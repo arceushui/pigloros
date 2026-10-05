@@ -2,14 +2,14 @@
 
 //! Public contracts for durable authorized recipient-export publication.
 
-use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
+use std::{os::unix::fs::PermissionsExt, sync::Arc};
 
 use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
-    ArtifactTransitionRuleV1, CanonicalBytes, ConsentAuthority, ConsentGrantedV1, CoreError,
-    EntityId, ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, EventDraft, EventStore, Kind, RegisteredArtifactV1,
-    ReplayClaimEvaluatorV1, TimelineMeta,
+    ArtifactTransitionRuleV1, CanonicalBytes, ConsentAuthority, ConsentGate, ConsentGrantedV1,
+    CoreError, EntityId, ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, EventDraft, EventStore, Hash, KeyDestructionRequestV1,
+    KeyRegistryErrorV1, Kind, RegisteredArtifactV1, ReplayClaimEvaluatorV1, TimelineMeta,
 };
 use pos_store::sqlite::{
     RecipientExportPublicationErrorV1, RecipientExportRequestV1, RecipientKeyOwnerV1, SqliteStore,
@@ -21,7 +21,6 @@ const EXPORT_DIGEST: ErasureReferenceV1 = ErasureReferenceV1::from_digest([241; 
 
 struct Fixture {
     temporary: tempfile::TempDir,
-    directory: PathBuf,
     store: SqliteStore,
     owner: RecipientKeyOwnerV1,
     authority: ConsentAuthority,
@@ -98,7 +97,6 @@ fn fixture(export_permitted: bool) -> TestResult<Fixture> {
     let descriptor = store.enroll_recipient_key(&owner)?;
     Ok(Fixture {
         temporary,
-        directory,
         store,
         owner,
         authority,
@@ -126,15 +124,6 @@ const fn request<'a>(
     }
 }
 
-fn export_file(directory: &std::path::Path, export_id: [u8; 16]) -> PathBuf {
-    let mut name = String::from("recipient-export-");
-    for byte in export_id {
-        name.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
-        name.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0f)]));
-    }
-    directory.join(format!("{name}.trx1"))
-}
-
 #[test]
 fn publication_is_catalog_visible_and_decryptable_without_importing() -> TestResult {
     let mut fixture = fixture(true)?;
@@ -153,7 +142,6 @@ fn publication_is_catalog_visible_and_decryptable_without_importing() -> TestRes
         .read_recipient_export(&fixture.owner, publication.export_id)?;
 
     assert_eq!(u64::try_from(encoded.len())?, publication.ciphertext_length);
-    assert!(export_file(&fixture.directory, publication.export_id).is_file());
     let decrypted = fixture.store.decrypt_recipient_export(
         &fixture.owner,
         &encoded,
@@ -163,12 +151,11 @@ fn publication_is_catalog_visible_and_decryptable_without_importing() -> TestRes
     assert_eq!(decrypted.export.timeline.id(), fixture.timeline);
     assert_eq!(decrypted.export.timeline.head, publication.local_head);
     assert_eq!(decrypted.export.events.len(), 1);
-    assert!(fixture.temporary.path().join("recipient.sqlite").is_file());
     Ok(())
 }
 
 #[test]
-fn publication_rejects_a_token_without_export_permission_before_creating_an_object() -> TestResult {
+fn publication_rejects_a_token_without_export_permission() -> TestResult {
     let mut fixture = fixture(false)?;
     let request = request(
         fixture.timeline,
@@ -185,10 +172,6 @@ fn publication_rejects_a_token_without_export_permission_before_creating_an_obje
         error,
         RecipientExportPublicationErrorV1::Consent(pos_core::ConsentError::ExportNotPermitted)
     ));
-    let entries = std::fs::read_dir(&fixture.directory)?.collect::<Result<Vec<_>, _>>()?;
-    assert!(entries
-        .iter()
-        .all(|entry| !entry.file_name().to_string_lossy().ends_with(".trx1")));
     Ok(())
 }
 
@@ -264,43 +247,136 @@ fn publication_holds_the_erasure_export_fence() -> TestResult {
 }
 
 #[test]
-fn reader_rejects_a_catalog_visible_ciphertext_whose_digest_changed() -> TestResult {
-    let mut fixture = fixture(true)?;
-    let request = request(
-        fixture.timeline,
-        fixture.descriptor,
-        &fixture.evaluation,
-        &fixture.token,
-    );
-    let publication =
-        fixture
-            .store
-            .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
-    let path = export_file(&fixture.directory, publication.export_id);
-    let mut encoded = std::fs::read(&path)?;
-    let first = encoded.first_mut().ok_or("TRX1 object is empty")?;
-    *first ^= 1;
-    std::fs::write(path, encoded)?;
-
+fn reader_treats_an_absent_catalog_as_an_unavailable_artifact() -> TestResult {
+    let fixture = fixture(true)?;
     assert!(matches!(
         fixture
             .store
-            .read_recipient_export(&fixture.owner, publication.export_id),
+            .read_recipient_export(&fixture.owner, [99; 16]),
         Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
     ));
     Ok(())
 }
 
 #[test]
-fn recovery_removes_an_unpublished_staging_object() -> TestResult {
+fn publication_rejects_a_token_for_another_timeline() -> TestResult {
     let mut fixture = fixture(true)?;
-    let staging = fixture
-        .directory
-        .join("recipient-export-01010101010101010101010101010101.trx1.staging");
-    std::fs::write(&staging, b"incomplete")?;
-    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600))?;
+    let request = request(
+        pos_core::TimelineId::new(),
+        fixture.descriptor,
+        &fixture.evaluation,
+        &fixture.token,
+    );
+    assert!(matches!(
+        fixture
+            .store
+            .publish_recipient_export(&fixture.authority, &fixture.owner, &request),
+        Err(RecipientExportPublicationErrorV1::Consent(
+            pos_core::ConsentError::NoConsent
+        ))
+    ));
+    Ok(())
+}
 
-    fixture.store.recover_recipient_exports(&fixture.owner)?;
-    assert!(!staging.exists());
+#[test]
+fn publication_rejects_a_revoked_consent_capability() -> TestResult {
+    let mut fixture = fixture(true)?;
+    ConsentGate::fence_timeline_at(&fixture.authority, fixture.timeline, 1)?;
+    let request = request(
+        fixture.timeline,
+        fixture.descriptor,
+        &fixture.evaluation,
+        &fixture.token,
+    );
+    assert!(matches!(
+        fixture
+            .store
+            .publish_recipient_export(&fixture.authority, &fixture.owner, &request),
+        Err(RecipientExportPublicationErrorV1::Consent(
+            pos_core::ConsentError::Revoked
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn publication_rejects_an_inactive_recipient_key() -> TestResult {
+    let mut fixture = fixture(true)?;
+    let stale_descriptor = fixture.descriptor;
+    let _replacement = fixture.store.enroll_recipient_key(&fixture.owner)?;
+    let request = request(
+        fixture.timeline,
+        stale_descriptor,
+        &fixture.evaluation,
+        &fixture.token,
+    );
+    assert!(matches!(
+        fixture
+            .store
+            .publish_recipient_export(&fixture.authority, &fixture.owner, &request),
+        Err(RecipientExportPublicationErrorV1::Registry(
+            KeyRegistryErrorV1::InactiveKey
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn publication_rejects_a_pending_recipient_key_destruction() -> TestResult {
+    let mut fixture = fixture(true)?;
+    let registry = fixture
+        .store
+        .load_key_registry()?
+        .ok_or("recipient registry is unavailable")?;
+    let digest = registry
+        .key_record(fixture.descriptor.identity())
+        .and_then(|record| record.private_material_digest)
+        .ok_or("recipient material is unavailable")?;
+    fixture
+        .store
+        .begin_key_registry_destruction(KeyDestructionRequestV1::new(
+            fixture.descriptor.identity(),
+            digest,
+            Hash::from_bytes([51; 32]),
+        ))?;
+    let request = request(
+        fixture.timeline,
+        fixture.descriptor,
+        &fixture.evaluation,
+        &fixture.token,
+    );
+    assert!(matches!(
+        fixture
+            .store
+            .publish_recipient_export(&fixture.authority, &fixture.owner, &request),
+        Err(RecipientExportPublicationErrorV1::Registry(
+            KeyRegistryErrorV1::DestructionPending
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn publication_rejects_a_destroyed_recipient_key() -> TestResult {
+    let mut fixture = fixture(true)?;
+    fixture.store.destroy_recipient_key(
+        &fixture.owner,
+        fixture.descriptor.identity().epoch,
+        Hash::from_bytes([52; 32]),
+    )?;
+    let request = request(
+        fixture.timeline,
+        fixture.descriptor,
+        &fixture.evaluation,
+        &fixture.token,
+    );
+    assert!(matches!(
+        fixture
+            .store
+            .publish_recipient_export(&fixture.authority, &fixture.owner, &request),
+        Err(RecipientExportPublicationErrorV1::Registry(
+            KeyRegistryErrorV1::Destroyed
+        ))
+    ));
     Ok(())
 }

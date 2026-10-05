@@ -32,6 +32,7 @@ use crate::{
     ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureTopologyTransitionPermitV1,
 };
 use std::sync::Arc;
+use zeroize::Zeroize;
 
 /// Exact identities and public signing material for one prepared protected append.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -329,6 +330,38 @@ pub struct TimelineExport {
     /// Always `None` for roots and for flattened logical [`export_timeline`] snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_fork_hash: Option<Hash>,
+}
+
+impl TimelineExport {
+    /// Whether each payload buffer in this export is exclusively owned by it.
+    ///
+    /// A host that needs to wipe an export snapshot must first establish this
+    /// property: wiping a shared buffer would mutate data still owned by a
+    /// different caller.
+    #[must_use]
+    pub fn plaintext_staging_is_exclusively_owned(&self) -> bool {
+        self.events
+            .iter()
+            .all(|event| event.payload.is_uniquely_owned())
+    }
+
+    /// Zeroize the export-owned plaintext buffers and strings used for staging.
+    ///
+    /// Returns false without changing the export when a payload is shared.
+    /// Hosts should check plaintext_staging_is_exclusively_owned before they
+    /// materialize any ciphertext.
+    pub fn zeroize_plaintext_staging(&mut self) -> bool {
+        if !self.plaintext_staging_is_exclusively_owned() {
+            return false;
+        }
+        if let Some(name) = &mut self.timeline.meta.name {
+            name.zeroize();
+        }
+        self.events.iter_mut().all(|event| {
+            event.event_type.zeroize();
+            event.payload.zeroize_if_uniquely_owned()
+        })
+    }
 }
 
 /// The kernel's event-store abstraction. Implementations live in `pos-store`.

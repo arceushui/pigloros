@@ -47,6 +47,48 @@ const RECIPIENT_REGISTRY_UNAVAILABLE: RecipientExportDecryptionErrorV1 =
 /// fingerprints. A pending record keeps its digest, so it never reaches this.
 const ABSENT_MATERIAL_DIGEST: pos_core::Hash = pos_core::Hash::from_bytes([0; 32]);
 
+struct RecipientExportPlaintextStagingV1 {
+    source: TimelineExport,
+    scrubbed: bool,
+}
+
+impl RecipientExportPlaintextStagingV1 {
+    fn new(source: TimelineExport) -> Result<Self, CoreError> {
+        if !source.plaintext_staging_is_exclusively_owned() {
+            return Err(CoreError::Storage(
+                "recipient export plaintext staging has shared payload buffers".to_owned(),
+            ));
+        }
+        Ok(Self {
+            source,
+            scrubbed: false,
+        })
+    }
+
+    const fn source(&self) -> &TimelineExport {
+        &self.source
+    }
+
+    fn zeroize(&mut self) -> Result<(), CoreError> {
+        if self.scrubbed || self.source.zeroize_plaintext_staging() {
+            self.scrubbed = true;
+            Ok(())
+        } else {
+            Err(CoreError::Storage(
+                "recipient export plaintext staging lost exclusive ownership".to_owned(),
+            ))
+        }
+    }
+}
+
+impl Drop for RecipientExportPlaintextStagingV1 {
+    fn drop(&mut self) {
+        if !self.scrubbed {
+            let _ = self.source.zeroize_plaintext_staging();
+        }
+    }
+}
+
 /// Require the envelope to name the expected export and the owner's recipient.
 fn check_envelope_identity(
     envelope: &RecipientTimelineExportV1,
@@ -787,9 +829,9 @@ impl SqliteStore {
     /// # Errors
     ///
     /// Returns a closed consent, erasure, registry, crypto, or storage error.
-    /// A failed publication does not add a catalog row; a completed object
-    /// without such a row is recovered as an orphan on a later publication or
-    /// explicit recovery call.
+    /// A failed publication does not add a catalog row. Its non-serving
+    /// pending record lets a later recovery call remove only the exact
+    /// interrupted object names.
     pub fn publish_recipient_export(
         &mut self,
         authority: &ConsentAuthority,
@@ -874,6 +916,8 @@ impl SqliteStore {
         request: &RecipientExportRequestV1<'_>,
         expected_logical_head: Seq,
     ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
+        self.recover_recipient_exports_under_writer(owner)?;
+        let export_id = self.reserve_recipient_export_id(owner)?;
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(storage_error)
@@ -886,8 +930,13 @@ impl SqliteStore {
                 .map_err(RecipientExportPublicationErrorV1::Store)?;
             ensure_recipient_export_catalog(&self.conn)
                 .map_err(RecipientExportPublicationErrorV1::Store)?;
-            reconcile_recipient_export_objects(&self.conn, owner)
-                .map_err(RecipientExportPublicationErrorV1::Store)?;
+            if !recipient_export_pending_belongs_to(&self.conn, owner, export_id)
+                .map_err(RecipientExportPublicationErrorV1::Store)?
+            {
+                return Err(RecipientExportPublicationErrorV1::Store(
+                    CoreError::Storage("recipient export reservation is unavailable".to_owned()),
+                ));
+            }
 
             let logical_head = Self::logical_head_unchecked_on(&self.conn, request.timeline_id)
                 .map_err(RecipientExportPublicationErrorV1::Store)?;
@@ -906,16 +955,6 @@ impl SqliteStore {
                 ));
             }
 
-            // This preserves CoW identity and the authenticated parent hash.
-            // The outer export fence remains held across this source snapshot
-            // and the catalog commit; its nested read fences are reentrant.
-            let source = export_timeline_own(
-                self,
-                request.timeline_id,
-                request.artifact_digest,
-                request.evaluation,
-            )
-            .map_err(RecipientExportPublicationErrorV1::Store)?;
             let registry = self
                 .load_key_registry()
                 .map_err(RecipientExportPublicationErrorV1::Store)?
@@ -925,13 +964,12 @@ impl SqliteStore {
             let identity = request.recipient.identity();
             let registered_digest =
                 registered_material_digest_or_absent_sentinel(&registry, identity);
-            Ok((source, registry, identity, registered_digest, logical_head))
+            Ok((registry, identity, registered_digest, logical_head))
         })();
-        let (source, mut registry, identity, registered_digest, logical_head) =
-            match pre_authorization {
-                Ok(value) => value,
-                Err(error) => return finish_recipient_export_transaction(&self.conn, Err(error)),
-            };
+        let (mut registry, identity, registered_digest, logical_head) = match pre_authorization {
+            Ok(value) => value,
+            Err(error) => return finish_recipient_export_transaction(&self.conn, Err(error)),
+        };
         match registry.with_encryption_authorization(identity, registered_digest, || {
             // The registry authorization includes the commit itself. The
             // SQLite writer reservation prevents a concurrent rotation or
@@ -939,9 +977,9 @@ impl SqliteStore {
             // this check and the catalog visibility marker.
             let result = self.publish_recipient_export_with_registered_material(
                 owner,
-                request.recipient,
+                request,
                 registered_digest,
-                &source,
+                export_id,
                 logical_head,
             );
             finish_recipient_export_transaction(&self.conn, result)
@@ -957,11 +995,12 @@ impl SqliteStore {
     fn publish_recipient_export_with_registered_material(
         &self,
         owner: &RecipientKeyOwnerV1,
-        recipient: RecipientKeyDescriptorV1,
+        request: &RecipientExportRequestV1<'_>,
         registered_digest: pos_core::Hash,
-        source: &TimelineExport,
+        export_id: [u8; 16],
         logical_head: Seq,
     ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
+        let recipient = request.recipient;
         let (stored_descriptor, private_path, file_identity, inventory_digest) =
             Self::recipient_inventory_path(&self.conn, owner, recipient.identity())
                 .map_err(|_| RecipientExportPublicationErrorV1::MaterialUnavailable)?;
@@ -979,22 +1018,28 @@ impl SqliteStore {
             ));
         }
 
-        let export_id = fresh_recipient_export_id()?;
-        if recipient_export_catalog_contains(&self.conn, export_id)
-            .map_err(RecipientExportPublicationErrorV1::Store)?
-        {
-            return Err(RecipientExportPublicationErrorV1::Store(
-                CoreError::Storage("recipient export ID collision".to_owned()),
-            ));
-        }
+        let source = export_timeline_own(
+            self,
+            request.timeline_id,
+            request.artifact_digest,
+            request.evaluation,
+        )
+        .map_err(RecipientExportPublicationErrorV1::Store)?;
+        let mut source = RecipientExportPlaintextStagingV1::new(source)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
+        let timeline_id = source.source().timeline.id();
+        let local_head = source.source().timeline.head;
         let mut seed = Zeroizing::new([0_u8; 32]);
         recipient_random_bytes(&mut *seed).map_err(|error| {
             RecipientExportPublicationErrorV1::Store(recipient_rng_error(&error))
         })?;
         let mut rng = StdRng::from_seed(*seed);
-        let encoded = encrypt_timeline_export_v1(source, recipient, export_id, &mut rng)
+        let encoded = encrypt_timeline_export_v1(source.source(), recipient, export_id, &mut rng)
             .map_err(RecipientExportPublicationErrorV1::Export)?
             .encode();
+        source
+            .zeroize()
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
         let ciphertext_length = u64::try_from(encoded.len())
             .map_err(|error| RecipientExportPublicationErrorV1::Store(storage_error(error)))?;
         let ciphertext_digest = pos_core::Hash::from_bytes(*blake3::hash(&encoded).as_bytes());
@@ -1003,15 +1048,77 @@ impl SqliteStore {
         let publication = PublishedRecipientExportV1 {
             export_id,
             recipient,
-            timeline_id: source.timeline.id(),
-            local_head: source.timeline.head,
+            timeline_id,
+            local_head,
             logical_head,
             ciphertext_length,
             ciphertext_digest,
         };
         record_recipient_export_catalog(&self.conn, owner, &publication)
             .map_err(RecipientExportPublicationErrorV1::Store)?;
+        remove_recipient_export_pending(&self.conn, export_id)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
         Ok(publication)
+    }
+
+    fn reserve_recipient_export_id(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+    ) -> Result<[u8; 16], RecipientExportPublicationErrorV1> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(storage_error)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
+        let result = (|| -> Result<[u8; 16], RecipientExportPublicationErrorV1> {
+            validate_owner_directory(owner).map_err(RecipientExportPublicationErrorV1::Store)?;
+            ensure_recipient_custody_tables(&self.conn)
+                .map_err(RecipientExportPublicationErrorV1::Store)?;
+            claim_recipient_custody_directory(&self.conn, owner)
+                .map_err(RecipientExportPublicationErrorV1::Store)?;
+            ensure_recipient_export_catalog(&self.conn)
+                .map_err(RecipientExportPublicationErrorV1::Store)?;
+            let export_id = fresh_recipient_export_id()?;
+            if recipient_export_catalog_contains(&self.conn, export_id)
+                .map_err(RecipientExportPublicationErrorV1::Store)?
+                || recipient_export_pending_contains(&self.conn, export_id)
+                    .map_err(RecipientExportPublicationErrorV1::Store)?
+            {
+                return Err(RecipientExportPublicationErrorV1::IdentifierCollision);
+            }
+            record_recipient_export_pending(&self.conn, owner, export_id)
+                .map_err(RecipientExportPublicationErrorV1::Store)?;
+            Ok(export_id)
+        })();
+        finish_recipient_export_transaction(&self.conn, result)
+    }
+
+    fn recover_recipient_exports_under_writer(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+    ) -> Result<(), RecipientExportPublicationErrorV1> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(storage_error)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
+        let result =
+            (|| -> Result<RecipientExportRecoveryProgressV1, RecipientExportPublicationErrorV1> {
+                validate_owner_directory(owner)
+                    .map_err(RecipientExportPublicationErrorV1::Store)?;
+                ensure_recipient_custody_tables(&self.conn)
+                    .map_err(RecipientExportPublicationErrorV1::Store)?;
+                claim_recipient_custody_directory(&self.conn, owner)
+                    .map_err(RecipientExportPublicationErrorV1::Store)?;
+                ensure_recipient_export_catalog(&self.conn)
+                    .map_err(RecipientExportPublicationErrorV1::Store)?;
+                reconcile_recipient_export_objects(&self.conn, owner)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
+            })();
+        match finish_recipient_export_transaction(&self.conn, result)? {
+            RecipientExportRecoveryProgressV1::Complete => Ok(()),
+            RecipientExportRecoveryProgressV1::Incomplete => {
+                Err(RecipientExportPublicationErrorV1::RecoveryIncomplete)
+            }
+        }
     }
 
     /// Read one catalog-visible ciphertext object and verify every immutable binding.
@@ -1055,44 +1162,25 @@ impl SqliteStore {
         Ok(encoded)
     }
 
-    /// Remove bounded orphan staging and final ciphertext files.
+    /// Recover one bounded batch of pending staging and final ciphertext files.
     ///
-    /// Recovery never creates catalog entries or reconstructs an export from a
-    /// directory entry. The `SQLite` catalog remains the only visibility marker.
+    /// Recovery never scans the directory, creates catalog entries, or
+    /// reconstructs an export. The SQLite catalog remains the only visibility
+    /// marker.
     ///
     /// # Errors
     ///
     /// Returns a closed error if the durable directory or catalog cannot be
-    /// inspected under the `SQLite` writer reservation.
+    /// inspected under the SQLite writer reservation. Returns
+    /// RecipientExportPublicationErrorV1::RecoveryIncomplete after committing
+    /// a bounded batch when another pass is required.
     pub fn recover_recipient_exports(
         &mut self,
         owner: &RecipientKeyOwnerV1,
     ) -> Result<(), RecipientExportPublicationErrorV1> {
         ensure_recipient_export_durability(&self.conn)
             .map_err(RecipientExportPublicationErrorV1::Store)?;
-        self.conn
-            .execute_batch(begin_immediate_sql())
-            .map_err(storage_error)
-            .map_err(RecipientExportPublicationErrorV1::Store)?;
-        let result = validate_owner_directory(owner)
-            .map_err(RecipientExportPublicationErrorV1::Store)
-            .and_then(|()| {
-                ensure_recipient_custody_tables(&self.conn)
-                    .map_err(RecipientExportPublicationErrorV1::Store)
-            })
-            .and_then(|()| {
-                claim_recipient_custody_directory(&self.conn, owner)
-                    .map_err(RecipientExportPublicationErrorV1::Store)
-            })
-            .and_then(|()| {
-                ensure_recipient_export_catalog(&self.conn)
-                    .map_err(RecipientExportPublicationErrorV1::Store)
-            })
-            .and_then(|()| {
-                reconcile_recipient_export_objects(&self.conn, owner)
-                    .map_err(RecipientExportPublicationErrorV1::Store)
-            });
-        finish_recipient_export_transaction(&self.conn, result)
+        self.recover_recipient_exports_under_writer(owner)
     }
 
     /// Mark one recipient epoch pending, durably remove its owned key file,
@@ -1330,10 +1418,10 @@ const RECIPIENT_EXPORT_STAGING_SUFFIX: &[u8] = b".trx1.staging";
 const MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS: usize = 256;
 const MAX_RECIPIENT_EXPORT_CIPHERTEXT_BYTES: u64 = (1_u64 << 30) + (2 * 1024 * 1024);
 
-#[derive(Clone, Copy)]
-enum RecipientExportObjectKindV1 {
-    Final([u8; 16]),
-    Staging,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecipientExportRecoveryProgressV1 {
+    Complete,
+    Incomplete,
 }
 
 struct StoredRecipientExportV1 {
@@ -1448,6 +1536,10 @@ fn ensure_recipient_export_catalog(connection: &Connection) -> Result<(), CoreEr
                 logical_head INTEGER NOT NULL CHECK (logical_head >= 0),
                 ciphertext_length INTEGER NOT NULL CHECK (ciphertext_length >= 0),
                 ciphertext_digest BLOB NOT NULL CHECK (length(ciphertext_digest) = 32)
+            );
+            CREATE TABLE IF NOT EXISTS recipient_export_pending_v1 (
+                export_id BLOB NOT NULL PRIMARY KEY CHECK (length(export_id) = 16),
+                owner_id TEXT NOT NULL
             );",
         )
         .map_err(storage_error)
@@ -1485,10 +1577,26 @@ fn record_recipient_export_catalog(
         .map_err(storage_error)
 }
 
+fn recipient_export_catalog_exists(connection: &Connection) -> Result<bool, CoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema
+                WHERE type = 'table' AND name = 'recipient_export_catalog_v1'
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)
+}
+
 fn load_recipient_export_catalog(
     connection: &Connection,
     export_id: [u8; 16],
 ) -> Result<Option<StoredRecipientExportV1>, CoreError> {
+    if !recipient_export_catalog_exists(connection)? {
+        return Ok(None);
+    }
     connection
         .query_row(
             "SELECT owner_id, recipient_epoch, recipient_descriptor, timeline_id,
@@ -1525,6 +1633,103 @@ fn recipient_export_catalog_contains(
         .map_err(storage_error)
 }
 
+fn recipient_export_pending_contains(
+    connection: &Connection,
+    export_id: [u8; 16],
+) -> Result<bool, CoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM recipient_export_pending_v1 WHERE export_id = ?1)",
+            rusqlite::params![export_id.as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)
+}
+
+fn recipient_export_pending_belongs_to(
+    connection: &Connection,
+    owner: &RecipientKeyOwnerV1,
+    export_id: [u8; 16],
+) -> Result<bool, CoreError> {
+    let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM recipient_export_pending_v1
+                WHERE export_id = ?1 AND owner_id = ?2
+            )",
+            rusqlite::params![export_id.as_slice(), owner_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)
+}
+
+fn record_recipient_export_pending(
+    connection: &Connection,
+    owner: &RecipientKeyOwnerV1,
+    export_id: [u8; 16],
+) -> Result<(), CoreError> {
+    let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
+    connection
+        .execute(
+            "INSERT INTO recipient_export_pending_v1 (export_id, owner_id) VALUES (?1, ?2)",
+            rusqlite::params![export_id.as_slice(), owner_id.as_str()],
+        )
+        .map(|_| ())
+        .map_err(storage_error)
+}
+
+fn remove_recipient_export_pending(
+    connection: &Connection,
+    export_id: [u8; 16],
+) -> Result<(), CoreError> {
+    let removed = connection
+        .execute(
+            "DELETE FROM recipient_export_pending_v1 WHERE export_id = ?1",
+            rusqlite::params![export_id.as_slice()],
+        )
+        .map_err(storage_error)?;
+    if removed == 1 {
+        Ok(())
+    } else {
+        Err(CoreError::Storage(
+            "recipient export reservation is unavailable".to_owned(),
+        ))
+    }
+}
+
+fn load_recipient_export_pending(
+    connection: &Connection,
+    owner: &RecipientKeyOwnerV1,
+) -> Result<(Vec<[u8; 16]>, bool), CoreError> {
+    let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
+    let limit = i64::try_from(MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS.saturating_add(1))
+        .map_err(storage_error)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT export_id FROM recipient_export_pending_v1
+             WHERE owner_id = ?1 ORDER BY export_id LIMIT ?2",
+        )
+        .map_err(storage_error)?;
+    let rows = statement
+        .query_map(rusqlite::params![owner_id.as_str(), limit], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })
+        .map_err(storage_error)?;
+    let mut export_ids = Vec::new();
+    for row in rows {
+        let export_id: [u8; 16] = row.map_err(storage_error)?.try_into().map_err(|_| {
+            CoreError::Storage("recipient export reservation is invalid".to_owned())
+        })?;
+        export_ids.push(export_id);
+    }
+    let incomplete = export_ids.len() > MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS;
+    if incomplete {
+        let _ = export_ids.pop();
+    }
+    Ok((export_ids, incomplete))
+}
+
 fn fresh_recipient_export_id() -> Result<[u8; 16], RecipientExportPublicationErrorV1> {
     let mut export_id = [0_u8; 16];
     recipient_random_bytes(&mut export_id)
@@ -1555,38 +1760,6 @@ fn recipient_export_final_name(export_id: [u8; 16]) -> Result<CString, CoreError
 
 fn recipient_export_staging_name(export_id: [u8; 16]) -> Result<CString, CoreError> {
     recipient_export_name(export_id, RECIPIENT_EXPORT_STAGING_SUFFIX)
-}
-
-fn recipient_export_object_kind(name: &[u8]) -> Option<RecipientExportObjectKindV1> {
-    parse_recipient_export_name(name, RECIPIENT_EXPORT_STAGING_SUFFIX)
-        .map(|_| RecipientExportObjectKindV1::Staging)
-        .or_else(|| {
-            parse_recipient_export_name(name, RECIPIENT_EXPORT_FINAL_SUFFIX)
-                .map(RecipientExportObjectKindV1::Final)
-        })
-}
-
-fn parse_recipient_export_name(name: &[u8], suffix: &[u8]) -> Option<[u8; 16]> {
-    if !name.starts_with(RECIPIENT_EXPORT_PREFIX) || !name.ends_with(suffix) {
-        return None;
-    }
-    let encoded = &name[RECIPIENT_EXPORT_PREFIX.len()..name.len().checked_sub(suffix.len())?];
-    if encoded.len() != 32 {
-        return None;
-    }
-    let mut export_id = [0_u8; 16];
-    for (index, pair) in encoded.chunks_exact(2).enumerate() {
-        export_id[index] = hex_nibble(pair[0])?.checked_mul(16)? + hex_nibble(pair[1])?;
-    }
-    Some(export_id)
-}
-
-const fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
-    }
 }
 
 fn validate_recipient_export_file(
@@ -1731,44 +1904,51 @@ const fn is_safe_recipient_export_entry(
         && metadata.st_uid == owner.directory_uid
 }
 
+fn remove_pending_recipient_export_object(
+    owner: &RecipientKeyOwnerV1,
+    name: &std::ffi::CStr,
+) -> Result<bool, CoreError> {
+    match recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(metadata) => {
+            if !is_safe_recipient_export_entry(owner, &metadata) {
+                return Err(CoreError::Storage(
+                    "recipient export recovery found an unsafe object".to_owned(),
+                ));
+            }
+            recipient_unlinkat(&owner.directory_file, name, AtFlags::empty())
+                .map_err(storage_error)?;
+            Ok(true)
+        }
+        Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
+        Err(error) => Err(storage_error(error)),
+    }
+}
+
 fn reconcile_recipient_export_objects(
     connection: &Connection,
     owner: &RecipientKeyOwnerV1,
-) -> Result<(), CoreError> {
-    let mut directory = rustix::fs::Dir::read_from(&owner.directory_file).map_err(storage_error)?;
-    let mut orphan_names = Vec::new();
-    while orphan_names.len() < MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS {
-        let Some(entry) = directory.read() else {
-            break;
-        };
-        let entry = entry.map_err(storage_error)?;
-        let name = entry.file_name();
-        let Some(kind) = recipient_export_object_kind(name.to_bytes()) else {
-            continue;
-        };
-        let metadata = recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(storage_error)?;
-        if !is_safe_recipient_export_entry(owner, &metadata) {
+) -> Result<RecipientExportRecoveryProgressV1, CoreError> {
+    let (export_ids, incomplete) = load_recipient_export_pending(connection, owner)?;
+    let mut changed_directory = false;
+    for export_id in export_ids {
+        if recipient_export_catalog_contains(connection, export_id)? {
+            remove_recipient_export_pending(connection, export_id)?;
             continue;
         }
-        let orphaned = match kind {
-            RecipientExportObjectKindV1::Staging => true,
-            RecipientExportObjectKindV1::Final(export_id) => {
-                !recipient_export_catalog_contains(connection, export_id)?
-            }
-        };
-        if orphaned {
-            orphan_names.push(name.to_owned());
-        }
+        let staging = recipient_export_staging_name(export_id)?;
+        let final_name = recipient_export_final_name(export_id)?;
+        changed_directory |= remove_pending_recipient_export_object(owner, staging.as_c_str())?;
+        changed_directory |= remove_pending_recipient_export_object(owner, final_name.as_c_str())?;
+        remove_recipient_export_pending(connection, export_id)?;
     }
-    if orphan_names.is_empty() {
-        return Ok(());
+    if changed_directory {
+        recipient_fsync(&owner.directory_file).map_err(storage_error)?;
     }
-    for name in orphan_names {
-        recipient_unlinkat(&owner.directory_file, name.as_c_str(), AtFlags::empty())
-            .map_err(storage_error)?;
-    }
-    recipient_fsync(&owner.directory_file).map_err(storage_error)
+    Ok(if incomplete {
+        RecipientExportRecoveryProgressV1::Incomplete
+    } else {
+        RecipientExportRecoveryProgressV1::Complete
+    })
 }
 
 fn validate_recipient_key_inventory(
@@ -2660,6 +2840,38 @@ mod tests {
             .map_err(storage_error)
     }
 
+    fn plaintext_staging_export(payload: CanonicalBytes) -> TimelineExport {
+        let payload_hash = Hash::from_bytes(*blake3::hash(payload.as_slice()).as_bytes());
+        TimelineExport {
+            timeline: Timeline {
+                meta: TimelineMeta {
+                    id: TimelineId::from_ulid(Ulid::from(31_u128)),
+                    mode: TimelineMode::Live,
+                    name: Some("recipient plaintext staging".to_owned()),
+                    owner: Some(EntityId::from_ulid(Ulid::from(32_u128))),
+                    fork_point: None,
+                },
+                head: Seq::from_u64(1),
+            },
+            events: vec![Event {
+                id: EventId::from_ulid(Ulid::from(33_u128)),
+                entity: EntityId::from_ulid(Ulid::from(34_u128)),
+                event_type: Kind::new("recipient.plaintext.staging"),
+                payload,
+                wall_time: WallTime::from_micros(1),
+                seq: Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                origin: None,
+                payload_hash,
+            }],
+            parent_fork_hash: None,
+        }
+    }
+
     fn pause_on_next_recipient_read(started: mpsc::Sender<()>, release: mpsc::Receiver<()>) {
         RECIPIENT_READ_PAUSE.with(|pause| {
             assert!(pause.replace(Some((started, release))).is_none());
@@ -2716,6 +2928,37 @@ mod tests {
 
     fn replace_directory_after_open(directory: PathBuf, replacement: PathBuf) {
         RECIPIENT_OPEN_REPLACEMENT.with(|fault| fault.replace(Some((directory, replacement))));
+    }
+
+    #[test]
+    fn recipient_export_plaintext_staging_requires_owned_payloads_and_scrubs_source(
+    ) -> RecipientTestResult {
+        let shared_payload = CanonicalBytes::from_vec(b"shared plaintext".to_vec());
+        let retained_payload = shared_payload.clone();
+        let mut shared_export = plaintext_staging_export(shared_payload);
+        assert!(!shared_export.plaintext_staging_is_exclusively_owned());
+        assert!(!shared_export.zeroize_plaintext_staging());
+        assert_eq!(retained_payload.as_slice(), b"shared plaintext");
+        assert!(RecipientExportPlaintextStagingV1::new(shared_export).is_err());
+
+        let unique_export =
+            plaintext_staging_export(CanonicalBytes::from_vec(b"owned plaintext".to_vec()));
+        let mut staging = RecipientExportPlaintextStagingV1::new(unique_export)?;
+        staging.zeroize()?;
+        assert_eq!(staging.source().timeline.meta.name.as_deref(), Some(""));
+        assert_eq!(staging.source().events[0].event_type.as_str(), "");
+        assert!(staging.source().events[0]
+            .payload
+            .as_slice()
+            .iter()
+            .all(|byte| *byte == 0));
+        staging.zeroize()?;
+
+        let dropped_staging = RecipientExportPlaintextStagingV1::new(plaintext_staging_export(
+            CanonicalBytes::from_vec(b"drop plaintext".to_vec()),
+        ))?;
+        drop(dropped_staging);
+        Ok(())
     }
 
     #[test]
@@ -3379,7 +3622,10 @@ mod tests {
             .publish_recipient_export(&fixture.authority, &fixture.owner, &request)
             .err()
             .ok_or("recipient export ID collision unexpectedly succeeded")?;
-        assert!(error.to_string().contains("ID collision"));
+        assert!(matches!(
+            error,
+            RecipientExportPublicationErrorV1::IdentifierCollision
+        ));
         assert_eq!(
             fixture
                 .store
@@ -3431,36 +3677,46 @@ mod tests {
     }
 
     #[test]
-    fn recipient_publication_names_and_recovery_keep_only_catalog_visible_objects(
-    ) -> RecipientTestResult {
+    fn recipient_publication_reader_rejects_a_tampered_ciphertext() -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        let publication =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
+        let name = recipient_export_final_name(publication.export_id)?;
+        let path = fixture.owner.directory.join(
+            std::str::from_utf8(name.as_bytes())
+                .map_err(|error| CoreError::Storage(error.to_string()))?,
+        );
+        let mut encoded =
+            std::fs::read(&path).map_err(|error| CoreError::Storage(error.to_string()))?;
+        let first = encoded
+            .first_mut()
+            .ok_or_else(|| CoreError::Storage("recipient ciphertext is empty".to_owned()))?;
+        *first ^= 1;
+        std::fs::write(path, encoded).map_err(|error| CoreError::Storage(error.to_string()))?;
+        assert!(matches!(
+            fixture
+                .store
+                .read_recipient_export(&fixture.owner, publication.export_id),
+            Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_publication_pending_journal_recovers_only_recorded_objects() -> RecipientTestResult
+    {
         let export_id = [32; 16];
         let final_name = recipient_export_final_name(export_id)?;
         let staging_name = recipient_export_staging_name(export_id)?;
-        assert_eq!(
-            parse_recipient_export_name(final_name.as_bytes(), RECIPIENT_EXPORT_FINAL_SUFFIX),
-            Some(export_id)
-        );
-        assert_eq!(
-            parse_recipient_export_name(staging_name.as_bytes(), RECIPIENT_EXPORT_STAGING_SUFFIX),
-            Some(export_id)
-        );
-        assert!(matches!(
-            recipient_export_object_kind(final_name.as_bytes()),
-            Some(RecipientExportObjectKindV1::Final(value)) if value == export_id
-        ));
-        assert!(matches!(
-            recipient_export_object_kind(staging_name.as_bytes()),
-            Some(RecipientExportObjectKindV1::Staging)
-        ));
-        let mut malformed = final_name.as_bytes().to_vec();
-        malformed[RECIPIENT_EXPORT_PREFIX.len()] = b'g';
-        assert_eq!(
-            parse_recipient_export_name(&malformed, RECIPIENT_EXPORT_FINAL_SUFFIX),
-            None
-        );
-        assert_eq!(hex_nibble(b'0'), Some(0));
-        assert_eq!(hex_nibble(b'f'), Some(15));
-        assert_eq!(hex_nibble(b'F'), None);
+        assert_ne!(final_name, staging_name);
 
         let mut fixture = recipient_publication_fixture()?;
         override_next_recipient_random_bytes(export_id.to_vec());
@@ -3484,15 +3740,38 @@ mod tests {
         );
         std::fs::write(&orphan, b"orphan")?;
         std::fs::set_permissions(&orphan, std::fs::Permissions::from_mode(0o600))?;
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, [33; 16])?;
+
+        let untracked_name = recipient_export_final_name([34; 16])?;
+        let untracked = fixture.owner.directory.join(
+            std::str::from_utf8(untracked_name.as_bytes())
+                .map_err(|error| CoreError::Storage(error.to_string()))?,
+        );
+        std::fs::write(&untracked, b"untracked")?;
+        std::fs::set_permissions(&untracked, std::fs::Permissions::from_mode(0o600))?;
 
         fixture.store.recover_recipient_exports(&fixture.owner)?;
         assert!(!orphan.exists());
+        assert!(untracked.exists());
         assert_eq!(
             fixture
                 .store
                 .read_recipient_export(&fixture.owner, publication.export_id)?,
             encoded
         );
+
+        for index in 0..=MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS {
+            let mut pending = [0; 16];
+            pending[..8].copy_from_slice(&u64::try_from(index + 1)?.to_be_bytes());
+            pending[15] = 44;
+            record_recipient_export_pending(&fixture.store.conn, &fixture.owner, pending)?;
+        }
+        assert!(matches!(
+            fixture.store.recover_recipient_exports(&fixture.owner),
+            Err(RecipientExportPublicationErrorV1::RecoveryIncomplete)
+        ));
+        fixture.store.recover_recipient_exports(&fixture.owner)?;
+        assert!(untracked.exists());
         Ok(())
     }
 }
