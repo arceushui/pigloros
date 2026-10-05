@@ -106,6 +106,9 @@ thread_local! {
     static RECIPIENT_RANDOM_FAILURE: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    static RECIPIENT_RANDOM_OVERRIDE: std::cell::RefCell<Option<Vec<u8>>> = const {
+        std::cell::RefCell::new(None)
+    };
     static RECIPIENT_READ_FAILURE: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
@@ -153,6 +156,16 @@ fn recipient_fsync(fd: impl rustix::fd::AsFd) -> Result<(), rustix::io::Errno> {
 fn recipient_random_bytes(bytes: &mut [u8]) -> std::io::Result<()> {
     if RECIPIENT_RANDOM_FAILURE.with(std::cell::Cell::get) {
         Err(std::io::Error::other("injected recipient RNG failure"))
+    } else if let Some(override_bytes) =
+        RECIPIENT_RANDOM_OVERRIDE.with(|override_bytes| override_bytes.borrow_mut().take())
+    {
+        if override_bytes.len() != bytes.len() {
+            return Err(std::io::Error::other(
+                "injected recipient RNG length mismatch",
+            ));
+        }
+        bytes.copy_from_slice(&override_bytes);
+        Ok(())
     } else {
         SysRng
             .try_fill_bytes(bytes)
@@ -2472,17 +2485,41 @@ fn write_private_key(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::{os::unix::fs::PermissionsExt, sync::mpsc, time::Duration};
+    use std::{
+        os::unix::fs::PermissionsExt,
+        sync::{mpsc, Arc},
+        time::Duration,
+    };
 
     use pos_core::{
-        CanonicalBytes, Event, EventId, Hash, Kind, SchemaVersion, Seq, Timeline, TimelineExport,
-        TimelineId, TimelineMeta, TimelineMode, WallTime,
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, CanonicalBytes, ConsentAuthority, ConsentCapabilityToken,
+        ConsentGrantedV1, ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1,
+        ErasureReplayClaimV1, Event, EventDraft, EventId, Hash, Kind, RegisteredArtifactV1,
+        ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, SchemaVersion, Seq, Timeline,
+        TimelineExport, TimelineId, TimelineMeta, TimelineMode, WallTime,
     };
     use pos_crypto::recipient_export::encrypt_timeline_export_v1;
     use rand::{rngs::StdRng, SeedableRng};
     use ulid::Ulid;
 
     use super::*;
+
+    type RecipientTestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    const TEST_RECIPIENT_EXPORT_DIGEST: ErasureReferenceV1 =
+        ErasureReferenceV1::from_digest([241; 32]);
+
+    struct RecipientPublicationFixture {
+        _temporary: tempfile::TempDir,
+        store: SqliteStore,
+        owner: RecipientKeyOwnerV1,
+        authority: ConsentAuthority,
+        token: ConsentCapabilityToken,
+        timeline: TimelineId,
+        descriptor: RecipientKeyDescriptorV1,
+        evaluation: ReplayClaimEvaluationV1,
+    }
 
     fn owner_fixture() -> Result<(tempfile::TempDir, SqliteStore, RecipientKeyOwnerV1), CoreError> {
         let temporary =
@@ -2500,6 +2537,88 @@ mod tests {
         )?;
         let owner = RecipientKeyOwnerV1::open(directory, EntityId::new())?;
         Ok((temporary, store, owner))
+    }
+
+    fn recipient_publication_evaluation() -> RecipientTestResult<ReplayClaimEvaluationV1> {
+        ReplayClaimEvaluatorV1::evaluate(
+            ErasureReplayClaimV1::Exact,
+            &[ArtifactClaimInputV1 {
+                registration: RegisteredArtifactV1::new(
+                    ErasureArtifactClassV1::Export,
+                    TEST_RECIPIENT_EXPORT_DIGEST,
+                    ArtifactDataClassV1::StructuralAuditMetadata,
+                    None,
+                    ErasureReferenceV1::from_digest([242; 32]),
+                    ArtifactOptionalityV1::Required,
+                    ArtifactTransitionRuleV1::PreserveExact,
+                ),
+                current_claim: ErasureReplayClaimV1::Exact,
+                state: ArtifactStateV1::Retained,
+            }],
+        )
+        .map_err(|error| error.to_string().into())
+    }
+
+    fn recipient_publication_fixture() -> RecipientTestResult<RecipientPublicationFixture> {
+        let (temporary, mut store, owner) = owner_fixture()?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let subject = EntityId::new();
+        let timeline = store.create_timeline_with_meta(TimelineMeta::root_owned(
+            "recipient-publication",
+            subject,
+        ))?;
+        store.append(
+            timeline.id(),
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new("recipient.publication.coverage.v1"),
+                CanonicalBytes::from_static(b"recipient-publication"),
+            )],
+        )?;
+        let authority = ConsentAuthority::new();
+        store.bind_consent_authority(authority.append_permit())?;
+        let token = authority.record_grant_on_timeline(
+            timeline.id(),
+            &ConsentGrantedV1 {
+                subject_id: subject,
+                grantee_id: owner.grantee_id,
+                purpose: "recipient-publication-coverage".to_owned(),
+                modalities: pos_core::MODALITY_EXPORT,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: true,
+                retention_days: 1,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let descriptor = store.enroll_recipient_key(&owner)?;
+        Ok(RecipientPublicationFixture {
+            _temporary: temporary,
+            store,
+            owner,
+            authority,
+            token,
+            timeline: timeline.id(),
+            descriptor,
+            evaluation: recipient_publication_evaluation()?,
+        })
+    }
+
+    const fn recipient_publication_request<'a>(
+        timeline: TimelineId,
+        recipient: RecipientKeyDescriptorV1,
+        evaluation: &'a ReplayClaimEvaluationV1,
+        token: &'a ConsentCapabilityToken,
+    ) -> RecipientExportRequestV1<'a> {
+        RecipientExportRequestV1 {
+            timeline_id: timeline,
+            recipient,
+            artifact_digest: TEST_RECIPIENT_EXPORT_DIGEST,
+            evaluation,
+            token,
+            now_secs: 1,
+        }
     }
 
     const TEST_EXPORT_ID: [u8; 16] = [7; 16];
@@ -2571,6 +2690,12 @@ mod tests {
 
     fn set_random_failure(enabled: bool) {
         RECIPIENT_RANDOM_FAILURE.with(|failure| failure.set(enabled));
+    }
+
+    fn override_next_recipient_random_bytes(bytes: Vec<u8>) {
+        RECIPIENT_RANDOM_OVERRIDE.with(|override_bytes| {
+            assert!(override_bytes.replace(Some(bytes)).is_none());
+        });
     }
 
     fn set_read_failure(enabled: bool) {
@@ -3096,6 +3221,277 @@ mod tests {
             Some(RecipientExportDecryptionErrorV1::Registry(
                 KeyRegistryErrorV1::DestructionPending
             ))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_publication_rolls_back_stale_source_and_rejects_unknown_artifact(
+    ) -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        assert!(matches!(
+            fixture.store.publish_recipient_export_under_fences(
+                &fixture.owner,
+                &request,
+                Seq::ZERO,
+            ),
+            Err(RecipientExportPublicationErrorV1::SourceChanged)
+        ));
+
+        let unsupported_artifact = RecipientExportRequestV1 {
+            timeline_id: request.timeline_id,
+            recipient: request.recipient,
+            artifact_digest: ErasureReferenceV1::from_digest([243; 32]),
+            evaluation: request.evaluation,
+            token: request.token,
+            now_secs: request.now_secs,
+        };
+        assert!(matches!(
+            fixture.store.publish_recipient_export(
+                &fixture.authority,
+                &fixture.owner,
+                &unsupported_artifact,
+            ),
+            Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+        ));
+
+        let publication =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
+        assert!(!fixture
+            .store
+            .read_recipient_export(&fixture.owner, publication.export_id)?
+            .is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_publication_faults_leave_no_catalog_visible_object() -> RecipientTestResult {
+        for failure in [0_usize, 1] {
+            let mut fixture = recipient_publication_fixture()?;
+            let export_id = [u8::try_from(failure + 1)?; 16];
+            override_next_recipient_random_bytes(export_id.to_vec());
+            let request = recipient_publication_request(
+                fixture.timeline,
+                fixture.descriptor,
+                &fixture.evaluation,
+                &fixture.token,
+            );
+            fail_fsync_at(failure);
+            assert!(fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)
+                .is_err());
+            clear_fsync_fault();
+            fixture.store.recover_recipient_exports(&fixture.owner)?;
+            assert!(matches!(
+                fixture
+                    .store
+                    .read_recipient_export(&fixture.owner, export_id),
+                Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+            ));
+        }
+
+        for fault in [
+            set_open_failure as fn(bool),
+            set_read_failure,
+            set_stat_failure,
+            set_write_failure,
+        ] {
+            let mut fixture = recipient_publication_fixture()?;
+            let request = recipient_publication_request(
+                fixture.timeline,
+                fixture.descriptor,
+                &fixture.evaluation,
+                &fixture.token,
+            );
+            fault(true);
+            assert!(fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)
+                .is_err());
+            fault(false);
+            fixture.store.recover_recipient_exports(&fixture.owner)?;
+            let entries = std::fs::read_dir(&fixture.owner.directory)?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert!(!entries
+                .iter()
+                .any(|name| name.starts_with("recipient-export-")));
+        }
+
+        let mut fixture = recipient_publication_fixture()?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        set_random_failure(true);
+        assert!(fixture
+            .store
+            .publish_recipient_export(&fixture.authority, &fixture.owner, &request)
+            .is_err());
+        set_random_failure(false);
+        fixture.store.recover_recipient_exports(&fixture.owner)?;
+        assert!(matches!(
+            fixture
+                .store
+                .read_recipient_export(&fixture.owner, [255; 16]),
+            Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_publication_rejects_identifier_collisions_without_replacing_ciphertext(
+    ) -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        let export_id = [31; 16];
+        override_next_recipient_random_bytes(export_id.to_vec());
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        let publication =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
+        assert_eq!(publication.export_id, export_id);
+        let original = fixture
+            .store
+            .read_recipient_export(&fixture.owner, export_id)?;
+
+        override_next_recipient_random_bytes(export_id.to_vec());
+        let error = fixture
+            .store
+            .publish_recipient_export(&fixture.authority, &fixture.owner, &request)
+            .err()
+            .ok_or("recipient export ID collision unexpectedly succeeded")?;
+        assert!(error.to_string().contains("ID collision"));
+        assert_eq!(
+            fixture
+                .store
+                .read_recipient_export(&fixture.owner, export_id)?,
+            original
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_publication_reader_rejects_each_invalid_catalog_binding() -> RecipientTestResult {
+        for mutation in [
+            "UPDATE recipient_export_catalog_v1 SET owner_id = 'wrong-owner'",
+            "UPDATE recipient_export_catalog_v1 SET recipient_epoch = 2",
+            "UPDATE recipient_export_catalog_v1 SET recipient_descriptor = X'00'",
+            "UPDATE recipient_export_catalog_v1 SET timeline_id = 'not-a-timeline'",
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE recipient_export_catalog_v1 SET local_head = -1;
+             PRAGMA ignore_check_constraints = OFF",
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE recipient_export_catalog_v1 SET logical_head = -1;
+             PRAGMA ignore_check_constraints = OFF",
+            "UPDATE recipient_export_catalog_v1 SET ciphertext_length = 1075838977",
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE recipient_export_catalog_v1 SET ciphertext_digest = X'00';
+             PRAGMA ignore_check_constraints = OFF",
+        ] {
+            let mut fixture = recipient_publication_fixture()?;
+            let request = recipient_publication_request(
+                fixture.timeline,
+                fixture.descriptor,
+                &fixture.evaluation,
+                &fixture.token,
+            );
+            let publication = fixture.store.publish_recipient_export(
+                &fixture.authority,
+                &fixture.owner,
+                &request,
+            )?;
+            fixture.store.conn.execute_batch(mutation)?;
+            assert!(matches!(
+                fixture
+                    .store
+                    .read_recipient_export(&fixture.owner, publication.export_id),
+                Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_publication_names_and_recovery_keep_only_catalog_visible_objects(
+    ) -> RecipientTestResult {
+        let export_id = [32; 16];
+        let final_name = recipient_export_final_name(export_id)?;
+        let staging_name = recipient_export_staging_name(export_id)?;
+        assert_eq!(
+            parse_recipient_export_name(final_name.as_bytes(), RECIPIENT_EXPORT_FINAL_SUFFIX),
+            Some(export_id)
+        );
+        assert_eq!(
+            parse_recipient_export_name(staging_name.as_bytes(), RECIPIENT_EXPORT_STAGING_SUFFIX),
+            Some(export_id)
+        );
+        assert!(matches!(
+            recipient_export_object_kind(final_name.as_bytes()),
+            Some(RecipientExportObjectKindV1::Final(value)) if value == export_id
+        ));
+        assert!(matches!(
+            recipient_export_object_kind(staging_name.as_bytes()),
+            Some(RecipientExportObjectKindV1::Staging)
+        ));
+        let mut malformed = final_name.as_bytes().to_vec();
+        malformed[RECIPIENT_EXPORT_PREFIX.len()] = b'g';
+        assert_eq!(
+            parse_recipient_export_name(&malformed, RECIPIENT_EXPORT_FINAL_SUFFIX),
+            None
+        );
+        assert_eq!(hex_nibble(b'0'), Some(0));
+        assert_eq!(hex_nibble(b'f'), Some(15));
+        assert_eq!(hex_nibble(b'F'), None);
+
+        let mut fixture = recipient_publication_fixture()?;
+        override_next_recipient_random_bytes(export_id.to_vec());
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        let publication =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
+        let encoded = fixture
+            .store
+            .read_recipient_export(&fixture.owner, publication.export_id)?;
+        let orphan_name = recipient_export_final_name([33; 16])?;
+        let orphan = fixture.owner.directory.join(
+            std::str::from_utf8(orphan_name.as_bytes())
+                .map_err(|error| CoreError::Storage(error.to_string()))?,
+        );
+        std::fs::write(&orphan, b"orphan")?;
+        std::fs::set_permissions(&orphan, std::fs::Permissions::from_mode(0o600))?;
+
+        fixture.store.recover_recipient_exports(&fixture.owner)?;
+        assert!(!orphan.exists());
+        assert_eq!(
+            fixture
+                .store
+                .read_recipient_export(&fixture.owner, publication.export_id)?,
+            encoded
         );
         Ok(())
     }
