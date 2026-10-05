@@ -1601,7 +1601,7 @@
     },
     {
       "id": "PCF-R4-008",
-      "title": "A Fork's Export and Snapshot paths fail closed under a frozen or completed ancestor, and an unrelated Fork succeeds",
+      "title": "A Fork's Export and projection-read paths fail closed under a frozen or completed ancestor, and an unrelated Fork succeeds",
       "sources": [
         "#499",
         "ADR-021 R4"
@@ -1625,11 +1625,7 @@
         "completed.unrelated.chain-hash": "ok",
         "completed.refold.refused": "true",
         "completed.unrelated.refold": "ok",
-        "completed.projection": "AccessFrozen",
-        "snapshot": "ErasureAccessFrozen",
-        "compare": "ErasureAccessFrozen",
-        "unrelated.snapshot": "ok",
-        "unrelated.compare": "ok"
+        "completed.projection": "AccessFrozen"
       }
     },
     {

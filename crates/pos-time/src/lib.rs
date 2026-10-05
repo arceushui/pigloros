@@ -368,6 +368,9 @@ fn read_complete_world_replay(
 }
 
 #[cfg(test)]
+mod inherited_scope_tests;
+
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub mod test_support {
     use std::{

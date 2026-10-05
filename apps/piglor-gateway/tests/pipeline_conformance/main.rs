@@ -44,7 +44,7 @@ use support::TestOk;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/v1/manifest.json");
-const MANIFEST_SHA256: &str = "66d8a8bbcb85b46ecd49ed1d3ccfe65deb33aa3c8071c5d74bd0809240d4b831";
+const MANIFEST_SHA256: &str = "2c51b6ec1e371d2269e39499b4a7aade344767d7e87af908ae4764fc7fe68409";
 
 /// Every runner of profile version 1, by case identifier.
 const RUNNERS: [(&str, Runner); 58] = [
@@ -163,7 +163,7 @@ const RUNNERS: [(&str, Runner); 58] = [
     ),
     (
         "PCF-R4-008",
-        inherited_scope::export_and_snapshot_fail_closed,
+        inherited_scope::export_and_projection_fail_closed,
     ),
     (
         "PCF-R4-009",

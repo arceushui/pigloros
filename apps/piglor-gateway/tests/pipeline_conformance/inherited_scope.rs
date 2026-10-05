@@ -1,31 +1,24 @@
 //! ADR-021 Revision 4 Decision 3 inherited-lineage erasure gating (#499).
 //!
 //! A Fork's stitched history includes its ancestors' Events. Every stitched
-//! read, `Export`, `Snapshot` and Driver pass of a Fork therefore applies
+//! read, `Export`, projection read and Driver pass of a Fork therefore applies
 //! each inherited ancestor's own erasure decision for the same operation,
 //! under one fence, and fails closed with the same closed error when any
 //! contributing scope denies.
 
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
 use pos_core::{
     ConsentAuthority, CoreError, EntityId, ErasureContainmentErrorV1, ErasureContainmentGateV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, Event, EventReadBounds, Hash, Reducer, Seq, SeqRange,
-    State, TimelineId, TimelineMeta, WorldReplayClosureV1,
+    Event, EventReadBounds, Seq, SeqRange, TimelineId, TimelineMeta,
 };
 use pos_runtime::{
-    ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, LocalScheduledAdmissionHostV1,
-    PluginRegistry, RuntimeError, ScheduledAdmissionStoreV1, VerifiedWorldReplayV1,
-    WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
+    LocalScheduledAdmissionHostV1, PluginRegistry, RuntimeError, ScheduledAdmissionStoreV1,
 };
-use pos_state::ProjectionRegistry;
-use pos_store::{memory::MemoryStore, sqlite::SqliteStore, StoreConfig};
+use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 
 use super::{
     harness::Capture,
@@ -262,25 +255,20 @@ pub fn completed_ancestor_follows_persisted_state() -> Capture {
 }
 
 /// PCF-R4-008: with an ancestor in a frozen or completed scope, a Fork's
-/// `Export` and `Snapshot` paths fail closed, and an unrelated Fork succeeds.
+/// `Export` and projection-read paths fail closed, and an unrelated Fork
+/// succeeds.
 #[must_use]
-pub fn export_and_snapshot_fail_closed() -> Capture {
+pub fn export_and_projection_fail_closed() -> Capture {
     let mut capture = Capture::default();
     for scope in ["frozen", "completed"] {
         for lineage in lineages() {
-            record_export_and_snapshot(&mut capture, scope, &lineage);
+            record_export_and_projection(&mut capture, scope, &lineage);
         }
-    }
-    for (store, config) in [
-        ("memory", StoreConfig::Memory),
-        ("sqlite", StoreConfig::SqliteInMemory),
-    ] {
-        record_time_paths(&mut capture, store, config);
     }
     capture
 }
 
-fn record_export_and_snapshot(capture: &mut Capture, scope: &str, lineage: &Lineage) {
+fn record_export_and_projection(capture: &mut Capture, scope: &str, lineage: &Lineage) {
     let store = lineage.store;
     let authority = ConsentAuthority::new();
     let subject = EntityId::new();
@@ -324,123 +312,6 @@ fn record_export_and_snapshot(capture: &mut Capture, scope: &str, lineage: &Line
         subject,
     );
     capture.record(store, &format!("{scope}.projection"), decision(&projection));
-}
-
-struct ExactVerifier;
-
-impl WorldReplayVerifierV1 for ExactVerifier {
-    fn verify(
-        &self,
-        closure: &WorldReplayClosureV1,
-        requested_use: &WorldReplayUseV1,
-        inventory_generation: ErasureReferenceV1,
-    ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
-        Ok(pos_runtime::world_replay::test_verified_world_replay(
-            closure,
-            requested_use,
-            inventory_generation,
-            ErasureReplayClaimV1::Exact,
-        ))
-    }
-}
-
-struct IdleCount;
-
-impl Reducer for IdleCount {
-    fn initial(&self) -> State {
-        State::new()
-    }
-
-    fn apply(&self, _: &mut State, _: &Event) {}
-}
-
-/// `pos-time` snapshots and Fork comparison through the erasure host.
-fn record_time_paths(capture: &mut Capture, store: &str, config: StoreConfig) {
-    let composition = ErasureCoordinatorCompositionV1::closed()
-        .with_world_replay_verifier(Arc::new(ExactVerifier));
-    let mut host = ErasureExecutionHostV1::open_with_authority(
-        config,
-        &composition,
-        pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-    )
-    .test_ok();
-    let mut forks = Vec::new();
-    let mut roots = Vec::new();
-    {
-        let mut commands = host.command_sender().test_ok();
-        for name in ["root", "unrelated"] {
-            let root = commands.create_timeline(name).test_ok().id();
-            commands
-                .append(root, &[draft(EntityId::new(), SIGNAL, b"t")])
-                .test_ok();
-            roots.push(root);
-            for fork in ["first", "second"] {
-                let id = commands
-                    .fork_timeline(root, Seq::from_u64(1), fork)
-                    .test_ok()
-                    .id();
-                forks.push(id);
-            }
-        }
-    }
-    let closures: HashMap<TimelineId, WorldReplayClosureV1> = {
-        let mut reads = host.read_sender().test_ok();
-        forks
-            .iter()
-            .map(|timeline| {
-                let (_, generation) = reads
-                    .read_bounded_at_generation(
-                        *timeline,
-                        SeqRange::all(),
-                        EventReadBounds::new(1_024, 64, 8, 64),
-                        None,
-                    )
-                    .test_ok();
-                let closure = WorldReplayClosureV1::test_fixture_for_timeline_consumer(
-                    *timeline,
-                    Hash::from_bytes(generation.digest()),
-                    "count",
-                )
-                .test_ok();
-                (*timeline, closure)
-            })
-            .collect()
-    };
-    host.freeze_timeline_for_test(roots[0]);
-    let gate = host.containment_gate();
-    let registry = || {
-        let mut registry = ProjectionRegistry::new().with_erasure_gate(Arc::clone(&gate));
-        registry.register("count", Box::new(IdleCount));
-        registry
-    };
-    let mut reads = host.read_sender().test_ok();
-    for (prefix, pair) in [
-        ("", [forks[0], forks[1]]),
-        ("unrelated.", [forks[2], forks[3]]),
-    ] {
-        let captured =
-            pos_time::snapshot(&mut reads, pair[0], &mut registry(), &closures[&pair[0]]);
-        let compared = pos_time::compare(
-            &mut reads,
-            pair,
-            Seq::from_u64(1),
-            [&mut registry(), &mut registry()],
-            [&closures[&pair[0]], &closures[&pair[1]]],
-        );
-        let outcome = |result: Result<(), CoreError>| {
-            result.map_or_else(|error| format!("{error:?}"), |()| "ok".to_owned())
-        };
-        capture.record(
-            store,
-            &format!("{prefix}snapshot"),
-            outcome(captured.map(|_| ())),
-        );
-        capture.record(
-            store,
-            &format!("{prefix}compare"),
-            outcome(compared.map(|_| ())),
-        );
-    }
 }
 
 /// PCF-R4-009: the unanchored `step_all` on a Fork whose ancestor is frozen
