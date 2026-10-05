@@ -2,8 +2,9 @@
 //! `scripts/package-reference-evaluator.sh`.
 //!
 //! The release packaging job exports the package directory it produced through
-//! `POS_REFERENCE_EVALUATOR_PACKAGE`; without it there is no packaged output to
-//! consume and the test has nothing to check.
+//! `POS_REFERENCE_EVALUATOR_PACKAGE`. When the variable is unset there is no
+//! packaged output to consume, so the test returns without checking anything;
+//! the release job verifies the directory exists before running it.
 
 pub mod support;
 
@@ -22,7 +23,6 @@ const PACKAGE_VARIABLE: &str = "POS_REFERENCE_EVALUATOR_PACKAGE";
 #[test]
 fn packaged_evaluator_verifies_its_own_script_output_and_emits_a_report() -> TestResult {
     let Some(package) = std::env::var_os(PACKAGE_VARIABLE).map(PathBuf::from) else {
-        eprintln!("{PACKAGE_VARIABLE} is unset; no packaged evaluator output to consume");
         return Ok(());
     };
     let inventory = fs::read_to_string(package.join("BLAKE3SUMS"))?;

@@ -3,9 +3,10 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use pos_reference::bounded_input::{self, parse_nonzero_digest};
 use pos_reference::evaluator::evaluate;
 use pos_reference::evaluator_build_identity::{
     verify_evaluator_build_identity, EvaluatorBuildEvidence, EvaluatorBuildIdentityError,
@@ -282,90 +283,17 @@ fn next_argument(arguments: &mut impl Iterator<Item = OsString>) -> Result<OsStr
 }
 
 fn parse_digest(value: &str) -> Result<[u8; 32], CommandError> {
-    if value.len() != 64 {
-        return Err(CommandError::Identity);
-    }
-    let mut digest = [0_u8; 32];
-    for (target, pair) in digest.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
-        let high = hexadecimal_nibble(pair[0]).ok_or(CommandError::Identity)?;
-        let low = hexadecimal_nibble(pair[1]).ok_or(CommandError::Identity)?;
-        *target = high << 4 | low;
-    }
-    if digest == [0; 32] {
-        Err(CommandError::Identity)
-    } else {
-        Ok(digest)
-    }
-}
-
-const fn hexadecimal_nibble(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        _ => None,
-    }
+    parse_nonzero_digest(value).ok_or(CommandError::Identity)
 }
 
 fn snapshot_bounded(path: &Path, maximum: u64) -> Result<File, CommandError> {
-    File::open(path)
-        .map_input_error()
-        .and_then(|source| snapshot_source(source, maximum))
-}
-
-fn snapshot_source(source: File, maximum: u64) -> Result<File, CommandError> {
-    tempfile::tempfile()
-        .map_input_error()
-        .and_then(|snapshot| copy_snapshot(source, snapshot, maximum))
-}
-
-fn copy_snapshot(source: File, mut snapshot: File, maximum: u64) -> Result<File, CommandError> {
-    io::copy(&mut source.take(maximum.saturating_add(1)), &mut snapshot)
-        .map_input_error()
-        .and_then(|copied| {
-            if copied > maximum {
-                Err(CommandError::Input)
-            } else {
-                snapshot
-                    .seek(SeekFrom::Start(0))
-                    .map_input_error()
-                    .map(|_| snapshot)
-            }
-        })
+    bounded_input::snapshot_bounded(path, maximum).map_input_error()
 }
 
 fn read_bounded_file(file: &mut File, maximum: u64) -> Result<Vec<u8>, CommandError> {
-    file.seek(SeekFrom::Start(0))
-        .map_input_error()
-        .and_then(|_| {
-            usize::try_from(maximum.min(16 * 1024 * 1024))
-                .map_input_error()
-                .and_then(|capacity| read_bounded_contents(file, maximum, capacity))
-        })
-}
-
-fn read_bounded_contents(
-    reader: impl Read,
-    maximum: u64,
-    capacity: usize,
-) -> Result<Vec<u8>, CommandError> {
-    let mut bytes = Vec::with_capacity(capacity);
-    reader
-        .take(maximum.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_input_error()
-        .and({
-            if bytes.len() as u64 > maximum {
-                Err(CommandError::Input)
-            } else {
-                Ok(bytes)
-            }
-        })
+    bounded_input::read_bounded_file(file, maximum).map_input_error()
 }
 
 fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, CommandError> {
-    File::open(path).map_input_error().and_then(|file| {
-        usize::try_from(maximum.min(16 * 1024 * 1024))
-            .map_input_error()
-            .and_then(|capacity| read_bounded_contents(file, maximum, capacity))
-    })
+    bounded_input::read_bounded(path, maximum).map_input_error()
 }
