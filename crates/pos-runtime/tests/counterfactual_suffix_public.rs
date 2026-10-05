@@ -263,7 +263,7 @@ struct Faulty<B> {
 
 /// Report a committed Tick one `Seq` past its real head; only a test wrapper
 /// may mint that outcome with the adapter seal.
-fn misreported(
+const fn misreported(
     expected: &CounterfactualBasisV1,
     outcome: CounterfactualTickOutcomeV1,
 ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
