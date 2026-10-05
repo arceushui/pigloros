@@ -695,10 +695,18 @@ fn code_two_records_reject_local_origin_and_malformed_bytes() -> TestResult {
         (malformed_local(&binding)?, 0, ClosureError::InvalidEncoding),
         (binding, 0, ClosureError::InvalidAuthorityClosure),
         (undecodable, 0, ClosureError::InvalidEncoding),
-        (malformed_local(&admission)?, 1, ClosureError::InvalidEncoding),
+        (
+            malformed_local(&admission)?,
+            1,
+            ClosureError::InvalidEncoding,
+        ),
         (admission, 1, ClosureError::InvalidAuthorityClosure),
         (garbage(), 1, ClosureError::InvalidEncoding),
-        (malformed_local(&publication)?, 2, ClosureError::InvalidEncoding),
+        (
+            malformed_local(&publication)?,
+            2,
+            ClosureError::InvalidEncoding,
+        ),
         (publication, 2, ClosureError::InvalidAuthorityClosure),
         (garbage(), 2, ClosureError::InvalidEncoding),
     ];
