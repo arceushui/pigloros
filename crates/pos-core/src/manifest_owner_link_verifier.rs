@@ -217,10 +217,10 @@ pub fn collect_manifest_owner_link_ancestors_v1<E>(
     let mut earlier = earlier.into_iter();
     let mut pre_state = seal_pre_state(seal);
     let mut ancestors = Vec::new();
-    while let Some(next) = (Some(pre_state) != admitted)
-        .then(|| earlier.next())
-        .flatten()
-    {
+    while Some(pre_state) != admitted {
+        let Some(next) = earlier.next() else {
+            break;
+        };
         let ancestor = next?;
         let earlier_seal = ancestor.seal.as_input();
         if earlier_seal.configuration_generation != seal.configuration_generation {
