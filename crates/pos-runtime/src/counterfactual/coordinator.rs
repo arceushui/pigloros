@@ -709,6 +709,14 @@ fn frontier_cbor(
     Ok(bytes)
 }
 
+/// The global frontier `(tick, scheduler_position)` of `frontier`.
+const fn global_frontier(frontier: &RecomputationFrontierV1) -> (u64, u32) {
+    (
+        frontier.global_frontier_tick,
+        frontier.global_frontier_scheduler_position,
+    )
+}
+
 /// Bind the frontier to the plan and request and check its global range.
 fn check_frontier(
     request: &CounterfactualAdmissionRequestV1<'_>,
@@ -734,10 +742,7 @@ fn check_frontier(
     if bound != expected || !seeds_are_the_interventions(plan, frontier) {
         return Err(CounterfactualAdmissionErrorV1::FrontierBindingMismatch);
     }
-    let global = (
-        frontier.global_frontier_tick,
-        frontier.global_frontier_scheduler_position,
-    );
+    let global = global_frontier(frontier);
     let in_range = match frontier.unknown_edge_policy {
         UnknownEdgePolicyV1::FullSuffixFromCut => global == (plan.first_tick, 0),
         UnknownEdgePolicyV1::Reject => plan.interventions.first().is_some_and(|earliest| {
@@ -751,6 +756,9 @@ fn check_frontier(
     }
 }
 
+/// One seed or Intervention as compared: `(tick, schema, digest)`.
+type SeedKey = (u64, u32, [u8; 32]);
+
 /// Whether the `RCF1` seeds are exactly one affected node per plan
 /// Intervention, each with that Intervention's INT1 digest, effective Tick,
 /// and target schema.
@@ -762,7 +770,7 @@ fn seeds_are_the_interventions(
     plan: &CounterfactualPlanV1,
     frontier: &RecomputationFrontierV1,
 ) -> bool {
-    let mut expected: Vec<(u64, u32, [u8; 32])> = plan
+    let mut expected: Vec<SeedKey> = plan
         .interventions
         .iter()
         .filter_map(|intervention| {
@@ -775,7 +783,7 @@ fn seeds_are_the_interventions(
             })
         })
         .collect();
-    let mut seeds: Vec<(u64, u32, [u8; 32])> = frontier
+    let mut seeds: Vec<SeedKey> = frontier
         .intervention_seed_nodes
         .iter()
         .map(|seed| (seed.tick, seed.schema_id, seed.artifact_digest))
@@ -916,10 +924,7 @@ fn invalid_range(
     frontier: &RecomputationFrontierV1,
     artifacts: &[InvalidArtifactV1],
 ) -> Result<(DependencyNodeV1, DependencyNodeV1), CounterfactualAdmissionErrorV1> {
-    let global = (
-        frontier.global_frontier_tick,
-        frontier.global_frontier_scheduler_position,
-    );
+    let global = global_frontier(frontier);
     let nodes: BTreeSet<&DependencyNodeV1> = frontier
         .affected_nodes
         .iter()
@@ -943,10 +948,7 @@ fn suffix_outputs(
     derivation: &CounterfactualFrontierDerivationV1,
     class: DependencyClassV1,
 ) -> impl Iterator<Item = &DependencyNodeV1> {
-    let global = (
-        derivation.frontier.global_frontier_tick,
-        derivation.frontier.global_frontier_scheduler_position,
-    );
+    let global = global_frontier(&derivation.frontier);
     derivation
         .provisional_outputs
         .iter()
@@ -1038,6 +1040,6 @@ pub(crate) fn stage_tick(
 }
 
 /// Whether `draft` uses the coordinator-reserved checkpoint Event type.
-pub(crate) fn is_reserved_draft(draft: &EventDraft) -> bool {
+fn is_reserved_draft(draft: &EventDraft) -> bool {
     draft.event_type.as_str() == COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1
 }

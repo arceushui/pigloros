@@ -507,14 +507,18 @@ fn edge(consumer: &Node, source: &Node) -> InputDependencyV1 {
     }
 }
 
-fn reseal(frontier: &mut RecomputationFrontierV1) {
-    if let Ok(digest) = frontier.digest() {
-        frontier.frontier_digest = digest;
-    }
+/// Re-seal a tampered frontier with its own digest.
+fn reseal(frontier: &mut RecomputationFrontierV1) -> TamperResult {
+    frontier.frontier_digest = frontier.digest()?;
+    Ok(())
 }
 
+/// The outcome of one frontier tamper: the reseal digest failure, if any.
+type TamperResult = Result<(), FrontierArtifactErrorV1>;
+/// One frontier tamper applied after the frontier is derived.
+type Tamper = fn(&mut RecomputationFrontierV1) -> TamperResult;
 /// One frontier tamper and the admission error it must produce.
-type FrontierCase = (fn(&mut RecomputationFrontierV1), AdmissionError);
+type FrontierCase = (Tamper, AdmissionError);
 /// One published-facts change, the conflict it must produce, and how often
 /// the frontier source runs before it is detected.
 type FactsCase = (
@@ -523,7 +527,9 @@ type FactsCase = (
     usize,
 );
 
-const fn untampered(_: &mut RecomputationFrontierV1) {}
+const fn untampered(_: &mut RecomputationFrontierV1) -> TamperResult {
+    Ok(())
+}
 
 fn graph_error(error: DependencyGraphErrorV1) -> AdmissionError {
     match error {
@@ -542,7 +548,7 @@ fn graph_error(error: DependencyGraphErrorV1) -> AdmissionError {
 struct Source {
     nodes: Vec<Node>,
     edges: Vec<InputDependencyV1>,
-    tamper: fn(&mut RecomputationFrontierV1),
+    tamper: Tamper,
     /// Provisional outputs reported in addition to the graph's.
     extra_outputs: Vec<CounterfactualProvisionalOutputV1>,
     calls: usize,
@@ -617,7 +623,7 @@ impl CounterfactualFrontierSourceV1 for Source {
         let mut frontier =
             derive_recomputation_frontier_v1(plan, &graph, frontier_id, provenance_digest)
                 .or(Err(AdmissionError::DependencyGraphInvalid))?;
-        (self.tamper)(&mut frontier);
+        (self.tamper)(&mut frontier).map_err(AdmissionError::Frontier)?;
         // Reverse canonical order, so the coordinator must order them itself.
         let provisional_outputs = graph
             .nodes()
@@ -1285,48 +1291,51 @@ both_backends!(incomplete_dependency_graph_is_rejected);
 fn derived_frontier_is_revalidated_and_bound<B: Backend>() -> TestResult {
     let cases: [FrontierCase; 9] = [
         (
-            |frontier| frontier.frontier_id = [1; 16],
+            |frontier| {
+                frontier.frontier_id = [1; 16];
+                Ok(())
+            },
             AdmissionError::Frontier(FrontierArtifactErrorV1::DigestMismatch),
         ),
         (
             |frontier| {
                 frontier.frontier_id = [1; 16];
-                reseal(frontier);
+                reseal(frontier)
             },
             AdmissionError::FrontierBindingMismatch,
         ),
         (
             |frontier| {
                 frontier.plan_digest = [1; 32];
-                reseal(frontier);
+                reseal(frontier)
             },
             AdmissionError::FrontierBindingMismatch,
         ),
         (
             |frontier| {
                 frontier.parent_cut_digest = [1; 32];
-                reseal(frontier);
+                reseal(frontier)
             },
             AdmissionError::FrontierBindingMismatch,
         ),
         (
             |frontier| {
                 frontier.classification_bundle_digest = [1; 32];
-                reseal(frontier);
+                reseal(frontier)
             },
             AdmissionError::FrontierBindingMismatch,
         ),
         (
             |frontier| {
                 frontier.provenance_digest = [1; 32];
-                reseal(frontier);
+                reseal(frontier)
             },
             AdmissionError::FrontierBindingMismatch,
         ),
         (
             |frontier| {
                 frontier.endogenous_suffix_end_tick = HORIZON_TICK - 1;
-                reseal(frontier);
+                reseal(frontier)
             },
             AdmissionError::FrontierBindingMismatch,
         ),
@@ -1334,7 +1343,7 @@ fn derived_frontier_is_revalidated_and_bound<B: Backend>() -> TestResult {
         (
             |frontier| {
                 frontier.global_frontier_tick = PARENT_CUT_TICK;
-                reseal(frontier);
+                reseal(frontier)
             },
             AdmissionError::FrontierOutOfRange,
         ),
@@ -1345,7 +1354,7 @@ fn derived_frontier_is_revalidated_and_bound<B: Backend>() -> TestResult {
                 frontier
                     .owner_frontiers
                     .retain(|owner| owner.earliest_tick >= 12);
-                reseal(frontier);
+                reseal(frontier)
             },
             AdmissionError::FrontierOutOfRange,
         ),
@@ -1362,32 +1371,32 @@ fn derived_frontier_is_revalidated_and_bound<B: Backend>() -> TestResult {
 both_backends!(derived_frontier_is_revalidated_and_bound);
 
 /// Tamperings of the `RCF1` seeds that keep the resealed record valid.
-const SEED_TAMPERS: [fn(&mut RecomputationFrontierV1); 5] = [
+const SEED_TAMPERS: [Tamper; 5] = [
     // A seed digest that is no Intervention's INT1 digest.
     |frontier| {
         frontier.intervention_seed_nodes[0].artifact_digest = [0xee; 32];
-        reseal(frontier);
+        reseal(frontier)
     },
     // A seed off its Intervention's effective Tick.
     |frontier| {
         frontier.intervention_seed_nodes[1].tick = 12;
-        reseal(frontier);
+        reseal(frontier)
     },
     // A seed off its Intervention's target schema.
     |frontier| {
         frontier.intervention_seed_nodes[0].schema_id = 8;
-        reseal(frontier);
+        reseal(frontier)
     },
     // A plan Intervention without a seed.
     |frontier| {
         frontier.intervention_seed_nodes.truncate(1);
-        reseal(frontier);
+        reseal(frontier)
     },
     // A seed that is not an affected node.
     |frontier| {
         let seed = frontier.intervention_seed_nodes[0].clone();
         frontier.affected_nodes.retain(|node| *node != seed);
-        reseal(frontier);
+        reseal(frontier)
     },
 ];
 
@@ -1396,7 +1405,7 @@ fn frontier_seeds_must_be_the_plans_interventions<B: Backend>() -> TestResult {
         let mut setup = setup::<B>(&BASE)?;
         // The tampered record still passes the standalone RCF1 validation.
         let mut frontier = expected_frontier(&setup)?;
-        tamper(&mut frontier);
+        tamper(&mut frontier)?;
         frontier.validate()?;
         setup.source.tamper = tamper;
         let outcome = admit(&mut setup);
@@ -1413,7 +1422,7 @@ fn frontier_seeds_must_be_the_plans_interventions<B: Backend>() -> TestResult {
 both_backends!(frontier_seeds_must_be_the_plans_interventions);
 
 fn derived_frontier_range_is_enforced<B: Backend>() -> TestResult {
-    let cases: [fn(&mut RecomputationFrontierV1); 2] = [
+    let cases: [Tamper; 2] = [
         // An affected node before the global frontier.
         |frontier| {
             if let Some(first) = frontier.affected_nodes.first().cloned() {
@@ -1425,7 +1434,7 @@ fn derived_frontier_range_is_enforced<B: Backend>() -> TestResult {
                     },
                 );
             }
-            reseal(frontier);
+            reseal(frontier)
         },
         // An affected node after the endogenous suffix end.
         |frontier| {
@@ -1435,7 +1444,7 @@ fn derived_frontier_range_is_enforced<B: Backend>() -> TestResult {
                     ..last
                 });
             }
-            reseal(frontier);
+            reseal(frontier)
         },
     ];
     for tamper in cases {
@@ -1464,16 +1473,16 @@ fn derived_frontier_range_is_enforced<B: Backend>() -> TestResult {
 both_backends!(derived_frontier_range_is_enforced);
 
 fn fallback_frontier_is_exactly_the_first_tick<B: Backend>() -> TestResult {
-    let cases: [fn(&mut RecomputationFrontierV1); 2] = [
+    let cases: [Tamper; 2] = [
         // A later scheduler position of the first Tick.
         |frontier| {
             frontier.global_frontier_scheduler_position = 1;
-            reseal(frontier);
+            reseal(frontier)
         },
         // A later Tick, which `Reject` would admit.
         |frontier| {
             frontier.global_frontier_tick = FIRST_TICK + 1;
-            reseal(frontier);
+            reseal(frontier)
         },
     ];
     for tamper in cases {
