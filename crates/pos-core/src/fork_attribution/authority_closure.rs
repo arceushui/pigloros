@@ -131,6 +131,10 @@ where
 }
 
 /// `FAE1` fields 18–20, strictly decoded.
+///
+/// This is a plain decoded `FCS1`/`FCT1`/`FCR1` triple. Its fields are public
+/// so that tests can build variants; the validated graph of a closure is
+/// exposed only by shared reference.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedForkClassifierGraphV1 {
     /// Field 18: the imported `FCS1`, kept apart from local source custody.
@@ -210,7 +214,8 @@ impl ForkAttributionImportClosureV1 {
         closure.check(envelope).map(|()| closure)
     }
 
-    /// ADR-105 import step 1, typed part: decode, re-encode, and order.
+    /// ADR-105 import step 1, typed part: decode (the strict decoders enforce
+    /// canonical form) and order.
     fn decode(envelope: &ForkAttributionAuthorityEnvelopeV1) -> Result<Self, Error> {
         let input = envelope.unsigned().input();
         let records = &input.records;
@@ -421,6 +426,7 @@ impl ForkAttributionImportClosureV1 {
                 derived.admissions.push(admission);
             }
         }
+        // Order does not matter: this and every per-Event failure are `InvalidAuthorityClosure`.
         let operation_ids = self
             .append_operations
             .iter()

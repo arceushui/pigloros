@@ -10,8 +10,6 @@
 //! canonical form. The projection never leaves this module, and every digest
 //! is computed over the exact code-2 bytes.
 
-use ciborium::value::Value;
-
 use super::{
     authority_envelope::MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1, domain_digest,
     ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionCodecErrorV1 as Error,
@@ -30,32 +28,48 @@ const IMPORTED_ORIGIN_HEAD: [u8; 4] = [0x82, 0x02, 0x58, 0x20];
 /// The complete code-2 origin: its head plus the 32-byte digest.
 const IMPORTED_ORIGIN_BYTES: usize = IMPORTED_ORIGIN_HEAD.len() + 32;
 
-/// Split bounded code-2 record bytes into their local projection and the
-/// carried authority-origin digest.
+/// Strictly decode bounded code-2 record bytes: `decode_local` validates
+/// their local projection, and the carried origin digest is returned with it.
 ///
 /// # Errors
-/// Returns `FieldOutOfBounds` above `maximum`, `FieldMismatch` for a local
-/// code-1 origin, which ADR-105 forbids inside `FAE1`, and `InvalidEncoding`
-/// for any other final field.
-fn local_projection(bytes_in: &[u8], maximum: usize) -> Result<(Vec<u8>, Hash), Error> {
+/// Returns `FieldOutOfBounds` above `maximum`. Bytes without the exact
+/// code-2 origin are `FieldMismatch` only when they decode in full as a valid
+/// local record, whose code-1 origin ADR-105 forbids inside `FAE1`, and
+/// `InvalidEncoding` otherwise (erratum E9). Every other failure is the
+/// error of `decode_local` on the projection.
+fn decode_imported<T>(
+    bytes_in: &[u8],
+    maximum: usize,
+    decode_local: fn(&[u8]) -> Result<T, Error>,
+) -> Result<(T, Hash), Error> {
     if bytes_in.len() > maximum {
         return Err(Error::FieldOutOfBounds);
     }
-    let rejection = if bytes_in.ends_with(&LOCAL_ORIGIN) {
-        Error::FieldMismatch
-    } else {
-        Error::InvalidEncoding
+    let Some((local, digest)) = local_projection(bytes_in) else {
+        let rejection = if decode_local(bytes_in).is_ok() {
+            Error::FieldMismatch
+        } else {
+            Error::InvalidEncoding
+        };
+        return Err(rejection);
     };
+    decode_local(&local).map(|record| (record, digest))
+}
+
+/// Split bytes ending in the code-2 `[2, digest]` origin into their local
+/// projection, with `[1]` in its place, and the carried digest.
+fn local_projection(bytes_in: &[u8]) -> Option<(Vec<u8>, Hash)> {
     let (prefix, origin) = bytes_in.split_at(bytes_in.len().saturating_sub(IMPORTED_ORIGIN_BYTES));
-    origin
-        .strip_prefix(&IMPORTED_ORIGIN_HEAD)
-        .and_then(|digest| <[u8; 32]>::try_from(digest).ok())
-        .map(|digest| {
-            let mut local = prefix.to_vec();
-            local.extend_from_slice(&LOCAL_ORIGIN);
-            (local, Hash::from_bytes(digest))
-        })
-        .ok_or(rejection)
+    let tail = origin.strip_prefix(&IMPORTED_ORIGIN_HEAD)?;
+    let digest = <[u8; 32]>::try_from(tail).ok()?;
+    let mut local = prefix.to_vec();
+    local.extend_from_slice(&LOCAL_ORIGIN);
+    Some((local, Hash::from_bytes(digest)))
+}
+
+/// The strict local `POB1` decoder, with every failure `InvalidEncoding`.
+fn decode_local_binding(bytes_in: &[u8]) -> Result<PrincipalOwnerBindingV1, Error> {
+    PrincipalOwnerBindingV1::from_canonical_cbor(bytes_in).map_err(|_| Error::InvalidEncoding)
 }
 
 /// Append the code-2 `[2, digest]` origin to one local record body.
@@ -78,6 +92,9 @@ pub struct ImportedPrincipalOwnerBindingV1 {
 impl ImportedPrincipalOwnerBindingV1 {
     /// Give one source binding the code-2 origin, as the `FAE1` producer does
     /// after deriving the `FAO1` digest.
+    ///
+    /// The production caller is the #519 `FAE1` producer; integration tests
+    /// use it to build code-2 records.
     #[must_use]
     pub const fn from_local(
         binding: PrincipalOwnerBindingV1,
@@ -93,23 +110,22 @@ impl ImportedPrincipalOwnerBindingV1 {
     ///
     /// # Errors
     /// Returns `FieldOutOfBounds` above 241 bytes, `FieldMismatch` for a
-    /// local origin, and `InvalidEncoding` for any other malformed,
-    /// noncanonical, or zero-identity binding.
+    /// valid local code-1 binding, and `InvalidEncoding` for any other
+    /// malformed, noncanonical, or zero-identity binding.
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, Error> {
-        let (local, digest) =
-            local_projection(bytes_in, MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1)?;
-        PrincipalOwnerBindingV1::from_canonical_cbor(&local)
-            .map(|binding| Self::from_local(binding, digest))
-            .map_err(|_| Error::InvalidEncoding)
+        decode_imported(
+            bytes_in,
+            MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1,
+            decode_local_binding,
+        )
+        .map(|(binding, digest)| Self::from_local(binding, digest))
     }
 
     /// Encode the exact canonical code-2 `POB1` bytes.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        self.binding.canonical_cbor_with_origin(Value::Array(vec![
-            Value::Integer(2.into()),
-            Value::Bytes(self.authority_origin_digest.as_bytes().to_vec()),
-        ]))
+        self.binding
+            .canonical_cbor_with_origin(Some(self.authority_origin_digest))
     }
 
     /// Return the ADR-099 `POB1` digest over the exact code-2 bytes.
@@ -144,6 +160,9 @@ pub struct ImportedForkAdmissionRecordV1 {
 impl ImportedForkAdmissionRecordV1 {
     /// Give one source admission the code-2 origin, as the `FAE1` producer
     /// does after deriving the `FAO1` digest.
+    ///
+    /// The production caller is the #519 `FAE1` producer; integration tests
+    /// use it to build code-2 records.
     #[must_use]
     pub const fn from_local(record: ForkAdmissionRecordV1, authority_origin_digest: Hash) -> Self {
         Self {
@@ -155,12 +174,16 @@ impl ImportedForkAdmissionRecordV1 {
     /// Decode exact canonical code-2 `FAR1` bytes.
     ///
     /// # Errors
-    /// Returns `FieldMismatch` for a local origin, and otherwise every error
-    /// of the strict local `FAR1` decoder.
+    /// Returns `FieldMismatch` for a valid local code-1 `FAR1`,
+    /// `InvalidEncoding` for any other bytes without the code-2 origin, and
+    /// otherwise every error of the strict local `FAR1` decoder.
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, Error> {
-        let (local, digest) = local_projection(bytes_in, MAX_FORK_ADMISSION_RECORD_BYTES_V1)?;
-        ForkAdmissionRecordV1::from_canonical_cbor(&local)
-            .map(|record| Self::from_local(record, digest))
+        decode_imported(
+            bytes_in,
+            MAX_FORK_ADMISSION_RECORD_BYTES_V1,
+            ForkAdmissionRecordV1::from_canonical_cbor,
+        )
+        .map(|(record, digest)| Self::from_local(record, digest))
     }
 
     /// Encode the exact canonical code-2 `FAR1` bytes.
@@ -201,6 +224,9 @@ pub struct ImportedForkPublicationOperationV1 {
 impl ImportedForkPublicationOperationV1 {
     /// Give one source publication operation the code-2 origin, as the
     /// `FAE1` producer does after deriving the `FAO1` digest.
+    ///
+    /// The production caller is the #519 `FAE1` producer; integration tests
+    /// use it to build code-2 records.
     #[must_use]
     pub const fn from_local(
         operation: ForkPublicationOperationV1,
@@ -215,12 +241,16 @@ impl ImportedForkPublicationOperationV1 {
     /// Decode exact canonical code-2 `FPO1` bytes.
     ///
     /// # Errors
-    /// Returns `FieldMismatch` for a local origin, and otherwise every error
-    /// of the strict local `FPO1` decoder.
+    /// Returns `FieldMismatch` for a valid local code-1 `FPO1`,
+    /// `InvalidEncoding` for any other bytes without the code-2 origin, and
+    /// otherwise every error of the strict local `FPO1` decoder.
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, Error> {
-        let (local, digest) = local_projection(bytes_in, MAX_FORK_PUBLICATION_OPERATION_BYTES_V1)?;
-        ForkPublicationOperationV1::from_canonical_cbor(&local)
-            .map(|operation| Self::from_local(operation, digest))
+        decode_imported(
+            bytes_in,
+            MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
+            ForkPublicationOperationV1::from_canonical_cbor,
+        )
+        .map(|(operation, digest)| Self::from_local(operation, digest))
     }
 
     /// Encode the exact canonical code-2 `FPO1` bytes.

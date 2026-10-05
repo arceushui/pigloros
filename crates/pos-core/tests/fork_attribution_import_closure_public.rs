@@ -617,6 +617,42 @@ fn import_decoders_reject_bounds_local_origin_and_malformed_tails() -> TestResul
     Ok(())
 }
 
+/// A local record with version 2: it ends in the local `[1]` origin but is not
+/// a valid local record.
+fn malformed_local(record: &[u8]) -> Fallible<Vec<u8>> {
+    let bytes = edited(record, 1, int(2))?;
+    assert!(bytes.ends_with(&[0x81, 0x01]));
+    Ok(bytes)
+}
+
+#[test]
+fn import_decoders_reject_a_malformed_record_ending_in_a_local_origin() -> TestResult {
+    let fixture = Fixture::new(Shape::Mixed)?;
+    let binding = malformed_local(&fixture.binding.to_canonical_cbor())?;
+    let admission = malformed_local(&fixture.admission.to_canonical_cbor())?;
+    let publication = malformed_local(&fixture.publication.to_canonical_cbor())?;
+    let tiny = [0x00, 0x81, 0x01];
+    for bytes in [binding.as_slice(), tiny.as_slice()] {
+        assert_eq!(
+            ImportedPrincipalOwnerBindingV1::from_canonical_cbor(bytes).err(),
+            Some(CodecError::InvalidEncoding)
+        );
+    }
+    for bytes in [admission.as_slice(), tiny.as_slice()] {
+        assert_eq!(
+            ImportedForkAdmissionRecordV1::from_canonical_cbor(bytes).err(),
+            Some(CodecError::InvalidEncoding)
+        );
+    }
+    for bytes in [publication.as_slice(), tiny.as_slice()] {
+        assert_eq!(
+            ImportedForkPublicationOperationV1::from_canonical_cbor(bytes).err(),
+            Some(CodecError::InvalidEncoding)
+        );
+    }
+    Ok(())
+}
+
 type InputEdit = fn(&mut ForkAttributionAuthorityEnvelopeInputV1) -> TestResult;
 
 /// Validate the mixed fixture after `edit` replaces carried bytes.
@@ -656,10 +692,13 @@ fn code_two_records_reject_local_origin_and_malformed_bytes() -> TestResult {
     let mut undecodable = vec![0x00];
     undecodable.extend(imported_origin_bytes(hash(0x5a)));
     let cases = [
+        (malformed_local(&binding)?, 0, ClosureError::InvalidEncoding),
         (binding, 0, ClosureError::InvalidAuthorityClosure),
         (undecodable, 0, ClosureError::InvalidEncoding),
+        (malformed_local(&admission)?, 1, ClosureError::InvalidEncoding),
         (admission, 1, ClosureError::InvalidAuthorityClosure),
         (garbage(), 1, ClosureError::InvalidEncoding),
+        (malformed_local(&publication)?, 2, ClosureError::InvalidEncoding),
         (publication, 2, ClosureError::InvalidAuthorityClosure),
         (garbage(), 2, ClosureError::InvalidEncoding),
     ];
@@ -828,10 +867,10 @@ fn carried_lists_must_be_in_strict_logical_sequence_order() -> TestResult {
 }
 
 /// Apply each edit to a fresh fixture and require `InvalidAuthorityClosure`.
-fn assert_each_inconsistent<T>(
+fn assert_each_inconsistent<E: Copy>(
     shape: Shape,
-    apply: fn(&mut Fixture, fn(&mut T)) -> TestResult,
-    edits: &[fn(&mut T)],
+    apply: fn(&mut Fixture, E) -> TestResult,
+    edits: &[E],
 ) -> TestResult {
     for (index, edit) in edits.iter().enumerate() {
         let mut fixture = Fixture::new(shape)?;
@@ -897,7 +936,7 @@ fn origins_and_timeline_coordinates_must_match() -> TestResult {
             Some(ClosureError::InvalidAuthorityClosure)
         );
     }
-    assert_each_inconsistent::<ForkAdmissionRecordInputV1>(
+    assert_each_inconsistent::<fn(&mut ForkAdmissionRecordInputV1)>(
         Shape::Mixed,
         apply_admission,
         &[
@@ -918,7 +957,7 @@ fn origins_and_timeline_coordinates_must_match() -> TestResult {
 
 #[test]
 fn creator_manifest_and_publication_records_must_match() -> TestResult {
-    assert_each_inconsistent::<ForkReproManifestInputV1>(
+    assert_each_inconsistent::<fn(&mut ForkReproManifestInputV1)>(
         Shape::Mixed,
         apply_manifest,
         &[
@@ -929,7 +968,7 @@ fn creator_manifest_and_publication_records_must_match() -> TestResult {
             |frm| frm.intervention_sequences = vec![8],
         ],
     )?;
-    assert_each_inconsistent::<ForkPublicationOperationInputV1>(
+    assert_each_inconsistent::<fn(&mut ForkPublicationOperationInputV1)>(
         Shape::Mixed,
         apply_publication,
         &[
@@ -941,7 +980,7 @@ fn creator_manifest_and_publication_records_must_match() -> TestResult {
             |fpo| fpo.signed_manifest_record_id = hash(OTHER),
         ],
     )?;
-    assert_each_inconsistent::<ForkPublicationBindingInputV1>(
+    assert_each_inconsistent::<fn(&mut ForkPublicationBindingInputV1)>(
         Shape::Mixed,
         apply_publication_binding,
         &[
@@ -1025,7 +1064,7 @@ fn apply_registration(
 
 /// G1–G7 against a classified closure of `shape`.
 fn assert_classifier_rows(shape: Shape) -> TestResult {
-    assert_each_inconsistent::<ForkClassifierSourceInputV1>(
+    assert_each_inconsistent::<fn(&mut ForkClassifierSourceInputV1)>(
         shape,
         apply_source,
         &[
@@ -1034,7 +1073,7 @@ fn assert_classifier_rows(shape: Shape) -> TestResult {
             |fcs| fcs.routes.truncate(1),
         ],
     )?;
-    assert_each_inconsistent::<ForkClassifierTableInputV1>(
+    assert_each_inconsistent::<fn(&mut ForkClassifierTableInputV1)>(
         shape,
         apply_table,
         &[
@@ -1046,7 +1085,7 @@ fn assert_classifier_rows(shape: Shape) -> TestResult {
             |fct| fct.routes.truncate(1),
         ],
     )?;
-    assert_each_inconsistent::<ForkClassifierRegistrationInputV1>(
+    assert_each_inconsistent::<fn(&mut ForkClassifierRegistrationInputV1)>(
         shape,
         apply_registration,
         &[
@@ -1085,16 +1124,25 @@ fn classifier_routes_must_be_copied_exactly() -> TestResult {
     Ok(())
 }
 
-fn apply_operations(
-    fixture: &mut Fixture,
-    edit: fn(&mut Vec<ForkAppendOperationInputV1>),
-) -> TestResult {
+/// One fallible edit of the `FOP1` inputs.
+type OperationsEdit = fn(&mut Vec<ForkAppendOperationInputV1>) -> TestResult;
+/// One fallible edit of the `EOR1` inputs.
+type OriginsEdit = fn(&mut Vec<EventOriginRecordInputV1>) -> TestResult;
+/// One fallible edit of the `FIA1` inputs.
+type InterventionsEdit = fn(&mut Vec<ForkInterventionAdmissionInputV1>) -> TestResult;
+
+/// Record `index` of one edited list.
+fn element<T>(records: &mut [T], index: usize) -> Fallible<&mut T> {
+    Ok(records.get_mut(index).ok_or("record index")?)
+}
+
+fn apply_operations(fixture: &mut Fixture, edit: OperationsEdit) -> TestResult {
     let mut inputs = fixture
         .operations
         .iter()
         .map(|operation| operation.input().clone())
         .collect();
-    edit(&mut inputs);
+    edit(&mut inputs)?;
     fixture.operations = inputs
         .into_iter()
         .map(ForkAppendOperationV1::new)
@@ -1104,22 +1152,59 @@ fn apply_operations(
 
 #[test]
 fn per_event_operation_rows_must_match() -> TestResult {
-    assert_each_inconsistent::<Vec<ForkAppendOperationInputV1>>(
+    assert_each_inconsistent::<OperationsEdit>(
         Shape::Mixed,
         apply_operations,
         &[
-            |ops| ops[1].child_timeline_id = timeline_id(3),
-            |ops| ops[3].logical_seq = 9,
-            |ops| ops[1].event_id = EventId::from_ulid(Ulid::from_parts(99, 7)),
-            |ops| ops[1].payload_hash = hash(OTHER),
-            |ops| ops[1].wall_time = WallTime::from_micros(9),
-            |ops| ops[1].classifier_revision_digest = hash(OTHER),
-            |ops| ops[1].fork_admission_digest = hash(OTHER),
-            |ops| ops[1].event_origin_digest = hash(OTHER),
-            |ops| ops[2].intervention_admission_digest = None,
-            |ops| ops[1].intervention_admission_digest = Some(hash(OTHER)),
-            |ops| ops[2].intervention_admission_digest = Some(hash(OTHER)),
-            |ops| ops[1].operation_id = ops[0].operation_id,
+            |ops| {
+                element(ops, 1)?.child_timeline_id = timeline_id(3);
+                Ok(())
+            },
+            |ops| {
+                element(ops, 3)?.logical_seq = 9;
+                Ok(())
+            },
+            |ops| {
+                element(ops, 1)?.event_id = EventId::from_ulid(Ulid::from_parts(99, 7));
+                Ok(())
+            },
+            |ops| {
+                element(ops, 1)?.payload_hash = hash(OTHER);
+                Ok(())
+            },
+            |ops| {
+                element(ops, 1)?.wall_time = WallTime::from_micros(9);
+                Ok(())
+            },
+            |ops| {
+                element(ops, 1)?.classifier_revision_digest = hash(OTHER);
+                Ok(())
+            },
+            |ops| {
+                element(ops, 1)?.fork_admission_digest = hash(OTHER);
+                Ok(())
+            },
+            |ops| {
+                element(ops, 1)?.event_origin_digest = hash(OTHER);
+                Ok(())
+            },
+            |ops| {
+                element(ops, 2)?.intervention_admission_digest = None;
+                Ok(())
+            },
+            |ops| {
+                element(ops, 1)?.intervention_admission_digest = Some(hash(OTHER));
+                Ok(())
+            },
+            |ops| {
+                element(ops, 2)?.intervention_admission_digest = Some(hash(OTHER));
+                Ok(())
+            },
+            |ops| {
+                let id = ops.first().ok_or("operation")?.operation_id;
+                element(ops, 1)?.operation_id = id;
+                Ok(())
+            },
         ],
     )
 }
@@ -1139,16 +1224,13 @@ fn an_unadmitted_source_route_rejects_the_closure() -> TestResult {
     Ok(())
 }
 
-fn apply_origins(
-    fixture: &mut Fixture,
-    edit: fn(&mut Vec<EventOriginRecordInputV1>),
-) -> TestResult {
+fn apply_origins(fixture: &mut Fixture, edit: OriginsEdit) -> TestResult {
     let mut inputs = fixture
         .origins
         .iter()
         .map(|origin| origin.input().clone())
         .collect();
-    edit(&mut inputs);
+    edit(&mut inputs)?;
     fixture.origins = inputs
         .into_iter()
         .map(EventOriginRecordV1::new)
@@ -1156,16 +1238,13 @@ fn apply_origins(
     Ok(())
 }
 
-fn apply_interventions(
-    fixture: &mut Fixture,
-    edit: fn(&mut Vec<ForkInterventionAdmissionInputV1>),
-) -> TestResult {
+fn apply_interventions(fixture: &mut Fixture, edit: InterventionsEdit) -> TestResult {
     let mut inputs = fixture
         .interventions
         .iter()
         .map(|intervention| intervention.input().clone())
         .collect();
-    edit(&mut inputs);
+    edit(&mut inputs)?;
     fixture.interventions = inputs
         .into_iter()
         .map(ForkInterventionAdmissionV1::new)
@@ -1175,27 +1254,43 @@ fn apply_interventions(
 
 #[test]
 fn origin_and_intervention_records_must_be_exactly_implied() -> TestResult {
-    assert_each_inconsistent::<Vec<EventOriginRecordInputV1>>(
+    assert_each_inconsistent::<OriginsEdit>(
         Shape::Mixed,
         apply_origins,
         &[
-            |origins| origins[0].classifier_revision_digest = hash(OTHER),
-            |origins| origins[1].classification = origins[0].classification,
+            |origins| {
+                element(origins, 0)?.classifier_revision_digest = hash(OTHER);
+                Ok(())
+            },
+            |origins| {
+                let classification = origins.first().ok_or("origin")?.classification;
+                element(origins, 1)?.classification = classification;
+                Ok(())
+            },
         ],
     )?;
-    assert_each_inconsistent::<Vec<ForkInterventionAdmissionInputV1>>(
+    assert_each_inconsistent::<InterventionsEdit>(
         Shape::Mixed,
         apply_interventions,
         &[
-            |admissions| admissions[0].operation_id = hash(OTHER),
-            |admissions| admissions[0].room_revision_descriptor_hash = hash(OTHER),
             |admissions| {
-                admissions.remove(0);
+                element(admissions, 0)?.operation_id = hash(OTHER);
+                Ok(())
             },
             |admissions| {
-                let mut extra = admissions[0].clone();
+                element(admissions, 0)?.room_revision_descriptor_hash = hash(OTHER);
+                Ok(())
+            },
+            |admissions| {
+                let rest = admissions.get(1..).ok_or("admission")?.to_vec();
+                *admissions = rest;
+                Ok(())
+            },
+            |admissions| {
+                let mut extra = admissions.first().ok_or("admission")?.clone();
                 extra.logical_seq = 6;
                 admissions.insert(0, extra);
+                Ok(())
             },
         ],
     )
