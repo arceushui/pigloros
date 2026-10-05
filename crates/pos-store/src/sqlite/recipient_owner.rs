@@ -1450,8 +1450,6 @@ impl SqliteStore {
         &self,
         fault: RecipientExportPublicationTestFaultV1,
     ) -> Result<(), CoreError> {
-        RECIPIENT_EXPORT_PUBLICATION_TEST_NAMED_PLAINTEXT_OBSERVED
-            .with(|observed| observed.set(false));
         RECIPIENT_EXPORT_PUBLICATION_TEST_FAULT.with(|configured| {
             if configured.get().is_some() {
                 return Err(CoreError::Storage(
@@ -1459,6 +1457,8 @@ impl SqliteStore {
                 ));
             }
             configured.set(Some(fault));
+            RECIPIENT_EXPORT_PUBLICATION_TEST_NAMED_PLAINTEXT_OBSERVED
+                .with(|observed| observed.set(false));
             Ok(())
         })
     }
