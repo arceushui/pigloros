@@ -148,6 +148,18 @@ pub fn is_consent_sensitive_event_type(event_type: &Kind) -> bool {
         || event_type.as_str().starts_with("retention.")
 }
 
+/// Returns whether an Event type is controlled by its subject.
+///
+/// A subject-controlled type is consent-sensitive
+/// ([`is_consent_sensitive_event_type`]) or a Gateway-owned `consent.*` type
+/// ([`is_consent_event_type`]). The Gateway's Event-read filter and the
+/// runtime's Driver visibility share this one predicate (ADR-021 Revision 4
+/// Decision 2).
+#[must_use]
+pub fn is_subject_controlled_event_type(event_type: &Kind) -> bool {
+    is_consent_sensitive_event_type(event_type) || is_consent_event_type(event_type)
+}
+
 // ---------------------------------------------------------------------------
 // CBOR helpers (private)
 // ---------------------------------------------------------------------------

@@ -618,6 +618,13 @@ pub trait Driver: Send + Sync {
     /// The host filters committed Events before exposing them. The default is
     /// an empty set, preserving the least-authority behavior for Drivers that
     /// only need projection state.
+    ///
+    /// The host reads this answer once, at registration, and uses only that
+    /// snapshot afterwards. A Driver that does not require the verified Event
+    /// prefix may not subscribe to a consent-sensitive type: registration
+    /// rejects it with
+    /// [`crate::PluginCompositionErrorV1::CursorSubscriptionToConsentSensitiveType`]
+    /// (ADR-021 Revision 4 Decision 1).
     fn event_subscriptions(&self) -> &[Kind] {
         &[]
     }
@@ -633,6 +640,11 @@ pub trait Driver: Send + Sync {
     }
 
     /// Whether the host must validate a complete prefix and forward its subscribed visible Events.
+    ///
+    /// Like [`Self::event_subscriptions`], the host reads this answer once, at
+    /// registration. The verified prefix is consent-filtered on every pass,
+    /// so a consent-sensitive Event hidden by one pass reaches the Driver in a
+    /// later pass whose consent shows it.
     fn requires_verified_event_prefix(&self) -> bool {
         false
     }
