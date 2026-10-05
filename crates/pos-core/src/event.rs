@@ -257,6 +257,19 @@ mod tests {
     }
 
     #[test]
+    fn canonical_bytes_staging_scrub_handles_empty_and_shared_buffers() {
+        let mut empty = CanonicalBytes::from_vec(Vec::new());
+        assert!(empty.zeroize_if_uniquely_owned());
+
+        let shared = CanonicalBytes::from_vec(b"shared plaintext".to_vec());
+        let retained = shared.clone();
+        let mut staging = shared;
+        assert!(!staging.zeroize_if_uniquely_owned());
+        assert_eq!(staging.as_slice(), b"shared plaintext");
+        assert_eq!(retained.as_slice(), b"shared plaintext");
+    }
+
+    #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn event_json_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let e = sample_event();

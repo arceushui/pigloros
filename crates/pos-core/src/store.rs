@@ -32,7 +32,7 @@ use crate::{
     ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureTopologyTransitionPermitV1,
 };
 use std::sync::Arc;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Exact identities and public signing material for one prepared protected append.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -340,15 +340,13 @@ impl TimelineExport {
     /// different caller.
     #[must_use]
     pub fn plaintext_staging_is_exclusively_owned(&self) -> bool {
-        self.events
-            .iter()
-            .all(|event| event.payload.is_uniquely_owned())
+        event_plaintext_staging_is_exclusively_owned(&self.events)
     }
 
     /// Zeroize the export-owned plaintext buffers and strings used for staging.
     ///
     /// Returns false without changing the export when a payload is shared.
-    /// Hosts should check plaintext_staging_is_exclusively_owned before they
+    /// Hosts should check [Self::plaintext_staging_is_exclusively_owned] before they
     /// materialize any ciphertext.
     pub fn zeroize_plaintext_staging(&mut self) -> bool {
         if !self.plaintext_staging_is_exclusively_owned() {
@@ -357,11 +355,28 @@ impl TimelineExport {
         if let Some(name) = &mut self.timeline.meta.name {
             name.zeroize();
         }
-        self.events.iter_mut().all(|event| {
-            event.event_type.zeroize();
-            event.payload.zeroize_if_uniquely_owned()
-        })
+        zeroize_event_plaintext_staging(&mut self.events)
     }
+}
+
+fn event_plaintext_staging_is_exclusively_owned(events: &[Event]) -> bool {
+    events.iter().all(|event| event.payload.is_uniquely_owned())
+}
+
+/// Zeroize event-owned plaintext buffers and type strings used for staging.
+///
+/// Returns `false` without changing `events` when a payload buffer is shared.
+/// This is opt-in because [`CanonicalBytes`] supports cheap shared clones; a
+/// caller must not wipe bytes still owned by another caller.
+#[must_use]
+pub fn zeroize_event_plaintext_staging(events: &mut [Event]) -> bool {
+    if !event_plaintext_staging_is_exclusively_owned(events) {
+        return false;
+    }
+    events.iter_mut().all(|event| {
+        event.event_type.zeroize();
+        event.payload.zeroize_if_uniquely_owned()
+    })
 }
 
 /// The kernel's event-store abstraction. Implementations live in `pos-store`.
@@ -1438,10 +1453,16 @@ pub fn export_timeline_raw(
         })
         .and_then(|mut export| {
             if let Some((parent, at_seq)) = export.timeline.meta.fork_point {
-                store.chain_hash_at(parent, at_seq).map(|parent_hash| {
-                    export.parent_fork_hash = Some(parent_hash);
-                    export
-                })
+                store
+                    .chain_hash_at(parent, at_seq)
+                    .inspect_err(|_| {
+                        let scrubbed = export.zeroize_plaintext_staging();
+                        debug_assert!(scrubbed);
+                    })
+                    .map(|parent_hash| {
+                        export.parent_fork_hash = Some(parent_hash);
+                        export
+                    })
             } else {
                 Ok(export)
             }
@@ -1714,10 +1735,12 @@ fn export_timeline_using(
     events_result: Result<Vec<Event>, CoreError>,
     id: TimelineId,
 ) -> Result<TimelineExport, CoreError> {
-    let Some(timeline) = timeline_result? else {
+    let Some(mut timeline) = timeline_result? else {
         return Err(CoreError::TimelineNotFound(id));
     };
+    let timeline_name = timeline.meta.name.take().map(Zeroizing::new);
     let events = events_result?;
+    timeline.meta.name = timeline_name.map(|mut name| std::mem::take(&mut *name));
     Ok(TimelineExport {
         timeline,
         events,
@@ -3159,6 +3182,22 @@ mod tests {
             origin: None,
             payload_hash: Hash::zero(),
         }
+    }
+
+    #[test]
+    fn event_plaintext_staging_scrub_preserves_shared_buffers() {
+        let shared_event = validation_test_event(1, EventId::new());
+        let retained = shared_event.payload.clone();
+        let mut shared_events = vec![shared_event];
+        assert!(!zeroize_event_plaintext_staging(&mut shared_events));
+        assert_eq!(shared_events[0].event_type.as_str(), "test.validation");
+        assert_eq!(shared_events[0].payload.as_slice(), b"x");
+        assert_eq!(retained.as_slice(), b"x");
+
+        let mut unique_events = vec![validation_test_event(2, EventId::new())];
+        assert!(zeroize_event_plaintext_staging(&mut unique_events));
+        assert_eq!(unique_events[0].event_type.as_str(), "");
+        assert!(unique_events[0].payload.is_empty());
     }
 
     struct ValidationTestHasher {
