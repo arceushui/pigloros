@@ -12034,10 +12034,10 @@ fn memory_owner_link_snapshot(
     let selected = recordings
         .iter()
         .filter(|recording| recording.binding.as_input().timeline_id == target.timeline_id);
+    let max_node_visits = admission.read_limits.max_node_visits;
     for recording in selected {
         let scope = recording.scope;
         let root = recording.binding.as_input().dependency_root_hash;
-        let max_node_visits = admission.read_limits.max_node_visits;
         let nodes = collect_manifest_owner_link_branches_v1(root, max_node_visits, |digest| {
             let node = store.world_dependency_branches.get(&(scope, digest));
             Ok(node.cloned())

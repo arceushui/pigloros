@@ -1421,9 +1421,9 @@ fn sqlite_owner_link_snapshot(
         .recordings
         .iter()
         .filter(|recording| recording.binding.as_input().timeline_id == timeline_id);
+    let max_node_visits = admission.read_limits.max_node_visits;
     for recording in selected {
         let root = recording.binding.as_input().dependency_root_hash;
-        let max_node_visits = admission.read_limits.max_node_visits;
         let nodes = collect_manifest_owner_link_branches_v1(root, max_node_visits, |digest| {
             sqlite_owner_link_branch(connection, recording.scope, digest)
         })?;
@@ -3357,8 +3357,8 @@ mod local_cut_owner_coverage {
         let (fixture, second) = with_history()?;
         let store = &fixture.store;
         let newest = link_identity(&second)?;
-        let setup = "DELETE FROM manifest_owner_admissions";
-        let read = with_rollback(&store.conn, setup, |connection| {
+        let setup = format!("{CORRUPTION_PRAGMAS}; DELETE FROM manifest_owner_admissions");
+        let read = with_rollback(&store.conn, &setup, |connection| {
             link_snapshot(store, connection, newest)
         })?;
         assert_eq!(read, Err(LocalError::CorruptState));

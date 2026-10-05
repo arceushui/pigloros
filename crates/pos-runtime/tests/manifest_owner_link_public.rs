@@ -1272,7 +1272,11 @@ fn branch_walks_stop_at_the_admitted_node_limit() -> TestResult {
     let limit = READ_LIMITS.max_node_visits;
     let nodes = collect_manifest_owner_link_branches_v1(root, limit, retained)?;
     assert_eq!(nodes, snapshot.dependency_branches);
-    let bounded = collect_manifest_owner_link_branches_v1(root, 0, retained);
+    // The walk accepts exactly as many nodes as the limit and rejects one more.
+    let exact = u64::try_from(nodes.len())?;
+    let at_limit = collect_manifest_owner_link_branches_v1(root, exact, retained)?;
+    assert_eq!(at_limit, nodes);
+    let bounded = collect_manifest_owner_link_branches_v1(root, exact - 1, retained);
     assert_eq!(bounded, Err(LocalCutOwnerErrorV1::BoundExceeded));
     Ok(())
 }
