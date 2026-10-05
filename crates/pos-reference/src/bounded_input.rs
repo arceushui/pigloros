@@ -9,6 +9,12 @@ use std::path::Path;
 #[error("an input artifact cannot be read within its bound")]
 pub struct BoundedInputError;
 
+impl From<io::Error> for BoundedInputError {
+    fn from(_: io::Error) -> Self {
+        Self
+    }
+}
+
 /// Open a path read-only without following links or blocking, and require a regular file.
 ///
 /// # Errors
@@ -23,8 +29,8 @@ pub fn open_regular_file(path: &Path) -> Result<File, BoundedInputError> {
 
         options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
     }
-    let file = options.open(path).map_err(|_| BoundedInputError)?;
-    if file.metadata().map_err(|_| BoundedInputError)?.is_file() {
+    let file = options.open(path)?;
+    if file.metadata()?.is_file() {
         Ok(file)
     } else {
         Err(BoundedInputError)
@@ -38,13 +44,12 @@ pub fn open_regular_file(path: &Path) -> Result<File, BoundedInputError> {
 /// or exceeds the bound.
 pub fn snapshot_bounded(path: &Path, maximum: u64) -> Result<File, BoundedInputError> {
     let source = open_regular_file(path)?;
-    let mut snapshot = tempfile::tempfile().map_err(|_| BoundedInputError)?;
-    let copied = io::copy(&mut source.take(maximum.saturating_add(1)), &mut snapshot)
-        .map_err(|_| BoundedInputError)?;
+    let mut snapshot = tempfile::tempfile()?;
+    let copied = io::copy(&mut source.take(maximum.saturating_add(1)), &mut snapshot)?;
     if copied > maximum {
         return Err(BoundedInputError);
     }
-    snapshot.seek(SeekFrom::Start(0)).map_err(|_| BoundedInputError)?;
+    snapshot.seek(SeekFrom::Start(0))?;
     Ok(snapshot)
 }
 
@@ -63,7 +68,7 @@ pub fn read_bounded(path: &Path, maximum: u64) -> Result<Vec<u8>, BoundedInputEr
 /// Returns [`BoundedInputError`] when the file cannot be rewound or read, or exceeds the
 /// bound.
 pub fn read_bounded_file(file: &mut File, maximum: u64) -> Result<Vec<u8>, BoundedInputError> {
-    file.seek(SeekFrom::Start(0)).map_err(|_| BoundedInputError)?;
+    file.seek(SeekFrom::Start(0))?;
     read_to_bound(file, maximum)
 }
 
@@ -71,8 +76,7 @@ fn read_to_bound(reader: impl Read, maximum: u64) -> Result<Vec<u8>, BoundedInpu
     let mut bytes = Vec::new();
     reader
         .take(maximum.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|_| BoundedInputError)?;
+        .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > maximum {
         Err(BoundedInputError)
     } else {
