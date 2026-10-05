@@ -1297,7 +1297,12 @@ fn validate_execution_matrix(
     bundle: &VerifiedBundle,
     digest: [u8; 32],
 ) -> Result<(), ProfileError> {
-    let member = validate_member_binding(bundle, "authority/execution-matrix.json", 11, digest)?;
+    let member = validate_member_binding(
+        bundle,
+        "authority/execution-matrix.json",
+        MemberRole::ExecutionMatrix,
+        digest,
+    )?;
     let root: serde_json::Value =
         serde_json::from_slice(&member.bytes).map_err(|_| ProfileError::InvalidEncoding)?;
     let root = json_object(&root)?;
