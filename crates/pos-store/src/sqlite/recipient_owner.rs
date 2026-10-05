@@ -20,7 +20,7 @@ use pos_crypto::recipient_export::{
 };
 use pos_crypto::recipient_key::recipient_public_key_from_private_v1;
 use rand::{rngs::SysRng, TryRng};
-use rusqlite::OptionalExtension;
+use rusqlite::{Connection, OptionalExtension};
 use rustix::fs::{
     fsync, openat2, renameat_with, statat, unlinkat, AtFlags, Mode, OFlags, RenameFlags,
     ResolveFlags,
@@ -28,8 +28,8 @@ use rustix::fs::{
 use zeroize::Zeroizing;
 
 use super::{
-    begin_immediate_sql, finish_immediate_transaction, CoreError, RecipientExportDecryptionErrorV1,
-    SqliteRollbackOnDrop, SqliteStore,
+    begin_immediate_sql, finish_immediate_transaction, sqlite_load_key_registry, CoreError,
+    RecipientExportDecryptionErrorV1, SqliteRollbackOnDrop, SqliteStore,
 };
 
 const RECIPIENT_REGISTRY_UNAVAILABLE: RecipientExportDecryptionErrorV1 =
@@ -60,7 +60,7 @@ fn check_envelope_identity(
 
 /// The registered material fingerprint, or the never-matching placeholder
 /// that leaves absent and destroyed identities to the port's own denial.
-fn registered_material_digest(
+fn registered_material_digest_or_absent_sentinel(
     registry: &KeyRegistryStateV1,
     identity: KeyIdentityV1,
 ) -> pos_core::Hash {
@@ -100,6 +100,12 @@ thread_local! {
     };
     static RECIPIENT_READ_FAILURE: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
+    };
+    static RECIPIENT_READ_PAUSE: std::cell::RefCell<Option<(
+        std::sync::mpsc::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>> = const {
+        std::cell::RefCell::new(None)
     };
     static RECIPIENT_WRITE_FAILURE: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
@@ -157,7 +163,25 @@ fn recipient_read_exact(file: &mut File, bytes: &mut [u8]) -> std::io::Result<()
     if RECIPIENT_READ_FAILURE.with(std::cell::Cell::get) {
         Err(std::io::Error::other("injected recipient read failure"))
     } else {
-        file.read_exact(bytes)
+        RECIPIENT_READ_PAUSE
+            .with(|pause| {
+                pause
+                    .borrow_mut()
+                    .take()
+                    .map_or(Ok(()), |(started, release)| {
+                        started
+                            .send(())
+                            .map_err(|_| {
+                                std::io::Error::other("recipient read pause was abandoned")
+                            })
+                            .and_then(|()| {
+                                release.recv().map_err(|_| {
+                                    std::io::Error::other("recipient read pause was abandoned")
+                                })
+                            })
+                    })
+            })
+            .and_then(|()| file.read_exact(bytes))
     }
 }
 
@@ -626,6 +650,12 @@ impl SqliteStore {
         expected_export_id: [u8; 16],
         expected_recipient: RecipientKeyDescriptorV1,
     ) -> Result<DecryptedTimelineExportV1, RecipientExportDecryptionErrorV1> {
+        // A read-only handle reserves the writer through its separate writable
+        // connection, exactly as the generic decryption-only port does.
+        let connection = self
+            .writer_reservation_connection
+            .as_ref()
+            .unwrap_or(&self.conn);
         // This decode is a pre-check before any registry or private-key access,
         // as ADR-098 requires; HPKE decodes again inside the #430 codec API.
         RecipientTimelineExportV1::decode(encoded)
@@ -634,24 +664,25 @@ impl SqliteStore {
                 check_envelope_identity(&envelope, expected_export_id, expected_recipient, owner)
             })
             .and_then(|()| {
-                self.conn
+                connection
                     .execute_batch(begin_immediate_sql())
                     .map_err(|_| RECIPIENT_REGISTRY_UNAVAILABLE)
             })
             .and_then(|()| {
-                let _rollback = SqliteRollbackOnDrop(&self.conn);
+                let _rollback = SqliteRollbackOnDrop(connection);
                 // A load failure and an absent registry both deliberately
                 // report the registry unavailable.
-                let mut registry = self
-                    .load_key_registry()
+                let mut registry = sqlite_load_key_registry(connection)
                     .ok()
                     .flatten()
                     .ok_or(RECIPIENT_REGISTRY_UNAVAILABLE)?;
                 let identity = expected_recipient.identity();
-                let registered_digest = registered_material_digest(&registry, identity);
+                let registered_digest =
+                    registered_material_digest_or_absent_sentinel(&registry, identity);
                 registry
                     .with_decryption_authorization(identity, registered_digest, || {
-                        self.decrypt_with_registered_material(
+                        Self::decrypt_with_registered_material(
+                            connection,
                             owner,
                             registered_digest,
                             encoded,
@@ -670,33 +701,52 @@ impl SqliteStore {
     /// key unavailable. Registered material that derives another public key
     /// than the presented RKP1 descriptor is an encryption-key mismatch.
     fn decrypt_with_registered_material(
-        &self,
+        connection: &Connection,
         owner: &RecipientKeyOwnerV1,
         registered_digest: pos_core::Hash,
         encoded: &[u8],
         expected_export_id: [u8; 16],
         expected_recipient: RecipientKeyDescriptorV1,
     ) -> Result<DecryptedTimelineExportV1, RecipientExportDecryptionErrorV1> {
-        ensure_recipient_custody_tables(&self.conn)
-            .and_then(|()| claim_recipient_custody_directory(&self.conn, owner))
-            .and_then(|()| self.recipient_inventory_path(owner, expected_recipient.identity()))
-            .and_then(|(path, file_identity, _)| {
-                read_bound_private_key(owner, &path, file_identity)
+        ensure_recipient_custody_tables(connection)
+            .and_then(|()| claim_recipient_custody_directory(connection, owner))
+            .and_then(|()| {
+                Self::recipient_inventory_path(connection, owner, expected_recipient.identity())
             })
+            .and_then(
+                |(stored_descriptor, path, file_identity, inventory_digest)| {
+                    if inventory_digest == registered_digest {
+                        read_bound_private_key(owner, &path, file_identity)
+                            .map(|material| (stored_descriptor, material))
+                    } else {
+                        Err(CoreError::Storage(
+                            "recipient key inventory does not match the registered material"
+                                .to_owned(),
+                        ))
+                    }
+                },
+            )
             .ok()
-            .filter(|material| key_material_digest(material) == registered_digest)
+            .filter(|(_, material)| key_material_digest(material) == registered_digest)
             .ok_or(RecipientExportDecryptionErrorV1::MaterialUnavailable)
-            .and_then(|material| {
+            .and_then(|(stored_descriptor, material)| {
                 if recipient_public_key_from_private_v1(&material)
                     == expected_recipient.public_key()
                 {
-                    decrypt_timeline_export_v1(
-                        encoded,
-                        expected_export_id,
-                        expected_recipient,
-                        &material,
-                    )
-                    .map_err(RecipientExportDecryptionErrorV1::Export)
+                    // Preserve a forged input descriptor's registry denial:
+                    // only material that does match it can expose corrupt
+                    // locally recorded RKP1 metadata as unavailable.
+                    if stored_descriptor == expected_recipient {
+                        decrypt_timeline_export_v1(
+                            encoded,
+                            expected_export_id,
+                            expected_recipient,
+                            &material,
+                        )
+                        .map_err(RecipientExportDecryptionErrorV1::Export)
+                    } else {
+                        Err(RecipientExportDecryptionErrorV1::MaterialUnavailable)
+                    }
                 } else {
                     Err(RecipientExportDecryptionErrorV1::Registry(
                         KeyRegistryErrorV1::EncryptionKeyMismatch,
@@ -824,8 +874,8 @@ impl SqliteStore {
                         "recipient destruction request is no longer pending".to_owned(),
                     ));
                 }
-                let (path, bound_file, inventory_digest) =
-                    self.recipient_inventory_path(owner, request.identity)?;
+                let (_, path, bound_file, inventory_digest) =
+                    Self::recipient_inventory_path(&self.conn, owner, request.identity)?;
                 if inventory_digest != request.expected_material_digest {
                     return Err(CoreError::Storage(
                         "recipient inventory material differs from pending destruction".to_owned(),
@@ -865,16 +915,24 @@ impl SqliteStore {
     }
 
     fn recipient_inventory_path(
-        &self,
+        connection: &Connection,
         owner: &RecipientKeyOwnerV1,
         identity: KeyIdentityV1,
-    ) -> Result<(PathBuf, RecipientPrivateFileIdentityV1, pos_core::Hash), CoreError> {
+    ) -> Result<
+        (
+            RecipientKeyDescriptorV1,
+            PathBuf,
+            RecipientPrivateFileIdentityV1,
+            pos_core::Hash,
+        ),
+        CoreError,
+    > {
         use std::os::unix::ffi::OsStringExt;
 
         i64::try_from(identity.epoch)
             .map_err(storage_error)
             .and_then(|epoch| {
-                self.conn.query_row(
+                connection.query_row(
                 "SELECT descriptor, material_digest, private_path, file_device, file_inode, file_uid FROM recipient_key_inventory_v1 WHERE owner_id = ?1 AND epoch = ?2",
                 rusqlite::params![
                     identity.owner_id.as_str(),
@@ -913,6 +971,7 @@ impl SqliteStore {
                                 RecipientPrivateFileIdentityV1::from_inventory(&inventory).map(
                                     |file_identity| {
                                         (
+                                            descriptor,
                                             path,
                                             file_identity,
                                             pos_core::Hash::from_bytes(material_digest),
@@ -1639,7 +1698,15 @@ fn write_private_key(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
+    use std::{os::unix::fs::PermissionsExt, sync::mpsc, time::Duration};
+
+    use pos_core::{
+        CanonicalBytes, Event, EventId, Hash, Kind, SchemaVersion, Seq, Timeline, TimelineExport,
+        TimelineId, TimelineMeta, TimelineMode, WallTime,
+    };
+    use pos_crypto::recipient_export::encrypt_timeline_export_v1;
+    use rand::{rngs::StdRng, SeedableRng};
+    use ulid::Ulid;
 
     use super::*;
 
@@ -1659,6 +1726,51 @@ mod tests {
         )?;
         let owner = RecipientKeyOwnerV1::open(directory, EntityId::new())?;
         Ok((temporary, store, owner))
+    }
+
+    const TEST_EXPORT_ID: [u8; 16] = [7; 16];
+
+    fn encrypted_export(descriptor: RecipientKeyDescriptorV1) -> Result<Vec<u8>, CoreError> {
+        let payload = b"recipient export".to_vec();
+        let payload_hash = Hash::from_bytes(*blake3::hash(&payload).as_bytes());
+        let export = TimelineExport {
+            timeline: Timeline {
+                meta: TimelineMeta {
+                    id: TimelineId::from_ulid(Ulid::from(3_u128)),
+                    mode: TimelineMode::Live,
+                    name: None,
+                    owner: Some(EntityId::from_ulid(Ulid::from(4_u128))),
+                    fork_point: None,
+                },
+                head: Seq::from_u64(1),
+            },
+            events: vec![Event {
+                id: EventId::from_ulid(Ulid::from(101_u128)),
+                entity: EntityId::from_ulid(Ulid::from(200_u128)),
+                event_type: Kind::new("test.event"),
+                payload: CanonicalBytes::from_vec(payload),
+                wall_time: WallTime::from_micros(1),
+                seq: Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                origin: None,
+                payload_hash,
+            }],
+            parent_fork_hash: None,
+        };
+        let mut rng = StdRng::from_seed([1; 32]);
+        encrypt_timeline_export_v1(&export, descriptor, TEST_EXPORT_ID, &mut rng)
+            .map(|encrypted| encrypted.encode())
+            .map_err(storage_error)
+    }
+
+    fn pause_on_next_recipient_read(started: mpsc::Sender<()>, release: mpsc::Receiver<()>) {
+        RECIPIENT_READ_PAUSE.with(|pause| {
+            assert!(pause.replace(Some((started, release))).is_none());
+        });
     }
 
     fn fail_fsync_at(call: usize) {
@@ -2058,9 +2170,10 @@ mod tests {
                 [foreign.encode()],
             )
             .map_err(|error| CoreError::Storage(error.to_string()))?;
-        assert!(store
-            .recipient_inventory_path(&owner, descriptor.identity())
-            .is_err());
+        assert!(
+            SqliteStore::recipient_inventory_path(&store.conn, &owner, descriptor.identity())
+                .is_err()
+        );
 
         connection
             .execute(
@@ -2079,14 +2192,15 @@ mod tests {
     }
 
     #[test]
-    fn recipient_decryption_placeholder_digest_never_authorizes_material() -> Result<(), CoreError>
-    {
+    fn recipient_decryption_absent_digest_sentinel_never_authorizes_material(
+    ) -> Result<(), CoreError> {
         let (_temporary, mut store, owner) = owner_fixture()?;
         let descriptor = store.enroll_recipient_key(&owner)?;
         let mut registry = store
             .load_key_registry()?
             .ok_or_else(|| CoreError::Storage("recipient registry is absent".to_owned()))?;
-        let registered = registered_material_digest(&registry, descriptor.identity());
+        let registered =
+            registered_material_digest_or_absent_sentinel(&registry, descriptor.identity());
         assert_ne!(registered, ABSENT_MATERIAL_DIGEST);
         assert_ne!(key_material_digest(&[0; 32]), ABSENT_MATERIAL_DIGEST);
         let public_key = descriptor.public_key();
@@ -2094,7 +2208,7 @@ mod tests {
             .map_err(|error| CoreError::Storage(error.to_string()))?
             .identity();
         assert_eq!(
-            registered_material_digest(&registry, absent),
+            registered_material_digest_or_absent_sentinel(&registry, absent),
             ABSENT_MATERIAL_DIGEST
         );
         let called = std::cell::Cell::new(false);
@@ -2112,6 +2226,103 @@ mod tests {
             Err(KeyRegistryErrorV1::EncryptionKeyMismatch)
         );
         assert!(!called.get());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_decryption_holds_writer_reservation_through_private_material_use(
+    ) -> Result<(), CoreError> {
+        let (temporary, mut writer, owner) = owner_fixture()?;
+        let descriptor = writer.enroll_recipient_key(&owner)?;
+        let encoded = encrypted_export(descriptor)?;
+        let digest = writer
+            .load_key_registry()?
+            .and_then(|registry| {
+                registry
+                    .key_record(descriptor.identity())
+                    .and_then(|record| record.private_material_digest)
+            })
+            .ok_or_else(|| CoreError::Storage("recipient material is absent".to_owned()))?;
+        let database = temporary.path().join("recipient.sqlite");
+        let database_path = database
+            .to_str()
+            .ok_or_else(|| CoreError::Storage("database path is not UTF-8".to_owned()))?
+            .to_owned();
+        let directory = owner.directory.clone();
+        let grantee = owner.grantee_id;
+        drop(writer);
+
+        let decrypting_store = SqliteStore::open(&database_path)?;
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let decryption = scope.spawn(move || {
+                pause_on_next_recipient_read(entered_tx, release_rx);
+                decrypting_store.decrypt_recipient_export(
+                    &owner,
+                    &encoded,
+                    TEST_EXPORT_ID,
+                    descriptor,
+                )
+            });
+            let entered = entered_rx.recv_timeout(Duration::from_secs(5));
+            if entered.is_err() {
+                assert!(
+                    release_tx.send(()).is_ok(),
+                    "decryption read must be released"
+                );
+            }
+            assert!(
+                entered.is_ok(),
+                "decryption did not reach the private-key read"
+            );
+
+            let blocked =
+                Connection::open(&database)
+                    .map_err(storage_error)
+                    .and_then(|connection| {
+                        connection
+                            .busy_timeout(Duration::ZERO)
+                            .map_err(storage_error)
+                            .and_then(|()| {
+                                connection
+                                    .execute_batch(begin_immediate_sql())
+                                    .map_err(storage_error)
+                            })
+                    });
+            assert!(
+                blocked.is_err_and(|error| error.to_string().contains("database is locked")),
+                "the direct decrypt must retain SQLite's writer reservation through key use"
+            );
+            assert!(
+                release_tx.send(()).is_ok(),
+                "decryption read must be released"
+            );
+            assert!(
+                decryption.join().is_ok_and(|result| result.is_ok()),
+                "the direct decrypt must succeed before a competing destruction"
+            );
+        });
+
+        let request =
+            KeyDestructionRequestV1::new(descriptor.identity(), digest, Hash::from_bytes([78; 32]));
+        let mut mutator = SqliteStore::open(&database_path)?;
+        mutator.begin_key_registry_destruction(request)?;
+        let verifier = SqliteStore::open(&database_path)?;
+        let owner = RecipientKeyOwnerV1::open(directory, grantee)?;
+        assert_eq!(
+            verifier
+                .decrypt_recipient_export(
+                    &owner,
+                    &encrypted_export(descriptor)?,
+                    TEST_EXPORT_ID,
+                    descriptor
+                )
+                .err(),
+            Some(RecipientExportDecryptionErrorV1::Registry(
+                KeyRegistryErrorV1::DestructionPending
+            ))
+        );
         Ok(())
     }
 }

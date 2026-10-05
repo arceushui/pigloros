@@ -396,6 +396,8 @@ jobs:
           grep --fixed-strings \
             "secure conformance fixture snapshot generation requires Linux openat2" \
             "${RUNNER_TEMP}/conformance-non-linux.log"
+      - name: Exercise unsupported recipient export decryption boundary
+        run: cargo test -p pos-store --test recipient_export_decryption_unsupported_public --locked -- --include-ignored
 
   ledger-windows:
     name: ledger-windows

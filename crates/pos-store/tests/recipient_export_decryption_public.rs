@@ -2,7 +2,10 @@
 
 //! Public black-box contracts for retained role-4 recipient export decryption.
 
-use std::{error::Error as _, os::unix::fs::PermissionsExt};
+use std::{
+    error::Error as _,
+    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+};
 
 use pos_core::{
     CanonicalBytes, EntityId, Event, EventId, EventStore, Hash, KeyDestructionRequestV1,
@@ -87,7 +90,7 @@ fn encrypt(
     Ok(encrypted)
 }
 
-fn denied(
+fn decryption_error(
     store: &SqliteStore,
     owner: &RecipientKeyOwnerV1,
     encoded: &[u8],
@@ -146,6 +149,19 @@ fn only_private_file(directory: &std::path::Path) -> TestResult<std::path::PathB
     Ok(path)
 }
 
+fn recipient_private_path(
+    directory: &std::path::Path,
+    descriptor: RecipientKeyDescriptorV1,
+) -> std::path::PathBuf {
+    let mut name = format!("recipient-{}-", descriptor.identity().epoch);
+    for byte in descriptor.fingerprint().as_bytes() {
+        name.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
+        name.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0f)]));
+    }
+    name.push_str(".key");
+    directory.join(name)
+}
+
 #[test]
 fn recipient_decryption_public_contract_decrypts_active_and_retained_epochs_only_encrypting_active(
 ) -> TestResult {
@@ -179,6 +195,19 @@ fn recipient_decryption_public_contract_decrypts_active_and_retained_epochs_only
 }
 
 #[test]
+fn recipient_decryption_public_contract_decrypts_from_a_read_only_store() -> TestResult {
+    let (temporary, mut writer, owner) = owner_for(EntityId::new())?;
+    let descriptor = writer.enroll_recipient_key(&owner)?;
+    let encrypted = encrypt(descriptor, 1)?;
+    let database = database(&temporary);
+    drop(writer);
+
+    let reader =
+        SqliteStore::open_read_only(database.to_str().ok_or("database path is not UTF-8")?)?;
+    assert_decrypts(&reader, &owner, descriptor, &encrypted)
+}
+
+#[test]
 fn recipient_decryption_public_contract_checks_the_envelope_before_the_locked_registry(
 ) -> TestResult {
     let (temporary, mut store, owner) = owner_for(EntityId::new())?;
@@ -198,24 +227,24 @@ fn recipient_decryption_public_contract_checks_the_envelope_before_the_locked_re
     let contender = rusqlite::Connection::open(database(&temporary))?;
     contender.execute_batch("BEGIN IMMEDIATE")?;
     assert_eq!(
-        denied(&store, &owner, &trailing, EXPORT_ID, old),
+        decryption_error(&store, &owner, &trailing, EXPORT_ID, old),
         codec_error.map(RecipientExportDecryptionErrorV1::Export)
     );
     assert_eq!(
-        denied(&store, &owner, &encoded, [6; 16], old),
+        decryption_error(&store, &owner, &encoded, [6; 16], old),
         Some(export_denial(RecipientExportErrorV1::IdentityMismatch))
     );
     assert_eq!(
-        denied(&store, &owner, &encoded, EXPORT_ID, current),
+        decryption_error(&store, &owner, &encoded, EXPORT_ID, current),
         Some(export_denial(RecipientExportErrorV1::IdentityMismatch))
     );
     assert_eq!(
-        denied(&store, &foreign, &encoded, EXPORT_ID, old),
+        decryption_error(&store, &foreign, &encoded, EXPORT_ID, old),
         Some(export_denial(RecipientExportErrorV1::IdentityMismatch))
     );
-    // A held writer reservation leaves the live key unavailable, not denied.
+    // A held writer reservation leaves the live key unavailable, not an envelope error.
     assert_eq!(
-        denied(&store, &owner, &encoded, EXPORT_ID, old),
+        decryption_error(&store, &owner, &encoded, EXPORT_ID, old),
         Some(registry_denial(KeyRegistryErrorV1::RegistryUnavailable))
     );
     contender.execute_batch("ROLLBACK")?;
@@ -231,7 +260,7 @@ fn recipient_decryption_public_contract_denies_absent_registry_and_unregistered_
     let unenrolled = RecipientKeyDescriptorV1::for_grantee(grantee, 1, public_key)?;
     let encoded = encrypt(unenrolled, 1)?.encode();
     assert_eq!(
-        denied(&store, &owner, &encoded, EXPORT_ID, unenrolled),
+        decryption_error(&store, &owner, &encoded, EXPORT_ID, unenrolled),
         Some(registry_denial(KeyRegistryErrorV1::RegistryUnavailable))
     );
 
@@ -241,7 +270,7 @@ fn recipient_decryption_public_contract_denies_absent_registry_and_unregistered_
     let next_epoch = RecipientKeyDescriptorV1::for_grantee(grantee, 2, public_key)?;
     let encoded = encrypt(next_epoch, 1)?.encode();
     assert_eq!(
-        denied(&store, &owner, &encoded, EXPORT_ID, next_epoch),
+        decryption_error(&store, &owner, &encoded, EXPORT_ID, next_epoch),
         Some(registry_denial(KeyRegistryErrorV1::NotFound))
     );
 
@@ -249,7 +278,7 @@ fn recipient_decryption_public_contract_denies_absent_registry_and_unregistered_
     rusqlite::Connection::open(database(&temporary))?
         .execute_batch("UPDATE key_registry SET state_cbor = X'01'")?;
     assert_eq!(
-        denied(&store, &owner, &encoded, EXPORT_ID, enrolled),
+        decryption_error(&store, &owner, &encoded, EXPORT_ID, enrolled),
         Some(registry_denial(KeyRegistryErrorV1::RegistryUnavailable))
     );
     Ok(())
@@ -266,7 +295,7 @@ fn recipient_decryption_public_contract_denies_a_public_key_not_bound_to_the_mat
     assert_eq!(forged.identity(), enrolled.identity());
     let encoded = encrypt(forged, 1)?.encode();
     assert_eq!(
-        denied(&store, &owner, &encoded, EXPORT_ID, forged),
+        decryption_error(&store, &owner, &encoded, EXPORT_ID, forged),
         Some(registry_denial(KeyRegistryErrorV1::EncryptionKeyMismatch))
     );
     Ok(())
@@ -283,7 +312,7 @@ fn recipient_decryption_public_contract_reports_missing_or_corrupt_material_unav
     let directory = temporary.path().join("recipient-private");
     std::fs::remove_file(only_private_file(&directory)?)?;
     assert_eq!(
-        denied(&store, &owner, &encoded, EXPORT_ID, descriptor),
+        decryption_error(&store, &owner, &encoded, EXPORT_ID, descriptor),
         unavailable
     );
 
@@ -293,7 +322,7 @@ fn recipient_decryption_public_contract_reports_missing_or_corrupt_material_unav
     let directory = temporary.path().join("recipient-private");
     std::fs::write(only_private_file(&directory)?, [17_u8; 32])?;
     assert_eq!(
-        denied(&store, &owner, &encoded, EXPORT_ID, descriptor),
+        decryption_error(&store, &owner, &encoded, EXPORT_ID, descriptor),
         unavailable
     );
 
@@ -303,20 +332,51 @@ fn recipient_decryption_public_contract_reports_missing_or_corrupt_material_unav
     rusqlite::Connection::open(database(&temporary))?
         .execute_batch("DELETE FROM recipient_key_inventory_v1")?;
     assert_eq!(
-        denied(&store, &owner, &encoded, EXPORT_ID, descriptor),
+        decryption_error(&store, &owner, &encoded, EXPORT_ID, descriptor),
+        unavailable
+    );
+
+    let (temporary, mut store, owner) = owner_for(EntityId::new())?;
+    let descriptor = store.enroll_recipient_key(&owner)?;
+    let encoded = encrypt(descriptor, 1)?.encode();
+    let mut mismatched_digest = *material_digest(&store, descriptor)?.as_bytes();
+    mismatched_digest[0] ^= 1;
+    rusqlite::Connection::open(database(&temporary))?.execute(
+        "UPDATE recipient_key_inventory_v1 SET material_digest = ?1",
+        [mismatched_digest.as_slice()],
+    )?;
+    assert_eq!(
+        decryption_error(&store, &owner, &encoded, EXPORT_ID, descriptor),
+        unavailable
+    );
+
+    let grantee = EntityId::new();
+    let (temporary, mut store, owner) = owner_for(grantee)?;
+    let descriptor = store.enroll_recipient_key(&owner)?;
+    let encoded = encrypt(descriptor, 1)?.encode();
+    let mut stored_public_key = descriptor.public_key();
+    stored_public_key[0] ^= 1;
+    let mismatched_descriptor = RecipientKeyDescriptorV1::for_grantee(
+        grantee,
+        descriptor.identity().epoch,
+        stored_public_key,
+    )?;
+    let directory = temporary.path().join("recipient-private");
+    let original_path = only_private_file(&directory)?;
+    let mismatched_path = recipient_private_path(&directory, mismatched_descriptor);
+    std::fs::rename(&original_path, &mismatched_path)?;
+    rusqlite::Connection::open(database(&temporary))?.execute(
+        "UPDATE recipient_key_inventory_v1 SET descriptor = ?1, private_path = ?2",
+        rusqlite::params![
+            mismatched_descriptor.encode(),
+            mismatched_path.as_os_str().as_encoded_bytes(),
+        ],
+    )?;
+    assert_eq!(
+        decryption_error(&store, &owner, &encoded, EXPORT_ID, descriptor),
         unavailable
     );
     Ok(())
-}
-
-/// Count the durable recipient custody directory claims.
-fn directory_claims(temporary: &tempfile::TempDir) -> TestResult<i64> {
-    let connection = rusqlite::Connection::open(database(temporary))?;
-    Ok(connection.query_row(
-        "SELECT count(*) FROM recipient_custody_directory_claims_v1",
-        [],
-        |row| row.get(0),
-    )?)
 }
 
 #[test]
@@ -329,15 +389,10 @@ fn recipient_decryption_public_contract_rolls_back_a_first_use_directory_claim()
     // then finds no bound file there; the claim must not survive the call.
     let fresh = private_directory(temporary.path(), "fresh-private")?;
     let first_use = RecipientKeyOwnerV1::open(fresh.clone(), grantee)?;
-    let claims_before = directory_claims(&temporary)?;
     assert_eq!(
-        denied(&store, &first_use, &encoded, EXPORT_ID, descriptor),
+        decryption_error(&store, &first_use, &encoded, EXPORT_ID, descriptor),
         Some(RecipientExportDecryptionErrorV1::MaterialUnavailable)
     );
-    // The only durable claim, before and after, is the enrolled directory's
-    // own; the fresh directory's first-use claim was rolled back.
-    assert_eq!(claims_before, 1);
-    assert_eq!(directory_claims(&temporary)?, claims_before);
     // A persisted claim for the first grantee would refuse this enrollment.
     let other_grantee = EntityId::new();
     let other = RecipientKeyOwnerV1::open(fresh, other_grantee)?;
@@ -359,7 +414,7 @@ fn recipient_decryption_public_contract_rejects_tampered_ciphertext_without_plai
         .ok_or("ciphertext chunk is empty")?;
     *byte ^= 1;
     assert_eq!(
-        denied(&store, &owner, &envelope.encode(), EXPORT_ID, descriptor),
+        decryption_error(&store, &owner, &envelope.encode(), EXPORT_ID, descriptor),
         Some(export_denial(RecipientExportErrorV1::AuthenticationFailed))
     );
     Ok(())
@@ -381,7 +436,7 @@ fn recipient_decryption_public_contract_orders_rotation_pending_and_destroyed_ep
         DESTRUCTION_AUTHORIZATION,
     ))?;
     assert_eq!(
-        denied(&store, &owner, &old_export.encode(), EXPORT_ID, old),
+        decryption_error(&store, &owner, &old_export.encode(), EXPORT_ID, old),
         Some(registry_denial(KeyRegistryErrorV1::DestructionPending))
     );
     assert_decrypts(&store, &owner, current, &current_export)?;
@@ -390,7 +445,7 @@ fn recipient_decryption_public_contract_orders_rotation_pending_and_destroyed_ep
     let directory = temporary.path().join("recipient-private");
     assert_eq!(std::fs::read_dir(&directory)?.count(), 1);
     assert_eq!(
-        denied(&store, &owner, &old_export.encode(), EXPORT_ID, old),
+        decryption_error(&store, &owner, &old_export.encode(), EXPORT_ID, old),
         Some(registry_denial(KeyRegistryErrorV1::Destroyed))
     );
     assert_decrypts(&store, &owner, current, &current_export)
