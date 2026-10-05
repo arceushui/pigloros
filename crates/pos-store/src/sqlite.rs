@@ -27,6 +27,10 @@ mod recipient_owner;
 pub use recipient_owner::RecipientKeyOwnerV1;
 mod recipient_decryption;
 pub use recipient_decryption::RecipientExportDecryptionErrorV1;
+mod recipient_publication;
+pub use recipient_publication::{
+    PublishedRecipientExportV1, RecipientExportPublicationErrorV1, RecipientExportRequestV1,
+};
 
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},

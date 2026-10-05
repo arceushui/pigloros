@@ -2,21 +2,23 @@
 
 use std::{
     collections::BTreeSet,
+    ffi::CString,
     fs::File,
     io::{Read, Write},
-    os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
 };
 
 use pos_core::{
-    recipient_owner_id_from_grantee, EntityId, EventStore, KeyDestructionRequestV1, KeyIdentityV1,
-    KeyRegistrationV1, KeyRegistryErrorV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
-    RecipientKeyDescriptorV1,
+    export_timeline_own, recipient_owner_id_from_grantee, ConsentAuthority, ConsentError,
+    ConsentGate, EntityId, ErasureArtifactClassV1, ErasureProtectedOperationV1, EventStore,
+    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryErrorV1,
+    KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, RecipientKeyDescriptorV1, Seq, TimelineExport,
+    TimelineId,
 };
 use pos_crypto::key_roles::key_material_digest;
 use pos_crypto::recipient_export::{
-    decrypt_timeline_export_v1, DecryptedTimelineExportV1, RecipientExportErrorV1,
-    RecipientTimelineExportV1,
+    decrypt_timeline_export_v1, encrypt_timeline_export_v1, DecryptedTimelineExportV1,
+    RecipientExportErrorV1, RecipientTimelineExportV1,
 };
 use pos_crypto::recipient_key::recipient_public_key_from_private_v1;
 use rand::{rngs::SysRng, TryRng};
@@ -28,8 +30,10 @@ use rustix::fs::{
 use zeroize::Zeroizing;
 
 use super::{
-    begin_immediate_sql, finish_immediate_transaction, sqlite_load_key_registry, CoreError,
-    RecipientExportDecryptionErrorV1, SqliteRollbackOnDrop, SqliteStore,
+    begin_immediate_sql, finish_immediate_transaction, finish_transaction, parse_timeline_id,
+    sqlite_load_key_registry, CoreError, PublishedRecipientExportV1,
+    RecipientExportDecryptionErrorV1, RecipientExportPublicationErrorV1, RecipientExportRequestV1,
+    SqliteRollbackOnDrop, SqliteStore,
 };
 
 const RECIPIENT_REGISTRY_UNAVAILABLE: RecipientExportDecryptionErrorV1 =
@@ -755,6 +759,295 @@ impl SqliteStore {
             })
     }
 
+    /// Publish one consent-authorized Timeline snapshot as a durable TRX1 object.
+    ///
+    /// The concrete [`ConsentAuthority`] lock is held first, followed by the
+    /// erasure export fence, the SQLite writer reservation, and then the
+    /// active role-4 registry authorization. The ciphertext is staged and
+    /// synced in the owner-bound private directory before a catalog row makes
+    /// it visible to readers.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed consent, erasure, registry, crypto, or storage error.
+    /// A failed publication does not add a catalog row; a completed object
+    /// without such a row is recovered as an orphan on a later publication or
+    /// explicit recovery call.
+    pub fn publish_recipient_export(
+        &mut self,
+        authority: &ConsentAuthority,
+        owner: &RecipientKeyOwnerV1,
+        request: RecipientExportRequestV1<'_>,
+    ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
+        if request.token.timeline_id() != request.timeline_id {
+            return Err(RecipientExportPublicationErrorV1::Consent(
+                ConsentError::NoConsent,
+            ));
+        }
+        if !request.token.export_permitted() {
+            return Err(RecipientExportPublicationErrorV1::Consent(
+                ConsentError::ExportNotPermitted,
+            ));
+        }
+        if request.token.grantee_id() != owner.grantee_id
+            || !request.recipient.is_for_grantee(owner.grantee_id)
+        {
+            return Err(RecipientExportPublicationErrorV1::RecipientMismatch);
+        }
+        request
+            .evaluation
+            .require_authoritative_use(ErasureArtifactClassV1::Export, request.artifact_digest)
+            .map_err(|_| RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+
+        // This is metadata only. The held writer reservation below rechecks
+        // it before reading source events, and the concrete consent fence
+        // validates the token at this exact expected logical head.
+        let expected_logical_head =
+            Self::logical_head_unchecked_on(&self.conn, request.timeline_id)
+                .map_err(RecipientExportPublicationErrorV1::Store)?;
+        let gate = self
+            .validated_erasure_gate()
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
+        // SQLite disallows changing this connection-local setting inside a
+        // transaction, so establish the ADR-098 durability floor before the
+        // writer reservation is taken.
+        ensure_recipient_export_durability(&self.conn)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
+
+        let mut result = Err(RecipientExportPublicationErrorV1::Store(
+            CoreError::Storage("recipient export consent fence did not execute".to_owned()),
+        ));
+        let mut under_consent_fence = || {
+            result = gate
+                .with_fence_value(
+                    request.timeline_id,
+                    ErasureProtectedOperationV1::Export,
+                    || {
+                        self.publish_recipient_export_under_fences(
+                            owner,
+                            request,
+                            expected_logical_head,
+                        )
+                    },
+                )
+                .map_err(pos_core::store::erasure_containment_error)
+                .map_err(RecipientExportPublicationErrorV1::Store)
+                .and_then(|publication| publication);
+        };
+        ConsentGate::with_token_fence(
+            authority,
+            request.timeline_id,
+            request.token,
+            expected_logical_head.as_u64(),
+            request.now_secs,
+            &mut under_consent_fence,
+        )
+        .map_err(RecipientExportPublicationErrorV1::Consent)?;
+        result
+    }
+
+    fn publish_recipient_export_under_fences(
+        &mut self,
+        owner: &RecipientKeyOwnerV1,
+        request: RecipientExportRequestV1<'_>,
+        expected_logical_head: Seq,
+    ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(storage_error)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
+        let result = (|| {
+            validate_owner_directory(owner).map_err(RecipientExportPublicationErrorV1::Store)?;
+            ensure_recipient_custody_tables(&self.conn)
+                .map_err(RecipientExportPublicationErrorV1::Store)?;
+            claim_recipient_custody_directory(&self.conn, owner)
+                .map_err(RecipientExportPublicationErrorV1::Store)?;
+            ensure_recipient_export_catalog(&self.conn)
+                .map_err(RecipientExportPublicationErrorV1::Store)?;
+            reconcile_recipient_export_objects(&self.conn, owner)
+                .map_err(RecipientExportPublicationErrorV1::Store)?;
+
+            let logical_head = Self::logical_head_unchecked_on(&self.conn, request.timeline_id)
+                .map_err(RecipientExportPublicationErrorV1::Store)?;
+            if logical_head != expected_logical_head {
+                return Err(RecipientExportPublicationErrorV1::SourceChanged);
+            }
+            let timeline = self
+                .get_timeline_for_host_transition_unchecked(request.timeline_id)
+                .map_err(RecipientExportPublicationErrorV1::Store)?
+                .ok_or(RecipientExportPublicationErrorV1::Store(
+                    CoreError::TimelineNotFound(request.timeline_id),
+                ))?;
+            if timeline.meta.owner != Some(request.token.subject_id()) {
+                return Err(RecipientExportPublicationErrorV1::Consent(
+                    ConsentError::NoConsent,
+                ));
+            }
+
+            // This preserves CoW identity and the authenticated parent hash.
+            // The outer export fence remains held across this source snapshot
+            // and the catalog commit; its nested read fences are reentrant.
+            let source = export_timeline_own(
+                self,
+                request.timeline_id,
+                request.artifact_digest,
+                request.evaluation,
+            )
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
+            let mut registry = self
+                .load_key_registry()
+                .map_err(RecipientExportPublicationErrorV1::Store)?
+                .ok_or(RecipientExportPublicationErrorV1::Registry(
+                    KeyRegistryErrorV1::RegistryUnavailable,
+                ))?;
+            let identity = request.recipient.identity();
+            let registered_digest =
+                registered_material_digest_or_absent_sentinel(&registry, identity);
+            registry
+                .with_encryption_authorization(identity, registered_digest, || {
+                    self.publish_recipient_export_with_registered_material(
+                        owner,
+                        request.recipient,
+                        registered_digest,
+                        &source,
+                        logical_head,
+                    )
+                })
+                .map_err(RecipientExportPublicationErrorV1::Registry)?
+        })();
+        finish_recipient_export_transaction(&self.conn, result)
+    }
+
+    fn publish_recipient_export_with_registered_material(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+        recipient: RecipientKeyDescriptorV1,
+        registered_digest: pos_core::Hash,
+        source: &TimelineExport,
+        logical_head: Seq,
+    ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
+        let (stored_descriptor, private_path, file_identity, inventory_digest) =
+            Self::recipient_inventory_path(&self.conn, owner, recipient.identity())
+                .map_err(|_| RecipientExportPublicationErrorV1::MaterialUnavailable)?;
+        if stored_descriptor != recipient || inventory_digest != registered_digest {
+            return Err(RecipientExportPublicationErrorV1::MaterialUnavailable);
+        }
+        let material = read_bound_private_key(owner, &private_path, file_identity)
+            .map_err(|_| RecipientExportPublicationErrorV1::MaterialUnavailable)?;
+        if key_material_digest(&material) != registered_digest {
+            return Err(RecipientExportPublicationErrorV1::MaterialUnavailable);
+        }
+        if recipient_public_key_from_private_v1(&material) != recipient.public_key() {
+            return Err(RecipientExportPublicationErrorV1::Registry(
+                KeyRegistryErrorV1::EncryptionKeyMismatch,
+            ));
+        }
+
+        let export_id = fresh_recipient_export_id()?;
+        let mut rng = SysRng;
+        let encoded = encrypt_timeline_export_v1(source, recipient, export_id, &mut rng)
+            .map_err(RecipientExportPublicationErrorV1::Export)?
+            .encode();
+        let ciphertext_length = u64::try_from(encoded.len())
+            .map_err(|error| RecipientExportPublicationErrorV1::Store(storage_error(error)))?;
+        let ciphertext_digest = pos_core::Hash::from_bytes(*blake3::hash(&encoded).as_bytes());
+        write_recipient_export_ciphertext(owner, export_id, &encoded)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
+        let publication = PublishedRecipientExportV1 {
+            export_id,
+            recipient,
+            timeline_id: source.timeline.id(),
+            local_head: source.timeline.head,
+            logical_head,
+            ciphertext_length,
+            ciphertext_digest,
+        };
+        record_recipient_export_catalog(&self.conn, owner, &publication)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
+        Ok(publication)
+    }
+
+    /// Read one catalog-visible ciphertext object and verify every immutable binding.
+    ///
+    /// This returns only the encrypted TRX1 bytes. It never decrypts or imports
+    /// the candidate Timeline into the local event store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecipientExportPublicationErrorV1::ArtifactUnavailable`] for
+    /// an absent, malformed, or digest-mismatched catalog object.
+    pub fn read_recipient_export(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+        export_id: [u8; 16],
+    ) -> Result<Vec<u8>, RecipientExportPublicationErrorV1> {
+        validate_owner_directory(owner).map_err(RecipientExportPublicationErrorV1::Store)?;
+        let stored = load_recipient_export_catalog(&self.conn, export_id)
+            .map_err(RecipientExportPublicationErrorV1::Store)?
+            .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+        let expected = stored
+            .validate_for(owner, export_id)
+            .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+        let encoded =
+            read_recipient_export_ciphertext(owner, export_id, expected.ciphertext_length)
+                .map_err(|_| RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+        if pos_core::Hash::from_bytes(*blake3::hash(&encoded).as_bytes())
+            != expected.ciphertext_digest
+        {
+            return Err(RecipientExportPublicationErrorV1::ArtifactUnavailable);
+        }
+        let envelope = RecipientTimelineExportV1::decode(&encoded)
+            .map_err(|_| RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+        if envelope.header.export_id != export_id
+            || envelope.header.recipient != expected.recipient
+            || envelope.header.timeline_id != expected.timeline_id
+            || envelope.header.local_head != expected.local_head
+        {
+            return Err(RecipientExportPublicationErrorV1::ArtifactUnavailable);
+        }
+        Ok(encoded)
+    }
+
+    /// Remove bounded orphan staging and final ciphertext files.
+    ///
+    /// Recovery never creates catalog entries or reconstructs an export from a
+    /// directory entry. The SQLite catalog remains the only visibility marker.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error if the durable directory or catalog cannot be
+    /// inspected under the SQLite writer reservation.
+    pub fn recover_recipient_exports(
+        &mut self,
+        owner: &RecipientKeyOwnerV1,
+    ) -> Result<(), RecipientExportPublicationErrorV1> {
+        ensure_recipient_export_durability(&self.conn)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(storage_error)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
+        let result = validate_owner_directory(owner)
+            .map_err(RecipientExportPublicationErrorV1::Store)
+            .and_then(|()| {
+                ensure_recipient_custody_tables(&self.conn)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
+            })
+            .and_then(|()| {
+                claim_recipient_custody_directory(&self.conn, owner)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
+            })
+            .and_then(|()| {
+                ensure_recipient_export_catalog(&self.conn)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
+            })
+            .and_then(|()| {
+                reconcile_recipient_export_objects(&self.conn, owner)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
+            });
+        finish_recipient_export_transaction(&self.conn, result)
+    }
+
     /// Mark one recipient epoch pending, durably remove its owned key file,
     /// then commit the irreversible registry tombstone.
     ///
@@ -982,6 +1275,454 @@ impl SqliteStore {
                     })
             })
     }
+}
+
+const RECIPIENT_EXPORT_PREFIX: &[u8] = b"recipient-export-";
+const RECIPIENT_EXPORT_FINAL_SUFFIX: &[u8] = b".trx1";
+const RECIPIENT_EXPORT_STAGING_SUFFIX: &[u8] = b".trx1.staging";
+const MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS: usize = 256;
+const MAX_RECIPIENT_EXPORT_CIPHERTEXT_BYTES: u64 = (1_u64 << 30) + (2 * 1024 * 1024);
+
+#[derive(Clone, Copy)]
+enum RecipientExportObjectKindV1 {
+    Final([u8; 16]),
+    Staging,
+}
+
+struct StoredRecipientExportV1 {
+    owner_id: String,
+    recipient_epoch: i64,
+    recipient_descriptor: Vec<u8>,
+    timeline_id: String,
+    local_head: i64,
+    logical_head: i64,
+    ciphertext_length: i64,
+    ciphertext_digest: Vec<u8>,
+}
+
+struct ValidatedRecipientExportCatalogV1 {
+    recipient: RecipientKeyDescriptorV1,
+    timeline_id: TimelineId,
+    local_head: Seq,
+    ciphertext_length: u64,
+    ciphertext_digest: pos_core::Hash,
+}
+
+impl StoredRecipientExportV1 {
+    fn validate_for(
+        self,
+        owner: &RecipientKeyOwnerV1,
+        _export_id: [u8; 16],
+    ) -> Option<ValidatedRecipientExportCatalogV1> {
+        let expected_owner = recipient_owner_id_from_grantee(owner.grantee_id).ok()?;
+        let recipient = RecipientKeyDescriptorV1::decode(&self.recipient_descriptor).ok()?;
+        let recipient_epoch = u64::try_from(self.recipient_epoch).ok()?;
+        let local_head = Seq::from_u64(u64::try_from(self.local_head).ok()?);
+        let _logical_head = Seq::from_u64(u64::try_from(self.logical_head).ok()?);
+        let ciphertext_length = u64::try_from(self.ciphertext_length).ok()?;
+        if ciphertext_length > MAX_RECIPIENT_EXPORT_CIPHERTEXT_BYTES {
+            return None;
+        }
+        let ciphertext_digest: [u8; 32] = self.ciphertext_digest.try_into().ok()?;
+        if self.owner_id != expected_owner.as_str()
+            || recipient.identity().owner_id != expected_owner
+            || recipient.identity().epoch != recipient_epoch
+            || !recipient.is_for_grantee(owner.grantee_id)
+        {
+            return None;
+        }
+        Some(ValidatedRecipientExportCatalogV1 {
+            recipient,
+            timeline_id: parse_timeline_id(&self.timeline_id).ok()?,
+            local_head,
+            ciphertext_length,
+            ciphertext_digest: pos_core::Hash::from_bytes(ciphertext_digest),
+        })
+    }
+}
+
+fn ensure_recipient_export_durability(connection: &Connection) -> Result<(), CoreError> {
+    let journal_mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .map_err(storage_error)?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        return Err(CoreError::Storage(
+            "recipient export publication requires SQLite WAL".to_owned(),
+        ));
+    }
+    connection
+        .execute_batch("PRAGMA synchronous=FULL")
+        .map_err(storage_error)?;
+    let synchronous: i64 = connection
+        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .map_err(storage_error)?;
+    if synchronous < 2 {
+        return Err(CoreError::Storage(
+            "recipient export publication requires SQLite synchronous=FULL".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn finish_recipient_export_transaction<T>(
+    connection: &Connection,
+    result: Result<T, RecipientExportPublicationErrorV1>,
+) -> Result<T, RecipientExportPublicationErrorV1> {
+    finish_transaction(
+        connection,
+        result,
+        |commit_error, rollback_error| {
+            RecipientExportPublicationErrorV1::Store(rollback_error.map_or_else(
+                || CoreError::Storage(format!("transaction commit failed: {commit_error}")),
+                |rollback_error| {
+                    CoreError::StorageOutcomeUnknown(format!(
+                        "transaction commit failed: {commit_error}; rollback failed: {rollback_error}"
+                    ))
+                },
+            ))
+        },
+        |error, rollback_error| {
+            RecipientExportPublicationErrorV1::Store(CoreError::StorageOutcomeUnknown(format!(
+                "{error}; rollback failed: {rollback_error}"
+            )))
+        },
+    )
+}
+
+fn ensure_recipient_export_catalog(connection: &Connection) -> Result<(), CoreError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS recipient_export_catalog_v1 (
+                export_id BLOB NOT NULL PRIMARY KEY CHECK (length(export_id) = 16),
+                owner_id TEXT NOT NULL,
+                recipient_epoch INTEGER NOT NULL CHECK (recipient_epoch > 0),
+                recipient_descriptor BLOB NOT NULL,
+                timeline_id TEXT NOT NULL,
+                local_head INTEGER NOT NULL CHECK (local_head >= 0),
+                logical_head INTEGER NOT NULL CHECK (logical_head >= 0),
+                ciphertext_length INTEGER NOT NULL CHECK (ciphertext_length >= 0),
+                ciphertext_digest BLOB NOT NULL CHECK (length(ciphertext_digest) = 32)
+            );",
+        )
+        .map_err(storage_error)
+}
+
+fn record_recipient_export_catalog(
+    connection: &Connection,
+    owner: &RecipientKeyOwnerV1,
+    publication: &PublishedRecipientExportV1,
+) -> Result<(), CoreError> {
+    let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
+    let epoch = i64::try_from(publication.recipient.identity().epoch).map_err(storage_error)?;
+    let local_head = i64::try_from(publication.local_head.as_u64()).map_err(storage_error)?;
+    let logical_head = i64::try_from(publication.logical_head.as_u64()).map_err(storage_error)?;
+    let ciphertext_length = i64::try_from(publication.ciphertext_length).map_err(storage_error)?;
+    connection
+        .execute(
+            "INSERT INTO recipient_export_catalog_v1
+             (export_id, owner_id, recipient_epoch, recipient_descriptor, timeline_id,
+              local_head, logical_head, ciphertext_length, ciphertext_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                publication.export_id.as_slice(),
+                owner_id.as_str(),
+                epoch,
+                publication.recipient.encode(),
+                publication.timeline_id.to_string(),
+                local_head,
+                logical_head,
+                ciphertext_length,
+                publication.ciphertext_digest.as_bytes().as_slice(),
+            ],
+        )
+        .map(|_| ())
+        .map_err(storage_error)
+}
+
+fn load_recipient_export_catalog(
+    connection: &Connection,
+    export_id: [u8; 16],
+) -> Result<Option<StoredRecipientExportV1>, CoreError> {
+    connection
+        .query_row(
+            "SELECT owner_id, recipient_epoch, recipient_descriptor, timeline_id,
+                    local_head, logical_head, ciphertext_length, ciphertext_digest
+             FROM recipient_export_catalog_v1 WHERE export_id = ?1",
+            rusqlite::params![export_id.as_slice()],
+            |row| {
+                Ok(StoredRecipientExportV1 {
+                    owner_id: row.get(0)?,
+                    recipient_epoch: row.get(1)?,
+                    recipient_descriptor: row.get(2)?,
+                    timeline_id: row.get(3)?,
+                    local_head: row.get(4)?,
+                    logical_head: row.get(5)?,
+                    ciphertext_length: row.get(6)?,
+                    ciphertext_digest: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(storage_error)
+}
+
+fn recipient_export_catalog_contains(
+    connection: &Connection,
+    export_id: [u8; 16],
+) -> Result<bool, CoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM recipient_export_catalog_v1 WHERE export_id = ?1)",
+            rusqlite::params![export_id.as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)
+}
+
+fn fresh_recipient_export_id() -> Result<[u8; 16], RecipientExportPublicationErrorV1> {
+    let mut export_id = [0_u8; 16];
+    recipient_random_bytes(&mut export_id)
+        .map_err(|error| RecipientExportPublicationErrorV1::Store(recipient_rng_error(&error)))?;
+    if export_id == [0; 16] {
+        return Err(RecipientExportPublicationErrorV1::Export(
+            RecipientExportErrorV1::FieldOutOfBounds,
+        ));
+    }
+    Ok(export_id)
+}
+
+fn recipient_export_name(export_id: [u8; 16], suffix: &[u8]) -> Result<CString, CoreError> {
+    let mut name =
+        Vec::with_capacity(RECIPIENT_EXPORT_PREFIX.len() + (export_id.len() * 2) + suffix.len());
+    name.extend_from_slice(RECIPIENT_EXPORT_PREFIX);
+    for byte in export_id {
+        name.push(b"0123456789abcdef"[usize::from(byte >> 4)]);
+        name.push(b"0123456789abcdef"[usize::from(byte & 0x0f)]);
+    }
+    name.extend_from_slice(suffix);
+    CString::new(name).map_err(storage_error)
+}
+
+fn recipient_export_final_name(export_id: [u8; 16]) -> Result<CString, CoreError> {
+    recipient_export_name(export_id, RECIPIENT_EXPORT_FINAL_SUFFIX)
+}
+
+fn recipient_export_staging_name(export_id: [u8; 16]) -> Result<CString, CoreError> {
+    recipient_export_name(export_id, RECIPIENT_EXPORT_STAGING_SUFFIX)
+}
+
+fn recipient_export_object_kind(name: &[u8]) -> Option<RecipientExportObjectKindV1> {
+    parse_recipient_export_name(name, RECIPIENT_EXPORT_STAGING_SUFFIX)
+        .map(|_| RecipientExportObjectKindV1::Staging)
+        .or_else(|| {
+            parse_recipient_export_name(name, RECIPIENT_EXPORT_FINAL_SUFFIX)
+                .map(RecipientExportObjectKindV1::Final)
+        })
+}
+
+fn parse_recipient_export_name(name: &[u8], suffix: &[u8]) -> Option<[u8; 16]> {
+    if !name.starts_with(RECIPIENT_EXPORT_PREFIX) || !name.ends_with(suffix) {
+        return None;
+    }
+    let encoded = &name[RECIPIENT_EXPORT_PREFIX.len()..name.len().checked_sub(suffix.len())?];
+    if encoded.len() != 32 {
+        return None;
+    }
+    let mut export_id = [0_u8; 16];
+    for (index, pair) in encoded.chunks_exact(2).enumerate() {
+        export_id[index] = hex_nibble(pair[0])?.checked_mul(16)? + hex_nibble(pair[1])?;
+    }
+    Some(export_id)
+}
+
+const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn validate_recipient_export_file(
+    metadata: &std::fs::Metadata,
+    owner: &RecipientKeyOwnerV1,
+    expected_length: u64,
+) -> Result<(), CoreError> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.uid() != owner.directory_uid
+        || metadata.len() != expected_length
+    {
+        return Err(CoreError::Storage(
+            "recipient export object is not a private single-link file".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_recipient_export_entry(
+    owner: &RecipientKeyOwnerV1,
+    name: &std::ffi::CStr,
+    expected_length: u64,
+) -> Result<(), CoreError> {
+    recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(storage_error)
+        .and_then(|metadata| {
+            if (metadata.st_mode & libc::S_IFMT) != libc::S_IFREG
+                || metadata.st_nlink != 1
+                || metadata.st_mode & 0o777 != 0o600
+                || metadata.st_uid != owner.directory_uid
+                || u64::try_from(metadata.st_size).ok() != Some(expected_length)
+            {
+                return Err(CoreError::Storage(
+                    "recipient export object is not a private single-link file".to_owned(),
+                ));
+            }
+            Ok(())
+        })
+}
+
+fn write_recipient_export_ciphertext(
+    owner: &RecipientKeyOwnerV1,
+    export_id: [u8; 16],
+    encoded: &[u8],
+) -> Result<(), CoreError> {
+    let expected_length = u64::try_from(encoded.len()).map_err(storage_error)?;
+    validate_owner_directory(owner)?;
+    let staging = recipient_export_staging_name(export_id)?;
+    let final_name = recipient_export_final_name(export_id)?;
+    recipient_openat2(
+        &owner.directory_file,
+        staging.as_c_str(),
+        OFlags::WRONLY
+            | OFlags::CREATE
+            | OFlags::EXCL
+            | OFlags::CLOEXEC
+            | OFlags::NONBLOCK
+            | OFlags::NOFOLLOW,
+        Mode::from_raw_mode(0o600),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    )
+    .map(File::from)
+    .map_err(storage_error)
+    .and_then(|mut file| {
+        file.metadata().map_err(storage_error).and_then(|metadata| {
+            validate_recipient_export_file(&metadata, owner, 0)
+                .and_then(|()| recipient_write_all(&mut file, encoded).map_err(storage_error))
+                .and_then(|()| recipient_fsync(&file).map_err(storage_error))
+                .and_then(|()| file.metadata().map_err(storage_error))
+                .and_then(|metadata| {
+                    validate_recipient_export_file(&metadata, owner, expected_length)
+                })
+                .and_then(|()| {
+                    verify_recipient_export_entry(owner, staging.as_c_str(), expected_length)
+                })
+                .and_then(|()| {
+                    renameat_with(
+                        &owner.directory_file,
+                        staging.as_c_str(),
+                        &owner.directory_file,
+                        final_name.as_c_str(),
+                        RenameFlags::NOREPLACE,
+                    )
+                    .map_err(storage_error)
+                })
+                .and_then(|()| recipient_fsync(&owner.directory_file).map_err(storage_error))
+                .and_then(|()| {
+                    verify_recipient_export_entry(owner, final_name.as_c_str(), expected_length)
+                })
+        })
+    })
+}
+
+fn read_recipient_export_ciphertext(
+    owner: &RecipientKeyOwnerV1,
+    export_id: [u8; 16],
+    expected_length: u64,
+) -> Result<Vec<u8>, CoreError> {
+    if expected_length > MAX_RECIPIENT_EXPORT_CIPHERTEXT_BYTES {
+        return Err(CoreError::Storage(
+            "recipient export object exceeds the TRX1 bound".to_owned(),
+        ));
+    }
+    let capacity = usize::try_from(expected_length).map_err(storage_error)?;
+    validate_owner_directory(owner)?;
+    let name = recipient_export_final_name(export_id)?;
+    recipient_openat2(
+        &owner.directory_file,
+        name.as_c_str(),
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    )
+    .map(File::from)
+    .map_err(storage_error)
+    .and_then(|mut file| {
+        file.metadata().map_err(storage_error).and_then(|metadata| {
+            validate_recipient_export_file(&metadata, owner, expected_length).and_then(|()| {
+                let mut encoded = vec![0_u8; capacity];
+                recipient_read_exact(&mut file, &mut encoded)
+                    .map_err(storage_error)
+                    .and_then(|()| {
+                        verify_recipient_export_entry(owner, name.as_c_str(), expected_length)
+                    })
+                    .map(|()| encoded)
+            })
+        })
+    })
+}
+
+fn is_safe_recipient_export_entry(
+    owner: &RecipientKeyOwnerV1,
+    metadata: &rustix::fs::Stat,
+) -> bool {
+    (metadata.st_mode & libc::S_IFMT) == libc::S_IFREG
+        && metadata.st_nlink == 1
+        && metadata.st_mode & 0o777 == 0o600
+        && metadata.st_uid == owner.directory_uid
+}
+
+fn reconcile_recipient_export_objects(
+    connection: &Connection,
+    owner: &RecipientKeyOwnerV1,
+) -> Result<(), CoreError> {
+    let mut directory = rustix::fs::Dir::read_from(&owner.directory_file).map_err(storage_error)?;
+    let mut orphan_names = Vec::new();
+    while orphan_names.len() < MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS {
+        let Some(entry) = directory.read() else {
+            break;
+        };
+        let entry = entry.map_err(storage_error)?;
+        let name = entry.file_name();
+        let Some(kind) = recipient_export_object_kind(name.to_bytes()) else {
+            continue;
+        };
+        let metadata = recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(storage_error)?;
+        if !is_safe_recipient_export_entry(owner, &metadata) {
+            continue;
+        }
+        let orphaned = match kind {
+            RecipientExportObjectKindV1::Staging => true,
+            RecipientExportObjectKindV1::Final(export_id) => {
+                !recipient_export_catalog_contains(connection, export_id)?
+            }
+        };
+        if orphaned {
+            orphan_names.push(name.to_owned());
+        }
+    }
+    if orphan_names.is_empty() {
+        return Ok(());
+    }
+    for name in orphan_names {
+        recipient_unlinkat(&owner.directory_file, name.as_c_str(), AtFlags::empty())
+            .map_err(storage_error)?;
+    }
+    recipient_fsync(&owner.directory_file).map_err(storage_error)
 }
 
 fn validate_recipient_key_inventory(
