@@ -174,6 +174,9 @@ thread_local! {
     static RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE: std::cell::Cell<Option<i64>> = const {
         std::cell::Cell::new(None)
     };
+    static RECIPIENT_DURABILITY_SYNCHRONOUS_READ_FAILURE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
 }
 
 #[cfg(feature = "test-support")]
@@ -1023,15 +1026,14 @@ impl SqliteStore {
         let gate = self
             .validated_erasure_gate()
             .map_err(RecipientExportPublicationErrorV1::Store)?;
-        // SQLite disallows changing this connection-local setting inside a
-        // transaction, so establish the ADR-098 durability floor before the
-        // writer reservation is taken.
-        ensure_recipient_export_durability(&self.conn)
-            .map_err(RecipientExportPublicationErrorV1::Store)?;
         #[cfg(feature = "test-support")]
         self.apply_recipient_export_publication_test_race(request.timeline_id)
             .map_err(RecipientExportPublicationErrorV1::Store)?;
-
+        // SQLite disallows changing this connection-local setting inside a
+        // transaction, so establish the ADR-098 durability floor before the
+        // writer reservation is taken.
+        let previous_synchronous = ensure_recipient_export_durability(&self.conn)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
         let mut result = Err(RecipientExportPublicationErrorV1::Store(
             CoreError::Storage("recipient export consent fence did not execute".to_owned()),
         ));
@@ -1052,7 +1054,7 @@ impl SqliteStore {
                 .map_err(RecipientExportPublicationErrorV1::Store)
                 .and_then(|publication| publication);
         };
-        ConsentGate::with_token_fence(
+        let result = ConsentGate::with_token_fence(
             authority,
             request.timeline_id,
             request.token,
@@ -1060,8 +1062,9 @@ impl SqliteStore {
             request.now_secs,
             &mut under_consent_fence,
         )
-        .map_err(RecipientExportPublicationErrorV1::Consent)?;
-        result
+        .map_err(RecipientExportPublicationErrorV1::Consent)
+        .and(result);
+        finish_recipient_export_durability(&self.conn, previous_synchronous, result)
     }
 
     #[cfg(feature = "test-support")]
@@ -1360,9 +1363,10 @@ impl SqliteStore {
         &mut self,
         owner: &RecipientKeyOwnerV1,
     ) -> Result<(), RecipientExportPublicationErrorV1> {
-        ensure_recipient_export_durability(&self.conn)
+        let previous_synchronous = ensure_recipient_export_durability(&self.conn)
             .map_err(RecipientExportPublicationErrorV1::Store)?;
-        self.recover_recipient_exports_under_writer(owner)
+        let result = self.recover_recipient_exports_under_writer(owner);
+        finish_recipient_export_durability(&self.conn, previous_synchronous, result)
     }
 
     /// Fix the next acceptance-test publication identifier.
@@ -1780,18 +1784,37 @@ impl StoredRecipientExportV1 {
     }
 }
 
+fn current_sqlite_synchronous_level(connection: &Connection) -> Result<i64, CoreError> {
+    connection
+        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .map_err(storage_error)
+}
+
 fn recipient_export_synchronous_level(connection: &Connection) -> Result<i64, CoreError> {
     #[cfg(test)]
     if let Some(synchronous) = RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE.with(std::cell::Cell::take)
     {
         return Ok(synchronous);
     }
+    #[cfg(test)]
+    if RECIPIENT_DURABILITY_SYNCHRONOUS_READ_FAILURE.with(std::cell::Cell::get) {
+        return Err(CoreError::Storage(
+            "injected recipient export synchronous read failure".to_owned(),
+        ));
+    }
+    current_sqlite_synchronous_level(connection)
+}
+
+fn restore_recipient_export_synchronous_level(
+    connection: &Connection,
+    previous_synchronous: i64,
+) -> Result<(), CoreError> {
     connection
-        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .pragma_update(None, "synchronous", previous_synchronous)
         .map_err(storage_error)
 }
 
-fn ensure_recipient_export_durability(connection: &Connection) -> Result<(), CoreError> {
+fn ensure_recipient_export_durability(connection: &Connection) -> Result<i64, CoreError> {
     let journal_mode: String = connection
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
         .map_err(storage_error)?;
@@ -1800,16 +1823,35 @@ fn ensure_recipient_export_durability(connection: &Connection) -> Result<(), Cor
             "recipient export publication requires SQLite WAL".to_owned(),
         ));
     }
+    let previous_synchronous = current_sqlite_synchronous_level(connection)?;
     connection
         .execute_batch("PRAGMA synchronous=FULL")
         .map_err(storage_error)?;
-    let synchronous = recipient_export_synchronous_level(connection)?;
-    if synchronous < 2 {
-        return Err(CoreError::Storage(
-            "recipient export publication requires SQLite synchronous=FULL".to_owned(),
-        ));
+    match recipient_export_synchronous_level(connection) {
+        Ok(synchronous) if synchronous >= 2 => Ok(previous_synchronous),
+        Ok(_) => {
+            restore_recipient_export_synchronous_level(connection, previous_synchronous)?;
+            Err(CoreError::Storage(
+                "recipient export publication requires SQLite synchronous=FULL".to_owned(),
+            ))
+        }
+        Err(error) => {
+            restore_recipient_export_synchronous_level(connection, previous_synchronous)?;
+            Err(error)
+        }
     }
-    Ok(())
+}
+
+fn finish_recipient_export_durability<T>(
+    connection: &Connection,
+    previous_synchronous: i64,
+    result: Result<T, RecipientExportPublicationErrorV1>,
+) -> Result<T, RecipientExportPublicationErrorV1> {
+    // The transaction outcome is already conclusive. A best-effort setting
+    // restoration failure leaves the safer FULL mode enabled and must not
+    // reclassify a committed publication as failed.
+    let _ = restore_recipient_export_synchronous_level(connection, previous_synchronous);
+    result
 }
 
 fn finish_recipient_export_transaction<T>(
@@ -2062,7 +2104,7 @@ fn fresh_recipient_export_id() -> Result<[u8; 16], RecipientExportPublicationErr
                 })
                 .map(|()| export_id)
         },
-        |test_export_id| Ok(test_export_id),
+        Ok,
     )?;
     if export_id == [0; 16] {
         return Err(RecipientExportPublicationErrorV1::Export(
@@ -3262,6 +3304,10 @@ mod tests {
         RECIPIENT_RANDOM_FAILURE.with(|failure| failure.set(enabled));
     }
 
+    fn set_recipient_export_synchronous_read_failure(enabled: bool) {
+        RECIPIENT_DURABILITY_SYNCHRONOUS_READ_FAILURE.with(|failure| failure.set(enabled));
+    }
+
     fn override_next_recipient_random_bytes(bytes: Vec<u8>) {
         RECIPIENT_RANDOM_OVERRIDE.with(|override_bytes| {
             assert!(override_bytes.replace(Some(bytes)).is_none());
@@ -3342,6 +3388,11 @@ mod tests {
         ));
 
         let fixture = recipient_publication_fixture()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA synchronous=NORMAL")?;
+        let expected_synchronous = current_sqlite_synchronous_level(&fixture.store.conn)?;
         RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE.with(|override_value| {
             override_value.set(Some(1));
         });
@@ -3349,7 +3400,81 @@ mod tests {
             ensure_recipient_export_durability(&fixture.store.conn),
             Err(CoreError::Storage(message)) if message.contains("synchronous=FULL")
         ));
-        assert!(ensure_recipient_export_durability(&fixture.store.conn).is_ok());
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            expected_synchronous
+        );
+        set_recipient_export_synchronous_read_failure(true);
+        let synchronous_read_failure = ensure_recipient_export_durability(&fixture.store.conn);
+        set_recipient_export_synchronous_read_failure(false);
+        assert!(matches!(
+            synchronous_read_failure,
+            Err(CoreError::Storage(message))
+                if message.contains("injected recipient export synchronous read failure")
+        ));
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            expected_synchronous
+        );
+        let previous_synchronous = ensure_recipient_export_durability(&fixture.store.conn)?;
+        assert!(current_sqlite_synchronous_level(&fixture.store.conn)? >= 2);
+        restore_recipient_export_synchronous_level(&fixture.store.conn, previous_synchronous)?;
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            expected_synchronous
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_operations_restore_connection_synchronous_mode() -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA synchronous=NORMAL")?;
+        let expected_synchronous = current_sqlite_synchronous_level(&fixture.store.conn)?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+
+        fixture
+            .store
+            .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            expected_synchronous
+        );
+
+        set_random_failure(true);
+        let failed_publication =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request);
+        set_random_failure(false);
+        assert!(failed_publication.is_err());
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            expected_synchronous
+        );
+
+        set_begin_failure(true);
+        let failed_recovery = fixture.store.recover_recipient_exports(&fixture.owner);
+        set_begin_failure(false);
+        assert!(failed_recovery.is_err());
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            expected_synchronous
+        );
+
+        fixture.store.recover_recipient_exports(&fixture.owner)?;
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            expected_synchronous
+        );
         Ok(())
     }
 

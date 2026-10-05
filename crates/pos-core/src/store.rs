@@ -1460,8 +1460,7 @@ pub fn export_timeline_raw(
                 store
                     .chain_hash_at(parent, at_seq)
                     .inspect_err(|_| {
-                        let scrubbed = export.zeroize_plaintext_staging();
-                        debug_assert!(scrubbed);
+                        let _ = export.zeroize_plaintext_staging();
                     })
                     .map(|parent_hash| {
                         export.parent_fork_hash = Some(parent_hash);
@@ -3378,6 +3377,7 @@ mod tests {
     fn export_timeline_raw_chain_hash_err_arm_counted() -> Result<(), Box<dyn std::error::Error>> {
         struct HashFail {
             id: TimelineId,
+            shared_payload: CanonicalBytes,
         }
         impl EventStore for HashFail {
             fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
@@ -3387,7 +3387,9 @@ mod tests {
                 Err(CoreError::Storage("unused".to_owned()))
             }
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
-                Ok(Vec::new())
+                let mut event = validation_test_event(1, EventId::new());
+                event.payload = self.shared_payload.clone();
+                Ok(vec![event])
             }
             fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
                 Err(CoreError::Storage("unused".to_owned()))
@@ -3429,11 +3431,14 @@ mod tests {
         }
 
         let id = TimelineId::new();
-        let err = export_timeline_raw(&HashFail { id }, id).test_err()?;
+        let shared_payload = CanonicalBytes::from_vec(b"shared raw export payload".to_vec());
+        let retained_payload = shared_payload.clone();
+        let err = export_timeline_raw(&HashFail { id, shared_payload }, id).test_err()?;
         assert!(
             err.to_string().contains("hash boom"),
             "expected hash boom error, got {err:?}"
         );
+        assert_eq!(retained_payload.as_slice(), b"shared raw export payload");
 
         Ok(())
     }
