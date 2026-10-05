@@ -25,6 +25,11 @@ use pos_core::{
     manifest_owner_link::{
         ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
     },
+    manifest_owner_link_verifier::{
+        verify_manifest_owner_link_v1, ManifestOwnerLinkAuthorityV1, ManifestOwnerLinkReadPortV1,
+        ManifestOwnerLinkReleaseV1, ManifestOwnerLinkRequestV1, ManifestOwnerLinkUseFenceV1,
+        ManifestOwnerLinkVerificationErrorV1,
+    },
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
     ConsentError, ConsentGate, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureGate,
     ErasureProtectedOperationV1, OwnerIdV1, Plugin, ProposedAction, Reducer,
@@ -1614,6 +1619,35 @@ impl PluginRegistry {
             verifier,
         )?;
         store.commit_local_cut_owner_v1(prepared)
+    }
+
+    /// Verify one historical owner link through this registry's installed
+    /// coordinator and admission hooks.
+    ///
+    /// The hooks re-verify the selected cut's LCQ1 and every kind-14 MSR1
+    /// with the same key roles that authenticated them at commit time; the
+    /// live Plugin registry is never consulted.
+    ///
+    /// # Errors
+    /// Returns `CompositionUnavailable` when either installed hook is absent,
+    /// otherwise the closed result of [`pos_core::verify_manifest_owner_link_v1`].
+    pub fn verify_manifest_owner_link_v1<S: ManifestOwnerLinkReadPortV1>(
+        &self,
+        store: &S,
+        request: &ManifestOwnerLinkRequestV1,
+        fence: ManifestOwnerLinkUseFenceV1<'_, '_>,
+    ) -> Result<ManifestOwnerLinkReleaseV1, ManifestOwnerLinkVerificationErrorV1> {
+        let (Some(local_cut), Some(admission)) = (
+            self.local_cut_owner_verifier.as_deref(),
+            self.manifest_owner_admission_verifier.as_deref(),
+        ) else {
+            return Err(ManifestOwnerLinkVerificationErrorV1::CompositionUnavailable);
+        };
+        let authority = ManifestOwnerLinkAuthorityV1 {
+            local_cut,
+            admission,
+        };
+        verify_manifest_owner_link_v1(store, request, authority, fence)
     }
 
     fn validate_complete_manifest_batch(

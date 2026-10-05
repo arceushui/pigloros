@@ -45,6 +45,7 @@ pub mod local_cut_world_closure;
 pub mod manifest;
 pub mod manifest_owner_admission;
 pub mod manifest_owner_link;
+pub mod manifest_owner_link_verifier;
 pub mod manifest_owner_members;
 pub mod output_policy;
 pub mod owntracks_enrollment;
@@ -282,6 +283,12 @@ pub use manifest_owner_link::{
     ManifestSlotBindingInputV1, ManifestSlotBindingRowV1, ManifestSlotBindingV1,
     MAX_MANIFEST_ADMISSION_CATALOG_BYTES_V1, MAX_MANIFEST_OWNER_PLUGINS_V1,
     MAX_MANIFEST_SLOT_ADMISSION_RECEIPT_BYTES_V1, MAX_MANIFEST_SLOT_BINDING_BYTES_V1,
+};
+pub use manifest_owner_link_verifier::{
+    verify_manifest_owner_link_v1, ManifestOwnerLinkAuthorityV1, ManifestOwnerLinkCutIdentityV1,
+    ManifestOwnerLinkDigestsV1, ManifestOwnerLinkHeadV1, ManifestOwnerLinkReadPortV1,
+    ManifestOwnerLinkReleaseV1, ManifestOwnerLinkRequestV1, ManifestOwnerLinkSnapshotV1,
+    ManifestOwnerLinkUseFenceV1, ManifestOwnerLinkVerificationErrorV1, VerifiedManifestOwnerLinkV1,
 };
 pub use manifest_owner_members::{
     build_manifest_owner_scope_v1, validate_manifest_owner_lease_replacement_v1,

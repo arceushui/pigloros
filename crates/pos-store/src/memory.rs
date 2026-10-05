@@ -11955,6 +11955,110 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
     }
 }
 
+/// Find the owner's first visible cut, in cut order, whose WCR1 for
+/// `timeline_id` the identity selects, with the operation that cut links.
+fn memory_owner_link_cut(
+    store: &MemoryStore,
+    owner_id: [u8; 32],
+    identity: pos_core::ManifestOwnerLinkCutIdentityV1,
+    timeline_id: TimelineId,
+) -> Option<(u64, Hash)> {
+    store
+        .local_cut_owner_cuts
+        .range((owner_id, 0)..=(owner_id, u64::MAX))
+        .find(|(_, operation_id)| {
+            let operation = store
+                .local_cut_owner_operations
+                .get(&(owner_id, **operation_id));
+            operation.is_some_and(|operation| {
+                operation.result.recordings.iter().any(|recording| {
+                    recording.binding.as_input().timeline_id == timeline_id
+                        && identity.selects(&recording.receipt)
+                })
+            })
+        })
+        .map(|(&(_, cut_id), &operation_id)| (cut_id, operation_id))
+}
+
+/// Load the owner's visible cuts before `seal`, newest first, until one was
+/// sealed in another configuration generation.
+fn memory_owner_link_ancestors(
+    store: &MemoryStore,
+    owner_id: [u8; 32],
+    seal: &pos_core::LocalCutSealInputV2,
+) -> Result<Vec<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1> {
+    let mut ancestors = Vec::new();
+    let earlier = store
+        .local_cut_owner_cuts
+        .range((owner_id, 0)..(owner_id, seal.cut_id));
+    for (&(_, cut_id), &operation_id) in earlier.rev() {
+        let operation = memory_linked_local_cut_operation(store, owner_id, cut_id, operation_id)?;
+        let generation = operation.result.seal.as_input().configuration_generation;
+        if generation != seal.configuration_generation {
+            break;
+        }
+        ancestors.push(operation.result.clone());
+    }
+    Ok(ancestors)
+}
+
+/// Load one selected cut with its same-generation ancestors, kind-14
+/// admissions and WDB1 nodes from the store's single shared borrow.
+fn memory_owner_link_snapshot(
+    store: &MemoryStore,
+    owner_id: [u8; 32],
+    owner_state: LocalCutOwnerStateV1,
+    (cut_id, operation_id): (u64, Hash),
+) -> Result<pos_core::ManifestOwnerLinkSnapshotV1, LocalCutOwnerErrorV1> {
+    let operation = memory_linked_local_cut_operation(store, owner_id, cut_id, operation_id)?;
+    let seal = operation.result.seal.as_input();
+    let ancestors = memory_owner_link_ancestors(store, owner_id, seal)?;
+    let generation = seal.configuration_generation;
+    let admissions = operation
+        .request
+        .manifest_binding_table
+        .rows()
+        .iter()
+        .map(|row| store.read_manifest_owner_admission_v1(owner_id, generation, row.timeline_id))
+        .filter_map(Result::transpose)
+        .collect::<Result<Vec<_>, _>>()?;
+    let dependency_branches = operation
+        .result
+        .recordings
+        .iter()
+        .flat_map(|recording| {
+            let first = (recording.scope, Hash::zero());
+            let last = (recording.scope, Hash::from_bytes([u8::MAX; 32]));
+            let branches = store.world_dependency_branches.range(first..=last);
+            branches.map(|(_, branch)| branch.clone())
+        })
+        .collect();
+    Ok(pos_core::ManifestOwnerLinkSnapshotV1 {
+        owner_state,
+        request: operation.request.clone(),
+        result: operation.result.clone(),
+        ancestors,
+        admissions,
+        dependency_branches,
+    })
+}
+
+impl pos_core::ManifestOwnerLinkReadPortV1 for MemoryStore {
+    fn read_manifest_owner_link_snapshot_v1(
+        &self,
+        owner_id: [u8; 32],
+        identity: pos_core::ManifestOwnerLinkCutIdentityV1,
+        timeline_id: TimelineId,
+    ) -> Result<Option<pos_core::ManifestOwnerLinkSnapshotV1>, LocalCutOwnerErrorV1> {
+        let Some(owner_state) = self.read_local_cut_owner_state_v1(owner_id)? else {
+            return Ok(None);
+        };
+        memory_owner_link_cut(self, owner_id, identity, timeline_id)
+            .map(|cut| memory_owner_link_snapshot(self, owner_id, owner_state, cut))
+            .transpose()
+    }
+}
+
 impl AdapterRecordingStoreV1 for MemoryStore {
     fn open_adapter_recording_session(
         &mut self,
@@ -15416,5 +15520,49 @@ mod local_cut_owner_coverage {
             assert_eq!(stored, nodes);
             Ok(())
         }
+    }
+
+    fn link_identity(
+        cut: &LocalCutOwnerCommitV1,
+    ) -> FixtureResult<pos_core::ManifestOwnerLinkCutIdentityV1> {
+        let recording = cut.recordings.first().ok_or("missing recording")?;
+        let digest = recording.receipt.digest();
+        Ok(pos_core::ManifestOwnerLinkCutIdentityV1::WorldRecordingReceipt(digest))
+    }
+
+    fn link_read(
+        store: &MemoryStore,
+        identity: pos_core::ManifestOwnerLinkCutIdentityV1,
+    ) -> Result<Option<pos_core::ManifestOwnerLinkSnapshotV1>, LocalCutOwnerErrorV1> {
+        pos_core::ManifestOwnerLinkReadPortV1::read_manifest_owner_link_snapshot_v1(
+            store,
+            CUT_OWNER,
+            identity,
+            CUT_TIMELINE,
+        )
+    }
+
+    #[test]
+    fn owner_link_reads_fail_closed_on_corrupt_owner_rows() -> TestResult {
+        let corrupt = Err(LocalCutOwnerErrorV1::CorruptState);
+        let (mut damaged, first) = cut_store()?;
+        let second = commit_cut(&mut damaged, CUT_OWNER, &SECOND_CUT)?;
+        local_operation(&mut damaged, FIRST_CUT.operation_id)?.intent_digest = hash(0x97);
+        assert_eq!(link_read(&damaged, link_identity(&first)?), corrupt);
+        assert_eq!(link_read(&damaged, link_identity(&second)?), corrupt);
+
+        let (mut unstated, first) = cut_store()?;
+        local_state(&mut unstated, CUT_OWNER)?.configuration_generation = 0;
+        assert_eq!(link_read(&unstated, link_identity(&first)?), corrupt);
+
+        let (mut replaced, first) = cut_store()?;
+        let batch = prepare_admission(&replaced, CUT_OWNER, 2, &[CUT_TIMELINE], hash(0x56))?;
+        replaced.commit_manifest_owner_admission_v1(batch)?;
+        let historical = (CUT_OWNER, 1, CUT_TIMELINE);
+        let snapshots = &mut replaced.manifest_owner_admission_snapshots;
+        let snapshot = snapshots.get_mut(&historical).ok_or("missing admission")?;
+        snapshot.resulting_inventory_generation = Hash::zero();
+        assert_eq!(link_read(&replaced, link_identity(&first)?), corrupt);
+        Ok(())
     }
 }

@@ -8,15 +8,17 @@
 use pos_core::{
     local_cut_owner_intent_digest_v1, validate_local_cut_owner_predecessors_v1,
     validate_local_cut_owner_recordings_v1, validate_local_cut_owner_result_v1,
-    validate_local_cut_owner_successor_v1, CoreError, Hash, LocalCutCommitV1,
+    validate_local_cut_owner_successor_v1, CanonicalBytes, CoreError, Hash, LocalCutCommitV1,
     LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1, LocalCutManifestBindingTableV1,
     LocalCutOwnerCommitKindV1, LocalCutOwnerCommitV1, LocalCutOwnerErrorV1,
     LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1, LocalCutOwnerStateV1,
-    LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1, LocalCutSealV2,
-    LocalCutTableRefV1, LocalCutWorldRecordingV1, ManifestOwnerAdmissionErrorV1,
-    ManifestOwnerAdmissionInputV1, ManifestOwnerAdmissionOwnerStateV1, PluginId,
-    PreparedLocalCutOwnerCommitV1, TimelineId, WorldClosureBindingV1, WorldRecordingReceiptV1,
-    MAX_LOCAL_CUT_OWNER_ROWS_V1,
+    LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1, LocalCutSealInputV2,
+    LocalCutSealV2, LocalCutTableRefV1, LocalCutWorldRecordingV1, ManifestOwnerAdmissionErrorV1,
+    ManifestOwnerAdmissionInputV1, ManifestOwnerAdmissionOwnerStateV1,
+    ManifestOwnerAdmissionPersistencePortV1, ManifestOwnerLinkCutIdentityV1,
+    ManifestOwnerLinkReadPortV1, ManifestOwnerLinkSnapshotV1, PluginId,
+    PreparedLocalCutOwnerCommitV1, TimelineId, WorldClosureBindingV1, WorldDependencyBranchV1,
+    WorldRecordingReceiptV1, MAX_LOCAL_CUT_OWNER_ROWS_V1,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -1293,6 +1295,157 @@ impl LocalCutOwnerPersistencePortV1 for SqliteStore {
     }
 }
 
+/// Classify a failed owner-link query; a mistyped stored column is corrupt.
+fn sqlite_owner_link_query_error(error: &rusqlite::Error) -> LocalCutOwnerErrorV1 {
+    if matches!(error, rusqlite::Error::InvalidColumnType(..)) {
+        LocalCutOwnerErrorV1::CorruptState
+    } else {
+        LocalCutOwnerErrorV1::StorageFailure
+    }
+}
+
+/// Find the owner's first visible cut, in cut order, whose WCR1 for
+/// `timeline_id` the identity selects, through the Timeline recording index.
+fn sqlite_owner_link_cut(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    identity: ManifestOwnerLinkCutIdentityV1,
+    timeline_id: TimelineId,
+) -> Result<Option<u64>, LocalCutOwnerErrorV1> {
+    let timeline_id = timeline_id.inner().to_bytes();
+    let rows = connection
+        .prepare(
+            "SELECT cut_id, receipt_cbor FROM local_cut_world_recordings
+             WHERE owner_id = ?1 AND timeline_id = ?2 ORDER BY cut_id",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map(params![owner_id.as_slice(), timeline_id.as_slice()], |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })
+                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        })
+        .map_err(|error| sqlite_owner_link_query_error(&error))?;
+    for (cut_id, receipt) in rows {
+        let receipt = WorldRecordingReceiptV1::from_canonical_cbor(&receipt)
+            .map_err(|_| LocalCutOwnerErrorV1::CorruptState)?;
+        if identity.selects(&receipt) {
+            return sqlite_local_cut_owner_u64(&cut_id).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+/// Load the owner's visible cuts before `seal`, newest first, until one was
+/// sealed in another configuration generation.
+fn sqlite_owner_link_ancestors(
+    connection: &Connection,
+    owner_id: [u8; 32],
+    seal: &LocalCutSealInputV2,
+) -> Result<Vec<LocalCutOwnerCommitV1>, LocalCutOwnerErrorV1> {
+    let mut ancestors = Vec::new();
+    let cut_ids = sqlite_local_cut_owner_cut_ids(connection, owner_id)?;
+    for cut_bytes in cut_ids.iter().rev() {
+        let cut_id = sqlite_local_cut_owner_u64(cut_bytes)?;
+        if cut_id >= seal.cut_id {
+            continue;
+        }
+        let cut = sqlite_local_cut_owner_existing_cut(connection, owner_id, cut_id)?;
+        if cut.result.seal.as_input().configuration_generation != seal.configuration_generation {
+            break;
+        }
+        ancestors.push(cut.result);
+    }
+    Ok(ancestors)
+}
+
+/// Read and decode every retained WDB1 node of one scope.
+fn sqlite_owner_link_branches(
+    connection: &Connection,
+    scope: Hash,
+) -> Result<Vec<WorldDependencyBranchV1>, LocalCutOwnerErrorV1> {
+    let scope = *scope.as_bytes();
+    let encoded = connection
+        .prepare(
+            "SELECT node_cbor FROM world_dependency_branches
+             WHERE scope = ?1 ORDER BY node_hash",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map(params![scope.as_slice()], |row| row.get::<_, Vec<u8>>(0))
+                .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        })
+        .map_err(|error| sqlite_owner_link_query_error(&error))?;
+    encoded
+        .into_iter()
+        .map(|bytes| {
+            WorldDependencyBranchV1::decode(&CanonicalBytes::from_vec(bytes))
+                .map_err(|_| LocalCutOwnerErrorV1::CorruptState)
+        })
+        .collect()
+}
+
+/// Read one selected cut with its same-generation ancestors, kind-14
+/// admissions and WDB1 nodes inside the caller's read transaction.
+fn sqlite_owner_link_snapshot(
+    store: &SqliteStore,
+    connection: &Connection,
+    owner_id: [u8; 32],
+    identity: ManifestOwnerLinkCutIdentityV1,
+    timeline_id: TimelineId,
+) -> Result<Option<ManifestOwnerLinkSnapshotV1>, LocalCutOwnerErrorV1> {
+    let Some(owner_state) = sqlite_read_local_cut_owner_state(connection, owner_id)? else {
+        return Ok(None);
+    };
+    let Some(cut_id) = sqlite_owner_link_cut(connection, owner_id, identity, timeline_id)? else {
+        return Ok(None);
+    };
+    let cut = sqlite_local_cut_owner_existing_cut(connection, owner_id, cut_id)?;
+    let seal = cut.result.seal.as_input();
+    let ancestors = sqlite_owner_link_ancestors(connection, owner_id, seal)?;
+    let generation = seal.configuration_generation;
+    let admissions = cut
+        .request
+        .manifest_binding_table
+        .rows()
+        .iter()
+        .map(|row| store.read_manifest_owner_admission_v1(owner_id, generation, row.timeline_id))
+        .filter_map(Result::transpose)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut dependency_branches = Vec::new();
+    for recording in &cut.result.recordings {
+        dependency_branches.extend(sqlite_owner_link_branches(connection, recording.scope)?);
+    }
+    Ok(Some(ManifestOwnerLinkSnapshotV1 {
+        owner_state,
+        request: cut.request,
+        result: cut.result,
+        ancestors,
+        admissions,
+        dependency_branches,
+    }))
+}
+
+impl ManifestOwnerLinkReadPortV1 for SqliteStore {
+    fn read_manifest_owner_link_snapshot_v1(
+        &self,
+        owner_id: [u8; 32],
+        identity: ManifestOwnerLinkCutIdentityV1,
+        timeline_id: TimelineId,
+    ) -> Result<Option<ManifestOwnerLinkSnapshotV1>, LocalCutOwnerErrorV1> {
+        let transaction = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+        let snapshot =
+            sqlite_owner_link_snapshot(self, &transaction, owner_id, identity, timeline_id)?;
+        transaction
+            .commit()
+            .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
+        Ok(snapshot)
+    }
+}
+
 impl SqliteStore {
     /// Verify the complete local-cut history of every owner with local-cut rows.
     pub(super) fn verify_local_cut_owner_histories(&self) -> Result<(), CoreError> {
@@ -1424,8 +1577,7 @@ mod local_cut_owner_coverage {
     use pos_core::{
         prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1,
         LocalCutHeadsTableV1, LocalCutManifestBindingRowV1, LocalCutOwnerVerifierV1,
-        LocalCutReceiptInputV1, LocalCutSealInputV2, ManifestAdmissionCatalogV1,
-        ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionPersistencePortV1,
+        LocalCutReceiptInputV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1,
         ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
         ManifestOwnerAdmissionVerifierV1, ManifestOwnerClassifiedLeafV1,
         ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
@@ -2060,6 +2212,11 @@ mod local_cut_owner_coverage {
         );
         assert_eq!(
             store.verify_local_cut_owner_history_v1(OWNER),
+            Err(expected)
+        );
+        let identity = ManifestOwnerLinkCutIdentityV1::LocalCutReceipt(hash(3));
+        assert_eq!(
+            store.read_manifest_owner_link_snapshot_v1(OWNER, identity, timeline(1)),
             Err(expected)
         );
     }
@@ -3103,6 +3260,101 @@ mod local_cut_owner_coverage {
             rejected,
             CoreError::Storage(message) if message.starts_with("local-cut owner history")
         ));
+        Ok(())
+    }
+
+    fn link_identity(
+        batch: &PreparedLocalCutOwnerCommitV1,
+    ) -> Fallible<ManifestOwnerLinkCutIdentityV1> {
+        let recording = batch.recordings().first().ok_or("missing recording")?;
+        let digest = recording.receipt.digest();
+        Ok(ManifestOwnerLinkCutIdentityV1::WorldRecordingReceipt(digest))
+    }
+
+    fn link_snapshot(
+        store: &SqliteStore,
+        connection: &Connection,
+        identity: ManifestOwnerLinkCutIdentityV1,
+    ) -> Result<Option<ManifestOwnerLinkSnapshotV1>, LocalError> {
+        sqlite_owner_link_snapshot(store, connection, OWNER, identity, timeline(1))
+    }
+
+    #[test]
+    fn owner_link_snapshot_reads_one_cut_with_its_ancestors_and_nodes() -> TestResult {
+        let (fixture, second) = with_history()?;
+        let store = &fixture.store;
+        let identity = link_identity(&second)?;
+        let newest = store.read_manifest_owner_link_snapshot_v1(OWNER, identity, timeline(1))?;
+        let newest = newest.ok_or("missing newest snapshot")?;
+        assert_eq!(&newest.request, second.request());
+        assert_eq!(newest.ancestors.len(), 1);
+        assert_eq!(newest.admissions, fixture.snapshots);
+        assert!(!newest.dependency_branches.is_empty());
+        let receipt = fixture.batch.receipt().digest();
+        let by_receipt = ManifestOwnerLinkCutIdentityV1::LocalCutReceipt(receipt);
+        let oldest = link_snapshot(store, &store.conn, by_receipt)?;
+        let oldest = oldest.ok_or("missing oldest snapshot")?;
+        assert!(oldest.ancestors.is_empty());
+        let unknown = ManifestOwnerLinkCutIdentityV1::LocalCutReceipt(hash(0x77));
+        assert_eq!(link_snapshot(store, &store.conn, unknown)?, None);
+        let owner = [0x42; 32];
+        let other = sqlite_owner_link_snapshot(store, &store.conn, owner, by_receipt, timeline(1))?;
+        assert_eq!(other, None);
+        Ok(())
+    }
+
+    #[test]
+    fn owner_link_snapshot_rejects_mistyped_or_undecodable_rows() -> TestResult {
+        let (fixture, second) = with_history()?;
+        let store = &fixture.store;
+        let newest = link_identity(&second)?;
+        let oldest = link_identity(&fixture.batch)?;
+        let old_row = format!("{OLD_CUT} AND timeline_id = X'01010101010101010101010101010101'");
+        let row = |set: &str| format!("UPDATE local_cut_world_recordings SET {set} {old_row}");
+        let cut = |set: &str| format!("UPDATE local_cut_owner_cuts SET {set} {OLD_CUT}");
+        let nodes = |set: &str| format!("UPDATE world_dependency_branches SET {set}");
+        let corruptions = [
+            (row("cut_id = 'abcdefgh'"), newest),
+            (row("receipt_cbor = 'r'"), newest),
+            (row("receipt_cbor = X'00'"), newest),
+            (cut("commit_cbor = X'00'"), oldest),
+            (cut("commit_cbor = X'00'"), newest),
+            (cut("cut_id = 'abcdefgh'"), newest),
+            (cut("cut_id = X'00'"), newest),
+            (nodes("node_cbor = 'node'"), newest),
+            (nodes("node_cbor = X'00'"), newest),
+        ];
+        for (setup, identity) in corruptions {
+            let read = with_rollback(&store.conn, &setup, |connection| {
+                link_snapshot(store, connection, identity)
+            })?;
+            assert_eq!(read, Err(LocalError::CorruptState));
+        }
+        deny_read(&store.conn, "world_dependency_branches", "node_cbor", 0)?;
+        let denied = link_snapshot(store, &store.conn, newest);
+        clear_authorizer(&store.conn)?;
+        assert_eq!(denied, Err(LocalError::StorageFailure));
+        Ok(())
+    }
+
+    #[test]
+    fn owner_link_snapshot_rejects_a_corrupt_historical_admission() -> TestResult {
+        let mut fixture = committed()?;
+        let oldest = link_identity(&fixture.batch)?;
+        let current = current_admission(&fixture.store)?;
+        fixture
+            .store
+            .commit_manifest_owner_admission_v1(successor_admission(&current)?)?;
+        let store = &fixture.store;
+        let setup = "UPDATE manifest_owner_admissions SET receipt_cbor = X'00'
+                     WHERE configuration_generation = X'0000000000000001'";
+        let read = with_rollback(&store.conn, setup, |connection| {
+            link_snapshot(store, connection, oldest)
+        })?;
+        assert_eq!(read, Err(LocalError::CorruptState));
+        let intact = link_snapshot(store, &store.conn, oldest)?;
+        let intact = intact.ok_or("missing historical snapshot")?;
+        assert_eq!(intact.admissions, fixture.snapshots);
         Ok(())
     }
 }
