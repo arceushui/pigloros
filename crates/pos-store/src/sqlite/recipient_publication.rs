@@ -88,3 +88,47 @@ pub enum RecipientExportPublicationErrorV1 {
     #[error(transparent)]
     Store(#[from] CoreError),
 }
+
+/// Test-only fault stages for the recipient-export host boundary.
+///
+/// This type is available only with the nondefault test-support feature. It
+/// exists so external acceptance tests can exercise the real publication
+/// pipeline without exposing a production fault-control surface.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecipientExportPublicationTestFaultV1 {
+    /// Advance the source Timeline after the initial head observation.
+    SourceHeadChanged,
+    /// Revoke the capability after the initial head observation.
+    ConsentRevoked,
+    /// Block the erasure boundary after the initial head observation.
+    ErasureBlocked,
+    /// Fail while the encrypted staging object is being written.
+    StagingWrite,
+    /// Fail the staged ciphertext file sync.
+    FileSync,
+    /// Fail the final ciphertext directory sync.
+    DirectorySync,
+    /// Abort the catalog visibility transaction at its commit boundary.
+    CatalogCommit,
+}
+
+/// Exact publication-boundary observations from the test-support adapter seam.
+///
+/// The host reader remains the production visibility authority; this fixture
+/// exists only to prove interrupted tests leave no partial visible object,
+/// that its sole named-object writer receives ciphertext, and that recovery
+/// removes non-serving ciphertext objects.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecipientExportPublicationTestArtifactsV1 {
+    /// Whether the exact encrypted staging object exists.
+    pub staging_ciphertext_exists: bool,
+    /// Whether the exact encrypted final object exists.
+    pub final_ciphertext_exists: bool,
+    /// Whether the sole named-object writer observed bytes that were not a
+    /// structurally valid encrypted TRX1 envelope.
+    pub named_plaintext_observed: bool,
+}

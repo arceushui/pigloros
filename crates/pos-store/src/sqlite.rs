@@ -15,6 +15,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use zeroize::Zeroizing;
 
 // The custody adapter relies on Linux-only `openat2` resolve flags and
 // `renameat2(RENAME_NOREPLACE)`; every other target gets the explicit stub,
@@ -30,6 +31,10 @@ pub use recipient_decryption::RecipientExportDecryptionErrorV1;
 mod recipient_publication;
 pub use recipient_publication::{
     PublishedRecipientExportV1, RecipientExportPublicationErrorV1, RecipientExportRequestV1,
+};
+#[cfg(feature = "test-support")]
+pub use recipient_publication::{
+    RecipientExportPublicationTestArtifactsV1, RecipientExportPublicationTestFaultV1,
 };
 
 use pos_core::{
@@ -2670,7 +2675,7 @@ impl SqliteStore {
             Ok(rows) => rows,
             Err(error) => return Err(CoreError::Storage(error.to_string())),
         };
-        let mut events = Vec::new();
+        let mut events = EventReadPlaintextStaging::default();
         loop {
             #[cfg(test)]
             bounded_read_delay_for_test(1);
@@ -2685,7 +2690,7 @@ impl SqliteStore {
             let row = match next.map_err(|e| CoreError::Storage(e.to_string())) {
                 Ok(Some(row)) => row,
                 Ok(None) => break,
-                Err(e) => return Err(e),
+                Err(error) => return Err(error),
             };
             #[cfg(test)]
             if limit.is_some() {
@@ -2698,7 +2703,7 @@ impl SqliteStore {
         bounded_read_delay_for_test(2);
         ensure_read_time_bound(started, max_elapsed_micros)?;
 
-        Ok(events)
+        Ok(events.into_events())
     }
 
     fn validate_own_events_bounded(
@@ -13804,12 +13809,35 @@ fn decode_own_event(
     inherited_prefix: u64,
 ) -> Result<Event, CoreError> {
     let mut event = decode_event_row(row)?;
-    crate::finalize_committed_origins(
-        timeline,
-        inherited_prefix,
-        std::slice::from_mut(&mut event),
-    )?;
+    crate::finalize_committed_origins(timeline, inherited_prefix, std::slice::from_mut(&mut event))
+        .inspect_err(|_| {
+            let scrubbed =
+                pos_core::store::zeroize_event_plaintext_staging(std::slice::from_mut(&mut event));
+            debug_assert!(scrubbed);
+        })?;
     Ok(event)
+}
+
+/// Owns SQL-read plaintext until the caller explicitly returns it to a public
+/// `EventStore` result. Every fallible exit scrubs the source-owned buffers.
+#[derive(Default)]
+struct EventReadPlaintextStaging(Vec<Event>);
+
+impl EventReadPlaintextStaging {
+    fn push(&mut self, event: Event) {
+        self.0.push(event);
+    }
+
+    fn into_events(mut self) -> Vec<Event> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for EventReadPlaintextStaging {
+    fn drop(&mut self) {
+        let scrubbed = pos_core::store::zeroize_event_plaintext_staging(&mut self.0);
+        debug_assert!(scrubbed);
+    }
 }
 
 /// Persist a `u64` micros value as `SQLite` INTEGER (saturates at [`i64::MAX`]).
@@ -13938,8 +13966,8 @@ struct RawEventRow {
     seq: i64,
     event_id: String,
     entity_id: String,
-    event_type: String,
-    payload: Vec<u8>,
+    event_type: Zeroizing<String>,
+    payload: Zeroizing<Vec<u8>>,
     wall_time: i64,
     causation_id: Option<String>,
     correlation_id: Option<String>,
@@ -13952,8 +13980,8 @@ fn read_event_row_fields(row: &rusqlite::Row<'_>) -> Result<RawEventRow, CoreErr
         seq: row.get(0).map_err(storage_error)?,
         event_id: row.get(1).map_err(storage_error)?,
         entity_id: row.get(2).map_err(storage_error)?,
-        event_type: row.get(3).map_err(storage_error)?,
-        payload: row.get(4).map_err(storage_error)?,
+        event_type: Zeroizing::new(row.get(3).map_err(storage_error)?),
+        payload: Zeroizing::new(row.get(4).map_err(storage_error)?),
         wall_time: row.get(5).map_err(storage_error)?,
         causation_id: row.get(6).map_err(storage_error)?,
         correlation_id: row.get(7).map_err(storage_error)?,
@@ -13966,8 +13994,8 @@ fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
         seq,
         event_id,
         entity_id,
-        event_type,
-        payload,
+        mut event_type,
+        mut payload,
         wall_time,
         causation_id,
         correlation_id,
@@ -13987,25 +14015,33 @@ fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
         .map_err(|_| CoreError::Serialization("bad event sequence".to_owned()))?;
     let wall_time = u64::try_from(wall_time)
         .map_err(|_| CoreError::Serialization("bad event wall time".to_owned()))?;
+    let id = parse_event_id(&event_id)?;
+    let entity = parse_entity_id(&entity_id)?;
+    let causation_id = causation_id.as_deref().map(parse_event_id).transpose()?;
+    let correlation_id = correlation_id
+        .as_deref()
+        .map(parse_correlation_id)
+        .transpose()?;
     let event = Event {
-        id: parse_event_id(&event_id)?,
-        entity: parse_entity_id(&entity_id)?,
-        event_type: Kind::new(event_type),
-        payload: CanonicalBytes::from_vec(payload),
+        id,
+        entity,
+        event_type: Kind::new(std::mem::take(&mut *event_type)),
+        payload: CanonicalBytes::from_vec(std::mem::take(&mut *payload)),
         wall_time: WallTime::from_micros(wall_time),
         seq: Seq::from_u64(seq),
-        causation_id: causation_id.as_deref().map(parse_event_id).transpose()?,
-        correlation_id: correlation_id
-            .as_deref()
-            .map(parse_correlation_id)
-            .transpose()?,
+        causation_id,
+        correlation_id,
         schema_version: SchemaVersion::V1,
         signature,
         signature_identity,
         origin: Some(origin),
         payload_hash: pos_core::Hash::from_bytes(ph_arr),
     };
-    pos_core::store::validate_event_signature(&event)?;
+    pos_core::store::validate_event_signature(&event).inspect_err(|_| {
+        let scrubbed =
+            pos_core::store::zeroize_event_plaintext_staging(std::slice::from_mut(&mut event));
+        debug_assert!(scrubbed);
+    })?;
     Ok(event)
 }
 

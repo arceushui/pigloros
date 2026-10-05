@@ -39,6 +39,8 @@ use super::{
     RecipientExportDecryptionErrorV1, RecipientExportPublicationErrorV1, RecipientExportRequestV1,
     SqliteRollbackOnDrop, SqliteStore,
 };
+#[cfg(feature = "test-support")]
+use super::{RecipientExportPublicationTestArtifactsV1, RecipientExportPublicationTestFaultV1};
 
 const RECIPIENT_REGISTRY_UNAVAILABLE: RecipientExportDecryptionErrorV1 =
     RecipientExportDecryptionErrorV1::Registry(KeyRegistryErrorV1::RegistryUnavailable);
@@ -171,6 +173,91 @@ thread_local! {
     };
 }
 
+#[cfg(feature = "test-support")]
+thread_local! {
+    static RECIPIENT_EXPORT_PUBLICATION_TEST_FAULT: std::cell::Cell<
+        Option<RecipientExportPublicationTestFaultV1>,
+    > = const { std::cell::Cell::new(None) };
+    static RECIPIENT_EXPORT_PUBLICATION_TEST_NAMED_PLAINTEXT_OBSERVED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_HOOK_INSTALLED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static RECIPIENT_EXPORT_PUBLICATION_TEST_EXPORT_ID: std::cell::Cell<Option<[u8; 16]>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(feature = "test-support")]
+struct RecipientExportPublicationTestFaultGuard;
+
+#[cfg(feature = "test-support")]
+impl Drop for RecipientExportPublicationTestFaultGuard {
+    fn drop(&mut self) {
+        RECIPIENT_EXPORT_PUBLICATION_TEST_FAULT.with(|fault| fault.set(None));
+        RECIPIENT_EXPORT_PUBLICATION_TEST_EXPORT_ID.with(|export_id| export_id.set(None));
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn take_recipient_export_publication_test_fault(
+    expected: RecipientExportPublicationTestFaultV1,
+) -> bool {
+    RECIPIENT_EXPORT_PUBLICATION_TEST_FAULT.with(|fault| {
+        if fault.get() == Some(expected) {
+            fault.set(None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(feature = "test-support")]
+fn recipient_export_publication_test_sync_fault(
+    fault: RecipientExportPublicationTestFaultV1,
+) -> Result<(), CoreError> {
+    if take_recipient_export_publication_test_fault(fault) {
+        Err(CoreError::Storage(
+            "injected recipient export sync failure".to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn install_recipient_export_publication_test_commit_abort(
+    connection: &Connection,
+) -> Result<(), CoreError> {
+    if !take_recipient_export_publication_test_fault(
+        RecipientExportPublicationTestFaultV1::CatalogCommit,
+    ) {
+        return Ok(());
+    }
+    let abort_once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let callback_abort_once = std::sync::Arc::clone(&abort_once);
+    connection
+        .commit_hook(Some(move || {
+            callback_abort_once.swap(false, std::sync::atomic::Ordering::AcqRel)
+        }))
+        .map_err(storage_error)?;
+    RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_HOOK_INSTALLED.with(|installed| installed.set(true));
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+fn clear_recipient_export_publication_test_commit_hook(
+    connection: &Connection,
+) -> Result<(), CoreError> {
+    let installed = RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_HOOK_INSTALLED
+        .with(|installed| installed.replace(false));
+    if installed {
+        connection
+            .commit_hook::<fn() -> bool>(None)
+            .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn recipient_fsync(fd: impl rustix::fd::AsFd) -> Result<(), rustix::io::Errno> {
@@ -256,6 +343,14 @@ fn recipient_read_exact(file: &mut File, bytes: &mut [u8]) -> std::io::Result<()
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn recipient_write_all(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(feature = "test-support")]
+    if take_recipient_export_publication_test_fault(
+        RecipientExportPublicationTestFaultV1::StagingWrite,
+    ) {
+        return Err(std::io::Error::other(
+            "injected recipient export staging write failure",
+        ));
+    }
     if RECIPIENT_WRITE_FAILURE.with(std::cell::Cell::get) {
         Err(std::io::Error::other("injected recipient write failure"))
     } else {
@@ -265,6 +360,14 @@ fn recipient_write_all(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(not(test))]
 fn recipient_write_all(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(feature = "test-support")]
+    if take_recipient_export_publication_test_fault(
+        RecipientExportPublicationTestFaultV1::StagingWrite,
+    ) {
+        return Err(std::io::Error::other(
+            "injected recipient export staging write failure",
+        ));
+    }
     file.write_all(bytes)
 }
 
@@ -838,6 +941,8 @@ impl SqliteStore {
         owner: &RecipientKeyOwnerV1,
         request: &RecipientExportRequestV1<'_>,
     ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
+        #[cfg(feature = "test-support")]
+        let _test_fault_guard = RecipientExportPublicationTestFaultGuard;
         if self.consent_authority_permit != Some(authority.append_permit()) {
             return Err(RecipientExportPublicationErrorV1::Consent(
                 ConsentError::NoConsent,
@@ -877,6 +982,14 @@ impl SqliteStore {
         // writer reservation is taken.
         ensure_recipient_export_durability(&self.conn)
             .map_err(RecipientExportPublicationErrorV1::Store)?;
+        #[cfg(feature = "test-support")]
+        self.apply_recipient_export_publication_test_race(
+            authority,
+            &gate,
+            request.timeline_id,
+            expected_logical_head,
+        )
+        .map_err(RecipientExportPublicationErrorV1::Store)?;
 
         let mut result = Err(RecipientExportPublicationErrorV1::Store(
             CoreError::Storage("recipient export consent fence did not execute".to_owned()),
@@ -908,6 +1021,44 @@ impl SqliteStore {
         )
         .map_err(RecipientExportPublicationErrorV1::Consent)?;
         result
+    }
+
+    #[cfg(feature = "test-support")]
+    fn apply_recipient_export_publication_test_race(
+        &mut self,
+        authority: &ConsentAuthority,
+        gate: &ErasureContainmentGateV1,
+        timeline: TimelineId,
+        expected_logical_head: Seq,
+    ) -> Result<(), CoreError> {
+        if take_recipient_export_publication_test_fault(
+            RecipientExportPublicationTestFaultV1::SourceHeadChanged,
+        ) {
+            self.append(
+                timeline,
+                &[pos_core::EventDraft::new(
+                    EntityId::new(),
+                    pos_core::Kind::new("recipient.export.test-source-change.v1"),
+                    pos_core::CanonicalBytes::from_static(b"recipient-export-test-source-change"),
+                )],
+            )?;
+        }
+        if take_recipient_export_publication_test_fault(
+            RecipientExportPublicationTestFaultV1::ConsentRevoked,
+        ) {
+            ConsentGate::fence_timeline_at(
+                authority,
+                timeline,
+                expected_logical_head.as_u64().saturating_add(1),
+            )
+            .map_err(|error| CoreError::Storage(error.to_string()))?;
+        }
+        if take_recipient_export_publication_test_fault(
+            RecipientExportPublicationTestFaultV1::ErasureBlocked,
+        ) {
+            gate.block_timeline(timeline);
+        }
+        Ok(())
     }
 
     fn publish_recipient_export_under_fences(
@@ -943,13 +1094,10 @@ impl SqliteStore {
             if logical_head != expected_logical_head {
                 return Err(RecipientExportPublicationErrorV1::SourceChanged);
             }
-            let timeline = self
-                .get_timeline_for_host_transition_unchecked(request.timeline_id)
+            if Self::timeline_owner_in_transaction(&self.conn, request.timeline_id)
                 .map_err(RecipientExportPublicationErrorV1::Store)?
-                .ok_or(RecipientExportPublicationErrorV1::Store(
-                    CoreError::TimelineNotFound(request.timeline_id),
-                ))?;
-            if timeline.meta.owner != Some(request.token.subject_id()) {
+                != Some(request.token.subject_id())
+            {
                 return Err(RecipientExportPublicationErrorV1::Consent(
                     ConsentError::NoConsent,
                 ));
@@ -970,26 +1118,31 @@ impl SqliteStore {
             Ok(value) => value,
             Err(error) => return finish_recipient_export_transaction(&self.conn, Err(error)),
         };
-        match registry.with_encryption_authorization(identity, registered_digest, || {
-            // The registry authorization includes the commit itself. The
-            // SQLite writer reservation prevents a concurrent rotation or
-            // destruction from changing the active role-4 identity between
-            // this check and the catalog visibility marker.
-            let result = self.publish_recipient_export_with_registered_material(
-                owner,
-                request,
-                registered_digest,
-                export_id,
-                logical_head,
-            );
-            finish_recipient_export_transaction(&self.conn, result)
-        }) {
-            Ok(publication) => publication,
-            Err(error) => finish_recipient_export_transaction(
-                &self.conn,
-                Err(RecipientExportPublicationErrorV1::Registry(error)),
-            ),
-        }
+        let result =
+            match registry.with_encryption_authorization(identity, registered_digest, || {
+                // The registry authorization includes the commit itself. The
+                // SQLite writer reservation prevents a concurrent rotation or
+                // destruction from changing the active role-4 identity between
+                // this check and the catalog visibility marker.
+                let result = self.publish_recipient_export_with_registered_material(
+                    owner,
+                    request,
+                    registered_digest,
+                    export_id,
+                    logical_head,
+                );
+                finish_recipient_export_transaction(&self.conn, result)
+            }) {
+                Ok(publication) => publication,
+                Err(error) => finish_recipient_export_transaction(
+                    &self.conn,
+                    Err(RecipientExportPublicationErrorV1::Registry(error)),
+                ),
+            };
+        #[cfg(feature = "test-support")]
+        clear_recipient_export_publication_test_commit_hook(&self.conn)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
+        result
     }
 
     fn publish_recipient_export_with_registered_material(
@@ -1057,6 +1210,9 @@ impl SqliteStore {
         record_recipient_export_catalog(&self.conn, owner, &publication)
             .map_err(RecipientExportPublicationErrorV1::Store)?;
         remove_recipient_export_pending(&self.conn, export_id)
+            .map_err(RecipientExportPublicationErrorV1::Store)?;
+        #[cfg(feature = "test-support")]
+        install_recipient_export_publication_test_commit_abort(&self.conn)
             .map_err(RecipientExportPublicationErrorV1::Store)?;
         Ok(publication)
     }
@@ -1172,7 +1328,7 @@ impl SqliteStore {
     ///
     /// Returns a closed error if the durable directory or catalog cannot be
     /// inspected under the SQLite writer reservation. Returns
-    /// RecipientExportPublicationErrorV1::RecoveryIncomplete after committing
+    /// [RecipientExportPublicationErrorV1::RecoveryIncomplete] after committing
     /// a bounded batch when another pass is required.
     pub fn recover_recipient_exports(
         &mut self,
@@ -1181,6 +1337,92 @@ impl SqliteStore {
         ensure_recipient_export_durability(&self.conn)
             .map_err(RecipientExportPublicationErrorV1::Store)?;
         self.recover_recipient_exports_under_writer(owner)
+    }
+
+    /// Fix the next acceptance-test publication identifier.
+    ///
+    /// This exists only behind the nondefault test-support feature so an
+    /// external test can inspect the exact interrupted object identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Storage`] for a zero identifier or when another
+    /// test identifier is already configured on this thread.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn set_recipient_export_publication_test_export_id(
+        &self,
+        export_id: [u8; 16],
+    ) -> Result<(), CoreError> {
+        if export_id == [0; 16] {
+            return Err(CoreError::Storage(
+                "recipient export test ID must be nonzero".to_owned(),
+            ));
+        }
+        RECIPIENT_EXPORT_PUBLICATION_TEST_EXPORT_ID.with(|configured| {
+            if configured.is_some() {
+                return Err(CoreError::Storage(
+                    "recipient export test ID is already configured".to_owned(),
+                ));
+            }
+            configured.set(Some(export_id));
+            Ok(())
+        })
+    }
+
+    /// Inject one narrow recipient-export boundary failure for an acceptance
+    /// test. The fault is consumed by the normal publication path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Storage`] when another test fault is already
+    /// configured on this thread.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_recipient_export_publication_test_fault(
+        &self,
+        fault: RecipientExportPublicationTestFaultV1,
+    ) -> Result<(), CoreError> {
+        RECIPIENT_EXPORT_PUBLICATION_TEST_NAMED_PLAINTEXT_OBSERVED
+            .with(|observed| observed.set(false));
+        RECIPIENT_EXPORT_PUBLICATION_TEST_FAULT.with(|configured| {
+            if configured.replace(Some(fault)).is_some() {
+                return Err(CoreError::Storage(
+                    "recipient export test fault is already configured".to_owned(),
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    /// Inspect only the exact opaque object names derived from one test export
+    /// identifier. This never accepts a filesystem path or scans a directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Storage`] when the owner directory cannot be
+    /// validated or either exact object name cannot be inspected.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inspect_recipient_export_publication_test_artifacts(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+        export_id: [u8; 16],
+    ) -> Result<RecipientExportPublicationTestArtifactsV1, CoreError> {
+        validate_owner_directory(owner)?;
+        let named_plaintext_observed = RECIPIENT_EXPORT_PUBLICATION_TEST_NAMED_PLAINTEXT_OBSERVED
+            .with(|observed| observed.replace(false));
+        Ok(RecipientExportPublicationTestArtifactsV1 {
+            staging_ciphertext_exists: recipient_export_test_object_exists(
+                owner,
+                recipient_export_staging_name(export_id)?.as_c_str(),
+            )?,
+            final_ciphertext_exists: recipient_export_test_object_exists(
+                owner,
+                recipient_export_final_name(export_id)?.as_c_str(),
+            )?,
+            named_plaintext_observed,
+        })
     }
 
     /// Mark one recipient epoch pending, durably remove its owned key file,
@@ -1734,6 +1976,17 @@ fn load_recipient_export_pending(
 
 fn fresh_recipient_export_id() -> Result<[u8; 16], RecipientExportPublicationErrorV1> {
     let mut export_id = [0_u8; 16];
+    #[cfg(feature = "test-support")]
+    if let Some(test_export_id) =
+        RECIPIENT_EXPORT_PUBLICATION_TEST_EXPORT_ID.with(std::cell::Cell::take)
+    {
+        export_id = test_export_id;
+    } else {
+        recipient_random_bytes(&mut export_id).map_err(|error| {
+            RecipientExportPublicationErrorV1::Store(recipient_rng_error(&error))
+        })?;
+    }
+    #[cfg(not(feature = "test-support"))]
     recipient_random_bytes(&mut export_id)
         .map_err(|error| RecipientExportPublicationErrorV1::Store(recipient_rng_error(&error)))?;
     if export_id == [0; 16] {
@@ -1762,6 +2015,18 @@ fn recipient_export_final_name(export_id: [u8; 16]) -> Result<CString, CoreError
 
 fn recipient_export_staging_name(export_id: [u8; 16]) -> Result<CString, CoreError> {
     recipient_export_name(export_id, RECIPIENT_EXPORT_STAGING_SUFFIX)
+}
+
+#[cfg(feature = "test-support")]
+fn recipient_export_test_object_exists(
+    owner: &RecipientKeyOwnerV1,
+    name: &std::ffi::CStr,
+) -> Result<bool, CoreError> {
+    match recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => Ok(true),
+        Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
+        Err(error) => Err(storage_error(error)),
+    }
 }
 
 fn validate_recipient_export_file(
@@ -1815,6 +2080,10 @@ fn write_recipient_export_ciphertext(
     validate_owner_directory(owner)?;
     let staging = recipient_export_staging_name(export_id)?;
     let final_name = recipient_export_final_name(export_id)?;
+    #[cfg(feature = "test-support")]
+    RECIPIENT_EXPORT_PUBLICATION_TEST_NAMED_PLAINTEXT_OBSERVED.with(|observed| {
+        observed.set(observed.get() | RecipientTimelineExportV1::decode(encoded).is_err());
+    });
     recipient_openat2(
         &owner.directory_file,
         staging.as_c_str(),
@@ -1833,7 +2102,13 @@ fn write_recipient_export_ciphertext(
         file.metadata().map_err(storage_error).and_then(|metadata| {
             validate_recipient_export_file(&metadata, owner, 0)
                 .and_then(|()| recipient_write_all(&mut file, encoded).map_err(storage_error))
-                .and_then(|()| recipient_fsync(&file).map_err(storage_error))
+                .and_then(|()| {
+                    #[cfg(feature = "test-support")]
+                    recipient_export_publication_test_sync_fault(
+                        RecipientExportPublicationTestFaultV1::FileSync,
+                    )?;
+                    recipient_fsync(&file).map_err(storage_error)
+                })
                 .and_then(|()| file.metadata().map_err(storage_error))
                 .and_then(|metadata| {
                     validate_recipient_export_file(&metadata, owner, expected_length)
@@ -1851,7 +2126,13 @@ fn write_recipient_export_ciphertext(
                     )
                     .map_err(storage_error)
                 })
-                .and_then(|()| recipient_fsync(&owner.directory_file).map_err(storage_error))
+                .and_then(|()| {
+                    #[cfg(feature = "test-support")]
+                    recipient_export_publication_test_sync_fault(
+                        RecipientExportPublicationTestFaultV1::DirectorySync,
+                    )?;
+                    recipient_fsync(&owner.directory_file).map_err(storage_error)
+                })
                 .and_then(|()| {
                     verify_recipient_export_entry(owner, final_name.as_c_str(), expected_length)
                 })

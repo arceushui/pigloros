@@ -10,6 +10,9 @@ publish.workspace = true
 [features]
 default = ["sqlite"]
 sqlite = ["dep:rusqlite", "dep:pos-conformance"]
+# Exposes recipient-export acceptance fixtures only. Never enable this in a
+# deployable dependency graph; CI enforces that policy.
+test-support = ["sqlite", "pos-core/test-support"]
 
 [dependencies]
 pos-core = { path = "../pos-core" }
@@ -38,6 +41,10 @@ tempfile = "3"
 [[bench]]
 name = "memory_erasure"
 harness = false
+
+[[test]]
+name = "recipient_export_publication_faults_public"
+required-features = ["test-support"]
 
 [lints]
 workspace = true
