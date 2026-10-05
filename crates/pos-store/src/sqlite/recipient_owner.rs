@@ -903,7 +903,7 @@ impl SqliteStore {
                 request.evaluation,
             )
             .map_err(RecipientExportPublicationErrorV1::Store)?;
-            let mut registry = self
+            let registry = self
                 .load_key_registry()
                 .map_err(RecipientExportPublicationErrorV1::Store)?
                 .ok_or(RecipientExportPublicationErrorV1::Registry(
