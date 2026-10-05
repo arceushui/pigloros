@@ -3,9 +3,14 @@
 //! Each test admits Plugin rows (MCA1/MSB1) through the public admission seam,
 //! records one zero-Event local cut through the public local-cut owner seam
 //! and a real store, and compares what the store published with an
-//! independent preferred-CBOR/BLAKE3 WDB1 oracle that shares no production
-//! packer or encoder. The rejection tests show that every substituted
-//! admission fact stops the cut before any owner record becomes visible.
+//! independent preferred-CBOR/BLAKE3 WDB1 oracle. The oracle reuses only the
+//! production WAL1 leaf encoding (`WorldArtifactLeafV1::to_canonical_cbor`) to
+//! hash each leaf; the key order, deduplication, 256-way packing, WDB1 branch
+//! encoding, domains, node addresses and root are computed independently. The
+//! rejection tests show that every substituted admission fact or inconsistent
+//! closure row stops the cut before any owner record becomes visible.
+
+use std::collections::BTreeSet;
 
 use pos_core::output_policy::{OutputPolicyInputV1, OutputPolicyV1};
 use pos_core::retention::{
@@ -50,6 +55,10 @@ type LeafEdit = fn(&mut WorldArtifactLeafInputV1);
 /// One stored WDB1 node: its content address and its exact WDB1 bytes.
 #[cfg(feature = "sqlite")]
 type StoredNode = (Vec<u8>, Vec<u8>);
+#[cfg(feature = "sqlite")]
+const NODE_COLUMNS: &str = "node_hash, node_cbor";
+#[cfg(feature = "sqlite")]
+const NODE_TABLE: &str = "world_dependency_branches";
 
 const OWNER: [u8; 32] = [0x41; 32];
 const TIMELINE: TimelineId = timeline(1);
@@ -463,15 +472,23 @@ fn admit<S: CutStore>(store: &mut S, plugins: u16) -> Fallible<Admitted> {
     Ok(Admitted { state, snapshot })
 }
 
-fn lease_leaf(snapshot: &ManifestOwnerAdmissionSnapshotV1) -> Fallible<&WorldArtifactLeafV1> {
+/// The first recorded scope member leaf of one kind.
+fn member_leaf(
+    snapshot: &ManifestOwnerAdmissionSnapshotV1,
+    kind: WorldArtifactKindV1,
+) -> Fallible<&WorldArtifactLeafV1> {
     let member = snapshot
         .timeline
         .members
         .leaves
         .iter()
-        .find(|member| member.leaf.as_input().kind == WorldArtifactKindV1::RetentionLease)
-        .ok_or("missing recorded lease leaf")?;
+        .find(|member| member.leaf.as_input().kind == kind)
+        .ok_or("missing recorded member leaf")?;
     Ok(&member.leaf)
+}
+
+fn lease_leaf(snapshot: &ManifestOwnerAdmissionSnapshotV1) -> Fallible<&WorldArtifactLeafV1> {
+    member_leaf(snapshot, WorldArtifactKindV1::RetentionLease)
 }
 
 fn table(row_count: usize, byte: u8) -> Fallible<LocalCutTableRefV1> {
@@ -699,7 +716,7 @@ fn key(out: &mut Vec<u8>, (kind, digest): (u8, Hash)) {
     bytes32(out, digest);
 }
 
-fn encode_branch(scope: Hash, height: u8, children: &[ExpectedChild]) -> Vec<u8> {
+fn encode_branch(scope: Hash, height: u8, children: &[ExpectedChild]) -> Fallible<Vec<u8>> {
     let mut out = vec![0x88, 0x44];
     out.extend_from_slice(b"WDB1");
     out.push(0x01);
@@ -708,7 +725,7 @@ fn encode_branch(scope: Hash, height: u8, children: &[ExpectedChild]) -> Vec<u8>
     key(&mut out, children[0].first);
     key(&mut out, children[children.len() - 1].last);
     head(&mut out, 0, children.iter().map(|child| child.count).sum());
-    head(&mut out, 4, children.len() as u64);
+    head(&mut out, 4, u64::try_from(children.len())?);
     for child in children {
         out.push(0x84);
         key(&mut out, child.first);
@@ -716,7 +733,7 @@ fn encode_branch(scope: Hash, height: u8, children: &[ExpectedChild]) -> Vec<u8>
         head(&mut out, 0, child.count);
         bytes32(&mut out, child.node_hash);
     }
-    out
+    Ok(out)
 }
 
 fn leaf_hash(leaf: &WorldArtifactLeafV1) -> Hash {
@@ -771,15 +788,15 @@ fn oracle_directory(snapshot: &ManifestOwnerAdmissionSnapshotV1) -> Fallible<Ora
     let mut level: Vec<ExpectedChild> = leaves.into_iter().map(leaf_child).collect();
     let mut branches = Vec::new();
     let mut heights = Vec::new();
-    let mut height = 0_u8;
+    let mut level_height = 0_u8;
     while level.len() > 1 {
-        height += 1;
+        level_height += 1;
         let mut next = Vec::with_capacity(level.len().div_ceil(FANOUT));
         for children in level.chunks(FANOUT) {
-            let bytes = encode_branch(scope, height, children);
+            let bytes = encode_branch(scope, level_height, children)?;
             next.push(branch_child(&bytes, children));
             branches.push(bytes);
-            heights.push(height);
+            heights.push(level_height);
         }
         level = next;
     }
@@ -918,6 +935,117 @@ fn assert_small_roster(cut: &RecordedCut, oracle: &OracleDirectory) -> TestResul
     Ok(())
 }
 
+/// Every recorded leaf of one kind.
+fn kind_leaves(
+    leaves: &[WorldArtifactLeafV1],
+    kind: WorldArtifactKindV1,
+) -> Vec<&WorldArtifactLeafV1> {
+    leaves
+        .iter()
+        .filter(|leaf| leaf.as_input().kind == kind)
+        .collect()
+}
+
+/// The sorted WAL1 addresses of every recorded leaf of one kind.
+fn kind_hashes(leaves: &[WorldArtifactLeafV1], kind: WorldArtifactKindV1) -> Vec<Hash> {
+    let mut hashes: Vec<Hash> = kind_leaves(leaves, kind)
+        .into_iter()
+        .map(leaf_hash)
+        .collect();
+    hashes.sort();
+    hashes
+}
+
+fn names(leaf: &WorldArtifactLeafV1, child: Hash) -> bool {
+    leaf.as_input().child_node_hashes.contains(&child)
+}
+
+/// One row's references: its OPC1 leaf and every direct OPC1 child, EOP1 included.
+const fn row_references(copy: &ManifestOwnerPolicyCopiesV1) -> usize {
+    1 + copy.opc1_leaf.as_input().child_node_hashes.len()
+}
+
+/// Each MSB1 row's own Required EOP1 (kind 0) and OPC1 (kind 14) leaves, all
+/// recorded; returns the number of distinct explicit seed memberships.
+fn assert_row_seeds(cut: &RecordedCut) -> Fallible<usize> {
+    let timeline = &cut.admitted.snapshot.timeline;
+    let leaves = cut.directory.leaves();
+    let copies = &timeline.policy_copies;
+    let mut seeds = BTreeSet::new();
+    for row in &timeline.binding.as_input().rows {
+        let copy = copies.iter().find(|copy| copy.plugin_id == row.plugin_id);
+        let copy = copy.ok_or("MSB1 row without a copy")?;
+        let eop1 = copy.eop1_leaf.as_input();
+        let opc1 = copy.opc1_leaf.as_input();
+        assert_eq!(eop1.kind, WorldArtifactKindV1::OutputPolicy);
+        assert_eq!(opc1.kind, WorldArtifactKindV1::OutputPolicyClosure);
+        assert_eq!(row.eop1_wal1_hash, leaf_hash(&copy.eop1_leaf));
+        assert_eq!(row.closure_hash, opc1.native_digest);
+        assert!(leaves.contains(&copy.eop1_leaf));
+        assert!(leaves.contains(&copy.opc1_leaf));
+        seeds.insert(leaf_hash(&copy.eop1_leaf));
+        seeds.insert(leaf_hash(&copy.opc1_leaf));
+    }
+    Ok(seeds.len())
+}
+
+/// Row membership is proved per row before deduplication: the 256 rows carry
+/// 512 explicit seed memberships, every OPC1 names the one scope RTP1 leaf,
+/// which the WDB1 records once, and the WDB1 holds fewer leaves than the rows
+/// reference.
+fn assert_full_roster_deduplication(cut: &RecordedCut) -> TestResult {
+    assert_eq!(assert_row_seeds(cut)?, 512);
+    let snapshot = &cut.admitted.snapshot;
+    let leaves = cut.directory.leaves();
+    let rtp1 = member_leaf(snapshot, WorldArtifactKindV1::RetentionPolicy)?;
+    let rtp1_hash = leaf_hash(rtp1);
+    let copies = &snapshot.timeline.policy_copies;
+    let naming = copies
+        .iter()
+        .filter(|copy| names(&copy.opc1_leaf, rtp1_hash))
+        .count();
+    assert_eq!(naming, 256);
+    let recorded = leaves
+        .iter()
+        .filter(|leaf| leaf_hash(leaf) == rtp1_hash)
+        .count();
+    assert_eq!(recorded, 1);
+    let references: usize = copies.iter().map(row_references).sum();
+    assert!(leaves.len() < references);
+    Ok(())
+}
+
+/// The WDB1 holds the exact transitive closure: every recorded leaf's native
+/// children are recorded, each even-seed EBP1 names its own EPF1, RTP1 names
+/// the audience reference leaf and RLS1 names RTP1.
+fn assert_transitive_closure(cut: &RecordedCut) -> TestResult {
+    let snapshot = &cut.admitted.snapshot;
+    let leaves = cut.directory.leaves();
+    let recorded: BTreeSet<Hash> = leaves.iter().map(leaf_hash).collect();
+    for leaf in leaves {
+        let children = &leaf.as_input().child_node_hashes;
+        assert!(children.iter().all(|child| recorded.contains(child)));
+    }
+    let profiles = kind_hashes(leaves, WorldArtifactKindV1::ExecutionProfile);
+    let rows = snapshot.catalog.as_input().rows.len();
+    assert_eq!(profiles.len(), rows.div_ceil(2));
+    let mut budget_children = Vec::new();
+    for budget in kind_leaves(leaves, WorldArtifactKindV1::ExecutableBudgetPolicy) {
+        budget_children.extend(budget.as_input().child_node_hashes.iter().copied());
+    }
+    budget_children.sort();
+    assert_eq!(budget_children, profiles);
+    let audience = member_leaf(snapshot, WorldArtifactKindV1::AudiencePolicy)?;
+    let rtp1 = member_leaf(snapshot, WorldArtifactKindV1::RetentionPolicy)?;
+    let rls1 = member_leaf(snapshot, WorldArtifactKindV1::RetentionLease)?;
+    assert_eq!(rtp1.as_input().child_node_hashes, [leaf_hash(audience)]);
+    assert_eq!(rls1.as_input().child_node_hashes, [leaf_hash(rtp1)]);
+    for leaf in [audience, rtp1, rls1] {
+        assert!(leaves.contains(leaf));
+    }
+    Ok(())
+}
+
 /// Substituted admission facts; each one invalidates the admission snapshot.
 const SNAPSHOT_FAULTS: [SnapshotEdit; 8] = [
     opc1_names_another_lease,
@@ -1026,11 +1154,15 @@ fn owner_view<S: CutStore>(store: &S, intent: Hash) -> Fallible<OwnerView> {
     })
 }
 
-/// Reject every substituted admission fact, then a kind-8 lease other than the
-/// recorded RLS1, each through the public cut seam and before any publication.
+/// Reject every substituted admission fact and each closure-inconsistent row
+/// through the public cut seam, before any publication.
 ///
-/// The cut seam re-runs the admission snapshot validation on the snapshots it
-/// is given, so every substituted fact returns `CorruptState`.
+/// Two layers reject them. The cut seam re-runs the admission snapshot
+/// validation on the snapshots it is given, so every substituted fact returns
+/// `CorruptState`. The snapshot-valid but closure-inconsistent rows reach the
+/// WCB1 derivation: a kind-8 lease other than the recorded RLS1 returns
+/// `Conflict`, and a kind-5 successor other than the derived WCB1 returns
+/// `InvalidBatch`.
 fn reject_each_fault<S: CutStore>(
     store: &S,
     admitted: &Admitted,
@@ -1060,6 +1192,13 @@ fn reject_each_fault<S: CutStore>(
     substituted.recording_context_rows[0].retention_lease_hash = hash(0x33);
     let prepared = prepare_against(admitted, &admitted.snapshot, substituted);
     assert_eq!(prepared.err(), Some(LocalCutOwnerErrorV1::Conflict));
+    assert_eq!(owner_view(store, intent)?, before);
+    let mut mismatched = request.clone();
+    mismatched.result_head_rows[0].successor_wcb_hash = hash(0x37);
+    let table = LocalCutHeadsTableV1::result_heads(OWNER, 1, &mismatched.result_head_rows)?;
+    mismatched.result_heads_table = table.table_ref();
+    let prepared = prepare_against(admitted, &admitted.snapshot, mismatched);
+    assert_eq!(prepared.err(), Some(LocalCutOwnerErrorV1::InvalidBatch));
     assert_eq!(owner_view(store, intent)?, before);
     Ok(())
 }
@@ -1094,8 +1233,8 @@ fn stored_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredNode> {
 #[cfg(feature = "sqlite")]
 fn sqlite_nodes(path: &str, scope: Hash) -> Fallible<Vec<StoredNode>> {
     let connection = rusqlite::Connection::open(path)?;
-    let mut statement = connection
-        .prepare("SELECT node_hash, node_cbor FROM world_dependency_branches WHERE scope = ?1")?;
+    let sql = format!("SELECT {NODE_COLUMNS} FROM {NODE_TABLE} WHERE scope = ?1");
+    let mut statement = connection.prepare(&sql)?;
     let rows = statement.query_map([scope.as_bytes().as_slice()], stored_node)?;
     let mut nodes = rows.collect::<Result<Vec<_>, _>>()?;
     nodes.sort();
@@ -1122,7 +1261,8 @@ fn full_roster_cut_records_the_exact_oracle_closure_in_memory() -> TestResult {
     let cut = record_cut(&mut MemoryStore::new(), full_roster()?)?;
     let oracle = assert_exact_closure(&cut)?;
     assert_full_roster_shape(&cut, &oracle);
-    Ok(())
+    assert_full_roster_deduplication(&cut)?;
+    assert_transitive_closure(&cut)
 }
 
 #[cfg(feature = "sqlite")]
@@ -1133,6 +1273,8 @@ fn full_roster_cut_persists_the_exact_oracle_nodes_in_sqlite() -> TestResult {
     let cut = record_cut(&mut store, full_roster()?)?;
     let oracle = assert_exact_closure(&cut)?;
     assert_full_roster_shape(&cut, &oracle);
+    assert_full_roster_deduplication(&cut)?;
+    assert_transitive_closure(&cut)?;
     let scope = cut.admitted.snapshot.timeline.scope;
     assert_eq!(sqlite_nodes(&path, scope)?, oracle_nodes(oracle.branches));
     Ok(())
@@ -1142,7 +1284,9 @@ fn full_roster_cut_persists_the_exact_oracle_nodes_in_sqlite() -> TestResult {
 fn same_name_and_reducer_only_plugins_are_recorded_in_memory() -> TestResult {
     let cut = record_cut(&mut MemoryStore::new(), SMALL_ROSTER)?;
     let oracle = assert_exact_closure(&cut)?;
-    assert_small_roster(&cut, &oracle)
+    assert_small_roster(&cut, &oracle)?;
+    assert_eq!(assert_row_seeds(&cut)?, 6);
+    assert_transitive_closure(&cut)
 }
 
 #[cfg(feature = "sqlite")]
