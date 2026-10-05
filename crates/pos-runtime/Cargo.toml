@@ -47,6 +47,10 @@ tempfile = { workspace = true }
 pos-time = { path = "../pos-time" }
 
 [[test]]
+name = "counterfactual_suffix_public"
+required-features = ["test-support"]
+
+[[test]]
 name = "event_type_ownership"
 required-features = ["test-support"]
 
