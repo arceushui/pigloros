@@ -152,7 +152,7 @@ use super::{
     begin_immediate_scope, finish_immediate_scope, normalize_schema_sql, seq_as_i64,
     sqlite_schema_ddl, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore,
 };
-use crate::counterfactual_adapter::{counterfactual_port_error, COUNTERFACTUAL_SEAL};
+use crate::{counterfactual_port_error, COUNTERFACTUAL_SEAL};
 
 type StoreError = CounterfactualStoreErrorV1;
 
