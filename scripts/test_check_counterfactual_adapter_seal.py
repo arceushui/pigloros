@@ -21,28 +21,70 @@ ALLOWED_MANIFESTS = {
     "crates/pos-core/Cargo.toml": '[features]\ncounterfactual-adapter = []\n',
 }
 
+DEPENDENCY = "enables counterfactual-adapter"
+OUTSIDE = "names the counterfactual adapter seal outside the adapters"
+REEXPORT = "re-exports the counterfactual adapter seal"
+RETURNS = "returns the counterfactual adapter seal from a public fn"
+CONFIG = "enables counterfactual-adapter outside a manifest"
+FEATURES_FLAG = "cargo test -p pos-runtime --features pos-core/counterfactual-adapter\n"
+
 REJECTED_MANIFESTS = {
-    "dependency": "[dependencies]\n" + ENABLING,
-    "build dependency": "[build-dependencies]\n" + ENABLING,
-    "target dependency": "[target.'cfg(unix)'.dependencies]\n" + ENABLING,
-    "workspace dependency": "[workspace.dependencies]\n"
-    + 'pos-core = { path = "crates/pos-core", features = ["counterfactual-adapter"] }\n',
-    "forwarding feature": '[features]\nadapters = ["pos-core/counterfactual-adapter"]\n',
-    "default feature": '[features]\ndefault = ["seal"]\nseal = ["counterfactual-adapter"]\n'
-    + "counterfactual-adapter = []\n",
+    "dependency": ("[dependencies]\n" + ENABLING, DEPENDENCY),
+    "build dependency": ("[build-dependencies]\n" + ENABLING, DEPENDENCY),
+    "target dependency": ("[target.'cfg(unix)'.dependencies]\n" + ENABLING, DEPENDENCY),
+    "workspace dependency": (
+        "[workspace.dependencies]\n"
+        + 'pos-core = { path = "crates/pos-core", features = ["counterfactual-adapter"] }\n',
+        DEPENDENCY,
+    ),
+    "forwarding feature": (
+        '[features]\nadapters = ["pos-core/counterfactual-adapter"]\n',
+        "feature adapters forwards counterfactual-adapter",
+    ),
+    "default feature": (
+        '[features]\ndefault = ["seal"]\nseal = ["counterfactual-adapter"]\n'
+        + "counterfactual-adapter = []\n",
+        "default feature enables counterfactual-adapter",
+    ),
 }
 
 ALLOWED_SOURCES = {
     "crates/pos-store/src/memory.rs": SEAL_USE,
+    "crates/pos-store/src/sqlite.rs": "pub(crate) fn seal() -> CounterfactualAdapterSealV1 {\n",
+    "crates/pos-store/src/lib.rs": "pub use pos_core::{CoreError, Seq};\n"
+    + "use pos_core::CounterfactualAdapterSealV1;\n",
     "crates/pos-core/src/counterfactual_store.rs": SEAL_USE,
     "crates/pos-runtime/tests/coordinator.rs": SEAL_USE,
+    "crates/pos-runtime/tests/support/mod.rs": SEAL_USE,
     "crates/pos-runtime/src/coordinator.rs": "// CounterfactualAdapterSealV1 is adapter-only.\n",
 }
 
+CRATE_MANIFEST = {"crates/pos-runtime/Cargo.toml": DEV_ONLY}
+
 REJECTED_SOURCES = {
-    "runtime source": ("crates/pos-runtime/src/coordinator.rs", SEAL_USE),
-    "tests-named file": ("crates/pos-runtime/src/tests.rs", SEAL_USE),
-    "nested crate": ("apps/fixture/crates/pos-store/src/lib.rs", SEAL_USE),
+    "runtime source": ("crates/pos-runtime/src/coordinator.rs", SEAL_USE, OUTSIDE),
+    "tests-named file": ("crates/pos-runtime/src/tests.rs", SEAL_USE, OUTSIDE),
+    "src/tests directory": ("crates/pos-runtime/src/tests/mod.rs", SEAL_USE, OUTSIDE),
+    "tests directory outside a crate": ("tools/tests/seal.rs", SEAL_USE, OUTSIDE),
+    "nested crate": ("apps/fixture/crates/pos-store/src/lib.rs", SEAL_USE, OUTSIDE),
+    "re-export": (
+        "crates/pos-store/src/lib.rs",
+        "pub use pos_core::{\n    CoreError,\n    CounterfactualAdapterSealV1 as Seal,\n};\n",
+        REEXPORT,
+    ),
+    "glob re-export": ("crates/pos-store/src/lib.rs", "pub use pos_core::*;\n", REEXPORT),
+    "public fn": (
+        "crates/pos-store/src/memory.rs",
+        "pub const fn seal() -> pos_core::CounterfactualAdapterSealV1 {\n",
+        RETURNS,
+    ),
+    "workflow": (".github/workflows/ci.yml", "run: " + FEATURES_FLAG, CONFIG),
+    "Dockerfile": ("docker/Dockerfile", "RUN " + FEATURES_FLAG, CONFIG),
+    "cargo config": (
+        ".cargo/config.toml",
+        '[alias]\nt = "test --features pos-core/counterfactual-adapter"\n',
+        CONFIG,
+    ),
 }
 
 
@@ -59,7 +101,7 @@ def with_files(files: dict[str, str]) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         ignored = {
-            "target/debug/Cargo.toml": REJECTED_MANIFESTS["dependency"],
+            "target/debug/Cargo.toml": REJECTED_MANIFESTS["dependency"][0],
             "target/debug/build.rs": SEAL_USE,
         }
         for relative, text in {**ignored, **files}.items():
@@ -69,6 +111,13 @@ def with_files(files: dict[str, str]) -> subprocess.CompletedProcess[str]:
         return invoke(root)
 
 
+def expect_rejected(case: str, result: subprocess.CompletedProcess[str], reason: str) -> None:
+    if result.returncode == 0:
+        raise SystemExit(f"checker accepted {case}")
+    if reason not in result.stderr:
+        raise SystemExit(f"checker rejected {case} without {reason!r}:\n{result.stderr}")
+
+
 def main() -> None:
     repository = invoke(ROOT)
     if repository.returncode != 0:
@@ -76,12 +125,12 @@ def main() -> None:
     allowed = with_files({**ALLOWED_MANIFESTS, **ALLOWED_SOURCES})
     if allowed.returncode != 0:
         raise SystemExit(f"checker rejected an allowed use:\n{allowed.stderr}")
-    for case, text in REJECTED_MANIFESTS.items():
-        if with_files({"apps/fixture/Cargo.toml": text}).returncode == 0:
-            raise SystemExit(f"checker accepted {case} enabling the adapter feature")
-    for case, (relative, text) in REJECTED_SOURCES.items():
-        if with_files({relative: text}).returncode == 0:
-            raise SystemExit(f"checker accepted the seal in a {case}")
+    for case, (text, reason) in REJECTED_MANIFESTS.items():
+        result = with_files({"apps/fixture/Cargo.toml": text})
+        expect_rejected(f"a {case} enabling the adapter feature", result, reason)
+    for case, (relative, text, reason) in REJECTED_SOURCES.items():
+        result = with_files({**CRATE_MANIFEST, relative: text})
+        expect_rejected(f"the seal in a {case}", result, reason)
 
 
 if __name__ == "__main__":

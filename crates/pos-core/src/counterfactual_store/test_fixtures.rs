@@ -40,7 +40,8 @@ pub fn uint(value: u64) -> Vec<u8> {
     }
 }
 
-/// Encode one shortest-form CBOR head of `major` with `argument`.
+/// Encode one shortest-form CBOR head of `major` (a CBOR major type, which
+/// must be at most 7) with `argument`.
 #[must_use]
 pub fn head(major: u8, argument: u64) -> Vec<u8> {
     let mut encoded = uint(argument);

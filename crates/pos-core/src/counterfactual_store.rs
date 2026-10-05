@@ -1026,9 +1026,13 @@ pub enum StoredCounterfactualArtifactV1 {
 /// the `RCF1` digest, and the Tick Boundary commit coordinate, and only
 /// [`Self::from_record`] rebuilds one from its persisted
 /// [`CounterfactualGenerationRecordV1`]; both are sealed. A receipt
-/// therefore matches exactly one `SIV1`; holders verify that the receipt's
-/// generation actually committed by reading that `SIV1` at
-/// [`Self::generation`] and checking [`Self::matches_invalidation`].
+/// therefore matches exactly one `SIV1` and is itself commit evidence: a
+/// `Committed` outcome carries one only after its transaction committed, and
+/// [`CounterfactualStorePortV1::committed_generation_receipt`] rebuilds one
+/// only from the record persisted inside that committed transaction. After an
+/// `OutcomeUnknown`, a receipt read back at the command's new generation that
+/// [`Self::matches_invalidation`] the command's `SIV1` proves that command
+/// committed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CounterfactualGenerationReceiptV1 {
     generation: ForkGenerationV1,
@@ -1154,11 +1158,14 @@ impl CounterfactualGenerationReceiptV1 {
     /// The receipt was built from a command whose `SIV1` was verified to
     /// bind this receipt's Fork, generation (`new_generation`), frontier
     /// digest, plan digest, and first Tick (`commit_tick`). Equal
-    /// invalidation digests imply only those `SIV1`-carried bindings: the
+    /// invalidation digests imply those `SIV1`-carried bindings; the
     /// receipt's `first_tick_head` and published facts are attested by the
-    /// adapter that committed it, and a match proves the receipt was built
-    /// from this `SIV1`, not that it was committed. Read the `SIV1` at the
-    /// receipt's generation through the port to prove the commit.
+    /// sealed adapter that committed it. Because a receipt exists only for a
+    /// committed transaction (a `Committed` outcome, or
+    /// [`CounterfactualStorePortV1::committed_generation_receipt`] rebuilding
+    /// it from the record persisted in that transaction), a match also proves
+    /// that this `SIV1` committed at the receipt's generation; this is the
+    /// `OutcomeUnknown` recovery check.
     #[must_use]
     pub fn matches_invalidation(&self, invalidation: &SuffixInvalidationBytesV1) -> bool {
         self.invalidation_digest == invalidation.digest()
