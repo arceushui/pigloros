@@ -3497,7 +3497,9 @@ fn profile_with_selected_closure_caps(
     }
     if matches!(
         mutation,
-        Some(ProfileMutation::SelectedClosureCapExact(ClosureCap::TotalBytes))
+        Some(ProfileMutation::SelectedClosureCapExact(
+            ClosureCap::TotalBytes
+        ))
     ) {
         const MAX_CONVERGENCE_STEPS: usize = 8;
         for _ in 0..MAX_CONVERGENCE_STEPS {
