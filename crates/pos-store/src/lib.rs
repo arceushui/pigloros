@@ -123,6 +123,55 @@ pub use pos_core::{
     TimelineId, ValidatedGeographicAdmissionV1, WallTime,
 };
 
+/// The seal the Memory and `SQLite` counterfactual adapters mint evidence with.
+///
+/// It stays a private crate-root item, visible to both adapters and never
+/// re-exported: only this crate mints counterfactual commit evidence.
+const COUNTERFACTUAL_SEAL: pos_core::CounterfactualAdapterSealV1 =
+    pos_core::CounterfactualAdapterSealV1::for_adapter();
+
+/// Map a backend failure onto the closed counterfactual port errors.
+///
+/// A missing Timeline is `ForkNotFound`, a write whose commit may or may not
+/// have landed is `OutcomeUnknown`, and every other backend failure is
+/// `StorageFailure`, which committed nothing.
+const fn counterfactual_port_error(error: &CoreError) -> pos_core::CounterfactualStoreErrorV1 {
+    match error {
+        CoreError::TimelineNotFound(_) => pos_core::CounterfactualStoreErrorV1::ForkNotFound,
+        CoreError::StorageOutcomeUnknown(_) => pos_core::CounterfactualStoreErrorV1::OutcomeUnknown,
+        _ => pos_core::CounterfactualStoreErrorV1::StorageFailure,
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod counterfactual_port_error_tests {
+    use pos_core::{CoreError, CounterfactualStoreErrorV1, TimelineId};
+
+    use super::counterfactual_port_error;
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn backend_failures_map_onto_the_closed_port_errors() {
+        assert_eq!(
+            counterfactual_port_error(&CoreError::TimelineNotFound(TimelineId::new())),
+            CounterfactualStoreErrorV1::ForkNotFound
+        );
+        assert_eq!(
+            counterfactual_port_error(&CoreError::StorageOutcomeUnknown(String::new())),
+            CounterfactualStoreErrorV1::OutcomeUnknown
+        );
+        assert_eq!(
+            counterfactual_port_error(&CoreError::Storage(String::new())),
+            CounterfactualStoreErrorV1::StorageFailure
+        );
+        assert_eq!(
+            counterfactual_port_error(&CoreError::ErasureContainmentUnavailable),
+            CounterfactualStoreErrorV1::StorageFailure
+        );
+    }
+}
+
 /// A committed or indeterminate topology write invalidates a cached inventory.
 pub(crate) const fn inventory_generation_may_have_changed<T>(
     result: &Result<T, CoreError>,

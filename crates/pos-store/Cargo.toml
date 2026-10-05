@@ -12,7 +12,10 @@ default = ["sqlite"]
 sqlite = ["dep:rusqlite", "dep:pos-conformance"]
 
 [dependencies]
-pos-core = { path = "../pos-core" }
+# The Memory and SQLite counterfactual adapters mint ADR-064 commit evidence;
+# scripts/check_counterfactual_adapter_seal.py allows only this crate to enable
+# `counterfactual-adapter`.
+pos-core = { path = "../pos-core", features = ["counterfactual-adapter"] }
 pos-crypto = { path = "../pos-crypto" }
 ciborium = { workspace = true }
 blake3 = { workspace = true }
