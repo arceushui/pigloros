@@ -5,9 +5,10 @@
 //! one `BEGIN IMMEDIATE` transaction: it reads the persisted
 //! [`CounterfactualBasisV1`], and either reports the first conflict or appends
 //! the first recomputation Tick's Events to the Fork Timeline, builds the
-//! receipt from the staged head, records the exact `RCF1`/`SIV1` bytes under
-//! the new generation, quarantines the invalid-artifact index and the
-//! eviction set, and advances the Fork generation.
+//! receipt from the staged head, records the receipt and the exact
+//! `RCF1`/`SIV1` bytes under the new generation, quarantines the
+//! invalid-artifact index and the eviction set, and advances the Fork
+//! generation.
 //! [`CounterfactualStorePortV1::append_counterfactual_tick`] runs the same
 //! recheck and appends one later Tick in its own `BEGIN IMMEDIATE`
 //! transaction. Any failure or rejection rolls the whole transaction back.
@@ -48,17 +49,35 @@
 //!   republication updates only the facts, never the generation or the stored
 //!   artifacts.
 //! - **Readable artifacts.** The committed `RCF1` and `SIV1` bytes become
-//!   readable by their self-digests at the new generation. Staging later
+//!   readable by their self-digests at the new generation. Every writing
+//!   generation records its own `counterfactual_artifacts` row, so the
+//!   latest generation that wrote a digest is its highest row. Staging later
 //!   recomputed outputs is owned by the coordinator slices, not this adapter.
-//! - **Quarantine.** The invalid-artifact index (kind `0`) and the
-//!   cache/checkpoint eviction set (kind `1`) are both stored exactly, per
-//!   generation, and every member is quarantined permanently: a read reports
-//!   it as [`StoredCounterfactualArtifactV1::Quarantined`] even when this
-//!   store holds its bytes, which stay retained for audit only. An artifact
-//!   digest recorded again by a later generation keeps its first row (the
-//!   insert is skipped when the digest exists), so its `generation` column
-//!   names the generation that first recorded it; the column is informational
-//!   and no read depends on it.
+//! - **Quarantine by generation.** The invalid-artifact index (kind `0`) and
+//!   the cache/checkpoint eviction set (kind `1`) are both stored exactly,
+//!   keyed by the generation that committed them. A digest is quarantined
+//!   through its highest such generation minus one, the
+//!   [`CounterfactualInvalidationCommandV1::quarantines_through`] of that
+//!   invalidation, and every read resolves the stored state with
+//!   [`ForkGenerationV1::resolve_read`]: quarantined bytes written at or
+//!   before that generation stay retained for audit only, while the same
+//!   bytes written again by a later generation are readable there. A
+//!   quarantined digest this store holds no bytes for reads as absent.
+//! - **Recovery read.** The invalidation records its receipt's
+//!   [`CounterfactualGenerationRecordV1`] in the same transaction, in its
+//!   `counterfactual_generations` row: the first Tick's head and the facts
+//!   are copied from the persisted Fork row the basis was rechecked against,
+//!   which equal the receipt's. The
+//!   [`CounterfactualStorePortV1::committed_generation_receipt`] read
+//!   rebuilds the receipt from that row; a generation above `i64::MAX`
+//!   cannot have committed and reads as `None`.
+//! - **Outcome unknown.** A write whose commit or rollback failed is
+//!   `CoreError::StorageOutcomeUnknown`, reported through the crate's shared
+//!   `counterfactual_port_error` as `OutcomeUnknown`; a rejection never hides
+//!   it. Port reads refuse to run on a connection that is already inside a
+//!   transaction (`StorageFailure`): one left open by an in-doubt write holds
+//!   unsettled state, and an outer host transaction cannot be told apart from
+//!   it, so recovery reads answer only from settled state.
 //! - **Epoch monotonicity.** The store does not require a republished trust,
 //!   revocation, or erasure epoch to be at least the previously published
 //!   one; keeping the published epochs monotonic is a host obligation.
@@ -78,10 +97,14 @@
 //!   other `SQLite` Timeline read, and fail closed without a bound erasure
 //!   gate. Publishing facts writes host-owned facts only, touches no Timeline
 //!   Event or derived artifact, and is not fenced.
-//! - **Concurrency.** A read checks Fork visibility and then reads the
-//!   counterfactual state and the Fork head outside a transaction; like the
-//!   other `SQLite` reads, it relies on the single-writer `SqliteStore`
-//!   handle, so no commit can interleave between those reads.
+//! - **Concurrency.** Every port read runs its statements (Fork visibility,
+//!   the counterfactual rows, and the live Fork head) inside one deferred
+//!   read transaction, so they observe one consistent read point even when
+//!   another connection commits to the same file. Every write runs in its
+//!   `BEGIN IMMEDIATE` transaction and first compares `PRAGMA data_version`
+//!   with the bound erasure inventory, because another connection may have
+//!   changed the file; the single-handle `MemoryStore` has no equivalent
+//!   check.
 //! - **Timeline deletion.** Deleting a Fork Timeline keeps its counterfactual
 //!   rows, which the triggers protect; a Timeline later created with the same
 //!   ID continues at the retained generation rather than resetting it. The
@@ -102,7 +125,8 @@
 //!   no in-memory counterpart.
 
 use pos_core::{
-    CoreError, CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualInvalidationCommandV1,
+    CoreError, CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
+    CounterfactualGenerationRecordV1, CounterfactualInvalidationCommandV1,
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
     CounterfactualTickOutcomeV1, ErasureProtectedOperationV1, ForkGenerationV1, Hash,
     PipelineDraftBatchV1, Seq, StoredCounterfactualArtifactV1, TimelineId,
@@ -110,9 +134,10 @@ use pos_core::{
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{
-    begin_immediate_scope, finish_immediate_scope, normalize_schema_sql, sqlite_schema_ddl,
-    SqliteSchemaColumn, SqliteSchemaTable, SqliteStore,
+    begin_immediate_scope, finish_immediate_scope, normalize_schema_sql, seq_as_i64,
+    sqlite_schema_ddl, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore,
 };
+use crate::counterfactual_adapter::{counterfactual_port_error, COUNTERFACTUAL_SEAL};
 
 type StoreError = CounterfactualStoreErrorV1;
 
@@ -228,12 +253,54 @@ const COUNTERFACTUAL_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
                 not_null: true,
                 primary_key: false,
             },
+            SqliteSchemaColumn {
+                name: "first_tick_head",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "plan_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "dependency_graph_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "trust_epoch",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "revocation_epoch",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "erasure_epoch",
+                kind: "INTEGER",
+                not_null: true,
+                primary_key: false,
+            },
         ],
         constraints: &[
             "CHECK (generation >= 1)",
             "CHECK (length(frontier_digest) = 32)",
             "CHECK (length(invalidation_digest) = 32)",
             "CHECK (first_tick >= 0)",
+            "CHECK (first_tick_head >= 1)",
+            "CHECK (length(plan_digest) = 32)",
+            "CHECK (length(dependency_graph_digest) = 32)",
+            "CHECK (trust_epoch >= 0)",
+            "CHECK (revocation_epoch >= 0)",
+            "CHECK (erasure_epoch >= 0)",
         ],
     },
     SqliteSchemaTable {
@@ -291,7 +358,7 @@ const COUNTERFACTUAL_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
                 name: "generation",
                 kind: "INTEGER",
                 not_null: true,
-                primary_key: false,
+                primary_key: true,
             },
             SqliteSchemaColumn {
                 name: "artifact_bytes",
@@ -307,7 +374,8 @@ const COUNTERFACTUAL_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
     },
 ];
 
-/// One named index or trigger and the exact body every open requires.
+/// One named index or trigger and the exact body every open requires after
+/// `CREATE <kind> <name>`.
 struct CounterfactualSchemaObjectV1 {
     kind: &'static str,
     name: &'static str,
@@ -406,6 +474,7 @@ const COUNTERFACTUAL_SCHEMA_OBJECTS: &[CounterfactualSchemaObjectV1] = &[
                WHEN EXISTS (
                    SELECT 1 FROM counterfactual_artifacts
                    WHERE fork_id = NEW.fork_id AND artifact_digest = NEW.artifact_digest
+                     AND generation = NEW.generation
                )
                BEGIN SELECT RAISE(ABORT, 'counterfactual artifact is immutable'); END",
     },
@@ -437,8 +506,14 @@ impl ForkStateV1 {
 /// Raw `counterfactual_forks` columns before range validation.
 type ForkStateRowV1 = (i64, Vec<u8>, Vec<u8>, i64, i64, i64);
 
-/// Raw generation, quarantine flag, and staged bytes of one artifact lookup.
-type StoredArtifactRowV1 = (i64, bool, Option<Vec<u8>>);
+/// Raw current generation, quarantined-through generation, and the latest
+/// writing generation and bytes of one artifact lookup.
+type StoredArtifactRowV1 = (i64, Option<i64>, Option<i64>, Option<Vec<u8>>);
+
+/// Raw receipt columns of one `counterfactual_generations` row: frontier
+/// digest, invalidation digest, first Tick, first Tick head, plan digest,
+/// dependency-graph digest, and the trust, revocation, and erasure epochs.
+type GenerationRecordRowV1 = (Vec<u8>, Vec<u8>, i64, i64, Vec<u8>, Vec<u8>, i64, i64, i64);
 
 fn decode_fork_state(row: ForkStateRowV1) -> Result<ForkStateV1, StoreError> {
     let (generation, plan_digest, dependency_graph_digest, trust, revocation, erasure) = row;
@@ -470,27 +545,62 @@ fn sql_integer(value: u64) -> Result<i64, StoreError> {
     i64::try_from(value).or(Err(StoreError::FieldOutOfBounds))
 }
 
-/// Classify one artifact lookup; quarantine wins over staged bytes.
-fn stored_artifact(quarantined: bool, bytes: Option<Vec<u8>>) -> StoredCounterfactualArtifactV1 {
-    match (quarantined, bytes) {
-        (true, _) => StoredCounterfactualArtifactV1::Quarantined,
-        (false, None) => StoredCounterfactualArtifactV1::Absent,
-        (false, Some(bytes)) => StoredCounterfactualArtifactV1::Authoritative(bytes),
-    }
+/// Decode one artifact lookup into the current generation and the stored
+/// state [`ForkGenerationV1::resolve_read`] resolves.
+fn decode_artifact_state(
+    row: StoredArtifactRowV1,
+) -> Result<(u64, StoredCounterfactualArtifactV1), StoreError> {
+    let (generation, quarantined_through, written_generation, bytes) = row;
+    let stored = match (
+        written_generation.map(stored_u64),
+        quarantined_through.map(stored_u64).transpose(),
+        bytes,
+    ) {
+        (Some(Ok(written_generation)), Ok(quarantined_through), Some(bytes)) => {
+            Ok(StoredCounterfactualArtifactV1::Stored {
+                bytes,
+                written_generation,
+                quarantined_through,
+            })
+        }
+        (None, Ok(_), None) => Ok(StoredCounterfactualArtifactV1::Absent),
+        _ => Err(StoreError::CorruptState),
+    };
+    stored_u64(generation).and_then(|generation| stored.map(|stored| (generation, stored)))
 }
 
-/// A missing Timeline is `ForkNotFound`; every other backend error is a
-/// storage failure whose outcome the caller must not assume.
-const fn port_error(error: &CoreError) -> StoreError {
-    if matches!(error, CoreError::TimelineNotFound(_)) {
-        StoreError::ForkNotFound
-    } else {
-        StoreError::StorageFailure
+/// Decode one persisted receipt record of generation `at`.
+fn decode_generation_record(
+    at: ForkGenerationV1,
+    row: GenerationRecordRowV1,
+) -> Result<CounterfactualGenerationRecordV1, StoreError> {
+    match (
+        [row.0, row.1, row.4, row.5].map(stored_hash),
+        [row.2, row.3, row.6, row.7, row.8].map(stored_u64),
+    ) {
+        (
+            [Ok(frontier), Ok(invalidation), Ok(plan), Ok(graph)],
+            [Ok(tick), Ok(head), Ok(trust), Ok(revocation), Ok(erasure)],
+        ) => Ok(CounterfactualGenerationRecordV1 {
+            generation: at,
+            frontier_digest: frontier,
+            invalidation_digest: invalidation,
+            first_tick: tick,
+            first_tick_head: Seq::from_u64(head),
+            facts: CounterfactualFactsV1 {
+                plan_digest: plan,
+                dependency_graph_digest: graph,
+                trust_epoch: trust,
+                revocation_epoch: revocation,
+                erasure_epoch: erasure,
+            },
+        }),
+        _ => Err(StoreError::CorruptState),
     }
 }
 
 fn settle<T>(staged: Staged<T>) -> Result<T, StoreError> {
-    staged.unwrap_or_else(|error| Err(port_error(&error)))
+    staged.unwrap_or_else(|error| Err(counterfactual_port_error(&error)))
 }
 
 /// Run `next` only when the previous staged step accepted.
@@ -514,8 +624,10 @@ fn read_fork_state(conn: &Connection, fork: TimelineId) -> Staged<ForkStateV1> {
     })
 }
 
-/// Read the generation and one artifact's state in a single statement, so
-/// the pair is one consistent snapshot.
+/// Read the generation and one artifact's state in a single statement: the
+/// current generation, the generation the digest is quarantined through (the
+/// highest quarantining generation minus one), and the latest writing
+/// generation with its bytes.
 fn read_artifact_state(
     conn: &Connection,
     fork: TimelineId,
@@ -523,17 +635,21 @@ fn read_artifact_state(
 ) -> Staged<(u64, StoredCounterfactualArtifactV1)> {
     conn.query_row(
         "SELECT forks.generation,
-                EXISTS (
-                    SELECT 1 FROM counterfactual_quarantine AS quarantine
+                (
+                    SELECT MAX(quarantine.generation) - 1
+                    FROM counterfactual_quarantine AS quarantine
                     WHERE quarantine.fork_id = forks.fork_id
                       AND quarantine.artifact_digest = ?2
                 ),
-                (
-                    SELECT artifacts.artifact_bytes FROM counterfactual_artifacts AS artifacts
-                    WHERE artifacts.fork_id = forks.fork_id
-                      AND artifacts.artifact_digest = ?2
-                )
-         FROM counterfactual_forks AS forks WHERE forks.fork_id = ?1",
+                latest.generation,
+                latest.artifact_bytes
+         FROM counterfactual_forks AS forks
+         LEFT JOIN (
+             SELECT generation, artifact_bytes FROM counterfactual_artifacts
+             WHERE fork_id = ?1 AND artifact_digest = ?2
+             ORDER BY generation DESC LIMIT 1
+         ) AS latest ON 1
+         WHERE forks.fork_id = ?1",
         params![fork.to_string(), artifact_digest.as_bytes().as_slice()],
         |row| <StoredArtifactRowV1>::try_from(row),
     )
@@ -541,11 +657,31 @@ fn read_artifact_state(
     .map_err(SqliteStore::into_storage_error)
     .map(|row| {
         row.ok_or(StoreError::ForkNotFound)
-            .and_then(|(generation, quarantined, bytes)| {
-                stored_u64(generation)
-                    .map(|generation| (generation, stored_artifact(quarantined, bytes)))
-            })
+            .and_then(decode_artifact_state)
     })
+}
+
+/// Read the persisted receipt record of generation `at`; `None` when no
+/// invalidation committed it. A generation above `i64::MAX` cannot be stored,
+/// so it cannot have committed.
+fn read_generation_record(
+    conn: &Connection,
+    at: ForkGenerationV1,
+) -> Staged<Option<CounterfactualGenerationRecordV1>> {
+    let Ok(generation) = i64::try_from(at.generation) else {
+        return Ok(Ok(None));
+    };
+    conn.query_row(
+        "SELECT frontier_digest, invalidation_digest, first_tick, first_tick_head,
+                plan_digest, dependency_graph_digest,
+                trust_epoch, revocation_epoch, erasure_epoch
+         FROM counterfactual_generations WHERE fork_id = ?1 AND generation = ?2",
+        params![at.fork.to_string(), generation],
+        |row| <GenerationRecordRowV1>::try_from(row),
+    )
+    .optional()
+    .map_err(SqliteStore::into_storage_error)
+    .map(|row| row.map(|row| decode_generation_record(at, row)).transpose())
 }
 
 /// Read the committed generation before publishing; `None` before the first
@@ -597,20 +733,30 @@ fn write_fork_facts(
     .map_err(SqliteStore::into_storage_error)
 }
 
-/// Record the exact `RCF1`/`SIV1` bytes, make them readable by their
-/// digests, and advance the Fork generation.
+/// Record the receipt and the exact `RCF1`/`SIV1` bytes, make the bytes
+/// readable by their digests at this generation, and advance the Fork
+/// generation.
+///
+/// The receipt's facts are the command's expected facts, which the recheck
+/// found equal to the persisted Fork row, so the row's facts are copied.
 fn insert_generation(
     conn: &Connection,
     command: &CounterfactualInvalidationCommandV1,
     generation: i64,
     first_tick: i64,
+    first_tick_head: Seq,
 ) -> Result<(), CoreError> {
     let fork = command.fork().to_string();
     conn.execute(
         "INSERT INTO counterfactual_generations
          (fork_id, generation, frontier_digest, frontier_bytes,
-          invalidation_digest, invalidation_bytes, first_tick)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+          invalidation_digest, invalidation_bytes, first_tick, first_tick_head,
+          plan_digest, dependency_graph_digest,
+          trust_epoch, revocation_epoch, erasure_epoch)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                plan_digest, dependency_graph_digest,
+                trust_epoch, revocation_epoch, erasure_epoch
+         FROM counterfactual_forks WHERE fork_id = ?1",
         params![
             fork,
             generation,
@@ -619,17 +765,14 @@ fn insert_generation(
             command.invalidation().digest().as_bytes().as_slice(),
             command.invalidation().as_bytes(),
             first_tick,
+            seq_as_i64(first_tick_head),
         ],
     )
     .and_then(|_| {
         conn.prepare_cached(
             "INSERT INTO counterfactual_artifacts
              (fork_id, artifact_digest, generation, artifact_bytes)
-             SELECT ?1, ?2, ?3, ?4
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM counterfactual_artifacts
-                 WHERE fork_id = ?1 AND artifact_digest = ?2
-             )",
+             VALUES (?1, ?2, ?3, ?4)",
         )
         .and_then(|mut statement| {
             statement
@@ -742,7 +885,11 @@ impl SqliteStore {
         &self,
         object: &CounterfactualSchemaObjectV1,
     ) -> Result<(), CoreError> {
-        let expected = normalize_schema_sql(object.body);
+        // `sqlite_master` keeps the statement without `IF NOT EXISTS`.
+        let expected = normalize_schema_sql(&format!(
+            "CREATE {} {} {}",
+            object.kind, object.name, object.body
+        ));
         self.conn
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
@@ -752,7 +899,7 @@ impl SqliteStore {
             .optional()
             .map_err(Self::into_storage_error)
             .and_then(|sql| {
-                if sql.is_some_and(|sql| normalize_schema_sql(&sql).contains(&expected)) {
+                if sql.is_some_and(|sql| normalize_schema_sql(&sql) == expected) {
                     Ok(())
                 } else {
                     Err(CoreError::Storage(format!(
@@ -791,6 +938,28 @@ impl SqliteStore {
                 rejection
                     .filter(|_| outcome_known)
                     .map_or(Err(error), |rejected| Ok(Err(rejected)))
+            })
+    }
+
+    /// Run a multi-statement port read at one consistent read point: one
+    /// deferred read transaction. A connection already inside a transaction
+    /// may hold the unsettled state of an in-doubt write, so the read is
+    /// refused rather than answered from it.
+    fn in_counterfactual_read<T>(&self, work: impl FnOnce(&Self) -> Staged<T>) -> Staged<T> {
+        if !self.conn.is_autocommit() {
+            return Err(CoreError::Storage(
+                "counterfactual read refused inside an open transaction".to_owned(),
+            ));
+        }
+        self.conn
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(Self::into_storage_error)
+            .and_then(|()| {
+                let result = work(self);
+                self.conn
+                    .execute_batch("COMMIT")
+                    .map_err(Self::into_storage_error)
+                    .and(result)
             })
     }
 
@@ -861,32 +1030,38 @@ impl SqliteStore {
         let fork = command.fork();
         let staged = self
             .append_tick_in_transaction(fork, command.first_tick_drafts())
-            .map(|head| command.committed_receipt(head));
+            .map(|head| command.committed_receipt(&COUNTERFACTUAL_SEAL, head));
         then_staged(staged, |receipt| {
-            insert_generation(&self.conn, command, generation, first_tick)
-                .and_then(|()| {
-                    insert_quarantine(
-                        &self.conn,
-                        fork,
-                        generation,
-                        INVALID_ARTIFACT_KIND,
-                        command.invalid_artifacts(),
-                    )
-                })
-                .and_then(|()| {
-                    insert_quarantine(
-                        &self.conn,
-                        fork,
-                        generation,
-                        EVICTION_KIND,
-                        command.evictions(),
-                    )
-                })
-                .map(|()| {
-                    Ok(CounterfactualInvalidationOutcomeV1::Committed(Box::new(
-                        receipt,
-                    )))
-                })
+            insert_generation(
+                &self.conn,
+                command,
+                generation,
+                first_tick,
+                receipt.first_tick_head(),
+            )
+            .and_then(|()| {
+                insert_quarantine(
+                    &self.conn,
+                    fork,
+                    generation,
+                    INVALID_ARTIFACT_KIND,
+                    command.invalid_artifacts(),
+                )
+            })
+            .and_then(|()| {
+                insert_quarantine(
+                    &self.conn,
+                    fork,
+                    generation,
+                    EVICTION_KIND,
+                    command.evictions(),
+                )
+            })
+            .map(|()| {
+                Ok(CounterfactualInvalidationOutcomeV1::Committed(Box::new(
+                    receipt,
+                )))
+            })
         })
     }
 }
@@ -974,9 +1149,9 @@ impl CounterfactualStorePortV1 for SqliteStore {
                             || {
                                 // The outcome is built from the staged head; a
                                 // head that did not advance rolls back.
-                                store
-                                    .append_tick_in_transaction(fork, drafts)
-                                    .map(|head| persisted.committed_tick(head))
+                                store.append_tick_in_transaction(fork, drafts).map(|head| {
+                                    persisted.committed_tick(&COUNTERFACTUAL_SEAL, head)
+                                })
                             },
                             |conflict| Ok(Ok(CounterfactualTickOutcomeV1::Stale(conflict))),
                         )
@@ -989,8 +1164,10 @@ impl CounterfactualStorePortV1 for SqliteStore {
     fn current_fork_generation(&self, fork: TimelineId) -> Result<ForkGenerationV1, StoreError> {
         settle(
             self.with_erasure_read_fence(fork, ErasureProtectedOperationV1::Read, |store| {
-                then_staged(store.visible_counterfactual_fork(fork), |()| {
-                    read_fork_state(&store.conn, fork)
+                store.in_counterfactual_read(|store| {
+                    then_staged(store.visible_counterfactual_fork(fork), |()| {
+                        read_fork_state(&store.conn, fork)
+                    })
                 })
             }),
         )
@@ -1006,9 +1183,34 @@ impl CounterfactualStorePortV1 for SqliteStore {
     ) -> Result<CounterfactualBasisV1, StoreError> {
         settle(
             self.with_erasure_read_fence(fork, ErasureProtectedOperationV1::Read, |store| {
-                store.persisted_counterfactual_basis(fork)
+                store.in_counterfactual_read(|store| store.persisted_counterfactual_basis(fork))
             }),
         )
+    }
+
+    fn committed_generation_receipt(
+        &self,
+        at: ForkGenerationV1,
+    ) -> Result<Option<CounterfactualGenerationReceiptV1>, StoreError> {
+        let fork = at.fork;
+        settle(
+            self.with_erasure_read_fence(fork, ErasureProtectedOperationV1::Read, |store| {
+                store.in_counterfactual_read(|store| {
+                    then_staged(store.visible_counterfactual_fork(fork), |()| {
+                        then_staged(read_fork_state(&store.conn, fork), |_| {
+                            read_generation_record(&store.conn, at)
+                        })
+                    })
+                })
+            }),
+        )
+        .and_then(|record| {
+            record
+                .map(|record| {
+                    CounterfactualGenerationReceiptV1::from_record(&COUNTERFACTUAL_SEAL, record)
+                })
+                .transpose()
+        })
     }
 
     fn read_generation_artifact(
@@ -1019,8 +1221,10 @@ impl CounterfactualStorePortV1 for SqliteStore {
         let fork = at.fork;
         settle(
             self.with_erasure_read_fence(fork, ErasureProtectedOperationV1::Read, |store| {
-                then_staged(store.visible_counterfactual_fork(fork), |()| {
-                    read_artifact_state(&store.conn, fork, artifact_digest)
+                store.in_counterfactual_read(|store| {
+                    then_staged(store.visible_counterfactual_fork(fork), |()| {
+                        read_artifact_state(&store.conn, fork, artifact_digest)
+                    })
                 })
             }),
         )
@@ -1030,7 +1234,204 @@ impl CounterfactualStorePortV1 for SqliteStore {
 
 #[cfg(test)]
 mod tests {
+    use pos_core::counterfactual_store::test_fixtures::{
+        frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, uint,
+    };
+    use pos_core::{
+        CanonicalBytes, CounterfactualInvalidationInputV1, EntityId, EventDraft, EventStore, Kind,
+        RecomputationFrontierBytesV1, SuffixInvalidationBytesV1,
+    };
+
     use super::*;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+        })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn drafts() -> PipelineDraftBatchV1 {
+        ok(PipelineDraftBatchV1::try_new(vec![EventDraft::new(
+            EntityId::new(),
+            Kind::new("counterfactual.tick"),
+            CanonicalBytes::from_vec(vec![1]),
+        )]))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    const fn facts() -> CounterfactualFactsV1 {
+        CounterfactualFactsV1 {
+            plan_digest: Hash::from_bytes([5; 32]),
+            dependency_graph_digest: Hash::from_bytes([3; 32]),
+            trust_epoch: 0,
+            revocation_epoch: 0,
+            erasure_epoch: 0,
+        }
+    }
+
+    /// The invalidation of generation 0 of `fork`, whose head is Seq 1.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn command(fork: TimelineId) -> CounterfactualInvalidationCommandV1 {
+        let frontier = ok(RecomputationFrontierBytesV1::try_from_canonical(
+            frontier_frame(
+                &[
+                    id_field([1; 16]),
+                    hash_field(facts().plan_digest),
+                    hash_field(Hash::from_bytes([2; 32])),
+                    hash_field(facts().dependency_graph_digest),
+                    vec![0x01],
+                ]
+                .concat(),
+                0,
+            ),
+        ));
+        let invalidation = ok(SuffixInvalidationBytesV1::try_from_canonical(
+            invalidation_frame(
+                &[
+                    id_field([4; 16]),
+                    hash_field(facts().plan_digest),
+                    id_field(fork.inner().to_bytes()),
+                    uint(0),
+                    uint(1),
+                    hash_field(frontier.digest()),
+                    invalidation_middle(),
+                    vec![0x83],
+                    id_field(fork.inner().to_bytes()),
+                    uint(1),
+                    uint(1),
+                ]
+                .concat(),
+                0,
+            ),
+        ));
+        ok(CounterfactualInvalidationCommandV1::try_new(
+            CounterfactualInvalidationInputV1 {
+                fork,
+                fork_logical_head: Seq::from_u64(1),
+                trust_epoch: 0,
+                revocation_epoch: 0,
+                erasure_epoch: 0,
+                frontier,
+                invalidation,
+                invalid_artifacts: vec![Hash::from_bytes([9; 32])],
+                evictions: Vec::new(),
+                first_tick: 1,
+                first_tick_drafts: drafts(),
+            },
+        ))
+    }
+
+    /// An in-memory store with a published Fork at logical Seq 1.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn published_store() -> (SqliteStore, TimelineId) {
+        let mut store = super::super::tests::new_store();
+        let root = ok(store.create_timeline("counterfactual-root")).id();
+        ok(store.append(root, drafts().drafts()));
+        let fork = ok(store.fork(root, Seq::from_u64(1), "counterfactual-fork")).id();
+        ok(store.publish_counterfactual_facts(fork, facts()));
+        (store, fork)
+    }
+
+    /// Make the next commit fail and its rollback fail too, so every write
+    /// reports an unknown outcome although nothing committed.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fail_commits(store: &SqliteStore, fail: bool) {
+        if fail {
+            ok(store.conn.commit_hook(Some(|| true)));
+        } else {
+            ok(store.conn.commit_hook::<fn() -> bool>(None));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn an_in_doubt_invalidation_is_outcome_unknown_and_recoverable() {
+        let (mut store, fork) = published_store();
+        let command = command(fork);
+        let next = command.new_generation();
+
+        fail_commits(&store, true);
+        let in_doubt = store.commit_counterfactual_invalidation(&command);
+        fail_commits(&store, false);
+
+        assert_eq!(in_doubt, Err(StoreError::OutcomeUnknown));
+        // The recovery read finds nothing committed at the new generation, so
+        // the same command is retried.
+        assert_eq!(store.committed_generation_receipt(next), Ok(None));
+        assert_eq!(
+            store.current_counterfactual_basis(fork),
+            Ok(command.expected_basis())
+        );
+        let receipt = ok(command.committed_receipt(&COUNTERFACTUAL_SEAL, Seq::from_u64(2)));
+        assert_eq!(
+            store.commit_counterfactual_invalidation(&command),
+            Ok(CounterfactualInvalidationOutcomeV1::Committed(Box::new(
+                receipt
+            )))
+        );
+        assert_eq!(store.committed_generation_receipt(next), Ok(Some(receipt)));
+        assert!(receipt.matches_invalidation(command.invalidation()));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn in_doubt_ticks_and_publications_are_outcome_unknown() {
+        let (mut store, fork) = published_store();
+        let receipt = match ok(store.commit_counterfactual_invalidation(&command(fork))) {
+            CounterfactualInvalidationOutcomeV1::Committed(receipt) => receipt,
+            other @ CounterfactualInvalidationOutcomeV1::InvalidationConflict(_) => {
+                std::panic::resume_unwind(Box::new(format!("expected a commit, got {other:?}")))
+            }
+        };
+        let expected = receipt.tick_basis(receipt.first_tick_head());
+
+        fail_commits(&store, true);
+        let tick = store.append_counterfactual_tick(fork, &expected, &drafts());
+        let publication = store.publish_counterfactual_facts(fork, facts());
+        fail_commits(&store, false);
+
+        assert_eq!(tick, Err(StoreError::OutcomeUnknown));
+        assert_eq!(publication, Err(StoreError::OutcomeUnknown));
+        // An unmoved basis proves the in-doubt Tick did not commit.
+        let persisted = ok(store.current_counterfactual_basis(fork));
+        assert_eq!(expected.first_conflict(&persisted), None);
+        assert_eq!(
+            store.append_counterfactual_tick(fork, &expected, &drafts()),
+            Ok(CounterfactualTickOutcomeV1::Committed {
+                head: Seq::from_u64(3)
+            })
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn reads_run_in_one_transaction_and_refuse_unsettled_state() {
+        let (store, fork) = published_store();
+        let observed = store.in_counterfactual_read(|store| Ok(Ok(store.conn.is_autocommit())));
+        assert!(matches!(observed, Ok(Ok(false))));
+        assert!(store.conn.is_autocommit());
+
+        // A connection left inside a transaction may hold an in-doubt write.
+        assert!(store.conn.execute_batch("BEGIN").is_ok());
+        assert!(matches!(
+            store.in_counterfactual_read(|_| Ok(Ok(()))),
+            Err(CoreError::Storage(_))
+        ));
+        assert_eq!(
+            store.current_counterfactual_basis(fork),
+            Err(StoreError::StorageFailure)
+        );
+        assert!(store.conn.execute_batch("ROLLBACK").is_ok());
+        assert_eq!(
+            store.current_fork_generation(fork),
+            Ok(ForkGenerationV1 {
+                fork,
+                generation: 0
+            })
+        );
+    }
 
     /// A rejection is reported only while its rollback is guaranteed: once
     /// the rollback itself fails, the unknown outcome wins.

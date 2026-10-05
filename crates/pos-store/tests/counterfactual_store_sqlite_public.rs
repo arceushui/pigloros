@@ -4,8 +4,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use pos_core::counterfactual_store::test_fixtures::{
+    frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, uint,
+};
 use pos_core::{
-    CanonicalBytes, CounterfactualBasisV1, CounterfactualFactsV1,
+    CanonicalBytes, CounterfactualAdapterSealV1, CounterfactualBasisV1, CounterfactualFactsV1,
     CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
     CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
     CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId,
@@ -21,6 +24,21 @@ type StoreError = CounterfactualStoreErrorV1;
 type Outcome = CounterfactualInvalidationOutcomeV1;
 type TickOutcome = CounterfactualTickOutcomeV1;
 
+/// Every column of one `counterfactual_generations` row after its key.
+type StoredGenerationRow = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    i64,
+    i64,
+    Vec<u8>,
+    Vec<u8>,
+    i64,
+    i64,
+    i64,
+);
+
 /// One stale-basis case: how the expectation is altered and the conflict.
 type StaleCase<T> = (fn(&mut T), InvalidationConflictV1);
 
@@ -30,10 +48,8 @@ type EpochSetter = (fn(&mut CounterfactualFactsV1, u64), InvalidationConflictV1)
 /// Event types the generic append guard conceals as an absent Fork.
 const GUARDED_KINDS: [&str; 3] = ["geo.location", "geo.cell", "consent.granted.v1"];
 
-const FRONTIER_DOMAIN: &[u8] = b"PiglorOS.RecomputationFrontier.v1";
-const INVALIDATION_DOMAIN: &[u8] = b"PiglorOS.SuffixInvalidation.v1";
-const FRONTIER_PREFIX: [u8; 6] = [0x64, b'R', b'C', b'F', b'1', 0x01];
-const INVALIDATION_PREFIX: [u8; 6] = [0x64, b'S', b'I', b'V', b'1', 0x01];
+/// The adapter seal, minted here only to build expected receipts.
+const SEAL: CounterfactualAdapterSealV1 = CounterfactualAdapterSealV1::for_adapter();
 /// The largest integer `SQLite` stores.
 const SQL_MAX: u64 = 9_223_372_036_854_775_807;
 
@@ -81,89 +97,6 @@ fn tick_drafts(values: &[u8], guarded: Option<&str>) -> PipelineDraftBatchV1 {
     ))
 }
 
-/// Encode one shortest-form CBOR unsigned integer.
-fn uint(value: u64) -> Vec<u8> {
-    let bytes = value.to_be_bytes();
-    match value {
-        0..=23 => vec![bytes[7]],
-        24..=0xff => vec![0x18, bytes[7]],
-        0x100..=0xffff => [&[0x19][..], &bytes[6..]].concat(),
-        0x1_0000..=0xffff_ffff => [&[0x1a][..], &bytes[4..]].concat(),
-        _ => [&[0x1b][..], &bytes[..]].concat(),
-    }
-}
-
-/// Encode one shortest-form CBOR head of `major` with `argument`.
-fn head(major: u8, argument: u64) -> Vec<u8> {
-    let mut encoded = uint(argument);
-    encoded[0] |= major << 5;
-    encoded
-}
-
-fn text_field(value: &str) -> Vec<u8> {
-    [
-        head(3, ok(u64::try_from(value.len()))),
-        value.as_bytes().to_vec(),
-    ]
-    .concat()
-}
-
-/// Encode one six-field dependency-node coordinate.
-fn node_field(tick: u64, owner: &str) -> Vec<u8> {
-    [
-        vec![0x86],
-        uint(tick),
-        uint(0),
-        text_field(owner),
-        uint(0),
-        uint(7),
-        hash_field(hash(21)),
-    ]
-    .concat()
-}
-
-/// Encode `SIV1` fields 8 through 14, as the `pos-core` port tests do.
-fn invalidation_middle() -> Vec<u8> {
-    [
-        node_field(5, "agent-a"),
-        node_field(4_294_967_296, "an-owner-identifier-of-thirty-"),
-        vec![0x81, 0x86],
-        text_field("event"),
-        uint(70_000),
-        hash_field(hash(22)),
-        node_field(5, "agent-a"),
-        uint(300),
-        uint(0),
-        vec![0x81],
-        hash_field(hash(23)),
-        vec![0x80, 0x80],
-        uint(0),
-    ]
-    .concat()
-}
-
-fn id_field(value: [u8; 16]) -> Vec<u8> {
-    [&[0x50][..], &value[..]].concat()
-}
-
-fn hash_field(value: Hash) -> Vec<u8> {
-    [&[0x58, 0x20][..], &value.as_bytes()[..]].concat()
-}
-
-/// Frame fields after the version as one self-digested record.
-fn frame(heads: (u8, u8), prefix: [u8; 6], domain: &[u8], fields: &[u8]) -> Vec<u8> {
-    let mut bytes = vec![heads.0];
-    bytes.extend_from_slice(&prefix);
-    bytes.extend_from_slice(fields);
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(domain);
-    hasher.update(&[0, heads.1]);
-    hasher.update(&bytes[1..]);
-    bytes.extend_from_slice(&[0x58, 0x20]);
-    bytes.extend_from_slice(hasher.finalize().as_bytes());
-    bytes
-}
-
 /// One invalidation request; every field defaults to the fixture's basis.
 struct Spec {
     fork: TimelineId,
@@ -201,12 +134,9 @@ impl Spec {
             vec![0x01],
         ]
         .concat();
-        ok(RecomputationFrontierBytesV1::try_from_canonical(frame(
-            (0x91, 0x90),
-            FRONTIER_PREFIX,
-            FRONTIER_DOMAIN,
-            &fields,
-        )))
+        ok(RecomputationFrontierBytesV1::try_from_canonical(
+            frontier_frame(&fields, 0),
+        ))
     }
 
     fn invalidation(&self, frontier: &RecomputationFrontierBytesV1) -> SuffixInvalidationBytesV1 {
@@ -225,12 +155,9 @@ impl Spec {
             uint(self.first_tick),
         ]
         .concat();
-        ok(SuffixInvalidationBytesV1::try_from_canonical(frame(
-            (0x92, 0x91),
-            INVALIDATION_PREFIX,
-            INVALIDATION_DOMAIN,
-            &fields,
-        )))
+        ok(SuffixInvalidationBytesV1::try_from_canonical(
+            invalidation_frame(&fields, 0),
+        ))
     }
 
     fn command(&self) -> CounterfactualInvalidationCommandV1 {
@@ -352,7 +279,7 @@ fn commit_persists_the_whole_generation_atomically() {
     assert_eq!(
         store.commit_counterfactual_invalidation(&command),
         Ok(Outcome::Committed(Box::new(ok(
-            command.committed_receipt(Seq::from_u64(4))
+            command.committed_receipt(&SEAL, Seq::from_u64(4))
         ))))
     );
     assert_eq!(store.current_fork_generation(fork), Ok(at(fork, 1)));
@@ -364,10 +291,11 @@ fn commit_persists_the_whole_generation_atomically() {
         rusqlite::Connection::open(&fixture.path).and_then(|connection| {
             connection.query_row(
                 "SELECT frontier_digest, frontier_bytes, invalidation_digest, invalidation_bytes,
-                    first_tick
+                    first_tick, first_tick_head, plan_digest, dependency_graph_digest,
+                    trust_epoch, revocation_epoch, erasure_epoch
              FROM counterfactual_generations WHERE fork_id = ?1 AND generation = 1",
                 rusqlite::params![fork.to_string()],
-                |row| <(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, i64)>::try_from(row),
+                |row| <StoredGenerationRow>::try_from(row),
             )
         }),
     );
@@ -379,6 +307,12 @@ fn commit_persists_the_whole_generation_atomically() {
             command.invalidation().digest().as_bytes().to_vec(),
             command.invalidation().as_bytes().to_vec(),
             17,
+            4,
+            hash(5).as_bytes().to_vec(),
+            hash(3).as_bytes().to_vec(),
+            6,
+            7,
+            8,
         )
     );
     for (kind, digest) in [(0, hash(10)), (0, hash(11)), (1, hash(12))] {
@@ -400,10 +334,11 @@ fn commit_persists_the_whole_generation_atomically() {
         reopened.read_generation_artifact(current, command.invalidation().digest()),
         Ok(Some(command.invalidation().as_bytes().to_vec()))
     );
+    // A quarantined digest this store holds no bytes for reads as absent.
     for quarantined in [hash(10), hash(11), hash(12)] {
         assert_eq!(
             reopened.read_generation_artifact(current, quarantined),
-            Err(StoreError::InvalidArtifactReuse)
+            Ok(None)
         );
     }
     assert_eq!(
@@ -441,12 +376,13 @@ fn a_later_generation_quarantines_stored_bytes_permanently() {
     assert_eq!(
         store.commit_counterfactual_invalidation(&second),
         Ok(Outcome::Committed(Box::new(ok(
-            second.committed_receipt(Seq::from_u64(6))
+            second.committed_receipt(&SEAL, Seq::from_u64(6))
         ))))
     );
     assert_eq!(generation(&store, fork), 2);
     let current = at(fork, 2);
-    // Quarantine wins over stored bytes; the bytes stay for audit only.
+    // Bytes written at or before the quarantined generation stay for audit
+    // only.
     assert_eq!(
         store.read_generation_artifact(current, first.frontier().digest()),
         Err(StoreError::InvalidArtifactReuse)
@@ -463,10 +399,7 @@ fn a_later_generation_quarantines_stored_bytes_permanently() {
         store.read_generation_artifact(current, first.invalidation().digest()),
         Ok(Some(first.invalidation().as_bytes().to_vec()))
     );
-    assert_eq!(
-        store.read_generation_artifact(current, hash(10)),
-        Err(StoreError::InvalidArtifactReuse)
-    );
+    assert_eq!(store.read_generation_artifact(current, hash(10)), Ok(None));
 
     // Republishing facts replaces them without resetting the generation.
     let mut republished = facts();
@@ -599,15 +532,15 @@ fn injected_faults_roll_back_everything_and_recover_after_reopen() {
     assert_eq!(
         recovered.commit_counterfactual_invalidation(&command),
         Ok(Outcome::Committed(Box::new(ok(
-            command.committed_receipt(Seq::from_u64(4))
+            command.committed_receipt(&SEAL, Seq::from_u64(4))
         ))))
     );
     drop(recovered);
     let reopened = open(&fixture.path);
     assert_eq!(generation(&reopened, fork), 1);
     assert_eq!(
-        reopened.read_generation_artifact(at(fork, 1), hash(11)),
-        Err(StoreError::InvalidArtifactReuse)
+        reopened.committed_generation_receipt(at(fork, 1)),
+        Ok(Some(ok(command.committed_receipt(&SEAL, Seq::from_u64(4)))))
     );
     assert_eq!(written_rows(&fixture.path, fork), [2, 1, 3, 2]);
 }
@@ -642,10 +575,6 @@ fn the_database_never_decreases_a_generation_or_rewrites_recorded_state() {
 
     let mut reopened = open(&fixture.path);
     assert_eq!(generation(&reopened, fork), 1);
-    assert_eq!(
-        reopened.read_generation_artifact(at(fork, 1), hash(10)),
-        Err(StoreError::InvalidArtifactReuse)
-    );
     // The recorded bytes are unchanged by the refused rewrites.
     let command = Spec::new(fork).command();
     assert_eq!(
@@ -694,6 +623,10 @@ fn missing_root_and_unpublished_timelines_are_not_forks() {
         );
         assert_eq!(
             store.current_counterfactual_basis(timeline),
+            Err(StoreError::ForkNotFound)
+        );
+        assert_eq!(
+            store.committed_generation_receipt(at(timeline, 1)),
             Err(StoreError::ForkNotFound)
         );
     }
@@ -827,6 +760,10 @@ fn containment_and_admitted_forks_fail_closed() {
         ungated.read_generation_artifact(at(fork, 0), hash(1)),
         Err(StoreError::StorageFailure)
     );
+    assert_eq!(
+        ungated.committed_generation_receipt(at(fork, 1)),
+        Err(StoreError::StorageFailure)
+    );
     drop(ungated);
     assert_eq!(written_rows(&fixture.path, fork), [0; 4]);
 
@@ -891,6 +828,10 @@ fn a_geographic_evidence_protected_fork_is_not_found() {
     );
     assert_eq!(
         store.current_counterfactual_basis(fork),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.committed_generation_receipt(at(fork, 1)),
         Err(StoreError::ForkNotFound)
     );
     assert_eq!(written_rows(&fixture.path, fork), [0; 4]);
@@ -1316,7 +1257,7 @@ fn a_head_that_does_not_advance_is_corrupt_and_rolls_back() {
 }
 
 #[test]
-fn a_repeated_frontier_keeps_its_first_artifact_row() {
+fn a_repeated_frontier_is_recorded_at_each_generation() {
     let fixture = fixture();
     let fork = fixture.fork;
     let mut store = open(&fixture.path);
@@ -1333,14 +1274,17 @@ fn a_repeated_frontier_keeps_its_first_artifact_row() {
         store.commit_counterfactual_invalidation(&repeated),
         Ok(Outcome::Committed(_))
     ));
-    assert_eq!(written_rows(&fixture.path, fork), [4, 2, 3, 3]);
+    assert_eq!(written_rows(&fixture.path, fork), [4, 2, 3, 4]);
     assert_eq!(
         count(
             &fixture.path,
-            "SELECT generation FROM counterfactual_artifacts
-             WHERE fork_id = ?1 AND artifact_digest = (
-                 SELECT frontier_digest FROM counterfactual_generations
-                 WHERE fork_id = ?1 AND generation = 2
+            "SELECT group_concat(generation) = '1,2' FROM (
+                 SELECT generation FROM counterfactual_artifacts
+                 WHERE fork_id = ?1 AND artifact_digest = (
+                     SELECT frontier_digest FROM counterfactual_generations
+                     WHERE fork_id = ?1 AND generation = 2
+                 )
+                 ORDER BY generation
              )",
             fork
         ),
@@ -1366,7 +1310,8 @@ fn replacing_inserts_cannot_rewrite_recorded_state() {
          FROM counterfactual_forks",
         "REPLACE INTO counterfactual_generations
          SELECT fork_id, generation, frontier_digest, X'00', invalidation_digest,
-                invalidation_bytes, first_tick
+                invalidation_bytes, first_tick, first_tick_head, plan_digest,
+                dependency_graph_digest, trust_epoch, revocation_epoch, erasure_epoch
          FROM counterfactual_generations",
         "INSERT OR REPLACE INTO counterfactual_artifacts
          SELECT fork_id, artifact_digest, generation, X'00' FROM counterfactual_artifacts",
@@ -1384,8 +1329,8 @@ fn replacing_inserts_cannot_rewrite_recorded_state() {
         Ok(Some(command.frontier().as_bytes().to_vec()))
     );
     assert_eq!(
-        reopened.read_generation_artifact(at(fork, 1), hash(12)),
-        Err(StoreError::InvalidArtifactReuse)
+        reopened.committed_generation_receipt(at(fork, 1)),
+        Ok(Some(receipt))
     );
     let stored = ok(
         rusqlite::Connection::open(&fixture.path).and_then(|connection| {
@@ -1455,4 +1400,181 @@ fn a_pre_schema_file_opens_read_only_without_counterfactual_state() {
         read_only.current_fork_generation(fork),
         Err(StoreError::ForkNotFound)
     );
+}
+
+#[test]
+fn bytes_rewritten_by_a_later_generation_are_readable_there() {
+    let fixture = fixture();
+    let fork = fixture.fork;
+    let mut store = open(&fixture.path);
+    let first = Spec::new(fork).command();
+    assert!(matches!(
+        store.commit_counterfactual_invalidation(&first),
+        Ok(Outcome::Committed(_))
+    ));
+    let mut spec = Spec::new(fork);
+    spec.prior = 1;
+    spec.head = 4;
+    spec.frontier_id = 2;
+    spec.invalid_artifacts = vec![first.frontier().digest()];
+    spec.evictions = Vec::new();
+    assert!(matches!(
+        store.commit_counterfactual_invalidation(&spec.command()),
+        Ok(Outcome::Committed(_))
+    ));
+    assert_eq!(
+        store.read_generation_artifact(at(fork, 2), first.frontier().digest()),
+        Err(StoreError::InvalidArtifactReuse)
+    );
+
+    // The third generation recomputes the first generation's exact frontier.
+    spec.prior = 2;
+    spec.head = 6;
+    spec.frontier_id = 1;
+    spec.invalid_artifacts = Vec::new();
+    let third = spec.command();
+    assert_eq!(third.frontier(), first.frontier());
+    assert!(matches!(
+        store.commit_counterfactual_invalidation(&third),
+        Ok(Outcome::Committed(_))
+    ));
+    drop(store);
+
+    let reopened = open(&fixture.path);
+    assert_eq!(
+        reopened.read_generation_artifact(at(fork, 3), first.frontier().digest()),
+        Ok(Some(first.frontier().as_bytes().to_vec()))
+    );
+    assert_eq!(
+        reopened.read_generation_artifact(at(fork, 3), first.invalidation().digest()),
+        Ok(Some(first.invalidation().as_bytes().to_vec()))
+    );
+}
+
+#[test]
+fn committed_generation_receipts_are_recoverable_after_reopen() {
+    let fixture = fixture();
+    let fork = fixture.fork;
+    let mut store = open(&fixture.path);
+    assert_eq!(store.committed_generation_receipt(at(fork, 0)), Ok(None));
+    assert_eq!(store.committed_generation_receipt(at(fork, 1)), Ok(None));
+    let first = commit_default(&mut store, fork);
+    let mut spec = Spec::new(fork);
+    spec.prior = 1;
+    spec.head = 4;
+    spec.frontier_id = 2;
+    let second = spec.command();
+    assert!(matches!(
+        store.commit_counterfactual_invalidation(&second),
+        Ok(Outcome::Committed(_))
+    ));
+    drop(store);
+
+    let reopened = open(&fixture.path);
+    assert_eq!(
+        reopened.committed_generation_receipt(at(fork, 1)),
+        Ok(Some(first))
+    );
+    let recovered = ok(reopened.committed_generation_receipt(at(fork, 2)));
+    assert_eq!(
+        recovered,
+        Some(ok(second.committed_receipt(&SEAL, Seq::from_u64(6))))
+    );
+    assert!(recovered.is_some_and(|receipt| receipt.matches_invalidation(second.invalidation())));
+    // Nothing committed generation 0 or any generation after the committed
+    // one, including generations SQLite cannot store.
+    for absent in [0, 3, SQL_MAX, SQL_MAX + 1, u64::MAX] {
+        assert_eq!(
+            reopened.committed_generation_receipt(at(fork, absent)),
+            Ok(None),
+            "{absent}"
+        );
+    }
+}
+
+#[test]
+fn corrupt_receipts_and_artifact_rows_are_rejected_closed() {
+    for (table, trigger, assignment) in [
+        (
+            "counterfactual_generations",
+            "counterfactual_generations_immutable",
+            "first_tick_head = -1",
+        ),
+        (
+            "counterfactual_generations",
+            "counterfactual_generations_immutable",
+            "plan_digest = X'00'",
+        ),
+        (
+            "counterfactual_artifacts",
+            "counterfactual_artifacts_immutable",
+            "generation = -1",
+        ),
+    ] {
+        let fixture = fixture();
+        let fork = fixture.fork;
+        let mut store = open(&fixture.path);
+        let receipt = commit_default(&mut store, fork);
+        drop(store);
+        ok(execute(
+            &fixture.path,
+            &format!(
+                "PRAGMA ignore_check_constraints = ON;
+                 DROP TRIGGER {trigger};
+                 UPDATE {table} SET {assignment};"
+            ),
+        ));
+        let reopened = open(&fixture.path);
+        let (receipt_read, artifact_read) = if table == "counterfactual_artifacts" {
+            (Ok(Some(receipt)), Err(StoreError::CorruptState))
+        } else {
+            (
+                Err(StoreError::CorruptState),
+                Ok(Some(
+                    Spec::new(fork).command().frontier().as_bytes().to_vec(),
+                )),
+            )
+        };
+        assert_eq!(
+            reopened.committed_generation_receipt(at(fork, 1)),
+            receipt_read,
+            "{assignment}"
+        );
+        assert_eq!(
+            reopened.read_generation_artifact(at(fork, 1), receipt.frontier_digest()),
+            artifact_read,
+            "{assignment}"
+        );
+    }
+}
+
+#[test]
+fn a_drifted_index_definition_is_rejected_on_open() {
+    let fixture = fixture();
+    let path_text = fixture.path.to_str().unwrap_or_default();
+    for drifted in [
+        "CREATE UNIQUE INDEX idx_counterfactual_quarantine_artifact
+         ON counterfactual_quarantine(fork_id, artifact_digest)",
+        "CREATE INDEX idx_counterfactual_quarantine_artifact
+         ON counterfactual_quarantine(fork_id, artifact_digest) WHERE kind = 0",
+    ] {
+        ok(execute(
+            &fixture.path,
+            &format!("DROP INDEX idx_counterfactual_quarantine_artifact; {drifted};"),
+        ));
+        assert!(
+            open_error(SqliteStore::open(path_text)).contains("idx_counterfactual_quarantine"),
+            "{drifted}"
+        );
+        assert!(
+            open_error(SqliteStore::open_read_only(path_text))
+                .contains("idx_counterfactual_quarantine"),
+            "{drifted}"
+        );
+    }
+    ok(execute(
+        &fixture.path,
+        "DROP INDEX idx_counterfactual_quarantine_artifact;",
+    ));
+    assert_eq!(open_error(SqliteStore::open(path_text)), "");
 }
