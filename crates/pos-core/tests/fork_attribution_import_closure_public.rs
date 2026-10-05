@@ -233,7 +233,7 @@ fn signed_manifest(
     )?)
 }
 
-fn manifest_input(
+const fn manifest_input(
     admission_digest: Hash,
     intervention_sequences: Vec<u64>,
     final_head: u64,
@@ -1030,7 +1030,7 @@ fn assert_classifier_rows(shape: Shape) -> TestResult {
         apply_source,
         &[
             |fcs| fcs.room_revision_descriptor_hash = hash(OTHER),
-            |fcs| fcs.registrar_identifier = "registrar-b".to_owned(),
+            |fcs| "registrar-b".clone_into(&mut fcs.registrar_identifier),
             |fcs| fcs.routes.truncate(1),
         ],
     )?;
@@ -1041,7 +1041,7 @@ fn assert_classifier_rows(shape: Shape) -> TestResult {
             |fct| fct.child_timeline_id = timeline_id(3),
             |fct| fct.fork_admission_digest = hash(OTHER),
             |fct| fct.room_revision_descriptor_hash = hash(OTHER),
-            |fct| fct.registrar_identifier = "registrar-b".to_owned(),
+            |fct| "registrar-b".clone_into(&mut fct.registrar_identifier),
             |fct| fct.source_configuration_revision_digest = hash(OTHER),
             |fct| fct.routes.truncate(1),
         ],
