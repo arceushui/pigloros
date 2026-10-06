@@ -114,9 +114,10 @@ fn local_admission_rejects_empty_or_unpinned_registries() -> TestResult {
     };
     let mut registry = PluginRegistry::new();
     registry.register_generated(&plugin, None, None)?;
+    // A generated Plugin has no host-authored slot, which is checked first.
     assert!(matches!(
         registry.admit_local_manifest_registration(owner, 1),
-        Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
+        Err(ManifestRegistrationErrorV1::MissingSlot { .. })
     ));
     Ok(())
 }
