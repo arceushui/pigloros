@@ -534,11 +534,7 @@ impl<'a> Wire<'a> {
     }
 
     fn byte(&mut self) -> Result<u8, ManifestPluginRosterErrorV1> {
-        let byte = self
-            .bytes
-            .get(self.offset)
-            .copied()
-            .ok_or(INVALID)?;
+        let byte = self.bytes.get(self.offset).copied().ok_or(INVALID)?;
         self.offset += 1;
         Ok(byte)
     }
@@ -594,8 +590,7 @@ impl<'a> Wire<'a> {
     }
 
     fn utf8(&mut self, length: usize) -> Result<&'a str, ManifestPluginRosterErrorV1> {
-        std::str::from_utf8(self.slice(length)?)
-            .map_err(|_| INVALID)
+        std::str::from_utf8(self.slice(length)?).map_err(|_| INVALID)
     }
 
     fn magic(&mut self) -> Result<(), ManifestPluginRosterErrorV1> {
