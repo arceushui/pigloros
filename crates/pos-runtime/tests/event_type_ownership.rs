@@ -9,10 +9,10 @@ use pos_core::{
     Capability, Event, Hash, Kind, Plugin, PluginId,
 };
 use pos_runtime::{
-    recorder::RECORDER_EVENT_TYPE, DomainImplementationKindV1, Driver, ObservationView,
-    OutputAdmissionErrorV1, OutputPolicyBindingV1, OutputPolicySourceV1, PluginAvailabilityV1,
-    PluginComposition, PluginCompositionErrorV1, PluginIsolationV1, PluginPinV1,
-    PluginRegistrationV1, PluginRegistry, RuntimeError, StepOutput,
+    recorder::RECORDER_EVENT_TYPE, DomainImplementationKindV1, Driver, ManifestSlotV1,
+    ObservationView, OutputAdmissionErrorV1, OutputPolicyBindingV1, OutputPolicySourceV1,
+    PluginAvailabilityV1, PluginComposition, PluginCompositionErrorV1, PluginIsolationV1,
+    PluginPinV1, PluginRegistrationV1, PluginRegistry, RuntimeError, StepOutput,
 };
 
 trait TestValueExt<T> {
@@ -241,6 +241,7 @@ fn register_on_path(
     path: &str,
     plugin: &OwnerPlugin,
 ) -> Result<(), RuntimeError> {
+    let slot = ManifestSlotV1::try_new("duplicate-local")?;
     match path {
         "generated" => registry.register_generated(plugin, None, None),
         "generated-with-approver" => {
@@ -255,7 +256,9 @@ fn register_on_path(
             None,
             std::iter::empty(),
         ),
-        "local" => registry.register_local(plugin, vec!["duplicate-local".to_owned()], None, None),
+        "local" => {
+            registry.register_local(plugin, slot, vec!["duplicate-local".to_owned()], None, None)
+        }
         _ => register_test_driver(registry, plugin),
     }
 }
