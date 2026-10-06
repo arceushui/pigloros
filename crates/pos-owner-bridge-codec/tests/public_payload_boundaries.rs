@@ -276,6 +276,384 @@ fn public_payload_decoders_reject_noncanonical_and_closed_schema_variations(
     Ok(())
 }
 
+#[test]
+fn public_payload_codecs_reject_every_truncated_input_and_output_boundary(
+) -> Result<(), OwnerBridgeCodecError> {
+    let create = CreateOptionsV1::new(CEREMONY_ID, CHALLENGE, USER_HANDLE, PRF_INPUT);
+    let mut create_bytes = [0; 148];
+    let create_length = encode_create_options(&create, &mut create_bytes)?;
+    for length in 0..create_length {
+        let mut output = vec![0; length];
+        assert_eq!(
+            encode_create_options(&create, &mut output),
+            Err(OwnerBridgeCodecError::BufferTooSmall),
+            "Create output length {length}"
+        );
+        assert!(
+            decode_create_options(&create_bytes[..length]).is_err(),
+            "Create input prefix {length}"
+        );
+    }
+
+    let credential_id = [0x80, 0x81];
+    let get = GetOptionsV1::new(CEREMONY_ID, CHALLENGE, &credential_id, PRF_INPUT)?;
+    let mut get_bytes = [0; 106];
+    let get_length = encode_get_options(&get, &mut get_bytes)?;
+    for length in 0..get_length {
+        let mut output = vec![0; length];
+        assert_eq!(
+            encode_get_options(&get, &mut output),
+            Err(OwnerBridgeCodecError::BufferTooSmall),
+            "Get output length {length}"
+        );
+        assert!(
+            decode_get_options(&get_bytes[..length]).is_err(),
+            "Get input prefix {length}"
+        );
+    }
+
+    let attestation = AttestationReplyV1::new(
+        CEREMONY_ID,
+        &credential_id,
+        b"{}",
+        b"\xa0",
+        TransportCodes::new(&[0])?,
+        true,
+        Some(PRF_RESULT),
+    )?;
+    let mut attestation_bytes = [0; 70];
+    let attestation_length = encode_attestation_reply(&attestation, &mut attestation_bytes)?;
+    for length in 0..attestation_length {
+        let mut output = vec![0; length];
+        assert_eq!(
+            encode_attestation_reply(&attestation, &mut output),
+            Err(OwnerBridgeCodecError::BufferTooSmall),
+            "attestation output length {length}"
+        );
+        assert!(
+            decode_attestation_reply(&attestation_bytes[..length]).is_err(),
+            "attestation input prefix {length}"
+        );
+    }
+
+    let authenticator_data = [0; 37];
+    let signature = [0; 8];
+    let assertion = AssertionReplyV1::new(
+        CEREMONY_ID,
+        &credential_id,
+        b"{}",
+        &authenticator_data,
+        &signature,
+        None,
+        PRF_RESULT,
+    )?;
+    let mut assertion_bytes = [0; 114];
+    let assertion_length = encode_assertion_reply(&assertion, &mut assertion_bytes)?;
+    for length in 0..assertion_length {
+        let mut output = vec![0; length];
+        assert_eq!(
+            encode_assertion_reply(&assertion, &mut output),
+            Err(OwnerBridgeCodecError::BufferTooSmall),
+            "assertion output length {length}"
+        );
+        assert!(
+            decode_assertion_reply(&assertion_bytes[..length]).is_err(),
+            "assertion input prefix {length}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn public_create_options_decoder_rejects_each_closed_schema_field(
+) -> Result<(), OwnerBridgeCodecError> {
+    let create = CreateOptionsV1::new(CEREMONY_ID, CHALLENGE, USER_HANDLE, PRF_INPUT);
+    let mut create_bytes = [0; 148];
+    encode_create_options(&create, &mut create_bytes)?;
+    for (label, offset, value, expected) in [
+        (
+            "challenge width",
+            24,
+            0x41,
+            OwnerBridgeCodecError::InvalidCbor,
+        ),
+        (
+            "user-handle width",
+            58,
+            0x41,
+            OwnerBridgeCodecError::InvalidCbor,
+        ),
+        (
+            "RP ID width",
+            92,
+            0x68,
+            OwnerBridgeCodecError::InvalidPayload,
+        ),
+        (
+            "RP ID contents",
+            93,
+            b'X',
+            OwnerBridgeCodecError::InvalidPayload,
+        ),
+        (
+            "RP name width",
+            102,
+            0x69,
+            OwnerBridgeCodecError::InvalidPayload,
+        ),
+        (
+            "RP name contents",
+            103,
+            b'X',
+            OwnerBridgeCodecError::InvalidPayload,
+        ),
+        ("algorithm", 111, 6, OwnerBridgeCodecError::InvalidPayload),
+        (
+            "required code one",
+            112,
+            1,
+            OwnerBridgeCodecError::InvalidPayload,
+        ),
+        (
+            "required code two",
+            113,
+            1,
+            OwnerBridgeCodecError::InvalidPayload,
+        ),
+        ("PRF width", 114, 0x51, OwnerBridgeCodecError::InvalidCbor),
+    ] {
+        let mut malformed = create_bytes;
+        malformed[offset] = value;
+        assert_eq!(decode_create_options(&malformed), Err(expected), "{label}");
+    }
+    let noncanonical_versions: [&[u8]; 3] = [
+        &[0x19, 0, 1],
+        &[0x1a, 0, 0, 0, 1],
+        &[0x1b, 0, 0, 0, 0, 0, 0, 0, 1],
+    ];
+    for version in noncanonical_versions {
+        let mut noncanonical = Vec::from(create_bytes);
+        noncanonical.splice(6..7, version.iter().copied());
+        assert_eq!(
+            decode_create_options(&noncanonical),
+            Err(OwnerBridgeCodecError::NonCanonicalCbor)
+        );
+    }
+    let mut unsupported_additional_info = create_bytes;
+    unsupported_additional_info[6] = 0x1c;
+    assert_eq!(
+        decode_create_options(&unsupported_additional_info),
+        Err(OwnerBridgeCodecError::InvalidCbor)
+    );
+    let mut signed_integer_overflow = Vec::from(create_bytes);
+    signed_integer_overflow.splice(111..112, [0x1b, 0x80, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        decode_create_options(&signed_integer_overflow),
+        Err(OwnerBridgeCodecError::InvalidCbor)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_get_options_decoder_rejects_each_closed_schema_field() -> Result<(), OwnerBridgeCodecError>
+{
+    let credential_id = [0x80, 0x81];
+    let get = GetOptionsV1::new(CEREMONY_ID, CHALLENGE, &credential_id, PRF_INPUT)?;
+    let mut get_bytes = [0; 106];
+    encode_get_options(&get, &mut get_bytes)?;
+    for (label, offset, value, expected) in [
+        (
+            "RP ID width",
+            58,
+            0x68,
+            OwnerBridgeCodecError::InvalidPayload,
+        ),
+        (
+            "RP ID contents",
+            59,
+            b'X',
+            OwnerBridgeCodecError::InvalidPayload,
+        ),
+        (
+            "empty credential",
+            68,
+            0x40,
+            OwnerBridgeCodecError::BoundsExceeded,
+        ),
+        (
+            "oversized credential",
+            68,
+            0x5a,
+            OwnerBridgeCodecError::BoundsExceeded,
+        ),
+        (
+            "required code",
+            71,
+            1,
+            OwnerBridgeCodecError::InvalidPayload,
+        ),
+        ("PRF width", 72, 0x51, OwnerBridgeCodecError::InvalidCbor),
+    ] {
+        let mut malformed = get_bytes;
+        malformed[offset] = value;
+        assert_eq!(decode_get_options(&malformed), Err(expected), "Get {label}");
+    }
+    Ok(())
+}
+
+#[test]
+fn public_attestation_decoder_rejects_each_closed_schema_field() -> Result<(), OwnerBridgeCodecError>
+{
+    let credential_id = [0x80, 0x81];
+    let attestation = AttestationReplyV1::new(
+        CEREMONY_ID,
+        &credential_id,
+        b"{}",
+        b"\xa0",
+        TransportCodes::new(&[0])?,
+        true,
+        Some(PRF_RESULT),
+    )?;
+    let mut attestation_bytes = [0; 70];
+    encode_attestation_reply(&attestation, &mut attestation_bytes)?;
+    for (label, offset, value, expected) in [
+        (
+            "empty raw ID",
+            24,
+            0x40,
+            OwnerBridgeCodecError::BoundsExceeded,
+        ),
+        (
+            "empty client data",
+            27,
+            0x40,
+            OwnerBridgeCodecError::BoundsExceeded,
+        ),
+        (
+            "empty attestation object",
+            30,
+            0x40,
+            OwnerBridgeCodecError::BoundsExceeded,
+        ),
+        (
+            "too many transports",
+            32,
+            0x87,
+            OwnerBridgeCodecError::BoundsExceeded,
+        ),
+        (
+            "unknown transport",
+            33,
+            6,
+            OwnerBridgeCodecError::InvalidPayload,
+        ),
+        ("PRF boolean", 34, 0xf6, OwnerBridgeCodecError::InvalidCbor),
+        (
+            "optional PRF width",
+            35,
+            0xf4,
+            OwnerBridgeCodecError::InvalidCbor,
+        ),
+        (
+            "required null",
+            69,
+            0xf4,
+            OwnerBridgeCodecError::InvalidCbor,
+        ),
+    ] {
+        let mut malformed = attestation_bytes;
+        malformed[offset] = value;
+        assert_eq!(
+            decode_attestation_reply(&malformed),
+            Err(expected),
+            "attestation {label}"
+        );
+    }
+    let false_prf = AttestationReplyV1::new(
+        CEREMONY_ID,
+        &credential_id,
+        b"{}",
+        b"\xa0",
+        TransportCodes::new(&[])?,
+        false,
+        None,
+    )?;
+    let mut false_prf_bytes = [0; 40];
+    let false_prf_length = encode_attestation_reply(&false_prf, &mut false_prf_bytes)?;
+    assert_eq!(
+        decode_attestation_reply(&false_prf_bytes[..false_prf_length]),
+        Ok(false_prf)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_assertion_decoder_rejects_each_closed_schema_field() -> Result<(), OwnerBridgeCodecError>
+{
+    let credential_id = [0x80, 0x81];
+    let authenticator_data = [0; 37];
+    let signature = [0; 8];
+    let assertion = AssertionReplyV1::new(
+        CEREMONY_ID,
+        &credential_id,
+        b"{}",
+        &authenticator_data,
+        &signature,
+        None,
+        PRF_RESULT,
+    )?;
+    let mut assertion_bytes = [0; 114];
+    encode_assertion_reply(&assertion, &mut assertion_bytes)?;
+    for (label, offset, value, expected) in [
+        (
+            "empty raw ID",
+            24,
+            0x40,
+            OwnerBridgeCodecError::BoundsExceeded,
+        ),
+        (
+            "empty client data",
+            27,
+            0x40,
+            OwnerBridgeCodecError::BoundsExceeded,
+        ),
+        (
+            "short authenticator data",
+            31,
+            36,
+            OwnerBridgeCodecError::BoundsExceeded,
+        ),
+        (
+            "short signature",
+            69,
+            0x47,
+            OwnerBridgeCodecError::BoundsExceeded,
+        ),
+        (
+            "user-handle width",
+            78,
+            0xf4,
+            OwnerBridgeCodecError::InvalidCbor,
+        ),
+        ("PRF width", 79, 0x51, OwnerBridgeCodecError::InvalidCbor),
+        (
+            "required null",
+            113,
+            0xf4,
+            OwnerBridgeCodecError::InvalidCbor,
+        ),
+    ] {
+        let mut malformed = assertion_bytes;
+        malformed[offset] = value;
+        assert_eq!(
+            decode_assertion_reply(&malformed),
+            Err(expected),
+            "assertion {label}"
+        );
+    }
+    Ok(())
+}
+
 fn assert_attestation_bounds(oversized_credential_id: &[u8]) -> Result<(), OwnerBridgeCodecError> {
     let oversized_client_data = vec![0; 4_097];
     let oversized_attestation = vec![0; 65_537];
