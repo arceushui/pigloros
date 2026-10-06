@@ -372,10 +372,9 @@ fn public_verifier_rejects_bad_reply_subcomponents() -> Result<(), OwnerBridgeCo
     let mut invalid_point_key = cose_key();
     invalid_point_key[10..42].fill(0);
     let invalid_point_authenticator_data = create_authenticator_data(invalid_point_key);
-    let parsed_invalid_point = parse_none_attestation_object(
-        &none_attestation_object(&invalid_point_authenticator_data),
-        &CREDENTIAL_ID,
-    )?;
+    let invalid_point_attestation = none_attestation_object(&invalid_point_authenticator_data);
+    let parsed_invalid_point =
+        parse_none_attestation_object(&invalid_point_attestation, &CREDENTIAL_ID)?;
     let invalid_point_credential = StoredCredential::new(
         &CREDENTIAL_ID,
         USER_HANDLE,
