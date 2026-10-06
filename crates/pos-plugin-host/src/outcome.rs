@@ -17,7 +17,7 @@ pub enum LoadError {
 }
 
 /// The lifted result and the measured budget of one successful invocation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvocationReport {
     /// The export's lifted return value, not yet validated as guest output.
     pub value: Val,
@@ -55,7 +55,7 @@ pub enum InvocationFailure {
 }
 
 /// Classify the error that ended an invocation.
-pub(super) fn classify(error: &wasmtime::Error) -> InvocationFailure {
+pub(crate) fn classify(error: &wasmtime::Error) -> InvocationFailure {
     error.downcast_ref::<HostFault>().map_or_else(
         || {
             error
@@ -98,7 +98,10 @@ mod tests {
         let fuel = wasmtime::Error::new(Trap::OutOfFuel);
         assert_eq!(classify(&fuel), InvocationFailure::FuelExhausted);
         let interrupt = wasmtime::Error::new(Trap::Interrupt);
-        assert_eq!(classify(&interrupt), InvocationFailure::OperationalWatchdogStop);
+        assert_eq!(
+            classify(&interrupt),
+            InvocationFailure::OperationalWatchdogStop
+        );
         let stack = wasmtime::Error::new(Trap::StackOverflow);
         assert_eq!(
             classify(&stack),

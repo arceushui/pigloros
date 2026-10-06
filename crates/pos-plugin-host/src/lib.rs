@@ -24,9 +24,11 @@
 //! `Val`, and reports other traps as the raw Wasmtime `Trap`. #541 replaces
 //! both with validated host types and the revision 4 trap-class table.
 
-mod engine;
-mod host_v1;
-mod outcome;
+// Public modules keep crate-only items compatible with both `unreachable_pub`
+// and Clippy's `redundant_pub_crate`.
+pub mod engine;
+pub mod host_v1;
+pub mod outcome;
 
 pub use engine::{ComponentHost, GuestExport, InvocationLimits, LoadedComponent};
 pub use host_v1::{HostInputs, OperationalLogRecord};

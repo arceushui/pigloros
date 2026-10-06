@@ -9,8 +9,8 @@
 use std::sync::LazyLock;
 
 use pos_plugin_host::{
-    ComponentHost, GuestExport, HostInputs, InvocationFailure, InvocationLimits,
-    InvocationReport, LoadError, LoadedComponent, OperationalLogRecord, Trap, Val,
+    ComponentHost, GuestExport, HostInputs, InvocationFailure, InvocationLimits, InvocationReport,
+    LoadError, LoadedComponent, OperationalLogRecord, Trap, Val,
 };
 
 /// Bytes of one committed compatibility fixture.
@@ -56,15 +56,15 @@ struct Measurement {
 
 /// Measurements recorded in `docs/evidence/adr-061-r4-prototype.md`.
 const MEASUREMENTS: [Measurement; 6] = [
-    measured("rust", "describe", 0, 0, 0),
-    measured("rust", "reduce", 0, 0, 0),
-    measured("rust", "reduce-1MiB", 0, 0, 0),
-    measured("c", "describe", 0, 0, 0),
-    measured("c", "reduce", 0, 0, 0),
-    measured("c", "reduce-1MiB", 0, 0, 0),
+    measured("rust", "describe", 1, 3_113, 1_179_648),
+    measured("rust", "reduce", 1, 8_559, 1_179_648),
+    measured("rust", "reduce-1MiB", 1, 16_785_766, 2_293_760),
+    measured("c", "describe", 19, 3_019, 131_072),
+    measured("c", "reduce", 19, 8_829, 131_072),
+    measured("c", "reduce-1MiB", 19, 9_970_526, 1_179_648),
 ];
 /// Component byte sizes recorded in the evidence document.
-const COMPONENT_BYTES: [(&str, usize); 2] = [("rust", 0), ("c", 0)];
+const COMPONENT_BYTES: [(&str, usize); 2] = [("rust", 37_986), ("c", 72_445)];
 
 const fn measured(
     guest: &'static str,
@@ -249,7 +249,11 @@ fn measure(guest: &LoadedComponent, export: GuestExport, args: &[Val]) -> (u64, 
     (report.startup_fuel, report.call_fuel, report.memory_bytes)
 }
 
-fn measurement(guest_name: &'static str, call: &'static str, values: (u64, u64, u64)) -> Measurement {
+fn measurement(
+    guest_name: &'static str,
+    call: &'static str,
+    values: (u64, u64, u64),
+) -> Measurement {
     measured(guest_name, call, values.0, values.1, values.2)
 }
 
@@ -305,12 +309,27 @@ fn budget_measurements_match_the_recorded_evidence() {
     let large = [invocation("reduce", &large_observation, &DOMAIN)];
     let mut measurements = Vec::new();
     for (name, guest) in guests() {
-        measurements.push(measurement(name, "describe", measure(guest, GuestExport::Describe, &[])));
-        measurements.push(measurement(name, "reduce", measure(guest, GuestExport::Reduce, &small)));
-        measurements.push(measurement(name, "reduce-1MiB", measure(guest, GuestExport::Reduce, &large)));
+        measurements.push(measurement(
+            name,
+            "describe",
+            measure(guest, GuestExport::Describe, &[]),
+        ));
+        measurements.push(measurement(
+            name,
+            "reduce",
+            measure(guest, GuestExport::Reduce, &small),
+        ));
+        measurements.push(measurement(
+            name,
+            "reduce-1MiB",
+            measure(guest, GuestExport::Reduce, &large),
+        ));
     }
     assert_eq!(measurements, MEASUREMENTS);
-    assert_eq!([("rust", RUST_GUEST.len()), ("c", C_GUEST.len())], COMPONENT_BYTES);
+    assert_eq!(
+        [("rust", RUST_GUEST.len()), ("c", C_GUEST.len())],
+        COMPONENT_BYTES
+    );
 }
 
 #[test]
@@ -319,11 +338,20 @@ fn fuel_exhaustion_is_fuel_exhausted_and_discards_completed_host_calls() {
     for (name, guest) in guests() {
         let recorded = recorded(name, "reduce");
         let total = recorded.startup_fuel + recorded.call_fuel;
-        let exact = InvocationLimits { fuel: total, ..LIMITS };
-        assert!(run(guest, GuestExport::Reduce, &args, exact).is_ok(), "{name}");
+        let exact = InvocationLimits {
+            fuel: total,
+            ..LIMITS
+        };
+        assert!(
+            run(guest, GuestExport::Reduce, &args, exact).is_ok(),
+            "{name}"
+        );
         // One unit short, the guest has already logged and hashed when the
         // fuel runs out; the failure carries none of that work.
-        let short = InvocationLimits { fuel: total - 1, ..LIMITS };
+        let short = InvocationLimits {
+            fuel: total - 1,
+            ..LIMITS
+        };
         let failure = run(guest, GuestExport::Reduce, &args, short).err();
         assert_eq!(failure, Some(InvocationFailure::FuelExhausted), "{name}");
         let starved = InvocationLimits { fuel: 1, ..LIMITS };
@@ -338,14 +366,34 @@ fn memory_limit_stops_growth_exactly_at_the_limit() {
     let args = [invocation("reduce", &observation, &DOMAIN)];
     for (name, guest) in guests() {
         let peak = recorded(name, "reduce-1MiB").memory_bytes;
-        let exact = InvocationLimits { memory_bytes: peak, ..LIMITS };
-        assert!(run(guest, GuestExport::Reduce, &args, exact).is_ok(), "{name}");
-        let below = InvocationLimits { memory_bytes: peak - 65_536, ..LIMITS };
+        let exact = InvocationLimits {
+            memory_bytes: peak,
+            ..LIMITS
+        };
+        assert!(
+            run(guest, GuestExport::Reduce, &args, exact).is_ok(),
+            "{name}"
+        );
+        let below = InvocationLimits {
+            memory_bytes: peak - 65_536,
+            ..LIMITS
+        };
         let failure = run(guest, GuestExport::Reduce, &args, below).err();
-        assert_eq!(failure, Some(InvocationFailure::MemoryLimitExceeded), "{name}");
-        let none = InvocationLimits { memory_bytes: 0, ..LIMITS };
+        assert_eq!(
+            failure,
+            Some(InvocationFailure::MemoryLimitExceeded),
+            "{name}"
+        );
+        let none = InvocationLimits {
+            memory_bytes: 0,
+            ..LIMITS
+        };
         let failure = run(guest, GuestExport::Describe, &[], none).err();
-        assert_eq!(failure, Some(InvocationFailure::MemoryLimitExceeded), "{name}");
+        assert_eq!(
+            failure,
+            Some(InvocationFailure::MemoryLimitExceeded),
+            "{name}"
+        );
     }
 }
 
@@ -362,10 +410,17 @@ fn guest_traps_after_a_host_call_return_no_output() {
 #[test]
 fn an_elapsed_watchdog_is_an_operational_stop() {
     let args = [invocation("reduce", b"observation", &DOMAIN)];
-    let elapsed = InvocationLimits { watchdog_epochs: 0, ..LIMITS };
+    let elapsed = InvocationLimits {
+        watchdog_epochs: 0,
+        ..LIMITS
+    };
     for (name, guest) in guests() {
         let failure = run(guest, GuestExport::Reduce, &args, elapsed).err();
-        assert_eq!(failure, Some(InvocationFailure::OperationalWatchdogStop), "{name}");
+        assert_eq!(
+            failure,
+            Some(InvocationFailure::OperationalWatchdogStop),
+            "{name}"
+        );
     }
 }
 
@@ -388,10 +443,20 @@ fn ambient_and_undeclared_imports_are_denied_before_execution() {
         ("undeclared host-v1 function", UNDECLARED_HOST_FUNCTION),
         ("mistyped host-v1 function", MISTYPED_HOST_FUNCTION),
     ] {
-        assert_eq!(host.load(component).err(), Some(LoadError::ImportDenied), "{name}");
+        assert_eq!(
+            host.load(component).err(),
+            Some(LoadError::ImportDenied),
+            "{name}"
+        );
     }
-    assert_eq!(host.load(NO_GUEST_EXPORTS).err(), Some(LoadError::MissingGuestExport));
-    assert_eq!(host.load(b"not a component").err(), Some(LoadError::InvalidComponent));
+    assert_eq!(
+        host.load(NO_GUEST_EXPORTS).err(),
+        Some(LoadError::MissingGuestExport)
+    );
+    assert_eq!(
+        host.load(b"not a component").err(),
+        Some(LoadError::InvalidComponent)
+    );
 }
 
 #[test]

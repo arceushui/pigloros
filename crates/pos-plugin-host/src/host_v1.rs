@@ -40,7 +40,7 @@ pub struct OperationalLogRecord {
 
 /// A host-side refusal raised inside Wasmtime and classified after the call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum HostFault {
+pub(crate) enum HostFault {
     /// A `host-v1` call whose arguments or count the host refuses.
     CallRejected,
     /// Linear-memory growth beyond the invocation's memory limit.
@@ -62,19 +62,19 @@ impl fmt::Display for HostFault {
 impl std::error::Error for HostFault {}
 
 /// Host state owned by one invocation's store and dropped with it.
-pub(super) struct HostState {
-    pub(super) inputs: HostInputs,
-    pub(super) memory: MemoryLimiter,
-    pub(super) log: Vec<OperationalLogRecord>,
+pub(crate) struct HostState {
+    pub(crate) inputs: HostInputs,
+    pub(crate) memory: MemoryLimiter,
+    pub(crate) log: Vec<OperationalLogRecord>,
 }
 
 /// Charges every linear-memory reservation against one invocation limit.
 ///
 /// Reservations are never returned: a reservation that Wasmtime later fails to
 /// commit still counts, which only makes the limit stricter.
-pub(super) struct MemoryLimiter {
-    pub(super) limit: usize,
-    pub(super) reserved: usize,
+pub(crate) struct MemoryLimiter {
+    pub(crate) limit: usize,
+    pub(crate) reserved: usize,
 }
 
 impl ResourceLimiter for MemoryLimiter {
@@ -105,7 +105,7 @@ impl ResourceLimiter for MemoryLimiter {
 }
 
 /// Define the `host-v1` instance and nothing else.
-pub(super) fn define(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
+pub(crate) fn define(linker: &mut Linker<HostState>) -> wasmtime::Result<()> {
     linker.instance(HOST_V1_INTERFACE).and_then(|mut host| {
         host.func_wrap("simulation-time", |store, ()| {
             Ok((store.data().inputs.simulation_time,))
@@ -236,9 +236,15 @@ mod tests {
             random_request(&random_params(&domain, MAX_RANDOM_BYTES)),
             Some((domain, 7, MAX_RANDOM_BYTES))
         );
-        assert_eq!(random_request(&random_params(&domain, MAX_RANDOM_BYTES + 1)), None);
+        assert_eq!(
+            random_request(&random_params(&domain, MAX_RANDOM_BYTES + 1)),
+            None
+        );
         assert_eq!(random_request(&random_params(&[9; 31], 16)), None);
-        assert_eq!(random_request(&[Val::Bool(true), Val::U64(7), Val::U32(16)]), None);
+        assert_eq!(
+            random_request(&[Val::Bool(true), Val::U64(7), Val::U32(16)]),
+            None
+        );
         assert_eq!(random_request(&[]), None);
     }
 
@@ -267,7 +273,10 @@ mod tests {
         let longest = [b'a'; MAX_LOG_MESSAGE_BYTES];
         let accepted = log_request(&log_params(&longest)).map(|record| record.message.len());
         assert_eq!(accepted, Some(MAX_LOG_MESSAGE_BYTES));
-        assert_eq!(log_request(&log_params(&[b'a'; MAX_LOG_MESSAGE_BYTES + 1])), None);
+        assert_eq!(
+            log_request(&log_params(&[b'a'; MAX_LOG_MESSAGE_BYTES + 1])),
+            None
+        );
         assert_eq!(log_request(&log_params(&[0xff])), None);
         assert_eq!(log_request(&[Val::U16(1), Val::Bool(true)]), None);
         assert_eq!(log_request(&[]), None);
@@ -297,7 +306,10 @@ mod tests {
             reserved: 0,
         };
         assert!(matches!(limiter.memory_growing(0, 65_536, None), Ok(true)));
-        assert!(matches!(limiter.memory_growing(65_536, 131_072, None), Ok(true)));
+        assert!(matches!(
+            limiter.memory_growing(65_536, 131_072, None),
+            Ok(true)
+        ));
         assert_eq!(limiter.reserved, 131_072);
         let denied = limiter.memory_growing(131_072, 196_608, None);
         assert!(denied.is_err_and(|error| error.is::<HostFault>()));
@@ -319,7 +331,10 @@ mod tests {
     #[test]
     fn host_faults_have_stable_messages() {
         assert_eq!(HostFault::CallRejected.to_string(), "host-v1 call rejected");
-        assert_eq!(HostFault::MemoryLimit.to_string(), "linear memory limit exceeded");
+        assert_eq!(
+            HostFault::MemoryLimit.to_string(),
+            "linear memory limit exceeded"
+        );
         assert_eq!(
             HostFault::MissingExport.to_string(),
             "guest-v1 export missing from the instance"

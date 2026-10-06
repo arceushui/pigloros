@@ -4,13 +4,15 @@
 ADR-061 revision 4 decision 2 pins Wasmtime with an exact `=` version and
 `default-features = false`, enabling `component-model` and `cranelift` plus
 only what Cargo needs them to imply. `runtime` is the feature that lets a
-Component be instantiated and called, and `cranelift` implies `std`.
+Component be instantiated and called. `cranelift` implies `std`, which in turn
+enables the implicit features of two optional dependencies, `once_cell` and
+`wasmtime-jit-icache-coherence`.
 
 The check reads `cargo metadata --format-version 1` JSON (stdin or a path) and
 requires that:
 - exactly one Wasmtime package resolves, at the pinned version, from crates.io;
-- only `pos-plugin-host` depends on it, with the exact requirement, default
-  features off and exactly the requested features;
+- in the resolved graph only `pos-plugin-host` depends on it, with the exact
+  requirement, default features off and exactly the requested features;
 - the resolved feature set is exactly the recorded one.
 """
 
@@ -26,7 +28,14 @@ VERSION = "49.0.2"
 REQUIREMENT = "=49.0.2"
 SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 REQUESTED_FEATURES = ["component-model", "cranelift", "runtime"]
-RESOLVED_FEATURES = ["component-model", "cranelift", "runtime", "std"]
+RESOLVED_FEATURES = [
+    "component-model",
+    "cranelift",
+    "once_cell",
+    "runtime",
+    "std",
+    "wasmtime-jit-icache-coherence",
+]
 
 
 def check(metadata: dict) -> list[str]:
@@ -42,10 +51,11 @@ def check(metadata: dict) -> list[str]:
     if package.get("source") != SOURCE:
         errors.append(f"{CRATE} comes from {package.get('source')}, not crates.io")
 
+    names = {candidate.get("id"): candidate.get("name", "") for candidate in packages}
     dependents = sorted(
-        candidate.get("name", "")
-        for candidate in packages
-        if any(dep.get("name") == CRATE for dep in candidate.get("dependencies", []))
+        names.get(node.get("id"), str(node.get("id")))
+        for node in metadata.get("resolve", {}).get("nodes", [])
+        if package.get("id") in node.get("dependencies", [])
     )
     if dependents != [HOST_PACKAGE]:
         errors.append(f"only {HOST_PACKAGE} may depend on {CRATE}, found {dependents}")

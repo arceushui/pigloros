@@ -13,6 +13,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CHECKER = ROOT / "scripts/check_wasmtime_feature_pin.py"
 WASMTIME_ID = "registry+https://github.com/rust-lang/crates.io-index#wasmtime@49.0.2"
+HOST_ID = "path+file:///repo/crates/pos-plugin-host#0.1.0"
+RESOLVED = [
+    "component-model",
+    "cranelift",
+    "once_cell",
+    "runtime",
+    "std",
+    "wasmtime-jit-icache-coherence",
+]
 
 VALID = {
     "packages": [
@@ -26,7 +35,7 @@ VALID = {
         {
             "name": "pos-plugin-host",
             "version": "0.1.0",
-            "id": "path+file:///repo/crates/pos-plugin-host#0.1.0",
+            "id": HOST_ID,
             "source": None,
             "dependencies": [
                 {
@@ -40,10 +49,10 @@ VALID = {
     ],
     "resolve": {
         "nodes": [
-            {
-                "id": WASMTIME_ID,
-                "features": ["component-model", "cranelift", "runtime", "std"],
-            }
+            {"id": WASMTIME_ID, "dependencies": [], "features": list(RESOLVED)},
+            {"id": HOST_ID, "dependencies": [WASMTIME_ID], "features": []},
+            # A declared but unresolved (dev) dependency is not a dependent.
+            {"id": "wit-component", "dependencies": [], "features": []},
         ]
     },
 }
@@ -78,17 +87,14 @@ REJECTED = {
         lambda m: host_dependency(m)["features"].append("async")
     ),
     "second dependent": mutate(
-        lambda m: m["packages"].append(
-            {
-                "name": "pos-other",
-                "dependencies": [{"name": "wasmtime", "features": ["wat"]}],
-            }
+        lambda m: m["resolve"]["nodes"].append(
+            {"id": "pos-other", "dependencies": [WASMTIME_ID], "features": []}
         )
     ),
     "second wasmtime": mutate(
         lambda m: m["packages"].append(dict(m["packages"][0], version="48.0.5"))
     ),
-    "unresolved": mutate(lambda m: m["resolve"].update(nodes=[])),
+    "unresolved": mutate(lambda m: m["resolve"]["nodes"].pop(0)),
 }
 
 

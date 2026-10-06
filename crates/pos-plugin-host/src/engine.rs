@@ -100,8 +100,8 @@ impl ComponentHost {
     /// [`LoadError::MissingGuestExport`] when `guest-v1` lacks `describe`,
     /// `reduce` or `drive`.
     pub fn load(&self, bytes: &[u8]) -> Result<LoadedComponent, LoadError> {
-        let component = Component::from_binary(&self.engine, bytes)
-            .map_err(|_| LoadError::InvalidComponent)?;
+        let component =
+            Component::from_binary(&self.engine, bytes).map_err(|_| LoadError::InvalidComponent)?;
         let pre = self
             .linker
             .instantiate_pre(&component)
@@ -194,9 +194,7 @@ fn guest_export(component: &Component, export: GuestExport) -> Option<ComponentE
     component
         .get_export_index(None, GUEST_V1_INTERFACE)
         .and_then(|interface| component.get_export(Some(&interface), export.name()))
-        .and_then(|(item, index)| {
-            matches!(item, ComponentItem::ComponentFunc(_)).then_some(index)
-        })
+        .and_then(|(item, index)| matches!(item, ComponentItem::ComponentFunc(_)).then_some(index))
 }
 
 fn call(
