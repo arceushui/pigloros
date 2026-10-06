@@ -70,6 +70,13 @@
 //!   the generation's receipt row. A generation with no receipt row (a Fork id
 //!   re-created after a purge resumes at its floor without an invalidation)
 //!   has no first Tick, so a later Tick with a record is `BindingMismatch`.
+//! - **Capacity.** The check sums the stored counts of the set's record rows
+//!   and trusts them; it does not recount the node and edge rows. That is the
+//!   accepted trust boundary: this adapter alone writes the counts, in the
+//!   same transaction as the rows they describe, and the immutability guard
+//!   keeps them from changing. A count that drifted low (only possible by
+//!   editing the file with the guards dropped) lets a record in that the real
+//!   rows would exceed; a negative or invalid count is `CorruptState`.
 //! - **Collisions.** One indexed lookup per node finds a position key or an
 //!   artifact digest the set already holds, `DuplicateIdentity`; the unique
 //!   keys and the insert guard are the backstop.
@@ -429,11 +436,15 @@ impl SetStateV1 {
 
 /// A Tick bound that fits `SQLite` or selects every row: a record Tick is
 /// checked to fit before it is written, and the other callers only compare.
+// The saturation is never reached when writing: node Ticks never exceed the
+// record Tick, and the record Tick passed `sql_integer` up front.
 fn sql_tick(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 /// A row count of one record, which is bounded far below `i64::MAX`.
+// The saturation is never reached: counts are bounded by the per-record caps
+// and the page limit.
 fn sql_count(count: usize) -> i64 {
     i64::try_from(count).unwrap_or(i64::MAX)
 }
@@ -681,21 +692,22 @@ fn nodes_collide(
     conn.prepare_cached(COLLISION_SQL)
         .and_then(|mut statement| {
             record.nodes().iter().try_fold(false, |found, node| {
+                if found {
+                    return Ok(true);
+                }
                 let coordinate = node.coordinate();
-                statement
-                    .query_row(
-                        params![
-                            set.timeline,
-                            set.generation,
-                            coordinate.artifact_digest().as_bytes().as_slice(),
-                            sql_tick(coordinate.tick()),
-                            i64::from(coordinate.scheduler_position()),
-                            coordinate.owner_id(),
-                            i64::from(coordinate.output_ordinal())
-                        ],
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .map(|hit| found || hit)
+                statement.query_row(
+                    params![
+                        set.timeline,
+                        set.generation,
+                        coordinate.artifact_digest().as_bytes().as_slice(),
+                        sql_tick(coordinate.tick()),
+                        i64::from(coordinate.scheduler_position()),
+                        coordinate.owner_id(),
+                        i64::from(coordinate.output_ordinal())
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )
             })
         })
         .map_err(SqliteStore::into_storage_error)

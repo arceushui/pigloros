@@ -495,7 +495,8 @@ struct CounterfactualSchemaObjectV1 {
 // module, seven copies in all, on purpose: the exact-body validation compares
 // literal text, so the seven copies must stay identical.
 /// The quarantine lookup index and the guards that keep generations
-/// monotonic, quarantine permanent, and recorded bytes immutable.
+/// monotonic, quarantine permanent, and recorded bytes immutable, followed by
+/// the ten guards of the dependency tables from the `dependency` module.
 const COUNTERFACTUAL_SCHEMA_OBJECTS: &[CounterfactualSchemaObjectV1] = &[
     CounterfactualSchemaObjectV1 {
         kind: "index",

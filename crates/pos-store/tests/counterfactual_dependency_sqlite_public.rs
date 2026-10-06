@@ -985,6 +985,41 @@ fn c3_corrupt_stored_counts_and_ticks_are_corrupt_state() {
     }
 }
 
+/// The capacity check trusts the stored counts: this adapter alone writes
+/// them, in the transaction of the rows they describe, behind the immutability
+/// guard. So a count that drifted low, which takes a file edited with the
+/// guard dropped, lets in a record that the real rows would exceed.
+#[test]
+fn c3_capacity_trusts_drifted_stored_counts() {
+    let fixture = recorded_fixture();
+    let fork = fixture.fork;
+    ok(execute(
+        &fixture.path,
+        &format!(
+            "DROP TRIGGER counterfactual_dependency_records_immutable;
+             UPDATE counterfactual_dependency_records
+             SET node_count = 0, edge_count = 0, input_count = 0;
+             INSERT INTO counterfactual_dependency_records
+             (timeline_id, generation, record_tick, node_count, edge_count, input_count)
+             VALUES ('{fork}', 1, 18, {}, {}, {});",
+            MAX_RECORDED_DEPENDENCY_NODES_V1 - 1,
+            MAX_RECORDED_DEPENDENCY_EDGES_V1 - 1,
+            MAX_RECORDED_DEPENDENCY_EDGES_V1 - 1
+        ),
+    ));
+    let mut store = open(&fixture.path);
+    // The real rows (two nodes) and the raw row's count would exceed the node
+    // bound once the Tick 19 record adds its node, but the stored counts say
+    // it fits.
+    assert_eq!(
+        append_record(&mut store, fork, &tick_19_record()),
+        Ok(TickOutcome::Committed {
+            head: Seq::from_u64(5)
+        })
+    );
+    assert_eq!(recorded_rows(&fixture.path, fork), [3, 3, 2]);
+}
+
 #[test]
 fn c4_repeated_position_keys_and_digests_are_rejected_across_records() {
     let fixture = recorded_fixture();
@@ -997,10 +1032,14 @@ fn c4_repeated_position_keys_and_digests_are_rejected_across_records() {
     // Only the second node of the record collides.
     let fresh = provisional(coord(18, "m", 41), Vec::new());
     let colliding = provisional(coord(18, "n", 2), Vec::new());
+    // Only the first node of the record collides; the lookup stops there.
+    let first_hit = provisional(coord(18, "n", 2), Vec::new());
+    let after_hit = provisional(coord(18, "p", 43), Vec::new());
     for candidates in [
         vec![same_position],
         vec![same_digest],
         vec![fresh, colliding],
+        vec![first_hit, after_hit],
     ] {
         let record = record_of(18, candidates, Vec::new());
         assert_eq!(
@@ -1031,6 +1070,7 @@ fn c4_the_database_refuses_repeated_keys_and_replacements() {
     let same_position = node_copy("INSERT", "tick", "randomblob(32)");
     let same_digest = node_copy("INSERT", "tick + 100", "artifact_digest");
     let replacing = node_copy("INSERT OR REPLACE", "tick", "randomblob(32)");
+    let replace_digest = node_copy("INSERT OR REPLACE", "tick + 100", "artifact_digest");
     let same_edge = "INSERT INTO counterfactual_dependency_edges
                      SELECT * FROM counterfactual_dependency_edges";
     let same_record = "INSERT INTO counterfactual_dependency_records
@@ -1039,6 +1079,7 @@ fn c4_the_database_refuses_repeated_keys_and_replacements() {
         same_position.as_str(),
         same_digest.as_str(),
         replacing.as_str(),
+        replace_digest.as_str(),
         same_edge,
         same_record,
     ];
