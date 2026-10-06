@@ -13,10 +13,11 @@ pub enum HostFailureClassV1 {
     /// No authoritative Event, state, retry or guest failure is fabricated
     /// from it, and it never substitutes for a deterministic outcome.
     Operational,
-    /// A refusal before any worker, invocation or commit exists.
+    /// A refusal before any worker or invocation exists.
     ///
-    /// Replay sees it only as a recorded refusal; it produces no Event,
-    /// state or guest failure.
+    /// No Event, state or guest failure is fabricated from it. The ADR-061
+    /// failure table has no row for these errors, so this class is the
+    /// host's typing of them, pending conformance (#194, #544).
     PreExecutionRejection,
 }
 
@@ -196,9 +197,12 @@ impl CommunityPluginHostErrorV1 {
 
     /// The ADR-061 classification of this error.
     ///
-    /// - Pre-execution rejections happen before any worker exists.
-    ///   `IncompatibleAbi`, `MissingFeature` and `CapabilityDenied` are
-    ///   deterministic typed outcomes of the manifest and the host profile
+    /// - Pre-execution rejections happen before any worker or invocation
+    ///   exists, and nothing is fabricated from them. The ADR-061 failure
+    ///   table has no row for them; this class is the host's typing of them,
+    ///   pending conformance (#194, #544). `IncompatibleAbi`,
+    ///   `MissingFeature` and `CapabilityDenied` are deterministic typed
+    ///   outcomes of the manifest and the host profile
     ///   (the corrective amendment's "capability denial, incompatible WIT
     ///   world" typed deterministic failure outcomes). `ArtifactTrustDenied`
     ///   and `ArtifactRevoked` depend on mutable trust state (#424, #401).

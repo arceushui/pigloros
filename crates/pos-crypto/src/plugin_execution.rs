@@ -110,6 +110,9 @@ impl DeterministicBudgetV1 {
     pub const MAXIMA: Self = Self {
         memory_bytes: 4_294_967_296,
         fuel: u64::MAX,
+        // `host_calls` and `event_bytes` share their origin with the PMF1
+        // codec's capability `max_calls` and byte bounds, which derive from
+        // them.
         host_calls: 1_000_000,
         event_count: 1_024,
         event_bytes: 16_777_216,

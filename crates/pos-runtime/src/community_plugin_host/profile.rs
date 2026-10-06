@@ -262,6 +262,9 @@ pub struct PinnedComponentRuntimeV1 {
 impl PinnedComponentRuntimeV1 {
     /// Record one pinned runtime identity with a validated trap table.
     ///
+    /// Before execution, #541 must require rows for `OutOfFuel`, `Interrupt`
+    /// and every other trap code of the pinned version.
+    ///
     /// # Errors
     /// Returns `DuplicateTrapCode` for the first repeated trap code, then
     /// `MisclassifiedTrapCode` for the first code whose outcome breaks the
