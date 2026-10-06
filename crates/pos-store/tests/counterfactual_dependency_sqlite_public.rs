@@ -142,7 +142,7 @@ struct Spec {
 }
 
 impl Spec {
-    fn new(fork: TimelineId) -> Self {
+    const fn new(fork: TimelineId) -> Self {
         Self {
             fork,
             facts: facts(),
