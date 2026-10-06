@@ -14,8 +14,8 @@
 //! - `counterfactual_dependency_records` holds one row per recorded Tick
 //!   record: its set, its Tick (persisted apart from the node Ticks), and the
 //!   node, edge, and declared-input counts of the record. Summing these rows
-//!   gives the stored counts of a set, so the capacity check reads a few rows
-//!   instead of counting every node and edge.
+//!   gives the stored counts of a set, so the capacity check sums one summary
+//!   row per recorded Tick of the set instead of counting every node and edge.
 //! - `counterfactual_dependency_nodes` holds the nodes, keyed by their set and
 //!   position key `(tick, scheduler_position, owner_id, output_ordinal)`, with
 //!   a second unique key on the set and artifact digest. The primary key
@@ -94,7 +94,10 @@
 //!   or Fork lookup; a parent-prefix `through_tick` above it selects every
 //!   row; and the rows of an older generation are retained but unreachable
 //!   (a read names the current generation only), where the in-memory adapter
-//!   keeps only the current generation's set.
+//!   keeps only the current generation's set; and a parent-prefix read of an
+//!   existing Timeline on a pre-schema read-only file is `ForkNotFound`, not
+//!   an empty page, because the tables do not exist there and cannot be
+//!   created, so the read fails closed as not found.
 //! - **Deletion.** The marked purge of a deleted Timeline also deletes its
 //!   edges, nodes, and records, whether they are its Fork generations' or its
 //!   own committed prefix. A re-created Timeline ID starts with empty sets.
@@ -470,12 +473,14 @@ fn stored_hashes(bytes: &[u8]) -> Result<Vec<Hash>, StoreError> {
         .collect()
 }
 
+/// Decode a stored class code, or fail as a corrupt read-back.
 fn stored_class(code: i64) -> Result<RecordedDependencyClassV1, StoreError> {
     stored_u64(code).and_then(|code| {
         RecordedDependencyClassV1::from_code(code).or(Err(DepError::READ_BACK_FAULT))
     })
 }
 
+/// Decode a stored origin code, or fail as a corrupt read-back.
 fn stored_origin(code: i64) -> Result<RecordedNodeOriginV1, StoreError> {
     stored_u64(code)
         .and_then(|code| RecordedNodeOriginV1::from_code(code).or(Err(DepError::READ_BACK_FAULT)))
@@ -573,6 +578,7 @@ fn cursor_key(after: Option<&DependencyPageCursorV1>) -> Result<CursorKeyV1, Sto
     )
 }
 
+/// Keyset page of a set's nodes in canonical position-key order.
 const NODE_PAGE_SQL: &str = "SELECT tick, scheduler_position, owner_id, output_ordinal,
             schema_id, artifact_digest, class, origin, input_digests, provenance_digest
      FROM counterfactual_dependency_nodes
@@ -581,6 +587,7 @@ const NODE_PAGE_SQL: &str = "SELECT tick, scheduler_position, owner_id, output_o
      ORDER BY tick, scheduler_position, owner_id, output_ordinal
      LIMIT ?8";
 
+/// Keyset page of a set's edges in `IDP1` edge-list order.
 const EDGE_PAGE_SQL: &str = "SELECT tick, scheduler_position, owner_id, output_ordinal,
             source_digest, consumer_schema_id, consumer_digest, edge_bytes
      FROM counterfactual_dependency_edges
@@ -590,6 +597,7 @@ const EDGE_PAGE_SQL: &str = "SELECT tick, scheduler_position, owner_id, output_o
      ORDER BY tick, scheduler_position, owner_id, output_ordinal, source_digest
      LIMIT ?9";
 
+/// Read and decode one page of node rows after the cursor.
 fn node_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<DependencyNodeRecordV1>> {
     let (tick, position, owner, ordinal, _) = query.after;
     conn.prepare_cached(NODE_PAGE_SQL)
@@ -614,6 +622,7 @@ fn node_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<Dependenc
         .map(|raw| raw.into_iter().map(decode_node).collect())
 }
 
+/// Read and decode one page of edge rows after the cursor.
 fn edge_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<DependencyEdgeRecordV1>> {
     let (tick, position, owner, ordinal, source) = query.after;
     conn.prepare_cached(EDGE_PAGE_SQL)
@@ -666,12 +675,14 @@ const fn fence_timeline(scope: DependencyReadScopeV1) -> TimelineId {
     }
 }
 
+/// Aggregate the record rows of a set and read the generation's first Tick.
 const SET_STATE_SQL: &str = "SELECT COALESCE(SUM(node_count), 0), COALESCE(SUM(edge_count), 0),
             COALESCE(SUM(input_count), 0), MAX(record_tick),
             (SELECT first_tick FROM counterfactual_generations
              WHERE fork_id = ?1 AND generation = ?2)
      FROM counterfactual_dependency_records WHERE timeline_id = ?1 AND generation = ?2";
 
+/// Read the stored counts, highest record Tick, and first Tick of a set.
 fn read_set_state(conn: &Connection, set: &DependencySetV1) -> Staged<SetStateV1> {
     conn.query_row(
         SET_STATE_SQL,
@@ -682,6 +693,7 @@ fn read_set_state(conn: &Connection, set: &DependencySetV1) -> Staged<SetStateV1
     .map(decode_set_state)
 }
 
+/// Whether a node's artifact digest or position key is already in the set.
 const COLLISION_SQL: &str = "SELECT EXISTS (
          SELECT 1 FROM counterfactual_dependency_nodes
          WHERE timeline_id = ?1 AND generation = ?2 AND artifact_digest = ?3

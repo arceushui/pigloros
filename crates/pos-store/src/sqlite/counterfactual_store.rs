@@ -640,11 +640,12 @@ const COUNTERFACTUAL_SCHEMA_OBJECTS: &[CounterfactualSchemaObjectV1] = &[
 ];
 
 /// Statements that purge one Fork's counterfactual state, each bound to the
-/// Fork id as `?1`. The marker row relaxes the delete guards for that Fork
-/// only; the tombstone keeps the Fork's last generation as a floor; the marker
-/// is removed before the enclosing transaction commits. The dependency
-/// tables are keyed by the Timeline ID, which is the Fork's own for its
-/// generations' rows and a parent Timeline's for its committed prefix.
+/// Fork id as `?1`. The marker row relaxes the delete guards for that
+/// Timeline only (the Fork's own, or a parent Timeline's id); the tombstone
+/// keeps the Fork's last generation as a floor; the marker is removed before
+/// the enclosing transaction commits. The dependency tables are keyed by the
+/// Timeline ID, which is the Fork's own for its generations' rows and a
+/// parent Timeline's for its committed prefix.
 const PURGE_COUNTERFACTUAL_STATEMENTS: [&str; 10] = [
     "INSERT INTO counterfactual_purge_fence (fork_id) VALUES (?1)",
     "DELETE FROM counterfactual_dependency_edges WHERE timeline_id = ?1",

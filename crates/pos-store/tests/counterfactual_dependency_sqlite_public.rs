@@ -1032,6 +1032,8 @@ fn c4_repeated_position_keys_and_digests_are_rejected_across_records() {
     let fresh = provisional(coord(18, "m", 41), Vec::new());
     let colliding = provisional(coord(18, "n", 2), Vec::new());
     // Only the first node of the record collides; the lookup stops there.
+    // Deliberately the same coordinate as `colliding`: it exists to hit the
+    // short-circuit branch of `nodes_collide`.
     let first_hit = provisional(coord(18, "n", 2), Vec::new());
     let after_hit = provisional(coord(18, "p", 43), Vec::new());
     for candidates in [
@@ -1633,6 +1635,26 @@ fn c9_a_misplaced_record_reports_the_fork_error_first() {
         StoreError::ForkNotFound
     );
     assert_eq!(snapshot(&fixture.path, fork), [0; 7]);
+    // An ADR-099 admitted Fork reserves its appends for classified authority,
+    // and that refusal also comes before any record check.
+    let admitted_fixture = self::fixture();
+    let admitted_fork = admitted_fixture.fork;
+    ok(execute(
+        &admitted_fixture.path,
+        &format!(
+            "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES ('{admitted_fork}', X'00');"
+        ),
+    ));
+    let mut admitted = open(&admitted_fixture.path);
+    assert_eq!(
+        err(commit_spec(
+            &mut admitted,
+            &Spec::new(admitted_fork),
+            &committed_record(FIRST_TICK)
+        )),
+        StoreError::StorageFailure
+    );
+    assert_eq!(snapshot(&admitted_fixture.path, admitted_fork), [0; 7]);
 }
 
 #[test]
