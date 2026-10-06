@@ -31,6 +31,8 @@ const RUST_GUEST: &[u8] = include_bytes!(
 );
 const PLUGIN_ID: &str = "pigloros.compatibility-prototype";
 const BUDGET: DeterministicBudgetV1 = DeterministicBudgetV1::MAXIMA;
+/// A watchdog that never fires during a test, so only deterministic limits stop the guest.
+const NO_WATCHDOG: u32 = u32::MAX;
 
 struct Engine {
     host: ComponentHost,
@@ -117,7 +119,7 @@ fn probe(selector: u64, budget: DeterministicBudgetV1) -> Option<Error> {
     };
     ENGINE
         .host
-        .describe(&ENGINE.probe, &execution(budget), inputs, 1)
+        .describe(&ENGINE.probe, &execution(budget), inputs, NO_WATCHDOG)
         .err()
 }
 
@@ -231,7 +233,7 @@ fn malformed_guest_values_are_invalid_guest_output_not_traps() {
             &execution(BUDGET),
             &invocation(0),
             HostInputs { simulation_time: 0 },
-            1,
+            NO_WATCHDOG,
         )
         .err();
     assert_eq!(failure, Some(Error::InvalidGuestOutput));
@@ -308,7 +310,7 @@ fn describe_must_match_the_negotiated_release() {
     for execution in mismatches {
         let failure = ENGINE
             .host
-            .describe(&ENGINE.rust, &execution, inputs, 1)
+            .describe(&ENGINE.rust, &execution, inputs, NO_WATCHDOG)
             .err();
         assert_eq!(failure, Some(Error::InvalidGuestOutput));
     }
@@ -331,10 +333,12 @@ fn invocations_outside_their_bounds_never_reach_the_guest() {
 
 #[test]
 fn the_watchdog_deadline_counts_epochs_after_the_invocation_starts() {
-    ENGINE.host.increment_epoch();
+    // A host of its own: advancing the shared engine's epoch would stop
+    // invocations running concurrently in other tests.
+    let host = ok(ComponentHost::new(), "pinned engine");
+    let rust = ok(host.load(RUST_GUEST), "Rust guest");
+    host.increment_epoch();
     let inputs = HostInputs { simulation_time: 0 };
-    let report = ENGINE
-        .host
-        .drive(&ENGINE.rust, &execution(BUDGET), &invocation(4), inputs, 1);
+    let report = host.drive(&rust, &execution(BUDGET), &invocation(4), inputs, 1);
     assert!(report.is_ok_and(|report| report.result.is_ok()));
 }

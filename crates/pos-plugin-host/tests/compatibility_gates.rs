@@ -73,11 +73,11 @@ struct Measurement {
 /// Measurements recorded in `docs/evidence/adr-061-r4-prototype.md`.
 const MEASUREMENTS: [Measurement; 6] = [
     measured("rust", "describe", 1, 3_113, 1_179_648, 0),
-    measured("rust", "reduce", 1, 8_559, 1_179_648, 3),
-    measured("rust", "reduce-1MiB", 1, 16_785_766, 2_293_760, 3),
+    measured("rust", "reduce", 1, 21_112, 1_179_648, 3),
+    measured("rust", "reduce-1MiB", 1, 16_798_314, 2_293_760, 3),
     measured("c", "describe", 19, 3_019, 131_072, 0),
-    measured("c", "reduce", 19, 8_829, 131_072, 3),
-    measured("c", "reduce-1MiB", 19, 9_970_526, 1_179_648, 3),
+    measured("c", "reduce", 19, 20_744, 131_072, 3),
+    measured("c", "reduce-1MiB", 19, 9_982_361, 1_179_648, 3),
 ];
 /// Component byte sizes recorded in the evidence document.
 const COMPONENT_BYTES: [(&str, usize); 2] = [("rust", 51_947), ("c", 88_893)];

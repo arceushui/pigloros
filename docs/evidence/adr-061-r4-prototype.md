@@ -142,16 +142,20 @@ call counts against `host_calls`.
 
 The values below are exact. Fuel and memory are deterministic for the pinned
 Wasmtime and the fixture bytes, and `budget_measurements_match_the_recorded_evidence`
-asserts every value.
+asserts every value. They are the #541 fixtures (ABI 0.0 and the V1
+`output-digest`), run through the engine under the default V1 profile; each
+`reduce` makes 3 `host-v1` calls and `describe` none.
 
 | Guest | Component bytes | Call | Startup fuel | Call fuel | Linear memory reserved |
 |---|---:|---|---:|---:|---:|
-| Rust | 37,986 | `describe` | 1 | 3,113 | 1,179,648 |
-| Rust | | `reduce`, 11-byte observation | 1 | 8,559 | 1,179,648 |
-| Rust | | `reduce`, 1 MiB observation | 1 | 16,785,766 | 2,293,760 |
-| C | 72,445 | `describe` | 19 | 3,019 | 131,072 |
-| C | | `reduce`, 11-byte observation | 19 | 8,829 | 131,072 |
-| C | | `reduce`, 1 MiB observation | 19 | 9,970,526 | 1,179,648 |
+| Rust | 51,947 | `describe` | 1 | 3,113 | 1,179,648 |
+| Rust | | `reduce`, 11-byte observation | 1 | 21,112 | 1,179,648 |
+| Rust | | `reduce`, 1 MiB observation | 1 | 16,798,314 | 2,293,760 |
+| C | 88,893 | `describe` | 19 | 3,019 | 131,072 |
+| C | | `reduce`, 11-byte observation | 19 | 20,744 | 131,072 |
+| C | | `reduce`, 1 MiB observation | 19 | 9,982,361 | 1,179,648 |
+
+The V1 output digest costs each guest about 12,000 fuel per `reduce`.
 
 Observations:
 
