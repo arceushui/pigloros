@@ -5769,8 +5769,10 @@ mod tests {
         let pauses = Arc::new(std::sync::Mutex::new(Vec::new()));
         let poisoned = Arc::clone(&pauses);
         assert!(std::thread::spawn(move || {
-            let _guard = poisoned.lock().expect("fresh recipient export pause lock");
-            panic!("poison recipient export pause lock");
+            let _guard = poisoned.lock().unwrap_or_else(|_| {
+                std::panic::resume_unwind(Box::new("recipient export pause lock is poisoned"))
+            });
+            std::panic::resume_unwind(Box::new("poison recipient export pause lock"));
         })
         .join()
         .is_err());
