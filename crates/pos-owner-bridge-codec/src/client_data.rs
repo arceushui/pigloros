@@ -59,15 +59,15 @@ pub fn validate_client_data_json(
         parser.skip_whitespace();
         let value = parser.parse_value()?;
 
-        if key.equals_text("type")? {
+        if key.equals_text("type") {
             let JsonValue::String(value) = value else {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             };
-            if !value.equals_text(expected_type)? {
+            if !value.equals_text(expected_type) {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
             type_seen = true;
-        } else if key.equals_text("challenge")? {
+        } else if key.equals_text("challenge") {
             let JsonValue::String(value) = value else {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             };
@@ -75,22 +75,22 @@ pub fn validate_client_data_json(
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
             challenge_seen = true;
-        } else if key.equals_text("origin")? {
+        } else if key.equals_text("origin") {
             let JsonValue::String(value) = value else {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             };
-            if !value.equals_text(OWNER_ORIGIN)? {
+            if !value.equals_text(OWNER_ORIGIN) {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
             origin_seen = true;
-        } else if key.equals_text("crossOrigin")? {
+        } else if key.equals_text("crossOrigin") {
             let JsonValue::Boolean(value) = value else {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             };
             if value {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-        } else if key.equals_text("topOrigin")? || key.equals_text("tokenBinding")? {
+        } else if key.equals_text("topOrigin") || key.equals_text("tokenBinding") {
             return Err(OwnerBridgeCodecError::InvalidPayload);
         }
 
@@ -133,7 +133,7 @@ fn duplicate_key_before(
         }
 
         let prior_key = parser.parse_string()?;
-        if prior_key.equals_string(key)? {
+        if prior_key.equals_string(key) {
             return Ok(true);
         }
         parser.skip_whitespace();
@@ -156,63 +156,50 @@ enum JsonValue<'a> {
 
 #[derive(Clone, Copy)]
 struct JsonString<'a> {
-    raw: &'a [u8],
+    // `JsonParser::parse_string` validates UTF-8 and every escape before this
+    // value exists, so equality operates on a closed, trusted string shape.
+    raw: &'a str,
     contains_escape: bool,
 }
 
 impl JsonString<'_> {
-    fn equals_text(self, expected: &str) -> Result<bool, OwnerBridgeCodecError> {
+    fn equals_text(self, expected: &str) -> bool {
         let mut offset = 0;
         for character in expected.chars() {
-            if self.next_scalar(&mut offset)? != Some(u32::from(character)) {
-                return Ok(false);
+            if self.next_scalar(&mut offset) != Some(u32::from(character)) {
+                return false;
             }
         }
-        Ok(self.next_scalar(&mut offset)?.is_none())
+        self.next_scalar(&mut offset).is_none()
     }
 
-    fn equals_string(self, other: Self) -> Result<bool, OwnerBridgeCodecError> {
+    fn equals_string(self, other: Self) -> bool {
         let mut left_offset = 0;
         let mut right_offset = 0;
         loop {
             match (
-                self.next_scalar(&mut left_offset)?,
-                other.next_scalar(&mut right_offset)?,
+                self.next_scalar(&mut left_offset),
+                other.next_scalar(&mut right_offset),
             ) {
                 (Some(left), Some(right)) if left == right => {}
-                (None, None) => return Ok(true),
-                _ => return Ok(false),
+                (None, None) => return true,
+                _ => return false,
             }
         }
     }
 
-    fn next_scalar(&self, offset: &mut usize) -> Result<Option<u32>, OwnerBridgeCodecError> {
-        let Some(&byte) = self.raw.get(*offset) else {
-            return Ok(None);
-        };
+    fn next_scalar(&self, offset: &mut usize) -> Option<u32> {
+        let raw = self.raw.as_bytes();
+        let &byte = raw.get(*offset)?;
         if byte != b'\\' {
-            let tail = core::str::from_utf8(&self.raw[*offset..])
-                .map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
-            let character = tail
-                .chars()
-                .next()
-                .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
-            *offset = offset
-                .checked_add(character.len_utf8())
-                .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
-            return Ok(Some(u32::from(character)));
+            let character = self.raw[*offset..].chars().next()?;
+            *offset += character.len_utf8();
+            return Some(u32::from(character));
         }
 
-        *offset = offset
-            .checked_add(1)
-            .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
-        let escape = *self
-            .raw
-            .get(*offset)
-            .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
-        *offset = offset
-            .checked_add(1)
-            .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
+        *offset += 1;
+        let &escape = raw.get(*offset)?;
+        *offset += 1;
         let scalar = match escape {
             b'"' => u32::from(b'"'),
             b'\\' => u32::from(b'\\'),
@@ -222,16 +209,16 @@ impl JsonString<'_> {
             b'n' => u32::from(b'\n'),
             b'r' => u32::from(b'\r'),
             b't' => u32::from(b'\t'),
-            b'u' => self.decode_unicode_escape(offset)?,
-            _ => return Err(OwnerBridgeCodecError::InvalidPayload),
+            b'u' => self.decode_unicode_escape(offset).ok()?,
+            _ => return None,
         };
-        Ok(Some(scalar))
+        Some(scalar)
     }
 
     fn decode_unicode_escape(&self, offset: &mut usize) -> Result<u32, OwnerBridgeCodecError> {
         let first = self.decode_code_unit(offset)?;
         if (0xd800..=0xdbff).contains(&first) {
-            if self.raw.get(
+            if self.raw.as_bytes().get(
                 *offset
                     ..offset
                         .checked_add(2)
@@ -263,6 +250,7 @@ impl JsonString<'_> {
             .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
         let digits = self
             .raw
+            .as_bytes()
             .get(*offset..end)
             .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
         let mut value = 0_u16;
@@ -281,13 +269,14 @@ impl JsonString<'_> {
 }
 
 struct JsonParser<'a> {
-    input: &'a [u8],
+    input: &'a str,
     offset: usize,
 }
 
 impl<'a> JsonParser<'a> {
     fn new(input: &'a [u8]) -> Result<Self, OwnerBridgeCodecError> {
-        core::str::from_utf8(input).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
+        let input =
+            core::str::from_utf8(input).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
         Ok(Self { input, offset: 0 })
     }
 
@@ -366,7 +355,7 @@ impl<'a> JsonParser<'a> {
             .offset
             .checked_add(expected.len())
             .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
-        if self.input.get(self.offset..end) != Some(expected) {
+        if self.input.as_bytes().get(self.offset..end) != Some(expected) {
             return Err(OwnerBridgeCodecError::InvalidPayload);
         }
         self.offset = end;
@@ -382,7 +371,7 @@ impl<'a> JsonParser<'a> {
     }
 
     fn peek_byte(&self) -> Option<u8> {
-        self.input.get(self.offset).copied()
+        self.input.as_bytes().get(self.offset).copied()
     }
 
     fn take_byte(&mut self) -> Option<u8> {
