@@ -34,5 +34,13 @@ sha2 = { workspace = true }
 name = "fork_ancestry_public"
 required-features = ["test-support"]
 
+[[test]]
+name = "local_cut_world_closure_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "world_key_evidence_public"
+required-features = ["test-support"]
+
 [lints]
 workspace = true

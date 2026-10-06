@@ -1,7 +1,7 @@
 //! Public acceptance for the ADR-089 Revision 4 installed historical
 //! owner-link verifier on Memory and `SQLite` owner stores.
 
-use std::{error::Error, sync::Arc};
+use std::{collections::BTreeMap, error::Error, sync::Arc};
 
 use pos_core::manifest_owner_link_verifier::test_verified_manifest_owner_link;
 use pos_core::retention::{
@@ -15,18 +15,20 @@ use pos_core::trusted_clock::{
 use pos_core::{
     build_manifest_owner_scope_v1, collect_manifest_owner_link_ancestors_v1,
     collect_manifest_owner_link_branches_v1, deletion_receipt, derive_local_cut_world_closure_v1,
-    ArtifactDataClassV1, ArtifactRegistrationV1, ArtifactTransitionRuleV1, AssuranceLevelV1,
-    AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, ErasureContainmentGateV1,
-    ErasureInventoryPersistencePortV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureVerifiedEmptyInventoryQueryV1, ErasureVerifiedInventoryQueryV1, EventStore, Hash,
-    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationOutcomeV1, KeyRegistrationV1,
-    KeyRegistryStateV1, KeyRoleV1, LocalCutCommitV1, LocalCutCompositionBindingRowV1,
-    LocalCutExpectedHeadRowV1, LocalCutHeadsTableV1, LocalCutManifestBindingRowV1,
-    LocalCutManifestBindingTableV1, LocalCutOwnerCommitKindV1, LocalCutOwnerCommitV1,
-    LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1,
-    LocalCutOwnerStateV1, LocalCutOwnerVerifierV1, LocalCutReceiptInputV1, LocalCutReceiptV1,
-    LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1, LocalCutSealInputV2, LocalCutSealV2,
-    LocalCutTableRefV1, LocalCutWorldClosureSourceV1, LocalCutWorldRecordingV1,
+    prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1,
+    test_coordinator_key_evidence, test_coordinator_key_registration,
+    test_coordinator_key_registry, ArtifactDataClassV1, ArtifactRegistrationV1,
+    ArtifactTransitionRuleV1, AssuranceLevelV1, AuthenticatedPrincipalDraftV1,
+    AuthenticatedPrincipalResultV1, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
+    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureVerifiedEmptyInventoryQueryV1,
+    ErasureVerifiedInventoryQueryV1, EventStore, Hash, KeyDestructionRequestV1, KeyIdentityV1,
+    KeyRegistrationOutcomeV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, LocalCutCommitV1,
+    LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1, LocalCutHeadsTableV1,
+    LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1, LocalCutOwnerCommitKindV1,
+    LocalCutOwnerCommitV1, LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1,
+    LocalCutOwnerRequestV1, LocalCutOwnerStateV1, LocalCutOwnerVerifierV1, LocalCutReceiptInputV1,
+    LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1, LocalCutSealInputV2,
+    LocalCutSealV2, LocalCutTableRefV1, LocalCutWorldClosureSourceV1, LocalCutWorldRecordingV1,
     ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
     ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
@@ -37,11 +39,13 @@ use pos_core::{
     ManifestOwnerLinkSnapshotV1, ManifestOwnerLinkUseFenceV1, ManifestOwnerLinkVerificationErrorV1,
     ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1,
     ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
-    ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptV1, ManifestSlotBindingV1,
-    OutputPolicyClosureEnvelopeV1, OwnerIdV1, Plugin, PluginId, PrincipalRefV1, PublicKey,
-    TimelineId, VerifiedManifestOwnerLinkV1, WallTime, WorldArtifactKeyDependencyV1,
-    WorldArtifactKindV1, WorldClosureReadLimitsV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
-    WorldConsumerV1, WorldKeyEvidenceInputV1, WorldKeyEvidenceV1, WorldProducerV1,
+    ManifestOwnerTimelineAdmissionV1, ManifestSlotAdmissionReceiptDraftV1,
+    ManifestSlotAdmissionReceiptV1, ManifestSlotBindingV1, OutputPolicyClosureEnvelopeV1,
+    OwnerIdV1, Plugin, PluginId, PreparedManifestOwnerAdmissionV1, PrincipalRefV1, PublicKey,
+    SignedLocalCutReceiptV1, SignedManifestSlotAdmissionReceiptV1, TimelineId,
+    VerifiedManifestOwnerLinkV1, WallTime, WorldArtifactKeyDependencyV1, WorldArtifactKindV1,
+    WorldClosureReadLimitsV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
+    WorldKeyEvidenceInputV1, WorldKeyEvidenceV1, WorldProducerV1,
 };
 use pos_runtime::{AdmittedCompositionV1, AdmittedManifestPolicySourceV1, PluginRegistry};
 use pos_store::{
@@ -64,8 +68,6 @@ const READ_LIMITS: WorldClosureReadLimitsV1 = WorldClosureReadLimitsV1 {
 const SOURCE_GENESIS: Hash = hash(0x47);
 const FORGED_EVIDENCE: Hash = hash(119);
 const SIGNATURE: [u8; 64] = [90; 64];
-/// Owner of the installed coordinator's Timeline-integrity signing key.
-const COORDINATOR: &str = "local-coordinator";
 
 const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
@@ -75,54 +77,73 @@ const fn hooks(local_cut: Hash, admission: Hash) -> OwnerHooks {
     OwnerHooks {
         local_cut,
         admission,
+        signed: SignedEvidence::Installed,
     }
 }
 
-/// The verify-only WKE1 of the installed coordinator's epoch-1 signing key.
-fn coordinator_evidence() -> Fallible<WorldKeyEvidenceV1> {
-    Ok(WorldKeyEvidenceV1::new(WorldKeyEvidenceInputV1 {
-        identity: KeyIdentityV1::new(COORDINATOR, KeyRoleV1::TimelineIntegritySigning, 1),
-        private_material_digest: hash(0xc1),
-        private_material_required: false,
-        public_verification_key: Some(PublicKey::from_bytes([0xc2; 32])),
-    })?)
+/// Which coordinator WKE1 the hooks sign with and return.
+#[derive(Clone, Copy)]
+enum SignedEvidence {
+    /// The shared registered epoch-1 verify-only coordinator key.
+    Installed,
+    /// The same key material under another signing role.
+    WrongRole,
+    /// The same key, claiming that private material is required.
+    PrivateMaterialRequired,
+    /// Bytes that are no WKE1 record, under the forged address.
+    Undecodable,
 }
 
-/// Hooks that accept only the installed coordinator's evidence.
+impl SignedEvidence {
+    /// The evidence address a receipt names and the bytes returned with it.
+    fn pair(self) -> Fallible<(Hash, Vec<u8>)> {
+        let installed = *test_coordinator_key_evidence(1).as_input();
+        let input = match self {
+            Self::Installed => installed,
+            Self::WrongRole => WorldKeyEvidenceInputV1 {
+                identity: KeyIdentityV1 {
+                    role: KeyRoleV1::SubjectAttributionSigning,
+                    ..installed.identity
+                },
+                ..installed
+            },
+            Self::PrivateMaterialRequired => WorldKeyEvidenceInputV1 {
+                private_material_required: true,
+                ..installed
+            },
+            Self::Undecodable => return Ok((FORGED_EVIDENCE, vec![0xff])),
+        };
+        let evidence = WorldKeyEvidenceV1::new(input)?;
+        Ok((evidence.digest(), evidence.to_canonical_cbor()))
+    }
+}
+
+/// Hooks that sign with `signed` and accept only its evidence address.
+fn signing(signed: SignedEvidence) -> Fallible<OwnerHooks> {
+    let (evidence, _) = signed.pair()?;
+    Ok(OwnerHooks {
+        local_cut: evidence,
+        admission: evidence,
+        signed,
+    })
+}
+
+/// Hooks that sign with and accept only the installed coordinator's evidence.
 fn installed() -> Fallible<OwnerHooks> {
-    let evidence = coordinator_evidence()?.digest();
-    Ok(hooks(evidence, evidence))
-}
-
-/// The registry row that the installed coordinator's WKE1 names.
-fn coordinator_registration(public_key: PublicKey) -> Fallible<KeyRegistrationV1> {
-    let evidence = *coordinator_evidence()?.as_input();
-    Ok(KeyRegistrationV1::new(
-        evidence.identity,
-        evidence.private_material_digest,
-        Some(public_key),
-    ))
-}
-
-/// A key registry holding the installed coordinator's live signing key.
-fn coordinator_keys() -> Fallible<KeyRegistryStateV1> {
-    let registration = coordinator_registration(PublicKey::from_bytes([0xc2; 32]))?;
-    let mut keys = KeyRegistryStateV1::new();
-    keys.register_key(registration)?;
-    Ok(keys)
+    signing(SignedEvidence::Installed)
 }
 
 /// A Memory owner store whose key registry holds the coordinator key.
 fn memory_owner() -> Fallible<MemoryStore> {
     let mut store = MemoryStore::new();
-    store.save_key_registry(&coordinator_keys()?)?;
+    store.save_key_registry(&test_coordinator_key_registry())?;
     Ok(store)
 }
 
 /// A `SQLite` owner store whose key registry holds the coordinator key.
 fn sqlite_owner(path: &str) -> Fallible<SqliteStore> {
     let mut store = SqliteStore::open(path)?;
-    store.save_key_registry(&coordinator_keys()?)?;
+    store.save_key_registry(&test_coordinator_key_registry())?;
     Ok(store)
 }
 
@@ -149,6 +170,7 @@ impl Plugin for LocalPlugin {
 struct OwnerHooks {
     local_cut: Hash,
     admission: Hash,
+    signed: SignedEvidence,
 }
 
 impl ManifestOwnerAdmissionVerifierV1 for OwnerHooks {
@@ -190,12 +212,15 @@ impl ManifestOwnerAdmissionVerifierV1 for OwnerHooks {
     fn sign_coordinator_receipt(
         &self,
         draft: ManifestSlotAdmissionReceiptDraftV1,
-    ) -> Result<(ManifestSlotAdmissionReceiptV1, Vec<u8>), ManifestOwnerAdmissionErrorV1> {
+    ) -> Result<SignedManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
         let rejected = ManifestOwnerAdmissionErrorV1::OwnerRejected;
-        let evidence = coordinator_evidence().or(Err(rejected))?;
+        let (evidence_hash, key_evidence) = self.signed.pair().or(Err(rejected))?;
         draft
-            .with_evidence_and_signature(evidence.digest(), SIGNATURE)
-            .map(|receipt| (receipt, evidence.to_canonical_cbor()))
+            .with_evidence_and_signature(evidence_hash, SIGNATURE)
+            .map(|receipt| SignedManifestSlotAdmissionReceiptV1 {
+                receipt,
+                key_evidence,
+            })
             .or(Err(rejected))
     }
 
@@ -240,16 +265,19 @@ impl LocalCutOwnerVerifierV1 for OwnerHooks {
     fn sign_local_cut_receipt(
         &self,
         commit: &LocalCutCommitV1,
-    ) -> Result<(LocalCutReceiptV1, Vec<u8>), LocalCutOwnerErrorV1> {
+    ) -> Result<SignedLocalCutReceiptV1, LocalCutOwnerErrorV1> {
         let rejected = LocalCutOwnerErrorV1::OwnerRejected;
-        let evidence = coordinator_evidence().or(Err(rejected))?;
+        let (evidence_hash, key_evidence) = self.signed.pair().or(Err(rejected))?;
         let receipt = LocalCutReceiptV1::new(LocalCutReceiptInputV1 {
             commit_record_hash: commit.digest(),
-            coordinator_key_evidence_hash: evidence.digest(),
+            coordinator_key_evidence_hash: evidence_hash,
             signature: SIGNATURE,
         });
         receipt
-            .map(|receipt| (receipt, evidence.to_canonical_cbor()))
+            .map(|receipt| SignedLocalCutReceiptV1 {
+                receipt,
+                key_evidence,
+            })
             .or(Err(rejected))
     }
 
@@ -336,7 +364,7 @@ fn world(timeline_count: usize) -> Fallible<World> {
         gate,
         generation,
         timelines,
-        keys: coordinator_keys()?,
+        keys: test_coordinator_key_registry(),
     })
 }
 
@@ -505,9 +533,12 @@ impl<T> OwnerStore for T where
 {
 }
 
-fn admit<S: OwnerStore>(world: &World, store: &mut S, plan: &AdmissionPlan<'_>) -> TestResult {
-    let prior = store.read_manifest_owner_state_v1(owner_id(world))?;
-    let prior = prior.as_ref();
+/// The complete admission request of every world Timeline after `prior`.
+fn admission_request(
+    world: &World,
+    prior: Option<&ManifestOwnerAdmissionOwnerStateV1>,
+    plan: &AdmissionPlan<'_>,
+) -> Fallible<ManifestOwnerAdmissionRequestV1> {
     let mut timelines = Vec::with_capacity(world.timelines.len());
     for timeline_id in &world.timelines {
         let scope = scope(world, *timeline_id, plan)?;
@@ -519,7 +550,7 @@ fn admit<S: OwnerStore>(world: &World, store: &mut S, plan: &AdmissionPlan<'_>) 
             members: scope.members,
         });
     }
-    let request = ManifestOwnerAdmissionRequestV1 {
+    Ok(ManifestOwnerAdmissionRequestV1 {
         operation_id: plan.operation_id,
         catalog: plan.admitted.catalog().clone(),
         expected_configuration_generation: prior.map(|state| state.configuration_generation),
@@ -528,7 +559,12 @@ fn admit<S: OwnerStore>(world: &World, store: &mut S, plan: &AdmissionPlan<'_>) 
         resulting_inventory_generation: plan.resulting_inventory,
         read_limits: READ_LIMITS,
         timelines,
-    };
+    })
+}
+
+fn admit<S: OwnerStore>(world: &World, store: &mut S, plan: &AdmissionPlan<'_>) -> TestResult {
+    let prior = store.read_manifest_owner_state_v1(owner_id(world))?;
+    let request = admission_request(world, prior.as_ref(), plan)?;
     world
         .registry
         .commit_admitted_manifest_owner_admission_v1(plan.admitted, request, store)?;
@@ -1353,7 +1389,8 @@ fn fresh_use_fences_deny_stale_closed_or_uncovered_protected_use() -> TestResult
     assert_eq!(stale_link.err(), denied);
     let plan = cut_plan(2, 0x35, fenced_inventory(&world));
     commit_cut(&world, &world.admitted, &mut store, &plan)?;
-    assert!(verify(&world.registry, &store, &request, current(&world))?.is_ok());
+    let verified = verify(&world.registry, &store, &request, current(&world))?;
+    assert!(verified.is_ok());
 
     let later_start = world.lease_start + DAY_MICROS;
     let later = lease(&world.policy, request.timeline_id, later_start)?;
@@ -1512,11 +1549,9 @@ fn coordinator_receipts_verify_after_their_key_is_rotated_or_tombstoned() -> Tes
     let mut store = memory_owner()?;
     let request = signed_cut(&world, &mut store)?;
     let signed = verify(&world.registry, &store, &request, current(&world))??;
-    let evidence = *coordinator_evidence()?.as_input();
+    let evidence = *test_coordinator_key_evidence(1).as_input();
     let identity = evidence.identity;
-    let next_epoch = KeyIdentityV1::new(COORDINATOR, identity.role, 2);
-    let next_key = Some(PublicKey::from_bytes([0xc4; 32]));
-    let rotation = KeyRegistrationV1::new(next_epoch, hash(0xc3), next_key);
+    let rotation = test_coordinator_key_registration(&test_coordinator_key_evidence(2));
     assert_eq!(
         world.keys.register_key(rotation)?,
         KeyRegistrationOutcomeV1::Registered
@@ -1547,7 +1582,10 @@ fn coordinator_evidence_must_be_retained_and_match_the_installed_registry() -> T
     };
     let missing = verify(&world.registry, &store, &request, unregistered)?;
     assert_eq!(missing.err(), denied);
-    let other_key = coordinator_registration(PublicKey::from_bytes([0xc6; 32]))?;
+    let other_key = KeyRegistrationV1 {
+        public_verification_key: Some(PublicKey::from_bytes([0xc6; 32])),
+        ..test_coordinator_key_registration(&test_coordinator_key_evidence(1))
+    };
     let mut substituted = KeyRegistryStateV1::new();
     substituted.register_key(other_key)?;
     let rekeyed = Fences {
@@ -1582,16 +1620,118 @@ fn a_lost_sqlite_evidence_row_leaves_the_admission_unavailable() -> TestResult {
     let mut store = sqlite_owner(path)?;
     let request = signed_cut(&world, &mut store)?;
     let snapshot = read_snapshot(&world, &store, &request)?;
-    let evidence = coordinator_evidence()?;
+    let evidence = test_coordinator_key_evidence(1);
     let retained = snapshot.key_evidence.get(&evidence.digest());
     assert_eq!(retained, Some(&evidence.to_canonical_cbor()));
     assert_eq!(snapshot.key_evidence.len(), 1);
-    assert!(verify(&world.registry, &store, &request, current(&world))?.is_ok());
+    let verified = verify(&world.registry, &store, &request, current(&world))?;
+    assert!(verified.is_ok());
     let raw = rusqlite::Connection::open(path)?;
     raw.execute("DELETE FROM world_key_evidence", [])?;
     drop(raw);
     let lost = verify(&world.registry, &store, &request, current(&world))?;
     assert_eq!(lost.err(), Some(LinkError::CompositionUnavailable));
+    Ok(())
+}
+
+/// Serves one snapshot assembled from prepared batches, never committed.
+struct DetachedStore {
+    snapshot: ManifestOwnerLinkSnapshotV1,
+}
+
+impl ManifestOwnerLinkReadPortV1 for DetachedStore {
+    fn read_manifest_owner_link_snapshot_v1(
+        &self,
+        _owner_id: [u8; 32],
+        _identity: ManifestOwnerLinkCutIdentityV1,
+        _timeline_id: TimelineId,
+    ) -> Result<Option<ManifestOwnerLinkSnapshotV1>, LocalCutOwnerErrorV1> {
+        Ok(Some(self.snapshot.clone()))
+    }
+}
+
+/// The admission rows a store would retain for one prepared admission.
+fn prepared_rows(
+    prepared: &PreparedManifestOwnerAdmissionV1,
+) -> Vec<ManifestOwnerAdmissionSnapshotV1> {
+    let input = prepared.input();
+    let row = |timeline: &ManifestOwnerTimelineAdmissionV1| ManifestOwnerAdmissionSnapshotV1 {
+        catalog: input.catalog.clone(),
+        timeline: timeline.clone(),
+        operation_id: input.operation_id,
+        expected_inventory_generation: input.expected_inventory_generation,
+        resulting_inventory_generation: input.resulting_inventory_generation,
+        read_limits: input.read_limits,
+    };
+    input.timelines.iter().map(row).collect()
+}
+
+/// Admit and cut every world Timeline through `hooks`, then assemble the
+/// owner-link snapshot a store would serve, without any store.
+///
+/// Stores reject unusable coordinator evidence at commit, so this is the only
+/// way such evidence can reach the verifier's own key-evidence check.
+fn detached_snapshot(world: &World, hooks: OwnerHooks) -> Fallible<ManifestOwnerLinkSnapshotV1> {
+    let plan = genesis_plan(world, 0x81, LeafPolicy::Structural);
+    let request = admission_request(world, None, &plan)?;
+    let admission = prepare_manifest_owner_admission_v1(request, &hooks, None)?;
+    let admissions = prepared_rows(&admission);
+    let admitted = admission.input();
+    let state = ManifestOwnerAdmissionOwnerStateV1 {
+        owner_id: owner_id(world),
+        configuration_generation: admitted.catalog.as_input().configuration_generation,
+        previous_visible_lcq1_hash: None,
+        inventory_generation: admitted.resulting_inventory_generation,
+        timelines: world.timelines.clone(),
+    };
+    let inputs = CutInputs {
+        owner_id: state.owner_id,
+        state: &state,
+        snapshots: &admissions,
+        previous: &[],
+        tick: 1,
+        membership_epoch: 0,
+    };
+    let request = cut_request(&inputs, &cut_plan(1, 0x83, fenced_inventory(world)))?;
+    let cut = prepare_local_cut_owner_commit_v1(request, None, &state, &admissions, &hooks)?;
+    let dependency_branches = cut
+        .dependency_directories()
+        .iter()
+        .flat_map(|directory| directory.branches())
+        .map(|branch| (branch.digest(), branch.clone()))
+        .collect();
+    let evidence = cut.coordinator_key_evidence();
+    let key_evidence = BTreeMap::from([(evidence.evidence_hash, evidence.bytes.clone())]);
+    Ok(ManifestOwnerLinkSnapshotV1 {
+        owner_state: cut.successor_state().clone(),
+        request: cut.request().clone(),
+        result: cut.applied_result(),
+        ancestors: Vec::new(),
+        admissions,
+        dependency_branches,
+        key_evidence,
+    })
+}
+
+#[test]
+fn unusable_coordinator_evidence_leaves_an_uncommitted_admission_unavailable() -> TestResult {
+    let world = world(1)?;
+    let unavailable = Some(LinkError::CompositionUnavailable);
+    let cases = [
+        (SignedEvidence::Installed, None),
+        (SignedEvidence::WrongRole, unavailable),
+        (SignedEvidence::PrivateMaterialRequired, unavailable),
+        (SignedEvidence::Undecodable, unavailable),
+    ];
+    for (signed, expected) in cases {
+        let hooks = signing(signed)?;
+        let store = DetachedStore {
+            snapshot: detached_snapshot(&world, hooks)?,
+        };
+        let request = by_recording(&world, first_recording(&store.snapshot.result)?);
+        let verified = verify(&owner_registry(hooks), &store, &request, current(&world))?;
+        assert_eq!(verified.err(), expected);
+    }
     Ok(())
 }
 

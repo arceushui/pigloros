@@ -20,15 +20,15 @@ use pos_core::retention::{
 use pos_core::{
     build_manifest_owner_scope_v1, local_cut_owner_intent_digest_v1,
     prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1,
+    test_coordinator_key_evidence, test_coordinator_key_registry,
     validate_manifest_owner_admission_snapshot_v1, ArtifactDataClassV1, ArtifactTransitionRuleV1,
     EventStore, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash,
-    KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1, LocalCutCommitV1,
-    LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1, LocalCutHeadsTableV1,
-    LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1, LocalCutOwnerCommitV1,
-    LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1,
-    LocalCutOwnerStateV1, LocalCutOwnerVerifierV1, LocalCutReceiptInputV1, LocalCutReceiptV1,
-    LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1, LocalCutSealInputV2, LocalCutSealV2,
-    LocalCutTableRefV1, LocalCutWorldRecordingV1, ManifestAdmissionCatalogInputV1,
+    LocalCutCommitV1, LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1,
+    LocalCutHeadsTableV1, LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1,
+    LocalCutOwnerCommitV1, LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1,
+    LocalCutOwnerRequestV1, LocalCutOwnerStateV1, LocalCutOwnerVerifierV1, LocalCutReceiptInputV1,
+    LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1, LocalCutSealInputV2,
+    LocalCutSealV2, LocalCutTableRefV1, LocalCutWorldRecordingV1, ManifestAdmissionCatalogInputV1,
     ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
     ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
@@ -38,11 +38,12 @@ use pos_core::{
     ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1,
     ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
     ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1,
-    PluginId, PreparedLocalCutOwnerCommitV1, PublicKey, TimelineId, WorkloadProfileV1,
-    WorldArtifactKindV1, WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldClosureBindingInputV1,
+    PluginId, PreparedLocalCutOwnerCommitV1, SignedLocalCutReceiptV1,
+    SignedManifestSlotAdmissionReceiptV1, TimelineId, WorkloadProfileV1, WorldArtifactKindV1,
+    WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldClosureBindingInputV1,
     WorldClosureBindingV1, WorldClosureCutCoordinateV1, WorldClosureReadLimitsV1,
     WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldDependencyDirectoryV1,
-    WorldKeyEvidenceInputV1, WorldKeyEvidenceV1, WorldProducerV1, MAX_MANIFEST_OWNER_PLUGINS_V1,
+    WorldProducerV1, MAX_MANIFEST_OWNER_PLUGINS_V1,
 };
 use pos_store::memory::MemoryStore;
 
@@ -118,38 +119,16 @@ impl FixtureOwner {
     const SUBSTITUTING: Self = Self { substitute: true };
 
     /// The signed evidence address and the WKE1 bytes returned with it.
-    fn signed_evidence(&self) -> Option<(Hash, Vec<u8>)> {
-        let signed = coordinator_evidence(1).ok()?;
-        let returned = if self.substitute {
-            coordinator_evidence(2).ok()?
-        } else {
-            signed
-        };
-        Some((signed.digest(), returned.to_canonical_cbor()))
+    fn signed_evidence(&self) -> (Hash, Vec<u8>) {
+        let returned = test_coordinator_key_evidence(if self.substitute { 2 } else { 1 });
+        let signed = test_coordinator_key_evidence(1).digest();
+        (signed, returned.to_canonical_cbor())
     }
 }
 
-/// The verify-only WKE1 of one epoch of the fixture coordinator's signing key.
-fn coordinator_evidence(epoch: u64) -> Fallible<WorldKeyEvidenceV1> {
-    let evidence = WorldKeyEvidenceV1::new(WorldKeyEvidenceInputV1 {
-        identity: KeyIdentityV1::new("coordinator", KeyRoleV1::TimelineIntegritySigning, epoch),
-        private_material_digest: hash(0xc0),
-        private_material_required: false,
-        public_verification_key: Some(PublicKey::from_bytes([0xc1; 32])),
-    })?;
-    Ok(evidence)
-}
-
-/// Install a registry holding the coordinator's epoch-1 signing key.
+/// Install the shared registry holding the coordinator's epoch-1 signing key.
 fn keyed<S: EventStore>(mut store: S) -> Fallible<S> {
-    let evidence = *coordinator_evidence(1)?.as_input();
-    let mut registry = KeyRegistryStateV1::new();
-    registry.register_key(KeyRegistrationV1::new(
-        evidence.identity,
-        evidence.private_material_digest,
-        evidence.public_verification_key,
-    ))?;
-    store.save_key_registry(&registry)?;
+    store.save_key_registry(&test_coordinator_key_registry())?;
     Ok(store)
 }
 
@@ -187,13 +166,15 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
     fn sign_coordinator_receipt(
         &self,
         draft: ManifestSlotAdmissionReceiptDraftV1,
-    ) -> Result<(ManifestSlotAdmissionReceiptV1, Vec<u8>), ManifestOwnerAdmissionErrorV1> {
-        let rejected = ManifestOwnerAdmissionErrorV1::OwnerRejected;
-        let (evidence_hash, bytes) = self.signed_evidence().ok_or(rejected)?;
+    ) -> Result<SignedManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+        let (evidence_hash, key_evidence) = self.signed_evidence();
         draft
             .with_evidence_and_signature(evidence_hash, SIGNATURE)
-            .map(|receipt| (receipt, bytes))
-            .or(Err(rejected))
+            .map(|receipt| SignedManifestSlotAdmissionReceiptV1 {
+                receipt,
+                key_evidence,
+            })
+            .or(Err(ManifestOwnerAdmissionErrorV1::OwnerRejected))
     }
 
     fn verify_native_policy_copies(
@@ -237,16 +218,18 @@ impl LocalCutOwnerVerifierV1 for FixtureOwner {
     fn sign_local_cut_receipt(
         &self,
         commit: &LocalCutCommitV1,
-    ) -> Result<(LocalCutReceiptV1, Vec<u8>), LocalCutOwnerErrorV1> {
-        let rejected = LocalCutOwnerErrorV1::OwnerRejected;
-        let (evidence_hash, bytes) = self.signed_evidence().ok_or(rejected)?;
+    ) -> Result<SignedLocalCutReceiptV1, LocalCutOwnerErrorV1> {
+        let (evidence_hash, key_evidence) = self.signed_evidence();
         LocalCutReceiptV1::new(LocalCutReceiptInputV1 {
             commit_record_hash: commit.digest(),
             coordinator_key_evidence_hash: evidence_hash,
             signature: SIGNATURE,
         })
-        .map(|receipt| (receipt, bytes))
-        .or(Err(rejected))
+        .map(|receipt| SignedLocalCutReceiptV1 {
+            receipt,
+            key_evidence,
+        })
+        .or(Err(LocalCutOwnerErrorV1::OwnerRejected))
     }
 
     fn verify_local_cut_receipt(
@@ -1391,10 +1374,10 @@ fn retained_evidence<S: ManifestOwnerLinkReadPortV1>(
 }
 
 /// The one deduplicated WKE1 record that the cut's LCQ1 and MSR1 both name.
-fn expected_evidence() -> Fallible<BTreeMap<Hash, Vec<u8>>> {
-    let evidence = coordinator_evidence(1)?;
+fn expected_evidence() -> BTreeMap<Hash, Vec<u8>> {
+    let evidence = test_coordinator_key_evidence(1);
     let entry = (evidence.digest(), evidence.to_canonical_cbor());
-    Ok(BTreeMap::from([entry]))
+    BTreeMap::from([entry])
 }
 
 /// Reject substituted WKE1 bytes and an absent registry before publication.
@@ -1435,7 +1418,7 @@ fn memory_cut_retains_the_exact_coordinator_evidence() -> TestResult {
     let cut = record_cut(&mut store, SMALL_ROSTER)?;
     assert_eq!(
         retained_evidence(&store, &cut.committed)?,
-        expected_evidence()?
+        expected_evidence()
     );
     Ok(())
 }
@@ -1456,7 +1439,7 @@ fn sqlite_cut_retains_the_same_coordinator_evidence_across_reopen() -> TestResul
         retained_evidence(&reopened, &cut.committed)?,
         memory_evidence
     );
-    assert_eq!(memory_evidence, expected_evidence()?);
+    assert_eq!(memory_evidence, expected_evidence());
     let connection = rusqlite::Connection::open(&path)?;
     let count = "SELECT COUNT(*) FROM world_key_evidence";
     let rows: i64 = connection.query_row(count, [], |row| row.get(0))?;

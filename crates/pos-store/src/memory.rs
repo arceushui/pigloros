@@ -14109,9 +14109,12 @@ mod coverage_entrypoints {
 mod manifest_owner_admission_coverage {
     use super::*;
     use crate::manifest_owner_fixtures::{
-        catalog, coordinator_registry, hash, timeline_request, AcceptingOwner, READ_LIMITS,
+        catalog, hash, timeline_request, AcceptingOwner, READ_LIMITS,
     };
-    use pos_core::{prepare_manifest_owner_admission_v1, ManifestOwnerAdmissionRequestV1};
+    use pos_core::{
+        prepare_manifest_owner_admission_v1, test_coordinator_key_registry,
+        ManifestOwnerAdmissionRequestV1,
+    };
 
     type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
     type TestResult = FixtureResult<()>;
@@ -14158,7 +14161,7 @@ mod manifest_owner_admission_coverage {
     /// Store holding generation 1 (operation `hash(41)`, Timelines 1 and 2).
     fn genesis_store() -> FixtureResult<MemoryStore> {
         let mut store = MemoryStore::new();
-        store.save_key_registry(&coordinator_registry()?)?;
+        store.save_key_registry(&test_coordinator_key_registry())?;
         store.commit_manifest_owner_admission_v1(prepared(None, &genesis_timelines())?)?;
         Ok(store)
     }
@@ -14455,19 +14458,22 @@ mod manifest_owner_admission_coverage {
 mod local_cut_owner_coverage {
     use super::*;
     use crate::manifest_owner_fixtures::{
-        catalog, coordinator_evidence, coordinator_registry, member_classes, timeline_request,
-        zero_event_inputs, zero_event_results, READ_LIMITS, SOURCE_GENESIS,
+        catalog, member_classes, timeline_request, zero_event_inputs, zero_event_results,
+        READ_LIMITS, SOURCE_GENESIS,
     };
     use pos_core::{
-        prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1, KeyRegistrationV1,
-        KeyRoleV1, LocalCutCommitV1, LocalCutCompositionBindingRowV1, LocalCutHeadsTableV1,
-        LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1, LocalCutOwnerVerifierV1,
-        LocalCutReceiptInputV1, LocalCutReceiptV1, LocalCutSealInputV2, LocalCutSealV2,
-        LocalCutTableRefV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
-        ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionVerifierV1,
-        ManifestOwnerClassifiedLeafV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
+        prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1,
+        test_coordinator_key_evidence, test_coordinator_key_registration,
+        test_coordinator_key_registry, CoordinatorSignedReceiptV1, KeyRoleV1, LocalCutCommitV1,
+        LocalCutCompositionBindingRowV1, LocalCutHeadsTableV1, LocalCutManifestBindingRowV1,
+        LocalCutManifestBindingTableV1, LocalCutOwnerVerifierV1, LocalCutReceiptInputV1,
+        LocalCutReceiptV1, LocalCutSealInputV2, LocalCutSealV2, LocalCutTableRefV1,
+        ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionRequestV1,
+        ManifestOwnerAdmissionVerifierV1, ManifestOwnerClassifiedLeafV1,
+        ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
         ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-        ManifestSlotAdmissionReceiptV1, WorldKeyEvidenceInputV1, WorldKeyEvidenceV1,
+        ManifestSlotAdmissionReceiptV1, SignedLocalCutReceiptV1,
+        SignedManifestSlotAdmissionReceiptV1, WorldKeyEvidenceInputV1, WorldKeyEvidenceV1,
     };
 
     type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -14549,9 +14555,9 @@ mod local_cut_owner_coverage {
         }
     }
 
-    /// Sign with the registered fixture coordinator evidence.
-    fn accepting() -> FixtureResult<AcceptingOwner> {
-        Ok(signing(&coordinator_evidence()?))
+    /// Sign with the registered epoch-1 coordinator evidence.
+    fn accepting() -> AcceptingOwner {
+        signing(&test_coordinator_key_evidence(1))
     }
 
     impl ManifestOwnerAdmissionVerifierV1 for AcceptingOwner {
@@ -14588,11 +14594,13 @@ mod local_cut_owner_coverage {
         fn sign_coordinator_receipt(
             &self,
             draft: ManifestSlotAdmissionReceiptDraftV1,
-        ) -> Result<(ManifestSlotAdmissionReceiptV1, Vec<u8>), ManifestOwnerAdmissionErrorV1>
-        {
+        ) -> Result<SignedManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
             draft
                 .with_evidence_and_signature(self.address, SIGNATURE)
-                .map(|receipt| (receipt, self.bytes.clone()))
+                .map(|receipt| CoordinatorSignedReceiptV1 {
+                    receipt,
+                    key_evidence: self.bytes.clone(),
+                })
                 .map_err(|_| ManifestOwnerAdmissionErrorV1::OwnerRejected)
         }
 
@@ -14636,13 +14644,16 @@ mod local_cut_owner_coverage {
         fn sign_local_cut_receipt(
             &self,
             commit: &LocalCutCommitV1,
-        ) -> Result<(LocalCutReceiptV1, Vec<u8>), LocalCutOwnerErrorV1> {
+        ) -> Result<SignedLocalCutReceiptV1, LocalCutOwnerErrorV1> {
             LocalCutReceiptV1::new(LocalCutReceiptInputV1 {
                 commit_record_hash: commit.digest(),
                 coordinator_key_evidence_hash: self.address,
                 signature: SIGNATURE,
             })
-            .map(|receipt| (receipt, self.bytes.clone()))
+            .map(|receipt| CoordinatorSignedReceiptV1 {
+                receipt,
+                key_evidence: self.bytes.clone(),
+            })
             .map_err(|_| LocalCutOwnerErrorV1::OwnerRejected)
         }
 
@@ -14707,13 +14718,13 @@ mod local_cut_owner_coverage {
             current.as_ref(),
         )?;
         let prepared =
-            prepare_manifest_owner_admission_v1(request, &accepting()?, current.as_ref())?;
+            prepare_manifest_owner_admission_v1(request, &accepting(), current.as_ref())?;
         Ok(prepared)
     }
 
     fn admitted_store(roster: &[([u8; 32], TimelineId)]) -> FixtureResult<MemoryStore> {
         let mut store = MemoryStore::new();
-        store.save_key_registry(&coordinator_registry()?)?;
+        store.save_key_registry(&test_coordinator_key_registry())?;
         for &(owner_id, timeline_id) in roster {
             let timelines = [timeline_id];
             let batch = prepare_admission(&store, owner_id, 1, &timelines, ADMISSION_OPERATION)?;
@@ -14854,7 +14865,7 @@ mod local_cut_owner_coverage {
         plan: &CutPlan,
         current: Option<&LocalCutOwnerStateV1>,
     ) -> FixtureResult<PreparedLocalCutOwnerCommitV1> {
-        prepare_signed_cut(store, owner_id, plan, current, &accepting()?)
+        prepare_signed_cut(store, owner_id, plan, current, &accepting())
     }
 
     fn prepare_signed_cut(
@@ -15373,7 +15384,7 @@ mod local_cut_owner_coverage {
             current.as_ref(),
             &view.state,
             &view.snapshots,
-            &accepting()?,
+            &accepting(),
         )?;
         assert_eq!(
             store.commit_local_cut_owner_v1(batch),
@@ -15585,7 +15596,7 @@ mod local_cut_owner_coverage {
                 current.as_ref(),
                 &state,
                 &snapshots,
-                &accepting()?,
+                &accepting(),
             )?;
             let committed = store.commit_local_cut_owner_v1(batch)?;
             Ok(committed)
@@ -15598,7 +15609,7 @@ mod local_cut_owner_coverage {
         {
             let timelines = [CUT_TIMELINE];
             let request = admission_request(CUT_OWNER, 1, &timelines, ADMISSION_OPERATION, None)?;
-            let batch = prepare_manifest_owner_admission_v1(request, &accepting()?, None)?;
+            let batch = prepare_manifest_owner_admission_v1(request, &accepting(), None)?;
             store.commit_manifest_owner_admission_v1(batch)?;
             let first = commit_shared_cut(store, &FIRST_CUT, None)?;
             let chained = first.recordings.first().ok_or("missing recording")?;
@@ -15669,9 +15680,9 @@ mod local_cut_owner_coverage {
             let path = directory.path().join("parity.db");
             let path = path.to_str().ok_or("non-UTF-8 database path")?;
             let mut database = SqliteStore::open(path)?;
-            database.save_key_registry(&coordinator_registry()?)?;
+            database.save_key_registry(&test_coordinator_key_registry())?;
             let mut memory = MemoryStore::new();
-            memory.save_key_registry(&coordinator_registry()?)?;
+            memory.save_key_registry(&test_coordinator_key_registry())?;
             let recorded = record_shared_fixture(&mut memory)?;
             assert_eq!(record_shared_fixture(&mut database)?, recorded);
             for cut_id in [FIRST_CUT.cut_id, SECOND_CUT.cut_id] {
@@ -15714,22 +15725,21 @@ mod local_cut_owner_coverage {
         store.read_manifest_owner_link_snapshot_v1(CUT_OWNER, identity, CUT_TIMELINE)
     }
 
-    /// The fixture coordinator WKE1 with one field changed.
+    /// The epoch-1 coordinator WKE1 with one field changed.
     fn altered_evidence(
         change: impl FnOnce(&mut WorldKeyEvidenceInputV1),
     ) -> FixtureResult<WorldKeyEvidenceV1> {
-        let mut input = *coordinator_evidence()?.as_input();
+        let mut input = *test_coordinator_key_evidence(1).as_input();
         change(&mut input);
         Ok(WorldKeyEvidenceV1::new(input)?)
     }
 
-    /// Sign with the registered address but return another record's bytes.
-    fn mismatched_signer() -> FixtureResult<AcceptingOwner> {
-        let other = altered_evidence(|input| input.identity.epoch = 2)?;
-        Ok(AcceptingOwner {
-            address: coordinator_evidence()?.digest(),
-            bytes: other.to_canonical_cbor(),
-        })
+    /// Sign with the registered address but return the epoch-2 record's bytes.
+    fn mismatched_signer() -> AcceptingOwner {
+        AcceptingOwner {
+            address: test_coordinator_key_evidence(1).digest(),
+            bytes: test_coordinator_key_evidence(2).to_canonical_cbor(),
+        }
     }
 
     /// Prepare the genesis admission of `CUT_OWNER`, signed by `signer`.
@@ -15739,15 +15749,13 @@ mod local_cut_owner_coverage {
         Ok(prepare_manifest_owner_admission_v1(request, signer, None)?)
     }
 
-    /// A registry holding the fixture identity with another public key.
+    /// A registry holding the epoch-1 coordinator identity with another public key.
     fn foreign_registry() -> FixtureResult<KeyRegistryStateV1> {
-        let fixture = *coordinator_evidence()?.as_input();
+        let evidence = test_coordinator_key_evidence(1);
+        let mut registration = test_coordinator_key_registration(&evidence);
+        registration.public_verification_key = Some(PublicKey::from_bytes([0xc3; 32]));
         let mut registry = KeyRegistryStateV1::new();
-        registry.register_key(KeyRegistrationV1::new(
-            fixture.identity,
-            fixture.private_material_digest,
-            Some(PublicKey::from_bytes([0xc3; 32])),
-        ))?;
+        registry.register_key(registration)?;
         Ok(registry)
     }
 
@@ -15755,7 +15763,7 @@ mod local_cut_owner_coverage {
     fn coordinator_key_evidence_is_retained_once_and_read_back() -> TestResult {
         let (mut store, first) = cut_store()?;
         let second = commit_cut(&mut store, CUT_OWNER, &SECOND_CUT)?;
-        let evidence = coordinator_evidence()?;
+        let evidence = test_coordinator_key_evidence(1);
         let address = evidence.digest();
         let retained = BTreeMap::from([(address, evidence.to_canonical_cbor())]);
         assert_eq!(store.world_key_evidence, retained);
@@ -15776,9 +15784,9 @@ mod local_cut_owner_coverage {
 
     #[test]
     fn commits_reject_evidence_bytes_that_miss_the_receipt_address() -> TestResult {
-        let signer = mismatched_signer()?;
+        let signer = mismatched_signer();
         let mut store = MemoryStore::new();
-        store.save_key_registry(&coordinator_registry()?)?;
+        store.save_key_registry(&test_coordinator_key_registry())?;
         assert_eq!(
             store.commit_manifest_owner_admission_v1(signed_genesis(&signer)?),
             Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
@@ -15804,10 +15812,10 @@ mod local_cut_owner_coverage {
         })?;
         let required = altered_evidence(|input| input.private_material_required = true)?;
         let cases = [
-            (signing(&attribution), Some(coordinator_registry()?)),
-            (signing(&required), Some(coordinator_registry()?)),
-            (accepting()?, None),
-            (accepting()?, Some(foreign_registry()?)),
+            (signing(&attribution), Some(test_coordinator_key_registry())),
+            (signing(&required), Some(test_coordinator_key_registry())),
+            (accepting(), None),
+            (accepting(), Some(foreign_registry()?)),
         ];
         for (signer, registry) in cases {
             let mut store = MemoryStore::new();

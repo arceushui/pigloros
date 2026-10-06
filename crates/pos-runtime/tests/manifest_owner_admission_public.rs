@@ -12,10 +12,11 @@ use pos_core::retention::{
 };
 use pos_core::{
     build_manifest_owner_scope_v1, manifest_owner_admission_intent_digest_v1,
-    prepare_manifest_owner_admission_v1, validate_manifest_owner_admission_snapshot_v1,
-    ArtifactDataClassV1, ArtifactTransitionRuleV1, Hash, KeyIdentityV1, KeyRegistrationV1,
-    KeyRegistryStateV1, KeyRoleV1, LocalCutOwnerCommitKindV1, LocalCutOwnerErrorV1,
-    LocalCutOwnerPersistencePortV1, ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogV1,
+    prepare_manifest_owner_admission_v1, test_coordinator_key_evidence,
+    test_coordinator_key_registry, validate_manifest_owner_admission_snapshot_v1,
+    ArtifactDataClassV1, ArtifactTransitionRuleV1, Hash, KeyIdentityV1, KeyRoleV1,
+    LocalCutOwnerCommitKindV1, LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1,
+    ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogV1,
     ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
     ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
     ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
@@ -26,7 +27,8 @@ use pos_core::{
     ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptInputV1,
     ManifestSlotAdmissionReceiptV1, ManifestSlotBindingInputV1, ManifestSlotBindingRowV1,
     ManifestSlotBindingV1, OutputPolicyClosureEnvelopeV1, OwnerIdV1, Plugin, PluginId,
-    PreparedManifestOwnerAdmissionV1, PublicKey, TimelineId, WorldArtifactKindV1,
+    PreparedManifestOwnerAdmissionV1, SignedLocalCutReceiptV1,
+    SignedManifestSlotAdmissionReceiptV1, TimelineId, WorldArtifactKindV1,
     WorldClosureReadLimitsV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
     WorldKeyEvidenceInputV1, WorldKeyEvidenceV1, WorldProducerV1,
     MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
@@ -306,44 +308,33 @@ fn consumer_set(
     })?)
 }
 
-/// Owner of the fixture coordinator's Timeline-integrity signing key.
-const COORDINATOR: &str = "local-coordinator";
-
-/// The fixture coordinator's epoch-1 WKE1 for `role` and private-material use.
+/// The shared epoch-1 coordinator WKE1 with `role` and private-material use.
 fn coordinator_key(role: KeyRoleV1, private_material_required: bool) -> Option<WorldKeyEvidenceV1> {
+    let installed = *test_coordinator_key_evidence(1).as_input();
     WorldKeyEvidenceV1::new(WorldKeyEvidenceInputV1 {
-        identity: KeyIdentityV1::new(COORDINATOR, role, 1),
-        private_material_digest: hash(0xc1),
+        identity: KeyIdentityV1 {
+            role,
+            ..installed.identity
+        },
         private_material_required,
-        public_verification_key: Some(PublicKey::from_bytes([0xc2; 32])),
+        ..installed
     })
     .ok()
-}
-
-/// A key registry holding the fixture coordinator's live signing key.
-fn coordinator_keys() -> Result<KeyRegistryStateV1, Box<dyn Error>> {
-    let evidence = coordinator_key(KeyRoleV1::TimelineIntegritySigning, false);
-    let evidence = *evidence.ok_or("invalid coordinator evidence")?.as_input();
-    let mut keys = KeyRegistryStateV1::new();
-    keys.register_key(KeyRegistrationV1::new(
-        evidence.identity,
-        evidence.private_material_digest,
-        evidence.public_verification_key,
-    ))?;
-    Ok(keys)
 }
 
 /// A Memory owner store whose key registry holds the coordinator key.
 fn memory_owner() -> Result<MemoryStore, Box<dyn Error>> {
     let mut store = MemoryStore::new();
-    pos_core::EventStore::save_key_registry(&mut store, &coordinator_keys()?)?;
+    let keys = test_coordinator_key_registry();
+    pos_core::EventStore::save_key_registry(&mut store, &keys)?;
     Ok(store)
 }
 
 /// A `SQLite` owner store whose key registry holds the coordinator key.
 fn sqlite_owner(path: &str) -> Result<pos_store::sqlite::SqliteStore, Box<dyn Error>> {
     let mut store = pos_store::sqlite::SqliteStore::open(path)?;
-    pos_core::EventStore::save_key_registry(&mut store, &coordinator_keys()?)?;
+    let keys = test_coordinator_key_registry();
+    pos_core::EventStore::save_key_registry(&mut store, &keys)?;
     Ok(store)
 }
 
@@ -489,14 +480,17 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
     fn sign_coordinator_receipt(
         &self,
         draft: ManifestSlotAdmissionReceiptDraftV1,
-    ) -> Result<(ManifestSlotAdmissionReceiptV1, Vec<u8>), ManifestOwnerAdmissionErrorV1> {
+    ) -> Result<SignedManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
         self.signed.fetch_add(1, Ordering::Relaxed);
         let rejected = ManifestOwnerAdmissionErrorV1::OwnerRejected;
         let evidence_hash = self.evidence_hash().ok_or(rejected)?;
-        let evidence = self.returned_evidence().ok_or(rejected)?;
+        let key_evidence = self.returned_evidence().ok_or(rejected)?;
         draft
             .with_evidence_and_signature(evidence_hash, [90; 64])
-            .map(|receipt| (receipt, evidence))
+            .map(|receipt| SignedManifestSlotAdmissionReceiptV1 {
+                receipt,
+                key_evidence,
+            })
             .or(Err(rejected))
     }
 
@@ -560,11 +554,11 @@ impl pos_core::LocalCutOwnerVerifierV1 for FixtureOwner {
     fn sign_local_cut_receipt(
         &self,
         commit: &pos_core::LocalCutCommitV1,
-    ) -> Result<(pos_core::LocalCutReceiptV1, Vec<u8>), pos_core::LocalCutOwnerErrorV1> {
+    ) -> Result<SignedLocalCutReceiptV1, pos_core::LocalCutOwnerErrorV1> {
         self.signed.fetch_add(1, Ordering::Relaxed);
         let rejected = LocalCutOwnerErrorV1::OwnerRejected;
         let installed = self.evidence_hash().ok_or(rejected)?;
-        let evidence = self.returned_evidence().ok_or(rejected)?;
+        let key_evidence = self.returned_evidence().ok_or(rejected)?;
         let (coordinator_key_evidence_hash, signature) =
             if self.signer_substituted.load(Ordering::Relaxed) {
                 (hash(119), [119; 64])
@@ -576,7 +570,10 @@ impl pos_core::LocalCutOwnerVerifierV1 for FixtureOwner {
             coordinator_key_evidence_hash,
             signature,
         })
-        .map(|receipt| (receipt, evidence))
+        .map(|receipt| SignedLocalCutReceiptV1 {
+            receipt,
+            key_evidence,
+        })
         .or(Err(rejected))
     }
 
@@ -2045,7 +2042,7 @@ impl ManifestOwnerAdmissionVerifierV1 for FaultyOwner {
     fn sign_coordinator_receipt(
         &self,
         draft: ManifestSlotAdmissionReceiptDraftV1,
-    ) -> Result<(ManifestSlotAdmissionReceiptV1, Vec<u8>), ManifestOwnerAdmissionErrorV1> {
+    ) -> Result<SignedManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
         self.reject_at(OwnerFault::Signature)?;
         if self.fault == OwnerFault::ReceiptDraft {
             let altered = ManifestSlotAdmissionReceiptDraftV1 {
@@ -2477,7 +2474,7 @@ impl pos_core::LocalCutOwnerVerifierV1 for FaultingCutVerifier {
     fn sign_local_cut_receipt(
         &self,
         commit: &pos_core::LocalCutCommitV1,
-    ) -> CutResult<(pos_core::LocalCutReceiptV1, Vec<u8>)> {
+    ) -> CutResult<SignedLocalCutReceiptV1> {
         if self.fault == CutVerifierFault::SignRejected {
             return Err(LocalCutOwnerErrorV1::OwnerRejected);
         }

@@ -1633,18 +1633,20 @@ pub(super) fn sqlite_sync_local_cut_owner_after_admission(
 mod local_cut_owner_coverage {
     use super::*;
     use crate::manifest_owner_fixtures::{
-        catalog, coordinator_evidence, coordinator_registry, member_classes, timeline_request,
-        zero_event_inputs, zero_event_results, READ_LIMITS, SOURCE_GENESIS,
+        catalog, member_classes, timeline_request, zero_event_inputs, zero_event_results,
+        READ_LIMITS, SOURCE_GENESIS,
     };
     use pos_core::{
-        prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1, EventStore,
-        LocalCutHeadsTableV1, LocalCutManifestBindingRowV1, LocalCutOwnerVerifierV1,
+        prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1,
+        test_coordinator_key_evidence, test_coordinator_key_registry, CoordinatorSignedReceiptV1,
+        EventStore, LocalCutHeadsTableV1, LocalCutManifestBindingRowV1, LocalCutOwnerVerifierV1,
         LocalCutReceiptInputV1, LocalCutSealInputV2, ManifestAdmissionCatalogV1,
         ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionRequestV1,
         ManifestOwnerAdmissionSnapshotV1, ManifestOwnerAdmissionVerifierV1,
         ManifestOwnerClassifiedLeafV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
         ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-        ManifestSlotAdmissionReceiptV1, PreparedManifestOwnerAdmissionV1, WorldKeyEvidenceV1,
+        ManifestSlotAdmissionReceiptV1, PreparedManifestOwnerAdmissionV1, SignedLocalCutReceiptV1,
+        SignedManifestSlotAdmissionReceiptV1,
     };
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
@@ -1743,8 +1745,8 @@ mod local_cut_owner_coverage {
     }
 
     impl InstalledOwner {
-        fn new() -> Fallible<Self> {
-            Ok(Self::returning(coordinator_evidence()?.to_canonical_cbor()))
+        fn installed() -> Self {
+            Self::returning(test_coordinator_key_evidence(1).to_canonical_cbor())
         }
 
         const fn returning(key_evidence: Vec<u8>) -> Self {
@@ -1786,14 +1788,15 @@ mod local_cut_owner_coverage {
         fn sign_coordinator_receipt(
             &self,
             draft: ManifestSlotAdmissionReceiptDraftV1,
-        ) -> Result<(ManifestSlotAdmissionReceiptV1, Vec<u8>), ManifestOwnerAdmissionErrorV1>
-        {
-            let rejected = ManifestOwnerAdmissionErrorV1::OwnerRejected;
-            let evidence_hash = coordinator_evidence().or(Err(rejected))?.digest();
+        ) -> Result<SignedManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+            let evidence_hash = test_coordinator_key_evidence(1).digest();
             draft
                 .with_evidence_and_signature(evidence_hash, [0x5a; 64])
-                .map(|receipt| (receipt, self.key_evidence.clone()))
-                .or(Err(rejected))
+                .map(|receipt| CoordinatorSignedReceiptV1 {
+                    receipt,
+                    key_evidence: self.key_evidence.clone(),
+                })
+                .or(Err(ManifestOwnerAdmissionErrorV1::OwnerRejected))
         }
 
         fn verify_native_policy_copies(
@@ -1836,9 +1839,12 @@ mod local_cut_owner_coverage {
         fn sign_local_cut_receipt(
             &self,
             commit: &LocalCutCommitV1,
-        ) -> Result<(LocalCutReceiptV1, Vec<u8>), LocalCutOwnerErrorV1> {
+        ) -> Result<SignedLocalCutReceiptV1, LocalCutOwnerErrorV1> {
             receipt_for(commit.digest())
-                .map(|receipt| (receipt, self.key_evidence.clone()))
+                .map(|receipt| CoordinatorSignedReceiptV1 {
+                    receipt,
+                    key_evidence: self.key_evidence.clone(),
+                })
                 .or(Err(LocalCutOwnerErrorV1::OwnerRejected))
         }
 
@@ -1855,7 +1861,7 @@ mod local_cut_owner_coverage {
     fn receipt_for(commit_record_hash: Hash) -> Fallible<LocalCutReceiptV1> {
         Ok(LocalCutReceiptV1::new(LocalCutReceiptInputV1 {
             commit_record_hash,
-            coordinator_key_evidence_hash: coordinator_evidence()?.digest(),
+            coordinator_key_evidence_hash: test_coordinator_key_evidence(1).digest(),
             signature: [90; 64],
         })?)
     }
@@ -2120,8 +2126,8 @@ mod local_cut_owner_coverage {
     }
 
     fn admitted_in(mut store: SqliteStore) -> Fallible<Admitted> {
-        store.save_key_registry(&coordinator_registry()?)?;
-        let prepared = genesis_admission(&InstalledOwner::new()?)?;
+        store.save_key_registry(&test_coordinator_key_registry())?;
+        let prepared = genesis_admission(&InstalledOwner::installed())?;
         let applied = store.commit_manifest_owner_admission_v1(prepared)?;
         assert_eq!(applied.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
         store.conn.execute_batch(CORRUPTION_PRAGMAS)?;
@@ -2152,7 +2158,7 @@ mod local_cut_owner_coverage {
             current_state,
             owner,
             snapshots,
-            &InstalledOwner::new()?,
+            &InstalledOwner::installed(),
         )?)
     }
 
@@ -2358,7 +2364,7 @@ mod local_cut_owner_coverage {
             admission_request(2, Some(current), &SUCCESSOR_TIMELINES, hash(141), hash(142))?;
         Ok(prepare_manifest_owner_admission_v1(
             request,
-            &InstalledOwner::new()?,
+            &InstalledOwner::installed(),
             Some(current),
         )?)
     }
@@ -3463,19 +3469,10 @@ mod local_cut_owner_coverage {
         Ok(())
     }
 
-    fn retained_evidence(connection: &Connection) -> Fallible<Vec<(Vec<u8>, Vec<u8>)>> {
-        let mut statement =
-            connection.prepare("SELECT evidence_hash, evidence_bytes FROM world_key_evidence")?;
-        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        let retained = rows.collect::<Result<Vec<_>, _>>()?;
-        Ok(retained)
-    }
-
-    // The fixture coordinator's WKE1 for its next epoch: valid, but not the receipts'.
-    fn foreign_evidence() -> Fallible<Vec<u8>> {
-        let mut input = *coordinator_evidence()?.as_input();
-        input.identity.epoch = 2;
-        Ok(WorldKeyEvidenceV1::new(input)?.to_canonical_cbor())
+    // The single retained evidence row, read through the store's own row reader.
+    fn retained_evidence(connection: &Connection, digest: Hash) -> Fallible<Option<Vec<u8>>> {
+        assert_eq!(row_count(connection, "world_key_evidence")?, 1);
+        Ok(sqlite_owner_link_key_evidence_row(connection, digest)?)
     }
 
     #[test]
@@ -3484,15 +3481,15 @@ mod local_cut_owner_coverage {
         let path = directory.path().join("key-evidence.sqlite");
         let path = path.to_str().ok_or("non-UTF-8 test path")?;
         let fixture = committed_in(admitted_in(SqliteStore::open(path)?)?)?;
-        let evidence = coordinator_evidence()?;
+        let evidence = test_coordinator_key_evidence(1);
         let digest = evidence.digest();
         let bytes = evidence.to_canonical_cbor();
-        let expected = vec![(digest.as_bytes().to_vec(), bytes.clone())];
-        assert_eq!(retained_evidence(&fixture.store.conn)?, expected);
+        let expected = Some(bytes.clone());
+        assert_eq!(retained_evidence(&fixture.store.conn, digest)?, expected);
         let identity = link_identity(&fixture.batch)?;
         drop(fixture);
         let reopened = SqliteStore::open(path)?;
-        assert_eq!(retained_evidence(&reopened.conn)?, expected);
+        assert_eq!(retained_evidence(&reopened.conn, digest)?, expected);
         let snapshot =
             reopened.read_manifest_owner_link_snapshot_v1(OWNER, identity, timeline(1))?;
         let snapshot = snapshot.ok_or("missing reopened owner-link snapshot")?;
@@ -3503,9 +3500,10 @@ mod local_cut_owner_coverage {
 
     #[test]
     fn commits_reject_coordinator_key_evidence_that_is_not_the_receipts() -> TestResult {
-        let foreign = foreign_evidence()?;
+        // The next coordinator epoch's WKE1: valid, but not the one each receipt names.
+        let foreign = test_coordinator_key_evidence(2).to_canonical_cbor();
         let mut store = SqliteStore::open_in_memory()?;
-        store.save_key_registry(&coordinator_registry()?)?;
+        store.save_key_registry(&test_coordinator_key_registry())?;
         let admission = genesis_admission(&InstalledOwner::returning(foreign.clone()))?;
         let rejected = store.commit_manifest_owner_admission_v1(admission);
         assert_eq!(rejected, Err(AdmissionError::InvalidBatch));

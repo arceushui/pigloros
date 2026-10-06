@@ -28324,11 +28324,11 @@ pub(super) mod key_registry_coverage {
 mod manifest_owner_admission_coverage {
     use super::*;
     use crate::manifest_owner_fixtures::{
-        catalog, coordinator_registry, hash, timeline_request, AcceptingOwner, READ_LIMITS,
+        catalog, hash, timeline_request, AcceptingOwner, READ_LIMITS,
     };
     use pos_core::{
-        prepare_manifest_owner_admission_v1, ManifestOwnerAdmissionErrorV1 as AdmissionError,
-        ManifestOwnerAdmissionRequestV1,
+        prepare_manifest_owner_admission_v1, test_coordinator_key_registry,
+        ManifestOwnerAdmissionErrorV1 as AdmissionError, ManifestOwnerAdmissionRequestV1,
     };
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
@@ -28581,7 +28581,7 @@ mod manifest_owner_admission_coverage {
     /// An empty store whose key registry holds the fixture coordinator key.
     fn keyed_store() -> Fallible<SqliteStore> {
         let mut store = SqliteStore::open_in_memory()?;
-        store.save_key_registry(&coordinator_registry()?)?;
+        store.save_key_registry(&test_coordinator_key_registry())?;
         Ok(store)
     }
 
@@ -29040,7 +29040,7 @@ mod manifest_owner_admission_coverage {
     }
 
     #[test]
-    fn commits_require_a_readable_registry_holding_the_coordinator_key() -> TestResult {
+    fn unregistered_key_rejects_and_any_registry_read_failure_is_corrupt_state() -> TestResult {
         let mut unkeyed = SqliteStore::open_in_memory()?;
         let prepared = prepare(genesis_request()?, None)?;
         let rejected = unkeyed.commit_manifest_owner_admission_v1(prepared.clone());

@@ -1,10 +1,12 @@
 use pos_core::{
-    deletion_receipt, resolve_coordinator_key_evidence_v1, CoordinatorKeyEvidenceErrorV1, Hash,
-    KeyDestructionRequestV1, KeyIdentityV1, KeyRecordV1, KeyRegistrationOutcomeV1,
-    KeyRegistrationV1, KeyRegistryErrorV1, KeyRegistryPortV1, KeyRegistryStateV1, KeyRoleV1,
-    KeyTombstoneV1, LocalCutOwnerErrorV1, ManifestOwnerAdmissionErrorV1, OwnerIdV1, PublicKey,
-    WorldKeyEvidenceErrorV1, WorldKeyEvidenceInputV1, WorldKeyEvidenceV1,
-    MAX_WORLD_KEY_EVIDENCE_BYTES_V1,
+    deletion_receipt, resolve_coordinator_key_evidence_v1, test_coordinator_key_evidence,
+    test_coordinator_key_registration, test_coordinator_key_registry,
+    CoordinatorKeyEvidenceErrorV1, CoordinatorKeyEvidenceV1, Hash, KeyDestructionRequestV1,
+    KeyIdentityV1, KeyRecordV1, KeyRegistrationOutcomeV1, KeyRegistrationV1, KeyRegistryErrorV1,
+    KeyRegistryPortV1, KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, LocalCutOwnerErrorV1,
+    ManifestOwnerAdmissionErrorV1, OwnerIdV1, PublicKey, WorldKeyEvidenceErrorV1,
+    WorldKeyEvidenceInputV1, WorldKeyEvidenceV1, MAX_WORLD_KEY_EVIDENCE_BYTES_V1,
+    TEST_COORDINATOR_OWNER,
 };
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -182,31 +184,23 @@ fn decoder_rejects_missing_extra_and_invalid_evidence_bytes() -> TestResult<()> 
     Ok(())
 }
 
-const COORDINATOR: &str = "coordinator";
-
-/// The verify-only WKE1 fields of the coordinator's epoch-1 key of `role`.
-fn coordinator_input(role: KeyRoleV1) -> WorldKeyEvidenceInputV1 {
-    WorldKeyEvidenceInputV1 {
-        identity: KeyIdentityV1::new(COORDINATOR, role, 1),
-        private_material_digest: Hash::from_bytes([0xc1; 32]),
-        private_material_required: false,
-        public_verification_key: Some(PublicKey::from_bytes([0xc2; 32])),
-    }
+/// The shared epoch-1 coordinator WKE1 with its identity's role replaced.
+fn coordinator_with_role(role: KeyRoleV1, seed: u8) -> TestResult<WorldKeyEvidenceV1> {
+    let input = *test_coordinator_key_evidence(1).as_input();
+    let identity = KeyIdentityV1::from_parts(input.identity.owner_id, role, 1);
+    Ok(WorldKeyEvidenceV1::new(WorldKeyEvidenceInputV1 {
+        identity,
+        private_material_digest: Hash::from_bytes([seed; 32]),
+        public_verification_key: Some(PublicKey::from_bytes([seed; 32])),
+        ..input
+    })?)
 }
 
-/// The registry row that exactly matches `input`.
-const fn registration(input: &WorldKeyEvidenceInputV1) -> KeyRegistrationV1 {
-    KeyRegistrationV1::new(
-        input.identity,
-        input.private_material_digest,
-        input.public_verification_key,
-    )
-}
-
-fn registry(registrations: &[KeyRegistrationV1]) -> TestResult<KeyRegistryStateV1> {
+fn registry(evidence: &[WorldKeyEvidenceV1]) -> TestResult<KeyRegistryStateV1> {
     let mut keys = KeyRegistryStateV1::new();
-    for registration in registrations {
-        keys.register_key(*registration)?;
+    for record in evidence {
+        let registration = test_coordinator_key_registration(record);
+        keys.register_key(registration)?;
     }
     Ok(keys)
 }
@@ -216,7 +210,37 @@ fn resolve(
     evidence: &WorldKeyEvidenceV1,
     keys: &dyn KeyRegistryPortV1,
 ) -> Result<WorldKeyEvidenceV1, CoordinatorKeyEvidenceErrorV1> {
-    resolve_coordinator_key_evidence_v1(&evidence.to_canonical_cbor(), evidence.digest(), keys)
+    let retained = CoordinatorKeyEvidenceV1 {
+        evidence_hash: evidence.digest(),
+        bytes: evidence.to_canonical_cbor(),
+    };
+    retained.resolve(keys)
+}
+
+/// Hand-built canonical framing of the shared epoch-1 coordinator WKE1 with
+/// `public_key` as its final field: a 32-byte string or CBOR null.
+fn coordinator_framing(public_key: Option<[u8; 32]>) -> Vec<u8> {
+    let owner = TEST_COORDINATOR_OWNER.as_bytes();
+    let mut bytes = vec![0x88, 0x44];
+    bytes.extend_from_slice(b"WKE1");
+    // Version 1, then a text string head for the 16-byte owner.
+    bytes.extend_from_slice(&[0x01, 0x70]);
+    bytes.extend_from_slice(owner);
+    // Role 2 and epoch 1, then the material digest and an unset
+    // private_material_required flag.
+    bytes.extend_from_slice(&[0x02, 0x01]);
+    bytes.extend(byte_string([1; 32]));
+    bytes.push(0xf4);
+    let key_field = public_key.map_or_else(|| vec![0xf6], byte_string);
+    bytes.extend(key_field);
+    bytes
+}
+
+/// One preferred-CBOR 32-byte string.
+fn byte_string(value: [u8; 32]) -> Vec<u8> {
+    let mut field = vec![0x58, 0x20];
+    field.extend_from_slice(&value);
+    field
 }
 
 /// A registry port that answers every identity with one fixed live record.
@@ -244,19 +268,54 @@ impl KeyRegistryPortV1 for FixedRecord {
 }
 
 #[test]
+fn shared_coordinator_fixtures_name_distinct_registered_epochs() {
+    let first = test_coordinator_key_evidence(1);
+    assert_eq!(test_coordinator_key_evidence(0), first);
+    let identity = first.as_input().identity;
+    assert_eq!(identity.owner_id.as_str(), TEST_COORDINATOR_OWNER);
+    assert_eq!(identity.role, KeyRoleV1::TimelineIntegritySigning);
+    assert_eq!(identity.epoch, 1);
+    assert!(!first.as_input().private_material_required);
+    let second = test_coordinator_key_evidence(2);
+    let (earlier, later) = (first.as_input(), second.as_input());
+    assert_eq!(later.identity.epoch, 2);
+    assert_ne!(
+        earlier.private_material_digest,
+        later.private_material_digest
+    );
+    assert_ne!(
+        earlier.public_verification_key,
+        later.public_verification_key
+    );
+    let registration = test_coordinator_key_registration(&second);
+    let registered = (
+        registration.identity,
+        registration.private_material_digest,
+        registration.public_verification_key,
+    );
+    let expected = (
+        later.identity,
+        later.private_material_digest,
+        later.public_verification_key,
+    );
+    assert_eq!(registered, expected);
+    let keys = test_coordinator_key_registry();
+    assert_eq!(resolve(&first, &keys), Ok(first));
+    assert_eq!(
+        resolve(&second, &keys),
+        Err(CoordinatorKeyEvidenceErrorV1::UnregisteredKey)
+    );
+}
+
+#[test]
 fn coordinator_evidence_resolves_live_rotated_and_tombstoned_keys() -> TestResult<()> {
-    let input = coordinator_input(KeyRoleV1::TimelineIntegritySigning);
-    let evidence = WorldKeyEvidenceV1::new(input)?;
-    let mut keys = registry(&[registration(&input)])?;
+    let evidence = test_coordinator_key_evidence(1);
+    let input = *evidence.as_input();
+    let mut keys = test_coordinator_key_registry();
     assert_eq!(resolve(&evidence, &keys), Ok(evidence));
 
-    let rotated = WorldKeyEvidenceInputV1 {
-        identity: KeyIdentityV1::new(COORDINATOR, input.identity.role, 2),
-        private_material_digest: Hash::from_bytes([0xd1; 32]),
-        public_verification_key: Some(PublicKey::from_bytes([0xd2; 32])),
-        ..input
-    };
-    keys.register_key(registration(&rotated))?;
+    let rotation = test_coordinator_key_registration(&test_coordinator_key_evidence(2));
+    keys.register_key(rotation)?;
     assert_eq!(resolve(&evidence, &keys), Ok(evidence));
 
     let authorization = Hash::from_bytes([0xe1; 32]);
@@ -283,14 +342,9 @@ fn coordinator_evidence_resolves_live_rotated_and_tombstoned_keys() -> TestResul
 
 #[test]
 fn coordinator_evidence_must_be_the_exact_verify_only_signing_record() -> TestResult<()> {
-    let input = coordinator_input(KeyRoleV1::TimelineIntegritySigning);
-    let release = WorldKeyEvidenceInputV1 {
-        private_material_digest: Hash::from_bytes([0xc5; 32]),
-        public_verification_key: Some(PublicKey::from_bytes([0xc6; 32])),
-        ..coordinator_input(KeyRoleV1::PluginReleaseSigning)
-    };
-    let keys = registry(&[registration(&input), registration(&release)])?;
-    let good = WorldKeyEvidenceV1::new(input)?;
+    let good = test_coordinator_key_evidence(1);
+    let release = coordinator_with_role(KeyRoleV1::PluginReleaseSigning, 0xc5)?;
+    let keys = registry(&[good, release])?;
     let bytes = good.to_canonical_cbor();
     let invalid = Err(CoordinatorKeyEvidenceErrorV1::InvalidEvidence);
     assert_eq!(
@@ -302,23 +356,26 @@ fn coordinator_evidence_must_be_the_exact_verify_only_signing_record() -> TestRe
         resolve_coordinator_key_evidence_v1(&bytes, other_address, &keys),
         invalid
     );
-    let mut missing_public_key = bytes;
-    missing_public_key.truncate(50);
-    missing_public_key.push(0xf6);
+    // The hand-built framing reproduces the canonical record, so its null
+    // variant fails only because a signing role has no public key.
+    assert_eq!(coordinator_framing(Some([1; 32])), bytes);
+    let missing_public_key = coordinator_framing(None);
+    assert_eq!(
+        WorldKeyEvidenceV1::from_canonical_cbor(&missing_public_key),
+        Err(WorldKeyEvidenceErrorV1::InvalidKey)
+    );
     assert_eq!(
         resolve_coordinator_key_evidence_v1(&missing_public_key, good.digest(), &keys),
         invalid
     );
 
     let wrong_use = Err(CoordinatorKeyEvidenceErrorV1::WrongKeyUse);
-    let wrong_role = WorldKeyEvidenceV1::new(release)?;
-    assert_eq!(resolve(&wrong_role, &keys), wrong_use);
-    let attribution = coordinator_input(KeyRoleV1::SubjectAttributionSigning);
-    let attribution = WorldKeyEvidenceV1::new(attribution)?;
+    assert_eq!(resolve(&release, &keys), wrong_use);
+    let attribution = coordinator_with_role(KeyRoleV1::SubjectAttributionSigning, 0xc7)?;
     assert_eq!(resolve(&attribution, &keys), wrong_use);
     let private_required = WorldKeyEvidenceV1::new(WorldKeyEvidenceInputV1 {
         private_material_required: true,
-        ..input
+        ..*good.as_input()
     })?;
     assert_eq!(resolve(&private_required, &keys), wrong_use);
     Ok(())
@@ -326,38 +383,30 @@ fn coordinator_evidence_must_be_the_exact_verify_only_signing_record() -> TestRe
 
 #[test]
 fn coordinator_evidence_must_match_one_registry_row() -> TestResult<()> {
-    let input = coordinator_input(KeyRoleV1::TimelineIntegritySigning);
-    let evidence = WorldKeyEvidenceV1::new(input)?;
+    let evidence = test_coordinator_key_evidence(1);
+    let input = *evidence.as_input();
     let unregistered = Err(CoordinatorKeyEvidenceErrorV1::UnregisteredKey);
     let empty = KeyRegistryStateV1::new();
     assert_eq!(resolve(&evidence, &empty), unregistered);
-    let other_material = KeyRegistrationV1 {
+    let other_material = WorldKeyEvidenceV1::new(WorldKeyEvidenceInputV1 {
         private_material_digest: Hash::from_bytes([0xc3; 32]),
-        ..registration(&input)
-    };
+        ..input
+    })?;
     let material_keys = registry(&[other_material])?;
     assert_eq!(resolve(&evidence, &material_keys), unregistered);
-    let other_key = KeyRegistrationV1 {
+    let other_key = WorldKeyEvidenceV1::new(WorldKeyEvidenceInputV1 {
         public_verification_key: Some(PublicKey::from_bytes([0xc4; 32])),
-        ..registration(&input)
-    };
+        ..input
+    })?;
     let public_keys = registry(&[other_key])?;
     assert_eq!(resolve(&evidence, &public_keys), unregistered);
 
-    let record = KeyRecordV1 {
-        identity: KeyIdentityV1::new(COORDINATOR, input.identity.role, 2),
+    let fixed = FixedRecord(KeyRecordV1 {
+        identity: KeyIdentityV1::from_parts(input.identity.owner_id, input.identity.role, 2),
         private_material_digest: Some(input.private_material_digest),
         public_verification_key: input.public_verification_key,
-    };
-    let mut fixed = FixedRecord(record);
+    });
     assert_eq!(resolve(&evidence, &fixed), unregistered);
-    let owner = input.identity.owner_id;
-    assert_eq!(fixed.active_key(&owner, input.identity.role), Some(record));
-    assert_eq!(fixed.tombstone(input.identity), None);
-    assert_eq!(
-        fixed.register_key(registration(&input)),
-        Err(KeyRegistryErrorV1::RegistryUnavailable)
-    );
     Ok(())
 }
 
