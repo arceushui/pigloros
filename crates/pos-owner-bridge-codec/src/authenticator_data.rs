@@ -1,4 +1,5 @@
 use crate::OwnerBridgeCodecError;
+use p256::ecdsa::VerifyingKey;
 
 const MIN_AUTHENTICATOR_DATA_BYTES: usize = 37;
 const MAX_AUTHENTICATOR_DATA_BYTES: usize = 1_024;
@@ -28,9 +29,9 @@ pub const CANONICAL_COSE_ES256_KEY_BYTES: usize = 77;
 
 /// A syntactically valid closed COSE ES256 P-256 public key.
 ///
-/// Point validation is deliberately performed by the signature-verifier layer,
-/// which is the only layer that constructs a cryptographic verifier from this
-/// value.
+/// Authenticator-data parsing retains the closed COSE shape before the
+/// verifier validates its point. Durable canonical decoding validates both
+/// shape and point before a binding reaches an owner adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CoseEs256PublicKey {
     x: [u8; 32],
@@ -70,6 +71,22 @@ impl CoseEs256PublicKey {
         output[1..33].copy_from_slice(&self.x);
         output[33..].copy_from_slice(&self.y);
         output
+    }
+
+    /// Decode an exact canonical COSE ES256 key stored in a durable binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OwnerBridgeCodecError::InvalidPayload`] when `input` is not
+    /// the one canonical closed COSE schema or its P-256 point is invalid.
+    pub fn from_canonical_encoding(input: &[u8]) -> Result<Self, OwnerBridgeCodecError> {
+        let (key, consumed) = parse_cose_es256_key(input)?;
+        if consumed != input.len() || key.canonical_encoding() != input {
+            return Err(OwnerBridgeCodecError::InvalidPayload);
+        }
+        VerifyingKey::from_sec1_bytes(&key.uncompressed_sec1_bytes())
+            .map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
+        Ok(key)
     }
 }
 

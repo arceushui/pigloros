@@ -16,6 +16,7 @@ mod authenticator_data;
 pub mod cbor;
 mod client_data;
 mod control;
+mod durable;
 mod error;
 mod http;
 mod payload;
@@ -29,6 +30,11 @@ pub use client_data::validate_client_data_json;
 pub use control::{
     CeremonyKind, ControlRole, ControlState, OwnerBridgeControlV1, CONTROL_HEADER_BYTES,
     CREATE_REPLY_BUFFER_CAPACITY, GET_REPLY_BUFFER_CAPACITY, REQUEST_BUFFER_CAPACITY,
+};
+pub use durable::{
+    decode_cleanup_record, decode_subject_credential_binding, encode_cleanup_record,
+    encode_subject_credential_binding, CleanupRecordV1, SubjectCredentialBindingV1,
+    MAX_CLEANUP_RECORD_BYTES, MAX_SUBJECT_CREDENTIAL_BINDING_BYTES,
 };
 pub use error::OwnerBridgeCodecError;
 pub use http::{admit_loopback_http_request, LoopbackRequestDisposition};

@@ -86,6 +86,22 @@ impl<'a> CborReader<'a> {
         }
     }
 
+    pub(crate) fn text(
+        &mut self,
+        minimum: usize,
+        maximum: usize,
+    ) -> Result<&'a str, OwnerBridgeCodecError> {
+        let (major, length) = self.head()?;
+        if major != 3 {
+            return Err(OwnerBridgeCodecError::InvalidCbor);
+        }
+        let length = Self::bounded_count(length, maximum)?;
+        if length < minimum {
+            return Err(OwnerBridgeCodecError::BoundsExceeded);
+        }
+        core::str::from_utf8(self.take(length)?).map_err(|_| OwnerBridgeCodecError::InvalidCbor)
+    }
+
     pub(crate) fn boolean(&mut self) -> Result<bool, OwnerBridgeCodecError> {
         match self.byte()? {
             0xf4 => Ok(false),
