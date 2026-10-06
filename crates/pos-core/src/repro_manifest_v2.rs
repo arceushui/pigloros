@@ -559,8 +559,8 @@ enum Raw {
     Other,
     Text(String),
     Bytes(Vec<u8>),
-    Array(Vec<Raw>),
-    Map(Vec<(String, Raw)>),
+    Array(Vec<Self>),
+    Map(Vec<(String, Self)>),
 }
 
 impl<'de> Deserialize<'de> for Raw {
@@ -687,8 +687,8 @@ fn gate(pairs: &[(String, Raw)], transport: Transport) -> Result<(), ReproManife
         _ => None,
     };
     let is_v2 = found == Some(FORMAT_VERSION);
-    let legacy = LEGACY_FIELDS.iter().copied().find(|name| has(*name));
-    let modern = ROSTER_FIELDS.iter().copied().find(|name| has(*name));
+    let legacy = LEGACY_FIELDS.iter().copied().find(|name| has(name));
+    let modern = ROSTER_FIELDS.iter().copied().find(|name| has(name));
     let mixed = if is_v2 { legacy } else { legacy.and(modern) };
     if let Some(field) = mixed {
         return Err(ReproManifestV2Error::AmbiguousLegacyManifest { field });
@@ -747,7 +747,7 @@ fn full_object<'a>(
     object(pairs, fields)?
         .into_iter()
         .zip(fields)
-        .map(|(value, field)| required(value, *field))
+        .map(|(value, field)| required(value, field))
         .collect()
 }
 
@@ -1014,17 +1014,17 @@ fn put_head(out: &mut Vec<u8>, major: u8, value: u64) {
     let bytes = value.to_be_bytes();
     match value {
         0..=23 => out.push(tag | bytes[7]),
-        24..=255 => out.extend_from_slice(&[tag | 24, bytes[7]]),
+        24..=255 => out.extend_from_slice(&[tag | 0x18, bytes[7]]),
         256..=65_535 => {
-            out.push(tag | 25);
+            out.push(tag | 0x19);
             out.extend_from_slice(&bytes[6..]);
         }
         65_536..=4_294_967_295 => {
-            out.push(tag | 26);
+            out.push(tag | 0x1a);
             out.extend_from_slice(&bytes[4..]);
         }
         _ => {
-            out.push(tag | 27);
+            out.push(tag | 0x1b);
             out.extend_from_slice(&bytes);
         }
     }
