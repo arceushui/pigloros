@@ -376,17 +376,16 @@ mod tests {
     #[test]
     fn every_field_of_the_wrong_kind_is_invalid() {
         let value = output_val(&output());
+        let invalid = |broken: &Val| plugin_output(broken, &BOUNDS) == Err(INVALID);
         for index in 0..7 {
-            let broken = replaced(&value, index);
-            assert_eq!(plugin_output(&broken, &BOUNDS), Err(INVALID), "output {index}");
+            assert!(invalid(&replaced(&value, index)), "output {index}");
         }
         for (list, fields) in [(1, 5), (4, 3)] {
             for index in 0..fields {
                 let broken = replaced_item(&value, list, Some(index));
-                assert_eq!(plugin_output(&broken, &BOUNDS), Err(INVALID), "{list}.{index}");
+                assert!(invalid(&broken), "{list}.{index}");
             }
-            let broken = replaced_item(&value, list, None);
-            assert_eq!(plugin_output(&broken, &BOUNDS), Err(INVALID), "{list}");
+            assert!(invalid(&replaced_item(&value, list, None)), "{list}");
         }
         let mut unordered = output();
         unordered.consumed_dependencies = vec![[2; 32], [1; 32]];
