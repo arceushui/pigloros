@@ -506,11 +506,11 @@ fn cleanup_record_length(folder_name: &str, browser_pid: u32, creation_filetime:
 
 // Every byte/text field reaches this helper only after the public
 // constructors bound it to at most 4,096 bytes.
-const fn bounded_cbor_bytes_length(value_length: usize) -> usize {
+fn bounded_cbor_bytes_length(value_length: usize) -> usize {
     bounded_cbor_head_length(value_length) + value_length
 }
 
-const fn bounded_cbor_head_length(value: usize) -> usize {
+fn bounded_cbor_head_length(value: usize) -> usize {
     if value <= 23 {
         1
     } else if value <= usize::from(u8::MAX) {
@@ -520,7 +520,7 @@ const fn bounded_cbor_head_length(value: usize) -> usize {
     }
 }
 
-const fn cbor_unsigned_length(value: u64) -> usize {
+fn cbor_unsigned_length(value: u64) -> usize {
     if value <= 23 {
         1
     } else if value <= u64::from(u8::MAX) {
