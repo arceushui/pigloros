@@ -133,6 +133,66 @@ fn public_durable_records_enforce_complete_size_and_output_boundaries(
 }
 
 #[test]
+fn public_durable_encoders_reject_every_short_output() -> Result<(), OwnerBridgeCodecError> {
+    let binding = fixture_binding()?;
+    for length in 0..187 {
+        let mut output = vec![0; length];
+        assert_eq!(
+            encode_subject_credential_binding(&binding, &mut output),
+            Err(OwnerBridgeCodecError::BufferTooSmall),
+            "binding output length {length}"
+        );
+    }
+
+    let cleanup = CleanupRecordV1::new(
+        CEREMONY_ID,
+        "owner-bridge-1",
+        7,
+        0x0102_0304_0506_0708,
+        IMAGE_PATH_SHA256,
+    )?;
+    for length in 0..83 {
+        let mut output = vec![0; length];
+        assert_eq!(
+            encode_cleanup_record(&cleanup, &mut output),
+            Err(OwnerBridgeCodecError::BufferTooSmall),
+            "cleanup output length {length}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn public_durable_decoders_reject_every_truncated_record() -> Result<(), OwnerBridgeCodecError> {
+    let binding = fixture_binding()?;
+    let mut binding_bytes = [0; 187];
+    let binding_length = encode_subject_credential_binding(&binding, &mut binding_bytes)?;
+    for length in 0..binding_length {
+        assert!(
+            decode_subject_credential_binding(&binding_bytes[..length]).is_err(),
+            "binding prefix {length}"
+        );
+    }
+
+    let cleanup = CleanupRecordV1::new(
+        CEREMONY_ID,
+        "owner-bridge-1",
+        7,
+        0x0102_0304_0506_0708,
+        IMAGE_PATH_SHA256,
+    )?;
+    let mut cleanup_bytes = [0; 83];
+    let cleanup_length = encode_cleanup_record(&cleanup, &mut cleanup_bytes)?;
+    for length in 0..cleanup_length {
+        assert!(
+            decode_cleanup_record(&cleanup_bytes[..length]).is_err(),
+            "cleanup prefix {length}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn public_durable_records_preserve_every_field_and_cbor_width_boundary(
 ) -> Result<(), OwnerBridgeCodecError> {
     let binding = fixture_binding()?;
