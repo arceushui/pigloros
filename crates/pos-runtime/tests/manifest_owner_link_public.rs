@@ -114,7 +114,7 @@ fn coordinator_keys() -> Fallible<KeyRegistryStateV1> {
 
 /// A Memory owner store whose key registry holds the coordinator key.
 fn memory_owner() -> Fallible<MemoryStore> {
-    let mut store = memory_owner()?;
+    let mut store = MemoryStore::new();
     store.save_key_registry(&coordinator_keys()?)?;
     Ok(store)
 }

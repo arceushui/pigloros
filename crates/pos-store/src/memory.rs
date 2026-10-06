@@ -14413,7 +14413,7 @@ mod local_cut_owner_coverage {
     use super::*;
     use crate::manifest_owner_fixtures::{
         catalog, coordinator_evidence, coordinator_registry, member_classes, timeline_request,
-        zero_event_inputs, zero_event_results, COORDINATOR_OWNER, READ_LIMITS, SOURCE_GENESIS,
+        zero_event_inputs, zero_event_results, READ_LIMITS, SOURCE_GENESIS,
     };
     use pos_core::{
         prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1, KeyRegistrationV1,
@@ -15330,7 +15330,7 @@ mod local_cut_owner_coverage {
             current.as_ref(),
             &view.state,
             &view.snapshots,
-            &AcceptingOwner,
+            &accepting()?,
         )?;
         assert_eq!(
             store.commit_local_cut_owner_v1(batch),

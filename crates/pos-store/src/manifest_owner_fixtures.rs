@@ -116,7 +116,7 @@ impl ManifestOwnerAdmissionVerifierV1 for AcceptingOwner {
 }
 
 /// Owner of the fixture coordinator's Timeline-integrity signing key.
-pub(crate) const COORDINATOR_OWNER: &str = "fixture-coordinator";
+const COORDINATOR_OWNER: &str = "fixture-coordinator";
 
 /// The verify-only WKE1 of the fixture coordinator's epoch-1 signing key.
 pub(crate) fn coordinator_evidence() -> Fallible<WorldKeyEvidenceV1> {
