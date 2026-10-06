@@ -142,7 +142,7 @@ fn validate_challenge_client_data_member(
     }
 }
 
-fn validate_cross_origin_client_data_member(
+const fn validate_cross_origin_client_data_member(
     value: JsonValue<'_>,
 ) -> Result<(), OwnerBridgeCodecError> {
     if matches!(value, JsonValue::Boolean(false)) {
