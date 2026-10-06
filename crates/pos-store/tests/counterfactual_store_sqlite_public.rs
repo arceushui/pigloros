@@ -904,7 +904,7 @@ fn corrupt_persisted_state_is_rejected_closed() {
 }
 
 /// Every counterfactual index and guard trigger, with a weakened body.
-const SCHEMA_OBJECTS: [(&str, &str, &str); 16] = [
+const SCHEMA_OBJECTS: [(&str, &str, &str); 26] = [
     (
         "INDEX",
         "idx_counterfactual_quarantine_artifact",
@@ -985,6 +985,56 @@ const SCHEMA_OBJECTS: [(&str, &str, &str); 16] = [
         "counterfactual_fork_tombstones_floor_kept",
         "BEFORE INSERT ON counterfactual_fork_tombstones BEGIN SELECT 1; END",
     ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_records_retained",
+        "BEFORE DELETE ON counterfactual_dependency_records BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_records_immutable",
+        "BEFORE UPDATE ON counterfactual_dependency_records BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_records_monotonic",
+        "BEFORE INSERT ON counterfactual_dependency_records BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_nodes_retained",
+        "BEFORE DELETE ON counterfactual_dependency_nodes BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_nodes_immutable",
+        "BEFORE UPDATE ON counterfactual_dependency_nodes BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_nodes_digest_not_replaced",
+        "BEFORE INSERT ON counterfactual_dependency_nodes BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_nodes_key_not_replaced",
+        "BEFORE INSERT ON counterfactual_dependency_nodes BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_edges_retained",
+        "BEFORE DELETE ON counterfactual_dependency_edges BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_edges_immutable",
+        "BEFORE UPDATE ON counterfactual_dependency_edges BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_edges_not_replaced",
+        "BEFORE INSERT ON counterfactual_dependency_edges BEGIN SELECT 1; END",
+    ),
 ];
 
 #[test]
@@ -1010,7 +1060,10 @@ fn the_schema_is_additive_idempotent_and_validated_on_every_open() {
          DROP TABLE counterfactual_quarantine;
          DROP TABLE counterfactual_artifacts;
          DROP TABLE counterfactual_fork_tombstones;
-         DROP TABLE counterfactual_purge_fence;",
+         DROP TABLE counterfactual_purge_fence;
+         DROP TABLE counterfactual_dependency_records;
+         DROP TABLE counterfactual_dependency_nodes;
+         DROP TABLE counterfactual_dependency_edges;",
     ));
     assert_eq!(open_read_only(), "");
     assert_eq!(open_writable(), "");
@@ -1378,7 +1431,10 @@ fn a_pre_schema_file_opens_read_only_without_counterfactual_state() {
          DROP TABLE counterfactual_quarantine;
          DROP TABLE counterfactual_artifacts;
          DROP TABLE counterfactual_fork_tombstones;
-         DROP TABLE counterfactual_purge_fence;",
+         DROP TABLE counterfactual_purge_fence;
+         DROP TABLE counterfactual_dependency_records;
+         DROP TABLE counterfactual_dependency_nodes;
+         DROP TABLE counterfactual_dependency_edges;",
     ));
     let mut read_only = ok(SqliteStore::open_read_only(path_text));
     ok(read_only.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
