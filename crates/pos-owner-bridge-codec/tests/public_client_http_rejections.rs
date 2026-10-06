@@ -286,7 +286,7 @@ fn public_http_admission_rejects_parser_limit_violations() {
     let mut long_header_name = Vec::from(DOCUMENT_REQUEST);
     long_header_name.splice(
         long_header_name.len() - 2..long_header_name.len() - 2,
-        core::iter::repeat_n(b'n', 33).chain([b':', b' ', b'x', b'\r', b'\n']),
+        core::iter::repeat_n(b'n', 33).chain(*b": x\r\n"),
     );
     assert_eq!(
         admit_loopback_http_request(&long_header_name),
@@ -296,10 +296,10 @@ fn public_http_admission_rejects_parser_limit_violations() {
     let mut long_header_value = Vec::from(DOCUMENT_REQUEST);
     long_header_value.splice(
         long_header_value.len() - 2..long_header_value.len() - 2,
-        [b'X', b':', b' ']
+        (*b"X: ")
             .into_iter()
             .chain(core::iter::repeat_n(b'v', 513))
-            .chain([b'\r', b'\n']),
+            .chain(*b"\r\n"),
     );
     assert_eq!(
         admit_loopback_http_request(&long_header_value),

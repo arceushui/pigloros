@@ -54,8 +54,9 @@ fn public_none_attestation_parser_rejects_closed_envelope_variations(
         parse_none_attestation_object(&[], &CREDENTIAL_ID),
         Err(OwnerBridgeCodecError::BoundsExceeded)
     );
+    let oversized = vec![0; 65_537];
     assert_eq!(
-        parse_none_attestation_object(&[0; 65_537], &CREDENTIAL_ID),
+        parse_none_attestation_object(&oversized, &CREDENTIAL_ID),
         Err(OwnerBridgeCodecError::BoundsExceeded)
     );
     assert_eq!(
