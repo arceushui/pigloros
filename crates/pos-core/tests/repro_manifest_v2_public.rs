@@ -38,23 +38,23 @@ const CAP: usize = MAX_REPRO_MANIFEST_V2_ADAPTER_RECORDS;
 const ENTRIES: &str = "manifest_plugin_entries";
 const VERSION: &str = "manifest_format_version";
 
-fn unsupported(found: Option<u64>) -> Failure {
+const fn unsupported(found: Option<u64>) -> Failure {
     Failure::UnsupportedManifestVersion { found }
 }
 
-fn ambiguous(field: &'static str) -> Failure {
+const fn ambiguous(field: &'static str) -> Failure {
     Failure::AmbiguousLegacyManifest { field }
 }
 
-fn missing(field: &'static str) -> Failure {
+const fn missing(field: &'static str) -> Failure {
     Failure::MissingField { field }
 }
 
-fn malformed(transport: &'static str) -> Failure {
+const fn malformed(transport: &'static str) -> Failure {
     Failure::InvalidEncoding { transport }
 }
 
-fn wrong(field: &'static str, transport: &'static str) -> Failure {
+const fn wrong(field: &'static str, transport: &'static str) -> Failure {
     Failure::WrongTransportField { field, transport }
 }
 
@@ -70,7 +70,7 @@ fn unknown(field: &str) -> Failure {
     }
 }
 
-fn streaming() -> Failure {
+const fn streaming() -> Failure {
     Failure::TooManyElements {
         field: "an array",
         max: CAP,
@@ -108,21 +108,21 @@ fn bad_name(slot: &str) -> Failure {
     })
 }
 
-fn invalid_of(failure: &Failure) -> Option<&'static str> {
+const fn invalid_of(failure: &Failure) -> Option<&'static str> {
     match failure {
         Failure::InvalidField { field, .. } => Some(*field),
         _ => None,
     }
 }
 
-fn canon_of(failure: &Failure) -> Option<&'static str> {
+const fn canon_of(failure: &Failure) -> Option<&'static str> {
     match failure {
         Failure::NonCanonical { field, .. } => Some(*field),
         _ => None,
     }
 }
 
-fn plugin_id(byte: u8) -> PluginId {
+const fn plugin_id(byte: u8) -> PluginId {
     PluginId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
 }
 
@@ -157,7 +157,7 @@ fn record(byte: u8, call_index: u64, wall: u64) -> AdapterRecord {
     }
 }
 
-fn timeline() -> TimelineId {
+const fn timeline() -> TimelineId {
     TimelineId::from_ulid(ulid::Ulid::from_bytes([7; 16]))
 }
 
