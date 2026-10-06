@@ -1289,6 +1289,7 @@ mod tests {
         let mut honest = Probe::new(prepared_store(&world, &built)?);
         run_import(&mut honest, &request_for(&world, &built))?;
         let last = honest.registry_reads.load(Ordering::SeqCst);
+        assert!(last > 1);
         let mut faulted = Probe::new(prepared_store(&world, &built)?);
         faulted.fault = Some(Fault::Registry(last));
         let outcome = run_import(&mut faulted, &request_for(&world, &built));
