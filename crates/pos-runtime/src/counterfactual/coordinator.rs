@@ -15,18 +15,29 @@
 //!    order, through the host [`CounterfactualInterventionAuthorityV1`];
 //! 4. the EPF1 execution-profile and TPS1 trust-policy identities bound by
 //!    the plan against the host-admitted records;
-//! 5. the Fork: its persisted counterfactual basis (committed Logical Head,
+//! 5. the admission preflight against the host's
+//!    [`CounterfactualHostPreflightV1`], in this order: the Scenario Room
+//!    identity and digest ([`CounterfactualAdmissionErrorV1::RoomMismatch`]),
+//!    the Plugin composition digest
+//!    ([`CounterfactualAdmissionErrorV1::PluginCompositionMismatch`]), every
+//!    frozen `ExogenousFrozen` then `FixedPolicy` descriptor, in plan order,
+//!    through the host [`CounterfactualFrozenArtifactsV1`] port
+//!    ([`CounterfactualAdmissionErrorV1::FrozenArtifactMissing`] or
+//!    [`CounterfactualAdmissionErrorV1::FrozenArtifactDigestMismatch`]), and
+//!    the requested `ReplayClaim` against the host's evaluated claim
+//!    ([`CounterfactualAdmissionErrorV1::ReplayClaimInsufficient`]);
+//! 6. the Fork: its persisted counterfactual basis (committed Logical Head,
 //!    generation, and published facts, read at one consistent point) and its
 //!    recorded parent cut against the CFP1 parent Timeline and cut `Seq`;
-//! 6. the expected plan digest and trust, revocation, and erasure epochs
+//! 7. the expected plan digest and trust, revocation, and erasure epochs
 //!    against the persisted basis, so a stale plan or epoch fails fast before
 //!    the host derives a frontier;
-//! 7. the closed dependency graph and the derived `RCF1` frontier, supplied
+//! 8. the closed dependency graph and the derived `RCF1` frontier, supplied
 //!    by the host [`CounterfactualFrontierSourceV1`] and re-validated here;
-//! 8. the frontier's dependency-graph digest against the persisted basis;
-//! 9. the `SIV1` invalidation built here, with its invalid-artifact index and
-//!    cache/checkpoint eviction set;
-//! 10. the first recomputation Tick, staged by the
+//! 9. the frontier's dependency-graph digest against the persisted basis;
+//! 10. the `SIV1` invalidation built here, with its invalid-artifact index and
+//!     cache/checkpoint eviction set;
+//! 11. the first recomputation Tick, staged by the
 //!     [`CounterfactualTickStagerV1`] from staged inputs only.
 //!
 //! Only then does it make exactly one
@@ -58,6 +69,43 @@
 //!
 //! # ADR gap decisions
 //!
+//! - **Preflight ownership.** ADR-064 admission step 1 lists room, profile
+//!   and trust, composition, artifacts, and `ReplayClaim` checks but not the
+//!   host state they compare with, so the host declares it in
+//!   [`CounterfactualHostPreflightV1`]: the expected Scenario Room identity
+//!   and digest, the expected Plugin composition digest, the frozen-artifact
+//!   availability port, and the host's evaluated `ReplayClaim`. Every check
+//!   runs before the first store call. ADR-064 has no closed error for a
+//!   room mismatch, so [`CounterfactualAdmissionErrorV1::RoomMismatch`] is
+//!   added; the other four names are the ADR-064 closed errors. The checks
+//!   run in the ADR's relative order, and the first error wins, with two
+//!   deliberate deviations from ADR-064.
+//!   First, ADR-064 lists room before profile and trust, but the room,
+//!   composition, artifact, and claim checks are cheap pure comparisons
+//!   against request-supplied host state, so they run after the existing
+//!   profile and trust check, which keeps its position.
+//!   Second, ADR-064 lists the parent head before room, but the parent-head
+//!   check is a store read, so it stays after the preflight and no store
+//!   call precedes a preflight rejection.
+//! - **Frozen artifacts.** The coordinator never reads artifact bytes: the
+//!   host port answers per descriptor, with the exact `artifact_digest`
+//!   the plan reuses, `Present`, `Missing`, or `DigestMismatch`.
+//! - **`ReplayClaim` sufficiency.** ADR-060 lists `Exact`,
+//!   `ExactAuthoritativeWithRedactedViews`, `StructuralOnly`,
+//!   `UnverifiableArtifactsMissing`, and `IncompatibleProfile`, states that a
+//!   weaker claim can never be presented as a stronger one, and calls
+//!   `IncompatibleProfile` orthogonal to erasure, without giving a total
+//!   order that includes it. The host evaluator in `pos-core`
+//!   (`ReplayClaimEvaluatorV1`) ranks the claims in that listed order, with
+//!   `IncompatibleProfile` weakest, and `ReplayClaimV1::is_no_stronger_than` is
+//!   the same order, so this slice follows it without inventing any other
+//!   rule: the plan's requested claim is sufficient when it is not stronger
+//!   than the host's evaluated claim (`ReplayClaimV1::after_artifact_evaluation`
+//!   applied to `Exact`), otherwise
+//!   `ReplayClaimInsufficient`. A host claim of `IncompatibleProfile`
+//!   therefore supports only a plan that requests `IncompatibleProfile`, and
+//!   a host claim of `Exact` supports every request. The evaluation's
+//!   redaction state is not compared: it is orthogonal to the claim.
 //! - **Dependency cycle.** The graph validation and frontier derivation of
 //!   ADR-064 live in `pos-time`, which depends on this crate. The coordinator
 //!   therefore receives them through [`CounterfactualFrontierSourceV1`]: a
@@ -172,11 +220,10 @@
 //!
 //! # Deferred
 //!
-//! These ADR-064 admission step-1 checks are not done here and are deferred
-//! to a follow-up: the room, Plugin composition, frozen-artifact
-//! availability, and `ReplayClaim` sufficiency checks; and proving the
-//! committed coverage of the Ticks from `first_tick` up to the global
-//! frontier.
+//! - Proving the committed coverage of the Ticks from `first_tick` up to the
+//!   global frontier.
+//! - The production [`CounterfactualFrontierSourceV1`] (Redmine #536).
+//! - Classified (ADR-099 FAR1-admitted) Fork admission (Redmine #537).
 
 use std::collections::BTreeSet;
 
@@ -190,7 +237,7 @@ use pos_conformance::counterfactual::plan::{
 use pos_conformance::counterfactual::InterventionV1;
 use pos_conformance::{
     DependencyClassV1, DependencyNodeV1, ExecutionProfileV1, InvalidArtifactV1,
-    RecomputationFrontierV1, SuffixInvalidationReasonV1, SuffixInvalidationV1,
+    RecomputationFrontierV1, ReplayClaimV1, SuffixInvalidationReasonV1, SuffixInvalidationV1,
     TrustPolicySnapshotV1, UnknownEdgePolicyV1,
 };
 use pos_core::{
@@ -199,7 +246,7 @@ use pos_core::{
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
     EventDraft, EventStore, ForkGenerationV1, Hash, InvalidationConflictV1,
     PipelineContractErrorV1, PipelineDraftBatchV1, RecomputationFrontierBytesV1,
-    SuffixInvalidationBytesV1, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
+    ReplayClaimEvaluationV1, SuffixInvalidationBytesV1, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
 };
 
 /// `SIV1` artifact class of every invalidated endogenous output.
@@ -237,6 +284,21 @@ pub enum CounterfactualAdmissionErrorV1 {
     /// The host TPS1 snapshot is invalid or is not the plan's snapshot.
     #[error("counterfactual trust policy does not match the plan")]
     TrustPolicyMismatch,
+    /// The plan's Scenario Room identity or digest is not the host's.
+    #[error("counterfactual room does not match the plan")]
+    RoomMismatch,
+    /// The plan's Plugin composition digest is not the host's.
+    #[error("counterfactual Plugin composition does not match the plan")]
+    PluginCompositionMismatch,
+    /// A frozen artifact the plan reuses is not available.
+    #[error("counterfactual frozen artifact is missing")]
+    FrozenArtifactMissing,
+    /// A frozen artifact is available but its digest is not the plan's.
+    #[error("counterfactual frozen artifact digest does not match")]
+    FrozenArtifactDigestMismatch,
+    /// The plan requests a stronger `ReplayClaim` than the host supports.
+    #[error("counterfactual replay claim is insufficient")]
+    ReplayClaimInsufficient,
     /// The Fork's recorded parent cut is absent or is not the plan's.
     #[error("counterfactual parent cut was not found")]
     ParentCutNotFound,
@@ -417,6 +479,44 @@ pub trait CounterfactualTickStagerV1 {
     ) -> Result<Vec<EventDraft>, CounterfactualTickFailureV1>;
 }
 
+/// Availability of one frozen artifact with the plan's exact digest.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrozenArtifactAvailabilityV1 {
+    /// The artifact is available with exactly the descriptor's digest.
+    Present,
+    /// The artifact is not available.
+    Missing,
+    /// An artifact is available but its digest differs from the descriptor's.
+    DigestMismatch,
+}
+
+/// Host port that reports the availability of the plan's frozen artifacts.
+pub trait CounterfactualFrozenArtifactsV1 {
+    /// Report whether the artifact `descriptor` names is available with
+    /// exactly `descriptor.artifact_digest`.
+    fn availability(&self, descriptor: &FrozenArtifactDescriptorV1)
+        -> FrozenArtifactAvailabilityV1;
+}
+
+/// The host state the admission preflight compares the plan with.
+///
+/// `room_id` and `room_digest` mirror the plan's room identity pair on
+/// purpose, so a host cannot supply a digest without naming the room.
+#[derive(Clone, Copy)]
+pub struct CounterfactualHostPreflightV1<'a> {
+    /// Expected Scenario Room identifier.
+    pub room_id: &'a str,
+    /// Expected digest of the Scenario Room closure.
+    pub room_digest: [u8; 32],
+    /// Expected digest of the pinned Plugin composition.
+    pub plugin_composition_digest: [u8; 32],
+    /// Availability of the plan's frozen artifacts.
+    pub frozen_artifacts: &'a dyn CounterfactualFrozenArtifactsV1,
+    /// The host's evaluated `ReplayClaim`; the plan may not request a
+    /// stronger one.
+    pub replay_claim: &'a ReplayClaimEvaluationV1,
+}
+
 /// One counterfactual admission request.
 #[derive(Clone, Copy)]
 pub struct CounterfactualAdmissionRequestV1<'a> {
@@ -430,6 +530,8 @@ pub struct CounterfactualAdmissionRequestV1<'a> {
     pub execution_profile: &'a ExecutionProfileV1,
     /// Host-admitted TPS1 trust-policy snapshot.
     pub trust_policy: &'a TrustPolicySnapshotV1,
+    /// Host state for the room, composition, artifact, and claim preflight.
+    pub preflight: CounterfactualHostPreflightV1<'a>,
     /// Current authority revocation epoch.
     pub revocation_epoch: u64,
     /// Current erasure epoch.
@@ -503,7 +605,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             return Err(CounterfactualAdmissionErrorV1::ClassifiedForkUnsupported);
         }
         authorize(plan, authority)?;
-        check_profile(request)?;
+        check_host_state(request)?;
         let basis = fork_basis(&self.store, request)?;
         check_persisted_facts(request, &basis)?;
         let derivation = frontier_source.derive_frontier(
@@ -618,6 +720,14 @@ fn authorize(
         })
 }
 
+/// Check the host-supplied state in order: the EPF1/TPS1 profile, then the
+/// preflight.
+fn check_host_state(
+    request: &CounterfactualAdmissionRequestV1<'_>,
+) -> Result<(), CounterfactualAdmissionErrorV1> {
+    check_profile(request).and_then(|()| check_preflight(request))
+}
+
 /// Prove the host EPF1 and TPS1 records are the ones the plan binds.
 fn check_profile(
     request: &CounterfactualAdmissionRequestV1<'_>,
@@ -632,6 +742,49 @@ fn check_profile(
         return Err(CounterfactualAdmissionErrorV1::TrustPolicyMismatch);
     }
     Ok(())
+}
+
+/// Prove the plan's room, Plugin composition, frozen artifacts, and requested
+/// `ReplayClaim` are the host's; the first mismatch wins.
+fn check_preflight(
+    request: &CounterfactualAdmissionRequestV1<'_>,
+) -> Result<(), CounterfactualAdmissionErrorV1> {
+    let plan = request.plan;
+    let host = &request.preflight;
+    if (plan.room_id.as_str(), plan.room_digest) != (host.room_id, host.room_digest) {
+        return Err(CounterfactualAdmissionErrorV1::RoomMismatch);
+    }
+    if plan.plugin_composition_digest != host.plugin_composition_digest {
+        return Err(CounterfactualAdmissionErrorV1::PluginCompositionMismatch);
+    }
+    plan.exogenous_descriptors
+        .iter()
+        .chain(&plan.fixed_policy_descriptors)
+        .try_for_each(|descriptor| check_artifact(host.frozen_artifacts, descriptor))?;
+    // `Exact` only anchors the conversion of the host's evaluation into a
+    // `ReplayClaimV1`: the result is the host's claim, never stronger than it.
+    let evaluated = ReplayClaimV1::Exact.after_artifact_evaluation(host.replay_claim);
+    if plan.replay_claim.is_no_stronger_than(evaluated) {
+        Ok(())
+    } else {
+        Err(CounterfactualAdmissionErrorV1::ReplayClaimInsufficient)
+    }
+}
+
+/// Map the host's availability answer for one frozen artifact to its error.
+fn check_artifact(
+    artifacts: &dyn CounterfactualFrozenArtifactsV1,
+    descriptor: &FrozenArtifactDescriptorV1,
+) -> Result<(), CounterfactualAdmissionErrorV1> {
+    match artifacts.availability(descriptor) {
+        FrozenArtifactAvailabilityV1::Present => Ok(()),
+        FrozenArtifactAvailabilityV1::Missing => {
+            Err(CounterfactualAdmissionErrorV1::FrozenArtifactMissing)
+        }
+        FrozenArtifactAvailabilityV1::DigestMismatch => {
+            Err(CounterfactualAdmissionErrorV1::FrozenArtifactDigestMismatch)
+        }
+    }
 }
 
 /// Read the Fork's persisted basis and check its recorded parent cut.
