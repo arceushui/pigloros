@@ -513,7 +513,7 @@ fn bounded_cbor_bytes_length(value_length: usize) -> usize {
 fn bounded_cbor_head_length(value: usize) -> usize {
     if value <= 23 {
         1
-    } else if value <= usize::from(u8::MAX) {
+    } else if u8::try_from(value).is_ok() {
         2
     } else {
         3
@@ -523,11 +523,11 @@ fn bounded_cbor_head_length(value: usize) -> usize {
 fn cbor_unsigned_length(value: u64) -> usize {
     if value <= 23 {
         1
-    } else if value <= u64::from(u8::MAX) {
+    } else if u8::try_from(value).is_ok() {
         2
-    } else if value <= u64::from(u16::MAX) {
+    } else if u16::try_from(value).is_ok() {
         3
-    } else if value <= u64::from(u32::MAX) {
+    } else if u32::try_from(value).is_ok() {
         5
     } else {
         9
