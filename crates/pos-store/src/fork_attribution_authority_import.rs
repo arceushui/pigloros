@@ -908,7 +908,7 @@ mod tests {
 
     /// A `MemoryStore` behind the backend seam that can race, hide state,
     /// misreport a head, or fail one read, to drive the paths no honest store
-    /// reaches. The Memory adapter alone hosts it: the SQLite adapter reaches
+    /// reaches. The Memory adapter alone hosts it: the `SQLite` adapter reaches
     /// its read failures through dropped tables instead.
     struct Probe {
         inner: MemoryStore,
@@ -984,6 +984,7 @@ mod tests {
         }
 
         fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            self.failing(Fault::ReadOwn(timeline))?;
             self.own_events.as_ref().map_or_else(
                 || self.inner.read_own(timeline, range),
                 |events| Ok(events.clone()),

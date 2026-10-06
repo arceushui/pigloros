@@ -118,11 +118,10 @@ impl MemoryStore {
         }) || closure.append_operations().iter().any(|record| {
             self.fork_append_operations
                 .contains_key(&record.input().operation_id)
-        })
-            || plan
-                .event_ids()
-                .iter()
-                .any(|event_id| self.import_event_held(*event_id))
+        }) || plan
+            .event_ids()
+            .iter()
+            .any(|event_id| self.import_event_held(*event_id))
     }
 
     fn import_event_held(&self, event_id: EventId) -> bool {
@@ -1058,7 +1057,10 @@ mod tests {
     fn staging_an_existing_child_is_indeterminate() -> Fallible<()> {
         let mut state = imported()?;
         let export = state.world.child_at(0)?.export.clone();
-        assert_eq!(state.store.stage_child(&export), Err(ImportError::StorageIndeterminate));
+        assert_eq!(
+            state.store.stage_child(&export),
+            Err(ImportError::StorageIndeterminate)
+        );
         Ok(())
     }
 }

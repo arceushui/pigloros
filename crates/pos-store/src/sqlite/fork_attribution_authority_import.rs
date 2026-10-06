@@ -173,7 +173,11 @@ pub(super) fn imported_binding_operation_held(
     conn: &Connection,
     operation_id: Hash,
 ) -> Result<bool, ImportError> {
-    Ok(held(conn, IMPORTED_BINDING_OPERATION_SQL, &blob(operation_id))?)
+    Ok(held(
+        conn,
+        IMPORTED_BINDING_OPERATION_SQL,
+        &blob(operation_id),
+    )?)
 }
 
 /// Map a local Principal-binding read failure.
@@ -1128,7 +1132,10 @@ mod tests {
     #[test]
     fn principal_failures_map_to_import_and_admission_errors() {
         use pos_core::ForkAdmissionErrorV1 as Admission;
-        assert_eq!(admission_failure(Admission::StorageIndeterminate), INDETERMINATE);
+        assert_eq!(
+            admission_failure(Admission::StorageIndeterminate),
+            INDETERMINATE
+        );
         assert_eq!(admission_failure(Admission::CorruptAuthority), CORRUPT);
         assert_eq!(
             imported_owner_failure(INDETERMINATE),
@@ -1156,6 +1163,37 @@ mod tests {
     }
 
     #[test]
+    fn a_local_binding_fails_closed_on_an_unreadable_imported_store() -> Fallible<()> {
+        let owner = pos_core::OwnerIdV1::new("creator-a")?;
+        let bind = |store: &SqliteStore, operation: u8| {
+            store.insert_principal_owner_operation(
+                hash(operation),
+                hash(0x01),
+                hash(0x22),
+                owner,
+                hash(0x02),
+            )
+        };
+        let state = Imported::new()?;
+        // The imported operation ID is held, and the Principal is of one Owner.
+        assert!(matches!(
+            bind(&state.store, 0x21),
+            Err(pos_core::ForkAdmissionErrorV1::Conflict)
+        ));
+        state.execute("UPDATE imported_fork_principal_owner_bindings SET pob1_cbor = 'text'")?;
+        assert!(matches!(
+            bind(&state.store, 0x40),
+            Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+        ));
+        state.execute("DROP TABLE imported_fork_principal_owner_bindings")?;
+        assert!(matches!(
+            bind(&state.store, 0x41),
+            Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn an_unreadable_local_principal_binding_is_corrupt() -> Fallible<()> {
         let world = World::new(Shape::Mixed, false)?;
         let built = world.build(&Spec::default())?;
@@ -1163,7 +1201,10 @@ mod tests {
         store.conn.execute(
             "INSERT INTO fork_principal_owner_bindings
              (operation_id, principal_digest, pob1_cbor) VALUES (?1, ?2, x'00')",
-            params![hash(0x5a).as_bytes().as_slice(), hash(0x22).as_bytes().as_slice()],
+            params![
+                hash(0x5a).as_bytes().as_slice(),
+                hash(0x22).as_bytes().as_slice()
+            ],
         )?;
         let outcome = store.import_verified(&request_for(&world, &built));
         assert_eq!(outcome, Err(CORRUPT));

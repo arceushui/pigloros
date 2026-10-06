@@ -3013,7 +3013,10 @@ impl MemoryStore {
             commitment,
         } = *command;
         // ADR-105 erratum E11: an operation ID that an import holds is occupied.
-        if self.imported_fork_principal_owner_bindings.contains_key(&operation_id) {
+        if self
+            .imported_fork_principal_owner_bindings
+            .contains_key(&operation_id)
+        {
             return Err(pos_core::ForkAdmissionErrorV1::Conflict);
         }
         // ADR-099: one Principal maps to exactly one immutable Owner. An equal

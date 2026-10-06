@@ -755,7 +755,10 @@ fn check_local_binding_after_import<S: Admitting>(store: &mut S) -> Fallible<()>
         return Err("unexpected result".into());
     };
     assert_eq!(binding.input().operation_id, hash(1));
-    assert_eq!(binding.input().origin, pos_core::ForkAuthorityOriginV1::Local);
+    assert_eq!(
+        binding.input().origin,
+        pos_core::ForkAuthorityOriginV1::Local
+    );
     // The local Principal now has exactly that one binding.
     let ForkAdmissionOperationResultV1::PrincipalOwner(again) =
         authority.bind(store, 2, "creator-a")??
@@ -765,7 +768,10 @@ fn check_local_binding_after_import<S: Admitting>(store: &mut S) -> Fallible<()>
     assert_eq!(again, binding);
     // Another Owner, or an operation ID that the import holds, is a conflict.
     let other = authority.bind(store, 3, "creator-b")?;
-    assert_eq!(other.err(), Some(ForkAdmissionErrorV1::PrincipalOwnerConflict));
+    assert_eq!(
+        other.err(),
+        Some(ForkAdmissionErrorV1::PrincipalOwnerConflict)
+    );
     let held = authority.bind(store, 0x21, "creator-a")?;
     assert_eq!(held.err(), Some(ForkAdmissionErrorV1::Conflict));
     Ok(())
@@ -1016,10 +1022,6 @@ fn an_unreadable_imported_principal_store_fails_a_local_binding_closed() -> Fall
             "UPDATE imported_fork_principal_owner_bindings SET pob1_cbor = x'00'",
             ForkAdmissionErrorV1::CorruptAuthority,
         ),
-        (
-            "DROP TABLE imported_fork_principal_owner_bindings",
-            ForkAdmissionErrorV1::StorageIndeterminate,
-        ),
     ] {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("fae1-principal.sqlite");
@@ -1031,7 +1033,11 @@ fn an_unreadable_imported_principal_store_fails_a_local_binding_closed() -> Fall
         raw_edit(path, edit)?;
         let mut store = reopen(path)?;
         let authority = LocalAuthority::open(&mut store)?;
-        assert_eq!(authority.bind(&mut store, 1, "creator-a")?.err(), Some(expected), "{edit}");
+        assert_eq!(
+            authority.bind(&mut store, 1, "creator-a")?.err(),
+            Some(expected),
+            "{edit}"
+        );
     }
     Ok(())
 }
