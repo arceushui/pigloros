@@ -19,10 +19,10 @@ use pos_core::{
     LocalCutResultHeadRowV1, LocalCutSealV2, LocalCutTableRefV1, LocalCutWorldRecordingV1,
     ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionInputV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
-    ManifestOwnerLinkAncestorV1, ManifestOwnerLinkCutIdentityV1, ManifestOwnerLinkReadPortV1,
-    ManifestOwnerLinkSnapshotV1, PluginId, PreparedLocalCutOwnerCommitV1, TimelineId,
-    WorldClosureBindingV1, WorldDependencyBranchV1, WorldRecordingReceiptV1,
-    MAX_LOCAL_CUT_OWNER_ROWS_V1,
+    ManifestOwnerAdmissionSnapshotV1, ManifestOwnerLinkAncestorV1, ManifestOwnerLinkCutIdentityV1,
+    ManifestOwnerLinkReadPortV1, ManifestOwnerLinkSnapshotV1, PluginId,
+    PreparedLocalCutOwnerCommitV1, TimelineId, WorldClosureBindingV1, WorldDependencyBranchV1,
+    WorldRecordingReceiptV1, MAX_LOCAL_CUT_OWNER_ROWS_V1,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -708,6 +708,26 @@ fn sqlite_latest_local_cut_world_binding(
 }
 
 /// Check a prepared successor and each WCB1 predecessor inside the commit.
+/// Resolve and retain a cut's coordinator evidence, then check its successor.
+///
+/// The evidence is resolved at the same point as the memory commit, before
+/// any successor, predecessor or cut-row check, so both stores report one
+/// error for the same fault.
+fn sqlite_retain_evidence_and_validate_local_cut(
+    connection: &Connection,
+    batch: &PreparedLocalCutOwnerCommitV1,
+    admission: &ManifestOwnerAdmissionOwnerStateV1,
+    current_state: Option<&LocalCutOwnerStateV1>,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    sqlite_retain_coordinator_key_evidence(
+        connection,
+        std::slice::from_ref(batch.coordinator_key_evidence()),
+        LocalCutOwnerErrorV1::CorruptState,
+        LocalCutOwnerErrorV1::StorageFailure,
+    )?;
+    sqlite_validate_local_cut_successor(connection, batch, admission, current_state)
+}
+
 fn sqlite_validate_local_cut_successor(
     connection: &Connection,
     batch: &PreparedLocalCutOwnerCommitV1,
@@ -1067,17 +1087,7 @@ fn sqlite_insert_local_cut_owner_cut(
             ],
         )
         .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
-    let evidence = [batch.coordinator_key_evidence()];
-    sqlite_insert_local_cut_world_recordings(connection, batch)
-        .and_then(|()| {
-            sqlite_retain_coordinator_key_evidence(
-                connection,
-                evidence,
-                LocalCutOwnerErrorV1::CorruptState,
-                LocalCutOwnerErrorV1::StorageFailure,
-            )
-        })
-        .map(|()| result)
+    sqlite_insert_local_cut_world_recordings(connection, batch).map(|()| result)
 }
 
 fn sqlite_write_local_cut_owner_state(
@@ -1257,7 +1267,7 @@ impl LocalCutOwnerPersistencePortV1 for SqliteStore {
             )? {
                 return Ok(retry);
             }
-            sqlite_validate_local_cut_successor(
+            sqlite_retain_evidence_and_validate_local_cut(
                 &self.conn,
                 &batch,
                 &admission,
@@ -1373,8 +1383,19 @@ fn sqlite_owner_link_branch(
         .transpose()
 }
 
-/// Read one retained coordinator WKE1 record by its address, if it is retained.
+/// Read the retained WKE1 bytes that one cut's LCQ1 and MSR1 receipts name.
 fn sqlite_owner_link_key_evidence(
+    connection: &Connection,
+    result: &LocalCutOwnerCommitV1,
+    admissions: &[ManifestOwnerAdmissionSnapshotV1],
+) -> Result<BTreeMap<Hash, Vec<u8>>, LocalCutOwnerErrorV1> {
+    collect_manifest_owner_link_key_evidence_v1(&result.receipt, admissions, |digest| {
+        sqlite_owner_link_key_evidence_row(connection, digest)
+    })
+}
+
+/// Read one retained coordinator WKE1 record by its address, if it is retained.
+fn sqlite_owner_link_key_evidence_row(
     connection: &Connection,
     evidence_hash: Hash,
 ) -> Result<Option<Vec<u8>>, LocalCutOwnerErrorV1> {
@@ -1455,20 +1476,16 @@ fn sqlite_owner_link_snapshot(
         })?;
         dependency_branches.extend(nodes);
     }
-    let receipt = &cut.result.receipt;
-    let retained = |digest: Hash| sqlite_owner_link_key_evidence(connection, digest);
-    let key_evidence = collect_manifest_owner_link_key_evidence_v1(receipt, &admissions, retained);
-    key_evidence.map(|key_evidence| {
-        Some(ManifestOwnerLinkSnapshotV1 {
-            owner_state,
-            request: cut.request,
-            result: cut.result,
-            ancestors,
-            admissions,
-            dependency_branches,
-            key_evidence,
-        })
-    })
+    let key_evidence = sqlite_owner_link_key_evidence(connection, &cut.result, &admissions)?;
+    Ok(Some(ManifestOwnerLinkSnapshotV1 {
+        owner_state,
+        request: cut.request,
+        result: cut.result,
+        ancestors,
+        admissions,
+        dependency_branches,
+        key_evidence,
+    }))
 }
 
 impl ManifestOwnerLinkReadPortV1 for SqliteStore {

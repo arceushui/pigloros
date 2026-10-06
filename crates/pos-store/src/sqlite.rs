@@ -6808,14 +6808,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
             }
             let configuration_generation = input.catalog.as_input().configuration_generation;
             sqlite_validate_manifest_owner_transition(input, current_state.as_ref())?;
-            sqlite_insert_manifest_owner_admission(&self.conn, input).and_then(|()| {
-                sqlite_retain_coordinator_key_evidence(
-                    &self.conn,
-                    batch.coordinator_key_evidence(),
-                    ManifestOwnerAdmissionErrorV1::CorruptState,
-                    ManifestOwnerAdmissionErrorV1::StorageFailure,
-                )
-            })?;
+            sqlite_insert_manifest_owner_admission_batch(&self.conn, &batch)?;
             sqlite_write_manifest_owner_state(&self.conn, input)?;
             sqlite_sync_local_cut_owner_after_admission(&self.conn, input, current_state.as_ref())?;
             let receipt_hashes = input
@@ -13715,11 +13708,12 @@ impl AuthorityPersistencePortV1 for SqliteStore {
 /// Resolve each coordinator WKE1 against this transaction's key registry,
 /// then retain its exact bytes by address; identical evidence is kept once.
 ///
-/// A store without a registry holds no coordinator key. A registry row that
-/// cannot be read or decoded yields `corrupt`, and a failed insert `storage`.
-fn sqlite_retain_coordinator_key_evidence<'a, E>(
+/// A store without a registry holds no coordinator key. Every registry read
+/// failure, an unreadable row and an undecodable one alike, is reported as
+/// `corrupt`; a failed evidence insert is reported as `storage`.
+fn sqlite_retain_coordinator_key_evidence<E>(
     connection: &Connection,
-    evidence: impl IntoIterator<Item = (Hash, &'a [u8])>,
+    evidence: &[pos_core::CoordinatorKeyEvidenceV1],
     corrupt: E,
     storage: E,
 ) -> Result<(), E>
@@ -13729,18 +13723,37 @@ where
     let registry = sqlite_load_key_registry(connection)
         .or(Err(corrupt))?
         .unwrap_or_default();
-    for (evidence_hash, bytes) in evidence {
-        pos_core::resolve_coordinator_key_evidence_v1(bytes, evidence_hash, &registry)
-            .map_err(E::from)?;
+    for record in evidence {
+        record.resolve(&registry).map_err(E::from)?;
+    }
+    for record in evidence {
         connection
             .execute(
                 "INSERT INTO world_key_evidence (evidence_hash, evidence_bytes) VALUES (?1, ?2)
                  ON CONFLICT (evidence_hash) DO NOTHING",
-                params![evidence_hash.as_bytes().as_slice(), bytes],
+                params![record.evidence_hash.as_bytes().as_slice(), record.bytes],
             )
             .or(Err(storage))?;
     }
     Ok(())
+}
+
+/// Retain an admission's coordinator evidence, then insert its rows.
+///
+/// The evidence is resolved at the same point as the memory commit, before
+/// any lease, member or row check, so both stores report one error for the
+/// same fault.
+fn sqlite_insert_manifest_owner_admission_batch(
+    connection: &Connection,
+    batch: &PreparedManifestOwnerAdmissionV1,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    sqlite_retain_coordinator_key_evidence(
+        connection,
+        batch.coordinator_key_evidence(),
+        ManifestOwnerAdmissionErrorV1::CorruptState,
+        ManifestOwnerAdmissionErrorV1::StorageFailure,
+    )?;
+    sqlite_insert_manifest_owner_admission(connection, batch.input())
 }
 
 fn sqlite_load_key_registry(conn: &Connection) -> Result<Option<KeyRegistryStateV1>, CoreError> {

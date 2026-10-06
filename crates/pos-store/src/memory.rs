@@ -11399,23 +11399,44 @@ fn memory_insert_manifest_owner_member_leaves(
     }
 }
 
-/// Resolve each coordinator WKE1 against the store's key registry and return
-/// the exact bytes to retain by address; a store without a registry holds no
-/// coordinator key.
-fn memory_resolved_key_evidence<'a, E: From<pos_core::CoordinatorKeyEvidenceErrorV1>>(
+/// Resolve each coordinator WKE1 against the store's key registry; a store
+/// without a registry holds no coordinator key.
+fn memory_resolve_key_evidence<E: From<pos_core::CoordinatorKeyEvidenceErrorV1>>(
     store: &MemoryStore,
-    evidence: impl IntoIterator<Item = (Hash, &'a [u8])>,
-) -> Result<Vec<(Hash, Vec<u8>)>, E> {
+    evidence: &[pos_core::CoordinatorKeyEvidenceV1],
+) -> Result<(), E> {
     let empty = KeyRegistryStateV1::new();
     let registry = store.key_registry.as_ref().unwrap_or(&empty);
-    evidence
-        .into_iter()
-        .map(|(evidence_hash, bytes)| {
-            pos_core::resolve_coordinator_key_evidence_v1(bytes, evidence_hash, registry)
-                .map(|_| (evidence_hash, bytes.to_vec()))
-                .map_err(E::from)
-        })
-        .collect()
+    for record in evidence {
+        record.resolve(registry).map_err(E::from)?;
+    }
+    Ok(())
+}
+
+/// Retain resolved coordinator WKE1 bytes by address; identical evidence is
+/// kept once.
+fn memory_retain_key_evidence(
+    store: &mut MemoryStore,
+    evidence: &[pos_core::CoordinatorKeyEvidenceV1],
+) {
+    for record in evidence {
+        store
+            .world_key_evidence
+            .entry(record.evidence_hash)
+            .or_insert_with(|| record.bytes.clone());
+    }
+}
+
+/// Resolve an admission's coordinator evidence, then check its successor.
+///
+/// The evidence is resolved at the same point as the `SQLite` commit, before
+/// any successor, lease or member check, so both stores report one error.
+fn memory_validate_admission_successor(
+    store: &MemoryStore,
+    batch: &PreparedManifestOwnerAdmissionV1,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    memory_resolve_key_evidence(store, batch.coordinator_key_evidence())?;
+    memory_validate_manifest_owner_successor(store, batch.input())
 }
 
 impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
@@ -11526,8 +11547,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
         }
 
         let configuration_generation = input.catalog.as_input().configuration_generation;
-        let key_evidence = memory_validate_manifest_owner_successor(self, input)
-            .and_then(|()| memory_resolved_key_evidence(self, batch.coordinator_key_evidence()))?;
+        memory_validate_admission_successor(self, &batch)?;
 
         let result = ManifestOwnerAdmissionCommitV1 {
             kind: ManifestOwnerAdmissionCommitKindV1::Applied,
@@ -11578,7 +11598,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
                 .insert(key, snapshot);
         }
         memory_insert_manifest_owner_member_leaves(self, input);
-        self.world_key_evidence.extend(key_evidence);
+        memory_retain_key_evidence(self, batch.coordinator_key_evidence());
         self.manifest_owner_admission_states
             .insert(owner_id, next_state);
         if let Some(next_local_cut_owner_state) = next_local_cut_owner_state {
@@ -11747,6 +11767,21 @@ fn validate_memory_local_cut_successor(
     pos_core::validate_local_cut_owner_predecessors_v1(batch, |timeline_id| {
         Ok(latest.get(&(owner_id, timeline_id)).copied())
     })
+}
+
+/// Resolve a cut's coordinator evidence, then check its successor.
+///
+/// The evidence is resolved at the same point as the `SQLite` commit, before
+/// any successor or predecessor check, so both stores report one error.
+fn validate_memory_local_cut_commit(
+    store: &MemoryStore,
+    batch: &PreparedLocalCutOwnerCommitV1,
+    admission: &ManifestOwnerAdmissionOwnerStateV1,
+    current_state: Option<&LocalCutOwnerStateV1>,
+) -> Result<(), LocalCutOwnerErrorV1> {
+    let evidence = std::slice::from_ref(batch.coordinator_key_evidence());
+    memory_resolve_key_evidence(store, evidence)?;
+    validate_memory_local_cut_successor(store, batch, admission, current_state)
 }
 
 /// Return the operation linked to one visible cut after fully validating it.
@@ -11949,10 +11984,7 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         let admission = self
             .read_manifest_owner_state_v1(owner_id)?
             .ok_or(LocalCutOwnerErrorV1::Conflict)?;
-        let evidence = [batch.coordinator_key_evidence()];
-        let key_evidence =
-            validate_memory_local_cut_successor(self, &batch, &admission, current_state.as_ref())
-                .and_then(|()| memory_resolved_key_evidence(self, evidence))?;
+        validate_memory_local_cut_commit(self, &batch, &admission, current_state.as_ref())?;
         let request = batch.request();
         let successor = batch.successor_state();
         // The owner-state read bounds every retained cut by the last visible cut,
@@ -11979,7 +12011,8 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         self.manifest_owner_admission_states
             .insert(owner_id, next_admission_state);
         self.record_local_cut_world_closures(&batch);
-        self.world_key_evidence.extend(key_evidence);
+        let evidence = std::slice::from_ref(batch.coordinator_key_evidence());
+        memory_retain_key_evidence(self, evidence);
         Ok(result)
     }
 
@@ -12107,10 +12140,8 @@ fn memory_owner_link_snapshot(
         })?;
         dependency_branches.extend(nodes);
     }
-    let receipt = &operation.result.receipt;
-    let retained = |digest: Hash| Ok(store.world_key_evidence.get(&digest).cloned());
-    let key_evidence = collect_manifest_owner_link_key_evidence_v1(receipt, &admissions, retained);
-    key_evidence.map(|key_evidence| ManifestOwnerLinkSnapshotV1 {
+    let key_evidence = memory_owner_link_key_evidence(store, operation, &admissions)?;
+    Ok(ManifestOwnerLinkSnapshotV1 {
         owner_state: target.owner_state,
         request: operation.request.clone(),
         result: operation.result.clone(),
@@ -12118,6 +12149,18 @@ fn memory_owner_link_snapshot(
         admissions,
         dependency_branches,
         key_evidence,
+    })
+}
+
+/// Read the retained WKE1 bytes that one cut's LCQ1 and MSR1 receipts name.
+fn memory_owner_link_key_evidence(
+    store: &MemoryStore,
+    operation: &MemoryLocalCutOwnerOperationV1,
+    admissions: &[ManifestOwnerAdmissionSnapshotV1],
+) -> Result<BTreeMap<Hash, Vec<u8>>, LocalCutOwnerErrorV1> {
+    let receipt = &operation.result.receipt;
+    collect_manifest_owner_link_key_evidence_v1(receipt, admissions, |digest| {
+        Ok(store.world_key_evidence.get(&digest).cloned())
     })
 }
 

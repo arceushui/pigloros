@@ -165,6 +165,41 @@ impl WorldKeyEvidenceV1 {
     }
 }
 
+/// One installed-coordinator receipt with the exact WKE1 bytes it names.
+///
+/// The signing hooks return this pair; `key_evidence` is unverified until the
+/// owner commit resolves it with [`resolve_coordinator_key_evidence_v1`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoordinatorSignedReceiptV1<R> {
+    /// The signed LCQ1 or MSR1 receipt.
+    pub receipt: R,
+    /// Exact canonical WKE1 bytes that the receipt's evidence hash names.
+    pub key_evidence: Vec<u8>,
+}
+
+/// One coordinator key-evidence record: its address and exact WKE1 bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoordinatorKeyEvidenceV1 {
+    /// The receipt's `coordinator_key_evidence_hash`.
+    pub evidence_hash: Hash,
+    /// Exact WKE1 bytes the installed coordinator returned for that address.
+    pub bytes: Vec<u8>,
+}
+
+impl CoordinatorKeyEvidenceV1 {
+    /// Resolve these bytes against `keys`, as
+    /// [`resolve_coordinator_key_evidence_v1`] does.
+    ///
+    /// # Errors
+    /// Returns the resolver's closed rejection.
+    pub fn resolve(
+        &self,
+        keys: &dyn KeyRegistryPortV1,
+    ) -> Result<WorldKeyEvidenceV1, CoordinatorKeyEvidenceErrorV1> {
+        resolve_coordinator_key_evidence_v1(&self.bytes, self.evidence_hash, keys)
+    }
+}
+
 /// Closed reasons why retained coordinator key evidence names no signer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CoordinatorKeyEvidenceErrorV1 {
@@ -226,6 +261,55 @@ pub fn resolve_coordinator_key_evidence_v1(
     } else {
         Err(CoordinatorKeyEvidenceErrorV1::UnregisteredKey)
     }
+}
+
+/// Owner of the shared `test-support` coordinator signing key.
+#[cfg(any(test, feature = "test-support"))]
+pub const TEST_COORDINATOR_OWNER: &str = "test-coordinator";
+
+/// The `test-support` verify-only WKE1 of the shared coordinator key.
+///
+/// Epoch zero is reserved, so it is raised to one. The material digest and
+/// public key repeat the epoch byte, so distinct epochs never reuse material.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn test_coordinator_key_evidence(epoch: u8) -> WorldKeyEvidenceV1 {
+    let seed = epoch.max(1);
+    WorldKeyEvidenceV1(WorldKeyEvidenceInputV1 {
+        identity: KeyIdentityV1::from_parts(
+            OwnerIdV1::from_static(TEST_COORDINATOR_OWNER),
+            KeyRoleV1::TimelineIntegritySigning,
+            u64::from(seed),
+        ),
+        private_material_digest: Hash::from_bytes([seed; 32]),
+        private_material_required: false,
+        public_verification_key: Some(PublicKey::from_bytes([seed; 32])),
+    })
+}
+
+/// The `test-support` registration that matches one coordinator WKE1.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub const fn test_coordinator_key_registration(
+    evidence: &WorldKeyEvidenceV1,
+) -> crate::KeyRegistrationV1 {
+    crate::KeyRegistrationV1::new(
+        evidence.0.identity,
+        evidence.0.private_material_digest,
+        evidence.0.public_verification_key,
+    )
+}
+
+/// A `test-support` key registry holding the epoch-1 coordinator key.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn test_coordinator_key_registry() -> crate::KeyRegistryStateV1 {
+    let mut registry = crate::KeyRegistryStateV1::new();
+    // A fresh registry always accepts the first epoch of a role.
+    let _registered = registry.register_key(test_coordinator_key_registration(
+        &test_coordinator_key_evidence(1),
+    ));
+    registry
 }
 
 fn domain_hash(domain: &[u8], bytes: &[u8]) -> Hash {

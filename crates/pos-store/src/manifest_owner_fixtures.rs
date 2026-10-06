@@ -12,22 +12,22 @@ use pos_core::retention::{
     WorldRetentionPolicyV1,
 };
 use pos_core::{
-    build_manifest_owner_scope_v1, derive_local_cut_world_closure_v1, ArtifactDataClassV1,
-    ArtifactTransitionRuleV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
-    FidelityBudgetV1, Hash, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
-    LocalCutExpectedHeadRowV1, LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1,
-    LocalCutSealV2, LocalCutWorldClosureSourceV1, ManifestAdmissionCatalogInputV1,
-    ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionErrorV1,
-    ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionRequestV1,
-    ManifestOwnerAdmissionSnapshotV1, ManifestOwnerAdmissionVerifierV1,
-    ManifestOwnerClassifiedLeafV1, ManifestOwnerConsumerReferenceV1,
-    ManifestOwnerLeafClassificationV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1,
-    ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1,
-    ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-    ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1, PluginId, PublicKey, TimelineId,
-    WorkloadProfileV1, WorldArtifactKindV1, WorldClosureReadLimitsV1, WorldConsumerSetInputV1,
-    WorldConsumerSetV1, WorldConsumerV1, WorldKeyEvidenceInputV1, WorldKeyEvidenceV1,
-    WorldProducerV1,
+    build_manifest_owner_scope_v1, derive_local_cut_world_closure_v1,
+    test_coordinator_key_evidence, ArtifactDataClassV1, ArtifactTransitionRuleV1,
+    CoordinatorSignedReceiptV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
+    FidelityBudgetV1, Hash, LocalCutExpectedHeadRowV1, LocalCutRecordingContextRowV1,
+    LocalCutResultHeadRowV1, LocalCutSealV2, LocalCutWorldClosureSourceV1,
+    ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
+    ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
+    ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
+    ManifestOwnerAdmissionVerifierV1, ManifestOwnerClassifiedLeafV1,
+    ManifestOwnerConsumerReferenceV1, ManifestOwnerLeafClassificationV1,
+    ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1,
+    ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
+    ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1,
+    PluginId, SignedManifestSlotAdmissionReceiptV1, TimelineId, WorkloadProfileV1,
+    WorldArtifactKindV1, WorldClosureReadLimitsV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
+    WorldConsumerV1, WorldProducerV1,
 };
 
 pub(crate) type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
@@ -87,13 +87,15 @@ impl ManifestOwnerAdmissionVerifierV1 for AcceptingOwner {
     fn sign_coordinator_receipt(
         &self,
         draft: ManifestSlotAdmissionReceiptDraftV1,
-    ) -> Result<(ManifestSlotAdmissionReceiptV1, Vec<u8>), ManifestOwnerAdmissionErrorV1> {
-        let rejected = ManifestOwnerAdmissionErrorV1::OwnerRejected;
-        let evidence = coordinator_evidence().or(Err(rejected))?;
+    ) -> Result<SignedManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+        let evidence = test_coordinator_key_evidence(1);
         draft
             .with_evidence_and_signature(evidence.digest(), [0x5a; 64])
-            .map(|receipt| (receipt, evidence.to_canonical_cbor()))
-            .or(Err(rejected))
+            .map(|receipt| CoordinatorSignedReceiptV1 {
+                receipt,
+                key_evidence: evidence.to_canonical_cbor(),
+            })
+            .or(Err(ManifestOwnerAdmissionErrorV1::OwnerRejected))
     }
 
     fn verify_native_policy_copies(
@@ -113,31 +115,6 @@ impl ManifestOwnerAdmissionVerifierV1 for AcceptingOwner {
     ) -> Result<Vec<ManifestOwnerClassifiedLeafV1>, ManifestOwnerAdmissionErrorV1> {
         Ok(member_classes(members))
     }
-}
-
-/// Owner of the fixture coordinator's Timeline-integrity signing key.
-const COORDINATOR_OWNER: &str = "fixture-coordinator";
-
-/// The verify-only WKE1 of the fixture coordinator's epoch-1 signing key.
-pub(crate) fn coordinator_evidence() -> Fallible<WorldKeyEvidenceV1> {
-    Ok(WorldKeyEvidenceV1::new(WorldKeyEvidenceInputV1 {
-        identity: KeyIdentityV1::new(COORDINATOR_OWNER, KeyRoleV1::TimelineIntegritySigning, 1),
-        private_material_digest: hash(0xc1),
-        private_material_required: false,
-        public_verification_key: Some(PublicKey::from_bytes([0xc2; 32])),
-    })?)
-}
-
-/// A key registry holding the fixture coordinator's live signing key.
-pub(crate) fn coordinator_registry() -> Fallible<KeyRegistryStateV1> {
-    let evidence = *coordinator_evidence()?.as_input();
-    let mut registry = KeyRegistryStateV1::new();
-    registry.register_key(KeyRegistrationV1::new(
-        evidence.identity,
-        evidence.private_material_digest,
-        evidence.public_verification_key,
-    ))?;
-    Ok(registry)
 }
 
 /// Echo the classification recorded in each member leaf, in leaf order.

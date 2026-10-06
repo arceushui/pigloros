@@ -637,8 +637,7 @@ fn verify_snapshot<'s>(
     }
     verify_dependency_closure(snapshot, recording, admission, context)?;
     verify_static_pins(snapshot, admission)?;
-    authenticate_receipts(snapshot, authority)
-        .and_then(|()| verify_coordinator_key_evidence(snapshot, keys))?;
+    authenticate_receipts(snapshot, authority, keys)?;
     Ok(SelectedLinkV1 {
         recording,
         admission,
@@ -993,10 +992,12 @@ const fn static_pin(row: &ManifestAdmissionCatalogRowV1) -> (PluginId, &str, Has
     )
 }
 
-/// Re-verify LCQ1 and every MSR1 through the installed key-role hooks.
+/// Re-verify LCQ1 and every MSR1 through the installed key-role hooks, then
+/// resolve the coordinator key evidence they name against `keys`.
 fn authenticate_receipts(
     snapshot: &ManifestOwnerLinkSnapshotV1,
     authority: ManifestOwnerLinkAuthorityV1<'_>,
+    keys: &dyn KeyRegistryPortV1,
 ) -> Result<(), ManifestOwnerLinkVerificationErrorV1> {
     let result = &snapshot.result;
     authority
@@ -1010,7 +1011,7 @@ fn authenticate_receipts(
             .is_ok()
     });
     if admitted {
-        Ok(())
+        verify_coordinator_key_evidence(snapshot, keys)
     } else {
         Err(ManifestOwnerLinkVerificationErrorV1::CompositionUnavailable)
     }
