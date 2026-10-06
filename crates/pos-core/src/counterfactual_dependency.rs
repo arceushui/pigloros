@@ -17,11 +17,11 @@
 //! exact canonical `IDP1` bytes in a core-native newtype,
 //! [`DependencyEdgeRecordV1`]. Construction verifies, without a CBOR decoder:
 //!
-//! - the size bound ([`MAX_DEPENDENCY_EDGE_BYTES_V1`]) before anything else;
+//! - the size bound ([`MAX_DEPENDENCY_EDGE_BYTES_V1`]) and that the supplied
+//!   source digest is nonzero, both before anything else;
 //! - the nine-field array head, then the text magic and version `1`;
 //! - that the consumer node coordinate inside the bytes is byte-for-byte the
 //!   canonical encoding of the supplied [`DependencyNodeCoordinateV1`];
-//! - that the supplied source digest is nonzero;
 //! - that the source node is a six-field array whose owner text is 1 to
 //!   [`MAX_DEPENDENCY_OWNER_ID_BYTES_V1`] bytes, so the 16 KiB edge bound
 //!   cannot be spent on owner padding, and that its artifact digest is the
@@ -169,16 +169,16 @@
 //!   recoverable from the node Ticks (a record made only of early roots
 //!   carries them all before its Tick), and a later record's Tick must be
 //!   compared with it, not with the maximum node Tick.
-//! - **Fork set start.** The dependency set of a Fork generation is built
-//!   only through the `_with_dependencies` methods, starting at the
-//!   invalidation's `first_tick`. The adapter does not require the first Tick
-//!   to be recorded: after a plain invalidation it accepts an append at any
-//!   Tick at or after `first_tick` into the empty set. The coordinator seam
-//!   (#552) guarantees the first Tick's nodes by always using the
-//!   `_with_dependencies` methods from the first Tick. A plain invalidation
-//!   (without dependencies) does not touch the dependency set. Rows of older
-//!   generations may be retained or dropped: unobservable, since a read of any
-//!   non-current generation is `MixedForkGeneration`.
+//! - **Fork set start.** The dependency set of a Fork generation is
+//!   written only by the `_with_dependencies` methods, starting at the
+//!   invalidation's `first_tick`. A plain invalidation (without dependencies)
+//!   leaves the set empty, and a recorded append may then start it at any
+//!   Tick at or after `first_tick`: the adapter does not require the first
+//!   Tick to be recorded. The coordinator seam (#552) guarantees the first
+//!   Tick's nodes by always using the `_with_dependencies` methods from the
+//!   first Tick. Rows of older generations may be retained or dropped:
+//!   unobservable, since a read of any non-current generation is
+//!   `MixedForkGeneration`.
 //! - **Stager-asserted record Tick.** Nothing in the store can verify that
 //!   the record Tick is the Tick the drafts commit
 //!   ([`CounterfactualBasisV1`] carries a Seq, not a Tick), so #552 owns the
@@ -225,9 +225,9 @@
 //! - **Test model.** The `pos-core` fake store of the public contract test is
 //!   the reference model. Adapters mirror these obligations in their own test
 //!   suites, which add storage-, erasure-, and failure-specific tests. Each
-//!   adapter PR (#423 Memory, #424 `SQLite`; Redmine #550 and #551) tags its
-//!   tests with the checklist ids C1 to C13 (C14, the schema validation, is
-//!   `SQLite` only).
+//!   adapter (Redmine #550 Memory, #551 `SQLite`) tags its tests with the
+//!   checklist ids C1 to C13 defined in Redmine #550 (C14, the schema
+//!   validation, is `SQLite` only).
 //!
 //! # Deferred
 //!
@@ -370,6 +370,7 @@ impl RecordedDependencyClassV1 {
     /// Every class, indexed by its wire code.
     ///
     /// Public only for tests and parity checks against the wire codes.
+    #[doc(hidden)]
     pub const ALL: [Self; 5] = [
         Self::ExogenousFrozen,
         Self::InterventionAssigned,
@@ -900,15 +901,15 @@ impl TickDependencyRecordV1 {
     /// Check that recording this record keeps one recorded set within the
     /// graph bounds, given the rows already recorded in that set.
     ///
+    /// The declared-inputs cap deliberately equals the edge bound, so that
+    /// constant is intentionally reused: `pos-time` rejects a graph whose
+    /// declared inputs exceed its edge bound.
+    ///
     /// # Errors
     /// Returns `FieldOutOfBounds` when the set would exceed
     /// [`MAX_RECORDED_DEPENDENCY_NODES_V1`] nodes,
     /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] edges, or
     /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] declared inputs.
-    ///
-    /// The declared-inputs cap deliberately equals the edge bound, so that
-    /// constant is intentionally reused: pos-time rejects a graph whose
-    /// declared inputs exceed its edge bound.
     pub fn ensure_set_capacity(&self, recorded: RecordedSetCountsV1) -> DependencyResult<()> {
         if recorded.nodes.saturating_add(self.nodes.len()) > MAX_RECORDED_DEPENDENCY_NODES_V1
             || recorded.edges.saturating_add(self.edges.len()) > MAX_RECORDED_DEPENDENCY_EDGES_V1
@@ -1112,6 +1113,9 @@ impl DependencyPageCursorV1 {
 }
 
 /// One row kind a read port pages: a node or an edge.
+///
+/// Only the two in-crate row types (nodes and edges) are intended
+/// implementors.
 pub trait DependencyPagedRowV1 {
     /// Whether this row's cursor carries an edge source digest.
     const KEYED_BY_SOURCE: bool;

@@ -1610,6 +1610,27 @@ fn conflicting_or_misplaced_invalidations_record_nothing() {
 }
 
 #[test]
+fn bad_records_are_refused_before_a_conflicting_basis_is_reported() {
+    let mut store = FakeStore::new();
+    store.facts.trust_epoch = 99;
+    let committed_record = ok(TickRecord::try_new(
+        17,
+        RecordedNodeOriginV1::Committed,
+        Vec::new(),
+        Vec::new(),
+    ));
+    let wrong_tick = ok(TickRecord::try_new(18, PROVISIONAL, Vec::new(), Vec::new()));
+    for record in [committed_record, wrong_tick] {
+        let outcome =
+            store.commit_counterfactual_invalidation_with_dependencies(&command(), &record);
+        assert_eq!(err(outcome), StoreError::BindingMismatch);
+    }
+    assert_eq!(ok(collect_nodes(&store, fork_scope(3), 2)), Vec::new());
+    assert_eq!(ok(collect_edges(&store, fork_scope(3), 2)), Vec::new());
+    assert_eq!(store.basis().generation, 3);
+}
+
+#[test]
 fn later_ticks_record_only_on_the_expected_basis() {
     let mut store = committed_store();
     let expected = store.basis();
