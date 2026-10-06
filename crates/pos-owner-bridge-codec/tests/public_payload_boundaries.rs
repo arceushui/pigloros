@@ -102,7 +102,7 @@ fn public_payload_values_expose_every_field_and_enforce_bounds() -> Result<(), O
     assert_eq!(assertion.prf_first(), PRF_RESULT);
 
     assert_attestation_bounds(&oversized_credential_id)?;
-    assert_assertion_bounds(&oversized_credential_id)?;
+    assert_assertion_bounds(&oversized_credential_id);
     Ok(())
 }
 
@@ -323,7 +323,7 @@ fn assert_attestation_bounds(oversized_credential_id: &[u8]) -> Result<(), Owner
     Ok(())
 }
 
-fn assert_assertion_bounds(oversized_credential_id: &[u8]) -> Result<(), OwnerBridgeCodecError> {
+fn assert_assertion_bounds(oversized_credential_id: &[u8]) {
     let oversized_client_data = vec![0; 4_097];
     let short_authenticator_data = [0; 36];
     let oversized_authenticator_data = vec![0; 1_025];
@@ -415,5 +415,4 @@ fn assert_assertion_bounds(oversized_credential_id: &[u8]) -> Result<(), OwnerBr
         ),
         Err(OwnerBridgeCodecError::BoundsExceeded)
     );
-    Ok(())
 }
