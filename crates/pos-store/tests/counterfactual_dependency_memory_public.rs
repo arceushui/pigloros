@@ -1046,8 +1046,9 @@ fn c9_writes_require_a_visible_published_fork() {
             store.append_counterfactual_tick_with_dependencies(target, &basis, &drafts, &tick_18());
         assert_eq!(later, Err(StoreError::ForkNotFound));
     }
-    // The Fork resolves before the record is checked: a misplaced record
-    // (its Tick before the first Tick) is still a missing Fork.
+    // The commit resolves the Fork before it checks the record, and the
+    // append resolves it through the basis read: a misplaced record (its Tick
+    // before the first Tick) is still a missing Fork on both paths.
     let misplaced = empty_at(1);
     let first = command(fork, 1, 0);
     let commit = store.commit_counterfactual_invalidation_with_dependencies(&first, &misplaced);
