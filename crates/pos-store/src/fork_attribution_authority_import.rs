@@ -13,7 +13,7 @@
 //! adapter transaction it repeats the lookup and every occupancy check,
 //! stages the child Timeline, checks the staged range (#411 or the
 //! empty-segment rule) and the final chain hash, and installs every row. The
-//! adapters supply only the storage primitives of [`ImportBackendV1`].
+//! adapters supply only the storage primitives of `ImportBackendV1`.
 //!
 //! The `FAR1` descriptor and composition fields (room revision descriptor
 //! hash, plugin composition hash, and the fold and tick coordinates) are

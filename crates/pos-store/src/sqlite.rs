@@ -12057,7 +12057,6 @@ impl SqliteStore {
                 .then_some(ForkAdmissionOperationResultV1::PrincipalOwner(existing))
                 .ok_or(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict);
         }
-
         // Verified POC1 facts carry nonzero operation and Principal digests,
         // so construction cannot fail; any failure still fails closed.
         let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
