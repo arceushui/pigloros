@@ -203,9 +203,9 @@ fn seqs(store: &MemoryStore, timeline: TimelineId) -> Vec<u64> {
 }
 
 // The coordinate, node, edge, and record builders below mirror the contract's
-// own tests (and the `SQLite` adapter's will mirror them again). Consolidating
-// them into the shared `test_fixtures` is a follow-up that touches the
-// contract crate, so it is not done here.
+// own tests, the in-module tests of this adapter, and the `SQLite` adapter's
+// tests. Consolidating them into the shared `test_fixtures` touches the
+// contract crate, so it is not done here (follow-up: Redmine #559).
 fn coord_at(tick: u64, owner: &str, digest: Hash) -> Coordinate {
     ok(Coordinate::try_new(tick, 0, owner.to_owned(), 0, 7, digest))
 }
@@ -946,6 +946,29 @@ fn c9_reads_run_under_their_erasure_read_fence() {
 }
 
 #[test]
+fn c9_a_blocked_grandparent_fails_a_grandchild_prefix_read_closed() {
+    let mut fixture = fixture();
+    let (fork, root) = (fixture.fork, fixture.root);
+    let name = "dependency-grandchild";
+    let grandchild = ok(fixture.store.fork(fork, Seq::from_u64(1), name)).id();
+    let scope = prefix_scope(grandchild, 5);
+    assert_eq!(ok(collect_nodes(&fixture.store, scope, 2)), Vec::new());
+
+    // Only the grandparent is blocked: the fence of the grandchild's own
+    // read stays open, and its inherited scopes decide.
+    fixture.gate.block_timeline(root);
+
+    assert_eq!(
+        err(collect_nodes(&fixture.store, scope, 2)),
+        StoreError::StorageFailure
+    );
+    assert_eq!(
+        err(collect_edges(&fixture.store, scope, 2)),
+        StoreError::StorageFailure
+    );
+}
+
+#[test]
 fn c9_an_ungated_store_fails_closed() {
     let fixture = recorded();
     let (fork, root) = (fixture.fork, fixture.root);
@@ -1023,6 +1046,16 @@ fn c9_writes_require_a_visible_published_fork() {
             store.append_counterfactual_tick_with_dependencies(target, &basis, &drafts, &tick_18());
         assert_eq!(later, Err(StoreError::ForkNotFound));
     }
+    // The Fork resolves before the record is checked: a misplaced record
+    // (its Tick before the first Tick) is still a missing Fork.
+    let misplaced = empty_at(1);
+    let first = command(fork, 1, 0);
+    let commit = store.commit_counterfactual_invalidation_with_dependencies(&first, &misplaced);
+    assert_eq!(commit, Err(StoreError::ForkNotFound));
+    let drafts = tick_drafts(1);
+    let later =
+        store.append_counterfactual_tick_with_dependencies(fork, &basis, &drafts, &misplaced);
+    assert_eq!(later, Err(StoreError::ForkNotFound));
     assert_eq!(seqs(store, fork), vec![1]);
 }
 

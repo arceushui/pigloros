@@ -172,7 +172,7 @@ impl ForkDependencySetV1 {
         let previous = self.last_record_tick;
         let earliest = previous.map_or(first_tick, |recorded| recorded.checked_add(1));
         let fits = earliest.is_some_and(|floor| tick >= floor);
-        ensure(fits, StoreError::BindingMismatch)
+        require_that(fits, StoreError::BindingMismatch)
     }
 
     /// No node may reuse a recorded position key or artifact digest.
@@ -191,6 +191,7 @@ impl ForkDependencySetV1 {
             || self.rows.nodes.contains_key(&row.cursor())
     }
 
+    /// The record must fit the set's bounds on top of the stored counts.
     fn ensure_capacity(&self, record: &TickDependencyRecordV1) -> Result<(), StoreError> {
         record
             .ensure_set_capacity(self.counts)
@@ -242,8 +243,9 @@ impl CounterfactualForkStateV1 {
         self.dependencies = Some((generation, set));
     }
 
-    /// One page of the current generation's rows, or of `at` if it is not.
-    fn fork_page<T: DependencyPagedRowV1 + Clone>(
+    /// One page of the current generation's rows; a request for any other
+    /// generation is a mixed generation.
+    fn page_of_current<T: DependencyPagedRowV1 + Clone>(
         &self,
         request: &DependencyPageRequestV1,
         select: Select<T>,
@@ -258,12 +260,12 @@ impl CounterfactualForkStateV1 {
 
 /// The first record of an invalidation: provisional and at its first Tick.
 fn admit_first(first_tick: u64, record: &TickDependencyRecordV1) -> Result<(), StoreError> {
-    let tick_check = ensure(record.tick() == first_tick, StoreError::BindingMismatch);
+    let tick_check = require_that(record.tick() == first_tick, StoreError::BindingMismatch);
     record.ensure_provisional().and(tick_check)
 }
 
 /// `Ok` if `holds`, else `error`.
-fn ensure(holds: bool, error: StoreError) -> Result<(), StoreError> {
+fn require_that(holds: bool, error: StoreError) -> Result<(), StoreError> {
     holds.then_some(()).ok_or(error)
 }
 
@@ -290,12 +292,15 @@ fn revalidated<T: DependencyPagedRowV1 + Clone>(
     request: &DependencyPageRequestV1,
     page: &DependencyPageV1<T>,
 ) -> Result<DependencyPageV1<T>, StoreError> {
+    // Copying the page is bounded by the page cap, so it stays cheap.
     let items = page.items().to_vec();
     DependencyPageV1::try_new(request, items, page.next().cloned())
         .or(Err(CounterfactualDependencyErrorV1::READ_BACK_FAULT))
 }
 
 impl MemoryStore {
+    /// Check the first record of an invalidation against its command, once the
+    /// Fork resolves.
     fn admit_first_record(
         &self,
         command: &CounterfactualInvalidationCommandV1,
@@ -305,6 +310,8 @@ impl MemoryStore {
         state.and_then(|_| admit_first(command.first_tick(), record))
     }
 
+    /// Check a later record against the Fork's stored set, once the Fork
+    /// resolves.
     fn admit_later_record(
         &self,
         fork: TimelineId,
@@ -358,8 +365,8 @@ impl MemoryStore {
     }
 
     /// Admit the record, append the Tick, and record the rows only after it
-    /// installed. The caller rechecked the basis, so an `Ok` append is the
-    /// committed Tick.
+    /// installed. The caller just rechecked the basis, so `Stale` is
+    /// unreachable here and any `Ok` append is the committed Tick.
     fn admit_and_append(
         &mut self,
         fork: TimelineId,
@@ -374,10 +381,12 @@ impl MemoryStore {
         })
     }
 
+    /// The stored committed prefix rows of a parent Timeline, if any.
     fn prefix_rows(&self, parent: TimelineId) -> &DependencyRowsV1 {
         self.dependency_prefixes.get(&parent).unwrap_or(&NO_ROWS)
     }
 
+    /// One page of a parent Timeline's committed prefix rows.
     fn prefix_page<T: DependencyPagedRowV1 + Clone>(
         &self,
         parent: TimelineId,
@@ -387,6 +396,7 @@ impl MemoryStore {
         page_after(select(self.prefix_rows(parent)), request)
     }
 
+    /// One page of a Fork generation's rows, once the Fork resolves.
     fn fork_page<T: DependencyPagedRowV1 + Clone>(
         &self,
         at: ForkGenerationV1,
@@ -394,7 +404,7 @@ impl MemoryStore {
         select: Select<T>,
     ) -> Result<DependencyPageV1<T>, StoreError> {
         let state = self.counterfactual_fork(at.fork);
-        state.and_then(|persisted| persisted.fork_page(request, select))
+        state.and_then(|persisted| persisted.page_of_current(request, select))
     }
 
     fn read_prefix_page<T: DependencyPagedRowV1 + Clone>(
@@ -510,6 +520,8 @@ mod tests {
     const PROVISIONAL: RecordedNodeOriginV1 = RecordedNodeOriginV1::Provisional;
     const COMMITTED: RecordedNodeOriginV1 = RecordedNodeOriginV1::Committed;
 
+    // These builders mirror those of the public test and the `SQLite` adapter's
+    // tests; consolidating them is a follow-up: Redmine #559.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn coordinate(tick: u64, owner: &str, digest: u8) -> Coordinate {
         let digest = Hash::from_bytes([digest; 32]);
@@ -945,7 +957,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn c9_geographic_protected_timelines_are_not_found() {
+    fn c9_concealed_geographic_timelines_are_not_found() {
         let (mut store, fork) = recorded_store();
         let root = parent_of(&store, fork);
         let expected = ok(store.current_counterfactual_basis(fork));
