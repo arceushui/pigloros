@@ -16,7 +16,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Install pinned Rust for hosted-only dependency resolution
-        run: rustup toolchain install 1.97.1 --profile minimal
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustup component add --toolchain 1.97.1 rustfmt clippy
       - name: Resolve the candidate lockfile
         run: cargo +1.97.1 metadata --format-version 1 > /dev/null
       - name: Check formatting
