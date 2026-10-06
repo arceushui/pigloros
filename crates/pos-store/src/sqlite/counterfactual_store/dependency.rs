@@ -131,7 +131,7 @@ const GENERATION_CHECK: &str = "CHECK (generation = -1 OR generation >= 1)";
 /// schema constants are built at compile time, so a function body would never
 /// run and would show as uncovered code.
 macro_rules! key_column {
-    ($name:expr, $kind:expr) => {
+    ($name:literal, $kind:literal) => {
         SqliteSchemaColumn {
             name: $name,
             kind: $kind,
@@ -143,7 +143,7 @@ macro_rules! key_column {
 
 /// A non-key column of a schema constant (see `key_column`).
 macro_rules! data_column {
-    ($name:expr, $kind:expr) => {
+    ($name:literal, $kind:literal) => {
         SqliteSchemaColumn {
             name: $name,
             kind: $kind,
