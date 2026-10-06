@@ -275,8 +275,7 @@ fn compare_rosters(
     baseline: &ManifestPluginRosterV1,
     candidate: &ManifestPluginRosterV1,
 ) -> Outcome {
-    compare_manifest_plugin_rosters_v1(baseline, candidate)
-        .map(RosterEquivalenceV1::slot_count)
+    compare_manifest_plugin_rosters_v1(baseline, candidate).map(RosterEquivalenceV1::slot_count)
 }
 
 fn compare_runs(baseline: &Run, candidate: &Run) -> Result<Outcome, Box<dyn std::error::Error>> {
@@ -412,15 +411,27 @@ fn policy_cases() -> [(Field, &'static str, Edit); 15] {
         (Field::PolicyRevision, "policy revision", |run| {
             run.plugins[0].revision = 2;
         }),
-        (Field::ImplementationArtifact, "implementation artifact", |run| {
-            run.plugins[0].implementation = b"implementation-2".to_vec();
-        }),
-        (Field::ConfigurationArtifact, "base configuration artifact", |run| {
-            run.plugins[0].configuration = b"configuration-2".to_vec();
-        }),
-        (Field::ExecutionProfileArtifact, "execution-profile artifact", |run| {
-            run.plugins[0].profile = Vec::new();
-        }),
+        (
+            Field::ImplementationArtifact,
+            "implementation artifact",
+            |run| {
+                run.plugins[0].implementation = b"implementation-2".to_vec();
+            },
+        ),
+        (
+            Field::ConfigurationArtifact,
+            "base configuration artifact",
+            |run| {
+                run.plugins[0].configuration = b"configuration-2".to_vec();
+            },
+        ),
+        (
+            Field::ExecutionProfileArtifact,
+            "execution-profile artifact",
+            |run| {
+                run.plugins[0].profile = Vec::new();
+            },
+        ),
         (Field::RetentionPolicy, "retention policy", |run| {
             run.plugins[0].total_days = 400;
         }),
@@ -431,10 +442,18 @@ fn policy_cases() -> [(Field, &'static str, Edit); 15] {
         (Field::BudgetScalars, scalars, |run| {
             run.budget.max_event_bytes = 2048;
         }),
-        (Field::BudgetScalars, scalars, |run| run.budget.profile_hash = 8),
-        (Field::BudgetScalars, scalars, |run| run.budget.wall_us = 2_000),
-        (Field::FidelityBudgets, fidelities, |run| run.budget.events[0] = 101),
-        (Field::FidelityBudgets, fidelities, |run| run.budget.bytes[2] = 200_000),
+        (Field::BudgetScalars, scalars, |run| {
+            run.budget.profile_hash = 8
+        }),
+        (Field::BudgetScalars, scalars, |run| {
+            run.budget.wall_us = 2_000
+        }),
+        (Field::FidelityBudgets, fidelities, |run| {
+            run.budget.events[0] = 101
+        }),
+        (Field::FidelityBudgets, fidelities, |run| {
+            run.budget.bytes[2] = 200_000
+        }),
     ]
 }
 
@@ -589,12 +608,20 @@ fn closure_cases() -> [(Problem, DraftEdit); 8] {
     [
         (Problem::Empty, |draft| draft.raw = Some(Vec::new())),
         (Problem::Envelope, |draft| draft.raw = Some(SECRET.to_vec())),
-        (Problem::UndecodableEop1, |draft| draft.members[0] = SECRET.to_vec()),
+        (Problem::UndecodableEop1, |draft| {
+            draft.members[0] = SECRET.to_vec()
+        }),
         (Problem::ForeignEop1, |draft| draft.digest = hash(9)),
         (Problem::ForeignEop1, |draft| draft.id = 77),
-        (Problem::ForeignEop1, |draft| draft.version = "9.9.9".to_owned()),
-        (Problem::UndecodableBudget, |draft| draft.members[1] = SECRET.to_vec()),
-        (Problem::UndecodableRetention, |draft| draft.members[5] = SECRET.to_vec()),
+        (Problem::ForeignEop1, |draft| {
+            draft.version = "9.9.9".to_owned()
+        }),
+        (Problem::UndecodableBudget, |draft| {
+            draft.members[1] = SECRET.to_vec()
+        }),
+        (Problem::UndecodableRetention, |draft| {
+            draft.members[5] = SECRET.to_vec()
+        }),
     ]
 }
 
@@ -656,9 +683,18 @@ fn error_messages_say_what_to_change_without_ids_or_bytes() {
         (missing("alpha"), "register"),
         (unexpected("alpha"), "remove"),
         (mismatch("alpha", Field::Version), "rebuild both runs"),
-        (closure_error("alpha", Side::Baseline, Problem::ForeignEop1), "retain"),
-        (reservation("alpha", Some(Side::Candidate), Kind::UnboundOwner), "add the reserved"),
-        (reservation("alpha", None, Kind::TableDiffers), "rebuild both runs"),
+        (
+            closure_error("alpha", Side::Baseline, Problem::ForeignEop1),
+            "retain",
+        ),
+        (
+            reservation("alpha", Some(Side::Candidate), Kind::UnboundOwner),
+            "add the reserved",
+        ),
+        (
+            reservation("alpha", None, Kind::TableDiffers),
+            "rebuild both runs",
+        ),
     ];
     for (error, hint) in cases {
         let text = error.to_string();

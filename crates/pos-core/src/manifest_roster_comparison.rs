@@ -13,7 +13,7 @@
 //!
 //! 1. the set of stable slots (`MissingPlugin`, then `UnexpectedPlugin`);
 //! 2. each closure is present, framed, decodable and belongs to its entry
-//!    (`ClosureUnavailable`), baseline before candidate, in slot order;
+//!    (`ClosureUnavailable`), per slot in slot order, baseline then candidate;
 //! 3. per slot (`PolicyMismatch`): registered version, owned Event-type set
 //!    (derived from the EOP1 declarations), declarations, EOP1 revision,
 //!    implementation, configuration and execution-profile artifact bytes,
@@ -61,7 +61,7 @@
 //! println!("{error}");
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 use crate::executable_budget::{ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1};
@@ -355,7 +355,10 @@ const FIELD_CHECKS: [(ComparedFieldV1, FieldCheck); 10] = [
     (ComparedFieldV1::PolicyRevision, same_revision),
     (ComparedFieldV1::ImplementationArtifact, same_implementation),
     (ComparedFieldV1::ConfigurationArtifact, same_configuration),
-    (ComparedFieldV1::ExecutionProfileArtifact, same_profile_artifact),
+    (
+        ComparedFieldV1::ExecutionProfileArtifact,
+        same_profile_artifact,
+    ),
     (ComparedFieldV1::RetentionPolicy, same_retention),
     (ComparedFieldV1::BudgetScalars, same_budget_scalars),
     (ComparedFieldV1::FidelityBudgets, same_fidelity_budgets),
@@ -365,7 +368,7 @@ fn same_version(left: &Closure<'_>, right: &Closure<'_>) -> bool {
     left.policy.fields().plugin_version == right.policy.fields().plugin_version
 }
 
-fn event_types<'c>(closure: &'c Closure<'_>) -> Vec<&'c str> {
+fn event_types<'c>(closure: &'c Closure<'_>) -> BTreeSet<&'c str> {
     let declarations = &closure.policy.fields().output_declarations;
     declarations
         .iter()
@@ -462,6 +465,8 @@ fn decode_pairs<'a>(
     candidate: &'a ManifestPluginRosterV1,
 ) -> Result<Vec<Pair<'a>>, RosterComparisonErrorV1> {
     let mut pairs = Vec::new();
+    // Both rosters are strictly slot-sorted with unique slots, and the slot
+    // sets were just proven equal, so index pairing aligns every slot.
     for (left, right) in baseline.entries().iter().zip(candidate.entries()) {
         let slot = left.stable_slot();
         let before = Closure::decode(left, ComparisonSideV1::Baseline)?;
