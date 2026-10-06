@@ -147,7 +147,7 @@ fn roster() -> TestResult<ManifestPluginRosterV1> {
     ])?)
 }
 
-fn record(byte: u8, call_index: u64, wall: u64) -> AdapterRecord {
+const fn record(byte: u8, call_index: u64, wall: u64) -> AdapterRecord {
     AdapterRecord {
         plugin_id: plugin_id(byte),
         call_index,
