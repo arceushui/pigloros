@@ -1,11 +1,14 @@
 //! ADR-100 WKE1 key-evidence bytes and stable key identity.
 //!
 //! Structural decoding and content hashes do not prove a registry row or
-//! authorize use. The installed owner must compare these bytes with its
-//! immutable registration and live or tombstoned row under the release fence.
+//! authorize use. [`resolve_coordinator_key_evidence_v1`] compares the
+//! retained coordinator WKE1 of an LCQ1 or MSR1 with the registry's
+//! immutable live or tombstoned row; the owner commits and the historical
+//! owner-link verifier both call it.
 
 use crate::{
-    encode_bytes, encode_hash, encode_head, Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1, PublicKey,
+    encode_bytes, encode_hash, encode_head, Hash, KeyIdentityV1, KeyRegistryPortV1, KeyRoleV1,
+    OwnerIdV1, PublicKey,
 };
 
 /// Maximum preferred-CBOR size of one WKE1 record.
@@ -159,6 +162,70 @@ impl WorldKeyEvidenceV1 {
                     Ok(record)
                 }
             })
+    }
+}
+
+/// Closed reasons why retained coordinator key evidence names no signer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum CoordinatorKeyEvidenceErrorV1 {
+    /// The bytes are not one canonical WKE1 record with the receipt's address.
+    #[error("coordinator key evidence is not the receipt's exact WKE1 record")]
+    InvalidEvidence,
+    /// The WKE1 record is not the verify-only Timeline-integrity signing form.
+    #[error("coordinator key evidence has the wrong role or private-material use")]
+    WrongKeyUse,
+    /// No registry row has the WKE1 identity, material and public key.
+    #[error("coordinator key evidence does not match the key registry")]
+    UnregisteredKey,
+}
+
+/// Resolve retained LCQ1 or MSR1 coordinator WKE1 bytes against the registry.
+///
+/// The bytes must be one canonical WKE1 record whose digest is the receipt's
+/// `coordinator_key_evidence_hash`, in the ADR-100 historical-signature
+/// verifier form: `TimelineIntegritySigning`, no private material required,
+/// and a retained public verification key (a structurally valid signing WKE1
+/// always carries one). `keys` must then hold the exact identity's record with
+/// that public key, and its live material digest, or the tombstone's destroyed
+/// material digest once the key was destroyed, must equal the evidence's. A
+/// later rotated or tombstoned key therefore still resolves (ADR-065 §2).
+///
+/// This proves which registered key the evidence names; the installed hook
+/// still verifies the receipt signature itself.
+///
+/// # Errors
+/// Returns `InvalidEvidence` for undecodable bytes or another address,
+/// `WrongKeyUse` for another role or a private-material requirement, and
+/// `UnregisteredKey` when no matching registry row exists.
+pub fn resolve_coordinator_key_evidence_v1(
+    bytes: &[u8],
+    evidence_hash: Hash,
+    keys: &dyn KeyRegistryPortV1,
+) -> Result<WorldKeyEvidenceV1, CoordinatorKeyEvidenceErrorV1> {
+    let evidence = WorldKeyEvidenceV1::from_canonical_cbor(bytes)
+        .ok()
+        .filter(|evidence| evidence.digest() == evidence_hash)
+        .ok_or(CoordinatorKeyEvidenceErrorV1::InvalidEvidence)?;
+    let input = evidence.as_input();
+    if input.identity.role != KeyRoleV1::TimelineIntegritySigning
+        || input.private_material_required
+    {
+        return Err(CoordinatorKeyEvidenceErrorV1::WrongKeyUse);
+    }
+    let identity = input.identity;
+    let registered = keys.key_record(identity).is_some_and(|record| {
+        let material = record.private_material_digest.or_else(|| {
+            keys.tombstone(identity)
+                .map(|tombstone| tombstone.destroyed_material_digest)
+        });
+        record.identity == identity
+            && material == Some(input.private_material_digest)
+            && record.public_verification_key == input.public_verification_key
+    });
+    if registered {
+        Ok(evidence)
+    } else {
+        Err(CoordinatorKeyEvidenceErrorV1::UnregisteredKey)
     }
 }
 

@@ -288,11 +288,11 @@ pub use manifest_owner_link::{
 };
 pub use manifest_owner_link_verifier::{
     collect_manifest_owner_link_ancestors_v1, collect_manifest_owner_link_branches_v1,
-    verify_manifest_owner_link_v1, ManifestOwnerLinkAncestorV1, ManifestOwnerLinkAuthorityV1,
-    ManifestOwnerLinkCutIdentityV1, ManifestOwnerLinkDigestsV1, ManifestOwnerLinkHeadV1,
-    ManifestOwnerLinkReadPortV1, ManifestOwnerLinkReleaseV1, ManifestOwnerLinkRequestV1,
-    ManifestOwnerLinkSnapshotV1, ManifestOwnerLinkUseFenceV1, ManifestOwnerLinkVerificationErrorV1,
-    VerifiedManifestOwnerLinkV1,
+    collect_manifest_owner_link_key_evidence_v1, verify_manifest_owner_link_v1,
+    ManifestOwnerLinkAncestorV1, ManifestOwnerLinkAuthorityV1, ManifestOwnerLinkCutIdentityV1,
+    ManifestOwnerLinkDigestsV1, ManifestOwnerLinkHeadV1, ManifestOwnerLinkReadPortV1,
+    ManifestOwnerLinkReleaseV1, ManifestOwnerLinkRequestV1, ManifestOwnerLinkSnapshotV1,
+    ManifestOwnerLinkUseFenceV1, ManifestOwnerLinkVerificationErrorV1, VerifiedManifestOwnerLinkV1,
 };
 pub use manifest_owner_members::{
     build_manifest_owner_scope_v1, validate_manifest_owner_lease_replacement_v1,
@@ -625,8 +625,8 @@ pub use world_history::{
     MAX_WORLD_HISTORY_HEIGHT_V1,
 };
 pub use world_key_evidence::{
-    WorldKeyEvidenceErrorV1, WorldKeyEvidenceInputV1, WorldKeyEvidenceV1,
-    MAX_WORLD_KEY_EVIDENCE_BYTES_V1,
+    resolve_coordinator_key_evidence_v1, CoordinatorKeyEvidenceErrorV1, WorldKeyEvidenceErrorV1,
+    WorldKeyEvidenceInputV1, WorldKeyEvidenceV1, MAX_WORLD_KEY_EVIDENCE_BYTES_V1,
 };
 pub use world_recording_receipt::{
     WorldRecordingReceiptErrorV1, WorldRecordingReceiptInputV1, WorldRecordingReceiptV1,

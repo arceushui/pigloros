@@ -1276,6 +1276,10 @@ const MANIFEST_OWNER_ADMISSION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS ma
              REFERENCES manifest_owner_admissions(owner_id, configuration_generation, timeline_id),
          FOREIGN KEY (scope, kind, native_digest)
              REFERENCES manifest_owner_member_leaves(scope, kind, native_digest)
+     );
+     CREATE TABLE IF NOT EXISTS world_key_evidence (
+         evidence_hash BLOB PRIMARY KEY CHECK (length(evidence_hash) = 32),
+         evidence_bytes BLOB NOT NULL CHECK (length(evidence_bytes) <= 256)
      );";
 
 const SQLITE_MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1: u32 = 1_048_576;
@@ -6804,7 +6808,14 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
             }
             let configuration_generation = input.catalog.as_input().configuration_generation;
             sqlite_validate_manifest_owner_transition(input, current_state.as_ref())?;
-            sqlite_insert_manifest_owner_admission(&self.conn, input)?;
+            sqlite_insert_manifest_owner_admission(&self.conn, input).and_then(|()| {
+                sqlite_retain_coordinator_key_evidence(
+                    &self.conn,
+                    batch.coordinator_key_evidence(),
+                    ManifestOwnerAdmissionErrorV1::CorruptState,
+                    ManifestOwnerAdmissionErrorV1::StorageFailure,
+                )
+            })?;
             sqlite_write_manifest_owner_state(&self.conn, input)?;
             sqlite_sync_local_cut_owner_after_admission(&self.conn, input, current_state.as_ref())?;
             let receipt_hashes = input
@@ -13699,6 +13710,37 @@ impl AuthorityPersistencePortV1 for SqliteStore {
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
         read_authority_state(&self.conn).and_then(|state| state.resolve(leaf_grant_id))
     }
+}
+
+/// Resolve each coordinator WKE1 against this transaction's key registry,
+/// then retain its exact bytes by address; identical evidence is kept once.
+///
+/// A store without a registry holds no coordinator key. A registry row that
+/// cannot be read or decoded yields `corrupt`, and a failed insert `storage`.
+fn sqlite_retain_coordinator_key_evidence<'a, E>(
+    connection: &Connection,
+    evidence: impl IntoIterator<Item = (Hash, &'a [u8])>,
+    corrupt: E,
+    storage: E,
+) -> Result<(), E>
+where
+    E: From<pos_core::CoordinatorKeyEvidenceErrorV1> + Copy,
+{
+    let registry = sqlite_load_key_registry(connection)
+        .or(Err(corrupt))?
+        .unwrap_or_default();
+    for (evidence_hash, bytes) in evidence {
+        pos_core::resolve_coordinator_key_evidence_v1(bytes, evidence_hash, &registry)
+            .map_err(E::from)?;
+        connection
+            .execute(
+                "INSERT INTO world_key_evidence (evidence_hash, evidence_bytes) VALUES (?1, ?2)
+                 ON CONFLICT (evidence_hash) DO NOTHING",
+                params![evidence_hash.as_bytes().as_slice(), bytes],
+            )
+            .or(Err(storage))?;
+    }
+    Ok(())
 }
 
 fn sqlite_load_key_registry(conn: &Connection) -> Result<Option<KeyRegistryStateV1>, CoreError> {

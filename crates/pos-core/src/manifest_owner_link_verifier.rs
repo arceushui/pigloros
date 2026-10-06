@@ -8,14 +8,17 @@
 //! producer subset of MSB1 with equal EOP1, that WCB1's complete Required WDB1
 //! closure holds every admitted EOP1/OPC1 leaf, zero-output Plugins included,
 //! and that the kind-1 static pins match MCA1. Every signature is re-verified
-//! through the installed hooks. Only then does it recheck the inventory
+//! through the installed hooks, and the retained WKE1 coordinator key
+//! evidence of LCQ1 and every MSR1 is resolved natively against the installed
+//! key registry, so a coordinator key rotated or tombstoned after signing
+//! still verifies (ADR-065 §2). Only then does it recheck the inventory
 //! generation, retention lease, key owner and erasure fences, and release an
 //! identity-only capability through the trusted-clock handoff.
 //!
 //! ADR-081 Revision 2 closures carry unavailable reference leaves, so the
 //! capability never grants an Exact claim.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::local_cut_commit::{LocalCutCommitV1, LocalCutReceiptV1};
 use crate::local_cut_owner::{
@@ -41,7 +44,10 @@ use crate::trusted_clock::{
     TrustedWallSourceV1,
 };
 use crate::world_dependency_directory::WorldDependencyBranchV1;
-use crate::world_key_evidence::{WorldKeyEvidenceInputV1, WorldKeyEvidenceV1};
+use crate::world_key_evidence::{
+    resolve_coordinator_key_evidence_v1, CoordinatorKeyEvidenceErrorV1, WorldKeyEvidenceInputV1,
+    WorldKeyEvidenceV1,
+};
 use crate::{
     ArtifactRegistrationV1, ErasureContainmentGateV1, ErasureProtectedOperationV1,
     ErasureReferenceV1, Hash, KeyRegistryPortV1, KeyRoleV1, ManifestAdmissionCatalogRowV1,
@@ -153,6 +159,10 @@ pub struct ManifestOwnerLinkSnapshotV1 {
     /// dependency root, keyed by digest, as gathered by
     /// [`collect_manifest_owner_link_branches_v1`].
     pub dependency_branches: BTreeMap<Hash, WorldDependencyBranchV1>,
+    /// Retained exact WKE1 bytes of the LCQ1 and every MSR1 coordinator key
+    /// evidence address, keyed by that address, as gathered by
+    /// [`collect_manifest_owner_link_key_evidence_v1`].
+    pub key_evidence: BTreeMap<Hash, Vec<u8>>,
 }
 
 /// One earlier visible cut: its LCS2 seal, LCC1 commit and LCQ1 receipt.
@@ -271,6 +281,41 @@ pub fn collect_manifest_owner_link_branches_v1(
         }
     }
     Ok(nodes)
+}
+
+/// Gather the retained WKE1 bytes that one cut's receipts name.
+///
+/// `evidence` reads one retained `world_key_evidence` row by its address. The
+/// LCQ1 address and each admission's MSR1 address are read once each; an
+/// address without a retained row is left out, so the verifier rejects it.
+///
+/// # Errors
+/// Returns the first error that `evidence` returns.
+pub fn collect_manifest_owner_link_key_evidence_v1(
+    receipt: &LocalCutReceiptV1,
+    admissions: &[ManifestOwnerAdmissionSnapshotV1],
+    mut evidence: impl FnMut(Hash) -> Result<Option<Vec<u8>>, LocalCutOwnerErrorV1>,
+) -> Result<BTreeMap<Hash, Vec<u8>>, LocalCutOwnerErrorV1> {
+    let addresses: BTreeSet<Hash> = coordinator_evidence_hashes(receipt, admissions).collect();
+    let mut retained = BTreeMap::new();
+    for evidence_hash in addresses {
+        if let Some(bytes) = evidence(evidence_hash)? {
+            retained.insert(evidence_hash, bytes);
+        }
+    }
+    Ok(retained)
+}
+
+/// The LCQ1 coordinator key-evidence address, then each MSR1's, in row order.
+fn coordinator_evidence_hashes<'s>(
+    receipt: &LocalCutReceiptV1,
+    admissions: &'s [ManifestOwnerAdmissionSnapshotV1],
+) -> impl Iterator<Item = Hash> + use<'s> {
+    let lcq1 = receipt.as_input().coordinator_key_evidence_hash;
+    let msr1 = admissions
+        .iter()
+        .map(|admission| admission.timeline.receipt.as_input().coordinator_key_evidence_hash);
+    std::iter::once(lcq1).chain(msr1)
 }
 
 /// Same-store read port for the installed owner-link verifier.
@@ -453,7 +498,11 @@ pub fn test_verified_manifest_owner_link(
 /// The whole read runs inside the erasure gate's fence for `request`'s
 /// Timeline. The verifier requires the gate's installed inventory, reads one
 /// owner snapshot, proves the complete cut and admission chain, and
-/// re-verifies the LCQ1 and every MSR1 through `authority`. It then requires
+/// re-verifies the LCQ1 and every MSR1 through `authority`. It resolves the
+/// retained WKE1 bytes of each receipt's coordinator key evidence against
+/// `keys` with [`resolve_coordinator_key_evidence_v1`], so a coordinator key
+/// rotated or tombstoned since signing still verifies while its registry row
+/// keeps the exact material and public key. It then requires
 /// the owner's current inventory generation to equal the gate's, `expiries`
 /// to cover the selected scope's RLS1 retention deadline, every key
 /// dependency of the scope to name the owner's active live key, and the gate
@@ -465,7 +514,10 @@ pub fn test_verified_manifest_owner_link(
 /// # Errors
 /// Returns one closed [`ManifestOwnerLinkVerificationErrorV1`]; an
 /// unavailable snapshot is `CompositionUnavailable` and an unknown identity
-/// is `WrongCut`.
+/// is `WrongCut`. Coordinator key evidence that is not retained, does not
+/// decode to the receipt's address or is not the verify-only signing form is
+/// `CompositionUnavailable`; evidence that the registry does not hold is
+/// `ProtectedUseDenied`.
 pub fn verify_manifest_owner_link_v1<S: ManifestOwnerLinkReadPortV1 + ?Sized>(
     store: &S,
     request: &ManifestOwnerLinkRequestV1,
@@ -526,6 +578,7 @@ fn verify_and_release<S: ManifestOwnerLinkReadPortV1 + ?Sized>(
     let generation = erasure_gate.inventory_generation().map_err(|_| denied)?;
     let snapshot = read_snapshot(store, request)?;
     let selected = verify_snapshot(request, &snapshot, authority)?;
+    verify_coordinator_key_evidence(&snapshot, keys)?;
     let admission = selected.admission;
     let fresh = is_fresh_use(request, &snapshot, admission, generation, expiries)
         && keys_are_live(request, admission, keys);
@@ -957,6 +1010,39 @@ fn authenticate_receipts(
     }
 }
 
+/// Resolve the retained WKE1 of the LCQ1 and every MSR1 against `keys`.
+fn verify_coordinator_key_evidence(
+    snapshot: &ManifestOwnerLinkSnapshotV1,
+    keys: &dyn KeyRegistryPortV1,
+) -> Result<(), ManifestOwnerLinkVerificationErrorV1> {
+    let mut addresses = coordinator_evidence_hashes(&snapshot.result.receipt, &snapshot.admissions);
+    addresses.try_for_each(|evidence_hash| {
+        let bytes = snapshot
+            .key_evidence
+            .get(&evidence_hash)
+            .ok_or(ManifestOwnerLinkVerificationErrorV1::CompositionUnavailable)?;
+        resolve_coordinator_key_evidence_v1(bytes, evidence_hash, keys)
+            .map(drop)
+            .map_err(key_evidence_error)
+    })
+}
+
+/// Unusable retained evidence leaves the admission unavailable; evidence that
+/// the installed registry does not hold denies protected use.
+const fn key_evidence_error(
+    error: CoordinatorKeyEvidenceErrorV1,
+) -> ManifestOwnerLinkVerificationErrorV1 {
+    match error {
+        CoordinatorKeyEvidenceErrorV1::InvalidEvidence
+        | CoordinatorKeyEvidenceErrorV1::WrongKeyUse => {
+            ManifestOwnerLinkVerificationErrorV1::CompositionUnavailable
+        }
+        CoordinatorKeyEvidenceErrorV1::UnregisteredKey => {
+            ManifestOwnerLinkVerificationErrorV1::ProtectedUseDenied
+        }
+    }
+}
+
 /// Whether the owner's current inventory equals the gate's and `expiries`
 /// cover the selected scope's recorded RLS1 retention deadline.
 fn is_fresh_use(
@@ -980,8 +1066,10 @@ fn is_fresh_use(
 /// Whether every key dependency of the selected scope names the owner's
 /// active, undestroyed key of its role.
 ///
-/// Only the active epoch resolves: an older retained epoch needs native WKE1
-/// evidence, which this verifier does not read.
+/// Only the active epoch resolves. A leaf names its key only by identity
+/// digest, and the registry port cannot enumerate an owner's sparse role
+/// epochs, so an older epoch has no bounded lookup here; coordinator receipts
+/// instead resolve their retained WKE1 bytes directly.
 fn keys_are_live(
     request: &ManifestOwnerLinkRequestV1,
     admission: &ManifestOwnerAdmissionSnapshotV1,

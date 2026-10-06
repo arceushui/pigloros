@@ -9,14 +9,14 @@ use std::collections::BTreeMap;
 
 use pos_core::{
     collect_manifest_owner_link_ancestors_v1, collect_manifest_owner_link_branches_v1,
-    local_cut_owner_intent_digest_v1, validate_local_cut_owner_predecessors_v1,
-    validate_local_cut_owner_recordings_v1, validate_local_cut_owner_result_v1,
-    validate_local_cut_owner_successor_v1, CanonicalBytes, CoreError, Hash, LocalCutCommitV1,
-    LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1, LocalCutManifestBindingTableV1,
-    LocalCutOwnerCommitKindV1, LocalCutOwnerCommitV1, LocalCutOwnerErrorV1,
-    LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1, LocalCutOwnerStateV1,
-    LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1, LocalCutSealV2,
-    LocalCutTableRefV1, LocalCutWorldRecordingV1, ManifestOwnerAdmissionErrorV1,
+    collect_manifest_owner_link_key_evidence_v1, local_cut_owner_intent_digest_v1,
+    validate_local_cut_owner_predecessors_v1, validate_local_cut_owner_recordings_v1,
+    validate_local_cut_owner_result_v1, validate_local_cut_owner_successor_v1, CanonicalBytes,
+    CoreError, Hash, LocalCutCommitV1, LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1,
+    LocalCutManifestBindingTableV1, LocalCutOwnerCommitKindV1, LocalCutOwnerCommitV1,
+    LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1,
+    LocalCutOwnerStateV1, LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1,
+    LocalCutSealV2, LocalCutTableRefV1, LocalCutWorldRecordingV1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionInputV1, ManifestOwnerAdmissionOwnerStateV1,
     ManifestOwnerAdmissionPersistencePortV1, ManifestOwnerLinkAncestorV1,
     ManifestOwnerLinkCutIdentityV1, ManifestOwnerLinkReadPortV1, ManifestOwnerLinkSnapshotV1,
@@ -27,8 +27,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::{
     begin_immediate_scope, finish_owner_scope, sqlite_manifest_owner_has_rows,
-    sqlite_read_manifest_owner_current_state, SqliteManifestOwnerAdmissionGenerationV1,
-    SqliteStore,
+    sqlite_read_manifest_owner_current_state, sqlite_retain_coordinator_key_evidence,
+    SqliteManifestOwnerAdmissionGenerationV1, SqliteStore,
 };
 
 pub(super) const LOCAL_CUT_OWNER_SCHEMA_SQL: &str =
@@ -1066,7 +1066,17 @@ fn sqlite_insert_local_cut_owner_cut(
             ],
         )
         .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)?;
-    sqlite_insert_local_cut_world_recordings(connection, batch).map(|()| result)
+    let evidence = [batch.coordinator_key_evidence()];
+    sqlite_insert_local_cut_world_recordings(connection, batch)
+        .and_then(|()| {
+            sqlite_retain_coordinator_key_evidence(
+                connection,
+                evidence,
+                LocalCutOwnerErrorV1::CorruptState,
+                LocalCutOwnerErrorV1::StorageFailure,
+            )
+        })
+        .map(|()| result)
 }
 
 fn sqlite_write_local_cut_owner_state(
@@ -1362,6 +1372,21 @@ fn sqlite_owner_link_branch(
         .transpose()
 }
 
+/// Read one retained coordinator WKE1 record by its address, if it is retained.
+fn sqlite_owner_link_key_evidence(
+    connection: &Connection,
+    evidence_hash: Hash,
+) -> Result<Option<Vec<u8>>, LocalCutOwnerErrorV1> {
+    connection
+        .query_row(
+            "SELECT evidence_bytes FROM world_key_evidence WHERE evidence_hash = ?1",
+            params![evidence_hash.as_bytes().as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_local_cut_query_error(&error))
+}
+
 /// Read one selected cut, its kind-14 admissions, the earlier cuts its
 /// ancestry walk needs and its Timeline's WDB1 nodes inside the caller's
 /// read transaction.
@@ -1429,14 +1454,20 @@ fn sqlite_owner_link_snapshot(
         })?;
         dependency_branches.extend(nodes);
     }
-    Ok(Some(ManifestOwnerLinkSnapshotV1 {
-        owner_state,
-        request: cut.request,
-        result: cut.result,
-        ancestors,
-        admissions,
-        dependency_branches,
-    }))
+    let receipt = &cut.result.receipt;
+    let retained = |digest: Hash| sqlite_owner_link_key_evidence(connection, digest);
+    let key_evidence = collect_manifest_owner_link_key_evidence_v1(receipt, &admissions, retained);
+    key_evidence.map(|key_evidence| {
+        Some(ManifestOwnerLinkSnapshotV1 {
+            owner_state,
+            request: cut.request,
+            result: cut.result,
+            ancestors,
+            admissions,
+            dependency_branches,
+            key_evidence,
+        })
+    })
 }
 
 impl ManifestOwnerLinkReadPortV1 for SqliteStore {

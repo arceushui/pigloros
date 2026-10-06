@@ -14,7 +14,8 @@ use std::{
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
     close_adapter_recording_v1, collect_manifest_owner_link_ancestors_v1,
-    collect_manifest_owner_link_branches_v1, completed_adapter_call_v1,
+    collect_manifest_owner_link_branches_v1, collect_manifest_owner_link_key_evidence_v1,
+    completed_adapter_call_v1,
     crypto::Hash,
     error::CoreError,
     event::{Event, EventDraft, EventOriginV1, Kind},
@@ -328,6 +329,9 @@ pub struct MemoryStore {
     local_cut_world_latest_bindings: BTreeMap<([u8; 32], TimelineId), Hash>,
     /// Packed WDB1 dependency nodes by `(scope, node digest)`.
     world_dependency_branches: BTreeMap<(Hash, Hash), pos_core::WorldDependencyBranchV1>,
+    /// Exact retained coordinator WKE1 bytes of every committed LCQ1 and MSR1,
+    /// content addressed by their evidence digest.
+    world_key_evidence: BTreeMap<Hash, Vec<u8>>,
     /// Crash-recoverable local adapter recorder sessions by owner/run ID.
     adapter_recording_sessions: BTreeMap<(Hash, Hash), MemoryAdapterRecordingSessionV1>,
     /// Canonical ERS1 history needed to validate predecessor links after restart.
@@ -748,6 +752,7 @@ impl MemoryStore {
             local_cut_world_binding_digests: BTreeMap::new(),
             local_cut_world_latest_bindings: BTreeMap::new(),
             world_dependency_branches: BTreeMap::new(),
+            world_key_evidence: BTreeMap::new(),
             adapter_recording_sessions: BTreeMap::new(),
             erasure_states: BTreeMap::new(),
             erasure_attempt_pages: BTreeMap::new(),
@@ -11394,6 +11399,25 @@ fn memory_insert_manifest_owner_member_leaves(
     }
 }
 
+/// Resolve each coordinator WKE1 against the store's key registry and return
+/// the exact bytes to retain by address; a store without a registry holds no
+/// coordinator key.
+fn memory_resolved_key_evidence<'a, E: From<pos_core::CoordinatorKeyEvidenceErrorV1>>(
+    store: &MemoryStore,
+    evidence: impl IntoIterator<Item = (Hash, &'a [u8])>,
+) -> Result<Vec<(Hash, Vec<u8>)>, E> {
+    let empty = KeyRegistryStateV1::new();
+    let registry = store.key_registry.as_ref().unwrap_or(&empty);
+    evidence
+        .into_iter()
+        .map(|(evidence_hash, bytes)| {
+            pos_core::resolve_coordinator_key_evidence_v1(bytes, evidence_hash, registry)
+                .map(|_| (evidence_hash, bytes.to_vec()))
+                .map_err(E::from)
+        })
+        .collect()
+}
+
 impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
     fn read_manifest_owner_state_v1(
         &self,
@@ -11502,7 +11526,8 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
         }
 
         let configuration_generation = input.catalog.as_input().configuration_generation;
-        memory_validate_manifest_owner_successor(self, input)?;
+        let key_evidence = memory_validate_manifest_owner_successor(self, input)
+            .and_then(|()| memory_resolved_key_evidence(self, batch.coordinator_key_evidence()))?;
 
         let result = ManifestOwnerAdmissionCommitV1 {
             kind: ManifestOwnerAdmissionCommitKindV1::Applied,
@@ -11553,6 +11578,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for MemoryStore {
                 .insert(key, snapshot);
         }
         memory_insert_manifest_owner_member_leaves(self, input);
+        self.world_key_evidence.extend(key_evidence);
         self.manifest_owner_admission_states
             .insert(owner_id, next_state);
         if let Some(next_local_cut_owner_state) = next_local_cut_owner_state {
@@ -11923,7 +11949,10 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         let admission = self
             .read_manifest_owner_state_v1(owner_id)?
             .ok_or(LocalCutOwnerErrorV1::Conflict)?;
-        validate_memory_local_cut_successor(self, &batch, &admission, current_state.as_ref())?;
+        let evidence = [batch.coordinator_key_evidence()];
+        let key_evidence =
+            validate_memory_local_cut_successor(self, &batch, &admission, current_state.as_ref())
+                .and_then(|()| memory_resolved_key_evidence(self, evidence))?;
         let request = batch.request();
         let successor = batch.successor_state();
         // The owner-state read bounds every retained cut by the last visible cut,
@@ -11950,6 +11979,7 @@ impl LocalCutOwnerPersistencePortV1 for MemoryStore {
         self.manifest_owner_admission_states
             .insert(owner_id, next_admission_state);
         self.record_local_cut_world_closures(&batch);
+        self.world_key_evidence.extend(key_evidence);
         Ok(result)
     }
 
@@ -12077,13 +12107,17 @@ fn memory_owner_link_snapshot(
         })?;
         dependency_branches.extend(nodes);
     }
-    Ok(ManifestOwnerLinkSnapshotV1 {
+    let receipt = &operation.result.receipt;
+    let retained = |digest: Hash| Ok(store.world_key_evidence.get(&digest).cloned());
+    let key_evidence = collect_manifest_owner_link_key_evidence_v1(receipt, &admissions, retained);
+    key_evidence.map(|key_evidence| ManifestOwnerLinkSnapshotV1 {
         owner_state: target.owner_state,
         request: operation.request.clone(),
         result: operation.result.clone(),
         ancestors,
         admissions,
         dependency_branches,
+        key_evidence,
     })
 }
 
