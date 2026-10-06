@@ -9,17 +9,22 @@ use std::{
 };
 
 use pos_core::{
-    recipient_owner_id_from_grantee, EntityId, EventStore, KeyDestructionRequestV1, KeyIdentityV1,
-    KeyRegistrationV1, KeyRegistryErrorV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1,
-    RecipientKeyDescriptorV1,
+    export_timeline_own, recipient_owner_id_from_grantee, ConsentAuthority, ConsentError,
+    ConsentGate, EntityId, ErasureArtifactClassV1, ErasureProtectedOperationV1, EventStore,
+    KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryErrorV1,
+    KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, RecipientKeyDescriptorV1, Seq, TimelineExport,
+    TimelineId,
 };
 use pos_crypto::key_roles::key_material_digest;
 use pos_crypto::recipient_export::{
-    decrypt_timeline_export_v1, DecryptedTimelineExportV1, RecipientExportErrorV1,
-    RecipientTimelineExportV1,
+    decrypt_timeline_export_v1, encrypt_timeline_export_v1, DecryptedTimelineExportV1,
+    RecipientExportErrorV1, RecipientTimelineExportV1,
 };
 use pos_crypto::recipient_key::recipient_public_key_from_private_v1;
-use rand::{rngs::SysRng, TryRng};
+use rand::{
+    rngs::{StdRng, SysRng},
+    SeedableRng, TryRng,
+};
 use rusqlite::{Connection, OptionalExtension};
 use rustix::fs::{
     fsync, openat2, renameat_with, statat, unlinkat, AtFlags, Mode, OFlags, RenameFlags,
@@ -28,9 +33,13 @@ use rustix::fs::{
 use zeroize::Zeroizing;
 
 use super::{
-    begin_immediate_sql, finish_immediate_transaction, sqlite_load_key_registry, CoreError,
-    RecipientExportDecryptionErrorV1, SqliteRollbackOnDrop, SqliteStore,
+    begin_immediate_sql, finish_immediate_transaction, finish_transaction, parse_timeline_id,
+    sqlite_load_key_registry, CoreError, PublishedRecipientExportV1,
+    RecipientExportDecryptionErrorV1, RecipientExportPublicationErrorV1, RecipientExportRequestV1,
+    SqliteRollbackOnDrop, SqliteStore,
 };
+#[cfg(feature = "test-support")]
+use super::{RecipientExportPublicationTestArtifactsV1, RecipientExportPublicationTestFaultV1};
 
 const RECIPIENT_REGISTRY_UNAVAILABLE: RecipientExportDecryptionErrorV1 =
     RecipientExportDecryptionErrorV1::Registry(KeyRegistryErrorV1::RegistryUnavailable);
@@ -38,6 +47,48 @@ const RECIPIENT_REGISTRY_UNAVAILABLE: RecipientExportDecryptionErrorV1 =
 /// whose record carries no digest. The port rejects both before comparing
 /// fingerprints. A pending record keeps its digest, so it never reaches this.
 const ABSENT_MATERIAL_DIGEST: pos_core::Hash = pos_core::Hash::from_bytes([0; 32]);
+
+struct RecipientExportPlaintextStagingV1 {
+    source: TimelineExport,
+    scrubbed: bool,
+}
+
+impl RecipientExportPlaintextStagingV1 {
+    fn new(source: TimelineExport) -> Result<Self, CoreError> {
+        if !source.plaintext_staging_is_exclusively_owned() {
+            return Err(CoreError::Storage(
+                "recipient export plaintext staging has shared payload buffers".to_owned(),
+            ));
+        }
+        Ok(Self {
+            source,
+            scrubbed: false,
+        })
+    }
+
+    const fn source(&self) -> &TimelineExport {
+        &self.source
+    }
+
+    fn zeroize(&mut self) -> Result<(), CoreError> {
+        if self.scrubbed || self.source.zeroize_plaintext_staging() {
+            self.scrubbed = true;
+            Ok(())
+        } else {
+            Err(CoreError::Storage(
+                "recipient export plaintext staging lost exclusive ownership".to_owned(),
+            ))
+        }
+    }
+}
+
+impl Drop for RecipientExportPlaintextStagingV1 {
+    fn drop(&mut self) {
+        if !self.scrubbed {
+            let _ = self.source.zeroize_plaintext_staging();
+        }
+    }
+}
 
 /// Require the envelope to name the expected export and the owner's recipient.
 fn check_envelope_identity(
@@ -98,6 +149,9 @@ thread_local! {
     static RECIPIENT_RANDOM_FAILURE: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    static RECIPIENT_RANDOM_OVERRIDE: std::cell::RefCell<Option<Vec<u8>>> = const {
+        std::cell::RefCell::new(None)
+    };
     static RECIPIENT_READ_FAILURE: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
@@ -116,6 +170,140 @@ thread_local! {
     static RECIPIENT_OPEN_REPLACEMENT: std::cell::RefCell<Option<(PathBuf, PathBuf)>> = const {
         std::cell::RefCell::new(None)
     };
+    static RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE: std::cell::Cell<Option<i64>> = const {
+        std::cell::Cell::new(None)
+    };
+    static RECIPIENT_DURABILITY_SYNCHRONOUS_READ_FAILURE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    static RECIPIENT_EXPORT_PUBLICATION_TEST_FAULT: std::cell::Cell<
+        Option<RecipientExportPublicationTestFaultV1>,
+    > = const { std::cell::Cell::new(None) };
+    static RECIPIENT_EXPORT_PUBLICATION_TEST_NAMED_PLAINTEXT_OBSERVED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_HOOK_INSTALLED: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static RECIPIENT_EXPORT_PUBLICATION_TEST_EXPORT_ID: std::cell::Cell<Option<[u8; 16]>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(feature = "test-support")]
+struct RecipientExportPublicationTestFencePause {
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(feature = "test-support")]
+static RECIPIENT_EXPORT_PUBLICATION_TEST_FENCE_PAUSES: std::sync::Mutex<
+    Vec<(TimelineId, RecipientExportPublicationTestFencePause)>,
+> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(feature = "test-support")]
+struct RecipientExportPublicationTestFaultGuard;
+
+#[cfg(feature = "test-support")]
+impl Drop for RecipientExportPublicationTestFaultGuard {
+    fn drop(&mut self) {
+        RECIPIENT_EXPORT_PUBLICATION_TEST_FAULT.with(|fault| fault.set(None));
+        RECIPIENT_EXPORT_PUBLICATION_TEST_EXPORT_ID.with(|export_id| export_id.set(None));
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn pause_recipient_export_publication_after_fences(timeline: TimelineId) -> Result<(), CoreError> {
+    RECIPIENT_EXPORT_PUBLICATION_TEST_FENCE_PAUSES
+        .lock()
+        .map_err(|_| CoreError::Storage("recipient export test pause is unavailable".to_owned()))
+        .map(|mut pauses| {
+            pauses
+                .iter()
+                .position(|(configured, _)| *configured == timeline)
+                .map(|index| pauses.swap_remove(index).1)
+        })
+        .and_then(|pause| {
+            pause.map_or(Ok(()), |pause| {
+                pause
+                    .entered
+                    .send(())
+                    .map_err(|_| {
+                        CoreError::Storage(
+                            "recipient export test pause observer is unavailable".to_owned(),
+                        )
+                    })
+                    .and_then(|()| {
+                        pause.release.recv().map_err(|_| {
+                            CoreError::Storage(
+                                "recipient export test pause release is unavailable".to_owned(),
+                            )
+                        })
+                    })
+            })
+        })
+}
+
+#[cfg(feature = "test-support")]
+fn take_recipient_export_publication_test_fault(
+    expected: RecipientExportPublicationTestFaultV1,
+) -> bool {
+    RECIPIENT_EXPORT_PUBLICATION_TEST_FAULT.with(|fault| {
+        if fault.get() == Some(expected) {
+            fault.set(None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(feature = "test-support")]
+fn recipient_export_publication_test_sync_fault(
+    fault: RecipientExportPublicationTestFaultV1,
+) -> Result<(), CoreError> {
+    if take_recipient_export_publication_test_fault(fault) {
+        Err(CoreError::Storage(
+            "injected recipient export sync failure".to_owned(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn install_recipient_export_publication_test_commit_abort(
+    connection: &Connection,
+) -> Result<(), CoreError> {
+    if !take_recipient_export_publication_test_fault(
+        RecipientExportPublicationTestFaultV1::CatalogCommit,
+    ) {
+        return Ok(());
+    }
+    let abort_once = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let callback_abort_once = std::sync::Arc::clone(&abort_once);
+    connection
+        .commit_hook(Some(move || {
+            callback_abort_once.swap(false, std::sync::atomic::Ordering::AcqRel)
+        }))
+        .map_err(storage_error)?;
+    RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_HOOK_INSTALLED.with(|installed| installed.set(true));
+    Ok(())
+}
+
+#[cfg(feature = "test-support")]
+fn clear_recipient_export_publication_test_commit_hook(
+    connection: &Connection,
+) -> Result<(), CoreError> {
+    let installed = RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_HOOK_INSTALLED
+        .with(|installed| installed.replace(false));
+    if installed {
+        connection
+            .commit_hook::<fn() -> bool>(None)
+            .map_err(storage_error)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -145,6 +333,16 @@ fn recipient_fsync(fd: impl rustix::fd::AsFd) -> Result<(), rustix::io::Errno> {
 fn recipient_random_bytes(bytes: &mut [u8]) -> std::io::Result<()> {
     if RECIPIENT_RANDOM_FAILURE.with(std::cell::Cell::get) {
         Err(std::io::Error::other("injected recipient RNG failure"))
+    } else if let Some(override_bytes) =
+        RECIPIENT_RANDOM_OVERRIDE.with(|override_bytes| override_bytes.borrow_mut().take())
+    {
+        if override_bytes.len() != bytes.len() {
+            return Err(std::io::Error::other(
+                "injected recipient RNG length mismatch",
+            ));
+        }
+        bytes.copy_from_slice(&override_bytes);
+        Ok(())
     } else {
         SysRng
             .try_fill_bytes(bytes)
@@ -193,6 +391,14 @@ fn recipient_read_exact(file: &mut File, bytes: &mut [u8]) -> std::io::Result<()
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn recipient_write_all(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(feature = "test-support")]
+    if take_recipient_export_publication_test_fault(
+        RecipientExportPublicationTestFaultV1::StagingWrite,
+    ) {
+        return Err(std::io::Error::other(
+            "injected recipient export staging write failure",
+        ));
+    }
     if RECIPIENT_WRITE_FAILURE.with(std::cell::Cell::get) {
         Err(std::io::Error::other("injected recipient write failure"))
     } else {
@@ -202,6 +408,14 @@ fn recipient_write_all(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(not(test))]
 fn recipient_write_all(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(feature = "test-support")]
+    if take_recipient_export_publication_test_fault(
+        RecipientExportPublicationTestFaultV1::StagingWrite,
+    ) {
+        return Err(std::io::Error::other(
+            "injected recipient export staging write failure",
+        ));
+    }
     file.write_all(bytes)
 }
 
@@ -755,6 +969,490 @@ impl SqliteStore {
             })
     }
 
+    /// Publish one consent-authorized Timeline snapshot as a durable TRX1 object.
+    ///
+    /// The concrete [`ConsentAuthority`] lock is held first, followed by the
+    /// erasure export fence, the `SQLite` writer reservation, and then the
+    /// active role-4 registry authorization. The ciphertext is staged and
+    /// synced in the owner-bound private directory before a catalog row makes
+    /// it visible to readers.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed consent, erasure, registry, crypto, or storage error.
+    /// A failed publication does not add a catalog row. Its non-serving
+    /// pending record lets a later recovery call remove only the exact
+    /// interrupted object names.
+    pub fn publish_recipient_export(
+        &mut self,
+        authority: &ConsentAuthority,
+        owner: &RecipientKeyOwnerV1,
+        request: &RecipientExportRequestV1<'_>,
+    ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
+        #[cfg(feature = "test-support")]
+        let _test_fault_guard = RecipientExportPublicationTestFaultGuard;
+        if self.consent_authority_permit != Some(authority.append_permit()) {
+            return Err(RecipientExportPublicationErrorV1::Consent(
+                ConsentError::NoConsent,
+            ));
+        }
+        if request.token.timeline_id() != request.timeline_id {
+            return Err(RecipientExportPublicationErrorV1::Consent(
+                ConsentError::NoConsent,
+            ));
+        }
+        if !request.token.export_permitted() {
+            return Err(RecipientExportPublicationErrorV1::Consent(
+                ConsentError::ExportNotPermitted,
+            ));
+        }
+        if request.token.grantee_id() != owner.grantee_id
+            || !request.recipient.is_for_grantee(owner.grantee_id)
+        {
+            return Err(RecipientExportPublicationErrorV1::RecipientMismatch);
+        }
+        request
+            .evaluation
+            .require_authoritative_use(ErasureArtifactClassV1::Export, request.artifact_digest)
+            .map_err(|_| RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+
+        // This is metadata only. The held writer reservation below rechecks
+        // it before reading source events, and the concrete consent fence
+        // validates the token at this exact expected logical head.
+        let expected_logical_head =
+            Self::logical_head_unchecked_on(&self.conn, request.timeline_id)?;
+        let gate = self.validated_erasure_gate()?;
+        #[cfg(feature = "test-support")]
+        self.apply_recipient_export_publication_test_race(request.timeline_id)?;
+        // SQLite disallows changing this connection-local setting inside a
+        // transaction, so establish the ADR-098 durability floor before the
+        // writer reservation is taken.
+        let previous_synchronous = ensure_recipient_export_durability(&self.conn)?;
+        let mut result = Err(RecipientExportPublicationErrorV1::Store(
+            CoreError::Storage("recipient export consent fence did not execute".to_owned()),
+        ));
+        let mut under_consent_fence = || {
+            result = gate
+                .with_fence_value(
+                    request.timeline_id,
+                    ErasureProtectedOperationV1::Export,
+                    || {
+                        self.publish_recipient_export_under_fences(
+                            owner,
+                            request,
+                            expected_logical_head,
+                        )
+                    },
+                )
+                .map_err(pos_core::store::erasure_containment_error)
+                .map_err(RecipientExportPublicationErrorV1::Store)
+                .and_then(|publication| publication);
+        };
+        let result = ConsentGate::with_token_fence(
+            authority,
+            request.timeline_id,
+            request.token,
+            expected_logical_head.as_u64(),
+            request.now_secs,
+            &mut under_consent_fence,
+        )
+        .map_err(RecipientExportPublicationErrorV1::Consent)
+        .and(result);
+        finish_recipient_export_durability(&self.conn, previous_synchronous, result)
+    }
+
+    #[cfg(feature = "test-support")]
+    fn apply_recipient_export_publication_test_race(
+        &mut self,
+        timeline: TimelineId,
+    ) -> Result<(), CoreError> {
+        if take_recipient_export_publication_test_fault(
+            RecipientExportPublicationTestFaultV1::SourceHeadChanged,
+        ) {
+            self.append(
+                timeline,
+                &[pos_core::EventDraft::new(
+                    EntityId::new(),
+                    pos_core::Kind::new("recipient.export.test-source-change.v1"),
+                    pos_core::CanonicalBytes::from_static(b"recipient-export-test-source-change"),
+                )],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn publish_recipient_export_under_fences(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+        request: &RecipientExportRequestV1<'_>,
+        expected_logical_head: Seq,
+    ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
+        #[cfg(feature = "test-support")]
+        pause_recipient_export_publication_after_fences(request.timeline_id)?;
+        self.recover_recipient_exports_under_writer(owner)?;
+        let export_id = self.reserve_recipient_export_id(owner)?;
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(storage_error)?;
+        let pre_authorization = (|| {
+            validate_owner_directory(owner)?;
+            ensure_recipient_custody_tables(&self.conn)?;
+            claim_recipient_custody_directory(&self.conn, owner)?;
+            ensure_recipient_export_catalog(&self.conn)?;
+            if !recipient_export_pending_belongs_to(&self.conn, owner, export_id)? {
+                return Err(RecipientExportPublicationErrorV1::Store(
+                    CoreError::Storage("recipient export reservation is unavailable".to_owned()),
+                ));
+            }
+
+            let logical_head = Self::logical_head_unchecked_on(&self.conn, request.timeline_id)?;
+            if logical_head != expected_logical_head {
+                return Err(RecipientExportPublicationErrorV1::SourceChanged);
+            }
+            if Self::timeline_owner_in_transaction(&self.conn, request.timeline_id)?
+                != Some(request.token.subject_id())
+            {
+                return Err(RecipientExportPublicationErrorV1::Consent(
+                    ConsentError::NoConsent,
+                ));
+            }
+
+            let registry =
+                self.load_key_registry()?
+                    .ok_or(RecipientExportPublicationErrorV1::Registry(
+                        KeyRegistryErrorV1::RegistryUnavailable,
+                    ))?;
+            let identity = request.recipient.identity();
+            let registered_digest =
+                registered_material_digest_or_absent_sentinel(&registry, identity);
+            Ok((registry, identity, registered_digest, logical_head))
+        })();
+        let (mut registry, identity, registered_digest, logical_head) = match pre_authorization {
+            Ok(value) => value,
+            Err(error) => return finish_recipient_export_transaction(&self.conn, Err(error)),
+        };
+        let result =
+            match registry.with_encryption_authorization(identity, registered_digest, || {
+                // The registry authorization includes the commit itself. The
+                // SQLite writer reservation prevents a concurrent rotation or
+                // destruction from changing the active role-4 identity between
+                // this check and the catalog visibility marker.
+                let result = self.publish_recipient_export_with_registered_material(
+                    owner,
+                    request,
+                    registered_digest,
+                    export_id,
+                    logical_head,
+                );
+                finish_recipient_export_transaction(&self.conn, result)
+            }) {
+                Ok(publication) => publication,
+                Err(error) => finish_recipient_export_transaction(
+                    &self.conn,
+                    Err(RecipientExportPublicationErrorV1::Registry(error)),
+                ),
+            };
+        #[cfg(feature = "test-support")]
+        clear_recipient_export_publication_test_commit_hook(&self.conn)?;
+        result
+    }
+
+    fn publish_recipient_export_with_registered_material(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+        request: &RecipientExportRequestV1<'_>,
+        registered_digest: pos_core::Hash,
+        export_id: [u8; 16],
+        logical_head: Seq,
+    ) -> Result<PublishedRecipientExportV1, RecipientExportPublicationErrorV1> {
+        let recipient = request.recipient;
+        let (stored_descriptor, private_path, file_identity, inventory_digest) =
+            Self::recipient_inventory_path(&self.conn, owner, recipient.identity())
+                .map_err(|_| RecipientExportPublicationErrorV1::MaterialUnavailable)?;
+        if stored_descriptor != recipient || inventory_digest != registered_digest {
+            return Err(RecipientExportPublicationErrorV1::MaterialUnavailable);
+        }
+        let material = read_bound_private_key(owner, &private_path, file_identity)
+            .map_err(|_| RecipientExportPublicationErrorV1::MaterialUnavailable)?;
+        if key_material_digest(&material) != registered_digest {
+            return Err(RecipientExportPublicationErrorV1::MaterialUnavailable);
+        }
+        if recipient_public_key_from_private_v1(&material) != recipient.public_key() {
+            return Err(RecipientExportPublicationErrorV1::Registry(
+                KeyRegistryErrorV1::EncryptionKeyMismatch,
+            ));
+        }
+
+        let source = export_timeline_own(
+            self,
+            request.timeline_id,
+            request.artifact_digest,
+            request.evaluation,
+        )?;
+        let mut source = RecipientExportPlaintextStagingV1::new(source)?;
+        let timeline_id = source.source().timeline.id();
+        let local_head = source.source().timeline.head;
+        let mut seed = Zeroizing::new([0_u8; 32]);
+        recipient_random_bytes(&mut *seed).map_err(|error| {
+            RecipientExportPublicationErrorV1::Store(recipient_rng_error(&error))
+        })?;
+        let mut rng = StdRng::from_seed(*seed);
+        let encoded = encrypt_timeline_export_v1(source.source(), recipient, export_id, &mut rng)
+            .map_err(RecipientExportPublicationErrorV1::Export)?
+            .encode();
+        source.zeroize()?;
+        // `usize` is no wider than `u64` on supported Rust targets.
+        let ciphertext_length = encoded.len() as u64;
+        let ciphertext_digest = pos_core::Hash::from_bytes(*blake3::hash(&encoded).as_bytes());
+        write_recipient_export_ciphertext(owner, export_id, &encoded)?;
+        let publication = PublishedRecipientExportV1 {
+            export_id,
+            recipient,
+            timeline_id,
+            local_head,
+            logical_head,
+            ciphertext_length,
+            ciphertext_digest,
+        };
+        record_recipient_export_catalog(&self.conn, owner, &publication)?;
+        remove_recipient_export_pending(&self.conn, export_id)?;
+        #[cfg(feature = "test-support")]
+        install_recipient_export_publication_test_commit_abort(&self.conn)?;
+        Ok(publication)
+    }
+
+    fn reserve_recipient_export_id(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+    ) -> Result<[u8; 16], RecipientExportPublicationErrorV1> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(storage_error)?;
+        let result = (|| -> Result<[u8; 16], RecipientExportPublicationErrorV1> {
+            validate_owner_directory(owner)?;
+            ensure_recipient_custody_tables(&self.conn)?;
+            claim_recipient_custody_directory(&self.conn, owner)?;
+            ensure_recipient_export_catalog(&self.conn)?;
+            let export_id = fresh_recipient_export_id()?;
+            if recipient_export_catalog_contains(&self.conn, export_id)?
+                || recipient_export_pending_contains(&self.conn, export_id)?
+            {
+                return Err(RecipientExportPublicationErrorV1::IdentifierCollision);
+            }
+            record_recipient_export_pending(&self.conn, owner, export_id)?;
+            Ok(export_id)
+        })();
+        finish_recipient_export_transaction(&self.conn, result)
+    }
+
+    fn recover_recipient_exports_under_writer(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+    ) -> Result<(), RecipientExportPublicationErrorV1> {
+        self.conn
+            .execute_batch(begin_immediate_sql())
+            .map_err(storage_error)?;
+        let result =
+            (|| -> Result<RecipientExportRecoveryProgressV1, RecipientExportPublicationErrorV1> {
+                validate_owner_directory(owner)?;
+                ensure_recipient_custody_tables(&self.conn)?;
+                claim_recipient_custody_directory(&self.conn, owner)?;
+                ensure_recipient_export_catalog(&self.conn)?;
+                Ok(reconcile_recipient_export_objects(&self.conn, owner)?)
+            })();
+        match finish_recipient_export_transaction(&self.conn, result)? {
+            RecipientExportRecoveryProgressV1::Complete => Ok(()),
+            RecipientExportRecoveryProgressV1::Incomplete => {
+                Err(RecipientExportPublicationErrorV1::RecoveryIncomplete)
+            }
+        }
+    }
+
+    /// Read one catalog-visible ciphertext object and verify every immutable binding.
+    ///
+    /// This returns only the encrypted TRX1 bytes. It never decrypts or imports
+    /// the candidate Timeline into the local event store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecipientExportPublicationErrorV1::ArtifactUnavailable`] for
+    /// an absent, malformed, or digest-mismatched catalog object.
+    pub fn read_recipient_export(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+        export_id: [u8; 16],
+    ) -> Result<Vec<u8>, RecipientExportPublicationErrorV1> {
+        validate_owner_directory(owner)?;
+        let stored = load_recipient_export_catalog(&self.conn, export_id)?
+            .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+        let expected = stored
+            .validate_for(owner)
+            .ok_or(RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+        let encoded =
+            read_recipient_export_ciphertext(owner, export_id, expected.ciphertext_length)
+                .map_err(|_| RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+        if pos_core::Hash::from_bytes(*blake3::hash(&encoded).as_bytes())
+            != expected.ciphertext_digest
+        {
+            return Err(RecipientExportPublicationErrorV1::ArtifactUnavailable);
+        }
+        let envelope = RecipientTimelineExportV1::decode(&encoded)
+            .map_err(|_| RecipientExportPublicationErrorV1::ArtifactUnavailable)?;
+        if envelope.header.export_id != export_id
+            || envelope.header.recipient != expected.recipient
+            || envelope.header.timeline_id != expected.timeline_id
+            || envelope.header.local_head != expected.local_head
+        {
+            return Err(RecipientExportPublicationErrorV1::ArtifactUnavailable);
+        }
+        Ok(encoded)
+    }
+
+    /// Recover one bounded batch of pending staging and final ciphertext files.
+    ///
+    /// Recovery never scans the directory, creates catalog entries, or
+    /// reconstructs an export. The `SQLite` catalog remains the only visibility
+    /// marker.
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error if the durable directory or catalog cannot be
+    /// inspected under the `SQLite` writer reservation. Returns
+    /// [`RecipientExportPublicationErrorV1::RecoveryIncomplete`] after committing
+    /// a bounded batch when another pass is required.
+    pub fn recover_recipient_exports(
+        &mut self,
+        owner: &RecipientKeyOwnerV1,
+    ) -> Result<(), RecipientExportPublicationErrorV1> {
+        let previous_synchronous = ensure_recipient_export_durability(&self.conn)?;
+        let result = self.recover_recipient_exports_under_writer(owner);
+        finish_recipient_export_durability(&self.conn, previous_synchronous, result)
+    }
+
+    /// Fix the next acceptance-test publication identifier.
+    ///
+    /// This exists only behind the nondefault test-support feature so an
+    /// external test can inspect the exact interrupted object identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Storage`] for a zero identifier or when another
+    /// test identifier is already configured on this thread.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn set_recipient_export_publication_test_export_id(
+        &self,
+        export_id: [u8; 16],
+    ) -> Result<(), CoreError> {
+        if export_id == [0; 16] {
+            return Err(CoreError::Storage(
+                "recipient export test ID must be nonzero".to_owned(),
+            ));
+        }
+        RECIPIENT_EXPORT_PUBLICATION_TEST_EXPORT_ID.with(|configured| {
+            if configured.get().is_some() {
+                return Err(CoreError::Storage(
+                    "recipient export test ID is already configured".to_owned(),
+                ));
+            }
+            configured.set(Some(export_id));
+            Ok(())
+        })
+    }
+
+    /// Pause the next test publication for one Timeline after its fences hold.
+    ///
+    /// This exists only behind the nondefault test-support feature so an
+    /// external test can prove that neither competing lifecycle operation
+    /// can pass its real fence before catalog publication linearizes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Storage`] when another pause is already configured
+    /// or test synchronization is unavailable.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn pause_recipient_export_publication_after_fences_for_test(
+        &self,
+        timeline: TimelineId,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> Result<(), CoreError> {
+        RECIPIENT_EXPORT_PUBLICATION_TEST_FENCE_PAUSES
+            .lock()
+            .map_err(|_| {
+                CoreError::Storage("recipient export test pause is unavailable".to_owned())
+            })
+            .and_then(|mut pauses| {
+                if pauses.iter().any(|(configured, _)| *configured == timeline) {
+                    return Err(CoreError::Storage(
+                        "recipient export test pause is already configured".to_owned(),
+                    ));
+                }
+                pauses.push((
+                    timeline,
+                    RecipientExportPublicationTestFencePause { entered, release },
+                ));
+                Ok(())
+            })
+    }
+
+    /// Inject one narrow recipient-export boundary failure for an acceptance
+    /// test. The fault is consumed by the normal publication path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Storage`] when another test fault is already
+    /// configured on this thread.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_recipient_export_publication_test_fault(
+        &self,
+        fault: RecipientExportPublicationTestFaultV1,
+    ) -> Result<(), CoreError> {
+        RECIPIENT_EXPORT_PUBLICATION_TEST_FAULT.with(|configured| {
+            if configured.get().is_some() {
+                return Err(CoreError::Storage(
+                    "recipient export test fault is already configured".to_owned(),
+                ));
+            }
+            configured.set(Some(fault));
+            RECIPIENT_EXPORT_PUBLICATION_TEST_NAMED_PLAINTEXT_OBSERVED
+                .with(|observed| observed.set(false));
+            Ok(())
+        })
+    }
+
+    /// Inspect only the exact opaque object names derived from one test export
+    /// identifier. This never accepts a filesystem path or scans a directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::Storage`] when the owner directory cannot be
+    /// validated or either exact object name cannot be inspected.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inspect_recipient_export_publication_test_artifacts(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+        export_id: [u8; 16],
+    ) -> Result<RecipientExportPublicationTestArtifactsV1, CoreError> {
+        validate_owner_directory(owner)?;
+        let named_plaintext_observed = RECIPIENT_EXPORT_PUBLICATION_TEST_NAMED_PLAINTEXT_OBSERVED
+            .with(|observed| observed.replace(false));
+        Ok(RecipientExportPublicationTestArtifactsV1 {
+            staging_ciphertext_exists: recipient_export_test_object_exists(
+                owner,
+                &recipient_export_staging_name(export_id),
+            )?,
+            final_ciphertext_exists: recipient_export_test_object_exists(
+                owner,
+                &recipient_export_final_name(export_id),
+            )?,
+            named_plaintext_observed,
+        })
+    }
+
     /// Mark one recipient epoch pending, durably remove its owned key file,
     /// then commit the irreversible registry tombstone.
     ///
@@ -982,6 +1680,640 @@ impl SqliteStore {
                     })
             })
     }
+}
+
+const RECIPIENT_EXPORT_PREFIX: &[u8] = b"recipient-export-";
+const RECIPIENT_EXPORT_FINAL_SUFFIX: &[u8] = b".trx1";
+const RECIPIENT_EXPORT_STAGING_SUFFIX: &[u8] = b".trx1.staging";
+const MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS: usize = 256;
+const MAX_RECIPIENT_EXPORT_CIPHERTEXT_BYTES: u64 = (1_u64 << 30) + (2 * 1024 * 1024);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecipientExportRecoveryProgressV1 {
+    Complete,
+    Incomplete,
+}
+
+struct StoredRecipientExportV1 {
+    owner_id: String,
+    recipient_epoch: i64,
+    recipient_descriptor: Vec<u8>,
+    timeline_id: String,
+    local_head: i64,
+    logical_head: i64,
+    ciphertext_length: i64,
+    ciphertext_digest: Vec<u8>,
+}
+
+struct ValidatedRecipientExportCatalogV1 {
+    recipient: RecipientKeyDescriptorV1,
+    timeline_id: TimelineId,
+    local_head: Seq,
+    ciphertext_length: u64,
+    ciphertext_digest: pos_core::Hash,
+}
+
+impl StoredRecipientExportV1 {
+    fn validate_for(
+        self,
+        owner: &RecipientKeyOwnerV1,
+    ) -> Option<ValidatedRecipientExportCatalogV1> {
+        let expected_owner = recipient_owner_id_from_grantee(owner.grantee_id).ok()?;
+        let recipient = RecipientKeyDescriptorV1::decode(&self.recipient_descriptor).ok()?;
+        let recipient_epoch = u64::try_from(self.recipient_epoch).ok()?;
+        let local_head = Seq::from_u64(u64::try_from(self.local_head).ok()?);
+        let _logical_head = Seq::from_u64(u64::try_from(self.logical_head).ok()?);
+        let ciphertext_length = u64::try_from(self.ciphertext_length).ok()?;
+        if ciphertext_length > MAX_RECIPIENT_EXPORT_CIPHERTEXT_BYTES {
+            return None;
+        }
+        let ciphertext_digest: [u8; 32] = self.ciphertext_digest.try_into().ok()?;
+        if self.owner_id != expected_owner.as_str()
+            || recipient.identity().owner_id != expected_owner
+            || recipient.identity().epoch != recipient_epoch
+            || !recipient.is_for_grantee(owner.grantee_id)
+        {
+            return None;
+        }
+        Some(ValidatedRecipientExportCatalogV1 {
+            recipient,
+            timeline_id: parse_timeline_id(&self.timeline_id).ok()?,
+            local_head,
+            ciphertext_length,
+            ciphertext_digest: pos_core::Hash::from_bytes(ciphertext_digest),
+        })
+    }
+}
+
+fn current_sqlite_synchronous_level(connection: &Connection) -> Result<i64, CoreError> {
+    connection
+        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .map_err(storage_error)
+}
+
+fn recipient_export_synchronous_level(connection: &Connection) -> Result<i64, CoreError> {
+    #[cfg(test)]
+    if let Some(synchronous) = RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE.with(std::cell::Cell::take)
+    {
+        return Ok(synchronous);
+    }
+    #[cfg(test)]
+    if RECIPIENT_DURABILITY_SYNCHRONOUS_READ_FAILURE.with(std::cell::Cell::get) {
+        return Err(CoreError::Storage(
+            "injected recipient export synchronous read failure".to_owned(),
+        ));
+    }
+    current_sqlite_synchronous_level(connection)
+}
+
+fn restore_recipient_export_synchronous_level(
+    connection: &Connection,
+    previous_synchronous: i64,
+) -> Result<(), CoreError> {
+    connection
+        .pragma_update(None, "synchronous", previous_synchronous)
+        .map_err(storage_error)
+}
+
+fn ensure_recipient_export_durability(connection: &Connection) -> Result<i64, CoreError> {
+    let journal_mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .map_err(storage_error)?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        return Err(CoreError::Storage(
+            "recipient export publication requires SQLite WAL".to_owned(),
+        ));
+    }
+    let previous_synchronous = current_sqlite_synchronous_level(connection)?;
+    connection
+        .execute_batch("PRAGMA synchronous=FULL")
+        .map_err(storage_error)?;
+    match recipient_export_synchronous_level(connection) {
+        Ok(synchronous) if synchronous >= 2 => Ok(previous_synchronous),
+        Ok(_) => {
+            restore_recipient_export_synchronous_level(connection, previous_synchronous)?;
+            Err(CoreError::Storage(
+                "recipient export publication requires SQLite synchronous=FULL".to_owned(),
+            ))
+        }
+        Err(error) => {
+            restore_recipient_export_synchronous_level(connection, previous_synchronous)?;
+            Err(error)
+        }
+    }
+}
+
+fn finish_recipient_export_durability<T>(
+    connection: &Connection,
+    previous_synchronous: i64,
+    result: Result<T, RecipientExportPublicationErrorV1>,
+) -> Result<T, RecipientExportPublicationErrorV1> {
+    // The transaction outcome is already conclusive. A best-effort setting
+    // restoration failure leaves the safer FULL mode enabled and must not
+    // reclassify a committed publication as failed.
+    drop(restore_recipient_export_synchronous_level(
+        connection,
+        previous_synchronous,
+    ));
+    result
+}
+
+fn finish_recipient_export_transaction<T>(
+    connection: &Connection,
+    result: Result<T, RecipientExportPublicationErrorV1>,
+) -> Result<T, RecipientExportPublicationErrorV1> {
+    finish_transaction(
+        connection,
+        result,
+        |commit_error, rollback_error| {
+            RecipientExportPublicationErrorV1::Store(rollback_error.map_or_else(
+                || CoreError::Storage(format!("transaction commit failed: {commit_error}")),
+                |rollback_error| {
+                    CoreError::StorageOutcomeUnknown(format!(
+                        "transaction commit failed: {commit_error}; rollback failed: {rollback_error}"
+                    ))
+                },
+            ))
+        },
+        |error, rollback_error| {
+            RecipientExportPublicationErrorV1::Store(CoreError::StorageOutcomeUnknown(format!(
+                "{error}; rollback failed: {rollback_error}"
+            )))
+        },
+    )
+}
+
+fn ensure_recipient_export_catalog(connection: &Connection) -> Result<(), CoreError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS recipient_export_catalog_v1 (
+                export_id BLOB NOT NULL PRIMARY KEY CHECK (length(export_id) = 16),
+                owner_id TEXT NOT NULL,
+                recipient_epoch INTEGER NOT NULL CHECK (recipient_epoch > 0),
+                recipient_descriptor BLOB NOT NULL,
+                timeline_id TEXT NOT NULL,
+                local_head INTEGER NOT NULL CHECK (local_head >= 0),
+                logical_head INTEGER NOT NULL CHECK (logical_head >= 0),
+                ciphertext_length INTEGER NOT NULL CHECK (ciphertext_length >= 0),
+                ciphertext_digest BLOB NOT NULL CHECK (length(ciphertext_digest) = 32)
+            );
+            CREATE TABLE IF NOT EXISTS recipient_export_pending_v1 (
+                export_id BLOB NOT NULL PRIMARY KEY CHECK (length(export_id) = 16),
+                owner_id TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS recipient_export_pending_owner_v1
+                ON recipient_export_pending_v1 (owner_id, export_id);",
+        )
+        .map_err(storage_error)
+}
+
+fn record_recipient_export_catalog(
+    connection: &Connection,
+    owner: &RecipientKeyOwnerV1,
+    publication: &PublishedRecipientExportV1,
+) -> Result<(), CoreError> {
+    let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
+    let epoch = i64::try_from(publication.recipient.identity().epoch).map_err(storage_error)?;
+    let local_head = i64::try_from(publication.local_head.as_u64()).map_err(storage_error)?;
+    let logical_head = i64::try_from(publication.logical_head.as_u64()).map_err(storage_error)?;
+    let ciphertext_length = i64::try_from(publication.ciphertext_length).map_err(storage_error)?;
+    connection
+        .execute(
+            "INSERT INTO recipient_export_catalog_v1
+             (export_id, owner_id, recipient_epoch, recipient_descriptor, timeline_id,
+              local_head, logical_head, ciphertext_length, ciphertext_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                publication.export_id.as_slice(),
+                owner_id.as_str(),
+                epoch,
+                publication.recipient.encode(),
+                publication.timeline_id.to_string(),
+                local_head,
+                logical_head,
+                ciphertext_length,
+                publication.ciphertext_digest.as_bytes().as_slice(),
+            ],
+        )
+        .map(|_| ())
+        .map_err(storage_error)
+}
+
+fn recipient_export_catalog_exists(connection: &Connection) -> Result<bool, CoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema
+                WHERE type = 'table' AND name = 'recipient_export_catalog_v1'
+            )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)
+}
+
+fn load_recipient_export_catalog(
+    connection: &Connection,
+    export_id: [u8; 16],
+) -> Result<Option<StoredRecipientExportV1>, CoreError> {
+    if !recipient_export_catalog_exists(connection)? {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            "SELECT owner_id, recipient_epoch, recipient_descriptor, timeline_id,
+                    local_head, logical_head, ciphertext_length, ciphertext_digest
+             FROM recipient_export_catalog_v1 WHERE export_id = ?1",
+            rusqlite::params![export_id.as_slice()],
+            |row| {
+                Ok(StoredRecipientExportV1 {
+                    owner_id: row.get(0)?,
+                    recipient_epoch: row.get(1)?,
+                    recipient_descriptor: row.get(2)?,
+                    timeline_id: row.get(3)?,
+                    local_head: row.get(4)?,
+                    logical_head: row.get(5)?,
+                    ciphertext_length: row.get(6)?,
+                    ciphertext_digest: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(storage_error)
+}
+
+fn recipient_export_catalog_contains(
+    connection: &Connection,
+    export_id: [u8; 16],
+) -> Result<bool, CoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM recipient_export_catalog_v1 WHERE export_id = ?1)",
+            rusqlite::params![export_id.as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)
+}
+
+fn recipient_export_pending_contains(
+    connection: &Connection,
+    export_id: [u8; 16],
+) -> Result<bool, CoreError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM recipient_export_pending_v1 WHERE export_id = ?1)",
+            rusqlite::params![export_id.as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)
+}
+
+fn recipient_export_pending_belongs_to(
+    connection: &Connection,
+    owner: &RecipientKeyOwnerV1,
+    export_id: [u8; 16],
+) -> Result<bool, CoreError> {
+    let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM recipient_export_pending_v1
+                WHERE export_id = ?1 AND owner_id = ?2
+            )",
+            rusqlite::params![export_id.as_slice(), owner_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)
+}
+
+fn record_recipient_export_pending(
+    connection: &Connection,
+    owner: &RecipientKeyOwnerV1,
+    export_id: [u8; 16],
+) -> Result<(), CoreError> {
+    let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
+    connection
+        .execute(
+            "INSERT INTO recipient_export_pending_v1 (export_id, owner_id) VALUES (?1, ?2)",
+            rusqlite::params![export_id.as_slice(), owner_id.as_str()],
+        )
+        .map(|_| ())
+        .map_err(storage_error)
+}
+
+fn remove_recipient_export_pending(
+    connection: &Connection,
+    export_id: [u8; 16],
+) -> Result<(), CoreError> {
+    let removed = connection
+        .execute(
+            "DELETE FROM recipient_export_pending_v1 WHERE export_id = ?1",
+            rusqlite::params![export_id.as_slice()],
+        )
+        .map_err(storage_error)?;
+    if removed == 1 {
+        Ok(())
+    } else {
+        Err(CoreError::Storage(
+            "recipient export reservation is unavailable".to_owned(),
+        ))
+    }
+}
+
+fn load_recipient_export_pending(
+    connection: &Connection,
+    owner: &RecipientKeyOwnerV1,
+) -> Result<(Vec<[u8; 16]>, bool), CoreError> {
+    let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
+    let limit = i64::try_from(MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS.saturating_add(1))
+        .map_err(storage_error)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT export_id FROM recipient_export_pending_v1
+             WHERE owner_id = ?1 ORDER BY export_id LIMIT ?2",
+        )
+        .map_err(storage_error)?;
+    let rows = statement
+        .query_map(rusqlite::params![owner_id.as_str(), limit], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })
+        .map_err(storage_error)?;
+    let mut export_ids = Vec::new();
+    for row in rows {
+        let export_id: [u8; 16] = row.map_err(storage_error)?.try_into().map_err(|_| {
+            CoreError::Storage("recipient export reservation is invalid".to_owned())
+        })?;
+        export_ids.push(export_id);
+    }
+    let incomplete = export_ids.len() > MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS;
+    if incomplete {
+        let _ = export_ids.pop();
+    }
+    Ok((export_ids, incomplete))
+}
+
+fn fresh_recipient_export_id() -> Result<[u8; 16], RecipientExportPublicationErrorV1> {
+    #[cfg(feature = "test-support")]
+    let configured_export_id =
+        RECIPIENT_EXPORT_PUBLICATION_TEST_EXPORT_ID.with(std::cell::Cell::take);
+    #[cfg(not(feature = "test-support"))]
+    let configured_export_id = None;
+
+    let export_id = configured_export_id.map_or_else(
+        || {
+            let mut export_id = [0_u8; 16];
+            recipient_random_bytes(&mut export_id)
+                .map_err(|error| {
+                    RecipientExportPublicationErrorV1::Store(recipient_rng_error(&error))
+                })
+                .map(|()| export_id)
+        },
+        Ok,
+    )?;
+    if export_id == [0; 16] {
+        return Err(RecipientExportPublicationErrorV1::Export(
+            RecipientExportErrorV1::FieldOutOfBounds,
+        ));
+    }
+    Ok(export_id)
+}
+
+fn recipient_export_name(export_id: [u8; 16], suffix: &[u8]) -> Vec<u8> {
+    let mut name =
+        Vec::with_capacity(RECIPIENT_EXPORT_PREFIX.len() + (export_id.len() * 2) + suffix.len());
+    name.extend_from_slice(RECIPIENT_EXPORT_PREFIX);
+    for byte in export_id {
+        name.push(b"0123456789abcdef"[usize::from(byte >> 4)]);
+        name.push(b"0123456789abcdef"[usize::from(byte & 0x0f)]);
+    }
+    name.extend_from_slice(suffix);
+    name
+}
+
+fn recipient_export_final_name(export_id: [u8; 16]) -> Vec<u8> {
+    recipient_export_name(export_id, RECIPIENT_EXPORT_FINAL_SUFFIX)
+}
+
+fn recipient_export_staging_name(export_id: [u8; 16]) -> Vec<u8> {
+    recipient_export_name(export_id, RECIPIENT_EXPORT_STAGING_SUFFIX)
+}
+
+#[cfg(feature = "test-support")]
+fn recipient_export_test_object_exists(
+    owner: &RecipientKeyOwnerV1,
+    name: &[u8],
+) -> Result<bool, CoreError> {
+    match recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => Ok(true),
+        Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
+        Err(error) => Err(storage_error(error)),
+    }
+}
+
+fn validate_recipient_export_file(
+    metadata: &std::fs::Metadata,
+    owner: &RecipientKeyOwnerV1,
+    expected_length: u64,
+) -> Result<(), CoreError> {
+    use std::os::unix::fs::MetadataExt;
+
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.uid() != owner.directory_uid
+        || metadata.len() != expected_length
+    {
+        return Err(CoreError::Storage(
+            "recipient export object is not a private single-link file".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_recipient_export_entry(
+    owner: &RecipientKeyOwnerV1,
+    name: &[u8],
+    expected_length: u64,
+) -> Result<(), CoreError> {
+    recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(storage_error)
+        .and_then(|metadata| {
+            if (metadata.st_mode & libc::S_IFMT) != libc::S_IFREG
+                || metadata.st_nlink != 1
+                || metadata.st_mode & 0o777 != 0o600
+                || metadata.st_uid != owner.directory_uid
+                || u64::try_from(metadata.st_size).ok() != Some(expected_length)
+            {
+                return Err(CoreError::Storage(
+                    "recipient export object is not a private single-link file".to_owned(),
+                ));
+            }
+            Ok(())
+        })
+}
+
+fn write_recipient_export_ciphertext(
+    owner: &RecipientKeyOwnerV1,
+    export_id: [u8; 16],
+    encoded: &[u8],
+) -> Result<(), CoreError> {
+    // `usize` is no wider than `u64` on supported Rust targets.
+    let expected_length = encoded.len() as u64;
+    validate_owner_directory(owner)?;
+    let staging = recipient_export_staging_name(export_id);
+    let final_name = recipient_export_final_name(export_id);
+    #[cfg(feature = "test-support")]
+    RECIPIENT_EXPORT_PUBLICATION_TEST_NAMED_PLAINTEXT_OBSERVED.with(|observed| {
+        observed.set(observed.get() | RecipientTimelineExportV1::decode(encoded).is_err());
+    });
+    recipient_openat2(
+        &owner.directory_file,
+        staging.as_slice(),
+        OFlags::WRONLY
+            | OFlags::CREATE
+            | OFlags::EXCL
+            | OFlags::CLOEXEC
+            | OFlags::NONBLOCK
+            | OFlags::NOFOLLOW,
+        Mode::from_raw_mode(0o600),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    )
+    .map(File::from)
+    .map_err(storage_error)
+    .and_then(|mut file| {
+        file.metadata().map_err(storage_error).and_then(|metadata| {
+            validate_recipient_export_file(&metadata, owner, 0)
+                .and_then(|()| recipient_write_all(&mut file, encoded).map_err(storage_error))
+                .and_then(|()| {
+                    #[cfg(feature = "test-support")]
+                    recipient_export_publication_test_sync_fault(
+                        RecipientExportPublicationTestFaultV1::FileSync,
+                    )?;
+                    recipient_fsync(&file).map_err(storage_error)
+                })
+                .and_then(|()| file.metadata().map_err(storage_error))
+                .and_then(|metadata| {
+                    validate_recipient_export_file(&metadata, owner, expected_length)
+                })
+                .and_then(|()| {
+                    verify_recipient_export_entry(owner, staging.as_slice(), expected_length)
+                })
+                .and_then(|()| {
+                    renameat_with(
+                        &owner.directory_file,
+                        staging.as_slice(),
+                        &owner.directory_file,
+                        final_name.as_slice(),
+                        RenameFlags::NOREPLACE,
+                    )
+                    .map_err(storage_error)
+                })
+                .and_then(|()| {
+                    #[cfg(feature = "test-support")]
+                    recipient_export_publication_test_sync_fault(
+                        RecipientExportPublicationTestFaultV1::DirectorySync,
+                    )?;
+                    recipient_fsync(&owner.directory_file).map_err(storage_error)
+                })
+                .and_then(|()| {
+                    verify_recipient_export_entry(owner, final_name.as_slice(), expected_length)
+                })
+        })
+    })
+}
+
+fn read_recipient_export_ciphertext(
+    owner: &RecipientKeyOwnerV1,
+    export_id: [u8; 16],
+    expected_length: u64,
+) -> Result<Vec<u8>, CoreError> {
+    if expected_length > MAX_RECIPIENT_EXPORT_CIPHERTEXT_BYTES {
+        return Err(CoreError::Storage(
+            "recipient export object exceeds the TRX1 bound".to_owned(),
+        ));
+    }
+    let capacity = usize::try_from(expected_length).map_err(storage_error)?;
+    validate_owner_directory(owner)?;
+    let name = recipient_export_final_name(export_id);
+    recipient_openat2(
+        &owner.directory_file,
+        name.as_slice(),
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    )
+    .map(File::from)
+    .map_err(storage_error)
+    .and_then(|mut file| {
+        file.metadata().map_err(storage_error).and_then(|metadata| {
+            validate_recipient_export_file(&metadata, owner, expected_length).and_then(|()| {
+                let mut encoded = vec![0_u8; capacity];
+                recipient_read_exact(&mut file, &mut encoded)
+                    .map_err(storage_error)
+                    .and_then(|()| {
+                        verify_recipient_export_entry(owner, name.as_slice(), expected_length)
+                    })
+                    .map(|()| encoded)
+            })
+        })
+    })
+}
+
+const fn is_safe_recipient_export_entry(
+    owner: &RecipientKeyOwnerV1,
+    metadata: &rustix::fs::Stat,
+) -> bool {
+    (metadata.st_mode & libc::S_IFMT) == libc::S_IFREG
+        && metadata.st_nlink == 1
+        && metadata.st_mode & 0o777 == 0o600
+        && metadata.st_uid == owner.directory_uid
+}
+
+fn remove_pending_recipient_export_object(
+    owner: &RecipientKeyOwnerV1,
+    name: &[u8],
+) -> Result<bool, CoreError> {
+    match recipient_statat(&owner.directory_file, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(metadata) => {
+            if !is_safe_recipient_export_entry(owner, &metadata) {
+                return Err(CoreError::Storage(
+                    "recipient export recovery found an unsafe object".to_owned(),
+                ));
+            }
+            recipient_unlinkat(&owner.directory_file, name, AtFlags::empty())
+                .map_err(storage_error)?;
+            Ok(true)
+        }
+        Err(error) if error == rustix::io::Errno::NOENT => Ok(false),
+        Err(error) => Err(storage_error(error)),
+    }
+}
+
+fn reconcile_recipient_export_objects(
+    connection: &Connection,
+    owner: &RecipientKeyOwnerV1,
+) -> Result<RecipientExportRecoveryProgressV1, CoreError> {
+    let (export_ids, incomplete) = load_recipient_export_pending(connection, owner)?;
+    let mut changed_directory = false;
+    for export_id in export_ids {
+        if recipient_export_catalog_contains(connection, export_id)? {
+            remove_recipient_export_pending(connection, export_id)?;
+            continue;
+        }
+        let staging = recipient_export_staging_name(export_id);
+        let final_name = recipient_export_final_name(export_id);
+        changed_directory |= remove_pending_recipient_export_object(owner, staging.as_slice())?;
+        changed_directory |= remove_pending_recipient_export_object(owner, final_name.as_slice())?;
+        remove_recipient_export_pending(connection, export_id)?;
+    }
+    if changed_directory {
+        recipient_fsync(&owner.directory_file).map_err(storage_error)?;
+    }
+    Ok(if incomplete {
+        RecipientExportRecoveryProgressV1::Incomplete
+    } else {
+        RecipientExportRecoveryProgressV1::Complete
+    })
 }
 
 fn validate_recipient_key_inventory(
@@ -1698,17 +3030,42 @@ fn write_private_key(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::{os::unix::fs::PermissionsExt, sync::mpsc, time::Duration};
+    use std::{
+        os::unix::fs::PermissionsExt,
+        sync::{mpsc, Arc},
+        time::Duration,
+    };
 
     use pos_core::{
-        CanonicalBytes, Event, EventId, Hash, Kind, SchemaVersion, Seq, Timeline, TimelineExport,
-        TimelineId, TimelineMeta, TimelineMode, WallTime,
+        ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+        ArtifactTransitionRuleV1, CanonicalBytes, ConsentAuthority, ConsentCapabilityToken,
+        ConsentGrantedV1, ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1,
+        ErasureReplayClaimV1, Event, EventDraft, EventId, Hash, Kind, RegisteredArtifactV1,
+        ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, SchemaVersion, Seq, Timeline,
+        TimelineExport, TimelineId, TimelineMeta, TimelineMode, WallTime,
     };
     use pos_crypto::recipient_export::encrypt_timeline_export_v1;
     use rand::{rngs::StdRng, SeedableRng};
+    use rusqlite::limits::Limit;
     use ulid::Ulid;
 
     use super::*;
+
+    type RecipientTestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    const TEST_RECIPIENT_EXPORT_DIGEST: ErasureReferenceV1 =
+        ErasureReferenceV1::from_digest([241; 32]);
+
+    struct RecipientPublicationFixture {
+        _temporary: tempfile::TempDir,
+        store: SqliteStore,
+        owner: RecipientKeyOwnerV1,
+        authority: ConsentAuthority,
+        token: ConsentCapabilityToken,
+        timeline: TimelineId,
+        descriptor: RecipientKeyDescriptorV1,
+        evaluation: ReplayClaimEvaluationV1,
+    }
 
     fn owner_fixture() -> Result<(tempfile::TempDir, SqliteStore, RecipientKeyOwnerV1), CoreError> {
         let temporary =
@@ -1726,6 +3083,103 @@ mod tests {
         )?;
         let owner = RecipientKeyOwnerV1::open(directory, EntityId::new())?;
         Ok((temporary, store, owner))
+    }
+
+    fn recipient_publication_evaluation() -> RecipientTestResult<ReplayClaimEvaluationV1> {
+        ReplayClaimEvaluatorV1::evaluate(
+            ErasureReplayClaimV1::Exact,
+            &[ArtifactClaimInputV1 {
+                registration: RegisteredArtifactV1::new(
+                    ErasureArtifactClassV1::Export,
+                    TEST_RECIPIENT_EXPORT_DIGEST,
+                    ArtifactDataClassV1::StructuralAuditMetadata,
+                    None,
+                    ErasureReferenceV1::from_digest([242; 32]),
+                    ArtifactOptionalityV1::Required,
+                    ArtifactTransitionRuleV1::PreserveExact,
+                ),
+                current_claim: ErasureReplayClaimV1::Exact,
+                state: ArtifactStateV1::Retained,
+            }],
+        )
+        .map_err(|error| error.to_string().into())
+    }
+
+    fn recipient_publication_fixture() -> RecipientTestResult<RecipientPublicationFixture> {
+        let (temporary, mut store, owner) = owner_fixture()?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let subject = EntityId::new();
+        let timeline = store.create_timeline_with_meta(TimelineMeta::root_owned(
+            "recipient-publication",
+            subject,
+        ))?;
+        store.append(
+            timeline.id(),
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new("recipient.publication.coverage.v1"),
+                CanonicalBytes::from_static(b"recipient-publication"),
+            )],
+        )?;
+        let authority = ConsentAuthority::new();
+        store.bind_consent_authority(authority.append_permit())?;
+        let token = authority.record_grant_on_timeline(
+            timeline.id(),
+            &ConsentGrantedV1 {
+                subject_id: subject,
+                grantee_id: owner.grantee_id,
+                purpose: "recipient-publication-coverage".to_owned(),
+                modalities: pos_core::MODALITY_EXPORT,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: true,
+                retention_days: 1,
+                expiry_secs: 0,
+                grant_seq: 1,
+            },
+        );
+        let descriptor = store.enroll_recipient_key(&owner)?;
+        Ok(RecipientPublicationFixture {
+            _temporary: temporary,
+            store,
+            owner,
+            authority,
+            token,
+            timeline: timeline.id(),
+            descriptor,
+            evaluation: recipient_publication_evaluation()?,
+        })
+    }
+
+    const fn recipient_publication_request<'a>(
+        timeline: TimelineId,
+        recipient: RecipientKeyDescriptorV1,
+        evaluation: &'a ReplayClaimEvaluationV1,
+        token: &'a ConsentCapabilityToken,
+    ) -> RecipientExportRequestV1<'a> {
+        RecipientExportRequestV1 {
+            timeline_id: timeline,
+            recipient,
+            artifact_digest: TEST_RECIPIENT_EXPORT_DIGEST,
+            evaluation,
+            token,
+            now_secs: 1,
+        }
+    }
+
+    fn recipient_test_publication(
+        fixture: &RecipientPublicationFixture,
+        export_id: [u8; 16],
+    ) -> PublishedRecipientExportV1 {
+        PublishedRecipientExportV1 {
+            export_id,
+            recipient: fixture.descriptor,
+            timeline_id: fixture.timeline,
+            local_head: Seq::from_u64(1),
+            logical_head: Seq::from_u64(1),
+            ciphertext_length: 0,
+            ciphertext_digest: Hash::from_bytes([0; 32]),
+        }
     }
 
     const TEST_EXPORT_ID: [u8; 16] = [7; 16];
@@ -1767,6 +3221,38 @@ mod tests {
             .map_err(storage_error)
     }
 
+    fn plaintext_staging_export(payload: CanonicalBytes) -> TimelineExport {
+        let payload_hash = Hash::from_bytes(*blake3::hash(payload.as_slice()).as_bytes());
+        TimelineExport {
+            timeline: Timeline {
+                meta: TimelineMeta {
+                    id: TimelineId::from_ulid(Ulid::from(31_u128)),
+                    mode: TimelineMode::Live,
+                    name: Some("recipient plaintext staging".to_owned()),
+                    owner: Some(EntityId::from_ulid(Ulid::from(32_u128))),
+                    fork_point: None,
+                },
+                head: Seq::from_u64(1),
+            },
+            events: vec![Event {
+                id: EventId::from_ulid(Ulid::from(33_u128)),
+                entity: EntityId::from_ulid(Ulid::from(34_u128)),
+                event_type: Kind::new("recipient.plaintext.staging"),
+                payload,
+                wall_time: WallTime::from_micros(1),
+                seq: Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                origin: None,
+                payload_hash,
+            }],
+            parent_fork_hash: None,
+        }
+    }
+
     fn pause_on_next_recipient_read(started: mpsc::Sender<()>, release: mpsc::Receiver<()>) {
         RECIPIENT_READ_PAUSE.with(|pause| {
             assert!(pause.replace(Some((started, release))).is_none());
@@ -1799,6 +3285,186 @@ mod tests {
         RECIPIENT_RANDOM_FAILURE.with(|failure| failure.set(enabled));
     }
 
+    fn set_recipient_export_synchronous_read_failure(enabled: bool) {
+        RECIPIENT_DURABILITY_SYNCHRONOUS_READ_FAILURE.with(|failure| failure.set(enabled));
+    }
+
+    #[derive(Clone, Copy)]
+    enum DeniedRecipientExportPragma {
+        JournalMode,
+        SynchronousRead,
+        SynchronousWrite,
+    }
+
+    fn deny_recipient_export_pragma(
+        connection: &Connection,
+        denied: DeniedRecipientExportPragma,
+    ) -> RecipientTestResult {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            let deny = match context.action {
+                AuthAction::Pragma { pragma_name, .. }
+                    if pragma_name.eq_ignore_ascii_case("journal_mode") =>
+                {
+                    matches!(denied, DeniedRecipientExportPragma::JournalMode)
+                }
+                AuthAction::Pragma {
+                    pragma_name,
+                    pragma_value,
+                } if pragma_name.eq_ignore_ascii_case("synchronous") => matches!(
+                    (denied, pragma_value),
+                    (DeniedRecipientExportPragma::SynchronousRead, None)
+                        | (DeniedRecipientExportPragma::SynchronousWrite, Some(_))
+                ),
+                _ => false,
+            };
+            if deny {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
+        Ok(())
+    }
+
+    fn deny_second_recipient_export_synchronous_write(
+        connection: &Connection,
+    ) -> RecipientTestResult {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let restore_writes = Arc::clone(&writes);
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Pragma {
+                    pragma_name,
+                    pragma_value: Some(_),
+                } if pragma_name.eq_ignore_ascii_case("synchronous")
+            ) && restore_writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
+            {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
+        Ok(())
+    }
+
+    fn clear_recipient_export_authorizer(connection: &Connection) -> RecipientTestResult {
+        use rusqlite::hooks::{AuthContext, Authorization};
+
+        connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        Ok(())
+    }
+
+    #[derive(Clone, Copy)]
+    enum RecipientExportSqlAction {
+        CreateTable(&'static str),
+        Delete(&'static str),
+        Insert(&'static str),
+        Read(&'static str),
+        Select,
+    }
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum RecipientExportSqlOperation {
+        CreateTable,
+        Delete,
+        Insert,
+        Read,
+    }
+
+    impl RecipientExportSqlAction {
+        const fn operation(self) -> Option<RecipientExportSqlOperation> {
+            match self {
+                Self::CreateTable(_) => Some(RecipientExportSqlOperation::CreateTable),
+                Self::Delete(_) => Some(RecipientExportSqlOperation::Delete),
+                Self::Insert(_) => Some(RecipientExportSqlOperation::Insert),
+                Self::Read(_) => Some(RecipientExportSqlOperation::Read),
+                Self::Select => None,
+            }
+        }
+
+        const fn table(self) -> Option<&'static str> {
+            match self {
+                Self::CreateTable(table)
+                | Self::Delete(table)
+                | Self::Insert(table)
+                | Self::Read(table) => Some(table),
+                Self::Select => None,
+            }
+        }
+    }
+
+    fn deny_recipient_export_sql_action(
+        connection: &Connection,
+        action: RecipientExportSqlAction,
+    ) -> RecipientTestResult {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            let observed = match context.action {
+                AuthAction::CreateTable { table_name } => {
+                    Some((RecipientExportSqlOperation::CreateTable, table_name))
+                }
+                AuthAction::Delete { table_name } => {
+                    Some((RecipientExportSqlOperation::Delete, table_name))
+                }
+                AuthAction::Insert { table_name } => {
+                    Some((RecipientExportSqlOperation::Insert, table_name))
+                }
+                AuthAction::Read { table_name, .. } => {
+                    Some((RecipientExportSqlOperation::Read, table_name))
+                }
+                _ => None,
+            };
+            let denied = (matches!(action, RecipientExportSqlAction::Select)
+                && matches!(context.action, AuthAction::Select))
+                || observed.is_some_and(|(operation, table)| {
+                    action.operation() == Some(operation) && action.table() == Some(table)
+                });
+            if denied {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
+        Ok(())
+    }
+
+    fn deny_nth_recipient_export_begin(
+        connection: &Connection,
+        denied_begin: usize,
+    ) -> RecipientTestResult {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+        let begins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_begins = Arc::clone(&begins);
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            if matches!(
+                context.action,
+                AuthAction::Transaction {
+                    operation: TransactionOperation::Begin
+                }
+            ) && observed_begins.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+                == denied_begin
+            {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }))?;
+        Ok(())
+    }
+
+    fn override_next_recipient_random_bytes(bytes: Vec<u8>) {
+        RECIPIENT_RANDOM_OVERRIDE.with(|override_bytes| {
+            assert!(override_bytes.replace(Some(bytes)).is_none());
+        });
+    }
+
     fn set_read_failure(enabled: bool) {
         RECIPIENT_READ_FAILURE.with(|failure| failure.set(enabled));
     }
@@ -1817,6 +3483,209 @@ mod tests {
 
     fn replace_directory_after_open(directory: PathBuf, replacement: PathBuf) {
         RECIPIENT_OPEN_REPLACEMENT.with(|fault| fault.replace(Some((directory, replacement))));
+    }
+
+    #[test]
+    fn recipient_export_plaintext_staging_requires_owned_payloads_and_scrubs_source(
+    ) -> RecipientTestResult {
+        let shared_payload = CanonicalBytes::from_vec(b"shared plaintext".to_vec());
+        let retained_payload = shared_payload.clone();
+        let mut shared_export = plaintext_staging_export(shared_payload);
+        assert!(!shared_export.plaintext_staging_is_exclusively_owned());
+        assert!(!shared_export.zeroize_plaintext_staging());
+        assert_eq!(retained_payload.as_slice(), b"shared plaintext");
+        assert!(RecipientExportPlaintextStagingV1::new(shared_export).is_err());
+
+        let mut lost_ownership = RecipientExportPlaintextStagingV1::new(plaintext_staging_export(
+            CanonicalBytes::from_vec(b"lost ownership".to_vec()),
+        ))?;
+        let retained_lost_ownership = lost_ownership.source.events[0].payload.clone();
+        assert!(matches!(
+            lost_ownership.zeroize(),
+            Err(CoreError::Storage(message)) if message.contains("lost exclusive ownership")
+        ));
+        assert_eq!(retained_lost_ownership.as_slice(), b"lost ownership");
+
+        let unique_export =
+            plaintext_staging_export(CanonicalBytes::from_vec(b"owned plaintext".to_vec()));
+        let mut staging = RecipientExportPlaintextStagingV1::new(unique_export)?;
+        staging.zeroize()?;
+        assert_eq!(staging.source().timeline.meta.name.as_deref(), Some(""));
+        assert_eq!(staging.source().events[0].event_type.as_str(), "");
+        assert!(staging.source().events[0]
+            .payload
+            .as_slice()
+            .iter()
+            .all(|byte| *byte == 0));
+        staging.zeroize()?;
+
+        let dropped_staging = RecipientExportPlaintextStagingV1::new(plaintext_staging_export(
+            CanonicalBytes::from_vec(b"drop plaintext".to_vec()),
+        ))?;
+        drop(dropped_staging);
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_durability_requires_wal_and_full_synchronous_mode() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA journal_mode=DELETE")?;
+        assert!(matches!(
+            ensure_recipient_export_durability(&fixture.store.conn),
+            Err(CoreError::Storage(message)) if message.contains("requires SQLite WAL")
+        ));
+
+        let fixture = recipient_publication_fixture()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA synchronous=NORMAL")?;
+        let expected_synchronous = current_sqlite_synchronous_level(&fixture.store.conn)?;
+        RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE.with(|override_value| {
+            override_value.set(Some(1));
+        });
+        assert!(matches!(
+            ensure_recipient_export_durability(&fixture.store.conn),
+            Err(CoreError::Storage(message)) if message.contains("synchronous=FULL")
+        ));
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            expected_synchronous
+        );
+        set_recipient_export_synchronous_read_failure(true);
+        let synchronous_read_failure = ensure_recipient_export_durability(&fixture.store.conn);
+        set_recipient_export_synchronous_read_failure(false);
+        assert!(matches!(
+            synchronous_read_failure,
+            Err(CoreError::Storage(message))
+                if message.contains("injected recipient export synchronous read failure")
+        ));
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            expected_synchronous
+        );
+        let previous_synchronous = ensure_recipient_export_durability(&fixture.store.conn)?;
+        assert!(current_sqlite_synchronous_level(&fixture.store.conn)? >= 2);
+        restore_recipient_export_synchronous_level(&fixture.store.conn, previous_synchronous)?;
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            expected_synchronous
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_durability_rejects_unavailable_pragmas() -> RecipientTestResult {
+        for denied in [
+            DeniedRecipientExportPragma::JournalMode,
+            DeniedRecipientExportPragma::SynchronousRead,
+            DeniedRecipientExportPragma::SynchronousWrite,
+        ] {
+            let fixture = recipient_publication_fixture()?;
+            deny_recipient_export_pragma(&fixture.store.conn, denied)?;
+            let result = ensure_recipient_export_durability(&fixture.store.conn);
+            clear_recipient_export_authorizer(&fixture.store.conn)?;
+            assert!(result.is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_durability_rejects_failed_restoration() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA synchronous=NORMAL")?;
+        deny_second_recipient_export_synchronous_write(&fixture.store.conn)?;
+        RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE.with(|override_value| {
+            override_value.set(Some(1));
+        });
+        let restore_after_low_level = ensure_recipient_export_durability(&fixture.store.conn);
+        RECIPIENT_DURABILITY_SYNCHRONOUS_OVERRIDE.with(|override_value| {
+            override_value.set(None);
+        });
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(restore_after_low_level.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA synchronous=NORMAL")?;
+        deny_second_recipient_export_synchronous_write(&fixture.store.conn)?;
+        set_recipient_export_synchronous_read_failure(true);
+        let restore_after_read_failure = ensure_recipient_export_durability(&fixture.store.conn);
+        set_recipient_export_synchronous_read_failure(false);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(restore_after_read_failure.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_operations_restore_connection_synchronous_mode() -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA synchronous=NORMAL")?;
+        let expected_synchronous = current_sqlite_synchronous_level(&fixture.store.conn)?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+
+        fixture
+            .store
+            .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            expected_synchronous
+        );
+
+        set_random_failure(true);
+        let failed_publication =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request);
+        set_random_failure(false);
+        assert!(failed_publication.is_err());
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            expected_synchronous
+        );
+
+        set_begin_failure(true);
+        let failed_recovery = fixture.store.recover_recipient_exports(&fixture.owner);
+        set_begin_failure(false);
+        assert!(failed_recovery.is_err());
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            expected_synchronous
+        );
+
+        fixture.store.recover_recipient_exports(&fixture.owner)?;
+        assert_eq!(
+            current_sqlite_synchronous_level(&fixture.store.conn)?,
+            expected_synchronous
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fresh_recipient_export_id_rejects_zero_bytes() {
+        override_next_recipient_random_bytes(vec![0; 16]);
+        assert!(matches!(
+            fresh_recipient_export_id(),
+            Err(RecipientExportPublicationErrorV1::Export(
+                RecipientExportErrorV1::FieldOutOfBounds
+            ))
+        ));
     }
 
     #[test]
@@ -2323,6 +4192,1417 @@ mod tests {
                 KeyRegistryErrorV1::DestructionPending
             ))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_publication_rolls_back_stale_source_and_rejects_unknown_artifact(
+    ) -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        assert!(matches!(
+            fixture.store.publish_recipient_export_under_fences(
+                &fixture.owner,
+                &request,
+                Seq::ZERO,
+            ),
+            Err(RecipientExportPublicationErrorV1::SourceChanged)
+        ));
+
+        let unsupported_artifact = RecipientExportRequestV1 {
+            timeline_id: request.timeline_id,
+            recipient: request.recipient,
+            artifact_digest: ErasureReferenceV1::from_digest([243; 32]),
+            evaluation: request.evaluation,
+            token: request.token,
+            now_secs: request.now_secs,
+        };
+        assert!(matches!(
+            fixture.store.publish_recipient_export(
+                &fixture.authority,
+                &fixture.owner,
+                &unsupported_artifact,
+            ),
+            Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+        ));
+
+        let publication =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
+        assert!(!fixture
+            .store
+            .read_recipient_export(&fixture.owner, publication.export_id)?
+            .is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_publication_faults_leave_no_catalog_visible_object() -> RecipientTestResult {
+        for failure in [0_usize, 1] {
+            let mut fixture = recipient_publication_fixture()?;
+            let export_id = [u8::try_from(failure + 1)?; 16];
+            override_next_recipient_random_bytes(export_id.to_vec());
+            let request = recipient_publication_request(
+                fixture.timeline,
+                fixture.descriptor,
+                &fixture.evaluation,
+                &fixture.token,
+            );
+            fail_fsync_at(failure);
+            assert!(fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)
+                .is_err());
+            clear_fsync_fault();
+            fixture.store.recover_recipient_exports(&fixture.owner)?;
+            assert!(matches!(
+                fixture
+                    .store
+                    .read_recipient_export(&fixture.owner, export_id),
+                Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+            ));
+        }
+
+        for fault in [
+            set_open_failure as fn(bool),
+            set_read_failure,
+            set_stat_failure,
+            set_write_failure,
+        ] {
+            let mut fixture = recipient_publication_fixture()?;
+            let request = recipient_publication_request(
+                fixture.timeline,
+                fixture.descriptor,
+                &fixture.evaluation,
+                &fixture.token,
+            );
+            fault(true);
+            assert!(fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)
+                .is_err());
+            fault(false);
+            fixture.store.recover_recipient_exports(&fixture.owner)?;
+            let entries = std::fs::read_dir(&fixture.owner.directory)?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert!(!entries
+                .iter()
+                .any(|name| name.starts_with("recipient-export-")));
+        }
+
+        let mut fixture = recipient_publication_fixture()?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        set_random_failure(true);
+        assert!(fixture
+            .store
+            .publish_recipient_export(&fixture.authority, &fixture.owner, &request)
+            .is_err());
+        set_random_failure(false);
+        fixture.store.recover_recipient_exports(&fixture.owner)?;
+        assert!(matches!(
+            fixture
+                .store
+                .read_recipient_export(&fixture.owner, [255; 16]),
+            Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_publication_pre_authorization_rejects_wrong_owner_and_missing_registry(
+    ) -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        let expected_logical_head =
+            SqliteStore::logical_head_unchecked_on(&fixture.store.conn, fixture.timeline)?;
+        let wrong_owner_token = fixture.authority.record_grant_on_timeline(
+            fixture.timeline,
+            &ConsentGrantedV1 {
+                subject_id: EntityId::new(),
+                grantee_id: fixture.owner.grantee_id,
+                purpose: "wrong-recipient-publication-owner".to_owned(),
+                modalities: pos_core::MODALITY_EXPORT,
+                min_geo_resolution: 0,
+                fork_permitted: false,
+                export_permitted: true,
+                retention_days: 1,
+                expiry_secs: 0,
+                grant_seq: 2,
+            },
+        );
+        let wrong_owner_request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &wrong_owner_token,
+        );
+        assert!(matches!(
+            fixture.store.publish_recipient_export_under_fences(
+                &fixture.owner,
+                &wrong_owner_request,
+                expected_logical_head,
+            ),
+            Err(RecipientExportPublicationErrorV1::Consent(
+                ConsentError::NoConsent
+            ))
+        ));
+
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        fixture
+            .store
+            .conn
+            .execute("DELETE FROM key_registry WHERE singleton = 1", [])?;
+        assert!(matches!(
+            fixture.store.publish_recipient_export_under_fences(
+                &fixture.owner,
+                &request,
+                expected_logical_head,
+            ),
+            Err(RecipientExportPublicationErrorV1::Registry(
+                KeyRegistryErrorV1::RegistryUnavailable
+            ))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_publication_rejects_identifier_collisions_without_replacing_ciphertext(
+    ) -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        let export_id = [31; 16];
+        override_next_recipient_random_bytes(export_id.to_vec());
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        let publication =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
+        assert_eq!(publication.export_id, export_id);
+        let original = fixture
+            .store
+            .read_recipient_export(&fixture.owner, export_id)?;
+
+        override_next_recipient_random_bytes(export_id.to_vec());
+        let error = fixture
+            .store
+            .publish_recipient_export(&fixture.authority, &fixture.owner, &request)
+            .err()
+            .ok_or("recipient export ID collision unexpectedly succeeded")?;
+        assert!(matches!(
+            error,
+            RecipientExportPublicationErrorV1::IdentifierCollision
+        ));
+        assert_eq!(
+            fixture
+                .store
+                .read_recipient_export(&fixture.owner, export_id)?,
+            original
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_publication_reader_rejects_each_invalid_catalog_binding() -> RecipientTestResult {
+        for mutation in [
+            "UPDATE recipient_export_catalog_v1 SET owner_id = 'wrong-owner'",
+            "UPDATE recipient_export_catalog_v1 SET recipient_epoch = 2",
+            "UPDATE recipient_export_catalog_v1 SET recipient_descriptor = X'00'",
+            "UPDATE recipient_export_catalog_v1 SET timeline_id = 'not-a-timeline'",
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE recipient_export_catalog_v1 SET local_head = -1;
+             PRAGMA ignore_check_constraints = OFF",
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE recipient_export_catalog_v1 SET logical_head = -1;
+             PRAGMA ignore_check_constraints = OFF",
+            "UPDATE recipient_export_catalog_v1 SET ciphertext_length = 1075838977",
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE recipient_export_catalog_v1 SET ciphertext_digest = X'00';
+             PRAGMA ignore_check_constraints = OFF",
+        ] {
+            let mut fixture = recipient_publication_fixture()?;
+            let request = recipient_publication_request(
+                fixture.timeline,
+                fixture.descriptor,
+                &fixture.evaluation,
+                &fixture.token,
+            );
+            let publication = fixture.store.publish_recipient_export(
+                &fixture.authority,
+                &fixture.owner,
+                &request,
+            )?;
+            fixture.store.conn.execute_batch(mutation)?;
+            assert!(matches!(
+                fixture
+                    .store
+                    .read_recipient_export(&fixture.owner, publication.export_id),
+                Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_publication_reader_rejects_a_tampered_ciphertext() -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        let publication =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
+        let name = recipient_export_final_name(publication.export_id);
+        let path = fixture.owner.directory.join(
+            std::str::from_utf8(&name).map_err(|error| CoreError::Storage(error.to_string()))?,
+        );
+        let mut encoded =
+            std::fs::read(&path).map_err(|error| CoreError::Storage(error.to_string()))?;
+        let first = encoded
+            .first_mut()
+            .ok_or_else(|| CoreError::Storage("recipient ciphertext is empty".to_owned()))?;
+        *first ^= 1;
+        std::fs::write(path, encoded).map_err(|error| CoreError::Storage(error.to_string()))?;
+        assert!(matches!(
+            fixture
+                .store
+                .read_recipient_export(&fixture.owner, publication.export_id),
+            Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_publication_reader_rejects_catalog_matched_invalid_envelopes(
+    ) -> RecipientTestResult {
+        for invalid_envelope in [false, true] {
+            let mut fixture = recipient_publication_fixture()?;
+            let request = recipient_publication_request(
+                fixture.timeline,
+                fixture.descriptor,
+                &fixture.evaluation,
+                &fixture.token,
+            );
+            let publication = fixture.store.publish_recipient_export(
+                &fixture.authority,
+                &fixture.owner,
+                &request,
+            )?;
+            let replacement = if invalid_envelope {
+                encrypted_export(fixture.descriptor)?
+            } else {
+                vec![0]
+            };
+            let replacement_digest = Hash::from_bytes(*blake3::hash(&replacement).as_bytes());
+            let replacement_length = i64::try_from(replacement.len())?;
+            fixture.store.conn.execute(
+                "UPDATE recipient_export_catalog_v1
+                 SET ciphertext_length = ?1, ciphertext_digest = ?2
+                 WHERE export_id = ?3",
+                rusqlite::params![
+                    replacement_length,
+                    replacement_digest.as_bytes().as_slice(),
+                    publication.export_id.as_slice(),
+                ],
+            )?;
+            let name = recipient_export_final_name(publication.export_id);
+            let path = fixture.owner.directory.join(
+                std::str::from_utf8(&name)
+                    .map_err(|error| CoreError::Storage(error.to_string()))?,
+            );
+            std::fs::write(path, replacement)
+                .map_err(|error| CoreError::Storage(error.to_string()))?;
+            assert!(matches!(
+                fixture
+                    .store
+                    .read_recipient_export(&fixture.owner, publication.export_id),
+                Err(RecipientExportPublicationErrorV1::ArtifactUnavailable)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_publication_pending_journal_recovers_only_recorded_objects() -> RecipientTestResult
+    {
+        let export_id = [32; 16];
+        let final_name = recipient_export_final_name(export_id);
+        let staging_name = recipient_export_staging_name(export_id);
+        assert_ne!(final_name, staging_name);
+
+        let mut fixture = recipient_publication_fixture()?;
+        override_next_recipient_random_bytes(export_id.to_vec());
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        let publication =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request)?;
+        let encoded = fixture
+            .store
+            .read_recipient_export(&fixture.owner, publication.export_id)?;
+        let orphan_name = recipient_export_final_name([33; 16]);
+        let orphan = fixture.owner.directory.join(
+            std::str::from_utf8(&orphan_name)
+                .map_err(|error| CoreError::Storage(error.to_string()))?,
+        );
+        std::fs::write(&orphan, b"orphan")?;
+        std::fs::set_permissions(&orphan, std::fs::Permissions::from_mode(0o600))?;
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, [33; 16])?;
+
+        let untracked_name = recipient_export_final_name([34; 16]);
+        let untracked = fixture.owner.directory.join(
+            std::str::from_utf8(&untracked_name)
+                .map_err(|error| CoreError::Storage(error.to_string()))?,
+        );
+        std::fs::write(&untracked, b"untracked")?;
+        std::fs::set_permissions(&untracked, std::fs::Permissions::from_mode(0o600))?;
+
+        fixture.store.recover_recipient_exports(&fixture.owner)?;
+        assert!(!orphan.exists());
+        assert!(untracked.exists());
+        assert_eq!(
+            fixture
+                .store
+                .read_recipient_export(&fixture.owner, publication.export_id)?,
+            encoded
+        );
+
+        for index in 0..=MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS {
+            let mut pending = [0; 16];
+            pending[..8].copy_from_slice(&u64::try_from(index + 1)?.to_be_bytes());
+            pending[15] = 44;
+            record_recipient_export_pending(&fixture.store.conn, &fixture.owner, pending)?;
+        }
+        assert!(matches!(
+            fixture.store.recover_recipient_exports(&fixture.owner),
+            Err(RecipientExportPublicationErrorV1::RecoveryIncomplete)
+        ));
+        fixture.store.recover_recipient_exports(&fixture.owner)?;
+        assert!(untracked.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_transaction_failures_preserve_closed_outcomes() -> RecipientTestResult {
+        let autocommit = Connection::open_in_memory()?;
+        assert!(matches!(
+            finish_recipient_export_transaction::<()>(
+                &autocommit,
+                Err(RecipientExportPublicationErrorV1::ArtifactUnavailable),
+            ),
+            Err(RecipientExportPublicationErrorV1::Store(
+                CoreError::StorageOutcomeUnknown(_)
+            ))
+        ));
+        assert!(matches!(
+            finish_recipient_export_transaction(&autocommit, Ok(())),
+            Err(RecipientExportPublicationErrorV1::Store(
+                CoreError::StorageOutcomeUnknown(_)
+            ))
+        ));
+
+        let deferred_constraint = Connection::open_in_memory()?;
+        deferred_constraint.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE child (
+                 parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED
+             );
+             BEGIN IMMEDIATE;
+             INSERT INTO child (parent_id) VALUES (1);",
+        )?;
+        assert!(matches!(
+            finish_recipient_export_transaction(&deferred_constraint, Ok(())),
+            Err(RecipientExportPublicationErrorV1::Store(CoreError::Storage(message)))
+                if message.contains("transaction commit failed")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_catalog_and_pending_decoders_reject_corrupt_storage() -> RecipientTestResult
+    {
+        let fixture = recipient_publication_fixture()?;
+        let epoch = i64::try_from(fixture.descriptor.identity().epoch)?;
+        let owner_id = recipient_owner_id_from_grantee(fixture.owner.grantee_id)?;
+        let owner_id_text = owner_id.as_str().to_owned();
+        let stored = |recipient_epoch, local_head, logical_head, ciphertext_length| {
+            StoredRecipientExportV1 {
+                owner_id: owner_id_text.clone(),
+                recipient_epoch,
+                recipient_descriptor: fixture.descriptor.encode(),
+                timeline_id: fixture.timeline.to_string(),
+                local_head,
+                logical_head,
+                ciphertext_length,
+                ciphertext_digest: vec![0; 32],
+            }
+        };
+        assert!(stored(-1, 1, 1, 1).validate_for(&fixture.owner).is_none());
+        assert!(stored(epoch, -1, 1, 1)
+            .validate_for(&fixture.owner)
+            .is_none());
+        assert!(stored(epoch, 1, -1, 1)
+            .validate_for(&fixture.owner)
+            .is_none());
+        assert!(stored(epoch, 1, 1, -1)
+            .validate_for(&fixture.owner)
+            .is_none());
+        assert!(stored(
+            epoch,
+            1,
+            1,
+            i64::try_from(MAX_RECIPIENT_EXPORT_CIPHERTEXT_BYTES)? + 1
+        )
+        .validate_for(&fixture.owner)
+        .is_none());
+
+        let empty = Connection::open_in_memory()?;
+        assert!(remove_recipient_export_pending(&empty, [1; 16]).is_err());
+        assert!(load_recipient_export_pending(&empty, &fixture.owner).is_err());
+
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        fixture.store.conn.execute(
+            "INSERT INTO recipient_export_pending_v1 (export_id, owner_id) VALUES (?1, ?2)",
+            rusqlite::params![vec![1_u8; 15], owner_id.as_str()],
+        )?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = OFF")?;
+        assert!(load_recipient_export_pending(&fixture.store.conn, &fixture.owner).is_err());
+
+        let mut publication = recipient_test_publication(&fixture, [2; 16]);
+        publication.recipient = RecipientKeyDescriptorV1::for_grantee(
+            fixture.owner.grantee_id,
+            u64::MAX,
+            fixture.descriptor.public_key(),
+        )?;
+        assert!(
+            record_recipient_export_catalog(&fixture.store.conn, &fixture.owner, &publication)
+                .is_err()
+        );
+
+        let mut publication = recipient_test_publication(&fixture, [3; 16]);
+        publication.local_head = Seq::from_u64(u64::MAX);
+        assert!(
+            record_recipient_export_catalog(&fixture.store.conn, &fixture.owner, &publication)
+                .is_err()
+        );
+
+        let mut publication = recipient_test_publication(&fixture, [4; 16]);
+        publication.logical_head = Seq::from_u64(u64::MAX);
+        assert!(
+            record_recipient_export_catalog(&fixture.store.conn, &fixture.owner, &publication)
+                .is_err()
+        );
+
+        let mut publication = recipient_test_publication(&fixture, [5; 16]);
+        publication.ciphertext_length = u64::MAX;
+        assert!(
+            record_recipient_export_catalog(&fixture.store.conn, &fixture.owner, &publication)
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn recipient_export_objects_and_recovery_reject_unsafe_paths() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        let unsafe_id = [81; 16];
+        let final_name = recipient_export_final_name(unsafe_id);
+        let final_path = fixture.owner.directory.join(
+            std::str::from_utf8(&final_name)
+                .map_err(|error| CoreError::Storage(error.to_string()))?,
+        );
+        std::fs::write(&final_path, b"unsafe")?;
+        std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o644))?;
+        let metadata = std::fs::metadata(&final_path)?;
+        assert!(validate_recipient_export_file(&metadata, &fixture.owner, 6).is_err());
+        assert!(verify_recipient_export_entry(&fixture.owner, &final_name, 6).is_err());
+        assert!(remove_pending_recipient_export_object(&fixture.owner, &final_name).is_err());
+
+        std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o600))?;
+        set_unlink_failure(true);
+        assert!(remove_pending_recipient_export_object(&fixture.owner, &final_name).is_err());
+        set_unlink_failure(false);
+        assert!(remove_pending_recipient_export_object(
+            &fixture.owner,
+            &final_name
+        )?);
+        set_stat_failure(true);
+        assert!(recipient_export_test_object_exists(&fixture.owner, &final_name).is_err());
+        set_stat_failure(false);
+
+        assert!(read_recipient_export_ciphertext(
+            &fixture.owner,
+            unsafe_id,
+            MAX_RECIPIENT_EXPORT_CIPHERTEXT_BYTES + 1,
+        )
+        .is_err());
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        assert!(
+            write_recipient_export_ciphertext(&fixture.owner, [82; 16], b"ciphertext").is_err()
+        );
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        let catalog_id = [83; 16];
+        let publication = recipient_test_publication(&fixture, catalog_id);
+        record_recipient_export_catalog(&fixture.store.conn, &fixture.owner, &publication)?;
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, catalog_id)?;
+        assert_eq!(
+            reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner)?,
+            RecipientExportRecoveryProgressV1::Complete
+        );
+
+        let staged_id = [84; 16];
+        let staging_name = recipient_export_staging_name(staged_id);
+        let staging_path = fixture.owner.directory.join(
+            std::str::from_utf8(&staging_name)
+                .map_err(|error| CoreError::Storage(error.to_string()))?,
+        );
+        std::fs::write(&staging_path, b"staged")?;
+        std::fs::set_permissions(&staging_path, std::fs::Permissions::from_mode(0o600))?;
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, staged_id)?;
+        assert_eq!(
+            reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner)?,
+            RecipientExportRecoveryProgressV1::Complete
+        );
+        assert!(!staging_path.exists());
+
+        let sync_id = [85; 16];
+        let sync_name = recipient_export_final_name(sync_id);
+        let sync_path = fixture.owner.directory.join(
+            std::str::from_utf8(&sync_name)
+                .map_err(|error| CoreError::Storage(error.to_string()))?,
+        );
+        std::fs::write(&sync_path, b"sync")?;
+        std::fs::set_permissions(&sync_path, std::fs::Permissions::from_mode(0o600))?;
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, sync_id)?;
+        fail_fsync_at(0);
+        assert!(reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner).is_err());
+        clear_fsync_fault();
+
+        let unsafe_pending_id = [86; 16];
+        let unsafe_pending_name = recipient_export_final_name(unsafe_pending_id);
+        let unsafe_pending_path = fixture.owner.directory.join(
+            std::str::from_utf8(&unsafe_pending_name)
+                .map_err(|error| CoreError::Storage(error.to_string()))?,
+        );
+        std::fs::write(&unsafe_pending_path, b"unsafe")?;
+        std::fs::set_permissions(&unsafe_pending_path, std::fs::Permissions::from_mode(0o644))?;
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, unsafe_pending_id)?;
+        assert!(reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner).is_err());
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn recipient_export_publication_rejects_missing_or_mismatched_material() -> RecipientTestResult
+    {
+        let fixture = recipient_publication_fixture()?;
+        let registry = fixture
+            .store
+            .load_key_registry()?
+            .ok_or("recipient registry is unavailable")?;
+        let registered_digest = registry
+            .key_record(fixture.descriptor.identity())
+            .and_then(|record| record.private_material_digest)
+            .ok_or("recipient material is unavailable")?;
+
+        let (_, foreign_public_key) =
+            pos_crypto::recipient_key::derive_recipient_keypair_v1(&[9; 32]);
+        let absent_recipient = RecipientKeyDescriptorV1::for_grantee(
+            fixture.owner.grantee_id,
+            fixture.descriptor.identity().epoch + 1,
+            foreign_public_key,
+        )?;
+        let absent_request = recipient_publication_request(
+            fixture.timeline,
+            absent_recipient,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        assert!(matches!(
+            fixture
+                .store
+                .publish_recipient_export_with_registered_material(
+                    &fixture.owner,
+                    &absent_request,
+                    registered_digest,
+                    [91; 16],
+                    Seq::from_u64(1),
+                ),
+            Err(RecipientExportPublicationErrorV1::MaterialUnavailable)
+        ));
+
+        let mismatched_recipient = RecipientKeyDescriptorV1::for_grantee(
+            fixture.owner.grantee_id,
+            fixture.descriptor.identity().epoch,
+            foreign_public_key,
+        )?;
+        let mismatched_request = recipient_publication_request(
+            fixture.timeline,
+            mismatched_recipient,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        assert!(matches!(
+            fixture
+                .store
+                .publish_recipient_export_with_registered_material(
+                    &fixture.owner,
+                    &mismatched_request,
+                    registered_digest,
+                    [92; 16],
+                    Seq::from_u64(1),
+                ),
+            Err(RecipientExportPublicationErrorV1::MaterialUnavailable)
+        ));
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn recipient_export_publication_rejects_tampered_inventory_and_private_key(
+    ) -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        let replacement_digest = Hash::from_bytes([93; 32]);
+        fixture.store.conn.execute(
+            "UPDATE recipient_key_inventory_v1 SET material_digest = ?1",
+            [replacement_digest.as_bytes().as_slice()],
+        )?;
+        assert!(matches!(
+            fixture
+                .store
+                .publish_recipient_export_with_registered_material(
+                    &fixture.owner,
+                    &request,
+                    replacement_digest,
+                    [93; 16],
+                    Seq::from_u64(1),
+                ),
+            Err(RecipientExportPublicationErrorV1::MaterialUnavailable)
+        ));
+
+        let (_, private_path, _, _) = SqliteStore::recipient_inventory_path(
+            &fixture.store.conn,
+            &fixture.owner,
+            fixture.descriptor.identity(),
+        )?;
+        let (replacement_private, _) =
+            pos_crypto::recipient_key::derive_recipient_keypair_v1(&[10; 32]);
+        let replacement_digest = key_material_digest(&replacement_private);
+        std::fs::write(&private_path, replacement_private)?;
+        fixture.store.conn.execute(
+            "UPDATE recipient_key_inventory_v1 SET material_digest = ?1",
+            [replacement_digest.as_bytes().as_slice()],
+        )?;
+        assert!(matches!(
+            fixture
+                .store
+                .publish_recipient_export_with_registered_material(
+                    &fixture.owner,
+                    &request,
+                    replacement_digest,
+                    [94; 16],
+                    Seq::from_u64(1),
+                ),
+            Err(RecipientExportPublicationErrorV1::Registry(
+                KeyRegistryErrorV1::EncryptionKeyMismatch
+            ))
+        ));
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn recipient_export_publication_recovers_after_seed_entropy_failure() -> RecipientTestResult {
+        let mut entropy_fixture = recipient_publication_fixture()?;
+        entropy_fixture
+            .store
+            .set_recipient_export_publication_test_export_id([95; 16])?;
+        set_random_failure(true);
+        let entropy_request = recipient_publication_request(
+            entropy_fixture.timeline,
+            entropy_fixture.descriptor,
+            &entropy_fixture.evaluation,
+            &entropy_fixture.token,
+        );
+        assert!(entropy_fixture
+            .store
+            .publish_recipient_export(
+                &entropy_fixture.authority,
+                &entropy_fixture.owner,
+                &entropy_request,
+            )
+            .is_err());
+        set_random_failure(false);
+        entropy_fixture
+            .store
+            .recover_recipient_exports(&entropy_fixture.owner)?;
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_publication_maps_initial_preflight_failures() -> RecipientTestResult {
+        let mut head_fixture = recipient_publication_fixture()?;
+        let head_request = recipient_publication_request(
+            head_fixture.timeline,
+            head_fixture.descriptor,
+            &head_fixture.evaluation,
+            &head_fixture.token,
+        );
+        deny_recipient_export_sql_action(
+            &head_fixture.store.conn,
+            RecipientExportSqlAction::Select,
+        )?;
+        let head_result = head_fixture.store.publish_recipient_export(
+            &head_fixture.authority,
+            &head_fixture.owner,
+            &head_request,
+        );
+        clear_recipient_export_authorizer(&head_fixture.store.conn)?;
+        assert!(head_result.is_err());
+
+        let mut gate_fixture = recipient_publication_fixture()?;
+        let gate_request = recipient_publication_request(
+            gate_fixture.timeline,
+            gate_fixture.descriptor,
+            &gate_fixture.evaluation,
+            &gate_fixture.token,
+        );
+        gate_fixture.store.erasure_gate = None;
+        assert!(gate_fixture
+            .store
+            .publish_recipient_export(&gate_fixture.authority, &gate_fixture.owner, &gate_request)
+            .is_err());
+
+        let mut durability_fixture = recipient_publication_fixture()?;
+        let durability_request = recipient_publication_request(
+            durability_fixture.timeline,
+            durability_fixture.descriptor,
+            &durability_fixture.evaluation,
+            &durability_fixture.token,
+        );
+        durability_fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA journal_mode=DELETE")?;
+        assert!(durability_fixture
+            .store
+            .publish_recipient_export(
+                &durability_fixture.authority,
+                &durability_fixture.owner,
+                &durability_request,
+            )
+            .is_err());
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn recipient_export_publication_maps_source_head_append_failure() -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        fixture
+            .store
+            .inject_recipient_export_publication_test_fault(
+                RecipientExportPublicationTestFaultV1::SourceHeadChanged,
+            )?;
+        set_begin_failure(true);
+        let result =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request);
+        set_begin_failure(false);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_publication_maps_inner_writer_reservation_failure() -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        deny_nth_recipient_export_begin(&fixture.store.conn, 3)?;
+        let result =
+            fixture
+                .store
+                .publish_recipient_export(&fixture.authority, &fixture.owner, &request);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_pre_authorization_maps_query_failures() -> RecipientTestResult {
+        let mut owner_fixture = recipient_publication_fixture()?;
+        let owner_request = recipient_publication_request(
+            owner_fixture.timeline,
+            owner_fixture.descriptor,
+            &owner_fixture.evaluation,
+            &owner_fixture.token,
+        );
+        deny_recipient_export_sql_action(
+            &owner_fixture.store.conn,
+            RecipientExportSqlAction::Read("timeline_owners"),
+        )?;
+        let owner_result = owner_fixture.store.publish_recipient_export(
+            &owner_fixture.authority,
+            &owner_fixture.owner,
+            &owner_request,
+        );
+        clear_recipient_export_authorizer(&owner_fixture.store.conn)?;
+        assert!(owner_result.is_err());
+
+        let mut registry_fixture = recipient_publication_fixture()?;
+        let registry_request = recipient_publication_request(
+            registry_fixture.timeline,
+            registry_fixture.descriptor,
+            &registry_fixture.evaluation,
+            &registry_fixture.token,
+        );
+        deny_recipient_export_sql_action(
+            &registry_fixture.store.conn,
+            RecipientExportSqlAction::Read("key_registry"),
+        )?;
+        let registry_result = registry_fixture.store.publish_recipient_export(
+            &registry_fixture.authority,
+            &registry_fixture.owner,
+            &registry_request,
+        );
+        clear_recipient_export_authorizer(&registry_fixture.store.conn)?;
+        assert!(registry_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_pre_authorization_rejects_lost_pending_reservation() -> RecipientTestResult
+    {
+        let fixture = recipient_publication_fixture()?;
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        fixture.store.conn.execute_batch(
+            "CREATE TRIGGER remove_recipient_export_reservation
+             AFTER INSERT ON recipient_export_pending_v1
+             BEGIN
+                 DELETE FROM recipient_export_pending_v1 WHERE export_id = NEW.export_id;
+             END",
+        )?;
+        let request = recipient_publication_request(
+            fixture.timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        let expected_head =
+            SqliteStore::logical_head_unchecked_on(&fixture.store.conn, fixture.timeline)?;
+        assert!(matches!(
+            fixture.store.publish_recipient_export_under_fences(
+                &fixture.owner,
+                &request,
+                expected_head,
+            ),
+            Err(RecipientExportPublicationErrorV1::Store(CoreError::Storage(message)))
+                if message.contains("reservation is unavailable")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_reservation_maps_begin_and_directory_failures() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        set_begin_failure(true);
+        let begin_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        set_begin_failure(false);
+        assert!(begin_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        let directory_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        assert!(directory_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("DROP TABLE recipient_key_inventory_v1")?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::CreateTable("recipient_key_inventory_v1"),
+        )?;
+        let custody_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(custody_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Read("recipient_custody_directory_claims_v1"),
+        )?;
+        let claim_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(claim_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_reservation_maps_catalog_and_pending_failures() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        fixture
+            .store
+            .conn
+            .execute_batch("DROP TABLE recipient_export_catalog_v1")?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::CreateTable("recipient_export_catalog_v1"),
+        )?;
+        let catalog_setup_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(catalog_setup_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Read("recipient_export_catalog_v1"),
+        )?;
+        let catalog_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(catalog_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Read("recipient_export_pending_v1"),
+        )?;
+        let pending_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(pending_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Insert("recipient_export_pending_v1"),
+        )?;
+        let insert_result = fixture.store.reserve_recipient_export_id(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(insert_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_recovery_maps_preflight_and_object_failures() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        set_begin_failure(true);
+        let begin_result = fixture
+            .store
+            .recover_recipient_exports_under_writer(&fixture.owner);
+        set_begin_failure(false);
+        assert!(begin_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        let directory_result = fixture
+            .store
+            .recover_recipient_exports_under_writer(&fixture.owner);
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        assert!(directory_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("DROP TABLE recipient_key_inventory_v1")?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::CreateTable("recipient_key_inventory_v1"),
+        )?;
+        let custody_result = fixture
+            .store
+            .recover_recipient_exports_under_writer(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(custody_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        fixture
+            .store
+            .conn
+            .execute_batch("DROP TABLE recipient_export_catalog_v1")?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::CreateTable("recipient_export_catalog_v1"),
+        )?;
+        let catalog_result = fixture
+            .store
+            .recover_recipient_exports_under_writer(&fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(catalog_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, [17; 16])?;
+        set_stat_failure(true);
+        let object_result = fixture
+            .store
+            .recover_recipient_exports_under_writer(&fixture.owner);
+        set_stat_failure(false);
+        assert!(object_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_recovery_rejects_unavailable_durability() -> RecipientTestResult {
+        let mut fixture = recipient_publication_fixture()?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA journal_mode=DELETE")?;
+        assert!(fixture
+            .store
+            .recover_recipient_exports(&fixture.owner)
+            .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_reader_maps_directory_catalog_and_object_failures() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        let directory_result = fixture
+            .store
+            .read_recipient_export(&fixture.owner, [18; 16]);
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        assert!(directory_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        deny_recipient_export_sql_action(&fixture.store.conn, RecipientExportSqlAction::Select)?;
+        let catalog_result = fixture
+            .store
+            .read_recipient_export(&fixture.owner, [19; 16]);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(catalog_result.is_err());
+
+        let fixture = recipient_publication_fixture()?;
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        let publication = recipient_test_publication(&fixture, [20; 16]);
+        record_recipient_export_catalog(&fixture.store.conn, &fixture.owner, &publication)?;
+        set_open_failure(true);
+        let object_result = fixture
+            .store
+            .read_recipient_export(&fixture.owner, publication.export_id);
+        set_open_failure(false);
+        assert!(object_result.is_err());
+
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        let ciphertext_result = read_recipient_export_ciphertext(&fixture.owner, [21; 16], 0);
+        std::fs::set_permissions(
+            &fixture.owner.directory,
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+        assert!(ciphertext_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_catalog_reader_maps_schema_and_column_failures() -> RecipientTestResult {
+        let connection = Connection::open_in_memory()?;
+        deny_recipient_export_sql_action(&connection, RecipientExportSqlAction::Select)?;
+        let schema_result = load_recipient_export_catalog(&connection, [1; 16]);
+        clear_recipient_export_authorizer(&connection)?;
+        assert!(schema_result.is_err());
+
+        connection.execute_batch(
+            "CREATE TABLE recipient_export_catalog_v1 (
+                export_id,
+                owner_id,
+                recipient_epoch,
+                recipient_descriptor,
+                timeline_id,
+                local_head,
+                logical_head,
+                ciphertext_length,
+                ciphertext_digest
+            )",
+        )?;
+        for values in [
+            "X'01010101010101010101010101010101', X'00', 1, X'00', 'timeline', 1, 1, 1, X'00'",
+            "X'01010101010101010101010101010101', 'owner', X'00', X'00', 'timeline', 1, 1, 1, X'00'",
+            "X'01010101010101010101010101010101', 'owner', 1, 1, 'timeline', 1, 1, 1, X'00'",
+            "X'01010101010101010101010101010101', 'owner', 1, X'00', X'00', 1, 1, 1, X'00'",
+            "X'01010101010101010101010101010101', 'owner', 1, X'00', 'timeline', X'00', 1, 1, X'00'",
+            "X'01010101010101010101010101010101', 'owner', 1, X'00', 'timeline', 1, X'00', 1, X'00'",
+            "X'01010101010101010101010101010101', 'owner', 1, X'00', 'timeline', 1, 1, X'00', X'00'",
+            "X'01010101010101010101010101010101', 'owner', 1, X'00', 'timeline', 1, 1, 1, 1",
+        ] {
+            connection.execute_batch("DELETE FROM recipient_export_catalog_v1")?;
+            connection.execute_batch(&format!(
+                "INSERT INTO recipient_export_catalog_v1 VALUES ({values})"
+            ))?;
+            assert!(load_recipient_export_catalog(&connection, [1; 16]).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_publication_maps_export_catalog_and_pending_failures() -> RecipientTestResult
+    {
+        let mut catalog_fixture = recipient_publication_fixture()?;
+        let catalog_request = recipient_publication_request(
+            catalog_fixture.timeline,
+            catalog_fixture.descriptor,
+            &catalog_fixture.evaluation,
+            &catalog_fixture.token,
+        );
+        deny_recipient_export_sql_action(
+            &catalog_fixture.store.conn,
+            RecipientExportSqlAction::Insert("recipient_export_catalog_v1"),
+        )?;
+        let catalog_result = catalog_fixture.store.publish_recipient_export(
+            &catalog_fixture.authority,
+            &catalog_fixture.owner,
+            &catalog_request,
+        );
+        clear_recipient_export_authorizer(&catalog_fixture.store.conn)?;
+        assert!(catalog_result.is_err());
+
+        let mut pending_fixture = recipient_publication_fixture()?;
+        let pending_request = recipient_publication_request(
+            pending_fixture.timeline,
+            pending_fixture.descriptor,
+            &pending_fixture.evaluation,
+            &pending_fixture.token,
+        );
+        deny_recipient_export_sql_action(
+            &pending_fixture.store.conn,
+            RecipientExportSqlAction::Delete("recipient_export_pending_v1"),
+        )?;
+        let pending_result = pending_fixture.store.publish_recipient_export(
+            &pending_fixture.authority,
+            &pending_fixture.owner,
+            &pending_request,
+        );
+        clear_recipient_export_authorizer(&pending_fixture.store.conn)?;
+        assert!(pending_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_publication_maps_source_export_failure() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        let registry = fixture
+            .store
+            .load_key_registry()?
+            .ok_or("recipient registry is unavailable")?;
+        let registered_digest = registry
+            .key_record(fixture.descriptor.identity())
+            .and_then(|record| record.private_material_digest)
+            .ok_or("recipient material is unavailable")?;
+        let absent_timeline = TimelineId::from_ulid(Ulid::from(96_u128));
+        let request = recipient_publication_request(
+            absent_timeline,
+            fixture.descriptor,
+            &fixture.evaluation,
+            &fixture.token,
+        );
+        assert!(fixture
+            .store
+            .publish_recipient_export_with_registered_material(
+                &fixture.owner,
+                &request,
+                registered_digest,
+                [22; 16],
+                Seq::from_u64(1),
+            )
+            .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_reconciliation_maps_loader_and_catalog_failures() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        let empty = Connection::open_in_memory()?;
+        assert!(reconcile_recipient_export_objects(&empty, &fixture.owner).is_err());
+
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, [23; 16])?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Read("recipient_export_catalog_v1"),
+        )?;
+        let catalog_result =
+            reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(catalog_result.is_err());
+        remove_recipient_export_pending(&fixture.store.conn, [23; 16])?;
+
+        let catalog_id = [24; 16];
+        let publication = recipient_test_publication(&fixture, catalog_id);
+        record_recipient_export_catalog(&fixture.store.conn, &fixture.owner, &publication)?;
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, catalog_id)?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Delete("recipient_export_pending_v1"),
+        )?;
+        let delete_result = reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(delete_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_reconciliation_maps_object_and_pending_failures() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, [25; 16])?;
+        set_stat_failure(true);
+        let object_result = reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner);
+        set_stat_failure(false);
+        assert!(object_result.is_err());
+
+        record_recipient_export_pending(&fixture.store.conn, &fixture.owner, [26; 16])?;
+        deny_recipient_export_sql_action(
+            &fixture.store.conn,
+            RecipientExportSqlAction::Delete("recipient_export_pending_v1"),
+        )?;
+        let pending_result =
+            reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner);
+        clear_recipient_export_authorizer(&fixture.store.conn)?;
+        assert!(pending_result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_pending_helpers_reject_absent_and_invalid_rows() -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        ensure_recipient_export_catalog(&fixture.store.conn)?;
+        assert!(remove_recipient_export_pending(&fixture.store.conn, [27; 16]).is_err());
+        let owner_id = recipient_owner_id_from_grantee(fixture.owner.grantee_id)?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        fixture.store.conn.execute(
+            "INSERT INTO recipient_export_pending_v1 (export_id, owner_id) VALUES (?1, ?2)",
+            rusqlite::params![1_i64, owner_id.as_str()],
+        )?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = OFF")?;
+        assert!(load_recipient_export_pending(&fixture.store.conn, &fixture.owner).is_err());
+        fixture
+            .store
+            .conn
+            .execute_batch("DELETE FROM recipient_export_pending_v1")?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = ON")?;
+        fixture.store.conn.execute(
+            "INSERT INTO recipient_export_pending_v1 (export_id, owner_id) VALUES (?1, ?2)",
+            rusqlite::params![vec![1_u8; 15], owner_id.as_str()],
+        )?;
+        fixture
+            .store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints = OFF")?;
+        assert!(reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner).is_err());
+
+        fixture
+            .store
+            .conn
+            .execute_batch("DELETE FROM recipient_export_pending_v1")?;
+        let previous_limit = fixture
+            .store
+            .conn
+            .set_limit(Limit::SQLITE_LIMIT_LENGTH, 1)?;
+        let query_result = reconcile_recipient_export_objects(&fixture.store.conn, &fixture.owner);
+        fixture
+            .store
+            .conn
+            .set_limit(Limit::SQLITE_LIMIT_LENGTH, previous_limit)?;
+        assert!(query_result.is_err());
         Ok(())
     }
 }
