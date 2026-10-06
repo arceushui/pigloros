@@ -347,8 +347,7 @@ fn public_assertion_extension_parser_accepts_every_closed_value_class(
 }
 
 #[test]
-fn public_assertion_extension_parser_rejects_truncated_cbor_values(
-) -> Result<(), OwnerBridgeCodecError> {
+fn public_assertion_extension_parser_rejects_truncated_cbor_values() {
     for extension in [
         b"\xa1\x61x\x58\x04x".as_slice(),
         b"\xa1\x61x\x78\x04x".as_slice(),
@@ -367,7 +366,6 @@ fn public_assertion_extension_parser_rejects_truncated_cbor_values(
             Err(OwnerBridgeCodecError::BoundsExceeded)
         );
     }
-    Ok(())
 }
 
 #[test]
