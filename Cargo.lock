@@ -93,7 +93,6 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1973cfbc1a2daf9cf550e74e1f088c28e7f7d8c1e1418fb6c9dc5184b7e84c99"
 dependencies = [
- "crypto-common",
  "crypto-common 0.2.2",
  "inout",
 ]
@@ -1871,7 +1870,6 @@ dependencies = [
  "cc",
  "cfg-if",
  "constant_time_eq",
- "cpufeatures",
  "cpufeatures 0.3.0",
 ]
 
@@ -1929,6 +1927,9 @@ name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
+dependencies = [
+ "allocator-api2",
+]
 
 [[package]]
 name = "bytemuck"
@@ -2020,7 +2021,6 @@ checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cipher",
- "cpufeatures",
  "cpufeatures 0.3.0",
  "rand_core 0.10.1",
 ]
@@ -2070,9 +2070,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
 dependencies = [
- "block-buffer",
  "block-buffer 0.12.1",
- "crypto-common",
  "crypto-common 0.2.2",
  "inout",
 ]
@@ -2561,10 +2559,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5eed333089e2e1c1ac8c6c0398e5e2497b4c9926ca6d0365ed1e099afa5bc23"
 dependencies = [
  "cfg-if",
- "cpufeatures",
  "cpufeatures 0.3.0",
  "curve25519-dalek-derive",
- "digest",
  "digest 0.11.3",
  "fiat-crypto",
  "rand_core 0.10.1",
@@ -2663,10 +2659,8 @@ version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
- "block-buffer",
  "block-buffer 0.12.1",
  "const-oid 0.10.2",
- "crypto-common",
  "crypto-common 0.2.2",
  "ctutils",
 ]
@@ -2743,7 +2737,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0681a4fc24c767085329728d8dfba959af91228aa4610cca4f8ce317ba46ae0"
 dependencies = [
  "der 0.8.2",
- "digest",
+ "digest 0.11.3",
  "elliptic-curve",
  "rfc6979",
  "signature",
@@ -2770,7 +2764,6 @@ dependencies = [
  "ed25519",
  "rand_core 0.10.1",
  "serde",
- "sha2",
  "sha2 0.11.0",
  "signature",
  "subtle",
@@ -2791,8 +2784,8 @@ checksum = "9d65aa39b3a5c1c9c1b745c9a019234bb7a21b77abcb4f4d266d706e2d577d65"
 dependencies = [
  "base16ct",
  "crypto-bigint",
- "crypto-common",
- "digest",
+ "crypto-common 0.2.2",
+ "digest 0.11.3",
  "ff",
  "group",
  "hybrid-array",
@@ -3565,7 +3558,6 @@ version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
 dependencies = [
- "digest",
  "digest 0.11.3",
 ]
 
@@ -3581,7 +3573,6 @@ dependencies = [
  "hkdf",
  "hybrid-array",
  "rand_core 0.10.1",
- "sha2",
  "sha2 0.11.0",
  "subtle",
  "x25519-dalek",
@@ -4243,7 +4234,6 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pp-rs",
- "rustc-hash",
  "rustc-hash 1.1.0",
  "spirv",
  "thiserror 2.0.21",
@@ -4261,7 +4251,6 @@ dependencies = [
  "indexmap",
  "naga",
  "regex",
- "rustc-hash",
  "rustc-hash 1.1.0",
  "thiserror 2.0.21",
  "tracing",
@@ -4708,7 +4697,7 @@ dependencies = [
  "elliptic-curve",
  "primefield",
  "primeorder",
- "sha2",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -4828,7 +4817,6 @@ dependencies = [
  "rustix 1.1.5",
  "serde",
  "serde_json",
- "sha2",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.21",
@@ -4961,7 +4949,6 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c"
 dependencies = [
- "cpufeatures",
  "cpufeatures 0.3.0",
  "universal-hash",
 ]
@@ -5014,7 +5001,6 @@ dependencies = [
  "rustix 1.1.5",
  "serde",
  "serde_json",
- "sha2",
  "sha2 0.11.0",
  "thiserror 2.0.21",
 ]
@@ -5030,7 +5016,6 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
- "sha2",
  "sha2 0.11.0",
  "thiserror 2.0.21",
  "ulid",
@@ -5051,7 +5036,6 @@ dependencies = [
  "rand 0.10.3",
  "serde",
  "serde_json",
- "sha2",
  "sha2 0.11.0",
  "thiserror 2.0.21",
  "ulid",
@@ -5092,7 +5076,7 @@ dependencies = [
  "base64",
  "httparse",
  "p256",
- "sha2",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -5194,7 +5178,6 @@ version = "0.1.0"
 dependencies = [
  "rustix 1.1.5",
  "serde_json",
- "sha2",
  "sha2 0.11.0",
  "thiserror 2.0.21",
 ]
@@ -5267,7 +5250,6 @@ dependencies = [
  "ciborium",
  "ciborium-ll",
  "cms",
- "der",
  "der 0.7.10",
  "ed25519-dalek",
  "flate2",
@@ -5279,7 +5261,6 @@ dependencies = [
  "rustls-webpki",
  "serde",
  "serde_json",
- "sha2",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.21",
@@ -5426,7 +5407,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c555a6e4eb7d4e158fcb028c835c3b8642206ddc279b5c6b202ef9a8bdb592f4"
 dependencies = [
  "crypto-bigint",
- "crypto-common",
+ "crypto-common 0.2.2",
  "ff",
  "rand_core 0.10.1",
  "subtle",
@@ -5945,6 +5926,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "send_wrapper"
@@ -6076,9 +6061,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
 dependencies = [
  "cfg-if",
- "cpufeatures",
  "cpufeatures 0.3.0",
- "digest",
  "digest 0.11.3",
 ]
 
@@ -6113,7 +6096,7 @@ version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
 dependencies = [
- "digest",
+ "digest 0.11.3",
  "rand_core 0.10.1",
 ]
 
@@ -6179,6 +6162,9 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "smol_str"
@@ -6780,7 +6766,6 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f4987bdc12753382e0bec4a65c50738ffaabc998b9cdd1f952fb5f39b0048a96"
 dependencies = [
- "crypto-common",
  "crypto-common 0.2.2",
  "ctutils",
 ]
@@ -7326,7 +7311,6 @@ dependencies = [
  "portable-atomic",
  "profiling",
  "raw-window-handle",
- "rustc-hash",
  "rustc-hash 1.1.0",
  "smallvec",
  "thiserror 2.0.21",
