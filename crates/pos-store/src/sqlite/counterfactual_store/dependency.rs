@@ -94,10 +94,11 @@
 //!   or Fork lookup; a parent-prefix `through_tick` above it selects every
 //!   row; and the rows of an older generation are retained but unreachable
 //!   (a read names the current generation only), where the in-memory adapter
-//!   keeps only the current generation's set; and a parent-prefix read of an
-//!   existing Timeline on a pre-schema read-only file is `ForkNotFound`, not
-//!   an empty page, because the tables do not exist there and cannot be
-//!   created, so the read fails closed as not found.
+//!   keeps only the current generation's set. One more difference is not
+//!   about integers: a parent-prefix read of an existing Timeline on a
+//!   pre-schema read-only file is `ForkNotFound`, not an empty page, because
+//!   the tables do not exist there and cannot be created, so the read fails
+//!   closed as not found.
 //! - **Deletion.** The marked purge of a deleted Timeline also deletes its
 //!   edges, nodes, and records, whether they are its Fork generations' or its
 //!   own committed prefix. A re-created Timeline ID starts with empty sets.
