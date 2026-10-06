@@ -223,7 +223,7 @@
 //! - **Test model.** The `pos-core` fake store of the public contract test is
 //!   the reference model. Adapters mirror these obligations in their own test
 //!   suites, which add storage-, erasure-, and failure-specific tests. Each
-//!   adapter PR (#423 Memory, #424 SQLite; Redmine #550 and #551) tags its
+//!   adapter PR (#423 Memory, #424 `SQLite`; Redmine #550 and #551) tags its
 //!   tests with the checklist ids C1 to C13 (C14, the schema validation, is
 //!   `SQLite` only).
 //!
