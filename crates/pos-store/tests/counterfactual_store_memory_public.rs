@@ -13,7 +13,7 @@ use pos_core::{
     CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId,
     ErasureContainmentGateV1, EventDraft, ForkGenerationV1, Hash, InvalidationConflictV1, Kind,
     PipelineDraftBatchV1, RecomputationFrontierBytesV1, Seq, SeqRange, SuffixInvalidationBytesV1,
-    TimelineId,
+    TimelineId, TimelineMeta,
 };
 use pos_store::{memory::MemoryStore, EventStore};
 
@@ -580,8 +580,8 @@ fn unpublished_root_and_deleted_forks_are_not_found() {
     committed(store, &command);
     ok(store.delete_timeline(fork));
 
-    // Like the SQLite adapter, deletion keeps the counterfactual state but the
-    // deleted Fork is no longer visible to any port operation.
+    // Deletion purges the counterfactual state, and the deleted Fork is no
+    // longer visible to any port operation.
     assert_eq!(
         store.commit_counterfactual_invalidation(&command),
         Err(StoreError::ForkNotFound)
@@ -605,6 +605,62 @@ fn unpublished_root_and_deleted_forks_are_not_found() {
     assert_eq!(
         store.append_counterfactual_tick(fork, &basis(3, 1, facts()), &tick_drafts(1, None)),
         Err(StoreError::ForkNotFound)
+    );
+}
+
+#[test]
+fn deleting_a_fork_purges_its_state_and_keeps_only_a_generation_floor() {
+    let mut fixture = published();
+    let (fork, root) = (fixture.fork, fixture.root);
+    let store = &mut fixture.store;
+    let command = Spec::new(fork).command();
+    committed(store, &command);
+
+    // A failed delete (the root still has a Fork) leaves the rows intact.
+    assert!(store.delete_timeline(root).is_err());
+    assert_eq!(store.current_fork_generation(fork), Ok(at(fork, 1)));
+    assert_eq!(
+        store.read_generation_artifact(at(fork, 1), command.frontier().digest()),
+        Ok(Some(command.frontier().as_bytes().to_vec()))
+    );
+
+    ok(store.delete_timeline(fork));
+    assert_eq!(
+        store.committed_generation_receipt(at(fork, 1)),
+        Err(StoreError::ForkNotFound)
+    );
+
+    // A Fork re-created under the same id resumes at the floor and holds
+    // none of the purged state.
+    let mut meta = TimelineMeta::forked_from(root, Seq::from_u64(1), "recreated");
+    meta.id = fork;
+    ok(store.create_timeline_with_meta(meta.clone()));
+    assert_eq!(
+        store.current_fork_generation(fork),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.publish_counterfactual_facts(fork, facts()),
+        Ok(at(fork, 1))
+    );
+    assert_eq!(
+        store.read_generation_artifact(at(fork, 1), command.frontier().digest()),
+        Ok(None)
+    );
+    assert_eq!(store.committed_generation_receipt(at(fork, 1)), Ok(None));
+    let second = Spec {
+        prior: 1,
+        ..Spec::new(fork)
+    }
+    .command();
+    assert_eq!(committed(store, &second).generation(), at(fork, 2));
+
+    // The floor follows the last generation, so a second delete raises it.
+    ok(store.delete_timeline(fork));
+    ok(store.create_timeline_with_meta(meta));
+    assert_eq!(
+        store.publish_counterfactual_facts(fork, facts()),
+        Ok(at(fork, 2))
     );
 }
 
