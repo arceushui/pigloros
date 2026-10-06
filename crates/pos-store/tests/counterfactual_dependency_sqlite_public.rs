@@ -14,10 +14,9 @@ use pos_core::counterfactual_store::test_fixtures::{
     frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, text_field, uint,
 };
 use pos_core::{
-    CanonicalBytes, CounterfactualAdapterSealV1,
-    CounterfactualDependencyErrorV1, CounterfactualDependencyReadPortV1,
-    CounterfactualDependencyRecordingPortV1, CounterfactualFactsV1,
-    CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
+    CanonicalBytes, CounterfactualAdapterSealV1, CounterfactualDependencyErrorV1,
+    CounterfactualDependencyReadPortV1, CounterfactualDependencyRecordingPortV1,
+    CounterfactualFactsV1, CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
     CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
     CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1,
     DependencyEdgeRecordV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
@@ -258,7 +257,9 @@ fn execute(path: &Path, sql: &str) -> rusqlite::Result<()> {
 
 fn scalar(path: &Path, sql: &str, timeline: TimelineId) -> i64 {
     ok(rusqlite::Connection::open(path).and_then(|connection| {
-        connection.query_row(sql, rusqlite::params![timeline.to_string()], |row| row.get(0))
+        connection.query_row(sql, rusqlite::params![timeline.to_string()], |row| {
+            row.get(0)
+        })
     }))
 }
 
@@ -345,7 +346,13 @@ fn row(
     origin: RecordedNodeOriginV1,
     inputs: Vec<Hash>,
 ) -> NodeRow {
-    ok(NodeRow::try_new(coordinate, class, origin, inputs, hash(99)))
+    ok(NodeRow::try_new(
+        coordinate,
+        class,
+        origin,
+        inputs,
+        hash(99),
+    ))
 }
 
 fn provisional(coordinate: Coordinate, inputs: Vec<Hash>) -> NodeRow {
@@ -612,12 +619,7 @@ const GUARDED_KINDS: [&str; 3] = ["geo.location", "geo.cell", "consent.granted.v
 
 /// An empty record of committed origin at `tick`.
 fn committed_record(tick: u64) -> TickRecord {
-    ok(TickRecord::try_new(
-        tick,
-        COMMITTED,
-        Vec::new(),
-        Vec::new(),
-    ))
+    ok(TickRecord::try_new(tick, COMMITTED, Vec::new(), Vec::new()))
 }
 
 #[test]
@@ -1111,7 +1113,11 @@ fn c5_an_empty_set_starts_at_the_generation_first_tick() {
         Outcome::Committed(_)
     ));
     assert_eq!(
-        err(append_record(&mut store, fork, &empty_record(FIRST_TICK - 1))),
+        err(append_record(
+            &mut store,
+            fork,
+            &empty_record(FIRST_TICK - 1)
+        )),
         StoreError::BindingMismatch
     );
     assert_eq!(recorded_rows(&fixture.path, fork), [0; 3]);
@@ -1216,7 +1222,11 @@ fn c6_roots_may_not_repeat_a_position_key_and_follow_the_record_tick_rule() {
     // record, is a collision.
     let twin = row(coord(9, "q", 77), ROOT, PROVISIONAL, Vec::new());
     assert_eq!(
-        err(append_record(&mut store, fork, &record_of(21, vec![twin], Vec::new()))),
+        err(append_record(
+            &mut store,
+            fork,
+            &record_of(21, vec![twin], Vec::new())
+        )),
         StoreError::DuplicateIdentity
     );
     assert_eq!(recorded_rows(&fixture.path, fork), [2, 3, 1]);
@@ -1520,7 +1530,11 @@ fn c9_a_protected_lineage_is_not_found() {
         ),
     ));
     let store = open(&fixture.path);
-    for scope in [fork_scope(fork, 1), prefix_scope(fork, 9), prefix_scope(root, 9)] {
+    for scope in [
+        fork_scope(fork, 1),
+        prefix_scope(fork, 9),
+        prefix_scope(root, 9),
+    ] {
         assert_eq!(counts(&store, scope), NOT_FOUND, "{scope:?}");
     }
 }
@@ -1554,7 +1568,11 @@ fn c9_a_misplaced_record_reports_the_fork_error_first() {
     let mut frozen = open_with_gate(&fixture.path, &gate);
     gate.freeze_timeline_for_test(fork);
     assert_eq!(
-        err(commit_spec(&mut frozen, &Spec::new(fork), &committed_record(FIRST_TICK))),
+        err(commit_spec(
+            &mut frozen,
+            &Spec::new(fork),
+            &committed_record(FIRST_TICK)
+        )),
         StoreError::StorageFailure
     );
     drop(frozen);
@@ -1567,7 +1585,11 @@ fn c9_a_misplaced_record_reports_the_fork_error_first() {
     ));
     let mut protected = open(&fixture.path);
     assert_eq!(
-        err(commit_spec(&mut protected, &Spec::new(fork), &committed_record(FIRST_TICK))),
+        err(commit_spec(
+            &mut protected,
+            &Spec::new(fork),
+            &committed_record(FIRST_TICK)
+        )),
         StoreError::ForkNotFound
     );
     assert_eq!(snapshot(&fixture.path, fork), [0; 7]);
@@ -1578,7 +1600,11 @@ fn c9_reads_and_writes_fail_closed_without_a_gate() {
     let fixture = recorded_fixture();
     let (fork, root) = (fixture.fork, fixture.root);
     let mut ungated = ok(SqliteStore::open(fixture_path_str(&fixture)));
-    for scope in [fork_scope(fork, 1), prefix_scope(root, 9), prefix_scope(fork, 9)] {
+    for scope in [
+        fork_scope(fork, 1),
+        prefix_scope(root, 9),
+        prefix_scope(fork, 9),
+    ] {
         assert_eq!(counts(&ungated, scope), FAILED, "{scope:?}");
     }
     let spec = Spec::new(fork);
@@ -1641,7 +1667,10 @@ fn c9_a_file_changed_by_another_connection_fails_closed() {
     let fixture = recorded_fixture();
     let fork = fixture.fork;
     let mut store = open(&fixture.path);
-    ok(execute(&fixture.path, "CREATE TABLE unrelated (id INTEGER);"));
+    ok(execute(
+        &fixture.path,
+        "CREATE TABLE unrelated (id INTEGER);",
+    ));
     assert_eq!(counts(&store, fork_scope(fork, 1)), FAILED);
     assert_eq!(
         err(commit_spec(&mut store, &Spec::new(fork), &sample_record())),
@@ -1673,10 +1702,8 @@ fn c9_reads_inside_a_protected_effect_interval_see_its_writes() {
     assert_eq!(ok(edges(&store, fork_scope(fork, 1), 1)), sample.edges());
     assert!(append_record(&mut store, fork, &tick_18_record()).is_ok());
     assert_eq!(ok(nodes(&store, fork_scope(fork, 1), 2)).len(), 3);
-    ok(store.finish_protected_effect_interval(
-        interval,
-        ErasureProtectedEffectDispositionV1::Rollback,
-    ));
+    ok(store
+        .finish_protected_effect_interval(interval, ErasureProtectedEffectDispositionV1::Rollback));
     assert_eq!(generation(&store, fork), 0);
     assert_eq!(snapshot(&fixture.path, fork), [0; 7]);
     assert_eq!(counts(&store, fork_scope(fork, 0)), EMPTY);
@@ -1707,14 +1734,13 @@ fn c10_a_page_is_capped_and_keyset_paging_is_stable_across_reopen() {
     insert_prefix_run(&fixture.path, root, page_cap + 1);
     let scope = prefix_scope(root, u64::MAX);
     let store = open(&fixture.path);
-    let first: NodePage = ok(store.read_dependency_nodes(&request(
-        scope,
-        None,
-        MAX_DEPENDENCY_PAGE_ROWS_V1,
-    )));
+    let first: NodePage =
+        ok(store.read_dependency_nodes(&request(scope, None, MAX_DEPENDENCY_PAGE_ROWS_V1)));
     assert_eq!(first.items().len(), MAX_DEPENDENCY_PAGE_ROWS_V1);
     assert_eq!(first.items()[0].coordinate().tick(), 1);
-    let last = first.items()[MAX_DEPENDENCY_PAGE_ROWS_V1 - 1].coordinate().tick();
+    let last = first.items()[MAX_DEPENDENCY_PAGE_ROWS_V1 - 1]
+        .coordinate()
+        .tick();
     assert_eq!(last, page_cap);
     let cursor = first.next().cloned();
     let cursor_tick = cursor.as_ref().map(DependencyPageCursorV1::tick);
@@ -1731,15 +1757,14 @@ fn c10_a_page_is_capped_and_keyset_paging_is_stable_across_reopen() {
 
     // The same cursor continues identically after a reopen.
     let reopened = open(&fixture.path);
-    let again = ok(reopened.read_dependency_nodes(&request(
-        scope,
-        cursor,
-        MAX_DEPENDENCY_PAGE_ROWS_V1,
-    )));
+    let again =
+        ok(reopened.read_dependency_nodes(&request(scope, cursor, MAX_DEPENDENCY_PAGE_ROWS_V1)));
     assert_eq!(again, second);
     let all = ok(nodes(&reopened, scope, 100));
     assert_eq!(all.len(), MAX_DEPENDENCY_PAGE_ROWS_V1 + 1);
-    assert!(all.windows(2).all(|pair| pair[0].coordinate().tick() < pair[1].coordinate().tick()));
+    assert!(all
+        .windows(2)
+        .all(|pair| pair[0].coordinate().tick() < pair[1].coordinate().tick()));
 }
 
 #[test]
@@ -1762,7 +1787,9 @@ fn c10_cursors_continue_after_their_key_and_wrong_ones_are_refused() {
     let served = ok(store.read_dependency_nodes(&after_first));
     assert_eq!(owners(served.items()), ["b"]);
     let after_last = request(scope, Some(cursor("b", 0, None)), 5);
-    assert!(ok(store.read_dependency_nodes(&after_last)).items().is_empty());
+    assert!(ok(store.read_dependency_nodes(&after_last))
+        .items()
+        .is_empty());
     let before_edge = request(scope, Some(cursor("a", 5, Some(hash(9)))), 5);
     let served = ok(store.read_dependency_edges(&before_edge));
     assert_eq!(served.items().len(), 1);
@@ -1819,7 +1846,13 @@ fn c11_dependency_faults_map_to_the_storage_errors() {
         let rejected = err(DependencyPageRequestV1::try_new(scope, None, limit));
         assert_eq!(StoreError::from(rejected), StoreError::FieldOutOfBounds);
     }
-    let beyond = ok(DependencyPageCursorV1::try_new(6, 0, "a".to_owned(), 0, None));
+    let beyond = ok(DependencyPageCursorV1::try_new(
+        6,
+        0,
+        "a".to_owned(),
+        0,
+        None,
+    ));
     let rejected = err(DependencyPageRequestV1::try_new(scope, Some(beyond), 1));
     assert_eq!(StoreError::from(rejected), StoreError::BindingMismatch);
     assert!(DependencyPageRequestV1::try_new(scope, None, MAX_DEPENDENCY_PAGE_ROWS_V1).is_ok());
@@ -2034,7 +2067,10 @@ fn c13_the_existing_methods_keep_working_and_plain_ticks_record_nothing() {
 #[test]
 fn c14_drifted_dependency_tables_are_rejected_on_every_open() {
     for (table, fragment) in [
-        ("nodes", "UNIQUE (timeline_id, generation, artifact_digest), "),
+        (
+            "nodes",
+            "UNIQUE (timeline_id, generation, artifact_digest), ",
+        ),
         ("nodes", "CHECK (class BETWEEN 0 AND 4), "),
         ("nodes", "CHECK ((generation = -1) = (origin = 0)), "),
         ("edges", "CHECK (length(edge_bytes) <= 16384), "),
@@ -2048,7 +2084,10 @@ fn c14_drifted_dependency_tables_are_rejected_on_every_open() {
         );
         let drifted = stored.replace(fragment, "");
         assert_ne!(drifted, stored, "{fragment}");
-        ok(execute(&fixture.path, &format!("DROP TABLE {name}; {drifted};")));
+        ok(execute(
+            &fixture.path,
+            &format!("DROP TABLE {name}; {drifted};"),
+        ));
         let text = fixture_path_str(&fixture);
         assert!(refuses(text, &name), "{fragment}");
     }
@@ -2107,7 +2146,11 @@ fn c14_a_pre_schema_file_reads_dependencies_as_not_found() {
     ));
     let mut read_only = ok(SqliteStore::open_read_only(fixture_path_str(&fixture)));
     ok(read_only.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
-    for scope in [fork_scope(fork, 1), prefix_scope(root, 9), prefix_scope(fork, 9)] {
+    for scope in [
+        fork_scope(fork, 1),
+        prefix_scope(root, 9),
+        prefix_scope(fork, 9),
+    ] {
         assert_eq!(counts(&read_only, scope), NOT_FOUND, "{scope:?}");
     }
 }

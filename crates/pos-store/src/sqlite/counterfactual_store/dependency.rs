@@ -376,7 +376,18 @@ struct PageQueryV1<'a> {
 
 /// Raw node columns after the set: position key, schema ID, artifact digest,
 /// class code, origin code, input digests, and provenance digest.
-type NodeRowV1 = (i64, i64, String, i64, i64, Vec<u8>, i64, i64, Vec<u8>, Vec<u8>);
+type NodeRowV1 = (
+    i64,
+    i64,
+    String,
+    i64,
+    i64,
+    Vec<u8>,
+    i64,
+    i64,
+    Vec<u8>,
+    Vec<u8>,
+);
 
 /// Raw edge columns after the set: position key, source digest, the
 /// consumer's schema ID and artifact digest, and the `IDP1` bytes.
@@ -442,9 +453,8 @@ fn stored_class(code: i64) -> Result<RecordedDependencyClassV1, StoreError> {
 }
 
 fn stored_origin(code: i64) -> Result<RecordedNodeOriginV1, StoreError> {
-    stored_u64(code).and_then(|code| {
-        RecordedNodeOriginV1::from_code(code).or(Err(DepError::READ_BACK_FAULT))
-    })
+    stored_u64(code)
+        .and_then(|code| RecordedNodeOriginV1::from_code(code).or(Err(DepError::READ_BACK_FAULT)))
 }
 
 /// Decode one stored node; a row that fails the contract's checks is corrupt.
@@ -1145,7 +1155,10 @@ mod tests {
 
         assert_eq!(in_doubt, Err(StoreError::OutcomeUnknown));
         assert_eq!(recorded(&store), 0);
-        assert_eq!(store.committed_generation_receipt(command.new_generation()), Ok(None));
+        assert_eq!(
+            store.committed_generation_receipt(command.new_generation()),
+            Ok(None)
+        );
         assert!(matches!(
             store.commit_counterfactual_invalidation_with_dependencies(&command, &record),
             Ok(CounterfactualInvalidationOutcomeV1::Committed(_))
@@ -1167,24 +1180,16 @@ mod tests {
         let record = one_node_record(2, 2);
 
         fail_commits(&store, true);
-        let in_doubt = store.append_counterfactual_tick_with_dependencies(
-            fork,
-            &expected,
-            &drafts(),
-            &record,
-        );
+        let in_doubt =
+            store.append_counterfactual_tick_with_dependencies(fork, &expected, &drafts(), &record);
         fail_commits(&store, false);
 
         assert_eq!(in_doubt, Err(StoreError::OutcomeUnknown));
         assert_eq!(recorded(&store), 2);
         assert_eq!(store.current_counterfactual_basis(fork), Ok(expected));
         assert_eq!(
-            store.append_counterfactual_tick_with_dependencies(
-                fork,
-                &expected,
-                &drafts(),
-                &record,
-            ),
+            store
+                .append_counterfactual_tick_with_dependencies(fork, &expected, &drafts(), &record,),
             Ok(CounterfactualTickOutcomeV1::Committed {
                 head: Seq::from_u64(3)
             })
@@ -1216,7 +1221,10 @@ mod tests {
 
         let mut reopened = open_file_store(&path);
         assert_eq!([recorded(&reopened), written(&reopened)], [0, 0]);
-        assert_eq!(reopened.committed_generation_receipt(command.new_generation()), Ok(None));
+        assert_eq!(
+            reopened.committed_generation_receipt(command.new_generation()),
+            Ok(None)
+        );
         assert!(matches!(
             reopened.commit_counterfactual_invalidation_with_dependencies(&command, &record),
             Ok(CounterfactualInvalidationOutcomeV1::Committed(_))
@@ -1240,12 +1248,7 @@ mod tests {
         assert_eq!(recorded(&again), 2);
         assert_eq!(again.current_counterfactual_basis(fork), Ok(expected));
         assert_eq!(
-            again.append_counterfactual_tick_with_dependencies(
-                fork,
-                &expected,
-                &drafts(),
-                &later,
-            ),
+            again.append_counterfactual_tick_with_dependencies(fork, &expected, &drafts(), &later,),
             Ok(CounterfactualTickOutcomeV1::Committed {
                 head: Seq::from_u64(3)
             })
@@ -1266,14 +1269,23 @@ mod tests {
         let edge_text = EDGES_TABLE.constraints.join("\n");
         let checks = [
             (&node_text, format!("BETWEEN 1 AND {owner})")),
-            (&node_text, format!("scheduler_position BETWEEN 0 AND {word})")),
+            (
+                &node_text,
+                format!("scheduler_position BETWEEN 0 AND {word})"),
+            ),
             (&node_text, format!("output_ordinal BETWEEN 0 AND {word})")),
             (&node_text, format!("schema_id BETWEEN 1 AND {word})")),
             (&node_text, format!("length(input_digests) <= {inputs})")),
             (&edge_text, format!("BETWEEN 1 AND {owner})")),
-            (&edge_text, format!("scheduler_position BETWEEN 0 AND {word})")),
+            (
+                &edge_text,
+                format!("scheduler_position BETWEEN 0 AND {word})"),
+            ),
             (&edge_text, format!("output_ordinal BETWEEN 0 AND {word})")),
-            (&edge_text, format!("consumer_schema_id BETWEEN 1 AND {word})")),
+            (
+                &edge_text,
+                format!("consumer_schema_id BETWEEN 1 AND {word})"),
+            ),
             (&edge_text, format!("length(edge_bytes) <= {edge_bytes})")),
         ];
         for (text, needle) in &checks {
