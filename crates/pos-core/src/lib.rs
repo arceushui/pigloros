@@ -367,8 +367,8 @@ pub use counterfactual_dependency::{
     CounterfactualDependencyRecordingPortV1, DependencyEdgeRecordV1, DependencyNodeCoordinateV1,
     DependencyNodeRecordV1, DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1,
     DependencyPagedRowV1, DependencyReadScopeV1, RecordedDependencyClassV1, RecordedNodeOriginV1,
-    TickDependencyRecordV1, MAX_DEPENDENCY_EDGE_BYTES_V1, MAX_DEPENDENCY_NODE_INPUTS_V1,
-    MAX_DEPENDENCY_OWNER_ID_BYTES_V1, MAX_DEPENDENCY_PAGE_ROWS_V1,
+    RecordedSetCountsV1, TickDependencyRecordV1, MAX_DEPENDENCY_EDGE_BYTES_V1,
+    MAX_DEPENDENCY_NODE_INPUTS_V1, MAX_DEPENDENCY_OWNER_ID_BYTES_V1, MAX_DEPENDENCY_PAGE_ROWS_V1,
     MAX_RECORDED_DEPENDENCY_EDGES_V1, MAX_RECORDED_DEPENDENCY_NODES_V1,
     MAX_TICK_DEPENDENCY_EDGES_V1, MAX_TICK_DEPENDENCY_EDGE_BYTES_V1, MAX_TICK_DEPENDENCY_NODES_V1,
 };

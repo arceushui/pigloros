@@ -66,8 +66,8 @@ fn coordinate(node: &DependencyNodeV1) -> TestResult<DependencyNodeCoordinateV1>
     )?)
 }
 
-fn record(edge: &InputDependencyV1) -> TestResult<DependencyEdgeRecordV1> {
-    Ok(DependencyEdgeRecordV1::try_from_canonical(
+fn record(edge: &InputDependencyV1) -> TestResult<EdgeRecord> {
+    Ok(EdgeRecord::try_from_canonical(
         edge.to_canonical_cbor()?,
         coordinate(&edge.consumer)?,
         Hash::from_bytes(edge.source.artifact_digest),
@@ -138,7 +138,7 @@ fn contract_rejects_bytes_that_disagree_with_the_supplied_fields() -> TestResult
     let bytes = edge.to_canonical_cbor()?;
     let other_consumer = coordinate(&node(5, 2, "agent-b", 1, 0x77))?;
     assert_eq!(
-        DependencyEdgeRecordV1::try_from_canonical(
+        EdgeRecord::try_from_canonical(
             bytes.clone(),
             other_consumer,
             Hash::from_bytes(edge.source.artifact_digest)
@@ -146,7 +146,7 @@ fn contract_rejects_bytes_that_disagree_with_the_supplied_fields() -> TestResult
         Err(CounterfactualDependencyErrorV1::BindingMismatch)
     );
     assert_eq!(
-        DependencyEdgeRecordV1::try_from_canonical(
+        EdgeRecord::try_from_canonical(
             bytes,
             coordinate(&edge.consumer)?,
             Hash::from_bytes([0x78; 32])

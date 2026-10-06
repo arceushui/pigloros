@@ -25,7 +25,10 @@
 //! - that the source node is a six-field array whose owner text is 1 to
 //!   [`MAX_DEPENDENCY_OWNER_ID_BYTES_V1`] bytes, so the 16 KiB edge bound
 //!   cannot be spent on owner padding, and that its artifact digest is the
-//!   supplied source digest;
+//!   supplied source digest. The conformance codec
+//!   (`crates/pos-conformance/src/counterfactual/dependency.rs`) validates
+//!   the owners of BOTH coordinates as 1 to 128 bytes, so this bound rejects
+//!   nothing the conformance codec accepts;
 //! - that the five remaining fields are well-formed definite-length items
 //!   and that nothing trails them.
 //!
@@ -73,10 +76,18 @@
 //!   record of their origin whose Tick is at or after their own. Every other
 //!   node (`EndogenousRecomputed`, `PresentationOnly`) must carry exactly the
 //!   record's Tick. The record checks the bound (`BindingMismatch` for a root
-//!   node after the record's Tick or a non-root node at any other Tick); that
-//!   it is the *first* such record needs the plan, so it stays the producer's
-//!   obligation. Reads filter and order by the node's own Tick, never the
-//!   record's, so a root node is addressed at its effective Tick.
+//!   node after the record's Tick or a non-root node at any other Tick). The
+//!   rest of the placement is the producer's and coordinator's obligation,
+//!   because the store sees neither the plan nor the omitted rows: that a
+//!   root rides the *first* such record, and that the LAST record's Tick is
+//!   at or after the maximum root effective Tick. A root whose effective
+//!   Tick is after the last recomputed Tick has no record at all, and
+//!   `pos-time` then fails with `InterventionNodeMissing`. Reads filter and
+//!   order by the node's own Tick, never the record's, so a root node is
+//!   addressed at its effective Tick. Because a root can arrive in a later
+//!   record behind a reader's cursor, reads serve a SETTLED generation or
+//!   parent prefix only: paging a generation that is still being written is
+//!   not stable.
 //! - **Generation qualification.** Provisional rows are written under the
 //!   Fork generation the same transaction commits (the new generation for an
 //!   invalidation, the expected basis generation for a later Tick) and are
@@ -108,15 +119,18 @@
 //!   rejects a graph whose declared inputs exceed its edge bound, so the
 //!   recorded set's declared-input total is held to the same edge bound.
 //!   Adapters enforce all three with
-//!   [`TickDependencyRecordV1::ensure_set_capacity`]. One record commits
+//!   [`TickDependencyRecordV1::ensure_set_capacity`], passing the set's
+//!   [`RecordedSetCountsV1`]. One record commits
 //!   inside one Event Store transaction, so it is capped far lower
 //!   ([`MAX_TICK_DEPENDENCY_NODES_V1`] and
 //!   [`MAX_TICK_DEPENDENCY_EDGES_V1`], the same one to four ratio, which
 //!   also bounds [`TickDependencyRecordV1::declared_input_count`]). The
 //!   16 KiB per-edge cap alone would let 262,144 edges hold 4 GiB, so a
 //!   record's edges are also capped at
-//!   [`MAX_TICK_DEPENDENCY_EDGE_BYTES_V1`] bytes in total: 256 bytes per edge
-//!   at the full edge count, above the roughly 200 bytes of a typical edge.
+//!   [`MAX_TICK_DEPENDENCY_EDGE_BYTES_V1`] bytes in total, 128 MiB: 512 bytes
+//!   per edge at the full edge count, well above the roughly 240 bytes of a
+//!   typical edge and the roughly 600 bytes of one with the longest legal
+//!   owner IDs and rule IDs, and still 32 times below 4 GiB.
 //!
 //! # Adapter obligations
 //!
@@ -131,6 +145,26 @@
 //!   recorded set. A record checks digest uniqueness only within itself, but
 //!   `pos-time` requires it across the whole graph, and only the adapter
 //!   sees the set.
+//! - Also reject a node whose position key `(tick, scheduler_position,
+//!   owner_id, output_ordinal)` is already recorded in the same recorded
+//!   set, alongside and not instead of digest uniqueness. A root rides a
+//!   record at or after its own Tick, so two records of one set can carry
+//!   roots at one position key with different digests; each record is valid
+//!   alone, and without this check the collision would only surface at read
+//!   time as `DuplicateIdentity`. Order rows by position key globally across
+//!   the records of the set, never by insertion order.
+//! - Persist each record's Tick. It is not recoverable from the node Ticks
+//!   (a record made only of early roots carries them all before its Tick),
+//!   and a later record's Tick must be compared with it, not with the
+//!   maximum node Tick.
+//! - Map [`CounterfactualDependencyErrorV1`] to the storage error with
+//!   `CounterfactualStoreErrorV1::from`: `InvalidEncoding` for encoding and
+//!   unknown-enum faults, `FieldOutOfBounds` for bounds, page-limit, and
+//!   missing-provenance faults, `BindingMismatch` for binding, consumer,
+//!   input, and cursor faults, and the namesake for the version, order, and
+//!   duplicate faults. A row that fails re-validation when it is
+//!   READ BACK from storage is corrupt state, not a caller fault: use
+//!   [`CounterfactualDependencyErrorV1::READ_BACK_FAULT`] (`CorruptState`).
 //! - For a Fork, reject a record whose provisional Ticks are not strictly
 //!   after the parent cut; nothing in this contract knows the cut, and a
 //!   provisional node at or before it would overlap the committed prefix it
@@ -140,10 +174,12 @@
 //!   fence, including its inherited scopes when the parent is itself a Fork,
 //!   exactly as every other Timeline read. A parent-prefix read names no
 //!   Fork, so the Fork's fence does not apply to it. Both fail closed
-//!   without a bound erasure gate. Order rows by the canonical coordinate
-//!   and edge order, and build pages with [`DependencyPageV1::try_new`],
-//!   which also checks that rows belong to the request scope, or
-//!   [`DependencyPageV1::from_ordered`], which trusts its rows.
+//!   without a bound erasure gate. Serve a settled generation or prefix only
+//!   (see the root-node rule). Order rows by the canonical coordinate and
+//!   edge order, and build pages with [`DependencyPageV1::try_new`], which
+//!   also checks that nodes and parent-prefix edges belong to the request
+//!   scope (a Fork scope cannot tell its edges apart and accepts them all),
+//!   or [`DependencyPageV1::from_ordered`], which trusts its rows.
 //! - Recover an `OutcomeUnknown` write exactly as the storage port does; the
 //!   record is part of the same transaction, so the receipt or basis read
 //!   that settles the Tick settles the record.
@@ -178,8 +214,8 @@ pub const MAX_TICK_DEPENDENCY_EDGES_V1: usize = 262_144;
 pub const MAX_DEPENDENCY_NODE_INPUTS_V1: usize = 4_096;
 /// Maximum encoded size of one `IDP1` edge.
 pub const MAX_DEPENDENCY_EDGE_BYTES_V1: usize = 16 * 1024;
-/// Maximum total encoded size of the edges of one Tick record, 64 MiB.
-pub const MAX_TICK_DEPENDENCY_EDGE_BYTES_V1: usize = 64 * 1024 * 1024;
+/// Maximum total encoded size of the edges of one Tick record, 128 MiB.
+pub const MAX_TICK_DEPENDENCY_EDGE_BYTES_V1: usize = 128 * 1024 * 1024;
 /// Maximum UTF-8 byte length of a node owner ID.
 pub const MAX_DEPENDENCY_OWNER_ID_BYTES_V1: usize = 128;
 /// Maximum number of rows in one page.
@@ -235,6 +271,37 @@ pub enum CounterfactualDependencyErrorV1 {
     /// A page limit is zero or above the page maximum.
     #[error("dependency page limit is invalid")]
     InvalidPageLimit,
+}
+
+impl CounterfactualDependencyErrorV1 {
+    /// The storage error for a row that fails re-validation on read-back.
+    ///
+    /// Persisted state is corrupt then, and the caller is not at fault.
+    pub const READ_BACK_FAULT: CounterfactualStoreErrorV1 =
+        CounterfactualStoreErrorV1::CorruptState;
+}
+
+/// Map a dependency fault to the nearest storage error.
+///
+/// See the module's adapter obligations. Use
+/// [`CounterfactualDependencyErrorV1::READ_BACK_FAULT`] for read-back faults.
+impl From<CounterfactualDependencyErrorV1> for CounterfactualStoreErrorV1 {
+    fn from(error: CounterfactualDependencyErrorV1) -> Self {
+        match error {
+            CounterfactualDependencyErrorV1::InvalidEncoding
+            | CounterfactualDependencyErrorV1::UnknownEnum => Self::InvalidEncoding,
+            CounterfactualDependencyErrorV1::UnsupportedVersion => Self::UnsupportedVersion,
+            CounterfactualDependencyErrorV1::FieldOutOfBounds
+            | CounterfactualDependencyErrorV1::ProvenanceMissing
+            | CounterfactualDependencyErrorV1::InvalidPageLimit => Self::FieldOutOfBounds,
+            CounterfactualDependencyErrorV1::NonCanonicalOrder => Self::NonCanonicalOrder,
+            CounterfactualDependencyErrorV1::DuplicateIdentity => Self::DuplicateIdentity,
+            CounterfactualDependencyErrorV1::BindingMismatch
+            | CounterfactualDependencyErrorV1::UnknownConsumer
+            | CounterfactualDependencyErrorV1::UndeclaredInput
+            | CounterfactualDependencyErrorV1::InvalidCursor => Self::BindingMismatch,
+        }
+    }
 }
 
 type DependencyResult<T> = Result<T, CounterfactualDependencyErrorV1>;
@@ -441,7 +508,7 @@ impl DependencyNodeCoordinateV1 {
         let mut out = vec![NODE_ARRAY_HEAD];
         encode_head(&mut out, 0, self.tick);
         encode_head(&mut out, 0, u64::from(self.scheduler_position));
-        encode_bytes(&mut out, self.owner_id.as_bytes(), 3);
+        encode_bytes(&mut out, self.owner_id.as_bytes(), OWNER_TEXT_MAJOR);
         encode_head(&mut out, 0, u64::from(self.output_ordinal));
         encode_head(&mut out, 0, u64::from(self.schema_id));
         encode_hash(&mut out, self.artifact_digest);
@@ -644,7 +711,7 @@ fn read_source_digest(cursor: &mut CborCursor<'_>) -> CursorResult<Hash> {
 fn owner_text_length(length: u64) -> DependencyResult<usize> {
     usize::try_from(length)
         .ok()
-        .filter(|length| (1..=MAX_DEPENDENCY_OWNER_ID_BYTES_V1).contains(length))
+        .filter(|bytes| (1..=MAX_DEPENDENCY_OWNER_ID_BYTES_V1).contains(bytes))
         .ok_or(CounterfactualDependencyErrorV1::FieldOutOfBounds)
 }
 
@@ -676,6 +743,21 @@ fn edge_digest(bytes: &[u8]) -> Hash {
     hasher.update(&[0]);
     hasher.update(bytes);
     Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// The row counts already recorded in one recorded set: a parent Timeline's
+/// committed prefix or one Fork generation.
+///
+/// Named fields keep the three counts from being transposed at the call to
+/// [`TickDependencyRecordV1::ensure_set_capacity`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RecordedSetCountsV1 {
+    /// Nodes already recorded in the set.
+    pub nodes: usize,
+    /// Edges already recorded in the set.
+    pub edges: usize,
+    /// Declared-input digests, in total, of the nodes already recorded.
+    pub inputs: usize,
 }
 
 /// The nodes and edges of one Tick, committed with that Tick's Events.
@@ -728,7 +810,8 @@ impl TickDependencyRecordV1 {
             })
     }
 
-    /// Return the Tick of every node.
+    /// Return the Tick the record is committed at; root-class nodes may carry
+    /// an earlier Tick.
     #[must_use]
     pub const fn tick(&self) -> u64 {
         self.tick
@@ -770,23 +853,15 @@ impl TickDependencyRecordV1 {
     /// Check that recording this record keeps one recorded set within the
     /// graph bounds, given the rows already recorded in that set.
     ///
-    /// `recorded_inputs` is the declared-input total of the set's recorded
-    /// nodes.
-    ///
     /// # Errors
     /// Returns `FieldOutOfBounds` when the set would exceed
     /// [`MAX_RECORDED_DEPENDENCY_NODES_V1`] nodes,
     /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] edges, or
     /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] declared inputs.
-    pub fn ensure_set_capacity(
-        &self,
-        recorded_nodes: usize,
-        recorded_edges: usize,
-        recorded_inputs: usize,
-    ) -> DependencyResult<()> {
-        if recorded_nodes.saturating_add(self.nodes.len()) > MAX_RECORDED_DEPENDENCY_NODES_V1
-            || recorded_edges.saturating_add(self.edges.len()) > MAX_RECORDED_DEPENDENCY_EDGES_V1
-            || recorded_inputs.saturating_add(self.declared_input_count())
+    pub fn ensure_set_capacity(&self, recorded: RecordedSetCountsV1) -> DependencyResult<()> {
+        if recorded.nodes.saturating_add(self.nodes.len()) > MAX_RECORDED_DEPENDENCY_NODES_V1
+            || recorded.edges.saturating_add(self.edges.len()) > MAX_RECORDED_DEPENDENCY_EDGES_V1
+            || recorded.inputs.saturating_add(self.declared_input_count())
                 > MAX_RECORDED_DEPENDENCY_EDGES_V1
         {
             Err(CounterfactualDependencyErrorV1::FieldOutOfBounds)
@@ -1009,14 +1084,10 @@ impl DependencyPagedRowV1 for DependencyNodeRecordV1 {
     const KEYED_BY_SOURCE: bool = false;
 
     fn in_scope(&self, scope: DependencyReadScopeV1) -> bool {
-        match scope {
-            DependencyReadScopeV1::ParentPrefix { through_tick, .. } => {
-                self.origin == RecordedNodeOriginV1::Committed
-                    && self.coordinate.tick <= through_tick
-            }
-            DependencyReadScopeV1::ForkGeneration(_) => {
-                self.origin == RecordedNodeOriginV1::Provisional
-            }
+        let committed = self.origin == RecordedNodeOriginV1::Committed;
+        match scope.through_tick() {
+            Some(through_tick) => committed && self.coordinate.tick <= through_tick,
+            None => !committed,
         }
     }
 
@@ -1029,12 +1100,9 @@ impl DependencyPagedRowV1 for DependencyEdgeRecordV1 {
     const KEYED_BY_SOURCE: bool = true;
 
     fn in_scope(&self, scope: DependencyReadScopeV1) -> bool {
-        match scope {
-            DependencyReadScopeV1::ParentPrefix { through_tick, .. } => {
-                self.consumer.tick <= through_tick
-            }
-            DependencyReadScopeV1::ForkGeneration(_) => true,
-        }
+        scope
+            .through_tick()
+            .is_none_or(|through_tick| self.consumer.tick <= through_tick)
     }
 
     fn cursor(&self) -> DependencyPageCursorV1 {
@@ -1057,6 +1125,16 @@ pub enum DependencyReadScopeV1 {
 }
 
 impl DependencyReadScopeV1 {
+    /// Return the last Tick, inclusive, a parent-prefix scope may return, or
+    /// `None` for a Fork scope, which no Tick bounds.
+    #[must_use]
+    pub const fn through_tick(self) -> Option<u64> {
+        match self {
+            Self::ParentPrefix { through_tick, .. } => Some(through_tick),
+            Self::ForkGeneration(_) => None,
+        }
+    }
+
     /// Check the scope against the Fork's committed generation.
     ///
     /// A parent-prefix scope names no generation and always passes. A Fork
@@ -1130,12 +1208,9 @@ impl DependencyPageRequestV1 {
 }
 
 fn beyond_scope(scope: DependencyReadScopeV1, after: Option<&DependencyPageCursorV1>) -> bool {
-    match scope {
-        DependencyReadScopeV1::ParentPrefix { through_tick, .. } => {
-            after.is_some_and(|cursor| cursor.tick > through_tick)
-        }
-        DependencyReadScopeV1::ForkGeneration(_) => false,
-    }
+    after
+        .zip(scope.through_tick())
+        .is_some_and(|(cursor, through_tick)| cursor.tick > through_tick)
 }
 
 /// One page of rows and the cursor that continues after it.
@@ -1148,9 +1223,9 @@ pub struct DependencyPageV1<T> {
 impl<T: DependencyPagedRowV1> DependencyPageV1<T> {
     /// Validate one adapter-built page against its request.
     ///
-    /// Rows must belong to the request scope ([`DependencyPagedRowV1::in_scope`]);
-    /// edges carry no origin, so a Fork scope cannot reject an edge that
-    /// another scope recorded.
+    /// Nodes and parent-prefix edges must belong to the request scope
+    /// ([`DependencyPagedRowV1::in_scope`]); edges carry no origin, so a Fork
+    /// scope cannot reject an edge that another scope recorded.
     ///
     /// # Errors
     /// Returns `InvalidCursor` when the request cursor is of the other row
@@ -1280,10 +1355,11 @@ pub trait CounterfactualDependencyRecordingPortV1: CounterfactualStorePortV1 {
     ///
     /// # Errors
     /// Returns what the storage port returns, and `BindingMismatch` for a
-    /// record that is not provisional or not at the first Tick and
+    /// record that is not provisional or not at the first Tick,
     /// `FieldOutOfBounds` for a record that would exceed the recorded-set
-    /// bounds. Every error and every conflict records nothing; after
-    /// `OutcomeUnknown` the caller recovers with
+    /// bounds, and `DuplicateIdentity` for a node whose artifact digest or
+    /// position key is already recorded. Every error and every conflict
+    /// records nothing; after `OutcomeUnknown` the caller recovers with
     /// [`CounterfactualStorePortV1::committed_generation_receipt`].
     fn commit_counterfactual_invalidation_with_dependencies(
         &mut self,
@@ -1302,10 +1378,11 @@ pub trait CounterfactualDependencyRecordingPortV1: CounterfactualStorePortV1 {
     ///
     /// # Errors
     /// Returns what the storage port returns, and `BindingMismatch` for a
-    /// record that is not provisional or not after the recorded Ticks and
+    /// record that is not provisional or not after the recorded Ticks,
     /// `FieldOutOfBounds` for a record that would exceed the recorded-set
-    /// bounds. Every error and every stale outcome records nothing; after
-    /// `OutcomeUnknown` the caller recovers with
+    /// bounds, and `DuplicateIdentity` for a node whose artifact digest or
+    /// position key is already recorded. Every error and every stale outcome
+    /// records nothing; after `OutcomeUnknown` the caller recovers with
     /// [`CounterfactualStorePortV1::current_counterfactual_basis`].
     fn append_counterfactual_tick_with_dependencies(
         &mut self,
@@ -1318,7 +1395,9 @@ pub trait CounterfactualDependencyRecordingPortV1: CounterfactualStorePortV1 {
 
 /// Read side of the dependency record: paged, canonically ordered reads.
 ///
-/// Reads serve settled state only. An existing Timeline or Fork generation
+/// Reads serve a settled generation or parent prefix only: a root node can
+/// arrive in a later record behind a reader's cursor, so paging a generation
+/// that is still being written is not stable. An existing Timeline or Fork generation
 /// with no recorded rows yields an empty page; the host decides completeness
 /// from the graph digest it published. A Timeline that is unknown or erased,
 /// as a parent prefix's or a Fork's, is `ForkNotFound` and never an empty

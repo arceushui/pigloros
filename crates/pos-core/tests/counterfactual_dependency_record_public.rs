@@ -19,11 +19,11 @@ use pos_core::{
     DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1, DependencyPagedRowV1,
     DependencyReadScopeV1, EntityId, EventDraft, ForkGenerationV1, Hash, InvalidationConflictV1,
     Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1, RecordedDependencyClassV1,
-    RecordedNodeOriginV1, Seq, SuffixInvalidationBytesV1, TickDependencyRecordV1, TimelineId,
-    MAX_DEPENDENCY_EDGE_BYTES_V1, MAX_DEPENDENCY_NODE_INPUTS_V1, MAX_DEPENDENCY_OWNER_ID_BYTES_V1,
-    MAX_DEPENDENCY_PAGE_ROWS_V1, MAX_RECORDED_DEPENDENCY_EDGES_V1,
-    MAX_RECORDED_DEPENDENCY_NODES_V1, MAX_TICK_DEPENDENCY_EDGES_V1,
-    MAX_TICK_DEPENDENCY_EDGE_BYTES_V1, MAX_TICK_DEPENDENCY_NODES_V1,
+    RecordedNodeOriginV1, RecordedSetCountsV1, Seq, SuffixInvalidationBytesV1,
+    TickDependencyRecordV1, TimelineId, MAX_DEPENDENCY_EDGE_BYTES_V1,
+    MAX_DEPENDENCY_NODE_INPUTS_V1, MAX_DEPENDENCY_OWNER_ID_BYTES_V1, MAX_DEPENDENCY_PAGE_ROWS_V1,
+    MAX_RECORDED_DEPENDENCY_EDGES_V1, MAX_RECORDED_DEPENDENCY_NODES_V1,
+    MAX_TICK_DEPENDENCY_EDGES_V1, MAX_TICK_DEPENDENCY_EDGE_BYTES_V1, MAX_TICK_DEPENDENCY_NODES_V1,
 };
 use ulid::Ulid;
 
@@ -605,9 +605,11 @@ fn edge_count_is_bounded_at_the_limit() {
         })
         .collect();
     assert_eq!(edges.len(), MAX_TICK_DEPENDENCY_EDGES_V1);
-    let over = vec![edges[0].clone(); MAX_TICK_DEPENDENCY_EDGES_V1 + 1];
+    let kept = edges[0].clone();
     let record = ok(TickRecord::try_new(17, PROVISIONAL, nodes.clone(), edges));
     assert_eq!(record.uncovered_input_count(), 0);
+    drop(record);
+    let over = vec![kept; MAX_TICK_DEPENDENCY_EDGES_V1 + 1];
     assert_eq!(
         err(TickRecord::try_new(17, PROVISIONAL, nodes, over)),
         DepError::FieldOutOfBounds
@@ -643,6 +645,14 @@ fn full_edge(consumer: &Coordinate, source_digest: Hash) -> EdgeRow {
     ))
 }
 
+/// Full-size edges from `consumer`, one per source digest.
+fn full_edges(consumer: &Coordinate, sources: &[Hash]) -> Vec<EdgeRow> {
+    sources
+        .iter()
+        .map(|digest| full_edge(consumer, *digest))
+        .collect()
+}
+
 #[test]
 fn edge_bytes_are_bounded_per_record() {
     let count = MAX_TICK_DEPENDENCY_EDGE_BYTES_V1 / MAX_DEPENDENCY_EDGE_BYTES_V1;
@@ -650,15 +660,25 @@ fn edge_bytes_are_bounded_per_record() {
         count * MAX_DEPENDENCY_EDGE_BYTES_V1,
         MAX_TICK_DEPENDENCY_EDGE_BYTES_V1
     );
-    let inputs = ascending_hashes(count);
-    let consumer = coord_at(17, "c", 0, indexed_hash(100_000));
-    let nodes = vec![node_row(consumer.clone(), PROVISIONAL, inputs.clone())];
-    let over = vec![full_edge(&consumer, inputs[0]); count + 1];
+    // A node declares at most 4,096 inputs, so the full count needs two.
+    let inputs = ascending_hashes(MAX_DEPENDENCY_NODE_INPUTS_V1);
+    assert_eq!(count, 2 * inputs.len());
+    let consumers = [
+        coord_at(17, "c", 0, indexed_hash(100_000)),
+        coord_at(17, "c", 1, indexed_hash(100_001)),
+    ];
+    let nodes: Vec<NodeRow> = consumers
+        .iter()
+        .map(|consumer| node_row(consumer.clone(), PROVISIONAL, inputs.clone()))
+        .collect();
+    // The over-limit vector is built first and dropped before the at-limit
+    // one exists, so only one of them is ever in memory.
+    let over = vec![full_edge(&consumers[0], inputs[0]); count + 1];
     let outcome = err(build(nodes.clone(), over));
     assert_eq!(outcome, DepError::FieldOutOfBounds);
-    let edges: Vec<EdgeRow> = inputs
+    let edges: Vec<EdgeRow> = consumers
         .iter()
-        .map(|digest| full_edge(&consumer, *digest))
+        .flat_map(|consumer| full_edges(consumer, &inputs))
         .collect();
     let record = ok(build(nodes, edges));
     assert_eq!(record.edges().len(), count);
@@ -667,21 +687,26 @@ fn edge_bytes_are_bounded_per_record() {
 #[test]
 fn recorded_sets_are_bounded_at_the_graph_limits() {
     let record = sample_record();
-    let nodes = MAX_RECORDED_DEPENDENCY_NODES_V1 - record.nodes().len();
-    let edges = MAX_RECORDED_DEPENDENCY_EDGES_V1 - record.edges().len();
-    let inputs = MAX_RECORDED_DEPENDENCY_EDGES_V1 - record.declared_input_count();
-    assert_eq!(record.ensure_set_capacity(nodes, edges, inputs), Ok(()));
-    let over = [
-        (nodes + 1, edges, inputs),
-        (nodes, edges + 1, inputs),
-        (nodes, edges, inputs + 1),
-        (usize::MAX, 0, 0),
-        (0, usize::MAX, 0),
-        (0, 0, usize::MAX),
-    ];
-    for (set_nodes, set_edges, set_inputs) in over {
+    let room = RecordedSetCountsV1 {
+        nodes: MAX_RECORDED_DEPENDENCY_NODES_V1 - record.nodes().len(),
+        edges: MAX_RECORDED_DEPENDENCY_EDGES_V1 - record.edges().len(),
+        inputs: MAX_RECORDED_DEPENDENCY_EDGES_V1 - record.declared_input_count(),
+    };
+    assert_eq!(record.ensure_set_capacity(room), Ok(()));
+    assert_eq!(
+        record.ensure_set_capacity(RecordedSetCountsV1::default()),
+        Ok(())
+    );
+    let mut over = [room; 6];
+    over[0].nodes += 1;
+    over[1].edges += 1;
+    over[2].inputs += 1;
+    over[3].nodes = usize::MAX;
+    over[4].edges = usize::MAX;
+    over[5].inputs = usize::MAX;
+    for counts in over {
         assert_eq!(
-            record.ensure_set_capacity(set_nodes, set_edges, set_inputs),
+            record.ensure_set_capacity(counts),
             Err(DepError::FieldOutOfBounds)
         );
     }
@@ -826,6 +851,28 @@ fn errors_have_distinct_safe_messages() {
     ];
     let messages: BTreeSet<String> = errors.iter().map(ToString::to_string).collect();
     assert_eq!(messages.len(), errors.len());
+}
+
+#[test]
+fn dependency_errors_map_to_the_nearest_store_error() {
+    let table = [
+        (DepError::InvalidEncoding, StoreError::InvalidEncoding),
+        (DepError::UnsupportedVersion, StoreError::UnsupportedVersion),
+        (DepError::FieldOutOfBounds, StoreError::FieldOutOfBounds),
+        (DepError::UnknownEnum, StoreError::InvalidEncoding),
+        (DepError::NonCanonicalOrder, StoreError::NonCanonicalOrder),
+        (DepError::DuplicateIdentity, StoreError::DuplicateIdentity),
+        (DepError::ProvenanceMissing, StoreError::FieldOutOfBounds),
+        (DepError::BindingMismatch, StoreError::BindingMismatch),
+        (DepError::UnknownConsumer, StoreError::BindingMismatch),
+        (DepError::UndeclaredInput, StoreError::BindingMismatch),
+        (DepError::InvalidCursor, StoreError::BindingMismatch),
+        (DepError::InvalidPageLimit, StoreError::FieldOutOfBounds),
+    ];
+    for (error, expected) in table {
+        assert_eq!(StoreError::from(error), expected);
+    }
+    assert_eq!(DepError::READ_BACK_FAULT, StoreError::CorruptState);
 }
 
 fn fork_scope(generation: u64) -> DependencyReadScopeV1 {
@@ -1066,6 +1113,12 @@ fn read_scopes_require_the_committed_generation() {
     assert_eq!(prefix_scope(9).ensure_current(0), Ok(()));
 }
 
+#[test]
+fn only_parent_prefix_scopes_are_bounded_by_a_tick() {
+    assert_eq!(prefix_scope(9).through_tick(), Some(9));
+    assert_eq!(fork_scope(3).through_tick(), None);
+}
+
 // The frontier, invalidation, drafts, facts, and command helpers below mirror
 // those of `counterfactual_store_public.rs`: integration tests are separate
 // crates, so they are copied rather than shared.
@@ -1150,6 +1203,9 @@ struct FakeStore {
     facts: CounterfactualFactsV1,
     fork_nodes: Vec<(u64, NodeRow)>,
     fork_edges: Vec<(u64, EdgeRow)>,
+    /// The Tick of every record, with its generation: persisted apart from
+    /// the node Ticks, which under-report it for a record of early roots.
+    record_ticks: Vec<(u64, u64)>,
     parent_nodes: Vec<NodeRow>,
     parent_edges: Vec<EdgeRow>,
 }
@@ -1162,6 +1218,7 @@ impl FakeStore {
             facts: facts(),
             fork_nodes: Vec::new(),
             fork_edges: Vec::new(),
+            record_ticks: Vec::new(),
             parent_nodes: Vec::new(),
             parent_edges: Vec::new(),
         }
@@ -1179,33 +1236,69 @@ impl FakeStore {
         Seq::from_u64(self.head.as_u64() + ok(u64::try_from(drafts.drafts().len())))
     }
 
-    /// Validate `record` for a Fork write at a Tick after `last_tick`.
-    fn admit(&self, record: &TickRecord, first_tick: Option<u64>) -> Result<(), StoreError> {
-        record.ensure_provisional()?;
-        let last_tick = self
-            .fork_nodes
+    /// The nodes recorded under the current generation.
+    fn recorded_nodes(&self) -> impl Iterator<Item = &NodeRow> {
+        self.fork_nodes
             .iter()
             .filter(|(generation, _)| *generation == self.generation)
-            .map(|(_, row)| row.coordinate().tick())
-            .max();
-        let misplaced = first_tick.map_or_else(
-            || last_tick.is_some_and(|last| record.tick() <= last),
-            |expected| record.tick() != expected,
-        );
-        if misplaced {
+            .map(|(_, row)| row)
+    }
+
+    /// The row counts of the current generation's recorded set.
+    fn recorded_counts(&self) -> RecordedSetCountsV1 {
+        let edges = self
+            .fork_edges
+            .iter()
+            .filter(|(generation, _)| *generation == self.generation);
+        RecordedSetCountsV1 {
+            nodes: self.recorded_nodes().count(),
+            edges: edges.count(),
+            inputs: self
+                .recorded_nodes()
+                .map(|row| row.input_digests().len())
+                .sum(),
+        }
+    }
+
+    /// Validate `record` for an invalidation at `first_tick`, which writes
+    /// the empty set of the new generation.
+    fn admit_first(record: &TickRecord, first_tick: u64) -> Result<(), StoreError> {
+        record.ensure_provisional()?;
+        if record.tick() != first_tick {
             return Err(StoreError::BindingMismatch);
         }
-        let inputs: usize = self
-            .fork_nodes
+        let capacity = record.ensure_set_capacity(RecordedSetCountsV1::default());
+        capacity.map_err(StoreError::from)
+    }
+
+    /// Validate `record` for a later Tick: after the last persisted record
+    /// Tick, with no node position key or digest already in the set.
+    fn admit_later(&self, record: &TickRecord) -> Result<(), StoreError> {
+        record.ensure_provisional()?;
+        let last_tick = self
+            .record_ticks
             .iter()
-            .map(|(_, row)| row.input_digests().len())
-            .sum();
-        record
-            .ensure_set_capacity(self.fork_nodes.len(), self.fork_edges.len(), inputs)
-            .or(Err(StoreError::FieldOutOfBounds))
+            .filter(|(generation, _)| *generation == self.generation)
+            .map(|(_, tick)| *tick)
+            .max();
+        if last_tick.is_some_and(|last| record.tick() <= last) {
+            return Err(StoreError::BindingMismatch);
+        }
+        let repeats = record.nodes().iter().any(|row| {
+            self.recorded_nodes().any(|old| {
+                old.coordinate().artifact_digest() == row.coordinate().artifact_digest()
+                    || old.coordinate().position_key() == row.coordinate().position_key()
+            })
+        });
+        if repeats {
+            return Err(StoreError::DuplicateIdentity);
+        }
+        let capacity = record.ensure_set_capacity(self.recorded_counts());
+        capacity.map_err(StoreError::from)
     }
 
     fn record(&mut self, record: &TickRecord, generation: u64) {
+        self.record_ticks.push((generation, record.tick()));
         self.fork_nodes
             .extend(record.nodes().iter().map(|row| (generation, row.clone())));
         self.fork_edges
@@ -1218,7 +1311,7 @@ impl FakeStore {
         record: Option<&TickRecord>,
     ) -> Result<CounterfactualInvalidationOutcomeV1, StoreError> {
         if let Some(record) = record {
-            self.admit(record, Some(command.first_tick()))?;
+            Self::admit_first(record, command.first_tick())?;
         }
         if let Some(conflict) = command.expected_basis().first_conflict(&self.basis()) {
             return Ok(CounterfactualInvalidationOutcomeV1::InvalidationConflict(
@@ -1247,7 +1340,7 @@ impl FakeStore {
             return Ok(CounterfactualTickOutcomeV1::Stale(conflict));
         }
         if let Some(record) = record {
-            self.admit(record, None)?;
+            self.admit_later(record)?;
         }
         let outcome = self
             .basis()
@@ -1283,7 +1376,7 @@ impl FakeStore {
             _ => return Err(StoreError::ForkNotFound),
         };
         rows.sort_by_key(T::cursor);
-        DependencyPageV1::from_ordered(request, &rows).or(Err(StoreError::CorruptState))
+        DependencyPageV1::from_ordered(request, &rows).or(Err(DepError::READ_BACK_FAULT))
     }
 }
 
@@ -1546,6 +1639,47 @@ fn later_tick_records_must_be_provisional_and_advance() {
     }
     assert_eq!(store.basis(), expected);
     assert_eq!(ok(collect_nodes(&store, fork_scope(4), 5)).len(), 2);
+}
+
+fn append_record(
+    store: &mut FakeStore,
+    record: &TickRecord,
+) -> Result<CounterfactualTickOutcomeV1, StoreError> {
+    let expected = store.basis();
+    store.append_counterfactual_tick_with_dependencies(fork(), &expected, &drafts(), record)
+}
+
+#[test]
+fn later_records_may_not_reuse_a_recorded_position_key_or_digest() {
+    let mut store = committed_store();
+    let expected = store.basis();
+    let root = RecordedDependencyClassV1::InterventionAssigned;
+    // The position key of node `a` at tick 17 with another digest.
+    let same_position = class_row(coord(17, "a", 77), root, PROVISIONAL, Vec::new());
+    // The digest of node `a` at another position.
+    let same_digest = node_row(coord(18, "z", 1), PROVISIONAL, Vec::new());
+    for row in [same_position, same_digest] {
+        let record = ok(TickRecord::try_new(18, PROVISIONAL, vec![row], Vec::new()));
+        let outcome = append_record(&mut store, &record);
+        assert_eq!(err(outcome), StoreError::DuplicateIdentity);
+    }
+    assert_eq!(store.basis(), expected);
+    assert_eq!(ok(collect_nodes(&store, fork_scope(4), 5)).len(), 2);
+}
+
+#[test]
+fn the_record_tick_is_persisted_apart_from_node_ticks() {
+    let mut store = FakeStore::new();
+    let root_class = RecordedDependencyClassV1::InterventionAssigned;
+    let root = class_row(coord(2, "r", 9), root_class, PROVISIONAL, Vec::new());
+    let early = ok(TickRecord::try_new(5, PROVISIONAL, vec![root], Vec::new()));
+    let empty_at = |tick: u64| ok(TickRecord::try_new(tick, PROVISIONAL, Vec::new(), Vec::new()));
+    let first = append_record(&mut store, &early);
+    assert!(first.is_ok());
+    let before = append_record(&mut store, &empty_at(4));
+    assert_eq!(err(before), StoreError::BindingMismatch);
+    let after = append_record(&mut store, &empty_at(6));
+    assert!(after.is_ok());
 }
 
 #[test]
