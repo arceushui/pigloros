@@ -71,7 +71,7 @@ pub fn validate_client_data_json(
             let JsonValue::String(value) = value else {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             };
-            if value.contains_escape || value.raw != &expected_challenge[..] {
+            if value.contains_escape || value.raw.as_bytes() != &expected_challenge[..] {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
             challenge_seen = true;
