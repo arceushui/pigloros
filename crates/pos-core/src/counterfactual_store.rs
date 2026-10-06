@@ -307,7 +307,7 @@ fn read_id(cursor: &mut CborCursor<'_>) -> Result<[u8; 16], CborReadError> {
         })
 }
 
-fn read_hash(cursor: &mut CborCursor<'_>) -> Result<Hash, CborReadError> {
+pub(crate) fn read_hash(cursor: &mut CborCursor<'_>) -> Result<Hash, CborReadError> {
     cursor
         .fixed(&DIGEST_FIELD_HEAD)
         .and_then(|()| cursor.take(32))
@@ -335,7 +335,7 @@ fn read_unsigned(cursor: &mut CborCursor<'_>) -> Result<u64, CborReadError> {
 
 /// Skip one definite-length unsigned integer, byte string, text string, or
 /// array of at most `array_depth` nested levels.
-fn skip_item(cursor: &mut CborCursor<'_>, array_depth: u8) -> Result<(), CborReadError> {
+pub(crate) fn skip_item(cursor: &mut CborCursor<'_>, array_depth: u8) -> Result<(), CborReadError> {
     let first = cursor.byte()?;
     let argument = match first & 0x1f {
         small @ 0..=23 => u64::from(small),

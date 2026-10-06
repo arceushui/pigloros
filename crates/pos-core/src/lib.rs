@@ -19,6 +19,7 @@ extern crate self as pos_core;
 
 pub mod clock;
 pub mod consent;
+pub mod counterfactual_dependency;
 pub mod counterfactual_store;
 pub mod crypto;
 pub mod entity;
@@ -360,6 +361,16 @@ pub use consent::{
     ConsentRevocationReservation, ConsentRevokedV1, FieldStateV1, EVENT_TYPE_CONSENT_GRANTED_V1,
     EVENT_TYPE_CONSENT_REVOKED_V1, HOST_CONSENT_CLOSED_EVENT_TYPE, MAX_CONSENT_HISTORY_EVENTS,
     MODALITY_EXPORT, MODALITY_LOCATION, MODALITY_MODEL_FIT, MODALITY_PERSONA,
+};
+pub use counterfactual_dependency::{
+    CounterfactualDependencyErrorV1, CounterfactualDependencyReadPortV1,
+    CounterfactualDependencyRecordingPortV1, DependencyEdgeRecordV1, DependencyNodeCoordinateV1,
+    DependencyNodeRecordV1, DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1,
+    DependencyPagedRowV1, DependencyReadScopeV1, RecordedDependencyClassV1, RecordedNodeOriginV1,
+    RecordedSetCountsV1, TickDependencyRecordV1, MAX_DEPENDENCY_EDGE_BYTES_V1,
+    MAX_DEPENDENCY_NODE_INPUTS_V1, MAX_DEPENDENCY_OWNER_ID_BYTES_V1, MAX_DEPENDENCY_PAGE_ROWS_V1,
+    MAX_RECORDED_DEPENDENCY_EDGES_V1, MAX_RECORDED_DEPENDENCY_NODES_V1,
+    MAX_TICK_DEPENDENCY_EDGES_V1, MAX_TICK_DEPENDENCY_EDGE_BYTES_V1, MAX_TICK_DEPENDENCY_NODES_V1,
 };
 pub use counterfactual_store::{
     CounterfactualAdapterSealV1, CounterfactualBasisV1, CounterfactualFactsV1,
