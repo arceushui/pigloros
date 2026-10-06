@@ -33,8 +33,8 @@ pub use control::{
 };
 pub use durable::{
     decode_cleanup_record, decode_subject_credential_binding, encode_cleanup_record,
-    encode_subject_credential_binding, CleanupRecordV1, SubjectCredentialBindingV1,
-    MAX_CLEANUP_RECORD_BYTES, MAX_SUBJECT_CREDENTIAL_BINDING_BYTES,
+    encode_subject_credential_binding, CleanupRecordV1, SubjectCredentialBindingInputV1,
+    SubjectCredentialBindingV1, MAX_CLEANUP_RECORD_BYTES, MAX_SUBJECT_CREDENTIAL_BINDING_BYTES,
 };
 pub use error::OwnerBridgeCodecError;
 pub use http::{admit_loopback_http_request, LoopbackRequestDisposition};

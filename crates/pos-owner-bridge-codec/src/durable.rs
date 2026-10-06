@@ -22,6 +22,35 @@ pub const MAX_SUBJECT_CREDENTIAL_BINDING_BYTES: usize = 4_096;
 /// Maximum deterministic-CBOR bytes admitted for one owner-bridge cleanup record.
 pub const MAX_CLEANUP_RECORD_BYTES: usize = 4_096;
 
+/// Named candidate fields for one durable credential binding.
+///
+/// This input deliberately carries no validity claim. Pass it to
+/// [`SubjectCredentialBindingV1::new`] to enforce the closed ADR-097 schema
+/// before any binding reaches durable storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SubjectCredentialBindingInputV1<'a> {
+    /// Durable identifier of the owner account.
+    pub owner_id: &'a str,
+    /// Exact subject identifier whose epoch owns the credential.
+    pub subject_id: [u8; 16],
+    /// Durable subject-key epoch.
+    pub epoch: u64,
+    /// Sole credential identifier bound to this epoch.
+    pub credential_id: &'a [u8],
+    /// Exact owner user handle.
+    pub user_handle: [u8; 32],
+    /// Candidate closed ES256 credential public key.
+    pub public_key: CoseEs256PublicKey,
+    /// Credential backup-eligibility flag.
+    pub backup_eligible: bool,
+    /// Credential backup-state flag.
+    pub backup_state: bool,
+    /// Last verified authenticator signature counter.
+    pub sign_count: u32,
+    /// Non-authoritative ordered transport hints.
+    pub transports: TransportCodes,
+}
+
 /// One exact ADR-097 durable credential binding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SubjectCredentialBindingV1<'a> {
@@ -46,19 +75,19 @@ impl<'a> SubjectCredentialBindingV1<'a> {
     /// field exceeds the durable-record limit, and
     /// [`OwnerBridgeCodecError::InvalidPayload`] for an invalid P-256 point or
     /// impossible backup-flag combination.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        owner_id: &'a str,
-        subject_id: [u8; 16],
-        epoch: u64,
-        credential_id: &'a [u8],
-        user_handle: [u8; 32],
-        public_key: CoseEs256PublicKey,
-        backup_eligible: bool,
-        backup_state: bool,
-        sign_count: u32,
-        transports: TransportCodes,
-    ) -> Result<Self, OwnerBridgeCodecError> {
+    pub fn new(input: SubjectCredentialBindingInputV1<'a>) -> Result<Self, OwnerBridgeCodecError> {
+        let SubjectCredentialBindingInputV1 {
+            owner_id,
+            subject_id,
+            epoch,
+            credential_id,
+            user_handle,
+            public_key,
+            backup_eligible,
+            backup_state,
+            sign_count,
+            transports,
+        } = input;
         require_bounded(owner_id.as_bytes(), 0, MAX_SUBJECT_CREDENTIAL_BINDING_BYTES)?;
         require_bounded(credential_id, 1, MAX_CREDENTIAL_ID_BYTES)?;
         if backup_state && !backup_eligible {
@@ -276,7 +305,7 @@ pub fn decode_subject_credential_binding(
         u32::try_from(reader.unsigned()?).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
     let transports = read_transports(&mut reader)?;
     reader.finish()?;
-    SubjectCredentialBindingV1::new(
+    SubjectCredentialBindingV1::new(SubjectCredentialBindingInputV1 {
         owner_id,
         subject_id,
         epoch,
@@ -287,7 +316,7 @@ pub fn decode_subject_credential_binding(
         backup_state,
         sign_count,
         transports,
-    )
+    })
 }
 
 /// Encode one exact deterministic-CBOR owner-bridge cleanup record.

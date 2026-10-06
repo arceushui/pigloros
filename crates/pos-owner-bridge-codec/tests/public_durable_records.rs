@@ -1,7 +1,8 @@
 use pos_owner_bridge_codec::{
     decode_cleanup_record, decode_subject_credential_binding, encode_cleanup_record,
     encode_subject_credential_binding, CleanupRecordV1, CoseEs256PublicKey, OwnerBridgeCodecError,
-    SubjectCredentialBindingV1, TransportCodes, MAX_SUBJECT_CREDENTIAL_BINDING_BYTES,
+    SubjectCredentialBindingInputV1, SubjectCredentialBindingV1, TransportCodes,
+    MAX_SUBJECT_CREDENTIAL_BINDING_BYTES,
 };
 
 const CEREMONY_ID: [u8; 16] = [
@@ -55,18 +56,18 @@ fn public_durable_codecs_match_adr_097_and_110_vectors() -> Result<(), OwnerBrid
 #[test]
 fn public_durable_codecs_reject_closed_schema_violations() -> Result<(), OwnerBridgeCodecError> {
     assert_eq!(
-        SubjectCredentialBindingV1::new(
-            "owner",
-            SUBJECT_ID,
-            1,
-            &[0x80, 0x81],
-            USER_HANDLE,
-            CoseEs256PublicKey::from_canonical_encoding(&cose_key())?,
-            false,
-            true,
-            7,
-            TransportCodes::new(&[0])?,
-        ),
+        SubjectCredentialBindingV1::new(SubjectCredentialBindingInputV1 {
+            owner_id: "owner",
+            subject_id: SUBJECT_ID,
+            epoch: 1,
+            credential_id: &[0x80, 0x81],
+            user_handle: USER_HANDLE,
+            public_key: CoseEs256PublicKey::from_canonical_encoding(&cose_key())?,
+            backup_eligible: false,
+            backup_state: true,
+            sign_count: 7,
+            transports: TransportCodes::new(&[0])?,
+        }),
         Err(OwnerBridgeCodecError::InvalidPayload)
     );
 
@@ -102,18 +103,18 @@ fn public_durable_codecs_reject_closed_schema_violations() -> Result<(), OwnerBr
 }
 
 fn fixture_binding() -> Result<SubjectCredentialBindingV1<'static>, OwnerBridgeCodecError> {
-    SubjectCredentialBindingV1::new(
-        "owner",
-        SUBJECT_ID,
-        1,
-        &[0x80, 0x81],
-        USER_HANDLE,
-        CoseEs256PublicKey::from_canonical_encoding(&cose_key())?,
-        false,
-        false,
-        7,
-        TransportCodes::new(&[0])?,
-    )
+    SubjectCredentialBindingV1::new(SubjectCredentialBindingInputV1 {
+        owner_id: "owner",
+        subject_id: SUBJECT_ID,
+        epoch: 1,
+        credential_id: &[0x80, 0x81],
+        user_handle: USER_HANDLE,
+        public_key: CoseEs256PublicKey::from_canonical_encoding(&cose_key())?,
+        backup_eligible: false,
+        backup_state: false,
+        sign_count: 7,
+        transports: TransportCodes::new(&[0])?,
+    })
 }
 
 fn cose_key() -> [u8; 77] {
