@@ -113,7 +113,7 @@ fn public_durable_records_enforce_complete_size_and_output_boundaries(
     );
 
     let cleanup = CleanupRecordV1::new(CEREMONY_ID, "owner-bridge-1", 7, 0, IMAGE_PATH_SHA256)?;
-    let mut cleanup_short_output = [0; 82];
+    let mut cleanup_short_output = [0; 74];
     assert_eq!(
         encode_cleanup_record(&cleanup, &mut cleanup_short_output),
         Err(OwnerBridgeCodecError::BufferTooSmall)
