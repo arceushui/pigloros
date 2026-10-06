@@ -10,7 +10,7 @@
 //! rejection tests show that every substituted admission fact or inconsistent
 //! closure row stops the cut before any owner record becomes visible.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pos_core::output_policy::{OutputPolicyInputV1, OutputPolicyV1};
 use pos_core::retention::{
@@ -20,8 +20,9 @@ use pos_core::retention::{
 use pos_core::{
     build_manifest_owner_scope_v1, local_cut_owner_intent_digest_v1,
     prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1,
+    test_coordinator_key_evidence, test_coordinator_key_registry,
     validate_manifest_owner_admission_snapshot_v1, ArtifactDataClassV1, ArtifactTransitionRuleV1,
-    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash,
+    EventStore, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash,
     LocalCutCommitV1, LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1,
     LocalCutHeadsTableV1, LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1,
     LocalCutOwnerCommitV1, LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1,
@@ -32,11 +33,13 @@ use pos_core::{
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
     ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
     ManifestOwnerAdmissionVerifierV1, ManifestOwnerClassifiedLeafV1,
-    ManifestOwnerConsumerReferenceV1, ManifestOwnerLeafClassificationV1, ManifestOwnerMemberLeafV1,
+    ManifestOwnerConsumerReferenceV1, ManifestOwnerLeafClassificationV1,
+    ManifestOwnerLinkCutIdentityV1, ManifestOwnerLinkReadPortV1, ManifestOwnerMemberLeafV1,
     ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1,
     ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
     ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1,
-    PluginId, PreparedLocalCutOwnerCommitV1, TimelineId, WorkloadProfileV1, WorldArtifactKindV1,
+    PluginId, PreparedLocalCutOwnerCommitV1, SignedLocalCutReceiptV1,
+    SignedManifestSlotAdmissionReceiptV1, TimelineId, WorkloadProfileV1, WorldArtifactKindV1,
     WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldClosureBindingInputV1,
     WorldClosureBindingV1, WorldClosureCutCoordinateV1, WorldClosureReadLimitsV1,
     WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldDependencyDirectoryV1,
@@ -63,7 +66,6 @@ const NODE_TABLE: &str = "world_dependency_branches";
 const OWNER: [u8; 32] = [0x41; 32];
 const TIMELINE: TimelineId = timeline(1);
 const DAY_MICROS: u64 = 86_400_000_000;
-const EVIDENCE: Hash = hash(90);
 const SIGNATURE: [u8; 64] = [0x5a; 64];
 const GENESIS: Hash = hash(0x47);
 const ADMISSION_OPERATION: Hash = hash(0x51);
@@ -105,7 +107,30 @@ const fn timeline(byte: u8) -> TimelineId {
 }
 
 /// Accepts every owner check so these tests isolate the closure evidence.
-struct FixtureOwner;
+///
+/// Every receipt names the coordinator's epoch-1 WKE1; a substituting owner
+/// returns the epoch-2 WKE1 bytes with it instead.
+struct FixtureOwner {
+    substitute: bool,
+}
+
+impl FixtureOwner {
+    const INSTALLED: Self = Self { substitute: false };
+    const SUBSTITUTING: Self = Self { substitute: true };
+
+    /// The signed evidence address and the WKE1 bytes returned with it.
+    fn signed_evidence(&self) -> (Hash, Vec<u8>) {
+        let returned = test_coordinator_key_evidence(if self.substitute { 2 } else { 1 });
+        let signed = test_coordinator_key_evidence(1).digest();
+        (signed, returned.to_canonical_cbor())
+    }
+}
+
+/// Install the shared registry holding the coordinator's epoch-1 signing key.
+fn keyed<S: EventStore>(mut store: S) -> Fallible<S> {
+    store.save_key_registry(&test_coordinator_key_registry())?;
+    Ok(store)
+}
 
 impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
     fn verify_complete_composition(
@@ -141,10 +166,15 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
     fn sign_coordinator_receipt(
         &self,
         draft: ManifestSlotAdmissionReceiptDraftV1,
-    ) -> Result<ManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+    ) -> Result<SignedManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+        let (evidence_hash, key_evidence) = self.signed_evidence();
         draft
-            .with_evidence_and_signature(EVIDENCE, SIGNATURE)
-            .map_err(|_| ManifestOwnerAdmissionErrorV1::OwnerRejected)
+            .with_evidence_and_signature(evidence_hash, SIGNATURE)
+            .map(|receipt| SignedManifestSlotAdmissionReceiptV1 {
+                receipt,
+                key_evidence,
+            })
+            .or(Err(ManifestOwnerAdmissionErrorV1::OwnerRejected))
     }
 
     fn verify_native_policy_copies(
@@ -188,13 +218,18 @@ impl LocalCutOwnerVerifierV1 for FixtureOwner {
     fn sign_local_cut_receipt(
         &self,
         commit: &LocalCutCommitV1,
-    ) -> Result<LocalCutReceiptV1, LocalCutOwnerErrorV1> {
+    ) -> Result<SignedLocalCutReceiptV1, LocalCutOwnerErrorV1> {
+        let (evidence_hash, key_evidence) = self.signed_evidence();
         LocalCutReceiptV1::new(LocalCutReceiptInputV1 {
             commit_record_hash: commit.digest(),
-            coordinator_key_evidence_hash: EVIDENCE,
+            coordinator_key_evidence_hash: evidence_hash,
             signature: SIGNATURE,
         })
-        .map_err(|_| LocalCutOwnerErrorV1::OwnerRejected)
+        .map(|receipt| SignedLocalCutReceiptV1 {
+            receipt,
+            key_evidence,
+        })
+        .or(Err(LocalCutOwnerErrorV1::OwnerRejected))
     }
 
     fn verify_local_cut_receipt(
@@ -463,7 +498,7 @@ struct Admitted {
 
 fn admit<S: CutStore>(store: &mut S, plugins: u16) -> Fallible<Admitted> {
     let request = admission_request(plugins)?;
-    let batch = prepare_manifest_owner_admission_v1(request, &FixtureOwner, None)?;
+    let batch = prepare_manifest_owner_admission_v1(request, &FixtureOwner::INSTALLED, None)?;
     store.commit_manifest_owner_admission_v1(batch)?;
     let state = store.read_manifest_owner_state_v1(OWNER)?;
     let state = state.ok_or("missing admitted owner state")?;
@@ -664,7 +699,8 @@ fn prepare_against(
     request: LocalCutOwnerRequestV1,
 ) -> Result<PreparedLocalCutOwnerCommitV1, LocalCutOwnerErrorV1> {
     let admissions = std::slice::from_ref(snapshot);
-    prepare_local_cut_owner_commit_v1(request, None, &admitted.state, admissions, &FixtureOwner)
+    let owner = &FixtureOwner::INSTALLED;
+    prepare_local_cut_owner_commit_v1(request, None, &admitted.state, admissions, owner)
 }
 
 // Independent preferred-CBOR WDB1 oracle; it shares no production encoder or packer.
@@ -1221,7 +1257,7 @@ fn publish_after_rejections<S: CutStore>(
 fn open_sqlite(directory: &tempfile::TempDir) -> Fallible<(SqliteStore, String)> {
     let path = directory.path().join("owner.db");
     let path = path.to_str().ok_or("non-UTF-8 database path")?.to_owned();
-    let store = SqliteStore::open(&path)?;
+    let store = keyed(SqliteStore::open(&path)?)?;
     Ok((store, path))
 }
 
@@ -1259,7 +1295,7 @@ fn oracle_nodes(branches: Vec<Vec<u8>>) -> Vec<StoredNode> {
 
 #[test]
 fn full_roster_cut_records_the_exact_oracle_closure_in_memory() -> TestResult {
-    let cut = record_cut(&mut MemoryStore::new(), full_roster()?)?;
+    let cut = record_cut(&mut keyed(MemoryStore::new())?, full_roster()?)?;
     let oracle = assert_exact_closure(&cut)?;
     assert_full_roster_shape(&cut, &oracle);
     assert_full_roster_deduplication(&cut)?;
@@ -1283,7 +1319,7 @@ fn full_roster_cut_persists_the_exact_oracle_nodes_in_sqlite() -> TestResult {
 
 #[test]
 fn same_name_and_reducer_only_plugins_are_recorded_in_memory() -> TestResult {
-    let cut = record_cut(&mut MemoryStore::new(), SMALL_ROSTER)?;
+    let cut = record_cut(&mut keyed(MemoryStore::new())?, SMALL_ROSTER)?;
     let oracle = assert_exact_closure(&cut)?;
     assert_small_roster(&cut, &oracle)?;
     assert_eq!(assert_row_seeds(&cut)?, 6);
@@ -1305,7 +1341,7 @@ fn same_name_and_reducer_only_plugins_are_recorded_in_sqlite() -> TestResult {
 
 #[test]
 fn owner_seam_faults_reject_before_memory_publication() -> TestResult {
-    let mut store = MemoryStore::new();
+    let mut store = keyed(MemoryStore::new())?;
     let admitted = admit(&mut store, SMALL_ROSTER)?;
     let request = cut_request(&admitted)?;
     reject_each_fault(&store, &admitted, &request)?;
@@ -1325,4 +1361,100 @@ fn owner_seam_faults_reject_before_sqlite_publication() -> TestResult {
     publish_after_rejections(&mut store, &admitted, request)?;
     assert!(!sqlite_nodes(&path, scope)?.is_empty());
     Ok(())
+}
+
+/// The coordinator WKE1 bytes a store retained for `cut`, keyed by digest.
+fn retained_evidence<S: ManifestOwnerLinkReadPortV1>(
+    store: &S,
+    cut: &LocalCutOwnerCommitV1,
+) -> Fallible<BTreeMap<Hash, Vec<u8>>> {
+    let identity = ManifestOwnerLinkCutIdentityV1::LocalCutReceipt(cut.receipt.digest());
+    let snapshot = store.read_manifest_owner_link_snapshot_v1(OWNER, identity, TIMELINE)?;
+    Ok(snapshot.ok_or("missing owner-link snapshot")?.key_evidence)
+}
+
+/// The one deduplicated WKE1 record that the cut's LCQ1 and MSR1 both name.
+fn expected_evidence() -> BTreeMap<Hash, Vec<u8>> {
+    let evidence = test_coordinator_key_evidence(1);
+    let entry = (evidence.digest(), evidence.to_canonical_cbor());
+    BTreeMap::from([entry])
+}
+
+/// Reject substituted WKE1 bytes and an absent registry before publication.
+fn assert_evidence_rejections<S: CutStore>(mut keyed_store: S, mut unkeyed: S) -> TestResult {
+    let request = admission_request(SMALL_ROSTER)?;
+    let installed = &FixtureOwner::INSTALLED;
+    let batch = prepare_manifest_owner_admission_v1(request.clone(), installed, None)?;
+    assert_eq!(
+        unkeyed.commit_manifest_owner_admission_v1(batch),
+        Err(ManifestOwnerAdmissionErrorV1::OwnerRejected)
+    );
+    assert_eq!(unkeyed.read_manifest_owner_state_v1(OWNER)?, None);
+    let substituting = &FixtureOwner::SUBSTITUTING;
+    let substituted = prepare_manifest_owner_admission_v1(request, substituting, None)?;
+    assert_eq!(
+        keyed_store.commit_manifest_owner_admission_v1(substituted),
+        Err(ManifestOwnerAdmissionErrorV1::InvalidBatch)
+    );
+    assert_eq!(keyed_store.read_manifest_owner_state_v1(OWNER)?, None);
+    let admitted = admit(&mut keyed_store, SMALL_ROSTER)?;
+    let cut = cut_request(&admitted)?;
+    let intent = local_cut_owner_intent_digest_v1(&cut)?;
+    let before = owner_view(&keyed_store, intent)?;
+    let admissions = std::slice::from_ref(&admitted.snapshot);
+    let state = &admitted.state;
+    let batch = prepare_local_cut_owner_commit_v1(cut, None, state, admissions, substituting)?;
+    assert_eq!(
+        keyed_store.commit_local_cut_owner_v1(batch),
+        Err(LocalCutOwnerErrorV1::InvalidBatch)
+    );
+    assert_eq!(owner_view(&keyed_store, intent)?, before);
+    Ok(())
+}
+
+#[test]
+fn memory_cut_retains_the_exact_coordinator_evidence() -> TestResult {
+    let mut store = keyed(MemoryStore::new())?;
+    let cut = record_cut(&mut store, SMALL_ROSTER)?;
+    assert_eq!(
+        retained_evidence(&store, &cut.committed)?,
+        expected_evidence()
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_cut_retains_the_same_coordinator_evidence_across_reopen() -> TestResult {
+    let mut memory = keyed(MemoryStore::new())?;
+    let memory_cut = record_cut(&mut memory, SMALL_ROSTER)?;
+    let memory_evidence = retained_evidence(&memory, &memory_cut.committed)?;
+    let directory = tempfile::tempdir()?;
+    let (mut store, path) = open_sqlite(&directory)?;
+    let cut = record_cut(&mut store, SMALL_ROSTER)?;
+    assert_eq!(retained_evidence(&store, &cut.committed)?, memory_evidence);
+    drop(store);
+    let reopened = SqliteStore::open(&path)?;
+    assert_eq!(
+        retained_evidence(&reopened, &cut.committed)?,
+        memory_evidence
+    );
+    assert_eq!(memory_evidence, expected_evidence());
+    let connection = rusqlite::Connection::open(&path)?;
+    let count = "SELECT COUNT(*) FROM world_key_evidence";
+    let rows: i64 = connection.query_row(count, [], |row| row.get(0))?;
+    assert_eq!(rows, 1);
+    Ok(())
+}
+
+#[test]
+fn memory_commits_reject_substituted_evidence_and_an_absent_registry() -> TestResult {
+    assert_evidence_rejections(keyed(MemoryStore::new())?, MemoryStore::new())
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn sqlite_commits_reject_substituted_evidence_and_an_absent_registry() -> TestResult {
+    let unkeyed = SqliteStore::open_in_memory()?;
+    assert_evidence_rejections(keyed(SqliteStore::open_in_memory()?)?, unkeyed)
 }

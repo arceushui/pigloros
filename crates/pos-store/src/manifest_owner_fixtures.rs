@@ -12,8 +12,9 @@ use pos_core::retention::{
     WorldRetentionPolicyV1,
 };
 use pos_core::{
-    build_manifest_owner_scope_v1, derive_local_cut_world_closure_v1, ArtifactDataClassV1,
-    ArtifactTransitionRuleV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
+    build_manifest_owner_scope_v1, derive_local_cut_world_closure_v1,
+    test_coordinator_key_evidence, ArtifactDataClassV1, ArtifactTransitionRuleV1,
+    CoordinatorSignedReceiptV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
     FidelityBudgetV1, Hash, LocalCutExpectedHeadRowV1, LocalCutRecordingContextRowV1,
     LocalCutResultHeadRowV1, LocalCutSealV2, LocalCutWorldClosureSourceV1,
     ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
@@ -24,8 +25,9 @@ use pos_core::{
     ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1,
     ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
     ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1,
-    PluginId, TimelineId, WorkloadProfileV1, WorldArtifactKindV1, WorldClosureReadLimitsV1,
-    WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1,
+    PluginId, SignedManifestSlotAdmissionReceiptV1, TimelineId, WorkloadProfileV1,
+    WorldArtifactKindV1, WorldClosureReadLimitsV1, WorldConsumerSetInputV1, WorldConsumerSetV1,
+    WorldConsumerV1, WorldProducerV1,
 };
 
 pub(crate) type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
@@ -85,10 +87,15 @@ impl ManifestOwnerAdmissionVerifierV1 for AcceptingOwner {
     fn sign_coordinator_receipt(
         &self,
         draft: ManifestSlotAdmissionReceiptDraftV1,
-    ) -> Result<ManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+    ) -> Result<SignedManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+        let evidence = test_coordinator_key_evidence(1);
         draft
-            .with_evidence_and_signature(hash(90), [0x5a; 64])
-            .map_err(|_| ManifestOwnerAdmissionErrorV1::OwnerRejected)
+            .with_evidence_and_signature(evidence.digest(), [0x5a; 64])
+            .map(|receipt| CoordinatorSignedReceiptV1 {
+                receipt,
+                key_evidence: evidence.to_canonical_cbor(),
+            })
+            .or(Err(ManifestOwnerAdmissionErrorV1::OwnerRejected))
     }
 
     fn verify_native_policy_copies(

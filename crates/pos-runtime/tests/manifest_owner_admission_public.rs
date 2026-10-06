@@ -12,10 +12,12 @@ use pos_core::retention::{
 };
 use pos_core::{
     build_manifest_owner_scope_v1, manifest_owner_admission_intent_digest_v1,
-    prepare_manifest_owner_admission_v1, validate_manifest_owner_admission_snapshot_v1,
-    ArtifactDataClassV1, ArtifactTransitionRuleV1, Hash, LocalCutOwnerCommitKindV1,
-    LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1, ManifestAdmissionCatalogInputV1,
-    ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
+    prepare_manifest_owner_admission_v1, test_coordinator_key_evidence,
+    test_coordinator_key_registry, validate_manifest_owner_admission_snapshot_v1,
+    ArtifactDataClassV1, ArtifactTransitionRuleV1, Hash, KeyIdentityV1, KeyRoleV1,
+    LocalCutOwnerCommitKindV1, LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1,
+    ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogV1,
+    ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionCommitV1,
     ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionOwnerStateV1,
     ManifestOwnerAdmissionRequestV1, ManifestOwnerAdmissionSnapshotV1,
     ManifestOwnerAdmissionVerifierV1, ManifestOwnerClassifiedLeafV1,
@@ -25,8 +27,10 @@ use pos_core::{
     ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptInputV1,
     ManifestSlotAdmissionReceiptV1, ManifestSlotBindingInputV1, ManifestSlotBindingRowV1,
     ManifestSlotBindingV1, OutputPolicyClosureEnvelopeV1, OwnerIdV1, Plugin, PluginId,
-    PreparedManifestOwnerAdmissionV1, TimelineId, WorldArtifactKindV1, WorldClosureReadLimitsV1,
-    WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1,
+    PreparedManifestOwnerAdmissionV1, SignedLocalCutReceiptV1,
+    SignedManifestSlotAdmissionReceiptV1, TimelineId, WorldArtifactKindV1,
+    WorldClosureReadLimitsV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
+    WorldKeyEvidenceInputV1, WorldKeyEvidenceV1, WorldProducerV1,
     MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
 };
 use pos_runtime::{
@@ -304,6 +308,47 @@ fn consumer_set(
     })?)
 }
 
+/// The shared epoch-1 coordinator WKE1 with `role` and private-material use.
+fn coordinator_key(role: KeyRoleV1, private_material_required: bool) -> Option<WorldKeyEvidenceV1> {
+    let installed = *test_coordinator_key_evidence(1).as_input();
+    WorldKeyEvidenceV1::new(WorldKeyEvidenceInputV1 {
+        identity: KeyIdentityV1 {
+            role,
+            ..installed.identity
+        },
+        private_material_required,
+        ..installed
+    })
+    .ok()
+}
+
+/// A Memory owner store whose key registry holds the coordinator key.
+fn memory_owner() -> Result<MemoryStore, Box<dyn Error>> {
+    let mut store = MemoryStore::new();
+    let keys = test_coordinator_key_registry();
+    pos_core::EventStore::save_key_registry(&mut store, &keys)?;
+    Ok(store)
+}
+
+/// A `SQLite` owner store whose key registry holds the coordinator key.
+fn sqlite_owner(path: &str) -> Result<pos_store::sqlite::SqliteStore, Box<dyn Error>> {
+    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    let keys = test_coordinator_key_registry();
+    pos_core::EventStore::save_key_registry(&mut store, &keys)?;
+    Ok(store)
+}
+
+/// Which coordinator WKE1 the fixture owner signs with and returns.
+#[derive(Clone, Copy)]
+enum EvidenceMode {
+    /// The registered verify-only signing key, with its exact bytes.
+    Installed,
+    /// The registered key's digest, with other WKE1 bytes.
+    ForeignBytes,
+    /// A signing key of another role, with its exact bytes.
+    WrongRole,
+}
+
 #[derive(Clone)]
 struct FixtureOwner {
     allowed_timeline_ids: Vec<TimelineId>,
@@ -312,6 +357,36 @@ struct FixtureOwner {
     rejected: Arc<AtomicBool>,
     signer_substituted: Arc<AtomicBool>,
     signed: Arc<AtomicUsize>,
+    evidence: EvidenceMode,
+}
+
+impl FixtureOwner {
+    /// The WKE1 whose digest this owner's receipts name.
+    fn signed_evidence(&self) -> Option<WorldKeyEvidenceV1> {
+        let role = match self.evidence {
+            EvidenceMode::WrongRole => KeyRoleV1::SubjectAttributionSigning,
+            EvidenceMode::Installed | EvidenceMode::ForeignBytes => {
+                KeyRoleV1::TimelineIntegritySigning
+            }
+        };
+        coordinator_key(role, false)
+    }
+
+    /// The digest this owner's receipts name.
+    fn evidence_hash(&self) -> Option<Hash> {
+        self.signed_evidence().map(|evidence| evidence.digest())
+    }
+
+    /// The WKE1 bytes this owner returns with each receipt.
+    fn returned_evidence(&self) -> Option<Vec<u8>> {
+        let returned = match self.evidence {
+            EvidenceMode::ForeignBytes => {
+                coordinator_key(KeyRoleV1::TimelineIntegritySigning, true)
+            }
+            EvidenceMode::Installed | EvidenceMode::WrongRole => self.signed_evidence(),
+        };
+        returned.map(|evidence| evidence.to_canonical_cbor())
+    }
 }
 
 impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
@@ -358,7 +433,7 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
         &self,
         receipt: &ManifestSlotAdmissionReceiptV1,
     ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
-        if receipt.as_input().coordinator_key_evidence_hash == hash(90)
+        if Some(receipt.as_input().coordinator_key_evidence_hash) == self.evidence_hash()
             && receipt.as_input().signature == [90; 64]
         {
             Ok(())
@@ -405,11 +480,18 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
     fn sign_coordinator_receipt(
         &self,
         draft: ManifestSlotAdmissionReceiptDraftV1,
-    ) -> Result<ManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+    ) -> Result<SignedManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
         self.signed.fetch_add(1, Ordering::Relaxed);
+        let rejected = ManifestOwnerAdmissionErrorV1::OwnerRejected;
+        let evidence_hash = self.evidence_hash().ok_or(rejected)?;
+        let key_evidence = self.returned_evidence().ok_or(rejected)?;
         draft
-            .with_evidence_and_signature(hash(90), [90; 64])
-            .map_err(|_| ManifestOwnerAdmissionErrorV1::OwnerRejected)
+            .with_evidence_and_signature(evidence_hash, [90; 64])
+            .map(|receipt| SignedManifestSlotAdmissionReceiptV1 {
+                receipt,
+                key_evidence,
+            })
+            .or(Err(rejected))
     }
 
     fn verify_native_policy_copies(
@@ -472,20 +554,27 @@ impl pos_core::LocalCutOwnerVerifierV1 for FixtureOwner {
     fn sign_local_cut_receipt(
         &self,
         commit: &pos_core::LocalCutCommitV1,
-    ) -> Result<pos_core::LocalCutReceiptV1, pos_core::LocalCutOwnerErrorV1> {
+    ) -> Result<SignedLocalCutReceiptV1, pos_core::LocalCutOwnerErrorV1> {
         self.signed.fetch_add(1, Ordering::Relaxed);
+        let rejected = LocalCutOwnerErrorV1::OwnerRejected;
+        let installed = self.evidence_hash().ok_or(rejected)?;
+        let key_evidence = self.returned_evidence().ok_or(rejected)?;
         let (coordinator_key_evidence_hash, signature) =
             if self.signer_substituted.load(Ordering::Relaxed) {
                 (hash(119), [119; 64])
             } else {
-                (hash(90), [90; 64])
+                (installed, [90; 64])
             };
         pos_core::LocalCutReceiptV1::new(pos_core::LocalCutReceiptInputV1 {
             commit_record_hash: commit.digest(),
             coordinator_key_evidence_hash,
             signature,
         })
-        .map_err(|_| pos_core::LocalCutOwnerErrorV1::OwnerRejected)
+        .map(|receipt| SignedLocalCutReceiptV1 {
+            receipt,
+            key_evidence,
+        })
+        .or(Err(rejected))
     }
 
     fn verify_local_cut_receipt(
@@ -495,11 +584,14 @@ impl pos_core::LocalCutOwnerVerifierV1 for FixtureOwner {
         _admissions: &[pos_core::ManifestOwnerAdmissionSnapshotV1],
     ) -> Result<(), pos_core::LocalCutOwnerErrorV1> {
         let fields = receipt.as_input();
+        let installed = self
+            .evidence_hash()
+            .ok_or(LocalCutOwnerErrorV1::OwnerRejected)?;
         if fields.commit_record_hash == commit.digest()
-            && fields.coordinator_key_evidence_hash == hash(90)
+            && fields.coordinator_key_evidence_hash == installed
             && fields.signature == [90; 64]
             && receipt.signature_preimage()
-                == pos_core::local_cut_receipt_signature_preimage_v1(commit.digest(), hash(90))
+                == pos_core::local_cut_receipt_signature_preimage_v1(commit.digest(), installed)
                     .map_err(|_| pos_core::LocalCutOwnerErrorV1::OwnerRejected)?
         {
             Ok(())
@@ -547,6 +639,7 @@ fn verifier_for_scopes(expected_timeline_sets: Vec<(Hash, Vec<TimelineId>)>) -> 
         rejected: Arc::new(AtomicBool::new(false)),
         signer_substituted: Arc::new(AtomicBool::new(false)),
         signed: Arc::new(AtomicUsize::new(0)),
+        evidence: EvidenceMode::Installed,
     }
 }
 
@@ -559,7 +652,7 @@ fn current_private_composition_is_committed_with_exact_policy_bytes() -> TestRes
     let (registry, _plugins, owner, admitted) = setup(owner_verifier)?;
     let sources = registry.admitted_manifest_policy_sources(&admitted)?;
     let input = request(&admitted, &sources, timeline_id, operation_id)?;
-    let mut store = MemoryStore::new();
+    let mut store = memory_owner()?;
 
     let first = registry.commit_admitted_manifest_owner_admission_v1(
         &admitted,
@@ -633,7 +726,7 @@ fn sqlite_owner_retry_recovers_without_registry_or_signer_after_reopen() -> Test
     let path = directory.path().join("runtime-owner-admission.sqlite");
     let path = path.to_str().ok_or("non-UTF8 test path")?;
 
-    let mut store = pos_store::sqlite::SqliteStore::open(path)?;
+    let mut store = sqlite_owner(path)?;
     let applied = registry.commit_admitted_manifest_owner_admission_v1(
         &admitted,
         input.clone(),
@@ -964,7 +1057,7 @@ fn registry_commits_local_cut_owner_and_recovers_without_authority() -> TestResu
     let (registry, _plugins, owner, admitted) = setup(owner_verifier)?;
     let sources = registry.admitted_manifest_policy_sources(&admitted)?;
     let admission = request(&admitted, &sources, timeline_id, admission_operation)?;
-    let mut store = MemoryStore::new();
+    let mut store = memory_owner()?;
     registry.commit_admitted_manifest_owner_admission_v1(&admitted, admission, &mut store)?;
 
     let owner_id = *pos_core::ArtifactRegistrationV1::owner_reference(&owner).as_bytes();
@@ -1061,7 +1154,7 @@ fn sqlite_local_cut_owner_retry_survives_reopen_without_registry_authority() -> 
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("runtime-local-cut-owner.sqlite");
     let database = database.to_str().ok_or("non-UTF8 test path")?;
-    let mut store = pos_store::sqlite::SqliteStore::open(database)?;
+    let mut store = sqlite_owner(database)?;
     registry.commit_admitted_manifest_owner_admission_v1(&admitted, admission, &mut store)?;
 
     let owner_id = *pos_core::ArtifactRegistrationV1::owner_reference(&owner).as_bytes();
@@ -1317,7 +1410,7 @@ fn multi_timeline_zero_output_cuts_retain_history_across_scope_replacement() -> 
             resulting_inventory_generation: hash(123),
         },
     )?;
-    let mut store = MemoryStore::new();
+    let mut store = memory_owner()?;
     registry.commit_admitted_manifest_owner_admission_v1(&admitted, first_admission, &mut store)?;
     let owner_id = *pos_core::ArtifactRegistrationV1::owner_reference(&owner).as_bytes();
     let (first, second) =
@@ -1455,7 +1548,7 @@ fn sqlite_local_cut_owner_successor_admission_survives_reopen() -> TestResult {
         .path()
         .join("runtime-local-cut-owner-successor.sqlite");
     let database = database.to_str().ok_or("non-UTF8 test path")?;
-    let mut store = pos_store::sqlite::SqliteStore::open(database)?;
+    let mut store = sqlite_owner(database)?;
     registry.commit_admitted_manifest_owner_admission_v1(&admitted, first_admission, &mut store)?;
 
     let owner_id = *pos_core::ArtifactRegistrationV1::owner_reference(&owner).as_bytes();
@@ -1500,7 +1593,7 @@ fn sqlite_local_cut_owner_rolls_back_failed_publication() -> TestResult {
         .path()
         .join("runtime-local-cut-owner-rollback.sqlite");
     let database = database.to_str().ok_or("non-UTF8 test path")?;
-    let mut store = pos_store::sqlite::SqliteStore::open(database)?;
+    let mut store = sqlite_owner(database)?;
     registry.commit_admitted_manifest_owner_admission_v1(&admitted, admission, &mut store)?;
 
     let owner_id = *pos_core::ArtifactRegistrationV1::owner_reference(&owner).as_bytes();
@@ -1675,7 +1768,7 @@ fn complete_admitted_owner_selection_is_required_before_lcq1_signing() -> TestRe
     let (registry, _plugins, owner, admitted) = setup(admission_verifier)?;
     let sources = registry.admitted_manifest_policy_sources(&admitted)?;
     let admission = request(&admitted, &sources, timeline_id, admission_operation)?;
-    let mut store = MemoryStore::new();
+    let mut store = memory_owner()?;
     registry.commit_admitted_manifest_owner_admission_v1(&admitted, admission, &mut store)?;
     let owner_id = *pos_core::ArtifactRegistrationV1::owner_reference(&owner).as_bytes();
     let state = store
@@ -1742,7 +1835,7 @@ fn stale_local_cut_admission_is_rejected_before_signing() -> TestResult {
     let (registry, _plugins, owner, admitted) = setup(owner_verifier)?;
     let sources = registry.admitted_manifest_policy_sources(&admitted)?;
     let first_admission = request(&admitted, &sources, timeline_id, first_admission_operation)?;
-    let mut store = MemoryStore::new();
+    let mut store = memory_owner()?;
     registry.commit_admitted_manifest_owner_admission_v1(&admitted, first_admission, &mut store)?;
 
     let owner_id = *pos_core::ArtifactRegistrationV1::owner_reference(&owner).as_bytes();
@@ -1796,7 +1889,7 @@ fn current_private_composition_rejects_stale_catalog_and_policy_bytes() -> TestR
     let signed_count = Arc::clone(&owner_verifier.signed);
     let (registry, _plugins, _owner, admitted) = setup(owner_verifier)?;
     let sources = registry.admitted_manifest_policy_sources(&admitted)?;
-    let mut store = MemoryStore::new();
+    let mut store = memory_owner()?;
 
     let stale_admission = PluginRegistry::new().commit_admitted_manifest_owner_admission_v1(
         &admitted,
@@ -1949,7 +2042,7 @@ impl ManifestOwnerAdmissionVerifierV1 for FaultyOwner {
     fn sign_coordinator_receipt(
         &self,
         draft: ManifestSlotAdmissionReceiptDraftV1,
-    ) -> Result<ManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+    ) -> Result<SignedManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
         self.reject_at(OwnerFault::Signature)?;
         if self.fault == OwnerFault::ReceiptDraft {
             let altered = ManifestSlotAdmissionReceiptDraftV1 {
@@ -2313,6 +2406,36 @@ fn commit_rejects_a_foreign_capability_and_forwards_owner_state_failures() -> Te
     Ok(())
 }
 
+#[test]
+fn admission_commit_rejects_unretainable_coordinator_evidence() -> TestResult {
+    let cases = [
+        (
+            EvidenceMode::ForeignBytes,
+            ManifestOwnerAdmissionErrorV1::InvalidBatch,
+        ),
+        (
+            EvidenceMode::WrongRole,
+            ManifestOwnerAdmissionErrorV1::OwnerRejected,
+        ),
+    ];
+    for (mode, expected) in cases {
+        let timeline_id = TimelineId::new();
+        let operation_id = hash(0xd1);
+        let mut owner_verifier = verifier(timeline_id, operation_id);
+        owner_verifier.evidence = mode;
+        let (registry, _plugins, owner, admitted) = setup(owner_verifier)?;
+        let sources = registry.admitted_manifest_policy_sources(&admitted)?;
+        let admission = request(&admitted, &sources, timeline_id, operation_id)?;
+        let mut store = memory_owner()?;
+        let committed =
+            registry.commit_admitted_manifest_owner_admission_v1(&admitted, admission, &mut store);
+        assert_eq!(committed, Err(expected));
+        let owner_id = *pos_core::ArtifactRegistrationV1::owner_reference(&owner).as_bytes();
+        assert_eq!(store.read_manifest_owner_state_v1(owner_id)?, None);
+    }
+    Ok(())
+}
+
 type AdmissionResult<T> = Result<T, ManifestOwnerAdmissionErrorV1>;
 type CutResult<T> = Result<T, LocalCutOwnerErrorV1>;
 
@@ -2351,7 +2474,7 @@ impl pos_core::LocalCutOwnerVerifierV1 for FaultingCutVerifier {
     fn sign_local_cut_receipt(
         &self,
         commit: &pos_core::LocalCutCommitV1,
-    ) -> CutResult<pos_core::LocalCutReceiptV1> {
+    ) -> CutResult<SignedLocalCutReceiptV1> {
         if self.fault == CutVerifierFault::SignRejected {
             return Err(LocalCutOwnerErrorV1::OwnerRejected);
         }
@@ -2541,7 +2664,7 @@ fn local_cut_fixture(
         register_fixture_plugins(fixture_registry(owner_verifier.clone(), binding))?;
     let sources = registry.admitted_manifest_policy_sources(&admitted)?;
     let admission = request(&admitted, &sources, timeline_id, admission_operation)?;
-    let mut store = MemoryStore::new();
+    let mut store = memory_owner()?;
     registry.commit_admitted_manifest_owner_admission_v1(&admitted, admission, &mut store)?;
     let owner_id = *pos_core::ArtifactRegistrationV1::owner_reference(&owner).as_bytes();
     let state = store

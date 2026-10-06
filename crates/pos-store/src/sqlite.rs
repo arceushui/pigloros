@@ -1276,6 +1276,10 @@ const MANIFEST_OWNER_ADMISSION_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS ma
              REFERENCES manifest_owner_admissions(owner_id, configuration_generation, timeline_id),
          FOREIGN KEY (scope, kind, native_digest)
              REFERENCES manifest_owner_member_leaves(scope, kind, native_digest)
+     );
+     CREATE TABLE IF NOT EXISTS world_key_evidence (
+         evidence_hash BLOB PRIMARY KEY CHECK (length(evidence_hash) = 32),
+         evidence_bytes BLOB NOT NULL CHECK (length(evidence_bytes) <= 256)
      );";
 
 const SQLITE_MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1: u32 = 1_048_576;
@@ -6804,7 +6808,7 @@ impl ManifestOwnerAdmissionPersistencePortV1 for SqliteStore {
             }
             let configuration_generation = input.catalog.as_input().configuration_generation;
             sqlite_validate_manifest_owner_transition(input, current_state.as_ref())?;
-            sqlite_insert_manifest_owner_admission(&self.conn, input)?;
+            sqlite_insert_manifest_owner_admission_batch(&self.conn, &batch)?;
             sqlite_write_manifest_owner_state(&self.conn, input)?;
             sqlite_sync_local_cut_owner_after_admission(&self.conn, input, current_state.as_ref())?;
             let receipt_hashes = input
@@ -13699,6 +13703,57 @@ impl AuthorityPersistencePortV1 for SqliteStore {
     ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
         read_authority_state(&self.conn).and_then(|state| state.resolve(leaf_grant_id))
     }
+}
+
+/// Resolve each coordinator WKE1 against this transaction's key registry,
+/// then retain its exact bytes by address; identical evidence is kept once.
+///
+/// A store without a registry holds no coordinator key. Every registry read
+/// failure, an unreadable row and an undecodable one alike, is reported as
+/// `corrupt`; a failed evidence insert is reported as `storage`.
+fn sqlite_retain_coordinator_key_evidence<E>(
+    connection: &Connection,
+    evidence: &[pos_core::CoordinatorKeyEvidenceV1],
+    corrupt: E,
+    storage: E,
+) -> Result<(), E>
+where
+    E: From<pos_core::CoordinatorKeyEvidenceErrorV1> + Copy,
+{
+    let registry = sqlite_load_key_registry(connection)
+        .or(Err(corrupt))?
+        .unwrap_or_default();
+    for record in evidence {
+        record.resolve(&registry).map_err(E::from)?;
+    }
+    for record in evidence {
+        connection
+            .execute(
+                "INSERT INTO world_key_evidence (evidence_hash, evidence_bytes) VALUES (?1, ?2)
+                 ON CONFLICT (evidence_hash) DO NOTHING",
+                params![record.evidence_hash.as_bytes().as_slice(), record.bytes],
+            )
+            .or(Err(storage))?;
+    }
+    Ok(())
+}
+
+/// Retain an admission's coordinator evidence, then insert its rows.
+///
+/// The evidence is resolved at the same point as the memory commit, before
+/// any lease, member or row check, so both stores report one error for the
+/// same fault.
+fn sqlite_insert_manifest_owner_admission_batch(
+    connection: &Connection,
+    batch: &PreparedManifestOwnerAdmissionV1,
+) -> Result<(), ManifestOwnerAdmissionErrorV1> {
+    sqlite_retain_coordinator_key_evidence(
+        connection,
+        batch.coordinator_key_evidence(),
+        ManifestOwnerAdmissionErrorV1::CorruptState,
+        ManifestOwnerAdmissionErrorV1::StorageFailure,
+    )?;
+    sqlite_insert_manifest_owner_admission(connection, batch.input())
 }
 
 fn sqlite_load_key_registry(conn: &Connection) -> Result<Option<KeyRegistryStateV1>, CoreError> {
@@ -28272,8 +28327,8 @@ mod manifest_owner_admission_coverage {
         catalog, hash, timeline_request, AcceptingOwner, READ_LIMITS,
     };
     use pos_core::{
-        prepare_manifest_owner_admission_v1, ManifestOwnerAdmissionErrorV1 as AdmissionError,
-        ManifestOwnerAdmissionRequestV1,
+        prepare_manifest_owner_admission_v1, test_coordinator_key_registry,
+        ManifestOwnerAdmissionErrorV1 as AdmissionError, ManifestOwnerAdmissionRequestV1,
     };
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
@@ -28295,6 +28350,7 @@ mod manifest_owner_admission_coverage {
     const LEASES: &str = "manifest_owner_scope_leases";
     const MEMBER_LEAVES: &str = "manifest_owner_member_leaves";
     const MEMBERS: &str = "manifest_owner_admission_members";
+    const KEY_EVIDENCE: &str = "world_key_evidence";
     const ALL: &str = "1";
     const FIRST_SCOPE: &str = "timeline_id = X'01010101010101010101010101010101'";
     const SECOND_SCOPE: &str = "timeline_id = X'02020202020202020202020202020202'";
@@ -28460,7 +28516,7 @@ mod manifest_owner_admission_coverage {
         ("scope = 7", STORAGE),
     ];
     // Tables whose INSERT an injected trigger aborts mid-commit, with the mapped error.
-    const INSERT_FAULTS: [(&str, AdmissionError); 7] = [
+    const INSERT_FAULTS: [(&str, AdmissionError); 8] = [
         (ADMISSIONS, STORAGE),
         (STATE, CONFLICT),
         (OPERATIONS, STORAGE),
@@ -28468,6 +28524,7 @@ mod manifest_owner_admission_coverage {
         (LEASES, STORAGE),
         (MEMBER_LEAVES, STORAGE),
         (MEMBERS, STORAGE),
+        (KEY_EVIDENCE, STORAGE),
     ];
 
     #[derive(Clone, Copy)]
@@ -28521,8 +28578,15 @@ mod manifest_owner_admission_coverage {
         prepare_manifest_owner_admission_v1(admission, &AcceptingOwner, state).map_err(Into::into)
     }
 
-    fn admitted_store() -> Fallible<SqliteStore> {
+    /// An empty store whose key registry holds the fixture coordinator key.
+    fn keyed_store() -> Fallible<SqliteStore> {
         let mut store = SqliteStore::open_in_memory()?;
+        store.save_key_registry(&test_coordinator_key_registry())?;
+        Ok(store)
+    }
+
+    fn admitted_store() -> Fallible<SqliteStore> {
+        let mut store = keyed_store()?;
         store.commit_manifest_owner_admission_v1(prepare(genesis_request()?, None)?)?;
         Ok(store)
     }
@@ -28785,7 +28849,7 @@ mod manifest_owner_admission_coverage {
 
     #[test]
     fn commits_recover_exact_retries_and_reject_changed_intents() -> TestResult {
-        let mut store = SqliteStore::open_in_memory()?;
+        let mut store = keyed_store()?;
         let prepared = prepare(genesis_request()?, None)?;
         let applied = store.commit_manifest_owner_admission_v1(prepared.clone())?;
         let exact = store.commit_manifest_owner_admission_v1(prepared)?;
@@ -28802,7 +28866,7 @@ mod manifest_owner_admission_coverage {
     #[test]
     fn commits_map_insert_and_state_write_faults() -> TestResult {
         for (table, expected) in INSERT_FAULTS {
-            let mut store = SqliteStore::open_in_memory()?;
+            let mut store = keyed_store()?;
             run_sql(&store, &trigger("INSERT", table, ABORT))?;
             let prepared = prepare(genesis_request()?, None)?;
             assert_eq!(
@@ -28828,7 +28892,7 @@ mod manifest_owner_admission_coverage {
 
     #[test]
     fn commits_inside_an_outer_transaction_finish_their_savepoint() -> TestResult {
-        let mut store = SqliteStore::open_in_memory()?;
+        let mut store = keyed_store()?;
         let prepared = prepare(genesis_request()?, None)?;
         run_sql(&store, "BEGIN")?;
         deny_action(&store, releases_savepoint)?;
@@ -28931,7 +28995,7 @@ mod manifest_owner_admission_coverage {
 
     #[test]
     fn owner_writers_cover_visible_hashes_and_empty_receipt_sets() -> TestResult {
-        let store = SqliteStore::open_in_memory()?;
+        let store = keyed_store()?;
         let mut input = prepare(genesis_request()?, None)?.input().clone();
         input.previous_visible_lcq1_hash = Some(hash(77));
         assert_eq!(
@@ -28948,7 +29012,7 @@ mod manifest_owner_admission_coverage {
     #[test]
     fn commits_map_missing_lease_and_member_leaf_tables() -> TestResult {
         for table in [LEASES, MEMBER_LEAVES] {
-            let mut store = SqliteStore::open_in_memory()?;
+            let mut store = keyed_store()?;
             run_sql(&store, &format!("DROP TABLE {table}"))?;
             let prepared = prepare(genesis_request()?, None)?;
             assert_eq!(
@@ -28961,7 +29025,7 @@ mod manifest_owner_admission_coverage {
 
     #[test]
     fn readback_returns_recorded_leases_members_and_limits() -> TestResult {
-        let mut store = SqliteStore::open_in_memory()?;
+        let mut store = keyed_store()?;
         let prepared = prepare(genesis_request()?, None)?;
         let expected = prepared.input().clone();
         store.commit_manifest_owner_admission_v1(prepared)?;
@@ -28973,5 +29037,28 @@ mod manifest_owner_admission_coverage {
             assert_eq!(snapshot.read_limits, READ_LIMITS);
         }
         Ok(())
+    }
+
+    #[test]
+    fn unregistered_key_rejects_and_any_registry_read_failure_is_corrupt_state() -> TestResult {
+        let mut unkeyed = SqliteStore::open_in_memory()?;
+        let prepared = prepare(genesis_request()?, None)?;
+        let rejected = unkeyed.commit_manifest_owner_admission_v1(prepared.clone());
+        assert_eq!(rejected, Err(AdmissionError::OwnerRejected));
+        assert_eq!(unkeyed.read_manifest_owner_state_v1(OWNER), Ok(None));
+        assert_eq!(row_total(&unkeyed, KEY_EVIDENCE)?, 0);
+
+        let mut store = keyed_store()?;
+        run_sql(&store, "UPDATE key_registry SET state_cbor = X'00'")?;
+        let corrupt = store.commit_manifest_owner_admission_v1(prepared);
+        assert_eq!(corrupt, Err(CORRUPT));
+        assert_eq!(store.read_manifest_owner_state_v1(OWNER), Ok(None));
+        assert_eq!(row_total(&store, KEY_EVIDENCE)?, 0);
+        Ok(())
+    }
+
+    fn row_total(store: &SqliteStore, table: &str) -> Fallible<i64> {
+        let sql = format!("SELECT COUNT(*) FROM {table}");
+        Ok(store.conn.query_row(&sql, [], |row| row.get(0))?)
     }
 }

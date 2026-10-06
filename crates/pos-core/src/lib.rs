@@ -253,7 +253,7 @@ pub use local_cut_owner::{
     LocalCutCompositionBindingRowV1, LocalCutOwnerCommitKindV1, LocalCutOwnerCommitV1,
     LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1,
     LocalCutOwnerStateV1, LocalCutOwnerVerifierV1, LocalCutRecordingContextRowV1,
-    PreparedLocalCutOwnerCommitV1, MAX_LOCAL_CUT_OWNER_ROWS_V1,
+    PreparedLocalCutOwnerCommitV1, SignedLocalCutReceiptV1, MAX_LOCAL_CUT_OWNER_ROWS_V1,
 };
 pub use local_cut_seal::{
     local_cut_tree_scope_v1, LocalCutBranchChildV1, LocalCutManifestBindingBranchV1,
@@ -276,8 +276,9 @@ pub use manifest_owner_admission::{
     ManifestOwnerTimelineAdmissionRequestV1, ManifestOwnerTimelineAdmissionV1,
     ManifestSlotAdmissionReceiptDraftV1, OutputPolicyClosureEnvelopeErrorV1,
     OutputPolicyClosureEnvelopeV1, PreparedManifestOwnerAdmissionV1,
-    MAX_MANIFEST_OWNER_ADMISSION_NATIVE_BYTES_V1, MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1,
-    MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1, OUTPUT_POLICY_CLOSURE_MEMBER_COUNT_V1,
+    SignedManifestSlotAdmissionReceiptV1, MAX_MANIFEST_OWNER_ADMISSION_NATIVE_BYTES_V1,
+    MAX_MANIFEST_OWNER_ADMISSION_SCOPES_V1, MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
+    OUTPUT_POLICY_CLOSURE_MEMBER_COUNT_V1,
 };
 pub use manifest_owner_link::{
     ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
@@ -288,11 +289,11 @@ pub use manifest_owner_link::{
 };
 pub use manifest_owner_link_verifier::{
     collect_manifest_owner_link_ancestors_v1, collect_manifest_owner_link_branches_v1,
-    verify_manifest_owner_link_v1, ManifestOwnerLinkAncestorV1, ManifestOwnerLinkAuthorityV1,
-    ManifestOwnerLinkCutIdentityV1, ManifestOwnerLinkDigestsV1, ManifestOwnerLinkHeadV1,
-    ManifestOwnerLinkReadPortV1, ManifestOwnerLinkReleaseV1, ManifestOwnerLinkRequestV1,
-    ManifestOwnerLinkSnapshotV1, ManifestOwnerLinkUseFenceV1, ManifestOwnerLinkVerificationErrorV1,
-    VerifiedManifestOwnerLinkV1,
+    collect_manifest_owner_link_key_evidence_v1, verify_manifest_owner_link_v1,
+    ManifestOwnerLinkAncestorV1, ManifestOwnerLinkAuthorityV1, ManifestOwnerLinkCutIdentityV1,
+    ManifestOwnerLinkDigestsV1, ManifestOwnerLinkHeadV1, ManifestOwnerLinkReadPortV1,
+    ManifestOwnerLinkReleaseV1, ManifestOwnerLinkRequestV1, ManifestOwnerLinkSnapshotV1,
+    ManifestOwnerLinkUseFenceV1, ManifestOwnerLinkVerificationErrorV1, VerifiedManifestOwnerLinkV1,
 };
 pub use manifest_owner_members::{
     build_manifest_owner_scope_v1, validate_manifest_owner_lease_replacement_v1,
@@ -625,8 +626,14 @@ pub use world_history::{
     MAX_WORLD_HISTORY_HEIGHT_V1,
 };
 pub use world_key_evidence::{
-    WorldKeyEvidenceErrorV1, WorldKeyEvidenceInputV1, WorldKeyEvidenceV1,
-    MAX_WORLD_KEY_EVIDENCE_BYTES_V1,
+    resolve_coordinator_key_evidence_v1, CoordinatorKeyEvidenceErrorV1, CoordinatorKeyEvidenceV1,
+    CoordinatorSignedReceiptV1, WorldKeyEvidenceErrorV1, WorldKeyEvidenceInputV1,
+    WorldKeyEvidenceV1, MAX_WORLD_KEY_EVIDENCE_BYTES_V1,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use world_key_evidence::{
+    test_coordinator_key_evidence, test_coordinator_key_registration,
+    test_coordinator_key_registry, TEST_COORDINATOR_OWNER,
 };
 pub use world_recording_receipt::{
     WorldRecordingReceiptErrorV1, WorldRecordingReceiptInputV1, WorldRecordingReceiptV1,

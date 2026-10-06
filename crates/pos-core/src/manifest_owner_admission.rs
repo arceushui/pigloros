@@ -14,6 +14,9 @@ use crate::manifest_owner_members::{
     ManifestOwnerClassifiedLeafV1, ManifestOwnerScopeMembersV1,
 };
 use crate::output_policy::OutputPolicyV1;
+use crate::world_key_evidence::{
+    CoordinatorKeyEvidenceErrorV1, CoordinatorKeyEvidenceV1, CoordinatorSignedReceiptV1,
+};
 use crate::{
     ArtifactOptionalityV1, Hash, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
     ManifestSlotAdmissionReceiptInputV1, ManifestSlotAdmissionReceiptV1,
@@ -156,6 +159,25 @@ pub enum ManifestOwnerAdmissionErrorV1 {
     StorageFailure,
 }
 
+/// Read a coordinator key-evidence rejection at the admission commit.
+///
+/// WKE1 bytes that are not the MSR1's exact evidence make the batch invalid;
+/// evidence that names no registered verify-only coordinator key is an owner
+/// rejection.
+impl From<CoordinatorKeyEvidenceErrorV1> for ManifestOwnerAdmissionErrorV1 {
+    fn from(error: CoordinatorKeyEvidenceErrorV1) -> Self {
+        match error {
+            CoordinatorKeyEvidenceErrorV1::InvalidEvidence => Self::InvalidBatch,
+            CoordinatorKeyEvidenceErrorV1::WrongKeyUse
+            | CoordinatorKeyEvidenceErrorV1::UnregisteredKey => Self::OwnerRejected,
+        }
+    }
+}
+
+/// One installed-coordinator MSR1 with the exact WKE1 bytes it names.
+pub type SignedManifestSlotAdmissionReceiptV1 =
+    CoordinatorSignedReceiptV1<ManifestSlotAdmissionReceiptV1>;
+
 /// Trusted local-owner checks performed before an admission is staged.
 ///
 /// Applications must only use an implementation bound to the actual local
@@ -208,8 +230,12 @@ pub trait ManifestOwnerAdmissionVerifierV1: Send + Sync {
     /// Sign one exact MSR1 draft with the installed coordinator admission role.
     ///
     /// The implementation selects its own retained coordinator evidence and
-    /// must verify that evidence and signature before returning. The draft
-    /// contains no caller-supplied key evidence, signature, or signer.
+    /// must verify that evidence and signature before returning. It returns
+    /// the receipt together with the exact canonical WKE1 bytes that its
+    /// `coordinator_key_evidence_hash` names, as one
+    /// [`CoordinatorSignedReceiptV1`]; the owner commit resolves those bytes
+    /// against its key registry and retains them in the same transaction. The
+    /// draft contains no caller-supplied key evidence, signature, or signer.
     ///
     /// # Errors
     /// Returns `OwnerRejected` when the installed role or key is unavailable,
@@ -217,7 +243,7 @@ pub trait ManifestOwnerAdmissionVerifierV1: Send + Sync {
     fn sign_coordinator_receipt(
         &self,
         draft: ManifestSlotAdmissionReceiptDraftV1,
-    ) -> Result<ManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1>;
+    ) -> Result<SignedManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1>;
 
     /// Confirm exact native owner/copy policy for one scoped EOP1/OPC1 pair.
     ///
@@ -408,6 +434,7 @@ pub fn manifest_owner_admission_intent_digest_v1(
 pub struct PreparedManifestOwnerAdmissionV1 {
     input: ManifestOwnerAdmissionInputV1,
     intent_digest: Hash,
+    coordinator_key_evidence: Vec<CoordinatorKeyEvidenceV1>,
 }
 
 impl PreparedManifestOwnerAdmissionV1 {
@@ -421,6 +448,17 @@ impl PreparedManifestOwnerAdmissionV1 {
     #[must_use]
     pub const fn intent_digest(&self) -> Hash {
         self.intent_digest
+    }
+
+    /// Borrow each scope's MSR1 coordinator key-evidence address with the
+    /// exact WKE1 bytes the installed coordinator returned for it.
+    ///
+    /// Preparation has no key registry, so the bytes are unverified here: the
+    /// commit must [`CoordinatorKeyEvidenceV1::resolve`] each record before
+    /// retaining it.
+    #[must_use]
+    pub fn coordinator_key_evidence(&self) -> &[CoordinatorKeyEvidenceV1] {
+        &self.coordinator_key_evidence
     }
 }
 
@@ -448,11 +486,13 @@ pub fn prepare_manifest_owner_admission_v1(
     verifier
         .verify_complete_owned_scope_set(request.catalog.as_input().owner_id, &request.timelines)?;
 
-    let timelines = request
+    let (timelines, coordinator_key_evidence) = request
         .timelines
         .iter()
         .map(|timeline_request| prepare_timeline(&request, timeline_request, verifier))
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .unzip();
 
     let input = ManifestOwnerAdmissionInputV1 {
         operation_id: request.operation_id,
@@ -471,16 +511,21 @@ pub fn prepare_manifest_owner_admission_v1(
     Ok(PreparedManifestOwnerAdmissionV1 {
         input,
         intent_digest,
+        coordinator_key_evidence,
     })
 }
 
+/// One prepared scope with its coordinator key-evidence record.
+type PreparedTimelineV1 = (ManifestOwnerTimelineAdmissionV1, CoordinatorKeyEvidenceV1);
+
 /// Verify one scope, derive its MSB1, and sign its MSR1 with the installed
-/// coordinator after the owner hook classified every member leaf.
+/// coordinator after the owner hook classified every member leaf; return the
+/// scope with the coordinator's key-evidence record.
 fn prepare_timeline(
     request: &ManifestOwnerAdmissionRequestV1,
     timeline_request: &ManifestOwnerTimelineAdmissionRequestV1,
     verifier: &dyn ManifestOwnerAdmissionVerifierV1,
-) -> Result<ManifestOwnerTimelineAdmissionV1, ManifestOwnerAdmissionErrorV1> {
+) -> Result<PreparedTimelineV1, ManifestOwnerAdmissionErrorV1> {
     validate_timeline_request(&request.catalog, timeline_request)?;
     let binding = derive_binding(&request.catalog, timeline_request)?;
     for copies in &timeline_request.policy_copies {
@@ -507,12 +552,19 @@ fn prepare_timeline(
         expected_inventory_generation: request.expected_inventory_generation,
         msb1_hash: binding.digest(),
     };
-    let receipt = verifier.sign_coordinator_receipt(draft)?;
+    let CoordinatorSignedReceiptV1 {
+        receipt,
+        key_evidence,
+    } = verifier.sign_coordinator_receipt(draft)?;
     if !receipt_matches_draft(&receipt, &draft) {
         return Err(ManifestOwnerAdmissionErrorV1::OwnerRejected);
     }
     verifier.verify_coordinator_receipt(&receipt)?;
-    Ok(ManifestOwnerTimelineAdmissionV1 {
+    let evidence = CoordinatorKeyEvidenceV1 {
+        evidence_hash: receipt.as_input().coordinator_key_evidence_hash,
+        bytes: key_evidence,
+    };
+    let timeline = ManifestOwnerTimelineAdmissionV1 {
         timeline_id: timeline_request.timeline_id,
         scope: timeline_request.scope,
         wcs1: timeline_request.wcs1.clone(),
@@ -520,7 +572,8 @@ fn prepare_timeline(
         receipt,
         policy_copies: timeline_request.policy_copies.clone(),
         members: timeline_request.members.clone(),
-    })
+    };
+    Ok((timeline, evidence))
 }
 
 /// Recheck the self-contained identities of one persisted historical row.

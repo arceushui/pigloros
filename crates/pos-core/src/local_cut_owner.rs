@@ -23,6 +23,9 @@ use crate::manifest_owner_admission::{
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionSnapshotV1,
 };
 use crate::world_dependency_packing::WorldDependencyDirectoryV1;
+use crate::world_key_evidence::{
+    CoordinatorKeyEvidenceErrorV1, CoordinatorKeyEvidenceV1, CoordinatorSignedReceiptV1,
+};
 use crate::{Hash, ManifestAdmissionCatalogV1, PluginId, TimelineId};
 
 /// Maximum kind-1 or kind-8 rows that one local owner cut can select.
@@ -67,6 +70,21 @@ impl From<ManifestOwnerAdmissionErrorV1> for LocalCutOwnerErrorV1 {
             | ManifestOwnerAdmissionErrorV1::InvalidBatch
             | ManifestOwnerAdmissionErrorV1::OwnerRejected
             | ManifestOwnerAdmissionErrorV1::CorruptState => Self::CorruptState,
+        }
+    }
+}
+
+/// Read a coordinator key-evidence rejection at the local-cut commit.
+///
+/// WKE1 bytes that are not the LCQ1's exact evidence make the batch invalid;
+/// evidence that names no registered verify-only coordinator key is an owner
+/// rejection.
+impl From<CoordinatorKeyEvidenceErrorV1> for LocalCutOwnerErrorV1 {
+    fn from(error: CoordinatorKeyEvidenceErrorV1) -> Self {
+        match error {
+            CoordinatorKeyEvidenceErrorV1::InvalidEvidence => Self::InvalidBatch,
+            CoordinatorKeyEvidenceErrorV1::WrongKeyUse
+            | CoordinatorKeyEvidenceErrorV1::UnregisteredKey => Self::OwnerRejected,
         }
     }
 }
@@ -233,6 +251,9 @@ impl LocalCutOwnerStateV1 {
     }
 }
 
+/// One installed-coordinator LCQ1 with the exact WKE1 bytes it names.
+pub type SignedLocalCutReceiptV1 = CoordinatorSignedReceiptV1<LocalCutReceiptV1>;
+
 /// Trusted local checks and coordinator signing performed by the installed host.
 ///
 /// A remote caller's implementation of this trait is never a source of owner
@@ -270,8 +291,12 @@ pub trait LocalCutOwnerVerifierV1: Send + Sync {
     /// Sign the exact LCC1 content address through the installed coordinator role.
     ///
     /// The implementation chooses retained key evidence itself and signs the
-    /// exact LCQ1 signature preimage. It must not accept caller-supplied key
-    /// evidence or signature bytes as authority.
+    /// exact LCQ1 signature preimage. It returns the receipt together with the
+    /// exact canonical WKE1 bytes that its `coordinator_key_evidence_hash`
+    /// names, as one [`CoordinatorSignedReceiptV1`]; the owner commit resolves
+    /// those bytes against its key registry and retains them in the same
+    /// transaction. It must not accept
+    /// caller-supplied key evidence or signature bytes as authority.
     ///
     /// # Errors
     /// Returns `OwnerRejected` when the active installed coordinator role cannot
@@ -279,7 +304,7 @@ pub trait LocalCutOwnerVerifierV1: Send + Sync {
     fn sign_local_cut_receipt(
         &self,
         commit: &LocalCutCommitV1,
-    ) -> Result<LocalCutReceiptV1, LocalCutOwnerErrorV1>;
+    ) -> Result<SignedLocalCutReceiptV1, LocalCutOwnerErrorV1>;
 
     /// Verify the returned receipt against current installed coordinator authority.
     ///
@@ -301,6 +326,7 @@ pub struct PreparedLocalCutOwnerCommitV1 {
     intent_digest: Hash,
     commit: LocalCutCommitV1,
     receipt: LocalCutReceiptV1,
+    coordinator_key_evidence: CoordinatorKeyEvidenceV1,
     successor_state: LocalCutOwnerStateV1,
     recordings: Vec<LocalCutWorldRecordingV1>,
     dependency_directories: Vec<WorldDependencyDirectoryV1>,
@@ -329,6 +355,17 @@ impl PreparedLocalCutOwnerCommitV1 {
     #[must_use]
     pub const fn receipt(&self) -> &LocalCutReceiptV1 {
         &self.receipt
+    }
+
+    /// Borrow the LCQ1 coordinator key-evidence address with the exact WKE1
+    /// bytes the installed coordinator returned for it.
+    ///
+    /// Preparation has no key registry, so the bytes are unverified here: the
+    /// commit must [`CoordinatorKeyEvidenceV1::resolve`] them before
+    /// retaining them.
+    #[must_use]
+    pub const fn coordinator_key_evidence(&self) -> &CoordinatorKeyEvidenceV1 {
+        &self.coordinator_key_evidence
     }
 
     /// Borrow the fully validated durable owner successor state.
@@ -578,7 +615,10 @@ pub fn prepare_local_cut_owner_commit_v1(
         result_inventory_generation: request.result_inventory_generation,
         release_fence_proof_digest: request.release_fence_proof_digest,
     });
-    let receipt = verifier.sign_local_cut_receipt(&commit)?;
+    let CoordinatorSignedReceiptV1 {
+        receipt,
+        key_evidence,
+    } = verifier.sign_local_cut_receipt(&commit)?;
     if receipt.as_input().commit_record_hash != commit.digest()
         || admissions.iter().any(|snapshot| {
             snapshot
@@ -612,6 +652,10 @@ pub fn prepare_local_cut_owner_commit_v1(
         intent_digest,
         commit,
         receipt,
+        coordinator_key_evidence: CoordinatorKeyEvidenceV1 {
+            evidence_hash: receipt.as_input().coordinator_key_evidence_hash,
+            bytes: key_evidence,
+        },
         successor_state,
         recordings,
         dependency_directories: closures
