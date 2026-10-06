@@ -43,9 +43,9 @@
 //!   invalidation. This is stricter than the contract's reference model,
 //!   which starts with a first Tick; it is the confirmed decision.
 //! - **Parent-cut Ticks are not enforced.** The contract leaves this to the
-//!   coordinator (#552); a Memory Fork row has no cut Tick. A Memory Fork row
-//!   holds a `fork_point` (a parent Timeline and a `Seq`), so the adapter
-//!   cannot compare, and roots may legitimately carry Ticks below the first
+//!   coordinator (#552). A Memory Fork row has no cut Tick, only a
+//!   `fork_point` (a parent Timeline and a `Seq`), so the adapter cannot
+//!   compare, and roots may legitimately carry Ticks below the first
 //!   Tick.
 //! - **Committed prefix.** The committed prefix of a parent Timeline is kept
 //!   once per parent Timeline, outside any Fork, and served as
@@ -623,7 +623,7 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn prefix_through(timeline: TimelineId, through_tick: u64) -> Scope {
+    const fn prefix_through(timeline: TimelineId, through_tick: u64) -> Scope {
         Scope::ParentPrefix {
             timeline,
             through_tick,

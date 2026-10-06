@@ -5,6 +5,9 @@
 //! it proves (C1 to C13), so the `SQLite` adapter's tests correspond one to one.
 //! State-private cases (injected failures, lowered set counts, the seeded
 //! committed prefix, corrupt stored rows) are in-module tests of the adapter.
+//!
+//! Checklist id C3 is split: provisional-only is proved here, and set capacity
+//! is proved in the in-module tests.
 
 use std::sync::Arc;
 
@@ -1238,6 +1241,12 @@ fn c12_deleting_a_fork_purges_its_rows_and_a_recreated_fork_starts_empty() {
     // Publication resumes at the generation floor and holds none of the rows.
     ok(store.publish_counterfactual_facts(fork, facts()));
     assert_recorded(store, fork_scope(fork, 1), &[]);
+    let events = seqs(store, fork);
+    assert_eq!(
+        append(store, fork, &empty_at(FIRST_TICK)),
+        Err(StoreError::BindingMismatch)
+    );
+    assert_eq!(seqs(store, fork), events);
     let again = committed(store, &command(fork, 1, 1), &tick_17());
     assert_eq!(again.generation(), at(fork, 2));
     assert_recorded(store, fork_scope(fork, 2), &[tick_17()]);
