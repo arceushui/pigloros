@@ -10,8 +10,8 @@ use pos_core::{
     prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1,
     validate_local_cut_owner_predecessors_v1, validate_local_cut_owner_recordings_v1,
     validate_local_cut_owner_result_v1, ArtifactDataClassV1, ArtifactTransitionRuleV1,
-    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash,
-    LocalCutCommitV1, LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1,
+    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash, KeyIdentityV1,
+    KeyRoleV1, LocalCutCommitV1, LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1,
     LocalCutHeadsTableV1, LocalCutManifestBindingRowV1, LocalCutManifestBindingTableV1,
     LocalCutOwnerCommitV1, LocalCutOwnerErrorV1, LocalCutOwnerRequestV1, LocalCutOwnerStateV1,
     LocalCutOwnerVerifierV1, LocalCutReceiptInputV1, LocalCutReceiptV1,
@@ -24,12 +24,12 @@ use pos_core::{
     ManifestOwnerLeafClassificationV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1,
     ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1,
     ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-    ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1, PluginId,
-    PreparedLocalCutOwnerCommitV1, TimelineId, WorkloadProfileV1, WorldArtifactKindV1,
-    WorldArtifactLeafV1, WorldClosureBindingV1, WorldClosureCutCoordinateV1,
-    WorldClosureReadLimitsV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
-    WorldDependencyDirectoryV1, WorldProducerV1, WorldRecordingReceiptInputV1,
-    WorldRecordingReceiptV1,
+    ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1, PluginId, PreparedLocalCutOwnerCommitV1,
+    PublicKey, TimelineId, WorkloadProfileV1, WorldArtifactKindV1, WorldArtifactLeafV1,
+    WorldClosureBindingV1, WorldClosureCutCoordinateV1, WorldClosureReadLimitsV1,
+    WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldDependencyDirectoryV1,
+    WorldKeyEvidenceErrorV1, WorldKeyEvidenceInputV1, WorldKeyEvidenceV1, WorldProducerV1,
+    WorldRecordingReceiptInputV1, WorldRecordingReceiptV1,
 };
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
@@ -43,7 +43,6 @@ type ResultEdit = fn(&mut ResultRows);
 
 const OWNER: [u8; 32] = [0x41; 32];
 const DAY_MICROS: u64 = 86_400_000_000;
-const EVIDENCE: Hash = hash(90);
 const SIGNATURE: [u8; 64] = [0x5a; 64];
 const GENESIS: Hash = hash(0x47);
 const OPERATION: Hash = hash(0x61);
@@ -56,6 +55,16 @@ const READ_LIMITS: WorldClosureReadLimitsV1 = WorldClosureReadLimitsV1 {
 
 const fn hash(byte: u8) -> Hash {
     Hash::from_bytes([byte; 32])
+}
+
+/// The verify-only WKE1 of the fixture coordinator's epoch-1 signing key.
+fn coordinator_evidence() -> Result<WorldKeyEvidenceV1, WorldKeyEvidenceErrorV1> {
+    WorldKeyEvidenceV1::new(WorldKeyEvidenceInputV1 {
+        identity: KeyIdentityV1::new("coordinator", KeyRoleV1::TimelineIntegritySigning, 1),
+        private_material_digest: hash(0xc1),
+        private_material_required: false,
+        public_verification_key: Some(PublicKey::from_bytes([0xc2; 32])),
+    })
 }
 
 const fn plugin(byte: u8) -> PluginId {
@@ -103,10 +112,13 @@ impl ManifestOwnerAdmissionVerifierV1 for AcceptingOwner {
     fn sign_coordinator_receipt(
         &self,
         draft: ManifestSlotAdmissionReceiptDraftV1,
-    ) -> Result<ManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+    ) -> Result<(ManifestSlotAdmissionReceiptV1, Vec<u8>), ManifestOwnerAdmissionErrorV1> {
+        let rejected = ManifestOwnerAdmissionErrorV1::OwnerRejected;
+        let evidence = coordinator_evidence().or(Err(rejected))?;
         draft
-            .with_evidence_and_signature(EVIDENCE, SIGNATURE)
-            .map_err(|_| ManifestOwnerAdmissionErrorV1::OwnerRejected)
+            .with_evidence_and_signature(evidence.digest(), SIGNATURE)
+            .map(|receipt| (receipt, evidence.to_canonical_cbor()))
+            .or(Err(rejected))
     }
 
     fn verify_native_policy_copies(
@@ -156,13 +168,16 @@ impl LocalCutOwnerVerifierV1 for CutOwner {
     fn sign_local_cut_receipt(
         &self,
         commit: &LocalCutCommitV1,
-    ) -> Result<LocalCutReceiptV1, LocalCutOwnerErrorV1> {
+    ) -> Result<(LocalCutReceiptV1, Vec<u8>), LocalCutOwnerErrorV1> {
+        let rejected = LocalCutOwnerErrorV1::OwnerRejected;
+        let evidence = coordinator_evidence().or(Err(rejected))?;
         LocalCutReceiptV1::new(LocalCutReceiptInputV1 {
             commit_record_hash: commit.digest(),
-            coordinator_key_evidence_hash: EVIDENCE,
+            coordinator_key_evidence_hash: evidence.digest(),
             signature: SIGNATURE,
         })
-        .map_err(|_| LocalCutOwnerErrorV1::OwnerRejected)
+        .map(|receipt| (receipt, evidence.to_canonical_cbor()))
+        .or(Err(rejected))
     }
 
     fn verify_local_cut_receipt(

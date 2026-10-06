@@ -10,7 +10,8 @@ use pos_core::{
     build_manifest_owner_scope_v1, manifest_owner_admission_intent_digest_v1,
     prepare_manifest_owner_admission_v1, validate_manifest_owner_lease_replacement_v1,
     ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1, ArtifactTransitionRuleV1,
-    ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash,
+    EventStore, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, FidelityBudgetV1, Hash,
+    KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
     ManifestAdmissionCatalogInputV1, ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1,
     ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionErrorV1,
     ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionRequestV1,
@@ -19,11 +20,11 @@ use pos_core::{
     ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1, ManifestOwnerScopeMembersV1,
     ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1, ManifestOwnerTimelineAdmissionRequestV1,
     ManifestSlotAdmissionReceiptDraftV1, ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1,
-    PluginId, TimelineId, WorkloadProfileV1, WorldArtifactKeyDependencyV1, WorldArtifactKindV1,
-    WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldClosureReadLimitsV1,
-    WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldProducerV1,
-    WorldReplayClosureV1, MAX_MANIFEST_OWNER_MEMBER_NATIVE_BYTES_V1,
-    MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
+    PluginId, PublicKey, TimelineId, WorkloadProfileV1, WorldArtifactKeyDependencyV1,
+    WorldArtifactKindV1, WorldArtifactLeafInputV1, WorldArtifactLeafV1, WorldClosureReadLimitsV1,
+    WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldKeyEvidenceInputV1,
+    WorldKeyEvidenceV1, WorldProducerV1, WorldReplayClosureV1,
+    MAX_MANIFEST_OWNER_MEMBER_NATIVE_BYTES_V1, MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1,
 };
 use pos_store::{memory::MemoryStore, ManifestOwnerAdmissionPersistencePortV1};
 
@@ -68,7 +69,7 @@ struct FixtureOwner {
     expected_timelines: Vec<TimelineId>,
     expected_operation: Hash,
     signatures_issued: AtomicUsize,
-    coordinator_evidence: Hash,
+    coordinator_epoch: u64,
     signature_byte: u8,
     member_fault: MemberFault,
 }
@@ -79,14 +80,14 @@ impl FixtureOwner {
             expected_timelines,
             expected_operation,
             signatures_issued: AtomicUsize::new(0),
-            coordinator_evidence: hash(90),
+            coordinator_epoch: 1,
             signature_byte: 0x5a,
             member_fault: MemberFault::Accept,
         }
     }
 
-    const fn with_signing_identity(mut self, evidence: Hash, signature_byte: u8) -> Self {
-        self.coordinator_evidence = evidence;
+    const fn with_signing_identity(mut self, epoch: u64, signature_byte: u8) -> Self {
+        self.coordinator_epoch = epoch;
         self.signature_byte = signature_byte;
         self
     }
@@ -153,21 +154,28 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
     fn sign_coordinator_receipt(
         &self,
         draft: ManifestSlotAdmissionReceiptDraftV1,
-    ) -> Result<ManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+    ) -> Result<(ManifestSlotAdmissionReceiptV1, Vec<u8>), ManifestOwnerAdmissionErrorV1> {
         self.signatures_issued.fetch_add(1, Ordering::SeqCst);
+        let rejected = ManifestOwnerAdmissionErrorV1::OwnerRejected;
+        let epoch = self.coordinator_epoch;
+        let evidence = coordinator_evidence(epoch).or(Err(rejected))?;
         draft
-            .with_evidence_and_signature(self.coordinator_evidence, [self.signature_byte; 64])
-            .map_err(|_| ManifestOwnerAdmissionErrorV1::OwnerRejected)
+            .with_evidence_and_signature(evidence.digest(), [self.signature_byte; 64])
+            .map(|receipt| (receipt, evidence.to_canonical_cbor()))
+            .or(Err(rejected))
     }
 
     fn verify_coordinator_receipt(
         &self,
         receipt: &ManifestSlotAdmissionReceiptV1,
     ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
-        if receipt.as_input().coordinator_key_evidence_hash != self.coordinator_evidence
+        let rejected = ManifestOwnerAdmissionErrorV1::OwnerRejected;
+        let epoch = self.coordinator_epoch;
+        let evidence = coordinator_evidence(epoch).or(Err(rejected))?;
+        if receipt.as_input().coordinator_key_evidence_hash != evidence.digest()
             || receipt.as_input().signature != [self.signature_byte; 64]
         {
-            return Err(ManifestOwnerAdmissionErrorV1::OwnerRejected);
+            return Err(rejected);
         }
         Ok(())
     }
@@ -210,6 +218,29 @@ impl ManifestOwnerAdmissionVerifierV1 for FixtureOwner {
             }
         }
     }
+}
+
+/// The verify-only WKE1 of one epoch of the fixture coordinator's signing key.
+fn coordinator_evidence(epoch: u64) -> FixtureResult<WorldKeyEvidenceV1> {
+    Ok(WorldKeyEvidenceV1::new(WorldKeyEvidenceInputV1 {
+        identity: KeyIdentityV1::new("coordinator", KeyRoleV1::TimelineIntegritySigning, epoch),
+        private_material_digest: hash(0xc0),
+        private_material_required: false,
+        public_verification_key: Some(PublicKey::from_bytes([0xc1; 32])),
+    })?)
+}
+
+/// Install a registry holding the coordinator's epoch-1 signing key.
+fn keyed<S: EventStore>(mut store: S) -> FixtureResult<S> {
+    let evidence = *coordinator_evidence(1)?.as_input();
+    let mut registry = KeyRegistryStateV1::new();
+    registry.register_key(KeyRegistrationV1::new(
+        evidence.identity,
+        evidence.private_material_digest,
+        evidence.public_verification_key,
+    ))?;
+    store.save_key_registry(&registry)?;
+    Ok(store)
 }
 
 const fn classification(data_class: ArtifactDataClassV1) -> ManifestOwnerLeafClassificationV1 {
@@ -694,13 +725,13 @@ fn memory_owner_admission_resolves_retries_conflicts_and_historical_rows() -> Te
     let prepared =
         prepare_manifest_owner_admission_v1(genesis_request.clone(), &genesis_owner, None)?;
     assert_eq!(genesis_owner.signatures_issued.load(Ordering::SeqCst), 2);
-    let mut store = MemoryStore::new();
+    let mut store = keyed(MemoryStore::new())?;
     let applied = store.commit_manifest_owner_admission_v1(prepared)?;
     assert_eq!(applied.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
     assert_eq!(applied.receipt_hashes.len(), 2);
 
     let retry_owner =
-        FixtureOwner::new(first_timelines.clone(), hash(41)).with_signing_identity(hash(91), 0xa5);
+        FixtureOwner::new(first_timelines.clone(), hash(41)).with_signing_identity(2, 0xa5);
     let retry_prepared =
         prepare_manifest_owner_admission_v1(genesis_request.clone(), &retry_owner, None)?;
     assert_ne!(
@@ -796,7 +827,7 @@ fn memory_owner_admission_replaces_the_complete_timeline_set() -> TestResult {
         &first_timelines,
     )?;
     let genesis_owner = FixtureOwner::new(first_timelines, hash(61));
-    let mut store = MemoryStore::new();
+    let mut store = keyed(MemoryStore::new())?;
     let genesis = prepare_manifest_owner_admission_v1(genesis_request, &genesis_owner, None)?;
     store.commit_manifest_owner_admission_v1(genesis)?;
     let previous = store
@@ -868,7 +899,8 @@ fn sqlite_owner_admission_rolls_back_failed_transaction_and_recovers_after_reope
         &timelines,
     )?;
     let owner = FixtureOwner::new(timelines.clone(), operation_id);
-    let mut store = SqliteStore::open(path.to_str().ok_or("non-UTF8 test path")?)?;
+    let opened = SqliteStore::open(path.to_str().ok_or("non-UTF8 test path")?)?;
+    let mut store = keyed(opened)?;
     let connection = rusqlite::Connection::open(&path)?;
     connection.execute_batch(
         "CREATE TRIGGER fail_manifest_policy_copy
@@ -1007,7 +1039,7 @@ fn sqlite_owner_admission_replaces_complete_generation_and_recovers_after_reopen
         &original_timelines,
     )?;
     let genesis_owner = FixtureOwner::new(original_timelines, genesis_operation);
-    let mut store = SqliteStore::open(path)?;
+    let mut store = keyed(SqliteStore::open(path)?)?;
     let genesis = prepare_manifest_owner_admission_v1(genesis_request, &genesis_owner, None)?;
     let genesis_result = store.commit_manifest_owner_admission_v1(genesis)?;
     assert_eq!(
@@ -1802,11 +1834,11 @@ fn assert_lease_and_member_rules<S: ManifestOwnerAdmissionPersistencePortV1>(
 
 #[test]
 fn memory_owner_admission_records_leases_and_member_leaves() -> TestResult {
-    assert_lease_and_member_rules(MemoryStore::new())
+    assert_lease_and_member_rules(keyed(MemoryStore::new())?)
 }
 
 #[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_owner_admission_records_leases_and_member_leaves() -> TestResult {
-    assert_lease_and_member_rules(SqliteStore::open_in_memory()?)
+    assert_lease_and_member_rules(keyed(SqliteStore::open_in_memory()?)?)
 }

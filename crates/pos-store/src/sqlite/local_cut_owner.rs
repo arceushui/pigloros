@@ -1615,18 +1615,18 @@ pub(super) fn sqlite_sync_local_cut_owner_after_admission(
 mod local_cut_owner_coverage {
     use super::*;
     use crate::manifest_owner_fixtures::{
-        catalog, member_classes, timeline_request, zero_event_inputs, zero_event_results,
-        READ_LIMITS, SOURCE_GENESIS,
+        catalog, coordinator_evidence, coordinator_registry, member_classes, timeline_request,
+        zero_event_inputs, zero_event_results, READ_LIMITS, SOURCE_GENESIS,
     };
     use pos_core::{
-        prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1,
+        prepare_local_cut_owner_commit_v1, prepare_manifest_owner_admission_v1, EventStore,
         LocalCutHeadsTableV1, LocalCutManifestBindingRowV1, LocalCutOwnerVerifierV1,
         LocalCutReceiptInputV1, LocalCutSealInputV2, ManifestAdmissionCatalogV1,
         ManifestOwnerAdmissionCommitKindV1, ManifestOwnerAdmissionRequestV1,
         ManifestOwnerAdmissionSnapshotV1, ManifestOwnerAdmissionVerifierV1,
         ManifestOwnerClassifiedLeafV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerScopeMembersV1,
         ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-        ManifestSlotAdmissionReceiptV1, PreparedManifestOwnerAdmissionV1,
+        ManifestSlotAdmissionReceiptV1, PreparedManifestOwnerAdmissionV1, WorldKeyEvidenceV1,
     };
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
@@ -1700,6 +1700,10 @@ mod local_cut_owner_coverage {
     const BRANCH_INSERT_ABORT: &str = "CREATE TRIGGER fault \
          BEFORE INSERT ON world_dependency_branches \
          BEGIN SELECT RAISE(ABORT, 'branch insert fault'); END";
+    const EVIDENCE_INSERT_ABORT: &str = "CREATE TRIGGER fault \
+         BEFORE INSERT ON world_key_evidence \
+         BEGIN SELECT RAISE(ABORT, 'evidence insert fault'); END";
+    const UNREADABLE_REGISTRY: &str = "UPDATE key_registry SET state_cbor = X'00'";
 
     const fn hash(byte: u8) -> Hash {
         Hash::from_bytes([byte; 32])
@@ -1713,10 +1717,24 @@ mod local_cut_owner_coverage {
         TimelineId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
     }
 
-    // Structural stand-in for the installed manifest owner; it isolates the store port.
-    struct AdmissionOwner;
+    // Structural stand-in for the installed manifest owner, local-cut owner and
+    // coordinator signer; it isolates the store port. Every receipt names the
+    // fixture coordinator WKE1, and the signer returns `key_evidence` with it.
+    struct InstalledOwner {
+        key_evidence: Vec<u8>,
+    }
 
-    impl ManifestOwnerAdmissionVerifierV1 for AdmissionOwner {
+    impl InstalledOwner {
+        fn new() -> Fallible<Self> {
+            Ok(Self::returning(coordinator_evidence()?.to_canonical_cbor()))
+        }
+
+        const fn returning(key_evidence: Vec<u8>) -> Self {
+            Self { key_evidence }
+        }
+    }
+
+    impl ManifestOwnerAdmissionVerifierV1 for InstalledOwner {
         fn verify_complete_composition(
             &self,
             _catalog: &ManifestAdmissionCatalogV1,
@@ -1750,10 +1768,13 @@ mod local_cut_owner_coverage {
         fn sign_coordinator_receipt(
             &self,
             draft: ManifestSlotAdmissionReceiptDraftV1,
-        ) -> Result<ManifestSlotAdmissionReceiptV1, ManifestOwnerAdmissionErrorV1> {
+        ) -> Result<(ManifestSlotAdmissionReceiptV1, Vec<u8>), ManifestOwnerAdmissionErrorV1> {
+            let rejected = ManifestOwnerAdmissionErrorV1::OwnerRejected;
+            let evidence_hash = coordinator_evidence().or(Err(rejected))?.digest();
             draft
-                .with_evidence_and_signature(hash(90), [0x5a; 64])
-                .map_err(|_| ManifestOwnerAdmissionErrorV1::OwnerRejected)
+                .with_evidence_and_signature(evidence_hash, [0x5a; 64])
+                .map(|receipt| (receipt, self.key_evidence.clone()))
+                .or(Err(rejected))
         }
 
         fn verify_native_policy_copies(
@@ -1775,10 +1796,7 @@ mod local_cut_owner_coverage {
         }
     }
 
-    // Structural stand-in for the installed local-cut owner and coordinator signer.
-    struct CutOwner;
-
-    impl LocalCutOwnerVerifierV1 for CutOwner {
+    impl LocalCutOwnerVerifierV1 for InstalledOwner {
         fn verify_authenticated_cut(
             &self,
             _request: &LocalCutOwnerRequestV1,
@@ -1799,8 +1817,10 @@ mod local_cut_owner_coverage {
         fn sign_local_cut_receipt(
             &self,
             commit: &LocalCutCommitV1,
-        ) -> Result<LocalCutReceiptV1, LocalCutOwnerErrorV1> {
-            receipt_for(commit.digest()).map_err(|_| LocalCutOwnerErrorV1::OwnerRejected)
+        ) -> Result<(LocalCutReceiptV1, Vec<u8>), LocalCutOwnerErrorV1> {
+            receipt_for(commit.digest())
+                .map(|receipt| (receipt, self.key_evidence.clone()))
+                .or(Err(LocalCutOwnerErrorV1::OwnerRejected))
         }
 
         fn verify_local_cut_receipt(
@@ -1816,7 +1836,7 @@ mod local_cut_owner_coverage {
     fn receipt_for(commit_record_hash: Hash) -> Fallible<LocalCutReceiptV1> {
         Ok(LocalCutReceiptV1::new(LocalCutReceiptInputV1 {
             commit_record_hash,
-            coordinator_key_evidence_hash: hash(90),
+            coordinator_key_evidence_hash: coordinator_evidence()?.digest(),
             signature: [90; 64],
         })?)
     }
@@ -2081,8 +2101,8 @@ mod local_cut_owner_coverage {
     }
 
     fn admitted_in(mut store: SqliteStore) -> Fallible<Admitted> {
-        let request = admission_request(1, None, &TIMELINES, hash(41), hash(40))?;
-        let prepared = prepare_manifest_owner_admission_v1(request, &AdmissionOwner, None)?;
+        store.save_key_registry(&coordinator_registry()?)?;
+        let prepared = genesis_admission(&InstalledOwner::new()?)?;
         let applied = store.commit_manifest_owner_admission_v1(prepared)?;
         assert_eq!(applied.kind, ManifestOwnerAdmissionCommitKindV1::Applied);
         store.conn.execute_batch(CORRUPTION_PRAGMAS)?;
@@ -2097,6 +2117,11 @@ mod local_cut_owner_coverage {
         })
     }
 
+    fn genesis_admission(owner: &InstalledOwner) -> Fallible<PreparedManifestOwnerAdmissionV1> {
+        let request = admission_request(1, None, &TIMELINES, hash(41), hash(40))?;
+        Ok(prepare_manifest_owner_admission_v1(request, owner, None)?)
+    }
+
     fn prepare_cut(
         request: LocalCutOwnerRequestV1,
         current_state: Option<&LocalCutOwnerStateV1>,
@@ -2108,7 +2133,7 @@ mod local_cut_owner_coverage {
             current_state,
             owner,
             snapshots,
-            &CutOwner,
+            &InstalledOwner::new()?,
         )?)
     }
 
@@ -2314,7 +2339,7 @@ mod local_cut_owner_coverage {
             admission_request(2, Some(current), &SUCCESSOR_TIMELINES, hash(141), hash(142))?;
         Ok(prepare_manifest_owner_admission_v1(
             request,
-            &AdmissionOwner,
+            &InstalledOwner::new()?,
             Some(current),
         )?)
     }
@@ -2798,6 +2823,8 @@ mod local_cut_owner_coverage {
             (TIMELINE_INSERT_ABORT, LocalError::StorageFailure),
             (RECORDING_INSERT_ABORT, LocalError::StorageFailure),
             (BRANCH_INSERT_ABORT, LocalError::StorageFailure),
+            (UNREADABLE_REGISTRY, LocalError::CorruptState),
+            (EVIDENCE_INSERT_ABORT, LocalError::StorageFailure),
             (ADMISSION_UPDATE_IGNORE, LocalError::Conflict),
         ] {
             store.conn.execute_batch("BEGIN")?;
@@ -3414,6 +3441,99 @@ mod local_cut_owner_coverage {
         let intact = link_snapshot(store, &store.conn, oldest)?;
         let intact = intact.ok_or("missing historical snapshot")?;
         assert_eq!(intact.admissions, fixture.snapshots);
+        Ok(())
+    }
+
+    fn retained_evidence(connection: &Connection) -> Fallible<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut statement =
+            connection.prepare("SELECT evidence_hash, evidence_bytes FROM world_key_evidence")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let retained = rows.collect::<Result<Vec<_>, _>>()?;
+        Ok(retained)
+    }
+
+    // The fixture coordinator's WKE1 for its next epoch: valid, but not the receipts'.
+    fn foreign_evidence() -> Fallible<Vec<u8>> {
+        let mut input = *coordinator_evidence()?.as_input();
+        input.identity.epoch = 2;
+        Ok(WorldKeyEvidenceV1::new(input)?.to_canonical_cbor())
+    }
+
+    #[test]
+    fn coordinator_key_evidence_is_retained_once_and_survives_reopening() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("key-evidence.sqlite");
+        let path = path.to_str().ok_or("non-UTF-8 test path")?;
+        let fixture = committed_in(admitted_in(SqliteStore::open(path)?)?)?;
+        let evidence = coordinator_evidence()?;
+        let digest = evidence.digest();
+        let bytes = evidence.to_canonical_cbor();
+        let expected = vec![(digest.as_bytes().to_vec(), bytes.clone())];
+        assert_eq!(retained_evidence(&fixture.store.conn)?, expected);
+        let identity = link_identity(&fixture.batch)?;
+        drop(fixture);
+        let reopened = SqliteStore::open(path)?;
+        assert_eq!(retained_evidence(&reopened.conn)?, expected);
+        let snapshot = reopened.read_manifest_owner_link_snapshot_v1(OWNER, identity, timeline(1))?;
+        let snapshot = snapshot.ok_or("missing reopened owner-link snapshot")?;
+        assert_eq!(snapshot.key_evidence.len(), 1);
+        assert_eq!(snapshot.key_evidence.get(&digest), Some(&bytes));
+        Ok(())
+    }
+
+    #[test]
+    fn commits_reject_coordinator_key_evidence_that_is_not_the_receipts() -> TestResult {
+        let foreign = foreign_evidence()?;
+        let mut store = SqliteStore::open_in_memory()?;
+        store.save_key_registry(&coordinator_registry()?)?;
+        let admission = genesis_admission(&InstalledOwner::returning(foreign.clone()))?;
+        let rejected = store.commit_manifest_owner_admission_v1(admission);
+        assert_eq!(rejected, Err(AdmissionError::InvalidBatch));
+        assert_eq!(store.read_manifest_owner_state_v1(OWNER), Ok(None));
+        assert_eq!(row_count(&store.conn, "world_key_evidence")?, 0);
+
+        let fixture = admitted()?;
+        let request = cut_request(
+            &fixture.store,
+            &fixture.state,
+            &fixture.snapshots,
+            FIRST_CUT,
+        )?;
+        let batch = prepare_local_cut_owner_commit_v1(
+            request,
+            None,
+            &fixture.state,
+            &fixture.snapshots,
+            &InstalledOwner::returning(foreign),
+        )?;
+        let mut admitted_store = fixture.store;
+        let rejected_cut = admitted_store.commit_local_cut_owner_v1(batch);
+        assert_eq!(rejected_cut, Err(LocalError::InvalidBatch));
+        assert_eq!(admitted_store.read_local_cut_owner_state_v1(OWNER), Ok(None));
+        assert_eq!(row_count(&admitted_store.conn, "local_cut_owner_cuts")?, 0);
+        assert_eq!(row_count(&admitted_store.conn, "world_key_evidence")?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn owner_link_snapshot_rejects_mistyped_and_omits_missing_key_evidence() -> TestResult {
+        let fixture = committed()?;
+        let store = &fixture.store;
+        let identity = link_identity(&fixture.batch)?;
+        let mistyped = "UPDATE world_key_evidence SET evidence_bytes = 'x'";
+        let read = with_rollback(&store.conn, mistyped, |connection| {
+            link_snapshot(store, connection, identity)
+        })?;
+        assert_eq!(read, Err(LocalError::CorruptState));
+        let deleted = "DELETE FROM world_key_evidence";
+        let missing = with_rollback(&store.conn, deleted, |connection| {
+            link_snapshot(store, connection, identity)
+        })?;
+        let missing = missing?.ok_or("missing snapshot without key evidence")?;
+        assert!(missing.key_evidence.is_empty());
+        let intact = link_snapshot(store, &store.conn, identity)?;
+        let intact = intact.ok_or("missing owner-link snapshot")?;
+        assert_eq!(intact.key_evidence.len(), 1);
         Ok(())
     }
 }
