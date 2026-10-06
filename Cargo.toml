@@ -11,6 +11,7 @@ members = [
   "crates/pos-reference",
   "crates/pos-plugin-release",
   "crates/pos-owner-bridge-codec",
+  "crates/pos-plugin-host",
   "plugins/entities/rule-agent",
   "plugins/observations/synthetic",
   "plugins/eval",
@@ -81,6 +82,16 @@ num-traits = "0.2"
 
 # SQLite
 rusqlite = { version = "0.40", features = ["bundled", "hooks", "functions"] }
+
+# Community Plugin Component host (ADR-061 revision 4, decision 2): an exact
+# pin with default features off. `runtime` is the feature that lets the
+# Component Model instantiate and call a Component; `scripts/
+# check_wasmtime_feature_pin.py` fails if any further feature is resolved.
+wasmtime = { version = "=49.0.2", default-features = false, features = [
+  "component-model",
+  "cranelift",
+  "runtime",
+] }
 
 # Testing
 proptest = "1"
