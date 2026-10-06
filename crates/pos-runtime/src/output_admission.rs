@@ -30,6 +30,9 @@ pub const MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1: usize = 2 * 65_536
     + 4
     + 6 * 8;
 
+const _: () =
+    assert!(MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1 == pos_core::MAX_MANIFEST_PLUGIN_CLOSURE_BYTES_V1);
+
 /// Closed failures returned by the production output gate.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum OutputAdmissionErrorV1 {

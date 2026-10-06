@@ -49,6 +49,7 @@ pub mod manifest_owner_admission;
 pub mod manifest_owner_link;
 pub mod manifest_owner_link_verifier;
 pub mod manifest_owner_members;
+pub mod manifest_plugin_roster;
 pub mod output_policy;
 pub mod owntracks_enrollment;
 pub mod owntracks_ingress;
@@ -301,6 +302,11 @@ pub use manifest_owner_members::{
     ManifestOwnerLeafClassificationV1, ManifestOwnerMemberLeafV1, ManifestOwnerPolicySourceV1,
     ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1, ManifestOwnerScopeV1,
     MAX_MANIFEST_OWNER_MEMBER_NATIVE_BYTES_V1,
+};
+pub use manifest_plugin_roster::{
+    checked_manifest_plugin_roster_size_v1, ManifestPluginEntryV1, ManifestPluginFieldV1,
+    ManifestPluginRosterErrorV1, ManifestPluginRosterV1, MAX_MANIFEST_PLUGIN_CLOSURE_BYTES_V1,
+    MAX_MANIFEST_PLUGIN_ROSTER_BYTES_V1, MAX_MANIFEST_PLUGIN_ROSTER_ENTRIES_V1,
 };
 pub use repro_manifest_root::{
     ReproManifestRootErrorV1, ReproManifestRootInputV1, ReproManifestRootV1,
