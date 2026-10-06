@@ -560,6 +560,10 @@ fn prepare_timeline(
         return Err(ManifestOwnerAdmissionErrorV1::OwnerRejected);
     }
     verifier.verify_coordinator_receipt(&receipt)?;
+    let evidence = CoordinatorKeyEvidenceV1 {
+        evidence_hash: receipt.as_input().coordinator_key_evidence_hash,
+        bytes: key_evidence,
+    };
     let timeline = ManifestOwnerTimelineAdmissionV1 {
         timeline_id: timeline_request.timeline_id,
         scope: timeline_request.scope,
@@ -568,10 +572,6 @@ fn prepare_timeline(
         receipt,
         policy_copies: timeline_request.policy_copies.clone(),
         members: timeline_request.members.clone(),
-    };
-    let evidence = CoordinatorKeyEvidenceV1 {
-        evidence_hash: receipt.as_input().coordinator_key_evidence_hash,
-        bytes: key_evidence,
     };
     Ok((timeline, evidence))
 }

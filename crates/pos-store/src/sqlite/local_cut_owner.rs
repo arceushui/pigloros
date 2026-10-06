@@ -707,7 +707,6 @@ fn sqlite_latest_local_cut_world_binding(
         .map_err(|_| LocalCutOwnerErrorV1::StorageFailure)
 }
 
-/// Check a prepared successor and each WCB1 predecessor inside the commit.
 /// Resolve and retain a cut's coordinator evidence, then check its successor.
 ///
 /// The evidence is resolved at the same point as the memory commit, before
@@ -728,6 +727,7 @@ fn sqlite_retain_evidence_and_validate_local_cut(
     sqlite_validate_local_cut_successor(connection, batch, admission, current_state)
 }
 
+/// Check a prepared successor and each WCB1 predecessor inside the commit.
 fn sqlite_validate_local_cut_successor(
     connection: &Connection,
     batch: &PreparedLocalCutOwnerCommitV1,
