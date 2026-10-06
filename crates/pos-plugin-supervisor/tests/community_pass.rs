@@ -33,9 +33,8 @@ use pos_runtime::community_plugin_host::{
     TrapReproductionV1,
 };
 use pos_runtime::{
-    LocalScheduledAdmissionHostV1, ObservationView, PluginAvailabilityV1,
-    PluginCompositionErrorV1, PluginRegistry, RuntimeError, ScheduledDriverBindingV1,
-    ScheduledPassAdmissionV1,
+    LocalScheduledAdmissionHostV1, ObservationView, PluginAvailabilityV1, PluginCompositionErrorV1,
+    PluginRegistry, RuntimeError, ScheduledDriverBindingV1, ScheduledPassAdmissionV1,
 };
 use pos_store::memory::MemoryStore;
 

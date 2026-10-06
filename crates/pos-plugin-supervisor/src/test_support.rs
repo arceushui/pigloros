@@ -6,11 +6,11 @@
 //! deployable builds. Nothing here grants authority: the releases come from
 //! the unchecked `pos-crypto` projection fixture.
 
+use pos_core::{Capability, Hash, Kind, Plugin, PluginId};
 use pos_crypto::plugin_execution::{
     DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
     PluginExecutionProjectionFixtureV1, PluginExecutionProjectionV1,
 };
-use pos_core::{Capability, Hash, Kind, Plugin, PluginId};
 use pos_runtime::community_plugin_host::{
     negotiate_community_plugin_v1, plugin_output_digest_v1, ArtifactRefV1,
     CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1,

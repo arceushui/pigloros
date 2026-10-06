@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use pos_core::{CoreError, EntityId, Kind, PipelineOutcomeV1};
 use pos_runtime::community_plugin_host::{
-    plugin_output_digest_v1, MeteringV1, AtomicCommitFailureV1, ComponentTrapClassV1, EventDraftV1,
-    FieldRefV1, GuestPluginErrorV1, PluginErrorCodeV1, TraceAnnotationV1, TrapReproductionV1,
+    plugin_output_digest_v1, AtomicCommitFailureV1, ComponentTrapClassV1, EventDraftV1, FieldRefV1,
+    GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1, TraceAnnotationV1, TrapReproductionV1,
 };
 use ulid::Ulid;
 
@@ -410,7 +410,10 @@ fn a_quarantined_adapter_refuses_to_run_until_it_is_cleared() {
     let plugin = plugin(handle.plugin_id(), false);
     let () = ok(registry.register_pinned_generated(
         &plugin,
-        PluginRegistrationV1::new(community_pin(1, "community"), PluginAvailabilityV1::Available),
+        PluginRegistrationV1::new(
+            community_pin(1, "community"),
+            PluginAvailabilityV1::Available,
+        ),
         None,
         None,
     ));

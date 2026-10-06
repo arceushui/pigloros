@@ -53,8 +53,8 @@ use std::time::Duration;
 
 use pos_core::{Plugin, PluginId, TimelineId};
 use pos_runtime::community_plugin_host::{
-    CommunityPluginHostErrorV1, GuestPluginErrorV1, HostInputs, InvocationReportV1,
-    MeteringV1, NegotiatedCommunityPluginV1, PluginInvocationV1, PluginOutputV1,
+    CommunityPluginHostErrorV1, GuestPluginErrorV1, HostInputs, InvocationReportV1, MeteringV1,
+    NegotiatedCommunityPluginV1, PluginInvocationV1, PluginOutputV1,
 };
 use pos_runtime::{
     DomainImplementationKindV1, Driver, ObservationView, PluginAvailabilityV1,
@@ -192,10 +192,7 @@ impl CommunityDriverV1 {
                 &invocation,
                 context.host_inputs,
             )
-            .map_err(|failure| {
-                self.record(id, ReceiptParts::failed(failure));
-                failure
-            })?;
+            .inspect_err(|failure| self.record(id, ReceiptParts::failed(*failure)))?;
         self.accept(id, report)
     }
 
