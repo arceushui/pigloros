@@ -259,7 +259,7 @@ impl CounterfactualForkStateV1 {
 /// The first record of an invalidation: provisional and at its first Tick.
 fn admit_first(first_tick: u64, record: &TickDependencyRecordV1) -> Result<(), StoreError> {
     let tick_check = ensure(record.tick() == first_tick, StoreError::BindingMismatch);
-    record.ensure_provisional().and_then(|()| tick_check)
+    record.ensure_provisional().and(tick_check)
 }
 
 /// `Ok` if `holds`, else `error`.
