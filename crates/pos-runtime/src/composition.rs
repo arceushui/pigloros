@@ -9,7 +9,7 @@ use pos_core::{
 };
 
 /// Closed failures of the host's complete pre-registration manifest batch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ManifestRegistrationErrorV1 {
     #[error("manifest registration batch is missing or already prepared")]
     BatchState,
@@ -21,10 +21,91 @@ pub enum ManifestRegistrationErrorV1 {
     PluginMismatch,
     #[error("manifest registration slot is missing, duplicated or mismatched")]
     SlotMismatch,
+    #[error(
+        "Plugin {plugin_name:?} ({plugin_id}) has no manifest slot; register it with \
+         PluginRegistry::register_local and a ManifestSlotV1"
+    )]
+    MissingSlot {
+        plugin_name: String,
+        plugin_id: PluginId,
+    },
     #[error("manifest registration requires an available pin and retained output closure")]
     UnverifiedRegistration,
     #[error("manifest registration batch is incomplete or changed")]
     IncompleteBatch,
+}
+
+/// Maximum byte length of a [`ManifestSlotV1`].
+pub const MAX_MANIFEST_SLOT_BYTES_V1: usize = 64;
+
+/// Closed rejection of a host-authored manifest slot.
+///
+/// Messages name the offending slot (never more than 64 bytes of it) or Plugin
+/// and say what to change.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ManifestSlotErrorV1 {
+    #[error("manifest slot is empty; use A-Z a-z 0-9 . _ - (1-64 bytes)")]
+    Empty,
+    #[error("manifest slot is {length} bytes; use A-Z a-z 0-9 . _ - (1-64 bytes)")]
+    TooLong { length: usize },
+    #[error(
+        "manifest slot {slot:?} contains {character:?} at byte {index}; use A-Z a-z 0-9 . _ - \
+         (1-64 bytes)"
+    )]
+    InvalidCharacter {
+        slot: String,
+        character: char,
+        index: usize,
+    },
+    #[error("manifest slot {slot:?} is already registered; give Plugin {plugin:?} another slot")]
+    Duplicate { slot: String, plugin: String },
+}
+
+/// A host-authored, stable name for one Plugin in a local composition.
+///
+/// A slot is 1-64 ASCII bytes from `A-Z a-z 0-9 . _ -`. The embedding
+/// application chooses it, passes it once to
+/// [`crate::PluginRegistry::register_local`], and may record it in its own
+/// reproduction recipe. It is not derived from the Plugin name or `PluginId`
+/// and must hold no participant, secret or other private text.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ManifestSlotV1(String);
+
+const fn is_manifest_slot_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+}
+
+impl ManifestSlotV1 {
+    /// Validate a slot against the ADR-088 grammar.
+    ///
+    /// # Errors
+    /// Returns [`ManifestSlotErrorV1`] for an empty, over-long or
+    /// out-of-grammar slot.
+    pub fn try_new(slot: &str) -> Result<Self, ManifestSlotErrorV1> {
+        if slot.is_empty() {
+            return Err(ManifestSlotErrorV1::Empty);
+        }
+        if slot.len() > MAX_MANIFEST_SLOT_BYTES_V1 {
+            return Err(ManifestSlotErrorV1::TooLong { length: slot.len() });
+        }
+        if let Some((index, character)) = slot
+            .char_indices()
+            .find(|&(_, character)| !is_manifest_slot_character(character))
+        {
+            return Err(ManifestSlotErrorV1::InvalidCharacter {
+                slot: slot.to_owned(),
+                character,
+                index,
+            });
+        }
+        Ok(Self(slot.to_owned()))
+    }
+
+    /// The validated slot text.
+    #[must_use]
+    pub const fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
 }
 
 /// Private registry-issued proof of one complete, identity-bound Plugin batch.
