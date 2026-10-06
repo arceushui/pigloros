@@ -390,10 +390,7 @@ fn operator_ceilings_stay_within_the_pmf1_member_ranges() -> TestResult {
         ),
         (ceiling_values(0, 0, 0), ExecutionLimitV1::MemoryBytes),
         (ceiling_values(65_536, 0, 0), ExecutionLimitV1::Fuel),
-        (
-            ceiling_values(65_536, 0, 1_000_001),
-            ExecutionLimitV1::Fuel,
-        ),
+        (ceiling_values(65_536, 0, 1_000_001), ExecutionLimitV1::Fuel),
         (
             ceiling_values(65_536, 1, 1_000_001),
             ExecutionLimitV1::HostCalls,
