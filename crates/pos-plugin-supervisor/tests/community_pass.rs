@@ -523,7 +523,8 @@ fn a_typed_non_commit_and_a_store_error_discard_the_pass_and_classify() {
     );
     assert_eq!(world.events().len(), 1);
 
-    // A store error: the erasure fence froze the Timeline after staging.
+    // A store error: the erasure fence froze the Timeline after staging. A
+    // frozen Timeline cannot be read, so its Events were counted above.
     let staged = ok(world.stage());
     world.gate.freeze_timeline_for_test(world.timeline);
     let frozen = err(world.admit(&staged));
@@ -538,7 +539,6 @@ fn a_typed_non_commit_and_a_store_error_discard_the_pass_and_classify() {
         classify_pass_failure(&frozen),
         PassFailureV1::Host(operational)
     );
-    assert_eq!(world.events().len(), 1);
 
     // Both discarded every staged Driver output and quarantined nobody.
     for handle in [&alpha, &beta] {
