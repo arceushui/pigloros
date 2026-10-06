@@ -60,10 +60,18 @@
 //!   these paths: every fallible step runs on staged copies, and installing
 //!   is infallible, so a write either commits entirely or fails having
 //!   committed nothing, and its state is always settled.
-//! - **Deleted Forks.** Deleting a Fork Timeline keeps its counterfactual
-//!   state, exactly like the `SQLite` adapter, so a generation never
-//!   decreases and the audit bytes are retained. Publication, reads, Tick
-//!   appends, and commits on a deleted Fork still report `ForkNotFound`.
+//! - **Deleted Forks.** Deleting a Fork Timeline purges its counterfactual
+//!   state inside the generic `delete_timeline`, exactly like the `SQLite`
+//!   adapter: the facts, artifacts, quarantine marks, and receipts go, and
+//!   only the Fork's last generation stays as a floor that no port read can
+//!   reach. A Fork re-created under the same id (identity-preserving import)
+//!   is seeded at that floor when its facts are published, so the generation
+//!   never decreases. Publication, reads, Tick appends, and commits on a
+//!   deleted Fork still report `ForkNotFound`.
+//! - **ADR-060 clarification.** The purge is derived-state cleanup: the
+//!   counterfactual rows are derived from the Fork Timeline, not erasure
+//!   evidence. The generic `delete_timeline` still clears no erasure
+//!   evidence, fence, or inventory, and this purge touches none of them.
 //! - **Containment.** The invalidation commit and later Tick appends add
 //!   Events, so they run under the ADR-060 erasure write fence and, like every
 //!   generic Fork append, are rejected on an ADR-099 admitted Fork whose
@@ -143,10 +151,10 @@ pub(super) struct CounterfactualForkStateV1 {
 }
 
 impl CounterfactualForkStateV1 {
-    const fn new(facts: CounterfactualFactsV1) -> Self {
+    const fn new(facts: CounterfactualFactsV1, generation: u64) -> Self {
         Self {
             facts,
-            generation: 0,
+            generation,
             artifacts: BTreeMap::new(),
             quarantined: BTreeMap::new(),
             receipts: BTreeMap::new(),
@@ -329,6 +337,15 @@ impl MemoryStore {
             })
     }
 
+    /// Drop every counterfactual row of a deleted Fork, keeping only the last
+    /// generation as a floor that no port read can reach.
+    pub(super) fn purge_counterfactual_state(&mut self, fork: TimelineId) {
+        if let Some(state) = self.counterfactual_forks.remove(&fork) {
+            self.counterfactual_generation_floors
+                .insert(fork, state.generation);
+        }
+    }
+
     fn counterfactual_fork(
         &self,
         fork: TimelineId,
@@ -430,10 +447,15 @@ impl CounterfactualStorePortV1 for MemoryStore {
         facts: CounterfactualFactsV1,
     ) -> Result<ForkGenerationV1, CounterfactualStoreErrorV1> {
         self.ensure_visible_fork(fork).map(|()| {
+            let floor = self
+                .counterfactual_generation_floors
+                .get(&fork)
+                .copied()
+                .unwrap_or_default();
             let state = self
                 .counterfactual_forks
                 .entry(fork)
-                .or_insert_with(|| CounterfactualForkStateV1::new(facts));
+                .or_insert_with(|| CounterfactualForkStateV1::new(facts, floor));
             state.facts = facts;
             ForkGenerationV1 {
                 fork,

@@ -6389,6 +6389,7 @@ impl EventStore for SqliteStore {
                 )
                 .map_err(|e| CoreError::Storage(e.to_string()))?;
                 pipeline_admission::delete_pipeline_admission_rows(&tx, &id_str)?;
+                counterfactual_store::purge_counterfactual_state(&tx, &id_str)?;
                 let enrollment = Self::enrollment_state_in_transaction(&tx)?;
                 let enrollment_result = if enrollment.permits_geographic_admission_target(id) {
                     enrollment
