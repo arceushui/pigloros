@@ -1,13 +1,14 @@
 use core::convert::TryFrom;
 
 use pos_owner_bridge_codec::{
-    CeremonyKind, ControlRole, ControlState, OwnerBridgeCodecError, OwnerBridgeControlV1,
-    CREATE_REPLY_BUFFER_CAPACITY, GET_REPLY_BUFFER_CAPACITY, REQUEST_BUFFER_CAPACITY,
+    CeremonyId, CeremonyKind, ControlRole, ControlState, OwnerBridgeCodecError,
+    OwnerBridgeControlV1, CREATE_REPLY_BUFFER_CAPACITY, GET_REPLY_BUFFER_CAPACITY,
+    REQUEST_BUFFER_CAPACITY,
 };
 
-const CEREMONY_ID: [u8; 16] = [
+const CEREMONY_ID: CeremonyId = CeremonyId::from_bytes([
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-];
+]);
 
 #[test]
 fn public_control_headers_round_trip_every_closed_state_and_accessor(

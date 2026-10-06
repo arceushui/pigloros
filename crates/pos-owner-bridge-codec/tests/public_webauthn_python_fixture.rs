@@ -1,7 +1,8 @@
 use pos_owner_bridge_codec::{
     verify_assertion_reply, verify_attestation_reply, AssertionReplyV1,
-    AssertionVerificationContext, AttestationReplyV1, CreateVerificationContext,
-    OwnerBridgeCodecError, StoredCredential, TransportCodes,
+    AssertionVerificationContext, AttestationReplyV1, CeremonyId, CreateVerificationContext,
+    OwnerBridgeCodecError, OwnerUserHandle, PrfResult, StoredCredential, TransportCodes,
+    WebAuthnChallenge,
 };
 
 const FIXTURE: &str = include_str!("../../../fixtures/owner-bridge/webauthn-es256-v1.fixture");
@@ -9,13 +10,13 @@ const FIXTURE: &str = include_str!("../../../fixtures/owner-bridge/webauthn-es25
 #[test]
 fn public_verifier_accepts_independently_generated_python_fixture(
 ) -> Result<(), OwnerBridgeCodecError> {
-    let ceremony_id = fixture_array("ceremony_id")?;
-    let challenge = fixture_array("challenge")?;
+    let ceremony_id = CeremonyId::from_bytes(fixture_array("ceremony_id")?);
+    let challenge = WebAuthnChallenge::from_bytes(fixture_array("challenge")?);
     let credential_id = fixture_bytes("credential_id")?;
-    let user_handle = fixture_array("user_handle")?;
+    let user_handle = OwnerUserHandle::from_bytes(fixture_array("user_handle")?);
     let create_client_data = fixture_bytes("create_client_data_json")?;
     let attestation_object = fixture_bytes("attestation_object")?;
-    let prf_first = fixture_array("prf_first")?;
+    let prf_first = PrfResult::from_bytes(fixture_array("prf_first")?);
     let registration_reply = AttestationReplyV1::new(
         ceremony_id,
         &credential_id,

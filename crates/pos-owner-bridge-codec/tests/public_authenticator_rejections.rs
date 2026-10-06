@@ -1,7 +1,7 @@
 use pos_owner_bridge_codec::{
     parse_assertion_authenticator_data, parse_none_attestation_object, CoseEs256PublicKey,
-    OwnerBridgeCodecError, SubjectCredentialBindingInputV1, SubjectCredentialBindingV1,
-    TransportCodes,
+    OwnerBridgeCodecError, OwnerUserHandle, SubjectCredentialBindingInputV1,
+    SubjectCredentialBindingV1, SubjectId, TransportCodes,
 };
 
 const CREDENTIAL_ID: [u8; 2] = [0x80, 0x81];
@@ -197,10 +197,10 @@ fn public_durable_binding_rejects_a_non_curve_attestation_key() -> Result<(), Ow
     assert_eq!(
         SubjectCredentialBindingV1::new(SubjectCredentialBindingInputV1 {
             owner_id: "owner",
-            subject_id: [0; 16],
+            subject_id: SubjectId::from_bytes([0; 16]),
             epoch: 1,
             credential_id: parsed.credential_id(),
-            user_handle: [0; 32],
+            user_handle: OwnerUserHandle::from_bytes([0; 32]),
             public_key: parsed.public_key(),
             backup_eligible: parsed.backup_eligible(),
             backup_state: parsed.backup_state(),

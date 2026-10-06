@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
-use crate::{CeremonyKind, OwnerBridgeCodecError};
+use crate::{CeremonyKind, OwnerBridgeCodecError, WebAuthnChallenge};
 
 const MAX_CLIENT_DATA_BYTES: usize = 4_096;
 const OWNER_ORIGIN: &str = "http://localhost:49291";
@@ -28,7 +28,7 @@ const REQUIRED_CLIENT_DATA_FIELDS: u8 =
 pub fn validate_client_data_json(
     input: &[u8],
     kind: CeremonyKind,
-    challenge: &[u8; 32],
+    challenge: &WebAuthnChallenge,
 ) -> Result<(), OwnerBridgeCodecError> {
     if input.is_empty() || input.len() > MAX_CLIENT_DATA_BYTES {
         return Err(OwnerBridgeCodecError::BoundsExceeded);
@@ -44,7 +44,7 @@ pub fn validate_client_data_json(
         CeremonyKind::Create => CREATE_TYPE,
         CeremonyKind::Get => GET_TYPE,
     };
-    let expected_challenge = base64url_challenge(challenge);
+    let expected_challenge = base64url_challenge(challenge.as_bytes());
 
     parser.skip_whitespace();
     if parser.peek_byte() == Some(b'}') {

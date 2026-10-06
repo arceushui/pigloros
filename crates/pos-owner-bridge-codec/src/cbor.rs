@@ -1,4 +1,58 @@
-use crate::OwnerBridgeCodecError;
+use crate::{
+    transport::{TransportCodes, MAX_TRANSPORT_CODES},
+    OwnerBridgeCodecError,
+};
+
+pub(crate) const PROTOCOL_VERSION: u64 = 1;
+
+pub(crate) fn expect_magic(
+    reader: &mut CborReader<'_>,
+    expected: [u8; 4],
+) -> Result<(), OwnerBridgeCodecError> {
+    if reader.fixed_bytes()? == expected {
+        Ok(())
+    } else {
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    }
+}
+
+pub(crate) fn expect_version(reader: &mut CborReader<'_>) -> Result<(), OwnerBridgeCodecError> {
+    if reader.unsigned()? == PROTOCOL_VERSION {
+        Ok(())
+    } else {
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    }
+}
+
+pub(crate) fn read_transports(
+    reader: &mut CborReader<'_>,
+) -> Result<TransportCodes, OwnerBridgeCodecError> {
+    let count = reader.array(MAX_TRANSPORT_CODES)?;
+    let mut codes = [0; MAX_TRANSPORT_CODES];
+    for code in codes.iter_mut().take(count) {
+        *code =
+            u8::try_from(reader.unsigned()?).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
+    }
+    TransportCodes::new(&codes[..count])
+}
+
+pub(crate) fn write_transports(writer: &mut CborWriter<'_>, transports: TransportCodes) {
+    writer.array(transports.as_slice().len());
+    for &code in transports.as_slice() {
+        writer.unsigned(u64::from(code));
+    }
+}
+
+pub(crate) const fn require_bounded(
+    value: &[u8],
+    minimum: usize,
+    maximum: usize,
+) -> Result<(), OwnerBridgeCodecError> {
+    if value.len() < minimum || value.len() > maximum {
+        return Err(OwnerBridgeCodecError::BoundsExceeded);
+    }
+    Ok(())
+}
 
 /// Minimal deterministic-CBOR reader for the fixed owner-bridge schemas.
 pub(crate) struct CborReader<'a> {

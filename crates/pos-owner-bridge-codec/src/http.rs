@@ -70,19 +70,19 @@ pub fn admit_loopback_http_request(
             return Err(OwnerBridgeCodecError::BoundsExceeded);
         }
         match header.name {
-            "Host" => {
+            name if name.eq_ignore_ascii_case("host") => {
                 if host_seen || header.value != OWNER_HOST {
                     return Err(OwnerBridgeCodecError::InvalidHttpRequest);
                 }
                 host_seen = true;
             }
-            "Sec-Fetch-Dest" => {
+            name if name.eq_ignore_ascii_case("sec-fetch-dest") => {
                 if destination_seen || header.value != FETCH_DESTINATION {
                     return Err(OwnerBridgeCodecError::InvalidHttpRequest);
                 }
                 destination_seen = true;
             }
-            "Sec-Fetch-Mode" => {
+            name if name.eq_ignore_ascii_case("sec-fetch-mode") => {
                 if mode_seen || header.value != FETCH_MODE {
                     return Err(OwnerBridgeCodecError::InvalidHttpRequest);
                 }

@@ -3,8 +3,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     parse_assertion_authenticator_data, parse_none_attestation_object, validate_client_data_json,
-    AssertionReplyV1, AttestationReplyV1, CoseEs256PublicKey, OwnerBridgeCodecError,
-    TransportCodes,
+    AssertionReplyV1, AttestationReplyV1, CeremonyId, CoseEs256PublicKey, OwnerBridgeCodecError,
+    OwnerUserHandle, PrfResult, TransportCodes, WebAuthnChallenge,
 };
 
 const MIN_CREDENTIAL_ID_BYTES: usize = 1;
@@ -15,15 +15,15 @@ const SIGNED_MESSAGE_BYTES: usize = MAX_AUTHENTICATOR_DATA_BYTES + 32;
 /// Host-owned invariants for verifying a Create reply.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CreateVerificationContext {
-    ceremony_id: [u8; 16],
-    challenge: [u8; 32],
+    ceremony_id: CeremonyId,
+    challenge: WebAuthnChallenge,
 }
 
 impl CreateVerificationContext {
     /// Construct the exact one-use ceremony context that a Create reply must
     /// match.
     #[must_use]
-    pub const fn new(ceremony_id: [u8; 16], challenge: [u8; 32]) -> Self {
+    pub const fn new(ceremony_id: CeremonyId, challenge: WebAuthnChallenge) -> Self {
         Self {
             ceremony_id,
             challenge,
@@ -35,7 +35,7 @@ impl CreateVerificationContext {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StoredCredential<'a> {
     credential_id: &'a [u8],
-    user_handle: [u8; 32],
+    user_handle: OwnerUserHandle,
     public_key: CoseEs256PublicKey,
     backup_eligible: bool,
     sign_count: u32,
@@ -50,7 +50,7 @@ impl<'a> StoredCredential<'a> {
     /// is not within the required 1–1024-byte `WebAuthn` range.
     pub const fn new(
         credential_id: &'a [u8],
-        user_handle: [u8; 32],
+        user_handle: OwnerUserHandle,
         public_key: CoseEs256PublicKey,
         backup_eligible: bool,
         backup_state: bool,
@@ -75,8 +75,8 @@ impl<'a> StoredCredential<'a> {
 /// Host-owned invariants for verifying one Get assertion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AssertionVerificationContext<'a> {
-    ceremony_id: [u8; 16],
-    challenge: [u8; 32],
+    ceremony_id: CeremonyId,
+    challenge: WebAuthnChallenge,
     credential: StoredCredential<'a>,
 }
 
@@ -84,8 +84,8 @@ impl<'a> AssertionVerificationContext<'a> {
     /// Construct the exact one-use Get context and its stored credential.
     #[must_use]
     pub const fn new(
-        ceremony_id: [u8; 16],
-        challenge: [u8; 32],
+        ceremony_id: CeremonyId,
+        challenge: WebAuthnChallenge,
         credential: StoredCredential<'a>,
     ) -> Self {
         Self {
@@ -105,7 +105,7 @@ pub struct VerifiedRegistration<'a> {
     backup_eligible: bool,
     backup_state: bool,
     sign_count: u32,
-    prf_first: Option<[u8; 32]>,
+    prf_first: Option<PrfResult>,
 }
 
 impl<'a> VerifiedRegistration<'a> {
@@ -147,7 +147,7 @@ impl<'a> VerifiedRegistration<'a> {
 
     /// Return the optional renderer-supplied Create PRF result.
     #[must_use]
-    pub const fn prf_first(self) -> Option<[u8; 32]> {
+    pub const fn prf_first(self) -> Option<PrfResult> {
         self.prf_first
     }
 }
@@ -157,7 +157,7 @@ impl<'a> VerifiedRegistration<'a> {
 pub struct VerifiedAssertion {
     backup_state: bool,
     sign_count: u32,
-    prf_first: [u8; 32],
+    prf_first: PrfResult,
 }
 
 impl VerifiedAssertion {
@@ -175,7 +175,7 @@ impl VerifiedAssertion {
 
     /// Return the renderer-supplied Get PRF result.
     #[must_use]
-    pub const fn prf_first(self) -> [u8; 32] {
+    pub const fn prf_first(self) -> PrfResult {
         self.prf_first
     }
 }

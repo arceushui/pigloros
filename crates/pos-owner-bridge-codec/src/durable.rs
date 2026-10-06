@@ -1,20 +1,22 @@
 use p256::ecdsa::VerifyingKey;
 
 use crate::{
-    cbor::{CborReader, CborWriter},
-    CoseEs256PublicKey, OwnerBridgeCodecError, TransportCodes, CANONICAL_COSE_ES256_KEY_BYTES,
+    cbor::{
+        expect_magic, expect_version, read_transports, require_bounded, write_transports,
+        CborReader, CborWriter, PROTOCOL_VERSION,
+    },
+    CeremonyId, CoseEs256PublicKey, ImagePathSha256, OwnerBridgeCodecError, OwnerUserHandle,
+    SubjectId, TransportCodes, CANONICAL_COSE_ES256_KEY_BYTES,
 };
 
 const SUBJECT_CREDENTIAL_BINDING_MAGIC: [u8; 4] = *b"SCB1";
 const CLEANUP_RECORD_MAGIC: [u8; 4] = *b"PBCR";
-const PROTOCOL_VERSION: u64 = 1;
 const SUBJECT_DATA_ENCRYPTION_ROLE: u64 = 0;
 const ES256_ALGORITHM_CODE: u64 = 0;
 const RP_ID: &str = "localhost";
 const OWNER_ORIGIN: &str = "http://localhost:49291";
 const MAX_CREDENTIAL_ID_BYTES: usize = 1_024;
 const MAX_COSE_KEY_BYTES: usize = 256;
-const MAX_TRANSPORTS: usize = 6;
 
 /// Maximum deterministic-CBOR bytes admitted for one durable credential binding.
 pub const MAX_SUBJECT_CREDENTIAL_BINDING_BYTES: usize = 4_096;
@@ -32,13 +34,13 @@ pub struct SubjectCredentialBindingInputV1<'a> {
     /// Durable identifier of the owner account.
     pub owner_id: &'a str,
     /// Exact subject identifier whose epoch owns the credential.
-    pub subject_id: [u8; 16],
+    pub subject_id: SubjectId,
     /// Durable subject-key epoch.
     pub epoch: u64,
     /// Sole credential identifier bound to this epoch.
     pub credential_id: &'a [u8],
     /// Exact owner user handle.
-    pub user_handle: [u8; 32],
+    pub user_handle: OwnerUserHandle,
     /// Candidate closed ES256 credential public key.
     pub public_key: CoseEs256PublicKey,
     /// Credential backup-eligibility flag.
@@ -55,10 +57,10 @@ pub struct SubjectCredentialBindingInputV1<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SubjectCredentialBindingV1<'a> {
     owner_id: &'a str,
-    subject_id: [u8; 16],
+    subject_id: SubjectId,
     epoch: u64,
     credential_id: &'a [u8],
-    user_handle: [u8; 32],
+    user_handle: OwnerUserHandle,
     public_key: CoseEs256PublicKey,
     backup_eligible: bool,
     backup_state: bool,
@@ -128,7 +130,7 @@ impl<'a> SubjectCredentialBindingV1<'a> {
 
     /// Return the exact subject identifier.
     #[must_use]
-    pub const fn subject_id(self) -> [u8; 16] {
+    pub const fn subject_id(self) -> SubjectId {
         self.subject_id
     }
 
@@ -146,7 +148,7 @@ impl<'a> SubjectCredentialBindingV1<'a> {
 
     /// Return the exact owner user handle.
     #[must_use]
-    pub const fn user_handle(self) -> [u8; 32] {
+    pub const fn user_handle(self) -> OwnerUserHandle {
         self.user_handle
     }
 
@@ -184,11 +186,11 @@ impl<'a> SubjectCredentialBindingV1<'a> {
 /// One durable record used to complete bridge cleanup after a process restart.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CleanupRecordV1<'a> {
-    ceremony_id: [u8; 16],
+    ceremony_id: CeremonyId,
     folder_name: &'a str,
     browser_pid: u32,
     creation_filetime: u64,
-    image_path_sha256: [u8; 32],
+    image_path_sha256: ImagePathSha256,
 }
 
 impl<'a> CleanupRecordV1<'a> {
@@ -200,11 +202,11 @@ impl<'a> CleanupRecordV1<'a> {
     /// its complete deterministic record exceeds the fixed cleanup-record
     /// limit.
     pub fn new(
-        ceremony_id: [u8; 16],
+        ceremony_id: CeremonyId,
         folder_name: &'a str,
         browser_pid: u32,
         creation_filetime: u64,
-        image_path_sha256: [u8; 32],
+        image_path_sha256: ImagePathSha256,
     ) -> Result<Self, OwnerBridgeCodecError> {
         require_bounded(folder_name.as_bytes(), 0, MAX_CLEANUP_RECORD_BYTES)?;
         require_length(
@@ -222,7 +224,7 @@ impl<'a> CleanupRecordV1<'a> {
 
     /// Return the ceremony identifier associated with this process.
     #[must_use]
-    pub const fn ceremony_id(self) -> [u8; 16] {
+    pub const fn ceremony_id(self) -> CeremonyId {
         self.ceremony_id
     }
 
@@ -246,7 +248,7 @@ impl<'a> CleanupRecordV1<'a> {
 
     /// Return the expected SHA-256 of the browser image path.
     #[must_use]
-    pub const fn image_path_sha256(self) -> [u8; 32] {
+    pub const fn image_path_sha256(self) -> ImagePathSha256 {
         self.image_path_sha256
     }
 }
@@ -277,13 +279,13 @@ pub fn encode_subject_credential_binding(
     writer.bytes(&SUBJECT_CREDENTIAL_BINDING_MAGIC);
     writer.unsigned(PROTOCOL_VERSION);
     writer.text(binding.owner_id);
-    writer.bytes(&binding.subject_id);
+    writer.bytes(binding.subject_id.as_bytes());
     writer.unsigned(SUBJECT_DATA_ENCRYPTION_ROLE);
     writer.unsigned(binding.epoch);
     writer.text(RP_ID);
     writer.text(OWNER_ORIGIN);
     writer.bytes(binding.credential_id);
-    writer.bytes(&binding.user_handle);
+    writer.bytes(binding.user_handle.as_bytes());
     writer.bytes(&binding.public_key.canonical_encoding());
     writer.unsigned(ES256_ALGORITHM_CODE);
     writer.boolean(binding.backup_eligible);
@@ -309,7 +311,7 @@ pub fn decode_subject_credential_binding(
     expect_magic(&mut reader, SUBJECT_CREDENTIAL_BINDING_MAGIC)?;
     expect_version(&mut reader)?;
     let owner_id = reader.text(MAX_SUBJECT_CREDENTIAL_BINDING_BYTES)?;
-    let subject_id = reader.fixed_bytes()?;
+    let subject_id = SubjectId::from_bytes(reader.fixed_bytes()?);
     if reader.unsigned()? != SUBJECT_DATA_ENCRYPTION_ROLE {
         return Err(OwnerBridgeCodecError::InvalidPayload);
     }
@@ -317,7 +319,7 @@ pub fn decode_subject_credential_binding(
     reader.exact_text(RP_ID)?;
     reader.exact_text(OWNER_ORIGIN)?;
     let credential_id = reader.bytes(1, MAX_CREDENTIAL_ID_BYTES)?;
-    let user_handle = reader.fixed_bytes()?;
+    let user_handle = OwnerUserHandle::from_bytes(reader.fixed_bytes()?);
     let cose_bytes = reader.bytes(1, MAX_COSE_KEY_BYTES)?;
     let public_key = CoseEs256PublicKey::from_canonical_encoding(cose_bytes)?;
     if reader.unsigned()? != ES256_ALGORITHM_CODE {
@@ -366,11 +368,11 @@ pub fn encode_cleanup_record(
     writer.array(7);
     writer.bytes(&CLEANUP_RECORD_MAGIC);
     writer.unsigned(PROTOCOL_VERSION);
-    writer.bytes(&record.ceremony_id);
+    writer.bytes(record.ceremony_id.as_bytes());
     writer.text(record.folder_name);
     writer.unsigned(u64::from(record.browser_pid));
     writer.unsigned(record.creation_filetime);
-    writer.bytes(&record.image_path_sha256);
+    writer.bytes(record.image_path_sha256.as_bytes());
     writer.finish()
 }
 
@@ -386,12 +388,12 @@ pub fn decode_cleanup_record(input: &[u8]) -> Result<CleanupRecordV1<'_>, OwnerB
     reader.fixed_array(7)?;
     expect_magic(&mut reader, CLEANUP_RECORD_MAGIC)?;
     expect_version(&mut reader)?;
-    let ceremony_id = reader.fixed_bytes()?;
+    let ceremony_id = CeremonyId::from_bytes(reader.fixed_bytes()?);
     let folder_name = reader.text(MAX_CLEANUP_RECORD_BYTES)?;
     let browser_pid =
         u32::try_from(reader.unsigned()?).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
     let creation_filetime = reader.unsigned()?;
-    let image_path_sha256 = reader.fixed_bytes()?;
+    let image_path_sha256 = ImagePathSha256::from_bytes(reader.fixed_bytes()?);
     reader.finish()?;
     CleanupRecordV1::new(
         ceremony_id,
@@ -402,55 +404,8 @@ pub fn decode_cleanup_record(input: &[u8]) -> Result<CleanupRecordV1<'_>, OwnerB
     )
 }
 
-fn expect_magic(
-    reader: &mut CborReader<'_>,
-    expected: [u8; 4],
-) -> Result<(), OwnerBridgeCodecError> {
-    if reader.fixed_bytes()? == expected {
-        Ok(())
-    } else {
-        Err(OwnerBridgeCodecError::InvalidPayload)
-    }
-}
-
-fn expect_version(reader: &mut CborReader<'_>) -> Result<(), OwnerBridgeCodecError> {
-    if reader.unsigned()? == PROTOCOL_VERSION {
-        Ok(())
-    } else {
-        Err(OwnerBridgeCodecError::InvalidPayload)
-    }
-}
-
-fn read_transports(reader: &mut CborReader<'_>) -> Result<TransportCodes, OwnerBridgeCodecError> {
-    let count = reader.array(MAX_TRANSPORTS)?;
-    let mut codes = [0; MAX_TRANSPORTS];
-    for code in codes.iter_mut().take(count) {
-        *code =
-            u8::try_from(reader.unsigned()?).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
-    }
-    TransportCodes::new(&codes[..count])
-}
-
-fn write_transports(writer: &mut CborWriter<'_>, transports: TransportCodes) {
-    writer.array(transports.as_slice().len());
-    for &code in transports.as_slice() {
-        writer.unsigned(u64::from(code));
-    }
-}
-
 const fn require_length(length: usize, maximum: usize) -> Result<(), OwnerBridgeCodecError> {
     if length > maximum {
-        return Err(OwnerBridgeCodecError::BoundsExceeded);
-    }
-    Ok(())
-}
-
-const fn require_bounded(
-    value: &[u8],
-    minimum: usize,
-    maximum: usize,
-) -> Result<(), OwnerBridgeCodecError> {
-    if value.len() < minimum || value.len() > maximum {
         return Err(OwnerBridgeCodecError::BoundsExceeded);
     }
     Ok(())

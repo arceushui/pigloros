@@ -1,6 +1,6 @@
 use core::convert::TryFrom;
 
-use crate::OwnerBridgeCodecError;
+use crate::{CeremonyId, OwnerBridgeCodecError};
 
 /// Exact byte width of an [`OwnerBridgeControlV1`] header.
 pub const CONTROL_HEADER_BYTES: usize = 64;
@@ -142,7 +142,7 @@ pub struct OwnerBridgeControlV1 {
     role: ControlRole,
     kind: CeremonyKind,
     generation: u32,
-    ceremony_id: [u8; 16],
+    ceremony_id: CeremonyId,
     total_capacity: u32,
     payload_len: u32,
     state: ControlState,
@@ -158,7 +158,7 @@ impl OwnerBridgeControlV1 {
     pub fn new_request(
         kind: CeremonyKind,
         generation: u32,
-        ceremony_id: [u8; 16],
+        ceremony_id: CeremonyId,
         payload_len: u32,
     ) -> Result<Self, OwnerBridgeCodecError> {
         let header = Self {
@@ -183,7 +183,7 @@ impl OwnerBridgeControlV1 {
     pub fn new_reply(
         kind: CeremonyKind,
         generation: u32,
-        ceremony_id: [u8; 16],
+        ceremony_id: CeremonyId,
     ) -> Result<Self, OwnerBridgeCodecError> {
         let header = Self {
             role: ControlRole::Reply,
@@ -248,7 +248,7 @@ impl OwnerBridgeControlV1 {
             role: ControlRole::try_from(header[8])?,
             kind: CeremonyKind::try_from(header[9])?,
             generation: read_u32(header, 12),
-            ceremony_id,
+            ceremony_id: CeremonyId::from_bytes(ceremony_id),
             total_capacity: read_u32(header, 32),
             payload_len: read_u32(header, 36),
             state: ControlState::try_from(read_u32(header, 40))?,
@@ -267,7 +267,7 @@ impl OwnerBridgeControlV1 {
         output[8] = self.role.code();
         output[9] = self.kind.code();
         write_u32(&mut output, 12, self.generation);
-        output[16..32].copy_from_slice(&self.ceremony_id);
+        output[16..32].copy_from_slice(self.ceremony_id.as_bytes());
         write_u32(&mut output, 32, self.total_capacity);
         write_u32(&mut output, 36, self.payload_len);
         write_u32(&mut output, 40, self.state.code());
@@ -294,7 +294,7 @@ impl OwnerBridgeControlV1 {
 
     /// Return the exact 16-byte ceremony identifier declared by this header.
     #[must_use]
-    pub const fn ceremony_id(self) -> [u8; 16] {
+    pub const fn ceremony_id(self) -> CeremonyId {
         self.ceremony_id
     }
 

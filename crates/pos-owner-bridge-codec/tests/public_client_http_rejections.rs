@@ -1,12 +1,12 @@
 use pos_owner_bridge_codec::{
     admit_loopback_http_request, validate_client_data_json, CeremonyKind,
-    LoopbackRequestDisposition, OwnerBridgeCodecError,
+    LoopbackRequestDisposition, OwnerBridgeCodecError, WebAuthnChallenge,
 };
 
-const CHALLENGE: [u8; 32] = [
+const CHALLENGE: WebAuthnChallenge = WebAuthnChallenge::from_bytes([
     0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
     0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
-];
+]);
 
 const CREATE_CLIENT_DATA: &[u8] = b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\"}";
 const GET_CLIENT_DATA: &[u8] = b"{\"type\":\"webauthn.get\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\"}";
@@ -243,7 +243,7 @@ fn public_client_data_exercises_every_json_escape_and_parser_rejection() {
 
 #[test]
 fn public_http_admission_rejects_incomplete_and_wrong_required_requests() {
-    let invalid_inputs: [(&str, &[u8]); 11] = [
+    let invalid_inputs: [(&str, &[u8]); 10] = [
         ("empty", b""),
         ("partial", b"GET /owner.html HTTP/1.1\r\n"),
         (
@@ -278,10 +278,6 @@ fn public_http_admission_rejects_incomplete_and_wrong_required_requests() {
             "wrong mode",
             b"GET /owner.html HTTP/1.1\r\nHost: localhost:49291\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: cors\r\n\r\n",
         ),
-        (
-            "lowercase host name",
-            b"GET /owner.html HTTP/1.1\r\nhost: localhost:49291\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\n\r\n",
-        ),
     ];
     for (label, input) in invalid_inputs {
         assert_eq!(
@@ -294,7 +290,7 @@ fn public_http_admission_rejects_incomplete_and_wrong_required_requests() {
 
 #[test]
 fn public_http_admission_rejects_duplicate_body_and_pipelined_requests() {
-    let invalid_inputs: [(&str, &[u8]); 7] = [
+    let invalid_inputs: [(&str, &[u8]); 10] = [
         (
             "duplicate host",
             b"GET /owner.html HTTP/1.1\r\nHost: localhost:49291\r\nHost: localhost:49291\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\n\r\n",
@@ -306,6 +302,18 @@ fn public_http_admission_rejects_duplicate_body_and_pipelined_requests() {
         (
             "duplicate mode",
             b"GET /owner.html HTTP/1.1\r\nHost: localhost:49291\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Mode: navigate\r\n\r\n",
+        ),
+        (
+            "case-variant duplicate host",
+            b"GET /owner.html HTTP/1.1\r\nHost: localhost:49291\r\nhost: attacker.example\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\n\r\n",
+        ),
+        (
+            "case-variant duplicate destination",
+            b"GET /owner.html HTTP/1.1\r\nHost: localhost:49291\r\nSec-Fetch-Dest: document\r\nsec-fetch-dest: document\r\nSec-Fetch-Mode: navigate\r\n\r\n",
+        ),
+        (
+            "case-variant duplicate mode",
+            b"GET /owner.html HTTP/1.1\r\nHost: localhost:49291\r\nSec-Fetch-Dest: document\r\nSec-Fetch-Mode: navigate\r\nsec-fetch-mode: navigate\r\n\r\n",
         ),
         (
             "content length",
@@ -331,6 +339,16 @@ fn public_http_admission_rejects_duplicate_body_and_pipelined_requests() {
             "{label}"
         );
     }
+}
+
+#[test]
+fn public_http_admission_accepts_case_insensitive_required_header_names() {
+    assert_eq!(
+        admit_loopback_http_request(
+            b"GET /owner.html HTTP/1.1\r\nhOsT: localhost:49291\r\nsec-fetch-dest: document\r\nSEC-FETCH-MODE: navigate\r\n\r\n"
+        ),
+        Ok(LoopbackRequestDisposition::OwnerDocument)
+    );
 }
 
 #[test]

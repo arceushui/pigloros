@@ -20,6 +20,8 @@ mod durable;
 mod error;
 mod http;
 mod payload;
+mod transport;
+mod values;
 mod webauthn;
 
 pub use authenticator_data::{
@@ -41,7 +43,11 @@ pub use http::{admit_loopback_http_request, LoopbackRequestDisposition};
 pub use payload::{
     decode_assertion_reply, decode_attestation_reply, decode_create_options, decode_get_options,
     encode_assertion_reply, encode_attestation_reply, encode_create_options, encode_get_options,
-    AssertionReplyV1, AttestationReplyV1, CreateOptionsV1, GetOptionsV1, TransportCodes,
+    AssertionReplyV1, AttestationReplyV1, CreateOptionsV1, GetOptionsV1,
+};
+pub use transport::TransportCodes;
+pub use values::{
+    CeremonyId, ImagePathSha256, OwnerUserHandle, PrfInput, PrfResult, SubjectId, WebAuthnChallenge,
 };
 pub use webauthn::{
     verify_assertion_reply, verify_attestation_reply, AssertionVerificationContext,
