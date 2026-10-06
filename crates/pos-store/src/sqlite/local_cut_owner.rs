@@ -1462,20 +1462,9 @@ fn sqlite_owner_link_snapshot(
         Ok::<_, LocalCutOwnerErrorV1>(ManifestOwnerLinkAncestorV1::of_result(&cut.result))
     });
     let ancestors = collect_manifest_owner_link_ancestors_v1(seal, admission, earlier)?;
-    let mut dependency_branches = BTreeMap::new();
-    let selected = cut
-        .result
-        .recordings
-        .iter()
-        .filter(|recording| recording.binding.as_input().timeline_id == timeline_id);
     let max_node_visits = admission.read_limits.max_node_visits;
-    for recording in selected {
-        let root = recording.binding.as_input().dependency_root_hash;
-        let nodes = collect_manifest_owner_link_branches_v1(root, max_node_visits, |digest| {
-            sqlite_owner_link_branch(connection, recording.scope, digest)
-        })?;
-        dependency_branches.extend(nodes);
-    }
+    let dependency_branches =
+        sqlite_owner_link_branches(connection, &cut.result, timeline_id, max_node_visits)?;
     let key_evidence = sqlite_owner_link_key_evidence(connection, &cut.result, &admissions)?;
     Ok(Some(ManifestOwnerLinkSnapshotV1 {
         owner_state,
@@ -1486,6 +1475,28 @@ fn sqlite_owner_link_snapshot(
         dependency_branches,
         key_evidence,
     }))
+}
+
+/// Gather the retained WDB1 nodes behind the requested Timeline's recordings.
+fn sqlite_owner_link_branches(
+    connection: &Connection,
+    result: &LocalCutOwnerCommitV1,
+    timeline_id: TimelineId,
+    max_node_visits: u64,
+) -> Result<BTreeMap<Hash, WorldDependencyBranchV1>, LocalCutOwnerErrorV1> {
+    let mut dependency_branches = BTreeMap::new();
+    let selected = result
+        .recordings
+        .iter()
+        .filter(|recording| recording.binding.as_input().timeline_id == timeline_id);
+    for recording in selected {
+        let root = recording.binding.as_input().dependency_root_hash;
+        let nodes = collect_manifest_owner_link_branches_v1(root, max_node_visits, |digest| {
+            sqlite_owner_link_branch(connection, recording.scope, digest)
+        })?;
+        dependency_branches.extend(nodes);
+    }
+    Ok(dependency_branches)
 }
 
 impl ManifestOwnerLinkReadPortV1 for SqliteStore {
