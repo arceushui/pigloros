@@ -194,7 +194,7 @@ struct Fixture {
     fork: TimelineId,
 }
 
-fn path_text(fixture: &Fixture) -> &str {
+fn fixture_path_str(fixture: &Fixture) -> &str {
     fixture.path.to_str().unwrap_or_default()
 }
 
@@ -1775,7 +1775,40 @@ fn only_a_marked_purge_passes_the_delete_guards_and_the_floor_cannot_drop() {
          SELECT fork_id, 9 FROM counterfactual_fork_tombstones",
     ));
     assert_eq!(tombstone_floor(&fixture.path, other), 9);
-    assert_eq!(open_error(SqliteStore::open(path_text(&fixture))), "");
+    assert_eq!(open_error(SqliteStore::open(fixture_path_str(&fixture))), "");
+}
+
+/// A purge marker authorizes deletes of its own Fork's rows only.
+#[test]
+fn a_purge_marker_authorizes_only_its_own_forks_rows() {
+    let fixture = fixture();
+    let (fork, root) = (fixture.fork, fixture.root);
+    let mut store = open(&fixture.path);
+    commit_default(&mut store, fork);
+    let other = published_other_fork(&mut store, root);
+    drop(store);
+    let mark = format!(
+        "INSERT INTO counterfactual_purge_fence (fork_id) VALUES ('{fork}');"
+    );
+
+    // The other Fork's quarantine rows are not authorized, so the whole
+    // unqualified delete aborts and removes nothing.
+    let unqualified = format!(
+        "BEGIN; {mark} DELETE FROM counterfactual_quarantine; COMMIT;"
+    );
+    assert!(execute(&fixture.path, &unqualified).is_err());
+    assert_eq!(counterfactual_rows(&fixture.path, fork), LIVE_ROWS);
+    assert_eq!(counterfactual_rows(&fixture.path, other), LIVE_ROWS);
+
+    let scoped = format!(
+        "BEGIN; {mark}
+         DELETE FROM counterfactual_quarantine WHERE fork_id = '{fork}';
+         DELETE FROM counterfactual_purge_fence;
+         COMMIT;"
+    );
+    ok(execute(&fixture.path, &scoped));
+    assert_eq!(counterfactual_rows(&fixture.path, fork), [1, 1, 0, 2, 0, 0]);
+    assert_eq!(counterfactual_rows(&fixture.path, other), LIVE_ROWS);
 }
 
 /// Faults that fail one statement of the delete transaction.
@@ -1815,7 +1848,7 @@ fn a_failed_delete_leaves_every_row_and_no_purge_marker() {
         );
         drop(faulted);
         ok(execute(&fixture.path, "DROP TRIGGER injected_fault;"));
-        assert_eq!(open_error(SqliteStore::open(path_text(&fixture))), "");
+        assert_eq!(open_error(SqliteStore::open(fixture_path_str(&fixture))), "");
     }
 
     let mut recovered = open(&fixture.path);
@@ -1830,7 +1863,7 @@ fn a_surviving_purge_marker_fails_every_open_closed() {
         &fixture.path,
         "INSERT INTO counterfactual_purge_fence (fork_id) VALUES ('stranded')",
     ));
-    let text = path_text(&fixture);
+    let text = fixture_path_str(&fixture);
     let writable = open_error(SqliteStore::open(text));
     let read_only = open_error(SqliteStore::open_read_only(text));
     assert!(writable.contains("purge marker"), "{writable}");
@@ -1879,7 +1912,7 @@ fn an_old_bodied_delete_guard_is_rejected_on_every_open() {
                  BEGIN SELECT RAISE(ABORT, '{message}'); END;"
             ),
         ));
-        let text = path_text(&fixture);
+        let text = fixture_path_str(&fixture);
         assert!(open_error(SqliteStore::open(text)).contains(name), "{name}");
         assert!(
             open_error(SqliteStore::open_read_only(text)).contains(name),
@@ -1903,7 +1936,7 @@ fn a_drifted_purge_table_is_rejected_on_open() {
             &format!("DROP TABLE {table}; CREATE TABLE {table} ({drifted});"),
         ));
         assert!(
-            open_error(SqliteStore::open_read_only(path_text(&fixture))).contains(table),
+            open_error(SqliteStore::open_read_only(fixture_path_str(&fixture))).contains(table),
             "{table}"
         );
     }

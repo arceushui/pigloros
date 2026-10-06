@@ -616,7 +616,9 @@ fn deleting_a_fork_purges_its_state_and_keeps_only_a_generation_floor() {
     let command = Spec::new(fork).command();
     committed(store, &command);
 
-    // A failed delete (the root still has a Fork) leaves the rows intact.
+    // A refused delete (the root still has a Fork) is rejected before any
+    // purge code runs, so it only shows that the rows survive a refusal; the
+    // purge itself is infallible and cannot fail partway.
     assert!(store.delete_timeline(root).is_err());
     assert_eq!(store.current_fork_generation(fork), Ok(at(fork, 1)));
     assert_eq!(

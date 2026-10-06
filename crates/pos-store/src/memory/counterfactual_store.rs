@@ -67,11 +67,16 @@
 //!   reach. A Fork re-created under the same id (identity-preserving import)
 //!   is seeded at that floor when its facts are published, so the generation
 //!   never decreases. Publication, reads, Tick appends, and commits on a
-//!   deleted Fork still report `ForkNotFound`.
+//!   deleted Fork still report `ForkNotFound`. Purge atomicity is structural
+//!   here: the purge runs in infallible code right after the Timeline is
+//!   removed, and the injected delete failure fires before any mutation, so
+//!   no failure can leave a half-purged Fork.
 //! - **ADR-060 clarification.** The purge is derived-state cleanup: the
 //!   counterfactual rows are derived from the Fork Timeline, not erasure
 //!   evidence. The generic `delete_timeline` still clears no erasure
-//!   evidence, fence, or inventory, and this purge touches none of them.
+//!   evidence, fence, or inventory, and this purge touches none of them. The floor stores only
+//!   the Fork id and a generation number; if ADR-060 or ADR-064 ever treat
+//!   Fork ids as erasable, it would need its own erasure path.
 //! - **Containment.** The invalidation commit and later Tick appends add
 //!   Events, so they run under the ADR-060 erasure write fence and, like every
 //!   generic Fork append, are rejected on an ADR-099 admitted Fork whose

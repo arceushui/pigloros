@@ -149,19 +149,25 @@
 //!   path, not an authorization boundary: a client with write access to the
 //!   database file can already drop the triggers, and the marker table has no
 //!   guard of its own. The tombstone is a generation floor: its own guards
-//!   refuse a delete and any change that lowers it, and no port read touches
-//!   it, so every read of a deleted Fork stays `ForkNotFound`, matching the
-//!   `MemoryStore` adapter. A Timeline later created with the same ID (an
-//!   identity-preserving import) is seeded at the floor when its facts are
-//!   published, so its generation never decreases. A marker only exists
-//!   inside the purge transaction, so a rollback or crash leaves none, and an
-//!   open that finds one fails closed. Files created by an earlier build
+//!   refuse a delete and any change that lowers it, while raising it (an
+//!   update or a replacing insert) is allowed; the replacing insert passes
+//!   only because `recursive_triggers` is off, so the replaced row fires no
+//!   delete guard. No port read touches the tombstone, so every read of a
+//!   deleted Fork stays `ForkNotFound`, matching the `MemoryStore` adapter.
+//!   A Timeline later created with the same ID (an identity-preserving
+//!   import) is seeded at the floor when its facts are published, so its
+//!   generation never decreases. A marker only exists inside the purge
+//!   transaction, so a rollback or crash leaves none, and an open that finds
+//!   one fails closed. Files created by an earlier build
 //!   before this schema version must be recreated: their old delete guards
 //!   fail the exact validation. **ADR-060 clarification:** the
 //!   counterfactual rows are derived state of the Fork Timeline, not erasure
 //!   evidence, so purging them in the generic `delete_timeline` is
 //!   derived-state cleanup. It clears no erasure evidence, fence, or
-//!   inventory, and the purge touches none of them.
+//!   inventory, and the purge touches none of them. The tombstone stores
+//!   only the Fork id and a generation number; if ADR-060 or ADR-064 ever
+//!   treat Fork ids as erasable, the tombstone table needs its own erasure
+//!   path.
 //! - **Errors.** A missing, deleted, non-Fork, unpublished, or protected
 //!   Timeline, and a Tick draft the generic append guard rejects, is
 //!   `ForkNotFound`; a staged head that did not advance is `CorruptState`;
@@ -462,6 +468,9 @@ struct CounterfactualSchemaObjectV1 {
     body: &'static str,
 }
 
+// The `WHEN NOT EXISTS (... counterfactual_purge_fence ...)` clause is
+// repeated in four trigger bodies on purpose: the exact-body validation
+// compares literal text, so the four copies must stay identical.
 /// The quarantine lookup index and the guards that keep generations
 /// monotonic, quarantine permanent, and recorded bytes immutable.
 const COUNTERFACTUAL_SCHEMA_OBJECTS: &[CounterfactualSchemaObjectV1] = &[
