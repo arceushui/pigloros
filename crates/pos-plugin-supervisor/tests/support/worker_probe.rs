@@ -59,12 +59,20 @@ fn serve(request: &WorkerRequestV1) -> ExitCode {
             raw(&[&frame_prefix(bytes.len()), &bytes])
         }
         b"truncated" => raw(&[&frame_prefix(FUEL.len()), &FUEL[..FUEL.len() - 1]]),
+        // `oversize` and `trailing` end in `linger()`, not in an exit: the
+        // supervisor sees the fault before the pipe closes and kills the probe
+        // at once, and a coverage-instrumented probe killed while it writes its
+        // profile at exit leaves a corrupt `.profraw` that fails the whole run.
         b"oversize" => {
             let limits = request.negotiation.limits;
             let limit = WorkerFrameLimitsV1::for_limits(&limits).response_bytes();
-            raw(&[&frame_prefix(limit + 1)])
+            raw(&[&frame_prefix(limit + 1)]);
+            linger()
         }
-        b"trailing" => raw(&[&frame_prefix(FUEL.len()), &FUEL, &[0]]),
+        b"trailing" => {
+            raw(&[&frame_prefix(FUEL.len()), &FUEL, &[0]]);
+            linger()
+        }
         b"exit-after-reply" => {
             reply(&Err(CommunityPluginHostErrorV1::FuelExhausted));
             ExitCode::from(1)
