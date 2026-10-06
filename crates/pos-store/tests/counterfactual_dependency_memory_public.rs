@@ -985,7 +985,7 @@ fn c9_writes_run_under_the_erasure_write_fence() {
     );
     assert_eq!(blocked.map(drop), Err(StoreError::StorageFailure));
 
-    let mut fresh = recorded();
+    let fresh = recorded();
     let fork = fresh.fork;
     let basis = ok(fresh.store.current_counterfactual_basis(fork));
     let first = command(fork, 3, 1);
