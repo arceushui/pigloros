@@ -93,6 +93,11 @@
 //!   append), because another connection may change the same file. A
 //!   `MemoryStore` is owned by one handle and has no other writer, so it has
 //!   no equivalent check.
+//! - **Dependency record.** The dependency rows of a Fork generation live in
+//!   its counterfactual state, so they commit with the Tick, are purged with
+//!   the Fork, and share the fences above; the `dependency` child module
+//!   documents the layout, the committed prefix of a parent Timeline (kept
+//!   once per Timeline and purged with it), and the check order.
 //! - **Errors.** A missing, deleted, non-Fork, unpublished, or protected
 //!   Timeline, and a Tick draft the generic append guard rejects, is
 //!   `ForkNotFound`; a staged head that did not advance is `CorruptState`;
@@ -116,6 +121,10 @@ use pos_core::{
 
 use super::{MemoryStore, TimelineState};
 use crate::{counterfactual_port_error, COUNTERFACTUAL_SEAL};
+
+mod dependency;
+
+pub(super) use dependency::DependencyRowsV1;
 
 /// Test-only fault injected at the staged head, after staging and before
 /// installing anything.
@@ -153,6 +162,10 @@ pub(super) struct CounterfactualForkStateV1 {
     quarantined: BTreeMap<Hash, u64>,
     /// Receipt record of every committed generation, keyed by generation.
     receipts: BTreeMap<u64, CounterfactualGenerationRecordV1>,
+    /// Provisional dependency rows of the one generation that has a record.
+    /// Only the current generation's set is readable, so a dependency write
+    /// replaces a set of any other generation.
+    dependencies: Option<(u64, dependency::ForkDependencySetV1)>,
 }
 
 impl CounterfactualForkStateV1 {
@@ -163,6 +176,7 @@ impl CounterfactualForkStateV1 {
             artifacts: BTreeMap::new(),
             quarantined: BTreeMap::new(),
             receipts: BTreeMap::new(),
+            dependencies: None,
         }
     }
 
@@ -343,11 +357,13 @@ impl MemoryStore {
     }
 
     /// Drop every counterfactual row of a deleted Fork, keeping only the last
-    /// generation as a floor that no port read can reach.
-    pub(super) fn purge_counterfactual_state(&mut self, fork: TimelineId) {
-        if let Some(state) = self.counterfactual_forks.remove(&fork) {
+    /// generation as a floor that no port read can reach, and the committed
+    /// dependency prefix of a deleted parent Timeline.
+    pub(super) fn purge_counterfactual_state(&mut self, timeline: TimelineId) {
+        self.dependency_prefixes.remove(&timeline);
+        if let Some(state) = self.counterfactual_forks.remove(&timeline) {
             self.counterfactual_generation_floors
-                .insert(fork, state.generation);
+                .insert(timeline, state.generation);
         }
     }
 
@@ -572,7 +588,7 @@ mod tests {
     use super::*;
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+    pub(super) fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
         result.unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
         })
@@ -580,12 +596,12 @@ mod tests {
 
     /// Arm one fault for the next staged Tick.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn inject(fault: InjectedFaultV1) {
+    pub(super) fn inject(fault: InjectedFaultV1) {
         INJECTED_COUNTERFACTUAL_FAULT.with(|armed| armed.set(Some(fault)));
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn draft(value: u8) -> EventDraft {
+    pub(super) fn draft(value: u8) -> EventDraft {
         EventDraft::new(
             EntityId::new(),
             Kind::new("counterfactual.tick"),
@@ -594,7 +610,7 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn command(fork: TimelineId) -> CounterfactualInvalidationCommandV1 {
+    pub(super) fn command(fork: TimelineId) -> CounterfactualInvalidationCommandV1 {
         command_with_trust_epoch(fork, 0)
     }
 
@@ -655,7 +671,7 @@ mod tests {
 
     /// The facts every test Fork is published with.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    const fn facts() -> CounterfactualFactsV1 {
+    pub(super) const fn facts() -> CounterfactualFactsV1 {
         CounterfactualFactsV1 {
             plan_digest: Hash::from_bytes([5; 32]),
             dependency_graph_digest: Hash::from_bytes([3; 32]),
@@ -667,7 +683,7 @@ mod tests {
 
     /// A store with an open erasure gate and a published Fork at logical Seq 1.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn published_store() -> (MemoryStore, TimelineId) {
+    pub(super) fn published_store() -> (MemoryStore, TimelineId) {
         let mut store = MemoryStore::new();
         ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
         let root = ok(store.create_timeline("counterfactual-root")).id();
@@ -877,7 +893,7 @@ mod tests {
 
     /// Fork state, Events, chain head, and Event ID count of one Fork.
     #[derive(Debug, PartialEq, Eq)]
-    struct ForkSnapshot {
+    pub(super) struct ForkSnapshot {
         /// The Fork's counterfactual state, if published.
         state: Option<CounterfactualForkStateV1>,
         /// The Fork Timeline's own Events.
@@ -890,7 +906,7 @@ mod tests {
 
     /// Snapshot one Fork to prove nothing committed.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn snapshot(store: &MemoryStore, fork: TimelineId) -> ForkSnapshot {
+    pub(super) fn snapshot(store: &MemoryStore, fork: TimelineId) -> ForkSnapshot {
         ForkSnapshot {
             state: store.counterfactual_forks.get(&fork).cloned(),
             events: store.state(fork).events.clone(),
