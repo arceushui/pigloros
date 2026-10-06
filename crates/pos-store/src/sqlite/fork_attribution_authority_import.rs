@@ -1247,7 +1247,9 @@ mod tests {
             public_verification_key: pos_core::PublicKey::from_bytes([1; 32]),
             expected_registry: pos_core::KeyRegistryStateV1::new(),
         };
-        let outcome = state.store.commit_authorized::<(), _>(request, |_, _| Err(()));
+        let outcome = state
+            .store
+            .commit_authorized::<(), _>(request, |_, _| Err(()));
         assert_eq!(
             outcome,
             Err(ForkManifestPublicationErrorV1::CorruptOrConflicting)
