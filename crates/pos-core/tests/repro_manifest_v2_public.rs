@@ -792,6 +792,18 @@ fn json_record_and_entry_values_must_have_the_documented_shape() -> TestResult {
     assert_eq!(invalid_of(&closure), Some("closure_bytes"));
     let eop1 = entry_fail(0, "eop1_digest", json!("00"))?;
     assert_eq!(invalid_of(&eop1), Some("eop1_digest"));
+    let owner = record_fail("plugin_id", json!("00"))?;
+    assert_eq!(invalid_of(&owner), Some("plugin_id"));
+    let output = record_fail("output_hash", json!("00"))?;
+    assert_eq!(invalid_of(&output), Some("output_hash"));
+    let wall = record_fail("wall_time", json!("x"))?;
+    assert_eq!(invalid_of(&wall), Some("wall_time"));
+    let entry_id = entry_fail(0, "plugin_id", json!("00"))?;
+    assert_eq!(invalid_of(&entry_id), Some("plugin_id"));
+    let slot = entry_fail(0, "stable_slot", json!(5))?;
+    assert_eq!(invalid_of(&slot), Some("stable_slot"));
+    let release = entry_fail(0, "plugin_version", json!(5))?;
+    assert_eq!(invalid_of(&release), Some("plugin_version"));
     let flat = top_fail(ENTRIES, json!([1]))?;
     assert_eq!(invalid_of(&flat), Some(ENTRIES));
     Ok(())
