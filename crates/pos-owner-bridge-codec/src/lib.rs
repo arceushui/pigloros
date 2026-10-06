@@ -1,0 +1,58 @@
+#![no_std]
+#![forbid(unsafe_code)]
+
+//! Closed, fixed-buffer codecs for the ADR-110 local owner bridge.
+//!
+//! This crate deliberately exposes only deterministic binary values and their
+//! validation. It owns no transport, allocation, `WebView`, or credential
+//! lifecycle policy; those belong to the `pos-owner-bridge` Module in the
+//! next stack slice.
+
+mod authenticator_data;
+// Public module reachability keeps these crate-only fixed-buffer helpers
+// compatible with both `unreachable_pub` and Clippy's `redundant_pub_crate`
+// lint while the payload codecs use them from a sibling module.
+#[doc(hidden)]
+pub mod cbor;
+mod client_data;
+mod control;
+mod durable;
+mod error;
+mod http;
+mod payload;
+// Public module reachability keeps the crate-only transport limit compatible
+// with both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
+#[doc(hidden)]
+pub mod transport;
+mod values;
+mod webauthn;
+
+pub use authenticator_data::{
+    parse_assertion_authenticator_data, parse_none_attestation_object, AssertionAuthenticatorData,
+    CoseEs256PublicKey, CreateAuthenticatorData, CANONICAL_COSE_ES256_KEY_BYTES,
+};
+pub use client_data::validate_client_data_json;
+pub use control::{
+    CeremonyKind, ControlRole, ControlState, OwnerBridgeControlV1, CONTROL_HEADER_BYTES,
+    CREATE_REPLY_BUFFER_CAPACITY, GET_REPLY_BUFFER_CAPACITY, REQUEST_BUFFER_CAPACITY,
+};
+pub use durable::{
+    decode_cleanup_record, decode_subject_credential_binding, encode_cleanup_record,
+    encode_subject_credential_binding, CleanupRecordV1, SubjectCredentialBindingInputV1,
+    SubjectCredentialBindingV1, MAX_CLEANUP_RECORD_BYTES, MAX_SUBJECT_CREDENTIAL_BINDING_BYTES,
+};
+pub use error::OwnerBridgeCodecError;
+pub use http::{admit_loopback_http_request, LoopbackRequestDisposition};
+pub use payload::{
+    decode_assertion_reply, decode_attestation_reply, decode_create_options, decode_get_options,
+    encode_assertion_reply, encode_attestation_reply, encode_create_options, encode_get_options,
+    AssertionReplyV1, AttestationReplyV1, CreateOptionsV1, GetOptionsV1,
+};
+pub use transport::TransportCodes;
+pub use values::{
+    CeremonyId, ImagePathSha256, OwnerUserHandle, PrfInput, PrfResult, SubjectId, WebAuthnChallenge,
+};
+pub use webauthn::{
+    verify_assertion_reply, verify_attestation_reply, AssertionVerificationContext,
+    CreateVerificationContext, StoredCredential, VerifiedAssertion, VerifiedRegistration,
+};
