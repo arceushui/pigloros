@@ -156,14 +156,15 @@
 //!   recorded in the same recorded set. A record checks digest uniqueness
 //!   only within itself, but `pos-time` requires it across the whole graph,
 //!   and only the adapter sees the set.
-//! - Also reject a node whose position key `(tick, scheduler_position,
-//!   owner_id, output_ordinal)` is already recorded in the same recorded
-//!   set, alongside and not instead of digest uniqueness. A root rides a
-//!   record at or after its own Tick, so two records of one set can carry
-//!   roots at one position key with different digests; each record is valid
-//!   alone, and without this check the collision would only surface at read
-//!   time as `DuplicateIdentity`. Order rows by position key globally across
-//!   the records of the set, never by insertion order.
+//! - **Position-key uniqueness.** Reject a node whose position key
+//!   `(tick, scheduler_position, owner_id, output_ordinal)` is already
+//!   recorded in the same recorded set, alongside and not instead of digest
+//!   uniqueness. A root rides a record at or after its own Tick, so two
+//!   records of one set can carry roots at one position key with different
+//!   digests; each record is valid alone, and without this check the
+//!   collision would only surface at read time as `DuplicateIdentity`. Order
+//!   rows by position key globally across the records of the set, never by
+//!   insertion order.
 //! - **Persisted record Tick.** Persist each record's Tick. It is not
 //!   recoverable from the node Ticks (a record made only of early roots
 //!   carries them all before its Tick), and a later record's Tick must be
@@ -185,11 +186,12 @@
 //! - **Node Ticks and the parent cut.** Do NOT enforce that provisional Ticks
 //!   lie strictly after the parent cut, and do not check node Ticks against
 //!   the generation's first Tick. A Fork row holds only a (parent, Seq) fork
-//!   point, not a cut Tick, and an adapter cannot know the horizon. A root
-//!   node may carry a Tick BEFORE its record's Tick but lies at or after the
-//!   generation's first Tick. The coordinator seam (#552), which knows the
-//!   plan's parent cut and horizon, and `pos-time` enforce the
-//!   `first_tick..=horizon_tick` window.
+//!   point, not a cut Tick, and an adapter cannot know the horizon. A
+//!   conforming root node may carry a Tick BEFORE its record's Tick but lies
+//!   at or after the generation's first Tick; the coordinator guarantees
+//!   this, and adapters accept lower Ticks. The coordinator seam (#552),
+//!   which knows the plan's parent cut and horizon, and `pos-time` enforce
+//!   the `first_tick..=horizon_tick` window.
 //! - **Committed prefix.** It has no write method yet (#554). Adapters keep
 //!   its storage and serve [`DependencyReadScopeV1::ParentPrefix`] reads;
 //!   their tests seed prefix rows through a test-only hook, as this crate's
@@ -1475,10 +1477,10 @@ pub trait CounterfactualDependencyRecordingPortV1: CounterfactualStorePortV1 {
 /// is not stable. Adapters just serve committed state. An existing Timeline
 /// or Fork generation with no recorded rows yields an empty page; the host
 /// decides completeness from the graph digest it published. A Timeline that
-/// is unknown or erased,
-/// as a parent prefix's or a Fork's, is `ForkNotFound` and never an empty
-/// page, the code every `pos-store` Timeline read maps a missing Timeline
-/// onto, so a reader cannot mistake erasure for "no dependencies". See
+/// is unknown or erased, whether a parent prefix's or a Fork's, is
+/// `ForkNotFound` and never an empty page, the code every `pos-store`
+/// Timeline read maps a missing Timeline onto, so a reader cannot mistake
+/// erasure for "no dependencies". See
 /// [`DependencyReadScopeV1::ensure_current`] for generation qualification and
 /// the module's adapter obligations for the read fence of each scope.
 ///
