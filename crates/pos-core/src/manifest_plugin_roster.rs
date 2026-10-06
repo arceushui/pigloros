@@ -447,19 +447,15 @@ fn first_violation(
 fn check_decoded_order(
     entries: &[ManifestPluginEntryV1],
 ) -> Result<(), ManifestPluginRosterErrorV1> {
-    match first_violation(entries, |left, right| left > right) {
-        Some(entry) => Err(ManifestPluginRosterErrorV1::unsorted(entry)),
-        None => Ok(()),
-    }
+    first_violation(entries, |left, right| left > right)
+        .map_or(Ok(()), |entry| Err(ManifestPluginRosterErrorV1::unsorted(entry)))
 }
 
 fn check_unique_slots(
     entries: &[ManifestPluginEntryV1],
 ) -> Result<(), ManifestPluginRosterErrorV1> {
-    match first_violation(entries, |left, right| left == right) {
-        Some(entry) => Err(ManifestPluginRosterErrorV1::duplicate_slot(entry)),
-        None => Ok(()),
-    }
+    first_violation(entries, |left, right| left == right)
+        .map_or(Ok(()), |entry| Err(ManifestPluginRosterErrorV1::duplicate_slot(entry)))
 }
 
 fn check_unique_ids(entries: &[ManifestPluginEntryV1]) -> Result<(), ManifestPluginRosterErrorV1> {
