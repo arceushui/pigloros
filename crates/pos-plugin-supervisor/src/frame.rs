@@ -184,12 +184,21 @@ mod tests {
     #[test]
     fn empty_and_over_limit_frames_are_never_written() {
         let mut out = Vec::new();
-        assert_eq!(write_frame(&mut out, b"", 3), Err(FrameFaultV1::OutOfBounds));
-        assert_eq!(write_frame(&mut out, b"abcd", 3), Err(FrameFaultV1::OutOfBounds));
+        assert_eq!(
+            write_frame(&mut out, b"", 3),
+            Err(FrameFaultV1::OutOfBounds)
+        );
+        assert_eq!(
+            write_frame(&mut out, b"abcd", 3),
+            Err(FrameFaultV1::OutOfBounds)
+        );
         assert!(out.is_empty());
         assert_eq!(write_frame(&mut Broken, b"a", 1), Err(FrameFaultV1::Io));
         let mut unflushable = Unflushable(Vec::new());
-        assert_eq!(write_frame(&mut unflushable, b"a", 1), Err(FrameFaultV1::Io));
+        assert_eq!(
+            write_frame(&mut unflushable, b"a", 1),
+            Err(FrameFaultV1::Io)
+        );
         assert_eq!(unflushable.0, [0, 0, 0, 1, b'a']);
     }
 
@@ -197,7 +206,10 @@ mod tests {
     fn malformed_frames_are_faults() {
         let read = |bytes: &[u8], limit| read_frame(&mut &bytes[..], limit);
         assert_eq!(read(&[0, 0, 0, 0], 3), Err(FrameFaultV1::OutOfBounds));
-        assert_eq!(read(&[0, 0, 0, 4, 1, 2, 3, 4], 3), Err(FrameFaultV1::OutOfBounds));
+        assert_eq!(
+            read(&[0, 0, 0, 4, 1, 2, 3, 4], 3),
+            Err(FrameFaultV1::OutOfBounds)
+        );
         assert_eq!(read(&[0, 0, 0, 3, 1, 2], 3), Err(FrameFaultV1::Truncated));
         assert_eq!(read(&[0, 0], 3), Err(FrameFaultV1::Truncated));
         assert_eq!(read(&[], 3), Err(FrameFaultV1::Truncated));

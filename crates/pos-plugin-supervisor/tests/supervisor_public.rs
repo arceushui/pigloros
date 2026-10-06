@@ -124,7 +124,8 @@ fn the_worker_sees_a_scrubbed_environment_and_only_its_pipes() {
 #[test]
 fn the_worker_runs_under_its_rlimit_ceilings() {
     let report = report();
-    let ceilings = WorkerResourceCeilingsV1::for_invocation(&negotiated().limits().values(), PROMPT);
+    let ceilings =
+        WorkerResourceCeilingsV1::for_invocation(&negotiated().limits().values(), PROMPT);
     for (name, value) in [
         ("cpu", ceilings.cpu_seconds),
         ("data", ceilings.data_bytes),
@@ -135,7 +136,10 @@ fn the_worker_runs_under_its_rlimit_ceilings() {
     }
     assert_eq!(ceilings.cpu_seconds, 62);
     // Allocating 1 GiB exceeds the data ceiling, so the worker aborts.
-    assert_eq!(invoke(b"allocate"), Err(CommunityPluginHostErrorV1::WorkerCrashed));
+    assert_eq!(
+        invoke(b"allocate"),
+        Err(CommunityPluginHostErrorV1::WorkerCrashed)
+    );
 }
 
 #[test]
@@ -162,12 +166,18 @@ fn a_valid_payload_is_validated_by_the_host() {
     };
     assert_eq!(report, Ok(expected));
     let rejected = invoke_with(PROMPT, b"payload", |_| None::<()>);
-    assert_eq!(rejected, Err(CommunityPluginHostErrorV1::InvalidGuestOutput));
+    assert_eq!(
+        rejected,
+        Err(CommunityPluginHostErrorV1::InvalidGuestOutput)
+    );
 }
 
 #[test]
 fn engine_failures_and_traps_keep_their_closed_names() {
-    assert_eq!(invoke(b"fuel"), Err(CommunityPluginHostErrorV1::FuelExhausted));
+    assert_eq!(
+        invoke(b"fuel"),
+        Err(CommunityPluginHostErrorV1::FuelExhausted)
+    );
     assert_eq!(
         invoke(b"trap"),
         Err(CommunityPluginHostErrorV1::ComponentTrap {
@@ -226,7 +236,11 @@ fn the_wall_time_watchdog_is_an_operational_stop() {
             "{}",
             String::from_utf8_lossy(mode)
         );
-        assert!(started.elapsed() < STOPPED_WITHIN, "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < STOPPED_WITHIN,
+            "{:?}",
+            started.elapsed()
+        );
     }
 }
 
@@ -267,7 +281,11 @@ fn a_worker_dies_with_its_supervisor() -> TestResult {
         return Ok(());
     }
     let mut helper = Command::new(std::env::current_exe()?)
-        .args(["--exact", "a_worker_dies_with_its_supervisor", "--test-threads=1"])
+        .args([
+            "--exact",
+            "a_worker_dies_with_its_supervisor",
+            "--test-threads=1",
+        ])
         .env(EXIT_HELPER, "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

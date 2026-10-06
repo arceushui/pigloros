@@ -116,8 +116,14 @@ impl CommunityPluginSupervisorV1 {
             .map_err(|_| CommunityPluginHostErrorV1::InvalidInvocation)?;
         let ceilings = WorkerResourceCeilingsV1::for_invocation(&limits, self.watchdog);
         let deadline = Instant::now() + self.watchdog;
-        let worker = launch(&self.program, &ceilings).ok_or(CommunityPluginHostErrorV1::WorkerCrashed)?;
-        let response = supervise(worker, &request, WorkerFrameLimitsV1::for_limits(&limits), deadline)?;
+        let worker =
+            launch(&self.program, &ceilings).ok_or(CommunityPluginHostErrorV1::WorkerCrashed)?;
+        let response = supervise(
+            worker,
+            &request,
+            WorkerFrameLimitsV1::for_limits(&limits),
+            deadline,
+        )?;
         decode_worker_response_v1(&response)
             .map_err(|_| CommunityPluginHostErrorV1::WorkerCrashed)
             .and_then(outcome_result)
@@ -227,7 +233,9 @@ fn await_exit(child: &mut std::process::Child, deadline: Instant) -> Option<bool
     }
 }
 
-fn outcome_result(outcome: WorkerOutcomeV1) -> Result<WorkerCompletionV1, CommunityPluginHostErrorV1> {
+fn outcome_result(
+    outcome: WorkerOutcomeV1,
+) -> Result<WorkerCompletionV1, CommunityPluginHostErrorV1> {
     match outcome {
         WorkerOutcomeV1::Completed(completion) => Ok(completion),
         WorkerOutcomeV1::Failed(failure) => Err(failure_error(failure)),
@@ -260,9 +268,7 @@ const fn failure_error(failure: WorkerFailureV1) -> CommunityPluginHostErrorV1 {
         WorkerFailureV1::InvalidGuestOutput => CommunityPluginHostErrorV1::InvalidGuestOutput,
         WorkerFailureV1::FuelExhausted => CommunityPluginHostErrorV1::FuelExhausted,
         WorkerFailureV1::MemoryLimitExceeded => CommunityPluginHostErrorV1::MemoryLimitExceeded,
-        WorkerFailureV1::HostCallLimitExceeded => {
-            CommunityPluginHostErrorV1::HostCallLimitExceeded
-        }
+        WorkerFailureV1::HostCallLimitExceeded => CommunityPluginHostErrorV1::HostCallLimitExceeded,
         WorkerFailureV1::OutputLimitExceeded => CommunityPluginHostErrorV1::OutputLimitExceeded,
         WorkerFailureV1::OperationalWatchdogStop => {
             CommunityPluginHostErrorV1::OperationalWatchdogStop

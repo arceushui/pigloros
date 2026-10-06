@@ -237,13 +237,19 @@ mod tests {
             Err(WorkerProcessErrorV1::Request)
         );
         let empty: &[u8] = &[];
-        assert_eq!(read_request(&mut &empty[..]), Err(WorkerProcessErrorV1::Request));
+        assert_eq!(
+            read_request(&mut &empty[..]),
+            Err(WorkerProcessErrorV1::Request)
+        );
         let outcome = WorkerOutcomeV1::Failed(WorkerFailureV1::FuelExhausted);
         let mut out = Vec::new();
         assert_eq!(write_response(&mut out, &outcome), Ok(()));
         let encoded = encode_worker_response_v1(&outcome);
         assert_eq!(out[4..], encoded);
-        assert_eq!(out[..4], u32::try_from(encoded.len()).unwrap_or(0).to_be_bytes());
+        assert_eq!(
+            out[..4],
+            u32::try_from(encoded.len()).unwrap_or(0).to_be_bytes()
+        );
         let mut full = [0_u8; 3];
         assert_eq!(
             write_response(&mut full.as_mut_slice(), &outcome),

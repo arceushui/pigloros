@@ -32,9 +32,8 @@ fn request() -> WorkerRequestV1 {
 }
 
 fn encoded(request: &WorkerRequestV1) -> Vec<u8> {
-    encode_worker_request_v1(request).unwrap_or_else(|error| {
-        std::panic::resume_unwind(Box::new(format!("encode: {error:?}")))
-    })
+    encode_worker_request_v1(request)
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("encode: {error:?}"))))
 }
 
 fn round_trip(request: &WorkerRequestV1) -> Result<WorkerRequestV1, WorkerEnvelopeErrorV1> {
@@ -160,10 +159,7 @@ fn request_bounds_are_enforced_on_both_sides() {
             Err(WorkerEnvelopeErrorV1)
         );
         let bytes = request_bytes(&request);
-        assert_eq!(
-            decode_worker_request_v1(&bytes),
-            Err(WorkerEnvelopeErrorV1)
-        );
+        assert_eq!(decode_worker_request_v1(&bytes), Err(WorkerEnvelopeErrorV1));
     }
 }
 
@@ -305,7 +301,10 @@ fn malformed_negotiations_are_envelope_faults() {
     }
     let largest = negotiation_with(&[0x19, 0xff, 0xff], &[0x80], &digest);
     let decoded = decode_worker_request_v1(&with_member(4, &largest));
-    assert_eq!(decoded.map(|request| request.negotiation.abi_major), Ok(65_535));
+    assert_eq!(
+        decoded.map(|request| request.negotiation.abi_major),
+        Ok(65_535)
+    );
 }
 
 fn completion() -> WorkerCompletionV1 {
@@ -360,9 +359,15 @@ fn malformed_responses_are_envelope_faults() {
         response(&[0x85, 0x01, 0x00, 0x00, 0x00, 0x00]),
         response(&[0x86, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00]),
         response(&[0x82, 0x01, 0x18, 0x00]),
-        response(&[0x82, 0x01, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+        response(&[
+            0x82, 0x01, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        ]),
         response(&[0x85, 0x00, 0x60, 0x00, 0x00, 0x00]),
-        [&[0x83, 0x64, b'P', b'W', b'Q', b'1', 0x01][..], &[0x82, 0x01, 0x00]].concat(),
+        [
+            &[0x83, 0x64, b'P', b'W', b'Q', b'1', 0x01][..],
+            &[0x82, 0x01, 0x00],
+        ]
+        .concat(),
         [&header[..6], &[0x02, 0x82, 0x01, 0x00]].concat(),
         [&[0x84], &header[1..], &[0x82, 0x01, 0x00]].concat(),
         [failed.as_slice(), &[0x00]].concat(),

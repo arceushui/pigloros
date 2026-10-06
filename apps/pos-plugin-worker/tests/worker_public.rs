@@ -129,7 +129,10 @@ fn both_fixtures_describe_the_same_plugin_in_fresh_workers() {
 #[test]
 fn the_host_validator_decides_guest_output() {
     let rejected = run(RUST_GUEST, WorkerExportV1::Describe, ROOMY, |_| None::<()>);
-    assert_eq!(rejected, Err(CommunityPluginHostErrorV1::InvalidGuestOutput));
+    assert_eq!(
+        rejected,
+        Err(CommunityPluginHostErrorV1::InvalidGuestOutput)
+    );
 }
 
 #[test]

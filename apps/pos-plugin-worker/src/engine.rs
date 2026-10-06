@@ -76,7 +76,9 @@ const fn failure_outcome(failure: InvocationFailure) -> WorkerOutcomeV1 {
         InvocationFailure::OperationalWatchdogStop => WorkerFailureV1::OperationalWatchdogStop,
         InvocationFailure::HostCallRejected => WorkerFailureV1::HostCallLimitExceeded,
         InvocationFailure::Rejected => WorkerFailureV1::InvalidInvocation,
-        InvocationFailure::ComponentTrap(trap) => return WorkerOutcomeV1::Trapped(trap_class(trap)),
+        InvocationFailure::ComponentTrap(trap) => {
+            return WorkerOutcomeV1::Trapped(trap_class(trap))
+        }
     };
     WorkerOutcomeV1::Failed(failure)
 }
@@ -136,8 +138,10 @@ fn cbor(value: &Val) -> Option<Value> {
 }
 
 fn tagged(tag: Value, payload: Option<&Val>) -> Option<Value> {
-    let payload = payload.map(cbor).map_or(Some(None), |payload| payload.map(Some))?;
-    Some(Value::Array([tag].into_iter().chain(payload).collect()))
+    let payload = payload
+        .map(cbor)
+        .map_or(Some(None), |payload| payload.map(Some))?;
+    Some(Value::Array(std::iter::once(tag).chain(payload).collect()))
 }
 
 #[cfg(test)]

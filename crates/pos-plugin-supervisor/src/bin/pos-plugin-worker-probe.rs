@@ -117,9 +117,10 @@ fn report() -> String {
         .iter()
         .map(ToString::to_string)
         .collect();
-    let directory = std::env::current_dir().map_or_else(|_| String::new(), |path| {
-        path.to_string_lossy().into_owned()
-    });
+    let directory = std::env::current_dir().map_or_else(
+        |_| String::new(),
+        |path| path.to_string_lossy().into_owned(),
+    );
     let mut lines = vec![
         format!("pid={}", getpid().as_raw_nonzero()),
         format!("ppid={}", Pid::as_raw(getppid())),
@@ -134,7 +135,11 @@ fn report() -> String {
         ("core", Resource::Core),
     ] {
         let limit = getrlimit(resource);
-        lines.push(format!("{name}={}:{}", value(limit.current), value(limit.maximum)));
+        lines.push(format!(
+            "{name}={}:{}",
+            value(limit.current),
+            value(limit.maximum)
+        ));
     }
     lines.join("\n")
 }

@@ -230,7 +230,8 @@ mod tests {
             memory_bytes: 65_536,
             ..DeterministicBudgetV1::MINIMA
         };
-        let ceilings = WorkerResourceCeilingsV1::for_invocation(&limits, Duration::from_millis(3_500));
+        let ceilings =
+            WorkerResourceCeilingsV1::for_invocation(&limits, Duration::from_millis(3_500));
         assert_eq!(ceilings.cpu_seconds, 5);
         let request = WorkerFrameLimitsV1::REQUEST_BYTES as u64;
         assert_eq!(ceilings.data_bytes, 65_536 + 2 * request + 512 * 1_048_576);

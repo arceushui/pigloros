@@ -284,15 +284,11 @@ pub fn decode_worker_request_v1(bytes: &[u8]) -> Result<WorkerRequestV1, WorkerE
     reader.fixed_array(REQUEST_FIELDS)?;
     header(&mut reader, WORKER_REQUEST_MAGIC_V1)?;
     let export = coded(&mut reader, &WorkerExportV1::ALL)?;
-    let component = reader
-        .byte_string(MAX_WORKER_COMPONENT_BYTES_V1)?
-        .to_vec();
+    let component = reader.byte_string(MAX_WORKER_COMPONENT_BYTES_V1)?.to_vec();
     let negotiation = negotiation(&mut reader)?;
     let limits = limits(&mut reader)?;
     let simulation_time = reader.unsigned()?;
-    let invocation = reader
-        .byte_string(MAX_WORKER_INVOCATION_BYTES_V1)?
-        .to_vec();
+    let invocation = reader.byte_string(MAX_WORKER_INVOCATION_BYTES_V1)?.to_vec();
     reader.finish()?;
     Ok(WorkerRequestV1 {
         export,
@@ -304,7 +300,9 @@ pub fn decode_worker_request_v1(bytes: &[u8]) -> Result<WorkerRequestV1, WorkerE
     })
 }
 
-fn negotiation(reader: &mut EnvelopeReader<'_>) -> Result<WorkerNegotiationV1, WorkerEnvelopeErrorV1> {
+fn negotiation(
+    reader: &mut EnvelopeReader<'_>,
+) -> Result<WorkerNegotiationV1, WorkerEnvelopeErrorV1> {
     reader.fixed_array(NEGOTIATION_FIELDS)?;
     let world = reader.text(MAX_TEXT_BYTES)?.to_owned();
     let abi_major = small(reader)?;
@@ -387,7 +385,9 @@ pub fn decode_worker_response_v1(bytes: &[u8]) -> Result<WorkerOutcomeV1, Worker
     Ok(outcome)
 }
 
-fn completion(reader: &mut EnvelopeReader<'_>) -> Result<WorkerCompletionV1, WorkerEnvelopeErrorV1> {
+fn completion(
+    reader: &mut EnvelopeReader<'_>,
+) -> Result<WorkerCompletionV1, WorkerEnvelopeErrorV1> {
     Ok(WorkerCompletionV1 {
         payload: reader.byte_string(usize::MAX)?.to_vec(),
         startup_fuel: reader.unsigned()?,

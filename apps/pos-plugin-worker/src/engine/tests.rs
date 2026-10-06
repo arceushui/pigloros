@@ -10,7 +10,11 @@ const C_GUEST: &[u8] = include_bytes!(
     "../../../../plugins/community/examples/compatibility-prototype/fixtures/c-guest.wasm"
 );
 
-fn request(component: &[u8], export: WorkerExportV1, limits: DeterministicBudgetV1) -> WorkerRequestV1 {
+fn request(
+    component: &[u8],
+    export: WorkerExportV1,
+    limits: DeterministicBudgetV1,
+) -> WorkerRequestV1 {
     WorkerRequestV1 {
         export,
         component: component.to_vec(),
@@ -99,7 +103,11 @@ fn inputs_the_prototype_engine_cannot_lower_are_invalid_invocations() {
 
 #[test]
 fn bytes_that_do_not_implement_the_world_are_incompatible() {
-    let outcome = run_request(&request(b"not a component", WorkerExportV1::Describe, ROOMY));
+    let outcome = run_request(&request(
+        b"not a component",
+        WorkerExportV1::Describe,
+        ROOMY,
+    ));
     assert_eq!(
         outcome,
         Some(WorkerOutcomeV1::Failed(WorkerFailureV1::IncompatibleAbi))
@@ -125,14 +133,26 @@ fn budgets_bound_the_prototype_engine() {
 #[test]
 fn prototype_failures_map_to_closed_outcomes() {
     for (failure, expected) in [
-        (InvocationFailure::FuelExhausted, WorkerFailureV1::FuelExhausted),
-        (InvocationFailure::MemoryLimitExceeded, WorkerFailureV1::MemoryLimitExceeded),
+        (
+            InvocationFailure::FuelExhausted,
+            WorkerFailureV1::FuelExhausted,
+        ),
+        (
+            InvocationFailure::MemoryLimitExceeded,
+            WorkerFailureV1::MemoryLimitExceeded,
+        ),
         (
             InvocationFailure::OperationalWatchdogStop,
             WorkerFailureV1::OperationalWatchdogStop,
         ),
-        (InvocationFailure::HostCallRejected, WorkerFailureV1::HostCallLimitExceeded),
-        (InvocationFailure::Rejected, WorkerFailureV1::InvalidInvocation),
+        (
+            InvocationFailure::HostCallRejected,
+            WorkerFailureV1::HostCallLimitExceeded,
+        ),
+        (
+            InvocationFailure::Rejected,
+            WorkerFailureV1::InvalidInvocation,
+        ),
     ] {
         assert_eq!(failure_outcome(failure), WorkerOutcomeV1::Failed(expected));
     }
@@ -146,15 +166,24 @@ fn prototype_failures_map_to_closed_outcomes() {
 fn trap_codes_follow_the_revision_4_table() {
     for (trap, class) in [
         (Trap::UnreachableCodeReached, WorkerTrapClassV1::Unreachable),
-        (Trap::MemoryOutOfBounds, WorkerTrapClassV1::MemoryOutOfBounds),
+        (
+            Trap::MemoryOutOfBounds,
+            WorkerTrapClassV1::MemoryOutOfBounds,
+        ),
         (Trap::HeapMisaligned, WorkerTrapClassV1::MemoryOutOfBounds),
         (Trap::ArrayOutOfBounds, WorkerTrapClassV1::MemoryOutOfBounds),
         (Trap::TableOutOfBounds, WorkerTrapClassV1::TableOutOfBounds),
         (Trap::IndirectCallToNull, WorkerTrapClassV1::IndirectCall),
         (Trap::BadSignature, WorkerTrapClassV1::IndirectCall),
         (Trap::IntegerOverflow, WorkerTrapClassV1::IntegerArithmetic),
-        (Trap::IntegerDivisionByZero, WorkerTrapClassV1::IntegerArithmetic),
-        (Trap::BadConversionToInteger, WorkerTrapClassV1::IntegerArithmetic),
+        (
+            Trap::IntegerDivisionByZero,
+            WorkerTrapClassV1::IntegerArithmetic,
+        ),
+        (
+            Trap::BadConversionToInteger,
+            WorkerTrapClassV1::IntegerArithmetic,
+        ),
         (Trap::StackOverflow, WorkerTrapClassV1::StackExhausted),
         (Trap::NullReference, WorkerTrapClassV1::Other),
         (Trap::CannotEnterComponent, WorkerTrapClassV1::Other),
@@ -177,7 +206,10 @@ fn lifted_values_encode_structurally() {
         (Val::U16(300), integer(300)),
         (Val::U32(70_000), integer(70_000)),
         (Val::U64(u64::MAX), integer(u64::MAX)),
-        (Val::Enum("reduce".to_owned()), Value::Text("reduce".to_owned())),
+        (
+            Val::Enum("reduce".to_owned()),
+            Value::Text("reduce".to_owned()),
+        ),
         (
             Val::Variant("case".to_owned(), boxed(Val::U8(2))),
             Value::Array(vec![Value::Text("case".to_owned()), integer(2)]),
@@ -187,14 +219,20 @@ fn lifted_values_encode_structurally() {
             Value::Array(vec![Value::Text("bare".to_owned())]),
         ),
         (Val::Option(None), Value::Null),
-        (Val::Option(boxed(Val::U8(3))), Value::Array(vec![integer(3)])),
+        (
+            Val::Option(boxed(Val::U8(3))),
+            Value::Array(vec![integer(3)]),
+        ),
         (Val::Result(Ok(None)), Value::Array(vec![integer(0)])),
         (
             Val::Result(Err(boxed(Val::U8(4)))),
             Value::Array(vec![integer(1), integer(4)]),
         ),
         (
-            Val::Record(vec![("a".to_owned(), Val::U8(5)), ("b".to_owned(), Val::Bool(false))]),
+            Val::Record(vec![
+                ("a".to_owned(), Val::U8(5)),
+                ("b".to_owned(), Val::Bool(false)),
+            ]),
             Value::Array(vec![integer(5), Value::Bool(false)]),
         ),
         (Val::List(vec![Val::U8(6)]), Value::Array(vec![integer(6)])),
