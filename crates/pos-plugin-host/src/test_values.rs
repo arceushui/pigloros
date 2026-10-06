@@ -8,15 +8,14 @@ use wasmtime::component::Val;
 
 use crate::host_v1::byte_list;
 
-/// A record value with `fields` in order.
-pub(crate) fn record(fields: Vec<(&str, Val)>) -> Val {
-    Val::Record(
-        fields
-            .into_iter()
-            .map(|(name, value)| (name.to_owned(), value))
-            .collect(),
-    )
-}
+pub(crate) use crate::lower::record;
+
+/// The artifact reference every test invocation uses.
+pub(crate) const ARTIFACT: ArtifactRefV1 = ArtifactRefV1 {
+    schema_id: 1,
+    byte_length: 0,
+    digest: [0; 32],
+};
 
 /// A `digest32` value of any length.
 pub(crate) fn digest_val(bytes: &[u8]) -> Val {
@@ -42,11 +41,6 @@ pub(crate) fn numbered_digest(index: usize) -> [u8; 32] {
 
 /// An invocation at its WIT bounds.
 pub(crate) fn invocation() -> PluginInvocationV1 {
-    let artifact = ArtifactRefV1 {
-        schema_id: 1,
-        byte_length: 0,
-        digest: [0; 32],
-    };
     PluginInvocationV1 {
         invocation_id: [1; 16],
         timeline_position: TimelinePositionV1 {
@@ -56,9 +50,9 @@ pub(crate) fn invocation() -> PluginInvocationV1 {
             scheduler_position: 5,
         },
         output_base_ordinal: 6,
-        principal_ref: artifact,
-        authorization_decision: artifact,
-        observation_snapshot: artifact,
+        principal_ref: ARTIFACT,
+        authorization_decision: ARTIFACT,
+        observation_snapshot: ARTIFACT,
         observation_bytes: vec![0; MAX_OBSERVATION_BYTES_V1],
         prior_state_schema: [7; 32],
         prior_state_bytes: vec![0; MAX_STATE_BYTES_V1],

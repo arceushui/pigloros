@@ -6,6 +6,8 @@
 //! its configuration from [`PINNED_ENGINE_CONFIG`], and [`pinned_runtime`]
 //! derives the trap table from the pinned `wasmtime::Trap` codes themselves.
 
+use std::sync::LazyLock;
+
 use pos_runtime::community_plugin_host::{
     CommunityPluginProfileErrorV1, ComponentTrapClassV1, PinnedComponentRuntimeV1,
     PinnedEngineConfigV1, TrapOutcomeV1, TrapTableEntryV1,
@@ -57,7 +59,7 @@ pub fn pinned_runtime() -> Result<PinnedComponentRuntimeV1, CommunityPluginProfi
         WASMTIME_VERSION.to_owned(),
         RESOLVED_WASMTIME_FEATURES.map(str::to_owned).to_vec(),
         PINNED_ENGINE_CONFIG,
-        trap_table(),
+        TRAP_TABLE.clone(),
     )
 }
 
@@ -69,8 +71,11 @@ pub(crate) fn is_pinned_runtime(runtime: &PinnedComponentRuntimeV1) -> bool {
     runtime.wasmtime_version() == WASMTIME_VERSION
         && runtime.resolved_features() == RESOLVED_WASMTIME_FEATURES
         && runtime.engine() == PINNED_ENGINE_CONFIG
-        && runtime.trap_table() == trap_table().as_slice()
+        && runtime.trap_table() == TRAP_TABLE.as_slice()
 }
+
+/// The pinned trap table, built once from the pinned trap codes.
+static TRAP_TABLE: LazyLock<Vec<TrapTableEntryV1>> = LazyLock::new(trap_table);
 
 /// One row for every trap code of the pinned version, in code order.
 fn trap_table() -> Vec<TrapTableEntryV1> {
@@ -263,8 +268,10 @@ mod tests {
         let listed = checker
             .split_once("RESOLVED_FEATURES = [")
             .and_then(|(_, rest)| rest.split_once(']'))
-            .map(|(list, _)| list)
-            .unwrap_or_default();
+            .map_or_else(
+                || std::panic::resume_unwind(Box::new("no RESOLVED_FEATURES")),
+                |(list, _)| list,
+            );
         let features: Vec<&str> = listed
             .split(',')
             .map(|item| item.trim().trim_matches('"'))

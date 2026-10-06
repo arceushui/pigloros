@@ -28,6 +28,15 @@ pub(crate) const MAX_LOG_MESSAGE_BYTES: usize = 256;
 /// Largest element count of any guest table.
 const MAX_TABLE_ELEMENTS: usize = 65_536;
 
+// The engine supports only targets whose `usize` fits in a `u64`, so
+// [`widen`] is lossless.
+const _: () = assert!(usize::BITS <= u64::BITS);
+
+/// A byte or element count as a `u64`; lossless on every supported target.
+pub(crate) const fn widen(count: usize) -> u64 {
+    count as u64
+}
+
 /// A host-side refusal raised inside Wasmtime and classified after the call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HostFault {
@@ -94,8 +103,8 @@ impl CallBudget {
     }
 
     /// Charge one log message of `message_bytes` bytes.
-    fn charge_log(&mut self, message_bytes: usize) -> Result<(), HostFault> {
-        let bytes = u64::try_from(message_bytes).unwrap_or(u64::MAX);
+    const fn charge_log(&mut self, message_bytes: usize) -> Result<(), HostFault> {
+        let bytes = widen(message_bytes);
         let calls = self.log_calls.checked_sub(1);
         let left = self.log_bytes.checked_sub(bytes);
         match (message_bytes <= MAX_LOG_MESSAGE_BYTES, calls, left) {
@@ -119,11 +128,11 @@ pub(crate) struct HostState {
 
 impl HostState {
     /// Fresh state for one invocation under `limits`.
-    pub(crate) fn new(inputs: HostInputs, limits: &DeterministicBudgetV1) -> Self {
+    pub(crate) const fn new(inputs: HostInputs, limits: &DeterministicBudgetV1) -> Self {
         Self {
             inputs,
             memory: MemoryLimiter {
-                limit: usize::try_from(limits.memory_bytes).unwrap_or(usize::MAX),
+                limit: limits.memory_bytes,
                 reserved: 0,
             },
             budget: CallBudget::new(limits),
@@ -138,20 +147,8 @@ impl HostState {
 /// commit still counts, which only makes the limit stricter. A denial is an
 /// error, never a silent `-1`, so it is always `MemoryLimitExceeded`.
 pub(crate) struct MemoryLimiter {
-    limit: usize,
-    reserved: usize,
-}
-
-impl MemoryLimiter {
-    /// A limiter that has reserved nothing yet and refuses beyond `limit` bytes.
-    pub(crate) const fn new(limit: usize) -> Self {
-        Self { limit, reserved: 0 }
-    }
-
-    /// Bytes reserved so far, widened losslessly (`usize` is at most 64 bits).
-    pub(crate) const fn reserved_bytes(&self) -> u64 {
-        self.reserved as u64
-    }
+    pub(crate) limit: u64,
+    pub(crate) reserved: u64,
 }
 
 impl ResourceLimiter for MemoryLimiter {
@@ -163,7 +160,7 @@ impl ResourceLimiter for MemoryLimiter {
     ) -> wasmtime::Result<bool> {
         let reserved = self
             .reserved
-            .saturating_add(desired.saturating_sub(current));
+            .saturating_add(widen(desired.saturating_sub(current)));
         if reserved > self.limit {
             return Err(HostFault::MemoryLimit.into());
         }

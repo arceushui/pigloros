@@ -12,6 +12,8 @@
 ;;  6 out-of-bounds `table.get`     14 request random bytes with a 31-byte domain
 ;;  7 loop forever                  15 return a `plugin-id` pointer past memory
 ;;  8 grow memory by 2,000 pages    16 log one 256-byte message
+;; 17 grow the table past 65,536     18 request random bytes while `realloc`
+;;    elements                          returns a pointer past memory
 ;;
 ;; Every other selector returns an all-zero descriptor, whose empty
 ;; `plugin-id` is not an ADR-061 ID. `reduce` and `drive` trap if called.
@@ -105,8 +107,10 @@
   (core module $libc
     (memory (export "memory") 1)
     (global $next (mut i32) (i32.const 8192))
+    (global $bad (export "bad") (mut i32) (i32.const 0))
     (func (export "realloc") (param i32 i32 i32 i32) (result i32)
       (local $at i32)
+      (if (global.get $bad) (then (return (i32.const -16))))
       (local.set $at
         (i32.and
           (i32.add (global.get $next) (i32.sub (local.get 2) (i32.const 1)))
@@ -116,6 +120,7 @@
   (core instance $libc (instantiate $libc))
   (alias core export $libc "memory" (core memory $memory))
   (alias core export $libc "realloc" (core func $realloc))
+  (alias core export $libc "bad" (core global $bad))
 
   (core func $time (canon lower (func $host "simulation-time")))
   (core func $random
@@ -128,6 +133,7 @@
     (import "host" "random" (func $random (param i32 i32 i64 i32 i32)))
     (import "host" "log" (func $log (param i32 i32 i32 i32)))
     (import "libc" "memory" (memory 1))
+    (import "libc" "bad" (global $bad (mut i32)))
     (type $void (func))
     (table $table 1 funcref)
     (func $recurse (call $recurse))
@@ -166,6 +172,13 @@
         (then (call $random
           (i32.const 512) (i32.const 31) (i64.const 0) (i32.const 16) (i32.const 2048))))
       (if (i64.eq (local.get $selector) (i64.const 15)) (then (return (i32.const 4000))))
+      (if (i64.eq (local.get $selector) (i64.const 17))
+        (then (drop (table.grow $table (ref.null func) (i32.const 70000)))))
+      (if (i64.eq (local.get $selector) (i64.const 18))
+        (then
+          (global.set $bad (i32.const 1))
+          (call $random
+            (i32.const 512) (i32.const 32) (i64.const 0) (i32.const 16) (i32.const 2048))))
       (if (i64.eq (local.get $selector) (i64.const 16))
         (then (call $log (i32.const 1) (i32.const 16) (i32.const 256) (i32.const 2048))))
       (i32.const 3000))
@@ -180,7 +193,7 @@
       (export "time" (func $time))
       (export "random" (func $random))
       (export "log" (func $log))))
-    (with "libc" (instance (export "memory" (memory $memory))))))
+    (with "libc" (instance (export "memory" (memory $memory)) (export "bad" (global $bad))))))
 
   (func $describe (result (result $plugin-descriptor (error $plugin-error)))
     (canon lift (core func $main "describe") (memory $memory)))

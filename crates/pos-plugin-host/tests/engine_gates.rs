@@ -19,7 +19,7 @@ use pos_plugin_host::{
 };
 use pos_runtime::community_plugin_host::{
     CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
-    PinnedComponentRuntimeV1, PinnedEngineConfigV1, TrapReproductionV1, MAX_OBSERVATION_BYTES_V1,
+    PinnedComponentRuntimeV1, TrapReproductionV1, MAX_OBSERVATION_BYTES_V1,
 };
 
 type Error = CommunityPluginHostErrorV1;
@@ -84,6 +84,8 @@ fn wasm_traps_map_to_their_pinned_trap_classes() {
 fn fuel_and_memory_limits_are_not_traps() {
     assert_eq!(probe(7, BUDGET), Some(Error::FuelExhausted));
     assert_eq!(probe(8, BUDGET), Some(Error::MemoryLimitExceeded));
+    // Table growth past 65,536 elements is a limiter denial too.
+    assert_eq!(probe(17, BUDGET), Some(Error::MemoryLimitExceeded));
 }
 
 #[test]
@@ -130,6 +132,9 @@ fn malformed_guest_values_are_invalid_guest_output_not_traps() {
     // A return the host's Canonical ABI lift cannot read, and a well-typed
     // descriptor that fails validation.
     assert_eq!(probe(15, BUDGET), Some(Error::InvalidGuestOutput));
+    // A guest `realloc` that returns a pointer past memory while the host
+    // lowers a `deterministic-random` result.
+    assert_eq!(probe(18, BUDGET), Some(Error::InvalidGuestOutput));
     assert_eq!(probe(0, BUDGET), Some(Error::InvalidGuestOutput));
 }
 
@@ -211,60 +216,50 @@ fn imported_functions_must_have_their_exact_host_v1_types() {
     }
 }
 
+/// A runtime like the pinned one with one recorded value replaced.
+enum RuntimeChange {
+    Version,
+    Features,
+    Engine,
+    TrapTable,
+}
+
+fn runtime_with(change: &RuntimeChange) -> PinnedComponentRuntimeV1 {
+    let runtime = ok(pinned_runtime(), "pinned runtime");
+    let mut version = runtime.wasmtime_version().to_owned();
+    let mut features = runtime.resolved_features().to_vec();
+    let mut engine = runtime.engine();
+    let mut trap_table = runtime.trap_table().to_vec();
+    match change {
+        RuntimeChange::Version => "0.0.0".clone_into(&mut version),
+        RuntimeChange::Features => {
+            features.remove(0);
+        }
+        RuntimeChange::Engine => engine.consume_fuel = false,
+        RuntimeChange::TrapTable => trap_table.truncate(2),
+    }
+    ok(
+        PinnedComponentRuntimeV1::new(version, features, engine, trap_table),
+        "changed runtime",
+    )
+}
+
 #[test]
 fn execution_requires_the_profile_to_pin_this_runtime() {
     let release = release(PLUGIN_ID, 0, &[], BUDGET);
     let host = CommunityPluginHostAbiV1::v1();
     let unpinned = negotiate(&release, &host, None);
     assert_eq!(PinnedExecutionV1::new(unpinned), Err(RuntimeNotPinnedV1));
-    let runtime = ok(pinned_runtime(), "pinned runtime");
-    let other = ok(
-        PinnedComponentRuntimeV1::new(
-            "0.0.0".to_owned(),
-            runtime.resolved_features().to_vec(),
-            runtime.engine(),
-            runtime.trap_table().to_vec(),
-        ),
-        "other runtime",
-    );
-    let foreign = negotiate(&release, &host, Some(other));
-    assert_eq!(PinnedExecutionV1::new(foreign), Err(RuntimeNotPinnedV1));
-    let partial = ok(
-        PinnedComponentRuntimeV1::new(
-            runtime.wasmtime_version().to_owned(),
-            runtime.resolved_features().to_vec(),
-            runtime.engine(),
-            runtime.trap_table()[..2].to_vec(),
-        ),
-        "partial runtime",
-    );
-    let partial = negotiate(&release, &host, Some(partial));
-    assert_eq!(PinnedExecutionV1::new(partial), Err(RuntimeNotPinnedV1));
-    let featureless = ok(
-        PinnedComponentRuntimeV1::new(
-            runtime.wasmtime_version().to_owned(),
-            runtime.resolved_features()[1..].to_vec(),
-            runtime.engine(),
-            runtime.trap_table().to_vec(),
-        ),
-        "featureless runtime",
-    );
-    let featureless = negotiate(&release, &host, Some(featureless));
-    assert_eq!(PinnedExecutionV1::new(featureless), Err(RuntimeNotPinnedV1));
-    let unmetered = ok(
-        PinnedComponentRuntimeV1::new(
-            runtime.wasmtime_version().to_owned(),
-            runtime.resolved_features().to_vec(),
-            PinnedEngineConfigV1 {
-                consume_fuel: false,
-                ..runtime.engine()
-            },
-            runtime.trap_table().to_vec(),
-        ),
-        "unmetered runtime",
-    );
-    let unmetered = negotiate(&release, &host, Some(unmetered));
-    assert_eq!(PinnedExecutionV1::new(unmetered), Err(RuntimeNotPinnedV1));
+    let changes = [
+        RuntimeChange::Version,
+        RuntimeChange::Features,
+        RuntimeChange::Engine,
+        RuntimeChange::TrapTable,
+    ];
+    for change in &changes {
+        let negotiated = negotiate(&release, &host, Some(runtime_with(change)));
+        assert_eq!(PinnedExecutionV1::new(negotiated), Err(RuntimeNotPinnedV1));
+    }
     let pinned = pinned(&release, &host);
     assert_eq!(pinned.negotiated().plugin_id(), PLUGIN_ID);
 }

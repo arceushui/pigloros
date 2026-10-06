@@ -11,6 +11,8 @@ use pos_runtime::community_plugin_host::{
 };
 use wasmtime::component::Val;
 
+use crate::host_v1::widen;
+
 /// A lifted value or the closed error that ends the invocation.
 pub(crate) type Lifted<T> = Result<T, CommunityPluginHostErrorV1>;
 
@@ -129,18 +131,12 @@ pub(crate) fn ordered_digests(value: &Val) -> Lifted<Vec<[u8; 32]>> {
 
 /// Whether every item is strictly greater than the one before it.
 pub(crate) fn strictly_increasing<T: Ord>(items: &[T]) -> bool {
-    items
-        .iter()
-        .zip(items.iter().skip(1))
-        .all(|(earlier, later)| earlier < later)
+    items.windows(2).all(|pair| pair[0] < pair[1])
 }
 
 /// `OutputLimitExceeded` unless `count <= limit`.
-pub(crate) fn within(count: usize, limit: u64) -> Lifted<()> {
-    ensure(
-        u64::try_from(count).is_ok_and(|count| count <= limit),
-        LIMIT,
-    )
+pub(crate) const fn within(count: usize, limit: u64) -> Lifted<()> {
+    ensure(widen(count) <= limit, LIMIT)
 }
 
 /// A `plugin-error`.

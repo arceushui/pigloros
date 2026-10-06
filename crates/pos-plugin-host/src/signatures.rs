@@ -8,6 +8,11 @@
 //! `describe`, `reduce` and `drive` exports, with their exact WIT signatures
 //! before anything runs, so a mistyped Component is refused at load, never at
 //! its first call.
+//!
+//! WIT shape knowledge lives in these places, which must change together:
+//! this module (the exact signatures), `lower.rs` (the invocation value),
+//! `lift.rs`, `describe.rs` and `output.rs` (the field order of lifted
+//! returns), and `pos_runtime::community_plugin_host`'s contract types.
 
 use wasmtime::component::types::{ComponentFunc, ComponentItem, Type};
 use wasmtime::component::Component;
@@ -32,12 +37,23 @@ enum Shape {
     Result(Option<Box<Self>>, Option<Box<Self>>),
 }
 
-/// A payload type that the world never uses.
-///
-/// It keeps "absent" and "unsupported" payloads apart without an
-/// `Option<Option<_>>`, which Clippy's `option_option` forbids.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Unsupported;
+/// The payload of a variant case or a `result` side.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PayloadShape {
+    /// No payload.
+    Absent,
+    /// A payload of this shape.
+    Present(Shape),
+}
+
+impl PayloadShape {
+    fn into_option(self) -> Option<Shape> {
+        match self {
+            Self::Absent => None,
+            Self::Present(shape) => Some(shape),
+        }
+    }
+}
 
 /// A function signature: named parameters, results and async-ness.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -123,24 +139,27 @@ fn shape(ty: &Type) -> Option<Shape> {
         Type::Variant(variant) => variant
             .cases()
             .map(|case| {
-                let shape = optional_shape(case.ty.as_ref()).ok()?;
-                Some((case.name.to_owned(), shape))
+                let payload = payload_shape(case.ty.as_ref())?;
+                Some((case.name.to_owned(), payload.into_option()))
             })
             .collect::<Option<Vec<_>>>()
             .map(Shape::Variant),
         Type::Enum(cases) => Some(Shape::Enum(cases.names().map(str::to_owned).collect())),
         Type::Result(result) => {
-            let ok = optional_shape(result.ok().as_ref()).ok()?;
-            let err = optional_shape(result.err().as_ref()).ok()?;
+            let ok = payload_shape(result.ok().as_ref())?.into_option();
+            let err = payload_shape(result.err().as_ref())?.into_option();
             Some(Shape::Result(ok.map(Box::new), err.map(Box::new)))
         }
         _ => None,
     }
 }
 
-/// The shape of an optional payload type: `None` when it is absent.
-fn optional_shape(ty: Option<&Type>) -> Result<Option<Shape>, Unsupported> {
-    ty.map_or(Ok(None), |ty| shape(ty).map(Some).ok_or(Unsupported))
+/// The shape of an optional payload type, or `None` for a type the world
+/// never uses.
+fn payload_shape(ty: Option<&Type>) -> Option<PayloadShape> {
+    ty.map_or(Some(PayloadShape::Absent), |ty| {
+        shape(ty).map(PayloadShape::Present)
+    })
 }
 
 /// The exact WIT signature of one `host-v1` function.
@@ -153,14 +172,14 @@ fn import_signature(name: &str) -> Option<Signature> {
                 named("offset", Shape::U64),
                 named("length", Shape::U32),
             ],
-            Shape::Result(Some(Box::new(bytes())), Some(Box::new(plugin_error()))),
+            Shape::Result(Some(Box::new(bytes())), Some(Box::new(error_shape()))),
         ),
         "record-operational-log" => (
             vec![
                 named("category", Shape::U16),
                 named("message", bounded_text()),
             ],
-            Shape::Result(None, Some(Box::new(plugin_error()))),
+            Shape::Result(None, Some(Box::new(error_shape()))),
         ),
         _ => return None,
     };
@@ -174,16 +193,16 @@ fn import_signature(name: &str) -> Option<Signature> {
 /// The exact WIT signature of one `guest-v1` export.
 fn export_signature(export: GuestExport) -> Signature {
     let (params, ok) = match export {
-        GuestExport::Describe => (Vec::new(), plugin_descriptor()),
+        GuestExport::Describe => (Vec::new(), descriptor_shape()),
         GuestExport::Reduce | GuestExport::Drive => {
-            (vec![named("input", plugin_invocation())], plugin_output())
+            (vec![named("input", invocation_shape())], output_shape())
         }
     };
     Signature {
         params,
         results: vec![Shape::Result(
             Some(Box::new(ok)),
-            Some(Box::new(plugin_error())),
+            Some(Box::new(error_shape())),
         )],
         is_async: false,
     }
@@ -213,7 +232,7 @@ fn field_ref() -> Shape {
 }
 
 /// `contract-v1.plugin-error`.
-fn plugin_error() -> Shape {
+fn error_shape() -> Shape {
     let code = Shape::Variant(vec![
         ("invalid-invocation".to_owned(), Some(field_ref())),
         ("unsupported-schema".to_owned(), Some(Shape::U32)),
@@ -302,7 +321,7 @@ fn migration_descriptor() -> Shape {
 }
 
 /// `contract-v1.plugin-descriptor`.
-fn plugin_descriptor() -> Shape {
+fn descriptor_shape() -> Shape {
     Shape::Record(vec![
         named("plugin-id", bounded_text()),
         named("release-semver", bounded_text()),
@@ -322,7 +341,7 @@ fn plugin_descriptor() -> Shape {
 }
 
 /// `contract-v1.plugin-invocation`.
-fn plugin_invocation() -> Shape {
+fn invocation_shape() -> Shape {
     let timeline_position = Shape::Record(vec![
         named("timeline-id", bytes()),
         named("seq", Shape::U64),
@@ -349,7 +368,7 @@ fn plugin_invocation() -> Shape {
 }
 
 /// `contract-v1.plugin-output`.
-fn plugin_output() -> Shape {
+fn output_shape() -> Shape {
     let event_draft = Shape::Record(vec![
         named("event-schema-id", Shape::U32),
         named("entity-id", bytes()),

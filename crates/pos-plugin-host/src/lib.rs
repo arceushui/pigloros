@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-//! In-worker community Plugin Component engine for ADR-061 revisions 4, 5 and 6.
+//! In-worker community Plugin Component engine (ADR-061 revisions 4 to 6).
+//!
+//! Revision 6, which records the owner decisions of 2026-10-06, is pending.
 //!
 //! This crate runs one Component of the `pigloros:plugin/community-plugin@0.1.0`
 //! world on the exact Wasmtime pin:

@@ -26,6 +26,12 @@ pub const INVOCATION_ID: [u8; 16] = [0x11; 16];
 pub const DOMAIN: [u8; 32] = [7; 32];
 /// The timeline sequence number of [`invocation`].
 pub const SEQ: u64 = 11;
+/// The artifact reference every test invocation uses.
+pub const ARTIFACT: ArtifactRefV1 = ArtifactRefV1 {
+    schema_id: 1,
+    byte_length: 0,
+    digest: [0; 32],
+};
 
 /// The value of `result`, or a test failure naming `context`.
 pub fn ok<T, E: std::fmt::Debug>(result: Result<T, E>, context: &str) -> T {
@@ -109,11 +115,6 @@ pub fn execution(budget: DeterministicBudgetV1) -> PinnedExecutionV1 {
 /// An invocation of the compatibility behaviour with `observation`.
 #[must_use]
 pub fn invocation(observation: &[u8]) -> PluginInvocationV1 {
-    let artifact = |schema_id| ArtifactRefV1 {
-        schema_id,
-        byte_length: 0,
-        digest: [0; 32],
-    };
     PluginInvocationV1 {
         invocation_id: INVOCATION_ID,
         timeline_position: TimelinePositionV1 {
@@ -123,9 +124,9 @@ pub fn invocation(observation: &[u8]) -> PluginInvocationV1 {
             scheduler_position: 0,
         },
         output_base_ordinal: 0,
-        principal_ref: artifact(1),
-        authorization_decision: artifact(2),
-        observation_snapshot: artifact(3),
+        principal_ref: ARTIFACT,
+        authorization_decision: ARTIFACT,
+        observation_snapshot: ARTIFACT,
         observation_bytes: observation.to_vec(),
         prior_state_schema: [2; 32],
         prior_state_bytes: b"prior".to_vec(),

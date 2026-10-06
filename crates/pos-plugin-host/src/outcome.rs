@@ -5,6 +5,8 @@
 //! survives it. A completed invocation returns the guest's validated typed
 //! return, which may be the guest's own `plugin-error`.
 
+use std::fmt;
+
 use pos_runtime::community_plugin_host::CommunityPluginHostErrorV1;
 use wasmtime::Trap;
 
@@ -29,6 +31,19 @@ pub enum LoadError {
     MistypedGuestExport,
 }
 
+impl fmt::Display for LoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidComponent => "not a valid community Plugin Component",
+            Self::ImportDenied => "community Plugin Component import denied",
+            Self::MissingGuestExport => "community Plugin Component lacks a guest-v1 export",
+            Self::MistypedGuestExport => "community Plugin guest-v1 export has the wrong type",
+        })
+    }
+}
+
+impl std::error::Error for LoadError {}
+
 impl From<LoadError> for CommunityPluginHostErrorV1 {
     /// Every load refusal is `IncompatibleAbi`.
     fn from(_: LoadError) -> Self {
@@ -44,12 +59,29 @@ impl From<LoadError> for CommunityPluginHostErrorV1 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeNotPinnedV1;
 
+impl fmt::Display for RuntimeNotPinnedV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("execution profile does not pin this engine's runtime")
+    }
+}
+
+impl std::error::Error for RuntimeNotPinnedV1 {}
+
 /// Classify the error that ended an invocation.
 ///
 /// A host refusal maps to its own error, and a trap to its pinned trap-table
 /// outcome. Any other error is the host's own Canonical ABI lift or lowering
 /// failing on guest-provided values, such as a guest return that does not
 /// lift: `InvalidGuestOutput`, never a trap.
+///
+/// In Wasmtime 49.0.2 the host lifts a guest return in Rust and reports a
+/// malformed value with a plain error, never a `Trap` code: for example
+/// `bail!("list pointer/length out of bounds of memory")` in
+/// `src/runtime/component/func/typed.rs` and the field and case checks in
+/// `src/runtime/component/values.rs`. The lift trap codes
+/// (`InvalidChar`, `ListOutOfBounds`, ...) are raised only by fused adapters
+/// compiled in `wasmtime-environ`'s `src/fact/trampoline.rs`, between
+/// Components inside one guest.
 pub(crate) fn classify(error: &wasmtime::Error) -> CommunityPluginHostErrorV1 {
     error.downcast_ref::<HostFault>().map_or_else(
         || {
@@ -71,6 +103,39 @@ mod tests {
     use super::*;
 
     type Error = CommunityPluginHostErrorV1;
+
+    #[test]
+    fn refusals_have_stable_messages() {
+        let messages = [
+            (
+                LoadError::InvalidComponent,
+                "not a valid community Plugin Component",
+            ),
+            (
+                LoadError::ImportDenied,
+                "community Plugin Component import denied",
+            ),
+            (
+                LoadError::MissingGuestExport,
+                "community Plugin Component lacks a guest-v1 export",
+            ),
+            (
+                LoadError::MistypedGuestExport,
+                "community Plugin guest-v1 export has the wrong type",
+            ),
+        ];
+        for (refusal, message) in messages {
+            assert_eq!(refusal.to_string(), message);
+            let error: &dyn std::error::Error = &refusal;
+            assert!(error.source().is_none());
+        }
+        assert_eq!(
+            RuntimeNotPinnedV1.to_string(),
+            "execution profile does not pin this engine's runtime"
+        );
+        let error: &dyn std::error::Error = &RuntimeNotPinnedV1;
+        assert!(error.source().is_none());
+    }
 
     #[test]
     fn every_load_refusal_is_incompatible_abi() {

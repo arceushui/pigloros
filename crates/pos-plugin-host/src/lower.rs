@@ -73,7 +73,8 @@ pub(crate) fn invocation_val(invocation: &PluginInvocationV1, kind: &str) -> Val
     ])
 }
 
-fn record(fields: Vec<(&str, Val)>) -> Val {
+/// A record value with `fields` in WIT order.
+pub(crate) fn record(fields: Vec<(&str, Val)>) -> Val {
     Val::Record(
         fields
             .into_iter()

@@ -311,16 +311,7 @@ impl ComponentHost {
         let index = component.export(export);
         let outcome = store
             .set_fuel(limits.fuel)
-            .and_then(|()| component.pre.instantiate(&mut store))
-            .and_then(|instance| {
-                store.get_fuel().and_then(|after_startup| {
-                    call_export(&mut store, instance, index, args).and_then(|value| {
-                        store
-                            .get_fuel()
-                            .map(|after_call| (value, after_startup, after_call))
-                    })
-                })
-            });
+            .and_then(|()| run_export(&mut store, &component.pre, index, args));
         let (value, after_startup, after_call) = outcome.map_err(|error| classify(&error))?;
         let state = store.into_data();
         Ok(RawReport {
@@ -328,7 +319,7 @@ impl ComponentHost {
             metering: MeteringV1 {
                 startup_fuel: limits.fuel.saturating_sub(after_startup),
                 call_fuel: after_startup.saturating_sub(after_call),
-                memory_bytes: u64::try_from(state.memory.reserved).unwrap_or(u64::MAX),
+                memory_bytes: state.memory.reserved,
                 host_calls: limits.host_calls.saturating_sub(state.budget.host_calls),
             },
             operational_log: state.log,
@@ -373,6 +364,28 @@ fn func_of(item: ComponentItem) -> Option<ComponentFunc> {
     }
 }
 
+/// Instantiate the Component and call one export.
+///
+/// It returns the lifted value with the fuel left after instantiation and
+/// after the call. The pinned engine always meters fuel, so both readings
+/// succeed; they are combined last, so no early return depends on them.
+fn run_export(
+    store: &mut Store<HostState>,
+    pre: &InstancePre<HostState>,
+    index: ComponentExportIndex,
+    args: &[Val],
+) -> wasmtime::Result<(Val, u64, u64)> {
+    let instance = pre.instantiate(&mut *store)?;
+    let after_startup = store.get_fuel();
+    let value = call_export(store, instance, index, args)?;
+    let after_call = store.get_fuel();
+    after_startup.and_then(|startup| after_call.map(|call| (value, startup, call)))
+}
+
+/// Call one export of `instance`.
+///
+/// An index of another Component resolves to no function; that is
+/// `InvalidGuestOutput`, like any export the guest cannot serve.
 fn call_export(
     store: &mut Store<HostState>,
     instance: Instance,
@@ -389,4 +402,75 @@ fn call_export(
             let [value] = results;
             value
         })
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use pos_crypto::plugin_execution::{
+        PluginAbiRequirementV1, PluginExecutionProjectionFixtureV1, PluginExecutionProjectionV1,
+    };
+    use pos_runtime::community_plugin_host::{
+        negotiate_community_plugin_v1, CommunityPluginCeilingsV1,
+        CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginModeV1,
+        HostInputs,
+    };
+
+    use super::*;
+
+    const PROBE: &str = include_str!("../tests/components/probe.wat");
+    const RUST_GUEST: &[u8] = include_bytes!(
+        "../../../plugins/community/examples/compatibility-prototype/fixtures/rust-guest.wasm"
+    );
+
+    fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+    }
+
+    fn execution() -> PinnedExecutionV1 {
+        let release = PluginExecutionProjectionV1::from(PluginExecutionProjectionFixtureV1 {
+            pmf1_digest: [1; 32],
+            release_digest: [2; 32],
+            plugin_id: "plugin-a".to_owned(),
+            abi: PluginAbiRequirementV1 {
+                major: 0,
+                min_minor: 0,
+                max_minor: 0,
+                required_features: Vec::new(),
+            },
+            capabilities: Vec::new(),
+            budget: DeterministicBudgetV1::MAXIMA,
+        });
+        let profile = CommunityPluginExecutionProfileV1::new(
+            CommunityPluginModeV1::Local,
+            CommunityPluginCeilingsV1::V1,
+            Some(ok(crate::runtime::pinned_runtime())),
+        );
+        let host = CommunityPluginHostAbiV1::v1();
+        let negotiated = ok(negotiate_community_plugin_v1(&release, &host, &profile));
+        ok(PinnedExecutionV1::new(negotiated))
+    }
+
+    #[test]
+    fn an_export_index_of_another_component_is_invalid_guest_output() {
+        let host = ok(ComponentHost::new());
+        let probe = ok(host.load(&ok(wat::parse_str(PROBE))));
+        let rust = ok(host.load(RUST_GUEST));
+        // The probe's instance with the Rust guest's `describe` index.
+        let mixed = LoadedComponent {
+            pre: probe.pre.clone(),
+            describe: rust.describe,
+            reduce: probe.reduce,
+            drive: probe.drive,
+        };
+        let options = InvocationOptionsV1 {
+            host_inputs: HostInputs { simulation_time: 0 },
+            watchdog_epochs: 1,
+        };
+        let failure = host.describe(&mixed, &execution(), options).err();
+        assert_eq!(
+            failure,
+            Some(CommunityPluginHostErrorV1::InvalidGuestOutput)
+        );
+    }
 }

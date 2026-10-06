@@ -13,6 +13,10 @@
 //!   can declare the values of its own release.
 //! - `capabilities` and `dependencies` are only count-bounded; the manifest,
 //!   not `describe`, is their authority.
+//!
+//! `release-semver` is length-bounded only (1-64 bytes, as PMF1 field 3).
+//! Its semantic-version grammar is intentionally unchecked: PMF1 field 3 is the
+//! authority for the release version.
 
 use pos_runtime::community_plugin_host::{NegotiatedCommunityPluginV1, PluginDescriptorV1};
 use wasmtime::component::Val;
@@ -21,7 +25,10 @@ use crate::lift::{
     digest, ensure, fields, id, list, ordered_digests, text, u16_value, Lifted, INVALID,
 };
 
-/// WIT bound on event schema digests and capability declarations.
+/// PMF1 bound on event schemas, capabilities and dependencies.
+///
+/// It is the at-most-256 row of PMF1 fields 11-13; fields 14 and 17 have
+/// the same bound.
 const MAX_DESCRIPTOR_ITEMS: usize = 256;
 /// PMF1 bound on release semver text, in bytes.
 const MAX_SEMVER_BYTES: usize = 64;
