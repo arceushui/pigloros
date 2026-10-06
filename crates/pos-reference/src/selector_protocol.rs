@@ -1143,6 +1143,7 @@ mod tests {
 
     use crate::adapter_transport::write_observation;
     use crate::evaluator::{AttemptArtifact, AttemptTransportCaps};
+    use crate::evaluator_domain::{ClaimLayer, ExecutionMode, FixtureFamily};
     use crate::evaluator_protocol::{ImplementationIdentity, OutputCapability, SubjectAdapterKind};
     use crate::profile::DeterministicBudget;
     use crate::sandbox_provider_protocol::{
@@ -1210,9 +1211,9 @@ mod tests {
         };
         CaseAttempt {
             case_id: "case".to_owned(),
-            claim_layer: 1,
-            family: 1,
-            mode: 1,
+            claim_layer: ClaimLayer::ReplayConformance,
+            family: FixtureFamily::Denied,
+            mode: ExecutionMode::AirGapped,
             fixture_digest: [15; 32],
             schema: artifact(vec![1]),
             payload: artifact(vec![2]),

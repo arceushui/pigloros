@@ -9,8 +9,16 @@ use pos_reference::evaluator::{
     AttemptArtifact, AttemptTransportCaps, CaseAttempt, ResourceUsage, SubjectObservation,
     SubjectResult,
 };
+use pos_reference::evaluator_domain::{
+    ClaimLayer, DivergenceMismatchKind, ExecutionMode, FixtureFamily,
+};
 use pos_reference::evaluator_protocol::ProtocolError;
 use pos_reference::profile::{DeterministicBudget, NamespacedFailure};
+
+use cbor::{canonical, replace_field};
+
+#[path = "support/cbor.rs"]
+pub mod cbor;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -72,9 +80,9 @@ fn artifact(bytes: Vec<u8>) -> AttemptArtifact {
 fn attempt() -> CaseAttempt {
     CaseAttempt {
         case_id: "case-1".to_owned(),
-        claim_layer: 6,
-        family: 5,
-        mode: 1,
+        claim_layer: ClaimLayer::EmpiricalEvaluation,
+        family: FixtureFamily::Downgrade,
+        mode: ExecutionMode::AirGapped,
         fixture_digest: [7; 32],
         schema: artifact(vec![1, 2]),
         payload: artifact(vec![3, 4]),
@@ -109,14 +117,8 @@ fn encoded_observation(value: &SubjectObservation) -> Result<Vec<u8>, TransportE
     Ok(bytes)
 }
 
-fn encode_value(value: &Value) -> TestResult<Vec<u8>> {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes)?;
-    Ok(bytes)
-}
-
 fn framed(value: &Value) -> TestResult<Vec<u8>> {
-    let encoded = encode_value(value)?;
+    let encoded = canonical(value)?;
     let length = u32::try_from(encoded.len())?;
     let mut frame = length.to_be_bytes().to_vec();
     frame.extend(encoded);
@@ -166,14 +168,6 @@ fn encode_frames(values: &[Value]) -> TestResult<Vec<u8>> {
     Ok(bytes)
 }
 
-fn replace_field(value: &mut Value, index: usize, replacement: Value) -> TestResult {
-    let Value::Array(fields) = value else {
-        return Err("frame must be an array".into());
-    };
-    *fields.get_mut(index).ok_or("field missing")? = replacement;
-    Ok(())
-}
-
 #[test]
 fn transport_errors_preserve_public_failure_classes() {
     assert_eq!(
@@ -216,12 +210,9 @@ fn attempt_stream_round_trips_authenticated_artifacts_and_selected_caps() -> Tes
 
 #[test]
 fn attempt_writer_rejects_invalid_public_values() {
-    let invalid: [fn(&mut CaseAttempt); 12] = [
+    let invalid: [fn(&mut CaseAttempt); 9] = [
         |value: &mut CaseAttempt| value.case_id.clear(),
         |value: &mut CaseAttempt| value.case_id = "a".repeat(129),
-        |value: &mut CaseAttempt| value.claim_layer = 7,
-        |value: &mut CaseAttempt| value.family = 7,
-        |value: &mut CaseAttempt| value.mode = 4,
         |value: &mut CaseAttempt| value.fixture_digest = [0; 32],
         |value: &mut CaseAttempt| value.watchdog_ms = 0,
         |value: &mut CaseAttempt| value.capability_ids.swap(0, 1),
@@ -309,6 +300,20 @@ fn attempt_writer_reports_payload_and_auxiliary_frame_failures() {
             Err(TransportError::InvalidEncoding)
         );
     }
+}
+
+#[test]
+fn attempt_reader_rejects_unassigned_discriminants() -> TestResult {
+    let valid = frame_values(&encoded_attempt(&attempt())?)?;
+    for (field, code) in [(3, 7_u64), (4, 7), (5, 4), (3, 256)] {
+        let mut changed = valid.clone();
+        replace_field(&mut changed[0], field, Value::Integer(code.into()))?;
+        assert_eq!(
+            read_attempt(signed_frames(changed, ATTEMPT_DOMAIN, 2)?.as_slice()),
+            Err(TransportError::InvalidEncoding)
+        );
+    }
+    Ok(())
 }
 
 #[test]
@@ -420,7 +425,7 @@ fn observation_stream_round_trips_every_terminal_result() -> TestResult {
             code_id: "denied".to_owned(),
         }),
         SubjectResult::Divergence {
-            classification: 6,
+            classification: DivergenceMismatchKind::SchemaOrUpcaster,
             first_coordinate: vec![4, 5],
         },
         SubjectResult::Unavailable,
@@ -433,6 +438,32 @@ fn observation_stream_round_trips_every_terminal_result() -> TestResult {
             Ok(expected)
         );
     }
+    for classification in DivergenceMismatchKind::ALL.iter().copied() {
+        let expected = observation(SubjectResult::Divergence {
+            classification,
+            first_coordinate: vec![1],
+        });
+        let encoded = encoded_observation(&expected)?;
+        assert_eq!(read_observation(encoded.as_slice(), 1024), Ok(expected));
+    }
+    Ok(())
+}
+
+#[test]
+fn observation_reader_rejects_unassigned_divergence_classification() -> TestResult {
+    let divergence = observation(SubjectResult::Divergence {
+        classification: DivergenceMismatchKind::EventIdentity,
+        first_coordinate: vec![1],
+    });
+    let mut values = frame_values(&encoded_observation(&divergence)?)?;
+    let terminal = values.last_mut().ok_or("terminal missing")?;
+    let unassigned = Value::Array(vec![Value::Integer(9_u64.into()), Value::Bytes(vec![1])]);
+    replace_field(terminal, 6, unassigned)?;
+    let encoded = signed_frames(values, OBSERVATION_DOMAIN, 8)?;
+    assert_eq!(
+        read_observation(encoded.as_slice(), 1024),
+        Err(TransportError::InvalidEncoding)
+    );
     Ok(())
 }
 
@@ -471,15 +502,11 @@ fn observation_transport_rejects_selected_bounds_and_invalid_results() -> TestRe
 
     for result in [
         SubjectResult::Divergence {
-            classification: 9,
-            first_coordinate: vec![1],
-        },
-        SubjectResult::Divergence {
-            classification: 1,
+            classification: DivergenceMismatchKind::EventOrder,
             first_coordinate: Vec::new(),
         },
         SubjectResult::Divergence {
-            classification: 1,
+            classification: DivergenceMismatchKind::EventOrder,
             first_coordinate: vec![1; 129],
         },
         SubjectResult::Failure(NamespacedFailure {

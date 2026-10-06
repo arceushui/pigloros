@@ -12,7 +12,7 @@ struct LocalBindingFixture {
 
 impl LocalBindingFixture {
     fn new(
-        mode: u8,
+        mode: ExecutionMode,
         capabilities: Vec<Value>,
         plans: Vec<NetworkExchangePlan>,
         proxy_limits: [u64; 3],
@@ -23,8 +23,11 @@ impl LocalBindingFixture {
             limits[10 + offset] =
                 Value::Array(vec![integer(10 + u64::try_from(offset)?), integer(value)]);
         }
-        let policy =
-            launch_policy_with_limits(wrapped_digest(&fixture.sim1)?, u64::from(mode), limits)?;
+        let policy = launch_policy_with_limits(
+            wrapped_digest(&fixture.sim1)?,
+            u64::from(mode.code()),
+            limits,
+        )?;
         fixture.lps1 =
             redigest_unsigned_field(&policy, "LPS1", 6, Value::Array(ordered(capabilities)?))?;
         fixture.policy = fixture.policy_for_image(&fixture.sim1, &fixture.lps1)?;
@@ -42,7 +45,7 @@ impl LocalBindingFixture {
         let request = SandboxExecuteRequest::from_canonical_cbor(&request)?;
         let mut attempt = selector_attempt();
         attempt.mode = mode;
-        attempt.network_allowed = mode == 0;
+        attempt.network_allowed = mode == ExecutionMode::Local;
         let commitment = provider.derive_selector_grant_commitment(
             &image,
             &launch,
@@ -82,7 +85,7 @@ impl LocalBindingFixture {
 fn local_network_binds_ordered_occurrences_endpoints_grant_and_limits() -> TestResult {
     for address in [vec![127, 0, 0, 1], vec![1; 16]] {
         let fixture = LocalBindingFixture::new(
-            0,
+            ExecutionMode::Local,
             vec![local_endpoint(&address, 443, 12, 34)],
             vec![local_plan(0, 3, 4)?, local_plan(1, 3, 4)?],
             [11, 22, 33],
@@ -113,11 +116,15 @@ fn local_network_binds_ordered_occurrences_endpoints_grant_and_limits() -> TestR
 
 #[test]
 fn local_network_rejects_nonlocal_foreign_and_noncanonical_policy() -> TestResult {
-    for mode in [1, 2, 3] {
+    for mode in [
+        ExecutionMode::AirGapped,
+        ExecutionMode::Replay,
+        ExecutionMode::Fork,
+    ] {
         let fixture = LocalBindingFixture::new(mode, vec![], vec![], [1; 3])?;
         assert!(fixture.bind().is_err());
     }
-    let fixture = LocalBindingFixture::new(0, vec![], vec![], [1; 3])?;
+    let fixture = LocalBindingFixture::new(ExecutionMode::Local, vec![], vec![], [1; 3])?;
     assert_eq!(fixture.bind()?.exchanges().len(), 0);
     let changed = redigest_unsigned_field(
         &fixture.policy,
@@ -131,7 +138,7 @@ fn local_network_rejects_nonlocal_foreign_and_noncanonical_policy() -> TestResul
             .bind_local_network(&fixture.commitment, &policy, &fixture.plans)
             .is_err());
     }
-    let foreign = LocalBindingFixture::new(0, vec![], vec![], [2; 3])?;
+    let foreign = LocalBindingFixture::new(ExecutionMode::Local, vec![], vec![], [2; 3])?;
     assert!(fixture
         .grant
         .bind_local_network(&foreign.commitment, &fixture.policy, &fixture.plans)
@@ -142,7 +149,7 @@ fn local_network_rejects_nonlocal_foreign_and_noncanonical_policy() -> TestResul
 #[test]
 fn local_network_rejects_plan_reordering_omission_substitution_and_oversized_lists() -> TestResult {
     let fixture = LocalBindingFixture::new(
-        0,
+        ExecutionMode::Local,
         vec![local_endpoint(&[127, 0, 0, 1], 443, 10, 10)],
         vec![local_plan(0, 3, 4)?, local_plan(1, 3, 4)?],
         [100; 3],
@@ -179,16 +186,29 @@ fn local_network_requires_unique_matching_bounded_endpoint_capabilities() -> Tes
     let endpoint = local_endpoint(&[127, 0, 0, 1], 443, 10, 10);
     let duplicate = local_endpoint(&[127, 0, 0, 1], 444, 10, 10);
     for capabilities in [vec![], vec![endpoint.clone(), duplicate]] {
-        let fixture =
-            LocalBindingFixture::new(0, capabilities, vec![local_plan(0, 3, 4)?], [100; 3])?;
+        let fixture = LocalBindingFixture::new(
+            ExecutionMode::Local,
+            capabilities,
+            vec![local_plan(0, 3, 4)?],
+            [100; 3],
+        )?;
         assert!(fixture.bind().is_err());
     }
     for plan in [local_plan(0, 11, 4)?, local_plan(0, 3, 11)?] {
-        let fixture = LocalBindingFixture::new(0, vec![endpoint.clone()], vec![plan], [100; 3])?;
+        let fixture = LocalBindingFixture::new(
+            ExecutionMode::Local,
+            vec![endpoint.clone()],
+            vec![plan],
+            [100; 3],
+        )?;
         assert!(fixture.bind().is_err());
     }
-    let fixture =
-        LocalBindingFixture::new(0, vec![endpoint], vec![local_plan(0, 10, 10)?], [100; 3])?;
+    let fixture = LocalBindingFixture::new(
+        ExecutionMode::Local,
+        vec![endpoint],
+        vec![local_plan(0, 10, 10)?],
+        [100; 3],
+    )?;
     assert_eq!(fixture.bind()?.exchanges().len(), 1);
     Ok(())
 }
@@ -200,7 +220,7 @@ fn local_network_rejects_unsupported_retention_and_unrepresentable_request_frame
     seal_local_plan(&mut unsupported)?;
     for plan in [unsupported, local_plan(0, 16 * 1024 * 1024, 1)?] {
         let fixture = LocalBindingFixture::new(
-            0,
+            ExecutionMode::Local,
             vec![local_endpoint(&[127, 0, 0, 1], 443, 128 * 1024 * 1024, 10)],
             vec![plan],
             [100; 3],
@@ -213,7 +233,7 @@ fn local_network_rejects_unsupported_retention_and_unrepresentable_request_frame
 #[test]
 fn local_network_retains_literal_zero_limits_without_minting_runtime_authority() -> TestResult {
     let fixture = LocalBindingFixture::new(
-        0,
+        ExecutionMode::Local,
         vec![local_endpoint(&[127, 0, 0, 1], 443, 10, 10)],
         vec![local_plan(0, 3, 4)?],
         [0; 3],

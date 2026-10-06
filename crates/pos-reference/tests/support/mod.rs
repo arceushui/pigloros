@@ -1,3 +1,7 @@
+pub mod cbor {
+    include!("cbor.rs");
+}
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::Write as _;
@@ -6,12 +10,14 @@ use std::io;
 use std::io::Write as _;
 use std::path::Path;
 
+use cbor::canonical;
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use pos_reference::evaluator_build_identity::{
     verify_evaluator_build_identity, EvaluatorBuildEvidence, VerifiedEvaluatorBuildIdentity,
+    PACKAGE_EVIDENCE_FILES,
 };
 use pos_reference::evaluator_protocol::{
     EvaluationRequest, ImplementationIdentity, IndependenceEvidence, OutputCapability,
@@ -97,23 +103,23 @@ pub(crate) fn write_evaluator_package(directory: &Path, binary: &Path) -> TestRe
     fs::create_dir_all(directory.join("source"))?;
     fs::create_dir_all(directory.join("bin"))?;
     let source = source_archive("1111111111111111111111111111111111111111")?;
-    fs::write(directory.join("source/pigloros-source.tar.gz"), &source)?;
-    fs::copy(binary, directory.join("bin/pos-reference-evaluator"))?;
+    fs::write(directory.join(PACKAGE_EVIDENCE_FILES.source), &source)?;
+    fs::copy(binary, directory.join(PACKAGE_EVIDENCE_FILES.binary))?;
     fs::write(
-        directory.join("Cargo.lock"),
+        directory.join(PACKAGE_EVIDENCE_FILES.lock),
         b"public test dependency lock\n",
     )?;
-    fs::write(directory.join("sbom.cdx.json"), b"{}\n")?;
-    fs::write(directory.join("licences.json"), b"{}\n")?;
+    fs::write(directory.join(PACKAGE_EVIDENCE_FILES.sbom), b"{}\n")?;
+    fs::write(directory.join(PACKAGE_EVIDENCE_FILES.licences), b"{}\n")?;
     write_evaluator_provenance(directory, &source)?;
     write_checksum_inventory(directory)
 }
 
 pub(crate) fn write_evaluator_provenance(directory: &Path, source: &[u8]) -> TestResult<()> {
-    let binary = fs::read(directory.join("bin/pos-reference-evaluator"))?;
-    let lock = fs::read(directory.join("Cargo.lock"))?;
-    let sbom = fs::read(directory.join("sbom.cdx.json"))?;
-    let licences = fs::read(directory.join("licences.json"))?;
+    let binary = fs::read(directory.join(PACKAGE_EVIDENCE_FILES.binary))?;
+    let lock = fs::read(directory.join(PACKAGE_EVIDENCE_FILES.lock))?;
+    let sbom = fs::read(directory.join(PACKAGE_EVIDENCE_FILES.sbom))?;
+    let licences = fs::read(directory.join(PACKAGE_EVIDENCE_FILES.licences))?;
     let provenance = serde_json::json!({
         "build_target": "public-test-target",
         "cargo_locked": true,
@@ -128,21 +134,13 @@ pub(crate) fn write_evaluator_provenance(directory: &Path, source: &[u8]) -> Tes
     });
     let mut bytes = serde_json::to_vec(&provenance)?;
     bytes.push(b'\n');
-    fs::write(directory.join("provenance.json"), bytes)?;
+    fs::write(directory.join(PACKAGE_EVIDENCE_FILES.provenance), bytes)?;
     Ok(())
 }
 
 pub(crate) fn write_checksum_inventory(directory: &Path) -> TestResult<()> {
-    let paths = [
-        "Cargo.lock",
-        "bin/pos-reference-evaluator",
-        "licences.json",
-        "provenance.json",
-        "sbom.cdx.json",
-        "source/pigloros-source.tar.gz",
-    ];
     let mut inventory = String::new();
-    for path in paths {
+    for path in PACKAGE_EVIDENCE_FILES.ordered() {
         writeln!(
             inventory,
             "{}  {path}",
@@ -227,6 +225,24 @@ fn write_octal(field: &mut [u8], value: u64) {
     field.copy_from_slice(encoded.as_bytes());
 }
 
+/// One selected archive-closure cap that a profile mutation can pin to the measured closure.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum ClosureCap {
+    MemberCount,
+    PathBytes,
+    MemberBytes,
+    TotalBytes,
+}
+
+impl ClosureCap {
+    pub const ALL: [Self; 4] = [
+        Self::MemberCount,
+        Self::PathBytes,
+        Self::MemberBytes,
+        Self::TotalBytes,
+    ];
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ProfileMutation {
     ArtifactEncoding(u8),
@@ -239,8 +255,8 @@ pub enum ProfileMutation {
     SelectedProfileByteCapBoundary,
     SelectedProfileByteCapExact,
     InvertedTransportCaps,
-    SelectedClosureCapBoundary(u8),
-    SelectedClosureCapExact(u8),
+    SelectedClosureCapBoundary(ClosureCap),
+    SelectedClosureCapExact(ClosureCap),
     ExecutionContractBoundary(u8),
     FixtureSemanticBoundary(u8),
     ProvenanceBoundary(u8),
@@ -727,12 +743,12 @@ pub fn corpus_with_profile_mutation(mutation: ProfileMutation) -> TestResult<Cor
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
 pub fn corpus_with_selected_closure_cap_and_secret(
-    cap_index: u8,
+    cap: ClosureCap,
     secret: &[u8],
 ) -> TestResult<Corpus> {
     corpus_for_options(CorpusOptions {
         extra: Some(secret),
-        profile_mutation: Some(ProfileMutation::SelectedClosureCapBoundary(cap_index)),
+        profile_mutation: Some(ProfileMutation::SelectedClosureCapBoundary(cap)),
         ..CorpusOptions::default()
     })
 }
@@ -889,11 +905,11 @@ fn selected_hard_caps(
             array_fields_mut(&mut caps)?[4] = uint(2);
             array_fields_mut(&mut caps)?[5] = uint(1);
         }
-        Some(ProfileMutation::SelectedClosureCapBoundary(index)) => {
-            select_closure_cap_boundary(&mut caps, members, index)?;
+        Some(ProfileMutation::SelectedClosureCapBoundary(cap)) => {
+            select_closure_cap_boundary(&mut caps, members, cap)?;
         }
-        Some(ProfileMutation::SelectedClosureCapExact(index)) => {
-            select_closure_cap_exact(&mut caps, members, index)?;
+        Some(ProfileMutation::SelectedClosureCapExact(cap)) => {
+            select_closure_cap_exact(&mut caps, members, cap)?;
         }
         _ => {}
     }
@@ -3382,14 +3398,14 @@ fn select_hard_cap_boundary(hard_caps: &mut Value, index: u8) -> TestResult<()> 
 fn select_closure_cap_boundary(
     hard_caps: &mut Value,
     members: &BTreeMap<String, (Vec<u8>, u8)>,
-    index: u8,
+    cap: ClosureCap,
 ) -> TestResult<()> {
     let measurements = closure_measurements(members)?;
-    let (cap_index, value) = match index {
-        0 => (2, measurements.member_count.saturating_sub(1)),
-        1 => (3, measurements.maximum_path_bytes.saturating_sub(1)),
-        2 => (4, measurements.maximum_member_bytes.saturating_sub(1)),
-        _ => (5, measurements.member_bytes),
+    let (cap_index, value) = match cap {
+        ClosureCap::MemberCount => (2, measurements.member_count.saturating_sub(1)),
+        ClosureCap::PathBytes => (3, measurements.maximum_path_bytes.saturating_sub(1)),
+        ClosureCap::MemberBytes => (4, measurements.maximum_member_bytes.saturating_sub(1)),
+        ClosureCap::TotalBytes => (5, measurements.member_bytes),
     };
     let fields = array_fields_mut(hard_caps)?;
     fields[cap_index] = uint(value);
@@ -3402,14 +3418,14 @@ fn select_closure_cap_boundary(
 fn select_closure_cap_exact(
     hard_caps: &mut Value,
     members: &BTreeMap<String, (Vec<u8>, u8)>,
-    index: u8,
+    cap: ClosureCap,
 ) -> TestResult<()> {
     let measurements = closure_measurements(members)?;
-    let (cap_index, value) = match index {
-        0 => (2, measurements.member_count),
-        1 => (3, measurements.maximum_path_bytes),
-        2 => (4, measurements.maximum_member_bytes),
-        _ => return Ok(()),
+    let (cap_index, value) = match cap {
+        ClosureCap::MemberCount => (2, measurements.member_count),
+        ClosureCap::PathBytes => (3, measurements.maximum_path_bytes),
+        ClosureCap::MemberBytes => (4, measurements.maximum_member_bytes),
+        ClosureCap::TotalBytes => return Ok(()),
     };
     array_fields_mut(hard_caps)?[cap_index] = uint(value);
     Ok(())
@@ -3484,7 +3500,12 @@ fn profile_with_selected_closure_caps(
         }
         return Err(io::Error::other("exact profile byte cap did not converge").into());
     }
-    if matches!(mutation, Some(ProfileMutation::SelectedClosureCapExact(3))) {
+    if matches!(
+        mutation,
+        Some(ProfileMutation::SelectedClosureCapExact(
+            ClosureCap::TotalBytes
+        ))
+    ) {
         const MAX_CONVERGENCE_STEPS: usize = 8;
         for _ in 0..MAX_CONVERGENCE_STEPS {
             let profile_bytes = encoded_profile_length(&profile_value)?;
@@ -3558,12 +3579,6 @@ fn fields(value: Value) -> TestResult<Vec<Value>> {
         return Err(io::Error::other("test value is not an array").into());
     };
     Ok(fields)
-}
-
-fn canonical(value: &Value) -> TestResult<Vec<u8>> {
-    let mut encoded = Vec::new();
-    ciborium::into_writer(value, &mut encoded)?;
-    Ok(encoded)
 }
 
 const fn array(values: Vec<Value>) -> Value {
