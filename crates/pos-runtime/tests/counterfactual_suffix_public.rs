@@ -127,6 +127,8 @@ const PAGE_CAP: usize = MAX_PIPELINE_DRAFT_BATCH_BYTES;
 /// Event's other content bytes in one batch.
 const HEAVY_PAYLOAD: usize = MAX_PIPELINE_DRAFT_BATCH_BYTES - 1_024;
 const WORLD_TYPE: &str = "counterfactual.world";
+/// Half of one Tick batch's bytes: two such Events overflow one batch.
+const HALF_BATCH: usize = MAX_PIPELINE_DRAFT_BATCH_BYTES / 2;
 
 fn root_id() -> TimelineId {
     TimelineId::from_ulid(Ulid::from(0x5100_u128))
@@ -1629,6 +1631,133 @@ fn tampered_suffix_events_are_rejected<B: Backend>() -> TestResult {
 }
 both_backends!(tampered_suffix_events_are_rejected);
 
+/// One Tick's committed Events: its drafts, then its checkpoint Event.
+type TickBlock = Vec<EventDraft>;
+
+/// The drafts of honest `tick` followed by its exact checkpoint Event.
+fn tick_block(fixture: &Fixture, tick: u64) -> TestResult<TickBlock> {
+    let checkpoint = expected_checkpoints(fixture, tick)?
+        .pop()
+        .ok_or("no checkpoint")?;
+    let mut block = tick_drafts(tick);
+    block.push(checkpoint_event(&checkpoint)?);
+    Ok(block)
+}
+
+/// `block` with its first draft rewritten.
+fn rewritten(block: &[EventDraft]) -> TickBlock {
+    let mut block = block.to_vec();
+    block[0] = event_draft(WORLD_TYPE, vec![9]);
+    block
+}
+
+/// The concatenation of `parts`.
+fn history(parts: &[&[EventDraft]]) -> TickBlock {
+    parts.concat()
+}
+
+/// Histories of Ticks 12 through 14 that a coordinator never committed, each
+/// with a checkpoint chain that does not follow from its Events.
+fn forged_histories(fixture: &Fixture) -> TestResult<Vec<TickBlock>> {
+    let early = tick_block(fixture, 12)?;
+    let mid = tick_block(fixture, 13)?;
+    let late = tick_block(fixture, 14)?;
+    let (early_ev, early_cp) = early.split_at(2);
+    let (mid_ev, mid_cp) = mid.split_at(2);
+    let (late_ev, late_cp) = late.split_at(2);
+    // Tick 13's slot, relabeled with the honest state of Tick 14.
+    let last = expected_checkpoints(fixture, 14)?
+        .pop()
+        .ok_or("no checkpoint")?;
+    let state14 = last.state_digests[0].digest;
+    let relabeled = checkpoint_at(fixture, 13, tick_seq(13), state14)?;
+    let relabeled = [checkpoint_event(&relabeled)?];
+    Ok(vec![
+        // The first later Tick's content, then a middle one, then the last.
+        history(&[&rewritten(&early), early_cp, &mid, &late]),
+        history(&[&early, &rewritten(&mid), mid_cp, &late]),
+        history(&[&early, &mid, &rewritten(&late), late_cp]),
+        // Events swapped between Ticks, each keeping its own checkpoint.
+        history(&[&early, late_ev, mid_cp, mid_ev, late_cp]),
+        history(&[mid_ev, early_cp, early_ev, mid_cp, &late]),
+        // Whole Ticks reordered, or Tick 13 dropped.
+        history(&[&early, &late, &mid]),
+        history(&[&early, &late]),
+        // Tick 14's Events under a consistently numbered checkpoint.
+        history(&[&early, late_ev, &relabeled]),
+    ])
+}
+
+fn forged_tick_histories_are_rejected<B: Backend>() -> TestResult {
+    let reference = reference()?;
+    let setup = prepare::<B>()?;
+    for forged in forged_histories(&setup.fixture)? {
+        let mut setup = prepare::<B>()?;
+        run(&mut setup, &mut Stager::failing(12, Fault::Error))?;
+        let mut setup = reopen(setup, |store| {
+            store.append(fork_id(), &forged)?;
+            Ok(())
+        })?;
+        assert_rejected(&mut setup, SuffixError::RecoveryMismatch);
+    }
+    // Control: the same Ticks, honestly committed, recover and finish.
+    let mut setup = prepare::<B>()?;
+    run(&mut setup, &mut Stager::failing(12, Fault::Error))?;
+    let early = tick_block(&setup.fixture, 12)?;
+    let mid = tick_block(&setup.fixture, 13)?;
+    let honest = history(&[&early, &mid]);
+    let mut setup = reopen(setup, |store| {
+        store.append(fork_id(), &honest)?;
+        Ok(())
+    })?;
+    assert_eq!(run(&mut setup, &mut Stager::default())?, reference);
+    Ok(())
+}
+both_backends!(forged_tick_histories_are_rejected);
+
+/// Events appended after the first Tick without a checkpoint Event, which no
+/// honest Tick has: one batch of Events, or more than one batch of bytes.
+fn oversized_tick_events() -> [Vec<EventDraft>; 2] {
+    [
+        world_drafts(99, MAX_PIPELINE_DRAFTS_PER_BATCH),
+        vec![
+            event_draft(WORLD_TYPE, vec![0x5b; HALF_BATCH + 1]),
+            event_draft(WORLD_TYPE, vec![0x5b; HALF_BATCH]),
+        ],
+    ]
+}
+
+fn unbounded_tick_buffers_are_rejected<B: Backend>() -> TestResult {
+    for drafts in oversized_tick_events() {
+        let mut setup = prepare::<B>()?;
+        run(&mut setup, &mut Stager::failing(12, Fault::Error))?;
+        let mut setup = reopen(setup, |store| {
+            store.append(fork_id(), &drafts)?;
+            Ok(())
+        })?;
+        assert_rejected(&mut setup, SuffixError::RecoveryMismatch);
+    }
+    Ok(())
+}
+both_backends!(unbounded_tick_buffers_are_rejected);
+
+/// Every recomputed Event of every Tick, the first through the last, is bound
+/// by the chained state on every later call.
+#[test]
+fn every_committed_tick_event_is_bound_by_the_chain() -> TestResult {
+    for tick in FRONTIER_TICK..=HORIZON_TICK {
+        for seq in [tick_seq(tick) - 1, tick_seq(tick)] {
+            let mut setup = prepare::<Faulty<MemoryStore>>()?;
+            assert_eq!(run(&mut setup, &mut Stager::default())?.failure, None);
+            let mut setup = configure(setup, StoreFault::Altered(seq), Interference::None)?;
+            assert_rejected(&mut setup, SuffixError::RecoveryMismatch);
+            let mut setup = configure(setup, StoreFault::None, Interference::None)?;
+            assert_eq!(run(&mut setup, &mut Stager::default())?.failure, None);
+        }
+    }
+    Ok(())
+}
+
 fn recovered_tick_without_a_recomputed_event_is_rejected<B: Backend>() -> TestResult {
     let mut setup = prepare::<B>()?;
     run(&mut setup, &mut Stager::failing(14, Fault::Error))?;
@@ -1761,7 +1890,7 @@ const FIRST_TICK_FAULTS: [FaultCase; 6] = [
 ];
 
 /// Faults once Ticks 12 through 14 are committed.
-const LATER_TICK_FAULTS: [FaultCase; 6] = [
+const LATER_TICK_FAULTS: [FaultCase; 7] = [
     (StoreFault::ReadFailsFrom(FIRST_TICK_HEAD + 1), STORAGE),
     (
         StoreFault::Dropped(tick_seq(13)),
@@ -1780,6 +1909,11 @@ const LATER_TICK_FAULTS: [FaultCase; 6] = [
     // ...and its own content.
     (
         StoreFault::Altered(tick_seq(12)),
+        SuffixError::RecoveryMismatch,
+    ),
+    // An intermediate Tick's content is verified by the chained state.
+    (
+        StoreFault::Altered(tick_seq(13)),
         SuffixError::RecoveryMismatch,
     ),
     // The last Tick's re-derived `RCP1` binds its content.
