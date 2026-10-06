@@ -57,6 +57,8 @@ pub enum ActionSubmissionError {
 pub enum RuntimeError {
     #[error(transparent)]
     ManifestRegistration(#[from] crate::ManifestRegistrationErrorV1),
+    #[error(transparent)]
+    ManifestSlot(#[from] crate::ManifestSlotErrorV1),
     /// An output-admission failure. `From` remaps
     /// [`crate::OutputAdmissionErrorV1::Composition`] to
     /// [`RuntimeError::Composition`], so a conversion never wraps it here.
