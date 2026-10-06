@@ -19,6 +19,15 @@ const FLAG_RESERVED_TWO: u8 = 1 << 5;
 const FLAG_AT: u8 = 1 << 6;
 const FLAG_ED: u8 = 1 << 7;
 
+const ATTESTATION_FORMAT_FIELD: u8 = 1;
+const ATTESTATION_STATEMENT_FIELD: u8 = 1 << 1;
+const ATTESTATION_AUTH_DATA_FIELD: u8 = 1 << 2;
+const COSE_KTY_FIELD: u8 = 1;
+const COSE_ALGORITHM_FIELD: u8 = 1 << 1;
+const COSE_CURVE_FIELD: u8 = 1 << 2;
+const COSE_X_FIELD: u8 = 1 << 3;
+const COSE_Y_FIELD: u8 = 1 << 4;
+
 const RP_ID_HASH: [u8; 32] = [
     0x49, 0x96, 0x0d, 0xe5, 0x88, 0x0e, 0x8c, 0x68, 0x74, 0x34, 0x17, 0x0f, 0x64, 0x76, 0x60, 0x5b,
     0x8f, 0xe4, 0xae, 0xb9, 0xa2, 0x86, 0x32, 0xc7, 0x99, 0x5c, 0xf3, 0xba, 0x83, 0x1d, 0x97, 0x63,
@@ -180,30 +189,26 @@ pub fn parse_none_attestation_object<'a>(
         return Err(OwnerBridgeCodecError::InvalidPayload);
     }
 
-    const FORMAT_SEEN: u8 = 1;
-    const STATEMENT_SEEN: u8 = 1 << 1;
-    const AUTH_DATA_SEEN: u8 = 1 << 2;
-
     let mut seen = 0;
     let mut auth_data = input;
     for _ in 0..count {
         let key = reader.map_key()?;
         if key.equals_text(b"fmt") {
-            if seen & FORMAT_SEEN != 0 || reader.text()? != b"none" {
+            if seen & ATTESTATION_FORMAT_FIELD != 0 || reader.text()? != b"none" {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            seen |= FORMAT_SEEN;
+            seen |= ATTESTATION_FORMAT_FIELD;
         } else if key.equals_text(b"attStmt") {
-            if seen & STATEMENT_SEEN != 0 || reader.map_len()? != 0 {
+            if seen & ATTESTATION_STATEMENT_FIELD != 0 || reader.map_len()? != 0 {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            seen |= STATEMENT_SEEN;
+            seen |= ATTESTATION_STATEMENT_FIELD;
         } else if key.equals_text(b"authData") {
-            if seen & AUTH_DATA_SEEN != 0 {
+            if seen & ATTESTATION_AUTH_DATA_FIELD != 0 {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
             auth_data = reader.bytes(MIN_AUTHENTICATOR_DATA_BYTES, MAX_AUTHENTICATOR_DATA_BYTES)?;
-            seen |= AUTH_DATA_SEEN;
+            seen |= ATTESTATION_AUTH_DATA_FIELD;
         } else {
             return Err(OwnerBridgeCodecError::InvalidPayload);
         }
@@ -361,44 +366,38 @@ fn parse_cose_es256_key(
         return Err(OwnerBridgeCodecError::InvalidPayload);
     }
 
-    const KTY_SEEN: u8 = 1;
-    const ALGORITHM_SEEN: u8 = 1 << 1;
-    const CURVE_SEEN: u8 = 1 << 2;
-    const X_SEEN: u8 = 1 << 3;
-    const Y_SEEN: u8 = 1 << 4;
-
     let mut seen = 0;
     let mut x = [0; 32];
     let mut y = [0; 32];
     for _ in 0..5 {
         let key = reader.map_key()?;
         if key.is_unsigned(1) {
-            if seen & KTY_SEEN != 0 || reader.unsigned()? != 2 {
+            if seen & COSE_KTY_FIELD != 0 || reader.unsigned()? != 2 {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            seen |= KTY_SEEN;
+            seen |= COSE_KTY_FIELD;
         } else if key.is_unsigned(3) {
-            if seen & ALGORITHM_SEEN != 0 || reader.signed()? != -7 {
+            if seen & COSE_ALGORITHM_FIELD != 0 || reader.signed()? != -7 {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            seen |= ALGORITHM_SEEN;
+            seen |= COSE_ALGORITHM_FIELD;
         } else if key.is_negative(0) {
-            if seen & CURVE_SEEN != 0 || reader.unsigned()? != 1 {
+            if seen & COSE_CURVE_FIELD != 0 || reader.unsigned()? != 1 {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            seen |= CURVE_SEEN;
+            seen |= COSE_CURVE_FIELD;
         } else if key.is_negative(1) {
-            if seen & X_SEEN != 0 {
+            if seen & COSE_X_FIELD != 0 {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
             x = reader.fixed_bytes()?;
-            seen |= X_SEEN;
+            seen |= COSE_X_FIELD;
         } else if key.is_negative(2) {
-            if seen & Y_SEEN != 0 {
+            if seen & COSE_Y_FIELD != 0 {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
             y = reader.fixed_bytes()?;
-            seen |= Y_SEEN;
+            seen |= COSE_Y_FIELD;
         } else {
             return Err(OwnerBridgeCodecError::InvalidPayload);
         }
