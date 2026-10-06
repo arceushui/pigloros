@@ -21,8 +21,8 @@
 //! `counterfactual_dependency_nodes`, `counterfactual_dependency_edges`, see
 //! the `dependency` module), two purge tables
 //! (`counterfactual_fork_tombstones`, `counterfactual_purge_fence`), one
-//! lookup index, and twenty-four guard triggers (fifteen on the storage and
-//! purge tables, nine on the dependency tables) are created with
+//! lookup index, and twenty-five guard triggers (fifteen on the storage and
+//! purge tables, ten on the dependency tables) are created with
 //! `IF NOT EXISTS` by every writable open, so creation is additive and
 //! idempotent. This is the one normative first version of the schema: a file
 //! written by an earlier build, whose delete guards lack the purge-marker
@@ -33,7 +33,10 @@
 //! open still fails. A file with the exact storage schema that only lacks the
 //! dependency tables gains them empty on a writable open (there is nothing to
 //! migrate, and no migration exists), and a read-only open of it fails the
-//! validation with a missing-table error.
+//! validation with a missing-table error. A read-only open of a file written
+//! by the previous schema and never opened writably since therefore refuses to
+//! open until one writable open adds the dependency tables, which is
+//! acceptable under the no-migration, replacement-first rule.
 //! Every open validates the exact table shapes, the index, and the trigger
 //! bodies, and fails closed with a storage error on any drift. A read-only
 //! open of a file written before this schema, which has no counterfactual
@@ -488,8 +491,9 @@ struct CounterfactualSchemaObjectV1 {
 }
 
 // The `WHEN NOT EXISTS (... counterfactual_purge_fence ...)` clause is
-// repeated in four trigger bodies on purpose: the exact-body validation
-// compares literal text, so the four copies must stay identical.
+// repeated in four trigger bodies here and in three in the `dependency`
+// module, seven copies in all, on purpose: the exact-body validation compares
+// literal text, so the seven copies must stay identical.
 /// The quarantine lookup index and the guards that keep generations
 /// monotonic, quarantine permanent, and recorded bytes immutable.
 const COUNTERFACTUAL_SCHEMA_OBJECTS: &[CounterfactualSchemaObjectV1] = &[
@@ -627,7 +631,8 @@ const COUNTERFACTUAL_SCHEMA_OBJECTS: &[CounterfactualSchemaObjectV1] = &[
     dependency::RECORDS_MONOTONIC,
     dependency::NODES_RETAINED,
     dependency::NODES_IMMUTABLE,
-    dependency::NODES_NOT_REPLACED,
+    dependency::NODES_DIGEST_NOT_REPLACED,
+    dependency::NODES_KEY_NOT_REPLACED,
     dependency::EDGES_RETAINED,
     dependency::EDGES_IMMUTABLE,
     dependency::EDGES_NOT_REPLACED,
@@ -1386,33 +1391,7 @@ impl CounterfactualStorePortV1 for SqliteStore {
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
     ) -> Result<CounterfactualInvalidationOutcomeV1, StoreError> {
-        let fork = command.fork();
-        let generation = sql_integer(command.new_generation().generation)?;
-        let first_tick = sql_integer(command.first_tick())?;
-        let staged = self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
-            store.in_counterfactual_scope(|store| {
-                then_staged(store.writable_counterfactual_basis(fork), |persisted| {
-                    command
-                        .expected_basis()
-                        .first_conflict(&persisted)
-                        .map_or_else(
-                            || {
-                                store.write_counterfactual_generation(
-                                    command, generation, first_tick,
-                                )
-                            },
-                            |conflict| {
-                                Ok(Ok(
-                                    CounterfactualInvalidationOutcomeV1::InvalidationConflict(
-                                        conflict,
-                                    ),
-                                ))
-                            },
-                        )
-                })
-            })
-        });
-        self.settle_write(staged)
+        self.commit_invalidation_recording(command, None)
     }
 
     fn append_counterfactual_tick(
@@ -1421,23 +1400,7 @@ impl CounterfactualStorePortV1 for SqliteStore {
         expected: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
     ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
-        let staged = self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
-            store.in_counterfactual_scope(|store| {
-                then_staged(store.writable_counterfactual_basis(fork), |persisted| {
-                    expected.first_conflict(&persisted).map_or_else(
-                        || {
-                            // The outcome is built from the staged head; a
-                            // head that did not advance rolls back.
-                            store
-                                .append_tick_in_transaction(fork, drafts)
-                                .map(|head| persisted.committed_tick(&COUNTERFACTUAL_SEAL, head))
-                        },
-                        |conflict| Ok(Ok(CounterfactualTickOutcomeV1::Stale(conflict))),
-                    )
-                })
-            })
-        });
-        self.settle_write(staged)
+        self.append_tick_recording(fork, expected, drafts, None)
     }
 
     fn current_fork_generation(&self, fork: TimelineId) -> Result<ForkGenerationV1, StoreError> {
@@ -1513,11 +1476,13 @@ impl CounterfactualStorePortV1 for SqliteStore {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use pos_core::counterfactual_store::test_fixtures::{
         frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, uint,
     };
     use pos_core::{
-        CanonicalBytes, CounterfactualInvalidationInputV1, EntityId,
+        CanonicalBytes, CounterfactualInvalidationInputV1, EntityId, ErasureContainmentGateV1,
         ErasureInventoryPersistencePortV1, ErasureProtectedEffectDispositionV1, EventDraft,
         EventStore, Kind, RecomputationFrontierBytesV1, SuffixInvalidationBytesV1,
     };
@@ -1606,7 +1571,21 @@ mod tests {
     /// An in-memory store with a published Fork at logical Seq 1.
     #[cfg_attr(coverage_nightly, coverage(off))]
     pub(super) fn published_store() -> (SqliteStore, TimelineId) {
-        let mut store = super::super::tests::new_store();
+        publish_fork(super::super::tests::new_store())
+    }
+
+    /// A writable store on the file at `path`, bound to an open gate.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(super) fn open_file_store(path: &str) -> SqliteStore {
+        let mut store = ok(SqliteStore::open(path));
+        ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
+        store
+    }
+
+    /// Create a root with one Event and a Fork at logical Seq 1 on `store`,
+    /// and publish the Fork's facts.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(super) fn publish_fork(mut store: SqliteStore) -> (SqliteStore, TimelineId) {
         let root = ok(store.create_timeline("counterfactual-root")).id();
         ok(store.append(root, drafts().drafts()));
         let fork = ok(store.fork(root, Seq::from_u64(1), "counterfactual-fork")).id();

@@ -8,7 +8,7 @@
 //!
 //! # Schema
 //!
-//! Three additive tables and nine guard triggers, created and validated like
+//! Three additive tables and ten guard triggers, created and validated like
 //! the rest of the counterfactual schema:
 //!
 //! - `counterfactual_dependency_records` holds one row per recorded Tick
@@ -42,18 +42,26 @@
 //! guards of the storage tables), and refuse an insert that repeats a key.
 //! The record Tick guard also refuses an insert that is not above every Tick
 //! already recorded in its set, so the database enforces what the adapter
-//! checks. The node insert guard covers both unique keys, so
-//! `INSERT OR REPLACE` cannot delete and rewrite a node past the other guards.
+//! checks. A node has two unique keys and one insert guard for each, a single
+//! condition per guard so each lookup is one index probe; together they stop
+//! `INSERT OR REPLACE` from deleting and rewriting a node past the other
+//! guards.
 //!
 //! # Decisions
 //!
-//! - **Order of checks.** An invalidation checks its record before the basis,
-//!   like the contract's reference model: a record that is not provisional or
-//!   not at the command's first Tick is `BindingMismatch` even when the basis
-//!   is stale. A later Tick rechecks the basis first and reports `Stale`
-//!   before it checks the record; then it checks, in order, provisional,
-//!   record Tick, node collisions, and set capacity, all before the Tick's
-//!   drafts are appended.
+//! - **Order of checks.** Both writes take the erasure fence, then refuse an
+//!   admitted Fork and look the Fork up, like the in-memory adapter: a record
+//!   on an unknown, protected, or admitted Fork gets the Fork's error, never
+//!   `BindingMismatch`. An invalidation then checks its record before the
+//!   basis, like the contract's reference model: a record that is not
+//!   provisional or not at the command's first Tick is `BindingMismatch` even
+//!   when the basis is stale. A later Tick rechecks the basis first and
+//!   reports `Stale` before it checks the record; then it checks, in order,
+//!   provisional, record Tick, node collisions, and set capacity, all before
+//!   the Tick's drafts are appended.
+//! - **One write path.** The plain and the recording write of each operation
+//!   run the same helper, which takes the record as an `Option`, so a plain
+//!   write records nothing and cannot drift from the recording one.
 //! - **First record of a generation.** The record of an invalidation opens an
 //!   empty set at the command's first Tick, so it needs no Tick, collision, or
 //!   capacity check: a record is bounded far below the set bounds.
@@ -72,17 +80,24 @@
 //!   host's savepoint and refuse an unsettled in-doubt write. A stored row
 //!   that fails re-validation, or lies outside the requested scope, is
 //!   `CorruptState`.
-//! - **`SQLite`-only differences.** A record Tick above `i64::MAX` is
-//!   `FieldOutOfBounds` before any transaction, and a cursor Tick above it is
-//!   `BindingMismatch`. A parent-prefix `through_tick` above it selects every
-//!   row, like the in-memory adapter.
+//! - **`SQLite`-only differences.** `SQLite` stores signed 64-bit integers, so:
+//!   a record Tick above `i64::MAX` is `FieldOutOfBounds` before any fence,
+//!   Fork lookup, or transaction, and a first Tick above it is rejected the
+//!   same way; a cursor Tick above it is `BindingMismatch` before any fence
+//!   or Fork lookup; a parent-prefix `through_tick` above it selects every
+//!   row; and the rows of an older generation are retained but unreachable
+//!   (a read names the current generation only), where the in-memory adapter
+//!   keeps only the current generation's set.
 //! - **Deletion.** The marked purge of a deleted Timeline also deletes its
 //!   edges, nodes, and records, whether they are its Fork generations' or its
 //!   own committed prefix. A re-created Timeline ID starts with empty sets.
 //! - **Existing files.** The tables are additive and created with
 //!   `IF NOT EXISTS`; a writable open of a file with the storage tables but
 //!   without these creates them empty, and a read-only open of such a file
-//!   fails the exact validation. There is no migration.
+//!   fails the exact validation. There is no migration. Operationally, a file
+//!   written by the #337 storage schema and never opened writably since
+//!   refuses a read-only open until one writable open adds the new tables;
+//!   that is acceptable under the no-migration, replacement-first rule.
 
 use pos_core::{
     CoreError, CounterfactualBasisV1, CounterfactualDependencyErrorV1 as DepError,
@@ -129,7 +144,6 @@ const fn data_column(name: &'static str, kind: &'static str) -> SqliteSchemaColu
         primary_key: false,
     }
 }
-
 
 /// Tick records: the Tick persisted apart from the node Ticks, and the counts
 /// the capacity check sums.
@@ -218,8 +232,9 @@ pub(super) const EDGES_TABLE: SqliteSchemaTable = SqliteSchemaTable {
 };
 
 // The `WHEN NOT EXISTS (... counterfactual_purge_fence ...)` clause is
-// repeated in three trigger bodies on purpose, like the four of the storage
-// tables: the exact-body validation compares literal text.
+// repeated in three trigger bodies here and in four in the parent module, seven
+// copies in all, on purpose: the exact-body validation compares literal text,
+// so the seven copies must stay identical.
 pub(super) const RECORDS_RETAINED: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
     kind: "trigger",
     name: "counterfactual_dependency_records_retained",
@@ -268,21 +283,37 @@ pub(super) const NODES_IMMUTABLE: CounterfactualSchemaObjectV1 = CounterfactualS
            BEGIN SELECT RAISE(ABORT, 'dependency node is immutable'); END",
 };
 
-/// Covers both unique keys of a node, so a replacing insert deletes neither.
-pub(super) const NODES_NOT_REPLACED: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
-    kind: "trigger",
-    name: "counterfactual_dependency_nodes_not_replaced",
-    body: "BEFORE INSERT ON counterfactual_dependency_nodes
+/// Guards the artifact digest key of a node, so a replacing insert deletes no
+/// node that holds the digest.
+pub(super) const NODES_DIGEST_NOT_REPLACED: CounterfactualSchemaObjectV1 =
+    CounterfactualSchemaObjectV1 {
+        kind: "trigger",
+        name: "counterfactual_dependency_nodes_digest_not_replaced",
+        body: "BEFORE INSERT ON counterfactual_dependency_nodes
            WHEN EXISTS (
                SELECT 1 FROM counterfactual_dependency_nodes
                WHERE timeline_id = NEW.timeline_id AND generation = NEW.generation
-                 AND (artifact_digest = NEW.artifact_digest
-                      OR (tick = NEW.tick AND scheduler_position = NEW.scheduler_position
-                          AND owner_id = NEW.owner_id
-                          AND output_ordinal = NEW.output_ordinal))
+                 AND artifact_digest = NEW.artifact_digest
            )
-           BEGIN SELECT RAISE(ABORT, 'dependency node is already recorded'); END",
-};
+           BEGIN SELECT RAISE(ABORT, 'dependency node digest is already recorded'); END",
+    };
+
+/// Guards the position key of a node, so a replacing insert deletes no node
+/// that holds the key. One condition per trigger keeps each lookup on one
+/// index.
+pub(super) const NODES_KEY_NOT_REPLACED: CounterfactualSchemaObjectV1 =
+    CounterfactualSchemaObjectV1 {
+        kind: "trigger",
+        name: "counterfactual_dependency_nodes_key_not_replaced",
+        body: "BEFORE INSERT ON counterfactual_dependency_nodes
+           WHEN EXISTS (
+               SELECT 1 FROM counterfactual_dependency_nodes
+               WHERE timeline_id = NEW.timeline_id AND generation = NEW.generation
+                 AND tick = NEW.tick AND scheduler_position = NEW.scheduler_position
+                 AND owner_id = NEW.owner_id AND output_ordinal = NEW.output_ordinal
+           )
+           BEGIN SELECT RAISE(ABORT, 'dependency node key is already recorded'); END",
+    };
 
 pub(super) const EDGES_RETAINED: CounterfactualSchemaObjectV1 = CounterfactualSchemaObjectV1 {
     kind: "trigger",
@@ -577,6 +608,10 @@ fn build_page<T: DependencyPagedRowV1 + Clone>(
     request: &DependencyPageRequestV1,
     rows: &[T],
 ) -> Result<DependencyPageV1<T>, StoreError> {
+    // The rebuild clones the page, at most `MAX_DEPENDENCY_PAGE_ROWS_V1` rows:
+    // that bound is the accepted price of telling a caller's fault from a
+    // stored-row fault, since `try_new` is the only constructor that re-checks
+    // the rows.
     DependencyPageV1::from_ordered(request, rows)
         .map_err(StoreError::from)
         .and_then(|page| {
@@ -649,9 +684,18 @@ fn nodes_collide(
         .map(Ok)
 }
 
+/// Admit the record of a later Tick, if any: a plain Tick has none.
+fn admit_later_record(
+    conn: &Connection,
+    set: &DependencySetV1,
+    record: Option<&TickDependencyRecordV1>,
+) -> Staged<()> {
+    record.map_or(Ok(Ok(())), |record| admit_recorded_tick(conn, set, record))
+}
+
 /// Admit a record of a later Tick against the stored set: provisional, its
 /// Tick, no repeated position key or digest, and the set bounds.
-fn admit_later_record(
+fn admit_recorded_tick(
     conn: &Connection,
     set: &DependencySetV1,
     record: &TickDependencyRecordV1,
@@ -673,13 +717,18 @@ fn admit_later_record(
     })
 }
 
-/// Admit the record of an invalidation: provisional and at the first Tick.
-/// It opens an empty set and is bounded far below the set bounds.
-fn admit_first_record(record: &TickDependencyRecordV1, first_tick: u64) -> Result<(), StoreError> {
-    record.ensure_provisional().and_then(|()| {
-        (record.tick() == first_tick)
-            .then_some(())
-            .ok_or(StoreError::BindingMismatch)
+/// Admit the record of an invalidation, if any: provisional and at the first
+/// Tick. It opens an empty set and is bounded far below the set bounds.
+fn admit_first_record(
+    record: Option<&TickDependencyRecordV1>,
+    first_tick: u64,
+) -> Result<(), StoreError> {
+    record.map_or(Ok(()), |record| {
+        record.ensure_provisional().and_then(|()| {
+            (record.tick() == first_tick)
+                .then_some(())
+                .ok_or(StoreError::BindingMismatch)
+        })
     })
 }
 
@@ -868,28 +917,34 @@ impl SqliteStore {
             .and_then(|fetched| build_page(request, &fetched))
     }
 
-    /// Write the invalidation's generation and insert its first record in the
-    /// open transaction.
+    /// Write the invalidation's generation and insert its first record, if
+    /// any, in the open transaction.
     fn write_recorded_generation(
         &self,
         command: &CounterfactualInvalidationCommandV1,
         set: &DependencySetV1,
         first_tick: i64,
-        record: &TickDependencyRecordV1,
+        record: Option<&TickDependencyRecordV1>,
     ) -> Staged<CounterfactualInvalidationOutcomeV1> {
         let written = self.write_counterfactual_generation(command, set.generation, first_tick);
         then_staged(written, |outcome| {
-            insert_dependency_record(&self.conn, set, first_tick, record).map(|()| Ok(outcome))
+            record
+                .map_or(Ok(()), |record| {
+                    insert_dependency_record(&self.conn, set, first_tick, record)
+                })
+                .map(|()| Ok(outcome))
         })
     }
 
-    /// Append one later Tick and insert its record in the open transaction.
+    /// Append one later Tick and insert its record, if any, in the open
+    /// transaction. The outcome is built from the staged head; a head that did
+    /// not advance rolls back.
     fn append_recorded_tick(
         &self,
         fork: TimelineId,
         persisted: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
-        record: &TickDependencyRecordV1,
+        record: Option<&TickDependencyRecordV1>,
     ) -> Staged<CounterfactualTickOutcomeV1> {
         let set = DependencySetV1::new(fork, sql_tick(persisted.generation));
         then_staged(admit_later_record(&self.conn, &set, record), |()| {
@@ -897,10 +952,82 @@ impl SqliteStore {
                 .append_tick_in_transaction(fork, drafts)
                 .map(|head| persisted.committed_tick(&COUNTERFACTUAL_SEAL, head));
             then_staged(appended, |outcome| {
-                insert_dependency_record(&self.conn, &set, sql_tick(record.tick()), record)
+                record
+                    .map_or(Ok(()), |record| {
+                        insert_dependency_record(&self.conn, &set, sql_tick(record.tick()), record)
+                    })
                     .map(|()| Ok(outcome))
             })
         })
+    }
+
+    /// The one write path of an invalidation, plain (`record` is `None`) or
+    /// recording. After the fence, the admitted-Fork guard, and the Fork
+    /// lookup, a record is checked before the basis, so a misplaced record
+    /// wins over a stale basis.
+    pub(super) fn commit_invalidation_recording(
+        &mut self,
+        command: &CounterfactualInvalidationCommandV1,
+        record: Option<&TickDependencyRecordV1>,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, StoreError> {
+        let fork = command.fork();
+        let generation = sql_integer(command.new_generation().generation)?;
+        let first_tick = sql_integer(command.first_tick())?;
+        let set = DependencySetV1::new(fork, generation);
+        let staged = self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
+            store.in_counterfactual_scope(|store| {
+                then_staged(store.writable_counterfactual_basis(fork), |persisted| {
+                    let admitted = admit_first_record(record, command.first_tick());
+                    then_staged(Ok(admitted), |()| {
+                        command
+                            .expected_basis()
+                            .first_conflict(&persisted)
+                            .map_or_else(
+                                || {
+                                    store.write_recorded_generation(
+                                        command, &set, first_tick, record,
+                                    )
+                                },
+                                |conflict| {
+                                    Ok(Ok(
+                                        CounterfactualInvalidationOutcomeV1::InvalidationConflict(
+                                            conflict,
+                                        ),
+                                    ))
+                                },
+                            )
+                    })
+                })
+            })
+        });
+        self.settle_write(staged)
+    }
+
+    /// The one write path of a later Tick, plain (`record` is `None`) or
+    /// recording. A record's Tick must fit `SQLite` before any fence.
+    pub(super) fn append_tick_recording(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        record: Option<&TickDependencyRecordV1>,
+    ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
+        record
+            .map_or(Ok(()), |record| sql_integer(record.tick()).map(drop))
+            .and_then(|()| {
+                let staged =
+                    self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
+                        store.in_counterfactual_scope(|store| {
+                            then_staged(store.writable_counterfactual_basis(fork), |persisted| {
+                                expected.first_conflict(&persisted).map_or_else(
+                                    || store.append_recorded_tick(fork, &persisted, drafts, record),
+                                    |conflict| Ok(Ok(CounterfactualTickOutcomeV1::Stale(conflict))),
+                                )
+                            })
+                        })
+                    });
+                self.settle_write(staged)
+            })
     }
 }
 
@@ -926,31 +1053,7 @@ impl CounterfactualDependencyRecordingPortV1 for SqliteStore {
         command: &CounterfactualInvalidationCommandV1,
         record: &TickDependencyRecordV1,
     ) -> Result<CounterfactualInvalidationOutcomeV1, StoreError> {
-        let fork = command.fork();
-        let generation = sql_integer(command.new_generation().generation)?;
-        let first_tick = sql_integer(command.first_tick())?;
-        admit_first_record(record, command.first_tick())?;
-        let set = DependencySetV1::new(fork, generation);
-        let staged = self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
-            store.in_counterfactual_scope(|store| {
-                then_staged(store.writable_counterfactual_basis(fork), |persisted| {
-                    command
-                        .expected_basis()
-                        .first_conflict(&persisted)
-                        .map_or_else(
-                            || store.write_recorded_generation(command, &set, first_tick, record),
-                            |conflict| {
-                                Ok(Ok(
-                                    CounterfactualInvalidationOutcomeV1::InvalidationConflict(
-                                        conflict,
-                                    ),
-                                ))
-                            },
-                        )
-                })
-            })
-        });
-        self.settle_write(staged)
+        self.commit_invalidation_recording(command, Some(record))
     }
 
     fn append_counterfactual_tick_with_dependencies(
@@ -960,26 +1063,20 @@ impl CounterfactualDependencyRecordingPortV1 for SqliteStore {
         drafts: &PipelineDraftBatchV1,
         record: &TickDependencyRecordV1,
     ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
-        sql_integer(record.tick())?;
-        let staged = self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
-            store.in_counterfactual_scope(|store| {
-                then_staged(store.writable_counterfactual_basis(fork), |persisted| {
-                    expected.first_conflict(&persisted).map_or_else(
-                        || store.append_recorded_tick(fork, &persisted, drafts, record),
-                        |conflict| Ok(Ok(CounterfactualTickOutcomeV1::Stale(conflict))),
-                    )
-                })
-            })
-        });
-        self.settle_write(staged)
+        self.append_tick_recording(fork, expected, drafts, Some(record))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use pos_core::{CounterfactualStorePortV1, Seq};
+    use pos_core::{
+        CounterfactualStorePortV1, Seq, MAX_DEPENDENCY_EDGE_BYTES_V1,
+        MAX_DEPENDENCY_NODE_INPUTS_V1, MAX_DEPENDENCY_OWNER_ID_BYTES_V1,
+    };
 
-    use super::super::tests::{command, drafts, fail_commits, ok, published_store};
+    use super::super::tests::{
+        command, drafts, fail_commits, ok, open_file_store, publish_fork, published_store,
+    };
     use super::*;
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1007,11 +1104,26 @@ mod tests {
         ))
     }
 
+    /// Rows of the three dependency tables.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn recorded(store: &SqliteStore) -> i64 {
         ok(store.conn.query_row(
             "SELECT (SELECT count(*) FROM counterfactual_dependency_records)
-                  + (SELECT count(*) FROM counterfactual_dependency_nodes)",
+                  + (SELECT count(*) FROM counterfactual_dependency_nodes)
+                  + (SELECT count(*) FROM counterfactual_dependency_edges)",
+            [],
+            |row| row.get::<_, i64>(0),
+        ))
+    }
+
+    /// Rows an invalidation writes beside the Events: generations, quarantine,
+    /// and artifacts.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn written(store: &SqliteStore) -> i64 {
+        ok(store.conn.query_row(
+            "SELECT (SELECT count(*) FROM counterfactual_generations)
+                  + (SELECT count(*) FROM counterfactual_quarantine)
+                  + (SELECT count(*) FROM counterfactual_artifacts)",
             [],
             |row| row.get::<_, i64>(0),
         ))
@@ -1078,5 +1190,94 @@ mod tests {
             })
         );
         assert_eq!(recorded(&store), 4);
+    }
+
+    /// A file-backed in-doubt write leaves no partial row once the file is
+    /// reopened, and the retry of the same command and record commits.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_file_backed_in_doubt_write_leaves_no_partial_rows_after_reopen() {
+        let directory = ok(tempfile::tempdir());
+        let path = directory
+            .path()
+            .join("in-doubt.db")
+            .to_string_lossy()
+            .into_owned();
+        let (mut store, fork) = publish_fork(open_file_store(&path));
+        let command = command(fork);
+        let record = one_node_record(1, 1);
+
+        fail_commits(&store, true);
+        let in_doubt =
+            store.commit_counterfactual_invalidation_with_dependencies(&command, &record);
+        fail_commits(&store, false);
+        assert_eq!(in_doubt, Err(StoreError::OutcomeUnknown));
+        drop(store);
+
+        let mut reopened = open_file_store(&path);
+        assert_eq!([recorded(&reopened), written(&reopened)], [0, 0]);
+        assert_eq!(reopened.committed_generation_receipt(command.new_generation()), Ok(None));
+        assert!(matches!(
+            reopened.commit_counterfactual_invalidation_with_dependencies(&command, &record),
+            Ok(CounterfactualInvalidationOutcomeV1::Committed(_))
+        ));
+        assert_eq!(recorded(&reopened), 2);
+        let expected = ok(reopened.current_counterfactual_basis(fork));
+        let later = one_node_record(2, 2);
+
+        fail_commits(&reopened, true);
+        let tick_in_doubt = reopened.append_counterfactual_tick_with_dependencies(
+            fork,
+            &expected,
+            &drafts(),
+            &later,
+        );
+        fail_commits(&reopened, false);
+        assert_eq!(tick_in_doubt, Err(StoreError::OutcomeUnknown));
+        drop(reopened);
+
+        let mut again = open_file_store(&path);
+        assert_eq!(recorded(&again), 2);
+        assert_eq!(again.current_counterfactual_basis(fork), Ok(expected));
+        assert_eq!(
+            again.append_counterfactual_tick_with_dependencies(
+                fork,
+                &expected,
+                &drafts(),
+                &later,
+            ),
+            Ok(CounterfactualTickOutcomeV1::Committed {
+                head: Seq::from_u64(3)
+            })
+        );
+        assert_eq!(recorded(&again), 4);
+    }
+
+    /// The `CHECK` text repeats the contract's bounds as literals; each must
+    /// appear in it and equal the `pos-core` constant.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn the_check_literals_equal_the_contract_bounds() {
+        let owner = MAX_DEPENDENCY_OWNER_ID_BYTES_V1;
+        let word = u32::MAX;
+        let inputs = MAX_DEPENDENCY_NODE_INPUTS_V1 * HASH_BYTES;
+        let edge_bytes = MAX_DEPENDENCY_EDGE_BYTES_V1;
+        let node_text = NODES_TABLE.constraints.join("\n");
+        let edge_text = EDGES_TABLE.constraints.join("\n");
+        let checks = [
+            (&node_text, format!("BETWEEN 1 AND {owner})")),
+            (&node_text, format!("scheduler_position BETWEEN 0 AND {word})")),
+            (&node_text, format!("output_ordinal BETWEEN 0 AND {word})")),
+            (&node_text, format!("schema_id BETWEEN 1 AND {word})")),
+            (&node_text, format!("length(input_digests) <= {inputs})")),
+            (&edge_text, format!("BETWEEN 1 AND {owner})")),
+            (&edge_text, format!("scheduler_position BETWEEN 0 AND {word})")),
+            (&edge_text, format!("output_ordinal BETWEEN 0 AND {word})")),
+            (&edge_text, format!("consumer_schema_id BETWEEN 1 AND {word})")),
+            (&edge_text, format!("length(edge_bytes) <= {edge_bytes})")),
+        ];
+        for (text, needle) in &checks {
+            assert!(text.contains(needle.as_str()), "{needle}");
+        }
     }
 }

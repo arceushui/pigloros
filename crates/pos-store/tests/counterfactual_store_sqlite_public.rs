@@ -904,7 +904,7 @@ fn corrupt_persisted_state_is_rejected_closed() {
 }
 
 /// Every counterfactual index and guard trigger, with a weakened body.
-const SCHEMA_OBJECTS: [(&str, &str, &str); 25] = [
+const SCHEMA_OBJECTS: [(&str, &str, &str); 26] = [
     (
         "INDEX",
         "idx_counterfactual_quarantine_artifact",
@@ -1012,7 +1012,12 @@ const SCHEMA_OBJECTS: [(&str, &str, &str); 25] = [
     ),
     (
         "TRIGGER",
-        "counterfactual_dependency_nodes_not_replaced",
+        "counterfactual_dependency_nodes_digest_not_replaced",
+        "BEFORE INSERT ON counterfactual_dependency_nodes BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_nodes_key_not_replaced",
         "BEFORE INSERT ON counterfactual_dependency_nodes BEGIN SELECT 1; END",
     ),
     (

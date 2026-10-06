@@ -796,9 +796,9 @@ fn c2_rejected_records_commit_no_events_and_no_rows() {
         head: 3,
         ..Spec::new(fork)
     };
-    let specs = [Spec::new(fork), stale];
+    let bases = [Spec::new(fork), stale];
     for record in [committed_record(FIRST_TICK), empty_record(18)] {
-        for spec in &specs {
+        for spec in &bases {
             assert_eq!(
                 err(commit_spec(&mut store, spec, &record)),
                 StoreError::BindingMismatch
@@ -1011,7 +1011,8 @@ fn c4_repeated_position_keys_and_digests_are_rejected_across_records() {
     assert!(append_record(&mut store, fork, &tick_18_record()).is_ok());
 }
 
-/// A node insert copying the first stored node with `columns` replaced.
+/// A node insert copying the first stored node with its Tick and artifact
+/// digest replaced by the given SQL expressions.
 fn node_copy(verb: &str, tick: &str, digest: &str) -> String {
     format!(
         "{verb} INTO counterfactual_dependency_nodes ({NODE_COLUMNS})
@@ -1044,8 +1045,8 @@ fn c4_the_database_refuses_repeated_keys_and_replacements() {
     }
     // Without the insert guards the unique keys refuse the same rows.
     for (guard, sql) in [
-        ("nodes_not_replaced", same_position.as_str()),
-        ("nodes_not_replaced", same_digest.as_str()),
+        ("nodes_key_not_replaced", same_position.as_str()),
+        ("nodes_digest_not_replaced", same_digest.as_str()),
         ("edges_not_replaced", same_edge),
         ("records_monotonic", same_record),
     ] {
@@ -1430,15 +1431,15 @@ fn c8_stored_input_digests_must_be_one_ascending_run_of_digests() {
     // canonical, and a trailing partial digest is not a digest at all.
     let descending = format!("X'{}{}'", hash_hex(2), hash_hex(1));
     let partial = format!("X'{}00'", hash_hex(1));
-    for stored in [descending, partial] {
+    for digests in [descending, partial] {
         let fixture = recorded_fixture();
-        let assignment = format!("input_digests = {stored}");
+        let assignment = format!("input_digests = {digests}");
         corrupt(&fixture.path, "nodes", &assignment, "WHERE owner_id = 'b'");
         let store = open(&fixture.path);
         assert_eq!(
             err(nodes(&store, fork_scope(fixture.fork, 1), 5)),
             StoreError::CorruptState,
-            "{stored}"
+            "{digests}"
         );
     }
 }
@@ -1522,6 +1523,54 @@ fn c9_a_protected_lineage_is_not_found() {
     for scope in [fork_scope(fork, 1), prefix_scope(fork, 9), prefix_scope(root, 9)] {
         assert_eq!(counts(&store, scope), NOT_FOUND, "{scope:?}");
     }
+}
+
+#[test]
+fn c9_a_misplaced_record_reports_the_fork_error_first() {
+    let fixture = fixture();
+    let (fork, root) = (fixture.fork, fixture.root);
+    let missing = TimelineId::from_ulid(Ulid::from(0x0123_4567_89ab_cdef_u128));
+    let mut store = open(&fixture.path);
+    let expected = ok(store.current_counterfactual_basis(fork));
+    // The Fork is looked up before the record is checked, so a record that
+    // is not provisional, or not at the first Tick, never wins over it.
+    for record in [committed_record(FIRST_TICK), empty_record(18)] {
+        assert_eq!(
+            err(commit_spec(&mut store, &Spec::new(missing), &record)),
+            StoreError::ForkNotFound
+        );
+    }
+    assert_eq!(
+        err(store.append_counterfactual_tick_with_dependencies(
+            missing,
+            &expected,
+            &tick_drafts(&[20], None),
+            &committed_record(18)
+        )),
+        StoreError::ForkNotFound
+    );
+    // A frozen Fork is closed by its fence before any record check.
+    let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+    let mut frozen = open_with_gate(&fixture.path, &gate);
+    gate.freeze_timeline_for_test(fork);
+    assert_eq!(
+        err(commit_spec(&mut frozen, &Spec::new(fork), &committed_record(FIRST_TICK))),
+        StoreError::StorageFailure
+    );
+    drop(frozen);
+    // A geographic-protected lineage is not found.
+    ok(execute(
+        &fixture.path,
+        &format!(
+            "INSERT INTO geographic_presence (timeline_id, has_evidence) VALUES ('{root}', 1);"
+        ),
+    ));
+    let mut protected = open(&fixture.path);
+    assert_eq!(
+        err(commit_spec(&mut protected, &Spec::new(fork), &committed_record(FIRST_TICK))),
+        StoreError::ForkNotFound
+    );
+    assert_eq!(snapshot(&fixture.path, fork), [0; 7]);
 }
 
 #[test]
