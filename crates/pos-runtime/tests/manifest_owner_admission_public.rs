@@ -35,7 +35,7 @@ use pos_core::{
 };
 use pos_runtime::{
     recover_local_cut_owner_retry_v1, recover_manifest_owner_admission_retry_v1,
-    AdmittedCompositionV1, PluginRegistry,
+    AdmittedCompositionV1, ManifestSlotV1, PluginRegistry,
 };
 use pos_store::{memory::MemoryStore, ManifestOwnerAdmissionPersistencePortV1};
 
@@ -121,7 +121,8 @@ fn register_fixture_plugins(mut registry: PluginRegistry) -> Result<FixtureSetup
     ];
     let owner_id = OwnerIdV1::from_static("open-source-app");
     for (plugin, role) in plugins.iter().zip(["world", "agent"]) {
-        registry.register_local(plugin, vec![role.to_owned()], None, None)?;
+        let slot = ManifestSlotV1::try_new(role)?;
+        registry.register_local(plugin, slot, vec![role.to_owned()], None, None)?;
     }
     let admitted = registry.admit_local_manifest_registration(owner_id, 1)?;
     Ok((registry, plugins, owner_id, admitted))

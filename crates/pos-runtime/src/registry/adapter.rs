@@ -791,7 +791,7 @@ fn adapter_idempotency_key(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::composition::{ManifestRegistrationErrorV1, PluginRegistrationV1};
+    use crate::composition::{ManifestRegistrationErrorV1, ManifestSlotV1, PluginRegistrationV1};
     use pos_core::{
         adapter_configuration_digest_v1, public_adapter_schema_digest_v1, AdapterDataClassV1,
         ArtifactRegistrationV1, Capability, OwnerIdV1, Plugin, TimelineId,
@@ -880,7 +880,8 @@ mod tests {
             id: PluginId::new(),
         };
         let mut registry = PluginRegistry::new();
-        registry.register_local(&plugin, vec!["weather.read".to_owned()], None, None)?;
+        let slot = ManifestSlotV1::try_new("weather")?;
+        registry.register_local(&plugin, slot, vec!["weather.read".to_owned()], None, None)?;
         register_echo(&mut registry, plugin.id)?;
         Ok((registry, plugin.id))
     }
@@ -1030,7 +1031,8 @@ mod tests {
             id: PluginId::new(),
         };
         let mut registry = PluginRegistry::new();
-        registry.register_local(&plugin, vec!["weather.read".to_owned()], None, None)?;
+        let slot = ManifestSlotV1::try_new("weather")?;
+        registry.register_local(&plugin, slot, vec!["weather.read".to_owned()], None, None)?;
 
         let admission = plugin_entry(&mut registry, plugin.id)?
             .output_admission
@@ -1067,7 +1069,8 @@ mod tests {
         let other = LocalPlugin {
             id: PluginId::new(),
         };
-        registry.register_local(&other, vec!["weather.other".to_owned()], None, None)?;
+        let slot = ManifestSlotV1::try_new("weather-other")?;
+        registry.register_local(&other, slot, vec!["weather.other".to_owned()], None, None)?;
         registry
             .plugins
             .shift_remove(&plugin_id)

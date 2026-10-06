@@ -2,7 +2,8 @@ use std::error::Error;
 
 use pos_core::{ids::PluginId, Kind, OwnerIdV1, Plugin};
 use pos_runtime::{
-    ManifestRegistrationErrorV1, PluginCompositionErrorV1, PluginRegistry, RuntimeError,
+    ManifestRegistrationErrorV1, ManifestSlotV1, PluginCompositionErrorV1, PluginRegistry,
+    RuntimeError,
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -41,7 +42,8 @@ fn local_registration_admits_the_actual_complete_registry_without_epf1() -> Test
     let owner = OwnerIdV1::from_static("open-source-app");
     let mut registry = PluginRegistry::new();
     for (plugin, role) in plugins.iter().zip(["world", "agent"]) {
-        registry.register_local(plugin, vec![role.to_owned()], None, None)?;
+        let slot = ManifestSlotV1::try_new(role)?;
+        registry.register_local(plugin, slot, vec![role.to_owned()], None, None)?;
     }
 
     let admitted = registry.admit_local_manifest_registration(owner, 3)?;
@@ -86,6 +88,7 @@ fn local_registration_admits_the_actual_complete_registry_without_epf1() -> Test
                 id: PluginId::new(),
                 name: "late-plugin",
             },
+            ManifestSlotV1::try_new("late")?,
             vec!["late".to_owned()],
             None,
             None,
@@ -111,9 +114,10 @@ fn local_admission_rejects_empty_or_unpinned_registries() -> TestResult {
     };
     let mut registry = PluginRegistry::new();
     registry.register_generated(&plugin, None, None)?;
+    // A generated Plugin has no host-authored slot, which is checked first.
     assert!(matches!(
         registry.admit_local_manifest_registration(owner, 1),
-        Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
+        Err(ManifestRegistrationErrorV1::MissingSlot { .. })
     ));
     Ok(())
 }
@@ -131,7 +135,8 @@ fn local_admission_rejects_nonlocal_resealed_and_zero_generation_registries() ->
         name: "zero-generation-local-plugin",
     };
     let mut registry = PluginRegistry::new();
-    registry.register_local(&plugin, vec!["world".to_owned()], None, None)?;
+    let slot = ManifestSlotV1::try_new("world")?;
+    registry.register_local(&plugin, slot, vec!["world".to_owned()], None, None)?;
     assert!(matches!(
         registry.admit_local_manifest_registration(owner, 0),
         Err(ManifestRegistrationErrorV1::IncompleteBatch)
@@ -164,14 +169,20 @@ impl Plugin for InvalidDeclarationPlugin {
 }
 
 #[test]
-fn local_registration_rejects_missing_roles_and_invalid_output_declarations() {
+fn local_registration_rejects_missing_roles_and_invalid_output_declarations() -> TestResult {
     let plugin = LocalPlugin {
         id: PluginId::new(),
         name: "roleless-local-plugin",
     };
     let mut registry = PluginRegistry::new();
     assert!(matches!(
-        registry.register_local(&plugin, Vec::new(), None, None),
+        registry.register_local(
+            &plugin,
+            ManifestSlotV1::try_new("empty-roles")?,
+            Vec::new(),
+            None,
+            None,
+        ),
         Err(RuntimeError::Composition(
             PluginCompositionErrorV1::InvalidMetadata
         ))
@@ -179,6 +190,7 @@ fn local_registration_rejects_missing_roles_and_invalid_output_declarations() {
     assert!(matches!(
         registry.register_local(
             &InvalidDeclarationPlugin,
+            ManifestSlotV1::try_new("invalid")?,
             vec!["world".to_owned()],
             None,
             None,
@@ -186,4 +198,5 @@ fn local_registration_rejects_missing_roles_and_invalid_output_declarations() {
         Err(RuntimeError::CapabilityMismatch { .. })
     ));
     assert!(registry.is_empty());
+    Ok(())
 }

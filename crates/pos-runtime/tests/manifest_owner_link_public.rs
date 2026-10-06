@@ -47,7 +47,9 @@ use pos_core::{
     WorldClosureReadLimitsV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
     WorldKeyEvidenceInputV1, WorldKeyEvidenceV1, WorldProducerV1,
 };
-use pos_runtime::{AdmittedCompositionV1, AdmittedManifestPolicySourceV1, PluginRegistry};
+use pos_runtime::{
+    AdmittedCompositionV1, AdmittedManifestPolicySourceV1, ManifestSlotV1, PluginRegistry,
+};
 use pos_store::{
     memory::MemoryStore, sqlite::SqliteStore, trusted_clock::MemoryTrustedClockAuthorityV1,
 };
@@ -331,7 +333,8 @@ fn world(timeline_count: usize) -> Fallible<World> {
         let plugin = LocalPlugin {
             id: PluginId::new(),
         };
-        registry.register_local(&plugin, vec![role.to_owned()], None, None)?;
+        let slot = ManifestSlotV1::try_new(role)?;
+        registry.register_local(&plugin, slot, vec![role.to_owned()], None, None)?;
     }
     let owner = OwnerIdV1::from_static("open-source-app");
     let admitted = registry.admit_local_manifest_registration(owner, 1)?;
