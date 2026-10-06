@@ -13,7 +13,7 @@ const CHALLENGE: [u8; 32] = [
     0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
     0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
 ];
-const CREDENTIAL_ID: [u8; 2] = [0x80, 0x81];
+static CREDENTIAL_ID: [u8; 2] = [0x80, 0x81];
 const USER_HANDLE: [u8; 32] = [
     0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
     0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
@@ -81,23 +81,9 @@ fn public_verifier_accepts_closed_create_and_assertion() -> Result<(), OwnerBrid
 }
 
 #[test]
-fn public_verifier_rejects_closed_invariant_violations() -> Result<(), OwnerBridgeCodecError> {
+fn public_verifier_rejects_invalid_create_replies() -> Result<(), OwnerBridgeCodecError> {
     let authenticator_data = create_authenticator_data(cose_key());
     let attestation_object = none_attestation_object(&authenticator_data);
-    let valid_reply = AttestationReplyV1::new(
-        CEREMONY_ID,
-        &CREDENTIAL_ID,
-        CREATE_CLIENT_DATA,
-        &attestation_object,
-        TransportCodes::new(&[0])?,
-        true,
-        None,
-    )?;
-    let registration = verify_attestation_reply(
-        &valid_reply,
-        CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
-    )?;
-
     let disabled_prf = AttestationReplyV1::new(
         CEREMONY_ID,
         &CREDENTIAL_ID,
@@ -135,15 +121,12 @@ fn public_verifier_rejects_closed_invariant_violations() -> Result<(), OwnerBrid
         ),
         Err(OwnerBridgeCodecError::InvalidPayload)
     );
+    Ok(())
+}
 
-    let credential = StoredCredential::new(
-        registration.credential_id(),
-        USER_HANDLE,
-        registration.public_key(),
-        false,
-        false,
-        1,
-    )?;
+#[test]
+fn public_verifier_rejects_identity_and_counter_violations() -> Result<(), OwnerBridgeCodecError> {
+    let credential = fixture_credential(1)?;
     let assertion_data = assertion_authenticator_data(0x05, 2);
     let mut signature = [0; 80];
     let signature_length = sign_assertion(&assertion_data, GET_CLIENT_DATA, &mut signature)?;
@@ -183,7 +166,14 @@ fn public_verifier_rejects_closed_invariant_violations() -> Result<(), OwnerBrid
         PRF_RESULT,
     )?;
     assert_invalid_assertion(&repeated_counter, credential);
+    Ok(())
+}
 
+#[test]
+fn public_verifier_rejects_backup_and_signature_violations() -> Result<(), OwnerBridgeCodecError> {
+    let credential = fixture_credential(1)?;
+    let assertion_data = assertion_authenticator_data(0x05, 2);
+    let mut signature = [0; 80];
     let backup_eligibility_mismatch_data = assertion_authenticator_data(0x0d, 2);
     let backup_eligibility_mismatch_length = sign_assertion(
         &backup_eligibility_mismatch_data,
@@ -215,6 +205,32 @@ fn public_verifier_rejects_closed_invariant_violations() -> Result<(), OwnerBrid
     )?;
     assert_invalid_assertion(&invalid_signature_reply, credential);
     Ok(())
+}
+
+fn fixture_credential(sign_count: u32) -> Result<StoredCredential<'static>, OwnerBridgeCodecError> {
+    let authenticator_data = create_authenticator_data(cose_key());
+    let attestation_object = none_attestation_object(&authenticator_data);
+    let reply = AttestationReplyV1::new(
+        CEREMONY_ID,
+        &CREDENTIAL_ID,
+        CREATE_CLIENT_DATA,
+        &attestation_object,
+        TransportCodes::new(&[0])?,
+        true,
+        None,
+    )?;
+    let registration = verify_attestation_reply(
+        &reply,
+        CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
+    )?;
+    StoredCredential::new(
+        &CREDENTIAL_ID,
+        USER_HANDLE,
+        registration.public_key(),
+        registration.backup_eligible(),
+        registration.backup_state(),
+        sign_count,
+    )
 }
 
 fn assert_invalid_assertion(reply: &AssertionReplyV1<'_>, credential: StoredCredential<'_>) {
