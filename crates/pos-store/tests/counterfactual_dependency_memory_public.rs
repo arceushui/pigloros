@@ -965,8 +965,11 @@ fn c9_an_ungated_store_fails_closed() {
 
 #[test]
 fn c9_writes_run_under_the_erasure_write_fence() {
+    // The basis is read before the fence closes: reading it afterwards would
+    // fail closed on its own and never reach the write.
     let mut fixture = recorded();
     let fork = fixture.fork;
+    let basis = ok(fixture.store.current_counterfactual_basis(fork));
     fixture.gate.block_timeline(fork);
     let first = command(fork, 3, 1);
 
@@ -974,22 +977,30 @@ fn c9_writes_run_under_the_erasure_write_fence() {
         .store
         .commit_counterfactual_invalidation_with_dependencies(&first, &tick_17());
     assert_eq!(commit, Err(StoreError::StorageFailure));
-    assert_eq!(
-        append(&mut fixture.store, fork, &tick_18()).map(drop),
-        Err(StoreError::StorageFailure)
+    let blocked = fixture.store.append_counterfactual_tick_with_dependencies(
+        fork,
+        &basis,
+        &tick_drafts(1),
+        &tick_18(),
     );
+    assert_eq!(blocked.map(drop), Err(StoreError::StorageFailure));
 
-    let fresh = recorded();
+    let mut fresh = recorded();
     let fork = fresh.fork;
+    let basis = ok(fresh.store.current_counterfactual_basis(fork));
+    let first = command(fork, 3, 1);
     let mut ungated = fresh.store.without_erasure_gate();
     assert_eq!(
         ungated.commit_counterfactual_invalidation_with_dependencies(&first, &tick_17()),
         Err(StoreError::StorageFailure)
     );
-    assert_eq!(
-        append(&mut ungated, fork, &tick_18()),
-        Err(StoreError::StorageFailure)
+    let ungated_append = ungated.append_counterfactual_tick_with_dependencies(
+        fork,
+        &basis,
+        &tick_drafts(1),
+        &tick_18(),
     );
+    assert_eq!(ungated_append.map(drop), Err(StoreError::StorageFailure));
 }
 
 #[test]
