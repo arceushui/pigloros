@@ -432,7 +432,10 @@ fn receipts_are_bounded_and_the_oldest_is_dropped() {
     let receipts = handle.receipts();
     assert_eq!(receipts.len(), MAX_RETAINED_RECEIPTS_V1);
     assert_eq!(receipts[0].metering.host_calls, 1);
-    assert_eq!(receipts[MAX_RETAINED_RECEIPTS_V1 - 1].metering.host_calls, limit);
+    assert_eq!(
+        receipts[MAX_RETAINED_RECEIPTS_V1 - 1].metering.host_calls,
+        limit
+    );
 }
 
 fn driver_receipt(driver: &CommunityDriverV1) -> CommunityInvocationReceiptV1 {
@@ -640,7 +643,9 @@ fn registration_rejects_a_foreign_plugin_or_a_non_community_pin() {
     }
 
     let (driver, handle, _) = fixture(None, accepting());
-    let foreign = FixturePlugin { id: PluginId::new() };
+    let foreign = FixturePlugin {
+        id: PluginId::new(),
+    };
     let mut registry = PluginRegistry::new();
     let rejected = err(register_community_driver(
         &mut registry,

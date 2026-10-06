@@ -55,13 +55,13 @@ use pos_runtime::{
 };
 
 pub use self::failure::{classify_pass_failure, quarantine_for, PassFailureV1};
-pub use self::output::APPROVAL_CAPABILITY_V1;
 use self::output::approved_drafts;
-pub use self::state::{
-    CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1,
-    ReceiptDispositionV1, MAX_RETAINED_RECEIPTS_V1,
-};
+pub use self::output::APPROVAL_CAPABILITY_V1;
 use self::state::Shared;
+pub use self::state::{
+    CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1, ReceiptDispositionV1,
+    MAX_RETAINED_RECEIPTS_V1,
+};
 use crate::supervisor::CommunityPluginSupervisorV1;
 
 type Error = CommunityPluginHostErrorV1;
@@ -194,7 +194,13 @@ impl CommunityDriverV1 {
     ) -> Result<StepOutput, Error> {
         let metering = report.metering;
         let Ok(output) = report.result else {
-            self.record(invocation_id, None, metering, 0, ReceiptDispositionV1::Discarded);
+            self.record(
+                invocation_id,
+                None,
+                metering,
+                0,
+                ReceiptDispositionV1::Discarded,
+            );
             return Err(Error::GuestDeclaredFailure);
         };
         let staged = self.stage(&output);

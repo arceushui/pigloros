@@ -84,7 +84,7 @@ pub(super) struct Shared {
 }
 
 impl Shared {
-    pub(super) fn new(plugin_id: PluginId, initial: CommunityStateV1) -> Self {
+    pub(super) const fn new(plugin_id: PluginId, initial: CommunityStateV1) -> Self {
         Self {
             plugin_id,
             inner: Mutex::new(Inner {

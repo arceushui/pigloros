@@ -66,7 +66,7 @@ pub enum PassFailureV1 {
 /// - `StorageOutcomeUnknown` is [`PassFailureV1::InDoubt`].
 /// - A community host error raised while staging is carried as it is.
 #[must_use]
-pub fn classify_pass_failure(error: &RuntimeError) -> PassFailureV1 {
+pub const fn classify_pass_failure(error: &RuntimeError) -> PassFailureV1 {
     match error {
         RuntimeError::CommunityPlugin(host) => PassFailureV1::Host(*host),
         RuntimeError::ScheduledPassNotAdmitted(_) => PassFailureV1::Host(commit_failed(

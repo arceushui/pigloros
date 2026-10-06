@@ -4,9 +4,7 @@
 //! approve every draft with the host-native `ActionApprover`, then stage. The
 //! guest has no `approve` export; the approver is the host's own code.
 
-use pos_core::{
-    ActionApprover, CanonicalBytes, EntityId, EventDraft, Kind, ProposedAction,
-};
+use pos_core::{ActionApprover, CanonicalBytes, EntityId, EventDraft, Kind, ProposedAction};
 use pos_crypto::plugin_execution::is_valid_id_v1;
 use pos_runtime::community_plugin_host::{
     AtomicCommitFailureV1, CommunityPluginHostErrorV1, EventDraftV1, PluginOutputV1,

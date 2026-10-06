@@ -33,8 +33,8 @@ use pos_runtime::community_plugin_host::{
 };
 use pos_runtime::{
     DomainImplementationKindV1, LocalScheduledAdmissionHostV1, ObservationView,
-    PluginAvailabilityV1, PluginCompositionErrorV1, PluginIsolationV1, PluginPinV1,
-    PluginRegistry, RuntimeError, ScheduledDriverBindingV1, ScheduledPassAdmissionV1,
+    PluginAvailabilityV1, PluginCompositionErrorV1, PluginIsolationV1, PluginPinV1, PluginRegistry,
+    RuntimeError, ScheduledDriverBindingV1, ScheduledPassAdmissionV1,
 };
 use pos_store::memory::MemoryStore;
 
@@ -184,7 +184,7 @@ impl World {
         let timeline = ok(store.create_timeline("community-pass")).id();
         Self {
             store,
-            registry: PluginRegistry::new().with_erasure_gate(Arc::clone(&gate)),
+            registry: PluginRegistry::new().with_erasure_gate(gate.clone()),
             gate,
             timeline,
             members: 0,
@@ -416,7 +416,12 @@ fn any_plugin_failure_discards_the_whole_pass_and_marks_only_that_plugin() {
     for failure in failures() {
         let mut world = World::new();
         let alpha = world.add("alpha", "community.alpha", b"draft:community.alpha", PROMPT);
-        let beta = world.add("beta", "community.beta", failure.component, failure.watchdog);
+        let beta = world.add(
+            "beta",
+            "community.beta",
+            failure.component,
+            failure.watchdog,
+        );
 
         let error = err(world.pass());
         let expected = PassFailureV1::Host(failure.error);
@@ -431,7 +436,9 @@ fn any_plugin_failure_discards_the_whole_pass_and_marks_only_that_plugin() {
         assert_eq!(alpha.availability(), PluginAvailabilityV1::Available);
 
         assert_eq!(beta.last_failure(), Some(failure.error));
-        let quarantine = failure.quarantine.unwrap_or(PluginAvailabilityV1::Available);
+        let quarantine = failure
+            .quarantine
+            .unwrap_or(PluginAvailabilityV1::Available);
         assert_eq!(beta.availability(), quarantine, "{}", failure.error);
         assert_eq!(beta.receipts().len(), failure.receipts, "{}", failure.error);
         assert!(dispositions(&beta)
@@ -538,7 +545,10 @@ fn a_typed_non_commit_and_a_store_error_discard_the_pass_and_classify() {
         assert_eq!(handle.committed_state(), initial());
         assert_eq!(
             dispositions(handle),
-            [ReceiptDispositionV1::Discarded, ReceiptDispositionV1::Discarded]
+            [
+                ReceiptDispositionV1::Discarded,
+                ReceiptDispositionV1::Discarded
+            ]
         );
         assert_eq!(handle.availability(), PluginAvailabilityV1::Available);
         assert_eq!(handle.last_failure(), None);

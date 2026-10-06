@@ -22,8 +22,8 @@ use pos_plugin_supervisor::{
 };
 use pos_runtime::community_plugin_host::{
     plugin_output_digest_v1, CommunityPluginHostErrorV1, ComponentTrapClassV1, EventDraftV1,
-    GuestPluginErrorV1, InvocationReportV1, PluginDescriptorV1, PluginErrorCodeV1,
-    PluginOutputV1, TrapReproductionV1,
+    GuestPluginErrorV1, InvocationReportV1, PluginDescriptorV1, PluginErrorCodeV1, PluginOutputV1,
+    TrapReproductionV1,
 };
 use rustix::process::{getpid, getppid, getrlimit, Pid, Resource};
 use rustix::stdio::dup2_stdout;
@@ -123,7 +123,11 @@ fn serve_draft(request: &WorkerRequestV1) -> Option<ExitCode> {
     };
     let prior = &invocation.prior_state_bytes;
     let (payload, dependency_digests, state) = match mode {
-        b"draft" => (event_type.clone().into_bytes(), Vec::new(), b"next".to_vec()),
+        b"draft" => (
+            event_type.clone().into_bytes(),
+            Vec::new(),
+            b"next".to_vec(),
+        ),
         b"chain" => (prior.clone(), Vec::new(), [prior.as_slice(), b"+"].concat()),
         b"deps" => (b"p".to_vec(), vec![[1; 32]], b"next".to_vec()),
         b"big" => (vec![0; 4097], Vec::new(), b"next".to_vec()),
