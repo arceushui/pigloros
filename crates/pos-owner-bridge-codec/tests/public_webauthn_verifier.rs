@@ -1,7 +1,7 @@
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use pos_owner_bridge_codec::{
-    verify_assertion_reply, verify_attestation_reply, AssertionReplyV1,
-    AssertionVerificationContext, AttestationReplyV1, CreateVerificationContext,
+    parse_none_attestation_object, verify_assertion_reply, verify_attestation_reply,
+    AssertionReplyV1, AssertionVerificationContext, AttestationReplyV1, CreateVerificationContext,
     OwnerBridgeCodecError, StoredCredential, TransportCodes,
 };
 use sha2::{Digest, Sha256};
@@ -204,6 +204,196 @@ fn public_verifier_rejects_backup_and_signature_violations() -> Result<(), Owner
         PRF_RESULT,
     )?;
     assert_invalid_assertion(&invalid_signature_reply, credential);
+    Ok(())
+}
+
+#[test]
+fn public_verifier_preserves_registration_hints_and_accepts_zero_counter(
+) -> Result<(), OwnerBridgeCodecError> {
+    let authenticator_data = create_authenticator_data(cose_key());
+    let attestation_object = none_attestation_object(&authenticator_data);
+    let registration_reply = AttestationReplyV1::new(
+        CEREMONY_ID,
+        &CREDENTIAL_ID,
+        CREATE_CLIENT_DATA,
+        &attestation_object,
+        TransportCodes::new(&[0, 2])?,
+        true,
+        Some(PRF_RESULT),
+    )?;
+    let registration = verify_attestation_reply(
+        &registration_reply,
+        CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
+    )?;
+    assert_eq!(registration.transports().as_slice(), &[0, 2]);
+    assert!(!registration.backup_eligible());
+    assert!(!registration.backup_state());
+
+    let credential = StoredCredential::new(
+        registration.credential_id(),
+        USER_HANDLE,
+        registration.public_key(),
+        registration.backup_eligible(),
+        registration.backup_state(),
+        0,
+    )?;
+    let assertion_data = assertion_authenticator_data(0x05, 0);
+    let mut signature = [0; 80];
+    let signature_length = sign_assertion(&assertion_data, GET_CLIENT_DATA, &mut signature)?;
+    let assertion_reply = AssertionReplyV1::new(
+        CEREMONY_ID,
+        &CREDENTIAL_ID,
+        GET_CLIENT_DATA,
+        &assertion_data,
+        &signature[..signature_length],
+        None,
+        PRF_RESULT,
+    )?;
+    let assertion = verify_assertion_reply(
+        &assertion_reply,
+        AssertionVerificationContext::new(CEREMONY_ID, CHALLENGE, credential),
+    )?;
+    assert!(!assertion.backup_state());
+    assert_eq!(assertion.sign_count(), 0);
+    assert_eq!(assertion.prf_first(), PRF_RESULT);
+
+    let too_long_credential_id = vec![0; 1_025];
+    assert_eq!(
+        StoredCredential::new(&[], USER_HANDLE, registration.public_key(), false, false, 0,),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
+    assert_eq!(
+        StoredCredential::new(
+            &too_long_credential_id,
+            USER_HANDLE,
+            registration.public_key(),
+            false,
+            false,
+            0,
+        ),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
+    assert_eq!(
+        StoredCredential::new(
+            &CREDENTIAL_ID,
+            USER_HANDLE,
+            registration.public_key(),
+            false,
+            true,
+            0,
+        ),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_verifier_rejects_bad_reply_subcomponents() -> Result<(), OwnerBridgeCodecError> {
+    let authenticator_data = create_authenticator_data(cose_key());
+    let attestation_object = none_attestation_object(&authenticator_data);
+    let mismatched_ceremony = AttestationReplyV1::new(
+        [0; 16],
+        &CREDENTIAL_ID,
+        CREATE_CLIENT_DATA,
+        &attestation_object,
+        TransportCodes::new(&[0])?,
+        true,
+        None,
+    )?;
+    assert_eq!(
+        verify_attestation_reply(
+            &mismatched_ceremony,
+            CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
+        ),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+
+    let invalid_client_data = AttestationReplyV1::new(
+        CEREMONY_ID,
+        &CREDENTIAL_ID,
+        b"[]",
+        &attestation_object,
+        TransportCodes::new(&[0])?,
+        true,
+        None,
+    )?;
+    assert_eq!(
+        verify_attestation_reply(
+            &invalid_client_data,
+            CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
+        ),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+
+    let malformed_attestation = AttestationReplyV1::new(
+        CEREMONY_ID,
+        &CREDENTIAL_ID,
+        CREATE_CLIENT_DATA,
+        b"\xa0",
+        TransportCodes::new(&[0])?,
+        true,
+        None,
+    )?;
+    assert_eq!(
+        verify_attestation_reply(
+            &malformed_attestation,
+            CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
+        ),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+
+    let credential = fixture_credential(0)?;
+    let assertion_data = assertion_authenticator_data(0x05, 1);
+    let mut signature = [0; 80];
+    let signature_length = sign_assertion(&assertion_data, GET_CLIENT_DATA, &mut signature)?;
+    let invalid_assertion_client_data = AssertionReplyV1::new(
+        CEREMONY_ID,
+        &CREDENTIAL_ID,
+        b"[]",
+        &assertion_data,
+        &signature[..signature_length],
+        None,
+        PRF_RESULT,
+    )?;
+    assert_invalid_assertion(&invalid_assertion_client_data, credential);
+
+    let malformed_assertion_data = [0; 37];
+    let malformed_assertion = AssertionReplyV1::new(
+        CEREMONY_ID,
+        &CREDENTIAL_ID,
+        GET_CLIENT_DATA,
+        &malformed_assertion_data,
+        &signature[..signature_length],
+        None,
+        PRF_RESULT,
+    )?;
+    assert_invalid_assertion(&malformed_assertion, credential);
+
+    let mut invalid_point_key = cose_key();
+    invalid_point_key[10..42].fill(0);
+    let invalid_point_authenticator_data = create_authenticator_data(invalid_point_key);
+    let parsed_invalid_point = parse_none_attestation_object(
+        &none_attestation_object(&invalid_point_authenticator_data),
+        &CREDENTIAL_ID,
+    )?;
+    let invalid_point_credential = StoredCredential::new(
+        &CREDENTIAL_ID,
+        USER_HANDLE,
+        parsed_invalid_point.public_key(),
+        false,
+        false,
+        0,
+    )?;
+    let valid_assertion = AssertionReplyV1::new(
+        CEREMONY_ID,
+        &CREDENTIAL_ID,
+        GET_CLIENT_DATA,
+        &assertion_data,
+        &signature[..signature_length],
+        None,
+        PRF_RESULT,
+    )?;
+    assert_invalid_assertion(&valid_assertion, invalid_point_credential);
     Ok(())
 }
 

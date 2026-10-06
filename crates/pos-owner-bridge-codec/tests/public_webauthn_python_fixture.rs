@@ -60,6 +60,24 @@ fn public_verifier_accepts_independently_generated_python_fixture(
     assert_eq!(assertion.sign_count(), fixture_u32("assertion_sign_count")?);
     assert_eq!(assertion.prf_first(), prf_first);
 
+    let high_s_signature = fixture_bytes("assertion_signature_high_s_der")?;
+    let high_s_reply = AssertionReplyV1::new(
+        ceremony_id,
+        &credential_id,
+        &assertion_client_data,
+        &assertion_authenticator_data,
+        &high_s_signature,
+        None,
+        prf_first,
+    )?;
+    assert_eq!(
+        verify_assertion_reply(
+            &high_s_reply,
+            AssertionVerificationContext::new(ceremony_id, challenge, credential),
+        )?,
+        assertion
+    );
+
     let mut invalid_signature = signature;
     invalid_signature[0] ^= 1;
     let invalid_reply = AssertionReplyV1::new(

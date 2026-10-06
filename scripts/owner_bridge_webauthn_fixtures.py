@@ -107,8 +107,8 @@ def _der_integer(value: int) -> bytes:
     return b"\x02" + bytes((len(encoded),)) + encoded
 
 
-def ecdsa_der_signature(message: bytes) -> bytes:
-    """Sign one message with fixture scalar one using deterministic P-256."""
+def ecdsa_signature_values(message: bytes) -> tuple[int, int]:
+    """Return deterministic P-256 ECDSA values for one fixture message."""
     digest = hashlib.sha256(message).digest()
     nonce = _rfc6979_nonce(PRIVATE_SCALAR, digest)
     point = _scalar_multiply(nonce, (GX, GY))
@@ -121,6 +121,13 @@ def ecdsa_der_signature(message: bytes) -> bytes:
     s_value = pow(nonce, -1, N) * (digest_value + r_value * PRIVATE_SCALAR) % N
     if s_value == 0:
         raise AssertionError("RFC-6979 nonce unexpectedly produced s = 0")
+    return r_value, s_value
+
+
+def ecdsa_der_signature(r_value: int, s_value: int) -> bytes:
+    """Encode the supplied valid P-256 ECDSA values as strict DER."""
+    if not 0 < r_value < N or not 0 < s_value < N:
+        raise ValueError("P-256 ECDSA values must be in the scalar range")
     body = _der_integer(r_value) + _der_integer(s_value)
     return b"\x30" + bytes((len(body),)) + body
 
@@ -161,7 +168,9 @@ def fixture_fields() -> dict[str, str]:
     cose_key = canonical_cose_es256_key()
     assertion_authenticator_data = RP_ID_HASH + b"\x05" + (1).to_bytes(4, "big")
     assertion_message = assertion_authenticator_data + hashlib.sha256(ASSERTION_CLIENT_DATA).digest()
-    signature = ecdsa_der_signature(assertion_message)
+    r_value, s_value = ecdsa_signature_values(assertion_message)
+    signature = ecdsa_der_signature(r_value, s_value)
+    high_s_signature = ecdsa_der_signature(r_value, N - s_value)
     return {
         "version": "1",
         "ceremony_id": CEREMONY_ID.hex(),
@@ -173,6 +182,7 @@ def fixture_fields() -> dict[str, str]:
         "assertion_client_data_json": ASSERTION_CLIENT_DATA.hex(),
         "assertion_authenticator_data": assertion_authenticator_data.hex(),
         "assertion_signature_der": signature.hex(),
+        "assertion_signature_high_s_der": high_s_signature.hex(),
         "public_key_cose": cose_key.hex(),
         "backup_eligible": "false",
         "backup_state": "false",
