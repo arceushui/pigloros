@@ -226,7 +226,7 @@ impl<'a> CborWriter<'a> {
         self.write(&[0xf6]);
     }
 
-    pub(crate) fn finish(self) -> Result<usize, OwnerBridgeCodecError> {
+    pub(crate) const fn finish(self) -> Result<usize, OwnerBridgeCodecError> {
         match self.error {
             Some(error) => Err(error),
             None => Ok(self.offset),
@@ -243,12 +243,9 @@ impl<'a> CborWriter<'a> {
     fn head(&mut self, major: u8, value: u64) {
         let prefix = major << 5;
         if value <= 23 {
-            let value = match u8::try_from(value) {
-                Ok(value) => value,
-                Err(_) => {
-                    self.set_error(OwnerBridgeCodecError::InvalidPayload);
-                    return;
-                }
+            let Ok(value) = u8::try_from(value) else {
+                self.set_error(OwnerBridgeCodecError::InvalidPayload);
+                return;
             };
             self.write(&[prefix | value]);
             return;
