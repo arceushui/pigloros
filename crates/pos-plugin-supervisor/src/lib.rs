@@ -60,7 +60,7 @@ pub use adapter::{
     classify_pass_failure, quarantine_for, register_community_driver, CommunityDriverConfigV1,
     CommunityDriverV1, CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1,
     InvocationContextSourceV1, InvocationContextV1, PassFailureV1, ReceiptDispositionV1,
-    APPROVAL_CAPABILITY_V1, MAX_RETAINED_RECEIPTS_V1,
+    MAX_RETAINED_RECEIPTS_V1,
 };
 pub use frame::{FrameFaultV1, WorkerFrameLimitsV1};
 pub use ipc::{

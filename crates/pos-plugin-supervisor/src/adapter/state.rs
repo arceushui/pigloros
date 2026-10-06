@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use pos_core::PluginId;
 use pos_runtime::community_plugin_host::{
-    CommunityPluginHostErrorV1, EffectiveExecutionLimitsV1, MeteringV1, NegotiatedCommunityPluginV1,
+    CommunityPluginHostErrorV1, EffectiveExecutionLimitsV1, GuestPluginErrorV1, MeteringV1,
+    NegotiatedCommunityPluginV1,
 };
 use pos_runtime::{PluginAvailabilityV1, PluginRegistry, RuntimeError};
 
@@ -43,11 +44,13 @@ pub enum ReceiptDispositionV1 {
     Discarded,
 }
 
-/// In-memory record of one completed invocation (non-durable).
+/// In-memory record of one invocation that reached a worker (non-durable).
 ///
 /// It holds what the follow-up `ReproManifest` record needs: the negotiated
-/// tuple, the output digest, the effective limits and the metering. Nothing
-/// here is persisted or authoritative.
+/// tuple, the output digest, the effective limits and the metering. A failed
+/// invocation keeps its receipt too, with the closed `failure` and, for a
+/// guest-declared failure, the guest's exact `plugin-error` (code, field
+/// ordinal and related digest). Nothing here is persisted or authoritative.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommunityInvocationReceiptV1 {
     /// The host-built invocation's ID.
@@ -56,14 +59,21 @@ pub struct CommunityInvocationReceiptV1 {
     /// granted, mode, limits and pinned runtime.
     pub negotiated: NegotiatedCommunityPluginV1,
     /// The V1 output digest the guest returned, or `None` when it returned
-    /// its own `plugin-error`.
+    /// its own `plugin-error` or no return at all.
     pub output_digest: Option<[u8; 32]>,
     /// The effective limits fixed at negotiation.
     pub limits: EffectiveExecutionLimitsV1,
-    /// The deterministic metering the worker reported.
-    pub metering: MeteringV1,
+    /// The deterministic metering the worker reported, or `None` when the
+    /// invocation ended without a report (a crash, a watchdog stop, an engine
+    /// failure or a supervisor check).
+    pub metering: Option<MeteringV1>,
     /// The number of trace annotations validated and then dropped.
     pub dropped_trace_annotations: usize,
+    /// The closed host error that ended the invocation, if it failed.
+    pub failure: Option<CommunityPluginHostErrorV1>,
+    /// The guest's own `plugin-error`, kept exactly when `failure` is
+    /// `GuestDeclaredFailure`.
+    pub guest_error: Option<GuestPluginErrorV1>,
     /// What became of the staged result.
     pub disposition: ReceiptDispositionV1,
 }
@@ -168,7 +178,7 @@ fn settle(
 /// invocation receipts and the committed Plugin state.
 ///
 /// A failure changes the handle's availability at once, but the registry only
-/// learns it through [`Self::sync_registry`]; the host calls that after every
+/// learns it through [`Self::sync_registry()`]; the host calls that after every
 /// pass. Until it does, the adapter itself already refuses to run.
 #[derive(Clone, Debug)]
 pub struct CommunityPluginHandleV1 {

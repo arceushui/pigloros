@@ -6,91 +6,29 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pos_core::{
-    ActionRejected, CanonicalBytes, Capability, CoreError, EntityId, EventDraft, Kind,
-    PipelineOutcomeV1, ProposedAction,
-};
+use pos_core::{CoreError, EntityId, Kind, PipelineOutcomeV1};
 use pos_runtime::community_plugin_host::{
     plugin_output_digest_v1, AtomicCommitFailureV1, ComponentTrapClassV1, EventDraftV1,
-    GuestPluginErrorV1, PluginErrorCodeV1, TraceAnnotationV1, TrapReproductionV1,
+    FieldRefV1, GuestPluginErrorV1, PluginErrorCodeV1, TraceAnnotationV1, TrapReproductionV1,
 };
 use ulid::Ulid;
 
 use super::failure::commit_failed;
-use super::output::{approved_drafts, map_draft};
+use super::output::{map_draft, mapped_drafts};
 use super::*;
 use crate::launch::WorkerProgramV1;
-use crate::test_support::{self, METERING, SMALL_BUDGET};
-
-fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
-}
-
-fn err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
-    match result {
-        Ok(value) => std::panic::resume_unwind(Box::new(format!("unexpected success: {value:?}"))),
-        Err(error) => error,
-    }
-}
+use crate::test_support::{
+    self, community_pin, err, ok, pin_of, DriverPlugin, METERING, SMALL_BUDGET,
+};
 
 const DENIED: Error = commit_failed(AtomicCommitFailureV1::DeterministicTypedResult);
 
-struct FixturePlugin {
-    id: PluginId,
-    has_driver: bool,
-}
-
-impl Plugin for FixturePlugin {
-    fn id(&self) -> PluginId {
-        self.id
-    }
-
-    fn name(&self) -> &'static str {
-        "community-fixture"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability {
-            owned_event_types: vec![Kind::new("community.event")],
-            has_driver: self.has_driver,
-            ..Capability::default()
-        }
-    }
-}
-
-/// Approves every proposal unchanged, counting the proposals it saw.
-struct CountingApprover(Arc<AtomicUsize>);
-
-impl ActionApprover for CountingApprover {
-    fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(proposal.capability.as_str(), APPROVAL_CAPABILITY_V1);
-        Ok(EventDraft::new(
-            proposal.actor_entity_id,
-            proposal.event_type.clone(),
-            proposal.payload.clone(),
-        ))
-    }
-}
-
-/// Denies the payload `deny` and rewrites the payload `rewrite`.
-struct ScriptedApprover;
-
-impl ActionApprover for ScriptedApprover {
-    fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
-        match proposal.payload.as_slice() {
-            b"deny" => Err(ActionRejected::CapabilityNotGranted),
-            b"rewrite" => Ok(EventDraft::new(
-                proposal.actor_entity_id,
-                proposal.event_type.clone(),
-                CanonicalBytes::from_static(b"rewritten"),
-            )),
-            _ => Ok(EventDraft::new(
-                proposal.actor_entity_id,
-                proposal.event_type.clone(),
-                proposal.payload.clone(),
-            )),
-        }
+fn plugin(id: PluginId, has_driver: bool) -> DriverPlugin {
+    DriverPlugin {
+        id,
+        name: "community-fixture",
+        event_type: "community.event",
+        has_driver,
     }
 }
 
@@ -165,7 +103,6 @@ fn initial() -> CommunityStateV1 {
 
 fn fixture(
     refusal: Option<Error>,
-    approver: Box<dyn ActionApprover>,
 ) -> (CommunityDriverV1, CommunityPluginHandleV1, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let supervisor = WorkerProgramV1::new(PathBuf::from("/worker"))
@@ -183,14 +120,9 @@ fn fixture(
             calls: Arc::clone(&calls),
             refusal,
         }),
-        approver,
         initial_state: initial(),
     });
     (driver, handle, calls)
-}
-
-fn accepting() -> Box<dyn ActionApprover> {
-    Box::new(ScriptedApprover)
 }
 
 fn every_error() -> Vec<(Error, Option<PluginAvailabilityV1>)> {
@@ -268,57 +200,32 @@ fn a_draft_maps_to_an_event_draft_or_is_rejected() {
         dependency_digests: vec![[1; 32]],
         ..draft("community.event", b"p")
     };
-    for rejected in [
-        draft("Community.Event", b"p"),
-        draft("", b"p"),
-        with_dependency,
-    ] {
-        assert_eq!(map_draft(&rejected), Err(Error::InvalidGuestOutput));
+    for malformed in [draft("Community.Event", b"p"), draft("", b"p")] {
+        assert_eq!(map_draft(&malformed), Err(Error::InvalidGuestOutput));
     }
+    // Dependency digests have nowhere to go: a distinct, closed refusal.
+    assert_eq!(map_draft(&with_dependency), Err(Error::UnsupportedSchema));
 }
 
 #[test]
-fn drafts_are_mapped_then_approved_in_the_guests_order() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let counting = CountingApprover(Arc::clone(&calls));
-    let drafts = ok(approved_drafts(
-        &counting,
-        &output(vec![draft("a.b", b"one"), draft("c.d", b"two")]),
-    ));
+fn drafts_are_mapped_in_the_guests_order_within_the_event_bytes_limit() {
+    let two = output(vec![draft("a.b", b"one"), draft("c.d", b"two")]);
+    let drafts = ok(mapped_drafts(&two, 6));
     let payloads: Vec<&[u8]> = drafts.iter().map(|d| d.payload.as_slice()).collect();
     assert_eq!(payloads, [&b"one"[..], &b"two"[..]]);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
-
-    // The approver's own draft is the committed one.
-    let rewritten = ok(approved_drafts(
-        &ScriptedApprover,
-        &output(vec![draft("a.b", b"rewrite")]),
-    ));
-    assert_eq!(rewritten[0].payload.as_slice(), b"rewritten");
-
-    // A draft that cannot map stops everything before any approval.
-    calls.store(0, Ordering::SeqCst);
+    assert_eq!(mapped_drafts(&two, 5), Err(Error::OutputLimitExceeded));
+    // Nothing above the limit is mapped partly; a bad draft stops the vector.
     let unmappable = output(vec![draft("a.b", b"one"), draft("BAD", b"two")]);
     assert_eq!(
-        approved_drafts(&counting, &unmappable),
+        mapped_drafts(&unmappable, 100),
         Err(Error::InvalidGuestOutput)
     );
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn a_typed_denial_or_an_oversize_payload_is_a_deterministic_commit_failure() {
-    let denied = output(vec![draft("a.b", b"ok"), draft("a.b", b"deny")]);
-    assert_eq!(approved_drafts(&ScriptedApprover, &denied), Err(DENIED));
-    let oversize = output(vec![draft("a.b", &[0; 4097])]);
-    assert_eq!(approved_drafts(&ScriptedApprover, &oversize), Err(DENIED));
-    let at_bound = output(vec![draft("a.b", &[0; 4096])]);
-    assert_eq!(ok(approved_drafts(&ScriptedApprover, &at_bound)).len(), 1);
+    assert!(ok(mapped_drafts(&output(Vec::new()), 0)).is_empty());
 }
 
 #[test]
 fn a_valid_output_is_staged_with_a_receipt_until_the_batch_commits() {
-    let (mut driver, handle, _) = fixture(None, accepting());
+    let (mut driver, handle, _) = fixture(None);
     let valid = output(vec![draft("community.event", b"payload")]);
     let digest = valid.output_digest;
     let staged = ok(driver.accept([3; 16], report(valid)));
@@ -339,7 +246,9 @@ fn a_valid_output_is_staged_with_a_receipt_until_the_batch_commits() {
     assert_eq!(receipt.negotiated, driver.negotiated);
     assert_eq!(receipt.output_digest, Some(digest));
     assert_eq!(receipt.limits, driver.negotiated.limits());
-    assert_eq!(receipt.metering, METERING);
+    assert_eq!(receipt.metering, Some(METERING));
+    assert_eq!(receipt.failure, None);
+    assert_eq!(receipt.guest_error, None);
     assert_eq!(receipt.dropped_trace_annotations, 1);
     assert_eq!(receipt.disposition, ReceiptDispositionV1::Staged);
 
@@ -358,8 +267,8 @@ fn a_valid_output_is_staged_with_a_receipt_until_the_batch_commits() {
 
 #[test]
 fn an_abort_discards_the_staged_state_and_receipt() {
-    let (mut driver, handle, _) = fixture(None, accepting());
-    ok(driver.accept([3; 16], report(output(vec![draft("a.b", b"p")]))));
+    let (mut driver, handle, _) = fixture(None);
+    let _staged = ok(driver.accept([3; 16], report(output(vec![draft("a.b", b"p")]))));
     driver.abort_step();
     assert_eq!(driver.staged, None);
     assert_eq!(handle.committed_state(), initial());
@@ -376,22 +285,24 @@ fn an_abort_discards_the_staged_state_and_receipt() {
 }
 
 #[test]
-fn an_unmappable_denied_or_declared_failure_stages_nothing() {
-    let (mut driver, handle, _) = fixture(None, accepting());
+fn an_unmappable_or_declared_failure_stages_nothing_and_keeps_its_receipt() {
+    let (mut driver, handle, _) = fixture(None);
     let unmappable = output(vec![draft("BAD", b"p")]);
     let digest = unmappable.output_digest;
     assert_eq!(
         driver.accept([1; 16], report(unmappable)).err(),
         Some(Error::InvalidGuestOutput)
     );
-    let denied = output(vec![draft("a.b", b"deny")]);
-    assert_eq!(driver.accept([2; 16], report(denied)).err(), Some(DENIED));
-    let declared = InvocationReportV1 {
-        result: Err(GuestPluginErrorV1 {
-            code: PluginErrorCodeV1::DeterministicBudgetExhausted,
-            canonical_coordinate: None,
-            related_digest: None,
+    let guest = GuestPluginErrorV1 {
+        code: PluginErrorCodeV1::InvalidState(FieldRefV1 {
+            schema_id: 4,
+            field_ordinal: 7,
         }),
+        canonical_coordinate: Some(b"at".to_vec()),
+        related_digest: Some([8; 32]),
+    };
+    let declared = InvocationReportV1 {
+        result: Err(guest.clone()),
         metering: METERING,
         operational_log: Vec::new(),
     };
@@ -401,14 +312,18 @@ fn an_unmappable_denied_or_declared_failure_stages_nothing() {
     );
     assert_eq!(driver.staged, None);
     let receipts = handle.receipts();
-    let digests: Vec<_> = receipts.iter().map(|r| r.output_digest).collect();
-    assert_eq!(digests[0], Some(digest));
-    assert_eq!(digests[2], None);
+    assert_eq!(receipts[0].output_digest, Some(digest));
+    assert_eq!(receipts[0].failure, Some(Error::InvalidGuestOutput));
+    assert_eq!(receipts[0].dropped_trace_annotations, 1);
+    // The guest's exact plugin-error, with its field ordinal, is kept.
+    assert_eq!(receipts[1].output_digest, None);
+    assert_eq!(receipts[1].failure, Some(Error::GuestDeclaredFailure));
+    assert_eq!(receipts[1].guest_error, Some(guest));
+    assert_eq!(receipts[1].metering, Some(METERING));
+    assert_eq!(receipts[1].dropped_trace_annotations, 0);
     assert!(receipts
         .iter()
         .all(|r| r.disposition == ReceiptDispositionV1::Discarded));
-    assert_eq!(receipts[2].dropped_trace_annotations, 0);
-    assert_eq!(receipts[0].dropped_trace_annotations, 1);
 }
 
 #[test]
@@ -423,7 +338,7 @@ fn the_prior_state_is_always_the_one_the_adapter_holds() {
 
 #[test]
 fn receipts_are_bounded_and_the_oldest_is_dropped() {
-    let (driver, handle, _) = fixture(None, accepting());
+    let (driver, handle, _) = fixture(None);
     let limit = u64::try_from(MAX_RETAINED_RECEIPTS_V1).unwrap_or(u64::MAX);
     for index in 0..=limit {
         let mut receipt = driver_receipt(&driver);
@@ -454,7 +369,7 @@ fn driver_receipt(driver: &CommunityDriverV1) -> CommunityInvocationReceiptV1 {
 #[test]
 fn a_refused_invocation_marks_or_quarantines_only_by_its_class() {
     for (error, quarantine) in every_error() {
-        let (mut driver, handle, calls) = fixture(Some(error), accepting());
+        let (mut driver, handle, calls) = fixture(Some(error));
         let failed = err(driver.step(TimelineId::new(), ObservationView::empty()));
         assert!(
             matches!(failed, RuntimeError::CommunityPlugin(refused) if refused == error),
@@ -472,7 +387,7 @@ fn a_refused_invocation_marks_or_quarantines_only_by_its_class() {
 
 #[test]
 fn a_quarantined_adapter_refuses_to_run_until_it_is_cleared() {
-    let (mut driver, handle, calls) = fixture(Some(Error::FuelExhausted), accepting());
+    let (mut driver, handle, calls) = fixture(Some(Error::FuelExhausted));
     assert!(driver
         .step(TimelineId::new(), ObservationView::empty())
         .is_err());
@@ -489,22 +404,19 @@ fn a_quarantined_adapter_refuses_to_run_until_it_is_cleared() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let mut registry = PluginRegistry::new();
-    let plugin = FixturePlugin {
-        id: handle.plugin_id(),
-        has_driver: false,
-    };
-    ok(registry.register_pinned_generated(
+    let plugin = plugin(handle.plugin_id(), false);
+    let () = ok(registry.register_pinned_generated(
         &plugin,
-        PluginRegistrationV1::new(community_pin(), PluginAvailabilityV1::Available),
+        PluginRegistrationV1::new(community_pin(1, "community"), PluginAvailabilityV1::Available),
         None,
         None,
     ));
-    ok(handle.sync_registry(&mut registry));
+    let () = ok(handle.sync_registry(&mut registry));
     assert_eq!(
         registry.availability(plugin.id),
         Some(PluginAvailabilityV1::ResourceExhausted)
     );
-    ok(handle.clear_quarantine(&mut registry));
+    let () = ok(handle.clear_quarantine(&mut registry));
     assert_eq!(
         registry.availability(plugin.id),
         Some(PluginAvailabilityV1::Available)
@@ -520,7 +432,7 @@ fn a_quarantined_adapter_refuses_to_run_until_it_is_cleared() {
 
 #[test]
 fn syncing_an_unregistered_plugin_leaves_the_handle_quarantined() {
-    let (mut driver, handle, _) = fixture(Some(Error::WorkerCrashed), accepting());
+    let (mut driver, handle, _) = fixture(Some(Error::WorkerCrashed));
     assert!(driver
         .step(TimelineId::new(), ObservationView::empty())
         .is_err());
@@ -540,8 +452,8 @@ fn syncing_an_unregistered_plugin_leaves_the_handle_quarantined() {
 
 #[test]
 fn a_step_drops_a_stale_staged_state_first() {
-    let (mut driver, handle, _) = fixture(Some(Error::InvalidInvocation), accepting());
-    ok(driver.accept([1; 16], report(output(vec![draft("a.b", b"p")]))));
+    let (mut driver, handle, _) = fixture(Some(Error::InvalidInvocation));
+    let _staged = ok(driver.accept([1; 16], report(output(vec![draft("a.b", b"p")]))));
     assert!(driver.staged.is_some());
     assert!(driver
         .step(TimelineId::new(), ObservationView::empty())
@@ -555,42 +467,22 @@ fn a_step_drops_a_stale_staged_state_first() {
 
 #[test]
 fn the_driver_reports_its_configuration() {
-    let (driver, _, _) = fixture(None, accepting());
+    let (driver, _, _) = fixture(None);
     assert_eq!(driver.name(), "community-fixture");
     assert_eq!(driver.tick_interval(), Duration::from_millis(250));
     assert_eq!(driver.subscriptions().len(), 1);
     assert!(!driver.requires_snapshot_anchor());
 }
 
-fn community_pin() -> PluginPinV1 {
-    pin_with(
-        DomainImplementationKindV1::Plugin,
-        PluginIsolationV1::GovernedCommunity,
-    )
-}
-
-fn pin_with(kind: DomainImplementationKindV1, isolation: PluginIsolationV1) -> PluginPinV1 {
-    ok(PluginPinV1::try_new(
-        kind,
-        isolation,
-        pos_core::Hash::from_bytes([1; 32]),
-        vec!["community".to_owned()],
-    ))
-}
-
 #[test]
 fn registration_is_pinned_community_and_non_participant() {
-    let (driver, handle, _) = fixture(None, accepting());
-    let plugin = FixturePlugin {
-        id: handle.plugin_id(),
-        has_driver: true,
-    };
+    let (driver, handle, _) = fixture(None);
+    let plugin = plugin(handle.plugin_id(), true);
     let mut registry = PluginRegistry::new();
-    ok(register_community_driver(
+    let () = ok(register_community_driver(
         &mut registry,
         &plugin,
-        community_pin(),
-        &handle,
+        community_pin(1, "community"),
         driver,
     ));
     assert_eq!(
@@ -605,35 +497,34 @@ fn registration_is_pinned_community_and_non_participant() {
 }
 
 #[test]
-fn registration_rejects_a_foreign_plugin_or_a_non_community_pin() {
-    let native = pin_with(
-        DomainImplementationKindV1::Plugin,
-        PluginIsolationV1::OperatorTrustedNative,
-    );
-    let adapter = pin_with(
-        DomainImplementationKindV1::PublicAdapter,
-        PluginIsolationV1::GovernedCommunity,
-    );
-    let both = pin_with(
-        DomainImplementationKindV1::PublicAdapter,
-        PluginIsolationV1::OperatorTrustedNative,
-    );
-    for (pin, expected) in [
-        (native, PluginPinFieldV1::Isolation),
-        (adapter, PluginPinFieldV1::ImplementationKind),
-        (both, PluginPinFieldV1::ImplementationKind),
+fn registration_rejects_a_non_community_pin() {
+    use DomainImplementationKindV1 as Impl;
+    use PluginIsolationV1 as Isolation;
+    for (kind, isolation, expected) in [
+        (
+            Impl::Plugin,
+            Isolation::OperatorTrustedNative,
+            PluginPinFieldV1::Isolation,
+        ),
+        (
+            Impl::PublicAdapter,
+            Isolation::GovernedCommunity,
+            PluginPinFieldV1::ImplementationKind,
+        ),
+        (
+            Impl::PublicAdapter,
+            Isolation::OperatorTrustedNative,
+            PluginPinFieldV1::ImplementationKind,
+        ),
     ] {
-        let (driver, handle, _) = fixture(None, accepting());
-        let plugin = FixturePlugin {
-            id: handle.plugin_id(),
-            has_driver: true,
-        };
+        let (driver, handle, _) = fixture(None);
+        let plugin = plugin(handle.plugin_id(), true);
         let mut registry = PluginRegistry::new();
+        let pin = pin_of(kind, isolation, 1, "community");
         let rejected = err(register_community_driver(
             &mut registry,
             &plugin,
             pin,
-            &handle,
             driver,
         ));
         assert!(matches!(
@@ -645,23 +536,4 @@ fn registration_rejects_a_foreign_plugin_or_a_non_community_pin() {
         ));
         assert_eq!(registry.driver_count(), 0);
     }
-
-    let (driver, handle, _) = fixture(None, accepting());
-    let foreign = FixturePlugin {
-        id: PluginId::new(),
-        has_driver: true,
-    };
-    let mut registry = PluginRegistry::new();
-    let rejected = err(register_community_driver(
-        &mut registry,
-        &foreign,
-        community_pin(),
-        &handle,
-        driver,
-    ));
-    assert!(matches!(
-        rejected,
-        RuntimeError::Composition(PluginCompositionErrorV1::InvalidMetadata)
-    ));
-    assert_eq!(registry.driver_count(), 0);
 }

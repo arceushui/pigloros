@@ -13,14 +13,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pos_core::{
-    ActionApprover, ActionRejected, AppendDedupKey, AppendDedupScope, AppendIdentity,
-    CanonicalBytes, Capability, CoreError, EntityId, ErasureContainmentGateV1, Event, EventDraft,
-    EventStore, Hash, Kind, PipelineAdmissionBasisV1, PipelineAdmissionPortV1, PipelineAttemptIdV1,
-    PipelineCommitReceiptV1, PipelineEvidenceRefV1, PipelineOutcomeV1, PipelineReceiptLookupV1,
-    PipelineSecurityRevisionsV1, Plugin, PluginId, ProposedAction, PurgeOutcome, Seq, SeqRange,
-    TimelineId,
+    AppendDedupKey, AppendDedupScope, AppendIdentity, CanonicalBytes, CoreError, EntityId,
+    ErasureContainmentGateV1, Event, EventDraft, EventStore, Hash, Kind, PipelineAdmissionBasisV1,
+    PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineEvidenceRefV1,
+    PipelineOutcomeV1, PipelineReceiptLookupV1, PipelineSecurityRevisionsV1, PluginId,
+    PurgeOutcome, Seq, SeqRange, TimelineId,
 };
-use pos_plugin_supervisor::test_support::{self, negotiated_with, SMALL_BUDGET};
+use pos_plugin_supervisor::test_support::{
+    self, community_pin, err, negotiated_with, ok, DriverPlugin, SMALL_BUDGET,
+};
 use pos_plugin_supervisor::{
     classify_pass_failure, register_community_driver, CommunityDriverConfigV1, CommunityDriverV1,
     CommunityPluginHandleV1, CommunityPluginSupervisorV1, CommunityStateV1,
@@ -32,9 +33,9 @@ use pos_runtime::community_plugin_host::{
     TrapReproductionV1,
 };
 use pos_runtime::{
-    DomainImplementationKindV1, LocalScheduledAdmissionHostV1, ObservationView,
-    PluginAvailabilityV1, PluginCompositionErrorV1, PluginIsolationV1, PluginPinV1, PluginRegistry,
-    RuntimeError, ScheduledDriverBindingV1, ScheduledPassAdmissionV1,
+    LocalScheduledAdmissionHostV1, ObservationView, PluginAvailabilityV1,
+    PluginCompositionErrorV1, PluginRegistry, RuntimeError, ScheduledDriverBindingV1,
+    ScheduledPassAdmissionV1,
 };
 use pos_store::memory::MemoryStore;
 
@@ -45,44 +46,10 @@ const PROBE: &str = env!("CARGO_BIN_EXE_pos-plugin-worker-probe");
 const PROMPT: Duration = Duration::from_mins(1);
 /// A short watchdog for an invocation that must be stopped.
 const SHORT: Duration = Duration::from_secs(1);
-const DENIED: Error = Error::AtomicCommitFailed {
+/// The classification of a typed non-committed pipeline outcome.
+const NOT_ADMITTED: Error = Error::AtomicCommitFailed {
     failure: AtomicCommitFailureV1::DeterministicTypedResult,
 };
-
-fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
-}
-
-fn err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
-    match result {
-        Ok(value) => std::panic::resume_unwind(Box::new(format!("unexpected success: {value:?}"))),
-        Err(error) => error,
-    }
-}
-
-struct MemberPlugin {
-    id: PluginId,
-    name: &'static str,
-    event_type: &'static str,
-}
-
-impl Plugin for MemberPlugin {
-    fn id(&self) -> PluginId {
-        self.id
-    }
-
-    fn name(&self) -> &'static str {
-        self.name
-    }
-
-    fn capability(&self) -> Capability {
-        Capability {
-            owned_event_types: vec![Kind::new(self.event_type)],
-            has_driver: true,
-            ..Capability::default()
-        }
-    }
-}
 
 /// The host's invocation inputs, one distinct invocation ID per member.
 struct Source {
@@ -105,19 +72,6 @@ impl InvocationContextSourceV1 for Source {
             invocation,
             host_inputs: HostInputs { simulation_time: 1 },
         })
-    }
-}
-
-/// The host's approver: it approves every proposal unchanged.
-struct Approver;
-
-impl ActionApprover for Approver {
-    fn approve(&self, proposal: &ProposedAction) -> Result<EventDraft, ActionRejected> {
-        Ok(EventDraft::new(
-            proposal.actor_entity_id,
-            proposal.event_type.clone(),
-            proposal.payload.clone(),
-        ))
     }
 }
 
@@ -180,7 +134,7 @@ impl World {
     fn new() -> Self {
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         let mut store = MemoryStore::new();
-        ok(store.bind_erasure_gate(Arc::clone(&gate)));
+        let () = ok(store.bind_erasure_gate(Arc::clone(&gate)));
         let timeline = ok(store.create_timeline("community-pass")).id();
         Self {
             store,
@@ -202,10 +156,11 @@ impl World {
         watchdog: Duration,
     ) -> CommunityPluginHandleV1 {
         self.members += 1;
-        let plugin = MemberPlugin {
+        let plugin = DriverPlugin {
             id: PluginId::new(),
             name,
             event_type,
+            has_driver: true,
         };
         let supervisor = WorkerProgramV1::new(PathBuf::from(PROBE))
             .and_then(|program| CommunityPluginSupervisorV1::new(program, watchdog));
@@ -221,20 +176,13 @@ impl World {
             source: Box::new(Source {
                 invocation_id: [self.members; 16],
             }),
-            approver: Box::new(Approver),
             initial_state: initial(),
         });
-        let pin = ok(PluginPinV1::try_new(
-            DomainImplementationKindV1::Plugin,
-            PluginIsolationV1::GovernedCommunity,
-            Hash::from_bytes([self.members; 32]),
-            vec![format!("community-{name}")],
-        ));
-        ok(register_community_driver(
+        let pin = community_pin(self.members, &format!("community-{name}"));
+        let () = ok(register_community_driver(
             &mut self.registry,
             &plugin,
             pin,
-            &handle,
             driver,
         ));
         handle
@@ -291,7 +239,7 @@ impl World {
     /// Mirror each handle's availability into the registry.
     fn sync(&mut self, handles: &[&CommunityPluginHandleV1]) {
         for handle in handles {
-            ok(handle.sync_registry(&mut self.registry));
+            let () = ok(handle.sync_registry(&mut self.registry));
         }
     }
 }
@@ -346,11 +294,11 @@ fn a_pass_commits_every_draft_atomically_and_only_then_the_state() {
     let receipts = alpha.receipts();
     assert_eq!(receipts[0].negotiated.plugin_id(), "alpha");
     assert_eq!(receipts[0].limits, receipts[0].negotiated.limits());
-    assert_eq!(receipts[0].metering, test_support::METERING);
+    assert_eq!(receipts[0].metering, Some(test_support::METERING));
     assert!(receipts[0].output_digest.is_some());
 
     // The committed state is the prior state of the next invocation.
-    ok(world.pass());
+    let _receipt = ok(world.pass());
     assert_eq!(payloads(&world.events())[2], b"initial+");
     assert_eq!(alpha.committed_state().bytes, b"initial++");
 }
@@ -361,98 +309,114 @@ struct Failure {
     watchdog: Duration,
     error: Error,
     quarantine: Option<PluginAvailabilityV1>,
-    receipts: usize,
 }
 
-fn failures() -> Vec<Failure> {
-    let exhausted = Some(PluginAvailabilityV1::ResourceExhausted);
-    let case = |component: &'static [u8], error, quarantine, receipts| Failure {
+const fn failure(
+    component: &'static [u8],
+    error: Error,
+    quarantine: Option<PluginAvailabilityV1>,
+) -> Failure {
+    Failure {
         component,
         watchdog: PROMPT,
         error,
         quarantine,
-        receipts,
-    };
-    vec![
-        case(b"fuel", Error::FuelExhausted, exhausted, 0),
-        case(b"memory", Error::MemoryLimitExceeded, exhausted, 0),
-        case(b"host-calls", Error::HostCallLimitExceeded, exhausted, 0),
-        case(b"output-limit", Error::OutputLimitExceeded, exhausted, 0),
-        case(
-            b"trap",
-            Error::ComponentTrap {
-                class: ComponentTrapClassV1::StackExhausted,
-                reproduction: TrapReproductionV1::Unverified,
-            },
-            Some(PluginAvailabilityV1::Trapped),
-            0,
-        ),
-        case(
-            b"exit",
-            Error::WorkerCrashed,
-            Some(PluginAvailabilityV1::Unavailable),
-            0,
-        ),
-        case(
-            b"abort",
-            Error::WorkerCrashed,
-            Some(PluginAvailabilityV1::Unavailable),
-            0,
-        ),
-        case(b"bad-digest", Error::InvalidGuestOutput, None, 0),
-        case(b"guest-error", Error::GuestDeclaredFailure, None, 1),
-        case(b"deps:community.beta", Error::InvalidGuestOutput, None, 1),
-        case(b"draft:Not.An.Id", Error::InvalidGuestOutput, None, 1),
-        case(b"big:community.beta", DENIED, None, 1),
-        Failure {
-            watchdog: SHORT,
-            ..case(b"hang", Error::OperationalWatchdogStop, None, 0)
-        },
-    ]
+    }
+}
+
+/// Run one pass whose second member fails as `failure` says, and check that
+/// the whole pass is discarded and only that member is marked.
+fn check_failure(failure: &Failure) {
+    let mut world = World::new();
+    let alpha = world.add("alpha", "community.alpha", b"draft:community.alpha", PROMPT);
+    let beta = world.add(
+        "beta",
+        "community.beta",
+        failure.component,
+        failure.watchdog,
+    );
+
+    let error = err(world.pass());
+    let expected = PassFailureV1::Host(failure.error);
+    assert_eq!(classify_pass_failure(&error), expected, "{}", failure.error);
+
+    // Nothing committed: not the unaffected Plugin's Event, nor its state.
+    assert!(world.events().is_empty(), "{}", failure.error);
+    assert_eq!(alpha.committed_state(), initial());
+    assert_eq!(dispositions(&alpha), [ReceiptDispositionV1::Discarded]);
+    // The unaffected Plugin is never marked or quarantined.
+    assert_eq!(alpha.last_failure(), None);
+    assert_eq!(alpha.availability(), PluginAvailabilityV1::Available);
+
+    assert_eq!(beta.last_failure(), Some(failure.error));
+    let quarantine = failure
+        .quarantine
+        .unwrap_or(PluginAvailabilityV1::Available);
+    assert_eq!(beta.availability(), quarantine, "{}", failure.error);
+    // The failed invocation keeps its receipt, with the closed failure.
+    let receipts = beta.receipts();
+    assert_eq!(receipts.len(), 1, "{}", failure.error);
+    assert_eq!(receipts[0].failure, Some(failure.error));
+    assert_eq!(
+        receipts[0].guest_error.is_some(),
+        failure.error == Error::GuestDeclaredFailure
+    );
+    assert_eq!(receipts[0].disposition, ReceiptDispositionV1::Discarded);
+
+    world.sync(&[&alpha, &beta]);
+    let (a, b) = (alpha.plugin_id(), beta.plugin_id());
+    assert_eq!(
+        world.registry.availability(a),
+        Some(PluginAvailabilityV1::Available)
+    );
+    assert_eq!(world.registry.availability(b), Some(quarantine));
 }
 
 #[test]
-fn any_plugin_failure_discards_the_whole_pass_and_marks_only_that_plugin() {
-    for failure in failures() {
-        let mut world = World::new();
-        let alpha = world.add("alpha", "community.alpha", b"draft:community.alpha", PROMPT);
-        let beta = world.add(
-            "beta",
-            "community.beta",
-            failure.component,
-            failure.watchdog,
-        );
-
-        let error = err(world.pass());
-        let expected = PassFailureV1::Host(failure.error);
-        assert_eq!(classify_pass_failure(&error), expected, "{}", failure.error);
-
-        // Nothing committed: not the unaffected Plugin's Event, nor its state.
-        assert!(world.events().is_empty(), "{}", failure.error);
-        assert_eq!(alpha.committed_state(), initial());
-        assert_eq!(dispositions(&alpha), [ReceiptDispositionV1::Discarded]);
-        // The unaffected Plugin is never marked or quarantined.
-        assert_eq!(alpha.last_failure(), None);
-        assert_eq!(alpha.availability(), PluginAvailabilityV1::Available);
-
-        assert_eq!(beta.last_failure(), Some(failure.error));
-        let quarantine = failure
-            .quarantine
-            .unwrap_or(PluginAvailabilityV1::Available);
-        assert_eq!(beta.availability(), quarantine, "{}", failure.error);
-        assert_eq!(beta.receipts().len(), failure.receipts, "{}", failure.error);
-        assert!(dispositions(&beta)
-            .iter()
-            .all(|disposition| *disposition == ReceiptDispositionV1::Discarded));
-
-        world.sync(&[&alpha, &beta]);
-        let (a, b) = (alpha.plugin_id(), beta.plugin_id());
-        assert_eq!(
-            world.registry.availability(a),
-            Some(PluginAvailabilityV1::Available)
-        );
-        assert_eq!(world.registry.availability(b), Some(quarantine));
+fn a_resource_limit_discards_the_pass_and_exhausts_only_that_plugin() {
+    let exhausted = Some(PluginAvailabilityV1::ResourceExhausted);
+    for (component, error) in [
+        (&b"fuel"[..], Error::FuelExhausted),
+        (&b"memory"[..], Error::MemoryLimitExceeded),
+        (&b"host-calls"[..], Error::HostCallLimitExceeded),
+        (&b"output-limit"[..], Error::OutputLimitExceeded),
+    ] {
+        check_failure(&failure(component, error, exhausted));
     }
+}
+
+#[test]
+fn a_trap_or_a_crash_discards_the_pass_and_quarantines_only_that_plugin() {
+    let trap = Error::ComponentTrap {
+        class: ComponentTrapClassV1::StackExhausted,
+        reproduction: TrapReproductionV1::Unverified,
+    };
+    check_failure(&failure(b"trap", trap, Some(PluginAvailabilityV1::Trapped)));
+    for component in [&b"exit"[..], b"abort"] {
+        let unavailable = Some(PluginAvailabilityV1::Unavailable);
+        check_failure(&failure(component, Error::WorkerCrashed, unavailable));
+    }
+}
+
+#[test]
+fn an_invalid_output_discards_the_pass_and_only_marks_that_plugin() {
+    for (component, error) in [
+        (&b"bad-digest"[..], Error::InvalidGuestOutput),
+        (&b"guest-error"[..], Error::GuestDeclaredFailure),
+        (&b"draft:Not.An.Id"[..], Error::InvalidGuestOutput),
+        // Dependency digests have no EventDraft field: a distinct refusal.
+        (&b"deps:community.beta"[..], Error::UnsupportedSchema),
+    ] {
+        check_failure(&failure(component, error, None));
+    }
+}
+
+#[test]
+fn a_watchdog_stop_discards_the_pass_without_quarantine() {
+    check_failure(&Failure {
+        watchdog: SHORT,
+        ..failure(b"hang", Error::OperationalWatchdogStop, None)
+    });
 }
 
 #[test]
@@ -482,7 +446,7 @@ fn a_quarantined_plugin_blocks_passes_in_memory_until_the_host_clears_it() {
     assert_eq!(alpha.receipts().len(), 1);
     assert!(world.events().is_empty());
 
-    ok(beta.clear_quarantine(&mut world.registry));
+    let () = ok(beta.clear_quarantine(&mut world.registry));
     assert_eq!(beta.availability(), PluginAvailabilityV1::Available);
     assert_eq!(beta.last_failure(), None);
     // Cleared, the Plugin runs again, and fails again.
@@ -503,7 +467,7 @@ fn a_typed_non_commit_and_a_store_error_discard_the_pass_and_classify() {
     // A typed non-committed outcome: an Event committed after staging moves
     // the Logical Head, so the store reports an admission conflict.
     let staged = ok(world.stage());
-    ok(world.store.append(
+    let _events = ok(world.store.append(
         world.timeline,
         &[EventDraft::new(
             EntityId::new(),
@@ -519,7 +483,7 @@ fn a_typed_non_commit_and_a_store_error_discard_the_pass_and_classify() {
     ));
     assert_eq!(
         classify_pass_failure(&conflict),
-        PassFailureV1::Host(DENIED)
+        PassFailureV1::Host(NOT_ADMITTED)
     );
     assert_eq!(world.events().len(), 1);
 

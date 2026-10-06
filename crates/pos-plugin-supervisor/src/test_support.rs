@@ -10,6 +10,7 @@ use pos_crypto::plugin_execution::{
     DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
     PluginExecutionProjectionFixtureV1, PluginExecutionProjectionV1,
 };
+use pos_core::{Capability, Hash, Kind, Plugin, PluginId};
 use pos_runtime::community_plugin_host::{
     negotiate_community_plugin_v1, plugin_output_digest_v1, ArtifactRefV1,
     CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1,
@@ -17,6 +18,7 @@ use pos_runtime::community_plugin_host::{
     OperationalLogRecord, PluginDescriptorV1, PluginInvocationV1, PluginOutputV1,
     TimelinePositionV1, TraceAnnotationV1,
 };
+use pos_runtime::{DomainImplementationKindV1, PluginIsolationV1, PluginPinV1};
 
 /// A budget small enough that the worker's data ceiling stays far below 1 GiB.
 pub const SMALL_BUDGET: DeterministicBudgetV1 = DeterministicBudgetV1 {
@@ -37,6 +39,72 @@ pub const METERING: MeteringV1 = MeteringV1 {
 #[must_use]
 pub fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+}
+
+/// The error of `result`, or a test failure that names the unexpected value.
+#[must_use]
+pub fn err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
+    match result {
+        Ok(value) => std::panic::resume_unwind(Box::new(format!("unexpected success: {value:?}"))),
+        Err(error) => error,
+    }
+}
+
+/// A Plugin that owns one Event type, for the adapter's registry tests.
+pub struct DriverPlugin {
+    /// The Plugin ID.
+    pub id: PluginId,
+    /// The Plugin name.
+    pub name: &'static str,
+    /// The one Event type it owns.
+    pub event_type: &'static str,
+    /// Whether it declares a Driver.
+    pub has_driver: bool,
+}
+
+impl Plugin for DriverPlugin {
+    fn id(&self) -> PluginId {
+        self.id
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            owned_event_types: vec![Kind::new(self.event_type)],
+            has_driver: self.has_driver,
+            ..Capability::default()
+        }
+    }
+}
+
+/// A pin of the given kind and isolation with one role and a non-zero digest.
+#[must_use]
+pub fn pin_of(
+    kind: DomainImplementationKindV1,
+    isolation: PluginIsolationV1,
+    byte: u8,
+    role: &str,
+) -> PluginPinV1 {
+    ok(PluginPinV1::try_new(
+        kind,
+        isolation,
+        Hash::from_bytes([byte; 32]),
+        vec![role.to_owned()],
+    ))
+}
+
+/// The pin of a community Plugin.
+#[must_use]
+pub fn community_pin(byte: u8, role: &str) -> PluginPinV1 {
+    pin_of(
+        DomainImplementationKindV1::Plugin,
+        PluginIsolationV1::GovernedCommunity,
+        byte,
+        role,
+    )
 }
 
 /// An optional capability, which negotiation records as not granted.
@@ -197,6 +265,19 @@ mod tests {
             .err()
             .and_then(|payload| payload.downcast::<String>().ok());
         assert_eq!(message.as_deref().map(String::as_str), Some("\"boom\""));
+    }
+
+    #[test]
+    fn an_unexpected_success_is_a_test_failure_naming_the_value() {
+        assert_eq!(err(Err::<u8, _>("boom")), "boom");
+        let failure = std::panic::catch_unwind(|| err(Ok::<u8, ()>(7)));
+        let message = failure
+            .err()
+            .and_then(|payload| payload.downcast::<String>().ok());
+        assert_eq!(
+            message.as_deref().map(String::as_str),
+            Some("unexpected success: 7")
+        );
     }
 
     #[test]

@@ -65,6 +65,13 @@ pub enum PassFailureV1 {
 ///   store's public contract defines no deterministic result for it.
 /// - `StorageOutcomeUnknown` is [`PassFailureV1::InDoubt`].
 /// - A community host error raised while staging is carried as it is.
+///
+/// A commit failure has no failing Plugin, so nothing here marks a handle:
+/// the adapter that failed while staging already marked itself in its own
+/// `step`. Every other runtime error (consent, contract, authority, pending
+/// step and so on) is the host's own and is `Unrelated`; the variants are
+/// deliberately not enumerated, so a new runtime error is never silently
+/// classified as a community host failure.
 #[must_use]
 pub const fn classify_pass_failure(error: &RuntimeError) -> PassFailureV1 {
     match error {
@@ -76,6 +83,7 @@ pub const fn classify_pass_failure(error: &RuntimeError) -> PassFailureV1 {
         RuntimeError::Store(_) => {
             PassFailureV1::Host(commit_failed(AtomicCommitFailureV1::Operational))
         }
+        // Not a community host failure: see the function documentation.
         _ => PassFailureV1::Unrelated,
     }
 }

@@ -2,14 +2,16 @@
 //!
 //! [`CommunityDriverV1`] implements pos-runtime's [`Driver`] trait. Each
 //! `step` runs the Plugin's `drive` export in one fresh supervised worker,
-//! maps the guest's output to the pipeline's `EventDraft`s, approves them with
-//! the host-native [`ActionApprover`], and stages them in the registry's usual
-//! pending step. Nothing is committed by `step`: the registry commits the
-//! whole pass atomically through `PluginRegistry::admit_scheduled_pass`, or
-//! discards every staged Driver output. The guest never commits, there is no
-//! `approve` export, and a failed pass is never retried implicitly.
+//! maps the guest's output to the pipeline's `EventDraft`s, and stages them in
+//! the registry's usual pending step. Nothing is committed by `step`: the
+//! registry validates every draft (host-owned types, ownership, output
+//! admission, schema) and commits the whole pass atomically through
+//! `PluginRegistry::admit_scheduled_pass`, or discards every staged Driver
+//! output. That host validation is the only approval. The guest never commits,
+//! there is no `approve` export, the adapter has no approver of its own, and a
+//! failed pass is never retried implicitly.
 //!
-//! Registration goes through [`register_community_driver`]: the local-pinned
+//! Registration goes through [`register_community_driver()`]: the local-pinned
 //! path (`register_pinned_generated` with a `GovernedCommunity` pin) and the
 //! non-participant scheduled profile. Trust-derived admission is #544.
 //!
@@ -19,7 +21,7 @@
 //! no Event, and are not recorded in a `ReproManifest` or commit receipt: that
 //! needs a storage decision and belongs to the follow-up #560.
 //! - The next state is held in the adapter and adopted through
-//!   [`Driver::commit_step`] only after the whole batch commits. An abort
+//!   [`Driver::commit_step()`] only after the whole batch commits. An abort
 //!   discards it, and a store outcome that is unknown keeps it staged for
 //!   `recover_scheduled_pass`.
 //! - Trace annotations are validated by the engine and the supervisor and
@@ -27,13 +29,20 @@
 //!
 //! # Quarantine
 //! A failure quarantines the failing Plugin and nobody else; see
-//! [`quarantine_for`]. The adapter refuses to run while quarantined, and the
+//! [`quarantine_for()`]. The adapter refuses to run while quarantined, and the
 //! host mirrors the quarantine into the registry with
-//! [`CommunityPluginHandleV1::sync_registry`] so a pass refuses the Plugin
-//! before any Driver runs, until [`CommunityPluginHandleV1::clear_quarantine`].
+//! [`CommunityPluginHandleV1::sync_registry()`]. The registry's pass-time
+//! check is registry-wide: while any selected Driver is quarantined, the
+//! registry refuses the whole pass before any Driver runs, so a quarantined
+//! Plugin stops every Plugin's passes until the host calls
+//! [`CommunityPluginHandleV1::clear_quarantine()`]. A refused pass stages
+//! nothing and adds no new failure.
 //!
 //! # Classification of a failed pass
-//! The host passes the error of a failed pass to [`classify_pass_failure`].
+//! The host passes the error of a failed pass to [`classify_pass_failure()`].
+//! A commit failure has no failing Plugin, so no handle is marked by it; a
+//! host error raised while staging was already recorded by the failing
+//! adapter's own `step`, so there is no separate recording call.
 
 mod failure;
 mod output;
@@ -42,10 +51,10 @@ mod state;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pos_core::{ActionApprover, Plugin, PluginId, TimelineId};
+use pos_core::{Plugin, PluginId, TimelineId};
 use pos_runtime::community_plugin_host::{
-    CommunityPluginHostErrorV1, HostInputs, InvocationReportV1, MeteringV1,
-    NegotiatedCommunityPluginV1, PluginInvocationV1, PluginOutputV1,
+    CommunityPluginHostErrorV1, GuestPluginErrorV1, HostInputs, InvocationReportV1,
+    MeteringV1, NegotiatedCommunityPluginV1, PluginInvocationV1, PluginOutputV1,
 };
 use pos_runtime::{
     DomainImplementationKindV1, Driver, ObservationView, PluginAvailabilityV1,
@@ -55,8 +64,7 @@ use pos_runtime::{
 };
 
 pub use self::failure::{classify_pass_failure, quarantine_for, PassFailureV1};
-use self::output::approved_drafts;
-pub use self::output::APPROVAL_CAPABILITY_V1;
+use self::output::mapped_drafts;
 use self::state::Shared;
 pub use self::state::{
     CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1, ReceiptDispositionV1,
@@ -73,7 +81,9 @@ type Error = CommunityPluginHostErrorV1;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvocationContextV1 {
     /// The invocation. Its `prior_state_schema` and `prior_state_bytes` are
-    /// ignored: the adapter always substitutes the Plugin state it holds.
+    /// ignored and overwritten: the adapter always substitutes the Plugin
+    /// state it holds (the initial state, then each committed next state), so
+    /// the host cannot feed a different state through the context.
     pub invocation: PluginInvocationV1,
     /// The deterministic `host-v1` values.
     pub host_inputs: HostInputs,
@@ -115,8 +125,6 @@ pub struct CommunityDriverConfigV1 {
     pub component: Vec<u8>,
     /// The source of every invocation's host-built inputs.
     pub source: Box<dyn InvocationContextSourceV1>,
-    /// The host-native approver of every draft.
-    pub approver: Box<dyn ActionApprover>,
     /// The Plugin state before the first committed step (non-durable).
     pub initial_state: CommunityStateV1,
 }
@@ -130,7 +138,6 @@ pub struct CommunityDriverV1 {
     negotiated: NegotiatedCommunityPluginV1,
     component: Vec<u8>,
     source: Box<dyn InvocationContextSourceV1>,
-    approver: Box<dyn ActionApprover>,
     shared: Arc<Shared>,
     /// The next state staged by the pending step, adopted only on commit.
     staged: Option<CommunityStateV1>,
@@ -150,7 +157,6 @@ impl CommunityDriverV1 {
             negotiated: config.negotiated,
             component: config.component,
             source: config.source,
-            approver: config.approver,
             shared,
             staged: None,
         };
@@ -177,13 +183,20 @@ impl CommunityDriverV1 {
     ) -> Result<StepOutput, Error> {
         let context = self.source.context(timeline, observation)?;
         let invocation = with_prior_state(context.invocation, &self.shared.committed_state());
-        let report = self.supervisor.drive(
-            &self.negotiated,
-            &self.component,
-            &invocation,
-            context.host_inputs,
-        )?;
-        self.accept(invocation.invocation_id, report)
+        let id = invocation.invocation_id;
+        let report = self
+            .supervisor
+            .drive(
+                &self.negotiated,
+                &self.component,
+                &invocation,
+                context.host_inputs,
+            )
+            .map_err(|failure| {
+                self.record(id, ReceiptParts::failed(failure));
+                failure
+            })?;
+        self.accept(id, report)
     }
 
     /// Record the receipt of a returned report and stage a valid output.
@@ -192,36 +205,41 @@ impl CommunityDriverV1 {
         invocation_id: [u8; 16],
         report: InvocationReportV1<PluginOutputV1>,
     ) -> Result<StepOutput, Error> {
-        let metering = report.metering;
-        let Ok(output) = report.result else {
-            self.record(
-                invocation_id,
-                None,
-                metering,
-                0,
-                ReceiptDispositionV1::Discarded,
-            );
-            return Err(Error::GuestDeclaredFailure);
-        };
-        let staged = self.stage(&output);
-        let disposition = if staged.is_ok() {
-            ReceiptDispositionV1::Staged
-        } else {
-            ReceiptDispositionV1::Discarded
-        };
-        self.record(
-            invocation_id,
-            Some(output.output_digest),
-            metering,
-            output.trace_annotations.len(),
-            disposition,
-        );
-        staged
+        let metering = Some(report.metering);
+        match report.result {
+            Err(guest) => {
+                let parts = ReceiptParts {
+                    metering,
+                    guest_error: Some(guest),
+                    ..ReceiptParts::failed(Error::GuestDeclaredFailure)
+                };
+                self.record(invocation_id, parts);
+                Err(Error::GuestDeclaredFailure)
+            }
+            Ok(output) => {
+                let staged = self.stage(&output);
+                let parts = ReceiptParts {
+                    output_digest: Some(output.output_digest),
+                    metering,
+                    dropped_trace_annotations: output.trace_annotations.len(),
+                    failure: staged.as_ref().err().copied(),
+                    disposition: if staged.is_ok() {
+                        ReceiptDispositionV1::Staged
+                    } else {
+                        ReceiptDispositionV1::Discarded
+                    },
+                    guest_error: None,
+                };
+                self.record(invocation_id, parts);
+                staged
+            }
+        }
     }
 
-    /// Map and approve every draft, then hold the next state until commit.
+    /// Map every draft, then hold the next state until commit.
     fn stage(&mut self, output: &PluginOutputV1) -> Result<StepOutput, Error> {
-        approved_drafts(self.approver.as_ref(), output).map(|drafts| {
+        let event_bytes = self.negotiated.limits().values().event_bytes;
+        mapped_drafts(output, event_bytes).map(|drafts| {
             self.staged = Some(CommunityStateV1 {
                 schema: output.next_state_schema,
                 bytes: output.next_state_bytes.clone(),
@@ -230,23 +248,42 @@ impl CommunityDriverV1 {
         })
     }
 
-    fn record(
-        &self,
-        invocation_id: [u8; 16],
-        output_digest: Option<[u8; 32]>,
-        metering: MeteringV1,
-        dropped_trace_annotations: usize,
-        disposition: ReceiptDispositionV1,
-    ) {
+    fn record(&self, invocation_id: [u8; 16], parts: ReceiptParts) {
         self.shared.push_receipt(CommunityInvocationReceiptV1 {
             invocation_id,
             negotiated: self.negotiated.clone(),
-            output_digest,
+            output_digest: parts.output_digest,
             limits: self.negotiated.limits(),
-            metering,
-            dropped_trace_annotations,
-            disposition,
+            metering: parts.metering,
+            dropped_trace_annotations: parts.dropped_trace_annotations,
+            failure: parts.failure,
+            guest_error: parts.guest_error,
+            disposition: parts.disposition,
         });
+    }
+}
+
+/// The variable part of one receipt.
+struct ReceiptParts {
+    output_digest: Option<[u8; 32]>,
+    metering: Option<MeteringV1>,
+    dropped_trace_annotations: usize,
+    failure: Option<Error>,
+    guest_error: Option<GuestPluginErrorV1>,
+    disposition: ReceiptDispositionV1,
+}
+
+impl ReceiptParts {
+    /// An invocation that ended in `failure` with nothing staged.
+    const fn failed(failure: Error) -> Self {
+        Self {
+            output_digest: None,
+            metering: None,
+            dropped_trace_annotations: 0,
+            failure: Some(failure),
+            guest_error: None,
+            disposition: ReceiptDispositionV1::Discarded,
+        }
     }
 }
 
@@ -314,18 +351,16 @@ impl Driver for CommunityDriverV1 {
 /// assigned too, and registration is not undone if it fails.
 ///
 /// # Errors
-/// Returns `InvalidMetadata` when `plugin` is not the Driver's Plugin, a
-/// pin that is not a `GovernedCommunity` Plugin as an
+/// Returns a pin that is not a `GovernedCommunity` Plugin as an
 /// `IncompatibleImplementation`, then the registry's registration and
 /// profile-composition errors.
 pub fn register_community_driver(
     registry: &mut PluginRegistry,
     plugin: &dyn Plugin,
     pin: PluginPinV1,
-    handle: &CommunityPluginHandleV1,
     driver: CommunityDriverV1,
 ) -> Result<(), RuntimeError> {
-    require_community_pin(plugin.id(), handle, &pin)?;
+    require_community_pin(plugin.id(), &pin)?;
     registry
         .register_pinned_generated(
             plugin,
@@ -341,12 +376,8 @@ pub fn register_community_driver(
         })
 }
 
-/// The Plugin must be the handle's, and the pin a community Plugin's.
-fn require_community_pin(
-    plugin_id: PluginId,
-    handle: &CommunityPluginHandleV1,
-    pin: &PluginPinV1,
-) -> Result<(), RuntimeError> {
+/// The pin must be a community Plugin's.
+fn require_community_pin(plugin_id: PluginId, pin: &PluginPinV1) -> Result<(), RuntimeError> {
     let field = if pin.implementation_kind() != DomainImplementationKindV1::Plugin {
         Some(PluginPinFieldV1::ImplementationKind)
     } else if pin.isolation() != PluginIsolationV1::GovernedCommunity {
@@ -354,9 +385,6 @@ fn require_community_pin(
     } else {
         None
     };
-    if handle.plugin_id() != plugin_id {
-        return Err(PluginCompositionErrorV1::InvalidMetadata.into());
-    }
     field.map_or(Ok(()), |field| {
         Err(PluginCompositionErrorV1::IncompatibleImplementation { plugin_id, field }.into())
     })

@@ -4,7 +4,10 @@
 //! through [`PluginRegistry::set_availability`]. A scheduled pass then refuses
 //! to step a Driver whose recorded availability is anything but
 //! [`PluginAvailabilityV1::Available`], before any Driver runs and before any
-//! state is staged. The availability is in-memory registry state: it is lost
+//! state is staged. The refusal is registry-wide on purpose: it refuses the
+//! whole pass, so one unavailable Driver stops every Driver's passes until the
+//! host sets it available again. A pass is never run with a Driver silently
+//! left out, because ADR-021 treats a pass as one atomic unit. The availability is in-memory registry state: it is lost
 //! on restart, and setting it fabricates no Event.
 //!
 //! Registration and composition resolution are unchanged. A Plugin registered
@@ -20,7 +23,7 @@ impl PluginRegistry {
     /// Set the host-observed availability of a registered, pinned Plugin.
     ///
     /// The pin is kept. The availability is in memory only. A pass that would
-    /// step the Plugin's Driver fails with
+    /// step the Plugin's Driver fails as a whole, for every Plugin in it, with
     /// [`PluginCompositionErrorV1::ImplementationUnavailable`] until the host
     /// sets [`PluginAvailabilityV1::Available`] again.
     ///
