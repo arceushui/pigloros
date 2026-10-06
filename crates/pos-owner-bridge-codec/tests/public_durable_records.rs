@@ -188,6 +188,110 @@ fn public_durable_records_preserve_every_field_and_cbor_width_boundary(
     Ok(())
 }
 
+#[test]
+fn public_durable_decoders_reject_every_closed_schema_variation(
+) -> Result<(), OwnerBridgeCodecError> {
+    let binding = fixture_binding()?;
+    let mut binding_bytes = [0; 187];
+    let binding_length = encode_subject_credential_binding(&binding, &mut binding_bytes)?;
+    assert_eq!(binding_length, binding_bytes.len());
+
+    let mut wrong_binding_array = binding_bytes;
+    wrong_binding_array[0] = 0x8f;
+    assert_binding_error(&wrong_binding_array, OwnerBridgeCodecError::InvalidCbor);
+    let mut wrong_binding_magic = binding_bytes;
+    wrong_binding_magic[2] = b'X';
+    assert_binding_error(&wrong_binding_magic, OwnerBridgeCodecError::InvalidPayload);
+    let mut wrong_binding_version = binding_bytes;
+    wrong_binding_version[6] = 2;
+    assert_binding_error(
+        &wrong_binding_version,
+        OwnerBridgeCodecError::InvalidPayload,
+    );
+    let mut noncanonical_binding_version = Vec::from(binding_bytes);
+    noncanonical_binding_version.splice(6..7, [0x18, 1]);
+    assert_binding_error(
+        &noncanonical_binding_version,
+        OwnerBridgeCodecError::NonCanonicalCbor,
+    );
+    let mut wrong_subject_width = binding_bytes;
+    wrong_subject_width[13] = 0x51;
+    assert_binding_error(&wrong_subject_width, OwnerBridgeCodecError::InvalidCbor);
+    let mut wrong_role = binding_bytes;
+    wrong_role[30] = 1;
+    assert_binding_error(&wrong_role, OwnerBridgeCodecError::InvalidPayload);
+    let mut wrong_rp_id = binding_bytes;
+    wrong_rp_id[33] = b'X';
+    assert_binding_error(&wrong_rp_id, OwnerBridgeCodecError::InvalidPayload);
+    let mut wrong_origin = binding_bytes;
+    wrong_origin[43] = b'X';
+    assert_binding_error(&wrong_origin, OwnerBridgeCodecError::InvalidPayload);
+    let mut empty_credential = binding_bytes;
+    empty_credential[65] = 0x40;
+    assert_binding_error(&empty_credential, OwnerBridgeCodecError::BoundsExceeded);
+    let mut wrong_user_handle_width = binding_bytes;
+    wrong_user_handle_width[68] = 0x41;
+    assert_binding_error(&wrong_user_handle_width, OwnerBridgeCodecError::InvalidCbor);
+    let mut wrong_algorithm = binding_bytes;
+    wrong_algorithm[181] = 1;
+    assert_binding_error(&wrong_algorithm, OwnerBridgeCodecError::InvalidPayload);
+    let mut wrong_backup_flag = binding_bytes;
+    wrong_backup_flag[182] = 0xf6;
+    assert_binding_error(&wrong_backup_flag, OwnerBridgeCodecError::InvalidCbor);
+    let mut oversized_sign_count = Vec::from(binding_bytes);
+    oversized_sign_count.splice(184..185, [0x1b, 0, 0, 0, 1, 0, 0, 0, 0]);
+    assert_binding_error(&oversized_sign_count, OwnerBridgeCodecError::InvalidPayload);
+    let mut too_many_transports = binding_bytes;
+    too_many_transports[185] = 0x87;
+    assert_binding_error(&too_many_transports, OwnerBridgeCodecError::BoundsExceeded);
+    let mut unknown_transport = binding_bytes;
+    unknown_transport[186] = 6;
+    assert_binding_error(&unknown_transport, OwnerBridgeCodecError::InvalidPayload);
+    let mut binding_trailing = Vec::from(binding_bytes);
+    binding_trailing.push(0);
+    assert_binding_error(&binding_trailing, OwnerBridgeCodecError::TrailingBytes);
+
+    let cleanup = CleanupRecordV1::new(
+        CEREMONY_ID,
+        "owner-bridge-1",
+        7,
+        0x0102_0304_0506_0708,
+        IMAGE_PATH_SHA256,
+    )?;
+    let mut cleanup_bytes = [0; 83];
+    let cleanup_length = encode_cleanup_record(&cleanup, &mut cleanup_bytes)?;
+    assert_eq!(cleanup_length, cleanup_bytes.len());
+
+    let mut wrong_cleanup_array = cleanup_bytes;
+    wrong_cleanup_array[0] = 0x86;
+    assert_cleanup_error(&wrong_cleanup_array, OwnerBridgeCodecError::InvalidCbor);
+    let mut wrong_cleanup_magic = cleanup_bytes;
+    wrong_cleanup_magic[2] = b'X';
+    assert_cleanup_error(&wrong_cleanup_magic, OwnerBridgeCodecError::InvalidPayload);
+    let mut wrong_cleanup_version = cleanup_bytes;
+    wrong_cleanup_version[6] = 2;
+    assert_cleanup_error(
+        &wrong_cleanup_version,
+        OwnerBridgeCodecError::InvalidPayload,
+    );
+    let mut wrong_ceremony_width = cleanup_bytes;
+    wrong_ceremony_width[7] = 0x51;
+    assert_cleanup_error(&wrong_ceremony_width, OwnerBridgeCodecError::InvalidCbor);
+    let mut oversized_browser_pid = Vec::from(cleanup_bytes);
+    oversized_browser_pid.splice(39..40, [0x1b, 0, 0, 0, 1, 0, 0, 0, 0]);
+    assert_cleanup_error(
+        &oversized_browser_pid,
+        OwnerBridgeCodecError::InvalidPayload,
+    );
+    let mut wrong_image_hash_width = cleanup_bytes;
+    wrong_image_hash_width[49] = 0x41;
+    assert_cleanup_error(&wrong_image_hash_width, OwnerBridgeCodecError::InvalidCbor);
+    let mut cleanup_trailing = Vec::from(cleanup_bytes);
+    cleanup_trailing.push(0);
+    assert_cleanup_error(&cleanup_trailing, OwnerBridgeCodecError::TrailingBytes);
+    Ok(())
+}
+
 fn fixture_binding() -> Result<SubjectCredentialBindingV1<'static>, OwnerBridgeCodecError> {
     binding_with("owner", 1, &[0x80, 0x81])
 }
@@ -209,6 +313,14 @@ fn binding_with<'a>(
         sign_count: 7,
         transports: TransportCodes::new(&[0])?,
     })
+}
+
+fn assert_binding_error(input: &[u8], expected: OwnerBridgeCodecError) {
+    assert_eq!(decode_subject_credential_binding(input), Err(expected));
+}
+
+fn assert_cleanup_error(input: &[u8], expected: OwnerBridgeCodecError) {
+    assert_eq!(decode_cleanup_record(input), Err(expected));
 }
 
 fn cose_key() -> [u8; 77] {
