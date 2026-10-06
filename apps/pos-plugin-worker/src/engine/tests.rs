@@ -1,5 +1,11 @@
-use pos_crypto::plugin_execution::DeterministicBudgetV1;
-use pos_crypto::plugin_worker_ipc::WorkerNegotiationV1;
+use pos_crypto::plugin_execution::{
+    DeterministicBudgetV1, PluginAbiRequirementV1, PluginExecutionProjectionFixtureV1,
+    PluginExecutionProjectionV1,
+};
+use pos_runtime::community_plugin_host::{
+    negotiate_community_plugin_v1, ArtifactRefV1, CommunityPluginModeV1, ComponentTrapClassV1,
+    HostInputs, PluginInvocationV1, TimelinePositionV1, TrapReproductionV1,
+};
 
 use super::*;
 
@@ -9,260 +15,159 @@ const RUST_GUEST: &[u8] = include_bytes!(
 const C_GUEST: &[u8] = include_bytes!(
     "../../../../plugins/community/examples/compatibility-prototype/fixtures/c-guest.wasm"
 );
+const PLUGIN_ID: &str = "pigloros.compatibility-prototype";
 
-fn request(
-    component: &[u8],
-    export: WorkerExportV1,
-    limits: DeterministicBudgetV1,
-) -> WorkerRequestV1 {
-    WorkerRequestV1 {
-        export,
-        component: component.to_vec(),
-        negotiation: WorkerNegotiationV1 {
-            world: "pigloros:plugin/community-plugin@0.1.0".to_owned(),
-            abi_major: 0,
-            abi_minor: 0,
+type Error = CommunityPluginHostErrorV1;
+
+fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+    result.unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+}
+
+fn transport(budget: DeterministicBudgetV1) -> NegotiatedTransportV1 {
+    let fixture = PluginExecutionProjectionFixtureV1 {
+        pmf1_digest: [1; 32],
+        release_digest: [2; 32],
+        plugin_id: PLUGIN_ID.to_owned(),
+        abi: PluginAbiRequirementV1 {
+            major: 0,
+            min_minor: 0,
+            max_minor: 0,
             required_features: Vec::new(),
-            pmf1_digest: [1; 32],
-            release_digest: [2; 32],
         },
-        limits,
-        simulation_time: 42,
-        invocation: Vec::new(),
+        capabilities: Vec::new(),
+        budget,
+    };
+    let profile = CommunityPluginExecutionProfileV1::new(
+        CommunityPluginModeV1::Local,
+        CommunityPluginCeilingsV1::V1,
+        None,
+    );
+    let execution = PluginExecutionProjectionV1::from(fixture);
+    let negotiated = negotiate_community_plugin_v1(
+        &execution,
+        &CommunityPluginHostAbiV1::v1(),
+        &profile,
+    );
+    ok(negotiated).to_transport()
+}
+
+fn invocation(observation: &[u8]) -> PluginInvocationV1 {
+    let artifact = |schema_id| ArtifactRefV1 {
+        schema_id,
+        byte_length: 0,
+        digest: [0; 32],
+    };
+    PluginInvocationV1 {
+        invocation_id: [0x11; 16],
+        timeline_position: TimelinePositionV1 {
+            timeline_id: [0x22; 16],
+            seq: 11,
+            tick: 3,
+            scheduler_position: 0,
+        },
+        output_base_ordinal: 0,
+        principal_ref: artifact(1),
+        authorization_decision: artifact(2),
+        observation_snapshot: artifact(3),
+        observation_bytes: observation.to_vec(),
+        prior_state_schema: [2; 32],
+        prior_state_bytes: b"prior".to_vec(),
+        execution_profile_digest: [3; 32],
+        trust_policy_snapshot_digest: [4; 32],
+        deterministic_budget_id: "budget".to_owned(),
+        deterministic_random_domain: [7; 32],
+        provenance_root: [5; 32],
     }
 }
 
-const ROOMY: DeterministicBudgetV1 = DeterministicBudgetV1 {
-    memory_bytes: 64 * 1_048_576,
-    fuel: 100_000_000,
-    ..DeterministicBudgetV1::MAXIMA
-};
-
-fn run_request(request: &WorkerRequestV1) -> Option<WorkerOutcomeV1> {
-    invoke(request)
+fn request(component: &[u8], call: WorkerCallV1) -> WorkerRequestV1 {
+    WorkerRequestV1 {
+        component: component.to_vec(),
+        negotiation: transport(DeterministicBudgetV1::MAXIMA),
+        watchdog_millis: 600_000,
+        host_inputs: HostInputs {
+            simulation_time: 42,
+        },
+        call,
+    }
 }
 
-fn integer(value: u64) -> Value {
-    Value::Integer(value.into())
-}
-
-fn bytes(value: &[u8]) -> Value {
-    Value::Array(value.iter().map(|byte| integer(u64::from(*byte))).collect())
-}
-
-fn record(value: &[u8]) -> Value {
-    Value::Array(vec![bytes(value)])
-}
-
-fn expected_descriptor() -> Vec<u8> {
-    let descriptor = Value::Array(vec![
-        record(b"pigloros.compatibility-prototype"),
-        record(b"0.1.0"),
-        record(b"pigloros:plugin/community-plugin@0.1.0"),
-        integer(0),
-        integer(1),
-        integer(1),
-        Value::Array(Vec::new()),
-        Value::Array(vec![record(&[1; 32])]),
-        record(&[2; 32]),
-        Value::Array(Vec::new()),
-        Value::Array(Vec::new()),
-        Value::Array(Vec::new()),
-        record(&[0; 32]),
-        record(&[0; 32]),
-    ]);
-    let mut out = Vec::new();
-    let encoded = ciborium::into_writer(&Value::Array(vec![integer(0), descriptor]), &mut out);
-    assert!(encoded.is_ok());
-    out
+fn host() -> ComponentHost {
+    ok(ComponentHost::new())
 }
 
 #[test]
-fn both_guests_describe_the_same_plugin() {
+fn both_guests_describe_the_negotiated_plugin() {
     for guest in [RUST_GUEST, C_GUEST] {
-        let outcome = run_request(&request(guest, WorkerExportV1::Describe, ROOMY));
-        let Some(WorkerOutcomeV1::Completed(completion)) = outcome else {
+        let outcome = invoke(request(guest, WorkerCallV1::Describe));
+        let Some(Ok(WorkerReturnV1::Described(report))) = outcome else {
             std::panic::resume_unwind(Box::new(format!("{outcome:?}")));
         };
-        assert_eq!(completion.payload, expected_descriptor());
-        assert!(completion.call_fuel > 0);
-        assert!(completion.memory_bytes > 0);
+        assert_eq!(ok(report.result).plugin_id, PLUGIN_ID);
+        assert!(report.metering.call_fuel > 0);
     }
 }
 
 #[test]
-fn inputs_the_prototype_engine_cannot_lower_are_invalid_invocations() {
-    let invalid = Some(WorkerOutcomeV1::Failed(WorkerFailureV1::InvalidInvocation));
-    for export in [WorkerExportV1::Reduce, WorkerExportV1::Drive] {
-        assert_eq!(run_request(&request(RUST_GUEST, export, ROOMY)), invalid);
+fn reduce_and_drive_return_validated_outputs() {
+    for call in [
+        WorkerCallV1::Reduce(invocation(b"observation")),
+        WorkerCallV1::Drive(invocation(b"observation")),
+    ] {
+        let outcome = run(&host(), request(RUST_GUEST, call), EPOCH_TICK);
+        let Some(Ok(WorkerReturnV1::Produced(report))) = outcome else {
+            std::panic::resume_unwind(Box::new(format!("{outcome:?}")));
+        };
+        assert_eq!(ok(report.result).invocation_id, [0x11; 16]);
     }
-    let mut with_input = request(RUST_GUEST, WorkerExportV1::Describe, ROOMY);
-    with_input.invocation = b"input".to_vec();
-    assert_eq!(run_request(&with_input), invalid);
 }
 
 #[test]
-fn bytes_that_do_not_implement_the_world_are_incompatible() {
-    let outcome = run_request(&request(
-        b"not a component",
-        WorkerExportV1::Describe,
-        ROOMY,
-    ));
+fn engine_failures_are_closed_outcomes() {
+    let trap = request(RUST_GUEST, WorkerCallV1::Reduce(invocation(b"trap")));
     assert_eq!(
-        outcome,
-        Some(WorkerOutcomeV1::Failed(WorkerFailureV1::IncompatibleAbi))
+        run(&host(), trap, EPOCH_TICK),
+        Some(Err(Error::ComponentTrap {
+            class: ComponentTrapClassV1::Unreachable,
+            reproduction: TrapReproductionV1::Unverified,
+        }))
     );
+    let mut starved = request(RUST_GUEST, WorkerCallV1::Describe);
+    starved.negotiation = transport(DeterministicBudgetV1 {
+        fuel: 1,
+        ..DeterministicBudgetV1::MAXIMA
+    });
+    assert_eq!(run(&host(), starved, EPOCH_TICK), Some(Err(Error::FuelExhausted)));
+    let invalid = request(b"not a component", WorkerCallV1::Describe);
+    assert_eq!(run(&host(), invalid, EPOCH_TICK), Some(Err(Error::IncompatibleAbi)));
 }
 
 #[test]
-fn budgets_bound_the_prototype_engine() {
-    let starved = DeterministicBudgetV1 { fuel: 1, ..ROOMY };
-    let small = DeterministicBudgetV1 {
-        memory_bytes: 65_536,
-        ..ROOMY
-    };
-    for (limits, failure) in [
-        (starved, WorkerFailureV1::FuelExhausted),
-        (small, WorkerFailureV1::MemoryLimitExceeded),
-    ] {
-        let outcome = run_request(&request(RUST_GUEST, WorkerExportV1::Describe, limits));
-        assert_eq!(outcome, Some(WorkerOutcomeV1::Failed(failure)));
-    }
+fn a_rejected_transport_gets_no_reply() {
+    let mut foreign = request(RUST_GUEST, WorkerCallV1::Describe);
+    foreign.negotiation.world.push('x');
+    assert_eq!(run(&host(), foreign, EPOCH_TICK), None);
 }
 
 #[test]
-fn prototype_failures_map_to_closed_outcomes() {
-    for (failure, expected) in [
-        (
-            InvocationFailure::FuelExhausted,
-            WorkerFailureV1::FuelExhausted,
-        ),
-        (
-            InvocationFailure::MemoryLimitExceeded,
-            WorkerFailureV1::MemoryLimitExceeded,
-        ),
-        (
-            InvocationFailure::OperationalWatchdogStop,
-            WorkerFailureV1::OperationalWatchdogStop,
-        ),
-        (
-            InvocationFailure::HostCallRejected,
-            WorkerFailureV1::HostCallLimitExceeded,
-        ),
-        (
-            InvocationFailure::Rejected,
-            WorkerFailureV1::InvalidInvocation,
-        ),
-    ] {
-        assert_eq!(failure_outcome(failure), WorkerOutcomeV1::Failed(expected));
-    }
-    assert_eq!(
-        failure_outcome(InvocationFailure::ComponentTrap(Trap::StackOverflow)),
-        WorkerOutcomeV1::Trapped(WorkerTrapClassV1::StackExhausted)
-    );
+fn the_epoch_ticker_stops_a_running_guest() {
+    let mut elapsed = request(RUST_GUEST, WorkerCallV1::Describe);
+    elapsed.watchdog_millis = 0;
+    let stopped = Some(Err(Error::OperationalWatchdogStop));
+    assert_eq!(run(&host(), elapsed, EPOCH_TICK), stopped);
+    // One epoch, advanced continuously: a 1 MiB reduce cannot finish first.
+    let large = invocation(&vec![0xa5; 1_048_576]);
+    let mut ticking = request(RUST_GUEST, WorkerCallV1::Reduce(large));
+    ticking.watchdog_millis = 1;
+    assert_eq!(run(&host(), ticking, Duration::ZERO), stopped);
 }
 
 #[test]
-fn trap_codes_follow_the_revision_4_table() {
-    for (trap, class) in [
-        (Trap::UnreachableCodeReached, WorkerTrapClassV1::Unreachable),
-        (
-            Trap::MemoryOutOfBounds,
-            WorkerTrapClassV1::MemoryOutOfBounds,
-        ),
-        (Trap::HeapMisaligned, WorkerTrapClassV1::MemoryOutOfBounds),
-        (Trap::ArrayOutOfBounds, WorkerTrapClassV1::MemoryOutOfBounds),
-        (Trap::TableOutOfBounds, WorkerTrapClassV1::TableOutOfBounds),
-        (Trap::IndirectCallToNull, WorkerTrapClassV1::IndirectCall),
-        (Trap::BadSignature, WorkerTrapClassV1::IndirectCall),
-        (Trap::IntegerOverflow, WorkerTrapClassV1::IntegerArithmetic),
-        (
-            Trap::IntegerDivisionByZero,
-            WorkerTrapClassV1::IntegerArithmetic,
-        ),
-        (
-            Trap::BadConversionToInteger,
-            WorkerTrapClassV1::IntegerArithmetic,
-        ),
-        (Trap::StackOverflow, WorkerTrapClassV1::StackExhausted),
-        (Trap::NullReference, WorkerTrapClassV1::Other),
-        (Trap::CannotEnterComponent, WorkerTrapClassV1::Other),
-    ] {
-        assert_eq!(trap_class(trap), class, "{trap:?}");
-    }
-}
-
-fn encoded(value: &Value) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    ciborium::into_writer(value, &mut out).ok().map(|()| out)
-}
-
-#[test]
-fn lifted_values_encode_structurally() {
-    let boxed = |value: Val| Some(Box::new(value));
-    for (value, expected) in [
-        (Val::Bool(true), Value::Bool(true)),
-        (Val::U8(1), integer(1)),
-        (Val::U16(300), integer(300)),
-        (Val::U32(70_000), integer(70_000)),
-        (Val::U64(u64::MAX), integer(u64::MAX)),
-        (
-            Val::Enum("reduce".to_owned()),
-            Value::Text("reduce".to_owned()),
-        ),
-        (
-            Val::Variant("case".to_owned(), boxed(Val::U8(2))),
-            Value::Array(vec![Value::Text("case".to_owned()), integer(2)]),
-        ),
-        (
-            Val::Variant("bare".to_owned(), None),
-            Value::Array(vec![Value::Text("bare".to_owned())]),
-        ),
-        (Val::Option(None), Value::Null),
-        (
-            Val::Option(boxed(Val::U8(3))),
-            Value::Array(vec![integer(3)]),
-        ),
-        (Val::Result(Ok(None)), Value::Array(vec![integer(0)])),
-        (
-            Val::Result(Err(boxed(Val::U8(4)))),
-            Value::Array(vec![integer(1), integer(4)]),
-        ),
-        (
-            Val::Record(vec![
-                ("a".to_owned(), Val::U8(5)),
-                ("b".to_owned(), Val::Bool(false)),
-            ]),
-            Value::Array(vec![integer(5), Value::Bool(false)]),
-        ),
-        (Val::List(vec![Val::U8(6)]), Value::Array(vec![integer(6)])),
-    ] {
-        assert_eq!(encode_value(&value), encoded(&expected), "{value:?}");
-    }
-}
-
-#[test]
-fn kinds_outside_the_world_are_not_encoded() {
-    for value in [
-        Val::String("text".to_owned()),
-        Val::S32(-1),
-        Val::List(vec![Val::U8(1), Val::Float64(1.0)]),
-        Val::Record(vec![("a".to_owned(), Val::Char('x'))]),
-        Val::Variant("case".to_owned(), Some(Box::new(Val::S8(1)))),
-        Val::Option(Some(Box::new(Val::S16(1)))),
-        Val::Result(Ok(Some(Box::new(Val::S64(1))))),
-    ] {
-        assert_eq!(encode_value(&value), None, "{value:?}");
-    }
-    let report = InvocationReport {
-        value: Val::String("text".to_owned()),
-        startup_fuel: 1,
-        call_fuel: 2,
-        memory_bytes: 3,
-        operational_log: Vec::new(),
-    };
-    assert_eq!(
-        completion(&report),
-        WorkerOutcomeV1::Failed(WorkerFailureV1::InvalidGuestOutput)
-    );
+fn watchdog_epochs_count_whole_ticks() {
+    assert_eq!(watchdog_epochs(60_000, EPOCH_TICK), 6_000);
+    assert_eq!(watchdog_epochs(19, EPOCH_TICK), 1);
+    assert_eq!(watchdog_epochs(9, EPOCH_TICK), 0);
+    assert_eq!(watchdog_epochs(7, Duration::ZERO), 7);
+    assert_eq!(watchdog_epochs(u64::MAX, Duration::ZERO), u32::MAX);
+    assert_eq!(watchdog_epochs(7, Duration::MAX), 0);
 }

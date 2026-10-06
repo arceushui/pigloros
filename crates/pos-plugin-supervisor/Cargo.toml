@@ -24,6 +24,7 @@ pos-runtime = { path = "../pos-runtime" }
 # `process` provides prlimit, PR_SET_PDEATHSIG and getppid as safe calls; `fs`
 # lists the worker's open descriptors.
 rustix = { workspace = true, features = ["process"] }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 # Supervisor tests build negotiated releases without a release closure.

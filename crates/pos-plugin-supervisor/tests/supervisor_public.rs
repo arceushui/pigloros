@@ -14,19 +14,20 @@ use pos_crypto::plugin_execution::{
     DeterministicBudgetV1, PluginAbiRequirementV1, PluginExecutionProjectionFixtureV1,
     PluginExecutionProjectionV1,
 };
-use pos_crypto::plugin_worker_ipc::{WorkerExportV1, MAX_WORKER_INVOCATION_BYTES_V1};
 use pos_plugin_supervisor::{
-    CommunityPluginSupervisorV1, WorkerInvocationV1, WorkerProgramV1, WorkerReportV1,
-    WorkerResourceCeilingsV1, FORWARDED_ENVIRONMENT,
+    CommunityPluginSupervisorV1, WorkerProgramV1, WorkerResourceCeilingsV1, FORWARDED_ENVIRONMENT,
 };
 use pos_runtime::community_plugin_host::{
-    negotiate_community_plugin_v1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
-    CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, CommunityPluginModeV1,
-    ComponentTrapClassV1, NegotiatedCommunityPluginV1, TrapReproductionV1,
+    negotiate_community_plugin_v1, ArtifactRefV1, CommunityPluginCeilingsV1,
+    CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginHostErrorV1,
+    CommunityPluginModeV1, ComponentTrapClassV1, HostInputs, InvocationReportV1,
+    NegotiatedCommunityPluginV1, PluginInvocationV1, PluginOutputV1, TimelinePositionV1,
+    TrapReproductionV1,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-type Invocation<T> = Result<WorkerReportV1<T>, CommunityPluginHostErrorV1>;
+type Error = CommunityPluginHostErrorV1;
+type Produced = Result<InvocationReportV1<PluginOutputV1>, Error>;
 
 const PROBE: &str = env!("CARGO_BIN_EXE_pos-plugin-worker-probe");
 /// A generous watchdog for invocations that should finish promptly.
@@ -36,6 +37,11 @@ const SHORT: Duration = Duration::from_secs(1);
 /// Well below the probe's 60-second linger, well above the short watchdog.
 const STOPPED_WITHIN: Duration = Duration::from_secs(30);
 const EXIT_HELPER: &str = "POS_PLUGIN_SUPERVISOR_EXIT_HELPER";
+const INPUTS: HostInputs = HostInputs { simulation_time: 7 };
+
+fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+    result.unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+}
 
 fn negotiated() -> NegotiatedCommunityPluginV1 {
     let fixture = PluginExecutionProjectionFixtureV1 {
@@ -61,8 +67,40 @@ fn negotiated() -> NegotiatedCommunityPluginV1 {
         None,
     );
     let execution = PluginExecutionProjectionV1::from(fixture);
-    negotiate_community_plugin_v1(&execution, &CommunityPluginHostAbiV1::v1(), &profile)
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
+    ok(negotiate_community_plugin_v1(
+        &execution,
+        &CommunityPluginHostAbiV1::v1(),
+        &profile,
+    ))
+}
+
+fn invocation() -> PluginInvocationV1 {
+    let artifact = ArtifactRefV1 {
+        schema_id: 1,
+        byte_length: 0,
+        digest: [0; 32],
+    };
+    PluginInvocationV1 {
+        invocation_id: [0x33; 16],
+        timeline_position: TimelinePositionV1 {
+            timeline_id: [0x44; 16],
+            seq: 1,
+            tick: 2,
+            scheduler_position: 3,
+        },
+        output_base_ordinal: 0,
+        principal_ref: artifact,
+        authorization_decision: artifact,
+        observation_snapshot: artifact,
+        observation_bytes: b"observation".to_vec(),
+        prior_state_schema: [5; 32],
+        prior_state_bytes: b"prior".to_vec(),
+        execution_profile_digest: [6; 32],
+        trust_policy_snapshot_digest: [7; 32],
+        deterministic_budget_id: "budget".to_owned(),
+        deterministic_random_domain: [8; 32],
+        provenance_root: [9; 32],
+    }
 }
 
 fn supervisor(program: &str, watchdog: Duration) -> CommunityPluginSupervisorV1 {
@@ -71,29 +109,20 @@ fn supervisor(program: &str, watchdog: Duration) -> CommunityPluginSupervisorV1 
         .unwrap_or_else(|| std::panic::resume_unwind(Box::new("invalid supervisor")))
 }
 
-fn invoke_with<T>(
-    watchdog: Duration,
-    mode: &[u8],
-    validate: impl FnOnce(&[u8]) -> Option<T>,
-) -> Invocation<T> {
-    let invocation = WorkerInvocationV1 {
-        export: WorkerExportV1::Reduce,
-        component: b"not a component",
-        simulation_time: 7,
-        invocation: mode,
-    };
-    supervisor(PROBE, watchdog).invoke(&negotiated(), &invocation, validate)
+/// `reduce` against the probe, whose behaviour `mode` names.
+fn reduce_with(watchdog: Duration, mode: &[u8]) -> Produced {
+    supervisor(PROBE, watchdog).reduce(&negotiated(), mode, &invocation(), INPUTS)
 }
 
-fn invoke(mode: &[u8]) -> Invocation<Vec<u8>> {
-    invoke_with(PROMPT, mode, |payload| Some(payload.to_vec()))
+fn reduce(mode: &[u8]) -> Produced {
+    reduce_with(PROMPT, mode)
 }
 
 /// The probe's `name=value` report of its own process state.
 fn report() -> BTreeMap<String, String> {
-    let report = invoke(b"report")
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
-    String::from_utf8_lossy(&report.output)
+    let report = ok(reduce(b"report"));
+    let state = ok(report.result).next_state_bytes;
+    String::from_utf8_lossy(&state)
         .lines()
         .filter_map(|line| line.split_once('='))
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
@@ -124,8 +153,8 @@ fn the_worker_sees_a_scrubbed_environment_and_only_its_pipes() {
 #[test]
 fn the_worker_runs_under_its_rlimit_ceilings() {
     let report = report();
-    let ceilings =
-        WorkerResourceCeilingsV1::for_invocation(&negotiated().limits().values(), PROMPT);
+    let limits = negotiated().limits().values();
+    let ceilings = WorkerResourceCeilingsV1::for_invocation(&limits, PROMPT);
     for (name, value) in [
         ("cpu", ceilings.cpu_seconds),
         ("data", ceilings.data_bytes),
@@ -136,10 +165,7 @@ fn the_worker_runs_under_its_rlimit_ceilings() {
     }
     assert_eq!(ceilings.cpu_seconds, 62);
     // Allocating 1 GiB exceeds the data ceiling, so the worker aborts.
-    assert_eq!(
-        invoke(b"allocate"),
-        Err(CommunityPluginHostErrorV1::WorkerCrashed)
-    );
+    assert_eq!(reduce(b"allocate"), Err(Error::WorkerCrashed));
 }
 
 #[test]
@@ -154,33 +180,28 @@ fn every_invocation_gets_a_fresh_worker_process() {
 }
 
 #[test]
-fn a_valid_payload_is_validated_by_the_host() {
-    let report = invoke_with(PROMPT, b"payload", |payload| {
-        (payload == b"payload").then_some("validated")
-    });
-    let expected = WorkerReportV1 {
-        output: "validated",
-        startup_fuel: 1,
-        call_fuel: 2,
-        memory_bytes: 65_536,
-    };
-    assert_eq!(report, Ok(expected));
-    let rejected = invoke_with(PROMPT, b"payload", |_| None::<()>);
-    assert_eq!(
-        rejected,
-        Err(CommunityPluginHostErrorV1::InvalidGuestOutput)
-    );
+fn returned_values_are_checked_by_the_supervisor() {
+    let report = ok(reduce(b"output"));
+    assert_eq!(report.metering.host_calls, 3);
+    assert_eq!(ok(report.result).invocation_id, invocation().invocation_id);
+    let drive = supervisor(PROBE, PROMPT).drive(&negotiated(), b"output", &invocation(), INPUTS);
+    assert!(drive.is_ok_and(|report| report.result.is_ok()));
+    assert_eq!(reduce(b"bad-digest"), Err(Error::InvalidGuestOutput));
+    let describe = |mode: &[u8]| supervisor(PROBE, PROMPT).describe(&negotiated(), mode, INPUTS);
+    let described = ok(describe(b"describe"));
+    assert_eq!(ok(described.result).plugin_id, "plugin-a");
+    assert_eq!(describe(b"foreign-descriptor"), Err(Error::InvalidGuestOutput));
+    // A return of the other export's kind is a protocol fault.
+    assert_eq!(describe(b"output"), Err(Error::WorkerCrashed));
+    assert_eq!(reduce(b"describe"), Err(Error::WorkerCrashed));
 }
 
 #[test]
 fn engine_failures_and_traps_keep_their_closed_names() {
+    assert_eq!(reduce(b"fuel"), Err(Error::FuelExhausted));
     assert_eq!(
-        invoke(b"fuel"),
-        Err(CommunityPluginHostErrorV1::FuelExhausted)
-    );
-    assert_eq!(
-        invoke(b"trap"),
-        Err(CommunityPluginHostErrorV1::ComponentTrap {
+        reduce(b"trap"),
+        Err(Error::ComponentTrap {
             class: ComponentTrapClassV1::StackExhausted,
             reproduction: TrapReproductionV1::Unverified,
         })
@@ -201,8 +222,8 @@ fn worker_death_and_ipc_faults_are_worker_crashed() {
         b"unknown-mode",
     ] {
         assert_eq!(
-            invoke(mode),
-            Err(CommunityPluginHostErrorV1::WorkerCrashed),
+            reduce(mode),
+            Err(Error::WorkerCrashed),
             "{}",
             String::from_utf8_lossy(mode)
         );
@@ -210,37 +231,33 @@ fn worker_death_and_ipc_faults_are_worker_crashed() {
 }
 
 #[test]
-fn launch_and_request_faults_fail_before_any_guest_runs() {
-    let invocation = WorkerInvocationV1 {
-        export: WorkerExportV1::Describe,
-        component: b"",
-        simulation_time: 0,
-        invocation: b"",
-    };
+fn launch_and_invocation_faults_fail_before_any_guest_runs() {
     let missing = supervisor("/nonexistent/pos-plugin-worker", PROMPT);
-    let result = missing.invoke(&negotiated(), &invocation, |_| Some(()));
-    assert_eq!(result, Err(CommunityPluginHostErrorV1::WorkerCrashed));
-    let oversized = vec![0; MAX_WORKER_INVOCATION_BYTES_V1 + 1];
-    let result = invoke(&oversized);
-    assert_eq!(result, Err(CommunityPluginHostErrorV1::InvalidInvocation));
+    let result = missing.describe(&negotiated(), b"describe", INPUTS);
+    assert_eq!(result, Err(Error::WorkerCrashed));
+    let mut oversized = invocation();
+    oversized.observation_bytes = vec![0; 1_048_577];
+    let result = supervisor(PROBE, PROMPT).reduce(&negotiated(), b"output", &oversized, INPUTS);
+    assert_eq!(result, Err(Error::InvalidInvocation));
+    let result = supervisor(PROBE, PROMPT).drive(&negotiated(), b"output", &oversized, INPUTS);
+    assert_eq!(result, Err(Error::InvalidInvocation));
+    let component = vec![0; 33_554_433];
+    let result = supervisor(PROBE, PROMPT).describe(&negotiated(), &component, INPUTS);
+    assert_eq!(result, Err(Error::InvalidInvocation));
 }
 
 #[test]
 fn the_wall_time_watchdog_is_an_operational_stop() {
     for mode in [&b"hang"[..], b"linger-after-reply"] {
         let started = Instant::now();
-        let result = invoke_with(SHORT, mode, |_| Some(()));
+        let result = reduce_with(SHORT, mode);
         assert_eq!(
             result,
-            Err(CommunityPluginHostErrorV1::OperationalWatchdogStop),
+            Err(Error::OperationalWatchdogStop),
             "{}",
             String::from_utf8_lossy(mode)
         );
-        assert!(
-            started.elapsed() < STOPPED_WITHIN,
-            "{:?}",
-            started.elapsed()
-        );
+        assert!(started.elapsed() < STOPPED_WITHIN, "{:?}", started.elapsed());
     }
 }
 
@@ -277,7 +294,7 @@ fn within<T>(limit: Duration, mut probe: impl FnMut() -> Option<T>) -> Option<T>
 fn a_worker_dies_with_its_supervisor() -> TestResult {
     if std::env::var_os(EXIT_HELPER).is_some() {
         // The helper supervisor: blocks until the outer test kills it.
-        drop(invoke(b"hang"));
+        drop(reduce(b"hang"));
         return Ok(());
     }
     let mut helper = Command::new(std::env::current_exe()?)

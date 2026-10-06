@@ -23,10 +23,10 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::Duration;
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
-use pos_crypto::plugin_worker_ipc::MAX_WORKER_COMPONENT_BYTES_V1;
 use rustix::process::{prlimit, Pid, Resource, Rlimit};
 
 use crate::frame::WorkerFrameLimitsV1;
+use crate::ipc::MAX_WORKER_COMPONENT_BYTES_V1;
 
 /// Environment variables forwarded to the worker; every other is cleared.
 ///

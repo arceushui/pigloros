@@ -48,7 +48,7 @@ fn serve(
     prepare_worker_process(arguments)
         .and_then(|()| read_request(input))
         .ok()
-        .and_then(|request| engine::invoke(&request))
+        .and_then(engine::invoke)
         .is_some_and(|outcome| write_response(output, &outcome).is_ok())
 }
 

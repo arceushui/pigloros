@@ -18,13 +18,13 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 
-use pos_crypto::plugin_worker_ipc::{
-    decode_worker_request_v1, encode_worker_response_v1, WorkerOutcomeV1, WorkerRequestV1,
-};
 use rustix::fs::Dir;
 use rustix::process::{getppid, set_parent_process_death_signal, Pid, Signal};
 
 use crate::frame::{read_frame, write_frame, WorkerFrameLimitsV1};
+use crate::ipc::{
+    decode_worker_request_v1, encode_worker_response_v1, WorkerOutcomeV1, WorkerRequestV1,
+};
 use crate::launch::FORWARDED_ENVIRONMENT;
 
 /// Why a worker process refused to serve its invocation.
@@ -124,24 +124,26 @@ pub fn read_request(reader: &mut impl Read) -> Result<WorkerRequestV1, WorkerPro
 /// Encode and write the single response frame.
 ///
 /// # Errors
-/// Returns `Response` when the frame cannot be written.
+/// Returns `Response` when the outcome cannot be encoded or the frame cannot
+/// be written.
 pub fn write_response(
     writer: &mut impl Write,
     outcome: &WorkerOutcomeV1,
 ) -> Result<(), WorkerProcessErrorV1> {
-    let bytes = encode_worker_response_v1(outcome);
-    write_frame(writer, &bytes, bytes.len()).map_err(|_| WorkerProcessErrorV1::Response)
+    encode_worker_response_v1(outcome)
+        .ok()
+        .and_then(|bytes| write_frame(writer, &bytes, bytes.len()).ok())
+        .ok_or(WorkerProcessErrorV1::Response)
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use pos_crypto::plugin_execution::DeterministicBudgetV1;
-    use pos_crypto::plugin_worker_ipc::{
-        encode_worker_request_v1, WorkerExportV1, WorkerFailureV1, WorkerNegotiationV1,
-    };
+    use pos_runtime::community_plugin_host::{CommunityPluginHostErrorV1, HostInputs};
 
     use super::*;
+    use crate::fixtures::negotiated;
+    use crate::ipc::{encode_worker_request_v1, WorkerCallV1};
 
     fn arguments(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
@@ -209,19 +211,11 @@ mod tests {
 
     fn request() -> WorkerRequestV1 {
         WorkerRequestV1 {
-            export: WorkerExportV1::Describe,
             component: b"component".to_vec(),
-            negotiation: WorkerNegotiationV1 {
-                world: "world".to_owned(),
-                abi_major: 0,
-                abi_minor: 0,
-                required_features: Vec::new(),
-                pmf1_digest: [1; 32],
-                release_digest: [2; 32],
-            },
-            limits: DeterministicBudgetV1::MINIMA,
-            simulation_time: 9,
-            invocation: Vec::new(),
+            negotiation: negotiated().to_transport(),
+            watchdog_millis: 1_000,
+            host_inputs: HostInputs { simulation_time: 9 },
+            call: WorkerCallV1::Describe,
         }
     }
 
@@ -241,10 +235,10 @@ mod tests {
             read_request(&mut &empty[..]),
             Err(WorkerProcessErrorV1::Request)
         );
-        let outcome = WorkerOutcomeV1::Failed(WorkerFailureV1::FuelExhausted);
+        let outcome: WorkerOutcomeV1 = Err(CommunityPluginHostErrorV1::FuelExhausted);
         let mut out = Vec::new();
         assert_eq!(write_response(&mut out, &outcome), Ok(()));
-        let encoded = encode_worker_response_v1(&outcome);
+        let encoded = encode_worker_response_v1(&outcome).unwrap_or_default();
         assert_eq!(out[4..], encoded);
         assert_eq!(
             out[..4],
@@ -255,5 +249,12 @@ mod tests {
             write_response(&mut full.as_mut_slice(), &outcome),
             Err(WorkerProcessErrorV1::Response)
         );
+        let unencodable: WorkerOutcomeV1 = Err(CommunityPluginHostErrorV1::WorkerCrashed);
+        let mut nothing = Vec::new();
+        assert_eq!(
+            write_response(&mut nothing, &unencodable),
+            Err(WorkerProcessErrorV1::Response)
+        );
+        assert!(nothing.is_empty());
     }
 }

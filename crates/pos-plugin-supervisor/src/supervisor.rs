@@ -1,70 +1,51 @@
 //! One supervised invocation in a fresh worker (ADR-061 revision 4).
 //!
-//! Every call to [`CommunityPluginSupervisorV1::invoke`] launches a new worker
-//! process, sends it exactly one request frame, reads at most one response
-//! frame, and reaps the worker. Nothing is retried: a later operator retry is a
-//! new invocation.
+//! Every call to [`CommunityPluginSupervisorV1::describe`],
+//! [`CommunityPluginSupervisorV1::reduce`] or
+//! [`CommunityPluginSupervisorV1::drive`] launches a new worker process, sends
+//! it exactly one request frame, reads at most one response frame, and reaps
+//! the worker. Nothing is retried: a later operator retry is a new invocation.
 //!
 //! Outcomes are classified in this order:
-//! 1. A request the host cannot encode is `InvalidInvocation`, and no worker
-//!    starts.
+//! 1. An invocation outside its WIT bounds, or a request the IPC cannot
+//!    carry, is `InvalidInvocation`, and no worker starts.
 //! 2. The wall-time watchdog: when the deadline passes before the worker has
 //!    replied and exited, the supervisor kills it and reports the operational
-//!    `OperationalWatchdogStop`. It never substitutes for `FuelExhausted`.
+//!    `OperationalWatchdogStop`. The worker's own epoch watchdog reports the
+//!    same error. It never substitutes for `FuelExhausted`.
 //! 3. A worker that cannot start or be confined, dies, is signalled, exits
 //!    unsuccessfully, closes its output early, or sends a truncated,
-//!    over-limit, trailing, malformed or non-canonical frame or envelope is
-//!    the operational `WorkerCrashed`. Nothing is fabricated from it.
+//!    over-limit, trailing, malformed, non-canonical or mismatched frame or
+//!    envelope is the operational `WorkerCrashed`. Nothing is fabricated from
+//!    it.
 //! 4. A well-formed response reports the engine's closed failure or trap
-//!    class, or a guest payload. A payload that the host's validator rejects
-//!    is the authoritative `InvalidGuestOutput`.
+//!    class, or the guest's return. A returned value that fails the
+//!    supervisor's own checks ([`crate::verify`]) is the authoritative
+//!    `InvalidGuestOutput`.
 
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pos_crypto::plugin_worker_ipc::{
-    decode_worker_response_v1, encode_worker_request_v1, WorkerCompletionV1, WorkerExportV1,
-    WorkerFailureV1, WorkerNegotiationV1, WorkerOutcomeV1, WorkerRequestV1, WorkerTrapClassV1,
-};
 use pos_runtime::community_plugin_host::{
-    CommunityPluginHostErrorV1, ComponentTrapClassV1, NegotiatedCommunityPluginV1,
-    TrapReproductionV1,
+    CommunityPluginHostErrorV1, HostInputs, InvocationReportV1, NegotiatedCommunityPluginV1,
+    PluginDescriptorV1, PluginInvocationV1, PluginOutputV1,
 };
 
 use crate::frame::{read_frame, require_end, write_frame, FrameFaultV1, WorkerFrameLimitsV1};
+use crate::ipc::{
+    decode_worker_response_v1, encode_worker_request_v1, WorkerCallV1, WorkerRequestV1,
+    WorkerReturnV1,
+};
 use crate::launch::{launch, LaunchedWorker, WorkerProgramV1, WorkerResourceCeilingsV1};
+use crate::verify::{verify_descriptor, verify_output};
 
 /// The longest wall-time watchdog a supervisor accepts.
 pub const MAX_WORKER_WATCHDOG: Duration = Duration::from_hours(1);
 /// Interval at which the supervisor checks whether a replied worker exited.
 const EXIT_POLL: Duration = Duration::from_millis(1);
 
-/// One invocation's inputs besides the negotiated release.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WorkerInvocationV1<'a> {
-    /// The export to invoke.
-    pub export: WorkerExportV1,
-    /// The verified Component bytes.
-    pub component: &'a [u8],
-    /// Simulation Time that `simulation-time` returns.
-    pub simulation_time: u64,
-    /// The canonical `plugin-invocation` record; empty for `describe`.
-    pub invocation: &'a [u8],
-}
-
-/// The validated guest output and the measured budget of one invocation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkerReportV1<T> {
-    /// The guest output, as accepted by the host's validator.
-    pub output: T,
-    /// Fuel consumed while instantiating the Component.
-    pub startup_fuel: u64,
-    /// Fuel consumed by the call itself.
-    pub call_fuel: u64,
-    /// Linear memory reserved by the Component, in bytes.
-    pub memory_bytes: u64,
-}
+type Error = CommunityPluginHostErrorV1;
 
 /// Launches one fresh worker per invocation under a wall-time watchdog.
 ///
@@ -94,62 +75,116 @@ impl CommunityPluginSupervisorV1 {
         self.watchdog
     }
 
-    /// Run one invocation of `negotiated` in a fresh worker.
-    ///
-    /// `validate` receives a completed call's guest payload and returns the
-    /// validated output, or `None` to reject it.
+    /// Call `describe` in a fresh worker.
     ///
     /// # Errors
-    /// Returns `InvalidInvocation` when the request exceeds the IPC bounds,
-    /// `OperationalWatchdogStop` when the watchdog elapses, `WorkerCrashed`
-    /// for any worker or IPC fault, `InvalidGuestOutput` when `validate`
-    /// rejects the payload, and otherwise the engine's closed failure or
-    /// trap class.
-    pub fn invoke<T>(
+    /// Returns the closed error that ended the invocation (see the module
+    /// documentation), or `InvalidGuestOutput` when the descriptor does not
+    /// describe `negotiated`.
+    pub fn describe(
         &self,
         negotiated: &NegotiatedCommunityPluginV1,
-        invocation: &WorkerInvocationV1<'_>,
-        validate: impl FnOnce(&[u8]) -> Option<T>,
-    ) -> Result<WorkerReportV1<T>, CommunityPluginHostErrorV1> {
+        component: &[u8],
+        host_inputs: HostInputs,
+    ) -> Result<InvocationReportV1<PluginDescriptorV1>, Error> {
+        match self.run(negotiated, component, host_inputs, WorkerCallV1::Describe)? {
+            WorkerReturnV1::Described(report) => {
+                checked(report, |descriptor| verify_descriptor(descriptor, negotiated))
+            }
+            WorkerReturnV1::Produced(_) => Err(Error::WorkerCrashed),
+        }
+    }
+
+    /// Call `reduce` with `invocation` in a fresh worker.
+    ///
+    /// # Errors
+    /// Returns `InvalidInvocation` before any worker starts for an invocation
+    /// outside its WIT bounds, then the closed error that ended the
+    /// invocation, or `InvalidGuestOutput` when the output fails the
+    /// supervisor's checks.
+    pub fn reduce(
+        &self,
+        negotiated: &NegotiatedCommunityPluginV1,
+        component: &[u8],
+        invocation: &PluginInvocationV1,
+        host_inputs: HostInputs,
+    ) -> Result<InvocationReportV1<PluginOutputV1>, Error> {
+        invocation.validate()?;
+        let call = WorkerCallV1::Reduce(invocation.clone());
+        let outcome = self.run(negotiated, component, host_inputs, call)?;
+        produced(outcome, negotiated, invocation)
+    }
+
+    /// Call `drive` with `invocation` in a fresh worker.
+    ///
+    /// # Errors
+    /// As [`Self::reduce`].
+    pub fn drive(
+        &self,
+        negotiated: &NegotiatedCommunityPluginV1,
+        component: &[u8],
+        invocation: &PluginInvocationV1,
+        host_inputs: HostInputs,
+    ) -> Result<InvocationReportV1<PluginOutputV1>, Error> {
+        invocation.validate()?;
+        let call = WorkerCallV1::Drive(invocation.clone());
+        let outcome = self.run(negotiated, component, host_inputs, call)?;
+        produced(outcome, negotiated, invocation)
+    }
+
+    /// Run one call in a fresh worker and decode its response.
+    fn run(
+        &self,
+        negotiated: &NegotiatedCommunityPluginV1,
+        component: &[u8],
+        host_inputs: HostInputs,
+        call: WorkerCallV1,
+    ) -> Result<WorkerReturnV1, Error> {
         let limits = negotiated.limits().values();
-        let request = encode_worker_request_v1(&request_envelope(negotiated, invocation))
-            .map_err(|_| CommunityPluginHostErrorV1::InvalidInvocation)?;
+        let request = WorkerRequestV1 {
+            component: component.to_vec(),
+            negotiation: negotiated.to_transport(),
+            watchdog_millis: u64::try_from(self.watchdog.as_millis()).unwrap_or(u64::MAX),
+            host_inputs,
+            call,
+        };
+        let request = encode_worker_request_v1(&request).map_err(|_| Error::InvalidInvocation)?;
         let ceilings = WorkerResourceCeilingsV1::for_invocation(&limits, self.watchdog);
         let deadline = Instant::now() + self.watchdog;
-        let worker =
-            launch(&self.program, &ceilings).ok_or(CommunityPluginHostErrorV1::WorkerCrashed)?;
-        let response = supervise(
-            worker,
-            &request,
-            WorkerFrameLimitsV1::for_limits(&limits),
-            deadline,
-        )?;
-        decode_worker_response_v1(&response)
-            .map_err(|_| CommunityPluginHostErrorV1::WorkerCrashed)
-            .and_then(outcome_result)
-            .and_then(|completion| report(&completion, validate))
+        let worker = launch(&self.program, &ceilings).ok_or(Error::WorkerCrashed)?;
+        let frames = WorkerFrameLimitsV1::for_limits(&limits);
+        let response = supervise(worker, &request, frames, deadline)?;
+        decode_worker_response_v1(&response).map_err(|_| Error::WorkerCrashed)?
     }
 }
 
-fn request_envelope(
+/// The output report of a `reduce` or `drive` outcome, checked.
+fn produced(
+    outcome: WorkerReturnV1,
     negotiated: &NegotiatedCommunityPluginV1,
-    invocation: &WorkerInvocationV1<'_>,
-) -> WorkerRequestV1 {
-    let (abi_major, abi_minor) = negotiated.abi();
-    WorkerRequestV1 {
-        export: invocation.export,
-        component: invocation.component.to_vec(),
-        negotiation: WorkerNegotiationV1 {
-            world: negotiated.world().to_owned(),
-            abi_major,
-            abi_minor,
-            required_features: negotiated.required_features().to_vec(),
-            pmf1_digest: negotiated.pmf1_digest(),
-            release_digest: negotiated.release_digest(),
-        },
-        limits: negotiated.limits().values(),
-        simulation_time: invocation.simulation_time,
-        invocation: invocation.invocation.to_vec(),
+    invocation: &PluginInvocationV1,
+) -> Result<InvocationReportV1<PluginOutputV1>, Error> {
+    let limits = negotiated.limits().values();
+    match outcome {
+        WorkerReturnV1::Produced(report) => {
+            checked(report, |output| verify_output(output, invocation, &limits))
+        }
+        WorkerReturnV1::Described(_) => Err(Error::WorkerCrashed),
+    }
+}
+
+/// `report`, unless its value fails `verify`.
+///
+/// The guest's own `plugin-error` is passed through: the engine validated it.
+fn checked<T>(
+    report: InvocationReportV1<T>,
+    verify: impl FnOnce(&T) -> bool,
+) -> Result<InvocationReportV1<T>, Error> {
+    let valid = report.result.as_ref().ok().is_none_or(verify);
+    if valid {
+        Ok(report)
+    } else {
+        Err(Error::InvalidGuestOutput)
     }
 }
 
@@ -233,109 +268,44 @@ fn await_exit(child: &mut std::process::Child, deadline: Instant) -> Option<bool
     }
 }
 
-fn outcome_result(
-    outcome: WorkerOutcomeV1,
-) -> Result<WorkerCompletionV1, CommunityPluginHostErrorV1> {
-    match outcome {
-        WorkerOutcomeV1::Completed(completion) => Ok(completion),
-        WorkerOutcomeV1::Failed(failure) => Err(failure_error(failure)),
-        WorkerOutcomeV1::Trapped(class) => Err(CommunityPluginHostErrorV1::ComponentTrap {
-            class: trap_class(class),
-            reproduction: TrapReproductionV1::Unverified,
-        }),
-    }
-}
-
-fn report<T>(
-    completion: &WorkerCompletionV1,
-    validate: impl FnOnce(&[u8]) -> Option<T>,
-) -> Result<WorkerReportV1<T>, CommunityPluginHostErrorV1> {
-    validate(&completion.payload)
-        .map(|output| WorkerReportV1 {
-            output,
-            startup_fuel: completion.startup_fuel,
-            call_fuel: completion.call_fuel,
-            memory_bytes: completion.memory_bytes,
-        })
-        .ok_or(CommunityPluginHostErrorV1::InvalidGuestOutput)
-}
-
-/// The closed host error that one in-worker failure reports.
-const fn failure_error(failure: WorkerFailureV1) -> CommunityPluginHostErrorV1 {
-    match failure {
-        WorkerFailureV1::InvalidInvocation => CommunityPluginHostErrorV1::InvalidInvocation,
-        WorkerFailureV1::IncompatibleAbi => CommunityPluginHostErrorV1::IncompatibleAbi,
-        WorkerFailureV1::InvalidGuestOutput => CommunityPluginHostErrorV1::InvalidGuestOutput,
-        WorkerFailureV1::FuelExhausted => CommunityPluginHostErrorV1::FuelExhausted,
-        WorkerFailureV1::MemoryLimitExceeded => CommunityPluginHostErrorV1::MemoryLimitExceeded,
-        WorkerFailureV1::HostCallLimitExceeded => CommunityPluginHostErrorV1::HostCallLimitExceeded,
-        WorkerFailureV1::OutputLimitExceeded => CommunityPluginHostErrorV1::OutputLimitExceeded,
-        WorkerFailureV1::OperationalWatchdogStop => {
-            CommunityPluginHostErrorV1::OperationalWatchdogStop
-        }
-    }
-}
-
-/// The canonical trap class one wire class names.
-const fn trap_class(class: WorkerTrapClassV1) -> ComponentTrapClassV1 {
-    match class {
-        WorkerTrapClassV1::Unreachable => ComponentTrapClassV1::Unreachable,
-        WorkerTrapClassV1::MemoryOutOfBounds => ComponentTrapClassV1::MemoryOutOfBounds,
-        WorkerTrapClassV1::TableOutOfBounds => ComponentTrapClassV1::TableOutOfBounds,
-        WorkerTrapClassV1::IndirectCall => ComponentTrapClassV1::IndirectCall,
-        WorkerTrapClassV1::IntegerArithmetic => ComponentTrapClassV1::IntegerArithmetic,
-        WorkerTrapClassV1::StackExhausted => ComponentTrapClassV1::StackExhausted,
-        WorkerTrapClassV1::Other => ComponentTrapClassV1::Other,
-    }
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::path::PathBuf;
 
+    use pos_runtime::community_plugin_host::{
+        GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1,
+    };
+
     use super::*;
 
-    #[test]
-    fn failures_map_to_their_closed_host_errors() {
-        let names = WorkerFailureV1::ALL.map(|failure| failure_error(failure).name());
-        assert_eq!(
-            names,
-            [
-                "InvalidInvocation",
-                "IncompatibleAbi",
-                "InvalidGuestOutput",
-                "FuelExhausted",
-                "MemoryLimitExceeded",
-                "HostCallLimitExceeded",
-                "OutputLimitExceeded",
-                "OperationalWatchdogStop",
-            ]
-        );
+    fn report<T>(result: Result<T, GuestPluginErrorV1>) -> InvocationReportV1<T> {
+        InvocationReportV1 {
+            result,
+            metering: MeteringV1 {
+                startup_fuel: 1,
+                call_fuel: 2,
+                memory_bytes: 3,
+                host_calls: 4,
+            },
+            operational_log: Vec::new(),
+        }
     }
 
     #[test]
-    fn trap_classes_map_one_to_one() {
-        let classes = WorkerTrapClassV1::ALL.map(|class| trap_class(class).name());
+    fn returned_values_must_pass_the_supervisor_check() {
+        assert_eq!(checked(report(Ok(1)), |value| *value == 1), Ok(report(Ok(1))));
         assert_eq!(
-            classes,
-            [
-                "unreachable",
-                "memory-out-of-bounds",
-                "table-out-of-bounds",
-                "indirect-call",
-                "integer-arithmetic",
-                "stack-exhausted",
-                "other",
-            ]
+            checked(report(Ok(2)), |value| *value == 1),
+            Err(Error::InvalidGuestOutput)
         );
-        assert_eq!(
-            outcome_result(WorkerOutcomeV1::Trapped(WorkerTrapClassV1::Other)),
-            Err(CommunityPluginHostErrorV1::ComponentTrap {
-                class: ComponentTrapClassV1::Other,
-                reproduction: TrapReproductionV1::Unverified,
-            })
-        );
+        let guest = GuestPluginErrorV1 {
+            code: PluginErrorCodeV1::DeterministicBudgetExhausted,
+            canonical_coordinate: None,
+            related_digest: None,
+        };
+        let declared = report::<u8>(Err(guest));
+        assert_eq!(checked(declared.clone(), |_| false), Ok(declared));
     }
 
     #[test]

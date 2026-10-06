@@ -1,147 +1,102 @@
 //! The in-worker engine seam: the only worker code that runs a Component.
 //!
 //! [`invoke`] takes one decoded request and returns the outcome the worker
-//! reports. Everything else in the worker is engine-agnostic.
-//!
-//! This adapter drives the #539 prototype engine of `pos-plugin-host`. When the
-//! #541 engine lands, this module is rewired to it:
-//! - #541 lowers the canonical `plugin-invocation` record for `reduce` and
-//!   `drive`; until then only `describe`, which takes no input, runs, and any
-//!   other request is `InvalidInvocation`;
-//! - #541 validates the guest output, including the `describe` ABI check
-//!   against the negotiated tuple the request carries; until then the
-//!   payload is the lifted value encoded structurally (see [`encode_value`]);
-//! - #541 supplies the closed failure classification and the pinned trap
-//!   table; the provisional mapping is in `failure_outcome` and
-//!   `trap_class`.
-//!
-//! The wall-time watchdog is the supervisor's deadline, which kills the worker.
-//! The engine's epoch deadline is therefore never reached here; an epoch
-//! interrupt would still report `OperationalWatchdogStop`.
+//! reports:
+//! 1. it rebuilds the supervisor's negotiated record with
+//!    `NegotiatedCommunityPluginV1::from_transport`, against this worker's V1
+//!    host ABI and a profile pinning this engine's runtime, and accepts it as
+//!    a `PinnedExecutionV1`. A rejected record is a protocol fault: the worker
+//!    replies nothing, which the supervisor reports as `WorkerCrashed`;
+//! 2. it loads the Component; a load failure is `IncompatibleAbi`;
+//! 3. it calls the export under the request's limits while an epoch ticker
+//!    advances the engine epoch. An invocation still running when the
+//!    supervisor's watchdog has elapsed stops with `OperationalWatchdogStop`,
+//!    the same error the supervisor reports when it kills a worker.
 
-use ciborium::value::Value;
-use pos_crypto::plugin_worker_ipc::{
-    WorkerCompletionV1, WorkerExportV1, WorkerFailureV1, WorkerOutcomeV1, WorkerRequestV1,
-    WorkerTrapClassV1,
-};
-use pos_plugin_host::{
-    ComponentHost, GuestExport, HostInputs, InvocationFailure, InvocationLimits, InvocationReport,
-    Trap, Val,
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
+
+use pos_plugin_host::{pinned_runtime, ComponentHost, PinnedExecutionV1};
+use pos_plugin_supervisor::{WorkerCallV1, WorkerOutcomeV1, WorkerRequestV1, WorkerReturnV1};
+use pos_runtime::community_plugin_host::{
+    CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1,
+    CommunityPluginHostErrorV1, InvocationOptionsV1, NegotiatedCommunityPluginV1,
+    NegotiatedTransportV1,
 };
 
-/// Run one request, or `None` when this platform cannot build the engine.
-#[must_use]
-pub fn invoke(request: &WorkerRequestV1) -> Option<WorkerOutcomeV1> {
-    ComponentHost::new().ok().map(|host| run(&host, request))
-}
+/// Interval between two engine epoch increments.
+pub const EPOCH_TICK: Duration = Duration::from_millis(10);
 
-fn run(host: &ComponentHost, request: &WorkerRequestV1) -> WorkerOutcomeV1 {
-    if request.export != WorkerExportV1::Describe || !request.invocation.is_empty() {
-        return WorkerOutcomeV1::Failed(WorkerFailureV1::InvalidInvocation);
-    }
-    let Ok(component) = host.load(&request.component) else {
-        return WorkerOutcomeV1::Failed(WorkerFailureV1::IncompatibleAbi);
-    };
-    let limits = InvocationLimits {
-        fuel: request.limits.fuel,
-        memory_bytes: request.limits.memory_bytes,
-        watchdog_epochs: u32::MAX,
-    };
-    let inputs = HostInputs {
-        simulation_time: request.simulation_time,
-    };
-    host.invoke(&component, GuestExport::Describe, &[], limits, inputs)
-        .map_or_else(failure_outcome, |report| completion(&report))
-}
-
-fn completion(report: &InvocationReport) -> WorkerOutcomeV1 {
-    encode_value(&report.value).map_or(
-        WorkerOutcomeV1::Failed(WorkerFailureV1::InvalidGuestOutput),
-        |payload| {
-            WorkerOutcomeV1::Completed(WorkerCompletionV1 {
-                payload,
-                startup_fuel: report.startup_fuel,
-                call_fuel: report.call_fuel,
-                memory_bytes: report.memory_bytes,
-            })
-        },
-    )
-}
-
-/// The provisional closed outcome of one prototype-engine failure.
-const fn failure_outcome(failure: InvocationFailure) -> WorkerOutcomeV1 {
-    let failure = match failure {
-        InvocationFailure::FuelExhausted => WorkerFailureV1::FuelExhausted,
-        InvocationFailure::MemoryLimitExceeded => WorkerFailureV1::MemoryLimitExceeded,
-        InvocationFailure::OperationalWatchdogStop => WorkerFailureV1::OperationalWatchdogStop,
-        InvocationFailure::HostCallRejected => WorkerFailureV1::HostCallLimitExceeded,
-        InvocationFailure::Rejected => WorkerFailureV1::InvalidInvocation,
-        InvocationFailure::ComponentTrap(trap) => {
-            return WorkerOutcomeV1::Trapped(trap_class(trap))
-        }
-    };
-    WorkerOutcomeV1::Failed(failure)
-}
-
-/// The ADR-061 revision 4 decision 6 class of one trap code.
-const fn trap_class(trap: Trap) -> WorkerTrapClassV1 {
-    match trap {
-        Trap::UnreachableCodeReached => WorkerTrapClassV1::Unreachable,
-        Trap::MemoryOutOfBounds | Trap::HeapMisaligned | Trap::ArrayOutOfBounds => {
-            WorkerTrapClassV1::MemoryOutOfBounds
-        }
-        Trap::TableOutOfBounds => WorkerTrapClassV1::TableOutOfBounds,
-        Trap::IndirectCallToNull | Trap::BadSignature => WorkerTrapClassV1::IndirectCall,
-        Trap::IntegerOverflow | Trap::IntegerDivisionByZero | Trap::BadConversionToInteger => {
-            WorkerTrapClassV1::IntegerArithmetic
-        }
-        Trap::StackOverflow => WorkerTrapClassV1::StackExhausted,
-        _ => WorkerTrapClassV1::Other,
-    }
-}
-
-/// Canonical CBOR of a lifted value, or `None` for a kind outside the world.
+/// Run one request, or `None` when the worker must not reply.
 ///
-/// Records and lists are arrays in field and element order, enum and variant
-/// cases are their names, `option` is `null` or a one-element array, and
-/// `result` is `[0 or 1, payload?]`.
+/// `None` means the engine cannot be built on this platform or the
+/// transported record was rejected.
 #[must_use]
-pub fn encode_value(value: &Val) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    cbor(value)
-        .and_then(|value| ciborium::into_writer(&value, &mut out).ok())
-        .map(|()| out)
+pub fn invoke(request: WorkerRequestV1) -> Option<WorkerOutcomeV1> {
+    ComponentHost::new()
+        .ok()
+        .and_then(|host| run(&host, request, EPOCH_TICK))
 }
 
-fn cbor(value: &Val) -> Option<Value> {
-    Some(match value {
-        Val::Bool(value) => Value::Bool(*value),
-        Val::U8(value) => Value::Integer((*value).into()),
-        Val::U16(value) => Value::Integer((*value).into()),
-        Val::U32(value) => Value::Integer((*value).into()),
-        Val::U64(value) => Value::Integer((*value).into()),
-        Val::List(items) => Value::Array(items.iter().map(cbor).collect::<Option<_>>()?),
-        Val::Record(fields) => Value::Array(
-            fields
-                .iter()
-                .map(|(_, field)| cbor(field))
-                .collect::<Option<_>>()?,
-        ),
-        Val::Enum(case) => Value::Text(case.clone()),
-        Val::Variant(case, payload) => tagged(Value::Text(case.clone()), payload.as_deref())?,
-        Val::Option(None) => Value::Null,
-        Val::Option(Some(payload)) => Value::Array(vec![cbor(payload)?]),
-        Val::Result(Ok(payload)) => tagged(Value::Integer(0.into()), payload.as_deref())?,
-        Val::Result(Err(payload)) => tagged(Value::Integer(1.into()), payload.as_deref())?,
-        _ => return None,
+fn run(host: &ComponentHost, request: WorkerRequestV1, tick: Duration) -> Option<WorkerOutcomeV1> {
+    let execution = pinned(request.negotiation)?;
+    let component = match host.load(&request.component) {
+        Ok(component) => component,
+        Err(error) => return Some(Err(CommunityPluginHostErrorV1::from(error))),
+    };
+    let options = InvocationOptionsV1 {
+        host_inputs: request.host_inputs,
+        watchdog_epochs: watchdog_epochs(request.watchdog_millis, tick),
+    };
+    Some(ticking(host, tick, || match &request.call {
+        WorkerCallV1::Describe => host
+            .describe(&component, &execution, options)
+            .map(WorkerReturnV1::Described),
+        WorkerCallV1::Reduce(invocation) => host
+            .reduce(&component, &execution, invocation, options)
+            .map(WorkerReturnV1::Produced),
+        WorkerCallV1::Drive(invocation) => host
+            .drive(&component, &execution, invocation, options)
+            .map(WorkerReturnV1::Produced),
+    }))
+}
+
+/// The supervisor's record, rebuilt and pinned to this engine's runtime.
+fn pinned(transport: NegotiatedTransportV1) -> Option<PinnedExecutionV1> {
+    let profile = CommunityPluginExecutionProfileV1::new(
+        transport.mode,
+        CommunityPluginCeilingsV1::V1,
+        pinned_runtime().ok(),
+    );
+    NegotiatedCommunityPluginV1::from_transport(transport, &CommunityPluginHostAbiV1::v1(), &profile)
+        .ok()
+        .and_then(|negotiated| PinnedExecutionV1::new(negotiated).ok())
+}
+
+/// Epoch ticks of `tick` that fit in the supervisor's watchdog.
+///
+/// A tick below one millisecond counts as one millisecond.
+#[must_use]
+pub fn watchdog_epochs(watchdog_millis: u64, tick: Duration) -> u32 {
+    let tick_millis = u64::try_from(tick.as_millis()).unwrap_or(u64::MAX).max(1);
+    u32::try_from(watchdog_millis / tick_millis).unwrap_or(u32::MAX)
+}
+
+/// Run `call` while another thread advances the engine epoch every `tick`.
+fn ticking<T>(host: &ComponentHost, tick: Duration, call: impl FnOnce() -> T) -> T {
+    let done = AtomicBool::new(false);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            while !done.load(Ordering::Acquire) {
+                thread::sleep(tick);
+                host.increment_epoch();
+            }
+        });
+        let result = call();
+        done.store(true, Ordering::Release);
+        result
     })
-}
-
-fn tagged(tag: Value, payload: Option<&Val>) -> Option<Value> {
-    let payload = payload
-        .map(cbor)
-        .map_or(Some(None), |payload| payload.map(Some))?;
-    Some(Value::Array(std::iter::once(tag).chain(payload).collect()))
 }
 
 #[cfg(test)]

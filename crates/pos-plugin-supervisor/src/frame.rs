@@ -7,16 +7,18 @@
 use std::io::{self, Read, Write};
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
-use pos_crypto::plugin_worker_ipc::{
-    MAX_WORKER_COMPONENT_BYTES_V1, MAX_WORKER_INVOCATION_BYTES_V1,
+use pos_runtime::community_plugin_host::{
+    MAX_OBSERVATION_BYTES_V1, MAX_STATE_BYTES_V1, MAX_TRACE_ANNOTATION_BYTES_V1,
 };
 
-/// Request envelope bytes beyond the Component and invocation.
+use crate::ipc::MAX_WORKER_COMPONENT_BYTES_V1;
+
+/// Request envelope bytes beyond the Component, observation and prior state.
 ///
-/// The negotiation record is at most 256 features of 128 bytes plus two
-/// digests, the world and eight limits: well under 64 KiB.
-const REQUEST_ENVELOPE_BYTES: usize = 65_536;
-/// Response envelope bytes beyond the Event, state and log budgets.
+/// The negotiation record (at most 256 features and 256 capabilities) and
+/// the invocation's other fields fit well within 1 MiB.
+const REQUEST_ENVELOPE_BYTES: usize = 1_048_576;
+/// Response envelope bytes beyond the Event, state, log and trace budgets.
 const RESPONSE_ENVELOPE_BYTES: u64 = 1_048_576;
 
 /// Why a frame could not be read or written.
@@ -43,19 +45,23 @@ impl WorkerFrameLimitsV1 {
     ///
     /// The worker reads its request before it knows the invocation's limits,
     /// so the request limit is the same for every invocation.
-    pub const REQUEST_BYTES: usize =
-        MAX_WORKER_COMPONENT_BYTES_V1 + MAX_WORKER_INVOCATION_BYTES_V1 + REQUEST_ENVELOPE_BYTES;
+    pub const REQUEST_BYTES: usize = MAX_WORKER_COMPONENT_BYTES_V1
+        + MAX_OBSERVATION_BYTES_V1
+        + MAX_STATE_BYTES_V1
+        + REQUEST_ENVELOPE_BYTES;
 
     /// The frame limits derived from the effective execution-profile limits.
     ///
-    /// The response may hold the effective Event, state and log bytes plus
-    /// 1 MiB of envelope and record structure.
+    /// The response may hold the effective Event, state and log bytes, the
+    /// 1 MiB of trace annotations ADR-061 revision 6 allows, and 1 MiB of
+    /// envelope and record structure.
     #[must_use]
     pub fn for_limits(limits: &DeterministicBudgetV1) -> Self {
         let response = limits
             .event_bytes
             .saturating_add(limits.state_bytes)
             .saturating_add(limits.log_bytes)
+            .saturating_add(MAX_TRACE_ANNOTATION_BYTES_V1 as u64)
             .saturating_add(RESPONSE_ENVELOPE_BYTES);
         Self {
             response_bytes: usize::try_from(response).unwrap_or(usize::MAX),
@@ -227,7 +233,7 @@ mod tests {
             ..DeterministicBudgetV1::MINIMA
         };
         let frames = WorkerFrameLimitsV1::for_limits(&limits);
-        assert_eq!(frames.response_bytes(), 1_048_576 + 3_210);
+        assert_eq!(frames.response_bytes(), 2 * 1_048_576 + 3_210);
         let saturated = DeterministicBudgetV1 {
             event_bytes: u64::MAX,
             ..limits
@@ -236,7 +242,7 @@ mod tests {
         assert_eq!(frames.response_bytes(), usize::MAX);
         assert_eq!(
             WorkerFrameLimitsV1::REQUEST_BYTES,
-            33_554_432 + 2 * 1_048_576 + 2 * 65_536
+            33_554_432 + 3 * 1_048_576
         );
     }
 }

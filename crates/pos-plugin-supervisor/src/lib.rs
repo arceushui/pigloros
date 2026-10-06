@@ -14,8 +14,7 @@
 //!   pipes ([`launch`], [`worker_process`]);
 //! - CPU, data (memory), file-size and core rlimit ceilings;
 //! - kill-on-supervisor-exit through `PR_SET_PDEATHSIG`;
-//! - bounded, length-prefixed canonical CBOR IPC ([`frame`] and
-//!   `pos_crypto::plugin_worker_ipc`);
+//! - bounded, length-prefixed canonical CBOR IPC ([`frame`], [`ipc`]);
 //! - a wall-time watchdog that kills the worker ([`supervisor`]).
 //!
 //! What it deliberately omits: a denied network namespace and job-level
@@ -34,15 +33,20 @@
 // Public modules keep crate-only items compatible with both `unreachable_pub`
 // and Clippy's `redundant_pub_crate`.
 pub mod frame;
+pub mod ipc;
 pub mod launch;
 pub mod supervisor;
+mod verify;
 pub mod worker_process;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod fixtures;
 
 pub use frame::{FrameFaultV1, WorkerFrameLimitsV1};
 pub use launch::{WorkerProgramV1, WorkerResourceCeilingsV1, FORWARDED_ENVIRONMENT};
-pub use supervisor::{
-    CommunityPluginSupervisorV1, WorkerInvocationV1, WorkerReportV1, MAX_WORKER_WATCHDOG,
-};
+pub use ipc::{WorkerCallV1, WorkerEnvelopeErrorV1, WorkerOutcomeV1, WorkerRequestV1, WorkerReturnV1};
+pub use supervisor::{CommunityPluginSupervisorV1, MAX_WORKER_WATCHDOG};
 pub use worker_process::{
     open_descriptors, prepare_worker_process, read_request, write_response, WorkerProcessErrorV1,
 };
