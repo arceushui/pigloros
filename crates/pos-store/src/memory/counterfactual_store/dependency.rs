@@ -65,10 +65,10 @@ use pos_core::{
     CounterfactualBasisV1, CounterfactualDependencyErrorV1, CounterfactualDependencyReadPortV1,
     CounterfactualDependencyRecordingPortV1, CounterfactualInvalidationCommandV1,
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualTickOutcomeV1,
-    DependencyEdgeRecordV1, DependencyNodeRecordV1, DependencyPageCursorV1,
-    DependencyPageRequestV1, DependencyPageV1, DependencyPagedRowV1, DependencyReadScopeV1,
-    ErasureProtectedOperationV1, ForkGenerationV1, Hash, PipelineDraftBatchV1,
-    RecordedSetCountsV1, TickDependencyRecordV1, TimelineId,
+    DependencyEdgeRecordV1, DependencyNodeRecordV1, DependencyPageCursorV1, DependencyPageRequestV1,
+    DependencyPageV1, DependencyPagedRowV1, DependencyReadScopeV1, ErasureProtectedOperationV1,
+    ForkGenerationV1, Hash, PipelineDraftBatchV1, RecordedSetCountsV1, TickDependencyRecordV1,
+    TimelineId,
 };
 
 use super::{fenced_result, CounterfactualForkStateV1};
@@ -439,5 +439,482 @@ impl CounterfactualDependencyReadPortV1 for MemoryStore {
         request: &DependencyPageRequestV1,
     ) -> Result<DependencyPageV1<DependencyEdgeRecordV1>, CounterfactualStoreErrorV1> {
         self.read_dependency_page(request, |rows| &rows.edges)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pos_core::counterfactual_store::test_fixtures::{hash_field, text_field, uint};
+    use pos_core::{
+        DependencyNodeCoordinateV1, EventStore, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1,
+        ForkAttributionOriginV1, OwnerIdV1, RecordedDependencyClassV1, RecordedNodeOriginV1,
+        MAX_RECORDED_DEPENDENCY_EDGES_V1, MAX_RECORDED_DEPENDENCY_NODES_V1,
+    };
+
+    use super::super::tests::{command, draft, inject, ok, published_store, snapshot};
+    use super::super::InjectedFaultV1;
+    use super::*;
+
+    type NodeRow = DependencyNodeRecordV1;
+    type EdgeRow = DependencyEdgeRecordV1;
+    type Coordinate = DependencyNodeCoordinateV1;
+    type Scope = DependencyReadScopeV1;
+    /// One capacity case: stored counts and a record that crosses one bound.
+    type CapacityCase = (RecordedSetCountsV1, fn(u64) -> TickDependencyRecordV1);
+
+    const ENDOGENOUS: RecordedDependencyClassV1 = RecordedDependencyClassV1::EndogenousRecomputed;
+    const PROVISIONAL: RecordedNodeOriginV1 = RecordedNodeOriginV1::Provisional;
+    const COMMITTED: RecordedNodeOriginV1 = RecordedNodeOriginV1::Committed;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn coordinate(tick: u64, owner: &str, digest: u8) -> Coordinate {
+        let digest = Hash::from_bytes([digest; 32]);
+        ok(Coordinate::try_new(tick, 0, owner.to_owned(), 0, 7, digest))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn node(
+        coordinate: &Coordinate,
+        origin: RecordedNodeOriginV1,
+        inputs: Vec<Hash>,
+    ) -> DependencyNodeRecordV1 {
+        let provenance = Hash::from_bytes([99; 32]);
+        ok(DependencyNodeRecordV1::try_new(
+            coordinate.clone(),
+            ENDOGENOUS,
+            origin,
+            inputs,
+            provenance,
+        ))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn node_bytes(node: &Coordinate) -> Vec<u8> {
+        [
+            vec![0x86],
+            uint(node.tick()),
+            uint(u64::from(node.scheduler_position())),
+            text_field(node.owner_id()),
+            uint(u64::from(node.output_ordinal())),
+            uint(u64::from(node.schema_id())),
+            hash_field(node.artifact_digest()),
+        ]
+        .concat()
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn edge(consumer: &Coordinate, source: &Coordinate) -> DependencyEdgeRecordV1 {
+        let tail = [
+            uint(2),
+            vec![0x82],
+            uint(3),
+            uint(5),
+            hash_field(Hash::from_bytes([0x33; 32])),
+            vec![0x82],
+            text_field("adr064.classification"),
+            uint(1),
+            hash_field(Hash::from_bytes([0x44; 32])),
+        ]
+        .concat();
+        let head = vec![0x89, 0x64, b'I', b'D', b'P', b'1', 0x01];
+        let bytes = [head, node_bytes(consumer), node_bytes(source), tail].concat();
+        ok(DependencyEdgeRecordV1::try_from_canonical(
+            bytes,
+            consumer.clone(),
+            source.artifact_digest(),
+        ))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn record_of(
+        tick: u64,
+        nodes: Vec<DependencyNodeRecordV1>,
+        edges: Vec<DependencyEdgeRecordV1>,
+    ) -> TickDependencyRecordV1 {
+        ok(TickDependencyRecordV1::try_new(
+            tick,
+            PROVISIONAL,
+            nodes,
+            edges,
+        ))
+    }
+
+    /// A record of one provisional node `n` at `tick`, digest `tick`.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn lone_node(tick: u64) -> TickDependencyRecordV1 {
+        let digest = u8::try_from(tick).unwrap_or(u8::MAX);
+        let row = node(&coordinate(tick, "n", digest), PROVISIONAL, Vec::new());
+        record_of(tick, vec![row], Vec::new())
+    }
+
+    /// A record of one node declaring one input, with no edge.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn input_node(tick: u64) -> TickDependencyRecordV1 {
+        let digest = u8::try_from(tick).unwrap_or(u8::MAX);
+        let inputs = vec![Hash::from_bytes([200; 32])];
+        let row = node(&coordinate(tick, "n", digest), PROVISIONAL, inputs);
+        record_of(tick, vec![row], Vec::new())
+    }
+
+    /// A record of one node declaring one input, with its edge.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn edge_node(tick: u64) -> TickDependencyRecordV1 {
+        let digest = u8::try_from(tick).unwrap_or(u8::MAX);
+        let consumer = coordinate(tick, "n", digest);
+        let inputs = vec![Hash::from_bytes([200; 32])];
+        let edges = vec![edge(&consumer, &coordinate(0, "w", 200))];
+        record_of(tick, vec![node(&consumer, PROVISIONAL, inputs)], edges)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    const fn fork_scope(fork: TimelineId, generation: u64) -> Scope {
+        Scope::ForkGeneration(ForkGenerationV1 { fork, generation })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn prefix_through(timeline: TimelineId, through_tick: u64) -> Scope {
+        Scope::ParentPrefix {
+            timeline,
+            through_tick,
+        }
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn read_nodes(
+        store: &MemoryStore,
+        scope: Scope,
+        limit: usize,
+    ) -> Result<DependencyPageV1<NodeRow>, StoreError> {
+        let request = ok(DependencyPageRequestV1::try_new(scope, None, limit));
+        store.read_dependency_nodes(&request)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn read_edges(
+        store: &MemoryStore,
+        scope: Scope,
+        limit: usize,
+    ) -> Result<DependencyPageV1<EdgeRow>, StoreError> {
+        let request = ok(DependencyPageRequestV1::try_new(scope, None, limit));
+        store.read_dependency_edges(&request)
+    }
+
+    /// The Fork's current-generation rows, which are generation 1 here.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fork_nodes(store: &MemoryStore, fork: TimelineId) -> Vec<NodeRow> {
+        ok(read_nodes(store, fork_scope(fork, 1), 100))
+            .items()
+            .to_vec()
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn parent_of(store: &MemoryStore, fork: TimelineId) -> TimelineId {
+        let point = store.state(fork).timeline.meta.fork_point;
+        ok(point.ok_or("not a Fork")).0
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn seed_prefix(
+        store: &mut MemoryStore,
+        parent: TimelineId,
+        nodes: &[NodeRow],
+        edges: &[EdgeRow],
+    ) {
+        let rows = store.dependency_prefixes.entry(parent).or_default();
+        rows.nodes.extend(keyed(nodes));
+        rows.edges.extend(keyed(edges));
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn dependency_set(store: &mut MemoryStore, fork: TimelineId) -> &mut ForkDependencySetV1 {
+        let state = ok(store.counterfactual_forks.get_mut(&fork).ok_or("no state"));
+        ok(state.dependencies.get_mut(&1).ok_or("no set"))
+    }
+
+    /// A store whose Fork committed generation 1 with the tick 1 record `a`.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn recorded_store() -> (MemoryStore, TimelineId) {
+        let (mut store, fork) = published_store();
+        let first = lone_node(1);
+        let invalidation = command(fork);
+        let outcome =
+            store.commit_counterfactual_invalidation_with_dependencies(&invalidation, &first);
+        assert!(outcome.is_ok());
+        (store, fork)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn append_record(
+        store: &mut MemoryStore,
+        fork: TimelineId,
+        record: &TickDependencyRecordV1,
+    ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
+        let expected = ok(store.current_counterfactual_basis(fork));
+        let drafts = ok(PipelineDraftBatchV1::try_new(vec![draft(2)]));
+        store.append_counterfactual_tick_with_dependencies(fork, &expected, &drafts, record)
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn c2_injected_failures_record_nothing() {
+        let (mut store, fork) = published_store();
+        let first = lone_node(1);
+        let invalidation = command(fork);
+        let before = snapshot(&store, fork);
+
+        inject(InjectedFaultV1::Storage);
+        let failed =
+            store.commit_counterfactual_invalidation_with_dependencies(&invalidation, &first);
+        inject(InjectedFaultV1::StalledHead);
+        let stalled =
+            store.commit_counterfactual_invalidation_with_dependencies(&invalidation, &first);
+
+        assert_eq!(failed, Err(StoreError::StorageFailure));
+        assert_eq!(stalled, Err(StoreError::CorruptState));
+        assert_eq!(snapshot(&store, fork), before);
+        let committed =
+            store.commit_counterfactual_invalidation_with_dependencies(&invalidation, &first);
+        assert!(committed.is_ok());
+        assert_eq!(fork_nodes(&store, fork), first.nodes().to_vec());
+
+        let second = lone_node(2);
+        let after = snapshot(&store, fork);
+        inject(InjectedFaultV1::Storage);
+        let failed = append_record(&mut store, fork, &second);
+        inject(InjectedFaultV1::StalledHead);
+        let stalled = append_record(&mut store, fork, &second);
+
+        assert_eq!(failed, Err(StoreError::StorageFailure));
+        assert_eq!(stalled, Err(StoreError::CorruptState));
+        assert_eq!(snapshot(&store, fork), after);
+        assert!(append_record(&mut store, fork, &second).is_ok());
+        assert_eq!(fork_nodes(&store, fork).len(), 2);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn c3_set_capacity_is_checked_against_the_stored_counts() {
+        let limit_nodes = MAX_RECORDED_DEPENDENCY_NODES_V1;
+        let limit_edges = MAX_RECORDED_DEPENDENCY_EDGES_V1;
+        let cases: [CapacityCase; 3] = [
+            (
+                RecordedSetCountsV1 {
+                    nodes: limit_nodes - 1,
+                    ..RecordedSetCountsV1::default()
+                },
+                lone_node,
+            ),
+            (
+                RecordedSetCountsV1 {
+                    edges: limit_edges - 1,
+                    ..RecordedSetCountsV1::default()
+                },
+                edge_node,
+            ),
+            (
+                RecordedSetCountsV1 {
+                    inputs: limit_edges - 1,
+                    ..RecordedSetCountsV1::default()
+                },
+                input_node,
+            ),
+        ];
+        for (counts, make) in cases {
+            let (mut store, fork) = recorded_store();
+            dependency_set(&mut store, fork).counts = counts;
+
+            // The record that reaches the bound exactly is accepted.
+            assert!(append_record(&mut store, fork, &make(2)).is_ok());
+            let full = snapshot(&store, fork);
+            // One more row of the same kind is over the bound.
+            let over = append_record(&mut store, fork, &make(3));
+
+            assert_eq!(over, Err(StoreError::FieldOutOfBounds));
+            assert_eq!(snapshot(&store, fork), full);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn c5_no_record_tick_follows_the_largest_tick() {
+        let (mut store, fork) = recorded_store();
+        dependency_set(&mut store, fork).last_record_tick = Some(u64::MAX);
+        let before = snapshot(&store, fork);
+
+        let outcome = append_record(&mut store, fork, &lone_node(u64::MAX));
+
+        assert_eq!(outcome, Err(StoreError::BindingMismatch));
+        assert_eq!(snapshot(&store, fork), before);
+    }
+
+    /// The committed node `p<tick>` at `tick`, digest `tick`.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn prefix_coordinate(tick: u64) -> Coordinate {
+        coordinate(tick, &format!("p{tick}"), u8::try_from(tick).unwrap_or(0))
+    }
+
+    /// Committed prefix: nodes `p1`..`p4` at ticks 1 to 4, edges consumed by
+    /// `p2` and `p4`.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn seeded_prefix() -> (MemoryStore, TimelineId, TimelineId) {
+        let (mut store, fork) = published_store();
+        let root = parent_of(&store, fork);
+        let source = coordinate(0, "w", 200);
+        let inputs = vec![Hash::from_bytes([200; 32])];
+        let coordinates: Vec<Coordinate> = (1..=4).map(prefix_coordinate).collect();
+        let nodes: Vec<NodeRow> = coordinates
+            .iter()
+            .map(|at| node(at, COMMITTED, inputs.clone()))
+            .collect();
+        let edges = [&coordinates[1], &coordinates[3]].map(|at| edge(at, &source));
+        seed_prefix(&mut store, root, &nodes, &edges);
+        (store, root, fork)
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn c8_parent_prefix_serves_committed_rows_through_the_tick() {
+        let (store, root, fork) = seeded_prefix();
+        let ticks = |scope, limit| -> Vec<u64> {
+            let page = ok(read_nodes(&store, scope, limit));
+            let rows = page.items().iter();
+            rows.map(|row| row.coordinate().tick()).collect()
+        };
+        let edge_ticks = |scope| -> Vec<u64> {
+            let page = ok(read_edges(&store, scope, 10));
+            let rows = page.items().iter();
+            rows.map(|row| row.consumer().tick()).collect()
+        };
+
+        assert_eq!(ticks(prefix_through(root, 4), 10), vec![1, 2, 3, 4]);
+        assert_eq!(ticks(prefix_through(root, 3), 10), vec![1, 2, 3]);
+        assert_eq!(ticks(prefix_through(root, 2), 10), vec![1, 2]);
+        assert_eq!(ticks(prefix_through(root, 0), 10), Vec::<u64>::new());
+        assert_eq!(edge_ticks(prefix_through(root, 4)), vec![2, 4]);
+        assert_eq!(edge_ticks(prefix_through(root, 3)), vec![2]);
+        assert_eq!(edge_ticks(prefix_through(root, 1)), Vec::<u64>::new());
+        // Another Timeline's prefix and the Fork's own rows are not served.
+        assert_eq!(ticks(prefix_through(fork, 4), 10), Vec::<u64>::new());
+        let unrecorded = ok(read_nodes(&store, fork_scope(fork, 0), 10));
+        assert!(unrecorded.items().is_empty());
+        // Paging resumes after the page's last row and stops at the bound.
+        let first = ok(read_nodes(&store, prefix_through(root, 3), 2));
+        let after = first.next().cloned();
+        let request = ok(DependencyPageRequestV1::try_new(
+            prefix_through(root, 3),
+            after,
+            2,
+        ));
+        let second = ok(store.read_dependency_nodes(&request));
+        assert_eq!(first.items().len(), 2);
+        assert_eq!(second.items().len(), 1);
+        assert!(second.next().is_none());
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn c8_corrupt_stored_rows_read_back_as_corrupt_state() {
+        let (mut store, fork) = recorded_store();
+        let root = parent_of(&store, fork);
+        let committed = node(&coordinate(30, "q", 31), COMMITTED, Vec::new());
+        dependency_set(&mut store, fork)
+            .rows
+            .nodes
+            .insert(committed.cursor(), committed);
+        let provisional = node(&coordinate(8, "w", 32), PROVISIONAL, Vec::new());
+        seed_prefix(&mut store, root, &[provisional], &[]);
+
+        assert_eq!(
+            read_nodes(&store, fork_scope(fork, 1), 5).map(drop),
+            Err(StoreError::CorruptState)
+        );
+        assert_eq!(
+            read_nodes(&store, prefix_through(root, 9), 5).map(drop),
+            Err(StoreError::CorruptState)
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn c9_geographic_protected_timelines_are_not_found() {
+        let (mut store, fork) = recorded_store();
+        let root = parent_of(&store, fork);
+        let expected = ok(store.current_counterfactual_basis(fork));
+        let drafts = ok(PipelineDraftBatchV1::try_new(vec![draft(2)]));
+        let second = lone_node(2);
+        store.geographic_timelines.insert(root);
+        store.geographic_timelines.insert(fork);
+
+        for scope in [prefix_through(root, 5), fork_scope(fork, 1)] {
+            assert_eq!(
+                read_nodes(&store, scope, 5).map(drop),
+                Err(StoreError::ForkNotFound)
+            );
+        }
+        let before = snapshot(&store, fork);
+        let appended =
+            store.append_counterfactual_tick_with_dependencies(fork, &expected, &drafts, &second);
+        assert_eq!(appended, Err(StoreError::ForkNotFound));
+        assert_eq!(snapshot(&store, fork), before);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn c9_admitted_fork_writes_fail_closed_without_recording() {
+        let (mut store, fork) = recorded_store();
+        store.fork_admissions.insert(
+            fork,
+            ok(ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
+                operation_id: Hash::from_bytes([1; 32]),
+                principal_owner_binding_digest: Hash::from_bytes([2; 32]),
+                creator: OwnerIdV1::from_static("test-owner"),
+                parent_timeline_id: TimelineId::new(),
+                child_timeline_id: fork,
+                room_revision_descriptor_hash: Hash::from_bytes([3; 32]),
+                parent_logical_head: 0,
+                parent_chain_head_hash: Hash::from_bytes([4; 32]),
+                completed_fold_cursor: 0,
+                post_fold_tick_boundary: 0,
+                plugin_composition_hash: Hash::from_bytes([5; 32]),
+                attribution_required: false,
+                origin: ForkAttributionOriginV1::Local,
+            })),
+        );
+        let before = snapshot(&store, fork);
+        let first = lone_node(1);
+        let invalidation = command(fork);
+
+        let commit =
+            store.commit_counterfactual_invalidation_with_dependencies(&invalidation, &first);
+
+        assert_eq!(commit, Err(StoreError::StorageFailure));
+        assert_eq!(
+            append_record(&mut store, fork, &lone_node(2)).map(drop),
+            Err(StoreError::StorageFailure)
+        );
+        assert_eq!(snapshot(&store, fork), before);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn c12_deleting_timelines_purges_their_dependency_rows() {
+        let (mut store, fork) = recorded_store();
+        let root = parent_of(&store, fork);
+        let root_row = node(&coordinate(1, "p", 40), COMMITTED, Vec::new());
+        let fork_row = node(&coordinate(1, "p", 41), COMMITTED, Vec::new());
+        seed_prefix(&mut store, root, &[root_row], &[]);
+        seed_prefix(&mut store, fork, &[fork_row], &[]);
+
+        // A refused delete (the root still has a Fork) keeps every row.
+        assert!(store.delete_timeline(root).is_err());
+        assert!(store.dependency_prefixes.contains_key(&root));
+        assert!(!dependency_set(&mut store, fork).rows.nodes.is_empty());
+
+        ok(store.delete_timeline(fork));
+        assert!(!store.counterfactual_forks.contains_key(&fork));
+        assert!(!store.dependency_prefixes.contains_key(&fork));
+        assert!(store.dependency_prefixes.contains_key(&root));
+        ok(store.delete_timeline(root));
+        assert!(store.dependency_prefixes.is_empty());
     }
 }
