@@ -25,6 +25,7 @@ ciborium = { workspace = true }
 ulid = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

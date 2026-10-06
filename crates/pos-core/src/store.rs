@@ -32,6 +32,7 @@ use crate::{
     ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureTopologyTransitionPermitV1,
 };
 use std::sync::Arc;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Exact identities and public signing material for one prepared protected append.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -329,6 +330,53 @@ pub struct TimelineExport {
     /// Always `None` for roots and for flattened logical [`export_timeline`] snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_fork_hash: Option<Hash>,
+}
+
+impl TimelineExport {
+    /// Whether each payload buffer in this export is exclusively owned by it.
+    ///
+    /// A host that needs to wipe an export snapshot must first establish this
+    /// property: wiping a shared buffer would mutate data still owned by a
+    /// different caller.
+    #[must_use]
+    pub fn plaintext_staging_is_exclusively_owned(&self) -> bool {
+        event_plaintext_staging_is_exclusively_owned(&self.events)
+    }
+
+    /// Zeroize the export-owned plaintext buffers and strings used for staging.
+    ///
+    /// Returns false without changing the export when a payload is shared.
+    /// Hosts should check [`Self::plaintext_staging_is_exclusively_owned`] before they
+    /// materialize any ciphertext.
+    pub fn zeroize_plaintext_staging(&mut self) -> bool {
+        if !self.plaintext_staging_is_exclusively_owned() {
+            return false;
+        }
+        if let Some(name) = &mut self.timeline.meta.name {
+            name.zeroize();
+        }
+        zeroize_event_plaintext_staging(&mut self.events)
+    }
+}
+
+fn event_plaintext_staging_is_exclusively_owned(events: &[Event]) -> bool {
+    events.iter().all(|event| event.payload.is_uniquely_owned())
+}
+
+/// Zeroize event-owned plaintext buffers and type strings used for staging.
+///
+/// Returns `false` without changing `events` when a payload buffer is shared.
+/// This is opt-in because [`CanonicalBytes`] supports cheap shared clones; a
+/// caller must not wipe bytes still owned by another caller.
+#[must_use]
+pub fn zeroize_event_plaintext_staging(events: &mut [Event]) -> bool {
+    if !event_plaintext_staging_is_exclusively_owned(events) {
+        return false;
+    }
+    events.iter_mut().all(|event| {
+        event.event_type.zeroize();
+        event.payload.zeroize_if_uniquely_owned()
+    })
 }
 
 /// The kernel's event-store abstraction. Implementations live in `pos-store`.
@@ -1331,7 +1379,11 @@ pub fn export_timeline(
         .require_authoritative_use(crate::ErasureArtifactClassV1::Export, artifact_digest)
         .map_err(|_| CoreError::ArtifactUnavailable)
         .and_then(|()| {
-            export_timeline_using(store.get_timeline(id), store.read(id, SeqRange::all()), id)
+            export_timeline_using(
+                store.get_timeline(id),
+                || store.read(id, SeqRange::all()),
+                id,
+            )
         })
         .map(|mut export| {
             let was_fork = export.timeline.meta.fork_point.take().is_some();
@@ -1399,16 +1451,21 @@ pub fn export_timeline_raw(
         .and_then(|()| {
             export_timeline_using(
                 store.get_timeline(id),
-                store.read_own(id, SeqRange::all()),
+                || store.read_own(id, SeqRange::all()),
                 id,
             )
         })
         .and_then(|mut export| {
             if let Some((parent, at_seq)) = export.timeline.meta.fork_point {
-                store.chain_hash_at(parent, at_seq).map(|parent_hash| {
-                    export.parent_fork_hash = Some(parent_hash);
-                    export
-                })
+                store
+                    .chain_hash_at(parent, at_seq)
+                    .inspect_err(|_| {
+                        let _ = export.zeroize_plaintext_staging();
+                    })
+                    .map(|parent_hash| {
+                        export.parent_fork_hash = Some(parent_hash);
+                        export
+                    })
             } else {
                 Ok(export)
             }
@@ -1676,15 +1733,20 @@ pub fn validate_event_signature(event: &Event) -> Result<(), CoreError> {
     }
 }
 
-fn export_timeline_using(
+fn export_timeline_using<F>(
     timeline_result: Result<Option<Timeline>, CoreError>,
-    events_result: Result<Vec<Event>, CoreError>,
+    read_events: F,
     id: TimelineId,
-) -> Result<TimelineExport, CoreError> {
-    let Some(timeline) = timeline_result? else {
+) -> Result<TimelineExport, CoreError>
+where
+    F: FnOnce() -> Result<Vec<Event>, CoreError>,
+{
+    let Some(mut timeline) = timeline_result? else {
         return Err(CoreError::TimelineNotFound(id));
     };
-    let events = events_result?;
+    let timeline_name = timeline.meta.name.take().map(Zeroizing::new);
+    let events = read_events()?;
+    timeline.meta.name = timeline_name.map(|mut name| std::mem::take(&mut *name));
     Ok(TimelineExport {
         timeline,
         events,
@@ -3128,6 +3190,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn event_plaintext_staging_scrub_preserves_shared_buffers() {
+        let shared_event = validation_test_event(1, EventId::new());
+        let retained = shared_event.payload.clone();
+        let mut shared_events = vec![shared_event];
+        assert!(!zeroize_event_plaintext_staging(&mut shared_events));
+        assert_eq!(shared_events[0].event_type.as_str(), "test.validation");
+        assert_eq!(shared_events[0].payload.as_slice(), b"x");
+        assert_eq!(retained.as_slice(), b"x");
+
+        let mut unique_events = vec![validation_test_event(2, EventId::new())];
+        assert!(zeroize_event_plaintext_staging(&mut unique_events));
+        assert_eq!(unique_events[0].event_type.as_str(), "");
+        assert!(unique_events[0].payload.is_empty());
+    }
+
+    #[test]
+    fn timeline_export_plaintext_staging_scrubs_optional_names() {
+        let mut named = TimelineExport {
+            timeline: Timeline::new(TimelineMeta::root("plaintext staging")),
+            events: vec![validation_test_event(1, EventId::new())],
+            parent_fork_hash: None,
+        };
+        assert!(named.zeroize_plaintext_staging());
+        assert_eq!(named.timeline.meta.name.as_deref(), Some(""));
+
+        let mut unnamed_meta = TimelineMeta::root("plaintext staging");
+        unnamed_meta.name = None;
+        let mut unnamed = TimelineExport {
+            timeline: Timeline::new(unnamed_meta),
+            events: vec![validation_test_event(1, EventId::new())],
+            parent_fork_hash: None,
+        };
+        assert!(unnamed.zeroize_plaintext_staging());
+        assert!(unnamed.timeline.meta.name.is_none());
+    }
+
     struct ValidationTestHasher {
         should_match: bool,
     }
@@ -3299,6 +3398,7 @@ mod tests {
     fn export_timeline_raw_chain_hash_err_arm_counted() -> Result<(), Box<dyn std::error::Error>> {
         struct HashFail {
             id: TimelineId,
+            shared_payload: CanonicalBytes,
         }
         impl EventStore for HashFail {
             fn create_timeline(&mut self, _: &str) -> Result<Timeline, CoreError> {
@@ -3308,7 +3408,9 @@ mod tests {
                 Err(CoreError::Storage("unused".to_owned()))
             }
             fn read(&self, _: TimelineId, _: SeqRange) -> Result<Vec<Event>, CoreError> {
-                Ok(Vec::new())
+                let mut event = validation_test_event(1, EventId::new());
+                event.payload = self.shared_payload.clone();
+                Ok(vec![event])
             }
             fn fork(&mut self, _: TimelineId, _: Seq, _: &str) -> Result<Timeline, CoreError> {
                 Err(CoreError::Storage("unused".to_owned()))
@@ -3350,11 +3452,14 @@ mod tests {
         }
 
         let id = TimelineId::new();
-        let err = export_timeline_raw(&HashFail { id }, id).test_err()?;
+        let shared_payload = CanonicalBytes::from_vec(b"shared raw export payload".to_vec());
+        let retained_payload = shared_payload.clone();
+        let err = export_timeline_raw(&HashFail { id, shared_payload }, id).test_err()?;
         assert!(
             err.to_string().contains("hash boom"),
             "expected hash boom error, got {err:?}"
         );
+        assert_eq!(retained_payload.as_slice(), b"shared raw export payload");
 
         Ok(())
     }
