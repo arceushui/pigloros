@@ -477,9 +477,10 @@ mod tests {
             Err(HostFault::OutputLimit)
         );
         assert_eq!(budget.log_bytes, LIMITS.log_bytes - 256);
-        assert_eq!(budget.charge_log(344), Ok(()));
-        assert_eq!(budget.log_bytes, 0);
-        assert_eq!(budget.charge_log(1), Err(HostFault::OutputLimit));
+        assert_eq!(budget.charge_log(MAX_LOG_MESSAGE_BYTES), Ok(()));
+        assert_eq!(budget.log_bytes, 88);
+        assert_eq!(budget.charge_log(89), Err(HostFault::OutputLimit));
+        assert_eq!(budget.log_bytes, 88);
         assert_eq!(budget.log_calls, 1);
         assert_eq!(budget.charge_log(0), Ok(()));
         assert_eq!(budget.charge_log(0), Err(HostFault::OutputLimit));

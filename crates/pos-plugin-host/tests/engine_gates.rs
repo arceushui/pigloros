@@ -121,11 +121,11 @@ fn probe(selector: u64, budget: DeterministicBudgetV1) -> Option<Error> {
         .err()
 }
 
-const fn trap(class: ComponentTrapClassV1) -> Option<Error> {
-    Some(Error::ComponentTrap {
+const fn trap(class: ComponentTrapClassV1) -> Error {
+    Error::ComponentTrap {
         class,
         reproduction: TrapReproductionV1::Unverified,
-    })
+    }
 }
 
 fn invocation(observation_bytes: usize) -> PluginInvocationV1 {
@@ -159,21 +159,17 @@ fn invocation(observation_bytes: usize) -> PluginInvocationV1 {
 
 #[test]
 fn wasm_traps_map_to_their_pinned_trap_classes() {
-    assert_eq!(probe(1, BUDGET), trap(ComponentTrapClassV1::Unreachable));
-    assert_eq!(
-        probe(2, BUDGET),
-        trap(ComponentTrapClassV1::IntegerArithmetic)
-    );
-    assert_eq!(
-        probe(3, BUDGET),
-        trap(ComponentTrapClassV1::MemoryOutOfBounds)
-    );
-    assert_eq!(probe(4, BUDGET), trap(ComponentTrapClassV1::IndirectCall));
-    assert_eq!(probe(5, BUDGET), trap(ComponentTrapClassV1::StackExhausted));
-    assert_eq!(
-        probe(6, BUDGET),
-        trap(ComponentTrapClassV1::TableOutOfBounds)
-    );
+    let classes = [
+        (1, ComponentTrapClassV1::Unreachable),
+        (2, ComponentTrapClassV1::IntegerArithmetic),
+        (3, ComponentTrapClassV1::MemoryOutOfBounds),
+        (4, ComponentTrapClassV1::IndirectCall),
+        (5, ComponentTrapClassV1::StackExhausted),
+        (6, ComponentTrapClassV1::TableOutOfBounds),
+    ];
+    for (selector, class) in classes {
+        assert_eq!(probe(selector, BUDGET), Some(trap(class)), "{selector}");
+    }
 }
 
 #[test]
