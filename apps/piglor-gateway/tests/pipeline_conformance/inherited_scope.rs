@@ -115,6 +115,7 @@ fn decision<T>(result: &Result<T, RuntimeError>) -> String {
     match result {
         Ok(_) => "ok".to_owned(),
         Err(RuntimeError::ErasureContainment(error)) => format!("{error:?}"),
+        // Non-erasure errors render with their full Debug output.
         Err(error) => format!("{error:?}"),
     }
 }
