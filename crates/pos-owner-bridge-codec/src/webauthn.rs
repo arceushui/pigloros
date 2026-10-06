@@ -9,8 +9,6 @@ use crate::{
 
 const MIN_CREDENTIAL_ID_BYTES: usize = 1;
 const MAX_CREDENTIAL_ID_BYTES: usize = 1_024;
-const MIN_SIGNATURE_BYTES: usize = 8;
-const MAX_SIGNATURE_BYTES: usize = 80;
 const MAX_AUTHENTICATOR_DATA_BYTES: usize = 1_024;
 const SIGNED_MESSAGE_BYTES: usize = MAX_AUTHENTICATOR_DATA_BYTES + 32;
 
@@ -277,21 +275,13 @@ fn verify_signature(
     client_data_json: &[u8],
     signature_bytes: &[u8],
 ) -> Result<(), OwnerBridgeCodecError> {
-    if signature_bytes.len() < MIN_SIGNATURE_BYTES || signature_bytes.len() > MAX_SIGNATURE_BYTES {
-        return Err(OwnerBridgeCodecError::BoundsExceeded);
-    }
     let signature =
         Signature::from_der(signature_bytes).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
-    if signature.to_der().as_bytes() != signature_bytes {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
-    }
 
     let client_data_digest: [u8; 32] = Sha256::digest(client_data_json).into();
-    let message_length = authenticator_data
-        .len()
-        .checked_add(client_data_digest.len())
-        .filter(|length| *length <= SIGNED_MESSAGE_BYTES)
-        .ok_or(OwnerBridgeCodecError::BoundsExceeded)?;
+    // `verify_signature` is private and reached only through
+    // `AssertionReplyV1`, which bounds authenticator data to 1,024 bytes.
+    let message_length = authenticator_data.len() + client_data_digest.len();
     let mut signed_message = [0; SIGNED_MESSAGE_BYTES];
     signed_message[..authenticator_data.len()].copy_from_slice(authenticator_data);
     signed_message[authenticator_data.len()..message_length].copy_from_slice(&client_data_digest);

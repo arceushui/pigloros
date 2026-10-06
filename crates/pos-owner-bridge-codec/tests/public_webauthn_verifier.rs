@@ -204,6 +204,20 @@ fn public_verifier_rejects_backup_and_signature_violations() -> Result<(), Owner
         PRF_RESULT,
     )?;
     assert_invalid_assertion(&invalid_signature_reply, credential);
+
+    let mut nonminimal_der_signature = Vec::from(&signature[..final_signature_length]);
+    let encoded_length = nonminimal_der_signature[1];
+    nonminimal_der_signature.splice(1..2, [0x81, encoded_length]);
+    let nonminimal_der_reply = AssertionReplyV1::new(
+        CEREMONY_ID,
+        &CREDENTIAL_ID,
+        GET_CLIENT_DATA,
+        &assertion_data,
+        &nonminimal_der_signature,
+        None,
+        PRF_RESULT,
+    )?;
+    assert_invalid_assertion(&nonminimal_der_reply, credential);
     Ok(())
 }
 
