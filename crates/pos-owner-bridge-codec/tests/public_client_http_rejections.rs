@@ -180,6 +180,60 @@ fn public_client_data_rejects_malformed_json_strings_and_trailing_content() {
 }
 
 #[test]
+fn public_client_data_exercises_every_json_escape_and_parser_rejection() {
+    let escaped_key = r#"x\"\\\/\b\f\n\r\t\u00af\uABCD\uD83D\uDE00é"#;
+    let duplicate_escaped_key = [
+        br#"{"type":"webauthn.create","challenge":"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8","origin":"http://localhost:49291",""#,
+        escaped_key.as_bytes(),
+        br#"":"one",""#,
+        escaped_key.as_bytes(),
+        br#"":"two"}"#,
+    ]
+    .concat();
+    assert_eq!(
+        validate_client_data_json(&duplicate_escaped_key, CeremonyKind::Create, &CHALLENGE),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+
+    const UNKNOWN_VALUE_PREFIX: &[u8] = b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":";
+    let mut truncated_escape = Vec::from(UNKNOWN_VALUE_PREFIX);
+    truncated_escape.extend([b'\"', b'\\']);
+    let mut truncated_unicode = Vec::from(UNKNOWN_VALUE_PREFIX);
+    truncated_unicode.extend_from_slice(br#""\u001"#);
+    let invalid_inputs: [(&str, &[u8]); 6] = [
+        ("key without a string", b"{true:false}"),
+        (
+            "member without a colon",
+            b"{\"type\" \"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\"}",
+        ),
+        (
+            "truncated true literal",
+            b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":tru}",
+        ),
+        (
+            "non-hex unicode escape",
+            br#"{"type":"webauthn.create","challenge":"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8","origin":"http://localhost:49291","unknown":"\u00g0"}"#,
+        ),
+        (
+            "high surrogate followed by a non-low surrogate",
+            br#"{"type":"webauthn.create","challenge":"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8","origin":"http://localhost:49291","unknown":"\uD800\u0041"}"#,
+        ),
+        ("truncated unicode escape", &truncated_unicode),
+    ];
+    for (label, input) in invalid_inputs {
+        assert_eq!(
+            validate_client_data_json(input, CeremonyKind::Create, &CHALLENGE),
+            Err(OwnerBridgeCodecError::InvalidPayload),
+            "{label}"
+        );
+    }
+    assert_eq!(
+        validate_client_data_json(&truncated_escape, CeremonyKind::Create, &CHALLENGE),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+}
+
+#[test]
 fn public_http_admission_rejects_incomplete_and_wrong_required_requests() {
     let invalid_inputs: [(&str, &[u8]); 11] = [
         ("empty", b""),

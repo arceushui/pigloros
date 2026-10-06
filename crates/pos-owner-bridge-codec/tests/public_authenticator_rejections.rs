@@ -223,13 +223,54 @@ fn public_assertion_authenticator_parser_enforces_the_extension_profile(
 }
 
 #[test]
+fn public_assertion_extension_parser_accepts_every_closed_value_class(
+) -> Result<(), OwnerBridgeCodecError> {
+    let extension = extension_map_with_every_closed_value_class();
+    let parsed =
+        parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, &extension))?;
+    assert_eq!(parsed.sign_count(), 9);
+
+    let invalid_extensions: [(&str, &[u8]); 4] = [
+        (
+            "duplicate unsigned nested key",
+            b"\xa1\x61m\xa2\x01\xf4\x01\xf5",
+        ),
+        (
+            "duplicate negative nested key",
+            b"\xa1\x61m\xa2\x20\xf4\x20\xf5",
+        ),
+        ("invalid UTF-8 extension text", b"\xa1\x61s\x61\xff"),
+        ("indefinite extension value", b"\xa1\x61x\x9f"),
+    ];
+    for (label, extension) in invalid_extensions {
+        assert_eq!(
+            parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, extension)),
+            Err(OwnerBridgeCodecError::InvalidPayload),
+            "{label}"
+        );
+    }
+    assert_eq!(
+        parse_assertion_authenticator_data(&assertion_authenticator_data(
+            0x85,
+            b"\xa1\x61x\x58\x18",
+        )),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
+    Ok(())
+}
+
+#[test]
 fn public_cose_canonical_decoder_rejects_alternate_encodings_and_invalid_points(
 ) -> Result<(), OwnerBridgeCodecError> {
     let key = cose_key();
-    assert_eq!(
-        CoseEs256PublicKey::from_canonical_encoding(&key)?.canonical_encoding(),
-        key
-    );
+    let parsed = CoseEs256PublicKey::from_canonical_encoding(&key)?;
+    assert_eq!(parsed.canonical_encoding(), key);
+    assert_eq!(parsed.x(), key[10..42]);
+    assert_eq!(parsed.y(), key[45..]);
+    let sec1 = parsed.uncompressed_sec1_bytes();
+    assert_eq!(sec1[0], 4);
+    assert_eq!(sec1[1..33], key[10..42]);
+    assert_eq!(sec1[33..], key[45..]);
 
     let mut invalid_point = key;
     invalid_point[10..42].fill(0);
@@ -249,6 +290,34 @@ fn public_cose_canonical_decoder_rejects_alternate_encodings_and_invalid_points(
     noncanonical.extend_from_slice(&key[1..]);
     assert_eq!(
         CoseEs256PublicKey::from_canonical_encoding(&noncanonical),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+
+    let mut algorithm_as_bytes = key;
+    algorithm_as_bytes[4] = 0x40;
+    assert_eq!(
+        CoseEs256PublicKey::from_canonical_encoding(&algorithm_as_bytes),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+
+    let mut duplicate_kty = key;
+    duplicate_kty[3] = 1;
+    assert_eq!(
+        CoseEs256PublicKey::from_canonical_encoding(&duplicate_kty),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+
+    let mut duplicate_x = key;
+    duplicate_x[42] = 0x21;
+    assert_eq!(
+        CoseEs256PublicKey::from_canonical_encoding(&duplicate_x),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+
+    let mut non_integer_cose_key = key;
+    non_integer_cose_key[1] = 0x41;
+    assert_eq!(
+        CoseEs256PublicKey::from_canonical_encoding(&non_integer_cose_key),
         Err(OwnerBridgeCodecError::InvalidPayload)
     );
     Ok(())
@@ -286,6 +355,17 @@ fn assertion_authenticator_data(flags: u8, extension: &[u8]) -> Vec<u8> {
     output.push(flags);
     output.extend_from_slice(&9_u32.to_be_bytes());
     output.extend_from_slice(extension);
+    output
+}
+
+fn extension_map_with_every_closed_value_class() -> Vec<u8> {
+    let mut output = Vec::from([
+        0xa9, 0x61, b'u', 0x18, 24, 0x61, b'v', 0x19, 0, 24, 0x61, b'w', 0x1a, 0, 0, 0, 24, 0x61,
+        b'x', 0x1b, 0, 0, 0, 0, 0, 0, 0, 24, 0x61, b'n', 0x38, 24, 0x61, b'b', 0x58, 24,
+    ]);
+    output.extend(core::iter::repeat_n(0, 24));
+    output.extend(b"\x61s\x78\x18abcdefghijklmnopqrstuvwx");
+    output.extend(b"\x61a\x85\x01\x20\xf4\xf5\xf6\x61m\xa3\x01\xf4\x20\xf5\x61q\x61r");
     output
 }
 
