@@ -105,7 +105,7 @@
 //!   unsigned fields once, and the validated canonical encoding encodes them
 //!   twice more. Recovery never re-seals a committed `RCP1` it only
 //!   decodes, so this cost is paid once per committed Tick, plus once per
-//!   call for each re-derived Tick (see **Recovery**).
+//!   call for the re-derived first Tick (see **Recovery**).
 //! - **Recovery.** Recovery reads exactly the Fork Events after the `SIV1`
 //!   commit coordinate through the persisted head with
 //!   [`EventStore::read_bounded`], in pages of at most
@@ -122,18 +122,26 @@
 //!   the persisted head must be the last checkpoint Event, so a foreign or
 //!   unmarked trailing Event is a mismatch, and so are a recovered later Tick
 //!   without a recomputed Event before its checkpoint Event and a recovered
-//!   last Tick past the plan horizon. Every committed `RCP1` is decoded and must be
-//!   exactly this generation's checkpoint of the next Tick at its `Seq`
-//!   (plan, Tick, `Seq`, scheduler position, lists, cursor, and
-//!   provenance). An intermediate checkpoint's chained state is decoded but
-//!   not verified, except for the Tick immediately before the last, whose
-//!   state the last Tick's re-derived `RCP1` chains on. The first Tick's
-//!   `RCP1`, the first later Tick's, and the last Tick's are re-derived from
-//!   the committed Events (at most one read each) and must match byte for
-//!   byte: the first later link binds the first Tick's content and the
-//!   receipt's first-Tick head, and the last link binds the state the next
-//!   Tick chains on. Recovery therefore resumes from the last checkpoint
-//!   without re-hashing every Tick.
+//!   last Tick past the plan horizon. Every committed `RCP1` is decoded and
+//!   must be exactly this generation's checkpoint of the next Tick at its
+//!   `Seq` (plan, Tick, `Seq`, scheduler position, lists, cursor, and
+//!   provenance). The walk buffers the recomputed Events of the Tick it is
+//!   inside, across page boundaries: an honest Tick is at most one batch, so
+//!   a buffer of more than [`MAX_PIPELINE_DRAFTS_PER_BATCH`] - 1 recomputed
+//!   Events (the checkpoint Event takes the last slot) or more than
+//!   [`MAX_PIPELINE_DRAFT_BATCH_BYTES`] payload and Event type bytes is a
+//!   mismatch. At every checkpoint Event it recomputes the
+//!   chained state from the previous verified state, the receipt's epochs,
+//!   the Tick number, and the buffered Events, and requires it to equal the
+//!   state the committed `RCP1` records, so every Tick's state is verified
+//!   in the single walk, with one hash pass per Tick, no extra read, and no
+//!   re-sealing. A rewritten, reordered, or dropped Tick therefore breaks
+//!   the chain and is a mismatch. The first Tick's `RCP1` is re-derived from
+//!   the committed Events (at most one read) and the first later Tick's
+//!   chain links it, so that link binds the first Tick's content and the
+//!   receipt's first-Tick head. The final chained state, which becomes
+//!   the `CFR1` suffix digest, is the verified one, and recovery resumes from
+//!   the last checkpoint.
 //! - **`CFR1` content.** The first Tick is the receipt's first recomputation
 //!   Tick; the suffix digest is the final chained state digest; the
 //!   dependency root is the committed `RCF1` frontier digest, which binds the
@@ -158,15 +166,17 @@
 //!   the next Tick commits, recovery binds only the first Tick's exact Event
 //!   range (the `SIV1` commit coordinate through the receipt's first-Tick
 //!   head); an altered first-Tick Event of that range relies on the store's
-//!   own atomic commit. Once the next Tick commits, its re-derived `RCP1`
-//!   binds the first Tick's content.
-//! - **Intermediate Ticks.** The content and chained state of a Tick between
-//!   the first later Tick and the last one are checked when it is committed,
-//!   not re-hashed on every call; recovery relies on the Event Store never
-//!   mutating a committed Event. The chained state is an unkeyed public
-//!   digest, so it detects inconsistent, not forged, checkpoints: a writer
-//!   that bypasses the coordinator and appends a whole well-formed Tick at
-//!   the head between calls is not distinguished from a committed one.
+//!   own atomic commit. Once the next Tick commits, its chained state
+//!   binds the first Tick's content, and every call then verifies it.
+//! - **Keyed integrity.** The chained state is an unkeyed public digest, so
+//!   recovery detects inconsistent edits, corruption, and buggy adapters, not
+//!   forgery: an adversary who can rewrite Events and the checkpoint payloads
+//!   that chain over them (or a writer that bypasses the coordinator and
+//!   appends a whole well-formed Tick at the head between calls) is not
+//!   distinguished from a committed Tick. Keyed or signed checkpoints are not
+//!   part of this slice. Intermediate Ticks are verified on every call by the
+//!   recovery walk, but only against the chain, never against an independent
+//!   record of what each Tick staged.
 
 use pos_conformance::counterfactual::checkpoint::{
     CheckpointDigestEntryV1, ExogenousCursorV1, RecomputeCheckpointV1,
@@ -380,6 +390,42 @@ struct CheckpointV1 {
     digest: [u8; 32],
 }
 
+/// The recomputed Events of the Tick a recovery walk is inside, carried across
+/// page boundaries until the Tick's checkpoint Event.
+#[derive(Default)]
+struct TickEventsV1 {
+    drafts: Vec<EventDraft>,
+    bytes: usize,
+}
+
+impl TickEventsV1 {
+    /// Buffer one committed Event and report whether the Tick now exceeds one
+    /// batch.
+    ///
+    /// Returns `true` once the buffer is at the count bound or over the byte
+    /// bound, so the Tick cannot be an honest single batch.
+    ///
+    /// That bounds the memory a walk can use. An honest Tick stages at most
+    /// one batch, whose last draft is its checkpoint Event, so it buffers
+    /// fewer than [`MAX_PIPELINE_DRAFTS_PER_BATCH`] Events and at most
+    /// [`MAX_PIPELINE_DRAFT_BATCH_BYTES`] payload and Event type bytes.
+    fn exceeds_batch_after_push(&mut self, event: Event) -> bool {
+        self.bytes = self
+            .bytes
+            .saturating_add(event.payload.len())
+            .saturating_add(event.event_type.as_str().len());
+        self.drafts.push(committed_draft(event));
+        self.drafts.len() >= MAX_PIPELINE_DRAFTS_PER_BATCH
+            || self.bytes > MAX_PIPELINE_DRAFT_BATCH_BYTES
+    }
+
+    /// Hand out the buffered drafts and start the next Tick empty.
+    fn take(&mut self) -> Vec<EventDraft> {
+        self.bytes = 0;
+        std::mem::take(&mut self.drafts)
+    }
+}
+
 /// One Tick step: a closed failure that committed nothing, or a closed error.
 type TickStepV1 = Result<Option<CounterfactualSuffixFailureV1>, CounterfactualSuffixErrorV1>;
 
@@ -507,30 +553,28 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             checkpoints: Vec::new(),
             refs: Vec::new(),
         };
-        let first = self.derived_checkpoint(context, &progress, first_tick, first_head)?;
+        let first = self.first_checkpoint(context, &progress)?;
         progress.advance(first_tick, first_head, first);
         let mut next = first_head.saturating_add(1);
+        let mut tick_events = TickEventsV1::default();
         while next <= head {
             let to = head.min(next.saturating_add(PAGE_EVENTS - 1));
             let page = self.read_page(context.fork(), next, to)?;
-            for (seq, event) in (next..).zip(&page) {
+            let count = page.len() as u64;
+            for (seq, event) in (next..).zip(page) {
                 if event.event_type.as_str() == COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1 {
-                    // Every later Tick recomputes at least one Event before
-                    // its checkpoint Event.
-                    if seq <= progress.head.saturating_add(1) {
-                        return Err(CounterfactualSuffixErrorV1::RecoveryMismatch);
-                    }
                     let tick = progress.tick.saturating_add(1);
+                    let drafts = tick_events.take();
                     let payload = event.payload.as_slice();
-                    let checkpoint = if tick == first_tick.saturating_add(1) || seq == head {
-                        self.linked_checkpoint(context, &progress, tick, seq, payload)?
-                    } else {
-                        committed_checkpoint(context, tick, seq.saturating_sub(1), payload)?
-                    };
+                    let checkpoint =
+                        verified_checkpoint(context, &progress, tick, seq, payload, &drafts)?;
                     progress.advance(tick, seq, checkpoint);
+                } else if tick_events.exceeds_batch_after_push(event) {
+                    // No honest Tick has more Events or bytes than one batch.
+                    return Err(CounterfactualSuffixErrorV1::RecoveryMismatch);
                 }
             }
-            next = next.saturating_add(page.len() as u64);
+            next = next.saturating_add(count);
         }
         // Every Event after the first Tick belongs to a checkpointed Tick.
         if progress.head == head {
@@ -581,42 +625,22 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         }
     }
 
-    /// Re-derive the `RCP1` of `tick`, whose committed Events follow
-    /// `previous` through `last_seq`.
-    fn derived_checkpoint(
+    /// Re-derive the first Tick's `RCP1`, whose committed Events follow
+    /// `previous` through the receipt's first-Tick head.
+    fn first_checkpoint(
         &self,
         context: &SuffixContextV1<'_>,
         previous: &ProgressV1,
-        tick: u64,
-        last_seq: u64,
     ) -> Result<CheckpointV1, CounterfactualSuffixErrorV1> {
         let from = previous.head.saturating_add(1);
+        let last_seq = context.receipt.first_tick_head().as_u64();
         let drafts: Vec<EventDraft> = self
             .read_exact(context.fork(), from, last_seq)?
             .into_iter()
             .map(committed_draft)
             .collect();
+        let tick = context.receipt.first_tick();
         next_checkpoint(context, previous.state, tick, &drafts, last_seq)
-    }
-
-    /// Re-derive the `RCP1` of the Tick whose checkpoint Event is `seq` and
-    /// require the committed `payload` to be exactly it.
-    fn linked_checkpoint(
-        &self,
-        context: &SuffixContextV1<'_>,
-        previous: &ProgressV1,
-        tick: u64,
-        seq: u64,
-        payload: &[u8],
-    ) -> Result<CheckpointV1, CounterfactualSuffixErrorV1> {
-        self.derived_checkpoint(context, previous, tick, seq.saturating_sub(1))
-            .and_then(|checkpoint| {
-                if checkpoint.bytes.as_slice() == payload {
-                    Ok(checkpoint)
-                } else {
-                    Err(CounterfactualSuffixErrorV1::RecoveryMismatch)
-                }
-            })
     }
 
     /// Stage, checkpoint, and atomically commit the next Tick under the
@@ -887,6 +911,34 @@ fn committed_checkpoint(
         .ok_or(CounterfactualSuffixErrorV1::RecoveryMismatch)
 }
 
+/// Verify the committed `RCP1` of the Tick ending with checkpoint Event `seq`.
+///
+/// It must be exactly this generation's checkpoint, and its chained state must
+/// follow from the Tick's recomputed `drafts` and the verified state of the
+/// Tick before it. A Tick without a recomputed Event is rejected, because
+/// every Tick commits at least one.
+fn verified_checkpoint(
+    context: &SuffixContextV1<'_>,
+    previous: &ProgressV1,
+    tick: u64,
+    seq: u64,
+    payload: &[u8],
+    drafts: &[EventDraft],
+) -> Result<CheckpointV1, CounterfactualSuffixErrorV1> {
+    if drafts.is_empty() {
+        return Err(CounterfactualSuffixErrorV1::RecoveryMismatch);
+    }
+    let last = seq.saturating_sub(1);
+    committed_checkpoint(context, tick, last, payload).and_then(|checkpoint| {
+        let state = chain_state(&previous.state, &context.receipt.facts(), tick, drafts);
+        if checkpoint.state == state {
+            Ok(checkpoint)
+        } else {
+            Err(CounterfactualSuffixErrorV1::RecoveryMismatch)
+        }
+    })
+}
+
 /// The strongest claim CFR1 permits for an incomplete suffix: only an exact
 /// claim is weakened, to `StructuralOnly`; every other claim is kept.
 const fn incomplete_claim(claim: ReplayClaimV1) -> ReplayClaimV1 {
@@ -962,4 +1014,63 @@ fn finish(
             failure,
         })
         .or(Err(CounterfactualSuffixErrorV1::ArtifactEncoding))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use pos_core::{EventId, SchemaVersion, WallTime};
+
+    use super::*;
+
+    /// One committed Event of type `x` whose payload is `payload_len` bytes.
+    fn event_of(payload_len: usize) -> Event {
+        Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("x"),
+            payload: CanonicalBytes::from_vec(vec![0; payload_len]),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        }
+    }
+
+    #[test]
+    fn the_count_bound_leaves_the_checkpoint_event_the_last_slot() {
+        let mut buffer = TickEventsV1::default();
+        for _ in 1..MAX_PIPELINE_DRAFTS_PER_BATCH {
+            assert!(!buffer.exceeds_batch_after_push(event_of(0)));
+        }
+        assert_eq!(buffer.drafts.len(), MAX_PIPELINE_DRAFTS_PER_BATCH - 1);
+        assert!(buffer.exceeds_batch_after_push(event_of(0)));
+    }
+
+    #[test]
+    fn the_byte_bound_counts_payload_and_event_type_bytes_exactly() {
+        let mut buffer = TickEventsV1::default();
+        // The Event type adds one byte: exactly the bound is still one batch.
+        let at_bound = event_of(MAX_PIPELINE_DRAFT_BATCH_BYTES - 1);
+        assert!(!buffer.exceeds_batch_after_push(at_bound));
+        assert_eq!(buffer.bytes, MAX_PIPELINE_DRAFT_BATCH_BYTES);
+        assert!(buffer.exceeds_batch_after_push(event_of(0)));
+    }
+
+    #[test]
+    fn taking_the_drafts_starts_the_next_tick_empty() {
+        let mut buffer = TickEventsV1::default();
+        let over_bound = event_of(MAX_PIPELINE_DRAFT_BATCH_BYTES);
+        assert!(buffer.exceeds_batch_after_push(over_bound));
+        assert_eq!(buffer.take().len(), 1);
+        assert!(buffer.drafts.is_empty());
+        assert_eq!(buffer.bytes, 0);
+        let at_bound = event_of(MAX_PIPELINE_DRAFT_BATCH_BYTES - 1);
+        assert!(!buffer.exceeds_batch_after_push(at_bound));
+    }
 }
