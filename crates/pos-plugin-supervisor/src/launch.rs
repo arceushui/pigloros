@@ -23,6 +23,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::Duration;
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
+use pos_crypto::plugin_worker_ipc::MAX_WORKER_COMPONENT_BYTES_V1;
 use rustix::process::{prlimit, Pid, Resource, Rlimit};
 
 use crate::frame::WorkerFrameLimitsV1;
@@ -48,12 +49,12 @@ const WORKER_RUNTIME_DATA_BYTES: u64 = 512 * 1_048_576;
 /// CPU seconds granted beyond the whole watchdog seconds, so the wall-time
 /// watchdog, not the CPU ceiling, stops a long invocation.
 const CPU_MARGIN_SECONDS: u64 = 2;
-/// File-size ceiling: the worker writes no file.
+/// File bytes reserved for the coverage profile: none in production builds.
 #[cfg(not(coverage))]
-const FILE_SIZE_BYTES: u64 = 0;
-/// File-size ceiling: coverage builds let the worker write its profile.
+const PROFILE_FILE_BYTES: u64 = 0;
+/// File bytes reserved for the coverage profile an instrumented worker writes.
 #[cfg(coverage)]
-const FILE_SIZE_BYTES: u64 = 1 << 30;
+const PROFILE_FILE_BYTES: u64 = 1 << 30;
 
 /// The absolute path of the worker program the supervisor launches.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,6 +92,11 @@ pub struct WorkerResourceCeilingsV1 {
     /// `RLIMIT_AS` ceiling would refuse those reservations.
     pub data_bytes: u64,
     /// `RLIMIT_FSIZE`, in bytes.
+    ///
+    /// The worker writes no regular file, but Wasmtime writes each
+    /// copy-on-write linear-memory image into an in-memory file, which this
+    /// ceiling also bounds. It is the effective guest memory plus the largest
+    /// Component.
     pub file_size_bytes: u64,
     /// `RLIMIT_CORE`, in bytes: no core dump carries guest memory.
     pub core_bytes: u64,
@@ -109,7 +115,10 @@ impl WorkerResourceCeilingsV1 {
                 .memory_bytes
                 .saturating_add(2 * WorkerFrameLimitsV1::REQUEST_BYTES as u64)
                 .saturating_add(WORKER_RUNTIME_DATA_BYTES),
-            file_size_bytes: FILE_SIZE_BYTES,
+            file_size_bytes: limits
+                .memory_bytes
+                .saturating_add(MAX_WORKER_COMPONENT_BYTES_V1 as u64)
+                .saturating_add(PROFILE_FILE_BYTES),
             core_bytes: 0,
         }
     }
@@ -225,12 +234,13 @@ mod tests {
         assert_eq!(ceilings.cpu_seconds, 5);
         let request = WorkerFrameLimitsV1::REQUEST_BYTES as u64;
         assert_eq!(ceilings.data_bytes, 65_536 + 2 * request + 512 * 1_048_576);
-        assert_eq!(ceilings.file_size_bytes, FILE_SIZE_BYTES);
+        let file_size = 65_536 + 33_554_432 + PROFILE_FILE_BYTES;
+        assert_eq!(ceilings.file_size_bytes, file_size);
         assert_eq!(ceilings.core_bytes, 0);
         let entries = ceilings.entries();
         assert_eq!(
             entries.map(|(_, value)| value),
-            [5, ceilings.data_bytes, FILE_SIZE_BYTES, 0]
+            [5, ceilings.data_bytes, file_size, 0]
         );
         assert_eq!(entries[0].0, Resource::Cpu);
         assert_eq!(entries[1].0, Resource::Data);

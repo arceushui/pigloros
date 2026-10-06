@@ -36,7 +36,7 @@ use crate::frame::{read_frame, require_end, write_frame, FrameFaultV1, WorkerFra
 use crate::launch::{launch, LaunchedWorker, WorkerProgramV1, WorkerResourceCeilingsV1};
 
 /// The longest wall-time watchdog a supervisor accepts.
-pub const MAX_WORKER_WATCHDOG: Duration = Duration::from_secs(3_600);
+pub const MAX_WORKER_WATCHDOG: Duration = Duration::from_hours(1);
 /// Interval at which the supervisor checks whether a replied worker exited.
 const EXIT_POLL: Duration = Duration::from_millis(1);
 
