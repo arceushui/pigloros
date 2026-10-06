@@ -146,6 +146,7 @@ fn comparison_and_replay_of_a_fork_fail_closed_on_a_frozen_ancestor() {
     hosted.host.freeze_timeline_for_test(hosted.root);
     assert!(is_frozen(&hosted.compare(forks)));
     assert!(is_frozen(&hosted.compare([forks[0], unrelated[0]])));
+    assert!(is_frozen(&hosted.compare([unrelated[0], forks[0]])));
     assert!(is_frozen(&hosted.replay(forks[1])));
 
     crate::test_support::test_ok(hosted.compare(unrelated));
