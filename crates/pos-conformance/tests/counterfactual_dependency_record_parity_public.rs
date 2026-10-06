@@ -198,7 +198,10 @@ fn core_node(node: &DependencyNodeV1) -> TestResult<DependencyNodeRecordV1> {
 /// Record `nodes` in the given order at the latest of their Ticks; root-class
 /// nodes may precede the record's Tick.
 fn core_record(nodes: &[DependencyNodeV1]) -> TestResult<RecordResult> {
-    let rows = nodes.iter().map(core_node).collect::<TestResult<Vec<_>>>()?;
+    let rows = nodes
+        .iter()
+        .map(core_node)
+        .collect::<TestResult<Vec<_>>>()?;
     let tick = nodes.iter().map(|node| node.tick).max().unwrap_or(0);
     Ok(TickDependencyRecordV1::try_new(
         tick,

@@ -6,8 +6,7 @@
 use std::collections::BTreeSet;
 
 use pos_core::counterfactual_store::test_fixtures::{
-    frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, text_field,
-    uint,
+    frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, text_field, uint,
 };
 use pos_core::{
     CanonicalBytes, CounterfactualAdapterSealV1, CounterfactualBasisV1,
@@ -22,8 +21,9 @@ use pos_core::{
     Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1, RecordedDependencyClassV1,
     RecordedNodeOriginV1, Seq, SuffixInvalidationBytesV1, TickDependencyRecordV1, TimelineId,
     MAX_DEPENDENCY_EDGE_BYTES_V1, MAX_DEPENDENCY_NODE_INPUTS_V1, MAX_DEPENDENCY_OWNER_ID_BYTES_V1,
-    MAX_DEPENDENCY_PAGE_ROWS_V1, MAX_RECORDED_DEPENDENCY_EDGES_V1, MAX_RECORDED_DEPENDENCY_NODES_V1,
-    MAX_TICK_DEPENDENCY_EDGES_V1, MAX_TICK_DEPENDENCY_EDGE_BYTES_V1, MAX_TICK_DEPENDENCY_NODES_V1,
+    MAX_DEPENDENCY_PAGE_ROWS_V1, MAX_RECORDED_DEPENDENCY_EDGES_V1,
+    MAX_RECORDED_DEPENDENCY_NODES_V1, MAX_TICK_DEPENDENCY_EDGES_V1,
+    MAX_TICK_DEPENDENCY_EDGE_BYTES_V1, MAX_TICK_DEPENDENCY_NODES_V1,
 };
 use ulid::Ulid;
 
@@ -98,7 +98,13 @@ fn class_row(
     origin: RecordedNodeOriginV1,
     inputs: Vec<Hash>,
 ) -> NodeRow {
-    ok(NodeRow::try_new(coordinate, class, origin, inputs, hash(99)))
+    ok(NodeRow::try_new(
+        coordinate,
+        class,
+        origin,
+        inputs,
+        hash(99),
+    ))
 }
 
 fn node_row(coordinate: Coordinate, origin: RecordedNodeOriginV1, inputs: Vec<Hash>) -> NodeRow {
@@ -321,8 +327,16 @@ fn node_records_bound_and_order_their_inputs() {
         (over, hash(99), DepError::FieldOutOfBounds),
         (vec![Hash::zero()], hash(99), DepError::FieldOutOfBounds),
         (vec![hash(1)], Hash::zero(), DepError::ProvenanceMissing),
-        (vec![hash(2), hash(1)], hash(99), DepError::NonCanonicalOrder),
-        (vec![hash(1), hash(1)], hash(99), DepError::DuplicateIdentity),
+        (
+            vec![hash(2), hash(1)],
+            hash(99),
+            DepError::NonCanonicalOrder,
+        ),
+        (
+            vec![hash(1), hash(1)],
+            hash(99),
+            DepError::DuplicateIdentity,
+        ),
     ];
     for (inputs, provenance, expected) in cases {
         assert_eq!(err(make(inputs, provenance)), expected);
@@ -429,7 +443,11 @@ fn edge_fields_must_match_the_supplied_coordinates() {
     };
     assert_eq!(err(verify(&other_source)), DepError::BindingMismatch);
     let long_form_tick = EdgeParts {
-        consumer: [vec![0x86, 0x18, 17], node_bytes(&coord(17, "a", 1))[2..].to_vec()].concat(),
+        consumer: [
+            vec![0x86, 0x18, 17],
+            node_bytes(&coord(17, "a", 1))[2..].to_vec(),
+        ]
+        .concat(),
         ..valid_parts()
     };
     assert_eq!(err(verify(&long_form_tick)), DepError::BindingMismatch);
@@ -557,12 +575,7 @@ fn numbered_nodes(count: usize, inputs: &[Hash]) -> Vec<NodeRow> {
 fn node_count_is_bounded_at_the_limit() {
     let at_limit = numbered_nodes(MAX_TICK_DEPENDENCY_NODES_V1, &[]);
     let over = vec![at_limit[0].clone(); MAX_TICK_DEPENDENCY_NODES_V1 + 1];
-    let record = ok(TickRecord::try_new(
-        17,
-        PROVISIONAL,
-        at_limit,
-        Vec::new(),
-    ));
+    let record = ok(TickRecord::try_new(17, PROVISIONAL, at_limit, Vec::new()));
     assert_eq!(record.nodes().len(), MAX_TICK_DEPENDENCY_NODES_V1);
     assert_eq!(
         err(TickRecord::try_new(17, PROVISIONAL, over, Vec::new())),
@@ -593,12 +606,7 @@ fn edge_count_is_bounded_at_the_limit() {
         .collect();
     assert_eq!(edges.len(), MAX_TICK_DEPENDENCY_EDGES_V1);
     let over = vec![edges[0].clone(); MAX_TICK_DEPENDENCY_EDGES_V1 + 1];
-    let record = ok(TickRecord::try_new(
-        17,
-        PROVISIONAL,
-        nodes.clone(),
-        edges,
-    ));
+    let record = ok(TickRecord::try_new(17, PROVISIONAL, nodes.clone(), edges));
     assert_eq!(record.uncovered_input_count(), 0);
     assert_eq!(
         err(TickRecord::try_new(17, PROVISIONAL, nodes, over)),
@@ -1241,7 +1249,9 @@ impl FakeStore {
         if let Some(record) = record {
             self.admit(record, None)?;
         }
-        let outcome = self.basis().committed_tick(&SEAL, self.head_after(drafts))?;
+        let outcome = self
+            .basis()
+            .committed_tick(&SEAL, self.head_after(drafts))?;
         self.head = self.head_after(drafts);
         if let Some(record) = record {
             self.record(record, self.generation);
@@ -1416,10 +1426,9 @@ fn tick_18_record() -> TickRecord {
 
 fn committed_store() -> FakeStore {
     let mut store = FakeStore::new();
-    let outcome = ok(store.commit_counterfactual_invalidation_with_dependencies(
-        &command(),
-        &sample_record(),
-    ));
+    let outcome =
+        ok(store
+            .commit_counterfactual_invalidation_with_dependencies(&command(), &sample_record()));
     assert!(matches!(
         outcome,
         CounterfactualInvalidationOutcomeV1::Committed(_)
@@ -1452,10 +1461,9 @@ fn invalidation_records_its_dependencies_under_the_new_generation() {
 fn conflicting_or_misplaced_invalidations_record_nothing() {
     let mut store = FakeStore::new();
     store.facts.trust_epoch = 99;
-    let outcome = ok(store.commit_counterfactual_invalidation_with_dependencies(
-        &command(),
-        &sample_record(),
-    ));
+    let outcome =
+        ok(store
+            .commit_counterfactual_invalidation_with_dependencies(&command(), &sample_record()));
     assert_eq!(
         outcome,
         CounterfactualInvalidationOutcomeV1::InvalidationConflict(
