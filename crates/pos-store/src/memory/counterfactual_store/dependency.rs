@@ -1,0 +1,443 @@
+//! `MemoryStore` adapter for the ADR-064 counterfactual dependency record.
+//!
+//! The recording methods are thin compositions of the counterfactual write
+//! path in the parent module: they validate the record against the stored
+//! set, run the existing recheck/stage/install commit, and add the record's
+//! rows only after that commit installed. Reads page the stored rows through
+//! [`DependencyPageV1`].
+//!
+//! # ADR gap decisions
+//!
+//! - **Storage layout.** Provisional rows live in the Fork's counterfactual
+//!   state, in one set per Fork generation: the rows keyed by their own page
+//!   cursor (the canonical node and `IDP1` edge order, so a read is a keyset
+//!   range scan and never depends on insertion order), the artifact digests
+//!   of the nodes, the largest persisted record Tick, and the stored row
+//!   counts. A dependency write keeps only the current generation's set, so
+//!   the rows of a quarantined generation, which no read can reach, are
+//!   dropped by the next write. The Fork's receipt of the current generation
+//!   persists its first Tick, which bounds the first record of the set.
+//! - **Atomicity is structural.** Every fallible step (the record checks, the
+//!   basis recheck, staging, and the receipt) runs before anything is
+//!   installed, and the rows are added by an infallible step that runs only
+//!   after the Tick's Events and the generation were installed. A conflict, an
+//!   error, or an injected failure therefore leaves the Events, the
+//!   generation, and the dependency rows unchanged. The same holds for
+//!   `OutcomeUnknown`, which `MemoryStore` never produces.
+//! - **Check order.** An invalidation checks its record before the basis, as
+//!   the `SQLite` adapter does, so a misplaced record is a `BindingMismatch`
+//!   even for a stale basis. A later Tick rechecks the basis first, so a stale
+//!   basis is `Stale` even for a misplaced record; the record is then checked
+//!   in the order provisional, Tick, node identity, and set capacity.
+//! - **No capacity check for an invalidation.** The set of a new generation
+//!   is empty and a record is capped far below the set bounds, so the
+//!   capacity check of the first record cannot fail and is not made. Later
+//!   records check capacity against the stored counts.
+//! - **Generation 0 takes no record.** A Fork that was published but never
+//!   invalidated has no first Tick to bound its first record, so a later Tick
+//!   with a record at generation 0 is a `BindingMismatch`; the dependency set
+//!   of a generation starts at an invalidation.
+//! - **Committed prefix.** The committed prefix of a parent Timeline is kept
+//!   once per parent Timeline, outside any Fork, and served as
+//!   [`DependencyReadScopeV1::ParentPrefix`] up to its `through_tick`. No write
+//!   path exists for it yet (#554), so it stays empty in production and the
+//!   unit tests seed it directly. Deleting the parent Timeline purges it.
+//! - **Reads and fences.** A parent-prefix read of an unknown or concealed
+//!   Timeline is `ForkNotFound`, and one of an existing Timeline without rows
+//!   is an empty page. It runs under that Timeline's own erasure read fence
+//!   including its inherited scopes. A Fork-generation read runs under the
+//!   Fork's read fence like every other counterfactual read and is
+//!   `ForkNotFound` for a Fork that is not visible and published, and
+//!   `MixedForkGeneration` for any generation but the current one. Both fail
+//!   closed without a bound erasure gate; writes run under the write fence
+//!   and the admitted-Fork guard of the Tick append they compose.
+//! - **Purge.** Deleting a Fork drops its dependency sets with the rest of its
+//!   counterfactual state (the generation floor stays), so a re-created Fork
+//!   starts with no rows.
+//! - **Corrupt rows.** A stored row that fails page re-validation reads back
+//!   as `CorruptState`; a request cursor of the other row kind is the
+//!   caller's `BindingMismatch`.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
+
+use pos_core::{
+    CounterfactualBasisV1, CounterfactualDependencyErrorV1, CounterfactualDependencyReadPortV1,
+    CounterfactualDependencyRecordingPortV1, CounterfactualInvalidationCommandV1,
+    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualTickOutcomeV1,
+    DependencyEdgeRecordV1, DependencyNodeRecordV1, DependencyPageCursorV1,
+    DependencyPageRequestV1, DependencyPageV1, DependencyPagedRowV1, DependencyReadScopeV1,
+    ErasureProtectedOperationV1, ForkGenerationV1, Hash, PipelineDraftBatchV1,
+    RecordedSetCountsV1, TickDependencyRecordV1, TimelineId,
+};
+
+use super::{fenced_result, CounterfactualForkStateV1};
+use crate::memory::MemoryStore;
+
+type StoreError = CounterfactualStoreErrorV1;
+/// Rows are keyed by their own page cursor: the canonical coordinate order of
+/// nodes and the `IDP1` edge-list order of edges.
+type RowKey = DependencyPageCursorV1;
+/// Picks the node rows or the edge rows of a set.
+type Select<T> = fn(&DependencyRowsV1) -> &BTreeMap<RowKey, T>;
+
+const READ: ErasureProtectedOperationV1 = ErasureProtectedOperationV1::Read;
+const APPEND: ErasureProtectedOperationV1 = ErasureProtectedOperationV1::Append;
+
+/// The rows of a Timeline or Fork generation that has none.
+static NO_ROWS: DependencyRowsV1 = DependencyRowsV1::new();
+/// The set of a generation that has no record.
+static NO_SET: ForkDependencySetV1 = ForkDependencySetV1::new();
+
+/// The nodes and edges of one recorded set.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(in crate::memory) struct DependencyRowsV1 {
+    nodes: BTreeMap<RowKey, DependencyNodeRecordV1>,
+    edges: BTreeMap<RowKey, DependencyEdgeRecordV1>,
+}
+
+/// Each row with the cursor that keys it.
+fn keyed<T: DependencyPagedRowV1 + Clone>(rows: &[T]) -> Vec<(RowKey, T)> {
+    rows.iter().map(|r| (r.cursor(), r.clone())).collect()
+}
+
+impl DependencyRowsV1 {
+    const fn new() -> Self {
+        Self {
+            nodes: BTreeMap::new(),
+            edges: BTreeMap::new(),
+        }
+    }
+
+    /// Add the rows of one record. Infallible.
+    fn extend(&mut self, record: &TickDependencyRecordV1) {
+        self.nodes.extend(keyed(record.nodes()));
+        self.edges.extend(keyed(record.edges()));
+    }
+}
+
+/// The provisional rows of one Fork generation.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct ForkDependencySetV1 {
+    rows: DependencyRowsV1,
+    /// Artifact digests of the recorded nodes.
+    digests: BTreeSet<Hash>,
+    /// Largest Tick of a persisted record, kept apart from the node Ticks.
+    last_record_tick: Option<u64>,
+    /// Stored row counts of the set.
+    counts: RecordedSetCountsV1,
+}
+
+impl ForkDependencySetV1 {
+    const fn new() -> Self {
+        Self {
+            rows: DependencyRowsV1::new(),
+            digests: BTreeSet::new(),
+            last_record_tick: None,
+            counts: RecordedSetCountsV1 {
+                nodes: 0,
+                edges: 0,
+                inputs: 0,
+            },
+        }
+    }
+
+    /// Check a later record against the set and the generation's first Tick.
+    fn admit(
+        &self,
+        first_tick: Option<u64>,
+        record: &TickDependencyRecordV1,
+    ) -> Result<(), StoreError> {
+        record
+            .ensure_provisional()
+            .and_then(|()| self.ensure_tick_order(first_tick, record.tick()))
+            .and_then(|()| self.ensure_unrecorded(record))
+            .and_then(|()| self.ensure_capacity(record))
+    }
+
+    /// The Tick must be strictly after the last record's, or, in an empty
+    /// set, not before the generation's first Tick.
+    fn ensure_tick_order(&self, first_tick: Option<u64>, tick: u64) -> Result<(), StoreError> {
+        let last = self.last_record_tick;
+        let least = last.map_or(first_tick, |recorded| recorded.checked_add(1));
+        let fits = least.is_some_and(|floor| tick >= floor);
+        fits.then_some(()).ok_or(StoreError::BindingMismatch)
+    }
+
+    /// No node may reuse a recorded position key or artifact digest.
+    fn ensure_unrecorded(&self, record: &TickDependencyRecordV1) -> Result<(), StoreError> {
+        let repeats = record.nodes().iter().any(|row| self.records(row));
+        if repeats {
+            Err(StoreError::DuplicateIdentity)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Whether the set holds the node's position key or artifact digest.
+    fn records(&self, row: &DependencyNodeRecordV1) -> bool {
+        self.digests.contains(&row.coordinate().artifact_digest())
+            || self.rows.nodes.contains_key(&row.cursor())
+    }
+
+    fn ensure_capacity(&self, record: &TickDependencyRecordV1) -> Result<(), StoreError> {
+        record
+            .ensure_set_capacity(self.counts)
+            .map_err(StoreError::from)
+    }
+
+    /// Add an admitted record. Infallible.
+    fn insert(&mut self, record: &TickDependencyRecordV1) {
+        self.rows.extend(record);
+        for row in record.nodes() {
+            self.digests.insert(row.coordinate().artifact_digest());
+        }
+        let counts = self.counts;
+        self.counts = RecordedSetCountsV1 {
+            nodes: counts.nodes.saturating_add(record.nodes().len()),
+            edges: counts.edges.saturating_add(record.edges().len()),
+            inputs: counts.inputs.saturating_add(record.declared_input_count()),
+        };
+        self.last_record_tick = Some(record.tick());
+    }
+}
+
+impl CounterfactualForkStateV1 {
+    /// Check a record against the set of the current generation, whose
+    /// receipt persists its first Tick.
+    fn admit_dependencies(&self, record: &TickDependencyRecordV1) -> Result<(), StoreError> {
+        let receipt = self.receipts.get(&self.generation);
+        let first_tick = receipt.map(|persisted| persisted.first_tick);
+        let set = self.dependencies.get(&self.generation);
+        set.unwrap_or(&NO_SET).admit(first_tick, record)
+    }
+
+    /// Record under the current generation and drop the other generations.
+    fn record_dependencies(&mut self, record: &TickDependencyRecordV1) {
+        let generation = self.generation;
+        self.dependencies.retain(|kept, _| *kept == generation);
+        let set = self.dependencies.entry(generation).or_default();
+        set.insert(record);
+    }
+
+    /// One page of the current generation's rows, or of `at` if it is not.
+    fn fork_page<T: DependencyPagedRowV1 + Clone>(
+        &self,
+        at: ForkGenerationV1,
+        request: &DependencyPageRequestV1,
+        select: Select<T>,
+    ) -> Result<DependencyPageV1<T>, StoreError> {
+        let current = request.scope().ensure_current(self.generation);
+        current.and_then(|()| {
+            let set = self.dependencies.get(&at.generation);
+            let rows = set.map_or(&NO_ROWS, |recorded| &recorded.rows);
+            page_after(select(rows), request)
+        })
+    }
+}
+
+/// The first record of an invalidation: provisional and at its first Tick.
+fn admit_first(first_tick: u64, record: &TickDependencyRecordV1) -> Result<(), StoreError> {
+    let at_first = record.tick() == first_tick;
+    let tick_check = at_first.then_some(()).ok_or(StoreError::BindingMismatch);
+    record.ensure_provisional().and_then(|()| tick_check)
+}
+
+/// Page the rows after the request cursor and within its Tick bound.
+fn page_after<T: DependencyPagedRowV1 + Clone>(
+    rows: &BTreeMap<RowKey, T>,
+    request: &DependencyPageRequestV1,
+) -> Result<DependencyPageV1<T>, StoreError> {
+    let through = request.scope().through_tick().unwrap_or(u64::MAX);
+    let after = request.after().cloned();
+    let start = after.map_or(Bound::Unbounded, Bound::Excluded);
+    let limit = request.limit().saturating_add(1);
+    let later = rows.range((start, Bound::Unbounded));
+    let within = later.take_while(|(cursor, _)| cursor.tick() <= through);
+    let window: Vec<T> = within.take(limit).map(|(_, row)| row.clone()).collect();
+    DependencyPageV1::from_ordered(request, &window)
+        .map_err(StoreError::from)
+        .and_then(|page| revalidated(request, &page))
+}
+
+/// Re-validate a page of stored rows; a failure is corrupt state, not a
+/// caller fault.
+fn revalidated<T: DependencyPagedRowV1 + Clone>(
+    request: &DependencyPageRequestV1,
+    page: &DependencyPageV1<T>,
+) -> Result<DependencyPageV1<T>, StoreError> {
+    let items = page.items().to_vec();
+    DependencyPageV1::try_new(request, items, page.next().cloned())
+        .or(Err(CounterfactualDependencyErrorV1::READ_BACK_FAULT))
+}
+
+impl MemoryStore {
+    fn admit_first_record(
+        &self,
+        command: &CounterfactualInvalidationCommandV1,
+        record: &TickDependencyRecordV1,
+    ) -> Result<(), StoreError> {
+        let state = self.counterfactual_fork(command.fork());
+        state.and_then(|_| admit_first(command.first_tick(), record))
+    }
+
+    fn admit_later_record(
+        &self,
+        fork: TimelineId,
+        record: &TickDependencyRecordV1,
+    ) -> Result<(), StoreError> {
+        let state = self.counterfactual_fork(fork);
+        state.and_then(|persisted| persisted.admit_dependencies(record))
+    }
+
+    /// Add a record to the Fork's current generation. Infallible.
+    fn install_dependencies(&mut self, fork: TimelineId, record: &TickDependencyRecordV1) {
+        let install = |state: &mut CounterfactualForkStateV1| state.record_dependencies(record);
+        let forks = &mut self.counterfactual_forks;
+        forks.get_mut(&fork).into_iter().for_each(install);
+    }
+
+    /// Admit the first record, commit the invalidation, and record the rows
+    /// under the new generation only if it committed.
+    fn commit_recorded(
+        &mut self,
+        command: &CounterfactualInvalidationCommandV1,
+        record: &TickDependencyRecordV1,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, StoreError> {
+        let admitted = self.admit_first_record(command, record);
+        let committed = admitted.and_then(|()| self.commit_visible_counterfactual(command));
+        if let Ok(CounterfactualInvalidationOutcomeV1::Committed(_)) = &committed {
+            self.install_dependencies(command.fork(), record);
+        }
+        committed
+    }
+
+    /// Recheck the basis, admit the record, append the Tick, and record the
+    /// rows only after it installed.
+    fn append_recorded(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        record: &TickDependencyRecordV1,
+    ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
+        let persisted = self.persisted_counterfactual_basis(fork)?;
+        if let Some(conflict) = expected.first_conflict(&persisted) {
+            return Ok(CounterfactualTickOutcomeV1::Stale(conflict));
+        }
+        self.admit_later_record(fork, record)?;
+        // The basis was rechecked above, so an `Ok` append is the committed Tick.
+        let appended = self.append_visible_counterfactual_tick(fork, expected, drafts);
+        appended.inspect(|_| self.install_dependencies(fork, record))
+    }
+
+    fn prefix_rows(&self, parent: TimelineId) -> &DependencyRowsV1 {
+        self.dependency_prefixes.get(&parent).unwrap_or(&NO_ROWS)
+    }
+
+    fn prefix_page<T: DependencyPagedRowV1 + Clone>(
+        &self,
+        parent: TimelineId,
+        request: &DependencyPageRequestV1,
+        select: Select<T>,
+    ) -> Result<DependencyPageV1<T>, StoreError> {
+        page_after(select(self.prefix_rows(parent)), request)
+    }
+
+    fn fork_page<T: DependencyPagedRowV1 + Clone>(
+        &self,
+        at: ForkGenerationV1,
+        request: &DependencyPageRequestV1,
+        select: Select<T>,
+    ) -> Result<DependencyPageV1<T>, StoreError> {
+        let state = self.counterfactual_fork(at.fork);
+        state.and_then(|persisted| persisted.fork_page(at, request, select))
+    }
+
+    fn read_prefix_page<T: DependencyPagedRowV1 + Clone>(
+        &self,
+        parent: TimelineId,
+        request: &DependencyPageRequestV1,
+        select: Select<T>,
+    ) -> Result<DependencyPageV1<T>, StoreError> {
+        let read = self.with_erasure_read_fence(parent, READ, |store| {
+            store
+                .ensure_generic_timeline_visibility(parent)
+                .and_then(|()| store.authorize_inherited_scopes(parent, READ))
+                .map(|()| store.prefix_page(parent, request, select))
+        });
+        fenced_result(read)
+    }
+
+    fn read_fork_page<T: DependencyPagedRowV1 + Clone>(
+        &self,
+        at: ForkGenerationV1,
+        request: &DependencyPageRequestV1,
+        select: Select<T>,
+    ) -> Result<DependencyPageV1<T>, StoreError> {
+        let read = self.with_erasure_read_fence(at.fork, READ, |store| {
+            Ok(store.fork_page(at, request, select))
+        });
+        fenced_result(read)
+    }
+
+    fn read_dependency_page<T: DependencyPagedRowV1 + Clone>(
+        &self,
+        request: &DependencyPageRequestV1,
+        select: Select<T>,
+    ) -> Result<DependencyPageV1<T>, StoreError> {
+        match request.scope() {
+            DependencyReadScopeV1::ParentPrefix { timeline, .. } => {
+                self.read_prefix_page(timeline, request, select)
+            }
+            DependencyReadScopeV1::ForkGeneration(at) => self.read_fork_page(at, request, select),
+        }
+    }
+}
+
+impl CounterfactualDependencyRecordingPortV1 for MemoryStore {
+    fn commit_counterfactual_invalidation_with_dependencies(
+        &mut self,
+        command: &CounterfactualInvalidationCommandV1,
+        record: &TickDependencyRecordV1,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1> {
+        let fork = command.fork();
+        let write = self.with_erasure_fence(fork, APPEND, |store| {
+            store
+                .ensure_generic_fork_append_is_rejected(fork)
+                .map(|()| store.commit_recorded(command, record))
+        });
+        fenced_result(write)
+    }
+
+    fn append_counterfactual_tick_with_dependencies(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        record: &TickDependencyRecordV1,
+    ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
+        let write = self.with_erasure_fence(fork, APPEND, |store| {
+            store
+                .ensure_generic_fork_append_is_rejected(fork)
+                .map(|()| store.append_recorded(fork, expected, drafts, record))
+        });
+        fenced_result(write)
+    }
+}
+
+impl CounterfactualDependencyReadPortV1 for MemoryStore {
+    fn read_dependency_nodes(
+        &self,
+        request: &DependencyPageRequestV1,
+    ) -> Result<DependencyPageV1<DependencyNodeRecordV1>, CounterfactualStoreErrorV1> {
+        self.read_dependency_page(request, |rows| &rows.nodes)
+    }
+
+    fn read_dependency_edges(
+        &self,
+        request: &DependencyPageRequestV1,
+    ) -> Result<DependencyPageV1<DependencyEdgeRecordV1>, CounterfactualStoreErrorV1> {
+        self.read_dependency_page(request, |rows| &rows.edges)
+    }
+}

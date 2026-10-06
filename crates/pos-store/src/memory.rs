@@ -262,6 +262,8 @@ pub struct MemoryStore {
     counterfactual_forks: HashMap<TimelineId, counterfactual_store::CounterfactualForkStateV1>,
     /// Last generation of each deleted Fork, so a re-created id never resumes lower.
     counterfactual_generation_floors: HashMap<TimelineId, u64>,
+    /// ADR-064 committed dependency prefix of each parent Timeline.
+    dependency_prefixes: HashMap<TimelineId, counterfactual_store::DependencyRowsV1>,
     /// Retained ADR-021 admitted-batch receipts keyed by opaque idempotency key.
     pipeline_admission_receipts:
         HashMap<AppendDedupKey, pipeline_admission::PipelineReceiptRecordV1>,
@@ -738,6 +740,7 @@ impl MemoryStore {
             pipeline_admission_fences: HashMap::new(),
             counterfactual_forks: HashMap::new(),
             counterfactual_generation_floors: HashMap::new(),
+            dependency_prefixes: HashMap::new(),
             pipeline_admission_receipts: HashMap::new(),
             authority_persistence_binding: None,
             fork_admission_authority: ForkAdmissionAuthorityStateV1::default(),
