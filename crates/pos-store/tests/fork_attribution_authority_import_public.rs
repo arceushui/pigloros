@@ -880,6 +880,21 @@ fn an_occupied_operation_key_of_another_fork_is_a_conflict() -> Fallible<()> {
     Ok(())
 }
 
+/// Reopen a file-backed store. A write by another connection makes a live
+/// store fail closed, so every raw edit happens between two handles.
+fn reopen(path: &str) -> Fallible<SqliteStore> {
+    let mut store = SqliteStore::open(path)?;
+    store.bind_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ))?;
+    Ok(store)
+}
+
+fn raw_edit(path: &str, sql: &str) -> Fallible<()> {
+    rusqlite::Connection::open(path)?.execute_batch(sql)?;
+    Ok(())
+}
+
 #[test]
 fn a_file_backed_store_reports_partial_state_and_indeterminate_writes() -> Fallible<()> {
     let world = World::new(Shape::Mixed, false)?;
@@ -887,31 +902,27 @@ fn a_file_backed_store_reports_partial_state_and_indeterminate_writes() -> Falli
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("fae1-tamper.sqlite");
     let path = path.to_str().ok_or("utf-8 path")?;
-    let mut store = SqliteStore::open(path)?;
-    prepare(&mut store, &world, &built)?;
-    // An uncertain write is reported, rolled back, and then recovered by retry.
-    let connection = rusqlite::Connection::open(path)?;
-    connection.execute_batch(
+    prepare(&mut SqliteStore::open(path)?, &world, &built)?;
+    // An uncertain write is reported and rolled back.
+    raw_edit(
+        path,
         "CREATE TRIGGER fault BEFORE INSERT ON fork_publication_artifacts
          BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
     )?;
-    assert_eq!(
-        import(&mut store, &world, &built),
-        Err(ImportError::StorageIndeterminate)
-    );
+    let mut store = reopen(path)?;
+    assert_eq!(import(&mut store, &world, &built), Err(ImportError::StorageIndeterminate));
     assert_eq!(store.get_timeline(world.child_at(0)?.id)?, None);
-    connection.execute_batch("DROP TRIGGER fault")?;
+    drop(store);
+    // The identical retry then installs it.
+    raw_edit(path, "DROP TRIGGER fault")?;
+    let mut store = reopen(path)?;
     import(&mut store, &world, &built)?;
+    drop(store);
     // Partial committed state is corrupt authority, never repaired.
-    connection.execute_batch("DELETE FROM fork_append_operations")?;
-    assert_eq!(
-        import(&mut store, &world, &built),
-        Err(ImportError::CorruptAuthority)
-    );
-    assert_eq!(
-        import(&mut store, &world, &built),
-        Err(ImportError::CorruptAuthority)
-    );
+    raw_edit(path, "DELETE FROM fork_append_operations")?;
+    let mut store = reopen(path)?;
+    assert_eq!(import(&mut store, &world, &built), Err(ImportError::CorruptAuthority));
+    assert_eq!(import(&mut store, &world, &built), Err(ImportError::CorruptAuthority));
     Ok(())
 }
 
@@ -919,26 +930,23 @@ fn a_file_backed_store_reports_partial_state_and_indeterminate_writes() -> Falli
 fn a_tampered_shared_source_or_retained_policy_is_corrupt_authority() -> Fallible<()> {
     let mut world = World::new(Shape::Mixed, false)?;
     world.add_child(Shape::Mixed)?;
-    let first = world.build(&Spec::default())?;
+    let base = world.build(&Spec::default())?;
     let second = world.build(&Spec::distinct(1))?;
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("fae1-source.sqlite");
     let path = path.to_str().ok_or("utf-8 path")?;
     let mut store = SqliteStore::open(path)?;
-    prepare(&mut store, &world, &first)?;
-    import(&mut store, &world, &first)?;
-    let connection = rusqlite::Connection::open(path)?;
-    connection.execute_batch("UPDATE imported_fork_classifier_sources SET fcs1_cbor = x'00'")?;
-    assert_eq!(
-        import(&mut store, &world, &second),
-        Err(ImportError::CorruptAuthority)
-    );
+    prepare(&mut store, &world, &base)?;
+    import(&mut store, &world, &base)?;
+    drop(store);
+    raw_edit(path, "UPDATE imported_fork_classifier_sources SET fcs1_cbor = x'00'")?;
+    let mut store = reopen(path)?;
+    assert_eq!(import(&mut store, &world, &second), Err(ImportError::CorruptAuthority));
     assert_eq!(store.get_timeline(world.child_at(1)?.id)?, None);
-    connection.execute_batch("UPDATE fork_attribution_issuer_policies SET fip1_cbor = x'00'")?;
-    assert_eq!(
-        import(&mut store, &world, &first),
-        Err(ImportError::CorruptAuthority)
-    );
+    drop(store);
+    raw_edit(path, "UPDATE fork_attribution_issuer_policies SET fip1_cbor = x'00'")?;
+    let mut store = reopen(path)?;
+    assert_eq!(import(&mut store, &world, &base), Err(ImportError::CorruptAuthority));
     Ok(())
 }
 
@@ -949,16 +957,13 @@ fn rows_keyed_only_by_the_child_are_an_occupied_key_not_corruption() -> Fallible
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("fae1-orphan.sqlite");
     let path = path.to_str().ok_or("utf-8 path")?;
-    let mut store = SqliteStore::open(path)?;
-    prepare(&mut store, &world, &built)?;
+    prepare(&mut SqliteStore::open(path)?, &world, &built)?;
     let child = world.child_at(0)?.id;
-    rusqlite::Connection::open(path)?.execute(
-        "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES (?1, x'00')",
-        rusqlite::params![child.to_string()],
+    raw_edit(
+        path,
+        &format!("INSERT INTO fork_admissions (child_id, far1_cbor) VALUES ('{child}', x'00')"),
     )?;
-    assert_eq!(
-        import(&mut store, &world, &built),
-        Err(ImportError::Conflict)
-    );
+    let mut store = reopen(path)?;
+    assert_eq!(import(&mut store, &world, &built), Err(ImportError::Conflict));
     Ok(())
 }

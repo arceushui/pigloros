@@ -843,9 +843,14 @@ mod tests {
 
     #[test]
     fn a_missing_extra_or_altered_installed_row_is_corrupt() -> Fallible<()> {
-        let probe = Imported::new()?;
-        for statement in tamperings(&probe.keys) {
+        let count = tamperings(&Imported::new()?.keys).len();
+        for index in 0..count {
+            // Every statement names the keys of its own world.
             let mut state = Imported::new()?;
+            let statement = tamperings(&state.keys)
+                .into_iter()
+                .nth(index)
+                .ok_or("no such statement")?;
             state.execute(&statement)?;
             assert_eq!(state.retry(), Err(CORRUPT), "{statement}");
         }
