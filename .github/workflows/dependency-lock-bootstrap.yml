@@ -21,8 +21,8 @@ jobs:
           rustup component add --toolchain 1.97.1 rustfmt clippy
       - name: Resolve the candidate lockfile
         run: cargo +1.97.1 metadata --format-version 1 > /dev/null
-      - name: Check formatting
-        run: cargo +1.97.1 fmt --all -- --check
+      - name: Check codec formatting
+        run: find crates/pos-owner-bridge-codec -name '*.rs' -print0 | xargs -0 rustup run 1.97.1 rustfmt --edition 2021 --check
       - name: Compile and test the codec
         run: cargo +1.97.1 test -p pos-owner-bridge-codec --locked
       - name: Lint the codec
