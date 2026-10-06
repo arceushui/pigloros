@@ -1289,7 +1289,10 @@ impl FakeStore {
             .map(|(_, tick)| *tick)
             .max();
         let first_tick = self.first_tick;
-        let rejected = last_tick.map_or(record.tick() < first_tick, |last| record.tick() <= last);
+        let rejected = last_tick.map_or_else(
+            || record.tick() < first_tick,
+            |last| record.tick() <= last,
+        );
         if rejected {
             return Err(StoreError::BindingMismatch);
         }
