@@ -1,6 +1,6 @@
 //! The closed community Plugin host failure surface (ADR-061).
 
-/// How one host failure binds the authoritative record (ADR-061 failure table).
+/// How one host failure binds the record (ADR-061 failure table).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostFailureClassV1 {
     /// A deterministic result under the pinned Component, runtime and profile.
@@ -13,6 +13,11 @@ pub enum HostFailureClassV1 {
     /// No authoritative Event, state, retry or guest failure is fabricated
     /// from it, and it never substitutes for a deterministic outcome.
     Operational,
+    /// A refusal before any worker, invocation or commit exists.
+    ///
+    /// Replay sees it only as a recorded refusal; it produces no Event,
+    /// state or guest failure.
+    PreExecutionRejection,
 }
 
 /// The profile-defined canonical trap class (ADR-061 revision 4 decision 6).
@@ -38,17 +43,6 @@ pub enum ComponentTrapClassV1 {
 }
 
 impl ComponentTrapClassV1 {
-    /// Every class in ADR table order.
-    pub const ALL: [Self; 7] = [
-        Self::Unreachable,
-        Self::MemoryOutOfBounds,
-        Self::TableOutOfBounds,
-        Self::IndirectCall,
-        Self::IntegerArithmetic,
-        Self::StackExhausted,
-        Self::Other,
-    ];
-
     /// The exact ADR-061 class name.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -62,6 +56,19 @@ impl ComponentTrapClassV1 {
             Self::Other => "other",
         }
     }
+}
+
+/// Whether conformance fixtures reproduce a trap's class and coordinate.
+///
+/// ADR-061 makes `ComponentTrap` authoritative only when conformance
+/// fixtures reproduce the same class and coordinate. The host always emits
+/// `Unverified`; only conformance establishes reproduction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrapReproductionV1 {
+    /// Conformance fixtures reproduce the same class and coordinate.
+    ReproducedByConformance,
+    /// No conformance reproduction is established.
+    Unverified,
 }
 
 /// Whether a failed approval or atomic store has a deterministic typed result.
@@ -127,6 +134,8 @@ pub enum CommunityPluginHostErrorV1 {
     ComponentTrap {
         /// The profile-defined canonical trap class.
         class: ComponentTrapClassV1,
+        /// Whether conformance reproduces this class and coordinate.
+        reproduction: TrapReproductionV1,
     },
     /// The worker crashed, was signalled, lost its IPC, or framed it badly.
     #[error("community Plugin worker crashed")]
@@ -185,28 +194,63 @@ impl CommunityPluginHostErrorV1 {
         }
     }
 
-    /// The ADR-061 failure-table classification of this error.
+    /// The ADR-061 classification of this error.
     ///
-    /// Worker crashes and watchdog stops are operational. An atomic commit
-    /// failure is authoritative only with a deterministic typed result. Every
-    /// other error is a deterministic function of the pinned release, runtime,
-    /// profile and invocation, and is authoritative.
+    /// - Pre-execution rejections happen before any worker exists.
+    ///   `IncompatibleAbi`, `MissingFeature` and `CapabilityDenied` are
+    ///   deterministic typed outcomes of the manifest and the host profile
+    ///   (the corrective amendment's "capability denial, incompatible WIT
+    ///   world" typed deterministic failure outcomes). `ArtifactTrustDenied`
+    ///   and `ArtifactRevoked` depend on mutable trust state (#424, #401).
+    /// - The guest-output and deterministic-limit rows of the failure table
+    ///   are authoritative, as are `StateMigrationFailed` and
+    ///   `DeterministicDeadlineExceeded`, which a V1 host never produces.
+    /// - `ComponentTrap` is authoritative only when conformance reproduces
+    ///   it, and `AtomicCommitFailed` only with a deterministic typed result.
+    ///   Otherwise both are operational, like worker crashes and watchdog
+    ///   stops.
     #[must_use]
     pub const fn class(self) -> HostFailureClassV1 {
         match self {
+            Self::InvalidManifest
+            | Self::ArtifactTrustDenied
+            | Self::ArtifactRevoked
+            | Self::IncompatibleAbi
+            | Self::MissingFeature { .. }
+            | Self::CapabilityDenied { .. }
+            | Self::InvalidInvocation
+            | Self::UnsupportedSchema => HostFailureClassV1::PreExecutionRejection,
+            Self::InvalidGuestOutput
+            | Self::StateMigrationFailed
+            | Self::GuestDeclaredFailure
+            | Self::FuelExhausted
+            | Self::MemoryLimitExceeded
+            | Self::HostCallLimitExceeded
+            | Self::OutputLimitExceeded
+            | Self::DeterministicDeadlineExceeded
+            | Self::ComponentTrap {
+                reproduction: TrapReproductionV1::ReproducedByConformance,
+                ..
+            }
+            | Self::AtomicCommitFailed {
+                failure: AtomicCommitFailureV1::DeterministicTypedResult,
+            } => HostFailureClassV1::Authoritative,
             Self::WorkerCrashed
             | Self::OperationalWatchdogStop
+            | Self::ComponentTrap {
+                reproduction: TrapReproductionV1::Unverified,
+                ..
+            }
             | Self::AtomicCommitFailed {
                 failure: AtomicCommitFailureV1::Operational,
             } => HostFailureClassV1::Operational,
-            _ => HostFailureClassV1::Authoritative,
         }
     }
 
     /// Whether a V1 host can produce this error.
     ///
-    /// V1 defines no deterministic deadline and never invokes
-    /// `migrate-state` (ADR-061 revision 4).
+    /// V1 defines no deterministic deadline (revision 4 decision 3) and never
+    /// invokes `migrate-state` (revision 4 scope clarifications).
     #[must_use]
     pub const fn produced_in_v1(self) -> bool {
         !matches!(

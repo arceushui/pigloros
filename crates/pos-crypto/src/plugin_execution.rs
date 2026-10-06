@@ -15,6 +15,16 @@ use crate::plugin_trust::ValidatedPluginManifestProjectionV1;
 
 /// The exact Component world every PMF1 V1 release targets (field 4).
 pub const COMMUNITY_PLUGIN_WORLD_V1: &str = "pigloros:plugin/community-plugin@0.1.0";
+/// WebAssembly page size; `memory_bytes` is a whole number of pages.
+pub const WASM_PAGE_BYTES_V1: u64 = 65_536;
+
+/// Whether `value` matches the ADR-061 ID grammar used by PMF1 feature IDs.
+///
+/// The grammar is `[a-z0-9][a-z0-9._/-]*`, 1-128 bytes.
+#[must_use]
+pub fn is_valid_id_v1(value: &str) -> bool {
+    plugin_manifest::valid_id_text(value)
+}
 
 /// The PMF1 V1 ABI requirement: fields 5-8.
 ///
@@ -77,6 +87,36 @@ pub struct DeterministicBudgetV1 {
     pub log_calls: u64,
     /// Total operational log message bytes.
     pub log_bytes: u64,
+}
+
+impl DeterministicBudgetV1 {
+    /// The PMF1 V1 lower bound of every member (revision 3 section 3.3).
+    pub const MINIMA: Self = Self {
+        memory_bytes: WASM_PAGE_BYTES_V1,
+        fuel: 1,
+        host_calls: 0,
+        event_count: 0,
+        event_bytes: 0,
+        state_bytes: 0,
+        log_calls: 0,
+        log_bytes: 0,
+    };
+
+    /// The PMF1 V1 upper bound of every member (revision 3 section 3.3).
+    ///
+    /// `event_count`, `state_bytes` and `log_calls` are the WIT ceilings
+    /// (1,024 `EventDrafts`, 1 MiB of state, 64 log calls); `log_bytes` is
+    /// 64 log calls of 256 bytes.
+    pub const MAXIMA: Self = Self {
+        memory_bytes: 4_294_967_296,
+        fuel: u64::MAX,
+        host_calls: 1_000_000,
+        event_count: 1_024,
+        event_bytes: 16_777_216,
+        state_bytes: 1_048_576,
+        log_calls: 64,
+        log_bytes: 16_384,
+    };
 }
 
 /// The execution requirements of one fully validated PMF1 V1 release.

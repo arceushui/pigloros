@@ -10,8 +10,8 @@
 use std::collections::BTreeMap;
 
 use pos_crypto::plugin_execution::{
-    DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
-    PluginExecutionProjectionV1,
+    is_valid_id_v1, DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
+    PluginExecutionProjectionV1, WASM_PAGE_BYTES_V1,
 };
 use pos_crypto::plugin_manifest::PluginManifestErrorV1;
 use pos_crypto::plugin_trust::{
@@ -1823,4 +1823,43 @@ fn a_re_signed_release_binds_only_its_own_trust_projection() -> TestResult {
     assert!(execution.is_bound_to(&resigned.project()??));
     assert!(!execution.is_bound_to(&original.project()??));
     Ok(())
+}
+
+#[test]
+fn exported_bounds_and_id_grammar_are_the_codec_rules() -> TestResult {
+    let minima = DeterministicBudgetV1::MINIMA;
+    let maxima = DeterministicBudgetV1::MAXIMA;
+    assert_eq!(minima.memory_bytes, WASM_PAGE_BYTES_V1);
+    let smallest = Release::sealed_with(15, &budget(budget_members(minima)))?;
+    assert_eq!(smallest.execution()??.budget(), minima);
+    let largest = Release::sealed_with(15, &budget(budget_members(maxima)))?;
+    assert_eq!(largest.execution()??.budget(), maxima);
+    for (member, value) in budget_members(maxima).into_iter().enumerate() {
+        let mut members = budget_members(maxima);
+        members[member] = value.saturating_add(1);
+        if value < u64::MAX {
+            expect(&Release::with(15, &budget(members))?, invalid(15))?;
+        }
+    }
+    for valid in ["a", "0.x_y/z-1", &"a".repeat(128)] {
+        assert!(is_valid_id_v1(valid), "{valid}");
+    }
+    for invalid_id in ["", "A", "-a", "a b", &"a".repeat(129)] {
+        assert!(!is_valid_id_v1(invalid_id), "{invalid_id}");
+    }
+    Ok(())
+}
+
+/// The eight members of `budget` in field 15 order.
+const fn budget_members(budget: DeterministicBudgetV1) -> [u64; 8] {
+    [
+        budget.memory_bytes,
+        budget.fuel,
+        budget.host_calls,
+        budget.event_count,
+        budget.event_bytes,
+        budget.state_bytes,
+        budget.log_calls,
+        budget.log_bytes,
+    ]
 }

@@ -5,7 +5,7 @@
 //! that the invocation, its result and the `ReproManifest` record.
 
 use pos_crypto::plugin_execution::{
-    DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
+    is_valid_id_v1, DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
     PluginExecutionProjectionV1, COMMUNITY_PLUGIN_WORLD_V1,
 };
 
@@ -17,14 +17,26 @@ use super::profile::{
 
 /// The only ABI major of the community Plugin world in ABI 0.x.
 pub const COMMUNITY_PLUGIN_ABI_MAJOR_V1: u16 = 0;
-/// WIT ceiling on `EventDrafts` per invocation.
-pub const WIT_EVENT_COUNT_CEILING_V1: u64 = 1_024;
-/// WIT ceiling on staged state bytes (1 MiB).
-pub const WIT_STATE_BYTES_CEILING_V1: u64 = 1_048_576;
-/// WIT ceiling on `record-operational-log` calls per invocation.
-pub const WIT_LOG_CALLS_CEILING_V1: u64 = 64;
-/// WIT ceiling on one operational log message in bytes.
-pub const WIT_LOG_MESSAGE_BYTES_CEILING_V1: u64 = 256;
+
+/// A rejected host ABI declaration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum CommunityPluginHostAbiErrorV1 {
+    /// The lowest supported minor is above the highest.
+    #[error("community Plugin host ABI minor range is empty")]
+    EmptyMinorRange,
+    /// A feature ID does not match the PMF1 ID grammar.
+    #[error("community Plugin host feature {index} is not a valid ID")]
+    InvalidFeature {
+        /// Position in the feature list.
+        index: usize,
+    },
+    /// A feature ID does not strictly follow the one before it.
+    #[error("community Plugin host feature {index} is out of order")]
+    UnorderedFeature {
+        /// Position in the feature list.
+        index: usize,
+    },
+}
 
 /// The ABI this host supports for `pigloros:plugin/community-plugin@0.1.0`.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -36,6 +48,10 @@ pub struct CommunityPluginHostAbiV1 {
 
 impl CommunityPluginHostAbiV1 {
     /// The V1 host: ABI 0.0 only, with no optional feature.
+    ///
+    /// Minor 0 is the baseline ABI defined by the package
+    /// `pigloros:plugin@0.1.0`. Any added import, export, record field,
+    /// variant case or changed bound increments the minor.
     #[must_use]
     pub const fn v1() -> Self {
         Self {
@@ -47,14 +63,27 @@ impl CommunityPluginHostAbiV1 {
 
     /// A host supporting minors `min_minor..=max_minor` and `features`.
     ///
-    /// Returns `None` when `min_minor > max_minor`.
-    #[must_use]
-    pub fn new(min_minor: u16, max_minor: u16, features: Vec<String>) -> Option<Self> {
-        (min_minor <= max_minor).then_some(Self {
-            min_minor,
-            max_minor,
-            features,
-        })
+    /// # Errors
+    /// Returns `EmptyMinorRange` when `min_minor > max_minor`, then
+    /// `InvalidFeature` for the first feature outside the PMF1 ID grammar,
+    /// then `UnorderedFeature` for the first feature that is not strictly
+    /// greater than the one before it.
+    pub fn new(
+        min_minor: u16,
+        max_minor: u16,
+        features: Vec<String>,
+    ) -> Result<Self, CommunityPluginHostAbiErrorV1> {
+        let failure = (min_minor > max_minor)
+            .then_some(CommunityPluginHostAbiErrorV1::EmptyMinorRange)
+            .or_else(|| feature_failure(&features));
+        failure.map_or(
+            Ok(Self {
+                min_minor,
+                max_minor,
+                features,
+            }),
+            Err,
+        )
     }
 
     /// The lowest supported ABI minor.
@@ -69,11 +98,25 @@ impl CommunityPluginHostAbiV1 {
         self.max_minor
     }
 
-    /// The feature IDs this host provides.
+    /// The feature IDs this host provides, strictly increasing.
     #[must_use]
     pub fn features(&self) -> &[String] {
         &self.features
     }
+}
+
+/// The first invalid or out-of-order feature ID.
+fn feature_failure(features: &[String]) -> Option<CommunityPluginHostAbiErrorV1> {
+    let invalid = features
+        .iter()
+        .position(|feature| !is_valid_id_v1(feature))
+        .map(|index| CommunityPluginHostAbiErrorV1::InvalidFeature { index });
+    let unordered = features
+        .iter()
+        .zip(features.iter().skip(1))
+        .position(|(earlier, later)| earlier >= later)
+        .map(|index| CommunityPluginHostAbiErrorV1::UnorderedFeature { index: index + 1 });
+    invalid.or(unordered)
 }
 
 /// The effective deterministic limits fixed at negotiation.
@@ -83,38 +126,33 @@ impl CommunityPluginHostAbiV1 {
 /// budget above a ceiling is clamped, never rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EffectiveExecutionLimitsV1 {
-    /// Linear memory bytes, a whole number of pages.
-    pub memory_bytes: u64,
-    /// Wasmtime fuel.
-    pub fuel: u64,
-    /// Host import calls.
-    pub host_calls: u64,
-    /// `EventDraft` count.
-    pub event_count: u64,
-    /// Total `EventDraft` bytes.
-    pub event_bytes: u64,
-    /// Staged state bytes.
-    pub state_bytes: u64,
-    /// `record-operational-log` calls.
-    pub log_calls: u64,
-    /// Total operational log bytes.
-    pub log_bytes: u64,
+    limits: DeterministicBudgetV1,
 }
 
 impl EffectiveExecutionLimitsV1 {
     /// Clamp `budget` by `ceilings` and the WIT ceilings.
     #[must_use]
     pub fn clamp(budget: DeterministicBudgetV1, ceilings: CommunityPluginCeilingsV1) -> Self {
+        let ceiling = ceilings.values();
+        let wit = DeterministicBudgetV1::MAXIMA;
         Self {
-            memory_bytes: budget.memory_bytes.min(ceilings.memory_bytes()),
-            fuel: budget.fuel.min(ceilings.fuel()),
-            host_calls: budget.host_calls.min(ceilings.host_calls()),
-            event_count: budget.event_count.min(WIT_EVENT_COUNT_CEILING_V1),
-            event_bytes: budget.event_bytes.min(ceilings.event_bytes()),
-            state_bytes: budget.state_bytes.min(WIT_STATE_BYTES_CEILING_V1),
-            log_calls: budget.log_calls.min(WIT_LOG_CALLS_CEILING_V1),
-            log_bytes: budget.log_bytes.min(ceilings.log_bytes()),
+            limits: DeterministicBudgetV1 {
+                memory_bytes: budget.memory_bytes.min(ceiling.memory_bytes),
+                fuel: budget.fuel.min(ceiling.fuel),
+                host_calls: budget.host_calls.min(ceiling.host_calls),
+                event_count: budget.event_count.min(wit.event_count),
+                event_bytes: budget.event_bytes.min(ceiling.event_bytes),
+                state_bytes: budget.state_bytes.min(wit.state_bytes),
+                log_calls: budget.log_calls.min(wit.log_calls),
+                log_bytes: budget.log_bytes.min(ceiling.log_bytes),
+            },
         }
+    }
+
+    /// The effective value of every budget member.
+    #[must_use]
+    pub const fn values(&self) -> DeterministicBudgetV1 {
+        self.limits
     }
 }
 
@@ -206,6 +244,11 @@ impl NegotiatedCommunityPluginV1 {
 /// The checks run in ADR-061 validation order: ABI major and highest common
 /// minor, every required feature, then capability attenuation. Budgets are
 /// then clamped. No worker exists yet, so a failure launches nothing.
+///
+/// This function cannot check that `execution` is bound to an authorized
+/// release. #544 must wrap it behind `PluginExecutionProjectionV1::is_bound_to`
+/// and the trust-authorization gate before it becomes the public host
+/// surface; until then it is not the #194 surface.
 ///
 /// # Errors
 /// Returns `IncompatibleAbi` for an ABI major other than 0 or no common

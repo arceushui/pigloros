@@ -11,14 +11,14 @@ mod profile;
 
 pub use error::{
     AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1, HostFailureClassV1,
+    TrapReproductionV1,
 };
 pub use negotiation::{
-    negotiate_community_plugin_v1, CommunityPluginHostAbiV1, EffectiveExecutionLimitsV1,
-    NegotiatedCommunityPluginV1, COMMUNITY_PLUGIN_ABI_MAJOR_V1, WIT_EVENT_COUNT_CEILING_V1,
-    WIT_LOG_CALLS_CEILING_V1, WIT_LOG_MESSAGE_BYTES_CEILING_V1, WIT_STATE_BYTES_CEILING_V1,
+    negotiate_community_plugin_v1, CommunityPluginHostAbiErrorV1, CommunityPluginHostAbiV1,
+    EffectiveExecutionLimitsV1, NegotiatedCommunityPluginV1, COMMUNITY_PLUGIN_ABI_MAJOR_V1,
 };
 pub use profile::{
-    CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1, CommunityPluginModeV1,
-    CommunityPluginProfileErrorV1, ExecutionLimitV1, PinnedComponentRuntimeV1, TrapOutcomeV1,
-    TrapTableEntryV1, WASM_PAGE_BYTES_V1,
+    CeilingValuesV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
+    CommunityPluginModeV1, CommunityPluginProfileErrorV1, ExecutionLimitV1,
+    PinnedComponentRuntimeV1, PinnedEngineConfigV1, TrapOutcomeV1, TrapTableEntryV1,
 };

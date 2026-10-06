@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use crate::plugin_execution::{
     DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
-    PluginExecutionProjectionV1,
+    PluginExecutionProjectionV1, WASM_PAGE_BYTES_V1,
 };
 use crate::plugin_trust::ValidatedPluginManifestProjectionV1;
 use crate::strict_cbor::{Reader, StrictCborError};
@@ -57,8 +57,6 @@ const MAX_MESSAGE_BYTES: u64 = 16_777_216;
 const MAX_BLOB_BYTES: u64 = 33_554_432;
 const MAX_WIT_BYTES: u64 = 4_194_304;
 const MAX_SCHEMA_BYTES: u64 = 1_048_576;
-const WASM_PAGE_BYTES: u64 = 65_536;
-const MAX_MEMORY_BYTES: u64 = 4_294_967_296;
 const MAX_INTERVAL_SECONDS: i128 = 31_622_400;
 const MAGIC: &str = "PMF1";
 const WORLD: &str = "pigloros:plugin/community-plugin@0.1.0";
@@ -71,14 +69,16 @@ const UNSIGNED_HEAD: [u8; 2] = [0x98, 0x19];
 const HEX: &[u8; 16] = b"0123456789abcdef";
 /// `DeterministicBudgetV1` member bounds after `memory_bytes`, in field order.
 const BUDGET: [(u64, u64); 7] = [
-    (1, u64::MAX),
-    (0, MAX_CALLS),
-    (0, 1_024),
-    (0, MAX_MESSAGE_BYTES),
-    (0, 1_048_576),
-    (0, 64),
-    (0, 16_384),
+    (MINIMA.fuel, MAXIMA.fuel),
+    (MINIMA.host_calls, MAXIMA.host_calls),
+    (MINIMA.event_count, MAXIMA.event_count),
+    (MINIMA.event_bytes, MAXIMA.event_bytes),
+    (MINIMA.state_bytes, MAXIMA.state_bytes),
+    (MINIMA.log_calls, MAXIMA.log_calls),
+    (MINIMA.log_bytes, MAXIMA.log_bytes),
 ];
+const MINIMA: DeterministicBudgetV1 = DeterministicBudgetV1::MINIMA;
+const MAXIMA: DeterministicBudgetV1 = DeterministicBudgetV1::MAXIMA;
 
 /// A closed PMF1 V1 projection failure (ADR-061 revision 3, section 8).
 ///
@@ -534,25 +534,35 @@ fn read_compatibility<'a>(
     reader.at(4);
     exact_text(reader, WORLD)?;
     reader.at(5);
-    let major = unsigned_in(reader, 0, 0)?;
+    let major = abi_u16_in(reader, 0, 0)?;
     reader.at(6);
-    let minimum = unsigned_in(reader, 0, MAX_MINOR)?;
+    let minimum = abi_u16_in(reader, 0, u16::MAX)?;
     reader.at(7);
-    let maximum = unsigned_in(reader, minimum, MAX_MINOR)?;
+    let maximum = abi_u16_in(reader, minimum, u16::MAX)?;
     reader.at(8);
     let features = read_id_list(reader)?;
     let abi = PluginAbiRequirementV1 {
-        major: abi_u16(major),
-        min_minor: abi_u16(minimum),
-        max_minor: abi_u16(maximum),
+        major,
+        min_minor: minimum,
+        max_minor: maximum,
         required_features: features.into_iter().map(str::to_owned).collect(),
     };
     Ok((plugin_id, abi))
 }
 
-/// An ABI value the reader already bounded to `0..=65,535`.
-fn abi_u16(value: u64) -> u16 {
-    u16::try_from(value).unwrap_or(u16::MAX)
+/// An unsigned `u16` ABI value in `minimum..=maximum`, else `InvalidField`.
+fn abi_u16_in(
+    reader: &mut Pmf1Reader<'_>,
+    minimum: u16,
+    maximum: u16,
+) -> Result<u16, PluginManifestErrorV1> {
+    let invalid = PluginManifestErrorV1::InvalidField {
+        ordinal: reader.ordinal(),
+    };
+    let value = u16::try_from(reader.unsigned()?)
+        .ok()
+        .filter(|value| (minimum..=maximum).contains(value));
+    value.ok_or(invalid)
 }
 
 fn read_schema(reader: &mut Pmf1Reader<'_>) -> Result<Schema, PluginManifestErrorV1> {
@@ -621,8 +631,8 @@ fn read_budget(
     reader: &mut Pmf1Reader<'_>,
 ) -> Result<DeterministicBudgetV1, PluginManifestErrorV1> {
     reader.fixed_array(8)?;
-    let memory_bytes = unsigned_in(reader, WASM_PAGE_BYTES, MAX_MEMORY_BYTES)?;
-    require(reader, memory_bytes % WASM_PAGE_BYTES == 0)?;
+    let memory_bytes = unsigned_in(reader, MINIMA.memory_bytes, MAXIMA.memory_bytes)?;
+    require(reader, memory_bytes.is_multiple_of(WASM_PAGE_BYTES_V1))?;
     let mut members = [0; BUDGET.len()];
     for (member, (minimum, maximum)) in members.iter_mut().zip(BUDGET) {
         *member = unsigned_in(reader, minimum, maximum)?;
