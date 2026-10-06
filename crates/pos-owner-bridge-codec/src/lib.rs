@@ -20,7 +20,10 @@ mod durable;
 mod error;
 mod http;
 mod payload;
-mod transport;
+// Public module reachability keeps the crate-only transport limit compatible
+// with both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
+#[doc(hidden)]
+pub mod transport;
 mod values;
 mod webauthn;
 
