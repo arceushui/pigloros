@@ -112,8 +112,14 @@ fn receipt_for(built: &Built, generation: u64) -> Fallible<Receipt> {
 
 fn assert_installed(store: &dyn Destination, world: &World, shape: Shape) -> Fallible<()> {
     let child = world.child_at(0)?;
-    assert_eq!(store.get_timeline(child.id)?, Some(child.export.timeline.clone()));
-    assert_eq!(store.read_own(child.id, SeqRange::all())?, child.export.events);
+    assert_eq!(
+        store.get_timeline(child.id)?,
+        Some(child.export.timeline.clone())
+    );
+    assert_eq!(
+        store.read_own(child.id, SeqRange::all())?,
+        child.export.events
+    );
     assert_eq!(
         store.logical_head(child.id)?.as_u64(),
         PARENT_CUT + shape.events()
@@ -264,7 +270,10 @@ fn committed_imports_recover_before_current_policy_admission() -> Fallible<()> {
         // A new import by the revoked issuer is refused.
         let mut denied = request(&world, &fresh);
         denied.expected_issuer_policy_digest = revoked.digest();
-        assert_eq!(store.import_verified(&denied), Err(ImportError::IssuerRevoked));
+        assert_eq!(
+            store.import_verified(&denied),
+            Err(ImportError::IssuerRevoked)
+        );
         assert_eq!(store.get_timeline(world.child_at(1)?.id)?, None);
         Ok(())
     })
@@ -276,8 +285,14 @@ fn issuer_admission_errors_follow_the_pinned_policy() -> Fallible<()> {
     let base = world.build(&Spec::default())?;
     let other = other_issuer("issuer-b", 0x32)?;
     let genesis = two_issuer_genesis(&base, &other)?;
-    let retired = successor(&genesis, &[(&base.issuer, State::Retired), (&other, State::Active)])?;
-    let revoked = successor(&genesis, &[(&base.issuer, State::Revoked), (&other, State::Active)])?;
+    let retired = successor(
+        &genesis,
+        &[(&base.issuer, State::Retired), (&other, State::Active)],
+    )?;
+    let revoked = successor(
+        &genesis,
+        &[(&base.issuer, State::Revoked), (&other, State::Active)],
+    )?;
     let stranger = pinned_policy(&other, State::Active)?;
     let cases = [
         (&genesis, Some(&retired), ImportError::IssuerRetired),
@@ -324,7 +339,10 @@ fn a_missing_stale_or_unpinned_policy_changes_nothing() -> Fallible<()> {
         // The operator pinned another digest than the envelope names.
         let mut unpinned = request(&world, &built);
         unpinned.expected_issuer_policy_digest = hash(0x77);
-        assert_eq!(store.import_verified(&unpinned), Err(ImportError::PolicyChanged));
+        assert_eq!(
+            store.import_verified(&unpinned),
+            Err(ImportError::PolicyChanged)
+        );
         // The floor moved past the envelope's policy.
         install_policy(store, &rotated)?;
         refuse(store, &world, &built, ImportError::PolicyChanged)
@@ -389,7 +407,12 @@ fn event_evidence_needs_the_registry_the_anchors_and_non_geographic_events() -> 
                 Err(ImportError::InvalidEventEvidence)
             );
         }
-        refuse(store, &world, &geographic, ImportError::InvalidEventEvidence)?;
+        refuse(
+            store,
+            &world,
+            &geographic,
+            ImportError::InvalidEventEvidence,
+        )?;
         // Nothing above changed the destination: the valid import succeeds.
         import(store, &world, &built)?;
         assert_installed(store, &world, Shape::Mixed)
@@ -410,11 +433,21 @@ fn the_fti_owner_must_equal_the_parent_owner_in_both_directions() -> Fallible<()
     })?;
     on_both_adapters(|store| {
         prepare(store, &unowned, &claims_owner)?;
-        refuse(store, &unowned, &claims_owner, ImportError::InvalidAuthorityClosure)
+        refuse(
+            store,
+            &unowned,
+            &claims_owner,
+            ImportError::InvalidAuthorityClosure,
+        )
     })?;
     on_both_adapters(|store| {
         prepare(store, &owned, &drops_owner)?;
-        refuse(store, &owned, &drops_owner, ImportError::InvalidAuthorityClosure)
+        refuse(
+            store,
+            &owned,
+            &drops_owner,
+            ImportError::InvalidAuthorityClosure,
+        )
     })
 }
 
@@ -521,7 +554,10 @@ fn an_unequal_import_reuse_or_occupied_child_is_a_conflict() -> Fallible<()> {
         // The same import operation ID with another complete envelope.
         assert_eq!(import(store, &world, &reused), Err(ImportError::Conflict));
         // Another operation naming the same child Fork.
-        assert_eq!(import(store, &world, &same_child), Err(ImportError::Conflict));
+        assert_eq!(
+            import(store, &world, &same_child),
+            Err(ImportError::Conflict)
+        );
         assert_eq!(import(store, &world, &built), Ok(receipt));
         Ok(())
     })
@@ -558,7 +594,8 @@ fn imported_code_two_stays_unreadable_and_closed_to_local_appends() -> Fallible<
     let world = World::new(Shape::Mixed, false)?;
     let built = world.build(&Spec::default())?;
     assert_code_two_is_unreadable(&mut MemoryStore::new(), &world, &built)?;
-    assert_code_two_is_unreadable(&mut SqliteStore::open_in_memory()?, &world, &built)
+    let mut sqlite = SqliteStore::open_in_memory()?;
+    assert_code_two_is_unreadable(&mut sqlite, &world, &built)
 }
 
 #[test]
@@ -858,14 +895,23 @@ fn a_file_backed_store_reports_partial_state_and_indeterminate_writes() -> Falli
         "CREATE TRIGGER fault BEFORE INSERT ON fork_publication_artifacts
          BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
     )?;
-    assert_eq!(import(&mut store, &world, &built), Err(ImportError::StorageIndeterminate));
+    assert_eq!(
+        import(&mut store, &world, &built),
+        Err(ImportError::StorageIndeterminate)
+    );
     assert_eq!(store.get_timeline(world.child_at(0)?.id)?, None);
     connection.execute_batch("DROP TRIGGER fault")?;
     import(&mut store, &world, &built)?;
     // Partial committed state is corrupt authority, never repaired.
     connection.execute_batch("DELETE FROM fork_append_operations")?;
-    assert_eq!(import(&mut store, &world, &built), Err(ImportError::CorruptAuthority));
-    assert_eq!(import(&mut store, &world, &built), Err(ImportError::CorruptAuthority));
+    assert_eq!(
+        import(&mut store, &world, &built),
+        Err(ImportError::CorruptAuthority)
+    );
+    assert_eq!(
+        import(&mut store, &world, &built),
+        Err(ImportError::CorruptAuthority)
+    );
     Ok(())
 }
 
@@ -883,10 +929,16 @@ fn a_tampered_shared_source_or_retained_policy_is_corrupt_authority() -> Fallibl
     import(&mut store, &world, &first)?;
     let connection = rusqlite::Connection::open(path)?;
     connection.execute_batch("UPDATE imported_fork_classifier_sources SET fcs1_cbor = x'00'")?;
-    assert_eq!(import(&mut store, &world, &second), Err(ImportError::CorruptAuthority));
+    assert_eq!(
+        import(&mut store, &world, &second),
+        Err(ImportError::CorruptAuthority)
+    );
     assert_eq!(store.get_timeline(world.child_at(1)?.id)?, None);
     connection.execute_batch("UPDATE fork_attribution_issuer_policies SET fip1_cbor = x'00'")?;
-    assert_eq!(import(&mut store, &world, &first), Err(ImportError::CorruptAuthority));
+    assert_eq!(
+        import(&mut store, &world, &first),
+        Err(ImportError::CorruptAuthority)
+    );
     Ok(())
 }
 
@@ -904,6 +956,9 @@ fn rows_keyed_only_by_the_child_are_an_occupied_key_not_corruption() -> Fallible
         "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES (?1, x'00')",
         rusqlite::params![child.to_string()],
     )?;
-    assert_eq!(import(&mut store, &world, &built), Err(ImportError::Conflict));
+    assert_eq!(
+        import(&mut store, &world, &built),
+        Err(ImportError::Conflict)
+    );
     Ok(())
 }

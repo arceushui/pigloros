@@ -556,9 +556,10 @@ fn revalidate<S: ImportBackendV1>(
     let prepared = PreparedImportV1::decode(&stored.envelope_bytes)
         .ok()
         .ok_or(corrupt)?;
-    let admission = ImportedForkAttributionAdmissionV1::from_canonical_cbor(&stored.admission_bytes)
-        .ok()
-        .ok_or(corrupt)?;
+    let admission =
+        ImportedForkAttributionAdmissionV1::from_canonical_cbor(&stored.admission_bytes)
+            .ok()
+            .ok_or(corrupt)?;
     let generation = admission.input().issuer_policy_generation;
     let consistent = prepared.import_operation_id() == operation_id
         && prepared.envelope.full_envelope_digest() == stored.envelope_digest
@@ -807,7 +808,10 @@ mod tests {
             (Codec::FieldMismatch, ImportError::InvalidAuthorityClosure),
             (Codec::InvalidEncoding, ImportError::InvalidEncoding),
             (Codec::NonCanonical, ImportError::InvalidEncoding),
-            (Codec::ImportedAuthorityUnavailable, ImportError::InvalidEncoding),
+            (
+                Codec::ImportedAuthorityUnavailable,
+                ImportError::InvalidEncoding,
+            ),
             (Codec::InterventionOrder, ImportError::InvalidEncoding),
         ];
         for (codec, expected) in cases {
@@ -822,7 +826,10 @@ mod tests {
             ImportError::InvalidAuthorityClosure
         );
         let storage = CoreError::Storage("failed".to_owned());
-        assert_eq!(ImportError::from(storage), ImportError::StorageIndeterminate);
+        assert_eq!(
+            ImportError::from(storage),
+            ImportError::StorageIndeterminate
+        );
     }
 
     #[test]
@@ -831,22 +838,37 @@ mod tests {
             (PolicyError::PolicyChanged, ImportError::PolicyChanged),
             (PolicyError::IssuerRetired, ImportError::IssuerRetired),
             (PolicyError::IssuerRevoked, ImportError::IssuerRevoked),
-            (PolicyError::StorageIndeterminate, ImportError::StorageIndeterminate),
+            (
+                PolicyError::StorageIndeterminate,
+                ImportError::StorageIndeterminate,
+            ),
             (PolicyError::UntrustedIssuer, ImportError::UntrustedIssuer),
             (PolicyError::PolicyUnavailable, ImportError::UntrustedIssuer),
             (PolicyError::InvalidIssuerKey, ImportError::UntrustedIssuer),
             (PolicyError::CorruptPolicy, ImportError::CorruptAuthority),
             (PolicyError::InvalidEncoding, ImportError::CorruptAuthority),
-            (PolicyError::UnsupportedVersion, ImportError::CorruptAuthority),
+            (
+                PolicyError::UnsupportedVersion,
+                ImportError::CorruptAuthority,
+            ),
             (PolicyError::BoundsExceeded, ImportError::CorruptAuthority),
             (PolicyError::PinMismatch, ImportError::CorruptAuthority),
             (PolicyError::ScopeMismatch, ImportError::CorruptAuthority),
             (PolicyError::Rollback, ImportError::CorruptAuthority),
-            (PolicyError::GenerationConflict, ImportError::CorruptAuthority),
-            (PolicyError::GenerationSkipped, ImportError::CorruptAuthority),
+            (
+                PolicyError::GenerationConflict,
+                ImportError::CorruptAuthority,
+            ),
+            (
+                PolicyError::GenerationSkipped,
+                ImportError::CorruptAuthority,
+            ),
             (PolicyError::WrongPredecessor, ImportError::CorruptAuthority),
             (PolicyError::HistoryExhausted, ImportError::CorruptAuthority),
-            (PolicyError::IllegalTransition, ImportError::CorruptAuthority),
+            (
+                PolicyError::IllegalTransition,
+                ImportError::CorruptAuthority,
+            ),
             (PolicyError::NoOpSuccessor, ImportError::CorruptAuthority),
             (PolicyError::NoActiveIssuer, ImportError::CorruptAuthority),
         ];
@@ -925,11 +947,7 @@ mod tests {
             self.inner.get_timeline(id)
         }
 
-        fn read_own(
-            &self,
-            timeline: TimelineId,
-            range: SeqRange,
-        ) -> Result<Vec<Event>, CoreError> {
+        fn read_own(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
             self.own_events.as_ref().map_or_else(
                 || self.inner.read_own(timeline, range),
                 |events| Ok(events.clone()),
@@ -985,9 +1003,7 @@ mod tests {
             self.inner.install(pin, policy_bytes)
         }
 
-        fn issuer_policy_floor(
-            &self,
-        ) -> Result<Option<crate::IssuerPolicyFloorV1>, PolicyError> {
+        fn issuer_policy_floor(&self) -> Result<Option<crate::IssuerPolicyFloorV1>, PolicyError> {
             self.inner.issuer_policy_floor()
         }
 
@@ -1016,10 +1032,7 @@ mod tests {
             self.inner.has_key_evidence(import_operation_id)
         }
 
-        fn read_installed(
-            &self,
-            plan: &InstallPlanV1<'_>,
-        ) -> Result<InstalledRowsV1, ImportError> {
+        fn read_installed(&self, plan: &InstallPlanV1<'_>) -> Result<InstalledRowsV1, ImportError> {
             self.inner.read_installed(plan)
         }
 
@@ -1161,7 +1174,10 @@ mod tests {
             (PolicyError::IssuerRetired, ImportError::CorruptAuthority),
             (PolicyError::IssuerRevoked, ImportError::CorruptAuthority),
             (PolicyError::UntrustedIssuer, ImportError::CorruptAuthority),
-            (PolicyError::StorageIndeterminate, ImportError::StorageIndeterminate),
+            (
+                PolicyError::StorageIndeterminate,
+                ImportError::StorageIndeterminate,
+            ),
         ];
         for (verdict, expected) in cases {
             probe.committed_verdict = Some(verdict);
@@ -1176,9 +1192,18 @@ mod tests {
         let storage = CoreError::Storage("failed".to_owned());
         let unknown = CoreError::StorageOutcomeUnknown("unknown".to_owned());
         let verdict = CoreError::SignatureVerificationFailed;
-        for rejection in [ImportError::InvalidEventEvidence, ImportError::InvalidRangeEvidence] {
-            assert_eq!(core_failure(&storage, rejection), ImportError::StorageIndeterminate);
-            assert_eq!(core_failure(&unknown, rejection), ImportError::StorageIndeterminate);
+        for rejection in [
+            ImportError::InvalidEventEvidence,
+            ImportError::InvalidRangeEvidence,
+        ] {
+            assert_eq!(
+                core_failure(&storage, rejection),
+                ImportError::StorageIndeterminate
+            );
+            assert_eq!(
+                core_failure(&unknown, rejection),
+                ImportError::StorageIndeterminate
+            );
             assert_eq!(core_failure(&verdict, rejection), rejection);
         }
     }

@@ -132,7 +132,8 @@ impl MemoryStore {
 
     fn import_registration_held(&self, record: &ForkClassifierRegistrationV1) -> bool {
         let operation_id = record.input().operation_id;
-        self.fork_classifier_registrations.contains_key(&operation_id)
+        self.fork_classifier_registrations
+            .contains_key(&operation_id)
     }
 
     fn import_operation_held(&self, record: &ForkAppendOperationV1) -> bool {
@@ -159,9 +160,7 @@ impl MemoryStore {
         let operation_id = operation.operation_id;
         self.fork_publication_bindings
             .contains_key(&(plan.child(), plan.final_head()))
-            || self
-                .fork_publication_operations
-                .contains_key(&operation_id)
+            || self.fork_publication_operations.contains_key(&operation_id)
             || self
                 .imported_fork_publication_operations
                 .contains_key(&operation_id)
@@ -238,8 +237,10 @@ impl MemoryStore {
                 .or_insert_with(|| graph.source.clone());
             self.fork_classifier_tables
                 .insert(plan.child(), graph.table.clone());
-            self.fork_classifier_registrations
-                .insert(graph.registration.input().operation_id, graph.registration.clone());
+            self.fork_classifier_registrations.insert(
+                graph.registration.input().operation_id,
+                graph.registration.clone(),
+            );
         }
     }
 
@@ -354,7 +355,12 @@ impl ImportBackendV1 for MemoryStore {
                 .map(ForkPublicationBindingV1::to_canonical_cbor),
             publication_artifact: self
                 .fork_publication_artifacts
-                .get(&closure.publication_artifact().input().signed_manifest_record_id)
+                .get(
+                    &closure
+                        .publication_artifact()
+                        .input()
+                        .signed_manifest_record_id,
+                )
                 .map(ForkPublicationArtifactV1::to_canonical_cbor),
             key_record: evidence.map(|row| row.record.to_canonical_cbor()),
             key_tombstone: evidence
@@ -666,7 +672,9 @@ mod tests {
                     ..graph.source.input().clone()
                 })?;
                 let digest = s.keys.source_digest;
-                s.store.imported_fork_classifier_sources.insert(digest, other);
+                s.store
+                    .imported_fork_classifier_sources
+                    .insert(digest, other);
                 Ok(())
             },
             |s| {
@@ -724,7 +732,9 @@ mod tests {
             source.room_revision_descriptor_hash,
             source.registrar_identifier.clone(),
         );
-        store.fork_classifier_sources.insert(key.clone(), local.clone());
+        store
+            .fork_classifier_sources
+            .insert(key.clone(), local.clone());
         store.import_verified(&request_for(&world, &built))?;
         assert_eq!(store.fork_classifier_sources.get(&key), Some(&local));
         assert_eq!(store.fork_classifier_sources.len(), 1);
@@ -848,7 +858,9 @@ mod tests {
                 let record = PrincipalOwnerBindingV1::new(
                     closure.principal_owner_binding().input().clone(),
                 )?;
-                store.fork_principal_owner_bindings.insert(hash(0xee), record);
+                store
+                    .fork_principal_owner_bindings
+                    .insert(hash(0xee), record);
                 Ok(())
             },
         ];
@@ -893,7 +905,9 @@ mod tests {
                 store
                     .fork_publication_artifacts
                     .insert(keys.record_id, record.clone());
-                store.fork_publication_artifacts.insert(hash(0xee), record.clone());
+                store
+                    .fork_publication_artifacts
+                    .insert(hash(0xee), record.clone());
                 Ok(())
             },
             |store, closure, _keys| {
@@ -952,8 +966,14 @@ mod tests {
         assert_ne!(one, two);
         assert!(store.fork_principal_owner_bindings.is_empty());
         assert_eq!(store.imported_fork_principal_owner_bindings.len(), 2);
-        assert_eq!(store.import_verified(&request_for(&world, &initial)), Ok(one));
-        assert_eq!(store.import_verified(&request_for(&world, &second)), Ok(two));
+        assert_eq!(
+            store.import_verified(&request_for(&world, &initial)),
+            Ok(one)
+        );
+        assert_eq!(
+            store.import_verified(&request_for(&world, &second)),
+            Ok(two)
+        );
         Ok(())
     }
 
@@ -991,7 +1011,9 @@ mod tests {
                 origin: pos_core::ForkAuthorityOriginV1::Local,
             })?;
             let mut store = prepared(&world, &built)?;
-            store.fork_principal_owner_bindings.insert(hash(0x22), local);
+            store
+                .fork_principal_owner_bindings
+                .insert(hash(0x22), local);
             let outcome = store.import_verified(&request_for(&world, &built));
             assert_eq!(outcome.err(), expected, "{creator}");
             assert_eq!(store.fork_principal_owner_bindings.len(), 1);

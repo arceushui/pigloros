@@ -297,7 +297,10 @@ fn read_publication_rows(
 ) -> rusqlite::Result<[Option<Vec<u8>>; 3]> {
     let closure = plan.closure();
     let operation_id = closure.publication_operation().fields().operation_id;
-    let record_id = closure.publication_artifact().input().signed_manifest_record_id;
+    let record_id = closure
+        .publication_artifact()
+        .input()
+        .signed_manifest_record_id;
     let binding = conn
         .query_row(
             PUBLICATION_BINDING_SQL,
@@ -321,14 +324,15 @@ fn read_key_evidence(
     import_operation_id: Hash,
 ) -> rusqlite::Result<KeyEvidenceRowsV1> {
     let row = conn
-        .query_row(KEY_EVIDENCE_SQL, params![blob(import_operation_id)], |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, Option<Vec<u8>>>(1)?,
-            ))
-        })
+        .query_row(
+            KEY_EVIDENCE_SQL,
+            params![blob(import_operation_id)],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
+        )
         .optional()?;
-    Ok(row.map_or((None, None), |(record, tombstone)| (Some(record), tombstone)))
+    Ok(row.map_or((None, None), |(record, tombstone)| {
+        (Some(record), tombstone)
+    }))
 }
 
 fn insert_authority_rows(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::Result<()> {
@@ -346,7 +350,10 @@ fn insert_authority_rows(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlit
     )?;
     conn.execute(
         "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES (?1, ?2)",
-        params![child_key(plan.child()), closure.fork_admission().to_canonical_cbor()],
+        params![
+            child_key(plan.child()),
+            closure.fork_admission().to_canonical_cbor()
+        ],
     )?;
     Ok(())
 }
@@ -356,13 +363,19 @@ fn insert_event_rows(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::R
     for record in closure.event_origins() {
         conn.execute(
             "INSERT INTO fork_event_origins (event_id, eor1_cbor) VALUES (?1, ?2)",
-            params![event_key(record.input().event_id), record.to_canonical_cbor()],
+            params![
+                event_key(record.input().event_id),
+                record.to_canonical_cbor()
+            ],
         )?;
     }
     for record in closure.intervention_admissions() {
         conn.execute(
             "INSERT INTO fork_intervention_admissions (event_id, fia1_cbor) VALUES (?1, ?2)",
-            params![event_key(record.input().event_id), record.to_canonical_cbor()],
+            params![
+                event_key(record.input().event_id),
+                record.to_canonical_cbor()
+            ],
         )?;
     }
     let sequences = plan.local_sequences();
@@ -390,7 +403,10 @@ fn insert_classifier_rows(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqli
     conn.execute(
         "INSERT OR IGNORE INTO imported_fork_classifier_sources (fcs1_digest, fcs1_cbor)
          VALUES (?1, ?2)",
-        params![blob(graph.source.digest()), graph.source.to_canonical_cbor()],
+        params![
+            blob(graph.source.digest()),
+            graph.source.to_canonical_cbor()
+        ],
     )?;
     conn.execute(
         "INSERT INTO fork_classifier_tables (child_id, fct1_digest, fct1_cbor)
@@ -421,7 +437,11 @@ fn insert_publication_rows(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusql
     conn.execute(
         "INSERT INTO fork_publication_operations (operation_id, record_id, fpo1_cbor)
          VALUES (?1, ?2, ?3)",
-        params![blob(operation_id), blob(record_id), operation.to_canonical_cbor()],
+        params![
+            blob(operation_id),
+            blob(record_id),
+            operation.to_canonical_cbor()
+        ],
     )?;
     conn.execute(
         "INSERT INTO fork_publication_bindings
@@ -455,7 +475,11 @@ fn insert_admission_rows(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlit
     conn.execute(
         "INSERT INTO imported_fork_key_evidence (import_operation_id, ikr1_cbor, ikt1_cbor)
          VALUES (?1, ?2, ?3)",
-        params![operation_id, plan.key_record().to_canonical_cbor(), tombstone],
+        params![
+            operation_id,
+            plan.key_record().to_canonical_cbor(),
+            tombstone
+        ],
     )?;
     conn.execute(
         "INSERT INTO imported_fork_attribution_admissions
@@ -500,19 +524,25 @@ impl ImportBackendV1 for SqliteStore {
     ) -> Result<Option<StoredImportV1>, ImportError> {
         let row = self
             .conn
-            .query_row(STORED_IMPORT_SQL, params![blob(import_operation_id)], |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, [u8; 32]>(2)?,
-                ))
-            })
+            .query_row(
+                STORED_IMPORT_SQL,
+                params![blob(import_operation_id)],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, [u8; 32]>(2)?,
+                    ))
+                },
+            )
             .optional()?;
-        Ok(row.map(|(admission_bytes, envelope_bytes, digest)| StoredImportV1 {
-            admission_bytes,
-            envelope_bytes,
-            envelope_digest: Hash::from_bytes(digest),
-        }))
+        Ok(
+            row.map(|(admission_bytes, envelope_bytes, digest)| StoredImportV1 {
+                admission_bytes,
+                envelope_bytes,
+                envelope_digest: Hash::from_bytes(digest),
+            }),
+        )
     }
 
     fn has_key_evidence(&self, import_operation_id: Hash) -> Result<bool, ImportError> {
@@ -525,7 +555,11 @@ impl ImportBackendV1 for SqliteStore {
 
     fn read_installed(&self, plan: &InstallPlanV1<'_>) -> Result<InstalledRowsV1, ImportError> {
         let conn = &self.conn;
-        let binding = plan.closure().principal_owner_binding().input().operation_id;
+        let binding = plan
+            .closure()
+            .principal_owner_binding()
+            .input()
+            .operation_id;
         let [source, table, registration] = read_classifier_rows(conn, plan)?;
         let [publication_operation, publication_binding, publication_artifact] =
             read_publication_rows(conn, plan)?;
@@ -719,7 +753,9 @@ mod tests {
     fn row_count(store: &SqliteStore, table: &str) -> rusqlite::Result<i64> {
         store
             .conn
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
     }
 
     fn assert_nothing_installed(store: &SqliteStore, world: &World) -> Fallible<()> {
@@ -737,7 +773,10 @@ mod tests {
             assert!(row_count(&imported.store, table)? >= 1, "{table} is empty");
         }
         assert_eq!(row_count(&imported.store, "fork_append_operations")?, 4);
-        assert_eq!(row_count(&imported.store, "fork_intervention_admissions")?, 2);
+        assert_eq!(
+            row_count(&imported.store, "fork_intervention_admissions")?,
+            2
+        );
         Ok(())
     }
 
@@ -1008,9 +1047,18 @@ mod tests {
         let two = store.import_verified(&request_for(&world, &second))?;
         assert_ne!(one, two);
         assert_eq!(row_count(&store, "fork_principal_owner_bindings")?, 0);
-        assert_eq!(row_count(&store, "imported_fork_principal_owner_bindings")?, 2);
-        assert_eq!(store.import_verified(&request_for(&world, &initial)), Ok(one));
-        assert_eq!(store.import_verified(&request_for(&world, &second)), Ok(two));
+        assert_eq!(
+            row_count(&store, "imported_fork_principal_owner_bindings")?,
+            2
+        );
+        assert_eq!(
+            store.import_verified(&request_for(&world, &initial)),
+            Ok(one)
+        );
+        assert_eq!(
+            store.import_verified(&request_for(&world, &second)),
+            Ok(two)
+        );
         Ok(())
     }
 
@@ -1029,7 +1077,10 @@ mod tests {
         let outcome = store.import_verified(&request_for(&world, &other));
         assert_eq!(outcome, Err(ImportError::Conflict));
         assert_eq!(store.get_timeline(world.child_at(1)?.id)?, None);
-        assert_eq!(row_count(&store, "imported_fork_principal_owner_bindings")?, 1);
+        assert_eq!(
+            row_count(&store, "imported_fork_principal_owner_bindings")?,
+            1
+        );
         Ok(())
     }
 
@@ -1041,14 +1092,13 @@ mod tests {
             ("creator-a", None),
             ("creator-b", Some(ImportError::Conflict)),
         ] {
-            let local = pos_core::PrincipalOwnerBindingV1::new(
-                pos_core::PrincipalOwnerBindingInputV1 {
+            let local =
+                pos_core::PrincipalOwnerBindingV1::new(pos_core::PrincipalOwnerBindingInputV1 {
                     operation_id: hash(0x5a),
                     principal_digest: hash(0x22),
                     owner: pos_core::OwnerIdV1::new(creator)?,
                     origin: pos_core::ForkAuthorityOriginV1::Local,
-                },
-            )?;
+                })?;
             let mut store = prepared(&world, &built)?;
             store.conn.execute(
                 "INSERT INTO fork_principal_owner_bindings
@@ -1077,9 +1127,9 @@ mod tests {
         })?;
         let mut store = prepared(&world, &initial)?;
         store.import_verified(&request_for(&world, &initial))?;
-        store.conn.execute_batch(
-            "UPDATE imported_fork_principal_owner_bindings SET pob1_cbor = x'00'",
-        )?;
+        store
+            .conn
+            .execute_batch("UPDATE imported_fork_principal_owner_bindings SET pob1_cbor = x'00'")?;
         let outcome = store.import_verified(&request_for(&world, &second));
         assert_eq!(outcome, Err(CORRUPT));
         Ok(())

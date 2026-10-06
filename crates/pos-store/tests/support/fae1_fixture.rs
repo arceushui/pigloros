@@ -24,17 +24,17 @@ use pos_core::{
     ForkAttributionIssuerStateV1, ForkAttributionIssuerV1, ForkAttributionOriginV1,
     ForkAuthorityOriginV1, ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1,
     ForkClassifierSourceInputV1, ForkClassifierSourceV1, ForkClassifierTableInputV1,
-    ForkClassifierTableV1, ForkEventClassifierV1, ForkEventEvidenceV1,
-    ForkEventSourceDescriptorV1, ForkExternalInputRouteV1, ForkInterventionAdmissionV1,
-    ForkPublicationArtifactInputV1, ForkPublicationArtifactV1, ForkPublicationBindingInputV1,
-    ForkPublicationBindingV1, ForkPublicationOperationInputV1, ForkPublicationOperationV1,
-    ForkReproManifestInputV1, ForkReproManifestV1, ForkTimelineImportInputV1,
-    ForkTimelineImportV1, Hash, ImportedForkAdmissionRecordV1, ImportedForkClassifierGraphV1,
+    ForkClassifierTableV1, ForkEventClassifierV1, ForkEventEvidenceV1, ForkEventSourceDescriptorV1,
+    ForkExternalInputRouteV1, ForkInterventionAdmissionV1, ForkPublicationArtifactInputV1,
+    ForkPublicationArtifactV1, ForkPublicationBindingInputV1, ForkPublicationBindingV1,
+    ForkPublicationOperationInputV1, ForkPublicationOperationV1, ForkReproManifestInputV1,
+    ForkReproManifestV1, ForkTimelineImportInputV1, ForkTimelineImportV1, Hash,
+    ImportedForkAdmissionRecordV1, ImportedForkClassifierGraphV1,
     ImportedForkPublicationOperationV1, ImportedKeyRecordV1, ImportedKeyTombstoneV1,
     ImportedPrincipalOwnerBindingV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1,
-    KeyRoleV1, Kind, OwnerIdV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1,
-    PublicKey, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq,
-    Signature, SignedForkReproManifestV1, TimelineEventEnvelopeV1, TimelineId, TimelineMeta,
+    KeyRoleV1, Kind, OwnerIdV1, PrincipalOwnerBindingInputV1, PrincipalOwnerBindingV1, PublicKey,
+    RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, Signature,
+    SignedForkReproManifestV1, TimelineEventEnvelopeV1, TimelineId, TimelineMeta,
 };
 use pos_crypto::key_roles::{
     sign_for_registered_role, sign_timeline_event_for_registered_role, SigningKeyMaterial,
@@ -421,7 +421,10 @@ impl World {
                 payload,
             )?;
         }
-        let anchors = vec![(timeline_identity, timeline_material.public_verification_key())];
+        let anchors = vec![(
+            timeline_identity,
+            timeline_material.public_verification_key(),
+        )];
         let mut world = Self {
             source,
             root,
@@ -475,7 +478,9 @@ impl World {
     /// # Errors
     /// Returns an error when there is no such child.
     pub fn child_at(&self, index: usize) -> Fallible<&Child> {
-        self.children.get(index).ok_or_else(|| "no such child".into())
+        self.children
+            .get(index)
+            .ok_or_else(|| "no such child".into())
     }
 
     /// The exact own-segment export of the root, the destination parent.
@@ -635,11 +640,13 @@ impl World {
             key_tombstone,
             evidence,
             timeline_import: Self::timeline_import(child, spec)?,
-            classifier: graph.as_ref().map(|graph| ForkAttributionClassifierRecordsV1 {
-                source: graph.source.to_canonical_cbor(),
-                table: graph.table.to_canonical_cbor(),
-                registration: graph.registration.to_canonical_cbor(),
-            }),
+            classifier: graph
+                .as_ref()
+                .map(|graph| ForkAttributionClassifierRecordsV1 {
+                    source: graph.source.to_canonical_cbor(),
+                    table: graph.table.to_canonical_cbor(),
+                    registration: graph.registration.to_canonical_cbor(),
+                }),
             operations: derived
                 .iter()
                 .map(|record| record.operation.to_canonical_cbor())
@@ -769,7 +776,9 @@ impl World {
         let payload = CanonicalBytes::from_vec(manifest.to_canonical_cbor());
         let identity = attribution_identity(spec.creator, 1);
         let signature = sign_for_registered_role(&mut registry, &signer, identity, &payload)?;
-        Ok(SignedForkReproManifestV1::new(identity, manifest, signature)?)
+        Ok(SignedForkReproManifestV1::new(
+            identity, manifest, signature,
+        )?)
     }
 }
 
@@ -847,10 +856,7 @@ pub fn pinned_policy(
 ///
 /// # Errors
 /// Returns the store error.
-pub fn own_events(
-    store: &dyn EventStore,
-    timeline: TimelineId,
-) -> Fallible<Vec<pos_core::Event>> {
+pub fn own_events(store: &dyn EventStore, timeline: TimelineId) -> Fallible<Vec<pos_core::Event>> {
     Ok(store.read_own(timeline, SeqRange::all())?)
 }
 
