@@ -41,6 +41,18 @@ pub const FORWARDED_ENVIRONMENT: &[&str] = if cfg!(coverage) {
     &[]
 };
 
+/// Environment variables a coverage-instrumented worker's own runtime sets in
+/// itself at startup; the worker accepts them although nothing forwards them.
+///
+/// The LLVM profile runtime marks its initialisation in the environment, so an
+/// instrumented worker always sees this name. It is empty in production
+/// builds, which have no such runtime.
+pub const RUNTIME_ENVIRONMENT: &[&str] = if cfg!(coverage) {
+    &["__LLVM_PROFILE_RT_INIT_ONCE"]
+} else {
+    &[]
+};
+
 /// Data-segment bytes the worker runtime needs beyond guest memory and the
 /// request: the compiled Component, the engine and the process itself.
 const WORKER_RUNTIME_DATA_BYTES: u64 = 512 * MIB as u64;

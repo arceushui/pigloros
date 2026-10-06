@@ -6,7 +6,8 @@
 //!    leaves that process as its parent. `PR_SET_PDEATHSIG` with `SIGKILL`
 //!    kills the worker when the supervisor exits; the parent check closes the
 //!    race in which the supervisor exited before the signal was bound;
-//! 2. its environment holds only [`FORWARDED_ENVIRONMENT`] names;
+//! 2. its environment holds only [`FORWARDED_ENVIRONMENT`] names and the
+//!    [`RUNTIME_ENVIRONMENT`] names its own coverage runtime sets;
 //! 3. its open descriptors are exactly standard input, output and error.
 //!
 //! These calls are safe `rustix` wrappers; the worker needs no `unsafe` code.
@@ -25,7 +26,7 @@ use crate::frame::{read_frame, write_frame, WorkerFrameLimitsV1};
 use crate::ipc::{
     decode_worker_request_v1, encode_worker_response_v1, WorkerOutcomeV1, WorkerRequestV1,
 };
-use crate::launch::FORWARDED_ENVIRONMENT;
+use crate::launch::{FORWARDED_ENVIRONMENT, RUNTIME_ENVIRONMENT};
 
 /// Why a worker process refused to serve its invocation.
 ///
@@ -87,12 +88,17 @@ fn bind_to_parent(parent: Pid) -> Result<(), WorkerProcessErrorV1> {
         .ok_or(WorkerProcessErrorV1::Parent)
 }
 
-/// Every environment name must be one the supervisor forwards.
+/// Every environment name must be forwarded or set by the worker's runtime.
 fn verify_environment(
     mut names: impl Iterator<Item = OsString>,
 ) -> Result<(), WorkerProcessErrorV1> {
     names
-        .all(|name| FORWARDED_ENVIRONMENT.iter().any(|allowed| name == *allowed))
+        .all(|name| {
+            [FORWARDED_ENVIRONMENT, RUNTIME_ENVIRONMENT]
+                .into_iter()
+                .flatten()
+                .any(|allowed| name == *allowed)
+        })
         .then_some(())
         .ok_or(WorkerProcessErrorV1::Environment)
 }
@@ -193,6 +199,13 @@ mod tests {
         let forwarded = FORWARDED_ENVIRONMENT.iter().map(OsString::from);
         assert_eq!(verify_environment(forwarded), Ok(()));
         assert_eq!(verify_environment(std::iter::empty()), Ok(()));
+        // The profile runtime's own marker is accepted only in a coverage build.
+        let marker = std::iter::once(OsString::from("__LLVM_PROFILE_RT_INIT_ONCE"));
+        assert_eq!(verify_environment(marker).is_ok(), cfg!(coverage));
+        assert_eq!(
+            RUNTIME_ENVIRONMENT.contains(&"__LLVM_PROFILE_RT_INIT_ONCE"),
+            cfg!(coverage)
+        );
         let extra = std::iter::once(OsString::from("PATH"));
         assert_eq!(
             verify_environment(extra),

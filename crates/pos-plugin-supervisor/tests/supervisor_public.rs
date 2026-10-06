@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use pos_plugin_supervisor::test_support::{self, negotiated_with, ok, METERING, SMALL_BUDGET};
 use pos_plugin_supervisor::{
     CommunityPluginSupervisorV1, WorkerProgramV1, WorkerResourceCeilingsV1, FORWARDED_ENVIRONMENT,
+    RUNTIME_ENVIRONMENT,
 };
 use pos_runtime::community_plugin_host::{
     CommunityPluginHostErrorV1, ComponentTrapClassV1, HostInputs, InvocationReportV1,
@@ -79,7 +80,7 @@ fn the_worker_sees_a_scrubbed_environment_and_only_its_pipes() {
         environment
             .split(',')
             .filter(|name| !name.is_empty())
-            .all(|name| FORWARDED_ENVIRONMENT.contains(&name)),
+            .all(|name| FORWARDED_ENVIRONMENT.contains(&name) || RUNTIME_ENVIRONMENT.contains(&name)),
         "{environment}"
     );
     assert!(std::env::vars_os().next().is_some());
