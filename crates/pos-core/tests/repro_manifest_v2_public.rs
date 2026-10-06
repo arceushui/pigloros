@@ -1,8 +1,8 @@
-use ciborium::value::Value as Cbor;
+use ciborium::value::{Integer, Value as Cbor};
 use pos_core::{
     checked_repro_manifest_v2_input_len, AdapterRecord, Hash, ManifestPluginEntryV1,
     ManifestPluginFieldV1, ManifestPluginRosterErrorV1, ManifestPluginRosterV1, PluginId,
-    ReproManifestV2, ReproManifestV2Error, TimelineId, WallTime,
+    ReproManifest, ReproManifestV2, ReproManifestV2Error, TimelineId, WallTime,
     MAX_REPRO_MANIFEST_V2_ADAPTER_RECORDS, MAX_REPRO_MANIFEST_V2_INPUT_BYTES,
 };
 use serde_json::{json, Value as Json};
@@ -36,6 +36,7 @@ const CBOR_REQUIRED: [&str; 5] = [
 ];
 const CAP: usize = MAX_REPRO_MANIFEST_V2_ADAPTER_RECORDS;
 const ENTRIES: &str = "manifest_plugin_entries";
+const VERSION: &str = "manifest_format_version";
 
 fn unsupported(found: Option<u64>) -> Failure {
     Failure::UnsupportedManifestVersion { found }
@@ -344,6 +345,63 @@ fn legacy_json() -> Json {
     })
 }
 
+// A real old manifest, built with the real type's constructors and field.
+fn old_manifest(label: Option<&str>) -> ReproManifest {
+    let mut old = ReproManifest::new(
+        timeline(),
+        Hash::from_bytes([9; 32]),
+        WallTime::from_micros(1),
+    );
+    old.label = label.map(str::to_owned);
+    old
+}
+
+fn old_cbor_pairs(old: &ReproManifest) -> TestResult<Vec<(Cbor, Cbor)>> {
+    match Cbor::serialized(old)? {
+        Cbor::Map(pairs) => Ok(pairs),
+        _ => Err("an old manifest serializes as a map".into()),
+    }
+}
+
+fn cbor_bytes(value: &Cbor) -> TestResult<Vec<u8>> {
+    let mut out = Vec::new();
+    ciborium::into_writer(value, &mut out)?;
+    Ok(out)
+}
+
+const GOLDEN: &str = "{\"adapter_records\":[{\"call_index\":3,\"input_hash\":\"@I@\",\
+\"output_hash\":\"@O@\",\"plugin_id\":\"@P@\",\"wall_time\":77}],\"created_at\":5,\
+\"head_hash\":\"@H@\",\"label\":\"x\",\"manifest_format_version\":2,\
+\"manifest_plugin_entries\":[{\"closure_bytes\":\"AQ==\",\"eop1_digest\":\"@D@\",\
+\"plugin_id\":\"@E@\",\"plugin_name\":\"Sensor\",\"plugin_version\":\"1.0.0\",\
+\"stable_slot\":\"sensor.a\"}],\"manifest_plugin_roster_version\":1,\
+\"timeline_id\":\"@T@\"}";
+const GOLDEN_FILL: [(&str, u8, usize); 7] = [
+    ("@I@", 5, 32),
+    ("@O@", 6, 32),
+    ("@P@", 5, 16),
+    ("@H@", 9, 32),
+    ("@D@", 1, 32),
+    ("@E@", 1, 16),
+    ("@T@", 7, 16),
+];
+
+fn hex(byte: u8, count: usize) -> String {
+    format!("{byte:02x}").repeat(count)
+}
+
+// Values that are well-formed but are never a valid unsigned integer, in CBOR.
+fn other_cbor_values() -> TestResult<Vec<Cbor>> {
+    let beyond_i64 = Integer::try_from(i128::from(i64::MIN) - 1)?;
+    Ok(vec![
+        Cbor::Null,
+        Cbor::Bool(true),
+        Cbor::Float(2.0),
+        Cbor::Integer((-1_i64).into()),
+        Cbor::Integer(beyond_i64),
+    ])
+}
+
 #[test]
 fn json_round_trip_keeps_same_name_rows_digests_and_closures() -> TestResult {
     let source = manifest()?;
@@ -485,7 +543,7 @@ fn a_roster_of_exactly_256_entries_round_trips() -> TestResult {
 }
 
 #[test]
-fn json_with_more_than_256_roster_entries_is_rejected_before_parsing_them() -> TestResult {
+fn json_roster_count_is_checked_before_any_entry_is_decoded() -> TestResult {
     let too_many = Json::Array(vec![json!(0); 257]);
     let failure = top_fail(ENTRIES, too_many)?;
     assert_eq!(failure, Failure::Roster(RosterFailure::RosterTooLarge));
@@ -508,8 +566,76 @@ fn old_and_missing_version_json_documents_are_unsupported() -> TestResult {
     assert_eq!(quoted, unsupported(None));
     let three = top_fail("manifest_format_version", json!(3))?;
     assert_eq!(three, unsupported(Some(3)));
-    let float = top_fail("manifest_format_version", json!(2.0))?;
-    assert_eq!(float, malformed("JSON"));
+    for other in [json!(2.0), json!(null), json!(true), json!(-2)] {
+        assert_eq!(top_fail(VERSION, other)?, unsupported(None));
+    }
+    Ok(())
+}
+
+#[test]
+fn real_old_manifests_report_an_unsupported_version_in_both_transports() -> TestResult {
+    for label in [None, Some("old-run")] {
+        let old = old_manifest(label);
+        let json = serde_json::to_string(&old)?;
+        assert_eq!(json.contains("\"label\":null"), label.is_none());
+        assert_eq!(text_fail(&json)?, unsupported(None));
+        let pairs = old_cbor_pairs(&old)?;
+        let null_label = pairs.contains(&(text("label"), Cbor::Null));
+        assert_eq!(null_label, label.is_none());
+        let cbor = cbor_bytes(&Cbor::Map(pairs))?;
+        let failure = rejection(ReproManifestV2::from_cbor(&cbor))?;
+        assert_eq!(failure, unsupported(None));
+    }
+    let mut versioned = serde_json::to_value(old_manifest(None))?;
+    versioned[VERSION] = json!(1);
+    assert_eq!(text_fail(&versioned.to_string())?, unsupported(Some(1)));
+    Ok(())
+}
+
+#[test]
+fn real_old_manifests_with_a_roster_are_ambiguous_in_both_transports() -> TestResult {
+    for label in [None, Some("old-run")] {
+        let old = old_manifest(label);
+        let mut doc = serde_json::to_value(&old)?;
+        doc[ENTRIES] = json!([]);
+        assert_eq!(text_fail(&doc.to_string())?, ambiguous(ENTRIES));
+        let mut pairs = old_cbor_pairs(&old)?;
+        pairs.push((text("manifest_plugin_roster"), Cbor::Bytes(Vec::new())));
+        let cbor = cbor_bytes(&Cbor::Map(pairs))?;
+        let failure = rejection(ReproManifestV2::from_cbor(&cbor))?;
+        assert_eq!(failure, ambiguous("manifest_plugin_roster"));
+    }
+    Ok(())
+}
+
+#[test]
+fn null_bool_float_and_negative_values_fail_their_field_in_cbor() -> TestResult {
+    for other in other_cbor_values()? {
+        let label = cbor_set("label", other.clone())?;
+        assert_eq!(invalid_of(&label), Some("label"));
+        let created = cbor_set("created_at", other)?;
+        assert_eq!(invalid_of(&created), Some("created_at"));
+    }
+    Ok(())
+}
+
+#[test]
+fn json_text_is_pinned_exactly() -> TestResult {
+    // serde_json sorts object keys unless its `preserve_order` feature is on; this pins the text.
+    let roster = ManifestPluginRosterV1::new(vec![entry("sensor.a", 1, &[1])?])?;
+    let source = ReproManifestV2::new(
+        timeline(),
+        Hash::from_bytes([9; 32]),
+        WallTime::from_micros(5),
+        roster,
+        vec![record(5, 3, 77)],
+        Some("x".to_owned()),
+    )?;
+    let mut expected = GOLDEN.to_owned();
+    for (token, byte, count) in GOLDEN_FILL {
+        expected = expected.replace(token, &hex(byte, count));
+    }
+    assert_eq!(source.to_json()?, expected);
     Ok(())
 }
 
@@ -540,8 +666,11 @@ fn old_missing_version_and_mixed_cbor_documents_are_rejected() -> TestResult {
         ("plugin_versions", Cbor::Map(Vec::new())),
     ];
     assert_eq!(cbor_fail(&old)?, unsupported(None));
-    let version = "manifest_format_version";
+    let version = VERSION;
     assert_eq!(cbor_set(version, uint(1))?, unsupported(Some(1)));
+    for other in other_cbor_values()? {
+        assert_eq!(cbor_set(version, other)?, unsupported(None));
+    }
     assert_eq!(cbor_set(version, text("2"))?, unsupported(None));
     for name in LEGACY {
         let failure = cbor_add(name, Cbor::Map(Vec::new()))?;
@@ -634,8 +763,14 @@ fn json_top_level_values_must_have_the_documented_shape() -> TestResult {
     assert_eq!(invalid_of(&records), Some("adapter_records"));
     let label = top_fail("label", json!(5))?;
     assert_eq!(invalid_of(&label), Some("label"));
-    assert_eq!(top_fail("label", Json::Null)?, malformed("JSON"));
-    assert_eq!(top_fail("created_at", json!(-1))?, malformed("JSON"));
+    let null_label = top_fail("label", Json::Null)?;
+    assert_eq!(invalid_of(&null_label), Some("label"));
+    let negative = top_fail("created_at", json!(-1))?;
+    assert_eq!(invalid_of(&negative), Some("created_at"));
+    let float = top_fail("created_at", json!(1.5))?;
+    assert_eq!(invalid_of(&float), Some("created_at"));
+    let flag = top_fail("head_hash", json!(true))?;
+    assert_eq!(invalid_of(&flag), Some("head_hash"));
     Ok(())
 }
 
@@ -763,6 +898,8 @@ fn input_size_cap_is_checked_before_parsing() -> TestResult {
     assert_eq!(over, Err(refusal.clone()));
     let way_over = checked_repro_manifest_v2_input_len(usize::MAX);
     assert_eq!(way_over, Err(refusal.clone()));
+    // One 1.5 GiB buffer feeds both transports. The zeroing is lazy (calloc-backed), so the pages
+    // are never touched: the cap check must refuse before any byte is read.
     let huge = vec![0_u8; max + 1];
     assert_eq!(rejection(ReproManifestV2::from_json(&huge))?, refusal);
     assert_eq!(rejection(ReproManifestV2::from_cbor(&huge))?, refusal);
@@ -810,6 +947,9 @@ fn labels_are_bounded_to_256_utf8_bytes_in_both_transports() -> TestResult {
     let refusal = Failure::LabelTooLong { len: 257 };
     assert_eq!(top_fail("label", json!(long))?, refusal);
     assert_eq!(cbor_set("label", text(&long))?, refusal);
+    // Longer than the CBOR decoder's scratch buffer, so the text arrives as an owned string.
+    let owned = cbor_set("label", text(&"a".repeat(5000)))?;
+    assert_eq!(owned, Failure::LabelTooLong { len: 5000 });
     let multibyte = top_fail("label", json!("é".repeat(129)))?;
     assert_eq!(multibyte, Failure::LabelTooLong { len: 258 });
     Ok(())
@@ -869,5 +1009,13 @@ fn json_documents_must_be_one_object_without_trailing_text() -> TestResult {
 #[test]
 fn too_many_elements_message_names_the_field_and_limit() {
     let message = streaming().to_string();
-    assert!(message.contains("an array has more than 1048576 elements"));
+    let needle = "an array has more than 1048576 elements: keep at most 1048576";
+    assert!(message.contains(needle));
+    let built = Failure::TooManyElements {
+        field: "adapter_records",
+        max: CAP,
+    };
+    let message = built.to_string();
+    let needle = "adapter_records has more than 1048576 elements";
+    assert!(message.contains(needle));
 }

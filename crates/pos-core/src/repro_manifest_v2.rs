@@ -11,15 +11,34 @@
 //!
 //! # Example
 //!
-//! ```text
-//! let roster = ManifestPluginRosterV1::new(vec![sensor_b, sensor_a])?;
+//! ```
+//! # use pos_core::{
+//! #     Hash, ManifestPluginEntryV1, ManifestPluginRosterV1, PluginId, ReproManifestV2,
+//! #     TimelineId, WallTime,
+//! # };
+//! # type Outcome<T> = Result<T, Box<dyn std::error::Error>>;
+//! # fn entry(slot: &str, byte: u8) -> Outcome<ManifestPluginEntryV1> {
+//! #     let id = PluginId::from_ulid(ulid::Ulid::from_bytes([byte; 16]));
+//! #     let digest = Hash::from_bytes([byte; 32]);
+//! #     Ok(ManifestPluginEntryV1::new(slot, id, "Sensor", "1.0.0", digest, vec![byte])?)
+//! # }
+//! # fn main() -> Outcome<()> {
+//! let roster = ManifestPluginRosterV1::new(vec![entry("sensor.b", 2)?, entry("sensor.a", 1)?])?;
+//! let timeline_id = TimelineId::from_ulid(ulid::Ulid::from_bytes([7; 16]));
 //! let manifest = ReproManifestV2::new(
-//!     timeline_id, head_hash, created_at, roster, Vec::new(), Some("run-1".to_owned()),
+//!     timeline_id,
+//!     Hash::from_bytes([9; 32]),
+//!     WallTime::from_micros(1_000_000),
+//!     roster,
+//!     Vec::new(),
+//!     Some("run-1".to_owned()),
 //! )?;
 //! let json = manifest.to_json()?;
 //! assert_eq!(ReproManifestV2::from_json(json.as_bytes())?, manifest);
 //! let cbor = manifest.to_cbor()?;
 //! assert_eq!(ReproManifestV2::from_cbor(&cbor)?, manifest);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # JSON layout
@@ -51,8 +70,20 @@
 //! # Bounds
 //!
 //! Whole JSON and CBOR inputs are at most 1.5 GiB, an MPR1 roster at most 1 GiB, `adapter_records`
-//! at most 1,048,576 and a label at most 256 UTF-8 bytes. Each bound is checked before the
-//! structure it limits is built.
+//! at most 1,048,576 and a label at most 256 UTF-8 bytes.
+//!
+//! The whole-input length is checked before any parsing, and an `adapter_records` array stops
+//! at its cap while it streams, so an oversized array is never built. The remaining limits (label,
+//! roster bytes and JSON roster entries) are checked after the generic document tree exists: the
+//! decoder holds each such string or byte string once, moved rather than copied, and the 1.5 GiB
+//! input cap is what bounds that memory.
+//!
+//! A document that is well-formed JSON or CBOR is classified before its shape is checked: null,
+//! boolean, float and negative values are kept as opaque values, so an old document (which
+//! serializes an absent `label` as null) reports `UnsupportedManifestVersion` or
+//! `AmbiguousLegacyManifest`. Such a value in a version-2 field fails that field with
+//! `InvalidField`; `InvalidEncoding` is kept for bytes that are not one well-formed document
+//! with a map on top.
 
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{json, Value};
@@ -97,6 +128,15 @@ const JSON_FIELDS: [&str; 8] = [
     ENTRIES,
 ];
 const CBOR_FIELDS: [&str; 7] = [VERSION, TIMELINE, HEAD, CREATED, RECORDS, LABEL, ROSTER];
+// Positions in `JSON_FIELDS` and `CBOR_FIELDS`; the two lists agree up to `AT_LABEL`.
+const AT_TIMELINE: usize = 1;
+const AT_HEAD: usize = 2;
+const AT_CREATED: usize = 3;
+const AT_RECORDS: usize = 4;
+const AT_LABEL: usize = 5;
+const AT_ROSTER_VERSION: usize = 6;
+const AT_ENTRIES: usize = 7;
+const AT_ROSTER: usize = 6;
 const ROSTER_FIELDS: [&str; 3] = [ROSTER_VERSION, ENTRIES, ROSTER];
 const LEGACY_FIELDS: [&str; 5] = [
     "plugin_versions",
@@ -113,6 +153,18 @@ const ENTRY_FIELDS: [&str; 6] = [
     "eop1_digest",
     "closure_bytes",
 ];
+// Positions in `ENTRY_FIELDS` and `RECORD_FIELDS`.
+const ENTRY_SLOT: usize = 0;
+const ENTRY_ID: usize = 1;
+const ENTRY_NAME: usize = 2;
+const ENTRY_VERSION: usize = 3;
+const ENTRY_DIGEST: usize = 4;
+const ENTRY_CLOSURE: usize = 5;
+const RECORD_ID: usize = 0;
+const RECORD_CALL: usize = 1;
+const RECORD_INPUT: usize = 2;
+const RECORD_OUTPUT: usize = 3;
+const RECORD_WALL: usize = 4;
 const RECORD_FIELDS: [&str; 5] = [
     "plugin_id",
     "call_index",
@@ -126,7 +178,7 @@ const BASE64_RULE: &str = "must be RFC 4648 base64 with padding, zero pad bits a
 const CBOR_RULE: &str = "must use the documented deterministic layout";
 const ROSTER_RULE: &str = "must be a byte string of canonical MPR1 bytes";
 const OBJECT_RULE: &str = "must be a map (a JSON object)";
-const TOO_MANY_MARKER: &str = "manifest array exceeds 1048576 elements";
+const TOO_MANY_MARKER: &str = "manifest array exceeds the element cap";
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
@@ -164,13 +216,12 @@ pub enum ReproManifestV2Error {
         /// `JSON` or `CBOR`.
         transport: &'static str,
     },
-    /// A list holds more elements than allowed.
+    /// An `adapter_records` list holds more elements than allowed.
     #[error(
-        "{field} has more than {max} elements: keep at most 1048576 adapter_records and at \
-         most 256 manifest_plugin_entries"
+        "{field} has more than {max} elements: keep at most {max}"
     )]
     TooManyElements {
-        /// The offending field, or `an array` when found while streaming.
+        /// The offending field, or `an array` when found while streaming; `max` is its limit.
         field: &'static str,
         /// The limit.
         max: usize,
@@ -341,8 +392,12 @@ impl ReproManifestV2 {
 
     /// Encode compact JSON.
     ///
+    /// Key order follows `serde_json`'s default sorted map; a golden test pins it.
+    ///
     /// # Errors
-    /// `InputTooLarge` when the text would exceed the 1.5 GiB cap.
+    /// `InputTooLarge` when the text would exceed the 1.5 GiB cap. A manifest holds at most a
+    /// 1 GiB roster and about 168 MB of records, so a value built through [`Self::new`] stays
+    /// far below the cap and this is a defensive bound, not a reachable path.
     pub fn to_json(&self) -> Result<String, ReproManifestV2Error> {
         let roster = &self.plugin_roster;
         let entries: Vec<Value> = roster.entries().iter().map(entry_json).collect();
@@ -360,8 +415,8 @@ impl ReproManifestV2 {
             document[LABEL] = label.as_str().into();
         }
         let text = document.to_string();
-        checked_repro_manifest_v2_input_len(text.len())?;
-        Ok(text)
+        let len = text.len();
+        checked_repro_manifest_v2_input_len(len).map(|_| text)
     }
 
     /// Decode strict JSON.
@@ -379,8 +434,15 @@ impl ReproManifestV2 {
     /// Encode the deterministic CBOR layout described in the module docs.
     ///
     /// # Errors
-    /// `InputTooLarge` when the bytes would exceed the 1.5 GiB cap.
+    /// `InputTooLarge` when the bytes would exceed the 1.5 GiB cap. As with JSON, that is a
+    /// defensive bound: the roster is at most 1 GiB and the records about 168 MB.
     pub fn to_cbor(&self) -> Result<Vec<u8>, ReproManifestV2Error> {
+        let out = self.encode_cbor();
+        let len = out.len();
+        checked_repro_manifest_v2_input_len(len).map(|_| out)
+    }
+
+    fn encode_cbor(&self) -> Vec<u8> {
         let mut out = Vec::new();
         put_head(&mut out, 5, 6 + u64::from(self.label.is_some()));
         if let Some(label) = &self.label {
@@ -402,8 +464,7 @@ impl ReproManifestV2 {
         put_bytes(&mut out, &self.plugin_roster.to_canonical_cbor());
         put_text(&mut out, VERSION);
         put_head(&mut out, 0, FORMAT_VERSION);
-        checked_repro_manifest_v2_input_len(out.len())?;
-        Ok(out)
+        out
     }
 
     /// Decode strict CBOR; the input must be the exact deterministic encoding.
@@ -420,7 +481,7 @@ impl ReproManifestV2 {
             return Err(malformed(Transport::Cbor));
         }
         let manifest = decode(raw, Transport::Cbor)?;
-        if manifest.to_cbor()? != bytes {
+        if manifest.encode_cbor() != bytes {
             return Err(non_canonical("manifest", CBOR_RULE));
         }
         Ok(manifest)
@@ -448,8 +509,8 @@ const fn malformed(transport: Transport) -> ReproManifestV2Error {
     }
 }
 
-fn bounded_text(text: &str) -> String {
-    text.chars().take(64).collect()
+fn bounded_text(value: &str) -> String {
+    value.chars().take(64).collect()
 }
 
 fn unknown_field(key: &str) -> ReproManifestV2Error {
@@ -496,6 +557,8 @@ impl Transport {
 // A generic document tree. Maps keep every pair, so duplicate keys survive until they are checked.
 enum Raw {
     Uint(u64),
+    // Null, boolean, float or negative integer: well-formed, but never a valid field value.
+    Other,
     Text(String),
     Bytes(Vec<u8>),
     Array(Vec<Raw>),
@@ -514,7 +577,31 @@ impl<'de> Visitor<'de> for RawVisitor {
     type Value = Raw;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("an unsigned integer, text, bytes, array or map")
+        formatter.write_str("a JSON or CBOR value")
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Raw, E> {
+        Ok(Raw::Other)
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Raw, E> {
+        Ok(Raw::Other)
+    }
+
+    fn visit_bool<E: de::Error>(self, _value: bool) -> Result<Raw, E> {
+        Ok(Raw::Other)
+    }
+
+    fn visit_f64<E: de::Error>(self, _value: f64) -> Result<Raw, E> {
+        Ok(Raw::Other)
+    }
+
+    fn visit_i64<E: de::Error>(self, _value: i64) -> Result<Raw, E> {
+        Ok(Raw::Other)
+    }
+
+    fn visit_i128<E: de::Error>(self, _value: i128) -> Result<Raw, E> {
+        Ok(Raw::Other)
     }
 
     fn visit_u64<E: de::Error>(self, value: u64) -> Result<Raw, E> {
@@ -525,8 +612,17 @@ impl<'de> Visitor<'de> for RawVisitor {
         Ok(Raw::Text(value.to_owned()))
     }
 
+    // Long strings arrive owned from the CBOR decoder; move them instead of copying.
+    fn visit_string<E: de::Error>(self, value: String) -> Result<Raw, E> {
+        Ok(Raw::Text(value))
+    }
+
     fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<Raw, E> {
         Ok(Raw::Bytes(value.to_vec()))
+    }
+
+    fn visit_byte_buf<E: de::Error>(self, value: Vec<u8>) -> Result<Raw, E> {
+        Ok(Raw::Bytes(value))
     }
 
     // Stop at the cap while streaming, so a huge array is never built.
@@ -551,6 +647,8 @@ impl<'de> Visitor<'de> for RawVisitor {
 }
 
 fn stream_error(transport: Transport, error: &impl fmt::Display) -> ReproManifestV2Error {
+    // The visitor reports the cap through `Error::custom`, which only carries text; the marker has
+    // no numbers, so it cannot drift from the cap constants.
     if error.to_string().contains(TOO_MANY_MARKER) {
         too_many("an array")
     } else {
@@ -565,13 +663,13 @@ fn decode(raw: Raw, transport: Transport) -> Result<ReproManifestV2, ReproManife
     gate(&pairs, transport)?;
     let fields = object(&pairs, transport.allowed())?;
     let (timeline_id, head_hash, created_at) = decode_head(&fields, transport)?;
-    let adapter_records = decode_records(required(fields[4], RECORDS)?, transport)?;
-    let label = fields[5]
+    let adapter_records = decode_records(required(fields[AT_RECORDS], RECORDS)?, transport)?;
+    let label = fields[AT_LABEL]
         .map(|raw| text(raw, LABEL).map(str::to_owned))
         .transpose()?;
     let plugin_roster = match transport {
-        Transport::Json => json_roster(fields[6], fields[7])?,
-        Transport::Cbor => cbor_roster(fields[6])?,
+        Transport::Json => json_roster(fields[AT_ROSTER_VERSION], fields[AT_ENTRIES])?,
+        Transport::Cbor => cbor_roster(fields[AT_ROSTER])?,
     };
     ReproManifestV2::new(
         timeline_id,
@@ -681,8 +779,8 @@ fn fixed<const N: usize>(
     raw: &Raw,
     field: &'static str,
     transport: Transport,
+    rule: &'static str,
 ) -> Result<[u8; N], ReproManifestV2Error> {
-    let rule = if N == 16 { ID_RULE } else { HASH_RULE };
     let exact = match (raw, transport) {
         (Raw::Text(value), Transport::Json) => return hex_decode(value, field, rule),
         (Raw::Bytes(value), Transport::Cbor) => <[u8; N]>::try_from(value.as_slice()).ok(),
@@ -696,9 +794,11 @@ fn decode_head(
     fields: &[Option<&Raw>],
     transport: Transport,
 ) -> Result<(TimelineId, Hash, WallTime), ReproManifestV2Error> {
-    let timeline = fixed::<16>(required(fields[1], TIMELINE)?, TIMELINE, transport)?;
-    let head = fixed::<32>(required(fields[2], HEAD)?, HEAD, transport)?;
-    let created = unsigned(required(fields[3], CREATED)?, CREATED)?;
+    let timeline = required(fields[AT_TIMELINE], TIMELINE)?;
+    let timeline = fixed::<16>(timeline, TIMELINE, transport, ID_RULE)?;
+    let head = required(fields[AT_HEAD], HEAD)?;
+    let head = fixed::<32>(head, HEAD, transport, HASH_RULE)?;
+    let created = unsigned(required(fields[AT_CREATED], CREATED)?, CREATED)?;
     Ok((
         TimelineId::from_ulid(Ulid::from_bytes(timeline)),
         Hash::from_bytes(head),
@@ -721,15 +821,15 @@ fn decode_records(
 
 fn decode_record(raw: &Raw, transport: Transport) -> Result<AdapterRecord, ReproManifestV2Error> {
     let fields = full_object(raw, &RECORD_FIELDS, RECORDS)?;
-    let plugin_id = fixed::<16>(fields[0], "plugin_id", transport)?;
-    let input_hash = fixed::<32>(fields[2], "input_hash", transport)?;
-    let output_hash = fixed::<32>(fields[3], "output_hash", transport)?;
+    let plugin_id = fixed::<16>(fields[RECORD_ID], "plugin_id", transport, ID_RULE)?;
+    let input_hash = fixed::<32>(fields[RECORD_INPUT], "input_hash", transport, HASH_RULE)?;
+    let output_hash = fixed::<32>(fields[RECORD_OUTPUT], "output_hash", transport, HASH_RULE)?;
     Ok(AdapterRecord {
         plugin_id: PluginId::from_ulid(Ulid::from_bytes(plugin_id)),
-        call_index: unsigned(fields[1], "call_index")?,
+        call_index: unsigned(fields[RECORD_CALL], "call_index")?,
         input_hash: Hash::from_bytes(input_hash),
         output_hash: Hash::from_bytes(output_hash),
-        wall_time: WallTime::from_micros(unsigned(fields[4], "wall_time")?),
+        wall_time: WallTime::from_micros(unsigned(fields[RECORD_WALL], "wall_time")?),
     })
 }
 
@@ -783,15 +883,20 @@ fn check_slot_order(
 
 fn json_entry(raw: &Raw) -> Result<ManifestPluginEntryV1, ReproManifestV2Error> {
     let fields = full_object(raw, &ENTRY_FIELDS, ENTRIES)?;
-    let id = fixed::<16>(fields[1], "plugin_id", Transport::Json)?;
-    let digest = fixed::<32>(fields[4], "eop1_digest", Transport::Json)?;
+    let id = fixed::<16>(fields[ENTRY_ID], "plugin_id", Transport::Json, ID_RULE)?;
+    let digest = fixed::<32>(
+        fields[ENTRY_DIGEST],
+        "eop1_digest",
+        Transport::Json,
+        HASH_RULE,
+    )?;
     Ok(ManifestPluginEntryV1::new(
-        text(fields[0], "stable_slot")?,
+        text(fields[ENTRY_SLOT], "stable_slot")?,
         PluginId::from_ulid(Ulid::from_bytes(id)),
-        text(fields[2], "plugin_name")?,
-        text(fields[3], "plugin_version")?,
+        text(fields[ENTRY_NAME], "plugin_name")?,
+        text(fields[ENTRY_VERSION], "plugin_version")?,
         Hash::from_bytes(digest),
-        closure_bytes(fields[5])?,
+        closure_bytes(fields[ENTRY_CLOSURE])?,
     )?)
 }
 
@@ -825,7 +930,7 @@ fn record_json(record: &AdapterRecord) -> Value {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
+    let mut out = String::new();
     for byte in bytes {
         out.push(char::from(HEX[usize::from(*byte >> 4)]));
         out.push(char::from(HEX[usize::from(*byte & 15)]));
@@ -842,15 +947,15 @@ const fn nibble(digit: u8) -> Option<u8> {
 }
 
 fn hex_decode<const N: usize>(
-    text: &str,
+    encoded: &str,
     field: &'static str,
     rule: &'static str,
 ) -> Result<[u8; N], ReproManifestV2Error> {
-    if text.len() != 2 * N {
+    if encoded.len() != 2 * N {
         return Err(invalid(field, rule));
     }
     let mut out = [0_u8; N];
-    for (byte, pair) in out.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+    for (byte, pair) in out.iter_mut().zip(encoded.as_bytes().chunks_exact(2)) {
         let Some((high, low)) = nibble(pair[0]).zip(nibble(pair[1])) else {
             return Err(non_canonical(field, rule));
         };
@@ -860,7 +965,7 @@ fn hex_decode<const N: usize>(
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut out = String::new();
     for chunk in bytes.chunks(3) {
         let mut padded = [0_u8; 4];
         padded[1..=chunk.len()].copy_from_slice(chunk);
@@ -890,12 +995,12 @@ fn sextet(digit: u8) -> Option<u32> {
 
 // Lenient decode; the caller re-encodes and compares, which rejects bad padding and pad bits.
 fn base64_decode(encoded: &str) -> Option<Vec<u8>> {
-    let digits = encoded.trim_end_matches('=').as_bytes();
-    let mut out = Vec::with_capacity(digits.len() / 4 * 3 + 3);
-    for chunk in digits.chunks(4) {
+    let symbols = encoded.trim_end_matches('=').as_bytes();
+    let mut out = Vec::new();
+    for chunk in symbols.chunks(4) {
         let mut word = 0_u32;
         for index in 0..4 {
-            word = (word << 6) | chunk.get(index).map_or(Some(0), |digit| sextet(*digit))?;
+            word = (word << 6) | chunk.get(index).map_or(Some(0), |symbol| sextet(*symbol))?;
         }
         let kept = chunk.len() * 6 / 8;
         if kept == 0 {
@@ -932,9 +1037,9 @@ fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-fn put_text(out: &mut Vec<u8>, text: &str) {
-    put_head(out, 3, text.len() as u64);
-    out.extend_from_slice(text.as_bytes());
+fn put_text(out: &mut Vec<u8>, value: &str) {
+    put_head(out, 3, value.len() as u64);
+    out.extend_from_slice(value.as_bytes());
 }
 
 // Keys in canonical order: shorter first, then bytewise.
