@@ -120,6 +120,7 @@ use crate::{
 };
 
 mod counterfactual_store;
+mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod pipeline_admission;
 
@@ -295,6 +296,23 @@ pub struct MemoryStore {
     /// Accepted ADR-105 `FIP1` history with each digest recorded at install;
     /// index `g - 1` holds generation `g`, and the last entry is the floor.
     fork_attribution_issuer_policies: Vec<(Hash, pos_core::ForkAttributionIssuerPolicyV1)>,
+    /// Imported ADR-105 code-2 `POB1` rows keyed by operation ID.
+    imported_fork_principal_owner_bindings:
+        HashMap<Hash, pos_core::ImportedPrincipalOwnerBindingV1>,
+    /// Imported ADR-105 code-2 `FAR1` rows keyed by child Timeline.
+    imported_fork_admissions: HashMap<TimelineId, pos_core::ImportedForkAdmissionRecordV1>,
+    /// Imported `FCS1` custody keyed by digest, apart from local custody.
+    imported_fork_classifier_sources: HashMap<Hash, ForkClassifierSourceV1>,
+    /// Imported ADR-105 code-2 `FPO1` rows keyed by operation ID.
+    imported_fork_publication_operations:
+        HashMap<Hash, pos_core::ImportedForkPublicationOperationV1>,
+    /// Imported `IKR1`/`IKT1` evidence keyed by import operation ID.
+    imported_fork_key_evidence:
+        HashMap<Hash, fork_attribution_authority_import::ImportedKeyEvidenceV1>,
+    /// Committed `IFA1` admissions with their `FAE1` bytes, keyed by import
+    /// operation ID.
+    imported_fork_attributions:
+        HashMap<Hash, fork_attribution_authority_import::ImportedAttributionV1>,
     /// Current raw ERCRP1 envelope per request.
     erasure_records: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     /// Independently bounded content-addressed erasure supporting evidence.
@@ -740,6 +758,12 @@ impl MemoryStore {
             fork_publication_bindings: HashMap::new(),
             fork_publication_artifacts: HashMap::new(),
             fork_attribution_issuer_policies: Vec::new(),
+            imported_fork_principal_owner_bindings: HashMap::new(),
+            imported_fork_admissions: HashMap::new(),
+            imported_fork_classifier_sources: HashMap::new(),
+            imported_fork_publication_operations: HashMap::new(),
+            imported_fork_key_evidence: HashMap::new(),
+            imported_fork_attributions: HashMap::new(),
             erasure_records: BTreeMap::new(),
             erasure_evidence: BTreeMap::new(),
             artifact_registrations: BTreeMap::new(),
@@ -2697,18 +2721,47 @@ impl MemoryStore {
         })
     }
 
+    /// Whether any local or imported `FPO1` carries `record_id`.
+    fn publication_operations_hold_record(&self, record_id: Hash) -> bool {
+        self.fork_publication_operations
+            .values()
+            .any(|row| row.input().signed_manifest_record_id == record_id)
+            || self
+                .imported_fork_publication_operations
+                .values()
+                .any(|row| row.fields().signed_manifest_record_id == record_id)
+    }
+
     /// Whether any stored `FPO1`, `FPB1`, or `FPA1` already carries
     /// `record_id`.
     fn fork_publication_record_is_present(&self, record_id: Hash) -> bool {
         self.fork_publication_artifacts.contains_key(&record_id)
-            || self
-                .fork_publication_operations
-                .values()
-                .any(|row| row.input().signed_manifest_record_id == record_id)
+            || self.publication_operations_hold_record(record_id)
             || self
                 .fork_publication_bindings
                 .values()
                 .any(|row| row.input().signed_manifest_record_id == record_id)
+    }
+
+    /// Refuse a new issuance whose operation ID an import holds as its `FPO1`
+    /// (the shared operation-ID namespace of `SQLite`), then sign it.
+    fn sign_new_unless_imported<E, F>(
+        &self,
+        request: &ForkManifestPublicationRequestV1,
+        key: &(TimelineId, u64),
+        sign: F,
+    ) -> Result<PublicationGraphV1, ForkManifestPublicationErrorV1>
+    where
+        F: FnOnce(&HeldRegistryAuthorizationV1, &[u8]) -> Result<Signature, E>,
+    {
+        if self
+            .imported_fork_publication_operations
+            .contains_key(&request.operation_id)
+        {
+            Err(ForkManifestPublicationErrorV1::CorruptOrConflicting)
+        } else {
+            self.sign_new_fork_publication(request, key, sign)
+        }
     }
 
     /// Read the authoritative Fork provenance sources for one new issuance.
@@ -2790,7 +2843,7 @@ impl ForkManifestPublicationPortV1 for MemoryStore {
             request.child_timeline_id,
             request.expected_final_logical_head,
         );
-        let graph = self.sign_new_fork_publication(&request, &key, sign)?;
+        let graph = self.sign_new_unless_imported(&request, &key, sign)?;
         self.fork_publication_artifacts
             .insert(graph.receipt.signed_manifest_record_id, graph.artifact);
         self.fork_publication_operations
@@ -2921,7 +2974,7 @@ impl MemoryStore {
                 owner,
                 commitment,
                 ..
-            } => self.execute_principal_owner_command(
+            } => self.execute_principal_owner_command_gated(
                 key,
                 &MemoryPrincipalOwnerOperation {
                     operation_id,
@@ -2964,6 +3017,27 @@ impl MemoryStore {
             self.fork_admission_authority = authority;
         }
         result
+    }
+
+    /// Apply the imported-binding rules (ADR-105 errata E10 and E11), then the
+    /// local command: an operation ID that an import holds is a `Conflict`,
+    /// and a Principal an import bound to another Owner is a
+    /// `PrincipalOwnerConflict`; an equal imported Owner is no conflict.
+    fn execute_principal_owner_command_gated(
+        &mut self,
+        key: (ForkAdmissionOperationKindV1, Hash),
+        command: &MemoryPrincipalOwnerOperation,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        if self
+            .imported_fork_principal_owner_bindings
+            .contains_key(&command.operation_id)
+        {
+            Err(pos_core::ForkAdmissionErrorV1::Conflict)
+        } else if self.imported_principal_has_other_owner(command.principal_digest, command.owner) {
+            Err(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict)
+        } else {
+            self.execute_principal_owner_command(key, command)
+        }
     }
 
     fn execute_principal_owner_command(
@@ -5697,13 +5771,19 @@ impl EventStore for MemoryStore {
 }
 
 impl MemoryStore {
+    /// Whether a local `FAR1` or an imported code-2 `FAR1` admits `timeline`.
+    fn fork_is_admitted(&self, timeline: TimelineId) -> bool {
+        self.fork_admissions.contains_key(&timeline)
+            || self.imported_fork_admissions.contains_key(&timeline)
+    }
+
     /// ADR-099 reserves every admitted Fork's append boundary for its
     /// classifier authority.  Generic callers never obtain a bypass.
     fn ensure_generic_fork_append_is_rejected(
         &self,
         timeline: TimelineId,
     ) -> Result<(), CoreError> {
-        if self.fork_admissions.contains_key(&timeline) {
+        if self.fork_is_admitted(timeline) {
             return Err(CoreError::Storage(
                 "admitted Fork Events require classified append authority".to_owned(),
             ));

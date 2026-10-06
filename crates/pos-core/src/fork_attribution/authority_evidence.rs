@@ -537,13 +537,21 @@ impl ForkTimelineImportV1 {
         evidence: &[ForkEventEvidenceV1],
     ) -> Result<TimelineExport, Error> {
         self.validate_segment(evidence)?;
+        Ok(self.segment_export(evidence))
+    }
+
+    /// Build the #202 own-segment export of `evidence` without re-checking it.
+    ///
+    /// Callers hold evidence that [`Self::validate_segment`] already accepted:
+    /// every `FAE1` envelope proves it when constructed.
+    pub(super) fn segment_export(&self, evidence: &[ForkEventEvidenceV1]) -> TimelineExport {
         let value = &self.0;
         let events = evidence
             .iter()
             .zip(1_u64..)
             .map(|(item, local_seq)| item.to_child_event(local_seq))
             .collect();
-        Ok(TimelineExport {
+        TimelineExport {
             timeline: Timeline {
                 meta: TimelineMeta {
                     id: value.child_timeline_id,
@@ -556,7 +564,7 @@ impl ForkTimelineImportV1 {
             },
             events,
             parent_fork_hash: Some(value.parent_chain_hash),
-        })
+        }
     }
 
     /// Require `evidence` to be exactly this child segment.
