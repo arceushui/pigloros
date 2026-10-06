@@ -137,7 +137,11 @@ impl Writer {
     }
 
     /// An array of `items`, each written by `item`.
-    pub(super) fn list<T>(&mut self, items: &[T], mut item: impl FnMut(&mut Self, &T)) -> &mut Self {
+    pub(super) fn list<T>(
+        &mut self,
+        items: &[T],
+        mut item: impl FnMut(&mut Self, &T),
+    ) -> &mut Self {
         self.array(items.len());
         for value in items {
             item(self, value);

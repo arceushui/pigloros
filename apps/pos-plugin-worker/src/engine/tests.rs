@@ -43,11 +43,8 @@ fn transport(budget: DeterministicBudgetV1) -> NegotiatedTransportV1 {
         None,
     );
     let execution = PluginExecutionProjectionV1::from(fixture);
-    let negotiated = negotiate_community_plugin_v1(
-        &execution,
-        &CommunityPluginHostAbiV1::v1(),
-        &profile,
-    );
+    let negotiated =
+        negotiate_community_plugin_v1(&execution, &CommunityPluginHostAbiV1::v1(), &profile);
     ok(negotiated).to_transport()
 }
 
@@ -137,9 +134,15 @@ fn engine_failures_are_closed_outcomes() {
         fuel: 1,
         ..DeterministicBudgetV1::MAXIMA
     });
-    assert_eq!(run(&host(), starved, EPOCH_TICK), Some(Err(Error::FuelExhausted)));
+    assert_eq!(
+        run(&host(), starved, EPOCH_TICK),
+        Some(Err(Error::FuelExhausted))
+    );
     let invalid = request(b"not a component", WorkerCallV1::Describe);
-    assert_eq!(run(&host(), invalid, EPOCH_TICK), Some(Err(Error::IncompatibleAbi)));
+    assert_eq!(
+        run(&host(), invalid, EPOCH_TICK),
+        Some(Err(Error::IncompatibleAbi))
+    );
 }
 
 #[test]

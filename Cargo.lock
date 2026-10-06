@@ -5228,6 +5228,7 @@ dependencies = [
  "pos-crypto",
  "pos-runtime",
  "rustix 1.1.5",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -5246,7 +5247,6 @@ dependencies = [
 name = "pos-plugin-worker"
 version = "0.1.0"
 dependencies = [
- "ciborium",
  "pos-crypto",
  "pos-plugin-host",
  "pos-plugin-supervisor",

@@ -43,8 +43,10 @@ pub mod worker_process;
 pub mod fixtures;
 
 pub use frame::{FrameFaultV1, WorkerFrameLimitsV1};
+pub use ipc::{
+    WorkerCallV1, WorkerEnvelopeErrorV1, WorkerOutcomeV1, WorkerRequestV1, WorkerReturnV1,
+};
 pub use launch::{WorkerProgramV1, WorkerResourceCeilingsV1, FORWARDED_ENVIRONMENT};
-pub use ipc::{WorkerCallV1, WorkerEnvelopeErrorV1, WorkerOutcomeV1, WorkerRequestV1, WorkerReturnV1};
 pub use supervisor::{CommunityPluginSupervisorV1, MAX_WORKER_WATCHDOG};
 pub use worker_process::{
     open_descriptors, prepare_worker_process, read_request, write_response, WorkerProcessErrorV1,

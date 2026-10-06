@@ -69,9 +69,13 @@ fn pinned(transport: NegotiatedTransportV1) -> Option<PinnedExecutionV1> {
         CommunityPluginCeilingsV1::V1,
         pinned_runtime().ok(),
     );
-    NegotiatedCommunityPluginV1::from_transport(transport, &CommunityPluginHostAbiV1::v1(), &profile)
-        .ok()
-        .and_then(|negotiated| PinnedExecutionV1::new(negotiated).ok())
+    NegotiatedCommunityPluginV1::from_transport(
+        transport,
+        &CommunityPluginHostAbiV1::v1(),
+        &profile,
+    )
+    .ok()
+    .and_then(|negotiated| PinnedExecutionV1::new(negotiated).ok())
 }
 
 /// Epoch ticks of `tick` that fit in the supervisor's watchdog.

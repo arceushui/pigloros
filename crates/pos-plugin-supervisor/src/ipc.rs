@@ -35,18 +35,16 @@ mod wire;
 use pos_crypto::plugin_execution::{DeterministicBudgetV1, PluginCapabilityDescriptorV1};
 use pos_runtime::community_plugin_host::{
     CommunityPluginHostErrorV1, CommunityPluginModeV1, ComponentTrapClassV1, GuestReturnV1,
-    HostInputs, InvocationReportV1, NegotiatedTransportV1, PluginDescriptorV1,
-    PluginInvocationV1, PluginOutputV1, TrapReproductionV1,
+    HostInputs, InvocationReportV1, NegotiatedTransportV1, PluginDescriptorV1, PluginInvocationV1,
+    PluginOutputV1, TrapReproductionV1,
 };
 
 use self::contract::{
     read_descriptor, read_guest_error, read_invocation, read_log, read_metering, read_output,
-    write_descriptor, write_guest_error, write_invocation, write_log, write_metering,
-    write_output,
+    write_descriptor, write_guest_error, write_invocation, write_log, write_metering, write_output,
 };
 use self::wire::{
-    read_bytes, read_code, read_list, read_text, read_u16, require, Decoded, EnvelopeReader,
-    Writer,
+    read_bytes, read_code, read_list, read_text, read_u16, require, Decoded, EnvelopeReader, Writer,
 };
 
 /// Magic text of a worker request envelope.
@@ -81,8 +79,10 @@ const VERSION: u64 = 1;
 const MAX_TEXT_BYTES: usize = 128;
 const MAX_PATTERN_BYTES: usize = 512;
 const MAX_LIST: usize = 256;
-const MODES: [CommunityPluginModeV1; 2] =
-    [CommunityPluginModeV1::Local, CommunityPluginModeV1::AirGapped];
+const MODES: [CommunityPluginModeV1; 2] = [
+    CommunityPluginModeV1::Local,
+    CommunityPluginModeV1::AirGapped,
+];
 
 /// A malformed, non-canonical, truncated, out-of-bounds or unencodable
 /// worker envelope.
@@ -216,7 +216,9 @@ fn write_negotiation(writer: &mut Writer, negotiation: &NegotiatedTransportV1) {
             writer.text(feature);
         })
         .list(&negotiation.not_granted_capabilities, write_capability)
-        .unsigned(u64::from(negotiation.mode == CommunityPluginModeV1::AirGapped))
+        .unsigned(u64::from(
+            negotiation.mode == CommunityPluginModeV1::AirGapped,
+        ))
         .array(8);
     for member in [
         limits.memory_bytes,
@@ -381,9 +383,13 @@ pub fn decode_worker_response_v1(bytes: &[u8]) -> Result<WorkerOutcomeV1, Worker
     let tag = read_code(&mut reader, 4)?;
     require(members == if tag < 2 { 4 } else { 2 })?;
     let outcome = match tag {
-        0 => read_report(&mut reader, read_descriptor).map(|report| Ok(WorkerReturnV1::Described(report))),
-        1 => read_report(&mut reader, read_output).map(|report| Ok(WorkerReturnV1::Produced(report))),
-        2 => read_code(&mut reader, WORKER_FAILURES_V1.len()).map(|code| Err(WORKER_FAILURES_V1[code])),
+        0 => read_report(&mut reader, read_descriptor)
+            .map(|report| Ok(WorkerReturnV1::Described(report))),
+        1 => {
+            read_report(&mut reader, read_output).map(|report| Ok(WorkerReturnV1::Produced(report)))
+        }
+        2 => read_code(&mut reader, WORKER_FAILURES_V1.len())
+            .map(|code| Err(WORKER_FAILURES_V1[code])),
         _ => read_code(&mut reader, WORKER_TRAP_CLASSES_V1.len()).map(|code| {
             Err(CommunityPluginHostErrorV1::ComponentTrap {
                 class: WORKER_TRAP_CLASSES_V1[code],

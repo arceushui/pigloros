@@ -32,13 +32,13 @@ use pos_runtime::community_plugin_host::{
     PluginDescriptorV1, PluginInvocationV1, PluginOutputV1,
 };
 
+use self::verify::{verify_descriptor, verify_output};
 use crate::frame::{read_frame, require_end, write_frame, FrameFaultV1, WorkerFrameLimitsV1};
 use crate::ipc::{
     decode_worker_response_v1, encode_worker_request_v1, WorkerCallV1, WorkerRequestV1,
     WorkerReturnV1,
 };
 use crate::launch::{launch, LaunchedWorker, WorkerProgramV1, WorkerResourceCeilingsV1};
-use self::verify::{verify_descriptor, verify_output};
 
 mod verify;
 
@@ -90,9 +90,9 @@ impl CommunityPluginSupervisorV1 {
         host_inputs: HostInputs,
     ) -> Result<InvocationReportV1<PluginDescriptorV1>, Error> {
         match self.run(negotiated, component, host_inputs, WorkerCallV1::Describe)? {
-            WorkerReturnV1::Described(report) => {
-                checked(report, |descriptor| verify_descriptor(descriptor, negotiated))
-            }
+            WorkerReturnV1::Described(report) => checked(report, |descriptor| {
+                verify_descriptor(descriptor, negotiated)
+            }),
             WorkerReturnV1::Produced(_) => Err(Error::WorkerCrashed),
         }
     }
@@ -275,9 +275,7 @@ fn await_exit(child: &mut std::process::Child, deadline: Instant) -> Option<bool
 mod tests {
     use std::path::PathBuf;
 
-    use pos_runtime::community_plugin_host::{
-        GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1,
-    };
+    use pos_runtime::community_plugin_host::{GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1};
 
     use super::*;
 
@@ -296,7 +294,10 @@ mod tests {
 
     #[test]
     fn returned_values_must_pass_the_supervisor_check() {
-        assert_eq!(checked(report(Ok(1)), |value| *value == 1), Ok(report(Ok(1))));
+        assert_eq!(
+            checked(report(Ok(1)), |value| *value == 1),
+            Ok(report(Ok(1)))
+        );
         assert_eq!(
             checked(report(Ok(2)), |value| *value == 1),
             Err(Error::InvalidGuestOutput)

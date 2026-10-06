@@ -190,7 +190,10 @@ fn returned_values_are_checked_by_the_supervisor() {
     let describe = |mode: &[u8]| supervisor(PROBE, PROMPT).describe(&negotiated(), mode, INPUTS);
     let described = ok(describe(b"describe"));
     assert_eq!(ok(described.result).plugin_id, "plugin-a");
-    assert_eq!(describe(b"foreign-descriptor"), Err(Error::InvalidGuestOutput));
+    assert_eq!(
+        describe(b"foreign-descriptor"),
+        Err(Error::InvalidGuestOutput)
+    );
     // A return of the other export's kind is a protocol fault.
     assert_eq!(describe(b"output"), Err(Error::WorkerCrashed));
     assert_eq!(reduce(b"describe"), Err(Error::WorkerCrashed));
@@ -257,7 +260,11 @@ fn the_wall_time_watchdog_is_an_operational_stop() {
             "{}",
             String::from_utf8_lossy(mode)
         );
-        assert!(started.elapsed() < STOPPED_WITHIN, "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < STOPPED_WITHIN,
+            "{:?}",
+            started.elapsed()
+        );
     }
 }
 

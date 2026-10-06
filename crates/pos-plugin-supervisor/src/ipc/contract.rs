@@ -7,10 +7,9 @@
 //! semantic validation stays with the engine and the supervisor.
 
 use pos_runtime::community_plugin_host::{
-    ArtifactRefV1, EventDraftV1, FieldRefV1, GuestPluginErrorV1, MeteringV1,
-    OperationalLogRecord, PluginDescriptorV1, PluginErrorCodeV1, PluginInvocationV1,
-    PluginOutputV1, TimelinePositionV1, TraceAnnotationV1, MAX_OBSERVATION_BYTES_V1,
-    MAX_STATE_BYTES_V1, MAX_TRACE_ANNOTATION_BYTES_V1,
+    ArtifactRefV1, EventDraftV1, FieldRefV1, GuestPluginErrorV1, MeteringV1, OperationalLogRecord,
+    PluginDescriptorV1, PluginErrorCodeV1, PluginInvocationV1, PluginOutputV1, TimelinePositionV1,
+    TraceAnnotationV1, MAX_OBSERVATION_BYTES_V1, MAX_STATE_BYTES_V1, MAX_TRACE_ANNOTATION_BYTES_V1,
 };
 
 use super::wire::{

@@ -18,8 +18,8 @@ use pos_plugin_supervisor::{
     WorkerFrameLimitsV1, WorkerOutcomeV1, WorkerRequestV1, WorkerReturnV1,
 };
 use pos_runtime::community_plugin_host::{
-    plugin_output_digest_v1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
-    InvocationReportV1, MeteringV1, PluginDescriptorV1, PluginOutputV1, TrapReproductionV1,
+    plugin_output_digest_v1, CommunityPluginHostErrorV1, ComponentTrapClassV1, InvocationReportV1,
+    MeteringV1, PluginDescriptorV1, PluginOutputV1, TrapReproductionV1,
 };
 use rustix::process::{getpid, getppid, getrlimit, Pid, Resource};
 
@@ -44,11 +44,11 @@ fn main() -> ExitCode {
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn serve(request: &WorkerRequestV1) -> ExitCode {
     match request.component.as_slice() {
-        b"report" => reply(&produced(request, report().as_bytes(), false)),
-        b"output" => reply(&produced(request, b"next", false)),
-        b"bad-digest" => reply(&produced(request, b"next", true)),
-        b"describe" => reply(&described(request, false)),
-        b"foreign-descriptor" => reply(&described(request, true)),
+        b"report" => reply(&Ok(produced(request, report().as_bytes(), false))),
+        b"output" => reply(&Ok(produced(request, b"next", false))),
+        b"bad-digest" => reply(&Ok(produced(request, b"next", true))),
+        b"describe" => reply(&Ok(described(request, false))),
+        b"foreign-descriptor" => reply(&Ok(described(request, true))),
         b"fuel" => reply(&Err(CommunityPluginHostErrorV1::FuelExhausted)),
         b"trap" => reply(&Err(CommunityPluginHostErrorV1::ComponentTrap {
             class: ComponentTrapClassV1::StackExhausted,
@@ -81,7 +81,7 @@ fn serve(request: &WorkerRequestV1) -> ExitCode {
         b"allocate" => {
             // One GiB: more than the data ceiling of a 64 KiB-memory invocation.
             let allocation = std::hint::black_box(vec![0_u8; 1 << 30]);
-            reply(&produced(request, &allocation[..1], false))
+            reply(&Ok(produced(request, &allocation[..1], false)))
         }
         _ => ExitCode::from(4),
     }
@@ -89,7 +89,7 @@ fn serve(request: &WorkerRequestV1) -> ExitCode {
 
 /// A `reduce` or `drive` return carrying `state`, whatever the call was.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn produced(request: &WorkerRequestV1, state: &[u8], tampered: bool) -> WorkerOutcomeV1 {
+fn produced(request: &WorkerRequestV1, state: &[u8], tampered: bool) -> WorkerReturnV1 {
     let invocation_id = match &request.call {
         WorkerCallV1::Reduce(invocation) | WorkerCallV1::Drive(invocation) => {
             invocation.invocation_id
@@ -107,16 +107,16 @@ fn produced(request: &WorkerRequestV1, state: &[u8], tampered: bool) -> WorkerOu
     };
     output.output_digest = plugin_output_digest_v1(&output);
     output.output_digest[0] ^= u8::from(tampered);
-    Ok(WorkerReturnV1::Produced(InvocationReportV1 {
+    WorkerReturnV1::Produced(InvocationReportV1 {
         result: Ok(output),
         metering: METERING,
         operational_log: Vec::new(),
-    }))
+    })
 }
 
 /// The descriptor of the transported release, or of another Plugin.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn described(request: &WorkerRequestV1, foreign: bool) -> WorkerOutcomeV1 {
+fn described(request: &WorkerRequestV1, foreign: bool) -> WorkerReturnV1 {
     let negotiation = &request.negotiation;
     let plugin_id = if foreign {
         "another-plugin".to_owned()
@@ -136,11 +136,11 @@ fn described(request: &WorkerRequestV1, foreign: bool) -> WorkerOutcomeV1 {
         manifest_digest: [0; 32],
         release_digest: [0; 32],
     };
-    Ok(WorkerReturnV1::Described(InvocationReportV1 {
+    WorkerReturnV1::Described(InvocationReportV1 {
         result: Ok(descriptor),
         metering: METERING,
         operational_log: Vec::new(),
-    }))
+    })
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]

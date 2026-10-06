@@ -7,8 +7,8 @@
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
 use pos_runtime::community_plugin_host::{
-    plugin_output_digest_v1, NegotiatedCommunityPluginV1, PluginDescriptorV1,
-    PluginInvocationV1, PluginOutputV1, MAX_TRACE_ANNOTATION_BYTES_V1,
+    plugin_output_digest_v1, NegotiatedCommunityPluginV1, PluginDescriptorV1, PluginInvocationV1,
+    PluginOutputV1, MAX_TRACE_ANNOTATION_BYTES_V1,
 };
 
 /// Whether `descriptor` describes `negotiated`.
@@ -24,8 +24,7 @@ pub(super) fn verify_descriptor(
     descriptor.plugin_id == negotiated.plugin_id()
         && descriptor.world == negotiated.world()
         && descriptor.abi_major == abi_major
-        && (descriptor.min_abi_minor, descriptor.max_abi_minor)
-            == negotiated.declared_minor_range()
+        && (descriptor.min_abi_minor, descriptor.max_abi_minor) == negotiated.declared_minor_range()
         && descriptor.required_features == negotiated.required_features()
         && descriptor.manifest_digest == [0; 32]
         && descriptor.release_digest == [0; 32]

@@ -59,7 +59,11 @@ fn every_head_width_is_written_in_shortest_form() {
         assert_eq!(writer.bytes.len(), length, "{value}");
         let mut original = request(WorkerCallV1::Describe);
         original.watchdog_millis = value;
-        assert_eq!(round_trip_request(&original).as_ref(), Ok(&original), "{value}");
+        assert_eq!(
+            round_trip_request(&original).as_ref(),
+            Ok(&original),
+            "{value}"
+        );
     }
 }
 
@@ -76,9 +80,8 @@ fn the_describe_request_has_its_golden_prefix_and_suffix() {
     let suffix = [0x19, 0xea, 0x60, 0x18, 0x2a, 0x81, 0x00];
     assert!(bytes.ends_with(&suffix));
     let capability_and_mode = [
-        0x81, 0x89, 0x64, b'r', b'e', b'a', b'd', 0x63, b'g', b'e', b't', 0x61, b'*', 0x64,
-        b't', b'e', b's', b't', 0x65, b'l', b'o', b'c', b'a', b'l', 0xf4, 0x01, 0x02, 0x03,
-        0x00, 0x88,
+        0x81, 0x89, 0x64, b'r', b'e', b'a', b'd', 0x63, b'g', b'e', b't', 0x61, b'*', 0x64, b't',
+        b'e', b's', b't', 0x65, b'l', b'o', b'c', b'a', b'l', 0xf4, 0x01, 0x02, 0x03, 0x00, 0x88,
     ];
     assert!(bytes
         .windows(capability_and_mode.len())
@@ -92,10 +95,16 @@ fn requests_beyond_the_decoder_bounds_are_not_encoded() {
     assert!(round_trip_request(&largest).is_ok());
     let mut oversized = largest;
     oversized.component.push(0);
-    assert_eq!(encode_worker_request_v1(&oversized), Err(WorkerEnvelopeErrorV1));
+    assert_eq!(
+        encode_worker_request_v1(&oversized),
+        Err(WorkerEnvelopeErrorV1)
+    );
     let mut long_world = request(WorkerCallV1::Describe);
     long_world.negotiation.world = "w".repeat(MAX_TEXT_BYTES + 1);
-    assert_eq!(encode_worker_request_v1(&long_world), Err(WorkerEnvelopeErrorV1));
+    assert_eq!(
+        encode_worker_request_v1(&long_world),
+        Err(WorkerEnvelopeErrorV1)
+    );
     let mut long_pattern = request(WorkerCallV1::Describe);
     long_pattern.negotiation.not_granted_capabilities[0].resource_pattern =
         "p".repeat(MAX_PATTERN_BYTES);
@@ -103,11 +112,17 @@ fn requests_beyond_the_decoder_bounds_are_not_encoded() {
     long_pattern.negotiation.not_granted_capabilities[0]
         .resource_pattern
         .push('p');
-    assert_eq!(encode_worker_request_v1(&long_pattern), Err(WorkerEnvelopeErrorV1));
+    assert_eq!(
+        encode_worker_request_v1(&long_pattern),
+        Err(WorkerEnvelopeErrorV1)
+    );
     let mut long_observation = invocation();
     long_observation.observation_bytes = vec![0; 1_048_577];
     let observed = request(WorkerCallV1::Reduce(long_observation));
-    assert_eq!(encode_worker_request_v1(&observed), Err(WorkerEnvelopeErrorV1));
+    assert_eq!(
+        encode_worker_request_v1(&observed),
+        Err(WorkerEnvelopeErrorV1)
+    );
 }
 
 /// The encoded request with the call replaced by `call`.
@@ -159,7 +174,11 @@ fn malformed_requests_are_envelope_faults() {
     .iter()
     .enumerate()
     {
-        assert_eq!(decode_worker_request_v1(bytes), Err(WorkerEnvelopeErrorV1), "case {index}");
+        assert_eq!(
+            decode_worker_request_v1(bytes),
+            Err(WorkerEnvelopeErrorV1),
+            "case {index}"
+        );
     }
     let mut air_gapped = valid;
     air_gapped[mode_at] = 0x01;
@@ -230,7 +249,11 @@ fn responses_round_trip_every_outcome() {
         })
     }));
     for outcome in outcomes {
-        assert_eq!(round_trip_response(&outcome), Ok(outcome.clone()), "{outcome:?}");
+        assert_eq!(
+            round_trip_response(&outcome),
+            Ok(outcome.clone()),
+            "{outcome:?}"
+        );
     }
 }
 
@@ -282,7 +305,10 @@ fn errors_the_wire_cannot_carry_are_not_encoded() {
             reproduction: TrapReproductionV1::ReproducedByConformance,
         },
     ] {
-        assert_eq!(encode_worker_response_v1(&Err(error)), Err(WorkerEnvelopeErrorV1));
+        assert_eq!(
+            encode_worker_response_v1(&Err(error)),
+            Err(WorkerEnvelopeErrorV1)
+        );
     }
     let mut long_log = log();
     long_log[0].message = "m".repeat(257);
@@ -291,7 +317,10 @@ fn errors_the_wire_cannot_carry_are_not_encoded() {
         metering: METERING,
         operational_log: long_log,
     }));
-    assert_eq!(encode_worker_response_v1(&logged), Err(WorkerEnvelopeErrorV1));
+    assert_eq!(
+        encode_worker_response_v1(&logged),
+        Err(WorkerEnvelopeErrorV1)
+    );
 }
 
 #[test]
@@ -307,9 +336,15 @@ fn malformed_responses_are_envelope_faults() {
         response(&[0x84, 0x02, 0x00, 0x00, 0x00]),
         response(&[0x85, 0x00, 0x00, 0x00, 0x00, 0x00]),
         response(&[0x84, 0x00, 0x82, 0x02, 0x00, 0x84, 0, 0, 0, 0, 0x80]),
-        response(&[0x84, 0x00, 0x82, 0x01, 0x83, 0x82, 0x04, 0x00, 0xf6, 0xf6, 0x84, 0, 0, 0, 0, 0x80]),
-        response(&[0x84, 0x00, 0x82, 0x01, 0x83, 0x81, 0x00, 0xf6, 0xf6, 0x84, 0, 0, 0, 0, 0x80]),
-        response(&[0x84, 0x00, 0x82, 0x01, 0x83, 0x81, 0x08, 0xf6, 0xf6, 0x84, 0, 0, 0, 0, 0x80]),
+        response(&[
+            0x84, 0x00, 0x82, 0x01, 0x83, 0x82, 0x04, 0x00, 0xf6, 0xf6, 0x84, 0, 0, 0, 0, 0x80,
+        ]),
+        response(&[
+            0x84, 0x00, 0x82, 0x01, 0x83, 0x81, 0x00, 0xf6, 0xf6, 0x84, 0, 0, 0, 0, 0x80,
+        ]),
+        response(&[
+            0x84, 0x00, 0x82, 0x01, 0x83, 0x81, 0x08, 0xf6, 0xf6, 0x84, 0, 0, 0, 0, 0x80,
+        ]),
         [&header[..6], &[0x02, 0x82, 0x02, 0x00]].concat(),
         [&[0x84], &header[1..], &[0x82, 0x02, 0x00]].concat(),
         [&response(&[0x82, 0x02, 0x00])[..], &[0x00]].concat(),
@@ -317,8 +352,14 @@ fn malformed_responses_are_envelope_faults() {
         Vec::new(),
     ];
     for (index, bytes) in cases.iter().enumerate() {
-        assert_eq!(decode_worker_response_v1(bytes), Err(WorkerEnvelopeErrorV1), "case {index}");
+        assert_eq!(
+            decode_worker_response_v1(bytes),
+            Err(WorkerEnvelopeErrorV1),
+            "case {index}"
+        );
     }
-    let unit = response(&[0x84, 0x00, 0x82, 0x01, 0x83, 0x81, 0x04, 0xf6, 0xf6, 0x84, 0, 0, 0, 0, 0x80]);
+    let unit = response(&[
+        0x84, 0x00, 0x82, 0x01, 0x83, 0x81, 0x04, 0xf6, 0xf6, 0x84, 0, 0, 0, 0, 0x80,
+    ]);
     assert!(decode_worker_response_v1(&unit).is_ok());
 }
