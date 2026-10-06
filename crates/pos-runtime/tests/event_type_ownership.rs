@@ -103,7 +103,7 @@ struct RegistrySnapshot {
     descriptions: Vec<(String, String)>,
     plugin_count: usize,
     driver_count: usize,
-    policies: Vec<(String, pos_core::Hash)>,
+    policies: Vec<pos_core::Hash>,
 }
 
 fn snapshot(registry: &PluginRegistry) -> RegistrySnapshot {
@@ -123,10 +123,7 @@ fn snapshot(registry: &PluginRegistry) -> RegistrySnapshot {
         descriptions,
         plugin_count: registry.len(),
         driver_count: registry.driver_count(),
-        policies: registry
-            .replay_policy_identities()
-            .map(|(name, digest)| (name.to_owned(), digest))
-            .collect(),
+        policies: registry.retained_closure_replay_identities(),
     }
 }
 

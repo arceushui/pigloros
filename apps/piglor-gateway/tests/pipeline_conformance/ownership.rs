@@ -44,7 +44,7 @@ struct RegistrySnapshot {
     descriptions: Vec<(String, String)>,
     plugins: usize,
     drivers: usize,
-    policies: Vec<(String, Hash)>,
+    policies: Vec<Hash>,
     routes: Vec<String>,
 }
 
@@ -84,10 +84,7 @@ fn snapshot(registry: &PluginRegistry, probes: &[&str]) -> RegistrySnapshot {
         descriptions,
         plugins: registry.len(),
         drivers: registry.driver_count(),
-        policies: registry
-            .replay_policy_identities()
-            .map(|(name, digest)| (name.to_owned(), digest))
-            .collect(),
+        policies: registry.retained_closure_replay_identities(),
         routes: routes(registry, probes),
     }
 }

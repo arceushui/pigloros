@@ -65,6 +65,7 @@ mod adapter;
 mod authorized_pass;
 mod catalogue;
 mod human_admission;
+mod manifest_roster;
 mod profile_composition;
 mod scheduled_admission;
 mod staged_catalogue;
@@ -81,6 +82,7 @@ pub use catalogue::{
 pub use human_admission::{
     HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
 };
+pub use manifest_roster::ManifestRosterBuildErrorV1;
 pub use profile_composition::{ScheduledDriverBindingV1, ScheduledProfileErrorV1};
 pub use scheduled_admission::ScheduledPassAdmissionV1;
 #[cfg(any(test, feature = "test-support"))]
@@ -131,94 +133,10 @@ pub fn recover_local_cut_owner_retry_v1<S: LocalCutOwnerPersistencePortV1>(
     )
 }
 
-fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
-    hasher.update(&(bytes.len() as u64).to_le_bytes());
-    hasher.update(bytes);
-}
-
 struct PendingRegistrationCallbacksV1<I> {
     driver: Option<Box<dyn Driver>>,
     approver: Option<Box<dyn ActionApprover>>,
     approver_event_types: I,
-}
-
-fn replay_policy_identity_digest(
-    entry: &PluginEntry,
-    admission: &OutputAdmissionV1,
-) -> pos_core::Hash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pigloros/replay-policy-identity/v1");
-    hash_framed(&mut hasher, entry.name.as_bytes());
-    hash_framed(&mut hasher, entry.version.as_bytes());
-    let mut owned_event_types: Vec<&str> =
-        entry.owned_event_types.iter().map(Kind::as_str).collect();
-    owned_event_types.sort_unstable();
-    for event_type in owned_event_types {
-        hash_framed(&mut hasher, event_type.as_bytes());
-    }
-    let policy = admission.policy().fields();
-    for hash in [
-        policy.implementation_hash,
-        policy.base_configuration_digest,
-        policy.retention_policy_hash,
-    ] {
-        hasher.update(hash.as_bytes());
-    }
-    hasher.update(&policy.policy_revision.to_le_bytes());
-    let mut declarations = policy.output_declarations.iter().collect::<Vec<_>>();
-    declarations.sort_by(|left, right| left.event_type().cmp(right.event_type()));
-    for declaration in declarations {
-        hash_framed(&mut hasher, declaration.event_type().as_bytes());
-        hasher.update(&[match declaration.authority() {
-            pos_core::output_policy::OutputAuthorityV1::Authoritative => 0,
-            pos_core::output_policy::OutputAuthorityV1::ReproducibleDerived => 1,
-            pos_core::output_policy::OutputAuthorityV1::Ephemeral => 2,
-        }]);
-        hasher.update(&[match declaration.fidelity() {
-            pos_core::output_policy::OutputFidelityV1::L0 => 0,
-            pos_core::output_policy::OutputFidelityV1::L1 => 1,
-            pos_core::output_policy::OutputFidelityV1::L2 => 2,
-        }]);
-        hasher.update(&declaration.max_bytes().to_le_bytes());
-        hasher.update(&declaration.stride_ticks().unwrap_or_default().to_le_bytes());
-        hasher.update(
-            &declaration
-                .aggregate_min_group()
-                .unwrap_or_default()
-                .to_le_bytes(),
-        );
-    }
-    let budget = admission.budget().fields();
-    hasher.update(&budget.revision.to_le_bytes());
-    hasher.update(&[match budget.workload_profile {
-        pos_core::WorkloadProfileV1::Interactive => 0,
-        pos_core::WorkloadProfileV1::Fork => 1,
-        pos_core::WorkloadProfileV1::Research => 2,
-    }]);
-    hasher.update(&[budget.cut_budget_family]);
-    hasher.update(&budget.max_event_bytes.to_le_bytes());
-    for fidelity in budget.fidelity_budgets {
-        hasher.update(&[fidelity.level]);
-        hasher.update(&fidelity.max_events.to_le_bytes());
-        hasher.update(&fidelity.max_bytes.to_le_bytes());
-        hasher.update(&fidelity.max_cpu_us.to_le_bytes());
-        hasher.update(&fidelity.shared_host_cpu_reservation_us.to_le_bytes());
-    }
-    let mut reservations = budget
-        .plugin_cpu_reservations
-        .iter()
-        .map(|reservation| reservation.cpu_reservations_us)
-        .collect::<Vec<_>>();
-    reservations.sort_unstable();
-    for reservation in reservations {
-        hasher.update(&reservation[0].to_le_bytes());
-        hasher.update(&reservation[1].to_le_bytes());
-        hasher.update(&reservation[2].to_le_bytes());
-    }
-    hasher.update(&[budget.accounting_semantics]);
-    hasher.update(&budget.execution_profile_hash.as_bytes()[..]);
-    hasher.update(&budget.max_pass_wall_duration_us.to_le_bytes());
-    pos_core::Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
 fn extend_unique_subscriptions(
@@ -1208,10 +1126,6 @@ enum ReducerSlotV1 {
 
 const fn plugin_name(entry: &PluginEntry) -> &str {
     entry.name.as_str()
-}
-
-const fn plugin_name_and_version(entry: &PluginEntry) -> (&str, &str) {
-    (entry.name.as_str(), entry.version.as_str())
 }
 
 struct PendingStep {
@@ -3920,57 +3834,22 @@ impl PluginRegistry {
         self.plugins.values().map(plugin_name)
     }
 
-    /// Iterate over registered plugin (name, version) pairs in registration order.
-    pub fn plugin_versions(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.plugins.values().map(plugin_name_and_version)
-    }
-
-    /// Iterate over canonical output-admission policy digests bound to registered Plugins.
-    pub fn output_policy_digests(&self) -> impl Iterator<Item = (&str, pos_core::Hash)> {
-        self.plugins.values().filter_map(|entry| {
-            entry
-                .output_admission
-                .as_ref()
-                .map(|admission| (entry.name.as_str(), admission.policy_digest()))
-        })
-    }
-
-    /// Iterate over stable replay identities for registered output policies.
-    pub fn replay_policy_identities(&self) -> impl Iterator<Item = (&str, pos_core::Hash)> {
-        self.plugins.values().filter_map(|entry| {
-            entry.output_admission.as_ref().map(|admission| {
-                (
-                    entry.name.as_str(),
-                    replay_policy_identity_digest(entry, admission),
-                )
-            })
-        })
-    }
-
-    /// Iterate over exact retained policy closures for Replay manifests.
-    pub fn replay_policy_closures(&self) -> impl Iterator<Item = (&str, Vec<u8>)> {
-        self.plugins.values().filter_map(|entry| {
-            entry.output_admission.as_ref().and_then(|admission| {
-                admission
-                    .closure()
-                    .map(|closure| (entry.name.as_str(), closure.to_canonical_bytes()))
-            })
-        })
-    }
-
-    /// Iterate over stable identities for retained policy closures.
+    /// Replay identities of the retained output-policy closures, in registration order.
     ///
-    /// The exact closure envelope is still retained separately.  This
-    /// identity excludes fresh runtime Plugin IDs while preserving the typed
-    /// policy/budget and all non-address artifact identities.
-    pub fn replay_policy_closure_identities(&self) -> impl Iterator<Item = (&str, pos_core::Hash)> {
-        self.plugins.values().filter_map(|entry| {
-            entry.output_admission.as_ref().and_then(|admission| {
-                admission
-                    .closure()
-                    .map(|closure| (entry.name.as_str(), closure.replay_identity_digest()))
-            })
-        })
+    /// Test support for configuration-identity checks only. Production code reads the admitted
+    /// roster through [`Self::manifest_plugin_roster`], which is keyed by slot and `PluginId`.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub fn retained_closure_replay_identities(&self) -> Vec<pos_core::Hash> {
+        let closures = self
+            .plugins
+            .values()
+            .filter_map(|entry| entry.output_admission.as_ref()?.closure());
+        closures
+            .map(OutputPolicyClosureV1::replay_identity_digest)
+            .collect()
     }
 
     /// Register a direct driver in an explicit test-support harness.
@@ -4905,110 +4784,6 @@ mod tests {
             budget.fields().execution_profile_hash,
             crate::execution_profile_artifact_hash_v1(&[])
         );
-    }
-
-    #[test]
-    fn replay_identity_hash_covers_declaration_and_budget_variants() {
-        let plugin_id = PluginId::new();
-        let mut replay_identities = Vec::new();
-        for workload_profile in [
-            WorkloadProfileV1::Interactive,
-            WorkloadProfileV1::Fork,
-            WorkloadProfileV1::Research,
-        ] {
-            let mut registry = gated_registry();
-            let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
-                revision: 1,
-                workload_profile,
-                cut_budget_family: 0,
-                max_event_bytes: 4_096,
-                fidelity_budgets: [
-                    FidelityBudgetV1 {
-                        level: 0,
-                        max_events: 10,
-                        max_bytes: 10_000,
-                        max_cpu_us: 10_000,
-                        shared_host_cpu_reservation_us: 0,
-                    },
-                    FidelityBudgetV1 {
-                        level: 1,
-                        max_events: 10,
-                        max_bytes: 10_000,
-                        max_cpu_us: 10_000,
-                        shared_host_cpu_reservation_us: 0,
-                    },
-                    FidelityBudgetV1 {
-                        level: 2,
-                        max_events: 10,
-                        max_bytes: 10_000,
-                        max_cpu_us: 10_000,
-                        shared_host_cpu_reservation_us: 0,
-                    },
-                ],
-                plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-                    plugin_id,
-                    cpu_reservations_us: [10, 20, 30],
-                }],
-                accounting_semantics: 0,
-                execution_profile_hash: Hash::from_bytes([0x41; 32]),
-                max_pass_wall_duration_us: 1_000,
-            })
-            .test_ok();
-            let declarations = vec![
-                OutputDeclarationV1::new(
-                    "a.authoritative".to_owned(),
-                    OutputAuthorityV1::Authoritative,
-                    OutputFidelityV1::L0,
-                    64,
-                    None,
-                    None,
-                )
-                .test_ok(),
-                OutputDeclarationV1::new(
-                    "b.derived".to_owned(),
-                    OutputAuthorityV1::ReproducibleDerived,
-                    OutputFidelityV1::L1,
-                    64,
-                    Some(2),
-                    None,
-                )
-                .test_ok(),
-                OutputDeclarationV1::new(
-                    "c.ephemeral".to_owned(),
-                    OutputAuthorityV1::Ephemeral,
-                    OutputFidelityV1::L2,
-                    64,
-                    None,
-                    Some(10),
-                )
-                .test_ok(),
-            ];
-            let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-                plugin_id,
-                plugin_version: "test".to_owned(),
-                implementation_hash: Hash::from_bytes([0x42; 32]),
-                base_configuration_digest: Hash::from_bytes([0x43; 32]),
-                executable_profile_hash: budget.digest(),
-                retention_policy_hash: Hash::from_bytes([0x44; 32]),
-                policy_revision: 1,
-                output_declarations: declarations,
-            })
-            .test_ok();
-            registry
-                .register_test_driver_with_output_policy(
-                    plugin_id,
-                    "test",
-                    policy,
-                    budget,
-                    Box::new(NoopDriver),
-                )
-                .test_ok();
-            let (_, replay_identity) = registry.replay_policy_identities().next().test_ok();
-            replay_identities.push(replay_identity);
-        }
-        assert_ne!(replay_identities[0], replay_identities[1]);
-        assert_ne!(replay_identities[0], replay_identities[2]);
-        assert_ne!(replay_identities[1], replay_identities[2]);
     }
 
     #[test]
@@ -6364,10 +6139,11 @@ mod tests {
     }
 
     fn owned_policy_digests(registry: &PluginRegistry) -> Vec<(String, Hash)> {
-        registry
-            .output_policy_digests()
-            .map(|(name, digest)| (name.to_owned(), digest))
-            .collect()
+        let admitted = registry.plugins.values().filter_map(|entry| {
+            let admission = entry.output_admission.as_ref();
+            admission.map(|admission| (entry.name.clone(), admission.policy_digest()))
+        });
+        admitted.collect()
     }
 
     fn reducer_count(
@@ -6780,8 +6556,9 @@ mod tests {
                     &catalogue_configuration(PluginId::new(), details),
                 )
                 .test_ok();
-            let mut identities = registry.replay_policy_closure_identities();
-            identities.next().test_ok().1
+            let entry = registry.plugins.values().next().test_ok();
+            let admission = entry.output_admission.as_ref().test_ok();
+            admission.closure().test_ok().replay_identity_digest()
         };
         assert_eq!(identity(b"first"), identity(b"first"));
         assert_ne!(identity(b"first"), identity(b"second"));
@@ -7751,7 +7528,11 @@ mod tests {
         let names: Vec<&str> = reg.plugin_names().collect();
         assert!(names.contains(&"alpha"));
         assert!(names.contains(&"beta"));
-        let versions: Vec<(&str, &str)> = reg.plugin_versions().collect();
+        let versions: Vec<(&str, &str)> = reg
+            .plugins
+            .values()
+            .map(|entry| (entry.name.as_str(), entry.version.as_str()))
+            .collect();
         assert!(versions.contains(&("alpha", "0.1.0")));
         assert!(versions.contains(&("beta", "0.1.0")));
     }

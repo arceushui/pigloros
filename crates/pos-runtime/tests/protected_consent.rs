@@ -2022,10 +2022,6 @@ fn public_registry_reports_registered_plugin_metadata() {
     assert!(registry.contains(&plugin.id));
     assert_eq!(registry.len(), 1);
     assert_eq!(registry.plugin_names().collect::<Vec<_>>(), ["metadata"]);
-    assert_eq!(
-        registry.plugin_versions().collect::<Vec<_>>(),
-        [("metadata", "0.1.0")]
-    );
     assert!(PluginRegistry::new_replay().is_empty());
     assert!(PluginRegistry::new()
         .with_consent_gate(Arc::new(ConsentAuthority::new()))
@@ -2041,10 +2037,6 @@ fn public_registry_reports_driver_metadata_and_ticks() {
     assert_eq!(
         normal.plugin_names().collect::<Vec<_>>(),
         ["empty-public-seam"]
-    );
-    assert_eq!(
-        normal.plugin_versions().collect::<Vec<_>>(),
-        [("empty-public-seam", "0.1.0")]
     );
     let timeline = TimelineId::new();
     assert!(test_ok(normal.tick_cadenced(timeline, &root_ancestry(timeline), 0)).is_empty());

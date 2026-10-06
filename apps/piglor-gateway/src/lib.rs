@@ -504,7 +504,7 @@ mod coverage_tests {
         let registered = &composition.plugins[0];
         assert_eq!(registered.name, "gateway-world-actions");
         assert!(registered.pin.is_none());
-        assert_eq!(registry.replay_policy_closures().count(), 1);
+        assert_eq!(registry.retained_closure_replay_identities().len(), 1);
         let pin = PluginPinV1::try_new(
             DomainImplementationKindV1::Plugin,
             PluginIsolationV1::OperatorTrustedNative,
@@ -551,7 +551,7 @@ mod coverage_tests {
         ));
         assert!(registry.is_empty());
         assert_eq!(registry.composition().schemas.len(), schemas_before);
-        assert_eq!(registry.replay_policy_closures().count(), 0);
+        assert!(registry.retained_closure_replay_identities().is_empty());
     }
 
     #[test]
@@ -591,8 +591,7 @@ mod coverage_tests {
                     frozen,
                 )
                 .test_ok();
-            let mut identities = registry.replay_policy_closure_identities();
-            identities.next().test_ok().1
+            registry.retained_closure_replay_identities()
         };
         let baseline = resolved();
         let changes = [
