@@ -605,8 +605,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             return Err(CounterfactualAdmissionErrorV1::ClassifiedForkUnsupported);
         }
         authorize(plan, authority)?;
-        check_profile(request)?;
-        check_preflight(request)?;
+        check_host_state(request)?;
         let basis = fork_basis(&self.store, request)?;
         check_persisted_facts(request, &basis)?;
         let derivation = frontier_source.derive_frontier(
@@ -719,6 +718,14 @@ fn authorize(
                 Err(CounterfactualAdmissionErrorV1::TargetNotIntervenable)
             }
         })
+}
+
+/// Check the host-supplied state in order: the EPF1/TPS1 profile, then the
+/// preflight.
+fn check_host_state(
+    request: &CounterfactualAdmissionRequestV1<'_>,
+) -> Result<(), CounterfactualAdmissionErrorV1> {
+    check_profile(request).and_then(|()| check_preflight(request))
 }
 
 /// Prove the host EPF1 and TPS1 records are the ones the plan binds.
