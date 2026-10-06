@@ -1216,7 +1216,11 @@ mod tests {
             &[],
             &[REFERENCE_AGENT_SLOT],
             &[REFERENCE_AGENT_SLOT, "other.observation"],
-            &[REFERENCE_AGENT_SLOT, REFERENCE_OBSERVATION_SLOT, "extra.plugin"],
+            &[
+                REFERENCE_AGENT_SLOT,
+                REFERENCE_OBSERVATION_SLOT,
+                "extra.plugin",
+            ],
         ];
         for slots in cases {
             let error = reproduce_error_for(&roster_manifest(slots));

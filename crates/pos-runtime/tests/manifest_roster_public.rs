@@ -151,7 +151,9 @@ fn the_roster_is_sorted_by_slot_and_keeps_same_name_rows_apart() -> TestResult {
 #[test]
 fn every_row_carries_the_exact_native_digest_and_closure_bytes() -> TestResult {
     let built = admitted_composition()?;
-    let sources = built.registry.admitted_manifest_policy_sources(&built.admitted)?;
+    let sources = built
+        .registry
+        .admitted_manifest_policy_sources(&built.admitted)?;
     let roster = built.registry.manifest_plugin_roster(&built.admitted)?;
     assert_eq!(sources.len(), roster.entries().len());
     for row in roster.entries() {
