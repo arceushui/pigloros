@@ -105,6 +105,13 @@ impl ForkAttributionAuthorityImportPortV1 for SqliteStore {
     }
 }
 
+/// `SQLite` integers are signed. A value above `i64::MAX` wraps to a negative
+/// one, which no head lookup matches and which the `final_logical_head >= 0`
+/// table `CHECK` rejects on insert, so the import fails closed.
+const fn sql_int(value: u64) -> i64 {
+    i64::from_ne_bytes(value.to_ne_bytes())
+}
+
 fn blob(hash: Hash) -> Value {
     Value::Blob(hash.as_bytes().to_vec())
 }
@@ -198,7 +205,7 @@ fn keys_held(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::Result<bo
         KEYS_HELD_SQL,
         params![
             child_key(plan.child()),
-            plan.final_head(),
+            sql_int(plan.final_head()),
             blob(closure.principal_owner_binding().input().operation_id),
             blob(operation.operation_id),
             blob(operation.signed_manifest_record_id),
@@ -285,7 +292,7 @@ fn read_publication_rows(
     let binding = conn
         .query_row(
             PUBLICATION_BINDING_SQL,
-            params![child_key(plan.child()), plan.final_head()],
+            params![child_key(plan.child()), sql_int(plan.final_head())],
             |row| row.get::<_, Vec<u8>>(0),
         )
         .optional()?;
@@ -368,7 +375,7 @@ fn insert_event_rows(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::R
             params![
                 blob(record.input().operation_id),
                 child_key(plan.child()),
-                local_seq,
+                sql_int(local_seq),
                 event_key(record.input().event_id),
                 record.to_canonical_cbor(),
             ],
@@ -430,7 +437,7 @@ fn insert_publication_rows(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusql
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             child_key(plan.child()),
-            plan.final_head(),
+            sql_int(plan.final_head()),
             blob(operation_id),
             blob(record_id),
             closure.publication_binding().to_canonical_cbor(),
@@ -1133,7 +1140,7 @@ mod tests {
     #[test]
     fn an_unreadable_imported_principal_store_is_indeterminate() -> Fallible<()> {
         let owner = pos_core::OwnerIdV1::new("creator-a")?;
-        let mut state = Imported::new()?;
+        let state = Imported::new()?;
         // A text value where a blob belongs fails the row read.
         state.execute("UPDATE imported_fork_principal_owner_bindings SET pob1_cbor = 'text'")?;
         assert_eq!(
