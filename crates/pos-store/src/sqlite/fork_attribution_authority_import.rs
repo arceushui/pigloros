@@ -106,8 +106,11 @@ impl ForkAttributionAuthorityImportPortV1 for SqliteStore {
 }
 
 /// `SQLite` integers are signed. A value above `i64::MAX` wraps to a negative
-/// one, which no head lookup matches and which the `final_logical_head >= 0`
-/// table `CHECK` rejects on insert, so the import fails closed.
+/// one. For the final head that fails closed: no lookup matches it and the
+/// `final_logical_head >= 0` table `CHECK` rejects the insert. `local_seq` has
+/// no such `CHECK`, but it is bounded by the Event count of the segment, which
+/// the head already bounds. `sqlite_publication_head` in the parent module
+/// clamps to `-1` instead; both conventions yield a value no row holds.
 const fn sql_int(value: u64) -> i64 {
     i64::from_ne_bytes(value.to_ne_bytes())
 }
@@ -220,6 +223,9 @@ fn keys_held(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::Result<bo
 }
 
 /// Whether any Event key of the import is held.
+///
+/// This runs one indexed query per Event inside the write lock, at most the
+/// 10,000 Events that `FAE1` allows.
 fn events_held(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::Result<bool> {
     for record in plan.closure().append_operations() {
         let input = record.input();
@@ -1127,6 +1133,12 @@ mod tests {
         let outcome = store.import_verified(&request_for(&world, &second));
         assert_eq!(outcome, Err(CORRUPT));
         Ok(())
+    }
+
+    #[test]
+    fn an_out_of_range_integer_wraps_negative() {
+        assert!(sql_int(u64::MAX) < 0);
+        assert_eq!(sql_int(7), 7);
     }
 
     #[test]

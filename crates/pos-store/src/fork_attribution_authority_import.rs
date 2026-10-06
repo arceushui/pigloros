@@ -285,9 +285,14 @@ impl PreparedImportV1 {
     }
 
     /// The `IFA1` admission that this envelope earns under `generation`, a
-    /// `FIP1` generation that `admit_issuer` returned.
-    fn admission(&self, generation: u64) -> ImportedForkAttributionAdmissionV1 {
-        ImportedForkAttributionAdmissionV1::from_admitted(&self.envelope, generation)
+    /// `FIP1` generation that `admit_issuer` returned. A zero generation is
+    /// corrupt policy state.
+    fn admission(
+        &self,
+        generation: u64,
+    ) -> Result<ImportedForkAttributionAdmissionV1, ImportError> {
+        ImportedForkAttributionAdmissionV1::from_envelope(&self.envelope, generation)
+            .map_err(|_| ImportError::CorruptAuthority)
     }
 
     /// Whether a stored `IFA1` names exactly this envelope, whatever policy
@@ -706,7 +711,7 @@ fn install_absent<S: ImportBackendV1>(
     // `FSM1` verifications are repeated here so that the policy floor, the
     // destination registry, and the parent are checked under the write lock.
     let generation = precheck(&*store, prepared, request)?;
-    let plan = prepared.plan(prepared.admission(generation));
+    let plan = prepared.plan(prepared.admission(generation)?);
     if store.occupied(&plan)? {
         return Err(ImportError::Conflict);
     }
@@ -919,6 +924,7 @@ mod tests {
         committed_verdict: Option<PolicyError>,
         fault: Option<Fault>,
         registry_reads: AtomicU32,
+        admitted_generation: Option<u64>,
     }
 
     impl Probe {
@@ -932,6 +938,7 @@ mod tests {
                 committed_verdict: None,
                 fault: None,
                 registry_reads: AtomicU32::new(0),
+                admitted_generation: None,
             }
         }
 
@@ -1056,6 +1063,14 @@ mod tests {
                 (self.committed_verdict, query.basis)
             {
                 return Err(error);
+            }
+            if let (Some(policy_generation), ForkAttributionIssuerAdmissionBasisV1::AbsentImport) =
+                (self.admitted_generation, query.basis)
+            {
+                return Ok(crate::ForkAttributionIssuerAdmissionV1 {
+                    policy_generation,
+                    policy_digest: query.policy_digest,
+                });
             }
             self.inner.admit_issuer(query)
         }
@@ -1242,15 +1257,13 @@ mod tests {
 
     #[test]
     fn a_store_failure_at_each_read_is_indeterminate() -> Fallible<()> {
-        let mixed: [fn(TimelineId, TimelineId) -> Fault; 7] = [
+        let mixed: [fn(TimelineId, TimelineId) -> Fault; 6] = [
             |root, _| Fault::GetTimeline(root),
             |root, _| Fault::LogicalHead(root),
             |root, _| Fault::ChainHash(root),
             |_, child| Fault::Read(child),
             |_, child| Fault::ChainHash(child),
             |_, _| Fault::Registry(1),
-            // The registry reads of the range check follow four in the checks.
-            |_, _| Fault::Registry(5),
         ];
         for fault in mixed {
             let outcome = faulted_import(Shape::Mixed, fault)?;
@@ -1264,6 +1277,34 @@ mod tests {
             let outcome = faulted_import(Shape::EmptyClassified, fault)?;
             assert_eq!(outcome.err(), Some(ImportError::StorageIndeterminate));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn a_store_failure_at_the_range_check_registry_read_is_indeterminate() -> Fallible<()> {
+        let world = World::new(Shape::Mixed, false)?;
+        let built = world.build(&Spec::default())?;
+        // The #411 range check is the last registry read of an import, so an
+        // honest run names the read to fail, whatever reads come before it.
+        let mut honest = Probe::new(prepared_store(&world, &built)?);
+        run_import(&mut honest, &request_for(&world, &built))?;
+        let last = honest.registry_reads.load(Ordering::SeqCst);
+        let mut faulted = Probe::new(prepared_store(&world, &built)?);
+        faulted.fault = Some(Fault::Registry(last));
+        let outcome = run_import(&mut faulted, &request_for(&world, &built));
+        assert_eq!(outcome.err(), Some(ImportError::StorageIndeterminate));
+        assert_eq!(faulted.registry_reads.load(Ordering::SeqCst), last);
+        Ok(())
+    }
+
+    #[test]
+    fn a_zero_policy_generation_is_corrupt_authority() -> Fallible<()> {
+        let world = World::new(Shape::Mixed, false)?;
+        let built = world.build(&Spec::default())?;
+        let mut probe = Probe::new(prepared_store(&world, &built)?);
+        probe.admitted_generation = Some(0);
+        let outcome = run_import(&mut probe, &request_for(&world, &built));
+        assert_eq!(outcome.err(), Some(ImportError::CorruptAuthority));
         Ok(())
     }
 

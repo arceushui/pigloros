@@ -788,9 +788,25 @@ fn import_after_bind<S: Admitting>(
         ..Spec::default()
     })?;
     let authority = LocalAuthority::open(store)?;
-    assert!(authority.bind(store, 1, local)?.is_ok());
+    let ForkAdmissionOperationResultV1::PrincipalOwner(binding) = authority.bind(store, 1, local)??
+    else {
+        return Err("unexpected result".into());
+    };
     prepare(store, &world, &built)?;
-    Ok(import(store, &world, &built))
+    let outcome = import(store, &world, &built);
+    if let Ok(receipt) = &outcome {
+        // An exact retry returns the original receipt.
+        assert_eq!(import(store, &world, &built).as_ref(), Ok(receipt));
+        // A local re-bind with the same Owner still returns the original
+        // local binding: the import wrote no second Principal binding.
+        let ForkAdmissionOperationResultV1::PrincipalOwner(again) =
+            authority.bind(store, 2, local)??
+        else {
+            return Err("unexpected result".into());
+        };
+        assert_eq!(again, binding);
+    }
+    Ok(outcome)
 }
 
 #[test]
@@ -840,6 +856,10 @@ fn a_local_binding_after_an_import_writes_its_own_row_for_an_equal_owner_only() 
     check_local_binding_after_import(&mut SqliteStore::open_in_memory()?)
 }
 
+// The local different-Owner code is the ADR-099 `PrincipalOwnerConflict`; the
+// import side reports the ADR-105 `Conflict` (erratum E10). The row counts of
+// the local and imported Principal tables are asserted in the adapter unit
+// tests, which can read them.
 #[test]
 fn an_import_after_a_local_binding_resolves_for_an_equal_owner_only() -> Fallible<()> {
     let memory_equal = import_after_bind(&mut MemoryStore::new(), "creator-a")?;

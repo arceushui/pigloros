@@ -30,7 +30,10 @@ use crate::fork_attribution_authority_import::{
 };
 
 /// The child Fork and stored admission of one committed import.
-pub(super) type ImportedAttributionV1 = (TimelineId, StoredImportV1);
+pub(super) struct ImportedAttributionV1 {
+    child: TimelineId,
+    stored: StoredImportV1,
+}
 
 /// The imported `IKR1` and optional `IKT1` of one import.
 pub(super) struct ImportedKeyEvidenceV1 {
@@ -84,7 +87,7 @@ impl MemoryStore {
             || self
                 .imported_fork_attributions
                 .values()
-                .any(|(held, _)| *held == child)
+                .any(|row| row.child == child)
     }
 
     /// Whether the `POB1` operation is held, or its Principal is bound to
@@ -238,14 +241,14 @@ impl MemoryStore {
             .insert(artifact.input().signed_manifest_record_id, artifact.clone());
         self.imported_fork_attributions.insert(
             plan.import_operation_id(),
-            (
-                plan.child(),
-                StoredImportV1 {
+            ImportedAttributionV1 {
+                child: plan.child(),
+                stored: StoredImportV1 {
                     admission_bytes: plan.admission.to_canonical_cbor(),
                     envelope_bytes: plan.prepared.bytes.clone(),
                     envelope_digest: plan.admission.input().full_envelope_digest,
                 },
-            ),
+            },
         );
     }
 }
@@ -258,7 +261,7 @@ impl ImportBackendV1 for MemoryStore {
         Ok(self
             .imported_fork_attributions
             .get(&import_operation_id)
-            .map(|(_, row)| row.clone()))
+            .map(|row| row.stored.clone()))
     }
 
     fn has_key_evidence(&self, import_operation_id: Hash) -> Result<bool, ImportError> {
@@ -629,21 +632,21 @@ mod tests {
                 let operation = s.keys.import_operation;
                 let row = s.store.imported_fork_attributions.get_mut(&operation);
                 let row = row.ok_or("no row")?;
-                row.1.envelope_bytes.truncate(8);
+                row.stored.envelope_bytes.truncate(8);
                 Ok(())
             },
             |s| {
                 let operation = s.keys.import_operation;
                 let row = s.store.imported_fork_attributions.get_mut(&operation);
                 let row = row.ok_or("no row")?;
-                row.1.admission_bytes.truncate(8);
+                row.stored.admission_bytes.truncate(8);
                 Ok(())
             },
             |s| {
                 let operation = s.keys.import_operation;
                 let row = s.store.imported_fork_attributions.get_mut(&operation);
                 let row = row.ok_or("no row")?;
-                row.1.envelope_digest = hash(0x01);
+                row.stored.envelope_digest = hash(0x01);
                 Ok(())
             },
             |s| {
@@ -1048,7 +1051,7 @@ mod tests {
         let receipt = elsewhere.import_verified(&request_for(&state.world, &other))?;
         let operation = state.keys.import_operation;
         let row = state.store.imported_fork_attributions.get_mut(&operation);
-        row.ok_or("no row")?.1.admission_bytes = receipt.to_canonical_cbor();
+        row.ok_or("no row")?.stored.admission_bytes = receipt.to_canonical_cbor();
         assert_eq!(state.retry(), Err(CORRUPT));
         Ok(())
     }
