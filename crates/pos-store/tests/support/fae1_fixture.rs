@@ -260,7 +260,7 @@ fn owner(value: &str) -> Fallible<OwnerIdV1> {
 
 /// The attribution-signing identity of `creator` at `epoch`.
 #[must_use]
-pub fn attribution_identity(creator: &str, epoch: u64) -> KeyIdentityV1 {
+pub fn attribution_identity(creator: &'static str, epoch: u64) -> KeyIdentityV1 {
     KeyIdentityV1::new(creator, KeyRoleV1::SubjectAttributionSigning, epoch)
 }
 
@@ -391,7 +391,7 @@ impl World {
     ///
     /// # Errors
     /// Returns the construction error of any fixture record.
-    pub fn new(shape: Shape, owned: bool) -> Fallible<Self> {
+    pub fn new(shape: Shape, with_owner: bool) -> Fallible<Self> {
         let timeline_material = material(0x41);
         let timeline_identity =
             KeyIdentityV1::new("import-owner", KeyRoleV1::TimelineIntegritySigning, 1);
@@ -404,7 +404,7 @@ impl World {
         let mut source = MemoryStore::new();
         source.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
         source.save_key_registry(&registry)?;
-        let owner = owned.then(EntityId::new);
+        let owner = with_owner.then(EntityId::new);
         let root_meta = match owner {
             Some(owner) => TimelineMeta::root_owned("fae1-root", owner),
             None => TimelineMeta::root("fae1-root"),
@@ -801,7 +801,7 @@ struct BuiltRecords {
 fn key_evidence(
     attribution: &SigningKeyMaterial,
     destroyed: bool,
-    creator: &str,
+    creator: &'static str,
 ) -> Fallible<(ImportedKeyRecordV1, Option<ImportedKeyTombstoneV1>)> {
     let identity = attribution_identity(creator, 1);
     let key = attribution.public_verification_key();

@@ -796,6 +796,7 @@ mod tests {
     use crate::{
         fae1_fixture::{pin_policy, request_for, Built, Fallible, Shape, Spec, World, PARENT_CUT},
         memory::MemoryStore,
+        AuthenticatedOperatorPolicyPinV1,
     };
 
     #[test]
@@ -1107,7 +1108,7 @@ mod tests {
     fn a_phantom_own_event_in_an_empty_segment_is_range_evidence() -> Fallible<()> {
         let world = World::new(Shape::EmptyClassified, false)?;
         let built = world.build(&Spec::default())?;
-        let mut inner = prepared_store(&world, &built)?;
+        let inner = prepared_store(&world, &built)?;
         let phantom = inner.read_own(world.root, SeqRange::all())?;
         let mut probe = Probe::new(inner);
         probe.own_events = Some(phantom);

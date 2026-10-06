@@ -57,6 +57,7 @@ impl MemoryStore {
     /// `owner`.
     pub(super) fn imported_principal_has_other_owner(
         &self,
+        principal: Hash,
         owner: OwnerIdV1,
     ) -> bool {
         self.imported_fork_principal_owner_bindings
