@@ -102,6 +102,10 @@ fn public_none_attestation_parser_rejects_truncated_cbor_claims(
     ] {
         assert_invalid_attestation(envelope, &CREDENTIAL_ID);
     }
+    assert_eq!(
+        parse_none_attestation_object(b"\xa3\x63fmt\x78\x18", &CREDENTIAL_ID),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
 
     let authenticator_data = create_authenticator_data(cose_key());
     let missing_attested_fields = assertion_authenticator_data(0x45, &[]);

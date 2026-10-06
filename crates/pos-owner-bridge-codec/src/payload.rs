@@ -23,7 +23,7 @@ const MAX_TRANSPORTS: usize = 6;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransportCodes {
     codes: [u8; MAX_TRANSPORTS],
-    length: u8,
+    length: usize,
 }
 
 impl TransportCodes {
@@ -47,14 +47,14 @@ impl TransportCodes {
         }
         Ok(Self {
             codes: output,
-            length: u8::try_from(codes.len()).map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?,
+            length: codes.len(),
         })
     }
 
     /// Return the ordered transport-code slice.
     #[must_use]
     pub fn as_slice(&self) -> &[u8] {
-        &self.codes[..usize::from(self.length)]
+        &self.codes[..self.length]
     }
 }
 
