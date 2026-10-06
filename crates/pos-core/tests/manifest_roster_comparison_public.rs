@@ -443,16 +443,16 @@ fn policy_cases() -> [(Field, &'static str, Edit); 15] {
             run.budget.max_event_bytes = 2048;
         }),
         (Field::BudgetScalars, scalars, |run| {
-            run.budget.profile_hash = 8
+            run.budget.profile_hash = 8;
         }),
         (Field::BudgetScalars, scalars, |run| {
-            run.budget.wall_us = 2_000
+            run.budget.wall_us = 2_000;
         }),
         (Field::FidelityBudgets, fidelities, |run| {
-            run.budget.events[0] = 101
+            run.budget.events[0] = 101;
         }),
         (Field::FidelityBudgets, fidelities, |run| {
-            run.budget.bytes[2] = 200_000
+            run.budget.bytes[2] = 200_000;
         }),
     ]
 }
@@ -609,18 +609,18 @@ fn closure_cases() -> [(Problem, DraftEdit); 8] {
         (Problem::Empty, |draft| draft.raw = Some(Vec::new())),
         (Problem::Envelope, |draft| draft.raw = Some(SECRET.to_vec())),
         (Problem::UndecodableEop1, |draft| {
-            draft.members[0] = SECRET.to_vec()
+            draft.members[0] = SECRET.to_vec();
         }),
         (Problem::ForeignEop1, |draft| draft.digest = hash(9)),
         (Problem::ForeignEop1, |draft| draft.id = 77),
         (Problem::ForeignEop1, |draft| {
-            draft.version = "9.9.9".to_owned()
+            "9.9.9".clone_into(&mut draft.version);
         }),
         (Problem::UndecodableBudget, |draft| {
-            draft.members[1] = SECRET.to_vec()
+            draft.members[1] = SECRET.to_vec();
         }),
         (Problem::UndecodableRetention, |draft| {
-            draft.members[5] = SECRET.to_vec()
+            draft.members[5] = SECRET.to_vec();
         }),
     ]
 }
