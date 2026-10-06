@@ -65,6 +65,24 @@ impl<'a> OutputPolicyClosureEnvelopeV1<'a> {
         bytes: &'a [u8],
         expected_eop1: &[u8],
     ) -> Result<Self, OutputPolicyClosureEnvelopeErrorV1> {
+        let envelope = Self::from_canonical_bytes_unbound_v1(bytes)?;
+        if envelope.members[0] != expected_eop1 {
+            return Err(OutputPolicyClosureEnvelopeErrorV1::InvalidEnvelope);
+        }
+        Ok(envelope)
+    }
+
+    /// Decode bounded OPC1 framing without binding member zero to any EOP1.
+    ///
+    /// The caller must check member zero itself, for example against the EOP1
+    /// a roster entry names, before treating the envelope as that Plugin's.
+    ///
+    /// # Errors
+    /// Returns `BoundExceeded` for oversized input and `InvalidEnvelope` for
+    /// malformed framing or trailing bytes.
+    pub fn from_canonical_bytes_unbound_v1(
+        bytes: &'a [u8],
+    ) -> Result<Self, OutputPolicyClosureEnvelopeErrorV1> {
         if bytes.len() > MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1 {
             return Err(OutputPolicyClosureEnvelopeErrorV1::BoundExceeded);
         }
@@ -93,7 +111,7 @@ impl<'a> OutputPolicyClosureEnvelopeV1<'a> {
                 .ok_or(OutputPolicyClosureEnvelopeErrorV1::InvalidEnvelope)?;
             offset = member_end;
         }
-        if offset != bytes.len() || members[0] != expected_eop1 {
+        if offset != bytes.len() {
             return Err(OutputPolicyClosureEnvelopeErrorV1::InvalidEnvelope);
         }
         Ok(Self { members })
