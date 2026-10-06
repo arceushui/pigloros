@@ -217,9 +217,7 @@ pub enum ReproManifestV2Error {
         transport: &'static str,
     },
     /// An `adapter_records` list holds more elements than allowed.
-    #[error(
-        "{field} has more than {max} elements: keep at most {max}"
-    )]
+    #[error("{field} has more than {max} elements: keep at most {max}")]
     TooManyElements {
         /// The offending field, or `an array` when found while streaming; `max` is its limit.
         field: &'static str,
