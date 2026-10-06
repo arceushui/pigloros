@@ -910,7 +910,10 @@ fn a_file_backed_store_reports_partial_state_and_indeterminate_writes() -> Falli
          BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
     )?;
     let mut store = reopen(path)?;
-    assert_eq!(import(&mut store, &world, &built), Err(ImportError::StorageIndeterminate));
+    assert_eq!(
+        import(&mut store, &world, &built),
+        Err(ImportError::StorageIndeterminate)
+    );
     assert_eq!(store.get_timeline(world.child_at(0)?.id)?, None);
     drop(store);
     // The identical retry then installs it.
@@ -921,8 +924,14 @@ fn a_file_backed_store_reports_partial_state_and_indeterminate_writes() -> Falli
     // Partial committed state is corrupt authority, never repaired.
     raw_edit(path, "DELETE FROM fork_append_operations")?;
     let mut store = reopen(path)?;
-    assert_eq!(import(&mut store, &world, &built), Err(ImportError::CorruptAuthority));
-    assert_eq!(import(&mut store, &world, &built), Err(ImportError::CorruptAuthority));
+    assert_eq!(
+        import(&mut store, &world, &built),
+        Err(ImportError::CorruptAuthority)
+    );
+    assert_eq!(
+        import(&mut store, &world, &built),
+        Err(ImportError::CorruptAuthority)
+    );
     Ok(())
 }
 
@@ -939,14 +948,26 @@ fn a_tampered_shared_source_or_retained_policy_is_corrupt_authority() -> Fallibl
     prepare(&mut store, &world, &base)?;
     import(&mut store, &world, &base)?;
     drop(store);
-    raw_edit(path, "UPDATE imported_fork_classifier_sources SET fcs1_cbor = x'00'")?;
+    raw_edit(
+        path,
+        "UPDATE imported_fork_classifier_sources SET fcs1_cbor = x'00'",
+    )?;
     let mut store = reopen(path)?;
-    assert_eq!(import(&mut store, &world, &second), Err(ImportError::CorruptAuthority));
+    assert_eq!(
+        import(&mut store, &world, &second),
+        Err(ImportError::CorruptAuthority)
+    );
     assert_eq!(store.get_timeline(world.child_at(1)?.id)?, None);
     drop(store);
-    raw_edit(path, "UPDATE fork_attribution_issuer_policies SET fip1_cbor = x'00'")?;
+    raw_edit(
+        path,
+        "UPDATE fork_attribution_issuer_policies SET fip1_cbor = x'00'",
+    )?;
     let mut store = reopen(path)?;
-    assert_eq!(import(&mut store, &world, &base), Err(ImportError::CorruptAuthority));
+    assert_eq!(
+        import(&mut store, &world, &base),
+        Err(ImportError::CorruptAuthority)
+    );
     Ok(())
 }
 
@@ -964,6 +985,9 @@ fn rows_keyed_only_by_the_child_are_an_occupied_key_not_corruption() -> Fallible
         &format!("INSERT INTO fork_admissions (child_id, far1_cbor) VALUES ('{child}', x'00')"),
     )?;
     let mut store = reopen(path)?;
-    assert_eq!(import(&mut store, &world, &built), Err(ImportError::Conflict));
+    assert_eq!(
+        import(&mut store, &world, &built),
+        Err(ImportError::Conflict)
+    );
     Ok(())
 }
