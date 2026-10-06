@@ -3103,8 +3103,7 @@ impl PluginRegistry {
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
-        self.ensure_manifest_slot_free(plugin, &slot)?;
-        let binding = Self::generated_output_binding(plugin)?;
+        let binding = self.local_output_binding(plugin, &slot)?;
         let pin = crate::PluginPinV1::try_new(
             DomainImplementationKindV1::Plugin,
             PluginIsolationV1::OperatorTrustedNative,
@@ -3130,6 +3129,16 @@ impl PluginRegistry {
                 manifest_slot: Some(slot),
             },
         )
+    }
+
+    /// The generated binding for a local Plugin, after its slot is known free.
+    fn local_output_binding(
+        &self,
+        plugin: &dyn Plugin,
+        slot: &ManifestSlotV1,
+    ) -> Result<OutputPolicyBindingV1, RuntimeError> {
+        self.ensure_manifest_slot_free(plugin, slot)?;
+        Self::generated_output_binding(plugin)
     }
 
     /// Reject a slot another registered Plugin already holds.
