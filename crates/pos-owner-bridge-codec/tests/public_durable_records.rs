@@ -2,7 +2,7 @@ use pos_owner_bridge_codec::{
     decode_cleanup_record, decode_subject_credential_binding, encode_cleanup_record,
     encode_subject_credential_binding, CleanupRecordV1, CoseEs256PublicKey, OwnerBridgeCodecError,
     SubjectCredentialBindingInputV1, SubjectCredentialBindingV1, TransportCodes,
-    MAX_SUBJECT_CREDENTIAL_BINDING_BYTES,
+    MAX_CLEANUP_RECORD_BYTES, MAX_SUBJECT_CREDENTIAL_BINDING_BYTES,
 };
 
 const CEREMONY_ID: [u8; 16] = [
@@ -102,12 +102,106 @@ fn public_durable_codecs_reject_closed_schema_violations() -> Result<(), OwnerBr
     Ok(())
 }
 
+#[test]
+fn public_durable_records_enforce_complete_size_and_output_boundaries(
+) -> Result<(), OwnerBridgeCodecError> {
+    let binding = fixture_binding()?;
+    let mut binding_short_output = [0; 186];
+    assert_eq!(
+        encode_subject_credential_binding(&binding, &mut binding_short_output),
+        Err(OwnerBridgeCodecError::BufferTooSmall)
+    );
+
+    let cleanup = CleanupRecordV1::new(CEREMONY_ID, "owner-bridge-1", 7, 0, IMAGE_PATH_SHA256)?;
+    let mut cleanup_short_output = [0; 82];
+    assert_eq!(
+        encode_cleanup_record(&cleanup, &mut cleanup_short_output),
+        Err(OwnerBridgeCodecError::BufferTooSmall)
+    );
+
+    let owner_at_field_limit = "o".repeat(MAX_SUBJECT_CREDENTIAL_BINDING_BYTES);
+    assert_eq!(
+        binding_with(&owner_at_field_limit, 1, &[0x80, 0x81]),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
+    let folder_at_field_limit = "f".repeat(MAX_CLEANUP_RECORD_BYTES);
+    assert_eq!(
+        CleanupRecordV1::new(CEREMONY_ID, &folder_at_field_limit, 7, 0, IMAGE_PATH_SHA256),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_durable_records_preserve_every_field_and_cbor_width_boundary(
+) -> Result<(), OwnerBridgeCodecError> {
+    let binding = fixture_binding()?;
+    assert_eq!(binding.owner_id(), "owner");
+    assert_eq!(binding.subject_id(), SUBJECT_ID);
+    assert_eq!(binding.epoch(), 1);
+    assert_eq!(binding.credential_id(), &[0x80, 0x81]);
+    assert_eq!(binding.user_handle(), USER_HANDLE);
+    assert_eq!(binding.public_key().canonical_encoding(), cose_key());
+    assert!(!binding.backup_eligible());
+    assert!(!binding.backup_state());
+    assert_eq!(binding.sign_count(), 7);
+    assert_eq!(binding.transports().as_slice(), &[0]);
+
+    let cleanup = CleanupRecordV1::new(
+        CEREMONY_ID,
+        "owner-bridge-1",
+        u32::MAX,
+        u64::MAX,
+        IMAGE_PATH_SHA256,
+    )?;
+    assert_eq!(cleanup.ceremony_id(), CEREMONY_ID);
+    assert_eq!(cleanup.folder_name(), "owner-bridge-1");
+    assert_eq!(cleanup.browser_pid(), u32::MAX);
+    assert_eq!(cleanup.creation_filetime(), u64::MAX);
+    assert_eq!(cleanup.image_path_sha256(), IMAGE_PATH_SHA256);
+
+    let credential_id = [0x80, 0x81];
+    for epoch in [24, 256, 65_536, u64::MAX] {
+        let boundary = binding_with("owner", epoch, &credential_id)?;
+        let mut output = vec![0; MAX_SUBJECT_CREDENTIAL_BINDING_BYTES];
+        let length = encode_subject_credential_binding(&boundary, &mut output)?;
+        assert_eq!(
+            decode_subject_credential_binding(&output[..length])?.epoch(),
+            epoch
+        );
+    }
+
+    let owner_with_one_byte_length = "o".repeat(24);
+    let owner_with_two_byte_length = "o".repeat(256);
+    for owner_id in [
+        owner_with_one_byte_length.as_str(),
+        owner_with_two_byte_length.as_str(),
+    ] {
+        let boundary = binding_with(owner_id, 1, &credential_id)?;
+        let mut output = vec![0; MAX_SUBJECT_CREDENTIAL_BINDING_BYTES];
+        let length = encode_subject_credential_binding(&boundary, &mut output)?;
+        assert_eq!(
+            decode_subject_credential_binding(&output[..length])?.owner_id(),
+            owner_id
+        );
+    }
+    Ok(())
+}
+
 fn fixture_binding() -> Result<SubjectCredentialBindingV1<'static>, OwnerBridgeCodecError> {
+    binding_with("owner", 1, &[0x80, 0x81])
+}
+
+fn binding_with<'a>(
+    owner_id: &'a str,
+    epoch: u64,
+    credential_id: &'a [u8],
+) -> Result<SubjectCredentialBindingV1<'a>, OwnerBridgeCodecError> {
     SubjectCredentialBindingV1::new(SubjectCredentialBindingInputV1 {
-        owner_id: "owner",
+        owner_id,
         subject_id: SUBJECT_ID,
-        epoch: 1,
-        credential_id: &[0x80, 0x81],
+        epoch,
+        credential_id,
         user_handle: USER_HANDLE,
         public_key: CoseEs256PublicKey::from_canonical_encoding(&cose_key())?,
         backup_eligible: false,

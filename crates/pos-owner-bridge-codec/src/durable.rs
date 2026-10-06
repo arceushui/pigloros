@@ -2,7 +2,7 @@ use p256::ecdsa::VerifyingKey;
 
 use crate::{
     cbor::{CborReader, CborWriter},
-    CoseEs256PublicKey, OwnerBridgeCodecError, TransportCodes,
+    CoseEs256PublicKey, OwnerBridgeCodecError, TransportCodes, CANONICAL_COSE_ES256_KEY_BYTES,
 };
 
 const SUBJECT_CREDENTIAL_BINDING_MAGIC: [u8; 4] = *b"SCB1";
@@ -71,8 +71,9 @@ impl<'a> SubjectCredentialBindingV1<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`OwnerBridgeCodecError::BoundsExceeded`] when one borrowed
-    /// field exceeds the durable-record limit, and
+    /// Returns [`OwnerBridgeCodecError::BoundsExceeded`] when a borrowed field
+    /// or the complete deterministic record exceeds the durable-record limit,
+    /// and
     /// [`OwnerBridgeCodecError::InvalidPayload`] for an invalid P-256 point or
     /// impossible backup-flag combination.
     pub fn new(input: SubjectCredentialBindingInputV1<'a>) -> Result<Self, OwnerBridgeCodecError> {
@@ -90,6 +91,16 @@ impl<'a> SubjectCredentialBindingV1<'a> {
         } = input;
         require_bounded(owner_id.as_bytes(), 0, MAX_SUBJECT_CREDENTIAL_BINDING_BYTES)?;
         require_bounded(credential_id, 1, MAX_CREDENTIAL_ID_BYTES)?;
+        require_length(
+            subject_credential_binding_length(
+                owner_id,
+                epoch,
+                credential_id,
+                sign_count,
+                transports,
+            ),
+            MAX_SUBJECT_CREDENTIAL_BINDING_BYTES,
+        )?;
         if backup_state && !backup_eligible {
             return Err(OwnerBridgeCodecError::InvalidPayload);
         }
@@ -185,8 +196,9 @@ impl<'a> CleanupRecordV1<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`OwnerBridgeCodecError::BoundsExceeded`] when `folder_name`
-    /// exceeds the fixed cleanup-record limit.
+    /// Returns [`OwnerBridgeCodecError::BoundsExceeded`] when `folder_name` or
+    /// its complete deterministic record exceeds the fixed cleanup-record
+    /// limit.
     pub fn new(
         ceremony_id: [u8; 16],
         folder_name: &'a str,
@@ -195,6 +207,10 @@ impl<'a> CleanupRecordV1<'a> {
         image_path_sha256: [u8; 32],
     ) -> Result<Self, OwnerBridgeCodecError> {
         require_bounded(folder_name.as_bytes(), 0, MAX_CLEANUP_RECORD_BYTES)?;
+        require_length(
+            cleanup_record_length(folder_name, browser_pid, creation_filetime),
+            MAX_CLEANUP_RECORD_BYTES,
+        )?;
         Ok(Self {
             ceremony_id,
             folder_name,
@@ -246,6 +262,16 @@ pub fn encode_subject_credential_binding(
     binding: &SubjectCredentialBindingV1<'_>,
     output: &mut [u8],
 ) -> Result<usize, OwnerBridgeCodecError> {
+    let expected_length = subject_credential_binding_length(
+        binding.owner_id,
+        binding.epoch,
+        binding.credential_id,
+        binding.sign_count,
+        binding.transports,
+    );
+    if output.len() < expected_length {
+        return Err(OwnerBridgeCodecError::BufferTooSmall);
+    }
     let mut writer = CborWriter::new(output);
     writer.array(16)?;
     writer.bytes(&SUBJECT_CREDENTIAL_BINDING_MAGIC)?;
@@ -264,9 +290,7 @@ pub fn encode_subject_credential_binding(
     writer.boolean(binding.backup_state)?;
     writer.unsigned(u64::from(binding.sign_count))?;
     write_transports(&mut writer, binding.transports)?;
-    let length = writer.finish();
-    require_length(length, MAX_SUBJECT_CREDENTIAL_BINDING_BYTES)?;
-    Ok(length)
+    Ok(writer.finish())
 }
 
 /// Decode one exact deterministic-CBOR durable credential binding.
@@ -330,6 +354,14 @@ pub fn encode_cleanup_record(
     record: &CleanupRecordV1<'_>,
     output: &mut [u8],
 ) -> Result<usize, OwnerBridgeCodecError> {
+    let expected_length = cleanup_record_length(
+        record.folder_name,
+        record.browser_pid,
+        record.creation_filetime,
+    );
+    if output.len() < expected_length {
+        return Err(OwnerBridgeCodecError::BufferTooSmall);
+    }
     let mut writer = CborWriter::new(output);
     writer.array(7)?;
     writer.bytes(&CLEANUP_RECORD_MAGIC)?;
@@ -339,9 +371,7 @@ pub fn encode_cleanup_record(
     writer.unsigned(u64::from(record.browser_pid))?;
     writer.unsigned(record.creation_filetime)?;
     writer.bytes(&record.image_path_sha256)?;
-    let length = writer.finish();
-    require_length(length, MAX_CLEANUP_RECORD_BYTES)?;
-    Ok(length)
+    Ok(writer.finish())
 }
 
 /// Decode one exact deterministic-CBOR owner-bridge cleanup record.
@@ -431,4 +461,75 @@ const fn require_bounded(
         return Err(OwnerBridgeCodecError::BoundsExceeded);
     }
     Ok(())
+}
+
+fn subject_credential_binding_length(
+    owner_id: &str,
+    epoch: u64,
+    credential_id: &[u8],
+    sign_count: u32,
+    transports: TransportCodes,
+) -> usize {
+    cbor_unsigned_length(16)
+        + bounded_cbor_bytes_length(SUBJECT_CREDENTIAL_BINDING_MAGIC.len())
+        + cbor_unsigned_length(PROTOCOL_VERSION)
+        + bounded_cbor_bytes_length(owner_id.len())
+        + bounded_cbor_bytes_length(16)
+        + cbor_unsigned_length(SUBJECT_DATA_ENCRYPTION_ROLE)
+        + cbor_unsigned_length(epoch)
+        + bounded_cbor_bytes_length(RP_ID.len())
+        + bounded_cbor_bytes_length(OWNER_ORIGIN.len())
+        + bounded_cbor_bytes_length(credential_id.len())
+        + bounded_cbor_bytes_length(32)
+        + bounded_cbor_bytes_length(CANONICAL_COSE_ES256_KEY_BYTES)
+        + cbor_unsigned_length(ES256_ALGORITHM_CODE)
+        + 2
+        + cbor_unsigned_length(u64::from(sign_count))
+        + bounded_cbor_head_length(transports.as_slice().len())
+        + transports
+            .as_slice()
+            .iter()
+            .map(|&code| cbor_unsigned_length(u64::from(code)))
+            .sum::<usize>()
+}
+
+fn cleanup_record_length(folder_name: &str, browser_pid: u32, creation_filetime: u64) -> usize {
+    cbor_unsigned_length(7)
+        + bounded_cbor_bytes_length(CLEANUP_RECORD_MAGIC.len())
+        + cbor_unsigned_length(PROTOCOL_VERSION)
+        + bounded_cbor_bytes_length(16)
+        + bounded_cbor_bytes_length(folder_name.len())
+        + cbor_unsigned_length(u64::from(browser_pid))
+        + cbor_unsigned_length(creation_filetime)
+        + bounded_cbor_bytes_length(32)
+}
+
+// Every byte/text field reaches this helper only after the public
+// constructors bound it to at most 4,096 bytes.
+const fn bounded_cbor_bytes_length(value_length: usize) -> usize {
+    bounded_cbor_head_length(value_length) + value_length
+}
+
+const fn bounded_cbor_head_length(value: usize) -> usize {
+    if value <= 23 {
+        1
+    } else if value <= usize::from(u8::MAX) {
+        2
+    } else {
+        3
+    }
+}
+
+const fn cbor_unsigned_length(value: u64) -> usize {
+    if value <= 23 {
+        1
+    } else if value <= u64::from(u8::MAX) {
+        2
+    } else if value <= u64::from(u16::MAX) {
+        3
+    } else if value <= u64::from(u32::MAX) {
+        5
+    } else {
+        9
+    }
 }
