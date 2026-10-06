@@ -6,6 +6,11 @@ const MAX_CLIENT_DATA_BYTES: usize = 4_096;
 const OWNER_ORIGIN: &str = "http://localhost:49291";
 const CREATE_TYPE: &str = "webauthn.create";
 const GET_TYPE: &str = "webauthn.get";
+const CLIENT_DATA_TYPE_FIELD: u8 = 1;
+const CLIENT_DATA_CHALLENGE_FIELD: u8 = 2;
+const CLIENT_DATA_ORIGIN_FIELD: u8 = 4;
+const REQUIRED_CLIENT_DATA_FIELDS: u8 =
+    CLIENT_DATA_TYPE_FIELD | CLIENT_DATA_CHALLENGE_FIELD | CLIENT_DATA_ORIGIN_FIELD;
 
 /// Validate closed `WebAuthn` `clientDataJSON` for one ceremony and challenge.
 ///
@@ -34,9 +39,7 @@ pub fn validate_client_data_json(
     parser.expect_byte(b'{')?;
     let members_start = parser.offset;
 
-    let mut type_seen = false;
-    let mut challenge_seen = false;
-    let mut origin_seen = false;
+    let mut seen_fields = 0;
     let expected_type = match kind {
         CeremonyKind::Create => CREATE_TYPE,
         CeremonyKind::Get => GET_TYPE,
@@ -59,40 +62,13 @@ pub fn validate_client_data_json(
         parser.skip_whitespace();
         let value = parser.parse_value()?;
 
-        if key.equals_text("type") {
-            let JsonValue::String(value) = value else {
-                return Err(OwnerBridgeCodecError::InvalidPayload);
-            };
-            if !value.equals_text(expected_type) {
-                return Err(OwnerBridgeCodecError::InvalidPayload);
-            }
-            type_seen = true;
-        } else if key.equals_text("challenge") {
-            let JsonValue::String(value) = value else {
-                return Err(OwnerBridgeCodecError::InvalidPayload);
-            };
-            if value.contains_escape || value.raw.as_bytes() != &expected_challenge[..] {
-                return Err(OwnerBridgeCodecError::InvalidPayload);
-            }
-            challenge_seen = true;
-        } else if key.equals_text("origin") {
-            let JsonValue::String(value) = value else {
-                return Err(OwnerBridgeCodecError::InvalidPayload);
-            };
-            if !value.equals_text(OWNER_ORIGIN) {
-                return Err(OwnerBridgeCodecError::InvalidPayload);
-            }
-            origin_seen = true;
-        } else if key.equals_text("crossOrigin") {
-            let JsonValue::Boolean(value) = value else {
-                return Err(OwnerBridgeCodecError::InvalidPayload);
-            };
-            if value {
-                return Err(OwnerBridgeCodecError::InvalidPayload);
-            }
-        } else if key.equals_text("topOrigin") || key.equals_text("tokenBinding") {
-            return Err(OwnerBridgeCodecError::InvalidPayload);
-        }
+        validate_client_data_member(
+            key,
+            value,
+            expected_type,
+            &expected_challenge,
+            &mut seen_fields,
+        )?;
 
         parser.skip_whitespace();
         match parser.take_byte() {
@@ -108,10 +84,72 @@ pub fn validate_client_data_json(
     }
 
     parser.skip_whitespace();
-    if parser.offset != input.len() || !(type_seen && challenge_seen && origin_seen) {
+    if parser.offset != input.len() || seen_fields != REQUIRED_CLIENT_DATA_FIELDS {
         return Err(OwnerBridgeCodecError::InvalidPayload);
     }
     Ok(())
+}
+
+fn validate_client_data_member(
+    key: JsonString<'_>,
+    value: JsonValue<'_>,
+    expected_type: &str,
+    expected_challenge: &[u8; 43],
+    seen_fields: &mut u8,
+) -> Result<(), OwnerBridgeCodecError> {
+    if key.equals_text("type") {
+        validate_text_client_data_member(value, expected_type)?;
+        *seen_fields |= CLIENT_DATA_TYPE_FIELD;
+    } else if key.equals_text("challenge") {
+        validate_challenge_client_data_member(value, expected_challenge)?;
+        *seen_fields |= CLIENT_DATA_CHALLENGE_FIELD;
+    } else if key.equals_text("origin") {
+        validate_text_client_data_member(value, OWNER_ORIGIN)?;
+        *seen_fields |= CLIENT_DATA_ORIGIN_FIELD;
+    } else if key.equals_text("crossOrigin") {
+        validate_cross_origin_client_data_member(value)?;
+    } else if key.equals_text("topOrigin") || key.equals_text("tokenBinding") {
+        return Err(OwnerBridgeCodecError::InvalidPayload);
+    }
+    Ok(())
+}
+
+fn validate_text_client_data_member(
+    value: JsonValue<'_>,
+    expected: &str,
+) -> Result<(), OwnerBridgeCodecError> {
+    let JsonValue::String(value) = value else {
+        return Err(OwnerBridgeCodecError::InvalidPayload);
+    };
+    if value.equals_text(expected) {
+        Ok(())
+    } else {
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    }
+}
+
+fn validate_challenge_client_data_member(
+    value: JsonValue<'_>,
+    expected_challenge: &[u8; 43],
+) -> Result<(), OwnerBridgeCodecError> {
+    let JsonValue::String(value) = value else {
+        return Err(OwnerBridgeCodecError::InvalidPayload);
+    };
+    if !value.contains_escape && value.raw.as_bytes() == &expected_challenge[..] {
+        Ok(())
+    } else {
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    }
+}
+
+fn validate_cross_origin_client_data_member(
+    value: JsonValue<'_>,
+) -> Result<(), OwnerBridgeCodecError> {
+    if matches!(value, JsonValue::Boolean(false)) {
+        Ok(())
+    } else {
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    }
 }
 
 fn duplicate_key_before<'a>(
