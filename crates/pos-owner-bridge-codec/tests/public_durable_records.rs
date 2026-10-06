@@ -241,7 +241,7 @@ fn public_binding_decoder_rejects_wrong_cbor_types() -> Result<(), OwnerBridgeCo
     }
 
     let mut oversized_owner_length = binding_bytes;
-    oversized_owner_length[7..10].copy_from_slice(&[0x59, 0x10, 0x01]);
+    oversized_owner_length[7..10].copy_from_slice(&[0x79, 0x10, 0x01]);
     assert_eq!(
         decode_subject_credential_binding(&oversized_owner_length),
         Err(OwnerBridgeCodecError::BoundsExceeded)
@@ -279,7 +279,7 @@ fn public_cleanup_decoder_rejects_wrong_cbor_types() -> Result<(), OwnerBridgeCo
     }
 
     let mut oversized_folder_length = cleanup_bytes;
-    oversized_folder_length[24..27].copy_from_slice(&[0x59, 0x10, 0x01]);
+    oversized_folder_length[24..27].copy_from_slice(&[0x79, 0x10, 0x01]);
     assert_eq!(
         decode_cleanup_record(&oversized_folder_length),
         Err(OwnerBridgeCodecError::BoundsExceeded)
