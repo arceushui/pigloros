@@ -53,12 +53,8 @@ pub const MAX_MANIFEST_PLUGIN_ROSTER_BYTES_V1: usize = 1 << 30;
 ///
 /// This mirrors `pos_runtime::MAX_OUTPUT_POLICY_CLOSURE_BYTES_V1`, which
 /// `pos-core` cannot import; `pos-runtime` asserts equality at compile time.
-pub const MAX_MANIFEST_PLUGIN_CLOSURE_BYTES_V1: usize = 2 * 65_536
-    + 2 * (2 * 1_048_576)
-    + 1_048_576
-    + MAX_WORLD_RETENTION_RECORD_BYTES_V1
-    + 4
-    + 6 * 8;
+pub const MAX_MANIFEST_PLUGIN_CLOSURE_BYTES_V1: usize =
+    2 * 65_536 + 2 * (2 * 1_048_576) + 1_048_576 + MAX_WORLD_RETENTION_RECORD_BYTES_V1 + 4 + 6 * 8;
 
 // Rendered rule for `ClosureBytes`; the public tests pin it to the constant.
 const CLOSURE_RULE: &str = "closure_bytes must be at most 5374516 bytes (the native OPC1 maximum)";
@@ -259,9 +255,7 @@ impl ManifestPluginEntryV1 {
         let plugin_version = plugin_version.into();
         let closure_bytes = closure_bytes.into();
         if !valid_slot(&stable_slot) {
-            return Err(ManifestPluginRosterErrorV1::InvalidSlot {
-                slot: stable_slot,
-            });
+            return Err(ManifestPluginRosterErrorV1::InvalidSlot { slot: stable_slot });
         }
         let field = if !(1..=MAX_NAME_BYTES).contains(&plugin_name.len()) {
             Some(ManifestPluginFieldV1::PluginName)
