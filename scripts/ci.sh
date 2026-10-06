@@ -36,6 +36,9 @@ python3 "$ROOT/scripts/generate_pmf1_golden_vectors.py" --check
 echo "==> owner-bridge codec vectors match their independent generator"
 python3 "$ROOT/scripts/owner_bridge_vectors.py" --check
 
+echo "==> owner-bridge WebAuthn fixture matches its independent generator"
+python3 "$ROOT/scripts/owner_bridge_webauthn_fixtures.py" --check
+
 echo "==> MemoryStore benchmark CI policy"
 python3 "$ROOT/scripts/check_memory_store_benchmark_ci_policy.py"
 python3 "$ROOT/scripts/test_check_memory_store_benchmark_ci_policy.py"
