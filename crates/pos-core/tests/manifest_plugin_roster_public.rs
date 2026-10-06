@@ -510,6 +510,15 @@ fn aggregate_cap_accepts_the_exact_cap_and_rejects_one_byte_more() -> TestResult
 }
 
 #[test]
+fn decode_rejects_input_past_the_cap_before_parsing() {
+    // Zeroed allocations stay lazily mapped; the decoder reads at most one byte.
+    let at_cap = vec![0_u8; MAX_MANIFEST_PLUGIN_ROSTER_BYTES_V1];
+    decode_rejects(&at_cap, INVALID);
+    let over_cap = vec![0_u8; MAX_MANIFEST_PLUGIN_ROSTER_BYTES_V1 + 1];
+    decode_rejects(&over_cap, TOO_LARGE);
+}
+
+#[test]
 fn truncated_extended_and_trailing_inputs_reject() {
     let bytes = wire(&[row("a", 1), row("b", 2)]);
     for cut in 0..bytes.len() {
@@ -748,5 +757,33 @@ fn documented_usage_flow_round_trips_two_same_name_plugins() -> TestResult {
     assert_eq!(slots_of(&roster), ["sensor.a", "sensor.b"]);
     let bytes = roster.to_canonical_cbor();
     assert_eq!(decode(&bytes)?, roster);
+    Ok(())
+}
+
+#[test]
+fn byte_prefix_slots_order_before_their_extensions() -> TestResult {
+    let sorted = [row("a", 1), row("a-", 2), row("a.b", 3)];
+    assert_roundtrip(&sorted)?;
+    let reversed = [row("a-", 2), row("a", 1)];
+    decode_rejects(&wire(&reversed), unsorted("a"));
+    let scrambled = [row("a.b", 3), row("a", 1), row("a-", 2)];
+    assert_eq!(slots_of(&build(&scrambled)?), ["a", "a-", "a.b"]);
+    Ok(())
+}
+
+#[test]
+fn non_adjacent_duplicate_plugin_ids_reject() {
+    let batch = [row("a", 1), row("b", 2), row("c", 1)];
+    build_rejects(&batch, duplicate_id("c"));
+    decode_rejects(&wire(&batch), duplicate_id("c"));
+}
+
+#[test]
+fn an_empty_closure_decodes() -> TestResult {
+    let decoded = decode(&wire(&[closed("a", 1, Vec::new())]))?;
+    let [entry] = decoded.entries() else {
+        return Err("expected exactly one entry".into());
+    };
+    assert!(entry.closure_bytes().is_empty());
     Ok(())
 }
