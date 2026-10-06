@@ -9,8 +9,8 @@
 //!   configuration and the trap table that execution profiles carry;
 //! - [`ComponentHost::load`] compiles a Component and refuses, before any
 //!   execution, every import that is not a `host-v1` function with its exact
-//!   type, and any Component without the `describe`, `reduce` and `drive`
-//!   exports;
+//!   type, and any Component whose `describe`, `reduce` and `drive` exports
+//!   are missing or not of their exact type;
 //! - [`ComponentHost::describe`], [`ComponentHost::reduce`] and
 //!   [`ComponentHost::drive`] run one export in a fresh store under the
 //!   negotiated effective limits: fuel, linear memory, host calls,
@@ -20,6 +20,13 @@
 //! Execution needs a [`PinnedExecutionV1`]: a negotiated release
 //! (`pos-runtime`'s `NegotiatedCommunityPluginV1`) whose execution profile
 //! pins exactly this engine's runtime.
+//!
+//! The guest contract types (invocation, output, descriptor, guest error,
+//! report, invocation options and the output digest) live in
+//! `pos_runtime::community_plugin_host`, which links no WebAssembly runtime,
+//! so the supervisor and the commit use them without Wasmtime. This crate
+//! keeps only what needs Wasmtime: loading, lifting, lowering and the trap
+//! mapping.
 //!
 //! The engine never commits anything. A failed invocation returns only the
 //! closed `CommunityPluginHostErrorV1`; the guest's output and operational
@@ -35,26 +42,21 @@
 
 // Public modules keep crate-only items compatible with both `unreachable_pub`
 // and Clippy's `redundant_pub_crate`.
-pub mod contract;
 pub mod describe;
-pub mod digest;
 pub mod engine;
 pub mod host_v1;
-pub mod imports;
 pub mod lift;
+pub mod lower;
 pub mod outcome;
 pub mod output;
 pub mod runtime;
+pub mod signatures;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod test_values;
 
-pub use contract::{
-    ArtifactRefV1, EventDraftV1, FieldRefV1, GuestPluginErrorV1, PluginDescriptorV1,
-    PluginErrorCodeV1, PluginInvocationV1, PluginOutputV1, TimelinePositionV1, TraceAnnotationV1,
-    MAX_OBSERVATION_BYTES_V1, MAX_STATE_BYTES_V1,
-};
-pub use digest::{plugin_output_digest_v1, PLUGIN_OUTPUT_DIGEST_DOMAIN_V1};
 pub use engine::{ComponentHost, GuestExport, LoadedComponent, PinnedExecutionV1};
-pub use host_v1::{HostInputs, OperationalLogRecord};
-pub use outcome::{GuestReturnV1, InvocationReportV1, LoadError, MeteringV1, RuntimeNotPinnedV1};
+pub use outcome::{LoadError, RuntimeNotPinnedV1};
 pub use runtime::{
     pinned_runtime, MAX_WASM_STACK_BYTES, PINNED_ENGINE_CONFIG, RESOLVED_WASMTIME_FEATURES,
     WASMTIME_VERSION,

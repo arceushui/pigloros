@@ -13,7 +13,9 @@
 use std::fmt;
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
-use pos_runtime::community_plugin_host::CommunityPluginHostErrorV1;
+use pos_runtime::community_plugin_host::{
+    CommunityPluginHostErrorV1, HostInputs, OperationalLogRecord,
+};
 use wasmtime::component::{Linker, Val};
 use wasmtime::ResourceLimiter;
 
@@ -25,24 +27,6 @@ pub(crate) const MAX_RANDOM_BYTES: u32 = 4_096;
 pub(crate) const MAX_LOG_MESSAGE_BYTES: usize = 256;
 /// Largest element count of any guest table.
 const MAX_TABLE_ELEMENTS: usize = 65_536;
-
-/// Deterministic values that `host-v1` exposes to one invocation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HostInputs {
-    /// Simulation Time returned by `simulation-time`.
-    pub simulation_time: u64,
-}
-
-/// One accepted `record-operational-log` call.
-///
-/// Operational logs are never authoritative behaviour inputs.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OperationalLogRecord {
-    /// Category chosen by the guest.
-    pub category: u16,
-    /// UTF-8 message of at most 256 bytes.
-    pub message: String,
-}
 
 /// A host-side refusal raised inside Wasmtime and classified after the call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -318,6 +302,7 @@ fn store_result(results: &mut [Val], value: Val) -> wasmtime::Result<()> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::test_values::digest_val;
 
     const LIMITS: DeterministicBudgetV1 = DeterministicBudgetV1 {
         memory_bytes: 65_536,
@@ -330,16 +315,12 @@ mod tests {
         log_bytes: 600,
     };
 
-    fn byte_record_of(bytes: &[u8]) -> Val {
-        Val::Record(vec![("value".to_owned(), byte_list(bytes))])
-    }
-
     fn random_params(domain: &[u8], length: u32) -> [Val; 3] {
-        [byte_record_of(domain), Val::U64(7), Val::U32(length)]
+        [digest_val(domain), Val::U64(7), Val::U32(length)]
     }
 
     fn log_params(message: &[u8]) -> [Val; 2] {
-        [Val::U16(1), byte_record_of(message)]
+        [Val::U16(1), digest_val(message)]
     }
 
     fn state(limits: &DeterministicBudgetV1) -> HostState {
@@ -354,7 +335,7 @@ mod tests {
 
     #[test]
     fn byte_records_accept_only_single_byte_list_records() {
-        assert_eq!(byte_record(&byte_record_of(&[1, 2])), Some(vec![1, 2]));
+        assert_eq!(byte_record(&digest_val(&[1, 2])), Some(vec![1, 2]));
         assert_eq!(byte_record(&Val::Bool(true)), None);
         assert_eq!(byte_record(&Val::Record(Vec::new())), None);
         let wide = Val::Record(vec![("value".to_owned(), Val::List(vec![Val::U16(1)]))]);

@@ -1,27 +1,30 @@
 //! The pinned engine, Component loading and single-invocation execution.
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
-use pos_runtime::community_plugin_host::{CommunityPluginHostErrorV1, NegotiatedCommunityPluginV1};
-use wasmtime::component::types::ComponentItem;
+use pos_runtime::community_plugin_host::{
+    CommunityPluginHostErrorV1, GuestReturnV1, InvocationOptionsV1, InvocationReportV1,
+    MeteringV1, NegotiatedCommunityPluginV1, OperationalLogRecord, PluginDescriptorV1,
+    PluginInvocationV1, PluginOutputV1,
+};
+use wasmtime::component::types::{ComponentFunc, ComponentItem};
 use wasmtime::component::{Component, ComponentExportIndex, Instance, InstancePre, Linker, Val};
 use wasmtime::{Config, Engine, OptLevel, Store, Strategy, WasmBacktraceDetails};
 
-use crate::contract::{PluginDescriptorV1, PluginInvocationV1, PluginOutputV1};
 use crate::describe::plugin_descriptor;
-use crate::host_v1::{self, HostFault, HostInputs, HostState, OperationalLogRecord};
-use crate::imports::imported_functions_are_exact;
+use crate::host_v1::{self, HostFault, HostState};
 use crate::lift::{guest_return, Lifted};
-use crate::outcome::{
-    classify, GuestReturnV1, InvocationReportV1, LoadError, MeteringV1, RuntimeNotPinnedV1,
-};
+use crate::lower::invocation_val;
+use crate::outcome::{classify, LoadError, RuntimeNotPinnedV1};
 use crate::output::{plugin_output, OutputBounds};
+use crate::signatures::{export_is_exact, imported_functions_are_exact};
 use crate::runtime::{pinned_runtime, MAX_WASM_STACK_BYTES, PINNED_ENGINE_CONFIG};
 
 const GUEST_V1_INTERFACE: &str = "pigloros:plugin/guest-v1@0.1.0";
 
 /// One `guest-v1` export that the host may invoke.
 ///
-/// `migrate-state` is deliberately absent: a V1 host never invokes it.
+/// `migrate-state` is deliberately absent: a V1 host never invokes it. The
+/// discriminants follow [`GuestExport::ALL`], so they index export tables.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum GuestExport {
     /// `describe: func() -> result<plugin-descriptor, plugin-error>`.
@@ -67,6 +70,8 @@ impl PinnedExecutionV1 {
     /// Returns [`RuntimeNotPinnedV1`] when the profile records no runtime or a
     /// runtime other than [`pinned_runtime`].
     pub fn new(negotiated: NegotiatedCommunityPluginV1) -> Result<Self, RuntimeNotPinnedV1> {
+        // `pinned_runtime` always validates (a runtime test proves it); were
+        // it ever to fail, nothing would be pinned and execution is refused.
         let pinned = negotiated
             .runtime()
             .zip(pinned_runtime().ok())
@@ -90,13 +95,6 @@ impl PinnedExecutionV1 {
     }
 }
 
-/// Inputs of one invocation that do not come from the guest.
-#[derive(Clone, Copy)]
-struct Run {
-    inputs: HostInputs,
-    watchdog_epochs: u32,
-}
-
 /// The pinned Wasmtime engine and a linker that provides only `host-v1`.
 pub struct ComponentHost {
     engine: Engine,
@@ -106,19 +104,8 @@ pub struct ComponentHost {
 /// A compiled Component whose imports and `guest-v1` exports were checked.
 pub struct LoadedComponent {
     pre: InstancePre<HostState>,
-    describe: ComponentExportIndex,
-    reduce: ComponentExportIndex,
-    drive: ComponentExportIndex,
-}
-
-impl LoadedComponent {
-    const fn export(&self, export: GuestExport) -> ComponentExportIndex {
-        match export {
-            GuestExport::Describe => self.describe,
-            GuestExport::Reduce => self.reduce,
-            GuestExport::Drive => self.drive,
-        }
-    }
+    /// Export indices in [`GuestExport::ALL`] order.
+    exports: [ComponentExportIndex; 3],
 }
 
 /// The lifted return and the metering of one call, not yet validated.
@@ -165,16 +152,20 @@ impl ComponentHost {
         self.engine.increment_epoch();
     }
 
-    /// Compile a Component and check its imports before any execution.
+    /// Compile a Component and check its imports and exports before any
+    /// execution.
+    ///
+    /// Every refusal converts to the closed `IncompatibleAbi`.
     ///
     /// # Errors
     ///
     /// Returns [`LoadError::InvalidComponent`] for bytes that are not a valid
     /// Component, [`LoadError::ImportDenied`] when the Component imports a
     /// function other than a `host-v1` function with its exact type, or
-    /// anything else the linker does not provide, and
-    /// [`LoadError::MissingGuestExport`] when `guest-v1` lacks `describe`,
-    /// `reduce` or `drive`.
+    /// anything else the linker does not provide,
+    /// [`LoadError::MissingGuestExport`] when `guest-v1` lacks a `describe`,
+    /// `reduce` or `drive` function, and [`LoadError::MistypedGuestExport`]
+    /// when one of them does not have its exact WIT signature.
     pub fn load(&self, bytes: &[u8]) -> Result<LoadedComponent, LoadError> {
         let component = self.compile(bytes)?;
         let pre = self
@@ -186,11 +177,17 @@ impl ComponentHost {
         else {
             return Err(LoadError::MissingGuestExport);
         };
+        let exports = [describe, reduce, drive];
+        let exact = GuestExport::ALL
+            .iter()
+            .zip(&exports)
+            .all(|(export, (func, _))| export_is_exact(*export, func));
+        if !exact {
+            return Err(LoadError::MistypedGuestExport);
+        }
         Ok(LoadedComponent {
             pre,
-            describe,
-            reduce,
-            drive,
+            exports: exports.map(|(_, index)| index),
         })
     }
 
@@ -206,15 +203,10 @@ impl ComponentHost {
         &self,
         component: &LoadedComponent,
         execution: &PinnedExecutionV1,
-        inputs: HostInputs,
-        watchdog_epochs: u32,
+        options: InvocationOptionsV1,
     ) -> Result<InvocationReportV1<PluginDescriptorV1>, CommunityPluginHostErrorV1> {
-        let run = Run {
-            inputs,
-            watchdog_epochs,
-        };
         let negotiated = execution.negotiated();
-        self.call(component, GuestExport::Describe, &[], execution, run)?
+        self.call(component, GuestExport::Describe, &[], execution, options)?
             .lift(|value| guest_return(value, |payload| plugin_descriptor(payload, negotiated)))
     }
 
@@ -230,14 +222,9 @@ impl ComponentHost {
         component: &LoadedComponent,
         execution: &PinnedExecutionV1,
         invocation: &PluginInvocationV1,
-        inputs: HostInputs,
-        watchdog_epochs: u32,
+        options: InvocationOptionsV1,
     ) -> Result<InvocationReportV1<PluginOutputV1>, CommunityPluginHostErrorV1> {
-        let run = Run {
-            inputs,
-            watchdog_epochs,
-        };
-        self.invoke_output(component, GuestExport::Reduce, execution, invocation, run)
+        self.invoke_output(component, GuestExport::Reduce, execution, invocation, options)
     }
 
     /// Call `drive` with `invocation` and validate the complete output.
@@ -250,14 +237,9 @@ impl ComponentHost {
         component: &LoadedComponent,
         execution: &PinnedExecutionV1,
         invocation: &PluginInvocationV1,
-        inputs: HostInputs,
-        watchdog_epochs: u32,
+        options: InvocationOptionsV1,
     ) -> Result<InvocationReportV1<PluginOutputV1>, CommunityPluginHostErrorV1> {
-        let run = Run {
-            inputs,
-            watchdog_epochs,
-        };
-        self.invoke_output(component, GuestExport::Drive, execution, invocation, run)
+        self.invoke_output(component, GuestExport::Drive, execution, invocation, options)
     }
 
     /// Compile `bytes` and require exact `host-v1` function imports.
@@ -277,15 +259,15 @@ impl ComponentHost {
         export: GuestExport,
         execution: &PinnedExecutionV1,
         invocation: &PluginInvocationV1,
-        run: Run,
+        options: InvocationOptionsV1,
     ) -> Result<InvocationReportV1<PluginOutputV1>, CommunityPluginHostErrorV1> {
         invocation.validate()?;
-        let args = [invocation.to_val(export.name())];
+        let args = [invocation_val(invocation, export.name())];
         let bounds = OutputBounds {
             invocation_id: invocation.invocation_id,
             limits: execution.limits(),
         };
-        self.call(component, export, &args, execution, run)?
+        self.call(component, export, &args, execution, options)?
             .lift(|value| guest_return(value, |payload| plugin_output(payload, &bounds)))
     }
 
@@ -300,13 +282,14 @@ impl ComponentHost {
         export: GuestExport,
         args: &[Val],
         execution: &PinnedExecutionV1,
-        run: Run,
+        options: InvocationOptionsV1,
     ) -> Result<RawReport, CommunityPluginHostErrorV1> {
         let limits = execution.limits();
-        let mut store = Store::new(&self.engine, HostState::new(run.inputs, &limits));
+        let state = HostState::new(options.host_inputs, &limits);
+        let mut store = Store::new(&self.engine, state);
         store.limiter(|state| &mut state.memory);
-        store.set_epoch_deadline(u64::from(run.watchdog_epochs));
-        let index = component.export(export);
+        store.set_epoch_deadline(u64::from(options.watchdog_epochs));
+        let index = component.exports[export as usize];
         let outcome = store
             .set_fuel(limits.fuel)
             .and_then(|()| component.pre.instantiate(&mut store))
@@ -346,12 +329,19 @@ fn engine_config() -> Config {
     config
 }
 
-/// Resolve a `guest-v1` function export before any instance exists.
-fn guest_export(component: &Component, export: GuestExport) -> Option<ComponentExportIndex> {
+/// Resolve a `guest-v1` function export and its type before any instance
+/// exists.
+fn guest_export(
+    component: &Component,
+    export: GuestExport,
+) -> Option<(ComponentFunc, ComponentExportIndex)> {
     component
         .get_export_index(None, GUEST_V1_INTERFACE)
         .and_then(|interface| component.get_export(Some(&interface), export.name()))
-        .and_then(|(item, index)| matches!(item, ComponentItem::ComponentFunc(_)).then_some(index))
+        .and_then(|(item, index)| match item {
+            ComponentItem::ComponentFunc(func) => Some((func, index)),
+            _ => None,
+        })
 }
 
 fn call_export(
@@ -370,4 +360,12 @@ fn call_export(
             let [value] = results;
             value
         })
+}
+
+/// Fuel left in the store.
+///
+/// The pinned engine always meters fuel, so `get_fuel` cannot fail; the
+/// zero default is never taken.
+fn remaining_fuel(store: &Store<HostState>) -> u64 {
+    store.get_fuel().unwrap_or_default()
 }

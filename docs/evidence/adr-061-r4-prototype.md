@@ -109,7 +109,8 @@ against an in-test oracle.
   - `plugin-id` is `pigloros.compatibility-prototype`, ABI 0.0–0.0 (the V1
     host's only minor, since #541 checks it against the negotiated release);
   - one event schema digest, `0x01` × 32; state schema digest `0x02` × 32;
-  - manifest and release digests `0x00` × 32;
+  - manifest and release digests `0x00` × 32, which ADR-061 revision 6
+    requires of every V1 guest (the host rejects any other value);
   - empty `capabilities`, `migrations`, `dependencies` and `required-features`.
 - **`reduce` and `drive`**, in this order:
   1. If `observation-bytes` is `trap`, call `record-operational-log(2, "trapping")`,
@@ -127,7 +128,9 @@ against an in-test oracle.
      - one EventDraft: schema 1, `entity-id` set to the `invocation-id`,
        type `prototype.reduced` or `prototype.driven`, payload `h`;
      - `output-digest` is the V1 output digest of the other fields (see
-       `crates/pos-plugin-host/src/digest.rs`); `invocation-id` is echoed;
+       `plugin_output_digest_v1` in
+       `crates/pos-runtime/src/community_plugin_host/contract.rs`, the
+       ADR-061 revision 6 definition); `invocation-id` is echoed;
      - every other list is empty.
 - **`migrate-state`** returns `guest-declared-failure(1)`. A V1 host never
   calls it, and `GuestExport` cannot name it.
@@ -284,7 +287,8 @@ call time.
 
 **Resolved by #541.** `load` compares every imported function's type
 structurally with the exact `host-v1` signature before linking
-(`crates/pos-plugin-host/src/imports.rs`).
+(`crates/pos-plugin-host/src/signatures.rs`). The same module checks the
+`describe`, `reduce` and `drive` export types at load.
 
 ### F4. Guest memory baseline
 

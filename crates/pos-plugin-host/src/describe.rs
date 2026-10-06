@@ -7,18 +7,19 @@
 //! `migrate-state`. Any mismatch or bound violation is `InvalidGuestOutput`.
 //! Fields are checked in WIT order, so the lowest failing ordinal wins.
 //!
-//! Two fields are deliberately not compared, pending an owner decision:
-//! - `manifest-digest` and `release-digest` are only checked to be 32 bytes.
-//!   Both digests cover the Component's own digest (PMF1 field 9), so no
-//!   Component can embed the values of its own release.
+//! Two owner decisions (ADR-061 revision 6) fix the remaining fields:
+//! - `manifest-digest` and `release-digest` must be 32 zero bytes. Both real
+//!   digests cover the Component's own digest (PMF1 field 9), so no Component
+//!   can declare the values of its own release.
 //! - `capabilities` and `dependencies` are only count-bounded; the manifest,
 //!   not `describe`, is their authority.
 
-use pos_runtime::community_plugin_host::NegotiatedCommunityPluginV1;
+use pos_runtime::community_plugin_host::{NegotiatedCommunityPluginV1, PluginDescriptorV1};
 use wasmtime::component::Val;
 
-use crate::contract::PluginDescriptorV1;
-use crate::lift::{digest, fields, id, list, ordered_digests, text, u16_value, Lifted, INVALID};
+use crate::lift::{
+    digest, ensure, fields, id, list, ordered_digests, text, u16_value, Lifted, INVALID,
+};
 
 /// WIT bound on event schema digests and capability declarations.
 const MAX_DESCRIPTOR_ITEMS: usize = 256;
@@ -45,9 +46,7 @@ pub(crate) fn plugin_descriptor(
     bounded(event_schema_digests.len())?;
     let state_schema_digest = digest(state)?;
     bounded(list(capabilities)?.len())?;
-    if !list(migrations)?.is_empty() {
-        return Err(INVALID);
-    }
+    ensure(list(migrations)?.is_empty(), INVALID)?;
     bounded(list(dependencies)?.len())?;
     Ok(PluginDescriptorV1 {
         plugin_id,
@@ -59,27 +58,26 @@ pub(crate) fn plugin_descriptor(
         required_features,
         event_schema_digests,
         state_schema_digest,
-        manifest_digest: digest(manifest)?,
-        release_digest: digest(release)?,
+        manifest_digest: zero_digest(manifest)?,
+        release_digest: zero_digest(release)?,
     })
 }
 
 /// `value` if it equals `expected`.
 fn matching<T: PartialEq<U>, U: ?Sized>(value: T, expected: &U) -> Lifted<T> {
-    if value == *expected {
-        Ok(value)
-    } else {
-        Err(INVALID)
-    }
+    ensure(value == *expected, INVALID)?;
+    Ok(value)
+}
+
+/// A `digest32` of 32 zero bytes, as V1 `describe` digests must be.
+fn zero_digest(value: &Val) -> Lifted<[u8; 32]> {
+    matching(digest(value)?, &[0; 32])
 }
 
 fn semver_text(value: &Val) -> Lifted<String> {
     let semver = text(value)?;
-    if (1..=MAX_SEMVER_BYTES).contains(&semver.len()) {
-        Ok(semver)
-    } else {
-        Err(INVALID)
-    }
+    ensure((1..=MAX_SEMVER_BYTES).contains(&semver.len()), INVALID)?;
+    Ok(semver)
 }
 
 fn id_list(value: &Val) -> Lifted<Vec<String>> {
@@ -87,11 +85,7 @@ fn id_list(value: &Val) -> Lifted<Vec<String>> {
 }
 
 const fn bounded(count: usize) -> Lifted<()> {
-    if count <= MAX_DESCRIPTOR_ITEMS {
-        Ok(())
-    } else {
-        Err(INVALID)
-    }
+    ensure(count <= MAX_DESCRIPTOR_ITEMS, INVALID)
 }
 
 #[cfg(test)]
@@ -107,24 +101,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::host_v1::byte_list;
-
-    fn record(fields: Vec<(&str, Val)>) -> Val {
-        Val::Record(
-            fields
-                .into_iter()
-                .map(|(name, value)| (name.to_owned(), value))
-                .collect(),
-        )
-    }
-
-    fn digest_val(bytes: &[u8]) -> Val {
-        record(vec![("value", byte_list(bytes))])
-    }
-
-    fn text_val(text: &str) -> Val {
-        record(vec![("utf8", byte_list(text.as_bytes()))])
-    }
+    use crate::test_values::{digest_val, numbered_digest, record, text_val};
 
     fn texts(items: &[&str]) -> Val {
         Val::List(items.iter().map(|item| text_val(item)).collect())
@@ -173,8 +150,8 @@ mod tests {
             ("capabilities", Val::List(Vec::new())),
             ("migrations", Val::List(Vec::new())),
             ("dependencies", Val::List(Vec::new())),
-            ("manifest-digest", digest_val(&[6; 32])),
-            ("release-digest", digest_val(&[7; 32])),
+            ("manifest-digest", digest_val(&[0; 32])),
+            ("release-digest", digest_val(&[0; 32])),
         ]
     }
 
@@ -197,8 +174,8 @@ mod tests {
             required_features: vec!["feature.a".to_owned()],
             event_schema_digests: vec![[3; 32], [4; 32]],
             state_schema_digest: [5; 32],
-            manifest_digest: [6; 32],
-            release_digest: [7; 32],
+            manifest_digest: [0; 32],
+            release_digest: [0; 32],
         };
         assert_eq!(lifted, Ok(expected));
     }
@@ -224,11 +201,7 @@ mod tests {
     fn descriptor_bounds_and_migrations_are_checked() {
         let many = |count: usize| Val::List(vec![Val::Bool(false); count]);
         let ordered: Vec<Val> = (0..=MAX_DESCRIPTOR_ITEMS)
-            .map(|index| {
-                let mut digest = [0; 32];
-                digest[..8].copy_from_slice(&(index as u64).to_be_bytes());
-                digest_val(&digest)
-            })
+            .map(|index| digest_val(&numbered_digest(index)))
             .collect();
         assert!(with(7, Val::List(ordered[..MAX_DESCRIPTOR_ITEMS].to_vec())).is_ok());
         let invalid = [
@@ -243,8 +216,10 @@ mod tests {
             (9, many(MAX_DESCRIPTOR_ITEMS + 1)),
             (10, many(1)),
             (11, many(MAX_DESCRIPTOR_ITEMS + 1)),
-            (12, digest_val(&[6; 31])),
-            (13, digest_val(&[7; 31])),
+            (12, digest_val(&[0; 31])),
+            (13, digest_val(&[0; 31])),
+            (12, digest_val(&[6; 32])),
+            (13, digest_val(&[7; 32])),
         ];
         for (index, value) in invalid {
             assert_eq!(with(index, value), Err(INVALID), "field {index}");

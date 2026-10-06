@@ -9,8 +9,9 @@ use pos_crypto::plugin_execution::is_valid_id_v1;
 use pos_runtime::community_plugin_host::CommunityPluginHostErrorV1;
 use wasmtime::component::Val;
 
-use crate::contract::{FieldRefV1, GuestPluginErrorV1, PluginErrorCodeV1};
-use crate::outcome::GuestReturnV1;
+use pos_runtime::community_plugin_host::{
+    FieldRefV1, GuestPluginErrorV1, GuestReturnV1, PluginErrorCodeV1,
+};
 
 /// A lifted value or the closed error that ends the invocation.
 pub(crate) type Lifted<T> = Result<T, CommunityPluginHostErrorV1>;
@@ -24,6 +25,15 @@ pub(crate) const LIMIT: CommunityPluginHostErrorV1 =
 
 /// WIT bound on a `canonical-coordinate`, in bytes.
 const MAX_COORDINATE_BYTES: usize = 128;
+
+/// `Ok(())` when `condition` holds, otherwise `error`.
+pub(crate) const fn ensure(condition: bool, error: CommunityPluginHostErrorV1) -> Lifted<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
 
 /// Lift `result<T, plugin-error>`, lifting the `ok` payload with `ok`.
 pub(crate) fn guest_return<T>(
@@ -89,11 +99,8 @@ pub(crate) fn text(value: &Val) -> Lifted<String> {
 /// A `bounded-text` that is an ADR-061 ID.
 pub(crate) fn id(value: &Val) -> Lifted<String> {
     let text = text(value)?;
-    if is_valid_id_v1(&text) {
-        Ok(text)
-    } else {
-        Err(INVALID)
-    }
+    ensure(is_valid_id_v1(&text), INVALID)?;
+    Ok(text)
 }
 
 /// A `u16`.
@@ -118,11 +125,8 @@ pub(crate) fn ordered_digests(value: &Val) -> Lifted<Vec<[u8; 32]>> {
         .iter()
         .map(digest)
         .collect::<Lifted<Vec<_>>>()?;
-    if strictly_increasing(&digests) {
-        Ok(digests)
-    } else {
-        Err(INVALID)
-    }
+    ensure(strictly_increasing(&digests), INVALID)?;
+    Ok(digests)
 }
 
 /// Whether every item is strictly greater than the one before it.
@@ -135,11 +139,7 @@ pub(crate) fn strictly_increasing<T: Ord>(items: &[T]) -> bool {
 
 /// `OutputLimitExceeded` unless `count <= limit`.
 pub(crate) fn within(count: usize, limit: u64) -> Lifted<()> {
-    if u64::try_from(count).is_ok_and(|count| count <= limit) {
-        Ok(())
-    } else {
-        Err(LIMIT)
-    }
+    ensure(u64::try_from(count).is_ok_and(|count| count <= limit), LIMIT)
 }
 
 /// A `plugin-error`.
@@ -204,35 +204,16 @@ fn optional<T>(value: &Val, lift: impl FnOnce(&Val) -> Lifted<T>) -> Lifted<Opti
 /// A `canonical-coordinate` of at most 128 bytes.
 fn coordinate_bytes(value: &Val) -> Lifted<Vec<u8>> {
     let coordinate = bytes(value)?;
-    if coordinate.len() <= MAX_COORDINATE_BYTES {
-        Ok(coordinate)
-    } else {
-        Err(INVALID)
-    }
+    ensure(coordinate.len() <= MAX_COORDINATE_BYTES, INVALID)?;
+    Ok(coordinate)
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::test_values::{digest_val, record, text_val};
     use crate::host_v1::byte_list;
-
-    fn record(fields: Vec<(&str, Val)>) -> Val {
-        Val::Record(
-            fields
-                .into_iter()
-                .map(|(name, value)| (name.to_owned(), value))
-                .collect(),
-        )
-    }
-
-    fn digest_val(bytes: &[u8]) -> Val {
-        record(vec![("value", byte_list(bytes))])
-    }
-
-    fn text_val(text: &str) -> Val {
-        record(vec![("utf8", byte_list(text.as_bytes()))])
-    }
 
     fn some(value: Val) -> Val {
         Val::Option(Some(Box::new(value)))

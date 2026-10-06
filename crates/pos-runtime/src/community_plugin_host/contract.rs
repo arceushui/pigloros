@@ -1,15 +1,33 @@
-//! Host types for the `contract-v1` records that cross the Component boundary.
+//! The guest contract of the community Plugin world (ADR-061).
+//!
+//! Host types for the `contract-v1` records that cross the Component
+//! boundary, the V1 `output-digest`, and the report of one completed
+//! invocation. Nothing here links a WebAssembly runtime: the supervisor and
+//! the Tick-Boundary commit use these types, and only the in-worker engine
+//! (`pos-plugin-host`) converts them to and from Canonical ABI values.
 //!
 //! The host builds a [`PluginInvocationV1`] and receives a validated
 //! [`PluginOutputV1`], [`PluginDescriptorV1`] or [`GuestPluginErrorV1`]. Fixed
 //! lengths are part of the types: every `digest32` is `[u8; 32]`, and every
 //! `invocation-id`, `timeline-id` and `entity-id` is `[u8; 16]`.
+//!
+//! # Output digest (ADR-061 revision 6)
+//!
+//! The host recomputes `output-digest` over every prior `plugin-output` field
+//! and rejects a mismatch. Revision 6 defines the hashed bytes as raw
+//! BLAKE3-256 over:
+//!
+//! - the domain `PiglorOS.Plugin.Output.v1\0`;
+//! - then fields 0-5 in WIT order, each encoded as follows:
+//!   - `list<u8>` (including `digest32.value` and `bounded-text.utf8`):
+//!     `u64be(length) || bytes`;
+//!   - any other list: `u64be(count)`, then each element;
+//!   - a record: its fields in WIT order;
+//!   - `u32`: four big-endian bytes.
 
 use pos_crypto::plugin_execution::is_valid_id_v1;
-use pos_runtime::community_plugin_host::CommunityPluginHostErrorV1;
-use wasmtime::component::Val;
 
-use crate::host_v1::byte_list;
+use super::error::CommunityPluginHostErrorV1;
 
 /// WIT bound on observation bytes, in bytes (1 MiB).
 pub const MAX_OBSERVATION_BYTES_V1: usize = 1_048_576;
@@ -93,80 +111,6 @@ impl PluginInvocationV1 {
             .then_some(())
             .ok_or(CommunityPluginHostErrorV1::InvalidInvocation)
     }
-
-    /// The Canonical ABI value of this invocation with `kind`.
-    pub(crate) fn to_val(&self, kind: &str) -> Val {
-        record(vec![
-            ("invocation-id", byte_list(&self.invocation_id)),
-            ("kind", Val::Enum(kind.to_owned())),
-            (
-                "timeline-position",
-                record(vec![
-                    (
-                        "timeline-id",
-                        byte_list(&self.timeline_position.timeline_id),
-                    ),
-                    ("seq", Val::U64(self.timeline_position.seq)),
-                    ("tick", Val::U64(self.timeline_position.tick)),
-                    (
-                        "scheduler-position",
-                        Val::U32(self.timeline_position.scheduler_position),
-                    ),
-                ]),
-            ),
-            ("output-base-ordinal", Val::U32(self.output_base_ordinal)),
-            ("principal-ref", artifact(&self.principal_ref)),
-            (
-                "authorization-decision",
-                artifact(&self.authorization_decision),
-            ),
-            ("observation-snapshot", artifact(&self.observation_snapshot)),
-            ("observation-bytes", byte_list(&self.observation_bytes)),
-            ("prior-state-schema", digest(&self.prior_state_schema)),
-            ("prior-state-bytes", byte_list(&self.prior_state_bytes)),
-            (
-                "execution-profile-digest",
-                digest(&self.execution_profile_digest),
-            ),
-            (
-                "trust-policy-snapshot-digest",
-                digest(&self.trust_policy_snapshot_digest),
-            ),
-            (
-                "deterministic-budget-id",
-                record(vec![(
-                    "utf8",
-                    byte_list(self.deterministic_budget_id.as_bytes()),
-                )]),
-            ),
-            (
-                "deterministic-random-domain",
-                digest(&self.deterministic_random_domain),
-            ),
-            ("provenance-root", digest(&self.provenance_root)),
-        ])
-    }
-}
-
-fn record(fields: Vec<(&str, Val)>) -> Val {
-    Val::Record(
-        fields
-            .into_iter()
-            .map(|(name, value)| (name.to_owned(), value))
-            .collect(),
-    )
-}
-
-fn digest(value: &[u8; 32]) -> Val {
-    record(vec![("value", byte_list(value))])
-}
-
-fn artifact(value: &ArtifactRefV1) -> Val {
-    record(vec![
-        ("schema-id", Val::U32(value.schema_id)),
-        ("byte-length", Val::U64(value.byte_length)),
-        ("digest", digest(&value.digest)),
-    ])
 }
 
 /// `contract-v1.event-draft`, validated.
@@ -213,14 +157,15 @@ pub struct PluginOutputV1 {
     pub trace_annotations: Vec<TraceAnnotationV1>,
     /// Consumed dependency digests, strictly increasing.
     pub consumed_dependencies: Vec<[u8; 32]>,
-    /// The output digest, equal to [`crate::digest::plugin_output_digest_v1`].
+    /// The output digest, equal to [`plugin_output_digest_v1`].
     pub output_digest: [u8; 32],
 }
 
 /// `contract-v1.plugin-descriptor`, checked against the negotiated release.
 ///
 /// `capabilities` and `dependencies` are checked against their count bounds
-/// only, and `migrations` must be empty, so none of them is kept.
+/// only, because the manifest is their authority, and `migrations` must be
+/// empty, so none of them is kept.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginDescriptorV1 {
     /// Plugin ID, equal to the negotiated PMF1 Plugin ID.
@@ -241,9 +186,12 @@ pub struct PluginDescriptorV1 {
     pub event_schema_digests: Vec<[u8; 32]>,
     /// State schema digest.
     pub state_schema_digest: [u8; 32],
-    /// The guest's declared manifest digest.
+    /// Manifest digest: 32 zero bytes in V1 (ADR-061 revision 6).
+    ///
+    /// The real digest covers the Component's own digest, so no Component
+    /// can declare it.
     pub manifest_digest: [u8; 32],
-    /// The guest's declared release digest.
+    /// Release digest: 32 zero bytes in V1, for the same reason.
     pub release_digest: [u8; 32],
 }
 
@@ -289,6 +237,111 @@ pub struct GuestPluginErrorV1 {
     pub canonical_coordinate: Option<Vec<u8>>,
     /// Related digest.
     pub related_digest: Option<[u8; 32]>,
+}
+
+/// Deterministic values that `host-v1` exposes to one invocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HostInputs {
+    /// Simulation Time returned by `simulation-time`.
+    pub simulation_time: u64,
+}
+
+/// What the caller supplies to one invocation besides the guest's input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvocationOptionsV1 {
+    /// Deterministic `host-v1` values.
+    pub host_inputs: HostInputs,
+    /// Engine epoch ticks before the operational watchdog stops the guest.
+    ///
+    /// Zero stops the guest at its first epoch check.
+    pub watchdog_epochs: u32,
+}
+
+/// One accepted `record-operational-log` call.
+///
+/// Operational logs are never authoritative behaviour inputs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperationalLogRecord {
+    /// Category chosen by the guest.
+    pub category: u16,
+    /// UTF-8 message of at most 256 bytes.
+    pub message: String,
+}
+
+/// The guest's validated return: its value, or its own `plugin-error`.
+pub type GuestReturnV1<T> = Result<T, GuestPluginErrorV1>;
+
+/// Deterministic resource use of one completed invocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MeteringV1 {
+    /// Fuel consumed while instantiating the Component.
+    pub startup_fuel: u64,
+    /// Fuel consumed by the call itself.
+    pub call_fuel: u64,
+    /// Linear memory reserved across all of the Component's memories, in bytes.
+    pub memory_bytes: u64,
+    /// `host-v1` calls made.
+    pub host_calls: u64,
+}
+
+/// One completed invocation: the guest's validated return and its metering.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvocationReportV1<T> {
+    /// The guest's validated typed return.
+    pub result: GuestReturnV1<T>,
+    /// Fuel, memory and host calls the invocation used.
+    pub metering: MeteringV1,
+    /// Accepted `record-operational-log` calls, in call order.
+    ///
+    /// Operational only: never an authoritative input or output.
+    pub operational_log: Vec<OperationalLogRecord>,
+}
+
+/// The domain separator of the V1 output digest, including its NUL.
+pub const PLUGIN_OUTPUT_DIGEST_DOMAIN_V1: &[u8] = b"PiglorOS.Plugin.Output.v1\0";
+
+/// The V1 `output-digest` over fields 0-5 of `output`.
+///
+/// `output.output_digest` itself is not hashed.
+#[must_use]
+pub fn plugin_output_digest_v1(output: &PluginOutputV1) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(PLUGIN_OUTPUT_DIGEST_DOMAIN_V1);
+    put_bytes(&mut hasher, &output.invocation_id);
+    put_count(&mut hasher, output.event_drafts.len());
+    for draft in &output.event_drafts {
+        hasher.update(&draft.event_schema_id.to_be_bytes());
+        put_bytes(&mut hasher, &draft.entity_id);
+        put_bytes(&mut hasher, draft.event_type.as_bytes());
+        put_bytes(&mut hasher, &draft.canonical_payload);
+        put_digests(&mut hasher, &draft.dependency_digests);
+    }
+    put_bytes(&mut hasher, &output.next_state_schema);
+    put_bytes(&mut hasher, &output.next_state_bytes);
+    put_count(&mut hasher, output.trace_annotations.len());
+    for annotation in &output.trace_annotations {
+        hasher.update(&annotation.annotation_schema_id.to_be_bytes());
+        put_bytes(&mut hasher, &annotation.canonical_bytes);
+        put_digests(&mut hasher, &annotation.dependency_digests);
+    }
+    put_digests(&mut hasher, &output.consumed_dependencies);
+    *hasher.finalize().as_bytes()
+}
+
+fn put_count(hasher: &mut blake3::Hasher, count: usize) {
+    hasher.update(&(count as u64).to_be_bytes());
+}
+
+fn put_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    put_count(hasher, bytes.len());
+    hasher.update(bytes);
+}
+
+fn put_digests(hasher: &mut blake3::Hasher, digests: &[[u8; 32]]) {
+    put_count(hasher, digests.len());
+    for digest in digests {
+        put_bytes(hasher, digest);
+    }
 }
 
 #[cfg(test)]
@@ -341,33 +394,69 @@ mod tests {
         assert_eq!(unnamed.validate(), error);
     }
 
+    fn output() -> PluginOutputV1 {
+        PluginOutputV1 {
+            invocation_id: [1; 16],
+            event_drafts: vec![EventDraftV1 {
+                event_schema_id: 0x0102_0304,
+                entity_id: [2; 16],
+                event_type: "t".to_owned(),
+                canonical_payload: vec![3],
+                dependency_digests: vec![[4; 32]],
+            }],
+            next_state_schema: [5; 32],
+            next_state_bytes: vec![6, 7],
+            trace_annotations: vec![TraceAnnotationV1 {
+                annotation_schema_id: 9,
+                canonical_bytes: vec![10],
+                dependency_digests: Vec::new(),
+            }],
+            consumed_dependencies: vec![[11; 32]],
+            output_digest: [0; 32],
+        }
+    }
+
+    const fn len(count: u64) -> [u8; 8] {
+        count.to_be_bytes()
+    }
+
     #[test]
-    fn invocations_lower_in_wit_field_order() {
-        let Val::Record(fields) = invocation().to_val("drive") else {
-            std::panic::resume_unwind(Box::new("not a record"));
-        };
-        let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "invocation-id",
-                "kind",
-                "timeline-position",
-                "output-base-ordinal",
-                "principal-ref",
-                "authorization-decision",
-                "observation-snapshot",
-                "observation-bytes",
-                "prior-state-schema",
-                "prior-state-bytes",
-                "execution-profile-digest",
-                "trust-policy-snapshot-digest",
-                "deterministic-budget-id",
-                "deterministic-random-domain",
-                "provenance-root",
-            ]
-        );
-        assert_eq!(fields[1].1, Val::Enum("drive".to_owned()));
-        assert_eq!(fields[3].1, Val::U32(6));
+    fn the_digest_hashes_the_documented_encoding_of_fields_0_to_5() {
+        let mut expected = PLUGIN_OUTPUT_DIGEST_DOMAIN_V1.to_vec();
+        let parts: [&[u8]; 25] = [
+            &len(16),
+            &[1; 16],
+            &len(1),
+            &[1, 2, 3, 4],
+            &len(16),
+            &[2; 16],
+            &len(1),
+            b"t",
+            &len(1),
+            &[3],
+            &len(1),
+            &len(32),
+            &[4; 32],
+            &len(32),
+            &[5; 32],
+            &len(2),
+            &[6, 7],
+            &len(1),
+            &[0, 0, 0, 9],
+            &len(1),
+            &[10],
+            &len(0),
+            &len(1),
+            &len(32),
+            &[11; 32],
+        ];
+        for part in parts {
+            expected.extend_from_slice(part);
+        }
+        let digest = plugin_output_digest_v1(&output());
+        assert_eq!(digest, *blake3::hash(&expected).as_bytes());
+        let mut moved = output();
+        moved.output_digest = [0xff; 32];
+        assert_eq!(plugin_output_digest_v1(&moved), digest);
     }
 }

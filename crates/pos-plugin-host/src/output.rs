@@ -11,17 +11,18 @@
 //! dependency-digest list must be strictly increasing.
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
+use pos_runtime::community_plugin_host::{
+    plugin_output_digest_v1, EventDraftV1, PluginOutputV1, TraceAnnotationV1,
+};
 use wasmtime::component::Val;
 
-use crate::contract::{EventDraftV1, PluginOutputV1, TraceAnnotationV1};
-use crate::digest::plugin_output_digest_v1;
 use crate::lift::{
-    bytes, digest, fields, fixed, id, list, ordered_digests, u32_value, within, Lifted, INVALID,
-    LIMIT,
+    bytes, digest, ensure, fields, fixed, id, list, ordered_digests, u32_value, within, Lifted,
+    INVALID, LIMIT,
 };
 
 /// WIT bound on trace annotations in one output.
-pub(crate) const MAX_TRACE_ANNOTATIONS: u64 = 1_024;
+pub(crate) const MAX_TRACE_ANNOTATIONS: usize = 1_024;
 /// WIT bound on dependency digests in one output.
 pub(crate) const MAX_DEPENDENCY_DIGESTS: usize = 4_096;
 
@@ -62,20 +63,14 @@ pub(crate) fn plugin_output(value: &Val, bounds: &OutputBounds) -> Lifted<Plugin
         consumed_dependencies: dependencies.charge(ordered_digests(consumed)?)?,
         output_digest: digest(output_digest)?,
     };
-    if output.output_digest == plugin_output_digest_v1(&output) {
-        Ok(output)
-    } else {
-        Err(INVALID)
-    }
+    ensure(output.output_digest == plugin_output_digest_v1(&output), INVALID)?;
+    Ok(output)
 }
 
 fn echoed_invocation(value: &Val, invocation_id: [u8; 16]) -> Lifted<[u8; 16]> {
     let echoed = fixed(value)?;
-    if echoed == invocation_id {
-        Ok(echoed)
-    } else {
-        Err(INVALID)
-    }
+    ensure(echoed == invocation_id, INVALID)?;
+    Ok(echoed)
 }
 
 fn event_drafts(
@@ -119,7 +114,7 @@ fn trace_annotations(
     dependencies: &mut DependencyBudget,
 ) -> Lifted<Vec<TraceAnnotationV1>> {
     let items = list(value)?;
-    within(items.len(), MAX_TRACE_ANNOTATIONS)?;
+    ensure(items.len() <= MAX_TRACE_ANNOTATIONS, LIMIT)?;
     items
         .iter()
         .map(|item| trace_annotation(item, dependencies))
@@ -140,6 +135,7 @@ fn trace_annotation(value: &Val, dependencies: &mut DependencyBudget) -> Lifted<
 mod tests {
     use super::*;
     use crate::host_v1::byte_list;
+    use crate::test_values::{digest_val, digests_val, numbered_digest, record, text_val};
 
     const INVOCATION: [u8; 16] = [1; 16];
     const LIMITS: DeterministicBudgetV1 = DeterministicBudgetV1 {
@@ -157,31 +153,11 @@ mod tests {
         limits: LIMITS,
     };
 
-    fn record(fields: Vec<(&str, Val)>) -> Val {
-        Val::Record(
-            fields
-                .into_iter()
-                .map(|(name, value)| (name.to_owned(), value))
-                .collect(),
-        )
-    }
-
-    fn digest_val(bytes: &[u8]) -> Val {
-        record(vec![("value", byte_list(bytes))])
-    }
-
-    fn digests_val(digests: &[[u8; 32]]) -> Val {
-        Val::List(digests.iter().map(|digest| digest_val(digest)).collect())
-    }
-
     fn draft_val(draft: &EventDraftV1) -> Val {
         record(vec![
             ("event-schema-id", Val::U32(draft.event_schema_id)),
             ("entity-id", byte_list(&draft.entity_id)),
-            (
-                "event-type",
-                record(vec![("utf8", byte_list(draft.event_type.as_bytes()))]),
-            ),
+            ("event-type", text_val(&draft.event_type)),
             ("canonical-payload", byte_list(&draft.canonical_payload)),
             ("dependency-digests", digests_val(&draft.dependency_digests)),
         ])
@@ -310,19 +286,12 @@ mod tests {
 
     #[test]
     fn annotations_and_dependencies_stay_within_the_wit_bounds() {
-        let bound = usize::try_from(MAX_TRACE_ANNOTATIONS).unwrap_or(usize::MAX);
         let mut fullest = output();
-        fullest.trace_annotations = vec![annotation(Vec::new()); bound];
+        fullest.trace_annotations = vec![annotation(Vec::new()); MAX_TRACE_ANNOTATIONS];
         assert!(validate(&sealed(fullest.clone())).is_ok());
         fullest.trace_annotations.push(annotation(Vec::new()));
         assert_eq!(validate(&sealed(fullest)), Err(LIMIT));
-        let digests: Vec<[u8; 32]> = (0..MAX_DEPENDENCY_DIGESTS)
-            .map(|index| {
-                let mut digest = [0; 32];
-                digest[..8].copy_from_slice(&(index as u64).to_be_bytes());
-                digest
-            })
-            .collect();
+        let digests: Vec<[u8; 32]> = (0..MAX_DEPENDENCY_DIGESTS).map(numbered_digest).collect();
         let mut exact = output();
         exact.event_drafts.clear();
         exact.trace_annotations = vec![annotation(digests[..1].to_vec())];

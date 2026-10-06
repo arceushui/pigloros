@@ -8,11 +8,13 @@
 use pos_runtime::community_plugin_host::CommunityPluginHostErrorV1;
 use wasmtime::Trap;
 
-use crate::contract::GuestPluginErrorV1;
-use crate::host_v1::{HostFault, OperationalLogRecord};
+use crate::host_v1::HostFault;
 use crate::runtime::trap_outcome;
 
 /// Why a Component could not be loaded.
+///
+/// Every refusal is the closed `IncompatibleAbi`, a pre-execution rejection
+/// (owner decision of 2026-10-06): see the `From` conversion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoadError {
     /// The bytes are not a valid Component for the pinned engine.
@@ -22,6 +24,16 @@ pub enum LoadError {
     ImportDenied,
     /// `guest-v1` does not export `describe`, `reduce` and `drive` as functions.
     MissingGuestExport,
+    /// A `describe`, `reduce` or `drive` export does not have its exact WIT
+    /// signature.
+    MistypedGuestExport,
+}
+
+impl From<LoadError> for CommunityPluginHostErrorV1 {
+    /// Every load refusal is `IncompatibleAbi`.
+    fn from(_: LoadError) -> Self {
+        Self::IncompatibleAbi
+    }
 }
 
 /// The negotiated record's profile does not pin this engine's runtime.
@@ -31,35 +43,6 @@ pub enum LoadError {
 /// configuration and complete trap table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeNotPinnedV1;
-
-/// The guest's validated return: its value, or its own `plugin-error`.
-pub type GuestReturnV1<T> = Result<T, GuestPluginErrorV1>;
-
-/// Deterministic resource use of one completed invocation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MeteringV1 {
-    /// Fuel consumed while instantiating the Component.
-    pub startup_fuel: u64,
-    /// Fuel consumed by the call itself.
-    pub call_fuel: u64,
-    /// Linear memory reserved across all of the Component's memories, in bytes.
-    pub memory_bytes: u64,
-    /// `host-v1` calls made.
-    pub host_calls: u64,
-}
-
-/// One completed invocation: the guest's validated return and its metering.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InvocationReportV1<T> {
-    /// The guest's validated typed return.
-    pub result: GuestReturnV1<T>,
-    /// Fuel, memory and host calls the invocation used.
-    pub metering: MeteringV1,
-    /// Accepted `record-operational-log` calls, in call order.
-    ///
-    /// Operational only: never an authoritative input or output.
-    pub operational_log: Vec<OperationalLogRecord>,
-}
 
 /// Classify the error that ended an invocation.
 ///
@@ -88,6 +71,19 @@ mod tests {
     use super::*;
 
     type Error = CommunityPluginHostErrorV1;
+
+    #[test]
+    fn every_load_refusal_is_incompatible_abi() {
+        let refusals = [
+            LoadError::InvalidComponent,
+            LoadError::ImportDenied,
+            LoadError::MissingGuestExport,
+            LoadError::MistypedGuestExport,
+        ];
+        for refusal in refusals {
+            assert_eq!(Error::from(refusal), Error::IncompatibleAbi);
+        }
+    }
 
     #[test]
     fn host_faults_traps_and_lift_failures_map_to_closed_errors() {

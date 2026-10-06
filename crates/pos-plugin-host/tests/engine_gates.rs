@@ -5,33 +5,27 @@
 //! type and selects one misbehaviour from the Simulation Time it is given, so
 //! each closed outcome is reached through a real Wasmtime invocation.
 
+mod common;
+
 use std::sync::LazyLock;
 
-use pos_crypto::plugin_execution::{
-    DeterministicBudgetV1, PluginAbiRequirementV1, PluginExecutionProjectionFixtureV1,
-    PluginExecutionProjectionV1,
+use common::{
+    execution, invocation, negotiate, ok, options, pinned, release, BUDGET, PLUGIN_ID, RUST_GUEST,
 };
+use pos_crypto::plugin_execution::DeterministicBudgetV1;
 use pos_plugin_host::{
-    pinned_runtime, ArtifactRefV1, ComponentHost, HostInputs, LoadError, LoadedComponent,
-    PinnedExecutionV1, PluginInvocationV1, RuntimeNotPinnedV1, TimelinePositionV1,
-    MAX_OBSERVATION_BYTES_V1,
+    pinned_runtime, ComponentHost, LoadError, LoadedComponent, PinnedExecutionV1, RuntimeNotPinnedV1,
 };
 use pos_runtime::community_plugin_host::{
-    negotiate_community_plugin_v1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
-    CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, CommunityPluginModeV1,
-    ComponentTrapClassV1, NegotiatedCommunityPluginV1, PinnedComponentRuntimeV1,
-    TrapReproductionV1,
+    CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
+    PinnedComponentRuntimeV1, TrapReproductionV1, MAX_OBSERVATION_BYTES_V1,
 };
 
 type Error = CommunityPluginHostErrorV1;
 
 const PROBE: &str = include_str!("components/probe.wat");
-const RUST_GUEST: &[u8] = include_bytes!(
-    "../../../plugins/community/examples/compatibility-prototype/fixtures/rust-guest.wasm"
-);
-const PLUGIN_ID: &str = "pigloros.compatibility-prototype";
-const BUDGET: DeterministicBudgetV1 = DeterministicBudgetV1::MAXIMA;
-/// A watchdog that never fires during a test, so only deterministic limits stop the guest.
+/// A watchdog that never fires during a test, so only deterministic limits
+/// stop the guest.
 const NO_WATCHDOG: u32 = u32::MAX;
 
 struct Engine {
@@ -47,79 +41,15 @@ static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
     Engine { host, probe, rust }
 });
 
-fn ok<T, E: std::fmt::Debug>(result: Result<T, E>, context: &str) -> T {
-    result.unwrap_or_else(|error| {
-        std::panic::resume_unwind(Box::new(format!("{context}: {error:?}")))
-    })
-}
-
 fn component(text: &str) -> Vec<u8> {
     ok(wat::parse_str(text), "component text")
 }
 
-fn release(
-    plugin_id: &str,
-    max_minor: u16,
-    features: &[&str],
-    budget: DeterministicBudgetV1,
-) -> PluginExecutionProjectionV1 {
-    PluginExecutionProjectionV1::from(PluginExecutionProjectionFixtureV1 {
-        pmf1_digest: [1; 32],
-        release_digest: [2; 32],
-        plugin_id: plugin_id.to_owned(),
-        abi: PluginAbiRequirementV1 {
-            major: 0,
-            min_minor: 0,
-            max_minor,
-            required_features: features.iter().map(|id| (*id).to_owned()).collect(),
-        },
-        capabilities: Vec::new(),
-        budget,
-    })
-}
-
-fn negotiate(
-    release: &PluginExecutionProjectionV1,
-    host: &CommunityPluginHostAbiV1,
-    runtime: Option<PinnedComponentRuntimeV1>,
-) -> NegotiatedCommunityPluginV1 {
-    let profile = CommunityPluginExecutionProfileV1::new(
-        CommunityPluginModeV1::Local,
-        CommunityPluginCeilingsV1::V1,
-        runtime,
-    );
-    ok(
-        negotiate_community_plugin_v1(release, host, &profile),
-        "negotiation",
-    )
-}
-
-fn pinned(
-    release: &PluginExecutionProjectionV1,
-    host: &CommunityPluginHostAbiV1,
-) -> PinnedExecutionV1 {
-    let runtime = ok(pinned_runtime(), "pinned runtime");
-    ok(
-        PinnedExecutionV1::new(negotiate(release, host, Some(runtime))),
-        "pinned execution",
-    )
-}
-
-fn execution(budget: DeterministicBudgetV1) -> PinnedExecutionV1 {
-    pinned(
-        &release(PLUGIN_ID, 0, &[], budget),
-        &CommunityPluginHostAbiV1::v1(),
-    )
-}
-
 /// Run the probe's `describe` with `selector` under `budget`.
 fn probe(selector: u64, budget: DeterministicBudgetV1) -> Option<Error> {
-    let inputs = HostInputs {
-        simulation_time: selector,
-    };
     ENGINE
         .host
-        .describe(&ENGINE.probe, &execution(budget), inputs, NO_WATCHDOG)
+        .describe(&ENGINE.probe, &execution(budget), options(selector, NO_WATCHDOG))
         .err()
 }
 
@@ -127,35 +57,6 @@ const fn trap(class: ComponentTrapClassV1) -> Error {
     Error::ComponentTrap {
         class,
         reproduction: TrapReproductionV1::Unverified,
-    }
-}
-
-fn invocation(observation_bytes: usize) -> PluginInvocationV1 {
-    let artifact = ArtifactRefV1 {
-        schema_id: 1,
-        byte_length: 0,
-        digest: [0; 32],
-    };
-    PluginInvocationV1 {
-        invocation_id: [1; 16],
-        timeline_position: TimelinePositionV1 {
-            timeline_id: [2; 16],
-            seq: 0,
-            tick: 0,
-            scheduler_position: 0,
-        },
-        output_base_ordinal: 0,
-        principal_ref: artifact,
-        authorization_decision: artifact,
-        observation_snapshot: artifact,
-        observation_bytes: vec![0; observation_bytes],
-        prior_state_schema: [3; 32],
-        prior_state_bytes: Vec::new(),
-        execution_profile_digest: [4; 32],
-        trust_policy_snapshot_digest: [5; 32],
-        deterministic_budget_id: "budget".to_owned(),
-        deterministic_random_domain: [6; 32],
-        provenance_root: [7; 32],
     }
 }
 
@@ -221,22 +122,41 @@ fn malformed_guest_values_are_invalid_guest_output_not_traps() {
     // Invalid UTF-8 in a log message and a 31-byte random domain.
     assert_eq!(probe(12, BUDGET), Some(Error::InvalidGuestOutput));
     assert_eq!(probe(14, BUDGET), Some(Error::InvalidGuestOutput));
-    // A return the host's Canonical ABI lift cannot read, and a well-formed
-    // return of the wrong type.
+    // A return the host's Canonical ABI lift cannot read, and a well-typed
+    // descriptor that fails validation.
     assert_eq!(probe(15, BUDGET), Some(Error::InvalidGuestOutput));
     assert_eq!(probe(0, BUDGET), Some(Error::InvalidGuestOutput));
-    // `reduce` takes no invocation, so lowering the invocation fails.
-    let failure = ENGINE
-        .host
-        .reduce(
-            &ENGINE.probe,
-            &execution(BUDGET),
-            &invocation(0),
-            HostInputs { simulation_time: 0 },
-            NO_WATCHDOG,
-        )
-        .err();
-    assert_eq!(failure, Some(Error::InvalidGuestOutput));
+}
+
+#[test]
+fn guest_exports_must_have_their_exact_guest_v1_types() {
+    let untyped = "(component
+        (core module $m (func (export \"f\")))
+        (core instance $i (instantiate $m))
+        (func $f (canon lift (core func $i \"f\")))
+        (instance $g (export \"describe\" (func $f)) (export \"reduce\" (func $f))
+          (export \"drive\" (func $f)))
+        (export \"pigloros:plugin/guest-v1@0.1.0\" (instance $g)))";
+    let loaded = ENGINE.host.load(&component(untyped)).err();
+    assert_eq!(loaded, Some(LoadError::MistypedGuestExport));
+    let drive = PROBE.replace(
+        "(export \"drive\" (func $invoke)))",
+        "(export \"drive\" (func $describe)))",
+    );
+    assert_ne!(drive, PROBE);
+    let loaded = ENGINE.host.load(&component(&drive)).err();
+    assert_eq!(loaded, Some(LoadError::MistypedGuestExport));
+    let not_a_function = "(component
+        (core module $m (func (export \"f\")))
+        (core instance $i (instantiate $m))
+        (func $f (canon lift (core func $i \"f\")))
+        (instance $empty)
+        (instance $g (export \"describe\" (instance $empty)) (export \"reduce\" (func $f))
+          (export \"drive\" (func $f)))
+        (export \"pigloros:plugin/guest-v1@0.1.0\" (instance $g)))";
+    let loaded = ENGINE.host.load(&component(not_a_function)).err();
+    assert_eq!(loaded, Some(LoadError::MissingGuestExport));
+    assert_eq!(Error::from(LoadError::MistypedGuestExport), Error::IncompatibleAbi);
 }
 
 #[test]
@@ -300,7 +220,6 @@ fn execution_requires_the_profile_to_pin_this_runtime() {
 
 #[test]
 fn describe_must_match_the_negotiated_release() {
-    let inputs = HostInputs { simulation_time: 0 };
     let featured = ok(
         CommunityPluginHostAbiV1::new(0, 0, vec!["feature.a".to_owned()]),
         "host ABI",
@@ -314,7 +233,7 @@ fn describe_must_match_the_negotiated_release() {
     for execution in mismatches {
         let failure = ENGINE
             .host
-            .describe(&ENGINE.rust, &execution, inputs, NO_WATCHDOG)
+            .describe(&ENGINE.rust, &execution, options(0, NO_WATCHDOG))
             .err();
         assert_eq!(failure, Some(Error::InvalidGuestOutput));
     }
@@ -322,16 +241,11 @@ fn describe_must_match_the_negotiated_release() {
 
 #[test]
 fn invocations_outside_their_bounds_never_reach_the_guest() {
-    let inputs = HostInputs { simulation_time: 0 };
     let execution = execution(BUDGET);
-    let large = invocation(MAX_OBSERVATION_BYTES_V1 + 1);
-    let reduced = ENGINE
-        .host
-        .reduce(&ENGINE.rust, &execution, &large, inputs, 0);
+    let large = invocation(&vec![0; MAX_OBSERVATION_BYTES_V1 + 1]);
+    let reduced = ENGINE.host.reduce(&ENGINE.rust, &execution, &large, options(0, 0));
     assert_eq!(reduced.err(), Some(Error::InvalidInvocation));
-    let driven = ENGINE
-        .host
-        .drive(&ENGINE.rust, &execution, &large, inputs, 0);
+    let driven = ENGINE.host.drive(&ENGINE.rust, &execution, &large, options(0, 0));
     assert_eq!(driven.err(), Some(Error::InvalidInvocation));
 }
 
@@ -342,9 +256,9 @@ fn the_watchdog_deadline_counts_epochs_after_the_invocation_starts() {
     let host = ok(ComponentHost::new(), "pinned engine");
     let rust = ok(host.load(RUST_GUEST), "Rust guest");
     host.increment_epoch();
-    let inputs = HostInputs { simulation_time: 0 };
-    let report = host.drive(&rust, &execution(BUDGET), &invocation(4), inputs, 1);
-    let stopped = host.drive(&rust, &execution(BUDGET), &invocation(4), inputs, 0);
+    let observation = invocation(b"four");
+    let report = host.drive(&rust, &execution(BUDGET), &observation, options(0, 1));
+    let stopped = host.drive(&rust, &execution(BUDGET), &observation, options(0, 0));
     assert_eq!(stopped.err(), Some(Error::OperationalWatchdogStop));
     assert!(report.is_ok_and(|report| report.result.is_ok()));
 }

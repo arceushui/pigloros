@@ -8,21 +8,19 @@
 //! are exact, because fuel and memory are deterministic for the pinned
 //! Wasmtime and fixture bytes.
 
+mod common;
+
 use std::sync::LazyLock;
 
-use pos_crypto::plugin_execution::{
-    DeterministicBudgetV1, PluginAbiRequirementV1, PluginExecutionProjectionFixtureV1,
-    PluginExecutionProjectionV1, COMMUNITY_PLUGIN_WORLD_V1,
+use common::{
+    execution, invocation, ok, options, BUDGET, DOMAIN, INVOCATION_ID, PLUGIN_ID, RUST_GUEST, SEQ,
 };
-use pos_plugin_host::{
-    pinned_runtime, plugin_output_digest_v1, ArtifactRefV1, ComponentHost, EventDraftV1,
-    GuestExport, HostInputs, InvocationReportV1, LoadError, LoadedComponent, OperationalLogRecord,
-    PinnedExecutionV1, PluginDescriptorV1, PluginInvocationV1, PluginOutputV1, TimelinePositionV1,
-};
+use pos_crypto::plugin_execution::{DeterministicBudgetV1, COMMUNITY_PLUGIN_WORLD_V1};
+use pos_plugin_host::{ComponentHost, GuestExport, LoadError, LoadedComponent};
 use pos_runtime::community_plugin_host::{
-    negotiate_community_plugin_v1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
-    CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, CommunityPluginModeV1,
-    ComponentTrapClassV1, TrapReproductionV1,
+    plugin_output_digest_v1, CommunityPluginHostErrorV1, ComponentTrapClassV1, EventDraftV1,
+    HostInputs, InvocationOptionsV1, InvocationReportV1, OperationalLogRecord,
+    PluginDescriptorV1, PluginOutputV1, TrapReproductionV1,
 };
 
 /// Bytes of one committed compatibility fixture.
@@ -38,26 +36,19 @@ macro_rules! fixture {
 type Error = CommunityPluginHostErrorV1;
 type Outcome = Result<InvocationReportV1<PluginOutputV1>, Error>;
 
-const RUST_GUEST: &[u8] = fixture!("rust-guest.wasm");
 const C_GUEST: &[u8] = fixture!("c-guest.wasm");
 const AMBIENT_WASI_IMPORT: &[u8] = fixture!("ambient-wasi-import.wasm");
 const UNDECLARED_HOST_FUNCTION: &[u8] = fixture!("undeclared-host-function.wasm");
 const MISTYPED_HOST_FUNCTION: &[u8] = fixture!("mistyped-host-function.wasm");
 const NO_GUEST_EXPORTS: &[u8] = fixture!("no-guest-exports.wasm");
 
-const PLUGIN_ID: &str = "pigloros.compatibility-prototype";
 const INPUTS: HostInputs = HostInputs {
     simulation_time: 42,
 };
-const WATCHDOG: u32 = 1;
-const INVOCATION_ID: [u8; 16] = [0x11; 16];
-const DOMAIN: [u8; 32] = [7; 32];
-const SEQ: u64 = 11;
+const OPTIONS: InvocationOptionsV1 = options(INPUTS.simulation_time, 1);
 const LARGE_OBSERVATION_BYTES: usize = 1024 * 1024;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-/// The release's declared budget; the V1 profile clamps memory and fuel.
-const BUDGET: DeterministicBudgetV1 = DeterministicBudgetV1::MAXIMA;
 
 /// Fuel, memory and host calls of one measured invocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,71 +104,8 @@ static PROTOTYPE: LazyLock<Prototype> = LazyLock::new(|| {
     Prototype { host, rust, c }
 });
 
-fn ok<T, E: std::fmt::Debug>(result: Result<T, E>, context: &str) -> T {
-    result.unwrap_or_else(|error| {
-        std::panic::resume_unwind(Box::new(format!("{context}: {error:?}")))
-    })
-}
-
 fn guests() -> [(&'static str, &'static LoadedComponent); 2] {
     [("rust", &PROTOTYPE.rust), ("c", &PROTOTYPE.c)]
-}
-
-/// The compatibility release negotiated under the default V1 Local profile.
-fn execution(budget: DeterministicBudgetV1) -> PinnedExecutionV1 {
-    let release = PluginExecutionProjectionV1::from(PluginExecutionProjectionFixtureV1 {
-        pmf1_digest: [1; 32],
-        release_digest: [2; 32],
-        plugin_id: PLUGIN_ID.to_owned(),
-        abi: PluginAbiRequirementV1 {
-            major: 0,
-            min_minor: 0,
-            max_minor: 0,
-            required_features: Vec::new(),
-        },
-        capabilities: Vec::new(),
-        budget,
-    });
-    let profile = CommunityPluginExecutionProfileV1::new(
-        CommunityPluginModeV1::Local,
-        CommunityPluginCeilingsV1::V1,
-        Some(ok(pinned_runtime(), "pinned runtime")),
-    );
-    let host = CommunityPluginHostAbiV1::v1();
-    let negotiated = ok(
-        negotiate_community_plugin_v1(&release, &host, &profile),
-        "negotiation",
-    );
-    ok(PinnedExecutionV1::new(negotiated), "pinned execution")
-}
-
-fn invocation(observation: &[u8]) -> PluginInvocationV1 {
-    let artifact = |schema_id| ArtifactRefV1 {
-        schema_id,
-        byte_length: 0,
-        digest: [0; 32],
-    };
-    PluginInvocationV1 {
-        invocation_id: INVOCATION_ID,
-        timeline_position: TimelinePositionV1 {
-            timeline_id: [0x22; 16],
-            seq: SEQ,
-            tick: 3,
-            scheduler_position: 0,
-        },
-        output_base_ordinal: 0,
-        principal_ref: artifact(1),
-        authorization_decision: artifact(2),
-        observation_snapshot: artifact(3),
-        observation_bytes: observation.to_vec(),
-        prior_state_schema: [2; 32],
-        prior_state_bytes: b"prior".to_vec(),
-        execution_profile_digest: [3; 32],
-        trust_policy_snapshot_digest: [4; 32],
-        deterministic_budget_id: "budget".to_owned(),
-        deterministic_random_domain: DOMAIN,
-        provenance_root: [5; 32],
-    }
 }
 
 fn run(
@@ -190,9 +118,9 @@ fn run(
     let execution = execution(budget);
     let invocation = invocation(observation);
     if export == GuestExport::Drive {
-        host.drive(guest, &execution, &invocation, INPUTS, WATCHDOG)
+        host.drive(guest, &execution, &invocation, OPTIONS)
     } else {
-        host.reduce(guest, &execution, &invocation, INPUTS, WATCHDOG)
+        host.reduce(guest, &execution, &invocation, OPTIONS)
     }
 }
 
@@ -290,7 +218,7 @@ fn recorded(guest_name: &str, call: &str) -> Measurement {
 fn describe(guest: &LoadedComponent) -> Result<InvocationReportV1<PluginDescriptorV1>, Error> {
     PROTOTYPE
         .host
-        .describe(guest, &execution(BUDGET), INPUTS, WATCHDOG)
+        .describe(guest, &execution(BUDGET), OPTIONS)
 }
 
 #[test]
@@ -378,7 +306,7 @@ fn fuel_exhaustion_is_fuel_exhausted_and_discards_completed_host_calls() {
         let starved = DeterministicBudgetV1 { fuel: 1, ..BUDGET };
         let failure = PROTOTYPE
             .host
-            .describe(guest, &execution(starved), INPUTS, WATCHDOG)
+            .describe(guest, &execution(starved), OPTIONS)
             .err();
         assert_eq!(failure, Some(Error::FuelExhausted), "{name}");
     }
@@ -409,7 +337,7 @@ fn memory_limit_stops_growth_exactly_at_the_limit() {
         };
         let failure = PROTOTYPE
             .host
-            .describe(guest, &execution(one_page), INPUTS, WATCHDOG)
+            .describe(guest, &execution(one_page), OPTIONS)
             .err();
         assert_eq!(failure, Some(Error::MemoryLimitExceeded), "{name}");
     }
@@ -434,7 +362,7 @@ fn an_elapsed_watchdog_is_an_operational_stop() {
     for (name, guest) in guests() {
         let failure = PROTOTYPE
             .host
-            .reduce(guest, &execution, &invocation, INPUTS, 0)
+            .reduce(guest, &execution, &invocation, options(42, 0))
             .err();
         assert_eq!(failure, Some(Error::OperationalWatchdogStop), "{name}");
     }
