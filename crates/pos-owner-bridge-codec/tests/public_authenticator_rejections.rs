@@ -67,6 +67,30 @@ fn public_none_attestation_parser_rejects_closed_envelope_variations(
 }
 
 #[test]
+fn public_none_attestation_parser_rejects_duplicate_fields_and_wrong_cbor_types(
+) -> Result<(), OwnerBridgeCodecError> {
+    let authenticator_data = create_authenticator_data(cose_key());
+    let attestation = none_attestation_object(&authenticator_data)?;
+
+    let mut wrong_format_type = attestation.clone();
+    wrong_format_type[5] = 0x40;
+    assert_invalid_attestation(&wrong_format_type, &CREDENTIAL_ID);
+
+    let mut wrong_authenticator_data_type = attestation.clone();
+    wrong_authenticator_data_type[28] = 0x60;
+    assert_invalid_attestation(&wrong_authenticator_data_type, &CREDENTIAL_ID);
+
+    let mut duplicate_authenticator_data = Vec::from(b"\xa3\x68authData\x58".as_slice());
+    let authenticator_data_length = u8::try_from(authenticator_data.len())
+        .map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?;
+    duplicate_authenticator_data.push(authenticator_data_length);
+    duplicate_authenticator_data.extend_from_slice(&authenticator_data);
+    duplicate_authenticator_data.extend_from_slice(b"\x68authData");
+    assert_invalid_attestation(&duplicate_authenticator_data, &CREDENTIAL_ID);
+    Ok(())
+}
+
+#[test]
 fn public_none_attestation_parser_rejects_authenticator_and_cose_fields(
 ) -> Result<(), OwnerBridgeCodecError> {
     let authenticator_data = create_authenticator_data(cose_key());
@@ -249,6 +273,14 @@ fn public_assertion_authenticator_parser_enforces_the_extension_profile(
         parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, nested_too_deep)),
         Err(OwnerBridgeCodecError::BoundsExceeded)
     );
+    let nested_array_too_deep = b"\xa1\x61a\x81\x81\x81\x81\xf5";
+    assert_eq!(
+        parse_assertion_authenticator_data(&assertion_authenticator_data(
+            0x85,
+            nested_array_too_deep,
+        )),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
     Ok(())
 }
 
@@ -285,6 +317,48 @@ fn public_assertion_extension_parser_accepts_every_closed_value_class(
             b"\xa1\x61x\x58\x18",
         )),
         Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_cose_canonical_decoder_rejects_each_closed_map_shape() -> Result<(), OwnerBridgeCodecError>
+{
+    let key = cose_key();
+
+    let mut wrong_map_length = key;
+    wrong_map_length[0] = 0xa4;
+    assert_eq!(
+        CoseEs256PublicKey::from_canonical_encoding(&wrong_map_length),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+
+    let mut duplicate_y = key;
+    duplicate_y[7] = 0x22;
+    assert_eq!(
+        CoseEs256PublicKey::from_canonical_encoding(&duplicate_y),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+
+    let mut unknown_key = key;
+    unknown_key[1] = 4;
+    assert_eq!(
+        CoseEs256PublicKey::from_canonical_encoding(&unknown_key),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+
+    let mut x_as_text = key;
+    x_as_text[8] = 0x60;
+    assert_eq!(
+        CoseEs256PublicKey::from_canonical_encoding(&x_as_text),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+
+    let mut oversized_algorithm = Vec::from(key);
+    oversized_algorithm.splice(4..5, [0x1b, 0x80, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        CoseEs256PublicKey::from_canonical_encoding(&oversized_algorithm),
+        Err(OwnerBridgeCodecError::InvalidPayload)
     );
     Ok(())
 }

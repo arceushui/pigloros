@@ -407,6 +407,12 @@ fn public_create_options_decoder_rejects_each_closed_schema_field(
             b'X',
             OwnerBridgeCodecError::InvalidPayload,
         ),
+        (
+            "algorithm type",
+            111,
+            0x60,
+            OwnerBridgeCodecError::InvalidCbor,
+        ),
         ("algorithm", 111, 6, OwnerBridgeCodecError::InvalidPayload),
         (
             "required code one",

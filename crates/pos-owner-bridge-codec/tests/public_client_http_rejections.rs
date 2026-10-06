@@ -136,7 +136,7 @@ fn public_client_data_rejects_closed_value_mismatches_and_duplicates() {
 
 #[test]
 fn public_client_data_rejects_malformed_json_strings_and_trailing_content() {
-    let invalid_inputs: [(&str, &[u8]); 8] = [
+    let invalid_inputs: [(&str, &[u8]); 9] = [
         (
             "invalid escape",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":\"\\q\"}",
@@ -156,6 +156,10 @@ fn public_client_data_rejects_malformed_json_strings_and_trailing_content() {
         (
             "trailing comma",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",}",
+        ),
+        (
+            "invalid member delimiter",
+            b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\";}",
         ),
         (
             "trailing bytes",

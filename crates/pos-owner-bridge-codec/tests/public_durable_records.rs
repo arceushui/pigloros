@@ -124,9 +124,25 @@ fn public_durable_records_enforce_complete_size_and_output_boundaries(
         binding_with(&owner_at_field_limit, 1, &[0x80, 0x81]),
         Err(OwnerBridgeCodecError::BoundsExceeded)
     );
+    let owner_over_field_limit = "o".repeat(MAX_SUBJECT_CREDENTIAL_BINDING_BYTES + 1);
+    assert_eq!(
+        binding_with(&owner_over_field_limit, 1, &[0x80, 0x81]),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
     let folder_at_field_limit = "f".repeat(MAX_CLEANUP_RECORD_BYTES);
     assert_eq!(
         CleanupRecordV1::new(CEREMONY_ID, &folder_at_field_limit, 7, 0, IMAGE_PATH_SHA256),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
+    let folder_over_field_limit = "f".repeat(MAX_CLEANUP_RECORD_BYTES + 1);
+    assert_eq!(
+        CleanupRecordV1::new(
+            CEREMONY_ID,
+            &folder_over_field_limit,
+            7,
+            0,
+            IMAGE_PATH_SHA256,
+        ),
         Err(OwnerBridgeCodecError::BoundsExceeded)
     );
     Ok(())
@@ -189,6 +205,85 @@ fn public_durable_decoders_reject_every_truncated_record() -> Result<(), OwnerBr
             "cleanup prefix {length}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn public_binding_decoder_rejects_wrong_cbor_types() -> Result<(), OwnerBridgeCodecError> {
+    let binding = fixture_binding()?;
+    let mut binding_bytes = [0; 187];
+    encode_subject_credential_binding(&binding, &mut binding_bytes)?;
+    for (label, offset, value) in [
+        ("outer array", 0, 0x40),
+        ("magic", 1, 0x60),
+        ("version", 6, 0x60),
+        ("owner ID", 7, 0x40),
+        ("subject ID", 13, 0x60),
+        ("role", 30, 0x60),
+        ("RP ID", 32, 0x40),
+        ("owner origin", 42, 0x40),
+        ("credential ID", 65, 0x60),
+        ("user handle", 68, 0x60),
+        ("COSE key", 102, 0x60),
+        ("algorithm", 181, 0x60),
+        ("backup eligibility", 182, 0x60),
+        ("backup state", 183, 0x60),
+        ("signature counter", 184, 0x60),
+        ("transport list", 185, 0x40),
+        ("transport code", 186, 0x60),
+    ] {
+        let mut malformed = binding_bytes;
+        malformed[offset] = value;
+        assert!(
+            decode_subject_credential_binding(&malformed).is_err(),
+            "binding {label}"
+        );
+    }
+
+    let mut oversized_owner_length = binding_bytes;
+    oversized_owner_length[7..10].copy_from_slice(&[0x59, 0x10, 0x01]);
+    assert_eq!(
+        decode_subject_credential_binding(&oversized_owner_length),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_cleanup_decoder_rejects_wrong_cbor_types() -> Result<(), OwnerBridgeCodecError> {
+    let cleanup = CleanupRecordV1::new(
+        CEREMONY_ID,
+        "owner-bridge-1",
+        7,
+        0x0102_0304_0506_0708,
+        IMAGE_PATH_SHA256,
+    )?;
+    let mut cleanup_bytes = [0; 83];
+    encode_cleanup_record(&cleanup, &mut cleanup_bytes)?;
+    for (label, offset, value) in [
+        ("outer array", 0, 0x40),
+        ("magic", 1, 0x60),
+        ("version", 6, 0x60),
+        ("ceremony ID", 7, 0x60),
+        ("folder name", 24, 0x40),
+        ("browser PID", 39, 0x60),
+        ("creation time", 40, 0x60),
+        ("image hash", 49, 0x60),
+    ] {
+        let mut malformed = cleanup_bytes;
+        malformed[offset] = value;
+        assert!(
+            decode_cleanup_record(&malformed).is_err(),
+            "cleanup {label}"
+        );
+    }
+
+    let mut oversized_folder_length = cleanup_bytes;
+    oversized_folder_length[24..27].copy_from_slice(&[0x59, 0x10, 0x01]);
+    assert_eq!(
+        decode_cleanup_record(&oversized_folder_length),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
     Ok(())
 }
 
