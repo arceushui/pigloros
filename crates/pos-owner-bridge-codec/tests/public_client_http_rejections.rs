@@ -204,7 +204,7 @@ fn public_client_data_exercises_every_json_escape_and_parser_rejection() {
     truncated_escape.extend_from_slice(b"\"\\");
     let mut truncated_unicode = Vec::from(UNKNOWN_VALUE_PREFIX);
     truncated_unicode.extend_from_slice(br#""\u001"#);
-    let invalid_inputs: [(&str, &[u8]); 6] = [
+    let invalid_inputs: [(&str, &[u8]); 7] = [
         ("key without a string", b"{true:false}"),
         (
             "member without a colon",
@@ -213,6 +213,10 @@ fn public_client_data_exercises_every_json_escape_and_parser_rejection() {
         (
             "truncated true literal",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":tru}",
+        ),
+        (
+            "truncated false literal",
+            b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":fal}",
         ),
         (
             "non-hex unicode escape",

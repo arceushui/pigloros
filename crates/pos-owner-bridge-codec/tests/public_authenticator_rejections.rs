@@ -112,6 +112,14 @@ fn public_none_attestation_parser_rejects_truncated_cbor_claims(
         &none_attestation_object(&authenticator_data[..55])?,
         &CREDENTIAL_ID,
     );
+
+    let mut truncated_algorithm_head = authenticator_data;
+    truncated_algorithm_head[57 + 4] = 0x3b;
+    truncated_algorithm_head.truncate(57 + 5);
+    assert_invalid_attestation(
+        &none_attestation_object(&truncated_algorithm_head)?,
+        &CREDENTIAL_ID,
+    );
     Ok(())
 }
 
@@ -361,6 +369,22 @@ fn public_assertion_extension_parser_rejects_truncated_cbor_values() {
         b"\xa1\x61x\x98\x10".as_slice(),
         b"\xa1\x61x\xb8\x10".as_slice(),
     ] {
+        assert_eq!(
+            parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, extension)),
+            Err(OwnerBridgeCodecError::BoundsExceeded)
+        );
+    }
+}
+
+#[test]
+fn public_assertion_extension_parser_rejects_malformed_map_keys_and_counted_text() {
+    for extension in [b"\xa1\x61\xff\xf4".as_slice(), b"\xa1\x40\xf4".as_slice()] {
+        assert_eq!(
+            parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, extension)),
+            Err(OwnerBridgeCodecError::InvalidPayload)
+        );
+    }
+    for extension in [b"\xa1\x78\x18".as_slice(), b"\xa1\x61x\x78\x18".as_slice()] {
         assert_eq!(
             parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, extension)),
             Err(OwnerBridgeCodecError::BoundsExceeded)

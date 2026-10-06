@@ -638,6 +638,65 @@ fn public_attestation_decoder_rejects_each_closed_schema_field() -> Result<(), O
         decode_attestation_reply(&false_prf_bytes[..false_prf_length]),
         Ok(false_prf)
     );
+
+    let mut overwide_transport = Vec::from(attestation_bytes);
+    overwide_transport.splice(33..34, [0x19, 1, 0]);
+    assert_eq!(
+        decode_attestation_reply(&overwide_transport),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_payload_decoders_reject_trailing_bytes_for_each_remaining_shape(
+) -> Result<(), OwnerBridgeCodecError> {
+    let credential_id = [0x80, 0x81];
+    let get = GetOptionsV1::new(CEREMONY_ID, CHALLENGE, &credential_id, PRF_INPUT)?;
+    let mut get_bytes = [0; 106];
+    let get_length = encode_get_options(&get, &mut get_bytes)?;
+    let mut get_trailing = Vec::from(&get_bytes[..get_length]);
+    get_trailing.push(0);
+    assert_eq!(
+        decode_get_options(&get_trailing),
+        Err(OwnerBridgeCodecError::TrailingBytes)
+    );
+
+    let attestation = AttestationReplyV1::new(
+        CEREMONY_ID,
+        &credential_id,
+        b"{}",
+        b"\xa0",
+        TransportCodes::new(&[0])?,
+        true,
+        Some(PRF_RESULT),
+    )?;
+    let mut attestation_bytes = [0; 70];
+    let attestation_length = encode_attestation_reply(&attestation, &mut attestation_bytes)?;
+    let mut attestation_trailing = Vec::from(&attestation_bytes[..attestation_length]);
+    attestation_trailing.push(0);
+    assert_eq!(
+        decode_attestation_reply(&attestation_trailing),
+        Err(OwnerBridgeCodecError::TrailingBytes)
+    );
+
+    let assertion = AssertionReplyV1::new(
+        CEREMONY_ID,
+        &credential_id,
+        b"{}",
+        &[0; 37],
+        &[0; 8],
+        None,
+        PRF_RESULT,
+    )?;
+    let mut assertion_bytes = [0; 114];
+    let assertion_length = encode_assertion_reply(&assertion, &mut assertion_bytes)?;
+    let mut assertion_trailing = Vec::from(&assertion_bytes[..assertion_length]);
+    assertion_trailing.push(0);
+    assert_eq!(
+        decode_assertion_reply(&assertion_trailing),
+        Err(OwnerBridgeCodecError::TrailingBytes)
+    );
     Ok(())
 }
 
