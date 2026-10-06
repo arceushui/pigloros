@@ -26,22 +26,26 @@ use pos_conformance::{
     UnknownEdgePolicyV1,
 };
 use pos_core::{
-    pipeline_draft_vector_digest_v1, CanonicalBytes, CoreError, CounterfactualAdapterSealV1,
-    CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
-    CounterfactualInvalidationCommandV1, CounterfactualInvalidationOutcomeV1,
-    CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId,
-    ErasureContainmentGateV1, Event, EventDraft, EventReadBounds, EventStore, ForkGenerationV1,
-    Hash, InvalidationConflictV1, Kind, PipelineContractErrorV1, PipelineDraftBatchV1, Seq,
-    SeqRange, Timeline, TimelineId, TimelineMeta, MAX_FORK_EVENT_TYPE_BYTES_V1,
+    pipeline_draft_vector_digest_v1, ArtifactClaimInputV1, ArtifactDataClassV1,
+    ArtifactOptionalityV1, ArtifactStateV1, ArtifactTransitionRuleV1, CanonicalBytes, CoreError,
+    CounterfactualAdapterSealV1, CounterfactualBasisV1, CounterfactualFactsV1,
+    CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
+    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
+    CounterfactualTickOutcomeV1, EntityId, ErasureArtifactClassV1, ErasureContainmentGateV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, EventReadBounds, EventStore,
+    ForkGenerationV1, Hash, InvalidationConflictV1, Kind, PipelineContractErrorV1,
+    PipelineDraftBatchV1, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
+    Seq, SeqRange, Timeline, TimelineId, TimelineMeta, MAX_FORK_EVENT_TYPE_BYTES_V1,
     MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
 };
 use pos_runtime::counterfactual::coordinator::{
     CounterfactualAdmissionErrorV1 as AdmissionError, CounterfactualAdmissionRequestV1,
     CounterfactualCoordinatorV1, CounterfactualForkAppendAuthorityV1,
     CounterfactualFrontierDerivationV1, CounterfactualFrontierSourceV1,
+    CounterfactualFrozenArtifactsV1, CounterfactualHostPreflightV1,
     CounterfactualInterventionAuthorityV1, CounterfactualProvisionalOutputV1,
     CounterfactualTickFailureV1, CounterfactualTickInputsV1, CounterfactualTickStagerV1,
-    InterventionDecisionV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
+    FrozenArtifactAvailabilityV1, InterventionDecisionV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
 };
 use pos_runtime::counterfactual::suffix::{
     CounterfactualSuffixErrorV1 as SuffixError, CounterfactualSuffixFailureV1 as Failure,
@@ -794,10 +798,41 @@ impl CounterfactualTickStagerV1 for Stager {
 // Fixture
 // ---------------------------------------------------------------------------
 
+/// The host reports every frozen artifact as available.
+struct AllPresent;
+
+impl CounterfactualFrozenArtifactsV1 for AllPresent {
+    fn availability(&self, _: &FrozenArtifactDescriptorV1) -> FrozenArtifactAvailabilityV1 {
+        FrozenArtifactAvailabilityV1::Present
+    }
+}
+
+/// The host's evaluation of one retained `Exact` Export artifact.
+fn exact_evaluation() -> TestResult<ReplayClaimEvaluationV1> {
+    let claim = ErasureReplayClaimV1::Exact;
+    Ok(ReplayClaimEvaluatorV1::evaluate(
+        claim,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::Export,
+                ErasureReferenceV1::from_digest([201; 32]),
+                ArtifactDataClassV1::StructuralAuditMetadata,
+                None,
+                ErasureReferenceV1::from_digest([202; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: claim,
+            state: ArtifactStateV1::Retained,
+        }],
+    )?)
+}
+
 struct Fixture {
     plan: CounterfactualPlanV1,
     profile: ExecutionProfileV1,
     snapshot: TrustPolicySnapshotV1,
+    claim: ReplayClaimEvaluationV1,
     facts: CounterfactualFactsV1,
     receipt: CounterfactualGenerationReceiptV1,
 }
@@ -812,6 +847,7 @@ fn admission_request<'a>(
     plan: &'a CounterfactualPlanV1,
     profile: &'a ExecutionProfileV1,
     snapshot: &'a TrustPolicySnapshotV1,
+    claim: &'a ReplayClaimEvaluationV1,
 ) -> CounterfactualAdmissionRequestV1<'a> {
     CounterfactualAdmissionRequestV1 {
         plan,
@@ -819,6 +855,13 @@ fn admission_request<'a>(
         fork_append_authority: CounterfactualForkAppendAuthorityV1::Generic,
         execution_profile: profile,
         trust_policy: snapshot,
+        preflight: CounterfactualHostPreflightV1 {
+            room_id: "room.alpha",
+            room_digest: [2; 32],
+            plugin_composition_digest: [6; 32],
+            frozen_artifacts: &AllPresent,
+            replay_claim: claim,
+        },
         revocation_epoch: REVOCATION_EPOCH,
         erasure_epoch: ERASURE_EPOCH,
         frontier_id: FRONTIER_ID,
@@ -853,6 +896,7 @@ fn setup_in<B: Backend>(mut store: B, edit: fn(&mut CounterfactualPlanV1)) -> Te
     let snapshot =
         TrustPolicySnapshotV1::from_canonical_cbor(&draft_trust_policy_snapshot_bytes_v1()?)?;
     let plan = plan(&profile, &snapshot, edit)?;
+    let claim = exact_evaluation()?;
     let mut source = Source::new(&plan)?;
     let facts = CounterfactualFactsV1 {
         plan_digest: Hash::from_bytes(plan.plan_digest),
@@ -864,7 +908,7 @@ fn setup_in<B: Backend>(mut store: B, edit: fn(&mut CounterfactualPlanV1)) -> Te
     store.publish_counterfactual_facts(fork_id(), facts)?;
     let mut coordinator = CounterfactualCoordinatorV1::new(store);
     let receipt = coordinator.admit(
-        &admission_request(&plan, &profile, &snapshot),
+        &admission_request(&plan, &profile, &snapshot, &claim),
         &Authority,
         &mut source,
         &mut Stager::default(),
@@ -876,6 +920,7 @@ fn setup_in<B: Backend>(mut store: B, edit: fn(&mut CounterfactualPlanV1)) -> Te
             plan,
             profile,
             snapshot,
+            claim,
             facts,
             receipt,
         },
@@ -1546,7 +1591,12 @@ fn stale_generation_and_foreign_plans_are_rejected<B: Backend>() -> TestResult {
         fixture,
     } = &mut setup;
     coordinator.admit(
-        &admission_request(&fixture.plan, &fixture.profile, &fixture.snapshot),
+        &admission_request(
+            &fixture.plan,
+            &fixture.profile,
+            &fixture.snapshot,
+            &fixture.claim,
+        ),
         &Authority,
         source,
         &mut Stager::default(),
@@ -1594,7 +1644,12 @@ fn another_generations_invalidation_is_rejected() -> TestResult {
         fixture,
     } = &mut setup;
     fixture.receipt = coordinator.admit(
-        &admission_request(&fixture.plan, &fixture.profile, &fixture.snapshot),
+        &admission_request(
+            &fixture.plan,
+            &fixture.profile,
+            &fixture.snapshot,
+            &fixture.claim,
+        ),
         &Authority,
         source,
         &mut Stager::default(),
