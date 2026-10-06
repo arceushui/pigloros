@@ -905,6 +905,10 @@ impl TickDependencyRecordV1 {
     /// [`MAX_RECORDED_DEPENDENCY_NODES_V1`] nodes,
     /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] edges, or
     /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] declared inputs.
+    ///
+    /// The declared-inputs cap deliberately equals the edge bound, so that
+    /// constant is intentionally reused: pos-time rejects a graph whose
+    /// declared inputs exceed its edge bound.
     pub fn ensure_set_capacity(&self, recorded: RecordedSetCountsV1) -> DependencyResult<()> {
         if recorded.nodes.saturating_add(self.nodes.len()) > MAX_RECORDED_DEPENDENCY_NODES_V1
             || recorded.edges.saturating_add(self.edges.len()) > MAX_RECORDED_DEPENDENCY_EDGES_V1
@@ -1313,7 +1317,8 @@ impl<T: DependencyPagedRowV1> DependencyPageV1<T> {
     ///
     /// # Errors
     /// Returns `InvalidCursor` when the request cursor is of the other row
-    /// kind.
+    /// kind. Through the store-error `From` mapping, `InvalidCursor` maps to
+    /// `BindingMismatch`.
     pub fn from_ordered(request: &DependencyPageRequestV1, rows: &[T]) -> DependencyResult<Self>
     where
         T: Clone,
