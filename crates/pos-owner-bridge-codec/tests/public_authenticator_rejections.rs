@@ -91,6 +91,31 @@ fn public_none_attestation_parser_rejects_duplicate_fields_and_wrong_cbor_types(
 }
 
 #[test]
+fn public_none_attestation_parser_rejects_truncated_cbor_claims(
+) -> Result<(), OwnerBridgeCodecError> {
+    for envelope in [
+        b"\xa3\x78\x04x".as_slice(),
+        b"\xa3\x61\xff".as_slice(),
+        b"\xa3\x63fmt\x78\x04".as_slice(),
+        b"\xa3\x63fmt\x61\xff".as_slice(),
+    ] {
+        assert_invalid_attestation(envelope, &CREDENTIAL_ID);
+    }
+
+    let authenticator_data = create_authenticator_data(cose_key());
+    let missing_attested_fields = assertion_authenticator_data(0x45, &[]);
+    assert_invalid_attestation(
+        &none_attestation_object(&missing_attested_fields)?,
+        &CREDENTIAL_ID,
+    );
+    assert_invalid_attestation(
+        &none_attestation_object(&authenticator_data[..55])?,
+        &CREDENTIAL_ID,
+    );
+    Ok(())
+}
+
+#[test]
 fn public_none_attestation_parser_rejects_authenticator_and_cose_fields(
 ) -> Result<(), OwnerBridgeCodecError> {
     let authenticator_data = create_authenticator_data(cose_key());
@@ -322,6 +347,30 @@ fn public_assertion_extension_parser_accepts_every_closed_value_class(
 }
 
 #[test]
+fn public_assertion_extension_parser_rejects_truncated_cbor_values(
+) -> Result<(), OwnerBridgeCodecError> {
+    for extension in [
+        b"\xa1\x61x\x58\x04x".as_slice(),
+        b"\xa1\x61x\x78\x04x".as_slice(),
+    ] {
+        assert_eq!(
+            parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, extension)),
+            Err(OwnerBridgeCodecError::InvalidPayload)
+        );
+    }
+    for extension in [
+        b"\xa1\x61x\x98\x10".as_slice(),
+        b"\xa1\x61x\xb8\x10".as_slice(),
+    ] {
+        assert_eq!(
+            parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, extension)),
+            Err(OwnerBridgeCodecError::BoundsExceeded)
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn public_cose_canonical_decoder_rejects_each_closed_map_shape() {
     let key = cose_key();
 
@@ -359,6 +408,16 @@ fn public_cose_canonical_decoder_rejects_each_closed_map_shape() {
         CoseEs256PublicKey::from_canonical_encoding(&oversized_algorithm),
         Err(OwnerBridgeCodecError::InvalidPayload)
     );
+}
+
+#[test]
+fn public_cose_canonical_decoder_rejects_malformed_numeric_claims() {
+    for encoded_key in [b"\xa5\x01\x40".as_slice(), b"\xa5\x03\x3b".as_slice()] {
+        assert_eq!(
+            CoseEs256PublicKey::from_canonical_encoding(encoded_key),
+            Err(OwnerBridgeCodecError::InvalidPayload)
+        );
+    }
 }
 
 #[test]
