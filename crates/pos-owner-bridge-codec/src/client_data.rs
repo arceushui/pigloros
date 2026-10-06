@@ -188,9 +188,7 @@ impl JsonString<'_> {
 
     fn next_scalar(&self, offset: &mut usize) -> Option<u32> {
         let raw = self.raw.as_bytes();
-        let Some(&byte) = raw.get(*offset) else {
-            return None;
-        };
+        let &byte = raw.get(*offset)?;
         if byte != b'\\' {
             let character = self.raw[*offset..].chars().next().unwrap_or_default();
             *offset += character.len_utf8();

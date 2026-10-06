@@ -219,18 +219,22 @@ pub fn parse_none_attestation_object<'a>(
     // accepted traversal assigned `auth_data` exactly once.
 
     let prefix = parse_authenticator_data_prefix(auth_data)?;
-    if !prefix.attested_data {
+    if prefix.flags & FLAG_AT == 0 {
         return Err(OwnerBridgeCodecError::InvalidPayload);
     }
     let (credential_id, cose_offset) = read_attested_credential_id(auth_data, raw_id)?;
     let (public_key, consumed) = parse_cose_es256_key(&auth_data[cose_offset..])?;
     // `parse_cose_es256_key` cannot consume beyond the supplied suffix.
-    finish_authenticator_data(auth_data, cose_offset + consumed, prefix.extensions)?;
+    finish_authenticator_data(
+        auth_data,
+        cose_offset + consumed,
+        prefix.flags & FLAG_ED != 0,
+    )?;
     Ok(CreateAuthenticatorData {
         credential_id,
         public_key,
-        backup_eligible: prefix.backup_eligible,
-        backup_state: prefix.backup_state,
+        backup_eligible: prefix.flags & FLAG_BE != 0,
+        backup_state: prefix.flags & FLAG_BS != 0,
         sign_count: prefix.sign_count,
     })
 }
@@ -246,23 +250,24 @@ pub fn parse_assertion_authenticator_data(
     input: &[u8],
 ) -> Result<AssertionAuthenticatorData, OwnerBridgeCodecError> {
     let prefix = parse_authenticator_data_prefix(input)?;
-    if prefix.attested_data {
+    if prefix.flags & FLAG_AT != 0 {
         return Err(OwnerBridgeCodecError::InvalidPayload);
     }
-    finish_authenticator_data(input, MIN_AUTHENTICATOR_DATA_BYTES, prefix.extensions)?;
+    finish_authenticator_data(
+        input,
+        MIN_AUTHENTICATOR_DATA_BYTES,
+        prefix.flags & FLAG_ED != 0,
+    )?;
     Ok(AssertionAuthenticatorData {
-        backup_eligible: prefix.backup_eligible,
-        backup_state: prefix.backup_state,
+        backup_eligible: prefix.flags & FLAG_BE != 0,
+        backup_state: prefix.flags & FLAG_BS != 0,
         sign_count: prefix.sign_count,
     })
 }
 
 struct AuthenticatorDataPrefix {
-    backup_eligible: bool,
-    backup_state: bool,
+    flags: u8,
     sign_count: u32,
-    attested_data: bool,
-    extensions: bool,
 }
 
 fn parse_authenticator_data_prefix(
@@ -284,17 +289,7 @@ fn parse_authenticator_data_prefix(
         return Err(OwnerBridgeCodecError::InvalidPayload);
     }
     let sign_count = u32::from_be_bytes([input[33], input[34], input[35], input[36]]);
-    let backup_eligible = flags & FLAG_BE != 0;
-    let backup_state = flags & FLAG_BS != 0;
-    let attested_data = flags & FLAG_AT != 0;
-    let extensions = flags & FLAG_ED != 0;
-    Ok(AuthenticatorDataPrefix {
-        backup_eligible,
-        backup_state,
-        sign_count,
-        attested_data,
-        extensions,
-    })
+    Ok(AuthenticatorDataPrefix { flags, sign_count })
 }
 
 fn finish_authenticator_data(
