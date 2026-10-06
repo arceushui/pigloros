@@ -95,7 +95,7 @@ fn public_durable_codecs_reject_closed_schema_violations() -> Result<(), OwnerBr
     let cleanup_length = encode_cleanup_record(&cleanup, &mut cleanup_output)?;
     cleanup_output[cleanup_length] = 0;
     assert_eq!(
-        decode_cleanup_record(&cleanup_output[..cleanup_length + 1]),
+        decode_cleanup_record(&cleanup_output[..=cleanup_length]),
         Err(OwnerBridgeCodecError::TrailingBytes)
     );
     Ok(())
