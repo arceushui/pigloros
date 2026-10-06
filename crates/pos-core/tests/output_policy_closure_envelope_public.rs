@@ -88,3 +88,39 @@ fn shared_decoder_rejects_unrepresentable_lengths_and_oversized_envelopes() {
         Err(OutputPolicyClosureEnvelopeErrorV1::BoundExceeded)
     );
 }
+
+#[test]
+fn unbound_decoder_borrows_members_unbound() -> Result<(), Box<dyn std::error::Error>> {
+    let members = [
+        b"any eop1".as_slice(),
+        b"budget",
+        b"implementation",
+        b"config",
+        b"profile",
+        b"retention",
+    ];
+    let bytes = encode_opc1(members);
+    let unbound = OutputPolicyClosureEnvelopeV1::from_canonical_bytes_unbound_v1(&bytes)?;
+    assert_eq!(unbound.eop1_bytes(), members[0]);
+    assert_eq!(unbound.retention_policy_artifact(), members[5]);
+    let bound = OutputPolicyClosureEnvelopeV1::from_canonical_bytes_v1(&bytes, members[0])?;
+    assert_eq!(unbound, bound);
+    Ok(())
+}
+
+#[test]
+fn unbound_decoder_keeps_every_framing_and_bound_check() {
+    let members = [b"e".as_slice(), b"b", b"i", b"c", b"p", b"r"];
+    let bytes = encode_opc1(members);
+    let decode = OutputPolicyClosureEnvelopeV1::from_canonical_bytes_unbound_v1;
+    let mut extra = bytes.clone();
+    extra.push(0);
+    let invalid = Err(OutputPolicyClosureEnvelopeErrorV1::InvalidEnvelope);
+    assert_eq!(decode(&extra), invalid);
+    assert_eq!(decode(&bytes[..bytes.len() - 1]), invalid);
+    assert_eq!(decode(b"OPC1"), invalid);
+    assert_eq!(decode(b"XPC1"), invalid);
+    let oversized = vec![0; MAX_MANIFEST_OWNER_POLICY_COPY_BYTES_V1 + 1];
+    let exceeded = Err(OutputPolicyClosureEnvelopeErrorV1::BoundExceeded);
+    assert_eq!(decode(&oversized), exceeded);
+}
