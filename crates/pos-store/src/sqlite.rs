@@ -1138,6 +1138,9 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
         constraints: &[
             "CHECK (length(import_operation_id) = 32)",
             "CHECK (length(principal_digest) = 32)",
+            // The Principal digest is deliberately not unique: several imports
+            // may share one Principal and Owner (ADR-105 erratum E10). The
+            // exact `POB1` bytes still differ per import operation.
             "UNIQUE (pob1_cbor)",
         ],
     },
