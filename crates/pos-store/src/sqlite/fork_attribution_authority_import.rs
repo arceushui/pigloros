@@ -633,7 +633,8 @@ mod tests {
         let digits = value
             .as_bytes()
             .iter()
-            .map(|byte| format!("{byte:02x}"))
+            .flat_map(|byte| [byte >> 4, byte & 15])
+            .filter_map(|nibble| char::from_digit(u32::from(nibble), 16))
             .collect::<String>();
         format!("x'{digits}'")
     }
@@ -1181,11 +1182,11 @@ mod tests {
             "CHECK (length(ifa1_cbor) BETWEEN 1 AND {})",
             pos_core::MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1
         );
-        let constraints = crate::sqlite::FORK_ADMISSION_SCHEMA_TABLES
+        let found = crate::sqlite::FORK_ADMISSION_SCHEMA_TABLES
             .iter()
             .filter(|table| table.name == "imported_fork_attribution_admissions")
             .flat_map(|table| table.constraints.iter().copied())
-            .collect::<Vec<_>>();
-        assert!(constraints.contains(&bound.as_str()));
+            .any(|constraint| constraint == bound);
+        assert!(found);
     }
 }

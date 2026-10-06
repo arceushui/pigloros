@@ -861,11 +861,14 @@ mod tests {
         }
     }
 
+    /// A step to run on the inner store before the transaction body.
+    type Prelude = Box<dyn FnOnce(&mut MemoryStore) + Send>;
+
     /// A `MemoryStore` behind the backend seam that can race, hide state, or
     /// misreport a head, to drive the paths no honest store reaches.
     struct Probe {
         inner: MemoryStore,
-        before_body: Option<Box<dyn FnOnce(&mut MemoryStore) + Send>>,
+        before_body: Option<Prelude>,
         child_head: Option<(TimelineId, Seq)>,
         hide_child: bool,
         own_events: Option<Vec<Event>>,
@@ -927,10 +930,10 @@ mod tests {
             timeline: TimelineId,
             range: SeqRange,
         ) -> Result<Vec<Event>, CoreError> {
-            match &self.own_events {
-                Some(events) => Ok(events.clone()),
-                None => self.inner.read_own(timeline, range),
-            }
+            self.own_events.as_ref().map_or_else(
+                || self.inner.read_own(timeline, range),
+                |events| Ok(events.clone()),
+            )
         }
 
         fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
@@ -1051,7 +1054,7 @@ mod tests {
     }
 
     /// A prelude that commits `winner` before the transaction body runs.
-    fn racer(world: &World, winner: &Built) -> Box<dyn FnOnce(&mut MemoryStore) + Send> {
+    fn racer(world: &World, winner: &Built) -> Prelude {
         let bytes = winner.bytes.clone();
         let digest = winner.policy.digest();
         let parent = world.root;

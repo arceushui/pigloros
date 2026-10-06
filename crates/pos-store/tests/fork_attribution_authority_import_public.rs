@@ -42,18 +42,12 @@ use pos_store::{
 
 /// One adapter under test.
 trait Destination:
-    ForkAttributionAuthorityImportPortV1
-    + EventStore
-    + ForkEventProvenanceAuthorityPortV1
-    + ForkManifestPublicationPortV1
+    ForkAttributionAuthorityImportPortV1 + EventStore + ForkEventProvenanceAuthorityPortV1
 {
 }
 
 impl<T> Destination for T where
-    T: ForkAttributionAuthorityImportPortV1
-        + EventStore
-        + ForkEventProvenanceAuthorityPortV1
-        + ForkManifestPublicationPortV1
+    T: ForkAttributionAuthorityImportPortV1 + EventStore + ForkEventProvenanceAuthorityPortV1
 {
 }
 
@@ -533,31 +527,38 @@ fn an_unequal_import_reuse_or_occupied_child_is_a_conflict() -> Fallible<()> {
     })
 }
 
+/// Check that an imported Fork stays unreadable and closed to local appends.
+fn assert_code_two_is_unreadable<S>(store: &mut S, world: &World, built: &Built) -> Fallible<()>
+where
+    S: Destination + ForkManifestPublicationPortV1,
+{
+    prepare(store, world, built)?;
+    import(store, world, built)?;
+    let child = world.child_at(0)?.id;
+    let head = PARENT_CUT + 4;
+    assert_eq!(
+        store.read_fork_event_suffix(child, PARENT_CUT + 1),
+        Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+    );
+    assert_eq!(
+        store.read_committed(child, head),
+        Err(ForkManifestPublicationErrorV1::PublicationConflict)
+    );
+    let draft = EventDraft::new(
+        EntityId::new(),
+        Kind::new("fae1.import.test"),
+        CanonicalBytes::from_vec(b"local".to_vec()),
+    );
+    assert!(store.append(child, &[draft]).is_err());
+    Ok(())
+}
+
 #[test]
 fn imported_code_two_stays_unreadable_and_closed_to_local_appends() -> Fallible<()> {
     let world = World::new(Shape::Mixed, false)?;
     let built = world.build(&Spec::default())?;
-    on_both_adapters(|store| {
-        prepare(store, &world, &built)?;
-        import(store, &world, &built)?;
-        let child = world.child_at(0)?.id;
-        let head = PARENT_CUT + 4;
-        assert_eq!(
-            store.read_fork_event_suffix(child, PARENT_CUT + 1),
-            Err(ForkEventAuthorityErrorV1::CorruptAuthority)
-        );
-        assert_eq!(
-            store.read_committed(child, head),
-            Err(ForkManifestPublicationErrorV1::PublicationConflict)
-        );
-        let draft = EventDraft::new(
-            EntityId::new(),
-            Kind::new("fae1.import.test"),
-            CanonicalBytes::from_vec(b"local".to_vec()),
-        );
-        assert!(store.append(child, &[draft]).is_err());
-        Ok(())
-    })
+    assert_code_two_is_unreadable(&mut MemoryStore::new(), &world, &built)?;
+    assert_code_two_is_unreadable(&mut SqliteStore::open_in_memory()?, &world, &built)
 }
 
 #[test]

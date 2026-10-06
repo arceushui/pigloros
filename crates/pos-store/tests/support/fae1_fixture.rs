@@ -405,10 +405,10 @@ impl World {
         source.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
         source.save_key_registry(&registry)?;
         let owner = with_owner.then(EntityId::new);
-        let root_meta = match owner {
-            Some(owner) => TimelineMeta::root_owned("fae1-root", owner),
-            None => TimelineMeta::root("fae1-root"),
-        };
+        let root_meta = owner.map_or_else(
+            || TimelineMeta::root("fae1-root"),
+            |owner| TimelineMeta::root_owned("fae1-root", owner),
+        );
         let root = source.create_timeline_with_meta(root_meta)?.id();
         for index in 1..=PARENT_CUT {
             let payload = format!("root-{index}").into_bytes();
@@ -520,7 +520,7 @@ impl World {
     }
 
     /// The Event evidence of `child`, with the requested deviation.
-    fn evidence(&self, child: &Child, spec: &Spec) -> Fallible<Vec<ForkEventEvidenceV1>> {
+    fn evidence(child: &Child, spec: &Spec) -> Fallible<Vec<ForkEventEvidenceV1>> {
         let mut events = child.export.events.clone();
         if spec.geographic {
             if let Some(first) = events.first_mut() {
@@ -533,7 +533,7 @@ impl World {
             .collect()
     }
 
-    fn timeline_import(&self, child: &Child, spec: &Spec) -> Fallible<ForkTimelineImportV1> {
+    fn timeline_import(child: &Child, spec: &Spec) -> Fallible<ForkTimelineImportV1> {
         let (projection, _) = ForkTimelineImportV1::from_export(&child.export)?;
         let mut input: ForkTimelineImportInputV1 = projection.input().clone();
         if let FtiOwner::Replace(owner) = spec.fti_owner {
@@ -601,7 +601,7 @@ impl World {
         let graph = (child.shape != Shape::EmptyUnclassified)
             .then(|| classifier(child.id, authority.digest, spec))
             .transpose()?;
-        let evidence = self.evidence(child, spec)?;
+        let evidence = Self::evidence(child, spec)?;
         let derived = match graph.as_ref() {
             Some(graph) => evidence
                 .iter()
@@ -634,7 +634,7 @@ impl World {
             key_record,
             key_tombstone,
             evidence,
-            timeline_import: self.timeline_import(child, spec)?,
+            timeline_import: Self::timeline_import(child, spec)?,
             classifier: graph.as_ref().map(|graph| ForkAttributionClassifierRecordsV1 {
                 source: graph.source.to_canonical_cbor(),
                 table: graph.table.to_canonical_cbor(),
@@ -705,7 +705,7 @@ impl World {
             .filter(|record| record.intervention.is_some())
             .map(|record| record.operation.input().logical_seq)
             .collect::<Vec<_>>();
-        let manifest = self.signed_manifest(
+        let manifest = Self::signed_manifest(
             ForkReproManifestInputV1 {
                 parent_timeline_id: self.root,
                 fork_timeline_id: child.id,
@@ -755,7 +755,6 @@ impl World {
     /// The manifest names the code-2 `FAR1` digest, so the local-admission
     /// signing helper cannot be used.
     fn signed_manifest(
-        &self,
         input: ForkReproManifestInputV1,
         spec: &Spec,
     ) -> Fallible<SignedForkReproManifestV1> {
