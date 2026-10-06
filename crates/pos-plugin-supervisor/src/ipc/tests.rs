@@ -448,8 +448,11 @@ fn every_truncated_request_is_an_envelope_fault() {
 }
 
 fn response_samples() -> Vec<WorkerOutcomeV1> {
+    let mut featured = descriptor(&negotiated());
+    featured.required_features = vec!["alpha".to_owned(), "beta".to_owned()];
     let mut samples: Vec<WorkerOutcomeV1> = vec![
         Ok(described(Ok(descriptor(&negotiated())))),
+        Ok(described(Ok(featured))),
         Ok(produced(Ok(output(&invocation(b"observation"))))),
     ];
     for error in guest_errors() {
@@ -501,7 +504,9 @@ fn integers_beyond_their_field_width_are_envelope_faults() {
     // `scheduler_position` 2^32 - 1 as a `u32`, then as 2^32.
     let mut position = invocation(b"observation");
     position.timeline_position.scheduler_position = u32::MAX;
-    let bytes = ok(encode_worker_request_v1(&request(WorkerCallV1::Reduce(position))));
+    let bytes = ok(encode_worker_request_v1(&request(WorkerCallV1::Reduce(
+        position,
+    ))));
     assert!(decode_worker_request_v1(&bytes).is_ok());
     let wide = spliced(
         &bytes,
