@@ -142,7 +142,7 @@ impl Row {
             self.name.clone(),
             self.version.clone(),
             hash(self.digest),
-            Arc::from(self.closure.as_slice()),
+            Arc::<[u8]>::from(self.closure.as_slice()),
         )
     }
 
