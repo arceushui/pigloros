@@ -412,13 +412,20 @@ fn public_cose_canonical_decoder_rejects_each_closed_map_shape() {
 
 #[test]
 fn public_cose_canonical_decoder_rejects_malformed_numeric_claims() {
+    let key = cose_key();
+
+    let mut kty_as_negative = key;
+    kty_as_negative[2] = 0x20;
     assert_eq!(
-        CoseEs256PublicKey::from_canonical_encoding(b"\xa5\x01\x40"),
+        CoseEs256PublicKey::from_canonical_encoding(&kty_as_negative),
         Err(OwnerBridgeCodecError::InvalidPayload)
     );
+
+    let mut algorithm_as_unsigned = key;
+    algorithm_as_unsigned[4] = 0;
     assert_eq!(
-        CoseEs256PublicKey::from_canonical_encoding(b"\xa5\x03\x3b"),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
+        CoseEs256PublicKey::from_canonical_encoding(&algorithm_as_unsigned),
+        Err(OwnerBridgeCodecError::InvalidPayload)
     );
 }
 
