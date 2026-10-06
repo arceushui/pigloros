@@ -9,14 +9,16 @@
 //! # ADR gap decisions
 //!
 //! - **Storage layout.** Provisional rows live in the Fork's counterfactual
-//!   state, in one set per Fork generation: the rows keyed by their own page
-//!   cursor (the canonical node and `IDP1` edge order, so a read is a keyset
-//!   range scan and never depends on insertion order), the artifact digests
-//!   of the nodes, the largest persisted record Tick, and the stored row
-//!   counts. A dependency write keeps only the current generation's set, so
-//!   the rows of a quarantined generation, which no read can reach, are
-//!   dropped by the next write. The Fork's receipt of the current generation
-//!   persists its first Tick, which bounds the first record of the set.
+//!   state, in the one set of the generation that has a record: the rows keyed
+//!   by their own page cursor (the canonical node and `IDP1` edge order, so a
+//!   read is a keyset range scan and never depends on insertion order), the
+//!   artifact digests of the nodes, the largest persisted record Tick, and the
+//!   stored row counts. The state holds that single set as a generation and
+//!   its rows, and a dependency write of the current generation replaces a set
+//!   of any other generation, so the rows of a quarantined generation, which
+//!   no read can reach, are dropped by the next write. The Fork's receipt of
+//!   the current generation persists its first Tick, which bounds the first
+//!   record of the set.
 //! - **Atomicity is structural.** Every fallible step (the record checks, the
 //!   basis recheck, staging, and the receipt) runs before anything is
 //!   installed, and the rows are added by an infallible step that runs only
@@ -33,10 +35,19 @@
 //!   is empty and a record is capped far below the set bounds, so the
 //!   capacity check of the first record cannot fail and is not made. Later
 //!   records check capacity against the stored counts.
-//! - **Generation 0 takes no record.** A Fork that was published but never
-//!   invalidated has no first Tick to bound its first record, so a later Tick
-//!   with a record at generation 0 is a `BindingMismatch`; the dependency set
-//!   of a generation starts at an invalidation.
+//! - **A generation without a persisted first Tick takes no record.** A Fork
+//!   that was published but never invalidated (generation 0), or that was
+//!   re-created at its generation floor, has no receipt and so no first Tick
+//!   to bound its first record. A later Tick with a record there is a
+//!   `BindingMismatch`, and the dependency set of a generation starts at an
+//!   invalidation. This is stricter than the contract's reference model,
+//!   which starts with a first Tick; it is the confirmed decision.
+//! - **Parent-cut Ticks are not enforced.** The contract says to reject a
+//!   record whose provisional Ticks are not strictly after the parent cut. A
+//!   Memory Fork row holds a `fork_point` (a parent Timeline and a `Seq`) and
+//!   no parent-cut Tick, so the adapter cannot compare. The coordinator seam
+//!   (#552) knows the plan and owns that obligation, and roots may legitimately
+//!   carry Ticks below the first Tick.
 //! - **Committed prefix.** The committed prefix of a parent Timeline is kept
 //!   once per parent Timeline, outside any Fork, and served as
 //!   [`DependencyReadScopeV1::ParentPrefix`] up to its `through_tick`. No write
@@ -158,10 +169,10 @@ impl ForkDependencySetV1 {
     /// The Tick must be strictly after the last record's, or, in an empty
     /// set, not before the generation's first Tick.
     fn ensure_tick_order(&self, first_tick: Option<u64>, tick: u64) -> Result<(), StoreError> {
-        let last = self.last_record_tick;
-        let least = last.map_or(first_tick, |recorded| recorded.checked_add(1));
-        let fits = least.is_some_and(|floor| tick >= floor);
-        fits.then_some(()).ok_or(StoreError::BindingMismatch)
+        let previous = self.last_record_tick;
+        let earliest = previous.map_or(first_tick, |recorded| recorded.checked_add(1));
+        let fits = earliest.is_some_and(|floor| tick >= floor);
+        ensure(fits, StoreError::BindingMismatch)
     }
 
     /// No node may reuse a recorded position key or artifact digest.
@@ -203,34 +214,43 @@ impl ForkDependencySetV1 {
 }
 
 impl CounterfactualForkStateV1 {
+    /// The set of the current generation, if it has a record.
+    fn current_set(&self) -> Option<&ForkDependencySetV1> {
+        let current = self.dependencies.as_ref();
+        current
+            .filter(|(held, _)| *held == self.generation)
+            .map(|(_, set)| set)
+    }
+
     /// Check a record against the set of the current generation, whose
     /// receipt persists its first Tick.
     fn admit_dependencies(&self, record: &TickDependencyRecordV1) -> Result<(), StoreError> {
         let receipt = self.receipts.get(&self.generation);
         let first_tick = receipt.map(|persisted| persisted.first_tick);
-        let set = self.dependencies.get(&self.generation);
-        set.unwrap_or(&NO_SET).admit(first_tick, record)
+        let set = self.current_set().unwrap_or(&NO_SET);
+        set.admit(first_tick, record)
     }
 
-    /// Record under the current generation and drop the other generations.
+    /// Record under the current generation, replacing any other generation's
+    /// set.
     fn record_dependencies(&mut self, record: &TickDependencyRecordV1) {
         let generation = self.generation;
-        self.dependencies.retain(|kept, _| *kept == generation);
-        let set = self.dependencies.entry(generation).or_default();
+        let kept = self.dependencies.take();
+        let held = kept.filter(|(other, _)| *other == generation);
+        let mut set = held.map_or_else(ForkDependencySetV1::new, |(_, set)| set);
         set.insert(record);
+        self.dependencies = Some((generation, set));
     }
 
     /// One page of the current generation's rows, or of `at` if it is not.
     fn fork_page<T: DependencyPagedRowV1 + Clone>(
         &self,
-        at: ForkGenerationV1,
         request: &DependencyPageRequestV1,
         select: Select<T>,
     ) -> Result<DependencyPageV1<T>, StoreError> {
         let current = request.scope().ensure_current(self.generation);
         current.and_then(|()| {
-            let set = self.dependencies.get(&at.generation);
-            let rows = set.map_or(&NO_ROWS, |recorded| &recorded.rows);
+            let rows = self.current_set().map_or(&NO_ROWS, |held| &held.rows);
             page_after(select(rows), request)
         })
     }
@@ -238,9 +258,13 @@ impl CounterfactualForkStateV1 {
 
 /// The first record of an invalidation: provisional and at its first Tick.
 fn admit_first(first_tick: u64, record: &TickDependencyRecordV1) -> Result<(), StoreError> {
-    let at_first = record.tick() == first_tick;
-    let tick_check = at_first.then_some(()).ok_or(StoreError::BindingMismatch);
+    let tick_check = ensure(record.tick() == first_tick, StoreError::BindingMismatch);
     record.ensure_provisional().and_then(|()| tick_check)
+}
+
+/// `Ok` if `holds`, else `error`.
+fn ensure(holds: bool, error: StoreError) -> Result<(), StoreError> {
+    holds.then_some(()).ok_or(error)
 }
 
 /// Page the rows after the request cursor and within its Tick bound.
@@ -294,6 +318,8 @@ impl MemoryStore {
     fn install_dependencies(&mut self, fork: TimelineId, record: &TickDependencyRecordV1) {
         let install = |state: &mut CounterfactualForkStateV1| state.record_dependencies(record);
         let forks = &mut self.counterfactual_forks;
+        // Infallible by design: the checks before the commit proved the Fork
+        // exists, so a missing Fork is deliberately ignored, not an error.
         forks.get_mut(&fork).into_iter().for_each(install);
     }
 
@@ -321,14 +347,31 @@ impl MemoryStore {
         drafts: &PipelineDraftBatchV1,
         record: &TickDependencyRecordV1,
     ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
-        let persisted = self.persisted_counterfactual_basis(fork)?;
-        if let Some(conflict) = expected.first_conflict(&persisted) {
-            return Ok(CounterfactualTickOutcomeV1::Stale(conflict));
-        }
-        self.admit_later_record(fork, record)?;
-        // The basis was rechecked above, so an `Ok` append is the committed Tick.
-        let appended = self.append_visible_counterfactual_tick(fork, expected, drafts);
-        appended.inspect(|_| self.install_dependencies(fork, record))
+        let basis = self.persisted_counterfactual_basis(fork);
+        basis.and_then(|persisted| {
+            let found = expected.first_conflict(&persisted);
+            found.map_or_else(
+                || self.admit_and_append(fork, expected, drafts, record),
+                |conflict| Ok(CounterfactualTickOutcomeV1::Stale(conflict)),
+            )
+        })
+    }
+
+    /// Admit the record, append the Tick, and record the rows only after it
+    /// installed. The caller rechecked the basis, so an `Ok` append is the
+    /// committed Tick.
+    fn admit_and_append(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        record: &TickDependencyRecordV1,
+    ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
+        let admitted = self.admit_later_record(fork, record);
+        admitted.and_then(|()| {
+            let appended = self.append_visible_counterfactual_tick(fork, expected, drafts);
+            appended.inspect(|_| self.install_dependencies(fork, record))
+        })
     }
 
     fn prefix_rows(&self, parent: TimelineId) -> &DependencyRowsV1 {
@@ -351,7 +394,7 @@ impl MemoryStore {
         select: Select<T>,
     ) -> Result<DependencyPageV1<T>, StoreError> {
         let state = self.counterfactual_fork(at.fork);
-        state.and_then(|persisted| persisted.fork_page(at, request, select))
+        state.and_then(|persisted| persisted.fork_page(request, select))
     }
 
     fn read_prefix_page<T: DependencyPagedRowV1 + Clone>(
@@ -446,12 +489,13 @@ impl CounterfactualDependencyReadPortV1 for MemoryStore {
 mod tests {
     use pos_core::counterfactual_store::test_fixtures::{hash_field, text_field, uint};
     use pos_core::{
-        DependencyNodeCoordinateV1, EventStore, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1,
-        ForkAttributionOriginV1, OwnerIdV1, RecordedDependencyClassV1, RecordedNodeOriginV1,
-        MAX_RECORDED_DEPENDENCY_EDGES_V1, MAX_RECORDED_DEPENDENCY_NODES_V1,
+        CounterfactualStorePortV1, DependencyNodeCoordinateV1, EventStore,
+        ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionOriginV1, OwnerIdV1,
+        RecordedDependencyClassV1, RecordedNodeOriginV1, Seq, MAX_RECORDED_DEPENDENCY_EDGES_V1,
+        MAX_RECORDED_DEPENDENCY_NODES_V1,
     };
 
-    use super::super::tests::{command, draft, inject, ok, published_store, snapshot};
+    use super::super::tests::{command, draft, facts, inject, ok, published_store, snapshot};
     use super::super::InjectedFaultV1;
     use super::*;
 
@@ -628,7 +672,8 @@ mod tests {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn dependency_set(store: &mut MemoryStore, fork: TimelineId) -> &mut ForkDependencySetV1 {
         let state = ok(store.counterfactual_forks.get_mut(&fork).ok_or("no state"));
-        ok(state.dependencies.get_mut(&1).ok_or("no set"))
+        let held = state.dependencies.as_mut().map(|(_, set)| set);
+        ok(held.ok_or("no set"))
     }
 
     /// A store whose Fork committed generation 1 with the tick 1 record `a`.
@@ -745,6 +790,70 @@ mod tests {
 
         assert_eq!(outcome, Err(StoreError::BindingMismatch));
         assert_eq!(snapshot(&store, fork), before);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn c7_a_write_keeps_only_the_current_generations_set() {
+        let (mut store, fork) = recorded_store();
+        let state = ok(store.counterfactual_forks.get_mut(&fork).ok_or("no state"));
+        let first = state.dependencies.as_ref().map(|(held, _)| *held);
+        assert_eq!(first, Some(1));
+        state.generation = 2;
+        let second = lone_node(5);
+
+        state.record_dependencies(&second);
+
+        let (generation, set) = ok(state.dependencies.as_ref().ok_or("no set"));
+        assert_eq!(*generation, 2);
+        let nodes: Vec<NodeRow> = set.rows.nodes.values().cloned().collect();
+        assert_eq!(nodes, second.nodes().to_vec());
+        assert_eq!(set.counts.nodes, 1);
+        assert_eq!(set.last_record_tick, Some(5));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn c8_sibling_forks_share_one_prefix_and_stitch_by_concatenation() {
+        let (mut store, fork) = recorded_store();
+        let root = parent_of(&store, fork);
+        let sibling = ok(store.fork(root, Seq::from_u64(1), "sibling")).id();
+        ok(store.publish_counterfactual_facts(sibling, facts()));
+        let first = lone_node(1);
+        let invalidation = command(sibling);
+        let outcome =
+            store.commit_counterfactual_invalidation_with_dependencies(&invalidation, &first);
+        assert!(outcome.is_ok());
+        assert!(append_record(&mut store, fork, &lone_node(2)).is_ok());
+        let cut = 0;
+        let committed_rows = [
+            node(&coordinate(cut, "p", 61), COMMITTED, Vec::new()),
+            node(&coordinate(cut, "q", 62), COMMITTED, Vec::new()),
+        ];
+        seed_prefix(&mut store, root, &committed_rows, &[]);
+        let prefix_of = |at| {
+            let scope = prefix_through(parent_of(&store, at), cut);
+            ok(read_nodes(&store, scope, 10))
+        };
+        let ticks_of = |rows: &[NodeRow]| -> Vec<u64> {
+            rows.iter().map(|row| row.coordinate().tick()).collect()
+        };
+
+        let shared = prefix_of(fork);
+
+        assert_eq!(prefix_of(sibling), shared);
+        assert_eq!(shared.items(), committed_rows.as_slice());
+        assert!(ticks_of(shared.items()).iter().all(|tick| *tick <= cut));
+        for (own_fork, expected) in [(fork, vec![1, 2]), (sibling, vec![1])] {
+            let own = ok(read_nodes(&store, fork_scope(own_fork, 1), 10));
+            let read_ticks = ticks_of(own.items());
+            assert_eq!(read_ticks, expected);
+            assert!(read_ticks.iter().all(|tick| *tick > cut));
+            let stitched = [shared.items(), own.items()].concat();
+            assert_eq!(ticks_of(&stitched), [vec![cut, cut], expected].concat());
+            let cursors: Vec<RowKey> = stitched.iter().map(DependencyPagedRowV1::cursor).collect();
+            assert!(cursors.windows(2).all(|pair| pair[0] < pair[1]));
+        }
     }
 
     /// The committed node `p<tick>` at `tick`, digest `tick`.

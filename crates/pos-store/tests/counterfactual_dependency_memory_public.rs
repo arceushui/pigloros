@@ -202,6 +202,10 @@ fn seqs(store: &MemoryStore, timeline: TimelineId) -> Vec<u64> {
         .collect()
 }
 
+// The coordinate, node, edge, and record builders below mirror the contract's
+// own tests (and the `SQLite` adapter's will mirror them again). Consolidating
+// them into the shared `test_fixtures` is a follow-up that touches the
+// contract crate, so it is not done here.
 fn coord_at(tick: u64, owner: &str, digest: Hash) -> Coordinate {
     ok(Coordinate::try_new(tick, 0, owner.to_owned(), 0, 7, digest))
 }
@@ -515,6 +519,53 @@ fn c2_a_stale_tick_basis_records_nothing() {
     // Neither the rows nor the record Tick 18 were kept.
     assert!(append(store, fork, &tick_18()).is_ok());
     assert_recorded(store, fork_scope(fork, 1), &[tick_17(), tick_18()]);
+}
+
+#[test]
+fn c2_a_misplaced_record_beats_a_conflicting_invalidation_basis() {
+    let mut fixture = published();
+    let fork = fixture.fork;
+    let store = &mut fixture.store;
+    let conflicting = command_expecting(fork, 1, 0, 60);
+    let misplaced = empty_at(FIRST_TICK + 1);
+
+    let outcome =
+        store.commit_counterfactual_invalidation_with_dependencies(&conflicting, &misplaced);
+
+    // The record is checked before the basis, so no conflict is reported.
+    assert_eq!(outcome, Err(StoreError::BindingMismatch));
+    assert_eq!(store.current_fork_generation(fork), Ok(at(fork, 0)));
+    assert_eq!(seqs(store, fork), vec![1]);
+    assert_recorded(store, fork_scope(fork, 0), &[]);
+}
+
+#[test]
+fn c2_a_stale_tick_basis_beats_a_misplaced_record() {
+    let mut fixture = recorded();
+    let fork = fixture.fork;
+    let store = &mut fixture.store;
+    let mut expected = ok(store.current_counterfactual_basis(fork));
+    expected.generation = 0;
+    // Not after the last record Tick 17, so the record alone is rejected.
+    let misplaced = empty_at(FIRST_TICK);
+
+    let outcome = store.append_counterfactual_tick_with_dependencies(
+        fork,
+        &expected,
+        &tick_drafts(1),
+        &misplaced,
+    );
+
+    // The basis is rechecked first, so the Stale outcome is reported.
+    assert_eq!(
+        outcome,
+        Ok(CounterfactualTickOutcomeV1::Stale(
+            InvalidationConflictV1::PriorGeneration
+        ))
+    );
+    assert_eq!(seqs(store, fork), vec![1, 2, 3]);
+    assert_recorded(store, fork_scope(fork, 1), &[tick_17()]);
+    assert!(append(store, fork, &tick_18()).is_ok());
 }
 
 #[test]

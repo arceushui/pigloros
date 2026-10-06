@@ -130,7 +130,7 @@ pub(super) use dependency::DependencyRowsV1;
 /// installing anything.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum InjectedFaultV1 {
+enum InjectedFaultV1 {
     /// Staging fails with a backend error.
     Storage,
     /// The staged head reports no advance past the committed head.
@@ -162,9 +162,10 @@ pub(super) struct CounterfactualForkStateV1 {
     quarantined: BTreeMap<Hash, u64>,
     /// Receipt record of every committed generation, keyed by generation.
     receipts: BTreeMap<u64, CounterfactualGenerationRecordV1>,
-    /// Provisional dependency rows by generation; only the current one is
-    /// readable, and a dependency write drops the others.
-    dependencies: BTreeMap<u64, dependency::ForkDependencySetV1>,
+    /// Provisional dependency rows of the one generation that has a record.
+    /// Only the current generation's set is readable, so a dependency write
+    /// replaces a set of any other generation.
+    dependencies: Option<(u64, dependency::ForkDependencySetV1)>,
 }
 
 impl CounterfactualForkStateV1 {
@@ -175,7 +176,7 @@ impl CounterfactualForkStateV1 {
             artifacts: BTreeMap::new(),
             quarantined: BTreeMap::new(),
             receipts: BTreeMap::new(),
-            dependencies: BTreeMap::new(),
+            dependencies: None,
         }
     }
 
@@ -615,7 +616,7 @@ mod tests {
 
     /// One invalidation command expecting `trust_epoch`.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    pub(super) fn command_with_trust_epoch(
+    fn command_with_trust_epoch(
         fork: TimelineId,
         trust_epoch: u64,
     ) -> CounterfactualInvalidationCommandV1 {
