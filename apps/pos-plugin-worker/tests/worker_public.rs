@@ -62,15 +62,15 @@ fn both_fixtures_describe_the_negotiated_plugin_in_fresh_workers() {
 #[test]
 fn both_fixtures_reduce_and_drive_identically() {
     let negotiated = negotiated(ROOMY);
-    let invocation = invocation(b"observation");
+    let call = invocation(b"observation");
     let mut outputs = Vec::new();
     for guest in [RUST_GUEST, C_GUEST] {
-        let reduced = ok(supervisor().reduce(&negotiated, guest, &invocation, INPUTS));
-        let driven = ok(supervisor().drive(&negotiated, guest, &invocation, INPUTS));
+        let reduced = ok(supervisor().reduce(&negotiated, guest, &call, INPUTS));
+        let driven = ok(supervisor().drive(&negotiated, guest, &call, INPUTS));
         outputs.push((ok(reduced.result), ok(driven.result)));
     }
     assert_eq!(outputs[0], outputs[1]);
-    assert_eq!(outputs[0].0.invocation_id, invocation(b"").invocation_id);
+    assert_eq!(outputs[0].0.invocation_id, call.invocation_id);
     assert_ne!(outputs[0].0, outputs[0].1);
 }
 

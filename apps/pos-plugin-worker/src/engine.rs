@@ -51,17 +51,21 @@ fn run(host: &ComponentHost, request: WorkerRequestV1, tick: Duration) -> Option
         host_inputs: request.host_inputs,
         watchdog_epochs: watchdog_epochs(request.watchdog_millis, tick),
     };
-    Some(ticking(|| host.increment_epoch(), tick, || match &request.call {
-        WorkerCallV1::Describe => host
-            .describe(&component, &execution, options)
-            .map(WorkerReturnV1::Described),
-        WorkerCallV1::Reduce(invocation) => host
-            .reduce(&component, &execution, invocation, options)
-            .map(WorkerReturnV1::Produced),
-        WorkerCallV1::Drive(invocation) => host
-            .drive(&component, &execution, invocation, options)
-            .map(WorkerReturnV1::Produced),
-    }))
+    Some(ticking(
+        || host.increment_epoch(),
+        tick,
+        || match &request.call {
+            WorkerCallV1::Describe => host
+                .describe(&component, &execution, options)
+                .map(WorkerReturnV1::Described),
+            WorkerCallV1::Reduce(invocation) => host
+                .reduce(&component, &execution, invocation, options)
+                .map(WorkerReturnV1::Produced),
+            WorkerCallV1::Drive(invocation) => host
+                .drive(&component, &execution, invocation, options)
+                .map(WorkerReturnV1::Produced),
+        },
+    ))
 }
 
 /// The supervisor's record, rebuilt and pinned to this engine's runtime.

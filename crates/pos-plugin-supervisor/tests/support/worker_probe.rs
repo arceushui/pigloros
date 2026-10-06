@@ -15,6 +15,7 @@ use std::io::Write;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use pos_plugin_supervisor::test_support::METERING;
 use pos_plugin_supervisor::{
     open_descriptors, prepare_worker_process, read_request, write_response, WorkerCallV1,
     WorkerFrameLimitsV1, WorkerOutcomeV1, WorkerRequestV1, WorkerReturnV1,
@@ -23,7 +24,6 @@ use pos_runtime::community_plugin_host::{
     plugin_output_digest_v1, CommunityPluginHostErrorV1, ComponentTrapClassV1, InvocationReportV1,
     PluginDescriptorV1, PluginOutputV1, TrapReproductionV1,
 };
-use pos_plugin_supervisor::test_support::METERING;
 use rustix::process::{getpid, getppid, getrlimit, Pid, Resource};
 
 /// Longest a misbehaving probe stays alive, so no test can hang forever.

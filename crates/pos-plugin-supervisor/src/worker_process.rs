@@ -145,8 +145,8 @@ mod tests {
     use pos_runtime::community_plugin_host::{CommunityPluginHostErrorV1, HostInputs};
 
     use super::*;
-    use crate::test_support::negotiated;
     use crate::ipc::{encode_worker_request_v1, WorkerCallV1};
+    use crate::test_support::negotiated;
 
     fn arguments(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()

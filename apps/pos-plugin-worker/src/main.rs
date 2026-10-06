@@ -21,6 +21,9 @@ mod tests {
         // The test harness's arguments are not a single supervisor PID, so the
         // worker refuses before it reads a request.
         let code = super::main();
-        assert_eq!(format!("{code:?}"), format!("{:?}", std::process::ExitCode::FAILURE));
+        assert_eq!(
+            format!("{code:?}"),
+            format!("{:?}", std::process::ExitCode::FAILURE)
+        );
     }
 }

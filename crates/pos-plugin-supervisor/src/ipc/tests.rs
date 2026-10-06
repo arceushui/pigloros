@@ -107,7 +107,10 @@ fn only_an_oversize_component_stops_the_encoder() {
     assert_eq!(round_trip_request(&largest).as_ref(), Ok(&largest));
     let mut oversized = largest;
     oversized.component.push(0);
-    assert_eq!(encode_worker_request_v1(&oversized), Err(WorkerEnvelopeErrorV1));
+    assert_eq!(
+        encode_worker_request_v1(&oversized),
+        Err(WorkerEnvelopeErrorV1)
+    );
 }
 
 #[test]
@@ -123,15 +126,22 @@ fn the_decoder_enforces_the_bounds_the_encoder_leaves_to_validation() {
         encode_worker_request_v1(&request).and_then(|bytes| decode_worker_request_v1(&bytes))
     };
     assert!(at_bound(|r| r.negotiation.world = "w".repeat(MAX_TEXT_BYTES)).is_ok());
-    assert!(at_bound(|r| r.negotiation.not_granted_capabilities[0].resource_pattern =
-        "p".repeat(MAX_PATTERN_BYTES))
+    assert!(at_bound(
+        |r| r.negotiation.not_granted_capabilities[0].resource_pattern =
+            "p".repeat(MAX_PATTERN_BYTES)
+    )
     .is_ok());
     assert!(at_bound(|r| r.negotiation.required_features = vec!["f".to_owned(); MAX_LIST]).is_ok());
     let bad = Err(WorkerEnvelopeErrorV1);
-    assert_eq!(over_bound(|r| r.negotiation.world = "w".repeat(MAX_TEXT_BYTES + 1)), bad);
     assert_eq!(
-        over_bound(|r| r.negotiation.not_granted_capabilities[0].resource_pattern =
-            "p".repeat(MAX_PATTERN_BYTES + 1)),
+        over_bound(|r| r.negotiation.world = "w".repeat(MAX_TEXT_BYTES + 1)),
+        bad
+    );
+    assert_eq!(
+        over_bound(
+            |r| r.negotiation.not_granted_capabilities[0].resource_pattern =
+                "p".repeat(MAX_PATTERN_BYTES + 1)
+        ),
         bad
     );
     assert_eq!(

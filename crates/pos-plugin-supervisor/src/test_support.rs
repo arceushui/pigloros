@@ -193,7 +193,9 @@ mod tests {
     fn a_failed_result_is_a_test_failure_naming_the_error() {
         assert_eq!(ok(Ok::<_, ()>(3)), 3);
         let failure = std::panic::catch_unwind(|| ok(Err::<u8, _>("boom")));
-        let message = failure.err().and_then(|payload| payload.downcast::<String>().ok());
+        let message = failure
+            .err()
+            .and_then(|payload| payload.downcast::<String>().ok());
         assert_eq!(message.as_deref().map(String::as_str), Some("\"boom\""));
     }
 
