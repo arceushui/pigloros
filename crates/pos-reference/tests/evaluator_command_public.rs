@@ -5,10 +5,8 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
 #[cfg(target_os = "linux")]
-use std::fs::OpenOptions;
-#[cfg(target_os = "linux")]
 use std::io;
-use std::io::{Cursor, Write};
+use std::io::Cursor;
 use std::path::Path;
 use std::process::{Command, Stdio};
 #[cfg(target_os = "linux")]
@@ -17,10 +15,7 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStringExt;
 #[cfg(target_os = "linux")]
-use std::os::{
-    fd::AsRawFd,
-    unix::fs::{symlink, OpenOptionsExt},
-};
+use std::os::{fd::AsRawFd, unix::fs::symlink};
 
 #[cfg(target_os = "linux")]
 use pos_reference::evaluator_build_identity::{
@@ -40,7 +35,7 @@ use support::{
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 #[cfg(target_os = "linux")]
-const FIFO_READY_TIMEOUT: Duration = Duration::from_secs(10);
+const EXEC_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[cfg(target_os = "linux")]
 fn executable_test_io<T>(stage: &'static str, result: io::Result<T>) -> io::Result<T> {
@@ -48,39 +43,23 @@ fn executable_test_io<T>(stage: &'static str, result: io::Result<T>) -> io::Resu
 }
 
 #[cfg(target_os = "linux")]
-fn open_fifo_writer_after_child_ready(
-    path: &Path,
-    child: &mut std::process::Child,
-) -> TestResult<fs::File> {
-    let deadline = Instant::now() + FIFO_READY_TIMEOUT;
+fn wait_for_child_exec(child: &mut std::process::Child, binary: &Path) -> TestResult {
+    let loaded = fs::canonicalize(binary)?;
+    let executable = format!("/proc/{}/exe", child.id());
+    let deadline = Instant::now() + EXEC_READY_TIMEOUT;
     loop {
-        match OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(path)
-        {
-            Ok(readiness_writer) => {
-                let reader_guard = OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NONBLOCK)
-                    .open(path)?;
-                let writer = OpenOptions::new().write(true).open(path)?;
-                drop(reader_guard);
-                drop(readiness_writer);
-                return Ok(writer);
-            }
-            Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {}
-            Err(error) => return Err(error.into()),
+        if fs::read_link(&executable).is_ok_and(|current| current == loaded) {
+            return Ok(());
         }
-        if let Some(status) = child.try_wait()? {
-            return Err(format!("evaluator exited before opening request FIFO: {status}").into());
+        if child.try_wait()?.is_some() {
+            return Ok(());
         }
         if Instant::now() >= deadline {
             drop(child.kill());
             drop(child.wait());
-            return Err("evaluator did not open request FIFO before the deadline".into());
+            return Err("evaluator did not load its executable before the deadline".into());
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -547,15 +526,6 @@ fn command_accepts_an_exact_authenticated_profile_byte_cap() -> TestResult {
 fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResult {
     let directory = tempfile::tempdir()?;
     let base = complete_command(directory.path())?;
-    let request_path = directory.path().join("request.cbor");
-    let request = executable_test_io("read request", fs::read(&request_path))?;
-    executable_test_io("remove request", fs::remove_file(&request_path))?;
-    assert!(executable_test_io(
-        "create request FIFO",
-        Command::new("mkfifo").arg(&request_path).status(),
-    )?
-    .success());
-
     let executable = directory.path().join("running-evaluator");
     let replacement = directory.path().join("replacement-evaluator");
     // Use the built inode directly: a fresh copy briefly opens it for writing,
@@ -575,10 +545,16 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
         .stderr(Stdio::piped());
     let mut child = executable_test_io("spawn loaded executable", command.spawn())?;
 
-    // Opening the FIFO synchronizes with the evaluator after exec and before
-    // the launcher path is replaced. Remove the symlink before installing the
-    // replacement so filesystems that reject an overwrite with ETXTBSY pass.
-    let mut request_writer = open_fifo_writer_after_child_ready(&request_path, &mut child)?;
+    // Observing the loaded image orders the replacement after exec whenever the
+    // evaluator is still running; the evaluator reads only regular files, so no
+    // public input can hold it at the identity check. The binding itself is
+    // timing-independent: it digests /proc/self/exe, never the launcher path.
+    // Remove the symlink before installing the replacement so filesystems that
+    // reject an overwrite with ETXTBSY pass.
+    wait_for_child_exec(
+        &mut child,
+        Path::new(env!("CARGO_BIN_EXE_pos-reference-evaluator")),
+    )?;
     executable_test_io("remove launcher symlink", fs::remove_file(&executable))?;
     executable_test_io(
         "replace launcher pathname",
@@ -588,8 +564,6 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
         executable_test_io("read replacement pathname", fs::read(&executable))?,
         b"replacement path contents"
     );
-    executable_test_io("release request FIFO", request_writer.write_all(&request))?;
-    drop(request_writer);
 
     let output = executable_test_io("wait for loaded executable", child.wait_with_output())?;
     assert!(
@@ -597,6 +571,23 @@ fn command_binds_the_loaded_executable_after_its_path_is_replaced() -> TestResul
         "evaluator stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn command_rejects_non_regular_request_archive_and_policy_inputs() -> TestResult {
+    for option in ["--request", "--bundle", "--trust-policy"] {
+        let directory = tempfile::tempdir()?;
+        let complete = complete_command(directory.path())?;
+        let fifo = directory.path().join("input.fifo");
+        assert!(Command::new("mkfifo").arg(&fifo).status()?.success());
+        for non_regular in [fifo.as_path(), directory.path()] {
+            let output = replacing_argument(&complete, option, non_regular)?.output()?;
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+        }
+    }
     Ok(())
 }
 
@@ -815,7 +806,7 @@ fn command_closes_post_preflight_and_output_failures() -> TestResult {
             support::ProfileMutation::SelectedProfileByteCapBoundary,
         )?,
         support::corpus_with_profile_mutation(
-            support::ProfileMutation::SelectedClosureCapBoundary(0),
+            support::ProfileMutation::SelectedClosureCapBoundary(support::ClosureCap::MemberCount),
         )?,
         support::corpus_with_bundle_mutation(support::BundleMutation::MemberBytes)?,
     ] {

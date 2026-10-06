@@ -13,6 +13,7 @@ use crate::evaluator_protocol::{
     array, array_values, decode_canonical, decode_canonical_with_limit, encode, fixed_bytes,
     preflight_cbor, text, uint, EvaluationRequest, ProtocolError,
 };
+use crate::profile::EvaluatorHardCaps;
 
 const MAX_ARCHIVE_BYTES: usize = 1024 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
@@ -118,14 +119,64 @@ pub struct SelectedBundleCaps {
     pub max_total_bundle_bytes: u64,
 }
 
-/// Authenticated CFB1 metadata inspected without retaining non-profile member bodies.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AuthenticatedBundlePreflight {
-    profile_bytes: Vec<u8>,
+impl From<EvaluatorHardCaps> for SelectedBundleCaps {
+    fn from(caps: EvaluatorHardCaps) -> Self {
+        Self {
+            max_profile_bytes: caps.max_profile_bytes,
+            max_bundle_members: caps.max_bundle_members,
+            max_member_path_bytes: caps.max_member_path_bytes,
+            max_member_bytes: caps.max_member_bytes,
+            max_total_bundle_bytes: caps.max_total_bundle_bytes,
+        }
+    }
+}
+
+/// The archive closure measured by a staged scan, compared against selected caps in one place.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ClosureMeasurements {
+    profile_bytes: u64,
     member_count: u64,
     maximum_path_bytes: u64,
     maximum_member_bytes: u64,
     total_member_bytes: u64,
+}
+
+impl ClosureMeasurements {
+    fn measure(members: &[ScannedMember], profile_bytes: &[u8]) -> Self {
+        Self {
+            profile_bytes: profile_bytes.len() as u64,
+            member_count: members.len() as u64,
+            maximum_path_bytes: members
+                .iter()
+                .map(|member| member.path.len() as u64)
+                .fold(0_u64, u64::max),
+            maximum_member_bytes: members
+                .iter()
+                .map(|member| member.size)
+                .fold(0_u64, u64::max),
+            total_member_bytes: members.iter().map(|member| member.size).sum(),
+        }
+    }
+
+    const fn enforce(self, caps: SelectedBundleCaps) -> Result<(), BundleError> {
+        if self.profile_bytes > caps.max_profile_bytes
+            || self.member_count > caps.max_bundle_members
+            || self.maximum_path_bytes > caps.max_member_path_bytes
+            || self.maximum_member_bytes > caps.max_member_bytes
+            || self.total_member_bytes > caps.max_total_bundle_bytes
+        {
+            Err(BundleError::FieldOutOfBounds)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Authenticated CFB1 metadata inspected without retaining non-profile member bodies.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedBundlePreflight {
+    profile_bytes: Vec<u8>,
+    measurements: ClosureMeasurements,
 }
 
 impl AuthenticatedBundlePreflight {
@@ -140,16 +191,7 @@ impl AuthenticatedBundlePreflight {
     /// # Errors
     /// Returns a bound failure when the indexed closure exceeds a selected cap.
     pub const fn enforce_selected_caps(&self, caps: SelectedBundleCaps) -> Result<(), BundleError> {
-        if self.profile_bytes.len() as u64 > caps.max_profile_bytes
-            || self.member_count > caps.max_bundle_members
-            || self.maximum_path_bytes > caps.max_member_path_bytes
-            || self.maximum_member_bytes > caps.max_member_bytes
-            || self.total_member_bytes > caps.max_total_bundle_bytes
-        {
-            Err(BundleError::FieldOutOfBounds)
-        } else {
-            Ok(())
-        }
+        self.measurements.enforce(caps)
     }
 }
 
@@ -456,24 +498,9 @@ fn preflight_archive(
         &scanned.profile_bytes,
         &trust_policy,
     )?;
-    let member_count = scanned.members.len() as u64;
-    let maximum_path_bytes = scanned
-        .members
-        .iter()
-        .map(|member| member.path.len() as u64)
-        .fold(0_u64, u64::max);
-    let maximum_member_bytes = scanned
-        .members
-        .iter()
-        .map(|member| member.size)
-        .fold(0_u64, u64::max);
-    let total_member_bytes = scanned.members.iter().map(|member| member.size).sum();
     Ok(AuthenticatedBundlePreflight {
+        measurements: ClosureMeasurements::measure(&scanned.members, &scanned.profile_bytes),
         profile_bytes: scanned.profile_bytes,
-        member_count,
-        maximum_path_bytes,
-        maximum_member_bytes,
-        total_member_bytes,
     })
 }
 

@@ -2608,7 +2608,9 @@ pub mod tests {
         assert!(bootstrap.resolve_installed_case(&request, 0).is_err());
 
         let cap_violation = crate::selector_test_support::corpus_with_profile_mutation(
-            crate::selector_test_support::ProfileMutation::SelectedClosureCapBoundary(0),
+            crate::selector_test_support::ProfileMutation::SelectedClosureCapBoundary(
+                crate::selector_test_support::ClosureCap::MemberCount,
+            ),
         )?;
         let (request, bootstrap) = installed_case_bootstrap(&cap_violation)?;
         assert!(bootstrap.resolve_installed_case(&request, 0).is_err());
