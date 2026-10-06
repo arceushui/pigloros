@@ -16,6 +16,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use zeroize::Zeroizing;
 
 // The custody adapter relies on Linux-only `openat2` resolve flags and
 // `renameat2(RENAME_NOREPLACE)`; every other target gets the explicit stub,
@@ -28,6 +29,14 @@ mod recipient_owner;
 pub use recipient_owner::RecipientKeyOwnerV1;
 mod recipient_decryption;
 pub use recipient_decryption::RecipientExportDecryptionErrorV1;
+mod recipient_publication;
+pub use recipient_publication::{
+    PublishedRecipientExportV1, RecipientExportPublicationErrorV1, RecipientExportRequestV1,
+};
+#[cfg(feature = "test-support")]
+pub use recipient_publication::{
+    RecipientExportPublicationTestArtifactsV1, RecipientExportPublicationTestFaultV1,
+};
 
 use pos_core::{
     clock::{AdmissionClock, Seq, SystemAdmissionClock, WallTime},
@@ -2676,22 +2685,23 @@ impl SqliteStore {
             Ok(rows) => rows,
             Err(error) => return Err(CoreError::Storage(error.to_string())),
         };
-        let mut events = Vec::new();
+        let mut events = EventReadPlaintextStaging::default();
         loop {
             #[cfg(test)]
             bounded_read_delay_for_test(1);
             ensure_read_time_bound(started, max_elapsed_micros)?;
             #[cfg(test)]
-            if FAIL_ROWS_NEXT.with(std::cell::Cell::get) {
-                return Err(CoreError::Storage(
-                    "injected row iteration failure".to_owned(),
-                ));
-            }
+            let next = if FAIL_ROWS_NEXT.with(std::cell::Cell::get) {
+                Err(rusqlite::Error::InvalidQuery)
+            } else {
+                rows.next()
+            };
+            #[cfg(not(test))]
             let next = rows.next();
             let row = match next.map_err(|e| CoreError::Storage(e.to_string())) {
                 Ok(Some(row)) => row,
                 Ok(None) => break,
-                Err(e) => return Err(e),
+                Err(error) => return Err(error),
             };
             #[cfg(test)]
             if limit.is_some() {
@@ -2704,7 +2714,7 @@ impl SqliteStore {
         bounded_read_delay_for_test(2);
         ensure_read_time_bound(started, max_elapsed_micros)?;
 
-        Ok(events)
+        Ok(events.into_events())
     }
 
     fn validate_own_events_bounded(
@@ -3264,11 +3274,18 @@ impl ForkChainRow {
 #[derive(Debug)]
 struct TimelineRow {
     id: String,
-    name: Option<String>,
+    name: Zeroizing<Option<String>>,
     mode: String,
     parent_id: Option<String>,
     fork_seq: Option<i64>,
     head_seq: i64,
+}
+
+struct DecodedTimelineFields {
+    id: TimelineId,
+    mode: TimelineMode,
+    fork_point: Option<(TimelineId, Seq)>,
+    head: Seq,
 }
 
 #[derive(Clone, Copy)]
@@ -3301,7 +3318,7 @@ fn sqlite_usize_or_max(value: i64) -> usize {
 fn read_timeline_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TimelineRow> {
     Ok(TimelineRow {
         id: row.get(0)?,
-        name: row.get(1)?,
+        name: Zeroizing::new(row.get(1)?),
         mode: row.get(2)?,
         parent_id: row.get(3)?,
         fork_seq: row.get(4)?,
@@ -3309,14 +3326,13 @@ fn read_timeline_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TimelineRow> {
     })
 }
 
-fn timeline_fields_to_timeline(
+fn decode_timeline_fields(
     id_str: &str,
-    name: Option<String>,
     mode_s: &str,
     parent_id: Option<String>,
     fork_seq: Option<i64>,
     head_seq: i64,
-) -> Result<Timeline, CoreError> {
+) -> Result<DecodedTimelineFields, CoreError> {
     let id = parse_timeline_id(id_str)?;
     let mode = parse_mode(mode_s);
     let fork_point = match (parent_id, fork_seq) {
@@ -3326,16 +3342,37 @@ fn timeline_fields_to_timeline(
         )),
         _ => None,
     };
-    let meta = TimelineMeta {
+    Ok(DecodedTimelineFields {
         id,
         mode,
-        name,
-        owner: None,
         fork_point,
+        head: Seq::from_u64(u64::try_from(head_seq).unwrap_or(0)),
+    })
+}
+
+fn timeline_fields_to_timeline(
+    id_str: &str,
+    mut name: Zeroizing<Option<String>>,
+    mode_s: &str,
+    parent_id: Option<String>,
+    fork_seq: Option<i64>,
+    head_seq: i64,
+) -> Result<Timeline, CoreError> {
+    let fields = decode_timeline_fields(id_str, mode_s, parent_id, fork_seq, head_seq)?;
+    let meta = TimelineMeta {
+        id: fields.id,
+        mode: fields.mode,
+        name: std::mem::take(&mut *name),
+        owner: None,
+        fork_point: fields.fork_point,
     };
     let mut tl = Timeline::new(meta);
-    tl.head = Seq::from_u64(u64::try_from(head_seq).unwrap_or(0));
+    tl.head = fields.head;
     Ok(tl)
+}
+
+fn restore_timeline_name(timeline: &mut Timeline, name: Option<Zeroizing<String>>) {
+    timeline.meta.name = name.map(|mut name| std::mem::take(&mut *name));
 }
 
 impl SqliteStore {
@@ -3521,6 +3558,30 @@ impl SqliteStore {
             self.timeline_contains_geographic_evidence(timeline),
             timeline,
         )
+    }
+
+    fn ensure_timeline_exists(&self, timeline: TimelineId) -> Result<(), CoreError> {
+        self.conn
+            .query_row(
+                "SELECT id, name, mode, parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
+                params![timeline.to_string()],
+                read_timeline_row,
+            )
+            .optional()
+            .map_err(|error| CoreError::Storage(error.to_string()))
+            .and_then(|row| {
+                row.ok_or(CoreError::TimelineNotFound(timeline))
+                    .and_then(|row| {
+                        decode_timeline_fields(
+                            &row.id,
+                            &row.mode,
+                            row.parent_id,
+                            row.fork_seq,
+                            row.head_seq,
+                        )
+                        .and_then(|fields| self.timeline_owner(fields.id).map(|_| ()))
+                    })
+            })
     }
 
     fn ensure_admin_visibility(&self, timeline: TimelineId) -> Result<(), CoreError> {
@@ -5181,8 +5242,12 @@ impl SqliteStore {
             row.fork_seq,
             row.head_seq,
         )?;
-        timeline.meta.owner = self.timeline_owner(timeline.id())?;
-        Ok(timeline)
+        let timeline_name = timeline.meta.name.take().map(Zeroizing::new);
+        self.timeline_owner(timeline.id()).map(move |owner| {
+            restore_timeline_name(&mut timeline, timeline_name);
+            timeline.meta.owner = owner;
+            timeline
+        })
     }
 }
 
@@ -6028,12 +6093,8 @@ impl EventStore for SqliteStore {
         self.with_erasure_read_fence(timeline, ErasureProtectedOperationV1::Export, |store| {
             store
                 .ensure_generic_timeline_visibility(timeline)
-                .and_then(|()| {
-                    let _ = store
-                        .get_timeline(timeline)?
-                        .ok_or(CoreError::TimelineNotFound(timeline))?;
-                    store.read_own_events(timeline, range.from, range.to)
-                })
+                .and_then(|()| store.ensure_timeline_exists(timeline))
+                .and_then(|()| store.read_own_events(timeline, range.from, range.to))
         })
     }
 
@@ -6125,11 +6186,17 @@ impl EventStore for SqliteStore {
             store
                 .get_timeline_for_host_transition_unchecked(id)
                 .and_then(|timeline| {
-                    timeline.map_or(Ok(None), |timeline| {
+                    timeline.map_or(Ok(None), |mut timeline| {
+                        let timeline_name = timeline.meta.name.take().map(Zeroizing::new);
                         crate::generic_timeline_is_visible(
                             store.timeline_contains_geographic_evidence(timeline.id()),
                         )
-                        .map(|visible| visible.then_some(timeline))
+                        .map(move |visible| {
+                            visible.then(|| {
+                                restore_timeline_name(&mut timeline, timeline_name);
+                                timeline
+                            })
+                        })
                     })
                 })
         })
@@ -13852,12 +13919,35 @@ fn decode_own_event(
     inherited_prefix: u64,
 ) -> Result<Event, CoreError> {
     let mut event = decode_event_row(row)?;
-    crate::finalize_committed_origins(
-        timeline,
-        inherited_prefix,
-        std::slice::from_mut(&mut event),
-    )?;
+    crate::finalize_committed_origins(timeline, inherited_prefix, std::slice::from_mut(&mut event))
+        .inspect_err(|_| {
+            let scrubbed =
+                pos_core::store::zeroize_event_plaintext_staging(std::slice::from_mut(&mut event));
+            debug_assert!(scrubbed);
+        })?;
     Ok(event)
+}
+
+/// Owns SQL-read plaintext until the caller explicitly returns it to a public
+/// `EventStore` result. Every fallible exit scrubs the source-owned buffers.
+#[derive(Default)]
+struct EventReadPlaintextStaging(Vec<Event>);
+
+impl EventReadPlaintextStaging {
+    fn push(&mut self, event: Event) {
+        self.0.push(event);
+    }
+
+    fn into_events(mut self) -> Vec<Event> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for EventReadPlaintextStaging {
+    fn drop(&mut self) {
+        let scrubbed = pos_core::store::zeroize_event_plaintext_staging(&mut self.0);
+        debug_assert!(scrubbed);
+    }
 }
 
 /// Persist a `u64` micros value as `SQLite` INTEGER (saturates at [`i64::MAX`]).
@@ -13986,8 +14076,8 @@ struct RawEventRow {
     seq: i64,
     event_id: String,
     entity_id: String,
-    event_type: String,
-    payload: Vec<u8>,
+    event_type: Zeroizing<String>,
+    payload: Zeroizing<Vec<u8>>,
     wall_time: i64,
     causation_id: Option<String>,
     correlation_id: Option<String>,
@@ -14000,8 +14090,8 @@ fn read_event_row_fields(row: &rusqlite::Row<'_>) -> Result<RawEventRow, CoreErr
         seq: row.get(0).map_err(storage_error)?,
         event_id: row.get(1).map_err(storage_error)?,
         entity_id: row.get(2).map_err(storage_error)?,
-        event_type: row.get(3).map_err(storage_error)?,
-        payload: row.get(4).map_err(storage_error)?,
+        event_type: Zeroizing::new(row.get(3).map_err(storage_error)?),
+        payload: Zeroizing::new(row.get(4).map_err(storage_error)?),
         wall_time: row.get(5).map_err(storage_error)?,
         causation_id: row.get(6).map_err(storage_error)?,
         correlation_id: row.get(7).map_err(storage_error)?,
@@ -14014,8 +14104,8 @@ fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
         seq,
         event_id,
         entity_id,
-        event_type,
-        payload,
+        mut event_type,
+        mut payload,
         wall_time,
         causation_id,
         correlation_id,
@@ -14035,25 +14125,33 @@ fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
         .map_err(|_| CoreError::Serialization("bad event sequence".to_owned()))?;
     let wall_time = u64::try_from(wall_time)
         .map_err(|_| CoreError::Serialization("bad event wall time".to_owned()))?;
-    let event = Event {
-        id: parse_event_id(&event_id)?,
-        entity: parse_entity_id(&entity_id)?,
-        event_type: Kind::new(event_type),
-        payload: CanonicalBytes::from_vec(payload),
+    let id = parse_event_id(&event_id)?;
+    let entity = parse_entity_id(&entity_id)?;
+    let causation_id = causation_id.as_deref().map(parse_event_id).transpose()?;
+    let correlation_id = correlation_id
+        .as_deref()
+        .map(parse_correlation_id)
+        .transpose()?;
+    let mut event = Event {
+        id,
+        entity,
+        event_type: Kind::new(std::mem::take(&mut *event_type)),
+        payload: CanonicalBytes::from_vec(std::mem::take(&mut *payload)),
         wall_time: WallTime::from_micros(wall_time),
         seq: Seq::from_u64(seq),
-        causation_id: causation_id.as_deref().map(parse_event_id).transpose()?,
-        correlation_id: correlation_id
-            .as_deref()
-            .map(parse_correlation_id)
-            .transpose()?,
+        causation_id,
+        correlation_id,
         schema_version: SchemaVersion::V1,
         signature,
         signature_identity,
         origin: Some(origin),
         payload_hash: pos_core::Hash::from_bytes(ph_arr),
     };
-    pos_core::store::validate_event_signature(&event)?;
+    pos_core::store::validate_event_signature(&event).inspect_err(|_| {
+        let scrubbed =
+            pos_core::store::zeroize_event_plaintext_staging(std::slice::from_mut(&mut event));
+        debug_assert!(scrubbed);
+    })?;
     Ok(event)
 }
 
