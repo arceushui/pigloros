@@ -13,6 +13,12 @@ publish.workspace = true
 test-support = []
 
 [dependencies]
+# Safe `set_fds_cloexec_threadsafe`: marks every descriptor the supervisor
+# process inherited (for example a build tool's jobserver pipe) close-on-exec
+# before each launch. Closing or flagging a raw descriptor needs `unsafe`,
+# which this workspace forbids; the crate is MIT and depends only on `libc`
+# and `cfg-if`.
+close_fds = "=0.3.2"
 pos-crypto = { path = "../pos-crypto" }
 pos-runtime = { path = "../pos-runtime" }
 # `process` provides prlimit, PR_SET_PDEATHSIG and getppid as safe calls; `fs`

@@ -4,9 +4,11 @@
 //! - with a cleared environment, forwarding only [`FORWARDED_ENVIRONMENT`];
 //! - with `/` as its working directory;
 //! - with its standard input and output as the only IPC pipes and its
-//!   standard error on `/dev/null`. The standard library opens every other
-//!   descriptor close-on-exec, and the worker refuses to run if it inherited
-//!   anything else (see [`crate::worker_process`]);
+//!   standard error on `/dev/null`. The standard library opens every
+//!   descriptor close-on-exec; before each launch the supervisor also marks
+//!   close-on-exec every descriptor from 3 upwards that its own process
+//!   inherited without that flag. The worker refuses to run if it still
+//!   inherited anything else (see [`crate::worker_process`]);
 //! - with the supervisor's process ID as its only argument, so the worker can
 //!   bind its parent-death signal to it;
 //! - with hard and soft rlimit ceilings on CPU time, data (memory), file size
@@ -156,6 +158,7 @@ pub(crate) fn launch(
     program: &WorkerProgramV1,
     ceilings: &WorkerResourceCeilingsV1,
 ) -> Option<LaunchedWorker> {
+    close_fds::set_fds_cloexec_threadsafe(3, &[]);
     let mut process = WorkerProcess {
         child: command(program).spawn().ok()?,
     };
