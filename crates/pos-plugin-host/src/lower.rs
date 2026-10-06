@@ -25,16 +25,31 @@ pub(crate) fn invocation_val(invocation: &PluginInvocationV1, kind: &str) -> Val
                 ),
             ]),
         ),
-        ("output-base-ordinal", Val::U32(invocation.output_base_ordinal)),
+        (
+            "output-base-ordinal",
+            Val::U32(invocation.output_base_ordinal),
+        ),
         ("principal-ref", lower_artifact(&invocation.principal_ref)),
         (
             "authorization-decision",
             lower_artifact(&invocation.authorization_decision),
         ),
-        ("observation-snapshot", lower_artifact(&invocation.observation_snapshot)),
-        ("observation-bytes", byte_list(&invocation.observation_bytes)),
-        ("prior-state-schema", lower_digest(&invocation.prior_state_schema)),
-        ("prior-state-bytes", byte_list(&invocation.prior_state_bytes)),
+        (
+            "observation-snapshot",
+            lower_artifact(&invocation.observation_snapshot),
+        ),
+        (
+            "observation-bytes",
+            byte_list(&invocation.observation_bytes),
+        ),
+        (
+            "prior-state-schema",
+            lower_digest(&invocation.prior_state_schema),
+        ),
+        (
+            "prior-state-bytes",
+            byte_list(&invocation.prior_state_bytes),
+        ),
         (
             "execution-profile-digest",
             lower_digest(&invocation.execution_profile_digest),

@@ -5,7 +5,7 @@
 //! type and selects one misbehaviour from the Simulation Time it is given, so
 //! each closed outcome is reached through a real Wasmtime invocation.
 
-mod common;
+pub mod common;
 
 use std::sync::LazyLock;
 
@@ -14,7 +14,8 @@ use common::{
 };
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
 use pos_plugin_host::{
-    pinned_runtime, ComponentHost, LoadError, LoadedComponent, PinnedExecutionV1, RuntimeNotPinnedV1,
+    pinned_runtime, ComponentHost, LoadError, LoadedComponent, PinnedExecutionV1,
+    RuntimeNotPinnedV1,
 };
 use pos_runtime::community_plugin_host::{
     CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
@@ -49,7 +50,11 @@ fn component(text: &str) -> Vec<u8> {
 fn probe(selector: u64, budget: DeterministicBudgetV1) -> Option<Error> {
     ENGINE
         .host
-        .describe(&ENGINE.probe, &execution(budget), options(selector, NO_WATCHDOG))
+        .describe(
+            &ENGINE.probe,
+            &execution(budget),
+            options(selector, NO_WATCHDOG),
+        )
         .err()
 }
 
@@ -156,7 +161,10 @@ fn guest_exports_must_have_their_exact_guest_v1_types() {
         (export \"pigloros:plugin/guest-v1@0.1.0\" (instance $g)))";
     let loaded = ENGINE.host.load(&component(not_a_function)).err();
     assert_eq!(loaded, Some(LoadError::MissingGuestExport));
-    assert_eq!(Error::from(LoadError::MistypedGuestExport), Error::IncompatibleAbi);
+    assert_eq!(
+        Error::from(LoadError::MistypedGuestExport),
+        Error::IncompatibleAbi
+    );
 }
 
 #[test]
@@ -243,9 +251,13 @@ fn describe_must_match_the_negotiated_release() {
 fn invocations_outside_their_bounds_never_reach_the_guest() {
     let execution = execution(BUDGET);
     let large = invocation(&vec![0; MAX_OBSERVATION_BYTES_V1 + 1]);
-    let reduced = ENGINE.host.reduce(&ENGINE.rust, &execution, &large, options(0, 0));
+    let reduced = ENGINE
+        .host
+        .reduce(&ENGINE.rust, &execution, &large, options(0, 0));
     assert_eq!(reduced.err(), Some(Error::InvalidInvocation));
-    let driven = ENGINE.host.drive(&ENGINE.rust, &execution, &large, options(0, 0));
+    let driven = ENGINE
+        .host
+        .drive(&ENGINE.rust, &execution, &large, options(0, 0));
     assert_eq!(driven.err(), Some(Error::InvalidInvocation));
 }
 

@@ -7,9 +7,9 @@ use pos_crypto::plugin_execution::{
 use pos_plugin_host::{pinned_runtime, PinnedExecutionV1};
 use pos_runtime::community_plugin_host::{
     negotiate_community_plugin_v1, ArtifactRefV1, CommunityPluginCeilingsV1,
-    CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginModeV1,
-    HostInputs, InvocationOptionsV1, NegotiatedCommunityPluginV1, PinnedComponentRuntimeV1,
-    PluginInvocationV1, TimelinePositionV1,
+    CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginModeV1, HostInputs,
+    InvocationOptionsV1, NegotiatedCommunityPluginV1, PinnedComponentRuntimeV1, PluginInvocationV1,
+    TimelinePositionV1,
 };
 
 /// The compatibility Rust guest.

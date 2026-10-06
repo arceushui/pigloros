@@ -53,7 +53,7 @@ pub mod runtime;
 pub mod signatures;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod test_values;
+pub mod test_values;
 
 pub use engine::{ComponentHost, GuestExport, LoadedComponent, PinnedExecutionV1};
 pub use outcome::{LoadError, RuntimeNotPinnedV1};

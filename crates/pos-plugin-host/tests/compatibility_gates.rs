@@ -8,7 +8,7 @@
 //! are exact, because fuel and memory are deterministic for the pinned
 //! Wasmtime and fixture bytes.
 
-mod common;
+pub mod common;
 
 use std::sync::LazyLock;
 
@@ -19,8 +19,8 @@ use pos_crypto::plugin_execution::{DeterministicBudgetV1, COMMUNITY_PLUGIN_WORLD
 use pos_plugin_host::{ComponentHost, GuestExport, LoadError, LoadedComponent};
 use pos_runtime::community_plugin_host::{
     plugin_output_digest_v1, CommunityPluginHostErrorV1, ComponentTrapClassV1, EventDraftV1,
-    HostInputs, InvocationOptionsV1, InvocationReportV1, OperationalLogRecord,
-    PluginDescriptorV1, PluginOutputV1, TrapReproductionV1,
+    HostInputs, InvocationOptionsV1, InvocationReportV1, OperationalLogRecord, PluginDescriptorV1,
+    PluginOutputV1, TrapReproductionV1,
 };
 
 /// Bytes of one committed compatibility fixture.
@@ -216,9 +216,7 @@ fn recorded(guest_name: &str, call: &str) -> Measurement {
 }
 
 fn describe(guest: &LoadedComponent) -> Result<InvocationReportV1<PluginDescriptorV1>, Error> {
-    PROTOTYPE
-        .host
-        .describe(guest, &execution(BUDGET), OPTIONS)
+    PROTOTYPE.host.describe(guest, &execution(BUDGET), OPTIONS)
 }
 
 #[test]

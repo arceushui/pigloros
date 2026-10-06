@@ -63,7 +63,10 @@ pub(crate) fn plugin_output(value: &Val, bounds: &OutputBounds) -> Lifted<Plugin
         consumed_dependencies: dependencies.charge(ordered_digests(consumed)?)?,
         output_digest: digest(output_digest)?,
     };
-    ensure(output.output_digest == plugin_output_digest_v1(&output), INVALID)?;
+    ensure(
+        output.output_digest == plugin_output_digest_v1(&output),
+        INVALID,
+    )?;
     Ok(output)
 }
 

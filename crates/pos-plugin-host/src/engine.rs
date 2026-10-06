@@ -2,9 +2,9 @@
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
 use pos_runtime::community_plugin_host::{
-    CommunityPluginHostErrorV1, GuestReturnV1, InvocationOptionsV1, InvocationReportV1,
-    MeteringV1, NegotiatedCommunityPluginV1, OperationalLogRecord, PluginDescriptorV1,
-    PluginInvocationV1, PluginOutputV1,
+    CommunityPluginHostErrorV1, GuestReturnV1, InvocationOptionsV1, InvocationReportV1, MeteringV1,
+    NegotiatedCommunityPluginV1, OperationalLogRecord, PluginDescriptorV1, PluginInvocationV1,
+    PluginOutputV1,
 };
 use wasmtime::component::types::{ComponentFunc, ComponentItem};
 use wasmtime::component::{Component, ComponentExportIndex, Instance, InstancePre, Linker, Val};
@@ -16,8 +16,8 @@ use crate::lift::{guest_return, Lifted};
 use crate::lower::invocation_val;
 use crate::outcome::{classify, LoadError, RuntimeNotPinnedV1};
 use crate::output::{plugin_output, OutputBounds};
-use crate::signatures::{export_is_exact, imported_functions_are_exact};
 use crate::runtime::{pinned_runtime, MAX_WASM_STACK_BYTES, PINNED_ENGINE_CONFIG};
+use crate::signatures::{export_is_exact, imported_functions_are_exact};
 
 const GUEST_V1_INTERFACE: &str = "pigloros:plugin/guest-v1@0.1.0";
 
@@ -224,7 +224,13 @@ impl ComponentHost {
         invocation: &PluginInvocationV1,
         options: InvocationOptionsV1,
     ) -> Result<InvocationReportV1<PluginOutputV1>, CommunityPluginHostErrorV1> {
-        self.invoke_output(component, GuestExport::Reduce, execution, invocation, options)
+        self.invoke_output(
+            component,
+            GuestExport::Reduce,
+            execution,
+            invocation,
+            options,
+        )
     }
 
     /// Call `drive` with `invocation` and validate the complete output.
@@ -239,7 +245,13 @@ impl ComponentHost {
         invocation: &PluginInvocationV1,
         options: InvocationOptionsV1,
     ) -> Result<InvocationReportV1<PluginOutputV1>, CommunityPluginHostErrorV1> {
-        self.invoke_output(component, GuestExport::Drive, execution, invocation, options)
+        self.invoke_output(
+            component,
+            GuestExport::Drive,
+            execution,
+            invocation,
+            options,
+        )
     }
 
     /// Compile `bytes` and require exact `host-v1` function imports.

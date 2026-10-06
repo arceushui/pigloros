@@ -139,7 +139,10 @@ pub(crate) fn strictly_increasing<T: Ord>(items: &[T]) -> bool {
 
 /// `OutputLimitExceeded` unless `count <= limit`.
 pub(crate) fn within(count: usize, limit: u64) -> Lifted<()> {
-    ensure(u64::try_from(count).is_ok_and(|count| count <= limit), LIMIT)
+    ensure(
+        u64::try_from(count).is_ok_and(|count| count <= limit),
+        LIMIT,
+    )
 }
 
 /// A `plugin-error`.
@@ -212,8 +215,8 @@ fn coordinate_bytes(value: &Val) -> Lifted<Vec<u8>> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::test_values::{digest_val, record, text_val};
     use crate::host_v1::byte_list;
+    use crate::test_values::{digest_val, record, text_val};
 
     fn some(value: Val) -> Val {
         Val::Option(Some(Box::new(value)))
