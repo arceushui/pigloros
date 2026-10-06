@@ -76,7 +76,7 @@ fn public_none_attestation_parser_rejects_duplicate_fields_and_wrong_cbor_types(
     wrong_format_type[5] = 0x40;
     assert_invalid_attestation(&wrong_format_type, &CREDENTIAL_ID);
 
-    let mut wrong_authenticator_data_type = attestation.clone();
+    let mut wrong_authenticator_data_type = attestation;
     wrong_authenticator_data_type[28] = 0x60;
     assert_invalid_attestation(&wrong_authenticator_data_type, &CREDENTIAL_ID);
 
@@ -322,8 +322,7 @@ fn public_assertion_extension_parser_accepts_every_closed_value_class(
 }
 
 #[test]
-fn public_cose_canonical_decoder_rejects_each_closed_map_shape() -> Result<(), OwnerBridgeCodecError>
-{
+fn public_cose_canonical_decoder_rejects_each_closed_map_shape() {
     let key = cose_key();
 
     let mut wrong_map_length = key;
@@ -360,7 +359,6 @@ fn public_cose_canonical_decoder_rejects_each_closed_map_shape() -> Result<(), O
         CoseEs256PublicKey::from_canonical_encoding(&oversized_algorithm),
         Err(OwnerBridgeCodecError::InvalidPayload)
     );
-    Ok(())
 }
 
 #[test]
