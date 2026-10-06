@@ -1,6 +1,7 @@
 use pos_owner_bridge_codec::{
     parse_assertion_authenticator_data, parse_none_attestation_object, CoseEs256PublicKey,
-    OwnerBridgeCodecError,
+    OwnerBridgeCodecError, SubjectCredentialBindingInputV1, SubjectCredentialBindingV1,
+    TransportCodes,
 };
 
 const CREDENTIAL_ID: [u8; 2] = [0x80, 0x81];
@@ -177,6 +178,32 @@ fn public_none_attestation_parser_rejects_authenticator_and_cose_fields(
     assert_eq!(
         parse_none_attestation_object(&none_attestation_object(&wrong_x_width)?, &CREDENTIAL_ID),
         Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
+    Ok(())
+}
+
+#[test]
+fn public_durable_binding_rejects_a_non_curve_attestation_key() -> Result<(), OwnerBridgeCodecError>
+{
+    let mut authenticator_data = create_authenticator_data(cose_key());
+    authenticator_data[57 + 10..57 + 42].fill(0);
+    let attestation = none_attestation_object(&authenticator_data)?;
+    let parsed = parse_none_attestation_object(&attestation, &CREDENTIAL_ID)?;
+
+    assert_eq!(
+        SubjectCredentialBindingV1::new(SubjectCredentialBindingInputV1 {
+            owner_id: "owner",
+            subject_id: [0; 16],
+            epoch: 1,
+            credential_id: parsed.credential_id(),
+            user_handle: [0; 32],
+            public_key: parsed.public_key(),
+            backup_eligible: parsed.backup_eligible(),
+            backup_state: parsed.backup_state(),
+            sign_count: parsed.sign_count(),
+            transports: TransportCodes::new(&[])?,
+        }),
+        Err(OwnerBridgeCodecError::InvalidPayload)
     );
     Ok(())
 }

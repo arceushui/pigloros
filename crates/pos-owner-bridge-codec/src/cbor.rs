@@ -243,11 +243,7 @@ impl<'a> CborWriter<'a> {
     fn head(&mut self, major: u8, value: u64) {
         let prefix = major << 5;
         if value <= 23 {
-            let Ok(value) = u8::try_from(value) else {
-                self.set_error(OwnerBridgeCodecError::InvalidPayload);
-                return;
-            };
-            self.write(&[prefix | value]);
+            self.write(&[prefix | value.to_be_bytes()[7]]);
             return;
         }
         if let Ok(value) = u8::try_from(value) {

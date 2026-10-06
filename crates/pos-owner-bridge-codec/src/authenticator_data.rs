@@ -180,38 +180,38 @@ pub fn parse_none_attestation_object<'a>(
         return Err(OwnerBridgeCodecError::InvalidPayload);
     }
 
-    let mut fmt_seen = false;
-    let mut statement_seen = false;
-    let mut auth_data_seen = false;
-    let mut auth_data = None;
+    const FORMAT_SEEN: u8 = 1;
+    const STATEMENT_SEEN: u8 = 1 << 1;
+    const AUTH_DATA_SEEN: u8 = 1 << 2;
+
+    let mut seen = 0;
+    let mut auth_data = input;
     for _ in 0..count {
         let key = reader.map_key()?;
         if key.equals_text(b"fmt") {
-            if fmt_seen || reader.text()? != b"none" {
+            if seen & FORMAT_SEEN != 0 || reader.text()? != b"none" {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            fmt_seen = true;
+            seen |= FORMAT_SEEN;
         } else if key.equals_text(b"attStmt") {
-            if statement_seen || reader.map_len()? != 0 {
+            if seen & STATEMENT_SEEN != 0 || reader.map_len()? != 0 {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            statement_seen = true;
+            seen |= STATEMENT_SEEN;
         } else if key.equals_text(b"authData") {
-            if auth_data_seen {
+            if seen & AUTH_DATA_SEEN != 0 {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            auth_data =
-                Some(reader.bytes(MIN_AUTHENTICATOR_DATA_BYTES, MAX_AUTHENTICATOR_DATA_BYTES)?);
-            auth_data_seen = true;
+            auth_data = reader.bytes(MIN_AUTHENTICATOR_DATA_BYTES, MAX_AUTHENTICATOR_DATA_BYTES)?;
+            seen |= AUTH_DATA_SEEN;
         } else {
             return Err(OwnerBridgeCodecError::InvalidPayload);
         }
     }
     reader.finish()?;
-    let auth_data = auth_data.ok_or(OwnerBridgeCodecError::InvalidPayload)?;
-    if !(fmt_seen && statement_seen) {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
-    }
+    // The three accepted fields have distinct bits, duplicates and unknown
+    // fields return above, and the map length is exactly three. Thus every
+    // accepted traversal assigned `auth_data` exactly once.
 
     let parsed = parse_authenticator_data(auth_data, AuthenticatorDataKind::Create, raw_id)?;
     let (Some(credential_id), Some(public_key)) = (parsed.credential_id, parsed.public_key) else {
@@ -292,11 +292,11 @@ fn parse_authenticator_data<'a>(
             if !attested_data {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            offset = skip_aaguid_and_read_credential(input, offset, raw_id, &mut credential_id)?;
-            let (parsed_key, consumed) = parse_cose_es256_key(&input[offset..])?;
-            offset = offset
-                .checked_add(consumed)
-                .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
+            let (parsed_credential_id, cose_offset) = read_attested_credential_id(input, raw_id)?;
+            credential_id = Some(parsed_credential_id);
+            let (parsed_key, consumed) = parse_cose_es256_key(&input[cose_offset..])?;
+            // `parse_cose_es256_key` can consume no more than its input slice.
+            offset = cose_offset + consumed;
             public_key = Some(parsed_key);
         }
         AuthenticatorDataKind::Assertion if attested_data => {
@@ -306,9 +306,7 @@ fn parse_authenticator_data<'a>(
     }
 
     if extensions {
-        let extension_bytes = input
-            .get(offset..)
-            .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
+        let extension_bytes = &input[offset..];
         require_bounded(extension_bytes, 1, MAX_EXTENSION_MAP_BYTES)?;
         let mut extension_reader = AuthenticatorCborReader::new(extension_bytes);
         extension_reader.validate_extension_map()?;
@@ -328,20 +326,15 @@ fn parse_authenticator_data<'a>(
     })
 }
 
-fn skip_aaguid_and_read_credential<'a>(
+fn read_attested_credential_id<'a>(
     input: &'a [u8],
-    offset: usize,
     raw_id: &[u8],
-    credential_id: &mut Option<&'a [u8]>,
-) -> Result<usize, OwnerBridgeCodecError> {
-    let length_offset = offset
-        .checked_add(16)
-        .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
-    let length_end = length_offset
-        .checked_add(2)
-        .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
+) -> Result<(&'a [u8], usize), OwnerBridgeCodecError> {
+    const CREDENTIAL_LENGTH_OFFSET: usize = MIN_AUTHENTICATOR_DATA_BYTES + 16;
+    const CREDENTIAL_START: usize = CREDENTIAL_LENGTH_OFFSET + 2;
+
     let credential_length = input
-        .get(length_offset..length_end)
+        .get(CREDENTIAL_LENGTH_OFFSET..CREDENTIAL_START)
         .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
     let credential_length = usize::from(u16::from_be_bytes([
         credential_length[0],
@@ -350,18 +343,14 @@ fn skip_aaguid_and_read_credential<'a>(
     if !(MIN_CREDENTIAL_ID_BYTES..=MAX_CREDENTIAL_ID_BYTES).contains(&credential_length) {
         return Err(OwnerBridgeCodecError::BoundsExceeded);
     }
-    let credential_start = length_end;
-    let credential_end = credential_start
-        .checked_add(credential_length)
-        .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
+    let credential_end = CREDENTIAL_START + credential_length;
     let parsed_credential_id = input
-        .get(credential_start..credential_end)
+        .get(CREDENTIAL_START..credential_end)
         .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
     if parsed_credential_id != raw_id {
         return Err(OwnerBridgeCodecError::InvalidPayload);
     }
-    *credential_id = Some(parsed_credential_id);
-    Ok(credential_end)
+    Ok((parsed_credential_id, credential_end))
 }
 
 fn parse_cose_es256_key(
@@ -372,47 +361,50 @@ fn parse_cose_es256_key(
         return Err(OwnerBridgeCodecError::InvalidPayload);
     }
 
-    let mut kty_seen = false;
-    let mut algorithm_seen = false;
-    let mut curve_seen = false;
-    let mut x = None;
-    let mut y = None;
+    const KTY_SEEN: u8 = 1;
+    const ALGORITHM_SEEN: u8 = 1 << 1;
+    const CURVE_SEEN: u8 = 1 << 2;
+    const X_SEEN: u8 = 1 << 3;
+    const Y_SEEN: u8 = 1 << 4;
+
+    let mut seen = 0;
+    let mut x = [0; 32];
+    let mut y = [0; 32];
     for _ in 0..5 {
         let key = reader.map_key()?;
         if key.is_unsigned(1) {
-            if kty_seen || reader.unsigned()? != 2 {
+            if seen & KTY_SEEN != 0 || reader.unsigned()? != 2 {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            kty_seen = true;
+            seen |= KTY_SEEN;
         } else if key.is_unsigned(3) {
-            if algorithm_seen || reader.signed()? != -7 {
+            if seen & ALGORITHM_SEEN != 0 || reader.signed()? != -7 {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            algorithm_seen = true;
+            seen |= ALGORITHM_SEEN;
         } else if key.is_negative(0) {
-            if curve_seen || reader.unsigned()? != 1 {
+            if seen & CURVE_SEEN != 0 || reader.unsigned()? != 1 {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            curve_seen = true;
+            seen |= CURVE_SEEN;
         } else if key.is_negative(1) {
-            if x.is_some() {
+            if seen & X_SEEN != 0 {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            x = Some(reader.fixed_bytes()?);
+            x = reader.fixed_bytes()?;
+            seen |= X_SEEN;
         } else if key.is_negative(2) {
-            if y.is_some() {
+            if seen & Y_SEEN != 0 {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            y = Some(reader.fixed_bytes()?);
+            y = reader.fixed_bytes()?;
+            seen |= Y_SEEN;
         } else {
             return Err(OwnerBridgeCodecError::InvalidPayload);
         }
     }
-    if !(kty_seen && algorithm_seen && curve_seen) {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
-    }
-    let x = x.ok_or(OwnerBridgeCodecError::InvalidPayload)?;
-    let y = y.ok_or(OwnerBridgeCodecError::InvalidPayload)?;
+    // Exactly five distinct closed labels are accepted above, and the map
+    // length is exactly five, so each field was assigned once.
     Ok((CoseEs256PublicKey { x, y }, reader.offset))
 }
 
