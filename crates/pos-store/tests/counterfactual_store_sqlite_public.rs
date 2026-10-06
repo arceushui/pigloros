@@ -1775,7 +1775,10 @@ fn only_a_marked_purge_passes_the_delete_guards_and_the_floor_cannot_drop() {
          SELECT fork_id, 9 FROM counterfactual_fork_tombstones",
     ));
     assert_eq!(tombstone_floor(&fixture.path, other), 9);
-    assert_eq!(open_error(SqliteStore::open(fixture_path_str(&fixture))), "");
+    assert_eq!(
+        open_error(SqliteStore::open(fixture_path_str(&fixture))),
+        ""
+    );
 }
 
 /// A purge marker authorizes deletes of its own Fork's rows only.
@@ -1787,15 +1790,11 @@ fn a_purge_marker_authorizes_only_its_own_forks_rows() {
     commit_default(&mut store, fork);
     let other = published_other_fork(&mut store, root);
     drop(store);
-    let mark = format!(
-        "INSERT INTO counterfactual_purge_fence (fork_id) VALUES ('{fork}');"
-    );
+    let mark = format!("INSERT INTO counterfactual_purge_fence (fork_id) VALUES ('{fork}');");
 
     // The other Fork's quarantine rows are not authorized, so the whole
     // unqualified delete aborts and removes nothing.
-    let unqualified = format!(
-        "BEGIN; {mark} DELETE FROM counterfactual_quarantine; COMMIT;"
-    );
+    let unqualified = format!("BEGIN; {mark} DELETE FROM counterfactual_quarantine; COMMIT;");
     assert!(execute(&fixture.path, &unqualified).is_err());
     assert_eq!(counterfactual_rows(&fixture.path, fork), LIVE_ROWS);
     assert_eq!(counterfactual_rows(&fixture.path, other), LIVE_ROWS);
@@ -1848,7 +1847,10 @@ fn a_failed_delete_leaves_every_row_and_no_purge_marker() {
         );
         drop(faulted);
         ok(execute(&fixture.path, "DROP TRIGGER injected_fault;"));
-        assert_eq!(open_error(SqliteStore::open(fixture_path_str(&fixture))), "");
+        assert_eq!(
+            open_error(SqliteStore::open(fixture_path_str(&fixture))),
+            ""
+        );
     }
 
     let mut recovered = open(&fixture.path);
