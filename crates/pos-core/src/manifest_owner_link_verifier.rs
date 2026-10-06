@@ -577,8 +577,7 @@ fn verify_and_release<S: ManifestOwnerLinkReadPortV1 + ?Sized>(
     let denied = ManifestOwnerLinkVerificationErrorV1::ProtectedUseDenied;
     let generation = erasure_gate.inventory_generation().map_err(|_| denied)?;
     let snapshot = read_snapshot(store, request)?;
-    let selected = verify_snapshot(request, &snapshot, authority)?;
-    verify_coordinator_key_evidence(&snapshot, keys)?;
+    let selected = verify_snapshot(request, &snapshot, authority, keys)?;
     let admission = selected.admission;
     let fresh = is_fresh_use(request, &snapshot, admission, generation, expiries)
         && keys_are_live(request, admission, keys);
@@ -612,7 +611,8 @@ fn read_snapshot<S: ManifestOwnerLinkReadPortV1 + ?Sized>(
         .ok_or(ManifestOwnerLinkVerificationErrorV1::WrongCut)
 }
 
-/// Prove the cut, admission and closure chain, then re-verify signatures.
+/// Prove the cut, admission and closure chain, then re-verify signatures and
+/// resolve the coordinator key evidence they name.
 ///
 /// Structural checks run first so that a signature hook only ever sees one
 /// consistent chain.
@@ -620,6 +620,7 @@ fn verify_snapshot<'s>(
     request: &ManifestOwnerLinkRequestV1,
     snapshot: &'s ManifestOwnerLinkSnapshotV1,
     authority: ManifestOwnerLinkAuthorityV1<'_>,
+    keys: &dyn KeyRegistryPortV1,
 ) -> Result<SelectedLinkV1<'s>, ManifestOwnerLinkVerificationErrorV1> {
     let recording = select_recording(request, snapshot)?;
     verify_cut_chain(snapshot)?;
@@ -632,7 +633,8 @@ fn verify_snapshot<'s>(
     }
     verify_dependency_closure(snapshot, recording, admission, context)?;
     verify_static_pins(snapshot, admission)?;
-    authenticate_receipts(snapshot, authority)?;
+    authenticate_receipts(snapshot, authority)
+        .and_then(|()| verify_coordinator_key_evidence(snapshot, keys))?;
     Ok(SelectedLinkV1 {
         recording,
         admission,
