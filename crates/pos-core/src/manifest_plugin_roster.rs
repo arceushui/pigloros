@@ -48,6 +48,11 @@ use crate::{
 /// Maximum entries in one MPR1 roster.
 pub const MAX_MANIFEST_PLUGIN_ROSTER_ENTRIES_V1: usize = MAX_MANIFEST_OWNER_PLUGINS_V1;
 /// Fixed upper bound on one roster's checked maximum encoded size, 1 GiB.
+///
+/// The cap is the checked sum of each entry's worst-case encoded size, so a
+/// roster of 256 maximum-size closures (about 1.28 GiB) cannot be represented
+/// by design; roughly 200 maximum-size entries fit. Decoding rejects any input
+/// longer than this before parsing or copying anything.
 pub const MAX_MANIFEST_PLUGIN_ROSTER_BYTES_V1: usize = 1 << 30;
 /// Native OPC1 maximum for one retained closure envelope.
 ///
@@ -58,6 +63,7 @@ pub const MAX_MANIFEST_PLUGIN_CLOSURE_BYTES_V1: usize =
 
 // Rendered rule for `ClosureBytes`; the public tests pin it to the constant.
 const CLOSURE_RULE: &str = "closure_bytes must be at most 5374516 bytes (the native OPC1 maximum)";
+const INVALID: ManifestPluginRosterErrorV1 = ManifestPluginRosterErrorV1::InvalidEncoding;
 const MAGIC: &[u8; 4] = b"MPR1";
 const MAX_SLOT_BYTES: usize = 64;
 const MAX_NAME_BYTES: usize = 128;
@@ -65,6 +71,8 @@ const MAX_VERSION_BYTES: usize = 64;
 // Array head, magic string and entry-count head, each at its widest.
 const ROSTER_FRAMING_MAX_BYTES: usize = 1 + 5 + 9;
 // Array head, four variable heads at their widest, 16-byte id, 32-byte digest.
+// The cap uses this widest-head framing, so a canonical roster within about
+// 256 x 30 bytes of the cap can be rejected.
 const ENTRY_FRAMING_MAX_BYTES: usize = 1 + 4 * 9 + 17 + 34;
 
 /// An entry field whose bound an error refers to.
@@ -313,6 +321,8 @@ impl ManifestPluginEntryV1 {
     }
 
     /// Exact retained OPC1 envelope bytes, unverified by this crate.
+    ///
+    /// An empty closure is allowed: the ADR gives only an upper bound.
     #[must_use]
     pub fn closure_bytes(&self) -> &[u8] {
         &self.closure_bytes
@@ -390,7 +400,8 @@ impl ManifestPluginRosterV1 {
     /// Decode one complete preferred MPR1 record; the decoder stays strict.
     ///
     /// Unlike [`Self::new`], the input must already be in strict slot order.
-    /// Declared entry counts and closure lengths are bounded before any
+    /// Input longer than the 1 GiB cap is rejected before anything is parsed
+    /// or copied. Declared entry counts and closure lengths are bounded before any
     /// entry is copied or any slice is taken. The decoded roster is
     /// re-encoded and compared byte for byte with the input.
     ///
@@ -398,6 +409,7 @@ impl ManifestPluginRosterV1 {
     /// Rejects malformed, noncanonical, oversized, duplicate, unsorted or
     /// out-of-bounds inputs with the matching closed error.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, ManifestPluginRosterErrorV1> {
+        checked_manifest_plugin_roster_size_v1(0, bytes.len())?;
         let mut wire = Wire::new(bytes);
         wire.array(2)?;
         wire.magic()?;
@@ -421,26 +433,33 @@ fn valid_slot(slot: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
+// The second entry of the first adjacent pair whose slots satisfy `violates`.
+fn first_violation(
+    entries: &[ManifestPluginEntryV1],
+    violates: impl Fn(&str, &str) -> bool,
+) -> Option<&ManifestPluginEntryV1> {
+    entries
+        .windows(2)
+        .find(|pair| violates(&pair[0].stable_slot, &pair[1].stable_slot))
+        .map(|pair| &pair[1])
+}
+
 fn check_decoded_order(
     entries: &[ManifestPluginEntryV1],
 ) -> Result<(), ManifestPluginRosterErrorV1> {
-    for pair in entries.windows(2) {
-        if pair[0].stable_slot > pair[1].stable_slot {
-            return Err(ManifestPluginRosterErrorV1::unsorted(&pair[1]));
-        }
+    match first_violation(entries, |left, right| left > right) {
+        Some(entry) => Err(ManifestPluginRosterErrorV1::unsorted(entry)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn check_unique_slots(
     entries: &[ManifestPluginEntryV1],
 ) -> Result<(), ManifestPluginRosterErrorV1> {
-    for pair in entries.windows(2) {
-        if pair[0].stable_slot == pair[1].stable_slot {
-            return Err(ManifestPluginRosterErrorV1::duplicate_slot(&pair[1]));
-        }
+    match first_violation(entries, |left, right| left == right) {
+        Some(entry) => Err(ManifestPluginRosterErrorV1::duplicate_slot(entry)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn check_unique_ids(entries: &[ManifestPluginEntryV1]) -> Result<(), ManifestPluginRosterErrorV1> {
@@ -485,13 +504,10 @@ fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
             out.push(tag | 0x19);
             out.extend_from_slice(&bytes[6..]);
         }
-        65_536..=4_294_967_295 => {
+        // Lengths and counts are bounded below 2^32 by the codec limits.
+        _ => {
             out.push(tag | 0x1a);
             out.extend_from_slice(&bytes[4..]);
-        }
-        _ => {
-            out.push(tag | 0x1b);
-            out.extend_from_slice(&bytes);
         }
     }
 }
@@ -522,7 +538,7 @@ impl<'a> Wire<'a> {
             .bytes
             .get(self.offset)
             .copied()
-            .ok_or(ManifestPluginRosterErrorV1::InvalidEncoding)?;
+            .ok_or(INVALID)?;
         self.offset += 1;
         Ok(byte)
     }
@@ -532,7 +548,7 @@ impl<'a> Wire<'a> {
     fn head(&mut self, major: u8) -> Result<u64, ManifestPluginRosterErrorV1> {
         let first = self.byte()?;
         if first >> 5 != major {
-            return Err(ManifestPluginRosterErrorV1::InvalidEncoding);
+            return Err(INVALID);
         }
         let additional = first & 0x1f;
         if additional < 24 {
@@ -543,7 +559,7 @@ impl<'a> Wire<'a> {
             25 => 2,
             26 => 4,
             27 => 8,
-            _ => return Err(ManifestPluginRosterErrorV1::InvalidEncoding),
+            _ => return Err(INVALID),
         };
         let mut value = 0_u64;
         for _ in 0..width {
@@ -556,7 +572,7 @@ impl<'a> Wire<'a> {
         if self.head(4)? == expected {
             Ok(())
         } else {
-            Err(ManifestPluginRosterErrorV1::InvalidEncoding)
+            Err(INVALID)
         }
     }
 
@@ -570,7 +586,7 @@ impl<'a> Wire<'a> {
 
     fn slice(&mut self, length: usize) -> Result<&'a [u8], ManifestPluginRosterErrorV1> {
         if length > self.bytes.len() - self.offset {
-            return Err(ManifestPluginRosterErrorV1::InvalidEncoding);
+            return Err(INVALID);
         }
         let start = self.offset;
         self.offset += length;
@@ -579,7 +595,7 @@ impl<'a> Wire<'a> {
 
     fn utf8(&mut self, length: usize) -> Result<&'a str, ManifestPluginRosterErrorV1> {
         std::str::from_utf8(self.slice(length)?)
-            .map_err(|_| ManifestPluginRosterErrorV1::InvalidEncoding)
+            .map_err(|_| INVALID)
     }
 
     fn magic(&mut self) -> Result<(), ManifestPluginRosterErrorV1> {
@@ -628,7 +644,7 @@ impl<'a> Wire<'a> {
 
     fn fixed<const N: usize>(&mut self) -> Result<[u8; N], ManifestPluginRosterErrorV1> {
         let Some(length) = self.length(2, (N, N))? else {
-            return Err(ManifestPluginRosterErrorV1::InvalidEncoding);
+            return Err(INVALID);
         };
         let mut out = [0; N];
         out.copy_from_slice(self.slice(length)?);
@@ -667,7 +683,7 @@ impl<'a> Wire<'a> {
         if self.offset == self.bytes.len() {
             Ok(())
         } else {
-            Err(ManifestPluginRosterErrorV1::InvalidEncoding)
+            Err(INVALID)
         }
     }
 }
