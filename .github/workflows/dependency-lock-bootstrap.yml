@@ -48,3 +48,89 @@ jobs:
           path: Cargo.lock
           if-no-files-found: error
           retention-days: 1
+
+  verifier-mutation-baseline:
+    name: owner-bridge verifier mutation baseline
+    needs: resolve-lock
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: owner-bridge-verifier-mutation
+      - name: Prove the unmutated owner-bridge package
+        run: cargo test -p pos-owner-bridge-codec --all-features --locked -- --include-ignored
+
+  verifier-mutation:
+    name: owner-bridge verifier mutation (full crate, shard ${{ matrix.shard }})
+    needs: verifier-mutation-baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-08-28
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: owner-bridge-verifier-mutation
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-mutants
+      - name: Run every owner-bridge crate mutant
+        run: |
+          set -euo pipefail
+          set +e
+          timeout --foreground 80m cargo mutants \
+            --package pos-owner-bridge-codec \
+            --all-features \
+            --no-shuffle \
+            --shard "${{ matrix.shard }}/8" \
+            --baseline skip \
+            --jobs 4 \
+            --timeout 120 \
+            --build-timeout 600 \
+            --cap-lints true \
+            --cargo-arg=--locked \
+            -- \
+            -- \
+            -Zunstable-options \
+            --fail-fast \
+            --include-ignored \
+            --test-threads=2
+          mutation_status=$?
+          set -e
+          if [[ "$mutation_status" -eq 124 ]]; then
+            echo "Mutation shard watchdog timed out after 80 minutes."
+          fi
+          exit "$mutation_status"
+      - name: Upload full-crate mutation report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: owner-bridge-verifier-mutation-shard-${{ matrix.shard }}
+          path: mutants.out
+          if-no-files-found: error
+          retention-days: 7
+
+  verifier-mutation-evidence:
+    name: owner-bridge verifier mutation evidence
+    if: always()
+    needs: [verifier-mutation-baseline, verifier-mutation]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require a passing baseline and every full-crate shard
+        run: |
+          test "${{ needs.verifier-mutation-baseline.result }}" = success
+          test "${{ needs.verifier-mutation.result }}" = success
