@@ -1562,6 +1562,6 @@ fn verified_registration_rejects_a_policy_recorded_for_another_plugin_identity()
         ))
     ));
     assert!(registry.is_empty());
-    assert_eq!(registry.retained_manifest_plugin_roster(), Ok(None));
+    assert_eq!(registry.retained_manifest_plugin_roster(), None);
     Ok(())
 }

@@ -1783,8 +1783,10 @@ fn plugin_versions_for_profile(
 ) -> Result<BTreeMap<String, String>, RuntimeError> {
     build_registry_for_admission(topology, profile_id, admission).map(|registry| {
         registry
-            .plugin_versions()
-            .map(|(name, version)| (name.to_owned(), version.to_owned()))
+            .composition()
+            .plugins
+            .into_iter()
+            .map(|plugin| (plugin.name, plugin.version))
             .collect()
     })
 }

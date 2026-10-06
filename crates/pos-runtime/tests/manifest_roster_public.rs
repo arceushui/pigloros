@@ -151,7 +151,7 @@ fn every_row_carries_the_exact_native_digest_and_closure_bytes() -> TestResult {
 fn the_retained_roster_matches_the_capability_roster() -> TestResult {
     let built = admitted_composition()?;
     let expected = built.registry.manifest_plugin_roster(&built.admitted)?;
-    let retained = built.registry.retained_manifest_plugin_roster()?;
+    let retained = built.registry.retained_manifest_plugin_roster();
     assert_eq!(retained, Some(expected));
     Ok(())
 }
@@ -159,9 +159,9 @@ fn the_retained_roster_matches_the_capability_roster() -> TestResult {
 #[test]
 fn a_registry_that_was_never_admitted_has_no_retained_roster() -> TestResult {
     let mut registry = PluginRegistry::new();
-    assert_eq!(registry.retained_manifest_plugin_roster(), Ok(None));
+    assert_eq!(registry.retained_manifest_plugin_roster(), None);
     register(&mut registry, &RosterPlugin::new("weather"), "weather")?;
-    assert_eq!(registry.retained_manifest_plugin_roster(), Ok(None));
+    assert_eq!(registry.retained_manifest_plugin_roster(), None);
     Ok(())
 }
 

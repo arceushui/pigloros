@@ -358,6 +358,14 @@ pub struct ManifestPluginRosterV1 {
 }
 
 impl ManifestPluginRosterV1 {
+    /// The roster with no entries, valid only when no Plugin was admitted.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
     /// Build a roster from entries in any order, sorting them by raw slot bytes.
     ///
     /// Only the canonical decoder requires the input to arrive sorted.

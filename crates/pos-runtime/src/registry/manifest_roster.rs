@@ -15,7 +15,7 @@ pub enum ManifestRosterBuildErrorV1 {
     /// The registry could not read its admitted Plugin sources.
     #[error("cannot read the admitted Plugins: {0}")]
     Admission(#[from] ManifestRegistrationErrorV1),
-    /// An admitted Plugin does not fit a roster row, for example a name over 128 bytes.
+    /// The admitted rows do not fit one roster, for example above its 1 GiB size cap.
     #[error("an admitted Plugin does not fit the manifest roster: {0}")]
     Roster(ManifestPluginRosterErrorV1),
 }
@@ -37,8 +37,8 @@ impl PluginRegistry {
     /// capability.
     ///
     /// # Errors
-    /// `Admission` for a stale capability or an unavailable native byte copy; `Roster` when a
-    /// Plugin field does not fit a roster row.
+    /// `Admission` for a stale capability or an unavailable native byte copy; `Roster` when the
+    /// rows exceed the roster bounds.
     pub fn manifest_plugin_roster(
         &self,
         admitted: &AdmittedCompositionV1,
@@ -47,23 +47,18 @@ impl PluginRegistry {
         roster_from_sources(&sources)
     }
 
-    /// Build the manifest roster for the composition this registry last admitted.
+    /// Build the manifest roster for the composition this registry currently has admitted.
     ///
-    /// Returns `None` when the registry was never admitted, so a caller can tell "no admitted
-    /// composition" from an admitted empty one. Anything else behaves as
-    /// [`Self::manifest_plugin_roster`], including failing closed when a later registration
-    /// change made the admission stale.
-    ///
-    /// # Errors
-    /// The same errors as [`Self::manifest_plugin_roster`].
-    pub fn retained_manifest_plugin_roster(
-        &self,
-    ) -> Result<Option<ManifestPluginRosterV1>, ManifestRosterBuildErrorV1> {
-        let Some(batch) = &self.manifest_batch else {
-            return Ok(None);
-        };
-        let admitted = self.admitted_composition_for(batch.clone())?;
-        self.manifest_plugin_roster(&admitted).map(Some)
+    /// Returns `None` when the registry was never admitted, or when a later registration change
+    /// made its admission stale. A host that records a run keeps an empty roster in that case: an
+    /// empty roster claims nothing, and the installed verifier rejects it against any admitted
+    /// composition, so no stale or missing admission can pass as a complete one.
+    #[must_use]
+    pub fn retained_manifest_plugin_roster(&self) -> Option<ManifestPluginRosterV1> {
+        self.manifest_batch
+            .as_ref()
+            .and_then(|batch| self.admitted_composition_for(batch.clone()).ok())
+            .and_then(|admitted| self.manifest_plugin_roster(&admitted).ok())
     }
 }
 
