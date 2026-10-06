@@ -20,6 +20,8 @@ pub const fn quarantine_for(error: CommunityPluginHostErrorV1) -> Option<PluginA
     use CommunityPluginHostErrorV1 as Error;
     match error {
         Error::ComponentTrap { .. } => Some(PluginAvailabilityV1::Trapped),
+        // Every deterministic resource-limit failure, including the host-call
+        // and output limits, is `ResourceExhausted`.
         Error::FuelExhausted
         | Error::MemoryLimitExceeded
         | Error::HostCallLimitExceeded

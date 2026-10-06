@@ -8,10 +8,10 @@
 
 use pos_core::{CanonicalBytes, EntityId, EventDraft, Kind};
 use pos_crypto::plugin_execution::is_valid_id_v1;
-use pos_runtime::community_plugin_host::{CommunityPluginHostErrorV1, EventDraftV1, PluginOutputV1};
+use pos_runtime::community_plugin_host::{EventDraftV1, PluginOutputV1};
 use ulid::Ulid;
 
-type Error = CommunityPluginHostErrorV1;
+use super::Error;
 
 /// Map one guest draft to the pipeline's `EventDraft`.
 ///

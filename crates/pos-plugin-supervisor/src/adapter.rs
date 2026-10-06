@@ -182,7 +182,7 @@ impl CommunityDriverV1 {
         observation: &ObservationView<'_>,
     ) -> Result<StepOutput, Error> {
         let context = self.source.context(timeline, observation)?;
-        let invocation = with_prior_state(context.invocation, &self.shared.committed_state());
+        let invocation = with_prior_state(context.invocation, self.shared.committed_state());
         let id = invocation.invocation_id;
         let report = self
             .supervisor
@@ -290,10 +290,10 @@ impl ReceiptParts {
 /// `invocation` with the Plugin state the adapter holds.
 fn with_prior_state(
     mut invocation: PluginInvocationV1,
-    state: &CommunityStateV1,
+    state: CommunityStateV1,
 ) -> PluginInvocationV1 {
     invocation.prior_state_schema = state.schema;
-    invocation.prior_state_bytes.clone_from(&state.bytes);
+    invocation.prior_state_bytes = state.bytes;
     invocation
 }
 

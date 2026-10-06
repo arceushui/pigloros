@@ -111,8 +111,7 @@ fn serve(request: &WorkerRequestV1) -> ExitCode {
 /// payload and `next` as the next state. `chain` carries the prior state as
 /// its payload and the prior state plus `+` as the next state, so the state
 /// the host feeds back is visible in the committed Event. `deps` adds a
-/// dependency digest, which no `EventDraft` field can carry, and `big`
-/// carries a payload above the 4,096-byte proposal bound.
+/// dependency digest, which no `EventDraft` field can carry.
 fn serve_draft(request: &WorkerRequestV1) -> Option<ExitCode> {
     let mut parts = request.component.splitn(2, |byte| *byte == b':');
     let mode = parts.next()?;
@@ -130,7 +129,6 @@ fn serve_draft(request: &WorkerRequestV1) -> Option<ExitCode> {
         ),
         b"chain" => (prior.clone(), Vec::new(), [prior.as_slice(), b"+"].concat()),
         b"deps" => (b"p".to_vec(), vec![[1; 32]], b"next".to_vec()),
-        b"big" => (vec![0; 4097], Vec::new(), b"next".to_vec()),
         _ => return None,
     };
     let mut output = PluginOutputV1 {

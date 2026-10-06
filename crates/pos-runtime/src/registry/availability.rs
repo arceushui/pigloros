@@ -1,14 +1,15 @@
 //! Host-observed Plugin availability at pass time (ADR-061, #543).
 //!
 //! The host records a quarantine or revocation of a registered, pinned Plugin
-//! through [`PluginRegistry::set_availability`]. A scheduled pass then refuses
+//! through [`PluginRegistry::set_availability()`]. A scheduled pass then refuses
 //! to step a Driver whose recorded availability is anything but
 //! [`PluginAvailabilityV1::Available`], before any Driver runs and before any
 //! state is staged. The refusal is registry-wide on purpose: it refuses the
 //! whole pass, so one unavailable Driver stops every Driver's passes until the
 //! host sets it available again. A pass is never run with a Driver silently
-//! left out, because ADR-021 treats a pass as one atomic unit. The availability is in-memory registry state: it is lost
-//! on restart, and setting it fabricates no Event.
+//! left out, because ADR-021 treats a pass as one atomic unit. The
+//! availability is in-memory registry state: it is lost on restart, and
+//! setting it fabricates no Event.
 //!
 //! Registration and composition resolution are unchanged. A Plugin registered
 //! without a pin has no availability and is never refused here.

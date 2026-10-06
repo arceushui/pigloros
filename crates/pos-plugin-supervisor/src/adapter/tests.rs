@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use pos_core::{CoreError, EntityId, Kind, PipelineOutcomeV1};
 use pos_runtime::community_plugin_host::{
-    plugin_output_digest_v1, AtomicCommitFailureV1, ComponentTrapClassV1, EventDraftV1,
+    plugin_output_digest_v1, MeteringV1, AtomicCommitFailureV1, ComponentTrapClassV1, EventDraftV1,
     FieldRefV1, GuestPluginErrorV1, PluginErrorCodeV1, TraceAnnotationV1, TrapReproductionV1,
 };
 use ulid::Ulid;
@@ -331,7 +331,7 @@ fn the_prior_state_is_always_the_one_the_adapter_holds() {
     let mut invocation = test_support::invocation(b"observation");
     invocation.prior_state_schema = [0xee; 32];
     invocation.prior_state_bytes = b"host supplied".to_vec();
-    let replaced = with_prior_state(invocation, &initial());
+    let replaced = with_prior_state(invocation, initial());
     assert_eq!(replaced.prior_state_schema, [9; 32]);
     assert_eq!(replaced.prior_state_bytes, b"initial");
 }
@@ -342,16 +342,17 @@ fn receipts_are_bounded_and_the_oldest_is_dropped() {
     let limit = u64::try_from(MAX_RETAINED_RECEIPTS_V1).unwrap_or(u64::MAX);
     for index in 0..=limit {
         let mut receipt = driver_receipt(&driver);
-        receipt.metering.host_calls = index;
+        receipt.metering = Some(MeteringV1 {
+            host_calls: index,
+            ..METERING
+        });
         driver.shared.push_receipt(receipt);
     }
     let receipts = handle.receipts();
     assert_eq!(receipts.len(), MAX_RETAINED_RECEIPTS_V1);
-    assert_eq!(receipts[0].metering.host_calls, 1);
-    assert_eq!(
-        receipts[MAX_RETAINED_RECEIPTS_V1 - 1].metering.host_calls,
-        limit
-    );
+    let host_calls = |at: usize| receipts[at].metering.map(|metering| metering.host_calls);
+    assert_eq!(host_calls(0), Some(1));
+    assert_eq!(host_calls(MAX_RETAINED_RECEIPTS_V1 - 1), Some(limit));
 }
 
 fn driver_receipt(driver: &CommunityDriverV1) -> CommunityInvocationReceiptV1 {
@@ -360,8 +361,10 @@ fn driver_receipt(driver: &CommunityDriverV1) -> CommunityInvocationReceiptV1 {
         negotiated: driver.negotiated.clone(),
         output_digest: None,
         limits: driver.negotiated.limits(),
-        metering: METERING,
+        metering: Some(METERING),
         dropped_trace_annotations: 0,
+        failure: None,
+        guest_error: None,
         disposition: ReceiptDispositionV1::Discarded,
     }
 }
