@@ -60,10 +60,23 @@
 //!   these paths: every fallible step runs on staged copies, and installing
 //!   is infallible, so a write either commits entirely or fails having
 //!   committed nothing, and its state is always settled.
-//! - **Deleted Forks.** Deleting a Fork Timeline keeps its counterfactual
-//!   state, exactly like the `SQLite` adapter, so a generation never
-//!   decreases and the audit bytes are retained. Publication, reads, Tick
-//!   appends, and commits on a deleted Fork still report `ForkNotFound`.
+//! - **Deleted Forks.** Deleting a Fork Timeline purges its counterfactual
+//!   state inside the generic `delete_timeline`, exactly like the `SQLite`
+//!   adapter: the facts, artifacts, quarantine marks, and receipts go, and
+//!   only the Fork's last generation stays as a floor that no port read can
+//!   reach. A Fork re-created under the same id (identity-preserving import)
+//!   is seeded at that floor when its facts are published, so the generation
+//!   never decreases. Publication, reads, Tick appends, and commits on a
+//!   deleted Fork still report `ForkNotFound`. Purge atomicity is structural
+//!   here: the purge runs in infallible code right after the Timeline is
+//!   removed, and the injected delete failure fires before any mutation, so
+//!   no failure can leave a half-purged Fork.
+//! - **ADR-060 clarification.** The purge is derived-state cleanup: the
+//!   counterfactual rows are derived from the Fork Timeline, not erasure
+//!   evidence. The generic `delete_timeline` still clears no erasure
+//!   evidence, fence, or inventory, and this purge touches none of them. The floor stores only
+//!   the Fork id and a generation number; if ADR-060 or ADR-064 ever treat
+//!   Fork ids as erasable, it would need its own erasure path.
 //! - **Containment.** The invalidation commit and later Tick appends add
 //!   Events, so they run under the ADR-060 erasure write fence and, like every
 //!   generic Fork append, are rejected on an ADR-099 admitted Fork whose
@@ -143,10 +156,10 @@ pub(super) struct CounterfactualForkStateV1 {
 }
 
 impl CounterfactualForkStateV1 {
-    const fn new(facts: CounterfactualFactsV1) -> Self {
+    const fn new(facts: CounterfactualFactsV1, generation: u64) -> Self {
         Self {
             facts,
-            generation: 0,
+            generation,
             artifacts: BTreeMap::new(),
             quarantined: BTreeMap::new(),
             receipts: BTreeMap::new(),
@@ -329,6 +342,15 @@ impl MemoryStore {
             })
     }
 
+    /// Drop every counterfactual row of a deleted Fork, keeping only the last
+    /// generation as a floor that no port read can reach.
+    pub(super) fn purge_counterfactual_state(&mut self, fork: TimelineId) {
+        if let Some(state) = self.counterfactual_forks.remove(&fork) {
+            self.counterfactual_generation_floors
+                .insert(fork, state.generation);
+        }
+    }
+
     fn counterfactual_fork(
         &self,
         fork: TimelineId,
@@ -430,10 +452,15 @@ impl CounterfactualStorePortV1 for MemoryStore {
         facts: CounterfactualFactsV1,
     ) -> Result<ForkGenerationV1, CounterfactualStoreErrorV1> {
         self.ensure_visible_fork(fork).map(|()| {
+            let floor = self
+                .counterfactual_generation_floors
+                .get(&fork)
+                .copied()
+                .unwrap_or_default();
             let state = self
                 .counterfactual_forks
                 .entry(fork)
-                .or_insert_with(|| CounterfactualForkStateV1::new(facts));
+                .or_insert_with(|| CounterfactualForkStateV1::new(facts, floor));
             state.facts = facts;
             ForkGenerationV1 {
                 fork,
@@ -757,11 +784,17 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn deleted_fork_is_not_found_but_keeps_its_counterfactual_state() {
+    fn deleted_fork_is_not_found_and_its_state_is_purged() {
         let (mut store, fork) = published_store();
         let command = command(fork);
         ok(store.commit_counterfactual_invalidation(&command));
-        let saved_state = store.counterfactual_forks.get(&fork).cloned();
+        assert_eq!(
+            store
+                .counterfactual_forks
+                .get(&fork)
+                .map(|state| (state.generation, state.artifacts.len())),
+            Some((1, 2))
+        );
 
         ok(store.delete_timeline(fork));
 
@@ -787,11 +820,9 @@ mod tests {
             store.publish_counterfactual_facts(fork, facts()),
             Err(CounterfactualStoreErrorV1::ForkNotFound)
         );
-        assert_eq!(store.counterfactual_forks.get(&fork).cloned(), saved_state);
-        assert_eq!(
-            saved_state.map(|state| (state.generation, state.artifacts.len())),
-            Some((1, 2))
-        );
+        // Only the generation floor of the purged Fork remains.
+        assert!(!store.counterfactual_forks.contains_key(&fork));
+        assert_eq!(store.counterfactual_generation_floors.get(&fork), Some(&1));
     }
 
     #[test]

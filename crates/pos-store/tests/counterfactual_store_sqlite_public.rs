@@ -14,7 +14,7 @@ use pos_core::{
     CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId,
     ErasureContainmentGateV1, EventDraft, EventStore, ForkGenerationV1, Hash,
     InvalidationConflictV1, Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1, Seq,
-    SuffixInvalidationBytesV1, TimelineId,
+    SuffixInvalidationBytesV1, TimelineId, TimelineMeta,
 };
 use pos_store::sqlite::SqliteStore;
 use tempfile::{tempdir, TempDir};
@@ -194,6 +194,10 @@ struct Fixture {
     fork: TimelineId,
 }
 
+fn fixture_path_str(fixture: &Fixture) -> &str {
+    fixture.path.to_str().unwrap_or_default()
+}
+
 fn open(path: &Path) -> SqliteStore {
     let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
     ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
@@ -226,7 +230,7 @@ fn execute(path: &Path, sql: &str) -> rusqlite::Result<()> {
     rusqlite::Connection::open(path).and_then(|connection| connection.execute_batch(sql))
 }
 
-fn count(path: &Path, sql: &str, fork: TimelineId) -> i64 {
+fn scalar(path: &Path, sql: &str, fork: TimelineId) -> i64 {
     ok(rusqlite::Connection::open(path).and_then(|connection| {
         connection.query_row(sql, rusqlite::params![fork.to_string()], |row| row.get(0))
     }))
@@ -241,7 +245,7 @@ fn written_rows(path: &Path, fork: TimelineId) -> [i64; 4] {
         "SELECT count(*) FROM counterfactual_quarantine WHERE fork_id = ?1",
         "SELECT count(*) FROM counterfactual_artifacts WHERE fork_id = ?1",
     ]
-    .map(|sql| count(path, sql, fork))
+    .map(|sql| scalar(path, sql, fork))
 }
 
 /// Count one exact quarantine row of generation 1.
@@ -388,7 +392,7 @@ fn a_later_generation_quarantines_stored_bytes_permanently() {
         Err(StoreError::InvalidArtifactReuse)
     );
     assert_eq!(
-        count(
+        scalar(
             &fixture.path,
             "SELECT count(*) FROM counterfactual_artifacts WHERE fork_id = ?1",
             fork
@@ -713,7 +717,7 @@ fn integers_beyond_sqlite_storage_are_out_of_bounds() {
         Ok(Outcome::Committed(_))
     ));
     assert_eq!(
-        count(
+        scalar(
             &fixture.path,
             "SELECT first_tick FROM counterfactual_generations WHERE fork_id = ?1",
             fork
@@ -900,7 +904,7 @@ fn corrupt_persisted_state_is_rejected_closed() {
 }
 
 /// Every counterfactual index and guard trigger, with a weakened body.
-const SCHEMA_OBJECTS: [(&str, &str, &str); 13] = [
+const SCHEMA_OBJECTS: [(&str, &str, &str); 16] = [
     (
         "INDEX",
         "idx_counterfactual_quarantine_artifact",
@@ -966,6 +970,21 @@ const SCHEMA_OBJECTS: [(&str, &str, &str); 13] = [
         "counterfactual_artifacts_not_replaced",
         "BEFORE INSERT ON counterfactual_artifacts BEGIN SELECT 1; END",
     ),
+    (
+        "TRIGGER",
+        "counterfactual_fork_tombstones_retained",
+        "BEFORE DELETE ON counterfactual_fork_tombstones BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_fork_tombstones_floor_monotonic",
+        "BEFORE UPDATE ON counterfactual_fork_tombstones BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_fork_tombstones_floor_kept",
+        "BEFORE INSERT ON counterfactual_fork_tombstones BEGIN SELECT 1; END",
+    ),
 ];
 
 #[test]
@@ -989,22 +1008,24 @@ fn the_schema_is_additive_idempotent_and_validated_on_every_open() {
         "DROP TABLE counterfactual_forks;
          DROP TABLE counterfactual_generations;
          DROP TABLE counterfactual_quarantine;
-         DROP TABLE counterfactual_artifacts;",
+         DROP TABLE counterfactual_artifacts;
+         DROP TABLE counterfactual_fork_tombstones;
+         DROP TABLE counterfactual_purge_fence;",
     ));
     assert_eq!(open_read_only(), "");
     assert_eq!(open_writable(), "");
     assert_eq!(open_read_only(), "");
-    let mut migrated = open(&fixture.path);
-    assert_eq!(ok(migrated.logical_head(fork)), Seq::from_u64(2));
+    let mut reopened = open(&fixture.path);
+    assert_eq!(ok(reopened.logical_head(fork)), Seq::from_u64(2));
     assert_eq!(
-        migrated.current_fork_generation(fork),
+        reopened.current_fork_generation(fork),
         Err(StoreError::ForkNotFound)
     );
     assert_eq!(
-        migrated.publish_counterfactual_facts(fork, facts()),
+        reopened.publish_counterfactual_facts(fork, facts()),
         Ok(at(fork, 0))
     );
-    drop(migrated);
+    drop(reopened);
 
     for (kind, name, weakened) in SCHEMA_OBJECTS {
         ok(execute(&fixture.path, &format!("DROP {kind} {name};")));
@@ -1276,7 +1297,7 @@ fn a_repeated_frontier_is_recorded_at_each_generation() {
     ));
     assert_eq!(written_rows(&fixture.path, fork), [4, 2, 3, 4]);
     assert_eq!(
-        count(
+        scalar(
             &fixture.path,
             "SELECT group_concat(generation) = '1,2' FROM (
                  SELECT generation FROM counterfactual_artifacts
@@ -1355,7 +1376,9 @@ fn a_pre_schema_file_opens_read_only_without_counterfactual_state() {
         "DROP TABLE counterfactual_forks;
          DROP TABLE counterfactual_generations;
          DROP TABLE counterfactual_quarantine;
-         DROP TABLE counterfactual_artifacts;",
+         DROP TABLE counterfactual_artifacts;
+         DROP TABLE counterfactual_fork_tombstones;
+         DROP TABLE counterfactual_purge_fence;",
     ));
     let mut read_only = ok(SqliteStore::open_read_only(path_text));
     ok(read_only.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
@@ -1573,4 +1596,350 @@ fn a_drifted_index_definition_is_rejected_on_open() {
         "DROP INDEX idx_counterfactual_quarantine_artifact;",
     ));
     assert_eq!(open_error(SqliteStore::open(path_text)), "");
+}
+
+/// Row counts of one Fork in the Fork, generation, quarantine, and artifact
+/// tables, then the tombstone and purge-marker tables.
+fn counterfactual_rows(path: &Path, fork: TimelineId) -> [i64; 6] {
+    [
+        "SELECT count(*) FROM counterfactual_forks WHERE fork_id = ?1",
+        "SELECT count(*) FROM counterfactual_generations WHERE fork_id = ?1",
+        "SELECT count(*) FROM counterfactual_quarantine WHERE fork_id = ?1",
+        "SELECT count(*) FROM counterfactual_artifacts WHERE fork_id = ?1",
+        "SELECT count(*) FROM counterfactual_fork_tombstones WHERE fork_id = ?1",
+        "SELECT count(*) FROM counterfactual_purge_fence WHERE fork_id = ?1",
+    ]
+    .map(|sql| scalar(path, sql, fork))
+}
+
+/// A Fork holding one committed generation.
+const LIVE_ROWS: [i64; 6] = [1, 1, 3, 2, 0, 0];
+/// A purged Fork: only its tombstone remains.
+const PURGED_ROWS: [i64; 6] = [0, 0, 0, 0, 1, 0];
+
+fn tombstone_floor(path: &Path, fork: TimelineId) -> i64 {
+    scalar(
+        path,
+        "SELECT generation_floor FROM counterfactual_fork_tombstones WHERE fork_id = ?1",
+        fork,
+    )
+}
+
+/// Commit the default command on a fresh Fork of the root at Seq 1.
+fn published_other_fork(store: &mut SqliteStore, root: TimelineId) -> TimelineId {
+    let other = ok(store.fork(root, Seq::from_u64(1), "other")).id();
+    ok(store.publish_counterfactual_facts(other, facts()));
+    let spec = Spec {
+        head: 1,
+        ..Spec::new(other)
+    };
+    assert!(matches!(
+        ok(store.commit_counterfactual_invalidation(&spec.command())),
+        Outcome::Committed(_)
+    ));
+    other
+}
+
+#[test]
+fn deleting_a_fork_purges_its_rows_and_keeps_only_a_generation_floor() {
+    let fixture = fixture();
+    let (fork, root) = (fixture.fork, fixture.root);
+    let mut store = open(&fixture.path);
+    commit_default(&mut store, fork);
+    let other = published_other_fork(&mut store, root);
+    assert_eq!(counterfactual_rows(&fixture.path, fork), LIVE_ROWS);
+
+    ok(store.delete_timeline(fork));
+    assert_eq!(counterfactual_rows(&fixture.path, fork), PURGED_ROWS);
+    assert_eq!(tombstone_floor(&fixture.path, fork), 1);
+    assert_eq!(counterfactual_rows(&fixture.path, other), LIVE_ROWS);
+    assert_eq!(store.current_fork_generation(other), Ok(at(other, 1)));
+    // Nothing reads the deleted Fork or its tombstone.
+    assert_eq!(
+        store.current_fork_generation(fork),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.current_counterfactual_basis(fork),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.read_generation_artifact(at(fork, 1), hash(10)),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.committed_generation_receipt(at(fork, 1)),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.publish_counterfactual_facts(fork, facts()),
+        Err(StoreError::ForkNotFound)
+    );
+}
+
+#[test]
+fn a_recreated_fork_id_resumes_at_the_floor_and_never_decreases() {
+    let fixture = fixture();
+    let (fork, root) = (fixture.fork, fixture.root);
+    let mut store = open(&fixture.path);
+    commit_default(&mut store, fork);
+    ok(store.delete_timeline(fork));
+    drop(store);
+
+    let mut store = open(&fixture.path);
+    let mut meta = TimelineMeta::forked_from(root, Seq::from_u64(2), "recreated");
+    meta.id = fork;
+    ok(store.create_timeline_with_meta(meta.clone()));
+    assert_eq!(
+        store.current_fork_generation(fork),
+        Err(StoreError::ForkNotFound)
+    );
+    assert_eq!(
+        store.publish_counterfactual_facts(fork, facts()),
+        Ok(at(fork, 1))
+    );
+    assert_eq!(generation(&store, fork), 1);
+    assert_eq!(store.committed_generation_receipt(at(fork, 1)), Ok(None));
+    assert_eq!(counterfactual_rows(&fixture.path, fork), [1, 0, 0, 0, 1, 0]);
+    let second = Spec {
+        prior: 1,
+        ..Spec::new(fork)
+    };
+    assert!(matches!(
+        ok(store.commit_counterfactual_invalidation(&second.command())),
+        Outcome::Committed(_)
+    ));
+    assert_eq!(generation(&store, fork), 2);
+
+    // The floor follows the last generation, so a second purge raises it.
+    ok(store.delete_timeline(fork));
+    assert_eq!(counterfactual_rows(&fixture.path, fork), PURGED_ROWS);
+    assert_eq!(tombstone_floor(&fixture.path, fork), 2);
+    ok(store.create_timeline_with_meta(meta));
+    assert_eq!(
+        store.publish_counterfactual_facts(fork, facts()),
+        Ok(at(fork, 2))
+    );
+}
+
+/// Direct deletes that no purge marker authorizes.
+const UNMARKED_DELETES: [&str; 5] = [
+    "DELETE FROM counterfactual_forks",
+    "DELETE FROM counterfactual_quarantine",
+    "DELETE FROM counterfactual_generations",
+    "DELETE FROM counterfactual_artifacts",
+    "DELETE FROM counterfactual_fork_tombstones",
+];
+
+#[test]
+fn only_a_marked_purge_passes_the_delete_guards_and_the_floor_cannot_drop() {
+    let fixture = fixture();
+    let (fork, root) = (fixture.fork, fixture.root);
+    let mut store = open(&fixture.path);
+    let other = published_other_fork(&mut store, root);
+    ok(store.delete_timeline(other));
+    commit_default(&mut store, fork);
+    drop(store);
+
+    for delete in UNMARKED_DELETES {
+        assert!(execute(&fixture.path, delete).is_err(), "{delete}");
+        // A marker for another Fork authorizes nothing here.
+        let marked = format!(
+            "BEGIN;
+             INSERT INTO counterfactual_purge_fence (fork_id) VALUES ('another');
+             {delete};
+             COMMIT;"
+        );
+        assert!(execute(&fixture.path, &marked).is_err(), "{marked}");
+    }
+    for lowering in [
+        "UPDATE counterfactual_fork_tombstones SET generation_floor = 0",
+        "UPDATE counterfactual_fork_tombstones SET fork_id = 'reassigned'",
+        "INSERT OR REPLACE INTO counterfactual_fork_tombstones
+         SELECT fork_id, 0 FROM counterfactual_fork_tombstones",
+    ] {
+        assert!(execute(&fixture.path, lowering).is_err(), "{lowering}");
+    }
+    assert_eq!(counterfactual_rows(&fixture.path, fork), LIVE_ROWS);
+    assert_eq!(counterfactual_rows(&fixture.path, other), PURGED_ROWS);
+    assert_eq!(tombstone_floor(&fixture.path, other), 1);
+    ok(execute(
+        &fixture.path,
+        "UPDATE counterfactual_fork_tombstones SET generation_floor = generation_floor",
+    ));
+    // Raising the floor through `INSERT OR REPLACE` passes only because
+    // `recursive_triggers` is off, so the replaced row fires no delete guard.
+    ok(execute(
+        &fixture.path,
+        "INSERT OR REPLACE INTO counterfactual_fork_tombstones
+         SELECT fork_id, 9 FROM counterfactual_fork_tombstones",
+    ));
+    assert_eq!(tombstone_floor(&fixture.path, other), 9);
+    assert_eq!(
+        open_error(SqliteStore::open(fixture_path_str(&fixture))),
+        ""
+    );
+}
+
+/// A purge marker authorizes deletes of its own Fork's rows only.
+#[test]
+fn a_purge_marker_authorizes_only_its_own_forks_rows() {
+    let fixture = fixture();
+    let (fork, root) = (fixture.fork, fixture.root);
+    let mut store = open(&fixture.path);
+    commit_default(&mut store, fork);
+    let other = published_other_fork(&mut store, root);
+    drop(store);
+    let mark = format!("INSERT INTO counterfactual_purge_fence (fork_id) VALUES ('{fork}');");
+
+    // The other Fork's quarantine rows are not authorized, so the whole
+    // unqualified delete aborts and removes nothing.
+    let unqualified = format!("BEGIN; {mark} DELETE FROM counterfactual_quarantine; COMMIT;");
+    assert!(execute(&fixture.path, &unqualified).is_err());
+    assert_eq!(counterfactual_rows(&fixture.path, fork), LIVE_ROWS);
+    assert_eq!(counterfactual_rows(&fixture.path, other), LIVE_ROWS);
+
+    let scoped = format!(
+        "BEGIN; {mark}
+         DELETE FROM counterfactual_quarantine WHERE fork_id = '{fork}';
+         DELETE FROM counterfactual_purge_fence;
+         COMMIT;"
+    );
+    ok(execute(&fixture.path, &scoped));
+    assert_eq!(counterfactual_rows(&fixture.path, fork), [1, 1, 0, 2, 0, 0]);
+    assert_eq!(counterfactual_rows(&fixture.path, other), LIVE_ROWS);
+}
+
+/// Faults that fail one statement of the delete transaction.
+const DELETE_FAULTS: [&str; 8] = [
+    "BEFORE INSERT ON counterfactual_purge_fence",
+    "BEFORE DELETE ON counterfactual_artifacts",
+    "BEFORE DELETE ON counterfactual_quarantine",
+    "BEFORE DELETE ON counterfactual_generations",
+    "BEFORE INSERT ON counterfactual_fork_tombstones",
+    "BEFORE DELETE ON counterfactual_forks",
+    "BEFORE DELETE ON counterfactual_purge_fence",
+    "BEFORE DELETE ON timelines",
+];
+
+#[test]
+fn a_failed_delete_leaves_every_row_and_no_purge_marker() {
+    let fixture = fixture();
+    let fork = fixture.fork;
+    let mut store = open(&fixture.path);
+    commit_default(&mut store, fork);
+    drop(store);
+    for fault in DELETE_FAULTS {
+        ok(execute(
+            &fixture.path,
+            &format!(
+                "CREATE TRIGGER injected_fault {fault}
+                 BEGIN SELECT RAISE(ABORT, 'injected delete fault'); END;"
+            ),
+        ));
+        let mut faulted = open(&fixture.path);
+        assert!(faulted.delete_timeline(fork).is_err(), "{fault}");
+        assert_eq!(faulted.current_fork_generation(fork), Ok(at(fork, 1)));
+        assert_eq!(
+            counterfactual_rows(&fixture.path, fork),
+            LIVE_ROWS,
+            "{fault}"
+        );
+        drop(faulted);
+        ok(execute(&fixture.path, "DROP TRIGGER injected_fault;"));
+        assert_eq!(
+            open_error(SqliteStore::open(fixture_path_str(&fixture))),
+            ""
+        );
+    }
+
+    let mut recovered = open(&fixture.path);
+    ok(recovered.delete_timeline(fork));
+    assert_eq!(counterfactual_rows(&fixture.path, fork), PURGED_ROWS);
+}
+
+#[test]
+fn a_surviving_purge_marker_fails_every_open_closed() {
+    let fixture = fixture();
+    ok(execute(
+        &fixture.path,
+        "INSERT INTO counterfactual_purge_fence (fork_id) VALUES ('stranded')",
+    ));
+    let text = fixture_path_str(&fixture);
+    let writable = open_error(SqliteStore::open(text));
+    let read_only = open_error(SqliteStore::open_read_only(text));
+    assert!(writable.contains("purge marker"), "{writable}");
+    assert!(read_only.contains("purge marker"), "{read_only}");
+    ok(execute(
+        &fixture.path,
+        "DELETE FROM counterfactual_purge_fence",
+    ));
+    assert_eq!(open_error(SqliteStore::open(text)), "");
+}
+
+/// The delete guards as the previous build created them, without the
+/// purge-marker condition: name, table, message.
+const OLD_DELETE_GUARDS: [(&str, &str, &str); 4] = [
+    (
+        "counterfactual_forks_retained",
+        "counterfactual_forks",
+        "counterfactual generation is retained",
+    ),
+    (
+        "counterfactual_quarantine_retained",
+        "counterfactual_quarantine",
+        "quarantined artifact cannot be reactivated",
+    ),
+    (
+        "counterfactual_generations_retained",
+        "counterfactual_generations",
+        "counterfactual generation record is retained",
+    ),
+    (
+        "counterfactual_artifacts_retained",
+        "counterfactual_artifacts",
+        "counterfactual artifact is retained",
+    ),
+];
+
+#[test]
+fn an_old_bodied_delete_guard_is_rejected_on_every_open() {
+    for (name, table, message) in OLD_DELETE_GUARDS {
+        let fixture = fixture();
+        ok(execute(
+            &fixture.path,
+            &format!(
+                "DROP TRIGGER {name};
+                 CREATE TRIGGER {name} BEFORE DELETE ON {table}
+                 BEGIN SELECT RAISE(ABORT, '{message}'); END;"
+            ),
+        ));
+        let text = fixture_path_str(&fixture);
+        assert!(open_error(SqliteStore::open(text)).contains(name), "{name}");
+        assert!(
+            open_error(SqliteStore::open_read_only(text)).contains(name),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_drifted_purge_table_is_rejected_on_open() {
+    for (table, drifted) in [
+        (
+            "counterfactual_fork_tombstones",
+            "fork_id TEXT NOT NULL PRIMARY KEY, generation_floor TEXT NOT NULL",
+        ),
+        ("counterfactual_purge_fence", "fork_id TEXT NOT NULL"),
+    ] {
+        let fixture = fixture();
+        ok(execute(
+            &fixture.path,
+            &format!("DROP TABLE {table}; CREATE TABLE {table} ({drifted});"),
+        ));
+        assert!(
+            open_error(SqliteStore::open_read_only(fixture_path_str(&fixture))).contains(table),
+            "{table}"
+        );
+    }
 }

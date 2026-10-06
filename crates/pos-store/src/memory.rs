@@ -259,6 +259,8 @@ pub struct MemoryStore {
     pipeline_admission_fences: HashMap<TimelineId, pos_core::PipelineAdmissionFenceV1>,
     /// ADR-064 per-Fork counterfactual facts, generation, and artifacts.
     counterfactual_forks: HashMap<TimelineId, counterfactual_store::CounterfactualForkStateV1>,
+    /// Last generation of each deleted Fork, so a re-created id never resumes lower.
+    counterfactual_generation_floors: HashMap<TimelineId, u64>,
     /// Retained ADR-021 admitted-batch receipts keyed by opaque idempotency key.
     pipeline_admission_receipts:
         HashMap<AppendDedupKey, pipeline_admission::PipelineReceiptRecordV1>,
@@ -530,6 +532,7 @@ fn delete_visible_timeline_impl(store: &mut MemoryStore, id: TimelineId) -> Resu
             }
             store.append_identities = retained_identities;
             store.forget_pipeline_admission_timeline(id);
+            store.purge_counterfactual_state(id);
             store.geographic_timelines.remove(&id);
             if store
                 .owntracks_enrollment
@@ -716,6 +719,7 @@ impl MemoryStore {
             authority_state: AuthorityPersistenceStateV1::new(),
             pipeline_admission_fences: HashMap::new(),
             counterfactual_forks: HashMap::new(),
+            counterfactual_generation_floors: HashMap::new(),
             pipeline_admission_receipts: HashMap::new(),
             authority_persistence_binding: None,
             fork_admission_authority: ForkAdmissionAuthorityStateV1::default(),

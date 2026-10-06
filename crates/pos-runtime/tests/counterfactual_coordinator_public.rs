@@ -24,22 +24,26 @@ use pos_conformance::{
     UnknownEdgePolicyV1,
 };
 use pos_core::{
-    CanonicalBytes, CoreError, CounterfactualAdapterSealV1, CounterfactualBasisV1,
-    CounterfactualFactsV1, CounterfactualGenerationReceiptV1, CounterfactualGenerationRecordV1,
-    CounterfactualInvalidationCommandV1, CounterfactualInvalidationOutcomeV1,
-    CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId,
-    ErasureContainmentGateV1, Event, EventDraft, EventStore, ForkGenerationV1, Hash,
-    InvalidationConflictV1, Kind, PipelineContractErrorV1, PipelineDraftBatchV1, Seq, SeqRange,
-    Timeline, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+    ArtifactTransitionRuleV1, CanonicalBytes, CoreError, CounterfactualAdapterSealV1,
+    CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
+    CounterfactualGenerationRecordV1, CounterfactualInvalidationCommandV1,
+    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
+    CounterfactualTickOutcomeV1, EntityId, ErasureArtifactClassV1, ErasureContainmentGateV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, EventStore, ForkGenerationV1,
+    Hash, InvalidationConflictV1, Kind, PipelineContractErrorV1, PipelineDraftBatchV1,
+    RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, SeqRange, Timeline,
+    TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
 };
 use pos_runtime::counterfactual::coordinator::{
     CounterfactualAdmissionErrorV1 as AdmissionError, CounterfactualAdmissionRequestV1,
     CounterfactualCoordinatorV1, CounterfactualForkAppendAuthorityV1,
     CounterfactualFrontierDerivationV1, CounterfactualFrontierSourceV1,
+    CounterfactualFrozenArtifactsV1, CounterfactualHostPreflightV1,
     CounterfactualInterventionAuthorityV1, CounterfactualPendingCommitV1,
     CounterfactualProvisionalOutputV1, CounterfactualTickFailureV1, CounterfactualTickInputsV1,
-    CounterfactualTickStagerV1, InterventionDecisionV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
-    ENDOGENOUS_ARTIFACT_CLASS_V1,
+    CounterfactualTickStagerV1, FrozenArtifactAvailabilityV1 as Avail, InterventionDecisionV1,
+    COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1, ENDOGENOUS_ARTIFACT_CLASS_V1,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
@@ -88,6 +92,9 @@ const BOUNDS: DependencyGraphBoundsV1 = DependencyGraphBoundsV1 {
 const DESCRIPTOR_AUTHORIZATION: [u8; 32] = [0x61; 32];
 const DESCRIPTOR_PROVENANCE: [u8; 32] = [0x62; 32];
 const CONSENT_DECISION: [u8; 32] = [4; 32];
+const ROOM_ID: &str = "room.alpha";
+const ROOM_DIGEST: [u8; 32] = [2; 32];
+const COMPOSITION_DIGEST: [u8; 32] = [6; 32];
 const INTERVENTION_PROVENANCE: [u8; 32] = [6; 32];
 const ENDOGENOUS_AUTHORIZATION: [u8; 32] = [0x72; 32];
 const NODE_PROVENANCE: [u8; 32] = [0x71; 32];
@@ -383,8 +390,8 @@ fn plan(
 ) -> TestResult<CounterfactualPlanV1> {
     let mut plan = CounterfactualPlanV1 {
         plan_id: [1; 16],
-        room_id: "room.alpha".to_owned(),
-        room_digest: [2; 32],
+        room_id: ROOM_ID.to_owned(),
+        room_digest: ROOM_DIGEST,
         parent_timeline_id: parent.inner().to_bytes(),
         parent_cut_seq: CUT_SEQ,
         parent_cut_tick: PARENT_CUT_TICK,
@@ -401,7 +408,7 @@ fn plan(
         unknown_edge_policy,
         execution_profile: PlanExecutionProfileRefV1::from_execution_profile_v1(profile)?,
         trust_policy: PlanTrustPolicyRefV1::from_trust_policy_snapshot_v1(snapshot)?,
-        plugin_composition_digest: [6; 32],
+        plugin_composition_digest: COMPOSITION_DIGEST,
         scheduler_digest: [7; 32],
         numeric_profile_digest: [8; 32],
         budget_digest: [9; 32],
@@ -744,12 +751,53 @@ const BASE: Spec = Spec {
     facts: |_| {},
 };
 
+/// Artifact digests the host reports as other than present.
+type Overrides = &'static [([u8; 32], Avail)];
+
+/// The host's frozen-artifact port: every artifact is present except the
+/// listed digests.
+#[derive(Clone, Copy)]
+struct Artifacts {
+    overrides: Overrides,
+}
+
+impl CounterfactualFrozenArtifactsV1 for Artifacts {
+    fn availability(&self, descriptor: &FrozenArtifactDescriptorV1) -> Avail {
+        self.overrides
+            .iter()
+            .find(|(digest, _)| *digest == descriptor.artifact_digest)
+            .map_or(Avail::Present, |found| found.1)
+    }
+}
+
+/// The host's evaluation of one retained Export artifact of `claim`.
+fn evaluation(claim: ErasureReplayClaimV1) -> TestResult<ReplayClaimEvaluationV1> {
+    Ok(ReplayClaimEvaluatorV1::evaluate(
+        claim,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::Export,
+                ErasureReferenceV1::from_digest([201; 32]),
+                ArtifactDataClassV1::StructuralAuditMetadata,
+                None,
+                ErasureReferenceV1::from_digest([202; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: claim,
+            state: ArtifactStateV1::Retained,
+        }],
+    )?)
+}
+
 struct Fixture {
     root: TimelineId,
     fork: TimelineId,
     plan: CounterfactualPlanV1,
     profile: ExecutionProfileV1,
     snapshot: TrustPolicySnapshotV1,
+    claim: ReplayClaimEvaluationV1,
+    artifacts: Artifacts,
 }
 
 struct Setup<B> {
@@ -793,6 +841,8 @@ fn setup<B: Backend>(spec: &Spec) -> TestResult<Setup<B>> {
             plan,
             profile,
             snapshot,
+            claim: evaluation(ErasureReplayClaimV1::Exact)?,
+            artifacts: Artifacts { overrides: &[] },
         },
     })
 }
@@ -804,6 +854,13 @@ const fn request(fixture: &Fixture) -> CounterfactualAdmissionRequestV1<'_> {
         fork_append_authority: CounterfactualForkAppendAuthorityV1::Generic,
         execution_profile: &fixture.profile,
         trust_policy: &fixture.snapshot,
+        preflight: CounterfactualHostPreflightV1 {
+            room_id: ROOM_ID,
+            room_digest: ROOM_DIGEST,
+            plugin_composition_digest: COMPOSITION_DIGEST,
+            frozen_artifacts: &fixture.artifacts,
+            replay_claim: &fixture.claim,
+        },
         revocation_epoch: REVOCATION_EPOCH,
         erasure_epoch: ERASURE_EPOCH,
         frontier_id: FRONTIER_ID,
@@ -1833,6 +1890,295 @@ fn failed_recovery_read_keeps_the_commit_outcome_unknown() -> TestResult {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Admission preflight
+// ---------------------------------------------------------------------------
+
+type PlanEdit = fn(&mut CounterfactualPlanV1);
+
+/// One preflight fault: a plan edit, the host's non-present artifacts, and
+/// the closed error it must produce.
+type PreflightCase = (PlanEdit, Overrides, AdmissionError);
+
+/// One host preflight stage: the expected room digest and Plugin composition
+/// digest, the non-present artifacts, the evaluated claim, and the first
+/// closed error it must produce.
+struct Peel {
+    room_digest: [u8; 32],
+    composition: [u8; 32],
+    overrides: Overrides,
+    claim: ErasureReplayClaimV1,
+    expected: AdmissionError,
+}
+
+const EXOGENOUS_DIGEST: [u8; 32] = [0x50; 32];
+const FIXED_DIGEST: [u8; 32] = [0x30; 32];
+const EXOGENOUS_MISSING: Overrides = &[(EXOGENOUS_DIGEST, Avail::Missing)];
+const FIXED_MISSING: Overrides = &[(FIXED_DIGEST, Avail::Missing)];
+const EXOGENOUS_MISMATCH: Overrides = &[(EXOGENOUS_DIGEST, Avail::DigestMismatch)];
+const FIXED_MISMATCH: Overrides = &[(FIXED_DIGEST, Avail::DigestMismatch)];
+const SECOND_DIGEST: [u8; 32] = [0x51; 32];
+const SECOND_MISSING: Overrides = &[(SECOND_DIGEST, Avail::Missing)];
+const FIRST_MISMATCH_SECOND_MISSING: Overrides = &[
+    (EXOGENOUS_DIGEST, Avail::DigestMismatch),
+    (SECOND_DIGEST, Avail::Missing),
+];
+const FIRST_MISSING_SECOND_MISMATCH: Overrides = &[
+    (EXOGENOUS_DIGEST, Avail::Missing),
+    (SECOND_DIGEST, Avail::DigestMismatch),
+];
+const BOTH_FAULTY: Overrides = &[
+    (EXOGENOUS_DIGEST, Avail::Missing),
+    (FIXED_DIGEST, Avail::DigestMismatch),
+];
+
+/// Every claim a host can evaluate, strongest first.
+const HOST_CLAIMS: [ErasureReplayClaimV1; 5] = [
+    ErasureReplayClaimV1::Exact,
+    ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+    ErasureReplayClaimV1::StructuralOnly,
+    ErasureReplayClaimV1::UnverifiableArtifactsMissing,
+    ErasureReplayClaimV1::IncompatibleProfile,
+];
+
+/// Plans that request each claim, in the order of [`HOST_CLAIMS`].
+const CLAIM_SPECS: [Spec; 5] = [
+    BASE,
+    Spec {
+        plan: |plan| plan.replay_claim = ReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+        ..BASE
+    },
+    Spec {
+        plan: |plan| plan.replay_claim = ReplayClaimV1::StructuralOnly,
+        ..BASE
+    },
+    Spec {
+        plan: |plan| plan.replay_claim = ReplayClaimV1::UnverifiableArtifactsMissing,
+        ..BASE
+    },
+    Spec {
+        plan: |plan| plan.replay_claim = ReplayClaimV1::IncompatibleProfile,
+        ..BASE
+    },
+];
+
+/// Adds a second `ExogenousFrozen` descriptor after the base one.
+const WITH_SECOND: PlanEdit = |plan| plan.exogenous_descriptors.push(descriptor(2, 0x51));
+
+const PREFLIGHT_CASES: [PreflightCase; 10] = [
+    (
+        |plan| "room.beta".clone_into(&mut plan.room_id),
+        &[],
+        AdmissionError::RoomMismatch,
+    ),
+    (
+        |plan| plan.room_digest = [0xff; 32],
+        &[],
+        AdmissionError::RoomMismatch,
+    ),
+    (
+        |plan| plan.plugin_composition_digest = [0xff; 32],
+        &[],
+        AdmissionError::PluginCompositionMismatch,
+    ),
+    (
+        |_| {},
+        EXOGENOUS_MISSING,
+        AdmissionError::FrozenArtifactMissing,
+    ),
+    (|_| {}, FIXED_MISSING, AdmissionError::FrozenArtifactMissing),
+    (
+        |_| {},
+        EXOGENOUS_MISMATCH,
+        AdmissionError::FrozenArtifactDigestMismatch,
+    ),
+    (
+        |_| {},
+        FIXED_MISMATCH,
+        AdmissionError::FrozenArtifactDigestMismatch,
+    ),
+    (
+        WITH_SECOND,
+        SECOND_MISSING,
+        AdmissionError::FrozenArtifactMissing,
+    ),
+    (
+        WITH_SECOND,
+        FIRST_MISMATCH_SECOND_MISSING,
+        AdmissionError::FrozenArtifactDigestMismatch,
+    ),
+    (
+        WITH_SECOND,
+        FIRST_MISSING_SECOND_MISMATCH,
+        AdmissionError::FrozenArtifactMissing,
+    ),
+];
+
+fn preflight_rejections_are_closed_and_touch_nothing<B: Backend>() -> TestResult {
+    for (edit, overrides, expected) in PREFLIGHT_CASES {
+        let mut setup = setup::<B>(&Spec { plan: edit, ..BASE })?;
+        setup.fixture.artifacts.overrides = overrides;
+        let outcome = admit(&mut setup);
+        assert_rejected(&setup, &outcome, &expected, 0)?;
+        assert_eq!(setup.source.calls, 0);
+    }
+    Ok(())
+}
+both_backends!(preflight_rejections_are_closed_and_touch_nothing);
+
+#[test]
+fn preflight_rejections_make_no_store_call() -> TestResult {
+    let mut committed = setup::<Rigged<DELEGATES>>(&BASE)?;
+    committed.fixture.artifacts.overrides = EXOGENOUS_MISSING;
+    let outcome = admit(&mut committed);
+    let missing = AdmissionError::FrozenArtifactMissing;
+    assert_rejected(&committed, &outcome, &missing, 0)?;
+    assert!(committed.coordinator.store().commands.is_empty());
+    assert_eq!(committed.coordinator.store().recovery_reads.get(), 0);
+
+    // The Fork Timeline read, which fails here, is never reached.
+    let mut unread = setup::<Rigged<TIMELINE_FAILS>>(&Spec {
+        plan: |plan| plan.plugin_composition_digest = [0xff; 32],
+        ..BASE
+    })?;
+    let outcome = admit(&mut unread);
+    let mismatch = AdmissionError::PluginCompositionMismatch;
+    assert_rejected(&unread, &outcome, &mismatch, 0)?;
+    assert_eq!(unread.source.calls, 0);
+    Ok(())
+}
+
+fn first_preflight_error_wins<B: Backend>() -> TestResult {
+    let structural = ErasureReplayClaimV1::StructuralOnly;
+    let peels: [Peel; 5] = [
+        Peel {
+            room_digest: [9; 32],
+            composition: [0xff; 32],
+            overrides: BOTH_FAULTY,
+            claim: structural,
+            expected: AdmissionError::RoomMismatch,
+        },
+        Peel {
+            room_digest: ROOM_DIGEST,
+            composition: [0xff; 32],
+            overrides: BOTH_FAULTY,
+            claim: structural,
+            expected: AdmissionError::PluginCompositionMismatch,
+        },
+        Peel {
+            room_digest: ROOM_DIGEST,
+            composition: COMPOSITION_DIGEST,
+            overrides: BOTH_FAULTY,
+            claim: structural,
+            expected: AdmissionError::FrozenArtifactMissing,
+        },
+        Peel {
+            room_digest: ROOM_DIGEST,
+            composition: COMPOSITION_DIGEST,
+            overrides: FIXED_MISMATCH,
+            claim: structural,
+            expected: AdmissionError::FrozenArtifactDigestMismatch,
+        },
+        Peel {
+            room_digest: ROOM_DIGEST,
+            composition: COMPOSITION_DIGEST,
+            overrides: &[],
+            claim: structural,
+            expected: AdmissionError::ReplayClaimInsufficient,
+        },
+    ];
+    let mut setup = setup::<B>(&BASE)?;
+    for peel in peels {
+        let evaluated = evaluation(peel.claim)?;
+        let artifacts = Artifacts {
+            overrides: peel.overrides,
+        };
+        let preflight = CounterfactualHostPreflightV1 {
+            room_digest: peel.room_digest,
+            plugin_composition_digest: peel.composition,
+            frozen_artifacts: &artifacts,
+            replay_claim: &evaluated,
+            ..request(&setup.fixture).preflight
+        };
+        let mut stager = Stager::drafting(2);
+        let result = setup.coordinator.admit(
+            &CounterfactualAdmissionRequestV1 {
+                preflight,
+                ..request(&setup.fixture)
+            },
+            &Authority::default(),
+            &mut setup.source,
+            &mut stager,
+        );
+        assert_rejected(&setup, &(result, stager), &peel.expected, 0)?;
+        assert_eq!(setup.source.calls, 0);
+    }
+    // With every host fact matching the plan, the same plan is admitted.
+    admit(&mut setup).0?;
+    Ok(())
+}
+both_backends!(first_preflight_error_wins);
+
+fn preflight_follows_the_profile_and_precedes_the_store_reads<B: Backend>() -> TestResult {
+    let mut setup = setup::<B>(&BASE)?;
+    let mut profile = setup.fixture.profile.clone();
+    profile.profile_digest = [9; 32];
+    let faulty = CounterfactualHostPreflightV1 {
+        room_digest: [9; 32],
+        ..request(&setup.fixture).preflight
+    };
+    let cases = [
+        (
+            CounterfactualAdmissionRequestV1 {
+                execution_profile: &profile,
+                preflight: faulty,
+                ..request(&setup.fixture)
+            },
+            AdmissionError::IncompatibleExecutionProfile,
+        ),
+        (
+            CounterfactualAdmissionRequestV1 {
+                fork: setup.fixture.root,
+                preflight: faulty,
+                ..request(&setup.fixture)
+            },
+            AdmissionError::RoomMismatch,
+        ),
+    ];
+    for (admission, expected) in cases {
+        let mut stager = Stager::drafting(2);
+        let result = setup.coordinator.admit(
+            &admission,
+            &Authority::default(),
+            &mut setup.source,
+            &mut stager,
+        );
+        assert_rejected(&setup, &(result, stager), &expected, 0)?;
+        assert_eq!(setup.source.calls, 0);
+    }
+    Ok(())
+}
+both_backends!(preflight_follows_the_profile_and_precedes_the_store_reads);
+
+fn replay_claim_must_not_be_stronger_than_the_hosts<B: Backend>() -> TestResult {
+    for (plan_rank, spec) in CLAIM_SPECS.iter().enumerate() {
+        for (host_rank, host) in HOST_CLAIMS.into_iter().enumerate() {
+            let mut scenario = setup::<B>(spec)?;
+            scenario.fixture.claim = evaluation(host)?;
+            let outcome = admit(&mut scenario);
+            if host_rank <= plan_rank {
+                outcome.0?;
+            } else {
+                let insufficient = AdmissionError::ReplayClaimInsufficient;
+                assert_rejected(&scenario, &outcome, &insufficient, 0)?;
+                assert_eq!(scenario.source.calls, 0);
+            }
+        }
+    }
+    Ok(())
+}
+both_backends!(replay_claim_must_not_be_stronger_than_the_hosts);
+
 /// The invalid-artifact index of the base scenario: every invalidated
 /// endogenous output and the suffix presentation output (`UI_15`).
 const BASE_INDEX: [u8; 5] = [3, 4, 5, 7, 8];
@@ -1920,6 +2266,11 @@ fn every_error_has_a_distinct_safe_message() {
         AdmissionError::TargetNotIntervenable,
         AdmissionError::IncompatibleExecutionProfile,
         AdmissionError::TrustPolicyMismatch,
+        AdmissionError::RoomMismatch,
+        AdmissionError::PluginCompositionMismatch,
+        AdmissionError::FrozenArtifactMissing,
+        AdmissionError::FrozenArtifactDigestMismatch,
+        AdmissionError::ReplayClaimInsufficient,
         AdmissionError::ParentCutNotFound,
         AdmissionError::DependencyGraphIncomplete(coordinate.clone()),
         AdmissionError::UnknownDependencyEdge(coordinate),
@@ -1945,7 +2296,7 @@ fn every_error_has_a_distinct_safe_message() {
         errors.iter().map(ToString::to_string).collect();
     assert_eq!(messages.len(), errors.len());
     assert!(messages.iter().all(|message| !message.is_empty()));
-    let with_source = [0, 11, 14, 16, 19];
+    let with_source = [0, 16, 19, 21, 24];
     for (position, error) in errors.iter().enumerate() {
         assert_eq!(error.source().is_some(), with_source.contains(&position));
     }

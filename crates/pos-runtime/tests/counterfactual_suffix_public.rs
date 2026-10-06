@@ -26,22 +26,26 @@ use pos_conformance::{
     UnknownEdgePolicyV1,
 };
 use pos_core::{
-    pipeline_draft_vector_digest_v1, CanonicalBytes, CoreError, CounterfactualAdapterSealV1,
-    CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
-    CounterfactualInvalidationCommandV1, CounterfactualInvalidationOutcomeV1,
-    CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId,
-    ErasureContainmentGateV1, Event, EventDraft, EventReadBounds, EventStore, ForkGenerationV1,
-    Hash, InvalidationConflictV1, Kind, PipelineContractErrorV1, PipelineDraftBatchV1, Seq,
-    SeqRange, Timeline, TimelineId, TimelineMeta, MAX_FORK_EVENT_TYPE_BYTES_V1,
+    pipeline_draft_vector_digest_v1, ArtifactClaimInputV1, ArtifactDataClassV1,
+    ArtifactOptionalityV1, ArtifactStateV1, ArtifactTransitionRuleV1, CanonicalBytes, CoreError,
+    CounterfactualAdapterSealV1, CounterfactualBasisV1, CounterfactualFactsV1,
+    CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
+    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
+    CounterfactualTickOutcomeV1, EntityId, ErasureArtifactClassV1, ErasureContainmentGateV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, EventReadBounds, EventStore,
+    ForkGenerationV1, Hash, InvalidationConflictV1, Kind, PipelineContractErrorV1,
+    PipelineDraftBatchV1, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
+    Seq, SeqRange, Timeline, TimelineId, TimelineMeta, MAX_FORK_EVENT_TYPE_BYTES_V1,
     MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
 };
 use pos_runtime::counterfactual::coordinator::{
     CounterfactualAdmissionErrorV1 as AdmissionError, CounterfactualAdmissionRequestV1,
     CounterfactualCoordinatorV1, CounterfactualForkAppendAuthorityV1,
     CounterfactualFrontierDerivationV1, CounterfactualFrontierSourceV1,
+    CounterfactualFrozenArtifactsV1, CounterfactualHostPreflightV1,
     CounterfactualInterventionAuthorityV1, CounterfactualProvisionalOutputV1,
     CounterfactualTickFailureV1, CounterfactualTickInputsV1, CounterfactualTickStagerV1,
-    InterventionDecisionV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
+    FrozenArtifactAvailabilityV1, InterventionDecisionV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
 };
 use pos_runtime::counterfactual::suffix::{
     CounterfactualSuffixErrorV1 as SuffixError, CounterfactualSuffixFailureV1 as Failure,
@@ -98,6 +102,9 @@ const BOUNDS: DependencyGraphBoundsV1 = DependencyGraphBoundsV1 {
 const DESCRIPTOR_AUTHORIZATION: [u8; 32] = [0x61; 32];
 const DESCRIPTOR_PROVENANCE: [u8; 32] = [0x62; 32];
 const CONSENT_DECISION: [u8; 32] = [4; 32];
+const ROOM_ID: &str = "room.alpha";
+const ROOM_DIGEST: [u8; 32] = [2; 32];
+const COMPOSITION_DIGEST: [u8; 32] = [6; 32];
 const INTERVENTION_PROVENANCE: [u8; 32] = [6; 32];
 const ENDOGENOUS_AUTHORIZATION: [u8; 32] = [0x72; 32];
 const NODE_PROVENANCE: [u8; 32] = [0x71; 32];
@@ -127,6 +134,8 @@ const PAGE_CAP: usize = MAX_PIPELINE_DRAFT_BATCH_BYTES;
 /// Event's other content bytes in one batch.
 const HEAVY_PAYLOAD: usize = MAX_PIPELINE_DRAFT_BATCH_BYTES - 1_024;
 const WORLD_TYPE: &str = "counterfactual.world";
+/// Half of one Tick batch's bytes: two such Events overflow one batch.
+const HALF_BATCH: usize = MAX_PIPELINE_DRAFT_BATCH_BYTES / 2;
 
 fn root_id() -> TimelineId {
     TimelineId::from_ulid(Ulid::from(0x5100_u128))
@@ -492,8 +501,8 @@ fn plan(
 ) -> TestResult<CounterfactualPlanV1> {
     let mut plan = CounterfactualPlanV1 {
         plan_id: [1; 16],
-        room_id: "room.alpha".to_owned(),
-        room_digest: [2; 32],
+        room_id: ROOM_ID.to_owned(),
+        room_digest: ROOM_DIGEST,
         parent_timeline_id: root_id().inner().to_bytes(),
         parent_cut_seq: CUT_SEQ,
         parent_cut_tick: PARENT_CUT_TICK,
@@ -510,7 +519,7 @@ fn plan(
         unknown_edge_policy: UnknownEdgePolicyV1::Reject,
         execution_profile: PlanExecutionProfileRefV1::from_execution_profile_v1(profile)?,
         trust_policy: PlanTrustPolicyRefV1::from_trust_policy_snapshot_v1(snapshot)?,
-        plugin_composition_digest: [6; 32],
+        plugin_composition_digest: COMPOSITION_DIGEST,
         scheduler_digest: [7; 32],
         numeric_profile_digest: [8; 32],
         budget_digest: [9; 32],
@@ -792,10 +801,41 @@ impl CounterfactualTickStagerV1 for Stager {
 // Fixture
 // ---------------------------------------------------------------------------
 
+/// The host reports every frozen artifact as available.
+struct AllPresent;
+
+impl CounterfactualFrozenArtifactsV1 for AllPresent {
+    fn availability(&self, _: &FrozenArtifactDescriptorV1) -> FrozenArtifactAvailabilityV1 {
+        FrozenArtifactAvailabilityV1::Present
+    }
+}
+
+/// The host's evaluation of one retained `Exact` Export artifact.
+fn exact_evaluation() -> TestResult<ReplayClaimEvaluationV1> {
+    let claim = ErasureReplayClaimV1::Exact;
+    Ok(ReplayClaimEvaluatorV1::evaluate(
+        claim,
+        &[ArtifactClaimInputV1 {
+            registration: RegisteredArtifactV1::new(
+                ErasureArtifactClassV1::Export,
+                ErasureReferenceV1::from_digest([201; 32]),
+                ArtifactDataClassV1::StructuralAuditMetadata,
+                None,
+                ErasureReferenceV1::from_digest([202; 32]),
+                ArtifactOptionalityV1::Required,
+                ArtifactTransitionRuleV1::PreserveExact,
+            ),
+            current_claim: claim,
+            state: ArtifactStateV1::Retained,
+        }],
+    )?)
+}
+
 struct Fixture {
     plan: CounterfactualPlanV1,
     profile: ExecutionProfileV1,
     snapshot: TrustPolicySnapshotV1,
+    claim: ReplayClaimEvaluationV1,
     facts: CounterfactualFactsV1,
     receipt: CounterfactualGenerationReceiptV1,
 }
@@ -810,6 +850,7 @@ fn admission_request<'a>(
     plan: &'a CounterfactualPlanV1,
     profile: &'a ExecutionProfileV1,
     snapshot: &'a TrustPolicySnapshotV1,
+    claim: &'a ReplayClaimEvaluationV1,
 ) -> CounterfactualAdmissionRequestV1<'a> {
     CounterfactualAdmissionRequestV1 {
         plan,
@@ -817,6 +858,13 @@ fn admission_request<'a>(
         fork_append_authority: CounterfactualForkAppendAuthorityV1::Generic,
         execution_profile: profile,
         trust_policy: snapshot,
+        preflight: CounterfactualHostPreflightV1 {
+            room_id: ROOM_ID,
+            room_digest: ROOM_DIGEST,
+            plugin_composition_digest: COMPOSITION_DIGEST,
+            frozen_artifacts: &AllPresent,
+            replay_claim: claim,
+        },
         revocation_epoch: REVOCATION_EPOCH,
         erasure_epoch: ERASURE_EPOCH,
         frontier_id: FRONTIER_ID,
@@ -851,6 +899,7 @@ fn setup_in<B: Backend>(mut store: B, edit: fn(&mut CounterfactualPlanV1)) -> Te
     let snapshot =
         TrustPolicySnapshotV1::from_canonical_cbor(&draft_trust_policy_snapshot_bytes_v1()?)?;
     let plan = plan(&profile, &snapshot, edit)?;
+    let claim = exact_evaluation()?;
     let mut source = Source::new(&plan)?;
     let facts = CounterfactualFactsV1 {
         plan_digest: Hash::from_bytes(plan.plan_digest),
@@ -862,7 +911,7 @@ fn setup_in<B: Backend>(mut store: B, edit: fn(&mut CounterfactualPlanV1)) -> Te
     store.publish_counterfactual_facts(fork_id(), facts)?;
     let mut coordinator = CounterfactualCoordinatorV1::new(store);
     let receipt = coordinator.admit(
-        &admission_request(&plan, &profile, &snapshot),
+        &admission_request(&plan, &profile, &snapshot, &claim),
         &Authority,
         &mut source,
         &mut Stager::default(),
@@ -874,6 +923,7 @@ fn setup_in<B: Backend>(mut store: B, edit: fn(&mut CounterfactualPlanV1)) -> Te
             plan,
             profile,
             snapshot,
+            claim,
             facts,
             receipt,
         },
@@ -1544,7 +1594,12 @@ fn stale_generation_and_foreign_plans_are_rejected<B: Backend>() -> TestResult {
         fixture,
     } = &mut setup;
     coordinator.admit(
-        &admission_request(&fixture.plan, &fixture.profile, &fixture.snapshot),
+        &admission_request(
+            &fixture.plan,
+            &fixture.profile,
+            &fixture.snapshot,
+            &fixture.claim,
+        ),
         &Authority,
         source,
         &mut Stager::default(),
@@ -1592,7 +1647,12 @@ fn another_generations_invalidation_is_rejected() -> TestResult {
         fixture,
     } = &mut setup;
     fixture.receipt = coordinator.admit(
-        &admission_request(&fixture.plan, &fixture.profile, &fixture.snapshot),
+        &admission_request(
+            &fixture.plan,
+            &fixture.profile,
+            &fixture.snapshot,
+            &fixture.claim,
+        ),
         &Authority,
         source,
         &mut Stager::default(),
@@ -1628,6 +1688,155 @@ fn tampered_suffix_events_are_rejected<B: Backend>() -> TestResult {
     Ok(())
 }
 both_backends!(tampered_suffix_events_are_rejected);
+
+/// Committed Events a forgery is made of: one Tick's drafts then its
+/// checkpoint Event, or the concatenation of several Ticks.
+type ForgedTick = Vec<EventDraft>;
+
+/// The honest `RCP1` of `tick`, the last of the checkpoints through it.
+fn last_checkpoint(fixture: &Fixture, tick: u64) -> TestResult<RecomputeCheckpointV1> {
+    let mut checkpoints = expected_checkpoints(fixture, tick)?;
+    Ok(checkpoints.pop().ok_or("no checkpoint")?)
+}
+
+/// The drafts of honest `tick` followed by its exact checkpoint Event.
+fn forged_tick(fixture: &Fixture, tick: u64) -> TestResult<ForgedTick> {
+    let checkpoint = last_checkpoint(fixture, tick)?;
+    let mut block = tick_drafts(tick);
+    block.push(checkpoint_event(&checkpoint)?);
+    Ok(block)
+}
+
+/// `block` with its first draft rewritten.
+fn with_first_draft_rewritten(block: &[EventDraft]) -> ForgedTick {
+    let mut block = block.to_vec();
+    block[0] = event_draft(WORLD_TYPE, vec![9]);
+    block
+}
+
+/// The concatenation of `parts`.
+fn forged_history(parts: &[&[EventDraft]]) -> ForgedTick {
+    parts.concat()
+}
+
+/// Histories of Ticks 12 through 14 that a coordinator never committed, each
+/// with a checkpoint chain that does not follow from its Events.
+fn forged_histories(fixture: &Fixture) -> TestResult<Vec<ForgedTick>> {
+    let early = forged_tick(fixture, 12)?;
+    let mid = forged_tick(fixture, 13)?;
+    let late = forged_tick(fixture, 14)?;
+    let (early_ev, early_cp) = early.split_at(2);
+    let (mid_ev, mid_cp) = mid.split_at(2);
+    let (late_ev, late_cp) = late.split_at(2);
+    // Tick 13's slot, relabeled with the honest state of Tick 14.
+    let last = last_checkpoint(fixture, 14)?;
+    let state14 = last.state_digests[0].digest;
+    let relabeled = checkpoint_at(fixture, 13, tick_seq(13), state14)?;
+    let relabeled = [checkpoint_event(&relabeled)?];
+    let early_rewritten = with_first_draft_rewritten(&early);
+    let mid_rewritten = with_first_draft_rewritten(&mid);
+    let late_rewritten = with_first_draft_rewritten(&late);
+    let histories = vec![
+        // The first later Tick's content, then a middle one, then the last.
+        forged_history(&[&early_rewritten, early_cp, &mid, &late]),
+        forged_history(&[&early, &mid_rewritten, mid_cp, &late]),
+        forged_history(&[&early, &mid, &late_rewritten, late_cp]),
+        // Events swapped between Ticks, each keeping its own checkpoint.
+        forged_history(&[&early, late_ev, mid_cp, mid_ev, late_cp]),
+        forged_history(&[mid_ev, early_cp, early_ev, mid_cp, &late]),
+        // Whole Ticks reordered, or Tick 13 dropped.
+        forged_history(&[&early, &late, &mid]),
+        forged_history(&[&early, &late]),
+        // Tick 14's Events under a consistently numbered checkpoint.
+        forged_history(&[&early, late_ev, &relabeled]),
+    ];
+    Ok(histories)
+}
+
+fn forged_tick_histories_are_rejected<B: Backend>() -> TestResult {
+    let reference = reference()?;
+    let fixture = prepare::<MemoryStore>()?.fixture;
+    for forged in forged_histories(&fixture)? {
+        let mut setup = prepare::<B>()?;
+        run(&mut setup, &mut Stager::failing(12, Fault::Error))?;
+        let mut setup = reopen(setup, |store| {
+            store.append(fork_id(), &forged)?;
+            Ok(())
+        })?;
+        assert_rejected(&mut setup, SuffixError::RecoveryMismatch);
+    }
+    // Control: the same Ticks, honestly committed, recover and finish.
+    let mut setup = prepare::<B>()?;
+    run(&mut setup, &mut Stager::failing(12, Fault::Error))?;
+    let early = forged_tick(&setup.fixture, 12)?;
+    let mid = forged_tick(&setup.fixture, 13)?;
+    let honest = forged_history(&[&early, &mid]);
+    let mut setup = reopen(setup, |store| {
+        store.append(fork_id(), &honest)?;
+        Ok(())
+    })?;
+    assert_eq!(run(&mut setup, &mut Stager::default())?, reference);
+    Ok(())
+}
+both_backends!(forged_tick_histories_are_rejected);
+
+/// Events appended after the first Tick without a checkpoint Event, which no
+/// honest Tick has, are a mismatch.
+///
+/// End to end, the trailing head check alone also rejects these; the buffer
+/// bound itself is pinned at both of its boundaries by the unit tests of
+/// `TickEventsV1` in `suffix.rs`. This only shows that a walk meets such
+/// Events through the real paged reads of each backend.
+fn reject_checkpointless_events<B: Backend>(drafts: &[EventDraft]) -> TestResult {
+    let mut setup = prepare::<B>()?;
+    run(&mut setup, &mut Stager::failing(12, Fault::Error))?;
+    let mut setup = reopen(setup, |store| {
+        store.append(fork_id(), drafts)?;
+        Ok(())
+    })?;
+    assert_rejected(&mut setup, SuffixError::RecoveryMismatch);
+    Ok(())
+}
+
+fn a_full_batch_of_checkpointless_events_is_rejected<B: Backend>() -> TestResult {
+    reject_checkpointless_events::<B>(&world_drafts(99, MAX_PIPELINE_DRAFTS_PER_BATCH))
+}
+both_backends!(a_full_batch_of_checkpointless_events_is_rejected);
+
+/// More than one batch of bytes appends about 16 MiB, so it runs on the Memory
+/// backend only: the paged read halving with oversized Events is already
+/// exercised on both backends by `recovery_reads_are_bounded`.
+#[test]
+fn overweight_checkpointless_events_are_rejected() -> TestResult {
+    reject_checkpointless_events::<MemoryStore>(&[
+        event_draft(WORLD_TYPE, vec![0x5b; HALF_BATCH + 1]),
+        event_draft(WORLD_TYPE, vec![0x5b; HALF_BATCH]),
+    ])
+}
+
+/// Every committed Event of every Tick, the first through the last, is bound
+/// by the chained state on every later call: the recomputed Events by the
+/// chain, and each checkpoint Event by its own `RCP1` decode (an altered
+/// payload is not that Tick's exact checkpoint). The first Tick's checkpoint
+/// seq equals its last Event, so it is visited twice.
+///
+/// Memory only, because fault injection sits in the read layer and wraps the
+/// store the same way for every backend, and each Event costs a full run. The
+/// forged-history tests cover the paged walk over both real backends.
+#[test]
+fn every_committed_tick_event_is_bound_by_the_chain() -> TestResult {
+    for tick in FRONTIER_TICK..=HORIZON_TICK {
+        for seq in [tick_seq(tick) - 1, tick_seq(tick), committed_head(tick)] {
+            let mut setup = prepare::<Faulty<MemoryStore>>()?;
+            assert_eq!(run(&mut setup, &mut Stager::default())?.failure, None);
+            let mut setup = configure(setup, StoreFault::Altered(seq), Interference::None)?;
+            assert_rejected(&mut setup, SuffixError::RecoveryMismatch);
+            let mut setup = configure(setup, StoreFault::None, Interference::None)?;
+            assert_eq!(run(&mut setup, &mut Stager::default())?.failure, None);
+        }
+    }
+    Ok(())
+}
 
 fn recovered_tick_without_a_recomputed_event_is_rejected<B: Backend>() -> TestResult {
     let mut setup = prepare::<B>()?;
@@ -1761,7 +1970,7 @@ const FIRST_TICK_FAULTS: [FaultCase; 6] = [
 ];
 
 /// Faults once Ticks 12 through 14 are committed.
-const LATER_TICK_FAULTS: [FaultCase; 6] = [
+const LATER_TICK_FAULTS: [FaultCase; 7] = [
     (StoreFault::ReadFailsFrom(FIRST_TICK_HEAD + 1), STORAGE),
     (
         StoreFault::Dropped(tick_seq(13)),
@@ -1772,7 +1981,7 @@ const LATER_TICK_FAULTS: [FaultCase; 6] = [
         StoreFault::Altered(committed_head(13)),
         SuffixError::RecoveryMismatch,
     ),
-    // Tick 12's re-derived `RCP1` binds the first Tick's content.
+    // The first Tick's derived state feeds Tick 12's chain, which binds its content.
     (
         StoreFault::Altered(FIRST_TICK_HEAD),
         SuffixError::RecoveryMismatch,
@@ -1782,7 +1991,13 @@ const LATER_TICK_FAULTS: [FaultCase; 6] = [
         StoreFault::Altered(tick_seq(12)),
         SuffixError::RecoveryMismatch,
     ),
-    // The last Tick's re-derived `RCP1` binds its content.
+    // An intermediate Tick's content is verified by the chained state; this is the
+    // minimal regression case, and the Memory-only chain test covers every Tick.
+    (
+        StoreFault::Altered(tick_seq(13)),
+        SuffixError::RecoveryMismatch,
+    ),
+    // The last Tick's content is bound by the chained state.
     (
         StoreFault::Altered(tick_seq(14)),
         SuffixError::RecoveryMismatch,
