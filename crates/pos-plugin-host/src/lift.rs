@@ -6,12 +6,10 @@
 //! `InvalidGuestOutput`, and a count or size bound is `OutputLimitExceeded`.
 
 use pos_crypto::plugin_execution::is_valid_id_v1;
-use pos_runtime::community_plugin_host::CommunityPluginHostErrorV1;
-use wasmtime::component::Val;
-
 use pos_runtime::community_plugin_host::{
-    FieldRefV1, GuestPluginErrorV1, GuestReturnV1, PluginErrorCodeV1,
+    CommunityPluginHostErrorV1, FieldRefV1, GuestPluginErrorV1, GuestReturnV1, PluginErrorCodeV1,
 };
+use wasmtime::component::Val;
 
 /// A lifted value or the closed error that ends the invocation.
 pub(crate) type Lifted<T> = Result<T, CommunityPluginHostErrorV1>;

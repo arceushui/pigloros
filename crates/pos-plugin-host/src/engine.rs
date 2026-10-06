@@ -16,7 +16,7 @@ use crate::lift::{guest_return, Lifted};
 use crate::lower::invocation_val;
 use crate::outcome::{classify, LoadError, RuntimeNotPinnedV1};
 use crate::output::{plugin_output, OutputBounds};
-use crate::runtime::{pinned_runtime, MAX_WASM_STACK_BYTES, PINNED_ENGINE_CONFIG};
+use crate::runtime::{is_pinned_runtime, MAX_WASM_STACK_BYTES, PINNED_ENGINE_CONFIG};
 use crate::signatures::{export_is_exact, imported_functions_are_exact};
 
 const GUEST_V1_INTERFACE: &str = "pigloros:plugin/guest-v1@0.1.0";
@@ -55,7 +55,7 @@ impl GuestExport {
 /// A negotiated release whose profile pins this engine's runtime.
 ///
 /// Building one is the precondition of every invocation: the profile must
-/// record exactly [`pinned_runtime`], whose validated trap table has a row
+/// record exactly [`crate::runtime::pinned_runtime`], whose validated trap table has a row
 /// for `OutOfFuel`, `Interrupt` and every other pinned trap code.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PinnedExecutionV1 {
@@ -68,19 +68,12 @@ impl PinnedExecutionV1 {
     /// # Errors
     ///
     /// Returns [`RuntimeNotPinnedV1`] when the profile records no runtime or a
-    /// runtime other than [`pinned_runtime`].
+    /// runtime other than [`crate::runtime::pinned_runtime`].
     pub fn new(negotiated: NegotiatedCommunityPluginV1) -> Result<Self, RuntimeNotPinnedV1> {
-        // `pinned_runtime` always validates (a runtime test proves it); were
-        // it ever to fail, nothing would be pinned and execution is refused.
-        let pinned = negotiated
-            .runtime()
-            .zip(pinned_runtime().ok())
-            .is_some_and(|(recorded, pinned)| *recorded == pinned);
-        if pinned {
-            Ok(Self { negotiated })
-        } else {
-            Err(RuntimeNotPinnedV1)
-        }
+        let pinned = negotiated.runtime().is_some_and(is_pinned_runtime);
+        pinned
+            .then_some(Self { negotiated })
+            .ok_or(RuntimeNotPinnedV1)
     }
 
     /// The negotiated release.
@@ -104,8 +97,19 @@ pub struct ComponentHost {
 /// A compiled Component whose imports and `guest-v1` exports were checked.
 pub struct LoadedComponent {
     pre: InstancePre<HostState>,
-    /// Export indices in [`GuestExport::ALL`] order.
-    exports: [ComponentExportIndex; 3],
+    describe: ComponentExportIndex,
+    reduce: ComponentExportIndex,
+    drive: ComponentExportIndex,
+}
+
+impl LoadedComponent {
+    const fn export(&self, export: GuestExport) -> ComponentExportIndex {
+        match export {
+            GuestExport::Describe => self.describe,
+            GuestExport::Reduce => self.reduce,
+            GuestExport::Drive => self.drive,
+        }
+    }
 }
 
 /// The lifted return and the metering of one call, not yet validated.
@@ -177,17 +181,20 @@ impl ComponentHost {
         else {
             return Err(LoadError::MissingGuestExport);
         };
-        let exports = [describe, reduce, drive];
-        let exact = GuestExport::ALL
+        let typed = [
+            (GuestExport::Describe, &describe.0),
+            (GuestExport::Reduce, &reduce.0),
+            (GuestExport::Drive, &drive.0),
+        ];
+        let exact = typed
             .iter()
-            .zip(&exports)
-            .all(|(export, (func, _))| export_is_exact(*export, func));
-        if !exact {
-            return Err(LoadError::MistypedGuestExport);
-        }
+            .all(|(export, func)| export_is_exact(*export, func));
+        exact.then_some(()).ok_or(LoadError::MistypedGuestExport)?;
         Ok(LoadedComponent {
             pre,
-            exports: exports.map(|(_, index)| index),
+            describe: describe.1,
+            reduce: reduce.1,
+            drive: drive.1,
         })
     }
 
@@ -301,13 +308,18 @@ impl ComponentHost {
         let mut store = Store::new(&self.engine, state);
         store.limiter(|state| &mut state.memory);
         store.set_epoch_deadline(u64::from(options.watchdog_epochs));
-        let index = component.exports[export as usize];
+        let index = component.export(export);
         let outcome = store
             .set_fuel(limits.fuel)
             .and_then(|()| component.pre.instantiate(&mut store))
             .and_then(|instance| {
-                let after_startup = remaining_fuel(&store);
-                call_export(&mut store, instance, index, args).map(|value| (value, after_startup))
+                store.get_fuel().and_then(|after_startup| {
+                    call_export(&mut store, instance, index, args).and_then(|value| {
+                        store
+                            .get_fuel()
+                            .map(|after_call| (value, after_startup, after_call))
+                    })
+                })
             });
         let (value, after_startup, after_call) = outcome.map_err(|error| classify(&error))?;
         let state = store.into_data();
@@ -350,10 +362,15 @@ fn guest_export(
     component
         .get_export_index(None, GUEST_V1_INTERFACE)
         .and_then(|interface| component.get_export(Some(&interface), export.name()))
-        .and_then(|(item, index)| match item {
-            ComponentItem::ComponentFunc(func) => Some((func, index)),
-            _ => None,
-        })
+        .and_then(|(item, index)| func_of(item).map(|func| (func, index)))
+}
+
+/// The function type of an export item, if it is a function.
+fn func_of(item: ComponentItem) -> Option<ComponentFunc> {
+    match item {
+        ComponentItem::ComponentFunc(func) => Some(func),
+        _ => None,
+    }
 }
 
 fn call_export(
@@ -372,12 +389,4 @@ fn call_export(
             let [value] = results;
             value
         })
-}
-
-/// Fuel left in the store.
-///
-/// The pinned engine always meters fuel, so `get_fuel` cannot fail; the
-/// zero default is never taken.
-fn remaining_fuel(store: &Store<HostState>) -> u64 {
-    store.get_fuel().unwrap_or_default()
 }

@@ -61,6 +61,17 @@ pub fn pinned_runtime() -> Result<PinnedComponentRuntimeV1, CommunityPluginProfi
     )
 }
 
+/// Whether `runtime` records exactly this engine's runtime.
+///
+/// It compares the same values [`pinned_runtime`] records, without building
+/// (and so without re-validating) a second runtime.
+pub(crate) fn is_pinned_runtime(runtime: &PinnedComponentRuntimeV1) -> bool {
+    runtime.wasmtime_version() == WASMTIME_VERSION
+        && runtime.resolved_features() == RESOLVED_WASMTIME_FEATURES
+        && runtime.engine() == PINNED_ENGINE_CONFIG
+        && runtime.trap_table() == trap_table().as_slice()
+}
+
 /// One row for every trap code of the pinned version, in code order.
 fn trap_table() -> Vec<TrapTableEntryV1> {
     (0..=u8::MAX)

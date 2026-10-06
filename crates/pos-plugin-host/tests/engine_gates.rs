@@ -19,7 +19,7 @@ use pos_plugin_host::{
 };
 use pos_runtime::community_plugin_host::{
     CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
-    PinnedComponentRuntimeV1, TrapReproductionV1, MAX_OBSERVATION_BYTES_V1,
+    PinnedComponentRuntimeV1, PinnedEngineConfigV1, TrapReproductionV1, MAX_OBSERVATION_BYTES_V1,
 };
 
 type Error = CommunityPluginHostErrorV1;
@@ -144,13 +144,31 @@ fn guest_exports_must_have_their_exact_guest_v1_types() {
         (export \"pigloros:plugin/guest-v1@0.1.0\" (instance $g)))";
     let loaded = ENGINE.host.load(&component(untyped)).err();
     assert_eq!(loaded, Some(LoadError::MistypedGuestExport));
-    let drive = PROBE.replace(
-        "(export \"drive\" (func $invoke)))",
-        "(export \"drive\" (func $describe)))",
-    );
-    assert_ne!(drive, PROBE);
-    let loaded = ENGINE.host.load(&component(&drive)).err();
-    assert_eq!(loaded, Some(LoadError::MistypedGuestExport));
+    // One export at a time, then the right parameters with a wrong result.
+    let variants = [
+        (
+            "(export \"describe\" (func $describe))",
+            "(export \"describe\" (func $invoke))",
+        ),
+        (
+            "(export \"reduce\" (func $invoke))",
+            "(export \"reduce\" (func $describe))",
+        ),
+        (
+            "(export \"drive\" (func $invoke)))",
+            "(export \"drive\" (func $describe)))",
+        ),
+        (
+            "(result (result $plugin-output (error $plugin-error)))",
+            "(result (result $plugin-descriptor (error $plugin-error)))",
+        ),
+    ];
+    for (exact, mistyped) in variants {
+        let variant = PROBE.replace(exact, mistyped);
+        assert_ne!(variant, PROBE, "{mistyped}");
+        let loaded = ENGINE.host.load(&component(&variant)).err();
+        assert_eq!(loaded, Some(LoadError::MistypedGuestExport), "{mistyped}");
+    }
     let not_a_function = "(component
         (core module $m (func (export \"f\")))
         (core instance $i (instantiate $m))
@@ -222,6 +240,31 @@ fn execution_requires_the_profile_to_pin_this_runtime() {
     );
     let partial = negotiate(&release, &host, Some(partial));
     assert_eq!(PinnedExecutionV1::new(partial), Err(RuntimeNotPinnedV1));
+    let featureless = ok(
+        PinnedComponentRuntimeV1::new(
+            runtime.wasmtime_version().to_owned(),
+            runtime.resolved_features()[1..].to_vec(),
+            runtime.engine(),
+            runtime.trap_table().to_vec(),
+        ),
+        "featureless runtime",
+    );
+    let featureless = negotiate(&release, &host, Some(featureless));
+    assert_eq!(PinnedExecutionV1::new(featureless), Err(RuntimeNotPinnedV1));
+    let unmetered = ok(
+        PinnedComponentRuntimeV1::new(
+            runtime.wasmtime_version().to_owned(),
+            runtime.resolved_features().to_vec(),
+            PinnedEngineConfigV1 {
+                consume_fuel: false,
+                ..runtime.engine()
+            },
+            runtime.trap_table().to_vec(),
+        ),
+        "unmetered runtime",
+    );
+    let unmetered = negotiate(&release, &host, Some(unmetered));
+    assert_eq!(PinnedExecutionV1::new(unmetered), Err(RuntimeNotPinnedV1));
     let pinned = pinned(&release, &host);
     assert_eq!(pinned.negotiated().plugin_id(), PLUGIN_ID);
 }

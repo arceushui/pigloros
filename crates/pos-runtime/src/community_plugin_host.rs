@@ -3,8 +3,8 @@
 //! This module holds what the host fixes before any worker exists: the
 //! closed host error surface, the host-owned execution profile for each live
 //! Execution Mode, the negotiation of one validated PMF1 V1 release against
-//! them, and the guest contract types that cross the Component boundary. It loads, launches and executes nothing, and links no
-//! WebAssembly runtime.
+//! them, and the guest contract types that cross the Component boundary. It
+//! loads, launches and executes nothing, and links no WebAssembly runtime.
 
 mod contract;
 mod error;
