@@ -27,6 +27,16 @@
 //! conformance; hosted execution waits for Sandbox Provider launch in a later
 //! accepted revision.
 //!
+//! The crate also exports the worker-side helpers (`prepare_worker_process`,
+//! `read_request`, `write_response`, `open_descriptors`) and the frame and
+//! envelope error types, so that the Component worker and the test probe share
+//! one implementation of the worker's half of the protocol. The error types
+//! are public only so those helpers can return them; every caller maps them
+//! to a crash and discards the variants.
+//!
+//! Launching a worker has one process-wide effect: see
+//! [`CommunityPluginSupervisorV1`].
+//!
 //! The supervisor and worker are Linux-only: they rely on `prlimit`,
 //! `PR_SET_PDEATHSIG` and `/proc/self/fd`.
 
@@ -38,9 +48,8 @@ pub mod launch;
 pub mod supervisor;
 pub mod worker_process;
 
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-pub mod fixtures;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use frame::{FrameFaultV1, WorkerFrameLimitsV1};
 pub use ipc::{

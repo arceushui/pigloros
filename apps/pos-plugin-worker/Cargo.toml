@@ -19,8 +19,10 @@ pos-plugin-supervisor = { path = "../../crates/pos-plugin-supervisor" }
 pos-runtime = { path = "../../crates/pos-runtime" }
 
 [dev-dependencies]
-# Worker tests build negotiated releases without a release closure.
+# Worker tests share the supervisor's fixtures, which build negotiated releases
+# without a release closure.
 pos-crypto = { path = "../../crates/pos-crypto", features = ["test-support"] }
+pos-plugin-supervisor = { path = "../../crates/pos-plugin-supervisor", features = ["test-support"] }
 
 [lints]
 workspace = true

@@ -28,6 +28,9 @@ use crate::ipc::{
 use crate::launch::FORWARDED_ENVIRONMENT;
 
 /// Why a worker process refused to serve its invocation.
+///
+/// Public so the worker programs can return it; they only turn it into an
+/// unsuccessful exit, which the supervisor reports as `WorkerCrashed`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerProcessErrorV1 {
     /// The arguments are not exactly one supervisor process ID.
@@ -142,7 +145,7 @@ mod tests {
     use pos_runtime::community_plugin_host::{CommunityPluginHostErrorV1, HostInputs};
 
     use super::*;
-    use crate::fixtures::negotiated;
+    use crate::test_support::negotiated;
     use crate::ipc::{encode_worker_request_v1, WorkerCallV1};
 
     fn arguments(values: &[&str]) -> Vec<OsString> {

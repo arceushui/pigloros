@@ -25,36 +25,31 @@ use std::time::Duration;
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
 use rustix::process::{prlimit, Pid, Resource, Rlimit};
 
-use crate::frame::WorkerFrameLimitsV1;
+use crate::frame::{WorkerFrameLimitsV1, MIB};
 use crate::ipc::MAX_WORKER_COMPONENT_BYTES_V1;
 
 /// Environment variables forwarded to the worker; every other is cleared.
 ///
-/// Production builds forward nothing. Coverage-instrumented builds forward
-/// only the LLVM profile path, so an instrumented worker can record its
-/// coverage.
-#[cfg(not(coverage))]
-pub const FORWARDED_ENVIRONMENT: &[&str] = &[];
-/// Environment variables forwarded to the worker; every other is cleared.
-///
-/// Production builds forward nothing. Coverage-instrumented builds forward
-/// only the LLVM profile path, so an instrumented worker can record its
-/// coverage.
-#[cfg(coverage)]
-pub const FORWARDED_ENVIRONMENT: &[&str] = &["LLVM_PROFILE_FILE"];
+/// Production builds forward nothing. Coverage-instrumented builds
+/// (`cfg(coverage)`) forward only the LLVM profile path, so an instrumented
+/// worker can record its coverage. The supervisor and its worker must be
+/// built with the same `coverage` cfg: a worker built without it refuses the
+/// forwarded variable.
+pub const FORWARDED_ENVIRONMENT: &[&str] = if cfg!(coverage) {
+    &["LLVM_PROFILE_FILE"]
+} else {
+    &[]
+};
 
 /// Data-segment bytes the worker runtime needs beyond guest memory and the
 /// request: the compiled Component, the engine and the process itself.
-const WORKER_RUNTIME_DATA_BYTES: u64 = 512 * 1_048_576;
+const WORKER_RUNTIME_DATA_BYTES: u64 = 512 * MIB as u64;
 /// CPU seconds granted beyond the whole watchdog seconds, so the wall-time
 /// watchdog, not the CPU ceiling, stops a long invocation.
 const CPU_MARGIN_SECONDS: u64 = 2;
-/// File bytes reserved for the coverage profile: none in production builds.
-#[cfg(not(coverage))]
-const PROFILE_FILE_BYTES: u64 = 0;
-/// File bytes reserved for the coverage profile an instrumented worker writes.
-#[cfg(coverage)]
-const PROFILE_FILE_BYTES: u64 = 1 << 30;
+/// File bytes reserved for the coverage profile an instrumented worker
+/// writes: none in production builds.
+const PROFILE_FILE_BYTES: u64 = if cfg!(coverage) { 1 << 30 } else { 0 };
 
 /// The absolute path of the worker program the supervisor launches.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -161,6 +156,9 @@ pub(crate) struct LaunchedWorker {
 
 /// Start `program` and apply `ceilings` before it receives any request.
 ///
+/// Marks every descriptor from 3 upwards that this process inherited
+/// close-on-exec first. That is a process-wide change, not a per-child one.
+///
 /// Returns `None` when the program cannot start or a ceiling cannot be set;
 /// a started worker is then killed.
 pub(crate) fn launch(
@@ -234,7 +232,7 @@ mod tests {
             WorkerResourceCeilingsV1::for_invocation(&limits, Duration::from_millis(3_500));
         assert_eq!(ceilings.cpu_seconds, 5);
         let request = WorkerFrameLimitsV1::REQUEST_BYTES as u64;
-        assert_eq!(ceilings.data_bytes, 65_536 + 2 * request + 512 * 1_048_576);
+        assert_eq!(ceilings.data_bytes, 65_536 + 2 * request + 512 * MIB as u64);
         let file_size = 65_536 + 33_554_432 + PROFILE_FILE_BYTES;
         assert_eq!(ceilings.file_size_bytes, file_size);
         assert_eq!(ceilings.core_bytes, 0);

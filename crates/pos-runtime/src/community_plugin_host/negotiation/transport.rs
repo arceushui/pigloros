@@ -111,6 +111,11 @@ impl NegotiatedCommunityPluginV1 {
     /// `host` and `profile` are the worker's own; the record's runtime is the
     /// profile's pinned runtime.
     ///
+    /// Capabilities are checked for their count and their `required` flag
+    /// only. Their string fields are not re-validated against the PMF1
+    /// grammar: the IPC decoder bounds their lengths, and the supervisor that
+    /// sent them is trusted and took them from a validated release.
+    ///
     /// # Errors
     /// Returns the first failed check, in this order: `World`, `PluginId`,
     /// `Abi` (major 0 and the highest minor common to the declared range and

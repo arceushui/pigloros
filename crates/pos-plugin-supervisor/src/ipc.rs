@@ -76,6 +76,7 @@ pub const WORKER_TRAP_CLASSES_V1: [ComponentTrapClassV1; 7] = [
 ];
 
 const VERSION: u64 = 1;
+/// WIT bound on IDs and other bounded text, in bytes.
 const MAX_TEXT_BYTES: usize = 128;
 const MAX_PATTERN_BYTES: usize = 512;
 const MAX_LIST: usize = 256;
@@ -86,6 +87,9 @@ const MODES: [CommunityPluginModeV1; 2] = [
 
 /// A malformed, non-canonical, truncated, out-of-bounds or unencodable
 /// worker envelope.
+///
+/// Public so the worker-side helpers can return it; every caller maps it to a
+/// crash, so nothing inspects it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("malformed community Plugin worker envelope")]
 pub struct WorkerEnvelopeErrorV1;
@@ -132,12 +136,21 @@ pub type WorkerOutcomeV1 = Result<WorkerReturnV1, CommunityPluginHostErrorV1>;
 
 /// Encode one request envelope.
 ///
+/// The encoder checks only the Component size, the one large field, before it
+/// writes. Every other bound holds by construction: the negotiated record
+/// comes from negotiation, the invocation from `PluginInvocationV1::validate`,
+/// and the fixed-size fields from their types. The worker's decoder enforces
+/// all of them again, so a value that broke one would be a protocol fault at
+/// the worker (`WorkerCrashed`), never a committed result. Encoding does not
+/// decode the output back; the tests round-trip values at each bound.
+///
 /// # Errors
-/// Returns [`WorkerEnvelopeErrorV1`] when the request exceeds a bound the
-/// decoder enforces; the encoder never emits what the decoder rejects.
+/// Returns [`WorkerEnvelopeErrorV1`] when the Component exceeds
+/// [`MAX_WORKER_COMPONENT_BYTES_V1`].
 pub fn encode_worker_request_v1(
     request: &WorkerRequestV1,
 ) -> Result<Vec<u8>, WorkerEnvelopeErrorV1> {
+    require(request.component.len() <= MAX_WORKER_COMPONENT_BYTES_V1)?;
     let mut writer = Writer::default();
     writer
         .array(7)
@@ -161,8 +174,7 @@ pub fn encode_worker_request_v1(
             write_invocation(&mut writer, invocation);
         }
     }
-    let bytes = writer.bytes;
-    decode_worker_request_v1(&bytes).map(|_| bytes)
+    Ok(writer.bytes)
 }
 
 /// Decode one complete request envelope.
@@ -304,10 +316,12 @@ fn read_limits(reader: &mut EnvelopeReader<'_>) -> Decoded<DeterministicBudgetV1
 
 /// Encode one response envelope.
 ///
+/// As for the request, the encoder does not re-decode its output: the engine
+/// has validated the value, and the supervisor's decoder enforces every bound.
+///
 /// # Errors
-/// Returns [`WorkerEnvelopeErrorV1`] for an error the wire cannot carry
-/// (one outside [`WORKER_FAILURES_V1`], or a reproduced trap) and for a
-/// value outside the decoder's bounds.
+/// Returns [`WorkerEnvelopeErrorV1`] for an error the wire cannot carry (one
+/// outside [`WORKER_FAILURES_V1`], or a reproduced trap).
 pub fn encode_worker_response_v1(
     outcome: &WorkerOutcomeV1,
 ) -> Result<Vec<u8>, WorkerEnvelopeErrorV1> {
@@ -323,8 +337,7 @@ pub fn encode_worker_response_v1(
         Ok(WorkerReturnV1::Produced(report)) => write_report(&mut writer, 1, report, write_output),
         Err(error) => write_error(&mut writer, *error)?,
     }
-    let bytes = writer.bytes;
-    decode_worker_response_v1(&bytes).map(|_| bytes)
+    Ok(writer.bytes)
 }
 
 fn write_report<T>(

@@ -8,7 +8,8 @@
 //!
 //! Outcomes are classified in this order:
 //! 1. An invocation outside its WIT bounds, or a request the IPC cannot
-//!    carry, is `InvalidInvocation`, and no worker starts.
+//!    carry, is `InvalidInvocation`, and no worker starts. A Component above
+//!    the 32 MiB PMF1 bound is such a request.
 //! 2. The wall-time watchdog: when the deadline passes before the worker has
 //!    replied and exited, the supervisor kills it and reports the operational
 //!    `OperationalWatchdogStop`. The worker's own epoch watchdog reports the
@@ -54,6 +55,14 @@ type Error = CommunityPluginHostErrorV1;
 /// This is the ADR-061 revision 4 Local relaxation: engineering evidence, not
 /// a hosted, Candidate or Stable execution boundary, and no hosted
 /// conformance claim.
+///
+/// # Process-wide effect
+/// Before every launch the supervisor marks close-on-exec every descriptor,
+/// from 3 upwards, that the host process inherited without that flag. This
+/// is how the worker is guaranteed to inherit nothing but its pipes. It
+/// changes the host process, not only the child: an application that relies
+/// on a descriptor surviving an `exec` of its own must set the flag again
+/// after the call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommunityPluginSupervisorV1 {
     program: WorkerProgramV1,
@@ -79,6 +88,9 @@ impl CommunityPluginSupervisorV1 {
 
     /// Call `describe` in a fresh worker.
     ///
+    /// Like every call it marks the host's inherited descriptors from 3 upwards
+    /// close-on-exec (see the type's `Process-wide effect`).
+    ///
     /// # Errors
     /// Returns the closed error that ended the invocation (see the module
     /// documentation), or `InvalidGuestOutput` when the descriptor does not
@@ -98,6 +110,9 @@ impl CommunityPluginSupervisorV1 {
     }
 
     /// Call `reduce` with `invocation` in a fresh worker.
+    ///
+    /// Like every call it marks the host's inherited descriptors from 3 upwards
+    /// close-on-exec (see the type's `Process-wide effect`).
     ///
     /// # Errors
     /// Returns `InvalidInvocation` before any worker starts for an invocation
@@ -119,6 +134,9 @@ impl CommunityPluginSupervisorV1 {
 
     /// Call `drive` with `invocation` in a fresh worker.
     ///
+    /// Like every call it marks the host's inherited descriptors from 3 upwards
+    /// close-on-exec (see the type's `Process-wide effect`).
+    ///
     /// # Errors
     /// As [`Self::reduce`].
     pub fn drive(
@@ -135,6 +153,9 @@ impl CommunityPluginSupervisorV1 {
     }
 
     /// Run one call in a fresh worker and decode its response.
+    ///
+    /// A request the IPC cannot encode, which only an oversize Component can
+    /// be here, is `InvalidInvocation`.
     fn run(
         &self,
         negotiated: &NegotiatedCommunityPluginV1,
@@ -210,7 +231,7 @@ fn supervise(
     request: &[u8],
     frames: WorkerFrameLimitsV1,
     deadline: Instant,
-) -> Result<Vec<u8>, CommunityPluginHostErrorV1> {
+) -> Result<Vec<u8>, Error> {
     let LaunchedWorker {
         mut process,
         mut stdin,
@@ -233,8 +254,8 @@ fn supervise(
     });
     match ending {
         Ending::Replied(bytes) => Ok(bytes),
-        Ending::Crashed => Err(CommunityPluginHostErrorV1::WorkerCrashed),
-        Ending::TimedOut => Err(CommunityPluginHostErrorV1::OperationalWatchdogStop),
+        Ending::Crashed => Err(Error::WorkerCrashed),
+        Ending::TimedOut => Err(Error::OperationalWatchdogStop),
     }
 }
 

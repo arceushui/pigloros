@@ -1,9 +1,11 @@
 #![forbid(unsafe_code)]
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 //! Fault-injection worker for the supervisor's black-box tests.
 //!
-//! Built only with the `test-support` feature. It runs the same worker
+//! Built only with the `test-support` feature, from `tests/` so that no
+//! production coverage or cargo-crap gate counts it: the supervisor's black-box
+//! tests drive it, and its abort and hang behaviours cannot flush a coverage
+//! profile. It runs the same worker
 //! process checks as the Component worker, reads one real request, and then
 //! behaves as the request's Component bytes name: it reports its own process
 //! state, returns a chosen guest value or failure, or misbehaves in one
@@ -19,29 +21,22 @@ use pos_plugin_supervisor::{
 };
 use pos_runtime::community_plugin_host::{
     plugin_output_digest_v1, CommunityPluginHostErrorV1, ComponentTrapClassV1, InvocationReportV1,
-    MeteringV1, PluginDescriptorV1, PluginOutputV1, TrapReproductionV1,
+    PluginDescriptorV1, PluginOutputV1, TrapReproductionV1,
 };
+use pos_plugin_supervisor::test_support::METERING;
 use rustix::process::{getpid, getppid, getrlimit, Pid, Resource};
 
 /// Longest a misbehaving probe stays alive, so no test can hang forever.
 const LINGER: Duration = Duration::from_mins(1);
 /// The canonical `FuelExhausted` response envelope.
 const FUEL: [u8; 10] = [0x83, 0x64, b'P', b'W', b'R', b'1', 0x01, 0x82, 0x02, 0x03];
-const METERING: MeteringV1 = MeteringV1 {
-    startup_fuel: 1,
-    call_fuel: 2,
-    memory_bytes: 65_536,
-    host_calls: 3,
-};
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn main() -> ExitCode {
     let request = prepare_worker_process(std::env::args_os())
         .and_then(|()| read_request(&mut std::io::stdin().lock()));
     request.map_or_else(|_| ExitCode::from(2), |request| serve(&request))
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn serve(request: &WorkerRequestV1) -> ExitCode {
     match request.component.as_slice() {
         b"report" => reply(&Ok(produced(request, report().as_bytes(), false))),
@@ -88,7 +83,6 @@ fn serve(request: &WorkerRequestV1) -> ExitCode {
 }
 
 /// A `reduce` or `drive` return carrying `state`, whatever the call was.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn produced(request: &WorkerRequestV1, state: &[u8], tampered: bool) -> WorkerReturnV1 {
     let invocation_id = match &request.call {
         WorkerCallV1::Reduce(invocation) | WorkerCallV1::Drive(invocation) => {
@@ -115,7 +109,6 @@ fn produced(request: &WorkerRequestV1, state: &[u8], tampered: bool) -> WorkerRe
 }
 
 /// The descriptor of the transported release, or of another Plugin.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn described(request: &WorkerRequestV1, foreign: bool) -> WorkerReturnV1 {
     let negotiation = &request.negotiation;
     let plugin_id = if foreign {
@@ -143,13 +136,11 @@ fn described(request: &WorkerRequestV1, foreign: bool) -> WorkerReturnV1 {
     })
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn reply(outcome: &WorkerOutcomeV1) -> ExitCode {
     write_response(&mut std::io::stdout().lock(), outcome)
         .map_or_else(|_| ExitCode::from(5), |()| ExitCode::SUCCESS)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn raw(parts: &[&[u8]]) -> ExitCode {
     let mut stdout = std::io::stdout().lock();
     let written = parts
@@ -159,19 +150,16 @@ fn raw(parts: &[&[u8]]) -> ExitCode {
     written.map_or_else(|_| ExitCode::from(5), |()| ExitCode::SUCCESS)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn frame_prefix(length: usize) -> [u8; 4] {
     u32::try_from(length).unwrap_or(u32::MAX).to_be_bytes()
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn linger() -> ExitCode {
     std::thread::sleep(LINGER);
     ExitCode::SUCCESS
 }
 
 /// `name=value` lines describing this process from the inside.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn report() -> String {
     let environment: Vec<String> = std::env::vars_os()
         .map(|(name, _)| name.to_string_lossy().into_owned())
@@ -208,7 +196,6 @@ fn report() -> String {
     lines.join("\n")
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn value(limit: Option<u64>) -> String {
     limit.map_or_else(|| "unlimited".to_owned(), |limit| limit.to_string())
 }

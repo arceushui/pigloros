@@ -8,16 +8,12 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use pos_crypto::plugin_execution::{
-    DeterministicBudgetV1, PluginAbiRequirementV1, PluginExecutionProjectionFixtureV1,
-    PluginExecutionProjectionV1,
-};
+use pos_crypto::plugin_execution::DeterministicBudgetV1;
+use pos_plugin_supervisor::test_support::{invocation, negotiated_with, ok};
 use pos_plugin_supervisor::{CommunityPluginSupervisorV1, WorkerProgramV1};
 use pos_runtime::community_plugin_host::{
-    negotiate_community_plugin_v1, ArtifactRefV1, CommunityPluginCeilingsV1,
-    CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginHostErrorV1,
-    CommunityPluginModeV1, ComponentTrapClassV1, HostInputs, NegotiatedCommunityPluginV1,
-    PluginInvocationV1, TimelinePositionV1, TrapReproductionV1,
+    CommunityPluginHostErrorV1, ComponentTrapClassV1, HostInputs, NegotiatedCommunityPluginV1,
+    TrapReproductionV1,
 };
 
 /// Bytes of one committed compatibility fixture.
@@ -42,64 +38,8 @@ const INPUTS: HostInputs = HostInputs {
 
 type Error = CommunityPluginHostErrorV1;
 
-fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
-}
-
 fn negotiated(budget: DeterministicBudgetV1) -> NegotiatedCommunityPluginV1 {
-    let fixture = PluginExecutionProjectionFixtureV1 {
-        pmf1_digest: [0x11; 32],
-        release_digest: [0x22; 32],
-        plugin_id: PLUGIN_ID.to_owned(),
-        abi: PluginAbiRequirementV1 {
-            major: 0,
-            min_minor: 0,
-            max_minor: 0,
-            required_features: Vec::new(),
-        },
-        capabilities: Vec::new(),
-        budget,
-    };
-    let profile = CommunityPluginExecutionProfileV1::new(
-        CommunityPluginModeV1::Local,
-        CommunityPluginCeilingsV1::V1,
-        None,
-    );
-    let execution = PluginExecutionProjectionV1::from(fixture);
-    ok(negotiate_community_plugin_v1(
-        &execution,
-        &CommunityPluginHostAbiV1::v1(),
-        &profile,
-    ))
-}
-
-fn invocation(observation: &[u8]) -> PluginInvocationV1 {
-    let artifact = |schema_id| ArtifactRefV1 {
-        schema_id,
-        byte_length: 0,
-        digest: [0; 32],
-    };
-    PluginInvocationV1 {
-        invocation_id: [0x11; 16],
-        timeline_position: TimelinePositionV1 {
-            timeline_id: [0x22; 16],
-            seq: 11,
-            tick: 3,
-            scheduler_position: 0,
-        },
-        output_base_ordinal: 0,
-        principal_ref: artifact(1),
-        authorization_decision: artifact(2),
-        observation_snapshot: artifact(3),
-        observation_bytes: observation.to_vec(),
-        prior_state_schema: [2; 32],
-        prior_state_bytes: b"prior".to_vec(),
-        execution_profile_digest: [3; 32],
-        trust_policy_snapshot_digest: [4; 32],
-        deterministic_budget_id: "budget".to_owned(),
-        deterministic_random_domain: [7; 32],
-        provenance_root: [5; 32],
-    }
+    negotiated_with(PLUGIN_ID, budget, Vec::new())
 }
 
 fn supervisor() -> CommunityPluginSupervisorV1 {
@@ -130,7 +70,7 @@ fn both_fixtures_reduce_and_drive_identically() {
         outputs.push((ok(reduced.result), ok(driven.result)));
     }
     assert_eq!(outputs[0], outputs[1]);
-    assert_eq!(outputs[0].0.invocation_id, [0x11; 16]);
+    assert_eq!(outputs[0].0.invocation_id, invocation(b"").invocation_id);
     assert_ne!(outputs[0].0, outputs[0].1);
 }
 

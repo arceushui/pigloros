@@ -1,7 +1,7 @@
 use pos_runtime::community_plugin_host::{EventDraftV1, TraceAnnotationV1};
 
 use super::*;
-use crate::fixtures::{descriptor, invocation, negotiated, output};
+use crate::test_support::{descriptor, invocation, negotiated, output};
 
 #[test]
 fn a_descriptor_must_describe_the_negotiated_release() {
@@ -27,7 +27,7 @@ fn a_descriptor_must_describe_the_negotiated_release() {
 }
 
 fn resealed(change: impl FnOnce(&mut PluginOutputV1)) -> PluginOutputV1 {
-    let mut changed = output(&invocation());
+    let mut changed = output(&invocation(b"observation"));
     change(&mut changed);
     changed.output_digest = plugin_output_digest_v1(&changed);
     changed
@@ -35,7 +35,7 @@ fn resealed(change: impl FnOnce(&mut PluginOutputV1)) -> PluginOutputV1 {
 
 #[test]
 fn an_output_must_answer_its_invocation_within_limits() {
-    let invocation = invocation();
+    let invocation = invocation(b"observation");
     let limits = DeterministicBudgetV1 {
         event_count: 1,
         state_bytes: 4,

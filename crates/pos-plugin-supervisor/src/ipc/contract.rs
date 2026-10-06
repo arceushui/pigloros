@@ -16,10 +16,8 @@ use super::wire::{
     read_bytes, read_code, read_digests, read_list, read_text, read_u16, read_u32, Decoded,
     EnvelopeReader, Writer,
 };
-use super::WorkerEnvelopeErrorV1;
+use super::{WorkerEnvelopeErrorV1, MAX_TEXT_BYTES};
 
-/// WIT bound on IDs and other bounded text, in bytes.
-const MAX_TEXT_BYTES: usize = 128;
 /// WIT bound on one operational log message, in bytes.
 const MAX_LOG_MESSAGE_BYTES: usize = 256;
 /// WIT bound on `record-operational-log` calls.

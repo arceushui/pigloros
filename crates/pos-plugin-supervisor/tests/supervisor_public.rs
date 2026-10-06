@@ -10,19 +10,13 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use pos_crypto::plugin_execution::{
-    DeterministicBudgetV1, PluginAbiRequirementV1, PluginExecutionProjectionFixtureV1,
-    PluginExecutionProjectionV1,
-};
+use pos_plugin_supervisor::test_support::{self, negotiated_with, ok, METERING, SMALL_BUDGET};
 use pos_plugin_supervisor::{
     CommunityPluginSupervisorV1, WorkerProgramV1, WorkerResourceCeilingsV1, FORWARDED_ENVIRONMENT,
 };
 use pos_runtime::community_plugin_host::{
-    negotiate_community_plugin_v1, ArtifactRefV1, CommunityPluginCeilingsV1,
-    CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginHostErrorV1,
-    CommunityPluginModeV1, ComponentTrapClassV1, HostInputs, InvocationReportV1,
-    NegotiatedCommunityPluginV1, PluginInvocationV1, PluginOutputV1, TimelinePositionV1,
-    TrapReproductionV1,
+    CommunityPluginHostErrorV1, ComponentTrapClassV1, HostInputs, InvocationReportV1,
+    NegotiatedCommunityPluginV1, PluginInvocationV1, PluginOutputV1, TrapReproductionV1,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -39,68 +33,12 @@ const STOPPED_WITHIN: Duration = Duration::from_secs(30);
 const EXIT_HELPER: &str = "POS_PLUGIN_SUPERVISOR_EXIT_HELPER";
 const INPUTS: HostInputs = HostInputs { simulation_time: 7 };
 
-fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
-}
-
 fn negotiated() -> NegotiatedCommunityPluginV1 {
-    let fixture = PluginExecutionProjectionFixtureV1 {
-        pmf1_digest: [0x11; 32],
-        release_digest: [0x22; 32],
-        plugin_id: "plugin-a".to_owned(),
-        abi: PluginAbiRequirementV1 {
-            major: 0,
-            min_minor: 0,
-            max_minor: 0,
-            required_features: Vec::new(),
-        },
-        capabilities: Vec::new(),
-        budget: DeterministicBudgetV1 {
-            memory_bytes: 65_536,
-            fuel: 1_000,
-            ..DeterministicBudgetV1::MAXIMA
-        },
-    };
-    let profile = CommunityPluginExecutionProfileV1::new(
-        CommunityPluginModeV1::Local,
-        CommunityPluginCeilingsV1::V1,
-        None,
-    );
-    let execution = PluginExecutionProjectionV1::from(fixture);
-    ok(negotiate_community_plugin_v1(
-        &execution,
-        &CommunityPluginHostAbiV1::v1(),
-        &profile,
-    ))
+    negotiated_with("plugin-a", SMALL_BUDGET, Vec::new())
 }
 
 fn invocation() -> PluginInvocationV1 {
-    let artifact = ArtifactRefV1 {
-        schema_id: 1,
-        byte_length: 0,
-        digest: [0; 32],
-    };
-    PluginInvocationV1 {
-        invocation_id: [0x33; 16],
-        timeline_position: TimelinePositionV1 {
-            timeline_id: [0x44; 16],
-            seq: 1,
-            tick: 2,
-            scheduler_position: 3,
-        },
-        output_base_ordinal: 0,
-        principal_ref: artifact,
-        authorization_decision: artifact,
-        observation_snapshot: artifact,
-        observation_bytes: b"observation".to_vec(),
-        prior_state_schema: [5; 32],
-        prior_state_bytes: b"prior".to_vec(),
-        execution_profile_digest: [6; 32],
-        trust_policy_snapshot_digest: [7; 32],
-        deterministic_budget_id: "budget".to_owned(),
-        deterministic_random_domain: [8; 32],
-        provenance_root: [9; 32],
-    }
+    test_support::invocation(b"observation")
 }
 
 fn supervisor(program: &str, watchdog: Duration) -> CommunityPluginSupervisorV1 {
@@ -182,7 +120,7 @@ fn every_invocation_gets_a_fresh_worker_process() {
 #[test]
 fn returned_values_are_checked_by_the_supervisor() {
     let report = ok(reduce(b"output"));
-    assert_eq!(report.metering.host_calls, 3);
+    assert_eq!(report.metering, METERING);
     assert_eq!(ok(report.result).invocation_id, invocation().invocation_id);
     let drive = supervisor(PROBE, PROMPT).drive(&negotiated(), b"output", &invocation(), INPUTS);
     assert!(drive.is_ok_and(|report| report.result.is_ok()));

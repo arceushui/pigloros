@@ -1,11 +1,23 @@
 use pos_runtime::community_plugin_host::{
-    FieldRefV1, GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1,
+    FieldRefV1, GuestPluginErrorV1, MeteringV1, OperationalLogRecord, PluginErrorCodeV1,
 };
 
 use super::*;
-use crate::fixtures::{descriptor, invocation, log, negotiated, ok, output, METERING};
+use crate::test_support::{descriptor, invocation, log, negotiated, ok, output, METERING};
 
 type Error = CommunityPluginHostErrorV1;
+
+/// An invocation whose numbers need every CBOR head width.
+fn wide_invocation() -> PluginInvocationV1 {
+    let mut wide = invocation(b"observation");
+    wide.timeline_position.seq = 70_000;
+    wide.timeline_position.tick = u64::MAX;
+    wide.timeline_position.scheduler_position = 24;
+    wide.output_base_ordinal = 255;
+    wide.principal_ref.schema_id = 300;
+    wide.principal_ref.byte_length = 4_294_967_296;
+    wide
+}
 
 fn request(call: WorkerCallV1) -> WorkerRequestV1 {
     WorkerRequestV1 {
@@ -27,8 +39,8 @@ fn round_trip_request(request: &WorkerRequestV1) -> Decoded<WorkerRequestV1> {
 fn requests_round_trip_every_call_and_mode() {
     for call in [
         WorkerCallV1::Describe,
-        WorkerCallV1::Reduce(invocation()),
-        WorkerCallV1::Drive(invocation()),
+        WorkerCallV1::Reduce(wide_invocation()),
+        WorkerCallV1::Drive(invocation(b"observation")),
     ] {
         let original = request(call);
         assert_eq!(round_trip_request(&original).as_ref(), Ok(&original));
@@ -89,40 +101,48 @@ fn the_describe_request_has_its_golden_prefix_and_suffix() {
 }
 
 #[test]
-fn requests_beyond_the_decoder_bounds_are_not_encoded() {
+fn only_an_oversize_component_stops_the_encoder() {
     let mut largest = request(WorkerCallV1::Describe);
     largest.component = vec![0; MAX_WORKER_COMPONENT_BYTES_V1];
-    assert!(round_trip_request(&largest).is_ok());
+    assert_eq!(round_trip_request(&largest).as_ref(), Ok(&largest));
     let mut oversized = largest;
     oversized.component.push(0);
+    assert_eq!(encode_worker_request_v1(&oversized), Err(WorkerEnvelopeErrorV1));
+}
+
+#[test]
+fn the_decoder_enforces_the_bounds_the_encoder_leaves_to_validation() {
+    let at_bound = |change: fn(&mut WorkerRequestV1)| {
+        let mut request = request(WorkerCallV1::Describe);
+        change(&mut request);
+        round_trip_request(&request)
+    };
+    let over_bound = |change: fn(&mut WorkerRequestV1)| {
+        let mut request = request(WorkerCallV1::Describe);
+        change(&mut request);
+        encode_worker_request_v1(&request).and_then(|bytes| decode_worker_request_v1(&bytes))
+    };
+    assert!(at_bound(|r| r.negotiation.world = "w".repeat(MAX_TEXT_BYTES)).is_ok());
+    assert!(at_bound(|r| r.negotiation.not_granted_capabilities[0].resource_pattern =
+        "p".repeat(MAX_PATTERN_BYTES))
+    .is_ok());
+    assert!(at_bound(|r| r.negotiation.required_features = vec!["f".to_owned(); MAX_LIST]).is_ok());
+    let bad = Err(WorkerEnvelopeErrorV1);
+    assert_eq!(over_bound(|r| r.negotiation.world = "w".repeat(MAX_TEXT_BYTES + 1)), bad);
     assert_eq!(
-        encode_worker_request_v1(&oversized),
-        Err(WorkerEnvelopeErrorV1)
+        over_bound(|r| r.negotiation.not_granted_capabilities[0].resource_pattern =
+            "p".repeat(MAX_PATTERN_BYTES + 1)),
+        bad
     );
-    let mut long_world = request(WorkerCallV1::Describe);
-    long_world.negotiation.world = "w".repeat(MAX_TEXT_BYTES + 1);
     assert_eq!(
-        encode_worker_request_v1(&long_world),
-        Err(WorkerEnvelopeErrorV1)
+        over_bound(|r| r.negotiation.required_features = vec!["f".to_owned(); MAX_LIST + 1]),
+        bad
     );
-    let mut long_pattern = request(WorkerCallV1::Describe);
-    long_pattern.negotiation.not_granted_capabilities[0].resource_pattern =
-        "p".repeat(MAX_PATTERN_BYTES);
-    assert!(round_trip_request(&long_pattern).is_ok());
-    long_pattern.negotiation.not_granted_capabilities[0]
-        .resource_pattern
-        .push('p');
-    assert_eq!(
-        encode_worker_request_v1(&long_pattern),
-        Err(WorkerEnvelopeErrorV1)
-    );
-    let mut long_observation = invocation();
-    long_observation.observation_bytes = vec![0; 1_048_577];
-    let observed = request(WorkerCallV1::Reduce(long_observation));
-    assert_eq!(
-        encode_worker_request_v1(&observed),
-        Err(WorkerEnvelopeErrorV1)
-    );
+    let mut observed = invocation(b"observation");
+    observed.observation_bytes = vec![0; 1_048_577];
+    let request = request(WorkerCallV1::Reduce(observed));
+    let decoded = encode_worker_request_v1(&request).and_then(|b| decode_worker_request_v1(&b));
+    assert_eq!(decoded, bad);
 }
 
 /// The encoded request with the call replaced by `call`.
@@ -235,7 +255,7 @@ fn round_trip_response(outcome: &WorkerOutcomeV1) -> Decoded<WorkerOutcomeV1> {
 fn responses_round_trip_every_outcome() {
     let mut outcomes: Vec<WorkerOutcomeV1> = vec![
         Ok(described(Ok(descriptor(&negotiated())))),
-        Ok(produced(Ok(output(&invocation())))),
+        Ok(produced(Ok(output(&invocation(b"observation"))))),
     ];
     for error in guest_errors() {
         outcomes.push(Ok(described(Err(error.clone()))));
@@ -310,15 +330,29 @@ fn errors_the_wire_cannot_carry_are_not_encoded() {
             Err(WorkerEnvelopeErrorV1)
         );
     }
-    let mut long_log = log();
-    long_log[0].message = "m".repeat(257);
-    let logged = Ok(WorkerReturnV1::Produced(InvocationReportV1 {
-        result: Ok(output(&invocation())),
-        metering: METERING,
-        operational_log: long_log,
-    }));
+}
+
+#[test]
+fn the_response_decoder_enforces_the_log_bounds() {
+    let logged = |records: Vec<OperationalLogRecord>| {
+        let outcome = Ok(WorkerReturnV1::Produced(InvocationReportV1 {
+            result: Ok(output(&invocation(b"observation"))),
+            metering: METERING,
+            operational_log: records,
+        }));
+        encode_worker_response_v1(&outcome).and_then(|bytes| decode_worker_response_v1(&bytes))
+    };
+    let record = |message: String| OperationalLogRecord {
+        category: 1,
+        message,
+    };
+    assert!(logged(vec![record("m".repeat(256)); 64]).is_ok());
     assert_eq!(
-        encode_worker_response_v1(&logged),
+        logged(vec![record("m".repeat(257))]),
+        Err(WorkerEnvelopeErrorV1)
+    );
+    assert_eq!(
+        logged(vec![record(String::new()); 65]),
         Err(WorkerEnvelopeErrorV1)
     );
 }

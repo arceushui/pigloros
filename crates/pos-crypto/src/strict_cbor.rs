@@ -85,8 +85,9 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     /// Read one shortest-form item head as `(major type, argument)`.
     ///
     /// # Errors
-    /// Returns the caller's error for a truncated, non-canonical, wrongly
-    /// typed or out-of-bounds item.
+    /// Returns the invalid-encoding error for a truncated head, a reserved or
+    /// indefinite additional-information value, or an argument that is not in
+    /// its shortest form.
     pub fn head(&mut self) -> Result<(u8, u64), E> {
         let first = self.byte()?;
         let small = first & 31;
@@ -117,8 +118,8 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     /// Read a definite array header whose count is at most `max`.
     ///
     /// # Errors
-    /// Returns the caller's error for a truncated, non-canonical, wrongly
-    /// typed or out-of-bounds item.
+    /// Returns the invalid-encoding error for an item that is not a definite
+    /// array, and the bounds error for a count above `max`.
     pub fn array(&mut self, max: usize) -> Result<usize, E> {
         let (major, count) = self.head()?;
         if major != 4 {
@@ -130,8 +131,8 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     /// Read a definite array header with exactly `members` members.
     ///
     /// # Errors
-    /// Returns the caller's error for a truncated, non-canonical, wrongly
-    /// typed or out-of-bounds item.
+    /// Returns the invalid-encoding error for an item that is not a definite
+    /// array of exactly `members` members.
     pub fn fixed_array(&mut self, members: u64) -> Result<(), E> {
         if self.head()? == (4, members) {
             Ok(())
@@ -143,8 +144,8 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     /// Read an unsigned integer.
     ///
     /// # Errors
-    /// Returns the caller's error for a truncated, non-canonical, wrongly
-    /// typed or out-of-bounds item.
+    /// Returns the invalid-encoding error for an item that is not an unsigned
+    /// integer.
     pub fn unsigned(&mut self) -> Result<u64, E> {
         let (major, value) = self.head()?;
         if major != 0 {
@@ -156,8 +157,8 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     /// Read a signed integer that fits `i64`.
     ///
     /// # Errors
-    /// Returns the caller's error for a truncated, non-canonical, wrongly
-    /// typed or out-of-bounds item.
+    /// Returns the invalid-encoding error for an item that is not an integer
+    /// or does not fit `i64`.
     pub fn signed(&mut self) -> Result<i64, E> {
         let (major, value) = self.head()?;
         match major {
@@ -172,8 +173,9 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     /// Read valid UTF-8 text of at most `max` bytes.
     ///
     /// # Errors
-    /// Returns the caller's error for a truncated, non-canonical, wrongly
-    /// typed or out-of-bounds item.
+    /// Returns the invalid-encoding error for an item that is not text, a
+    /// truncated body or invalid UTF-8, and the bounds error for a length
+    /// above `max`.
     pub fn text(&mut self, max: usize) -> Result<&'a str, E> {
         let (major, length) = self.head()?;
         if major != 3 {
@@ -189,8 +191,8 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     /// and the bytes are not read.
     ///
     /// # Errors
-    /// Returns the caller's error for a truncated, non-canonical, wrongly
-    /// typed or out-of-bounds item.
+    /// Returns the invalid-encoding error for an item that is not text, or a
+    /// body that is cut short.
     pub fn exact_text(&mut self, expected: &str) -> Result<bool, E> {
         let (major, length) = self.head()?;
         if major != 3 {
@@ -205,8 +207,9 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     /// Read a byte string of at most `max` bytes.
     ///
     /// # Errors
-    /// Returns the caller's error for a truncated, non-canonical, wrongly
-    /// typed or out-of-bounds item.
+    /// Returns the invalid-encoding error for an item that is not a byte
+    /// string or a body that is cut short, and the bounds error for a length
+    /// above `max`.
     pub fn byte_string(&mut self, max: usize) -> Result<&'a [u8], E> {
         let (major, length) = self.head()?;
         if major != 2 {
@@ -219,8 +222,8 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     /// Read a byte string of exactly `N` bytes.
     ///
     /// # Errors
-    /// Returns the caller's error for a truncated, non-canonical, wrongly
-    /// typed or out-of-bounds item.
+    /// Returns the invalid-encoding error for an item that is not a byte
+    /// string of exactly `N` bytes.
     pub fn bytes<const N: usize>(&mut self) -> Result<[u8; N], E> {
         let (major, length) = self.head()?;
         if major != 2 || usize::try_from(length) != Ok(N) {
@@ -241,8 +244,7 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     /// Read CBOR `null` or a byte string of exactly `N` bytes.
     ///
     /// # Errors
-    /// Returns the caller's error for a truncated, non-canonical, wrongly
-    /// typed or out-of-bounds item.
+    /// As [`Self::bytes`], when the item is not `null`.
     pub fn optional_bytes<const N: usize>(&mut self) -> Result<Option<[u8; N]>, E> {
         if self.null() {
             Ok(None)
@@ -254,8 +256,8 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     /// Read CBOR `false` (`0xf4`) or `true` (`0xf5`).
     ///
     /// # Errors
-    /// Returns the caller's error for a truncated, non-canonical, wrongly
-    /// typed or out-of-bounds item.
+    /// Returns the invalid-encoding error for an item that is neither `false`
+    /// nor `true`.
     pub fn boolean(&mut self) -> Result<bool, E> {
         match self.byte()? {
             0xf4 => Ok(false),
@@ -267,13 +269,75 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
     /// Require that every byte was consumed.
     ///
     /// # Errors
-    /// Returns the caller's error for a truncated, non-canonical, wrongly
-    /// typed or out-of-bounds item.
+    /// Returns the invalid-encoding error when bytes remain after the last
+    /// item.
     pub fn finish(&self) -> Result<(), E> {
         if self.offset == self.bytes.len() {
             Ok(())
         } else {
             Err(self.invalid())
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum Fault {
+        Invalid,
+        Exceeded,
+    }
+
+    impl StrictCborError for Fault {
+        fn invalid_encoding(_ordinal: u8) -> Self {
+            Self::Invalid
+        }
+
+        fn bounds_exceeded(_ordinal: u8) -> Self {
+            Self::Exceeded
+        }
+    }
+
+    fn reader(bytes: &[u8]) -> Reader<'_, Fault> {
+        Reader::new(bytes)
+    }
+
+    #[test]
+    fn byte_strings_are_read_up_to_their_bound() {
+        let mut empty = reader(&[0x40]);
+        assert_eq!(empty.byte_string(0), Ok(&[][..]));
+        let mut exact = reader(&[0x43, 1, 2, 3]);
+        assert_eq!(exact.byte_string(3), Ok(&[1, 2, 3][..]));
+        assert_eq!(exact.finish(), Ok(()));
+        let mut long = reader(&[0x58, 0x19, 0]);
+        assert_eq!(long.byte_string(24), Err(Fault::Exceeded));
+        let mut wide = reader(&[0x58, 0x18]);
+        assert_eq!(wide.byte_string(23), Err(Fault::Exceeded));
+    }
+
+    #[test]
+    fn byte_strings_reject_other_items_and_cut_bodies() {
+        for (bytes, fault) in [
+            (&[0x61, b'a'][..], Fault::Invalid),
+            (&[0x81, 0x00], Fault::Invalid),
+            (&[0x42, 1], Fault::Invalid),
+            (&[0x58, 0x01, 1], Fault::Invalid),
+            (&[0x5f, 0xff], Fault::Invalid),
+            (&[], Fault::Invalid),
+        ] {
+            assert_eq!(reader(bytes).byte_string(8), Err(fault), "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn finish_reports_trailing_bytes() {
+        let mut one = reader(&[0x01, 0x02]);
+        assert_eq!(one.unsigned(), Ok(1));
+        assert_eq!(one.finish(), Err(Fault::Invalid));
+        assert_eq!(one.unsigned(), Ok(2));
+        assert_eq!(one.finish(), Ok(()));
     }
 }

@@ -13,15 +13,20 @@ use pos_runtime::community_plugin_host::{
 
 use crate::ipc::MAX_WORKER_COMPONENT_BYTES_V1;
 
+/// One mebibyte: the unit of the envelope allowances and the worker ceilings.
+pub(crate) const MIB: usize = 1_048_576;
 /// Request envelope bytes beyond the Component, observation and prior state.
 ///
 /// The negotiation record (at most 256 features and 256 capabilities) and
 /// the invocation's other fields fit well within 1 MiB.
-const REQUEST_ENVELOPE_BYTES: usize = 1_048_576;
+const REQUEST_ENVELOPE_BYTES: usize = MIB;
 /// Response envelope bytes beyond the Event, state, log and trace budgets.
-const RESPONSE_ENVELOPE_BYTES: u64 = 1_048_576;
+const RESPONSE_ENVELOPE_BYTES: u64 = MIB as u64;
 
 /// Why a frame could not be read or written.
+///
+/// Public so the worker-side helpers can return it; the supervisor and the
+/// worker only ever map it to a crash, so no caller inspects the variants.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameFaultV1 {
     /// The stream ended before the complete frame.
@@ -233,7 +238,7 @@ mod tests {
             ..DeterministicBudgetV1::MINIMA
         };
         let frames = WorkerFrameLimitsV1::for_limits(&limits);
-        assert_eq!(frames.response_bytes(), 2 * 1_048_576 + 3_210);
+        assert_eq!(frames.response_bytes(), 2 * MIB + 3_210);
         let saturated = DeterministicBudgetV1 {
             event_bytes: u64::MAX,
             ..limits
@@ -242,7 +247,7 @@ mod tests {
         assert_eq!(frames.response_bytes(), usize::MAX);
         assert_eq!(
             WorkerFrameLimitsV1::REQUEST_BYTES,
-            33_554_432 + 3 * 1_048_576
+            MAX_WORKER_COMPONENT_BYTES_V1 + 3 * MIB
         );
     }
 }

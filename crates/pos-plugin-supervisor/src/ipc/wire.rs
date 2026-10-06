@@ -81,6 +81,11 @@ pub(super) fn read_code(reader: &mut EnvelopeReader<'_>, count: usize) -> Decode
 }
 
 /// A canonical CBOR writer.
+///
+/// It stays beside the codec rather than in `pos-crypto`: the existing head
+/// writer in `recipient_export` is private to that format. This writer's
+/// kill locus is this crate's IPC tests, which assert golden bytes and
+/// shortest-form widths.
 #[derive(Default)]
 pub(super) struct Writer {
     pub(super) bytes: Vec<u8>,

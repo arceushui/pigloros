@@ -4,9 +4,11 @@
 //! reports:
 //! 1. it rebuilds the supervisor's negotiated record with
 //!    `NegotiatedCommunityPluginV1::from_transport`, against this worker's V1
-//!    host ABI and a profile pinning this engine's runtime, and accepts it as
-//!    a `PinnedExecutionV1`. A rejected record is a protocol fault: the worker
-//!    replies nothing, which the supervisor reports as `WorkerCrashed`;
+//!    host ABI and its own profile (the Local mode, which is all the Local
+//!    relaxation serves, with the V1 ceilings and this engine's pinned
+//!    runtime), and accepts it as a `PinnedExecutionV1`. A rejected record,
+//!    an Air-Gapped one included, is a protocol fault: the worker replies
+//!    nothing, which the supervisor reports as `WorkerCrashed`;
 //! 2. it loads the Component; a load failure is `IncompatibleAbi`;
 //! 3. it calls the export under the request's limits while an epoch ticker
 //!    advances the engine epoch. An invocation still running when the
@@ -21,8 +23,8 @@ use pos_plugin_host::{pinned_runtime, ComponentHost, PinnedExecutionV1};
 use pos_plugin_supervisor::{WorkerCallV1, WorkerOutcomeV1, WorkerRequestV1, WorkerReturnV1};
 use pos_runtime::community_plugin_host::{
     CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1,
-    CommunityPluginHostErrorV1, InvocationOptionsV1, NegotiatedCommunityPluginV1,
-    NegotiatedTransportV1,
+    CommunityPluginHostErrorV1, CommunityPluginModeV1, InvocationOptionsV1,
+    NegotiatedCommunityPluginV1, NegotiatedTransportV1,
 };
 
 /// Interval between two engine epoch increments.
@@ -49,7 +51,7 @@ fn run(host: &ComponentHost, request: WorkerRequestV1, tick: Duration) -> Option
         host_inputs: request.host_inputs,
         watchdog_epochs: watchdog_epochs(request.watchdog_millis, tick),
     };
-    Some(ticking(host, tick, || match &request.call {
+    Some(ticking(|| host.increment_epoch(), tick, || match &request.call {
         WorkerCallV1::Describe => host
             .describe(&component, &execution, options)
             .map(WorkerReturnV1::Described),
@@ -63,9 +65,12 @@ fn run(host: &ComponentHost, request: WorkerRequestV1, tick: Duration) -> Option
 }
 
 /// The supervisor's record, rebuilt and pinned to this engine's runtime.
+///
+/// The profile's mode is the worker's own and fixed: a record negotiated for
+/// another mode is rejected, not served.
 fn pinned(transport: NegotiatedTransportV1) -> Option<PinnedExecutionV1> {
     let profile = CommunityPluginExecutionProfileV1::new(
-        transport.mode,
+        CommunityPluginModeV1::Local,
         CommunityPluginCeilingsV1::V1,
         pinned_runtime().ok(),
     );
@@ -87,19 +92,30 @@ pub fn watchdog_epochs(watchdog_millis: u64, tick: Duration) -> u32 {
     u32::try_from(watchdog_millis / tick_millis).unwrap_or(u32::MAX)
 }
 
-/// Run `call` while another thread advances the engine epoch every `tick`.
-fn ticking<T>(host: &ComponentHost, tick: Duration, call: impl FnOnce() -> T) -> T {
+/// Sets its flag when dropped, including while a panic unwinds.
+struct Stop<'a>(&'a AtomicBool);
+
+impl Drop for Stop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+/// Run `call` while another thread calls `advance` every `tick`.
+///
+/// The ticker stops when `call` returns or panics: the guard sets the flag on
+/// unwind too, so the scope never waits for a ticker nobody stops.
+fn ticking<T>(advance: impl Fn() + Sync, tick: Duration, call: impl FnOnce() -> T) -> T {
     let done = AtomicBool::new(false);
     thread::scope(|scope| {
         scope.spawn(|| {
             while !done.load(Ordering::Acquire) {
                 thread::sleep(tick);
-                host.increment_epoch();
+                advance();
             }
         });
-        let result = call();
-        done.store(true, Ordering::Release);
-        result
+        let _stop = Stop(&done);
+        call()
     })
 }
 
