@@ -45,8 +45,7 @@
 //! - **Parent-cut Ticks are not enforced.** The contract leaves this to the
 //!   coordinator (#552). A Memory Fork row has no cut Tick, only a
 //!   `fork_point` (a parent Timeline and a `Seq`), so the adapter cannot
-//!   compare, and roots may legitimately carry Ticks below the first
-//!   Tick.
+//!   compare, and roots may legitimately carry Ticks below the first Tick.
 //! - **Committed prefix.** The committed prefix of a parent Timeline is kept
 //!   once per parent Timeline, outside any Fork, and served as
 //!   [`DependencyReadScopeV1::ParentPrefix`] up to its `through_tick`. No write
