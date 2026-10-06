@@ -1525,14 +1525,14 @@ mod tests {
     use super::*;
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+    pub(super) fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
         result.unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
         })
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn drafts() -> PipelineDraftBatchV1 {
+    pub(super) fn drafts() -> PipelineDraftBatchV1 {
         ok(PipelineDraftBatchV1::try_new(vec![EventDraft::new(
             EntityId::new(),
             Kind::new("counterfactual.tick"),
@@ -1541,7 +1541,7 @@ mod tests {
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
-    const fn facts() -> CounterfactualFactsV1 {
+    pub(super) const fn facts() -> CounterfactualFactsV1 {
         CounterfactualFactsV1 {
             plan_digest: Hash::from_bytes([5; 32]),
             dependency_graph_digest: Hash::from_bytes([3; 32]),
@@ -1553,7 +1553,7 @@ mod tests {
 
     /// The invalidation of generation 0 of `fork`, whose head is Seq 1.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn command(fork: TimelineId) -> CounterfactualInvalidationCommandV1 {
+    pub(super) fn command(fork: TimelineId) -> CounterfactualInvalidationCommandV1 {
         let frontier = ok(RecomputationFrontierBytesV1::try_from_canonical(
             frontier_frame(
                 &[
@@ -1605,7 +1605,7 @@ mod tests {
 
     /// An in-memory store with a published Fork at logical Seq 1.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn published_store() -> (SqliteStore, TimelineId) {
+    pub(super) fn published_store() -> (SqliteStore, TimelineId) {
         let mut store = super::super::tests::new_store();
         let root = ok(store.create_timeline("counterfactual-root")).id();
         ok(store.append(root, drafts().drafts()));
@@ -1617,7 +1617,7 @@ mod tests {
     /// Make the next commit fail and its rollback fail too, so every write
     /// reports an unknown outcome although nothing committed.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn fail_commits(store: &SqliteStore, fail: bool) {
+    pub(super) fn fail_commits(store: &SqliteStore, fail: bool) {
         if fail {
             ok(store.conn.commit_hook(Some(|| true)));
         } else {

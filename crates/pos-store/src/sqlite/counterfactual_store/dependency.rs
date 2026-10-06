@@ -974,3 +974,109 @@ impl CounterfactualDependencyRecordingPortV1 for SqliteStore {
         self.settle_write(staged)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use pos_core::{CounterfactualStorePortV1, Seq};
+
+    use super::super::tests::{command, drafts, fail_commits, ok, published_store};
+    use super::*;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn one_node_record(tick: u64, digest: u8) -> TickDependencyRecordV1 {
+        let coordinate = ok(DependencyNodeCoordinateV1::try_new(
+            tick,
+            0,
+            "a".to_owned(),
+            0,
+            7,
+            Hash::from_bytes([digest; 32]),
+        ));
+        let node = ok(DependencyNodeRecordV1::try_new(
+            coordinate,
+            RecordedDependencyClassV1::EndogenousRecomputed,
+            RecordedNodeOriginV1::Provisional,
+            Vec::new(),
+            Hash::from_bytes([9; 32]),
+        ));
+        ok(TickDependencyRecordV1::try_new(
+            tick,
+            RecordedNodeOriginV1::Provisional,
+            vec![node],
+            Vec::new(),
+        ))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn recorded(store: &SqliteStore) -> i64 {
+        ok(store.conn.query_row(
+            "SELECT (SELECT count(*) FROM counterfactual_dependency_records)
+                  + (SELECT count(*) FROM counterfactual_dependency_nodes)",
+            [],
+            |row| row.get::<_, i64>(0),
+        ))
+    }
+
+    /// An in-doubt invalidation with a record is `OutcomeUnknown`, records
+    /// nothing, and the same command and record commit on the retry.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn an_in_doubt_invalidation_with_dependencies_records_nothing() {
+        let (mut store, fork) = published_store();
+        let command = command(fork);
+        let record = one_node_record(1, 1);
+
+        fail_commits(&store, true);
+        let in_doubt =
+            store.commit_counterfactual_invalidation_with_dependencies(&command, &record);
+        fail_commits(&store, false);
+
+        assert_eq!(in_doubt, Err(StoreError::OutcomeUnknown));
+        assert_eq!(recorded(&store), 0);
+        assert_eq!(store.committed_generation_receipt(command.new_generation()), Ok(None));
+        assert!(matches!(
+            store.commit_counterfactual_invalidation_with_dependencies(&command, &record),
+            Ok(CounterfactualInvalidationOutcomeV1::Committed(_))
+        ));
+        assert_eq!(recorded(&store), 2);
+    }
+
+    /// An in-doubt later Tick with a record is `OutcomeUnknown` and records
+    /// nothing; the unmoved basis proves it and the retry commits.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn an_in_doubt_tick_with_dependencies_records_nothing() {
+        let (mut store, fork) = published_store();
+        ok(store.commit_counterfactual_invalidation_with_dependencies(
+            &command(fork),
+            &one_node_record(1, 1),
+        ));
+        let expected = ok(store.current_counterfactual_basis(fork));
+        let record = one_node_record(2, 2);
+
+        fail_commits(&store, true);
+        let in_doubt = store.append_counterfactual_tick_with_dependencies(
+            fork,
+            &expected,
+            &drafts(),
+            &record,
+        );
+        fail_commits(&store, false);
+
+        assert_eq!(in_doubt, Err(StoreError::OutcomeUnknown));
+        assert_eq!(recorded(&store), 2);
+        assert_eq!(store.current_counterfactual_basis(fork), Ok(expected));
+        assert_eq!(
+            store.append_counterfactual_tick_with_dependencies(
+                fork,
+                &expected,
+                &drafts(),
+                &record,
+            ),
+            Ok(CounterfactualTickOutcomeV1::Committed {
+                head: Seq::from_u64(3)
+            })
+        );
+        assert_eq!(recorded(&store), 4);
+    }
+}
