@@ -5,6 +5,8 @@
 //! protected operation, under one fence. The ancestor chain always comes from
 //! the store through [`fork_ancestry()`]; hosts never assemble it by hand.
 
+use std::collections::HashSet;
+
 use crate::{
     erasure::{ErasureContainmentErrorV1, ErasureGate, ErasureProtectedOperationV1},
     error::CoreError,
@@ -29,9 +31,10 @@ pub fn fork_ancestry<S: EventStore + ?Sized>(
     timeline: TimelineId,
 ) -> Result<Vec<TimelineMeta>, CoreError> {
     let mut ancestry: Vec<TimelineMeta> = Vec::new();
+    let mut visited: HashSet<TimelineId> = HashSet::new();
     let mut next = Some(timeline);
     while let Some(member) = next {
-        if ancestry.iter().any(|known| known.id == member) {
+        if !visited.insert(member) {
             return Err(CoreError::Storage(format!(
                 "fork ancestry contains a cycle at timeline {member}"
             )));

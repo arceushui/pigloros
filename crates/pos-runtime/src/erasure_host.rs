@@ -4136,6 +4136,12 @@ impl ErasureReadSenderV1<'_> {
     /// (ADR-021 Revision 4 Decision 3). It does not run when any contributing
     /// scope denies.
     ///
+    /// The inner `with_fork_ancestry_fence` fence nests on the same Timeline
+    /// inside this sender's own protected-effect fence, relying on the gate's
+    /// re-entrant fence. Chain construction goes through `get_timeline`, which
+    /// is always `Read`-fenced, so an ancestor that permits one operation but
+    /// denies `Read` over-denies; this fails closed.
+    ///
     /// # Errors
     /// Returns the payload-free host errors of
     /// [`Self::with_protected_effect_fence`], or the closed erasure error of
