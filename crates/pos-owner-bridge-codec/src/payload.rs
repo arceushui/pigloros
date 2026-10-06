@@ -351,19 +351,19 @@ pub fn encode_create_options(
     output: &mut [u8],
 ) -> Result<usize, OwnerBridgeCodecError> {
     let mut writer = CborWriter::new(output);
-    writer.array(11)?;
-    writer.bytes(&CREATE_OPTIONS_MAGIC)?;
-    writer.unsigned(PROTOCOL_VERSION)?;
-    writer.bytes(&options.ceremony_id)?;
-    writer.bytes(&options.challenge)?;
-    writer.bytes(&options.user_handle)?;
-    writer.text(RP_ID)?;
-    writer.text(RP_NAME)?;
-    writer.negative(CREATE_TYPE_MAGNITUDE)?;
-    writer.unsigned(REQUIRED_CODE)?;
-    writer.unsigned(REQUIRED_CODE)?;
-    writer.bytes(&options.prf_input)?;
-    Ok(writer.finish())
+    writer.array(11);
+    writer.bytes(&CREATE_OPTIONS_MAGIC);
+    writer.unsigned(PROTOCOL_VERSION);
+    writer.bytes(&options.ceremony_id);
+    writer.bytes(&options.challenge);
+    writer.bytes(&options.user_handle);
+    writer.text(RP_ID);
+    writer.text(RP_NAME);
+    writer.negative(CREATE_TYPE_MAGNITUDE);
+    writer.unsigned(REQUIRED_CODE);
+    writer.unsigned(REQUIRED_CODE);
+    writer.bytes(&options.prf_input);
+    writer.finish()
 }
 
 /// Decode exact deterministic-CBOR Create options from a request payload.
@@ -409,16 +409,16 @@ pub fn encode_get_options(
     output: &mut [u8],
 ) -> Result<usize, OwnerBridgeCodecError> {
     let mut writer = CborWriter::new(output);
-    writer.array(8)?;
-    writer.bytes(&GET_OPTIONS_MAGIC)?;
-    writer.unsigned(PROTOCOL_VERSION)?;
-    writer.bytes(&options.ceremony_id)?;
-    writer.bytes(&options.challenge)?;
-    writer.text(RP_ID)?;
-    writer.bytes(options.credential_id)?;
-    writer.unsigned(REQUIRED_CODE)?;
-    writer.bytes(&options.prf_input)?;
-    Ok(writer.finish())
+    writer.array(8);
+    writer.bytes(&GET_OPTIONS_MAGIC);
+    writer.unsigned(PROTOCOL_VERSION);
+    writer.bytes(&options.ceremony_id);
+    writer.bytes(&options.challenge);
+    writer.text(RP_ID);
+    writer.bytes(options.credential_id);
+    writer.unsigned(REQUIRED_CODE);
+    writer.bytes(&options.prf_input);
+    writer.finish()
 }
 
 /// Decode exact deterministic-CBOR Get options from a request payload.
@@ -455,18 +455,18 @@ pub fn encode_attestation_reply(
     output: &mut [u8],
 ) -> Result<usize, OwnerBridgeCodecError> {
     let mut writer = CborWriter::new(output);
-    writer.array(10)?;
-    writer.bytes(&ATTESTATION_REPLY_MAGIC)?;
-    writer.unsigned(PROTOCOL_VERSION)?;
-    writer.bytes(&reply.ceremony_id)?;
-    writer.bytes(reply.raw_id)?;
-    writer.bytes(reply.client_data_json)?;
-    writer.bytes(reply.attestation_object)?;
-    write_transports(&mut writer, reply.transports)?;
-    writer.boolean(reply.prf_enabled)?;
-    write_optional_fixed(&mut writer, reply.prf_first)?;
-    writer.null()?;
-    Ok(writer.finish())
+    writer.array(10);
+    writer.bytes(&ATTESTATION_REPLY_MAGIC);
+    writer.unsigned(PROTOCOL_VERSION);
+    writer.bytes(&reply.ceremony_id);
+    writer.bytes(reply.raw_id);
+    writer.bytes(reply.client_data_json);
+    writer.bytes(reply.attestation_object);
+    write_transports(&mut writer, reply.transports);
+    writer.boolean(reply.prf_enabled);
+    write_optional_fixed(&mut writer, reply.prf_first);
+    writer.null();
+    writer.finish()
 }
 
 /// Decode exact deterministic-CBOR Attestation reply bytes from a page payload.
@@ -513,18 +513,18 @@ pub fn encode_assertion_reply(
     output: &mut [u8],
 ) -> Result<usize, OwnerBridgeCodecError> {
     let mut writer = CborWriter::new(output);
-    writer.array(10)?;
-    writer.bytes(&ASSERTION_REPLY_MAGIC)?;
-    writer.unsigned(PROTOCOL_VERSION)?;
-    writer.bytes(&reply.ceremony_id)?;
-    writer.bytes(reply.raw_id)?;
-    writer.bytes(reply.client_data_json)?;
-    writer.bytes(reply.authenticator_data)?;
-    writer.bytes(reply.signature)?;
-    write_optional_fixed(&mut writer, reply.user_handle)?;
-    writer.bytes(&reply.prf_first)?;
-    writer.null()?;
-    Ok(writer.finish())
+    writer.array(10);
+    writer.bytes(&ASSERTION_REPLY_MAGIC);
+    writer.unsigned(PROTOCOL_VERSION);
+    writer.bytes(&reply.ceremony_id);
+    writer.bytes(reply.raw_id);
+    writer.bytes(reply.client_data_json);
+    writer.bytes(reply.authenticator_data);
+    writer.bytes(reply.signature);
+    write_optional_fixed(&mut writer, reply.user_handle);
+    writer.bytes(&reply.prf_first);
+    writer.null();
+    writer.finish()
 }
 
 /// Decode exact deterministic-CBOR Assertion reply bytes from a page payload.
@@ -588,24 +588,14 @@ fn read_transports(reader: &mut CborReader<'_>) -> Result<TransportCodes, OwnerB
     TransportCodes::new(&codes[..count])
 }
 
-fn write_transports(
-    writer: &mut CborWriter<'_>,
-    transports: TransportCodes,
-) -> Result<(), OwnerBridgeCodecError> {
-    writer.array(
-        u64::try_from(transports.as_slice().len())
-            .map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?,
-    )?;
+fn write_transports(writer: &mut CborWriter<'_>, transports: TransportCodes) {
+    writer.array(transports.as_slice().len());
     for &code in transports.as_slice() {
-        writer.unsigned(u64::from(code))?;
+        writer.unsigned(u64::from(code));
     }
-    Ok(())
 }
 
-fn write_optional_fixed<const N: usize>(
-    writer: &mut CborWriter<'_>,
-    value: Option<[u8; N]>,
-) -> Result<(), OwnerBridgeCodecError> {
+fn write_optional_fixed<const N: usize>(writer: &mut CborWriter<'_>, value: Option<[u8; N]>) {
     match value {
         Some(value) => writer.bytes(&value),
         None => writer.null(),

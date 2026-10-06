@@ -273,24 +273,24 @@ pub fn encode_subject_credential_binding(
         return Err(OwnerBridgeCodecError::BufferTooSmall);
     }
     let mut writer = CborWriter::new(output);
-    writer.array(16)?;
-    writer.bytes(&SUBJECT_CREDENTIAL_BINDING_MAGIC)?;
-    writer.unsigned(PROTOCOL_VERSION)?;
-    writer.text(binding.owner_id)?;
-    writer.bytes(&binding.subject_id)?;
-    writer.unsigned(SUBJECT_DATA_ENCRYPTION_ROLE)?;
-    writer.unsigned(binding.epoch)?;
-    writer.text(RP_ID)?;
-    writer.text(OWNER_ORIGIN)?;
-    writer.bytes(binding.credential_id)?;
-    writer.bytes(&binding.user_handle)?;
-    writer.bytes(&binding.public_key.canonical_encoding())?;
-    writer.unsigned(ES256_ALGORITHM_CODE)?;
-    writer.boolean(binding.backup_eligible)?;
-    writer.boolean(binding.backup_state)?;
-    writer.unsigned(u64::from(binding.sign_count))?;
-    write_transports(&mut writer, binding.transports)?;
-    Ok(writer.finish())
+    writer.array(16);
+    writer.bytes(&SUBJECT_CREDENTIAL_BINDING_MAGIC);
+    writer.unsigned(PROTOCOL_VERSION);
+    writer.text(binding.owner_id);
+    writer.bytes(&binding.subject_id);
+    writer.unsigned(SUBJECT_DATA_ENCRYPTION_ROLE);
+    writer.unsigned(binding.epoch);
+    writer.text(RP_ID);
+    writer.text(OWNER_ORIGIN);
+    writer.bytes(binding.credential_id);
+    writer.bytes(&binding.user_handle);
+    writer.bytes(&binding.public_key.canonical_encoding());
+    writer.unsigned(ES256_ALGORITHM_CODE);
+    writer.boolean(binding.backup_eligible);
+    writer.boolean(binding.backup_state);
+    writer.unsigned(u64::from(binding.sign_count));
+    write_transports(&mut writer, binding.transports);
+    writer.finish()
 }
 
 /// Decode one exact deterministic-CBOR durable credential binding.
@@ -363,15 +363,15 @@ pub fn encode_cleanup_record(
         return Err(OwnerBridgeCodecError::BufferTooSmall);
     }
     let mut writer = CborWriter::new(output);
-    writer.array(7)?;
-    writer.bytes(&CLEANUP_RECORD_MAGIC)?;
-    writer.unsigned(PROTOCOL_VERSION)?;
-    writer.bytes(&record.ceremony_id)?;
-    writer.text(record.folder_name)?;
-    writer.unsigned(u64::from(record.browser_pid))?;
-    writer.unsigned(record.creation_filetime)?;
-    writer.bytes(&record.image_path_sha256)?;
-    Ok(writer.finish())
+    writer.array(7);
+    writer.bytes(&CLEANUP_RECORD_MAGIC);
+    writer.unsigned(PROTOCOL_VERSION);
+    writer.bytes(&record.ceremony_id);
+    writer.text(record.folder_name);
+    writer.unsigned(u64::from(record.browser_pid));
+    writer.unsigned(record.creation_filetime);
+    writer.bytes(&record.image_path_sha256);
+    writer.finish()
 }
 
 /// Decode one exact deterministic-CBOR owner-bridge cleanup record.
@@ -431,18 +431,11 @@ fn read_transports(reader: &mut CborReader<'_>) -> Result<TransportCodes, OwnerB
     TransportCodes::new(&codes[..count])
 }
 
-fn write_transports(
-    writer: &mut CborWriter<'_>,
-    transports: TransportCodes,
-) -> Result<(), OwnerBridgeCodecError> {
-    writer.array(
-        u64::try_from(transports.as_slice().len())
-            .map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?,
-    )?;
+fn write_transports(writer: &mut CborWriter<'_>, transports: TransportCodes) {
+    writer.array(transports.as_slice().len());
     for &code in transports.as_slice() {
-        writer.unsigned(u64::from(code))?;
+        writer.unsigned(u64::from(code));
     }
-    Ok(())
 }
 
 const fn require_length(length: usize, maximum: usize) -> Result<(), OwnerBridgeCodecError> {

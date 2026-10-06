@@ -184,82 +184,110 @@ impl<'a> CborReader<'a> {
 pub(crate) struct CborWriter<'a> {
     output: &'a mut [u8],
     offset: usize,
+    error: Option<OwnerBridgeCodecError>,
 }
 
 impl<'a> CborWriter<'a> {
     pub(crate) const fn new(output: &'a mut [u8]) -> Self {
-        Self { output, offset: 0 }
+        Self {
+            output,
+            offset: 0,
+            error: None,
+        }
     }
 
-    pub(crate) fn array(&mut self, count: u64) -> Result<(), OwnerBridgeCodecError> {
-        self.head(4, count)
+    pub(crate) fn array(&mut self, count: usize) {
+        self.length(4, count);
     }
 
-    pub(crate) fn unsigned(&mut self, value: u64) -> Result<(), OwnerBridgeCodecError> {
-        self.head(0, value)
+    pub(crate) fn unsigned(&mut self, value: u64) {
+        self.head(0, value);
     }
 
-    pub(crate) fn negative(&mut self, magnitude: u64) -> Result<(), OwnerBridgeCodecError> {
-        self.head(1, magnitude)
+    pub(crate) fn negative(&mut self, magnitude: u64) {
+        self.head(1, magnitude);
     }
 
-    pub(crate) fn bytes(&mut self, value: &[u8]) -> Result<(), OwnerBridgeCodecError> {
-        self.head(
-            2,
-            u64::try_from(value.len()).map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?,
-        )?;
-        self.write(value)
+    pub(crate) fn bytes(&mut self, value: &[u8]) {
+        self.length(2, value.len());
+        self.write(value);
     }
 
-    pub(crate) fn text(&mut self, value: &str) -> Result<(), OwnerBridgeCodecError> {
-        self.head(
-            3,
-            u64::try_from(value.len()).map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?,
-        )?;
-        self.write(value.as_bytes())
+    pub(crate) fn text(&mut self, value: &str) {
+        self.length(3, value.len());
+        self.write(value.as_bytes());
     }
 
-    pub(crate) fn boolean(&mut self, value: bool) -> Result<(), OwnerBridgeCodecError> {
-        self.write(&[if value { 0xf5 } else { 0xf4 }])
+    pub(crate) fn boolean(&mut self, value: bool) {
+        self.write(&[if value { 0xf5 } else { 0xf4 }]);
     }
 
-    pub(crate) fn null(&mut self) -> Result<(), OwnerBridgeCodecError> {
-        self.write(&[0xf6])
+    pub(crate) fn null(&mut self) {
+        self.write(&[0xf6]);
     }
 
-    pub(crate) const fn finish(&self) -> usize {
-        self.offset
+    pub(crate) fn finish(self) -> Result<usize, OwnerBridgeCodecError> {
+        match self.error {
+            Some(error) => Err(error),
+            None => Ok(self.offset),
+        }
     }
 
-    fn head(&mut self, major: u8, value: u64) -> Result<(), OwnerBridgeCodecError> {
+    fn length(&mut self, major: u8, value: usize) {
+        match u64::try_from(value) {
+            Ok(value) => self.head(major, value),
+            Err(_) => self.set_error(OwnerBridgeCodecError::BoundsExceeded),
+        }
+    }
+
+    fn head(&mut self, major: u8, value: u64) {
         let prefix = major << 5;
         if value <= 23 {
-            let value = u8::try_from(value).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
-            return self.write(&[prefix | value]);
+            let value = match u8::try_from(value) {
+                Ok(value) => value,
+                Err(_) => {
+                    self.set_error(OwnerBridgeCodecError::InvalidPayload);
+                    return;
+                }
+            };
+            self.write(&[prefix | value]);
+            return;
         }
         if let Ok(value) = u8::try_from(value) {
-            return self.write(&[prefix | 0x18, value]);
+            self.write(&[prefix | 0x18, value]);
+            return;
         }
         if let Ok(value) = u16::try_from(value) {
-            self.write(&[prefix | 0x19])?;
-            return self.write(&value.to_be_bytes());
+            self.write(&[prefix | 0x19]);
+            self.write(&value.to_be_bytes());
+            return;
         }
         if let Ok(value) = u32::try_from(value) {
-            self.write(&[prefix | 0x1a])?;
-            return self.write(&value.to_be_bytes());
+            self.write(&[prefix | 0x1a]);
+            self.write(&value.to_be_bytes());
+            return;
         }
-        self.write(&[prefix | 0x1b])?;
-        self.write(&value.to_be_bytes())
+        self.write(&[prefix | 0x1b]);
+        self.write(&value.to_be_bytes());
     }
 
-    fn write(&mut self, value: &[u8]) -> Result<(), OwnerBridgeCodecError> {
-        let end = self
+    fn write(&mut self, value: &[u8]) {
+        if self.error.is_some() {
+            return;
+        }
+        let Some(end) = self
             .offset
             .checked_add(value.len())
             .filter(|end| *end <= self.output.len())
-            .ok_or(OwnerBridgeCodecError::BufferTooSmall)?;
+        else {
+            self.set_error(OwnerBridgeCodecError::BufferTooSmall);
+            return;
+        };
         self.output[self.offset..end].copy_from_slice(value);
         self.offset = end;
-        Ok(())
+    }
+
+    fn set_error(&mut self, error: OwnerBridgeCodecError) {
+        self.error.get_or_insert(error);
     }
 }
