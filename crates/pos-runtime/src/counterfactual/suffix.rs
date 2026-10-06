@@ -398,13 +398,17 @@ struct TickEventsV1 {
 }
 
 impl TickEventsV1 {
-    /// Buffer one committed Event; `false` once the buffer is over one batch.
+    /// Buffer one committed Event and report whether it is still one batch.
+    ///
+    /// Returns `true` while the buffer is within one honest batch, and
+    /// `false` once it is over the count or the byte bound, so the Tick
+    /// cannot be an honest single batch.
     ///
     /// That bounds the memory a walk can use. An honest Tick stages at most
     /// one batch, whose last draft is its checkpoint Event, so it buffers
     /// fewer than [`MAX_PIPELINE_DRAFTS_PER_BATCH`] Events and at most
     /// [`MAX_PIPELINE_DRAFT_BATCH_BYTES`] payload and Event type bytes.
-    fn push(&mut self, event: Event) -> bool {
+    fn push_within_batch(&mut self, event: Event) -> bool {
         self.bytes = self
             .bytes
             .saturating_add(event.payload.len())
@@ -548,7 +552,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             checkpoints: Vec::new(),
             refs: Vec::new(),
         };
-        let first = self.derived_checkpoint(context, &progress, first_tick, first_head)?;
+        let first = self.first_checkpoint(context, &progress)?;
         progress.advance(first_tick, first_head, first);
         let mut next = first_head.saturating_add(1);
         let mut tick_events = TickEventsV1::default();
@@ -564,7 +568,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
                     let checkpoint =
                         verified_checkpoint(context, &progress, tick, seq, payload, &drafts)?;
                     progress.advance(tick, seq, checkpoint);
-                } else if !tick_events.push(event) {
+                } else if !tick_events.push_within_batch(event) {
                     // No honest Tick has more Events or bytes than one batch.
                     return Err(CounterfactualSuffixErrorV1::RecoveryMismatch);
                 }
@@ -621,20 +625,20 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     }
 
     /// Re-derive the first Tick's `RCP1`, whose committed Events follow
-    /// `previous` through `last_seq`.
-    fn derived_checkpoint(
+    /// `previous` through the receipt's first-Tick head.
+    fn first_checkpoint(
         &self,
         context: &SuffixContextV1<'_>,
         previous: &ProgressV1,
-        tick: u64,
-        last_seq: u64,
     ) -> Result<CheckpointV1, CounterfactualSuffixErrorV1> {
         let from = previous.head.saturating_add(1);
+        let last_seq = context.receipt.first_tick_head().as_u64();
         let drafts: Vec<EventDraft> = self
             .read_exact(context.fork(), from, last_seq)?
             .into_iter()
             .map(committed_draft)
             .collect();
+        let tick = context.receipt.first_tick();
         next_checkpoint(context, previous.state, tick, &drafts, last_seq)
     }
 

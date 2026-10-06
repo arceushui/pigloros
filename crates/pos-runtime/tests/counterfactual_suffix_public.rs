@@ -1672,7 +1672,7 @@ fn forged_histories(fixture: &Fixture) -> TestResult<Vec<TickBlock>> {
     let state14 = last.state_digests[0].digest;
     let relabeled = checkpoint_at(fixture, 13, tick_seq(13), state14)?;
     let relabeled = [checkpoint_event(&relabeled)?];
-    Ok(vec![
+    let histories = vec![
         // The first later Tick's content, then a middle one, then the last.
         history(&[&rewritten(&early), early_cp, &mid, &late]),
         history(&[&early, &rewritten(&mid), mid_cp, &late]),
@@ -1685,13 +1685,14 @@ fn forged_histories(fixture: &Fixture) -> TestResult<Vec<TickBlock>> {
         history(&[&early, &late]),
         // Tick 14's Events under a consistently numbered checkpoint.
         history(&[&early, late_ev, &relabeled]),
-    ])
+    ];
+    Ok(histories)
 }
 
 fn forged_tick_histories_are_rejected<B: Backend>() -> TestResult {
     let reference = reference()?;
-    let setup = prepare::<B>()?;
-    for forged in forged_histories(&setup.fixture)? {
+    let fixture = prepare::<MemoryStore>()?.fixture;
+    for forged in forged_histories(&fixture)? {
         let mut setup = prepare::<B>()?;
         run(&mut setup, &mut Stager::failing(12, Fault::Error))?;
         let mut setup = reopen(setup, |store| {
@@ -1901,7 +1902,7 @@ const LATER_TICK_FAULTS: [FaultCase; 7] = [
         StoreFault::Altered(committed_head(13)),
         SuffixError::RecoveryMismatch,
     ),
-    // Tick 12's re-derived `RCP1` binds the first Tick's content.
+    // The first Tick's derived state feeds Tick 12's chain, which binds its content.
     (
         StoreFault::Altered(FIRST_TICK_HEAD),
         SuffixError::RecoveryMismatch,
@@ -1911,12 +1912,13 @@ const LATER_TICK_FAULTS: [FaultCase; 7] = [
         StoreFault::Altered(tick_seq(12)),
         SuffixError::RecoveryMismatch,
     ),
-    // An intermediate Tick's content is verified by the chained state.
+    // An intermediate Tick's content is verified by the chained state; this is the
+    // minimal both-backend regression case, and the Memory test covers every Tick.
     (
         StoreFault::Altered(tick_seq(13)),
         SuffixError::RecoveryMismatch,
     ),
-    // The last Tick's re-derived `RCP1` binds its content.
+    // The last Tick's content is bound by the chained state.
     (
         StoreFault::Altered(tick_seq(14)),
         SuffixError::RecoveryMismatch,
