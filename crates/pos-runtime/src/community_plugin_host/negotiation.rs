@@ -15,6 +15,10 @@ use super::profile::{
     PinnedComponentRuntimeV1,
 };
 
+mod transport;
+
+pub use transport::{NegotiatedTransportErrorV1, NegotiatedTransportV1};
+
 /// The only ABI major of the community Plugin world in ABI 0.x.
 pub const COMMUNITY_PLUGIN_ABI_MAJOR_V1: u16 = 0;
 
@@ -149,7 +153,9 @@ impl EffectiveExecutionLimitsV1 {
 ///
 /// It is `ReproManifest` input: world, release identity, negotiated ABI,
 /// not-granted capabilities, mode, effective limits and the pinned runtime.
-/// Only [`negotiate_community_plugin_v1`] constructs it.
+/// Only [`negotiate_community_plugin_v1`] constructs it; a worker process
+/// rebuilds the supervisor's record with
+/// [`NegotiatedCommunityPluginV1::from_transport`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NegotiatedCommunityPluginV1 {
     world: &'static str,
