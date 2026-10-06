@@ -779,11 +779,17 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn deleted_fork_is_not_found_but_keeps_its_counterfactual_state() {
+    fn deleted_fork_is_not_found_and_its_state_is_purged() {
         let (mut store, fork) = published_store();
         let command = command(fork);
         ok(store.commit_counterfactual_invalidation(&command));
-        let saved_state = store.counterfactual_forks.get(&fork).cloned();
+        assert_eq!(
+            store
+                .counterfactual_forks
+                .get(&fork)
+                .map(|state| (state.generation, state.artifacts.len())),
+            Some((1, 2))
+        );
 
         ok(store.delete_timeline(fork));
 
@@ -809,11 +815,9 @@ mod tests {
             store.publish_counterfactual_facts(fork, facts()),
             Err(CounterfactualStoreErrorV1::ForkNotFound)
         );
-        assert_eq!(store.counterfactual_forks.get(&fork).cloned(), saved_state);
-        assert_eq!(
-            saved_state.map(|state| (state.generation, state.artifacts.len())),
-            Some((1, 2))
-        );
+        // Only the generation floor of the purged Fork remains.
+        assert!(!store.counterfactual_forks.contains_key(&fork));
+        assert_eq!(store.counterfactual_generation_floors.get(&fork), Some(&1));
     }
 
     #[test]
