@@ -176,9 +176,7 @@ pub enum ReproManifestV2Error {
         max: usize,
     },
     /// The whole input is larger than the cap.
-    #[error(
-        "manifest is larger than {max} bytes: record fewer adapter_records or Plugins"
-    )]
+    #[error("manifest is larger than {max} bytes: record fewer adapter_records or Plugins")]
     InputTooLarge {
         /// The cap in bytes.
         max: usize,
@@ -373,8 +371,8 @@ impl ReproManifestV2 {
     /// noncanonical or out-of-bounds input with the matching closed error.
     pub fn from_json(bytes: &[u8]) -> Result<Self, ReproManifestV2Error> {
         checked_repro_manifest_v2_input_len(bytes.len())?;
-        let raw: Raw = serde_json::from_slice(bytes)
-            .map_err(|error| stream_error(Transport::Json, &error))?;
+        let raw: Raw =
+            serde_json::from_slice(bytes).map_err(|error| stream_error(Transport::Json, &error))?;
         decode(raw, Transport::Json)
     }
 
