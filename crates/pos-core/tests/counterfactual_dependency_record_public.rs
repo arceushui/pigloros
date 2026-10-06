@@ -1271,14 +1271,15 @@ impl FakeStore {
     }
 
     /// Validate `record` for an invalidation at `first_tick`, which writes
-    /// the empty set of the new generation.
+    /// the empty set of the new generation, so only the record rules apply:
+    /// no identity or capacity fault can arise there.
     fn admit_first(record: &TickRecord, first_tick: u64) -> Result<(), StoreError> {
         record.ensure_provisional()?;
-        if record.tick() != first_tick {
-            return Err(StoreError::BindingMismatch);
+        if record.tick() == first_tick {
+            Ok(())
+        } else {
+            Err(StoreError::BindingMismatch)
         }
-        let capacity = record.ensure_set_capacity(RecordedSetCountsV1::default());
-        capacity.map_err(StoreError::from)
     }
 
     /// Validate `record` for a later Tick: refused outright when the
@@ -1698,6 +1699,9 @@ fn the_record_tick_is_persisted_apart_from_node_ticks() {
     let mut store = FakeStore::new();
     store.first_tick = 5;
     let root_class = RecordedDependencyClassV1::InterventionAssigned;
+    // The root's Tick 2 is below the generation's first Tick 5 on purpose: the
+    // adapter does not check node Ticks against the first Tick (the coordinator
+    // and pos-time enforce that window), so this exercises that non-enforcement.
     let root = class_row(coord(2, "r", 9), root_class, PROVISIONAL, Vec::new());
     let early = ok(TickRecord::try_new(5, PROVISIONAL, vec![root], Vec::new()));
     let empty_at = |tick: u64| {

@@ -142,17 +142,20 @@
 //!
 //! # Adapter obligations
 //!
-//! - Commit the record in the same atomic step as the Tick's Events (and, for
-//!   an invalidation, the generation increment). A stale, conflicting,
-//!   failed, or unknown-outcome commit records nothing.
-//! - Reject a record that is not provisional, or whose Tick is not the
-//!   invalidation's first Tick, with `BindingMismatch`, and a record that
-//!   would exceed the recorded-set bounds with `FieldOutOfBounds`; both
-//!   commit nothing.
-//! - Reject a node whose artifact digest is already recorded in the same
-//!   recorded set. A record checks digest uniqueness only within itself, but
-//!   `pos-time` requires it across the whole graph, and only the adapter
-//!   sees the set.
+//! Each method's check order, record-Tick rule, and errors are documented on
+//! the method, in [`CounterfactualDependencyRecordingPortV1`] and
+//! [`CounterfactualDependencyReadPortV1`]. These rules cut across methods.
+//!
+//! - **Atomicity.** Commit the record in the same atomic step as the Tick's
+//!   Events (and, for an invalidation, the generation increment). A stale,
+//!   conflicting, failed, or unknown-outcome commit records nothing. Recover
+//!   an `OutcomeUnknown` write exactly as the storage port does; the record is
+//!   part of the same transaction, so the receipt or basis read that settles
+//!   the Tick settles the record.
+//! - **Node uniqueness.** Reject a node whose artifact digest is already
+//!   recorded in the same recorded set. A record checks digest uniqueness
+//!   only within itself, but `pos-time` requires it across the whole graph,
+//!   and only the adapter sees the set.
 //! - Also reject a node whose position key `(tick, scheduler_position,
 //!   owner_id, output_ordinal)` is already recorded in the same recorded
 //!   set, alongside and not instead of digest uniqueness. A root rides a
@@ -161,91 +164,68 @@
 //!   alone, and without this check the collision would only surface at read
 //!   time as `DuplicateIdentity`. Order rows by position key globally across
 //!   the records of the set, never by insertion order.
-//! - Persist each record's Tick. It is not recoverable from the node Ticks
-//!   (a record made only of early roots carries them all before its Tick),
-//!   and a later record's Tick must be compared with it, not with the
-//!   maximum node Tick. The record Tick must be STRICTLY GREATER than the
-//!   maximum persisted record Tick of the same recorded set; gaps are
-//!   allowed, and a violation is `BindingMismatch`. The dependency set of a
-//!   Fork generation is built only through the `_with_dependencies` methods,
-//!   starting at the invalidation's `first_tick` (the coordinator seam #552
-//!   must always use them). While the set has no records yet, compare the
-//!   record Tick with the generation's persisted first Tick (known from the
-//!   invalidation) and reject a record Tick below it with `BindingMismatch`.
-//!   A record at a generation with no persisted first Tick (generation 0, a
-//!   Fork never invalidated, a Fork re-created at its generation floor until
-//!   its next invalidation) is `BindingMismatch` too: the set is started by
-//!   `commit_counterfactual_invalidation_with_dependencies` and continued by
-//!   `append_counterfactual_tick_with_dependencies`.
-//! - The record Tick is STAGER-ASSERTED. Nothing in the store can verify that
-//!   it is the Tick the drafts commit ([`CounterfactualBasisV1`] carries a
-//!   Seq, not a Tick), so #552 owns the correspondence between the record
-//!   Tick and its drafts. A write path for the parent prefix belongs to #554.
-//! - Map [`CounterfactualDependencyErrorV1`] to the storage error with
-//!   `CounterfactualStoreErrorV1::from`: `InvalidEncoding` for encoding and
-//!   unknown-enum faults, `FieldOutOfBounds` for bounds, page-limit, and
-//!   missing-provenance faults, `BindingMismatch` for binding, consumer,
-//!   input, and cursor faults, and the namesake for the version, order, and
-//!   duplicate faults. A row that fails re-validation when it is
+//! - **Persisted record Tick.** Persist each record's Tick. It is not
+//!   recoverable from the node Ticks (a record made only of early roots
+//!   carries them all before its Tick), and a later record's Tick must be
+//!   compared with it, not with the maximum node Tick.
+//! - **Fork set start.** The dependency set of a Fork generation is built
+//!   only through the `_with_dependencies` methods, starting at the
+//!   invalidation's `first_tick`. The adapter does not require the first Tick
+//!   to be recorded: after a plain invalidation it accepts an append at any
+//!   Tick at or after `first_tick` into the empty set. The coordinator seam
+//!   (#552) guarantees the first Tick's nodes by always using the
+//!   `_with_dependencies` methods from the first Tick. A plain invalidation
+//!   (without dependencies) does not touch the dependency set. Rows of older
+//!   generations may be retained or dropped: unobservable, since a read of any
+//!   non-current generation is `MixedForkGeneration`.
+//! - **Stager-asserted record Tick.** Nothing in the store can verify that
+//!   the record Tick is the Tick the drafts commit
+//!   ([`CounterfactualBasisV1`] carries a Seq, not a Tick), so #552 owns the
+//!   correspondence between the record Tick and its drafts.
+//! - **Node Ticks and the parent cut.** Do NOT enforce that provisional Ticks
+//!   lie strictly after the parent cut, and do not check node Ticks against
+//!   the generation's first Tick. A Fork row holds only a (parent, Seq) fork
+//!   point, not a cut Tick, and an adapter cannot know the horizon. A root
+//!   node may carry a Tick BEFORE its record's Tick but lies at or after the
+//!   generation's first Tick. The coordinator seam (#552), which knows the
+//!   plan's parent cut and horizon, and `pos-time` enforce the
+//!   `first_tick..=horizon_tick` window.
+//! - **Committed prefix.** It has no write method yet (#554). Adapters keep
+//!   its storage and serve [`DependencyReadScopeV1::ParentPrefix`] reads;
+//!   their tests seed prefix rows through a test-only hook, as this crate's
+//!   fake store pokes its `parent_nodes` and `parent_edges`. Deleting a parent
+//!   Timeline purges its prefix rows.
+//! - **Purge.** Not an obligation of this contract yet. Deleting a Fork purges
+//!   its generation rows with the rest of its counterfactual state (#530), and
+//!   its reads then return `ForkNotFound`. A re-created Fork id starts with an
+//!   empty set.
+//! - **Error mapping.** Map [`CounterfactualDependencyErrorV1`] to the storage
+//!   error with `CounterfactualStoreErrorV1::from`: `InvalidEncoding` for
+//!   encoding and unknown-enum faults, `FieldOutOfBounds` for bounds,
+//!   page-limit, and missing-provenance faults, `BindingMismatch` for binding,
+//!   consumer, input, and cursor faults, and the namesake for the version,
+//!   order, and duplicate faults. A row that fails re-validation when it is
 //!   READ BACK from storage is corrupt state, not a caller fault: use
 //!   [`CounterfactualDependencyErrorV1::READ_BACK_FAULT`] (`CorruptState`).
-//! - Do NOT enforce that provisional Ticks lie strictly after the parent cut.
-//!   A Fork row holds only a (parent, Seq) fork point, not a cut Tick, and
-//!   roots may legitimately carry Ticks below the first Tick. The coordinator
-//!   seam (#552) owns it: it knows the plan's parent cut.
-//! - Check in this order, so adapters agree. An invalidation with
-//!   dependencies resolves the Fork first (fence, admitted and protected-Fork
-//!   guard, Fork lookup: `StorageFailure` or `ForkNotFound`), then checks its
-//!   record (provisional; record Tick equal to the command's first Tick, else
-//!   `BindingMismatch`) BEFORE the basis, so a bad record on a conflicting
-//!   basis is `BindingMismatch`. A later Tick rechecks the basis FIRST (stale
-//!   is the `Stale` outcome and records nothing), then provisional, then the
-//!   record Tick rule, then node identity (position key and digest
-//!   uniqueness: `DuplicateIdentity`), then set capacity.
-//! - Check set capacity (`ensure_set_capacity`) on LATER records only: the
-//!   invalidation record starts an empty set and is capped far below the set
-//!   bounds, so that check could never fail there.
-//! - A plain invalidation (without dependencies) does not touch the
-//!   dependency set. Rows of older generations may be retained or dropped:
-//!   unobservable, since a read of any non-current generation is
-//!   `MixedForkGeneration`.
-//! - Serve a Fork-generation read through the Fork's erasure read fence and
-//!   a parent-prefix read through the parent Timeline's own erasure read
-//!   fence, including its inherited scopes when the parent is itself a Fork,
-//!   exactly as every other Timeline read. A parent-prefix read names no
-//!   Fork, so the Fork's fence does not apply to it. Both fail closed
+//! - **Read fences.** Serve a Fork-generation read through the Fork's erasure
+//!   read fence and a parent-prefix read through the parent Timeline's own
+//!   erasure read fence, including its inherited scopes when the parent is
+//!   itself a Fork, exactly as every other Timeline read. A parent-prefix read
+//!   names no Fork, so the Fork's fence does not apply to it. Both fail closed
 //!   without a bound erasure gate. Serve the committed state as it stands;
 //!   that a generation is settled is the reader's obligation (see the
-//!   root-node rule). Order rows by the canonical coordinate and edge order,
-//!   and build pages with [`DependencyPageV1::try_new`], which also checks
-//!   that nodes and parent-prefix edges belong to the request scope (a Fork
-//!   scope cannot tell its edges apart and accepts them all), or
-//!   [`DependencyPageV1::from_ordered`], which trusts its rows. Its only
-//!   failure is a request cursor of the other row kind, a CALLER fault:
-//!   map it with `CounterfactualStoreErrorV1::from` (`BindingMismatch`), and
-//!   reserve `CorruptState` for STORED rows that fail `try_new` or scope
-//!   re-validation.
-//! - Read precedence. A parent-prefix read uses the PARENT Timeline's erasure
-//!   fence plus inherited-scope authorization; a Fork read uses only the
-//!   Fork's fence. A fence block is `StorageFailure`, never `ForkNotFound`.
-//!   `ForkNotFound` (missing, deleted, concealed or geographic-protected, or
-//!   unpublished for the Fork scope) precedes `MixedForkGeneration`, and a
-//!   wrong-kind request cursor is `BindingMismatch`. A parent-prefix read of
-//!   an existing Timeline with no rows (an unpublished Fork's Timeline id
-//!   included) is an empty page.
-//! - Adapter-specific bounds are allowed, not contract violations: an adapter
-//!   backed by a signed 64-bit integer may reject record or cursor Ticks
-//!   above `i64::MAX` (`SQLite` does: `FieldOutOfBounds` or `BindingMismatch`
-//!   before any fence or Fork lookup) and treat a parent-prefix `through_tick`
-//!   above `i64::MAX` as every row.
-//! - Test model: the `pos-core` fake store of the public contract test is the
-//!   reference model. Adapters add storage-, erasure-, and failure-specific
-//!   tests, and mirror the checklist ids C1 to C13 in
-//!   `counterfactual_dependency_memory_public.rs` and
-//!   `counterfactual_dependency_sqlite_public.rs`.
-//! - Recover an `OutcomeUnknown` write exactly as the storage port does; the
-//!   record is part of the same transaction, so the receipt or basis read
-//!   that settles the Tick settles the record.
+//!   root-node rule). The read precedence is on the read port.
+//! - **Adapter-specific bounds** are allowed, not contract violations: an
+//!   adapter backed by a signed 64-bit integer may reject record or cursor
+//!   Ticks above `i64::MAX` (`SQLite` does: `FieldOutOfBounds` or
+//!   `BindingMismatch` before any fence or Fork lookup) and treat a
+//!   parent-prefix `through_tick` above `i64::MAX` as every row.
+//! - **Test model.** The `pos-core` fake store of the public contract test is
+//!   the reference model. Adapters mirror these obligations in their own test
+//!   suites, which add storage-, erasure-, and failure-specific tests. Each
+//!   adapter PR (#423 Memory, #424 SQLite; Redmine #550 and #551) tags its
+//!   tests with the checklist ids C1 to C13 (C14, the schema validation, is
+//!   `SQLite` only).
 //!
 //! # Deferred
 //!
@@ -386,6 +366,8 @@ pub enum RecordedDependencyClassV1 {
 
 impl RecordedDependencyClassV1 {
     /// Every class, indexed by its wire code.
+    ///
+    /// Public only for tests and parity checks against the wire codes.
     pub const ALL: [Self; 5] = [
         Self::ExogenousFrozen,
         Self::InterventionAssigned,
@@ -1404,8 +1386,9 @@ fn continuation_valid<T: DependencyPagedRowV1>(
 ///
 /// Every method commits its record in the same atomic step as the Tick's
 /// Events and generation increment; a stale, conflicting, failed, or
-/// unknown-outcome commit records nothing. See the module's adapter
-/// obligations. Only the core coordinator may hold this capability.
+/// unknown-outcome commit records nothing. Each method documents its check
+/// order and errors; see also the module's adapter obligations. Only the core
+/// coordinator may hold this capability.
 pub trait CounterfactualDependencyRecordingPortV1: CounterfactualStorePortV1 {
     /// Atomically commit the whole invalidation command and its first Tick's
     /// dependency record.
@@ -1413,16 +1396,28 @@ pub trait CounterfactualDependencyRecordingPortV1: CounterfactualStorePortV1 {
     /// Behaves exactly like
     /// [`CounterfactualStorePortV1::commit_counterfactual_invalidation`], and
     /// additionally records `record` under the new generation in the same
-    /// transaction. The record must be provisional and at the command's
-    /// first Tick.
+    /// transaction, which starts that generation's set. The record must be
+    /// provisional and at the command's first Tick.
+    ///
+    /// Check in this order, so adapters agree: resolve the Fork first (fence,
+    /// admitted and protected-Fork guard, Fork lookup), then check the record
+    /// (provisional; record Tick equal to the command's first Tick) BEFORE the
+    /// basis, so a bad record on a conflicting basis is `BindingMismatch`.
+    /// The new generation's set is empty and the record is capped far below
+    /// the set bounds, so neither the identity check nor
+    /// [`TickDependencyRecordV1::ensure_set_capacity`] applies here.
     ///
     /// # Errors
-    /// Returns what the storage port returns, and `BindingMismatch` for a
-    /// record that is not provisional or not at the first Tick,
-    /// `FieldOutOfBounds` for a record that would exceed the recorded-set
-    /// bounds, and `DuplicateIdentity` for a node whose artifact digest or
-    /// position key is already recorded. Every error and every conflict
-    /// records nothing; after `OutcomeUnknown` the caller recovers with
+    /// Returns what the storage port returns (`StorageFailure` or
+    /// `ForkNotFound` from the Fork resolution among them), and
+    /// `BindingMismatch` for a record that is not provisional or not at the
+    /// first Tick. `DuplicateIdentity` and the set-capacity
+    /// `FieldOutOfBounds` arise only on
+    /// [`Self::append_counterfactual_tick_with_dependencies`]. A per-record
+    /// bound is enforced by [`TickDependencyRecordV1::try_new`] at
+    /// construction, before this call, so it is not a port error. Every error
+    /// and every conflict records nothing; after `OutcomeUnknown` the caller
+    /// recovers with
     /// [`CounterfactualStorePortV1::committed_generation_receipt`].
     fn commit_counterfactual_invalidation_with_dependencies(
         &mut self,
@@ -1439,17 +1434,29 @@ pub trait CounterfactualDependencyRecordingPortV1: CounterfactualStorePortV1 {
     /// transaction. The record must be provisional and its Tick strictly
     /// greater than the maximum record Tick already persisted in that
     /// generation (gaps are allowed), or, while the generation has no
-    /// records, not below the generation's first Tick. The Tick is
-    /// stager-asserted: the store cannot check it against the drafts.
+    /// records, not below the generation's first Tick. A generation with no
+    /// persisted first Tick (generation 0, a Fork never invalidated, a Fork
+    /// re-created at its generation floor until its next invalidation) takes
+    /// no record: its set is started by
+    /// [`Self::commit_counterfactual_invalidation_with_dependencies`]. The Tick
+    /// is stager-asserted: the store cannot check it against the drafts.
+    ///
+    /// Check in this order, so adapters agree: recheck the basis FIRST (stale
+    /// is the `Stale` outcome and records nothing), then provisional, then the
+    /// record Tick rule, then node identity (position key and digest
+    /// uniqueness within the recorded set), then set capacity
+    /// ([`TickDependencyRecordV1::ensure_set_capacity`]), which is why the
+    /// invalidation method, whose set starts empty, never checks it.
     ///
     /// # Errors
     /// Returns what the storage port returns, and `BindingMismatch` for a
-    /// record that is not provisional or whose Tick is not strictly after
-    /// the persisted record Ticks (or below the first Tick),
+    /// record that is not provisional, whose Tick is not strictly after the
+    /// persisted record Ticks (or is below the first Tick), or that targets a
+    /// generation with no persisted first Tick, `DuplicateIdentity` for a node
+    /// whose artifact digest or position key is already recorded, and
     /// `FieldOutOfBounds` for a record that would exceed the recorded-set
-    /// bounds, and `DuplicateIdentity` for a node whose artifact digest or
-    /// position key is already recorded. Every error and every stale outcome
-    /// records nothing; after `OutcomeUnknown` the caller recovers with
+    /// bounds. Every error and every stale outcome records nothing; after
+    /// `OutcomeUnknown` the caller recovers with
     /// [`CounterfactualStorePortV1::current_counterfactual_basis`].
     fn append_counterfactual_tick_with_dependencies(
         &mut self,
@@ -1474,6 +1481,24 @@ pub trait CounterfactualDependencyRecordingPortV1: CounterfactualStorePortV1 {
 /// onto, so a reader cannot mistake erasure for "no dependencies". See
 /// [`DependencyReadScopeV1::ensure_current`] for generation qualification and
 /// the module's adapter obligations for the read fence of each scope.
+///
+/// Read precedence. A parent-prefix read uses the PARENT Timeline's erasure
+/// fence plus inherited-scope authorization; a Fork read uses only the Fork's
+/// fence. A fence block is `StorageFailure`, never `ForkNotFound`.
+/// `ForkNotFound` (missing, deleted, concealed or geographic-protected, or
+/// unpublished for the Fork scope) precedes `MixedForkGeneration`, and a
+/// wrong-kind request cursor is `BindingMismatch`. A parent-prefix read of an
+/// existing Timeline with no rows (an unpublished Fork's Timeline id
+/// included) is an empty page.
+///
+/// Order rows by the canonical coordinate and edge order, and build pages
+/// with [`DependencyPageV1::try_new`], which also checks that nodes and
+/// parent-prefix edges belong to the request scope (a Fork scope cannot tell
+/// its edges apart and accepts them all), or [`DependencyPageV1::from_ordered`],
+/// which trusts its rows. Its only failure is a request cursor of the other
+/// row kind, a CALLER fault: map it with `CounterfactualStoreErrorV1::from`
+/// (`BindingMismatch`), and reserve `CorruptState` for STORED rows that fail
+/// `try_new` or scope re-validation.
 ///
 /// Pages do not echo their scope or generation: the caller owns the scope it
 /// asked for and must not mix pages of different requests. A Fork read cannot
