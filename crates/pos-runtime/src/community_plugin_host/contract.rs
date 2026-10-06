@@ -33,6 +33,9 @@ use super::error::CommunityPluginHostErrorV1;
 pub const MAX_OBSERVATION_BYTES_V1: usize = 1_048_576;
 /// WIT bound on prior and next state bytes, in bytes (1 MiB).
 pub const MAX_STATE_BYTES_V1: usize = 1_048_576;
+/// Bound on the summed `canonical-bytes` of one output's trace annotations,
+/// in bytes (1 MiB; ADR-061 revision 6).
+pub const MAX_TRACE_ANNOTATION_BYTES_V1: usize = 1_048_576;
 
 /// `contract-v1.artifact-ref`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -13,6 +13,7 @@
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
 use pos_runtime::community_plugin_host::{
     plugin_output_digest_v1, EventDraftV1, PluginOutputV1, TraceAnnotationV1,
+    MAX_TRACE_ANNOTATION_BYTES_V1,
 };
 use wasmtime::component::Val;
 
@@ -59,7 +60,7 @@ pub(crate) fn plugin_output(value: &Val, bounds: &OutputBounds) -> Lifted<Plugin
         event_drafts: event_drafts(drafts, &bounds.limits, &mut dependencies)?,
         next_state_schema: digest(schema)?,
         next_state_bytes: state_bytes(state, bounds.limits.state_bytes)?,
-        trace_annotations: trace_annotations(annotations, &mut dependencies)?,
+        trace_annotations: bounded_trace_annotations(annotations, &mut dependencies)?,
         consumed_dependencies: dependencies.charge(ordered_digests(consumed)?)?,
         output_digest: digest(output_digest)?,
     };
@@ -110,6 +111,21 @@ fn state_bytes(value: &Val, limit: u64) -> Lifted<Vec<u8>> {
     let state = bytes(value)?;
     within(state.len(), limit)?;
     Ok(state)
+}
+
+/// Trace annotations whose summed `canonical-bytes` stay within
+/// [`MAX_TRACE_ANNOTATION_BYTES_V1`].
+fn bounded_trace_annotations(
+    value: &Val,
+    dependencies: &mut DependencyBudget,
+) -> Lifted<Vec<TraceAnnotationV1>> {
+    let annotations = trace_annotations(value, dependencies)?;
+    let annotation_bytes = annotations
+        .iter()
+        .map(|annotation| annotation.canonical_bytes.len())
+        .fold(0, usize::saturating_add);
+    ensure(annotation_bytes <= MAX_TRACE_ANNOTATION_BYTES_V1, LIMIT)?;
+    Ok(annotations)
 }
 
 fn trace_annotations(
@@ -285,6 +301,23 @@ mod tests {
         let mut large = output();
         large.next_state_bytes.push(11);
         assert_eq!(validate(&sealed(large)), Err(LIMIT));
+    }
+
+    #[test]
+    fn annotation_bytes_stay_within_one_mebibyte_in_total() {
+        let half = MAX_TRACE_ANNOTATION_BYTES_V1 / 2;
+        let mut exact = output();
+        exact.trace_annotations = vec![annotation(Vec::new()), annotation(Vec::new())];
+        exact.trace_annotations[0].canonical_bytes = vec![1; half];
+        exact.trace_annotations[1].canonical_bytes = vec![2; MAX_TRACE_ANNOTATION_BYTES_V1 - half];
+        assert!(validate(&sealed(exact.clone())).is_ok());
+        exact.trace_annotations[1].canonical_bytes.push(3);
+        assert_eq!(validate(&sealed(exact.clone())), Err(LIMIT));
+        // The annotations field fails before the later consumed-dependencies
+        // field and the output digest.
+        exact.consumed_dependencies = vec![[2; 32], [1; 32]];
+        exact.output_digest = [0; 32];
+        assert_eq!(validate(&exact), Err(LIMIT));
     }
 
     #[test]

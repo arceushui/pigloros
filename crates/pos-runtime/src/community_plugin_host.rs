@@ -16,7 +16,7 @@ pub use contract::{
     GuestReturnV1, HostInputs, InvocationOptionsV1, InvocationReportV1, MeteringV1,
     OperationalLogRecord, PluginDescriptorV1, PluginErrorCodeV1, PluginInvocationV1,
     PluginOutputV1, TimelinePositionV1, TraceAnnotationV1, MAX_OBSERVATION_BYTES_V1,
-    MAX_STATE_BYTES_V1, PLUGIN_OUTPUT_DIGEST_DOMAIN_V1,
+    MAX_STATE_BYTES_V1, MAX_TRACE_ANNOTATION_BYTES_V1, PLUGIN_OUTPUT_DIGEST_DOMAIN_V1,
 };
 pub use error::{
     AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1, HostFailureClassV1,
