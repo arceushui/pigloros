@@ -389,8 +389,9 @@ struct PageQueryV1<'a> {
     limit: i64,
 }
 
-/// Raw node columns after the set: position key, schema ID, artifact digest,
-/// class code, origin code, input digests, and provenance digest.
+/// Raw node columns after the set, in the node SELECT column order: position
+/// key, schema ID, artifact digest, class code, origin code, input digests,
+/// and provenance digest.
 type NodeRowV1 = (
     i64,
     i64,
@@ -404,12 +405,14 @@ type NodeRowV1 = (
     Vec<u8>,
 );
 
-/// Raw edge columns after the set: position key, source digest, the
-/// consumer's schema ID and artifact digest, and the `IDP1` bytes.
+/// Raw edge columns after the set, in the edge SELECT column order: position
+/// key, source digest, the consumer's schema ID and artifact digest, and the
+/// `IDP1` bytes.
 type EdgeRowV1 = (i64, i64, String, i64, Vec<u8>, i64, Vec<u8>, Vec<u8>);
 
-/// Raw set aggregates: recorded node, edge, and declared-input totals, the
-/// highest record Tick, and the generation's first Tick.
+/// Raw set aggregates, in the `SET_STATE_SQL` column order: recorded node,
+/// edge, and declared-input totals, the highest record Tick, and the
+/// generation's first Tick.
 type SetStateRowV1 = (i64, i64, i64, Option<i64>, Option<i64>);
 
 /// Reads one kind of row for a page query.
@@ -449,10 +452,12 @@ fn sql_count(count: usize) -> i64 {
     i64::try_from(count).unwrap_or(i64::MAX)
 }
 
+/// Narrow a stored integer to `u32`; out of range is corrupt.
 fn stored_u32(value: i64) -> Result<u32, StoreError> {
     u32::try_from(value).or(Err(StoreError::CorruptState))
 }
 
+/// Widen a stored non-negative integer to `usize`; a negative is corrupt.
 fn stored_count(value: i64) -> Result<usize, StoreError> {
     usize::try_from(value).or(Err(StoreError::CorruptState))
 }
@@ -478,6 +483,7 @@ fn stored_origin(code: i64) -> Result<RecordedNodeOriginV1, StoreError> {
 
 /// Decode one stored node; a row that fails the contract's checks is corrupt.
 fn decode_node(row: NodeRowV1) -> Result<DependencyNodeRecordV1, StoreError> {
+    // Destructure in the `NodeRowV1` column order.
     let (tick, position, owner, ordinal, schema, digest, class, origin, inputs, provenance) = row;
     match (
         stored_u64(tick),
@@ -505,6 +511,7 @@ fn decode_node(row: NodeRowV1) -> Result<DependencyNodeRecordV1, StoreError> {
 
 /// Decode one stored edge, re-validating its `IDP1` bytes against its key.
 fn decode_edge(row: EdgeRowV1) -> Result<DependencyEdgeRecordV1, StoreError> {
+    // Destructure in the `EdgeRowV1` column order.
     let (tick, position, owner, ordinal, source, schema, consumer, bytes) = row;
     match (
         stored_u64(tick),
@@ -522,7 +529,9 @@ fn decode_edge(row: EdgeRowV1) -> Result<DependencyEdgeRecordV1, StoreError> {
     }
 }
 
+/// Decode the stored set aggregates; a negative or out-of-range value is corrupt.
 fn decode_set_state(row: SetStateRowV1) -> Result<SetStateV1, StoreError> {
+    // Destructure in the `SetStateRowV1` column order.
     let (nodes, edges, inputs, last, first) = row;
     match (
         [nodes, edges, inputs].map(stored_count),
@@ -762,6 +771,7 @@ fn admit_first_record(
     })
 }
 
+/// Insert the record's summary row for the set and Tick.
 fn insert_record_row(
     conn: &Connection,
     set: &DependencySetV1,
@@ -793,6 +803,7 @@ fn input_blob(node: &DependencyNodeRecordV1) -> Vec<u8> {
         .collect()
 }
 
+/// Insert every node of the record under the set.
 fn insert_nodes(
     conn: &Connection,
     set: &DependencySetV1,
@@ -829,6 +840,7 @@ fn insert_nodes(
     .map_err(SqliteStore::into_storage_error)
 }
 
+/// Insert every edge of the record under the set.
 fn insert_edges(
     conn: &Connection,
     set: &DependencySetV1,
@@ -949,6 +961,11 @@ impl SqliteStore {
 
     /// Write the invalidation's generation and insert its first record, if
     /// any, in the open transaction.
+    ///
+    /// The first record skips the collision and capacity checks. That is safe
+    /// because `TickDependencyRecordV1::try_new` already enforces the
+    /// per-record node, edge, input, and byte caps, which are far below the
+    /// set bounds, and the generation's set starts empty.
     fn write_recorded_generation(
         &self,
         command: &CounterfactualInvalidationCommandV1,
@@ -1043,7 +1060,7 @@ impl SqliteStore {
         record: Option<&TickDependencyRecordV1>,
     ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
         record
-            .map_or(Ok(()), |record| sql_integer(record.tick()).map(drop))
+            .map_or(Ok(()), |record| sql_integer(record.tick()).map(|_| ()))
             .and_then(|()| {
                 let staged =
                     self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
