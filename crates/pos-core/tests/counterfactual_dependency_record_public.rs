@@ -47,11 +47,12 @@ fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     })
 }
 
+fn unexpected_success<T: std::fmt::Debug, E>(value: &T) -> E {
+    std::panic::resume_unwind(Box::new(format!("unexpected success: {value:?}")))
+}
+
 fn err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
-    match result {
-        Ok(value) => std::panic::resume_unwind(Box::new(format!("unexpected success: {value:?}"))),
-        Err(error) => error,
-    }
+    result.map_or_else(|error| error, |value| unexpected_success(&value))
 }
 
 const fn hash(value: u8) -> Hash {
@@ -598,10 +599,10 @@ fn edge_count_is_bounded_at_the_limit() {
         .collect();
     let edges: Vec<EdgeRow> = nodes
         .iter()
-        .flat_map(|node| {
+        .flat_map(|row| {
             sources
                 .iter()
-                .map(move |source| edge_row(node.coordinate(), source))
+                .map(move |origin| edge_row(row.coordinate(), origin))
         })
         .collect();
     assert_eq!(edges.len(), MAX_TICK_DEPENDENCY_EDGES_V1);
@@ -663,20 +664,20 @@ fn edge_bytes_are_bounded_per_record() {
     // A node declares at most 4,096 inputs, so the full count needs two.
     let inputs = ascending_hashes(MAX_DEPENDENCY_NODE_INPUTS_V1);
     assert_eq!(count, 2 * inputs.len());
-    let consumers = [
+    let pair = [
         coord_at(17, "c", 0, indexed_hash(100_000)),
         coord_at(17, "c", 1, indexed_hash(100_001)),
     ];
-    let nodes: Vec<NodeRow> = consumers
+    let nodes: Vec<NodeRow> = pair
         .iter()
         .map(|consumer| node_row(consumer.clone(), PROVISIONAL, inputs.clone()))
         .collect();
     // The over-limit vector is built first and dropped before the at-limit
     // one exists, so only one of them is ever in memory.
-    let over = vec![full_edge(&consumers[0], inputs[0]); count + 1];
+    let over = vec![full_edge(&pair[0], inputs[0]); count + 1];
     let outcome = err(build(nodes.clone(), over));
     assert_eq!(outcome, DepError::FieldOutOfBounds);
-    let edges: Vec<EdgeRow> = consumers
+    let edges: Vec<EdgeRow> = pair
         .iter()
         .flat_map(|consumer| full_edges(consumer, &inputs))
         .collect();
@@ -1206,7 +1207,11 @@ struct FakeStore {
     /// The Tick of every record, with its generation: persisted apart from
     /// the node Ticks, which under-report it for a record of early roots.
     record_ticks: Vec<(u64, u64)>,
+    /// The first Tick of the current generation, known from its invalidation.
+    first_tick: u64,
+    /// Test-poked: the committed prefix has no write path here (#554).
     parent_nodes: Vec<NodeRow>,
+    /// Test-poked: the committed prefix has no write path here (#554).
     parent_edges: Vec<EdgeRow>,
 }
 
@@ -1219,6 +1224,7 @@ impl FakeStore {
             fork_nodes: Vec::new(),
             fork_edges: Vec::new(),
             record_ticks: Vec::new(),
+            first_tick: 17,
             parent_nodes: Vec::new(),
             parent_edges: Vec::new(),
         }
@@ -1271,8 +1277,9 @@ impl FakeStore {
         capacity.map_err(StoreError::from)
     }
 
-    /// Validate `record` for a later Tick: after the last persisted record
-    /// Tick, with no node position key or digest already in the set.
+    /// Validate `record` for a later Tick: strictly after the last persisted
+    /// record Tick, or not below the generation's first Tick while the set is
+    /// empty, with no node position key or digest already in the set.
     fn admit_later(&self, record: &TickRecord) -> Result<(), StoreError> {
         record.ensure_provisional()?;
         let last_tick = self
@@ -1281,7 +1288,9 @@ impl FakeStore {
             .filter(|(generation, _)| *generation == self.generation)
             .map(|(_, tick)| *tick)
             .max();
-        if last_tick.is_some_and(|last| record.tick() <= last) {
+        let first_tick = self.first_tick;
+        let rejected = last_tick.map_or(record.tick() < first_tick, |last| record.tick() <= last);
+        if rejected {
             return Err(StoreError::BindingMismatch);
         }
         let repeats = record.nodes().iter().any(|row| {
@@ -1322,6 +1331,7 @@ impl FakeStore {
             command.committed_receipt(&SEAL, self.head_after(command.first_tick_drafts()))?;
         self.head = receipt.first_tick_head();
         self.generation = receipt.generation().generation;
+        self.first_tick = command.first_tick();
         if let Some(record) = record {
             self.record(record, self.generation);
         }
@@ -1376,7 +1386,12 @@ impl FakeStore {
             _ => return Err(StoreError::ForkNotFound),
         };
         rows.sort_by_key(T::cursor);
-        DependencyPageV1::from_ordered(request, &rows).or(Err(DepError::READ_BACK_FAULT))
+        // A request cursor of the other row kind is the caller's fault.
+        let page = DependencyPageV1::from_ordered(request, &rows)?;
+        // A stored row that fails re-validation is corrupt state.
+        let checked =
+            DependencyPageV1::try_new(request, page.items().to_vec(), page.next().cloned());
+        checked.or(Err(DepError::READ_BACK_FAULT))
     }
 }
 
@@ -1670,6 +1685,7 @@ fn later_records_may_not_reuse_a_recorded_position_key_or_digest() {
 #[test]
 fn the_record_tick_is_persisted_apart_from_node_ticks() {
     let mut store = FakeStore::new();
+    store.first_tick = 5;
     let root_class = RecordedDependencyClassV1::InterventionAssigned;
     let root = class_row(coord(2, "r", 9), root_class, PROVISIONAL, Vec::new());
     let early = ok(TickRecord::try_new(5, PROVISIONAL, vec![root], Vec::new()));
@@ -1721,6 +1737,44 @@ fn reads_reject_cursors_of_the_wrong_row_kind() {
     let wrong = request(fork_scope(4), Some(edge_cursor), 2);
     assert_eq!(
         err(store.read_dependency_nodes(&wrong)),
+        StoreError::BindingMismatch
+    );
+}
+
+#[test]
+fn stored_rows_that_fail_revalidation_read_back_as_corrupt_state() {
+    let mut store = committed_store();
+    let committed = RecordedNodeOriginV1::Committed;
+    // A committed node stored under the Fork generation is out of scope.
+    let stray = node_row(coord(30, "q", 1), committed, Vec::new());
+    store.fork_nodes.push((4, stray));
+    assert_eq!(
+        err(collect_nodes(&store, fork_scope(4), 5)),
         StoreError::CorruptState
     );
+    // A provisional node stored in the parent prefix is out of scope.
+    let mut prefix_store = FakeStore::new();
+    prefix_store.parent_nodes = vec![node_row(coord(8, "w", 31), PROVISIONAL, Vec::new())];
+    assert_eq!(
+        err(collect_nodes(&prefix_store, prefix_scope(9), 2)),
+        StoreError::CorruptState
+    );
+}
+
+#[test]
+fn the_first_record_tick_may_not_precede_the_generation_first_tick() {
+    let mut store = FakeStore::new();
+    let plain = ok(store.commit_counterfactual_invalidation(&command()));
+    assert!(matches!(
+        plain,
+        CounterfactualInvalidationOutcomeV1::Committed(_)
+    ));
+    let below = ok(TickRecord::try_new(16, PROVISIONAL, Vec::new(), Vec::new()));
+    assert_eq!(
+        err(append_record(&mut store, &below)),
+        StoreError::BindingMismatch
+    );
+    assert_eq!(ok(collect_nodes(&store, fork_scope(4), 5)), Vec::new());
+    assert!(append_record(&mut store, &sample_record()).is_ok());
+    assert_eq!(ok(collect_nodes(&store, fork_scope(4), 5)).len(), 2);
 }

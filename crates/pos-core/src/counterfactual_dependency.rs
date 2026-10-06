@@ -85,9 +85,12 @@
 //!   `pos-time` then fails with `InterventionNodeMissing`. Reads filter and
 //!   order by the node's own Tick, never the record's, so a root node is
 //!   addressed at its effective Tick. Because a root can arrive in a later
-//!   record behind a reader's cursor, reads serve a SETTLED generation or
-//!   parent prefix only: paging a generation that is still being written is
-//!   not stable.
+//!   record behind a reader's cursor, paging a generation that is still being
+//!   written is not stable. That is a READER and coordinator obligation: read
+//!   a generation only after the final Tick record of the generation is
+//!   committed (a parent prefix likewise only once it is complete). An adapter
+//!   cannot know whether a generation is still being written, so it just
+//!   serves the committed state.
 //! - **Generation qualification.** Provisional rows are written under the
 //!   Fork generation the same transaction commits (the new generation for an
 //!   invalidation, the expected basis generation for a later Tick) and are
@@ -120,7 +123,12 @@
 //!   recorded set's declared-input total is held to the same edge bound.
 //!   Adapters enforce all three with
 //!   [`TickDependencyRecordV1::ensure_set_capacity`], passing the set's
-//!   [`RecordedSetCountsV1`]. One record commits
+//!   [`RecordedSetCountsV1`]. Adapters check each recorded set on its own
+//!   only: the graph `pos-time` consumes is the stitched parent prefix plus
+//!   Fork generation, which `pos-time` also caps at the same node and edge
+//!   totals, and a digest can repeat across the two sets. The host and
+//!   `pos-time` reject an oversized or duplicated stitched graph (fail
+//!   closed); no adapter can see both sets. One record commits
 //!   inside one Event Store transaction, so it is capped far lower
 //!   ([`MAX_TICK_DEPENDENCY_NODES_V1`] and
 //!   [`MAX_TICK_DEPENDENCY_EDGES_V1`], the same one to four ratio, which
@@ -156,7 +164,20 @@
 //! - Persist each record's Tick. It is not recoverable from the node Ticks
 //!   (a record made only of early roots carries them all before its Tick),
 //!   and a later record's Tick must be compared with it, not with the
-//!   maximum node Tick.
+//!   maximum node Tick. The record Tick must be STRICTLY GREATER than the
+//!   maximum persisted record Tick of the same recorded set; gaps are
+//!   allowed, and a violation is `BindingMismatch`. The dependency set of a
+//!   Fork generation is built only through the `_with_dependencies` methods,
+//!   starting at the invalidation's `first_tick` (the coordinator seam #552
+//!   must always use them). While the set has no records yet, compare the
+//!   record Tick with the generation's persisted first Tick (known from the
+//!   invalidation) and reject a record Tick below it with `BindingMismatch`.
+//! - The record Tick is STAGER-ASSERTED. Nothing in the store can verify that
+//!   it is the Tick the drafts commit ([`CounterfactualBasisV1`] carries a
+//!   Seq, not a Tick), so #552 owns the correspondence between the record
+//!   Tick and its drafts. An adapter reads the parent cut and the first Tick
+//!   from the Fork's persisted row; a write path for the parent prefix
+//!   belongs to #554.
 //! - Map [`CounterfactualDependencyErrorV1`] to the storage error with
 //!   `CounterfactualStoreErrorV1::from`: `InvalidEncoding` for encoding and
 //!   unknown-enum faults, `FieldOutOfBounds` for bounds, page-limit, and
@@ -174,12 +195,17 @@
 //!   fence, including its inherited scopes when the parent is itself a Fork,
 //!   exactly as every other Timeline read. A parent-prefix read names no
 //!   Fork, so the Fork's fence does not apply to it. Both fail closed
-//!   without a bound erasure gate. Serve a settled generation or prefix only
-//!   (see the root-node rule). Order rows by the canonical coordinate and
-//!   edge order, and build pages with [`DependencyPageV1::try_new`], which
-//!   also checks that nodes and parent-prefix edges belong to the request
-//!   scope (a Fork scope cannot tell its edges apart and accepts them all),
-//!   or [`DependencyPageV1::from_ordered`], which trusts its rows.
+//!   without a bound erasure gate. Serve the committed state as it stands;
+//!   that a generation is settled is the reader's obligation (see the
+//!   root-node rule). Order rows by the canonical coordinate and edge order,
+//!   and build pages with [`DependencyPageV1::try_new`], which also checks
+//!   that nodes and parent-prefix edges belong to the request scope (a Fork
+//!   scope cannot tell its edges apart and accepts them all), or
+//!   [`DependencyPageV1::from_ordered`], which trusts its rows. Its only
+//!   failure is a request cursor of the other row kind, a CALLER fault:
+//!   map it with `CounterfactualStoreErrorV1::from` (`BindingMismatch`), and
+//!   reserve `CorruptState` for STORED rows that fail `try_new` or scope
+//!   re-validation.
 //! - Recover an `OutcomeUnknown` write exactly as the storage port does; the
 //!   record is part of the same transaction, so the receipt or basis read
 //!   that settles the Tick settles the record.
@@ -1085,10 +1111,10 @@ impl DependencyPagedRowV1 for DependencyNodeRecordV1 {
 
     fn in_scope(&self, scope: DependencyReadScopeV1) -> bool {
         let committed = self.origin == RecordedNodeOriginV1::Committed;
-        match scope.through_tick() {
-            Some(through_tick) => committed && self.coordinate.tick <= through_tick,
-            None => !committed,
-        }
+        let tick = self.coordinate.tick;
+        scope
+            .through_tick()
+            .map_or(!committed, |through| committed && tick <= through)
     }
 
     fn cursor(&self) -> DependencyPageCursorV1 {
@@ -1373,12 +1399,16 @@ pub trait CounterfactualDependencyRecordingPortV1: CounterfactualStorePortV1 {
     /// Behaves exactly like
     /// [`CounterfactualStorePortV1::append_counterfactual_tick`], and
     /// additionally records `record` under the basis generation in the same
-    /// transaction. The record must be provisional and its Tick must come
-    /// after every Tick already recorded in that generation.
+    /// transaction. The record must be provisional and its Tick strictly
+    /// greater than the maximum record Tick already persisted in that
+    /// generation (gaps are allowed), or, while the generation has no
+    /// records, not below the generation's first Tick. The Tick is
+    /// stager-asserted: the store cannot check it against the drafts.
     ///
     /// # Errors
     /// Returns what the storage port returns, and `BindingMismatch` for a
-    /// record that is not provisional or not after the recorded Ticks,
+    /// record that is not provisional or whose Tick is not strictly after
+    /// the persisted record Ticks (or below the first Tick),
     /// `FieldOutOfBounds` for a record that would exceed the recorded-set
     /// bounds, and `DuplicateIdentity` for a node whose artifact digest or
     /// position key is already recorded. Every error and every stale outcome
@@ -1395,11 +1425,13 @@ pub trait CounterfactualDependencyRecordingPortV1: CounterfactualStorePortV1 {
 
 /// Read side of the dependency record: paged, canonically ordered reads.
 ///
-/// Reads serve a settled generation or parent prefix only: a root node can
-/// arrive in a later record behind a reader's cursor, so paging a generation
-/// that is still being written is not stable. An existing Timeline or Fork generation
-/// with no recorded rows yields an empty page; the host decides completeness
-/// from the graph digest it published. A Timeline that is unknown or erased,
+/// A root node can arrive in a later record behind a reader's cursor, so a
+/// READER must read a generation only after the final Tick record of the
+/// generation is committed; paging a generation that is still being written
+/// is not stable. Adapters just serve committed state. An existing Timeline
+/// or Fork generation with no recorded rows yields an empty page; the host
+/// decides completeness from the graph digest it published. A Timeline that
+/// is unknown or erased,
 /// as a parent prefix's or a Fork's, is `ForkNotFound` and never an empty
 /// page, the code every `pos-store` Timeline read maps a missing Timeline
 /// onto, so a reader cannot mistake erasure for "no dependencies". See
@@ -1417,7 +1449,9 @@ pub trait CounterfactualDependencyReadPortV1 {
     /// # Errors
     /// Returns `MixedForkGeneration` for a Fork scope that is not the
     /// committed generation, `ForkNotFound` for an unknown or erased
-    /// Timeline of either scope, `CorruptState`, or `StorageFailure`.
+    /// Timeline of either scope, `BindingMismatch` for a request cursor of
+    /// the other row kind, `CorruptState` for a stored row that fails
+    /// re-validation, or `StorageFailure`.
     fn read_dependency_nodes(
         &self,
         request: &DependencyPageRequestV1,
@@ -1428,7 +1462,9 @@ pub trait CounterfactualDependencyReadPortV1 {
     /// # Errors
     /// Returns `MixedForkGeneration` for a Fork scope that is not the
     /// committed generation, `ForkNotFound` for an unknown or erased
-    /// Timeline of either scope, `CorruptState`, or `StorageFailure`.
+    /// Timeline of either scope, `BindingMismatch` for a request cursor of
+    /// the other row kind, `CorruptState` for a stored row that fails
+    /// re-validation, or `StorageFailure`.
     fn read_dependency_edges(
         &self,
         request: &DependencyPageRequestV1,
