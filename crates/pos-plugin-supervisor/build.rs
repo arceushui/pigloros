@@ -11,7 +11,10 @@ use std::io::Write;
 fn main() {
     let mut out = std::io::stdout();
     drop(writeln!(out, "cargo::rustc-check-cfg=cfg(asan_build)"));
-    drop(writeln!(out, "cargo::rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS"));
+    drop(writeln!(
+        out,
+        "cargo::rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS"
+    ));
     let flags = std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
     if flags.contains("sanitizer=address") {
         drop(writeln!(out, "cargo::rustc-cfg=asan_build"));

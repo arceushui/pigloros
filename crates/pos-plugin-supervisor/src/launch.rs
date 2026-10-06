@@ -258,7 +258,10 @@ mod tests {
         assert_eq!(ceilings.cpu_seconds, 5);
         let request = WorkerFrameLimitsV1::REQUEST_BYTES as u64;
         let data = 65_536 + 2 * request + 512 * MIB as u64;
-        assert_eq!(ceilings.data_bytes, if cfg!(asan_build) { u64::MAX } else { data });
+        assert_eq!(
+            ceilings.data_bytes,
+            if cfg!(asan_build) { u64::MAX } else { data }
+        );
         let file_size = 65_536 + 33_554_432 + PROFILE_FILE_BYTES;
         assert_eq!(ceilings.file_size_bytes, file_size);
         assert_eq!(ceilings.core_bytes, 0);
