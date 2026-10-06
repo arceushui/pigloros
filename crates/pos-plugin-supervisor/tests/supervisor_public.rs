@@ -96,17 +96,24 @@ fn the_worker_runs_under_its_rlimit_ceilings() {
     let report = report();
     let limits = negotiated().limits().values();
     let ceilings = WorkerResourceCeilingsV1::for_invocation(&limits, PROMPT);
+    // An AddressSanitizer build lifts only the data ceiling (see build.rs).
+    let data = (!cfg!(asan_build)).then_some(("data", ceilings.data_bytes));
     for (name, value) in [
-        ("cpu", ceilings.cpu_seconds),
-        ("data", ceilings.data_bytes),
-        ("fsize", ceilings.file_size_bytes),
-        ("core", ceilings.core_bytes),
-    ] {
+        Some(("cpu", ceilings.cpu_seconds)),
+        data,
+        Some(("fsize", ceilings.file_size_bytes)),
+        Some(("core", ceilings.core_bytes)),
+    ]
+    .into_iter()
+    .flatten()
+    {
         assert_eq!(field(&report, name), format!("{value}:{value}"), "{name}");
     }
     assert_eq!(ceilings.cpu_seconds, 62);
-    // Allocating 1 GiB exceeds the data ceiling, so the worker aborts.
-    assert_eq!(reduce(b"allocate"), Err(Error::WorkerCrashed));
+    if !cfg!(asan_build) {
+        // Allocating 1 GiB exceeds the data ceiling, so the worker aborts.
+        assert_eq!(reduce(b"allocate"), Err(Error::WorkerCrashed));
+    }
 }
 
 #[test]

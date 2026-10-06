@@ -109,6 +109,22 @@ pub struct WorkerResourceCeilingsV1 {
     pub core_bytes: u64,
 }
 
+/// The `RLIMIT_DATA` ceiling for `memory_bytes` of guest memory.
+///
+/// An `AddressSanitizer` build (`asan_build`, set by `build.rs`) lifts this
+/// one ceiling: the sanitizer's shadow mapping is charged against it and
+/// would stop every instrumented worker from starting. No other build lifts
+/// it, and the other ceilings are never lifted.
+const fn data_ceiling(memory_bytes: u64) -> u64 {
+    if cfg!(asan_build) {
+        u64::MAX
+    } else {
+        memory_bytes
+            .saturating_add(2 * WorkerFrameLimitsV1::REQUEST_BYTES as u64)
+            .saturating_add(WORKER_RUNTIME_DATA_BYTES)
+    }
+}
+
 impl WorkerResourceCeilingsV1 {
     /// The ceilings for one invocation under `limits` and `watchdog`.
     ///
@@ -118,10 +134,7 @@ impl WorkerResourceCeilingsV1 {
     pub const fn for_invocation(limits: &DeterministicBudgetV1, watchdog: Duration) -> Self {
         Self {
             cpu_seconds: watchdog.as_secs().saturating_add(CPU_MARGIN_SECONDS),
-            data_bytes: limits
-                .memory_bytes
-                .saturating_add(2 * WorkerFrameLimitsV1::REQUEST_BYTES as u64)
-                .saturating_add(WORKER_RUNTIME_DATA_BYTES),
+            data_bytes: data_ceiling(limits.memory_bytes),
             file_size_bytes: limits
                 .memory_bytes
                 .saturating_add(MAX_WORKER_COMPONENT_BYTES_V1 as u64)
@@ -244,7 +257,8 @@ mod tests {
             WorkerResourceCeilingsV1::for_invocation(&limits, Duration::from_millis(3_500));
         assert_eq!(ceilings.cpu_seconds, 5);
         let request = WorkerFrameLimitsV1::REQUEST_BYTES as u64;
-        assert_eq!(ceilings.data_bytes, 65_536 + 2 * request + 512 * MIB as u64);
+        let data = 65_536 + 2 * request + 512 * MIB as u64;
+        assert_eq!(ceilings.data_bytes, if cfg!(asan_build) { u64::MAX } else { data });
         let file_size = 65_536 + 33_554_432 + PROFILE_FILE_BYTES;
         assert_eq!(ceilings.file_size_bytes, file_size);
         assert_eq!(ceilings.core_bytes, 0);
