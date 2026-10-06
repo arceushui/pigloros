@@ -357,7 +357,7 @@ fn v1_ceilings_lower_memory_and_fuel_only() -> TestResult {
     let ceilings = CommunityPluginCeilingsV1::V1.values();
     assert_eq!(ceilings.memory_bytes, 67_108_864);
     assert!(ceilings.memory_bytes.is_multiple_of(WASM_PAGE_BYTES_V1));
-    assert_eq!(ceilings.fuel, 10_000_000_000);
+    assert_eq!(ceilings.fuel, 1_000_000_000);
     assert_eq!(ceilings.host_calls, 1_000_000);
     assert_eq!(ceilings.event_bytes, 16_777_216);
     assert_eq!(ceilings.log_bytes, 16_384);

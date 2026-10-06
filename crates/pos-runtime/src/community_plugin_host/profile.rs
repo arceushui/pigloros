@@ -145,16 +145,17 @@ pub struct CommunityPluginCeilingsV1 {
 }
 
 impl CommunityPluginCeilingsV1 {
-    /// The provisional V1 host ceilings for both Local and Air-Gapped modes.
+    /// The V1 host ceilings for both Local and Air-Gapped modes.
     ///
-    /// Memory is 64 MiB (1,024 pages) and fuel is 10,000,000,000 units of
+    /// Memory is 64 MiB (1,024 pages) and fuel is 1,000,000,000 units of
     /// pinned Wasmtime fuel; host calls, Event bytes and log bytes stay at
-    /// their PMF1 V1 maxima. The values await an owner decision informed by
-    /// the #539 budget measurements.
+    /// their PMF1 V1 maxima. The owner chose these on 2026-10-06 from the #539
+    /// measurements, whose largest call (a 1 MiB reduce) used about 16.8
+    /// million fuel and 2.3 MB of memory.
     pub const V1: Self = Self {
         values: CeilingValuesV1 {
             memory_bytes: 1_024 * WASM_PAGE_BYTES_V1,
-            fuel: 10_000_000_000,
+            fuel: 1_000_000_000,
             host_calls: MAXIMA.host_calls,
             event_bytes: MAXIMA.event_bytes,
             log_bytes: MAXIMA.log_bytes,
