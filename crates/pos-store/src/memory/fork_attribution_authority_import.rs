@@ -23,7 +23,7 @@ use pos_core::{
 
 use super::MemoryStore;
 use crate::fork_attribution_authority_import::{
-    run_import, ForkAttributionAuthorityImportErrorV1 as ImportError,
+    core_failure, run_import, ForkAttributionAuthorityImportErrorV1 as ImportError,
     ForkAttributionAuthorityImportPortV1, ForkAttributionAuthorityImportReceiptV1,
     ForkAttributionAuthorityImportRequestV1, ImportBackendV1, InstallPlanV1, InstalledRowsV1,
     StoredImportV1,
@@ -151,14 +151,7 @@ impl MemoryStore {
                 .imported_fork_publication_operations
                 .contains_key(&operation_id)
             || self.fork_publication_artifacts.contains_key(&record_id)
-            || self
-                .fork_publication_operations
-                .values()
-                .any(|record| record.input().signed_manifest_record_id == record_id)
-            || self
-                .imported_fork_publication_operations
-                .values()
-                .any(|record| record.fields().signed_manifest_record_id == record_id)
+            || self.publication_operations_hold_record(record_id)
             || self
                 .fork_publication_bindings
                 .values()
@@ -282,6 +275,14 @@ impl ImportBackendV1 for MemoryStore {
             .filter(|record| record.input().child_timeline_id == child)
             .collect::<Vec<_>>();
         operations.sort_by_key(|record| record.input().logical_seq);
+        // Every registration of the child counts: a second one is an extra row.
+        let mut registration = self
+            .fork_classifier_registrations
+            .values()
+            .filter(|record| record.input().child_timeline_id == child)
+            .map(ForkClassifierRegistrationV1::to_canonical_cbor)
+            .collect::<Vec<_>>();
+        registration.sort();
         Ok(InstalledRowsV1 {
             binding: self
                 .imported_fork_principal_owner_bindings
@@ -320,11 +321,7 @@ impl ImportBackendV1 for MemoryStore {
                 .fork_classifier_tables
                 .get(&child)
                 .map(ForkClassifierTableV1::to_canonical_cbor),
-            registration: self
-                .fork_classifier_registrations
-                .values()
-                .find(|record| record.input().child_timeline_id == child)
-                .map(ForkClassifierRegistrationV1::to_canonical_cbor),
+            registration,
             operations: operations
                 .into_iter()
                 .map(ForkAppendOperationV1::to_canonical_cbor)
@@ -364,8 +361,9 @@ impl ImportBackendV1 for MemoryStore {
     }
 
     fn stage_child(&mut self, export: &TimelineExport) -> Result<(), ImportError> {
-        self.import_committed(export.timeline.meta.clone(), &export.events)?;
-        Ok(())
+        self.import_committed(export.timeline.meta.clone(), &export.events)
+            .map(|_| ())
+            .map_err(|error| core_failure(&error, ImportError::InvalidEventEvidence))
     }
 
     fn install_rows(&mut self, plan: &InstallPlanV1<'_>) -> Result<(), ImportError> {
@@ -603,6 +601,14 @@ mod tests {
                     ..operation.input().clone()
                 })?;
                 s.store.fork_append_operations.insert(hash(0xee), extra);
+                Ok(())
+            },
+            |s| {
+                // An extra registration of the child under another operation.
+                let graph = s.closure.classifier().ok_or("no classifier")?;
+                s.store
+                    .fork_classifier_registrations
+                    .insert(hash(0xed), graph.registration.clone());
                 Ok(())
             },
             |s| {

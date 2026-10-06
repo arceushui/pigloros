@@ -1117,7 +1117,7 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
         columns_query: "PRAGMA table_info(imported_fork_principal_owner_bindings)",
         columns: &[
             SqliteSchemaColumn {
-                name: "import_operation_id",
+                name: "pob1_operation_id",
                 kind: "BLOB",
                 not_null: false,
                 primary_key: true,
@@ -1136,7 +1136,7 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
             },
         ],
         constraints: &[
-            "CHECK (length(import_operation_id) = 32)",
+            "CHECK (length(pob1_operation_id) = 32)",
             "CHECK (length(principal_digest) = 32)",
             // The Principal digest is deliberately not unique: several imports
             // may share one Principal and Owner (ADR-105 erratum E10). The
@@ -2366,6 +2366,8 @@ impl SqliteStore {
                      last_authority_wall_time INTEGER NOT NULL DEFAULT 0
                  );
                  {}
+                 CREATE INDEX IF NOT EXISTS idx_imported_pob1_principal
+                     ON imported_fork_principal_owner_bindings(principal_digest);
                  INSERT OR IGNORE INTO fork_delivery_fence_counter (id, last_fence) VALUES (1, 0);
                  COMMIT;",
                 sqlite_schema_ddl(FORK_ADMISSION_SCHEMA_TABLES)

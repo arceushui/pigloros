@@ -35,6 +35,9 @@
 //!   `CorruptAuthority`. A row that names only the child, a publication, or
 //!   another semantic key, without anything under the operation ID, is an
 //!   occupied key and a `Conflict` (R6.8 step 3).
+//! - A corrupt imported `POB1` can only be detected on `SQLite`, which stores
+//!   canonical bytes; `MemoryStore` holds typed records, so the case cannot
+//!   arise there. On `SQLite` it is `CorruptAuthority`.
 //! - A Principal already bound to an equal Owner, locally or by an earlier
 //!   import, is not an occupancy conflict (erratum E10); the import keeps its
 //!   own `POB1` under its import operation ID in an imported store, so the
@@ -386,7 +389,7 @@ pub(crate) struct InstalledRowsV1 {
     pub(crate) interventions: Vec<Option<Vec<u8>>>,
     pub(crate) source: Option<Vec<u8>>,
     pub(crate) table: Option<Vec<u8>>,
-    pub(crate) registration: Option<Vec<u8>>,
+    pub(crate) registration: Vec<Vec<u8>>,
     pub(crate) operations: Vec<Vec<u8>>,
     pub(crate) publication_operation: Option<Vec<u8>>,
     pub(crate) publication_binding: Option<Vec<u8>>,
@@ -420,7 +423,10 @@ impl InstalledRowsV1 {
                 .collect(),
             source: graph.map(|graph| graph.source.to_canonical_cbor()),
             table: graph.map(|graph| graph.table.to_canonical_cbor()),
-            registration: graph.map(|graph| graph.registration.to_canonical_cbor()),
+            registration: graph
+                .map(|graph| graph.registration.to_canonical_cbor())
+                .into_iter()
+                .collect(),
             operations: closure
                 .append_operations()
                 .iter()
@@ -551,13 +557,10 @@ fn revalidate<S: ImportBackendV1>(
     stored: &StoredImportV1,
 ) -> Result<Receipt, ImportError> {
     let corrupt = ImportError::CorruptAuthority;
-    let prepared = PreparedImportV1::decode(&stored.envelope_bytes)
-        .ok()
-        .ok_or(corrupt)?;
+    let prepared = PreparedImportV1::decode(&stored.envelope_bytes).map_err(|_| corrupt)?;
     let admission =
         ImportedForkAttributionAdmissionV1::from_canonical_cbor(&stored.admission_bytes)
-            .ok()
-            .ok_or(corrupt)?;
+            .map_err(|_| corrupt)?;
     let generation = admission.input().issuer_policy_generation;
     let consistent = prepared.import_operation_id() == operation_id
         && prepared.envelope.full_envelope_digest() == stored.envelope_digest
@@ -673,7 +676,7 @@ fn precheck_events<S: EventStore>(
 
 /// Map a store or verification failure: storage failures never prove a
 /// verdict, so they are indeterminate, and any other failure is `rejection`.
-const fn core_failure(error: &CoreError, rejection: ImportError) -> ImportError {
+pub(crate) const fn core_failure(error: &CoreError, rejection: ImportError) -> ImportError {
     if matches!(
         error,
         CoreError::Storage(_) | CoreError::StorageOutcomeUnknown(_)
@@ -751,8 +754,7 @@ fn verify_staged<S: EventStore>(
 /// head equals the parent cut and its own range is empty.
 ///
 /// An honest adapter always stages exactly that, so this is defence in depth
-/// that ADR-105 requires; the fault-injecting `Probe` tests reach it. Do not
-/// remove it as a tautology.
+/// that ADR-105 requires. Do not remove it as a tautology.
 fn verify_empty_segment<S: EventStore>(
     store: &S,
     child: TimelineId,

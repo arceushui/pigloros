@@ -145,7 +145,10 @@ impl ImportedPrincipalOwnerBindingV1 {
     ///
     /// The returned input is the local projection, whose origin member is
     /// `Local`; the carried code-2 origin is
-    /// [`Self::authority_origin_digest`].
+    /// [`Self::authority_origin_digest`]. It is never an authority: it only
+    /// lets an import adapter key and compare the carried record.
+    ///
+    /// NOTE(#519): revisit this accessor when code 2 is activated.
     #[must_use]
     pub const fn input(&self) -> &PrincipalOwnerBindingInputV1 {
         self.binding.input()
@@ -216,6 +219,10 @@ impl ImportedForkAdmissionRecordV1 {
     }
 
     /// `FAR1` fields 2–13. The projected origin member is not field 14.
+    ///
+    /// This is the local projection only, never an authority.
+    ///
+    /// NOTE(#519): revisit this accessor when code 2 is activated.
     #[must_use]
     pub const fn fields(&self) -> &ForkAdmissionRecordInputV1 {
         self.record.input()
@@ -280,6 +287,10 @@ impl ImportedForkPublicationOperationV1 {
     }
 
     /// `FPO1` fields 2–12. The projected origin member is not field 13.
+    ///
+    /// This is the local projection only, never an authority.
+    ///
+    /// NOTE(#519): revisit this accessor when code 2 is activated.
     #[must_use]
     pub const fn fields(&self) -> &ForkPublicationOperationInputV1 {
         self.operation.input()

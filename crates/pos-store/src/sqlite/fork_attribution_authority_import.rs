@@ -20,7 +20,7 @@ use rusqlite::{params, types::Value, Connection, OptionalExtension};
 
 use super::{begin_immediate_sql, SqliteStore};
 use crate::fork_attribution_authority_import::{
-    run_import, ForkAttributionAuthorityImportErrorV1 as ImportError,
+    core_failure, run_import, ForkAttributionAuthorityImportErrorV1 as ImportError,
     ForkAttributionAuthorityImportPortV1, ForkAttributionAuthorityImportReceiptV1,
     ForkAttributionAuthorityImportRequestV1, ImportBackendV1, InstallPlanV1, InstalledRowsV1,
     StoredImportV1,
@@ -33,9 +33,9 @@ const KEY_EVIDENCE_PRESENT_SQL: &str = "SELECT EXISTS(SELECT 1 FROM imported_for
 const KEY_EVIDENCE_SQL: &str = "SELECT ikr1_cbor, ikt1_cbor FROM imported_fork_key_evidence
     WHERE import_operation_id = ?1";
 const BINDING_SQL: &str = "SELECT pob1_cbor FROM imported_fork_principal_owner_bindings
-    WHERE import_operation_id = ?1";
+    WHERE pob1_operation_id = ?1";
 const IMPORTED_BINDING_OPERATION_SQL: &str = "SELECT EXISTS(SELECT 1
-    FROM imported_fork_principal_owner_bindings WHERE import_operation_id = ?1)";
+    FROM imported_fork_principal_owner_bindings WHERE pob1_operation_id = ?1)";
 const IMPORTED_PRINCIPAL_SQL: &str = "SELECT pob1_cbor FROM imported_fork_principal_owner_bindings
     WHERE principal_digest = ?1";
 const ADMISSION_SQL: &str = "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1";
@@ -71,7 +71,7 @@ const KEYS_HELD_SQL: &str = "SELECT
     OR EXISTS(SELECT 1 FROM imported_fork_attribution_admissions WHERE child_id = ?1)
     OR EXISTS(SELECT 1 FROM fork_principal_owner_bindings WHERE operation_id = ?3)
     OR EXISTS(SELECT 1 FROM imported_fork_principal_owner_bindings
-              WHERE import_operation_id = ?3)
+              WHERE pob1_operation_id = ?3)
     OR EXISTS(SELECT 1 FROM fork_publication_bindings
               WHERE (child_id = ?1 AND final_logical_head = ?2)
                  OR operation_id = ?4 OR record_id = ?5)
@@ -110,7 +110,10 @@ impl ForkAttributionAuthorityImportPortV1 for SqliteStore {
 /// `final_logical_head >= 0` table `CHECK` rejects the insert. `local_seq` has
 /// no such `CHECK`, but it is bounded by the Event count of the segment, which
 /// the head already bounds. `sqlite_publication_head` in the parent module
-/// clamps to `-1` instead; both conventions yield a value no row holds.
+/// clamps to `-1` instead; both conventions yield a value no row holds. A
+/// head is the parent cut (read back from this store's own `INTEGER` heads)
+/// plus the segment length, so a wrapped value does not arise from honest
+/// state; a `CHECK` violation would surface as `StorageIndeterminate`.
 const fn sql_int(value: u64) -> i64 {
     i64::from_ne_bytes(value.to_ne_bytes())
 }
@@ -357,7 +360,7 @@ fn insert_authority_rows(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlit
     let binding = closure.principal_owner_binding();
     conn.execute(
         "INSERT INTO imported_fork_principal_owner_bindings
-         (import_operation_id, principal_digest, pob1_cbor)
+         (pob1_operation_id, principal_digest, pob1_cbor)
          VALUES (?1, ?2, ?3)",
         params![
             blob(binding.input().operation_id),
@@ -578,6 +581,7 @@ impl ImportBackendV1 for SqliteStore {
             .input()
             .operation_id;
         let [source, table, registration] = read_classifier_rows(conn, plan)?;
+        let registration = registration.into_iter().collect();
         let [publication_operation, publication_binding, publication_artifact] =
             read_publication_rows(conn, plan)?;
         let (key_record, key_tombstone) = read_key_evidence(conn, plan.import_operation_id())?;
@@ -607,8 +611,10 @@ impl ImportBackendV1 for SqliteStore {
     }
 
     fn stage_child(&mut self, export: &TimelineExport) -> Result<(), ImportError> {
-        self.create_timeline_with_meta(export.timeline.meta.clone())?;
-        self.append_committed(export.timeline.id(), &export.events)?;
+        self.create_timeline_with_meta(export.timeline.meta.clone())
+            .map_err(|error| core_failure(&error, ImportError::InvalidEventEvidence))?;
+        self.append_committed(export.timeline.id(), &export.events)
+            .map_err(|error| core_failure(&error, ImportError::InvalidEventEvidence))?;
         Ok(())
     }
 
@@ -639,8 +645,13 @@ mod tests {
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
     use super::*;
-    use crate::fae1_fixture::{
-        first, hash, pin_policy, request_for, Built, Fallible, Shape, Spec, World, PARENT_CUT,
+    use crate::{
+        fae1_fixture::{
+            attribution_identity, first, hash, pin_policy, request_for, Built, Fallible, Shape,
+            Spec, World, PARENT_CUT,
+        },
+        ForkManifestPublicationErrorV1, ForkManifestPublicationPortV1,
+        ForkManifestPublicationRequestV1,
     };
 
     type Outcome = Result<ForkAttributionAuthorityImportReceiptV1, ImportError>;
@@ -953,7 +964,7 @@ mod tests {
             ),
             format!(
                 "INSERT INTO imported_fork_principal_owner_bindings
-                 (import_operation_id, principal_digest, pob1_cbor)
+                 (pob1_operation_id, principal_digest, pob1_cbor)
                  VALUES ({binding}, zeroblob(32), x'00')"
             ),
             format!(
@@ -1221,6 +1232,26 @@ mod tests {
             bind(&state.store, 0x41),
             Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_local_publication_cannot_reuse_an_imported_operation_id() -> Fallible<()> {
+        let mut state = Imported::new()?;
+        let request = ForkManifestPublicationRequestV1 {
+            operation_id: hash(0x91),
+            child_timeline_id: state.world.child_at(0)?.id,
+            expected_final_logical_head: PARENT_CUT + 4,
+            signing_identity: attribution_identity("creator-a", 1),
+            private_material_digest: hash(1),
+            public_verification_key: pos_core::PublicKey::from_bytes([1; 32]),
+            expected_registry: pos_core::KeyRegistryStateV1::new(),
+        };
+        let outcome = state.store.commit_authorized::<(), _>(request, |_, _| Err(()));
+        assert_eq!(
+            outcome,
+            Err(ForkManifestPublicationErrorV1::CorruptOrConflicting)
+        );
         Ok(())
     }
 

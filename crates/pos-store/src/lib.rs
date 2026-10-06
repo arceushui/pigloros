@@ -35,11 +35,15 @@
 //! Disable `SQLite` entirely: `--no-default-features`
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-// The shared `FAE1` fixture under `tests/support` names this crate `pos_store`
-// in both the integration tests and these unit tests.
+// Test-only. The shared `FAE1` fixture under `tests/support` names this crate
+// `pos_store` in both the integration tests and these unit tests; the alias
+// below is the cost of sharing one fixture file between them.
 #[cfg(test)]
 extern crate self as pos_store;
 
+// Test-only. The fixture stays `pub` (a private module would make every
+// fixture item `unreachable_pub`), which is also what keeps its helpers that
+// only some test crates use from being dead code.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "../tests/support/fae1_fixture.rs"]
