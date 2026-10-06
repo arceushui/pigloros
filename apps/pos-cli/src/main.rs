@@ -121,16 +121,6 @@ use ulid::Ulid;
 
 include!("host_store.rs");
 
-#[cfg(test)]
-fn blank_manifest(timeline_id: TimelineId, head_hash: pos_core::Hash) -> pos_core::ReproManifest {
-    let roster = pos_core::ManifestPluginRosterV1::empty();
-    let created_at = pos_core::clock::WallTime::from_micros(0);
-    pos_core::ReproManifest::new(timeline_id, head_hash, created_at, roster, Vec::new(), None)
-        .unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!("a blank manifest must build: {error}")))
-        })
-}
-
 const POS_CLI_REPRODUCTION_HOST: &str = "pos-cli";
 const POS_CLI_REPRODUCTION_FORMAT: u32 = 1;
 /// Fixed manifest slot of the built-in reference agent Plugin.
@@ -143,6 +133,9 @@ const REFERENCE_AGENT_SLOT: &str = "reference.agent";
 const REFERENCE_OBSERVATION_SLOT: &str = "reference.observation";
 const SLOT_MISMATCH_ERROR: &str = "manifest recipe records slots this build does not use: \
      expected agent reference.agent and observation reference.observation";
+const ROSTER_SLOT_MISMATCH_ERROR: &str = "manifest Plugin roster does not hold exactly the \
+     recipe's recorded slots: record the run again with this build";
+const OWNER_VERIFIED_ERROR: &str = "reproduction requires an owner-verified policy closure";
 const MAX_EXPERIMENT_TICKS: u64 = 1_000_000;
 const TICK_LIMIT_ERROR: &str = "experiment tick count exceeds the maximum of 1000000";
 
@@ -202,10 +195,26 @@ struct ReferenceSlotsV1 {
     observation: String,
 }
 
-impl ReferenceSlotsV1 {
-    fn is_current(&self) -> bool {
-        self.agent == REFERENCE_AGENT_SLOT && self.observation == REFERENCE_OBSERVATION_SLOT
-    }
+fn validate_reference_slots(slots: &ReferenceSlotsV1) -> Result<(), &'static str> {
+    let agent = slots.agent == REFERENCE_AGENT_SLOT;
+    let observation = slots.observation == REFERENCE_OBSERVATION_SLOT;
+    let current = agent && observation;
+    current.then_some(()).ok_or(SLOT_MISMATCH_ERROR)
+}
+
+// The manifest roster must hold exactly the recipe's recorded slots, one row per slot.
+fn validate_roster_slots(
+    manifest: &pos_core::ReproManifest,
+    slots: &ReferenceSlotsV1,
+) -> Result<(), &'static str> {
+    let slot_of = pos_core::ManifestPluginEntryV1::stable_slot;
+    let rows = manifest.plugin_roster().entries().iter();
+    let recorded: Vec<&str> = rows.map(slot_of).collect();
+    let mut expected = [slots.agent.as_str(), slots.observation.as_str()];
+    expected.sort_unstable();
+    (recorded == expected)
+        .then_some(())
+        .ok_or(ROSTER_SLOT_MISMATCH_ERROR)
 }
 
 #[cfg(not(test))]
@@ -589,38 +598,71 @@ fn run_builtin_reference_experiment_fixture(
     store_config: StoreConfig,
     ticks: u64,
 ) -> Result<RunResult, Box<dyn std::error::Error>> {
-    use pos_core::ids::EntityId;
-    use pos_plugin_rule_agent::{RuleAgentDriver, RuleAgentPlugin, RuleAgentReducer};
-    use pos_plugin_synthetic_obs::{SyntheticDriver, SyntheticObsPlugin, SyntheticReducer};
-
     let mut exp = Experiment::new(ExperimentConfig {
         name: "cli-fixture".to_owned(),
         stop: StopCondition::MaxTicks(ticks),
         store_config,
     });
-    let agent_entity = EntityId::new();
+    reference_slots()
+        .map_err(Box::<dyn std::error::Error>::from)
+        .and_then(|slots| register_reference_plugins(&mut exp, slots))
+        .and_then(|()| admit_reference_plugins(&mut exp))
+        .and_then(|_admitted| exp.run().map_err(Into::into))
+}
+
+// The fixed agent and observation slots, in that order.
+#[cfg(test)]
+type ReferenceSlotPair = [pos_runtime::ManifestSlotV1; 2];
+
+// Both constants satisfy the slot grammar, so this chain has no reachable error arm.
+#[cfg(test)]
+fn reference_slots() -> Result<ReferenceSlotPair, pos_runtime::ManifestSlotErrorV1> {
+    let agent = pos_runtime::ManifestSlotV1::try_new(REFERENCE_AGENT_SLOT);
+    agent.and_then(|agent| {
+        let observation = pos_runtime::ManifestSlotV1::try_new(REFERENCE_OBSERVATION_SLOT);
+        observation.map(|observation| [agent, observation])
+    })
+}
+
+#[cfg(test)]
+fn register_reference_plugins(
+    exp: &mut Experiment,
+    slots: ReferenceSlotPair,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use pos_core::ids::EntityId;
+    use pos_plugin_rule_agent::{RuleAgentDriver, RuleAgentPlugin, RuleAgentReducer};
+    use pos_plugin_synthetic_obs::{SyntheticDriver, SyntheticObsPlugin, SyntheticReducer};
+
+    let [agent_slot, observation_slot] = slots;
     let agent_plugin = RuleAgentPlugin::new();
-    exp.register_local(
-        &agent_plugin,
-        pos_runtime::ManifestSlotV1::try_new(REFERENCE_AGENT_SLOT)?,
-        vec![REFERENCE_AGENT_SLOT.to_owned()],
-        Some(Box::new(RuleAgentReducer)),
-        Some(Box::new(RuleAgentDriver::new(
-            agent_entity,
-            agent_plugin.actions().to_vec(),
-        ))),
-    )?;
+    let agent_driver = RuleAgentDriver::new(EntityId::new(), agent_plugin.actions().to_vec());
     let obs_plugin = SyntheticObsPlugin::new();
     exp.register_local(
-        &obs_plugin,
-        pos_runtime::ManifestSlotV1::try_new(REFERENCE_OBSERVATION_SLOT)?,
-        vec![REFERENCE_OBSERVATION_SLOT.to_owned()],
-        Some(Box::new(SyntheticReducer)),
-        Some(Box::new(SyntheticDriver::new(EntityId::new()))),
-    )?;
+        &agent_plugin,
+        agent_slot,
+        vec![REFERENCE_AGENT_SLOT.to_owned()],
+        Some(Box::new(RuleAgentReducer)),
+        Some(Box::new(agent_driver)),
+    )
+    .and_then(|()| {
+        exp.register_local(
+            &obs_plugin,
+            observation_slot,
+            vec![REFERENCE_OBSERVATION_SLOT.to_owned()],
+            Some(Box::new(SyntheticReducer)),
+            Some(Box::new(SyntheticDriver::new(EntityId::new()))),
+        )
+    })
+    .map_err(Into::into)
+}
+
+#[cfg(test)]
+fn admit_reference_plugins(
+    exp: &mut Experiment,
+) -> Result<pos_runtime::AdmittedCompositionV1, Box<dyn std::error::Error>> {
     let owner = pos_core::OwnerIdV1::from_static("pos-cli");
-    drop(exp.admit_local_manifest_registration(owner, 1)?);
-    exp.run().map_err(Into::into)
+    let admitted = exp.admit_local_manifest_registration(owner, 1);
+    admitted.map_err(Into::into)
 }
 
 fn cmd_experiment_run(path: &str, ticks: u64) -> Result<(), Box<dyn std::error::Error>> {
@@ -682,17 +724,18 @@ fn cli_reproduction_recipe(ticks: u64) -> ReproductionRecipe {
 fn cmd_experiment_reproduce(manifest_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::read_to_string(manifest_path)
         .map_err(Into::into)
-        .and_then(|json| {
-            serde_json::from_str::<ReproductionManifest>(&json).map_err(Into::into)
-        })
+        .and_then(|json| serde_json::from_str::<ReproductionManifest>(&json).map_err(Into::into))
         .and_then(reproduce_manifest)
 }
 
 fn reproduce_manifest(
     reproduction: ReproductionManifest,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = reproduce_cli_recipe(reproduction.recipe)?;
-    Err("reproduction requires an owner-verified policy closure".into())
+    let decoded = reproduce_cli_recipe(reproduction.recipe)?;
+    let slots = &decoded.builtin_reference_v1.slots;
+    validate_roster_slots(&reproduction.manifest, slots)
+        .map_err(Into::into)
+        .and_then(|()| Err(OWNER_VERIFIED_ERROR.into()))
 }
 
 fn reproduce_cli_recipe(
@@ -705,11 +748,10 @@ fn reproduce_cli_recipe(
         return Err("manifest recipe has an unsupported format version".into());
     }
     let decoded: CliExperimentRecipe = serde_json::from_value(recipe.configuration)?;
-    validate_experiment_ticks(decoded.builtin_reference_v1.ticks)?;
-    if !decoded.builtin_reference_v1.slots.is_current() {
-        return Err(SLOT_MISMATCH_ERROR.into());
-    }
-    Ok(decoded)
+    validate_experiment_ticks(decoded.builtin_reference_v1.ticks)
+        .and_then(|()| validate_reference_slots(&decoded.builtin_reference_v1.slots))
+        .map(|()| decoded)
+        .map_err(Into::into)
 }
 
 fn validate_experiment_ticks(ticks: u64) -> Result<(), &'static str> {
@@ -1103,7 +1145,13 @@ mod tests {
 
     #[test]
     fn cmd_experiment_reproduce_rejects_manifest_without_recipe() {
-        let manifest = crate::blank_manifest(TimelineId::new(), pos_core::Hash::zero());
+        let manifest = pos_core::ReproManifest::recorded(
+            TimelineId::new(),
+            pos_core::Hash::zero(),
+            pos_core::WallTime::from_micros(0),
+            pos_core::ManifestPluginRosterV1::empty(),
+            None,
+        );
         let file = tempfile::NamedTempFile::new().test_ok();
         std::fs::write(file.path(), serde_json::to_string(&manifest).test_ok()).test_ok();
         assert!(cmd_experiment_reproduce(file.path().to_str().test_ok()).is_err());
@@ -1118,14 +1166,122 @@ mod tests {
 
     #[test]
     fn cmd_experiment_reproduce_requires_owner_verified_manifest() {
-        let manifest = ReproductionManifest {
-            manifest: crate::blank_manifest(TimelineId::new(), pos_core::Hash::zero()),
-            recipe: cli_reproduction_recipe(1),
-        };
+        let slots = [REFERENCE_AGENT_SLOT, REFERENCE_OBSERVATION_SLOT];
+        let error = reproduce_error_for(&roster_manifest(&slots));
+        assert_eq!(error, OWNER_VERIFIED_ERROR);
+    }
+
+    // A manifest whose roster holds exactly `slots`, with fresh `PluginId`s and dummy closures.
+    fn roster_manifest(slots: &[&str]) -> pos_core::ReproManifest {
+        let rows = slots.iter().map(|slot| {
+            pos_core::ManifestPluginEntryV1::new(
+                *slot,
+                pos_core::ids::PluginId::new(),
+                "reference",
+                "0.1.0",
+                pos_core::Hash::from_bytes([1; 32]),
+                vec![1],
+            )
+            .test_ok()
+        });
+        let roster = pos_core::ManifestPluginRosterV1::new(rows.collect()).test_ok();
+        pos_core::ReproManifest::recorded(
+            TimelineId::new(),
+            pos_core::Hash::zero(),
+            pos_core::WallTime::from_micros(0),
+            roster,
+            None,
+        )
+    }
+
+    // Write a reproduction file around `manifest` and return the reproduce error message.
+    fn reproduce_error_for(manifest: &pos_core::ReproManifest) -> String {
+        let reproduction = serde_json::json!({
+            "manifest": manifest,
+            "recipe": cli_reproduction_recipe(1),
+        });
+        reproduce_file_error(&reproduction)
+    }
+
+    fn reproduce_file_error(document: &serde_json::Value) -> String {
         let file = tempfile::NamedTempFile::new().test_ok();
-        std::fs::write(file.path(), serde_json::to_string(&manifest).test_ok()).test_ok();
+        std::fs::write(file.path(), document.to_string()).test_ok();
         let error = cmd_experiment_reproduce(file.path().to_str().test_ok()).test_err();
-        assert!(error.to_string().contains("owner-verified policy closure"));
+        error.to_string()
+    }
+
+    #[test]
+    fn cmd_experiment_reproduce_rejects_a_roster_that_differs_from_the_recorded_slots() {
+        let cases: [&[&str]; 4] = [
+            &[],
+            &[REFERENCE_AGENT_SLOT],
+            &[REFERENCE_AGENT_SLOT, "other.observation"],
+            &[REFERENCE_AGENT_SLOT, REFERENCE_OBSERVATION_SLOT, "extra.plugin"],
+        ];
+        for slots in cases {
+            let error = reproduce_error_for(&roster_manifest(slots));
+            assert_eq!(error, ROSTER_SLOT_MISMATCH_ERROR, "{slots:?}");
+        }
+    }
+
+    // The old name-keyed manifest shape, as an earlier build wrote it.
+    fn old_shape_manifest() -> serde_json::Value {
+        serde_json::json!({
+            "timeline_id": "01HZY0000000000000000000000",
+            "head_hash": "00",
+            "created_at": 0,
+            "plugin_versions": {"rule-agent": "0.1.0"},
+            "output_policy_digests": {},
+            "replay_policy_identities": {},
+            "replay_policy_closures": {},
+            "replay_policy_closure_identities": {},
+            "adapter_records": [],
+            "label": null,
+        })
+    }
+
+    fn mixed_shape_manifest() -> serde_json::Value {
+        let mut manifest = old_shape_manifest();
+        manifest["manifest_plugin_roster_version"] = serde_json::json!(1);
+        manifest["manifest_plugin_entries"] = serde_json::json!([]);
+        manifest
+    }
+
+    #[test]
+    fn cmd_experiment_reproduce_reports_old_and_mixed_manifest_shapes() {
+        let unsupported = pos_core::ReproManifestError::UnsupportedManifestVersion { found: None };
+        let field = "plugin_versions";
+        let ambiguous = pos_core::ReproManifestError::AmbiguousLegacyManifest { field };
+        let cases = [
+            (old_shape_manifest(), unsupported),
+            (mixed_shape_manifest(), ambiguous),
+        ];
+        for (manifest, expected) in cases {
+            let reproduction = serde_json::json!({
+                "manifest": manifest,
+                "recipe": cli_reproduction_recipe(1),
+            });
+            let error = reproduce_file_error(&reproduction);
+            assert!(error.contains(&expected.to_string()), "{error}");
+        }
+    }
+
+    #[test]
+    fn cmd_experiment_verify_reports_old_and_mixed_manifest_shapes() {
+        let unsupported = pos_core::ReproManifestError::UnsupportedManifestVersion { found: None };
+        let field = "plugin_versions";
+        let ambiguous = pos_core::ReproManifestError::AmbiguousLegacyManifest { field };
+        let cases = [
+            (old_shape_manifest(), unsupported),
+            (mixed_shape_manifest(), ambiguous),
+        ];
+        for (manifest, expected) in cases {
+            let file = tempfile::NamedTempFile::new().test_ok();
+            std::fs::write(file.path(), manifest.to_string()).test_ok();
+            let error = cmd_experiment_verify(file.path().to_str().test_ok()).test_err();
+            let message = error.to_string();
+            assert!(message.contains(&expected.to_string()), "{message}");
+        }
     }
 
     #[test]
@@ -1137,7 +1293,13 @@ mod tests {
     #[test]
     fn reproduce_manifest_rejects_a_different_host_before_running() {
         let reproduction = ReproductionManifest {
-            manifest: crate::blank_manifest(TimelineId::new(), pos_core::Hash::zero()),
+            manifest: pos_core::ReproManifest::recorded(
+                TimelineId::new(),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
+            ),
             recipe: ReproductionRecipe::new("another-host", 1, serde_json::json!({})),
         };
         assert!(reproduce_manifest(reproduction).is_err());
@@ -1172,7 +1334,7 @@ mod tests {
         })
     }
 
-    fn recipe_with_slots(slots: serde_json::Value) -> ReproductionRecipe {
+    fn recipe_with_slots(slots: &serde_json::Value) -> ReproductionRecipe {
         ReproductionRecipe::new(
             POS_CLI_REPRODUCTION_HOST,
             POS_CLI_REPRODUCTION_FORMAT,
@@ -1182,7 +1344,7 @@ mod tests {
 
     #[test]
     fn reproduce_cli_recipe_accepts_the_recorded_reference_slots() {
-        let recipe = recipe_with_slots(recorded_slots());
+        let recipe = recipe_with_slots(&recorded_slots());
         let decoded = reproduce_cli_recipe(recipe).test_ok();
         assert_eq!(decoded.builtin_reference_v1.slots.agent, "reference.agent");
         assert_eq!(
@@ -1202,7 +1364,7 @@ mod tests {
             "observation": "other.observation",
         });
         for slots in [renamed_agent, renamed_observation] {
-            let recipe = recipe_with_slots(slots);
+            let recipe = recipe_with_slots(&slots);
             let error = reproduce_cli_recipe(recipe).err().test_ok();
             assert_eq!(error.to_string(), SLOT_MISMATCH_ERROR);
         }
@@ -1217,7 +1379,7 @@ mod tests {
             missing,
         );
         assert!(reproduce_cli_recipe(recipe).is_err());
-        let partial = recipe_with_slots(serde_json::json!({"agent": REFERENCE_AGENT_SLOT}));
+        let partial = recipe_with_slots(&serde_json::json!({"agent": REFERENCE_AGENT_SLOT}));
         assert!(reproduce_cli_recipe(partial).is_err());
     }
 
@@ -1255,7 +1417,13 @@ mod tests {
     #[test]
     fn cmd_experiment_reproduce_rejects_unknown_envelope_field() {
         let reproduction = ReproductionManifest {
-            manifest: crate::blank_manifest(TimelineId::new(), pos_core::Hash::zero()),
+            manifest: pos_core::ReproManifest::recorded(
+                TimelineId::new(),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
+            ),
             recipe: cli_reproduction_recipe(1),
         };
         let mut json = serde_json::to_value(reproduction).test_ok();
@@ -1270,7 +1438,13 @@ mod tests {
     #[test]
     fn cmd_experiment_reproduce_rejects_unknown_kernel_manifest_field_before_execution() {
         let reproduction = ReproductionManifest {
-            manifest: crate::blank_manifest(TimelineId::new(), pos_core::Hash::zero()),
+            manifest: pos_core::ReproManifest::recorded(
+                TimelineId::new(),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
+            ),
             recipe: cli_reproduction_recipe(1),
         };
         let mut json = serde_json::to_value(reproduction).test_ok();
@@ -1317,7 +1491,13 @@ mod tests {
         let mut store = open_store(StoreConfig::Sqlite { path: db_path }).test_ok();
         let tl = store.create_timeline("verify-real").test_ok();
 
-        let manifest = crate::blank_manifest(tl.id(), pos_core::crypto::Hash::zero());
+        let manifest = pos_core::ReproManifest::recorded(
+            tl.id(),
+            pos_core::crypto::Hash::zero(),
+            pos_core::WallTime::from_micros(0),
+            pos_core::ManifestPluginRosterV1::empty(),
+            None,
+        );
         let json = serde_json::to_string(&manifest).test_ok();
         std::fs::write(&manifest_path, &json).test_ok();
 
@@ -1719,9 +1899,12 @@ mod coverage_tests {
         use tempfile::NamedTempFile;
 
         // Build a manifest with a random timeline_id that won't exist in a fresh store
-        let manifest = crate::blank_manifest(
+        let manifest = pos_core::ReproManifest::recorded(
             TimelineId::new(),
             pos_core::crypto::Hash::from_bytes([0xAB; 32]),
+            pos_core::WallTime::from_micros(0),
+            pos_core::ManifestPluginRosterV1::empty(),
+            None,
         );
         let json = serde_json::to_string(&manifest).test_ok();
         let mut f = NamedTempFile::new().test_ok();
@@ -1874,7 +2057,13 @@ mod main_coverage {
 
             // Build a manifest pointing at this timeline with head_hash = zero
             // (no events appended → last().map_or(zero, ...) = zero)
-            let manifest = crate::blank_manifest(tl.id(), pos_core::crypto::Hash::zero());
+            let manifest = pos_core::ReproManifest::recorded(
+                tl.id(),
+                pos_core::crypto::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
+            );
             let json = serde_json::to_string(&manifest).test_ok();
             let mut f = NamedTempFile::new().test_ok();
             std::io::Write::write_all(&mut f, json.as_bytes()).test_ok();
@@ -1939,7 +2128,13 @@ mod final_coverage {
         let tl = store.create_timeline("match-test").test_ok();
 
         // Empty timeline → last event = None → head_hash = Hash::zero()
-        let manifest = crate::blank_manifest(tl.id(), pos_core::crypto::Hash::zero());
+        let manifest = pos_core::ReproManifest::recorded(
+            tl.id(),
+            pos_core::crypto::Hash::zero(),
+            pos_core::WallTime::from_micros(0),
+            pos_core::ManifestPluginRosterV1::empty(),
+            None,
+        );
 
         let mut output = Vec::new();
         let result = report_manifest_head_verification(&manifest, store.as_ref(), &mut output);
@@ -1957,9 +2152,12 @@ mod final_coverage {
         let tl = store.create_timeline("mismatch-test").test_ok();
 
         // Use a non-zero hash — won't match empty timeline's zero hash
-        let manifest = crate::blank_manifest(
+        let manifest = pos_core::ReproManifest::recorded(
             tl.id(),
             pos_core::crypto::Hash::from_bytes([0xFFu8; 32]),
+            pos_core::WallTime::from_micros(0),
+            pos_core::ManifestPluginRosterV1::empty(),
+            None,
         );
 
         let mut output = Vec::new();
@@ -1996,9 +2194,12 @@ mod final_coverage {
 
         let store = open_store(StoreConfig::Memory).test_ok();
         // Manifest points at a timeline that was never created in this store.
-        let manifest = crate::blank_manifest(
+        let manifest = pos_core::ReproManifest::recorded(
             TimelineId::new(),
             pos_core::crypto::Hash::from_bytes([0xAB; 32]),
+            pos_core::WallTime::from_micros(0),
+            pos_core::ManifestPluginRosterV1::empty(),
+            None,
         );
         let result = verify_manifest_against_store(&manifest, store.as_ref());
         assert_eq!(result.test_ok(), ManifestHeadVerification::Mismatch);
@@ -2012,9 +2213,12 @@ mod final_coverage {
         let dir = tempfile::tempdir().test_ok();
         // Write a manifest.json whose companion .db does NOT exist.
         let manifest_path = dir.path().join("no-companion-manifest.json");
-        let manifest = crate::blank_manifest(
+        let manifest = pos_core::ReproManifest::recorded(
             TimelineId::new(),
             pos_core::crypto::Hash::from_bytes([0xCC; 32]),
+            pos_core::WallTime::from_micros(0),
+            pos_core::ManifestPluginRosterV1::empty(),
+            None,
         );
         let json = serde_json::to_string(&manifest).test_ok();
         std::fs::write(&manifest_path, &json).test_ok();
@@ -2061,14 +2265,23 @@ mod final_coverage {
         let chain_head = pos_core::crypto::Hash::from_bytes(*hasher.finalize().as_bytes());
 
         // Manifest with the correct chain_head → timeline-head-only verification.
-        let manifest = crate::blank_manifest(tl.id(), chain_head);
+        let manifest = pos_core::ReproManifest::recorded(
+            tl.id(),
+            chain_head,
+            pos_core::WallTime::from_micros(0),
+            pos_core::ManifestPluginRosterV1::empty(),
+            None,
+        );
         let result = verify_manifest_against_store(&manifest, store.as_ref());
         assert_eq!(result.test_ok(), ManifestHeadVerification::TimelineHeadOnly);
 
         // Manifest with wrong hash → should MISMATCH
-        let bad_manifest = crate::blank_manifest(
+        let bad_manifest = pos_core::ReproManifest::recorded(
             tl.id(),
             pos_core::crypto::Hash::from_bytes([0xDEu8; 32]),
+            pos_core::WallTime::from_micros(0),
+            pos_core::ManifestPluginRosterV1::empty(),
+            None,
         );
         let bad_result = verify_manifest_against_store(&bad_manifest, store.as_ref());
         assert_eq!(bad_result.test_ok(), ManifestHeadVerification::Mismatch);
@@ -2368,7 +2581,13 @@ mod fault_injection_tests {
             hasher.update(e.payload_hash.as_bytes());
         }
         let chain_head = pos_core::crypto::Hash::from_bytes(*hasher.finalize().as_bytes());
-        let manifest = crate::blank_manifest(tl.id(), chain_head);
+        let manifest = pos_core::ReproManifest::recorded(
+            tl.id(),
+            chain_head,
+            pos_core::WallTime::from_micros(0),
+            pos_core::ManifestPluginRosterV1::empty(),
+            None,
+        );
         let manifest_path = path.replace(".db", "-manifest.json");
         std::fs::write(&manifest_path, serde_json::to_string(&manifest).test_ok()).test_ok();
         drop(store);
@@ -2448,7 +2667,13 @@ mod fault_injection_tests {
             .into_iter()
             .find(|t| t.id().to_string() == tl_id)
             .test_ok();
-        let manifest = crate::blank_manifest(tl.id(), pos_core::crypto::Hash::zero());
+        let manifest = pos_core::ReproManifest::recorded(
+            tl.id(),
+            pos_core::crypto::Hash::zero(),
+            pos_core::WallTime::from_micros(0),
+            pos_core::ManifestPluginRosterV1::empty(),
+            None,
+        );
         let manifest_path = path.replace(".db", "-manifest.json");
         std::fs::write(&manifest_path, serde_json::to_string(&manifest).test_ok()).test_ok();
         drop(store);

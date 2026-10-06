@@ -527,6 +527,10 @@ fn verified_output_policy_closure_has_a_stable_identity_across_fresh_plugin_ids(
     )?;
     let identity = replay_identity_of(&expected_bytes, &source.output_policy_bytes)?;
     assert_eq!(registry.retained_closure_replay_identities(), [identity]);
+    // The registry retains exactly the canonical OPC1 encoding, byte for byte.
+    let rows = registry.plugin_ownership_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1.as_deref(), Some(expected_bytes.as_slice()));
 
     let fresh_plugin = FixturePlugin {
         id: PluginId::new(),
@@ -1562,6 +1566,6 @@ fn verified_registration_rejects_a_policy_recorded_for_another_plugin_identity()
         ))
     ));
     assert!(registry.is_empty());
-    assert_eq!(registry.retained_manifest_plugin_roster(), None);
+    assert_eq!(registry.retained_manifest_plugin_roster(), Ok(None));
     Ok(())
 }

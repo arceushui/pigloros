@@ -310,9 +310,7 @@ pub enum ReproManifestError {
 ///
 /// # Errors
 /// `InputTooLarge` when `len` exceeds `MAX_REPRO_MANIFEST_INPUT_BYTES`.
-pub const fn checked_repro_manifest_input_len(
-    len: usize,
-) -> Result<usize, ReproManifestError> {
+pub const fn checked_repro_manifest_input_len(len: usize) -> Result<usize, ReproManifestError> {
     if len > MAX_REPRO_MANIFEST_INPUT_BYTES {
         Err(ReproManifestError::InputTooLarge {
             max: MAX_REPRO_MANIFEST_INPUT_BYTES,
@@ -324,8 +322,13 @@ pub const fn checked_repro_manifest_input_len(
 
 /// Immutable validated reproduction manifest; it carries no Replay capability.
 ///
-/// Build it with [`Self::new`], which validates everything before returning, and read it back
-/// with the getters. There is no builder that overwrites an earlier value.
+/// Build it with [`Self::new`], which validates everything before returning, or with
+/// [`Self::recorded`] for a freshly recorded run, and read it back with the getters. There is no
+/// builder that overwrites an earlier value.
+///
+/// An empty Plugin roster is not a Replay claim. It records that no admitted composition was
+/// available, names no Plugin, and the installed verifier rejects it against any admitted
+/// composition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReproManifest {
     timeline_id: TimelineId,
@@ -364,6 +367,29 @@ impl ReproManifest {
             adapter_records,
             label,
         })
+    }
+
+    /// Build the manifest of a run a host just recorded: at most one adapter record, no label.
+    ///
+    /// This cannot fail, so it returns the manifest directly. [`Self::new`] rejects only more
+    /// than 1,048,576 `adapter_records` or a label above 256 bytes; this constructor takes at
+    /// most one record and sets no label, so neither cap can be reached.
+    #[must_use]
+    pub fn recorded(
+        timeline_id: TimelineId,
+        head_hash: Hash,
+        created_at: WallTime,
+        plugin_roster: ManifestPluginRosterV1,
+        adapter_record: Option<AdapterRecord>,
+    ) -> Self {
+        Self {
+            timeline_id,
+            head_hash,
+            created_at,
+            plugin_roster,
+            adapter_records: adapter_record.into_iter().collect(),
+            label: None,
+        }
     }
 
     /// The Timeline this manifest describes.
@@ -737,10 +763,7 @@ fn foreign_name(key: &str, transport: Transport) -> Option<&'static str> {
     names.iter().copied().find(|name| *name == key)
 }
 
-fn foreign_check(
-    pairs: &[(String, Raw)],
-    transport: Transport,
-) -> Result<(), ReproManifestError> {
+fn foreign_check(pairs: &[(String, Raw)], transport: Transport) -> Result<(), ReproManifestError> {
     let found = pairs
         .iter()
         .find_map(|(key, _)| foreign_name(key, transport));
@@ -886,28 +909,19 @@ fn json_roster(
     }
     let parsed = items.iter().map(json_entry);
     let rows = parsed.collect::<Result<Vec<_>, _>>()?;
-    let slots: Vec<String> = rows.iter().map(slot_text).collect();
-    let roster = ManifestPluginRosterV1::new(rows)?;
-    check_slot_order(&roster, &slots)?;
-    Ok(roster)
+    check_slot_order(&rows)?;
+    Ok(ManifestPluginRosterV1::new(rows)?)
 }
 
-fn slot_text(entry: &ManifestPluginEntryV1) -> String {
-    entry.stable_slot().to_owned()
-}
-
-// `ManifestPluginRosterV1::new` sorts, but a JSON document must already arrive sorted.
-fn check_slot_order(
-    roster: &ManifestPluginRosterV1,
-    slots: &[String],
-) -> Result<(), ReproManifestError> {
-    let moved = roster
-        .entries()
-        .iter()
-        .zip(slots)
-        .find(|(entry, slot)| entry.stable_slot() != slot.as_str());
-    moved.map_or(Ok(()), |(entry, _)| {
-        let slot = entry.stable_slot().to_owned();
+// `ManifestPluginRosterV1::new` sorts, but a JSON document must already arrive sorted. Report the
+// first slot that sorts before its predecessor in the input; a repeated slot is not out of order
+// and is left to the roster's duplicate-slot check.
+fn check_slot_order(rows: &[ManifestPluginEntryV1]) -> Result<(), ReproManifestError> {
+    let unsorted = rows
+        .windows(2)
+        .find(|pair| pair[1].stable_slot() < pair[0].stable_slot());
+    unsorted.map_or(Ok(()), |pair| {
+        let slot = pair[1].stable_slot().to_owned();
         Err(ManifestPluginRosterErrorV1::UnsortedSlots { slot }.into())
     })
 }

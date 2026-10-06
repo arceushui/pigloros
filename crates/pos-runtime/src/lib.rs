@@ -113,3 +113,11 @@ pub use world_profile::HostWorldProfileV1;
 pub use world_replay::{
     VerifiedWorldReplayV1, WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
 };
+
+// Length-framed hashing shared by the output-admission and staged-catalogue identities: each field
+// goes in behind its little-endian `u64` length, so adjacent fields cannot run together.
+fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    hasher.update(&bytes_len.to_le_bytes());
+    hasher.update(bytes);
+}

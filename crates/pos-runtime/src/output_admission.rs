@@ -1156,7 +1156,7 @@ impl OutputPolicyClosureV1 {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"pigloros.output-policy-replay-identity.v1\0");
         let policy = self.output_policy.fields();
-        hash_framed(&mut hasher, policy.plugin_version.as_bytes());
+        crate::hash_framed(&mut hasher, policy.plugin_version.as_bytes());
         for hash in [
             policy.implementation_hash,
             policy.base_configuration_digest,
@@ -1168,7 +1168,7 @@ impl OutputPolicyClosureV1 {
         let mut declarations = policy.output_declarations.iter().collect::<Vec<_>>();
         declarations.sort_by(|left, right| left.event_type().cmp(right.event_type()));
         for declaration in declarations {
-            hash_framed(&mut hasher, declaration.event_type().as_bytes());
+            crate::hash_framed(&mut hasher, declaration.event_type().as_bytes());
             hasher.update(&[match declaration.authority() {
                 pos_core::output_policy::OutputAuthorityV1::Authoritative => 0,
                 pos_core::output_policy::OutputAuthorityV1::ReproducibleDerived => 1,
@@ -1224,7 +1224,7 @@ impl OutputPolicyClosureV1 {
             self.execution_profile_artifact(),
             self.retention_policy_artifact(),
         ] {
-            hash_framed(&mut hasher, bytes);
+            crate::hash_framed(&mut hasher, bytes);
         }
         Hash::from_bytes(*hasher.finalize().as_bytes())
     }
@@ -1316,12 +1316,6 @@ pub fn validate_output_policy_artifacts_v1(
         retention_policy_artifact,
     )
     .map(|_| ())
-}
-
-fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
-    let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    hasher.update(&bytes_len.to_le_bytes());
-    hasher.update(bytes);
 }
 
 const fn validate_leaf_lengths(

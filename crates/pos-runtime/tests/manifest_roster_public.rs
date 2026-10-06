@@ -3,9 +3,11 @@
 use std::error::Error;
 
 use pos_core::{
+    compare_manifest_plugin_rosters_v1,
     state::{Reducer, State},
-    Capability, Event, Hash, ManifestPluginEntryV1, ManifestPluginRosterErrorV1, OwnerIdV1, Plugin,
-    PluginId, ReproManifest, TimelineId, WallTime,
+    Capability, ComparedFieldV1, Event, Hash, Kind, ManifestPluginEntryV1,
+    ManifestPluginRosterErrorV1, ManifestPluginRosterV1, OwnerIdV1, Plugin, PluginId,
+    ReproManifest, RosterComparisonErrorV1, TimelineId, WallTime,
 };
 use pos_runtime::{
     AdmittedCompositionV1, ManifestRegistrationErrorV1, ManifestRosterBuildErrorV1, ManifestSlotV1,
@@ -18,6 +20,7 @@ struct RosterPlugin {
     id: PluginId,
     name: &'static str,
     reducer_only: bool,
+    owns: Option<&'static str>,
 }
 
 impl RosterPlugin {
@@ -26,6 +29,17 @@ impl RosterPlugin {
             id: PluginId::new(),
             name,
             reducer_only: false,
+            owns: None,
+        }
+    }
+
+    // A Plugin with a fixed id that owns one Event type, so its generated policy declares it.
+    const fn owning(id: PluginId, event_type: &'static str) -> Self {
+        Self {
+            id,
+            name: "weather",
+            reducer_only: false,
+            owns: Some(event_type),
         }
     }
 
@@ -46,6 +60,7 @@ impl Plugin for RosterPlugin {
 
     fn capability(&self) -> Capability {
         Capability {
+            owned_event_types: self.owns.into_iter().map(Kind::new).collect(),
             has_reducer: self.reducer_only,
             ..Capability::default()
         }
@@ -115,11 +130,17 @@ fn the_roster_is_sorted_by_slot_and_keeps_same_name_rows_apart() -> TestResult {
     let built = admitted_composition()?;
     let roster = built.registry.manifest_plugin_roster(&built.admitted)?;
     let rows = roster.entries();
-    let slots: Vec<&str> = rows.iter().map(ManifestPluginEntryV1::stable_slot).collect();
+    let slots: Vec<&str> = rows
+        .iter()
+        .map(ManifestPluginEntryV1::stable_slot)
+        .collect();
     assert_eq!(slots, ["tally", "weather-north", "weather-south"]);
     let ids: Vec<PluginId> = rows.iter().map(ManifestPluginEntryV1::plugin_id).collect();
     assert_eq!(ids, [built.tally, built.north, built.south]);
-    let names: Vec<&str> = rows.iter().map(ManifestPluginEntryV1::plugin_name).collect();
+    let names: Vec<&str> = rows
+        .iter()
+        .map(ManifestPluginEntryV1::plugin_name)
+        .collect();
     assert_eq!(names, ["tally", "weather", "weather"]);
     assert!(rows.iter().all(|row| row.plugin_version() == "0.1.0"));
     assert_ne!(rows[1].eop1_digest(), rows[2].eop1_digest());
@@ -151,7 +172,7 @@ fn every_row_carries_the_exact_native_digest_and_closure_bytes() -> TestResult {
 fn the_retained_roster_matches_the_capability_roster() -> TestResult {
     let built = admitted_composition()?;
     let expected = built.registry.manifest_plugin_roster(&built.admitted)?;
-    let retained = built.registry.retained_manifest_plugin_roster();
+    let retained = built.registry.retained_manifest_plugin_roster()?;
     assert_eq!(retained, Some(expected));
     Ok(())
 }
@@ -159,9 +180,9 @@ fn the_retained_roster_matches_the_capability_roster() -> TestResult {
 #[test]
 fn a_registry_that_was_never_admitted_has_no_retained_roster() -> TestResult {
     let mut registry = PluginRegistry::new();
-    assert_eq!(registry.retained_manifest_plugin_roster(), None);
+    assert_eq!(registry.retained_manifest_plugin_roster(), Ok(None));
     register(&mut registry, &RosterPlugin::new("weather"), "weather")?;
-    assert_eq!(registry.retained_manifest_plugin_roster(), None);
+    assert_eq!(registry.retained_manifest_plugin_roster(), Ok(None));
     Ok(())
 }
 
@@ -201,5 +222,73 @@ fn the_built_roster_survives_json_and_cbor_with_same_name_rows_intact() -> TestR
         assert_ne!(rows[1].eop1_digest(), rows[2].eop1_digest());
         assert_ne!(rows[1].closure_bytes(), rows[2].closure_bytes());
     }
+    Ok(())
+}
+
+// One admitted registry holding `plugins` at their slots, and its retained roster.
+fn admitted_roster(
+    plugins: &[(&RosterPlugin, &str)],
+) -> Result<ManifestPluginRosterV1, Box<dyn Error>> {
+    let mut registry = PluginRegistry::new();
+    for (plugin, slot) in plugins {
+        register(&mut registry, plugin, slot)?;
+    }
+    let owner = OwnerIdV1::from_static("roster-app");
+    let _admitted = registry.admit_local_manifest_registration(owner, 1)?;
+    let roster = registry.retained_manifest_plugin_roster()?;
+    Ok(roster.ok_or("an admitted registry retains its roster")?)
+}
+
+fn recorded(roster: ManifestPluginRosterV1) -> ReproManifest {
+    let head = Hash::from_bytes([9; 32]);
+    let created = WallTime::from_micros(1_000_000);
+    ReproManifest::recorded(timeline(), head, created, roster, None)
+}
+
+#[test]
+fn a_changed_output_declaration_changes_the_roster_and_its_comparison() -> TestResult {
+    let id = PluginId::new();
+    let baseline = admitted_roster(&[(&RosterPlugin::owning(id, "weather.rain"), "weather")])?;
+    let changed = admitted_roster(&[(&RosterPlugin::owning(id, "weather.snow"), "weather")])?;
+    assert_ne!(baseline, changed);
+    assert_ne!(recorded(baseline.clone()), recorded(changed.clone()));
+    let mismatch = compare_manifest_plugin_rosters_v1(&baseline, &changed);
+    let expected = RosterComparisonErrorV1::PolicyMismatch {
+        slot: "weather".to_owned(),
+        field: ComparedFieldV1::EventTypeSet,
+    };
+    assert_eq!(mismatch, Err(expected));
+    Ok(())
+}
+
+#[test]
+fn fresh_plugin_ids_at_the_same_slots_compare_equal() -> TestResult {
+    let first = RosterPlugin::owning(PluginId::new(), "weather.rain");
+    let second = RosterPlugin::owning(PluginId::new(), "weather.rain");
+    let baseline = admitted_roster(&[(&first, "weather")])?;
+    let candidate = admitted_roster(&[(&second, "weather")])?;
+    assert_ne!(baseline, candidate);
+    let marker = compare_manifest_plugin_rosters_v1(&baseline, &candidate)?;
+    assert_eq!(marker.slot_count(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_missing_or_extra_slot_is_rejected() -> TestResult {
+    let alone = RosterPlugin::new("weather");
+    let paired = RosterPlugin::new("weather");
+    let tally = RosterPlugin::new("tally").reducer_only();
+    let single = admitted_roster(&[(&alone, "weather")])?;
+    let double = admitted_roster(&[(&paired, "weather"), (&tally, "tally")])?;
+    let missing = RosterComparisonErrorV1::MissingPlugin {
+        slot: "tally".to_owned(),
+    };
+    let dropped = compare_manifest_plugin_rosters_v1(&double, &single);
+    assert_eq!(dropped, Err(missing));
+    let unexpected = RosterComparisonErrorV1::UnexpectedPlugin {
+        slot: "tally".to_owned(),
+    };
+    let added = compare_manifest_plugin_rosters_v1(&single, &double);
+    assert_eq!(added, Err(unexpected));
     Ok(())
 }

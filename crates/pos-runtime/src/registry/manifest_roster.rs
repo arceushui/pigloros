@@ -47,18 +47,33 @@ impl PluginRegistry {
         roster_from_sources(&sources)
     }
 
-    /// Build the manifest roster for the composition this registry currently has admitted.
+    /// Build the manifest roster for the composition this registry has admitted, if any.
     ///
-    /// Returns `None` when the registry was never admitted, or when a later registration change
-    /// made its admission stale. A host that records a run keeps an empty roster in that case: an
-    /// empty roster claims nothing, and the installed verifier rejects it against any admitted
-    /// composition, so no stale or missing admission can pass as a complete one.
-    #[must_use]
-    pub fn retained_manifest_plugin_roster(&self) -> Option<ManifestPluginRosterV1> {
-        self.manifest_batch
-            .as_ref()
-            .and_then(|batch| self.admitted_composition_for(batch.clone()).ok())
-            .and_then(|admitted| self.manifest_plugin_roster(&admitted).ok())
+    /// `Ok(None)` means the registry holds no manifest batch: it was never admitted through
+    /// [`Self::admit_local_manifest_registration`], for example because its Plugins were added
+    /// with `register` or `register_generated`. A host that records a run in that case may keep
+    /// an empty roster, which is not a Replay claim: it names no Plugin, and the installed
+    /// verifier rejects it against any admitted composition.
+    ///
+    /// The retained batch is read without an `AdmittedCompositionV1`. A local admission cannot
+    /// go stale, because every ordinary registration path rejects a registry that holds a
+    /// batch; a batch that no longer matches the registered Plugins, such as a prepared
+    /// installed batch that is still incomplete, is an error.
+    ///
+    /// # Errors
+    /// `Admission` when the retained batch does not match the registered Plugins; `Roster` when
+    /// the rows exceed the roster bounds, for example its 1 GiB size cap. An error is never
+    /// replaced by an empty or partial roster.
+    pub fn retained_manifest_plugin_roster(
+        &self,
+    ) -> Result<Option<ManifestPluginRosterV1>, ManifestRosterBuildErrorV1> {
+        let batch = self.manifest_batch.as_ref();
+        let roster = batch.map(|catalog| {
+            self.policy_sources_for(catalog)
+                .map_err(ManifestRosterBuildErrorV1::from)
+                .and_then(|sources| roster_from_sources(&sources))
+        });
+        roster.transpose()
     }
 }
 

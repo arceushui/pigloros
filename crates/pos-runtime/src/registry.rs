@@ -1128,6 +1128,17 @@ const fn plugin_name(entry: &PluginEntry) -> &str {
     entry.name.as_str()
 }
 
+#[cfg(any(test, feature = "test-support"))]
+fn plugin_ownership_row(entry: &PluginEntry) -> (Vec<String>, Option<Vec<u8>>) {
+    let owned = entry.owned_event_types.iter().map(Kind::as_str);
+    let mut owned_event_types: Vec<String> = owned.map(str::to_owned).collect();
+    owned_event_types.sort_unstable();
+    let admission = entry.output_admission.as_ref();
+    let closure = admission.and_then(OutputAdmissionV1::closure);
+    let closure_bytes = closure.map(OutputPolicyClosureV1::to_canonical_bytes);
+    (owned_event_types, closure_bytes)
+}
+
 struct PendingStep {
     timeline: pos_core::ids::TimelineId,
     driver_ids: Vec<PluginId>,
@@ -1457,9 +1468,20 @@ impl PluginRegistry {
         if !self.is_admitted_composition_current_for_generation(admitted, generation) {
             return Err(ManifestRegistrationErrorV1::IncompleteBatch);
         }
-        self.validate_complete_manifest_batch(&admitted.catalog)?;
-        let mut sources = Vec::with_capacity(admitted.catalog.as_input().rows.len());
-        for row in &admitted.catalog.as_input().rows {
+        self.policy_sources_for(&admitted.catalog)
+    }
+
+    /// Exact EOP1/OPC1 bytes for every row of a complete catalog, without the currentness check.
+    ///
+    /// Callers either checked an `AdmittedCompositionV1` first or pass the registry's own retained
+    /// batch; the complete-batch check below still rejects any drift from the registered Plugins.
+    fn policy_sources_for(
+        &self,
+        catalog: &ManifestAdmissionCatalogV1,
+    ) -> Result<Vec<AdmittedManifestPolicySourceV1>, ManifestRegistrationErrorV1> {
+        self.validate_complete_manifest_batch(catalog)?;
+        let mut sources = Vec::with_capacity(catalog.as_input().rows.len());
+        for row in &catalog.as_input().rows {
             let entry = self
                 .plugins
                 .get(&row.plugin_id)
@@ -3841,15 +3863,27 @@ impl PluginRegistry {
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     #[must_use]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     pub fn retained_closure_replay_identities(&self) -> Vec<pos_core::Hash> {
-        let closures = self
+        let admissions = self
             .plugins
             .values()
-            .filter_map(|entry| entry.output_admission.as_ref()?.closure());
-        closures
+            .filter_map(|entry| entry.output_admission.as_ref());
+        admissions
+            .filter_map(OutputAdmissionV1::closure)
             .map(OutputPolicyClosureV1::replay_identity_digest)
             .collect()
+    }
+
+    /// One row per registered Plugin, in registration order: its sorted owned Event types and
+    /// the exact canonical bytes of its retained output-policy closure, if it has one.
+    ///
+    /// Test support for rollback snapshots only: a rejected registration must leave every row,
+    /// including a Plugin without a closure and its owned Event types, unchanged.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn plugin_ownership_rows(&self) -> Vec<(Vec<String>, Option<Vec<u8>>)> {
+        self.plugins.values().map(plugin_ownership_row).collect()
     }
 
     /// Register a direct driver in an explicit test-support harness.

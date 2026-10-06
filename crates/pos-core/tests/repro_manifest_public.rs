@@ -2,8 +2,8 @@ use ciborium::value::{Integer, Value as Cbor};
 use pos_core::{
     checked_repro_manifest_input_len, AdapterRecord, Hash, ManifestPluginEntryV1,
     ManifestPluginFieldV1, ManifestPluginRosterErrorV1, ManifestPluginRosterV1, PluginId,
-    ReproManifest, ReproManifestError, TimelineId, WallTime,
-    MAX_REPRO_MANIFEST_ADAPTER_RECORDS, MAX_REPRO_MANIFEST_INPUT_BYTES,
+    ReproManifest, ReproManifestError, TimelineId, WallTime, MAX_REPRO_MANIFEST_ADAPTER_RECORDS,
+    MAX_REPRO_MANIFEST_INPUT_BYTES,
 };
 use serde_json::{json, Value as Json};
 
@@ -575,6 +575,37 @@ fn old_and_missing_version_json_documents_are_unsupported() -> TestResult {
     Ok(())
 }
 
+// Only a document that carries both shapes is mixed. Without the integer version, roster fields
+// alone or legacy fields alone are simply an unsupported version, in both transports.
+#[test]
+fn one_shape_without_a_version_is_unsupported_not_ambiguous() -> TestResult {
+    let roster_only = top_missing(VERSION)?;
+    assert_eq!(roster_only, unsupported(None));
+    let legacy_only = text_fail(&legacy_json().to_string())?;
+    assert_eq!(legacy_only, unsupported(None));
+    assert_eq!(cbor_drop(VERSION)?, unsupported(None));
+    let cbor_legacy = cbor_bytes(&Cbor::Map(old_cbor_pairs(Some("old"))))?;
+    let failure = rejection(ReproManifest::from_cbor(&cbor_legacy))?;
+    assert_eq!(failure, unsupported(None));
+    Ok(())
+}
+
+#[test]
+fn recorded_builds_the_same_manifest_as_new() -> TestResult {
+    let head = Hash::from_bytes([9; 32]);
+    let created = WallTime::from_micros(5);
+    let call = Some(record(5, 3, 77));
+    let built = ReproManifest::recorded(timeline(), head, created, roster()?, call);
+    let records = vec![record(5, 3, 77)];
+    let expected = ReproManifest::new(timeline(), head, created, roster()?, records, None)?;
+    assert_eq!(built, expected);
+    assert_eq!(built.label(), None);
+    let without = ReproManifest::recorded(timeline(), head, created, roster()?, None);
+    assert!(without.adapter_records().is_empty());
+    assert_eq!(via_json(&without)?, without);
+    Ok(())
+}
+
 #[test]
 fn old_manifests_report_an_unsupported_version_in_both_transports() -> TestResult {
     for label in [None, Some("old-run")] {
@@ -911,8 +942,9 @@ fn input_size_cap_is_checked_before_parsing() -> TestResult {
     assert_eq!(over, Err(refusal.clone()));
     let way_over = checked_repro_manifest_input_len(usize::MAX);
     assert_eq!(way_over, Err(refusal.clone()));
-    // One 1.5 GiB buffer feeds both transports. The zeroing is lazy (calloc-backed), so the pages
-    // are never touched: the cap check must refuse before any byte is read.
+    // One 1.5 GiB buffer, deliberately the only one in this suite, feeds both transports. Its
+    // zeroing is deliberately lazy (calloc-backed), so no page is touched unless a decoder reads
+    // it: the cap check must refuse before any byte is read.
     let huge = vec![0_u8; max + 1];
     assert_eq!(rejection(ReproManifest::from_json(&huge))?, refusal);
     assert_eq!(rejection(ReproManifest::from_cbor(&huge))?, refusal);

@@ -359,6 +359,9 @@ pub struct ManifestPluginRosterV1 {
 
 impl ManifestPluginRosterV1 {
     /// The roster with no entries, valid only when no Plugin was admitted.
+    ///
+    /// An empty roster is not a Replay claim: it names no Plugin, and the installed verifier
+    /// rejects it against any admitted composition.
     #[must_use]
     pub const fn empty() -> Self {
         Self {
