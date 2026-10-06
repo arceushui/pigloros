@@ -1108,80 +1108,13 @@ impl SqliteStore {
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(storage_error)?;
-        let pre_authorization = validate_owner_directory(owner)
-            .map_err(RecipientExportPublicationErrorV1::Store)
-            .and_then(|()| {
-                ensure_recipient_custody_tables(&self.conn)
-                    .map_err(RecipientExportPublicationErrorV1::Store)
-            })
-            .and_then(|()| {
-                claim_recipient_custody_directory(&self.conn, owner)
-                    .map_err(RecipientExportPublicationErrorV1::Store)
-            })
-            .and_then(|()| {
-                ensure_recipient_export_catalog(&self.conn)
-                    .map_err(RecipientExportPublicationErrorV1::Store)
-            })
-            .and_then(|()| {
-                recipient_export_pending_belongs_to(&self.conn, owner, export_id)
-                    .map_err(RecipientExportPublicationErrorV1::Store)
-                    .and_then(|reservation_belongs_to_owner| {
-                        if !reservation_belongs_to_owner {
-                            Err(RecipientExportPublicationErrorV1::Store(CoreError::Storage(
-                                "recipient export reservation is unavailable".to_owned(),
-                            )))
-                        } else {
-                            Self::logical_head_unchecked_on(&self.conn, request.timeline_id)
-                                .map_err(RecipientExportPublicationErrorV1::Store)
-                                .and_then(|logical_head| {
-                                    if logical_head != expected_logical_head {
-                                        Err(RecipientExportPublicationErrorV1::SourceChanged)
-                                    } else {
-                                        Self::timeline_owner_in_transaction(
-                                            &self.conn,
-                                            request.timeline_id,
-                                        )
-                                        .map_err(RecipientExportPublicationErrorV1::Store)
-                                        .and_then(|timeline_owner| {
-                                            if timeline_owner
-                                                != Some(request.token.subject_id())
-                                            {
-                                                Err(RecipientExportPublicationErrorV1::Consent(
-                                                    ConsentError::NoConsent,
-                                                ))
-                                            } else {
-                                                self.load_key_registry()
-                                                    .map_err(
-                                                        RecipientExportPublicationErrorV1::Store,
-                                                    )
-                                                    .and_then(|registry| {
-                                                        registry.ok_or(
-                                                            RecipientExportPublicationErrorV1::Registry(
-                                                                KeyRegistryErrorV1::RegistryUnavailable,
-                                                            ),
-                                                        )
-                                                    })
-                                                    .map(|registry| {
-                                                        let identity = request.recipient.identity();
-                                                        let registered_digest =
-                                                            registered_material_digest_or_absent_sentinel(
-                                                                &registry, identity,
-                                                            );
-                                                        (
-                                                            registry,
-                                                            identity,
-                                                            registered_digest,
-                                                            logical_head,
-                                                        )
-                                                    })
-                                            }
-                                        })
-                                    }
-                                })
-                        }
-                    })
-            });
-        let (mut registry, identity, registered_digest, logical_head) = match pre_authorization {
+        let (mut registry, identity, registered_digest, logical_head) = match self
+            .pre_authorize_recipient_export_publication(
+                owner,
+                request,
+                export_id,
+                expected_logical_head,
+            ) {
             Ok(value) => value,
             Err(error) => return finish_recipient_export_transaction(&self.conn, Err(error)),
         };
@@ -1211,6 +1144,89 @@ impl SqliteStore {
             .map_err(RecipientExportPublicationErrorV1::Store)
             .and(result);
         result
+    }
+
+    fn pre_authorize_recipient_export_publication(
+        &self,
+        owner: &RecipientKeyOwnerV1,
+        request: &RecipientExportRequestV1<'_>,
+        export_id: [u8; 16],
+        expected_logical_head: Seq,
+    ) -> Result<
+        (KeyRegistryStateV1, KeyIdentityV1, pos_core::Hash, Seq),
+        RecipientExportPublicationErrorV1,
+    > {
+        validate_owner_directory(owner)
+            .map_err(RecipientExportPublicationErrorV1::Store)
+            .and_then(|()| {
+                ensure_recipient_custody_tables(&self.conn)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
+            })
+            .and_then(|()| {
+                claim_recipient_custody_directory(&self.conn, owner)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
+            })
+            .and_then(|()| {
+                ensure_recipient_export_catalog(&self.conn)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
+            })
+            .and_then(|()| {
+                recipient_export_pending_belongs_to(&self.conn, owner, export_id)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
+                    .and_then(|reservation_belongs_to_owner| {
+                        if reservation_belongs_to_owner {
+                            Self::logical_head_unchecked_on(&self.conn, request.timeline_id)
+                                .map_err(RecipientExportPublicationErrorV1::Store)
+                                .and_then(|logical_head| {
+                                    if logical_head == expected_logical_head {
+                                        Self::timeline_owner_in_transaction(
+                                            &self.conn,
+                                            request.timeline_id,
+                                        )
+                                        .map_err(RecipientExportPublicationErrorV1::Store)
+                                        .and_then(|timeline_owner| {
+                                            if timeline_owner == Some(request.token.subject_id()) {
+                                                self.load_key_registry()
+                                                    .map_err(
+                                                        RecipientExportPublicationErrorV1::Store,
+                                                    )
+                                                    .and_then(|registry| {
+                                                        registry.ok_or(
+                                                            RecipientExportPublicationErrorV1::Registry(
+                                                                KeyRegistryErrorV1::RegistryUnavailable,
+                                                            ),
+                                                        )
+                                                    })
+                                                    .map(|registry| {
+                                                        let identity = request.recipient.identity();
+                                                        let registered_digest =
+                                                            registered_material_digest_or_absent_sentinel(
+                                                                &registry, identity,
+                                                            );
+                                                        (
+                                                            registry,
+                                                            identity,
+                                                            registered_digest,
+                                                            logical_head,
+                                                        )
+                                                    })
+                                            } else {
+                                                Err(RecipientExportPublicationErrorV1::Consent(
+                                                    ConsentError::NoConsent,
+                                                ))
+                                            }
+                                        })
+                                    } else {
+                                        Err(RecipientExportPublicationErrorV1::SourceChanged)
+                                    }
+                                })
+                        } else {
+                            Err(RecipientExportPublicationErrorV1::Store(CoreError::Storage(
+                                "recipient export reservation is unavailable".to_owned(),
+                            )))
+                        }
+                    })
+            })
     }
 
     fn publish_recipient_export_with_registered_material(
