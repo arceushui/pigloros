@@ -31,6 +31,7 @@ pub mod adapter_transport;
 pub mod bounded_input;
 pub mod evaluator;
 pub mod evaluator_build_identity;
+pub mod evaluator_domain;
 pub mod evaluator_protocol;
 pub mod profile;
 #[cfg(unix)]

@@ -8,15 +8,57 @@ use pos_reference::evaluator::{
     SubjectObservation, SubjectResult,
 };
 use pos_reference::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
+use pos_reference::evaluator_domain::{RedactionState, ReplayClaim, SafeErrorCode};
 use pos_reference::evaluator_protocol::{
     CaseStatus, ConformanceReport, EvaluationRequest, ProtocolError, RequiredProviderCapability,
     SandboxRequirement, SubjectAdapterKind,
 };
 use pos_reference::profile::ProfileError;
 use pos_reference::signed_bundle::BundleError;
+use support::cbor::{canonical, decoded_value, replace_field, replace_path};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 type RequirementMutation = fn(&mut SandboxRequirement);
+
+/// Every redaction state that coheres with a non-exact replay claim.
+const BOUNDED_REDACTION_CONTRACTS: [(RedactionState, ReplayClaim); 6] = [
+    (
+        RedactionState::RedactedViews,
+        ReplayClaim::ExactAuthoritativeWithRedactedViews,
+    ),
+    (
+        RedactionState::RedactedViews,
+        ReplayClaim::IncompatibleProfile,
+    ),
+    (RedactionState::StructuralOnly, ReplayClaim::StructuralOnly),
+    (
+        RedactionState::StructuralOnly,
+        ReplayClaim::IncompatibleProfile,
+    ),
+    (
+        RedactionState::EvidenceMissing,
+        ReplayClaim::UnverifiableArtifactsMissing,
+    ),
+    (
+        RedactionState::EvidenceMissing,
+        ReplayClaim::IncompatibleProfile,
+    ),
+];
+
+/// CNR1 field paths whose closed vocabulary rejects the paired wire code.
+const UNASSIGNED_REPORT_CODES: [(&[usize], u64); 8] = [
+    // Report-level replay claim and redaction state.
+    (&[19], 5),
+    (&[20], 4),
+    // Case execution mode, claim layer, replay claim, and redaction state.
+    (&[13, 0, 3], 4),
+    (&[13, 0, 4], 7),
+    (&[13, 0, 11], 5),
+    (&[13, 0, 12], 4),
+    // Case expected and actual safe error codes.
+    (&[13, 0, 9], 14),
+    (&[13, 0, 10], 14),
+];
 
 #[test]
 fn public_error_boundaries_preserve_closed_failure_classes() {
@@ -167,42 +209,6 @@ fn assert_report_rejected(
     let mut report = template.clone();
     update(&mut report);
     assert_eq!(report.to_canonical_cbor(), Err(expected));
-}
-
-fn canonical(value: &Value) -> TestResult<Vec<u8>> {
-    let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes)?;
-    Ok(bytes)
-}
-
-fn decoded_value(bytes: &[u8]) -> TestResult<Value> {
-    Ok(ciborium::from_reader(bytes)?)
-}
-
-fn replace_field(value: &mut Value, index: usize, replacement: Value) -> TestResult {
-    let Value::Array(fields) = value else {
-        return Err("test value is not an array".into());
-    };
-    *fields
-        .get_mut(index)
-        .ok_or("test field index is out of bounds")? = replacement;
-    Ok(())
-}
-
-fn replace_path(value: &mut Value, path: &[usize], replacement: Value) -> TestResult {
-    let (&index, remainder) = path.split_first().ok_or("test path is empty")?;
-    let Value::Array(fields) = value else {
-        return Err("test path does not select an array".into());
-    };
-    let field = fields
-        .get_mut(index)
-        .ok_or("test path index is out of bounds")?;
-    if remainder.is_empty() {
-        *field = replacement;
-        Ok(())
-    } else {
-        replace_path(field, remainder, replacement)
-    }
 }
 
 #[test]
@@ -601,9 +607,9 @@ fn report_round_trips_every_status_and_evidence_shape() -> TestResult {
     exact.case_id = "status-pass".to_owned();
     cases.push(exact);
 
-    for safe_error in 0..=13 {
+    for safe_error in SafeErrorCode::ALL.iter().copied() {
         let mut typed = base.clone();
-        typed.case_id = format!("status-typed-{safe_error:02}");
+        typed.case_id = format!("status-typed-{:02}", safe_error.code());
         typed.expected_digest = None;
         typed.actual_digest = None;
         typed.expected_error = Some(safe_error);
@@ -648,12 +654,12 @@ fn report_round_trips_every_status_and_evidence_shape() -> TestResult {
 #[test]
 fn report_accepts_each_bounded_redaction_contract() -> TestResult {
     let template = valid_report()?;
-    for (redaction, replay) in [(1, 1), (1, 4), (2, 2), (2, 4), (3, 3), (3, 4)] {
+    for (redaction, replay) in BOUNDED_REDACTION_CONTRACTS {
         let mut report = template.clone();
         let case = &mut report.cases[0];
         case.redaction_state = redaction;
         case.replay_claim = replay;
-        if redaction >= 2 {
+        if redaction >= RedactionState::StructuralOnly {
             case.outcome = CaseStatus::Unavailable;
             case.expected_digest = None;
             case.actual_digest = None;
@@ -708,7 +714,7 @@ fn report_rejects_invalid_identity_order_aggregate_and_case_contracts() -> TestR
     );
 
     let mut report = valid.clone();
-    report.replay_claim = 4;
+    report.replay_claim = ReplayClaim::IncompatibleProfile;
     assert_eq!(
         report.to_canonical_cbor(),
         Err(ProtocolError::DigestMismatch)
@@ -859,16 +865,6 @@ fn report_decoder_rejects_each_outer_and_nested_contract_shape() -> TestResult {
 #[test]
 fn report_rejects_every_top_level_and_independence_boundary() -> TestResult {
     let valid = valid_report()?;
-    assert_report_rejected(
-        &valid,
-        |report| report.replay_claim = 5,
-        ProtocolError::FieldOutOfBounds,
-    );
-    assert_report_rejected(
-        &valid,
-        |report| report.redaction_state = 4,
-        ProtocolError::FieldOutOfBounds,
-    );
     for index in 0..10 {
         assert_report_rejected(
             &valid,
@@ -907,21 +903,53 @@ fn report_rejects_every_top_level_and_independence_boundary() -> TestResult {
 }
 
 #[test]
+fn report_decoder_rejects_unassigned_discriminants() -> TestResult {
+    let valid = decoded_value(&valid_report()?.to_canonical_cbor()?)?;
+    for (path, code) in UNASSIGNED_REPORT_CODES {
+        let mut changed = valid.clone();
+        replace_path(&mut changed, path, Value::Integer(code.into()))?;
+        assert_eq!(
+            ConformanceReport::from_canonical_cbor(&canonical(&changed)?),
+            Err(ProtocolError::FieldOutOfBounds)
+        );
+        let mut overflowing = valid.clone();
+        replace_path(&mut overflowing, path, Value::Integer(256_u64.into()))?;
+        assert_eq!(
+            ConformanceReport::from_canonical_cbor(&canonical(&overflowing)?),
+            Err(ProtocolError::InvalidEncoding)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn report_wire_codes_are_unchanged_by_the_typed_vocabularies() -> TestResult {
+    let report = valid_report()?;
+    let value = decoded_value(&report.to_canonical_cbor()?)?;
+    let Value::Array(fields) = &value else {
+        return Err("report is not an array".into());
+    };
+    assert_eq!(
+        fields[19],
+        Value::Integer(report.replay_claim.code().into())
+    );
+    assert_eq!(
+        fields[20],
+        Value::Integer(report.redaction_state.code().into())
+    );
+    Ok(())
+}
+
+#[test]
 fn report_rejects_every_case_bound_and_evidence_boundary() -> TestResult {
     let valid = valid_report()?;
-    for update in 0..10 {
+    for update in 0..4 {
         assert_report_rejected(
             &valid,
             |report| match update {
                 0 => report.cases[0].fixture_digest = [0; 32],
                 1 => report.cases[0].execution_profile_digest = [0; 32],
                 2 => report.cases[0].provenance_digest = [0; 32],
-                3 => report.cases[0].mode = 4,
-                4 => report.cases[0].claim_layer = 7,
-                5 => report.cases[0].replay_claim = 5,
-                6 => report.cases[0].redaction_state = 4,
-                7 => report.cases[0].expected_error = Some(14),
-                8 => report.cases[0].actual_error = Some(14),
                 _ => report.cases[0].first_coordinate = Some(vec![1; 129]),
             },
             ProtocolError::FieldOutOfBounds,
@@ -939,8 +967,8 @@ fn report_rejects_every_case_bound_and_evidence_boundary() -> TestResult {
     assert_report_rejected(
         &valid,
         |report| {
-            report.cases[0].redaction_state = 1;
-            report.cases[0].replay_claim = 2;
+            report.cases[0].redaction_state = RedactionState::RedactedViews;
+            report.cases[0].replay_claim = ReplayClaim::StructuralOnly;
         },
         ProtocolError::InvalidEncoding,
     );

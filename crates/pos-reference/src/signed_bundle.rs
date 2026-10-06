@@ -1,4 +1,11 @@
 //! Independent CFB1 closure and signature validation.
+//!
+//! This verifier re-derives member roles, descriptor closure, and expected
+//! result bindings from the archive bytes instead of reusing the CPF1 profile
+//! validator in `profile`. The two validators cross-check each other, so their
+//! overlapping relationship checks are an independence control and must not be
+//! merged. Only closed vocabularies (`evaluator_domain`) and lexical grammars
+//! (`evaluator_protocol`) are shared, because divergence there is accidental.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -9,9 +16,11 @@ use ciborium::value::Value;
 use ciborium_ll::{Decoder, Header};
 use ed25519_dalek::Verifier;
 
+use crate::evaluator_domain::{ClaimLayer, ExecutionMode, MemberRole};
 use crate::evaluator_protocol::{
     array, array_values, decode_canonical, decode_canonical_with_limit, encode, fixed_bytes,
-    preflight_cbor, text, uint, EvaluationRequest, ProtocolError,
+    preflight_cbor, text, uint, valid_identifier, valid_semantic_version, EvaluationRequest,
+    ProtocolError,
 };
 use crate::profile::EvaluatorHardCaps;
 
@@ -82,7 +91,7 @@ impl<T, E> InvalidEncodingResult<T> for Result<T, E> {
 /// signature validation have completed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedMember {
-    pub role: u8,
+    pub role: MemberRole,
     pub digest: [u8; 32],
     pub bytes: Vec<u8>,
 }
@@ -92,15 +101,15 @@ pub struct VerifiedMember {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ExpectedResultKey {
     pub case_id: String,
-    pub claim_layer: u8,
+    pub claim_layer: ClaimLayer,
     pub execution_profile_digest: [u8; 32],
-    pub mode: u8,
+    pub mode: ExecutionMode,
 }
 
 /// Validated CFB1 content available to the evaluator implementation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedBundle {
-    pub mode: u8,
+    pub mode: ExecutionMode,
     pub profile_digest: [u8; 32],
     pub archive_digest: [u8; 32],
     pub members: BTreeMap<String, VerifiedMember>,
@@ -216,7 +225,7 @@ struct Descriptor {
     path: String,
     size: u64,
     digest: [u8; 32],
-    role: u8,
+    role: MemberRole,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -239,7 +248,7 @@ struct TrustPolicy {
 }
 
 struct DecodedArchive {
-    mode: u8,
+    mode: ExecutionMode,
     profile_digest: [u8; 32],
     descriptors: Vec<Descriptor>,
     expected: Vec<ExpectedResult>,
@@ -250,7 +259,7 @@ struct DecodedArchive {
 }
 
 struct DecodedManifest {
-    mode: u8,
+    mode: ExecutionMode,
     profile_digest: [u8; 32],
     descriptors: Vec<Descriptor>,
     expected: Vec<ExpectedResult>,
@@ -260,7 +269,7 @@ struct DecodedManifest {
 struct ScannedMember {
     path: String,
     size: u64,
-    role: u8,
+    role: MemberRole,
 }
 
 struct ScannedArchive {
@@ -661,9 +670,9 @@ fn read_verified_members<R: Read + ?Sized>(
         }
         let length = bytes_length(&mut decoder)?;
         let bytes = read_bytes(&mut decoder, length, MAX_MEMBER_BYTES)?;
-        let role = u8::try_from(positive(&mut decoder)?).map_invalid_encoding()?;
+        let role = member_role(positive(&mut decoder)?)?;
         total = total.saturating_add(length as u64);
-        if total > MAX_ARCHIVE_BYTES as u64 || role > 19 {
+        if total > MAX_ARCHIVE_BYTES as u64 {
             return Err(BundleError::FieldOutOfBounds);
         }
         previous_path = Some(path.clone());
@@ -769,11 +778,7 @@ fn scan_members<R: Read + ?Sized>(
             drain_bytes(decoder, size)?;
             None
         };
-        let role = positive(decoder)?;
-        let role = u8::try_from(role).map_invalid_encoding()?;
-        if role > 19 {
-            return Err(BundleError::FieldOutOfBounds);
-        }
+        let role = member_role(positive(decoder)?)?;
         if let Some(bytes) = bytes {
             profile_bytes = Some(bytes);
         }
@@ -1030,10 +1035,7 @@ fn decode_manifest_value(
     if text(&magic)? != "CFB1" || uint(&version)? != 0 {
         return Err(BundleError::InvalidEncoding);
     }
-    let mode = u8::try_from(uint(&mode)?).map_invalid_encoding()?;
-    if mode > 1 {
-        return Err(BundleError::InvalidEncoding);
-    }
+    let mode = closed_code(&mode, ExecutionMode::archive_from_code)?;
     let profile_digest = fixed_bytes(&profile)?;
     if profile_digest != request.profile_digest {
         return Err(BundleError::DigestMismatch);
@@ -1343,7 +1345,7 @@ fn valid_minimum_versions(value: &Value) -> Result<bool, BundleError> {
         let kind = text(&fields[0])?;
         let version = text(&fields[1])?;
         if !valid_identifier(kind)
-            || !valid_semantic_version(version)
+            || !valid_semantic_version(version, None)
             || previous.is_some_and(|old| old.as_bytes() >= kind.as_bytes())
         {
             return Ok(false);
@@ -1362,61 +1364,16 @@ fn valid_expiry(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b':' | b'.' | b'Z'))
 }
 
-fn valid_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value.is_ascii()
-        && value
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'_' | b'/' | b'-')
-        })
+fn member_role(code: u64) -> Result<MemberRole, BundleError> {
+    let code = u8::try_from(code).map_invalid_encoding()?;
+    MemberRole::from_code(code).ok_or(BundleError::FieldOutOfBounds)
 }
 
-fn valid_semantic_version(value: &str) -> bool {
-    if value.is_empty() || value.len() > 64 || !value.is_ascii() {
-        return false;
-    }
-    let (core_pre, build) = match value.split_once('+') {
-        Some((left, right)) if !right.is_empty() && !right.contains('+') => (left, right),
-        Some(_) => return false,
-        None => (value, ""),
-    };
-    let (core, pre) = match core_pre.split_once('-') {
-        Some((left, right)) if !right.is_empty() => (left, right),
-        Some(_) => return false,
-        None => (core_pre, ""),
-    };
-    let mut parts = core.split('.');
-    parts.next().is_some_and(valid_numeric_version)
-        && parts.next().is_some_and(valid_numeric_version)
-        && parts.next().is_some_and(valid_numeric_version)
-        && parts.next().is_none()
-        && valid_version_identifiers(pre, true)
-        && valid_version_identifiers(build, false)
-}
-
-fn valid_numeric_version(value: &str) -> bool {
-    !value.is_empty()
-        && (value == "0" || !value.starts_with('0'))
-        && value.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn valid_version_identifiers(value: &str, no_leading_zero: bool) -> bool {
-    value.is_empty()
-        || value.split('.').all(|item| {
-            !item.is_empty()
-                && item
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                && (!no_leading_zero
-                    || !item.bytes().all(|byte| byte.is_ascii_digit())
-                    || valid_numeric_version(item))
-        })
+fn closed_code<T>(value: &Value, from_code: fn(u8) -> Option<T>) -> Result<T, BundleError> {
+    u8::try_from(uint(value)?)
+        .ok()
+        .and_then(from_code)
+        .ok_or(BundleError::InvalidEncoding)
 }
 
 fn decode_descriptors(value: Value) -> Result<Vec<Descriptor>, BundleError> {
@@ -1433,8 +1390,8 @@ fn decode_descriptors(value: Value) -> Result<Vec<Descriptor>, BundleError> {
             let path = validated_path(text(&fields[0])?)?;
             let size = uint(&fields[1])?;
             let digest = fixed_bytes(&fields[2])?;
-            let role = u8::try_from(uint(&fields[3])?).map_invalid_encoding()?;
-            if size > 64 * 1024 * 1024 || role > 19 {
+            let role = member_role(uint(&fields[3])?)?;
+            if size > 64 * 1024 * 1024 {
                 return Err(BundleError::FieldOutOfBounds);
             }
             Ok(Descriptor {
@@ -1479,9 +1436,9 @@ fn decode_members(value: Value) -> Result<BTreeMap<String, VerifiedMember>, Bund
         let Value::Bytes(raw) = raw_value else {
             return Err(BundleError::InvalidEncoding);
         };
-        let role = u8::try_from(uint(&role_value)?).map_invalid_encoding()?;
+        let role = member_role(uint(&role_value)?)?;
         total += raw.len();
-        if raw.len() > MAX_MEMBER_BYTES || total > MAX_ARCHIVE_BYTES || role > 19 {
+        if raw.len() > MAX_MEMBER_BYTES || total > MAX_ARCHIVE_BYTES {
             return Err(BundleError::FieldOutOfBounds);
         }
         let member = VerifiedMember {
@@ -1507,11 +1464,8 @@ fn decode_expected_results(value: Value) -> Result<Vec<ExpectedResult>, BundleEr
             if case_id.is_empty() || case_id.len() > 128 {
                 return Err(BundleError::FieldOutOfBounds);
             }
-            let claim_layer = u8::try_from(uint(&fields[1])?).map_invalid_encoding()?;
-            let mode = u8::try_from(uint(&fields[3])?).map_invalid_encoding()?;
-            if claim_layer > 6 || mode > 1 {
-                return Err(BundleError::InvalidEncoding);
-            }
+            let claim_layer = closed_code(&fields[1], ClaimLayer::from_code)?;
+            let mode = closed_code(&fields[3], ExecutionMode::archive_from_code)?;
             Ok(ExpectedResult {
                 key: ExpectedResultKey {
                     case_id,

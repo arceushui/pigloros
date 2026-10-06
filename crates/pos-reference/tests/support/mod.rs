@@ -1,3 +1,7 @@
+pub mod cbor {
+    include!("cbor.rs");
+}
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::Write as _;
@@ -6,6 +10,7 @@ use std::io;
 use std::io::Write as _;
 use std::path::Path;
 
+use cbor::canonical;
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use flate2::write::GzEncoder;
@@ -3574,12 +3579,6 @@ fn fields(value: Value) -> TestResult<Vec<Value>> {
         return Err(io::Error::other("test value is not an array").into());
     };
     Ok(fields)
-}
-
-fn canonical(value: &Value) -> TestResult<Vec<u8>> {
-    let mut encoded = Vec::new();
-    ciborium::into_writer(value, &mut encoded)?;
-    Ok(encoded)
 }
 
 const fn array(values: Vec<Value>) -> Value {

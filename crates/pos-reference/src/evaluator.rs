@@ -1,8 +1,12 @@
 //! Resource-bounded black-box evaluation behind one public operation.
 
 use crate::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
+use crate::evaluator_domain::{
+    ClaimLayer, DivergenceMismatchKind, ExecutionMode, FixtureFamily, RedactionState, ReplayClaim,
+    SafeErrorCode,
+};
 use crate::evaluator_protocol::{
-    CaseOutcome, CaseStatus, ConformanceReport, EvaluationRequest, ProtocolError,
+    compare_cases, CaseOutcome, CaseStatus, ConformanceReport, EvaluationRequest, ProtocolError,
     SubjectAdapterKind,
 };
 use crate::profile::{
@@ -12,13 +16,6 @@ use crate::profile::{
 use crate::signed_bundle::{
     preflight_signed_bundle_bytes, verify_signed_bundle, BundleError, VerifiedBundle,
 };
-use std::cmp::Ordering;
-
-const SAFE_ERROR_INVALID_ENCODING: u8 = 0;
-const SAFE_ERROR_DIGEST_MISMATCH: u8 = 4;
-const SAFE_ERROR_CLOSURE_INCOMPLETE: u8 = 9;
-const SAFE_ERROR_PROFILE_UNSUPPORTED: u8 = 11;
-const SAFE_ERROR_RESOURCE_LIMIT_EXCEEDED: u8 = 13;
 
 /// Deterministic resource consumption reported by a public subject adapter.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -50,9 +47,9 @@ impl ResourceUsage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CaseAttempt {
     pub case_id: String,
-    pub claim_layer: u8,
-    pub family: u8,
-    pub mode: u8,
+    pub claim_layer: ClaimLayer,
+    pub family: FixtureFamily,
+    pub mode: ExecutionMode,
     pub fixture_digest: [u8; 32],
     pub schema: AttemptArtifact,
     pub payload: AttemptArtifact,
@@ -84,7 +81,7 @@ pub enum SubjectResult {
     Output(Vec<u8>),
     Failure(NamespacedFailure),
     Divergence {
-        classification: u8,
+        classification: DivergenceMismatchKind,
         first_coordinate: Vec<u8>,
     },
     Unavailable,
@@ -229,18 +226,18 @@ pub fn evaluate(
         return Err(EvaluatorError::Independence);
     }
     let mut cases = evaluate_cases(&profile, &bundle, &request, adapter)?;
-    cases.sort_by(compare_case_outcomes);
+    cases.sort_by(compare_cases);
 
     let replay_claim = cases
         .iter()
         .map(|case| case.replay_claim)
         .max()
-        .unwrap_or(4);
+        .unwrap_or(ReplayClaim::IncompatibleProfile);
     let redaction_state = cases
         .iter()
         .map(|case| case.redaction_state)
         .max()
-        .unwrap_or(3);
+        .unwrap_or(RedactionState::EvidenceMissing);
     let mut report = ConformanceReport {
         report_id: request.request_id,
         subject_artifact_digest: request.subject_artifact_digest,
@@ -393,7 +390,7 @@ pub(crate) fn selector_bounded_hard_caps(
 fn evaluate_attempt(
     request: &EvaluationRequest,
     fixture: &Fixture,
-    mode: u8,
+    mode: ExecutionMode,
     maximum_coordinate_bytes: u64,
     adapter: &mut impl SubjectAdapter,
     attempt: &CaseAttempt,
@@ -480,7 +477,7 @@ const fn enforce_observed_coordinate_limit(
 pub(crate) fn case_attempt(
     bundle: &VerifiedBundle,
     fixture: &Fixture,
-    mode: u8,
+    mode: ExecutionMode,
     hard_caps: EvaluatorHardCaps,
 ) -> Result<CaseAttempt, EvaluatorError> {
     let artifacts = bounded_attempt_artifacts(bundle, fixture, hard_caps)?;
@@ -557,7 +554,7 @@ fn bounded_attempt_artifacts(
 
 fn case_outcome(
     fixture: &Fixture,
-    mode: u8,
+    mode: ExecutionMode,
     observation: Result<SubjectObservation, AdapterError>,
     provenance_digest: [u8; 32],
 ) -> CaseOutcome {
@@ -577,13 +574,13 @@ fn case_outcome(
         redaction_state: fixture.redaction_state,
         provenance_digest,
     };
-    if outcome.redaction_state >= 2 {
+    if outcome.redaction_state >= RedactionState::StructuralOnly {
         return outcome;
     }
     match &fixture.oracle {
         StrictOracle::Output(expected) => outcome.expected_digest = Some(expected.digest),
         StrictOracle::Failure(_) => {
-            outcome.expected_error = failure_safe_error(fixture.expected_verification_outcome);
+            outcome.expected_error = fixture.expected_verification_outcome.failure_safe_error();
         }
         StrictOracle::Divergence {
             classification,
@@ -600,7 +597,7 @@ fn case_outcome(
     };
     if observation.usage.exceeds(fixture.deterministic_budget) {
         outcome.outcome = CaseStatus::Fail;
-        outcome.actual_error = Some(SAFE_ERROR_RESOURCE_LIMIT_EXCEEDED);
+        outcome.actual_error = Some(SafeErrorCode::ResourceLimitExceeded);
         return outcome;
     }
     match (&fixture.oracle, observation.result) {
@@ -620,7 +617,7 @@ fn case_outcome(
                 outcome.actual_error = outcome.expected_error;
                 outcome.outcome = CaseStatus::Pass;
             } else {
-                outcome.actual_error = Some(SAFE_ERROR_DIGEST_MISMATCH);
+                outcome.actual_error = Some(SafeErrorCode::DigestMismatch);
                 outcome.outcome = CaseStatus::Fail;
             }
         }
@@ -653,18 +650,10 @@ fn case_outcome(
     outcome
 }
 
-fn failure_safe_error(verification_outcome: u8) -> Option<u8> {
-    [
-        None,
-        None,
-        Some(SAFE_ERROR_INVALID_ENCODING),
-        Some(SAFE_ERROR_CLOSURE_INCOMPLETE),
-        Some(SAFE_ERROR_PROFILE_UNSUPPORTED),
-        Some(SAFE_ERROR_RESOURCE_LIMIT_EXCEEDED),
-    ][usize::from(verification_outcome)]
-}
-
-fn expected_divergence_digest(classification: u8, coordinate: &[u8]) -> [u8; 32] {
+fn expected_divergence_digest(
+    classification: DivergenceMismatchKind,
+    coordinate: &[u8],
+) -> [u8; 32] {
     divergence_digest(
         b"PiglorOS.ExpectedDivergence.v1\0",
         classification,
@@ -672,7 +661,7 @@ fn expected_divergence_digest(classification: u8, coordinate: &[u8]) -> [u8; 32]
     )
 }
 
-fn actual_divergence_digest(classification: u8, coordinate: &[u8]) -> [u8; 32] {
+fn actual_divergence_digest(classification: DivergenceMismatchKind, coordinate: &[u8]) -> [u8; 32] {
     divergence_digest(
         b"PiglorOS.ActualDivergence.v1\0",
         classification,
@@ -680,22 +669,17 @@ fn actual_divergence_digest(classification: u8, coordinate: &[u8]) -> [u8; 32] {
     )
 }
 
-fn divergence_digest(domain: &[u8], classification: u8, coordinate: &[u8]) -> [u8; 32] {
+fn divergence_digest(
+    domain: &[u8],
+    classification: DivergenceMismatchKind,
+    coordinate: &[u8],
+) -> [u8; 32] {
     let mut bytes = domain.to_vec();
-    bytes.push(classification);
+    bytes.push(classification.code());
     let length = coordinate.len() as u64;
     bytes.extend_from_slice(&length.to_be_bytes());
     bytes.extend_from_slice(coordinate);
     *blake3::hash(&bytes).as_bytes()
-}
-
-fn compare_case_outcomes(left: &CaseOutcome, right: &CaseOutcome) -> Ordering {
-    left.case_id
-        .as_bytes()
-        .cmp(right.case_id.as_bytes())
-        .then(left.mode.cmp(&right.mode))
-        .then(left.claim_layer.cmp(&right.claim_layer))
-        .then(left.fixture_digest.cmp(&right.fixture_digest))
 }
 
 fn diagnostics(report: &ConformanceReport, limit: u64) -> Result<Option<Vec<u8>>, EvaluatorError> {
