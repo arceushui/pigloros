@@ -127,9 +127,10 @@
 //!   `Seq` (plan, Tick, `Seq`, scheduler position, lists, cursor, and
 //!   provenance). The walk buffers the recomputed Events of the Tick it is
 //!   inside, across page boundaries: an honest Tick is at most one batch, so
-//!   a buffer past [`MAX_PIPELINE_DRAFTS_PER_BATCH`] Events (counting the
-//!   checkpoint Event) or [`MAX_PIPELINE_DRAFT_BATCH_BYTES`] payload and Event
-//!   type bytes is a mismatch. At every checkpoint Event it recomputes the
+//!   a buffer of more than [`MAX_PIPELINE_DRAFTS_PER_BATCH`] - 1 recomputed
+//!   Events (the checkpoint Event takes the last slot) or more than
+//!   [`MAX_PIPELINE_DRAFT_BATCH_BYTES`] payload and Event type bytes is a
+//!   mismatch. At every checkpoint Event it recomputes the
 //!   chained state from the previous verified state, the receipt's epochs,
 //!   the Tick number, and the buffered Events, and requires it to equal the
 //!   state the committed `RCP1` records, so every Tick's state is verified
@@ -398,24 +399,24 @@ struct TickEventsV1 {
 }
 
 impl TickEventsV1 {
-    /// Buffer one committed Event and report whether it is still one batch.
+    /// Buffer one committed Event and report whether the Tick now exceeds one
+    /// batch.
     ///
-    /// Returns `true` while the buffer is within one honest batch, and
-    /// `false` once it is over the count or the byte bound, so the Tick
-    /// cannot be an honest single batch.
+    /// Returns `true` once the buffer is at the count bound or over the byte
+    /// bound, so the Tick cannot be an honest single batch.
     ///
     /// That bounds the memory a walk can use. An honest Tick stages at most
     /// one batch, whose last draft is its checkpoint Event, so it buffers
     /// fewer than [`MAX_PIPELINE_DRAFTS_PER_BATCH`] Events and at most
     /// [`MAX_PIPELINE_DRAFT_BATCH_BYTES`] payload and Event type bytes.
-    fn push_within_batch(&mut self, event: Event) -> bool {
+    fn exceeds_batch_after_push(&mut self, event: Event) -> bool {
         self.bytes = self
             .bytes
             .saturating_add(event.payload.len())
             .saturating_add(event.event_type.as_str().len());
         self.drafts.push(committed_draft(event));
-        self.drafts.len() < MAX_PIPELINE_DRAFTS_PER_BATCH
-            && self.bytes <= MAX_PIPELINE_DRAFT_BATCH_BYTES
+        self.drafts.len() >= MAX_PIPELINE_DRAFTS_PER_BATCH
+            || self.bytes > MAX_PIPELINE_DRAFT_BATCH_BYTES
     }
 
     /// Hand out the buffered drafts and start the next Tick empty.
@@ -568,7 +569,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
                     let checkpoint =
                         verified_checkpoint(context, &progress, tick, seq, payload, &drafts)?;
                     progress.advance(tick, seq, checkpoint);
-                } else if !tick_events.push_within_batch(event) {
+                } else if tick_events.exceeds_batch_after_push(event) {
                     // No honest Tick has more Events or bytes than one batch.
                     return Err(CounterfactualSuffixErrorV1::RecoveryMismatch);
                 }
@@ -1013,4 +1014,63 @@ fn finish(
             failure,
         })
         .or(Err(CounterfactualSuffixErrorV1::ArtifactEncoding))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use pos_core::{EventId, SchemaVersion, WallTime};
+
+    use super::*;
+
+    /// One committed Event of type `x` whose payload is `payload_len` bytes.
+    fn event_of(payload_len: usize) -> Event {
+        Event {
+            id: EventId::new(),
+            entity: EntityId::new(),
+            event_type: Kind::new("x"),
+            payload: CanonicalBytes::from_vec(vec![0; payload_len]),
+            wall_time: WallTime::from_micros(1),
+            seq: Seq::from_u64(1),
+            causation_id: None,
+            correlation_id: None,
+            schema_version: SchemaVersion::V1,
+            signature: None,
+            signature_identity: None,
+            origin: None,
+            payload_hash: Hash::from_bytes([0; 32]),
+        }
+    }
+
+    #[test]
+    fn the_count_bound_leaves_the_checkpoint_event_the_last_slot() {
+        let mut buffer = TickEventsV1::default();
+        for _ in 1..MAX_PIPELINE_DRAFTS_PER_BATCH {
+            assert!(!buffer.exceeds_batch_after_push(event_of(0)));
+        }
+        assert_eq!(buffer.drafts.len(), MAX_PIPELINE_DRAFTS_PER_BATCH - 1);
+        assert!(buffer.exceeds_batch_after_push(event_of(0)));
+    }
+
+    #[test]
+    fn the_byte_bound_counts_payload_and_event_type_bytes_exactly() {
+        let mut buffer = TickEventsV1::default();
+        // The Event type adds one byte: exactly the bound is still one batch.
+        let at_bound = event_of(MAX_PIPELINE_DRAFT_BATCH_BYTES - 1);
+        assert!(!buffer.exceeds_batch_after_push(at_bound));
+        assert_eq!(buffer.bytes, MAX_PIPELINE_DRAFT_BATCH_BYTES);
+        assert!(buffer.exceeds_batch_after_push(event_of(0)));
+    }
+
+    #[test]
+    fn taking_the_drafts_starts_the_next_tick_empty() {
+        let mut buffer = TickEventsV1::default();
+        let over_bound = event_of(MAX_PIPELINE_DRAFT_BATCH_BYTES);
+        assert!(buffer.exceeds_batch_after_push(over_bound));
+        assert_eq!(buffer.take().len(), 1);
+        assert!(buffer.drafts.is_empty());
+        assert_eq!(buffer.bytes, 0);
+        let at_bound = event_of(MAX_PIPELINE_DRAFT_BATCH_BYTES - 1);
+        assert!(!buffer.exceeds_batch_after_push(at_bound));
+    }
 }
