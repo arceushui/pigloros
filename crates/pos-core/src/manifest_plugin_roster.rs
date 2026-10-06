@@ -401,8 +401,8 @@ impl ManifestPluginRosterV1 {
     ///
     /// Unlike [`Self::new`], the input must already be in strict slot order.
     /// Input longer than the 1 GiB cap is rejected before anything is parsed
-    /// or copied. Declared entry counts and closure lengths are bounded before any
-    /// entry is copied or any slice is taken. The decoded roster is
+    /// or copied. Declared entry counts and closure lengths are bounded before
+    /// any entry is copied or any slice is taken. The decoded roster is
     /// re-encoded and compared byte for byte with the input.
     ///
     /// # Errors

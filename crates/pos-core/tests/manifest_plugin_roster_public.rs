@@ -511,9 +511,9 @@ fn aggregate_cap_accepts_the_exact_cap_and_rejects_one_byte_more() -> TestResult
 
 #[test]
 fn decode_rejects_input_past_the_cap_before_parsing() {
-    // Zeroed allocations stay lazily mapped; the decoder reads at most one byte.
-    let at_cap = vec![0_u8; MAX_MANIFEST_PLUGIN_ROSTER_BYTES_V1];
-    decode_rejects(&at_cap, INVALID);
+    // A zeroed allocation stays lazily mapped and the decoder reads no byte of
+    // it. Only the over-cap input needs a real buffer: the exact-cap boundary is
+    // pinned by the `checked_manifest_plugin_roster_size_v1` tests.
     let over_cap = vec![0_u8; MAX_MANIFEST_PLUGIN_ROSTER_BYTES_V1 + 1];
     decode_rejects(&over_cap, TOO_LARGE);
 }
