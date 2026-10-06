@@ -35,6 +35,7 @@ pub fn ok<T, E: std::fmt::Debug>(result: Result<T, E>, context: &str) -> T {
 }
 
 /// Invocation options with `simulation_time` and `watchdog_epochs`.
+#[must_use]
 pub const fn options(simulation_time: u64, watchdog_epochs: u32) -> InvocationOptionsV1 {
     InvocationOptionsV1 {
         host_inputs: HostInputs { simulation_time },
@@ -43,6 +44,7 @@ pub const fn options(simulation_time: u64, watchdog_epochs: u32) -> InvocationOp
 }
 
 /// A release declaring ABI `0.0..=0.max_minor` and `features`.
+#[must_use]
 pub fn release(
     plugin_id: &str,
     max_minor: u16,
@@ -65,6 +67,7 @@ pub fn release(
 }
 
 /// `release` negotiated under the V1 Local profile recording `runtime`.
+#[must_use]
 pub fn negotiate(
     release: &PluginExecutionProjectionV1,
     host: &CommunityPluginHostAbiV1,
@@ -82,6 +85,7 @@ pub fn negotiate(
 }
 
 /// `release` negotiated under a profile that pins this engine's runtime.
+#[must_use]
 pub fn pinned(
     release: &PluginExecutionProjectionV1,
     host: &CommunityPluginHostAbiV1,
@@ -94,6 +98,7 @@ pub fn pinned(
 }
 
 /// The compatibility release under the default V1 profile with `budget`.
+#[must_use]
 pub fn execution(budget: DeterministicBudgetV1) -> PinnedExecutionV1 {
     pinned(
         &release(PLUGIN_ID, 0, &[], budget),
@@ -102,6 +107,7 @@ pub fn execution(budget: DeterministicBudgetV1) -> PinnedExecutionV1 {
 }
 
 /// An invocation of the compatibility behaviour with `observation`.
+#[must_use]
 pub fn invocation(observation: &[u8]) -> PluginInvocationV1 {
     let artifact = |schema_id| ArtifactRefV1 {
         schema_id,
