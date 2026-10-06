@@ -359,11 +359,11 @@ impl MemoryStore {
     /// Drop every counterfactual row of a deleted Fork, keeping only the last
     /// generation as a floor that no port read can reach, and the committed
     /// dependency prefix of a deleted parent Timeline.
-    pub(super) fn purge_counterfactual_state(&mut self, fork: TimelineId) {
-        self.dependency_prefixes.remove(&fork);
-        if let Some(state) = self.counterfactual_forks.remove(&fork) {
+    pub(super) fn purge_counterfactual_state(&mut self, timeline: TimelineId) {
+        self.dependency_prefixes.remove(&timeline);
+        if let Some(state) = self.counterfactual_forks.remove(&timeline) {
             self.counterfactual_generation_floors
-                .insert(fork, state.generation);
+                .insert(timeline, state.generation);
         }
     }
 

@@ -26,9 +26,9 @@
 //!   error, or an injected failure therefore leaves the Events, the
 //!   generation, and the dependency rows unchanged. The same holds for
 //!   `OutcomeUnknown`, which `MemoryStore` never produces.
-//! - **Check order.** An invalidation checks its record before the basis, as
-//!   the `SQLite` adapter does, so a misplaced record is a `BindingMismatch`
-//!   even for a stale basis. A later Tick rechecks the basis first, so a stale
+//! - **Check order.** An invalidation checks its record before the basis,
+//!   mirroring the contract, so a misplaced record is a `BindingMismatch` even
+//!   for a stale basis. A later Tick rechecks the basis first, so a stale
 //!   basis is `Stale` even for a misplaced record; the record is then checked
 //!   in the order provisional, Tick, node identity, and set capacity.
 //! - **No capacity check for an invalidation.** The set of a new generation
@@ -42,12 +42,11 @@
 //!   `BindingMismatch`, and the dependency set of a generation starts at an
 //!   invalidation. This is stricter than the contract's reference model,
 //!   which starts with a first Tick; it is the confirmed decision.
-//! - **Parent-cut Ticks are not enforced.** The contract says to reject a
-//!   record whose provisional Ticks are not strictly after the parent cut. A
-//!   Memory Fork row holds a `fork_point` (a parent Timeline and a `Seq`) and
-//!   no parent-cut Tick, so the adapter cannot compare. The coordinator seam
-//!   (#552) knows the plan and owns that obligation, and roots may legitimately
-//!   carry Ticks below the first Tick.
+//! - **Parent-cut Ticks are not enforced.** The contract leaves this to the
+//!   coordinator (#552); a Memory Fork row has no cut Tick. A Memory Fork row
+//!   holds a `fork_point` (a parent Timeline and a `Seq`), so the adapter
+//!   cannot compare, and roots may legitimately carry Ticks below the first
+//!   Tick.
 //! - **Committed prefix.** The committed prefix of a parent Timeline is kept
 //!   once per parent Timeline, outside any Fork, and served as
 //!   [`DependencyReadScopeV1::ParentPrefix`] up to its `through_tick`. No write
@@ -178,11 +177,7 @@ impl ForkDependencySetV1 {
     /// No node may reuse a recorded position key or artifact digest.
     fn ensure_unrecorded(&self, record: &TickDependencyRecordV1) -> Result<(), StoreError> {
         let repeats = record.nodes().iter().any(|row| self.records(row));
-        if repeats {
-            Err(StoreError::DuplicateIdentity)
-        } else {
-            Ok(())
-        }
+        require_that(!repeats, StoreError::DuplicateIdentity)
     }
 
     /// Whether the set holds the node's position key or artifact digest.
