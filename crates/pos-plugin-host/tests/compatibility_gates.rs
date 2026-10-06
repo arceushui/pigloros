@@ -135,7 +135,7 @@ fn text(value: &str) -> Val {
     record(vec![("utf8", bytes(value.as_bytes()))])
 }
 
-fn empty() -> Val {
+const fn empty() -> Val {
     Val::List(Vec::new())
 }
 
@@ -249,7 +249,7 @@ fn measure(guest: &LoadedComponent, export: GuestExport, args: &[Val]) -> (u64, 
     (report.startup_fuel, report.call_fuel, report.memory_bytes)
 }
 
-fn measurement(
+const fn measurement(
     guest_name: &'static str,
     call: &'static str,
     values: (u64, u64, u64),
@@ -334,9 +334,10 @@ fn budget_measurements_match_the_recorded_evidence() {
 
 #[test]
 fn fuel_exhaustion_is_fuel_exhausted_and_discards_completed_host_calls() {
-    let args = [invocation("reduce", b"observation", &DOMAIN)];
+    let observation = vec![0xa5; LARGE_OBSERVATION_BYTES];
+    let args = [invocation("reduce", &observation, &DOMAIN)];
     for (name, guest) in guests() {
-        let recorded = recorded(name, "reduce");
+        let recorded = recorded(name, "reduce-1MiB");
         let total = recorded.startup_fuel + recorded.call_fuel;
         let exact = InvocationLimits {
             fuel: total,
@@ -346,13 +347,14 @@ fn fuel_exhaustion_is_fuel_exhausted_and_discards_completed_host_calls() {
             run(guest, GuestExport::Reduce, &args, exact).is_ok(),
             "{name}"
         );
-        // One unit short, the guest has already logged and hashed when the
-        // fuel runs out; the failure carries none of that work.
-        let short = InvocationLimits {
-            fuel: total - 1,
+        // Half the budget runs out while hashing the observation, after the
+        // guest's `record-operational-log` call succeeded; the failure carries
+        // none of that work.
+        let half = InvocationLimits {
+            fuel: total / 2,
             ..LIMITS
         };
-        let failure = run(guest, GuestExport::Reduce, &args, short).err();
+        let failure = run(guest, GuestExport::Reduce, &args, half).err();
         assert_eq!(failure, Some(InvocationFailure::FuelExhausted), "{name}");
         let starved = InvocationLimits { fuel: 1, ..LIMITS };
         let failure = run(guest, GuestExport::Describe, &[], starved).err();
