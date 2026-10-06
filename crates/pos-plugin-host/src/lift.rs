@@ -380,6 +380,14 @@ mod tests {
 
     #[test]
     fn primitive_lifts_reject_other_shapes() {
+        assert_eq!(bytes(&Val::U8(1)), Err(INVALID));
+        assert_eq!(ordered_digests(&Val::U8(1)), Err(INVALID));
+        assert_eq!(
+            id(&record(vec![("utf8", byte_list(&[0xff]))])),
+            Err(INVALID)
+        );
+        let bad_ordinal = record(vec![("schema-id", Val::U32(3)), ("field-ordinal", Val::U32(4))]);
+        assert_eq!(field_ref(&bad_ordinal), Err(INVALID));
         assert_eq!(fields::<1>(&Val::U8(1)), Err(INVALID));
         assert_eq!(list(&Val::U8(1)), Err(INVALID));
         assert_eq!(bytes(&Val::List(vec![Val::U16(1)])), Err(INVALID));

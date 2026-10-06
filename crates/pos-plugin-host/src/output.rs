@@ -349,4 +349,47 @@ mod tests {
         }
         assert_eq!(plugin_output(&value, &BOUNDS), Err(INVALID));
     }
+
+    /// `value` with field `index` of the first item of list field `list`
+    /// replaced by a `u8`, or the whole first item when `index` is `None`.
+    fn replaced_item(value: &Val, list: usize, index: Option<usize>) -> Val {
+        let mut value = value.clone();
+        if let Val::Record(fields) = &mut value {
+            if let Val::List(items) = &mut fields[list].1 {
+                match (index, &mut items[0]) {
+                    (Some(index), Val::Record(item)) => item[index].1 = Val::U8(0),
+                    (_, item) => *item = Val::U8(0),
+                }
+            }
+        }
+        value
+    }
+
+    fn replaced(value: &Val, index: usize) -> Val {
+        let mut value = value.clone();
+        if let Val::Record(fields) = &mut value {
+            fields[index].1 = Val::U8(0);
+        }
+        value
+    }
+
+    #[test]
+    fn every_field_of_the_wrong_kind_is_invalid() {
+        let value = output_val(&output());
+        for index in 0..7 {
+            let broken = replaced(&value, index);
+            assert_eq!(plugin_output(&broken, &BOUNDS), Err(INVALID), "output {index}");
+        }
+        for (list, fields) in [(1, 5), (4, 3)] {
+            for index in 0..fields {
+                let broken = replaced_item(&value, list, Some(index));
+                assert_eq!(plugin_output(&broken, &BOUNDS), Err(INVALID), "{list}.{index}");
+            }
+            let broken = replaced_item(&value, list, None);
+            assert_eq!(plugin_output(&broken, &BOUNDS), Err(INVALID), "{list}");
+        }
+        let mut unordered = output();
+        unordered.consumed_dependencies = vec![[2; 32], [1; 32]];
+        assert_eq!(validate(&sealed(unordered)), Err(INVALID));
+    }
 }

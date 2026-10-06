@@ -6,6 +6,13 @@
 //! its `migrations` must be empty, because a V1 host never invokes
 //! `migrate-state`. Any mismatch or bound violation is `InvalidGuestOutput`.
 //! Fields are checked in WIT order, so the lowest failing ordinal wins.
+//!
+//! Two fields are deliberately not compared, pending an owner decision:
+//! - `manifest-digest` and `release-digest` are only checked to be 32 bytes.
+//!   Both digests cover the Component's own digest (PMF1 field 9), so no
+//!   Component can embed the values of its own release.
+//! - `capabilities` and `dependencies` are only count-bounded; the manifest,
+//!   not `describe`, is their authority.
 
 use pos_runtime::community_plugin_host::NegotiatedCommunityPluginV1;
 use wasmtime::component::Val;
@@ -246,5 +253,13 @@ mod tests {
         assert!(with(9, many(MAX_DESCRIPTOR_ITEMS)).is_ok());
         assert!(with(11, many(MAX_DESCRIPTOR_ITEMS)).is_ok());
         assert_eq!(plugin_descriptor(&Val::U8(0), &negotiated()), Err(INVALID));
+    }
+
+    #[test]
+    fn every_field_of_the_wrong_kind_is_invalid() {
+        for index in 0..descriptor_fields().len() {
+            assert_eq!(with(index, Val::U8(0)), Err(INVALID), "field {index}");
+        }
+        assert_eq!(with(6, Val::List(vec![Val::U8(0)])), Err(INVALID));
     }
 }

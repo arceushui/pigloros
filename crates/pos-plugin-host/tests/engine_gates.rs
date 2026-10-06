@@ -254,6 +254,10 @@ fn imported_functions_must_have_their_exact_host_v1_types() {
         "(component (import \"pigloros:plugin/host-v1@0.1.0\" (instance
            (export \"record-operational-log\"
              (func (param \"category\" u16) (result (result (error string))))))))",
+        "(component (import \"pigloros:plugin/host-v1@0.1.0\" (instance
+           (type $v (variant (case \"text\" string)))
+           (export \"failure\" (type $e (eq $v)))
+           (export \"simulation-time\" (func (result $e))))))",
     ];
     for text in denied {
         let loaded = ENGINE.host.load(&component(text)).err();
@@ -340,5 +344,7 @@ fn the_watchdog_deadline_counts_epochs_after_the_invocation_starts() {
     host.increment_epoch();
     let inputs = HostInputs { simulation_time: 0 };
     let report = host.drive(&rust, &execution(BUDGET), &invocation(4), inputs, 1);
+    let stopped = host.drive(&rust, &execution(BUDGET), &invocation(4), inputs, 0);
+    assert_eq!(stopped.err(), Some(Error::OperationalWatchdogStop));
     assert!(report.is_ok_and(|report| report.result.is_ok()));
 }
