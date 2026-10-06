@@ -105,7 +105,6 @@ fn public_none_attestation_parser_rejects_authenticator_and_cose_fields(
         ("wrong key type", 2, 1),
         ("wrong algorithm", 4, 0x25),
         ("wrong curve", 6, 2),
-        ("wrong x width", 8, 0x57),
     ] {
         let mut mutated = authenticator_data.clone();
         mutated[57 + cose_offset] = value;
@@ -115,6 +114,12 @@ fn public_none_attestation_parser_rejects_authenticator_and_cose_fields(
             "{label}"
         );
     }
+    let mut wrong_x_width = authenticator_data;
+    wrong_x_width[57 + 8] = 0x57;
+    assert_eq!(
+        parse_none_attestation_object(&none_attestation_object(&wrong_x_width)?, &CREDENTIAL_ID),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
     Ok(())
 }
 
