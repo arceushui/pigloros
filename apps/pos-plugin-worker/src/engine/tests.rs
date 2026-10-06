@@ -59,36 +59,58 @@ fn an_elapsed_watchdog_stops_the_guest_with_the_operational_error() {
     assert_eq!(outcome, Some(Err(Error::OperationalWatchdogStop)));
 }
 
+/// How long a ticker test may take before it counts as hung.
+const HUNG_AFTER: Duration = Duration::from_secs(30);
+
+/// Run `test` on its own thread and wait for its result for at most
+/// [`HUNG_AFTER`], so a regression fails fast instead of stalling the job.
+///
+/// A hung thread is left behind: it is detached, so it cannot keep the test
+/// process from exiting.
+fn within_deadline<T: Send + 'static>(test: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        // The receiver is gone only after the deadline, when nobody listens.
+        let _sent = sender.send(test());
+    });
+    receiver.recv_timeout(HUNG_AFTER).ok()
+}
+
 #[test]
 fn the_ticker_advances_until_the_call_returns() {
-    let ticks = AtomicU64::new(0);
-    let advance = || {
-        ticks.fetch_add(1, Ordering::AcqRel);
-    };
-    // Deterministic: the call returns only once the ticker has fired three
-    // times, so a ticker that never advances makes this test hang, not flake.
-    let seen = ticking(advance, Duration::from_millis(1), || {
-        while ticks.load(Ordering::Acquire) < 3 {
-            thread::yield_now();
-        }
-        ticks.load(Ordering::Acquire)
+    let seen = within_deadline(|| {
+        let ticks = AtomicU64::new(0);
+        let advance = || {
+            ticks.fetch_add(1, Ordering::AcqRel);
+        };
+        // The call returns once the ticker has fired three times.
+        ticking(advance, Duration::from_millis(1), || {
+            while ticks.load(Ordering::Acquire) < 3 {
+                thread::yield_now();
+            }
+            ticks.load(Ordering::Acquire)
+        })
     });
-    assert!(seen >= 3);
+    assert!(
+        seen.is_some_and(|seen| seen >= 3),
+        "the ticker never advanced"
+    );
 }
 
 #[test]
 fn a_panicking_call_still_stops_the_ticker() {
-    let ticks = AtomicU64::new(0);
-    let advance = || {
-        ticks.fetch_add(1, Ordering::AcqRel);
-    };
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ticking(advance, Duration::from_millis(1), || -> u8 {
-            std::panic::resume_unwind(Box::new("call failed"))
+    let outcome = within_deadline(|| {
+        std::panic::catch_unwind(|| {
+            ticking(
+                || (),
+                Duration::from_millis(1),
+                || -> u8 { std::panic::resume_unwind(Box::new("call failed")) },
+            )
         })
-    }));
-    // Without the drop guard the scope would wait forever for the ticker.
-    assert!(outcome.is_err());
+        .is_err()
+    });
+    // Without the drop guard the scope never joins the ticker: no result.
+    assert_eq!(outcome, Some(true), "the ticker outlived a panicking call");
 }
 
 #[test]
