@@ -60,6 +60,7 @@ pub mod pipeline_evidence;
 pub mod plugin;
 pub mod recipient_key;
 pub mod repro_manifest_root;
+pub mod repro_manifest_v2;
 pub mod retention;
 pub mod staged_install;
 pub mod state;
@@ -316,6 +317,10 @@ pub use manifest_roster_comparison::{
 pub use repro_manifest_root::{
     ReproManifestRootErrorV1, ReproManifestRootInputV1, ReproManifestRootV1,
     MAX_REPRO_MANIFEST_LABEL_BYTES_V1, MAX_REPRO_MANIFEST_ROOT_BYTES_V1,
+};
+pub use repro_manifest_v2::{
+    checked_repro_manifest_v2_input_len, ReproManifestV2, ReproManifestV2Error,
+    MAX_REPRO_MANIFEST_V2_ADAPTER_RECORDS, MAX_REPRO_MANIFEST_V2_INPUT_BYTES,
 };
 pub use world_artifact::{
     WorldArtifactErrorV1, WorldArtifactKeyDependencyV1, WorldArtifactKindV1,
