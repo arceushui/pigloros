@@ -1209,6 +1209,9 @@ struct FakeStore {
     record_ticks: Vec<(u64, u64)>,
     /// The first Tick of the current generation, known from its invalidation.
     first_tick: u64,
+    /// Whether the generation has a persisted first Tick: not at generation
+    /// 0, nor for a Fork never invalidated, nor one re-created at its floor.
+    has_first_tick: bool,
     /// Test-poked: the committed prefix has no write path here (#554).
     parent_nodes: Vec<NodeRow>,
     /// Test-poked: the committed prefix has no write path here (#554).
@@ -1225,6 +1228,7 @@ impl FakeStore {
             fork_edges: Vec::new(),
             record_ticks: Vec::new(),
             first_tick: 17,
+            has_first_tick: true,
             parent_nodes: Vec::new(),
             parent_edges: Vec::new(),
         }
@@ -1277,11 +1281,16 @@ impl FakeStore {
         capacity.map_err(StoreError::from)
     }
 
-    /// Validate `record` for a later Tick: strictly after the last persisted
-    /// record Tick, or not below the generation's first Tick while the set is
-    /// empty, with no node position key or digest already in the set.
+    /// Validate `record` for a later Tick: refused outright when the
+    /// generation has no persisted first Tick; otherwise strictly after the
+    /// last persisted record Tick, or not below the generation's first Tick
+    /// while the set is empty, with no node position key or digest already in
+    /// the set.
     fn admit_later(&self, record: &TickRecord) -> Result<(), StoreError> {
         record.ensure_provisional()?;
+        if !self.has_first_tick {
+            return Err(StoreError::BindingMismatch);
+        }
         let last_tick = self
             .record_ticks
             .iter()
@@ -1333,6 +1342,7 @@ impl FakeStore {
         self.head = receipt.first_tick_head();
         self.generation = receipt.generation().generation;
         self.first_tick = command.first_tick();
+        self.has_first_tick = true;
         if let Some(record) = record {
             self.record(record, self.generation);
         }
@@ -1778,4 +1788,18 @@ fn the_first_record_tick_may_not_precede_the_generation_first_tick() {
     assert_eq!(ok(collect_nodes(&store, fork_scope(4), 5)), Vec::new());
     assert!(append_record(&mut store, &sample_record()).is_ok());
     assert_eq!(ok(collect_nodes(&store, fork_scope(4), 5)).len(), 2);
+}
+
+#[test]
+fn a_generation_without_a_first_tick_takes_no_record() {
+    let mut store = FakeStore::new();
+    store.has_first_tick = false;
+    let expected = store.basis();
+    assert_eq!(
+        err(append_record(&mut store, &sample_record())),
+        StoreError::BindingMismatch
+    );
+    assert_eq!(store.basis(), expected);
+    assert_eq!(ok(collect_nodes(&store, fork_scope(3), 5)), Vec::new());
+    assert!(store.record_ticks.is_empty());
 }
