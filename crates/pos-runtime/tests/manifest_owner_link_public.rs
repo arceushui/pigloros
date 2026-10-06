@@ -1697,7 +1697,7 @@ fn detached_snapshot(world: &World, hooks: OwnerHooks) -> Fallible<ManifestOwner
     let dependency_branches = cut
         .dependency_directories()
         .iter()
-        .flat_map(|directory| directory.branches())
+        .flat_map(pos_core::WorldDependencyDirectoryV1::branches)
         .map(|branch| (branch.digest(), branch.clone()))
         .collect();
     let evidence = cut.coordinator_key_evidence();
