@@ -194,6 +194,10 @@ struct Fixture {
     fork: TimelineId,
 }
 
+fn path_text(fixture: &Fixture) -> &str {
+    fixture.path.to_str().unwrap_or_default()
+}
+
 fn open(path: &Path) -> SqliteStore {
     let mut store = ok(SqliteStore::open(path.to_str().unwrap_or_default()));
     ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
@@ -226,7 +230,7 @@ fn execute(path: &Path, sql: &str) -> rusqlite::Result<()> {
     rusqlite::Connection::open(path).and_then(|connection| connection.execute_batch(sql))
 }
 
-fn count(path: &Path, sql: &str, fork: TimelineId) -> i64 {
+fn scalar(path: &Path, sql: &str, fork: TimelineId) -> i64 {
     ok(rusqlite::Connection::open(path).and_then(|connection| {
         connection.query_row(sql, rusqlite::params![fork.to_string()], |row| row.get(0))
     }))
@@ -241,7 +245,7 @@ fn written_rows(path: &Path, fork: TimelineId) -> [i64; 4] {
         "SELECT count(*) FROM counterfactual_quarantine WHERE fork_id = ?1",
         "SELECT count(*) FROM counterfactual_artifacts WHERE fork_id = ?1",
     ]
-    .map(|sql| count(path, sql, fork))
+    .map(|sql| scalar(path, sql, fork))
 }
 
 /// Count one exact quarantine row of generation 1.
@@ -388,7 +392,7 @@ fn a_later_generation_quarantines_stored_bytes_permanently() {
         Err(StoreError::InvalidArtifactReuse)
     );
     assert_eq!(
-        count(
+        scalar(
             &fixture.path,
             "SELECT count(*) FROM counterfactual_artifacts WHERE fork_id = ?1",
             fork
@@ -713,7 +717,7 @@ fn integers_beyond_sqlite_storage_are_out_of_bounds() {
         Ok(Outcome::Committed(_))
     ));
     assert_eq!(
-        count(
+        scalar(
             &fixture.path,
             "SELECT first_tick FROM counterfactual_generations WHERE fork_id = ?1",
             fork
@@ -1293,7 +1297,7 @@ fn a_repeated_frontier_is_recorded_at_each_generation() {
     ));
     assert_eq!(written_rows(&fixture.path, fork), [4, 2, 3, 4]);
     assert_eq!(
-        count(
+        scalar(
             &fixture.path,
             "SELECT group_concat(generation) = '1,2' FROM (
                  SELECT generation FROM counterfactual_artifacts
@@ -1605,7 +1609,7 @@ fn counterfactual_rows(path: &Path, fork: TimelineId) -> [i64; 6] {
         "SELECT count(*) FROM counterfactual_fork_tombstones WHERE fork_id = ?1",
         "SELECT count(*) FROM counterfactual_purge_fence WHERE fork_id = ?1",
     ]
-    .map(|sql| count(path, sql, fork))
+    .map(|sql| scalar(path, sql, fork))
 }
 
 /// A Fork holding one committed generation.
@@ -1614,7 +1618,7 @@ const LIVE_ROWS: [i64; 6] = [1, 1, 3, 2, 0, 0];
 const PURGED_ROWS: [i64; 6] = [0, 0, 0, 0, 1, 0];
 
 fn tombstone_floor(path: &Path, fork: TimelineId) -> i64 {
-    count(
+    scalar(
         path,
         "SELECT generation_floor FROM counterfactual_fork_tombstones WHERE fork_id = ?1",
         fork,
@@ -1763,6 +1767,8 @@ fn only_a_marked_purge_passes_the_delete_guards_and_the_floor_cannot_drop() {
         &fixture.path,
         "UPDATE counterfactual_fork_tombstones SET generation_floor = generation_floor",
     ));
+    // Raising the floor through `INSERT OR REPLACE` passes only because
+    // `recursive_triggers` is off, so the replaced row fires no delete guard.
     ok(execute(
         &fixture.path,
         "INSERT OR REPLACE INTO counterfactual_fork_tombstones
@@ -1770,10 +1776,6 @@ fn only_a_marked_purge_passes_the_delete_guards_and_the_floor_cannot_drop() {
     ));
     assert_eq!(tombstone_floor(&fixture.path, other), 9);
     assert_eq!(open_error(SqliteStore::open(path_text(&fixture))), "");
-}
-
-fn path_text(fixture: &Fixture) -> &str {
-    fixture.path.to_str().unwrap_or_default()
 }
 
 /// Faults that fail one statement of the delete transaction.
@@ -1840,8 +1842,9 @@ fn a_surviving_purge_marker_fails_every_open_closed() {
     assert_eq!(open_error(SqliteStore::open(text)), "");
 }
 
-/// The delete guards of the first schema version: name, table, message.
-const FIRST_VERSION_GUARDS: [(&str, &str, &str); 4] = [
+/// The delete guards as the previous build created them, without the
+/// purge-marker condition: name, table, message.
+const OLD_DELETE_GUARDS: [(&str, &str, &str); 4] = [
     (
         "counterfactual_forks_retained",
         "counterfactual_forks",
@@ -1865,17 +1868,9 @@ const FIRST_VERSION_GUARDS: [(&str, &str, &str); 4] = [
 ];
 
 #[test]
-fn a_first_version_file_migrates_its_delete_guards_on_a_writable_open() {
-    let fixture = fixture();
-    let fork = fixture.fork;
-    let mut store = open(&fixture.path);
-    commit_default(&mut store, fork);
-    drop(store);
-    ok(execute(
-        &fixture.path,
-        "DROP TABLE counterfactual_fork_tombstones; DROP TABLE counterfactual_purge_fence;",
-    ));
-    for (name, table, message) in FIRST_VERSION_GUARDS {
+fn an_old_bodied_delete_guard_is_rejected_on_every_open() {
+    for (name, table, message) in OLD_DELETE_GUARDS {
+        let fixture = fixture();
         ok(execute(
             &fixture.path,
             &format!(
@@ -1884,17 +1879,13 @@ fn a_first_version_file_migrates_its_delete_guards_on_a_writable_open() {
                  BEGIN SELECT RAISE(ABORT, '{message}'); END;"
             ),
         ));
+        let text = path_text(&fixture);
+        assert!(open_error(SqliteStore::open(text)).contains(name), "{name}");
+        assert!(
+            open_error(SqliteStore::open_read_only(text)).contains(name),
+            "{name}"
+        );
     }
-    let text = path_text(&fixture);
-    let stale = open_error(SqliteStore::open_read_only(text));
-    assert!(stale.contains("counterfactual_"), "{stale}");
-    assert_eq!(open_error(SqliteStore::open(text)), "");
-    assert_eq!(open_error(SqliteStore::open_read_only(text)), "");
-
-    let mut migrated = open(&fixture.path);
-    assert_eq!(generation(&migrated, fork), 1);
-    ok(migrated.delete_timeline(fork));
-    assert_eq!(counterfactual_rows(&fixture.path, fork), PURGED_ROWS);
 }
 
 #[test]

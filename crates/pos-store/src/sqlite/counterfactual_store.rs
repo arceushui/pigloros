@@ -19,25 +19,29 @@
 //! `counterfactual_quarantine`, `counterfactual_artifacts`), two purge tables
 //! (`counterfactual_fork_tombstones`, `counterfactual_purge_fence`), one
 //! lookup index, and fifteen guard triggers are created with `IF NOT EXISTS`
-//! by every writable open, so migration is additive and idempotent. The one
-//! exception is the four delete guards of the first schema version, which a
-//! writable open drops and recreates in the same transaction only when their
-//! stored body equals the first version's exactly (see the Timeline deletion
-//! decision below). Every open
-//! validates the exact table shapes, the index, and the trigger bodies, and
-//! fails closed with a storage error on any drift. A read-only open of a file
-//! written before this schema, which has no counterfactual table, index, or
-//! trigger at all, accepts the file as holding no counterfactual state: every
-//! port read reports `ForkNotFound`. Any counterfactual object that is
-//! present must still be complete and exact. The triggers make the database
-//! itself refuse to decrease a Fork generation, delete a Fork's
-//! counterfactual state outside a purge, delete or rewrite a quarantine row, or delete or
-//! rewrite a recorded generation or artifact. Each table also refuses an
-//! insert whose primary key already exists, before conflict resolution, so
-//! `INSERT OR REPLACE`, `REPLACE INTO`, and an upsert cannot delete and
-//! rewrite a row past the delete and update guards. A rolled-back
-//! coordinator version therefore cannot reactivate an invalidated artifact,
-//! and the prior `RCF1`, `SIV1`, and artifact bytes stay immutable for audit.
+//! by every writable open, so creation is additive and idempotent. This is
+//! the one normative first version of the schema: a file written by an
+//! earlier build, whose delete guards lack the purge-marker condition, fails
+//! the exact validation below with a storage error and must be recreated.
+//! Every open validates the exact table shapes, the index, and the trigger
+//! bodies, and fails closed with a storage error on any drift. A read-only
+//! open of a file written before this schema, which has no counterfactual
+//! table, index, or trigger at all, accepts the file as holding no
+//! counterfactual state: every port read reports `ForkNotFound`. Any
+//! counterfactual object that is present must still be complete and exact.
+//! The triggers make the database itself refuse to decrease a Fork
+//! generation, and, outside a purge, to delete a Fork row, a quarantine row,
+//! a recorded generation, or an artifact (see the Timeline deletion decision
+//! below). They also refuse to rewrite a quarantine row, a recorded
+//! generation, or an artifact. The four tables with a stored history (Forks,
+//! quarantine, generations, artifacts) each refuse an insert whose primary
+//! key already exists, before conflict resolution, so `INSERT OR REPLACE`,
+//! `REPLACE INTO`, and an upsert cannot delete and rewrite a row past the
+//! delete and update guards. The tombstone table instead refuses an insert
+//! that would lower an existing floor, and the purge-fence table has no
+//! guard. A rolled-back coordinator version therefore cannot reactivate an
+//! invalidated artifact, and the prior `RCF1`, `SIV1`, and artifact bytes
+//! stay immutable for audit.
 //!
 //! # ADR gap decisions
 //!
@@ -137,19 +141,22 @@
 //!   upserts one `counterfactual_fork_tombstones` row holding only the
 //!   Fork's last generation, and deletes the marker. Only the four delete
 //!   guards honor a marker, and only for the marked Fork, so any other delete
-//!   still aborts. The tombstone is a generation floor: its own guards refuse
-//!   a delete and any change that lowers it, and no port read touches it, so
-//!   every read of a deleted Fork stays `ForkNotFound`, matching the
+//!   still aborts. The marker is an accident guard for the generic delete
+//!   path, not an authorization boundary: a client with write access to the
+//!   database file can already drop the triggers, and the marker table has no
+//!   guard of its own. The tombstone is a generation floor: its own guards
+//!   refuse a delete and any change that lowers it, and no port read touches
+//!   it, so every read of a deleted Fork stays `ForkNotFound`, matching the
 //!   `MemoryStore` adapter. A Timeline later created with the same ID (an
 //!   identity-preserving import) is seeded at the floor when its facts are
 //!   published, so its generation never decreases. A marker only exists
 //!   inside the purge transaction, so a rollback or crash leaves none, and an
-//!   open that finds one fails closed. A file written with the first schema
-//!   version migrates on its next writable open; a read-only open of such a
-//!   file fails closed until then. **ADR-060 clarification:** the
+//!   open that finds one fails closed. Files created by an earlier build
+//!   before this schema version must be recreated: their old delete guards
+//!   fail the exact validation. **ADR-060 clarification:** the
 //!   counterfactual rows are derived state of the Fork Timeline, not erasure
-//!   evidence, so purging them is derived-state cleanup. The generic
-//!   `delete_timeline` still clears no erasure evidence, fence, or
+//!   evidence, so purging them in the generic `delete_timeline` is
+//!   derived-state cleanup. It clears no erasure evidence, fence, or
 //!   inventory, and the purge touches none of them.
 //! - **Errors.** A missing, deleted, non-Fork, unpublished, or protected
 //!   Timeline, and a Tick draft the generic append guard rejects, is
@@ -585,36 +592,6 @@ const COUNTERFACTUAL_SCHEMA_OBJECTS: &[CounterfactualSchemaObjectV1] = &[
     },
 ];
 
-/// The delete guards as earlier versions created them, before a purge marker
-/// relaxed them. A writable open replaces a trigger only when its stored body
-/// equals one of these exactly, so a tampered guard still fails validation.
-const COUNTERFACTUAL_SUPERSEDED_TRIGGERS: &[CounterfactualSchemaObjectV1] = &[
-    CounterfactualSchemaObjectV1 {
-        kind: "trigger",
-        name: "counterfactual_forks_retained",
-        body: "BEFORE DELETE ON counterfactual_forks
-               BEGIN SELECT RAISE(ABORT, 'counterfactual generation is retained'); END",
-    },
-    CounterfactualSchemaObjectV1 {
-        kind: "trigger",
-        name: "counterfactual_quarantine_retained",
-        body: "BEFORE DELETE ON counterfactual_quarantine
-               BEGIN SELECT RAISE(ABORT, 'quarantined artifact cannot be reactivated'); END",
-    },
-    CounterfactualSchemaObjectV1 {
-        kind: "trigger",
-        name: "counterfactual_generations_retained",
-        body: "BEFORE DELETE ON counterfactual_generations
-               BEGIN SELECT RAISE(ABORT, 'counterfactual generation record is retained'); END",
-    },
-    CounterfactualSchemaObjectV1 {
-        kind: "trigger",
-        name: "counterfactual_artifacts_retained",
-        body: "BEFORE DELETE ON counterfactual_artifacts
-               BEGIN SELECT RAISE(ABORT, 'counterfactual artifact is retained'); END",
-    },
-];
-
 /// Statements that purge one Fork's counterfactual state, each bound to the
 /// Fork id as `?1`. The marker row relaxes the delete guards for that Fork
 /// only; the tombstone keeps the Fork's last generation as a floor; the marker
@@ -888,7 +865,7 @@ fn publication_state(conn: &Connection, fork: TimelineId) -> Staged<(bool, u64)>
         |row| <(bool, i64)>::try_from(row),
     )
     .map_err(SqliteStore::into_storage_error)
-    .map(|(published, generation)| stored_u64(generation).map(|generation| (published, generation)))
+    .map(|(published, stored)| stored_u64(stored).map(|generation| (published, generation)))
 }
 
 /// Purge every counterfactual row of one deleted Fork inside the caller's
@@ -1039,8 +1016,7 @@ fn insert_quarantine(
 
 impl SqliteStore {
     /// Create the additive counterfactual tables, index, and guard
-    /// triggers, replacing any delete guard an earlier version created, then
-    /// validate their shape.
+    /// triggers, then validate their exact shape.
     pub(super) fn prepare_counterfactual_schema(&self) -> Result<(), CoreError> {
         let objects = COUNTERFACTUAL_SCHEMA_OBJECTS
             .iter()
@@ -1052,38 +1028,16 @@ impl SqliteStore {
             })
             .collect::<Vec<_>>()
             .concat();
-        // The drops and the creates share one transaction, so a concurrent
-        // opener never sees a Fork without its guards.
-        self.superseded_trigger_drops()
-            .and_then(|drops| {
-                self.conn
-                    .execute_batch(&format!(
-                        "BEGIN IMMEDIATE;
-                         {drops}
-                         {}
-                         {objects}
-                         COMMIT;",
-                        sqlite_schema_ddl(COUNTERFACTUAL_SCHEMA_TABLES)
-                    ))
-                    .map_err(Self::into_storage_error)
-            })
+        self.conn
+            .execute_batch(&format!(
+                "BEGIN IMMEDIATE;
+                 {}
+                 {objects}
+                 COMMIT;",
+                sqlite_schema_ddl(COUNTERFACTUAL_SCHEMA_TABLES)
+            ))
+            .map_err(Self::into_storage_error)
             .and_then(|()| self.validate_counterfactual_schema())
-    }
-
-    /// `DROP TRIGGER` statements for every delete guard still stored with the
-    /// exact body an earlier version created.
-    fn superseded_trigger_drops(&self) -> Result<String, CoreError> {
-        COUNTERFACTUAL_SUPERSEDED_TRIGGERS
-            .iter()
-            .try_fold(String::new(), |drops, object| {
-                self.stored_schema_sql(object).map(|stored| {
-                    if stored_matches(stored, object) {
-                        format!("{drops}DROP TRIGGER {};", object.name)
-                    } else {
-                        drops
-                    }
-                })
-            })
     }
 
     /// Validate the counterfactual tables, index, and triggers without
@@ -1371,10 +1325,13 @@ impl CounterfactualStorePortV1 for SqliteStore {
         })?;
         self.settle_write(self.in_counterfactual_scope(|store| {
             then_staged(store.visible_counterfactual_fork(fork), |()| {
-                then_staged(publication_state(&store.conn, fork), |(published, generation)| {
-                    write_fork_facts(&store.conn, fork, &facts, epochs, published)
-                        .map(|()| Ok(ForkGenerationV1 { fork, generation }))
-                })
+                then_staged(
+                    publication_state(&store.conn, fork),
+                    |(published, generation)| {
+                        write_fork_facts(&store.conn, fork, &facts, epochs, published)
+                            .map(|()| Ok(ForkGenerationV1 { fork, generation }))
+                    },
+                )
             })
         }))
     }
