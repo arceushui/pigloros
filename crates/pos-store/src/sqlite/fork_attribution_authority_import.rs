@@ -152,7 +152,7 @@ fn binding_held(conn: &Connection, plan: &InstallPlanV1<'_>) -> Result<bool, Imp
 
 /// Whether an imported `POB1` binds `principal` to an Owner other than
 /// `owner`.
-pub(super) fn imported_other_owner(
+fn imported_other_owner(
     conn: &Connection,
     principal: Hash,
     owner: OwnerIdV1,
@@ -172,7 +172,7 @@ pub(super) fn imported_other_owner(
 }
 
 /// Whether an import already holds `operation_id` as its `POB1` operation ID.
-pub(super) fn imported_binding_operation_held(
+fn imported_binding_operation_held(
     conn: &Connection,
     operation_id: Hash,
 ) -> Result<bool, ImportError> {
@@ -181,6 +181,25 @@ pub(super) fn imported_binding_operation_held(
         IMPORTED_BINDING_OPERATION_SQL,
         &blob(operation_id),
     )?)
+}
+
+/// The imported-binding rules for a local `POB1` (ADR-105 errata E10 and
+/// E11): an operation ID that an import holds is a `Conflict`, and a Principal
+/// an import bound to another Owner is a `PrincipalOwnerConflict`. An equal
+/// imported Owner is no conflict.
+pub(super) fn imported_binding_gate(
+    conn: &Connection,
+    operation_id: Hash,
+    principal: Hash,
+    owner: OwnerIdV1,
+) -> Result<(), ForkAdmissionErrorV1> {
+    if imported_binding_operation_held(conn, operation_id).map_err(imported_owner_failure)? {
+        Err(ForkAdmissionErrorV1::Conflict)
+    } else if imported_other_owner(conn, principal, owner).map_err(imported_owner_failure)? {
+        Err(ForkAdmissionErrorV1::PrincipalOwnerConflict)
+    } else {
+        Ok(())
+    }
 }
 
 /// Map a local Principal-binding read failure.
@@ -193,7 +212,7 @@ const fn admission_failure(error: ForkAdmissionErrorV1) -> ImportError {
 }
 
 /// Map an imported Principal-binding read failure for a local `POB1`.
-pub(super) const fn imported_owner_failure(error: ImportError) -> ForkAdmissionErrorV1 {
+const fn imported_owner_failure(error: ImportError) -> ForkAdmissionErrorV1 {
     if matches!(error, ImportError::StorageIndeterminate) {
         ForkAdmissionErrorV1::StorageIndeterminate
     } else {
@@ -1178,7 +1197,7 @@ mod tests {
     fn a_local_binding_fails_closed_on_an_unreadable_imported_store() -> Fallible<()> {
         let owner = pos_core::OwnerIdV1::new("creator-a")?;
         let bind = |store: &SqliteStore, operation: u8| {
-            store.insert_principal_owner_operation(
+            store.insert_principal_owner_operation_gated(
                 hash(operation),
                 hash(0x01),
                 hash(0x22),

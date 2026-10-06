@@ -11976,7 +11976,7 @@ impl SqliteStore {
                 owner,
                 commitment,
                 ..
-            } => self.insert_principal_owner_operation(
+            } => self.insert_principal_owner_operation_gated(
                 operation_id,
                 evidence_digest,
                 principal_digest,
@@ -12016,6 +12016,31 @@ impl SqliteStore {
         })
     }
 
+    /// Apply the imported-binding rules (ADR-105 errata E10 and E11), then
+    /// the local command.
+    fn insert_principal_owner_operation_gated(
+        &self,
+        operation_id: Hash,
+        evidence_digest: Hash,
+        principal_digest: Hash,
+        owner: OwnerIdV1,
+        commitment: Hash,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        fork_attribution_authority_import::imported_binding_gate(
+            &self.conn,
+            operation_id,
+            principal_digest,
+            owner,
+        )?;
+        self.insert_principal_owner_operation(
+            operation_id,
+            evidence_digest,
+            principal_digest,
+            owner,
+            commitment,
+        )
+    }
+
     fn insert_principal_owner_operation(
         &self,
         operation_id: Hash,
@@ -12024,15 +12049,6 @@ impl SqliteStore {
         owner: OwnerIdV1,
         commitment: Hash,
     ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
-        // ADR-105 erratum E11: an operation ID that an import holds is occupied.
-        if fork_attribution_authority_import::imported_binding_operation_held(
-            &self.conn,
-            operation_id,
-        )
-        .map_err(fork_attribution_authority_import::imported_owner_failure)?
-        {
-            return Err(pos_core::ForkAdmissionErrorV1::Conflict);
-        }
         // ADR-099: one Principal maps to exactly one immutable Owner. An equal
         // Owner under a new operation ID resolves to the committed binding
         // without writing; only an unequal Owner is a rebinding conflict.
@@ -12041,17 +12057,7 @@ impl SqliteStore {
                 .then_some(ForkAdmissionOperationResultV1::PrincipalOwner(existing))
                 .ok_or(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict);
         }
-        // ADR-105 erratum E10: a Principal an import bound to another Owner is
-        // a rebinding conflict too; an equal imported Owner is no conflict.
-        if fork_attribution_authority_import::imported_other_owner(
-            &self.conn,
-            principal_digest,
-            owner,
-        )
-        .map_err(fork_attribution_authority_import::imported_owner_failure)?
-        {
-            return Err(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict);
-        }
+
         // Verified POC1 facts carry nonzero operation and Principal digests,
         // so construction cannot fail; any failure still fails closed.
         let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {

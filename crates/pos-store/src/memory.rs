@@ -2721,22 +2721,47 @@ impl MemoryStore {
         })
     }
 
-    /// Whether any stored `FPO1`, `FPB1`, or `FPA1` already carries
-    /// `record_id`.
-    fn fork_publication_record_is_present(&self, record_id: Hash) -> bool {
-        self.fork_publication_artifacts.contains_key(&record_id)
+    /// Whether any local or imported `FPO1` carries `record_id`.
+    fn publication_operations_hold_record(&self, record_id: Hash) -> bool {
+        self.fork_publication_operations
+            .values()
+            .any(|row| row.input().signed_manifest_record_id == record_id)
             || self
                 .imported_fork_publication_operations
                 .values()
                 .any(|row| row.fields().signed_manifest_record_id == record_id)
-            || self
-                .fork_publication_operations
-                .values()
-                .any(|row| row.input().signed_manifest_record_id == record_id)
+    }
+
+    /// Whether any stored `FPO1`, `FPB1`, or `FPA1` already carries
+    /// `record_id`.
+    fn fork_publication_record_is_present(&self, record_id: Hash) -> bool {
+        self.fork_publication_artifacts.contains_key(&record_id)
+            || self.publication_operations_hold_record(record_id)
             || self
                 .fork_publication_bindings
                 .values()
                 .any(|row| row.input().signed_manifest_record_id == record_id)
+    }
+
+    /// Refuse a new issuance whose operation ID an import holds as its `FPO1`
+    /// (the shared operation-ID namespace of SQLite), then sign it.
+    fn sign_new_unless_imported<E, F>(
+        &self,
+        request: &ForkManifestPublicationRequestV1,
+        key: &(TimelineId, u64),
+        sign: F,
+    ) -> Result<PublicationGraphV1, ForkManifestPublicationErrorV1>
+    where
+        F: FnOnce(&HeldRegistryAuthorizationV1, &[u8]) -> Result<Signature, E>,
+    {
+        if self
+            .imported_fork_publication_operations
+            .contains_key(&request.operation_id)
+        {
+            Err(ForkManifestPublicationErrorV1::CorruptOrConflicting)
+        } else {
+            self.sign_new_fork_publication(request, key, sign)
+        }
     }
 
     /// Read the authoritative Fork provenance sources for one new issuance.
@@ -2809,12 +2834,6 @@ impl ForkManifestPublicationPortV1 for MemoryStore {
         F: FnOnce(&HeldRegistryAuthorizationV1, &[u8]) -> Result<Signature, E>,
     {
         validate_publication_request(&request)?;
-        if self
-            .imported_fork_publication_operations
-            .contains_key(&request.operation_id)
-        {
-            return Err(ForkManifestPublicationErrorV1::CorruptOrConflicting);
-        }
         if let Some(operation) = self.fork_publication_operations.get(&request.operation_id) {
             let input = operation.input();
             let committed = self.read_committed(input.child_timeline_id, input.final_logical_head);
@@ -2824,7 +2843,7 @@ impl ForkManifestPublicationPortV1 for MemoryStore {
             request.child_timeline_id,
             request.expected_final_logical_head,
         );
-        let graph = self.sign_new_fork_publication(&request, &key, sign)?;
+        let graph = self.sign_new_unless_imported(&request, &key, sign)?;
         self.fork_publication_artifacts
             .insert(graph.receipt.signed_manifest_record_id, graph.artifact);
         self.fork_publication_operations
@@ -2955,7 +2974,7 @@ impl MemoryStore {
                 owner,
                 commitment,
                 ..
-            } => self.execute_principal_owner_command(
+            } => self.execute_principal_owner_command_gated(
                 key,
                 &MemoryPrincipalOwnerOperation {
                     operation_id,
@@ -3000,6 +3019,28 @@ impl MemoryStore {
         result
     }
 
+    /// Apply the imported-binding rules (ADR-105 errata E10 and E11), then the
+    /// local command: an operation ID that an import holds is a `Conflict`,
+    /// and a Principal an import bound to another Owner is a
+    /// `PrincipalOwnerConflict`; an equal imported Owner is no conflict.
+    fn execute_principal_owner_command_gated(
+        &mut self,
+        key: (ForkAdmissionOperationKindV1, Hash),
+        command: &MemoryPrincipalOwnerOperation,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        if self
+            .imported_fork_principal_owner_bindings
+            .contains_key(&command.operation_id)
+        {
+            Err(pos_core::ForkAdmissionErrorV1::Conflict)
+        } else if self.imported_principal_has_other_owner(command.principal_digest, command.owner)
+        {
+            Err(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict)
+        } else {
+            self.execute_principal_owner_command(key, command)
+        }
+    }
+
     fn execute_principal_owner_command(
         &mut self,
         key: (ForkAdmissionOperationKindV1, Hash),
@@ -3012,13 +3053,6 @@ impl MemoryStore {
             owner,
             commitment,
         } = *command;
-        // ADR-105 erratum E11: an operation ID that an import holds is occupied.
-        if self
-            .imported_fork_principal_owner_bindings
-            .contains_key(&operation_id)
-        {
-            return Err(pos_core::ForkAdmissionErrorV1::Conflict);
-        }
         // ADR-099: one Principal maps to exactly one immutable Owner. An equal
         // Owner under a new operation ID resolves to the committed binding
         // without writing; only an unequal Owner is a rebinding conflict.
@@ -3026,11 +3060,6 @@ impl MemoryStore {
             return (existing.input().owner == owner)
                 .then(|| ForkAdmissionOperationResultV1::PrincipalOwner(existing.clone()))
                 .ok_or(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict);
-        }
-        // ADR-105 erratum E10: a Principal an import bound to another Owner is
-        // a rebinding conflict too; an equal imported Owner is no conflict.
-        if self.imported_principal_has_other_owner(principal_digest, owner) {
-            return Err(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict);
         }
         // Verified POC1 facts carry nonzero operation and Principal digests,
         // so construction cannot fail; any failure still fails closed.
@@ -5743,15 +5772,19 @@ impl EventStore for MemoryStore {
 }
 
 impl MemoryStore {
+    /// Whether a local `FAR1` or an imported code-2 `FAR1` admits `timeline`.
+    fn fork_is_admitted(&self, timeline: TimelineId) -> bool {
+        self.fork_admissions.contains_key(&timeline)
+            || self.imported_fork_admissions.contains_key(&timeline)
+    }
+
     /// ADR-099 reserves every admitted Fork's append boundary for its
     /// classifier authority.  Generic callers never obtain a bypass.
     fn ensure_generic_fork_append_is_rejected(
         &self,
         timeline: TimelineId,
     ) -> Result<(), CoreError> {
-        if self.fork_admissions.contains_key(&timeline)
-            || self.imported_fork_admissions.contains_key(&timeline)
-        {
+        if self.fork_is_admitted(timeline) {
             return Err(CoreError::Storage(
                 "admitted Fork Events require classified append authority".to_owned(),
             ));
