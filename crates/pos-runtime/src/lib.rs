@@ -25,6 +25,7 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 pub mod authorization_cache;
+pub mod community_plugin_host;
 pub mod composition;
 #[cfg(target_os = "linux")]
 pub mod counterfactual;

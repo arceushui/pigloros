@@ -1054,6 +1054,7 @@ dependencies = [
  "indexmap",
  "pos-conformance",
  "pos-core",
+ "pos-crypto",
  "pos-state",
  "pos-store",
  "serde_json",

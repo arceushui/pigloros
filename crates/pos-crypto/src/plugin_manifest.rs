@@ -14,6 +14,10 @@ use pos_core::OwnerIdV1;
 use pos_plugin_release::{BundleMemberV1, VerifiedReleaseBundleV1};
 use thiserror::Error;
 
+use crate::plugin_execution::{
+    DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
+    PluginExecutionProjectionV1,
+};
 use crate::plugin_trust::ValidatedPluginManifestProjectionV1;
 use crate::strict_cbor::{Reader, StrictCborError};
 
@@ -21,10 +25,17 @@ type Digest = [u8; 32];
 type Pmf1Reader<'a> = Reader<'a, PluginManifestErrorV1>;
 /// `(capability_id, operation, resource_pattern, purpose, audience)`.
 type CapabilityKey<'a> = (&'a str, &'a str, &'a str, &'a str, &'a str);
+/// Field 14: capability descriptors and field 15: the deterministic budget.
+type ExecutionBounds<'a> = (Vec<Capability<'a>>, DeterministicBudgetV1);
 /// `(dependency_id, release_digest32)`.
 type Dependency<'a> = (&'a str, Digest);
 /// Fields 17-20: dependency release digests, provenance and SBOM, licences.
 type SupplyChain = (Vec<Digest>, [Artifact; 2], Vec<Artifact>);
+/// The ADR-103 release projection and the execution projection of one PMF1.
+type Projections = (
+    ValidatedPluginManifestProjectionV1,
+    PluginExecutionProjectionV1,
+);
 /// An artifact with its position in PMF1 field order.
 type Positioned = (usize, Artifact);
 
@@ -242,6 +253,32 @@ struct Schema {
     artifact: Artifact,
 }
 
+/// One decoded `CapabilityDescriptorV1` borrowing its texts from PMF1.
+struct Capability<'a> {
+    key: CapabilityKey<'a>,
+    required: bool,
+    /// `max_calls`, `max_request_bytes`, `max_response_bytes`.
+    limits: [u64; 3],
+}
+
+impl Capability<'_> {
+    fn descriptor(&self) -> PluginCapabilityDescriptorV1 {
+        let (capability_id, operation, resource_pattern, purpose, audience) = self.key;
+        let [max_calls, max_request_bytes, max_response_bytes] = self.limits;
+        PluginCapabilityDescriptorV1 {
+            capability_id: capability_id.to_owned(),
+            operation: operation.to_owned(),
+            resource_pattern: resource_pattern.to_owned(),
+            purpose: purpose.to_owned(),
+            audience: audience.to_owned(),
+            required: self.required,
+            max_calls,
+            max_request_bytes,
+            max_response_bytes,
+        }
+    }
+}
+
 /// Fields 21-27 of a decoded PMF1.
 struct SignedFields {
     owner: OwnerIdV1,
@@ -259,9 +296,12 @@ struct SignedFields {
 /// A PMF1 V1 that passed pass 1 decoding.
 struct Pmf1<'a> {
     plugin_id: &'a str,
+    abi: PluginAbiRequirementV1,
     component: Artifact,
     wit: Artifact,
     schemas: Vec<Schema>,
+    capabilities: Vec<Capability<'a>>,
+    budget: DeterministicBudgetV1,
     dependencies: Vec<Digest>,
     provenance: Artifact,
     sbom: Artifact,
@@ -273,6 +313,18 @@ struct Pmf1<'a> {
 pub(crate) fn project_verified_bundle(
     bundle: &VerifiedReleaseBundleV1,
 ) -> Result<ValidatedPluginManifestProjectionV1, PluginManifestErrorV1> {
+    validate_bundle(bundle).map(|(projection, _)| projection)
+}
+
+/// Run the same validation and keep the execution requirements instead.
+pub(crate) fn project_execution(
+    bundle: &VerifiedReleaseBundleV1,
+) -> Result<PluginExecutionProjectionV1, PluginManifestErrorV1> {
+    validate_bundle(bundle).map(|(_, execution)| execution)
+}
+
+/// Every phase of one verified closure, then both projections of it.
+fn validate_bundle(bundle: &VerifiedReleaseBundleV1) -> Result<Projections, PluginManifestErrorV1> {
     let bytes = bundle.pmf1();
     let pmf1 = decode(bytes)?;
     check_relations(&pmf1)?;
@@ -287,8 +339,21 @@ pub(crate) fn project_verified_bundle(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    Ok(ValidatedPluginManifestProjectionV1 {
-        pmf1_digest: *blake3::hash(bytes).as_bytes(),
+    let pmf1_digest = *blake3::hash(bytes).as_bytes();
+    let execution = PluginExecutionProjectionV1 {
+        pmf1_digest,
+        release_digest: pmf1.signed.release_digest,
+        plugin_id: pmf1.plugin_id.to_owned(),
+        capabilities: pmf1
+            .capabilities
+            .iter()
+            .map(Capability::descriptor)
+            .collect(),
+        abi: pmf1.abi,
+        budget: pmf1.budget,
+    };
+    let projection = ValidatedPluginManifestProjectionV1 {
+        pmf1_digest,
         plugin_id: pmf1.plugin_id.to_owned(),
         owner: pmf1.signed.owner,
         role: pmf1.signed.role,
@@ -297,7 +362,8 @@ pub(crate) fn project_verified_bundle(
         not_after: pmf1.signed.not_after,
         release_digest: pmf1.signed.release_digest,
         descriptor_digests,
-    })
+    };
+    Ok((projection, execution))
 }
 
 /// The ADR-061 ID grammar: `[a-z0-9][a-z0-9._/-]*`, 1-128 bytes.
@@ -457,7 +523,9 @@ fn read_header(reader: &mut Pmf1Reader<'_>) -> Result<(), PluginManifestErrorV1>
 }
 
 /// Fields 2-8: Plugin ID, release, world, and ABI requirements.
-fn read_compatibility<'a>(reader: &mut Pmf1Reader<'a>) -> Result<&'a str, PluginManifestErrorV1> {
+fn read_compatibility<'a>(
+    reader: &mut Pmf1Reader<'a>,
+) -> Result<(&'a str, PluginAbiRequirementV1), PluginManifestErrorV1> {
     reader.at(2);
     let plugin_id = id_text(reader)?;
     reader.at(3);
@@ -466,14 +534,25 @@ fn read_compatibility<'a>(reader: &mut Pmf1Reader<'a>) -> Result<&'a str, Plugin
     reader.at(4);
     exact_text(reader, WORLD)?;
     reader.at(5);
-    unsigned_in(reader, 0, 0)?;
+    let major = unsigned_in(reader, 0, 0)?;
     reader.at(6);
     let minimum = unsigned_in(reader, 0, MAX_MINOR)?;
     reader.at(7);
-    unsigned_in(reader, minimum, MAX_MINOR)?;
+    let maximum = unsigned_in(reader, minimum, MAX_MINOR)?;
     reader.at(8);
-    read_id_list(reader)?;
-    Ok(plugin_id)
+    let features = read_id_list(reader)?;
+    let abi = PluginAbiRequirementV1 {
+        major: abi_u16(major),
+        min_minor: abi_u16(minimum),
+        max_minor: abi_u16(maximum),
+        required_features: features.into_iter().map(str::to_owned).collect(),
+    };
+    Ok((plugin_id, abi))
+}
+
+/// An ABI value the reader already bounded to `0..=65,535`.
+fn abi_u16(value: u64) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
 }
 
 fn read_schema(reader: &mut Pmf1Reader<'_>) -> Result<Schema, PluginManifestErrorV1> {
@@ -500,7 +579,7 @@ fn read_schemas(reader: &mut Pmf1Reader<'_>) -> Result<Vec<Schema>, PluginManife
 
 fn read_capability<'a>(
     reader: &mut Pmf1Reader<'a>,
-) -> Result<CapabilityKey<'a>, PluginManifestErrorV1> {
+) -> Result<Capability<'a>, PluginManifestErrorV1> {
     reader.fixed_array(9)?;
     let key = (
         id_text(reader)?,
@@ -509,28 +588,56 @@ fn read_capability<'a>(
         label(reader, MAX_LABEL_BYTES)?,
         label(reader, MAX_LABEL_BYTES)?,
     );
-    reader.boolean()?;
-    unsigned_in(reader, 0, MAX_CALLS)?;
-    unsigned_in(reader, 0, MAX_MESSAGE_BYTES)?;
-    unsigned_in(reader, 0, MAX_MESSAGE_BYTES)?;
-    Ok(key)
+    let required = reader.boolean()?;
+    let limits = [
+        unsigned_in(reader, 0, MAX_CALLS)?,
+        unsigned_in(reader, 0, MAX_MESSAGE_BYTES)?,
+        unsigned_in(reader, 0, MAX_MESSAGE_BYTES)?,
+    ];
+    Ok(Capability {
+        key,
+        required,
+        limits,
+    })
 }
 
 /// Fields 14-16: capabilities, deterministic budget, and migrations.
-fn read_execution_bounds(reader: &mut Pmf1Reader<'_>) -> Result<(), PluginManifestErrorV1> {
+fn read_execution_bounds<'a>(
+    reader: &mut Pmf1Reader<'a>,
+) -> Result<ExecutionBounds<'a>, PluginManifestErrorV1> {
     reader.at(14);
-    read_increasing(reader, MAX_LIST, read_capability, |key| *key)?;
+    let capabilities = read_increasing(reader, MAX_LIST, read_capability, |entry| entry.key)?;
     reader.at(15);
-    reader.fixed_array(8)?;
-    let memory = unsigned_in(reader, WASM_PAGE_BYTES, MAX_MEMORY_BYTES)?;
-    require(reader, memory % WASM_PAGE_BYTES == 0)?;
-    for (minimum, maximum) in BUDGET {
-        unsigned_in(reader, minimum, maximum)?;
-    }
+    let budget = read_budget(reader)?;
     // PMF1 V1 declares no migration; any other field 16 needs PMF1 version 2.
     reader.at(16);
     let migrations = reader.array(usize::MAX)?;
-    require(reader, migrations == 0)
+    require(reader, migrations == 0)?;
+    Ok((capabilities, budget))
+}
+
+/// Field 15: one `DeterministicBudgetV1` within its PMF1 V1 member bounds.
+fn read_budget(
+    reader: &mut Pmf1Reader<'_>,
+) -> Result<DeterministicBudgetV1, PluginManifestErrorV1> {
+    reader.fixed_array(8)?;
+    let memory_bytes = unsigned_in(reader, WASM_PAGE_BYTES, MAX_MEMORY_BYTES)?;
+    require(reader, memory_bytes % WASM_PAGE_BYTES == 0)?;
+    let mut members = [0; BUDGET.len()];
+    for (member, (minimum, maximum)) in members.iter_mut().zip(BUDGET) {
+        *member = unsigned_in(reader, minimum, maximum)?;
+    }
+    let [fuel, host_calls, event_count, event_bytes, state_bytes, log_calls, log_bytes] = members;
+    Ok(DeterministicBudgetV1 {
+        memory_bytes,
+        fuel,
+        host_calls,
+        event_count,
+        event_bytes,
+        state_bytes,
+        log_calls,
+        log_bytes,
+    })
 }
 
 fn read_dependency<'a>(
@@ -617,20 +724,23 @@ fn decode(bytes: &[u8]) -> Result<Pmf1<'_>, PluginManifestErrorV1> {
     }
     let mut reader = Reader::new(bytes);
     read_header(&mut reader)?;
-    let plugin_id = read_compatibility(&mut reader)?;
+    let (plugin_id, abi) = read_compatibility(&mut reader)?;
     reader.at(9);
     let component = read_artifact(&mut reader, &COMPONENT)?;
     reader.at(10);
     let wit = read_artifact(&mut reader, &WIT)?;
     let schemas = read_schemas(&mut reader)?;
-    read_execution_bounds(&mut reader)?;
+    let (capabilities, budget) = read_execution_bounds(&mut reader)?;
     let (dependencies, [provenance, sbom], licences) = read_supply_chain(&mut reader)?;
     let signed = read_signed_fields(&mut reader)?;
     Ok(Pmf1 {
         plugin_id,
+        abi,
         component,
         wit,
         schemas,
+        capabilities,
+        budget,
         dependencies,
         provenance,
         sbom,
