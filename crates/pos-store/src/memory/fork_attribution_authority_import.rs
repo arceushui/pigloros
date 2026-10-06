@@ -29,13 +29,8 @@ use crate::fork_attribution_authority_import::{
     StoredImportV1,
 };
 
-/// The committed admission row of one import.
-pub(super) struct ImportedAttributionRowV1 {
-    child: TimelineId,
-    admission_bytes: Vec<u8>,
-    envelope_bytes: Vec<u8>,
-    envelope_digest: Hash,
-}
+/// The child Fork and stored admission of one committed import.
+pub(super) type ImportedAttributionV1 = (TimelineId, StoredImportV1);
 
 /// The imported `IKR1` and optional `IKT1` of one import.
 pub(super) struct ImportedKeyEvidenceV1 {
@@ -89,7 +84,7 @@ impl MemoryStore {
             || self
                 .imported_fork_attributions
                 .values()
-                .any(|row| row.child == child)
+                .any(|(held, _)| *held == child)
     }
 
     /// Whether the `POB1` operation is held, or its Principal is bound to
@@ -117,28 +112,17 @@ impl MemoryStore {
     /// is held.
     fn import_event_rows_held(&self, plan: &InstallPlanV1<'_>) -> bool {
         let closure = plan.closure();
-        closure
-            .classifier()
-            .is_some_and(|graph| self.import_registration_held(&graph.registration))
-            || closure
-                .append_operations()
-                .iter()
-                .any(|record| self.import_operation_held(record))
+        closure.classifier().is_some_and(|graph| {
+            self.fork_classifier_registrations
+                .contains_key(&graph.registration.input().operation_id)
+        }) || closure.append_operations().iter().any(|record| {
+            self.fork_append_operations
+                .contains_key(&record.input().operation_id)
+        })
             || plan
                 .event_ids()
                 .iter()
                 .any(|event_id| self.import_event_held(*event_id))
-    }
-
-    fn import_registration_held(&self, record: &ForkClassifierRegistrationV1) -> bool {
-        let operation_id = record.input().operation_id;
-        self.fork_classifier_registrations
-            .contains_key(&operation_id)
-    }
-
-    fn import_operation_held(&self, record: &ForkAppendOperationV1) -> bool {
-        let operation_id = record.input().operation_id;
-        self.fork_append_operations.contains_key(&operation_id)
     }
 
     fn import_event_held(&self, event_id: EventId) -> bool {
@@ -255,12 +239,14 @@ impl MemoryStore {
             .insert(artifact.input().signed_manifest_record_id, artifact.clone());
         self.imported_fork_attributions.insert(
             plan.import_operation_id(),
-            ImportedAttributionRowV1 {
-                child: plan.child(),
-                admission_bytes: plan.admission.to_canonical_cbor(),
-                envelope_bytes: plan.prepared.bytes.clone(),
-                envelope_digest: plan.admission.input().full_envelope_digest,
-            },
+            (
+                plan.child(),
+                StoredImportV1 {
+                    admission_bytes: plan.admission.to_canonical_cbor(),
+                    envelope_bytes: plan.prepared.bytes.clone(),
+                    envelope_digest: plan.admission.input().full_envelope_digest,
+                },
+            ),
         );
     }
 }
@@ -273,11 +259,7 @@ impl ImportBackendV1 for MemoryStore {
         Ok(self
             .imported_fork_attributions
             .get(&import_operation_id)
-            .map(|row| StoredImportV1 {
-                admission_bytes: row.admission_bytes.clone(),
-                envelope_bytes: row.envelope_bytes.clone(),
-                envelope_digest: row.envelope_digest,
-            }))
+            .map(|(_, row)| row.clone()))
     }
 
     fn has_key_evidence(&self, import_operation_id: Hash) -> Result<bool, ImportError> {
@@ -648,21 +630,21 @@ mod tests {
                 let operation = s.keys.import_operation;
                 let row = s.store.imported_fork_attributions.get_mut(&operation);
                 let row = row.ok_or("no row")?;
-                row.envelope_bytes.truncate(8);
+                row.1.envelope_bytes.truncate(8);
                 Ok(())
             },
             |s| {
                 let operation = s.keys.import_operation;
                 let row = s.store.imported_fork_attributions.get_mut(&operation);
                 let row = row.ok_or("no row")?;
-                row.admission_bytes.truncate(8);
+                row.1.admission_bytes.truncate(8);
                 Ok(())
             },
             |s| {
                 let operation = s.keys.import_operation;
                 let row = s.store.imported_fork_attributions.get_mut(&operation);
                 let row = row.ok_or("no row")?;
-                row.envelope_digest = hash(0x01);
+                row.1.envelope_digest = hash(0x01);
                 Ok(())
             },
             |s| {
@@ -886,7 +868,14 @@ mod tests {
                 )?;
                 store
                     .fork_publication_operations
-                    .insert(keys.publication_operation, record.clone());
+                    .insert(keys.publication_operation, record);
+                Ok(())
+            },
+            |store, closure, _keys| {
+                // Only the record ID is shared.
+                let record = ForkPublicationOperationV1::new(
+                    closure.publication_operation().fields().clone(),
+                )?;
                 store.fork_publication_operations.insert(hash(0xee), record);
                 Ok(())
             },
@@ -895,6 +884,11 @@ mod tests {
                 store
                     .imported_fork_publication_operations
                     .insert(keys.publication_operation, record.clone());
+                Ok(())
+            },
+            |store, closure, _keys| {
+                // Only the record ID is shared.
+                let record = closure.publication_operation();
                 store
                     .imported_fork_publication_operations
                     .insert(hash(0xee), record.clone());
@@ -1041,6 +1035,9 @@ mod tests {
             Err(ForkManifestPublicationErrorV1::CorruptOrConflicting)
         );
         assert!(store.fork_publication_record_is_present(record_id));
+        // The imported `FPO1` alone also holds the record ID.
+        store.fork_publication_artifacts.clear();
+        assert!(store.fork_publication_record_is_present(record_id));
         Ok(())
     }
 
@@ -1052,8 +1049,16 @@ mod tests {
         let receipt = elsewhere.import_verified(&request_for(&state.world, &other))?;
         let operation = state.keys.import_operation;
         let row = state.store.imported_fork_attributions.get_mut(&operation);
-        row.ok_or("no row")?.admission_bytes = receipt.to_canonical_cbor();
+        row.ok_or("no row")?.1.admission_bytes = receipt.to_canonical_cbor();
         assert_eq!(state.retry(), Err(CORRUPT));
+        Ok(())
+    }
+
+    #[test]
+    fn staging_an_existing_child_is_indeterminate() -> Fallible<()> {
+        let mut state = imported()?;
+        let export = state.world.child_at(0)?.export.clone();
+        assert_eq!(state.store.stage_child(&export), Err(ImportError::StorageIndeterminate));
         Ok(())
     }
 }

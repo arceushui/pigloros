@@ -34,6 +34,8 @@ const KEY_EVIDENCE_SQL: &str = "SELECT ikr1_cbor, ikt1_cbor FROM imported_fork_k
     WHERE import_operation_id = ?1";
 const BINDING_SQL: &str = "SELECT pob1_cbor FROM imported_fork_principal_owner_bindings
     WHERE import_operation_id = ?1";
+const IMPORTED_BINDING_OPERATION_SQL: &str = "SELECT EXISTS(SELECT 1
+    FROM imported_fork_principal_owner_bindings WHERE import_operation_id = ?1)";
 const IMPORTED_PRINCIPAL_SQL: &str = "SELECT pob1_cbor FROM imported_fork_principal_owner_bindings
     WHERE principal_digest = ?1";
 const ADMISSION_SQL: &str = "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1";
@@ -54,46 +56,37 @@ const PUBLICATION_BINDING_SQL: &str = "SELECT fpb1_cbor FROM fork_publication_bi
 const PUBLICATION_ARTIFACT_SQL: &str =
     "SELECT fpa1_cbor FROM fork_publication_artifacts WHERE record_id = ?1";
 
-/// Tables whose key is the child Timeline ID.
-const CHILD_HELD_SQL: [&str; 6] = [
-    "SELECT EXISTS(SELECT 1 FROM timelines WHERE id = ?1)",
-    "SELECT EXISTS(SELECT 1 FROM fork_admissions WHERE child_id = ?1)",
-    "SELECT EXISTS(SELECT 1 FROM fork_classifier_tables WHERE child_id = ?1)",
-    "SELECT EXISTS(SELECT 1 FROM fork_classifier_registrations WHERE child_id = ?1)",
-    "SELECT EXISTS(SELECT 1 FROM fork_append_operations WHERE child_id = ?1)",
-    "SELECT EXISTS(SELECT 1 FROM imported_fork_attribution_admissions WHERE child_id = ?1)",
-];
-/// Tables whose key is an Event ID.
-const EVENT_HELD_SQL: [&str; 4] = [
-    "SELECT EXISTS(SELECT 1 FROM events WHERE event_id = ?1)",
-    "SELECT EXISTS(SELECT 1 FROM fork_append_operations WHERE event_id = ?1)",
-    "SELECT EXISTS(SELECT 1 FROM fork_event_origins WHERE event_id = ?1)",
-    "SELECT EXISTS(SELECT 1 FROM fork_intervention_admissions WHERE event_id = ?1)",
-];
-/// Tables whose key is the publication operation ID.
-const PUBLICATION_OPERATION_HELD_SQL: [&str; 3] = [
-    "SELECT EXISTS(SELECT 1 FROM fork_publication_operations WHERE operation_id = ?1)",
-    "SELECT EXISTS(SELECT 1 FROM fork_publication_bindings WHERE operation_id = ?1)",
-    "SELECT EXISTS(SELECT 1 FROM fork_publication_artifacts WHERE operation_id = ?1)",
-];
-/// Tables whose key is the `FSM1` record ID.
-const RECORD_HELD_SQL: [&str; 3] = [
-    "SELECT EXISTS(SELECT 1 FROM fork_publication_operations WHERE record_id = ?1)",
-    "SELECT EXISTS(SELECT 1 FROM fork_publication_bindings WHERE record_id = ?1)",
-    "SELECT EXISTS(SELECT 1 FROM fork_publication_artifacts WHERE record_id = ?1)",
-];
-/// The local and imported `POB1` operation ID keys.
-const BINDING_OPERATION_HELD_SQL: [&str; 2] = [
-    "SELECT EXISTS(SELECT 1 FROM fork_principal_owner_bindings WHERE operation_id = ?1)",
-    "SELECT EXISTS(SELECT 1 FROM imported_fork_principal_owner_bindings
-     WHERE import_operation_id = ?1)",
-];
-const REGISTRATION_OPERATION_HELD_SQL: &str =
-    "SELECT EXISTS(SELECT 1 FROM fork_classifier_registrations WHERE operation_id = ?1)";
-const OPERATION_HELD_SQL: &str =
-    "SELECT EXISTS(SELECT 1 FROM fork_append_operations WHERE operation_id = ?1)";
-const PUBLICATION_HEAD_HELD_SQL: &str = "SELECT EXISTS(SELECT 1 FROM fork_publication_bindings
-    WHERE child_id = ?1 AND final_logical_head = ?2)";
+/// Every semantic key of one import that is not an Event: the child, the
+/// `POB1`, `FCR1`, and publication operation IDs, the publication head, and the
+/// `FSM1` record ID. The parameters are the child ID, the final head, the
+/// `POB1` operation ID, the publication operation ID, the record ID, and the
+/// `FCR1` operation ID, which is `NULL` without a classifier.
+const KEYS_HELD_SQL: &str = "SELECT
+    EXISTS(SELECT 1 FROM timelines WHERE id = ?1)
+    OR EXISTS(SELECT 1 FROM fork_admissions WHERE child_id = ?1)
+    OR EXISTS(SELECT 1 FROM fork_classifier_tables WHERE child_id = ?1)
+    OR EXISTS(SELECT 1 FROM fork_classifier_registrations
+              WHERE child_id = ?1 OR operation_id = ?6)
+    OR EXISTS(SELECT 1 FROM fork_append_operations WHERE child_id = ?1)
+    OR EXISTS(SELECT 1 FROM imported_fork_attribution_admissions WHERE child_id = ?1)
+    OR EXISTS(SELECT 1 FROM fork_principal_owner_bindings WHERE operation_id = ?3)
+    OR EXISTS(SELECT 1 FROM imported_fork_principal_owner_bindings
+              WHERE import_operation_id = ?3)
+    OR EXISTS(SELECT 1 FROM fork_publication_bindings
+              WHERE (child_id = ?1 AND final_logical_head = ?2)
+                 OR operation_id = ?4 OR record_id = ?5)
+    OR EXISTS(SELECT 1 FROM fork_publication_operations
+              WHERE operation_id = ?4 OR record_id = ?5)
+    OR EXISTS(SELECT 1 FROM fork_publication_artifacts
+              WHERE operation_id = ?4 OR record_id = ?5)";
+/// The keys of one Event: its ID in any table, its `FOP1` operation ID, and
+/// its `EOR1` and `FIA1`. The parameters are the Event ID and the operation ID.
+const EVENT_HELD_SQL: &str = "SELECT
+    EXISTS(SELECT 1 FROM events WHERE event_id = ?1)
+    OR EXISTS(SELECT 1 FROM fork_append_operations
+              WHERE event_id = ?1 OR operation_id = ?2)
+    OR EXISTS(SELECT 1 FROM fork_event_origins WHERE event_id = ?1)
+    OR EXISTS(SELECT 1 FROM fork_intervention_admissions WHERE event_id = ?1)";
 
 impl From<rusqlite::Error> for ImportError {
     /// Storage failure; for writes the commit state is unknown. No `SQLite`
@@ -110,13 +103,6 @@ impl ForkAttributionAuthorityImportPortV1 for SqliteStore {
     ) -> Result<ForkAttributionAuthorityImportReceiptV1, ImportError> {
         run_import(self, request)
     }
-}
-
-/// `SQLite` integers are signed. Every head and sequence stored here is at
-/// most the parent cut plus the child length, and the cut was read back from
-/// this store's own `INTEGER` heads, so clamping cannot change a key.
-fn sql_int(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn blob(hash: Hash) -> Value {
@@ -141,28 +127,11 @@ fn held(conn: &Connection, sql: &str, key: &Value) -> rusqlite::Result<bool> {
     conn.query_row(sql, params![key], |row| row.get::<_, bool>(0))
 }
 
-/// Whether any one of `statements` finds a row under `key`.
-fn any_held(conn: &Connection, statements: &[&str], key: &Value) -> rusqlite::Result<bool> {
-    for sql in statements {
-        if held(conn, sql, key)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn child_held(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::Result<bool> {
-    any_held(conn, &CHILD_HELD_SQL, &child_key(plan.child()))
-}
-
-/// Whether the `POB1` operation ID is held, or its Principal is bound to
-/// another Owner (erratum E10: an equal Owner is no conflict).
+/// Whether the `POB1` Principal is bound to another Owner (erratum E10: an
+/// equal Owner is no conflict; its operation ID is checked with the other
+/// keys).
 fn binding_held(conn: &Connection, plan: &InstallPlanV1<'_>) -> Result<bool, ImportError> {
     let binding = plan.closure().principal_owner_binding().input();
-    let operation = blob(binding.operation_id);
-    if any_held(conn, &BINDING_OPERATION_HELD_SQL, &operation)? {
-        return Ok(true);
-    }
     let local = super::sqlite_principal_owner_binding(conn, binding.principal_digest)
         .map_err(admission_failure)?;
     if local.is_some_and(|record| record.input().owner != binding.owner) {
@@ -179,16 +148,25 @@ pub(super) fn imported_other_owner(
     owner: OwnerIdV1,
 ) -> Result<bool, ImportError> {
     let mut statement = conn.prepare(IMPORTED_PRINCIPAL_SQL)?;
-    let rows = statement.query_map(params![blob(principal)], |row| row.get::<_, Vec<u8>>(0))?;
-    for row in rows {
-        let record = ImportedPrincipalOwnerBindingV1::from_canonical_cbor(&row?)
-            .ok()
-            .ok_or(ImportError::CorruptAuthority)?;
+    let rows: Vec<Vec<u8>> = statement
+        .query_map(params![blob(principal)], |row| row.get::<_, Vec<u8>>(0))
+        .and_then(Iterator::collect)?;
+    for bytes in rows {
+        let record = ImportedPrincipalOwnerBindingV1::from_canonical_cbor(&bytes)
+            .map_err(|_| ImportError::CorruptAuthority)?;
         if record.input().owner != owner {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Whether an import already holds `operation_id` as its `POB1` operation ID.
+pub(super) fn imported_binding_operation_held(
+    conn: &Connection,
+    operation_id: Hash,
+) -> Result<bool, ImportError> {
+    Ok(held(conn, IMPORTED_BINDING_OPERATION_SQL, &blob(operation_id))?)
 }
 
 /// Map a local Principal-binding read failure.
@@ -209,35 +187,37 @@ pub(super) const fn imported_owner_failure(error: ImportError) -> ForkAdmissionE
     }
 }
 
-fn publication_held(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::Result<bool> {
-    let operation = plan.closure().publication_operation().fields();
-    let operation_key = blob(operation.operation_id);
-    let record_key = blob(operation.signed_manifest_record_id);
-    let head = conn.query_row(
-        PUBLICATION_HEAD_HELD_SQL,
-        params![child_key(plan.child()), sql_int(plan.final_head())],
+/// Whether any non-Event key of the import is held.
+fn keys_held(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::Result<bool> {
+    let closure = plan.closure();
+    let operation = closure.publication_operation().fields();
+    let registration = closure
+        .classifier()
+        .map(|graph| blob(graph.registration.input().operation_id));
+    conn.query_row(
+        KEYS_HELD_SQL,
+        params![
+            child_key(plan.child()),
+            plan.final_head(),
+            blob(closure.principal_owner_binding().input().operation_id),
+            blob(operation.operation_id),
+            blob(operation.signed_manifest_record_id),
+            registration,
+        ],
         |row| row.get::<_, bool>(0),
-    )?;
-    Ok(head
-        || any_held(conn, &PUBLICATION_OPERATION_HELD_SQL, &operation_key)?
-        || any_held(conn, &RECORD_HELD_SQL, &record_key)?)
+    )
 }
 
-fn rows_held(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::Result<bool> {
-    let closure = plan.closure();
-    if let Some(graph) = closure.classifier() {
-        let operation_id = graph.registration.input().operation_id;
-        if held(conn, REGISTRATION_OPERATION_HELD_SQL, &blob(operation_id))? {
-            return Ok(true);
-        }
-    }
-    for record in closure.append_operations() {
-        if held(conn, OPERATION_HELD_SQL, &blob(record.input().operation_id))? {
-            return Ok(true);
-        }
-    }
-    for event_id in plan.event_ids() {
-        if any_held(conn, &EVENT_HELD_SQL, &event_key(event_id))? {
+/// Whether any Event key of the import is held.
+fn events_held(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::Result<bool> {
+    for record in plan.closure().append_operations() {
+        let input = record.input();
+        let held = conn.query_row(
+            EVENT_HELD_SQL,
+            params![event_key(input.event_id), blob(input.operation_id)],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if held {
             return Ok(true);
         }
     }
@@ -256,8 +236,9 @@ fn source_is_reusable(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::
 
 fn read_operations(conn: &Connection, child: TimelineId) -> rusqlite::Result<Vec<Vec<u8>>> {
     let mut statement = conn.prepare(OPERATIONS_SQL)?;
-    let rows = statement.query_map(params![child_key(child)], |row| row.get::<_, Vec<u8>>(0))?;
-    rows.collect()
+    statement
+        .query_map(params![child_key(child)], |row| row.get::<_, Vec<u8>>(0))
+        .and_then(Iterator::collect)
 }
 
 fn read_event_rows(
@@ -304,7 +285,7 @@ fn read_publication_rows(
     let binding = conn
         .query_row(
             PUBLICATION_BINDING_SQL,
-            params![child_key(plan.child()), sql_int(plan.final_head())],
+            params![child_key(plan.child()), plan.final_head()],
             |row| row.get::<_, Vec<u8>>(0),
         )
         .optional()?;
@@ -387,7 +368,7 @@ fn insert_event_rows(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::R
             params![
                 blob(record.input().operation_id),
                 child_key(plan.child()),
-                sql_int(local_seq),
+                local_seq,
                 event_key(record.input().event_id),
                 record.to_canonical_cbor(),
             ],
@@ -449,7 +430,7 @@ fn insert_publication_rows(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusql
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             child_key(plan.child()),
-            sql_int(plan.final_head()),
+            plan.final_head(),
             blob(operation_id),
             blob(record_id),
             closure.publication_binding().to_canonical_cbor(),
@@ -586,10 +567,7 @@ impl ImportBackendV1 for SqliteStore {
         if !source_is_reusable(conn, plan)? {
             return Err(ImportError::CorruptAuthority);
         }
-        Ok(child_held(conn, plan)?
-            || binding_held(conn, plan)?
-            || publication_held(conn, plan)?
-            || rows_held(conn, plan)?)
+        Ok(keys_held(conn, plan)? || binding_held(conn, plan)? || events_held(conn, plan)?)
     }
 
     fn stage_child(&mut self, export: &TimelineExport) -> Result<(), ImportError> {
@@ -1137,6 +1115,69 @@ mod tests {
             .execute_batch("UPDATE imported_fork_principal_owner_bindings SET pob1_cbor = x'00'")?;
         let outcome = store.import_verified(&request_for(&world, &second));
         assert_eq!(outcome, Err(CORRUPT));
+        Ok(())
+    }
+
+    #[test]
+    fn principal_failures_map_to_import_and_admission_errors() {
+        use pos_core::ForkAdmissionErrorV1 as Admission;
+        assert_eq!(admission_failure(Admission::StorageIndeterminate), INDETERMINATE);
+        assert_eq!(admission_failure(Admission::CorruptAuthority), CORRUPT);
+        assert_eq!(
+            imported_owner_failure(INDETERMINATE),
+            Admission::StorageIndeterminate
+        );
+        assert_eq!(imported_owner_failure(CORRUPT), Admission::CorruptAuthority);
+    }
+
+    #[test]
+    fn an_unreadable_imported_principal_store_is_indeterminate() -> Fallible<()> {
+        let owner = pos_core::OwnerIdV1::new("creator-a")?;
+        let mut state = Imported::new()?;
+        // A text value where a blob belongs fails the row read.
+        state.execute("UPDATE imported_fork_principal_owner_bindings SET pob1_cbor = 'text'")?;
+        assert_eq!(
+            imported_other_owner(&state.store.conn, hash(0x22), owner),
+            Err(INDETERMINATE)
+        );
+        state.execute("DROP TABLE imported_fork_principal_owner_bindings")?;
+        assert_eq!(
+            imported_other_owner(&state.store.conn, hash(0x22), owner),
+            Err(INDETERMINATE)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_unreadable_local_principal_binding_is_corrupt() -> Fallible<()> {
+        let world = World::new(Shape::Mixed, false)?;
+        let built = world.build(&Spec::default())?;
+        let mut store = prepared(&world, &built)?;
+        store.conn.execute(
+            "INSERT INTO fork_principal_owner_bindings
+             (operation_id, principal_digest, pob1_cbor) VALUES (?1, ?2, x'00')",
+            params![hash(0x5a).as_bytes().as_slice(), hash(0x22).as_bytes().as_slice()],
+        )?;
+        let outcome = store.import_verified(&request_for(&world, &built));
+        assert_eq!(outcome, Err(CORRUPT));
+        Ok(())
+    }
+
+    #[test]
+    fn a_stored_row_of_the_wrong_type_is_indeterminate() -> Fallible<()> {
+        let tampers = [
+            "UPDATE imported_fork_key_evidence SET ikr1_cbor = 'text'",
+            "UPDATE imported_fork_key_evidence SET ikt1_cbor = 'text'",
+            "UPDATE imported_fork_attribution_admissions SET ifa1_cbor = 'text'",
+            "UPDATE imported_fork_attribution_admissions SET fae1_cbor = 'text'",
+            "UPDATE imported_fork_attribution_admissions
+             SET full_envelope_digest = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'",
+        ];
+        for tamper in tampers {
+            let mut state = Imported::new()?;
+            state.execute(tamper)?;
+            assert_eq!(state.retry(), Err(INDETERMINATE), "{tamper}");
+        }
         Ok(())
     }
 

@@ -82,16 +82,30 @@ impl ImportedForkAttributionAdmissionV1 {
         envelope: &ForkAttributionAuthorityEnvelopeV1,
         issuer_policy_generation: u64,
     ) -> Result<Self, Error> {
+        if issuer_policy_generation == 0 {
+            Err(Error::FieldOutOfBounds)
+        } else {
+            Ok(Self::from_admitted(envelope, issuer_policy_generation))
+        }
+    }
+
+    /// Derive the admission record for an envelope that a policy admitted.
+    ///
+    /// A decoded envelope has every required digest nonzero, and `FIP1`
+    /// generations start at 1, so this cannot fail; a zero `generation` is
+    /// raised to 1 rather than producing an invalid record.
+    #[must_use]
+    pub fn from_admitted(envelope: &ForkAttributionAuthorityEnvelopeV1, generation: u64) -> Self {
         let unsigned = envelope.unsigned();
         let input = unsigned.input();
         let fork = &input.timeline_import;
-        Self::new(ImportedForkAttributionAdmissionInputV1 {
+        Self(ImportedForkAttributionAdmissionInputV1 {
             import_operation_id: input.import_operation_id,
             authority_origin_digest: unsigned.authority_origin_digest(),
             full_envelope_digest: envelope.full_envelope_digest(),
             issuer: input.issuer.clone(),
             issuer_policy_digest: input.issuer_policy_digest,
-            issuer_policy_generation,
+            issuer_policy_generation: generation.max(1),
             child_timeline_id: fork.input().child_timeline_id,
             final_logical_head: fork.final_logical_head(),
             closure_root: unsigned.closure_root(),

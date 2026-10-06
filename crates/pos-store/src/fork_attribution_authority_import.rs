@@ -228,6 +228,7 @@ const fn committed_policy_failure(error: PolicyError) -> ImportError {
 }
 
 /// The stored admission row of one committed import.
+#[derive(Clone)]
 pub(crate) struct StoredImportV1 {
     /// The stored canonical `IFA1` bytes.
     pub(crate) admission_bytes: Vec<u8>,
@@ -250,10 +251,7 @@ impl PreparedImportV1 {
     fn decode(bytes: &[u8]) -> Result<Self, ImportError> {
         let envelope = ForkAttributionAuthorityEnvelopeV1::from_canonical_cbor(bytes)?;
         let closure = ForkAttributionImportClosureV1::validate(&envelope)?;
-        let input = envelope.unsigned().input();
-        let export = input
-            .timeline_import
-            .to_timeline_export(&input.event_evidence)?;
+        let export = envelope.unsigned().timeline_export();
         if export
             .events
             .iter()
@@ -286,15 +284,10 @@ impl PreparedImportV1 {
             .final_logical_head()
     }
 
-    /// The `IFA1` admission that this envelope earns under `generation`.
-    fn admission(
-        &self,
-        generation: u64,
-    ) -> Result<ImportedForkAttributionAdmissionV1, ImportError> {
-        Ok(ImportedForkAttributionAdmissionV1::from_envelope(
-            &self.envelope,
-            generation,
-        )?)
+    /// The `IFA1` admission that this envelope earns under `generation`, a
+    /// `FIP1` generation that `admit_issuer` returned.
+    fn admission(&self, generation: u64) -> ImportedForkAttributionAdmissionV1 {
+        ImportedForkAttributionAdmissionV1::from_admitted(&self.envelope, generation)
     }
 
     /// Whether a stored `IFA1` names exactly this envelope, whatever policy
@@ -709,8 +702,11 @@ fn install_absent<S: ImportBackendV1>(
     if let Some(receipt) = recover(&*store, prepared)? {
         return Ok(receipt);
     }
+    // The pre-transaction checks run again on purpose: the Ed25519 issuer and
+    // `FSM1` verifications are repeated here so that the policy floor, the
+    // destination registry, and the parent are checked under the write lock.
     let generation = precheck(&*store, prepared, request)?;
-    let plan = prepared.plan(prepared.admission(generation)?);
+    let plan = prepared.plan(prepared.admission(generation));
     if store.occupied(&plan)? {
         return Err(ImportError::Conflict);
     }
@@ -748,6 +744,10 @@ fn verify_staged<S: EventStore>(
 
 /// An empty child segment makes no #411 completeness claim: the staged child
 /// head equals the parent cut and its own range is empty.
+///
+/// An honest adapter always stages exactly that, so this is defence in depth
+/// that ADR-105 requires; the fault-injecting `Probe` tests reach it. Do not
+/// remove it as a tautology.
 fn verify_empty_segment<S: EventStore>(
     store: &S,
     child: TimelineId,
@@ -789,13 +789,21 @@ fn verify_signed_segment<S: EventStore>(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use pos_core::{Event, KeyRegistryStateV1, Timeline, TimelineMeta};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use pos_core::{
+        Event, ForkAttributionIssuerPolicyEntryV1, ForkAttributionIssuerPolicyInputV1,
+        ForkAttributionIssuerPolicyV1, ForkAttributionIssuerStateV1, ForkAttributionIssuerV1,
+        KeyRegistryStateV1, Timeline, TimelineMeta,
+    };
 
     use super::{
         ForkAttributionCodecErrorV1 as Codec, ForkAttributionImportClosureErrorV1 as Closure, *,
     };
     use crate::{
-        fae1_fixture::{pin_policy, request_for, Built, Fallible, Shape, Spec, World, PARENT_CUT},
+        fae1_fixture::{
+            pin_policy, request_for, Built, Fallible, Shape, Spec, World, PARENT_CUT, POLICY_SCOPE,
+        },
         memory::MemoryStore,
         AuthenticatedOperatorPolicyPinV1,
     };
@@ -886,8 +894,22 @@ mod tests {
     /// A step to run on the inner store before the transaction body.
     type Prelude = Box<dyn FnOnce(&mut MemoryStore) + Send>;
 
-    /// A `MemoryStore` behind the backend seam that can race, hide state, or
-    /// misreport a head, to drive the paths no honest store reaches.
+    /// One injected storage failure.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Fault {
+        GetTimeline(TimelineId),
+        LogicalHead(TimelineId),
+        ChainHash(TimelineId),
+        ReadOwn(TimelineId),
+        Read(TimelineId),
+        /// The nth (1-based) registry read.
+        Registry(u32),
+    }
+
+    /// A `MemoryStore` behind the backend seam that can race, hide state,
+    /// misreport a head, or fail one read, to drive the paths no honest store
+    /// reaches. The Memory adapter alone hosts it: the SQLite adapter reaches
+    /// its read failures through dropped tables instead.
     struct Probe {
         inner: MemoryStore,
         before_body: Option<Prelude>,
@@ -895,6 +917,8 @@ mod tests {
         hide_child: bool,
         own_events: Option<Vec<Event>>,
         committed_verdict: Option<PolicyError>,
+        fault: Option<Fault>,
+        registry_reads: AtomicU32,
     }
 
     impl Probe {
@@ -906,6 +930,16 @@ mod tests {
                 hide_child: false,
                 own_events: None,
                 committed_verdict: None,
+                fault: None,
+                registry_reads: AtomicU32::new(0),
+            }
+        }
+
+        fn failing(&self, fault: Fault) -> Result<(), CoreError> {
+            if self.fault == Some(fault) {
+                Err(CoreError::Storage("injected failure".to_owned()))
+            } else {
+                Ok(())
             }
         }
     }
@@ -924,6 +958,7 @@ mod tests {
         }
 
         fn read(&self, timeline: TimelineId, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+            self.failing(Fault::Read(timeline))?;
             self.inner.read(timeline, range)
         }
 
@@ -941,6 +976,7 @@ mod tests {
         }
 
         fn get_timeline(&self, id: TimelineId) -> Result<Option<Timeline>, CoreError> {
+            self.failing(Fault::GetTimeline(id))?;
             if self.hide_child && self.child_head.is_some_and(|(child, _)| child == id) {
                 return Ok(None);
             }
@@ -955,6 +991,7 @@ mod tests {
         }
 
         fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
+            self.failing(Fault::LogicalHead(id))?;
             match self.child_head {
                 Some((child, head)) if child == id => Ok(head),
                 _ => self.inner.logical_head(id),
@@ -962,10 +999,13 @@ mod tests {
         }
 
         fn chain_hash_at(&self, timeline: TimelineId, at_seq: Seq) -> Result<Hash, CoreError> {
+            self.failing(Fault::ChainHash(timeline))?;
             self.inner.chain_hash_at(timeline, at_seq)
         }
 
         fn load_key_registry(&self) -> Result<Option<KeyRegistryStateV1>, CoreError> {
+            let read = self.registry_reads.fetch_add(1, Ordering::SeqCst) + 1;
+            self.failing(Fault::Registry(read))?;
             self.inner.load_key_registry()
         }
 
@@ -1184,6 +1224,91 @@ mod tests {
             let outcome = run_import(&mut probe, &request_for(&world, &built));
             assert_eq!(outcome.err(), Some(expected));
         }
+        Ok(())
+    }
+
+    /// Run one default import of `shape` whose store fails at `fault(root, child)`.
+    fn faulted_import(
+        shape: Shape,
+        fault: fn(TimelineId, TimelineId) -> Fault,
+    ) -> Fallible<Result<Receipt, ImportError>> {
+        let world = World::new(shape, false)?;
+        let built = world.build(&Spec::default())?;
+        let mut probe = Probe::new(prepared_store(&world, &built)?);
+        probe.fault = Some(fault(world.root, world.child_at(0)?.id));
+        Ok(run_import(&mut probe, &request_for(&world, &built)))
+    }
+
+    #[test]
+    fn a_store_failure_at_each_read_is_indeterminate() -> Fallible<()> {
+        let mixed: [fn(TimelineId, TimelineId) -> Fault; 7] = [
+            |root, _| Fault::GetTimeline(root),
+            |root, _| Fault::LogicalHead(root),
+            |root, _| Fault::ChainHash(root),
+            |_, child| Fault::Read(child),
+            |_, child| Fault::ChainHash(child),
+            |_, _| Fault::Registry(1),
+            // The registry reads of the range check follow four in the checks.
+            |_, _| Fault::Registry(5),
+        ];
+        for fault in mixed {
+            let outcome = faulted_import(Shape::Mixed, fault)?;
+            assert_eq!(outcome.err(), Some(ImportError::StorageIndeterminate));
+        }
+        let empty: [fn(TimelineId, TimelineId) -> Fault; 2] = [
+            |_, child| Fault::ReadOwn(child),
+            |_, child| Fault::LogicalHead(child),
+        ];
+        for fault in empty {
+            let outcome = faulted_import(Shape::EmptyClassified, fault)?;
+            assert_eq!(outcome.err(), Some(ImportError::StorageIndeterminate));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_store_failure_while_revalidating_the_child_is_indeterminate() -> Fallible<()> {
+        let world = World::new(Shape::Mixed, false)?;
+        let built = world.build(&Spec::default())?;
+        let mut probe = Probe::new(prepared_store(&world, &built)?);
+        assert!(run_import(&mut probe, &request_for(&world, &built)).is_ok());
+        probe.fault = Some(Fault::ReadOwn(world.child_at(0)?.id));
+        let outcome = run_import(&mut probe, &request_for(&world, &built));
+        assert_eq!(outcome.err(), Some(ImportError::StorageIndeterminate));
+        Ok(())
+    }
+
+    #[test]
+    fn a_policy_that_moves_inside_the_transaction_is_refused() -> Fallible<()> {
+        let world = World::new(Shape::Mixed, false)?;
+        let built = world.build(&Spec::default())?;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0x32; 32]);
+        let other = ForkAttributionIssuerV1::new(
+            "issuer-b",
+            1,
+            PublicKey::from_bytes(key.verifying_key().to_bytes()),
+        )?;
+        let moved = ForkAttributionIssuerPolicyV1::new(ForkAttributionIssuerPolicyInputV1 {
+            scope: POLICY_SCOPE.to_owned(),
+            generation: 2,
+            previous_policy_digest: Some(built.policy.digest()),
+            entries: vec![
+                ForkAttributionIssuerPolicyEntryV1 {
+                    issuer: built.issuer.clone(),
+                    state: ForkAttributionIssuerStateV1::Active,
+                },
+                ForkAttributionIssuerPolicyEntryV1 {
+                    issuer: other,
+                    state: ForkAttributionIssuerStateV1::Active,
+                },
+            ],
+        })?;
+        let mut probe = Probe::new(prepared_store(&world, &built)?);
+        probe.before_body = Some(Box::new(move |inner| {
+            assert!(pin_policy(inner, &moved).is_ok());
+        }));
+        let outcome = run_import(&mut probe, &request_for(&world, &built));
+        assert_eq!(outcome.err(), Some(ImportError::PolicyChanged));
         Ok(())
     }
 

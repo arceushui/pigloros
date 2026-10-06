@@ -738,11 +738,8 @@ impl<T> Admitting for T where
 {
 }
 
-/// Import a Fork of the shared Principal, then bind it locally to `owner`.
-fn bind_after_import<S: Admitting>(
-    store: &mut S,
-    owner: &str,
-) -> Fallible<Result<ForkAdmissionOperationResultV1, ForkAdmissionErrorV1>> {
+/// Import a Fork of the shared Principal, then bind it locally (erratum E11).
+fn check_local_binding_after_import<S: Admitting>(store: &mut S) -> Fallible<()> {
     let world = World::new(Shape::Mixed, false)?;
     let built = world.build(&Spec {
         principal_digest: Some(principal()?),
@@ -751,7 +748,27 @@ fn bind_after_import<S: Admitting>(
     prepare(store, &world, &built)?;
     import(store, &world, &built)?;
     let authority = LocalAuthority::open(store)?;
-    authority.bind(store, 1, owner)
+    // An equal Owner writes a normal local row under its own operation ID.
+    let ForkAdmissionOperationResultV1::PrincipalOwner(binding) =
+        authority.bind(store, 1, "creator-a")??
+    else {
+        return Err("unexpected result".into());
+    };
+    assert_eq!(binding.input().operation_id, hash(1));
+    assert_eq!(binding.input().origin, pos_core::ForkAuthorityOriginV1::Local);
+    // The local Principal now has exactly that one binding.
+    let ForkAdmissionOperationResultV1::PrincipalOwner(again) =
+        authority.bind(store, 2, "creator-a")??
+    else {
+        return Err("unexpected result".into());
+    };
+    assert_eq!(again, binding);
+    // Another Owner, or an operation ID that the import holds, is a conflict.
+    let other = authority.bind(store, 3, "creator-b")?;
+    assert_eq!(other.err(), Some(ForkAdmissionErrorV1::PrincipalOwnerConflict));
+    let held = authority.bind(store, 0x21, "creator-a")?;
+    assert_eq!(held.err(), Some(ForkAdmissionErrorV1::Conflict));
+    Ok(())
 }
 
 /// Bind the shared Principal locally to `local`, then import a Fork of it.
@@ -812,19 +829,9 @@ fn another_owner_for_an_imported_principal_is_a_conflict() -> Fallible<()> {
 }
 
 #[test]
-fn a_local_binding_after_an_import_resolves_for_an_equal_owner_only() -> Fallible<()> {
-    assert!(bind_after_import(&mut MemoryStore::new(), "creator-a")?.is_ok());
-    assert!(bind_after_import(&mut SqliteStore::open_in_memory()?, "creator-a")?.is_ok());
-    let conflict = Err(ForkAdmissionErrorV1::PrincipalOwnerConflict);
-    assert_eq!(
-        bind_after_import(&mut MemoryStore::new(), "creator-b")?.map(|_| ()),
-        conflict
-    );
-    assert_eq!(
-        bind_after_import(&mut SqliteStore::open_in_memory()?, "creator-b")?.map(|_| ()),
-        conflict
-    );
-    Ok(())
+fn a_local_binding_after_an_import_writes_its_own_row_for_an_equal_owner_only() -> Fallible<()> {
+    check_local_binding_after_import(&mut MemoryStore::new())?;
+    check_local_binding_after_import(&mut SqliteStore::open_in_memory()?)
 }
 
 #[test]
@@ -990,4 +997,54 @@ fn rows_keyed_only_by_the_child_are_an_occupied_key_not_corruption() -> Fallible
         Err(ImportError::Conflict)
     );
     Ok(())
+}
+
+#[test]
+fn an_unreadable_imported_principal_store_fails_a_local_binding_closed() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec {
+        principal_digest: Some(principal()?),
+        ..Spec::default()
+    })?;
+    for (edit, expected) in [
+        (
+            // A wrong stored type fails the Principal read.
+            "UPDATE imported_fork_principal_owner_bindings SET pob1_cbor = 'text'",
+            ForkAdmissionErrorV1::StorageIndeterminate,
+        ),
+        (
+            "UPDATE imported_fork_principal_owner_bindings SET pob1_cbor = x'00'",
+            ForkAdmissionErrorV1::CorruptAuthority,
+        ),
+        (
+            "DROP TABLE imported_fork_principal_owner_bindings",
+            ForkAdmissionErrorV1::StorageIndeterminate,
+        ),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("fae1-principal.sqlite");
+        let path = path.to_str().ok_or("utf-8 path")?;
+        let mut store = SqliteStore::open(path)?;
+        prepare(&mut store, &world, &built)?;
+        import(&mut store, &world, &built)?;
+        drop(store);
+        raw_edit(path, edit)?;
+        let mut store = reopen(path)?;
+        let authority = LocalAuthority::open(&mut store)?;
+        assert_eq!(authority.bind(&mut store, 1, "creator-a")?.err(), Some(expected), "{edit}");
+    }
+    Ok(())
+}
+
+#[test]
+fn an_empty_segment_whose_final_hash_is_not_the_parent_hash_is_a_closure_failure() -> Fallible<()> {
+    let world = World::new(Shape::EmptyClassified, false)?;
+    let built = world.build(&Spec {
+        final_hash: Some(hash(0x99)),
+        ..Spec::default()
+    })?;
+    on_both_adapters(|store| {
+        prepare(store, &world, &built)?;
+        refuse(store, &world, &built, ImportError::InvalidAuthorityClosure)
+    })
 }

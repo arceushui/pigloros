@@ -359,6 +359,18 @@ impl ForkAttributionAuthorityUnsignedEnvelopeV1 {
         &self.input
     }
 
+    /// The exact #202 own-segment `TimelineExport` that `FTI1` and the `FEE1`
+    /// Events project.
+    ///
+    /// Construction proved the Events are exactly the `FTI1` child segment, so
+    /// this cannot fail.
+    #[must_use]
+    pub fn timeline_export(&self) -> crate::store::TimelineExport {
+        self.input
+            .timeline_import
+            .segment_export(&self.input.event_evidence)
+    }
+
     /// Field 5: the final closure root.
     #[must_use]
     pub const fn closure_root(&self) -> Hash {

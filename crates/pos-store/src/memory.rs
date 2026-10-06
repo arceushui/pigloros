@@ -312,7 +312,7 @@ pub struct MemoryStore {
     /// Committed `IFA1` admissions with their `FAE1` bytes, keyed by import
     /// operation ID.
     imported_fork_attributions:
-        HashMap<Hash, fork_attribution_authority_import::ImportedAttributionRowV1>,
+        HashMap<Hash, fork_attribution_authority_import::ImportedAttributionV1>,
     /// Current raw ERCRP1 envelope per request.
     erasure_records: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     /// Independently bounded content-addressed erasure supporting evidence.
@@ -3012,6 +3012,10 @@ impl MemoryStore {
             owner,
             commitment,
         } = *command;
+        // ADR-105 erratum E11: an operation ID that an import holds is occupied.
+        if self.imported_fork_principal_owner_bindings.contains_key(&operation_id) {
+            return Err(pos_core::ForkAdmissionErrorV1::Conflict);
+        }
         // ADR-099: one Principal maps to exactly one immutable Owner. An equal
         // Owner under a new operation ID resolves to the committed binding
         // without writing; only an unequal Owner is a rebinding conflict.

@@ -12021,6 +12021,15 @@ impl SqliteStore {
         owner: OwnerIdV1,
         commitment: Hash,
     ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        // ADR-105 erratum E11: an operation ID that an import holds is occupied.
+        if fork_attribution_authority_import::imported_binding_operation_held(
+            &self.conn,
+            operation_id,
+        )
+        .map_err(fork_attribution_authority_import::imported_owner_failure)?
+        {
+            return Err(pos_core::ForkAdmissionErrorV1::Conflict);
+        }
         // ADR-099: one Principal maps to exactly one immutable Owner. An equal
         // Owner under a new operation ID resolves to the committed binding
         // without writing; only an unequal Owner is a rebinding conflict.
