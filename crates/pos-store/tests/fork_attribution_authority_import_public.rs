@@ -788,7 +788,8 @@ fn import_after_bind<S: Admitting>(
         ..Spec::default()
     })?;
     let authority = LocalAuthority::open(store)?;
-    let ForkAdmissionOperationResultV1::PrincipalOwner(binding) = authority.bind(store, 1, local)??
+    let ForkAdmissionOperationResultV1::PrincipalOwner(binding) =
+        authority.bind(store, 1, local)??
     else {
         return Err("unexpected result".into());
     };
