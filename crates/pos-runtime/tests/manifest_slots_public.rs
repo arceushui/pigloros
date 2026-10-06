@@ -104,7 +104,10 @@ fn a_complete_slot_set_admits_exactly_the_supplied_slots() -> TestResult {
     assert_eq!(catalog_slots(&mut registry)?, expected);
     let owner = OwnerIdV1::from_static("app");
     let resealed = registry.admit_local_manifest_registration(owner, 1);
-    assert!(matches!(resealed, Err(ManifestRegistrationErrorV1::BatchState)));
+    assert!(matches!(
+        resealed,
+        Err(ManifestRegistrationErrorV1::BatchState)
+    ));
     Ok(())
 }
 
@@ -219,7 +222,9 @@ fn a_duplicate_slot_is_rejected_before_any_registry_mutation() -> TestResult {
     let error = register(&mut registry, &south, "weather").err();
     assert!(matches!(
         error,
-        Some(RuntimeError::ManifestSlot(ManifestSlotErrorV1::Duplicate { .. }))
+        Some(RuntimeError::ManifestSlot(
+            ManifestSlotErrorV1::Duplicate { .. }
+        ))
     ));
     assert_eq!(
         error.map(|error| error.to_string()),
@@ -282,4 +287,38 @@ fn a_plugin_registered_without_a_slot_names_itself_and_the_fix() -> TestResult {
 #[test]
 fn an_empty_registry_has_no_recorded_slots() {
     assert!(PluginRegistry::new().recorded_manifest_slots().is_empty());
+}
+
+#[test]
+fn the_same_slots_name_the_catalog_in_two_runs_with_different_plugin_ids() -> TestResult {
+    let mut first = PluginRegistry::new();
+    let mut second = PluginRegistry::new();
+    register(&mut first, &SlotPlugin::new("weather"), "weather")?;
+    register(&mut second, &SlotPlugin::new("weather"), "weather")?;
+
+    assert_eq!(catalog_slots(&mut first)?, catalog_slots(&mut second)?);
+    assert_ne!(
+        first.recorded_manifest_slots()[0].1,
+        second.recorded_manifest_slots()[0].1
+    );
+    Ok(())
+}
+
+#[test]
+fn re_registering_a_plugin_under_a_taken_slot_reports_the_slot() -> TestResult {
+    let plugin = SlotPlugin::new("weather");
+    let mut registry = PluginRegistry::new();
+    register(&mut registry, &plugin, "weather")?;
+    let before = registry.recorded_manifest_slots();
+
+    let error = register(&mut registry, &plugin, "weather").err();
+    assert_eq!(
+        error.map(|error| error.to_string()),
+        Some(
+            "manifest slot \"weather\" is already registered; give Plugin \"weather\" another slot"
+                .to_owned()
+        )
+    );
+    assert_eq!(registry.recorded_manifest_slots(), before);
+    Ok(())
 }

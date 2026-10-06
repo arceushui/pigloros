@@ -903,7 +903,13 @@ fn local_adapter_registry_orders_multiple_contracts() -> TestResult {
     let high = LocalPlugin { id: high_id };
     let mut registry = PluginRegistry::new();
     let high_slot = ManifestSlotV1::try_new("weather-high")?;
-    registry.register_local(&high, high_slot, vec!["weather.high".to_owned()], None, None)?;
+    registry.register_local(
+        &high,
+        high_slot,
+        vec!["weather.high".to_owned()],
+        None,
+        None,
+    )?;
     let low_slot = ManifestSlotV1::try_new("weather-low")?;
     registry.register_local(&low, low_slot, vec!["weather.low".to_owned()], None, None)?;
     registry.register_local_adapter(adapter_entry(high.id()), Box::new(RejectingProvider))?;

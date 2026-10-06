@@ -1453,7 +1453,11 @@ impl PluginRegistry {
     ///
     /// The embedding application writes this list into its reproduction
     /// recipe so a later run can supply the same slots. Slots are declared
-    /// only at registration, so this list always equals the admitted catalog.
+    /// only at registration, and a slot cannot be added, changed or exported
+    /// later, so no extra or unrecorded slot can exist. Plugins added through
+    /// the other `register_*` methods carry no slot and are omitted here; they
+    /// make admission fail with `MissingSlot`, so record this list only for a
+    /// registry built entirely with `register_local`.
     #[must_use]
     pub fn recorded_manifest_slots(&self) -> Vec<(ManifestSlotV1, PluginId)> {
         let mut recorded = Vec::with_capacity(self.plugins.len());

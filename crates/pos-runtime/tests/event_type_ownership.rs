@@ -256,13 +256,9 @@ fn register_on_path(
             None,
             std::iter::empty(),
         ),
-        "local" => registry.register_local(
-            plugin,
-            slot,
-            vec!["duplicate-local".to_owned()],
-            None,
-            None,
-        ),
+        "local" => {
+            registry.register_local(plugin, slot, vec!["duplicate-local".to_owned()], None, None)
+        }
         _ => register_test_driver(registry, plugin),
     }
 }
