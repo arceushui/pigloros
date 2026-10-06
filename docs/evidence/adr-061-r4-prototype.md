@@ -42,7 +42,10 @@ The check reads `cargo metadata --locked --all-features`. It fails when:
 
 ## Engine configuration
 
-Every value is set explicitly in `engine_config()`. #540 records it in the
+`engine_config()` sets each value below explicitly. Everything else keeps the
+pinned Wasmtime 49.0.2 default and is fixed by the exact pin: Wasm proposal
+flags, memory reservation and guard sizes, signals-based traps. #540 must
+enumerate those defaults too when it records the Engine configuration in the
 execution profile.
 
 | Setting | Value | Reason |
@@ -156,7 +159,7 @@ Observations:
 
 | Gate (ADR-061 "Compatibility gates") | Status | Evidence or owner |
 |---|---|---|
-| The pinned Rust toolchain builds the host without weakening supply-chain gates | **Proven** | Rust 1.97.1 builds Wasmtime 49.0.2. `cargo deny --locked check`, `cargo audit`, `cargo shear`, geiger and the pinned-Action policy run unchanged. `deny.toml` is unchanged. |
+| The pinned Rust toolchain builds the host without weakening supply-chain gates | **Proven**, subject to green CI on PR #413 and to F6 | Rust 1.97.1 builds Wasmtime 49.0.2. `cargo deny --locked check`, `cargo audit`, `cargo shear`, geiger and the pinned-Action policy run unchanged. `deny.toml` is unchanged. |
 | At least two guest languages implement the same world | **Proven, with finding F1** | The Rust and C guests produce identical results, equal to the oracle, over 3 repetitions, for `describe`, `reduce` and `drive`, and with a 1 MiB observation. |
 | Startup, invocation, memory and artifact-size budgets are measured | **Proven** for fuel, memory and size | See the table above. Wall time is deferred to #542. |
 | No ambient resource access | **Proven at link time** | A WASI import, an undeclared `host-v1` function and a mistyped `simulation-time` are all rejected by `load` before execution. Both guests import only `host-v1` and the types-only `contract-v1`. The engine reads no environment variable. Residual: see F3. |
@@ -165,6 +168,16 @@ Observations:
 | Licence and MIT-distribution review | **Inventory done; no allow-list change** | See below. A formal legal review is for the owner. |
 
 No P0 gate failed.
+
+Two failure names are prototype placeholders, not closed ADR error names:
+- `InvocationFailure::HostCallRejected` covers refused `host-v1` arguments and
+  log-count overruns;
+- `InvocationFailure::Rejected` covers non-trap Wasmtime refusals.
+
+#541 replaces both with the revision 4 names (`HostCallLimitExceeded`,
+`OutputLimitExceeded`, `InvalidGuestOutput`). It also removes the public
+`ComponentTrap(Trap)` and the `Trap` and `Val` re-exports in favour of the
+trap-class table and validated types.
 
 ## Licence inventory
 
@@ -217,8 +230,9 @@ Amending the canonical WIT and the ADR text to `%world` is an owner decision.
 
 ### F2. The trap table and the pinned Wasmtime trap codes
 
-- **`AlwaysTrapAdapter`.** The revision 4 table lists it, but Wasmtime 49.0.2
-  has no such code.
+- **`AlwaysTrapAdapter`.** The revision 4 table lists it, but the `Trap` enum
+  of Wasmtime 49.0.2 has no such code. The enum is defined in
+  `wasmtime-environ` 49.0.2, `src/trap_encoding.rs`.
 - **Unlisted codes.** 49.0.2 adds codes the table does not list. They fall
   under "other".
 - **Lift codes.** `InvalidChar`, `StringOutOfBounds`, `ListOutOfBounds`,
@@ -256,3 +270,14 @@ still deterministic.
 The exhaustion edge is not "consumed fuel exceeds the budget by one". #540 and
 #541 should state the budget semantics as "the outcome under the pinned
 runtime" rather than as a sharp threshold.
+
+### F6. `runtime` is a third requested feature
+
+Decision 2 allows `component-model` and `cranelift` "plus only those features
+Cargo requires them to imply". Neither feature implies `runtime`. Without it,
+Wasmtime 49.0.2 can compile a Component but has no `Store` or `Linker`, so it
+cannot instantiate or call one. The #539 brief anticipated it ("plus whatever
+those strictly require to compile and run, for example `runtime`").
+
+The owner should acknowledge `runtime` as part of the pinned feature set, or
+amend decision 2's wording. The CI check pins it, so any change is visible.

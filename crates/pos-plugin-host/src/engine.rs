@@ -67,11 +67,11 @@ pub struct LoadedComponent {
 }
 
 impl LoadedComponent {
-    const fn export(&self, export: GuestExport) -> &ComponentExportIndex {
+    const fn export(&self, export: GuestExport) -> ComponentExportIndex {
         match export {
-            GuestExport::Describe => &self.describe,
-            GuestExport::Reduce => &self.reduce,
-            GuestExport::Drive => &self.drive,
+            GuestExport::Describe => self.describe,
+            GuestExport::Reduce => self.reduce,
+            GuestExport::Drive => self.drive,
         }
     }
 }
@@ -151,13 +151,13 @@ impl ComponentHost {
         );
         store.limiter(|state| &mut state.memory);
         store.set_epoch_deadline(u64::from(limits.watchdog_epochs));
-        let index = *component.export(export);
+        let index = component.export(export);
         let outcome = store
             .set_fuel(limits.fuel)
             .and_then(|()| component.pre.instantiate(&mut store))
             .and_then(|instance| {
                 let after_startup = remaining_fuel(&store);
-                call(&mut store, instance, &index, args).map(|value| (value, after_startup))
+                call(&mut store, instance, index, args).map(|value| (value, after_startup))
             });
         let after_call = remaining_fuel(&store);
         let (value, after_startup) = outcome.map_err(|error| classify(&error))?;
@@ -200,7 +200,7 @@ fn guest_export(component: &Component, export: GuestExport) -> Option<ComponentE
 fn call(
     store: &mut Store<HostState>,
     instance: Instance,
-    index: &ComponentExportIndex,
+    index: ComponentExportIndex,
     args: &[Val],
 ) -> wasmtime::Result<Val> {
     let mut results = [Val::Bool(false)];

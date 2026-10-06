@@ -95,7 +95,38 @@ REJECTED = {
         lambda m: m["packages"].append(dict(m["packages"][0], version="48.0.5"))
     ),
     "unresolved": mutate(lambda m: m["resolve"]["nodes"].pop(0)),
+    "no wasmtime": mutate(lambda m: m["packages"].pop(0)),
+    "removed requested feature": mutate(
+        lambda m: host_dependency(m)["features"].remove("runtime")
+    ),
 }
+
+# The reason each case must be rejected for, so a case cannot pass by failing
+# a different check.
+REASONS = {
+    "extra resolved feature": "resolved features",
+    "missing resolved feature": "resolved features",
+    "other version": "resolved to 49.0.1",
+    "other source": "not crates.io",
+    "caret requirement": "requirement ^49.0.2",
+    "default features": "default features must be disabled",
+    "extra requested feature": "requested features",
+    "second dependent": "only pos-plugin-host may depend",
+    "second wasmtime": "expected exactly one wasmtime package, found 2",
+    "unresolved": "resolve nodes",
+    "no wasmtime": "expected exactly one wasmtime package, found 0",
+    "removed requested feature": "requested features",
+}
+
+
+def run_stdin(metadata: dict) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(CHECKER)],
+        input=json.dumps(metadata),
+        capture_output=True,
+        check=False,
+        text=True,
+    )
 
 
 def run(metadata: dict) -> subprocess.CompletedProcess[str]:
@@ -117,8 +148,13 @@ def main() -> int:
         failures.append(f"valid metadata rejected: {accepted.stderr.strip()}")
     for name, metadata in REJECTED.items():
         result = run(metadata)
-        if result.returncode != 1 or "wasmtime pin:" not in result.stderr:
-            failures.append(f"{name} was not rejected")
+        rejected = result.returncode == 1 and "wasmtime pin:" in result.stderr
+        if not rejected or REASONS[name] not in result.stderr:
+            failures.append(f"{name} was not rejected for {REASONS[name]!r}")
+    if run_stdin(VALID).returncode != 0:
+        failures.append("valid metadata on stdin rejected")
+    if run_stdin(REJECTED["other version"]).returncode != 1:
+        failures.append("invalid metadata on stdin accepted")
     usage = subprocess.run(
         [sys.executable, str(CHECKER), "a", "b"],
         capture_output=True,
@@ -131,7 +167,7 @@ def main() -> int:
         print(failure, file=sys.stderr)
     if failures:
         return 1
-    print(f"wasmtime pin checker: {len(REJECTED) + 2} cases passed")
+    print(f"wasmtime pin checker: {len(REJECTED) + 4} cases passed")
     return 0
 
 

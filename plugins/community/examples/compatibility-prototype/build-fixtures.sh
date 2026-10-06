@@ -31,7 +31,7 @@ canonical="${repo}/plugins/community/wit/pigloros-plugin.wit"
 mkdir -p -- "${work}/wit"
 derived="${work}/wit/pigloros-plugin.wit"
 sed 's/^    world: bounded-text,$/    %world: bounded-text,/' "${canonical}" >"${derived}"
-escaped="$(grep -c '^    %world: bounded-text,$' "${derived}")"
+escaped="$(grep -c '^    %world: bounded-text,$' "${derived}" || true)"
 if [[ "${escaped}" -ne 2 ]]; then
   echo "expected exactly two escaped world fields, found ${escaped}" >&2
   exit 1

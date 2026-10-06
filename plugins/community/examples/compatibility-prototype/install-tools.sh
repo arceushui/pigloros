@@ -15,7 +15,7 @@ tools_dir="$(cd -- "${tools_dir}" && pwd)"
 fetch() {
   local name="$1" url="$2" digest="$3"
   local archive="${tools_dir}/${name}.tar.gz"
-  curl --fail --location --silent --show-error --retry 3 --max-time 300 \
+  curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --retry 3 --max-time 300 \
     --output "${archive}" "${url}"
   printf '%s  %s\n' "${digest}" "${archive}" | sha256sum --check --strict -
   mkdir -p -- "${tools_dir}/${name}"
