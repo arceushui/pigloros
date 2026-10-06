@@ -8,7 +8,7 @@ use pos_core::{
 };
 use pos_runtime::{
     LocalAdapterErrorV1, LocalAdapterIdempotencyKeyV1, LocalAdapterProviderResponseV1,
-    LocalAdapterProviderV1, PluginRegistry,
+    LocalAdapterProviderV1, ManifestSlotV1, PluginRegistry,
 };
 
 struct LocalPlugin {
@@ -238,7 +238,8 @@ fn registry_with_adapter_mode(
     let owner = OwnerIdV1::from_static("local-adapter-test");
     let owner_reference = ArtifactRegistrationV1::owner_reference(&owner);
     let mut registry = PluginRegistry::new();
-    registry.register_local(&plugin, vec!["weather.read".to_owned()], None, None)?;
+    let slot = ManifestSlotV1::try_new("weather")?;
+    registry.register_local(&plugin, slot, vec!["weather.read".to_owned()], None, None)?;
     let mut entry = adapter_entry(plugin.id());
     entry.effect_mode = effect_mode;
     registry.register_local_adapter(entry, provider)?;
@@ -348,7 +349,8 @@ fn failed_local_adapter_session_cannot_produce_a_transcript() -> TestResult {
     let owner_reference = ArtifactRegistrationV1::owner_reference(&owner);
     let mut recorder = pos_store::memory::MemoryStore::new();
     let mut registry = PluginRegistry::new();
-    registry.register_local(&plugin, vec!["weather.read".to_owned()], None, None)?;
+    let slot = ManifestSlotV1::try_new("weather")?;
+    registry.register_local(&plugin, slot, vec!["weather.read".to_owned()], None, None)?;
     registry.register_local_adapter(adapter_entry(plugin_id), Box::new(provider))?;
     let admitted = registry.admit_local_manifest_registration(owner, 2)?;
     let mut session = registry.begin_local_adapter_session(
@@ -457,7 +459,8 @@ fn externally_idempotent_registration_requires_a_provider_deduplication_guarante
         id: PluginId::new(),
     };
     let mut registry = PluginRegistry::new();
-    registry.register_local(&plugin, vec!["weather.read".to_owned()], None, None)?;
+    let slot = ManifestSlotV1::try_new("weather")?;
+    registry.register_local(&plugin, slot, vec!["weather.read".to_owned()], None, None)?;
     let mut entry = adapter_entry(plugin.id());
     entry.effect_mode = AdapterEffectModeV1::ExternallyIdempotent;
     assert_eq!(
@@ -679,7 +682,8 @@ fn local_adapter_registration_rejects_missing_duplicate_and_sealed_entries() -> 
     );
 
     let mut registry = PluginRegistry::new();
-    registry.register_local(&plugin, vec!["weather.read".to_owned()], None, None)?;
+    let slot = ManifestSlotV1::try_new("weather")?;
+    registry.register_local(&plugin, slot, vec!["weather.read".to_owned()], None, None)?;
     let entry = adapter_entry(plugin.id());
     registry.register_local_adapter(entry.clone(), Box::new(RejectingProvider))?;
     assert_eq!(
@@ -898,8 +902,10 @@ fn local_adapter_registry_orders_multiple_contracts() -> TestResult {
     let low = LocalPlugin { id: low_id };
     let high = LocalPlugin { id: high_id };
     let mut registry = PluginRegistry::new();
-    registry.register_local(&high, vec!["weather.high".to_owned()], None, None)?;
-    registry.register_local(&low, vec!["weather.low".to_owned()], None, None)?;
+    let high_slot = ManifestSlotV1::try_new("weather-high")?;
+    registry.register_local(&high, high_slot, vec!["weather.high".to_owned()], None, None)?;
+    let low_slot = ManifestSlotV1::try_new("weather-low")?;
+    registry.register_local(&low, low_slot, vec!["weather.low".to_owned()], None, None)?;
     registry.register_local_adapter(adapter_entry(high.id()), Box::new(RejectingProvider))?;
     registry.register_local_adapter(adapter_entry(low.id()), Box::new(RejectingProvider))?;
     let admitted = registry.admit_local_manifest_registration(
@@ -1008,7 +1014,8 @@ fn local_adapter_registration_rejects_nonlocal_unpinned_and_invalid_contracts() 
     );
 
     let mut registry = PluginRegistry::new();
-    registry.register_local(&plugin, vec!["weather.read".to_owned()], None, None)?;
+    let slot = ManifestSlotV1::try_new("weather")?;
+    registry.register_local(&plugin, slot, vec!["weather.read".to_owned()], None, None)?;
     let mut entry = adapter_entry(plugin.id());
     entry.configuration_digest = Hash::from_bytes([9; 32]);
     assert_eq!(

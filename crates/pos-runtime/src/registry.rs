@@ -41,10 +41,11 @@ use crate::output_admission::OutputPolicySourceV1;
 use crate::{
     composition::{
         AdmittedCompositionV1, AdmittedManifestPolicySourceV1, DomainImplementationKindV1,
-        ManifestRegistrationErrorV1, PluginAvailabilityV1, PluginComposition,
-        PluginCompositionErrorV1, PluginExecutionModeV1, PluginIsolationV1, PluginPinFieldV1,
-        PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin, RequiredPluginCompositionV1,
-        RequiredPluginV1, ResolvedPluginCompositionV1, ResolvedPluginV1,
+        ManifestRegistrationErrorV1, ManifestSlotErrorV1, ManifestSlotV1, PluginAvailabilityV1,
+        PluginComposition, PluginCompositionErrorV1, PluginExecutionModeV1, PluginIsolationV1,
+        PluginPinFieldV1, PluginRegistrationV1, RegisteredEventSchema, RegisteredPlugin,
+        RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1,
+        ResolvedPluginV1,
     },
     driver::{
         CommittedForkHandoff, Driver, DriverRecoveryEvidence, ObservationSnapshot, ProjectionKey,
@@ -88,11 +89,6 @@ pub use staged_catalogue::{
     fold_detached_candidate_v1, HostProjectionProviderV1, StagedGrowthBoundV1,
     StagedReducerAdmissionErrorV1, StagedReducerAdmissionV1, MAX_STAGED_CALLBACK_BOUND_V1,
 };
-
-/// Stable manifest slot of a Plugin in a registry-derived local catalog.
-fn local_manifest_slot(plugin_id: PluginId) -> String {
-    format!("plugin-{plugin_id}")
-}
 
 /// Recover an exact owner-admission retry from durable state without a live
 /// Plugin registry or coordinator signer.
@@ -1117,7 +1113,7 @@ struct PluginEntry {
     event_cursor: Seq,
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
-    manifest_slot: Option<String>,
+    manifest_slot: Option<ManifestSlotV1>,
     event_observation: DriverEventObservation,
 }
 
@@ -1197,7 +1193,7 @@ struct RegistrationOptions {
     registration: Option<PluginRegistrationV1>,
     output_admission: Option<OutputAdmissionV1>,
     reducer_slot: ReducerSlotV1,
-    manifest_slot: Option<String>,
+    manifest_slot: Option<ManifestSlotV1>,
 }
 
 /// How a registered reducer is keyed in the projection registry.
@@ -1375,14 +1371,14 @@ impl PluginRegistry {
     /// Admit every Plugin already registered in this local registry.
     ///
     /// Unlike the installed-source path, this derives the complete catalog
-    /// from the actual in-process entries and uses the `PluginId` as its local
-    /// stable slot. It requires no EPF1 or deployment qualification. The
-    /// returned capability is tied to this registry instance and expires
-    /// after any registration change.
+    /// from the actual in-process entries and the host-authored slot each one
+    /// was registered with via [`Self::register_local`]. It requires no EPF1 or
+    /// deployment qualification. The returned capability is tied to this
+    /// registry instance and expires after any registration change.
     ///
     /// # Errors
-    /// Rejects an empty, replay, air-gapped, already sealed, unpinned, or
-    /// incomplete registry.
+    /// Rejects an empty, replay, air-gapped, already sealed, unpinned,
+    /// slotless, or incomplete registry.
     pub fn admit_local_manifest_registration(
         &mut self,
         owner_id: OwnerIdV1,
@@ -1408,7 +1404,7 @@ impl PluginRegistry {
                 .closure()
                 .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
             let row = ManifestAdmissionCatalogRowV1 {
-                stable_slot: local_manifest_slot(*plugin_id),
+                stable_slot: Self::local_entry_slot(*plugin_id, entry)?,
                 plugin_id: *plugin_id,
                 plugin_name: entry.name.clone(),
                 plugin_version: entry.version.clone(),
@@ -1432,13 +1428,42 @@ impl PluginRegistry {
             .adapter_admission_for_catalog(&catalog)
             .map_err(|_| ManifestRegistrationErrorV1::IncompleteBatch)?;
 
-        // The catalog has exactly one row per registered Plugin.
-        for (plugin_id, entry) in &mut self.plugins {
-            entry.manifest_slot = Some(local_manifest_slot(*plugin_id));
-        }
         self.registration_revision += 1;
         self.manifest_batch = Some(catalog.clone());
         Ok(self.bind_admitted_composition(catalog, adapter_admission))
+    }
+
+    /// The host-authored slot a local entry was registered with.
+    fn local_entry_slot(
+        plugin_id: PluginId,
+        entry: &PluginEntry,
+    ) -> Result<String, ManifestRegistrationErrorV1> {
+        entry
+            .manifest_slot
+            .as_ref()
+            .map(|slot| slot.as_str().to_owned())
+            .ok_or_else(|| ManifestRegistrationErrorV1::MissingSlot {
+                plugin_name: entry.name.clone(),
+                plugin_id,
+            })
+    }
+
+    /// The `(slot, PluginId)` pairs recorded by [`Self::register_local`], in
+    /// slot order.
+    ///
+    /// The embedding application writes this list into its reproduction
+    /// recipe so a later run can supply the same slots. Slots are declared
+    /// only at registration, so this list always equals the admitted catalog.
+    #[must_use]
+    pub fn recorded_manifest_slots(&self) -> Vec<(ManifestSlotV1, PluginId)> {
+        let mut recorded = Vec::with_capacity(self.plugins.len());
+        for (plugin_id, entry) in &self.plugins {
+            if let Some(slot) = &entry.manifest_slot {
+                recorded.push((slot.clone(), *plugin_id));
+            }
+        }
+        recorded.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        recorded
     }
 
     /// Revalidate the same static batch for a later owner generation.
@@ -1738,7 +1763,8 @@ impl PluginRegistry {
         row: &ManifestAdmissionCatalogRowV1,
         entry: &PluginEntry,
     ) -> Result<(), ManifestRegistrationErrorV1> {
-        if entry.manifest_slot.as_deref() != Some(row.stable_slot.as_str()) {
+        let recorded = entry.manifest_slot.as_ref().map(ManifestSlotV1::as_str);
+        if recorded != Some(row.stable_slot.as_str()) {
             return Err(ManifestRegistrationErrorV1::SlotMismatch);
         }
         Self::validate_manifest_entry_fields(row, entry)
@@ -3028,22 +3054,52 @@ impl PluginRegistry {
         )
     }
 
-    /// Register a local Plugin and bind it to the caller's domain roles.
+    /// Register a local Plugin in the host's stable manifest slot and bind it
+    /// to the caller's domain roles.
     ///
     /// This is the short path for ordinary open-source local compositions.
     /// The runtime builds a same-process output policy and an available native
     /// pin; no EPF1, installed bundle, or deployment qualification is needed.
     /// The roles remain explicit because they describe application semantics.
     ///
+    /// A **slot** is a stable, host-authored name for this Plugin's place in
+    /// your composition. It is 1-64 ASCII bytes from `A-Z a-z 0-9 . _ -`,
+    /// unique within the registry, and independent of the Plugin name and its
+    /// run-local `PluginId`, so two same-name Plugins keep distinct slots and a
+    /// fresh run can reuse the same slots. The Plugin cannot choose it and it
+    /// cannot be attached later. Declare it here, once; read the recorded set
+    /// back with [`Self::recorded_manifest_slots`] to store it in your recipe.
+    /// A slot must not contain participant names, secrets or other private
+    /// text.
+    ///
+    /// ```text
+    /// let mut registry = PluginRegistry::new();
+    /// // Two Plugins that share a name keep their own slots.
+    /// registry.register_local(&north, ManifestSlotV1::try_new("weather-north")?,
+    ///     vec!["weather.north".to_owned()], None, None)?;
+    /// registry.register_local(&south, ManifestSlotV1::try_new("weather-south")?,
+    ///     vec!["weather.south".to_owned()], None, None)?;
+    /// // A reducer-only Plugin with no output also needs a slot.
+    /// registry.register_local(&tally, ManifestSlotV1::try_new("tally")?,
+    ///     vec!["tally".to_owned()], Some(reducer), None)?;
+    /// let recipe_slots = registry.recorded_manifest_slots();
+    /// let admitted = registry.admit_local_manifest_registration(owner, 1)?;
+    /// ```
+    ///
+    /// The public test `manifest_slots_public` runs this same flow.
+    ///
     /// # Errors
-    /// Returns policy, pin, duplicate-role, or Plugin registration errors.
+    /// Returns a duplicate-slot, policy, pin, duplicate-role, or Plugin
+    /// registration error before mutation.
     pub fn register_local(
         &mut self,
         plugin: &dyn Plugin,
+        slot: ManifestSlotV1,
         roles: Vec<String>,
         reducer: Option<Box<dyn Reducer>>,
         driver: Option<Box<dyn Driver>>,
     ) -> Result<(), RuntimeError> {
+        self.ensure_manifest_slot_free(plugin, &slot)?;
         let binding = Self::generated_output_binding(plugin)?;
         let pin = crate::PluginPinV1::try_new(
             DomainImplementationKindV1::Plugin,
@@ -3067,9 +3123,28 @@ impl PluginRegistry {
                 )),
                 output_admission: None,
                 reducer_slot: ReducerSlotV1::ByPluginId,
-                manifest_slot: None,
+                manifest_slot: Some(slot),
             },
         )
+    }
+
+    /// Reject a slot another registered Plugin already holds.
+    fn ensure_manifest_slot_free(
+        &self,
+        plugin: &dyn Plugin,
+        slot: &ManifestSlotV1,
+    ) -> Result<(), ManifestSlotErrorV1> {
+        let taken = self
+            .plugins
+            .values()
+            .any(|entry| entry.manifest_slot.as_ref() == Some(slot));
+        if taken {
+            return Err(ManifestSlotErrorV1::Duplicate {
+                slot: slot.as_str().to_owned(),
+                plugin: plugin.name().to_owned(),
+            });
+        }
+        Ok(())
     }
 
     fn generated_output_binding(
@@ -5743,7 +5818,7 @@ mod tests {
             .plugins
             .get_mut(&plugin.id())
             .test_ok()
-            .manifest_slot = Some("fixture".to_owned());
+            .manifest_slot = ManifestSlotV1::try_new("fixture").ok();
         registry.manifest_batch = Some(catalog.clone());
         (registry, plugin.id(), catalog)
     }
@@ -6038,8 +6113,9 @@ mod tests {
         let id = plugin.id;
         let owner = OwnerIdV1::from_static("local-admission-fixture");
         let mut registry = gated_registry();
+        let slot = ManifestSlotV1::try_new("local-fixture").test_ok();
         registry
-            .register_local(&plugin, vec!["local.fixture".to_owned()], None, None)
+            .register_local(&plugin, slot, vec!["local.fixture".to_owned()], None, None)
             .test_ok();
 
         let verified = registry
