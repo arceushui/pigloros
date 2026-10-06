@@ -30,8 +30,8 @@ use pos_core::{
     CounterfactualGenerationRecordV1, CounterfactualInvalidationCommandV1,
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
     CounterfactualTickOutcomeV1, EntityId, ErasureArtifactClassV1, ErasureContainmentGateV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, EventStore, ForkGenerationV1, Hash,
-    InvalidationConflictV1, Kind, PipelineContractErrorV1, PipelineDraftBatchV1,
+    ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, EventStore, ForkGenerationV1,
+    Hash, InvalidationConflictV1, Kind, PipelineContractErrorV1, PipelineDraftBatchV1,
     RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, SeqRange, Timeline,
     TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
 };
@@ -1887,8 +1887,6 @@ fn failed_recovery_read_keeps_the_commit_outcome_unknown() -> TestResult {
     Ok(())
 }
 
-/// The invalid-artifact index of the base scenario: every invalidated
-/// endogenous output and the suffix presentation output (`UI_15`).
 // ---------------------------------------------------------------------------
 // Admission preflight
 // ---------------------------------------------------------------------------
@@ -1916,6 +1914,16 @@ const EXOGENOUS_MISSING: Overrides = &[(EXOGENOUS_DIGEST, Avail::Missing)];
 const FIXED_MISSING: Overrides = &[(FIXED_DIGEST, Avail::Missing)];
 const EXOGENOUS_MISMATCH: Overrides = &[(EXOGENOUS_DIGEST, Avail::DigestMismatch)];
 const FIXED_MISMATCH: Overrides = &[(FIXED_DIGEST, Avail::DigestMismatch)];
+const SECOND_DIGEST: [u8; 32] = [0x51; 32];
+const SECOND_MISSING: Overrides = &[(SECOND_DIGEST, Avail::Missing)];
+const FIRST_MISMATCH_SECOND_MISSING: Overrides = &[
+    (EXOGENOUS_DIGEST, Avail::DigestMismatch),
+    (SECOND_DIGEST, Avail::Missing),
+];
+const FIRST_MISSING_SECOND_MISMATCH: Overrides = &[
+    (EXOGENOUS_DIGEST, Avail::Missing),
+    (SECOND_DIGEST, Avail::DigestMismatch),
+];
 const BOTH_FAULTY: Overrides = &[
     (EXOGENOUS_DIGEST, Avail::Missing),
     (FIXED_DIGEST, Avail::DigestMismatch),
@@ -1951,7 +1959,10 @@ const CLAIM_SPECS: [Spec; 5] = [
     },
 ];
 
-const PREFLIGHT_CASES: [PreflightCase; 7] = [
+/// Adds a second `ExogenousFrozen` descriptor after the base one.
+const WITH_SECOND: PlanEdit = |plan| plan.exogenous_descriptors.push(descriptor(2, 0x51));
+
+const PREFLIGHT_CASES: [PreflightCase; 10] = [
     (
         |plan| "room.beta".clone_into(&mut plan.room_id),
         &[],
@@ -1982,6 +1993,21 @@ const PREFLIGHT_CASES: [PreflightCase; 7] = [
         |_| {},
         FIXED_MISMATCH,
         AdmissionError::FrozenArtifactDigestMismatch,
+    ),
+    (
+        WITH_SECOND,
+        SECOND_MISSING,
+        AdmissionError::FrozenArtifactMissing,
+    ),
+    (
+        WITH_SECOND,
+        FIRST_MISMATCH_SECOND_MISSING,
+        AdmissionError::FrozenArtifactDigestMismatch,
+    ),
+    (
+        WITH_SECOND,
+        FIRST_MISSING_SECOND_MISMATCH,
+        AdmissionError::FrozenArtifactMissing,
     ),
 ];
 
@@ -2114,10 +2140,10 @@ fn preflight_follows_the_profile_and_precedes_the_store_reads<B: Backend>() -> T
             AdmissionError::RoomMismatch,
         ),
     ];
-    for (request, expected) in cases {
+    for (admission, expected) in cases {
         let mut stager = Stager::drafting(2);
         let result = setup.coordinator.admit(
-            &request,
+            &admission,
             &Authority::default(),
             &mut setup.source,
             &mut stager,
@@ -2148,6 +2174,8 @@ fn replay_claim_must_not_be_stronger_than_the_hosts<B: Backend>() -> TestResult 
 }
 both_backends!(replay_claim_must_not_be_stronger_than_the_hosts);
 
+/// The invalid-artifact index of the base scenario: every invalidated
+/// endogenous output and the suffix presentation output (`UI_15`).
 const BASE_INDEX: [u8; 5] = [3, 4, 5, 7, 8];
 
 #[test]

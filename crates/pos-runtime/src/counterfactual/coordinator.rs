@@ -78,8 +78,13 @@
 //!   runs before the first store call. ADR-064 has no closed error for a
 //!   room mismatch, so [`CounterfactualAdmissionErrorV1::RoomMismatch`] is
 //!   added; the other four names are the ADR-064 closed errors. The checks
-//!   run in the ADR's listed order after the profile and trust checks, and
-//!   the first error wins.
+//!   run in the ADR's listed order, and the first error wins. This
+//!   deliberately deviates from ADR-064, which lists room before profile and
+//!   trust and the parent head before room: the room, composition, artifact,
+//!   and claim checks are cheap pure comparisons against request-supplied
+//!   host state, so they run after the existing profile and trust check, which
+//!   keeps its position, and the parent-head check is a store read, so it stays
+//!   after the preflight and no store call precedes a preflight rejection.
 //! - **Frozen artifacts.** The coordinator never reads artifact bytes: the
 //!   host port answers per descriptor, with the exact `artifact_digest`
 //!   the plan reuses, `Present`, `Missing`, or `DigestMismatch`.
@@ -90,10 +95,11 @@
 //!   `IncompatibleProfile` orthogonal to erasure, without giving a total
 //!   order that includes it. The host evaluator in `pos-core`
 //!   (`ReplayClaimEvaluatorV1`) ranks the claims in that listed order, with
-//!   `IncompatibleProfile` weakest, and `ReplayClaimV1`'s ordering is the same
-//!   CFR1 wire-code order, so this slice follows it without inventing any
-//!   other rule: the plan's requested claim is sufficient when it is not
-//!   stronger than the host's evaluated claim, otherwise
+//!   `IncompatibleProfile` weakest, and `ReplayClaimV1::is_no_stronger_than` is
+//!   the same order, so this slice follows it without inventing any other
+//!   rule: the plan's requested claim is sufficient when it is not stronger
+//!   than the host's evaluated claim (`ReplayClaimV1::after_artifact_evaluation`
+//!   applied to `Exact`), otherwise
 //!   `ReplayClaimInsufficient`. A host claim of `IncompatibleProfile`
 //!   therefore supports only a plan that requests `IncompatibleProfile`, and
 //!   a host claim of `Exact` supports every request. The evaluation's
@@ -236,9 +242,9 @@ use pos_core::{
     CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
     CounterfactualInvalidationCommandV1, CounterfactualInvalidationInputV1,
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
-    ErasureReplayClaimV1, EventDraft, EventStore, ForkGenerationV1, Hash, InvalidationConflictV1,
-    PipelineContractErrorV1, PipelineDraftBatchV1, RecomputationFrontierBytesV1,
-    ReplayClaimEvaluationV1, SuffixInvalidationBytesV1, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
+    EventDraft, EventStore, ForkGenerationV1, Hash, InvalidationConflictV1, PipelineContractErrorV1,
+    PipelineDraftBatchV1, RecomputationFrontierBytesV1, ReplayClaimEvaluationV1,
+    SuffixInvalidationBytesV1, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
 };
 
 /// `SIV1` artifact class of every invalidated endogenous output.
@@ -486,13 +492,14 @@ pub enum FrozenArtifactAvailabilityV1 {
 pub trait CounterfactualFrozenArtifactsV1 {
     /// Report whether the artifact `descriptor` names is available with
     /// exactly `descriptor.artifact_digest`.
-    fn availability(
-        &self,
-        descriptor: &FrozenArtifactDescriptorV1,
-    ) -> FrozenArtifactAvailabilityV1;
+    fn availability(&self, descriptor: &FrozenArtifactDescriptorV1)
+        -> FrozenArtifactAvailabilityV1;
 }
 
 /// The host state the admission preflight compares the plan with.
+///
+/// `room_id` and `room_digest` mirror the plan's room identity pair on
+/// purpose, so a host cannot supply a digest without naming the room.
 #[derive(Clone, Copy)]
 pub struct CounterfactualHostPreflightV1<'a> {
     /// Expected Scenario Room identifier.
@@ -745,11 +752,13 @@ fn check_preflight(
         .iter()
         .chain(&plan.fixed_policy_descriptors)
         .try_for_each(|descriptor| check_artifact(host.frozen_artifacts, descriptor))?;
-    // `ReplayClaimV1` orders from the strongest claim to the weakest.
-    if plan.replay_claim < evaluated_claim(host.replay_claim.replay_claim()) {
-        return Err(CounterfactualAdmissionErrorV1::ReplayClaimInsufficient);
+    // The host's evaluation can only weaken the strongest claim.
+    let evaluated = ReplayClaimV1::Exact.after_artifact_evaluation(host.replay_claim);
+    if plan.replay_claim.is_no_stronger_than(evaluated) {
+        Ok(())
+    } else {
+        Err(CounterfactualAdmissionErrorV1::ReplayClaimInsufficient)
     }
-    Ok(())
 }
 
 /// Map the host's availability answer for one frozen artifact to its error.
@@ -765,21 +774,6 @@ fn check_artifact(
         FrozenArtifactAvailabilityV1::DigestMismatch => {
             Err(CounterfactualAdmissionErrorV1::FrozenArtifactDigestMismatch)
         }
-    }
-}
-
-/// The CFP1 claim code of a host-evaluated erasure claim.
-const fn evaluated_claim(claim: ErasureReplayClaimV1) -> ReplayClaimV1 {
-    match claim {
-        ErasureReplayClaimV1::Exact => ReplayClaimV1::Exact,
-        ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews => {
-            ReplayClaimV1::ExactAuthoritativeWithRedactedViews
-        }
-        ErasureReplayClaimV1::StructuralOnly => ReplayClaimV1::StructuralOnly,
-        ErasureReplayClaimV1::UnverifiableArtifactsMissing => {
-            ReplayClaimV1::UnverifiableArtifactsMissing
-        }
-        ErasureReplayClaimV1::IncompatibleProfile => ReplayClaimV1::IncompatibleProfile,
     }
 }
 
