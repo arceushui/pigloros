@@ -15,9 +15,16 @@ use crate::composition::PluginExecutionModeV1;
 use super::error::{CommunityPluginHostErrorV1, ComponentTrapClassV1, TrapReproductionV1};
 
 const MINIMA: DeterministicBudgetV1 = DeterministicBudgetV1::MINIMA;
+/// The `wasmtime::Trap` code that is the authoritative `FuelExhausted`.
+const OUT_OF_FUEL_TRAP_CODE: &str = "OutOfFuel";
+/// The `wasmtime::Trap` code that is the operational watchdog stop.
+const INTERRUPT_TRAP_CODE: &str = "Interrupt";
 const MAXIMA: DeterministicBudgetV1 = DeterministicBudgetV1::MAXIMA;
 
 /// A live Execution Mode that runs community Plugin Components.
+///
+/// It mirrors `PluginExecutionModeV1` without Replay, because Replay uses the
+/// profile recorded in its `ReproManifest` and never a host profile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommunityPluginModeV1 {
     /// ADR-024 Local Execution Mode.
@@ -224,17 +231,34 @@ impl TrapTableEntryV1 {
     /// Whether this row follows the ADR-061 trap table.
     ///
     /// `OutOfFuel` yields `FuelExhausted`, `Interrupt` yields the watchdog
-    /// stop, and every other code yields exactly one trap class.
+    /// stop, every code named in decision 6 yields its ADR class, and every
+    /// other code yields `other`.
     fn is_classified(&self) -> bool {
-        let reserved = match self.trap_code.as_str() {
-            "OutOfFuel" => Some(TrapOutcomeV1::FuelExhausted),
-            "Interrupt" => Some(TrapOutcomeV1::WatchdogStop),
-            _ => None,
-        };
-        reserved.map_or(matches!(self.outcome, TrapOutcomeV1::Trap(_)), |expected| {
-            expected == self.outcome
-        })
+        adr_outcome(&self.trap_code) == self.outcome
     }
+}
+
+/// The ADR-061 revision 4 decision 6 outcome of one `wasmtime::Trap` code.
+///
+/// A listed code that the pinned version lacks is simply absent from its
+/// table; an unlisted code is `other`.
+fn adr_outcome(trap_code: &str) -> TrapOutcomeV1 {
+    let class = match trap_code {
+        OUT_OF_FUEL_TRAP_CODE => return TrapOutcomeV1::FuelExhausted,
+        INTERRUPT_TRAP_CODE => return TrapOutcomeV1::WatchdogStop,
+        "UnreachableCodeReached" => ComponentTrapClassV1::Unreachable,
+        "MemoryOutOfBounds" | "HeapMisaligned" | "ArrayOutOfBounds" => {
+            ComponentTrapClassV1::MemoryOutOfBounds
+        }
+        "TableOutOfBounds" => ComponentTrapClassV1::TableOutOfBounds,
+        "IndirectCallToNull" | "BadSignature" => ComponentTrapClassV1::IndirectCall,
+        "IntegerOverflow" | "IntegerDivisionByZero" | "BadConversionToInteger" => {
+            ComponentTrapClassV1::IntegerArithmetic
+        }
+        "StackOverflow" => ComponentTrapClassV1::StackExhausted,
+        _ => ComponentTrapClassV1::Other,
+    };
+    TrapOutcomeV1::Trap(class)
 }
 
 /// The pinned Engine configuration a profile records (decision 2).

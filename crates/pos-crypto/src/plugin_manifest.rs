@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use crate::plugin_execution::{
     DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
-    PluginExecutionProjectionV1, WASM_PAGE_BYTES_V1,
+    PluginExecutionProjectionV1, COMMUNITY_PLUGIN_WORLD_V1, WASM_PAGE_BYTES_V1,
 };
 use crate::plugin_trust::ValidatedPluginManifestProjectionV1;
 use crate::strict_cbor::{Reader, StrictCborError};
@@ -32,10 +32,6 @@ type Dependency<'a> = (&'a str, Digest);
 /// Fields 17-20: dependency release digests, provenance and SBOM, licences.
 type SupplyChain = (Vec<Digest>, [Artifact; 2], Vec<Artifact>);
 /// The ADR-103 release projection and the execution projection of one PMF1.
-type Projections = (
-    ValidatedPluginManifestProjectionV1,
-    PluginExecutionProjectionV1,
-);
 /// An artifact with its position in PMF1 field order.
 type Positioned = (usize, Artifact);
 
@@ -50,7 +46,6 @@ const MAX_LIST: usize = 256;
 const MAX_LICENCES: usize = 32;
 const MAX_LABEL_BYTES: usize = 128;
 const MAX_PATTERN_BYTES: usize = 512;
-const MAX_MINOR: u64 = 65_535;
 const MAX_U32: u64 = 4_294_967_295;
 const MAX_CALLS: u64 = DeterministicBudgetV1::MAXIMA.host_calls;
 const MAX_MESSAGE_BYTES: u64 = DeterministicBudgetV1::MAXIMA.event_bytes;
@@ -59,7 +54,7 @@ const MAX_WIT_BYTES: u64 = 4_194_304;
 const MAX_SCHEMA_BYTES: u64 = 1_048_576;
 const MAX_INTERVAL_SECONDS: i128 = 31_622_400;
 const MAGIC: &str = "PMF1";
-const WORLD: &str = "pigloros:plugin/community-plugin@0.1.0";
+const WORLD: &str = COMMUNITY_PLUGIN_WORLD_V1;
 const MANIFEST_DOMAIN: &[u8] = b"PiglorOS.Plugin.Manifest.v1\0";
 const RELEASE_DOMAIN: &[u8] = b"PiglorOS.Plugin.Release.v1\0";
 /// Canonical head of the 25-element unsigned array of fields 0-24. The outer
@@ -313,18 +308,29 @@ struct Pmf1<'a> {
 pub(crate) fn project_verified_bundle(
     bundle: &VerifiedReleaseBundleV1,
 ) -> Result<ValidatedPluginManifestProjectionV1, PluginManifestErrorV1> {
-    validate_bundle(bundle).map(|(projection, _)| projection)
+    validate_bundle(bundle).map(release_projection)
 }
 
 /// Run the same validation and keep the execution requirements instead.
 pub(crate) fn project_execution(
     bundle: &VerifiedReleaseBundleV1,
 ) -> Result<PluginExecutionProjectionV1, PluginManifestErrorV1> {
-    validate_bundle(bundle).map(|(_, execution)| execution)
+    validate_bundle(bundle).map(execution_projection)
 }
 
-/// Every phase of one verified closure, then both projections of it.
-fn validate_bundle(bundle: &VerifiedReleaseBundleV1) -> Result<Projections, PluginManifestErrorV1> {
+/// One PMF1 that passed every phase, with the values both projections bind.
+struct ValidatedPmf1<'a> {
+    pmf1: Pmf1<'a>,
+    /// The PMF1-derived member list `E` in ADR-102 layer order.
+    expected: Vec<Positioned>,
+    /// Unkeyed BLAKE3-256 of the complete PMF1 bytes.
+    pmf1_digest: Digest,
+}
+
+/// Every phase of one verified closure, in ADR-061 revision 3 order.
+fn validate_bundle(
+    bundle: &VerifiedReleaseBundleV1,
+) -> Result<ValidatedPmf1<'_>, PluginManifestErrorV1> {
     let bytes = bundle.pmf1();
     let pmf1 = decode(bytes)?;
     check_relations(&pmf1)?;
@@ -332,6 +338,20 @@ fn validate_bundle(bundle: &VerifiedReleaseBundleV1) -> Result<Projections, Plug
     check_closure(&expected, bundle.members())?;
     check_inner_digests(&expected, bundle)?;
     check_signed_digests(bytes, &pmf1)?;
+    Ok(ValidatedPmf1 {
+        pmf1,
+        expected,
+        pmf1_digest: *blake3::hash(bytes).as_bytes(),
+    })
+}
+
+/// The ADR-103 release projection of one validated PMF1.
+fn release_projection(validated: ValidatedPmf1<'_>) -> ValidatedPluginManifestProjectionV1 {
+    let ValidatedPmf1 {
+        pmf1,
+        expected,
+        pmf1_digest,
+    } = validated;
     let descriptor_digests = expected
         .iter()
         .flat_map(|(_, artifact)| [artifact.blake3, artifact.sha256])
@@ -339,20 +359,7 @@ fn validate_bundle(bundle: &VerifiedReleaseBundleV1) -> Result<Projections, Plug
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let pmf1_digest = *blake3::hash(bytes).as_bytes();
-    let execution = PluginExecutionProjectionV1 {
-        pmf1_digest,
-        release_digest: pmf1.signed.release_digest,
-        plugin_id: pmf1.plugin_id.to_owned(),
-        capabilities: pmf1
-            .capabilities
-            .iter()
-            .map(Capability::descriptor)
-            .collect(),
-        abi: pmf1.abi,
-        budget: pmf1.budget,
-    };
-    let projection = ValidatedPluginManifestProjectionV1 {
+    ValidatedPluginManifestProjectionV1 {
         pmf1_digest,
         plugin_id: pmf1.plugin_id.to_owned(),
         owner: pmf1.signed.owner,
@@ -362,8 +369,24 @@ fn validate_bundle(bundle: &VerifiedReleaseBundleV1) -> Result<Projections, Plug
         not_after: pmf1.signed.not_after,
         release_digest: pmf1.signed.release_digest,
         descriptor_digests,
-    };
-    Ok((projection, execution))
+    }
+}
+
+/// The execution projection of one validated PMF1.
+fn execution_projection(validated: ValidatedPmf1<'_>) -> PluginExecutionProjectionV1 {
+    let pmf1 = validated.pmf1;
+    PluginExecutionProjectionV1 {
+        pmf1_digest: validated.pmf1_digest,
+        release_digest: pmf1.signed.release_digest,
+        plugin_id: pmf1.plugin_id.to_owned(),
+        capabilities: pmf1
+            .capabilities
+            .iter()
+            .map(Capability::descriptor)
+            .collect(),
+        abi: pmf1.abi,
+        budget: pmf1.budget,
+    }
 }
 
 /// The ADR-061 ID grammar: `[a-z0-9][a-z0-9._/-]*`, 1-128 bytes.
@@ -658,8 +681,8 @@ fn read_dependency<'a>(
     let release_digest = reader.bytes()?;
     exact_text(reader, WORLD)?;
     unsigned_in(reader, 0, 0)?;
-    let minimum = unsigned_in(reader, 0, MAX_MINOR)?;
-    unsigned_in(reader, minimum, MAX_MINOR)?;
+    let minimum = unsigned_in(reader, 0, u64::from(u16::MAX))?;
+    unsigned_in(reader, minimum, u64::from(u16::MAX))?;
     read_id_list(reader)?;
     read_id_list(reader)?;
     unsigned_in(reader, 0, 4)?;

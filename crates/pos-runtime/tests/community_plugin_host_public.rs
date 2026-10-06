@@ -505,6 +505,56 @@ fn pinned_runtime_records_a_validated_trap_table() -> TestResult {
     Ok(())
 }
 
+/// Every code ADR-061 revision 4 decision 6 names, with its class.
+const ADR_TRAP_TABLE: [(&str, ComponentTrapClassV1); 18] = [
+    ("UnreachableCodeReached", ComponentTrapClassV1::Unreachable),
+    ("MemoryOutOfBounds", ComponentTrapClassV1::MemoryOutOfBounds),
+    ("HeapMisaligned", ComponentTrapClassV1::MemoryOutOfBounds),
+    ("ArrayOutOfBounds", ComponentTrapClassV1::MemoryOutOfBounds),
+    ("TableOutOfBounds", ComponentTrapClassV1::TableOutOfBounds),
+    ("IndirectCallToNull", ComponentTrapClassV1::IndirectCall),
+    ("BadSignature", ComponentTrapClassV1::IndirectCall),
+    ("IntegerOverflow", ComponentTrapClassV1::IntegerArithmetic),
+    (
+        "IntegerDivisionByZero",
+        ComponentTrapClassV1::IntegerArithmetic,
+    ),
+    (
+        "BadConversionToInteger",
+        ComponentTrapClassV1::IntegerArithmetic,
+    ),
+    ("StackOverflow", ComponentTrapClassV1::StackExhausted),
+    ("NullReference", ComponentTrapClassV1::Other),
+    ("CastFailure", ComponentTrapClassV1::Other),
+    ("AllocationTooLarge", ComponentTrapClassV1::Other),
+    ("AlwaysTrapAdapter", ComponentTrapClassV1::Other),
+    ("CannotEnterComponent", ComponentTrapClassV1::Other),
+    ("CodeAddedByALaterVersion", ComponentTrapClassV1::Other),
+    ("Unlisted", ComponentTrapClassV1::Other),
+];
+
+#[test]
+fn every_trap_code_maps_to_exactly_its_adr_class() -> TestResult {
+    let mut table = vec![
+        entry("Interrupt", TrapOutcomeV1::WatchdogStop),
+        entry("OutOfFuel", TrapOutcomeV1::FuelExhausted),
+    ];
+    table.extend(
+        ADR_TRAP_TABLE
+            .iter()
+            .map(|&(code, class)| entry(code, TrapOutcomeV1::Trap(class))),
+    );
+    assert_eq!(pinned(table)?.trap_table().len(), 20);
+    for (code, class) in ADR_TRAP_TABLE {
+        for wrong in TRAP_CLASSES.into_iter().filter(|other| *other != class) {
+            let table = vec![entry(code, TrapOutcomeV1::Trap(wrong))];
+            let expected = Err(ProfileError::MisclassifiedTrapCode { index: 0 });
+            assert_eq!(pinned(table), expected, "{code} as {}", wrong.name());
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn parity_profiles_carry_identical_ceilings_and_runtime() -> TestResult {
     let input = CeilingValuesV1 {

@@ -131,6 +131,9 @@ pub enum CommunityPluginHostErrorV1 {
     #[error("community Plugin guest declared a failure")]
     GuestDeclaredFailure,
     /// The Component trapped with a canonical trap class.
+    ///
+    /// The ADR's "same class/coordinate" coordinate is a conformance-side
+    /// concept (#194) and is not carried here.
     #[error("community Plugin Component trapped: {}", .class.name())]
     ComponentTrap {
         /// The profile-defined canonical trap class.
@@ -209,6 +212,8 @@ impl CommunityPluginHostErrorV1 {
     /// - The guest-output and deterministic-limit rows of the failure table
     ///   are authoritative, as are `StateMigrationFailed` and
     ///   `DeterministicDeadlineExceeded`, which a V1 host never produces.
+    ///   `GuestDeclaredFailure` and `InvalidGuestOutput` are constructed only
+    ///   after a valid deterministic invocation.
     /// - `ComponentTrap` is authoritative only when conformance reproduces
     ///   it, and `AtomicCommitFailed` only with a deterministic typed result.
     ///   Otherwise both are operational, like worker crashes and watchdog
