@@ -308,7 +308,7 @@ pub fn decode_subject_credential_binding(
     reader.fixed_array(16)?;
     expect_magic(&mut reader, SUBJECT_CREDENTIAL_BINDING_MAGIC)?;
     expect_version(&mut reader)?;
-    let owner_id = reader.text(0, MAX_SUBJECT_CREDENTIAL_BINDING_BYTES)?;
+    let owner_id = reader.text(MAX_SUBJECT_CREDENTIAL_BINDING_BYTES)?;
     let subject_id = reader.fixed_bytes()?;
     if reader.unsigned()? != SUBJECT_DATA_ENCRYPTION_ROLE {
         return Err(OwnerBridgeCodecError::InvalidPayload);
@@ -387,7 +387,7 @@ pub fn decode_cleanup_record(input: &[u8]) -> Result<CleanupRecordV1<'_>, OwnerB
     expect_magic(&mut reader, CLEANUP_RECORD_MAGIC)?;
     expect_version(&mut reader)?;
     let ceremony_id = reader.fixed_bytes()?;
-    let folder_name = reader.text(0, MAX_CLEANUP_RECORD_BYTES)?;
+    let folder_name = reader.text(MAX_CLEANUP_RECORD_BYTES)?;
     let browser_pid =
         u32::try_from(reader.unsigned()?).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
     let creation_filetime = reader.unsigned()?;

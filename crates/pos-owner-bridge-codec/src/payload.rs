@@ -8,6 +8,7 @@ const PROTOCOL_VERSION: u64 = 1;
 const RP_ID: &str = "localhost";
 const RP_NAME: &str = "PiglorOS";
 const CREATE_TYPE: i64 = -7;
+const CREATE_TYPE_MAGNITUDE: u64 = 6;
 const REQUIRED_CODE: u64 = 0;
 const MAX_CREDENTIAL_ID_BYTES: usize = 1_024;
 const MAX_CLIENT_DATA_BYTES: usize = 4_096;
@@ -358,7 +359,7 @@ pub fn encode_create_options(
     writer.bytes(&options.user_handle)?;
     writer.text(RP_ID)?;
     writer.text(RP_NAME)?;
-    writer.signed(CREATE_TYPE)?;
+    writer.negative(CREATE_TYPE_MAGNITUDE)?;
     writer.unsigned(REQUIRED_CODE)?;
     writer.unsigned(REQUIRED_CODE)?;
     writer.bytes(&options.prf_input)?;

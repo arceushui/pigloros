@@ -86,19 +86,12 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub(crate) fn text(
-        &mut self,
-        minimum: usize,
-        maximum: usize,
-    ) -> Result<&'a str, OwnerBridgeCodecError> {
+    pub(crate) fn text(&mut self, maximum: usize) -> Result<&'a str, OwnerBridgeCodecError> {
         let (major, length) = self.head()?;
         if major != 3 {
             return Err(OwnerBridgeCodecError::InvalidCbor);
         }
         let length = Self::bounded_count(length, maximum)?;
-        if length < minimum {
-            return Err(OwnerBridgeCodecError::BoundsExceeded);
-        }
         core::str::from_utf8(self.take(length)?).map_err(|_| OwnerBridgeCodecError::InvalidCbor)
     }
 
@@ -206,17 +199,8 @@ impl<'a> CborWriter<'a> {
         self.head(0, value)
     }
 
-    pub(crate) fn signed(&mut self, value: i64) -> Result<(), OwnerBridgeCodecError> {
-        if value >= 0 {
-            self.unsigned(u64::try_from(value).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?)
-        } else {
-            let magnitude = value
-                .checked_add(1)
-                .and_then(i64::checked_neg)
-                .and_then(|adjusted| u64::try_from(adjusted).ok())
-                .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
-            self.head(1, magnitude)
-        }
+    pub(crate) fn negative(&mut self, magnitude: u64) -> Result<(), OwnerBridgeCodecError> {
+        self.head(1, magnitude)
     }
 
     pub(crate) fn bytes(&mut self, value: &[u8]) -> Result<(), OwnerBridgeCodecError> {

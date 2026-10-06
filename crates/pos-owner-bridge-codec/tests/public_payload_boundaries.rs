@@ -277,6 +277,54 @@ fn public_payload_decoders_reject_noncanonical_and_closed_schema_variations(
 }
 
 #[test]
+fn public_payload_encoders_reject_short_buffers_at_wide_cbor_length_heads(
+) -> Result<(), OwnerBridgeCodecError> {
+    let credential_id = [0x80; 256];
+    let get = GetOptionsV1::new(CEREMONY_ID, CHALLENGE, &credential_id, PRF_INPUT)?;
+    let mut get_output = vec![0; 400];
+    let get_length = encode_get_options(&get, &mut get_output)?;
+    let credential_header = get_output[..get_length]
+        .windows(3)
+        .position(|window| window == [0x59, 1, 0])
+        .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
+    for output_length in [credential_header, credential_header + 1] {
+        let mut output = vec![0; output_length];
+        assert_eq!(
+            encode_get_options(&get, &mut output),
+            Err(OwnerBridgeCodecError::BufferTooSmall),
+            "Get output length {output_length}"
+        );
+    }
+
+    let raw_id = [0x81];
+    let attestation_object = vec![0xa0; 65_536];
+    let attestation = AttestationReplyV1::new(
+        CEREMONY_ID,
+        &raw_id,
+        b"{}",
+        &attestation_object,
+        TransportCodes::new(&[])?,
+        false,
+        None,
+    )?;
+    let mut attestation_output = vec![0; 66_000];
+    let attestation_length = encode_attestation_reply(&attestation, &mut attestation_output)?;
+    let attestation_header = attestation_output[..attestation_length]
+        .windows(5)
+        .position(|window| window == [0x5a, 0, 1, 0, 0])
+        .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
+    for output_length in [attestation_header, attestation_header + 1] {
+        let mut output = vec![0; output_length];
+        assert_eq!(
+            encode_attestation_reply(&attestation, &mut output),
+            Err(OwnerBridgeCodecError::BufferTooSmall),
+            "attestation output length {output_length}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn public_payload_codecs_reject_every_truncated_input_and_output_boundary(
 ) -> Result<(), OwnerBridgeCodecError> {
     let create = CreateOptionsV1::new(CEREMONY_ID, CHALLENGE, USER_HANDLE, PRF_INPUT);

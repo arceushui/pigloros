@@ -99,6 +99,11 @@ fn public_durable_codecs_reject_closed_schema_violations() -> Result<(), OwnerBr
         decode_cleanup_record(&cleanup_output[..=cleanup_length]),
         Err(OwnerBridgeCodecError::TrailingBytes)
     );
+    let oversized_cleanup = vec![0; MAX_CLEANUP_RECORD_BYTES + 1];
+    assert_eq!(
+        decode_cleanup_record(&oversized_cleanup),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
     Ok(())
 }
 
@@ -110,6 +115,10 @@ fn public_durable_records_enforce_complete_size_and_output_boundaries(
     assert_eq!(
         encode_subject_credential_binding(&binding, &mut binding_short_output),
         Err(OwnerBridgeCodecError::BufferTooSmall)
+    );
+    assert_eq!(
+        binding_with("owner", 1, &[]),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
     );
 
     let cleanup = CleanupRecordV1::new(CEREMONY_ID, "owner-bridge-1", 7, 0, IMAGE_PATH_SHA256)?;
@@ -390,6 +399,9 @@ fn public_durable_decoders_reject_every_closed_schema_variation(
     let mut wrong_algorithm = binding_bytes;
     wrong_algorithm[181] = 1;
     assert_binding_error(&wrong_algorithm, OwnerBridgeCodecError::InvalidPayload);
+    let mut invalid_cose_point = binding_bytes;
+    invalid_cose_point[114..146].fill(0);
+    assert_binding_error(&invalid_cose_point, OwnerBridgeCodecError::InvalidPayload);
     let mut wrong_backup_flag = binding_bytes;
     wrong_backup_flag[182] = 0xf6;
     assert_binding_error(&wrong_backup_flag, OwnerBridgeCodecError::InvalidCbor);
@@ -402,6 +414,12 @@ fn public_durable_decoders_reject_every_closed_schema_variation(
     let mut unknown_transport = binding_bytes;
     unknown_transport[186] = 6;
     assert_binding_error(&unknown_transport, OwnerBridgeCodecError::InvalidPayload);
+    let mut oversized_transport_code = Vec::from(binding_bytes);
+    oversized_transport_code.splice(186..187, [0x19, 1, 0]);
+    assert_binding_error(
+        &oversized_transport_code,
+        OwnerBridgeCodecError::InvalidPayload,
+    );
     let mut binding_trailing = Vec::from(binding_bytes);
     binding_trailing.push(0);
     assert_binding_error(&binding_trailing, OwnerBridgeCodecError::TrailingBytes);
