@@ -668,6 +668,7 @@ fn negotiation_records_the_release_abi_and_not_granted_capabilities() -> TestRes
     assert_eq!(negotiated.pmf1_digest(), [0x11; 32]);
     assert_eq!(negotiated.release_digest(), [0x22; 32]);
     assert_eq!(negotiated.abi(), (COMMUNITY_PLUGIN_ABI_MAJOR_V1, 0));
+    assert_eq!(negotiated.declared_minor_range(), (0, 1));
     assert!(negotiated.required_features().is_empty());
     assert_eq!(
         negotiated.not_granted_capabilities(),

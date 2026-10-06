@@ -1,110 +1,122 @@
 //! Closed load and invocation outcomes.
+//!
+//! A failed invocation returns only the closed
+//! [`CommunityPluginHostErrorV1`]: no guest output, log or runtime message
+//! survives it. A completed invocation returns the guest's validated typed
+//! return, which may be the guest's own `plugin-error`.
 
-use wasmtime::component::Val;
+use pos_runtime::community_plugin_host::CommunityPluginHostErrorV1;
 use wasmtime::Trap;
 
+use crate::contract::GuestPluginErrorV1;
 use crate::host_v1::{HostFault, OperationalLogRecord};
+use crate::runtime::trap_outcome;
 
 /// Why a Component could not be loaded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoadError {
     /// The bytes are not a valid Component for the pinned engine.
     InvalidComponent,
-    /// The Component needs an import that the `host-v1` linker does not provide.
+    /// The Component imports a function that is not a `host-v1` function with
+    /// its exact type, or anything else the `host-v1` linker does not provide.
     ImportDenied,
     /// `guest-v1` does not export `describe`, `reduce` and `drive` as functions.
     MissingGuestExport,
 }
 
-/// The lifted result and the measured budget of one successful invocation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InvocationReport {
-    /// The export's lifted return value, not yet validated as guest output.
-    pub value: Val,
+/// The negotiated record's profile does not pin this engine's runtime.
+///
+/// Execution requires the profile's pinned runtime to equal
+/// [`crate::runtime::pinned_runtime`]: the same version, features, Engine
+/// configuration and complete trap table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeNotPinnedV1;
+
+/// The guest's validated return: its value, or its own `plugin-error`.
+pub type GuestReturnV1<T> = Result<T, GuestPluginErrorV1>;
+
+/// Deterministic resource use of one completed invocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MeteringV1 {
     /// Fuel consumed while instantiating the Component.
     pub startup_fuel: u64,
     /// Fuel consumed by the call itself.
     pub call_fuel: u64,
     /// Linear memory reserved across all of the Component's memories, in bytes.
     pub memory_bytes: u64,
+    /// `host-v1` calls made.
+    pub host_calls: u64,
+}
+
+/// One completed invocation: the guest's validated return and its metering.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvocationReportV1<T> {
+    /// The guest's validated typed return.
+    pub result: GuestReturnV1<T>,
+    /// Fuel, memory and host calls the invocation used.
+    pub metering: MeteringV1,
     /// Accepted `record-operational-log` calls, in call order.
+    ///
+    /// Operational only: never an authoritative input or output.
     pub operational_log: Vec<OperationalLogRecord>,
 }
 
-/// Why an invocation ended without a result.
-///
-/// No variant carries guest output, so nothing from a failed invocation can be
-/// committed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InvocationFailure {
-    /// Wasmtime fuel ran out (`Trap::OutOfFuel`): the authoritative `FuelExhausted`.
-    FuelExhausted,
-    /// The limiter denied linear-memory growth: `MemoryLimitExceeded`.
-    MemoryLimitExceeded,
-    /// The epoch deadline elapsed (`Trap::Interrupt`): the operational
-    /// `OperationalWatchdogStop`, never an authoritative result.
-    OperationalWatchdogStop,
-    /// A `host-v1` call carried arguments, or exceeded a count, that the host
-    /// refuses.
-    HostCallRejected,
-    /// Any other Wasmtime trap, before #541 maps it to a canonical trap class.
-    ComponentTrap(Trap),
-    /// Wasmtime refused the invocation without a trap, for example because the
-    /// arguments do not match the export's type.
-    Rejected,
-}
-
 /// Classify the error that ended an invocation.
-pub(crate) fn classify(error: &wasmtime::Error) -> InvocationFailure {
+///
+/// A host refusal maps to its own error, and a trap to its pinned trap-table
+/// outcome. Any other error is the host's own Canonical ABI lift or lowering
+/// failing on guest-provided values, such as a guest return that does not
+/// lift: `InvalidGuestOutput`, never a trap.
+pub(crate) fn classify(error: &wasmtime::Error) -> CommunityPluginHostErrorV1 {
     error.downcast_ref::<HostFault>().map_or_else(
         || {
             error
                 .downcast_ref::<Trap>()
-                .map_or(InvocationFailure::Rejected, |trap| trap_failure(*trap))
+                .map_or(CommunityPluginHostErrorV1::InvalidGuestOutput, |trap| {
+                    trap_outcome(*trap).error()
+                })
         },
-        |fault| fault_failure(*fault),
+        |fault| fault.error(),
     )
-}
-
-const fn trap_failure(trap: Trap) -> InvocationFailure {
-    match trap {
-        Trap::OutOfFuel => InvocationFailure::FuelExhausted,
-        Trap::Interrupt => InvocationFailure::OperationalWatchdogStop,
-        other => InvocationFailure::ComponentTrap(other),
-    }
-}
-
-const fn fault_failure(fault: HostFault) -> InvocationFailure {
-    match fault {
-        HostFault::CallRejected => InvocationFailure::HostCallRejected,
-        HostFault::MemoryLimit => InvocationFailure::MemoryLimitExceeded,
-    }
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use pos_runtime::community_plugin_host::{ComponentTrapClassV1, TrapReproductionV1};
+
     use super::*;
 
+    type Error = CommunityPluginHostErrorV1;
+
     #[test]
-    fn host_faults_and_traps_map_to_closed_failures() {
-        let memory = wasmtime::Error::new(HostFault::MemoryLimit);
-        assert_eq!(classify(&memory), InvocationFailure::MemoryLimitExceeded);
-        let rejected = wasmtime::Error::new(HostFault::CallRejected);
-        assert_eq!(classify(&rejected), InvocationFailure::HostCallRejected);
-        let fuel = wasmtime::Error::new(Trap::OutOfFuel);
-        assert_eq!(classify(&fuel), InvocationFailure::FuelExhausted);
-        let interrupt = wasmtime::Error::new(Trap::Interrupt);
-        assert_eq!(
-            classify(&interrupt),
-            InvocationFailure::OperationalWatchdogStop
-        );
-        let stack = wasmtime::Error::new(Trap::StackOverflow);
-        assert_eq!(
-            classify(&stack),
-            InvocationFailure::ComponentTrap(Trap::StackOverflow)
-        );
-        let other = wasmtime::Error::msg("not a trap");
-        assert_eq!(classify(&other), InvocationFailure::Rejected);
+    fn host_faults_traps_and_lift_failures_map_to_closed_errors() {
+        let cases = [
+            (wasmtime::Error::new(HostFault::MemoryLimit), Error::MemoryLimitExceeded),
+            (wasmtime::Error::new(HostFault::HostCallLimit), Error::HostCallLimitExceeded),
+            (wasmtime::Error::new(Trap::OutOfFuel), Error::FuelExhausted),
+            (wasmtime::Error::new(Trap::Interrupt), Error::OperationalWatchdogStop),
+            (
+                wasmtime::Error::new(Trap::StackOverflow),
+                Error::ComponentTrap {
+                    class: ComponentTrapClassV1::StackExhausted,
+                    reproduction: TrapReproductionV1::Unverified,
+                },
+            ),
+            (
+                wasmtime::Error::new(Trap::NullReference),
+                Error::ComponentTrap {
+                    class: ComponentTrapClassV1::Other,
+                    reproduction: TrapReproductionV1::Unverified,
+                },
+            ),
+            (
+                wasmtime::Error::msg("list pointer/length out of bounds of memory"),
+                Error::InvalidGuestOutput,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(classify(&error), expected);
+        }
     }
 }

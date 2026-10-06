@@ -313,8 +313,9 @@ pub struct PinnedComponentRuntimeV1 {
 impl PinnedComponentRuntimeV1 {
     /// Record one pinned runtime identity with a validated trap table.
     ///
-    /// Before execution, #541 must require rows for `OutOfFuel`, `Interrupt`
-    /// and every other trap code of the pinned version.
+    /// The in-worker engine (`pos-plugin-host`) executes only under a
+    /// profile whose runtime equals its own pinned runtime, whose table has a
+    /// row for `OutOfFuel`, `Interrupt` and every other pinned trap code.
     ///
     /// # Errors
     /// Returns `DuplicateTrapCode` for the first repeated trap code, then
@@ -379,7 +380,7 @@ fn first_duplicate(trap_table: &[TrapTableEntryV1]) -> Option<usize> {
 
 /// The host-owned community Plugin execution profile for one live mode.
 ///
-/// `runtime` stays optional in this slice; #541 must require `Some` before
+/// `runtime` is optional here; the in-worker engine requires it before
 /// any Component executes under the profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommunityPluginExecutionProfileV1 {

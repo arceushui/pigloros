@@ -21,6 +21,7 @@ out_dir="$(cd -- "${out_dir}" && pwd)"
 wasm_tools="${tools}/wasm-tools/wasm-tools"
 wit_bindgen="${tools}/wit-bindgen/wit-bindgen"
 clang="${tools}/wasi-sdk/bin/clang"
+blake3_c="${tools}/blake3/c"
 
 work="$(mktemp -d)"
 trap 'rm -rf -- "${work}"' EXIT
@@ -55,12 +56,23 @@ c_flags=(
   --target=wasm32-wasip1 -O2 -std=c11
   "-ffile-prefix-map=${work}=/build" "-ffile-prefix-map=${here}=/src"
 )
-"${clang}" "${c_flags[@]}" -Wall -Wextra -Werror -I "${work}/c-guest" \
-  -c "${here}/c-guest/guest.c" -o "${work}/c-guest/guest.o"
 "${clang}" "${c_flags[@]}" -I "${work}/c-guest" \
   -c "${work}/c-guest/community_plugin.c" -o "${work}/c-guest/bindings.o"
+# BLAKE3: the portable implementation only, with assertions compiled out so
+# no libc I/O (and therefore no WASI import) is linked.
+blake3_objects=()
+for source in blake3 blake3_dispatch blake3_portable; do
+  "${clang}" "${c_flags[@]}" "-ffile-prefix-map=${tools}=/tools" -DNDEBUG \
+    -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 \
+    -DBLAKE3_USE_NEON=0 -c "${blake3_c}/${source}.c" \
+    -o "${work}/c-guest/${source}.o"
+  blake3_objects+=("${work}/c-guest/${source}.o")
+done
+"${clang}" "${c_flags[@]}" -Wall -Wextra -Werror -I "${work}/c-guest" \
+  -I "${blake3_c}" -c "${here}/c-guest/guest.c" -o "${work}/c-guest/guest.o"
 "${clang}" --target=wasm32-wasip1 -mexec-model=reactor -O2 \
   "${work}/c-guest/guest.o" "${work}/c-guest/bindings.o" \
+  "${blake3_objects[@]}" \
   "${work}/c-guest/community_plugin_component_type.o" \
   -o "${work}/c-guest/c-guest.core.wasm"
 "${wasm_tools}" component new "${work}/c-guest/c-guest.core.wasm" \

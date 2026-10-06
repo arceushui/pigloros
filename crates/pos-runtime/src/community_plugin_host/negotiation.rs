@@ -157,6 +157,7 @@ pub struct NegotiatedCommunityPluginV1 {
     pmf1_digest: [u8; 32],
     release_digest: [u8; 32],
     abi_minor: u16,
+    declared_minors: (u16, u16),
     required_features: Vec<String>,
     not_granted_capabilities: Vec<PluginCapabilityDescriptorV1>,
     mode: CommunityPluginModeV1,
@@ -193,6 +194,14 @@ impl NegotiatedCommunityPluginV1 {
     #[must_use]
     pub const fn abi(&self) -> (u16, u16) {
         (COMMUNITY_PLUGIN_ABI_MAJOR_V1, self.abi_minor)
+    }
+
+    /// The release's declared `(min, max)` ABI minors, PMF1 fields 6 and 7.
+    ///
+    /// The guest's `describe` must declare exactly this range.
+    #[must_use]
+    pub const fn declared_minor_range(&self) -> (u16, u16) {
+        self.declared_minors
     }
 
     /// The required features, every one provided by the host.
@@ -257,6 +266,7 @@ pub fn negotiate_community_plugin_v1(
         pmf1_digest: execution.pmf1_digest(),
         release_digest: execution.release_digest(),
         abi_minor,
+        declared_minors: (execution.abi().min_minor, execution.abi().max_minor),
         required_features: execution.abi().required_features.clone(),
         not_granted_capabilities,
         mode: profile.mode(),

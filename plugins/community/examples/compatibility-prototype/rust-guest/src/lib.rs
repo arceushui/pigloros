@@ -19,6 +19,8 @@ const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 const RANDOM_BYTES: u32 = 16;
 const TRAP_OBSERVATION: &[u8] = b"trap";
+/// The host's V1 `output-digest` domain, including its NUL.
+const OUTPUT_DIGEST_DOMAIN: &[u8] = b"PiglorOS.Plugin.Output.v1\0";
 
 struct Prototype;
 
@@ -42,6 +44,49 @@ fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
+fn put_count(hasher: &mut blake3::Hasher, count: usize) {
+    hasher.update(&(count as u64).to_be_bytes());
+}
+
+fn put_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    put_count(hasher, bytes.len());
+    hasher.update(bytes);
+}
+
+fn put_digests(hasher: &mut blake3::Hasher, digests: &[Digest32]) {
+    put_count(hasher, digests.len());
+    for digest in digests {
+        put_bytes(hasher, &digest.value);
+    }
+}
+
+/// The V1 `output-digest` over fields 0-5 of `output`.
+fn output_digest(output: &PluginOutput) -> Digest32 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(OUTPUT_DIGEST_DOMAIN);
+    put_bytes(&mut hasher, &output.invocation_id);
+    put_count(&mut hasher, output.event_drafts.len());
+    for draft in &output.event_drafts {
+        hasher.update(&draft.event_schema_id.to_be_bytes());
+        put_bytes(&mut hasher, &draft.entity_id);
+        put_bytes(&mut hasher, &draft.event_type.utf8);
+        put_bytes(&mut hasher, &draft.canonical_payload);
+        put_digests(&mut hasher, &draft.dependency_digests);
+    }
+    put_bytes(&mut hasher, &output.next_state_schema.value);
+    put_bytes(&mut hasher, &output.next_state_bytes);
+    put_count(&mut hasher, output.trace_annotations.len());
+    for annotation in &output.trace_annotations {
+        hasher.update(&annotation.annotation_schema_id.to_be_bytes());
+        put_bytes(&mut hasher, &annotation.canonical_bytes);
+        put_digests(&mut hasher, &annotation.dependency_digests);
+    }
+    put_digests(&mut hasher, &output.consumed_dependencies);
+    Digest32 {
+        value: hasher.finalize().as_bytes().to_vec(),
+    }
+}
+
 fn invoke(
     input: PluginInvocation,
     log_message: &str,
@@ -63,7 +108,7 @@ fn invoke(
     hash = fnv1a(hash, &now.to_le_bytes());
     hash = fnv1a(hash, &random);
     let state = hash.to_le_bytes().to_vec();
-    Ok(PluginOutput {
+    let mut output = PluginOutput {
         invocation_id: input.invocation_id.clone(),
         event_drafts: vec![EventDraft {
             event_schema_id: 1,
@@ -73,13 +118,13 @@ fn invoke(
             dependency_digests: Vec::new(),
         }],
         next_state_schema: input.prior_state_schema,
-        next_state_bytes: state.clone(),
+        next_state_bytes: state,
         trace_annotations: Vec::new(),
         consumed_dependencies: Vec::new(),
-        output_digest: Digest32 {
-            value: state.repeat(4),
-        },
-    })
+        output_digest: Digest32 { value: Vec::new() },
+    };
+    output.output_digest = output_digest(&output);
+    Ok(output)
 }
 
 impl Guest for Prototype {
@@ -89,8 +134,8 @@ impl Guest for Prototype {
             release_semver: text("0.1.0"),
             world: text("pigloros:plugin/community-plugin@0.1.0"),
             abi_major: 0,
-            min_abi_minor: 1,
-            max_abi_minor: 1,
+            min_abi_minor: 0,
+            max_abi_minor: 0,
             required_features: Vec::new(),
             event_schema_digests: vec![filled_digest(1)],
             state_schema_digest: filled_digest(2),
