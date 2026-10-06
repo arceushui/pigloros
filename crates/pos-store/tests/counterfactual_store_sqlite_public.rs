@@ -1015,17 +1015,17 @@ fn the_schema_is_additive_idempotent_and_validated_on_every_open() {
     assert_eq!(open_read_only(), "");
     assert_eq!(open_writable(), "");
     assert_eq!(open_read_only(), "");
-    let mut migrated = open(&fixture.path);
-    assert_eq!(ok(migrated.logical_head(fork)), Seq::from_u64(2));
+    let mut reopened = open(&fixture.path);
+    assert_eq!(ok(reopened.logical_head(fork)), Seq::from_u64(2));
     assert_eq!(
-        migrated.current_fork_generation(fork),
+        reopened.current_fork_generation(fork),
         Err(StoreError::ForkNotFound)
     );
     assert_eq!(
-        migrated.publish_counterfactual_facts(fork, facts()),
+        reopened.publish_counterfactual_facts(fork, facts()),
         Ok(at(fork, 0))
     );
-    drop(migrated);
+    drop(reopened);
 
     for (kind, name, weakened) in SCHEMA_OBJECTS {
         ok(execute(&fixture.path, &format!("DROP {kind} {name};")));

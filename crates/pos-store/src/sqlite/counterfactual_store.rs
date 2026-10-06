@@ -23,6 +23,10 @@
 //! the one normative first version of the schema: a file written by an
 //! earlier build, whose delete guards lack the purge-marker condition, fails
 //! the exact validation below with a storage error and must be recreated.
+//! A writable open of such a file still creates the tables, index, and
+//! triggers it lacks before validation fails, so a rejected file may gain
+//! those additive objects; its old delete guards stay and every later open
+//! still fails.
 //! Every open validates the exact table shapes, the index, and the trigger
 //! bodies, and fails closed with a storage error on any drift. A read-only
 //! open of a file written before this schema, which has no counterfactual
