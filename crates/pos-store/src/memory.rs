@@ -2744,7 +2744,7 @@ impl MemoryStore {
     }
 
     /// Refuse a new issuance whose operation ID an import holds as its `FPO1`
-    /// (the shared operation-ID namespace of SQLite), then sign it.
+    /// (the shared operation-ID namespace of `SQLite`), then sign it.
     fn sign_new_unless_imported<E, F>(
         &self,
         request: &ForkManifestPublicationRequestV1,
@@ -3033,8 +3033,7 @@ impl MemoryStore {
             .contains_key(&command.operation_id)
         {
             Err(pos_core::ForkAdmissionErrorV1::Conflict)
-        } else if self.imported_principal_has_other_owner(command.principal_digest, command.owner)
-        {
+        } else if self.imported_principal_has_other_owner(command.principal_digest, command.owner) {
             Err(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict)
         } else {
             self.execute_principal_owner_command(key, command)
