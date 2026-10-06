@@ -242,9 +242,9 @@ use pos_core::{
     CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
     CounterfactualInvalidationCommandV1, CounterfactualInvalidationInputV1,
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
-    EventDraft, EventStore, ForkGenerationV1, Hash, InvalidationConflictV1, PipelineContractErrorV1,
-    PipelineDraftBatchV1, RecomputationFrontierBytesV1, ReplayClaimEvaluationV1,
-    SuffixInvalidationBytesV1, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
+    EventDraft, EventStore, ForkGenerationV1, Hash, InvalidationConflictV1,
+    PipelineContractErrorV1, PipelineDraftBatchV1, RecomputationFrontierBytesV1,
+    ReplayClaimEvaluationV1, SuffixInvalidationBytesV1, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
 };
 
 /// `SIV1` artifact class of every invalidated endogenous output.
