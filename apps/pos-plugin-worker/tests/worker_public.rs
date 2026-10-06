@@ -36,7 +36,7 @@ const RUST_GUEST: &[u8] = fixture!("rust-guest.wasm");
 const C_GUEST: &[u8] = fixture!("c-guest.wasm");
 const WORKER: &str = env!("CARGO_BIN_EXE_pos-plugin-worker");
 /// Generous for compiling a fixture in an unoptimized, instrumented worker.
-const WATCHDOG: Duration = Duration::from_secs(300);
+const WATCHDOG: Duration = Duration::from_mins(5);
 
 type Invocation<T> = Result<WorkerReportV1<T>, CommunityPluginHostErrorV1>;
 

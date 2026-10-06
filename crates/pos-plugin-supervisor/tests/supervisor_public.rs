@@ -30,7 +30,7 @@ type Invocation<T> = Result<WorkerReportV1<T>, CommunityPluginHostErrorV1>;
 
 const PROBE: &str = env!("CARGO_BIN_EXE_pos-plugin-worker-probe");
 /// A generous watchdog for invocations that should finish promptly.
-const PROMPT: Duration = Duration::from_secs(60);
+const PROMPT: Duration = Duration::from_mins(1);
 /// A short watchdog for invocations that must be stopped.
 const SHORT: Duration = Duration::from_secs(1);
 /// Well below the probe's 60-second linger, well above the short watchdog.

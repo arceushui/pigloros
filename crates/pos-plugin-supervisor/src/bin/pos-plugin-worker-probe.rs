@@ -22,13 +22,13 @@ use pos_plugin_supervisor::{
 use rustix::process::{getpid, getppid, getrlimit, Pid, Resource};
 
 /// Longest a misbehaving probe stays alive, so no test can hang forever.
-const LINGER: Duration = Duration::from_secs(60);
+const LINGER: Duration = Duration::from_mins(1);
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn main() -> ExitCode {
     let request = prepare_worker_process(std::env::args_os())
         .and_then(|()| read_request(&mut std::io::stdin().lock()));
-    request.map_or(ExitCode::from(2), |request| serve(&request))
+    request.map_or_else(|_| ExitCode::from(2), |request| serve(&request))
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -82,7 +82,7 @@ fn serve(request: &WorkerRequestV1) -> ExitCode {
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn reply(outcome: &WorkerOutcomeV1) -> ExitCode {
     write_response(&mut std::io::stdout().lock(), outcome)
-        .map_or(ExitCode::from(5), |()| ExitCode::SUCCESS)
+        .map_or_else(|_| ExitCode::from(5), |()| ExitCode::SUCCESS)
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -92,7 +92,7 @@ fn raw(parts: &[&[u8]]) -> ExitCode {
         .iter()
         .try_for_each(|part| stdout.write_all(part))
         .and_then(|()| stdout.flush());
-    written.map_or(ExitCode::from(5), |()| ExitCode::SUCCESS)
+    written.map_or_else(|_| ExitCode::from(5), |()| ExitCode::SUCCESS)
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
