@@ -106,7 +106,7 @@ fn admitted_composition() -> Result<Composition, Box<dyn Error>> {
     })
 }
 
-fn timeline() -> TimelineId {
+const fn timeline() -> TimelineId {
     TimelineId::from_ulid(ulid::Ulid::from_bytes([7; 16]))
 }
 
