@@ -10,6 +10,9 @@ publish.workspace = true
 [features]
 default = ["sqlite"]
 sqlite = ["dep:rusqlite", "dep:pos-conformance"]
+# Exposes recipient-export acceptance fixtures only. Never enable this in a
+# deployable dependency graph; CI enforces that policy.
+test-support = ["sqlite", "pos-core/test-support"]
 
 [dependencies]
 # The Memory and SQLite counterfactual adapters mint ADR-064 commit evidence;
@@ -36,11 +39,17 @@ pos-conformance = { path = "../pos-conformance", optional = true }
 [dev-dependencies]
 ed25519-dalek = { workspace = true }
 pos-core = { path = "../pos-core", features = ["test-support"] }
+# Test-only SQLite limit control injects query binding failures.
+rusqlite = { workspace = true, features = ["limits"] }
 tempfile = "3"
 
 [[bench]]
 name = "memory_erasure"
 harness = false
+
+[[test]]
+name = "recipient_export_publication_faults_public"
+required-features = ["test-support"]
 
 [lints]
 workspace = true
