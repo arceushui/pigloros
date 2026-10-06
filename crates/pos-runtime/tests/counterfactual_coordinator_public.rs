@@ -2047,7 +2047,7 @@ fn preflight_rejections_make_no_store_call() -> TestResult {
 
 fn first_preflight_error_wins<B: Backend>() -> TestResult {
     let structural = ErasureReplayClaimV1::StructuralOnly;
-    let stages: [Stage; 5] = [
+    let peels: [Stage; 5] = [
         (
             [9; 32],
             [0xff; 32],
@@ -2085,7 +2085,7 @@ fn first_preflight_error_wins<B: Backend>() -> TestResult {
         ),
     ];
     let mut setup = setup::<B>(&BASE)?;
-    for (room_digest, composition, overrides, claim, expected) in stages {
+    for (room_digest, composition, overrides, claim, expected) in peels {
         let evaluated = evaluation(claim)?;
         let artifacts = Artifacts { overrides };
         let preflight = CounterfactualHostPreflightV1 {
