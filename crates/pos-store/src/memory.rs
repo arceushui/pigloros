@@ -14545,7 +14545,8 @@ mod local_cut_owner_coverage {
         fn sign_coordinator_receipt(
             &self,
             draft: ManifestSlotAdmissionReceiptDraftV1,
-        ) -> Result<(ManifestSlotAdmissionReceiptV1, Vec<u8>), ManifestOwnerAdmissionErrorV1> {
+        ) -> Result<(ManifestSlotAdmissionReceiptV1, Vec<u8>), ManifestOwnerAdmissionErrorV1>
+        {
             draft
                 .with_evidence_and_signature(self.address, SIGNATURE)
                 .map(|receipt| (receipt, self.bytes.clone()))

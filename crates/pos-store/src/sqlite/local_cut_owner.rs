@@ -15,13 +15,14 @@ use pos_core::{
     CoreError, Hash, LocalCutCommitV1, LocalCutCompositionBindingRowV1, LocalCutExpectedHeadRowV1,
     LocalCutManifestBindingTableV1, LocalCutOwnerCommitKindV1, LocalCutOwnerCommitV1,
     LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1, LocalCutOwnerRequestV1,
-    LocalCutOwnerStateV1, LocalCutReceiptV1, LocalCutRecordingContextRowV1, LocalCutResultHeadRowV1,
-    LocalCutSealV2, LocalCutTableRefV1, LocalCutWorldRecordingV1, ManifestOwnerAdmissionErrorV1,
-    ManifestOwnerAdmissionInputV1, ManifestOwnerAdmissionOwnerStateV1,
-    ManifestOwnerAdmissionPersistencePortV1, ManifestOwnerLinkAncestorV1,
-    ManifestOwnerLinkCutIdentityV1, ManifestOwnerLinkReadPortV1, ManifestOwnerLinkSnapshotV1,
-    PluginId, PreparedLocalCutOwnerCommitV1, TimelineId, WorldClosureBindingV1,
-    WorldDependencyBranchV1, WorldRecordingReceiptV1, MAX_LOCAL_CUT_OWNER_ROWS_V1,
+    LocalCutOwnerStateV1, LocalCutReceiptV1, LocalCutRecordingContextRowV1,
+    LocalCutResultHeadRowV1, LocalCutSealV2, LocalCutTableRefV1, LocalCutWorldRecordingV1,
+    ManifestOwnerAdmissionErrorV1, ManifestOwnerAdmissionInputV1,
+    ManifestOwnerAdmissionOwnerStateV1, ManifestOwnerAdmissionPersistencePortV1,
+    ManifestOwnerLinkAncestorV1, ManifestOwnerLinkCutIdentityV1, ManifestOwnerLinkReadPortV1,
+    ManifestOwnerLinkSnapshotV1, PluginId, PreparedLocalCutOwnerCommitV1, TimelineId,
+    WorldClosureBindingV1, WorldDependencyBranchV1, WorldRecordingReceiptV1,
+    MAX_LOCAL_CUT_OWNER_ROWS_V1,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -1768,7 +1769,8 @@ mod local_cut_owner_coverage {
         fn sign_coordinator_receipt(
             &self,
             draft: ManifestSlotAdmissionReceiptDraftV1,
-        ) -> Result<(ManifestSlotAdmissionReceiptV1, Vec<u8>), ManifestOwnerAdmissionErrorV1> {
+        ) -> Result<(ManifestSlotAdmissionReceiptV1, Vec<u8>), ManifestOwnerAdmissionErrorV1>
+        {
             let rejected = ManifestOwnerAdmissionErrorV1::OwnerRejected;
             let evidence_hash = coordinator_evidence().or(Err(rejected))?.digest();
             draft
@@ -3474,7 +3476,8 @@ mod local_cut_owner_coverage {
         drop(fixture);
         let reopened = SqliteStore::open(path)?;
         assert_eq!(retained_evidence(&reopened.conn)?, expected);
-        let snapshot = reopened.read_manifest_owner_link_snapshot_v1(OWNER, identity, timeline(1))?;
+        let snapshot =
+            reopened.read_manifest_owner_link_snapshot_v1(OWNER, identity, timeline(1))?;
         let snapshot = snapshot.ok_or("missing reopened owner-link snapshot")?;
         assert_eq!(snapshot.key_evidence.len(), 1);
         assert_eq!(snapshot.key_evidence.get(&digest), Some(&bytes));
@@ -3509,7 +3512,10 @@ mod local_cut_owner_coverage {
         let mut admitted_store = fixture.store;
         let rejected_cut = admitted_store.commit_local_cut_owner_v1(batch);
         assert_eq!(rejected_cut, Err(LocalError::InvalidBatch));
-        assert_eq!(admitted_store.read_local_cut_owner_state_v1(OWNER), Ok(None));
+        assert_eq!(
+            admitted_store.read_local_cut_owner_state_v1(OWNER),
+            Ok(None)
+        );
         assert_eq!(row_count(&admitted_store.conn, "local_cut_owner_cuts")?, 0);
         assert_eq!(row_count(&admitted_store.conn, "world_key_evidence")?, 1);
         Ok(())

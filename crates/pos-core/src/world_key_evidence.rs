@@ -207,8 +207,7 @@ pub fn resolve_coordinator_key_evidence_v1(
         .filter(|evidence| evidence.digest() == evidence_hash)
         .ok_or(CoordinatorKeyEvidenceErrorV1::InvalidEvidence)?;
     let input = evidence.as_input();
-    if input.identity.role != KeyRoleV1::TimelineIntegritySigning
-        || input.private_material_required
+    if input.identity.role != KeyRoleV1::TimelineIntegritySigning || input.private_material_required
     {
         return Err(CoordinatorKeyEvidenceErrorV1::WrongKeyUse);
     }

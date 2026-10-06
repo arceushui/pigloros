@@ -312,9 +312,13 @@ fn coordinator_evidence_hashes<'s>(
     admissions: &'s [ManifestOwnerAdmissionSnapshotV1],
 ) -> impl Iterator<Item = Hash> + use<'s> {
     let lcq1 = receipt.as_input().coordinator_key_evidence_hash;
-    let msr1 = admissions
-        .iter()
-        .map(|admission| admission.timeline.receipt.as_input().coordinator_key_evidence_hash);
+    let msr1 = admissions.iter().map(|admission| {
+        admission
+            .timeline
+            .receipt
+            .as_input()
+            .coordinator_key_evidence_hash
+    });
     std::iter::once(lcq1).chain(msr1)
 }
 

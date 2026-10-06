@@ -1433,7 +1433,10 @@ fn assert_evidence_rejections<S: CutStore>(mut keyed_store: S, mut unkeyed: S) -
 fn memory_cut_retains_the_exact_coordinator_evidence() -> TestResult {
     let mut store = keyed(MemoryStore::new())?;
     let cut = record_cut(&mut store, SMALL_ROSTER)?;
-    assert_eq!(retained_evidence(&store, &cut.committed)?, expected_evidence()?);
+    assert_eq!(
+        retained_evidence(&store, &cut.committed)?,
+        expected_evidence()?
+    );
     Ok(())
 }
 
@@ -1449,7 +1452,10 @@ fn sqlite_cut_retains_the_same_coordinator_evidence_across_reopen() -> TestResul
     assert_eq!(retained_evidence(&store, &cut.committed)?, memory_evidence);
     drop(store);
     let reopened = SqliteStore::open(&path)?;
-    assert_eq!(retained_evidence(&reopened, &cut.committed)?, memory_evidence);
+    assert_eq!(
+        retained_evidence(&reopened, &cut.committed)?,
+        memory_evidence
+    );
     assert_eq!(memory_evidence, expected_evidence()?);
     let connection = rusqlite::Connection::open(&path)?;
     let count = "SELECT COUNT(*) FROM world_key_evidence";

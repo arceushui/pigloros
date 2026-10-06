@@ -24,12 +24,12 @@ use pos_core::{
     ManifestOwnerLeafClassificationV1, ManifestOwnerPolicyCopiesV1, ManifestOwnerPolicySourceV1,
     ManifestOwnerScopeMembersV1, ManifestOwnerScopeSourceV1,
     ManifestOwnerTimelineAdmissionRequestV1, ManifestSlotAdmissionReceiptDraftV1,
-    ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1, PluginId, PreparedLocalCutOwnerCommitV1,
-    PublicKey, TimelineId, WorkloadProfileV1, WorldArtifactKindV1, WorldArtifactLeafV1,
-    WorldClosureBindingV1, WorldClosureCutCoordinateV1, WorldClosureReadLimitsV1,
-    WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1, WorldDependencyDirectoryV1,
-    WorldKeyEvidenceErrorV1, WorldKeyEvidenceInputV1, WorldKeyEvidenceV1, WorldProducerV1,
-    WorldRecordingReceiptInputV1, WorldRecordingReceiptV1,
+    ManifestSlotAdmissionReceiptV1, PluginCpuReservationV1, PluginId,
+    PreparedLocalCutOwnerCommitV1, PublicKey, TimelineId, WorkloadProfileV1, WorldArtifactKindV1,
+    WorldArtifactLeafV1, WorldClosureBindingV1, WorldClosureCutCoordinateV1,
+    WorldClosureReadLimitsV1, WorldConsumerSetInputV1, WorldConsumerSetV1, WorldConsumerV1,
+    WorldDependencyDirectoryV1, WorldKeyEvidenceErrorV1, WorldKeyEvidenceInputV1,
+    WorldKeyEvidenceV1, WorldProducerV1, WorldRecordingReceiptInputV1, WorldRecordingReceiptV1,
 };
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
