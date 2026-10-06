@@ -92,6 +92,9 @@ const BOUNDS: DependencyGraphBoundsV1 = DependencyGraphBoundsV1 {
 const DESCRIPTOR_AUTHORIZATION: [u8; 32] = [0x61; 32];
 const DESCRIPTOR_PROVENANCE: [u8; 32] = [0x62; 32];
 const CONSENT_DECISION: [u8; 32] = [4; 32];
+const ROOM_ID: &str = "room.alpha";
+const ROOM_DIGEST: [u8; 32] = [2; 32];
+const COMPOSITION_DIGEST: [u8; 32] = [6; 32];
 const INTERVENTION_PROVENANCE: [u8; 32] = [6; 32];
 const ENDOGENOUS_AUTHORIZATION: [u8; 32] = [0x72; 32];
 const NODE_PROVENANCE: [u8; 32] = [0x71; 32];
@@ -387,8 +390,8 @@ fn plan(
 ) -> TestResult<CounterfactualPlanV1> {
     let mut plan = CounterfactualPlanV1 {
         plan_id: [1; 16],
-        room_id: "room.alpha".to_owned(),
-        room_digest: [2; 32],
+        room_id: ROOM_ID.to_owned(),
+        room_digest: ROOM_DIGEST,
         parent_timeline_id: parent.inner().to_bytes(),
         parent_cut_seq: CUT_SEQ,
         parent_cut_tick: PARENT_CUT_TICK,
@@ -405,7 +408,7 @@ fn plan(
         unknown_edge_policy,
         execution_profile: PlanExecutionProfileRefV1::from_execution_profile_v1(profile)?,
         trust_policy: PlanTrustPolicyRefV1::from_trust_policy_snapshot_v1(snapshot)?,
-        plugin_composition_digest: [6; 32],
+        plugin_composition_digest: COMPOSITION_DIGEST,
         scheduler_digest: [7; 32],
         numeric_profile_digest: [8; 32],
         budget_digest: [9; 32],
@@ -852,9 +855,9 @@ const fn request(fixture: &Fixture) -> CounterfactualAdmissionRequestV1<'_> {
         execution_profile: &fixture.profile,
         trust_policy: &fixture.snapshot,
         preflight: CounterfactualHostPreflightV1 {
-            room_id: "room.alpha",
-            room_digest: [2; 32],
-            plugin_composition_digest: [6; 32],
+            room_id: ROOM_ID,
+            room_digest: ROOM_DIGEST,
+            plugin_composition_digest: COMPOSITION_DIGEST,
             frozen_artifacts: &fixture.artifacts,
             replay_claim: &fixture.claim,
         },
@@ -1900,13 +1903,13 @@ type PreflightCase = (PlanEdit, Overrides, AdmissionError);
 /// One host preflight stage: the expected room digest and Plugin composition
 /// digest, the non-present artifacts, the evaluated claim, and the first
 /// closed error it must produce.
-type Stage = (
-    [u8; 32],
-    [u8; 32],
-    Overrides,
-    ErasureReplayClaimV1,
-    AdmissionError,
-);
+struct Peel {
+    room_digest: [u8; 32],
+    composition: [u8; 32],
+    overrides: Overrides,
+    claim: ErasureReplayClaimV1,
+    expected: AdmissionError,
+}
 
 const EXOGENOUS_DIGEST: [u8; 32] = [0x50; 32];
 const FIXED_DIGEST: [u8; 32] = [0x30; 32];
@@ -2047,50 +2050,52 @@ fn preflight_rejections_make_no_store_call() -> TestResult {
 
 fn first_preflight_error_wins<B: Backend>() -> TestResult {
     let structural = ErasureReplayClaimV1::StructuralOnly;
-    let peels: [Stage; 5] = [
-        (
-            [9; 32],
-            [0xff; 32],
-            BOTH_FAULTY,
-            structural,
-            AdmissionError::RoomMismatch,
-        ),
-        (
-            [2; 32],
-            [0xff; 32],
-            BOTH_FAULTY,
-            structural,
-            AdmissionError::PluginCompositionMismatch,
-        ),
-        (
-            [2; 32],
-            [6; 32],
-            BOTH_FAULTY,
-            structural,
-            AdmissionError::FrozenArtifactMissing,
-        ),
-        (
-            [2; 32],
-            [6; 32],
-            FIXED_MISMATCH,
-            structural,
-            AdmissionError::FrozenArtifactDigestMismatch,
-        ),
-        (
-            [2; 32],
-            [6; 32],
-            &[],
-            structural,
-            AdmissionError::ReplayClaimInsufficient,
-        ),
+    let peels: [Peel; 5] = [
+        Peel {
+            room_digest: [9; 32],
+            composition: [0xff; 32],
+            overrides: BOTH_FAULTY,
+            claim: structural,
+            expected: AdmissionError::RoomMismatch,
+        },
+        Peel {
+            room_digest: ROOM_DIGEST,
+            composition: [0xff; 32],
+            overrides: BOTH_FAULTY,
+            claim: structural,
+            expected: AdmissionError::PluginCompositionMismatch,
+        },
+        Peel {
+            room_digest: ROOM_DIGEST,
+            composition: COMPOSITION_DIGEST,
+            overrides: BOTH_FAULTY,
+            claim: structural,
+            expected: AdmissionError::FrozenArtifactMissing,
+        },
+        Peel {
+            room_digest: ROOM_DIGEST,
+            composition: COMPOSITION_DIGEST,
+            overrides: FIXED_MISMATCH,
+            claim: structural,
+            expected: AdmissionError::FrozenArtifactDigestMismatch,
+        },
+        Peel {
+            room_digest: ROOM_DIGEST,
+            composition: COMPOSITION_DIGEST,
+            overrides: &[],
+            claim: structural,
+            expected: AdmissionError::ReplayClaimInsufficient,
+        },
     ];
     let mut setup = setup::<B>(&BASE)?;
-    for (room_digest, composition, overrides, claim, expected) in peels {
-        let evaluated = evaluation(claim)?;
-        let artifacts = Artifacts { overrides };
+    for peel in peels {
+        let evaluated = evaluation(peel.claim)?;
+        let artifacts = Artifacts {
+            overrides: peel.overrides,
+        };
         let preflight = CounterfactualHostPreflightV1 {
-            room_digest,
-            plugin_composition_digest: composition,
+            room_digest: peel.room_digest,
+            plugin_composition_digest: peel.composition,
             frozen_artifacts: &artifacts,
             replay_claim: &evaluated,
             ..request(&setup.fixture).preflight
@@ -2105,7 +2110,7 @@ fn first_preflight_error_wins<B: Backend>() -> TestResult {
             &mut setup.source,
             &mut stager,
         );
-        assert_rejected(&setup, &(result, stager), &expected, 0)?;
+        assert_rejected(&setup, &(result, stager), &peel.expected, 0)?;
         assert_eq!(setup.source.calls, 0);
     }
     // With every host fact matching the plan, the same plan is admitted.

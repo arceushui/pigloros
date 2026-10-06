@@ -78,13 +78,15 @@
 //!   runs before the first store call. ADR-064 has no closed error for a
 //!   room mismatch, so [`CounterfactualAdmissionErrorV1::RoomMismatch`] is
 //!   added; the other four names are the ADR-064 closed errors. The checks
-//!   run in the ADR's relative order, and the first error wins, except for
-//!   two deliberate deviations from ADR-064, which lists room before profile
-//!   and trust and the parent head before room: the room, composition, artifact,
-//!   and claim checks are cheap pure comparisons against request-supplied
-//!   host state, so they run after the existing profile and trust check, which
-//!   keeps its position, and the parent-head check is a store read, so it stays
-//!   after the preflight and no store call precedes a preflight rejection.
+//!   run in the ADR's relative order, and the first error wins, with two
+//!   deliberate deviations from ADR-064.
+//!   First, ADR-064 lists room before profile and trust, but the room,
+//!   composition, artifact, and claim checks are cheap pure comparisons
+//!   against request-supplied host state, so they run after the existing
+//!   profile and trust check, which keeps its position.
+//!   Second, ADR-064 lists the parent head before room, but the parent-head
+//!   check is a store read, so it stays after the preflight and no store
+//!   call precedes a preflight rejection.
 //! - **Frozen artifacts.** The coordinator never reads artifact bytes: the
 //!   host port answers per descriptor, with the exact `artifact_digest`
 //!   the plan reuses, `Present`, `Missing`, or `DigestMismatch`.

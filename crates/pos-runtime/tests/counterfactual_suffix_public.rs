@@ -102,6 +102,9 @@ const BOUNDS: DependencyGraphBoundsV1 = DependencyGraphBoundsV1 {
 const DESCRIPTOR_AUTHORIZATION: [u8; 32] = [0x61; 32];
 const DESCRIPTOR_PROVENANCE: [u8; 32] = [0x62; 32];
 const CONSENT_DECISION: [u8; 32] = [4; 32];
+const ROOM_ID: &str = "room.alpha";
+const ROOM_DIGEST: [u8; 32] = [2; 32];
+const COMPOSITION_DIGEST: [u8; 32] = [6; 32];
 const INTERVENTION_PROVENANCE: [u8; 32] = [6; 32];
 const ENDOGENOUS_AUTHORIZATION: [u8; 32] = [0x72; 32];
 const NODE_PROVENANCE: [u8; 32] = [0x71; 32];
@@ -498,8 +501,8 @@ fn plan(
 ) -> TestResult<CounterfactualPlanV1> {
     let mut plan = CounterfactualPlanV1 {
         plan_id: [1; 16],
-        room_id: "room.alpha".to_owned(),
-        room_digest: [2; 32],
+        room_id: ROOM_ID.to_owned(),
+        room_digest: ROOM_DIGEST,
         parent_timeline_id: root_id().inner().to_bytes(),
         parent_cut_seq: CUT_SEQ,
         parent_cut_tick: PARENT_CUT_TICK,
@@ -516,7 +519,7 @@ fn plan(
         unknown_edge_policy: UnknownEdgePolicyV1::Reject,
         execution_profile: PlanExecutionProfileRefV1::from_execution_profile_v1(profile)?,
         trust_policy: PlanTrustPolicyRefV1::from_trust_policy_snapshot_v1(snapshot)?,
-        plugin_composition_digest: [6; 32],
+        plugin_composition_digest: COMPOSITION_DIGEST,
         scheduler_digest: [7; 32],
         numeric_profile_digest: [8; 32],
         budget_digest: [9; 32],
@@ -856,9 +859,9 @@ fn admission_request<'a>(
         execution_profile: profile,
         trust_policy: snapshot,
         preflight: CounterfactualHostPreflightV1 {
-            room_id: "room.alpha",
-            room_digest: [2; 32],
-            plugin_composition_digest: [6; 32],
+            room_id: ROOM_ID,
+            room_digest: ROOM_DIGEST,
+            plugin_composition_digest: COMPOSITION_DIGEST,
             frozen_artifacts: &AllPresent,
             replay_claim: claim,
         },
