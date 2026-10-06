@@ -101,7 +101,7 @@ fn serve(request: &WorkerRequestV1) -> ExitCode {
             let allocation = std::hint::black_box(vec![0_u8; 1 << 30]);
             reply(&Ok(produced(request, &allocation[..1], false)))
         }
-        _ => serve_draft(request).unwrap_or(ExitCode::from(4)),
+        _ => serve_draft(request).unwrap_or_else(|| ExitCode::from(4)),
     }
 }
 
@@ -157,7 +157,7 @@ fn serve_draft(request: &WorkerRequestV1) -> Option<ExitCode> {
 }
 
 /// A `drive` return carrying the guest's own `plugin-error`.
-fn guest_error() -> WorkerReturnV1 {
+const fn guest_error() -> WorkerReturnV1 {
     WorkerReturnV1::Produced(InvocationReportV1 {
         result: Err(GuestPluginErrorV1 {
             code: PluginErrorCodeV1::DeterministicBudgetExhausted,

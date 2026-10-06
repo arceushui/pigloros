@@ -37,6 +37,7 @@ const DENIED: Error = commit_failed(AtomicCommitFailureV1::DeterministicTypedRes
 
 struct FixturePlugin {
     id: PluginId,
+    has_driver: bool,
 }
 
 impl Plugin for FixturePlugin {
@@ -51,7 +52,7 @@ impl Plugin for FixturePlugin {
     fn capability(&self) -> Capability {
         Capability {
             owned_event_types: vec![Kind::new("community.event")],
-            has_driver: true,
+            has_driver: self.has_driver,
             ..Capability::default()
         }
     }
@@ -490,6 +491,7 @@ fn a_quarantined_adapter_refuses_to_run_until_it_is_cleared() {
     let mut registry = PluginRegistry::new();
     let plugin = FixturePlugin {
         id: handle.plugin_id(),
+        has_driver: false,
     };
     ok(registry.register_pinned_generated(
         &plugin,
@@ -581,6 +583,7 @@ fn registration_is_pinned_community_and_non_participant() {
     let (driver, handle, _) = fixture(None, accepting());
     let plugin = FixturePlugin {
         id: handle.plugin_id(),
+        has_driver: true,
     };
     let mut registry = PluginRegistry::new();
     ok(register_community_driver(
@@ -623,6 +626,7 @@ fn registration_rejects_a_foreign_plugin_or_a_non_community_pin() {
         let (driver, handle, _) = fixture(None, accepting());
         let plugin = FixturePlugin {
             id: handle.plugin_id(),
+            has_driver: true,
         };
         let mut registry = PluginRegistry::new();
         let rejected = err(register_community_driver(
@@ -645,6 +649,7 @@ fn registration_rejects_a_foreign_plugin_or_a_non_community_pin() {
     let (driver, handle, _) = fixture(None, accepting());
     let foreign = FixturePlugin {
         id: PluginId::new(),
+        has_driver: true,
     };
     let mut registry = PluginRegistry::new();
     let rejected = err(register_community_driver(
