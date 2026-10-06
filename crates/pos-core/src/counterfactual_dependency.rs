@@ -21,8 +21,11 @@
 //! - the nine-field array head, then the text magic and version `1`;
 //! - that the consumer node coordinate inside the bytes is byte-for-byte the
 //!   canonical encoding of the supplied [`DependencyNodeCoordinateV1`];
-//! - that the source node is a six-field array and that its artifact digest
-//!   is the supplied source digest;
+//! - that the supplied source digest is nonzero;
+//! - that the source node is a six-field array whose owner text is 1 to
+//!   [`MAX_DEPENDENCY_OWNER_ID_BYTES_V1`] bytes, so the 16 KiB edge bound
+//!   cannot be spent on owner padding, and that its artifact digest is the
+//!   supplied source digest;
 //! - that the five remaining fields are well-formed definite-length items
 //!   and that nothing trails them.
 //!
@@ -55,11 +58,25 @@
 //!   at or before the parent cut and provisional nodes after it) and each
 //!   scope is canonically ordered, so stitching is plain concatenation.
 //! - **One origin and one Tick per record.** A [`TickDependencyRecordV1`]
-//!   holds the nodes of exactly one Tick and one origin, so a record is
-//!   either a parent-prefix record or a Fork-generation record, never both.
-//!   The Fork write methods accept only provisional records; recording
-//!   committed parent rows is the factual-Tick producer's write (see
-//!   Deferred).
+//!   holds the nodes of one origin and is recorded at one Tick, so a record
+//!   is either a parent-prefix record or a Fork-generation record, never
+//!   both. The Fork write methods accept only provisional records;
+//!   recording committed parent rows is the factual-Tick producer's write
+//!   (see Deferred).
+//! - **Root nodes ride the first Tick record at or after their effective
+//!   Tick.** `pos-time` requires one `InterventionAssigned` node per plan
+//!   intervention at the intervention's effective Tick, and frozen and
+//!   fixed-policy roots need homes too, but the recompute Ticks of a Fork
+//!   need not include those Ticks. Root-class nodes
+//!   ([`RecordedDependencyClassV1::is_root`]) may therefore carry a Tick at
+//!   or before the record's Tick; they are recorded with the first Tick
+//!   record of their origin whose Tick is at or after their own. Every other
+//!   node (`EndogenousRecomputed`, `PresentationOnly`) must carry exactly the
+//!   record's Tick. The record checks the bound (`BindingMismatch` for a root
+//!   node after the record's Tick or a non-root node at any other Tick); that
+//!   it is the *first* such record needs the plan, so it stays the producer's
+//!   obligation. Reads filter and order by the node's own Tick, never the
+//!   record's, so a root node is addressed at its effective Tick.
 //! - **Generation qualification.** Provisional rows are written under the
 //!   Fork generation the same transaction commits (the new generation for an
 //!   invalidation, the expected basis generation for a later Tick) and are
@@ -77,20 +94,29 @@
 //!   [`crate::CounterfactualStorePortV1`] or of its invalidation input and
 //!   command types changes, so existing fakes and callers keep compiling.
 //! - **Structural checks only.** The store enforces what it can without the
-//!   plan: bounds, strictly ascending unique nodes, canonical edge order,
-//!   that every edge consumer is a node of the same record, and that every
-//!   edge is declared by its consumer. The unknown-edge policy, horizon,
-//!   class, and authorization rules stay in `pos-time` validation. A declared
-//!   input without an edge is legal here because `FullSuffixFromCut` records
-//!   it as a missing edge; [`TickDependencyRecordV1::uncovered_input_count`]
+//!   plan: bounds (node, edge, declared-input, and aggregate edge-byte
+//!   counts), strictly ascending unique nodes, canonical edge order, that
+//!   every edge consumer is a node of the same record, and that every edge
+//!   is declared by its consumer. The unknown-edge policy, horizon, class,
+//!   and authorization rules stay in `pos-time` validation. A declared input
+//!   without an edge is legal here because `FullSuffixFromCut` records it as
+//!   a missing edge; [`TickDependencyRecordV1::uncovered_input_count`]
 //!   reports how many there are.
 //! - **Bounds.** A graph holds at most 1,000,000 nodes and 4,000,000 edges
 //!   ([`MAX_RECORDED_DEPENDENCY_NODES_V1`],
-//!   [`MAX_RECORDED_DEPENDENCY_EDGES_V1`]) per recorded set, which adapters
-//!   enforce with [`TickDependencyRecordV1::ensure_set_capacity`]. One
-//!   record commits inside one Event Store transaction, so it is capped far
-//!   lower ([`MAX_TICK_DEPENDENCY_NODES_V1`] and
-//!   [`MAX_TICK_DEPENDENCY_EDGES_V1`], the same one to four ratio).
+//!   [`MAX_RECORDED_DEPENDENCY_EDGES_V1`]) per recorded set, and `pos-time`
+//!   rejects a graph whose declared inputs exceed its edge bound, so the
+//!   recorded set's declared-input total is held to the same edge bound.
+//!   Adapters enforce all three with
+//!   [`TickDependencyRecordV1::ensure_set_capacity`]. One record commits
+//!   inside one Event Store transaction, so it is capped far lower
+//!   ([`MAX_TICK_DEPENDENCY_NODES_V1`] and
+//!   [`MAX_TICK_DEPENDENCY_EDGES_V1`], the same one to four ratio, which
+//!   also bounds [`TickDependencyRecordV1::declared_input_count`]). The
+//!   16 KiB per-edge cap alone would let 262,144 edges hold 4 GiB, so a
+//!   record's edges are also capped at
+//!   [`MAX_TICK_DEPENDENCY_EDGE_BYTES_V1`] bytes in total: 256 bytes per edge
+//!   at the full edge count, above the roughly 200 bytes of a typical edge.
 //!
 //! # Adapter obligations
 //!
@@ -101,9 +127,23 @@
 //!   invalidation's first Tick, with `BindingMismatch`, and a record that
 //!   would exceed the recorded-set bounds with `FieldOutOfBounds`; both
 //!   commit nothing.
-//! - Serve reads through the Fork's erasure read fence, ordered by the
-//!   canonical coordinate and edge order, and build pages with
-//!   [`DependencyPageV1::try_new`] or [`DependencyPageV1::from_ordered`].
+//! - Reject a node whose artifact digest is already recorded in the same
+//!   recorded set. A record checks digest uniqueness only within itself, but
+//!   `pos-time` requires it across the whole graph, and only the adapter
+//!   sees the set.
+//! - For a Fork, reject a record whose provisional Ticks are not strictly
+//!   after the parent cut; nothing in this contract knows the cut, and a
+//!   provisional node at or before it would overlap the committed prefix it
+//!   is stitched to.
+//! - Serve a Fork-generation read through the Fork's erasure read fence and
+//!   a parent-prefix read through the parent Timeline's own erasure read
+//!   fence, including its inherited scopes when the parent is itself a Fork,
+//!   exactly as every other Timeline read. A parent-prefix read names no
+//!   Fork, so the Fork's fence does not apply to it. Both fail closed
+//!   without a bound erasure gate. Order rows by the canonical coordinate
+//!   and edge order, and build pages with [`DependencyPageV1::try_new`],
+//!   which also checks that rows belong to the request scope, or
+//!   [`DependencyPageV1::from_ordered`], which trusts its rows.
 //! - Recover an `OutcomeUnknown` write exactly as the storage port does; the
 //!   record is part of the same transaction, so the receipt or basis read
 //!   that settles the Tick settles the record.
@@ -138,6 +178,8 @@ pub const MAX_TICK_DEPENDENCY_EDGES_V1: usize = 262_144;
 pub const MAX_DEPENDENCY_NODE_INPUTS_V1: usize = 4_096;
 /// Maximum encoded size of one `IDP1` edge.
 pub const MAX_DEPENDENCY_EDGE_BYTES_V1: usize = 16 * 1024;
+/// Maximum total encoded size of the edges of one Tick record, 64 MiB.
+pub const MAX_TICK_DEPENDENCY_EDGE_BYTES_V1: usize = 64 * 1024 * 1024;
 /// Maximum UTF-8 byte length of a node owner ID.
 pub const MAX_DEPENDENCY_OWNER_ID_BYTES_V1: usize = 128;
 /// Maximum number of rows in one page.
@@ -147,8 +189,8 @@ const EDGE_ARRAY_HEAD: u8 = 0x89;
 const EDGE_PREFIX: [u8; 6] = [0x64, b'I', b'D', b'P', b'1', 0x01];
 const EDGE_DIGEST_DOMAIN: &[u8] = b"PiglorOS.InputDependency.v1";
 const NODE_ARRAY_HEAD: u8 = 0x86;
-/// Node fields before the artifact digest: tick, position, owner, ordinal, schema.
-const NODE_PREFIX_FIELDS: usize = 5;
+/// The CBOR major type of a node owner ID.
+const OWNER_TEXT_MAJOR: u8 = 3;
 /// Edge fields after the source: class, range, authorization, rule, provenance.
 const EDGE_TAIL_FIELDS: usize = 5;
 /// The range and rule arrays hold only scalars.
@@ -228,6 +270,18 @@ impl RecordedDependencyClassV1 {
         self as u8
     }
 
+    /// Whether nodes of this class are roots of the recomputation: frozen
+    /// exogenous, intervention-assigned, and fixed-policy values.
+    ///
+    /// A root node may be recorded with a Tick record after its own Tick.
+    #[must_use]
+    pub const fn is_root(self) -> bool {
+        matches!(
+            self,
+            Self::ExogenousFrozen | Self::InterventionAssigned | Self::FixedPolicy
+        )
+    }
+
     /// Return the class carrying `code`.
     ///
     /// # Errors
@@ -274,10 +328,7 @@ impl RecordedNodeOriginV1 {
 }
 
 /// Return the first adjacent pair that is not strictly ascending.
-fn check_order<T>(
-    items: &[T],
-    compare: impl Fn(&T, &T) -> Ordering,
-) -> DependencyResult<()> {
+fn check_order<T>(items: &[T], compare: impl Fn(&T, &T) -> Ordering) -> DependencyResult<()> {
     items
         .windows(2)
         .try_for_each(|pair| match compare(&pair[0], &pair[1]) {
@@ -489,10 +540,12 @@ impl DependencyEdgeRecordV1 {
     /// Verify exact `IDP1` bytes against the supplied consumer and source.
     ///
     /// # Errors
-    /// Returns `FieldOutOfBounds` above [`MAX_DEPENDENCY_EDGE_BYTES_V1`]
-    /// (checked first), `InvalidEncoding` for a wrong array head, a
-    /// malformed source node or tail, or trailing bytes,
-    /// `UnsupportedVersion` for another magic or version, and
+    /// Returns `FieldOutOfBounds` above [`MAX_DEPENDENCY_EDGE_BYTES_V1`] or
+    /// for a zero `source_digest` (checked first), and for a source node
+    /// whose owner text is empty or above
+    /// [`MAX_DEPENDENCY_OWNER_ID_BYTES_V1`] bytes; `InvalidEncoding` for a
+    /// wrong array head, a malformed source node or tail, or trailing bytes;
+    /// `UnsupportedVersion` for another magic or version; and
     /// `BindingMismatch` unless the bytes carry exactly `consumer` as the
     /// consumer node and `source_digest` as the source artifact digest.
     pub fn try_from_canonical(
@@ -500,7 +553,7 @@ impl DependencyEdgeRecordV1 {
         consumer: DependencyNodeCoordinateV1,
         source_digest: Hash,
     ) -> DependencyResult<Self> {
-        if bytes.len() > MAX_DEPENDENCY_EDGE_BYTES_V1 {
+        if bytes.len() > MAX_DEPENDENCY_EDGE_BYTES_V1 || source_digest == Hash::zero() {
             return Err(CounterfactualDependencyErrorV1::FieldOutOfBounds);
         }
         let expected_consumer = consumer.encoded();
@@ -517,10 +570,7 @@ impl DependencyEdgeRecordV1 {
                     .strip_prefix(expected_consumer.as_slice())
                     .ok_or(CounterfactualDependencyErrorV1::BindingMismatch)
             })
-            .and_then(|rest| {
-                source_artifact_digest(rest)
-                    .or(Err(CounterfactualDependencyErrorV1::InvalidEncoding))
-            })
+            .and_then(source_artifact_digest)
             .and_then(|extracted| {
                 if extracted == source_digest {
                     Ok(())
@@ -569,18 +619,55 @@ impl DependencyEdgeRecordV1 {
     }
 }
 
+type CursorResult<T> = Result<T, CborReadError>;
+
+/// Report a structural read failure as `InvalidEncoding`.
+fn malformed<T>(read: CursorResult<T>) -> DependencyResult<T> {
+    read.or(Err(CounterfactualDependencyErrorV1::InvalidEncoding))
+}
+
+/// Skip the source node's array head, tick, and scheduler position.
+fn skip_source_head(cursor: &mut CborCursor<'_>) -> CursorResult<()> {
+    cursor
+        .fixed(&[NODE_ARRAY_HEAD])
+        .and_then(|()| (0..2).try_for_each(|_| skip_item(cursor, 1)))
+}
+
+/// Skip the source node's ordinal and schema, then read its artifact digest.
+fn read_source_digest(cursor: &mut CborCursor<'_>) -> CursorResult<Hash> {
+    (0..2)
+        .try_for_each(|_| skip_item(cursor, 1))
+        .and_then(|()| read_hash(cursor))
+}
+
+/// Check that a source owner text length is 1 to the owner bound.
+fn owner_text_length(length: u64) -> DependencyResult<usize> {
+    usize::try_from(length)
+        .ok()
+        .filter(|length| (1..=MAX_DEPENDENCY_OWNER_ID_BYTES_V1).contains(length))
+        .ok_or(CounterfactualDependencyErrorV1::FieldOutOfBounds)
+}
+
 /// Read the source node's artifact digest and check the edge tail.
-fn source_artifact_digest(rest: &[u8]) -> Result<Hash, CborReadError> {
+fn source_artifact_digest(rest: &[u8]) -> DependencyResult<Hash> {
     let mut cursor = CborCursor::new(rest);
-    cursor.fixed(&[NODE_ARRAY_HEAD])?;
-    (0..NODE_PREFIX_FIELDS).try_for_each(|_| skip_item(&mut cursor, 1))?;
-    let digest = read_hash(&mut cursor)?;
-    (0..EDGE_TAIL_FIELDS).try_for_each(|_| skip_item(&mut cursor, EDGE_TAIL_ARRAY_DEPTH))?;
-    if cursor.is_finished() {
-        Ok(digest)
-    } else {
-        Err(CborReadError::InvalidEncoding)
-    }
+    malformed(skip_source_head(&mut cursor))
+        .and_then(|()| malformed(cursor.head(OWNER_TEXT_MAJOR)))
+        .and_then(owner_text_length)
+        .and_then(|length| malformed(cursor.take(length)))
+        .and_then(|_| malformed(read_source_digest(&mut cursor)))
+        .and_then(|digest| {
+            let tail = (0..EDGE_TAIL_FIELDS)
+                .try_for_each(|_| skip_item(&mut cursor, EDGE_TAIL_ARRAY_DEPTH));
+            malformed(tail).map(|()| digest)
+        })
+        .and_then(|digest| {
+            if cursor.is_finished() {
+                Ok(digest)
+            } else {
+                Err(CounterfactualDependencyErrorV1::InvalidEncoding)
+            }
+        })
 }
 
 fn edge_digest(bytes: &[u8]) -> Hash {
@@ -597,7 +684,9 @@ fn edge_digest(bytes: &[u8]) -> Hash {
 /// with unique artifact digests; edges are in canonical `IDP1` order
 /// ([`DependencyEdgeRecordV1::order_cmp`]) with no repeated key; every edge
 /// consumer is a node of this record and every edge source is a declared
-/// input of its consumer. All nodes share the record's Tick and origin.
+/// input of its consumer. All nodes share the record's origin; root-class
+/// nodes carry a Tick at or before the record's Tick and every other node
+/// carries exactly the record's Tick.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TickDependencyRecordV1 {
     tick: u64,
@@ -611,9 +700,11 @@ impl TickDependencyRecordV1 {
     ///
     /// # Errors
     /// Returns, in check order: `FieldOutOfBounds` above
-    /// [`MAX_TICK_DEPENDENCY_NODES_V1`] nodes or
-    /// [`MAX_TICK_DEPENDENCY_EDGES_V1`] edges; `BindingMismatch` for a node
-    /// of another Tick or origin; `NonCanonicalOrder` or `DuplicateIdentity`
+    /// [`MAX_TICK_DEPENDENCY_NODES_V1`] nodes, [`MAX_TICK_DEPENDENCY_EDGES_V1`]
+    /// edges or declared inputs, or [`MAX_TICK_DEPENDENCY_EDGE_BYTES_V1`]
+    /// encoded edge bytes; `BindingMismatch` for a node of another origin, a
+    /// root-class node after `tick`, or any other node not at `tick`;
+    /// `NonCanonicalOrder` or `DuplicateIdentity`
     /// for unordered or repeated nodes, repeated node digests, or unordered
     /// or repeated edges; `UnknownConsumer` for an edge whose consumer is not
     /// a node of the record; and `UndeclaredInput` for an edge whose source
@@ -624,9 +715,7 @@ impl TickDependencyRecordV1 {
         nodes: Vec<DependencyNodeRecordV1>,
         edges: Vec<DependencyEdgeRecordV1>,
     ) -> DependencyResult<Self> {
-        if nodes.len() > MAX_TICK_DEPENDENCY_NODES_V1
-            || edges.len() > MAX_TICK_DEPENDENCY_EDGES_V1
-        {
+        if !within_record_bounds(&nodes, &edges) {
             return Err(CounterfactualDependencyErrorV1::FieldOutOfBounds);
         }
         check_nodes(tick, origin, &nodes)
@@ -663,30 +752,42 @@ impl TickDependencyRecordV1 {
         &self.edges
     }
 
+    /// Return the total number of input digests the nodes declare.
+    #[must_use]
+    pub fn declared_input_count(&self) -> usize {
+        declared_inputs(&self.nodes)
+    }
+
     /// Return how many declared inputs have no edge in this record.
     ///
     /// Every edge is declared by its consumer and a consumer's edges have
     /// distinct sources, so this is the declared inputs minus the edges.
     #[must_use]
     pub fn uncovered_input_count(&self) -> usize {
-        let declared: usize = self.nodes.iter().map(|node| node.input_digests.len()).sum();
-        declared.saturating_sub(self.edges.len())
+        self.declared_input_count().saturating_sub(self.edges.len())
     }
 
     /// Check that recording this record keeps one recorded set within the
     /// graph bounds, given the rows already recorded in that set.
     ///
+    /// `recorded_inputs` is the declared-input total of the set's recorded
+    /// nodes.
+    ///
     /// # Errors
     /// Returns `FieldOutOfBounds` when the set would exceed
-    /// [`MAX_RECORDED_DEPENDENCY_NODES_V1`] nodes or
-    /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] edges.
-    pub const fn ensure_set_capacity(
+    /// [`MAX_RECORDED_DEPENDENCY_NODES_V1`] nodes,
+    /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] edges, or
+    /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] declared inputs.
+    pub fn ensure_set_capacity(
         &self,
         recorded_nodes: usize,
         recorded_edges: usize,
+        recorded_inputs: usize,
     ) -> DependencyResult<()> {
         if recorded_nodes.saturating_add(self.nodes.len()) > MAX_RECORDED_DEPENDENCY_NODES_V1
             || recorded_edges.saturating_add(self.edges.len()) > MAX_RECORDED_DEPENDENCY_EDGES_V1
+            || recorded_inputs.saturating_add(self.declared_input_count())
+                > MAX_RECORDED_DEPENDENCY_EDGES_V1
         {
             Err(CounterfactualDependencyErrorV1::FieldOutOfBounds)
         } else {
@@ -707,6 +808,37 @@ impl TickDependencyRecordV1 {
     }
 }
 
+fn declared_inputs(nodes: &[DependencyNodeRecordV1]) -> usize {
+    nodes.iter().map(|node| node.input_digests.len()).sum()
+}
+
+fn edge_bytes(edges: &[DependencyEdgeRecordV1]) -> usize {
+    edges
+        .iter()
+        .fold(0, |total, edge| total.saturating_add(edge.bytes.len()))
+}
+
+/// The count, declared-input, and aggregate edge-byte bounds of one record.
+fn within_record_bounds(
+    nodes: &[DependencyNodeRecordV1],
+    edges: &[DependencyEdgeRecordV1],
+) -> bool {
+    nodes.len() <= MAX_TICK_DEPENDENCY_NODES_V1
+        && edges.len() <= MAX_TICK_DEPENDENCY_EDGES_V1
+        && declared_inputs(nodes) <= MAX_TICK_DEPENDENCY_EDGES_V1
+        && edge_bytes(edges) <= MAX_TICK_DEPENDENCY_EDGE_BYTES_V1
+}
+
+/// Whether a node's Tick fits a record at `tick`: a root-class node may
+/// precede it, every other node must equal it.
+const fn tick_fits(node: &DependencyNodeRecordV1, tick: u64) -> bool {
+    if node.class.is_root() {
+        node.coordinate.tick <= tick
+    } else {
+        node.coordinate.tick == tick
+    }
+}
+
 fn check_nodes(
     tick: u64,
     origin: RecordedNodeOriginV1,
@@ -714,7 +846,7 @@ fn check_nodes(
 ) -> DependencyResult<()> {
     if nodes
         .iter()
-        .any(|node| node.coordinate.tick != tick || node.origin != origin)
+        .any(|node| node.origin != origin || !tick_fits(node, tick))
     {
         return Err(CounterfactualDependencyErrorV1::BindingMismatch);
     }
@@ -770,6 +902,11 @@ fn check_edge(
 ///
 /// A node cursor is the node's position key; an edge cursor adds the source
 /// digest. The derived order is the canonical row order of both kinds.
+///
+/// The four position fields repeat those of [`DependencyNodeCoordinateV1`] on
+/// purpose. A cursor is only a position key: it has no schema ID or artifact
+/// digest, and an edge cursor carries an optional source digest instead. It
+/// stays a separate type so a cursor cannot be mistaken for a node identity.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DependencyPageCursorV1 {
     tick: u64,
@@ -853,6 +990,16 @@ pub trait DependencyPagedRowV1 {
     /// Whether this row's cursor carries an edge source digest.
     const KEYED_BY_SOURCE: bool;
 
+    /// Whether this row belongs to `scope`.
+    ///
+    /// A node carries its origin, so a parent-prefix scope holds committed
+    /// nodes through its Tick and a Fork scope holds provisional nodes. An
+    /// edge carries no origin: a parent-prefix scope holds edges whose
+    /// consumer Tick is within it, and a Fork scope cannot tell its edges
+    /// from any other, so it accepts every edge.
+    #[must_use]
+    fn in_scope(&self, scope: DependencyReadScopeV1) -> bool;
+
     /// Return the cursor that resumes after this row.
     #[must_use]
     fn cursor(&self) -> DependencyPageCursorV1;
@@ -861,6 +1008,18 @@ pub trait DependencyPagedRowV1 {
 impl DependencyPagedRowV1 for DependencyNodeRecordV1 {
     const KEYED_BY_SOURCE: bool = false;
 
+    fn in_scope(&self, scope: DependencyReadScopeV1) -> bool {
+        match scope {
+            DependencyReadScopeV1::ParentPrefix { through_tick, .. } => {
+                self.origin == RecordedNodeOriginV1::Committed
+                    && self.coordinate.tick <= through_tick
+            }
+            DependencyReadScopeV1::ForkGeneration(_) => {
+                self.origin == RecordedNodeOriginV1::Provisional
+            }
+        }
+    }
+
     fn cursor(&self) -> DependencyPageCursorV1 {
         DependencyPageCursorV1::at(&self.coordinate, None)
     }
@@ -868,6 +1027,15 @@ impl DependencyPagedRowV1 for DependencyNodeRecordV1 {
 
 impl DependencyPagedRowV1 for DependencyEdgeRecordV1 {
     const KEYED_BY_SOURCE: bool = true;
+
+    fn in_scope(&self, scope: DependencyReadScopeV1) -> bool {
+        match scope {
+            DependencyReadScopeV1::ParentPrefix { through_tick, .. } => {
+                self.consumer.tick <= through_tick
+            }
+            DependencyReadScopeV1::ForkGeneration(_) => true,
+        }
+    }
 
     fn cursor(&self) -> DependencyPageCursorV1 {
         DependencyPageCursorV1::at(&self.consumer, Some(self.source_digest))
@@ -899,10 +1067,7 @@ impl DependencyReadScopeV1 {
     /// # Errors
     /// Returns `MixedForkGeneration` unless a Fork scope names
     /// `current_generation`.
-    pub fn ensure_current(
-        self,
-        current_generation: u64,
-    ) -> Result<(), CounterfactualStoreErrorV1> {
+    pub fn ensure_current(self, current_generation: u64) -> Result<(), CounterfactualStoreErrorV1> {
         match self {
             Self::ParentPrefix { .. } => Ok(()),
             Self::ForkGeneration(at) => at
@@ -934,10 +1099,14 @@ impl DependencyPageRequestV1 {
     ) -> DependencyResult<Self> {
         if !(1..=MAX_DEPENDENCY_PAGE_ROWS_V1).contains(&limit) {
             Err(CounterfactualDependencyErrorV1::InvalidPageLimit)
-        } else if after.as_ref().is_some_and(|cursor| beyond_scope(scope, cursor)) {
+        } else if beyond_scope(scope, after.as_ref()) {
             Err(CounterfactualDependencyErrorV1::InvalidCursor)
         } else {
-            Ok(Self { scope, after, limit })
+            Ok(Self {
+                scope,
+                after,
+                limit,
+            })
         }
     }
 
@@ -960,9 +1129,11 @@ impl DependencyPageRequestV1 {
     }
 }
 
-const fn beyond_scope(scope: DependencyReadScopeV1, cursor: &DependencyPageCursorV1) -> bool {
+fn beyond_scope(scope: DependencyReadScopeV1, after: Option<&DependencyPageCursorV1>) -> bool {
     match scope {
-        DependencyReadScopeV1::ParentPrefix { through_tick, .. } => cursor.tick > through_tick,
+        DependencyReadScopeV1::ParentPrefix { through_tick, .. } => {
+            after.is_some_and(|cursor| cursor.tick > through_tick)
+        }
         DependencyReadScopeV1::ForkGeneration(_) => false,
     }
 }
@@ -977,9 +1148,14 @@ pub struct DependencyPageV1<T> {
 impl<T: DependencyPagedRowV1> DependencyPageV1<T> {
     /// Validate one adapter-built page against its request.
     ///
+    /// Rows must belong to the request scope ([`DependencyPagedRowV1::in_scope`]);
+    /// edges carry no origin, so a Fork scope cannot reject an edge that
+    /// another scope recorded.
+    ///
     /// # Errors
     /// Returns `InvalidCursor` when the request cursor is of the other row
     /// kind, `FieldOutOfBounds` for more rows than the limit,
+    /// `BindingMismatch` for a row outside the request scope,
     /// `NonCanonicalOrder` or `DuplicateIdentity` unless the rows are
     /// strictly ascending and after the request cursor, and `InvalidCursor`
     /// unless `next` is `None` or the cursor of the last row of a full page.
@@ -989,13 +1165,7 @@ impl<T: DependencyPagedRowV1> DependencyPageV1<T> {
         next: Option<DependencyPageCursorV1>,
     ) -> DependencyResult<Self> {
         check_cursor_kind::<T>(request)
-            .and_then(|()| {
-                if items.len() > request.limit {
-                    Err(CounterfactualDependencyErrorV1::FieldOutOfBounds)
-                } else {
-                    Ok(())
-                }
-            })
+            .and_then(|()| check_items(request, &items))
             .and_then(|()| {
                 let cursors: Vec<DependencyPageCursorV1> = request
                     .after
@@ -1016,6 +1186,8 @@ impl<T: DependencyPagedRowV1> DependencyPageV1<T> {
 
     /// Build the page of `rows`, which must be in canonical order, after the
     /// request cursor, with a continuation when more rows remain.
+    ///
+    /// The rows are trusted: they must already belong to the request scope.
     ///
     /// # Errors
     /// Returns `InvalidCursor` when the request cursor is of the other row
@@ -1048,6 +1220,19 @@ impl<T: DependencyPagedRowV1> DependencyPageV1<T> {
     #[must_use]
     pub const fn next(&self) -> Option<&DependencyPageCursorV1> {
         self.next.as_ref()
+    }
+}
+
+fn check_items<T: DependencyPagedRowV1>(
+    request: &DependencyPageRequestV1,
+    items: &[T],
+) -> DependencyResult<()> {
+    if items.len() > request.limit {
+        Err(CounterfactualDependencyErrorV1::FieldOutOfBounds)
+    } else if items.iter().all(|row| row.in_scope(request.scope)) {
+        Ok(())
+    } else {
+        Err(CounterfactualDependencyErrorV1::BindingMismatch)
     }
 }
 
@@ -1133,17 +1318,27 @@ pub trait CounterfactualDependencyRecordingPortV1: CounterfactualStorePortV1 {
 
 /// Read side of the dependency record: paged, canonically ordered reads.
 ///
-/// Reads serve settled state only. A scope with no recorded rows yields an
-/// empty page; the host decides completeness from the graph digest it
-/// published. See [`DependencyReadScopeV1::ensure_current`] for generation
-/// qualification.
+/// Reads serve settled state only. An existing Timeline or Fork generation
+/// with no recorded rows yields an empty page; the host decides completeness
+/// from the graph digest it published. A Timeline that is unknown or erased,
+/// as a parent prefix's or a Fork's, is `ForkNotFound` and never an empty
+/// page, the code every `pos-store` Timeline read maps a missing Timeline
+/// onto, so a reader cannot mistake erasure for "no dependencies". See
+/// [`DependencyReadScopeV1::ensure_current`] for generation qualification and
+/// the module's adapter obligations for the read fence of each scope.
+///
+/// Pages do not echo their scope or generation: the caller owns the scope it
+/// asked for and must not mix pages of different requests. A Fork read cannot
+/// be bounded by a horizon Tick, unlike a parent prefix, but both kinds of
+/// page are ordered by Tick, so a reader such as the frontier source can
+/// stop paging once a row's Tick passes its horizon.
 pub trait CounterfactualDependencyReadPortV1 {
     /// Read one page of nodes in canonical coordinate order.
     ///
     /// # Errors
     /// Returns `MixedForkGeneration` for a Fork scope that is not the
-    /// committed generation, `ForkNotFound`, `CorruptState`, or
-    /// `StorageFailure`.
+    /// committed generation, `ForkNotFound` for an unknown or erased
+    /// Timeline of either scope, `CorruptState`, or `StorageFailure`.
     fn read_dependency_nodes(
         &self,
         request: &DependencyPageRequestV1,
@@ -1153,8 +1348,8 @@ pub trait CounterfactualDependencyReadPortV1 {
     ///
     /// # Errors
     /// Returns `MixedForkGeneration` for a Fork scope that is not the
-    /// committed generation, `ForkNotFound`, `CorruptState`, or
-    /// `StorageFailure`.
+    /// committed generation, `ForkNotFound` for an unknown or erased
+    /// Timeline of either scope, `CorruptState`, or `StorageFailure`.
     fn read_dependency_edges(
         &self,
         request: &DependencyPageRequestV1,

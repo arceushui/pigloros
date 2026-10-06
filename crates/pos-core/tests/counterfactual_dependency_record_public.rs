@@ -23,7 +23,7 @@ use pos_core::{
     RecordedNodeOriginV1, Seq, SuffixInvalidationBytesV1, TickDependencyRecordV1, TimelineId,
     MAX_DEPENDENCY_EDGE_BYTES_V1, MAX_DEPENDENCY_NODE_INPUTS_V1, MAX_DEPENDENCY_OWNER_ID_BYTES_V1,
     MAX_DEPENDENCY_PAGE_ROWS_V1, MAX_RECORDED_DEPENDENCY_EDGES_V1, MAX_RECORDED_DEPENDENCY_NODES_V1,
-    MAX_TICK_DEPENDENCY_EDGES_V1, MAX_TICK_DEPENDENCY_NODES_V1,
+    MAX_TICK_DEPENDENCY_EDGES_V1, MAX_TICK_DEPENDENCY_EDGE_BYTES_V1, MAX_TICK_DEPENDENCY_NODES_V1,
 };
 use ulid::Ulid;
 
@@ -92,18 +92,18 @@ fn coord(tick: u64, owner: &str, digest: u8) -> Coordinate {
     coord_at(tick, owner, 0, hash(digest))
 }
 
-fn node_row(
+fn class_row(
     coordinate: Coordinate,
+    class: RecordedDependencyClassV1,
     origin: RecordedNodeOriginV1,
     inputs: Vec<Hash>,
 ) -> NodeRow {
-    ok(NodeRow::try_new(
-        coordinate,
-        RecordedDependencyClassV1::EndogenousRecomputed,
-        origin,
-        inputs,
-        hash(99),
-    ))
+    ok(NodeRow::try_new(coordinate, class, origin, inputs, hash(99)))
+}
+
+fn node_row(coordinate: Coordinate, origin: RecordedNodeOriginV1, inputs: Vec<Hash>) -> NodeRow {
+    let class = RecordedDependencyClassV1::EndogenousRecomputed;
+    class_row(coordinate, class, origin, inputs)
 }
 
 /// The encoded six-field node array, written independently of the contract.
@@ -120,8 +120,8 @@ fn node_bytes(node: &Coordinate) -> Vec<u8> {
     .concat()
 }
 
-/// The five `IDP1` fields after the source node.
-fn edge_tail() -> Vec<u8> {
+/// The five `IDP1` fields after the source node, with `rule` as the rule ID.
+fn edge_tail_with_rule(rule: &str) -> Vec<u8> {
     [
         uint(2),
         vec![0x82],
@@ -129,11 +129,15 @@ fn edge_tail() -> Vec<u8> {
         uint(5),
         hash_field(hash(0x33)),
         vec![0x82],
-        text_field("adr064.classification"),
+        text_field(rule),
         uint(1),
         hash_field(hash(0x44)),
     ]
     .concat()
+}
+
+fn edge_tail() -> Vec<u8> {
+    edge_tail_with_rule("adr064.classification")
 }
 
 /// One `IDP1` edge split into the parts a test corrupts.
@@ -162,6 +166,21 @@ impl EdgeParts {
             self.tail.as_slice(),
         ]
         .concat()
+    }
+}
+
+/// The edge of `consumer` and `source`, padded through its classification
+/// rule text to exactly `size` bytes.
+fn sized_parts(consumer: &Coordinate, source: &Coordinate, size: usize) -> EdgeParts {
+    let bare = EdgeParts {
+        tail: edge_tail_with_rule(""),
+        ..EdgeParts::new(consumer, source)
+    };
+    // Each rule text byte adds one byte, and its head grows from 1 to 3.
+    let rule = "r".repeat(size - bare.bytes().len() - 2);
+    EdgeParts {
+        tail: edge_tail_with_rule(&rule),
+        ..bare
     }
 }
 
@@ -342,6 +361,39 @@ fn edge_size_bound_is_checked_first() {
 }
 
 #[test]
+fn edges_may_fill_the_size_bound_exactly() {
+    let consumer = coord(17, "a", 1);
+    let source = coord(10, "w", 50);
+    let at_limit = sized_parts(&consumer, &source, MAX_DEPENDENCY_EDGE_BYTES_V1).bytes();
+    assert_eq!(at_limit.len(), MAX_DEPENDENCY_EDGE_BYTES_V1);
+    let edge = ok(EdgeRow::try_from_canonical(
+        at_limit,
+        consumer.clone(),
+        hash(50),
+    ));
+    assert_eq!(edge.as_bytes().len(), MAX_DEPENDENCY_EDGE_BYTES_V1);
+    let over = sized_parts(&consumer, &source, MAX_DEPENDENCY_EDGE_BYTES_V1 + 1).bytes();
+    assert_eq!(
+        err(EdgeRow::try_from_canonical(over, consumer, hash(50))),
+        DepError::FieldOutOfBounds
+    );
+}
+
+#[test]
+fn zero_source_digests_are_rejected_up_front() {
+    let consumer = coord(17, "a", 1);
+    let zero = Hash::zero();
+    assert_eq!(
+        EdgeRow::try_from_canonical(valid_parts().bytes(), consumer.clone(), zero),
+        Err(DepError::FieldOutOfBounds)
+    );
+    assert_eq!(
+        EdgeRow::try_from_canonical(Vec::new(), consumer, zero),
+        Err(DepError::FieldOutOfBounds)
+    );
+}
+
+#[test]
 fn edge_framing_failures_are_closed() {
     let wrong_head = EdgeParts {
         head: vec![0x88, 0x64, b'I', b'D', b'P', b'1', 0x01],
@@ -383,11 +435,24 @@ fn edge_fields_must_match_the_supplied_coordinates() {
     assert_eq!(err(verify(&long_form_tick)), DepError::BindingMismatch);
 }
 
+/// A source node array with the given owner and artifact digest fields.
+fn source_with(owner_field: Vec<u8>, digest_field: Vec<u8>) -> Vec<u8> {
+    [
+        vec![0x86],
+        uint(10),
+        uint(0),
+        owner_field,
+        uint(0),
+        uint(7),
+        digest_field,
+    ]
+    .concat()
+}
+
 #[test]
 fn edge_source_and_tail_must_be_well_formed_items() {
-    let digest = hash_field(hash(50));
     let not_an_array = EdgeParts {
-        source: digest.clone(),
+        source: hash_field(hash(50)),
         ..valid_parts()
     };
     let truncated_source = EdgeParts {
@@ -395,8 +460,17 @@ fn edge_source_and_tail_must_be_well_formed_items() {
         tail: Vec::new(),
         ..valid_parts()
     };
+    let truncated_owner = EdgeParts {
+        source: [vec![0x86], uint(10), uint(0), vec![0x65, b'w']].concat(),
+        tail: Vec::new(),
+        ..valid_parts()
+    };
+    let owner_not_text = EdgeParts {
+        source: source_with(uint(0), hash_field(hash(50))),
+        ..valid_parts()
+    };
     let digest_not_bytes = EdgeParts {
-        source: [vec![0x86], uint(1), uint(0), uint(0), uint(0), uint(7), uint(0)].concat(),
+        source: source_with(text_field("w"), uint(0)),
         ..valid_parts()
     };
     let missing_tail = EdgeParts {
@@ -414,6 +488,8 @@ fn edge_source_and_tail_must_be_well_formed_items() {
     for parts in [
         not_an_array,
         truncated_source,
+        truncated_owner,
+        owner_not_text,
         digest_not_bytes,
         missing_tail,
         negative_tail,
@@ -424,12 +500,32 @@ fn edge_source_and_tail_must_be_well_formed_items() {
 }
 
 #[test]
+fn edge_source_owner_is_bounded() {
+    let longest = "o".repeat(MAX_DEPENDENCY_OWNER_ID_BYTES_V1);
+    let at_limit = EdgeParts {
+        source: source_with(text_field(&longest), hash_field(hash(50))),
+        ..valid_parts()
+    };
+    assert!(verify(&at_limit).is_ok());
+    let over = "o".repeat(MAX_DEPENDENCY_OWNER_ID_BYTES_V1 + 1);
+    let huge = [vec![0x7b], vec![0xff; 8]].concat();
+    for owner_field in [text_field(""), text_field(&over), huge] {
+        let parts = EdgeParts {
+            source: source_with(owner_field, hash_field(hash(50))),
+            ..valid_parts()
+        };
+        assert_eq!(err(verify(&parts)), DepError::FieldOutOfBounds);
+    }
+}
+
+#[test]
 fn tick_records_expose_their_rows_and_uncovered_inputs() {
     let record = sample_record();
     assert_eq!(record.tick(), 17);
     assert_eq!(record.origin(), PROVISIONAL);
     assert_eq!(record.nodes(), sample_nodes().as_slice());
     assert_eq!(record.edges(), sample_edges().as_slice());
+    assert_eq!(record.declared_input_count(), 3);
     assert_eq!(record.uncovered_input_count(), 1);
     assert_eq!(record.ensure_provisional(), Ok(()));
     let empty = ok(TickRecord::try_new(
@@ -496,8 +592,7 @@ fn edge_count_is_bounded_at_the_limit() {
         })
         .collect();
     assert_eq!(edges.len(), MAX_TICK_DEPENDENCY_EDGES_V1);
-    let mut over = edges.clone();
-    over.push(edges[0].clone());
+    let over = vec![edges[0].clone(); MAX_TICK_DEPENDENCY_EDGES_V1 + 1];
     let record = ok(TickRecord::try_new(
         17,
         PROVISIONAL,
@@ -512,23 +607,76 @@ fn edge_count_is_bounded_at_the_limit() {
 }
 
 #[test]
+fn declared_inputs_are_bounded_per_record() {
+    let inputs = ascending_hashes(MAX_DEPENDENCY_NODE_INPUTS_V1);
+    let consumers = MAX_TICK_DEPENDENCY_EDGES_V1 / MAX_DEPENDENCY_NODE_INPUTS_V1;
+    let nodes = numbered_nodes(consumers, &inputs);
+    let ordinal = ok(u32::try_from(consumers));
+    let extra = node_row(
+        coord_at(17, "c", ordinal, indexed_hash(200_000)),
+        PROVISIONAL,
+        vec![hash(1)],
+    );
+    let mut over = nodes.clone();
+    over.push(extra);
+    let record = ok(build(nodes, Vec::new()));
+    assert_eq!(record.declared_input_count(), MAX_TICK_DEPENDENCY_EDGES_V1);
+    assert_eq!(err(build(over, Vec::new())), DepError::FieldOutOfBounds);
+}
+
+/// An edge of exactly the per-edge size bound from `consumer`.
+fn full_edge(consumer: &Coordinate, source_digest: Hash) -> EdgeRow {
+    let source = coord_at(3, "w", 0, source_digest);
+    let parts = sized_parts(consumer, &source, MAX_DEPENDENCY_EDGE_BYTES_V1);
+    ok(EdgeRow::try_from_canonical(
+        parts.bytes(),
+        consumer.clone(),
+        source_digest,
+    ))
+}
+
+#[test]
+fn edge_bytes_are_bounded_per_record() {
+    let count = MAX_TICK_DEPENDENCY_EDGE_BYTES_V1 / MAX_DEPENDENCY_EDGE_BYTES_V1;
+    assert_eq!(
+        count * MAX_DEPENDENCY_EDGE_BYTES_V1,
+        MAX_TICK_DEPENDENCY_EDGE_BYTES_V1
+    );
+    let inputs = ascending_hashes(count);
+    let consumer = coord_at(17, "c", 0, indexed_hash(100_000));
+    let nodes = vec![node_row(consumer.clone(), PROVISIONAL, inputs.clone())];
+    let over = vec![full_edge(&consumer, inputs[0]); count + 1];
+    let outcome = err(build(nodes.clone(), over));
+    assert_eq!(outcome, DepError::FieldOutOfBounds);
+    let edges: Vec<EdgeRow> = inputs
+        .iter()
+        .map(|digest| full_edge(&consumer, *digest))
+        .collect();
+    let record = ok(build(nodes, edges));
+    assert_eq!(record.edges().len(), count);
+}
+
+#[test]
 fn recorded_sets_are_bounded_at_the_graph_limits() {
     let record = sample_record();
     let nodes = MAX_RECORDED_DEPENDENCY_NODES_V1 - record.nodes().len();
     let edges = MAX_RECORDED_DEPENDENCY_EDGES_V1 - record.edges().len();
-    assert_eq!(record.ensure_set_capacity(nodes, edges), Ok(()));
-    assert_eq!(
-        record.ensure_set_capacity(nodes + 1, edges),
-        Err(DepError::FieldOutOfBounds)
-    );
-    assert_eq!(
-        record.ensure_set_capacity(nodes, edges + 1),
-        Err(DepError::FieldOutOfBounds)
-    );
-    assert_eq!(
-        record.ensure_set_capacity(usize::MAX, 0),
-        Err(DepError::FieldOutOfBounds)
-    );
+    let inputs = MAX_RECORDED_DEPENDENCY_EDGES_V1 - record.declared_input_count();
+    assert_eq!(record.ensure_set_capacity(nodes, edges, inputs), Ok(()));
+    let over = [
+        (nodes + 1, edges, inputs),
+        (nodes, edges + 1, inputs),
+        (nodes, edges, inputs + 1),
+        (usize::MAX, 0, 0),
+        (0, usize::MAX, 0),
+        (0, 0, usize::MAX),
+    ];
+    for (set_nodes, set_edges, set_inputs) in over {
+        assert_eq!(
+            record.ensure_set_capacity(set_nodes, set_edges, set_inputs),
+            Err(DepError::FieldOutOfBounds)
+        );
+    }
 }
 
 fn build(nodes: Vec<NodeRow>, edges: Vec<EdgeRow>) -> Result<TickRecord, DepError> {
@@ -546,6 +694,29 @@ fn nodes_must_share_the_record_tick_and_origin() {
         err(build(other_origin, Vec::new())),
         DepError::BindingMismatch
     );
+}
+
+#[test]
+fn root_nodes_may_precede_the_record_tick() {
+    let expected = [true, true, false, true, false];
+    for (class, expect_root) in RecordedDependencyClassV1::ALL.into_iter().zip(expected) {
+        assert_eq!(class.is_root(), expect_root);
+        let row_at = |tick: u64| class_row(coord(tick, "r", 9), class, PROVISIONAL, Vec::new());
+        let early = build(vec![row_at(12)], Vec::new()).err();
+        assert_eq!(early, (!expect_root).then_some(DepError::BindingMismatch));
+        let late = build(vec![row_at(18)], Vec::new()).err();
+        assert_eq!(late, Some(DepError::BindingMismatch));
+        assert_eq!(build(vec![row_at(17)], Vec::new()).err(), None);
+    }
+    let early_root = class_row(
+        coord(12, "r", 9),
+        RecordedDependencyClassV1::InterventionAssigned,
+        PROVISIONAL,
+        Vec::new(),
+    );
+    let mut nodes = vec![early_root];
+    nodes.extend(sample_nodes());
+    assert_eq!(ok(build(nodes, Vec::new())).nodes().len(), 3);
 }
 
 #[test]
@@ -743,6 +914,36 @@ fn page_requests_cap_the_limit_and_scope_the_cursor() {
     assert!(resumed.is_ok());
 }
 
+fn node_page_of(scope: DependencyReadScopeV1, row: &NodeRow) -> Result<NodePage, DepError> {
+    NodePage::try_new(&request(scope, None, 2), vec![row.clone()], None)
+}
+
+fn edge_page_of(scope: DependencyReadScopeV1, row: &EdgeRow) -> Result<EdgePage, DepError> {
+    EdgePage::try_new(&request(scope, None, 2), vec![row.clone()], None)
+}
+
+#[test]
+fn pages_reject_rows_outside_the_request_scope() {
+    let committed = RecordedNodeOriginV1::Committed;
+    let prefix_row = node_row(coord(10, "w", 50), committed, Vec::new());
+    let fork_row = node_row(coord(17, "a", 1), PROVISIONAL, Vec::new());
+    assert!(node_page_of(prefix_scope(10), &prefix_row).is_ok());
+    assert!(node_page_of(fork_scope(3), &fork_row).is_ok());
+    let outside = [
+        (prefix_scope(9), &prefix_row),
+        (prefix_scope(20), &fork_row),
+        (fork_scope(3), &prefix_row),
+    ];
+    for (scope, row) in outside {
+        assert_eq!(err(node_page_of(scope, row)), DepError::BindingMismatch);
+    }
+    let edge = sample_edges().remove(0);
+    assert!(edge_page_of(prefix_scope(17), &edge).is_ok());
+    assert!(edge_page_of(fork_scope(3), &edge).is_ok());
+    let beyond = edge_page_of(prefix_scope(16), &edge);
+    assert_eq!(err(beyond), DepError::BindingMismatch);
+}
+
 #[test]
 fn ordered_rows_page_with_continuation_cursors() {
     let rows = numbered_rows(5);
@@ -857,6 +1058,9 @@ fn read_scopes_require_the_committed_generation() {
     assert_eq!(prefix_scope(9).ensure_current(0), Ok(()));
 }
 
+// The frontier, invalidation, drafts, facts, and command helpers below mirror
+// those of `counterfactual_store_public.rs`: integration tests are separate
+// crates, so they are copied rather than shared.
 fn frontier() -> RecomputationFrontierBytesV1 {
     let fields = [
         id_field([1; 16]),
@@ -983,8 +1187,13 @@ impl FakeStore {
         if misplaced {
             return Err(StoreError::BindingMismatch);
         }
+        let inputs: usize = self
+            .fork_nodes
+            .iter()
+            .map(|(_, row)| row.input_digests().len())
+            .sum();
         record
-            .ensure_set_capacity(self.fork_nodes.len(), self.fork_edges.len())
+            .ensure_set_capacity(self.fork_nodes.len(), self.fork_edges.len(), inputs)
             .or(Err(StoreError::FieldOutOfBounds))
     }
 
@@ -1163,15 +1372,16 @@ impl CounterfactualDependencyReadPortV1 for FakeStore {
     }
 }
 
-fn collect_nodes(
-    store: &FakeStore,
+/// Read every page of `scope` through `read`.
+fn collect_rows<T: DependencyPagedRowV1 + Clone>(
     scope: DependencyReadScopeV1,
     limit: usize,
-) -> Result<Vec<NodeRow>, StoreError> {
+    read: impl Fn(&DependencyPageRequestV1) -> Result<DependencyPageV1<T>, StoreError>,
+) -> Result<Vec<T>, StoreError> {
     let mut rows = Vec::new();
     let mut after = None;
     loop {
-        let page = store.read_dependency_nodes(&request(scope, after, limit))?;
+        let page = read(&request(scope, after, limit))?;
         rows.extend_from_slice(page.items());
         after = page.next().cloned();
         if after.is_none() {
@@ -1180,21 +1390,20 @@ fn collect_nodes(
     }
 }
 
+fn collect_nodes(
+    store: &FakeStore,
+    scope: DependencyReadScopeV1,
+    limit: usize,
+) -> Result<Vec<NodeRow>, StoreError> {
+    collect_rows(scope, limit, |page| store.read_dependency_nodes(page))
+}
+
 fn collect_edges(
     store: &FakeStore,
     scope: DependencyReadScopeV1,
     limit: usize,
 ) -> Result<Vec<EdgeRow>, StoreError> {
-    let mut rows = Vec::new();
-    let mut after = None;
-    loop {
-        let page = store.read_dependency_edges(&request(scope, after, limit))?;
-        rows.extend_from_slice(page.items());
-        after = page.next().cloned();
-        if after.is_none() {
-            return Ok(rows);
-        }
-    }
+    collect_rows(scope, limit, |page| store.read_dependency_edges(page))
 }
 
 /// Tick 18: node `a` consumes the provisional node `a` of tick 17.
