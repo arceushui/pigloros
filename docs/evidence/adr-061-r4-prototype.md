@@ -160,7 +160,7 @@ Observations:
 | Gate (ADR-061 "Compatibility gates") | Status | Evidence or owner |
 |---|---|---|
 | The pinned Rust toolchain builds the host without weakening supply-chain gates | **Proven**, subject to green CI on PR #413 and to F6 | Rust 1.97.1 builds Wasmtime 49.0.2. `cargo deny --locked check`, `cargo audit`, `cargo shear`, geiger and the pinned-Action policy run unchanged. `deny.toml` is unchanged. |
-| At least two guest languages implement the same world | **Proven, with finding F1** | The Rust and C guests produce identical results, equal to the oracle, over 3 repetitions, for `describe`, `reduce` and `drive`, and with a 1 MiB observation. |
+| At least two guest languages implement the same world | **Proven**; finding F1 resolved by revision 5 | The Rust and C guests produce identical results, equal to the oracle, over 3 repetitions, for `describe`, `reduce` and `drive`, and with a 1 MiB observation. |
 | Startup, invocation, memory and artifact-size budgets are measured | **Proven** for fuel, memory and size | See the table above. Wall time is deferred to #542. |
 | No ambient resource access | **Proven at link time** | A WASI import, an undeclared `host-v1` function and a mistyped `simulation-time` are all rejected by `load` before execution. Both guests import only `host-v1` and the types-only `contract-v1`. The engine reads no environment variable. Residual: see F3. |
 | Identical output under Local and Air-Gapped profiles | **Deferred** to #540 (profiles) and #542 (worker) | The engine has no mode-dependent input, and outputs are identical across guests and repetitions. The two host-owned profiles do not exist yet. |
@@ -222,11 +222,19 @@ expected an identifier or string, found keyword `world`
 The standard fix is the escape `%world`. It is lexical only: it names the same
 field, `world`, so the component type, and therefore the world, is unchanged.
 
-`build-fixtures.sh` derives an escaped copy and refuses any other difference.
-The canonical file is left byte-identical to the ADR, because its BLAKE3
-digest feeds `pos-conformance::wave8_plugin_boundary()`.
+**Resolved by ADR-061 revision 5 (decision 1).** The owner amended the ADR's
+WIT block in place to `%world: bounded-text`, and the canonical file is again
+byte-identical to it, so it now parses. `build-fixtures.sh` builds from the
+canonical file directly; the build-time escaped copy is gone. The committed
+Components and `SHA256SUMS` are unchanged: they were built from the escaped
+copy, which equals the new canonical file.
 
-Amending the canonical WIT and the ADR text to `%world` is an owner decision.
+The WIT's BLAKE3 digest, which `pos-conformance::wave8_plugin_boundary()`
+computes from the file, changed from
+`688d4f69f958f2d1ebb56d02c58440235eb53180d8bf671cd7dd9128d9ea7cda` to
+`fa661f549a9e9ad4383ac5d7ba457f073ca76644725e16f286a4dd0d0323a73b`. The
+boundary's manifest and release digests are derived from it at run time. No
+committed fixture, golden vector or evidence value carries any of them.
 
 ### F2. The trap table and the pinned Wasmtime trap codes
 

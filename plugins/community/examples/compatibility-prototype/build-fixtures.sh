@@ -23,28 +23,16 @@ clang="${tools}/wasi-sdk/bin/clang"
 work="$(mktemp -d)"
 trap 'rm -rf -- "${work}"' EXIT
 
-# The accepted WIT spells two record fields `world`, which is a WIT keyword.
-# Standard WIT parsers need the `%world` escape. The escape is lexical only: it
-# names the same field, so the derived package denotes the same world. Refuse
-# any other difference from the canonical file.
-canonical="${repo}/plugins/community/wit/pigloros-plugin.wit"
-mkdir -p -- "${work}/wit"
-derived="${work}/wit/pigloros-plugin.wit"
-sed 's/^    world: bounded-text,$/    %world: bounded-text,/' "${canonical}" >"${derived}"
-escaped="$(grep -c '^    %world: bounded-text,$' "${derived}" || true)"
-if [[ "${escaped}" -ne 2 ]]; then
-  echo "expected exactly two escaped world fields, found ${escaped}" >&2
-  exit 1
-fi
-sed 's/^    %world: bounded-text,$/    world: bounded-text,/' "${derived}" |
-  cmp - "${canonical}"
+# Bindings come straight from the canonical WIT package, which is
+# byte-identical to the ADR-061 "Versioned WIT world" block.
+wit_dir="${repo}/plugins/community/wit"
 
 # Rust guest: wasm32-unknown-unknown has no WASI, so the core module can import
 # only what the bindings declare.
 cp -R -- "${here}/rust-guest" "${work}/rust-guest"
 mkdir -p -- "${work}/rust-guest/generated"
 "${wit_bindgen}" rust --world community-plugin \
-  --out-dir "${work}/rust-guest/generated" "${work}/wit"
+  --out-dir "${work}/rust-guest/generated" "${wit_dir}"
 cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
 (
   cd -- "${work}/rust-guest"
@@ -60,7 +48,7 @@ cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
 # no WASI adapter, so any remaining WASI import fails the build.
 mkdir -p -- "${work}/c-guest"
 "${wit_bindgen}" c --world community-plugin \
-  --out-dir "${work}/c-guest" "${work}/wit"
+  --out-dir "${work}/c-guest" "${wit_dir}"
 c_flags=(
   --target=wasm32-wasip1 -O2 -std=c11
   "-ffile-prefix-map=${work}=/build" "-ffile-prefix-map=${here}=/src"
