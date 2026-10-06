@@ -10,6 +10,10 @@ use std::io::Cursor;
 
 use ciborium::value::Value;
 
+use crate::evaluator_domain::{
+    ClaimLayer, ExecutionMode, RedactionState, ReplayClaim, SafeErrorCode,
+};
+
 pub(crate) const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CASES: usize = 65_536;
 const MAX_IDENTIFIER_BYTES: usize = 128;
@@ -41,12 +45,15 @@ pub enum SubjectAdapterKind {
 }
 
 impl SubjectAdapterKind {
-    const fn from_code(code: u64) -> Result<Self, ProtocolError> {
+    /// Decode the one wire mapping shared by EVR1, CPF1, and provider records.
+    ///
+    /// Each codec maps `None` to its own closed failure class.
+    pub(crate) const fn from_code(code: u64) -> Option<Self> {
         match code {
-            0 => Ok(Self::ExportedArtifact),
-            1 => Ok(Self::PublicGatewayProtocol),
-            2 => Ok(Self::PublicPluginProtocol),
-            _ => Err(ProtocolError::InvalidEncoding),
+            0 => Some(Self::ExportedArtifact),
+            1 => Some(Self::PublicGatewayProtocol),
+            2 => Some(Self::PublicPluginProtocol),
+            _ => None,
         }
     }
 
@@ -196,7 +203,8 @@ fn decode_evaluation_request(fields: &[Value]) -> Result<EvaluationRequest, Prot
         request_id: fixed_bytes(&fields[2])?,
         profile_digest: fixed_bytes(&fields[3])?,
         fixture_bundle_digest: fixed_bytes(&fields[4])?,
-        subject_adapter: SubjectAdapterKind::from_code(uint(&fields[5])?)?,
+        subject_adapter: SubjectAdapterKind::from_code(uint(&fields[5])?)
+            .ok_or(ProtocolError::InvalidEncoding)?,
         subject_artifact_digest: fixed_bytes(&fields[6])?,
         implementation: decode_identity(&fields[7])?,
         execution_profile_digest: fixed_bytes(&fields[8])?,
@@ -298,16 +306,16 @@ pub struct CaseOutcome {
     pub case_id: String,
     pub fixture_digest: [u8; 32],
     pub execution_profile_digest: [u8; 32],
-    pub mode: u8,
-    pub claim_layer: u8,
+    pub mode: ExecutionMode,
+    pub claim_layer: ClaimLayer,
     pub outcome: CaseStatus,
     pub first_coordinate: Option<Vec<u8>>,
     pub expected_digest: Option<[u8; 32]>,
     pub actual_digest: Option<[u8; 32]>,
-    pub expected_error: Option<u8>,
-    pub actual_error: Option<u8>,
-    pub replay_claim: u8,
-    pub redaction_state: u8,
+    pub expected_error: Option<SafeErrorCode>,
+    pub actual_error: Option<SafeErrorCode>,
+    pub replay_claim: ReplayClaim,
+    pub redaction_state: RedactionState,
     pub provenance_digest: [u8; 32],
 }
 
@@ -326,8 +334,8 @@ pub struct ConformanceReport {
     pub implementation: ImplementationIdentity,
     pub independence: IndependenceEvidence,
     pub cases: Vec<CaseOutcome>,
-    pub replay_claim: u8,
-    pub redaction_state: u8,
+    pub replay_claim: ReplayClaim,
+    pub redaction_state: RedactionState,
     pub limitations_digest: [u8; 32],
     pub evaluator_build_provenance_digest: [u8; 32],
     pub report_digest: [u8; 32],
@@ -371,8 +379,6 @@ impl ConformanceReport {
         if self.report_id == [0; 16]
             || self.cases.is_empty()
             || self.cases.len() > MAX_CASES
-            || self.replay_claim > 4
-            || self.redaction_state > 3
             || [
                 self.subject_artifact_digest,
                 self.profile_digest,
@@ -403,13 +409,13 @@ impl ConformanceReport {
             .iter()
             .map(|case| case.replay_claim)
             .max()
-            .unwrap_or(4);
+            .unwrap_or(ReplayClaim::IncompatibleProfile);
         let weakest_redaction = self
             .cases
             .iter()
             .map(|case| case.redaction_state)
             .max()
-            .unwrap_or(3);
+            .unwrap_or(RedactionState::EvidenceMissing);
         if self.replay_claim != weakest_replay
             || self.redaction_state != weakest_redaction
             || self.report_digest != self.digest()?
@@ -479,22 +485,19 @@ fn allowed_divergence_evidence(value: &CaseOutcome) -> bool {
 }
 
 fn valid_redaction(value: &CaseOutcome) -> bool {
-    match value.redaction_state {
-        0 => true,
-        1 => value.replay_claim == 1 || value.replay_claim == 4,
-        2 => (value.replay_claim == 2 || value.replay_claim == 4) && empty_case_evidence(value),
-        3 => {
-            (value.replay_claim == 3 || value.replay_claim == 4)
-                && value.outcome != CaseStatus::Pass
-                && empty_case_evidence(value)
+    value.redaction_state.admits_replay(value.replay_claim)
+        && match value.redaction_state {
+            RedactionState::Unredacted | RedactionState::RedactedViews => true,
+            RedactionState::StructuralOnly => empty_case_evidence(value),
+            RedactionState::EvidenceMissing => {
+                value.outcome != CaseStatus::Pass && empty_case_evidence(value)
+            }
         }
-        _ => false,
-    }
 }
 
 fn nonpass_has_difference(value: &CaseOutcome) -> bool {
     value.outcome == CaseStatus::Pass
-        || value.redaction_state >= 2
+        || value.redaction_state >= RedactionState::StructuralOnly
         || value.expected_digest != value.actual_digest
         || value.expected_error != value.actual_error
 }
@@ -532,12 +535,6 @@ fn validate_case(value: &CaseOutcome) -> Result<(), ProtocolError> {
     if value.fixture_digest == [0; 32]
         || value.execution_profile_digest == [0; 32]
         || value.provenance_digest == [0; 32]
-        || value.mode > 3
-        || value.claim_layer > 6
-        || value.replay_claim > 4
-        || value.redaction_state > 3
-        || value.expected_error.is_some_and(|code| code > 13)
-        || value.actual_error.is_some_and(|code| code > 13)
         || value.first_coordinate.as_ref().is_some_and(|coordinate| {
             coordinate.is_empty() || coordinate.len() > MAX_COORDINATE_BYTES
         })
@@ -547,7 +544,7 @@ fn validate_case(value: &CaseOutcome) -> Result<(), ProtocolError> {
     validate_case_evidence(value)
 }
 
-fn compare_cases(left: &CaseOutcome, right: &CaseOutcome) -> Ordering {
+pub(crate) fn compare_cases(left: &CaseOutcome, right: &CaseOutcome) -> Ordering {
     left.case_id
         .as_bytes()
         .cmp(right.case_id.as_bytes())
@@ -592,8 +589,8 @@ fn decode_report(value: &Value) -> Result<ConformanceReport, ProtocolError> {
         implementation: decode_identity(&fields[11])?,
         independence: decode_independence(&fields[12])?,
         cases,
-        replay_claim: u8_value(&fields[19])?,
-        redaction_state: u8_value(&fields[20])?,
+        replay_claim: closed_code(&fields[19], ReplayClaim::from_code)?,
+        redaction_state: closed_code(&fields[20], RedactionState::from_code)?,
         limitations_digest: fixed_bytes(&fields[21])?,
         evaluator_build_provenance_digest: fixed_bytes(&fields[22])?,
         report_digest: fixed_bytes(&fields[23])?,
@@ -650,16 +647,16 @@ fn decode_case(value: &Value) -> Result<CaseOutcome, ProtocolError> {
         case_id: identifier(&fields[0])?,
         fixture_digest: fixed_bytes(&fields[1])?,
         execution_profile_digest: fixed_bytes(&fields[2])?,
-        mode: u8_value(&fields[3])?,
-        claim_layer: u8_value(&fields[4])?,
+        mode: closed_code(&fields[3], ExecutionMode::from_code)?,
+        claim_layer: closed_code(&fields[4], ClaimLayer::from_code)?,
         outcome,
         first_coordinate: optional_bytes(&fields[6])?,
         expected_digest: optional_fixed_bytes(&fields[7])?,
         actual_digest: optional_fixed_bytes(&fields[8])?,
-        expected_error: optional_u8(&fields[9])?,
-        actual_error: optional_u8(&fields[10])?,
-        replay_claim: u8_value(&fields[11])?,
-        redaction_state: u8_value(&fields[12])?,
+        expected_error: optional_closed_code(&fields[9], SafeErrorCode::from_code)?,
+        actual_error: optional_closed_code(&fields[10], SafeErrorCode::from_code)?,
+        replay_claim: closed_code(&fields[11], ReplayClaim::from_code)?,
+        redaction_state: closed_code(&fields[12], RedactionState::from_code)?,
         provenance_digest: fixed_bytes(&fields[13])?,
     })
 }
@@ -758,8 +755,8 @@ fn report_value(value: &ConformanceReport, include_digest: bool) -> Value {
     ];
     fields.extend(counts.map(unsigned));
     fields.extend([
-        unsigned(u64::from(value.replay_claim)),
-        unsigned(u64::from(value.redaction_state)),
+        unsigned(u64::from(value.replay_claim.code())),
+        unsigned(u64::from(value.redaction_state.code())),
         bytes(&value.limitations_digest),
         bytes(&value.evaluator_build_provenance_digest),
     ]);
@@ -806,16 +803,16 @@ fn case_value(value: &CaseOutcome) -> Value {
         Value::Text(value.case_id.clone()),
         bytes(&value.fixture_digest),
         bytes(&value.execution_profile_digest),
-        unsigned(u64::from(value.mode)),
-        unsigned(u64::from(value.claim_layer)),
+        unsigned(u64::from(value.mode.code())),
+        unsigned(u64::from(value.claim_layer.code())),
         unsigned(value.outcome.code()),
         optional_bytes_value(value.first_coordinate.as_deref()),
         optional_digest_value(value.expected_digest.as_ref()),
         optional_digest_value(value.actual_digest.as_ref()),
-        optional_u8_value(value.expected_error),
-        optional_u8_value(value.actual_error),
-        unsigned(u64::from(value.replay_claim)),
-        unsigned(u64::from(value.redaction_state)),
+        optional_code_value(value.expected_error),
+        optional_code_value(value.actual_error),
+        unsigned(u64::from(value.replay_claim.code())),
+        unsigned(u64::from(value.redaction_state.code())),
         bytes(&value.provenance_digest),
     ])
 }
@@ -1010,6 +1007,14 @@ pub(crate) fn array_values(value: &Value) -> Result<&[Value], ProtocolError> {
     }
 }
 
+pub(crate) fn eight_uints(value: &Value) -> Result<[u64; 8], ProtocolError> {
+    let values = array(value, 8)?
+        .iter()
+        .map(uint)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(std::array::from_fn(|index| values[index]))
+}
+
 pub(crate) fn text(value: &Value) -> Result<&str, ProtocolError> {
     match value {
         Value::Text(value) => Ok(value),
@@ -1031,22 +1036,87 @@ const fn validate_identifier(value: &str) -> Result<(), ProtocolError> {
 }
 
 fn validate_provider_identifier(value: &str) -> Result<(), ProtocolError> {
-    let Some(first) = value.as_bytes().first() else {
-        return Err(ProtocolError::FieldOutOfBounds);
-    };
-    if value.len() > MAX_IDENTIFIER_BYTES
-        || !value.is_ascii()
-        || !(first.is_ascii_lowercase() || first.is_ascii_digit())
-        || !value.as_bytes().iter().all(|byte| {
+    if valid_identifier(value) {
+        Ok(())
+    } else {
+        Err(ProtocolError::FieldOutOfBounds)
+    }
+}
+
+/// The one lexical grammar for lowercase public identifiers.
+///
+/// CPF1, CFB1, SPR1, and provider capability records all use this grammar.
+/// Their closure and relationship checks stay independent; only the lexical
+/// predicate is shared so the grammars cannot drift.
+pub(crate) fn valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_IDENTIFIER_BYTES
+        && value.is_ascii()
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && value.bytes().all(|byte| {
             byte.is_ascii_lowercase()
                 || byte.is_ascii_digit()
                 || matches!(byte, b'.' | b'_' | b'/' | b'-')
         })
-    {
-        Err(ProtocolError::FieldOutOfBounds)
-    } else {
-        Ok(())
+}
+
+/// The one lexical grammar for semantic-version strings of at most 64 bytes.
+///
+/// `maximum_numeric_bytes` optionally bounds each numeric component.
+pub(crate) fn valid_semantic_version(value: &str, maximum_numeric_bytes: Option<usize>) -> bool {
+    if value.is_empty() || value.len() > 64 || !value.is_ascii() {
+        return false;
     }
+    let (core_pre, build) = match value.split_once('+') {
+        Some((left, right)) if !right.is_empty() && !right.contains('+') => (left, right),
+        Some(_) => return false,
+        None => (value, ""),
+    };
+    let (core, pre) = match core_pre.split_once('-') {
+        Some((left, right)) if !right.is_empty() => (left, right),
+        Some(_) => return false,
+        None => (core_pre, ""),
+    };
+    let mut parts = core.split('.');
+    parts
+        .next()
+        .is_some_and(|part| numeric_version(part, maximum_numeric_bytes))
+        && parts
+            .next()
+            .is_some_and(|part| numeric_version(part, maximum_numeric_bytes))
+        && parts
+            .next()
+            .is_some_and(|part| numeric_version(part, maximum_numeric_bytes))
+        && parts.next().is_none()
+        && version_identifiers(pre, true, maximum_numeric_bytes)
+        && version_identifiers(build, false, maximum_numeric_bytes)
+}
+
+fn numeric_version(value: &str, maximum_bytes: Option<usize>) -> bool {
+    !value.is_empty()
+        && maximum_bytes.is_none_or(|maximum| value.len() <= maximum)
+        && (value == "0" || !value.starts_with('0'))
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn version_identifiers(
+    value: &str,
+    no_leading_zero: bool,
+    maximum_numeric_bytes: Option<usize>,
+) -> bool {
+    value.is_empty()
+        || value.split('.').all(|item| {
+            !item.is_empty()
+                && item
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && (!no_leading_zero
+                    || !item.bytes().all(|byte| byte.is_ascii_digit())
+                    || numeric_version(item, maximum_numeric_bytes))
+        })
 }
 
 pub(crate) const fn bool_value(value: &Value) -> Result<bool, ProtocolError> {
@@ -1063,8 +1133,9 @@ pub(crate) fn uint(value: &Value) -> Result<u64, ProtocolError> {
     }
 }
 
-fn u8_value(value: &Value) -> Result<u8, ProtocolError> {
-    u8::try_from(uint(value)?).map_err(|_| ProtocolError::InvalidEncoding)
+fn closed_code<T>(value: &Value, from_code: fn(u8) -> Option<T>) -> Result<T, ProtocolError> {
+    let code = u8::try_from(uint(value)?).map_err(|_| ProtocolError::InvalidEncoding)?;
+    from_code(code).ok_or(ProtocolError::FieldOutOfBounds)
 }
 
 pub(crate) fn fixed_bytes<const N: usize>(value: &Value) -> Result<[u8; N], ProtocolError> {
@@ -1099,10 +1170,13 @@ fn optional_fixed_bytes<const N: usize>(value: &Value) -> Result<Option<[u8; N]>
     }
 }
 
-fn optional_u8(value: &Value) -> Result<Option<u8>, ProtocolError> {
+fn optional_closed_code<T>(
+    value: &Value,
+    from_code: fn(u8) -> Option<T>,
+) -> Result<Option<T>, ProtocolError> {
     match value {
         Value::Null => Ok(None),
-        _ => u8_value(value).map(Some),
+        _ => closed_code(value, from_code).map(Some),
     }
 }
 
@@ -1122,6 +1196,6 @@ fn optional_digest_value(value: Option<&[u8; 32]>) -> Value {
     value.map_or(Value::Null, |digest| bytes(digest))
 }
 
-fn optional_u8_value(value: Option<u8>) -> Value {
-    value.map_or(Value::Null, |code| unsigned(u64::from(code)))
+fn optional_code_value(value: Option<SafeErrorCode>) -> Value {
+    value.map_or(Value::Null, |code| unsigned(u64::from(code.code())))
 }

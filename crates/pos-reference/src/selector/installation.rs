@@ -2542,7 +2542,10 @@ pub mod tests {
         assert_eq!(resolved.profile_digest(), request.profile_digest);
         assert_ne!(resolved.fixture_contract_digest(), [0; 32]);
         assert_eq!(resolved.attempt().case_id, "case-0");
-        assert_eq!(resolved.attempt().mode, 0);
+        assert_eq!(
+            resolved.attempt().mode,
+            crate::evaluator_domain::ExecutionMode::Local
+        );
         assert_eq!(archive.stream_position()?, 17);
         Ok(())
     }
@@ -2608,7 +2611,9 @@ pub mod tests {
         assert!(bootstrap.resolve_installed_case(&request, 0).is_err());
 
         let cap_violation = crate::selector_test_support::corpus_with_profile_mutation(
-            crate::selector_test_support::ProfileMutation::SelectedClosureCapBoundary(0),
+            crate::selector_test_support::ProfileMutation::SelectedClosureCapBoundary(
+                crate::selector_test_support::ClosureCap::MemberCount,
+            ),
         )?;
         let (request, bootstrap) = installed_case_bootstrap(&cap_violation)?;
         assert!(bootstrap.resolve_installed_case(&request, 0).is_err());

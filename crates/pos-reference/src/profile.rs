@@ -1,20 +1,36 @@
 //! Independent CPF1 profile decoding and selection.
+//!
+//! This validator re-derives provider, fixture, and archive closure from the
+//! profile bytes instead of reusing the CFB1 archive verifier in
+//! `signed_bundle`. The two validators cross-check each other, so their
+//! overlapping relationship checks are an independence control and must not be
+//! merged. Only closed vocabularies (`evaluator_domain`) and lexical grammars
+//! (`evaluator_protocol`) are shared, because divergence there is accidental.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use ciborium::value::Value;
 use ed25519_dalek::Verifier;
 
+use crate::evaluator_domain::{
+    ClaimLayer, DivergenceMismatchKind, ExecutionMode, FixtureFamily, MemberRole, RedactionState,
+    ReplayClaim, VerificationOutcome,
+};
 use crate::evaluator_protocol::{
     array, array_values, bool_value, contract_digest, contract_digest_matches, decode_canonical,
-    encode, fixed_bytes, text, uint, EvaluationRequest, ProtocolError, SubjectAdapterKind,
+    eight_uints, encode, fixed_bytes, text, uint, valid_identifier, valid_semantic_version,
+    EvaluationRequest, ProtocolError, SubjectAdapterKind,
 };
-use crate::signed_bundle::{ExpectedResultKey, SelectedBundleCaps, VerifiedBundle, VerifiedMember};
+use crate::signed_bundle::{ExpectedResultKey, VerifiedBundle, VerifiedMember};
 
 const MAX_FIXTURES: usize = 65_536;
 const MAX_AUXILIARY: usize = 64;
+const AUXILIARY_ROLES: [MemberRole; 3] = [
+    MemberRole::FixtureInput,
+    MemberRole::ExpectedResult,
+    MemberRole::EvidenceStatus,
+];
 const MAX_CAPABILITIES: usize = 256;
-const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_PROVIDERS: usize = 4_096;
 
 /// Exact public fixture-provider identity carried by CPF1.
@@ -28,7 +44,7 @@ pub struct ProviderKey {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct AllowedDivergence {
-    classification: u8,
+    classification: DivergenceMismatchKind,
     first_coordinate: Vec<u8>,
 }
 
@@ -53,7 +69,7 @@ pub enum StrictOracle {
     Output(ArtifactDescriptor),
     Failure(NamespacedFailure),
     Divergence {
-        classification: u8,
+        classification: DivergenceMismatchKind,
         first_coordinate: Vec<u8>,
     },
 }
@@ -80,13 +96,30 @@ pub struct DeterministicBudget {
 }
 
 impl DeterministicBudget {
-    fn from_value(value: &Value) -> Result<Self, ProfileError> {
-        let fields = array(value, 8)?;
-        let values = fields.iter().map(uint).collect::<Result<Vec<_>, _>>()?;
+    /// Return the eight ceilings in exact CPF1 and EAI1 wire order.
+    #[must_use]
+    pub const fn values(self) -> [u64; 8] {
+        [
+            self.memory_bytes,
+            self.cpu_fuel,
+            self.host_calls,
+            self.event_count,
+            self.output_bytes,
+            self.storage_bytes,
+            self.execution_steps,
+            self.simulation_time_ns,
+        ]
+    }
+
+    /// Build a budget from eight wire ceilings, rejecting any zero ceiling.
+    ///
+    /// CPF1 fixtures and EAI1 attempts decode their budget through this one
+    /// constructor so the non-zero rule cannot drift between them.
+    pub(crate) fn from_nonzero_values(values: [u64; 8]) -> Option<Self> {
         if values.contains(&0) {
-            return Err(ProfileError::FieldOutOfBounds);
+            return None;
         }
-        Ok(Self {
+        Some(Self {
             memory_bytes: values[0],
             cpu_fuel: values[1],
             host_calls: values[2],
@@ -96,6 +129,10 @@ impl DeterministicBudget {
             execution_steps: values[6],
             simulation_time_ns: values[7],
         })
+    }
+
+    fn from_value(value: &Value) -> Result<Self, ProfileError> {
+        Self::from_nonzero_values(eight_uints(value)?).ok_or(ProfileError::FieldOutOfBounds)
     }
 }
 
@@ -176,17 +213,8 @@ impl EvaluatorHardCaps {
     /// # Errors
     /// Returns a bound failure when any fixture limit exceeds its ceiling.
     pub fn admits(&self, budget: DeterministicBudget) -> Result<(), ProfileError> {
-        let requested = [
-            budget.memory_bytes,
-            budget.cpu_fuel,
-            budget.host_calls,
-            budget.event_count,
-            budget.output_bytes,
-            budget.storage_bytes,
-            budget.execution_steps,
-            budget.simulation_time_ns,
-        ];
-        if requested
+        if budget
+            .values()
             .iter()
             .zip(&self.values()[10..])
             .any(|(request, maximum)| *request == 0 || request > maximum)
@@ -198,37 +226,25 @@ impl EvaluatorHardCaps {
     }
 }
 
-impl From<EvaluatorHardCaps> for SelectedBundleCaps {
-    fn from(caps: EvaluatorHardCaps) -> Self {
-        Self {
-            max_profile_bytes: caps.max_profile_bytes,
-            max_bundle_members: caps.max_bundle_members,
-            max_member_path_bytes: caps.max_member_path_bytes,
-            max_member_bytes: caps.max_member_bytes,
-            max_total_bundle_bytes: caps.max_total_bundle_bytes,
-        }
-    }
-}
-
 /// One selected execution coordinate from CPF1.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Fixture {
     pub case_id: String,
     pub mandatory: bool,
-    pub claim_layer: u8,
-    pub family: u8,
+    pub claim_layer: ClaimLayer,
+    pub family: FixtureFamily,
     pub provider: ProviderKey,
     pub subject_adapter: SubjectAdapterKind,
     pub execution_profile_digest: [u8; 32],
-    pub modes: Vec<u8>,
+    pub modes: Vec<ExecutionMode>,
     pub schema: ArtifactDescriptor,
     pub payload: ArtifactDescriptor,
     pub auxiliary: Vec<ArtifactDescriptor>,
     pub oracle: StrictOracle,
-    pub expected_verification_outcome: u8,
+    pub expected_verification_outcome: VerificationOutcome,
     pub expected_verification_error: Option<NamespacedFailure>,
-    pub replay_claim: u8,
-    pub redaction_state: u8,
+    pub replay_claim: ReplayClaim,
+    pub redaction_state: RedactionState,
     pub deterministic_budget: DeterministicBudget,
     pub watchdog_ms: u64,
     pub network_allowed: bool,
@@ -241,12 +257,12 @@ pub struct Fixture {
 struct FixtureHeader {
     case_id: String,
     mandatory: bool,
-    claim_layer: u8,
-    family: u8,
+    claim_layer: ClaimLayer,
+    family: FixtureFamily,
     provider: ProviderKey,
     subject_adapter: SubjectAdapterKind,
     execution_profile_digest: [u8; 32],
-    modes: Vec<u8>,
+    modes: Vec<ExecutionMode>,
 }
 
 struct FixtureEvidence {
@@ -254,10 +270,10 @@ struct FixtureEvidence {
     payload: ArtifactDescriptor,
     auxiliary: Vec<ArtifactDescriptor>,
     oracle: StrictOracle,
-    expected_verification_outcome: u8,
+    expected_verification_outcome: VerificationOutcome,
     expected_verification_error: Option<NamespacedFailure>,
-    replay_claim: u8,
-    redaction_state: u8,
+    replay_claim: ReplayClaim,
+    redaction_state: RedactionState,
 }
 
 struct FixturePolicy {
@@ -461,13 +477,13 @@ impl Profile {
 
     fn validate_bundle_closure(&self, bundle: &VerifiedBundle) -> Result<(), ProfileError> {
         for fixture in &self.fixtures {
-            validate_descriptor_roles(bundle, &fixture.schema, &[4])?;
-            validate_descriptor_roles(bundle, &fixture.payload, &[0])?;
+            validate_descriptor_roles(bundle, &fixture.schema, &[MemberRole::Schema])?;
+            validate_descriptor_roles(bundle, &fixture.payload, &[MemberRole::FixtureInput])?;
             fixture.auxiliary.iter().try_for_each(|descriptor| {
-                validate_descriptor_roles(bundle, descriptor, &[0, 1, 17]).map(|_| ())
+                validate_descriptor_roles(bundle, descriptor, &AUXILIARY_ROLES).map(|_| ())
             })?;
             if let StrictOracle::Output(descriptor) = &fixture.oracle {
-                validate_descriptor_roles(bundle, descriptor, &[1])?;
+                validate_descriptor_roles(bundle, descriptor, &[MemberRole::ExpectedResult])?;
             }
             if fixture.modes.contains(&bundle.mode) {
                 let evidence_count = fixture
@@ -476,7 +492,7 @@ impl Profile {
                     .filter(|descriptor| {
                         bundle
                             .member(&descriptor.member_path)
-                            .is_some_and(|member| member.role == 17)
+                            .is_some_and(|member| member.role == MemberRole::EvidenceStatus)
                     })
                     .count();
                 if evidence_count != 1 {
@@ -509,7 +525,7 @@ fn validate_release_admissions(
     let actual_members = bundle
         .members
         .values()
-        .filter(|member| member.role == 16)
+        .filter(|member| member.role == MemberRole::ReleaseAdmission)
         .collect::<Vec<_>>();
     let actual = actual_members
         .iter()
@@ -638,8 +654,8 @@ fn decode_fixture_header(fields: &[Value]) -> Result<FixtureHeader, ProfileError
     Ok(FixtureHeader {
         case_id: identifier(&fields[0])?,
         mandatory: bool_value(&fields[1])?,
-        claim_layer: bounded_code(&fields[2], 6)?,
-        family: bounded_code(&fields[3], 6)?,
+        claim_layer: closed_code(&fields[2], ClaimLayer::from_code)?,
+        family: closed_code(&fields[3], FixtureFamily::from_code)?,
         provider: decode_provider_key(&fields[4])?,
         subject_adapter: decode_subject_adapter(&fields[5])?,
         execution_profile_digest: fixed_bytes(&fields[6])?,
@@ -647,27 +663,24 @@ fn decode_fixture_header(fields: &[Value]) -> Result<FixtureHeader, ProfileError
     })
 }
 
-fn decode_fixture_modes(value: &Value) -> Result<Vec<u8>, ProfileError> {
-    let modes = array_values(value)?
+fn decode_fixture_modes(value: &Value) -> Result<Vec<ExecutionMode>, ProfileError> {
+    let codes = array_values(value)?
         .iter()
-        .map(|value| u8::try_from(uint(value)?).map_err(|_| ProfileError::InvalidEncoding))
+        .map(byte_code)
         .collect::<Result<Vec<_>, _>>()?;
-    if modes.is_empty()
-        || !modes.windows(2).all(|pair| pair[0] < pair[1])
-        || modes.iter().any(|mode| *mode > 3)
-    {
+    let modes = codes
+        .into_iter()
+        .map(ExecutionMode::from_code)
+        .collect::<Option<Vec<_>>>()
+        .ok_or(ProfileError::NonCanonicalOrder)?;
+    if modes.is_empty() || !modes.windows(2).all(|pair| pair[0] < pair[1]) {
         return Err(ProfileError::NonCanonicalOrder);
     }
     Ok(modes)
 }
 
 fn decode_subject_adapter(value: &Value) -> Result<SubjectAdapterKind, ProfileError> {
-    Ok(match uint(value)? {
-        0 => SubjectAdapterKind::ExportedArtifact,
-        1 => SubjectAdapterKind::PublicGatewayProtocol,
-        2 => SubjectAdapterKind::PublicPluginProtocol,
-        _ => return Err(ProfileError::InvalidEncoding),
-    })
+    SubjectAdapterKind::from_code(uint(value)?).ok_or(ProfileError::InvalidEncoding)
 }
 
 fn decode_fixture_evidence(fields: &[Value]) -> Result<FixtureEvidence, ProfileError> {
@@ -684,16 +697,16 @@ fn decode_fixture_evidence(fields: &[Value]) -> Result<FixtureEvidence, ProfileE
         payload,
         auxiliary,
         oracle,
-        expected_verification_outcome: bounded_code(&fields[12], 5)?,
+        expected_verification_outcome: closed_code(&fields[12], VerificationOutcome::from_code)?,
         expected_verification_error: optional_failure(&fields[13])?,
-        replay_claim: bounded_code(&fields[14], 4)?,
-        redaction_state: bounded_code(&fields[15], 3)?,
+        replay_claim: closed_code(&fields[14], ReplayClaim::from_code)?,
+        redaction_state: closed_code(&fields[15], RedactionState::from_code)?,
     })
 }
 
 fn decode_fixture_policy(
     fields: &[Value],
-    family: u8,
+    family: FixtureFamily,
     hard_caps: EvaluatorHardCaps,
 ) -> Result<FixturePolicy, ProfileError> {
     let deterministic_budget = DeterministicBudget::from_value(&fields[16])?;
@@ -710,9 +723,9 @@ fn decode_fixture_policy(
         optional_transition(&fields[22])?,
     );
     let release_admission = match (family, release_fields) {
-        (_, (None, None, None)) if family != 5 => None,
+        (_, (None, None, None)) if family != FixtureFamily::Downgrade => None,
         (
-            5,
+            FixtureFamily::Downgrade,
             (Some(trust_policy_snapshot_digest), Some(release_admission_digest), Some(transition)),
         ) => Some(ReleaseAdmissionBinding {
             trust_policy_snapshot_digest,
@@ -823,7 +836,7 @@ fn decode_profile_header(fields: &[Value]) -> Result<ProfileHeader, ProfileError
         limitations_digest: fixed_bytes(&fields[14])?,
         publication_digest: fixed_bytes(&fields[15])?,
     };
-    if !semantic_version(text(&fields[3])?, Some(10))
+    if !valid_semantic_version(text(&fields[3])?, Some(10))
         || uint(&fields[4])? > 3
         || [
             header.normative_spec_digest,
@@ -862,7 +875,7 @@ fn decode_provider_key(value: &Value) -> Result<ProviderKey, ProfileError> {
     let fields = array(value, 4)?;
     let provider_id = text(&fields[0])?;
     let contract_version = text(&fields[1])?;
-    if !valid_identifier(provider_id) || !semantic_version(contract_version, None) {
+    if !valid_identifier(provider_id) || !valid_semantic_version(contract_version, None) {
         return Err(ProfileError::FieldOutOfBounds);
     }
     Ok(ProviderKey {
@@ -919,7 +932,7 @@ fn decode_allowed_divergences(value: &Value) -> Result<Vec<AllowedDivergence>, P
 
 fn decode_divergence(value: &Value) -> Result<AllowedDivergence, ProfileError> {
     let fields = array(value, 2)?;
-    let classification = bounded_code(&fields[0], 6)?;
+    let classification = closed_code(&fields[0], DivergenceMismatchKind::fixture_from_code)?;
     let first_coordinate = byte_string(&fields[1])?;
     if first_coordinate.is_empty() || first_coordinate.len() > 128 {
         return Err(ProfileError::FieldOutOfBounds);
@@ -981,13 +994,14 @@ fn validate_profile_relationships(
     required_providers: &[ProviderKey],
     execution_profiles: &[[u8; 32]],
     allowed_divergences: &[AllowedDivergence],
-    profile_claim_layer: u8,
+    profile_claim_layer: ClaimLayer,
 ) -> Result<(), ProfileError> {
     let claim_layer = fixtures[0].claim_layer;
     let required = required_providers.iter().cloned().collect::<BTreeSet<_>>();
     let executions = execution_profiles.iter().copied().collect::<BTreeSet<_>>();
     let allowed = allowed_divergences.iter().cloned().collect::<BTreeSet<_>>();
-    let mut inventory = BTreeMap::<(ProviderKey, [u8; 32], u8), BTreeSet<u8>>::new();
+    let mut inventory =
+        BTreeMap::<(ProviderKey, [u8; 32], ExecutionMode), BTreeSet<FixtureFamily>>::new();
     let mut declared = BTreeSet::new();
     for fixture in fixtures {
         if fixture.claim_layer != claim_layer
@@ -1024,7 +1038,7 @@ fn validate_profile_relationships(
             declared.insert(divergence);
         }
     }
-    let required_families = BTreeSet::from([0, 1, 2, 3, 4, 5, 6]);
+    let required_families = FixtureFamily::ALL.iter().copied().collect::<BTreeSet<_>>();
     if claim_layer != profile_claim_layer
         || inventory
             .values()
@@ -1034,7 +1048,7 @@ fn validate_profile_relationships(
     }
     for provider in &required {
         for execution in &executions {
-            for mode in [0, 1] {
+            for mode in [ExecutionMode::Local, ExecutionMode::AirGapped] {
                 if inventory
                     .get(&(provider.clone(), *execution, mode))
                     .is_none_or(|families| families != &required_families)
@@ -1058,7 +1072,7 @@ fn validate_fixture(fixture: &Fixture) -> Result<(), ProfileError> {
         || fixture.auxiliary.len() > MAX_AUXILIARY
         || fixture.network_allowed
             && (fixture.subject_adapter == SubjectAdapterKind::PublicPluginProtocol
-                || fixture.modes.contains(&1))
+                || fixture.modes.contains(&ExecutionMode::AirGapped))
     {
         return Err(ProfileError::FieldOutOfBounds);
     }
@@ -1070,18 +1084,18 @@ fn validate_fixture(fixture: &Fixture) -> Result<(), ProfileError> {
 fn validate_outcome_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
     let valid = match &fixture.oracle {
         StrictOracle::Output(_) => {
-            fixture.expected_verification_outcome == 0
+            fixture.expected_verification_outcome == VerificationOutcome::VerifiedExact
                 && fixture.expected_verification_error.is_none()
         }
         StrictOracle::Failure(expected) => {
-            !matches!(fixture.expected_verification_outcome, 0 | 1)
+            fixture.expected_verification_outcome.is_failure()
                 && fixture.expected_verification_error.as_ref() == Some(expected)
                 && (expected.owner_id == "pigloros.core"
                     || expected.owner_id == fixture.provider.provider_id
                         && expected.contract_version == fixture.provider.contract_version)
         }
         StrictOracle::Divergence { .. } => {
-            fixture.expected_verification_outcome == 1
+            fixture.expected_verification_outcome == VerificationOutcome::Diverged
                 && fixture.expected_verification_error.is_none()
         }
     };
@@ -1092,15 +1106,8 @@ fn validate_outcome_relationship(fixture: &Fixture) -> Result<(), ProfileError> 
     }
 }
 
-fn validate_claim_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
-    let coherent = fixture.replay_claim == 4
-        || [
-            true,
-            fixture.replay_claim == 1,
-            fixture.replay_claim == 2,
-            fixture.replay_claim == 3,
-        ][usize::from(fixture.redaction_state)];
-    if coherent {
+const fn validate_claim_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
+    if fixture.redaction_state.admits_replay(fixture.replay_claim) {
         Ok(())
     } else {
         Err(ProfileError::ClosureIncomplete)
@@ -1108,7 +1115,7 @@ fn validate_claim_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
 }
 
 fn validate_downgrade_relationship(fixture: &Fixture) -> Result<(), ProfileError> {
-    if fixture.family != 5 {
+    if fixture.family != FixtureFamily::Downgrade {
         return Ok(());
     }
     let valid = fixture.release_admission.as_ref().is_some_and(|binding| {
@@ -1218,42 +1225,47 @@ fn validate_support_closure<'a>(
     {
         return Err(ProfileError::ClosureIncomplete);
     }
-    let registry_member = validate_descriptor_roles(bundle, registry, &[12])?;
+    let registry_member =
+        validate_descriptor_roles(bundle, registry, &[MemberRole::FixtureProviderRegistry])?;
     let support = [
         (
             "support/normative-requirements.md",
-            3,
+            MemberRole::NormativeSpecification,
             header.normative_spec_digest,
         ),
         (
             "support/fixture-family-contract.json",
-            18,
+            MemberRole::FixtureContractPolicy,
             header.fixture_policy_digest,
         ),
-        ("support/limitations.md", 9, header.limitations_digest),
+        (
+            "support/limitations.md",
+            MemberRole::Limitations,
+            header.limitations_digest,
+        ),
         (
             "support/publication-review.json",
-            8,
+            MemberRole::Provenance,
             header.publication_digest,
         ),
         (
             "support/evaluator-protocol-v1.json",
-            4,
+            MemberRole::Schema,
             evaluator_artifacts[0],
         ),
         (
             "support/evaluator-request-v1.cddl",
-            4,
+            MemberRole::Schema,
             evaluator_artifacts[1],
         ),
         (
             "support/evaluator-report-v1.cddl",
-            4,
+            MemberRole::Schema,
             evaluator_artifacts[2],
         ),
         (
             "authority/trust-policy-snapshot.tps1",
-            15,
+            MemberRole::TrustPolicySnapshot,
             trust_policy_digest,
         ),
     ];
@@ -1264,7 +1276,7 @@ fn validate_support_closure<'a>(
     let actual_execution_profiles = bundle
         .members
         .iter()
-        .filter(|(_, member)| member.role == 14)
+        .filter(|(_, member)| member.role == MemberRole::ExecutionProfile)
         .map(|(path, member)| -> Result<[u8; 32], ProfileError> {
             let maximum = validate_execution_profile(path, &member.bytes, member.digest)?;
             validate_fixture_execution_budget(member.digest, maximum, fixtures)?;
@@ -1285,7 +1297,12 @@ fn validate_execution_matrix(
     bundle: &VerifiedBundle,
     digest: [u8; 32],
 ) -> Result<(), ProfileError> {
-    let member = validate_member_binding(bundle, "authority/execution-matrix.json", 11, digest)?;
+    let member = validate_member_binding(
+        bundle,
+        "authority/execution-matrix.json",
+        MemberRole::ExecutionMatrix,
+        digest,
+    )?;
     let root: serde_json::Value =
         serde_json::from_slice(&member.bytes).map_err(|_| ProfileError::InvalidEncoding)?;
     let root = json_object(&root)?;
@@ -1577,7 +1594,7 @@ fn validate_execution_profile_identity(fields: &[Value], path: &str) -> Result<(
         || uint(&fields[1])? != 1
         || !valid_identifier(profile_id)
         || path != format!("authority/execution-profiles/{profile_id}.epf1")
-        || !semantic_version(text(&fields[3])?, None)
+        || !valid_semantic_version(text(&fields[3])?, None)
         || fields[4]
             != Value::Array(vec![
                 Value::Integer(0_u64.into()),
@@ -1608,7 +1625,8 @@ fn validate_execution_profile_contract(fields: &[Value]) -> Result<[u64; 8], Pro
     }
     let maximum = execution_budget(&fields[12])?;
     let versions = array(&fields[14], 2)?;
-    if !semantic_version(text(&versions[0])?, None) || !semantic_version(text(&versions[1])?, None)
+    if !valid_semantic_version(text(&versions[0])?, None)
+        || !valid_semantic_version(text(&versions[1])?, None)
     {
         return Err(ProfileError::FieldOutOfBounds);
     }
@@ -1676,7 +1694,7 @@ fn valid_text_list(value: &Value, empty_allowed: bool) -> Result<bool, ProfileEr
 fn validate_member_binding<'a>(
     bundle: &'a VerifiedBundle,
     path: &str,
-    role: u8,
+    role: MemberRole,
     digest: [u8; 32],
 ) -> Result<&'a VerifiedMember, ProfileError> {
     bundle
@@ -1698,7 +1716,8 @@ fn decode_oracle(value: &Value) -> Result<StrictOracle, ProfileError> {
             .ok_or(ProfileError::InvalidEncoding),
         2 if fields[1] == Value::Null && fields[2] == Value::Null => {
             let divergence = array(&fields[3], 2)?;
-            let classification = bounded_code(&divergence[0], 6)?;
+            let classification =
+                closed_code(&divergence[0], DivergenceMismatchKind::fixture_from_code)?;
             let first_coordinate = byte_string(&divergence[1])?;
             if first_coordinate.is_empty() || first_coordinate.len() > 128 {
                 return Err(ProfileError::FieldOutOfBounds);
@@ -1753,7 +1772,7 @@ fn optional_failure(value: &Value) -> Result<Option<NamespacedFailure>, ProfileE
         contract_version: text(&fields[1])?.to_owned(),
         code_id: identifier(&fields[2])?,
     };
-    if semantic_version(&failure.contract_version, None) {
+    if valid_semantic_version(&failure.contract_version, None) {
         Ok(Some(failure))
     } else {
         Err(ProfileError::FieldOutOfBounds)
@@ -1833,7 +1852,7 @@ fn validate_descriptor<'a>(
 fn validate_descriptor_roles<'a>(
     bundle: &'a VerifiedBundle,
     descriptor: &ArtifactDescriptor,
-    roles: &[u8],
+    roles: &[MemberRole],
 ) -> Result<&'a VerifiedMember, ProfileError> {
     let member = validate_descriptor(bundle, descriptor)?;
     if roles.contains(&member.role) {
@@ -1882,7 +1901,7 @@ fn validate_expected_results(
                     && artifact.digest == member.digest
                     && artifact.byte_length == member_length
         );
-        if member.role != 1 || !bound {
+        if member.role != MemberRole::ExpectedResult || !bound {
             return Err(ProfileError::ClosureIncomplete);
         }
     }
@@ -1892,7 +1911,7 @@ fn validate_expected_results(
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ProviderRecord {
     key: ProviderKey,
-    claim_layer: u8,
+    claim_layer: ClaimLayer,
     adapter: SubjectAdapterKind,
     package: ArtifactDescriptor,
     schemas: Vec<ArtifactDescriptor>,
@@ -1902,7 +1921,7 @@ fn validate_provider_contracts(
     bundle: &VerifiedBundle,
     registry_member: &VerifiedMember,
     required: &[ProviderKey],
-    profile_claim_layer: u8,
+    profile_claim_layer: ClaimLayer,
     fixtures: &[Fixture],
 ) -> Result<(), ProfileError> {
     let value = decode_canonical(&registry_member.bytes)?;
@@ -1941,11 +1960,10 @@ fn validate_provider_contracts(
         .iter()
         .map(|provider| provider.package.member_path.as_str())
         .collect::<BTreeSet<_>>();
-    if bundle
-        .members
-        .iter()
-        .any(|(path, member)| member.role == 13 && !declared_packages.contains(path.as_str()))
-    {
+    if bundle.members.iter().any(|(path, member)| {
+        member.role == MemberRole::FixtureProviderPackage
+            && !declared_packages.contains(path.as_str())
+    }) {
         return Err(ProfileError::ClosureIncomplete);
     }
     for fixture in fixtures {
@@ -1960,7 +1978,7 @@ fn validate_provider_contracts(
             .ok_or(ProfileError::ClosureIncomplete)?;
         if provider
             .schemas
-            .get(usize::from(fixture.family))
+            .get(usize::from(fixture.family.code()))
             .is_none_or(|schema| schema != &fixture.schema)
         {
             return Err(ProfileError::ClosureIncomplete);
@@ -1975,17 +1993,17 @@ fn decode_provider_record(
 ) -> Result<ProviderRecord, ProfileError> {
     let fields = array(value, 7)?;
     let key = decode_provider_key(&Value::Array(fields[..4].to_vec()))?;
-    let claim_layer =
-        u8::try_from(uint(&fields[4])?).map_err(|_| ProfileError::FieldOutOfBounds)?;
-    if claim_layer > 6 {
-        return Err(ProfileError::FieldOutOfBounds);
-    }
+    let claim_layer = u8::try_from(uint(&fields[4])?)
+        .ok()
+        .and_then(ClaimLayer::from_code)
+        .ok_or(ProfileError::FieldOutOfBounds)?;
     let adapter = decode_adapter(&fields[5])?;
     let package = decode_descriptor(&fields[6])?;
     if package.media_type != "application/cbor" {
         return Err(ProfileError::ClosureIncomplete);
     }
-    let package_member = validate_descriptor_roles(bundle, &package, &[13])?;
+    let package_member =
+        validate_descriptor_roles(bundle, &package, &[MemberRole::FixtureProviderPackage])?;
     let schemas = validate_provider_package(bundle, package_member, &key, claim_layer, adapter)?;
     Ok(ProviderRecord {
         key,
@@ -2000,7 +2018,7 @@ fn validate_provider_package(
     bundle: &VerifiedBundle,
     package: &VerifiedMember,
     key: &ProviderKey,
-    claim_layer: u8,
+    claim_layer: ClaimLayer,
     adapter: SubjectAdapterKind,
 ) -> Result<Vec<ArtifactDescriptor>, ProfileError> {
     let value = decode_canonical(&package.bytes)?;
@@ -2008,7 +2026,7 @@ fn validate_provider_package(
     if text(&fields[0])? != "FPP1"
         || uint(&fields[1])? != 1
         || decode_provider_key(&fields[2])? != *key
-        || uint(&fields[3])? != u64::from(claim_layer)
+        || uint(&fields[3])? != u64::from(claim_layer.code())
         || decode_adapter(&fields[4])? != adapter
     {
         return Err(ProfileError::ClosureIncomplete);
@@ -2023,11 +2041,17 @@ fn validate_provider_package(
                 return Err(ProfileError::NonCanonicalOrder);
             }
             let descriptor = decode_descriptor(&fields[1])?;
-            validate_descriptor_roles(bundle, &descriptor, &[4])?;
+            validate_descriptor_roles(bundle, &descriptor, &[MemberRole::Schema])?;
             Ok(descriptor)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let support_roles = [5, 6, 7, 8, 9];
+    let support_roles = [
+        MemberRole::Licence,
+        MemberRole::Notice,
+        MemberRole::Sbom,
+        MemberRole::Provenance,
+        MemberRole::Limitations,
+    ];
     let support = fields[6..11]
         .iter()
         .zip(support_roles)
@@ -2059,20 +2083,15 @@ fn validate_provider_package(
 }
 
 fn decode_adapter(value: &Value) -> Result<SubjectAdapterKind, ProfileError> {
-    match uint(value)? {
-        0 => Ok(SubjectAdapterKind::ExportedArtifact),
-        1 => Ok(SubjectAdapterKind::PublicGatewayProtocol),
-        2 => Ok(SubjectAdapterKind::PublicPluginProtocol),
-        _ => Err(ProfileError::FieldOutOfBounds),
-    }
+    SubjectAdapterKind::from_code(uint(value)?).ok_or(ProfileError::FieldOutOfBounds)
 }
 
 type FixtureKey<'a> = (
     (&'a [u8], &'a [u8], u16, u16),
-    u8,
+    FixtureFamily,
     &'a [u8],
     [u8; 32],
-    &'a [u8],
+    &'a [ExecutionMode],
 );
 
 fn fixture_key(value: &Fixture) -> FixtureKey<'_> {
@@ -2136,28 +2155,12 @@ fn byte_string(value: &Value) -> Result<Vec<u8>, ProfileError> {
     }
 }
 
-fn bounded_code(value: &Value, maximum: u8) -> Result<u8, ProfileError> {
-    let value = u8::try_from(uint(value)?).map_err(|_| ProfileError::InvalidEncoding)?;
-    if value <= maximum {
-        Ok(value)
-    } else {
-        Err(ProfileError::InvalidEncoding)
-    }
+fn byte_code(value: &Value) -> Result<u8, ProfileError> {
+    u8::try_from(uint(value)?).map_err(|_| ProfileError::InvalidEncoding)
 }
 
-fn valid_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_IDENTIFIER_BYTES
-        && value.is_ascii()
-        && value
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase()
-                || byte.is_ascii_digit()
-                || matches!(byte, b'.' | b'_' | b'/' | b'-')
-        })
+fn closed_code<T>(value: &Value, from_code: fn(u8) -> Option<T>) -> Result<T, ProfileError> {
+    from_code(byte_code(value)?).ok_or(ProfileError::InvalidEncoding)
 }
 
 fn valid_member_path(value: &str) -> bool {
@@ -2187,58 +2190,5 @@ fn valid_media_type(value: &str) -> bool {
                     byte,
                     b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-' | b'/'
                 )
-        })
-}
-
-fn semantic_version(value: &str, maximum_numeric_bytes: Option<usize>) -> bool {
-    if value.is_empty() || value.len() > 64 || !value.is_ascii() {
-        return false;
-    }
-    let (core_pre, build) = match value.split_once('+') {
-        Some((left, right)) if !right.is_empty() && !right.contains('+') => (left, right),
-        Some(_) => return false,
-        None => (value, ""),
-    };
-    let (core, pre) = match core_pre.split_once('-') {
-        Some((left, right)) if !right.is_empty() => (left, right),
-        Some(_) => return false,
-        None => (core_pre, ""),
-    };
-    let mut parts = core.split('.');
-    parts
-        .next()
-        .is_some_and(|part| numeric_version(part, maximum_numeric_bytes))
-        && parts
-            .next()
-            .is_some_and(|part| numeric_version(part, maximum_numeric_bytes))
-        && parts
-            .next()
-            .is_some_and(|part| numeric_version(part, maximum_numeric_bytes))
-        && parts.next().is_none()
-        && version_identifiers(pre, true, maximum_numeric_bytes)
-        && version_identifiers(build, false, maximum_numeric_bytes)
-}
-
-fn numeric_version(value: &str, maximum_bytes: Option<usize>) -> bool {
-    !value.is_empty()
-        && maximum_bytes.is_none_or(|maximum| value.len() <= maximum)
-        && (value == "0" || !value.starts_with('0'))
-        && value.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-fn version_identifiers(
-    value: &str,
-    no_leading_zero: bool,
-    maximum_numeric_bytes: Option<usize>,
-) -> bool {
-    value.is_empty()
-        || value.split('.').all(|item| {
-            !item.is_empty()
-                && item
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                && (!no_leading_zero
-                    || !item.bytes().all(|byte| byte.is_ascii_digit())
-                    || numeric_version(item, maximum_numeric_bytes))
         })
 }
