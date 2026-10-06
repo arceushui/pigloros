@@ -1008,9 +1008,8 @@ fn c3_capacity_trusts_drifted_stored_counts() {
         ),
     ));
     let mut store = open(&fixture.path);
-    // The real rows (two nodes) and the raw row's count would exceed the node
-    // bound once the Tick 19 record adds its node, but the stored counts say
-    // it fits.
+    // Counting the two real node rows, the Tick 19 record would exceed the
+    // node bound, but the zeroed stored counts say it fits.
     assert_eq!(
         append_record(&mut store, fork, &tick_19_record()),
         Ok(TickOutcome::Committed {
