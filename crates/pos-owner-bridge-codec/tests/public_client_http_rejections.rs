@@ -27,8 +27,11 @@ fn public_client_data_accepts_closed_strings_booleans_and_escaped_unknown_fields
 
 #[test]
 fn public_client_data_rejects_invalid_envelope_and_required_fields() {
-    let invalid_inputs: [(&str, &[u8]); 10] = [
-        ("empty", b""),
+    assert_eq!(
+        validate_client_data_json(b"", CeremonyKind::Create, &CHALLENGE),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
+    let invalid_inputs: [(&str, &[u8]); 9] = [
         ("invalid utf8", b"\xff"),
         ("array", b"[]"),
         ("empty object", b"{}"),
