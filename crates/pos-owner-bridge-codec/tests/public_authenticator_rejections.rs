@@ -125,6 +125,36 @@ fn public_none_attestation_parser_rejects_authenticator_and_cose_fields(
 }
 
 #[test]
+fn public_authenticator_parsers_reject_every_truncated_public_record(
+) -> Result<(), OwnerBridgeCodecError> {
+    let authenticator_data = create_authenticator_data(cose_key());
+    let attestation = none_attestation_object(&authenticator_data)?;
+    for length in 0..attestation.len() {
+        assert!(
+            parse_none_attestation_object(&attestation[..length], &CREDENTIAL_ID).is_err(),
+            "attestation prefix {length}"
+        );
+    }
+
+    let assertion = assertion_authenticator_data(0x85, b"\xa1\x61x\xf5");
+    for length in 0..assertion.len() {
+        assert!(
+            parse_assertion_authenticator_data(&assertion[..length]).is_err(),
+            "assertion prefix {length}"
+        );
+    }
+
+    let key = cose_key();
+    for length in 0..key.len() {
+        assert!(
+            CoseEs256PublicKey::from_canonical_encoding(&key[..length]).is_err(),
+            "COSE key prefix {length}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn public_assertion_authenticator_parser_enforces_flags_and_exact_length(
 ) -> Result<(), OwnerBridgeCodecError> {
     let baseline = assertion_authenticator_data(0x05, &[]);
