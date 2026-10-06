@@ -11435,7 +11435,10 @@ fn memory_validate_admission_successor(
     store: &MemoryStore,
     batch: &PreparedManifestOwnerAdmissionV1,
 ) -> Result<(), ManifestOwnerAdmissionErrorV1> {
-    memory_resolve_key_evidence(store, batch.coordinator_key_evidence())?;
+    memory_resolve_key_evidence::<ManifestOwnerAdmissionErrorV1>(
+        store,
+        batch.coordinator_key_evidence(),
+    )?;
     memory_validate_manifest_owner_successor(store, batch.input())
 }
 
@@ -11780,7 +11783,7 @@ fn validate_memory_local_cut_commit(
     current_state: Option<&LocalCutOwnerStateV1>,
 ) -> Result<(), LocalCutOwnerErrorV1> {
     let evidence = std::slice::from_ref(batch.coordinator_key_evidence());
-    memory_resolve_key_evidence(store, evidence)?;
+    memory_resolve_key_evidence::<LocalCutOwnerErrorV1>(store, evidence)?;
     validate_memory_local_cut_successor(store, batch, admission, current_state)
 }
 
