@@ -63,6 +63,7 @@ use std::{
 
 mod adapter;
 mod authorized_pass;
+mod availability;
 mod catalogue;
 mod human_admission;
 mod profile_composition;
@@ -2700,7 +2701,7 @@ impl PluginRegistry {
         self.restored_binding = None;
         self.validate_operation(timeline, &operation, observed_through, None)?;
         let (driver_ids, cadence_updates, subscriptions) =
-            self.collect_anchored_selection(selection)?;
+            self.collect_available_selection(selection)?;
         let mut event_cursors = Vec::new();
 
         let anchor = SnapshotAnchor::new(timeline, observed_through);

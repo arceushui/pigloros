@@ -34,6 +34,10 @@
 //! are public only so those helpers can return them; every caller maps them
 //! to a crash and discards the variants.
 //!
+//! The [`adapter`] module adapts the supervisor to pos-runtime's
+//! `Driver` trait, so a community Plugin's output commits atomically through
+//! the scheduled-pass pipeline (#543).
+//!
 //! Launching a worker has one process-wide effect: see
 //! [`CommunityPluginSupervisorV1`].
 //!
@@ -42,6 +46,7 @@
 
 // Public modules keep crate-only items compatible with both `unreachable_pub`
 // and Clippy's `redundant_pub_crate`.
+pub mod adapter;
 pub mod frame;
 pub mod ipc;
 pub mod launch;
@@ -51,6 +56,12 @@ pub mod worker_process;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
+pub use adapter::{
+    classify_pass_failure, quarantine_for, register_community_driver, CommunityDriverConfigV1,
+    CommunityDriverV1, CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1,
+    InvocationContextSourceV1, InvocationContextV1, PassFailureV1, ReceiptDispositionV1,
+    APPROVAL_CAPABILITY_V1, MAX_RETAINED_RECEIPTS_V1,
+};
 pub use frame::{FrameFaultV1, WorkerFrameLimitsV1};
 pub use ipc::{
     WorkerCallV1, WorkerEnvelopeErrorV1, WorkerOutcomeV1, WorkerRequestV1, WorkerReturnV1,
