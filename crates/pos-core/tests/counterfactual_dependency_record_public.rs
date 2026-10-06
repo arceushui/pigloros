@@ -1673,7 +1673,14 @@ fn the_record_tick_is_persisted_apart_from_node_ticks() {
     let root_class = RecordedDependencyClassV1::InterventionAssigned;
     let root = class_row(coord(2, "r", 9), root_class, PROVISIONAL, Vec::new());
     let early = ok(TickRecord::try_new(5, PROVISIONAL, vec![root], Vec::new()));
-    let empty_at = |tick: u64| ok(TickRecord::try_new(tick, PROVISIONAL, Vec::new(), Vec::new()));
+    let empty_at = |tick: u64| {
+        ok(TickRecord::try_new(
+            tick,
+            PROVISIONAL,
+            Vec::new(),
+            Vec::new(),
+        ))
+    };
     let first = append_record(&mut store, &early);
     assert!(first.is_ok());
     let before = append_record(&mut store, &empty_at(4));
