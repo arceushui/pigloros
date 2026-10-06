@@ -65,7 +65,11 @@ pub(super) fn read_list<T>(
 
 /// An array of at most `max` digests.
 pub(super) fn read_digests(reader: &mut EnvelopeReader<'_>, max: usize) -> Decoded<Vec<[u8; 32]>> {
-    read_list(reader, max, EnvelopeReader::bytes)
+    read_list(reader, max, read_digest)
+}
+
+fn read_digest(reader: &mut EnvelopeReader<'_>) -> Decoded<[u8; 32]> {
+    reader.bytes()
 }
 
 /// The index `code` names in a closed list of `count` entries.
