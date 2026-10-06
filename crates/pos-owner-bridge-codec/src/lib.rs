@@ -9,7 +9,11 @@
 //! next stack slice.
 
 mod authenticator_data;
-mod cbor;
+// Public module reachability keeps these crate-only fixed-buffer helpers
+// compatible with both `unreachable_pub` and Clippy's `redundant_pub_crate`
+// lint while the payload codecs use them from a sibling module.
+#[doc(hidden)]
+pub mod cbor;
 mod client_data;
 mod control;
 mod error;
