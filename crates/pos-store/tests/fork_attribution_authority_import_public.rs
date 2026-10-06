@@ -6,24 +6,38 @@
 //! `MemoryStore` and file-backed `SqliteStore`.
 
 #[path = "support/fae1_fixture.rs"]
-mod fixture;
+pub mod fixture;
 
+use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
-use fixture::{hash, pinned_policy, Built, Fallible, Shape, Spec, World, PARENT_CUT, POLICY_SCOPE};
+use fixture::{
+    hash, pin_policy, pinned_policy, Built, Fallible, FtiOwner, Shape, Spec, World, PARENT_CUT,
+    POLICY_SCOPE,
+};
 use pos_core::{
+    fork_authentication::{
+        principal_digest_v1, AuthenticatedPrincipalRecordV1, ForkAuthenticationAdapterPolicyV1,
+        ForkAuthenticationPolicyV1,
+    },
     store::{EventStore, SeqRange},
-    CanonicalBytes, EntityId, EventDraft, ForkAttributionIssuerPolicyEntryV1,
+    CanonicalBytes, EntityId, EventDraft, ForkAdmissionErrorV1, ForkAdmissionHostCommandV1,
+    ForkAdmissionOperationResultV1, ForkAttributionIssuerPolicyEntryV1,
     ForkAttributionIssuerPolicyInputV1, ForkAttributionIssuerPolicyV1,
     ForkAttributionIssuerStateV1 as State, ForkAttributionIssuerV1,
-    ImportedForkAttributionAdmissionV1, Kind, PublicKey, TimelineId,
+    ImportedForkAttributionAdmissionV1, Kind, PrincipalRefV1, PublicKey, TimelineId,
+};
+use pos_crypto::fork_authentication::{
+    verify_authenticated_principal_evidence_v1, ForkAuthenticationAdapterSigningKeyV1,
+    ForkHostSigningKeyV1,
 };
 use pos_store::{
-    memory::MemoryStore, sqlite::SqliteStore, AuthenticatedOperatorPolicyPinV1,
+    memory::MemoryStore, sqlite::SqliteStore, ForkAdmissionAuthorityBootstrapPortV1,
+    ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
     ForkAttributionAuthorityImportErrorV1 as ImportError, ForkAttributionAuthorityImportPortV1,
     ForkAttributionAuthorityImportReceiptV1 as Receipt,
-    ForkAttributionAuthorityImportRequestV1 as Request,
-    ForkAttributionIssuerPolicyInstallationPortV1 as PolicyPort,
-    ForkEventProvenanceAuthorityPortV1, ForkManifestPublicationPortV1,
+    ForkAttributionAuthorityImportRequestV1 as Request, ForkEventAuthorityErrorV1,
+    ForkEventProvenanceAuthorityPortV1, ForkManifestPublicationErrorV1,
+    ForkManifestPublicationPortV1,
 };
 
 /// One adapter under test.
@@ -57,9 +71,7 @@ fn install_policy(
     store: &mut dyn Destination,
     policy: &ForkAttributionIssuerPolicyV1,
 ) -> Fallible<()> {
-    let pin = AuthenticatedOperatorPolicyPinV1::new(POLICY_SCOPE, policy.digest());
-    store.install(&pin, &policy.to_canonical_cbor())?;
-    Ok(())
+    pin_policy(store, policy)
 }
 
 /// Seed the destination parent and install the policy admitting `built`.
@@ -395,11 +407,11 @@ fn the_fti_owner_must_equal_the_parent_owner_in_both_directions() -> Fallible<()
     let owned = World::new(Shape::Mixed, true)?;
     let unowned = World::new(Shape::Mixed, false)?;
     let claims_owner = unowned.build(&Spec {
-        fti_owner: Some(Some(EntityId::new())),
+        fti_owner: FtiOwner::Replace(Some(EntityId::new())),
         ..Spec::default()
     })?;
     let drops_owner = owned.build(&Spec {
-        fti_owner: Some(None),
+        fti_owner: FtiOwner::Replace(None),
         ..Spec::default()
     })?;
     on_both_adapters(|store| {
@@ -530,8 +542,14 @@ fn imported_code_two_stays_unreadable_and_closed_to_local_appends() -> Fallible<
         import(store, &world, &built)?;
         let child = world.child_at(0)?.id;
         let head = PARENT_CUT + 4;
-        assert!(store.read_fork_event_suffix(child, PARENT_CUT + 1).is_err());
-        assert!(store.read_committed(child, head).is_err());
+        assert_eq!(
+            store.read_fork_event_suffix(child, PARENT_CUT + 1),
+            Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+        );
+        assert_eq!(
+            store.read_committed(child, head),
+            Err(ForkManifestPublicationErrorV1::PublicationConflict)
+        );
         let draft = EventDraft::new(
             EntityId::new(),
             Kind::new("fae1.import.test"),
@@ -564,5 +582,327 @@ fn a_file_backed_sqlite_import_survives_reopen_and_a_second_connection() -> Fall
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ))?;
     assert_eq!(import(&mut second, &world, &built), Ok(receipt));
+    Ok(())
+}
+
+/// A Fork admission authority session on one store, for local `POB1` commands.
+struct LocalAuthority {
+    host: ForkHostSigningKeyV1,
+    adapter: ForkAuthenticationAdapterSigningKeyV1,
+    policy: ForkAuthenticationPolicyV1,
+    session: ForkAdmissionAuthoritySessionV1,
+}
+
+fn encode(value: &Value) -> Fallible<Vec<u8>> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(value, &mut bytes)?;
+    Ok(bytes)
+}
+
+/// The Principal digest that every local `POB1` command of this file binds.
+fn principal() -> Fallible<pos_core::Hash> {
+    Ok(principal_digest_v1(&PrincipalRefV1::try_new(
+        [4; 16],
+        "test.local",
+    )?)?)
+}
+
+impl LocalAuthority {
+    fn open<S: ForkAdmissionAuthorityBootstrapPortV1>(store: &mut S) -> Fallible<Self> {
+        let host = ForkHostSigningKeyV1::from_seed([111; 32])?;
+        let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([112; 32])?;
+        let policy = ForkAuthenticationPolicyV1::new(vec![ForkAuthenticationAdapterPolicyV1 {
+            adapter_id: "test-adapter".to_owned(),
+            verifying_key: adapter.public_key(),
+            minimum_assurance: 1,
+            registry_bindings: vec![pos_core::Hash::from_bytes([3; 32])],
+        }])?;
+        let key = PublicKey::from_bytes(host.public_key());
+        let initialize = store.begin_fork_admission_initialize(key, policy.digest()?)?;
+        store.finalize_fork_admission_initialize(
+            &initialize,
+            &host.sign_initialize(&initialize.to_canonical_cbor()?)?,
+        )?;
+        let open = store.begin_fork_admission_open(key, policy.digest()?)?;
+        let signature = host.sign_open(&open.to_canonical_cbor()?)?;
+        let session = store.finalize_fork_admission_open(&open, &signature)?;
+        Ok(Self {
+            host,
+            adapter,
+            policy,
+            session,
+        })
+    }
+
+    fn command<S: ForkAdmissionAuthorityBootstrapPortV1>(
+        &self,
+        store: &S,
+        operation: u8,
+        owner: &str,
+    ) -> Fallible<ForkAdmissionHostCommandV1> {
+        let record = AuthenticatedPrincipalRecordV1 {
+            principal: PrincipalRefV1::try_new([4; 16], "test.local")?,
+            adapter_id: "test-adapter".to_owned(),
+            assurance: 1,
+            issued_at: 0,
+            expires_at: u64::MAX,
+            registry_binding: pos_core::Hash::from_bytes([3; 32]),
+            operation_nonce: [5; 32],
+        };
+        let evidence = self.adapter.sign_authenticated_principal(record)?;
+        let verified = verify_authenticated_principal_evidence_v1(&self.policy, evidence)?;
+        let digest = principal_digest_v1(&verified.evidence().record().principal)?;
+        let host_record = store.fork_admission_host_record()?;
+        let inner = encode(&Value::Array(vec![
+            Value::Text("POC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(host_record.store_id().as_bytes().to_vec()),
+            Value::Bytes(self.session.identity().as_bytes().to_vec()),
+            Value::Bytes(vec![operation; 32]),
+            Value::Bytes(verified.evidence().digest()?.as_bytes().to_vec()),
+            Value::Bytes(digest.as_bytes().to_vec()),
+            Value::Text(owner.to_owned()),
+        ]))?;
+        let signature = self.host.sign_command(&inner, &verified)?;
+        let fac1 = encode(&Value::Array(vec![
+            Value::Text("FAC1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(inner),
+            Value::Bytes(verified.evidence().to_canonical_cbor()?),
+            Value::Bytes(signature.as_bytes().to_vec()),
+        ]))?;
+        Ok(ForkAdmissionHostCommandV1::from_canonical_cbor(&fac1)?)
+    }
+
+    /// Bind the shared Principal to `owner` through the local authority.
+    fn bind<S>(
+        &self,
+        store: &mut S,
+        operation: u8,
+        owner: &str,
+    ) -> Fallible<Result<ForkAdmissionOperationResultV1, ForkAdmissionErrorV1>>
+    where
+        S: ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1,
+    {
+        let command = self.command(&*store, operation, owner)?;
+        Ok(store.execute_fork_admission_command(&self.session, &self.policy, &command))
+    }
+}
+
+/// A store that imports Forks and admits local Principal bindings.
+trait Admitting:
+    Destination + ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1
+{
+}
+
+impl<T> Admitting for T where
+    T: Destination + ForkAdmissionAuthorityBootstrapPortV1 + ForkAdmissionAuthorityPortV1
+{
+}
+
+/// Import a Fork of the shared Principal, then bind it locally to `owner`.
+fn bind_after_import<S: Admitting>(
+    store: &mut S,
+    owner: &str,
+) -> Fallible<Result<ForkAdmissionOperationResultV1, ForkAdmissionErrorV1>> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec {
+        principal_digest: Some(principal()?),
+        ..Spec::default()
+    })?;
+    prepare(store, &world, &built)?;
+    import(store, &world, &built)?;
+    let authority = LocalAuthority::open(store)?;
+    authority.bind(store, 1, owner)
+}
+
+/// Bind the shared Principal locally to `local`, then import a Fork of it.
+fn import_after_bind<S: Admitting>(
+    store: &mut S,
+    local: &str,
+) -> Fallible<Result<Receipt, ImportError>> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec {
+        principal_digest: Some(principal()?),
+        ..Spec::default()
+    })?;
+    let authority = LocalAuthority::open(store)?;
+    assert!(authority.bind(store, 1, local)?.is_ok());
+    prepare(store, &world, &built)?;
+    Ok(import(store, &world, &built))
+}
+
+#[test]
+fn a_principal_forking_twice_reuses_its_equal_owner_binding() -> Fallible<()> {
+    let mut world = World::new(Shape::Mixed, false)?;
+    world.add_child(Shape::Mixed)?;
+    let first = world.build(&Spec::default())?;
+    let second = world.build(&Spec {
+        principal_seed: 0x22,
+        ..Spec::distinct(1)
+    })?;
+    on_both_adapters(|store| {
+        prepare(store, &world, &first)?;
+        let one = import(store, &world, &first)?;
+        let two = import(store, &world, &second)?;
+        assert_ne!(one, two);
+        // Recovery and retry read each import's own POB1 record.
+        assert_eq!(import(store, &world, &first), Ok(one));
+        assert_eq!(import(store, &world, &second), Ok(two));
+        Ok(())
+    })
+}
+
+#[test]
+fn another_owner_for_an_imported_principal_is_a_conflict() -> Fallible<()> {
+    let mut world = World::new(Shape::Mixed, false)?;
+    world.add_child(Shape::Mixed)?;
+    let first = world.build(&Spec::default())?;
+    let other = world.build(&Spec {
+        creator: "creator-b",
+        principal_seed: 0x22,
+        ..Spec::distinct(1)
+    })?;
+    on_both_adapters(|store| {
+        prepare(store, &world, &first)?;
+        let receipt = import(store, &world, &first)?;
+        assert_eq!(import(store, &world, &other), Err(ImportError::Conflict));
+        assert_eq!(store.get_timeline(world.child_at(1)?.id)?, None);
+        assert_eq!(import(store, &world, &first), Ok(receipt));
+        Ok(())
+    })
+}
+
+#[test]
+fn a_local_binding_after_an_import_resolves_for_an_equal_owner_only() -> Fallible<()> {
+    assert!(bind_after_import(&mut MemoryStore::new(), "creator-a")?.is_ok());
+    assert!(bind_after_import(&mut SqliteStore::open_in_memory()?, "creator-a")?.is_ok());
+    let conflict = Err(ForkAdmissionErrorV1::PrincipalOwnerConflict);
+    assert_eq!(
+        bind_after_import(&mut MemoryStore::new(), "creator-b")?.map(|_| ()),
+        conflict
+    );
+    assert_eq!(
+        bind_after_import(&mut SqliteStore::open_in_memory()?, "creator-b")?.map(|_| ()),
+        conflict
+    );
+    Ok(())
+}
+
+#[test]
+fn an_import_after_a_local_binding_resolves_for_an_equal_owner_only() -> Fallible<()> {
+    let memory_equal = import_after_bind(&mut MemoryStore::new(), "creator-a")?;
+    assert!(memory_equal.is_ok());
+    let sqlite_equal = import_after_bind(&mut SqliteStore::open_in_memory()?, "creator-a")?;
+    assert!(sqlite_equal.is_ok());
+    let memory_other = import_after_bind(&mut MemoryStore::new(), "creator-b")?;
+    assert_eq!(memory_other.err(), Some(ImportError::Conflict));
+    let sqlite_other = import_after_bind(&mut SqliteStore::open_in_memory()?, "creator-b")?;
+    assert_eq!(sqlite_other.err(), Some(ImportError::Conflict));
+    Ok(())
+}
+
+#[test]
+fn an_occupied_operation_key_of_another_fork_is_a_conflict() -> Fallible<()> {
+    let mut world = World::new(Shape::Mixed, false)?;
+    world.add_child(Shape::Mixed)?;
+    let first = world.build(&Spec::default())?;
+    let colliding = [
+        // The same append operation IDs.
+        Spec {
+            operations_seed: 0xa0,
+            ..Spec::distinct(1)
+        },
+        // The same classifier registration operation ID.
+        Spec {
+            registration_seed: 0x61,
+            ..Spec::distinct(1)
+        },
+        // The same POB1 operation ID under another Principal.
+        Spec {
+            binding_seed: 0x21,
+            ..Spec::distinct(1)
+        },
+        // The same publication operation ID.
+        Spec {
+            publication_seed: 0x91,
+            ..Spec::distinct(1)
+        },
+    ];
+    for spec in colliding {
+        let other = world.build(&spec)?;
+        on_both_adapters(|store| {
+            prepare(store, &world, &first)?;
+            import(store, &world, &first)?;
+            assert_eq!(import(store, &world, &other), Err(ImportError::Conflict));
+            assert_eq!(store.get_timeline(world.child_at(1)?.id)?, None);
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_file_backed_store_reports_partial_state_and_indeterminate_writes() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec::default())?;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fae1-tamper.sqlite");
+    let path = path.to_str().ok_or("utf-8 path")?;
+    let mut store = SqliteStore::open(path)?;
+    prepare(&mut store, &world, &built)?;
+    // An uncertain write is reported, rolled back, and then recovered by retry.
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch(
+        "CREATE TRIGGER fault BEFORE INSERT ON fork_publication_artifacts
+         BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
+    )?;
+    assert_eq!(import(&mut store, &world, &built), Err(ImportError::StorageIndeterminate));
+    assert_eq!(store.get_timeline(world.child_at(0)?.id)?, None);
+    connection.execute_batch("DROP TRIGGER fault")?;
+    import(&mut store, &world, &built)?;
+    // Partial committed state is corrupt authority, never repaired.
+    connection.execute_batch("DELETE FROM fork_append_operations")?;
+    assert_eq!(import(&mut store, &world, &built), Err(ImportError::CorruptAuthority));
+    assert_eq!(import(&mut store, &world, &built), Err(ImportError::CorruptAuthority));
+    Ok(())
+}
+
+#[test]
+fn a_tampered_shared_source_or_retained_policy_is_corrupt_authority() -> Fallible<()> {
+    let mut world = World::new(Shape::Mixed, false)?;
+    world.add_child(Shape::Mixed)?;
+    let first = world.build(&Spec::default())?;
+    let second = world.build(&Spec::distinct(1))?;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fae1-source.sqlite");
+    let path = path.to_str().ok_or("utf-8 path")?;
+    let mut store = SqliteStore::open(path)?;
+    prepare(&mut store, &world, &first)?;
+    import(&mut store, &world, &first)?;
+    let connection = rusqlite::Connection::open(path)?;
+    connection.execute_batch("UPDATE imported_fork_classifier_sources SET fcs1_cbor = x'00'")?;
+    assert_eq!(import(&mut store, &world, &second), Err(ImportError::CorruptAuthority));
+    assert_eq!(store.get_timeline(world.child_at(1)?.id)?, None);
+    connection.execute_batch("UPDATE fork_attribution_issuer_policies SET fip1_cbor = x'00'")?;
+    assert_eq!(import(&mut store, &world, &first), Err(ImportError::CorruptAuthority));
+    Ok(())
+}
+
+#[test]
+fn rows_keyed_only_by_the_child_are_an_occupied_key_not_corruption() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec::default())?;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fae1-orphan.sqlite");
+    let path = path.to_str().ok_or("utf-8 path")?;
+    let mut store = SqliteStore::open(path)?;
+    prepare(&mut store, &world, &built)?;
+    let child = world.child_at(0)?.id;
+    rusqlite::Connection::open(path)?.execute(
+        "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES (?1, x'00')",
+        rusqlite::params![child.to_string()],
+    )?;
+    assert_eq!(import(&mut store, &world, &built), Err(ImportError::Conflict));
     Ok(())
 }

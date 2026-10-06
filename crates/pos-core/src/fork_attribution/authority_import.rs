@@ -141,8 +141,11 @@ impl ImportedPrincipalOwnerBindingV1 {
         self.authority_origin_digest
     }
 
-    /// `POB1` fields 2–4 and 5: the operation, Principal, Owner, and local
-    /// projection of the origin, which the code-2 digest replaces.
+    /// `POB1` fields 2–4: the operation, Principal, and Owner.
+    ///
+    /// The returned input is the local projection, whose origin member is
+    /// `Local`; the carried code-2 origin is
+    /// [`Self::authority_origin_digest`].
     #[must_use]
     pub const fn input(&self) -> &PrincipalOwnerBindingInputV1 {
         self.binding.input()

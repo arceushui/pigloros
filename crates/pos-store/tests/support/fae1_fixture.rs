@@ -4,9 +4,8 @@
 //! signed Fork children, and the registry that verifies them. `World::build`
 //! turns one child into a complete, issuer-signed `FAE1` whose every
 //! cross-record equality holds, and a `Spec` selects one controlled deviation.
-//! The public tests and the adapter unit tests include this one file.
-
-#![allow(dead_code, unreachable_pub)]
+//! The public tests and the adapter unit tests include this one file; the
+//! items are public so that no test crate sees them as unused.
 
 use std::{error::Error, sync::Arc};
 
@@ -57,6 +56,7 @@ const ROUTE_A_SCHEMA: u8 = 0x51;
 const ROUTE_B_SCHEMA: u8 = 0x52;
 
 /// A digest of 32 copies of `value`.
+#[must_use]
 pub const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
 }
@@ -73,12 +73,23 @@ pub enum Shape {
 }
 
 impl Shape {
+    /// The number of child Events of this shape.
+    #[must_use]
     pub const fn events(self) -> u64 {
         match self {
             Self::Mixed => 4,
             Self::EmptyClassified | Self::EmptyUnclassified => 0,
         }
     }
+}
+
+/// Whether `FTI1` keeps the exported owner or names another.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FtiOwner {
+    /// The exported Timeline owner.
+    Keep,
+    /// Another owner, or none.
+    Replace(Option<EntityId>),
 }
 
 /// One controlled deviation of a built `FAE1`. Defaults build a valid one.
@@ -89,6 +100,8 @@ pub struct Spec {
     pub import_seed: u8,
     pub binding_seed: u8,
     pub principal_seed: u8,
+    /// The Principal digest, instead of one derived from `principal_seed`.
+    pub principal_digest: Option<Hash>,
     pub admission_seed: u8,
     pub registration_seed: u8,
     pub publication_seed: u8,
@@ -106,8 +119,10 @@ pub struct Spec {
     pub policy_digest: Option<Hash>,
     /// Replace the parent chain hash in `FTI1`, `FAR1`, and `FRM1`.
     pub parent_hash: Option<Hash>,
-    /// Replace the `FTI1` owner.
-    pub fti_owner: Option<Option<EntityId>>,
+    /// The `FTI1` owner.
+    pub fti_owner: FtiOwner,
+    /// The creator Owner of `POB1`, `FAR1`, and the attribution key.
+    pub creator: &'static str,
     /// Retype the first child Event as protected geographic evidence.
     pub geographic: bool,
     /// Replace the registrar of the imported `FCS1`.
@@ -121,6 +136,7 @@ impl Default for Spec {
             import_seed: 0x11,
             binding_seed: 0x21,
             principal_seed: 0x22,
+            principal_digest: None,
             admission_seed: 0x31,
             registration_seed: 0x61,
             publication_seed: 0x91,
@@ -133,7 +149,8 @@ impl Default for Spec {
             final_hash: None,
             policy_digest: None,
             parent_hash: None,
-            fti_owner: None,
+            fti_owner: FtiOwner::Keep,
+            creator: "creator-a",
             geographic: false,
             registrar: "registrar-a",
         }
@@ -143,6 +160,7 @@ impl Default for Spec {
 impl Spec {
     /// A spec whose every id differs from the default, so it can share a
     /// destination with a default import.
+    #[must_use]
     pub fn distinct(child: usize) -> Self {
         Self {
             child,
@@ -240,9 +258,18 @@ fn owner(value: &str) -> Fallible<OwnerIdV1> {
     Ok(OwnerIdV1::new(value)?)
 }
 
-/// The fixture creator's attribution-signing identity.
-pub fn attribution_identity(epoch: u64) -> KeyIdentityV1 {
-    KeyIdentityV1::new("creator-a", KeyRoleV1::SubjectAttributionSigning, epoch)
+/// The attribution-signing identity of `creator` at `epoch`.
+#[must_use]
+pub fn attribution_identity(creator: &str, epoch: u64) -> KeyIdentityV1 {
+    KeyIdentityV1::new(creator, KeyRoleV1::SubjectAttributionSigning, epoch)
+}
+
+/// The first item of a list.
+///
+/// # Errors
+/// Returns an error when the list is empty.
+pub fn first<T>(items: &[T]) -> Fallible<&T> {
+    items.first().ok_or_else(|| "empty list".into())
 }
 
 fn material(seed: u8) -> SigningKeyMaterial {
@@ -359,12 +386,11 @@ fn provenance(
     })
 }
 
-fn encode_all<T>(records: &[T], encode_one: fn(&T) -> Vec<u8>) -> Vec<Vec<u8>> {
-    records.iter().map(encode_one).collect()
-}
-
 impl World {
     /// A world with one signed Fork child of `shape`.
+    ///
+    /// # Errors
+    /// Returns the construction error of any fixture record.
     pub fn new(shape: Shape, owned: bool) -> Fallible<Self> {
         let timeline_material = material(0x41);
         let timeline_identity =
@@ -411,6 +437,9 @@ impl World {
     }
 
     /// Fork another signed child of `shape` at the parent cut.
+    ///
+    /// # Errors
+    /// Returns the construction error of any fixture record.
     pub fn add_child(&mut self, shape: Shape) -> Fallible<()> {
         let name = format!("fae1-child-{}", self.children.len());
         let child = self
@@ -442,11 +471,17 @@ impl World {
     }
 
     /// The child at `index`.
+    ///
+    /// # Errors
+    /// Returns an error when there is no such child.
     pub fn child_at(&self, index: usize) -> Fallible<&Child> {
         self.children.get(index).ok_or_else(|| "no such child".into())
     }
 
     /// The exact own-segment export of the root, the destination parent.
+    ///
+    /// # Errors
+    /// Returns the export error.
     pub fn root_export(&self) -> Fallible<TimelineExport> {
         Ok(export_timeline_own(
             &self.source,
@@ -458,21 +493,28 @@ impl World {
 
     /// Bind the erasure gate, save the registry, and import the verified
     /// root Timeline, so a destination can accept this world's Forks.
+    ///
+    /// # Errors
+    /// Returns the store or verification error.
     pub fn seed_destination(&self, store: &mut dyn EventStore) -> Fallible<()> {
-        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
-        store.save_key_registry(&self.registry)?;
-        import_timeline_verified_v1(store, self.root_export()?, &self.anchors)?;
-        Ok(())
+        self.seed_prefix(store, usize::MAX)
     }
 
     /// Like [`Self::seed_destination`], but the destination parent keeps only
     /// its first `keep` Events.
+    ///
+    /// # Errors
+    /// Returns the store or verification error.
     pub fn seed_truncated(&self, store: &mut dyn EventStore, keep: usize) -> Fallible<()> {
+        self.seed_prefix(store, keep)
+    }
+
+    fn seed_prefix(&self, store: &mut dyn EventStore, keep: usize) -> Fallible<()> {
         store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
         store.save_key_registry(&self.registry)?;
         let mut export = self.root_export()?;
         export.events.truncate(keep);
-        export.timeline.head = Seq::from_u64(u64::try_from(keep)?);
+        export.timeline.head = Seq::from_u64(u64::try_from(export.events.len())?);
         import_timeline_verified_v1(store, export, &self.anchors)?;
         Ok(())
     }
@@ -494,7 +536,7 @@ impl World {
     fn timeline_import(&self, child: &Child, spec: &Spec) -> Fallible<ForkTimelineImportV1> {
         let (projection, _) = ForkTimelineImportV1::from_export(&child.export)?;
         let mut input: ForkTimelineImportInputV1 = projection.input().clone();
-        if let Some(owner) = spec.fti_owner {
+        if let FtiOwner::Replace(owner) = spec.fti_owner {
             input.owner = owner;
         }
         if let Some(parent_hash) = spec.parent_hash {
@@ -504,6 +546,9 @@ impl World {
     }
 
     /// Build and sign the `FAE1` that `spec` describes.
+    ///
+    /// # Errors
+    /// Returns the construction error of any record.
     pub fn build(&self, spec: &Spec) -> Fallible<Built> {
         let child = self.children.get(spec.child).ok_or("no such child")?;
         let issuer_key = SigningKey::from_bytes(&[spec.issuer_seed; 32]);
@@ -552,17 +597,77 @@ impl World {
     fn records(&self, child: &Child, spec: &Spec, origin: Hash) -> Fallible<BuiltRecords> {
         let exported_hash = child.export.parent_fork_hash.ok_or("no parent hash")?;
         let parent_hash = spec.parent_hash.unwrap_or(exported_hash);
+        let authority = self.authority(child, spec, origin, parent_hash)?;
+        let graph = (child.shape != Shape::EmptyUnclassified)
+            .then(|| classifier(child.id, authority.digest, spec))
+            .transpose()?;
+        let evidence = self.evidence(child, spec)?;
+        let derived = match graph.as_ref() {
+            Some(graph) => evidence
+                .iter()
+                .zip(1_u64..)
+                .map(|(event, local)| provenance(event, local, child.id, &graph.table, spec))
+                .collect::<Fallible<Vec<_>>>()?,
+            None => Vec::new(),
+        };
+        let publication = self.publication(child, spec, origin, &authority, &derived)?;
+        let attribution = material(0x71);
+        let (key_record, key_tombstone) =
+            key_evidence(&attribution, spec.destroyed_key, spec.creator)?;
+        Ok(BuiltRecords {
+            records: ForkAttributionAuthorityRecordsV1 {
+                principal_owner_binding: authority.binding.to_canonical_cbor(),
+                fork_admission: authority.admission.to_canonical_cbor(),
+                event_origins: derived
+                    .iter()
+                    .map(|record| record.origin.to_canonical_cbor())
+                    .collect(),
+                intervention_admissions: derived
+                    .iter()
+                    .filter_map(|record| record.intervention.as_ref())
+                    .map(ForkInterventionAdmissionV1::to_canonical_cbor)
+                    .collect(),
+                publication_operation: publication.operation.to_canonical_cbor(),
+                publication_binding: publication.binding.to_canonical_cbor(),
+                publication_artifact: publication.artifact.to_canonical_cbor(),
+            },
+            key_record,
+            key_tombstone,
+            evidence,
+            timeline_import: self.timeline_import(child, spec)?,
+            classifier: graph.as_ref().map(|graph| ForkAttributionClassifierRecordsV1 {
+                source: graph.source.to_canonical_cbor(),
+                table: graph.table.to_canonical_cbor(),
+                registration: graph.registration.to_canonical_cbor(),
+            }),
+            operations: derived
+                .iter()
+                .map(|record| record.operation.to_canonical_cbor())
+                .collect(),
+        })
+    }
+
+    /// The code-2 `POB1` and `FAR1` of one import.
+    fn authority(
+        &self,
+        child: &Child,
+        spec: &Spec,
+        origin: Hash,
+        parent_hash: Hash,
+    ) -> Fallible<Authority> {
         let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
             operation_id: hash(spec.binding_seed),
-            principal_digest: hash(spec.principal_seed),
-            owner: owner("creator-a")?,
+            principal_digest: spec
+                .principal_digest
+                .unwrap_or_else(|| hash(spec.principal_seed)),
+            owner: owner(spec.creator)?,
             origin: ForkAuthorityOriginV1::Local,
         })?;
-        let imported_binding = ImportedPrincipalOwnerBindingV1::from_local(binding, origin);
+        let binding = ImportedPrincipalOwnerBindingV1::from_local(binding, origin);
         let admission = ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
             operation_id: hash(spec.admission_seed),
-            principal_owner_binding_digest: imported_binding.digest(),
-            creator: owner("creator-a")?,
+            principal_owner_binding_digest: binding.digest(),
+            creator: owner(spec.creator)?,
             parent_timeline_id: self.root,
             child_timeline_id: child.id,
             room_revision_descriptor_hash: hash(0x41),
@@ -574,33 +679,37 @@ impl World {
             attribution_required: true,
             origin: ForkAttributionOriginV1::Local,
         })?;
-        let imported_admission =
-            ImportedForkAdmissionRecordV1::from_local(admission, origin);
-        let admission_digest = imported_admission.digest();
-        let graph = (child.shape != Shape::EmptyUnclassified)
-            .then(|| classifier(child.id, admission_digest, spec))
-            .transpose()?;
-        let evidence = self.evidence(child, spec)?;
-        let derived = match graph.as_ref() {
-            Some(graph) => evidence
-                .iter()
-                .zip(1_u64..)
-                .map(|(event, local)| provenance(event, local, child.id, &graph.table, spec))
-                .collect::<Fallible<Vec<_>>>()?,
-            None => Vec::new(),
-        };
+        let admission = ImportedForkAdmissionRecordV1::from_local(admission, origin);
+        Ok(Authority {
+            digest: admission.digest(),
+            binding,
+            admission,
+        })
+    }
+
+    /// The signed `FSM1` with its `FPO1`, `FPB1`, and `FPA1`.
+    fn publication(
+        &self,
+        child: &Child,
+        spec: &Spec,
+        origin: Hash,
+        authority: &Authority,
+        derived: &[Provenance],
+    ) -> Fallible<Publication> {
+        let exported_hash = child.export.parent_fork_hash.ok_or("no parent hash")?;
+        let parent_hash = spec.parent_hash.unwrap_or(exported_hash);
+        let final_head = PARENT_CUT + child.shape.events();
+        let final_hash = spec.final_hash.unwrap_or(child.final_hash);
         let sequences = derived
             .iter()
             .filter(|record| record.intervention.is_some())
             .map(|record| record.operation.input().logical_seq)
             .collect::<Vec<_>>();
-        let final_head = PARENT_CUT + child.shape.events();
-        let final_hash = spec.final_hash.unwrap_or(child.final_hash);
         let manifest = self.signed_manifest(
             ForkReproManifestInputV1 {
                 parent_timeline_id: self.root,
                 fork_timeline_id: child.id,
-                admission_digest,
+                admission_digest: authority.digest,
                 room_revision_descriptor_hash: hash(0x41),
                 parent_logical_head: PARENT_CUT,
                 parent_chain_head_hash: parent_hash,
@@ -613,69 +722,31 @@ impl World {
             spec,
         )?;
         let attribution = material(0x71);
-        let publication = ImportedForkPublicationOperationV1::from_local(
-            ForkPublicationOperationV1::new(ForkPublicationOperationInputV1 {
-                operation_id: hash(spec.publication_seed),
-                child_timeline_id: child.id,
-                final_logical_head: final_head,
-                final_chain_head_hash: final_hash,
-                admission_digest,
-                signing_identity: attribution_identity(1),
-                private_material_digest: attribution.material_digest(),
-                public_verification_key: attribution.public_verification_key(),
-                signed_manifest_record_id: manifest.record_id(),
-                origin: ForkAttributionOriginV1::Local,
-            })?,
-            origin,
-        );
-        let publication_binding =
-            ForkPublicationBindingV1::new(ForkPublicationBindingInputV1 {
-                child_timeline_id: child.id,
-                final_logical_head: final_head,
-                operation_id: hash(spec.publication_seed),
-                signed_manifest_record_id: manifest.record_id(),
-            })?;
-        let artifact = ForkPublicationArtifactV1::new(ForkPublicationArtifactInputV1 {
-            signed_manifest_record_id: manifest.record_id(),
+        let operation = ForkPublicationOperationV1::new(ForkPublicationOperationInputV1 {
             operation_id: hash(spec.publication_seed),
-            signed_manifest_bytes: manifest.to_canonical_cbor(),
+            child_timeline_id: child.id,
+            final_logical_head: final_head,
+            final_chain_head_hash: final_hash,
+            admission_digest: authority.digest,
+            signing_identity: attribution_identity(spec.creator, 1),
+            private_material_digest: attribution.material_digest(),
+            public_verification_key: attribution.public_verification_key(),
+            signed_manifest_record_id: manifest.record_id(),
+            origin: ForkAttributionOriginV1::Local,
         })?;
-        let (key_record, key_tombstone) = key_evidence(&attribution, spec.destroyed_key)?;
-        let origins = derived
-            .iter()
-            .map(|record| record.origin.clone())
-            .collect::<Vec<_>>();
-        let interventions = derived
-            .iter()
-            .filter_map(|record| record.intervention.clone())
-            .collect::<Vec<_>>();
-        let operations = derived
-            .iter()
-            .map(|record| record.operation.clone())
-            .collect::<Vec<_>>();
-        Ok(BuiltRecords {
-            records: ForkAttributionAuthorityRecordsV1 {
-                principal_owner_binding: imported_binding.to_canonical_cbor(),
-                fork_admission: imported_admission.to_canonical_cbor(),
-                event_origins: encode_all(&origins, EventOriginRecordV1::to_canonical_cbor),
-                intervention_admissions: encode_all(
-                    &interventions,
-                    ForkInterventionAdmissionV1::to_canonical_cbor,
-                ),
-                publication_operation: publication.to_canonical_cbor(),
-                publication_binding: publication_binding.to_canonical_cbor(),
-                publication_artifact: artifact.to_canonical_cbor(),
-            },
-            key_record,
-            key_tombstone,
-            evidence,
-            timeline_import: self.timeline_import(child, spec)?,
-            classifier: graph.as_ref().map(|graph| ForkAttributionClassifierRecordsV1 {
-                source: graph.source.to_canonical_cbor(),
-                table: graph.table.to_canonical_cbor(),
-                registration: graph.registration.to_canonical_cbor(),
-            }),
-            operations: encode_all(&operations, ForkAppendOperationV1::to_canonical_cbor),
+        Ok(Publication {
+            operation: ImportedForkPublicationOperationV1::from_local(operation, origin),
+            binding: ForkPublicationBindingV1::new(ForkPublicationBindingInputV1 {
+                child_timeline_id: child.id,
+                final_logical_head: final_head,
+                operation_id: hash(spec.publication_seed),
+                signed_manifest_record_id: manifest.record_id(),
+            })?,
+            artifact: ForkPublicationArtifactV1::new(ForkPublicationArtifactInputV1 {
+                signed_manifest_record_id: manifest.record_id(),
+                operation_id: hash(spec.publication_seed),
+                signed_manifest_bytes: manifest.to_canonical_cbor(),
+            })?,
         })
     }
 
@@ -691,20 +762,30 @@ impl World {
         let signer = material(spec.manifest_signer_seed.unwrap_or(0x71));
         let mut registry = KeyRegistryStateV1::new();
         registry.register_key(KeyRegistrationV1::new(
-            attribution_identity(1),
+            attribution_identity(spec.creator, 1),
             signer.material_digest(),
             Some(signer.public_verification_key()),
         ))?;
         let manifest = ForkReproManifestV1::new(input)?;
         let payload = CanonicalBytes::from_vec(manifest.to_canonical_cbor());
-        let signature =
-            sign_for_registered_role(&mut registry, &signer, attribution_identity(1), &payload)?;
-        Ok(SignedForkReproManifestV1::new(
-            attribution_identity(1),
-            manifest,
-            signature,
-        )?)
+        let identity = attribution_identity(spec.creator, 1);
+        let signature = sign_for_registered_role(&mut registry, &signer, identity, &payload)?;
+        Ok(SignedForkReproManifestV1::new(identity, manifest, signature)?)
     }
+}
+
+/// The code-2 `POB1` and `FAR1` with the `FAR1` digest.
+struct Authority {
+    binding: ImportedPrincipalOwnerBindingV1,
+    admission: ImportedForkAdmissionRecordV1,
+    digest: Hash,
+}
+
+/// The publication records of one import.
+struct Publication {
+    operation: ImportedForkPublicationOperationV1,
+    binding: ForkPublicationBindingV1,
+    artifact: ForkPublicationArtifactV1,
 }
 
 struct BuiltRecords {
@@ -720,8 +801,9 @@ struct BuiltRecords {
 fn key_evidence(
     attribution: &SigningKeyMaterial,
     destroyed: bool,
+    creator: &str,
 ) -> Fallible<(ImportedKeyRecordV1, Option<ImportedKeyTombstoneV1>)> {
-    let identity = attribution_identity(1);
+    let identity = attribution_identity(creator, 1);
     let key = attribution.public_verification_key();
     if destroyed {
         Ok((
@@ -742,6 +824,9 @@ fn key_evidence(
 }
 
 /// The genesis `FIP1` of the fixture destination, naming one issuer.
+///
+/// # Errors
+/// Returns the policy construction error.
 pub fn pinned_policy(
     issuer: &ForkAttributionIssuerV1,
     state: ForkAttributionIssuerStateV1,
@@ -760,11 +845,18 @@ pub fn pinned_policy(
 }
 
 /// All own Events of one Timeline in a store.
-pub fn own_events(store: &dyn EventStore, timeline: TimelineId) -> Fallible<Vec<pos_core::Event>> {
+///
+/// # Errors
+/// Returns the store error.
+pub fn own_events(
+    store: &dyn EventStore,
+    timeline: TimelineId,
+) -> Fallible<Vec<pos_core::Event>> {
     Ok(store.read_own(timeline, SeqRange::all())?)
 }
 
 /// The import request that pins `built`'s own policy and `world`'s root.
+#[must_use]
 pub fn request_for<'a>(
     world: &'a World,
     built: &'a Built,
@@ -778,6 +870,9 @@ pub fn request_for<'a>(
 }
 
 /// Install `policy` under the operator pin for the fixture scope.
+///
+/// # Errors
+/// Returns the policy installation error.
 pub fn pin_policy(
     store: &mut dyn ForkAttributionIssuerPolicyInstallationPortV1,
     policy: &ForkAttributionIssuerPolicyV1,

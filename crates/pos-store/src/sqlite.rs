@@ -1113,6 +1113,35 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
         constraints: &["CHECK (length(fcs1_digest) = 32)"],
     },
     SqliteSchemaTable {
+        name: "imported_fork_principal_owner_bindings",
+        columns_query: "PRAGMA table_info(imported_fork_principal_owner_bindings)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "import_operation_id",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "principal_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "pob1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(import_operation_id) = 32)",
+            "CHECK (length(principal_digest) = 32)",
+            "UNIQUE (pob1_cbor)",
+        ],
+    },
+    SqliteSchemaTable {
         name: "imported_fork_key_evidence",
         columns_query: "PRAGMA table_info(imported_fork_key_evidence)",
         columns: &[
@@ -11999,6 +12028,17 @@ impl SqliteStore {
             return (existing.input().owner == owner)
                 .then_some(ForkAdmissionOperationResultV1::PrincipalOwner(existing))
                 .ok_or(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict);
+        }
+        // ADR-105 erratum E10: a Principal an import bound to another Owner is
+        // a rebinding conflict too; an equal imported Owner is no conflict.
+        if fork_attribution_authority_import::imported_other_owner(
+            &self.conn,
+            principal_digest,
+            owner,
+        )
+        .map_err(fork_attribution_authority_import::imported_owner_failure)?
+        {
+            return Err(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict);
         }
         // Verified POC1 facts carry nonzero operation and Principal digests,
         // so construction cannot fail; any failure still fails closed.

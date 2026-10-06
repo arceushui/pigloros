@@ -40,6 +40,11 @@
 #[cfg(test)]
 extern crate self as pos_store;
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../tests/support/fae1_fixture.rs"]
+pub mod fae1_fixture;
+
 pub mod fork_admission_authority;
 pub mod fork_attribution_authority_import;
 pub mod fork_attribution_issuer_policy;

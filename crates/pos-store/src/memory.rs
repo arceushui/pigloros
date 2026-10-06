@@ -2726,6 +2726,10 @@ impl MemoryStore {
     fn fork_publication_record_is_present(&self, record_id: Hash) -> bool {
         self.fork_publication_artifacts.contains_key(&record_id)
             || self
+                .imported_fork_publication_operations
+                .values()
+                .any(|row| row.fields().signed_manifest_record_id == record_id)
+            || self
                 .fork_publication_operations
                 .values()
                 .any(|row| row.input().signed_manifest_record_id == record_id)
@@ -2805,6 +2809,12 @@ impl ForkManifestPublicationPortV1 for MemoryStore {
         F: FnOnce(&HeldRegistryAuthorizationV1, &[u8]) -> Result<Signature, E>,
     {
         validate_publication_request(&request)?;
+        if self
+            .imported_fork_publication_operations
+            .contains_key(&request.operation_id)
+        {
+            return Err(ForkManifestPublicationErrorV1::CorruptOrConflicting);
+        }
         if let Some(operation) = self.fork_publication_operations.get(&request.operation_id) {
             let input = operation.input();
             let committed = self.read_committed(input.child_timeline_id, input.final_logical_head);
@@ -3009,6 +3019,11 @@ impl MemoryStore {
             return (existing.input().owner == owner)
                 .then(|| ForkAdmissionOperationResultV1::PrincipalOwner(existing.clone()))
                 .ok_or(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict);
+        }
+        // ADR-105 erratum E10: a Principal an import bound to another Owner is
+        // a rebinding conflict too; an equal imported Owner is no conflict.
+        if self.imported_principal_has_other_owner(principal_digest, owner) {
+            return Err(pos_core::ForkAdmissionErrorV1::PrincipalOwnerConflict);
         }
         // Verified POC1 facts carry nonzero operation and Principal digests,
         // so construction cannot fail; any failure still fails closed.

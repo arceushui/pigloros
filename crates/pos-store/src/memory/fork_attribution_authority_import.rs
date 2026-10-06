@@ -12,15 +12,13 @@
 //! child Timeline. Staging is the one fallible mutation: a later failure
 //! deletes the staged child, and every row insert is infallible.
 
-use std::collections::HashSet;
-
 use pos_core::{
     store::{EventStore, TimelineExport},
     EventId, EventOriginRecordV1, ForkAppendOperationV1, ForkClassifierRegistrationV1,
     ForkClassifierSourceV1, ForkClassifierTableV1, ForkInterventionAdmissionV1,
     ForkPublicationArtifactV1, ForkPublicationBindingV1, Hash, ImportedForkAdmissionRecordV1,
     ImportedForkPublicationOperationV1, ImportedKeyRecordV1, ImportedKeyTombstoneV1,
-    ImportedPrincipalOwnerBindingV1, TimelineId,
+    ImportedPrincipalOwnerBindingV1, OwnerIdV1, TimelineId,
 };
 
 use super::MemoryStore;
@@ -55,6 +53,19 @@ impl ForkAttributionAuthorityImportPortV1 for MemoryStore {
 }
 
 impl MemoryStore {
+    /// Whether an imported `POB1` binds `principal` to an Owner other than
+    /// `owner`.
+    pub(super) fn imported_principal_has_other_owner(
+        &self,
+        owner: OwnerIdV1,
+    ) -> bool {
+        self.imported_fork_principal_owner_bindings
+            .values()
+            .any(|record| {
+                record.input().principal_digest == principal && record.input().owner != owner
+            })
+    }
+
     /// Whether any key naming the child Fork is held.
     fn import_child_held(&self, child: TimelineId) -> bool {
         self.timelines.contains_key(&child)
@@ -80,18 +91,21 @@ impl MemoryStore {
                 .any(|row| row.child == child)
     }
 
-    /// Whether the `POB1` operation or Principal key is held.
+    /// Whether the `POB1` operation is held, or its Principal is bound to
+    /// another Owner (erratum E10: an equal Owner is no conflict).
     fn import_binding_held(&self, plan: &InstallPlanV1<'_>) -> bool {
         let binding = plan.closure().principal_owner_binding().input();
-        self.imported_fork_principal_owner_bindings
-            .contains_key(&binding.operation_id)
+        let owner = binding.owner;
+        let principal = binding.principal_digest;
+        let local_other = self
+            .fork_principal_owner_bindings
+            .get(&principal)
+            .is_some_and(|record| record.input().owner != owner);
+        local_other
+            || self.imported_principal_has_other_owner(principal, owner)
             || self
                 .imported_fork_principal_owner_bindings
-                .values()
-                .any(|record| record.input().principal_digest == binding.principal_digest)
-            || self
-                .fork_principal_owner_bindings
-                .contains_key(&binding.principal_digest)
+                .contains_key(&binding.operation_id)
             || self
                 .fork_principal_owner_bindings
                 .values()
@@ -102,11 +116,6 @@ impl MemoryStore {
     /// is held.
     fn import_event_rows_held(&self, plan: &InstallPlanV1<'_>) -> bool {
         let closure = plan.closure();
-        let held_events = self
-            .fork_append_operations
-            .values()
-            .map(|record| record.input().event_id)
-            .collect::<HashSet<_>>();
         closure
             .classifier()
             .is_some_and(|graph| self.import_registration_held(&graph.registration))
@@ -117,7 +126,7 @@ impl MemoryStore {
             || plan
                 .event_ids()
                 .iter()
-                .any(|event_id| self.import_event_held(*event_id, &held_events))
+                .any(|event_id| self.import_event_held(*event_id))
     }
 
     fn import_registration_held(&self, record: &ForkClassifierRegistrationV1) -> bool {
@@ -130,9 +139,12 @@ impl MemoryStore {
         self.fork_append_operations.contains_key(&operation_id)
     }
 
-    fn import_event_held(&self, event_id: EventId, held_events: &HashSet<EventId>) -> bool {
+    fn import_event_held(&self, event_id: EventId) -> bool {
         self.event_ids.contains(&event_id)
-            || held_events.contains(&event_id)
+            || self
+                .fork_append_operations
+                .values()
+                .any(|record| record.input().event_id == event_id)
             || self.fork_event_origins.contains_key(&event_id)
             || self.fork_intervention_admissions.contains_key(&event_id)
     }
@@ -235,7 +247,7 @@ impl MemoryStore {
         let artifact = closure.publication_artifact();
         self.fork_publication_bindings.insert(
             (plan.child(), plan.final_head()),
-            closure.publication_binding().clone(),
+            *closure.publication_binding(),
         );
         self.fork_publication_artifacts
             .insert(artifact.input().signed_manifest_record_id, artifact.clone());
@@ -373,6 +385,11 @@ impl ImportBackendV1 for MemoryStore {
         Ok(())
     }
 
+    /// A failed body deletes the staged child. `MemoryStore` has no
+    /// transaction to roll back, so when that delete itself fails the staged
+    /// child stays visible without authority rows: the outcome is
+    /// `StorageIndeterminate`, and every retry reports the child as an
+    /// occupied key (`Conflict`) until the Timeline is removed.
     fn atomically<T, F>(&mut self, child: TimelineId, body: F) -> Result<T, ImportError>
     where
         F: FnOnce(&mut Self) -> Result<T, ImportError>,
@@ -392,11 +409,6 @@ impl ImportBackendV1 for MemoryStore {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[path = "../../tests/support/fae1_fixture.rs"]
-mod fae1_fixture;
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use pos_core::{
         ForkAdmissionRecordV1, ForkAppendOperationInputV1, ForkAttributionImportClosureV1,
@@ -404,10 +416,15 @@ mod tests {
         PrincipalOwnerBindingV1,
     };
 
-    use super::fae1_fixture::{
-        hash, pin_policy, request_for, Built, Fallible, Shape, Spec, World, PARENT_CUT,
-    };
     use super::*;
+    use crate::{
+        fae1_fixture::{
+            attribution_identity, first, hash, pin_policy, request_for, Built, Fallible, Shape,
+            Spec, World, PARENT_CUT,
+        },
+        ForkManifestPublicationErrorV1, ForkManifestPublicationPortV1,
+        ForkManifestPublicationRequestV1,
+    };
 
     type Outcome = Result<ForkAttributionAuthorityImportReceiptV1, ImportError>;
 
@@ -418,7 +435,6 @@ mod tests {
         child: TimelineId,
         import_operation: Hash,
         binding_operation: Hash,
-        principal: Hash,
         registration_operation: Hash,
         operation: Hash,
         event: EventId,
@@ -444,11 +460,7 @@ mod tests {
         }
     }
 
-    fn first<T>(items: &[T]) -> Fallible<&T> {
-        items.first().ok_or_else(|| "empty list".into())
-    }
-
-    fn keys(
+    fn import_keys(
         world: &World,
         built: &Built,
         closure: &ForkAttributionImportClosureV1,
@@ -460,7 +472,6 @@ mod tests {
             child: world.child_at(0)?.id,
             import_operation: built.envelope.unsigned().input().import_operation_id,
             binding_operation: binding.operation_id,
-            principal: binding.principal_digest,
             registration_operation: graph.registration.input().operation_id,
             operation: first(closure.append_operations())?.input().operation_id,
             event: first(closure.event_origins())?.input().event_id,
@@ -484,7 +495,7 @@ mod tests {
         let mut store = prepared(&world, &built)?;
         store.import_verified(&request_for(&world, &built))?;
         let closure = ForkAttributionImportClosureV1::validate(&built.envelope)?;
-        let keys = keys(&world, &built, &closure)?;
+        let keys = import_keys(&world, &built, &closure)?;
         Ok(Imported {
             world,
             built,
@@ -677,11 +688,11 @@ mod tests {
     fn a_tampered_shared_source_blocks_a_second_import() -> Fallible<()> {
         let mut world = World::new(Shape::Mixed, false)?;
         world.add_child(Shape::Mixed)?;
-        let first = world.build(&Spec::default())?;
+        let initial = world.build(&Spec::default())?;
         let second = world.build(&Spec::distinct(1))?;
-        let mut store = prepared(&world, &first)?;
-        store.import_verified(&request_for(&world, &first))?;
-        let closure = ForkAttributionImportClosureV1::validate(&first.envelope)?;
+        let mut store = prepared(&world, &initial)?;
+        store.import_verified(&request_for(&world, &initial))?;
+        let closure = ForkAttributionImportClosureV1::validate(&initial.envelope)?;
         let graph = closure.classifier().ok_or("no classifier")?;
         let other = ForkClassifierSourceV1::new(ForkClassifierSourceInputV1 {
             registrar_identifier: "registrar-b".to_owned(),
@@ -728,7 +739,7 @@ mod tests {
         let world = World::new(Shape::Mixed, false)?;
         let built = world.build(&Spec::default())?;
         let closure = ForkAttributionImportClosureV1::validate(&built.envelope)?;
-        let keys = keys(&world, &built, &closure)?;
+        let keys = import_keys(&world, &built, &closure)?;
         let mut store = prepared(&world, &built)?;
         occupy(&mut store, &closure, &keys)?;
         let outcome = store.import_verified(&request_for(&world, &built));
@@ -753,14 +764,14 @@ mod tests {
                     .insert(keys.child, graph.table.clone());
                 Ok(())
             },
-            |store, closure, keys| {
+            |store, closure, _keys| {
                 let graph = closure.classifier().ok_or("no classifier")?;
                 store
                     .fork_classifier_registrations
                     .insert(hash(0xee), graph.registration.clone());
                 Ok(())
             },
-            |store, closure, keys| {
+            |store, closure, _keys| {
                 let operation = first(closure.append_operations())?;
                 store
                     .fork_append_operations
@@ -787,7 +798,7 @@ mod tests {
                 store.fork_append_operations.insert(keys.operation, other);
                 Ok(())
             },
-            |store, closure, keys| {
+            |store, closure, _keys| {
                 let operation = first(closure.append_operations())?;
                 let other = ForkAppendOperationV1::new(ForkAppendOperationInputV1 {
                     child_timeline_id: TimelineId::new(),
@@ -819,7 +830,7 @@ mod tests {
                     .insert(keys.event, record.clone());
                 Ok(())
             },
-            |store, closure, keys| {
+            |store, _closure, keys| {
                 store.event_ids.insert(keys.event);
                 Ok(())
             },
@@ -827,19 +838,16 @@ mod tests {
                 let record = closure.principal_owner_binding();
                 store
                     .imported_fork_principal_owner_bindings
-                    .insert(hash(0xee), record.clone());
+                    .insert(keys.binding_operation, record.clone());
                 Ok(())
             },
-            |store, closure, keys| {
+            |store, closure, _keys| {
+                // A local binding that carries the same operation ID, filed
+                // under another Principal.
                 let record = PrincipalOwnerBindingV1::new(
                     closure.principal_owner_binding().input().clone(),
                 )?;
-                store
-                    .fork_principal_owner_bindings
-                    .insert(keys.principal, record.clone());
-                store
-                    .fork_principal_owner_bindings
-                    .insert(hash(0xee), record);
+                store.fork_principal_owner_bindings.insert(hash(0xee), record);
                 Ok(())
             },
         ];
@@ -856,7 +864,7 @@ mod tests {
                 let key = (keys.child, keys.head);
                 store
                     .fork_publication_bindings
-                    .insert(key, closure.publication_binding().clone());
+                    .insert(key, *closure.publication_binding());
                 Ok(())
             },
             |store, closure, keys| {
@@ -887,11 +895,11 @@ mod tests {
                 store.fork_publication_artifacts.insert(hash(0xee), record.clone());
                 Ok(())
             },
-            |store, closure, keys| {
+            |store, closure, _keys| {
                 let key = (TimelineId::new(), 1);
                 store
                     .fork_publication_bindings
-                    .insert(key, closure.publication_binding().clone());
+                    .insert(key, *closure.publication_binding());
                 Ok(())
             },
         ];
@@ -920,6 +928,109 @@ mod tests {
             store.import_verified(&request_for(&world, &wrong)),
             Err(ImportError::StorageIndeterminate)
         );
+        // The staged child could not be removed, so the retry finds it held.
+        assert_eq!(
+            store.import_verified(&request_for(&world, &right)),
+            Err(ImportError::Conflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_principal_forking_twice_keeps_one_owner_and_its_own_pob1_per_import() -> Fallible<()> {
+        let mut world = World::new(Shape::Mixed, false)?;
+        world.add_child(Shape::Mixed)?;
+        let initial = world.build(&Spec::default())?;
+        let second = world.build(&Spec {
+            principal_seed: 0x22,
+            ..Spec::distinct(1)
+        })?;
+        let mut store = prepared(&world, &initial)?;
+        let one = store.import_verified(&request_for(&world, &initial))?;
+        let two = store.import_verified(&request_for(&world, &second))?;
+        assert_ne!(one, two);
+        assert!(store.fork_principal_owner_bindings.is_empty());
+        assert_eq!(store.imported_fork_principal_owner_bindings.len(), 2);
+        assert_eq!(store.import_verified(&request_for(&world, &initial)), Ok(one));
+        assert_eq!(store.import_verified(&request_for(&world, &second)), Ok(two));
+        Ok(())
+    }
+
+    #[test]
+    fn another_owner_for_an_imported_principal_is_a_conflict() -> Fallible<()> {
+        let mut world = World::new(Shape::Mixed, false)?;
+        world.add_child(Shape::Mixed)?;
+        let initial = world.build(&Spec::default())?;
+        let other = world.build(&Spec {
+            creator: "creator-b",
+            principal_seed: 0x22,
+            ..Spec::distinct(1)
+        })?;
+        let mut store = prepared(&world, &initial)?;
+        store.import_verified(&request_for(&world, &initial))?;
+        let outcome = store.import_verified(&request_for(&world, &other));
+        assert_eq!(outcome, Err(ImportError::Conflict));
+        assert_eq!(store.get_timeline(world.child_at(1)?.id)?, None);
+        assert_eq!(store.imported_fork_principal_owner_bindings.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_local_principal_binding_conflicts_only_for_another_owner() -> Fallible<()> {
+        let world = World::new(Shape::Mixed, false)?;
+        let built = world.build(&Spec::default())?;
+        for (creator, expected) in [
+            ("creator-a", None),
+            ("creator-b", Some(ImportError::Conflict)),
+        ] {
+            let local = PrincipalOwnerBindingV1::new(pos_core::PrincipalOwnerBindingInputV1 {
+                operation_id: hash(0x5a),
+                principal_digest: hash(0x22),
+                owner: pos_core::OwnerIdV1::new(creator)?,
+                origin: pos_core::ForkAuthorityOriginV1::Local,
+            })?;
+            let mut store = prepared(&world, &built)?;
+            store.fork_principal_owner_bindings.insert(hash(0x22), local);
+            let outcome = store.import_verified(&request_for(&world, &built));
+            assert_eq!(outcome.err(), expected, "{creator}");
+            assert_eq!(store.fork_principal_owner_bindings.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_local_publication_cannot_reuse_an_imported_operation_or_record() -> Fallible<()> {
+        let state = imported()?;
+        let request = ForkManifestPublicationRequestV1 {
+            operation_id: state.keys.publication_operation,
+            child_timeline_id: state.keys.child,
+            expected_final_logical_head: state.keys.head,
+            signing_identity: attribution_identity("creator-a", 1),
+            private_material_digest: hash(1),
+            public_verification_key: pos_core::PublicKey::from_bytes([1; 32]),
+            expected_registry: pos_core::KeyRegistryStateV1::new(),
+        };
+        let record_id = state.keys.record_id;
+        let mut store = state.store;
+        let outcome = store.commit_authorized::<(), _>(request, |_, _| Err(()));
+        assert_eq!(
+            outcome,
+            Err(ForkManifestPublicationErrorV1::CorruptOrConflicting)
+        );
+        assert!(store.fork_publication_record_is_present(record_id));
+        Ok(())
+    }
+
+    #[test]
+    fn an_admission_row_of_another_import_is_corrupt() -> Fallible<()> {
+        let mut state = imported()?;
+        let other = state.world.build(&Spec::distinct(0))?;
+        let mut elsewhere = prepared(&state.world, &other)?;
+        let receipt = elsewhere.import_verified(&request_for(&state.world, &other))?;
+        let operation = state.keys.import_operation;
+        let row = state.store.imported_fork_attributions.get_mut(&operation);
+        row.ok_or("no row")?.admission_bytes = receipt.to_canonical_cbor();
+        assert_eq!(state.retry(), Err(CORRUPT));
         Ok(())
     }
 }

@@ -21,6 +21,24 @@
 //! no independent value to compare them with, so the import compares them
 //! only with the other carried records (`FRM1`, `FPO1`, `FCS1`, `FCT1`, and
 //! `FCR1`) and never with destination state.
+//!
+//! Decisions the ADR leaves open, recorded here:
+//!
+//! - Parent and identity equalities (the requested parent, an absent parent,
+//!   and the `FTI1` owner against the parent owner) are
+//!   `InvalidAuthorityClosure`. Range and chain-hash checks (a parent below
+//!   the cut, the parent or final chain hash, the #411 range, and the
+//!   empty-segment head) are `InvalidRangeEvidence`. Every #202 failure is
+//!   `InvalidEventEvidence`.
+//! - State under an import operation ID that the admission row does not
+//!   cover (key evidence without an admission) is partial or orphan state and
+//!   `CorruptAuthority`. A row that names only the child, a publication, or
+//!   another semantic key, without anything under the operation ID, is an
+//!   occupied key and a `Conflict` (R6.8 step 3).
+//! - A Principal already bound to an equal Owner, locally or by an earlier
+//!   import, is not an occupancy conflict (erratum E10); the import keeps its
+//!   own `POB1` under its import operation ID in an imported store, so the
+//!   local Principal table never holds a second binding for it.
 
 use std::collections::HashMap;
 
@@ -235,9 +253,7 @@ impl PreparedImportV1 {
         let input = envelope.unsigned().input();
         let export = input
             .timeline_import
-            .to_timeline_export(&input.event_evidence)
-            .ok()
-            .ok_or(ImportError::InvalidAuthorityClosure)?;
+            .to_timeline_export(&input.event_evidence)?;
         if export
             .events
             .iter()
@@ -268,6 +284,34 @@ impl PreparedImportV1 {
             .input()
             .timeline_import
             .final_logical_head()
+    }
+
+    /// The `IFA1` admission that this envelope earns under `generation`.
+    fn admission(
+        &self,
+        generation: u64,
+    ) -> Result<ImportedForkAttributionAdmissionV1, ImportError> {
+        Ok(ImportedForkAttributionAdmissionV1::from_envelope(
+            &self.envelope,
+            generation,
+        )?)
+    }
+
+    /// Whether a stored `IFA1` names exactly this envelope, whatever policy
+    /// generation admitted it.
+    fn is_admitted_by(&self, admission: &ImportedForkAttributionAdmissionV1) -> bool {
+        let fields = admission.input();
+        let unsigned = self.envelope.unsigned();
+        let input = unsigned.input();
+        fields.import_operation_id == input.import_operation_id
+            && fields.authority_origin_digest == unsigned.authority_origin_digest()
+            && fields.full_envelope_digest == self.envelope.full_envelope_digest()
+            && fields.issuer == input.issuer
+            && fields.issuer_policy_digest == input.issuer_policy_digest
+            && fields.child_timeline_id == self.fork().child_timeline_id
+            && fields.final_logical_head == self.final_head()
+            && fields.closure_root == unsigned.closure_root()
+            && fields.fork_admission_digest == self.closure.fork_admission_digest()
     }
 
     const fn plan(&self, admission: ImportedForkAttributionAdmissionV1) -> InstallPlanV1<'_> {
@@ -516,13 +560,9 @@ fn revalidate<S: ImportBackendV1>(
         .ok()
         .ok_or(corrupt)?;
     let generation = admission.input().issuer_policy_generation;
-    let derived =
-        ImportedForkAttributionAdmissionV1::from_envelope(&prepared.envelope, generation)
-            .ok()
-            .ok_or(corrupt)?;
     let consistent = prepared.import_operation_id() == operation_id
         && prepared.envelope.full_envelope_digest() == stored.envelope_digest
-        && derived == admission;
+        && prepared.is_admitted_by(&admission);
     if !consistent {
         return Err(corrupt);
     }
@@ -533,9 +573,8 @@ fn revalidate<S: ImportBackendV1>(
             policy_generation: generation,
         },
     };
-    store
-        .admit_issuer(&query)
-        .map_err(committed_policy_failure)?;
+    let verdict = store.admit_issuer(&query);
+    verdict.map_err(committed_policy_failure)?;
     let plan = prepared.plan(admission);
     let complete = store.read_installed(&plan)? == InstalledRowsV1::expected(&plan)
         && child_matches(store, &prepared)?;
@@ -585,9 +624,7 @@ fn precheck<S: ImportBackendV1>(
         return Err(ImportError::InvalidSignature);
     }
     precheck_parent(store, prepared, request)?;
-    verify_timeline_import_v1(store, &prepared.export, request.trust_anchors)
-        .ok()
-        .ok_or(ImportError::InvalidEventEvidence)?;
+    precheck_events(store, prepared, request)?;
     verify_manifest_signature(prepared)?;
     Ok(admitted.policy_generation)
 }
@@ -620,6 +657,34 @@ fn precheck_parent<S: EventStore>(
     }
 }
 
+/// Import step 7, first half: the #202 verification with the destination
+/// registry snapshot. A missing registry is a verification failure; only a
+/// storage failure is indeterminate.
+fn precheck_events<S: EventStore>(
+    store: &S,
+    prepared: &PreparedImportV1,
+    request: &Request<'_>,
+) -> Result<(), ImportError> {
+    if !prepared.export.events.is_empty() && store.load_key_registry()?.is_none() {
+        return Err(ImportError::InvalidEventEvidence);
+    }
+    verify_timeline_import_v1(store, &prepared.export, request.trust_anchors)
+        .map_err(|error| core_failure(&error, ImportError::InvalidEventEvidence))
+}
+
+/// Map a store or verification failure: storage failures never prove a
+/// verdict, so they are indeterminate, and any other failure is `rejection`.
+const fn core_failure(error: &CoreError, rejection: ImportError) -> ImportError {
+    if matches!(
+        error,
+        CoreError::Storage(_) | CoreError::StorageOutcomeUnknown(_)
+    ) {
+        ImportError::StorageIndeterminate
+    } else {
+        rejection
+    }
+}
+
 /// Import step 8: the ADR-065 role-bound `FSM1` signature over the complete
 /// `FRM1` bytes under the imported verification-only public key.
 fn verify_manifest_signature(prepared: &PreparedImportV1) -> Result<(), ImportError> {
@@ -644,11 +709,7 @@ fn install_absent<S: ImportBackendV1>(
         return Ok(receipt);
     }
     let generation = precheck(&*store, prepared, request)?;
-    let admission =
-        ImportedForkAttributionAdmissionV1::from_envelope(&prepared.envelope, generation)
-            .ok()
-            .ok_or(ImportError::CorruptAuthority)?;
-    let plan = prepared.plan(admission);
+    let plan = prepared.plan(prepared.admission(generation)?);
     if store.occupied(&plan)? {
         return Err(ImportError::Conflict);
     }
@@ -711,7 +772,8 @@ fn verify_signed_segment<S: EventStore>(
     let range = SeqRange::bounded(Seq::from_u64(cut.as_u64().saturating_add(1)), final_head);
     let events = store.read(child, range)?;
     let report =
-        verify_signed_timeline_range_v1(store, child, range, &events, anchors, Some(final_head))?;
+        verify_signed_timeline_range_v1(store, child, range, &events, anchors, Some(final_head))
+            .map_err(|error| core_failure(&error, ImportError::InvalidRangeEvidence))?;
     let verified = report
         .per_event()
         .iter()
@@ -725,19 +787,16 @@ fn verify_signed_segment<S: EventStore>(
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[path = "../tests/support/fae1_fixture.rs"]
-mod fae1_fixture;
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use pos_core::{Event, KeyRegistryStateV1, Timeline, TimelineMeta};
 
-    use super::fae1_fixture::{Built, Fallible, Shape, Spec, World, PARENT_CUT, POLICY_SCOPE};
     use super::{
         ForkAttributionCodecErrorV1 as Codec, ForkAttributionImportClosureErrorV1 as Closure, *,
     };
-    use crate::{memory::MemoryStore, AuthenticatedOperatorPolicyPinV1};
+    use crate::{
+        fae1_fixture::{pin_policy, request_for, Built, Fallible, Shape, Spec, World, PARENT_CUT},
+        memory::MemoryStore,
+    };
 
     #[test]
     fn decode_failures_map_to_the_closed_import_errors() {
@@ -805,20 +864,22 @@ mod tests {
     /// misreport a head, to drive the paths no honest store reaches.
     struct Probe {
         inner: MemoryStore,
-        before_body: Option<Box<dyn FnOnce(&mut MemoryStore)>>,
+        before_body: Option<Box<dyn FnOnce(&mut MemoryStore) + Send>>,
         child_head: Option<(TimelineId, Seq)>,
         hide_child: bool,
-        hide_events: bool,
+        own_events: Option<Vec<Event>>,
+        committed_verdict: Option<PolicyError>,
     }
 
     impl Probe {
-        fn new(inner: MemoryStore) -> Self {
+        const fn new(inner: MemoryStore) -> Self {
             Self {
                 inner,
                 before_body: None,
                 child_head: None,
                 hide_child: false,
-                hide_events: false,
+                own_events: None,
+                committed_verdict: None,
             }
         }
     }
@@ -865,10 +926,10 @@ mod tests {
             timeline: TimelineId,
             range: SeqRange,
         ) -> Result<Vec<Event>, CoreError> {
-            if self.hide_events {
-                return Ok(Vec::new());
+            match &self.own_events {
+                Some(events) => Ok(events.clone()),
+                None => self.inner.read_own(timeline, range),
             }
-            self.inner.read_own(timeline, range)
         }
 
         fn logical_head(&self, id: TimelineId) -> Result<Seq, CoreError> {
@@ -930,6 +991,11 @@ mod tests {
             &self,
             query: &ForkAttributionIssuerAdmissionQueryV1,
         ) -> Result<crate::ForkAttributionIssuerAdmissionV1, PolicyError> {
+            if let (Some(error), ForkAttributionIssuerAdmissionBasisV1::CommittedImport { .. }) =
+                (self.committed_verdict, query.basis)
+            {
+                return Err(error);
+            }
             self.inner.admit_issuer(query)
         }
     }
@@ -976,25 +1042,15 @@ mod tests {
         }
     }
 
-    fn request<'a>(world: &'a World, built: &'a Built) -> Request<'a> {
-        Request {
-            envelope_bytes: &built.bytes,
-            expected_issuer_policy_digest: built.policy.digest(),
-            parent_timeline_id: world.root,
-            trust_anchors: &world.anchors,
-        }
-    }
-
     fn prepared_store(world: &World, built: &Built) -> Fallible<MemoryStore> {
         let mut store = MemoryStore::new();
         world.seed_destination(&mut store)?;
-        let pin = AuthenticatedOperatorPolicyPinV1::new(POLICY_SCOPE, built.policy.digest());
-        store.install(&pin, &built.policy.to_canonical_cbor())?;
+        pin_policy(&mut store, &built.policy)?;
         Ok(store)
     }
 
     /// A prelude that commits `winner` before the transaction body runs.
-    fn racer(world: &World, winner: &Built) -> Box<dyn FnOnce(&mut MemoryStore)> {
+    fn racer(world: &World, winner: &Built) -> Box<dyn FnOnce(&mut MemoryStore) + Send> {
         let bytes = winner.bytes.clone();
         let digest = winner.policy.digest();
         let parent = world.root;
@@ -1027,7 +1083,7 @@ mod tests {
         for (winner, error) in expected {
             let mut probe = Probe::new(prepared_store(&world, &built)?);
             probe.before_body = Some(racer(&world, winner));
-            let outcome = run_import(&mut probe, &request(&world, &built));
+            let outcome = run_import(&mut probe, &request_for(&world, &built));
             assert_eq!(outcome.err(), error);
         }
         Ok(())
@@ -1039,25 +1095,39 @@ mod tests {
             let world = World::new(shape, false)?;
             let built = world.build(&Spec::default())?;
             let mut probe = Probe::new(prepared_store(&world, &built)?);
-            let child = world.children[0].id;
+            let child = world.child_at(0)?.id;
             probe.child_head = Some((child, Seq::from_u64(99)));
-            let outcome = run_import(&mut probe, &request(&world, &built));
+            let outcome = run_import(&mut probe, &request_for(&world, &built));
             assert_eq!(outcome.err(), Some(ImportError::InvalidRangeEvidence));
         }
         Ok(())
     }
 
     #[test]
-    fn a_hidden_child_or_hidden_events_make_a_committed_import_corrupt() -> Fallible<()> {
+    fn a_phantom_own_event_in_an_empty_segment_is_range_evidence() -> Fallible<()> {
+        let world = World::new(Shape::EmptyClassified, false)?;
+        let built = world.build(&Spec::default())?;
+        let mut inner = prepared_store(&world, &built)?;
+        let phantom = inner.read_own(world.root, SeqRange::all())?;
+        let mut probe = Probe::new(inner);
+        probe.own_events = Some(phantom);
+        let outcome = run_import(&mut probe, &request_for(&world, &built));
+        assert_eq!(outcome.err(), Some(ImportError::InvalidRangeEvidence));
+        Ok(())
+    }
+
+    #[test]
+    fn a_hidden_child_or_other_events_make_a_committed_import_corrupt() -> Fallible<()> {
         let world = World::new(Shape::Mixed, false)?;
         let built = world.build(&Spec::default())?;
         for hide_child in [true, false] {
             let mut probe = Probe::new(prepared_store(&world, &built)?);
-            assert!(run_import(&mut probe, &request(&world, &built)).is_ok());
-            probe.child_head = Some((world.children[0].id, Seq::from_u64(PARENT_CUT + 4)));
+            assert!(run_import(&mut probe, &request_for(&world, &built)).is_ok());
+            let head = Seq::from_u64(PARENT_CUT + 4);
+            probe.child_head = Some((world.child_at(0)?.id, head));
             probe.hide_child = hide_child;
-            probe.hide_events = !hide_child;
-            let outcome = run_import(&mut probe, &request(&world, &built));
+            probe.own_events = (!hide_child).then(Vec::new);
+            let outcome = run_import(&mut probe, &request_for(&world, &built));
             assert_eq!(outcome.err(), Some(ImportError::CorruptAuthority));
         }
         Ok(())
@@ -1068,13 +1138,60 @@ mod tests {
         let world = World::new(Shape::Mixed, false)?;
         let built = world.build(&Spec::default())?;
         let mut store = prepared_store(&world, &built)?;
-        let receipt = store.import_verified(&request(&world, &built))?;
+        let receipt = store.import_verified(&request_for(&world, &built))?;
         let stale = Request {
             expected_issuer_policy_digest: Hash::from_bytes([0x77; 32]),
-            ..request(&world, &built)
+            ..request_for(&world, &built)
         };
         assert_eq!(store.import_verified(&stale), Ok(receipt));
-        assert_eq!(PARENT_CUT, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn a_committed_admission_never_survives_an_adverse_policy_verdict() -> Fallible<()> {
+        let world = World::new(Shape::Mixed, false)?;
+        let built = world.build(&Spec::default())?;
+        let mut probe = Probe::new(prepared_store(&world, &built)?);
+        assert!(run_import(&mut probe, &request_for(&world, &built)).is_ok());
+        let cases = [
+            (PolicyError::IssuerRetired, ImportError::CorruptAuthority),
+            (PolicyError::IssuerRevoked, ImportError::CorruptAuthority),
+            (PolicyError::UntrustedIssuer, ImportError::CorruptAuthority),
+            (PolicyError::StorageIndeterminate, ImportError::StorageIndeterminate),
+        ];
+        for (verdict, expected) in cases {
+            probe.committed_verdict = Some(verdict);
+            let outcome = run_import(&mut probe, &request_for(&world, &built));
+            assert_eq!(outcome.err(), Some(expected));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn storage_failures_are_indeterminate_and_verdicts_are_rejections() {
+        let storage = CoreError::Storage("failed".to_owned());
+        let unknown = CoreError::StorageOutcomeUnknown("unknown".to_owned());
+        let verdict = CoreError::SignatureVerificationFailed;
+        for rejection in [ImportError::InvalidEventEvidence, ImportError::InvalidRangeEvidence] {
+            assert_eq!(core_failure(&storage, rejection), ImportError::StorageIndeterminate);
+            assert_eq!(core_failure(&unknown, rejection), ImportError::StorageIndeterminate);
+            assert_eq!(core_failure(&verdict, rejection), rejection);
+        }
+    }
+
+    #[test]
+    fn an_admission_names_only_its_own_envelope() -> Fallible<()> {
+        let mut world = World::new(Shape::Mixed, false)?;
+        world.add_child(Shape::Mixed)?;
+        let first = world.build(&Spec::default())?;
+        let second = world.build(&Spec::distinct(1))?;
+        let mut probe = Probe::new(prepared_store(&world, &first)?);
+        let receipt = run_import(&mut probe, &request_for(&world, &first))?;
+        let other = run_import(&mut probe, &request_for(&world, &second))?;
+        assert_ne!(receipt, other);
+        let prepared = PreparedImportV1::decode(&first.bytes)?;
+        assert!(prepared.is_admitted_by(&receipt.admission));
+        assert!(!prepared.is_admitted_by(&other.admission));
         Ok(())
     }
 }

@@ -3,15 +3,18 @@
 //! The import is one `BEGIN IMMEDIATE` transaction on the single database
 //! file: the occupancy re-check, the staged child Timeline, the staged-range
 //! check, and every row insert become visible at commit or not at all.
-//! Imported code-2 `POB1`, `FAR1`, and `FPO1` bytes sit in the same per-child
-//! tables as local rows, where the strict local decoders reject them, so every
-//! trusted read stays closed to code 2 until #519. The additive
+//! Imported code-2 `FAR1` and `FPO1` bytes sit in the same per-child tables as
+//! local rows, where the strict local decoders reject them, so every trusted
+//! read stays closed to code 2 until #519. An imported `POB1` lives in
+//! `imported_fork_principal_owner_bindings`, keyed by its import operation ID,
+//! so several imports can share one Principal and Owner (erratum E10) without
+//! a second row in the local Principal table. The additive
 //! `imported_fork_classifier_sources` store holds imported `FCS1` custody
 //! apart from `fork_classifier_sources`.
 
 use pos_core::{
     store::{EventStore, TimelineExport},
-    EventId, Hash, TimelineId,
+    EventId, ForkAdmissionErrorV1, Hash, ImportedPrincipalOwnerBindingV1, OwnerIdV1, TimelineId,
 };
 use rusqlite::{params, types::Value, Connection, OptionalExtension};
 
@@ -29,8 +32,10 @@ const KEY_EVIDENCE_PRESENT_SQL: &str = "SELECT EXISTS(SELECT 1 FROM imported_for
     WHERE import_operation_id = ?1)";
 const KEY_EVIDENCE_SQL: &str = "SELECT ikr1_cbor, ikt1_cbor FROM imported_fork_key_evidence
     WHERE import_operation_id = ?1";
-const BINDING_SQL: &str = "SELECT pob1_cbor FROM fork_principal_owner_bindings
-    WHERE operation_id = ?1";
+const BINDING_SQL: &str = "SELECT pob1_cbor FROM imported_fork_principal_owner_bindings
+    WHERE import_operation_id = ?1";
+const IMPORTED_PRINCIPAL_SQL: &str = "SELECT pob1_cbor FROM imported_fork_principal_owner_bindings
+    WHERE principal_digest = ?1";
 const ADMISSION_SQL: &str = "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1";
 const ORIGIN_SQL: &str = "SELECT eor1_cbor FROM fork_event_origins WHERE event_id = ?1";
 const INTERVENTION_SQL: &str =
@@ -77,12 +82,12 @@ const RECORD_HELD_SQL: [&str; 3] = [
     "SELECT EXISTS(SELECT 1 FROM fork_publication_bindings WHERE record_id = ?1)",
     "SELECT EXISTS(SELECT 1 FROM fork_publication_artifacts WHERE record_id = ?1)",
 ];
-/// The `POB1` operation ID key.
-const BINDING_OPERATION_HELD_SQL: &str =
-    "SELECT EXISTS(SELECT 1 FROM fork_principal_owner_bindings WHERE operation_id = ?1)";
-/// The `POB1` Principal digest key.
-const BINDING_PRINCIPAL_HELD_SQL: &str =
-    "SELECT EXISTS(SELECT 1 FROM fork_principal_owner_bindings WHERE principal_digest = ?1)";
+/// The local and imported `POB1` operation ID keys.
+const BINDING_OPERATION_HELD_SQL: [&str; 2] = [
+    "SELECT EXISTS(SELECT 1 FROM fork_principal_owner_bindings WHERE operation_id = ?1)",
+    "SELECT EXISTS(SELECT 1 FROM imported_fork_principal_owner_bindings
+     WHERE import_operation_id = ?1)",
+];
 const REGISTRATION_OPERATION_HELD_SQL: &str =
     "SELECT EXISTS(SELECT 1 FROM fork_classifier_registrations WHERE operation_id = ?1)";
 const OPERATION_HELD_SQL: &str =
@@ -107,7 +112,9 @@ impl ForkAttributionAuthorityImportPortV1 for SqliteStore {
     }
 }
 
-/// `SQLite` integers are signed; every imported head and sequence fits.
+/// `SQLite` integers are signed. Every head and sequence stored here is at
+/// most the parent cut plus the child length, and the cut was read back from
+/// this store's own `INTEGER` heads, so clamping cannot change a key.
 fn sql_int(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
@@ -148,10 +155,58 @@ fn child_held(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::Result<b
     any_held(conn, &CHILD_HELD_SQL, &child_key(plan.child()))
 }
 
-fn binding_held(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::Result<bool> {
+/// Whether the `POB1` operation ID is held, or its Principal is bound to
+/// another Owner (erratum E10: an equal Owner is no conflict).
+fn binding_held(conn: &Connection, plan: &InstallPlanV1<'_>) -> Result<bool, ImportError> {
     let binding = plan.closure().principal_owner_binding().input();
-    Ok(held(conn, BINDING_OPERATION_HELD_SQL, &blob(binding.operation_id))?
-        || held(conn, BINDING_PRINCIPAL_HELD_SQL, &blob(binding.principal_digest))?)
+    let operation = blob(binding.operation_id);
+    if any_held(conn, &BINDING_OPERATION_HELD_SQL, &operation)? {
+        return Ok(true);
+    }
+    let local = super::sqlite_principal_owner_binding(conn, binding.principal_digest)
+        .map_err(admission_failure)?;
+    if local.is_some_and(|record| record.input().owner != binding.owner) {
+        return Ok(true);
+    }
+    imported_other_owner(conn, binding.principal_digest, binding.owner)
+}
+
+/// Whether an imported `POB1` binds `principal` to an Owner other than
+/// `owner`.
+pub(super) fn imported_other_owner(
+    conn: &Connection,
+    principal: Hash,
+    owner: OwnerIdV1,
+) -> Result<bool, ImportError> {
+    let mut statement = conn.prepare(IMPORTED_PRINCIPAL_SQL)?;
+    let rows = statement.query_map(params![blob(principal)], |row| row.get::<_, Vec<u8>>(0))?;
+    for row in rows {
+        let record = ImportedPrincipalOwnerBindingV1::from_canonical_cbor(&row?)
+            .ok()
+            .ok_or(ImportError::CorruptAuthority)?;
+        if record.input().owner != owner {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Map a local Principal-binding read failure.
+const fn admission_failure(error: ForkAdmissionErrorV1) -> ImportError {
+    if matches!(error, ForkAdmissionErrorV1::StorageIndeterminate) {
+        ImportError::StorageIndeterminate
+    } else {
+        ImportError::CorruptAuthority
+    }
+}
+
+/// Map an imported Principal-binding read failure for a local `POB1`.
+pub(super) const fn imported_owner_failure(error: ImportError) -> ForkAdmissionErrorV1 {
+    if matches!(error, ImportError::StorageIndeterminate) {
+        ForkAdmissionErrorV1::StorageIndeterminate
+    } else {
+        ForkAdmissionErrorV1::CorruptAuthority
+    }
 }
 
 fn publication_held(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlite::Result<bool> {
@@ -257,11 +312,14 @@ fn read_publication_rows(
     ])
 }
 
+/// The stored `IKR1` and `IKT1` bytes of one import.
+type KeyEvidenceRowsV1 = (Option<Vec<u8>>, Option<Vec<u8>>);
+
 /// The imported `IKR1` and optional `IKT1` stored for one import.
 fn read_key_evidence(
     conn: &Connection,
     import_operation_id: Hash,
-) -> rusqlite::Result<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+) -> rusqlite::Result<KeyEvidenceRowsV1> {
     let row = conn
         .query_row(KEY_EVIDENCE_SQL, params![blob(import_operation_id)], |row| {
             Ok((
@@ -277,7 +335,8 @@ fn insert_authority_rows(conn: &Connection, plan: &InstallPlanV1<'_>) -> rusqlit
     let closure = plan.closure();
     let binding = closure.principal_owner_binding();
     conn.execute(
-        "INSERT INTO fork_principal_owner_bindings (operation_id, principal_digest, pob1_cbor)
+        "INSERT INTO imported_fork_principal_owner_bindings
+         (import_operation_id, principal_digest, pob1_cbor)
          VALUES (?1, ?2, ?3)",
         params![
             blob(binding.input().operation_id),
@@ -421,12 +480,17 @@ fn finish_import<T>(conn: &Connection, result: Result<T, ImportError>) -> Result
             .map(|()| value)
             .map_err(ImportError::from)
     });
-    match committed {
-        Ok(value) => Ok(value),
-        Err(error) => Err(conn
-            .execute_batch("ROLLBACK")
-            .map_or(ImportError::StorageIndeterminate, |()| error)),
-    }
+    let Err(error) = committed else {
+        return committed;
+    };
+    // A failed body or commit is rolled back; if that fails too, the outcome
+    // of the whole transaction is unknown.
+    let rolled_back = conn.execute_batch("ROLLBACK").is_ok();
+    Err(if rolled_back {
+        error
+    } else {
+        ImportError::StorageIndeterminate
+    })
 }
 
 impl ImportBackendV1 for SqliteStore {
@@ -522,19 +586,14 @@ impl ImportBackendV1 for SqliteStore {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[path = "../../tests/support/fae1_fixture.rs"]
-mod fae1_fixture;
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use pos_core::ForkAttributionImportClosureV1;
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
 
-    use super::fae1_fixture::{
-        hash, pin_policy, request_for, Built, Fallible, Shape, Spec, World, PARENT_CUT,
-    };
     use super::*;
+    use crate::fae1_fixture::{
+        first, hash, pin_policy, request_for, Built, Fallible, Shape, Spec, World, PARENT_CUT,
+    };
 
     type Outcome = Result<ForkAttributionAuthorityImportReceiptV1, ImportError>;
 
@@ -543,7 +602,7 @@ mod tests {
 
     /// The tables that hold one import, in install order.
     const IMPORT_TABLES: [&str; 13] = [
-        "fork_principal_owner_bindings",
+        "imported_fork_principal_owner_bindings",
         "fork_admissions",
         "fork_event_origins",
         "fork_intervention_admissions",
@@ -565,7 +624,6 @@ mod tests {
         operation: String,
         registration: String,
         binding: String,
-        principal: String,
         publication: String,
         record: String,
         head: u64,
@@ -580,11 +638,7 @@ mod tests {
         format!("x'{digits}'")
     }
 
-    fn first<T>(items: &[T]) -> Fallible<&T> {
-        items.first().ok_or_else(|| "empty list".into())
-    }
-
-    fn keys(world: &World, closure: &ForkAttributionImportClosureV1) -> Fallible<Keys> {
+    fn import_keys(world: &World, closure: &ForkAttributionImportClosureV1) -> Fallible<Keys> {
         let binding = closure.principal_owner_binding().input();
         let graph = closure.classifier().ok_or("no classifier")?;
         let publication = closure.publication_operation().fields();
@@ -594,7 +648,6 @@ mod tests {
             operation: literal(first(closure.append_operations())?.input().operation_id),
             registration: literal(graph.registration.input().operation_id),
             binding: literal(binding.operation_id),
-            principal: literal(binding.principal_digest),
             publication: literal(publication.operation_id),
             record: literal(publication.signed_manifest_record_id),
             head: PARENT_CUT + 4,
@@ -621,7 +674,7 @@ mod tests {
             let world = World::new(Shape::Mixed, false)?;
             let built = world.build(&Spec::default())?;
             let closure = ForkAttributionImportClosureV1::validate(&built.envelope)?;
-            let keys = keys(&world, &closure)?;
+            let keys = import_keys(&world, &closure)?;
             let mut store = prepared(&world, &built)?;
             store.import_verified(&request_for(&world, &built))?;
             Ok(Self {
@@ -645,7 +698,10 @@ mod tests {
 
     fn deny(store: &SqliteStore, denied: TransactionOperation) -> rusqlite::Result<()> {
         store.conn.authorizer(Some(move |context: AuthContext<'_>| {
-            if context.action == (AuthAction::Transaction { operation: denied }) {
+            if matches!(
+                context.action,
+                AuthAction::Transaction { operation } if operation == denied
+            ) {
                 Authorization::Deny
             } else {
                 Authorization::Allow
@@ -698,7 +754,7 @@ mod tests {
             format!("DELETE FROM fork_classifier_registrations WHERE child_id = {child}"),
             format!("DELETE FROM fork_event_origins WHERE event_id = {event}"),
             format!("DELETE FROM fork_admissions WHERE child_id = {child}"),
-            "DELETE FROM fork_principal_owner_bindings".to_owned(),
+            "DELETE FROM imported_fork_principal_owner_bindings".to_owned(),
             "DELETE FROM fork_publication_operations".to_owned(),
             "DELETE FROM fork_publication_bindings".to_owned(),
             "DELETE FROM fork_publication_artifacts".to_owned(),
@@ -730,7 +786,7 @@ mod tests {
             ("fork_append_operations", "fop1_cbor"),
             ("fork_event_origins", "eor1_cbor"),
             ("fork_intervention_admissions", "fia1_cbor"),
-            ("fork_principal_owner_bindings", "pob1_cbor"),
+            ("imported_fork_principal_owner_bindings", "pob1_cbor"),
             ("fork_publication_operations", "fpo1_cbor"),
             ("fork_publication_bindings", "fpb1_cbor"),
             ("fork_publication_artifacts", "fpa1_cbor"),
@@ -778,10 +834,10 @@ mod tests {
     fn a_tampered_shared_source_blocks_a_second_import() -> Fallible<()> {
         let mut world = World::new(Shape::Mixed, false)?;
         world.add_child(Shape::Mixed)?;
-        let first = world.build(&Spec::default())?;
+        let initial = world.build(&Spec::default())?;
         let second = world.build(&Spec::distinct(1))?;
-        let mut store = prepared(&world, &first)?;
-        store.import_verified(&request_for(&world, &first))?;
+        let mut store = prepared(&world, &initial)?;
+        store.import_verified(&request_for(&world, &initial))?;
         store
             .conn
             .execute_batch("UPDATE imported_fork_classifier_sources SET fcs1_cbor = x'00'")?;
@@ -828,7 +884,6 @@ mod tests {
             operation,
             registration,
             binding,
-            principal,
             ..
         } = keys;
         vec![
@@ -838,9 +893,9 @@ mod tests {
                  VALUES ({binding}, zeroblob(32), x'00')"
             ),
             format!(
-                "INSERT INTO fork_principal_owner_bindings
-                 (operation_id, principal_digest, pob1_cbor)
-                 VALUES (zeroblob(32), {principal}, x'00')"
+                "INSERT INTO imported_fork_principal_owner_bindings
+                 (import_operation_id, principal_digest, pob1_cbor)
+                 VALUES ({binding}, zeroblob(32), x'00')"
             ),
             format!(
                 "INSERT INTO fork_classifier_registrations (operation_id, child_id, fcr1_cbor)
@@ -920,7 +975,7 @@ mod tests {
         let world = World::new(Shape::Mixed, false)?;
         let built = world.build(&Spec::default())?;
         let closure = ForkAttributionImportClosureV1::validate(&built.envelope)?;
-        let keys = keys(&world, &closure)?;
+        let keys = import_keys(&world, &closure)?;
         let occupations = child_occupations(&keys)
             .into_iter()
             .chain(key_occupations(&keys))
@@ -935,6 +990,97 @@ mod tests {
             assert_eq!(admissions, i64::from(seeded), "{occupation}");
             assert_eq!(row_count(&store, "imported_fork_key_evidence")?, 0);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn a_principal_forking_twice_keeps_one_owner_and_its_own_pob1_per_import() -> Fallible<()> {
+        let mut world = World::new(Shape::Mixed, false)?;
+        world.add_child(Shape::Mixed)?;
+        let initial = world.build(&Spec::default())?;
+        let second = world.build(&Spec {
+            principal_seed: 0x22,
+            ..Spec::distinct(1)
+        })?;
+        let mut store = prepared(&world, &initial)?;
+        let one = store.import_verified(&request_for(&world, &initial))?;
+        let two = store.import_verified(&request_for(&world, &second))?;
+        assert_ne!(one, two);
+        assert_eq!(row_count(&store, "fork_principal_owner_bindings")?, 0);
+        assert_eq!(row_count(&store, "imported_fork_principal_owner_bindings")?, 2);
+        assert_eq!(store.import_verified(&request_for(&world, &initial)), Ok(one));
+        assert_eq!(store.import_verified(&request_for(&world, &second)), Ok(two));
+        Ok(())
+    }
+
+    #[test]
+    fn another_owner_for_an_imported_principal_is_a_conflict() -> Fallible<()> {
+        let mut world = World::new(Shape::Mixed, false)?;
+        world.add_child(Shape::Mixed)?;
+        let initial = world.build(&Spec::default())?;
+        let other = world.build(&Spec {
+            creator: "creator-b",
+            principal_seed: 0x22,
+            ..Spec::distinct(1)
+        })?;
+        let mut store = prepared(&world, &initial)?;
+        store.import_verified(&request_for(&world, &initial))?;
+        let outcome = store.import_verified(&request_for(&world, &other));
+        assert_eq!(outcome, Err(ImportError::Conflict));
+        assert_eq!(store.get_timeline(world.child_at(1)?.id)?, None);
+        assert_eq!(row_count(&store, "imported_fork_principal_owner_bindings")?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_local_principal_binding_conflicts_only_for_another_owner() -> Fallible<()> {
+        let world = World::new(Shape::Mixed, false)?;
+        let built = world.build(&Spec::default())?;
+        for (creator, expected) in [
+            ("creator-a", None),
+            ("creator-b", Some(ImportError::Conflict)),
+        ] {
+            let local = pos_core::PrincipalOwnerBindingV1::new(
+                pos_core::PrincipalOwnerBindingInputV1 {
+                    operation_id: hash(0x5a),
+                    principal_digest: hash(0x22),
+                    owner: pos_core::OwnerIdV1::new(creator)?,
+                    origin: pos_core::ForkAuthorityOriginV1::Local,
+                },
+            )?;
+            let mut store = prepared(&world, &built)?;
+            store.conn.execute(
+                "INSERT INTO fork_principal_owner_bindings
+                 (operation_id, principal_digest, pob1_cbor) VALUES (?1, ?2, ?3)",
+                params![
+                    hash(0x5a).as_bytes().as_slice(),
+                    hash(0x22).as_bytes().as_slice(),
+                    local.to_canonical_cbor(),
+                ],
+            )?;
+            let outcome = store.import_verified(&request_for(&world, &built));
+            assert_eq!(outcome.err(), expected, "{creator}");
+            assert_eq!(row_count(&store, "fork_principal_owner_bindings")?, 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_unreadable_imported_principal_binding_is_corrupt() -> Fallible<()> {
+        let mut world = World::new(Shape::Mixed, false)?;
+        world.add_child(Shape::Mixed)?;
+        let initial = world.build(&Spec::default())?;
+        let second = world.build(&Spec {
+            principal_seed: 0x22,
+            ..Spec::distinct(1)
+        })?;
+        let mut store = prepared(&world, &initial)?;
+        store.import_verified(&request_for(&world, &initial))?;
+        store.conn.execute_batch(
+            "UPDATE imported_fork_principal_owner_bindings SET pob1_cbor = x'00'",
+        )?;
+        let outcome = store.import_verified(&request_for(&world, &second));
+        assert_eq!(outcome, Err(CORRUPT));
         Ok(())
     }
 
