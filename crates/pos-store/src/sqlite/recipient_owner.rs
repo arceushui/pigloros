@@ -198,9 +198,22 @@ struct RecipientExportPublicationTestFencePause {
 }
 
 #[cfg(feature = "test-support")]
+type RecipientExportPublicationTestFencePauses =
+    Vec<(TimelineId, RecipientExportPublicationTestFencePause)>;
+
+#[cfg(feature = "test-support")]
 static RECIPIENT_EXPORT_PUBLICATION_TEST_FENCE_PAUSES: std::sync::Mutex<
-    Vec<(TimelineId, RecipientExportPublicationTestFencePause)>,
+    RecipientExportPublicationTestFencePauses,
 > = std::sync::Mutex::new(Vec::new());
+
+#[cfg(feature = "test-support")]
+fn lock_recipient_export_publication_test_fence_pauses(
+    pauses: &std::sync::Mutex<RecipientExportPublicationTestFencePauses>,
+) -> Result<std::sync::MutexGuard<'_, RecipientExportPublicationTestFencePauses>, CoreError> {
+    pauses
+        .lock()
+        .map_err(|_| CoreError::Storage("recipient export test pause is unavailable".to_owned()))
+}
 
 #[cfg(feature = "test-support")]
 struct RecipientExportPublicationTestFaultGuard;
@@ -215,34 +228,32 @@ impl Drop for RecipientExportPublicationTestFaultGuard {
 
 #[cfg(feature = "test-support")]
 fn pause_recipient_export_publication_after_fences(timeline: TimelineId) -> Result<(), CoreError> {
-    RECIPIENT_EXPORT_PUBLICATION_TEST_FENCE_PAUSES
-        .lock()
-        .map_err(|_| CoreError::Storage("recipient export test pause is unavailable".to_owned()))
-        .map(|mut pauses| {
-            pauses
-                .iter()
-                .position(|(configured, _)| *configured == timeline)
-                .map(|index| pauses.swap_remove(index).1)
-        })
-        .and_then(|pause| {
-            pause.map_or(Ok(()), |pause| {
-                pause
-                    .entered
-                    .send(())
-                    .map_err(|_| {
+    lock_recipient_export_publication_test_fence_pauses(
+        &RECIPIENT_EXPORT_PUBLICATION_TEST_FENCE_PAUSES,
+    )
+    .and_then(|mut pauses| {
+        let pause = pauses
+            .iter()
+            .position(|(configured, _)| *configured == timeline)
+            .map(|index| pauses.swap_remove(index).1);
+        pause.map_or(Ok(()), |pause| {
+            pause
+                .entered
+                .send(())
+                .map_err(|_| {
+                    CoreError::Storage(
+                        "recipient export test pause observer is unavailable".to_owned(),
+                    )
+                })
+                .and_then(|()| {
+                    pause.release.recv().map_err(|_| {
                         CoreError::Storage(
-                            "recipient export test pause observer is unavailable".to_owned(),
+                            "recipient export test pause release is unavailable".to_owned(),
                         )
                     })
-                    .and_then(|()| {
-                        pause.release.recv().map_err(|_| {
-                            CoreError::Storage(
-                                "recipient export test pause release is unavailable".to_owned(),
-                            )
-                        })
-                    })
-            })
+                })
         })
+    })
 }
 
 #[cfg(feature = "test-support")]
@@ -287,9 +298,11 @@ fn install_recipient_export_publication_test_commit_abort(
         .commit_hook(Some(move || {
             callback_abort_once.swap(false, std::sync::atomic::Ordering::AcqRel)
         }))
-        .map_err(storage_error)?;
-    RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_HOOK_INSTALLED.with(|installed| installed.set(true));
-    Ok(())
+        .map_err(storage_error)
+        .map(|()| {
+            RECIPIENT_EXPORT_PUBLICATION_TEST_COMMIT_HOOK_INSTALLED
+                .with(|installed| installed.set(true));
+        })
 }
 
 #[cfg(feature = "test-support")]
@@ -301,9 +314,10 @@ fn clear_recipient_export_publication_test_commit_hook(
     if installed {
         connection
             .commit_hook::<fn() -> bool>(None)
-            .map_err(storage_error)?;
+            .map_err(storage_error)
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1094,39 +1108,79 @@ impl SqliteStore {
         self.conn
             .execute_batch(begin_immediate_sql())
             .map_err(storage_error)?;
-        let pre_authorization = (|| {
-            validate_owner_directory(owner)?;
-            ensure_recipient_custody_tables(&self.conn)?;
-            claim_recipient_custody_directory(&self.conn, owner)?;
-            ensure_recipient_export_catalog(&self.conn)?;
-            if !recipient_export_pending_belongs_to(&self.conn, owner, export_id)? {
-                return Err(RecipientExportPublicationErrorV1::Store(
-                    CoreError::Storage("recipient export reservation is unavailable".to_owned()),
-                ));
-            }
-
-            let logical_head = Self::logical_head_unchecked_on(&self.conn, request.timeline_id)?;
-            if logical_head != expected_logical_head {
-                return Err(RecipientExportPublicationErrorV1::SourceChanged);
-            }
-            if Self::timeline_owner_in_transaction(&self.conn, request.timeline_id)?
-                != Some(request.token.subject_id())
-            {
-                return Err(RecipientExportPublicationErrorV1::Consent(
-                    ConsentError::NoConsent,
-                ));
-            }
-
-            let registry =
-                self.load_key_registry()?
-                    .ok_or(RecipientExportPublicationErrorV1::Registry(
-                        KeyRegistryErrorV1::RegistryUnavailable,
-                    ))?;
-            let identity = request.recipient.identity();
-            let registered_digest =
-                registered_material_digest_or_absent_sentinel(&registry, identity);
-            Ok((registry, identity, registered_digest, logical_head))
-        })();
+        let pre_authorization = validate_owner_directory(owner)
+            .map_err(RecipientExportPublicationErrorV1::Store)
+            .and_then(|()| {
+                ensure_recipient_custody_tables(&self.conn)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
+            })
+            .and_then(|()| {
+                claim_recipient_custody_directory(&self.conn, owner)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
+            })
+            .and_then(|()| {
+                ensure_recipient_export_catalog(&self.conn)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
+            })
+            .and_then(|()| {
+                recipient_export_pending_belongs_to(&self.conn, owner, export_id)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
+                    .and_then(|reservation_belongs_to_owner| {
+                        if !reservation_belongs_to_owner {
+                            Err(RecipientExportPublicationErrorV1::Store(CoreError::Storage(
+                                "recipient export reservation is unavailable".to_owned(),
+                            )))
+                        } else {
+                            Self::logical_head_unchecked_on(&self.conn, request.timeline_id)
+                                .map_err(RecipientExportPublicationErrorV1::Store)
+                                .and_then(|logical_head| {
+                                    if logical_head != expected_logical_head {
+                                        Err(RecipientExportPublicationErrorV1::SourceChanged)
+                                    } else {
+                                        Self::timeline_owner_in_transaction(
+                                            &self.conn,
+                                            request.timeline_id,
+                                        )
+                                        .map_err(RecipientExportPublicationErrorV1::Store)
+                                        .and_then(|timeline_owner| {
+                                            if timeline_owner
+                                                != Some(request.token.subject_id())
+                                            {
+                                                Err(RecipientExportPublicationErrorV1::Consent(
+                                                    ConsentError::NoConsent,
+                                                ))
+                                            } else {
+                                                self.load_key_registry()
+                                                    .map_err(
+                                                        RecipientExportPublicationErrorV1::Store,
+                                                    )
+                                                    .and_then(|registry| {
+                                                        registry.ok_or(
+                                                            RecipientExportPublicationErrorV1::Registry(
+                                                                KeyRegistryErrorV1::RegistryUnavailable,
+                                                            ),
+                                                        )
+                                                    })
+                                                    .map(|registry| {
+                                                        let identity = request.recipient.identity();
+                                                        let registered_digest =
+                                                            registered_material_digest_or_absent_sentinel(
+                                                                &registry, identity,
+                                                            );
+                                                        (
+                                                            registry,
+                                                            identity,
+                                                            registered_digest,
+                                                            logical_head,
+                                                        )
+                                                    })
+                                            }
+                                        })
+                                    }
+                                })
+                        }
+                    })
+            });
         let (mut registry, identity, registered_digest, logical_head) = match pre_authorization {
             Ok(value) => value,
             Err(error) => return finish_recipient_export_transaction(&self.conn, Err(error)),
@@ -1153,7 +1207,9 @@ impl SqliteStore {
                 ),
             };
         #[cfg(feature = "test-support")]
-        clear_recipient_export_publication_test_commit_hook(&self.conn)?;
+        let result = clear_recipient_export_publication_test_commit_hook(&self.conn)
+            .map_err(RecipientExportPublicationErrorV1::Store)
+            .and(result);
         result
     }
 
@@ -1189,36 +1245,53 @@ impl SqliteStore {
             request.artifact_digest,
             request.evaluation,
         )?;
-        let mut source = RecipientExportPlaintextStagingV1::new(source)?;
-        let timeline_id = source.source().timeline.id();
-        let local_head = source.source().timeline.head;
-        let mut seed = Zeroizing::new([0_u8; 32]);
-        recipient_random_bytes(&mut *seed).map_err(|error| {
-            RecipientExportPublicationErrorV1::Store(recipient_rng_error(&error))
-        })?;
-        let mut rng = StdRng::from_seed(*seed);
-        let encoded = encrypt_timeline_export_v1(source.source(), recipient, export_id, &mut rng)
-            .map_err(RecipientExportPublicationErrorV1::Export)?
-            .encode();
-        source.zeroize()?;
-        // `usize` is no wider than `u64` on supported Rust targets.
-        let ciphertext_length = encoded.len() as u64;
-        let ciphertext_digest = pos_core::Hash::from_bytes(*blake3::hash(&encoded).as_bytes());
-        write_recipient_export_ciphertext(owner, export_id, &encoded)?;
-        let publication = PublishedRecipientExportV1 {
-            export_id,
-            recipient,
-            timeline_id,
-            local_head,
-            logical_head,
-            ciphertext_length,
-            ciphertext_digest,
-        };
-        record_recipient_export_catalog(&self.conn, owner, &publication)?;
-        remove_recipient_export_pending(&self.conn, export_id)?;
-        #[cfg(feature = "test-support")]
-        install_recipient_export_publication_test_commit_abort(&self.conn)?;
-        Ok(publication)
+        RecipientExportPlaintextStagingV1::new(source)
+            .map_err(RecipientExportPublicationErrorV1::Store)
+            .and_then(|mut source| {
+                let timeline_id = source.source().timeline.id();
+                let local_head = source.source().timeline.head;
+                let mut seed = Zeroizing::new([0_u8; 32]);
+                recipient_random_bytes(&mut *seed).map_err(|error| {
+                    RecipientExportPublicationErrorV1::Store(recipient_rng_error(&error))
+                })?;
+                let mut rng = StdRng::from_seed(*seed);
+                encrypt_timeline_export_v1(source.source(), recipient, export_id, &mut rng)
+                    .map_err(RecipientExportPublicationErrorV1::Export)
+                    .and_then(|encrypted| {
+                        let encoded = encrypted.encode();
+                        source
+                            .zeroize()
+                            .map_err(RecipientExportPublicationErrorV1::Store)
+                            .and_then(|()| {
+                                // `usize` is no wider than `u64` on supported Rust targets.
+                                let ciphertext_length = encoded.len() as u64;
+                                let ciphertext_digest =
+                                    pos_core::Hash::from_bytes(*blake3::hash(&encoded).as_bytes());
+                                write_recipient_export_ciphertext(owner, export_id, &encoded)?;
+                                let publication = PublishedRecipientExportV1 {
+                                    export_id,
+                                    recipient,
+                                    timeline_id,
+                                    local_head,
+                                    logical_head,
+                                    ciphertext_length,
+                                    ciphertext_digest,
+                                };
+                                record_recipient_export_catalog(&self.conn, owner, &publication)?;
+                                remove_recipient_export_pending(&self.conn, export_id)?;
+                                #[cfg(feature = "test-support")]
+                                let publication =
+                                    install_recipient_export_publication_test_commit_abort(
+                                        &self.conn,
+                                    )
+                                    .map_err(RecipientExportPublicationErrorV1::Store)
+                                    .map(|()| publication);
+                                #[cfg(not(feature = "test-support"))]
+                                let publication = Ok(publication);
+                                publication
+                            })
+                    })
+            })
     }
 
     fn reserve_recipient_export_id(
@@ -1233,14 +1306,23 @@ impl SqliteStore {
             ensure_recipient_custody_tables(&self.conn)?;
             claim_recipient_custody_directory(&self.conn, owner)?;
             ensure_recipient_export_catalog(&self.conn)?;
-            let export_id = fresh_recipient_export_id()?;
-            if recipient_export_catalog_contains(&self.conn, export_id)?
-                || recipient_export_pending_contains(&self.conn, export_id)?
-            {
-                return Err(RecipientExportPublicationErrorV1::IdentifierCollision);
-            }
-            record_recipient_export_pending(&self.conn, owner, export_id)?;
-            Ok(export_id)
+            fresh_recipient_export_id().and_then(|export_id| {
+                recipient_export_catalog_contains(&self.conn, export_id)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
+                    .and_then(|catalog_contains| {
+                        recipient_export_pending_contains(&self.conn, export_id)
+                            .map_err(RecipientExportPublicationErrorV1::Store)
+                            .and_then(|pending_contains| {
+                                if catalog_contains || pending_contains {
+                                    Err(RecipientExportPublicationErrorV1::IdentifierCollision)
+                                } else {
+                                    record_recipient_export_pending(&self.conn, owner, export_id)
+                                        .map_err(RecipientExportPublicationErrorV1::Store)
+                                        .map(|()| export_id)
+                                }
+                            })
+                    })
+            })
         })();
         finish_recipient_export_transaction(&self.conn, result)
     }
@@ -1258,7 +1340,8 @@ impl SqliteStore {
                 ensure_recipient_custody_tables(&self.conn)?;
                 claim_recipient_custody_directory(&self.conn, owner)?;
                 ensure_recipient_export_catalog(&self.conn)?;
-                Ok(reconcile_recipient_export_objects(&self.conn, owner)?)
+                reconcile_recipient_export_objects(&self.conn, owner)
+                    .map_err(RecipientExportPublicationErrorV1::Store)
             })();
         match finish_recipient_export_transaction(&self.conn, result)? {
             RecipientExportRecoveryProgressV1::Complete => Ok(()),
@@ -1378,23 +1461,21 @@ impl SqliteStore {
         entered: std::sync::mpsc::Sender<()>,
         release: std::sync::mpsc::Receiver<()>,
     ) -> Result<(), CoreError> {
-        RECIPIENT_EXPORT_PUBLICATION_TEST_FENCE_PAUSES
-            .lock()
-            .map_err(|_| {
-                CoreError::Storage("recipient export test pause is unavailable".to_owned())
-            })
-            .and_then(|mut pauses| {
-                if pauses.iter().any(|(configured, _)| *configured == timeline) {
-                    return Err(CoreError::Storage(
-                        "recipient export test pause is already configured".to_owned(),
-                    ));
-                }
-                pauses.push((
-                    timeline,
-                    RecipientExportPublicationTestFencePause { entered, release },
+        lock_recipient_export_publication_test_fence_pauses(
+            &RECIPIENT_EXPORT_PUBLICATION_TEST_FENCE_PAUSES,
+        )
+        .and_then(|mut pauses| {
+            if pauses.iter().any(|(configured, _)| *configured == timeline) {
+                return Err(CoreError::Storage(
+                    "recipient export test pause is already configured".to_owned(),
                 ));
-                Ok(())
-            })
+            }
+            pauses.push((
+                timeline,
+                RecipientExportPublicationTestFencePause { entered, release },
+            ));
+            Ok(())
+        })
     }
 
     /// Inject one narrow recipient-export boundary failure for an acceptance
@@ -1437,19 +1518,24 @@ impl SqliteStore {
         owner: &RecipientKeyOwnerV1,
         export_id: [u8; 16],
     ) -> Result<RecipientExportPublicationTestArtifactsV1, CoreError> {
-        validate_owner_directory(owner)?;
-        let named_plaintext_observed = RECIPIENT_EXPORT_PUBLICATION_TEST_NAMED_PLAINTEXT_OBSERVED
-            .with(|observed| observed.replace(false));
-        Ok(RecipientExportPublicationTestArtifactsV1 {
-            staging_ciphertext_exists: recipient_export_test_object_exists(
-                owner,
-                &recipient_export_staging_name(export_id),
-            )?,
-            final_ciphertext_exists: recipient_export_test_object_exists(
-                owner,
-                &recipient_export_final_name(export_id),
-            )?,
-            named_plaintext_observed,
+        validate_owner_directory(owner).and_then(|()| {
+            let named_plaintext_observed =
+                RECIPIENT_EXPORT_PUBLICATION_TEST_NAMED_PLAINTEXT_OBSERVED
+                    .with(|observed| observed.replace(false));
+            recipient_export_test_object_exists(owner, &recipient_export_staging_name(export_id))
+                .and_then(|staging_ciphertext_exists| {
+                    recipient_export_test_object_exists(
+                        owner,
+                        &recipient_export_final_name(export_id),
+                    )
+                    .map(|final_ciphertext_exists| {
+                        RecipientExportPublicationTestArtifactsV1 {
+                            staging_ciphertext_exists,
+                            final_ciphertext_exists,
+                            named_plaintext_observed,
+                        }
+                    })
+                })
         })
     }
 
@@ -1718,30 +1804,34 @@ impl StoredRecipientExportV1 {
         self,
         owner: &RecipientKeyOwnerV1,
     ) -> Option<ValidatedRecipientExportCatalogV1> {
-        let expected_owner = recipient_owner_id_from_grantee(owner.grantee_id).ok()?;
-        let recipient = RecipientKeyDescriptorV1::decode(&self.recipient_descriptor).ok()?;
-        let recipient_epoch = u64::try_from(self.recipient_epoch).ok()?;
-        let local_head = Seq::from_u64(u64::try_from(self.local_head).ok()?);
-        let _logical_head = Seq::from_u64(u64::try_from(self.logical_head).ok()?);
-        let ciphertext_length = u64::try_from(self.ciphertext_length).ok()?;
-        if ciphertext_length > MAX_RECIPIENT_EXPORT_CIPHERTEXT_BYTES {
-            return None;
-        }
-        let ciphertext_digest: [u8; 32] = self.ciphertext_digest.try_into().ok()?;
-        if self.owner_id != expected_owner.as_str()
-            || recipient.identity().owner_id != expected_owner
-            || recipient.identity().epoch != recipient_epoch
-            || !recipient.is_for_grantee(owner.grantee_id)
-        {
-            return None;
-        }
-        Some(ValidatedRecipientExportCatalogV1 {
-            recipient,
-            timeline_id: parse_timeline_id(&self.timeline_id).ok()?,
-            local_head,
-            ciphertext_length,
-            ciphertext_digest: pos_core::Hash::from_bytes(ciphertext_digest),
-        })
+        recipient_owner_id_from_grantee(owner.grantee_id)
+            .ok()
+            .and_then(|expected_owner| {
+                let recipient =
+                    RecipientKeyDescriptorV1::decode(&self.recipient_descriptor).ok()?;
+                let recipient_epoch = u64::try_from(self.recipient_epoch).ok()?;
+                let local_head = Seq::from_u64(u64::try_from(self.local_head).ok()?);
+                let _logical_head = Seq::from_u64(u64::try_from(self.logical_head).ok()?);
+                let ciphertext_length = u64::try_from(self.ciphertext_length).ok()?;
+                if ciphertext_length > MAX_RECIPIENT_EXPORT_CIPHERTEXT_BYTES {
+                    return None;
+                }
+                let ciphertext_digest: [u8; 32] = self.ciphertext_digest.try_into().ok()?;
+                if self.owner_id != expected_owner.as_str()
+                    || recipient.identity().owner_id != expected_owner
+                    || recipient.identity().epoch != recipient_epoch
+                    || !recipient.is_for_grantee(owner.grantee_id)
+                {
+                    return None;
+                }
+                Some(ValidatedRecipientExportCatalogV1 {
+                    recipient,
+                    timeline_id: parse_timeline_id(&self.timeline_id).ok()?,
+                    local_head,
+                    ciphertext_length,
+                    ciphertext_digest: pos_core::Hash::from_bytes(ciphertext_digest),
+                })
+            })
     }
 }
 
@@ -1872,31 +1962,38 @@ fn record_recipient_export_catalog(
     owner: &RecipientKeyOwnerV1,
     publication: &PublishedRecipientExportV1,
 ) -> Result<(), CoreError> {
-    let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
-    let epoch = i64::try_from(publication.recipient.identity().epoch).map_err(storage_error)?;
-    let local_head = i64::try_from(publication.local_head.as_u64()).map_err(storage_error)?;
-    let logical_head = i64::try_from(publication.logical_head.as_u64()).map_err(storage_error)?;
-    let ciphertext_length = i64::try_from(publication.ciphertext_length).map_err(storage_error)?;
-    connection
-        .execute(
-            "INSERT INTO recipient_export_catalog_v1
-             (export_id, owner_id, recipient_epoch, recipient_descriptor, timeline_id,
-              local_head, logical_head, ciphertext_length, ciphertext_digest)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            rusqlite::params![
-                publication.export_id.as_slice(),
-                owner_id.as_str(),
-                epoch,
-                publication.recipient.encode(),
-                publication.timeline_id.to_string(),
-                local_head,
-                logical_head,
-                ciphertext_length,
-                publication.ciphertext_digest.as_bytes().as_slice(),
-            ],
-        )
-        .map(|_| ())
+    recipient_owner_id_from_grantee(owner.grantee_id)
         .map_err(storage_error)
+        .and_then(|owner_id| {
+            let epoch =
+                i64::try_from(publication.recipient.identity().epoch).map_err(storage_error)?;
+            let local_head =
+                i64::try_from(publication.local_head.as_u64()).map_err(storage_error)?;
+            let logical_head =
+                i64::try_from(publication.logical_head.as_u64()).map_err(storage_error)?;
+            let ciphertext_length =
+                i64::try_from(publication.ciphertext_length).map_err(storage_error)?;
+            connection
+                .execute(
+                    "INSERT INTO recipient_export_catalog_v1
+                     (export_id, owner_id, recipient_epoch, recipient_descriptor, timeline_id,
+                      local_head, logical_head, ciphertext_length, ciphertext_digest)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    rusqlite::params![
+                        publication.export_id.as_slice(),
+                        owner_id.as_str(),
+                        epoch,
+                        publication.recipient.encode(),
+                        publication.timeline_id.to_string(),
+                        local_head,
+                        logical_head,
+                        ciphertext_length,
+                        publication.ciphertext_digest.as_bytes().as_slice(),
+                    ],
+                )
+                .map(|_| ())
+                .map_err(storage_error)
+        })
 }
 
 fn recipient_export_catalog_exists(connection: &Connection) -> Result<bool, CoreError> {
@@ -1973,17 +2070,20 @@ fn recipient_export_pending_belongs_to(
     owner: &RecipientKeyOwnerV1,
     export_id: [u8; 16],
 ) -> Result<bool, CoreError> {
-    let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
-    connection
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM recipient_export_pending_v1
-                WHERE export_id = ?1 AND owner_id = ?2
-            )",
-            rusqlite::params![export_id.as_slice(), owner_id.as_str()],
-            |row| row.get(0),
-        )
+    recipient_owner_id_from_grantee(owner.grantee_id)
         .map_err(storage_error)
+        .and_then(|owner_id| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM recipient_export_pending_v1
+                        WHERE export_id = ?1 AND owner_id = ?2
+                    )",
+                    rusqlite::params![export_id.as_slice(), owner_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)
+        })
 }
 
 fn record_recipient_export_pending(
@@ -1991,14 +2091,17 @@ fn record_recipient_export_pending(
     owner: &RecipientKeyOwnerV1,
     export_id: [u8; 16],
 ) -> Result<(), CoreError> {
-    let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
-    connection
-        .execute(
-            "INSERT INTO recipient_export_pending_v1 (export_id, owner_id) VALUES (?1, ?2)",
-            rusqlite::params![export_id.as_slice(), owner_id.as_str()],
-        )
-        .map(|_| ())
+    recipient_owner_id_from_grantee(owner.grantee_id)
         .map_err(storage_error)
+        .and_then(|owner_id| {
+            connection
+                .execute(
+                    "INSERT INTO recipient_export_pending_v1 (export_id, owner_id) VALUES (?1, ?2)",
+                    rusqlite::params![export_id.as_slice(), owner_id.as_str()],
+                )
+                .map(|_| ())
+                .map_err(storage_error)
+        })
 }
 
 fn remove_recipient_export_pending(
@@ -2024,32 +2127,40 @@ fn load_recipient_export_pending(
     connection: &Connection,
     owner: &RecipientKeyOwnerV1,
 ) -> Result<(Vec<[u8; 16]>, bool), CoreError> {
-    let owner_id = recipient_owner_id_from_grantee(owner.grantee_id).map_err(storage_error)?;
-    let limit = i64::try_from(MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS.saturating_add(1))
-        .map_err(storage_error)?;
-    let mut statement = connection
-        .prepare(
-            "SELECT export_id FROM recipient_export_pending_v1
-             WHERE owner_id = ?1 ORDER BY export_id LIMIT ?2",
-        )
-        .map_err(storage_error)?;
-    let rows = statement
-        .query_map(rusqlite::params![owner_id.as_str(), limit], |row| {
-            row.get::<_, Vec<u8>>(0)
+    recipient_owner_id_from_grantee(owner.grantee_id)
+        .map_err(storage_error)
+        .and_then(|owner_id| {
+            i64::try_from(MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS.saturating_add(1))
+                .map_err(storage_error)
+                .and_then(|limit| {
+                    let mut statement = connection
+                        .prepare(
+                            "SELECT export_id FROM recipient_export_pending_v1
+                             WHERE owner_id = ?1 ORDER BY export_id LIMIT ?2",
+                        )
+                        .map_err(storage_error)?;
+                    let rows = statement
+                        .query_map(rusqlite::params![owner_id.as_str(), limit], |row| {
+                            row.get::<_, Vec<u8>>(0)
+                        })
+                        .map_err(storage_error)?;
+                    let mut export_ids = Vec::new();
+                    for row in rows {
+                        let export_id: [u8; 16] =
+                            row.map_err(storage_error)?.try_into().map_err(|_| {
+                                CoreError::Storage(
+                                    "recipient export reservation is invalid".to_owned(),
+                                )
+                            })?;
+                        export_ids.push(export_id);
+                    }
+                    let incomplete = export_ids.len() > MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS;
+                    if incomplete {
+                        let _ = export_ids.pop();
+                    }
+                    Ok((export_ids, incomplete))
+                })
         })
-        .map_err(storage_error)?;
-    let mut export_ids = Vec::new();
-    for row in rows {
-        let export_id: [u8; 16] = row.map_err(storage_error)?.try_into().map_err(|_| {
-            CoreError::Storage("recipient export reservation is invalid".to_owned())
-        })?;
-        export_ids.push(export_id);
-    }
-    let incomplete = export_ids.len() > MAX_RECIPIENT_EXPORT_RECOVERY_PER_PASS;
-    if incomplete {
-        let _ = export_ids.pop();
-    }
-    Ok((export_ids, incomplete))
 }
 
 fn fresh_recipient_export_id() -> Result<[u8; 16], RecipientExportPublicationErrorV1> {
@@ -2232,31 +2343,41 @@ fn read_recipient_export_ciphertext(
             "recipient export object exceeds the TRX1 bound".to_owned(),
         ));
     }
-    let capacity = usize::try_from(expected_length).map_err(storage_error)?;
-    validate_owner_directory(owner)?;
-    let name = recipient_export_final_name(export_id);
-    recipient_openat2(
-        &owner.directory_file,
-        name.as_slice(),
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
-        Mode::empty(),
-        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
-    )
-    .map(File::from)
-    .map_err(storage_error)
-    .and_then(|mut file| {
-        file.metadata().map_err(storage_error).and_then(|metadata| {
-            validate_recipient_export_file(&metadata, owner, expected_length).and_then(|()| {
-                let mut encoded = vec![0_u8; capacity];
-                recipient_read_exact(&mut file, &mut encoded)
-                    .map_err(storage_error)
-                    .and_then(|()| {
-                        verify_recipient_export_entry(owner, name.as_slice(), expected_length)
+    usize::try_from(expected_length)
+        .map_err(storage_error)
+        .and_then(|capacity| {
+            validate_owner_directory(owner).and_then(|()| {
+                let name = recipient_export_final_name(export_id);
+                recipient_openat2(
+                    &owner.directory_file,
+                    name.as_slice(),
+                    OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW,
+                    Mode::empty(),
+                    ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+                )
+                .map(File::from)
+                .map_err(storage_error)
+                .and_then(|mut file| {
+                    file.metadata().map_err(storage_error).and_then(|metadata| {
+                        validate_recipient_export_file(&metadata, owner, expected_length).and_then(
+                            |()| {
+                                let mut encoded = vec![0_u8; capacity];
+                                recipient_read_exact(&mut file, &mut encoded)
+                                    .map_err(storage_error)
+                                    .and_then(|()| {
+                                        verify_recipient_export_entry(
+                                            owner,
+                                            name.as_slice(),
+                                            expected_length,
+                                        )
+                                    })
+                                    .map(|()| encoded)
+                            },
+                        )
                     })
-                    .map(|()| encoded)
+                })
             })
         })
-    })
 }
 
 const fn is_safe_recipient_export_entry(
@@ -5045,6 +5166,26 @@ mod tests {
                 &durability_request,
             )
             .is_err());
+
+        let mut synchronous_fixture = recipient_publication_fixture()?;
+        let synchronous_request = recipient_publication_request(
+            synchronous_fixture.timeline,
+            synchronous_fixture.descriptor,
+            &synchronous_fixture.evaluation,
+            &synchronous_fixture.token,
+        );
+        set_recipient_export_synchronous_read_failure(true);
+        let synchronous_result = synchronous_fixture.store.publish_recipient_export(
+            &synchronous_fixture.authority,
+            &synchronous_fixture.owner,
+            &synchronous_request,
+        );
+        set_recipient_export_synchronous_read_failure(false);
+        assert!(matches!(
+            synchronous_result,
+            Err(RecipientExportPublicationErrorV1::Store(CoreError::Storage(message)))
+                if message.contains("injected recipient export synchronous read failure")
+        ));
         Ok(())
     }
 
@@ -5603,6 +5744,127 @@ mod tests {
             .conn
             .set_limit(Limit::SQLITE_LIMIT_LENGTH, previous_limit)?;
         assert!(query_result.is_err());
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn recipient_export_test_pause_lock_rejects_poisoned_state() {
+        let pauses = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let poisoned = Arc::clone(&pauses);
+        assert!(std::thread::spawn(move || {
+            let _guard = poisoned.lock().expect("fresh recipient export pause lock");
+            panic!("poison recipient export pause lock");
+        })
+        .join()
+        .is_err());
+        assert!(lock_recipient_export_publication_test_fence_pauses(&pauses).is_err());
+    }
+
+    #[test]
+    fn recipient_export_inventory_validation_rejects_malformed_and_unbound_rows(
+    ) -> RecipientTestResult {
+        let fixture = recipient_publication_fixture()?;
+        let owner_id = recipient_owner_id_from_grantee(fixture.owner.grantee_id)?;
+        let registry = fixture
+            .store
+            .load_key_registry()?
+            .ok_or("recipient registry is unavailable")?;
+        let material_digest = registry
+            .key_record(fixture.descriptor.identity())
+            .and_then(|record| record.private_material_digest)
+            .ok_or("recipient material is unavailable")?;
+
+        let malformed_descriptor = StoredRecipientKeyInventoryV1 {
+            descriptor: vec![0],
+            material_digest: Vec::new(),
+            private_path: Vec::new(),
+            file_device: Vec::new(),
+            file_inode: Vec::new(),
+            file_uid: Vec::new(),
+        };
+        assert!(validate_recipient_key_inventory(
+            &fixture.owner,
+            &owner_id,
+            &registry,
+            &[malformed_descriptor],
+        )
+        .is_err());
+
+        let mut mismatched_digest = material_digest.as_bytes().to_vec();
+        mismatched_digest[0] ^= 1;
+        let unbound_identity = StoredRecipientKeyInventoryV1 {
+            descriptor: fixture.descriptor.encode(),
+            material_digest: mismatched_digest,
+            private_path: Vec::new(),
+            file_device: Vec::new(),
+            file_inode: Vec::new(),
+            file_uid: Vec::new(),
+        };
+        assert!(validate_recipient_key_inventory(
+            &fixture.owner,
+            &owner_id,
+            &registry,
+            &[unbound_identity],
+        )
+        .is_err());
+
+        let malformed_identity = StoredRecipientKeyInventoryV1 {
+            descriptor: fixture.descriptor.encode(),
+            material_digest: material_digest.as_bytes().to_vec(),
+            private_path: Vec::new(),
+            file_device: Vec::new(),
+            file_inode: Vec::new(),
+            file_uid: Vec::new(),
+        };
+        assert!(validate_recipient_key_inventory(
+            &fixture.owner,
+            &owner_id,
+            &registry,
+            &[malformed_identity],
+        )
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recipient_export_staged_recovery_rejects_malformed_names_and_owner_mismatch(
+    ) -> RecipientTestResult {
+        use std::os::unix::ffi::OsStrExt;
+
+        assert_eq!(
+            staged_recipient_epoch(std::ffi::OsStr::from_bytes(&[0xff])),
+            None
+        );
+        assert_eq!(
+            staged_recipient_epoch(std::ffi::OsStr::new("recipient-1-not-a-key")),
+            None
+        );
+        assert_eq!(
+            staged_recipient_epoch(std::ffi::OsStr::new("recipient-1.key")),
+            None
+        );
+        assert_eq!(
+            staged_recipient_epoch(std::ffi::OsStr::new("recipient-not-an-epoch-key.key")),
+            None
+        );
+        assert_eq!(
+            staged_recipient_epoch(std::ffi::OsStr::new("recipient-1-staged.key")),
+            Some(1)
+        );
+
+        let (_temporary, _store, owner) = owner_fixture()?;
+        let name = std::path::Path::new("recipient-1-staged.key");
+        let staged_path = owner.directory.join(name);
+        std::fs::write(&staged_path, [7_u8; 32])?;
+        std::fs::set_permissions(&staged_path, std::fs::Permissions::from_mode(0o600))?;
+        quarantine_unregistered_owned_staged_material(&owner)?;
+        assert!(staged_path.exists());
+
+        set_file_owner_mismatch(true);
+        let owner_mismatch = read_unregistered_staged_private_key(&owner, name);
+        set_file_owner_mismatch(false);
+        assert!(owner_mismatch.is_err());
         Ok(())
     }
 }
