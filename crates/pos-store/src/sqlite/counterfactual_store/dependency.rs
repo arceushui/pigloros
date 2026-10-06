@@ -127,22 +127,30 @@ const HASH_BYTES: usize = 32;
 /// The generation key rule every table shares.
 const GENERATION_CHECK: &str = "CHECK (generation = -1 OR generation >= 1)";
 
-const fn key_column(name: &'static str, kind: &'static str) -> SqliteSchemaColumn {
-    SqliteSchemaColumn {
-        name,
-        kind,
-        not_null: true,
-        primary_key: true,
-    }
+/// A primary-key column of a schema constant. A macro, not a function: the
+/// schema constants are built at compile time, so a function body would never
+/// run and would show as uncovered code.
+macro_rules! key_column {
+    ($name:expr, $kind:expr) => {
+        SqliteSchemaColumn {
+            name: $name,
+            kind: $kind,
+            not_null: true,
+            primary_key: true,
+        }
+    };
 }
 
-const fn data_column(name: &'static str, kind: &'static str) -> SqliteSchemaColumn {
-    SqliteSchemaColumn {
-        name,
-        kind,
-        not_null: true,
-        primary_key: false,
-    }
+/// A non-key column of a schema constant (see `key_column`).
+macro_rules! data_column {
+    ($name:expr, $kind:expr) => {
+        SqliteSchemaColumn {
+            name: $name,
+            kind: $kind,
+            not_null: true,
+            primary_key: false,
+        }
+    };
 }
 
 /// Tick records: the Tick persisted apart from the node Ticks, and the counts
@@ -151,12 +159,12 @@ pub(super) const RECORDS_TABLE: SqliteSchemaTable = SqliteSchemaTable {
     name: "counterfactual_dependency_records",
     columns_query: "PRAGMA table_info(counterfactual_dependency_records)",
     columns: &[
-        key_column("timeline_id", "TEXT"),
-        key_column("generation", "INTEGER"),
-        key_column("record_tick", "INTEGER"),
-        data_column("node_count", "INTEGER"),
-        data_column("edge_count", "INTEGER"),
-        data_column("input_count", "INTEGER"),
+        key_column!("timeline_id", "TEXT"),
+        key_column!("generation", "INTEGER"),
+        key_column!("record_tick", "INTEGER"),
+        data_column!("node_count", "INTEGER"),
+        data_column!("edge_count", "INTEGER"),
+        data_column!("input_count", "INTEGER"),
     ],
     constraints: &[
         GENERATION_CHECK,
@@ -172,18 +180,18 @@ pub(super) const NODES_TABLE: SqliteSchemaTable = SqliteSchemaTable {
     name: "counterfactual_dependency_nodes",
     columns_query: "PRAGMA table_info(counterfactual_dependency_nodes)",
     columns: &[
-        key_column("timeline_id", "TEXT"),
-        key_column("generation", "INTEGER"),
-        key_column("tick", "INTEGER"),
-        key_column("scheduler_position", "INTEGER"),
-        key_column("owner_id", "TEXT"),
-        key_column("output_ordinal", "INTEGER"),
-        data_column("schema_id", "INTEGER"),
-        data_column("artifact_digest", "BLOB"),
-        data_column("class", "INTEGER"),
-        data_column("origin", "INTEGER"),
-        data_column("input_digests", "BLOB"),
-        data_column("provenance_digest", "BLOB"),
+        key_column!("timeline_id", "TEXT"),
+        key_column!("generation", "INTEGER"),
+        key_column!("tick", "INTEGER"),
+        key_column!("scheduler_position", "INTEGER"),
+        key_column!("owner_id", "TEXT"),
+        key_column!("output_ordinal", "INTEGER"),
+        data_column!("schema_id", "INTEGER"),
+        data_column!("artifact_digest", "BLOB"),
+        data_column!("class", "INTEGER"),
+        data_column!("origin", "INTEGER"),
+        data_column!("input_digests", "BLOB"),
+        data_column!("provenance_digest", "BLOB"),
     ],
     constraints: &[
         GENERATION_CHECK,
@@ -207,16 +215,16 @@ pub(super) const EDGES_TABLE: SqliteSchemaTable = SqliteSchemaTable {
     name: "counterfactual_dependency_edges",
     columns_query: "PRAGMA table_info(counterfactual_dependency_edges)",
     columns: &[
-        key_column("timeline_id", "TEXT"),
-        key_column("generation", "INTEGER"),
-        key_column("tick", "INTEGER"),
-        key_column("scheduler_position", "INTEGER"),
-        key_column("owner_id", "TEXT"),
-        key_column("output_ordinal", "INTEGER"),
-        key_column("source_digest", "BLOB"),
-        data_column("consumer_schema_id", "INTEGER"),
-        data_column("consumer_digest", "BLOB"),
-        data_column("edge_bytes", "BLOB"),
+        key_column!("timeline_id", "TEXT"),
+        key_column!("generation", "INTEGER"),
+        key_column!("tick", "INTEGER"),
+        key_column!("scheduler_position", "INTEGER"),
+        key_column!("owner_id", "TEXT"),
+        key_column!("output_ordinal", "INTEGER"),
+        key_column!("source_digest", "BLOB"),
+        data_column!("consumer_schema_id", "INTEGER"),
+        data_column!("consumer_digest", "BLOB"),
+        data_column!("edge_bytes", "BLOB"),
     ],
     constraints: &[
         GENERATION_CHECK,
