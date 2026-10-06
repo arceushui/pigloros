@@ -78,9 +78,9 @@
 //!   runs before the first store call. ADR-064 has no closed error for a
 //!   room mismatch, so [`CounterfactualAdmissionErrorV1::RoomMismatch`] is
 //!   added; the other four names are the ADR-064 closed errors. The checks
-//!   run in the ADR's listed order, and the first error wins. This
-//!   deliberately deviates from ADR-064, which lists room before profile and
-//!   trust and the parent head before room: the room, composition, artifact,
+//!   run in the ADR's relative order, and the first error wins, except for
+//!   two deliberate deviations from ADR-064, which lists room before profile
+//!   and trust and the parent head before room: the room, composition, artifact,
 //!   and claim checks are cheap pure comparisons against request-supplied
 //!   host state, so they run after the existing profile and trust check, which
 //!   keeps its position, and the parent-head check is a store read, so it stays
@@ -752,7 +752,8 @@ fn check_preflight(
         .iter()
         .chain(&plan.fixed_policy_descriptors)
         .try_for_each(|descriptor| check_artifact(host.frozen_artifacts, descriptor))?;
-    // The host's evaluation can only weaken the strongest claim.
+    // `Exact` only anchors the conversion of the host's evaluation into a
+    // `ReplayClaimV1`: the result is the host's claim, never stronger than it.
     let evaluated = ReplayClaimV1::Exact.after_artifact_evaluation(host.replay_claim);
     if plan.replay_claim.is_no_stronger_than(evaluated) {
         Ok(())
