@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Install the pinned Component guest toolchains into one directory.
 #
+# The pins are x86_64 Linux release archives only.
+#
 # Every archive is fetched from its upstream GitHub release and checked against
 # a pinned SHA-256 digest before it is unpacked. Bump a pin by updating both its
 # URL and its digest in one reviewed change.
@@ -18,8 +20,17 @@ fetch() {
   curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --retry 3 --max-time 300 \
     --output "${archive}" "${url}"
   printf '%s  %s\n' "${digest}" "${archive}" | sha256sum --check --strict -
+  # Refuse members that would land outside the tool directory.
+  if tar --list --gzip --file "${archive}" |
+    grep -E '^/|(^|/)\.\.(/|$)' >/dev/null; then
+    echo "${name}: archive has an absolute or parent-relative member" >&2
+    exit 1
+  fi
+  # A re-run starts from an empty directory, so files never mix.
+  rm -rf -- "${tools_dir:?}/${name}"
   mkdir -p -- "${tools_dir}/${name}"
   tar --extract --gzip --file "${archive}" --strip-components 1 \
+    --no-same-owner --no-same-permissions \
     --directory "${tools_dir}/${name}"
   rm -f -- "${archive}"
 }

@@ -1,4 +1,4 @@
-//! Rust guest of the ADR-061 revision 4 compatibility prototype (#539).
+//! Rust guest of the ADR-061 revisions 4 and 5 compatibility prototype (#539).
 //!
 //! It implements `pigloros:plugin/community-plugin@0.1.0` with no WASI import.
 //! The C guest in `../c-guest` implements the same behaviour, specified in

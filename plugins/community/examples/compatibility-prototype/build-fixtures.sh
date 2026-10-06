@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the ADR-061 revision 4 compatibility Components from source.
+# Build the ADR-061 revisions 4 and 5 compatibility Components from source.
 #
 # Requires the tools from install-tools.sh in PROTOTYPE_TOOLS, plus rustup with
 # network access for the pinned Rust toolchain. Writes the Components and their
@@ -8,6 +8,8 @@
 #
 # Usage: PROTOTYPE_TOOLS=DIR build-fixtures.sh OUT_DIR
 set -euo pipefail
+# Locale-independent `sort` and glob order, so SHA256SUMS line order is stable.
+export LC_ALL=C
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd -- "${here}/../../../.." && pwd)"

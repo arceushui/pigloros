@@ -2,8 +2,9 @@
 
 This is the compatibility gate evidence for ADR-061 revision 4 (Accepted
 2026-10-06), produced by Redmine #539, slice 1 of the #538 community Plugin
-Component host. As revision 4 states, these gates apply to the #539 prototype
-evidence. They do not re-accept the ADR.
+Component host. ADR-061 revision 5 resolves findings F1, F2 and F6 below. As
+revision 4 states, these gates apply to the #539 prototype evidence. They do
+not re-accept the ADR.
 
 The evidence is executable:
 
@@ -19,9 +20,9 @@ The evidence is executable:
 | Item | Value |
 |---|---|
 | Crate | `wasmtime` `=49.0.2` (newest stable release on 2026-10-06; MSRV 1.96) |
-| Requested features | `default-features = false`, `component-model`, `cranelift`, `runtime` |
+| Requested features | `default-features = false`, `component-model`, `cranelift`, `runtime` (ADR-061 revision 5, decision 2) |
 | Resolved Wasmtime features | `component-model`, `cranelift`, `once_cell`, `runtime`, `std`, `wasmtime-jit-icache-coherence` |
-| Rust toolchain | 1.97.1 (repository pin) |
+| Rust toolchain | 1.97.1 (repository pin; the download is verified only by rustup's own checks) |
 | Enforcement | `scripts/check_wasmtime_feature_pin.py` in the `dependency-policy` job |
 
 `runtime` is the feature that lets the Component Model instantiate and call a
@@ -39,6 +40,10 @@ The check reads `cargo metadata --locked --all-features`. It fails when:
 - the resolved feature set differs from the table above.
 
 `scripts/test_check_wasmtime_feature_pin.py` exercises each rejection.
+
+The resolved feature set is recorded in two places: the pin checker
+(`RESOLVED_FEATURES`) and this document. Recording it in the execution profile
+and the ReproManifest is #540 and #541's work.
 
 ## Engine configuration
 
@@ -75,7 +80,7 @@ SHA-256 digests.
 
 | Tool | Version | Use |
 |---|---|---|
-| Rust | 1.97.1, target `wasm32-unknown-unknown` | Rust guest (no WASI in the target) |
+| Rust | 1.97.1, target `wasm32-unknown-unknown` | Rust guest (no WASI in the target). rustup installs it, verified only by rustup's own checks. |
 | `wit-bindgen` crate | `=0.61.1`, `default-features = false`, `realloc` | Rust guest runtime support only |
 | `wit-bindgen` CLI | 0.61.1 | Rust and C bindings |
 | wasi-sdk | 34 (clang, wasi-libc `malloc`/`memcpy` only) | C guest |
@@ -159,10 +164,10 @@ Observations:
 
 | Gate (ADR-061 "Compatibility gates") | Status | Evidence or owner |
 |---|---|---|
-| The pinned Rust toolchain builds the host without weakening supply-chain gates | **Proven**, subject to green CI on PR #413 and to F6 | Rust 1.97.1 builds Wasmtime 49.0.2. `cargo deny --locked check`, `cargo audit`, `cargo shear`, geiger and the pinned-Action policy run unchanged. `deny.toml` is unchanged. |
+| The pinned Rust toolchain builds the host without weakening supply-chain gates | **Proven**, subject to green CI on PR #413 | Rust 1.97.1 builds Wasmtime 49.0.2. `cargo deny --locked check`, `cargo audit`, `cargo shear`, geiger and the pinned-Action policy run unchanged. `deny.toml` is unchanged. |
 | At least two guest languages implement the same world | **Proven**; finding F1 resolved by revision 5 | The Rust and C guests produce identical results, equal to the oracle, over 3 repetitions, for `describe`, `reduce` and `drive`, and with a 1 MiB observation. |
 | Startup, invocation, memory and artifact-size budgets are measured | **Proven** for fuel, memory and size | See the table above. Wall time is deferred to #542. |
-| No ambient resource access | **Proven at link time** | A WASI import, an undeclared `host-v1` function and a mistyped `simulation-time` are all rejected by `load` before execution. Both guests import only `host-v1` and the types-only `contract-v1`. The engine reads no environment variable. Residual: see F3. |
+| No ambient resource access | **Proven for imports and `simulation-time`** | A WASI import, an undeclared `host-v1` function and a mistyped `simulation-time` are all rejected by `load` before execution. Both guests import only `host-v1` and the types-only `contract-v1`. The engine reads no environment variable. The record-typed host functions (`deterministic-random`, `record-operational-log`) are not type-checked at load: a mistyped import of them fails closed at call time (F3, fixed in #541). |
 | Identical output under Local and Air-Gapped profiles | **Deferred** to #540 (profiles) and #542 (worker) | The engine has no mode-dependent input, and outputs are identical across guests and repetitions. The two host-owned profiles do not exist yet. |
 | Traps and budget exhaustion cannot partially commit | **Proven at prototype level** | `InvocationFailure` carries no guest data, and each store is dropped on failure. A trap after a successful `record-operational-log` returns nothing, and so does fuel exhaustion halfway through hashing a 1 MiB observation. The atomic Tick Boundary commit is #543. |
 | Licence and MIT-distribution review | **Inventory done; no allow-list change** | See below. A formal legal review is for the owner. |
@@ -238,6 +243,8 @@ committed fixture, golden vector or evidence value carries any of them.
 
 ### F2. The trap table and the pinned Wasmtime trap codes
 
+**Resolved by ADR-061 revision 5 (decision 3); #541 builds the pinned table.**
+
 - **`AlwaysTrapAdapter`.** The revision 4 table lists it, but the `Trap` enum
   of Wasmtime 49.0.2 has no such code. The enum is defined in
   `wasmtime-environ` 49.0.2, `src/trap_encoding.rs`.
@@ -280,6 +287,8 @@ The exhaustion edge is not "consumed fuel exceeds the budget by one". #540 and
 runtime" rather than as a sharp threshold.
 
 ### F6. `runtime` is a third requested feature
+
+**Resolved by ADR-061 revision 5 (decision 2).**
 
 Decision 2 allows `component-model` and `cranelift` "plus only those features
 Cargo requires them to imply". Neither feature implies `runtime`. Without it,

@@ -1,4 +1,4 @@
-# Rust guest of the ADR-061 revision 4 compatibility prototype (#539).
+# Rust guest of the ADR-061 revisions 4 and 5 compatibility prototype (#539).
 #
 # Not a workspace member: it builds only for wasm32-unknown-unknown, through
 # `build-fixtures.sh`, with the pinned toolchain below.
