@@ -1,7 +1,7 @@
 //! Named fixed-width values carried by the owner-bridge wire contracts.
 
 macro_rules! fixed_bytes_value {
-    ($name:ident, $length:expr, $description:literal) => {
+    ($name:ident, $length:expr_2021, $description:literal) => {
         #[doc = $description]
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         #[repr(transparent)]

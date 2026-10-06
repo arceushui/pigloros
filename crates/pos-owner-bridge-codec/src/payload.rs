@@ -430,7 +430,7 @@ pub fn encode_attestation_reply(
     writer.bytes(reply.attestation_object);
     write_transports(&mut writer, reply.transports);
     writer.boolean(reply.prf_enabled);
-    write_optional_bytes(
+    write_optional_fixed(
         &mut writer,
         reply.prf_first.as_ref().map(PrfResult::as_bytes),
     );
@@ -492,7 +492,7 @@ pub fn encode_assertion_reply(
     writer.bytes(reply.client_data_json);
     writer.bytes(reply.authenticator_data);
     writer.bytes(reply.signature);
-    write_optional_bytes(
+    write_optional_fixed(
         &mut writer,
         reply.user_handle.as_ref().map(OwnerUserHandle::as_bytes),
     );
@@ -535,7 +535,7 @@ pub fn decode_assertion_reply(input: &[u8]) -> Result<AssertionReplyV1<'_>, Owne
     )
 }
 
-fn write_optional_bytes(writer: &mut CborWriter<'_>, value: Option<&[u8]>) {
+fn write_optional_fixed<const N: usize>(writer: &mut CborWriter<'_>, value: Option<&[u8; N]>) {
     match value {
         Some(value) => writer.bytes(value),
         None => writer.null(),
