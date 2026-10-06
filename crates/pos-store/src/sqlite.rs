@@ -141,6 +141,7 @@ use crate::{
 };
 
 mod counterfactual_store;
+mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod local_cut_owner;
 mod pipeline_admission;
@@ -1090,6 +1091,132 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
             // unit test in `sqlite::fork_attribution_issuer_policy`.
             "CHECK (generation BETWEEN 1 AND 96)",
             "CHECK (length(policy_digest) = 32)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "imported_fork_classifier_sources",
+        columns_query: "PRAGMA table_info(imported_fork_classifier_sources)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "fcs1_digest",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "fcs1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &["CHECK (length(fcs1_digest) = 32)"],
+    },
+    SqliteSchemaTable {
+        name: "imported_fork_principal_owner_bindings",
+        columns_query: "PRAGMA table_info(imported_fork_principal_owner_bindings)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "pob1_operation_id",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "principal_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "pob1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(pob1_operation_id) = 32)",
+            "CHECK (length(principal_digest) = 32)",
+            // The Principal digest is deliberately not unique: several imports
+            // may share one Principal and Owner (ADR-105 erratum E10). The
+            // exact `POB1` bytes still differ per import operation.
+            "UNIQUE (pob1_cbor)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "imported_fork_key_evidence",
+        columns_query: "PRAGMA table_info(imported_fork_key_evidence)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "import_operation_id",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "ikr1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "ikt1_cbor",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(import_operation_id) = 32)",
+            "CHECK (length(ikr1_cbor) > 0)",
+            "CHECK (ikt1_cbor IS NULL OR length(ikt1_cbor) > 0)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "imported_fork_attribution_admissions",
+        columns_query: "PRAGMA table_info(imported_fork_attribution_admissions)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "import_operation_id",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "child_id",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "full_envelope_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "ifa1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "fae1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(import_operation_id) = 32)",
+            "CHECK (length(full_envelope_digest) = 32)",
+            // 512 is `pos_core::MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1`.
+            "CHECK (length(ifa1_cbor) BETWEEN 1 AND 512)",
+            "CHECK (length(fae1_cbor) > 0)",
+            "UNIQUE (child_id)",
+            "UNIQUE (full_envelope_digest)",
+            "UNIQUE (ifa1_cbor)",
         ],
     },
 ];
@@ -2239,6 +2366,8 @@ impl SqliteStore {
                      last_authority_wall_time INTEGER NOT NULL DEFAULT 0
                  );
                  {}
+                 CREATE INDEX IF NOT EXISTS idx_imported_pob1_principal
+                     ON imported_fork_principal_owner_bindings(principal_digest);
                  INSERT OR IGNORE INTO fork_delivery_fence_counter (id, last_fence) VALUES (1, 0);
                  COMMIT;",
                 sqlite_schema_ddl(FORK_ADMISSION_SCHEMA_TABLES)
@@ -11849,7 +11978,7 @@ impl SqliteStore {
                 owner,
                 commitment,
                 ..
-            } => self.insert_principal_owner_operation(
+            } => self.insert_principal_owner_operation_gated(
                 operation_id,
                 evidence_digest,
                 principal_digest,
@@ -11887,6 +12016,31 @@ impl SqliteStore {
                 .map_err(pos_core::ForkAdmissionErrorV1::from)
                 .map(|()| value)
         })
+    }
+
+    /// Apply the imported-binding rules (ADR-105 errata E10 and E11), then
+    /// the local command.
+    fn insert_principal_owner_operation_gated(
+        &self,
+        operation_id: Hash,
+        evidence_digest: Hash,
+        principal_digest: Hash,
+        owner: OwnerIdV1,
+        commitment: Hash,
+    ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+        fork_attribution_authority_import::imported_binding_gate(
+            &self.conn,
+            operation_id,
+            principal_digest,
+            owner,
+        )?;
+        self.insert_principal_owner_operation(
+            operation_id,
+            evidence_digest,
+            principal_digest,
+            owner,
+            commitment,
+        )
     }
 
     fn insert_principal_owner_operation(

@@ -18,7 +18,8 @@ use super::{
 };
 
 use crate::{
-    fork_admission::PRINCIPAL_OWNER_BINDING_DOMAIN, Hash, OwnerIdV1, PrincipalOwnerBindingV1,
+    fork_admission::PRINCIPAL_OWNER_BINDING_DOMAIN, Hash, OwnerIdV1, PrincipalOwnerBindingInputV1,
+    PrincipalOwnerBindingV1,
 };
 
 /// The local `authority-origin-v1 = [1]`.
@@ -140,6 +141,19 @@ impl ImportedPrincipalOwnerBindingV1 {
         self.authority_origin_digest
     }
 
+    /// `POB1` fields 2–4: the operation, Principal, and Owner.
+    ///
+    /// The returned input is the local projection, whose origin member is
+    /// `Local`; the carried code-2 origin is
+    /// [`Self::authority_origin_digest`]. It is never an authority: it only
+    /// lets an import adapter key and compare the carried record.
+    ///
+    /// NOTE(#519): revisit this accessor when code 2 is activated.
+    #[must_use]
+    pub const fn input(&self) -> &PrincipalOwnerBindingInputV1 {
+        self.binding.input()
+    }
+
     /// `POB1` field 4: the bound Owner.
     #[must_use]
     pub(super) const fn owner(&self) -> OwnerIdV1 {
@@ -205,8 +219,12 @@ impl ImportedForkAdmissionRecordV1 {
     }
 
     /// `FAR1` fields 2–13. The projected origin member is not field 14.
+    ///
+    /// This is the local projection only, never an authority.
+    ///
+    /// NOTE(#519): revisit this accessor when code 2 is activated.
     #[must_use]
-    pub(super) const fn fields(&self) -> &ForkAdmissionRecordInputV1 {
+    pub const fn fields(&self) -> &ForkAdmissionRecordInputV1 {
         self.record.input()
     }
 }
@@ -269,8 +287,12 @@ impl ImportedForkPublicationOperationV1 {
     }
 
     /// `FPO1` fields 2–12. The projected origin member is not field 13.
+    ///
+    /// This is the local projection only, never an authority.
+    ///
+    /// NOTE(#519): revisit this accessor when code 2 is activated.
     #[must_use]
-    pub(super) const fn fields(&self) -> &ForkPublicationOperationInputV1 {
+    pub const fn fields(&self) -> &ForkPublicationOperationInputV1 {
         self.operation.input()
     }
 }
