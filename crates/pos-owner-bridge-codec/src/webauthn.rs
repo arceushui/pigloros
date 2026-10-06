@@ -49,8 +49,8 @@ impl<'a> StoredCredential<'a> {
     /// # Errors
     ///
     /// Returns [`OwnerBridgeCodecError::BoundsExceeded`] when `credential_id`
-    /// is not within the required 1–1024-byte WebAuthn range.
-    pub fn new(
+    /// is not within the required 1–1024-byte `WebAuthn` range.
+    pub const fn new(
         credential_id: &'a [u8],
         user_handle: [u8; 32],
         public_key: CoseEs256PublicKey,
@@ -98,7 +98,7 @@ impl<'a> AssertionVerificationContext<'a> {
     }
 }
 
-/// A Create reply that passed the closed WebAuthn verification subset.
+/// A Create reply that passed the closed `WebAuthn` verification subset.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VerifiedRegistration<'a> {
     credential_id: &'a [u8],
@@ -154,7 +154,7 @@ impl<'a> VerifiedRegistration<'a> {
     }
 }
 
-/// A Get assertion that passed the closed WebAuthn verification subset.
+/// A Get assertion that passed the closed `WebAuthn` verification subset.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VerifiedAssertion {
     backup_state: bool,
@@ -188,7 +188,7 @@ impl VerifiedAssertion {
 ///
 /// Returns a closed [`OwnerBridgeCodecError`] when the ceremony ID, client
 /// data, attestation object, COSE point, flags, or PRF shape violates the
-/// closed WebAuthn Create contract.
+/// closed `WebAuthn` Create contract.
 pub fn verify_attestation_reply<'a>(
     reply: &AttestationReplyV1<'a>,
     context: CreateVerificationContext,
@@ -218,7 +218,7 @@ pub fn verify_attestation_reply<'a>(
 ///
 /// # Errors
 ///
-/// Returns a closed [`OwnerBridgeCodecError`] when any WebAuthn assertion
+/// Returns a closed [`OwnerBridgeCodecError`] when any `WebAuthn` assertion
 /// invariant, strict DER signature, ES256 verification, credential/user-handle
 /// equality, backup flag, counter, or PRF requirement fails.
 pub fn verify_assertion_reply(
@@ -258,7 +258,7 @@ pub fn verify_assertion_reply(
     })
 }
 
-fn counter_advanced(stored: u32, current: u32) -> bool {
+const fn counter_advanced(stored: u32, current: u32) -> bool {
     (stored == 0 && current == 0) || current > stored
 }
 

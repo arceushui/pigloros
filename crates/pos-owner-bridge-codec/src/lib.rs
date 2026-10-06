@@ -4,7 +4,7 @@
 //! Closed, fixed-buffer codecs for the ADR-110 local owner bridge.
 //!
 //! This crate deliberately exposes only deterministic binary values and their
-//! validation. It owns no transport, allocation, WebView, or credential
+//! validation. It owns no transport, allocation, `WebView`, or credential
 //! lifecycle policy; those belong to the `pos-owner-bridge` Module in the
 //! next stack slice.
 

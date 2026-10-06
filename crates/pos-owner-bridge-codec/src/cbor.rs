@@ -1,17 +1,17 @@
 use crate::OwnerBridgeCodecError;
 
 /// Minimal deterministic-CBOR reader for the fixed owner-bridge schemas.
-pub(crate) struct CborReader<'a> {
+pub struct CborReader<'a> {
     input: &'a [u8],
     offset: usize,
 }
 
 impl<'a> CborReader<'a> {
-    pub(crate) const fn new(input: &'a [u8]) -> Self {
+    pub const fn new(input: &'a [u8]) -> Self {
         Self { input, offset: 0 }
     }
 
-    pub(crate) fn fixed_array(&mut self, expected: u64) -> Result<(), OwnerBridgeCodecError> {
+    pub fn fixed_array(&mut self, expected: u64) -> Result<(), OwnerBridgeCodecError> {
         let (major, count) = self.head()?;
         if major == 4 && count == expected {
             Ok(())
@@ -20,15 +20,15 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub(crate) fn array(&mut self, maximum: usize) -> Result<usize, OwnerBridgeCodecError> {
+    pub fn array(&mut self, maximum: usize) -> Result<usize, OwnerBridgeCodecError> {
         let (major, count) = self.head()?;
         if major != 4 {
             return Err(OwnerBridgeCodecError::InvalidCbor);
         }
-        self.bounded_count(count, maximum)
+        Self::bounded_count(count, maximum)
     }
 
-    pub(crate) fn unsigned(&mut self) -> Result<u64, OwnerBridgeCodecError> {
+    pub fn unsigned(&mut self) -> Result<u64, OwnerBridgeCodecError> {
         let (major, value) = self.head()?;
         if major == 0 {
             Ok(value)
@@ -37,7 +37,7 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub(crate) fn signed(&mut self) -> Result<i64, OwnerBridgeCodecError> {
+    pub fn signed(&mut self) -> Result<i64, OwnerBridgeCodecError> {
         let (major, value) = self.head()?;
         match major {
             0 => i64::try_from(value).map_err(|_| OwnerBridgeCodecError::InvalidCbor),
@@ -48,7 +48,7 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub(crate) fn fixed_bytes<const N: usize>(&mut self) -> Result<[u8; N], OwnerBridgeCodecError> {
+    pub fn fixed_bytes<const N: usize>(&mut self) -> Result<[u8; N], OwnerBridgeCodecError> {
         let (major, length) = self.head()?;
         if major != 2 || usize::try_from(length) != Ok(N) {
             return Err(OwnerBridgeCodecError::InvalidCbor);
@@ -58,7 +58,7 @@ impl<'a> CborReader<'a> {
         Ok(output)
     }
 
-    pub(crate) fn bytes(
+    pub fn bytes(
         &mut self,
         minimum: usize,
         maximum: usize,
@@ -67,14 +67,14 @@ impl<'a> CborReader<'a> {
         if major != 2 {
             return Err(OwnerBridgeCodecError::InvalidCbor);
         }
-        let length = self.bounded_count(length, maximum)?;
+        let length = Self::bounded_count(length, maximum)?;
         if length < minimum {
             return Err(OwnerBridgeCodecError::BoundsExceeded);
         }
         self.take(length)
     }
 
-    pub(crate) fn exact_text(&mut self, expected: &str) -> Result<(), OwnerBridgeCodecError> {
+    pub fn exact_text(&mut self, expected: &str) -> Result<(), OwnerBridgeCodecError> {
         let (major, length) = self.head()?;
         if major != 3 || usize::try_from(length) != Ok(expected.len()) {
             return Err(OwnerBridgeCodecError::InvalidPayload);
@@ -86,7 +86,7 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub(crate) fn boolean(&mut self) -> Result<bool, OwnerBridgeCodecError> {
+    pub fn boolean(&mut self) -> Result<bool, OwnerBridgeCodecError> {
         match self.byte()? {
             0xf4 => Ok(false),
             0xf5 => Ok(true),
@@ -94,7 +94,7 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub(crate) fn null(&mut self) -> Result<(), OwnerBridgeCodecError> {
+    pub fn null(&mut self) -> Result<(), OwnerBridgeCodecError> {
         if self.byte()? == 0xf6 {
             Ok(())
         } else {
@@ -102,7 +102,7 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub(crate) fn optional_fixed_bytes<const N: usize>(
+    pub fn optional_fixed_bytes<const N: usize>(
         &mut self,
     ) -> Result<Option<[u8; N]>, OwnerBridgeCodecError> {
         if self.input.get(self.offset) == Some(&0xf6) {
@@ -113,7 +113,7 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub(crate) fn finish(&self) -> Result<(), OwnerBridgeCodecError> {
+    pub const fn finish(&self) -> Result<(), OwnerBridgeCodecError> {
         if self.offset == self.input.len() {
             Ok(())
         } else {
@@ -163,7 +163,7 @@ impl<'a> CborReader<'a> {
         Ok(bytes)
     }
 
-    fn bounded_count(&self, count: u64, maximum: usize) -> Result<usize, OwnerBridgeCodecError> {
+    fn bounded_count(count: u64, maximum: usize) -> Result<usize, OwnerBridgeCodecError> {
         usize::try_from(count)
             .ok()
             .filter(|value| *value <= maximum)
@@ -172,38 +172,38 @@ impl<'a> CborReader<'a> {
 }
 
 /// Minimal deterministic-CBOR writer for the fixed owner-bridge schemas.
-pub(crate) struct CborWriter<'a> {
+pub struct CborWriter<'a> {
     output: &'a mut [u8],
     offset: usize,
 }
 
 impl<'a> CborWriter<'a> {
-    pub(crate) const fn new(output: &'a mut [u8]) -> Self {
+    pub const fn new(output: &'a mut [u8]) -> Self {
         Self { output, offset: 0 }
     }
 
-    pub(crate) fn array(&mut self, count: u64) -> Result<(), OwnerBridgeCodecError> {
+    pub fn array(&mut self, count: u64) -> Result<(), OwnerBridgeCodecError> {
         self.head(4, count)
     }
 
-    pub(crate) fn unsigned(&mut self, value: u64) -> Result<(), OwnerBridgeCodecError> {
+    pub fn unsigned(&mut self, value: u64) -> Result<(), OwnerBridgeCodecError> {
         self.head(0, value)
     }
 
-    pub(crate) fn signed(&mut self, value: i64) -> Result<(), OwnerBridgeCodecError> {
+    pub fn signed(&mut self, value: i64) -> Result<(), OwnerBridgeCodecError> {
         if value >= 0 {
             self.unsigned(u64::try_from(value).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?)
         } else {
             let magnitude = value
                 .checked_add(1)
-                .and_then(|adjusted| adjusted.checked_neg())
+                .and_then(i64::checked_neg)
                 .and_then(|adjusted| u64::try_from(adjusted).ok())
                 .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
             self.head(1, magnitude)
         }
     }
 
-    pub(crate) fn bytes(&mut self, value: &[u8]) -> Result<(), OwnerBridgeCodecError> {
+    pub fn bytes(&mut self, value: &[u8]) -> Result<(), OwnerBridgeCodecError> {
         self.head(
             2,
             u64::try_from(value.len()).map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?,
@@ -211,7 +211,7 @@ impl<'a> CborWriter<'a> {
         self.write(value)
     }
 
-    pub(crate) fn text(&mut self, value: &str) -> Result<(), OwnerBridgeCodecError> {
+    pub fn text(&mut self, value: &str) -> Result<(), OwnerBridgeCodecError> {
         self.head(
             3,
             u64::try_from(value.len()).map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?,
@@ -219,15 +219,15 @@ impl<'a> CborWriter<'a> {
         self.write(value.as_bytes())
     }
 
-    pub(crate) fn boolean(&mut self, value: bool) -> Result<(), OwnerBridgeCodecError> {
+    pub fn boolean(&mut self, value: bool) -> Result<(), OwnerBridgeCodecError> {
         self.write(&[if value { 0xf5 } else { 0xf4 }])
     }
 
-    pub(crate) fn null(&mut self) -> Result<(), OwnerBridgeCodecError> {
+    pub fn null(&mut self) -> Result<(), OwnerBridgeCodecError> {
         self.write(&[0xf6])
     }
 
-    pub(crate) const fn finish(&self) -> usize {
+    pub const fn finish(&self) -> usize {
         self.offset
     }
 
@@ -237,21 +237,18 @@ impl<'a> CborWriter<'a> {
             let value = u8::try_from(value).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
             return self.write(&[prefix | value]);
         }
-        if value <= u64::from(u8::MAX) {
-            let value = u8::try_from(value).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
-            return self.write(&[prefix | 24, value]);
+        if let Ok(value) = u8::try_from(value) {
+            return self.write(&[prefix | 0x18, value]);
         }
-        if value <= u64::from(u16::MAX) {
-            let value = u16::try_from(value).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
-            self.write(&[prefix | 25])?;
+        if let Ok(value) = u16::try_from(value) {
+            self.write(&[prefix | 0x19])?;
             return self.write(&value.to_be_bytes());
         }
-        if value <= u64::from(u32::MAX) {
-            let value = u32::try_from(value).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
-            self.write(&[prefix | 26])?;
+        if let Ok(value) = u32::try_from(value) {
+            self.write(&[prefix | 0x1a])?;
             return self.write(&value.to_be_bytes());
         }
-        self.write(&[prefix | 27])?;
+        self.write(&[prefix | 0x1b])?;
         self.write(&value.to_be_bytes())
     }
 

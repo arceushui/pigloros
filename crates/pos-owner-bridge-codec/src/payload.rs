@@ -89,7 +89,7 @@ impl CreateOptionsV1 {
         self.ceremony_id
     }
 
-    /// Return the exact WebAuthn challenge.
+    /// Return the exact `WebAuthn` challenge.
     #[must_use]
     pub const fn challenge(self) -> [u8; 32] {
         self.challenge
@@ -145,7 +145,7 @@ impl<'a> GetOptionsV1<'a> {
         self.ceremony_id
     }
 
-    /// Return the exact WebAuthn challenge.
+    /// Return the exact `WebAuthn` challenge.
     #[must_use]
     pub const fn challenge(self) -> [u8; 32] {
         self.challenge
@@ -164,7 +164,7 @@ impl<'a> GetOptionsV1<'a> {
     }
 }
 
-/// Page-supplied Create result before WebAuthn verification.
+/// Page-supplied Create result before `WebAuthn` verification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AttestationReplyV1<'a> {
     ceremony_id: [u8; 16],
@@ -212,7 +212,7 @@ impl<'a> AttestationReplyV1<'a> {
         self.ceremony_id
     }
 
-    /// Return the WebAuthn raw credential identifier.
+    /// Return the `WebAuthn` raw credential identifier.
     #[must_use]
     pub const fn raw_id(self) -> &'a [u8] {
         self.raw_id
@@ -249,7 +249,7 @@ impl<'a> AttestationReplyV1<'a> {
     }
 }
 
-/// Page-supplied Get result before WebAuthn verification.
+/// Page-supplied Get result before `WebAuthn` verification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AssertionReplyV1<'a> {
     ceremony_id: [u8; 16],
@@ -302,7 +302,7 @@ impl<'a> AssertionReplyV1<'a> {
         self.ceremony_id
     }
 
-    /// Return the WebAuthn raw credential identifier.
+    /// Return the `WebAuthn` raw credential identifier.
     #[must_use]
     pub const fn raw_id(self) -> &'a [u8] {
         self.raw_id
@@ -611,7 +611,7 @@ fn write_optional_fixed<const N: usize>(
     }
 }
 
-fn require_bounded(
+const fn require_bounded(
     value: &[u8],
     minimum: usize,
     maximum: usize,

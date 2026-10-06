@@ -197,9 +197,8 @@ pub fn parse_none_attestation_object<'a>(
     }
 
     let parsed = parse_authenticator_data(auth_data, AuthenticatorDataKind::Create, raw_id)?;
-    let (credential_id, public_key) = match (parsed.credential_id, parsed.public_key) {
-        (Some(credential_id), Some(public_key)) => (credential_id, public_key),
-        _ => return Err(OwnerBridgeCodecError::InvalidPayload),
+    let (Some(credential_id), Some(public_key)) = (parsed.credential_id, parsed.public_key) else {
+        return Err(OwnerBridgeCodecError::InvalidPayload);
     };
     Ok(CreateAuthenticatorData {
         credential_id,
@@ -412,18 +411,18 @@ impl MapKey<'_> {
         matches!(self, Self::Text(text) if text == expected)
     }
 
-    fn is_unsigned(self, expected: u64) -> bool {
+    const fn is_unsigned(self, expected: u64) -> bool {
         matches!(self, Self::Unsigned(value) if value == expected)
     }
 
-    fn is_negative(self, expected_magnitude: u64) -> bool {
+    const fn is_negative(self, expected_magnitude: u64) -> bool {
         matches!(self, Self::Negative(value) if value == expected_magnitude)
     }
 
     fn equals(self, other: Self) -> bool {
         match (self, other) {
-            (Self::Unsigned(left), Self::Unsigned(right)) => left == right,
-            (Self::Negative(left), Self::Negative(right)) => left == right,
+            (Self::Unsigned(left), Self::Unsigned(right))
+            | (Self::Negative(left), Self::Negative(right)) => left == right,
             (Self::Text(left), Self::Text(right)) => left == right,
             _ => false,
         }
@@ -581,7 +580,7 @@ impl<'a> AuthenticatorCborReader<'a> {
         Ok(())
     }
 
-    fn finish(&self) -> Result<(), OwnerBridgeCodecError> {
+    const fn finish(&self) -> Result<(), OwnerBridgeCodecError> {
         if self.offset == self.input.len() {
             Ok(())
         } else {
@@ -663,7 +662,7 @@ fn duplicate_map_key_before(
     }
 }
 
-fn require_bounded(
+const fn require_bounded(
     input: &[u8],
     minimum: usize,
     maximum: usize,

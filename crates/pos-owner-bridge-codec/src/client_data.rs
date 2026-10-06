@@ -7,7 +7,7 @@ const OWNER_ORIGIN: &str = "http://localhost:49291";
 const CREATE_TYPE: &str = "webauthn.create";
 const GET_TYPE: &str = "webauthn.get";
 
-/// Validate closed WebAuthn `clientDataJSON` for one ceremony and challenge.
+/// Validate closed `WebAuthn` `clientDataJSON` for one ceremony and challenge.
 ///
 /// The parser accepts a single flat JSON object whose member values are only
 /// strings or booleans. It validates UTF-8 and every JSON escape while it
@@ -17,7 +17,7 @@ const GET_TYPE: &str = "webauthn.get";
 ///
 /// Returns [`OwnerBridgeCodecError::InvalidPayload`] for malformed JSON,
 /// duplicate keys, an unsupported value shape, or a client-data value that
-/// does not satisfy the closed ADR-110 WebAuthn contract. Returns
+/// does not satisfy the closed ADR-110 `WebAuthn` contract. Returns
 /// [`OwnerBridgeCodecError::BoundsExceeded`] when `input` is empty or exceeds
 /// the fixed 4,096-byte bridge limit.
 pub fn validate_client_data_json(

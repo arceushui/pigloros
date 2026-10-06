@@ -29,6 +29,15 @@ pub enum ControlRole {
     Reply = 1,
 }
 
+impl ControlRole {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Request => 0,
+            Self::Reply => 1,
+        }
+    }
+}
+
 impl TryFrom<u8> for ControlRole {
     type Error = OwnerBridgeCodecError;
 
@@ -41,14 +50,23 @@ impl TryFrom<u8> for ControlRole {
     }
 }
 
-/// The one WebAuthn ceremony shape accepted by the owner bridge.
+/// The one `WebAuthn` ceremony shape accepted by the owner bridge.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum CeremonyKind {
-    /// A WebAuthn Create ceremony.
+    /// A `WebAuthn` Create ceremony.
     Create = 0,
-    /// A WebAuthn Get ceremony.
+    /// A `WebAuthn` Get ceremony.
     Get = 1,
+}
+
+impl CeremonyKind {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Create => 0,
+            Self::Get => 1,
+        }
+    }
 }
 
 impl TryFrom<u8> for CeremonyKind {
@@ -79,10 +97,25 @@ pub enum ControlState {
     ReleaseRequested = 4,
     /// The page has started its release sequence.
     Releasing = 5,
-    /// The page failed or cancelled its WebAuthn call without a payload.
+    /// The page failed or cancelled its `WebAuthn` call without a payload.
     Failed = 6,
-    /// The page has received a complete pair before it begins its WebAuthn call.
+    /// The page has received a complete pair before it begins its `WebAuthn` call.
     Received = 7,
+}
+
+impl ControlState {
+    const fn code(self) -> u32 {
+        match self {
+            Self::Empty => 0,
+            Self::Writing => 1,
+            Self::Ready => 2,
+            Self::Consuming => 3,
+            Self::ReleaseRequested => 4,
+            Self::Releasing => 5,
+            Self::Failed => 6,
+            Self::Received => 7,
+        }
+    }
 }
 
 impl TryFrom<u32> for ControlState {
@@ -231,13 +264,13 @@ impl OwnerBridgeControlV1 {
         output[..4].copy_from_slice(&HEADER_MAGIC);
         write_u16(&mut output, 4, HEADER_VERSION);
         write_u16(&mut output, 6, CONTROL_HEADER_BYTES_U16);
-        output[8] = self.role as u8;
-        output[9] = self.kind as u8;
+        output[8] = self.role.code();
+        output[9] = self.kind.code();
         write_u32(&mut output, 12, self.generation);
         output[16..32].copy_from_slice(&self.ceremony_id);
         write_u32(&mut output, 32, self.total_capacity);
         write_u32(&mut output, 36, self.payload_len);
-        write_u32(&mut output, 40, self.state as u32);
+        write_u32(&mut output, 40, self.state.code());
         output
     }
 
@@ -247,7 +280,7 @@ impl OwnerBridgeControlV1 {
         self.role
     }
 
-    /// Return the closed WebAuthn ceremony kind declared by this header.
+    /// Return the closed `WebAuthn` ceremony kind declared by this header.
     #[must_use]
     pub const fn kind(self) -> CeremonyKind {
         self.kind
@@ -332,11 +365,11 @@ const fn reply_capacity(kind: CeremonyKind) -> u32 {
     }
 }
 
-fn read_u16(input: &[u8; CONTROL_HEADER_BYTES], offset: usize) -> u16 {
+const fn read_u16(input: &[u8; CONTROL_HEADER_BYTES], offset: usize) -> u16 {
     u16::from_le_bytes([input[offset], input[offset + 1]])
 }
 
-fn read_u32(input: &[u8; CONTROL_HEADER_BYTES], offset: usize) -> u32 {
+const fn read_u32(input: &[u8; CONTROL_HEADER_BYTES], offset: usize) -> u32 {
     u32::from_le_bytes([
         input[offset],
         input[offset + 1],
