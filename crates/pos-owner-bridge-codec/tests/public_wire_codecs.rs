@@ -269,7 +269,7 @@ fn hex<const N: usize>(input: &[u8]) -> [u8; N] {
     output
 }
 
-fn hex_nibble(input: u8) -> u8 {
+const fn hex_nibble(input: u8) -> u8 {
     match input {
         b'0'..=b'9' => input - b'0',
         b'a'..=b'f' => input - b'a' + 10,
