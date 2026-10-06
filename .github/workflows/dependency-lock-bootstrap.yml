@@ -18,7 +18,10 @@ jobs:
       - name: Install pinned Rust for hosted-only dependency resolution
         run: |
           rustup toolchain install 1.97.1 --profile minimal
-          rustup component add --toolchain 1.97.1 rustfmt clippy
+          rustup component add --toolchain 1.97.1 rustfmt clippy llvm-tools-preview
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-llvm-cov
       - name: Resolve the candidate lockfile
         run: cargo +1.97.1 metadata --format-version 1 > /dev/null
       - name: Check codec formatting
@@ -27,6 +30,18 @@ jobs:
         run: cargo +1.97.1 test -p pos-owner-bridge-codec --locked
       - name: Lint the codec
         run: cargo +1.97.1 clippy -p pos-owner-bridge-codec --all-targets --locked -- -D warnings -W clippy::pedantic
+      - name: Measure codec coverage for ticket 533
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: >
+          cargo +1.97.1 llvm-cov -p pos-owner-bridge-codec --locked
+          --json --output-path codec-coverage.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codec-coverage-${{ github.sha }}
+          path: codec-coverage.json
+          if-no-files-found: error
+          retention-days: 1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dependency-lock-${{ github.sha }}
