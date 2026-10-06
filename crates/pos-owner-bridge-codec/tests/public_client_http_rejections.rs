@@ -181,6 +181,7 @@ fn public_client_data_rejects_malformed_json_strings_and_trailing_content() {
 
 #[test]
 fn public_client_data_exercises_every_json_escape_and_parser_rejection() {
+    const UNKNOWN_VALUE_PREFIX: &[u8] = b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":";
     let escaped_key = r#"x\"\\\/\b\f\n\r\t\u00af\uABCD\uD83D\uDE00é"#;
     let duplicate_escaped_key = [
         br#"{"type":"webauthn.create","challenge":"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8","origin":"http://localhost:49291",""#,
@@ -195,9 +196,8 @@ fn public_client_data_exercises_every_json_escape_and_parser_rejection() {
         Err(OwnerBridgeCodecError::InvalidPayload)
     );
 
-    const UNKNOWN_VALUE_PREFIX: &[u8] = b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":";
     let mut truncated_escape = Vec::from(UNKNOWN_VALUE_PREFIX);
-    truncated_escape.extend([b'\"', b'\\']);
+    truncated_escape.extend_from_slice(b"\"\\");
     let mut truncated_unicode = Vec::from(UNKNOWN_VALUE_PREFIX);
     truncated_unicode.extend_from_slice(br#""\u001"#);
     let invalid_inputs: [(&str, &[u8]); 6] = [
