@@ -9,7 +9,7 @@
 //! next stack slice.
 
 mod authenticator_data;
-mod cbor;
+pub(crate) mod cbor;
 mod client_data;
 mod control;
 mod error;

@@ -1,17 +1,17 @@
 use crate::OwnerBridgeCodecError;
 
 /// Minimal deterministic-CBOR reader for the fixed owner-bridge schemas.
-pub struct CborReader<'a> {
+pub(crate) struct CborReader<'a> {
     input: &'a [u8],
     offset: usize,
 }
 
 impl<'a> CborReader<'a> {
-    pub const fn new(input: &'a [u8]) -> Self {
+    pub(crate) const fn new(input: &'a [u8]) -> Self {
         Self { input, offset: 0 }
     }
 
-    pub fn fixed_array(&mut self, expected: u64) -> Result<(), OwnerBridgeCodecError> {
+    pub(crate) fn fixed_array(&mut self, expected: u64) -> Result<(), OwnerBridgeCodecError> {
         let (major, count) = self.head()?;
         if major == 4 && count == expected {
             Ok(())
@@ -20,7 +20,7 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub fn array(&mut self, maximum: usize) -> Result<usize, OwnerBridgeCodecError> {
+    pub(crate) fn array(&mut self, maximum: usize) -> Result<usize, OwnerBridgeCodecError> {
         let (major, count) = self.head()?;
         if major != 4 {
             return Err(OwnerBridgeCodecError::InvalidCbor);
@@ -28,7 +28,7 @@ impl<'a> CborReader<'a> {
         Self::bounded_count(count, maximum)
     }
 
-    pub fn unsigned(&mut self) -> Result<u64, OwnerBridgeCodecError> {
+    pub(crate) fn unsigned(&mut self) -> Result<u64, OwnerBridgeCodecError> {
         let (major, value) = self.head()?;
         if major == 0 {
             Ok(value)
@@ -37,7 +37,7 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub fn signed(&mut self) -> Result<i64, OwnerBridgeCodecError> {
+    pub(crate) fn signed(&mut self) -> Result<i64, OwnerBridgeCodecError> {
         let (major, value) = self.head()?;
         match major {
             0 => i64::try_from(value).map_err(|_| OwnerBridgeCodecError::InvalidCbor),
@@ -48,7 +48,7 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub fn fixed_bytes<const N: usize>(&mut self) -> Result<[u8; N], OwnerBridgeCodecError> {
+    pub(crate) fn fixed_bytes<const N: usize>(&mut self) -> Result<[u8; N], OwnerBridgeCodecError> {
         let (major, length) = self.head()?;
         if major != 2 || usize::try_from(length) != Ok(N) {
             return Err(OwnerBridgeCodecError::InvalidCbor);
@@ -58,7 +58,7 @@ impl<'a> CborReader<'a> {
         Ok(output)
     }
 
-    pub fn bytes(
+    pub(crate) fn bytes(
         &mut self,
         minimum: usize,
         maximum: usize,
@@ -74,7 +74,7 @@ impl<'a> CborReader<'a> {
         self.take(length)
     }
 
-    pub fn exact_text(&mut self, expected: &str) -> Result<(), OwnerBridgeCodecError> {
+    pub(crate) fn exact_text(&mut self, expected: &str) -> Result<(), OwnerBridgeCodecError> {
         let (major, length) = self.head()?;
         if major != 3 || usize::try_from(length) != Ok(expected.len()) {
             return Err(OwnerBridgeCodecError::InvalidPayload);
@@ -86,7 +86,7 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub fn boolean(&mut self) -> Result<bool, OwnerBridgeCodecError> {
+    pub(crate) fn boolean(&mut self) -> Result<bool, OwnerBridgeCodecError> {
         match self.byte()? {
             0xf4 => Ok(false),
             0xf5 => Ok(true),
@@ -94,7 +94,7 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub fn null(&mut self) -> Result<(), OwnerBridgeCodecError> {
+    pub(crate) fn null(&mut self) -> Result<(), OwnerBridgeCodecError> {
         if self.byte()? == 0xf6 {
             Ok(())
         } else {
@@ -102,7 +102,7 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub fn optional_fixed_bytes<const N: usize>(
+    pub(crate) fn optional_fixed_bytes<const N: usize>(
         &mut self,
     ) -> Result<Option<[u8; N]>, OwnerBridgeCodecError> {
         if self.input.get(self.offset) == Some(&0xf6) {
@@ -113,7 +113,7 @@ impl<'a> CborReader<'a> {
         }
     }
 
-    pub const fn finish(&self) -> Result<(), OwnerBridgeCodecError> {
+    pub(crate) const fn finish(&self) -> Result<(), OwnerBridgeCodecError> {
         if self.offset == self.input.len() {
             Ok(())
         } else {
@@ -172,25 +172,25 @@ impl<'a> CborReader<'a> {
 }
 
 /// Minimal deterministic-CBOR writer for the fixed owner-bridge schemas.
-pub struct CborWriter<'a> {
+pub(crate) struct CborWriter<'a> {
     output: &'a mut [u8],
     offset: usize,
 }
 
 impl<'a> CborWriter<'a> {
-    pub const fn new(output: &'a mut [u8]) -> Self {
+    pub(crate) const fn new(output: &'a mut [u8]) -> Self {
         Self { output, offset: 0 }
     }
 
-    pub fn array(&mut self, count: u64) -> Result<(), OwnerBridgeCodecError> {
+    pub(crate) fn array(&mut self, count: u64) -> Result<(), OwnerBridgeCodecError> {
         self.head(4, count)
     }
 
-    pub fn unsigned(&mut self, value: u64) -> Result<(), OwnerBridgeCodecError> {
+    pub(crate) fn unsigned(&mut self, value: u64) -> Result<(), OwnerBridgeCodecError> {
         self.head(0, value)
     }
 
-    pub fn signed(&mut self, value: i64) -> Result<(), OwnerBridgeCodecError> {
+    pub(crate) fn signed(&mut self, value: i64) -> Result<(), OwnerBridgeCodecError> {
         if value >= 0 {
             self.unsigned(u64::try_from(value).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?)
         } else {
@@ -203,7 +203,7 @@ impl<'a> CborWriter<'a> {
         }
     }
 
-    pub fn bytes(&mut self, value: &[u8]) -> Result<(), OwnerBridgeCodecError> {
+    pub(crate) fn bytes(&mut self, value: &[u8]) -> Result<(), OwnerBridgeCodecError> {
         self.head(
             2,
             u64::try_from(value.len()).map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?,
@@ -211,7 +211,7 @@ impl<'a> CborWriter<'a> {
         self.write(value)
     }
 
-    pub fn text(&mut self, value: &str) -> Result<(), OwnerBridgeCodecError> {
+    pub(crate) fn text(&mut self, value: &str) -> Result<(), OwnerBridgeCodecError> {
         self.head(
             3,
             u64::try_from(value.len()).map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?,
@@ -219,15 +219,15 @@ impl<'a> CborWriter<'a> {
         self.write(value.as_bytes())
     }
 
-    pub fn boolean(&mut self, value: bool) -> Result<(), OwnerBridgeCodecError> {
+    pub(crate) fn boolean(&mut self, value: bool) -> Result<(), OwnerBridgeCodecError> {
         self.write(&[if value { 0xf5 } else { 0xf4 }])
     }
 
-    pub fn null(&mut self) -> Result<(), OwnerBridgeCodecError> {
+    pub(crate) fn null(&mut self) -> Result<(), OwnerBridgeCodecError> {
         self.write(&[0xf6])
     }
 
-    pub const fn finish(&self) -> usize {
+    pub(crate) const fn finish(&self) -> usize {
         self.offset
     }
 
