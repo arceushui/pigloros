@@ -412,12 +412,14 @@ fn public_cose_canonical_decoder_rejects_each_closed_map_shape() {
 
 #[test]
 fn public_cose_canonical_decoder_rejects_malformed_numeric_claims() {
-    for encoded_key in [b"\xa5\x01\x40".as_slice(), b"\xa5\x03\x3b".as_slice()] {
-        assert_eq!(
-            CoseEs256PublicKey::from_canonical_encoding(encoded_key),
-            Err(OwnerBridgeCodecError::InvalidPayload)
-        );
-    }
+    assert_eq!(
+        CoseEs256PublicKey::from_canonical_encoding(b"\xa5\x01\x40"),
+        Err(OwnerBridgeCodecError::InvalidPayload)
+    );
+    assert_eq!(
+        CoseEs256PublicKey::from_canonical_encoding(b"\xa5\x03\x3b"),
+        Err(OwnerBridgeCodecError::BoundsExceeded)
+    );
 }
 
 #[test]
