@@ -10,7 +10,7 @@ publish.workspace = true
 base64 = { workspace = true }
 httparse = { workspace = true }
 p256 = { workspace = true }
-sha2 = { workspace = true, default-features = false }
+sha2 = { workspace = true }
 
 [lints]
 workspace = true

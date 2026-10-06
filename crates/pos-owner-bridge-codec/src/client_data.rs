@@ -381,7 +381,7 @@ impl<'a> JsonParser<'a> {
         }
     }
 
-    const fn peek_byte(&self) -> Option<u8> {
+    fn peek_byte(&self) -> Option<u8> {
         self.input.get(self.offset).copied()
     }
 
