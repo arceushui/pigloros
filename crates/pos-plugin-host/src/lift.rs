@@ -275,8 +275,14 @@ mod tests {
         let ok = Val::Result(Ok(Some(Box::new(Val::U32(1)))));
         assert_eq!(guest_return(&ok, u32_value), Ok(Ok(1)));
         assert_eq!(guest_return(&ok, u16_value), Err(INVALID));
-        assert_eq!(guest_return(&Val::Result(Ok(None)), u32_value), Err(INVALID));
-        assert_eq!(guest_return(&Val::Result(Err(None)), u32_value), Err(INVALID));
+        assert_eq!(
+            guest_return(&Val::Result(Ok(None)), u32_value),
+            Err(INVALID)
+        );
+        assert_eq!(
+            guest_return(&Val::Result(Err(None)), u32_value),
+            Err(INVALID)
+        );
         assert_eq!(guest_return(&Val::U32(1), u32_value), Err(INVALID));
     }
 
@@ -360,7 +366,10 @@ mod tests {
         assert_eq!(lifted_error(&error), Err(INVALID));
         let error = err_return(record(vec![("code", failure())]));
         assert_eq!(lifted_error(&error), Err(INVALID));
-        let bad_ref = record(vec![("schema-id", Val::U16(3)), ("field-ordinal", Val::U16(4))]);
+        let bad_ref = record(vec![
+            ("schema-id", Val::U16(3)),
+            ("field-ordinal", Val::U16(4)),
+        ]);
         let error = err_return(error_val(
             code("invalid-state", Some(bad_ref)),
             Val::Option(None),

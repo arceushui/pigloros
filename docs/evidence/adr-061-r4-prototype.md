@@ -68,9 +68,10 @@ execution profile.
 The host also sets these limits:
 
 - **Memory.** A store limiter charges every linear-memory reservation,
-  instantiation included, against `InvocationLimits::memory_bytes`. Denial is
-  `MemoryLimitExceeded`.
-- **Tables.** Each table is capped at 65,536 elements.
+  instantiation included, against the negotiated effective `memory_bytes`.
+  Denial is `MemoryLimitExceeded`.
+- **Tables.** Each table is capped at 65,536 elements; growth beyond it is
+  also `MemoryLimitExceeded`.
 - **Store.** Every invocation runs in a fresh store and instance.
 
 ## Guest toolchains
@@ -85,6 +86,8 @@ SHA-256 digests.
 | `wit-bindgen` CLI | 0.61.1 | Rust and C bindings |
 | wasi-sdk | 34 (clang, wasi-libc `malloc`/`memcpy` only) | C guest |
 | `wasm-tools` | 1.258.3 | `component new` (no WASI adapter), WAT variants, import check |
+| BLAKE3 C sources | 1.8.7 (the workspace `blake3` release), portable implementation only | C guest `output-digest` |
+| `blake3` crate | `=1.8.7`, `default-features = false` | Rust guest `output-digest` |
 
 The `wit-bindgen` and `wasm-tools` versions are the ones Wasmtime 49.0.2 itself
 builds and tests against (`wasmparser` 0.258).
@@ -103,7 +106,8 @@ Both guests implement this behaviour independently, and the host test checks it
 against an in-test oracle.
 
 - **`describe`** returns a fixed descriptor:
-  - `plugin-id` is `pigloros.compatibility-prototype`, ABI 0.1–0.1;
+  - `plugin-id` is `pigloros.compatibility-prototype`, ABI 0.0–0.0 (the V1
+    host's only minor, since #541 checks it against the negotiated release);
   - one event schema digest, `0x01` × 32; state schema digest `0x02` × 32;
   - manifest and release digests `0x00` × 32;
   - empty `capabilities`, `migrations`, `dependencies` and `required-features`.
@@ -122,14 +126,17 @@ against an in-test oracle.
        `prior-state-schema`;
      - one EventDraft: schema 1, `entity-id` set to the `invocation-id`,
        type `prototype.reduced` or `prototype.driven`, payload `h`;
-     - `output-digest` is `h` repeated 4 times; `invocation-id` is echoed;
+     - `output-digest` is the V1 output digest of the other fields (see
+       `crates/pos-plugin-host/src/digest.rs`); `invocation-id` is echoed;
      - every other list is empty.
 - **`migrate-state`** returns `guest-declared-failure(1)`. A V1 host never
   calls it, and `GuestExport` cannot name it.
 
-The prototype host serves `deterministic-random` as BLAKE3 extendable output
-keyed by the 32-byte domain and read from `offset`, up to 4,096 bytes per call.
-`record-operational-log` accepts up to 64 calls of at most 256 UTF-8 bytes.
+The host serves `deterministic-random` as BLAKE3 extendable output keyed by the
+32-byte domain and read from `offset`, up to 4,096 bytes per call.
+`record-operational-log` accepts at most the effective `log_calls` (64 or
+fewer) and `log_bytes`, each message at most 256 UTF-8 bytes. Every `host-v1`
+call counts against `host_calls`.
 
 ## Budget measurements
 
@@ -167,22 +174,19 @@ Observations:
 | The pinned Rust toolchain builds the host without weakening supply-chain gates | **Proven**, subject to green CI on PR #413 | Rust 1.97.1 builds Wasmtime 49.0.2. `cargo deny --locked check`, `cargo audit`, `cargo shear`, geiger and the pinned-Action policy run unchanged. `deny.toml` is unchanged. |
 | At least two guest languages implement the same world | **Proven**; finding F1 resolved by revision 5 | The Rust and C guests produce identical results, equal to the oracle, over 3 repetitions, for `describe`, `reduce` and `drive`, and with a 1 MiB observation. |
 | Startup, invocation, memory and artifact-size budgets are measured | **Proven** for fuel, memory and size | See the table above. Wall time is deferred to #542. |
-| No ambient resource access | **Proven for imports and `simulation-time`** | A WASI import, an undeclared `host-v1` function and a mistyped `simulation-time` are all rejected by `load` before execution. Both guests import only `host-v1` and the types-only `contract-v1`. The engine reads no environment variable. The record-typed host functions (`deterministic-random`, `record-operational-log`) are not type-checked at load: a mistyped import of them fails closed at call time (F3, fixed in #541). |
+| No ambient resource access | **Proven at load time** | A WASI import, an undeclared `host-v1` function, and a mistyped `simulation-time`, `deterministic-random` or `record-operational-log` are all rejected by `load` before execution (F3 resolved by #541). Both guests import only `host-v1` and the types-only `contract-v1`. The engine reads no environment variable. |
 | Identical output under Local and Air-Gapped profiles | **Deferred** to #540 (profiles) and #542 (worker) | The engine has no mode-dependent input, and outputs are identical across guests and repetitions. The two host-owned profiles do not exist yet. **This gate is open:** "No P0 gate failed" does not cover it, and #540 and #542 must close it before ADR-061 is treated as gate-clean. |
-| Traps and budget exhaustion cannot partially commit | **Proven at prototype level** | `InvocationFailure` carries no guest data, and each store is dropped on failure. A trap after a successful `record-operational-log` returns nothing, and so does fuel exhaustion halfway through hashing a 1 MiB observation. The atomic Tick Boundary commit is #543. |
+| Traps and budget exhaustion cannot partially commit | **Proven in the engine (#541)** | A failure returns only the closed `CommunityPluginHostErrorV1`, which carries no guest data, and each store is dropped on failure. A trap after a successful `record-operational-log` returns nothing, and so does fuel exhaustion halfway through hashing a 1 MiB observation. The atomic Tick Boundary commit is #543. |
 | Licence and MIT-distribution review | **Inventory done; no allow-list change** | See below. A formal legal review is for the owner. |
 
 No P0 gate failed.
 
-Two failure names are prototype placeholders, not closed ADR error names:
-- `InvocationFailure::HostCallRejected` covers refused `host-v1` arguments and
-  log-count overruns;
-- `InvocationFailure::Rejected` covers non-trap Wasmtime refusals.
-
-#541 replaces both with the revision 4 names (`HostCallLimitExceeded`,
-`OutputLimitExceeded`, `InvalidGuestOutput`). It also removes the public
-`ComponentTrap(Trap)` and the `Trap` and `Val` re-exports in favour of the
-trap-class table and validated types.
+The #539 prototype's placeholder outcomes (`HostCallRejected`, `Rejected`,
+`ComponentTrap(Trap)`, and the public `Trap` and `Val` re-exports) are gone.
+#541 reports every failure as the closed `CommunityPluginHostErrorV1` of #540:
+host-call bounds are `HostCallLimitExceeded`, log and output bounds
+`OutputLimitExceeded`, malformed guest values and Canonical ABI lift failures
+`InvalidGuestOutput`, and traps their pinned trap-table class.
 
 ## Licence inventory
 
@@ -255,7 +259,13 @@ committed fixture, golden vector or evidence value carries any of them.
   failures. When they arise while lifting a guest return, decision 6 makes
   them `InvalidGuestOutput`, not `ComponentTrap`.
 
-#541 must classify them before applying the table.
+**Resolved by ADR-061 revision 5 (decision 3) and #541.** The engine builds
+the pinned table from the 50 `wasmtime::Trap` codes of 49.0.2
+(`crates/pos-plugin-host/src/runtime.rs`), so `AlwaysTrapAdapter` is absent
+and every unlisted code is `other`. The lift codes are raised only by fused
+adapters between Components inside one guest. The host's own lift of a guest
+return reports a failure without a trap code, and the engine maps it to
+`InvalidGuestOutput`.
 
 ### F3. Dynamic host functions are not type-checked at load
 
@@ -265,14 +275,19 @@ They are defined with Wasmtime's dynamic `func_new`, because the typed
 bindings (`bindgen!` and the `ComponentType` derives) emit `unsafe impl`,
 which the workspace `unsafe_code = "forbid"` lint rejects.
 
-A mistyped import of either function therefore links, then fails closed at
-call time (`HostCallRejected` or `Rejected`). #541 should compare these import
-types structurally at load.
+A mistyped import of either function therefore linked, then failed closed at
+call time.
+
+**Resolved by #541.** `load` compares every imported function's type
+structurally with the exact `host-v1` signature before linking
+(`crates/pos-plugin-host/src/imports.rs`).
 
 ### F4. Guest memory baseline
 
 A Rust guest's default 1 MiB shadow stack reserves 1.1 MiB before any work. An
-execution profile ceiling below that rejects every unmodified Rust guest.
+execution profile ceiling below that rejects every unmodified Rust guest. The
+V1 profile ceiling is 64 MiB, and the #541 compatibility gates run both guests
+under it.
 
 ### F5. Fuel is checked at function entries and loop headers
 
@@ -282,9 +297,9 @@ still complete when the overshoot is straight-line code after the last check.
 For the pinned version and fixture bytes, the outcome at any given budget is
 still deterministic.
 
-The exhaustion edge is not "consumed fuel exceeds the budget by one". #540 and
-#541 should state the budget semantics as "the outcome under the pinned
-runtime" rather than as a sharp threshold.
+The exhaustion edge is not "consumed fuel exceeds the budget by one". The #541
+tests therefore assert only the outcome at the measured total and well below
+it, never a budget-minus-one edge.
 
 ### F6. `runtime` is a third requested feature
 

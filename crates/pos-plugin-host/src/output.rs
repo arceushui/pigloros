@@ -126,10 +126,7 @@ fn trace_annotations(
         .collect()
 }
 
-fn trace_annotation(
-    value: &Val,
-    dependencies: &mut DependencyBudget,
-) -> Lifted<TraceAnnotationV1> {
+fn trace_annotation(value: &Val, dependencies: &mut DependencyBudget) -> Lifted<TraceAnnotationV1> {
     let [schema, canonical_bytes, dependency_digests] = fields(value)?;
     Ok(TraceAnnotationV1 {
         annotation_schema_id: u32_value(schema)?,
@@ -192,7 +189,10 @@ mod tests {
 
     fn annotation_val(annotation: &TraceAnnotationV1) -> Val {
         record(vec![
-            ("annotation-schema-id", Val::U32(annotation.annotation_schema_id)),
+            (
+                "annotation-schema-id",
+                Val::U32(annotation.annotation_schema_id),
+            ),
             ("canonical-bytes", byte_list(&annotation.canonical_bytes)),
             (
                 "dependency-digests",
@@ -213,7 +213,13 @@ mod tests {
             ("next-state-bytes", byte_list(&output.next_state_bytes)),
             (
                 "trace-annotations",
-                Val::List(output.trace_annotations.iter().map(annotation_val).collect()),
+                Val::List(
+                    output
+                        .trace_annotations
+                        .iter()
+                        .map(annotation_val)
+                        .collect(),
+                ),
             ),
             (
                 "consumed-dependencies",

@@ -343,12 +343,7 @@ mod tests {
     }
 
     fn state(limits: &DeterministicBudgetV1) -> HostState {
-        HostState::new(
-            HostInputs {
-                simulation_time: 5,
-            },
-            limits,
-        )
+        HostState::new(HostInputs { simulation_time: 5 }, limits)
     }
 
     fn fault(result: wasmtime::Result<()>) -> Option<HostFault> {

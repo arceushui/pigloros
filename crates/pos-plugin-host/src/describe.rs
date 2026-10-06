@@ -23,22 +23,8 @@ pub(crate) fn plugin_descriptor(
     value: &Val,
     negotiated: &NegotiatedCommunityPluginV1,
 ) -> Lifted<PluginDescriptorV1> {
-    let [
-        plugin_id,
-        semver,
-        world,
-        major,
-        min_minor,
-        max_minor,
-        features,
-        events,
-        state,
-        capabilities,
-        migrations,
-        dependencies,
-        manifest,
-        release,
-    ] = fields(value)?;
+    let [plugin_id, semver, world, major, min_minor, max_minor, features, events, state, capabilities, migrations, dependencies, manifest, release] =
+        fields(value)?;
     let (negotiated_major, _) = negotiated.abi();
     let (declared_min, declared_max) = negotiated.declared_minor_range();
     let plugin_id = matching(id(plugin_id)?, negotiated.plugin_id())?;
@@ -109,8 +95,8 @@ mod tests {
         PluginExecutionProjectionV1,
     };
     use pos_runtime::community_plugin_host::{
-        negotiate_community_plugin_v1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
-        CommunityPluginHostAbiV1, CommunityPluginModeV1,
+        negotiate_community_plugin_v1, CommunityPluginCeilingsV1,
+        CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginModeV1,
     };
 
     use super::*;
@@ -242,7 +228,10 @@ mod tests {
             (1, text_val("")),
             (1, text_val(&"1".repeat(MAX_SEMVER_BYTES + 1))),
             (7, Val::List(ordered)),
-            (7, Val::List(vec![digest_val(&[4; 32]), digest_val(&[3; 32])])),
+            (
+                7,
+                Val::List(vec![digest_val(&[4; 32]), digest_val(&[3; 32])]),
+            ),
             (8, digest_val(&[5; 31])),
             (9, many(MAX_DESCRIPTOR_ITEMS + 1)),
             (10, many(1)),

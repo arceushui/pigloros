@@ -92,10 +92,19 @@ mod tests {
     #[test]
     fn host_faults_traps_and_lift_failures_map_to_closed_errors() {
         let cases = [
-            (wasmtime::Error::new(HostFault::MemoryLimit), Error::MemoryLimitExceeded),
-            (wasmtime::Error::new(HostFault::HostCallLimit), Error::HostCallLimitExceeded),
+            (
+                wasmtime::Error::new(HostFault::MemoryLimit),
+                Error::MemoryLimitExceeded,
+            ),
+            (
+                wasmtime::Error::new(HostFault::HostCallLimit),
+                Error::HostCallLimitExceeded,
+            ),
             (wasmtime::Error::new(Trap::OutOfFuel), Error::FuelExhausted),
-            (wasmtime::Error::new(Trap::Interrupt), Error::OperationalWatchdogStop),
+            (
+                wasmtime::Error::new(Trap::Interrupt),
+                Error::OperationalWatchdogStop,
+            ),
             (
                 wasmtime::Error::new(Trap::StackOverflow),
                 Error::ComponentTrap {

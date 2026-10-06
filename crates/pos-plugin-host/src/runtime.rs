@@ -163,18 +163,45 @@ mod tests {
     /// Every row whose outcome is not the `other` class.
     const CLASSIFIED: [(&str, TrapOutcomeV1); 15] = [
         ("StackOverflow", TrapOutcomeV1::Trap(Class::StackExhausted)),
-        ("MemoryOutOfBounds", TrapOutcomeV1::Trap(Class::MemoryOutOfBounds)),
-        ("HeapMisaligned", TrapOutcomeV1::Trap(Class::MemoryOutOfBounds)),
-        ("TableOutOfBounds", TrapOutcomeV1::Trap(Class::TableOutOfBounds)),
-        ("IndirectCallToNull", TrapOutcomeV1::Trap(Class::IndirectCall)),
+        (
+            "MemoryOutOfBounds",
+            TrapOutcomeV1::Trap(Class::MemoryOutOfBounds),
+        ),
+        (
+            "HeapMisaligned",
+            TrapOutcomeV1::Trap(Class::MemoryOutOfBounds),
+        ),
+        (
+            "TableOutOfBounds",
+            TrapOutcomeV1::Trap(Class::TableOutOfBounds),
+        ),
+        (
+            "IndirectCallToNull",
+            TrapOutcomeV1::Trap(Class::IndirectCall),
+        ),
         ("BadSignature", TrapOutcomeV1::Trap(Class::IndirectCall)),
-        ("IntegerOverflow", TrapOutcomeV1::Trap(Class::IntegerArithmetic)),
-        ("IntegerDivisionByZero", TrapOutcomeV1::Trap(Class::IntegerArithmetic)),
-        ("BadConversionToInteger", TrapOutcomeV1::Trap(Class::IntegerArithmetic)),
-        ("UnreachableCodeReached", TrapOutcomeV1::Trap(Class::Unreachable)),
+        (
+            "IntegerOverflow",
+            TrapOutcomeV1::Trap(Class::IntegerArithmetic),
+        ),
+        (
+            "IntegerDivisionByZero",
+            TrapOutcomeV1::Trap(Class::IntegerArithmetic),
+        ),
+        (
+            "BadConversionToInteger",
+            TrapOutcomeV1::Trap(Class::IntegerArithmetic),
+        ),
+        (
+            "UnreachableCodeReached",
+            TrapOutcomeV1::Trap(Class::Unreachable),
+        ),
         ("Interrupt", TrapOutcomeV1::WatchdogStop),
         ("OutOfFuel", TrapOutcomeV1::FuelExhausted),
-        ("ArrayOutOfBounds", TrapOutcomeV1::Trap(Class::MemoryOutOfBounds)),
+        (
+            "ArrayOutOfBounds",
+            TrapOutcomeV1::Trap(Class::MemoryOutOfBounds),
+        ),
         // Canonical-ABI lift codes come only from fused adapters inside a
         // Component; the host's own lift of a guest return never traps.
         ("InvalidChar", TrapOutcomeV1::Trap(Class::Other)),

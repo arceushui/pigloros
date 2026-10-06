@@ -102,7 +102,10 @@ impl PluginInvocationV1 {
             (
                 "timeline-position",
                 record(vec![
-                    ("timeline-id", byte_list(&self.timeline_position.timeline_id)),
+                    (
+                        "timeline-id",
+                        byte_list(&self.timeline_position.timeline_id),
+                    ),
                     ("seq", Val::U64(self.timeline_position.seq)),
                     ("tick", Val::U64(self.timeline_position.tick)),
                     (
@@ -113,7 +116,10 @@ impl PluginInvocationV1 {
             ),
             ("output-base-ordinal", Val::U32(self.output_base_ordinal)),
             ("principal-ref", artifact(&self.principal_ref)),
-            ("authorization-decision", artifact(&self.authorization_decision)),
+            (
+                "authorization-decision",
+                artifact(&self.authorization_decision),
+            ),
             ("observation-snapshot", artifact(&self.observation_snapshot)),
             ("observation-bytes", byte_list(&self.observation_bytes)),
             ("prior-state-schema", digest(&self.prior_state_schema)),

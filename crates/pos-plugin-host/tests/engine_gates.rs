@@ -160,11 +160,20 @@ fn invocation(observation_bytes: usize) -> PluginInvocationV1 {
 #[test]
 fn wasm_traps_map_to_their_pinned_trap_classes() {
     assert_eq!(probe(1, BUDGET), trap(ComponentTrapClassV1::Unreachable));
-    assert_eq!(probe(2, BUDGET), trap(ComponentTrapClassV1::IntegerArithmetic));
-    assert_eq!(probe(3, BUDGET), trap(ComponentTrapClassV1::MemoryOutOfBounds));
+    assert_eq!(
+        probe(2, BUDGET),
+        trap(ComponentTrapClassV1::IntegerArithmetic)
+    );
+    assert_eq!(
+        probe(3, BUDGET),
+        trap(ComponentTrapClassV1::MemoryOutOfBounds)
+    );
     assert_eq!(probe(4, BUDGET), trap(ComponentTrapClassV1::IndirectCall));
     assert_eq!(probe(5, BUDGET), trap(ComponentTrapClassV1::StackExhausted));
-    assert_eq!(probe(6, BUDGET), trap(ComponentTrapClassV1::TableOutOfBounds));
+    assert_eq!(
+        probe(6, BUDGET),
+        trap(ComponentTrapClassV1::TableOutOfBounds)
+    );
 }
 
 #[test]
@@ -225,9 +234,7 @@ fn malformed_guest_values_are_invalid_guest_output_not_traps() {
             &ENGINE.probe,
             &execution(BUDGET),
             &invocation(0),
-            HostInputs {
-                simulation_time: 0,
-            },
+            HostInputs { simulation_time: 0 },
             1,
         )
         .err();
@@ -291,9 +298,7 @@ fn execution_requires_the_profile_to_pin_this_runtime() {
 
 #[test]
 fn describe_must_match_the_negotiated_release() {
-    let inputs = HostInputs {
-        simulation_time: 0,
-    };
+    let inputs = HostInputs { simulation_time: 0 };
     let featured = ok(
         CommunityPluginHostAbiV1::new(0, 0, vec!["feature.a".to_owned()]),
         "host ABI",
@@ -305,30 +310,33 @@ fn describe_must_match_the_negotiated_release() {
         pinned(&release(PLUGIN_ID, 0, &["feature.a"], BUDGET), &featured),
     ];
     for execution in mismatches {
-        let failure = ENGINE.host.describe(&ENGINE.rust, &execution, inputs, 1).err();
+        let failure = ENGINE
+            .host
+            .describe(&ENGINE.rust, &execution, inputs, 1)
+            .err();
         assert_eq!(failure, Some(Error::InvalidGuestOutput));
     }
 }
 
 #[test]
 fn invocations_outside_their_bounds_never_reach_the_guest() {
-    let inputs = HostInputs {
-        simulation_time: 0,
-    };
+    let inputs = HostInputs { simulation_time: 0 };
     let execution = execution(BUDGET);
     let large = invocation(MAX_OBSERVATION_BYTES_V1 + 1);
-    let reduced = ENGINE.host.reduce(&ENGINE.rust, &execution, &large, inputs, 0);
+    let reduced = ENGINE
+        .host
+        .reduce(&ENGINE.rust, &execution, &large, inputs, 0);
     assert_eq!(reduced.err(), Some(Error::InvalidInvocation));
-    let driven = ENGINE.host.drive(&ENGINE.rust, &execution, &large, inputs, 0);
+    let driven = ENGINE
+        .host
+        .drive(&ENGINE.rust, &execution, &large, inputs, 0);
     assert_eq!(driven.err(), Some(Error::InvalidInvocation));
 }
 
 #[test]
 fn the_watchdog_deadline_counts_epochs_after_the_invocation_starts() {
     ENGINE.host.increment_epoch();
-    let inputs = HostInputs {
-        simulation_time: 0,
-    };
+    let inputs = HostInputs { simulation_time: 0 };
     let report = ENGINE
         .host
         .drive(&ENGINE.rust, &execution(BUDGET), &invocation(4), inputs, 1);

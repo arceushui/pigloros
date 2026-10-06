@@ -16,9 +16,8 @@ use pos_crypto::plugin_execution::{
 };
 use pos_plugin_host::{
     pinned_runtime, plugin_output_digest_v1, ArtifactRefV1, ComponentHost, EventDraftV1,
-    GuestExport, HostInputs, InvocationReportV1, LoadError, LoadedComponent,
-    OperationalLogRecord, PinnedExecutionV1, PluginDescriptorV1, PluginInvocationV1,
-    PluginOutputV1, TimelinePositionV1,
+    GuestExport, HostInputs, InvocationReportV1, LoadError, LoadedComponent, OperationalLogRecord,
+    PinnedExecutionV1, PluginDescriptorV1, PluginInvocationV1, PluginOutputV1, TimelinePositionV1,
 };
 use pos_runtime::community_plugin_host::{
     negotiate_community_plugin_v1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
@@ -81,7 +80,7 @@ const MEASUREMENTS: [Measurement; 6] = [
     measured("c", "reduce-1MiB", 19, 9_970_526, 1_179_648, 3),
 ];
 /// Component byte sizes recorded in the evidence document.
-const COMPONENT_BYTES: [(&str, usize); 2] = [("rust", 37_986), ("c", 72_445)];
+const COMPONENT_BYTES: [(&str, usize); 2] = [("rust", 51_947), ("c", 88_893)];
 
 const fn measured(
     guest: &'static str,
@@ -337,7 +336,10 @@ fn budget_measurements_match_the_recorded_evidence() {
     for (name, guest) in guests() {
         let report = ok(describe(guest), name);
         measurements.push(measurement(name, "describe", metered(&report)));
-        let report = ok(run(guest, GuestExport::Reduce, b"observation", BUDGET), name);
+        let report = ok(
+            run(guest, GuestExport::Reduce, b"observation", BUDGET),
+            name,
+        );
         measurements.push(measurement(name, "reduce", metered(&report)));
         let report = ok(run(guest, GuestExport::Reduce, &large, BUDGET), name);
         measurements.push(measurement(name, "reduce-1MiB", metered(&report)));
@@ -359,7 +361,10 @@ fn fuel_exhaustion_is_fuel_exhausted_and_discards_completed_host_calls() {
             fuel: total,
             ..BUDGET
         };
-        assert!(run(guest, GuestExport::Reduce, &observation, exact).is_ok(), "{name}");
+        assert!(
+            run(guest, GuestExport::Reduce, &observation, exact).is_ok(),
+            "{name}"
+        );
         // Half the budget runs out while hashing the observation, after the
         // guest's `record-operational-log` call succeeded; the failure carries
         // none of that work. Wasmtime checks fuel only at function entries and
@@ -388,7 +393,10 @@ fn memory_limit_stops_growth_exactly_at_the_limit() {
             memory_bytes: peak,
             ..BUDGET
         };
-        assert!(run(guest, GuestExport::Reduce, &observation, exact).is_ok(), "{name}");
+        assert!(
+            run(guest, GuestExport::Reduce, &observation, exact).is_ok(),
+            "{name}"
+        );
         let below = DeterministicBudgetV1 {
             memory_bytes: peak - 65_536,
             ..BUDGET

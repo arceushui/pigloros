@@ -27,6 +27,10 @@ enum Shape {
     Result(Option<Box<Self>>, Option<Box<Self>>),
 }
 
+/// A payload type that `host-v1` never uses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Unsupported;
+
 /// A function signature: named parameters, results and async-ness.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Signature {
@@ -41,10 +45,11 @@ struct Signature {
 /// Only functions are checked here. Every other imported item is left to the
 /// `host-v1`-only linker, which refuses anything it does not define.
 pub(crate) fn imported_functions_are_exact(engine: &Engine, component: &Component) -> bool {
-    component
-        .component_type()
+    let component_type = component.component_type();
+    let exact = component_type
         .imports(engine)
-        .all(|(interface, import)| item_is_exact(engine, interface, &import.ty))
+        .all(|(interface, import)| item_is_exact(engine, interface, &import.ty));
+    exact
 }
 
 fn item_is_exact(engine: &Engine, interface: &str, item: &ComponentItem) -> bool {
@@ -103,21 +108,24 @@ fn shape(ty: &Type) -> Option<Shape> {
             .map(Shape::Record),
         Type::Variant(variant) => variant
             .cases()
-            .map(|case| optional_shape(case.ty.as_ref()).map(|shape| (case.name.to_owned(), shape)))
+            .map(|case| {
+                let shape = optional_shape(case.ty.as_ref()).ok()?;
+                Some((case.name.to_owned(), shape))
+            })
             .collect::<Option<Vec<_>>>()
             .map(Shape::Variant),
         Type::Result(result) => {
-            let ok = optional_shape(result.ok().as_ref())?;
-            let err = optional_shape(result.err().as_ref())?;
+            let ok = optional_shape(result.ok().as_ref()).ok()?;
+            let err = optional_shape(result.err().as_ref()).ok()?;
             Some(Shape::Result(ok.map(Box::new), err.map(Box::new)))
         }
         _ => None,
     }
 }
 
-/// `Some(None)` for an absent payload, `None` for an unsupported one.
-fn optional_shape(ty: Option<&Type>) -> Option<Option<Shape>> {
-    ty.map_or(Some(None), |ty| shape(ty).map(Some))
+/// The shape of an optional payload type: `None` when it is absent.
+fn optional_shape(ty: Option<&Type>) -> Result<Option<Shape>, Unsupported> {
+    ty.map_or(Ok(None), |ty| shape(ty).map(Some).ok_or(Unsupported))
 }
 
 /// The exact WIT signature of one `host-v1` function.
@@ -133,7 +141,10 @@ fn expected_signature(name: &str) -> Option<Signature> {
             Shape::Result(Some(Box::new(bytes())), Some(Box::new(plugin_error()))),
         ),
         "record-operational-log" => (
-            vec![named("category", Shape::U16), named("message", bounded_text())],
+            vec![
+                named("category", Shape::U16),
+                named("message", bounded_text()),
+            ],
             Shape::Result(None, Some(Box::new(plugin_error()))),
         ),
         _ => return None,
