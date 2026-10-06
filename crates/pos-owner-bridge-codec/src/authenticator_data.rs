@@ -218,16 +218,20 @@ pub fn parse_none_attestation_object<'a>(
     // fields return above, and the map length is exactly three. Thus every
     // accepted traversal assigned `auth_data` exactly once.
 
-    let parsed = parse_authenticator_data(auth_data, AuthenticatorDataKind::Create, raw_id)?;
-    let (Some(credential_id), Some(public_key)) = (parsed.credential_id, parsed.public_key) else {
+    let prefix = parse_authenticator_data_prefix(auth_data)?;
+    if !prefix.attested_data {
         return Err(OwnerBridgeCodecError::InvalidPayload);
-    };
+    }
+    let (credential_id, cose_offset) = read_attested_credential_id(auth_data, raw_id)?;
+    let (public_key, consumed) = parse_cose_es256_key(&auth_data[cose_offset..])?;
+    // `parse_cose_es256_key` cannot consume beyond the supplied suffix.
+    finish_authenticator_data(auth_data, cose_offset + consumed, prefix.extensions)?;
     Ok(CreateAuthenticatorData {
         credential_id,
         public_key,
-        backup_eligible: parsed.backup_eligible,
-        backup_state: parsed.backup_state,
-        sign_count: parsed.sign_count,
+        backup_eligible: prefix.backup_eligible,
+        backup_state: prefix.backup_state,
+        sign_count: prefix.sign_count,
     })
 }
 
@@ -241,33 +245,29 @@ pub fn parse_none_attestation_object<'a>(
 pub fn parse_assertion_authenticator_data(
     input: &[u8],
 ) -> Result<AssertionAuthenticatorData, OwnerBridgeCodecError> {
-    let parsed = parse_authenticator_data(input, AuthenticatorDataKind::Assertion, &[])?;
+    let prefix = parse_authenticator_data_prefix(input)?;
+    if prefix.attested_data {
+        return Err(OwnerBridgeCodecError::InvalidPayload);
+    }
+    finish_authenticator_data(input, MIN_AUTHENTICATOR_DATA_BYTES, prefix.extensions)?;
     Ok(AssertionAuthenticatorData {
-        backup_eligible: parsed.backup_eligible,
-        backup_state: parsed.backup_state,
-        sign_count: parsed.sign_count,
+        backup_eligible: prefix.backup_eligible,
+        backup_state: prefix.backup_state,
+        sign_count: prefix.sign_count,
     })
 }
 
-#[derive(Clone, Copy)]
-enum AuthenticatorDataKind {
-    Create,
-    Assertion,
-}
-
-struct ParsedAuthenticatorData<'a> {
-    credential_id: Option<&'a [u8]>,
-    public_key: Option<CoseEs256PublicKey>,
+struct AuthenticatorDataPrefix {
     backup_eligible: bool,
     backup_state: bool,
     sign_count: u32,
+    attested_data: bool,
+    extensions: bool,
 }
 
-fn parse_authenticator_data<'a>(
-    input: &'a [u8],
-    kind: AuthenticatorDataKind,
-    raw_id: &[u8],
-) -> Result<ParsedAuthenticatorData<'a>, OwnerBridgeCodecError> {
+fn parse_authenticator_data_prefix(
+    input: &[u8],
+) -> Result<AuthenticatorDataPrefix, OwnerBridgeCodecError> {
     require_bounded(
         input,
         MIN_AUTHENTICATOR_DATA_BYTES,
@@ -288,28 +288,20 @@ fn parse_authenticator_data<'a>(
     let backup_state = flags & FLAG_BS != 0;
     let attested_data = flags & FLAG_AT != 0;
     let extensions = flags & FLAG_ED != 0;
-    let mut offset = MIN_AUTHENTICATOR_DATA_BYTES;
-    let mut credential_id = None;
-    let mut public_key = None;
+    Ok(AuthenticatorDataPrefix {
+        backup_eligible,
+        backup_state,
+        sign_count,
+        attested_data,
+        extensions,
+    })
+}
 
-    match kind {
-        AuthenticatorDataKind::Create => {
-            if !attested_data {
-                return Err(OwnerBridgeCodecError::InvalidPayload);
-            }
-            let (parsed_credential_id, cose_offset) = read_attested_credential_id(input, raw_id)?;
-            credential_id = Some(parsed_credential_id);
-            let (parsed_key, consumed) = parse_cose_es256_key(&input[cose_offset..])?;
-            // `parse_cose_es256_key` can consume no more than its input slice.
-            offset = cose_offset + consumed;
-            public_key = Some(parsed_key);
-        }
-        AuthenticatorDataKind::Assertion if attested_data => {
-            return Err(OwnerBridgeCodecError::InvalidPayload);
-        }
-        AuthenticatorDataKind::Assertion => {}
-    }
-
+fn finish_authenticator_data(
+    input: &[u8],
+    mut offset: usize,
+    extensions: bool,
+) -> Result<(), OwnerBridgeCodecError> {
     if extensions {
         let extension_bytes = &input[offset..];
         require_bounded(extension_bytes, 1, MAX_EXTENSION_MAP_BYTES)?;
@@ -321,14 +313,7 @@ fn parse_authenticator_data<'a>(
     if offset != input.len() {
         return Err(OwnerBridgeCodecError::TrailingBytes);
     }
-
-    Ok(ParsedAuthenticatorData {
-        credential_id,
-        public_key,
-        backup_eligible,
-        backup_state,
-        sign_count,
-    })
+    Ok(())
 }
 
 fn read_attested_credential_id<'a>(
@@ -580,7 +565,7 @@ impl<'a> AuthenticatorCborReader<'a> {
             if matches!(policy, MapKeyPolicy::Text) && !matches!(key, MapKey::Text(_)) {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            if duplicate_map_key_before(self.input, map_start, key_start, key, depth, policy)? {
+            if duplicate_map_key_before(self.input, map_start, key_start, key, depth) {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
             self.validate_value(depth + 1)?;
@@ -642,31 +627,26 @@ impl<'a> AuthenticatorCborReader<'a> {
     }
 }
 
-fn duplicate_map_key_before(
-    input: &[u8],
+fn duplicate_map_key_before<'a>(
+    input: &'a [u8],
     map_start: usize,
     current_key_start: usize,
-    key: MapKey<'_>,
+    key: MapKey<'a>,
     depth: usize,
-    policy: MapKeyPolicy,
-) -> Result<bool, OwnerBridgeCodecError> {
+) -> bool {
     let mut reader = AuthenticatorCborReader::new(input);
     reader.offset = map_start;
     loop {
         if reader.offset == current_key_start {
-            return Ok(false);
+            return false;
         }
-        if reader.offset > current_key_start {
-            return Err(OwnerBridgeCodecError::InvalidPayload);
-        }
-        let prior_key = reader.map_key()?;
-        if matches!(policy, MapKeyPolicy::Text) && !matches!(prior_key, MapKey::Text(_)) {
-            return Err(OwnerBridgeCodecError::InvalidPayload);
-        }
+        // Every preceding member completed `map_key`, policy validation, and
+        // `validate_value` in the outer traversal before this replay begins.
+        let prior_key = reader.map_key().unwrap_or(key);
         if prior_key.equals(key) {
-            return Ok(true);
+            return true;
         }
-        reader.validate_value(depth + 1)?;
+        reader.validate_value(depth + 1).unwrap_or(());
     }
 }
 

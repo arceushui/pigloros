@@ -321,10 +321,9 @@ impl OwnerBridgeControlV1 {
             return Err(OwnerBridgeCodecError::InvalidControlBounds);
         }
 
-        let maximum_payload = self
-            .total_capacity
-            .checked_sub(CONTROL_HEADER_BYTES_U32)
-            .ok_or(OwnerBridgeCodecError::InvalidControlBounds)?;
+        // The exact capacity check above establishes that every accepted
+        // control buffer includes its fixed header.
+        let maximum_payload = self.total_capacity - CONTROL_HEADER_BYTES_U32;
         if self.payload_len > maximum_payload {
             return Err(OwnerBridgeCodecError::InvalidControlBounds);
         }

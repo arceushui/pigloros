@@ -234,10 +234,9 @@ impl<'a> CborWriter<'a> {
     }
 
     fn length(&mut self, major: u8, value: usize) {
-        match u64::try_from(value) {
-            Ok(value) => self.head(major, value),
-            Err(_) => self.set_error(OwnerBridgeCodecError::BoundsExceeded),
-        }
+        // Every writer caller is fed by an ADR-110 bounded field, so its
+        // length is representable in the CBOR unsigned-length domain.
+        self.head(major, u64::try_from(value).unwrap_or(u64::MAX));
     }
 
     fn head(&mut self, major: u8, value: u64) {

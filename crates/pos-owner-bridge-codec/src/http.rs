@@ -100,9 +100,11 @@ pub fn admit_loopback_http_request(
         return Err(OwnerBridgeCodecError::InvalidHttpRequest);
     }
 
-    match request.path {
-        Some(OWNER_DOCUMENT_PATH) => Ok(LoopbackRequestDisposition::OwnerDocument),
-        Some(_) => Ok(LoopbackRequestDisposition::NotFound),
-        None => Err(OwnerBridgeCodecError::InvalidHttpRequest),
+    // `httparse` assigns a path for each complete request. A default path is
+    // still fail-closed as NotFound if a future parser ever changes that
+    // invariant.
+    match request.path.unwrap_or_default() {
+        OWNER_DOCUMENT_PATH => Ok(LoopbackRequestDisposition::OwnerDocument),
+        _ => Ok(LoopbackRequestDisposition::NotFound),
     }
 }

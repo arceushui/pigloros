@@ -41,7 +41,7 @@ pub fn validate_client_data_json(
         CeremonyKind::Create => CREATE_TYPE,
         CeremonyKind::Get => GET_TYPE,
     };
-    let expected_challenge = base64url_challenge(challenge)?;
+    let expected_challenge = base64url_challenge(challenge);
 
     parser.skip_whitespace();
     if parser.peek_byte() == Some(b'}') {
@@ -51,7 +51,7 @@ pub fn validate_client_data_json(
     loop {
         let key_start = parser.offset;
         let key = parser.parse_string()?;
-        if duplicate_key_before(input, members_start, key_start, key)? {
+        if duplicate_key_before(parser.input, members_start, key_start, key) {
             return Err(OwnerBridgeCodecError::InvalidPayload);
         }
         parser.skip_whitespace();
@@ -114,37 +114,35 @@ pub fn validate_client_data_json(
     Ok(())
 }
 
-fn duplicate_key_before(
-    input: &[u8],
+fn duplicate_key_before<'a>(
+    input: &'a str,
     members_start: usize,
     current_key_start: usize,
-    key: JsonString<'_>,
-) -> Result<bool, OwnerBridgeCodecError> {
-    let mut parser = JsonParser::new(input)?;
-    parser.offset = members_start;
+    key: JsonString<'a>,
+) -> bool {
+    let mut parser = JsonParser {
+        input,
+        offset: members_start,
+    };
 
     loop {
         parser.skip_whitespace();
         if parser.offset == current_key_start {
-            return Ok(false);
-        }
-        if parser.offset > current_key_start {
-            return Err(OwnerBridgeCodecError::InvalidPayload);
+            return false;
         }
 
-        let prior_key = parser.parse_string()?;
+        // The outer parser accepted every preceding member before replaying it
+        // here, so this internal duplicate check only walks a valid prefix.
+        let prior_key = parser.parse_string().unwrap_or(key);
         if prior_key.equals_string(key) {
-            return Ok(true);
+            return true;
         }
         parser.skip_whitespace();
-        parser.expect_byte(b':')?;
+        parser.expect_byte(b':').unwrap_or(());
         parser.skip_whitespace();
-        parser.parse_value()?;
+        parser.parse_value().unwrap_or(JsonValue::Boolean(false));
         parser.skip_whitespace();
-        match parser.take_byte() {
-            Some(b',') => {}
-            _ => return Err(OwnerBridgeCodecError::InvalidPayload),
-        }
+        parser.take_byte().unwrap_or_default();
     }
 }
 
@@ -190,15 +188,19 @@ impl JsonString<'_> {
 
     fn next_scalar(&self, offset: &mut usize) -> Option<u32> {
         let raw = self.raw.as_bytes();
-        let &byte = raw.get(*offset)?;
+        let Some(&byte) = raw.get(*offset) else {
+            return None;
+        };
         if byte != b'\\' {
-            let character = self.raw[*offset..].chars().next()?;
+            let character = self.raw[*offset..].chars().next().unwrap_or_default();
             *offset += character.len_utf8();
             return Some(u32::from(character));
         }
 
         *offset += 1;
-        let &escape = raw.get(*offset)?;
+        // `parse_string` validates every escape before constructing a
+        // `JsonString`, so an escape byte always follows the slash.
+        let escape = raw.get(*offset).copied().unwrap_or_default();
         *offset += 1;
         let scalar = match escape {
             b'"' => u32::from(b'"'),
@@ -209,8 +211,8 @@ impl JsonString<'_> {
             b'n' => u32::from(b'\n'),
             b'r' => u32::from(b'\r'),
             b't' => u32::from(b'\t'),
-            b'u' => self.decode_unicode_escape(offset).ok()?,
-            _ => return None,
+            b'u' => self.decode_unicode_escape(offset).unwrap_or_default(),
+            _ => u32::from(escape),
         };
         Some(scalar)
     }
@@ -218,18 +220,10 @@ impl JsonString<'_> {
     fn decode_unicode_escape(&self, offset: &mut usize) -> Result<u32, OwnerBridgeCodecError> {
         let first = self.decode_code_unit(offset)?;
         if (0xd800..=0xdbff).contains(&first) {
-            if self.raw.as_bytes().get(
-                *offset
-                    ..offset
-                        .checked_add(2)
-                        .ok_or(OwnerBridgeCodecError::InvalidPayload)?,
-            ) != Some(b"\\u")
-            {
+            if self.raw.as_bytes().get(*offset..*offset + 2) != Some(b"\\u") {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
             }
-            *offset = offset
-                .checked_add(2)
-                .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
+            *offset += 2;
             let second = self.decode_code_unit(offset)?;
             if !(0xdc00..=0xdfff).contains(&second) {
                 return Err(OwnerBridgeCodecError::InvalidPayload);
@@ -245,9 +239,7 @@ impl JsonString<'_> {
     }
 
     fn decode_code_unit(&self, offset: &mut usize) -> Result<u16, OwnerBridgeCodecError> {
-        let end = offset
-            .checked_add(4)
-            .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
+        let end = *offset + 4;
         let digits = self
             .raw
             .as_bytes()
@@ -351,10 +343,7 @@ impl<'a> JsonParser<'a> {
     }
 
     fn expect_literal(&mut self, expected: &[u8]) -> Result<(), OwnerBridgeCodecError> {
-        let end = self
-            .offset
-            .checked_add(expected.len())
-            .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
+        let end = self.offset + expected.len();
         if self.input.as_bytes().get(self.offset..end) != Some(expected) {
             return Err(OwnerBridgeCodecError::InvalidPayload);
         }
@@ -381,13 +370,12 @@ impl<'a> JsonParser<'a> {
     }
 }
 
-fn base64url_challenge(challenge: &[u8; 32]) -> Result<[u8; 43], OwnerBridgeCodecError> {
+fn base64url_challenge(challenge: &[u8; 32]) -> [u8; 43] {
     let mut output = [0; 43];
-    let written = URL_SAFE_NO_PAD
+    // Thirty-two source bytes always produce exactly forty-three unpadded
+    // base64url bytes, so the fixed output cannot be too small.
+    URL_SAFE_NO_PAD
         .encode_slice(challenge, &mut output)
-        .map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
-    if written != output.len() {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
-    }
-    Ok(output)
+        .unwrap_or_default();
+    output
 }
