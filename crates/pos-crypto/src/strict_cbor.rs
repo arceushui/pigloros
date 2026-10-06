@@ -164,6 +164,16 @@ impl<'a, E: StrictCborError> Reader<'a, E> {
         Ok(self.take(expected.len())? == expected.as_bytes())
     }
 
+    /// Read a byte string of at most `max` bytes.
+    pub(crate) fn byte_string(&mut self, max: usize) -> Result<&'a [u8], E> {
+        let (major, length) = self.head()?;
+        if major != 2 {
+            return Err(self.invalid());
+        }
+        let length = self.bounded(length, max)?;
+        self.take(length)
+    }
+
     pub(crate) fn bytes<const N: usize>(&mut self) -> Result<[u8; N], E> {
         let (major, length) = self.head()?;
         if major != 2 || usize::try_from(length) != Ok(N) {

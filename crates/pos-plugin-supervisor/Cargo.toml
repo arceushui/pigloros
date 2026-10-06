@@ -1,0 +1,36 @@
+[package]
+name = "pos-plugin-supervisor"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Builds the `pos-plugin-worker-probe` fault-injection worker for this crate's
+# black-box tests only. Never enable in deployable builds; the probe is not a
+# Component worker. Enforced by scripts/check_test_support_features.py in CI.
+test-support = []
+
+[dependencies]
+pos-crypto = { path = "../pos-crypto" }
+pos-runtime = { path = "../pos-runtime" }
+# `process` provides prlimit, PR_SET_PDEATHSIG and getppid as safe calls; `fs`
+# lists the worker's open descriptors.
+rustix = { workspace = true, features = ["process"] }
+
+[dev-dependencies]
+# Supervisor tests build negotiated releases without a release closure.
+pos-crypto = { path = "../pos-crypto", features = ["test-support"] }
+
+[[bin]]
+name = "pos-plugin-worker-probe"
+path = "src/bin/pos-plugin-worker-probe.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "supervisor_public"
+required-features = ["test-support"]
+
+[lints]
+workspace = true

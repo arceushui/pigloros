@@ -1,0 +1,30 @@
+[package]
+name = "pos-plugin-worker"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The community Plugin Component worker program (ADR-061 revision 4, #542).
+# It is the only program that links the Wasmtime runtime; the supervisor
+# launches one fresh instance per Component invocation.
+[[bin]]
+name = "pos-plugin-worker"
+path = "src/main.rs"
+
+[dependencies]
+# Encodes the prototype engine's lifted guest value until #541 provides the
+# validated output types.
+ciborium = { workspace = true }
+pos-crypto = { path = "../../crates/pos-crypto" }
+pos-plugin-host = { path = "../../crates/pos-plugin-host" }
+pos-plugin-supervisor = { path = "../../crates/pos-plugin-supervisor" }
+
+[dev-dependencies]
+# Worker tests build negotiated releases without a release closure.
+pos-crypto = { path = "../../crates/pos-crypto", features = ["test-support"] }
+pos-runtime = { path = "../../crates/pos-runtime" }
+
+[lints]
+workspace = true
