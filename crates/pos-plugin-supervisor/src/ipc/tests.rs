@@ -407,3 +407,106 @@ fn malformed_responses_are_envelope_faults() {
     ]);
     assert!(decode_worker_response_v1(&unit).is_ok());
 }
+
+/// Every request shape: each call, a required capability, features, Air-Gapped.
+fn request_samples() -> Vec<WorkerRequestV1> {
+    let mut rich = request(WorkerCallV1::Describe);
+    rich.negotiation.mode = CommunityPluginModeV1::AirGapped;
+    rich.negotiation.required_features = vec!["alpha".to_owned(), "beta".to_owned()];
+    let mut required = rich.negotiation.not_granted_capabilities[0].clone();
+    required.required = true;
+    rich.negotiation.not_granted_capabilities.push(required);
+    vec![
+        rich,
+        request(WorkerCallV1::Reduce(wide_invocation())),
+        request(WorkerCallV1::Drive(invocation(b"observation"))),
+    ]
+}
+
+#[test]
+fn a_required_capability_round_trips_so_the_transport_can_refuse_it() {
+    let samples = request_samples();
+    assert_eq!(round_trip_request(&samples[0]).as_ref(), Ok(&samples[0]));
+    let required = &samples[0].negotiation.not_granted_capabilities;
+    assert!(!required[0].required && required[1].required);
+}
+
+#[test]
+fn every_truncated_request_is_an_envelope_fault() {
+    for sample in request_samples() {
+        let bytes = ok(encode_worker_request_v1(&sample));
+        for length in 0..bytes.len() {
+            assert_eq!(
+                decode_worker_request_v1(&bytes[..length]),
+                Err(WorkerEnvelopeErrorV1),
+                "{length} of {} bytes",
+                bytes.len()
+            );
+        }
+        assert_eq!(decode_worker_request_v1(&bytes), Ok(sample));
+    }
+}
+
+fn response_samples() -> Vec<WorkerOutcomeV1> {
+    let mut samples: Vec<WorkerOutcomeV1> = vec![
+        Ok(described(Ok(descriptor(&negotiated())))),
+        Ok(produced(Ok(output(&invocation(b"observation"))))),
+    ];
+    for error in guest_errors() {
+        samples.push(Ok(described(Err(error.clone()))));
+        samples.push(Ok(produced(Err(error))));
+    }
+    samples.push(Err(Error::FuelExhausted));
+    samples.push(Err(Error::ComponentTrap {
+        class: ComponentTrapClassV1::Other,
+        reproduction: TrapReproductionV1::Unverified,
+    }));
+    samples
+}
+
+#[test]
+fn every_truncated_response_is_an_envelope_fault() {
+    for sample in response_samples() {
+        let bytes = ok(encode_worker_response_v1(&sample));
+        for length in 0..bytes.len() {
+            assert_eq!(
+                decode_worker_response_v1(&bytes[..length]),
+                Err(WorkerEnvelopeErrorV1),
+                "{length} of {} bytes",
+                bytes.len()
+            );
+        }
+        assert_eq!(decode_worker_response_v1(&bytes), Ok(sample));
+    }
+}
+
+/// `bytes` with the first occurrence of `from` replaced by `to`.
+fn spliced(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    let at = bytes
+        .windows(from.len())
+        .position(|window| window == from)
+        .unwrap_or_default();
+    [&bytes[..at], to, &bytes[at + from.len()..]].concat()
+}
+
+#[test]
+fn integers_beyond_their_field_width_are_envelope_faults() {
+    // `abi_major` 65,535 as a `u16`, then as 65,536 (a `u32`-sized head).
+    let mut abi = request(WorkerCallV1::Describe);
+    abi.negotiation.abi_major = u16::MAX;
+    let bytes = ok(encode_worker_request_v1(&abi));
+    assert_eq!(decode_worker_request_v1(&bytes), Ok(abi));
+    let wide = spliced(&bytes, &[0x19, 0xff, 0xff], &[0x1a, 0x00, 0x01, 0x00, 0x00]);
+    assert_eq!(decode_worker_request_v1(&wide), Err(WorkerEnvelopeErrorV1));
+    // `scheduler_position` 2^32 - 1 as a `u32`, then as 2^32.
+    let mut position = invocation(b"observation");
+    position.timeline_position.scheduler_position = u32::MAX;
+    let bytes = ok(encode_worker_request_v1(&request(WorkerCallV1::Reduce(position))));
+    assert!(decode_worker_request_v1(&bytes).is_ok());
+    let wide = spliced(
+        &bytes,
+        &[0x1a, 0xff, 0xff, 0xff, 0xff],
+        &[0x1b, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00],
+    );
+    assert_eq!(decode_worker_request_v1(&wide), Err(WorkerEnvelopeErrorV1));
+}

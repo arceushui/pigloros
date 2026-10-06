@@ -104,18 +104,46 @@ fn verify_environment(
 }
 
 /// The descriptors open in this process, ascending, except the listing's own.
+///
+/// `None` when the listing cannot be opened or read.
 #[must_use]
 pub fn open_descriptors() -> Option<Vec<i32>> {
-    let directory = OwnedFd::from(File::open("/proc/self/fd").ok()?);
-    let own = directory.as_raw_fd();
-    let mut entries = Dir::new(directory).ok()?;
-    let mut open = Vec::new();
-    while let Some(entry) = entries.read() {
-        let name = entry.ok()?.file_name().to_str().ok()?.parse::<i32>();
-        open.extend(name.ok().filter(|descriptor| *descriptor != own));
-    }
-    open.sort_unstable();
-    Some(open)
+    File::open("/proc/self/fd")
+        .ok()
+        .map(OwnedFd::from)
+        .and_then(|directory| {
+            let own = directory.as_raw_fd();
+            Dir::new(directory)
+                .ok()
+                .and_then(|entries| descriptor_numbers(entries, own))
+        })
+}
+
+/// The numeric entry names of `entries`, ascending, without `own`.
+///
+/// A non-numeric name (`.` and `..`) is skipped; an unreadable entry fails the
+/// whole listing.
+fn descriptor_numbers(entries: Dir, own: i32) -> Option<Vec<i32>> {
+    let names: Result<Vec<Option<i32>>, _> = entries
+        .map(|entry| {
+            entry.map(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .ok()
+                    .and_then(|name| name.parse::<i32>().ok())
+            })
+        })
+        .collect();
+    names.ok().map(|names| {
+        let mut open: Vec<i32> = names
+            .into_iter()
+            .flatten()
+            .filter(|descriptor| *descriptor != own)
+            .collect();
+        open.sort_unstable();
+        open
+    })
 }
 
 /// Read and decode the single request frame.
@@ -191,6 +219,26 @@ mod tests {
         assert_eq!(
             prepare_worker_process(arguments(&["worker"])),
             Err(WorkerProcessErrorV1::Arguments)
+        );
+    }
+
+    #[test]
+    fn preparation_checks_the_parent_and_then_the_environment() {
+        // Binding the parent-death signal to a process that is not our parent
+        // is refused. The signal stays bound to our real parent, which is the
+        // test runner that outlives this test.
+        let other = std::process::id().to_string();
+        assert_eq!(
+            prepare_worker_process(arguments(&["worker", &other])),
+            Err(WorkerProcessErrorV1::Parent)
+        );
+        // With the real parent the test process still fails: its environment
+        // is not a worker's scrubbed one.
+        let parent = getppid().map(|parent| parent.as_raw_nonzero().to_string());
+        let parent = parent.unwrap_or_default();
+        assert_eq!(
+            prepare_worker_process(arguments(&["worker", &parent])),
+            Err(WorkerProcessErrorV1::Environment)
         );
     }
 

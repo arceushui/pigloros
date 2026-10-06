@@ -143,6 +143,8 @@ fn returned_values_are_checked_by_the_supervisor() {
 #[test]
 fn engine_failures_and_traps_keep_their_closed_names() {
     assert_eq!(reduce(b"fuel"), Err(Error::FuelExhausted));
+    let drive = supervisor(PROBE, PROMPT).drive(&negotiated(), b"fuel", &invocation(), INPUTS);
+    assert_eq!(drive, Err(Error::FuelExhausted));
     assert_eq!(
         reduce(b"trap"),
         Err(Error::ComponentTrap {
@@ -192,7 +194,7 @@ fn launch_and_invocation_faults_fail_before_any_guest_runs() {
 
 #[test]
 fn the_wall_time_watchdog_is_an_operational_stop() {
-    for mode in [&b"hang"[..], b"linger-after-reply"] {
+    for mode in [&b"hang"[..], b"linger-after-reply", b"close-then-linger"] {
         let started = Instant::now();
         let result = reduce_with(SHORT, mode);
         assert_eq!(

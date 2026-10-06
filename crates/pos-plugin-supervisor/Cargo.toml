@@ -24,8 +24,9 @@ pos-crypto = { path = "../pos-crypto" }
 pos-runtime = { path = "../pos-runtime" }
 # `process` provides prlimit, PR_SET_PDEATHSIG and getppid as safe calls. The
 # worker lists its open descriptors through `/proc/self/fd` with the `fs`
-# feature, which the workspace dependency already enables.
-rustix = { workspace = true, features = ["process"] }
+# feature, which the workspace dependency already enables. `stdio` is used only
+# by the test probe, to close its stdout while it keeps running.
+rustix = { workspace = true, features = ["process", "stdio"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]

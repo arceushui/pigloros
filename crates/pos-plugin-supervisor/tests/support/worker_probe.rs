@@ -25,6 +25,7 @@ use pos_runtime::community_plugin_host::{
     PluginDescriptorV1, PluginOutputV1, TrapReproductionV1,
 };
 use rustix::process::{getpid, getppid, getrlimit, Pid, Resource};
+use rustix::stdio::dup2_stdout;
 
 /// Longest a misbehaving probe stays alive, so no test can hang forever.
 const LINGER: Duration = Duration::from_mins(1);
@@ -80,6 +81,15 @@ fn serve(request: &WorkerRequestV1) -> ExitCode {
         b"linger-after-reply" => {
             reply(&Err(CommunityPluginHostErrorV1::FuelExhausted));
             linger()
+        }
+        b"close-then-linger" => {
+            reply(&Err(CommunityPluginHostErrorV1::FuelExhausted));
+            // Replace stdout by /dev/null: the supervisor sees the end of the
+            // output while this process keeps running.
+            let closed = std::fs::File::open("/dev/null")
+                .ok()
+                .and_then(|null| dup2_stdout(&null).ok());
+            closed.map_or_else(|| ExitCode::from(6), |()| linger())
         }
         b"allocate" => {
             // One GiB: more than the data ceiling of a 64 KiB-memory invocation.
