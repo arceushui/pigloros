@@ -80,7 +80,9 @@ fn the_worker_sees_a_scrubbed_environment_and_only_its_pipes() {
         environment
             .split(',')
             .filter(|name| !name.is_empty())
-            .all(|name| FORWARDED_ENVIRONMENT.contains(&name) || RUNTIME_ENVIRONMENT.contains(&name)),
+            .all(
+                |name| FORWARDED_ENVIRONMENT.contains(&name) || RUNTIME_ENVIRONMENT.contains(&name)
+            ),
         "{environment}"
     );
     assert!(std::env::vars_os().next().is_some());
