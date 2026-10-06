@@ -141,6 +141,7 @@ use crate::{
 };
 
 mod counterfactual_store;
+mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod local_cut_owner;
 mod pipeline_admission;
@@ -1090,6 +1091,100 @@ const FORK_ADMISSION_SCHEMA_TABLES: &[SqliteSchemaTable] = &[
             // unit test in `sqlite::fork_attribution_issuer_policy`.
             "CHECK (generation BETWEEN 1 AND 96)",
             "CHECK (length(policy_digest) = 32)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "imported_fork_classifier_sources",
+        columns_query: "PRAGMA table_info(imported_fork_classifier_sources)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "fcs1_digest",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "fcs1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &["CHECK (length(fcs1_digest) = 32)"],
+    },
+    SqliteSchemaTable {
+        name: "imported_fork_key_evidence",
+        columns_query: "PRAGMA table_info(imported_fork_key_evidence)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "import_operation_id",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "ikr1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "ikt1_cbor",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(import_operation_id) = 32)",
+            "CHECK (length(ikr1_cbor) > 0)",
+            "CHECK (ikt1_cbor IS NULL OR length(ikt1_cbor) > 0)",
+        ],
+    },
+    SqliteSchemaTable {
+        name: "imported_fork_attribution_admissions",
+        columns_query: "PRAGMA table_info(imported_fork_attribution_admissions)",
+        columns: &[
+            SqliteSchemaColumn {
+                name: "import_operation_id",
+                kind: "BLOB",
+                not_null: false,
+                primary_key: true,
+            },
+            SqliteSchemaColumn {
+                name: "child_id",
+                kind: "TEXT",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "full_envelope_digest",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "ifa1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+            SqliteSchemaColumn {
+                name: "fae1_cbor",
+                kind: "BLOB",
+                not_null: true,
+                primary_key: false,
+            },
+        ],
+        constraints: &[
+            "CHECK (length(import_operation_id) = 32)",
+            "CHECK (length(full_envelope_digest) = 32)",
+            // 512 is `pos_core::MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1`.
+            "CHECK (length(ifa1_cbor) BETWEEN 1 AND 512)",
+            "CHECK (length(fae1_cbor) > 0)",
+            "UNIQUE (child_id)",
+            "UNIQUE (full_envelope_digest)",
+            "UNIQUE (ifa1_cbor)",
         ],
     },
 ];

@@ -35,7 +35,13 @@
 //! Disable `SQLite` entirely: `--no-default-features`
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
+// The shared `FAE1` fixture under `tests/support` names this crate `pos_store`
+// in both the integration tests and these unit tests.
+#[cfg(test)]
+extern crate self as pos_store;
+
 pub mod fork_admission_authority;
+pub mod fork_attribution_authority_import;
 pub mod fork_attribution_issuer_policy;
 pub mod fork_delivery_journal;
 pub mod fork_event_authority;
@@ -48,6 +54,10 @@ pub mod trusted_clock;
 pub use fork_admission_authority::{
     ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityErrorV1,
     ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
+};
+pub use fork_attribution_authority_import::{
+    ForkAttributionAuthorityImportErrorV1, ForkAttributionAuthorityImportPortV1,
+    ForkAttributionAuthorityImportReceiptV1, ForkAttributionAuthorityImportRequestV1,
 };
 pub use fork_attribution_issuer_policy::{
     AuthenticatedOperatorPolicyPinV1, ForkAttributionIssuerAdmissionBasisV1,
@@ -1241,7 +1251,26 @@ pub fn import_timeline_verified_v1(
     export: TimelineExport,
     trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
 ) -> Result<pos_core::Timeline, CoreError> {
-    let (public_keys, registry) = resolve_import_trust_context(store, &export, trust_anchors)?;
+    verify_timeline_import_v1(store, &export, trust_anchors)?;
+    pos_core::store::import_timeline_with_id(store, export)
+}
+
+/// Apply the pre-mutation checks of [`import_timeline_verified_v1`] to one
+/// export without importing it.
+///
+/// The ADR-105 `FAE1` import runs exactly these checks inside its own
+/// transaction, so it neither calls the mutating import first nor accepts a
+/// weaker duplicate verifier.
+///
+/// # Errors
+/// Rejects missing or mismatched trust context, invalid envelopes or
+/// signatures, and origin transplants.
+pub(crate) fn verify_timeline_import_v1(
+    store: &dyn EventStore,
+    export: &TimelineExport,
+    trust_anchors: &[(pos_core::KeyIdentityV1, pos_core::PublicKey)],
+) -> Result<(), CoreError> {
+    let (public_keys, registry) = resolve_import_trust_context(store, export, trust_anchors)?;
     let inherited_prefix = export
         .timeline
         .meta
@@ -1271,7 +1300,7 @@ pub fn import_timeline_verified_v1(
             return Err(CoreError::SignatureVerificationFailed);
         }
     }
-    pos_core::store::import_timeline_with_id(store, export)
+    Ok(())
 }
 
 fn load_import_registry(

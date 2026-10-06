@@ -18,7 +18,8 @@ use super::{
 };
 
 use crate::{
-    fork_admission::PRINCIPAL_OWNER_BINDING_DOMAIN, Hash, OwnerIdV1, PrincipalOwnerBindingV1,
+    fork_admission::PRINCIPAL_OWNER_BINDING_DOMAIN, Hash, OwnerIdV1, PrincipalOwnerBindingInputV1,
+    PrincipalOwnerBindingV1,
 };
 
 /// The local `authority-origin-v1 = [1]`.
@@ -140,6 +141,13 @@ impl ImportedPrincipalOwnerBindingV1 {
         self.authority_origin_digest
     }
 
+    /// `POB1` fields 2–4 and 5: the operation, Principal, Owner, and local
+    /// projection of the origin, which the code-2 digest replaces.
+    #[must_use]
+    pub const fn input(&self) -> &PrincipalOwnerBindingInputV1 {
+        self.binding.input()
+    }
+
     /// `POB1` field 4: the bound Owner.
     #[must_use]
     pub(super) const fn owner(&self) -> OwnerIdV1 {
@@ -206,7 +214,7 @@ impl ImportedForkAdmissionRecordV1 {
 
     /// `FAR1` fields 2–13. The projected origin member is not field 14.
     #[must_use]
-    pub(super) const fn fields(&self) -> &ForkAdmissionRecordInputV1 {
+    pub const fn fields(&self) -> &ForkAdmissionRecordInputV1 {
         self.record.input()
     }
 }
@@ -270,7 +278,7 @@ impl ImportedForkPublicationOperationV1 {
 
     /// `FPO1` fields 2–12. The projected origin member is not field 13.
     #[must_use]
-    pub(super) const fn fields(&self) -> &ForkPublicationOperationInputV1 {
+    pub const fn fields(&self) -> &ForkPublicationOperationInputV1 {
         self.operation.input()
     }
 }

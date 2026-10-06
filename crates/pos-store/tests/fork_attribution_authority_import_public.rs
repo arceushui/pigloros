@@ -1,0 +1,568 @@
+#![cfg(feature = "sqlite")]
+
+//! Public adapter-parity evidence for the ADR-105 `FAE1` authority import
+//! (R6.10): install, exact retry, recovery before current policy, conflicts,
+//! every closed validation error, and zero partial visibility, each on
+//! `MemoryStore` and file-backed `SqliteStore`.
+
+#[path = "support/fae1_fixture.rs"]
+mod fixture;
+
+use ed25519_dalek::SigningKey;
+use fixture::{hash, pinned_policy, Built, Fallible, Shape, Spec, World, PARENT_CUT, POLICY_SCOPE};
+use pos_core::{
+    store::{EventStore, SeqRange},
+    CanonicalBytes, EntityId, EventDraft, ForkAttributionIssuerPolicyEntryV1,
+    ForkAttributionIssuerPolicyInputV1, ForkAttributionIssuerPolicyV1,
+    ForkAttributionIssuerStateV1 as State, ForkAttributionIssuerV1,
+    ImportedForkAttributionAdmissionV1, Kind, PublicKey, TimelineId,
+};
+use pos_store::{
+    memory::MemoryStore, sqlite::SqliteStore, AuthenticatedOperatorPolicyPinV1,
+    ForkAttributionAuthorityImportErrorV1 as ImportError, ForkAttributionAuthorityImportPortV1,
+    ForkAttributionAuthorityImportReceiptV1 as Receipt,
+    ForkAttributionAuthorityImportRequestV1 as Request,
+    ForkAttributionIssuerPolicyInstallationPortV1 as PolicyPort,
+    ForkEventProvenanceAuthorityPortV1, ForkManifestPublicationPortV1,
+};
+
+/// One adapter under test.
+trait Destination:
+    ForkAttributionAuthorityImportPortV1
+    + EventStore
+    + ForkEventProvenanceAuthorityPortV1
+    + ForkManifestPublicationPortV1
+{
+}
+
+impl<T> Destination for T where
+    T: ForkAttributionAuthorityImportPortV1
+        + EventStore
+        + ForkEventProvenanceAuthorityPortV1
+        + ForkManifestPublicationPortV1
+{
+}
+
+/// Run one scenario against both reference adapters.
+fn on_both_adapters(scenario: impl Fn(&mut dyn Destination) -> Fallible<()>) -> Fallible<()> {
+    let mut memory = MemoryStore::new();
+    scenario(&mut memory)?;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fae1-import.sqlite");
+    let mut sqlite = SqliteStore::open(path.to_str().ok_or("utf-8 path")?)?;
+    scenario(&mut sqlite)
+}
+
+fn install_policy(
+    store: &mut dyn Destination,
+    policy: &ForkAttributionIssuerPolicyV1,
+) -> Fallible<()> {
+    let pin = AuthenticatedOperatorPolicyPinV1::new(POLICY_SCOPE, policy.digest());
+    store.install(&pin, &policy.to_canonical_cbor())?;
+    Ok(())
+}
+
+/// Seed the destination parent and install the policy admitting `built`.
+fn prepare(store: &mut dyn Destination, world: &World, built: &Built) -> Fallible<()> {
+    world.seed_destination(store)?;
+    install_policy(store, &built.policy)
+}
+
+fn request<'a>(world: &'a World, built: &'a Built) -> Request<'a> {
+    Request {
+        envelope_bytes: &built.bytes,
+        expected_issuer_policy_digest: built.policy.digest(),
+        parent_timeline_id: world.root,
+        trust_anchors: &world.anchors,
+    }
+}
+
+fn import(
+    store: &mut dyn Destination,
+    world: &World,
+    built: &Built,
+) -> Result<Receipt, ImportError> {
+    store.import_verified(&request(world, built))
+}
+
+/// Import `built`, which must be refused with `error`, and keep it invisible.
+fn refuse(
+    store: &mut dyn Destination,
+    world: &World,
+    built: &Built,
+    error: ImportError,
+) -> Fallible<()> {
+    let child = world.child_at(0)?.id;
+    assert_eq!(import(store, world, built), Err(error));
+    assert_eq!(store.get_timeline(child)?, None);
+    Ok(())
+}
+
+fn receipt_for(built: &Built, generation: u64) -> Fallible<Receipt> {
+    Ok(Receipt {
+        admission: ImportedForkAttributionAdmissionV1::from_envelope(&built.envelope, generation)?,
+    })
+}
+
+fn assert_installed(store: &dyn Destination, world: &World, shape: Shape) -> Fallible<()> {
+    let child = world.child_at(0)?;
+    assert_eq!(store.get_timeline(child.id)?, Some(child.export.timeline.clone()));
+    assert_eq!(store.read_own(child.id, SeqRange::all())?, child.export.events);
+    assert_eq!(
+        store.logical_head(child.id)?.as_u64(),
+        PARENT_CUT + shape.events()
+    );
+    Ok(())
+}
+
+fn successor(
+    previous: &ForkAttributionIssuerPolicyV1,
+    entries: &[(&ForkAttributionIssuerV1, State)],
+) -> Fallible<ForkAttributionIssuerPolicyV1> {
+    Ok(ForkAttributionIssuerPolicyV1::new(
+        ForkAttributionIssuerPolicyInputV1 {
+            scope: POLICY_SCOPE.to_owned(),
+            generation: previous.input().generation + 1,
+            previous_policy_digest: Some(previous.digest()),
+            entries: entries
+                .iter()
+                .map(|(issuer, state)| ForkAttributionIssuerPolicyEntryV1 {
+                    issuer: (*issuer).clone(),
+                    state: *state,
+                })
+                .collect(),
+        },
+    )?)
+}
+
+fn other_issuer(id: &str, seed: u8) -> Fallible<ForkAttributionIssuerV1> {
+    let key = SigningKey::from_bytes(&[seed; 32]);
+    Ok(ForkAttributionIssuerV1::new(
+        id,
+        1,
+        PublicKey::from_bytes(key.verifying_key().to_bytes()),
+    )?)
+}
+
+/// Genesis admitting both the fixture issuer and `other`.
+fn two_issuer_genesis(
+    built: &Built,
+    other: &ForkAttributionIssuerV1,
+) -> Fallible<ForkAttributionIssuerPolicyV1> {
+    Ok(ForkAttributionIssuerPolicyV1::new(
+        ForkAttributionIssuerPolicyInputV1 {
+            scope: POLICY_SCOPE.to_owned(),
+            generation: 1,
+            previous_policy_digest: None,
+            entries: vec![
+                ForkAttributionIssuerPolicyEntryV1 {
+                    issuer: built.issuer.clone(),
+                    state: State::Active,
+                },
+                ForkAttributionIssuerPolicyEntryV1 {
+                    issuer: other.clone(),
+                    state: State::Active,
+                },
+            ],
+        },
+    )?)
+}
+
+#[test]
+fn mixed_import_installs_and_every_retry_returns_the_original_receipt() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec::default())?;
+    on_both_adapters(|store| {
+        prepare(store, &world, &built)?;
+        let receipt = import(store, &world, &built)?;
+        assert_eq!(receipt, receipt_for(&built, 1)?);
+        let fields = receipt.admission.input();
+        assert_eq!(fields.import_operation_id, hash(0x11));
+        assert_eq!(fields.child_timeline_id, world.child_at(0)?.id);
+        assert_eq!(fields.final_logical_head, PARENT_CUT + 4);
+        assert_eq!(fields.issuer_policy_generation, 1);
+        assert_installed(store, &world, Shape::Mixed)?;
+        let again = import(store, &world, &built)?;
+        assert_eq!(again.to_canonical_cbor(), receipt.to_canonical_cbor());
+        Ok(())
+    })
+}
+
+#[test]
+fn empty_segments_install_with_and_without_a_classifier() -> Fallible<()> {
+    for shape in [Shape::EmptyClassified, Shape::EmptyUnclassified] {
+        let world = World::new(shape, true)?;
+        let built = world.build(&Spec::default())?;
+        on_both_adapters(|store| {
+            prepare(store, &world, &built)?;
+            let receipt = import(store, &world, &built)?;
+            assert_eq!(receipt, receipt_for(&built, 1)?);
+            assert_installed(store, &world, shape)?;
+            assert_eq!(import(store, &world, &built)?, receipt);
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_destroyed_source_key_installs_its_tombstone() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let spec = Spec {
+        destroyed_key: true,
+        ..Spec::default()
+    };
+    let built = world.build(&spec)?;
+    on_both_adapters(|store| {
+        prepare(store, &world, &built)?;
+        let receipt = import(store, &world, &built)?;
+        assert_eq!(receipt, receipt_for(&built, 1)?);
+        assert_eq!(import(store, &world, &built)?, receipt);
+        Ok(())
+    })
+}
+
+#[test]
+fn two_forks_share_one_imported_classifier_source() -> Fallible<()> {
+    let mut world = World::new(Shape::Mixed, false)?;
+    world.add_child(Shape::Mixed)?;
+    let first = world.build(&Spec::default())?;
+    let second = world.build(&Spec::distinct(1))?;
+    on_both_adapters(|store| {
+        prepare(store, &world, &first)?;
+        let one = import(store, &world, &first)?;
+        let two = import(store, &world, &second)?;
+        assert_ne!(one, two);
+        assert_eq!(import(store, &world, &first)?, one);
+        assert_eq!(import(store, &world, &second)?, two);
+        Ok(())
+    })
+}
+
+#[test]
+fn committed_imports_recover_before_current_policy_admission() -> Fallible<()> {
+    let mut world = World::new(Shape::Mixed, false)?;
+    world.add_child(Shape::Mixed)?;
+    let built = world.build(&Spec::default())?;
+    let revoked = successor(&built.policy, &[(&built.issuer, State::Revoked)])?;
+    let fresh = world.build(&Spec {
+        policy_digest: Some(revoked.digest()),
+        ..Spec::distinct(1)
+    })?;
+    on_both_adapters(|store| {
+        prepare(store, &world, &built)?;
+        let receipt = import(store, &world, &built)?;
+        install_policy(store, &revoked)?;
+        // The retry names the historical policy, and the issuer is now revoked.
+        assert_eq!(import(store, &world, &built), Ok(receipt));
+        // A new import by the revoked issuer is refused.
+        let mut denied = request(&world, &fresh);
+        denied.expected_issuer_policy_digest = revoked.digest();
+        assert_eq!(store.import_verified(&denied), Err(ImportError::IssuerRevoked));
+        assert_eq!(store.get_timeline(world.child_at(1)?.id)?, None);
+        Ok(())
+    })
+}
+
+#[test]
+fn issuer_admission_errors_follow_the_pinned_policy() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let base = world.build(&Spec::default())?;
+    let other = other_issuer("issuer-b", 0x32)?;
+    let genesis = two_issuer_genesis(&base, &other)?;
+    let retired = successor(&genesis, &[(&base.issuer, State::Retired), (&other, State::Active)])?;
+    let revoked = successor(&genesis, &[(&base.issuer, State::Revoked), (&other, State::Active)])?;
+    let stranger = pinned_policy(&other, State::Active)?;
+    let cases = [
+        (&genesis, Some(&retired), ImportError::IssuerRetired),
+        (&genesis, Some(&revoked), ImportError::IssuerRevoked),
+        (&stranger, None, ImportError::UntrustedIssuer),
+    ];
+    for (installed, moved, expected) in cases {
+        let latest = moved.unwrap_or(installed);
+        let spec = Spec {
+            policy_digest: Some(latest.digest()),
+            ..Spec::default()
+        };
+        let built = world.build(&spec)?;
+        on_both_adapters(|store| {
+            world.seed_destination(store)?;
+            install_policy(store, installed)?;
+            if let Some(moved) = moved {
+                install_policy(store, moved)?;
+            }
+            let mut asked = request(&world, &built);
+            asked.expected_issuer_policy_digest = latest.digest();
+            assert_eq!(store.import_verified(&asked), Err(expected));
+            assert_eq!(store.get_timeline(world.child_at(0)?.id)?, None);
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_missing_stale_or_unpinned_policy_changes_nothing() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec::default())?;
+    let other = other_issuer("issuer-b", 0x32)?;
+    let rotated = successor(
+        &built.policy,
+        &[(&built.issuer, State::Active), (&other, State::Active)],
+    )?;
+    on_both_adapters(|store| {
+        world.seed_destination(store)?;
+        // No policy is installed, so no issuer is trusted.
+        refuse(store, &world, &built, ImportError::UntrustedIssuer)?;
+        install_policy(store, &built.policy)?;
+        // The operator pinned another digest than the envelope names.
+        let mut unpinned = request(&world, &built);
+        unpinned.expected_issuer_policy_digest = hash(0x77);
+        assert_eq!(store.import_verified(&unpinned), Err(ImportError::PolicyChanged));
+        // The floor moved past the envelope's policy.
+        install_policy(store, &rotated)?;
+        refuse(store, &world, &built, ImportError::PolicyChanged)
+    })
+}
+
+#[test]
+fn issuer_and_manifest_signatures_must_verify() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    for (spec, expected) in [
+        (
+            Spec {
+                envelope_signer_seed: Some(0x55),
+                ..Spec::default()
+            },
+            ImportError::InvalidSignature,
+        ),
+        (
+            Spec {
+                manifest_signer_seed: Some(0x56),
+                ..Spec::default()
+            },
+            ImportError::InvalidSignature,
+        ),
+    ] {
+        let built = world.build(&spec)?;
+        on_both_adapters(|store| {
+            prepare(store, &world, &built)?;
+            refuse(store, &world, &built, expected)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn event_evidence_needs_the_registry_the_anchors_and_non_geographic_events() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec::default())?;
+    let geographic = world.build(&Spec {
+        geographic: true,
+        ..Spec::default()
+    })?;
+    let (identity, _) = *world.anchors.first().ok_or("no anchor")?;
+    let wrong_key = vec![(identity, PublicKey::from_bytes([0x13; 32]))];
+    let no_anchors = Vec::new();
+    on_both_adapters(|store| {
+        install_policy(store, &built.policy)?;
+        // The parent exists, but the destination has no key registry.
+        store.bind_erasure_gate(std::sync::Arc::new(
+            pos_core::ErasureContainmentGateV1::new_test_open(),
+        ))?;
+        pos_store::import_timeline_with_id(store, world.root_export()?)?;
+        refuse(store, &world, &built, ImportError::InvalidEventEvidence)?;
+        store.save_key_registry(&world.registry)?;
+        for anchors in [no_anchors.as_slice(), wrong_key.as_slice()] {
+            let asked = Request {
+                trust_anchors: anchors,
+                ..request(&world, &built)
+            };
+            assert_eq!(
+                store.import_verified(&asked),
+                Err(ImportError::InvalidEventEvidence)
+            );
+        }
+        refuse(store, &world, &geographic, ImportError::InvalidEventEvidence)?;
+        // Nothing above changed the destination: the valid import succeeds.
+        import(store, &world, &built)?;
+        assert_installed(store, &world, Shape::Mixed)
+    })
+}
+
+#[test]
+fn the_fti_owner_must_equal_the_parent_owner_in_both_directions() -> Fallible<()> {
+    let owned = World::new(Shape::Mixed, true)?;
+    let unowned = World::new(Shape::Mixed, false)?;
+    let claims_owner = unowned.build(&Spec {
+        fti_owner: Some(Some(EntityId::new())),
+        ..Spec::default()
+    })?;
+    let drops_owner = owned.build(&Spec {
+        fti_owner: Some(None),
+        ..Spec::default()
+    })?;
+    on_both_adapters(|store| {
+        prepare(store, &unowned, &claims_owner)?;
+        refuse(store, &unowned, &claims_owner, ImportError::InvalidAuthorityClosure)
+    })?;
+    on_both_adapters(|store| {
+        prepare(store, &owned, &drops_owner)?;
+        refuse(store, &owned, &drops_owner, ImportError::InvalidAuthorityClosure)
+    })
+}
+
+#[test]
+fn the_requested_parent_must_be_the_present_fti_parent() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec::default())?;
+    on_both_adapters(|store| {
+        install_policy(store, &built.policy)?;
+        store.bind_erasure_gate(std::sync::Arc::new(
+            pos_core::ErasureContainmentGateV1::new_test_open(),
+        ))?;
+        // The parent Timeline is absent from the destination.
+        refuse(store, &world, &built, ImportError::InvalidAuthorityClosure)
+    })?;
+    on_both_adapters(|store| {
+        prepare(store, &world, &built)?;
+        let mut elsewhere = request(&world, &built);
+        elsewhere.parent_timeline_id = TimelineId::new();
+        assert_eq!(
+            store.import_verified(&elsewhere),
+            Err(ImportError::InvalidAuthorityClosure)
+        );
+        assert_eq!(store.get_timeline(world.child_at(0)?.id)?, None);
+        Ok(())
+    })
+}
+
+#[test]
+fn a_shorter_or_divergent_destination_parent_is_range_evidence() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec::default())?;
+    let divergent = world.build(&Spec {
+        parent_hash: Some(hash(0x98)),
+        ..Spec::default()
+    })?;
+    on_both_adapters(|store| {
+        prepare(store, &world, &divergent)?;
+        refuse(store, &world, &divergent, ImportError::InvalidRangeEvidence)
+    })?;
+    on_both_adapters(|store| {
+        install_policy(store, &built.policy)?;
+        world.seed_truncated(store, 3)?;
+        refuse(store, &world, &built, ImportError::InvalidRangeEvidence)
+    })
+}
+
+#[test]
+fn a_wrong_final_chain_hash_is_range_evidence_and_rolls_back() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let wrong = world.build(&Spec {
+        final_hash: Some(hash(0x99)),
+        ..Spec::default()
+    })?;
+    let right = world.build(&Spec::default())?;
+    on_both_adapters(|store| {
+        prepare(store, &world, &right)?;
+        refuse(store, &world, &wrong, ImportError::InvalidRangeEvidence)?;
+        // The staged child was rolled back, so the same operation can retry.
+        import(store, &world, &right)?;
+        assert_installed(store, &world, Shape::Mixed)
+    })
+}
+
+#[test]
+fn malformed_envelopes_fail_closed_before_any_effect() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec::default())?;
+    let mut unsupported = built.bytes.clone();
+    // Byte 6 is the version: it follows the array head (1 byte) and the
+    // text string "FAE1" (5 bytes).
+    *unsupported.get_mut(6).ok_or("short envelope")? = 2;
+    let mut truncated = built.bytes.clone();
+    truncated.truncate(built.bytes.len() / 2);
+    let oversized = vec![0_u8; 64 * 1024 * 1024 + 1];
+    on_both_adapters(|store| {
+        prepare(store, &world, &built)?;
+        for (bytes, expected) in [
+            (&truncated, ImportError::InvalidEncoding),
+            (&unsupported, ImportError::UnsupportedVersion),
+            (&oversized, ImportError::BoundsExceeded),
+        ] {
+            let mut asked = request(&world, &built);
+            asked.envelope_bytes = bytes;
+            assert_eq!(store.import_verified(&asked), Err(expected));
+        }
+        assert_eq!(store.get_timeline(world.child_at(0)?.id)?, None);
+        Ok(())
+    })
+}
+
+#[test]
+fn an_unequal_import_reuse_or_occupied_child_is_a_conflict() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec::default())?;
+    let reused = world.build(&Spec {
+        operations_seed: 0xc0,
+        ..Spec::default()
+    })?;
+    let same_child = world.build(&Spec::distinct(0))?;
+    on_both_adapters(|store| {
+        prepare(store, &world, &built)?;
+        let receipt = import(store, &world, &built)?;
+        // The same import operation ID with another complete envelope.
+        assert_eq!(import(store, &world, &reused), Err(ImportError::Conflict));
+        // Another operation naming the same child Fork.
+        assert_eq!(import(store, &world, &same_child), Err(ImportError::Conflict));
+        assert_eq!(import(store, &world, &built), Ok(receipt));
+        Ok(())
+    })
+}
+
+#[test]
+fn imported_code_two_stays_unreadable_and_closed_to_local_appends() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec::default())?;
+    on_both_adapters(|store| {
+        prepare(store, &world, &built)?;
+        import(store, &world, &built)?;
+        let child = world.child_at(0)?.id;
+        let head = PARENT_CUT + 4;
+        assert!(store.read_fork_event_suffix(child, PARENT_CUT + 1).is_err());
+        assert!(store.read_committed(child, head).is_err());
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("fae1.import.test"),
+            CanonicalBytes::from_vec(b"local".to_vec()),
+        );
+        assert!(store.append(child, &[draft]).is_err());
+        Ok(())
+    })
+}
+
+#[test]
+fn a_file_backed_sqlite_import_survives_reopen_and_a_second_connection() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec::default())?;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("fae1-durable.sqlite");
+    let path = path.to_str().ok_or("utf-8 path")?;
+    let receipt = {
+        let mut store = SqliteStore::open(path)?;
+        prepare(&mut store, &world, &built)?;
+        import(&mut store, &world, &built)?
+    };
+    let mut reopened = SqliteStore::open(path)?;
+    reopened.bind_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ))?;
+    assert_eq!(import(&mut reopened, &world, &built), Ok(receipt.clone()));
+    let mut second = SqliteStore::open(path)?;
+    second.bind_erasure_gate(std::sync::Arc::new(
+        pos_core::ErasureContainmentGateV1::new_test_open(),
+    ))?;
+    assert_eq!(import(&mut second, &world, &built), Ok(receipt));
+    Ok(())
+}

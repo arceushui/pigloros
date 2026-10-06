@@ -120,6 +120,7 @@ use crate::{
 };
 
 mod counterfactual_store;
+mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod pipeline_admission;
 
@@ -295,6 +296,23 @@ pub struct MemoryStore {
     /// Accepted ADR-105 `FIP1` history with each digest recorded at install;
     /// index `g - 1` holds generation `g`, and the last entry is the floor.
     fork_attribution_issuer_policies: Vec<(Hash, pos_core::ForkAttributionIssuerPolicyV1)>,
+    /// Imported ADR-105 code-2 `POB1` rows keyed by operation ID.
+    imported_fork_principal_owner_bindings:
+        HashMap<Hash, pos_core::ImportedPrincipalOwnerBindingV1>,
+    /// Imported ADR-105 code-2 `FAR1` rows keyed by child Timeline.
+    imported_fork_admissions: HashMap<TimelineId, pos_core::ImportedForkAdmissionRecordV1>,
+    /// Imported `FCS1` custody keyed by digest, apart from local custody.
+    imported_fork_classifier_sources: HashMap<Hash, ForkClassifierSourceV1>,
+    /// Imported ADR-105 code-2 `FPO1` rows keyed by operation ID.
+    imported_fork_publication_operations:
+        HashMap<Hash, pos_core::ImportedForkPublicationOperationV1>,
+    /// Imported `IKR1`/`IKT1` evidence keyed by import operation ID.
+    imported_fork_key_evidence:
+        HashMap<Hash, fork_attribution_authority_import::ImportedKeyEvidenceV1>,
+    /// Committed `IFA1` admissions with their `FAE1` bytes, keyed by import
+    /// operation ID.
+    imported_fork_attributions:
+        HashMap<Hash, fork_attribution_authority_import::ImportedAttributionRowV1>,
     /// Current raw ERCRP1 envelope per request.
     erasure_records: BTreeMap<ErasureReferenceV1, (ErasureReferenceV1, Vec<u8>)>,
     /// Independently bounded content-addressed erasure supporting evidence.
@@ -740,6 +758,12 @@ impl MemoryStore {
             fork_publication_bindings: HashMap::new(),
             fork_publication_artifacts: HashMap::new(),
             fork_attribution_issuer_policies: Vec::new(),
+            imported_fork_principal_owner_bindings: HashMap::new(),
+            imported_fork_admissions: HashMap::new(),
+            imported_fork_classifier_sources: HashMap::new(),
+            imported_fork_publication_operations: HashMap::new(),
+            imported_fork_key_evidence: HashMap::new(),
+            imported_fork_attributions: HashMap::new(),
             erasure_records: BTreeMap::new(),
             erasure_evidence: BTreeMap::new(),
             artifact_registrations: BTreeMap::new(),
@@ -5703,7 +5727,9 @@ impl MemoryStore {
         &self,
         timeline: TimelineId,
     ) -> Result<(), CoreError> {
-        if self.fork_admissions.contains_key(&timeline) {
+        if self.fork_admissions.contains_key(&timeline)
+            || self.imported_fork_admissions.contains_key(&timeline)
+        {
             return Err(CoreError::Storage(
                 "admitted Fork Events require classified append authority".to_owned(),
             ));
