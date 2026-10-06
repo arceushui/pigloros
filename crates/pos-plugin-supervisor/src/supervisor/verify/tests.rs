@@ -8,7 +8,7 @@ fn a_descriptor_must_describe_the_negotiated_release() {
     let negotiated = negotiated();
     let valid = descriptor(&negotiated);
     assert!(verify_descriptor(&valid, &negotiated));
-    let changes: [fn(&mut PluginDescriptorV1); 9] = [
+    let edits: [fn(&mut PluginDescriptorV1); 9] = [
         |d| d.plugin_id.push('x'),
         |d| d.world.push('x'),
         |d| d.abi_major = 1,
@@ -19,9 +19,9 @@ fn a_descriptor_must_describe_the_negotiated_release() {
         |d| d.release_digest = [1; 32],
         |d| d.release_digest[31] = 1,
     ];
-    for (index, change) in changes.iter().enumerate() {
+    for (index, edit) in edits.iter().enumerate() {
         let mut changed = valid.clone();
-        change(&mut changed);
+        edit(&mut changed);
         assert!(!verify_descriptor(&changed, &negotiated), "change {index}");
     }
 }

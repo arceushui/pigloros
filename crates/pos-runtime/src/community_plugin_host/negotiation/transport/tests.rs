@@ -9,6 +9,7 @@ use crate::community_plugin_host::profile::{
 };
 
 type Error = NegotiatedTransportErrorV1;
+type LimitEdit = fn(&mut DeterministicBudgetV1);
 
 fn runtime() -> PinnedComponentRuntimeV1 {
     let engine = PinnedEngineConfigV1 {
@@ -161,12 +162,12 @@ fn the_mode_must_match_the_worker_profile() {
 fn limits_must_be_a_clamped_budget() {
     let ceilings = CommunityPluginCeilingsV1::V1.values();
     let wit = DeterministicBudgetV1::MAXIMA;
-    let cases: [(&str, fn(&mut DeterministicBudgetV1)); 11] = [
+    let cases: [(&str, LimitEdit); 11] = [
         ("memory below a page", |l| l.memory_bytes = 0),
         ("memory not whole pages", |l| l.memory_bytes = 65_537),
         ("no fuel", |l| l.fuel = 0),
         ("memory above ceiling", |l| {
-            l.memory_bytes += WASM_PAGE_BYTES_V1
+            l.memory_bytes += WASM_PAGE_BYTES_V1;
         }),
         ("fuel above ceiling", |l| l.fuel += 1),
         ("host calls above ceiling", |l| l.host_calls += 1),

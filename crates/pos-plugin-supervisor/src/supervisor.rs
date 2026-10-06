@@ -20,7 +20,7 @@
 //!    it.
 //! 4. A well-formed response reports the engine's closed failure or trap
 //!    class, or the guest's return. A returned value that fails the
-//!    supervisor's own checks ([`crate::verify`]) is the authoritative
+//!    supervisor's own checks (`verify`) is the authoritative
 //!    `InvalidGuestOutput`.
 
 use std::sync::mpsc;
@@ -38,7 +38,9 @@ use crate::ipc::{
     WorkerReturnV1,
 };
 use crate::launch::{launch, LaunchedWorker, WorkerProgramV1, WorkerResourceCeilingsV1};
-use crate::verify::{verify_descriptor, verify_output};
+use self::verify::{verify_descriptor, verify_output};
+
+mod verify;
 
 /// The longest wall-time watchdog a supervisor accepts.
 pub const MAX_WORKER_WATCHDOG: Duration = Duration::from_hours(1);

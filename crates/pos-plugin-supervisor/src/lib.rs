@@ -36,12 +36,11 @@ pub mod frame;
 pub mod ipc;
 pub mod launch;
 pub mod supervisor;
-mod verify;
 pub mod worker_process;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod fixtures;
+pub mod fixtures;
 
 pub use frame::{FrameFaultV1, WorkerFrameLimitsV1};
 pub use launch::{WorkerProgramV1, WorkerResourceCeilingsV1, FORWARDED_ENVIRONMENT};

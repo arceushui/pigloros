@@ -192,20 +192,20 @@ fn guest_errors() -> Vec<GuestPluginErrorV1> {
     .collect()
 }
 
-fn described(result: GuestReturnV1<PluginDescriptorV1>) -> WorkerOutcomeV1 {
-    Ok(WorkerReturnV1::Described(InvocationReportV1 {
+fn described(result: GuestReturnV1<PluginDescriptorV1>) -> WorkerReturnV1 {
+    WorkerReturnV1::Described(InvocationReportV1 {
         result,
         metering: METERING,
         operational_log: log(),
-    }))
+    })
 }
 
-fn produced(result: GuestReturnV1<PluginOutputV1>) -> WorkerOutcomeV1 {
-    Ok(WorkerReturnV1::Produced(InvocationReportV1 {
+fn produced(result: GuestReturnV1<PluginOutputV1>) -> WorkerReturnV1 {
+    WorkerReturnV1::Produced(InvocationReportV1 {
         result,
         metering: METERING,
         operational_log: log(),
-    }))
+    })
 }
 
 fn round_trip_response(outcome: &WorkerOutcomeV1) -> Decoded<WorkerOutcomeV1> {
@@ -214,13 +214,13 @@ fn round_trip_response(outcome: &WorkerOutcomeV1) -> Decoded<WorkerOutcomeV1> {
 
 #[test]
 fn responses_round_trip_every_outcome() {
-    let mut outcomes = vec![
-        described(Ok(descriptor(&negotiated()))),
-        produced(Ok(output(&invocation()))),
+    let mut outcomes: Vec<WorkerOutcomeV1> = vec![
+        Ok(described(Ok(descriptor(&negotiated())))),
+        Ok(produced(Ok(output(&invocation())))),
     ];
     for error in guest_errors() {
-        outcomes.push(described(Err(error.clone())));
-        outcomes.push(produced(Err(error)));
+        outcomes.push(Ok(described(Err(error.clone()))));
+        outcomes.push(Ok(produced(Err(error))));
     }
     outcomes.extend(WORKER_FAILURES_V1.map(Err));
     outcomes.extend(WORKER_TRAP_CLASSES_V1.map(|class| {
