@@ -139,6 +139,16 @@ fn malformed_guest_values_are_invalid_guest_output_not_traps() {
 }
 
 #[test]
+fn a_trap_inside_realloc_stays_a_trap_table_outcome() {
+    // Unlike selector 18, whose `realloc` returns a bad pointer, here `realloc`
+    // itself executes `unreachable` while the host lowers a result.
+    assert_eq!(
+        probe(19, BUDGET),
+        Some(trap(ComponentTrapClassV1::Unreachable))
+    );
+}
+
+#[test]
 fn guest_exports_must_have_their_exact_guest_v1_types() {
     let untyped = "(component
         (core module $m (func (export \"f\")))

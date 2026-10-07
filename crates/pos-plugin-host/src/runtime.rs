@@ -14,6 +14,8 @@ use pos_runtime::community_plugin_host::{
 };
 use wasmtime::Trap;
 
+use crate::lift::widen;
+
 /// Exact Wasmtime release of the host (ADR-061 revision 4, decision 2).
 ///
 /// A new pin is a new execution-profile version.
@@ -39,7 +41,7 @@ pub const RESOLVED_WASMTIME_FEATURES: [&str; 6] = [
 
 /// The pinned Engine configuration that the engine applies and profiles record.
 pub const PINNED_ENGINE_CONFIG: PinnedEngineConfigV1 = PinnedEngineConfigV1 {
-    max_wasm_stack: MAX_WASM_STACK_BYTES as u64,
+    max_wasm_stack: widen(MAX_WASM_STACK_BYTES),
     consume_fuel: true,
     epoch_interruption: true,
 };
@@ -78,6 +80,10 @@ pub(crate) fn is_pinned_runtime(runtime: &PinnedComponentRuntimeV1) -> bool {
 static TRAP_TABLE: LazyLock<Vec<TrapTableEntryV1>> = LazyLock::new(trap_table);
 
 /// One row for every trap code of the pinned version, in code order.
+///
+/// The row key is the `Debug` text of the trap code. `Debug` formatting is not
+/// a stability promise of Wasmtime; the exact version pin and the
+/// `PINNED_TRAP_CODES` test, which lists every key, guard against a change.
 fn trap_table() -> Vec<TrapTableEntryV1> {
     (0..=u8::MAX)
         .filter_map(Trap::from_u8)
@@ -119,6 +125,7 @@ pub(crate) const fn trap_outcome(trap: Trap) -> TrapOutcomeV1 {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::test_values::ok;
 
     use ComponentTrapClassV1 as Class;
 
@@ -224,10 +231,6 @@ mod tests {
         ("ListOutOfBounds", TrapOutcomeV1::Trap(Class::Other)),
     ];
 
-    fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-        result.unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
-    }
-
     #[test]
     fn the_trap_table_has_one_row_per_pinned_code_in_code_order() {
         let runtime = ok(pinned_runtime());
@@ -268,10 +271,8 @@ mod tests {
         let listed = checker
             .split_once("RESOLVED_FEATURES = [")
             .and_then(|(_, rest)| rest.split_once(']'))
-            .map_or_else(
-                || std::panic::resume_unwind(Box::new("no RESOLVED_FEATURES")),
-                |(list, _)| list,
-            );
+            .map(|(list, _)| list);
+        let listed = ok(listed.ok_or("no RESOLVED_FEATURES"));
         let features: Vec<&str> = listed
             .split(',')
             .map(|item| item.trim().trim_matches('"'))

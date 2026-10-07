@@ -19,6 +19,9 @@ use pos_runtime::community_plugin_host::{
 use wasmtime::component::{Linker, Val};
 use wasmtime::ResourceLimiter;
 
+use crate::lift::{digest, text, widen};
+use crate::lower::byte_list;
+
 /// The `host-v1` interface name inside the world.
 pub(crate) const HOST_V1_INTERFACE: &str = "pigloros:plugin/host-v1@0.1.0";
 /// Largest `deterministic-random` request, in bytes.
@@ -28,19 +31,12 @@ pub(crate) const MAX_LOG_MESSAGE_BYTES: usize = 256;
 /// Largest element count of any guest table.
 const MAX_TABLE_ELEMENTS: usize = 65_536;
 
-// The engine supports only targets whose `usize` fits in a `u64`, so
-// [`widen`] is lossless.
-const _: () = assert!(usize::BITS <= u64::BITS);
-
-/// A byte or element count as a `u64`; lossless on every supported target.
-pub(crate) const fn widen(count: usize) -> u64 {
-    count as u64
-}
-
 /// A host-side refusal raised inside Wasmtime and classified after the call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HostFault {
-    /// The effective `host_calls` limit, or a per-call request bound.
+    /// The effective `host_calls` limit, or the 4,096-byte bound of one
+    /// `deterministic-random` request. ADR-061 revision 6 item 5 reports both as
+    /// `HostCallLimitExceeded`, so they share one fault.
     HostCallLimit,
     /// An operational log limit: `log_calls`, `log_bytes` or 256 bytes.
     OutputLimit,
@@ -234,9 +230,7 @@ fn random_request(params: &[Val]) -> Result<([u8; 32], u64, u32), HostFault> {
     let [domain, Val::U64(offset), Val::U32(length)] = params else {
         return Err(HostFault::GuestAbi);
     };
-    let domain = byte_record(domain)
-        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
-        .ok_or(HostFault::GuestAbi)?;
+    let domain = digest(domain).map_err(|_| HostFault::GuestAbi)?;
     if *length > MAX_RANDOM_BYTES {
         return Err(HostFault::HostCallLimit);
     }
@@ -247,36 +241,11 @@ fn log_request(params: &[Val]) -> Result<OperationalLogRecord, HostFault> {
     let [Val::U16(category), message] = params else {
         return Err(HostFault::GuestAbi);
     };
-    let message = byte_record(message)
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .ok_or(HostFault::GuestAbi)?;
+    let message = text(message).map_err(|_| HostFault::GuestAbi)?;
     Ok(OperationalLogRecord {
         category: *category,
         message,
     })
-}
-
-/// Bytes of a single-field `record { value: list<u8> }` such as `digest32`.
-fn byte_record(value: &Val) -> Option<Vec<u8>> {
-    let Val::Record(fields) = value else {
-        return None;
-    };
-    let [(_, Val::List(items))] = fields.as_slice() else {
-        return None;
-    };
-    items.iter().map(byte_value).collect()
-}
-
-const fn byte_value(value: &Val) -> Option<u8> {
-    match value {
-        Val::U8(byte) => Some(*byte),
-        _ => None,
-    }
-}
-
-/// A `list<u8>` value.
-pub(crate) fn byte_list(bytes: &[u8]) -> Val {
-    Val::List(bytes.iter().copied().map(Val::U8).collect())
 }
 
 fn random_bytes(domain: &[u8; 32], offset: u64, length: u32) -> Vec<u8> {
@@ -328,15 +297,6 @@ mod tests {
         result
             .err()
             .and_then(|error| error.downcast_ref::<HostFault>().copied())
-    }
-
-    #[test]
-    fn byte_records_accept_only_single_byte_list_records() {
-        assert_eq!(byte_record(&digest_val(&[1, 2])), Some(vec![1, 2]));
-        assert_eq!(byte_record(&Val::Bool(true)), None);
-        assert_eq!(byte_record(&Val::Record(Vec::new())), None);
-        let wide = Val::Record(vec![("value".to_owned(), Val::List(vec![Val::U16(1)]))]);
-        assert_eq!(byte_record(&wide), None);
     }
 
     #[test]

@@ -37,23 +37,9 @@ enum Shape {
     Result(Option<Box<Self>>, Option<Box<Self>>),
 }
 
-/// The payload of a variant case or a `result` side.
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum PayloadShape {
-    /// No payload.
-    Absent,
-    /// A payload of this shape.
-    Present(Shape),
-}
-
-impl PayloadShape {
-    fn into_option(self) -> Option<Shape> {
-        match self {
-            Self::Absent => None,
-            Self::Present(shape) => Some(shape),
-        }
-    }
-}
+/// A value type that the world never uses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Unsupported;
 
 /// A function signature: named parameters, results and async-ness.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -70,10 +56,9 @@ struct Signature {
 /// `host-v1`-only linker, which refuses anything it does not define.
 pub(crate) fn imported_functions_are_exact(engine: &Engine, component: &Component) -> bool {
     let component_type = component.component_type();
-    let exact = component_type
+    component_type
         .imports(engine)
-        .all(|(interface, import)| item_is_exact(engine, interface, &import.ty));
-    exact
+        .all(|(interface, import)| item_is_exact(engine, interface, &import.ty))
 }
 
 fn item_is_exact(engine: &Engine, interface: &str, item: &ComponentItem) -> bool {
@@ -139,27 +124,25 @@ fn shape(ty: &Type) -> Option<Shape> {
         Type::Variant(variant) => variant
             .cases()
             .map(|case| {
-                let payload = payload_shape(case.ty.as_ref())?;
-                Some((case.name.to_owned(), payload.into_option()))
+                let payload = payload_shape(case.ty.as_ref()).ok()?;
+                Some((case.name.to_owned(), payload))
             })
             .collect::<Option<Vec<_>>>()
             .map(Shape::Variant),
         Type::Enum(cases) => Some(Shape::Enum(cases.names().map(str::to_owned).collect())),
         Type::Result(result) => {
-            let ok = payload_shape(result.ok().as_ref())?.into_option();
-            let err = payload_shape(result.err().as_ref())?.into_option();
+            let ok = payload_shape(result.ok().as_ref()).ok()?;
+            let err = payload_shape(result.err().as_ref()).ok()?;
             Some(Shape::Result(ok.map(Box::new), err.map(Box::new)))
         }
         _ => None,
     }
 }
 
-/// The shape of an optional payload type, or `None` for a type the world
-/// never uses.
-fn payload_shape(ty: Option<&Type>) -> Option<PayloadShape> {
-    ty.map_or(Some(PayloadShape::Absent), |ty| {
-        shape(ty).map(PayloadShape::Present)
-    })
+/// The shape of an optional payload type, `None` for no payload, or
+/// [`Unsupported`] for a type the world never uses.
+fn payload_shape(ty: Option<&Type>) -> Result<Option<Shape>, Unsupported> {
+    ty.map(|ty| shape(ty).ok_or(Unsupported)).transpose()
 }
 
 /// The exact WIT signature of one `host-v1` function.

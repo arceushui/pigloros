@@ -209,10 +209,10 @@ const fn metered<T>(report: &InvocationReportV1<T>) -> Measurement {
 }
 
 fn recorded(guest_name: &str, call: &str) -> Measurement {
-    MEASUREMENTS
+    let found = MEASUREMENTS
         .into_iter()
-        .find(|entry| entry.guest == guest_name && entry.call == call)
-        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("measurement not recorded")))
+        .find(|entry| entry.guest == guest_name && entry.call == call);
+    ok(found.ok_or("not recorded"), "measurement")
 }
 
 fn describe(guest: &LoadedComponent) -> Result<InvocationReportV1<PluginDescriptorV1>, Error> {

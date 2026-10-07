@@ -11,7 +11,6 @@ use pos_runtime::community_plugin_host::{
 };
 use wasmtime::component::Val;
 
-use crate::host_v1::widen;
 
 /// A lifted value or the closed error that ends the invocation.
 pub(crate) type Lifted<T> = Result<T, CommunityPluginHostErrorV1>;
@@ -101,6 +100,15 @@ pub(crate) fn id(value: &Val) -> Lifted<String> {
     let text = text(value)?;
     ensure(is_valid_id_v1(&text), INVALID)?;
     Ok(text)
+}
+
+// The engine supports only targets whose `usize` fits in a `u64`, so
+// [`widen`] is lossless.
+const _: () = assert!(usize::BITS <= u64::BITS);
+
+/// A byte or element count as a `u64`; lossless on every supported target.
+pub(crate) const fn widen(count: usize) -> u64 {
+    count as u64
 }
 
 /// A `u16`.
@@ -209,7 +217,7 @@ fn coordinate_bytes(value: &Val) -> Lifted<Vec<u8>> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::host_v1::byte_list;
+    use crate::lower::byte_list;
     use crate::test_values::{digest_val, record, text_val};
 
     fn some(value: Val) -> Val {

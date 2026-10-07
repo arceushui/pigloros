@@ -3,7 +3,6 @@
 use pos_runtime::community_plugin_host::{ArtifactRefV1, PluginInvocationV1};
 use wasmtime::component::Val;
 
-use crate::host_v1::byte_list;
 
 /// The Canonical ABI value of `invocation` with `kind`.
 pub(crate) fn invocation_val(invocation: &PluginInvocationV1, kind: &str) -> Val {
@@ -73,6 +72,11 @@ pub(crate) fn invocation_val(invocation: &PluginInvocationV1, kind: &str) -> Val
     ])
 }
 
+/// A `list<u8>` value.
+pub(crate) fn byte_list(bytes: &[u8]) -> Val {
+    Val::List(bytes.iter().copied().map(Val::U8).collect())
+}
+
 /// A record value with `fields` in WIT order.
 pub(crate) fn record(fields: Vec<(&str, Val)>) -> Val {
     Val::Record(
@@ -99,12 +103,12 @@ fn lower_artifact(value: &ArtifactRefV1) -> Val {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::test_values::invocation;
+    use crate::test_values::{invocation, ok};
 
     #[test]
     fn invocations_lower_in_wit_field_order() {
         let Val::Record(fields) = invocation_val(&invocation(), "drive") else {
-            std::panic::resume_unwind(Box::new("not a record"));
+            return ok(Err("not a record"));
         };
         let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(

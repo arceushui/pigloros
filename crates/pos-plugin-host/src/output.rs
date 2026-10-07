@@ -153,7 +153,7 @@ fn trace_annotation(value: &Val, dependencies: &mut DependencyBudget) -> Lifted<
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::host_v1::byte_list;
+    use crate::lower::byte_list;
     use crate::test_values::{digest_val, digests_val, numbered_digest, record, text_val};
 
     const INVOCATION: [u8; 16] = [1; 16];

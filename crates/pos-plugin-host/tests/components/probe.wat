@@ -14,6 +14,7 @@
 ;;  8 grow memory by 2,000 pages    16 log one 256-byte message
 ;; 17 grow the table past 65,536     18 request random bytes while `realloc`
 ;;    elements                          returns a pointer past memory
+;; 19 request random bytes while `realloc` executes `unreachable`
 ;;
 ;; Every other selector returns an all-zero descriptor, whose empty
 ;; `plugin-id` is not an ADR-061 ID. `reduce` and `drive` trap if called.
@@ -110,6 +111,7 @@
     (global $bad (export "bad") (mut i32) (i32.const 0))
     (func (export "realloc") (param i32 i32 i32 i32) (result i32)
       (local $at i32)
+      (if (i32.eq (global.get $bad) (i32.const 2)) (then unreachable))
       (if (global.get $bad) (then (return (i32.const -16))))
       (local.set $at
         (i32.and
@@ -177,6 +179,11 @@
       (if (i64.eq (local.get $selector) (i64.const 18))
         (then
           (global.set $bad (i32.const 1))
+          (call $random
+            (i32.const 512) (i32.const 32) (i64.const 0) (i32.const 16) (i32.const 2048))))
+      (if (i64.eq (local.get $selector) (i64.const 19))
+        (then
+          (global.set $bad (i32.const 2))
           (call $random
             (i32.const 512) (i32.const 32) (i64.const 0) (i32.const 16) (i32.const 2048))))
       (if (i64.eq (local.get $selector) (i64.const 16))

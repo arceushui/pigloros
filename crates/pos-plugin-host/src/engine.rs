@@ -70,8 +70,9 @@ impl PinnedExecutionV1 {
     /// Returns [`RuntimeNotPinnedV1`] when the profile records no runtime or a
     /// runtime other than [`crate::runtime::pinned_runtime`].
     pub fn new(negotiated: NegotiatedCommunityPluginV1) -> Result<Self, RuntimeNotPinnedV1> {
-        let pinned = negotiated.runtime().is_some_and(is_pinned_runtime);
-        pinned
+        negotiated
+            .runtime()
+            .is_some_and(is_pinned_runtime)
             .then_some(Self { negotiated })
             .ok_or(RuntimeNotPinnedV1)
     }
@@ -407,49 +408,15 @@ fn call_export(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use pos_crypto::plugin_execution::{
-        PluginAbiRequirementV1, PluginExecutionProjectionFixtureV1, PluginExecutionProjectionV1,
-    };
-    use pos_runtime::community_plugin_host::{
-        negotiate_community_plugin_v1, CommunityPluginCeilingsV1,
-        CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginModeV1,
-        HostInputs,
-    };
+    use pos_runtime::community_plugin_host::HostInputs;
 
     use super::*;
+    use crate::test_values::{execution, ok};
 
     const PROBE: &str = include_str!("../tests/components/probe.wat");
     const RUST_GUEST: &[u8] = include_bytes!(
         "../../../plugins/community/examples/compatibility-prototype/fixtures/rust-guest.wasm"
     );
-
-    fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-        result.unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
-    }
-
-    fn execution() -> PinnedExecutionV1 {
-        let release = PluginExecutionProjectionV1::from(PluginExecutionProjectionFixtureV1 {
-            pmf1_digest: [1; 32],
-            release_digest: [2; 32],
-            plugin_id: "plugin-a".to_owned(),
-            abi: PluginAbiRequirementV1 {
-                major: 0,
-                min_minor: 0,
-                max_minor: 0,
-                required_features: Vec::new(),
-            },
-            capabilities: Vec::new(),
-            budget: DeterministicBudgetV1::MAXIMA,
-        });
-        let profile = CommunityPluginExecutionProfileV1::new(
-            CommunityPluginModeV1::Local,
-            CommunityPluginCeilingsV1::V1,
-            Some(ok(crate::runtime::pinned_runtime())),
-        );
-        let host = CommunityPluginHostAbiV1::v1();
-        let negotiated = ok(negotiate_community_plugin_v1(&release, &host, &profile));
-        ok(PinnedExecutionV1::new(negotiated))
-    }
 
     #[test]
     fn an_export_index_of_another_component_is_invalid_guest_output() {

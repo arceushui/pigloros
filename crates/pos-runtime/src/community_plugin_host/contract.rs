@@ -331,6 +331,9 @@ pub fn plugin_output_digest_v1(output: &PluginOutputV1) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
+// `usize` fits in a `u64` on every supported target, so the cast is lossless.
+const _: () = assert!(usize::BITS <= u64::BITS);
+
 fn put_count(hasher: &mut blake3::Hasher, count: usize) {
     hasher.update(&(count as u64).to_be_bytes());
 }

@@ -14,9 +14,9 @@
 //! - `capabilities` and `dependencies` are only count-bounded; the manifest,
 //!   not `describe`, is their authority.
 //!
-//! `release-semver` is length-bounded only (1-64 bytes, as PMF1 field 3).
-//! Its semantic-version grammar is intentionally unchecked: PMF1 field 3 is the
-//! authority for the release version.
+//! `release-semver` is only lifted as text: ADR-061 revision 6 item 2 lists
+//! exactly what `describe` is checked against, and the manifest (PMF1 field 3)
+//! is the authority for the release version.
 
 use pos_runtime::community_plugin_host::{NegotiatedCommunityPluginV1, PluginDescriptorV1};
 use wasmtime::component::Val;
@@ -30,8 +30,6 @@ use crate::lift::{
 /// It is the at-most-256 row of PMF1 fields 11-13; fields 14 and 17 have
 /// the same bound.
 const MAX_DESCRIPTOR_ITEMS: usize = 256;
-/// PMF1 bound on release semver text, in bytes.
-const MAX_SEMVER_BYTES: usize = 64;
 
 /// Lift one `plugin-descriptor` and check it against `negotiated`.
 pub(crate) fn plugin_descriptor(
@@ -43,7 +41,7 @@ pub(crate) fn plugin_descriptor(
     let (negotiated_major, _) = negotiated.abi();
     let (declared_min, declared_max) = negotiated.declared_minor_range();
     let plugin_id = matching(id(plugin_id)?, negotiated.plugin_id())?;
-    let release_semver = semver_text(semver)?;
+    let release_semver = text(semver)?;
     let world = matching(text(world)?, negotiated.world())?;
     let abi_major = matching(u16_value(major)?, &negotiated_major)?;
     let min_abi_minor = matching(u16_value(min_minor)?, &declared_min)?;
@@ -81,12 +79,6 @@ fn zero_digest(value: &Val) -> Lifted<[u8; 32]> {
     matching(digest(value)?, &[0; 32])
 }
 
-fn semver_text(value: &Val) -> Lifted<String> {
-    let semver = text(value)?;
-    ensure((1..=MAX_SEMVER_BYTES).contains(&semver.len()), INVALID)?;
-    Ok(semver)
-}
-
 fn id_list(value: &Val) -> Lifted<Vec<String>> {
     list(value)?.iter().map(id).collect()
 }
@@ -98,45 +90,18 @@ const fn bounded(count: usize) -> Lifted<()> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use pos_crypto::plugin_execution::{
-        DeterministicBudgetV1, PluginAbiRequirementV1, PluginExecutionProjectionFixtureV1,
-        PluginExecutionProjectionV1,
-    };
-    use pos_runtime::community_plugin_host::{
-        negotiate_community_plugin_v1, CommunityPluginCeilingsV1,
-        CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginModeV1,
-    };
+    use pos_runtime::community_plugin_host::CommunityPluginHostAbiV1;
 
     use super::*;
-    use crate::test_values::{digest_val, numbered_digest, record, text_val};
+    use crate::test_values::{digest_val, negotiate, numbered_digest, ok, record, release, text_val};
 
     fn texts(items: &[&str]) -> Val {
         Val::List(items.iter().map(|item| text_val(item)).collect())
     }
 
     fn negotiated() -> NegotiatedCommunityPluginV1 {
-        let execution = PluginExecutionProjectionV1::from(PluginExecutionProjectionFixtureV1 {
-            pmf1_digest: [1; 32],
-            release_digest: [2; 32],
-            plugin_id: "plugin-a".to_owned(),
-            abi: PluginAbiRequirementV1 {
-                major: 0,
-                min_minor: 0,
-                max_minor: 3,
-                required_features: vec!["feature.a".to_owned()],
-            },
-            capabilities: Vec::new(),
-            budget: DeterministicBudgetV1::MAXIMA,
-        });
-        let host = CommunityPluginHostAbiV1::new(0, 0, vec!["feature.a".to_owned()]);
-        let profile = CommunityPluginExecutionProfileV1::new(
-            CommunityPluginModeV1::Local,
-            CommunityPluginCeilingsV1::V1,
-            None,
-        );
-        let host = host.unwrap_or_else(|_| std::panic::resume_unwind(Box::new("host ABI")));
-        negotiate_community_plugin_v1(&execution, &host, &profile)
-            .unwrap_or_else(|_| std::panic::resume_unwind(Box::new("negotiation")))
+        let host = ok(CommunityPluginHostAbiV1::new(0, 0, vec!["feature.a".to_owned()]));
+        negotiate(&release(3, &["feature.a"]), &host, None)
     }
 
     /// Descriptor fields in WIT order, matching [`negotiated`].
@@ -212,8 +177,6 @@ mod tests {
             .collect();
         assert!(with(7, Val::List(ordered[..MAX_DESCRIPTOR_ITEMS].to_vec())).is_ok());
         let invalid = [
-            (1, text_val("")),
-            (1, text_val(&"1".repeat(MAX_SEMVER_BYTES + 1))),
             (7, Val::List(ordered)),
             (
                 7,
@@ -231,7 +194,6 @@ mod tests {
         for (index, value) in invalid {
             assert_eq!(with(index, value), Err(INVALID), "field {index}");
         }
-        assert!(with(1, text_val(&"1".repeat(MAX_SEMVER_BYTES))).is_ok());
         assert!(with(9, many(MAX_DESCRIPTOR_ITEMS)).is_ok());
         assert!(with(11, many(MAX_DESCRIPTOR_ITEMS)).is_ok());
         assert_eq!(plugin_descriptor(&Val::U8(0), &negotiated()), Err(INVALID));
