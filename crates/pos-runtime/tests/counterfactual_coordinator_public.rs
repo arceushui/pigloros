@@ -3,6 +3,7 @@
 #![cfg(target_os = "linux")]
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::error::Error as _;
 use std::sync::Arc;
 
@@ -26,24 +27,29 @@ use pos_conformance::{
 use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
     ArtifactTransitionRuleV1, CanonicalBytes, CoreError, CounterfactualAdapterSealV1,
-    CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
-    CounterfactualGenerationRecordV1, CounterfactualInvalidationCommandV1,
-    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
-    CounterfactualTickOutcomeV1, EntityId, ErasureArtifactClassV1, ErasureContainmentGateV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, EventStore, ForkGenerationV1,
-    Hash, InvalidationConflictV1, Kind, PipelineContractErrorV1, PipelineDraftBatchV1,
-    RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, SeqRange, Timeline,
-    TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
+    CounterfactualBasisV1, CounterfactualDependencyErrorV1 as DependencyError,
+    CounterfactualDependencyReadPortV1, CounterfactualDependencyRecordingPortV1,
+    CounterfactualFactsV1, CounterfactualGenerationReceiptV1, CounterfactualGenerationRecordV1,
+    CounterfactualInvalidationCommandV1, CounterfactualInvalidationOutcomeV1,
+    CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1,
+    DependencyEdgeRecordV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
+    DependencyPageRequestV1, DependencyPageV1, DependencyReadScopeV1, EntityId,
+    ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    Event, EventDraft, EventStore, ForkGenerationV1, Hash, InvalidationConflictV1, Kind,
+    PipelineContractErrorV1, PipelineDraftBatchV1, RecordedDependencyClassV1, RecordedNodeOriginV1,
+    RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, SeqRange,
+    TickDependencyRecordV1, Timeline, TimelineId, MAX_DEPENDENCY_PAGE_ROWS_V1,
+    MAX_FORK_EVENT_TYPE_BYTES_V1,
 };
 use pos_runtime::counterfactual::coordinator::{
     CounterfactualAdmissionErrorV1 as AdmissionError, CounterfactualAdmissionRequestV1,
-    CounterfactualCoordinatorV1, CounterfactualForkAppendAuthorityV1,
-    CounterfactualFrontierDerivationV1, CounterfactualFrontierSourceV1,
-    CounterfactualFrozenArtifactsV1, CounterfactualHostPreflightV1,
+    CounterfactualCoordinatorV1, CounterfactualDeclaringTickStagerV1,
+    CounterfactualForkAppendAuthorityV1, CounterfactualFrontierDerivationV1,
+    CounterfactualFrontierSourceV1, CounterfactualFrozenArtifactsV1, CounterfactualHostPreflightV1,
     CounterfactualInterventionAuthorityV1, CounterfactualPendingCommitV1,
-    CounterfactualProvisionalOutputV1, CounterfactualTickFailureV1, CounterfactualTickInputsV1,
-    CounterfactualTickStagerV1, FrozenArtifactAvailabilityV1 as Avail, InterventionDecisionV1,
-    COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1, ENDOGENOUS_ARTIFACT_CLASS_V1,
+    CounterfactualProvisionalOutputV1, CounterfactualStagedTickV1, CounterfactualTickFailureV1,
+    CounterfactualTickInputsV1, CounterfactualTickStagerV1, FrozenArtifactAvailabilityV1 as Avail,
+    InterventionDecisionV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1, ENDOGENOUS_ARTIFACT_CLASS_V1,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
@@ -149,6 +155,20 @@ fn draft(value: u8) -> EventDraft {
 trait Backend: EventStore + CounterfactualStorePortV1 + Sized {
     fn open() -> TestResult<Self>;
 }
+
+/// A backend that also records and reads dependency records.
+trait RecordingBackend:
+    Backend + CounterfactualDependencyRecordingPortV1 + CounterfactualDependencyReadPortV1
+{
+}
+
+impl<B> RecordingBackend for B where
+    B: Backend + CounterfactualDependencyRecordingPortV1 + CounterfactualDependencyReadPortV1
+{
+}
+
+/// The outcome of one rigged invalidation commit.
+type CommitResult = Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1>;
 
 fn open_gate() -> Arc<ErasureContainmentGateV1> {
     Arc::new(ErasureContainmentGateV1::new_test_open())
@@ -264,20 +284,10 @@ impl<const MODE: u8> CounterfactualStorePortV1 for Rigged<MODE> {
     fn commit_counterfactual_invalidation(
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
-    ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1> {
-        self.commands.push(command.clone());
-        match MODE {
-            COMMIT_CONFLICTS => Ok(CounterfactualInvalidationOutcomeV1::InvalidationConflict(
-                InvalidationConflictV1::LogicalHead,
-            )),
-            COMMIT_FAILS => Err(CounterfactualStoreErrorV1::StorageFailure),
-            LOST_UNKNOWN => Err(CounterfactualStoreErrorV1::OutcomeUnknown),
-            LANDED_UNKNOWN | RECOVERY_READ_FAILS | OTHER_RECEIPT => self
-                .store
-                .commit_counterfactual_invalidation(command)
-                .and(Err(CounterfactualStoreErrorV1::OutcomeUnknown)),
-            _ => self.store.commit_counterfactual_invalidation(command),
-        }
+    ) -> CommitResult {
+        self.rigged_commit(command, |store| {
+            store.commit_counterfactual_invalidation(command)
+        })
     }
 
     fn append_counterfactual_tick(
@@ -336,6 +346,67 @@ impl<const MODE: u8> CounterfactualStorePortV1 for Rigged<MODE> {
         artifact_digest: Hash,
     ) -> Result<Option<Vec<u8>>, CounterfactualStoreErrorV1> {
         self.store.read_generation_artifact(at, artifact_digest)
+    }
+}
+
+impl<const MODE: u8> CounterfactualDependencyRecordingPortV1 for Rigged<MODE> {
+    fn commit_counterfactual_invalidation_with_dependencies(
+        &mut self,
+        command: &CounterfactualInvalidationCommandV1,
+        record: &TickDependencyRecordV1,
+    ) -> CommitResult {
+        self.rigged_commit(command, |store| {
+            store.commit_counterfactual_invalidation_with_dependencies(command, record)
+        })
+    }
+
+    fn append_counterfactual_tick_with_dependencies(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        record: &TickDependencyRecordV1,
+    ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
+        self.store
+            .append_counterfactual_tick_with_dependencies(fork, expected, drafts, record)
+    }
+}
+
+impl<const MODE: u8> CounterfactualDependencyReadPortV1 for Rigged<MODE> {
+    fn read_dependency_nodes(
+        &self,
+        request: &DependencyPageRequestV1,
+    ) -> Result<DependencyPageV1<DependencyNodeRecordV1>, CounterfactualStoreErrorV1> {
+        self.store.read_dependency_nodes(request)
+    }
+
+    fn read_dependency_edges(
+        &self,
+        request: &DependencyPageRequestV1,
+    ) -> Result<DependencyPageV1<DependencyEdgeRecordV1>, CounterfactualStoreErrorV1> {
+        self.store.read_dependency_edges(request)
+    }
+}
+
+impl<const MODE: u8> Rigged<MODE> {
+    /// Record `command` and make the commit call `commit` as `MODE` rigs it.
+    fn rigged_commit(
+        &mut self,
+        command: &CounterfactualInvalidationCommandV1,
+        commit: impl FnOnce(&mut MemoryStore) -> CommitResult,
+    ) -> CommitResult {
+        self.commands.push(command.clone());
+        match MODE {
+            COMMIT_CONFLICTS => Ok(CounterfactualInvalidationOutcomeV1::InvalidationConflict(
+                InvalidationConflictV1::LogicalHead,
+            )),
+            COMMIT_FAILS => Err(CounterfactualStoreErrorV1::StorageFailure),
+            LOST_UNKNOWN => Err(CounterfactualStoreErrorV1::OutcomeUnknown),
+            LANDED_UNKNOWN | RECOVERY_READ_FAILS | OTHER_RECEIPT => {
+                commit(&mut self.store).and(Err(CounterfactualStoreErrorV1::OutcomeUnknown))
+            }
+            _ => commit(&mut self.store),
+        }
     }
 }
 
@@ -730,6 +801,181 @@ impl CounterfactualTickStagerV1 for Stager {
             })
             .ok_or(CounterfactualTickFailureV1)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dependency declarations
+// ---------------------------------------------------------------------------
+
+/// The declared nodes and edges of one Tick record.
+type Declaration = (Vec<DependencyNodeRecordV1>, Vec<DependencyEdgeRecordV1>);
+/// One edit of a Tick's declaration before it is staged.
+type DeclarationTamper = fn(&mut Declaration) -> TestResult;
+/// One declaration tamper with the contract error the seam must report.
+type DeclarationCase = (DeclarationTamper, DependencyError);
+
+const fn recorded_class(class: DependencyClassV1) -> RecordedDependencyClassV1 {
+    match class {
+        DependencyClassV1::ExogenousFrozen => RecordedDependencyClassV1::ExogenousFrozen,
+        DependencyClassV1::InterventionAssigned => RecordedDependencyClassV1::InterventionAssigned,
+        DependencyClassV1::EndogenousRecomputed => RecordedDependencyClassV1::EndogenousRecomputed,
+        DependencyClassV1::FixedPolicy => RecordedDependencyClassV1::FixedPolicy,
+        DependencyClassV1::PresentationOnly => RecordedDependencyClassV1::PresentationOnly,
+    }
+}
+
+fn coordinate(node: &DependencyNodeV1) -> TestResult<DependencyNodeCoordinateV1> {
+    Ok(DependencyNodeCoordinateV1::try_new(
+        node.tick,
+        node.scheduler_position,
+        node.owner_id.clone(),
+        node.output_ordinal,
+        node.schema_id,
+        Hash::from_bytes(node.artifact_digest),
+    )?)
+}
+
+/// The provisional record of one graph node.
+fn node_record(node: &Node) -> TestResult<DependencyNodeRecordV1> {
+    Ok(DependencyNodeRecordV1::try_new(
+        coordinate(&node.node)?,
+        recorded_class(node.class),
+        RecordedNodeOriginV1::Provisional,
+        node.input_digests
+            .iter()
+            .copied()
+            .map(Hash::from_bytes)
+            .collect(),
+        Hash::from_bytes(node.provenance_digest),
+    )?)
+}
+
+/// The record of one graph edge: its exact `IDP1` bytes bound to its consumer and source.
+fn edge_record(edge: &InputDependencyV1) -> TestResult<DependencyEdgeRecordV1> {
+    Ok(DependencyEdgeRecordV1::try_from_canonical(
+        edge.to_canonical_cbor()?,
+        coordinate(&edge.consumer)?,
+        Hash::from_bytes(edge.source.artifact_digest),
+    )?)
+}
+
+/// A provisional `FixedPolicy` root node at `tick` with `digest`.
+fn root_at(tick: u64, digest: u8) -> TestResult<DependencyNodeRecordV1> {
+    Ok(DependencyNodeRecordV1::try_new(
+        DependencyNodeCoordinateV1::try_new(
+            tick,
+            0,
+            "policy".to_owned(),
+            0,
+            3,
+            Hash::from_bytes([digest; 32]),
+        )?,
+        RecordedDependencyClassV1::FixedPolicy,
+        RecordedNodeOriginV1::Provisional,
+        Vec::new(),
+        Hash::from_bytes(DESCRIPTOR_PROVENANCE),
+    )?)
+}
+
+/// The declaration of every record Tick of `source`'s graph from `first`,
+/// the first recomputation Tick: each provisional node rides the record of
+/// its own Tick, except a root before `first`, which rides the first record;
+/// a non-root node before `first` is not recomputed and is not declared.
+/// Every edge rides its consumer's record. Rows are in canonical order.
+fn declarations(source: &Source, first: u64) -> TestResult<BTreeMap<u64, Declaration>> {
+    let mut by_tick: BTreeMap<u64, Declaration> = BTreeMap::new();
+    let mut record_ticks: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+    let provisional = source
+        .nodes
+        .iter()
+        .filter(|node| node.origin == Origin::Provisional);
+    for node in provisional {
+        let tick = if recorded_class(node.class).is_root() {
+            node.node.tick.max(first)
+        } else {
+            node.node.tick
+        };
+        if tick >= first {
+            by_tick.entry(tick).or_default().0.push(node_record(node)?);
+            record_ticks.insert(node.node.artifact_digest, tick);
+        }
+    }
+    for edge in &source.edges {
+        if let Some(&tick) = record_ticks.get(&edge.consumer.artifact_digest) {
+            by_tick.entry(tick).or_default().1.push(edge_record(edge)?);
+        }
+    }
+    for (nodes, edges) in by_tick.values_mut() {
+        nodes.sort_by(|left, right| {
+            left.coordinate()
+                .position_key()
+                .cmp(&right.coordinate().position_key())
+        });
+        edges.sort_by(DependencyEdgeRecordV1::order_cmp);
+    }
+    Ok(by_tick)
+}
+
+/// Stages drafts like [`Stager`] and declares each Tick's dependencies from
+/// [`declarations`]; `tamper` edits one Tick's declaration before staging.
+struct DeclaringStager {
+    inner: Stager,
+    declarations: BTreeMap<u64, Declaration>,
+    tamper: Option<(u64, DeclarationTamper)>,
+}
+
+impl DeclaringStager {
+    fn new(source: &Source, first: u64, inner: Stager) -> TestResult<Self> {
+        Ok(Self {
+            inner,
+            declarations: declarations(source, first)?,
+            tamper: None,
+        })
+    }
+}
+
+impl CounterfactualDeclaringTickStagerV1 for DeclaringStager {
+    fn stage_tick_with_dependencies(
+        &mut self,
+        inputs: &CounterfactualTickInputsV1<'_>,
+    ) -> Result<CounterfactualStagedTickV1, CounterfactualTickFailureV1> {
+        let drafts = self.inner.stage_tick(inputs)?;
+        let mut declaration = self
+            .declarations
+            .get(&inputs.tick())
+            .cloned()
+            .unwrap_or_default();
+        if let Some((_, tamper)) = self.tamper.filter(|(at, _)| *at == inputs.tick()) {
+            tamper(&mut declaration).or(Err(CounterfactualTickFailureV1))?;
+        }
+        Ok(CounterfactualStagedTickV1 {
+            drafts,
+            nodes: declaration.0,
+            edges: declaration.1,
+        })
+    }
+}
+
+/// The first full page of `generation`'s rows.
+fn page_request(generation: ForkGenerationV1) -> TestResult<DependencyPageRequestV1> {
+    Ok(DependencyPageRequestV1::try_new(
+        DependencyReadScopeV1::ForkGeneration(generation),
+        None,
+        MAX_DEPENDENCY_PAGE_ROWS_V1,
+    )?)
+}
+
+/// Every recorded node and edge of `generation`, in canonical order; the
+/// fixtures stay far below one page.
+fn recorded<B: RecordingBackend>(
+    store: &B,
+    generation: ForkGenerationV1,
+) -> TestResult<Declaration> {
+    let request = page_request(generation)?;
+    let nodes = store.read_dependency_nodes(&request)?;
+    let edges = store.read_dependency_edges(&request)?;
+    assert!(nodes.next().is_none() && edges.next().is_none());
+    Ok((nodes.items().to_vec(), edges.items().to_vec()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1891,6 +2137,299 @@ fn failed_recovery_read_keeps_the_commit_outcome_unknown() -> TestResult {
 }
 
 // ---------------------------------------------------------------------------
+// Dependency records
+// ---------------------------------------------------------------------------
+
+/// Admit the base request through the recording path with `stager`.
+///
+/// A macro, not a function: the admission error is too large to return from
+/// a helper (`result_large_err`).
+macro_rules! admit_recording {
+    ($setup:ident, $stager:expr_2021) => {
+        $setup.coordinator.admit_with_dependencies(
+            &request(&$setup.fixture),
+            &Authority::default(),
+            &mut $setup.source,
+            $stager,
+        )
+    };
+}
+
+/// The base graph's first-Tick record: Tick 11 with the `FixedPolicy` root
+/// of Tick 10 riding it.
+const FIRST_RECORD_TICK: u64 = 11;
+
+fn first_tick_dependencies_are_recorded_with_the_commit<B: RecordingBackend>() -> TestResult {
+    let mut setup = setup::<B>(&BASE)?;
+    let fork = setup.fixture.fork;
+    let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
+    let receipt = admit_recording!(setup, &mut stager)?;
+    let generation = ForkGenerationV1 {
+        fork,
+        generation: 1,
+    };
+    assert_eq!(receipt.generation(), generation);
+    assert_eq!(receipt.first_tick(), FIRST_RECORD_TICK);
+    assert_eq!(receipt.first_tick_head(), Seq::from_u64(CUT_SEQ + 2));
+    // The declaring stager saw exactly the staged inputs of the plain one.
+    assert_eq!(stager.inner.seen.len(), 1);
+    assert_eq!(stager.inner.seen[0].tick, FIRST_RECORD_TICK);
+    assert_eq!(stager.inner.seen[0].generation, generation);
+    // The record committed with the Tick: the root of Tick 10 rides it, the
+    // Intervention seed and the recomputed output lie on the Tick, and the
+    // one edge is the output's; nothing of any other Tick is recorded.
+    let declared = stager
+        .declarations
+        .get(&FIRST_RECORD_TICK)
+        .cloned()
+        .ok_or("no first-Tick declaration")?;
+    let ticks: Vec<u64> = declared
+        .0
+        .iter()
+        .map(|node| node.coordinate().tick())
+        .collect();
+    assert_eq!(ticks, vec![10, 11, 11]);
+    assert_eq!(declared.1.len(), 1);
+    assert_eq!(recorded(setup.coordinator.store(), generation)?, declared);
+    let store = setup.coordinator.store();
+    assert_eq!(store.current_fork_generation(fork)?, generation);
+    assert_eq!(store.logical_head(fork)?, Seq::from_u64(CUT_SEQ + 2));
+
+    // The plain path records nothing: the next generation starts empty and
+    // the recorded generation is no longer readable.
+    let second = admit(&mut setup).0?;
+    assert_eq!(second.generation().generation, 2);
+    assert_eq!(
+        recorded(setup.coordinator.store(), second.generation())?,
+        (Vec::new(), Vec::new())
+    );
+    assert_eq!(
+        setup
+            .coordinator
+            .store()
+            .read_dependency_nodes(&page_request(generation)?),
+        Err(CounterfactualStoreErrorV1::MixedForkGeneration)
+    );
+    Ok(())
+}
+both_backends!(first_tick_dependencies_are_recorded_with_the_commit);
+
+/// Replace the root of Tick 10 with one at the parent cut Tick.
+fn root_at_the_cut(declaration: &mut Declaration) -> TestResult {
+    declaration.0[0] = root_at(PARENT_CUT_TICK, 0xa9)?;
+    Ok(())
+}
+
+/// Tamperings of the first-Tick declaration with the contract error each
+/// must report; every one is detected by the seam before any store call.
+const DECLARATION_CASES: [DeclarationCase; 8] = [
+    // A root strictly after the parent cut is admitted (the base root of
+    // Tick 10); one at the cut is not.
+    (root_at_the_cut, DependencyError::BindingMismatch),
+    // A root after the record's Tick.
+    (
+        |declaration| {
+            declaration.0.push(root_at(FIRST_RECORD_TICK + 1, 0xa9)?);
+            Ok(())
+        },
+        DependencyError::BindingMismatch,
+    ),
+    // A non-root node off the record's Tick.
+    (
+        |declaration| {
+            let early = DependencyNodeCoordinateV1::try_new(
+                FIRST_RECORD_TICK - 1,
+                0,
+                "world".to_owned(),
+                1,
+                40,
+                Hash::from_bytes([0xa9; 32]),
+            )?;
+            let node = DependencyNodeRecordV1::try_new(
+                early,
+                RecordedDependencyClassV1::EndogenousRecomputed,
+                RecordedNodeOriginV1::Provisional,
+                Vec::new(),
+                Hash::from_bytes(NODE_PROVENANCE),
+            )?;
+            declaration.0.insert(1, node);
+            declaration.1.clear();
+            Ok(())
+        },
+        DependencyError::BindingMismatch,
+    ),
+    // A committed-origin node: the Fork write methods take provisional
+    // records only.
+    (
+        |declaration| {
+            let committed = DependencyNodeRecordV1::try_new(
+                declaration.0[0].coordinate().clone(),
+                declaration.0[0].class(),
+                RecordedNodeOriginV1::Committed,
+                Vec::new(),
+                declaration.0[0].provenance_digest(),
+            )?;
+            declaration.0[0] = committed;
+            Ok(())
+        },
+        DependencyError::BindingMismatch,
+    ),
+    (
+        |declaration| {
+            declaration.0.swap(1, 2);
+            Ok(())
+        },
+        DependencyError::NonCanonicalOrder,
+    ),
+    (
+        |declaration| {
+            let repeated = declaration.0[1].clone();
+            declaration.0.insert(1, repeated);
+            Ok(())
+        },
+        DependencyError::DuplicateIdentity,
+    ),
+    (
+        |declaration| {
+            let repeated = declaration.1[0].clone();
+            declaration.1.push(repeated);
+            Ok(())
+        },
+        DependencyError::DuplicateIdentity,
+    ),
+    // An edge whose consumer is not a node of the record.
+    (
+        |declaration| {
+            declaration.0.truncate(2);
+            Ok(())
+        },
+        DependencyError::UnknownConsumer,
+    ),
+];
+
+fn rejected_declarations_are_typed_and_commit_nothing<B: RecordingBackend>() -> TestResult {
+    for (tamper, expected) in DECLARATION_CASES {
+        let mut setup = setup::<B>(&BASE)?;
+        let mut stager =
+            DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
+        stager.tamper = Some((FIRST_RECORD_TICK, tamper));
+        let result = admit_recording!(setup, &mut stager);
+        let outcome = (result, stager.inner);
+        let rejected = AdmissionError::DependencyDeclarationRejected(expected);
+        assert_rejected(&setup, &outcome, &rejected, 1)?;
+        let empty = ForkGenerationV1 {
+            fork: setup.fixture.fork,
+            generation: 0,
+        };
+        assert_eq!(
+            recorded(setup.coordinator.store(), empty)?,
+            (Vec::new(), Vec::new())
+        );
+
+        // A retry with the declaration repaired admits the same plan from
+        // the same staged inputs.
+        let mut retry =
+            DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
+        let receipt = admit_recording!(setup, &mut retry)?;
+        assert_eq!(retry.inner.seen, outcome.1.seen);
+        let declared = retry.declarations.get(&FIRST_RECORD_TICK).cloned();
+        assert_eq!(
+            Some(recorded(setup.coordinator.store(), receipt.generation())?),
+            declared
+        );
+    }
+    Ok(())
+}
+both_backends!(rejected_declarations_are_typed_and_commit_nothing);
+
+fn drafts_are_checked_before_the_declaration<B: RecordingBackend>() -> TestResult {
+    let mut setup = setup::<B>(&BASE)?;
+    let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(0))?;
+    stager.tamper = Some((FIRST_RECORD_TICK, root_at_the_cut));
+    let result = admit_recording!(setup, &mut stager);
+    assert_rejected(
+        &setup,
+        &(result, stager.inner),
+        &AdmissionError::StagedTickRejected(PipelineContractErrorV1::EmptyBatch),
+        1,
+    )?;
+
+    // A stager that fails to stage is the plain failure.
+    let failing = Stager {
+        drafts: None,
+        ..Stager::drafting(0)
+    };
+    let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, failing)?;
+    let result = admit_recording!(setup, &mut stager);
+    assert_rejected(
+        &setup,
+        &(result, stager.inner),
+        &AdmissionError::PluginFailure,
+        1,
+    )
+}
+both_backends!(drafts_are_checked_before_the_declaration);
+
+#[test]
+fn recording_commit_outcomes_are_resolved_like_plain_ones() -> TestResult {
+    // The commit landed with its record: the receipt is returned as if it
+    // had been reported, and the record is readable at the generation.
+    let mut landed = setup::<Rigged<LANDED_UNKNOWN>>(&BASE)?;
+    let mut stager = DeclaringStager::new(&landed.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
+    let receipt = admit_recording!(landed, &mut stager)?;
+    let generation = receipt.generation();
+    assert_eq!(generation.generation, 1);
+    assert_eq!(landed.coordinator.store().recovery_reads.get(), 1);
+    assert_eq!(
+        Some(recorded(landed.coordinator.store(), generation)?),
+        stager.declarations.get(&FIRST_RECORD_TICK).cloned()
+    );
+
+    // The commit was lost: nothing committed, the record included, and the
+    // admission may be retried.
+    let mut lost = setup::<Rigged<LOST_UNKNOWN>>(&BASE)?;
+    let mut stager = DeclaringStager::new(&lost.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
+    let result = admit_recording!(lost, &mut stager);
+    assert_rejected(
+        &lost,
+        &(result, stager.inner),
+        &AdmissionError::Store(CounterfactualStoreErrorV1::StorageFailure),
+        1,
+    )?;
+    let empty = ForkGenerationV1 {
+        fork: lost.fixture.fork,
+        generation: 0,
+    };
+    assert_eq!(
+        recorded(lost.coordinator.store(), empty)?,
+        (Vec::new(), Vec::new())
+    );
+
+    // A rejected and a conflicting commit map as on the plain path.
+    let mut failing = setup::<Rigged<COMMIT_FAILS>>(&BASE)?;
+    let mut stager = DeclaringStager::new(&failing.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
+    let result = admit_recording!(failing, &mut stager);
+    assert_rejected(
+        &failing,
+        &(result, stager.inner),
+        &AdmissionError::Store(CounterfactualStoreErrorV1::StorageFailure),
+        1,
+    )?;
+    let mut conflicting = setup::<Rigged<COMMIT_CONFLICTS>>(&BASE)?;
+    let mut stager =
+        DeclaringStager::new(&conflicting.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
+    let result = admit_recording!(conflicting, &mut stager);
+    assert_rejected(
+        &conflicting,
+        &(result, stager.inner),
+        &AdmissionError::InvalidationConflict(InvalidationConflictV1::LogicalHead),
+        1,
+    )?;
+    assert_eq!(conflicting.coordinator.store().commands.len(), 1);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Admission preflight
 // ---------------------------------------------------------------------------
 
@@ -2282,6 +2821,7 @@ fn every_error_has_a_distinct_safe_message() {
         AdmissionError::PluginFailure,
         AdmissionError::StagedTickRejected(PipelineContractErrorV1::EmptyBatch),
         AdmissionError::ReservedEventType,
+        AdmissionError::DependencyDeclarationRejected(DependencyError::BindingMismatch),
         AdmissionError::InvalidationConflict(InvalidationConflictV1::LogicalHead),
         AdmissionError::Store(CounterfactualStoreErrorV1::StorageFailure),
         AdmissionError::CommitOutcomeUnknown(CounterfactualPendingCommitV1 {
@@ -2296,7 +2836,7 @@ fn every_error_has_a_distinct_safe_message() {
         errors.iter().map(ToString::to_string).collect();
     assert_eq!(messages.len(), errors.len());
     assert!(messages.iter().all(|message| !message.is_empty()));
-    let with_source = [0, 16, 19, 21, 24];
+    let with_source = [0, 16, 19, 21, 23, 25];
     for (position, error) in errors.iter().enumerate() {
         assert_eq!(error.source().is_some(), with_source.contains(&position));
     }
