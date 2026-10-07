@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PiglorOS owner</title>
+<style>body{font:16px system-ui,sans-serif;margin:24px}</style>
+</head>
+<body>
+<p id="s">Waiting for your security key.</p>
+<script>
+(function () {
+  "use strict";
+  var T0 = performance.now();
+  var STATE = 10;
+  var EMPTY = 0, WRITING = 1, READY = 2, RELEASE_REQUESTED = 4, RELEASING = 5, FAILED = 6, RECEIVED = 7;
+  var WEBVIEW_POLL_MS = 2, WEBVIEW_LIMIT_MS = 5000, STATE_POLL_MS = 20, ABORT_WAIT_MS = 500;
+  var DEADLINE_MS = 155000, MAX_ENTRIES = 8;
+  var entries = new Map();
+  var dead = new Set();
+  var active = null;
+  var expired = false;
+  var webviewTimer = 0;
+  var stateTimer = 0;
+  var TRANSPORTS = { "usb": 0, "nfc": 1, "ble": 2, "smart-card": 3, "hybrid": 4, "internal": 5 };
+
+  function say(text) { document.getElementById("s").textContent = text; }
+
+  function Buf(buffer) {
+    this.ab = buffer;
+    this.words = new Int32Array(buffer, 0, 16);
+    this.bytes = new Uint8Array(buffer);
+    this.view = new DataView(buffer);
+    this.released = false;
+  }
+  Buf.prototype.u32 = function (offset) { return this.view.getUint32(offset, true); };
+  Buf.prototype.id = function () { return this.bytes.slice(16, 32); };
+
+  function release(buf) {
+    if (buf === undefined || buf.released) { return; }
+    buf.released = true;
+    try { window.chrome.webview.releaseBuffer(buf.ab); } catch (e) { /* already gone */ }
+  }
+
+  function releaseEntry(entry) { release(entry.request); release(entry.reply); }
+
+  function capacityFor(role, kind) {
+    if (role === 0) { return 4096; }
+    return kind === 0 ? 73728 : 8192;
+  }
+
+  function headerOk(buf, role) {
+    if (buf.bytes.length < 64) { return false; }
+    var b = buf.bytes, v = buf.view;
+    if (b[0] !== 0x50 || b[1] !== 0x57 || b[2] !== 0x42 || b[3] !== 0x31) { return false; }
+    if (v.getUint16(4, true) !== 1 || v.getUint16(6, true) !== 64) { return false; }
+    if (b[8] !== role || (b[9] !== 0 && b[9] !== 1)) { return false; }
+    if (b[10] !== 0 || b[11] !== 0 || buf.u32(12) === 0) { return false; }
+    if (buf.u32(32) !== capacityFor(role, b[9]) || buf.ab.byteLength !== buf.u32(32)) { return false; }
+    for (var i = 44; i < 64; i++) { if (b[i] !== 0) { return false; } }
+    return true;
+  }
+
+  function equalBytes(a, b) {
+    if (a.length !== b.length) { return false; }
+    for (var i = 0; i < a.length; i++) { if (a[i] !== b[i]) { return false; } }
+    return true;
+  }
+
+  function Reader(bytes) { this.u = bytes; this.i = 0; }
+  Reader.prototype.head = function () {
+    var first = this.u[this.i++], ai = first & 31, value;
+    if (ai < 24) { value = ai; }
+    else if (ai === 24) { value = this.u[this.i++]; }
+    else if (ai === 25) { value = (this.u[this.i] << 8) | this.u[this.i + 1]; this.i += 2; }
+    else { throw new Error("cbor"); }
+    return { major: first >> 5, value: value };
+  };
+  Reader.prototype.expect = function (major) {
+    var h = this.head();
+    if (h.major !== major) { throw new Error("cbor"); }
+    return h.value;
+  };
+  Reader.prototype.bstr = function (exact) {
+    var n = this.expect(2);
+    if (exact !== undefined && n !== exact) { throw new Error("cbor"); }
+    var out = this.u.slice(this.i, this.i + n);
+    if (out.length !== n) { throw new Error("cbor"); }
+    this.i += n;
+    return out;
+  };
+  Reader.prototype.tstr = function (text) {
+    var n = this.expect(3);
+    var out = this.u.slice(this.i, this.i + n);
+    this.i += n;
+    if (out.length !== n || String.fromCharCode.apply(null, out) !== text) { throw new Error("cbor"); }
+  };
+  Reader.prototype.uint = function (want) {
+    if (this.expect(0) !== want) { throw new Error("cbor"); }
+  };
+
+  function decodeRequest(buf) {
+    var len = buf.u32(36);
+    if (len < 1 || len > 4032) { throw new Error("len"); }
+    var r = new Reader(buf.bytes.subarray(64, 64 + len));
+    var kind = buf.bytes[9], out = { kind: kind };
+    if (kind === 0) {
+      if (r.expect(4) !== 11) { throw new Error("cbor"); }
+      r.bstr(4); r.uint(1);
+      out.id = r.bstr(16); out.challenge = r.bstr(32); out.userHandle = r.bstr(32);
+      r.tstr("localhost"); r.tstr("PiglorOS");
+      if (r.head().major !== 1) { throw new Error("cbor"); }
+      r.uint(0); r.uint(0);
+      out.prf = r.bstr(32);
+    } else {
+      if (r.expect(4) !== 8) { throw new Error("cbor"); }
+      r.bstr(4); r.uint(1);
+      out.id = r.bstr(16); out.challenge = r.bstr(32);
+      r.tstr("localhost");
+      out.credentialId = r.bstr();
+      r.uint(0);
+      out.prf = r.bstr(32);
+    }
+    if (r.i !== len) { throw new Error("cbor"); }
+    return out;
+  }
+
+  function Writer(bytes, start, limit) { this.u = bytes; this.i = start; this.end = start + limit; }
+  Writer.prototype.put = function (value) {
+    if (this.i >= this.end) { throw new Error("full"); }
+    this.u[this.i++] = value;
+  };
+  Writer.prototype.head = function (major, n) {
+    var m = major << 5;
+    if (n < 24) { this.put(m | n); }
+    else if (n < 256) { this.put(m | 24); this.put(n); }
+    else if (n < 65536) { this.put(m | 25); this.put(n >> 8); this.put(n & 255); }
+    else { this.put(m | 26); this.put((n >>> 24) & 255); this.put((n >> 16) & 255); this.put((n >> 8) & 255); this.put(n & 255); }
+  };
+  Writer.prototype.bstr = function (data) {
+    var bytes = new Uint8Array(data);
+    this.head(2, bytes.length);
+    for (var i = 0; i < bytes.length; i++) { this.put(bytes[i]); }
+  };
+  Writer.prototype.simple = function (value) { this.put(0xe0 | value); };
+
+  function encodeReply(a, credential) {
+    var response = credential.response, w = new Writer(a.reply.bytes, 64, a.reply.bytes.length - 64);
+    var ext = credential.getClientExtensionResults().prf || {};
+    var first = ext.results && ext.results.first;
+    w.head(4, 10);
+    w.bstr(a.kind === 0 ? [0x57, 0x41, 0x52, 0x31] : [0x57, 0x41, 0x53, 0x31]);
+    w.head(0, 1);
+    w.bstr(a.id);
+    w.bstr(credential.rawId);
+    w.bstr(response.clientDataJSON);
+    if (a.kind === 0) {
+      w.bstr(response.attestationObject);
+      var codes = [];
+      (response.getTransports ? response.getTransports() : []).forEach(function (t) {
+        if (TRANSPORTS[t] !== undefined && codes.indexOf(TRANSPORTS[t]) < 0) { codes.push(TRANSPORTS[t]); }
+      });
+      codes.sort();
+      w.head(4, codes.length);
+      codes.forEach(function (c) { w.head(0, c); });
+      w.simple(ext.enabled === true ? 21 : 20);
+      if (first) { w.bstr(first); } else { w.simple(22); }
+    } else {
+      w.bstr(response.authenticatorData);
+      w.bstr(response.signature);
+      if (response.userHandle) { w.bstr(response.userHandle); } else { w.simple(22); }
+      if (first) { w.bstr(first); } else { w.simple(22); }
+    }
+    w.simple(22);
+    return w.i - 64;
+  }
+
+  function cas(a, from, to) {
+    try { return Atomics.compareExchange(a.reply.words, STATE, from, to) === from; }
+    catch (e) { return false; }
+  }
+
+  function releaseActive() {
+    var a = active;
+    if (a === null || a.done) { return; }
+    a.done = true;
+    try {
+      a.reply.bytes.fill(0, 64);
+      Atomics.store(a.reply.words, STATE, RELEASING);
+    } catch (e) { /* buffer already detached */ }
+    release(a.reply);
+    release(a.request);
+  }
+
+  function abortThenRelease() {
+    var a = active;
+    if (a === null || a.releasing) { return; }
+    a.releasing = true;
+    if (a.pending) {
+      a.controller.abort();
+      a.abortTimer = setTimeout(function () { a.pending = false; releaseActive(); }, ABORT_WAIT_MS);
+    } else {
+      releaseActive();
+    }
+  }
+
+  function settle(a) {
+    a.pending = false;
+    if (a.releasing) { clearTimeout(a.abortTimer); }
+  }
+
+  function onResult(a, credential) {
+    settle(a);
+    if (a.releasing) { cas(a, RECEIVED, FAILED); releaseActive(); return; }
+    var length = 0;
+    try {
+      if (!cas(a, RECEIVED, WRITING)) { abortThenRelease(); return; }
+      length = encodeReply(a, credential);
+    } catch (e) {
+      if (!cas(a, WRITING, FAILED)) { abortThenRelease(); }
+      return;
+    }
+    Atomics.store(a.reply.words, 9, length);
+    if (!cas(a, WRITING, READY)) { abortThenRelease(); }
+  }
+
+  function onError(a) {
+    settle(a);
+    if (a.releasing) { cas(a, RECEIVED, FAILED); releaseActive(); return; }
+    if (!cas(a, RECEIVED, FAILED)) { abortThenRelease(); }
+  }
+
+  function startCeremony(a, req) {
+    var options, call;
+    a.controller = new AbortController();
+    if (req.kind === 0) {
+      options = {
+        publicKey: {
+          rp: { id: "localhost", name: "PiglorOS" },
+          user: { id: req.userHandle, name: "PiglorOS owner", displayName: "PiglorOS owner" },
+          challenge: req.challenge,
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+          authenticatorSelection: { authenticatorAttachment: "cross-platform", residentKey: "discouraged", requireResidentKey: false, userVerification: "required" },
+          hints: ["security-key"], timeout: 120000, attestation: "none", excludeCredentials: [],
+          extensions: { prf: { eval: { first: req.prf } } }
+        },
+        signal: a.controller.signal
+      };
+      call = navigator.credentials.create(options);
+    } else {
+      options = {
+        publicKey: {
+          challenge: req.challenge, rpId: "localhost",
+          allowCredentials: [{ type: "public-key", id: req.credentialId }],
+          userVerification: "required", hints: ["security-key"], timeout: 120000,
+          extensions: { prf: { eval: { first: req.prf } } }
+        },
+        signal: a.controller.signal
+      };
+      call = navigator.credentials.get(options);
+    }
+    a.pending = true;
+    say("Touch your security key.");
+    call.then(function (c) { onResult(a, c); }, function () { onError(a); });
+  }
+
+  function pairOk(entry) {
+    var q = entry.request, p = entry.reply;
+    if (!headerOk(q, 0) || !headerOk(p, 1)) { return false; }
+    if (q.u32(12) !== p.u32(12) || q.bytes[9] !== p.bytes[9] || !equalBytes(q.id(), p.id())) { return false; }
+    return Atomics.load(q.words, STATE) === READY && Atomics.load(p.words, STATE) === EMPTY;
+  }
+
+  function activate(generation, entry) {
+    var req;
+    try {
+      if (!pairOk(entry)) { throw new Error("pair"); }
+      req = decodeRequest(entry.request);
+      if (!equalBytes(req.id, entry.request.id())) { throw new Error("id"); }
+    } catch (e) { releaseEntry(entry); entries.delete(generation); return; }
+    var a = { generation: generation, request: entry.request, reply: entry.reply, kind: req.kind, id: req.id,
+      pending: false, releasing: false, done: false, controller: null, abortTimer: 0 };
+    if (!cas(a, EMPTY, RECEIVED)) { releaseEntry(entry); entries.delete(generation); return; }
+    active = a;
+    entries.delete(generation);
+    entries.forEach(releaseEntry);
+    entries.clear();
+    startCeremony(a, req);
+  }
+
+  function dropLowest() {
+    var lowest = null;
+    entries.forEach(function (_entry, generation) { if (lowest === null || generation < lowest) { lowest = generation; } });
+    if (lowest !== null) { releaseEntry(entries.get(lowest)); entries.delete(lowest); }
+  }
+
+  function onBuffer(event) {
+    var buf = new Buf(event.getBuffer());
+    var role = event.additionalData && event.additionalData.role === "request" ? 0
+      : (event.additionalData && event.additionalData.role === "reply" ? 1 : -1);
+    if (expired || active !== null || role < 0 || !headerOk(buf, role)) { release(buf); return; }
+    var generation = buf.u32(12);
+    if (dead.has(generation)) { release(buf); return; }
+    var entry = entries.get(generation) || {};
+    var slot = role === 0 ? "request" : "reply";
+    if (entry[slot] !== undefined) {
+      releaseEntry(entry); release(buf); entries.delete(generation); dead.add(generation); return;
+    }
+    entry[slot] = buf;
+    entries.set(generation, entry);
+    if (entries.size > MAX_ENTRIES) { dropLowest(); }
+    if (entry.request !== undefined && entry.reply !== undefined && entries.has(generation)) {
+      entries.forEach(function (other, g) {
+        if (g < generation && (other.request === undefined || other.reply === undefined)) {
+          releaseEntry(other); entries.delete(g);
+        }
+      });
+      activate(generation, entry);
+    }
+  }
+
+  function tick() {
+    if (active === null) { return; }
+    var state = -1;
+    try { state = Atomics.load(active.reply.words, STATE); } catch (e) { return; }
+    if (state === RELEASE_REQUESTED) { abortThenRelease(); }
+  }
+
+  function expire() {
+    expired = true;
+    clearInterval(webviewTimer);
+    abortThenRelease();
+    entries.forEach(releaseEntry);
+    entries.clear();
+  }
+
+  function waitForWebview() {
+    if (window.chrome && window.chrome.webview) {
+      clearInterval(webviewTimer);
+      window.chrome.webview.addEventListener("sharedbufferreceived", onBuffer);
+    } else if (performance.now() - T0 > WEBVIEW_LIMIT_MS) {
+      clearInterval(webviewTimer);
+    }
+  }
+
+  stateTimer = setInterval(tick, STATE_POLL_MS);
+  webviewTimer = setInterval(waitForWebview, WEBVIEW_POLL_MS);
+  setTimeout(expire, DEADLINE_MS);
+  waitForWebview();
+})();
+</script>
+</body>
+</html>
