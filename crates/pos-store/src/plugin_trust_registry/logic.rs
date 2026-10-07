@@ -607,24 +607,24 @@ mod tests {
 
     /// Evidence whose terminal PTR1 digest differs from the genesis one.
     fn other_root_material(env: &Env) -> TestResult<Material> {
-        Ok(env.material(
+        env.material(
             &Spec {
                 root_variant: 1,
                 ..spec(2, 2)
             },
             &TpsSpec::default(),
-        )?)
+        )
     }
 
     /// Evidence whose terminal PRV1 digest differs from the genesis one.
     fn other_revocation_material(env: &Env) -> TestResult<Material> {
-        Ok(env.material(
+        env.material(
             &Spec {
                 revocation_variant: 1,
                 ..Spec::default()
             },
             &TpsSpec::default(),
-        )?)
+        )
     }
 
     fn policy_input<'a>(env: &'a Env, material: &'a Material) -> TestResult<PolicyInputV1<'a>> {
@@ -919,7 +919,10 @@ mod tests {
             decision: None,
             active: None,
         };
-        assert_eq!(plan_provision(&empty, &env.anchor, &genesis.tps1).err(), failed);
+        assert_eq!(
+            plan_provision(&empty, &env.anchor, &genesis.tps1).err(),
+            failed
+        );
         for read in [Read::Scope, Read::NextRowSeq] {
             assert_eq!(plan_advance(&tx(read, false, None), &policy).err(), failed);
         }

@@ -253,14 +253,13 @@ impl MemoryStore {
         let scope = input.anchor.scope();
         let utc = input.utc.as_i64();
         match plan_admit(&self.plugin_trust, input, projection, activation)? {
-            AdmitPlanV1::Replay(decision) => {
-                self.plugin_trust
-                    .with_scope(scope, |state| state.raise_utc(utc))
-                    .map(|()| AdmittedPluginReleaseReceiptV1 {
-                        decision: *decision,
-                        outcome: PluginTrustCommitOutcomeV1::IdempotentReplay,
-                    })
-            }
+            AdmitPlanV1::Replay(decision) => self
+                .plugin_trust
+                .with_scope(scope, |state| state.raise_utc(utc))
+                .map(|()| AdmittedPluginReleaseReceiptV1 {
+                    decision: *decision,
+                    outcome: PluginTrustCommitOutcomeV1::IdempotentReplay,
+                }),
             AdmitPlanV1::Commit(commit) => {
                 faults.before_append.map_or(Ok(()), Err)?;
                 let event = self.append_activation_event(activation)?;
@@ -298,14 +297,13 @@ impl MemoryStore {
         let scope = input.anchor.scope();
         let utc = input.utc.as_i64();
         match plan_rollback(&self.plugin_trust, input, target, activation)? {
-            RollbackPlanV1::Replay(facts) => {
-                self.plugin_trust
-                    .with_scope(scope, |state| state.raise_utc(utc))
-                    .map(|()| PluginRollbackReceiptV1 {
-                        facts: *facts,
-                        outcome: PluginTrustCommitOutcomeV1::IdempotentReplay,
-                    })
-            }
+            RollbackPlanV1::Replay(facts) => self
+                .plugin_trust
+                .with_scope(scope, |state| state.raise_utc(utc))
+                .map(|()| PluginRollbackReceiptV1 {
+                    facts: *facts,
+                    outcome: PluginTrustCommitOutcomeV1::IdempotentReplay,
+                }),
             RollbackPlanV1::Commit(commit) => {
                 faults.before_append.map_or(Ok(()), Err)?;
                 let event = self.append_activation_event(activation)?;
