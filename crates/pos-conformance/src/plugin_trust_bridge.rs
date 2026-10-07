@@ -17,8 +17,8 @@ use pos_crypto::plugin_trust::{
 };
 use thiserror::Error;
 
-use crate::{TPS1_MAX_REVOKED_ARTIFACTS, TPS1_MAX_REVOKED_KEYS, TPS1_MAX_TRUST_ROOTS};
 use crate::TrustPolicySnapshotV1;
+use crate::{TPS1_MAX_REVOKED_ARTIFACTS, TPS1_MAX_REVOKED_KEYS, TPS1_MAX_TRUST_ROOTS};
 
 /// The only operator role ADR-103 accepts for the Plugin TPS1 signature.
 pub const PLUGIN_OPERATOR_ROLE_V1: &str = "deployment-operator";

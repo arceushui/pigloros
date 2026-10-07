@@ -191,7 +191,7 @@ fn anchor_requires_plugin_scope_literal_role_and_valid_operator_key() -> TestRes
 }
 
 #[test]
-fn root_key_ids_are_ptr1_prefixed_lowercase_hex() -> TestResult {
+fn root_key_ids_are_ptr1_prefixed_lowercase_hex() {
     let mut id = [0xab; 32];
     id[0] = 0x01;
     id[31] = 0xfe;
@@ -209,7 +209,6 @@ fn root_key_ids_are_ptr1_prefixed_lowercase_hex() -> TestResult {
     assert!(!plugin_root_key_id_v1([0xff; 32])
         .bytes()
         .any(|byte| byte.is_ascii_uppercase()));
-    Ok(())
 }
 
 const PKR1_OWNER_VECTORS: [(usize, &str); 4] = [
@@ -298,7 +297,7 @@ fn revoked_key_ids_match_independent_golden_vectors_at_cbor_width_boundaries() -
 }
 
 #[test]
-fn offline_valid_through_accepts_only_exact_real_gregorian_utc() -> TestResult {
+fn offline_valid_through_accepts_only_exact_real_gregorian_utc() {
     assert_eq!(OFFLINE_VALID_THROUGH_BYTES_V1, 20);
     for (text, seconds) in [
         ("1970-01-01T00:00:00Z", 0),
@@ -322,7 +321,6 @@ fn offline_valid_through_accepts_only_exact_real_gregorian_utc() -> TestResult {
     ] {
         assert!(parse_offline_valid_through_v1(text).is_ok(), "{text}");
     }
-    Ok(())
 }
 
 #[test]
@@ -383,7 +381,7 @@ fn global_tps1_caps_hold_exactly_at_sixty_four_and_4096() {
     assert_eq!(check_plugin_tps1_global_caps_v1(0, 4096, 4096), Ok(()));
 }
 
-fn pair(coordinate: u64, fill: u8) -> Floor {
+const fn pair(coordinate: u64, fill: u8) -> Floor {
     (coordinate, [fill; 32])
 }
 
@@ -908,7 +906,7 @@ fn sign_with(mut snapshot: TrustPolicySnapshotV1, signer: &SigningKey) -> TestRe
         .trust_roots
         .sort_by(|left, right| left.key_id.cmp(&right.key_id));
     snapshot.revoked_key_ids.sort();
-    snapshot.revoked_artifact_digests.sort();
+    snapshot.revoked_artifact_digests.sort_unstable();
     snapshot.operator_signature = signer
         .sign(&snapshot.operator_signature_message_v1()?)
         .to_bytes();
