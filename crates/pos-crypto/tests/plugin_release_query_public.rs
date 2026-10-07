@@ -12,6 +12,10 @@
 use std::collections::BTreeMap;
 
 use pos_core::OwnerIdV1;
+use pos_crypto::plugin_execution::{
+    DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
+    PluginExecutionProjectionFixtureV1, PluginExecutionProjectionV1,
+};
 use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, PluginManifestProjectionFixtureV1, PluginTrustErrorV1,
     TrustedPluginRootAnchorV1, ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
@@ -448,5 +452,85 @@ fn golden_digests_deny_the_real_but_not_a_fabricated_partial_projection() -> Tes
         assert_eq!(removed, golden_digest(hex)?);
         assert_eq!(authorize(&evidence, partial), Ok(publisher_public()));
     }
+    Ok(())
+}
+
+/// One golden capability descriptor with the generator's shared members.
+fn golden_capability(
+    operation: &str,
+    purpose: &str,
+    required: bool,
+    limits: [u64; 3],
+) -> PluginCapabilityDescriptorV1 {
+    PluginCapabilityDescriptorV1 {
+        capability_id: "kv".to_owned(),
+        operation: operation.to_owned(),
+        resource_pattern: "state/*".to_owned(),
+        purpose: purpose.to_owned(),
+        audience: "plugin".to_owned(),
+        required,
+        max_calls: limits[0],
+        max_request_bytes: limits[1],
+        max_response_bytes: limits[2],
+    }
+}
+
+/// The generator's golden ABI, capability and budget facts.
+fn golden_execution() -> Result<PluginExecutionProjectionFixtureV1, Box<dyn std::error::Error>> {
+    Ok(PluginExecutionProjectionFixtureV1 {
+        pmf1_digest: golden_digest(GOLDEN_PMF1_DIGEST_HEX)?,
+        release_digest: golden_digest(GOLDEN_RELEASE_DIGEST_HEX)?,
+        plugin_id: "alpha/plugin".to_owned(),
+        abi: PluginAbiRequirementV1 {
+            major: 0,
+            min_minor: 1,
+            max_minor: 3,
+            required_features: vec!["clock.v1".to_owned(), "log".to_owned()],
+        },
+        capabilities: vec![
+            golden_capability("read", "Read Plugin state", true, [24, 1_024, 2_048]),
+            golden_capability("write", "Write Plugin state", false, [10, 2_048, 0]),
+        ],
+        budget: DeterministicBudgetV1 {
+            memory_bytes: 1_048_576,
+            fuel: 1 << 40,
+            host_calls: 1_000,
+            event_count: 16,
+            event_bytes: 4_096,
+            state_bytes: 65_536,
+            log_calls: 24,
+            log_bytes: 2_048,
+        },
+    })
+}
+
+#[test]
+fn golden_closure_projects_exactly_the_independent_execution_facts() -> TestResult {
+    let bundle = golden_bundle()?;
+    let execution = PluginExecutionProjectionV1::from_verified_bundle(&bundle)?;
+    let golden = golden_execution()?;
+    assert_eq!(execution, PluginExecutionProjectionV1::from(golden.clone()));
+    assert_eq!(execution.pmf1_digest(), golden.pmf1_digest);
+    assert_eq!(execution.release_digest(), golden.release_digest);
+    assert_eq!(execution.plugin_id(), "alpha/plugin");
+    assert_eq!(execution.abi(), &golden.abi);
+    assert_eq!(execution.capabilities(), golden.capabilities.as_slice());
+    assert_eq!(execution.budget(), golden.budget);
+    let manifest = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
+    assert!(execution.is_bound_to(&manifest));
+    Ok(())
+}
+
+#[test]
+fn execution_binding_needs_both_the_pmf1_and_release_digests() -> TestResult {
+    let manifest = ValidatedPluginManifestProjectionV1::from(golden_fixture()?);
+    let golden = golden_execution()?;
+    assert!(PluginExecutionProjectionV1::from(golden.clone()).is_bound_to(&manifest));
+    let mut other_pmf1 = golden.clone();
+    other_pmf1.pmf1_digest[0] ^= 1;
+    assert!(!PluginExecutionProjectionV1::from(other_pmf1).is_bound_to(&manifest));
+    let mut other_release = golden;
+    other_release.release_digest[0] ^= 1;
+    assert!(!PluginExecutionProjectionV1::from(other_release).is_bound_to(&manifest));
     Ok(())
 }

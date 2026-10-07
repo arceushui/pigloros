@@ -52,7 +52,7 @@ interface contract-v1 {
   record dependency-descriptor {
     dependency-id: bounded-text,
     release-digest: digest32,
-    world: bounded-text,
+    %world: bounded-text,
     abi-major: u16,
     min-abi-minor: u16,
     max-abi-minor: u16,
@@ -73,7 +73,7 @@ interface contract-v1 {
   record plugin-descriptor {
     plugin-id: bounded-text,
     release-semver: bounded-text,
-    world: bounded-text,
+    %world: bounded-text,
     abi-major: u16,
     min-abi-minor: u16,
     max-abi-minor: u16,

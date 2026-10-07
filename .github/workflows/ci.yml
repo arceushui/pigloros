@@ -120,6 +120,7 @@ jobs:
       - pinned-dependencies
       - conformance-fixtures
       - conformance-non-linux
+      - plugin-component-fixtures
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -132,6 +133,7 @@ jobs:
           POLICY_RESULT: ${{ needs.pinned-dependencies.result }}
           FIXTURES_RESULT: ${{ needs.conformance-fixtures.result }}
           NON_LINUX_RESULT: ${{ needs.conformance-non-linux.result }}
+          PLUGIN_FIXTURES_RESULT: ${{ needs.plugin-component-fixtures.result }}
         run: |
           set -euo pipefail
           test "${SCOPE_RESULT}" = success
@@ -144,8 +146,10 @@ jobs:
           fi
           if [[ "${RUST_SCOPE}" = true ]]; then
             test "${POLICY_RESULT}" = success
+            test "${PLUGIN_FIXTURES_RESULT}" = success
           else
             test "${POLICY_RESULT}" = skipped
+            test "${PLUGIN_FIXTURES_RESULT}" = skipped
           fi
 
   fmt:
@@ -406,6 +410,30 @@ jobs:
             "${RUNNER_TEMP}/conformance-non-linux.log"
       - name: Exercise unsupported recipient export decryption boundary
         run: cargo test -p pos-store --test recipient_export_decryption_unsupported_public --locked -- --include-ignored
+
+  # ADR-061 revision 4 compatibility prototype (#539): rebuild the Rust and C
+  # guest Components from source with pinned toolchains and require the
+  # committed fixtures byte for byte.
+  plugin-component-fixtures:
+    name: plugin-component-fixtures
+    needs: ci_change_scope
+    if: ${{ needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+          targets: wasm32-unknown-unknown
+      - name: Install pinned Component guest toolchains
+        run: >
+          bash plugins/community/examples/compatibility-prototype/install-tools.sh
+          "${{ runner.temp }}/component-tools"
+      - name: Rebuild the compatibility Components and compare their bytes
+        env:
+          PROTOTYPE_TOOLS: ${{ runner.temp }}/component-tools
+        run: bash plugins/community/examples/compatibility-prototype/verify-fixtures.sh
 
   ledger-windows:
     name: ledger-windows
@@ -697,6 +725,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.97.1
+      - name: Check the Wasmtime pin and resolved feature set
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --all-features --format-version 1 \
+            | python3 scripts/check_wasmtime_feature_pin.py
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
           tool: cargo-shear
@@ -1156,6 +1189,8 @@ jobs:
         run: python scripts/owner_bridge_vectors.py --check
       - name: Check independent owner-bridge WebAuthn fixture
         run: python scripts/owner_bridge_webauthn_fixtures.py --check
+      - name: Test Wasmtime pin checker
+        run: python scripts/test_check_wasmtime_feature_pin.py
 
   modules-structure:
     name: modules-structure (reports only)

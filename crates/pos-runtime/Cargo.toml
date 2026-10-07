@@ -19,6 +19,7 @@ local-admission-host = []
 [dependencies]
 blake3 = { workspace = true }
 pos-core = { path = "../pos-core" }
+pos-crypto = { path = "../pos-crypto" }
 pos-store = { path = "../pos-store" }
 pos-state = { path = "../pos-state" }
 serde_json = { workspace = true }
@@ -36,7 +37,8 @@ pos-core = { path = "../pos-core", features = [
   "test-support",
   "counterfactual-adapter",
 ] }
-pos-crypto = { path = "../pos-crypto" }
+# Negotiation tests build execution projections without a release closure.
+pos-crypto = { path = "../pos-crypto", features = ["test-support"] }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
 

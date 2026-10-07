@@ -193,6 +193,11 @@ pub enum RuntimeError {
     #[error("invalid driver recovery evidence: {reason}")]
     InvalidRecoveryEvidence { reason: &'static str },
 
+    /// A community Plugin host failure (ADR-061), the registry's only error
+    /// channel for the closed typed host error.
+    #[error(transparent)]
+    CommunityPlugin(#[from] crate::community_plugin_host::CommunityPluginHostErrorV1),
+
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),
 
@@ -325,6 +330,18 @@ mod tests {
         };
         assert!(e.to_string().contains("Live"));
         assert!(e.to_string().contains("Replay"));
+    }
+
+    #[test]
+    fn a_community_host_error_is_carried_verbatim() {
+        use crate::community_plugin_host::CommunityPluginHostErrorV1;
+
+        let error = RuntimeError::from(CommunityPluginHostErrorV1::WorkerCrashed);
+        assert_eq!(error.to_string(), "community Plugin worker crashed");
+        assert!(matches!(
+            error,
+            RuntimeError::CommunityPlugin(CommunityPluginHostErrorV1::WorkerCrashed)
+        ));
     }
 
     #[test]

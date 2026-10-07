@@ -9,6 +9,10 @@
 
 use std::collections::BTreeMap;
 
+use pos_crypto::plugin_execution::{
+    is_valid_id_v1, DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
+    PluginExecutionProjectionV1, WASM_PAGE_BYTES_V1,
+};
 use pos_crypto::plugin_manifest::PluginManifestErrorV1;
 use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, PluginTrustErrorV1, TrustedPluginRootAnchorV1,
@@ -24,6 +28,7 @@ include!("support/pmf1_golden_vectors.rs");
 
 type BoxResult<T> = Result<T, Box<dyn std::error::Error>>;
 type Projection = Result<ValidatedPluginManifestProjectionV1, PluginManifestErrorV1>;
+type Execution = Result<PluginExecutionProjectionV1, PluginManifestErrorV1>;
 type Bundle = Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1>;
 
 const WORLD: &str = "pigloros:plugin/community-plugin@0.1.0";
@@ -189,6 +194,11 @@ impl Release {
 
     fn project(&self) -> BoxResult<Projection> {
         project_bytes(self.pmf1(), &self.members)
+    }
+
+    fn execution(&self) -> BoxResult<Execution> {
+        let bundle = closure(self.pmf1(), &self.members)??;
+        Ok(PluginExecutionProjectionV1::from_verified_bundle(&bundle))
     }
 
     fn release_digest(&self) -> BoxResult<[u8; 32]> {
@@ -1670,4 +1680,186 @@ fn independent_golden_closure_projects_and_binds_its_digests() -> TestResult {
         assert_eq!(authorized, Ok(publisher_public()));
     }
     Ok(())
+}
+
+/// The projected form of `capability_with(texts, required, limits)`.
+fn projected_capability(
+    texts: [&str; 5],
+    required: bool,
+    limits: [u64; 3],
+) -> PluginCapabilityDescriptorV1 {
+    PluginCapabilityDescriptorV1 {
+        capability_id: texts[0].to_owned(),
+        operation: texts[1].to_owned(),
+        resource_pattern: texts[2].to_owned(),
+        purpose: texts[3].to_owned(),
+        audience: texts[4].to_owned(),
+        required,
+        max_calls: limits[0],
+        max_request_bytes: limits[1],
+        max_response_bytes: limits[2],
+    }
+}
+
+/// The projected form of `budget(members)`.
+const fn projected_budget(members: [u64; 8]) -> DeterministicBudgetV1 {
+    DeterministicBudgetV1 {
+        memory_bytes: members[0],
+        fuel: members[1],
+        host_calls: members[2],
+        event_count: members[3],
+        event_bytes: members[4],
+        state_bytes: members[5],
+        log_calls: members[6],
+        log_bytes: members[7],
+    }
+}
+
+#[test]
+fn default_release_projects_its_execution_requirements() -> TestResult {
+    let release = Release::new()?;
+    let execution = release.execution()??;
+    let manifest = release.project()??;
+    assert!(execution.is_bound_to(&manifest));
+    assert_eq!(execution.pmf1_digest(), digest(&release.pmf1()));
+    assert_eq!(execution.release_digest(), release.release_digest()?);
+    assert_eq!(execution.plugin_id(), "plugin-a");
+    let abi = PluginAbiRequirementV1 {
+        major: 0,
+        min_minor: 0,
+        max_minor: 1,
+        required_features: vec!["clock".to_owned()],
+    };
+    assert_eq!(execution.abi(), &abi);
+    let texts = ["kv", "read", "state/*", "Read Plugin state", "plugin"];
+    let capability = projected_capability(texts, true, [10, 1_024, 2_048]);
+    assert_eq!(execution.capabilities(), [capability].as_slice());
+    assert_eq!(execution.budget(), projected_budget(DEFAULT_BUDGET));
+    Ok(())
+}
+
+#[test]
+fn execution_projection_keeps_every_member_at_its_extremes() -> TestResult {
+    let maxima = [
+        1 << 32,
+        u64::MAX,
+        1_000_000,
+        1_024,
+        1 << 24,
+        1 << 20,
+        64,
+        16_384,
+    ];
+    let optional = ["kv", "write", "state/*", "purpose", "plugin"];
+    let capabilities = list(vec![
+        capability_with(CAPABILITY, Value::Bool(true), [1, 2, 3]),
+        capability_with(optional, Value::Bool(false), [1_000_000, 0, 16_777_216]),
+    ]);
+    let mut release = Release::with(6, &unsigned(7))?;
+    release.fields[7] = encode(&unsigned(65_535))?;
+    release.fields[8] = encode(&list(vec![text("a"), text("b.c")]))?;
+    release.fields[14] = encode(&capabilities)?;
+    release.fields[15] = encode(&budget(maxima))?;
+    release.seal()?;
+    let execution = release.execution()??;
+    let abi = PluginAbiRequirementV1 {
+        major: 0,
+        min_minor: 7,
+        max_minor: 65_535,
+        required_features: vec!["a".to_owned(), "b.c".to_owned()],
+    };
+    assert_eq!(execution.abi(), &abi);
+    let expected = [
+        projected_capability(CAPABILITY, true, [1, 2, 3]),
+        projected_capability(optional, false, [1_000_000, 0, 16_777_216]),
+    ];
+    assert_eq!(execution.capabilities(), expected.as_slice());
+    assert_eq!(execution.budget(), projected_budget(maxima));
+    let minima = [65_536, 1, 0, 0, 0, 0, 0, 0];
+    let mut smallest = Release::sealed_with(15, &budget(minima))?;
+    smallest.fields[14] = encode(&list(Vec::new()))?;
+    smallest.fields[8] = encode(&list(Vec::new()))?;
+    smallest.seal()?;
+    let execution = smallest.execution()??;
+    assert!(execution.capabilities().is_empty());
+    assert!(execution.abi().required_features.is_empty());
+    assert_eq!(execution.budget(), projected_budget(minima));
+    Ok(())
+}
+
+#[test]
+fn execution_projection_fails_exactly_as_the_release_projection() -> TestResult {
+    let mut reversed = Release::with(6, &unsigned(2))?;
+    reversed.fields[7] = encode(&unsigned(1))?;
+    let mut unsealed = Release::new()?;
+    unsealed.fields[15] = encode(&budget([131_072, 1, 0, 0, 0, 0, 0, 0]))?;
+    let failures = [
+        (Release::with(5, &unsigned(1))?, invalid(5)),
+        (reversed, invalid(7)),
+        (
+            Release::with(15, &budget([65_537, 1, 0, 0, 0, 0, 0, 0]))?,
+            invalid(15),
+        ),
+        (Release::with(16, &list(vec![unsigned(0)]))?, invalid(16)),
+        (
+            unsealed,
+            PluginManifestErrorV1::UnsignedManifestDigestMismatch,
+        ),
+    ];
+    for (release, error) in failures {
+        assert_eq!(release.execution()?, Err(error));
+        assert_eq!(release.project()?, Err(error));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_re_signed_release_binds_only_its_own_trust_projection() -> TestResult {
+    let original = Release::new()?;
+    let mut resigned = original.clone();
+    resigned.fields[26] = encode(&signature(2))?;
+    let execution = resigned.execution()??;
+    assert_eq!(execution.release_digest(), original.release_digest()?);
+    assert!(execution.is_bound_to(&resigned.project()??));
+    assert!(!execution.is_bound_to(&original.project()??));
+    Ok(())
+}
+
+#[test]
+fn exported_bounds_and_id_grammar_are_the_codec_rules() -> TestResult {
+    let minima = DeterministicBudgetV1::MINIMA;
+    let maxima = DeterministicBudgetV1::MAXIMA;
+    assert_eq!(minima.memory_bytes, WASM_PAGE_BYTES_V1);
+    let smallest = Release::sealed_with(15, &budget(budget_members(minima)))?;
+    assert_eq!(smallest.execution()??.budget(), minima);
+    let largest = Release::sealed_with(15, &budget(budget_members(maxima)))?;
+    assert_eq!(largest.execution()??.budget(), maxima);
+    for (member, value) in budget_members(maxima).into_iter().enumerate() {
+        let mut members = budget_members(maxima);
+        members[member] = value.saturating_add(1);
+        if value < u64::MAX {
+            expect(&Release::with(15, &budget(members))?, invalid(15))?;
+        }
+    }
+    for valid in ["a", "0.x_y/z-1", &"a".repeat(128)] {
+        assert!(is_valid_id_v1(valid), "{valid}");
+    }
+    for invalid_id in ["", "A", "-a", "a b", &"a".repeat(129)] {
+        assert!(!is_valid_id_v1(invalid_id), "{invalid_id}");
+    }
+    Ok(())
+}
+
+/// The eight members of `budget` in field 15 order.
+const fn budget_members(budget: DeterministicBudgetV1) -> [u64; 8] {
+    [
+        budget.memory_bytes,
+        budget.fuel,
+        budget.host_calls,
+        budget.event_count,
+        budget.event_bytes,
+        budget.state_bytes,
+        budget.log_calls,
+        budget.log_bytes,
+    ]
 }
