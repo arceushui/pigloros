@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Fail unless Wasmtime resolves to the ADR-061 revision 4 pin and features.
 
-ADR-061 revision 4 decision 2 pins Wasmtime with an exact `=` version and
-`default-features = false`, enabling `component-model` and `cranelift` plus
-only what Cargo needs them to imply. `runtime` is the feature that lets a
-Component be instantiated and called. `cranelift` implies `std`, which in turn
+ADR-061 revision 4 decision 2, as amended by revision 5 decision 2, pins
+Wasmtime with an exact `=` version and `default-features = false`, enabling
+`component-model`, `cranelift` and `runtime` plus only what Cargo needs them
+to imply. `runtime` is the feature that lets a Component be instantiated and
+called. `cranelift` implies `std`, which in turn
 enables the implicit features of two optional dependencies, `once_cell` and
 `wasmtime-jit-icache-coherence`.
 

@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-//! Community Plugin Component host for ADR-061 revision 4.
+//! Community Plugin Component host for ADR-061 revision 4, as amended by
+//! revision 5.
 //!
 //! This is slice 1 (#539) of the #538 host: the exact Wasmtime pin, a
 //! deterministic engine configuration and a linker that provides only the
