@@ -1254,7 +1254,7 @@ mod tests {
     #[test]
     fn cmd_experiment_reproduce_reports_old_and_mixed_manifest_shapes() {
         let unsupported = pos_core::ReproManifestError::UnsupportedManifestVersion { found: None };
-        let field = "plugin_versions";
+        let field = "manifest_plugin_roster_version";
         let ambiguous = pos_core::ReproManifestError::AmbiguousLegacyManifest { field };
         let cases = [
             (old_shape_manifest(), unsupported),
@@ -1273,7 +1273,7 @@ mod tests {
     #[test]
     fn cmd_experiment_verify_reports_old_and_mixed_manifest_shapes() {
         let unsupported = pos_core::ReproManifestError::UnsupportedManifestVersion { found: None };
-        let field = "plugin_versions";
+        let field = "manifest_plugin_roster_version";
         let ambiguous = pos_core::ReproManifestError::AmbiguousLegacyManifest { field };
         let cases = [
             (old_shape_manifest(), unsupported),
