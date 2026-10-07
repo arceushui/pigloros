@@ -11,11 +11,11 @@ const MAX_EXTENSION_MAP_ENTRIES: usize = 16;
 const MAX_CBOR_NESTING: usize = 4;
 
 const FLAG_UP: u8 = 1;
-const FLAG_RESERVED_ONE: u8 = 1 << 1;
 const FLAG_UV: u8 = 1 << 2;
 const FLAG_BE: u8 = 1 << 3;
 const FLAG_BS: u8 = 1 << 4;
-const FLAG_RESERVED_TWO: u8 = 1 << 5;
+/// Authenticator-data flag bits 1 and 5 are reserved and must be zero.
+const FLAG_RESERVED_MASK: u8 = 0x22;
 const FLAG_AT: u8 = 1 << 6;
 const FLAG_ED: u8 = 1 << 7;
 
@@ -307,7 +307,7 @@ const fn check_authenticator_flags(flags: u8) -> Result<(), VerificationReason> 
         Err(VerificationReason::UserPresence)
     } else if flags & FLAG_UV == 0 {
         Err(VerificationReason::UserVerification)
-    } else if flags & (FLAG_RESERVED_ONE | FLAG_RESERVED_TWO) != 0 {
+    } else if flags & FLAG_RESERVED_MASK != 0 {
         Err(VerificationReason::Malformed)
     } else if flags & FLAG_BS != 0 && flags & FLAG_BE == 0 {
         Err(VerificationReason::BackupFlags)
@@ -617,7 +617,7 @@ impl<'a> AuthenticatorCborReader<'a> {
             if matches!(policy, MapKeyPolicy::Text) && !matches!(key, MapKey::Text(_)) {
                 return Err(self.fault);
             }
-            if duplicate_map_key_before(self.input, map_start, key_start, key, depth) {
+            if duplicate_map_key_before(self.input, map_start, key_start, key) {
                 return Err(self.fault);
             }
             self.validate_value(depth + 1)?;
@@ -681,7 +681,6 @@ fn duplicate_map_key_before<'a>(
     map_start: usize,
     current_key_start: usize,
     key: MapKey<'a>,
-    depth: usize,
 ) -> bool {
     let mut reader = AuthenticatorCborReader::new(input, VerificationReason::Malformed);
     reader.offset = map_start;
@@ -695,7 +694,7 @@ fn duplicate_map_key_before<'a>(
         if prior_key.equals(key) {
             return true;
         }
-        reader.validate_value(depth + 1).unwrap_or(());
+        reader.validate_value(0).unwrap_or(());
     }
 }
 

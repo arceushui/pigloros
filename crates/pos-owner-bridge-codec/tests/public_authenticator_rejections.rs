@@ -232,6 +232,83 @@ fn public_attestation_parser_defers_to_the_key_shape_when_no_algorithm_is_found(
 }
 
 #[test]
+fn public_attestation_parser_rejects_every_duplicated_envelope_member(
+) -> Result<(), OwnerBridgeCodecError> {
+    let data = create_authenticator_data(&cose_key());
+    let mut authenticator_member = b"\x68authData\x58".to_vec();
+    let length = u8::try_from(data.len()).map_err(|_| OwnerBridgeCodecError::BoundsExceeded)?;
+    authenticator_member.push(length);
+    authenticator_member.extend_from_slice(&data);
+    let format = b"\x63fmt\x64none".as_slice();
+    let statement = b"\x67attStmt\xa0".as_slice();
+    let authenticator = authenticator_member.as_slice();
+    for members in [
+        [format, format, authenticator],
+        [format, statement, statement],
+        [authenticator, authenticator, format],
+    ] {
+        let object = [b"\xa3".as_slice(), &members.concat()].concat();
+        assert_eq!(
+            parse_none_attestation_object(&object, &CREDENTIAL_ID),
+            Err(Reason::AttestationFormat)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn public_cose_members_reject_duplicates() -> Result<(), OwnerBridgeCodecError> {
+    let key = cose_key();
+    let (kty, algorithm, curve) = (&key[1..3], &key[3..5], &key[5..7]);
+    let (x_member, y_member) = (&key[7..42], &key[42..]);
+    for members in [
+        [kty, kty, algorithm, curve, x_member],
+        [kty, algorithm, curve, curve, x_member],
+        [kty, algorithm, curve, x_member, x_member],
+        [kty, algorithm, curve, y_member, y_member],
+    ] {
+        let duplicated = [b"\xa5".as_slice(), &members.concat()].concat();
+        assert_cose_reason(&duplicated, Reason::CoseKey)?;
+    }
+    let mut unsigned_algorithm = key;
+    unsigned_algorithm[4] = 0x05;
+    assert_cose_reason(&unsigned_algorithm, Reason::Algorithm)
+}
+
+#[test]
+fn public_parsers_accept_the_exact_limits() -> Result<(), OwnerBridgeCodecError> {
+    let mut sixteen_entries = Vec::from([0xb0]);
+    for name in b'a'..=b'p' {
+        sixteen_entries.extend([0x61, name, 0xf5]);
+    }
+    let mut largest = Vec::from([0xa1, 0x61, b'a', 0x59, 0x03, 0xd5]);
+    largest.extend(core::iter::repeat_n(0, 981));
+    let accepted = [
+        sixteen_entries,
+        b"\xa1\x61a\x81\x81\x81\xf5".to_vec(),
+        b"\xa1\x61a\xa1\x61b\xa1\x61c\xa1\x61d\xf5".to_vec(),
+        largest,
+    ];
+    for extension in &accepted {
+        let data = assertion_authenticator_data(0x85, extension);
+        assert_eq!(parse_assertion_authenticator_data(&data)?.sign_count(), 9);
+    }
+    assert_eq!(assertion_authenticator_data(0x85, &accepted[3]).len(), 1_024);
+    assert_assertion_data_reason(
+        &assertion_authenticator_data(0x85, b"\xa1\x61x\xf7"),
+        Reason::Extensions,
+    );
+
+    let mut backed_up = create_authenticator_data(&cose_key());
+    backed_up[32] = 0x5d;
+    let attestation = none_attestation_object(&backed_up)?;
+    let parsed = parse_none_attestation_object(&attestation, &CREDENTIAL_ID)?;
+    assert!(parsed.backup_eligible());
+    assert!(parsed.backup_state());
+    Ok(())
+}
+
+#[test]
 fn public_durable_binding_rejects_a_non_curve_attestation_key() -> Result<(), OwnerBridgeCodecError>
 {
     let mut authenticator_data = create_authenticator_data(&cose_key());

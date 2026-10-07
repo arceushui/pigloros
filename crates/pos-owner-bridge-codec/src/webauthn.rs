@@ -10,8 +10,8 @@ use crate::{
 
 const MIN_CREDENTIAL_ID_BYTES: usize = 1;
 const MAX_CREDENTIAL_ID_BYTES: usize = 1_024;
-const MAX_AUTHENTICATOR_DATA_BYTES: usize = 1_024;
-const SIGNED_MESSAGE_BYTES: usize = MAX_AUTHENTICATOR_DATA_BYTES + 32;
+/// The 1,024-byte authenticator-data bound plus the 32-byte client-data digest.
+const SIGNED_MESSAGE_BYTES: usize = 1_056;
 
 /// Host-owned invariants for verifying a Create reply.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

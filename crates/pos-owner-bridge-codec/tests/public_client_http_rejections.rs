@@ -460,3 +460,52 @@ fn public_http_admission_preserves_the_fixed_document_and_not_found_split() {
         Err(Reason::ClientDataType)
     );
 }
+
+const MEMBER_PREFIX: &str = r#"{"type":"webauthn.create","challenge":"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8","origin":"http://localhost:49291""#;
+
+#[test]
+fn public_client_data_enforces_the_exact_size_limit() {
+    let mut padded = CREATE_CLIENT_DATA.to_vec();
+    padded.resize(4_096, b' ');
+    assert_eq!(
+        validate_client_data_json(&padded, CeremonyKind::Create, &CHALLENGE),
+        Ok(())
+    );
+    padded.push(b' ');
+    assert_eq!(
+        validate_client_data_json(&padded, CeremonyKind::Create, &CHALLENGE),
+        Err(Reason::Malformed)
+    );
+}
+
+#[test]
+fn public_client_data_unescapes_keys_to_the_scalars_they_name() {
+    let equal_pairs = [
+        (r"\b", r"\u0008"),
+        (r"\f", r"\u000c"),
+        (r"\n", r"\u000a"),
+        (r"\r", r"\u000d"),
+        (r"\t", r"\u0009"),
+        (r"\uD83D\uDE00", "\u{1F600}"),
+        (r"\u00af", r"\u00AF"),
+        (r"\u00af", "\u{af}"),
+        (r"\u00AF", "\u{af}"),
+    ];
+    for (escaped, other) in equal_pairs {
+        let input = format!(r#"{MEMBER_PREFIX},"{escaped}":true,"{other}":true}}"#);
+        assert_eq!(
+            validate_client_data_json(input.as_bytes(), CeremonyKind::Create, &CHALLENGE),
+            Err(Reason::Malformed),
+            "{escaped}"
+        );
+    }
+    let distinct_keys = [r"\uD83D\uDE00", r"\u00af", r"\u00AF", r"\u0aF0", r"\n"];
+    for key in distinct_keys {
+        let input = format!(r#"{MEMBER_PREFIX},"{key}":true}}"#);
+        assert_eq!(
+            validate_client_data_json(input.as_bytes(), CeremonyKind::Create, &CHALLENGE),
+            Ok(()),
+            "{key}"
+        );
+    }
+}

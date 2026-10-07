@@ -392,6 +392,14 @@ fn public_verifier_rejects_bad_reply_subcomponents() -> Result<(), OwnerBridgeCo
     )?;
     assert_invalid_assertion(&malformed_assertion, credential, Reason::RpIdHash);
 
+    Ok(())
+}
+
+#[test]
+fn public_verifier_rejects_an_off_curve_stored_key() -> Result<(), OwnerBridgeCodecError> {
+    let assertion_data = assertion_authenticator_data(0x05, 1);
+    let mut signature = [0; 80];
+    let signature_length = sign_assertion(&assertion_data, GET_CLIENT_DATA, &mut signature)?;
     let mut invalid_point_key = cose_key();
     invalid_point_key[10..42].fill(0);
     let invalid_point_authenticator_data = create_authenticator_data(invalid_point_key);
@@ -416,6 +424,58 @@ fn public_verifier_rejects_bad_reply_subcomponents() -> Result<(), OwnerBridgeCo
         PRF_RESULT,
     )?;
     assert_invalid_assertion(&valid_assertion, invalid_point_credential, Reason::CoseKey);
+    Ok(())
+}
+
+#[test]
+fn public_verifier_reports_backup_flags_and_counter() -> Result<(), OwnerBridgeCodecError> {
+    let mut authenticator_data = create_authenticator_data(cose_key());
+    authenticator_data[32] = 0x5d;
+    authenticator_data[33..37].copy_from_slice(&7_u32.to_be_bytes());
+    let attestation_object = none_attestation_object(&authenticator_data);
+    let reply = AttestationReplyV1::new(
+        CEREMONY_ID,
+        &CREDENTIAL_ID,
+        CREATE_CLIENT_DATA,
+        &attestation_object,
+        TransportCodes::new(&[0])?,
+        true,
+        None,
+    )?;
+    let registration = verify_attestation_reply(
+        &reply,
+        CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
+    )?;
+    assert!(registration.backup_eligible());
+    assert!(registration.backup_state());
+    assert_eq!(registration.sign_count(), 7);
+
+    let credential = StoredCredential::new(
+        &CREDENTIAL_ID,
+        USER_HANDLE,
+        registration.public_key(),
+        true,
+        true,
+        7,
+    )?;
+    let assertion_data = assertion_authenticator_data(0x1d, 8);
+    let mut signature = [0; 80];
+    let length = sign_assertion(&assertion_data, GET_CLIENT_DATA, &mut signature)?;
+    let assertion_reply = AssertionReplyV1::new(
+        CEREMONY_ID,
+        &CREDENTIAL_ID,
+        GET_CLIENT_DATA,
+        &assertion_data,
+        &signature[..length],
+        None,
+        PRF_RESULT,
+    )?;
+    let assertion = verify_assertion_reply(
+        &assertion_reply,
+        AssertionVerificationContext::new(CEREMONY_ID, CHALLENGE, credential),
+    )?;
+    assert!(assertion.backup_state());
+    assert_eq!(assertion.sign_count(), 8);
     Ok(())
 }
 

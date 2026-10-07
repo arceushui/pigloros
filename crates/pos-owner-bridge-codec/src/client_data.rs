@@ -131,8 +131,8 @@ fn validate_text_client_data_member(
     fault: VerificationReason,
 ) -> Result<(), VerificationReason> {
     match value {
-        JsonValue::String(text) if text.equals_text(expected) => Ok(()),
-        _ => Err(fault),
+        JsonValue::String(text) => text.equals_text(expected).then_some(()).ok_or(fault),
+        JsonValue::Boolean(_) => Err(fault),
     }
 }
 
@@ -246,10 +246,9 @@ impl JsonString<'_> {
         // `JsonString`, so an escape byte always follows the slash.
         let escape = raw.get(*offset).copied().unwrap_or_default();
         *offset += 1;
+        // `"`, `\\` and `/` unescape to themselves, so only the control
+        // escapes and `\u` need their own arms.
         let scalar = match escape {
-            b'"' => u32::from(b'"'),
-            b'\\' => u32::from(b'\\'),
-            b'/' => u32::from(b'/'),
             b'b' => u32::from(8_u8),
             b'f' => u32::from(12_u8),
             b'n' => u32::from(b'\n'),
@@ -297,7 +296,7 @@ impl JsonString<'_> {
                 b'A'..=b'F' => digit - b'A' + 10,
                 _ => return Err(VerificationReason::Malformed),
             };
-            value = (value << 4) | u16::from(nibble);
+            value = value * 16 + u16::from(nibble);
         }
         *offset = end;
         Ok(value)
