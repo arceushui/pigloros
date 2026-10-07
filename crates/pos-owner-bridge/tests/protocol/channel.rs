@@ -185,7 +185,11 @@ fn the_endpoint_can_poll_without_blocking_and_notices_a_missing_owner() {
         let polled = matches!(request, Some(SurfaceRequest::PollQuarantine));
         let delivered = endpoint.reply_poll(None);
         let end = endpoint.recv();
-        (polled, delivered, end.is_none(), endpoint.reply_poll(None))
+        // The owner drops its request sender before its reply receiver, so one reply may still
+        // be buffered; the second one cannot be, and fails once the receiver is gone.
+        let buffered = endpoint.reply_poll(None);
+        let delivered_last = endpoint.reply_poll(None);
+        (polled, delivered, end.is_none(), buffered && delivered_last)
     });
     assert!(host.poll_quarantine().is_none());
     drop(host);
