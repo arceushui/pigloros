@@ -2209,7 +2209,7 @@ fn encoder_rejects_every_invalid_draft_field_like_the_decoder() -> TestResult {
         |draft| {
             draft
                 .event_schemas
-                .push(schema_input(1, 1, STATE_SCHEMA, 1))
+                .push(schema_input(1, 1, STATE_SCHEMA, 1));
         },
         invalid(11),
     )?;
@@ -2245,7 +2245,7 @@ fn encoder_rejects_every_invalid_draft_field_like_the_decoder() -> TestResult {
         |draft| {
             draft
                 .capabilities
-                .insert(0, capability_input("kv", "write"))
+                .insert(0, capability_input("kv", "write"));
         },
         invalid(14),
     )?;
@@ -2269,6 +2269,11 @@ fn encoder_rejects_every_invalid_draft_field_like_the_decoder() -> TestResult {
         |draft| draft.capabilities[0].max_response_bytes = 16_777_217,
         invalid(14),
     )?;
+    Ok(())
+}
+
+#[test]
+fn encoder_rejects_invalid_budget_dependency_licence_and_interval_like_the_decoder() -> TestResult {
     rejected(|draft| draft.budget.memory_bytes = 65_535, invalid(15))?;
     rejected(|draft| draft.budget.memory_bytes = 65_537, invalid(15))?;
     rejected(|draft| draft.budget.fuel = 0, invalid(15))?;
