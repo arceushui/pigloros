@@ -263,7 +263,8 @@ impl UnsignedPluginReleaseV1 {
     ) -> Result<Vec<u8>, PluginManifestErrorV1> {
         let mut out = Out(Vec::with_capacity(self.unsigned.len() + 140));
         out.array(COMPLETE_FIELDS);
-        out.0.extend_from_slice(&self.unsigned[UNSIGNED_HEAD.len()..]);
+        out.0
+            .extend_from_slice(&self.unsigned[UNSIGNED_HEAD.len()..]);
         out.bytes(&self.manifest_digest);
         out.array(4);
         out.unsigned(ALGORITHM_ED25519);
@@ -442,7 +443,10 @@ mod tests {
             (65_536, &[0x1a, 0x00, 0x01, 0x00, 0x00]),
             (4_294_967_295, &[0x1a, 0xff, 0xff, 0xff, 0xff]),
             (4_294_967_296, &[0x1b, 0, 0, 0, 1, 0, 0, 0, 0]),
-            (u64::MAX, &[0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+            (
+                u64::MAX,
+                &[0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            ),
             (1_000_000, &[0x1a, 0x00, 0x0f, 0x42, 0x40]),
         ];
         for (value, expected) in cases {
@@ -454,12 +458,18 @@ mod tests {
     fn signed_integers_use_major_one_for_negative_values() {
         let cases: [(i64, &[u8]); 7] = [
             (0, &[0x00]),
-            (i64::MAX, &[0x1b, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+            (
+                i64::MAX,
+                &[0x1b, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            ),
             (-1, &[0x20]),
             (-24, &[0x37]),
             (-25, &[0x38, 0x18]),
             (-100, &[0x38, 0x63]),
-            (i64::MIN, &[0x3b, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+            (
+                i64::MIN,
+                &[0x3b, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            ),
         ];
         for (value, expected) in cases {
             assert_eq!(encoded(|out| out.signed(value)), expected, "{value}");
@@ -468,11 +478,14 @@ mod tests {
 
     #[test]
     fn text_bytes_booleans_and_null_use_their_major_types() {
-        assert_eq!(encoded(|out| out.text("PMF1")), [0x64, 0x50, 0x4d, 0x46, 0x31]);
+        assert_eq!(
+            encoded(|out| out.text("PMF1")),
+            [0x64, 0x50, 0x4d, 0x46, 0x31]
+        );
         assert_eq!(encoded(|out| out.bytes(&[1, 2])), [0x42, 1, 2]);
         assert_eq!(encoded(|out| out.boolean(true)), [0xf5]);
         assert_eq!(encoded(|out| out.boolean(false)), [0xf4]);
-        assert_eq!(encoded(|out| out.null()), [0xf6]);
+        assert_eq!(encoded(Out::null), [0xf6]);
         assert_eq!(encoded(|out| out.array(25)), UNSIGNED_HEAD);
         assert_eq!(encoded(|out| out.array(COMPLETE_FIELDS)), [0x98, 0x1c]);
         assert_eq!(encoded(|out| out.optional_digest(None)), [0xf6]);

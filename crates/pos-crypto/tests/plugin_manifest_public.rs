@@ -2050,7 +2050,16 @@ fn encoder_matches_the_independent_builder_at_every_cbor_width() -> TestResult {
         budget_members(DeterministicBudgetV1::MINIMA),
         budget_members(DeterministicBudgetV1::MAXIMA),
         [65_536, 256, 65_535, 255, 65_536, 65_535, 23, 24],
-        [4_294_967_296, 4_294_967_295, 1_000_000, 1_024, 16_777_216, 1_048_576, 64, 16_384],
+        [
+            4_294_967_296,
+            4_294_967_295,
+            1_000_000,
+            1_024,
+            16_777_216,
+            1_048_576,
+            64,
+            16_384,
+        ],
     ] {
         let mut draft = default_draft()?;
         draft.budget = budget_struct(members);
@@ -2148,7 +2157,10 @@ fn encoded_release_decodes_projects_and_binds_the_draft() -> TestResult {
     assert_eq!(execution.budget(), draft.budget);
     assert_eq!(execution.capabilities(), draft.capabilities.as_slice());
     assert_eq!(execution.pmf1_digest(), digest(&pmf1));
-    assert_eq!(execution.release_digest(), draft.unsigned()?.release_digest());
+    assert_eq!(
+        execution.release_digest(),
+        draft.unsigned()?.release_digest()
+    );
     Ok(())
 }
 
@@ -2173,8 +2185,14 @@ fn encoder_rejects_every_invalid_draft_field_like_the_decoder() -> TestResult {
     rejected(|draft| draft.plugin_id = "Bad".to_owned(), invalid(2))?;
     rejected(|draft| draft.plugin_id = String::new(), invalid(2))?;
     rejected(|draft| draft.release_version = "1.0".to_owned(), invalid(3))?;
-    rejected(|draft| draft.release_version = "01.0.0".to_owned(), invalid(3))?;
-    rejected(|draft| draft.release_version = "1.0.0+build".to_owned(), invalid(3))?;
+    rejected(
+        |draft| draft.release_version = "01.0.0".to_owned(),
+        invalid(3),
+    )?;
+    rejected(
+        |draft| draft.release_version = "1.0.0+build".to_owned(),
+        invalid(3),
+    )?;
     rejected(|draft| draft.abi.major = 1, invalid(5))?;
     rejected(|draft| draft.abi.min_minor = 2, invalid(7))?;
     rejected(
@@ -2183,12 +2201,34 @@ fn encoder_rejects_every_invalid_draft_field_like_the_decoder() -> TestResult {
     )?;
     rejected(|draft| draft.component = input(b""), invalid(9))?;
     rejected(|draft| draft.wit = input(b""), invalid(10))?;
-    rejected(|draft| draft.event_schemas = vec![schema_input(1, 0, EVENT_SCHEMA, 1)], invalid(11))?;
-    rejected(|draft| draft.event_schemas.push(schema_input(1, 1, STATE_SCHEMA, 1)), invalid(11))?;
-    rejected(|draft| draft.state_schema = schema_input(1, 1, STATE_SCHEMA, 1), invalid(12))?;
-    rejected(|draft| draft.state_schema = schema_input(2, 1, EVENT_SCHEMA, 1), invalid(12))?;
-    rejected(|draft| draft.state_schema = schema_input(2, 0, STATE_SCHEMA, 1), invalid(12))?;
-    rejected(|draft| draft.state_schema = schema_input(2, 1, STATE_SCHEMA, 0), invalid(12))?;
+    rejected(
+        |draft| draft.event_schemas = vec![schema_input(1, 0, EVENT_SCHEMA, 1)],
+        invalid(11),
+    )?;
+    rejected(
+        |draft| {
+            draft
+                .event_schemas
+                .push(schema_input(1, 1, STATE_SCHEMA, 1))
+        },
+        invalid(11),
+    )?;
+    rejected(
+        |draft| draft.state_schema = schema_input(1, 1, STATE_SCHEMA, 1),
+        invalid(12),
+    )?;
+    rejected(
+        |draft| draft.state_schema = schema_input(2, 1, EVENT_SCHEMA, 1),
+        invalid(12),
+    )?;
+    rejected(
+        |draft| draft.state_schema = schema_input(2, 0, STATE_SCHEMA, 1),
+        invalid(12),
+    )?;
+    rejected(
+        |draft| draft.state_schema = schema_input(2, 1, STATE_SCHEMA, 0),
+        invalid(12),
+    )?;
     rejected(
         |draft| draft.state_schema = schema_input(2, 1, STATE_SCHEMA, 1_048_577),
         invalid(12),
@@ -2201,21 +2241,49 @@ fn encoder_rejects_every_invalid_draft_field_like_the_decoder() -> TestResult {
         |draft| draft.configuration_schema = Some(schema_input(3, 1, STATE_SCHEMA, 1)),
         invalid(13),
     )?;
-    rejected(|draft| draft.capabilities.insert(0, capability_input("kv", "write")), invalid(14))?;
-    rejected(|draft| draft.capabilities[0].capability_id = "KV".to_owned(), invalid(14))?;
-    rejected(|draft| draft.capabilities[0].resource_pattern = String::new(), invalid(14))?;
-    rejected(|draft| draft.capabilities[0].max_calls = 1_000_001, invalid(14))?;
-    rejected(|draft| draft.capabilities[0].max_request_bytes = 16_777_217, invalid(14))?;
-    rejected(|draft| draft.capabilities[0].max_response_bytes = 16_777_217, invalid(14))?;
+    rejected(
+        |draft| {
+            draft
+                .capabilities
+                .insert(0, capability_input("kv", "write"))
+        },
+        invalid(14),
+    )?;
+    rejected(
+        |draft| draft.capabilities[0].capability_id = "KV".to_owned(),
+        invalid(14),
+    )?;
+    rejected(
+        |draft| draft.capabilities[0].resource_pattern = String::new(),
+        invalid(14),
+    )?;
+    rejected(
+        |draft| draft.capabilities[0].max_calls = 1_000_001,
+        invalid(14),
+    )?;
+    rejected(
+        |draft| draft.capabilities[0].max_request_bytes = 16_777_217,
+        invalid(14),
+    )?;
+    rejected(
+        |draft| draft.capabilities[0].max_response_bytes = 16_777_217,
+        invalid(14),
+    )?;
     rejected(|draft| draft.budget.memory_bytes = 65_535, invalid(15))?;
     rejected(|draft| draft.budget.memory_bytes = 65_537, invalid(15))?;
     rejected(|draft| draft.budget.fuel = 0, invalid(15))?;
     rejected(|draft| draft.budget.state_bytes = 1_048_577, invalid(15))?;
-    rejected(|draft| draft.dependencies.insert(0, dependency_input("e")), invalid(17))?;
+    rejected(
+        |draft| draft.dependencies.insert(0, dependency_input("e")),
+        invalid(17),
+    )?;
     rejected(|draft| draft.dependencies[0].class = 5, invalid(17))?;
     rejected(|draft| draft.dependencies[0].min_minor = 1, invalid(17))?;
     rejected(|draft| draft.licences = Vec::new(), invalid(20))?;
-    rejected(|draft| draft.licences.push(input(LICENCE_BYTES)), invalid(20))?;
+    rejected(
+        |draft| draft.licences.push(input(LICENCE_BYTES)),
+        invalid(20),
+    )?;
     rejected(|draft| draft.not_after = 40, invalid(23))?;
     rejected(|draft| draft.not_after = 31_622_441, invalid(23))?;
     Ok(())
@@ -2238,9 +2306,7 @@ fn encoder_accepts_each_boundary_value_beside_its_rejected_neighbour() -> TestRe
     accepted_draft(|draft| draft.abi.max_minor = 65_535)?;
     accepted_draft(|draft| draft.abi.required_features = Vec::new())?;
     accepted_draft(|draft| draft.owner = OwnerIdV1::from_static("o"))?;
-    let epoch_zero = default_draft()?
-        .unsigned()?
-        .with_signature(0, [0x5a; 64]);
+    let epoch_zero = default_draft()?.unsigned()?.with_signature(0, [0x5a; 64]);
     assert_eq!(epoch_zero, Err(invalid(26)));
     Ok(())
 }
@@ -2279,7 +2345,10 @@ fn encoder_bounds_collections_texts_and_artifact_sizes_exactly() -> TestResult {
         .map(|index| format!("licence {index}").into_bytes())
         .collect::<Vec<_>>();
     let mut draft = default_draft()?;
-    draft.licences = licences[..32].iter().map(|licence| input(licence)).collect();
+    draft.licences = licences[..32]
+        .iter()
+        .map(|licence| input(licence))
+        .collect();
     assert!(draft.unsigned().is_ok());
     draft.licences = licences.iter().map(|licence| input(licence)).collect();
     assert_eq!(draft.unsigned().err(), Some(bound(20)));
@@ -2420,11 +2489,7 @@ fn the_golden_signature_is_the_adr_065_message_signed_by_the_golden_key() -> Tes
 }
 
 /// Evidence granting `plugin` to `publisher` under exactly `epoch` and `key`.
-fn trust_for(
-    plugin: &str,
-    epoch: u64,
-    key: [u8; 32],
-) -> BoxResult<VerifiedPluginTrustEvidenceV1> {
+fn trust_for(plugin: &str, epoch: u64, key: [u8; 32]) -> BoxResult<VerifiedPluginTrustEvidenceV1> {
     let publishers = vec![publisher_entry("publisher", epoch, key)];
     let fields = root_fields(1, None, publishers, vec![grant(plugin, "publisher")]);
     let ptr1 = signed_record(fields, ROOT_SIGNATURE_DOMAIN, &signer())?;
@@ -2447,8 +2512,14 @@ fn the_golden_release_signature_verifies_under_its_resolved_key() -> TestResult 
     let evidence = trust_for("alpha/plugin", GOLDEN_SIGNER_EPOCH, publisher_public())?;
     let fact = authorization(&bundle, &evidence)?;
     let verified = verify_plugin_release_signature_v1(&bundle, &fact)?;
-    assert_eq!(verified.pmf1_digest(), golden_digest(GOLDEN_PMF1_DIGEST_HEX)?);
-    assert_eq!(verified.release_digest(), golden_digest(GOLDEN_RELEASE_DIGEST_HEX)?);
+    assert_eq!(
+        verified.pmf1_digest(),
+        golden_digest(GOLDEN_PMF1_DIGEST_HEX)?
+    );
+    assert_eq!(
+        verified.release_digest(),
+        golden_digest(GOLDEN_RELEASE_DIGEST_HEX)?
+    );
     assert_eq!(verified.owner(), owner(GOLDEN_SIGNER_OWNER)?);
     assert_eq!(verified.epoch(), GOLDEN_SIGNER_EPOCH);
     assert_eq!(verified.public_key(), publisher_public());
@@ -2580,7 +2651,7 @@ fn any_change_to_the_signed_message_fails_verification() -> TestResult {
     without_length.extend_from_slice(&payload);
     let full = role_message("publisher", 3, 1, &payload)?;
     let without_domain = full["pigloros/role-signature/v1".len()..].to_vec();
-    let mut flipped_domain = full.clone();
+    let mut flipped_domain = full;
     flipped_domain[0] ^= 1;
     let messages = [
         role_message("other", 3, 1, &payload)?,
@@ -2604,7 +2675,11 @@ fn any_change_to_the_signed_message_fails_verification() -> TestResult {
     ];
     for (index, message) in messages.iter().enumerate() {
         let release = base.signed_as(1, &ed25519(8, message))?;
-        assert_eq!(verify_own(&release, &evidence)?, INVALID_SIGNATURE, "message {index}");
+        assert_eq!(
+            verify_own(&release, &evidence)?,
+            INVALID_SIGNATURE,
+            "message {index}"
+        );
     }
     let control = role_message("publisher", 3, 1, &payload)?;
     let honest = base.signed_as(1, &ed25519(8, &control))?;
@@ -2650,7 +2725,11 @@ fn every_flipped_signature_bit_and_degenerate_signature_fails() -> TestResult {
             let mut tampered = signature;
             tampered[index] ^= bit;
             let release = base.signed_as(1, &tampered)?;
-            assert_eq!(verify_own(&release, &evidence)?, INVALID_SIGNATURE, "{index}/{bit}");
+            assert_eq!(
+                verify_own(&release, &evidence)?,
+                INVALID_SIGNATURE,
+                "{index}/{bit}"
+            );
         }
     }
     for degenerate in [[0; 64], [0xff; 64], [0x5a; 64]] {
@@ -2682,19 +2761,42 @@ fn a_bundle_that_fails_decoding_yields_the_decoder_error_not_a_verdict() -> Test
     let evidence = trust_for("plugin-a", 1, publisher_public())?;
     let wrong_shape = |value: Value| -> BoxResult<Release> { Release::with(26, &value) };
     let descriptor = |algorithm: u64, role: u64, epoch: u64, signature: Value| {
-        list(vec![unsigned(algorithm), unsigned(role), unsigned(epoch), signature])
+        list(vec![
+            unsigned(algorithm),
+            unsigned(role),
+            unsigned(epoch),
+            signature,
+        ])
     };
     let unsigned_mismatch = PluginManifestErrorV1::UnsignedManifestDigestMismatch;
     let mut cases = vec![
         (Release::with(2, &text("plugin-a2"))?, unsigned_mismatch),
-        (Release::with(1, &unsigned(2))?, PluginManifestErrorV1::UnsupportedVersion),
+        (
+            Release::with(1, &unsigned(2))?,
+            PluginManifestErrorV1::UnsupportedVersion,
+        ),
         (wrong_shape(Value::Null)?, encoding(26)),
-        (wrong_shape(descriptor(1, 3, 1, Value::Bytes(vec![0; 63])))?, encoding(26)),
-        (wrong_shape(descriptor(1, 3, 1, Value::Bytes(vec![0; 65])))?, encoding(26)),
+        (
+            wrong_shape(descriptor(1, 3, 1, Value::Bytes(vec![0; 63])))?,
+            encoding(26),
+        ),
+        (
+            wrong_shape(descriptor(1, 3, 1, Value::Bytes(vec![0; 65])))?,
+            encoding(26),
+        ),
         (wrong_shape(descriptor(1, 3, 1, Value::Null))?, encoding(26)),
-        (wrong_shape(descriptor(2, 3, 1, Value::Bytes(vec![0; 64])))?, invalid(26)),
-        (wrong_shape(descriptor(1, 2, 1, Value::Bytes(vec![0; 64])))?, invalid(26)),
-        (wrong_shape(descriptor(1, 3, 0, Value::Bytes(vec![0; 64])))?, invalid(26)),
+        (
+            wrong_shape(descriptor(2, 3, 1, Value::Bytes(vec![0; 64])))?,
+            invalid(26),
+        ),
+        (
+            wrong_shape(descriptor(1, 2, 1, Value::Bytes(vec![0; 64])))?,
+            invalid(26),
+        ),
+        (
+            wrong_shape(descriptor(1, 3, 0, Value::Bytes(vec![0; 64])))?,
+            invalid(26),
+        ),
     ];
     let mut digest_changed = base.clone();
     digest_changed.fields[27] = encode(&bytes([0; 32]))?;
