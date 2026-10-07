@@ -2077,7 +2077,7 @@ fn completed_run_wraps_the_host_reproduction_recipe() {
         manifest.recipe.configuration,
         serde_json::json!({"provider": "fixture-local"})
     );
-    assert_eq!(manifest.manifest.timeline_id, timeline_id);
+    assert_eq!(manifest.manifest.timeline_id(), timeline_id);
 }
 
 #[test]

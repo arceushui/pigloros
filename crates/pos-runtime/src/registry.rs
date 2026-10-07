@@ -65,6 +65,8 @@ mod adapter;
 mod authorized_pass;
 mod catalogue;
 mod human_admission;
+mod local_seal;
+mod manifest_roster;
 mod profile_composition;
 mod scheduled_admission;
 mod staged_catalogue;
@@ -81,6 +83,7 @@ pub use catalogue::{
 pub use human_admission::{
     HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
 };
+pub use manifest_roster::ManifestRosterBuildErrorV1;
 pub use profile_composition::{ScheduledDriverBindingV1, ScheduledProfileErrorV1};
 pub use scheduled_admission::ScheduledPassAdmissionV1;
 #[cfg(any(test, feature = "test-support"))]
@@ -131,94 +134,10 @@ pub fn recover_local_cut_owner_retry_v1<S: LocalCutOwnerPersistencePortV1>(
     )
 }
 
-fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
-    hasher.update(&(bytes.len() as u64).to_le_bytes());
-    hasher.update(bytes);
-}
-
 struct PendingRegistrationCallbacksV1<I> {
     driver: Option<Box<dyn Driver>>,
     approver: Option<Box<dyn ActionApprover>>,
     approver_event_types: I,
-}
-
-fn replay_policy_identity_digest(
-    entry: &PluginEntry,
-    admission: &OutputAdmissionV1,
-) -> pos_core::Hash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"pigloros/replay-policy-identity/v1");
-    hash_framed(&mut hasher, entry.name.as_bytes());
-    hash_framed(&mut hasher, entry.version.as_bytes());
-    let mut owned_event_types: Vec<&str> =
-        entry.owned_event_types.iter().map(Kind::as_str).collect();
-    owned_event_types.sort_unstable();
-    for event_type in owned_event_types {
-        hash_framed(&mut hasher, event_type.as_bytes());
-    }
-    let policy = admission.policy().fields();
-    for hash in [
-        policy.implementation_hash,
-        policy.base_configuration_digest,
-        policy.retention_policy_hash,
-    ] {
-        hasher.update(hash.as_bytes());
-    }
-    hasher.update(&policy.policy_revision.to_le_bytes());
-    let mut declarations = policy.output_declarations.iter().collect::<Vec<_>>();
-    declarations.sort_by(|left, right| left.event_type().cmp(right.event_type()));
-    for declaration in declarations {
-        hash_framed(&mut hasher, declaration.event_type().as_bytes());
-        hasher.update(&[match declaration.authority() {
-            pos_core::output_policy::OutputAuthorityV1::Authoritative => 0,
-            pos_core::output_policy::OutputAuthorityV1::ReproducibleDerived => 1,
-            pos_core::output_policy::OutputAuthorityV1::Ephemeral => 2,
-        }]);
-        hasher.update(&[match declaration.fidelity() {
-            pos_core::output_policy::OutputFidelityV1::L0 => 0,
-            pos_core::output_policy::OutputFidelityV1::L1 => 1,
-            pos_core::output_policy::OutputFidelityV1::L2 => 2,
-        }]);
-        hasher.update(&declaration.max_bytes().to_le_bytes());
-        hasher.update(&declaration.stride_ticks().unwrap_or_default().to_le_bytes());
-        hasher.update(
-            &declaration
-                .aggregate_min_group()
-                .unwrap_or_default()
-                .to_le_bytes(),
-        );
-    }
-    let budget = admission.budget().fields();
-    hasher.update(&budget.revision.to_le_bytes());
-    hasher.update(&[match budget.workload_profile {
-        pos_core::WorkloadProfileV1::Interactive => 0,
-        pos_core::WorkloadProfileV1::Fork => 1,
-        pos_core::WorkloadProfileV1::Research => 2,
-    }]);
-    hasher.update(&[budget.cut_budget_family]);
-    hasher.update(&budget.max_event_bytes.to_le_bytes());
-    for fidelity in budget.fidelity_budgets {
-        hasher.update(&[fidelity.level]);
-        hasher.update(&fidelity.max_events.to_le_bytes());
-        hasher.update(&fidelity.max_bytes.to_le_bytes());
-        hasher.update(&fidelity.max_cpu_us.to_le_bytes());
-        hasher.update(&fidelity.shared_host_cpu_reservation_us.to_le_bytes());
-    }
-    let mut reservations = budget
-        .plugin_cpu_reservations
-        .iter()
-        .map(|reservation| reservation.cpu_reservations_us)
-        .collect::<Vec<_>>();
-    reservations.sort_unstable();
-    for reservation in reservations {
-        hasher.update(&reservation[0].to_le_bytes());
-        hasher.update(&reservation[1].to_le_bytes());
-        hasher.update(&reservation[2].to_le_bytes());
-    }
-    hasher.update(&[budget.accounting_semantics]);
-    hasher.update(&budget.execution_profile_hash.as_bytes()[..]);
-    hasher.update(&budget.max_pass_wall_duration_us.to_le_bytes());
-    pos_core::Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
 fn extend_unique_subscriptions(
@@ -1210,8 +1129,15 @@ const fn plugin_name(entry: &PluginEntry) -> &str {
     entry.name.as_str()
 }
 
-const fn plugin_name_and_version(entry: &PluginEntry) -> (&str, &str) {
-    (entry.name.as_str(), entry.version.as_str())
+#[cfg(any(test, feature = "test-support"))]
+fn plugin_ownership_row(entry: &PluginEntry) -> (Vec<String>, Option<Vec<u8>>) {
+    let owned = entry.owned_event_types.iter().map(Kind::as_str);
+    let mut owned_event_types: Vec<String> = owned.map(str::to_owned).collect();
+    owned_event_types.sort_unstable();
+    let admission = entry.output_admission.as_ref();
+    let closure = admission.and_then(OutputAdmissionV1::closure);
+    let closure_bytes = closure.map(OutputPolicyClosureV1::to_canonical_bytes);
+    (owned_event_types, closure_bytes)
 }
 
 struct PendingStep {
@@ -1376,9 +1302,19 @@ impl PluginRegistry {
     /// deployment qualification. The returned capability is tied to this
     /// registry instance and expires after any registration change.
     ///
+    /// Admission completes each Plugin's generated executable budget (ADR-088
+    /// R3). Every local Plugin shares one execution profile, so every closure
+    /// must reserve CPU for the whole composition: one row per registered
+    /// Plugin, sorted by `PluginId`, each with that Plugin's own values. The
+    /// registry re-derives each EBP1, the EOP1 that names it, the OPC1 closure
+    /// and the native pin before it seals the batch, so EOP1 digests and pins
+    /// read before admission are superseded. A failed admission changes
+    /// nothing.
+    ///
     /// # Errors
     /// Rejects an empty, replay, air-gapped, already sealed, unpinned,
-    /// slotless, or incomplete registry.
+    /// slotless, or incomplete registry, and a composition of more than 256
+    /// Plugins, whose reservation table does not fit one EBP1.
     pub fn admit_local_manifest_registration(
         &mut self,
         owner_id: OwnerIdV1,
@@ -1394,28 +1330,15 @@ impl PluginRegistry {
             return Err(ManifestRegistrationErrorV1::EmptyBatch);
         }
         let owner_reference = pos_core::ArtifactRegistrationV1::owner_reference(&owner_id);
+        let reservations = self.composition_cpu_reservations();
         let mut rows = Vec::with_capacity(self.plugins.len());
+        let mut sealed = Vec::with_capacity(self.plugins.len());
         for (plugin_id, entry) in &self.plugins {
-            let admission = entry
-                .output_admission
-                .as_ref()
-                .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
-            let closure = admission
-                .closure()
-                .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
-            let row = ManifestAdmissionCatalogRowV1 {
-                stable_slot: Self::local_entry_slot(*plugin_id, entry)?,
-                plugin_id: *plugin_id,
-                plugin_name: entry.name.clone(),
-                plugin_version: entry.version.clone(),
-                implementation_hash: admission.policy().fields().implementation_hash,
-                eop1_native_digest: admission.policy_digest(),
-                closure_hash: closure.manifest_closure_hash(),
-            };
             // This requires the available native pin, so the local catalog
             // never contains an unpinned row.
-            Self::validate_manifest_entry_fields(&row, entry)?;
+            let (row, parts) = Self::sealed_local_entry(*plugin_id, entry, &reservations)?;
             rows.push(row);
+            sealed.push(parts);
         }
         rows.sort_unstable_by(|left, right| left.stable_slot.cmp(&right.stable_slot));
         let catalog = ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
@@ -1428,6 +1351,7 @@ impl PluginRegistry {
             .adapter_admission_for_catalog(&catalog)
             .map_err(|_| ManifestRegistrationErrorV1::IncompleteBatch)?;
 
+        self.install_sealed_entries(sealed);
         self.registration_revision += 1;
         self.manifest_batch = Some(catalog.clone());
         Ok(self.bind_admitted_composition(catalog, adapter_admission))
@@ -1543,9 +1467,20 @@ impl PluginRegistry {
         if !self.is_admitted_composition_current_for_generation(admitted, generation) {
             return Err(ManifestRegistrationErrorV1::IncompleteBatch);
         }
-        self.validate_complete_manifest_batch(&admitted.catalog)?;
-        let mut sources = Vec::with_capacity(admitted.catalog.as_input().rows.len());
-        for row in &admitted.catalog.as_input().rows {
+        self.policy_sources_for(&admitted.catalog)
+    }
+
+    /// Exact EOP1/OPC1 bytes for every row of a complete catalog, without the currentness check.
+    ///
+    /// Callers either checked an `AdmittedCompositionV1` first or pass the registry's own retained
+    /// batch; the complete-batch check below still rejects any drift from the registered Plugins.
+    fn policy_sources_for(
+        &self,
+        catalog: &ManifestAdmissionCatalogV1,
+    ) -> Result<Vec<AdmittedManifestPolicySourceV1>, ManifestRegistrationErrorV1> {
+        self.validate_complete_manifest_batch(catalog)?;
+        let mut sources = Vec::with_capacity(catalog.as_input().rows.len());
+        for row in &catalog.as_input().rows {
             let entry = self
                 .plugins
                 .get(&row.plugin_id)
@@ -1771,23 +1706,24 @@ impl PluginRegistry {
         if recorded != Some(row.stable_slot.as_str()) {
             return Err(ManifestRegistrationErrorV1::SlotMismatch);
         }
-        Self::validate_manifest_entry_fields(row, entry)
+        let registration = entry.registration.as_ref();
+        let admission = entry.output_admission.as_ref();
+        Self::validate_manifest_parts(row, entry, registration, admission)
     }
 
-    fn validate_manifest_entry_fields(
+    /// Check one catalog row against an entry's name and version and the given pin and
+    /// admission, which are either the entry's own or their re-derived local replacements.
+    fn validate_manifest_parts(
         row: &ManifestAdmissionCatalogRowV1,
         entry: &PluginEntry,
+        registration: Option<&PluginRegistrationV1>,
+        admission: Option<&OutputAdmissionV1>,
     ) -> Result<(), ManifestRegistrationErrorV1> {
-        let registration = entry
-            .registration
-            .as_ref()
-            .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
-        let admission = entry
-            .output_admission
-            .as_ref()
-            .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
+        use crate::composition::ManifestRegistrationErrorV1::UnverifiedRegistration;
+        let registration = registration.ok_or(UnverifiedRegistration)?;
+        let admission = admission.ok_or(UnverifiedRegistration)?;
         let Some(closure) = admission.closure() else {
-            return Err(ManifestRegistrationErrorV1::UnverifiedRegistration);
+            return Err(UnverifiedRegistration);
         };
         // A retained closure is only constructed together with its owner token.
         if registration.availability() != PluginAvailabilityV1::Available
@@ -1795,7 +1731,7 @@ impl PluginRegistry {
             || registration.pin().isolation() != PluginIsolationV1::OperatorTrustedNative
             || registration.pin().configuration_digest() != admission.policy_digest()
         {
-            return Err(ManifestRegistrationErrorV1::UnverifiedRegistration);
+            return Err(UnverifiedRegistration);
         }
         if entry.name != row.plugin_name
             || entry.version != row.plugin_version
@@ -3092,6 +3028,11 @@ impl PluginRegistry {
     ///
     /// The public test `manifest_slots_public` runs this same flow.
     ///
+    /// The generated budget first reserves CPU for this Plugin alone; the
+    /// complete composition table is added by
+    /// [`Self::admit_local_manifest_registration`], which also replaces this
+    /// Plugin's EOP1 digest and pin.
+    ///
     /// # Errors
     /// Returns a duplicate-slot, policy, pin, duplicate-role, or Plugin
     /// registration error before mutation.
@@ -3197,6 +3138,10 @@ impl PluginRegistry {
             })
     }
 
+    /// The shared generated budget, reserving CPU for `plugin` alone.
+    ///
+    /// Local admission later widens the reservation table to the complete
+    /// composition; see [`Self::admit_local_manifest_registration`].
     fn generated_budget_input(plugin: &dyn Plugin) -> pos_core::ExecutableBudgetPolicyInputV1 {
         pos_core::ExecutableBudgetPolicyInputV1 {
             revision: 1,
@@ -3920,57 +3865,34 @@ impl PluginRegistry {
         self.plugins.values().map(plugin_name)
     }
 
-    /// Iterate over registered plugin (name, version) pairs in registration order.
-    pub fn plugin_versions(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.plugins.values().map(plugin_name_and_version)
-    }
-
-    /// Iterate over canonical output-admission policy digests bound to registered Plugins.
-    pub fn output_policy_digests(&self) -> impl Iterator<Item = (&str, pos_core::Hash)> {
-        self.plugins.values().filter_map(|entry| {
-            entry
-                .output_admission
-                .as_ref()
-                .map(|admission| (entry.name.as_str(), admission.policy_digest()))
-        })
-    }
-
-    /// Iterate over stable replay identities for registered output policies.
-    pub fn replay_policy_identities(&self) -> impl Iterator<Item = (&str, pos_core::Hash)> {
-        self.plugins.values().filter_map(|entry| {
-            entry.output_admission.as_ref().map(|admission| {
-                (
-                    entry.name.as_str(),
-                    replay_policy_identity_digest(entry, admission),
-                )
-            })
-        })
-    }
-
-    /// Iterate over exact retained policy closures for Replay manifests.
-    pub fn replay_policy_closures(&self) -> impl Iterator<Item = (&str, Vec<u8>)> {
-        self.plugins.values().filter_map(|entry| {
-            entry.output_admission.as_ref().and_then(|admission| {
-                admission
-                    .closure()
-                    .map(|closure| (entry.name.as_str(), closure.to_canonical_bytes()))
-            })
-        })
-    }
-
-    /// Iterate over stable identities for retained policy closures.
+    /// Replay identities of the retained output-policy closures, in registration order.
     ///
-    /// The exact closure envelope is still retained separately.  This
-    /// identity excludes fresh runtime Plugin IDs while preserving the typed
-    /// policy/budget and all non-address artifact identities.
-    pub fn replay_policy_closure_identities(&self) -> impl Iterator<Item = (&str, pos_core::Hash)> {
-        self.plugins.values().filter_map(|entry| {
-            entry.output_admission.as_ref().and_then(|admission| {
-                admission
-                    .closure()
-                    .map(|closure| (entry.name.as_str(), closure.replay_identity_digest()))
-            })
-        })
+    /// Test support for configuration-identity checks only. Production code reads the admitted
+    /// roster through [`Self::manifest_plugin_roster`], which is keyed by slot and `PluginId`.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn retained_closure_replay_identities(&self) -> Vec<pos_core::Hash> {
+        let admissions = self
+            .plugins
+            .values()
+            .filter_map(|entry| entry.output_admission.as_ref());
+        admissions
+            .filter_map(OutputAdmissionV1::closure)
+            .map(OutputPolicyClosureV1::replay_identity_digest)
+            .collect()
+    }
+
+    /// One row per registered Plugin, in registration order: its sorted owned Event types and
+    /// the exact canonical bytes of its retained output-policy closure, if it has one.
+    ///
+    /// Test support for rollback snapshots only: a rejected registration must leave every row,
+    /// including a Plugin without a closure and its owned Event types, unchanged.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn plugin_ownership_rows(&self) -> Vec<(Vec<String>, Option<Vec<u8>>)> {
+        self.plugins.values().map(plugin_ownership_row).collect()
     }
 
     /// Register a direct driver in an explicit test-support harness.
@@ -4905,110 +4827,6 @@ mod tests {
             budget.fields().execution_profile_hash,
             crate::execution_profile_artifact_hash_v1(&[])
         );
-    }
-
-    #[test]
-    fn replay_identity_hash_covers_declaration_and_budget_variants() {
-        let plugin_id = PluginId::new();
-        let mut replay_identities = Vec::new();
-        for workload_profile in [
-            WorkloadProfileV1::Interactive,
-            WorkloadProfileV1::Fork,
-            WorkloadProfileV1::Research,
-        ] {
-            let mut registry = gated_registry();
-            let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
-                revision: 1,
-                workload_profile,
-                cut_budget_family: 0,
-                max_event_bytes: 4_096,
-                fidelity_budgets: [
-                    FidelityBudgetV1 {
-                        level: 0,
-                        max_events: 10,
-                        max_bytes: 10_000,
-                        max_cpu_us: 10_000,
-                        shared_host_cpu_reservation_us: 0,
-                    },
-                    FidelityBudgetV1 {
-                        level: 1,
-                        max_events: 10,
-                        max_bytes: 10_000,
-                        max_cpu_us: 10_000,
-                        shared_host_cpu_reservation_us: 0,
-                    },
-                    FidelityBudgetV1 {
-                        level: 2,
-                        max_events: 10,
-                        max_bytes: 10_000,
-                        max_cpu_us: 10_000,
-                        shared_host_cpu_reservation_us: 0,
-                    },
-                ],
-                plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-                    plugin_id,
-                    cpu_reservations_us: [10, 20, 30],
-                }],
-                accounting_semantics: 0,
-                execution_profile_hash: Hash::from_bytes([0x41; 32]),
-                max_pass_wall_duration_us: 1_000,
-            })
-            .test_ok();
-            let declarations = vec![
-                OutputDeclarationV1::new(
-                    "a.authoritative".to_owned(),
-                    OutputAuthorityV1::Authoritative,
-                    OutputFidelityV1::L0,
-                    64,
-                    None,
-                    None,
-                )
-                .test_ok(),
-                OutputDeclarationV1::new(
-                    "b.derived".to_owned(),
-                    OutputAuthorityV1::ReproducibleDerived,
-                    OutputFidelityV1::L1,
-                    64,
-                    Some(2),
-                    None,
-                )
-                .test_ok(),
-                OutputDeclarationV1::new(
-                    "c.ephemeral".to_owned(),
-                    OutputAuthorityV1::Ephemeral,
-                    OutputFidelityV1::L2,
-                    64,
-                    None,
-                    Some(10),
-                )
-                .test_ok(),
-            ];
-            let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-                plugin_id,
-                plugin_version: "test".to_owned(),
-                implementation_hash: Hash::from_bytes([0x42; 32]),
-                base_configuration_digest: Hash::from_bytes([0x43; 32]),
-                executable_profile_hash: budget.digest(),
-                retention_policy_hash: Hash::from_bytes([0x44; 32]),
-                policy_revision: 1,
-                output_declarations: declarations,
-            })
-            .test_ok();
-            registry
-                .register_test_driver_with_output_policy(
-                    plugin_id,
-                    "test",
-                    policy,
-                    budget,
-                    Box::new(NoopDriver),
-                )
-                .test_ok();
-            let (_, replay_identity) = registry.replay_policy_identities().next().test_ok();
-            replay_identities.push(replay_identity);
-        }
-        assert_ne!(replay_identities[0], replay_identities[1]);
-        assert_ne!(replay_identities[0], replay_identities[2]);
-        assert_ne!(replay_identities[1], replay_identities[2]);
     }
 
     #[test]
@@ -6120,16 +5938,22 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn local_admission_rejects_unverified_or_unavailable_local_entries() {
+    // A gated registry holding one locally registered Plugin, and that Plugin's id.
+    fn registered_local_fixture() -> (PluginRegistry, PluginId) {
         let plugin = simple_plugin("local-fixture", &[]);
-        let id = plugin.id;
-        let owner = OwnerIdV1::from_static("local-admission-fixture");
         let mut registry = gated_registry();
         let slot = ManifestSlotV1::try_new("local-fixture").test_ok();
+        let roles = vec!["local.fixture".to_owned()];
         registry
-            .register_local(&plugin, slot, vec!["local.fixture".to_owned()], None, None)
+            .register_local(&plugin, slot, roles, None, None)
             .test_ok();
+        (registry, plugin.id)
+    }
+
+    #[test]
+    fn local_admission_rejects_unverified_or_unavailable_local_entries() {
+        let owner = OwnerIdV1::from_static("local-admission-fixture");
+        let (mut registry, id) = registered_local_fixture();
 
         let verified = registry
             .plugins
@@ -6143,9 +5967,10 @@ mod tests {
             Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
         ));
 
+        let version = registry.plugins.get(&id).test_ok().version.clone();
         let unverified = OutputAdmissionV1::try_new(
             id,
-            plugin.version(),
+            &version,
             verified.policy().clone(),
             verified.budget().clone(),
         )
@@ -6179,6 +6004,34 @@ mod tests {
             .admit_local_manifest_registration(owner, 1)
             .test_ok();
         assert_eq!(admitted.catalog().as_input().rows[0].plugin_id, id);
+    }
+
+    #[test]
+    fn local_admission_rejects_a_pin_that_does_not_bind_the_generated_policy() {
+        let owner = OwnerIdV1::from_static("local-admission-fixture");
+        let (mut registry, id) = registered_local_fixture();
+        let entry = registry.plugins.get_mut(&id).test_ok();
+        let valid = entry.registration.clone().test_ok();
+        let generated = entry.output_admission.as_ref().test_ok().policy_digest();
+        let foreign = crate::composition::PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            Hash::from_bytes([7; 32]),
+            valid.pin().roles().to_vec(),
+        )
+        .test_ok();
+        let available = PluginAvailabilityV1::Available;
+        entry.registration = Some(PluginRegistrationV1::new(foreign, available));
+        assert!(matches!(
+            registry.admit_local_manifest_registration(owner, 1),
+            Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
+        ));
+        assert!(registry.manifest_batch.is_none());
+        let entry = registry.plugins.get(&id).test_ok();
+        let kept = entry.output_admission.as_ref().test_ok().policy_digest();
+        assert_eq!(kept, generated);
+        let pin = entry.registration.as_ref().test_ok().pin();
+        assert_eq!(pin.configuration_digest(), Hash::from_bytes([7; 32]));
     }
 
     #[test]
@@ -6364,10 +6217,11 @@ mod tests {
     }
 
     fn owned_policy_digests(registry: &PluginRegistry) -> Vec<(String, Hash)> {
-        registry
-            .output_policy_digests()
-            .map(|(name, digest)| (name.to_owned(), digest))
-            .collect()
+        let admitted = registry.plugins.values().filter_map(|entry| {
+            let admission = entry.output_admission.as_ref();
+            admission.map(|admission| (entry.name.clone(), admission.policy_digest()))
+        });
+        admitted.collect()
     }
 
     fn reducer_count(
@@ -6780,8 +6634,9 @@ mod tests {
                     &catalogue_configuration(PluginId::new(), details),
                 )
                 .test_ok();
-            let mut identities = registry.replay_policy_closure_identities();
-            identities.next().test_ok().1
+            let entry = registry.plugins.values().next().test_ok();
+            let admission = entry.output_admission.as_ref().test_ok();
+            admission.closure().test_ok().replay_identity_digest()
         };
         assert_eq!(identity(b"first"), identity(b"first"));
         assert_ne!(identity(b"first"), identity(b"second"));
@@ -7751,7 +7606,11 @@ mod tests {
         let names: Vec<&str> = reg.plugin_names().collect();
         assert!(names.contains(&"alpha"));
         assert!(names.contains(&"beta"));
-        let versions: Vec<(&str, &str)> = reg.plugin_versions().collect();
+        let versions: Vec<(&str, &str)> = reg
+            .plugins
+            .values()
+            .map(|entry| (entry.name.as_str(), entry.version.as_str()))
+            .collect();
         assert!(versions.contains(&("alpha", "0.1.0")));
         assert!(versions.contains(&("beta", "0.1.0")));
     }

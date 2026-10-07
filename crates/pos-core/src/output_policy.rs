@@ -191,6 +191,18 @@ impl OutputPolicyV1 {
         Ok(Self(input))
     }
 
+    /// This policy naming another executable budget by its digest.
+    ///
+    /// Every other field is carried over unchanged, so a validated policy stays validated. The
+    /// digest is a BLAKE3 output, which is never the all-zero reference construction rejects.
+    #[must_use]
+    pub fn with_executable_profile_hash(&self, executable_profile_hash: Hash) -> Self {
+        Self(OutputPolicyInputV1 {
+            executable_profile_hash,
+            ..self.0.clone()
+        })
+    }
+
     /// Immutable validated fields. No mutable reference is exposed.
     #[must_use]
     pub const fn fields(&self) -> &OutputPolicyInputV1 {

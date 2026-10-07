@@ -260,6 +260,7 @@ fn empty_roster_is_the_literal_seven_bytes() -> TestResult {
     assert!(roster.entries().is_empty());
     assert_eq!(roster.to_canonical_cbor(), literal);
     assert_eq!(decode(&literal)?, roster);
+    assert_eq!(ManifestPluginRosterV1::empty(), roster);
     Ok(())
 }
 

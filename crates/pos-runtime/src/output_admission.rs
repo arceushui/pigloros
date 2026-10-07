@@ -1063,6 +1063,27 @@ impl OutputPolicyClosureV1 {
         })
     }
 
+    /// This closure around another executable budget, with the EOP1 naming its digest.
+    ///
+    /// Only the EBP1 and the EOP1 reference to it change; every other member is kept. Each
+    /// identity [`Self::from_artifacts`] checks still holds, so no re-verification is needed.
+    #[must_use]
+    pub(crate) fn with_budget(&self, budget: ExecutableBudgetPolicyV1) -> Self {
+        let policy = self
+            .output_policy
+            .with_executable_profile_hash(budget.digest());
+        Self {
+            output_policy_bytes: policy.to_canonical_cbor(),
+            executable_budget_bytes: budget.to_canonical_cbor(),
+            output_policy: policy,
+            executable_budget: budget,
+            implementation_artifact: self.implementation_artifact.clone(),
+            configuration_artifact: self.configuration_artifact.clone(),
+            execution_profile_artifact: self.execution_profile_artifact.clone(),
+            retention_policy_artifact: self.retention_policy_artifact.clone(),
+        }
+    }
+
     /// The decoded EOP1 policy.
     #[must_use]
     pub const fn output_policy(&self) -> &OutputPolicyV1 {
@@ -1156,7 +1177,7 @@ impl OutputPolicyClosureV1 {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"pigloros.output-policy-replay-identity.v1\0");
         let policy = self.output_policy.fields();
-        hash_framed(&mut hasher, policy.plugin_version.as_bytes());
+        crate::hash_framed(&mut hasher, policy.plugin_version.as_bytes());
         for hash in [
             policy.implementation_hash,
             policy.base_configuration_digest,
@@ -1168,7 +1189,7 @@ impl OutputPolicyClosureV1 {
         let mut declarations = policy.output_declarations.iter().collect::<Vec<_>>();
         declarations.sort_by(|left, right| left.event_type().cmp(right.event_type()));
         for declaration in declarations {
-            hash_framed(&mut hasher, declaration.event_type().as_bytes());
+            crate::hash_framed(&mut hasher, declaration.event_type().as_bytes());
             hasher.update(&[match declaration.authority() {
                 pos_core::output_policy::OutputAuthorityV1::Authoritative => 0,
                 pos_core::output_policy::OutputAuthorityV1::ReproducibleDerived => 1,
@@ -1224,7 +1245,7 @@ impl OutputPolicyClosureV1 {
             self.execution_profile_artifact(),
             self.retention_policy_artifact(),
         ] {
-            hash_framed(&mut hasher, bytes);
+            crate::hash_framed(&mut hasher, bytes);
         }
         Hash::from_bytes(*hasher.finalize().as_bytes())
     }
@@ -1316,12 +1337,6 @@ pub fn validate_output_policy_artifacts_v1(
         retention_policy_artifact,
     )
     .map(|_| ())
-}
-
-fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
-    let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    hasher.update(&bytes_len.to_le_bytes());
-    hasher.update(bytes);
 }
 
 const fn validate_leaf_lengths(
@@ -1493,6 +1508,24 @@ impl OutputAdmissionV1 {
             closure: None,
             owner_token: None,
         })
+    }
+
+    /// This admission re-bound to `closure`, the same Plugin's closure around a new budget.
+    ///
+    /// The Plugin identity and owner token are kept and usage starts empty. `closure` must come
+    /// from [`OutputPolicyClosureV1::with_budget`] on this admission's own closure, whose
+    /// budget still reserves CPU for this Plugin.
+    pub(crate) fn resealed(&self, closure: OutputPolicyClosureV1) -> Self {
+        let policy = closure.output_policy().clone();
+        Self {
+            plugin_id: self.plugin_id,
+            policy_digest: policy.digest(),
+            policy,
+            budget: closure.executable_budget().clone(),
+            usage: Mutex::new(AdmissionUsage::default()),
+            closure: Some(closure),
+            owner_token: self.owner_token,
+        }
     }
 
     #[must_use]
