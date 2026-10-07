@@ -2,6 +2,7 @@
 //! the first atomic Tick, against both `MemoryStore` and `SqliteStore`.
 #![cfg(target_os = "linux")]
 
+use std::collections::BTreeMap;
 use std::error::Error as _;
 use std::sync::Arc;
 
@@ -28,24 +29,30 @@ use pos_conformance::{
 use pos_core::{
     pipeline_draft_vector_digest_v1, ArtifactClaimInputV1, ArtifactDataClassV1,
     ArtifactOptionalityV1, ArtifactStateV1, ArtifactTransitionRuleV1, CanonicalBytes, CoreError,
-    CounterfactualAdapterSealV1, CounterfactualBasisV1, CounterfactualFactsV1,
+    CounterfactualAdapterSealV1, CounterfactualBasisV1,
+    CounterfactualDependencyErrorV1 as DependencyError, CounterfactualDependencyReadPortV1,
+    CounterfactualDependencyRecordingPortV1, CounterfactualFactsV1,
     CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
-    CounterfactualTickOutcomeV1, EntityId, ErasureArtifactClassV1, ErasureContainmentGateV1,
-    ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, EventReadBounds, EventStore,
-    ForkGenerationV1, Hash, InvalidationConflictV1, Kind, PipelineContractErrorV1,
-    PipelineDraftBatchV1, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
-    Seq, SeqRange, Timeline, TimelineId, TimelineMeta, MAX_FORK_EVENT_TYPE_BYTES_V1,
+    CounterfactualTickOutcomeV1, DependencyEdgeRecordV1, DependencyNodeCoordinateV1,
+    DependencyNodeRecordV1, DependencyPageRequestV1, DependencyPageV1, DependencyReadScopeV1,
+    EntityId, ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, Event, EventDraft, EventReadBounds, EventStore, ForkGenerationV1, Hash,
+    InvalidationConflictV1, Kind, PipelineContractErrorV1, PipelineDraftBatchV1,
+    RecordedDependencyClassV1, RecordedNodeOriginV1, RegisteredArtifactV1, ReplayClaimEvaluationV1,
+    ReplayClaimEvaluatorV1, Seq, SeqRange, TickDependencyRecordV1, Timeline, TimelineId,
+    TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1, MAX_FORK_EVENT_TYPE_BYTES_V1,
     MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
 };
 use pos_runtime::counterfactual::coordinator::{
     CounterfactualAdmissionErrorV1 as AdmissionError, CounterfactualAdmissionRequestV1,
-    CounterfactualCoordinatorV1, CounterfactualForkAppendAuthorityV1,
-    CounterfactualFrontierDerivationV1, CounterfactualFrontierSourceV1,
-    CounterfactualFrozenArtifactsV1, CounterfactualHostPreflightV1,
+    CounterfactualCoordinatorV1, CounterfactualDeclaringTickStagerV1,
+    CounterfactualForkAppendAuthorityV1, CounterfactualFrontierDerivationV1,
+    CounterfactualFrontierSourceV1, CounterfactualFrozenArtifactsV1, CounterfactualHostPreflightV1,
     CounterfactualInterventionAuthorityV1, CounterfactualProvisionalOutputV1,
-    CounterfactualTickFailureV1, CounterfactualTickInputsV1, CounterfactualTickStagerV1,
-    FrozenArtifactAvailabilityV1, InterventionDecisionV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
+    CounterfactualStagedTickV1, CounterfactualTickFailureV1, CounterfactualTickInputsV1,
+    CounterfactualTickStagerV1, FrozenArtifactAvailabilityV1, InterventionDecisionV1,
+    COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
 };
 use pos_runtime::counterfactual::suffix::{
     CounterfactualSuffixErrorV1 as SuffixError, CounterfactualSuffixFailureV1 as Failure,
@@ -196,6 +203,20 @@ trait Backend: EventStore + CounterfactualStorePortV1 + Sized {
     fn open() -> TestResult<Self>;
 }
 
+/// A backend that also records and reads dependency records.
+trait RecordingBackend:
+    Backend + CounterfactualDependencyRecordingPortV1 + CounterfactualDependencyReadPortV1
+{
+}
+
+impl<B> RecordingBackend for B where
+    B: Backend + CounterfactualDependencyRecordingPortV1 + CounterfactualDependencyReadPortV1
+{
+}
+
+/// The outcome of one later Tick append.
+type TickResult = Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1>;
+
 fn open_gate() -> Arc<ErasureContainmentGateV1> {
     Arc::new(ErasureContainmentGateV1::new_test_open())
 }
@@ -295,6 +316,88 @@ impl<B> Faulty<B> {
     }
 }
 
+impl<B: Backend> Faulty<B> {
+    /// Run the interference configured for this, the next, later Tick
+    /// append, then make the append `append` unless the interference
+    /// replaced it.
+    fn interfered_append(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        append: impl FnOnce(&mut B) -> TickResult,
+    ) -> TickResult {
+        self.appends += 1;
+        let now = self.appends;
+        match self.interference {
+            Interference::Republish(at, change) if at == now => {
+                let mut facts = self.inner.current_counterfactual_basis(fork)?.facts;
+                change(&mut facts);
+                self.inner.publish_counterfactual_facts(fork, facts)?;
+            }
+            Interference::ForeignAppend(at) if at == now => {
+                self.inner
+                    .append(fork, &[event_draft("counterfactual.world", vec![1])])
+                    .or(Err(CounterfactualStoreErrorV1::StorageFailure))?;
+            }
+            Interference::LostUnknown(at) if at == now => {
+                return Err(CounterfactualStoreErrorV1::OutcomeUnknown);
+            }
+            Interference::UnreadableUnknown(at) if at == now => {
+                self.in_doubt = true;
+                return Err(CounterfactualStoreErrorV1::OutcomeUnknown);
+            }
+            Interference::LandedUnknown(at) if at == now => {
+                return append(&mut self.inner)
+                    .and(Err(CounterfactualStoreErrorV1::OutcomeUnknown));
+            }
+            Interference::MisreportedHead(at) if at == now => {
+                return append(&mut self.inner).and_then(|outcome| misreported(expected, outcome));
+            }
+            _ => {}
+        }
+        append(&mut self.inner)
+    }
+}
+
+impl<B: RecordingBackend> CounterfactualDependencyRecordingPortV1 for Faulty<B> {
+    fn commit_counterfactual_invalidation_with_dependencies(
+        &mut self,
+        command: &CounterfactualInvalidationCommandV1,
+        record: &TickDependencyRecordV1,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1> {
+        self.inner
+            .commit_counterfactual_invalidation_with_dependencies(command, record)
+    }
+
+    fn append_counterfactual_tick_with_dependencies(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        record: &TickDependencyRecordV1,
+    ) -> TickResult {
+        self.interfered_append(fork, expected, |inner| {
+            inner.append_counterfactual_tick_with_dependencies(fork, expected, drafts, record)
+        })
+    }
+}
+
+impl<B: RecordingBackend> CounterfactualDependencyReadPortV1 for Faulty<B> {
+    fn read_dependency_nodes(
+        &self,
+        request: &DependencyPageRequestV1,
+    ) -> Result<DependencyPageV1<DependencyNodeRecordV1>, CounterfactualStoreErrorV1> {
+        self.inner.read_dependency_nodes(request)
+    }
+
+    fn read_dependency_edges(
+        &self,
+        request: &DependencyPageRequestV1,
+    ) -> Result<DependencyPageV1<DependencyEdgeRecordV1>, CounterfactualStoreErrorV1> {
+        self.inner.read_dependency_edges(request)
+    }
+}
+
 impl<B: Backend> EventStore for Faulty<B> {
     fn create_timeline(&mut self, name: &str) -> Result<Timeline, CoreError> {
         self.inner.create_timeline(name)
@@ -371,43 +474,10 @@ impl<B: Backend> CounterfactualStorePortV1 for Faulty<B> {
         fork: TimelineId,
         expected: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
-    ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
-        self.appends += 1;
-        let now = self.appends;
-        match self.interference {
-            Interference::Republish(at, change) if at == now => {
-                let mut facts = self.inner.current_counterfactual_basis(fork)?.facts;
-                change(&mut facts);
-                self.inner.publish_counterfactual_facts(fork, facts)?;
-            }
-            Interference::ForeignAppend(at) if at == now => {
-                self.inner
-                    .append(fork, &[event_draft("counterfactual.world", vec![1])])
-                    .or(Err(CounterfactualStoreErrorV1::StorageFailure))?;
-            }
-            Interference::LostUnknown(at) if at == now => {
-                return Err(CounterfactualStoreErrorV1::OutcomeUnknown);
-            }
-            Interference::UnreadableUnknown(at) if at == now => {
-                self.in_doubt = true;
-                return Err(CounterfactualStoreErrorV1::OutcomeUnknown);
-            }
-            Interference::LandedUnknown(at) if at == now => {
-                return self
-                    .inner
-                    .append_counterfactual_tick(fork, expected, drafts)
-                    .and(Err(CounterfactualStoreErrorV1::OutcomeUnknown));
-            }
-            Interference::MisreportedHead(at) if at == now => {
-                return self
-                    .inner
-                    .append_counterfactual_tick(fork, expected, drafts)
-                    .and_then(|outcome| misreported(expected, outcome));
-            }
-            _ => {}
-        }
-        self.inner
-            .append_counterfactual_tick(fork, expected, drafts)
+    ) -> TickResult {
+        self.interfered_append(fork, expected, |inner| {
+            inner.append_counterfactual_tick(fork, expected, drafts)
+        })
     }
 
     fn current_fork_generation(
@@ -798,6 +868,216 @@ impl CounterfactualTickStagerV1 for Stager {
 }
 
 // ---------------------------------------------------------------------------
+// Dependency declarations
+// ---------------------------------------------------------------------------
+
+/// The declared nodes and edges of one Tick record.
+type Declaration = (Vec<DependencyNodeRecordV1>, Vec<DependencyEdgeRecordV1>);
+/// One edit of a Tick's declaration before it is staged.
+type DeclarationTamper = fn(&mut Declaration) -> TestResult;
+/// One declaration tamper with the contract error the seam must report.
+type DeclarationCase = (DeclarationTamper, DependencyError);
+
+const fn recorded_class(class: DependencyClassV1) -> RecordedDependencyClassV1 {
+    match class {
+        DependencyClassV1::ExogenousFrozen => RecordedDependencyClassV1::ExogenousFrozen,
+        DependencyClassV1::InterventionAssigned => RecordedDependencyClassV1::InterventionAssigned,
+        DependencyClassV1::EndogenousRecomputed => RecordedDependencyClassV1::EndogenousRecomputed,
+        DependencyClassV1::FixedPolicy => RecordedDependencyClassV1::FixedPolicy,
+        DependencyClassV1::PresentationOnly => RecordedDependencyClassV1::PresentationOnly,
+    }
+}
+
+fn coordinate(node: &DependencyNodeV1) -> TestResult<DependencyNodeCoordinateV1> {
+    Ok(DependencyNodeCoordinateV1::try_new(
+        node.tick,
+        node.scheduler_position,
+        node.owner_id.clone(),
+        node.output_ordinal,
+        node.schema_id,
+        Hash::from_bytes(node.artifact_digest),
+    )?)
+}
+
+/// The provisional record of one graph node.
+fn node_record(node: &Node) -> TestResult<DependencyNodeRecordV1> {
+    Ok(DependencyNodeRecordV1::try_new(
+        coordinate(&node.node)?,
+        recorded_class(node.class),
+        RecordedNodeOriginV1::Provisional,
+        node.input_digests
+            .iter()
+            .copied()
+            .map(Hash::from_bytes)
+            .collect(),
+        Hash::from_bytes(node.provenance_digest),
+    )?)
+}
+
+/// The record of one graph edge: its exact `IDP1` bytes bound to its
+/// consumer and source.
+fn edge_record(edge: &InputDependencyV1) -> TestResult<DependencyEdgeRecordV1> {
+    Ok(DependencyEdgeRecordV1::try_from_canonical(
+        edge.to_canonical_cbor()?,
+        coordinate(&edge.consumer)?,
+        Hash::from_bytes(edge.source.artifact_digest),
+    )?)
+}
+
+/// A provisional node of `class` at `tick`, owned by `owner`, with `digest`
+/// and no declared input.
+fn node_at(
+    tick: u64,
+    owner: &str,
+    digest: [u8; 32],
+    class: RecordedDependencyClassV1,
+) -> TestResult<DependencyNodeRecordV1> {
+    let schema_id = if class.is_root() { 3 } else { 40 };
+    Ok(DependencyNodeRecordV1::try_new(
+        DependencyNodeCoordinateV1::try_new(
+            tick,
+            0,
+            owner.to_owned(),
+            0,
+            schema_id,
+            Hash::from_bytes(digest),
+        )?,
+        class,
+        RecordedNodeOriginV1::Provisional,
+        Vec::new(),
+        Hash::from_bytes(NODE_PROVENANCE),
+    )?)
+}
+
+/// A fresh `FixedPolicy` root at `tick`.
+fn root_at(tick: u64) -> TestResult<DependencyNodeRecordV1> {
+    node_at(
+        tick,
+        "policy",
+        [0xa9; 32],
+        RecordedDependencyClassV1::FixedPolicy,
+    )
+}
+
+/// The declaration of every record Tick of `source`'s graph from `first`,
+/// the first recomputation Tick: each provisional node rides the record of
+/// its own Tick, except a root before `first`, which rides the first record;
+/// a non-root node before `first` is not recomputed and is not declared.
+/// Every edge rides its consumer's record. Rows are in canonical order.
+fn declarations(source: &Source, first: u64) -> TestResult<BTreeMap<u64, Declaration>> {
+    let mut by_tick: BTreeMap<u64, Declaration> = BTreeMap::new();
+    let mut record_ticks: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+    let provisional = source
+        .nodes
+        .iter()
+        .filter(|node| node.origin == Origin::Provisional);
+    for node in provisional {
+        let tick = if recorded_class(node.class).is_root() {
+            node.node.tick.max(first)
+        } else {
+            node.node.tick
+        };
+        if tick >= first {
+            by_tick.entry(tick).or_default().0.push(node_record(node)?);
+            record_ticks.insert(node.node.artifact_digest, tick);
+        }
+    }
+    for edge in &source.edges {
+        if let Some(&tick) = record_ticks.get(&edge.consumer.artifact_digest) {
+            by_tick.entry(tick).or_default().1.push(edge_record(edge)?);
+        }
+    }
+    for declaration in by_tick.values_mut() {
+        sort_declaration(declaration);
+    }
+    Ok(by_tick)
+}
+
+/// Put `declaration` in canonical row order.
+fn sort_declaration(declaration: &mut Declaration) {
+    declaration.0.sort_by(|left, right| {
+        left.coordinate()
+            .position_key()
+            .cmp(&right.coordinate().position_key())
+    });
+    declaration.1.sort_by(DependencyEdgeRecordV1::order_cmp);
+}
+
+/// The union of every declaration through `last`, in canonical order: what
+/// a generation whose last committed Tick is `last` has recorded.
+fn declared_through(declarations: &BTreeMap<u64, Declaration>, last: u64) -> Declaration {
+    let mut union: Declaration = (Vec::new(), Vec::new());
+    for (_, (nodes, edges)) in declarations.range(..=last) {
+        union.0.extend_from_slice(nodes);
+        union.1.extend_from_slice(edges);
+    }
+    sort_declaration(&mut union);
+    union
+}
+
+/// Stages drafts like [`Stager`] and declares each Tick's dependencies from
+/// [`declarations`]; `tamper` edits one Tick's declaration before staging.
+struct DeclaringStager {
+    inner: Stager,
+    declarations: BTreeMap<u64, Declaration>,
+    tamper: Option<(u64, DeclarationTamper)>,
+}
+
+impl DeclaringStager {
+    fn new(source: &Source, inner: Stager) -> TestResult<Self> {
+        Ok(Self {
+            inner,
+            declarations: declarations(source, FRONTIER_TICK)?,
+            tamper: None,
+        })
+    }
+
+    fn tampering(source: &Source, tick: u64, tamper: DeclarationTamper) -> TestResult<Self> {
+        Ok(Self {
+            tamper: Some((tick, tamper)),
+            ..Self::new(source, Stager::default())?
+        })
+    }
+}
+
+impl CounterfactualDeclaringTickStagerV1 for DeclaringStager {
+    fn stage_tick_with_dependencies(
+        &mut self,
+        inputs: &CounterfactualTickInputsV1<'_>,
+    ) -> Result<CounterfactualStagedTickV1, CounterfactualTickFailureV1> {
+        let drafts = self.inner.stage_tick(inputs)?;
+        let mut declaration = self
+            .declarations
+            .get(&inputs.tick())
+            .cloned()
+            .unwrap_or_default();
+        if let Some((_, tamper)) = self.tamper.filter(|(at, _)| *at == inputs.tick()) {
+            tamper(&mut declaration).or(Err(CounterfactualTickFailureV1))?;
+        }
+        Ok(CounterfactualStagedTickV1 {
+            drafts,
+            nodes: declaration.0,
+            edges: declaration.1,
+        })
+    }
+}
+
+/// Every recorded node and edge of the admitted generation, in canonical
+/// order; the fixtures stay far below one page.
+fn recorded<B: RecordingBackend>(setup: &Setup<B>) -> TestResult<Declaration> {
+    let request = DependencyPageRequestV1::try_new(
+        DependencyReadScopeV1::ForkGeneration(setup.fixture.receipt.generation()),
+        None,
+        MAX_DEPENDENCY_PAGE_ROWS_V1,
+    )?;
+    let store = setup.coordinator.store();
+    let nodes = store.read_dependency_nodes(&request)?;
+    let edges = store.read_dependency_edges(&request)?;
+    assert!(nodes.next().is_none() && edges.next().is_none());
+    Ok((nodes.items().to_vec(), edges.items().to_vec()))
+}
+
+// ---------------------------------------------------------------------------
 // Fixture
 // ---------------------------------------------------------------------------
 
@@ -875,9 +1155,20 @@ fn admission_request<'a>(
     }
 }
 
-/// A factual root with two Events, a Fork at `Seq` 2 with fixed IDs, the
-/// published facts, and an admitted generation 1 whose first Tick is 11.
-fn setup_in<B: Backend>(mut store: B, edit: fn(&mut CounterfactualPlanV1)) -> TestResult<Setup<B>> {
+/// The plan, host records, graph, and published facts of one seeded store,
+/// before its generation is admitted.
+struct Seeded {
+    plan: CounterfactualPlanV1,
+    profile: ExecutionProfileV1,
+    snapshot: TrustPolicySnapshotV1,
+    claim: ReplayClaimEvaluationV1,
+    facts: CounterfactualFactsV1,
+    source: Source,
+}
+
+/// Seed `store` with a factual root of two Events, a Fork at `Seq` 2 with
+/// fixed IDs, and the published facts of the plan.
+fn seed<B: Backend>(store: &mut B, edit: fn(&mut CounterfactualPlanV1)) -> TestResult<Seeded> {
     store.create_timeline_with_meta(TimelineMeta {
         id: root_id(),
         ..TimelineMeta::root("factual")
@@ -900,7 +1191,7 @@ fn setup_in<B: Backend>(mut store: B, edit: fn(&mut CounterfactualPlanV1)) -> Te
         TrustPolicySnapshotV1::from_canonical_cbor(&draft_trust_policy_snapshot_bytes_v1()?)?;
     let plan = plan(&profile, &snapshot, edit)?;
     let claim = exact_evaluation()?;
-    let mut source = Source::new(&plan)?;
+    let source = Source::new(&plan)?;
     let facts = CounterfactualFactsV1 {
         plan_digest: Hash::from_bytes(plan.plan_digest),
         dependency_graph_digest: Hash::from_bytes(source.graph_digest(&plan)?),
@@ -909,6 +1200,26 @@ fn setup_in<B: Backend>(mut store: B, edit: fn(&mut CounterfactualPlanV1)) -> Te
         erasure_epoch: ERASURE_EPOCH,
     };
     store.publish_counterfactual_facts(fork_id(), facts)?;
+    Ok(Seeded {
+        plan,
+        profile,
+        snapshot,
+        claim,
+        facts,
+        source,
+    })
+}
+
+/// A seeded store with an admitted generation 1 whose first Tick is 11.
+fn setup_in<B: Backend>(mut store: B, edit: fn(&mut CounterfactualPlanV1)) -> TestResult<Setup<B>> {
+    let Seeded {
+        plan,
+        profile,
+        snapshot,
+        claim,
+        facts,
+        mut source,
+    } = seed(&mut store, edit)?;
     let mut coordinator = CounterfactualCoordinatorV1::new(store);
     let receipt = coordinator.admit(
         &admission_request(&plan, &profile, &snapshot, &claim),
@@ -930,8 +1241,48 @@ fn setup_in<B: Backend>(mut store: B, edit: fn(&mut CounterfactualPlanV1)) -> Te
     })
 }
 
+/// A seeded store with generation 1 admitted through the recording path, so
+/// its first Tick's dependency record started the generation's set.
+fn setup_recording_in<B: RecordingBackend>(
+    mut store: B,
+    edit: fn(&mut CounterfactualPlanV1),
+) -> TestResult<Setup<B>> {
+    let Seeded {
+        plan,
+        profile,
+        snapshot,
+        claim,
+        facts,
+        mut source,
+    } = seed(&mut store, edit)?;
+    let mut coordinator = CounterfactualCoordinatorV1::new(store);
+    let mut stager = DeclaringStager::new(&source, Stager::default())?;
+    let receipt = coordinator.admit_with_dependencies(
+        &admission_request(&plan, &profile, &snapshot, &claim),
+        &Authority,
+        &mut source,
+        &mut stager,
+    )?;
+    Ok(Setup {
+        coordinator,
+        source,
+        fixture: Fixture {
+            plan,
+            profile,
+            snapshot,
+            claim,
+            facts,
+            receipt,
+        },
+    })
+}
+
 fn prepare<B: Backend>() -> TestResult<Setup<B>> {
     setup_in(B::open()?, |_| {})
+}
+
+fn prepare_recording<B: RecordingBackend>() -> TestResult<Setup<B>> {
+    setup_recording_in(B::open()?, |_| {})
 }
 
 /// Release the store, change it, and hand it to a new coordinator.
@@ -985,6 +1336,15 @@ fn run<B: Backend>(setup: &mut Setup<B>, stager: &mut Stager) -> Suffix {
     setup
         .coordinator
         .recompute_suffix(&suffix_request(&setup.fixture), stager)
+}
+
+fn run_recording<B: RecordingBackend>(
+    setup: &mut Setup<B>,
+    stager: &mut DeclaringStager,
+) -> Suffix {
+    setup
+        .coordinator
+        .recompute_suffix_with_dependencies(&suffix_request(&setup.fixture), stager)
 }
 
 /// Run with a stager that must not be called and expect `error`.
@@ -2036,6 +2396,318 @@ fn suffix_length_is_bounded_by_the_checkpoint_limit() -> TestResult {
     assert_rejected(&mut beyond, SuffixError::SuffixTooLong);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Dependency records
+// ---------------------------------------------------------------------------
+
+/// The Tick whose declaration the rejection cases tamper with; Tick 13 is
+/// the last committed one then.
+const DECLARATION_TICK: u64 = 14;
+
+fn recording_suffix_matches_the_plain_run_and_records_every_tick<B: RecordingBackend>() -> TestResult
+{
+    let reference = reference()?;
+    let mut setup = prepare_recording::<B>()?;
+    let mut stager = DeclaringStager::new(&setup.source, Stager::default())?;
+    // Admission recorded the first Tick's record, with the root of Tick 10
+    // riding it; later Ticks declare nothing yet.
+    assert_eq!(
+        recorded(&setup)?,
+        declared_through(&stager.declarations, FRONTIER_TICK)
+    );
+    assert_eq!(run_recording(&mut setup, &mut stager)?, reference);
+    assert_eq!(
+        stager.inner.ticks(),
+        (FRONTIER_TICK + 1..=HORIZON_TICK).collect::<Vec<_>>()
+    );
+    assert_eq!(head(&setup)?, committed_head(HORIZON_TICK));
+    // Every Tick's record committed with its Events: eight nodes and seven
+    // edges through Tick 16, and the empty records of Ticks 17 through 20.
+    let all = declared_through(&stager.declarations, HORIZON_TICK);
+    assert_eq!((all.0.len(), all.1.len()), (8, 7));
+    assert_eq!(stager.declarations.len(), 6);
+    assert_eq!(recorded(&setup)?, all);
+
+    // Recovery does not depend on the records: the plain call and the
+    // recording call recover the completed generation to the same artifacts
+    // and stage nothing.
+    let mut plain = Stager::default();
+    assert_eq!(run(&mut setup, &mut plain)?, reference);
+    assert!(plain.seen.is_empty());
+    let mut again = DeclaringStager::new(&setup.source, Stager::default())?;
+    assert_eq!(run_recording(&mut setup, &mut again)?, reference);
+    assert!(again.inner.seen.is_empty());
+    Ok(())
+}
+both_backends!(recording_suffix_matches_the_plain_run_and_records_every_tick);
+
+/// Tamperings of Tick 14's declaration with the contract error each must
+/// report; every one is detected by the seam before any store call.
+const SUFFIX_DECLARATION_CASES: [DeclarationCase; 5] = [
+    // A root at the last committed Tick; one at the staged Tick is admitted.
+    (
+        |declaration| {
+            declaration.0.insert(0, root_at(DECLARATION_TICK - 1)?);
+            Ok(())
+        },
+        DependencyError::BindingMismatch,
+    ),
+    // A root after the staged Tick.
+    (
+        |declaration| {
+            declaration.0.push(root_at(DECLARATION_TICK + 1)?);
+            Ok(())
+        },
+        DependencyError::BindingMismatch,
+    ),
+    (
+        |declaration| {
+            declaration.1.swap(0, 1);
+            Ok(())
+        },
+        DependencyError::NonCanonicalOrder,
+    ),
+    (
+        |declaration| {
+            let repeated = declaration.1[0].clone();
+            declaration.1.insert(0, repeated);
+            Ok(())
+        },
+        DependencyError::DuplicateIdentity,
+    ),
+    // Edges whose consumer is not a node of the record.
+    (
+        |declaration| {
+            declaration.0.clear();
+            Ok(())
+        },
+        DependencyError::UnknownConsumer,
+    ),
+];
+
+fn rejected_declarations_fail_the_tick_and_retry_from_the_same_inputs<B: RecordingBackend>(
+) -> TestResult {
+    let reference = reference()?;
+    for (tamper, expected) in SUFFIX_DECLARATION_CASES {
+        let mut setup = prepare_recording::<B>()?;
+        let mut attempt = DeclaringStager::tampering(&setup.source, DECLARATION_TICK, tamper)?;
+        let failed = run_recording(&mut setup, &mut attempt)?;
+        assert_eq!(attempt.inner.ticks(), vec![12, 13, DECLARATION_TICK]);
+        assert_failed_at(
+            &setup,
+            &failed,
+            Failure::DependencyDeclarationRejected(expected),
+            CounterfactualTerminalErrorCodeV1::PluginFailure,
+            DECLARATION_TICK,
+        )?;
+        assert_eq!(
+            recorded(&setup)?,
+            declared_through(&attempt.declarations, DECLARATION_TICK - 1)
+        );
+
+        // The failure is repeatable until the declaration is repaired, and
+        // every retry stages the Tick from the same inputs.
+        let mut retry = DeclaringStager::tampering(&setup.source, DECLARATION_TICK, tamper)?;
+        assert_eq!(run_recording(&mut setup, &mut retry)?, failed);
+        assert_eq!(retry.inner.ticks(), vec![DECLARATION_TICK]);
+        assert_eq!(retry.inner.seen.last(), attempt.inner.seen.last());
+
+        let mut finish = DeclaringStager::new(&setup.source, Stager::default())?;
+        assert_eq!(run_recording(&mut setup, &mut finish)?, reference);
+        assert_eq!(
+            finish.inner.ticks(),
+            (DECLARATION_TICK..=HORIZON_TICK).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            recorded(&setup)?,
+            declared_through(&finish.declarations, HORIZON_TICK)
+        );
+    }
+    Ok(())
+}
+both_backends!(rejected_declarations_fail_the_tick_and_retry_from_the_same_inputs);
+
+/// Add a fresh root at the staged Tick itself.
+fn root_at_the_staged_tick(declaration: &mut Declaration) -> TestResult {
+    declaration.0.push(root_at(DECLARATION_TICK)?);
+    Ok(())
+}
+
+fn a_root_at_the_staged_tick_rides_its_record<B: RecordingBackend>() -> TestResult {
+    let mut setup = prepare_recording::<B>()?;
+    let mut stager =
+        DeclaringStager::tampering(&setup.source, DECLARATION_TICK, root_at_the_staged_tick)?;
+    assert_eq!(run_recording(&mut setup, &mut stager)?, reference()?);
+    let mut expected = declared_through(&stager.declarations, HORIZON_TICK);
+    expected.0.push(root_at(DECLARATION_TICK)?);
+    sort_declaration(&mut expected);
+    assert_eq!(recorded(&setup)?, expected);
+    Ok(())
+}
+both_backends!(a_root_at_the_staged_tick_rides_its_record);
+
+/// Declare Tick 12's output under Tick 11's artifact digest, which the
+/// generation's set already holds; the record is valid on its own.
+fn repeated_digest(declaration: &mut Declaration) -> TestResult {
+    declaration.0 = vec![node_at(
+        12,
+        "world",
+        [0xd3; 32],
+        RecordedDependencyClassV1::EndogenousRecomputed,
+    )?];
+    declaration.1.clear();
+    Ok(())
+}
+
+fn store_rejected_record_fails_the_tick_atomically<B: RecordingBackend>() -> TestResult {
+    let reference = reference()?;
+    let mut setup = prepare_recording::<B>()?;
+    let mut attempt = DeclaringStager::tampering(&setup.source, 12, repeated_digest)?;
+    let failed = run_recording(&mut setup, &mut attempt)?;
+    // The store rejects the record against the set, so nothing of Tick 12
+    // committed, neither its Events nor its record.
+    assert_failed_at(
+        &setup,
+        &failed,
+        Failure::AtomicCommitFailed,
+        CounterfactualTerminalErrorCodeV1::AtomicCommitFailed,
+        12,
+    )?;
+    assert_eq!(
+        recorded(&setup)?,
+        declared_through(&attempt.declarations, FRONTIER_TICK)
+    );
+    let mut retry = DeclaringStager::tampering(&setup.source, 12, repeated_digest)?;
+    assert_eq!(run_recording(&mut setup, &mut retry)?, failed);
+    let mut finish = DeclaringStager::new(&setup.source, Stager::default())?;
+    assert_eq!(run_recording(&mut setup, &mut finish)?, reference);
+    assert_eq!(
+        recorded(&setup)?,
+        declared_through(&finish.declarations, HORIZON_TICK)
+    );
+    Ok(())
+}
+both_backends!(store_rejected_record_fails_the_tick_atomically);
+
+fn a_stale_tick_basis_records_nothing<B: RecordingBackend>() -> TestResult {
+    let setup = prepare_recording::<Faulty<B>>()?;
+    let change: FactsChange = |facts| facts.erasure_epoch += 1;
+    let mut setup = configure(setup, StoreFault::None, Interference::Republish(3, change))?;
+    let mut stager = DeclaringStager::new(&setup.source, Stager::default())?;
+    let failed = run_recording(&mut setup, &mut stager)?;
+    assert_failed_at(
+        &setup,
+        &failed,
+        Failure::InvalidationConflict(InvalidationConflictV1::ErasureEpoch),
+        CounterfactualTerminalErrorCodeV1::InvalidationConflict,
+        14,
+    )?;
+    assert_eq!(
+        recorded(&setup)?,
+        declared_through(&stager.declarations, 13)
+    );
+    Ok(())
+}
+both_backends!(a_stale_tick_basis_records_nothing);
+
+fn recording_suffix_recovers_committed_ticks_and_records<B: RecordingBackend>() -> TestResult {
+    let reference = reference()?;
+    let mut setup = prepare_recording::<B>()?;
+    let mut stager = DeclaringStager::new(&setup.source, Stager::failing(15, Fault::Error))?;
+    let failed = run_recording(&mut setup, &mut stager)?;
+    assert_eq!(failed.failure, Some(Failure::PluginFailure));
+    assert_eq!(
+        recorded(&setup)?,
+        declared_through(&stager.declarations, 14)
+    );
+    // A new coordinator over the same store recovers Ticks 11 through 14
+    // and their records from the Event Store and finishes the suffix.
+    let mut restarted = reopen(setup, |_| Ok(()))?;
+    let mut finish = DeclaringStager::new(&restarted.source, Stager::default())?;
+    assert_eq!(run_recording(&mut restarted, &mut finish)?, reference);
+    assert_eq!(
+        finish.inner.ticks(),
+        (15..=HORIZON_TICK).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        recorded(&restarted)?,
+        declared_through(&finish.declarations, HORIZON_TICK)
+    );
+
+    // Tamper evidence is unchanged: a forged Tick is rejected by the
+    // recording call too.
+    let mut setup = prepare_recording::<B>()?;
+    let mut early = DeclaringStager::new(&setup.source, Stager::failing(12, Fault::Error))?;
+    run_recording(&mut setup, &mut early)?;
+    let forged = with_first_draft_rewritten(&forged_tick(&setup.fixture, 12)?);
+    let mut setup = reopen(setup, |store| {
+        store.append(fork_id(), &forged)?;
+        Ok(())
+    })?;
+    let mut stager = DeclaringStager::new(&setup.source, Stager::default())?;
+    assert_eq!(
+        run_recording(&mut setup, &mut stager),
+        Err(SuffixError::RecoveryMismatch)
+    );
+    assert!(stager.inner.seen.is_empty());
+    Ok(())
+}
+both_backends!(recording_suffix_recovers_committed_ticks_and_records);
+
+fn unknown_recording_tick_outcomes_are_resolved_from_the_basis<B: RecordingBackend>() -> TestResult
+{
+    let reference = reference()?;
+    // Tick 13 did not commit, its record included, and the basis proves it.
+    let setup = prepare_recording::<Faulty<B>>()?;
+    let mut setup = configure(setup, StoreFault::None, Interference::LostUnknown(2))?;
+    let mut stager = DeclaringStager::new(&setup.source, Stager::default())?;
+    let failed = run_recording(&mut setup, &mut stager)?;
+    assert_failed_at(
+        &setup,
+        &failed,
+        Failure::AtomicCommitFailed,
+        CounterfactualTerminalErrorCodeV1::AtomicCommitFailed,
+        13,
+    )?;
+    assert_eq!(
+        recorded(&setup)?,
+        declared_through(&stager.declarations, 12)
+    );
+    let mut finish = DeclaringStager::new(&setup.source, Stager::default())?;
+    assert_eq!(run_recording(&mut setup, &mut finish)?, reference);
+    assert_eq!(
+        recorded(&setup)?,
+        declared_through(&finish.declarations, HORIZON_TICK)
+    );
+
+    // Tick 13 committed with its record: no result is sealed, and the next
+    // call recovers it from the Event Store.
+    let setup = prepare_recording::<Faulty<B>>()?;
+    let mut setup = configure(setup, StoreFault::None, Interference::LandedUnknown(2))?;
+    let mut stager = DeclaringStager::new(&setup.source, Stager::default())?;
+    assert_eq!(
+        run_recording(&mut setup, &mut stager),
+        Err(SuffixError::TickOutcomeUnknown)
+    );
+    assert_eq!(head(&setup)?, committed_head(13));
+    assert_eq!(
+        recorded(&setup)?,
+        declared_through(&stager.declarations, 13)
+    );
+    let mut finish = DeclaringStager::new(&setup.source, Stager::default())?;
+    assert_eq!(run_recording(&mut setup, &mut finish)?, reference);
+    assert_eq!(
+        finish.inner.ticks(),
+        (14..=HORIZON_TICK).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        recorded(&setup)?,
+        declared_through(&finish.declarations, HORIZON_TICK)
+    );
+    Ok(())
+}
+both_backends!(unknown_recording_tick_outcomes_are_resolved_from_the_basis);
 
 #[test]
 fn every_error_has_a_distinct_safe_message() {
