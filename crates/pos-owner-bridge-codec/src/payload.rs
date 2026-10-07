@@ -536,7 +536,8 @@ pub fn decode_assertion_reply(input: &[u8]) -> Result<AssertionReplyV1<'_>, Owne
 
 /// Name the verification reason for a reply field of the wrong shape.
 ///
-/// A wrong type, wrong length, or truncated field becomes `reason`. Every
+/// A wrong type, wrong length, or truncated field becomes `reason`: the reader reports all three
+/// as `InvalidCbor`, so a payload that ends inside the field is also reported as `reason`. Every
 /// other failure, such as a non-shortest encoding, keeps its own error.
 const fn field_fault(
     error: OwnerBridgeCodecError,

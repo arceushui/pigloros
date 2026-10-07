@@ -225,8 +225,8 @@ impl JsonString<'_> {
     fn equals_string(self, other: Self) -> bool {
         let mut left_offset = 0;
         let mut right_offset = 0;
-        // Each side yields at most one scalar per input byte, so this bound
-        // is never the deciding factor for a well-formed string.
+        // The bound exists only to make the loop provably finite: each side consumes at least
+        // one byte per scalar, so a well-formed string ends before the bound is reached.
         (0..=self.raw.len())
             .find_map(|_| self.compare_next(other, &mut left_offset, &mut right_offset))
             .unwrap_or(false)
@@ -323,6 +323,7 @@ impl<'a> JsonParser<'a> {
     }
 
     fn skip_whitespace(&mut self) {
+        // Counting the whitespace run (instead of looping on the offset) keeps this finite.
         let rest = self.input.as_bytes().get(self.offset..).unwrap_or_default();
         self.offset += rest
             .iter()
