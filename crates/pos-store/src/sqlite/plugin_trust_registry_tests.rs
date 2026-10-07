@@ -21,7 +21,8 @@ use crate::plugin_trust_registry::{
     PluginTrustPolicyRegistryV1, ProvisionOutcomeV1,
 };
 use crate::plugin_trust_registry_fixtures::{
-    activation, release_one, release_two, Backend, Env, Gate, Guard, Harness, TestResult,
+    activation, release_one, release_three, release_two, Backend, Env, Gate, Guard, Harness,
+    TestResult,
 };
 use crate::sqlite::SqliteStore;
 
@@ -148,22 +149,26 @@ fn a_reopened_store_runs_at_full_and_stays_there() -> TestResult {
     Ok(())
 }
 
-// A read-only handle: `plugin_trust_transaction` always runs the whole durability protocol, so
-// the level is set and restored around every mutating call. An identical re-provision plans no
-// write and so commits an empty transaction (`Unchanged`); every call that must write fails with
-// a storage-class error at its first write (or at `BEGIN IMMEDIATE` when SQLite refuses it
-// there), and the entry level is restored after each call either way.
+// A read-only handle (observed on CI, entry level 2): an identical re-provision plans no write
+// and commits an empty transaction, so it is `Unchanged`; every call that must write fails at its
+// first write with `StorageFailed` (whether that is `BEGIN IMMEDIATE` or the first write
+// statement cannot be told apart from outside). `admit` and `rollback` reach their activation
+// Event append as the first write, and the append refuses with `ActivationEventRejected`. The
+// entry level is restored after every call.
 #[test]
 fn a_read_only_handle_cannot_write_and_restores_the_level() -> TestResult {
-    let h = Harness::<SqliteStore>::open()?;
+    let mut h = Harness::<SqliteStore>::open()?;
+    let genesis = h.env.genesis()?;
+    let (one, two, three) = (release_one(), release_two(), release_three());
+    h.admit(&genesis, &one, 1)??;
+    h.admit(&genesis, &two, 2)??;
     let path = path_of(&h.guard)?;
     let mut read_only = SqliteStore::open_read_only(&path)?;
     let entry = level(&read_only)?;
-    let genesis = h.env.genesis()?;
-    assert!(matches!(
+    assert_eq!(
         read_only.provision(&h.env.anchor, &h.env.genesis_tps1),
-        Ok(ProvisionOutcomeV1::Unchanged) | Err(Error::StorageFailed)
-    ));
+        Ok(ProvisionOutcomeV1::Unchanged)
+    );
     assert_eq!(level(&read_only)?, entry);
     let other = Env::new("scope-two")?;
     assert_eq!(
@@ -171,55 +176,47 @@ fn a_read_only_handle_cannot_write_and_restores_the_level() -> TestResult {
         Err(Error::StorageFailed)
     );
     assert_eq!(level(&read_only)?, entry);
+    let trusted = genesis.trusted()?;
     assert_eq!(
         read_only.advance_policy(
             &h.env.anchor,
             &genesis.tps1,
             &genesis.evidence,
-            genesis.trusted()?,
+            trusted,
             genesis.tick
         ),
         Err(Error::StorageFailed)
     );
     assert_eq!(level(&read_only)?, entry);
-    let projection = release_one().projection()?;
-    let trusted = genesis.trusted()?;
-    let timeline = TimelineId::new();
-    let admit = |store: &mut SqliteStore| {
-        store.admit(
-            &h.env.anchor,
-            &genesis.tps1,
-            &genesis.evidence,
-            &projection,
-            trusted,
-            genesis.tick,
-            activation(timeline, 1),
-        )
-    };
-    let rollback = |store: &mut SqliteStore| {
-        store.rollback(
-            &h.env.anchor,
-            &genesis.tps1,
-            &genesis.evidence,
-            &projection,
-            trusted,
-            genesis.tick,
-            activation(timeline, 1),
-        )
-    };
-    // Without a bound gate the fence refuses first.
-    assert_eq!(admit(&mut read_only), Err(Error::ActivationEventRejected));
-    assert_eq!(rollback(&mut read_only), Err(Error::ActivationEventRejected));
+
+    // R3 is the direct successor of the active R2, and a rollback to R1 is legal: both reach the
+    // Event append on the real Timeline.
     read_only.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
-    assert!(matches!(
-        admit(&mut read_only),
-        Err(Error::StorageFailed | Error::ActivationEventRejected)
-    ));
+    assert_eq!(
+        read_only.admit(
+            &h.env.anchor,
+            &genesis.tps1,
+            &genesis.evidence,
+            &three.projection()?,
+            trusted,
+            genesis.tick,
+            activation(h.timeline, 3),
+        ),
+        Err(Error::ActivationEventRejected)
+    );
     assert_eq!(level(&read_only)?, entry);
-    assert!(matches!(
-        rollback(&mut read_only),
-        Err(Error::StorageFailed | Error::UnknownRollbackTarget)
-    ));
+    assert_eq!(
+        read_only.rollback(
+            &h.env.anchor,
+            &genesis.tps1,
+            &genesis.evidence,
+            &one.projection()?,
+            trusted,
+            genesis.tick,
+            activation(h.timeline, 3),
+        ),
+        Err(Error::ActivationEventRejected)
+    );
     assert_eq!(level(&read_only)?, entry);
     Ok(())
 }
