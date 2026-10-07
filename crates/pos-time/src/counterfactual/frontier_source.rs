@@ -162,6 +162,9 @@ trait RecordedRowV1: DependencyPagedRowV1 + Sized {
     fn tick(&self) -> u64;
 
     /// Convert the row; a stored row the codec rejects is `CorruptState`.
+    ///
+    /// The node conversion is infallible; its `Result` only unifies this
+    /// trait with the edge conversion, which decodes stored bytes.
     fn convert(&self) -> Result<Self::Graph, CounterfactualStoreErrorV1>;
 }
 
@@ -290,6 +293,11 @@ impl<P: CounterfactualDependencyReadPortV1> RecordedFrontierSourceV1<P> {
         &self,
         plan: &CounterfactualPlanV1,
     ) -> Result<ValidatedDependencyGraphV1, RecordedGraphFaultV1> {
+        // The clamp is observably redundant: bounds above a hard maximum make
+        // the validator answer `FieldOutOfBounds` whatever was read, and the
+        // read stops early only with the same `DependencyGraphInvalid`
+        // admission outcome. It only keeps the early stop within the hard
+        // maximum, which no test can exceed without millions of rows.
         let max_nodes = self.bounds.max_nodes.min(MAX_DEPENDENCY_GRAPH_NODES_V1);
         let max_edges = self.bounds.max_edges.min(MAX_DEPENDENCY_GRAPH_EDGES_V1);
         let mut nodes = Vec::new();
@@ -320,8 +328,11 @@ impl<P: CounterfactualDependencyReadPortV1> RecordedFrontierSourceV1<P> {
                     .or(Err(CounterfactualDependencyErrorV1::READ_BACK_FAULT))?;
             let page = R::read(&self.port, &request)?;
             let rows = page.items();
+            // `partition_point` relies on the port contract: nodes are ordered
+            // by their own Tick and edges by consumer Tick first, so the rows
+            // within the bound form a prefix of the page.
             let within = rows.partition_point(|row| row.tick() <= read.through_tick);
-            if out.len().saturating_add(within) > max_rows {
+            if out.len() + within > max_rows {
                 return Err(DependencyGraphErrorV1::ResourceLimitExceeded.into());
             }
             for row in &rows[..within] {

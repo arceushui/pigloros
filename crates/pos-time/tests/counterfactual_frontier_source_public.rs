@@ -465,6 +465,9 @@ fn fork_graph(plan: &CounterfactualPlanV1) -> TestResult<Graph> {
     Ok(connect(nodes, &specs, &[]))
 }
 
+// `graph_error` and `Graph::derive_frontier` below are a deliberate,
+// independent oracle for the differential test: they re-derive the expected
+// outcome straight from the validator and must not share code with the source.
 fn graph_error(error: DependencyGraphErrorV1) -> AdmissionError {
     match error {
         DependencyGraphErrorV1::DependencyGraphIncomplete(coordinate) => {
