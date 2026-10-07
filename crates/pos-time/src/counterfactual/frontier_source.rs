@@ -263,15 +263,17 @@ impl<P: CounterfactualDependencyReadPortV1> RecordedFrontierSourceV1<P> {
     /// Page the recorded graph for `plan` and validate it.
     ///
     /// # Errors
-    /// Returns the errors listed in the module documentation: the validator's
+    /// Returns the errors listed in the module documentation, boxed because
+    /// the admission error is large: the validator's
     /// `DependencyGraphIncomplete` and `UnknownDependencyEdge` with their
     /// coordinate, `DependencyGraphInvalid` for any other rejected graph, and
     /// `Store` for a port failure or corrupt stored rows.
     pub fn recorded_graph(
         &self,
         plan: &CounterfactualPlanV1,
-    ) -> Result<ValidatedDependencyGraphV1, CounterfactualAdmissionErrorV1> {
-        self.read_graph(plan).map_err(admission_error)
+    ) -> Result<ValidatedDependencyGraphV1, Box<CounterfactualAdmissionErrorV1>> {
+        self.read_graph(plan)
+            .map_err(|fault| Box::new(admission_error(fault)))
     }
 
     /// Page and validate the recorded graph for `plan` and return its
@@ -283,7 +285,7 @@ impl<P: CounterfactualDependencyReadPortV1> RecordedFrontierSourceV1<P> {
     pub fn recorded_graph_digest(
         &self,
         plan: &CounterfactualPlanV1,
-    ) -> Result<[u8; 32], CounterfactualAdmissionErrorV1> {
+    ) -> Result<[u8; 32], Box<CounterfactualAdmissionErrorV1>> {
         self.recorded_graph(plan)
             .map(|graph| dependency_graph_digest_v1(&graph))
     }
@@ -355,7 +357,7 @@ impl<P: CounterfactualDependencyReadPortV1> CounterfactualFrontierSourceV1
         frontier_id: [u8; 16],
         provenance_digest: [u8; 32],
     ) -> Result<CounterfactualFrontierDerivationV1, CounterfactualAdmissionErrorV1> {
-        let graph = self.recorded_graph(plan)?;
+        let graph = self.read_graph(plan).map_err(admission_error)?;
         let frontier =
             derive_recomputation_frontier_v1(plan, &graph, frontier_id, provenance_digest)
                 .or(Err(CounterfactualAdmissionErrorV1::DependencyGraphInvalid))?;

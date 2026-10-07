@@ -980,7 +980,7 @@ fn stops_reading_one_row_past_the_bounds() -> TestResult {
         RecordedFrontierSourceV1::new(recorded(), generation(1), node_bound).with_page_limit(2);
     assert_eq!(
         source.recorded_graph_digest(&plan),
-        Err(AdmissionError::DependencyGraphInvalid)
+        Err(Box::new(AdmissionError::DependencyGraphInvalid))
     );
     let port = source.port();
     assert_eq!(port.requests.borrow().len(), 3);
@@ -996,7 +996,7 @@ fn stops_reading_one_row_past_the_bounds() -> TestResult {
         RecordedFrontierSourceV1::new(recorded(), generation(1), edge_bound).with_page_limit(2);
     assert_eq!(
         source.recorded_graph_digest(&plan),
-        Err(AdmissionError::DependencyGraphInvalid)
+        Err(Box::new(AdmissionError::DependencyGraphInvalid))
     );
     let port = source.port();
     assert_eq!(port.requests.borrow().len(), 8);
