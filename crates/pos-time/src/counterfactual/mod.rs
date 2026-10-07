@@ -6,3 +6,4 @@
 
 pub mod dependency_graph;
 pub mod frontier;
+pub mod frontier_source;
