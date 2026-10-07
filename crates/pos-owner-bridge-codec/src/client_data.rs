@@ -130,10 +130,15 @@ fn validate_text_client_data_member(
     expected: &str,
     fault: VerificationReason,
 ) -> Result<(), VerificationReason> {
-    match value {
-        JsonValue::String(text) => text.equals_text(expected).then_some(()).ok_or(fault),
-        JsonValue::Boolean(_) => Err(fault),
+    if text_equals(value, expected) {
+        Ok(())
+    } else {
+        Err(fault)
     }
+}
+
+fn text_equals(value: JsonValue<'_>, expected: &str) -> bool {
+    matches!(value, JsonValue::String(text) if text.equals_text(expected))
 }
 
 fn validate_challenge_client_data_member(
@@ -220,15 +225,18 @@ impl JsonString<'_> {
     fn equals_string(self, other: Self) -> bool {
         let mut left_offset = 0;
         let mut right_offset = 0;
-        loop {
-            match (
-                self.next_scalar(&mut left_offset),
-                other.next_scalar(&mut right_offset),
-            ) {
-                (Some(left), Some(right)) if left == right => {}
-                (None, None) => return true,
-                _ => return false,
-            }
+        // Each side yields at most one scalar per input byte, so this bound
+        // is never the deciding factor for a well-formed string.
+        (0..=self.raw.len())
+            .find_map(|_| self.compare_next(other, &mut left_offset, &mut right_offset))
+            .unwrap_or(false)
+    }
+
+    fn compare_next(self, other: Self, left: &mut usize, right: &mut usize) -> Option<bool> {
+        match (self.next_scalar(left), other.next_scalar(right)) {
+            (Some(first), Some(second)) if first == second => None,
+            (None, None) => Some(true),
+            _ => Some(false),
         }
     }
 
@@ -315,12 +323,11 @@ impl<'a> JsonParser<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        while self
-            .peek_byte()
-            .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
-        {
-            self.offset += 1;
-        }
+        let rest = self.input.as_bytes().get(self.offset..).unwrap_or_default();
+        self.offset += rest
+            .iter()
+            .take_while(|&&byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+            .count();
     }
 
     fn parse_string(&mut self) -> Result<JsonString<'a>, VerificationReason> {

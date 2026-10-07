@@ -521,16 +521,8 @@ pub fn decode_assertion_reply(input: &[u8]) -> Result<AssertionReplyV1<'_>, Owne
     let authenticator_data =
         reader.bytes(MIN_AUTHENTICATOR_DATA_BYTES, MAX_AUTHENTICATOR_DATA_BYTES)?;
     let signature = reader.bytes(MIN_SIGNATURE_BYTES, MAX_SIGNATURE_BYTES)?;
-    let user_handle = reader
-        .optional_fixed_bytes::<32>()
-        .map_err(user_handle_fault)?
-        .map(OwnerUserHandle::from_bytes);
-    let prf_first = reader
-        .optional_fixed_bytes::<32>()
-        .map_err(prf_fault)?
-        .map(PrfResult::from_bytes)
-        .ok_or(PRF_ABSENT)?;
-    reader.null().map_err(prf_fault)?;
+    let user_handle = read_user_handle(&mut reader)?;
+    let prf_first = read_required_prf(&mut reader)?;
     reader.finish()?;
     AssertionReplyV1::new(
         ceremony_id,
@@ -555,6 +547,22 @@ const fn field_fault(
         OwnerBridgeCodecError::InvalidCbor => OwnerBridgeCodecError::Verification(reason),
         other => other,
     }
+}
+
+fn read_user_handle(
+    reader: &mut CborReader<'_>,
+) -> Result<Option<OwnerUserHandle>, OwnerBridgeCodecError> {
+    let handle = reader
+        .optional_fixed_bytes::<32>()
+        .map_err(user_handle_fault)?;
+    Ok(handle.map(OwnerUserHandle::from_bytes))
+}
+
+/// Read the required Get PRF result and the reserved `second` field.
+fn read_required_prf(reader: &mut CborReader<'_>) -> Result<PrfResult, OwnerBridgeCodecError> {
+    let first = reader.optional_fixed_bytes::<32>().map_err(prf_fault)?;
+    reader.null().map_err(prf_fault)?;
+    first.map(PrfResult::from_bytes).ok_or(PRF_ABSENT)
 }
 
 const fn prf_fault(error: OwnerBridgeCodecError) -> OwnerBridgeCodecError {

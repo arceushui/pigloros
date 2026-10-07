@@ -43,9 +43,9 @@ impl From<VerificationReason> for OwnerBridgeCodecError {
     }
 }
 
-impl fmt::Display for OwnerBridgeCodecError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
+impl OwnerBridgeCodecError {
+    const fn message(self) -> &'static str {
+        match self {
             Self::BufferTooSmall => "owner-bridge output buffer is too small",
             Self::InvalidControlHeaderLength => "owner-bridge control header has an invalid length",
             Self::InvalidControlMagic => "owner-bridge control header has an invalid magic",
@@ -60,8 +60,13 @@ impl fmt::Display for OwnerBridgeCodecError {
             Self::TrailingBytes => "owner-bridge input has trailing bytes",
             Self::InvalidPayload => "owner-bridge payload violates its closed schema",
             Self::Verification(_) => "owner-bridge reply field violates a closed rule",
-        };
-        formatter.write_str(message)
+        }
+    }
+}
+
+impl fmt::Display for OwnerBridgeCodecError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message())
     }
 }
 

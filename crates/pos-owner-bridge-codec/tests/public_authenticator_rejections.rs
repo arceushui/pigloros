@@ -293,7 +293,8 @@ fn public_parsers_accept_the_exact_limits() -> Result<(), OwnerBridgeCodecError>
         let data = assertion_authenticator_data(0x85, extension);
         assert_eq!(parse_assertion_authenticator_data(&data)?.sign_count(), 9);
     }
-    assert_eq!(assertion_authenticator_data(0x85, &accepted[3]).len(), 1_024);
+    let largest_data = assertion_authenticator_data(0x85, &accepted[3]);
+    assert_eq!(largest_data.len(), 1_024);
     assert_assertion_data_reason(
         &assertion_authenticator_data(0x85, b"\xa1\x61x\xf7"),
         Reason::Extensions,
