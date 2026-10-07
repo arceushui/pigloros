@@ -125,8 +125,7 @@ fn assertion_from(
         stored.sign_count,
     )
     .map_err(protocol_from_codec)?;
-    let context =
-        AssertionVerificationContext::new(plan.ceremony_id, plan.challenge(), credential);
+    let context = AssertionVerificationContext::new(plan.ceremony_id, plan.challenge(), credential);
     let verified =
         verify_assertion_reply(reply, context).map_err(BridgeError::from_verification_reason)?;
     prf.copy_from_slice(verified.prf_first().as_bytes());
