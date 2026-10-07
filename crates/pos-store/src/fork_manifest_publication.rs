@@ -5,16 +5,20 @@
 //! accepts manifest bytes or provenance fields from a caller.
 
 use pos_core::{
-    CoreError, EventOriginRecordV1, ForkAdmissionRecordV1, ForkAppendOperationV1,
+    CoreError, EventOriginRecordV1, ForkAppendOperationV1, ForkAttributionCodecErrorV1,
     ForkAttributionOriginV1, ForkInterventionAdmissionV1, ForkPublicationArtifactInputV1,
     ForkPublicationArtifactV1, ForkPublicationBindingInputV1, ForkPublicationBindingV1,
     ForkPublicationOperationInputV1, ForkPublicationOperationV1, ForkPublicationReceiptV1,
-    ForkReproManifestV1, Hash, KeyIdentityV1, KeyRegistryErrorV1, KeyRegistryStateV1, KeyRoleV1,
+    ForkReproManifestV1, Hash, ImportedForkPublicationOperationV1, ImportedKeyRecordV1,
+    ImportedKeyTombstoneV1, KeyIdentityV1, KeyRegistryErrorV1, KeyRegistryStateV1, KeyRoleV1,
     PublicKey, Signature, SignedForkReproManifestV1, TimelineId,
 };
 use pos_crypto::fork_attribution::verify_local_fork_manifest_signature_only;
 
-use crate::ForkEventAuthorityErrorV1;
+use crate::{
+    fork_event_authority::{AuthorityValidatorV1, ValidatedAdmissionV1, ValidatedOriginV1},
+    ForkEventAuthorityErrorV1,
+};
 
 /// Input that can be supplied by the trusted composition root for one local
 /// publication attempt.
@@ -81,12 +85,24 @@ impl HeldRegistryAuthorizationV1 {
 }
 
 /// A sidecar graph returned only after a complete trusted read.
+///
+/// The read accepts a local sidecar and a code-2 imported one (ADR-105 r6
+/// R6.9). The result is evidence, never publication or write authority, and
+/// only the publication port constructs it.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct CommittedForkManifestV1 {
     /// Receipt derived from the two matching committed publication rows.
     pub receipt: ForkPublicationReceiptV1,
     /// Strictly decoded `FPO1` authorization projection.
+    ///
+    /// For an imported sidecar this is the local projection of the code-2
+    /// `FPO1`, and [`Self::authority_origin_digest`] carries its origin. The
+    /// projection is not publication authority.
     pub operation: ForkPublicationOperationV1,
+    /// The code-2 authority-origin digest of an imported sidecar, or `None`
+    /// for a local one (ADR-105 r6 R6.9 read validator (b)).
+    pub authority_origin_digest: Option<Hash>,
     /// Strictly decoded `FPB1` Fork/head binding.
     pub binding: ForkPublicationBindingV1,
     /// Recomputed `FSM1` record address.
@@ -234,7 +250,11 @@ pub trait ForkManifestPublicationPortV1 {
     where
         F: FnOnce(&HeldRegistryAuthorizationV1, &[u8]) -> Result<Signature, E>;
 
-    /// Read and validate the one trusted local sidecar for a Fork/head key.
+    /// Read and validate the one trusted sidecar for a Fork/head key.
+    ///
+    /// This is read validator (b) of ADR-105 r6 R6.9: the sidecar of a local
+    /// Fork and the sidecar of a code-2 imported Fork are both accepted, each
+    /// under its own origin rules, and the result is never write authority.
     ///
     /// # Errors
     ///
@@ -317,7 +337,7 @@ impl From<ForkEventAuthorityErrorV1> for PublicationSourceErrorV1 {
 
 /// Authoritative Fork sources validated for one new issuance.
 pub(crate) struct PublicationSourcesV1 {
-    admission: ForkAdmissionRecordV1,
+    admission: ValidatedAdmissionV1,
     final_chain_head_hash: Hash,
     manifest: ForkReproManifestV1,
 }
@@ -336,12 +356,15 @@ pub(crate) struct CommittedPublicationRowsV1 {
     pub(crate) final_logical_head: u64,
     pub(crate) binding: ForkPublicationBindingV1,
     pub(crate) operation: ForkPublicationOperationV1,
+    /// The authority origin the stored `FPO1` carries.
+    pub(crate) origin: ValidatedOriginV1,
     pub(crate) artifact: ForkPublicationArtifactV1,
 }
 
 /// Trusted sources an adapter read under the same snapshot as the rows.
 pub(crate) struct CommittedPublicationSourcesV1 {
-    pub(crate) admission: PublicationSourceResultV1<ForkAdmissionRecordV1>,
+    pub(crate) admission: PublicationSourceResultV1<ValidatedAdmissionV1>,
+    pub(crate) retained: PublicationSourceResultV1<RetainedKeyEvidenceV1>,
     pub(crate) final_chain_head_hash: PublicationSourceResultV1<Hash>,
     pub(crate) suffix: PublicationSourceResultV1<PublicationSuffixV1>,
     pub(crate) registry: PublicationSourceResultV1<Option<KeyRegistryStateV1>>,
@@ -349,7 +372,8 @@ pub(crate) struct CommittedPublicationSourcesV1 {
 
 /// Comparison sources a trusted read obtained successfully.
 struct TrustedPublicationSourcesV1 {
-    admission: ForkAdmissionRecordV1,
+    admission: ValidatedAdmissionV1,
+    key_evidence: RetainedKeyEvidenceV1,
     final_chain_head_hash: Hash,
     intervention_sequences: Vec<u64>,
     registry: Option<KeyRegistryStateV1>,
@@ -408,11 +432,11 @@ const fn recovery_error(error: ForkManifestPublicationErrorV1) -> ForkManifestPu
 
 /// The parent cut of an admitted Fork, or the failure of its admission read.
 pub(crate) fn publication_parent_head(
-    admission: &PublicationSourceResultV1<ForkAdmissionRecordV1>,
+    admission: &PublicationSourceResultV1<ValidatedAdmissionV1>,
 ) -> PublicationSourceResultV1<u64> {
     admission
         .as_ref()
-        .map(|admission| admission.input().parent_logical_head)
+        .map(|admission| admission.fields().parent_logical_head)
         .map_err(|error| *error)
 }
 
@@ -485,7 +509,7 @@ pub(crate) fn authorize_publication(
 /// head, then derive `FRM1` only from the adapter's authoritative sources.
 pub(crate) fn publication_sources(
     request: &ForkManifestPublicationRequestV1,
-    admission: PublicationSourceResultV1<ForkAdmissionRecordV1>,
+    admission: PublicationSourceResultV1<ValidatedAdmissionV1>,
     head_and_chain: PublicationSourceResultV1<(u64, Hash)>,
     suffix: PublicationSourceResultV1<PublicationSuffixV1>,
 ) -> PublicationResultV1<PublicationSourcesV1> {
@@ -502,26 +526,32 @@ pub(crate) fn publication_sources(
 
 fn bind_publication_sources(
     request: &ForkManifestPublicationRequestV1,
-    admission: ForkAdmissionRecordV1,
+    admission: ValidatedAdmissionV1,
     head: u64,
     chain: Hash,
     suffix: PublicationSuffixV1,
 ) -> PublicationResultV1<PublicationSourcesV1> {
-    if admission.input().creator != request.signing_identity.owner_id {
+    if admission.fields().creator != request.signing_identity.owner_id {
         return Err(ForkManifestPublicationErrorV1::PrincipalOwnerConflict);
     }
     if head != request.expected_final_logical_head {
         return Err(ForkManifestPublicationErrorV1::SequenceOrHeadChanged);
     }
     let interventions = intervention_sequences(suffix, head);
-    ForkReproManifestV1::from_admission(&admission, interventions, head, chain)
-        .ok()
-        .map(|manifest| PublicationSourcesV1 {
-            admission,
-            final_chain_head_hash: chain,
-            manifest,
-        })
-        .ok_or(ForkManifestPublicationErrorV1::CorruptAuthority)
+    ForkReproManifestV1::from_admission_fields(
+        admission.digest(),
+        admission.fields(),
+        interventions,
+        head,
+        chain,
+    )
+    .ok()
+    .map(|manifest| PublicationSourcesV1 {
+        admission,
+        final_chain_head_hash: chain,
+        manifest,
+    })
+    .ok_or(ForkManifestPublicationErrorV1::CorruptAuthority)
 }
 
 /// The ordered classified intervention sequences at or below a final head.
@@ -576,7 +606,7 @@ where
 /// Derive `FPO1`, `FPB1`, `FPA1`, and `FPR1` from the ADR-099 source table.
 fn publication_graph(
     request: &ForkManifestPublicationRequestV1,
-    admission: &ForkAdmissionRecordV1,
+    admission: &ValidatedAdmissionV1,
     final_chain_head_hash: Hash,
     signed: &SignedForkReproManifestV1,
 ) -> PublicationResultV1<PublicationGraphV1> {
@@ -632,6 +662,7 @@ pub(crate) fn trusted_committed_manifest(
 ) -> PublicationResultV1<CommittedForkManifestV1> {
     let CommittedPublicationSourcesV1 {
         admission,
+        retained,
         final_chain_head_hash,
         suffix,
         registry,
@@ -640,15 +671,71 @@ pub(crate) fn trusted_committed_manifest(
         .and_then(|admission| final_chain_head_hash.map(|chain| (admission, chain)))
         .and_then(|(admission, chain)| suffix.map(|suffix| (admission, chain, suffix)))
         .and_then(|(admission, chain, suffix)| {
+            retained.map(|key_evidence| (admission, chain, suffix, key_evidence))
+        })
+        .and_then(|(admission, chain, suffix, key_evidence)| {
             registry.map(|registry| TrustedPublicationSourcesV1 {
                 admission,
+                key_evidence,
                 final_chain_head_hash: chain,
                 intervention_sequences: intervention_sequences(suffix, rows.final_logical_head),
                 registry,
             })
         })
         .map_err(PublicationSourceErrorV1::into_publication_conflict)
-        .and_then(|trusted| verified_committed_manifest(rows, &trusted))
+        .and_then(|trusted| verified_committed_origin(rows, &trusted))
+}
+
+/// ADR-105 r6 R6.9: the stored `FPO1` carries the same authority origin as
+/// the `FAR1` that validated, before the shared trusted read runs.
+fn verified_committed_origin(
+    rows: &CommittedPublicationRowsV1,
+    trusted: &TrustedPublicationSourcesV1,
+) -> PublicationResultV1<CommittedForkManifestV1> {
+    if rows.origin == trusted.admission.origin() {
+        verified_committed_manifest(rows, trusted)
+    } else {
+        Err(ForkManifestPublicationErrorV1::PublicationConflict)
+    }
+}
+
+/// One stored `FPO1` decoded with its authority origin.
+pub(crate) type DecodedPublicationOperationV1 =
+    Result<(ForkPublicationOperationV1, ValidatedOriginV1), ForkAttributionCodecErrorV1>;
+
+/// The `FPO1` decoder that one R6.9 validator may use.
+///
+/// Validator (a) reads with the strict local decoder alone, which rejects
+/// code 2, so issuance and recovery never decode a code-2 record. Only
+/// validator (b) may fall back to the code-2 decoder.
+pub(crate) fn publication_operation_decoder(
+    validator: AuthorityValidatorV1,
+) -> fn(&[u8]) -> DecodedPublicationOperationV1 {
+    match validator {
+        AuthorityValidatorV1::LocalOnly => decode_local_publication_operation,
+        AuthorityValidatorV1::CodeTwoAware => decode_publication_operation,
+    }
+}
+
+/// Strictly decode one stored `FPO1` as the local record only.
+fn decode_local_publication_operation(bytes: &[u8]) -> DecodedPublicationOperationV1 {
+    ForkPublicationOperationV1::from_canonical_cbor(bytes)
+        .map(|operation| (operation, ValidatedOriginV1::Local))
+}
+
+/// Strictly decode one stored `FPO1` as the local record or, failing that, as
+/// the code-2 record, and report which origin it carries.
+///
+/// ADR-105 r6 R6.9: only read validator (b) reaches this decoder.
+fn decode_publication_operation(bytes: &[u8]) -> DecodedPublicationOperationV1 {
+    decode_local_publication_operation(bytes).or_else(|_| {
+        ImportedForkPublicationOperationV1::from_canonical_cbor(bytes).map(|operation| {
+            (
+                operation.projection().clone(),
+                ValidatedOriginV1::Imported(operation.authority_origin_digest()),
+            )
+        })
+    })
 }
 
 fn verified_committed_manifest(
@@ -672,6 +759,7 @@ fn verified_committed_manifest(
                 .map(|receipt| CommittedForkManifestV1 {
                     receipt,
                     operation: rows.operation.clone(),
+                    authority_origin_digest: rows.origin.imported_digest(),
                     binding: rows.binding,
                     record_id: signed.record_id(),
                     outer_bytes: outer_bytes.clone(),
@@ -718,10 +806,82 @@ fn committed_graph_is_consistent(
         && operation.admission_digest == trusted.admission.digest()
         && signed.identity() == operation.signing_identity
         && signed
-            .validate_against_admission(&trusted.admission)
+            .validate_against_admission_fields(
+                trusted.admission.digest(),
+                trusted.admission.fields(),
+            )
             .is_ok()
         && manifest.intervention_sequences == trusted.intervention_sequences
-        && retained_key_is_consistent(trusted.registry.as_ref(), operation)
+        && trusted
+            .key_evidence
+            .accepts(trusted.registry.as_ref(), operation)
+}
+
+/// Where a trusted read takes the retained `FPO1`/`FSM1` verification key
+/// from (ADR-105 erratum E12).
+///
+/// A local sidecar keeps the ADR-099 rule: the destination's live registry
+/// retains the key. A code-2 sidecar takes it from the `IKR1`/`IKT1` evidence
+/// stored with its import admission, which never enters the live registry.
+/// Validator (a) and every write path use [`Self::LiveRegistry`] only and
+/// never read the retained evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RetainedKeyEvidenceV1 {
+    /// The live `KeyRegistryStateV1` retains the key.
+    LiveRegistry,
+    /// The imported `IKR1` and optional `IKT1` retain the key.
+    Imported(Box<RetainedImportedKeyV1>),
+}
+
+/// The `IKR1` and optional `IKT1` stored with one import admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RetainedImportedKeyV1 {
+    pub(crate) record: ImportedKeyRecordV1,
+    pub(crate) tombstone: Option<ImportedKeyTombstoneV1>,
+}
+
+impl RetainedKeyEvidenceV1 {
+    /// Whether the retained key agrees with the `FPO1` it signed under.
+    fn accepts(
+        &self,
+        registry: Option<&KeyRegistryStateV1>,
+        operation: &ForkPublicationOperationInputV1,
+    ) -> bool {
+        match self {
+            Self::LiveRegistry => retained_key_is_consistent(registry, operation),
+            Self::Imported(retained) => {
+                imported_key_is_consistent(&retained.record, retained.tombstone.as_ref(), operation)
+                    && local_key_agrees(&retained.record, registry)
+            }
+        }
+    }
+}
+
+/// The imported evidence names exactly the `FPO1` identity, public key, and
+/// material digest, as import step 8 required.
+fn imported_key_is_consistent(
+    record: &ImportedKeyRecordV1,
+    tombstone: Option<&ImportedKeyTombstoneV1>,
+    operation: &ForkPublicationOperationInputV1,
+) -> bool {
+    let destroyed = tombstone.map(ImportedKeyTombstoneV1::destroyed_material_digest);
+    record.identity() == operation.signing_identity
+        && record.public_verification_key() == operation.public_verification_key
+        && record.private_material_digest().or(destroyed) == Some(operation.private_material_digest)
+}
+
+/// A local record of the same key identity must equal the retained `IKR1`
+/// byte for byte (ADR-105 erratum E12); no local record is no disagreement.
+///
+/// Equality is deliberate and fails closed: a later local rotation or
+/// destruction of an equal-identity key changes the local record, and the
+/// imported publication is then unreadable until the records agree again.
+fn local_key_agrees(record: &ImportedKeyRecordV1, registry: Option<&KeyRegistryStateV1>) -> bool {
+    registry
+        .and_then(|registry| registry.key_record(record.identity()))
+        .is_none_or(|local| {
+            ImportedKeyRecordV1::from_key_record(&local).is_ok_and(|local| local == *record)
+        })
 }
 
 /// The retained exact-identity key must keep the FPO1 public key, and its

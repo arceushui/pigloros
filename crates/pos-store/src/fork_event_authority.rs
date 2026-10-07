@@ -9,10 +9,12 @@
 use std::sync::{Arc, Weak};
 
 use pos_core::{
-    Event, EventDraft, EventOriginRecordV1, ForkAdmissionRecordV1, ForkAppendOperationV1,
-    ForkAppendSourceIdentityV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
-    ForkClassifierTableV1, ForkEventAppendRequestV1, ForkEventClassifierV1,
-    ForkInterventionAdmissionV1, Hash, TimelineId, MAX_FORK_EVENT_REGISTRAR_BYTES_V1,
+    Event, EventDraft, EventOriginRecordV1, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1,
+    ForkAppendOperationV1, ForkAppendSourceIdentityV1, ForkClassifierRegistrationV1,
+    ForkClassifierSourceV1, ForkClassifierTableV1, ForkEventAppendRequestV1, ForkEventClassifierV1,
+    ForkInterventionAdmissionV1, Hash, ImportedForkAdmissionRecordV1,
+    ImportedForkAttributionAdmissionV1, ImportedForkClassifierGraphV1, TimelineId,
+    MAX_FORK_EVENT_REGISTRAR_BYTES_V1,
 };
 
 use crate::ForkAdmissionAuthoritySessionV1;
@@ -499,6 +501,11 @@ pub trait ForkEventProvenanceAuthorityPortV1 {
 
     /// Read the validated child suffix provenance in Timeline Order.
     ///
+    /// This is read validator (b) of ADR-105 r6 R6.9: it accepts a local Fork
+    /// and a code-2 imported Fork, each under its own origin rules. The result
+    /// is evidence, never write authority: no permit, registration, or append
+    /// follows from reading an imported Fork.
+    ///
     /// # Errors
     ///
     /// Returns an error when the stored suffix is incomplete or fails provenance validation.
@@ -541,26 +548,165 @@ pub(crate) fn fork_append_request(
     .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)
 }
 
+/// The two authority validators of ADR-105 r6 R6.9.
+///
+/// Every write path and every issuance or recovery read passes
+/// [`Self::LocalOnly`]. Only a read caller (`read_fork_event_suffix`,
+/// publication `read_committed`, and, once #561 lands, Replay) passes
+/// [`Self::CodeTwoAware`].
+/// Making the local check origin-aware instead is forbidden by R6.9.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AuthorityValidatorV1 {
+    /// Validator (a): `FAR1` origin exactly `Local`, an `FCC1` Fork-admission
+    /// row naming `D_FAR1`, and `FCS1` resolved only from the local custody
+    /// store. It rejects every code-2 `FAR1`.
+    LocalOnly,
+    /// Validator (b): validator (a) for a local `FAR1`, and for a code-2
+    /// `FAR1` the import admission row and the imported `FCS1` store.
+    CodeTwoAware,
+}
+
+/// The authority origin of a `FAR1` that a validator accepted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ValidatedOriginV1 {
+    /// The local `[1]` origin.
+    Local,
+    /// The code-2 `[2, authority_origin_digest]` origin.
+    Imported(Hash),
+}
+
+impl ValidatedOriginV1 {
+    /// ADR-105 r6 P9: a local classified Event is unsigned, and an imported
+    /// one carries its verified `TimelineIntegritySigning` signature.
+    pub(crate) const fn requires_signature(self) -> bool {
+        matches!(self, Self::Imported(_))
+    }
+
+    /// The code-2 digest, for a public result that must disclose the origin.
+    pub(crate) const fn imported_digest(self) -> Option<Hash> {
+        match self {
+            Self::Local => None,
+            Self::Imported(digest) => Some(digest),
+        }
+    }
+}
+
+/// One `FAR1` that a validator accepted: its fields, its ADR-099 digest over
+/// its exact bytes, and its origin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ValidatedAdmissionV1 {
+    digest: Hash,
+    fields: ForkAdmissionRecordInputV1,
+    origin: ValidatedOriginV1,
+    import: Option<ValidatedImportV1>,
+}
+
+/// The import admission that selects the retained key evidence of a code-2
+/// `FAR1` (ADR-105 erratum E12): the import operation ID keys the `IKR1` and
+/// `IKT1` rows, and the full-envelope digest must equal the stored one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ValidatedImportV1 {
+    pub(crate) import_operation_id: Hash,
+    pub(crate) full_envelope_digest: Hash,
+}
+
+impl ValidatedAdmissionV1 {
+    /// A local `FAR1` that validator (a) accepted.
+    pub(crate) fn local(record: &ForkAdmissionRecordV1) -> Self {
+        Self {
+            digest: record.digest(),
+            fields: record.input().clone(),
+            origin: ValidatedOriginV1::Local,
+            import: None,
+        }
+    }
+
+    /// A code-2 `FAR1` that validator (b) accepted with its import admission.
+    pub(crate) fn imported(
+        record: &ImportedForkAdmissionRecordV1,
+        admission: &ImportedForkAttributionAdmissionV1,
+    ) -> Self {
+        Self {
+            digest: record.digest(),
+            fields: record.fields().clone(),
+            origin: ValidatedOriginV1::Imported(record.authority_origin_digest()),
+            import: Some(ValidatedImportV1 {
+                import_operation_id: admission.input().import_operation_id,
+                full_envelope_digest: admission.input().full_envelope_digest,
+            }),
+        }
+    }
+
+    pub(crate) const fn digest(&self) -> Hash {
+        self.digest
+    }
+
+    pub(crate) const fn fields(&self) -> &ForkAdmissionRecordInputV1 {
+        &self.fields
+    }
+
+    pub(crate) const fn origin(&self) -> ValidatedOriginV1 {
+        self.origin
+    }
+
+    /// The import admission of a code-2 `FAR1`, none for a local one.
+    pub(crate) const fn import(&self) -> Option<ValidatedImportV1> {
+        self.import
+    }
+}
+
+/// The accepted `FAR1` and `FCT1` of one child's classified authority graph.
+pub(crate) struct ValidatedGraphV1 {
+    pub(crate) admission: ValidatedAdmissionV1,
+    pub(crate) table: ForkClassifierTableV1,
+}
+
+/// ADR-105 r6 R6.9 (b), `FAR1` admission: the stored import admission `IFA1`
+/// names exactly this child, this code-2 origin, and this `FAR1` digest.
+pub(crate) fn imported_admission_matches(
+    admission: &ImportedForkAdmissionRecordV1,
+    record: &ImportedForkAttributionAdmissionV1,
+    child_timeline_id: TimelineId,
+) -> bool {
+    let fields = record.input();
+    admission.fields().child_timeline_id == child_timeline_id
+        && fields.child_timeline_id == child_timeline_id
+        && fields.authority_origin_digest == admission.authority_origin_digest()
+        && fields.fork_admission_digest == admission.digest()
+}
+
+/// ADR-105 r6 R6.9 (b), `FCS1` resolution: the imported triple satisfies
+/// rows G1-G8 against the accepted code-2 `FAR1`, with the same check that
+/// the import ran.
+pub(crate) fn imported_graph_matches(
+    graph: &ImportedForkClassifierGraphV1,
+    admission: &ValidatedAdmissionV1,
+) -> bool {
+    graph.matches_admission(admission.fields(), admission.digest())
+}
+
 /// Whether a stored classified Event carries exactly the content its `FOP1` binds.
 ///
 /// ADR-105 r6 R6.5 P8 and R6.9: every adapter requires the `FOP1` `WallTime`,
 /// payload hash, and origin (this child at the `FOP1` logical sequence).
 ///
-/// The signature arm is currently local-only: authority-origin code 1 is the
-/// only active origin, and ADR-099 local append inserts one unsigned Event,
-/// so every classified Event must be unsigned. #519 (ADR-105 r6 P9) adds the
-/// code-2 arm, which instead requires the stored verified signature.
+/// The signature arm follows P9 by the validated origin: a local child's
+/// Event is unsigned, as ADR-099 local append inserts it, and a code-2
+/// child's Event carries the signature that #202 verified at import. P9 checks
+/// the stored signature's presence only, deliberately: a trusted read does not
+/// revalidate the envelope, so it does not verify the Ed25519 signature again.
 pub(crate) fn classified_event_matches_operation(
     event: &Event,
     operation: &ForkAppendOperationV1,
+    origin: ValidatedOriginV1,
 ) -> bool {
     let input = operation.input();
     event.wall_time == input.wall_time
         && event.payload_hash == input.payload_hash
-        && event.signature.is_none()
-        && event.origin.is_some_and(|origin| {
-            origin.origin_timeline_id == input.child_timeline_id
-                && origin.origin_logical_seq.as_u64() == input.logical_seq
+        && event.signature.is_some() == origin.requires_signature()
+        && event.origin.is_some_and(|event_origin| {
+            event_origin.origin_timeline_id == input.child_timeline_id
+                && event_origin.origin_logical_seq.as_u64() == input.logical_seq
         })
 }
 
@@ -3825,7 +3971,8 @@ mod tests {
         let receipt = assert_host_append(&mut store, &fixture)?;
         assert!(classified_event_matches_operation(
             &receipt.event,
-            &receipt.operation
+            &receipt.operation,
+            ValidatedOriginV1::Local
         ));
         let tampers: [EventTamperCaseV1; 6] = [
             ("wall-time", tamper_wall_time),
@@ -3839,10 +3986,41 @@ mod tests {
             let mut event = receipt.event.clone();
             tamper(&mut event);
             assert!(
-                !classified_event_matches_operation(&event, &receipt.operation),
+                !classified_event_matches_operation(
+                    &event,
+                    &receipt.operation,
+                    ValidatedOriginV1::Local
+                ),
                 "{name} must not match its FOP1"
             );
         }
+        Ok(())
+    }
+
+    /// ADR-105 r6 P9 by origin: a code-2 child's Event must carry its stored
+    /// signature, and a local child's Event must not.
+    #[test]
+    fn classified_event_rule_applies_the_signature_rule_of_its_origin() -> Result<(), Box<dyn Error>>
+    {
+        let mut store = MemoryStore::new();
+        let fixture = create_lifecycle(&mut store)?;
+        let receipt = assert_host_append(&mut store, &fixture)?;
+        let imported = ValidatedOriginV1::Imported(Hash::from_bytes([7; 32]));
+        let mut signed = receipt.event.clone();
+        tamper_signature(&mut signed);
+        for (event, origin, accepted) in [
+            (&receipt.event, ValidatedOriginV1::Local, true),
+            (&receipt.event, imported, false),
+            (&signed, ValidatedOriginV1::Local, false),
+            (&signed, imported, true),
+        ] {
+            assert_eq!(
+                classified_event_matches_operation(event, &receipt.operation, origin),
+                accepted
+            );
+        }
+        assert_eq!(imported.imported_digest(), Some(Hash::from_bytes([7; 32])));
+        assert_eq!(ValidatedOriginV1::Local.imported_digest(), None);
         Ok(())
     }
 
@@ -4464,6 +4642,135 @@ mod tests {
             }
             drop(conn);
             assert_eq!(store.preflight_fork_classifier_profile(&[]), Err(expected));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod code_two_barrier_tests {
+    //! In-crate evidence for the ADR-105 r6 R6.9 and R6.10 escalation barrier that
+    //! the public port cannot reach.
+    //!
+    //! The public tests prove that both permit issuers and publication issuance
+    //! refuse a code-2 child. `register_classifier`, `append_classified`, and
+    //! `recover_classified_append` need a permit, and a permit is never issued for
+    //! an imported child, so this module forges one that names the imported `FAR1`
+    //! with every field that a valid permit would carry. Validator (a) must still
+    //! refuse each call, on both adapters, for an empty child with the classifier
+    //! triple null, an empty child with it present, and a nonempty child.
+
+    use std::sync::Arc;
+
+    use pos_core::{
+        store::SeqRange, CanonicalBytes, EntityId, EventDraft, ForkAppendSourceIdentityV1,
+        ForkAttributionImportClosureV1, Kind,
+    };
+
+    use super::{ForkAppendSourcePermitV1, ForkClassifierRegistrarPermitV1};
+    #[cfg(feature = "sqlite")]
+    use crate::sqlite::SqliteStore;
+    use crate::{
+        fae1_fixture::{
+            gateway_source, hash, open_session, pin_policy, request_for, Fallible, Port, Shape,
+            Spec, World, GATEWAY_REGISTRAR, PARENT_CUT,
+        },
+        memory::MemoryStore,
+        ForkEventAuthorityErrorV1,
+    };
+
+    fn forged_barrier<S: Port>(store: &mut S, shape: Shape) -> Fallible<()> {
+        let world = World::new(shape, false)?;
+        let built = world.build(&Spec {
+            registrar: GATEWAY_REGISTRAR,
+            ..Spec::default()
+        })?;
+        world.seed_destination(store)?;
+        pin_policy(store, &built.policy)?;
+        store.import_verified(&request_for(&world, &built))?;
+        let closure = ForkAttributionImportClosureV1::validate(&built.envelope)?;
+        let child = world.child_at(0)?.id;
+        let before = store.read_own(child, SeqRange::all())?;
+        let session = open_session(store)?;
+        let live = Arc::new(());
+        let store_id = store.fork_admission_host_record()?.store_id();
+        let graph = closure.classifier();
+        let registrar_permit = ForkClassifierRegistrarPermitV1 {
+            store_id,
+            session_identity: session.identity(),
+            child_timeline_id: child,
+            fork_admission_digest: closure.fork_admission_digest(),
+            source: gateway_source()?,
+            scope: Arc::downgrade(&live),
+        };
+        let append_permit = ForkAppendSourcePermitV1 {
+            store_id,
+            session_identity: session.identity(),
+            child_timeline_id: child,
+            fork_admission_digest: closure.fork_admission_digest(),
+            classifier_revision_digest: graph.map_or(hash(1), |graph| graph.table.digest()),
+            registration_digest: graph.map_or(hash(2), |graph| graph.registration.digest()),
+            registrar_identifier: GATEWAY_REGISTRAR.to_owned(),
+            source: ForkAppendSourceIdentityV1::HostInternal,
+            scope: Arc::downgrade(&live),
+        };
+        let corrupt = Some(ForkEventAuthorityErrorV1::CorruptAuthority);
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("fae1.import.test"),
+            CanonicalBytes::from_vec(vec![1]),
+        );
+        // The registration retry of the imported FCR1 is refused too.
+        let retried = graph.map_or(hash(0xd1), |graph| graph.registration.input().operation_id);
+        for operation in [hash(0xd1), retried] {
+            assert_eq!(
+                store
+                    .register_classifier(&session, &registrar_permit, operation, child)
+                    .err(),
+                corrupt
+            );
+        }
+        assert_eq!(
+            store
+                .append_classified(&session, &append_permit, hash(0xd2), draft.clone())
+                .err(),
+            corrupt
+        );
+        assert_eq!(
+            store
+                .recover_classified_append(&session, &append_permit, hash(0xd2), &draft)
+                .err(),
+            corrupt
+        );
+        // Nothing changed, and read (b) still accepts the complete import.
+        assert_eq!(store.read_own(child, SeqRange::all())?, before);
+        let suffix = store.read_fork_event_suffix(child, PARENT_CUT + 1)?;
+        assert_eq!(u64::try_from(suffix.len())?, shape.events());
+        Ok(())
+    }
+
+    const SHAPES: [Shape; 3] = [
+        Shape::Mixed,
+        Shape::EmptyClassified,
+        Shape::EmptyUnclassified,
+    ];
+
+    #[test]
+    fn memory_refuses_forged_registration_and_append_permits_for_a_code_two_child() -> Fallible<()>
+    {
+        for shape in SHAPES {
+            forged_barrier(&mut MemoryStore::new(), shape)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_refuses_forged_registration_and_append_permits_for_a_code_two_child() -> Fallible<()>
+    {
+        for shape in SHAPES {
+            forged_barrier(&mut SqliteStore::open_in_memory()?, shape)?;
         }
         Ok(())
     }

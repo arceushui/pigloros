@@ -313,6 +313,33 @@ impl ForkReproManifestV1 {
         final_fork_logical_head: u64,
         final_fork_chain_head_hash: Hash,
     ) -> Result<Self, ForkAttributionCodecErrorV1> {
+        Self::from_admission_fields(
+            admission.digest(),
+            admission.input(),
+            intervention_sequences,
+            final_fork_logical_head,
+            final_fork_chain_head_hash,
+        )
+    }
+
+    /// Construct `FRM1` from the fields and ADR-099 digest of one validated
+    /// `FAR1`, whatever its authority origin.
+    ///
+    /// ADR-105 r6 R6.9: a code-2 `FAR1` digest is over its exact code-2 bytes,
+    /// so the digest is supplied by the trusted caller rather than recomputed
+    /// from the local projection. Like [`Self::from_admission`], this
+    /// establishes byte agreement only, never authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid final Fork coordinates or intervention sequences.
+    pub fn from_admission_fields(
+        admission_digest: Hash,
+        admission: &ForkAdmissionRecordInputV1,
+        intervention_sequences: Vec<u64>,
+        final_fork_logical_head: u64,
+        final_fork_chain_head_hash: Hash,
+    ) -> Result<Self, ForkAttributionCodecErrorV1> {
         let CutCoordinatesV1 {
             parent_timeline_id,
             fork_timeline_id,
@@ -321,11 +348,11 @@ impl ForkReproManifestV1 {
             parent_chain_head_hash,
             post_fold_tick_boundary,
             plugin_composition_hash,
-        } = admission.input().cut_coordinates();
+        } = admission.cut_coordinates();
         Self::new(ForkReproManifestInputV1 {
             parent_timeline_id,
             fork_timeline_id,
-            admission_digest: admission.digest(),
+            admission_digest,
             room_revision_descriptor_hash,
             parent_logical_head,
             parent_chain_head_hash,
@@ -381,8 +408,21 @@ impl ForkReproManifestV1 {
         &self,
         admission: &ForkAdmissionRecordV1,
     ) -> Result<(), ForkAttributionCodecErrorV1> {
-        if self.0.admission_digest != admission.digest()
-            || self.0.cut_coordinates() != admission.input().cut_coordinates()
+        self.validate_against_admission_fields(admission.digest(), admission.input())
+    }
+
+    /// Require every duplicated provenance coordinate to equal one validated
+    /// `FAR1`, given as its ADR-099 digest and fields, whatever its origin.
+    ///
+    /// # Errors
+    /// Rejects any mismatch between the manifest and admission authority.
+    pub fn validate_against_admission_fields(
+        &self,
+        admission_digest: Hash,
+        admission: &ForkAdmissionRecordInputV1,
+    ) -> Result<(), ForkAttributionCodecErrorV1> {
+        if self.0.admission_digest != admission_digest
+            || self.0.cut_coordinates() != admission.cut_coordinates()
         {
             return Err(ForkAttributionCodecErrorV1::FieldMismatch);
         }
@@ -509,10 +549,25 @@ impl SignedForkReproManifestV1 {
         &self,
         admission: &ForkAdmissionRecordV1,
     ) -> Result<(), ForkAttributionCodecErrorV1> {
-        if self.identity.owner_id != admission.input().creator {
+        self.validate_against_admission_fields(admission.digest(), admission.input())
+    }
+
+    /// Require the wrapper creator and manifest fields to agree with one
+    /// validated `FAR1`, given as its ADR-099 digest and fields.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a different creator or any mismatched duplicated manifest field.
+    pub fn validate_against_admission_fields(
+        &self,
+        admission_digest: Hash,
+        admission: &ForkAdmissionRecordInputV1,
+    ) -> Result<(), ForkAttributionCodecErrorV1> {
+        if self.identity.owner_id != admission.creator {
             return Err(ForkAttributionCodecErrorV1::FieldMismatch);
         }
-        self.manifest.validate_against_admission(admission)
+        self.manifest
+            .validate_against_admission_fields(admission_digest, admission)
     }
 
     /// Construct a signature-only wrapper for the exact inner canonical bytes.
