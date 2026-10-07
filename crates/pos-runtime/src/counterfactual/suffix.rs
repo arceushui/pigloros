@@ -803,8 +803,8 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
 /// Map a staging error of the shared stager seam to its Tick failure.
 ///
 /// The seam returns only `PluginFailure`, `StagedTickRejected`,
-/// `ReservedEventType`, and `DependencyDeclarationRejected`; the first is the
-/// remaining arm.
+/// `ReservedEventType`, and `DependencyDeclarationRejected`;
+/// [`declaration_failure`] tells the last from `PluginFailure`.
 const fn staging_failure(error: &CounterfactualAdmissionErrorV1) -> CounterfactualSuffixFailureV1 {
     match error {
         CounterfactualAdmissionErrorV1::StagedTickRejected(rejection) => {
@@ -813,6 +813,16 @@ const fn staging_failure(error: &CounterfactualAdmissionErrorV1) -> Counterfactu
         CounterfactualAdmissionErrorV1::ReservedEventType => {
             CounterfactualSuffixFailureV1::ReservedEventType
         }
+        other => declaration_failure(other),
+    }
+}
+
+/// Map a rejected declaration to its Tick failure, and any other staging
+/// error (the stager's own `PluginFailure`) to `PluginFailure`.
+const fn declaration_failure(
+    error: &CounterfactualAdmissionErrorV1,
+) -> CounterfactualSuffixFailureV1 {
+    match error {
         CounterfactualAdmissionErrorV1::DependencyDeclarationRejected(rejection) => {
             CounterfactualSuffixFailureV1::DependencyDeclarationRejected(*rejection)
         }
