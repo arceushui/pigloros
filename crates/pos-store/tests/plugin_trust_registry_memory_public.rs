@@ -643,7 +643,9 @@ fn an_unknown_activation_timeline_leaves_the_state_byte_identical() -> TestResul
         Err(RegistryError::ActivationEventRejected)
     );
     assert_eq!(h.snapshot(&[&one])?, before);
+    // Rolling back is legal only with another release active: admit R1, then its successor R2.
     h.admit(&genesis, &one, 1)??;
+    h.admit(&genesis, &release_two(), 2)??;
     let after_admit = h.snapshot(&[&one, &release_two()])?;
     assert_eq!(
         h.rollback_with(&genesis, &one, unknown)?,
