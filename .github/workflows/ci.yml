@@ -214,6 +214,11 @@ jobs:
           shared-key: test
       - name: cargo check (no default features)
         run: cargo check --workspace --all-targets --no-default-features --locked
+      - name: Plugin trust registry Memory vectors (no default features)
+        run: >
+          cargo test -p pos-store --no-default-features
+          --test plugin_trust_registry_memory_public
+          --test plugin_trust_registry_memory_policy_public --locked
       - name: cargo check (all features, all targets)
         run: cargo check --workspace --all-targets --all-features --locked
       - name: Prove reference evaluator implementation independence

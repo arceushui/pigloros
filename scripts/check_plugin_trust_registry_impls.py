@@ -82,10 +82,10 @@ UTC_CONSTRUCTION = re.compile(r"\bTrustedUtcSecondV1\s*::\s*from_source\b")
 RECEIPT_LITERAL = re.compile(r"\b(" + "|".join(RECEIPT_TYPES) + r")\s*\{")
 LITERAL_PREFIX = re.compile(r"(?:->|\b(?:struct|enum|impl|for|trait|type|dyn))\s*$")
 ANCHOR_CALL = re.compile(r"\bPluginTrustPolicyAnchorV1\s*::\s*new\s*\(")
-SETUP_CALL = re.compile(
-    r"(?:\.\s*|\b" + PORT + r"\s*::\s*)(?:provision|advance_policy)\s*\("
-)
-ADMISSION_CALL = re.compile(r"(?:\.\s*|\b" + PORT + r"\s*::\s*)(?:admit|rollback)\s*\(")
+# A method call, a path call (`MemoryStore::admit(..)`), or a qualified call
+# (`<S as PluginTrustPolicyRegistryV1>::admit(..)`).
+SETUP_CALL = re.compile(r"(?:\.|::)\s*(?:provision|advance_policy)\s*\(")
+ADMISSION_CALL = re.compile(r"(?:\.|::)\s*(?:admit|rollback)\s*\(")
 REGISTRY_AWARE = re.compile(r"\b" + PORT + r"\b|\bplugin_trust_registry\s*::\s*\*")
 PUBLIC_ITEM = re.compile(
     r"\bpub\s+(?:const\s+)?(?:unsafe\s+)?(?:async\s+)?"

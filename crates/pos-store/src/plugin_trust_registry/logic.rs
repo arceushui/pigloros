@@ -209,12 +209,6 @@ fn check_policy(
     })
 }
 
-/// Run the PTR1 and PRV1 floor plan: both floors are judged, the PTR1 failure first.
-fn check_floors(checked: &CheckedPolicyV1, input: &PolicyInputV1<'_>) -> RegistryResult<()> {
-    plan_plugin_floor_transition_v1(&checked.floors, input.evidence)?;
-    Ok(())
-}
-
 const fn policy_write(tps1: AuthenticatedPluginTps1V1, input: &PolicyInputV1<'_>) -> PolicyWriteV1 {
     PolicyWriteV1 {
         tps1,
@@ -243,7 +237,7 @@ pub(crate) fn plan_advance(
     input: &PolicyInputV1<'_>,
 ) -> RegistryResult<AdvancePlanV1> {
     let checked = check_policy(tx, input)?;
-    check_floors(&checked, input)?;
+    plan_plugin_floor_transition_v1(&checked.floors, input.evidence)?;
     let changed = matches!(checked.floors, PluginFloorStateV1::Absent)
         || checked.tps1.digest() != checked.scope.policy.tps1_digest;
     let write = policy_write(checked.tps1, input);
@@ -289,7 +283,7 @@ fn check_release(
     let checked = check_policy(tx, input)?;
     let authorization = input.evidence.authorize_release(projection)?;
     check_plugin_tps1_artifact_denial_v1(&checked.tps1, &authorization)?;
-    check_floors(&checked, input)?;
+    plan_plugin_floor_transition_v1(&checked.floors, input.evidence)?;
     Ok((checked, authorization))
 }
 
@@ -325,6 +319,10 @@ pub(crate) struct AdmitWritesV1 {
     pub(crate) row: PluginTrustLedgerRowV1,
 }
 
+// The snapshot fields repeated by `AdmitCommitV1::finish` and `RollbackCommitV1::finish` belong
+// to distinct public record types (decision, rollback facts, ledger columns) whose layouts the
+// accepted port table fixes separately; a shared snapshot type would add an indirection to every
+// accessor without removing a field, so the duplication is deliberate.
 impl AdmitCommitV1 {
     /// Complete the write set with the identity of the Event the guarded append returned.
     pub(crate) fn finish(self, event: ActivationEventIdentityV1) -> AdmitWritesV1 {
@@ -607,6 +605,28 @@ mod tests {
         }
     }
 
+    /// Evidence whose terminal PTR1 digest differs from the genesis one.
+    fn other_root_material(env: &Env) -> TestResult<Material> {
+        Ok(env.material(
+            &Spec {
+                root_variant: 1,
+                ..spec(2, 2)
+            },
+            &TpsSpec::default(),
+        )?)
+    }
+
+    /// Evidence whose terminal PRV1 digest differs from the genesis one.
+    fn other_revocation_material(env: &Env) -> TestResult<Material> {
+        Ok(env.material(
+            &Spec {
+                revocation_variant: 1,
+                ..Spec::default()
+            },
+            &TpsSpec::default(),
+        )?)
+    }
+
     fn policy_input<'a>(env: &'a Env, material: &'a Material) -> TestResult<PolicyInputV1<'a>> {
         Ok(PolicyInputV1 {
             anchor: &env.anchor,
@@ -637,13 +657,7 @@ mod tests {
             &same,
             &input
         ));
-        let other_root = env.material(
-            &Spec {
-                root_variant: 1,
-                ..spec(2, 2)
-            },
-            &TpsSpec::default(),
-        )?;
+        let other_root = other_root_material(&env)?;
         assert_ne!(other_root.terminal_root(), genesis.terminal_root());
         assert!(!same_decision_identity(
             &decision,
@@ -651,13 +665,7 @@ mod tests {
             &policy_input(&env, &other_root)?,
             &input
         ));
-        let other_revocation = env.material(
-            &Spec {
-                revocation_variant: 1,
-                ..Spec::default()
-            },
-            &TpsSpec::default(),
-        )?;
+        let other_revocation = other_revocation_material(&env)?;
         assert_ne!(
             other_revocation.terminal_revocation(),
             genesis.terminal_revocation()
@@ -735,13 +743,7 @@ mod tests {
             identical_rollback(Some(row(&facts)), [1; 32], &newer_tps1, &same, &input),
             None
         );
-        let other_root = env.material(
-            &Spec {
-                root_variant: 1,
-                ..spec(2, 2)
-            },
-            &TpsSpec::default(),
-        )?;
+        let other_root = other_root_material(&env)?;
         assert_eq!(
             identical_rollback(
                 Some(row(&facts)),
@@ -752,13 +754,7 @@ mod tests {
             ),
             None
         );
-        let other_revocation = env.material(
-            &Spec {
-                revocation_variant: 1,
-                ..Spec::default()
-            },
-            &TpsSpec::default(),
-        )?;
+        let other_revocation = other_revocation_material(&env)?;
         assert_eq!(
             identical_rollback(
                 Some(row(&facts)),
@@ -815,6 +811,134 @@ mod tests {
         assert!(chain_permits(Some(&active), &one));
         assert!(chain_permits(Some(&active), &two));
         assert!(!chain_permits(Some(&active), &unrelated));
+        Ok(())
+    }
+
+    /// The read that a `FailingTx` fails.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Read {
+        Scope,
+        Decision,
+        Active,
+        LatestRow,
+        NextRowSeq,
+    }
+
+    /// A transaction whose one named read fails and whose others return fixed state.
+    struct FailingTx {
+        fail: Read,
+        scope: Option<RetainedScopeV1>,
+        decision: Option<RetainedReleaseDecisionV1>,
+        active: Option<ActiveReleaseV1>,
+    }
+
+    impl FailingTx {
+        fn gate<T>(&self, read: Read, value: T) -> RegistryResult<T> {
+            if self.fail == read {
+                Err(PluginTrustPolicyRegistryErrorV1::StorageFailed)
+            } else {
+                Ok(value)
+            }
+        }
+    }
+
+    impl PluginTrustTransactionV1 for FailingTx {
+        fn scope(&self, _scope: &str) -> RegistryResult<Option<RetainedScopeV1>> {
+            self.gate(Read::Scope, self.scope.clone())
+        }
+
+        fn decision(
+            &self,
+            _scope: &str,
+            _pmf1_digest: [u8; 32],
+        ) -> RegistryResult<Option<RetainedReleaseDecisionV1>> {
+            self.gate(Read::Decision, self.decision.clone())
+        }
+
+        fn active(
+            &self,
+            _scope: &str,
+            _plugin_id: &str,
+        ) -> RegistryResult<Option<ActiveReleaseV1>> {
+            self.gate(Read::Active, self.active.clone())
+        }
+
+        fn latest_release_row(
+            &self,
+            _scope: &str,
+            _plugin_id: &str,
+        ) -> RegistryResult<Option<PluginTrustLedgerRowV1>> {
+            self.gate(Read::LatestRow, None)
+        }
+
+        fn next_row_seq(&self, _scope: &str) -> RegistryResult<u64> {
+            self.gate(Read::NextRowSeq, 1)
+        }
+    }
+
+    #[test]
+    fn every_plan_propagates_each_failed_transaction_read() -> TestResult {
+        let env = Env::new("scope")?;
+        let genesis = env.genesis()?;
+        let tps1 = authenticated(&env, &genesis)?;
+        let input = activation(TimelineId::new(), 1);
+        let policy = policy_input(&env, &genesis)?;
+        let retained = RetainedScopeV1 {
+            anchor: env.anchor.clone(),
+            policy: RetainedPolicyStateV1 {
+                scope: "scope".to_owned(),
+                tps1_epoch: tps1.epoch(),
+                tps1_digest: tps1.digest(),
+                tps1_effective_position: tps1.effective_timeline_position(),
+                tps1_bytes: tps1.bytes().to_vec(),
+                ptr1_floor: None,
+                prv1_floor: None,
+                highest_trusted_utc_second: None,
+            },
+        };
+        let decision = decision_of(&tps1, &genesis, &input);
+        let active = |pmf1: u8| ActiveReleaseV1 {
+            scope: "scope".to_owned(),
+            plugin_id: "plugin-a".to_owned(),
+            pmf1_digest: [pmf1; 32],
+            release_digest: [0x11; 32],
+            activation_event: identity(&input),
+        };
+        let tx = |fail: Read, decided: bool, pointer: Option<u8>| FailingTx {
+            fail,
+            scope: Some(retained.clone()),
+            decision: decided.then(|| decision.clone()),
+            active: pointer.map(active),
+        };
+        let failed = Some(PluginTrustPolicyRegistryErrorV1::StorageFailed);
+        let projection = release_one().projection()?;
+
+        let empty = FailingTx {
+            fail: Read::Scope,
+            scope: None,
+            decision: None,
+            active: None,
+        };
+        assert_eq!(plan_provision(&empty, &env.anchor, &genesis.tps1).err(), failed);
+        for read in [Read::Scope, Read::NextRowSeq] {
+            assert_eq!(plan_advance(&tx(read, false, None), &policy).err(), failed);
+        }
+        for read in [Read::Scope, Read::Decision, Read::Active, Read::NextRowSeq] {
+            let plan = plan_admit(&tx(read, false, None), &policy, &projection, &input);
+            assert_eq!(plan.err(), failed);
+        }
+        // Rollback reaches each read in turn: the target is retained, then the pointer names
+        // either the target (latest-row lookup) or another release (next row sequence).
+        for (read, pointer) in [
+            (Read::Scope, Some(0x03)),
+            (Read::Decision, Some(0x03)),
+            (Read::Active, Some(0x03)),
+            (Read::LatestRow, Some(0x01)),
+            (Read::NextRowSeq, Some(0x03)),
+        ] {
+            let plan = plan_rollback(&tx(read, true, pointer), &policy, &projection, &input);
+            assert_eq!(plan.err(), failed);
+        }
         Ok(())
     }
 }

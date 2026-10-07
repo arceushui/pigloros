@@ -63,6 +63,8 @@ ALLOWED = {
     "crates/pos-conformance/tests/bridge_public.rs": ANCHOR + IMPORT + CALLS,
     "crates/pos-state/src/docs.rs": "// impl PluginTrustPolicyRegistryV1 for Forged {}\n",
     "crates/pos-state/src/block.rs": "/* store.admit(a); AdmittedPluginReleaseReceiptV1 { } */\n",
+    "crates/pos-state/src/path_unaware.rs": "fn f(s: &mut S) { Other::admit(s, a); Other::rollback(s, a); }\n",
+    "crates/pos-state/src/path_test_only.rs": IMPORT + "#[cfg(test)]\nmod tests { fn t(s: &mut S) { MemoryStore::admit(s, a); } }\n",
     "crates/pos-state/src/uses.rs": "fn f(_: &mut dyn PluginTrustPolicyRegistryV1) {}\n",
     "crates/pos-state/src/imports.rs": IMPORT,
     "crates/pos-state/src/unaware.rs": "fn f(x: &mut X) { x.admit(a); x.rollback(a); x.provision(a); }\n",
@@ -100,6 +102,12 @@ REJECTED = {
     ),
     "crates/pos-state/src/admit.rs": IMPORT + "fn f(s: &mut S) { s.admit(a, b); }\n",
     "crates/pos-state/src/rollback.rs": IMPORT + "fn f(s: &mut S) { s.\n    rollback(a); }\n",
+    "crates/pos-state/src/path_admit.rs": IMPORT + "fn f(s: &mut S) { MemoryStore::admit(s, a); }\n",
+    "crates/pos-state/src/path_rollback.rs": IMPORT + "fn f(s: &mut S) { MemoryStore::rollback(s, a); }\n",
+    "crates/pos-state/src/qualified_admit.rs": (
+        IMPORT + "fn f(s: &mut S) { <S as PluginTrustPolicyRegistryV1>::admit(s, a); }\n"
+    ),
+    "crates/pos-state/src/path_provision.rs": IMPORT + "fn f(s: &mut S) { MemoryStore::provision(s, a); }\n",
     "crates/pos-state/src/ufcs.rs": "fn f() { PluginTrustPolicyRegistryV1::admit(s, a); }\n",
     "crates/pos-state/src/glob.rs": GLOB + "fn f(s: &mut S) { s.admit(a); }\n",
     "crates/pos-store/src/composition.rs": (

@@ -272,9 +272,9 @@ impl AdmittedPluginReleaseReceiptV1 {
     }
 }
 
-/// The facts of one committed rollback, kept in its ledger row.
+/// The facts of one committed rollback, kept in its ledger row and read through its receipt.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RollbackFactsV1 {
+pub(crate) struct RollbackFactsV1 {
     pub(crate) scope: String,
     pub(crate) plugin_id: String,
     pub(crate) target_pmf1_digest: [u8; 32],

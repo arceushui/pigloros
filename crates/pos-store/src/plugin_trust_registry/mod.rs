@@ -30,6 +30,6 @@ pub use types::{
     ActivationEventIdentityV1, ActivationEventInputV1, ActiveReleaseV1,
     AdmittedPluginReleaseReceiptV1, PluginRollbackReceiptV1, PluginTrustCommitOutcomeV1,
     PluginTrustLedgerKindV1, PluginTrustLedgerRowV1, PolicyAdvanceKindV1, PolicyAdvanceOutcomeV1,
-    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, RollbackFactsV1,
+    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1,
 };
 pub use utc::TrustedUtcSecondV1;

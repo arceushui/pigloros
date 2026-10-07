@@ -209,6 +209,9 @@ fn provisioning_rejects_an_unsigned_or_malformed_snapshot() -> TestResult {
 
 #[test]
 fn a_changed_anchor_field_is_an_anchor_mismatch_in_every_operation() -> TestResult {
+    // Two of the five anchor fields cannot mismatch: a different scope text is a new scope
+    // (see the next vector), and the constructor fixes the operator role. The other three
+    // fields are each varied alone.
     let mut h = Harness::new()?;
     let genesis = h.env.genesis()?;
     let one = release_one();
@@ -824,6 +827,8 @@ fn an_identical_admission_returns_the_original_receipt_and_commits_only_the_utc_
 
 #[test]
 fn a_changed_event_identity_component_is_a_release_conflict() -> TestResult {
+    // Each case changes exactly one component: the payload, the Timeline, or the event type.
+    // The schema version has one value (`SchemaVersion::V1`), so it cannot be varied.
     let mut h = Harness::new()?;
     let genesis = h.env.genesis()?;
     let one = release_one();

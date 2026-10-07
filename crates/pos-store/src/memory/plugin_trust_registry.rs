@@ -37,6 +37,10 @@ use crate::plugin_trust_registry::{
 type RegistryResult<T> = Result<T, PluginTrustPolicyRegistryErrorV1>;
 
 /// Faults a unit test can inject around the commit of an Event-bearing operation.
+///
+/// The faults are threaded as an adapter-internal parameter, not a `cfg(test)` field, so no
+/// test-only code sits in a production path. The public methods pass `NONE`; the failure
+/// branches are exercised by the E4 and F3 unit tests.
 #[derive(Clone, Copy, Debug)]
 struct MemoryFaultsV1 {
     /// Fails after the plan validated, before the Event append.
@@ -112,10 +116,19 @@ impl MemoryPluginTrustStateV1 {
             .ok_or(PluginTrustPolicyRegistryErrorV1::MissingState)
     }
 
-    fn with_scope(&mut self, scope: &str, apply: impl FnOnce(&mut MemoryScopeV1)) {
-        if let Some(state) = self.scopes.get_mut(scope) {
-            apply(state);
-        }
+    /// Apply `apply` to the committed state of `scope`.
+    ///
+    /// Every caller planned from this scope's state a moment earlier under the store's single
+    /// mutable owner, so the scope exists; a missing scope is still reported, never skipped.
+    fn with_scope(
+        &mut self,
+        scope: &str,
+        apply: impl FnOnce(&mut MemoryScopeV1),
+    ) -> RegistryResult<()> {
+        self.scopes
+            .get_mut(scope)
+            .ok_or(PluginTrustPolicyRegistryErrorV1::MissingState)
+            .map(apply)
     }
 
     fn insert_scope(&mut self, write: ProvisionWriteV1) {
@@ -190,17 +203,15 @@ impl MemoryStore {
         {
             return Err(PluginTrustPolicyRegistryErrorV1::ActivationEventRejected);
         }
-        self.guarded_generic_append(timeline, std::slice::from_ref(&activation.draft))
-            .or(Err(
-                PluginTrustPolicyRegistryErrorV1::ActivationEventRejected,
-            ))
-            .and_then(|events| {
-                events
-                    .into_iter()
-                    .next()
-                    .ok_or(PluginTrustPolicyRegistryErrorV1::ActivationEventRejected)
-            })
+        // Appending exactly one draft yields exactly one Event, so a single `ok_or` covers both
+        // a refused append and the (impossible) empty result.
+        let appended = self
+            .guarded_generic_append(timeline, std::slice::from_ref(&activation.draft))
+            .ok()
+            .and_then(|events| events.into_iter().next());
+        appended
             .map(|event| ActivationEventIdentityV1::from_event(timeline, &event, payload_digest))
+            .ok_or(PluginTrustPolicyRegistryErrorV1::ActivationEventRejected)
     }
 
     /// Run `operation` inside the erasure fence of the activation Timeline.
@@ -244,11 +255,11 @@ impl MemoryStore {
         match plan_admit(&self.plugin_trust, input, projection, activation)? {
             AdmitPlanV1::Replay(decision) => {
                 self.plugin_trust
-                    .with_scope(scope, |state| state.raise_utc(utc));
-                Ok(AdmittedPluginReleaseReceiptV1 {
-                    decision: *decision,
-                    outcome: PluginTrustCommitOutcomeV1::IdempotentReplay,
-                })
+                    .with_scope(scope, |state| state.raise_utc(utc))
+                    .map(|()| AdmittedPluginReleaseReceiptV1 {
+                        decision: *decision,
+                        outcome: PluginTrustCommitOutcomeV1::IdempotentReplay,
+                    })
             }
             AdmitPlanV1::Commit(commit) => {
                 faults.before_append.map_or(Ok(()), Err)?;
@@ -259,8 +270,8 @@ impl MemoryStore {
                     outcome: PluginTrustCommitOutcomeV1::Committed,
                 };
                 self.plugin_trust
-                    .with_scope(scope, |state| state.commit_admit(writes));
-                faults.after_commit.map_or(Ok(receipt), Err)
+                    .with_scope(scope, |state| state.commit_admit(writes))
+                    .and_then(|()| faults.after_commit.map_or(Ok(receipt), Err))
             }
         }
     }
@@ -289,11 +300,11 @@ impl MemoryStore {
         match plan_rollback(&self.plugin_trust, input, target, activation)? {
             RollbackPlanV1::Replay(facts) => {
                 self.plugin_trust
-                    .with_scope(scope, |state| state.raise_utc(utc));
-                Ok(PluginRollbackReceiptV1 {
-                    facts: *facts,
-                    outcome: PluginTrustCommitOutcomeV1::IdempotentReplay,
-                })
+                    .with_scope(scope, |state| state.raise_utc(utc))
+                    .map(|()| PluginRollbackReceiptV1 {
+                        facts: *facts,
+                        outcome: PluginTrustCommitOutcomeV1::IdempotentReplay,
+                    })
             }
             RollbackPlanV1::Commit(commit) => {
                 faults.before_append.map_or(Ok(()), Err)?;
@@ -304,8 +315,8 @@ impl MemoryStore {
                     outcome: PluginTrustCommitOutcomeV1::Committed,
                 };
                 self.plugin_trust
-                    .with_scope(scope, |state| state.commit_rollback(writes));
-                faults.after_commit.map_or(Ok(receipt), Err)
+                    .with_scope(scope, |state| state.commit_rollback(writes))
+                    .and_then(|()| faults.after_commit.map_or(Ok(receipt), Err))
             }
         }
     }
@@ -362,8 +373,8 @@ impl PluginTrustPolicyRegistryV1 for MemoryStore {
         let plan = plan_advance(&self.plugin_trust, &input)?;
         let outcome = plan.outcome;
         self.plugin_trust
-            .with_scope(anchor.scope(), |state| state.commit_advance(plan));
-        Ok(outcome)
+            .with_scope(anchor.scope(), |state| state.commit_advance(plan))
+            .map(|()| outcome)
     }
 
     fn rollback(
@@ -423,7 +434,11 @@ impl PluginTrustPolicyRegistryV1 for MemoryStore {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use pos_core::store::{EventStore, SeqRange};
+    use pos_core::{
+        store::{EventStore, SeqRange},
+        ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionOriginV1, Hash,
+        OwnerIdV1,
+    };
 
     use super::*;
     use crate::plugin_trust_registry_fixtures::{
@@ -658,16 +673,16 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn a_hidden_activation_timeline_is_rejected_like_a_generic_append() -> TestResult {
+    /// Admit on `timeline` and assert the activation Event was refused with nothing changed.
+    fn assert_activation_refused(h: Harness) -> TestResult {
         let Harness {
             mut store,
             env,
             timeline,
-        } = Harness::new()?;
+        } = h;
         let genesis = env.genesis()?;
-        store.geographic_timelines.insert(timeline);
         let before = store.retained_policy_state("scope")?;
+        let events = store.event_ids.len();
         assert_eq!(
             store.admit(
                 &env.anchor,
@@ -682,6 +697,39 @@ mod tests {
         );
         assert_eq!(store.retained_policy_state("scope")?, before);
         assert_eq!(store.ledger("scope")?.len(), 1);
+        assert_eq!(store.active_release("scope", "plugin-a")?, None);
+        assert_eq!(store.event_ids.len(), events);
         Ok(())
+    }
+
+    #[test]
+    fn the_visibility_guard_rejects_a_hidden_activation_timeline() -> TestResult {
+        let mut h = Harness::new()?;
+        h.store.geographic_timelines.insert(h.timeline);
+        assert_activation_refused(h)
+    }
+
+    #[test]
+    fn the_fork_guard_rejects_an_admitted_fork_activation_timeline() -> TestResult {
+        let mut h = Harness::new()?;
+        let fork = h.timeline;
+        let admission = ForkAdmissionRecordV1::new(ForkAdmissionRecordInputV1 {
+            operation_id: Hash::from_bytes([1; 32]),
+            principal_owner_binding_digest: Hash::from_bytes([2; 32]),
+            creator: OwnerIdV1::from_static("test-owner"),
+            parent_timeline_id: TimelineId::new(),
+            child_timeline_id: fork,
+            room_revision_descriptor_hash: Hash::from_bytes([3; 32]),
+            parent_logical_head: 0,
+            parent_chain_head_hash: Hash::from_bytes([4; 32]),
+            completed_fold_cursor: 0,
+            post_fold_tick_boundary: 0,
+            plugin_composition_hash: Hash::from_bytes([5; 32]),
+            attribution_required: false,
+            origin: ForkAttributionOriginV1::Local,
+        })
+        .map_err(|error| format!("{error:?}"))?;
+        h.store.fork_admissions.insert(fork, admission);
+        assert_activation_refused(h)
     }
 }
