@@ -81,13 +81,15 @@ pub use non_interference_report::{
     NON_INTERFERENCE_REPORT_OUTCOME_COUNT_V1,
 };
 pub use plugin_trust_bridge::{
-    authenticate_plugin_tps1_v1, check_plugin_tps1_global_caps_v1, parse_offline_valid_through_v1,
+    authenticate_plugin_tps1_v1, check_plugin_tps1_artifact_denial_v1,
+    check_plugin_tps1_genesis_v1, check_plugin_tps1_global_caps_v1,
+    check_plugin_tps1_successor_v1, parse_offline_valid_through_v1,
     plan_plugin_floor_transition_v1, plugin_floor_transition_v1, plugin_revoked_key_id_v1,
-    plugin_root_key_id_v1, verify_plugin_tps1_bridge_v1, AuthenticatedPluginTps1V1,
+    plugin_root_key_id_v1, verify_plugin_tps1_policy_v1, AuthenticatedPluginTps1V1,
     PluginFloorErrorV1, PluginFloorKindV1, PluginFloorPlanV1, PluginFloorStateV1,
     PluginFloorTransitionV1, PluginTrustBridgeErrorV1, PluginTrustPolicyAnchorV1,
-    VerifiedPluginTps1BridgeV1, OFFLINE_VALID_THROUGH_BYTES_V1, PLUGIN_OPERATOR_ROLE_V1,
-    PLUGIN_REVOKED_KEY_ID_PREFIX_V1, PLUGIN_ROOT_KEY_ID_PREFIX_V1, PLUGIN_TPS1_BRIDGE_ID_BYTES_V1,
+    OFFLINE_VALID_THROUGH_BYTES_V1, PLUGIN_OPERATOR_ROLE_V1, PLUGIN_REVOKED_KEY_ID_PREFIX_V1,
+    PLUGIN_ROOT_KEY_ID_PREFIX_V1, PLUGIN_TPS1_BRIDGE_ID_BYTES_V1,
 };
 pub use profile_contract::{
     AllowedDivergenceV1, CapabilityPolicyV1, ConformanceContractError, ConformanceProfileV1,

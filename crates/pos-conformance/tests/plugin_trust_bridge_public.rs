@@ -1,14 +1,17 @@
-//! Public acceptance vectors for the ADR-103 revision 3 Plugin TPS1 bridge.
+//! Public acceptance vectors for the ADR-103 revision 3 and 4 Plugin TPS1 bridge.
 
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
-    authenticate_plugin_tps1_v1, check_plugin_tps1_global_caps_v1, parse_offline_valid_through_v1,
+    authenticate_plugin_tps1_v1, check_plugin_tps1_artifact_denial_v1,
+    check_plugin_tps1_genesis_v1, check_plugin_tps1_global_caps_v1,
+    check_plugin_tps1_successor_v1, parse_offline_valid_through_v1,
     plan_plugin_floor_transition_v1, plugin_floor_transition_v1, plugin_revoked_key_id_v1,
-    plugin_root_key_id_v1, verify_plugin_tps1_bridge_v1, PluginFloorErrorV1, PluginFloorKindV1,
-    PluginFloorPlanV1, PluginFloorStateV1, PluginFloorTransitionV1, PluginTrustBridgeErrorV1,
-    PluginTrustPolicyAnchorV1, TrustPolicyRootV1, TrustPolicySnapshotV1,
-    OFFLINE_VALID_THROUGH_BYTES_V1, PLUGIN_OPERATOR_ROLE_V1, PLUGIN_TPS1_BRIDGE_ID_BYTES_V1,
+    plugin_root_key_id_v1, verify_plugin_tps1_policy_v1, AuthenticatedPluginTps1V1,
+    PluginFloorErrorV1, PluginFloorKindV1, PluginFloorPlanV1, PluginFloorStateV1,
+    PluginFloorTransitionV1, PluginTrustBridgeErrorV1, PluginTrustPolicyAnchorV1,
+    TrustPolicyRootV1, TrustPolicySnapshotV1, OFFLINE_VALID_THROUGH_BYTES_V1,
+    PLUGIN_OPERATOR_ROLE_V1, PLUGIN_TPS1_BRIDGE_ID_BYTES_V1,
 };
 use pos_core::OwnerIdV1;
 use pos_crypto::plugin_trust::{
@@ -868,6 +871,7 @@ fn manifest(
             not_before,
             not_after,
             release_digest: [0x22; 32],
+            previous_release_digest: None,
             descriptor_digests: vec![[0x30; 32], [0x33; 32]],
         },
     ))
@@ -917,18 +921,20 @@ fn sign(snapshot: TrustPolicySnapshotV1) -> TestResult<Vec<u8>> {
     sign_with(snapshot, &operator_signer())
 }
 
+fn authed(snapshot: TrustPolicySnapshotV1) -> TestResult<AuthenticatedPluginTps1V1> {
+    Ok(authenticate_plugin_tps1_v1(
+        &operator_anchor()?,
+        &sign(snapshot)?,
+    )?)
+}
+
 fn bridge(
     tps1: &[u8],
     evidence: &VerifiedPluginTrustEvidenceV1,
 ) -> TestResult<Result<(), PluginTrustBridgeErrorV1>> {
-    Ok(verify_plugin_tps1_bridge_v1(
-        &operator_anchor()?,
-        tps1,
-        evidence,
-        &good_manifest()?,
-        EVALUATION_UTC,
-    )
-    .map(|_| ()))
+    Ok(authenticate_plugin_tps1_v1(&operator_anchor()?, tps1).and_then(|authenticated| {
+        verify_plugin_tps1_policy_v1(&authenticated, evidence, EVALUATION_UTC, EVALUATION_TICK)
+    }))
 }
 
 fn other_revocation_evidence() -> TestResult<(VerifiedPluginTrustEvidenceV1, String)> {
@@ -944,7 +950,7 @@ fn other_revocation_evidence() -> TestResult<(VerifiedPluginTrustEvidenceV1, Str
 }
 
 #[test]
-fn complete_bridge_accepts_exact_mapping_and_returns_authenticated_facts() -> TestResult {
+fn policy_bridge_accepts_exact_mapping_and_keeps_authenticated_facts() -> TestResult {
     let (evidence, revoked_id) = other_revocation_evidence()?;
     let mut snapshot = base_snapshot(vec![revoked_id], vec![[0x77; 32]]);
     snapshot.trust_roots.push(TrustPolicyRootV1 {
@@ -956,26 +962,15 @@ fn complete_bridge_accepts_exact_mapping_and_returns_authenticated_facts() -> Te
     snapshot.revoked_key_ids.push("operator.revoked".to_owned());
     snapshot.revoked_artifact_digests.push([0x01; 32]);
     let tps1 = sign(snapshot)?;
-    let verified = verify_plugin_tps1_bridge_v1(
-        &operator_anchor()?,
-        &tps1,
-        &evidence,
-        &good_manifest()?,
-        EVALUATION_UTC,
-    )?;
-    assert_eq!(verified.tps1().bytes(), tps1.as_slice());
-    assert_eq!(verified.tps1().digest(), digest(&tps1));
-    assert_eq!(verified.tps1().epoch(), 1);
-    assert_eq!(verified.tps1().effective_timeline_position(), 9);
-    assert_eq!(verified.authorization().pmf1_digest(), [0x11; 32]);
+    let authenticated = authenticate_plugin_tps1_v1(&operator_anchor()?, &tps1)?;
     assert_eq!(
-        verified.authorization().resolved_public_key(),
-        publisher_public()
+        verify_plugin_tps1_policy_v1(&authenticated, &evidence, EVALUATION_UTC, EVALUATION_TICK),
+        Ok(())
     );
-    assert_eq!(
-        verified.authorization().terminal_root(),
-        evidence.terminal_root()
-    );
+    assert_eq!(authenticated.bytes(), tps1.as_slice());
+    assert_eq!(authenticated.digest(), digest(&tps1));
+    assert_eq!(authenticated.epoch(), 1);
+    assert_eq!(authenticated.effective_timeline_position(), 9);
     Ok(())
 }
 
@@ -1007,15 +1002,25 @@ fn bridge_checks_scope_epoch_trusted_utc_and_operator_signature() -> TestResult 
             Err(PluginTrustBridgeErrorV1::EpochMismatch)
         );
     }
-    let tps1 = sign(good)?;
+    let authenticated = authed(good)?;
+    let run = |utc: i64, tick: u64| {
+        verify_plugin_tps1_policy_v1(&authenticated, &evidence, utc, tick)
+    };
+    assert_eq!(run(50, 5), Ok(()));
+    for utc in [49, 51] {
+        assert_eq!(
+            run(utc, 5),
+            Err(PluginTrustBridgeErrorV1::EvaluationUtcMismatch)
+        );
+    }
+    for tick in [4, 6] {
+        assert_eq!(
+            run(50, tick),
+            Err(PluginTrustBridgeErrorV1::EvaluationTickMismatch)
+        );
+    }
     assert_eq!(
-        verify_plugin_tps1_bridge_v1(&operator_anchor()?, &tps1, &evidence, &good_manifest()?, 51)
-            .map(|_| ()),
-        Err(PluginTrustBridgeErrorV1::EvaluationUtcMismatch)
-    );
-    assert_eq!(
-        verify_plugin_tps1_bridge_v1(&operator_anchor()?, &tps1, &evidence, &good_manifest()?, 49)
-            .map(|_| ()),
+        run(51, 6),
         Err(PluginTrustBridgeErrorV1::EvaluationUtcMismatch)
     );
     Ok(())
@@ -1027,15 +1032,9 @@ fn bridge_evidence_scope_must_equal_the_tps1_policy() -> TestResult {
     let other = anchor_for("other", operator_signer().verifying_key().to_bytes())?;
     let mut snapshot = base_snapshot(Vec::new(), Vec::new());
     "other".clone_into(&mut snapshot.policy_id);
+    let authenticated = authenticate_plugin_tps1_v1(&other, &sign(snapshot)?)?;
     assert_eq!(
-        verify_plugin_tps1_bridge_v1(
-            &other,
-            &sign(snapshot)?,
-            &evidence,
-            &good_manifest()?,
-            EVALUATION_UTC
-        )
-        .map(|_| ()),
+        verify_plugin_tps1_policy_v1(&authenticated, &evidence, EVALUATION_UTC, EVALUATION_TICK),
         Err(PluginTrustBridgeErrorV1::ScopeMismatch)
     );
     Ok(())
@@ -1206,44 +1205,92 @@ fn bridge_requires_every_effective_prv1_artifact_denial() -> TestResult {
 }
 
 #[test]
-fn bridge_recomputes_release_authorization_from_the_evidence() -> TestResult {
-    let evidence = evidence_with(Vec::new(), Vec::new())?;
-    let tps1 = sign(base_snapshot(Vec::new(), Vec::new()))?;
-    let anchor = operator_anchor()?;
-    let run = |manifest: ValidatedPluginManifestProjectionV1| {
-        verify_plugin_tps1_bridge_v1(&anchor, &tps1, &evidence, &manifest, EVALUATION_UTC)
-            .map(|_| ())
-    };
-    assert_eq!(
-        run(manifest("unknown", 40, 60)?),
-        Err(PluginTrustBridgeErrorV1::Trust(
-            PluginTrustErrorV1::UnknownPublisherKey
-        ))
-    );
-    assert_eq!(
-        run(manifest("publisher", 51, 60)?),
-        Err(PluginTrustBridgeErrorV1::Trust(
-            PluginTrustErrorV1::ManifestExpired
-        ))
-    );
-    assert_eq!(run(manifest("publisher", 50, 51)?), Ok(()));
-    Ok(())
-}
-
-#[test]
-fn bridge_denies_a_release_whose_publisher_key_is_effectively_revoked() -> TestResult {
+fn policy_bridge_is_release_independent_for_a_revoked_publisher() -> TestResult {
     let evidence = evidence_with(
         vec![revoked_key("publisher", 1, publisher_public())],
         Vec::new(),
     )?;
     let revoked_id = plugin_revoked_key_id_v1(&OwnerIdV1::new("publisher")?, 1, publisher_public());
     let tps1 = sign(base_snapshot(vec![revoked_id], Vec::new()))?;
+    assert_eq!(bridge(&tps1, &evidence)?, Ok(()));
     assert_eq!(
-        bridge(&tps1, &evidence)?,
-        Err(PluginTrustBridgeErrorV1::Trust(
-            PluginTrustErrorV1::PublisherKeyRevoked
-        ))
+        evidence.authorize_release(&good_manifest()?).map(|_| ()),
+        Err(PluginTrustErrorV1::PublisherKeyRevoked)
     );
+    Ok(())
+}
+
+#[test]
+fn artifact_denial_check_rejects_every_release_digest_the_tps1_lists() -> TestResult {
+    let evidence = evidence_with(Vec::new(), Vec::new())?;
+    let authorization = evidence.authorize_release(&good_manifest()?)?;
+    let denied = Err(PluginTrustBridgeErrorV1::TpsArtifactDenied);
+    for digest in [[0x11; 32], [0x22; 32], [0x30; 32], [0x33; 32]] {
+        let tps1 = authed(base_snapshot(Vec::new(), vec![[0x01; 32], digest, [0xee; 32]]))?;
+        assert_eq!(
+            check_plugin_tps1_artifact_denial_v1(&tps1, &authorization),
+            denied
+        );
+    }
+    for allowed in [Vec::new(), vec![[0x44; 32]], vec![[0x10; 32], [0x31; 32], [0xff; 32]]] {
+        let tps1 = authed(base_snapshot(Vec::new(), allowed))?;
+        assert_eq!(
+            check_plugin_tps1_artifact_denial_v1(&tps1, &authorization),
+            Ok(())
+        );
+    }
+    Ok(())
+}
+
+fn successor_snapshot(epoch: u64, previous: Option<[u8; 32]>) -> TrustPolicySnapshotV1 {
+    let mut snapshot = base_snapshot(Vec::new(), Vec::new());
+    snapshot.epoch = epoch;
+    snapshot.previous_snapshot_digest = previous;
+    snapshot
+}
+
+#[test]
+fn genesis_check_requires_epoch_one_null_predecessor_and_pinned_digest() -> TestResult {
+    let operator = operator_signer().verifying_key().to_bytes();
+    let genesis = authed(successor_snapshot(1, None))?;
+    let pinned = |digest: [u8; 32]| {
+        PluginTrustPolicyAnchorV1::new("scope", [1; 32], operator, PLUGIN_OPERATOR_ROLE_V1, digest)
+    };
+    assert_eq!(check_plugin_tps1_genesis_v1(&pinned(genesis.digest())?, &genesis), Ok(()));
+    let invalid = Err(PluginTrustBridgeErrorV1::InvalidGenesis);
+    let mut other_digest = genesis.digest();
+    other_digest[31] ^= 1;
+    assert_eq!(check_plugin_tps1_genesis_v1(&pinned(other_digest)?, &genesis), invalid);
+    for later in [
+        successor_snapshot(2, None),
+        successor_snapshot(1, Some([0x22; 32])),
+        successor_snapshot(2, Some(genesis.digest())),
+    ] {
+        let later = authed(later)?;
+        assert_eq!(check_plugin_tps1_genesis_v1(&pinned(later.digest())?, &later), invalid);
+    }
+    Ok(())
+}
+
+#[test]
+fn successor_check_requires_greater_epoch_and_the_exact_predecessor() -> TestResult {
+    let retained = authed(successor_snapshot(3, None))?;
+    let check = |candidate: TrustPolicySnapshotV1| -> TestResult<_> {
+        Ok(check_plugin_tps1_successor_v1(3, retained.digest(), &authed(candidate)?))
+    };
+    let previous = Some(retained.digest());
+    assert_eq!(check(successor_snapshot(4, previous))?, Ok(()));
+    assert_eq!(check(successor_snapshot(9, previous))?, Ok(()));
+    let stale = Err(PluginTrustBridgeErrorV1::StaleSnapshot);
+    assert_eq!(check(successor_snapshot(3, previous))?, stale);
+    assert_eq!(check(successor_snapshot(2, previous))?, stale);
+    assert_eq!(check(successor_snapshot(3, Some([0x22; 32])))?, stale);
+    let discontinuity = Err(PluginTrustBridgeErrorV1::SnapshotDiscontinuity);
+    assert_eq!(check(successor_snapshot(4, None))?, discontinuity);
+    assert_eq!(check(successor_snapshot(4, Some([0x22; 32])))?, discontinuity);
+    let mut off_by_one = retained.digest();
+    off_by_one[0] ^= 1;
+    assert_eq!(check(successor_snapshot(4, Some(off_by_one)))?, discontinuity);
     Ok(())
 }
 
@@ -1254,8 +1301,12 @@ fn bridge_error_messages_are_stable_and_secret_free() {
         "TPS1 trust roots differ from the terminal PTR1 root keys"
     );
     assert_eq!(
-        PluginTrustBridgeErrorV1::Trust(PluginTrustErrorV1::ArtifactRevoked).to_string(),
-        PluginTrustErrorV1::ArtifactRevoked.to_string()
+        PluginTrustBridgeErrorV1::EvaluationTickMismatch.to_string(),
+        "evidence Tick differs from the trusted Tick"
+    );
+    assert_eq!(
+        PluginTrustBridgeErrorV1::TpsArtifactDenied.to_string(),
+        "TPS1 denies the release artifact"
     );
     assert_eq!(
         PluginFloorErrorV1::Rollback(PluginFloorKindV1::Root).to_string(),

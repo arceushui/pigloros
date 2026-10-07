@@ -1,4 +1,4 @@
-//! ADR-103 revision 3 Plugin trust bridge: the pure, storage-free checks that
+//! ADR-103 revision 3 and 4 Plugin trust bridge: the pure, storage-free checks that
 //! turn an operator-signed TPS1 snapshot and #423's verified PTR1/PRV1
 //! evidence into one authenticated Plugin trust-policy fact.
 //!
@@ -12,8 +12,7 @@ use std::collections::BTreeSet;
 use ed25519_dalek::VerifyingKey;
 use pos_core::OwnerIdV1;
 use pos_crypto::plugin_trust::{
-    PluginTrustErrorV1, ResolvedPluginTrustAuthorizationV1, TrustedPluginRootAnchorV1,
-    ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
+    ResolvedPluginTrustAuthorizationV1, TrustedPluginRootAnchorV1, VerifiedPluginTrustEvidenceV1,
 };
 use thiserror::Error;
 
@@ -67,11 +66,11 @@ pub enum PluginTrustBridgeErrorV1 {
     #[error("TPS1 epoch differs from the terminal PRV1 epoch")]
     EpochMismatch,
     /// The evidence was bound to a UTC second other than the trusted second.
-    ///
-    /// This check is an inference from revision 3's "trusted UTC second fixed
-    /// for the entire transaction", not an explicit rule of the amendment.
     #[error("evidence UTC second differs from the trusted UTC second")]
     EvaluationUtcMismatch,
+    /// The evidence was bound to a Tick other than the trusted Tick.
+    #[error("evidence Tick differs from the trusted Tick")]
+    EvaluationTickMismatch,
     /// `offline_valid_through` is not exact 20-byte real Gregorian UTC text.
     #[error("TPS1 offline_valid_through is not exact UTC text")]
     InvalidUtcFormat,
@@ -90,9 +89,18 @@ pub enum PluginTrustBridgeErrorV1 {
     /// A TPS1 list would exceed the global TPS1 cap.
     #[error("TPS1 global capacity is exceeded")]
     TpsCapExceeded,
-    /// The #423 evidence refuses the complete PMF1 projection.
-    #[error(transparent)]
-    Trust(#[from] PluginTrustErrorV1),
+    /// The TPS1 is not the anchor's genesis: epoch 1, null predecessor, pinned digest.
+    #[error("TPS1 snapshot is not the pinned genesis")]
+    InvalidGenesis,
+    /// The TPS1 epoch is not strictly greater than the retained epoch.
+    #[error("TPS1 snapshot epoch is not newer than the retained snapshot")]
+    StaleSnapshot,
+    /// The TPS1 does not name the retained snapshot digest as its predecessor.
+    #[error("TPS1 snapshot does not continue the retained snapshot")]
+    SnapshotDiscontinuity,
+    /// TPS1 denies the release's PMF1 digest, release digest, or a descriptor digest.
+    #[error("TPS1 denies the release artifact")]
+    TpsArtifactDenied,
 }
 
 /// Operator-pinned anchor for one exact Plugin policy scope.
@@ -212,27 +220,6 @@ impl AuthenticatedPluginTps1V1 {
     }
 }
 
-/// Facts proved by the complete bridge for one Plugin release.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VerifiedPluginTps1BridgeV1 {
-    tps1: AuthenticatedPluginTps1V1,
-    authorization: ResolvedPluginTrustAuthorizationV1,
-}
-
-impl VerifiedPluginTps1BridgeV1 {
-    /// The authenticated TPS1 that satisfied every bridge check.
-    #[must_use]
-    pub const fn tps1(&self) -> &AuthenticatedPluginTps1V1 {
-        &self.tps1
-    }
-
-    /// The release authorization recomputed from the evidence and projection.
-    #[must_use]
-    pub const fn authorization(&self) -> &ResolvedPluginTrustAuthorizationV1 {
-        &self.authorization
-    }
-}
-
 /// Decode exact canonical TPS1 bytes and verify the pinned operator signature.
 ///
 /// # Errors
@@ -258,25 +245,22 @@ pub fn authenticate_plugin_tps1_v1(
     })
 }
 
-/// Run every ADR-103 bridge check for one authenticated TPS1, #423 evidence,
-/// one complete PMF1 projection, and the trusted UTC second.
+/// Run the release-independent ADR-103 policy bridge on an authenticated TPS1.
 ///
-/// The checks run in this order: operator authentication; evidence scope;
-/// epoch; evidence UTC binding; expiry; root mapping; revoked-key mapping;
-/// artifact-denial mapping; and finally the evidence's own release
-/// authorization, which this function recomputes and never accepts from a
-/// caller.
+/// The TPS1 was already authenticated, so the signature check runs once. The
+/// checks run in this order: evidence scope; epoch; evidence UTC binding;
+/// evidence Tick binding; expiry; root mapping; revoked-key mapping; and the
+/// artifact-denial superset. Release authorization is the caller's own
+/// `authorize_release` call.
 ///
 /// # Errors
 /// Returns the first failing closed error in the order above.
-pub fn verify_plugin_tps1_bridge_v1(
-    anchor: &PluginTrustPolicyAnchorV1,
-    tps1_bytes: &[u8],
+pub fn verify_plugin_tps1_policy_v1(
+    tps1: &AuthenticatedPluginTps1V1,
     evidence: &VerifiedPluginTrustEvidenceV1,
-    manifest: &ValidatedPluginManifestProjectionV1,
     trusted_utc_second: i64,
-) -> Result<VerifiedPluginTps1BridgeV1, PluginTrustBridgeErrorV1> {
-    let tps1 = authenticate_plugin_tps1_v1(anchor, tps1_bytes)?;
+    trusted_tick: u64,
+) -> Result<(), PluginTrustBridgeErrorV1> {
     let snapshot = tps1.snapshot();
     if snapshot.policy_id != evidence.policy_scope() {
         return Err(PluginTrustBridgeErrorV1::ScopeMismatch);
@@ -284,20 +268,86 @@ pub fn verify_plugin_tps1_bridge_v1(
     if snapshot.epoch != evidence.terminal_revocation().0 {
         return Err(PluginTrustBridgeErrorV1::EpochMismatch);
     }
-    if evidence.evaluation_coordinates().0 != trusted_utc_second {
+    let (evidence_utc_second, evidence_tick) = evidence.evaluation_coordinates();
+    if evidence_utc_second != trusted_utc_second {
         return Err(PluginTrustBridgeErrorV1::EvaluationUtcMismatch);
+    }
+    if evidence_tick != trusted_tick {
+        return Err(PluginTrustBridgeErrorV1::EvaluationTickMismatch);
     }
     if trusted_utc_second >= parse_offline_valid_through_v1(&snapshot.offline_valid_through)? {
         return Err(PluginTrustBridgeErrorV1::Expired);
     }
     check_root_mapping(snapshot, evidence)?;
     check_revoked_key_mapping(snapshot, evidence)?;
-    check_artifact_mapping(snapshot, evidence)?;
-    let authorization = evidence.authorize_release(manifest)?;
-    Ok(VerifiedPluginTps1BridgeV1 {
-        tps1,
-        authorization,
-    })
+    check_artifact_mapping(snapshot, evidence)
+}
+
+/// Reject a release that the authenticated TPS1 itself denies.
+///
+/// Artifact digests carry no class, so the TPS1 `revoked_artifact_digests`
+/// must not contain the PMF1 digest, the release digest, or any descriptor
+/// digest that `authorize_release` checked, even when PRV1 lists none of them.
+///
+/// # Errors
+/// Returns `TpsArtifactDenied` when any of those digests is denied.
+pub fn check_plugin_tps1_artifact_denial_v1(
+    tps1: &AuthenticatedPluginTps1V1,
+    authorization: &ResolvedPluginTrustAuthorizationV1,
+) -> Result<(), PluginTrustBridgeErrorV1> {
+    let denied = &tps1.snapshot().revoked_artifact_digests;
+    // TPS1 validation keeps this list strictly ordered, so binary search is exact.
+    let listed = |digest: &[u8; 32]| denied.binary_search(digest).is_ok();
+    if listed(&authorization.pmf1_digest())
+        || listed(&authorization.release_digest())
+        || authorization.descriptor_digests().iter().any(listed)
+    {
+        Err(PluginTrustBridgeErrorV1::TpsArtifactDenied)
+    } else {
+        Ok(())
+    }
+}
+
+/// Check that an authenticated TPS1 is the anchor's genesis snapshot.
+///
+/// # Errors
+/// Returns `InvalidGenesis` unless the epoch is 1, the predecessor is null,
+/// and the full-byte digest equals the anchor's genesis TPS1 digest.
+pub fn check_plugin_tps1_genesis_v1(
+    anchor: &PluginTrustPolicyAnchorV1,
+    tps1: &AuthenticatedPluginTps1V1,
+) -> Result<(), PluginTrustBridgeErrorV1> {
+    if tps1.epoch() == 1
+        && tps1.snapshot().previous_snapshot_digest.is_none()
+        && tps1.digest() == anchor.genesis_tps1_digest
+    {
+        Ok(())
+    } else {
+        Err(PluginTrustBridgeErrorV1::InvalidGenesis)
+    }
+}
+
+/// Check that an authenticated TPS1 is a valid successor of the retained one.
+///
+/// The caller handles byte-identical retained bytes before calling this. The
+/// epoch must be strictly greater (gaps are allowed) and the predecessor
+/// digest must equal the retained full digest.
+///
+/// # Errors
+/// Returns `StaleSnapshot` for an equal or lower epoch (checked first) and
+/// `SnapshotDiscontinuity` for a wrong or null predecessor.
+pub fn check_plugin_tps1_successor_v1(
+    retained_epoch: u64,
+    retained_digest: [u8; 32],
+    candidate: &AuthenticatedPluginTps1V1,
+) -> Result<(), PluginTrustBridgeErrorV1> {
+    if candidate.epoch() <= retained_epoch {
+        return Err(PluginTrustBridgeErrorV1::StaleSnapshot);
+    }
+    if candidate.snapshot().previous_snapshot_digest != Some(retained_digest) {
+        return Err(PluginTrustBridgeErrorV1::SnapshotDiscontinuity);
+    }
+    Ok(())
 }
 
 fn check_root_mapping(
