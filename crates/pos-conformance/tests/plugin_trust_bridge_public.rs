@@ -32,6 +32,8 @@ const OPERATOR_PUBLIC_KEY_HEX: &str =
     "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737";
 const GOLDEN_PREIMAGE_HEX: &str = "5069676c6f724f532e545053312e6f70657261746f722d7369676e61747572652e7631008b6454505331016d706c7567696e2e676f6c64656e020781847845707472312d6162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616203674564323535313958204242424242424242424242424242424242424242424242424242424242424242816f7265766f6b65642e6578616d706c658158201111111111111111111111111111111111111111111111111111111111111111818266706c7567696e65312e322e3374323033302d30312d30315430303a30303a30305a58202222222222222222222222222222222222222222222222222222222222222222";
 const GOLDEN_TPS1_HEX: &str = "8c6454505331016d706c7567696e2e676f6c64656e020781847845707472312d6162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616203674564323535313958204242424242424242424242424242424242424242424242424242424242424242816f7265766f6b65642e6578616d706c658158201111111111111111111111111111111111111111111111111111111111111111818266706c7567696e65312e322e3374323033302d30312d30315430303a30303a30305a58202222222222222222222222222222222222222222222222222222222222222222584019cddc75717cbe12b3cd9a6e2ccbb478a80333dc0bdb925d56e70ec6d23761fc16ed351cf94f64a8328a8a41c1f7d2a59bcee61a515fed9e527211ef4e8d780f";
+const GOLDEN_POLICY_ID_BYTE: usize = 17;
+const GOLDEN_POSITION_BYTE: usize = 22;
 const GOLDEN_TPS1_DIGEST_HEX: &str =
     "915d839fa1d921bf2cca5e21c40169b16b3e5f32ef80b4a91d956dca2b1cb931";
 
@@ -109,9 +111,20 @@ fn authentication_rejects_scope_key_signature_and_encoding_faults() -> TestResul
         authenticate_plugin_tps1_v1(&anchor, &tampered),
         Err(PluginTrustBridgeErrorV1::InvalidOperatorSignature)
     );
-    let mut signed_field_changed = bytes.clone();
-    signed_field_changed[17] ^= 0x01;
-    assert!(authenticate_plugin_tps1_v1(&anchor, &signed_field_changed).is_err());
+    // Byte 17 is inside the `policy_id` text `plugin.golden`, so the scope no longer matches.
+    let mut scope_changed = bytes.clone();
+    scope_changed[GOLDEN_POLICY_ID_BYTE] ^= 0x01;
+    assert_eq!(
+        authenticate_plugin_tps1_v1(&anchor, &scope_changed),
+        Err(PluginTrustBridgeErrorV1::ScopeMismatch)
+    );
+    // Byte 22 is `effective_timeline_position`: a signed field with a valid new value.
+    let mut position_changed = bytes.clone();
+    position_changed[GOLDEN_POSITION_BYTE] ^= 0x01;
+    assert_eq!(
+        authenticate_plugin_tps1_v1(&anchor, &position_changed),
+        Err(PluginTrustBridgeErrorV1::InvalidOperatorSignature)
+    );
     let mut trailing = bytes.clone();
     trailing.push(0);
     assert_eq!(
@@ -344,6 +357,9 @@ fn offline_valid_through_rejects_every_non_profile_form() {
         "2030-01-01T00:00:0éZ",
         "2030-01-01T00:00:0-Z",
         "2030-0a-01T00:00:00Z",
+        "2030-01-0aT00:00:00Z",
+        "2030-01-01Ta0:00:00Z",
+        "2030-01-01T00:a0:00Z",
         "+030-01-01T00:00:00Z",
         "20300-1-01T00:00:00Z",
         "2030-00-01T00:00:00Z",
@@ -1202,6 +1218,84 @@ fn bridge_requires_every_effective_prv1_artifact_denial() -> TestResult {
     let superset = base_snapshot(vec![revoked_id], vec![[0x01; 32], [0x77; 32], [0xee; 32]]);
     assert_eq!(bridge(&sign(superset)?, &evidence)?, Ok(()));
     Ok(())
+}
+
+#[test]
+fn policy_bridge_error_precedence_matches_the_documented_order() -> TestResult {
+    let (evidence, revoked_id) = other_revocation_evidence()?;
+    let policy = |snapshot: TrustPolicySnapshotV1, utc: i64, tick: u64| -> TestResult<_> {
+        let authenticated = authed(snapshot)?;
+        Ok(verify_plugin_tps1_policy_v1(&authenticated, &evidence, utc, tick))
+    };
+    let mapped = || base_snapshot(vec![revoked_id.clone()], vec![[0x77; 32]]);
+    assert_eq!(policy(mapped(), 50, 5)?, Ok(()));
+    let wrong_root = |mut snapshot: TrustPolicySnapshotV1| {
+        snapshot.trust_roots = vec![plugin_root_entry(2, root_public())];
+        snapshot
+    };
+    let mut other_scope = mapped();
+    "other".clone_into(&mut other_scope.policy_id);
+    let other = anchor_for("other", operator_signer().verifying_key().to_bytes())?;
+    let authenticated = authenticate_plugin_tps1_v1(&other, &sign(wrong_epoch(other_scope))?)?;
+    assert_eq!(
+        verify_plugin_tps1_policy_v1(&authenticated, &evidence, 51, 6),
+        Err(PluginTrustBridgeErrorV1::ScopeMismatch)
+    );
+    assert_eq!(
+        policy(wrong_epoch(mapped()), 51, 6)?,
+        Err(PluginTrustBridgeErrorV1::EpochMismatch)
+    );
+    let expired = |mut snapshot: TrustPolicySnapshotV1| {
+        "1970-01-01T00:00:50Z".clone_into(&mut snapshot.offline_valid_through);
+        snapshot
+    };
+    assert_eq!(
+        policy(expired(mapped()), 50, 6)?,
+        Err(PluginTrustBridgeErrorV1::EvaluationTickMismatch)
+    );
+    assert_eq!(
+        policy(wrong_root(expired(mapped())), 50, 5)?,
+        Err(PluginTrustBridgeErrorV1::Expired)
+    );
+    let mut bad_format = wrong_root(mapped());
+    "2030-02-30T00:00:00Z".clone_into(&mut bad_format.offline_valid_through);
+    assert_eq!(
+        policy(bad_format, 50, 5)?,
+        Err(PluginTrustBridgeErrorV1::InvalidUtcFormat)
+    );
+    let mut roots_and_keys = base_snapshot(Vec::new(), Vec::new());
+    roots_and_keys.trust_roots = vec![plugin_root_entry(2, root_public())];
+    assert_eq!(
+        policy(roots_and_keys, 50, 5)?,
+        Err(PluginTrustBridgeErrorV1::BridgeRootMismatch)
+    );
+    let foreign =
+        plugin_revoked_key_id_v1(&OwnerIdV1::new("other-b")?, 1, other_publisher_public());
+    assert_eq!(
+        policy(base_snapshot(vec![foreign], Vec::new()), 50, 5)?,
+        Err(PluginTrustBridgeErrorV1::ReservedPrefix)
+    );
+    assert_eq!(
+        policy(base_snapshot(vec![revoked_id.clone()], Vec::new()), 50, 5)?,
+        Err(PluginTrustBridgeErrorV1::BridgeRevocationMismatch)
+    );
+    let mut extra_root = mapped();
+    extra_root.trust_roots = vec![TrustPolicyRootV1 {
+        key_id: plugin_root_key_id_v1([0x99; 32]),
+        root_version: 1,
+        algorithm: "Ed25519".to_owned(),
+        public_key: [0x55; 32],
+    }];
+    assert_eq!(
+        policy(extra_root, 50, 5)?,
+        Err(PluginTrustBridgeErrorV1::ReservedPrefix)
+    );
+    Ok(())
+}
+
+fn wrong_epoch(mut snapshot: TrustPolicySnapshotV1) -> TrustPolicySnapshotV1 {
+    snapshot.epoch = 2;
+    snapshot
 }
 
 #[test]

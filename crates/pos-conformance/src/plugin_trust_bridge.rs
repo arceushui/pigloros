@@ -16,8 +16,11 @@ use pos_crypto::plugin_trust::{
 };
 use thiserror::Error;
 
-use crate::TrustPolicySnapshotV1;
-use crate::{TPS1_MAX_REVOKED_ARTIFACTS, TPS1_MAX_REVOKED_KEYS, TPS1_MAX_TRUST_ROOTS};
+// The TPS1_MAX_* caps live at the crate root because clippy rejects `pub(crate)` items in
+// private modules.
+use crate::{
+    TrustPolicySnapshotV1, TPS1_MAX_REVOKED_ARTIFACTS, TPS1_MAX_REVOKED_KEYS, TPS1_MAX_TRUST_ROOTS,
+};
 
 /// The only operator role ADR-103 accepts for the Plugin TPS1 signature.
 pub const PLUGIN_OPERATOR_ROLE_V1: &str = "deployment-operator";
@@ -42,6 +45,9 @@ const CBOR_MAJOR_TEXT: u8 = 3;
 const CBOR_MAJOR_ARRAY: u8 = 4;
 
 /// Closed, secret-free failures of the Plugin TPS1 bridge.
+///
+/// One enum covers anchor, authentication, policy, genesis and successor failures because
+/// the registry wraps it as a single `Bridge(..)` family.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum PluginTrustBridgeErrorV1 {
     /// The anchor scope is not a valid Plugin policy scope.
@@ -295,9 +301,7 @@ pub fn check_plugin_tps1_artifact_denial_v1(
     tps1: &AuthenticatedPluginTps1V1,
     authorization: &ResolvedPluginTrustAuthorizationV1,
 ) -> Result<(), PluginTrustBridgeErrorV1> {
-    let denied = &tps1.snapshot().revoked_artifact_digests;
-    // TPS1 validation keeps this list strictly ordered, so binary search is exact.
-    let listed = |digest: &[u8; 32]| denied.binary_search(digest).is_ok();
+    let listed = |digest: &[u8; 32]| lists_digest(tps1.snapshot(), digest);
     if listed(&authorization.pmf1_digest())
         || listed(&authorization.release_digest())
         || authorization.descriptor_digests().iter().any(listed)
@@ -309,6 +313,9 @@ pub fn check_plugin_tps1_artifact_denial_v1(
 }
 
 /// Check that an authenticated TPS1 is the anchor's genesis snapshot.
+///
+/// The scope is not rechecked here: `authenticate_plugin_tps1_v1`, which the
+/// registry must call first, already requires `policy_id` to equal the anchor scope.
 ///
 /// # Errors
 /// Returns `InvalidGenesis` unless the epoch is 1, the predecessor is null,
@@ -336,6 +343,8 @@ pub fn check_plugin_tps1_genesis_v1(
 /// # Errors
 /// Returns `StaleSnapshot` for an equal or lower epoch (checked first) and
 /// `SnapshotDiscontinuity` for a wrong or null predecessor.
+///
+/// The primitive arguments are deliberate: slice 2 is the sole consumer.
 pub fn check_plugin_tps1_successor_v1(
     retained_epoch: u64,
     retained_digest: [u8; 32],
@@ -408,17 +417,23 @@ fn check_artifact_mapping(
     snapshot: &TrustPolicySnapshotV1,
     evidence: &VerifiedPluginTrustEvidenceV1,
 ) -> Result<(), PluginTrustBridgeErrorV1> {
-    // TPS1 validation keeps this list strictly ordered, so binary search is exact.
-    if evidence.effective_artifact_revocations().all(|digest| {
-        snapshot
-            .revoked_artifact_digests
-            .binary_search(&digest)
-            .is_ok()
-    }) {
+    if evidence
+        .effective_artifact_revocations()
+        .all(|digest| lists_digest(snapshot, &digest))
+    {
         Ok(())
     } else {
         Err(PluginTrustBridgeErrorV1::BridgeRevocationMismatch)
     }
+}
+
+/// Whether the TPS1 `revoked_artifact_digests` contains `digest`.
+fn lists_digest(snapshot: &TrustPolicySnapshotV1, digest: &[u8; 32]) -> bool {
+    // TPS1 validation keeps this list strictly ordered, so binary search is exact.
+    snapshot
+        .revoked_artifact_digests
+        .binary_search(digest)
+        .is_ok()
 }
 
 /// The TPS1 `trust_roots` key ID for one PTR1 root key ID.
@@ -439,8 +454,8 @@ pub fn plugin_revoked_key_id_v1(owner: &OwnerIdV1, epoch: u64, public_key: [u8; 
     let mut preimage = REVOKED_KEY_DOMAIN.to_vec();
     push_cbor_head(&mut preimage, CBOR_MAJOR_ARRAY, 4);
     let owner_text = owner.as_str().as_bytes();
-    // Counting avoids a fallible `usize` to `u64` conversion; owners are at most 128 bytes.
-    let owner_length = owner_text.iter().map(|_| 1_u64).sum::<u64>();
+    // `usize` is at most 64 bits on every supported target, so this cast is lossless.
+    let owner_length = owner_text.len() as u64;
     push_cbor_head(&mut preimage, CBOR_MAJOR_TEXT, owner_length);
     preimage.extend_from_slice(owner_text);
     push_cbor_head(&mut preimage, CBOR_MAJOR_UNSIGNED, PUBLISHER_KEY_ROLE);
