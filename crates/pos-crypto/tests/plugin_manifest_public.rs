@@ -5,18 +5,26 @@
 //! `pos_plugin_release::verify_oci_closure_v1` verifies. The only route to a
 //! `ValidatedPluginManifestProjectionV1` is `from_verified_bundle`. The
 //! independently generated golden closure is exercised by
-//! `plugin_release_query_public.rs`.
+//! `plugin_release_query_public.rs` and, with its Ed25519 signature, by the
+//! encoder and signature-verification tests at the end of this file. Those
+//! compare the encoder with the independent `Release` builder and the Python
+//! generator, never with itself.
 
 use std::collections::BTreeMap;
 
+use pos_core::OwnerIdV1;
 use pos_crypto::plugin_execution::{
     is_valid_id_v1, DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
     PluginExecutionProjectionV1, WASM_PAGE_BYTES_V1,
 };
-use pos_crypto::plugin_manifest::PluginManifestErrorV1;
+use pos_crypto::plugin_manifest::{
+    verify_plugin_release_signature_v1, PluginArtifactInputV1, PluginDependencyInputV1,
+    PluginManifestErrorV1, PluginReleaseDraftV1, PluginReleaseSignatureErrorV1,
+    PluginSchemaInputV1, VerifiedPluginReleaseSignatureV1,
+};
 use pos_crypto::plugin_trust::{
-    verify_plugin_trust_v1, PluginTrustErrorV1, TrustedPluginRootAnchorV1,
-    ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
+    verify_plugin_trust_v1, PluginTrustErrorV1, ResolvedPluginTrustAuthorizationV1,
+    TrustedPluginRootAnchorV1, ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
 use pos_plugin_release::{
     verify_oci_closure_v1, BundleAddressV1, ReleaseSourceErrorV1, VerifiedReleaseBundleV1,
@@ -25,6 +33,7 @@ use sha2::{Digest as _, Sha256};
 
 include!("support/plugin_trust_records.rs");
 include!("support/pmf1_golden_vectors.rs");
+include!("support/pmf1_signed_release_vectors.rs");
 
 type BoxResult<T> = Result<T, Box<dyn std::error::Error>>;
 type Projection = Result<ValidatedPluginManifestProjectionV1, PluginManifestErrorV1>;
@@ -1644,6 +1653,18 @@ fn inner_digest_mismatches_follow_pmf1_field_order_not_layer_order() -> TestResu
     expect(&release, digest_mismatch(11))
 }
 
+/// The verified OCI closure of the independently generated golden release.
+fn golden_bundle() -> BoxResult<VerifiedReleaseBundleV1> {
+    let manifest = GOLDEN_OCI_MANIFEST.as_bytes().to_vec();
+    let size = u64::try_from(manifest.len())?;
+    let address = BundleAddressV1::new(GOLDEN_OCI_MANIFEST_DIGEST.to_owned(), size)?;
+    let mut blobs = BTreeMap::new();
+    for (oci, hex) in GOLDEN_BLOBS_HEX {
+        blobs.insert(oci.to_owned(), hex_bytes(hex)?);
+    }
+    Ok(verify_oci_closure_v1(address, manifest, blobs)?)
+}
+
 fn golden_digest(hex: &str) -> BoxResult<[u8; 32]> {
     Ok(hex_bytes(hex)?.as_slice().try_into()?)
 }
@@ -1666,14 +1687,7 @@ fn authorize_with_revoked(
 
 #[test]
 fn independent_golden_closure_projects_and_binds_its_digests() -> TestResult {
-    let manifest = GOLDEN_OCI_MANIFEST.as_bytes().to_vec();
-    let size = u64::try_from(manifest.len())?;
-    let address = BundleAddressV1::new(GOLDEN_OCI_MANIFEST_DIGEST.to_owned(), size)?;
-    let mut blobs = BTreeMap::new();
-    for (oci, hex) in GOLDEN_BLOBS_HEX {
-        blobs.insert(oci.to_owned(), hex_bytes(hex)?);
-    }
-    let bundle = verify_oci_closure_v1(address, manifest, blobs)?;
+    let bundle = golden_bundle()?;
     let pmf1 = hex_bytes(GOLDEN_PMF1_HEX)?;
     assert_eq!(bundle.pmf1(), pmf1.as_slice());
     assert_eq!(digest(&pmf1), golden_digest(GOLDEN_PMF1_DIGEST_HEX)?);
@@ -1885,4 +1899,813 @@ const fn budget_members(budget: DeterministicBudgetV1) -> [u64; 8] {
         budget.log_calls,
         budget.log_bytes,
     ]
+}
+
+// --- PMF1 V1 encoder -------------------------------------------------------
+
+type Draft<'a> = PluginReleaseDraftV1<'a>;
+type Encoded = Result<Vec<u8>, PluginManifestErrorV1>;
+type Verification = Result<VerifiedPluginReleaseSignatureV1, PluginReleaseSignatureErrorV1>;
+
+fn owner(value: &str) -> BoxResult<OwnerIdV1> {
+    Ok(OwnerIdV1::new(value)?)
+}
+
+fn input(bytes: &[u8]) -> PluginArtifactInputV1<'_> {
+    PluginArtifactInputV1 {
+        bytes,
+        sha256: sha256(bytes),
+    }
+}
+
+fn schema_input(id: u32, version: u32, document: &[u8], max_bytes: u32) -> PluginSchemaInputV1<'_> {
+    PluginSchemaInputV1 {
+        id,
+        version,
+        artifact: input(document),
+        max_bytes,
+    }
+}
+
+const fn budget_struct(members: [u64; 8]) -> DeterministicBudgetV1 {
+    DeterministicBudgetV1 {
+        memory_bytes: members[0],
+        fuel: members[1],
+        host_calls: members[2],
+        event_count: members[3],
+        event_bytes: members[4],
+        state_bytes: members[5],
+        log_calls: members[6],
+        log_bytes: members[7],
+    }
+}
+
+fn capability_input(id: &str, operation: &str) -> PluginCapabilityDescriptorV1 {
+    PluginCapabilityDescriptorV1 {
+        capability_id: id.to_owned(),
+        operation: operation.to_owned(),
+        resource_pattern: "state/*".to_owned(),
+        purpose: "Read Plugin state".to_owned(),
+        audience: "plugin".to_owned(),
+        required: true,
+        max_calls: 10,
+        max_request_bytes: 1_024,
+        max_response_bytes: 2_048,
+    }
+}
+
+fn dependency_input(id: &str) -> PluginDependencyInputV1 {
+    PluginDependencyInputV1 {
+        dependency_id: id.to_owned(),
+        release_digest: DEPENDENCY_RELEASE,
+        min_minor: 0,
+        max_minor: 0,
+        required_features: vec!["clock".to_owned()],
+        capability_ids: Vec::new(),
+        class: 0,
+    }
+}
+
+/// The draft of the independent builder's default release (`Release::new`).
+fn default_draft<'a>() -> BoxResult<Draft<'a>> {
+    Ok(PluginReleaseDraftV1 {
+        plugin_id: "plugin-a".to_owned(),
+        release_version: "1.0.0".to_owned(),
+        abi: PluginAbiRequirementV1 {
+            major: 0,
+            min_minor: 0,
+            max_minor: 1,
+            required_features: vec!["clock".to_owned()],
+        },
+        component: input(COMPONENT_BYTES),
+        wit: input(WIT_BYTES),
+        event_schemas: vec![schema_input(1, 1, EVENT_SCHEMA, 65_536)],
+        state_schema: schema_input(2, 1, STATE_SCHEMA, 65_536),
+        configuration_schema: None,
+        capabilities: vec![capability_input("kv", "read")],
+        budget: budget_struct(DEFAULT_BUDGET),
+        dependencies: vec![dependency_input("dep")],
+        provenance: input(PROVENANCE_BYTES),
+        sbom: input(SBOM_BYTES),
+        licences: vec![input(LICENCE_BYTES)],
+        owner: owner("publisher")?,
+        not_before: 40,
+        not_after: 60,
+        previous_release_digest: None,
+    })
+}
+
+fn encode_draft(draft: &Draft<'_>, epoch: u64, signature: [u8; 64]) -> Encoded {
+    draft
+        .unsigned()
+        .and_then(|unsigned| unsigned.with_signature(epoch, signature))
+}
+
+#[test]
+fn encoder_output_equals_the_independent_builder_for_the_default_release() -> TestResult {
+    let encoded = encode_draft(&default_draft()?, 1, [0x5a; 64]);
+    assert_eq!(encoded, Ok(Release::new()?.pmf1()));
+    let unsigned = default_draft()?.unsigned()?;
+    let release = Release::new()?;
+    assert_eq!(unsigned.release_digest(), release.release_digest()?);
+    assert_eq!(unsigned.owner(), owner("publisher")?);
+    assert_eq!(unsigned.unsigned_bytes().first(), Some(&0x98));
+    assert_eq!(unsigned.unsigned_bytes().get(1), Some(&0x19));
+    let mut manifest = domain_digest(MANIFEST_DOMAIN, unsigned.unsigned_bytes());
+    assert_eq!(unsigned.unsigned_manifest_digest(), manifest);
+    manifest[0] ^= 1;
+    assert_ne!(unsigned.unsigned_manifest_digest(), manifest);
+    assert_eq!(default_draft()?.unsigned()?, unsigned);
+    Ok(())
+}
+
+#[test]
+fn encoder_matches_the_independent_builder_at_every_cbor_width() -> TestResult {
+    let intervals = [
+        (-1, 0),
+        (-24, 0),
+        (-25, 1),
+        (-256, -255),
+        (-257, 0),
+        (0, 24),
+        (23, 24),
+        (255, 256),
+        (65_535, 65_536),
+        (4_294_967_295, 4_294_967_296),
+        (-5_000_000_000, -4_999_999_999),
+        (i64::MAX - 1, i64::MAX),
+        (i64::MIN, i64::MIN + 1),
+        (0, 31_622_400),
+    ];
+    for (not_before, not_after) in intervals {
+        let mut draft = default_draft()?;
+        draft.not_before = not_before;
+        draft.not_after = not_after;
+        let mut release = interval(not_before, not_after)?;
+        release.seal()?;
+        let encoded = encode_draft(&draft, 1, [0x5a; 64]);
+        assert_eq!(encoded, Ok(release.pmf1()), "{not_before}..{not_after}");
+    }
+    for members in [
+        budget_members(DeterministicBudgetV1::MINIMA),
+        budget_members(DeterministicBudgetV1::MAXIMA),
+        [65_536, 256, 65_535, 255, 65_536, 65_535, 23, 24],
+        [4_294_967_296, 4_294_967_295, 1_000_000, 1_024, 16_777_216, 1_048_576, 64, 16_384],
+    ] {
+        let mut draft = default_draft()?;
+        draft.budget = budget_struct(members);
+        let mut release = Release::with(15, &budget(members))?;
+        release.seal()?;
+        assert_eq!(encode_draft(&draft, 1, [0x5a; 64]), Ok(release.pmf1()));
+    }
+    for epoch in [1, 23, 24, 255, 256, 65_535, 65_536, 4_294_967_296, u64::MAX] {
+        let mut release = Release::new()?;
+        release.fields[26] = encode(&signature(epoch))?;
+        let encoded = encode_draft(&default_draft()?, epoch, [0x5a; 64]);
+        assert_eq!(encoded, Ok(release.pmf1()), "epoch {epoch}");
+    }
+    let mut draft = default_draft()?;
+    draft.previous_release_digest = Some([7; 32]);
+    let mut release = Release::new()?;
+    release.fields[24] = encode(&bytes([7; 32]))?;
+    release.seal()?;
+    assert_eq!(encode_draft(&draft, 1, [0x5a; 64]), Ok(release.pmf1()));
+    Ok(())
+}
+
+#[test]
+fn encoder_matches_the_independent_builder_for_every_optional_member() -> TestResult {
+    let mut draft = default_draft()?;
+    draft.configuration_schema = Some(schema_input(3, 1, CONFIGURATION_SCHEMA, 65_536));
+    draft.capabilities.push(capability_input("kv", "write"));
+    draft.dependencies.push(dependency_input("dep2"));
+    let mut release = Release::with(13, &schema(3, CONFIGURATION_SCHEMA))?;
+    release.fields[14] = encode(&list(vec![
+        capability("kv", "read"),
+        capability("kv", "write"),
+    ]))?;
+    release.fields[17] = encode(&list(vec![
+        dependency("dep", DEPENDENCY_RELEASE),
+        dependency("dep2", DEPENDENCY_RELEASE),
+    ]))?;
+    release.seal()?;
+    assert_eq!(encode_draft(&draft, 1, [0x5a; 64]), Ok(release.pmf1()));
+    let mut features = default_draft()?;
+    features.abi.required_features = vec!["a".to_owned(), "b".to_owned()];
+    features.dependencies[0].capability_ids = vec!["kv".to_owned()];
+    features.dependencies[0].class = 4;
+    features.dependencies[0].min_minor = 1;
+    features.dependencies[0].max_minor = 65_535;
+    let mut release = Release::with(8, &list(vec![text("a"), text("b")]))?;
+    let mut dependency = dependency("dep", DEPENDENCY_RELEASE);
+    if let Value::Array(members) = &mut dependency {
+        members[4] = unsigned(1);
+        members[5] = unsigned(65_535);
+        members[7] = list(vec![text("kv")]);
+        members[8] = unsigned(4);
+    }
+    release.fields[17] = encode(&list(vec![dependency]))?;
+    release.seal()?;
+    assert_eq!(encode_draft(&features, 1, [0x5a; 64]), Ok(release.pmf1()));
+    Ok(())
+}
+
+#[test]
+fn licences_are_emitted_in_sha256_order_whatever_the_draft_order() -> TestResult {
+    let first: &[u8] = b"licence one";
+    let second: &[u8] = b"licence two";
+    let mut forward = default_draft()?;
+    forward.licences = vec![input(first), input(second)];
+    let mut backward = default_draft()?;
+    backward.licences = vec![input(second), input(first)];
+    let forward = encode_draft(&forward, 1, [1; 64]);
+    assert_eq!(forward, encode_draft(&backward, 1, [1; 64]));
+    let mut sorted = [first.to_vec(), second.to_vec()];
+    sorted.sort_by_key(|licence| sha256(licence));
+    let mut release = Release::with(20, &licence_list(&sorted))?;
+    release.fields[26] = encode(&list(vec![
+        unsigned(1),
+        unsigned(3),
+        unsigned(1),
+        Value::Bytes(vec![1; 64]),
+    ]))?;
+    release.seal()?;
+    assert_eq!(forward, Ok(release.pmf1()));
+    Ok(())
+}
+
+#[test]
+fn encoded_release_decodes_projects_and_binds_the_draft() -> TestResult {
+    let draft = default_draft()?;
+    let release = Release::new()?;
+    let pmf1 = encode_draft(&draft, 1, [0x5a; 64])?;
+    let bundle = closure(pmf1.clone(), &release.members)??;
+    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
+    assert_eq!(projection, release.project()??);
+    let execution = PluginExecutionProjectionV1::from_verified_bundle(&bundle)?;
+    assert_eq!(execution.plugin_id(), draft.plugin_id);
+    assert_eq!(execution.abi(), &draft.abi);
+    assert_eq!(execution.budget(), draft.budget);
+    assert_eq!(execution.capabilities(), draft.capabilities.as_slice());
+    assert_eq!(execution.pmf1_digest(), digest(&pmf1));
+    assert_eq!(execution.release_digest(), draft.unsigned()?.release_digest());
+    Ok(())
+}
+
+/// Assert that `change` makes the encoder fail exactly as the decoder would.
+fn rejected(change: impl FnOnce(&mut Draft<'_>), error: PluginManifestErrorV1) -> TestResult {
+    let mut draft = default_draft()?;
+    change(&mut draft);
+    assert_eq!(draft.unsigned().err(), Some(error));
+    Ok(())
+}
+
+/// Assert that `change` leaves a draft the encoder accepts.
+fn accepted_draft(change: impl FnOnce(&mut Draft<'_>)) -> TestResult {
+    let mut draft = default_draft()?;
+    change(&mut draft);
+    assert!(draft.unsigned().is_ok());
+    Ok(())
+}
+
+#[test]
+fn encoder_rejects_every_invalid_draft_field_like_the_decoder() -> TestResult {
+    rejected(|draft| draft.plugin_id = "Bad".to_owned(), invalid(2))?;
+    rejected(|draft| draft.plugin_id = String::new(), invalid(2))?;
+    rejected(|draft| draft.release_version = "1.0".to_owned(), invalid(3))?;
+    rejected(|draft| draft.release_version = "01.0.0".to_owned(), invalid(3))?;
+    rejected(|draft| draft.release_version = "1.0.0+build".to_owned(), invalid(3))?;
+    rejected(|draft| draft.abi.major = 1, invalid(5))?;
+    rejected(|draft| draft.abi.min_minor = 2, invalid(7))?;
+    rejected(
+        |draft| draft.abi.required_features = vec!["b".to_owned(), "a".to_owned()],
+        invalid(8),
+    )?;
+    rejected(|draft| draft.component = input(b""), invalid(9))?;
+    rejected(|draft| draft.wit = input(b""), invalid(10))?;
+    rejected(|draft| draft.event_schemas = vec![schema_input(1, 0, EVENT_SCHEMA, 1)], invalid(11))?;
+    rejected(|draft| draft.event_schemas.push(schema_input(1, 1, STATE_SCHEMA, 1)), invalid(11))?;
+    rejected(|draft| draft.state_schema = schema_input(1, 1, STATE_SCHEMA, 1), invalid(12))?;
+    rejected(|draft| draft.state_schema = schema_input(2, 1, EVENT_SCHEMA, 1), invalid(12))?;
+    rejected(|draft| draft.state_schema = schema_input(2, 0, STATE_SCHEMA, 1), invalid(12))?;
+    rejected(|draft| draft.state_schema = schema_input(2, 1, STATE_SCHEMA, 0), invalid(12))?;
+    rejected(
+        |draft| draft.state_schema = schema_input(2, 1, STATE_SCHEMA, 1_048_577),
+        invalid(12),
+    )?;
+    rejected(
+        |draft| draft.configuration_schema = Some(schema_input(2, 1, CONFIGURATION_SCHEMA, 1)),
+        invalid(13),
+    )?;
+    rejected(
+        |draft| draft.configuration_schema = Some(schema_input(3, 1, STATE_SCHEMA, 1)),
+        invalid(13),
+    )?;
+    rejected(|draft| draft.capabilities.insert(0, capability_input("kv", "write")), invalid(14))?;
+    rejected(|draft| draft.capabilities[0].capability_id = "KV".to_owned(), invalid(14))?;
+    rejected(|draft| draft.capabilities[0].resource_pattern = String::new(), invalid(14))?;
+    rejected(|draft| draft.capabilities[0].max_calls = 1_000_001, invalid(14))?;
+    rejected(|draft| draft.capabilities[0].max_request_bytes = 16_777_217, invalid(14))?;
+    rejected(|draft| draft.capabilities[0].max_response_bytes = 16_777_217, invalid(14))?;
+    rejected(|draft| draft.budget.memory_bytes = 65_535, invalid(15))?;
+    rejected(|draft| draft.budget.memory_bytes = 65_537, invalid(15))?;
+    rejected(|draft| draft.budget.fuel = 0, invalid(15))?;
+    rejected(|draft| draft.budget.state_bytes = 1_048_577, invalid(15))?;
+    rejected(|draft| draft.dependencies.insert(0, dependency_input("e")), invalid(17))?;
+    rejected(|draft| draft.dependencies[0].class = 5, invalid(17))?;
+    rejected(|draft| draft.dependencies[0].min_minor = 1, invalid(17))?;
+    rejected(|draft| draft.licences = Vec::new(), invalid(20))?;
+    rejected(|draft| draft.licences.push(input(LICENCE_BYTES)), invalid(20))?;
+    rejected(|draft| draft.not_after = 40, invalid(23))?;
+    rejected(|draft| draft.not_after = 31_622_441, invalid(23))?;
+    Ok(())
+}
+
+#[test]
+fn encoder_accepts_each_boundary_value_beside_its_rejected_neighbour() -> TestResult {
+    accepted_draft(|draft| draft.not_after = 41)?;
+    accepted_draft(|draft| draft.not_after = 31_622_440)?;
+    accepted_draft(|draft| draft.state_schema.max_bytes = 1)?;
+    accepted_draft(|draft| draft.state_schema.max_bytes = 1_048_576)?;
+    accepted_draft(|draft| draft.capabilities[0].max_calls = 1_000_000)?;
+    accepted_draft(|draft| draft.capabilities[0].max_request_bytes = 16_777_216)?;
+    accepted_draft(|draft| draft.capabilities[0].max_response_bytes = 0)?;
+    accepted_draft(|draft| draft.budget.memory_bytes = 65_536)?;
+    accepted_draft(|draft| draft.budget.memory_bytes = 4_294_967_296)?;
+    accepted_draft(|draft| draft.budget.fuel = u64::MAX)?;
+    accepted_draft(|draft| draft.budget.state_bytes = 1_048_576)?;
+    accepted_draft(|draft| draft.dependencies[0].class = 4)?;
+    accepted_draft(|draft| draft.abi.max_minor = 65_535)?;
+    accepted_draft(|draft| draft.abi.required_features = Vec::new())?;
+    accepted_draft(|draft| draft.owner = OwnerIdV1::from_static("o"))?;
+    let epoch_zero = default_draft()?
+        .unsigned()?
+        .with_signature(0, [0x5a; 64]);
+    assert_eq!(epoch_zero, Err(invalid(26)));
+    Ok(())
+}
+
+#[test]
+fn encoder_bounds_collections_texts_and_artifact_sizes_exactly() -> TestResult {
+    let features = |count: usize| {
+        ids(count, 3)
+            .iter()
+            .filter_map(|value| value.as_text().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+    let mut draft = default_draft()?;
+    draft.abi.required_features = features(256);
+    assert!(draft.unsigned().is_ok());
+    draft.abi.required_features = features(257);
+    assert_eq!(draft.unsigned().err(), Some(bound(8)));
+    let documents = (0..258)
+        .map(|index| format!("{{\"$id\":\"event-{index:04}\"}}").into_bytes())
+        .collect::<Vec<_>>();
+    let schemas = |count: usize| {
+        let ids = 10..;
+        documents
+            .iter()
+            .zip(ids)
+            .take(count)
+            .map(|(document, id)| schema_input(id, 1, document, 1))
+            .collect::<Vec<_>>()
+    };
+    let mut draft = default_draft()?;
+    draft.event_schemas = schemas(256);
+    assert!(draft.unsigned().is_ok());
+    draft.event_schemas = schemas(257);
+    assert_eq!(draft.unsigned().err(), Some(bound(11)));
+    let licences = (0..33)
+        .map(|index| format!("licence {index}").into_bytes())
+        .collect::<Vec<_>>();
+    let mut draft = default_draft()?;
+    draft.licences = licences[..32].iter().map(|licence| input(licence)).collect();
+    assert!(draft.unsigned().is_ok());
+    draft.licences = licences.iter().map(|licence| input(licence)).collect();
+    assert_eq!(draft.unsigned().err(), Some(bound(20)));
+    let wit = vec![0; 4_194_304];
+    let too_large = vec![0; 4_194_305];
+    let mut draft = default_draft()?;
+    draft.wit = input(&wit);
+    assert!(draft.unsigned().is_ok());
+    draft.wit = input(&too_large);
+    assert_eq!(draft.unsigned().err(), Some(bound(10)));
+    let mut draft = default_draft()?;
+    draft.plugin_id = "a".repeat(128);
+    assert!(draft.unsigned().is_ok());
+    draft.plugin_id = "a".repeat(129);
+    assert_eq!(draft.unsigned().err(), Some(bound(2)));
+    let mut draft = default_draft()?;
+    draft.release_version = format!("1.0.0-{}", "a".repeat(58));
+    assert!(draft.unsigned().is_ok());
+    draft.release_version = format!("1.0.0-{}", "a".repeat(59));
+    assert_eq!(draft.unsigned().err(), Some(bound(3)));
+    Ok(())
+}
+
+// --- Independent golden signing vectors ------------------------------------
+
+fn golden_signature() -> BoxResult<[u8; 64]> {
+    hex_bytes(GOLDEN_SIGNATURE_HEX)?
+        .try_into()
+        .map_err(|_| "golden signature is not 64 bytes".into())
+}
+
+fn golden_capability(
+    operation: &str,
+    required: bool,
+    limits: [u64; 3],
+) -> PluginCapabilityDescriptorV1 {
+    let mut capability = capability_input("kv", operation);
+    capability.purpose = format!("{} Plugin state", if required { "Read" } else { "Write" });
+    capability.required = required;
+    [
+        capability.max_calls,
+        capability.max_request_bytes,
+        capability.max_response_bytes,
+    ] = limits;
+    capability
+}
+
+/// The golden draft with licences in the given order, over `blobs`.
+fn golden_draft<'a>(
+    blobs: &'a BTreeMap<&'static str, Vec<u8>>,
+    licences: [&str; 2],
+) -> BoxResult<Draft<'a>> {
+    let blob = |name: &str| -> BoxResult<&'a [u8]> {
+        Ok(blobs.get(name).ok_or("unknown golden artifact")?.as_slice())
+    };
+    Ok(PluginReleaseDraftV1 {
+        plugin_id: "alpha/plugin".to_owned(),
+        release_version: "1.2.3-rc.1".to_owned(),
+        abi: PluginAbiRequirementV1 {
+            major: 0,
+            min_minor: 1,
+            max_minor: 3,
+            required_features: vec!["clock.v1".to_owned(), "log".to_owned()],
+        },
+        component: input(blob("component")?),
+        wit: input(blob("wit")?),
+        event_schemas: vec![
+            schema_input(1, 1, blob("event-a")?, 4_096),
+            schema_input(7, 2, blob("event-b")?, 4_096),
+        ],
+        state_schema: schema_input(100, 1, blob("state")?, 65_536),
+        configuration_schema: Some(schema_input(200, 1, blob("configuration")?, 1_024)),
+        capabilities: vec![
+            golden_capability("read", true, [24, 1_024, 2_048]),
+            golden_capability("write", false, [10, 2_048, 0]),
+        ],
+        budget: budget_struct([1_048_576, 1 << 40, 1_000, 16, 4_096, 65_536, 24, 2_048]),
+        dependencies: vec![PluginDependencyInputV1 {
+            dependency_id: "beta/lib".to_owned(),
+            release_digest: [0x42; 32],
+            min_minor: 0,
+            max_minor: 2,
+            required_features: vec!["clock.v1".to_owned()],
+            capability_ids: vec!["kv".to_owned()],
+            class: 1,
+        }],
+        provenance: input(blob("provenance")?),
+        sbom: input(blob("sbom")?),
+        licences: vec![input(blob(licences[0])?), input(blob(licences[1])?)],
+        owner: owner(GOLDEN_SIGNER_OWNER)?,
+        not_before: -100,
+        not_after: 100,
+        previous_release_digest: Some([0x24; 32]),
+    })
+}
+
+fn golden_blobs() -> BoxResult<BTreeMap<&'static str, Vec<u8>>> {
+    let mut blobs = BTreeMap::new();
+    for (name, hex) in GOLDEN_ARTIFACT_BYTES_HEX {
+        blobs.insert(name, hex_bytes(hex)?);
+    }
+    Ok(blobs)
+}
+
+#[test]
+fn encoder_reproduces_the_independent_golden_pmf1_byte_for_byte() -> TestResult {
+    let blobs = golden_blobs()?;
+    let signature = golden_signature()?;
+    for licences in [["licence-a", "licence-b"], ["licence-b", "licence-a"]] {
+        let unsigned = golden_draft(&blobs, licences)?.unsigned()?;
+        let fields = hex_bytes(GOLDEN_UNSIGNED_FIELDS_HEX)?;
+        assert_eq!(unsigned.unsigned_bytes(), fields.as_slice());
+        let manifest = golden_digest(GOLDEN_UNSIGNED_MANIFEST_DIGEST_HEX)?;
+        assert_eq!(unsigned.unsigned_manifest_digest(), manifest);
+        let release = golden_digest(GOLDEN_RELEASE_DIGEST_HEX)?;
+        assert_eq!(unsigned.release_digest(), release);
+        let pmf1 = unsigned.with_signature(GOLDEN_SIGNER_EPOCH, signature)?;
+        assert_eq!(pmf1, hex_bytes(GOLDEN_PMF1_HEX)?);
+        assert_eq!(digest(&pmf1), golden_digest(GOLDEN_PMF1_DIGEST_HEX)?);
+    }
+    Ok(())
+}
+
+#[test]
+fn the_golden_signature_is_the_adr_065_message_signed_by_the_golden_key() -> TestResult {
+    let release = golden_digest(GOLDEN_RELEASE_DIGEST_HEX)?;
+    let message = role_message(GOLDEN_SIGNER_OWNER, 3, GOLDEN_SIGNER_EPOCH, &release)?;
+    assert_eq!(message, hex_bytes(GOLDEN_ROLE_MESSAGE_HEX)?);
+    let seed = [GOLDEN_SIGNING_SEED_BYTE; 32];
+    let signer = SigningKey::from_bytes(&seed);
+    assert_eq!(signer.verifying_key().to_bytes(), publisher_public());
+    assert_eq!(
+        signer.verifying_key().to_bytes().as_slice(),
+        hex_bytes(GOLDEN_SIGNER_PUBLIC_HEX)?.as_slice()
+    );
+    assert_eq!(signer.sign(&message).to_bytes(), golden_signature()?);
+    Ok(())
+}
+
+/// Evidence granting `plugin` to `publisher` under exactly `epoch` and `key`.
+fn trust_for(
+    plugin: &str,
+    epoch: u64,
+    key: [u8; 32],
+) -> BoxResult<VerifiedPluginTrustEvidenceV1> {
+    let publishers = vec![publisher_entry("publisher", epoch, key)];
+    let fields = root_fields(1, None, publishers, vec![grant(plugin, "publisher")]);
+    let ptr1 = signed_record(fields, ROOT_SIGNATURE_DOMAIN, &signer())?;
+    let anchor = TrustedPluginRootAnchorV1::new("scope", digest(&ptr1))?;
+    let prv1 = revocation(digest(&ptr1), 1, None)?;
+    Ok(verify_plugin_trust_v1(&anchor, &[&ptr1], &[&prv1], 50, 4)?)
+}
+
+fn authorization(
+    bundle: &VerifiedReleaseBundleV1,
+    evidence: &VerifiedPluginTrustEvidenceV1,
+) -> BoxResult<ResolvedPluginTrustAuthorizationV1> {
+    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(bundle)?;
+    Ok(evidence.authorize_release(&projection)?)
+}
+
+#[test]
+fn the_golden_release_signature_verifies_under_its_resolved_key() -> TestResult {
+    let bundle = golden_bundle()?;
+    let evidence = trust_for("alpha/plugin", GOLDEN_SIGNER_EPOCH, publisher_public())?;
+    let fact = authorization(&bundle, &evidence)?;
+    let verified = verify_plugin_release_signature_v1(&bundle, &fact)?;
+    assert_eq!(verified.pmf1_digest(), golden_digest(GOLDEN_PMF1_DIGEST_HEX)?);
+    assert_eq!(verified.release_digest(), golden_digest(GOLDEN_RELEASE_DIGEST_HEX)?);
+    assert_eq!(verified.owner(), owner(GOLDEN_SIGNER_OWNER)?);
+    assert_eq!(verified.epoch(), GOLDEN_SIGNER_EPOCH);
+    assert_eq!(verified.public_key(), publisher_public());
+    assert_eq!(verified.public_key(), fact.resolved_public_key());
+    Ok(())
+}
+
+// --- Release-signature verification ----------------------------------------
+
+/// The ADR-065 preimage written out byte by byte from the ADR text.
+fn role_message(owner: &str, role: u8, epoch: u64, payload: &[u8]) -> BoxResult<Vec<u8>> {
+    let mut message = b"pigloros/role-signature/v1".to_vec();
+    message.extend_from_slice(&u32::try_from(owner.len())?.to_be_bytes());
+    message.extend_from_slice(owner.as_bytes());
+    message.push(role);
+    message.extend_from_slice(&epoch.to_be_bytes());
+    message.extend_from_slice(payload);
+    Ok(message)
+}
+
+/// An Ed25519 signature by the key whose seed is `[seed; 32]`.
+fn ed25519(seed: u8, message: &[u8]) -> [u8; 64] {
+    SigningKey::from_bytes(&[seed; 32]).sign(message).to_bytes()
+}
+
+impl Release {
+    /// This release with field 26 set to `[1, 3, epoch, signature]`.
+    fn signed_as(&self, epoch: u64, signature: &[u8]) -> BoxResult<Self> {
+        let mut release = self.clone();
+        let field = list(vec![
+            unsigned(1),
+            unsigned(3),
+            unsigned(epoch),
+            Value::Bytes(signature.to_vec()),
+        ]);
+        release.fields[26] = encode(&field)?;
+        Ok(release)
+    }
+
+    /// This release honestly signed by the publisher key at `epoch`.
+    fn honest(&self, epoch: u64) -> BoxResult<Self> {
+        let payload = self.release_digest()?;
+        let message = role_message("publisher", 3, epoch, &payload)?;
+        self.signed_as(epoch, &ed25519(8, &message))
+    }
+}
+
+/// Verify `release` under a fact resolved for that same release.
+fn verify_own(
+    release: &Release,
+    evidence: &VerifiedPluginTrustEvidenceV1,
+) -> BoxResult<Verification> {
+    let bundle = closure(release.pmf1(), &release.members)??;
+    let fact = authorization(&bundle, evidence)?;
+    Ok(verify_plugin_release_signature_v1(&bundle, &fact))
+}
+
+/// Verify `release` under a fact resolved for `authorized`.
+fn verify_against(
+    release: &Release,
+    authorized: &Release,
+    evidence: &VerifiedPluginTrustEvidenceV1,
+) -> BoxResult<Verification> {
+    let fact = authorization(&closure(authorized.pmf1(), &authorized.members)??, evidence)?;
+    let bundle = closure(release.pmf1(), &release.members)??;
+    Ok(verify_plugin_release_signature_v1(&bundle, &fact))
+}
+
+const INVALID_SIGNATURE: Result<VerifiedPluginReleaseSignatureV1, PluginReleaseSignatureErrorV1> =
+    Err(PluginReleaseSignatureErrorV1::InvalidSignature);
+
+#[test]
+fn an_honest_signature_verifies_at_every_epoch_encoding_width() -> TestResult {
+    for epoch in [1, 2, 23, 24, 255, 256, 65_536, 4_294_967_296, u64::MAX] {
+        let release = Release::new()?.honest(epoch)?;
+        let evidence = trust_for("plugin-a", epoch, publisher_public())?;
+        let verified = verify_own(&release, &evidence)??;
+        assert_eq!(verified.pmf1_digest(), digest(&release.pmf1()));
+        assert_eq!(verified.release_digest(), release.release_digest()?);
+        assert_eq!(verified.owner(), owner("publisher")?);
+        assert_eq!(verified.epoch(), epoch);
+        assert_eq!(verified.public_key(), publisher_public());
+    }
+    Ok(())
+}
+
+#[test]
+fn an_encoded_and_signed_release_verifies_end_to_end() -> TestResult {
+    let draft = default_draft()?;
+    let unsigned = draft.unsigned()?;
+    let message = role_message("publisher", 3, 5, &unsigned.release_digest())?;
+    let pmf1 = unsigned.with_signature(5, ed25519(8, &message))?;
+    let release = Release::new()?;
+    let bundle = closure(pmf1, &release.members)??;
+    let evidence = trust_for("plugin-a", 5, publisher_public())?;
+    let fact = authorization(&bundle, &evidence)?;
+    let verified = verify_plugin_release_signature_v1(&bundle, &fact)?;
+    assert_eq!(verified.release_digest(), unsigned.release_digest());
+    assert_eq!(verified.epoch(), 5);
+    Ok(())
+}
+
+#[test]
+fn re_signing_keeps_the_release_digest_and_changes_the_signed_evidence() -> TestResult {
+    let base = Release::new()?;
+    let first = base.honest(1)?;
+    let second = base.honest(2)?;
+    let first = verify_own(&first, &trust_for("plugin-a", 1, publisher_public())?)??;
+    let second = verify_own(&second, &trust_for("plugin-a", 2, publisher_public())?)??;
+    assert_eq!(first.release_digest(), second.release_digest());
+    assert_ne!(first.pmf1_digest(), second.pmf1_digest());
+    assert_ne!(first.epoch(), second.epoch());
+    Ok(())
+}
+
+#[test]
+fn any_change_to_the_signed_message_fails_verification() -> TestResult {
+    let base = Release::new()?;
+    let payload = base.release_digest()?;
+    let manifest: [u8; 32] = byte_string_field(&base, 25)?
+        .try_into()
+        .map_err(|_| "field 25 is not 32 bytes")?;
+    let evidence = trust_for("plugin-a", 1, publisher_public())?;
+    let owner_prefix = "publishe";
+    let mut without_length = b"pigloros/role-signature/v1".to_vec();
+    without_length.extend_from_slice(b"publisher");
+    without_length.push(3);
+    without_length.extend_from_slice(&1_u64.to_be_bytes());
+    without_length.extend_from_slice(&payload);
+    let full = role_message("publisher", 3, 1, &payload)?;
+    let without_domain = full["pigloros/role-signature/v1".len()..].to_vec();
+    let mut flipped_domain = full.clone();
+    flipped_domain[0] ^= 1;
+    let messages = [
+        role_message("other", 3, 1, &payload)?,
+        role_message(owner_prefix, 3, 1, &payload)?,
+        role_message("publisher2", 3, 1, &payload)?,
+        role_message("Publisher", 3, 1, &payload)?,
+        role_message("publisher", 0, 1, &payload)?,
+        role_message("publisher", 2, 1, &payload)?,
+        role_message("publisher", 4, 1, &payload)?,
+        role_message("publisher", 3, 0, &payload)?,
+        role_message("publisher", 3, 2, &payload)?,
+        role_message("publisher", 3, 256, &payload)?,
+        role_message("publisher", 3, 1, &manifest)?,
+        role_message("publisher", 3, 1, &payload[..31])?,
+        role_message("publisher", 3, 1, &[payload.as_slice(), &[0]].concat())?,
+        role_message("publisher", 3, 1, &[0; 32])?,
+        role_message("publisher", 3, 1, &digest(&payload))?,
+        without_length,
+        without_domain,
+        flipped_domain,
+    ];
+    for (index, message) in messages.iter().enumerate() {
+        let release = base.signed_as(1, &ed25519(8, message))?;
+        assert_eq!(verify_own(&release, &evidence)?, INVALID_SIGNATURE, "message {index}");
+    }
+    let control = role_message("publisher", 3, 1, &payload)?;
+    let honest = base.signed_as(1, &ed25519(8, &control))?;
+    assert!(verify_own(&honest, &evidence)?.is_ok());
+    let wrong_key = base.signed_as(1, &ed25519(9, &control))?;
+    assert_eq!(verify_own(&wrong_key, &evidence)?, INVALID_SIGNATURE);
+    Ok(())
+}
+
+/// The content of byte-string field `ordinal` of `release`.
+fn byte_string_field(release: &Release, ordinal: usize) -> BoxResult<Vec<u8>> {
+    let value: Value = ciborium::from_reader(release.fields[ordinal].as_slice())?;
+    Ok(value.as_bytes().ok_or("not a byte string")?.clone())
+}
+
+#[test]
+fn a_signature_by_another_epoch_owner_or_key_is_not_accepted() -> TestResult {
+    let base = Release::new()?;
+    let payload = base.release_digest()?;
+    let message = role_message("publisher", 3, 2, &payload)?;
+    let signed_for_two = base.signed_as(1, &ed25519(8, &message))?;
+    let evidence = trust_for("plugin-a", 1, publisher_public())?;
+    assert_eq!(verify_own(&signed_for_two, &evidence)?, INVALID_SIGNATURE);
+    let for_epoch_one = role_message("publisher", 3, 1, &payload)?;
+    let signed_for_one = base.signed_as(2, &ed25519(8, &for_epoch_one))?;
+    let evidence = trust_for("plugin-a", 2, publisher_public())?;
+    assert_eq!(verify_own(&signed_for_one, &evidence)?, INVALID_SIGNATURE);
+    let other_key = SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
+    let evidence = trust_for("plugin-a", 1, other_key)?;
+    let honest = base.honest(1)?;
+    assert_eq!(verify_own(&honest, &evidence)?, INVALID_SIGNATURE);
+    Ok(())
+}
+
+#[test]
+fn every_flipped_signature_bit_and_degenerate_signature_fails() -> TestResult {
+    let base = Release::new()?;
+    let payload = base.release_digest()?;
+    let signature = ed25519(8, &role_message("publisher", 3, 1, &payload)?);
+    let evidence = trust_for("plugin-a", 1, publisher_public())?;
+    for index in [0, 1, 31, 32, 33, 62, 63] {
+        for bit in [0x01, 0x80] {
+            let mut tampered = signature;
+            tampered[index] ^= bit;
+            let release = base.signed_as(1, &tampered)?;
+            assert_eq!(verify_own(&release, &evidence)?, INVALID_SIGNATURE, "{index}/{bit}");
+        }
+    }
+    for degenerate in [[0; 64], [0xff; 64], [0x5a; 64]] {
+        let release = base.signed_as(1, &degenerate)?;
+        assert_eq!(verify_own(&release, &evidence)?, INVALID_SIGNATURE);
+    }
+    Ok(())
+}
+
+#[test]
+fn an_authorization_for_other_pmf1_bytes_is_rejected_before_the_signature() -> TestResult {
+    let base = Release::new()?;
+    let authorized = base.honest(1)?;
+    let evidence = trust_for("plugin-a", 1, publisher_public())?;
+    let mismatch = Err(PluginReleaseSignatureErrorV1::AuthorizationMismatch);
+    let resigned = base.honest(2)?;
+    assert_eq!(verify_against(&resigned, &authorized, &evidence)?, mismatch);
+    let unsigned = base.signed_as(1, &[0; 64])?;
+    assert_eq!(verify_against(&unsigned, &authorized, &evidence)?, mismatch);
+    let changed = Release::sealed_with(3, &text("1.0.1"))?.honest(1)?;
+    assert_eq!(verify_against(&changed, &authorized, &evidence)?, mismatch);
+    assert!(verify_against(&authorized, &authorized, &evidence)?.is_ok());
+    Ok(())
+}
+
+#[test]
+fn a_bundle_that_fails_decoding_yields_the_decoder_error_not_a_verdict() -> TestResult {
+    let base = Release::new()?.honest(1)?;
+    let evidence = trust_for("plugin-a", 1, publisher_public())?;
+    let wrong_shape = |value: Value| -> BoxResult<Release> { Release::with(26, &value) };
+    let descriptor = |algorithm: u64, role: u64, epoch: u64, signature: Value| {
+        list(vec![unsigned(algorithm), unsigned(role), unsigned(epoch), signature])
+    };
+    let unsigned_mismatch = PluginManifestErrorV1::UnsignedManifestDigestMismatch;
+    let mut cases = vec![
+        (Release::with(2, &text("plugin-a2"))?, unsigned_mismatch),
+        (Release::with(1, &unsigned(2))?, PluginManifestErrorV1::UnsupportedVersion),
+        (wrong_shape(Value::Null)?, encoding(26)),
+        (wrong_shape(descriptor(1, 3, 1, Value::Bytes(vec![0; 63])))?, encoding(26)),
+        (wrong_shape(descriptor(1, 3, 1, Value::Bytes(vec![0; 65])))?, encoding(26)),
+        (wrong_shape(descriptor(1, 3, 1, Value::Null))?, encoding(26)),
+        (wrong_shape(descriptor(2, 3, 1, Value::Bytes(vec![0; 64])))?, invalid(26)),
+        (wrong_shape(descriptor(1, 2, 1, Value::Bytes(vec![0; 64])))?, invalid(26)),
+        (wrong_shape(descriptor(1, 3, 0, Value::Bytes(vec![0; 64])))?, invalid(26)),
+    ];
+    let mut digest_changed = base.clone();
+    digest_changed.fields[27] = encode(&bytes([0; 32]))?;
+    cases.push((digest_changed, PluginManifestErrorV1::ReleaseDigestMismatch));
+    let mut component_changed = base.clone();
+    component_changed.members[0] = Member::new(Role::Component, b"\0asm other");
+    cases.push((component_changed, mismatch(0)));
+    for (index, (release, error)) in cases.into_iter().enumerate() {
+        let verdict = verify_against(&release, &base, &evidence);
+        let expected = Err(PluginReleaseSignatureErrorV1::Manifest(error));
+        assert_eq!(verdict?, expected, "case {index}");
+    }
+    Ok(())
 }
