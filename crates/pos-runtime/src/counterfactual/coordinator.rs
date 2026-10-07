@@ -51,6 +51,16 @@
 //! increment, the index, the eviction set, and the first recomputation Tick
 //! as one transaction, so readers never observe mixed generations.
 //!
+//! [`CounterfactualCoordinatorV1::admit_with_dependencies`] is the same
+//! admission with one more staged input: the
+//! [`CounterfactualDeclaringTickStagerV1`] returns the first Tick's drafts
+//! together with its declared dependency nodes and edges, the shared staging
+//! seam validates them as the Tick's [`TickDependencyRecordV1`] before any
+//! store call, and the one commit call is
+//! [`CounterfactualDependencyRecordingPortV1::commit_counterfactual_invalidation_with_dependencies`],
+//! which records them atomically with the Tick's Events. See **Dependency
+//! records** below.
+//!
 //! # Unknown commit outcome
 //!
 //! When the commit call reports `OutcomeUnknown` the transaction may or may
@@ -217,12 +227,45 @@
 //!   [`CounterfactualAdmissionErrorV1::StagedTickRejected`] with
 //!   `FieldOutOfBounds`, so every committed Tick stays readable under the
 //!   bounded suffix recovery reads.
+//! - **Dependency records.** The dependency record contract
+//!   (`pos_core::counterfactual_dependency`) leaves three rules to this seam
+//!   because no adapter can check them. First, the record Tick is
+//!   stager-asserted: the seam builds every record at the Tick it stages
+//!   the drafts for, so the first Tick's record is at the `RCF1` global
+//!   frontier Tick, which the invalidation command commits, and every later
+//!   record is at the Tick the suffix appends. Second, provisional nodes lie
+//!   strictly after the parent cut and a root node (`InterventionAssigned`,
+//!   `ExogenousFrozen`, `FixedPolicy`) rides the FIRST record at or after its
+//!   effective Tick: the seam requires every declared node to lie strictly
+//!   after the previous recorded Tick, the parent cut for the first Tick
+//!   (CFP1 fixes `first_tick` as the cut plus one) and the last committed
+//!   Tick for every later one, while the record contract already bounds a
+//!   root at or before its record's Tick and every other node at exactly
+//!   that Tick. A root whose effective Tick falls between the cut and the
+//!   first Tick, or on an unrecorded Tick, therefore rides the next record,
+//!   and no later record may repeat it. Third, the last recorded Tick must
+//!   be at or after the plan's maximum root effective Tick: the suffix slice
+//!   records every Tick through the plan horizon, which CFP1 bounds every
+//!   Intervention by, so a completed suffix satisfies it; an incomplete one
+//!   is explicitly incomplete and `pos-time` reads it as
+//!   `InterventionNodeMissing`. Rejections are typed as
+//!   [`CounterfactualAdmissionErrorV1::DependencyDeclarationRejected`] with
+//!   the contract's error, `BindingMismatch` for a node at or before the
+//!   previous recorded Tick. The declaration is validated after the drafts
+//!   and before any store call, so a rejected declaration commits nothing.
+//!   Only the host-side declaration list is defined here: the
+//!   Driver/Plugin declaration API is a separate ticket, and the plain
+//!   [`CounterfactualTickStagerV1`] path stays for hosts without one. The
+//!   recording and plain paths are parallel methods sharing one body, so
+//!   neither existing signature changes.
 //!
 //! # Deferred
 //!
 //! - Proving the committed coverage of the Ticks from `first_tick` up to the
 //!   global frontier.
-//! - The production [`CounterfactualFrontierSourceV1`] (Redmine #536).
+//! - The production [`CounterfactualFrontierSourceV1`] (Redmine #536, #553).
+//! - The Driver/Plugin dependency declaration API behind
+//!   [`CounterfactualDeclaringTickStagerV1`].
 //! - Classified (ADR-099 FAR1-admitted) Fork admission (Redmine #537).
 
 use std::collections::BTreeSet;
@@ -241,12 +284,15 @@ use pos_conformance::{
     TrustPolicySnapshotV1, UnknownEdgePolicyV1,
 };
 use pos_core::{
-    CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
-    CounterfactualInvalidationCommandV1, CounterfactualInvalidationInputV1,
-    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
-    EventDraft, EventStore, ForkGenerationV1, Hash, InvalidationConflictV1,
-    PipelineContractErrorV1, PipelineDraftBatchV1, RecomputationFrontierBytesV1,
-    ReplayClaimEvaluationV1, SuffixInvalidationBytesV1, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
+    CounterfactualBasisV1, CounterfactualDependencyErrorV1,
+    CounterfactualDependencyRecordingPortV1, CounterfactualFactsV1,
+    CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
+    CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
+    CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1,
+    DependencyEdgeRecordV1, DependencyNodeRecordV1, EventDraft, EventStore, ForkGenerationV1, Hash,
+    InvalidationConflictV1, PipelineContractErrorV1, PipelineDraftBatchV1,
+    RecomputationFrontierBytesV1, RecordedNodeOriginV1, ReplayClaimEvaluationV1,
+    SuffixInvalidationBytesV1, TickDependencyRecordV1, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
 };
 
 /// `SIV1` artifact class of every invalidated endogenous output.
@@ -335,6 +381,12 @@ pub enum CounterfactualAdmissionErrorV1 {
     /// A staged draft uses the coordinator-reserved checkpoint Event type.
     #[error("counterfactual staged Tick uses a reserved Event type")]
     ReservedEventType,
+    /// The staged dependency declaration is not a valid provisional record
+    /// of the Tick ([`TickDependencyRecordV1::try_new`]), or a declared node
+    /// lies at or before the previous recorded Tick, the parent cut for the
+    /// first Tick (`BindingMismatch`).
+    #[error("counterfactual staged dependency declaration is invalid")]
+    DependencyDeclarationRejected(#[source] CounterfactualDependencyErrorV1),
     /// A persisted fact changed before commit; nothing was committed.
     #[error("counterfactual invalidation conflicts with committed state")]
     InvalidationConflict(InvalidationConflictV1),
@@ -479,6 +531,43 @@ pub trait CounterfactualTickStagerV1 {
     ) -> Result<Vec<EventDraft>, CounterfactualTickFailureV1>;
 }
 
+/// One recomputation Tick's Event drafts with its declared dependencies.
+///
+/// The declaration is host-supplied and unvalidated as a record: the shared
+/// staging seam validates it as the provisional [`TickDependencyRecordV1`] of
+/// the staged Tick (see the module's **Dependency records** decision). The
+/// nodes must be strictly ascending by position key and the edges in
+/// canonical `IDP1` order, as [`TickDependencyRecordV1::try_new`] requires.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CounterfactualStagedTickV1 {
+    /// The ordered Event drafts of the Tick.
+    pub drafts: Vec<EventDraft>,
+    /// The declared provisional nodes of the Tick.
+    pub nodes: Vec<DependencyNodeRecordV1>,
+    /// The declared edges whose consumers are nodes of the Tick.
+    pub edges: Vec<DependencyEdgeRecordV1>,
+}
+
+/// Driver/Plugin stage that produces one recomputation Tick's Event drafts
+/// together with its declared dependencies.
+///
+/// It is the parallel of [`CounterfactualTickStagerV1`] for the recording
+/// path ([`CounterfactualCoordinatorV1::admit_with_dependencies`] and the
+/// suffix slice's `recompute_suffix_with_dependencies`), and it is the first
+/// producer of a Tick's declaration; a Driver/Plugin declaration API behind it
+/// is deferred.
+pub trait CounterfactualDeclaringTickStagerV1 {
+    /// Stage the ordered Event drafts and the declared dependencies of one
+    /// Tick from staged inputs only.
+    ///
+    /// # Errors
+    /// Returns [`CounterfactualTickFailureV1`] when the Tick cannot be staged.
+    fn stage_tick_with_dependencies(
+        &mut self,
+        inputs: &CounterfactualTickInputsV1<'_>,
+    ) -> Result<CounterfactualStagedTickV1, CounterfactualTickFailureV1>;
+}
+
 /// Availability of one frozen artifact with the plan's exact digest.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrozenArtifactAvailabilityV1 {
@@ -597,6 +686,57 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         frontier_source: &mut impl CounterfactualFrontierSourceV1,
         stager: &mut impl CounterfactualTickStagerV1,
     ) -> Result<CounterfactualGenerationReceiptV1, CounterfactualAdmissionErrorV1> {
+        self.admit_through(
+            request,
+            authority,
+            frontier_source,
+            &mut PlainSeamV1(stager),
+        )
+    }
+
+    /// Validate `request` and commit its invalidation, its first
+    /// recomputation Tick, and that Tick's declared dependency record as one
+    /// store transaction.
+    ///
+    /// This is [`Self::admit`] with the staged declaration: see the module
+    /// documentation for the validation order and the **Dependency records**
+    /// rules the seam adds.
+    ///
+    /// # Errors
+    /// Returns the first closed safe error, as [`Self::admit`] does, and
+    /// [`CounterfactualAdmissionErrorV1::DependencyDeclarationRejected`] for
+    /// a declaration the seam rejects before any store call; the store's
+    /// `BindingMismatch` for a record it rejects is
+    /// [`CounterfactualAdmissionErrorV1::Store`]. Every error except
+    /// [`CounterfactualAdmissionErrorV1::CommitOutcomeUnknown`] commits
+    /// nothing, the record included.
+    pub fn admit_with_dependencies(
+        &mut self,
+        request: &CounterfactualAdmissionRequestV1<'_>,
+        authority: &impl CounterfactualInterventionAuthorityV1,
+        frontier_source: &mut impl CounterfactualFrontierSourceV1,
+        stager: &mut impl CounterfactualDeclaringTickStagerV1,
+    ) -> Result<CounterfactualGenerationReceiptV1, CounterfactualAdmissionErrorV1>
+    where
+        S: CounterfactualDependencyRecordingPortV1,
+    {
+        self.admit_through(
+            request,
+            authority,
+            frontier_source,
+            &mut RecordingSeamV1(stager),
+        )
+    }
+
+    /// The one admission body: validate `request`, stage the first Tick
+    /// through `seam`, and commit through it.
+    fn admit_through<M: TickSeamV1<S>>(
+        &mut self,
+        request: &CounterfactualAdmissionRequestV1<'_>,
+        authority: &impl CounterfactualInterventionAuthorityV1,
+        frontier_source: &mut impl CounterfactualFrontierSourceV1,
+        seam: &mut M,
+    ) -> Result<CounterfactualGenerationReceiptV1, CounterfactualAdmissionErrorV1> {
         let plan = request.plan;
         plan.validate()
             .map_err(CounterfactualAdmissionErrorV1::Plan)?;
@@ -621,7 +761,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             fork: request.fork,
             generation: next_generation(&basis),
         };
-        let drafts = stage_tick(stager, plan, generation, tick)?;
+        let (drafts, record) = seam.stage(plan, generation, tick, plan.parent_cut_tick)?;
         // Both records were validated above, so only the command's own
         // bindings can fail here; every store error maps once.
         let command = RecomputationFrontierBytesV1::try_from_canonical(frontier)
@@ -647,7 +787,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
                 )
             })
             .map_err(CounterfactualAdmissionErrorV1::Store)?;
-        self.commit(&command)
+        self.commit::<M>(&command, &record)
     }
 
     /// Resolve an admission whose commit outcome was unknown by reading the
@@ -677,13 +817,15 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         }
     }
 
-    /// Make the one store call and map its outcome; an unknown outcome is
-    /// resolved by the recovery read, never reported as nothing committed.
-    fn commit(
+    /// Make the one store call through the seam and map its outcome; an
+    /// unknown outcome is resolved by the recovery read, never reported as
+    /// nothing committed.
+    fn commit<M: TickSeamV1<S>>(
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
+        record: &M::Record,
     ) -> Result<CounterfactualGenerationReceiptV1, CounterfactualAdmissionErrorV1> {
-        match self.store.commit_counterfactual_invalidation(command) {
+        match M::commit_invalidation(&mut self.store, command, record) {
             Ok(CounterfactualInvalidationOutcomeV1::Committed(receipt)) => Ok(*receipt),
             Ok(CounterfactualInvalidationOutcomeV1::InvalidationConflict(conflict)) => Err(
                 CounterfactualAdmissionErrorV1::InvalidationConflict(conflict),
@@ -1158,6 +1300,119 @@ fn digest_set(digests: impl Iterator<Item = [u8; 32]>) -> Vec<Hash> {
         .collect()
 }
 
+/// What one coordinator path stages per Tick and how it commits it: with or
+/// without the Tick's dependency record.
+///
+/// Both coordinator slices run one body per operation; a seam supplies only
+/// what the plain and the recording paths differ in, so the parallel public
+/// methods share every check and the same commit outcome mapping.
+pub(crate) trait TickSeamV1<S> {
+    /// What a staged Tick carries besides its drafts.
+    type Record;
+
+    /// Stage `tick` of `plan` under `generation` through the shared staging
+    /// seam; a declared node must lie strictly after `after_tick`.
+    fn stage(
+        &mut self,
+        plan: &CounterfactualPlanV1,
+        generation: ForkGenerationV1,
+        tick: u64,
+        after_tick: u64,
+    ) -> Result<(PipelineDraftBatchV1, Self::Record), CounterfactualAdmissionErrorV1>;
+
+    /// Make the one invalidation commit call.
+    fn commit_invalidation(
+        store: &mut S,
+        command: &CounterfactualInvalidationCommandV1,
+        record: &Self::Record,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1>;
+
+    /// Append one later Tick under `expected`.
+    fn append_tick(
+        store: &mut S,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        record: &Self::Record,
+    ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1>;
+}
+
+/// The seam of the plain path: drafts only, through the storage port.
+pub(crate) struct PlainSeamV1<'a, T>(pub(crate) &'a mut T);
+
+impl<S: CounterfactualStorePortV1, T: CounterfactualTickStagerV1> TickSeamV1<S>
+    for PlainSeamV1<'_, T>
+{
+    type Record = ();
+
+    fn stage(
+        &mut self,
+        plan: &CounterfactualPlanV1,
+        generation: ForkGenerationV1,
+        tick: u64,
+        _after_tick: u64,
+    ) -> Result<(PipelineDraftBatchV1, ()), CounterfactualAdmissionErrorV1> {
+        stage_tick(self.0, plan, generation, tick).map(|batch| (batch, ()))
+    }
+
+    fn commit_invalidation(
+        store: &mut S,
+        command: &CounterfactualInvalidationCommandV1,
+        (): &(),
+    ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1> {
+        store.commit_counterfactual_invalidation(command)
+    }
+
+    fn append_tick(
+        store: &mut S,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        (): &(),
+    ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
+        store.append_counterfactual_tick(fork, expected, drafts)
+    }
+}
+
+/// The seam of the recording path: drafts with the Tick's dependency record,
+/// through the recording port.
+pub(crate) struct RecordingSeamV1<'a, T>(pub(crate) &'a mut T);
+
+impl<S: CounterfactualDependencyRecordingPortV1, T: CounterfactualDeclaringTickStagerV1>
+    TickSeamV1<S> for RecordingSeamV1<'_, T>
+{
+    type Record = TickDependencyRecordV1;
+
+    fn stage(
+        &mut self,
+        plan: &CounterfactualPlanV1,
+        generation: ForkGenerationV1,
+        tick: u64,
+        after_tick: u64,
+    ) -> Result<(PipelineDraftBatchV1, TickDependencyRecordV1), CounterfactualAdmissionErrorV1>
+    {
+        stage_declared_tick(self.0, plan, generation, tick, after_tick)
+    }
+
+    fn commit_invalidation(
+        store: &mut S,
+        command: &CounterfactualInvalidationCommandV1,
+        record: &TickDependencyRecordV1,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1> {
+        store.commit_counterfactual_invalidation_with_dependencies(command, record)
+    }
+
+    fn append_tick(
+        store: &mut S,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        record: &TickDependencyRecordV1,
+    ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
+        store.append_counterfactual_tick_with_dependencies(fork, expected, drafts, record)
+    }
+}
+
 /// Stage one recomputation Tick from staged inputs only.
 ///
 /// This is the shared staging seam of every recomputation Tick, the first
@@ -1167,32 +1422,97 @@ fn digest_set(digests: impl Iterator<Item = [u8; 32]>) -> Vec<Hash> {
 /// type longer than [`MAX_FORK_EVENT_TYPE_BYTES_V1`] as
 /// `StagedTickRejected(FieldOutOfBounds)`, so every committed Tick stays
 /// readable under the suffix recovery read bounds.
-pub(crate) fn stage_tick(
+fn stage_tick(
     stager: &mut impl CounterfactualTickStagerV1,
     plan: &CounterfactualPlanV1,
     generation: ForkGenerationV1,
     tick: u64,
 ) -> Result<PipelineDraftBatchV1, CounterfactualAdmissionErrorV1> {
+    stager
+        .stage_tick(&tick_inputs(plan, generation, tick))
+        .or(Err(CounterfactualAdmissionErrorV1::PluginFailure))
+        .and_then(bounded_batch)
+}
+
+/// Stage one recomputation Tick with its declared dependencies from staged
+/// inputs only.
+///
+/// The drafts pass exactly the checks of [`stage_tick`]; the declaration is
+/// then validated as the provisional [`TickDependencyRecordV1`] of `tick`
+/// whose every node lies strictly after `after_tick` (the parent cut for the
+/// first Tick, the last committed Tick for every later one), all before any
+/// store call.
+fn stage_declared_tick(
+    stager: &mut impl CounterfactualDeclaringTickStagerV1,
+    plan: &CounterfactualPlanV1,
+    generation: ForkGenerationV1,
+    tick: u64,
+    after_tick: u64,
+) -> Result<(PipelineDraftBatchV1, TickDependencyRecordV1), CounterfactualAdmissionErrorV1> {
+    let declaration = stager
+        .stage_tick_with_dependencies(&tick_inputs(plan, generation, tick))
+        .or(Err(CounterfactualAdmissionErrorV1::PluginFailure))?;
+    let batch = bounded_batch(declaration.drafts)?;
+    declared_record(tick, after_tick, declaration.nodes, declaration.edges)
+        .map(|record| (batch, record))
+}
+
+/// Validate one declaration as the provisional record of `tick` whose nodes
+/// all lie strictly after `after_tick`.
+///
+/// The record contract bounds a root node at or before `tick` and every
+/// other node at exactly `tick`; the window below is the seam's own rule
+/// (see the module's **Dependency records** decision).
+fn declared_record(
+    tick: u64,
+    after_tick: u64,
+    nodes: Vec<DependencyNodeRecordV1>,
+    edges: Vec<DependencyEdgeRecordV1>,
+) -> Result<TickDependencyRecordV1, CounterfactualAdmissionErrorV1> {
+    TickDependencyRecordV1::try_new(tick, RecordedNodeOriginV1::Provisional, nodes, edges)
+        .and_then(|record| {
+            if record
+                .nodes()
+                .iter()
+                .all(|node| node.coordinate().tick() > after_tick)
+            {
+                Ok(record)
+            } else {
+                Err(CounterfactualDependencyErrorV1::BindingMismatch)
+            }
+        })
+        .map_err(CounterfactualAdmissionErrorV1::DependencyDeclarationRejected)
+}
+
+/// The staged inputs of `tick`: the Interventions effective at it and the
+/// plan's frozen descriptors.
+fn tick_inputs(
+    plan: &CounterfactualPlanV1,
+    generation: ForkGenerationV1,
+    tick: u64,
+) -> CounterfactualTickInputsV1<'_> {
     let start = plan
         .interventions
         .partition_point(|intervention| intervention.effective_tick < tick);
     let end = plan
         .interventions
         .partition_point(|intervention| intervention.effective_tick <= tick);
-    let inputs = CounterfactualTickInputsV1 {
+    CounterfactualTickInputsV1 {
         generation,
         tick,
         interventions: &plan.interventions[start..end],
         exogenous_descriptors: &plan.exogenous_descriptors,
         fixed_policy_descriptors: &plan.fixed_policy_descriptors,
-    };
-    stager
-        .stage_tick(&inputs)
-        .or(Err(CounterfactualAdmissionErrorV1::PluginFailure))
-        .and_then(|drafts| {
-            PipelineDraftBatchV1::try_new(drafts)
-                .map_err(CounterfactualAdmissionErrorV1::StagedTickRejected)
-        })
+    }
+}
+
+/// Bound `drafts` as one batch, then reject the reserved checkpoint type and
+/// an Event type over [`MAX_FORK_EVENT_TYPE_BYTES_V1`].
+fn bounded_batch(
+    drafts: Vec<EventDraft>,
+) -> Result<PipelineDraftBatchV1, CounterfactualAdmissionErrorV1> {
+    PipelineDraftBatchV1::try_new(drafts)
+        .map_err(CounterfactualAdmissionErrorV1::StagedTickRejected)
         .and_then(|batch| {
             if batch.drafts().iter().any(is_reserved_draft) {
                 Err(CounterfactualAdmissionErrorV1::ReservedEventType)

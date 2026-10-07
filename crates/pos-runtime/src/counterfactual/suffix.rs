@@ -30,6 +30,24 @@
 //!    [`CounterfactualStorePortV1::append_counterfactual_tick`];
 //! 5. emits every checkpoint of the generation and one sealed `CFR1`.
 //!
+//! [`CounterfactualCoordinatorV1::recompute_suffix_with_dependencies`] is
+//! the same call for a generation admitted with
+//! [`CounterfactualCoordinatorV1::admit_with_dependencies`]: each Tick is
+//! staged through the [`CounterfactualDeclaringTickStagerV1`] seam, its
+//! declaration is validated as the Tick's dependency record before any store
+//! call (every declared node strictly after the last committed Tick; see the
+//! coordinator module's **Dependency records** decision), and the Tick is
+//! appended through
+//! [`CounterfactualDependencyRecordingPortV1::append_counterfactual_tick_with_dependencies`],
+//! which records it atomically with the Tick's Events. Recovery, the
+//! checkpoint chain, and every artifact are those of the plain call: the
+//! record is not part of the chained state, so a generation recomputed with
+//! dependencies emits exactly the checkpoints and `CFR1` of one recomputed
+//! without. A rejected declaration is
+//! [`CounterfactualSuffixFailureV1::DependencyDeclarationRejected`], a
+//! `PluginFailure` terminal code like every other staging rejection, and a
+//! retry re-stages the same Tick from the same inputs.
+//!
 //! A call on an already complete generation stages and commits nothing, but
 //! still compares the receipt's Tick basis with the persisted basis once: a
 //! difference is [`CounterfactualSuffixErrorV1::InvalidationConflict`],
@@ -152,9 +170,11 @@
 //!   `ExactAuthoritativeWithRedactedViews`, to `StructuralOnly`, the
 //!   strongest permitted claim; every other claim is kept unchanged.
 //! - **Terminal codes.** A stale Tick basis is `InvalidationConflict`; a
-//!   stager failure, an empty, malformed, or oversized staged batch, and a
-//!   reserved Event type are `PluginFailure`; an append the store rejects or
-//!   fails (`ForkNotFound`, `CorruptState`, or `StorageFailure`), or whose
+//!   stager failure, an empty, malformed, or oversized staged batch, a
+//!   reserved Event type, and a rejected dependency declaration are
+//!   `PluginFailure`; an append the store rejects or fails (`ForkNotFound`,
+//!   `CorruptState`, `StorageFailure`, or a dependency record the store
+//!   rejects, such as a `DuplicateIdentity` across records), or whose
 //!   unknown outcome the persisted basis proves uncommitted, is
 //!   `AtomicCommitFailed`. The failing coordinate is the first uncommitted
 //!   Tick at scheduler position `0`, without a safe digest.
@@ -192,6 +212,7 @@ use pos_conformance::counterfactual::result::{
 use pos_conformance::{ReplayClaimV1, SuffixInvalidationV1};
 use pos_core::{
     pipeline_draft_vector_digest_v1, CanonicalBytes, CoreError, CounterfactualBasisV1,
+    CounterfactualDependencyErrorV1, CounterfactualDependencyRecordingPortV1,
     CounterfactualFactsV1, CounterfactualGenerationReceiptV1, CounterfactualStoreErrorV1,
     CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId, Event, EventDraft,
     EventReadBounds, EventStore, Hash, InvalidationConflictV1, Kind, PipelineContractErrorV1,
@@ -200,8 +221,9 @@ use pos_core::{
 };
 
 use super::coordinator::{
-    stage_tick, CounterfactualAdmissionErrorV1, CounterfactualCoordinatorV1,
-    CounterfactualTickStagerV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
+    CounterfactualAdmissionErrorV1, CounterfactualCoordinatorV1,
+    CounterfactualDeclaringTickStagerV1, CounterfactualTickStagerV1, PlainSeamV1, RecordingSeamV1,
+    TickSeamV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
 };
 
 /// `RCP1` owner of the chained suffix state digest.
@@ -247,6 +269,11 @@ pub enum CounterfactualSuffixFailureV1 {
     StagedTickRejected(PipelineContractErrorV1),
     /// A staged draft uses the coordinator-owned checkpoint Event type.
     ReservedEventType,
+    /// The staged dependency declaration is not a valid provisional record
+    /// of the Tick, or a declared node lies at or before the last committed
+    /// Tick (`BindingMismatch`); see
+    /// [`CounterfactualAdmissionErrorV1::DependencyDeclarationRejected`].
+    DependencyDeclarationRejected(CounterfactualDependencyErrorV1),
     /// The Event Store rejected or failed the Tick's atomic append.
     AtomicCommitFailed,
 }
@@ -259,7 +286,10 @@ impl CounterfactualSuffixFailureV1 {
             Self::InvalidationConflict(_) => {
                 CounterfactualTerminalErrorCodeV1::InvalidationConflict
             }
-            Self::PluginFailure | Self::StagedTickRejected(_) | Self::ReservedEventType => {
+            Self::PluginFailure
+            | Self::StagedTickRejected(_)
+            | Self::ReservedEventType
+            | Self::DependencyDeclarationRejected(_) => {
                 CounterfactualTerminalErrorCodeV1::PluginFailure
             }
             Self::AtomicCommitFailed => CounterfactualTerminalErrorCodeV1::AtomicCommitFailed,
@@ -460,6 +490,37 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         request: &CounterfactualSuffixRequestV1<'_>,
         stager: &mut impl CounterfactualTickStagerV1,
     ) -> Result<CounterfactualSuffixRunV1, CounterfactualSuffixErrorV1> {
+        self.recompute_suffix_through(request, &mut PlainSeamV1(stager))
+    }
+
+    /// Recover the committed suffix of `request`'s generation and commit every
+    /// remaining Tick through the plan horizon, each with its declared
+    /// dependency record.
+    ///
+    /// This is [`Self::recompute_suffix`] with the staged declarations; see
+    /// the module documentation.
+    ///
+    /// # Errors
+    /// Exactly those of [`Self::recompute_suffix`]: a rejected declaration is
+    /// a Tick failure reported in the returned run, not an error.
+    pub fn recompute_suffix_with_dependencies(
+        &mut self,
+        request: &CounterfactualSuffixRequestV1<'_>,
+        stager: &mut impl CounterfactualDeclaringTickStagerV1,
+    ) -> Result<CounterfactualSuffixRunV1, CounterfactualSuffixErrorV1>
+    where
+        S: CounterfactualDependencyRecordingPortV1,
+    {
+        self.recompute_suffix_through(request, &mut RecordingSeamV1(stager))
+    }
+
+    /// The one suffix body: recover, then stage and append every remaining
+    /// Tick through `seam`.
+    fn recompute_suffix_through<M: TickSeamV1<S>>(
+        &mut self,
+        request: &CounterfactualSuffixRequestV1<'_>,
+        seam: &mut M,
+    ) -> Result<CounterfactualSuffixRunV1, CounterfactualSuffixErrorV1> {
         let plan = request.plan;
         plan.validate().map_err(CounterfactualSuffixErrorV1::Plan)?;
         if plan
@@ -494,7 +555,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             if progress.tick >= plan.horizon_tick {
                 break Ok(None);
             }
-            match self.commit_tick(&context, &mut progress, stager) {
+            match self.commit_tick(&context, &mut progress, seam) {
                 Ok(None) => {}
                 stopped => break stopped,
             }
@@ -646,29 +707,32 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     /// Stage, checkpoint, and atomically commit the next Tick under the
     /// generation's Tick basis.
     ///
-    /// Returns the failure of a Tick that committed nothing; see
-    /// [`Self::append_tick`] for the errors.
-    fn commit_tick(
+    /// The seam stages the Tick after the last committed one, so a declared
+    /// node must lie strictly after `progress.tick`. Returns the failure of a
+    /// Tick that committed nothing; see [`Self::append_tick`] for the errors.
+    fn commit_tick<M: TickSeamV1<S>>(
         &mut self,
         context: &SuffixContextV1<'_>,
         progress: &mut ProgressV1,
-        stager: &mut impl CounterfactualTickStagerV1,
+        seam: &mut M,
     ) -> TickStepV1 {
         let tick = progress.tick.saturating_add(1);
-        let batch = match stage_tick(stager, context.plan, context.receipt.generation(), tick) {
-            Ok(batch) => batch,
+        let generation = context.receipt.generation();
+        let (batch, record) = match seam.stage(context.plan, generation, tick, progress.tick) {
+            Ok(staged) => staged,
             Err(error) => return Ok(Some(staging_failure(&error))),
         };
         let drafts = batch.drafts();
         let bodies: Vec<EventDraft> = drafts.iter().map(content_draft).collect();
         let seq = progress.head.saturating_add(drafts.len() as u64);
         // Sealing a well-formed `RCP1` does not fail; an error flows out as is.
-        next_checkpoint(context, progress.state, tick, &bodies, seq)
-            .and_then(|checkpoint| self.append_tick(context, progress, tick, drafts, checkpoint))
+        next_checkpoint(context, progress.state, tick, &bodies, seq).and_then(|checkpoint| {
+            self.append_tick::<M>(context, progress, tick, drafts, checkpoint, &record)
+        })
     }
 
     /// Append the staged `drafts` and the Tick's checkpoint Event as one
-    /// batch under the generation's Tick basis.
+    /// batch under the generation's Tick basis, with the seam's `record`.
     ///
     /// Returns the failure of a Tick that committed nothing.
     ///
@@ -677,13 +741,14 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     /// the persisted basis does not prove it uncommitted, and
     /// `CommittedHeadMismatch` when the store reports a committed head other
     /// than the checkpoint Event's `Seq`; neither advances the progress.
-    fn append_tick(
+    fn append_tick<M: TickSeamV1<S>>(
         &mut self,
         context: &SuffixContextV1<'_>,
         progress: &mut ProgressV1,
         tick: u64,
         drafts: &[EventDraft],
         checkpoint: CheckpointV1,
+        record: &M::Record,
     ) -> TickStepV1 {
         let mut tick_drafts = drafts.to_vec();
         tick_drafts.push(checkpoint_draft(context.fork(), &checkpoint.bytes));
@@ -698,10 +763,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         let expected = context.receipt.tick_basis(Seq::from_u64(progress.head));
         // The checkpoint Event is the batch's last Event.
         let checkpoint_seq = progress.head.saturating_add(batch.drafts().len() as u64);
-        match self
-            .store
-            .append_counterfactual_tick(context.fork(), &expected, &batch)
-        {
+        match M::append_tick(&mut self.store, context.fork(), &expected, &batch, record) {
             Ok(CounterfactualTickOutcomeV1::Committed { head })
                 if head.as_u64() == checkpoint_seq =>
             {
@@ -740,8 +802,9 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
 
 /// Map a staging error of the shared stager seam to its Tick failure.
 ///
-/// The seam returns only `PluginFailure`, `StagedTickRejected`, and
-/// `ReservedEventType`; the first is the remaining arm.
+/// The seam returns only `PluginFailure`, `StagedTickRejected`,
+/// `ReservedEventType`, and `DependencyDeclarationRejected`;
+/// [`declaration_failure`] tells the last from `PluginFailure`.
 const fn staging_failure(error: &CounterfactualAdmissionErrorV1) -> CounterfactualSuffixFailureV1 {
     match error {
         CounterfactualAdmissionErrorV1::StagedTickRejected(rejection) => {
@@ -749,6 +812,19 @@ const fn staging_failure(error: &CounterfactualAdmissionErrorV1) -> Counterfactu
         }
         CounterfactualAdmissionErrorV1::ReservedEventType => {
             CounterfactualSuffixFailureV1::ReservedEventType
+        }
+        other => declaration_failure(other),
+    }
+}
+
+/// Map a rejected declaration to its Tick failure, and any other staging
+/// error (the stager's own `PluginFailure`) to `PluginFailure`.
+const fn declaration_failure(
+    error: &CounterfactualAdmissionErrorV1,
+) -> CounterfactualSuffixFailureV1 {
+    match error {
+        CounterfactualAdmissionErrorV1::DependencyDeclarationRejected(rejection) => {
+            CounterfactualSuffixFailureV1::DependencyDeclarationRejected(*rejection)
         }
         _ => CounterfactualSuffixFailureV1::PluginFailure,
     }
