@@ -10,8 +10,8 @@ use zeroize::Zeroizing;
 
 use super::parse_and_verify;
 use crate::ceremony::plan::{CeremonyPlan, StoredGet};
-use crate::ceremony::{replace_prf, PRF_NULL};
 use crate::fake::clock::FakeClock;
+use crate::fake::prf_item::{replace_prf, PRF_NULL};
 use crate::fake::signer::{FixtureSigner, ReplyShape, FIXTURE_COSE_KEY};
 use crate::{BridgeError, MonotonicClock, ProtocolCode, RejectedCode, UnavailableCode};
 
@@ -194,22 +194,16 @@ fn a_malformed_required_prf_is_prf_unsupported_in_both_kinds() -> TestResult {
 }
 
 #[test]
-fn an_absent_prf_never_hides_another_defect() -> TestResult {
+fn a_bad_prf_is_reported_before_later_fields_but_not_before_a_broken_structure() -> TestResult {
     let get_plan = plan(CeremonyKind::Get, true)?;
     let wrong_id = without_prf(&assertion_bytes(array(1))?)?;
-    assert_eq!(
-        outcome(&get_plan, &wrong_id),
-        Some(BridgeError::Protocol(ProtocolCode::CeremonyIdMismatch))
-    );
+    assert_eq!(outcome(&get_plan, &wrong_id), Some(PRF_UNSUPPORTED));
     let trailing = [decode_hex(ASSET_SHAPED_WITHOUT_PRF)?, vec![0]].concat();
+    assert_eq!(outcome(&get_plan, &trailing), Some(PRF_UNSUPPORTED));
+    let noncanonical = with_prf_item(&assertion_bytes(array(0))?, &[0x59, 0, 0x20])?;
     assert_eq!(
-        outcome(&get_plan, &trailing),
-        Some(BridgeError::Protocol(ProtocolCode::Malformed))
-    );
-    let with_map = with_prf_item(&assertion_bytes(array(0))?, &[0xa0])?;
-    assert_eq!(
-        outcome(&get_plan, &with_map),
-        Some(BridgeError::Protocol(ProtocolCode::Malformed))
+        outcome(&get_plan, &noncanonical),
+        Some(BridgeError::Protocol(ProtocolCode::NonCanonical))
     );
     for garbage in [&[0xff][..], &[]] {
         assert!(matches!(
@@ -217,6 +211,16 @@ fn an_absent_prf_never_hides_another_defect() -> TestResult {
             Some(BridgeError::Protocol(_))
         ));
     }
+    Ok(())
+}
+
+#[test]
+fn a_reply_for_another_ceremony_is_a_ceremony_id_mismatch() -> TestResult {
+    let wrong_id = assertion_bytes(array(1))?;
+    assert_eq!(
+        outcome(&plan(CeremonyKind::Get, true)?, &wrong_id),
+        Some(BridgeError::Protocol(ProtocolCode::CeremonyIdMismatch))
+    );
     Ok(())
 }
 

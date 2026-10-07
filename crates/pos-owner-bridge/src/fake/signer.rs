@@ -14,7 +14,7 @@ use pos_owner_bridge_codec::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::ceremony::{replace_prf, PRF_NULL};
+use super::prf_item::{replace_prf, PRF_NULL};
 
 /// The test-only scalar `d = 1`.
 pub const FIXTURE_SCALAR: [u8; 32] = [

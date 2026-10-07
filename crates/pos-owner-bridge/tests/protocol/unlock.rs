@@ -171,8 +171,8 @@ fn a_failed_open_stops_before_the_update() -> TestResult {
 #[test]
 fn a_rejected_assertion_never_reaches_the_owner_port() -> TestResult {
     let cases: [(Tweak, u32, RejectedCode); 2] = [
-        (eligible, 0, RejectedCode::Signature),
-        (|_| {}, 5, RejectedCode::Signature),
+        (eligible, 0, RejectedCode::BackupFlags),
+        (|_| {}, 5, RejectedCode::CounterRegression),
     ];
     for (tweak, counter, code) in cases {
         let page = HonestConfig {

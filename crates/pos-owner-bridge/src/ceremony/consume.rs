@@ -1,39 +1,26 @@
 //! Reply consumption: A/B copies, header and payload checks, and verification (ADR-110 §5.6).
 //!
-//! The merged codec verifier reports every verification failure as one error, so a failed
-//! Create is `Rejected(AttestationFormat)` and a failed Get is `Rejected(Signature)` until
-//! Redmine #563 lets the codec report its reason. The bridge itself still distinguishes the
-//! checks it makes before verifying: a credential ID or user handle that is not the stored one,
-//! a ceremony ID that is not the outstanding one, and a required PRF that is absent or malformed.
+//! The codec decoder and verifier report one `VerificationReason` per failure, and
+//! `BridgeError::from_verification_reason` maps each to its ADR-110 §11 code. A decode failure
+//! of the user handle or of a PRF field carries its reason too. An absent, unsupported or
+//! malformed required PRF is `Unavailable(PrfUnsupported)` (ADR-110 §1 and §7).
 //!
-//! The closed codec decoder rejects a Get reply whose PRF is not a 32-byte string, but the
-//! packaged page reports an absent PRF as CBOR `null` there, and a Create reply may carry a
-//! malformed PRF too. When a reply fails to decode, the bridge swaps its PRF item for a valid
-//! stand-in and decodes again: if only the PRF was wrong, the failure is
-//! `Unavailable(PrfUnsupported)` (ADR-110 §1 and §7), otherwise it is the codec's own protocol
-//! error.
-//!
-//! Precedence: a reply that fails to decode only because its PRF is absent or malformed is
-//! `PrfUnsupported` even when its signature would not have verified, because the signature is
-//! never reached. That failure is not user-retryable, which fits ADR-110 §1: a real ceremony needs
-//! a present, correctly shaped PRF result. This scan is a temporary bridge-side lenient decode,
-//! to be removed when Redmine #563 gives the codec a PRF-state reason.
+//! Precedence: the decoder rejects a malformed PRF field before the verifier looks at anything
+//! else, so a reply with a bad PRF is `PrfUnsupported` even when its ceremony ID or signature
+//! would not have verified. A structural defect that comes earlier in the payload, or a
+//! non-canonical encoding of the PRF item itself, still reports its own protocol error.
 
 use pos_owner_bridge_codec::{
     decode_assertion_reply, decode_attestation_reply, verify_assertion_reply,
     verify_attestation_reply, AssertionReplyV1, AssertionVerificationContext, AttestationReplyV1,
-    CeremonyId, CeremonyKind, ControlState, CreateVerificationContext, OwnerBridgeCodecError,
-    StoredCredential, CONTROL_HEADER_BYTES,
+    CeremonyKind, ControlState, CreateVerificationContext, StoredCredential, CONTROL_HEADER_BYTES,
 };
 use zeroize::Zeroizing;
 
 use super::plan::{Assertion, CeremonyPlan, Registration, Verified};
 use super::release::read_state;
-use super::{protocol_from_codec, replace_prf, PRF_PLACEHOLDER};
-use crate::{
-    BridgeError, OwnerWebSurface, ProtocolCode, RejectedCode, ReplyImage, SurfaceError,
-    UnavailableCode,
-};
+use super::protocol_from_codec;
+use crate::{BridgeError, OwnerWebSurface, ProtocolCode, RejectedCode, ReplyImage, SurfaceError};
 
 const HEADER: usize = CONTROL_HEADER_BYTES;
 
@@ -102,12 +89,9 @@ fn registration_from(
     plan: &CeremonyPlan,
     prf: &mut [u8; 32],
 ) -> Result<Registration, BridgeError> {
-    if !reply.prf_enabled() {
-        return Err(BridgeError::Unavailable(UnavailableCode::PrfUnsupported));
-    }
     let context = CreateVerificationContext::new(plan.ceremony_id, plan.challenge());
     let verified = verify_attestation_reply(reply, context)
-        .or(Err(BridgeError::Rejected(RejectedCode::AttestationFormat)))?;
+        .map_err(BridgeError::from_verification_reason)?;
     let first = verified.prf_first();
     if let Some(result) = first {
         prf.copy_from_slice(result.as_bytes());
@@ -128,18 +112,11 @@ fn assertion_from(
     plan: &CeremonyPlan,
     prf: &mut [u8; 32],
 ) -> Result<Assertion, BridgeError> {
-    let mismatch = BridgeError::Rejected(RejectedCode::CredentialMismatch);
-    let stored = plan.stored.as_ref().ok_or(mismatch)?;
-    if reply.raw_id() != stored.credential_id.as_slice() {
-        return Err(mismatch);
-    }
-    if reply
-        .user_handle()
-        .is_some_and(|handle| handle != stored.user_handle)
-    {
-        return Err(BridgeError::Rejected(RejectedCode::UserHandleMismatch));
-    }
-    let verified = StoredCredential::new(
+    let stored = plan
+        .stored
+        .as_ref()
+        .ok_or(BridgeError::Rejected(RejectedCode::CredentialMismatch))?;
+    let credential = StoredCredential::new(
         &stored.credential_id,
         stored.user_handle,
         stored.public_key,
@@ -147,13 +124,11 @@ fn assertion_from(
         stored.backup_state,
         stored.sign_count,
     )
-    .map_err(protocol_from_codec)
-    .and_then(|credential| {
-        let context =
-            AssertionVerificationContext::new(plan.ceremony_id, plan.challenge(), credential);
-        verify_assertion_reply(reply, context)
-            .or(Err(BridgeError::Rejected(RejectedCode::Signature)))
-    })?;
+    .map_err(protocol_from_codec)?;
+    let context =
+        AssertionVerificationContext::new(plan.ceremony_id, plan.challenge(), credential);
+    let verified =
+        verify_assertion_reply(reply, context).map_err(BridgeError::from_verification_reason)?;
     prf.copy_from_slice(verified.prf_first().as_bytes());
     Ok(Assertion {
         sign_count: verified.sign_count(),
@@ -161,38 +136,11 @@ fn assertion_from(
     })
 }
 
-fn ceremony_id_of(kind: CeremonyKind, payload: &[u8]) -> Result<CeremonyId, OwnerBridgeCodecError> {
-    match kind {
-        CeremonyKind::Create => {
-            decode_attestation_reply(payload).map(AttestationReplyV1::ceremony_id)
-        }
-        CeremonyKind::Get => decode_assertion_reply(payload).map(AssertionReplyV1::ceremony_id),
-    }
-}
-
-/// The failure of a reply that did not decode (see the module documentation).
-fn decode_failure(
-    plan: &CeremonyPlan,
-    payload: &[u8],
-    error: OwnerBridgeCodecError,
-) -> BridgeError {
-    let standin = replace_prf(payload, &PRF_PLACEHOLDER);
-    let id = standin.map(|bytes| ceremony_id_of(plan.kind, &bytes));
-    match id {
-        Some(Ok(id)) if id == plan.ceremony_id => {
-            BridgeError::Unavailable(UnavailableCode::PrfUnsupported)
-        }
-        Some(Ok(_)) => BridgeError::Protocol(ProtocolCode::CeremonyIdMismatch),
-        _ => protocol_from_codec(error),
-    }
-}
-
 /// Decode, check and verify the payload held in copy A, writing the PRF into `prf`.
 ///
 /// # Errors
 ///
-/// Returns the decode failure as a protocol error, a ceremony-ID mismatch, or the
-/// verification failure as a rejection.
+/// Returns the decode failure, or the verification failure, as its ADR-110 §11 error.
 pub(super) fn parse_and_verify(
     plan: &CeremonyPlan,
     payload: &[u8],
@@ -200,19 +148,11 @@ pub(super) fn parse_and_verify(
 ) -> Result<Verified, BridgeError> {
     match plan.kind {
         CeremonyKind::Create => {
-            let reply = decode_attestation_reply(payload)
-                .map_err(|error| decode_failure(plan, payload, error))?;
-            if reply.ceremony_id() != plan.ceremony_id {
-                return Err(BridgeError::Protocol(ProtocolCode::CeremonyIdMismatch));
-            }
+            let reply = decode_attestation_reply(payload).map_err(protocol_from_codec)?;
             registration_from(&reply, plan, prf).map(Verified::Registration)
         }
         CeremonyKind::Get => {
-            let reply = decode_assertion_reply(payload)
-                .map_err(|error| decode_failure(plan, payload, error))?;
-            if reply.ceremony_id() != plan.ceremony_id {
-                return Err(BridgeError::Protocol(ProtocolCode::CeremonyIdMismatch));
-            }
+            let reply = decode_assertion_reply(payload).map_err(protocol_from_codec)?;
             assertion_from(&reply, plan, prf).map(Verified::Assertion)
         }
     }

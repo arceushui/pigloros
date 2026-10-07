@@ -7,6 +7,7 @@ pub mod buffers;
 pub mod clock;
 pub mod honest;
 pub mod host;
+pub mod prf_item;
 pub mod signer;
 pub mod stepper;
 pub mod surface;

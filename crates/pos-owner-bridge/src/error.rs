@@ -4,6 +4,7 @@
 //! material. Nothing is retried automatically: "user-retryable" means the user
 //! may start a fresh ceremony with a new identifier, challenge and environment.
 
+use pos_owner_bridge_codec::VerificationReason;
 use thiserror::Error;
 
 /// Reasons the owner surface cannot run a ceremony until configuration or a restart changes.
@@ -37,31 +38,46 @@ pub enum UnavailableCode {
     PrfUnsupported,
 }
 
-/// Security rejections of a ceremony reply.
+/// Security rejections of a ceremony reply (ADR-110 §11).
 ///
-/// ADR-110 §11 names a finer set of verification reasons (origin, RP ID hash, client-data
-/// type and challenge, flags, algorithm, key, counter, backup flags and so on). The merged
-/// `pos-owner-bridge-codec` verifier collapses every verification failure into one error,
-/// so the bridge can report only the two codes below until Redmine #563 lets the codec
-/// report its reason. The missing variants are deliberately absent rather than defined and
-/// never produced; #563 adds them together with the code that produces them.
+/// Each verification code is one `pos_owner_bridge_codec::VerificationReason`. The ADR's
+/// `PrfMalformed` is not a code here: the ADR-110 errata fold it into
+/// `Unavailable(PrfUnsupported)`, which is also where an absent PRF result lands.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RejectedCode {
-    /// A Create reply failed verification. Until #563 this covers every Create verification
-    /// failure the codec reports: client data, origin, flags, attestation format, algorithm and
-    /// key.
+    /// The client data origin was not the owner origin.
+    Origin,
+    /// The authenticator RP ID hash was not the hash of `localhost`.
+    RpIdHash,
+    /// The client data type did not match the ceremony kind.
+    ClientDataType,
+    /// The client data challenge was not the host challenge.
+    Challenge,
+    /// The client data reported a cross-origin or token-binding context.
+    CrossOrigin,
+    /// The authenticator did not assert user presence.
+    UserPresence,
+    /// The authenticator did not assert user verification.
+    UserVerification,
+    /// The attestation was not the closed `none` format.
     AttestationFormat,
-    /// A Get reply failed verification. Until #563 this covers every Get verification
-    /// failure the codec reports: client data, flags, signature, counter and backup flags.
+    /// The credential algorithm was not ES256.
+    Algorithm,
+    /// The credential public key was not the closed ES256 key.
+    CoseKey,
+    /// The authenticator extensions were malformed.
+    Extensions,
+    /// The assertion signature did not verify.
     Signature,
     /// The credential ID did not match the stored credential.
     CredentialMismatch,
-    /// The reply user handle was present and not the stored handle.
-    ///
-    /// A user handle that is not exactly 32 bytes never reaches this check: the codec rejects
-    /// it while decoding the reply, which the bridge reports as a protocol error.
+    /// The reply user handle was present and not the stored handle, or was not 32 bytes.
     UserHandleMismatch,
-    /// The D2 enrollment confirmation failed.
+    /// The assertion counter did not advance. This is also a security event for the owner.
+    CounterRegression,
+    /// The backup-eligible flag changed, or backup state was set without eligibility.
+    BackupFlags,
+    /// The D2 enrollment confirmation failed. This is also a security event for the owner.
     EnrollmentConfirmation,
     /// Another binding already holds the credential ID.
     CredentialAlreadyBound,
@@ -201,6 +217,56 @@ pub enum BridgeError {
 }
 
 impl BridgeError {
+    /// Map a codec verification reason to its ADR-110 §11 error.
+    ///
+    /// A missing, unsupported or malformed required PRF is `Unavailable(PrfUnsupported)`. A
+    /// ceremony ID that is not the outstanding one and a structurally malformed reply are
+    /// protocol violations. Every other reason is a security rejection.
+    #[must_use]
+    pub const fn from_verification_reason(reason: VerificationReason) -> Self {
+        let rejected = match reason {
+            VerificationReason::CeremonyIdMismatch => {
+                return Self::Protocol(ProtocolCode::CeremonyIdMismatch);
+            }
+            VerificationReason::Malformed => return Self::Protocol(ProtocolCode::Malformed),
+            VerificationReason::PrfUnsupported
+            | VerificationReason::PrfMalformed
+            | VerificationReason::PrfAbsent => {
+                return Self::Unavailable(UnavailableCode::PrfUnsupported);
+            }
+            VerificationReason::Origin => RejectedCode::Origin,
+            VerificationReason::RpIdHash => RejectedCode::RpIdHash,
+            VerificationReason::ClientDataType => RejectedCode::ClientDataType,
+            VerificationReason::Challenge => RejectedCode::Challenge,
+            VerificationReason::CrossOrigin => RejectedCode::CrossOrigin,
+            VerificationReason::UserPresence => RejectedCode::UserPresence,
+            VerificationReason::UserVerification => RejectedCode::UserVerification,
+            VerificationReason::AttestationFormat => RejectedCode::AttestationFormat,
+            VerificationReason::Algorithm => RejectedCode::Algorithm,
+            VerificationReason::CoseKey => RejectedCode::CoseKey,
+            VerificationReason::Extensions => RejectedCode::Extensions,
+            VerificationReason::Signature => RejectedCode::Signature,
+            VerificationReason::CredentialMismatch => RejectedCode::CredentialMismatch,
+            VerificationReason::UserHandleMismatch => RejectedCode::UserHandleMismatch,
+            VerificationReason::CounterRegression => RejectedCode::CounterRegression,
+            VerificationReason::BackupFlags => RejectedCode::BackupFlags,
+        };
+        Self::Rejected(rejected)
+    }
+
+    /// Return whether ADR-110 §11 also reports this error to the owner as a security event.
+    ///
+    /// The ADR names `CounterRegression` and `EnrollmentConfirmation`. The ports of ADR-110 §10
+    /// define no event hook, so the bridge exposes this classification and the owner adapter
+    /// decides how to report it.
+    #[must_use]
+    pub const fn is_security_event(self) -> bool {
+        matches!(
+            self,
+            Self::Rejected(RejectedCode::CounterRegression | RejectedCode::EnrollmentConfirmation)
+        )
+    }
+
     /// Return the class of this error.
     #[must_use]
     pub const fn class(self) -> ErrorClass {
@@ -223,3 +289,6 @@ impl BridgeError {
         )
     }
 }
+
+#[cfg(test)]
+mod tests;

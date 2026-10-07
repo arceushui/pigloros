@@ -12,7 +12,7 @@ use pos_owner_bridge::fake::signer::ReplyShape;
 use pos_owner_bridge::fake::surface::{FakeSurfaceHandle, SurfaceConfig, SurfaceFaults};
 use pos_owner_bridge::{
     BridgeConfig, BridgeError, BridgeStatus, LifecycleCode, NavigationId, OwnerError,
-    OwnerErrorKind, ProtocolCode, SurfaceEvent, UnavailableCode,
+    OwnerErrorKind, ProtocolCode, RejectedCode, SurfaceEvent, UnavailableCode,
 };
 
 use super::{
@@ -1280,7 +1280,8 @@ fn check_ports(ev: &Evidence, sc: &Scenario) -> Failure {
     Ok(())
 }
 
-fn must_fail_reason(sc: &Scenario) -> Option<&'static str> {
+/// Every reason this scenario must fail, in the order they are checked.
+fn must_fail_reasons(sc: &Scenario) -> Vec<&'static str> {
     let creates = matches!(sc.kind, Kind::Create | Kind::Enroll);
     let reasons = [
         (sc.page.tamper != Tamper::None, "tamper"),
@@ -1323,8 +1324,13 @@ fn must_fail_reason(sc: &Scenario) -> Option<&'static str> {
     ];
     reasons
         .into_iter()
-        .find(|(applies, _)| *applies)
+        .filter(|(applies, _)| *applies)
         .map(|(_, reason)| reason)
+        .collect()
+}
+
+fn must_fail_reason(sc: &Scenario) -> Option<&'static str> {
+    must_fail_reasons(sc).first().copied()
 }
 
 fn must_fail(sc: &Scenario) -> bool {
@@ -1333,10 +1339,16 @@ fn must_fail(sc: &Scenario) -> bool {
 
 fn is_clean(sc: &Scenario) -> bool {
     !must_fail(sc)
-        && sc.events.is_empty()
+        && sc.page.tweak.is_none()
+        && sc.stored_counter == 0
+        && is_clean_apart_from_tweak(sc)
+}
+
+/// No noise but, possibly, a reply tweak and a stored counter.
+fn is_clean_apart_from_tweak(sc: &Scenario) -> bool {
+    sc.events.is_empty()
         && matches!(sc.hook, Hook::None)
         && sc.page.substitute_get_prf.is_none()
-        && sc.page.tweak.is_none()
         && matches!(sc.page.delivery, Delivery::Normal | Delivery::ReplyFirst)
         && sc.page.listener_delay <= Duration::from_millis(4_900)
         && sc
@@ -1348,7 +1360,24 @@ fn is_clean(sc: &Scenario) -> bool {
             .surface
             .exit_delay
             .is_some_and(|delay| delay <= Duration::from_millis(4_900))
-        && sc.stored_counter == 0
+}
+
+/// The one ADR-110 §11 error a scenario must report when a reply tweak is its only defect.
+///
+/// A stored counter ahead of the reply would be checked before the signature, so the wrong key
+/// is only expected to report `Signature` with a zero stored counter.
+fn expected_tweak_error(sc: &Scenario) -> Option<BridgeError> {
+    let only_tweak = must_fail_reasons(sc) == ["tweak"] && is_clean_apart_from_tweak(sc);
+    let rejected = |code| Some(BridgeError::Rejected(code));
+    match sc.tweak_name? {
+        _ if !only_tweak => None,
+        "wrong_raw_id" => rejected(RejectedCode::CredentialMismatch),
+        "wrong_handle" => rejected(RejectedCode::UserHandleMismatch),
+        "eligible" => rejected(RejectedCode::BackupFlags),
+        "no_prf" => Some(BridgeError::Unavailable(UnavailableCode::PrfUnsupported)),
+        "wrong_key" if sc.stored_counter == 0 => rejected(RejectedCode::Signature),
+        _ => None,
+    }
 }
 
 fn check_outcome(ev: &Evidence, sc: &Scenario) -> Failure {
@@ -1360,6 +1389,11 @@ fn check_outcome(ev: &Evidence, sc: &Scenario) -> Failure {
     }
     if !ev.ok && is_clean(sc) {
         return fail("false reject", format!("{:?}", ev.error));
+    }
+    if let Some(expected) = expected_tweak_error(sc) {
+        if ev.error != Some(expected) {
+            return fail("reason", format!("{:?} instead of {expected:?}", ev.error));
+        }
     }
     let unexpected = ev.error == Some(BridgeError::Protocol(ProtocolCode::UnexpectedState));
     // A stalled host (`SlowSecondCopy`) can outlast the page deadline, whose release then stores
