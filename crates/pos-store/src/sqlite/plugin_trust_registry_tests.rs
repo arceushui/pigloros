@@ -1,6 +1,8 @@
 //! Crate-internal vectors of the `SQLite` Plugin trust policy registry (slice #569): T1-T4, E5,
 //! F3, the `SQLite` clauses of E2, and the partial-floor vector of H1. They write raw SQL against
 //! the adapter's tables and drive the durability fault hooks of the parent module.
+// The gate below is also what `scripts/check_plugin_trust_registry_impls.py` reads to treat this
+// file as test code, so it is not redundant.
 #![cfg(any(test, feature = "test-support"))]
 
 use std::sync::{
@@ -118,7 +120,15 @@ fn the_entry_level_is_recorded_and_restored_on_every_exit_path() -> TestResult {
         h.store.conn.busy_timeout(Duration::ZERO)?;
         assert_eq!(h.advance(&genesis)?, Err(Error::StorageBusy));
         assert_eq!(level(&h.store)?, entry);
-        assert_eq!(h.admit(&genesis, &release_one(), 1)?, Err(Error::StorageBusy));
+        assert_eq!(
+            h.store.provision(&h.env.anchor, &h.env.genesis_tps1),
+            Err(Error::StorageBusy)
+        );
+        assert_eq!(level(&h.store)?, entry);
+        assert_eq!(
+            h.admit(&genesis, &release_one(), 1)?,
+            Err(Error::StorageBusy)
+        );
         assert_eq!(level(&h.store)?, entry);
         assert_eq!(
             h.rollback(&genesis, &release_one(), 1)?,
@@ -334,7 +344,10 @@ fn a_failed_commit_is_rolled_back_and_the_handle_keeps_working() -> TestResult {
          CREATE TRIGGER zz_commit_fails BEFORE INSERT ON plugin_trust_ledger
          BEGIN INSERT INTO zz_child VALUES (1); END;",
     )?;
-    assert_eq!(h.admit(&genesis, &one, 1)?, Err(Error::StorageIndeterminate));
+    assert_eq!(
+        h.admit(&genesis, &one, 1)?,
+        Err(Error::StorageIndeterminate)
+    );
     raw(&h, "DROP TRIGGER zz_commit_fails")?;
     assert!(h.store.conn.is_autocommit());
     assert_eq!(level(&h.store)?, entry);
@@ -899,16 +912,22 @@ fn a_fence_held_by_another_writer_is_waited_for() -> TestResult {
     let genesis = h.env.genesis()?;
     let timeline = h.timeline;
     let (entered, entered_receiver) = mpsc::channel();
+    let released = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&released);
     std::thread::spawn(move || {
         let _held = gate.with_fence_value(timeline, ErasureProtectedOperationV1::Append, || {
             let _sent = entered.send(());
             std::thread::sleep(Duration::from_millis(400));
+            // Set while the fence is still held, before it is released.
+            flag.store(true, Ordering::SeqCst);
         });
     });
     entered_receiver.recv_timeout(Duration::from_secs(10))?;
-    let start = Instant::now();
     h.admit(&genesis, &release_one(), 1)??;
-    assert!(start.elapsed() >= Duration::from_millis(200));
+    assert!(
+        released.load(Ordering::SeqCst),
+        "the registry call returned before the other writer released the fence"
+    );
     Ok(())
 }
 

@@ -155,10 +155,7 @@ mod seam {
         }
     }
 
-    pub(super) fn restore_statement(
-        connection: &Connection,
-        level: i64,
-    ) -> rusqlite::Result<()> {
+    pub(super) fn restore_statement(connection: &Connection, level: i64) -> rusqlite::Result<()> {
         RESTORE_PROBE.with(|probe| {
             if let Some(probe) = probe.borrow().as_ref() {
                 probe();
