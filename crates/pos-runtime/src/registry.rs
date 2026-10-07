@@ -5967,9 +5967,10 @@ mod tests {
             Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
         ));
 
+        let version = registry.plugins.get(&id).test_ok().version.clone();
         let unverified = OutputAdmissionV1::try_new(
             id,
-            plugin.version(),
+            &version,
             verified.policy().clone(),
             verified.budget().clone(),
         )
