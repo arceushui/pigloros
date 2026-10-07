@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 
@@ -19,10 +22,17 @@ sys.modules[SPEC.name] = CHECKER
 SPEC.loader.exec_module(CHECKER)
 
 SHIM = "crates/pos-owner-bridge-windows"
+OPS = f"{SHIM}/src/ffi/ops.rs"
+HOST = f"{SHIM}/src/host.rs"
+LIB = f"{SHIM}/src/lib.rs"
+INV = f"{SHIM}/unsafe-inventory.toml"
+SAFE_LIB_PATH = "crates/safe/src/lib.rs"
+RESERVED = f"unsafe is reserved for {SHIM}/src/ffi"
+BLOCK_ONLY = "only explicit unsafe blocks in src/ffi are allowed"
 
-ROOT_MANIFEST = '''
+ROOT_MANIFEST_TEMPLATE = '''
 [workspace]
-members = ["crates/safe", "crates/pos-owner-bridge-windows"]
+members = [@MEMBERS@]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -84,18 +94,75 @@ undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
 '''
 
-SAFE_MANIFEST = '''
+MEMBER_MANIFEST = '''
 [package]
-name = "safe"
+name = "member"
 version = "0.1.0"
 
 [lints]
 workspace = true
 '''
 
-SAFE_LIB = "#![forbid(unsafe_code)]\npub fn safe() {}\n"
-SHIM_LIB = "#![cfg(windows)]\n#![forbid(unsafe_code)]\n"
+CFG = "#![cfg(windows)]\n"
+FORBID = "#![forbid(unsafe_code)]\n"
+SAFE_LIB = FORBID + "pub fn safe() {}\n"
+SHIM_LIB = CFG + "\n//! Shim root.\n"
+HOST_MODULE = CFG + FORBID + "pub fn host() {}\n"
+HOSTED_TESTS = CFG + FORBID + "\n#[test]\nfn ffi_fixture() {}\n"
 EMPTY_INVENTORY = "# No FFI unsafe block has been added yet.\n"
+
+
+def manifest_for(members: list[str]) -> str:
+    return ROOT_MANIFEST_TEMPLATE.replace("@MEMBERS@", ", ".join(f'"{member}"' for member in members))
+
+
+def root_manifest(*extra_members: str) -> str:
+    return manifest_for(["crates/safe", SHIM, *extra_members])
+
+
+BASE_FILES: dict[str, str] = {
+    "Cargo.toml": root_manifest(),
+    "crates/safe/Cargo.toml": MEMBER_MANIFEST,
+    SAFE_LIB_PATH: SAFE_LIB,
+    f"{SHIM}/Cargo.toml": SHIM_MANIFEST,
+    LIB: SHIM_LIB,
+    INV: EMPTY_INVENTORY,
+}
+
+
+def entry(
+    file: str = "src/ffi/ops.rs",
+    line: int = 5,
+    function: str = "call",
+    hosted: str = "ffi_fixture",
+) -> str:
+    return (
+        "[[block]]\n"
+        f'file = "{file}"\n'
+        f"line = {line}\n"
+        f'function = "{function}"\n'
+        'operation = "fixture"\n'
+        'invariant = "fixture"\n'
+        f'hosted_test = "{hosted}"\n'
+    )
+
+
+def ffi_source(*body: str) -> str:
+    """Return an ffi file whose first body line is line 4."""
+    inner = "".join(f"    {line}\n" for line in body)
+    return f"{CFG}\npub fn call() {{\n{inner}}}\n"
+
+
+STANDARD_BODY = ("// SAFETY: fixture.", "unsafe {}")
+
+
+def ffi_case(*body: str, line: int = 5, inventory: str | None = None) -> dict[str, str | None]:
+    """Return a fully inventoried ffi fixture whose block sits at ``line``."""
+    return {
+        OPS: ffi_source(*body),
+        INV: entry(line=line) if inventory is None else inventory,
+        f"{SHIM}/tests/ffi.rs": HOSTED_TESTS,
+    }
 
 
 def write(root: Path, relative: str, content: str) -> None:
@@ -104,96 +171,610 @@ def write(root: Path, relative: str, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def fixture(extra: dict[str, str] | None = None) -> list[str]:
+@contextlib.contextmanager
+def tree(extra: dict[str, str | None] | None = None) -> Iterator[Path]:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        files = {
-            "Cargo.toml": ROOT_MANIFEST,
-            "crates/safe/Cargo.toml": SAFE_MANIFEST,
-            "crates/safe/src/lib.rs": SAFE_LIB,
-            f"{SHIM}/Cargo.toml": SHIM_MANIFEST,
-            f"{SHIM}/src/lib.rs": SHIM_LIB,
-            f"{SHIM}/unsafe-inventory.toml": EMPTY_INVENTORY,
-        }
-        for relative, content in {**files, **(extra or {})}.items():
-            write(root, relative, content)
+        for relative, content in {**BASE_FILES, **(extra or {})}.items():
+            if content is not None:
+                write(root, relative, content)
+        yield root
+
+
+def fixture(extra: dict[str, str | None] | None = None) -> list[str]:
+    with tree(extra) as root:
         return CHECKER.violations(root)
 
 
-def require_rejected(name: str, extra: dict[str, str], needle: str) -> None:
+def require_accepted(name: str, extra: dict[str, str | None] | None = None) -> None:
     found = fixture(extra)
-    if not any(needle in violation for violation in found):
-        raise SystemExit(f"{name} was not rejected: {found}")
+    if found:
+        raise SystemExit(f"{name} was rejected, expected no violations: {found}")
 
 
-def main() -> None:
-    if found := fixture():
-        raise SystemExit(f"accepted fixture was rejected: {found}")
+def require_rejected(
+    name: str,
+    extra: dict[str, str | None],
+    expected: list[str],
+    *,
+    prefixes: bool = False,
+) -> None:
+    found = fixture(extra)
+    wanted = sorted(expected)
+    matches = (
+        len(found) == len(wanted) and all(actual.startswith(prefix) for actual, prefix in zip(found, wanted))
+        if prefixes
+        else found == wanted
+    )
+    if not matches:
+        raise SystemExit(f"{name}: expected exactly {wanted}, got {found}")
+
+
+def at(path: str, line: int, message: str) -> str:
+    return f"{path}:{line}: {message}"
+
+
+def nonblock(path: str, line: int, kind: str) -> str:
+    return at(path, line, f"unsafe {kind} is forbidden; {BLOCK_ONLY}")
+
+
+def test_masker() -> None:
+    cases = (
+        ("// unsafe {}", False),
+        ("/// unsafe {}", False),
+        ("//! unsafe {}", False),
+        ("/* unsafe {} */", False),
+        ("/* a /* unsafe */ unsafe {} */", False),
+        ("/* a /* b */ */ unsafe {}", True),
+        ('"unsafe {}"', False),
+        (r'"a\"unsafe {}"', False),
+        (r'"\\" unsafe {}', True),
+        (r'"\\\"" unsafe {}', True),
+        (r'"a\"b"; unsafe {}', True),
+        ('r"unsafe {}"', False),
+        ('r#"a"b unsafe {}"#', False),
+        ('r###"a"## unsafe {}"###', False),
+        ('r"x" unsafe {}', True),
+        ('b"unsafe {}"', False),
+        ('br#"unsafe {}"#', False),
+        ('c"unsafe {}"', False),
+        ('cr"unsafe {}"', False),
+        ("'\\'' unsafe {}", True),
+        ("'\\\\' unsafe {}", True),
+        ("'\\\"' unsafe {}", True),
+        ("'\"' unsafe {}", True),
+        ("b'\\'' unsafe {}", True),
+        ("'u' unsafe {}", True),
+        ("'\\u{1F600}' unsafe {}", True),
+        ("fn f<'a>(x: &'a u8) { unsafe {} }", True),
+        ("let x: &'static str = 1; unsafe {}", True),
+        ("let r#unsafe = 1;", False),
+        ("let my_unsafe = unsafe_fn();", False),
+        ("let unsafe_code = 1;", False),
+    )
+    for source, visible in cases:
+        code = CHECKER.code_only(source)
+        newlines = [index for index, character in enumerate(source) if character == "\n"]
+        if len(code) != len(source) or [i for i, c in enumerate(code) if c == "\n"] != newlines:
+            raise SystemExit(f"masker changed offsets for {source!r}")
+        if bool(CHECKER.UNSAFE_TOKEN.search(code)) != visible:
+            raise SystemExit(f"masker mishandled {source!r}: visible={not visible}, code={code!r}")
+    multiline = "let s = \"a\nunsafe {}\nb\"; unsafe {}\n"
+    code = CHECKER.code_only(multiline)
+    if len(CHECKER.UNSAFE_TOKEN.findall(code)) != 1 or code.count("\n") != multiline.count("\n"):
+        raise SystemExit(f"masker mishandled a multi-line string: {code!r}")
+
+
+def test_accepted() -> None:
+    require_accepted("clean tree")
+    require_accepted(
+        "unsafe in comments, strings and raw strings",
+        {
+            SAFE_LIB_PATH: (
+                FORBID
+                + "// unsafe { }\n"
+                + "/* unsafe /* nested unsafe */ still comment unsafe */\n"
+                + "/// unsafe doc\n"
+                + "pub fn safe<'a>(text: &'a str) -> &'a str {\n"
+                + '    let _a = "unsafe { }";\n'
+                + '    let _b = r#"unsafe { "quoted" }"#;\n'
+                + '    let _c = r##"unsafe "# still"##;\n'
+                + '    let _d = b"unsafe";\n'
+                + '    let _e = br#"unsafe"#;\n'
+                + "    let _f = 'u';\n"
+                + "    let r#unsafe = 1;\n"
+                + "    text\n"
+                + "}\n"
+            ),
+            HOST: HOST_MODULE + '// unsafe { }\nconst TEXT: &str = "unsafe { }";\n',
+        },
+    )
+    for statement in (
+        r'let s = "\""; let t = "unsafe { }";',
+        r'let s = "\\"; let t = "unsafe { }";',
+        r"let s = '\"'; let t = " + '"unsafe { }";',
+        r"let s = '\''; let t = " + '"unsafe { }";',
+        r'let s = "\\\""; let t = "unsafe { }";',
+        r"let s = '\\'; let t = " + '"unsafe { }";',
+        r'let s = "a\"b"; let t = "unsafe { }";',
+    ):
+        require_accepted(f"string state after {statement}", {SAFE_LIB_PATH: f"{FORBID}{statement}\n"})
+    require_accepted("fn pointer type is not an extern definition", {SAFE_LIB_PATH: FORBID + 'type F = extern "C" fn(i32);\n'})
+    require_accepted(
+        "complete shim with lib.rs and an inventoried ffi module",
+        {
+            LIB: CFG + "\nmod ffi;\n#[forbid(unsafe_code)]\nmod host;\n#[forbid(unsafe_code)]\n#[cfg(test)]\npub(crate) mod more {}\n",
+            HOST: HOST_MODULE,
+            f"{SHIM}/src/ffi/mod.rs": CFG + "\nmod ops;\n",
+            **ffi_case(*STANDARD_BODY),
+        },
+    )
+    require_accepted("multi-line SAFETY comment", ffi_case("// SAFETY: first line", "// continues here.", "unsafe {}", line=6))
+    require_accepted("SAFETY comment above a let statement", ffi_case("// SAFETY: fixture.", "let _value = unsafe {};"))
+    require_accepted(
+        "SAFETY comment above a multi-line let statement",
+        ffi_case("// SAFETY: fixture.", "let _value =", "    unsafe {};", line=6),
+    )
+    require_accepted(
+        "unsafe text in ffi comments and strings is not a block",
+        ffi_case('let _text = "unsafe { fake }"; // unsafe { fake }', *STANDARD_BODY, line=6),
+    )
+    require_accepted("qualified inventory function", ffi_case(*STANDARD_BODY, inventory=entry(function="Surface::call")))
+    require_accepted(
+        "hosted test between attributes in src",
+        {
+            **ffi_case(*STANDARD_BODY),
+            f"{SHIM}/tests/ffi.rs": None,
+            HOST: HOST_MODULE + "\n#[test]\n#[cfg(windows)]\npub async fn ffi_fixture() {}\n",
+        },
+    )
+    require_accepted(
+        "doc comment and bracketed attributes before the cfg and forbid lines",
+        {HOST: '//! Host.\n#![cfg_attr(docsrs, doc = "x]y")]\n// note\n' + CFG + "/* c */\n" + FORBID},
+    )
+    require_accepted("build.rs needs no cfg(windows)", {f"{SHIM}/build.rs": FORBID + "fn main() {}\n"})
+    require_accepted("target directory beside src is skipped", {"crates/safe/target/gen.rs": "unsafe {}\n"})
+    require_accepted(
+        "include of a scanned sibling file",
+        {SAFE_LIB_PATH: FORBID + 'include!("extra.rs");\n', "crates/safe/src/extra.rs": "pub fn extra() {}\n"},
+    )
+    require_accepted(
+        "path attribute naming a scanned sibling file",
+        {SAFE_LIB_PATH: FORBID + '#[path = "extra.rs"]\nmod extra;\n', "crates/safe/src/extra.rs": "pub fn extra() {}\n"},
+    )
+    require_accepted(
+        "generated and manifest-relative includes in a non-shim crate",
+        {
+            SAFE_LIB_PATH: FORBID
+            + 'include!(concat!(env!("OUT_DIR"), "/generated.rs"));\n'
+            + 'include!(concat!(\n    env!("CARGO_MANIFEST_DIR"),\n    "/src/extra.rs"\n));\n',
+            "crates/safe/src/extra.rs": "pub fn extra() {}\n",
+        },
+    )
+    require_accepted("data include in a non-shim crate", {SAFE_LIB_PATH: FORBID + 'const T: &str = include_str!("../../../README");\n'})
+    require_accepted(
+        "clean piglor-owner member",
+        {
+            "Cargo.toml": root_manifest("apps/piglor-owner"),
+            "apps/piglor-owner/Cargo.toml": MEMBER_MANIFEST,
+            "apps/piglor-owner/src/main.rs": FORBID + "fn main() {}\n",
+        },
+    )
+    require_accepted("form feed and line separator do not shift lines", {SAFE_LIB_PATH: FORBID + "\x0cpub fn f() {}\n"})
+
+
+def test_unsafe_evasions() -> None:
+    for statement in (
+        r'let s = "\""; unsafe {}',
+        r'let s = "\\"; unsafe {}',
+        r"let s = '\"'; unsafe {}",
+        r"let s = '\''; unsafe {}",
+        r'let s = "\\\""; unsafe {}',
+        r"let s = '\\'; unsafe {}",
+        r'let s = "a\"b"; unsafe {}',
+        r'let s = b"\""; unsafe {}',
+        "let s = '\"'; unsafe {}",
+        "let s = r#\"a\"#; unsafe {}",
+    ):
+        require_rejected(
+            f"unsafe after {statement}",
+            {SAFE_LIB_PATH: f"{FORBID}{statement}\n"},
+            [at(SAFE_LIB_PATH, 2, RESERVED)],
+        )
+    require_rejected(
+        "form feed, vertical tab and line separator keep line numbers",
+        {SAFE_LIB_PATH: FORBID + "\x0cpub fn f() {}\n// note \x0b\nunsafe {}\n"},
+        [at(SAFE_LIB_PATH, 4, RESERVED)],
+    )
     require_rejected(
         "safe crate unsafe operation",
-        {"crates/safe/src/lib.rs": "pub fn forged() { unsafe {} }\n"},
-        "unsafe is reserved",
+        {SAFE_LIB_PATH: "pub fn forged() { unsafe {} }\n"},
+        [at(SAFE_LIB_PATH, 1, RESERVED)],
+    )
+    require_rejected(
+        "safe crate unsafe fn",
+        {SAFE_LIB_PATH: FORBID + "pub unsafe fn forged() {}\n"},
+        [at(SAFE_LIB_PATH, 2, RESERVED)],
     )
     require_rejected(
         "safe crate unsafe lint override",
-        {"crates/safe/Cargo.toml": SAFE_MANIFEST + "\n[lints.rust]\nunsafe_code = \"allow\"\n"},
-        "non-shim crate configures unsafe_code",
+        {"crates/safe/Cargo.toml": MEMBER_MANIFEST + '\n[lints.rust]\nunsafe_code = "allow"\n'},
+        ["crates/safe/Cargo.toml: non-shim crate configures unsafe_code"],
     )
     require_rejected(
-        "missing safe-module forbid",
-        {f"{SHIM}/src/host.rs": "#![cfg(windows)]\npub fn host() {}\n"},
-        "non-ffi module must forbid unsafe_code",
+        "unsafe in a directory named target below src",
+        {"crates/safe/src/target/gen.rs": "unsafe {}\n"},
+        [at("crates/safe/src/target/gen.rs", 1, RESERVED)],
     )
+    require_rejected(
+        "piglor-owner member is scanned",
+        {
+            "Cargo.toml": root_manifest("apps/piglor-owner"),
+            "apps/piglor-owner/Cargo.toml": MEMBER_MANIFEST,
+            "apps/piglor-owner/src/main.rs": FORBID + "fn main() { unsafe {} }\n",
+        },
+        [at("apps/piglor-owner/src/main.rs", 2, RESERVED)],
+    )
+    require_rejected(
+        "unsafe in an integration test of another member",
+        {"crates/safe/tests/t.rs": "unsafe {}\n"},
+        [at("crates/safe/tests/t.rs", 1, RESERVED)],
+    )
+
+
+def test_ffi_surface() -> None:
+    require_rejected(
+        "unsafe fn",
+        {OPS: CFG + "pub unsafe fn call() {}\n"},
+        [nonblock(OPS, 2, "fn")],
+    )
+    require_rejected("unsafe impl", {OPS: CFG + "struct S;\nunsafe impl Send for S {}\n"}, [nonblock(OPS, 3, "impl")])
+    require_rejected("unsafe trait", {OPS: CFG + "unsafe trait T {}\n"}, [nonblock(OPS, 2, "trait")])
+    require_rejected("unsafe extern", {OPS: CFG + 'unsafe extern "C" {}\n'}, [nonblock(OPS, 2, "extern")])
+    require_rejected(
+        "unsafe no_mangle attribute",
+        {OPS: CFG + "#[unsafe(no_mangle)]\npub fn f() {}\n"},
+        [nonblock(OPS, 2, "attribute"), at(OPS, 2, "#[no_mangle] creates FFI surface and is forbidden")],
+    )
+    for name, attribute in (
+        ("no_mangle", "#[no_mangle]"),
+        ("export_name", '#[export_name = "x"]'),
+        ("link_section", '#[link_section = ".x"]'),
+    ):
+        require_rejected(
+            f"{name} attribute",
+            {OPS: CFG + f"{attribute}\npub fn f() {{}}\n"},
+            [at(OPS, 2, f"#[{name}] creates FFI surface and is forbidden")],
+        )
+    require_rejected(
+        "no_mangle attribute in a safe crate",
+        {SAFE_LIB_PATH: FORBID + "#[no_mangle]\npub fn f() {}\n"},
+        [at(SAFE_LIB_PATH, 2, "#[no_mangle] creates FFI surface and is forbidden")],
+    )
+    extern_definition = "extern fn definition creates FFI surface and is forbidden"
+    require_rejected("extern C fn in the shim", {OPS: CFG + 'pub extern "C" fn f() {}\n'}, [at(OPS, 2, extern_definition)])
+    require_rejected(
+        "extern C fn in a safe crate",
+        {SAFE_LIB_PATH: FORBID + 'pub extern "C" fn f() {}\n'},
+        [at(SAFE_LIB_PATH, 2, extern_definition)],
+    )
+    require_rejected(
+        "unsafe block in a non-ffi shim file",
+        {HOST: CFG + FORBID + "pub fn host() {\n    // SAFETY: fixture.\n    unsafe {}\n}\n"},
+        [at(HOST, 5, "unsafe blocks belong only in src/ffi")],
+    )
+    for relative, source in (
+        ("tests/t.rs", CFG + FORBID + "fn t() { unsafe {} }\n"),
+        ("examples/e.rs", CFG + FORBID + "fn main() { unsafe {} }\n"),
+        ("benches/b.rs", CFG + FORBID + "fn b() { unsafe {} }\n"),
+        ("build.rs", FORBID + "fn main() { unsafe {} }\n"),
+    ):
+        require_rejected(
+            f"unsafe block in shim {relative}",
+            {f"{SHIM}/{relative}": source},
+            [at(f"{SHIM}/{relative}", 3 if source.startswith(CFG) else 2, "unsafe blocks belong only in src/ffi")],
+        )
+    require_rejected(
+        "shim examples file without cfg(windows)",
+        {f"{SHIM}/examples/e.rs": FORBID + "fn main() {}\n"},
+        [f"{SHIM}/examples/e.rs: must start with #![cfg(windows)]"],
+    )
+    require_rejected(
+        "shim tests file without forbid",
+        {f"{SHIM}/tests/t.rs": CFG + "fn t() {}\n"},
+        [f"{SHIM}/tests/t.rs: non-ffi module must forbid unsafe_code"],
+    )
+    for statement, kind in (
+        ('#[path = "x.rs"]\nmod x;', "#[path]"),
+        ('include!("x.rs");', "include!"),
+        ('const X: &str = include_str!("x.txt");', "include_str!"),
+        ('const X: &[u8] = include_bytes!("x.bin");', "include_bytes!"),
+    ):
+        require_rejected(
+            f"{kind} in the shim",
+            {HOST: HOST_MODULE + statement + "\n"},
+            [at(HOST, 4, f"{kind} is forbidden in the shim: it can pull in files outside the scanned tree")],
+        )
+    for statement, kind in (
+        ('include!(concat!(env!("HOME"), "/x.rs"));', "include!"),
+        ('include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../outside.rs"));', "include!"),
+        ('include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/missing.rs"));', "include!"),
+        ("include!(concat!(\n    env!(\"HOME\"),\n    \"/x.rs\"\n));", "include!"),
+        ('include!("../../outside.rs");', "include!"),
+        ('#[path = "../../outside.rs"]\nmod outside;', "#[path]"),
+        ('#[path = "missing.rs"]\nmod missing;', "#[path]"),
+    ):
+        require_rejected(
+            f"{kind} outside the scanned tree in a safe crate",
+            {SAFE_LIB_PATH: FORBID + statement + "\n", "crates/outside.rs": "pub fn outside() {}\n"},
+            [at(SAFE_LIB_PATH, 2, f"{kind} must name a .rs file inside a scanned workspace member")],
+        )
+
+
+def test_headers() -> None:
+    require_rejected("missing safe-module forbid", {HOST: CFG + "pub fn host() {}\n"}, [f"{HOST}: non-ffi module must forbid unsafe_code"])
+    require_rejected("missing cfg(windows) in a module", {HOST: FORBID + "pub fn host() {}\n"}, [f"{HOST}: must start with #![cfg(windows)]"])
+    require_rejected("missing cfg(windows) in lib.rs", {LIB: "//! Root.\n"}, [f"{LIB}: must start with #![cfg(windows)]"])
+    require_rejected("missing cfg(windows) in an ffi file", {OPS: "pub fn call() {}\n"}, [f"{OPS}: must start with #![cfg(windows)]"])
+    require_rejected(
+        "conditional forbid is not a forbid",
+        {HOST: CFG + "#![cfg_attr(windows, forbid(unsafe_code))]\n"},
+        [f"{HOST}: non-ffi module must forbid unsafe_code"],
+    )
+    require_rejected(
+        "forbid after an item is not a leading attribute",
+        {HOST: CFG + "pub fn host() {}\n" + FORBID},
+        [f"{HOST}: non-ffi module must forbid unsafe_code"],
+    )
+    require_rejected(
+        "lib.rs holds a crate-wide forbid",
+        {LIB: CFG + FORBID},
+        [
+            f"{LIB}: crate root must not hold a crate-wide #![forbid(unsafe_code)]; "
+            "forbid each non-ffi mod instead"
+        ],
+    )
+    require_rejected(
+        "lib.rs mod without the attribute",
+        {LIB: CFG + "\nmod ffi;\nmod host;\n", HOST: HOST_MODULE},
+        [at(LIB, 4, "mod host must carry #[forbid(unsafe_code)]")],
+    )
+    require_rejected(
+        "lib.rs pub(crate) mod with an unrelated attribute only",
+        {LIB: CFG + "\n#[cfg(test)]\npub(crate) mod host;\n"},
+        [at(LIB, 4, "mod host must carry #[forbid(unsafe_code)]")],
+    )
+    require_rejected(
+        "lib.rs inline mod without the attribute",
+        {LIB: CFG + "\nmod inline {}\n"},
+        [at(LIB, 3, "mod inline must carry #[forbid(unsafe_code)]")],
+    )
+
+
+def test_lints() -> None:
+    require_rejected(
+        "clippy lint drift",
+        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST.replace('unwrap_used = "deny"', 'unwrap_used = "allow"')},
+        [f"{SHIM}/Cargo.toml: [lints.clippy] differs from ADR-110 policy in unwrap_used"],
+    )
+    require_rejected(
+        "unsafe_code forbid in the shim",
+        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST.replace('unsafe_code = "allow"', 'unsafe_code = "forbid"')},
+        [f"{SHIM}/Cargo.toml: [lints.rust] differs from ADR-110 policy in unsafe_code"],
+    )
+    require_rejected(
+        "missing approved shim entry",
+        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST.replace('unsafe_op_in_unsafe_fn = "deny"\n', "")},
+        [f"{SHIM}/Cargo.toml: [lints.rust] differs from ADR-110 policy in unsafe_op_in_unsafe_fn"],
+    )
+    require_rejected(
+        "extra shim lint entry",
+        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST.replace("[lints.clippy]\n", '[lints.clippy]\nindexing_slicing = "allow"\n')},
+        [f"{SHIM}/Cargo.toml: [lints.clippy] differs from ADR-110 policy in indexing_slicing"],
+    )
+    require_rejected(
+        "shim inherits workspace lints",
+        {f"{SHIM}/Cargo.toml": '[package]\nname = "pos-owner-bridge-windows"\n\n[lints]\nworkspace = true\n'},
+        [
+            f"{SHIM}/Cargo.toml: [lints] must hold only the rust and clippy tables, found workspace",
+            f"{SHIM}/Cargo.toml: [lints.clippy] is missing or not a table",
+            f"{SHIM}/Cargo.toml: [lints.rust] is missing or not a table",
+        ],
+    )
+    require_rejected(
+        "shim without any lints table",
+        {f"{SHIM}/Cargo.toml": '[package]\nname = "pos-owner-bridge-windows"\n'},
+        [f"{SHIM}/Cargo.toml: [lints] is missing or not a table"],
+    )
+
+
+def test_safety_comments() -> None:
+    missing = at(OPS, 5, "unsafe block lacks // SAFETY:")
+    require_rejected("no comment", ffi_case("unsafe {}", line=4), [at(OPS, 4, "unsafe block lacks // SAFETY:")])
+    require_rejected("unrelated comment line", ffi_case("// not a safety note", "unsafe {}"), [missing])
+    require_rejected("empty SAFETY text", ffi_case("// SAFETY:", "unsafe {}"), [missing])
+    require_rejected("SAFETY comment separated by a blank line", ffi_case("// SAFETY: fixture.", "", "unsafe {}", line=6), [at(OPS, 6, "unsafe block lacks // SAFETY:")])
+    require_rejected("SAFETY text in a string", ffi_case('let _s = "// SAFETY: fixture.";', "unsafe {}", line=5), [missing])
+    require_rejected("block comment is not a line SAFETY comment", ffi_case("/* SAFETY: fixture. */", "unsafe {}"), [missing])
+    require_rejected(
+        "SAFETY above an unrelated earlier statement",
+        ffi_case("// SAFETY: fixture.", "let _a = 1;", "let _b = unsafe {};", line=6),
+        [at(OPS, 6, "unsafe block lacks // SAFETY:")],
+    )
+    require_rejected(
+        "SAFETY line inside a multi-line string",
+        ffi_case('let _s = "', "// SAFETY: fixture.", '"; unsafe {}', line=6),
+        [at(OPS, 6, "unsafe block lacks // SAFETY:")],
+    )
+
+
+def test_inventory() -> None:
     require_rejected(
         "ffi block missing inventory",
-        {
-            f"{SHIM}/src/ffi/ops.rs": (
-                "#![cfg(windows)]\npub fn call() {\n// SAFETY: fixture.\nunsafe {}\n}\n"
-            )
-        },
-        "missing record",
+        {**ffi_case(*STANDARD_BODY), INV: EMPTY_INVENTORY},
+        [f"{INV}: missing record for src/ffi/ops.rs:5"],
     )
-    require_rejected(
-        "ffi block missing safety comment",
-        {
-            f"{SHIM}/src/ffi/ops.rs": "#![cfg(windows)]\npub fn call() {\nunsafe {}\n}\n",
-            f"{SHIM}/unsafe-inventory.toml": (
-                "[[block]]\nfile = \"src/ffi/ops.rs\"\nline = 3\nfunction = \"call\"\n"
-                "operation = \"fixture\"\ninvariant = \"fixture\"\nhosted_test = \"ffi_fixture\"\n"
-            ),
-            f"{SHIM}/tests/ffi.rs": "fn ffi_fixture() {}\n",
-        },
-        "lacks // SAFETY:",
-    )
-    allowed = fixture(
-        {
-            f"{SHIM}/src/ffi/ops.rs": (
-                "#![cfg(windows)]\npub fn call() {\n// SAFETY: fixture.\nunsafe {}\n}\n"
-            ),
-            f"{SHIM}/unsafe-inventory.toml": (
-                "[[block]]\nfile = \"src/ffi/ops.rs\"\nline = 4\nfunction = \"call\"\n"
-                "operation = \"fixture\"\ninvariant = \"fixture\"\nhosted_test = \"ffi_fixture\"\n"
-            ),
-            f"{SHIM}/tests/ffi.rs": "fn ffi_fixture() {}\n",
-        }
-    )
-    if allowed:
-        raise SystemExit(f"fully inventoried FFI fixture was rejected: {allowed}")
     require_rejected(
         "stale inventory record",
-        {
-            f"{SHIM}/unsafe-inventory.toml": (
-                "[[block]]\nfile = \"src/ffi/ops.rs\"\nline = 4\nfunction = \"call\"\n"
-                "operation = \"fixture\"\ninvariant = \"fixture\"\nhosted_test = \"ffi_fixture\"\n"
-            )
-        },
-        "stale record",
+        {INV: entry(), f"{SHIM}/tests/ffi.rs": HOSTED_TESTS},
+        [f"{INV}: stale record for src/ffi/ops.rs:5"],
     )
     require_rejected(
-        "unsafe function declaration",
-        {f"{SHIM}/src/ffi/ops.rs": "#![cfg(windows)]\npub unsafe fn call() {}\n"},
-        "unsafe must be an explicit block",
+        "record at the wrong line",
+        ffi_case(*STANDARD_BODY, inventory=entry(line=4)),
+        [f"{INV}: missing record for src/ffi/ops.rs:5", f"{INV}: stale record for src/ffi/ops.rs:4"],
     )
+    require_rejected(
+        "duplicate inventory record",
+        ffi_case(*STANDARD_BODY, inventory=entry() + entry()),
+        [f"{INV}: duplicate record for src/ffi/ops.rs:5"],
+    )
+    require_rejected(
+        "missing hosted test",
+        ffi_case(*STANDARD_BODY, inventory=entry(hosted="absent_test")),
+        [f"{INV}: hosted test absent_test for src/ffi/ops.rs:5 is not a live #[test] function under tests/ or src/"],
+    )
+    for name, source in (
+        ("without #[test]", CFG + FORBID + "\nfn ffi_fixture() {}\n"),
+        ("ignored", CFG + FORBID + "\n#[test]\n#[ignore]\nfn ffi_fixture() {}\n"),
+        ("ignored with a reason", CFG + FORBID + '\n#[ignore = "slow"]\n#[test]\nfn ffi_fixture() {}\n'),
+        ("only in a comment", CFG + FORBID + "\n// #[test]\n// fn ffi_fixture() {}\n"),
+        ("test attribute is not directly attached", CFG + FORBID + "\n#[test]\nconst X: u8 = 1;\nfn ffi_fixture() {}\n"),
+    ):
+        require_rejected(
+            f"hosted test {name}",
+            {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": source},
+            [f"{INV}: hosted test ffi_fixture for src/ffi/ops.rs:5 is not a live #[test] function under tests/ or src/"],
+        )
+    require_rejected(
+        "function does not enclose the block",
+        ffi_case(*STANDARD_BODY, inventory=entry(function="other")),
+        [f"{INV}: function other for src/ffi/ops.rs:5 does not enclose the block (enclosed by call)"],
+    )
+    require_rejected(
+        "block outside any function",
+        {
+            OPS: CFG + "\nconst X: u8 = {\n    // SAFETY: fixture.\n    unsafe {};\n    1\n};\n",
+            INV: entry(line=5),
+            f"{SHIM}/tests/ffi.rs": HOSTED_TESTS,
+        },
+        [f"{INV}: function call for src/ffi/ops.rs:5 does not enclose the block (enclosed by no fn)"],
+    )
+    require_rejected(
+        "missing inventory fields",
+        {INV: '[[block]]\nfile = "src/ffi/ops.rs"\nline = 5\n'},
+        [f"{INV}: block 1 is missing function, operation, invariant, hosted_test"],
+    )
+    for name, replacement in (
+        ("zero line", ("line = 5", "line = 0")),
+        ("boolean line", ("line = 5", "line = true")),
+        ("empty operation", ('operation = "fixture"', 'operation = ""')),
+        ("non-string invariant", ('invariant = "fixture"', "invariant = 3")),
+    ):
+        require_rejected(
+            f"malformed inventory entry: {name}",
+            {INV: entry().replace(*replacement)},
+            [f"{INV}: block 1 has an invalid field"],
+        )
+    require_rejected("inventory block is not an array", {INV: 'block = "x"\n'}, [f"{INV}: block must be an array"])
+    require_rejected("inventory block is not a table", {INV: "block = [1]\n"}, [f"{INV}: block 1 is not a table"])
+    for file in ("../ops.rs", "src/ffi/../x.rs", "/etc/ops.rs", "src/host.rs", "src/ffi/ops.txt", "src/ffi\\\\ops.rs"):
+        require_rejected(
+            f"invalid inventory ffi path {file}",
+            {INV: entry(file=file)},
+            [f"{INV}: block 1 has an invalid ffi file path"],
+        )
+    require_rejected("missing inventory file", {INV: None}, [f"{INV}: missing unsafe inventory"])
+
+
+def test_manifests() -> None:
+    require_rejected(
+        "malformed inventory TOML",
+        {INV: "[[block\n"},
+        [f"{INV}: malformed TOML: "],
+        prefixes=True,
+    )
+    require_rejected(
+        "malformed shim manifest",
+        {f"{SHIM}/Cargo.toml": "[lints\n"},
+        [f"{SHIM}/Cargo.toml: malformed TOML: "],
+        prefixes=True,
+    )
+    require_rejected(
+        "malformed member manifest",
+        {"crates/safe/Cargo.toml": "[package\n"},
+        ["crates/safe/Cargo.toml: malformed TOML: "],
+        prefixes=True,
+    )
+    require_rejected("malformed root manifest", {"Cargo.toml": "[workspace\n"}, ["Cargo.toml: malformed TOML: "], prefixes=True)
+    require_rejected("missing root manifest", {"Cargo.toml": None}, ["Cargo.toml: missing workspace manifest"])
+    require_rejected(
+        "shim missing from the workspace",
+        {"Cargo.toml": manifest_for(["crates/safe"])},
+        [f"Cargo.toml: workspace must contain {SHIM}"],
+    )
+    require_rejected(
+        "glob workspace member",
+        {"Cargo.toml": root_manifest("crates/*")},
+        ["Cargo.toml: glob workspace member crates/* cannot be audited; list members explicitly"],
+    )
+    require_rejected(
+        "missing member manifest",
+        {"Cargo.toml": root_manifest("crates/ghost")},
+        ["crates/ghost/Cargo.toml: workspace member manifest is missing"],
+    )
+    require_rejected(
+        "member outside the repository",
+        {"Cargo.toml": root_manifest("../outside")},
+        ["Cargo.toml: workspace member ../outside is outside the repository"],
+    )
+    require_rejected(
+        "missing shim manifest",
+        {f"{SHIM}/Cargo.toml": None},
+        [f"{SHIM}/Cargo.toml: workspace member manifest is missing"],
+    )
+    require_rejected(
+        "root without workspace lint tables",
+        {"Cargo.toml": root_manifest().split("[workspace.lints.rust]")[0]},
+        [f"{SHIM}/Cargo.toml: cannot verify shim lint tables without root [workspace.lints.rust] and [workspace.lints.clippy]"],
+    )
+
+
+def run_cli(extra: dict[str, str | None] | None = None) -> subprocess.CompletedProcess[str]:
+    with tree(extra) as root:
+        return subprocess.run(
+            [sys.executable, str(CHECKER_PATH), "--root", str(root)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+
+def test_cli() -> None:
+    clean = run_cli()
+    if clean.returncode != 0 or "owner-bridge Windows unsafe policy holds" not in clean.stdout:
+        raise SystemExit(f"CLI rejected a clean tree: {clean}")
+    dirty = run_cli({SAFE_LIB_PATH: FORBID + "fn f() { unsafe {} }\n", HOST: FORBID + CFG + "pub fn host() {}\n"})
+    expected = [at(SAFE_LIB_PATH, 2, RESERVED)]
+    lines = dirty.stderr.strip().splitlines()
+    if dirty.returncode == 0 or dirty.stdout or lines != expected:
+        raise SystemExit(f"CLI did not report the expected violation {expected}: {dirty}")
+    malformed = run_cli({INV: "[[block\n"})
+    if malformed.returncode == 0 or "Traceback" in malformed.stderr or "malformed TOML" not in malformed.stderr:
+        raise SystemExit(f"CLI did not report malformed TOML cleanly: {malformed}")
+
+
+def main() -> None:
+    test_masker()
+    test_accepted()
+    test_unsafe_evasions()
+    test_ffi_surface()
+    test_headers()
+    test_lints()
+    test_safety_comments()
+    test_inventory()
+    test_manifests()
+    test_cli()
     print("owner-bridge unsafe-policy checker rejects every forged boundary")
 
 

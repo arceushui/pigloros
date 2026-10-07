@@ -1,20 +1,52 @@
 #!/usr/bin/env python3
 """Enforce the ADR-110 Windows owner-bridge unsafe boundary.
 
-Only ``pos-owner-bridge-windows`` may opt out of the workspace's
-``unsafe_code = \"forbid\"`` lint. Its manifest copies the workspace lint
-tables exactly except for the four ADR-approved entries, and only its
-``src/ffi`` modules may contain explicit unsafe blocks. Each such block needs
-an adjacent ``// SAFETY:`` explanation and a matching record in
-``unsafe-inventory.toml`` that names a hosted test function.
+The Windows shim ``crates/pos-owner-bridge-windows`` is the only crate allowed
+to opt out of the workspace ``unsafe_code = "forbid"`` lint. The checker is
+source-based and target-independent: the shim compiles to nothing on Linux, so
+a Linux compiler or geiger run cannot audit its FFI boundary.
 
-This is deliberately source-based. The Windows shim compiles to nothing on
-Linux, so a Linux-only compiler or geiger run cannot audit its FFI boundary.
+Policy, enforced over every ``.rs`` file under every workspace member (except
+``<member>/target``):
+
+* Allowed unsafe form: only an explicit ``unsafe { }`` block, only inside
+  ``crates/pos-owner-bridge-windows/src/ffi/*.rs``. Each block needs a
+  ``// SAFETY:`` comment (immediately above the block or above the statement it
+  belongs to) and an inventory record naming its enclosing function, operation,
+  invariant and a hosted ``#[test]``.
+* ``unsafe fn``, ``unsafe impl``, ``unsafe trait``, ``unsafe extern`` and every
+  other ``unsafe`` token that is not a block are rejected everywhere.
+* ``#[no_mangle]``, ``#[export_name]``, ``#[link_section]`` (including their
+  ``#[unsafe(...)]`` forms) and ``extern "ABI" fn`` definitions are rejected
+  everywhere, because they create FFI surface in edition 2021 without the
+  ``unsafe`` token.
+* ``#[path]``, ``include!``, ``include_str!`` and ``include_bytes!`` can pull
+  files from outside the scanned tree. They are rejected in the shim. In other
+  members, ``#[path]`` and ``include!`` must name a ``.rs`` file inside a
+  scanned member (``concat!(env!("CARGO_MANIFEST_DIR"), "...")`` is resolved
+  against the member; ``concat!(env!("OUT_DIR"), "...")`` names build-script
+  output and is allowed); the data forms are allowed there.
+* The shim manifest repeats the workspace lint tables except for the four
+  ADR-approved entries. Other members configure no ``unsafe_code`` lint.
+* Every shim source file (all of ``src``, ``tests``, ``examples``, ``benches``;
+  ``build.rs`` is exempt because a cfg-empty build script has no ``main``)
+  starts with ``#![cfg(windows)]``. Every shim file outside ``src/ffi`` starts
+  with ``#![forbid(unsafe_code)]``, except the crate root ``src/lib.rs``: an
+  inner forbid at the crate root is crate-wide and cannot be relaxed in
+  ``ffi``. The root therefore must not contain it, and instead every non-ffi
+  ``mod`` declaration in ``src/lib.rs`` carries ``#[forbid(unsafe_code)]``.
+* Workspace members must be listed explicitly; globs and missing member
+  manifests are errors, never silently skipped.
+
+Hosted tests named by the inventory may live in any shim ``tests/`` or ``src/``
+file: ADR-110 requires a hosted test but names no directory. The function must
+carry ``#[test]`` and must not be ``#[ignore]``d.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import tomllib
 from collections.abc import Iterable
@@ -25,19 +57,61 @@ from pathlib import Path, PurePosixPath
 SHIM = "crates/pos-owner-bridge-windows"
 INVENTORY = "unsafe-inventory.toml"
 REQUIRED_BLOCK_FIELDS = ("file", "line", "function", "operation", "invariant", "hosted_test")
-UNSAFE_TOKEN = re.compile(r"\bunsafe\b")
-UNSAFE_BLOCK = re.compile(r"\bunsafe\s*\{")
-RAW_STRING = re.compile(r"(?:br|rb|r)(?P<hashes>#+)?\"")
-IDENTIFIER = re.compile(r"[A-Za-z0-9_]")
+UNSAFE_TOKEN = re.compile(r"(?<!\w)unsafe(?!\w)")
+UNSAFE_BLOCK = re.compile(r"(?<!\w)unsafe\s*\{")
+UNSAFE_KIND = re.compile(r"unsafe\s*(\w+|\()")
+ATTRIBUTE_START = re.compile(r"#\s*(!?)\s*\[")
+BANNED_ATTRIBUTE = re.compile(r"(?<!\w)(no_mangle|export_name|link_section)(?!\w)")
+PATH_ATTRIBUTE = re.compile(r"(?<!\w)path\s*=")
+PATH_LITERAL = re.compile(r'path\s*=\s*"([^"\\]*)"')
+INCLUDE_MACRO = re.compile(r"(?<!\w)(include(?:_str|_bytes)?)\s*!")
+INCLUDE_LITERAL = re.compile(r'\s*[(\[{]\s*"([^"\\]*)"\s*[)\]}]')
+GENERATED_INCLUDE = re.compile(
+    r'\s*[(\[{]\s*concat!\s*\(\s*env!\s*\(\s*"(OUT_DIR|CARGO_MANIFEST_DIR)"\s*\)\s*,\s*"([^"\\]*)"\s*,?\s*\)\s*[)\]}]'
+)
+EXTERN_FN = re.compile(r"(?<!\w)extern\s+fn\s+\w")
+MOD_DECLARATION = re.compile(r"(?<!\w)(?P<visibility>pub\s*(?:\([^)]*\)\s*)?)?mod\s+(?P<name>\w+)\s*[;{]")
+FUNCTION = re.compile(r"(?<!\w)fn\s+(\w+)")
+FUNCTION_MODIFIERS = re.compile(r"(?:(?:pub(?:\s*\([^)]*\))?|async|const)\s+)*\Z")
+RAW_PREFIXES = ("r", "br", "cr")
+STRING_PREFIXES = ("b", "c")
+MISSING = object()
+
+
+@dataclass(frozen=True)
+class Scan:
+    """Masked source plus the standalone ``//`` comments by 0-based line."""
+
+    code: str
+    code_lines: tuple[str, ...]
+    comments: dict[int, str]
+
+
+@dataclass(frozen=True)
+class Attribute:
+    """One ``#[...]`` or ``#![...]`` attribute in masked code."""
+
+    start: int
+    end: int
+    inner: bool
+    content: str
 
 
 @dataclass(frozen=True)
 class UnsafeBlock:
-    """One explicit source-level unsafe block."""
+    """One explicit unsafe block in ``src/ffi`` and the functions enclosing it."""
 
     file: str
     line: int
-    offset: int
+    functions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ShimScan:
+    """What the shim pass learned, for the inventory comparison."""
+
+    blocks: dict[tuple[str, int], UnsafeBlock]
+    scans: dict[str, tuple[Scan, tuple[Attribute, ...]]]
 
 
 def _blank(text: str) -> str:
@@ -62,81 +136,225 @@ def _block_comment_end(text: str, start: int) -> int:
     return len(text)
 
 
-def _quoted_end(text: str, start: int, quote: str) -> int:
+def _quoted_end(text: str, start: int) -> int:
+    """Return the end of the escaped string literal opened at ``text[start]``."""
     index = start + 1
     while index < len(text):
-        if text[index] == "\\\\":
+        if text[index] == "\\":
             index += 2
-        elif text[index] == quote:
+        elif text[index] == '"':
             return index + 1
         else:
             index += 1
     return len(text)
 
 
-def _raw_string_end(text: str, start: int) -> int | None:
-    if start and IDENTIFIER.fullmatch(text[start - 1]):
+def _char_end(text: str, start: int) -> int | None:
+    """Return the end of the character literal at ``text[start]``, or None.
+
+    ``None`` means the quote opens a lifetime or label, which stays code.
+    """
+    following = start + 1
+    if following >= len(text):
         return None
-    match = RAW_STRING.match(text, start)
-    if match is None:
-        return None
-    closing = '"' + (match.group("hashes") or "")
-    end = text.find(closing, match.end())
+    if text[following] == "\\":
+        index = following + 2
+        while index < len(text) and text[index] not in "'\n":
+            index += 1
+        return index + 1 if index < len(text) and text[index] == "'" else None
+    if text[following] != "'" and following + 1 < len(text) and text[following + 1] == "'":
+        return following + 2
+    return None
+
+
+def _raw_string_end(text: str, quote: int, hashes: int) -> int:
+    closing = '"' + "#" * hashes
+    end = text.find(closing, quote + 1)
     return len(text) if end < 0 else end + len(closing)
 
 
-def _char_end(text: str, start: int) -> int | None:
-    """Return a simple character-literal end, leaving lifetimes as code."""
-    if start + 2 >= len(text):
-        return None
-    if text[start + 1] == "\\\\":
-        return _quoted_end(text, start, "'")
-    return start + 3 if text[start + 2] == "'" else None
+def _is_word(character: str) -> bool:
+    return character.isalnum() or character == "_"
+
+
+def scan(text: str) -> Scan:
+    """Tokenize Rust source, masking comments, literals and raw identifiers.
+
+    Offsets and line breaks are preserved. Strings, raw strings, byte and C
+    strings, character literals, comments (nested block comments included) and
+    doc comments become spaces. A raw identifier such as ``r#unsafe`` becomes
+    underscores so it is neither a keyword nor lost. Lifetimes stay code.
+    """
+    pieces: list[str] = []
+    comments: dict[int, str] = {}
+    length = len(text)
+    index = 0
+    line = 0
+    line_start = 0
+
+    def emit(end: int, mode: str) -> None:
+        nonlocal index, line, line_start
+        segment = text[index:end]
+        if mode == "keep":
+            pieces.append(segment)
+        elif mode == "ident":
+            pieces.append("_" * len(segment))
+        else:
+            pieces.append(_blank(segment))
+        newlines = segment.count("\n")
+        if newlines:
+            line += newlines
+            line_start = index + segment.rfind("\n") + 1
+        index = end
+
+    while index < length:
+        character = text[index]
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            end = length if end < 0 else end
+            if not text[line_start:index].strip():
+                comments[line] = text[index + 2 : end].strip()
+            emit(end, "blank")
+        elif text.startswith("/*", index):
+            emit(_block_comment_end(text, index), "blank")
+        elif _is_word(character):
+            end = index + 1
+            while end < length and _is_word(text[end]):
+                end += 1
+            word = text[index:end]
+            after = text[end : end + 1]
+            if word in RAW_PREFIXES and after in ('"', "#"):
+                quote = end
+                while quote < length and text[quote] == "#":
+                    quote += 1
+                if quote < length and text[quote] == '"':
+                    emit(_raw_string_end(text, quote, quote - end), "blank")
+                    continue
+                if word == "r" and quote == end + 1 and quote < length and _is_word(text[quote]):
+                    identifier_end = quote
+                    while identifier_end < length and _is_word(text[identifier_end]):
+                        identifier_end += 1
+                    emit(identifier_end, "ident")
+                    continue
+            if word in STRING_PREFIXES and after == '"':
+                emit(_quoted_end(text, end), "blank")
+            elif word == "b" and after == "'" and _char_end(text, end) is not None:
+                emit(_char_end(text, end) or end, "blank")
+            else:
+                emit(end, "keep")
+        elif character == '"':
+            emit(_quoted_end(text, index), "blank")
+        elif character == "'":
+            char_end = _char_end(text, index)
+            if char_end is None:
+                emit(index + 1, "keep")
+            else:
+                emit(char_end, "blank")
+        else:
+            emit(index + 1, "keep")
+    code = "".join(pieces)
+    return Scan(code, tuple(code.split("\n")), comments)
 
 
 def code_only(text: str) -> str:
     """Mask comments and literals while preserving source offsets and lines."""
-    pieces: list[str] = []
-    index = 0
-    while index < len(text):
-        if text.startswith("//", index):
-            end = text.find("\n", index)
-            end = len(text) if end < 0 else end
-            pieces.append(_blank(text[index:end]))
-            index = end
-            continue
-        if text.startswith("/*", index):
-            end = _block_comment_end(text, index)
-            pieces.append(_blank(text[index:end]))
-            index = end
-            continue
-        raw_end = _raw_string_end(text, index)
-        if raw_end is not None:
-            pieces.append(_blank(text[index:raw_end]))
-            index = raw_end
-            continue
-        if text.startswith('b"', index):
-            end = _quoted_end(text, index + 1, '"')
-            pieces.append(_blank(text[index:end]))
-            index = end
-            continue
-        if text[index] == '"':
-            end = _quoted_end(text, index, '"')
-            pieces.append(_blank(text[index:end]))
-            index = end
-            continue
-        char_end = _char_end(text, index) if text[index] == "'" else None
-        if char_end is not None:
-            pieces.append(_blank(text[index:char_end]))
-            index = char_end
-            continue
-        pieces.append(text[index])
-        index += 1
-    return "".join(pieces)
+    return scan(text).code
 
 
-def _toml(path: Path) -> dict[str, object]:
-    return tomllib.loads(path.read_text(encoding="utf-8"))
+def _line_of(code: str, offset: int) -> int:
+    return code.count("\n", 0, offset) + 1
+
+
+def _attributes(code: str) -> tuple[Attribute, ...]:
+    attributes: list[Attribute] = []
+    position = 0
+    for match in ATTRIBUTE_START.finditer(code):
+        if match.start() < position:
+            continue
+        depth = 1
+        index = match.end()
+        while index < len(code) and depth:
+            if code[index] == "[":
+                depth += 1
+            elif code[index] == "]":
+                depth -= 1
+            index += 1
+        if depth:
+            continue
+        attributes.append(Attribute(match.start(), index, bool(match.group(1)), code[match.end() : index - 1]))
+        position = index
+    return tuple(attributes)
+
+
+def _normalized(content: str) -> str:
+    return re.sub(r"\s+", "", content)
+
+
+def _leading_inner_attributes(code: str, attributes: Iterable[Attribute]) -> tuple[str, ...]:
+    """Return the normalized inner attributes that open the file."""
+    leading: list[str] = []
+    position = 0
+    for attribute in attributes:
+        if not attribute.inner or code[position : attribute.start].strip():
+            break
+        leading.append(_normalized(attribute.content))
+        position = attribute.end
+    return tuple(leading)
+
+
+def _outer_attributes_before(code: str, attributes: Iterable[Attribute], start: int) -> tuple[str, ...]:
+    """Return the normalized outer attributes directly attached to an item."""
+    candidates = tuple(attributes)
+    attached: list[str] = []
+    while True:
+        for attribute in candidates:
+            if not attribute.inner and attribute.end <= start and not code[attribute.end : start].strip():
+                attached.append(_normalized(attribute.content))
+                start = attribute.start
+                break
+        else:
+            return tuple(attached)
+
+
+def _matching_brace(code: str, start: int) -> int:
+    depth = 0
+    for index in range(start, len(code)):
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return len(code)
+
+
+def _function_spans(code: str) -> tuple[tuple[str, int, int], ...]:
+    """Return ``(name, body_start, body_end)`` for every ``fn`` with a body."""
+    spans: list[tuple[str, int, int]] = []
+    for match in FUNCTION.finditer(code):
+        depth = 0
+        index = match.end()
+        while index < len(code):
+            character = code[index]
+            if character in "([":
+                depth += 1
+            elif character in ")]":
+                depth -= 1
+            elif depth <= 0 and character == ";":
+                break
+            elif depth <= 0 and character == "{":
+                spans.append((match.group(1), index, _matching_brace(code, index)))
+                break
+            index += 1
+    return tuple(spans)
+
+
+def _toml(root: Path, path: Path, found: list[str]) -> dict[str, object] | None:
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError, OSError) as error:
+        found.append(f"{path.relative_to(root).as_posix()}: malformed TOML: {error}")
+        return None
 
 
 def _workspace_members(root_manifest: dict[str, object]) -> tuple[str, ...]:
@@ -149,13 +367,6 @@ def _workspace_members(root_manifest: dict[str, object]) -> tuple[str, ...]:
     return tuple(members)
 
 
-def _member_manifests(root: Path, members: Iterable[str]) -> Iterable[tuple[str, Path]]:
-    for member in members:
-        manifest = root / member / "Cargo.toml"
-        if manifest.is_file():
-            yield member, manifest
-
-
 def _contains_unsafe_code_lint(value: object) -> bool:
     if isinstance(value, dict):
         return any(key == "unsafe_code" or _contains_unsafe_code_lint(item) for key, item in value.items())
@@ -164,10 +375,19 @@ def _contains_unsafe_code_lint(value: object) -> bool:
     return False
 
 
-def _rust_files(directory: Path) -> Iterable[Path]:
+def _rust_files(directory: Path) -> tuple[Path, ...]:
+    """Return every ``.rs`` file under a crate, skipping only ``<crate>/target``."""
     if not directory.is_dir():
         return ()
-    return (path for path in sorted(directory.rglob("*.rs")) if "target" not in path.parts)
+    return tuple(
+        path
+        for path in sorted(directory.rglob("*.rs"))
+        if path.is_file() and path.relative_to(directory).parts[:1] != ("target",)
+    )
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def _expected_shim_lints(root_manifest: dict[str, object]) -> tuple[dict[str, object], dict[str, object]] | None:
@@ -190,54 +410,215 @@ def _expected_shim_lints(root_manifest: dict[str, object]) -> tuple[dict[str, ob
     return expected_rust, expected_clippy
 
 
-def _has_windows_cfg(text: str) -> bool:
-    return bool(re.match(r"\s*#!\[cfg\(windows\)\]", text))
-
-
-def _has_forbid_unsafe(text: str) -> bool:
-    return bool(re.match(r"\s*(?:#!\[[^\]]*\]\s*)*#!\[forbid\(unsafe_code\)\]", text))
-
-
-def _unsafe_blocks(relative: str, source: str, code: str) -> tuple[UnsafeBlock, ...]:
-    return tuple(
-        UnsafeBlock(relative, code.count("\n", 0, match.start()) + 1, match.start())
-        for match in UNSAFE_BLOCK.finditer(code)
+def _table_differences(actual: object, expected: dict[str, object]) -> list[str] | None:
+    if not isinstance(actual, dict):
+        return None
+    return sorted(
+        key for key in set(actual) | set(expected) if actual.get(key, MISSING) != expected.get(key, MISSING)
     )
 
 
-def _has_safety_comment(source: str, block: UnsafeBlock) -> bool:
-    lines = source[: block.offset].splitlines()
-    return bool(lines and lines[-1].lstrip().startswith("// SAFETY:"))
+def _check_shim_lints(root_manifest: dict[str, object], shim_manifest: dict[str, object], found: list[str]) -> None:
+    expected = _expected_shim_lints(root_manifest)
+    if expected is None:
+        found.append(
+            f"{SHIM}/Cargo.toml: cannot verify shim lint tables without root "
+            "[workspace.lints.rust] and [workspace.lints.clippy]"
+        )
+        return
+    lints = shim_manifest.get("lints")
+    if not isinstance(lints, dict):
+        found.append(f"{SHIM}/Cargo.toml: [lints] is missing or not a table")
+        return
+    extra = sorted(set(lints) - {"rust", "clippy"})
+    if extra:
+        found.append(f"{SHIM}/Cargo.toml: [lints] must hold only the rust and clippy tables, found {', '.join(extra)}")
+    for name, table in (("rust", expected[0]), ("clippy", expected[1])):
+        differences = _table_differences(lints.get(name), table)
+        if differences is None:
+            found.append(f"{SHIM}/Cargo.toml: [lints.{name}] is missing or not a table")
+        elif differences:
+            found.append(f"{SHIM}/Cargo.toml: [lints.{name}] differs from ADR-110 policy in {', '.join(differences)}")
 
 
-def _hosted_test_exists(crate: Path, name: str) -> bool:
-    expression = re.compile(rf"\b(?:async\s+)?fn\s+{re.escape(name)}\b")
+def _scanned_rust_file(target: Path, scanned_dirs: tuple[Path, ...]) -> bool:
+    if target.suffix != ".rs" or not target.is_file():
+        return False
     return any(
-        expression.search(code_only(path.read_text(encoding="utf-8", errors="replace")))
-        for path in _rust_files(crate / "tests")
+        target.is_relative_to(directory) and target.relative_to(directory).parts[:1] != ("target",)
+        for directory in scanned_dirs
     )
 
 
-def _inventory_blocks(crate: Path, found: list[str]) -> tuple[dict[tuple[str, int], dict[str, object]], ...]:
-    path = crate / INVENTORY
+def _check_surface(
+    label: str,
+    path: Path,
+    crate_dir: Path,
+    text: str,
+    scanned: Scan,
+    attributes: tuple[Attribute, ...],
+    scanned_dirs: tuple[Path, ...],
+    strict_includes: bool,
+    found: list[str],
+) -> None:
+    """Reject attributes, macros and definitions that create unaudited surface."""
+    code = scanned.code
+
+    def at(offset: int) -> str:
+        return f"{label}:{_line_of(code, offset)}"
+
+    def inclusion(offset: int, kind: str, literal: str | None, base: Path, *, data: bool) -> None:
+        if strict_includes:
+            found.append(f"{at(offset)}: {kind} is forbidden in the shim: it can pull in files outside the scanned tree")
+        elif not data:
+            target = None if literal is None else Path(os.path.normpath(base / literal)).resolve()
+            if target is None or not _scanned_rust_file(target, scanned_dirs):
+                found.append(f"{at(offset)}: {kind} must name a .rs file inside a scanned workspace member")
+
+    for attribute in attributes:
+        for match in BANNED_ATTRIBUTE.finditer(attribute.content):
+            found.append(f"{at(attribute.start)}: #[{match.group(1)}] creates FFI surface and is forbidden")
+        if PATH_ATTRIBUTE.search(attribute.content):
+            literal = PATH_LITERAL.search(text[attribute.start : attribute.end])
+            inclusion(attribute.start, "#[path]", literal.group(1) if literal else None, path.parent, data=False)
+    for match in INCLUDE_MACRO.finditer(code):
+        name = match.group(1)
+        literal = INCLUDE_LITERAL.match(text, match.end())
+        if literal:
+            inclusion(match.start(), f"{name}!", literal.group(1), path.parent, data=name != "include")
+            continue
+        generated = GENERATED_INCLUDE.match(text, match.end())
+        if generated and generated.group(1) == "CARGO_MANIFEST_DIR":
+            inclusion(match.start(), f"{name}!", generated.group(2).lstrip("/"), crate_dir, data=name != "include")
+        else:
+            inclusion(match.start(), f"{name}!", None, crate_dir, data=name != "include" or generated is not None)
+    for match in EXTERN_FN.finditer(code):
+        found.append(f"{at(match.start())}: extern fn definition creates FFI surface and is forbidden")
+
+
+def _has_safety_comment(scanned: Scan, line: int, column: int) -> bool:
+    """Accept a ``// SAFETY:`` comment above the block or its statement start."""
+    anchor = line
+    if not scanned.code_lines[line][:column].strip():
+        while anchor > 0:
+            previous = scanned.code_lines[anchor - 1].strip()
+            if previous and not previous.endswith((";", "{", "}")):
+                anchor -= 1
+            else:
+                break
+    texts: list[str] = []
+    index = anchor - 1
+    while index >= 0 and index in scanned.comments:
+        texts.append(scanned.comments[index])
+        index -= 1
+    texts.reverse()
+    for position, text in enumerate(texts):
+        if text.startswith("SAFETY:"):
+            return bool(" ".join(texts[position:])[len("SAFETY:") :].strip())
+    return False
+
+
+def _hosted_test_exists(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], name: str) -> bool:
+    """Return whether a shim ``tests/`` or ``src/`` file holds a live ``#[test]``."""
+    expression = re.compile(rf"(?<!\w)fn\s+{re.escape(name)}(?!\w)")
+    for relative, (scanned, attributes) in scans.items():
+        if not relative.startswith(("tests/", "src/")):
+            continue
+        for match in expression.finditer(scanned.code):
+            modifiers = FUNCTION_MODIFIERS.search(scanned.code[: match.start()])
+            start = modifiers.start() if modifiers else match.start()
+            attached = _outer_attributes_before(scanned.code, attributes, start)
+            if "test" in attached and not any(item.startswith("ignore") for item in attached):
+                return True
+    return False
+
+
+def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
+    blocks: dict[tuple[str, int], UnsafeBlock] = {}
+    scans: dict[str, tuple[Scan, tuple[Attribute, ...]]] = {}
+    for source in _rust_files(shim):
+        relative = source.relative_to(shim).as_posix()
+        label = f"{SHIM}/{relative}"
+        text = _read(source)
+        scanned = scan(text)
+        code = scanned.code
+        attributes = _attributes(code)
+        scans[relative] = (scanned, attributes)
+        _check_surface(label, source, shim, text, scanned, attributes, scanned_dirs, True, found)
+        leading = _leading_inner_attributes(code, attributes)
+        is_ffi = relative.startswith("src/ffi/")
+        if relative != "build.rs" and "cfg(windows)" not in leading:
+            found.append(f"{label}: must start with #![cfg(windows)]")
+        if relative == "src/lib.rs":
+            if "forbid(unsafe_code)" in leading:
+                found.append(
+                    f"{label}: crate root must not hold a crate-wide #![forbid(unsafe_code)]; "
+                    "forbid each non-ffi mod instead"
+                )
+            for match in MOD_DECLARATION.finditer(code):
+                if match.group("name") == "ffi":
+                    continue
+                start = match.start("visibility") if match.group("visibility") else match.start()
+                if "forbid(unsafe_code)" not in _outer_attributes_before(code, attributes, start):
+                    found.append(
+                        f"{label}:{_line_of(code, match.start())}: mod {match.group('name')} "
+                        "must carry #[forbid(unsafe_code)]"
+                    )
+        elif not is_ffi and "forbid(unsafe_code)" not in leading:
+            found.append(f"{label}: non-ffi module must forbid unsafe_code")
+        block_starts = {match.start() for match in UNSAFE_BLOCK.finditer(code)}
+        spans = _function_spans(code)
+        for token in UNSAFE_TOKEN.finditer(code):
+            line = _line_of(code, token.start())
+            if token.start() not in block_starts:
+                kind_match = UNSAFE_KIND.match(code, token.start())
+                kind = kind_match.group(1) if kind_match else "construct"
+                kind = "attribute" if kind == "(" else kind
+                found.append(
+                    f"{label}:{line}: unsafe {kind} is forbidden; only explicit unsafe blocks in src/ffi are allowed"
+                )
+            elif not is_ffi:
+                found.append(f"{label}:{line}: unsafe blocks belong only in src/ffi")
+            else:
+                column = token.start() - (code.rfind("\n", 0, token.start()) + 1)
+                if not _has_safety_comment(scanned, line - 1, column):
+                    found.append(f"{label}:{line}: unsafe block lacks // SAFETY:")
+                functions = tuple(name for name, begin, end in spans if begin < token.start() < end)
+                blocks[(relative, line)] = UnsafeBlock(relative, line, functions)
+    return ShimScan(blocks, scans)
+
+
+def _check_member_sources(root: Path, directory: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> None:
+    for source in _rust_files(directory):
+        label = source.relative_to(root).as_posix()
+        text = _read(source)
+        scanned = scan(text)
+        _check_surface(label, source, directory, text, scanned, _attributes(scanned.code), scanned_dirs, False, found)
+        for token in UNSAFE_TOKEN.finditer(scanned.code):
+            found.append(f"{label}:{_line_of(scanned.code, token.start())}: unsafe is reserved for {SHIM}/src/ffi")
+
+
+def _inventory_blocks(shim: Path, root: Path, found: list[str]) -> list[tuple[tuple[str, int], dict[str, object]]]:
+    path = shim / INVENTORY
+    label = f"{SHIM}/{INVENTORY}"
     if not path.is_file():
-        found.append(f"{SHIM}/{INVENTORY}: missing unsafe inventory")
-        return ()
-    data = _toml(path)
+        found.append(f"{label}: missing unsafe inventory")
+        return []
+    data = _toml(root, path, found)
+    if data is None:
+        return []
     blocks = data.get("block", [])
     if not isinstance(blocks, list):
-        found.append(f"{SHIM}/{INVENTORY}: block must be an array")
-        return ()
-    parsed: list[dict[tuple[str, int], dict[str, object]]] = []
+        found.append(f"{label}: block must be an array")
+        return []
+    parsed: list[tuple[tuple[str, int], dict[str, object]]] = []
     for index, entry in enumerate(blocks, start=1):
         if not isinstance(entry, dict):
-            found.append(f"{SHIM}/{INVENTORY}: block {index} is not a table")
+            found.append(f"{label}: block {index} is not a table")
             continue
         missing = [field for field in REQUIRED_BLOCK_FIELDS if field not in entry]
         if missing:
-            found.append(
-                f"{SHIM}/{INVENTORY}: block {index} is missing {', '.join(missing)}"
-            )
+            found.append(f"{label}: block {index} is missing {', '.join(missing)}")
             continue
         file = entry["file"]
         line = entry["line"]
@@ -245,103 +626,99 @@ def _inventory_blocks(crate: Path, found: list[str]) -> tuple[dict[tuple[str, in
         if (
             not isinstance(file, str)
             or not isinstance(line, int)
+            or isinstance(line, bool)
             or line < 1
             or not all(isinstance(value, str) and value for value in strings)
         ):
-            found.append(f"{SHIM}/{INVENTORY}: block {index} has an invalid field")
+            found.append(f"{label}: block {index} has an invalid field")
             continue
         pure = PurePosixPath(file)
-        if pure.is_absolute() or ".." in pure.parts or not file.startswith("src/ffi/") or not file.endswith(".rs"):
-            found.append(f"{SHIM}/{INVENTORY}: block {index} has an invalid ffi file path")
+        if (
+            pure.is_absolute()
+            or ".." in pure.parts
+            or "\\" in file
+            or not file.startswith("src/ffi/")
+            or not file.endswith(".rs")
+        ):
+            found.append(f"{label}: block {index} has an invalid ffi file path")
             continue
-        key = (file, line)
-        record = {str(field): value for field, value in entry.items()}
-        parsed.append({key: record})
-    return tuple(parsed)
+        parsed.append(((file, line), {str(field): value for field, value in entry.items()}))
+    return parsed
+
+
+def _check_inventory(shim: Path, root: Path, shim_scan: ShimScan, found: list[str]) -> None:
+    label = f"{SHIM}/{INVENTORY}"
+    records: dict[tuple[str, int], dict[str, object]] = {}
+    for key, record in _inventory_blocks(shim, root, found):
+        if key in records:
+            found.append(f"{label}: duplicate record for {key[0]}:{key[1]}")
+        records[key] = record
+    for key in sorted(shim_scan.blocks):
+        if key not in records:
+            found.append(f"{label}: missing record for {key[0]}:{key[1]}")
+    for key, record in sorted(records.items()):
+        block = shim_scan.blocks.get(key)
+        if block is None:
+            found.append(f"{label}: stale record for {key[0]}:{key[1]}")
+            continue
+        function = str(record["function"])
+        if function.rsplit("::", 1)[-1] not in block.functions:
+            enclosing = ", ".join(block.functions) or "no fn"
+            found.append(
+                f"{label}: function {function} for {key[0]}:{key[1]} does not enclose the block "
+                f"(enclosed by {enclosing})"
+            )
+        hosted_test = str(record["hosted_test"])
+        if not _hosted_test_exists(shim_scan.scans, hosted_test):
+            found.append(
+                f"{label}: hosted test {hosted_test} for {key[0]}:{key[1]} "
+                "is not a live #[test] function under tests/ or src/"
+            )
 
 
 def violations(root: Path) -> list[str]:
-    """Return every source-policy violation beneath ``root``."""
+    """Return every source-policy violation beneath ``root``, sorted."""
+    root = root.resolve()
     found: list[str] = []
     root_manifest_path = root / "Cargo.toml"
     if not root_manifest_path.is_file():
         return ["Cargo.toml: missing workspace manifest"]
-    root_manifest = _toml(root_manifest_path)
+    root_manifest = _toml(root, root_manifest_path, found)
+    if root_manifest is None:
+        return found
     members = _workspace_members(root_manifest)
     if SHIM not in members:
-        found.append(f"Cargo.toml: workspace must contain {SHIM}")
-        return found
-    shim = root / SHIM
-    shim_manifest_path = shim / "Cargo.toml"
-    if not shim_manifest_path.is_file():
-        return [f"{SHIM}/Cargo.toml: missing shim manifest"]
+        return [f"Cargo.toml: workspace must contain {SHIM}"]
 
-    expected = _expected_shim_lints(root_manifest)
-    shim_manifest = _toml(shim_manifest_path)
-    shim_lints = shim_manifest.get("lints")
-    if expected is None or not isinstance(shim_lints, dict):
-        found.append(f"{SHIM}/Cargo.toml: cannot verify shim lint tables")
-    else:
-        actual_rust = shim_lints.get("rust")
-        actual_clippy = shim_lints.get("clippy")
-        if actual_rust != expected[0]:
-            found.append(f"{SHIM}/Cargo.toml: rust lint table differs from ADR-110 policy")
-        if actual_clippy != expected[1]:
-            found.append(f"{SHIM}/Cargo.toml: clippy lint table differs from ADR-110 policy")
+    directories: dict[str, Path] = {}
+    for member in members:
+        if any(character in member for character in "*?["):
+            found.append(f"Cargo.toml: glob workspace member {member} cannot be audited; list members explicitly")
+            continue
+        directory = (root / member).resolve()
+        if not directory.is_relative_to(root):
+            found.append(f"Cargo.toml: workspace member {member} is outside the repository")
+        elif not (directory / "Cargo.toml").is_file():
+            found.append(f"{member}/Cargo.toml: workspace member manifest is missing")
+        else:
+            directories[member] = directory
+    scanned_dirs = tuple(directories.values())
 
-    for member, manifest_path in _member_manifests(root, members):
+    shim = directories.get(SHIM)
+    if shim is not None:
+        shim_manifest = _toml(root, shim / "Cargo.toml", found)
+        if shim_manifest is not None:
+            _check_shim_lints(root_manifest, shim_manifest, found)
+        _check_inventory(shim, root, _check_shim_sources(shim, scanned_dirs, found), found)
+
+    for member, directory in directories.items():
         if member == SHIM:
             continue
-        if _contains_unsafe_code_lint(_toml(manifest_path).get("lints", {})):
+        manifest = _toml(root, directory / "Cargo.toml", found)
+        if manifest is not None and _contains_unsafe_code_lint(manifest.get("lints", {})):
             found.append(f"{member}/Cargo.toml: non-shim crate configures unsafe_code")
-        for source in _rust_files(manifest_path.parent):
-            code = code_only(source.read_text(encoding="utf-8", errors="replace"))
-            if UNSAFE_TOKEN.search(code):
-                found.append(
-                    f"{source.relative_to(root).as_posix()}: unsafe is reserved for {SHIM}/src/ffi"
-                )
-
-    actual_blocks: dict[tuple[str, int], UnsafeBlock] = {}
-    for source in _rust_files(shim / "src"):
-        relative = source.relative_to(shim).as_posix()
-        source_text = source.read_text(encoding="utf-8", errors="replace")
-        code = code_only(source_text)
-        if not _has_windows_cfg(source_text):
-            found.append(f"{SHIM}/{relative}: must start with #![cfg(windows)]")
-        is_ffi = relative.startswith("src/ffi/")
-        if not is_ffi and not _has_forbid_unsafe(source_text):
-            found.append(f"{SHIM}/{relative}: non-ffi module must forbid unsafe_code")
-        blocks = _unsafe_blocks(relative, source_text, code)
-        block_offsets = {block.offset for block in blocks}
-        for match in UNSAFE_TOKEN.finditer(code):
-            if match.start() not in block_offsets:
-                found.append(f"{SHIM}/{relative}: unsafe must be an explicit block in src/ffi")
-        if not is_ffi and blocks:
-            found.append(f"{SHIM}/{relative}: unsafe blocks belong only in src/ffi")
-        for block in blocks:
-            if not _has_safety_comment(source_text, block):
-                found.append(f"{SHIM}/{relative}:{block.line}: unsafe block lacks // SAFETY:")
-            actual_blocks[(block.file, block.line)] = block
-
-    records: dict[tuple[str, int], dict[str, object]] = {}
-    for parsed in _inventory_blocks(shim, found):
-        for key, record in parsed.items():
-            if key in records:
-                found.append(f"{SHIM}/{INVENTORY}: duplicate record for {key[0]}:{key[1]}")
-            records[key] = record
-    for key in sorted(actual_blocks):
-        if key not in records:
-            found.append(f"{SHIM}/{INVENTORY}: missing record for {key[0]}:{key[1]}")
-    for key, record in sorted(records.items()):
-        if key not in actual_blocks:
-            found.append(f"{SHIM}/{INVENTORY}: stale record for {key[0]}:{key[1]}")
-            continue
-        hosted_test = record["hosted_test"]
-        if isinstance(hosted_test, str) and not _hosted_test_exists(shim, hosted_test):
-            found.append(
-                f"{SHIM}/{INVENTORY}: hosted test {hosted_test} for {key[0]}:{key[1]} does not exist"
-            )
-    return found
+        _check_member_sources(root, directory, scanned_dirs, found)
+    return sorted(set(found))
 
 
 def main() -> None:

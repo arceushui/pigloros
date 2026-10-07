@@ -1,5 +1,4 @@
-# Each explicit unsafe block in src/ffi is recorded here before it is merged.
-# The policy checker requires its source location, operation, invariant and a
-# hosted test function that exercises the block. The initial shim has no FFI
-# block yet, so this inventory is intentionally empty. Future entries use
-# `[[block]]`; leave this file table-free until the first block exists.
+# One `[[block]]` record per explicit unsafe block in src/ffi, with `file`,
+# `line`, `function`, `operation`, `invariant` and `hosted_test`. The rules and
+# their enforcement live in scripts/check_owner_bridge_unsafe_policy.py.
+# No FFI unsafe block exists yet, so there are no records.
