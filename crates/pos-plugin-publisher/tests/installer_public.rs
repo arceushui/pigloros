@@ -519,7 +519,7 @@ fn activation(timeline: TimelineId, tag: u8) -> ActivationEventInputV1 {
 // The world: keys, store, policy, and a provisioned spy registry
 // ---------------------------------------------------------------------------
 
-fn key_bytes(material: &SigningKeyMaterial) -> [u8; 32] {
+const fn key_bytes(material: &SigningKeyMaterial) -> [u8; 32] {
     *material.public_verification_key().as_bytes()
 }
 
@@ -1063,7 +1063,8 @@ fn a_release_with_a_bad_signature_is_refused_before_the_registry() -> TestResult
 #[test]
 fn a_release_signed_by_an_unlisted_key_is_refused_before_the_registry() -> TestResult {
     // PTR1 lists a different key for the publisher's epoch 1 than the one that signed.
-    let mut world = World::build(Some([0x5a; 32]), true)?;
+    let listed = SigningKey::from_bytes(&[0x5a; 32]).verifying_key().to_bytes();
+    let mut world = World::build(Some(listed), true)?;
     let published = world.publish(Shape::first())?;
     let material = world.material()?;
     assert_refused_before_registry(
