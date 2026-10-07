@@ -1259,6 +1259,6 @@ fn bridge_error_messages_are_stable_and_secret_free() {
     );
     assert_eq!(
         PluginFloorErrorV1::Rollback(PluginFloorKindV1::Root).to_string(),
-        "Root candidate is below the retained floor"
+        "PTR1 candidate is below the retained floor"
     );
 }

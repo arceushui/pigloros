@@ -33,7 +33,6 @@ pub const OFFLINE_VALID_THROUGH_BYTES_V1: usize = 20;
 
 const REVOKED_KEY_DOMAIN: &[u8] = b"pigloros/plugin-revoked-key-id/v1\0";
 const PUBLISHER_KEY_ROLE: u64 = 3;
-const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 const SECONDS_PER_DAY: i64 = 86_400;
 const DAYS_FROM_CIVIL_EPOCH_OFFSET: i64 = 719_468;
 const DAYS_PER_ERA: i64 = 146_097;
@@ -68,6 +67,9 @@ pub enum PluginTrustBridgeErrorV1 {
     #[error("TPS1 epoch differs from the terminal PRV1 epoch")]
     EpochMismatch,
     /// The evidence was bound to a UTC second other than the trusted second.
+    ///
+    /// This check is an inference from revision 3's "trusted UTC second fixed
+    /// for the entire transaction", not an explicit rule of the amendment.
     #[error("evidence UTC second differs from the trusted UTC second")]
     EvaluationUtcMismatch,
     /// `offline_valid_through` is not exact 20-byte real Gregorian UTC text.
@@ -121,6 +123,8 @@ impl PluginTrustPolicyAnchorV1 {
         operator_role: &str,
         genesis_tps1_digest: [u8; 32],
     ) -> Result<Self, PluginTrustBridgeErrorV1> {
+        // The error is closed and secret-free, so the cause is dropped. The scope is stored
+        // again below because the pos-crypto anchor exposes no getter.
         let root_anchor = TrustedPluginRootAnchorV1::new(scope, ptr1_genesis_digest)
             .map_err(|_| PluginTrustBridgeErrorV1::InvalidAnchorScope)?;
         if operator_role != PLUGIN_OPERATOR_ROLE_V1 {
@@ -385,11 +389,9 @@ pub fn plugin_revoked_key_id_v1(owner: &OwnerIdV1, epoch: u64, public_key: [u8; 
     let mut preimage = REVOKED_KEY_DOMAIN.to_vec();
     push_cbor_head(&mut preimage, CBOR_MAJOR_ARRAY, 4);
     let owner_text = owner.as_str().as_bytes();
-    push_cbor_head(
-        &mut preimage,
-        CBOR_MAJOR_TEXT,
-        u64::try_from(owner_text.len()).unwrap_or(u64::MAX),
-    );
+    // Counting avoids a fallible `usize` to `u64` conversion; owners are at most 128 bytes.
+    let owner_length = owner_text.iter().map(|_| 1_u64).sum::<u64>();
+    push_cbor_head(&mut preimage, CBOR_MAJOR_TEXT, owner_length);
     preimage.extend_from_slice(owner_text);
     push_cbor_head(&mut preimage, CBOR_MAJOR_UNSIGNED, PUBLISHER_KEY_ROLE);
     push_cbor_head(&mut preimage, CBOR_MAJOR_UNSIGNED, epoch);
@@ -402,13 +404,7 @@ pub fn plugin_revoked_key_id_v1(owner: &OwnerIdV1, epoch: u64, public_key: [u8; 
 }
 
 fn prefixed_hex(prefix: &str, bytes: &[u8; 32]) -> String {
-    let mut text = String::with_capacity(PLUGIN_TPS1_BRIDGE_ID_BYTES_V1);
-    text.push_str(prefix);
-    for byte in bytes {
-        text.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
-        text.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
-    }
-    text
+    format!("{prefix}{}", crate::hex_digest(bytes))
 }
 
 /// Append the shortest deterministic CBOR head for `major` and `value`.
@@ -433,6 +429,9 @@ fn push_cbor_head(out: &mut Vec<u8>, major: u8, value: u64) {
 }
 
 /// Enforce TPS1's global caps on the complete entry totals.
+///
+/// The three totals are positional because slice 2 is the only consumer and passes them
+/// in TPS1 field order (roots, revoked key IDs, revoked artifact digests).
 ///
 /// Totals include Plugin entries plus every retained non-Plugin entry. The
 /// bridge reserves no hidden capacity and never drops, compresses, or
@@ -566,6 +565,15 @@ pub enum PluginFloorKindV1 {
     Revocation,
 }
 
+impl std::fmt::Display for PluginFloorKindV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Root => "PTR1",
+            Self::Revocation => "PRV1",
+        })
+    }
+}
+
 /// Closed failures of the PTR1/PRV1 floor transition.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum PluginFloorErrorV1 {
@@ -573,14 +581,14 @@ pub enum PluginFloorErrorV1 {
     #[error("retained Plugin trust floor state is partial")]
     PartialFloorState,
     /// The candidate coordinate is below the retained floor.
-    #[error("{0:?} candidate is below the retained floor")]
+    #[error("{0} candidate is below the retained floor")]
     Rollback(PluginFloorKindV1),
     /// The candidate forks the retained digest at the same or a retained coordinate.
-    #[error("{0:?} candidate forks the retained floor")]
+    #[error("{0} candidate forks the retained floor")]
     Fork(PluginFloorKindV1),
     /// The authenticated history lacks, duplicates, or misorders the retained pair
     /// or does not terminate at the candidate.
-    #[error("{0:?} history does not continue the retained floor")]
+    #[error("{0} history does not continue the retained floor")]
     Discontinuity(PluginFloorKindV1),
 }
 
