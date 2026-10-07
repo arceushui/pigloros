@@ -4,14 +4,13 @@ use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
     authenticate_plugin_tps1_v1, check_plugin_tps1_artifact_denial_v1,
-    check_plugin_tps1_genesis_v1, check_plugin_tps1_global_caps_v1,
-    check_plugin_tps1_successor_v1, parse_offline_valid_through_v1,
-    plan_plugin_floor_transition_v1, plugin_floor_transition_v1, plugin_revoked_key_id_v1,
-    plugin_root_key_id_v1, verify_plugin_tps1_policy_v1, AuthenticatedPluginTps1V1,
-    PluginFloorErrorV1, PluginFloorKindV1, PluginFloorPlanV1, PluginFloorStateV1,
-    PluginFloorTransitionV1, PluginTrustBridgeErrorV1, PluginTrustPolicyAnchorV1,
-    TrustPolicyRootV1, TrustPolicySnapshotV1, OFFLINE_VALID_THROUGH_BYTES_V1,
-    PLUGIN_OPERATOR_ROLE_V1, PLUGIN_TPS1_BRIDGE_ID_BYTES_V1,
+    check_plugin_tps1_genesis_v1, check_plugin_tps1_global_caps_v1, check_plugin_tps1_successor_v1,
+    parse_offline_valid_through_v1, plan_plugin_floor_transition_v1, plugin_floor_transition_v1,
+    plugin_revoked_key_id_v1, plugin_root_key_id_v1, verify_plugin_tps1_policy_v1,
+    AuthenticatedPluginTps1V1, PluginFloorErrorV1, PluginFloorKindV1, PluginFloorPlanV1,
+    PluginFloorStateV1, PluginFloorTransitionV1, PluginTrustBridgeErrorV1,
+    PluginTrustPolicyAnchorV1, TrustPolicyRootV1, TrustPolicySnapshotV1,
+    OFFLINE_VALID_THROUGH_BYTES_V1, PLUGIN_OPERATOR_ROLE_V1, PLUGIN_TPS1_BRIDGE_ID_BYTES_V1,
 };
 use pos_core::OwnerIdV1;
 use pos_crypto::plugin_trust::{
@@ -932,9 +931,11 @@ fn bridge(
     tps1: &[u8],
     evidence: &VerifiedPluginTrustEvidenceV1,
 ) -> TestResult<Result<(), PluginTrustBridgeErrorV1>> {
-    Ok(authenticate_plugin_tps1_v1(&operator_anchor()?, tps1).and_then(|authenticated| {
-        verify_plugin_tps1_policy_v1(&authenticated, evidence, EVALUATION_UTC, EVALUATION_TICK)
-    }))
+    Ok(
+        authenticate_plugin_tps1_v1(&operator_anchor()?, tps1).and_then(|authenticated| {
+            verify_plugin_tps1_policy_v1(&authenticated, evidence, EVALUATION_UTC, EVALUATION_TICK)
+        }),
+    )
 }
 
 fn other_revocation_evidence() -> TestResult<(VerifiedPluginTrustEvidenceV1, String)> {
@@ -1003,9 +1004,8 @@ fn bridge_checks_scope_epoch_trusted_utc_and_operator_signature() -> TestResult 
         );
     }
     let authenticated = authed(good)?;
-    let run = |utc: i64, tick: u64| {
-        verify_plugin_tps1_policy_v1(&authenticated, &evidence, utc, tick)
-    };
+    let run =
+        |utc: i64, tick: u64| verify_plugin_tps1_policy_v1(&authenticated, &evidence, utc, tick);
     assert_eq!(run(50, 5), Ok(()));
     for utc in [49, 51] {
         assert_eq!(
@@ -1226,13 +1226,20 @@ fn artifact_denial_check_rejects_every_release_digest_the_tps1_lists() -> TestRe
     let authorization = evidence.authorize_release(&good_manifest()?)?;
     let denied = Err(PluginTrustBridgeErrorV1::TpsArtifactDenied);
     for digest in [[0x11; 32], [0x22; 32], [0x30; 32], [0x33; 32]] {
-        let tps1 = authed(base_snapshot(Vec::new(), vec![[0x01; 32], digest, [0xee; 32]]))?;
+        let tps1 = authed(base_snapshot(
+            Vec::new(),
+            vec![[0x01; 32], digest, [0xee; 32]],
+        ))?;
         assert_eq!(
             check_plugin_tps1_artifact_denial_v1(&tps1, &authorization),
             denied
         );
     }
-    for allowed in [Vec::new(), vec![[0x44; 32]], vec![[0x10; 32], [0x31; 32], [0xff; 32]]] {
+    for allowed in [
+        Vec::new(),
+        vec![[0x44; 32]],
+        vec![[0x10; 32], [0x31; 32], [0xff; 32]],
+    ] {
         let tps1 = authed(base_snapshot(Vec::new(), allowed))?;
         assert_eq!(
             check_plugin_tps1_artifact_denial_v1(&tps1, &authorization),
@@ -1256,18 +1263,27 @@ fn genesis_check_requires_epoch_one_null_predecessor_and_pinned_digest() -> Test
     let pinned = |digest: [u8; 32]| {
         PluginTrustPolicyAnchorV1::new("scope", [1; 32], operator, PLUGIN_OPERATOR_ROLE_V1, digest)
     };
-    assert_eq!(check_plugin_tps1_genesis_v1(&pinned(genesis.digest())?, &genesis), Ok(()));
+    assert_eq!(
+        check_plugin_tps1_genesis_v1(&pinned(genesis.digest())?, &genesis),
+        Ok(())
+    );
     let invalid = Err(PluginTrustBridgeErrorV1::InvalidGenesis);
     let mut other_digest = genesis.digest();
     other_digest[31] ^= 1;
-    assert_eq!(check_plugin_tps1_genesis_v1(&pinned(other_digest)?, &genesis), invalid);
+    assert_eq!(
+        check_plugin_tps1_genesis_v1(&pinned(other_digest)?, &genesis),
+        invalid
+    );
     for later in [
         successor_snapshot(2, None),
         successor_snapshot(1, Some([0x22; 32])),
         successor_snapshot(2, Some(genesis.digest())),
     ] {
         let later = authed(later)?;
-        assert_eq!(check_plugin_tps1_genesis_v1(&pinned(later.digest())?, &later), invalid);
+        assert_eq!(
+            check_plugin_tps1_genesis_v1(&pinned(later.digest())?, &later),
+            invalid
+        );
     }
     Ok(())
 }
@@ -1276,7 +1292,11 @@ fn genesis_check_requires_epoch_one_null_predecessor_and_pinned_digest() -> Test
 fn successor_check_requires_greater_epoch_and_the_exact_predecessor() -> TestResult {
     let retained = authed(successor_snapshot(3, None))?;
     let check = |candidate: TrustPolicySnapshotV1| -> TestResult<_> {
-        Ok(check_plugin_tps1_successor_v1(3, retained.digest(), &authed(candidate)?))
+        Ok(check_plugin_tps1_successor_v1(
+            3,
+            retained.digest(),
+            &authed(candidate)?,
+        ))
     };
     let previous = Some(retained.digest());
     assert_eq!(check(successor_snapshot(4, previous))?, Ok(()));
@@ -1287,10 +1307,16 @@ fn successor_check_requires_greater_epoch_and_the_exact_predecessor() -> TestRes
     assert_eq!(check(successor_snapshot(3, Some([0x22; 32])))?, stale);
     let discontinuity = Err(PluginTrustBridgeErrorV1::SnapshotDiscontinuity);
     assert_eq!(check(successor_snapshot(4, None))?, discontinuity);
-    assert_eq!(check(successor_snapshot(4, Some([0x22; 32])))?, discontinuity);
+    assert_eq!(
+        check(successor_snapshot(4, Some([0x22; 32])))?,
+        discontinuity
+    );
     let mut off_by_one = retained.digest();
     off_by_one[0] ^= 1;
-    assert_eq!(check(successor_snapshot(4, Some(off_by_one)))?, discontinuity);
+    assert_eq!(
+        check(successor_snapshot(4, Some(off_by_one)))?,
+        discontinuity
+    );
     Ok(())
 }
 
