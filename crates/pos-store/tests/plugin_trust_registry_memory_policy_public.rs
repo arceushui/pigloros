@@ -23,11 +23,11 @@ use pos_store::plugin_trust_registry::{
     PolicyAdvanceKindV1,
 };
 
-fn rollback_error(kind: PluginFloorKindV1) -> RegistryError {
+const fn rollback_error(kind: PluginFloorKindV1) -> RegistryError {
     RegistryError::Floor(PluginFloorErrorV1::Rollback(kind))
 }
 
-fn fork_error(kind: PluginFloorKindV1) -> RegistryError {
+const fn fork_error(kind: PluginFloorKindV1) -> RegistryError {
     RegistryError::Floor(PluginFloorErrorV1::Fork(kind))
 }
 

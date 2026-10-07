@@ -94,7 +94,7 @@ impl PolicyWriteV1 {
         policy.highest_trusted_utc_second = Some(self.utc);
     }
 
-    fn row(&self, row_seq: u64, body: PluginTrustLedgerBodyV1) -> PluginTrustLedgerRowV1 {
+    const fn row(&self, row_seq: u64, body: PluginTrustLedgerBodyV1) -> PluginTrustLedgerRowV1 {
         PluginTrustLedgerRowV1 {
             row_seq,
             tps1_digest: self.tps1.digest(),
@@ -214,7 +214,7 @@ fn check_floors(checked: &CheckedPolicyV1, input: &PolicyInputV1<'_>) -> Registr
     Ok(())
 }
 
-fn policy_write(tps1: AuthenticatedPluginTps1V1, input: &PolicyInputV1<'_>) -> PolicyWriteV1 {
+const fn policy_write(tps1: AuthenticatedPluginTps1V1, input: &PolicyInputV1<'_>) -> PolicyWriteV1 {
     PolicyWriteV1 {
         tps1,
         root: input.evidence.terminal_root(),

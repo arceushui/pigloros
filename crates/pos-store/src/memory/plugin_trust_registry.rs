@@ -74,7 +74,7 @@ impl MemoryScopeV1 {
         self.ledger.push(writes.row);
     }
 
-    fn raise_utc(&mut self, utc: i64) {
+    const fn raise_utc(&mut self, utc: i64) {
         self.retained.policy.highest_trusted_utc_second = Some(utc);
     }
 

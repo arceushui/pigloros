@@ -535,7 +535,7 @@ impl PluginTrustLedgerBodyV1 {
         }
     }
 
-    fn coordinates(&self) -> Option<(i64, u64)> {
+    const fn coordinates(&self) -> Option<(i64, u64)> {
         match self {
             Self::Provision => None,
             Self::Advance { utc, tick } => Some((*utc, *tick)),

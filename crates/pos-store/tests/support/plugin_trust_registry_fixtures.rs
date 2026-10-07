@@ -71,6 +71,8 @@ fn encode(value: &Value) -> TestResult<Vec<u8>> {
     Ok(encoded)
 }
 
+/// BLAKE3-256 of `bytes`.
+#[must_use]
 pub fn digest(bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }
@@ -83,10 +85,14 @@ fn root_key_id(public: [u8; 32]) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
+/// The operator signing key every fixture TPS1 uses.
+#[must_use]
 pub fn operator_signer() -> SigningKey {
     SigningKey::from_bytes(&[0x11; 32])
 }
 
+/// The pinned operator verification key.
+#[must_use]
 pub fn operator_public() -> [u8; 32] {
     operator_signer().verifying_key().to_bytes()
 }
@@ -100,6 +106,7 @@ fn root_public() -> [u8; 32] {
 }
 
 /// The public key of the `publisher` owner at key epoch 1 or 2.
+#[must_use]
 pub fn publisher_public(epoch: u64) -> [u8; 32] {
     let seed = if epoch == 1 { 8 } else { 10 };
     SigningKey::from_bytes(&[seed; 32])
@@ -162,6 +169,7 @@ impl Default for Spec {
 
 impl Spec {
     /// The same chain evaluated at other coordinates.
+    #[must_use]
     pub fn at(&self, utc: i64, tick: u64) -> Self {
         Self {
             utc,
@@ -292,6 +300,9 @@ pub struct Chain {
 ///
 /// PRV1 record `k` names the PTR1 of version `min(k, roots)`: a root digest never moves to
 /// an earlier root, and the terminal PRV1 names the terminal PTR1.
+///
+/// # Errors
+/// Returns the fixture construction or registry error.
 pub fn chain(scope: &str, spec: &Spec) -> TestResult<Chain> {
     let mut roots: Vec<Vec<u8>> = Vec::new();
     for version in 1..=spec.roots {
@@ -317,6 +328,9 @@ pub fn chain(scope: &str, spec: &Spec) -> TestResult<Chain> {
 }
 
 /// Verify the chain of `spec` at its own coordinates.
+///
+/// # Errors
+/// Returns the fixture construction or registry error.
 pub fn evidence(scope: &str, spec: &Spec) -> TestResult<VerifiedPluginTrustEvidenceV1> {
     let built = chain(scope, spec)?;
     let genesis = built.roots.first().ok_or("no genesis")?;
@@ -362,6 +376,7 @@ impl Default for TpsSpec {
 
 impl TpsSpec {
     /// A TPS1 that names `previous` as its predecessor.
+    #[must_use]
     pub fn after(previous: [u8; 32]) -> Self {
         Self {
             previous: Some(previous),
@@ -371,6 +386,9 @@ impl TpsSpec {
 }
 
 /// The operator-signed TPS1 that exactly maps `evidence`.
+///
+/// # Errors
+/// Returns the fixture construction or registry error.
 pub fn tps1(
     scope: &str,
     evidence: &VerifiedPluginTrustEvidenceV1,
@@ -439,18 +457,28 @@ pub struct Material {
 }
 
 impl Material {
+    /// A fixture value.
+    #[must_use]
     pub fn tps1_digest(&self) -> [u8; 32] {
         digest(&self.tps1)
     }
 
-    pub fn terminal_root(&self) -> Pair {
+    /// A fixture value.
+    #[must_use]
+    pub const fn terminal_root(&self) -> Pair {
         self.evidence.terminal_root()
     }
 
-    pub fn terminal_revocation(&self) -> Pair {
+    /// A fixture value.
+    #[must_use]
+    pub const fn terminal_revocation(&self) -> Pair {
         self.evidence.terminal_revocation()
     }
 
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn trusted(&self) -> TestResult<TrustedUtcSecondV1> {
         trusted(self.utc)
     }
@@ -465,6 +493,10 @@ pub struct Env {
 }
 
 impl Env {
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn new(scope: &str) -> TestResult<Self> {
         let genesis_tps1 = tps1(
             scope,
@@ -493,6 +525,9 @@ impl Env {
 
     /// Anchors for this scope that differ from the real one in exactly one field each:
     /// the PTR1 genesis digest, the operator key, and the genesis TPS1 digest.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn anchors_with_one_changed_field(&self) -> TestResult<Vec<PluginTrustPolicyAnchorV1>> {
         let foreign_operator = SigningKey::from_bytes(&[0x12; 32])
             .verifying_key()
@@ -516,6 +551,9 @@ impl Env {
     }
 
     /// Evidence for `spec` and the TPS1 that maps it.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn material(&self, spec: &Spec, tps: &TpsSpec) -> TestResult<Material> {
         let evidence = evidence(&self.scope, spec)?;
         let tps1 = tps1(&self.scope, &evidence, tps)?;
@@ -528,6 +566,9 @@ impl Env {
     }
 
     /// The default genesis material: PTR1 version 1, PRV1 epoch 1, no denials.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn genesis(&self) -> TestResult<Material> {
         self.material(&Spec::default(), &TpsSpec::default())
     }
@@ -545,6 +586,8 @@ pub struct ManifestSpec {
 }
 
 impl ManifestSpec {
+    /// A fixture value.
+    #[must_use]
     pub fn new(plugin_id: &str, pmf1: u8, release: u8, previous: Option<u8>) -> Self {
         Self {
             plugin_id: plugin_id.to_owned(),
@@ -556,6 +599,10 @@ impl ManifestSpec {
         }
     }
 
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn projection(&self) -> TestResult<ValidatedPluginManifestProjectionV1> {
         Ok(ValidatedPluginManifestProjectionV1::from(
             PluginManifestProjectionFixtureV1 {
@@ -573,16 +620,23 @@ impl ManifestSpec {
         ))
     }
 
-    pub fn pmf1_digest(&self) -> [u8; 32] {
+    /// A fixture value.
+    #[must_use]
+    pub const fn pmf1_digest(&self) -> [u8; 32] {
         [self.pmf1; 32]
     }
 
-    pub fn release_digest(&self) -> [u8; 32] {
+    /// A fixture value.
+    #[must_use]
+    pub const fn release_digest(&self) -> [u8; 32] {
         [self.release; 32]
     }
 }
 
 /// One trusted UTC second sampled through the sealed scripted wall source.
+///
+/// # Errors
+/// Returns the fixture construction or registry error.
 pub fn trusted(second: i64) -> TestResult<TrustedUtcSecondV1> {
     let micros = u64::try_from(second)? * 1_000_000;
     Ok(TrustedUtcSecondV1::from_source(
@@ -591,6 +645,7 @@ pub fn trusted(second: i64) -> TestResult<TrustedUtcSecondV1> {
 }
 
 /// An activation Event whose payload is `tag`; entity and correlation differ per call.
+#[must_use]
 pub fn activation(timeline: TimelineId, tag: u8) -> ActivationEventInputV1 {
     ActivationEventInputV1 {
         timeline,
@@ -603,6 +658,9 @@ pub fn activation(timeline: TimelineId, tag: u8) -> ActivationEventInputV1 {
 }
 
 /// A Memory store with an open erasure gate and one activation Timeline.
+///
+/// # Errors
+/// Returns the fixture construction or registry error.
 pub fn bound_store() -> TestResult<(MemoryStore, TimelineId)> {
     let mut store = MemoryStore::new();
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
@@ -611,21 +669,25 @@ pub fn bound_store() -> TestResult<(MemoryStore, TimelineId)> {
 }
 
 /// The first release of `plugin-a`.
+#[must_use]
 pub fn release_one() -> ManifestSpec {
     ManifestSpec::new("plugin-a", 0x01, 0x11, None)
 }
 
 /// The direct successor of [`release_one`].
+#[must_use]
 pub fn release_two() -> ManifestSpec {
     ManifestSpec::new("plugin-a", 0x03, 0x12, Some(0x11))
 }
 
 /// The direct successor of [`release_two`].
+#[must_use]
 pub fn release_three() -> ManifestSpec {
     ManifestSpec::new("plugin-a", 0x05, 0x13, Some(0x12))
 }
 
 /// A chain of `roots` PTR1 records and `epochs` PRV1 records at the default coordinates.
+#[must_use]
 pub fn spec(roots: u64, epochs: u64) -> Spec {
     Spec {
         roots,
@@ -635,6 +697,7 @@ pub fn spec(roots: u64, epochs: u64) -> Spec {
 }
 
 /// A TPS1 that names `previous` as its predecessor.
+#[must_use]
 pub fn tps_after(previous: &Material) -> TpsSpec {
     TpsSpec::after(previous.tps1_digest())
 }
@@ -657,6 +720,10 @@ pub struct Harness {
 }
 
 impl Harness {
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn new() -> TestResult<Self> {
         let (mut store, timeline) = bound_store()?;
         let env = Env::new("scope")?;
@@ -669,11 +736,18 @@ impl Harness {
     }
 
     /// The default policy (PTR1 1, PRV1 1) evaluated at other coordinates.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn same_policy(&self, utc: i64, tick: u64) -> TestResult<Material> {
         self.env
             .material(&Spec::default().at(utc, tick), &TpsSpec::default())
     }
 
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn admit_with(
         &mut self,
         material: &Material,
@@ -691,6 +765,10 @@ impl Harness {
         ))
     }
 
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn admit(
         &mut self,
         material: &Material,
@@ -701,6 +779,10 @@ impl Harness {
         self.admit_with(material, manifest, input)
     }
 
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn advance(
         &mut self,
         material: &Material,
@@ -714,6 +796,10 @@ impl Harness {
         ))
     }
 
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn rollback_with(
         &mut self,
         material: &Material,
@@ -731,6 +817,10 @@ impl Harness {
         ))
     }
 
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn rollback(
         &mut self,
         material: &Material,
@@ -741,6 +831,10 @@ impl Harness {
         self.rollback_with(material, target, input)
     }
 
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn snapshot(&self, manifests: &[&ManifestSpec]) -> TestResult<Snapshot> {
         let scope = self.env.scope.as_str();
         let mut decisions = Vec::new();
@@ -761,18 +855,34 @@ impl Harness {
         })
     }
 
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn events(&self) -> TestResult<Vec<Event>> {
         Ok(self.store.read(self.timeline, SeqRange::all())?)
     }
 
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn policy(&self) -> TestResult<RetainedPolicyStateV1> {
         Ok(self.store.retained_policy_state(&self.env.scope)?)
     }
 
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn ledger(&self) -> TestResult<Vec<PluginTrustLedgerRowV1>> {
         Ok(self.store.ledger(&self.env.scope)?)
     }
 
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
     pub fn active(&self, plugin_id: &str) -> TestResult<ActiveReleaseV1> {
         self.store
             .active_release(&self.env.scope, plugin_id)?
@@ -780,6 +890,12 @@ impl Harness {
     }
 
     /// Admit `manifest` and assert that exactly `expected` came back with nothing changed.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
+    ///
+    /// # Panics
+    /// Panics when the assertion fails.
     pub fn assert_admit_denied(
         &mut self,
         material: &Material,
@@ -793,6 +909,12 @@ impl Harness {
     }
 
     /// Roll back to `target` and assert that exactly `expected` came back with nothing changed.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
+    ///
+    /// # Panics
+    /// Panics when the assertion fails.
     pub fn assert_rollback_denied(
         &mut self,
         material: &Material,
@@ -806,6 +928,12 @@ impl Harness {
     }
 
     /// Advance the policy and assert that exactly `expected` came back with nothing changed.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
+    ///
+    /// # Panics
+    /// Panics when the assertion fails.
     pub fn assert_advance_denied(
         &mut self,
         material: &Material,
