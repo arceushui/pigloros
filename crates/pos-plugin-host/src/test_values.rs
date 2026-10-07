@@ -59,7 +59,11 @@ pub(crate) fn negotiate(
 /// engine's runtime.
 pub(crate) fn execution() -> PinnedExecutionV1 {
     let runtime = ok(pinned_runtime());
-    let negotiated = negotiate(&release(0, &[]), &CommunityPluginHostAbiV1::v1(), Some(runtime));
+    let negotiated = negotiate(
+        &release(0, &[]),
+        &CommunityPluginHostAbiV1::v1(),
+        Some(runtime),
+    );
     ok(PinnedExecutionV1::new(negotiated))
 }
 

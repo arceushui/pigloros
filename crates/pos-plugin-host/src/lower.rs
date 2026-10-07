@@ -3,7 +3,6 @@
 use pos_runtime::community_plugin_host::{ArtifactRefV1, PluginInvocationV1};
 use wasmtime::component::Val;
 
-
 /// The Canonical ABI value of `invocation` with `kind`.
 pub(crate) fn invocation_val(invocation: &PluginInvocationV1, kind: &str) -> Val {
     record(vec![

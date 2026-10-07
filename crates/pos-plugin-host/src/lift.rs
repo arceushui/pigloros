@@ -11,7 +11,6 @@ use pos_runtime::community_plugin_host::{
 };
 use wasmtime::component::Val;
 
-
 /// A lifted value or the closed error that ends the invocation.
 pub(crate) type Lifted<T> = Result<T, CommunityPluginHostErrorV1>;
 

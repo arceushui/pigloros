@@ -93,14 +93,20 @@ mod tests {
     use pos_runtime::community_plugin_host::CommunityPluginHostAbiV1;
 
     use super::*;
-    use crate::test_values::{digest_val, negotiate, numbered_digest, ok, record, release, text_val};
+    use crate::test_values::{
+        digest_val, negotiate, numbered_digest, ok, record, release, text_val,
+    };
 
     fn texts(items: &[&str]) -> Val {
         Val::List(items.iter().map(|item| text_val(item)).collect())
     }
 
     fn negotiated() -> NegotiatedCommunityPluginV1 {
-        let host = ok(CommunityPluginHostAbiV1::new(0, 0, vec!["feature.a".to_owned()]));
+        let host = ok(CommunityPluginHostAbiV1::new(
+            0,
+            0,
+            vec!["feature.a".to_owned()],
+        ));
         negotiate(&release(3, &["feature.a"]), &host, None)
     }
 

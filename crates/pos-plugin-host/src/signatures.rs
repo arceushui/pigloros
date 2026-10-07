@@ -56,9 +56,12 @@ struct Signature {
 /// `host-v1`-only linker, which refuses anything it does not define.
 pub(crate) fn imported_functions_are_exact(engine: &Engine, component: &Component) -> bool {
     let component_type = component.component_type();
-    component_type
+    // Bound first so the iterator, which borrows `component_type`, is dropped
+    // before it does.
+    let exact = component_type
         .imports(engine)
-        .all(|(interface, import)| item_is_exact(engine, interface, &import.ty))
+        .all(|(interface, import)| item_is_exact(engine, interface, &import.ty));
+    exact
 }
 
 fn item_is_exact(engine: &Engine, interface: &str, item: &ComponentItem) -> bool {
