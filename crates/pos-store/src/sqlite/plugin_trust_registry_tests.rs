@@ -15,7 +15,7 @@ use pos_core::{
     store::{EventStore, SeqRange},
     ErasureContainmentGateV1, ErasureProtectedOperationV1, TimelineId,
 };
-use rusqlite::{functions::FunctionFlags, Connection};
+use rusqlite::{functions::FunctionFlags, limits::Limit, Connection};
 
 use super::seam::{Step, FAULT, LEVEL_AT_COMMIT, RESTORE_PROBE};
 use crate::plugin_trust_registry::{
@@ -943,6 +943,83 @@ fn a_reviewed_object_without_its_tables_is_not_an_unprovisioned_store() -> TestR
     assert_eq!(
         store.provision(&env.anchor, &env.genesis_tps1),
         Err(Error::CorruptState)
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Statement failures: SQLite limits make each class of statement fail for real
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_failing_read_statement_is_storage_failed() -> TestResult {
+    let mut h = Harness::<SqliteStore>::open()?;
+    let genesis = h.env.genesis()?;
+    let one = release_one();
+    h.admit(&genesis, &one, 1)??;
+    // `SELECT *` of the scope, decision, and ledger tables exceeds the column limit; the schema
+    // probe (three columns) and the existence probe (one) still run.
+    h.store.conn.set_limit(Limit::SQLITE_LIMIT_COLUMN, 12)?;
+    assert_eq!(
+        h.store.retained_policy_state("scope"),
+        Err(Error::StorageFailed)
+    );
+    assert_eq!(
+        h.store.retained_release_decision("scope", one.pmf1_digest()),
+        Err(Error::StorageFailed)
+    );
+    assert_eq!(h.store.ledger("scope"), Err(Error::StorageFailed));
+    h.store.conn.set_limit(Limit::SQLITE_LIMIT_COLUMN, 2000)?;
+    assert_eq!(h.ledger()?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn a_failing_write_statement_is_storage_failed() -> TestResult {
+    let mut h = Harness::<SqliteStore>::open()?;
+    let other = Env::new("scope-two")?;
+    // The schema probe binds seven variables; every insert binds more.
+    h.store.conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 7)?;
+    assert_eq!(
+        h.store.provision(&other.anchor, &other.genesis_tps1),
+        Err(Error::StorageFailed)
+    );
+    h.store.conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 32_766)?;
+    assert_eq!(
+        h.store.retained_policy_state("scope-two"),
+        Err(Error::MissingState)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_failing_schema_probe_is_storage_failed_everywhere() -> TestResult {
+    let mut h = Harness::<SqliteStore>::open()?;
+    let genesis = h.env.genesis()?;
+    h.store.conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 6)?;
+    assert_eq!(h.advance(&genesis)?, Err(Error::StorageFailed));
+    assert_eq!(h.store.ledger("scope"), Err(Error::StorageFailed));
+    assert_eq!(
+        h.store.provision(&h.env.anchor, &h.env.genesis_tps1),
+        Err(Error::StorageFailed)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_failing_schema_creation_is_storage_failed_and_leaves_no_tables() -> TestResult {
+    let (mut store, _guard) = SqliteStore::build(Gate::open(), None)?;
+    let env = Env::new("scope")?;
+    // The probe statements are short; every `CREATE TABLE` is longer than the limit.
+    store.conn.set_limit(Limit::SQLITE_LIMIT_SQL_LENGTH, 300)?;
+    assert_eq!(
+        store.provision(&env.anchor, &env.genesis_tps1),
+        Err(Error::StorageFailed)
+    );
+    store.conn.set_limit(Limit::SQLITE_LIMIT_SQL_LENGTH, 1_000_000)?;
+    assert_eq!(
+        store.retained_policy_state("scope"),
+        Err(Error::MissingState)
     );
     Ok(())
 }

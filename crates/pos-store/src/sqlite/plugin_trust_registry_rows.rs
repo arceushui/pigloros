@@ -15,8 +15,12 @@
 //! with the same 64 bits, so every `u64` round-trips and no `CHECK` compares them.
 
 use pos_conformance::PluginTrustPolicyAnchorV1;
-use pos_core::{SchemaVersion, Seq};
-use rusqlite::{named_params, types::FromSql, Connection, ErrorCode, OptionalExtension, Row};
+use pos_core::{EventId, SchemaVersion, Seq, TimelineId};
+use std::cell::Cell;
+
+use rusqlite::{
+    named_params, types::FromSql, Connection, ErrorCode, OptionalExtension, Params, Row,
+};
 
 use super::{parse_event_id, parse_timeline_id};
 use crate::plugin_trust_registry::logic::{PolicyWriteV1, RetainedScopeV1};
@@ -75,43 +79,108 @@ const fn from_sql_u64(value: i64) -> u64 {
     u64::from_ne_bytes(value.to_ne_bytes())
 }
 
-fn column<T: FromSql>(row: &Row<'_>, name: &str) -> RegistryResult<T> {
-    row.get(name).map_err(|error| storage_error(&error))
+
+/// Reads the columns of one row. The first failed read is kept and later reads return
+/// placeholders, so a decoder is straight-line code whose one failure branch is [`Self::finish`].
+pub(super) struct Columns<'a, 'row> {
+    row: &'a Row<'row>,
+    failure: Cell<Option<PluginTrustPolicyRegistryErrorV1>>,
 }
 
-fn unsigned(row: &Row<'_>, name: &str) -> RegistryResult<u64> {
-    column::<i64>(row, name).map(from_sql_u64)
-}
+impl<'a, 'row> Columns<'a, 'row> {
+    pub(super) const fn new(row: &'a Row<'row>) -> Self {
+        Self {
+            row,
+            failure: Cell::new(None),
+        }
+    }
 
-/// A floor pair that must be present.
-fn required_pair(row: &Row<'_>, version: &str, digest: &str) -> RegistryResult<Pair> {
-    Ok((unsigned(row, version)?, column(row, digest)?))
-}
+    pub(super) fn get<T: FromSql + Default>(&self, name: &str) -> T {
+        self.row.get(name).unwrap_or_else(|error| {
+            self.failure.set(Some(storage_error(&error)));
+            T::default()
+        })
+    }
 
-/// A floor pair that is absent or complete; one column without the other is `CorruptState`.
-fn optional_pair(row: &Row<'_>, version: &str, digest: &str) -> RegistryResult<Option<Pair>> {
-    match (
-        column::<Option<i64>>(row, version)?,
-        column::<Option<[u8; 32]>>(row, digest)?,
-    ) {
-        (None, None) => Ok(None),
-        (Some(version), Some(digest)) => Ok(Some((from_sql_u64(version), digest))),
-        _ => Err(PluginTrustPolicyRegistryErrorV1::CorruptState),
+    fn corrupt(&self) {
+        self.failure
+            .set(Some(PluginTrustPolicyRegistryErrorV1::CorruptState));
+    }
+
+    fn unsigned(&self, name: &str) -> u64 {
+        from_sql_u64(self.get(name))
+    }
+
+    /// A floor pair that must be present.
+    fn required_pair(&self, version: &str, digest: &str) -> Pair {
+        (self.unsigned(version), self.get(digest))
+    }
+
+    /// A floor pair that is absent or complete; one column without the other is `CorruptState`.
+    fn optional_pair(&self, version: &str, digest: &str) -> Option<Pair> {
+        match (
+            self.get::<Option<i64>>(version),
+            self.get::<Option<[u8; 32]>>(digest),
+        ) {
+            (None, None) => None,
+            (Some(version), Some(digest)) => Some((from_sql_u64(version), digest)),
+            _ => {
+                self.corrupt();
+                None
+            }
+        }
+    }
+
+    /// `value`, or the first failure.
+    pub(super) fn finish<T>(&self, value: T) -> RegistryResult<T> {
+        self.failure.get().map_or(Ok(value), Err)
     }
 }
 
+/// The one row of `sql`, or `None`.
+fn query_one<T>(
+    connection: &Connection,
+    sql: &str,
+    params: impl Params,
+    decode: impl FnOnce(&Row<'_>) -> RegistryResult<T>,
+) -> RegistryResult<Option<T>> {
+    match connection
+        .query_row(sql, params, |row| Ok(decode(row)))
+        .optional()
+    {
+        Ok(found) => found.transpose(),
+        Err(error) => Err(storage_error(&error)),
+    }
+}
+
+/// Every row of `sql`, decoded.
+pub(super) fn query_many<T>(
+    connection: &Connection,
+    sql: &str,
+    params: impl Params,
+    decode: impl Fn(&Row<'_>) -> RegistryResult<T>,
+) -> RegistryResult<Vec<T>> {
+    let fetched = connection.prepare(sql).and_then(|mut statement| {
+        statement
+            .query_map(params, |row| Ok(decode(row)))
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+    });
+    match fetched {
+        Ok(rows) => rows.into_iter().collect(),
+        Err(error) => Err(storage_error(&error)),
+    }
+}
+
+/// Run one statement that must change exactly one row.
 fn execute_one(
     connection: &Connection,
     sql: &str,
-    params: impl rusqlite::Params,
+    params: impl Params,
 ) -> RegistryResult<()> {
-    let changed = connection
-        .execute(sql, params)
-        .map_err(|error| storage_error(&error))?;
-    if changed == 1 {
-        Ok(())
-    } else {
-        Err(PluginTrustPolicyRegistryErrorV1::StorageFailed)
+    match connection.execute(sql, params) {
+        Ok(1) => Ok(()),
+        Ok(_) => Err(PluginTrustPolicyRegistryErrorV1::StorageFailed),
+        Err(error) => Err(storage_error(&error)),
     }
 }
 
@@ -142,135 +211,151 @@ impl EventColumns {
     }
 }
 
-fn decode_event(row: &Row<'_>) -> RegistryResult<ActivationEventIdentityV1> {
-    let timeline = parse_timeline_id(&column::<String>(row, "event_timeline")?)
-        .or(Err(PluginTrustPolicyRegistryErrorV1::CorruptState))?;
-    let event_id = parse_event_id(&column::<String>(row, "event_id")?)
-        .or(Err(PluginTrustPolicyRegistryErrorV1::CorruptState))?;
-    Ok(ActivationEventIdentityV1 {
+fn decode_event(cols: &Columns<'_, '_>) -> ActivationEventIdentityV1 {
+    let timeline = parse_timeline_id(&cols.get::<String>("event_timeline")).unwrap_or_else(|_| {
+        cols.corrupt();
+        TimelineId::new()
+    });
+    let event_id = parse_event_id(&cols.get::<String>("event_id")).unwrap_or_else(|_| {
+        cols.corrupt();
+        EventId::new()
+    });
+    ActivationEventIdentityV1 {
         timeline,
         event_id,
-        seq: Seq::from_u64(unsigned(row, "event_seq")?),
-        event_type: column(row, "event_type")?,
+        seq: Seq::from_u64(cols.unsigned("event_seq")),
+        event_type: cols.get("event_type"),
         schema_version: SchemaVersion::V1,
-        payload_digest: column(row, "event_payload_digest")?,
-        origin_logical_seq: column::<Option<i64>>(row, "event_origin_logical_seq")?
+        payload_digest: cols.get("event_payload_digest"),
+        origin_logical_seq: cols
+            .get::<Option<i64>>("event_origin_logical_seq")
             .map(|seq| Seq::from_u64(from_sql_u64(seq))),
-    })
+    }
 }
 
 fn decode_scope(scope: &str, row: &Row<'_>) -> RegistryResult<RetainedScopeV1> {
-    let anchor = PluginTrustPolicyAnchorV1::new(
+    let cols = Columns::new(row);
+    let Ok(anchor) = PluginTrustPolicyAnchorV1::new(
         scope,
-        column(row, "anchor_ptr1_genesis_digest")?,
-        column(row, "anchor_operator_key")?,
-        &column::<String>(row, "anchor_operator_role")?,
-        column(row, "anchor_genesis_tps1_digest")?,
-    )
-    .or(Err(PluginTrustPolicyRegistryErrorV1::CorruptState))?;
-    let tps1_digest: [u8; 32] = column(row, "tps1_digest")?;
-    let tps1_bytes: Vec<u8> = column(row, "tps1_bytes")?;
+        cols.get("anchor_ptr1_genesis_digest"),
+        cols.get("anchor_operator_key"),
+        &cols.get::<String>("anchor_operator_role"),
+        cols.get("anchor_genesis_tps1_digest"),
+    ) else {
+        return Err(PluginTrustPolicyRegistryErrorV1::CorruptState);
+    };
+    let tps1_digest: [u8; 32] = cols.get("tps1_digest");
+    let tps1_bytes: Vec<u8> = cols.get("tps1_bytes");
     if *blake3::hash(&tps1_bytes).as_bytes() != tps1_digest {
         return Err(PluginTrustPolicyRegistryErrorV1::CorruptState);
     }
-    Ok(RetainedScopeV1 {
+    cols.finish(RetainedScopeV1 {
         anchor,
         policy: RetainedPolicyStateV1 {
             scope: scope.to_owned(),
-            tps1_epoch: unsigned(row, "tps1_epoch")?,
+            tps1_epoch: cols.unsigned("tps1_epoch"),
             tps1_digest,
-            tps1_effective_position: unsigned(row, "tps1_effective_position")?,
+            tps1_effective_position: cols.unsigned("tps1_effective_position"),
             tps1_bytes,
-            ptr1_floor: optional_pair(row, "ptr1_version", "ptr1_digest")?,
-            prv1_floor: optional_pair(row, "prv1_epoch", "prv1_digest")?,
-            highest_trusted_utc_second: column(row, "highest_trusted_utc")?,
+            ptr1_floor: cols.optional_pair("ptr1_version", "ptr1_digest"),
+            prv1_floor: cols.optional_pair("prv1_epoch", "prv1_digest"),
+            highest_trusted_utc_second: cols.get("highest_trusted_utc"),
         },
     })
 }
 
 /// A decision row. The ledger's `Admission` rows use the same column names, so one decoder
 /// serves both tables.
-fn decode_decision(row: &Row<'_>) -> RegistryResult<RetainedReleaseDecisionV1> {
-    Ok(RetainedReleaseDecisionV1 {
-        scope: column(row, "scope")?,
-        plugin_id: column(row, "plugin_id")?,
-        pmf1_digest: column(row, "pmf1_digest")?,
-        release_digest: column(row, "release_digest")?,
-        previous_release_digest: column(row, "previous_release_digest")?,
-        tps1_digest: column(row, "tps1_digest")?,
-        tps1_epoch: unsigned(row, "tps1_epoch")?,
-        tps1_effective_position: unsigned(row, "tps1_effective_position")?,
-        terminal_root: required_pair(row, "ptr1_version", "ptr1_digest")?,
-        terminal_revocation: required_pair(row, "prv1_epoch", "prv1_digest")?,
-        trusted_utc_second: column(row, "trusted_utc")?,
-        tick: unsigned(row, "tick")?,
-        activation_event: decode_event(row)?,
-    })
+fn decode_decision(cols: &Columns<'_, '_>) -> RetainedReleaseDecisionV1 {
+    RetainedReleaseDecisionV1 {
+        scope: cols.get("scope"),
+        plugin_id: cols.get("plugin_id"),
+        pmf1_digest: cols.get("pmf1_digest"),
+        release_digest: cols.get("release_digest"),
+        previous_release_digest: cols.get("previous_release_digest"),
+        tps1_digest: cols.get("tps1_digest"),
+        tps1_epoch: cols.unsigned("tps1_epoch"),
+        tps1_effective_position: cols.unsigned("tps1_effective_position"),
+        terminal_root: cols.required_pair("ptr1_version", "ptr1_digest"),
+        terminal_revocation: cols.required_pair("prv1_epoch", "prv1_digest"),
+        trusted_utc_second: cols.get("trusted_utc"),
+        tick: cols.unsigned("tick"),
+        activation_event: decode_event(cols),
+    }
 }
 
-fn decode_rollback(row: &Row<'_>) -> RegistryResult<RollbackFactsV1> {
-    Ok(RollbackFactsV1 {
-        scope: column(row, "scope")?,
-        plugin_id: column(row, "plugin_id")?,
-        target_pmf1_digest: column(row, "pmf1_digest")?,
-        target_release_digest: column(row, "release_digest")?,
-        replaced_pmf1_digest: column(row, "previous_active_pmf1_digest")?,
-        tps1_digest: column(row, "tps1_digest")?,
-        tps1_epoch: unsigned(row, "tps1_epoch")?,
-        tps1_effective_position: unsigned(row, "tps1_effective_position")?,
-        terminal_root: required_pair(row, "ptr1_version", "ptr1_digest")?,
-        terminal_revocation: required_pair(row, "prv1_epoch", "prv1_digest")?,
-        trusted_utc_second: column(row, "trusted_utc")?,
-        tick: unsigned(row, "tick")?,
-        activation_event: decode_event(row)?,
-    })
+fn decode_rollback(cols: &Columns<'_, '_>) -> RollbackFactsV1 {
+    RollbackFactsV1 {
+        scope: cols.get("scope"),
+        plugin_id: cols.get("plugin_id"),
+        target_pmf1_digest: cols.get("pmf1_digest"),
+        target_release_digest: cols.get("release_digest"),
+        replaced_pmf1_digest: cols.get("previous_active_pmf1_digest"),
+        tps1_digest: cols.get("tps1_digest"),
+        tps1_epoch: cols.unsigned("tps1_epoch"),
+        tps1_effective_position: cols.unsigned("tps1_effective_position"),
+        terminal_root: cols.required_pair("ptr1_version", "ptr1_digest"),
+        terminal_revocation: cols.required_pair("prv1_epoch", "prv1_digest"),
+        trusted_utc_second: cols.get("trusted_utc"),
+        tick: cols.unsigned("tick"),
+        activation_event: decode_event(cols),
+    }
+}
+
+fn decode_decision_row(row: &Row<'_>) -> RegistryResult<RetainedReleaseDecisionV1> {
+    let cols = Columns::new(row);
+    cols.finish(decode_decision(&cols))
 }
 
 fn decode_active(row: &Row<'_>) -> RegistryResult<ActiveReleaseV1> {
-    Ok(ActiveReleaseV1 {
-        scope: column(row, "scope")?,
-        plugin_id: column(row, "plugin_id")?,
-        pmf1_digest: column(row, "pmf1_digest")?,
-        release_digest: column(row, "release_digest")?,
-        activation_event: decode_event(row)?,
+    let cols = Columns::new(row);
+    cols.finish(ActiveReleaseV1 {
+        scope: cols.get("scope"),
+        plugin_id: cols.get("plugin_id"),
+        pmf1_digest: cols.get("pmf1_digest"),
+        release_digest: cols.get("release_digest"),
+        activation_event: decode_event(&cols),
     })
 }
 
-fn decode_ledger_body(kind: i64, row: &Row<'_>) -> RegistryResult<PluginTrustLedgerBodyV1> {
+fn decode_ledger_body(kind: i64, cols: &Columns<'_, '_>) -> PluginTrustLedgerBodyV1 {
     match kind {
-        KIND_PROVISION => Ok(PluginTrustLedgerBodyV1::Provision),
-        KIND_ADVANCE => Ok(PluginTrustLedgerBodyV1::Advance {
-            utc: column(row, "trusted_utc")?,
-            tick: unsigned(row, "tick")?,
-        }),
-        KIND_ADMISSION => Ok(PluginTrustLedgerBodyV1::Admission {
-            decision: Box::new(decode_decision(row)?),
-            previous_active_pmf1_digest: column(row, "previous_active_pmf1_digest")?,
-        }),
-        KIND_ROLLBACK => Ok(PluginTrustLedgerBodyV1::Rollback(Box::new(
-            decode_rollback(row)?,
-        ))),
-        _ => Err(PluginTrustPolicyRegistryErrorV1::CorruptState),
+        KIND_ADVANCE => PluginTrustLedgerBodyV1::Advance {
+            utc: cols.get("trusted_utc"),
+            tick: cols.unsigned("tick"),
+        },
+        KIND_ADMISSION => PluginTrustLedgerBodyV1::Admission {
+            decision: Box::new(decode_decision(cols)),
+            previous_active_pmf1_digest: cols.get("previous_active_pmf1_digest"),
+        },
+        KIND_ROLLBACK => PluginTrustLedgerBodyV1::Rollback(Box::new(decode_rollback(cols))),
+        other => {
+            if other != KIND_PROVISION {
+                cols.corrupt();
+            }
+            PluginTrustLedgerBodyV1::Provision
+        }
     }
 }
 
 fn decode_ledger(row: &Row<'_>) -> RegistryResult<PluginTrustLedgerRowV1> {
-    let kind: i64 = column(row, "kind")?;
-    let body = decode_ledger_body(kind, row)?;
+    let cols = Columns::new(row);
+    let kind: i64 = cols.get("kind");
+    let body = decode_ledger_body(kind, &cols);
     // A `Provision` row creates no floor; every later row carries both.
     let (ptr1_floor, prv1_floor) = if kind == KIND_PROVISION {
         (None, None)
     } else {
         (
-            Some(required_pair(row, "ptr1_version", "ptr1_digest")?),
-            Some(required_pair(row, "prv1_epoch", "prv1_digest")?),
+            Some(cols.required_pair("ptr1_version", "ptr1_digest")),
+            Some(cols.required_pair("prv1_epoch", "prv1_digest")),
         )
     };
-    Ok(PluginTrustLedgerRowV1 {
-        row_seq: unsigned(row, "row_seq")?,
-        tps1_digest: column(row, "tps1_digest")?,
-        tps1_epoch: unsigned(row, "tps1_epoch")?,
-        tps1_effective_position: unsigned(row, "tps1_effective_position")?,
+    cols.finish(PluginTrustLedgerRowV1 {
+        row_seq: cols.unsigned("row_seq"),
+        tps1_digest: cols.get("tps1_digest"),
+        tps1_epoch: cols.unsigned("tps1_epoch"),
+        tps1_effective_position: cols.unsigned("tps1_effective_position"),
         ptr1_floor,
         prv1_floor,
         body,
@@ -282,26 +367,23 @@ pub(super) fn load_scope(
     connection: &Connection,
     scope: &str,
 ) -> RegistryResult<Option<RetainedScopeV1>> {
-    connection
-        .query_row(
-            "SELECT * FROM plugin_trust_scopes WHERE scope = ?1",
-            [scope],
-            |row| Ok(decode_scope(scope, row)),
-        )
-        .optional()
-        .map_err(|error| storage_error(&error))?
-        .transpose()
+    query_one(
+        connection,
+        "SELECT * FROM plugin_trust_scopes WHERE scope = ?1",
+        [scope],
+        |row| decode_scope(scope, row),
+    )
 }
 
 /// Whether the scope row exists.
 pub(super) fn scope_exists(connection: &Connection, scope: &str) -> RegistryResult<bool> {
-    connection
-        .query_row(
-            "SELECT EXISTS (SELECT 1 FROM plugin_trust_scopes WHERE scope = ?1)",
-            [scope],
-            |row| row.get(0),
-        )
-        .map_err(|error| storage_error(&error))
+    query_one(
+        connection,
+        "SELECT 1 FROM plugin_trust_scopes WHERE scope = ?1",
+        [scope],
+        |_| Ok(()),
+    )
+    .map(|found| found.is_some())
 }
 
 /// The retained decision keyed `(scope, PMF1 digest)`.
@@ -310,15 +392,12 @@ pub(super) fn load_decision(
     scope: &str,
     pmf1_digest: [u8; 32],
 ) -> RegistryResult<Option<RetainedReleaseDecisionV1>> {
-    connection
-        .query_row(
-            "SELECT * FROM plugin_trust_decisions WHERE scope = ?1 AND pmf1_digest = ?2",
-            rusqlite::params![scope, pmf1_digest],
-            |row| Ok(decode_decision(row)),
-        )
-        .optional()
-        .map_err(|error| storage_error(&error))?
-        .transpose()
+    query_one(
+        connection,
+        "SELECT * FROM plugin_trust_decisions WHERE scope = ?1 AND pmf1_digest = ?2",
+        rusqlite::params![scope, pmf1_digest],
+        decode_decision_row,
+    )
 }
 
 /// The active pointer of `(scope, exact Plugin ID)`.
@@ -327,15 +406,12 @@ pub(super) fn load_active(
     scope: &str,
     plugin_id: &str,
 ) -> RegistryResult<Option<ActiveReleaseV1>> {
-    connection
-        .query_row(
-            "SELECT * FROM plugin_trust_active WHERE scope = ?1 AND plugin_id = ?2",
-            [scope, plugin_id],
-            |row| Ok(decode_active(row)),
-        )
-        .optional()
-        .map_err(|error| storage_error(&error))?
-        .transpose()
+    query_one(
+        connection,
+        "SELECT * FROM plugin_trust_active WHERE scope = ?1 AND plugin_id = ?2",
+        [scope, plugin_id],
+        decode_active,
+    )
 }
 
 /// The latest `Admission` or `Rollback` row of `(scope, exact Plugin ID)`.
@@ -344,28 +420,31 @@ pub(super) fn load_latest_release_row(
     scope: &str,
     plugin_id: &str,
 ) -> RegistryResult<Option<PluginTrustLedgerRowV1>> {
-    connection
-        .query_row(
-            "SELECT * FROM plugin_trust_ledger WHERE scope = ?1 AND plugin_id = ?2
-             ORDER BY row_seq DESC LIMIT 1",
-            [scope, plugin_id],
-            |row| Ok(decode_ledger(row)),
-        )
-        .optional()
-        .map_err(|error| storage_error(&error))?
-        .transpose()
+    query_one(
+        connection,
+        "SELECT * FROM plugin_trust_ledger WHERE scope = ?1 AND plugin_id = ?2
+         ORDER BY row_seq DESC LIMIT 1",
+        [scope, plugin_id],
+        decode_ledger,
+    )
 }
 
 /// The `row_seq` the next ledger row of `scope` takes.
 pub(super) fn next_row_seq(connection: &Connection, scope: &str) -> RegistryResult<u64> {
-    connection
-        .query_row(
-            "SELECT MAX(row_seq) FROM plugin_trust_ledger WHERE scope = ?1",
-            [scope],
-            |row| row.get::<_, Option<i64>>(0),
-        )
-        .map_err(|error| storage_error(&error))
-        .map(|last| last.map_or(1, |last| from_sql_u64(last).saturating_add(1)))
+    query_one(
+        connection,
+        "SELECT MAX(row_seq) AS last FROM plugin_trust_ledger WHERE scope = ?1",
+        [scope],
+        |row| {
+            let cols = Columns::new(row);
+            cols.finish(cols.get::<Option<i64>>("last"))
+        },
+    )
+    .map(|found| {
+        found
+            .flatten()
+            .map_or(1, |last| from_sql_u64(last).saturating_add(1))
+    })
 }
 
 /// Every ledger row of `scope` in row order.
@@ -373,14 +452,12 @@ pub(super) fn load_ledger(
     connection: &Connection,
     scope: &str,
 ) -> RegistryResult<Vec<PluginTrustLedgerRowV1>> {
-    let mut statement = connection
-        .prepare("SELECT * FROM plugin_trust_ledger WHERE scope = ?1 ORDER BY row_seq")
-        .map_err(|error| storage_error(&error))?;
-    let rows = statement
-        .query_map([scope], |row| Ok(decode_ledger(row)))
-        .map_err(|error| storage_error(&error))?;
-    rows.map(|row| row.map_err(|error| storage_error(&error))?)
-        .collect()
+    query_many(
+        connection,
+        "SELECT * FROM plugin_trust_ledger WHERE scope = ?1 ORDER BY row_seq",
+        [scope],
+        decode_ledger,
+    )
 }
 
 /// Insert the scope row of a provisioning.

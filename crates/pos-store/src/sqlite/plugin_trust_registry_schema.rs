@@ -13,7 +13,7 @@
 use rusqlite::{params_from_iter, Connection};
 
 use super::normalize_schema_sql;
-use super::plugin_trust_registry_rows::{storage_error, RegistryResult};
+use super::plugin_trust_registry_rows::{query_many, storage_error, Columns, RegistryResult};
 use crate::plugin_trust_registry::PluginTrustPolicyRegistryErrorV1;
 
 /// One scope: the persisted anchor, the retained TPS1, both floors, and the highest UTC second.
@@ -234,32 +234,23 @@ impl StoredObject {
 }
 
 fn stored_objects(connection: &Connection) -> RegistryResult<Vec<StoredObject>> {
-    let mut statement = connection
-        .prepare(STORED_OBJECTS)
-        .map_err(|error| storage_error(&error))?;
-    let rows = statement
-        .query_map(
-            params_from_iter(REVIEWED.iter().map(|reviewed| reviewed.name)),
-            |row| {
-                Ok(StoredObject {
-                    object_type: row.get(0)?,
-                    name: row.get(1)?,
-                    sql: row.get(2)?,
-                })
-            },
-        )
-        .map_err(|error| storage_error(&error))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| storage_error(&error))
+    query_many(
+        connection,
+        STORED_OBJECTS,
+        params_from_iter(REVIEWED.iter().map(|reviewed| reviewed.name)),
+        |row| {
+            let cols = Columns::new(row);
+            cols.finish(StoredObject {
+                object_type: cols.get("type"),
+                name: cols.get("name"),
+                sql: cols.get("sql"),
+            })
+        },
+    )
 }
 
-/// Classify the stored schema: absent, the exact reviewed set, or `CorruptState`.
-///
-/// # Errors
-/// `CorruptState` for a partial table set or a present object of a different shape; a storage
-/// error when `sqlite_master` cannot be read.
-pub(super) fn validate(connection: &Connection) -> RegistryResult<SchemaStateV1> {
-    let stored = stored_objects(connection)?;
+/// Classify the stored objects: absent, the exact reviewed set, or `CorruptState`.
+fn classify(stored: &[StoredObject]) -> RegistryResult<SchemaStateV1> {
     let tables = REVIEWED
         .iter()
         .filter(|reviewed| reviewed.kind == ObjectKind::Table)
@@ -284,15 +275,24 @@ pub(super) fn validate(connection: &Connection) -> RegistryResult<SchemaStateV1>
     }
 }
 
+/// Classify the stored schema: absent, the exact reviewed set, or `CorruptState`.
+///
+/// # Errors
+/// `CorruptState` for a partial table set or a present object of a different shape; a storage
+/// error when `sqlite_master` cannot be read.
+pub(super) fn validate(connection: &Connection) -> RegistryResult<SchemaStateV1> {
+    stored_objects(connection).and_then(|stored| classify(&stored))
+}
+
 /// Every operation except `provision` needs the complete schema.
 ///
 /// # Errors
 /// `MissingState` when every table is absent; `CorruptState` for any other deviation.
 pub(super) fn require_present(connection: &Connection) -> RegistryResult<()> {
-    match validate(connection)? {
+    validate(connection).and_then(|state| match state {
         SchemaStateV1::Present => Ok(()),
         SchemaStateV1::Absent => Err(PluginTrustPolicyRegistryErrorV1::MissingState),
-    }
+    })
 }
 
 /// `provision` creates the reviewed set when every table is absent and otherwise validates it.
@@ -300,14 +300,14 @@ pub(super) fn require_present(connection: &Connection) -> RegistryResult<()> {
 /// # Errors
 /// `CorruptState` for a partial or different set; a storage error when a statement fails.
 pub(super) fn ensure_for_provision(connection: &Connection) -> RegistryResult<()> {
-    match validate(connection)? {
+    validate(connection).and_then(|state| match state {
         SchemaStateV1::Present => Ok(()),
         SchemaStateV1::Absent => REVIEWED.iter().try_for_each(|reviewed| {
             connection
                 .execute_batch(reviewed.sql)
                 .map_err(|error| storage_error(&error))
         }),
-    }
+    })
 }
 
 #[cfg(test)]
