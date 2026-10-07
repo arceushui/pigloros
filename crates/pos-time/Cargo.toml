@@ -20,6 +20,7 @@ thiserror = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 blake3 = { workspace = true }
 pos-conformance = { path = "../pos-conformance" }
+ulid = { workspace = true }
 
 [dev-dependencies]
 pos-core = { path = "../pos-core", features = ["test-support"] }
