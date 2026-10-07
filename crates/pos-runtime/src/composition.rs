@@ -4,6 +4,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use pos_core::{
+    executable_budget::ExecutableBudgetErrorV1,
     manifest_owner_link::{ManifestAdmissionCatalogRowV1, ManifestAdmissionCatalogV1},
     AdapterAdmissionV1, Hash, PluginId,
 };
@@ -33,6 +34,11 @@ pub enum ManifestRegistrationErrorV1 {
     UnverifiedRegistration,
     #[error("manifest registration batch is incomplete or changed")]
     IncompleteBatch,
+    #[error(
+        "the composition's CPU reservation table does not fit one executable budget ({0}); \
+         register at most 256 Plugins, with reservations within the budget's CPU limits"
+    )]
+    ReservationTable(#[from] ExecutableBudgetErrorV1),
 }
 
 /// Maximum byte length of a [`ManifestSlotV1`].

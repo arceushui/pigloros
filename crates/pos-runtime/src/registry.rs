@@ -1706,13 +1706,6 @@ impl PluginRegistry {
         if recorded != Some(row.stable_slot.as_str()) {
             return Err(ManifestRegistrationErrorV1::SlotMismatch);
         }
-        Self::validate_manifest_entry_fields(row, entry)
-    }
-
-    fn validate_manifest_entry_fields(
-        row: &ManifestAdmissionCatalogRowV1,
-        entry: &PluginEntry,
-    ) -> Result<(), ManifestRegistrationErrorV1> {
         let registration = entry.registration.as_ref();
         let admission = entry.output_admission.as_ref();
         Self::validate_manifest_parts(row, entry, registration, admission)
@@ -5945,16 +5938,22 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn local_admission_rejects_unverified_or_unavailable_local_entries() {
+    // A gated registry holding one locally registered Plugin, and that Plugin's id.
+    fn registered_local_fixture() -> (PluginRegistry, PluginId) {
         let plugin = simple_plugin("local-fixture", &[]);
-        let id = plugin.id;
-        let owner = OwnerIdV1::from_static("local-admission-fixture");
         let mut registry = gated_registry();
         let slot = ManifestSlotV1::try_new("local-fixture").test_ok();
+        let roles = vec!["local.fixture".to_owned()];
         registry
-            .register_local(&plugin, slot, vec!["local.fixture".to_owned()], None, None)
+            .register_local(&plugin, slot, roles, None, None)
             .test_ok();
+        (registry, plugin.id)
+    }
+
+    #[test]
+    fn local_admission_rejects_unverified_or_unavailable_local_entries() {
+        let owner = OwnerIdV1::from_static("local-admission-fixture");
+        let (mut registry, id) = registered_local_fixture();
 
         let verified = registry
             .plugins
@@ -6008,14 +6007,8 @@ mod tests {
 
     #[test]
     fn local_admission_rejects_a_pin_that_does_not_bind_the_generated_policy() {
-        let plugin = simple_plugin("local-fixture", &[]);
-        let id = plugin.id;
         let owner = OwnerIdV1::from_static("local-admission-fixture");
-        let mut registry = gated_registry();
-        let slot = ManifestSlotV1::try_new("local-fixture").test_ok();
-        registry
-            .register_local(&plugin, slot, vec!["local.fixture".to_owned()], None, None)
-            .test_ok();
+        let (mut registry, id) = registered_local_fixture();
         let entry = registry.plugins.get_mut(&id).test_ok();
         let valid = entry.registration.clone().test_ok();
         let generated = entry.output_admission.as_ref().test_ok().policy_digest();

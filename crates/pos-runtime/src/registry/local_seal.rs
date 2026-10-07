@@ -18,7 +18,6 @@ use pos_core::{
         ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1, PluginCpuReservationV1,
     },
     manifest_owner_link::ManifestAdmissionCatalogRowV1,
-    output_policy::{OutputPolicyInputV1, OutputPolicyV1},
     Hash, PluginId,
 };
 
@@ -31,6 +30,7 @@ use crate::{
 /// One local entry's pin and admission re-derived for the complete composition, not yet
 /// written to the registry.
 pub(super) struct SealedLocalEntry {
+    plugin_id: PluginId,
     registration: Option<PluginRegistrationV1>,
     admission: OutputAdmissionV1,
 }
@@ -59,7 +59,8 @@ impl PluginRegistry {
     /// # Errors
     /// `UnverifiedRegistration` for an entry without a retained closure or an available native
     /// pin that binds its generated policy, `MissingSlot` for an entry registered without a
-    /// slot, and `IncompleteBatch` when the table does not fit one EBP1 (more than 256 Plugins).
+    /// slot, and `ReservationTable` when the table does not fit one EBP1 (more than 256
+    /// Plugins, or reservations beyond the budget's CPU limits).
     pub(super) fn sealed_local_entry(
         plugin_id: PluginId,
         entry: &PluginEntry,
@@ -73,81 +74,70 @@ impl PluginRegistry {
             .closure()
             .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
         let stable_slot = Self::local_entry_slot(plugin_id, entry)?;
+        let (sealed, closure_hash) = resealed_admission(admission, closure, reservations)?;
+        let digest = sealed.policy_digest();
         let generated = admission.policy_digest();
-        resealed_admission(plugin_id, &entry.version, admission, closure, reservations)
-            .ok_or(ManifestRegistrationErrorV1::IncompleteBatch)
-            .and_then(|(sealed, closure_hash)| {
-                let digest = sealed.policy_digest();
-                let rebind = |old| resealed_registration(old, generated, digest);
-                let registration = entry.registration.as_ref().and_then(rebind);
-                let row = ManifestAdmissionCatalogRowV1 {
-                    stable_slot,
-                    plugin_id,
-                    plugin_name: entry.name.clone(),
-                    plugin_version: entry.version.clone(),
-                    implementation_hash: sealed.policy().fields().implementation_hash,
-                    eop1_native_digest: digest,
-                    closure_hash,
-                };
-                let pinned = registration.as_ref();
-                Self::validate_manifest_parts(&row, entry, pinned, Some(&sealed))?;
-                let parts = SealedLocalEntry {
-                    registration,
-                    admission: sealed,
-                };
-                Ok((row, parts))
-            })
+        let rebind = |old| resealed_registration(old, generated, digest);
+        let registration = entry.registration.as_ref().and_then(rebind);
+        let row = ManifestAdmissionCatalogRowV1 {
+            stable_slot,
+            plugin_id,
+            plugin_name: entry.name.clone(),
+            plugin_version: entry.version.clone(),
+            implementation_hash: sealed.policy().fields().implementation_hash,
+            eop1_native_digest: digest,
+            closure_hash,
+        };
+        let pinned = registration.as_ref();
+        Self::validate_manifest_parts(&row, entry, pinned, Some(&sealed))?;
+        let parts = SealedLocalEntry {
+            plugin_id,
+            registration,
+            admission: sealed,
+        };
+        Ok((row, parts))
     }
 
-    /// Write every re-derived entry, in registry order, after the whole batch validated.
+    /// Write every re-derived entry after the whole batch validated.
+    ///
+    /// Each entry is found by its `PluginId`; the ids were read from this registry and nothing
+    /// has been added or removed since.
     pub(super) fn install_sealed_entries(&mut self, sealed: Vec<SealedLocalEntry>) {
-        for (entry, parts) in self.plugins.values_mut().zip(sealed) {
-            entry.registration = parts.registration;
-            entry.output_admission = Some(parts.admission);
+        for parts in sealed {
+            if let Some(entry) = self.plugins.get_mut(&parts.plugin_id) {
+                entry.registration = parts.registration;
+                entry.output_admission = Some(parts.admission);
+            }
         }
     }
 }
 
 /// The generated closure rebuilt around the composition table, admitted for the same Plugin.
 ///
-/// Only the reservation rows change; the EOP1 then names the new EBP1 digest. `None` when the
-/// table does not fit one EBP1.
+/// Only the reservation rows change; the EOP1 then names the new EBP1 digest.
+///
+/// # Errors
+/// `ReservationTable` when the table is not a valid EBP1.
 fn resealed_admission(
-    plugin_id: PluginId,
-    version: &str,
     admission: &OutputAdmissionV1,
     closure: &OutputPolicyClosureV1,
     reservations: &[PluginCpuReservationV1],
-) -> Option<(OutputAdmissionV1, Hash)> {
+) -> Result<(OutputAdmissionV1, Hash), ManifestRegistrationErrorV1> {
+    let fields = closure.executable_budget().fields();
     let budget = ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
         plugin_cpu_reservations: reservations.to_vec(),
-        ..closure.executable_budget().fields().clone()
-    });
-    let rebuilt = budget.ok().and_then(|budget| {
-        let policy = OutputPolicyV1::new(OutputPolicyInputV1 {
-            executable_profile_hash: budget.digest(),
-            ..closure.output_policy().fields().clone()
-        });
-        policy.ok().map(|policy| (policy, budget))
-    });
-    rebuilt
-        .and_then(|(policy, budget)| {
-            OutputPolicyClosureV1::from_artifacts(
-                &policy.to_canonical_cbor(),
-                &budget.to_canonical_cbor(),
-                closure.implementation_artifact(),
-                closure.configuration_artifact(),
-                closure.execution_profile_artifact(),
-                closure.retention_policy_artifact(),
-            )
-            .ok()
-        })
-        .zip(admission.owner_token())
-        .and_then(|(sealed, owner)| {
-            let closure_hash = sealed.manifest_closure_hash();
-            let admitted = OutputAdmissionV1::try_new_verified(plugin_id, version, sealed, owner);
-            admitted.ok().map(|admission| (admission, closure_hash))
-        })
+        revision: fields.revision,
+        workload_profile: fields.workload_profile,
+        cut_budget_family: fields.cut_budget_family,
+        max_event_bytes: fields.max_event_bytes,
+        fidelity_budgets: fields.fidelity_budgets,
+        accounting_semantics: fields.accounting_semantics,
+        execution_profile_hash: fields.execution_profile_hash,
+        max_pass_wall_duration_us: fields.max_pass_wall_duration_us,
+    })?;
+    let sealed = closure.with_budget(budget);
+    let closure_hash = sealed.manifest_closure_hash();
+    Ok((admission.resealed(sealed), closure_hash))
 }
 
 /// The same pin and availability, now binding the re-derived EOP1 digest.

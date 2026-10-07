@@ -6,10 +6,10 @@ use pos_core::{
     compare_manifest_plugin_rosters_v1,
     output_policy::{OutputPolicyInputV1, OutputPolicyV1},
     state::{Reducer, State},
-    Capability, ComparedFieldV1, ComparisonSideV1, Event, ExecutableBudgetPolicyV1, Hash, Kind,
-    ManifestPluginEntryV1, ManifestPluginRosterErrorV1, ManifestPluginRosterV1, OwnerIdV1, Plugin,
-    PluginId, ReproManifest, ReservationMismatchKindV1, RosterComparisonErrorV1, TimelineId,
-    WallTime,
+    Capability, ComparedFieldV1, ComparisonSideV1, Event, ExecutableBudgetErrorV1,
+    ExecutableBudgetPolicyV1, Hash, Kind, ManifestPluginEntryV1, ManifestPluginRosterErrorV1,
+    ManifestPluginRosterV1, OwnerIdV1, Plugin, PluginId, ReproManifest, ReservationMismatchKindV1,
+    RosterComparisonErrorV1, TimelineId, WallTime,
 };
 use pos_runtime::{
     AdmittedCompositionV1, ManifestRegistrationErrorV1, ManifestRosterBuildErrorV1, ManifestSlotV1,
@@ -42,6 +42,16 @@ impl RosterPlugin {
             name: "weather",
             reducer_only: false,
             owns: Some(event_type),
+        }
+    }
+
+    // A Plugin with a fixed id and no owned Event types.
+    const fn fixed(id: PluginId, name: &'static str) -> Self {
+        Self {
+            id,
+            name,
+            reducer_only: false,
+            owns: None,
         }
     }
 
@@ -321,12 +331,24 @@ fn budget_of(row: &ManifestPluginEntryV1) -> Result<ExecutableBudgetPolicyV1, Bo
     Ok(ExecutableBudgetPolicyV1::from_canonical_cbor(ebp1)?)
 }
 
+const fn fixed_id(byte: u8) -> PluginId {
+    PluginId::from_ulid(ulid::Ulid::from_bytes([byte; 16]))
+}
+
 #[test]
 fn every_closure_reserves_cpu_for_the_whole_composition() -> TestResult {
-    let built = admitted_composition()?;
-    let roster = built.registry.manifest_plugin_roster(&built.admitted)?;
-    let mut expected = vec![built.tally, built.north, built.south];
-    expected.sort_unstable();
+    // Registered out of id order, so only sorting by `PluginId` gives a canonical table.
+    let high = RosterPlugin::fixed(fixed_id(0x30), "high");
+    let low = RosterPlugin::fixed(fixed_id(0x10), "low");
+    let middle = RosterPlugin::fixed(fixed_id(0x20), "middle");
+    let mut registry = PluginRegistry::new();
+    register(&mut registry, &high, "high")?;
+    register(&mut registry, &low, "low")?;
+    register(&mut registry, &middle, "middle")?;
+    let owner = OwnerIdV1::from_static("roster-app");
+    let admitted = registry.admit_local_manifest_registration(owner, 1)?;
+    let roster = registry.manifest_plugin_roster(&admitted)?;
+    let expected = [low.id(), middle.id(), high.id()];
     for row in roster.entries() {
         let budget = budget_of(row)?;
         let table = &budget.fields().plugin_cpu_reservations;
@@ -335,6 +357,25 @@ fn every_closure_reserves_cpu_for_the_whole_composition() -> TestResult {
         let values: Vec<[u32; 3]> = table.iter().map(|row| row.cpu_reservations_us).collect();
         assert_eq!(values, [[10; 3]; 3]);
     }
+    Ok(())
+}
+
+#[test]
+fn a_composition_past_the_reservation_table_limit_is_rejected_unchanged() -> TestResult {
+    let mut registry = PluginRegistry::new();
+    for index in 0..=256 {
+        let slot = format!("s{index:03}");
+        register(&mut registry, &RosterPlugin::new("bulk"), &slot)?;
+    }
+    let before = registry.composition();
+    let owner = OwnerIdV1::from_static("roster-app");
+    let rejected = registry.admit_local_manifest_registration(owner, 1).err();
+    let cause = ExecutableBudgetErrorV1::FieldOutOfBounds;
+    let table = ManifestRegistrationErrorV1::ReservationTable(cause);
+    assert!(table.to_string().contains("at most 256 Plugins"));
+    assert_eq!(rejected, Some(table));
+    assert_eq!(registry.composition(), before);
+    assert_eq!(registry.retained_manifest_plugin_roster(), Ok(None));
     Ok(())
 }
 
