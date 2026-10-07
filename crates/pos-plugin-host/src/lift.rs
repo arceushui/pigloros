@@ -398,8 +398,14 @@ mod tests {
             ordered_digests(&digests_val(&[[1; 32], [2; 32]])),
             Ok(vec![[1; 32], [2; 32]])
         );
-        assert_eq!(ordered_digests(&digests_val(&[[2; 32], [1; 32]])), Err(INVALID));
-        assert_eq!(ordered_digests(&digests_val(&[[1; 32], [1; 32]])), Err(INVALID));
+        assert_eq!(
+            ordered_digests(&digests_val(&[[2; 32], [1; 32]])),
+            Err(INVALID)
+        );
+        assert_eq!(
+            ordered_digests(&digests_val(&[[1; 32], [1; 32]])),
+            Err(INVALID)
+        );
         assert_eq!(ordered_digests(&digests_val(&[])), Ok(Vec::new()));
         assert_eq!(
             ordered_digests(&Val::List(vec![digest_val(&[1; 31])])),
