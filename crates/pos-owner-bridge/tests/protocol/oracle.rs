@@ -367,7 +367,7 @@ fn run_single(sc: &Scenario) -> Result<Evidence, AnyError> {
             Ok(Verified::Registration(_) | Verified::Assertion(_))
         ),
         records_left: rig.store.records_now().len(),
-        prf_zero: result.is_ok() || *driver.prf() == [0; 32],
+        prf_zero: result.is_ok() || (*driver.prf() == [0; 32] && driver.request_clear()),
         port_calls: Vec::new(),
         port_sealed: None,
         port_confirmed: None,
@@ -409,7 +409,7 @@ fn run_enroll(sc: &Scenario) -> Result<Evidence, AnyError> {
         error: outcome.err(),
         ok: outcome.is_ok(),
         records_left: rig.store.records_now().len(),
-        prf_zero: true,
+        prf_zero: outcome.is_ok() || rig.bridge.secret_slots_clear(),
         port_calls: port.calls.iter().take(calls_before).cloned().collect(),
         port_sealed: port.seal_prf,
         port_confirmed: port.confirm_prf,
@@ -453,7 +453,7 @@ fn run_unlock(sc: &Scenario) -> Result<Evidence, AnyError> {
         error: outcome.err(),
         ok: outcome.is_ok(),
         records_left: rig.store.records_now().len(),
-        prf_zero: true,
+        prf_zero: outcome.is_ok() || rig.bridge.secret_slots_clear(),
         port_calls: port.calls.iter().take(calls_before).cloned().collect(),
         port_sealed: None,
         port_confirmed: None,
@@ -529,7 +529,10 @@ fn check_discipline(ev: &Evidence, sc: &Scenario) -> Failure {
         return fail("bounded time", format!("{:?}", ev.elapsed));
     }
     if !ev.prf_zero {
-        return fail("secrets", "a PRF survived a failed ceremony");
+        return fail(
+            "secrets",
+            "a PRF or the request image survived a failed ceremony",
+        );
     }
     Ok(())
 }
@@ -788,6 +791,41 @@ fn expected_release(abort: AbortBehavior, at: Duration) -> Duration {
 fn check_retention(ev: &Evidence, sc: &Scenario) -> Failure {
     if sc.page.abort == AbortBehavior::NeverRelease {
         return Ok(());
+    }
+    for slice in slices(&ev.log) {
+        // The active pair is the last one the host posted. Only for it can the host's release
+        // request be what makes the page release: a retired or never-activated pair, or a page
+        // holding a buffer back, releases at the page's own deadline.
+        let active = slice.iter().rev().find_map(|entry| match entry {
+            LogEntry::Post { pair, .. } => Some(*pair),
+            _ => None,
+        });
+        let requested = sc.page.delivery == Delivery::Normal
+            && slice.iter().any(|entry| {
+                matches!(
+                    entry,
+                    LogEntry::Cas { actor: Actor::Host, pair, new: 4, won: true, .. }
+                        if Some(*pair) == active
+                )
+            });
+        let late = slice.iter().find_map(|entry| match entry {
+            LogEntry::PageReleased { pair, at, .. }
+                if requested && Some(*pair) == active && *at > ev.elapsed =>
+            {
+                Some((*pair, *at))
+            }
+            _ => None,
+        });
+        if let Some((pair, at)) = late {
+            return fail(
+                "I14 release before settle",
+                format!(
+                    "the active pair {pair} was released at {at:?}, after the host finished at \
+                     {:?}: only the settle() advance made the page release",
+                    ev.elapsed
+                ),
+            );
+        }
     }
     for pair in &ev.pairs {
         for (delivered, released) in pair.delivered.iter().zip(pair.released) {

@@ -5086,7 +5086,7 @@ dependencies = [
  "getrandom 0.4.3",
  "p256",
  "pos-owner-bridge-codec",
- "sha2",
+ "sha2 0.11.0",
  "thiserror 2.0.21",
  "zeroize",
 ]

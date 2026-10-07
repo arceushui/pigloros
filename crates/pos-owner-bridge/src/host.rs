@@ -118,29 +118,26 @@ pub struct CeremonyReply {
     pub driver: Option<CeremonyDriver>,
 }
 
-/// The surface thread's bookkeeping for a quarantined ceremony.
+/// The surface thread's bookkeeping for quarantined ceremonies.
 ///
-/// It keeps the driver until its cleanup finished, so every host applies the same policy: a
+/// It keeps each driver until its cleanup finished, so every host applies the same policy: a
 /// quarantined driver never returns to the owner thread before its browser exit and `finish()`
-/// are done.
+/// are done. The bridge starts no ceremony while one is quarantined, so more than one driver is
+/// a host bug; the keeper still holds every one of them, because each may have a live browser.
 #[derive(Default)]
 pub struct QuarantineKeeper {
-    held: Option<CeremonyDriver>,
+    held: Vec<CeremonyDriver>,
 }
 
 impl QuarantineKeeper {
     /// An empty keeper.
     #[must_use]
     pub const fn new() -> Self {
-        Self { held: None }
+        Self { held: Vec::new() }
     }
 
     /// Turn a finished driver and its result into the reply for the owner thread; a driver that
     /// ended in quarantine stays here.
-    ///
-    /// The bridge starts no ceremony while one is quarantined, so a second quarantine is a host
-    /// bug. The driver already held is the one whose browser may be alive, so it is kept and
-    /// the new one goes back to the owner thread with its result.
     pub fn finish(
         &mut self,
         driver: CeremonyDriver,
@@ -148,7 +145,8 @@ impl QuarantineKeeper {
     ) -> CeremonyReply {
         let quarantined = matches!(result, Err(BridgeError::Quarantine(_)));
         let returned = if quarantined {
-            self.keep(driver)
+            self.held.push(driver);
+            None
         } else {
             Some(driver)
         };
@@ -158,29 +156,14 @@ impl QuarantineKeeper {
         }
     }
 
-    /// Hold `driver` unless one is already held, in which case it is handed back.
-    fn keep(&mut self, driver: CeremonyDriver) -> Option<CeremonyDriver> {
-        if self.held.is_none() {
-            self.held = Some(driver);
-            None
-        } else {
-            Some(driver)
-        }
-    }
-
-    /// Run `cleaned` (typically `CeremonyDriver::poll_cleanup` with the host's `StepEnv`) on the
-    /// kept driver and hand it back once it reports that cleanup finished.
+    /// Run `cleaned` (typically `CeremonyDriver::poll_cleanup` with the host's `StepEnv`) on each
+    /// kept driver and hand back the first one that reports its cleanup finished.
     pub fn poll(
         &mut self,
-        cleaned: impl FnOnce(&mut CeremonyDriver) -> bool,
+        mut cleaned: impl FnMut(&mut CeremonyDriver) -> bool,
     ) -> Option<CeremonyDriver> {
-        let mut driver = self.held.take()?;
-        if cleaned(&mut driver) {
-            Some(driver)
-        } else {
-            self.held = Some(driver);
-            None
-        }
+        let index = self.held.iter_mut().position(&mut cleaned)?;
+        Some(self.held.remove(index))
     }
 }
 

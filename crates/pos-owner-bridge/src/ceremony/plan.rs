@@ -53,7 +53,7 @@ impl Budget {
 }
 
 /// The stored credential a Get ceremony is restricted to.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct StoredGet {
     pub(crate) credential_id: Vec<u8>,
     pub(crate) user_handle: OwnerUserHandle,
@@ -61,6 +61,18 @@ pub struct StoredGet {
     pub(crate) backup_eligible: bool,
     pub(crate) backup_state: bool,
     pub(crate) sign_count: u32,
+}
+
+impl fmt::Debug for StoredGet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StoredGet")
+            .field("credential_id_len", &self.credential_id.len())
+            .field("backup_eligible", &self.backup_eligible)
+            .field("backup_state", &self.backup_state)
+            .field("sign_count", &self.sign_count)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StoredGet {
@@ -115,6 +127,22 @@ impl CeremonyPlan {
     #[must_use]
     pub fn challenge(&self) -> WebAuthnChallenge {
         WebAuthnChallenge::from_bytes(*self.challenge)
+    }
+
+    /// Zero the challenge, the user handle and the PRF input. A quarantined ceremony only
+    /// cleans up afterwards, which needs none of them.
+    pub(crate) fn wipe_secrets(&mut self) {
+        self.challenge.fill(0);
+        self.user_handle.fill(0);
+        self.prf_input.fill(0);
+    }
+
+    /// Whether the challenge, the user handle and the PRF input are all zero.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn secrets_clear(&self) -> bool {
+        [&self.challenge, &self.user_handle, &self.prf_input]
+            .iter()
+            .all(|secret| secret.iter().all(|byte| *byte == 0))
     }
 
     /// The user handle as the codec type.
@@ -284,16 +312,28 @@ impl Slots {
         })
     }
 
-    /// Zero both reply copies. The PRF slots are not touched.
-    pub(crate) fn wipe_copies(&mut self) {
+    /// Zero the request image and both reply copies. The PRF slots are not touched.
+    ///
+    /// Every post rebuilds the whole request image from the plan, so nothing needs it afterwards.
+    pub(crate) fn wipe_buffers(&mut self) {
+        self.request.wipe();
         self.copy_a.wipe();
         self.copy_b.wipe();
     }
 
-    /// Zero both reply copies and the ceremony PRF slot. The enrollment slot is not touched.
+    /// Zero the request image, both reply copies and the ceremony PRF slot. The enrollment slot
+    /// is not touched.
     pub(crate) fn wipe_ceremony(&mut self) {
-        self.wipe_copies();
+        self.wipe_buffers();
         self.prf.fill(0);
+    }
+
+    /// Whether the request image and both PRF slots are all zero.
+    #[cfg(feature = "test-support")]
+    pub(crate) fn secrets_clear(&self) -> bool {
+        self.request.as_bytes().iter().all(|byte| *byte == 0)
+            && self.prf.iter().all(|byte| *byte == 0)
+            && self.create_prf.iter().all(|byte| *byte == 0)
     }
 
     /// Zero every secret slot.
@@ -303,5 +343,5 @@ impl Slots {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 mod tests;

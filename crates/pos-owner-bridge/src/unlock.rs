@@ -16,6 +16,9 @@ pub struct BindingUpdate {
 /// Port methods run only after the ceremony's browser exit and `finish()`.
 pub trait UnlockPort {
     /// A root unwrapped but not yet released.
+    ///
+    /// The bridge drops it unreleased when `persist_binding_update` fails, so an implementation
+    /// must zeroize the root on drop.
     type Pending;
     /// The unlocked session.
     type Session;

@@ -290,6 +290,12 @@ impl LoopbackListener {
         self.mode
     }
 
+    /// Whether the accept threads still run: `true` from `start` until the first `shutdown`.
+    #[must_use]
+    pub const fn is_running(&self) -> bool {
+        !self.workers.is_empty()
+    }
+
     /// Stop accepting and join the accept threads. Connections already served finish on their own.
     pub fn shutdown(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);

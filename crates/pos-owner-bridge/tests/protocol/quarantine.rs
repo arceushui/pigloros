@@ -130,10 +130,10 @@ fn a_process_that_stays_present_leaves_the_surface_quarantined() -> TestResult {
         BridgeStatus::Quarantined(QuarantineCode::StaleProcessPresent)
     );
     assert_eq!(rig.store.records_now(), [bytes]);
-    // The check has ended: nothing is pending any more.
+    // The check has ended: nothing is pending any more, and the status still refuses.
     assert_eq!(
         rig.bridge.poll_restart_check(&mut rig.store, &mut probe),
-        Ok(RestartProgress::Done { deferred: 0 })
+        Err(BridgeError::Quarantine(QuarantineCode::StaleProcessPresent))
     );
     assert_eq!(probe.calls(), 31);
     Ok(())

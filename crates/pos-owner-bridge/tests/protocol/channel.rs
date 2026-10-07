@@ -318,14 +318,18 @@ fn the_quarantine_keeper_keeps_only_a_quarantined_driver_until_its_cleanup_finis
 }
 
 #[test]
-fn a_second_quarantine_keeps_the_first_driver_and_hands_the_second_back() {
+fn a_second_quarantine_keeps_both_drivers_until_each_is_cleaned() {
     let mut keeper = QuarantineKeeper::new();
     let first = keeper.finish(driver(), Err(ABANDONED));
     assert!(first.driver.is_none());
     let later = CeremonyDriver::for_test(create_plan(&FakeClock::start()).with_generation(5));
     let second = keeper.finish(later, Err(ABANDONED));
-    assert_eq!(second.driver.map(|returned| returned.generation()), Some(5));
-    // The driver that stays is the first one, generation 1.
-    assert_eq!(keeper.poll(|_| true).map(|held| held.generation()), Some(1));
+    assert!(second.driver.is_none());
+    // Only the second driver reports its cleanup done: the first stays held.
+    let cleaned = keeper.poll(|held| held.generation() == 5);
+    assert_eq!(cleaned.map(|held| held.generation()), Some(5));
+    assert!(keeper.poll(|held| held.generation() == 5).is_none());
+    let rest = keeper.poll(|_| true);
+    assert_eq!(rest.map(|held| held.generation()), Some(1));
     assert!(keeper.poll(|_| true).is_none());
 }

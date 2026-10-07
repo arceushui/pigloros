@@ -31,7 +31,8 @@ pub const RELEASE_WINDOW: Duration = Duration::from_secs(2);
 /// Exit window after `Controller::Close` returns.
 pub const EXIT_WINDOW: Duration = Duration::from_secs(5);
 
-/// Total enrollment budget from E1 `Completed(ok)` through E4 `Completed(ok)`.
+/// Total enrollment budget: it starts when the Create ceremony returns and ends at E4 host
+/// verification.
 pub const ENROLLMENT_BUDGET: Duration = Duration::from_mins(5);
 
 /// Poll cadence from each post and for the first second after the first observation past `EMPTY`.

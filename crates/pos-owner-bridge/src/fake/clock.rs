@@ -49,6 +49,9 @@ impl FakeClock {
     /// time (and so every scheduled offset) unchanged. A host calls this with a ceremony's T0
     /// when the owner thread drew it from another clock, so the ceremony's bounds do not depend on
     /// how the two clocks' origins happen to be scheduled.
+    ///
+    /// An `Instant` cannot go back past the platform's epoch, so for an instant closer to it than
+    /// the elapsed time the origin becomes the instant itself.
     pub fn align_to(&self, instant: Instant) {
         let origin = instant
             .checked_sub(self.state.offset.get())

@@ -123,11 +123,16 @@ impl RequestImage {
     pub fn as_mut_bytes(&mut self) -> &mut [u8] {
         &mut self.bytes
     }
+
+    /// Zero every byte of the image.
+    pub fn wipe(&mut self) {
+        self.bytes.zeroize();
+    }
 }
 
 impl Drop for RequestImage {
     fn drop(&mut self) {
-        self.bytes.zeroize();
+        self.wipe();
     }
 }
 

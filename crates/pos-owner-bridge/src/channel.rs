@@ -17,8 +17,8 @@
 //! thread that drops its endpoint after it accepted a driver (a driver still buffered in the
 //! capacity-one channel counts as accepted: the owner side cannot tell it was never received) may
 //! have a browser still alive, so the ceremony ends fail-closed as `Quarantine(CleanupTimeout)`
-//! and the surface stays quarantined; a host must therefore keep the endpoint alive until a quarantine has been polled
-//! to completion. A surface thread that is already gone when the driver is handed over fails the
+//! and the surface stays quarantined; a host must therefore keep the endpoint alive until a
+//! quarantine has been polled to completion. A surface thread that is already gone when the driver is handed over fails the
 //! ceremony as `Unavailable(InterfaceUnavailable)` and the driver comes back untouched.
 //!
 //! # Implementing a host on an STA thread

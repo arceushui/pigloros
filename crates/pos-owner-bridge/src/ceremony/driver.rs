@@ -178,6 +178,20 @@ impl CeremonyDriver {
         self.posts
     }
 
+    /// Whether the request image is all zero.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn request_clear(&self) -> bool {
+        self.slots.request.as_bytes().iter().all(|byte| *byte == 0)
+    }
+
+    /// Whether the plan's challenge, user handle and PRF input are all zero.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn plan_secrets_clear(&self) -> bool {
+        self.plan.secrets_clear()
+    }
+
     /// The ceremony's T0.
     #[cfg(feature = "test-support")]
     #[must_use]
@@ -679,7 +693,7 @@ impl CeremonyDriver {
         match release_loop(env.surface, ControlState::Consuming, ReleaseMode::Terminal) {
             Ok(_) => {
                 self.outcome = Ok(verified);
-                self.slots.wipe_copies();
+                self.slots.wipe_buffers();
                 self.phase = Phase::Releasing {
                     since: env.clock.now(),
                     state_live: true,
@@ -791,6 +805,7 @@ impl CeremonyDriver {
         let error = BridgeError::Quarantine(code);
         self.outcome = Err(error);
         self.slots.wipe_ceremony();
+        self.plan.wipe_secrets();
         self.phase = Phase::Quarantined;
         Step::Finished(Err(error))
     }

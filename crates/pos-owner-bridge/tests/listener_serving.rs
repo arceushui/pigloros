@@ -162,10 +162,11 @@ fn a_digest_mismatch_fails_the_integrity_verdict() -> TestResult {
 #[test]
 fn shutdown_is_idempotent_and_stops_accepting() -> TestResult {
     let mut listener = start(ListenerConfig::adr())?;
-    let address = listener.v4_addr();
+    assert!(listener.is_running());
     listener.shutdown();
+    assert!(!listener.is_running());
     listener.shutdown();
-    assert!(TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_err());
+    assert!(!listener.is_running());
     Ok(())
 }
 

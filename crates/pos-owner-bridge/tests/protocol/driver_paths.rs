@@ -76,6 +76,7 @@ fn an_honest_create_registers_the_credential_and_cleans_up() -> TestResult {
     assert!(registration.prf_present);
     assert_eq!(registration.sign_count, 0);
     assert_eq!(*driver.prf(), prf);
+    assert!(driver.request_clear());
     let log = rig.handle.log();
     assert_eq!(rig.handle.pair_count(), 1);
     let opened = log
@@ -295,6 +296,7 @@ fn a_challenge_that_expires_during_verification_is_refused_before_secrets_exist(
         lifecycle(LifecycleCode::ChallengeExpired)
     );
     assert_eq!(*driver.prf(), [0; 32]);
+    assert!(driver.request_clear());
     Ok(())
 }
 
@@ -893,6 +895,8 @@ fn cleanup_failures_quarantine_the_ceremony_without_reviving_secrets() -> TestRe
         let expected = BridgeError::Quarantine(QuarantineCode::ControllerCloseFailed);
         assert_eq!(failure(&result)?, expected);
         assert_eq!(*driver.prf(), [0; 32]);
+        assert!(driver.request_clear());
+        assert!(driver.plan_secrets_clear());
     }
     Ok(())
 }
@@ -1282,6 +1286,7 @@ fn a_late_second_completion_is_caught_before_the_reply_is_consumed() -> TestResu
         assert_eq!(failure(&result)?, expected, "{script:?}");
         assert_eq!(driver.posts(), 1);
         assert_eq!(*driver.prf(), [0; 32]);
+        assert!(driver.request_clear());
         let log = rig.handle.log();
         // It surfaced while the page was still working: the reply never became ready.
         assert!(
@@ -1342,6 +1347,7 @@ fn a_second_completion_after_consumption_fails_the_ceremony_and_cleanup_still_ru
             let (result, driver) = rig.run(plan);
             assert_eq!(failure(&result)?, duplicate, "{moment:?} create {create}");
             assert_eq!(*driver.prf(), [0; 32], "{moment:?} create {create}");
+            assert!(driver.request_clear(), "{moment:?} create {create}");
             let log = rig.handle.log();
             assert!(log.contains(&LogEntry::ExitObserved), "{moment:?}");
             assert!(log.contains(&LogEntry::Finished), "{moment:?}");

@@ -159,6 +159,14 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
         self.status
     }
 
+    /// Whether the request image and both PRF slots are zero; `true` while a quarantined driver
+    /// holds the slots.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn secret_slots_clear(&self) -> bool {
+        self.slots.as_deref().is_none_or(Slots::secrets_clear)
+    }
+
     /// Poll a quarantined ceremony for its browser exit; cleanup completing clears the status.
     pub fn poll_quarantine(&mut self) -> BridgeStatus {
         if self.quarantined {
@@ -204,19 +212,24 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
     }
 
     /// Probe again if the next probe is due; call it at the instant [`RestartProgress::Waiting`]
-    /// named. Without a pending check it reports `Done` with nothing deferred.
+    /// named. Without a pending check it reports `Done` with nothing deferred while the status
+    /// admits ceremonies; [`OwnerBridge::status`] is authoritative.
     ///
     /// # Errors
     ///
     /// Returns `Quarantine(StaleProcessPresent)` once a recorded process is still present after
-    /// 30 repeats; the surface then stays quarantined.
+    /// 30 repeats; the surface then stays quarantined, and so does every later poll: with nothing
+    /// pending it returns the error its status refuses ceremonies with.
     pub fn poll_restart_check(
         &mut self,
         store: &mut dyn CleanupStore,
         probe: &mut dyn ProcessProbe,
     ) -> Result<RestartProgress, BridgeError> {
         let Some(pending) = self.restart.take() else {
-            return Ok(RestartProgress::Done { deferred: 0 });
+            return self
+                .status
+                .admission()
+                .map(|()| RestartProgress::Done { deferred: 0 });
         };
         let now = self.clock.now();
         let outcome = restart::poll(pending, store, probe, now);
@@ -354,7 +367,8 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
         self.run_ceremony(plan).and_then(Verified::into_assertion)
     }
 
-    /// Run enrollment E1 to E5 (ADR-110 §8). Every failure calls `abandon` exactly once.
+    /// Run enrollment E1 to E5 (ADR-110 §8). A failure after `seal_candidate` returned a candidate and
+    /// before `commit` calls `abandon` once; no other failure does.
     ///
     /// # Errors
     ///
