@@ -1,0 +1,65 @@
+#![forbid(unsafe_code)]
+#![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
+
+//! In-worker community Plugin Component engine (ADR-061 revisions 4 to 6).
+//!
+//! Revision 6, which records the owner decisions of 2026-10-06, is pending.
+//!
+//! This crate runs one Component of the `pigloros:plugin/community-plugin@0.1.0`
+//! world on the exact Wasmtime pin:
+//! - [`runtime`] records the pin, its resolved features, the Engine
+//!   configuration and the trap table that execution profiles carry;
+//! - [`ComponentHost::load`] compiles a Component and refuses, before any
+//!   execution, every import that is not a `host-v1` function with its exact
+//!   type, and any Component whose `describe`, `reduce` and `drive` exports
+//!   are missing or not of their exact type;
+//! - [`ComponentHost::describe`], [`ComponentHost::reduce`] and
+//!   [`ComponentHost::drive`] run one export in a fresh store under the
+//!   negotiated effective limits: fuel, linear memory, host calls,
+//!   operational log calls and bytes, and the `EventDraft`, state and output
+//!   bounds. `migrate-state` is never invoked.
+//!
+//! Execution needs a [`PinnedExecutionV1`]: a negotiated release
+//! (`pos-runtime`'s `NegotiatedCommunityPluginV1`) whose execution profile
+//! pins exactly this engine's runtime.
+//!
+//! The guest contract types (invocation, output, descriptor, guest error,
+//! report, invocation options and the output digest) live in
+//! `pos_runtime::community_plugin_host`, which links no WebAssembly runtime,
+//! so the supervisor and the commit use them without Wasmtime. This crate
+//! keeps only what needs Wasmtime: loading, lifting, lowering and the trap
+//! mapping.
+//!
+//! The engine never commits anything. A failed invocation returns only the
+//! closed `CommunityPluginHostErrorV1`; the guest's output and operational
+//! logs are dropped with its store, and raw runtime messages and backtraces
+//! never leave the engine. A completed invocation returns the fully validated
+//! output, or the guest's own validated `plugin-error`, for the supervisor to
+//! approve and commit at the Tick Boundary.
+//!
+//! The evidence for the pin and the compatibility gates is in
+//! `docs/evidence/adr-061-r4-prototype.md`. Later slices build on this crate:
+//! #542 runs it in a supervised worker process, and #543 commits approved
+//! output atomically at the Tick Boundary.
+
+// Public modules keep crate-only items compatible with both `unreachable_pub`
+// and Clippy's `redundant_pub_crate`.
+pub mod describe;
+pub mod engine;
+pub mod host_v1;
+pub mod lift;
+pub mod lower;
+pub mod outcome;
+pub mod output;
+pub mod runtime;
+pub mod signatures;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub mod test_values;
+
+pub use engine::{ComponentHost, GuestExport, LoadedComponent, PinnedExecutionV1};
+pub use outcome::{LoadError, RuntimeNotPinnedV1};
+pub use runtime::{
+    pinned_runtime, MAX_WASM_STACK_BYTES, PINNED_ENGINE_CONFIG, RESOLVED_WASMTIME_FEATURES,
+    WASMTIME_VERSION,
+};
