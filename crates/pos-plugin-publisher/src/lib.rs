@@ -11,9 +11,13 @@
 //!
 //! Retained historical verification reports signature math, the registry
 //! state of the signing key, and an explicit "current admission not
-//! evaluated" as three separate facts. Installation and content validation
-//! are separate slices; neither publication nor historical verification ever
-//! admits or installs a release.
+//! evaluated" as three separate facts. Neither publication nor historical
+//! verification ever admits or installs a release.
+//!
+//! The signed installer (#573) reads one verified release, authorizes it with
+//! trust evidence, verifies its PMF1 signature, and only then asks the Plugin
+//! trust policy registry to admit it. It does not validate artifact content
+//! (follow-up #574) and builds no activation Event (the caller supplies it).
 
 #[cfg(target_os = "linux")]
 use pos_core::{CanonicalBytes, KeyIdentityV1, PublicKey, Signature};
@@ -25,12 +29,20 @@ use pos_crypto::signing::verifying_key_from_public_key;
 #[cfg(target_os = "linux")]
 mod historical;
 #[cfg(target_os = "linux")]
+mod install;
+#[cfg(target_os = "linux")]
 mod publish;
 
 #[cfg(target_os = "linux")]
 pub use historical::{
     verify_plugin_release_historical_v1, CurrentAdmissionV1, HistoricalReleaseVerificationV1,
     ReleaseSignatureMathV1, SigningKeyStateV1,
+};
+
+#[cfg(target_os = "linux")]
+pub use install::{
+    install_plugin_release_v1, ContentValidationV1, InstalledPluginReleaseV1,
+    PluginInstallRequestV1, PluginReleaseInstallErrorV1,
 };
 
 #[cfg(target_os = "linux")]

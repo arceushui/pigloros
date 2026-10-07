@@ -16,10 +16,15 @@ source of every `.rs` file outside the top-level build and tooling directories:
    `advance_policy` follow the same allow-list. Files under a `tests`
    directory, gated fixture files, and `#[cfg(test)]` items are tests.
 3. `admit` and `rollback` may be called only from tests and `test-support`
-   fixtures until #401 delivers the PMF1 signature-verification token (decision
-   1): any other call site, including one inside `pos-store`, is rejected. A
-   file can call a method of the port only after naming the trait or glob
-   importing its module, so method names are checked only in such files.
+   fixtures (decision 1), with one exception: the signed installer module
+   `crates/pos-plugin-publisher/src/install.rs` (#573) is the only non-test
+   call site of `admit`, and the only non-test file that may construct
+   `TrustedUtcSecondV1` outside the trusted host, because it verifies the
+   PMF1 release signature before it calls `admit`. It may not call
+   `rollback`, `provision`, or `advance_policy`, nor implement the port. Any
+   other call site, including one inside `pos-store`, is rejected. A file can
+   call a method of the port only after naming the trait or glob importing
+   its module, so method names are checked only in such files.
 4. Every public item of the registry modules (functions, types, constants,
    fields, enum variants, and re-exports) is linted against the forbidden-name
    list: no name may contain `signature`, `verified_signature`, `is_admitted`,
@@ -45,6 +50,7 @@ from check_trusted_clock_port_impls import (
 
 PORT = "PluginTrustPolicyRegistryV1"
 ALLOWED_PREFIXES = ("crates/pos-store/", "crates/pos-runtime/")
+INSTALLER_FILE = "crates/pos-plugin-publisher/src/install.rs"
 GUARDED_NAMES = (PORT, "TrustedUtcSecondV1", "PluginTrustPolicyAnchorV1")
 RECEIPT_TYPES = (
     "AdmittedPluginReleaseReceiptV1",
@@ -80,12 +86,13 @@ IMPL = re.compile(
 ALIAS = re.compile(r"\buse\b[^;]*?\b(?:" + "|".join(GUARDED_NAMES) + r")\s+as\b", re.DOTALL)
 UTC_CONSTRUCTION = re.compile(r"\bTrustedUtcSecondV1\s*::\s*from_source\b")
 RECEIPT_LITERAL = re.compile(r"\b(" + "|".join(RECEIPT_TYPES) + r")\s*\{")
-LITERAL_PREFIX = re.compile(r"(?:->|\b(?:struct|enum|impl|for|trait|type|dyn))\s*$")
+LITERAL_PREFIX = re.compile(r"(?:->\s*&?|\b(?:struct|enum|impl|for|trait|type|dyn))\s*$")
 ANCHOR_CALL = re.compile(r"\bPluginTrustPolicyAnchorV1\s*::\s*new\s*\(")
 # A method call, a path call (`MemoryStore::admit(..)`), or a qualified call
 # (`<S as PluginTrustPolicyRegistryV1>::admit(..)`).
 SETUP_CALL = re.compile(r"(?:\.|::)\s*(?:provision|advance_policy)\s*\(")
 ADMISSION_CALL = re.compile(r"(?:\.|::)\s*(?:admit|rollback)\s*\(")
+ROLLBACK_CALL = re.compile(r"(?:\.|::)\s*rollback\s*\(")
 REGISTRY_AWARE = re.compile(r"\b" + PORT + r"\b|\bplugin_trust_registry\s*::\s*\*")
 PUBLIC_ITEM = re.compile(
     r"\bpub\s+(?:const\s+)?(?:unsafe\s+)?(?:async\s+)?"
@@ -223,9 +230,9 @@ def linux_gate_findings(relative: str, code: str) -> list[str]:
     ]
 
 
-def construction_findings(relative: str, code: str) -> list[str]:
+def construction_findings(relative: str, code: str, installer: bool) -> list[str]:
     found: list[str] = []
-    if UTC_CONSTRUCTION.search(code):
+    if not installer and UTC_CONSTRUCTION.search(code):
         found.append(f"{relative}: TrustedUtcSecondV1 constructed outside the trusted host")
     for match in RECEIPT_LITERAL.finditer(code):
         if LITERAL_PREFIX.search(code[: match.start()]) is None:
@@ -241,6 +248,7 @@ def file_findings(relative: str, code: str) -> list[str]:
     is_test = gated or "tests" in Path(relative).parts
     live = strip_test_items(code)
     aware = REGISTRY_AWARE.search(live) is not None
+    installer = relative == INSTALLER_FILE
     found: list[str] = []
     if REGISTRY_MODULE.match(relative):
         found.extend(forbidden_name_findings(relative, live))
@@ -251,11 +259,12 @@ def file_findings(relative: str, code: str) -> list[str]:
             found.append(f"{relative}: Plugin trust registry implemented outside the trusted host")
         if ALIAS.search(code):
             found.append(f"{relative}: Plugin trust registry name aliased outside the trusted host")
-        found.extend(construction_findings(relative, code))
+        found.extend(construction_findings(relative, code, installer))
         if not is_test and (ANCHOR_CALL.search(live) or (aware and SETUP_CALL.search(live))):
             found.append(f"{relative}: registry anchor or setup call outside the trusted host")
-    if not is_test and aware and ADMISSION_CALL.search(live):
-        found.append(f"{relative}: admit or rollback called outside tests and test-support")
+    call = ROLLBACK_CALL if installer else ADMISSION_CALL
+    if not is_test and aware and call.search(live):
+        found.append(f"{relative}: admit or rollback called outside tests and the installer")
     return found
 
 
