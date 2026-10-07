@@ -148,10 +148,18 @@ fn a_read_only_handle_fails_at_begin_and_restores_the_level() -> TestResult {
     let mut read_only = SqliteStore::open_read_only(&path)?;
     let entry = level(&read_only)?;
     let genesis = h.env.genesis()?;
+    // An identical re-provision writes nothing, so it never attempts `BEGIN IMMEDIATE`.
     assert_eq!(
         read_only.provision(&h.env.anchor, &h.env.genesis_tps1),
+        Ok(ProvisionOutcomeV1::Unchanged)
+    );
+    assert_eq!(level(&read_only)?, entry);
+    let other = Env::new("scope-two")?;
+    assert_eq!(
+        read_only.provision(&other.anchor, &other.genesis_tps1),
         Err(Error::StorageFailed)
     );
+    assert_eq!(level(&read_only)?, entry);
     assert_eq!(
         read_only.advance_policy(
             &h.env.anchor,
@@ -286,7 +294,10 @@ fn a_failed_commit_is_rolled_back_and_the_handle_keeps_working() -> TestResult {
     let before = h.snapshot(&[&one])?;
     let entry = level(&h.store)?;
     let fault = Injected::step(Step::Commit);
-    assert_eq!(h.admit(&genesis, &one, 1)?, Err(Error::StorageIndeterminate));
+    assert_eq!(
+        h.admit(&genesis, &one, 1)?,
+        Err(Error::StorageIndeterminate)
+    );
     drop(fault);
     assert!(h.store.conn.is_autocommit());
     assert_eq!(level(&h.store)?, entry);
@@ -297,7 +308,10 @@ fn a_failed_commit_is_rolled_back_and_the_handle_keeps_working() -> TestResult {
     // A commit that SQLite itself turns into a rollback behaves the same.
     let two = release_two();
     h.store.conn.commit_hook(Some(|| true))?;
-    assert_eq!(h.admit(&genesis, &two, 2)?, Err(Error::StorageIndeterminate));
+    assert_eq!(
+        h.admit(&genesis, &two, 2)?,
+        Err(Error::StorageIndeterminate)
+    );
     h.store.conn.commit_hook::<fn() -> bool>(None)?;
     assert!(h.store.conn.is_autocommit());
     assert_eq!(h.active("plugin-a")?.pmf1_digest(), one.pmf1_digest());
@@ -312,7 +326,10 @@ fn a_failed_restore_poisons_the_handle_until_it_is_reopened() -> TestResult {
         let genesis = h.env.genesis()?;
         let one = release_one();
         let fault = Injected::step(step);
-        assert_eq!(h.admit(&genesis, &one, 1)?, Err(Error::StorageIndeterminate));
+        assert_eq!(
+            h.admit(&genesis, &one, 1)?,
+            Err(Error::StorageIndeterminate)
+        );
         drop(fault);
         let store = &h.store;
         assert_eq!(
@@ -330,10 +347,7 @@ fn a_failed_restore_poisons_the_handle_until_it_is_reopened() -> TestResult {
         );
         assert_eq!(h.admit(&genesis, &one, 1)?, Err(Error::StorePoisoned));
         assert_eq!(h.advance(&genesis)?, Err(Error::StorePoisoned));
-        assert_eq!(
-            h.rollback(&genesis, &one, 1)?,
-            Err(Error::StorePoisoned)
-        );
+        assert_eq!(h.rollback(&genesis, &one, 1)?, Err(Error::StorePoisoned));
         assert_eq!(
             h.store.provision(&h.env.anchor, &h.env.genesis_tps1),
             Err(Error::StorePoisoned)
@@ -358,7 +372,10 @@ fn a_failed_restore_poisons_the_handle_until_it_is_reopened() -> TestResult {
             genesis.tick,
             activation(timeline, 1),
         )?;
-        assert_eq!(receipt.outcome(), PluginTrustCommitOutcomeV1::IdempotentReplay);
+        assert_eq!(
+            receipt.outcome(),
+            PluginTrustCommitOutcomeV1::IdempotentReplay
+        );
         assert_eq!(reopened.read(timeline, SeqRange::all())?.len(), 1);
         drop(guard);
     }
@@ -385,11 +402,17 @@ fn a_lost_acknowledgement_commits_and_the_retry_replays_the_original() -> TestRe
     let one = release_one();
     let two = release_two();
     let lost = Injected::step(Step::LostAcknowledgement);
-    assert_eq!(h.admit(&genesis, &one, 1)?, Err(Error::StorageIndeterminate));
+    assert_eq!(
+        h.admit(&genesis, &one, 1)?,
+        Err(Error::StorageIndeterminate)
+    );
     drop(lost);
     assert_eq!(h.events()?.len(), 1);
     let retry = h.admit(&genesis, &one, 1)??;
-    assert_eq!(retry.outcome(), PluginTrustCommitOutcomeV1::IdempotentReplay);
+    assert_eq!(
+        retry.outcome(),
+        PluginTrustCommitOutcomeV1::IdempotentReplay
+    );
     assert_eq!(h.events()?.len(), 1);
 
     h.admit(&genesis, &two, 2)??;
@@ -402,7 +425,10 @@ fn a_lost_acknowledgement_commits_and_the_retry_replays_the_original() -> TestRe
     assert_eq!(h.active("plugin-a")?.pmf1_digest(), one.pmf1_digest());
     let events = h.events()?.len();
     let replay = h.rollback(&genesis, &one, 3)??;
-    assert_eq!(replay.outcome(), PluginTrustCommitOutcomeV1::IdempotentReplay);
+    assert_eq!(
+        replay.outcome(),
+        PluginTrustCommitOutcomeV1::IdempotentReplay
+    );
     assert_eq!(h.events()?.len(), events);
     Ok(())
 }
@@ -540,7 +566,10 @@ fn the_ledger_is_append_only() -> TestResult {
 
 fn assert_reads_corrupt(h: &H) {
     let store = &h.store;
-    assert_eq!(store.retained_policy_state("scope"), Err(Error::CorruptState));
+    assert_eq!(
+        store.retained_policy_state("scope"),
+        Err(Error::CorruptState)
+    );
     assert_eq!(store.ledger("scope"), Err(Error::CorruptState));
     assert_eq!(
         store.active_release("scope", "plugin-a"),
@@ -662,7 +691,10 @@ fn decision_and_pointer_rows_with_a_bad_event_are_corrupt() -> TestResult {
         h.store.retained_release_decision("scope", [0; 32]),
         Err(Error::CorruptState)
     );
-    assert_eq!(h.store.active_release("scope", "p"), Err(Error::CorruptState));
+    assert_eq!(
+        h.store.active_release("scope", "p"),
+        Err(Error::CorruptState)
+    );
     Ok(())
 }
 

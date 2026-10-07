@@ -23,8 +23,8 @@ use pos_conformance::{
 use pos_core::{
     store::{EventStore, SeqRange},
     trusted_clock::ScriptedTrustedWallSourceV1,
-    CanonicalBytes, EntityId, ErasureContainmentGateV1, Event, EventDraft, Hasher, Kind,
-    OwnerIdV1, TimelineId,
+    CanonicalBytes, EntityId, ErasureContainmentGateV1, Event, EventDraft, Hasher, Kind, OwnerIdV1,
+    TimelineId,
 };
 use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, PluginManifestProjectionFixtureV1, TrustedPluginRootAnchorV1,

@@ -130,7 +130,10 @@ fn committed_state_survives_a_restart_and_a_retry_replays() -> TestResult {
         genesis.tick,
         activation(timeline, 1),
     )?;
-    assert_eq!(retry.outcome(), PluginTrustCommitOutcomeV1::IdempotentReplay);
+    assert_eq!(
+        retry.outcome(),
+        PluginTrustCommitOutcomeV1::IdempotentReplay
+    );
     assert_eq!(retry.decision(), first.decision());
     assert_eq!(store.read(timeline, SeqRange::all())?.len(), 2);
     drop(guard);

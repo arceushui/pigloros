@@ -17,7 +17,7 @@
 //! moment `FULL` is set, every exit path restores the recorded level, so the connection never
 //! leaves at a different level than it entered with. After a failed `COMMIT` the adapter issues
 //! `ROLLBACK` (its error is ignored when the connection is already in autocommit) and requires
-//! autocommit before it touches the level, because SQLite refuses to change the safety level
+//! autocommit before it touches the level, because `SQLite` refuses to change the safety level
 //! inside a transaction. A connection that is still inside a transaction then, or a restore that
 //! fails, poisons the handle: the operation returns `StorageIndeterminate` and every later
 //! registry call, reads included, returns `StorePoisoned` until the store is dropped and reopened.
@@ -196,7 +196,7 @@ fn commit(connection: &Connection) -> rusqlite::Result<()> {
 
 /// Roll back whatever is open and report whether the connection is in autocommit afterwards.
 ///
-/// Without an open transaction the reported error carries no information: SQLite may already
+/// Without an open transaction the reported error carries no information: `SQLite` may already
 /// have rolled the transaction back.
 fn rollback_to_autocommit(connection: &Connection) -> bool {
     #[cfg(test)]
@@ -244,7 +244,7 @@ impl PluginTrustTransactionV1 for SqliteTransactionV1<'_> {
 
 impl SqliteStore {
     /// Step P: a poisoned handle fails every registry call.
-    fn ensure_plugin_trust_usable(&self) -> RegistryResult<()> {
+    const fn ensure_plugin_trust_usable(&self) -> RegistryResult<()> {
         if self.plugin_trust_poisoned.get() {
             Err(PluginTrustPolicyRegistryErrorV1::StorePoisoned)
         } else {
@@ -274,8 +274,8 @@ impl SqliteStore {
             return Err(PluginTrustPolicyRegistryErrorV1::NestedTransaction);
         }
         require_wal(connection)?;
-        let entry = read_level(connection, Step::ReadEntry)
-            .map_err(|error| storage_error(&error))?;
+        let entry =
+            read_level(connection, Step::ReadEntry).map_err(|error| storage_error(&error))?;
         set_full(connection)
             .and_then(|()| begin(connection))
             .or_else(|error| self.restore_level(entry).and(Err(error)))
@@ -410,14 +410,11 @@ impl SqliteStore {
         let scope = input.anchor.scope();
         let transaction = SqliteTransactionV1 { connection };
         match plan_admit(&transaction, input, projection, activation)? {
-            AdmitPlanV1::Replay(decision) => {
-                rows::raise_utc(connection, scope, input.utc.as_i64()).map(|()| {
-                    AdmittedPluginReleaseReceiptV1 {
-                        decision: *decision,
-                        outcome: PluginTrustCommitOutcomeV1::IdempotentReplay,
-                    }
-                })
-            }
+            AdmitPlanV1::Replay(decision) => rows::raise_utc(connection, scope, input.utc.as_i64())
+                .map(|()| AdmittedPluginReleaseReceiptV1 {
+                    decision: *decision,
+                    outcome: PluginTrustCommitOutcomeV1::IdempotentReplay,
+                }),
             AdmitPlanV1::Commit(commit) => {
                 let writes = commit.finish(self.append_activation_event(activation)?);
                 rows::apply_policy(connection, scope, &writes.policy)?;
@@ -443,14 +440,11 @@ impl SqliteStore {
         let scope = input.anchor.scope();
         let transaction = SqliteTransactionV1 { connection };
         match plan_rollback(&transaction, input, target, activation)? {
-            RollbackPlanV1::Replay(facts) => {
-                rows::raise_utc(connection, scope, input.utc.as_i64()).map(|()| {
-                    PluginRollbackReceiptV1 {
-                        facts: *facts,
-                        outcome: PluginTrustCommitOutcomeV1::IdempotentReplay,
-                    }
-                })
-            }
+            RollbackPlanV1::Replay(facts) => rows::raise_utc(connection, scope, input.utc.as_i64())
+                .map(|()| PluginRollbackReceiptV1 {
+                    facts: *facts,
+                    outcome: PluginTrustCommitOutcomeV1::IdempotentReplay,
+                }),
             RollbackPlanV1::Commit(commit) => {
                 let writes = commit.finish(self.append_activation_event(activation)?);
                 rows::apply_policy(connection, scope, &writes.policy)?;
@@ -476,11 +470,7 @@ impl SqliteStore {
 }
 
 /// Write the policy change of one `advance_policy`, and its ledger row when there is one.
-fn write_advance(
-    connection: &Connection,
-    scope: &str,
-    plan: &AdvancePlanV1,
-) -> RegistryResult<()> {
+fn write_advance(connection: &Connection, scope: &str, plan: &AdvancePlanV1) -> RegistryResult<()> {
     rows::apply_policy(connection, scope, &plan.write)?;
     plan.row
         .as_ref()

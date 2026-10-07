@@ -227,9 +227,9 @@ fn decode_ledger_body(kind: i64, row: &Row<'_>) -> RegistryResult<PluginTrustLed
             decision: Box::new(decode_decision(row)?),
             previous_active_pmf1_digest: column(row, "previous_active_pmf1_digest")?,
         }),
-        4 => Ok(PluginTrustLedgerBodyV1::Rollback(Box::new(decode_rollback(
-            row,
-        )?))),
+        4 => Ok(PluginTrustLedgerBodyV1::Rollback(Box::new(
+            decode_rollback(row)?,
+        ))),
         _ => Err(PluginTrustPolicyRegistryErrorV1::CorruptState),
     }
 }
