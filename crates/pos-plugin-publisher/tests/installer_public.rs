@@ -18,9 +18,8 @@ use std::sync::Arc;
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
-    plugin_revoked_key_id_v1, plugin_root_key_id_v1, PluginFloorKindV1,
-    PluginTrustBridgeErrorV1, PluginTrustPolicyAnchorV1, TrustPolicyRootV1,
-    TrustPolicySnapshotV1, PLUGIN_OPERATOR_ROLE_V1,
+    plugin_revoked_key_id_v1, plugin_root_key_id_v1, PluginFloorKindV1, PluginTrustBridgeErrorV1,
+    PluginTrustPolicyAnchorV1, TrustPolicyRootV1, TrustPolicySnapshotV1, PLUGIN_OPERATOR_ROLE_V1,
 };
 use pos_core::{
     store::{EventStore, SeqRange},
@@ -334,7 +333,12 @@ impl Spec {
 
 fn ptr1(policy: Policy) -> BoxResult<Vec<u8>> {
     let publisher = |owner: &str, epoch: u64, key: [u8; 32]| {
-        Value::Array(vec![text(owner), unsigned(3), unsigned(epoch), bytes_value(key)])
+        Value::Array(vec![
+            text(owner),
+            unsigned(3),
+            unsigned(epoch),
+            bytes_value(key),
+        ])
     };
     let mut publishers = vec![
         publisher(OTHER_OWNER, 1, policy.other),
@@ -495,9 +499,9 @@ impl Policy {
 }
 
 fn wall(utc: i64) -> BoxResult<WallSource> {
-    Ok(ScriptedTrustedWallSourceV1::from_micros([
-        u64::try_from(utc)? * 1_000_000,
-    ]))
+    Ok(ScriptedTrustedWallSourceV1::from_micros([u64::try_from(
+        utc,
+    )? * 1_000_000]))
 }
 
 fn activation(timeline: TimelineId, tag: u8) -> ActivationEventInputV1 {
@@ -527,7 +531,11 @@ fn register(
     let (signing_key, _verifying_key) = generate_keypair();
     let material = SigningKeyMaterial::new(signing_key);
     keys.register_key(KeyRegistrationV1::new(
-        KeyIdentityV1::new(OwnerIdV1::new(owner)?, KeyRoleV1::PluginReleaseSigning, epoch),
+        KeyIdentityV1::new(
+            OwnerIdV1::new(owner)?,
+            KeyRoleV1::PluginReleaseSigning,
+            epoch,
+        ),
         material.material_digest(),
         Some(material.public_verification_key()),
     ))?;
@@ -562,8 +570,7 @@ impl World {
         let other = register(&mut keys, OTHER_OWNER, 1)?;
         let policy = Policy {
             other: key_bytes(&other),
-            publisher_one: listed
-                .unwrap_or_else(|| key_bytes(&publisher)),
+            publisher_one: listed.unwrap_or_else(|| key_bytes(&publisher)),
             publisher_two: None,
         };
         let (anchor, genesis_tps1) = policy.anchor()?;
@@ -724,7 +731,10 @@ fn installs_a_signed_release_and_returns_the_admission_and_execution_projection(
         .install(published.address(), 1)?
         .map_err(|error| format!("install failed: {error}"))?;
     let decision = installed.admission().decision();
-    assert_eq!(installed.admission().outcome(), PluginTrustCommitOutcomeV1::Committed);
+    assert_eq!(
+        installed.admission().outcome(),
+        PluginTrustCommitOutcomeV1::Committed
+    );
     assert_eq!(decision.scope(), SCOPE);
     assert_eq!(decision.plugin_id(), "plugin-a");
     assert_eq!(decision.pmf1_digest(), pmf1_digest(&bundle));
@@ -745,12 +755,12 @@ fn installs_a_signed_release_and_returns_the_admission_and_execution_projection(
     assert_eq!(signature.release_digest(), published.release_digest());
     assert_eq!(signature.owner(), OwnerIdV1::new(OWNER)?);
     assert_eq!(signature.epoch(), 1);
-    assert_eq!(
-        signature.public_key(),
-        world.key_bytes(&publisher)
-    );
+    assert_eq!(signature.public_key(), world.key_bytes(&publisher));
     // Content validation was explicitly not performed (#574).
-    assert_eq!(installed.content_validation(), ContentValidationV1::NotPerformed);
+    assert_eq!(
+        installed.content_validation(),
+        ContentValidationV1::NotPerformed
+    );
     // One admit call, at the sampled UTC second and the evidence's own Tick.
     let material = world.material()?;
     assert_eq!(world.registry.admits.len(), 1);
@@ -764,7 +774,14 @@ fn installs_a_signed_release_and_returns_the_admission_and_execution_projection(
         active.as_ref().map(ActiveReleaseV1::pmf1_digest),
         Some(pmf1_digest(&bundle))
     );
-    assert_eq!(world.registry.store.read(world.timeline, SeqRange::all())?.len(), 1);
+    assert_eq!(
+        world
+            .registry
+            .store
+            .read(world.timeline, SeqRange::all())?
+            .len(),
+        1
+    );
     Ok(())
 }
 
@@ -775,12 +792,17 @@ fn installing_the_same_release_twice_is_an_idempotent_replay() -> TestResult {
     let first = world
         .install(published.address(), 1)?
         .map_err(|error| format!("first install failed: {error}"))?;
-    let digests = [pmf1_digest(&world.store.read_verified(published.address())?)];
+    let digests = [pmf1_digest(
+        &world.store.read_verified(published.address())?,
+    )];
     let before = world.snapshot(&digests)?;
     let second = world
         .install(published.address(), 1)?
         .map_err(|error| format!("second install failed: {error}"))?;
-    assert_eq!(first.admission().outcome(), PluginTrustCommitOutcomeV1::Committed);
+    assert_eq!(
+        first.admission().outcome(),
+        PluginTrustCommitOutcomeV1::Committed
+    );
     assert_eq!(
         second.admission().outcome(),
         PluginTrustCommitOutcomeV1::IdempotentReplay
@@ -798,7 +820,9 @@ fn a_changed_activation_identity_for_the_same_release_conflicts() -> TestResult 
     let mut world = World::new()?;
     let published = world.publish(Shape::first())?;
     assert!(world.install(published.address(), 1)?.is_ok());
-    let digests = [pmf1_digest(&world.store.read_verified(published.address())?)];
+    let digests = [pmf1_digest(
+        &world.store.read_verified(published.address())?,
+    )];
     let before = world.snapshot(&digests)?;
     let result = world.install(published.address(), 2)?;
     assert_eq!(
@@ -891,19 +915,24 @@ fn every_registry_error_variant_passes_through_typed() -> TestResult {
         PluginTrustPolicyRegistryErrorV1::StorageIndeterminate,
         PluginTrustPolicyRegistryErrorV1::StorePoisoned,
         PluginTrustPolicyRegistryErrorV1::Bridge(PluginTrustBridgeErrorV1::EvaluationUtcMismatch),
-        PluginTrustPolicyRegistryErrorV1::Floor(
-            pos_conformance::PluginFloorErrorV1::Rollback(PluginFloorKindV1::Root),
-        ),
+        PluginTrustPolicyRegistryErrorV1::Floor(pos_conformance::PluginFloorErrorV1::Rollback(
+            PluginFloorKindV1::Root,
+        )),
         PluginTrustPolicyRegistryErrorV1::Trust(PluginTrustErrorV1::ArtifactRevoked),
     ];
     let mut world = World::new()?;
     let published = world.publish(Shape::first())?;
-    let digests = [pmf1_digest(&world.store.read_verified(published.address())?)];
+    let digests = [pmf1_digest(
+        &world.store.read_verified(published.address())?,
+    )];
     let before = world.snapshot(&digests)?;
     for error in errors {
         world.registry.forced = Some(error);
         let result = world.install(published.address(), 1)?;
-        assert_eq!(result.err(), Some(PluginReleaseInstallErrorV1::Registry(error)));
+        assert_eq!(
+            result.err(),
+            Some(PluginReleaseInstallErrorV1::Registry(error))
+        );
         assert_eq!(world.snapshot(&digests)?, before);
     }
     assert_eq!(world.registry.admits.len(), errors.len());
@@ -961,7 +990,9 @@ fn an_unprovisioned_registry_refuses_after_the_signature_verified() -> TestResul
 fn the_registry_binds_the_sampled_second_to_the_evidence() -> TestResult {
     let mut world = World::new()?;
     let published = world.publish(Shape::first())?;
-    let digests = [pmf1_digest(&world.store.read_verified(published.address())?)];
+    let digests = [pmf1_digest(
+        &world.store.read_verified(published.address())?,
+    )];
     let before = world.snapshot(&digests)?;
     let material = world.material()?;
     let mut skewed = wall(UTC + 1)?;
@@ -1035,7 +1066,12 @@ fn a_release_signed_by_an_unlisted_key_is_refused_before_the_registry() -> TestR
     let mut world = World::build(Some([0x5a; 32]), true)?;
     let published = world.publish(Shape::first())?;
     let material = world.material()?;
-    assert_refused_before_registry(&mut world, published.address(), &material, signature_error())
+    assert_refused_before_registry(
+        &mut world,
+        published.address(),
+        &material,
+        signature_error(),
+    )
 }
 
 #[test]
@@ -1093,8 +1129,7 @@ fn an_unlisted_publisher_epoch_is_refused_before_signature_and_registry() -> Tes
     let mut world = World::new()?;
     let second = register(&mut world.keys, OWNER, 2)?;
     let draft = make_draft(Shape::first())?;
-    let published =
-        publish_plugin_release_v1(&mut world.keys, &second, 2, &draft, &world.store)?;
+    let published = publish_plugin_release_v1(&mut world.keys, &second, 2, &draft, &world.store)?;
     let material = world.material()?;
     assert_refused_before_registry(
         &mut world,
@@ -1220,7 +1255,10 @@ fn a_release_corrupted_in_the_store_is_refused_before_the_registry() -> TestResu
     let material = world.material()?;
     let mut source = wall(material.utc)?;
     let result = world.install_with(published.address(), &material, &mut source, 1);
-    assert!(matches!(result, Err(PluginReleaseInstallErrorV1::Source(_))));
+    assert!(matches!(
+        result,
+        Err(PluginReleaseInstallErrorV1::Source(_))
+    ));
     assert!(world.registry.admits.is_empty());
     assert_eq!(source.remaining(), 1);
     Ok(())
@@ -1243,7 +1281,9 @@ fn an_unknown_address_is_refused_before_the_registry() -> TestResult {
     let result = world.install_with(published.address(), &material, &mut source, 1);
     assert_eq!(
         result.err(),
-        Some(PluginReleaseInstallErrorV1::Source(ReleaseSourceErrorV1::NotFound))
+        Some(PluginReleaseInstallErrorV1::Source(
+            ReleaseSourceErrorV1::NotFound
+        ))
     );
     assert!(world.registry.admits.is_empty());
     assert_eq!(source.remaining(), 1);

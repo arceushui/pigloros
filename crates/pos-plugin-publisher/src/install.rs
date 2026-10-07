@@ -191,7 +191,10 @@ pub fn install_plugin_release_v1(
 }
 
 /// The trust projection and the execution projection of one closure.
-type Projections = (ValidatedPluginManifestProjectionV1, PluginExecutionProjectionV1);
+type Projections = (
+    ValidatedPluginManifestProjectionV1,
+    PluginExecutionProjectionV1,
+);
 
 /// Both projections of one closure; they run the same validation, so either
 /// both exist or the first failure is returned.

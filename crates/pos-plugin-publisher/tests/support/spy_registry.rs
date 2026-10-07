@@ -14,8 +14,8 @@ use pos_store::memory::MemoryStore;
 use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
     PluginRollbackReceiptV1, PluginTrustLedgerRowV1, PluginTrustPolicyRegistryErrorV1,
-    PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1, ProvisionOutcomeV1,
-    RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
+    PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1, ProvisionOutcomeV1, RetainedPolicyStateV1,
+    RetainedReleaseDecisionV1, TrustedUtcSecondV1,
 };
 
 /// What one `admit` call received.
