@@ -19,12 +19,21 @@ jobs:
             id: p570
             pkg: pos-crypto
             test: ""
+          - ref: redmine/571-release-publisher
+            id: p571
+            pkg: "pos-plugin-publisher -p pos-plugin-release"
+            test: ""
+          - ref: redmine/572-historical-verifier
+            id: p572
+            pkg: "pos-plugin-publisher"
+            test: ""
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ matrix.ref }}
       - name: rustfmt and publish patch
         run: |
+          cargo metadata --format-version 1 >/dev/null
           cargo fmt --all
           git --no-pager diff --stat
           git diff > /tmp/fmt.patch
@@ -35,7 +44,7 @@ jobs:
           git checkout -q -f ${{ matrix.ref }} 2>/dev/null || git checkout -q -f HEAD~1
       - name: clippy keep-going
         run: |
-          CARGO_TERM_COLOR=never cargo clippy --keep-going --message-format=short --locked --workspace --all-targets --all-features -- -D warnings -W clippy::pedantic 2>&1 | grep -E 'error|warning' | grep -E '${{ matrix.pkg }}' | sort -u | head -80
+          CARGO_TERM_COLOR=never cargo clippy --keep-going --message-format=short --workspace --all-targets --all-features -- -D warnings -W clippy::pedantic 2>&1 | grep -E 'error|warning' | grep -E 'crates/pos-(conformance|crypto|plugin-publisher|plugin-release)' | sort -u | head -80
       - name: targeted tests
         run: |
-          CARGO_TERM_COLOR=never cargo test --locked -p ${{ matrix.pkg }} ${{ matrix.test }} 2>&1 | grep -E -A14 '^---- |^error(\[|:)|test result' | head -200
+          CARGO_TERM_COLOR=never cargo test -p ${{ matrix.pkg }} ${{ matrix.test }} 2>&1 | grep -E -A14 '^---- |^error(\[|:)|test result' | head -200
