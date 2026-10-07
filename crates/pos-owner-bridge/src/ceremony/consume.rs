@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 
 use super::plan::{Assertion, CeremonyPlan, Registration, Verified};
 use super::release::read_state;
-use super::protocol_from_codec;
+use super::{protocol_from_codec, reply_error_from_codec};
 use crate::{BridgeError, OwnerWebSurface, ProtocolCode, RejectedCode, ReplyImage, SurfaceError};
 
 const HEADER: usize = CONTROL_HEADER_BYTES;
@@ -90,8 +90,8 @@ fn registration_from(
     prf: &mut [u8; 32],
 ) -> Result<Registration, BridgeError> {
     let context = CreateVerificationContext::new(plan.ceremony_id, plan.challenge());
-    let verified = verify_attestation_reply(reply, context)
-        .map_err(BridgeError::from_verification_reason)?;
+    let verified =
+        verify_attestation_reply(reply, context).map_err(BridgeError::from_verification_reason)?;
     let first = verified.prf_first();
     if let Some(result) = first {
         prf.copy_from_slice(result.as_bytes());
@@ -148,11 +148,11 @@ pub(super) fn parse_and_verify(
 ) -> Result<Verified, BridgeError> {
     match plan.kind {
         CeremonyKind::Create => {
-            let reply = decode_attestation_reply(payload).map_err(protocol_from_codec)?;
+            let reply = decode_attestation_reply(payload).map_err(reply_error_from_codec)?;
             registration_from(&reply, plan, prf).map(Verified::Registration)
         }
         CeremonyKind::Get => {
-            let reply = decode_assertion_reply(payload).map_err(protocol_from_codec)?;
+            let reply = decode_assertion_reply(payload).map_err(reply_error_from_codec)?;
             assertion_from(&reply, plan, prf).map(Verified::Assertion)
         }
     }

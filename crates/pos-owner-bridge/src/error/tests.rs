@@ -79,7 +79,10 @@ fn only_a_counter_regression_and_a_failed_confirmation_are_security_events() {
     ] {
         assert!(rejected(code).is_security_event());
     }
-    for code in [RejectedCode::Signature, RejectedCode::CredentialAlreadyBound] {
+    for code in [
+        RejectedCode::Signature,
+        RejectedCode::CredentialAlreadyBound,
+    ] {
         assert!(!rejected(code).is_security_event());
     }
     let prf = BridgeError::Unavailable(UnavailableCode::PrfUnsupported);

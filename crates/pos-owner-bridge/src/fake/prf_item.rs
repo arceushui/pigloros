@@ -36,7 +36,7 @@ fn head(input: &[u8], at: usize) -> Option<(u8, u64, usize)> {
         let argument = input.get(at + 1..at + 1 + width)?;
         argument
             .iter()
-            .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte))
+            .fold(0_u64, |value, byte| value * 256 + u64::from(*byte))
     };
     Some((major, value, at + 1 + width))
 }

@@ -2,7 +2,7 @@
 
 use pos_owner_bridge_codec::{OwnerBridgeCodecError, VerificationReason};
 
-use super::protocol_from_codec;
+use super::{protocol_from_codec, reply_error_from_codec};
 use crate::{BridgeError, ProtocolCode, RejectedCode, UnavailableCode};
 
 const fn protocol(code: ProtocolCode) -> BridgeError {
@@ -34,15 +34,26 @@ fn a_codec_failure_maps_to_its_protocol_code() {
 #[test]
 fn a_reply_field_reason_from_the_codec_decoder_keeps_its_bridge_error() {
     assert_eq!(
-        protocol_from_codec(OwnerBridgeCodecError::Verification(
+        reply_error_from_codec(OwnerBridgeCodecError::Verification(
             VerificationReason::UserHandleMismatch
         )),
         BridgeError::Rejected(RejectedCode::UserHandleMismatch)
     );
-    for reason in [VerificationReason::PrfMalformed, VerificationReason::PrfAbsent] {
+    for reason in [
+        VerificationReason::PrfMalformed,
+        VerificationReason::PrfAbsent,
+    ] {
         assert_eq!(
-            protocol_from_codec(OwnerBridgeCodecError::Verification(reason)),
+            reply_error_from_codec(OwnerBridgeCodecError::Verification(reason)),
             BridgeError::Unavailable(UnavailableCode::PrfUnsupported)
         );
     }
+}
+
+#[test]
+fn a_reply_decode_failure_without_a_reason_is_a_protocol_error() {
+    assert_eq!(
+        reply_error_from_codec(OwnerBridgeCodecError::TrailingBytes),
+        protocol(ProtocolCode::Malformed)
+    );
 }

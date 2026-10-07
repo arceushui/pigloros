@@ -1156,10 +1156,7 @@ fn an_equal_counter_or_a_zero_after_a_nonzero_counter_is_a_regression() -> TestR
         };
         let (mut rig, plan) = get_rig(page, stored)?;
         let (result, _) = rig.run(plan);
-        assert_eq!(
-            failure(&result)?,
-            rejected(RejectedCode::CounterRegression)
-        );
+        assert_eq!(failure(&result)?, rejected(RejectedCode::CounterRegression));
     }
     Ok(())
 }

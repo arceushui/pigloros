@@ -17,16 +17,10 @@ pub mod timing;
 #[cfg(test)]
 mod tests;
 
-/// Map a codec failure while decoding a reply to its bridge error.
-///
-/// A reply field the codec refuses because of its shape carries its own verification reason
-/// (the user handle and the PRF fields); every other failure is a protocol code.
+/// Map a codec failure while decoding a reply to its protocol code.
 #[must_use]
 pub(crate) const fn protocol_from_codec(error: OwnerBridgeCodecError) -> BridgeError {
     let code = match error {
-        OwnerBridgeCodecError::Verification(reason) => {
-            return BridgeError::from_verification_reason(reason);
-        }
         OwnerBridgeCodecError::NonCanonicalCbor => ProtocolCode::NonCanonical,
         OwnerBridgeCodecError::BoundsExceeded
         | OwnerBridgeCodecError::BufferTooSmall
@@ -34,4 +28,18 @@ pub(crate) const fn protocol_from_codec(error: OwnerBridgeCodecError) -> BridgeE
         _ => ProtocolCode::Malformed,
     };
     BridgeError::Protocol(code)
+}
+
+/// Map a codec failure while decoding a reply to its bridge error.
+///
+/// A reply field the codec refuses because of its shape carries its own verification reason
+/// (the user handle and the PRF fields); every other failure is a protocol code.
+#[must_use]
+pub(crate) const fn reply_error_from_codec(error: OwnerBridgeCodecError) -> BridgeError {
+    match error {
+        OwnerBridgeCodecError::Verification(reason) => {
+            BridgeError::from_verification_reason(reason)
+        }
+        other => protocol_from_codec(other),
+    }
 }
