@@ -13,7 +13,8 @@ const FLAG_UP: u8 = 1;
 const FLAG_UV: u8 = 1 << 2;
 const FLAG_BE: u8 = 1 << 3;
 const FLAG_BS: u8 = 1 << 4;
-/// Authenticator-data flag bits 1 and 5 are reserved and must be zero.
+/// Authenticator-data flag bits 1 and 5 are reserved and must be zero. The bits are disjoint, and
+/// `+` (not `|`) avoids an equivalent `|` to `^` mutant, so do not "fix" it back.
 const FLAG_RESERVED_MASK: u8 = (1 << 1) + (1 << 5);
 const FLAG_AT: u8 = 1 << 6;
 const FLAG_ED: u8 = 1 << 7;

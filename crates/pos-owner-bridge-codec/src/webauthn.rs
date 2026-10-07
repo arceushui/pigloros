@@ -229,9 +229,15 @@ pub fn verify_attestation_reply<'a>(
 /// reply with the stored binding: backup eligibility, user handle and counter.
 ///
 /// The signature comes first on purpose (a decider ruling; ADR-110 §7 lists the signature
-/// bullet before the backup-eligibility and counter bullets), so `BackupFlags`,
-/// `UserHandleMismatch` and `CounterRegression` can only describe an authenticated reply. A
-/// forged reply fails with `Signature` and can never raise a counter-regression security event.
+/// bullet before the backup-eligibility and counter bullets). The stored-binding comparisons
+/// (backup-eligibility equality, user-handle equality and the counter) therefore run only after
+/// the signature, so `CounterRegression`, the security event, is reported for authenticated
+/// replies only; a forged reply fails with `Signature`.
+///
+/// Two earlier routes exist and are deliberate: a backup-state flag set without backup
+/// eligibility is `BackupFlags` while the authenticator data is parsed (the ADR §7 flag rule),
+/// and a wrongly shaped user handle is `UserHandleMismatch` while the reply is decoded. Neither
+/// is a security event.
 pub fn verify_assertion_reply(
     reply: &AssertionReplyV1<'_>,
     context: AssertionVerificationContext<'_>,

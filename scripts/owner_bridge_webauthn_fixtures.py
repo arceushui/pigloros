@@ -319,6 +319,9 @@ def sign(auth_data: bytes, client_data: bytes) -> bytes:
 
 def corrupted(signature: bytes) -> bytes:
     """Flip one bit inside the DER r integer so the signature stays well formed."""
+    # DER: 0x30 len 0x02 len r...; index 10 is inside r for every signature this script makes.
+    if signature[0] != 0x30 or signature[2] != 0x02 or signature[3] < 8:
+        raise AssertionError("fixture signature is not the expected DER layout")
     return signature[:10] + bytes((signature[10] ^ 1,)) + signature[11:]
 
 
