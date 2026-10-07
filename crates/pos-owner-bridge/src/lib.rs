@@ -7,6 +7,7 @@
 
 pub mod bridge;
 pub mod ceremony;
+pub mod channel;
 pub mod enroll;
 pub mod error;
 #[cfg(feature = "test-support")]
@@ -15,20 +16,19 @@ pub mod host;
 pub mod listener;
 pub mod prf;
 pub mod random;
-pub mod restart;
 pub mod status;
 pub mod surface;
 pub mod unlock;
 
-pub use bridge::{BridgeConfig, OwnerBridge};
+pub use bridge::{BridgeConfig, OwnerBridge, RestartProgress};
 pub use enroll::{ConfirmedBinding, EnrollmentContext, EnrollmentPort, RootFingerprint};
 pub use error::{
     BridgeError, ErrorClass, LifecycleCode, OwnerError, OwnerErrorKind, ProtocolCode,
     QuarantineCode, RejectedCode, UnavailableCode,
 };
 pub use host::{
-    folder_name, CleanupError, CleanupStore, HostPorts, LoopbackPort, ProbeResult, ProcessProbe,
-    ServedSnapshot,
+    cleanup_record_bytes, folder_name, CeremonyHost, CeremonyReply, CleanupError, CleanupStore,
+    LoopbackPort, ProbeResult, ProcessProbe, QuarantineKeeper, ServedSnapshot,
 };
 pub use prf::PrfOutput;
 pub use random::{MonotonicClock, OsRandom, SecureRandom, SystemClock};

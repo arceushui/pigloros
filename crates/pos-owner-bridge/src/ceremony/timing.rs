@@ -11,6 +11,14 @@ pub const RECEIPT_WINDOWS_MS: [u64; 8] = [250, 250, 500, 500, 1_000, 1_000, 2_00
 /// Readiness bound from T0 to the first observation past `EMPTY`.
 pub const READINESS: Duration = Duration::from_secs(15);
 
+/// How long the host re-reads a served count of zero before the document counts as unserved.
+///
+/// `DOMContentLoaded` can reach the host a moment before the listener records the completed
+/// response, so a zero at the pre-post check is re-read at every step until this much time has
+/// passed since the first zero. The window sits inside [`READINESS`], which keeps running, and a
+/// zero that persists is `Unavailable(AssetIntegrity)`.
+pub const SERVED_SETTLE: Duration = Duration::from_millis(100);
+
 /// Interaction bound from the first observation past `EMPTY` to consumption.
 pub const INTERACTION: Duration = Duration::from_mins(2);
 
@@ -35,8 +43,9 @@ pub const SLOW_POLL: Duration = Duration::from_millis(50);
 /// How long the fast cadence lasts after the first observation past `EMPTY`.
 pub const FAST_POLL_SPAN: Duration = Duration::from_secs(1);
 
-/// The pump interval of the blocking bridge driver loop.
-pub const PUMP_INTERVAL: Duration = FAST_POLL;
+/// The cadence at which a host calls `step` while surface events must be polled: the 10 ms timer
+/// of ADR-110 §6. The portable core never sleeps; the host owns this timer.
+pub const TIMER_INTERVAL: Duration = FAST_POLL;
 
 /// The receipt window of post number `post` (1-based); later posts reuse the last window.
 #[must_use]

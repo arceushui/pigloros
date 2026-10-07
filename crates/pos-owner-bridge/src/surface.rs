@@ -1,5 +1,7 @@
 //! The `OwnerWebSurface` seam (ADR-110 §10): everything a platform adapter supplies.
 
+use std::fmt;
+
 use pos_owner_bridge_codec::{
     CeremonyId, CeremonyKind, ImagePathSha256, CREATE_REPLY_BUFFER_CAPACITY,
     GET_REPLY_BUFFER_CAPACITY, REQUEST_BUFFER_CAPACITY,
@@ -86,9 +88,20 @@ pub enum SurfaceEvent {
 }
 
 /// The host-written request image, preallocated once.
-#[derive(Debug)]
+///
+/// It holds the challenge, the user handle and the PRF input, so its `Debug` output shows only
+/// its length.
 pub struct RequestImage {
     bytes: Box<[u8]>,
+}
+
+impl fmt::Debug for RequestImage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RequestImage")
+            .field("len", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl RequestImage {
@@ -119,11 +132,23 @@ impl Drop for RequestImage {
 }
 
 /// A preallocated copy target for the reply buffer.
-#[derive(Debug)]
+///
+/// It holds the reply payload, including the PRF output, so its `Debug` output shows only its
+/// active length and whether anything was written to it since its last wipe.
 pub struct ReplyImage {
     bytes: Box<[u8]>,
     len: usize,
     dirty: bool,
+}
+
+impl fmt::Debug for ReplyImage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReplyImage")
+            .field("len", &self.len)
+            .field("dirty", &self.dirty)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ReplyImage {
@@ -220,17 +245,13 @@ pub trait OwnerWebSurface {
 
     /// Compare-exchange the reply state word; `Ok(true)` means the exchange won.
     ///
+    /// The host protocol writes the state word only by compare-exchange, never by plain store, so
+    /// the seam offers no store.
+    ///
     /// # Errors
     ///
     /// Returns the classified failure when the word cannot be accessed.
     fn reply_compare_exchange(&self, current: u32, new: u32) -> Result<bool, SurfaceError>;
-
-    /// Store the reply state word. The host protocol never uses a plain store.
-    ///
-    /// # Errors
-    ///
-    /// Returns the classified failure when the word cannot be written.
-    fn reply_store_state(&self, new: u32) -> Result<(), SurfaceError>;
 
     /// Copy the full reply capacity with atomic loads.
     ///

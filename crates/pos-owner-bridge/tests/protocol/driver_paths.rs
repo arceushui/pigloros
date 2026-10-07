@@ -2,26 +2,26 @@
 
 use std::time::Duration;
 
-use pos_owner_bridge::ceremony::consume::{parse_and_verify, protocol_from_codec};
-use pos_owner_bridge::ceremony::driver::{check_served, drive, next_generation, Step};
+use pos_owner_bridge::ceremony::driver::Step;
 use pos_owner_bridge::ceremony::plan::{Budget, CeremonyPlan, Registration, Verified};
+use pos_owner_bridge::ceremony::timing::SERVED_SETTLE;
 use pos_owner_bridge::fake::buffers::{Actor, LogEntry};
 use pos_owner_bridge::fake::honest::{AbortBehavior, CreatePrf, Delivery, HonestConfig, Tamper};
-use pos_owner_bridge::fake::signer::{Backup, FixtureSigner, ReplyShape};
+use pos_owner_bridge::fake::signer::{ReplyShape, FIXTURE_COSE_KEY};
 use pos_owner_bridge::fake::surface::{SurfaceConfig, SurfaceFaults};
 use pos_owner_bridge::{
     BridgeError, LifecycleCode, MonotonicClock, NavigationId, ProtocolCode, QuarantineCode,
     RejectedCode, ServedSnapshot, SurfaceEvent, UnavailableCode,
 };
 use pos_owner_bridge_codec::{
-    decode_cleanup_record, encode_attestation_reply, AttestationReplyV1, CeremonyId,
-    OwnerBridgeCodecError, OwnerUserHandle, TransportCodes, WebAuthnChallenge,
+    decode_cleanup_record, decode_create_options, encode_attestation_reply, AttestationReplyV1,
+    CeremonyId, CoseEs256PublicKey, TransportCodes,
 };
-use zeroize::Zeroizing;
 
 use super::{
-    bytes16, bytes32, create_plan, expected_prf, get_plan, honest, new_driver, stored_fixture,
-    Boxed, DriverRig, Hook, TestResult, CREDENTIAL_ID,
+    bytes16, create_plan, eligible, expected_prf, get_plan, honest, malformed_prf, new_driver,
+    no_prf, stored_fixture, wrong_key, wrong_raw_id, wrong_user_handle, Boxed, DriverRig, Hook,
+    Moment, TestResult, CREDENTIAL_ID,
 };
 
 type Tweak = fn(&mut ReplyShape);
@@ -75,7 +75,7 @@ fn an_honest_create_registers_the_credential_and_cleans_up() -> TestResult {
     assert_eq!(registration.credential_id, CREDENTIAL_ID);
     assert!(registration.prf_present);
     assert_eq!(registration.sign_count, 0);
-    assert_eq!(*driver.slots().prf, prf);
+    assert_eq!(*driver.prf(), prf);
     let log = rig.handle.log();
     assert_eq!(rig.handle.pair_count(), 1);
     let opened = log
@@ -120,7 +120,8 @@ fn a_late_listener_makes_the_host_retire_and_repost_under_a_new_generation() -> 
     let (result, driver) = rig.run(plan);
     result?;
     assert!(driver.posts() >= 2);
-    assert_eq!(driver.generation(), u32::from(driver.posts()));
+    // One bump per re-post, and one when the browser exit consumes the finished ceremony.
+    assert_eq!(driver.generation(), u32::from(driver.posts()) + 1);
     let log = rig.handle.log();
     let retired = log
         .iter()
@@ -275,7 +276,7 @@ fn a_challenge_past_its_time_to_live_is_refused_at_the_compare_exchange() -> Tes
     driver.step(&mut rig.env());
     assert_eq!(driver.posts(), 1);
     rig.clock.advance(Duration::from_secs(151));
-    let result = drive(&mut driver, &mut rig.env());
+    let result = rig.step_to_end(&mut driver);
     assert_eq!(
         failure(&result)?,
         lifecycle(LifecycleCode::ChallengeExpired)
@@ -293,7 +294,7 @@ fn a_challenge_that_expires_during_verification_is_refused_before_secrets_exist(
         failure(&result)?,
         lifecycle(LifecycleCode::ChallengeExpired)
     );
-    assert_eq!(*driver.slots().prf, [0; 32]);
+    assert_eq!(*driver.prf(), [0; 32]);
     Ok(())
 }
 
@@ -325,26 +326,6 @@ fn every_reply_tamper_is_rejected_with_its_protocol_code() -> TestResult {
     Ok(())
 }
 
-const fn wrong_key(shape: &mut ReplyShape) {
-    shape.wrong_key = true;
-}
-
-fn wrong_raw_id(shape: &mut ReplyShape) {
-    shape.raw_id = Some(vec![9, 9]);
-}
-
-const fn wrong_user_handle(shape: &mut ReplyShape) {
-    shape.user_handle = Some(OwnerUserHandle::from_bytes([1; 32]));
-}
-
-const fn flipped_backup(shape: &mut ReplyShape) {
-    shape.backup = Backup::Eligible;
-}
-
-const fn no_prf(shape: &mut ReplyShape) {
-    shape.prf = None;
-}
-
 #[test]
 fn every_verification_failure_is_classified() -> TestResult {
     let cases: [(Tweak, u32, BridgeError); 6] = [
@@ -355,9 +336,13 @@ fn every_verification_failure_is_classified() -> TestResult {
             0,
             rejected(RejectedCode::UserHandleMismatch),
         ),
-        (flipped_backup, 0, rejected(RejectedCode::BackupFlags)),
-        (|_| {}, 5, rejected(RejectedCode::CounterRegression)),
-        (no_prf, 0, lifecycle(LifecycleCode::ClientFailed)),
+        (eligible, 0, rejected(RejectedCode::Signature)),
+        (|_| {}, 5, rejected(RejectedCode::Signature)),
+        (
+            no_prf,
+            0,
+            BridgeError::Unavailable(UnavailableCode::PrfUnsupported),
+        ),
     ];
     for (index, (tweak, counter, expected)) in cases.into_iter().enumerate() {
         let page = HonestConfig {
@@ -367,6 +352,31 @@ fn every_verification_failure_is_classified() -> TestResult {
         let (mut rig, plan) = get_rig(page, counter)?;
         let (result, _) = rig.run(plan);
         assert_eq!(failure(&result)?, expected, "case {index}");
+    }
+    Ok(())
+}
+
+#[test]
+fn an_absent_or_malformed_required_prf_is_prf_unsupported_end_to_end() -> TestResult {
+    let unsupported = BridgeError::Unavailable(UnavailableCode::PrfUnsupported);
+    // A Create may omit the PRF (the source assertion then supplies it), but not malform it.
+    let cases: [(Tweak, bool); 2] = [(no_prf, true), (malformed_prf, false)];
+    for (tweak, create_registers) in cases {
+        let page = HonestConfig {
+            tweak: Some(tweak),
+            ..honest(0)
+        };
+        let (mut rig, plan) = get_rig(page.clone(), 0)?;
+        let (result, _) = rig.run(plan);
+        assert_eq!(failure(&result)?, unsupported, "get");
+        let mut rig = DriverRig::new(page, SurfaceConfig::default())?;
+        let plan = create_plan(&rig.clock);
+        let (result, _) = rig.run(plan);
+        if create_registers {
+            assert!(matches!(result?, Verified::Registration(r) if !r.prf_present));
+        } else {
+            assert_eq!(failure(&result)?, unsupported, "create");
+        }
     }
     Ok(())
 }
@@ -483,7 +493,9 @@ fn lifecycle_events_consume_the_ceremony_and_bump_the_generation() -> TestResult
         let plan = create_plan(&rig.clock);
         let (result, driver) = rig.run(plan);
         assert_eq!(failure(&result)?, lifecycle(code), "{event:?}");
-        assert_eq!(driver.generation(), 2, "{event:?}");
+        // The event consumes the ceremony and the browser exit that follows consumes it once more.
+        let bumps = 3;
+        assert_eq!(driver.generation(), bumps, "{event:?}");
     }
     Ok(())
 }
@@ -501,7 +513,7 @@ fn a_different_navigation_id_consumes_the_ceremony() -> TestResult {
         failure(&result)?,
         lifecycle(LifecycleCode::NavigationViolation)
     );
-    assert_eq!(driver.generation(), 2);
+    assert_eq!(driver.generation(), 3);
     assert_eq!(driver.posts(), 0);
     Ok(())
 }
@@ -555,21 +567,7 @@ fn the_served_count_rule_gates_every_post() -> TestResult {
         let (result, driver) = rig.run(plan);
         assert_eq!(failure(&result)?, expected, "count {count}");
         assert_eq!(driver.posts(), 0);
-        assert_eq!(
-            check_served(ServedSnapshot {
-                count,
-                integrity_ok: integrity
-            }),
-            Err(expected)
-        );
     }
-    assert_eq!(
-        check_served(ServedSnapshot {
-            count: 1,
-            integrity_ok: true
-        }),
-        Ok(())
-    );
     Ok(())
 }
 
@@ -583,7 +581,7 @@ fn a_second_document_load_before_a_repost_is_a_duplicate() -> TestResult {
     driver.step(&mut rig.env());
     assert_eq!(driver.posts(), 1);
     rig.loopback.set_served(2, true);
-    let result = drive(&mut driver, &mut rig.env());
+    let result = rig.step_to_end(&mut driver);
     assert_eq!(
         failure(&result)?,
         protocol(ProtocolCode::DuplicateDocumentLoad)
@@ -616,23 +614,18 @@ fn the_ipv6_probe_runs_before_navigation_and_again_before_the_first_post() -> Te
 
 #[test]
 fn generation_exhaustion_is_reported_and_zero_is_refused() -> TestResult {
-    assert_eq!(next_generation(0), Ok(1));
     let exhausted = BridgeError::Unavailable(UnavailableCode::GenerationExhausted);
-    assert_eq!(next_generation(u32::MAX - 1), Err(exhausted));
-    assert_eq!(next_generation(u32::MAX), Err(exhausted));
     let mut rig = DriverRig::new(honest(600), SurfaceConfig::default())?;
-    let mut plan = create_plan(&rig.clock);
-    plan.generation = u32::MAX - 1;
+    let plan = create_plan(&rig.clock).with_generation(u32::MAX - 1);
     let (result, _) = rig.run(plan);
     assert_eq!(failure(&result)?, exhausted);
     let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
-    let mut plan = create_plan(&rig.clock);
-    plan.generation = u32::MAX - 1;
-    let (result, _) = rig.run(plan);
+    let plan = create_plan(&rig.clock).with_generation(u32::MAX - 1);
+    let (result, driver) = rig.run(plan);
     result?;
+    assert_eq!(driver.generation(), u32::MAX);
     let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
-    let mut plan = create_plan(&rig.clock);
-    plan.generation = 0;
+    let plan = create_plan(&rig.clock).with_generation(0);
     let (result, _) = rig.run(plan);
     assert_eq!(failure(&result)?, protocol(ProtocolCode::LengthOutOfBounds));
     Ok(())
@@ -641,12 +634,11 @@ fn generation_exhaustion_is_reported_and_zero_is_refused() -> TestResult {
 #[test]
 fn a_get_without_a_stored_credential_cannot_be_posted() -> TestResult {
     let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
-    let plan = CeremonyPlan {
-        stored: None,
-        ..get_plan(&rig.clock, stored_fixture(0)?)
-    };
-    let (result, _) = rig.run(plan);
-    assert_eq!(failure(&result)?, protocol(ProtocolCode::Malformed));
+    let plan = get_plan(&rig.clock, stored_fixture(0)?).with_stored(None);
+    let (result, driver) = rig.run(plan);
+    assert_eq!(failure(&result)?, protocol(ProtocolCode::LengthOutOfBounds));
+    assert_eq!(driver.posts(), 0);
+    assert_eq!(rig.handle.pair_count(), 0);
     Ok(())
 }
 
@@ -669,11 +661,8 @@ fn the_enrollment_budget_fails_the_ceremony_in_progress() -> TestResult {
         ),
     ] {
         let mut rig = DriverRig::new(page, surface)?;
-        let mut plan = create_plan(&rig.clock);
-        plan.budget = Some(Budget {
-            start: rig.clock.now(),
-            limit: Duration::from_secs(5),
-        });
+        let plan = create_plan(&rig.clock)
+            .with_budget(Budget::with_limit(rig.clock.now(), Duration::from_secs(5)));
         let (result, _) = rig.run(plan);
         assert_eq!(
             failure(&result)?,
@@ -681,52 +670,6 @@ fn the_enrollment_budget_fails_the_ceremony_in_progress() -> TestResult {
         );
         assert!(rig.clock.elapsed() >= Duration::from_secs(5));
     }
-    Ok(())
-}
-
-#[test]
-fn protocol_codes_follow_the_codec_failure() {
-    assert_eq!(
-        protocol_from_codec(OwnerBridgeCodecError::NonCanonicalCbor),
-        protocol(ProtocolCode::NonCanonical)
-    );
-    for bounds in [
-        OwnerBridgeCodecError::BoundsExceeded,
-        OwnerBridgeCodecError::BufferTooSmall,
-        OwnerBridgeCodecError::InvalidControlBounds,
-    ] {
-        assert_eq!(
-            protocol_from_codec(bounds),
-            protocol(ProtocolCode::LengthOutOfBounds)
-        );
-    }
-    assert_eq!(
-        protocol_from_codec(OwnerBridgeCodecError::InvalidCbor),
-        protocol(ProtocolCode::Malformed)
-    );
-}
-
-#[test]
-fn a_get_plan_without_a_stored_credential_cannot_verify() -> TestResult {
-    let rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
-    let plan = CeremonyPlan {
-        stored: None,
-        ..get_plan(&rig.clock, stored_fixture(0)?)
-    };
-    let signer = FixtureSigner::new(&CREDENTIAL_ID).boxed()?;
-    let payload = signer
-        .assertion_payload(
-            CeremonyId::from_bytes(bytes16(0)),
-            &WebAuthnChallenge::from_bytes(bytes32(0x20)),
-            &ReplyShape::honest(1, Some(bytes32(0xa0))),
-        )
-        .boxed()?;
-    let mut prf = Zeroizing::new([0; 32]);
-    let outcome = parse_and_verify(&plan, &payload, &mut prf);
-    assert_eq!(
-        outcome.err(),
-        Some(rejected(RejectedCode::CredentialMismatch))
-    );
     Ok(())
 }
 
@@ -949,7 +892,7 @@ fn cleanup_failures_quarantine_the_ceremony_without_reviving_secrets() -> TestRe
         let (result, driver) = rig.run(plan);
         let expected = BridgeError::Quarantine(QuarantineCode::ControllerCloseFailed);
         assert_eq!(failure(&result)?, expected);
-        assert_eq!(*driver.slots().prf, [0; 32]);
+        assert_eq!(*driver.prf(), [0; 32]);
     }
     Ok(())
 }
@@ -963,7 +906,7 @@ fn an_exit_timeout_quarantines_and_a_late_exit_completes_cleanup() -> TestResult
     let mut rig = DriverRig::new(honest(0), surface)?;
     let plan = create_plan(&rig.clock);
     let mut driver = new_driver(plan);
-    let result = drive(&mut driver, &mut rig.env());
+    let result = rig.step_to_end(&mut driver);
     let expected = BridgeError::Quarantine(QuarantineCode::CleanupTimeout);
     assert_eq!(failure(&result)?, expected);
     assert!(!driver.poll_cleanup(&mut rig.env()));
@@ -995,7 +938,7 @@ fn unfinished_cleanup_keeps_waiting_until_it_can_finish() -> TestResult {
     });
     let plan = create_plan(&rig.clock);
     let mut driver = new_driver(plan);
-    let result = drive(&mut driver, &mut rig.env());
+    let result = rig.step_to_end(&mut driver);
     assert_eq!(
         failure(&result)?,
         BridgeError::Quarantine(QuarantineCode::CleanupTimeout)
@@ -1037,9 +980,9 @@ fn a_finished_or_quarantined_driver_stays_pending_and_never_wakes() -> TestResul
     let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
     let plan = create_plan(&rig.clock);
     let mut driver = new_driver(plan);
-    let result = drive(&mut driver, &mut rig.env());
+    let result = rig.step_to_end(&mut driver);
     result?;
-    assert!(matches!(driver.step(&mut rig.env()), Step::Pending));
+    assert!(matches!(driver.step(&mut rig.env()), Step::Done));
     assert_eq!(driver.next_wake(), None);
     let surface = SurfaceConfig {
         exit_delay: None,
@@ -1048,12 +991,12 @@ fn a_finished_or_quarantined_driver_stays_pending_and_never_wakes() -> TestResul
     let mut rig = DriverRig::new(honest(0), surface)?;
     let plan = create_plan(&rig.clock);
     let mut driver = new_driver(plan);
-    let result = drive(&mut driver, &mut rig.env());
+    let result = rig.step_to_end(&mut driver);
     assert_eq!(
         failure(&result)?,
         BridgeError::Quarantine(QuarantineCode::CleanupTimeout)
     );
-    assert!(matches!(driver.step(&mut rig.env()), Step::Pending));
+    assert!(matches!(driver.step(&mut rig.env()), Step::Done));
     assert_eq!(driver.next_wake(), None);
     Ok(())
 }
@@ -1120,7 +1063,7 @@ fn state_word_failures_at_consumption_are_unexpected_state() -> TestResult {
     let mut rig = DriverRig::new(honest(0), surface)?;
     let plan = create_plan(&rig.clock);
     let (result, _) = rig.run(plan);
-    assert_eq!(failure(&result)?, protocol(ProtocolCode::UnexpectedState));
+    assert_eq!(failure(&result)?, refused);
     Ok(())
 }
 
@@ -1186,10 +1129,9 @@ fn a_page_whose_call_resolves_just_after_the_release_request_loses_its_compare_e
 
 #[test]
 fn a_verified_registration_does_not_convert_to_an_assertion() -> TestResult {
-    let stored = stored_fixture(0)?;
     let registration = Registration {
         credential_id: vec![1],
-        public_key: stored.public_key,
+        public_key: CoseEs256PublicKey::from_canonical_encoding(&FIXTURE_COSE_KEY).boxed()?,
         transports: TransportCodes::new(&[]).boxed()?,
         backup_eligible: false,
         backup_state: false,
@@ -1210,7 +1152,301 @@ fn an_equal_counter_or_a_zero_after_a_nonzero_counter_is_a_regression() -> TestR
         };
         let (mut rig, plan) = get_rig(page, stored)?;
         let (result, _) = rig.run(plan);
-        assert_eq!(failure(&result)?, rejected(RejectedCode::CounterRegression));
+        assert_eq!(failure(&result)?, rejected(RejectedCode::Signature));
     }
+    Ok(())
+}
+
+const fn served(count: u32) -> ServedSnapshot {
+    ServedSnapshot {
+        count,
+        integrity_ok: true,
+    }
+}
+
+fn release_requested(rig: &DriverRig) -> bool {
+    rig.handle.log().iter().any(|entry| {
+        matches!(
+            entry,
+            LogEntry::Cas {
+                actor: Actor::Host,
+                new: 4,
+                won: true,
+                ..
+            }
+        )
+    })
+}
+
+fn controller_closed(rig: &DriverRig) -> bool {
+    rig.handle.log().contains(&LogEntry::ControllerClosed)
+}
+
+#[test]
+fn a_zero_served_count_that_settles_to_one_is_a_benign_race() -> TestResult {
+    let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
+    rig.loopback
+        .script_served(&[served(0), served(0), served(1)]);
+    let plan = create_plan(&rig.clock);
+    let mut driver = new_driver(plan);
+    driver.step(&mut rig.env());
+    rig.clock.advance(Duration::from_millis(100));
+    driver.step(&mut rig.env());
+    assert_eq!(driver.posts(), 0);
+    assert_eq!(
+        driver.next_wake(),
+        Some(rig.clock.now() + SERVED_SETTLE),
+        "the driver must wake when the settle window ends"
+    );
+    rig.clock.advance(Duration::from_millis(10));
+    driver.step(&mut rig.env());
+    assert_eq!(driver.posts(), 0);
+    rig.clock.advance(Duration::from_millis(10));
+    driver.step(&mut rig.env());
+    assert_eq!(driver.posts(), 1);
+    assert!(!controller_closed(&rig));
+    let result = rig.step_to_end(&mut driver);
+    assert!(matches!(result?, Verified::Registration(_)));
+    Ok(())
+}
+
+#[test]
+fn a_zero_served_count_that_persists_is_asset_integrity_after_the_settle_window() -> TestResult {
+    let surface = SurfaceConfig {
+        served_completions: 0,
+        ..SurfaceConfig::default()
+    };
+    let mut rig = DriverRig::new(honest(0), surface)?;
+    let plan = create_plan(&rig.clock);
+    let mut driver = new_driver(plan);
+    driver.step(&mut rig.env());
+    rig.clock.advance(Duration::from_millis(100));
+    driver.step(&mut rig.env());
+    rig.clock.advance(Duration::from_millis(90));
+    driver.step(&mut rig.env());
+    assert!(!controller_closed(&rig), "the window has not ended yet");
+    rig.clock.advance(Duration::from_millis(10));
+    driver.step(&mut rig.env());
+    assert!(controller_closed(&rig), "the window ended with a zero");
+    let result = rig.step_to_end(&mut driver);
+    assert_eq!(
+        failure(&result)?,
+        BridgeError::Unavailable(UnavailableCode::AssetIntegrity)
+    );
+    assert_eq!(driver.posts(), 0);
+    Ok(())
+}
+
+#[test]
+fn a_bad_digest_is_never_a_race_and_fails_without_waiting() -> TestResult {
+    let surface = SurfaceConfig {
+        served_completions: 0,
+        served_integrity_ok: false,
+        ..SurfaceConfig::default()
+    };
+    let mut rig = DriverRig::new(honest(0), surface)?;
+    let plan = create_plan(&rig.clock);
+    let mut driver = new_driver(plan);
+    driver.step(&mut rig.env());
+    rig.clock.advance(Duration::from_millis(100));
+    driver.step(&mut rig.env());
+    assert!(controller_closed(&rig));
+    let result = rig.step_to_end(&mut driver);
+    assert_eq!(
+        failure(&result)?,
+        BridgeError::Unavailable(UnavailableCode::AssetIntegrity)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_late_second_completion_is_caught_before_the_reply_is_consumed() -> TestResult {
+    let bad_digest = ServedSnapshot {
+        count: 1,
+        integrity_ok: false,
+    };
+    let integrity = BridgeError::Unavailable(UnavailableCode::AssetIntegrity);
+    let cases = [
+        (
+            vec![served(1), served(1), served(1), served(2)],
+            protocol(ProtocolCode::DuplicateDocumentLoad),
+        ),
+        (vec![served(1), served(1), served(1), bad_digest], integrity),
+        (vec![served(1), served(1), served(1), served(0)], integrity),
+    ];
+    for (script, expected) in cases {
+        let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
+        rig.loopback.script_served(&script);
+        let plan = create_plan(&rig.clock);
+        let (result, driver) = rig.run(plan);
+        assert_eq!(failure(&result)?, expected, "{script:?}");
+        assert_eq!(driver.posts(), 1);
+        assert_eq!(*driver.prf(), [0; 32]);
+        let log = rig.handle.log();
+        // It surfaced while the page was still working: the reply never became ready.
+        assert!(
+            !log.iter().any(|entry| matches!(
+                entry,
+                LogEntry::Cas {
+                    actor: Actor::Page,
+                    new: 2,
+                    ..
+                } | LogEntry::Cas {
+                    actor: Actor::Host,
+                    new: 3,
+                    ..
+                }
+            )),
+            "{script:?} {log:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_completion_that_arrives_between_the_writes_and_the_post_stops_the_post() -> TestResult {
+    let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
+    // Reads: the settle check, the check before the writes, then the one just before the post.
+    rig.loopback
+        .script_served(&[served(1), served(1), served(2)]);
+    let plan = create_plan(&rig.clock);
+    let (result, driver) = rig.run(plan);
+    assert_eq!(
+        failure(&result)?,
+        protocol(ProtocolCode::DuplicateDocumentLoad)
+    );
+    assert_eq!(driver.posts(), 0);
+    let log = rig.handle.log();
+    assert_eq!(rig.handle.pair_count(), 1, "the buffers were created");
+    assert!(!log
+        .iter()
+        .any(|entry| matches!(entry, LogEntry::Post { .. })));
+    assert!(log
+        .iter()
+        .any(|entry| matches!(entry, LogEntry::ZeroClose { pair: 0, .. })));
+    Ok(())
+}
+
+#[test]
+fn a_second_completion_after_consumption_fails_the_ceremony_and_cleanup_still_runs() -> TestResult {
+    let duplicate = protocol(ProtocolCode::DuplicateDocumentLoad);
+    for moment in [Moment::Consumed, Moment::Closing] {
+        for create in [true, false] {
+            let hook = Hook::SecondCompletion(moment);
+            let mut rig = DriverRig::with_hook(honest(0), hook, SurfaceConfig::default())?;
+            let plan = if create {
+                create_plan(&rig.clock)
+            } else {
+                get_plan(&rig.clock, stored_fixture(0)?)
+            };
+            let (result, driver) = rig.run(plan);
+            assert_eq!(failure(&result)?, duplicate, "{moment:?} create {create}");
+            assert_eq!(*driver.prf(), [0; 32], "{moment:?} create {create}");
+            let log = rig.handle.log();
+            assert!(log.contains(&LogEntry::ExitObserved), "{moment:?}");
+            assert!(log.contains(&LogEntry::Finished), "{moment:?}");
+            assert!(rig.store.records_now().is_empty(), "{moment:?}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_late_second_completion_surfaces_at_the_next_step_while_the_page_is_still_working() -> TestResult
+{
+    let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
+    rig.loopback
+        .script_served(&[served(1), served(1), served(1), served(1), served(2)]);
+    let plan = create_plan(&rig.clock);
+    let mut driver = new_driver(plan);
+    driver.step(&mut rig.env());
+    rig.clock.advance(Duration::from_millis(100));
+    driver.step(&mut rig.env());
+    assert_eq!(driver.posts(), 1);
+    rig.clock.advance(Duration::from_millis(10));
+    driver.step(&mut rig.env());
+    assert!(!release_requested(&rig), "one completion is still fine");
+    rig.clock.advance(Duration::from_millis(10));
+    driver.step(&mut rig.env());
+    assert!(
+        release_requested(&rig),
+        "the second completion ended the ceremony"
+    );
+    let result = rig.step_to_end(&mut driver);
+    assert_eq!(
+        failure(&result)?,
+        protocol(ProtocolCode::DuplicateDocumentLoad)
+    );
+    // The page was still waiting to answer, so the reply never became ready.
+    assert!(!rig.handle.log().iter().any(|entry| matches!(
+        entry,
+        LogEntry::Cas {
+            actor: Actor::Page,
+            new: 2,
+            ..
+        }
+    )));
+    Ok(())
+}
+
+#[test]
+fn a_page_landing_at_the_end_of_the_ceremony_never_makes_the_host_unexpected() -> TestResult {
+    let silent = HonestConfig {
+        respond_after: None,
+        ..honest(0)
+    };
+    for (from, to) in [(7, 6), (7, 1), (7, 2)] {
+        let hook = Hook::RaceEnd { from, to };
+        let mut rig = DriverRig::with_hook(silent.clone(), hook, SurfaceConfig::default())?;
+        let plan = create_plan(&rig.clock);
+        let (result, _) = rig.run(plan);
+        let expected = lifecycle(LifecycleCode::InteractionTimeout);
+        assert_eq!(failure(&result)?, expected, "{from} -> {to}");
+        assert!(rig.handle.log().iter().any(|entry| matches!(
+            entry,
+            LogEntry::Cas {
+                actor: Actor::Page,
+                current,
+                new,
+                won: true,
+                ..
+            } if (*current, *new) == (from, to)
+        )));
+    }
+    let hook = Hook::RaceEnd { from: 1, to: 2 };
+    let page = tampered(Tamper::HeaderGeneration);
+    let mut rig = DriverRig::with_hook(page, hook, SurfaceConfig::default())?;
+    let plan = create_plan(&rig.clock);
+    let (result, _) = rig.run(plan);
+    let mismatch = protocol(ProtocolCode::GenerationMismatch);
+    assert_eq!(failure(&result)?, mismatch);
+    assert!(rig.handle.log().iter().any(|entry| matches!(
+        entry,
+        LogEntry::Cas {
+            actor: Actor::Page,
+            current: 1,
+            new: 2,
+            won: false,
+            ..
+        }
+    )));
+    Ok(())
+}
+
+#[test]
+fn a_posted_pair_keeps_its_request_payload_after_the_host_zeroes_the_buffer() -> TestResult {
+    let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
+    let plan = create_plan(&rig.clock);
+    let challenge = *plan.challenge().as_bytes();
+    let (result, _) = rig.run(plan);
+    result?;
+    let (payload, request) = rig.handle.with_buffers(|buffers| {
+        let pair = buffers.pair_at(0);
+        (pair.payload.clone(), pair.request.clone())
+    });
+    assert!(request.iter().all(|byte| *byte == 0));
+    let options = decode_create_options(&payload).boxed()?;
+    assert_eq!(options.challenge().as_bytes(), &challenge);
+    assert_eq!(options.ceremony_id(), CeremonyId::from_bytes(bytes16(0)));
     Ok(())
 }

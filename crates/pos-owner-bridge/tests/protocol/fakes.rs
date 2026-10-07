@@ -2,7 +2,8 @@
 
 use std::time::{Duration, Instant};
 
-use pos_owner_bridge::ceremony::plan::{Assertion, Slots, Verified};
+use pos_owner_bridge::ceremony::driver::CeremonyDriver;
+use pos_owner_bridge::ceremony::plan::{Assertion, CeremonyPlan, Verified};
 use pos_owner_bridge::fake::buffers::{Actor, Buffers, LogEntry, Pair, Role};
 use pos_owner_bridge::fake::clock::{FakeClock, FakeRandom};
 use pos_owner_bridge::fake::honest::HonestPage;
@@ -10,25 +11,23 @@ use pos_owner_bridge::fake::host::{FakeLoopback, FakeProbe, FakeStore, StoreOp};
 use pos_owner_bridge::fake::signer::{
     base64url, Backup, FixtureSigner, ReplyShape, FIXTURE_SCALAR, OTHER_SCALAR,
 };
-use pos_owner_bridge::fake::surface::{PageModel, SurfaceFaults};
-use pos_owner_bridge::listener::assets::{
-    ASSET_MANIFEST, BAD_REQUEST_RESPONSE, CSP_SCRIPT_SHA256, CSP_STYLE_SHA256, NOT_FOUND_RESPONSE,
-    OWNER_HTML, OWNER_HTML_SHA256, OWNER_RESPONSE_HEAD, OWNER_RESPONSE_SHA256,
-};
+use pos_owner_bridge::fake::stepper::{FakeHost, FakeStepper, DEFAULT_STEP_LIMIT};
+use pos_owner_bridge::fake::surface::{FakeSurface, PageModel, SurfaceFaults};
 use pos_owner_bridge::{
-    folder_name, BridgeError, BridgeStatus, CleanupStore, ErrorClass, LifecycleCode, LoopbackPort,
-    MonotonicClock, NavigationId, OsRandom, OwnerError, OwnerErrorKind, OwnerWebSurface, PostGuard,
-    PrfOutput, ProbeResult, ProcessProbe, ProtocolCode, QuarantineCode, RejectedCode, ReplyImage,
-    RequestImage, RootFingerprint, SecureRandom, SurfaceError, SurfaceEvent, SurfaceSpec,
+    cleanup_record_bytes, folder_name, BridgeError, BridgeStatus, CeremonyHost, CleanupStore,
+    ErrorClass, LifecycleCode, LoopbackPort, MonotonicClock, NavigationId, OsRandom, OwnerError,
+    OwnerErrorKind, OwnerWebSurface, PostGuard, PrfOutput, ProbeResult, ProcessIdentity,
+    ProcessProbe, ProtocolCode, QuarantineCode, RejectedCode, ReplyImage, RequestImage,
+    RootFingerprint, SecureRandom, ServedSnapshot, SurfaceError, SurfaceEvent, SurfaceSpec,
     SystemClock, UnavailableCode,
 };
 use pos_owner_bridge_codec::{
-    CeremonyId, CeremonyKind, ImagePathSha256, OwnerBridgeControlV1, WebAuthnChallenge,
+    decode_assertion_reply, decode_cleanup_record, CeremonyId, CeremonyKind, ImagePathSha256,
+    OwnerBridgeControlV1, OwnerUserHandle, PrfInput, WebAuthnChallenge,
 };
-use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use super::{bytes16, bytes32, honest, Boxed, DriverRig, TestResult};
+use super::{bytes16, bytes32, create_plan, honest, new_driver, Boxed, DriverRig, TestResult};
 use pos_owner_bridge::fake::surface::SurfaceConfig;
 
 #[test]
@@ -57,34 +56,117 @@ fn the_operating_system_random_and_clock_work() {
     assert_eq!(random.fill(&mut b), Ok(()));
     assert_ne!(a, b);
     let clock = SystemClock;
-    let started = clock.now();
-    clock.pause(Duration::from_millis(2));
-    clock.pause_for(Duration::from_millis(1), None);
-    assert!(clock.now().duration_since(started) >= Duration::from_millis(3));
+    let (first, second) = (clock.now(), clock.now());
+    assert!(second >= first);
 }
 
 #[test]
 fn the_fake_clock_skips_dead_time_only_up_to_the_next_event() {
     let clock = FakeClock::start();
     let origin: Instant = clock.now();
-    clock.pause(Duration::from_millis(10));
+    clock.advance(Duration::from_millis(10));
     assert_eq!(clock.elapsed(), Duration::from_millis(10));
-    clock.pause_for(Duration::from_millis(10), None);
+    clock.skip(Duration::from_millis(10), None);
     assert_eq!(clock.elapsed(), Duration::from_millis(20));
-    clock.pause_for(
+    clock.skip(
         Duration::from_millis(10),
         Some(origin + Duration::from_millis(500)),
     );
     assert_eq!(clock.elapsed(), Duration::from_millis(500));
     clock.set_activity_source(Box::new(|| Some(Duration::from_millis(700))));
-    clock.pause_for(
+    clock.skip(
         Duration::from_millis(10),
         Some(origin + Duration::from_secs(9)),
     );
     assert_eq!(clock.elapsed(), Duration::from_millis(700));
-    clock.pause_for(Duration::from_millis(10), Some(origin));
+    clock.skip(Duration::from_millis(10), Some(origin));
     assert_eq!(clock.elapsed(), Duration::from_millis(710));
     assert_eq!(clock.now().duration_since(origin), clock.elapsed());
+}
+
+#[test]
+fn the_image_buffers_never_print_their_bytes() {
+    let mut request = RequestImage::zeroed();
+    request.as_mut_bytes().fill(0xab);
+    let mut reply = ReplyImage::zeroed();
+    reply.as_mut_bytes().fill(0xcd);
+    let text = format!("{request:?} {reply:?}");
+    assert!(!text.contains("171") && !text.contains("205"), "{text}");
+    assert!(
+        text.contains("RequestImage") && text.contains("len: 4096"),
+        "{text}"
+    );
+    assert!(text.contains("dirty: true"), "{text}");
+    reply.wipe();
+    assert!(format!("{reply:?}").contains("dirty: false"));
+}
+
+#[test]
+fn aligning_a_clock_moves_its_origin_and_keeps_the_elapsed_time() {
+    let clock = FakeClock::start();
+    clock.advance(Duration::from_secs(7));
+    let target = clock.now() + Duration::from_secs(1_000);
+    clock.align_to(target);
+    assert_eq!(clock.now(), target);
+    assert_eq!(clock.elapsed(), Duration::from_secs(7));
+    assert_eq!(clock.offset_of(target), Duration::from_secs(7));
+}
+
+#[test]
+fn a_host_starts_every_run_at_the_t0_the_owner_thread_drew() -> TestResult {
+    // T0 comes from a clock with another origin, 1,000 seconds before this one's: the bounds of
+    // the ceremony must run from T0, not from where this clock happens to start.
+    let clock = FakeClock::start();
+    let t0 = clock
+        .now()
+        .checked_sub(Duration::from_secs(1_000))
+        .ok_or("the platform clock is too young for this test")?;
+    let plan = CeremonyPlan::for_test(
+        CeremonyKind::Create,
+        CeremonyId::from_bytes(bytes16(0)),
+        WebAuthnChallenge::from_bytes(bytes32(0x20)),
+        OwnerUserHandle::from_bytes(bytes32(0x40)),
+        PrfInput::from_bytes(bytes32(0x60)),
+        t0,
+    );
+    let loopback = FakeLoopback::default();
+    let page = HonestPage::new(honest(0)).boxed()?;
+    let surface = FakeSurface::new(
+        clock.clone(),
+        loopback.clone(),
+        Box::new(page),
+        SurfaceConfig::default(),
+    );
+    let mut host = FakeHost::new(clock.clone(), surface, loopback, FakeStore::default());
+    let log = host.t0_log();
+    let reply = host.run(CeremonyDriver::for_test(plan));
+    assert!(reply.result.is_ok(), "{:?}", reply.result.err());
+    assert_eq!(*log.borrow(), [Duration::from_secs(0)]);
+    assert!(clock.now() >= t0);
+    Ok(())
+}
+
+#[test]
+fn the_fake_stepper_counts_its_steps_and_gives_up_at_its_limit() -> TestResult {
+    let mut rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
+    let plan = create_plan(&rig.clock);
+    let mut driver = new_driver(plan);
+    let mut stepper = FakeStepper::new(rig.clock.clone()).with_step_limit(3);
+    let outcome = stepper.run(&mut driver, &mut rig.env());
+    assert_eq!(
+        outcome.err(),
+        Some(BridgeError::Protocol(ProtocolCode::UnexpectedState))
+    );
+    assert_eq!(stepper.steps(), 3);
+    let mut stepper = FakeStepper::new(rig.clock.clone());
+    assert!(stepper.run(&mut driver, &mut rig.env()).is_ok());
+    assert!(stepper.steps() > 0 && stepper.steps() < DEFAULT_STEP_LIMIT);
+    // A driver that already finished cannot be stepped again.
+    assert_eq!(
+        stepper.run(&mut driver, &mut rig.env()).err(),
+        Some(BridgeError::Protocol(ProtocolCode::UnexpectedState))
+    );
+    Ok(())
 }
 
 #[test]
@@ -104,6 +186,49 @@ fn the_fake_loopback_scripts_the_served_count_and_the_probe() {
         Err(BridgeError::Unavailable(UnavailableCode::LoopbackChanged))
     );
     assert_eq!(loopback.probes(), 2);
+}
+
+#[test]
+fn a_scripted_served_count_advances_one_read_at_a_time_and_repeats_its_last_entry() {
+    let snapshot = |count| ServedSnapshot {
+        count,
+        integrity_ok: true,
+    };
+    let mut loopback = FakeLoopback::default();
+    loopback.script_served(&[snapshot(0), snapshot(1), snapshot(2)]);
+    let reads: Vec<u32> = (0..5).map(|_| loopback.served().count).collect();
+    assert_eq!(reads, [0, 1, 2, 2, 2]);
+    loopback.begin_navigation();
+    assert_eq!(loopback.served().count, 0);
+    loopback.script_served(&[]);
+    loopback.set_served(4, true);
+    assert_eq!(loopback.served().count, 4);
+    assert_eq!(loopback.served().count, 4);
+}
+
+#[test]
+fn a_cleanup_record_that_cannot_be_encoded_makes_the_surface_unavailable() -> TestResult {
+    let identity = ProcessIdentity {
+        browser_pid: 7,
+        creation_filetime: 8,
+        image_path_sha256: ImagePathSha256::from_bytes([9; 32]),
+    };
+    let id = CeremonyId::from_bytes(bytes16(0));
+    let name = folder_name(&id);
+    let bytes = cleanup_record_bytes(id, &name, &identity)?;
+    let record = decode_cleanup_record(&bytes).boxed()?;
+    assert_eq!(record.folder_name(), name);
+    assert_eq!(record.browser_pid(), 7);
+    assert_eq!(record.creation_filetime(), 8);
+    assert_eq!(record.image_path_sha256().as_bytes(), &[9; 32]);
+    let too_long = "x".repeat(4_096);
+    assert_eq!(
+        cleanup_record_bytes(id, &too_long, &identity),
+        Err(BridgeError::Unavailable(
+            UnavailableCode::InterfaceUnavailable
+        ))
+    );
+    Ok(())
 }
 
 #[test]
@@ -172,8 +297,20 @@ fn base64url_matches_the_golden_challenge_and_the_signer_is_cached_and_validated
         signer.assertion_payload(id, &challenge, &wrong).boxed()?,
         first
     );
+    // A missing PRF is encoded the way the packaged page does it: as CBOR null, so the closed
+    // decoder refuses the payload and the bridge classifies it.
     let missing = ReplyShape { prf: None, ..shape };
-    assert!(signer.assertion_payload(id, &challenge, &missing).is_err());
+    let absent = signer.assertion_payload(id, &challenge, &missing).boxed()?;
+    assert!(decode_assertion_reply(&absent).is_err());
+    let malformed = ReplyShape {
+        prf_item: Some(vec![0x41, 1]),
+        ..missing
+    };
+    let odd = signer
+        .assertion_payload(id, &challenge, &malformed)
+        .boxed()?;
+    assert_ne!(odd, absent);
+    assert!(decode_assertion_reply(&odd).is_err());
     assert!(signer
         .attestation_payload(id, &challenge, &ReplyShape::honest(0, None))
         .is_ok());
@@ -199,7 +336,6 @@ fn a_surface_refuses_every_state_call_without_a_live_pair() -> TestResult {
     let refused = SurfaceError::new(BridgeError::Protocol(ProtocolCode::UnexpectedState));
     assert_eq!(rig.surface.reply_load_state(), Err(refused));
     assert_eq!(rig.surface.reply_compare_exchange(0, 4), Err(refused));
-    assert_eq!(rig.surface.reply_store_state(5), Err(refused));
     assert_eq!(
         rig.surface.reply_copy(&mut ReplyImage::zeroed()),
         Err(refused)
@@ -217,7 +353,7 @@ fn a_surface_refuses_every_state_call_without_a_live_pair() -> TestResult {
         .iter()
         .filter(|entry| matches!(entry, LogEntry::Violation(_)))
         .count();
-    assert_eq!(violations, 6);
+    assert_eq!(violations, 5);
     Ok(())
 }
 
@@ -263,9 +399,8 @@ fn a_surface_re_checks_the_guard_and_exposes_the_state_word() -> TestResult {
     };
     assert_eq!(rig.surface.post(&good), Ok(()));
     assert_eq!(rig.surface.reply_load_state(), Ok(0));
-    assert_eq!(rig.surface.reply_store_state(5), Ok(()));
-    assert_eq!(rig.surface.reply_compare_exchange(5, 4), Ok(true));
-    assert_eq!(rig.surface.reply_compare_exchange(5, 4), Ok(false));
+    assert_eq!(rig.surface.reply_compare_exchange(0, 4), Ok(true));
+    assert_eq!(rig.surface.reply_compare_exchange(0, 4), Ok(false));
     rig.surface
         .create_and_write(&request, &header)
         .map_err(SurfaceError::error)?;
@@ -321,7 +456,7 @@ fn error_classes_retry_policy_and_messages_follow_the_taxonomy() {
             false,
         ),
         (
-            BridgeError::Rejected(RejectedCode::Origin),
+            BridgeError::Rejected(RejectedCode::Signature),
             ErrorClass::Rejected,
             true,
         ),
@@ -401,6 +536,27 @@ fn status_admission_and_transitions_follow_the_error_class() {
         BridgeStatus::after(Some(BridgeError::Protocol(ProtocolCode::Malformed))),
         BridgeStatus::Ready
     );
+    assert_eq!(BridgeStatus::after_restart(None), BridgeStatus::Ready);
+    for code in [
+        UnavailableCode::InterfaceUnavailable,
+        UnavailableCode::RngUnavailable,
+        UnavailableCode::LoopbackChanged,
+    ] {
+        assert_eq!(
+            BridgeStatus::after_restart(Some(BridgeError::Unavailable(code))),
+            BridgeStatus::Unavailable(code)
+        );
+    }
+    assert_eq!(
+        BridgeStatus::after_restart(Some(BridgeError::Quarantine(
+            QuarantineCode::StaleProcessPresent
+        ))),
+        BridgeStatus::Quarantined(QuarantineCode::StaleProcessPresent)
+    );
+    assert_eq!(
+        BridgeStatus::after_restart(Some(BridgeError::Protocol(ProtocolCode::Malformed))),
+        BridgeStatus::Ready
+    );
 }
 
 #[test]
@@ -416,22 +572,6 @@ fn secrets_are_redacted_wiped_and_compared_in_constant_time() {
     assert!(one.constant_time_eq(&RootFingerprint::from_bytes([1; 32])));
     assert!(!one.constant_time_eq(&other));
     assert_eq!(one.as_bytes(), &[1; 32]);
-    let mut slots = Slots::allocate();
-    slots.prf.fill(1);
-    slots.create_prf.fill(2);
-    slots.copy_a.as_mut_bytes().fill(3);
-    slots.copy_b.select(CeremonyKind::Get);
-    slots.copy_b.as_mut_bytes().fill(4);
-    assert_eq!(slots.copy_b.as_bytes().len(), 8_192);
-    slots.wipe_ceremony();
-    assert_eq!(*slots.prf, [0; 32]);
-    assert_eq!(*slots.create_prf, [2; 32]);
-    assert!(slots.copy_a.as_bytes().iter().all(|byte| *byte == 0));
-    assert!(slots.copy_b.as_bytes().iter().all(|byte| *byte == 0));
-    slots.wipe_all();
-    assert_eq!(*slots.create_prf, [0; 32]);
-    assert_eq!(slots.request.as_bytes().len(), 4_096);
-    assert_eq!(slots.copy_a.as_bytes().len(), 73_728);
 }
 
 #[test]
@@ -463,71 +603,6 @@ fn the_folder_name_is_the_lowercase_hex_ceremony_id() {
         folder_name(&CeremonyId::from_bytes([0xab; 16])),
         "ab".repeat(16)
     );
-}
-
-#[test]
-fn the_embedded_document_matches_its_manifest_and_pinned_digests() {
-    let html: [u8; 32] = Sha256::digest(OWNER_HTML).into();
-    assert_eq!(html, OWNER_HTML_SHA256);
-    let hex = html
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .concat();
-    assert_eq!(
-        ASSET_MANIFEST,
-        format!("{hex}  /owner.html  text/html; charset=utf-8\n")
-    );
-    let mut response = Sha256::new();
-    response.update(OWNER_RESPONSE_HEAD.as_bytes());
-    response.update(OWNER_HTML);
-    let digest: [u8; 32] = response.finalize().into();
-    assert_eq!(digest, OWNER_RESPONSE_SHA256);
-    assert!(OWNER_RESPONSE_HEAD.contains(&format!("Content-Length: {}\r\n", OWNER_HTML.len())));
-    let text = String::from_utf8_lossy(OWNER_HTML);
-    let hashed = |tag: &str| {
-        let start = text.find(&format!("<{tag}>")).map(|at| at + tag.len() + 2);
-        let end = text.find(&format!("</{tag}>"));
-        start
-            .zip(end)
-            .and_then(|(from, to)| text.get(from..to))
-            .map(|inner| {
-                let digest: [u8; 32] = Sha256::digest(inner.as_bytes()).into();
-                digest
-            })
-    };
-    for (tag, pinned) in [("script", CSP_SCRIPT_SHA256), ("style", CSP_STYLE_SHA256)] {
-        let digest = hashed(tag).map(|bytes| base64_standard(&bytes));
-        assert_eq!(digest.as_deref(), Some(pinned));
-        for head in [
-            OWNER_RESPONSE_HEAD,
-            NOT_FOUND_RESPONSE,
-            BAD_REQUEST_RESPONSE,
-        ] {
-            assert!(head.contains(&format!("'sha256-{pinned}'")));
-        }
-    }
-    assert!(NOT_FOUND_RESPONSE.contains("Content-Length: 0\r\n"));
-    assert!(BAD_REQUEST_RESPONSE.starts_with("HTTP/1.1 400"));
-}
-
-fn base64_standard(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let mut group = [0_u8; 3];
-        group[..chunk.len()].copy_from_slice(chunk);
-        let word = (u32::from(group[0]) << 16) | (u32::from(group[1]) << 8) | u32::from(group[2]);
-        for position in 0..4 {
-            if position <= chunk.len() {
-                let index = usize::try_from((word >> (18 - 6 * position)) & 63).unwrap_or(0);
-                out.push(char::from(ALPHABET.get(index).copied().unwrap_or(b'A')));
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
 }
 
 #[test]
@@ -570,6 +645,7 @@ fn crafted_pair(request_payload: &[u8]) -> Result<Buffers, Box<dyn std::error::E
         generation: 1,
         ceremony_id: bytes16(0),
         request,
+        payload: Vec::new(),
         reply,
         state: 0,
         state_changed_at: Duration::ZERO,

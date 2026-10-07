@@ -83,7 +83,7 @@ pub struct SurfaceFaults {
     pub create: Option<BridgeError>,
     /// `post` fails.
     pub post: Option<BridgeError>,
-    /// Every state-word load, exchange, store and copy fails.
+    /// Every state-word load, exchange and copy fails.
     pub state: Option<BridgeError>,
     /// Only compare-exchanges fail.
     pub exchange: Option<BridgeError>,
@@ -151,6 +151,14 @@ fn word(bytes: &[u8], at_offset: usize) -> u32 {
         .get(at_offset..at_offset + 4)
         .and_then(|chunk| <[u8; 4]>::try_from(chunk).ok())
         .map_or(0, u32::from_le_bytes)
+}
+
+fn posted_payload(request: &[u8]) -> Vec<u8> {
+    let length = usize::try_from(word(request, offset::PAYLOAD_LEN)).unwrap_or(0);
+    request
+        .get(offset::PAYLOAD..offset::PAYLOAD.saturating_add(length))
+        .unwrap_or_default()
+        .to_vec()
 }
 
 impl Inner {
@@ -227,12 +235,6 @@ impl Inner {
         Ok(won)
     }
 
-    fn store(&mut self, new: u32) -> Result<(), SurfaceError> {
-        let (_, pair) = self.state_pair("store without a live pair")?;
-        self.buffers.store(Actor::Host, pair, new);
-        Ok(())
-    }
-
     fn copy(&mut self, out: &mut ReplyImage) -> Result<(), SurfaceError> {
         let (now, pair) = self.state_pair("copy without a live pair")?;
         Self::fault(self.config.faults.copy)?;
@@ -294,6 +296,7 @@ impl Inner {
             generation: word(request.as_bytes(), offset::GENERATION),
             ceremony_id,
             request: request.as_bytes().to_vec(),
+            payload: posted_payload(request.as_bytes()),
             reply,
             state: 0,
             state_changed_at: self.clock.elapsed(),
@@ -526,10 +529,6 @@ impl OwnerWebSurface for FakeSurface {
 
     fn reply_compare_exchange(&self, current: u32, new: u32) -> Result<bool, SurfaceError> {
         self.inner.borrow_mut().exchange(current, new)
-    }
-
-    fn reply_store_state(&self, new: u32) -> Result<(), SurfaceError> {
-        self.inner.borrow_mut().store(new)
     }
 
     fn reply_copy(&self, out: &mut ReplyImage) -> Result<(), SurfaceError> {

@@ -1,24 +1,42 @@
 //! The ceremony state machine (ADR-110 §6): one non-blocking `step` per timer tick or event.
+//!
+//! The driver never sleeps and never loops waiting. It is an owned, `Send` value: the bridge builds
+//! it on the owner thread and hands it to the host, whose surface thread owns it, calls `step`
+//! from its `WM_TIMER` and `WebView2` callbacks, and sleeps until `next_wake` (ADR-110 §1a, §6;
+//! see `CeremonyHost`). Secrets cross threads only inside its preallocated `Box<Slots>`. Every
+//! phase has a timer, so a driver that is stepped on a monotonic clock always finishes:
+//!
+//! | Phase                     | Ends by                                                        |
+//! | ------------------------- | -------------------------------------------------------------- |
+//! | opening, awaiting load    | the page load, or `READINESS` from T0 (`ReadinessTimeout`)     |
+//! | posted, awaiting receipt  | a state past `EMPTY`, or the readiness bound / eight posts     |
+//! | posted, past `EMPTY`      | `READY` or `FAILED`, or `INTERACTION` after the first advance  |
+//! | releasing                 | `RELEASING` observed, or `RELEASE_WINDOW`                      |
+//! | awaiting exit             | the browser exit, or `EXIT_WINDOW` (`CleanupTimeout`)          |
+//!
+//! The 300 s enrollment budget is enforced while a ceremony is opening, loading or posted; it
+//! ends at E4 verification, so it is not checked while the driver releases and waits for exit,
+//! and `next_wake` ignores it from then on.
 
 use std::time::Instant;
 
 use pos_owner_bridge_codec::{
-    encode_cleanup_record, encode_create_options, encode_get_options, CeremonyKind,
-    CleanupRecordV1, ControlState, CreateOptionsV1, GetOptionsV1, OwnerBridgeControlV1,
-    CONTROL_HEADER_BYTES, MAX_CLEANUP_RECORD_BYTES,
+    encode_create_options, encode_get_options, CeremonyKind, ControlState, CreateOptionsV1,
+    GetOptionsV1, OwnerBridgeControlV1, CONTROL_HEADER_BYTES,
 };
 
-use super::consume::{check_reply_header, parse_and_verify, protocol_from_codec, snapshot};
+use super::consume::{check_reply_header, parse_and_verify, snapshot};
 use super::plan::{CeremonyPlan, Slots, Verified};
+use super::protocol_from_codec;
 use super::release::{reachable, read_state, release_loop, ReleaseMode};
 use super::timing::{
     expired, poll_interval, receipt_window, CHALLENGE_TTL, EXIT_WINDOW, INTERACTION, MAX_POSTS,
-    PUMP_INTERVAL, READINESS, RELEASE_WINDOW,
+    READINESS, RELEASE_WINDOW, SERVED_SETTLE,
 };
 use crate::{
-    folder_name, BridgeError, CleanupStore, LifecycleCode, LoopbackPort, MonotonicClock,
-    NavigationId, OwnerWebSurface, PostGuard, ProcessIdentity, ProtocolCode, QuarantineCode,
-    ServedSnapshot, SurfaceError, SurfaceEvent, SurfaceSpec, UnavailableCode,
+    cleanup_record_bytes, folder_name, BridgeError, CleanupStore, LifecycleCode, LoopbackPort,
+    MonotonicClock, NavigationId, OwnerWebSurface, PostGuard, ProcessIdentity, ProtocolCode,
+    QuarantineCode, ServedSnapshot, SurfaceError, SurfaceEvent, SurfaceSpec, UnavailableCode,
 };
 
 const HEADER: usize = CONTROL_HEADER_BYTES;
@@ -36,7 +54,7 @@ const fn lifecycle(code: LifecycleCode) -> BridgeError {
 /// # Errors
 ///
 /// Returns `Unavailable(GenerationExhausted)` when the next value would reach `u32::MAX`.
-pub const fn next_generation(current: u32) -> Result<u32, BridgeError> {
+const fn next_generation(current: u32) -> Result<u32, BridgeError> {
     match current.checked_add(1) {
         Some(next) if next < u32::MAX => Ok(next),
         _ => Err(BridgeError::Unavailable(
@@ -51,7 +69,7 @@ pub const fn next_generation(current: u32) -> Result<u32, BridgeError> {
 ///
 /// Returns `Unavailable(AssetIntegrity)` for a digest mismatch or no completion, and
 /// `Protocol(DuplicateDocumentLoad)` for a second completion.
-pub const fn check_served(served: ServedSnapshot) -> Result<(), BridgeError> {
+const fn check_served(served: ServedSnapshot) -> Result<(), BridgeError> {
     if !served.integrity_ok || served.count == 0 {
         Err(BridgeError::Unavailable(UnavailableCode::AssetIntegrity))
     } else if served.count > 1 {
@@ -80,6 +98,9 @@ pub enum Step {
     Pending,
     /// The ceremony ended (`Completed(ok|err)`) or entered quarantine.
     Finished(Result<Verified, BridgeError>),
+    /// The ceremony had already finished: there is nothing left to step, so a host that loops until
+    /// `Finished` must also stop on `Done`.
+    Done,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,25 +122,25 @@ pub struct CeremonyDriver {
     generation: u32,
     reply_header: [u8; HEADER],
     identity: Option<ProcessIdentity>,
-    record: Vec<u8>,
+    record: Option<Vec<u8>>,
     navigation: Option<NavigationId>,
     loaded: Option<NavigationId>,
     posts: u8,
     post_returned_at: Instant,
     first_past_empty: Option<Instant>,
     last_poll: Option<Instant>,
+    served_since: Option<Instant>,
     known: ControlState,
     buffers_live: bool,
     exit_seen: bool,
     surface_finished: bool,
-    error: Option<BridgeError>,
-    verified: Option<Verified>,
+    outcome: Result<Verified, BridgeError>,
 }
 
 impl CeremonyDriver {
     /// Start a ceremony from `plan`, using the preallocated `slots`.
     #[must_use]
-    pub const fn new(plan: CeremonyPlan, slots: Box<Slots>) -> Self {
+    pub(crate) const fn new(plan: CeremonyPlan, slots: Box<Slots>) -> Self {
         let (generation, t0) = (plan.generation, plan.t0);
         Self {
             plan,
@@ -128,19 +149,19 @@ impl CeremonyDriver {
             generation,
             reply_header: [0; HEADER],
             identity: None,
-            record: Vec::new(),
+            record: None,
             navigation: None,
             loaded: None,
             posts: 0,
             post_returned_at: t0,
             first_past_empty: None,
             last_poll: None,
+            served_since: None,
             known: ControlState::Empty,
             buffers_live: false,
             exit_seen: false,
             surface_finished: false,
-            error: None,
-            verified: None,
+            outcome: Err(UNEXPECTED_STATE),
         }
     }
 
@@ -151,9 +172,24 @@ impl CeremonyDriver {
     }
 
     /// The number of pairs posted so far.
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub const fn posts(&self) -> u8 {
         self.posts
+    }
+
+    /// The ceremony's T0.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub const fn t0(&self) -> Instant {
+        self.plan.t0
+    }
+
+    /// Start a ceremony from `plan` with freshly allocated slots.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn for_test(plan: CeremonyPlan) -> Self {
+        Self::new(plan, Slots::allocate())
     }
 
     /// Return the preallocated slots once the ceremony is over.
@@ -163,14 +199,21 @@ impl CeremonyDriver {
     }
 
     /// The PRF result of the latest verified ceremony.
+    #[cfg(feature = "test-support")]
     #[must_use]
-    pub fn slots(&self) -> &Slots {
-        &self.slots
+    pub fn prf(&self) -> &[u8; 32] {
+        &self.slots.prf
     }
 
     /// Advance the ceremony. Never blocks beyond the surface calls it makes.
+    ///
+    /// A host calls this from its timer and from each surface event until it returns
+    /// `Finished`; after that it returns `Done`, which a host that loops must also stop on. A
+    /// host that finished a ceremony in quarantine keeps the driver (see `QuarantineKeeper`) and
+    /// calls `poll_cleanup` until the browser exit and `finish()` are done.
     pub fn step(&mut self, env: &mut StepEnv<'_>) -> Step {
         let now = env.clock.now();
+        self.watch_served(env);
         if let Some(error) = self.drain_events(env.surface) {
             let error = self.bump_generation().err().unwrap_or(error);
             return self.fail(env, now, error);
@@ -181,24 +224,47 @@ impl CeremonyDriver {
             Phase::Posted => self.posted(env, now),
             Phase::Releasing { since, state_live } => self.releasing(env, now, since, state_live),
             Phase::AwaitingExit { since } => self.awaiting_exit(env, now, since),
-            Phase::Quarantined | Phase::Done => Step::Pending,
+            Phase::Quarantined | Phase::Done => Step::Done,
+        }
+    }
+
+    /// After the reply was consumed, a second document completion in this generation still fails
+    /// the ceremony (ADR-110 §4): the verified result is discarded, so no port method follows, and
+    /// the release and exit phases carry on with their timers.
+    fn watch_served(&mut self, env: &StepEnv<'_>) {
+        let consumed = matches!(
+            self.phase,
+            Phase::Releasing { .. } | Phase::AwaitingExit { .. }
+        );
+        if consumed && self.outcome.is_ok() && env.loopback.served().count > 1 {
+            self.outcome = Err(BridgeError::Protocol(ProtocolCode::DuplicateDocumentLoad));
+            self.slots.wipe_ceremony();
         }
     }
 
     /// The next instant at which the ceremony itself needs attention, if any.
     ///
-    /// A pump may sleep until then; surface events still need polling at the pump interval.
+    /// A host may sleep until then; surface events still need polling at the timer interval.
     #[must_use]
     pub fn next_wake(&self) -> Option<Instant> {
-        let budget = self.plan.budget.map(|budget| budget.start + budget.limit);
         let phase = match self.phase {
-            Phase::Opening | Phase::AwaitingLoad => self.readiness_wake(),
+            Phase::Opening | Phase::AwaitingLoad => self.load_wake(),
             Phase::Posted => self.posted_wake(),
             Phase::Releasing { since, .. } => Some(since + RELEASE_WINDOW),
             Phase::AwaitingExit { since } => Some(since + EXIT_WINDOW),
             Phase::Quarantined | Phase::Done => None,
         };
+        let budget = self
+            .plan
+            .budget
+            .filter(|_| self.pre_release())
+            .map(|budget| budget.start() + budget.limit());
         [phase, budget].into_iter().flatten().min()
+    }
+
+    fn load_wake(&self) -> Option<Instant> {
+        let served = self.served_since.map(|since| since + SERVED_SETTLE);
+        [self.readiness_wake(), served].into_iter().flatten().min()
     }
 
     fn readiness_wake(&self) -> Option<Instant> {
@@ -258,10 +324,19 @@ impl CeremonyDriver {
         let ours = self
             .identity
             .is_some_and(|identity| identity.browser_pid == browser_pid);
-        if ours {
-            self.exit_seen = true;
+        if !ours {
+            return None;
         }
-        (ours && self.pre_release()).then_some(lifecycle(LifecycleCode::RendererFailed))
+        self.exit_seen = true;
+        if self.pre_release() {
+            return Some(lifecycle(LifecycleCode::RendererFailed));
+        }
+        // A browser exit consumes the ceremony (ADR-110 §6). An exit before release fails the
+        // ceremony and `step` bumps the generation there; an exit after release bumps it here.
+        // Saturating keeps a verified result: a generation at the limit refuses the next
+        // ceremony with `GenerationExhausted` instead.
+        self.generation = self.generation.saturating_add(1);
+        None
     }
 
     fn apply_loaded(&mut self, id: NavigationId) -> Option<BridgeError> {
@@ -282,7 +357,7 @@ impl CeremonyDriver {
         let over = self
             .plan
             .budget
-            .is_some_and(|budget| expired(now, budget.start, budget.limit));
+            .is_some_and(|budget| expired(now, budget.start(), budget.limit()));
         over.then_some(lifecycle(LifecycleCode::EnrollmentBudgetExceeded))
     }
 
@@ -296,20 +371,6 @@ impl CeremonyDriver {
             return Some(error);
         }
         self.readiness_failure(now)
-    }
-
-    fn cleanup_record(&self, identity: &ProcessIdentity, name: &str) -> Vec<u8> {
-        let mut buffer = [0_u8; MAX_CLEANUP_RECORD_BYTES];
-        let length = CleanupRecordV1::new(
-            self.plan.ceremony_id,
-            name,
-            identity.browser_pid,
-            identity.creation_filetime,
-            identity.image_path_sha256,
-        )
-        .and_then(|record| encode_cleanup_record(&record, &mut buffer))
-        .unwrap_or(0);
-        buffer.get(..length).unwrap_or_default().to_vec()
     }
 
     fn open(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
@@ -326,10 +387,15 @@ impl CeremonyDriver {
             Err(error) => return self.fail(env, now, error.error()),
         };
         self.identity = Some(identity);
-        self.record = self.cleanup_record(&identity, &spec.folder_name);
-        if env.store.write_record(&self.record).is_err() {
+        let ceremony_id = self.plan.ceremony_id;
+        let record = match cleanup_record_bytes(ceremony_id, &spec.folder_name, &identity) {
+            Ok(record) => record,
+            Err(error) => return self.fail(env, now, error),
+        };
+        if env.store.write_record(&record).is_err() {
             return self.fail(env, now, CLEANUP_STORE_FAILED);
         }
+        self.record = Some(record);
         if let Err(error) = env.loopback.probe_ipv6() {
             return self.fail(env, now, error);
         }
@@ -359,7 +425,22 @@ impl CeremonyDriver {
         if let Err(error) = env.loopback.probe_ipv6() {
             return self.fail(env, now, error);
         }
+        if self.served_settling(env.loopback.served(), now) {
+            return Step::Pending;
+        }
         self.post_pair(env, now)
+    }
+
+    /// Whether a served count of zero may still be the benign race with the listener thread.
+    ///
+    /// A zero with a clean digest is re-read until `SERVED_SETTLE` after the first zero; a bad
+    /// digest is never a race and a persisting zero is judged by `post_pair`.
+    fn served_settling(&mut self, served: ServedSnapshot, now: Instant) -> bool {
+        if !served.integrity_ok || served.count != 0 {
+            return false;
+        }
+        let since = *self.served_since.get_or_insert(now);
+        !expired(now, since, SERVED_SETTLE)
     }
 
     fn write_request(&mut self) -> Result<[u8; HEADER], BridgeError> {
@@ -376,36 +457,36 @@ impl CeremonyDriver {
             CeremonyKind::Create => {
                 let options = CreateOptionsV1::new(
                     plan.ceremony_id,
-                    plan.challenge,
-                    plan.user_handle,
-                    plan.prf_input,
+                    plan.challenge(),
+                    plan.owner_user_handle(),
+                    plan.prf_input_value(),
                 );
                 encode_create_options(&options, payload)
             }
             CeremonyKind::Get => GetOptionsV1::new(
                 plan.ceremony_id,
-                plan.challenge,
+                plan.challenge(),
                 credential_id,
-                plan.prf_input,
+                plan.prf_input_value(),
             )
             .and_then(|options| encode_get_options(&options, payload)),
         }
-        .unwrap_or(0);
+        .map_err(protocol_from_codec)?;
         let request = OwnerBridgeControlV1::new_request(
             plan.kind,
             self.generation,
             plan.ceremony_id,
-            u32::try_from(length).unwrap_or(0),
+            u32::try_from(length).unwrap_or(u32::MAX),
         )
         .map_err(protocol_from_codec)?;
         head.copy_from_slice(&request.encode());
-        let reply = OwnerBridgeControlV1::new_reply(plan.kind, self.generation, plan.ceremony_id);
-        Ok(reply.map_or([0; HEADER], OwnerBridgeControlV1::encode))
+        OwnerBridgeControlV1::new_reply(plan.kind, self.generation, plan.ceremony_id)
+            .map(OwnerBridgeControlV1::encode)
+            .map_err(protocol_from_codec)
     }
 
     fn post_pair(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
-        let served = env.loopback.served();
-        if let Err(error) = check_served(served) {
+        if let Err(error) = check_served(env.loopback.served()) {
             return self.fail(env, now, error);
         }
         let reply_header = match self.write_request() {
@@ -421,6 +502,12 @@ impl CeremonyDriver {
         self.buffers_live = true;
         self.reply_header = reply_header;
         self.known = ControlState::Empty;
+        // ADR-110 §5.5 step 3: the served count is read again immediately before the post, after
+        // the buffers were written, so a completion that arrived meanwhile cannot be posted over.
+        let served = env.loopback.served();
+        if let Err(error) = check_served(served) {
+            return self.fail(env, now, error);
+        }
         let guard = PostGuard {
             generation: self.generation,
             navigation_id: self.navigation.unwrap_or(NavigationId(0)),
@@ -438,6 +525,11 @@ impl CeremonyDriver {
 
     fn posted(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
         if let Some(error) = self.budget_failure(now) {
+            return self.fail(env, now, error);
+        }
+        // The served count is re-read at every step, so a late second completion in this
+        // generation surfaces as `DuplicateDocumentLoad` promptly, not only at consumption.
+        if let Err(error) = check_served(env.loopback.served()) {
             return self.fail(env, now, error);
         }
         if let Err(error) = self.poll(env, now) {
@@ -506,8 +598,7 @@ impl CeremonyDriver {
     fn timing_failure(&mut self, env: &StepEnv<'_>, now: Instant) -> Step {
         match release_loop(env.surface, ControlState::Empty, ReleaseMode::Timing) {
             Ok(None) => {
-                self.error
-                    .get_or_insert(lifecycle(LifecycleCode::ReadinessTimeout));
+                self.outcome = Err(lifecycle(LifecycleCode::ReadinessTimeout));
                 self.slots.wipe_ceremony();
                 self.phase = Phase::Releasing {
                     since: env.clock.now(),
@@ -551,7 +642,8 @@ impl CeremonyDriver {
             .reply_compare_exchange(ControlState::Ready as u32, ControlState::Consuming as u32);
         match won {
             Ok(true) => self.known = ControlState::Consuming,
-            Ok(false) | Err(_) => return self.fail_unexpected(UNEXPECTED_STATE, now),
+            Ok(false) => return self.fail_unexpected(UNEXPECTED_STATE, now),
+            Err(error) => return self.fail_unexpected(error.error(), now),
         }
         match self.verify_reply(env) {
             Ok(verified) => self.finish_success(env, now, verified),
@@ -586,7 +678,7 @@ impl CeremonyDriver {
     fn finish_success(&mut self, env: &StepEnv<'_>, now: Instant, verified: Verified) -> Step {
         match release_loop(env.surface, ControlState::Consuming, ReleaseMode::Terminal) {
             Ok(_) => {
-                self.verified = Some(verified);
+                self.outcome = Ok(verified);
                 self.slots.wipe_copies();
                 self.phase = Phase::Releasing {
                     since: env.clock.now(),
@@ -599,8 +691,7 @@ impl CeremonyDriver {
     }
 
     fn fail(&mut self, env: &mut StepEnv<'_>, now: Instant, error: BridgeError) -> Step {
-        self.error.get_or_insert(error);
-        self.verified = None;
+        self.outcome = Err(error);
         self.slots.wipe_ceremony();
         if self.identity.is_none() {
             self.phase = Phase::Done;
@@ -622,8 +713,7 @@ impl CeremonyDriver {
     }
 
     fn fail_unexpected(&mut self, error: BridgeError, now: Instant) -> Step {
-        self.error = Some(error);
-        self.verified = None;
+        self.outcome = Err(error);
         self.slots.wipe_ceremony();
         self.phase = Phase::Releasing {
             since: now,
@@ -682,7 +772,11 @@ impl CeremonyDriver {
         if !self.surface_finished {
             self.surface_finished = env.surface.finish().is_ok();
         }
-        self.surface_finished && env.store.delete_record(&self.record).is_ok()
+        self.surface_finished
+            && self
+                .record
+                .as_deref()
+                .is_none_or(|record| env.store.delete_record(record).is_ok())
     }
 
     fn complete(&mut self, env: &mut StepEnv<'_>) -> Step {
@@ -690,16 +784,12 @@ impl CeremonyDriver {
             return self.quarantine(QuarantineCode::CleanupTimeout);
         }
         self.phase = Phase::Done;
-        let outcome = self
-            .error
-            .map_or_else(|| self.verified.take().ok_or(UNEXPECTED_STATE), Err);
-        Step::Finished(outcome)
+        Step::Finished(std::mem::replace(&mut self.outcome, Err(UNEXPECTED_STATE)))
     }
 
     fn quarantine(&mut self, code: QuarantineCode) -> Step {
         let error = BridgeError::Quarantine(code);
-        self.error = Some(error);
-        self.verified = None;
+        self.outcome = Err(error);
         self.slots.wipe_ceremony();
         self.phase = Phase::Quarantined;
         Step::Finished(Err(error))
@@ -716,27 +806,5 @@ impl CeremonyDriver {
     }
 }
 
-/// The most steps `drive` takes before giving up on a ceremony that never finishes.
-///
-/// A legitimate ceremony ends in far fewer: its worst case is about 14,000 pump intervals.
-pub const MAX_STEPS: u32 = 50_000;
-
-/// Pump `driver` until it finishes: step, then pause one pump interval or until its next wake.
-///
-/// A driver that is still pending after [`MAX_STEPS`] steps fails closed with
-/// `Protocol(UnexpectedState)`.
-///
-/// # Errors
-///
-/// Returns the ceremony's failure once it finishes.
-pub fn drive(driver: &mut CeremonyDriver, env: &mut StepEnv<'_>) -> Result<Verified, BridgeError> {
-    (0..MAX_STEPS)
-        .find_map(|_| match driver.step(env) {
-            Step::Finished(result) => Some(result),
-            Step::Pending => {
-                env.clock.pause_for(PUMP_INTERVAL, driver.next_wake());
-                None
-            }
-        })
-        .unwrap_or(Err(UNEXPECTED_STATE))
-}
+#[cfg(test)]
+mod tests;

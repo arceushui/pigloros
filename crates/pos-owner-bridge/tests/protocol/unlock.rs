@@ -1,42 +1,19 @@
 //! Unlock: Get ceremony, wait for exit, open, persist the binding update, then release.
 
+use super::{
+    bytes32, eligible, expected_prf, honest, unlock_binding as binding, Call, FakeUnlock, Hook,
+    Moment, Rig, TestResult,
+};
+use pos_owner_bridge::fake::buffers::LogEntry;
 use pos_owner_bridge::fake::clock::FakeRandom;
 use pos_owner_bridge::fake::honest::HonestConfig;
-use pos_owner_bridge::fake::signer::{Backup, ReplyShape, FIXTURE_COSE_KEY};
+use pos_owner_bridge::fake::signer::ReplyShape;
 use pos_owner_bridge::{
-    BindingUpdate, BridgeError, BridgeStatus, OwnerError, OwnerErrorKind, RejectedCode,
-    UnavailableCode,
-};
-use pos_owner_bridge_codec::{
-    CoseEs256PublicKey, SubjectCredentialBindingInputV1, SubjectCredentialBindingV1, SubjectId,
-    TransportCodes,
-};
-
-use super::{
-    bytes16, bytes32, expected_prf, honest, user_handle, Boxed, Call, FakeUnlock, Rig, TestResult,
-    CREDENTIAL_ID,
+    BindingUpdate, BridgeConfig, BridgeError, BridgeStatus, OwnerError, OwnerErrorKind,
+    ProtocolCode, RejectedCode, UnavailableCode,
 };
 
 type Tweak = fn(&mut ReplyShape);
-
-fn binding(
-    owner: &str,
-    sign_count: u32,
-) -> Result<SubjectCredentialBindingV1<'_>, Box<dyn std::error::Error>> {
-    SubjectCredentialBindingV1::new(SubjectCredentialBindingInputV1 {
-        owner_id: owner,
-        subject_id: SubjectId::from_bytes(bytes16(0x10)),
-        epoch: 1,
-        credential_id: &CREDENTIAL_ID,
-        user_handle: user_handle(),
-        public_key: CoseEs256PublicKey::from_canonical_encoding(&FIXTURE_COSE_KEY).boxed()?,
-        backup_eligible: false,
-        backup_state: false,
-        sign_count,
-        transports: TransportCodes::new(&[0]).boxed()?,
-    })
-    .boxed()
-}
 
 fn rig(page: HonestConfig) -> Result<Rig, Box<dyn std::error::Error>> {
     Rig::new(page, FakeRandom::seeded(9))
@@ -61,6 +38,101 @@ fn unlock_opens_persists_and_only_then_releases() -> TestResult {
         }]
     );
     assert_eq!(rig.bridge.status(), BridgeStatus::Ready);
+    Ok(())
+}
+
+#[test]
+fn consecutive_ceremonies_never_reuse_a_generation() -> TestResult {
+    let mut rig = rig(honest(0))?;
+    let mut port = FakeUnlock::new();
+    let first = binding("owner", 0)?;
+    rig.bridge.unlock(&first, &bytes32(0x60), &mut port)?;
+    let second = binding("owner", 1)?;
+    rig.bridge.unlock(&second, &bytes32(0x60), &mut port)?;
+    let generations: Vec<u32> = rig
+        .surface
+        .log()
+        .iter()
+        .filter_map(|entry| match entry {
+            LogEntry::Post { generation, .. } => Some(*generation),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(generations, [1, 2]);
+    Ok(())
+}
+
+#[test]
+fn a_ceremony_ending_at_the_last_generation_succeeds_and_the_next_is_refused() -> TestResult {
+    let config = BridgeConfig::default().with_start_generation(u32::MAX - 1);
+    let mut rig = Rig::with_hook(honest(0), Hook::None, FakeRandom::seeded(9), config)?;
+    let mut port = FakeUnlock::new();
+    let first = binding("owner", 0)?;
+    rig.bridge.unlock(&first, &bytes32(0x60), &mut port)?;
+    assert_eq!(rig.bridge.status(), BridgeStatus::Ready);
+    let second = binding("owner", 1)?;
+    let exhausted = BridgeError::Unavailable(UnavailableCode::GenerationExhausted);
+    assert_eq!(
+        rig.bridge.unlock(&second, &bytes32(0x60), &mut port),
+        Err(exhausted)
+    );
+    assert_eq!(
+        rig.bridge.status(),
+        BridgeStatus::Unavailable(UnavailableCode::GenerationExhausted)
+    );
+    Ok(())
+}
+
+#[test]
+fn an_illegal_observation_after_verification_discards_the_result_and_calls_no_port() -> TestResult {
+    let mut rig = Rig::with_hook(
+        honest(0),
+        Hook::Storm(vec![9]),
+        FakeRandom::seeded(9),
+        BridgeConfig::default(),
+    )?;
+    let mut port = FakeUnlock::new();
+    let binding = binding("owner", 0)?;
+    let outcome = rig.bridge.unlock(&binding, &bytes32(0x60), &mut port);
+    assert_eq!(
+        outcome.err(),
+        Some(BridgeError::Protocol(ProtocolCode::UnexpectedState))
+    );
+    // The reply was consumed and its copies compared before the illegal word appeared.
+    let log = rig.surface.log();
+    assert!(log
+        .iter()
+        .any(|entry| matches!(entry, LogEntry::HostCopy { state: 3, .. })));
+    assert!(port.calls.is_empty());
+    assert!(port.prf.is_none());
+    Ok(())
+}
+
+#[test]
+fn a_second_document_completion_after_consumption_discards_the_result_before_the_port() -> TestResult
+{
+    for moment in [Moment::Consumed, Moment::Closing] {
+        let mut rig = Rig::with_hook(
+            honest(0),
+            Hook::SecondCompletion(moment),
+            FakeRandom::seeded(9),
+            BridgeConfig::default(),
+        )?;
+        let mut port = FakeUnlock::new();
+        let binding = binding("owner", 0)?;
+        let outcome = rig.bridge.unlock(&binding, &bytes32(0x60), &mut port);
+        assert_eq!(
+            outcome.err(),
+            Some(BridgeError::Protocol(ProtocolCode::DuplicateDocumentLoad)),
+            "{moment:?}"
+        );
+        assert!(port.calls.is_empty(), "{moment:?}");
+        assert!(port.prf.is_none(), "{moment:?}");
+        let log = rig.surface.log();
+        assert!(log.contains(&LogEntry::ExitObserved), "{moment:?}");
+        assert!(log.contains(&LogEntry::Finished), "{moment:?}");
+        assert_eq!(rig.bridge.status(), BridgeStatus::Ready);
+    }
     Ok(())
 }
 
@@ -96,15 +168,11 @@ fn a_failed_open_stops_before_the_update() -> TestResult {
     Ok(())
 }
 
-const fn eligible(shape: &mut ReplyShape) {
-    shape.backup = Backup::Eligible;
-}
-
 #[test]
 fn a_rejected_assertion_never_reaches_the_owner_port() -> TestResult {
     let cases: [(Tweak, u32, RejectedCode); 2] = [
-        (eligible, 0, RejectedCode::BackupFlags),
-        (|_| {}, 5, RejectedCode::CounterRegression),
+        (eligible, 0, RejectedCode::Signature),
+        (|_| {}, 5, RejectedCode::Signature),
     ];
     for (tweak, counter, code) in cases {
         let page = HonestConfig {

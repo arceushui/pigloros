@@ -1,9 +1,13 @@
 //! Host-side ports the bridge needs besides the surface: the listener view and cleanup storage.
 
-use pos_owner_bridge_codec::{CeremonyId, ImagePathSha256};
+use pos_owner_bridge_codec::{
+    encode_cleanup_record, CeremonyId, CleanupRecordV1, ImagePathSha256, MAX_CLEANUP_RECORD_BYTES,
+};
 use thiserror::Error;
 
-use crate::BridgeError;
+use crate::ceremony::driver::CeremonyDriver;
+use crate::ceremony::plan::Verified;
+use crate::{BridgeError, ProcessIdentity, UnavailableCode};
 
 /// The listener's served count and integrity verdict for the current navigation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,7 +62,23 @@ pub trait CleanupStore {
     /// Returns [`CleanupError`] when the store cannot be read.
     fn records(&mut self) -> Result<Vec<Vec<u8>>, CleanupError>;
 
+    /// List the ceremony user-data folders that exist on disk, whether or not a record names them.
+    ///
+    /// Only folders the bridge's own scheme created count: names that are not a lowercase hex
+    /// ceremony ID (see [`folder_name`]) are ignored by the restart check.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CleanupError`] when the folders cannot be listed.
+    fn folders(&mut self) -> Result<Vec<String>, CleanupError>;
+
     /// Remove one user-data folder by name; a sharing violation defers it to the next start.
+    ///
+    /// The name is always a lowercase hex ceremony ID that the bridge derived itself, but an
+    /// implementation must still resolve it strictly under its own base folder and never follow
+    /// a path out of it. Removing a folder that does not exist succeeds: a record whose folder
+    /// is already gone must be able to clear, and an implementation that fails on a missing
+    /// folder only defers that record to every later start.
     ///
     /// # Errors
     ///
@@ -86,12 +106,124 @@ pub trait ProcessProbe {
     ) -> ProbeResult;
 }
 
-/// The collaborators the bridge owns besides its surface, randomness and clock.
-pub struct HostPorts {
-    /// The loopback listener view.
-    pub loopback: Box<dyn LoopbackPort>,
-    /// The cleanup-record store.
-    pub store: Box<dyn CleanupStore>,
+/// What a host returns after running one ceremony.
+///
+/// The driver comes back with its slots (the bridge reads the PRF from them, then wipes them),
+/// except when the ceremony ended in quarantine: the host keeps that driver and hands it back
+/// from [`CeremonyHost::poll_quarantine`] once cleanup finished.
+pub struct CeremonyReply {
+    /// The ceremony's result.
+    pub result: Result<Verified, BridgeError>,
+    /// The finished driver, unless it is quarantined.
+    pub driver: Option<CeremonyDriver>,
+}
+
+/// The surface thread's bookkeeping for a quarantined ceremony.
+///
+/// It keeps the driver until its cleanup finished, so every host applies the same policy: a
+/// quarantined driver never returns to the owner thread before its browser exit and `finish()`
+/// are done.
+#[derive(Default)]
+pub struct QuarantineKeeper {
+    held: Option<CeremonyDriver>,
+}
+
+impl QuarantineKeeper {
+    /// An empty keeper.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { held: None }
+    }
+
+    /// Turn a finished driver and its result into the reply for the owner thread; a driver that
+    /// ended in quarantine stays here.
+    ///
+    /// The bridge starts no ceremony while one is quarantined, so a second quarantine is a host
+    /// bug. The driver already held is the one whose browser may be alive, so it is kept and
+    /// the new one goes back to the owner thread with its result.
+    pub fn finish(
+        &mut self,
+        driver: CeremonyDriver,
+        result: Result<Verified, BridgeError>,
+    ) -> CeremonyReply {
+        let quarantined = matches!(result, Err(BridgeError::Quarantine(_)));
+        let returned = if quarantined {
+            self.keep(driver)
+        } else {
+            Some(driver)
+        };
+        CeremonyReply {
+            result,
+            driver: returned,
+        }
+    }
+
+    /// Hold `driver` unless one is already held, in which case it is handed back.
+    fn keep(&mut self, driver: CeremonyDriver) -> Option<CeremonyDriver> {
+        if self.held.is_none() {
+            self.held = Some(driver);
+            None
+        } else {
+            Some(driver)
+        }
+    }
+
+    /// Run `cleaned` (typically `CeremonyDriver::poll_cleanup` with the host's `StepEnv`) on the
+    /// kept driver and hand it back once it reports that cleanup finished.
+    pub fn poll(
+        &mut self,
+        cleaned: impl FnOnce(&mut CeremonyDriver) -> bool,
+    ) -> Option<CeremonyDriver> {
+        let mut driver = self.held.take()?;
+        if cleaned(&mut driver) {
+            Some(driver)
+        } else {
+            self.held = Some(driver);
+            None
+        }
+    }
+}
+
+/// The host side of the ceremony hand-off (ADR-110 §1a, §6, §10).
+///
+/// The host owns the surface and the driver on its surface thread. The bridge, on the owner
+/// thread, builds a driver and hands it over; the host moves it to the surface thread, calls
+/// [`CeremonyDriver::step`] from its timer and surface-event callbacks until the driver finishes,
+/// and replies. `OwnerBridge::enroll` and `unlock` block only inside [`CeremonyHost::run`]
+/// (the owner thread blocks on a reply channel); the portable core itself never sleeps. The
+/// crate's `ChannelHost` is the owner-side half of a bounded channel hand-off a host can use.
+pub trait CeremonyHost {
+    /// Run `driver` to the end and return its result.
+    fn run(&mut self, driver: CeremonyDriver) -> CeremonyReply;
+
+    /// Poll a quarantined ceremony for its browser exit. Returns the driver once its cleanup
+    /// finished, and `None` while it is still quarantined or when nothing is.
+    fn poll_quarantine(&mut self) -> Option<CeremonyDriver>;
+}
+
+/// Encode the cleanup record that precedes buffer creation (ADR-110 §16).
+///
+/// # Errors
+///
+/// Returns `Unavailable(InterfaceUnavailable)` when the record cannot be encoded: a ceremony
+/// must not continue without its durable record.
+pub fn cleanup_record_bytes(
+    ceremony_id: CeremonyId,
+    folder_name: &str,
+    identity: &ProcessIdentity,
+) -> Result<Vec<u8>, BridgeError> {
+    let mut buffer = [0_u8; MAX_CLEANUP_RECORD_BYTES];
+    let unavailable = BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable);
+    let length = CleanupRecordV1::new(
+        ceremony_id,
+        folder_name,
+        identity.browser_pid,
+        identity.creation_filetime,
+        identity.image_path_sha256,
+    )
+    .and_then(|record| encode_cleanup_record(&record, &mut buffer))
+    .or(Err(unavailable))?;
+    Ok(buffer.split_at(length.min(buffer.len())).0.to_vec())
 }
 
 /// The lowercase hex folder name of `ceremony_id`.
@@ -106,5 +238,10 @@ pub fn folder_name(ceremony_id: &CeremonyId) -> String {
 }
 
 fn hex_digit(nibble: u8) -> char {
-    char::from_digit(u32::from(nibble), 16).unwrap_or('0')
+    let digit = if nibble < 10 {
+        b'0' + nibble
+    } else {
+        b'a' - 10 + nibble
+    };
+    char::from(digit)
 }

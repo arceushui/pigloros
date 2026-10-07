@@ -211,15 +211,13 @@
   function onResult(a, credential) {
     settle(a);
     if (a.releasing) { cas(a, RECEIVED, FAILED); releaseActive(); return; }
-    var length = 0;
     try {
       if (!cas(a, RECEIVED, WRITING)) { abortThenRelease(); return; }
-      length = encodeReply(a, credential);
+      Atomics.store(a.reply.words, 9, encodeReply(a, credential));
     } catch (e) {
       if (!cas(a, WRITING, FAILED)) { abortThenRelease(); }
       return;
     }
-    Atomics.store(a.reply.words, 9, length);
     if (!cas(a, WRITING, READY)) { abortThenRelease(); }
   }
 
@@ -231,33 +229,35 @@
 
   function startCeremony(a, req) {
     var options, call;
-    a.controller = new AbortController();
-    if (req.kind === 0) {
-      options = {
-        publicKey: {
-          rp: { id: "localhost", name: "PiglorOS" },
-          user: { id: req.userHandle, name: "PiglorOS owner", displayName: "PiglorOS owner" },
-          challenge: req.challenge,
-          pubKeyCredParams: [{ type: "public-key", alg: -7 }],
-          authenticatorSelection: { authenticatorAttachment: "cross-platform", residentKey: "discouraged", requireResidentKey: false, userVerification: "required" },
-          hints: ["security-key"], timeout: 120000, attestation: "none", excludeCredentials: [],
-          extensions: { prf: { eval: { first: req.prf } } }
-        },
-        signal: a.controller.signal
-      };
-      call = navigator.credentials.create(options);
-    } else {
-      options = {
-        publicKey: {
-          challenge: req.challenge, rpId: "localhost",
-          allowCredentials: [{ type: "public-key", id: req.credentialId }],
-          userVerification: "required", hints: ["security-key"], timeout: 120000,
-          extensions: { prf: { eval: { first: req.prf } } }
-        },
-        signal: a.controller.signal
-      };
-      call = navigator.credentials.get(options);
-    }
+    try {
+      a.controller = new AbortController();
+      if (req.kind === 0) {
+        options = {
+          publicKey: {
+            rp: { id: "localhost", name: "PiglorOS" },
+            user: { id: req.userHandle, name: "PiglorOS owner", displayName: "PiglorOS owner" },
+            challenge: req.challenge,
+            pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+            authenticatorSelection: { authenticatorAttachment: "cross-platform", residentKey: "discouraged", requireResidentKey: false, userVerification: "required" },
+            hints: ["security-key"], timeout: 120000, attestation: "none", excludeCredentials: [],
+            extensions: { prf: { eval: { first: req.prf } } }
+          },
+          signal: a.controller.signal
+        };
+        call = navigator.credentials.create(options);
+      } else {
+        options = {
+          publicKey: {
+            challenge: req.challenge, rpId: "localhost",
+            allowCredentials: [{ type: "public-key", id: req.credentialId }],
+            userVerification: "required", hints: ["security-key"], timeout: 120000,
+            extensions: { prf: { eval: { first: req.prf } } }
+          },
+          signal: a.controller.signal
+        };
+        call = navigator.credentials.get(options);
+      }
+    } catch (e) { onError(a); return; }
     a.pending = true;
     say("Touch your security key.");
     call.then(function (c) { onResult(a, c); }, function () { onError(a); });

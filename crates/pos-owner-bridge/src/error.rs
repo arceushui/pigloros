@@ -23,7 +23,11 @@ pub enum UnavailableCode {
     LoopbackChanged,
     /// The bytes the listener served did not match the pinned response digest.
     AssetIntegrity,
-    /// A required `WebView` interface is unavailable.
+    /// A required interface is unavailable.
+    ///
+    /// ADR-110 §11 has no finer code, so this one is shared by a missing `WebView` interface,
+    /// a cleanup store that cannot write or be read, a restart check that cannot read the
+    /// store, and a ceremony refused because another one is already running.
     InterfaceUnavailable,
     /// The operating-system random generator failed.
     RngUnavailable,
@@ -34,42 +38,28 @@ pub enum UnavailableCode {
 }
 
 /// Security rejections of a ceremony reply.
+///
+/// ADR-110 §11 names a finer set of verification reasons (origin, RP ID hash, client-data
+/// type and challenge, flags, algorithm, key, counter, backup flags and so on). The merged
+/// `pos-owner-bridge-codec` verifier collapses every verification failure into one error,
+/// so the bridge can report only the two codes below until Redmine #563 lets the codec
+/// report its reason. The missing variants are deliberately absent rather than defined and
+/// never produced; #563 adds them together with the code that produces them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RejectedCode {
-    /// The origin was not the fixed owner origin.
-    Origin,
-    /// The RP ID hash was wrong.
-    RpIdHash,
-    /// The client data type was wrong.
-    ClientDataType,
-    /// The client data challenge was wrong.
-    Challenge,
-    /// A cross-origin marker was present.
-    CrossOrigin,
-    /// User presence was not asserted.
-    UserPresence,
-    /// User verification was not asserted.
-    UserVerification,
-    /// The attestation was not the `none` format, or was invalid.
+    /// A Create reply failed verification. Until #563 this covers every Create verification
+    /// failure the codec reports: client data, origin, flags, attestation format, algorithm and key.
     AttestationFormat,
-    /// The algorithm was not ES256.
-    Algorithm,
-    /// The COSE key was invalid.
-    CoseKey,
-    /// The assertion signature did not verify.
+    /// A Get reply failed verification. Until #563 this covers every Get verification
+    /// failure the codec reports: client data, flags, signature, counter and backup flags.
     Signature,
-    /// The credential ID did not match.
+    /// The credential ID did not match the stored credential.
     CredentialMismatch,
-    /// The user handle did not match.
+    /// The reply user handle was present and not the stored handle.
+    ///
+    /// A user handle that is not exactly 32 bytes never reaches this check: the codec rejects
+    /// it while decoding the reply, which the bridge reports as a protocol error.
     UserHandleMismatch,
-    /// The signature counter did not advance.
-    CounterRegression,
-    /// The backup flags changed illegally.
-    BackupFlags,
-    /// The authenticator extension data was malformed.
-    Extensions,
-    /// The PRF result was malformed.
-    PrfMalformed,
     /// The D2 enrollment confirmation failed.
     EnrollmentConfirmation,
     /// Another binding already holds the credential ID.
@@ -97,8 +87,6 @@ pub enum ProtocolCode {
     NonCanonical,
     /// A payload was malformed.
     Malformed,
-    /// The reply named no outstanding ceremony.
-    UnknownCeremony,
     /// The owner document was served more than once in one generation.
     DuplicateDocumentLoad,
 }
@@ -122,7 +110,8 @@ pub enum LifecycleCode {
     ChallengeExpired,
     /// The page reported a cancel or `WebAuthn` error.
     ClientFailed,
-    /// The ceremony window could not take the foreground.
+    /// The ceremony window could not take the foreground. The Windows shim (Redmine #535) is the
+    /// only producer: this portable crate never checks the foreground.
     ForegroundUnavailable,
     /// The enrollment budget ran out.
     EnrollmentBudgetExceeded,

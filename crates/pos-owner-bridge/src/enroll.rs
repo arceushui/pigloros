@@ -5,8 +5,8 @@ use pos_owner_bridge_codec::{
     SubjectCredentialBindingV1, SubjectId, TransportCodes,
 };
 
-use crate::ceremony::consume::protocol_from_codec;
 use crate::ceremony::plan::{Assertion, Registration};
+use crate::ceremony::protocol_from_codec;
 use crate::{BridgeError, OwnerError, PrfOutput};
 
 /// The ADR-091 `key_material_digest` of a generated root.
@@ -162,7 +162,13 @@ pub trait EnrollmentPort {
         binding: ConfirmedBinding,
     ) -> Result<(), OwnerError>;
 
-    /// Zeroize and discard an enrollment that did not commit. `candidate` is `None` when the
-    /// enrollment failed before `seal_candidate` returned or `commit` already consumed it.
-    fn abandon(&mut self, candidate: Option<Self::Candidate>);
+    /// Zeroize and discard a sealed candidate whose enrollment did not commit.
+    ///
+    /// The bridge calls this exactly once for every enrollment that fails after `seal_candidate`
+    /// returned a candidate and before `commit` took it: an E4 ceremony failure, a failed
+    /// `confirm_candidate`, a fingerprint mismatch or a binding that violates its schema. It never
+    /// calls it when no candidate exists (a failure before E3 leaves the adapter nothing to
+    /// discard), and never after `commit`, which consumes the candidate: ADR-110 §8 leaves a
+    /// failure inside E5 to ADR-097's recovery of unregistered staged artifacts.
+    fn abandon(&mut self, candidate: Self::Candidate);
 }

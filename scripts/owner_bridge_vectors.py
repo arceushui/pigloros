@@ -59,6 +59,11 @@ EXPECTED = {
         "222324483031323334353637f65820a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2"
         "b3b4b5b6b7b8b9babbbcbdbebff6"
     ),
+    "assertion_reply_without_prf": (
+        "8a44574153310150000102030405060708090a0b0c0d0e0f428081427b7d582500"
+        "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021"
+        "222324483031323334353637f6f6f6"
+    ),
     "request_header": "50574231010040000000000001000000000102030405060708090a0b0c0d0e0f0010000094000000020000000000000000000000000000000000000000000000",
     "ready_reply_header": "50574231010040000101000001000000000102030405060708090a0b0c0d0e0f0020000072000000020000000000000000000000000000000000000000000000",
     "subject_credential_binding": (
@@ -184,6 +189,22 @@ def vectors() -> dict[str, bytes]:
                 None,
             ]
         ),
+        # The packaged page reports an absent Get PRF as CBOR null where the closed decoder
+        # wants 32 bytes (ADR-110 section 1 and 7: this must fail closed as PrfUnsupported).
+        "assertion_reply_without_prf": cbor(
+            [
+                b"WAS1",
+                1,
+                CEREMONY_ID,
+                CREDENTIAL_ID,
+                b"{}",
+                authenticator_data,
+                bytes(range(0x30, 0x38)),
+                None,
+                None,
+                None,
+            ]
+        ),
         "request_header": control_header(0, 0, 4096, 148, 2),
         "ready_reply_header": control_header(1, 1, 8192, 114, 2),
         "subject_credential_binding": cbor(
@@ -261,9 +282,9 @@ def owner_asset_values() -> dict[str, object]:
         f"Content-Security-Policy: {policy}\r\n\r\n"
     )
     empty = (
-        "Content-Length: 0\r\n{fixed}Connection: close\r\n"
+        f"Content-Length: 0\r\n{fixed}Connection: close\r\n"
         f"Content-Security-Policy: {policy}\r\n\r\n"
-    ).replace("{fixed}", fixed)
+    )
     return {
         "body": body,
         "html_sha256": hashlib.sha256(body).digest(),
@@ -277,17 +298,17 @@ def owner_asset_values() -> dict[str, object]:
 
 
 def _rust_bytes(source: str, name: str) -> bytes:
-    match = re.search(rf"pub const {name}: \[u8; 32\] = \[(.*?)\];", source, re.DOTALL)
+    match = re.search(rf"pub(?:\(super\))? const {name}: \[u8; 32\] = \[(.*?)\];", source, re.DOTALL)
     if match is None:
         raise AssertionError(f"assets.rs has no {name}")
     return bytes(int(item, 16) for item in re.findall(r"0x([0-9a-f]{2})", match.group(1)))
 
 
 def _rust_text(source: str, name: str) -> str:
-    match = re.search(rf'pub const {name}: &str = "([^"]*)";', source)
+    match = re.search(rf'pub(?:\(super\))? const {name}: &str = "([^"]*)";', source)
     if match is not None:
         return match.group(1)
-    block = re.search(rf"pub const {name}: &str = concat!\((.*?)\n\);", source, re.DOTALL)
+    block = re.search(rf"pub(?:\(super\))? const {name}: &str = concat!\((.*?)\n\);", source, re.DOTALL)
     if block is None:
         raise AssertionError(f"assets.rs has no {name}")
     return "".join(ast.literal_eval(piece) for piece in re.findall(r'"(?:[^"\\]|\\.)*"', block.group(1)))

@@ -3,10 +3,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
-use pos_owner_bridge::ceremony::release::{
-    reachable, read_state, release_loop, ReleaseMode, MAX_RELEASE_ATTEMPTS,
-};
-use pos_owner_bridge::{
+use super::{reachable, read_state, release_loop, ReleaseMode};
+use crate::{
     BridgeError, NavigationId, OwnerWebSurface, PostGuard, ProcessIdentity, ProtocolCode,
     ReplyImage, RequestImage, SurfaceError, SurfaceEvent, SurfaceSpec,
 };
@@ -69,10 +67,6 @@ impl OwnerWebSurface for StateWord {
             return Err(refused());
         }
         self.outcomes.borrow_mut().pop_front().ok_or_else(refused)
-    }
-
-    fn reply_store_state(&self, _new: u32) -> Result<(), SurfaceError> {
-        Err(refused())
     }
 
     fn reply_copy(&self, _out: &mut ReplyImage) -> Result<(), SurfaceError> {
@@ -171,7 +165,18 @@ fn an_honest_page_costs_at_most_four_attempts() {
         Ok(None)
     );
     assert_eq!(surface.exchanges.get(), 4);
-    assert!(surface.exchanges.get() <= u32::from(MAX_RELEASE_ATTEMPTS / 2));
+}
+
+#[test]
+fn a_fifth_attempt_never_happens_because_nothing_is_reachable_from_ready_or_failed() {
+    for last in [2, 6] {
+        let surface = StateWord::new(&[0, 7, 1, last, last], &[false; 4]);
+        assert_eq!(
+            release_loop(&surface, EMPTY, ReleaseMode::Terminal),
+            Err(UNEXPECTED)
+        );
+        assert_eq!(surface.exchanges.get(), 4);
+    }
 }
 
 #[test]
@@ -264,14 +269,13 @@ fn an_illegal_successor_after_a_failed_compare_exchange_exits_the_loop() {
 }
 
 #[test]
-fn endless_churn_ends_within_the_attempt_bound() {
+fn endless_churn_ends_at_the_first_regression() {
     let churn = [7, 1, 2, 7, 1, 2, 7, 1, 2, 7];
     let surface = StateWord::new(&churn, &[false; 10]);
     assert_eq!(
         release_loop(&surface, EMPTY, ReleaseMode::Terminal),
         Err(UNEXPECTED)
     );
-    assert!(surface.exchanges.get() <= u32::from(MAX_RELEASE_ATTEMPTS));
     assert_eq!(surface.exchanges.get(), 3);
 }
 

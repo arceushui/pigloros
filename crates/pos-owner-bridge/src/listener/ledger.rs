@@ -6,20 +6,20 @@ use crate::ServedSnapshot;
 
 /// Counts completed owner-document responses for the current navigation.
 #[derive(Debug, Default)]
-pub struct ServedLedger {
+pub(super) struct ServedLedger {
     count: AtomicU32,
     integrity_failed: AtomicBool,
 }
 
 impl ServedLedger {
     /// Reset the count and verdict because a new navigation begins.
-    pub fn reset(&self) {
+    pub(super) fn reset(&self) {
         self.count.store(0, Ordering::SeqCst);
         self.integrity_failed.store(false, Ordering::SeqCst);
     }
 
     /// Record one completed owner response and whether its digest matched.
-    pub fn complete(&self, digest_ok: bool) {
+    pub(super) fn complete(&self, digest_ok: bool) {
         if !digest_ok {
             self.integrity_failed.store(true, Ordering::SeqCst);
         }
@@ -28,7 +28,7 @@ impl ServedLedger {
 
     /// Return the current count and integrity verdict.
     #[must_use]
-    pub fn snapshot(&self) -> ServedSnapshot {
+    pub(super) fn snapshot(&self) -> ServedSnapshot {
         ServedSnapshot {
             count: self.count.load(Ordering::SeqCst),
             integrity_ok: !self.integrity_failed.load(Ordering::SeqCst),

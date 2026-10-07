@@ -1,43 +1,95 @@
 //! `OwnerBridge` (ADR-110 §10): enroll with D2 confirmation, unlock, status and quarantine.
 
+mod restart;
+
+use std::time::Instant;
+
 use pos_owner_bridge_codec::{
     CeremonyId, CeremonyKind, OwnerUserHandle, PrfInput, SubjectCredentialBindingV1,
-    WebAuthnChallenge,
 };
 use zeroize::Zeroizing;
 
-use crate::ceremony::driver::{drive, CeremonyDriver, StepEnv};
+use restart::Pending;
+
+use crate::ceremony::driver::CeremonyDriver;
 use crate::ceremony::plan::{
     Assertion, Budget, CeremonyPlan, Registration, Slots, StoredGet, Verified,
 };
-use crate::ceremony::timing::ENROLLMENT_BUDGET;
-use crate::restart::restart_check;
 use crate::{
-    BindingUpdate, BridgeError, BridgeStatus, ConfirmedBinding, EnrollmentContext, EnrollmentPort,
-    HostPorts, MonotonicClock, OwnerWebSurface, PrfOutput, ProcessProbe, RejectedCode,
-    RootFingerprint, SecureRandom, UnavailableCode, UnlockPort,
+    BindingUpdate, BridgeError, BridgeStatus, CeremonyHost, CeremonyReply, CleanupStore,
+    ConfirmedBinding, EnrollmentContext, EnrollmentPort, MonotonicClock, PrfOutput, ProcessProbe,
+    QuarantineCode, RejectedCode, RootFingerprint, SecureRandom, UnavailableCode, UnlockPort,
 };
 
 /// Bridge construction options.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+///
+/// The ceremony generation starts at the ADR-110 §6 value of 1; only tests can start it elsewhere.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BridgeConfig {
-    /// The per-process generation the first ceremony starts at; `0` means `1`.
-    pub start_generation: u32,
-    /// The owning application window handle, used by unlock ceremonies.
-    pub owner_window: Option<u64>,
+    start_generation: u32,
+    owner_window: Option<u64>,
 }
 
-/// The owner bridge: composes the surface, randomness, clock and host ports into ceremonies.
-pub struct OwnerBridge<S: OwnerWebSurface, R: SecureRandom, C: MonotonicClock> {
-    surface: S,
+impl BridgeConfig {
+    /// Options for a bridge whose unlock ceremonies are owned by `owner_window`.
+    #[must_use]
+    pub const fn new(owner_window: Option<u64>) -> Self {
+        Self {
+            start_generation: 1,
+            owner_window,
+        }
+    }
+
+    /// Start the per-process generation at `generation`, so tests can reach its limit.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub const fn with_start_generation(self, generation: u32) -> Self {
+        Self {
+            start_generation: generation,
+            ..self
+        }
+    }
+}
+
+impl Default for BridgeConfig {
+    /// No owner window, and the generation starting at 1.
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+/// The progress of a restart check (ADR-110 §16).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RestartProgress {
+    /// Every recorded process is gone.
+    Done {
+        /// Records of absent processes whose folder or record could not be removed yet.
+        deferred: usize,
+    },
+    /// A recorded process is still present: poll again at `wake`.
+    Waiting {
+        /// When the next probe is due.
+        wake: Instant,
+    },
+}
+
+/// The owner bridge: draws each ceremony's randomness on the owner thread, hands the driver to
+/// the host that owns the surface, and runs the enrollment and unlock flows around the result.
+///
+/// ADR-110 §10 writes this type as generic over the surface. ADR §1a and §6 put the surface and
+/// the driver on the host's surface thread, so the bridge here is generic over the
+/// [`CeremonyHost`] that owns them instead.
+pub struct OwnerBridge<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> {
+    host: H,
     random: R,
     clock: C,
-    host: HostPorts,
     generation: u32,
     owner_window: Option<u64>,
     status: BridgeStatus,
     slots: Option<Box<Slots>>,
-    quarantined: Option<CeremonyDriver>,
+    quarantined: bool,
+    started: bool,
+    restart: Option<Pending>,
 }
 
 /// An enrollment failure and the candidate that still needs `abandon`.
@@ -62,10 +114,11 @@ struct CreatedCredential {
     prf_input: PrfInput,
 }
 
-fn split_array<const N: usize>(bytes: &[u8]) -> ([u8; N], &[u8]) {
-    bytes
-        .split_first_chunk::<N>()
-        .map_or(([0; N], &[][..]), |(head, rest)| (*head, rest))
+fn split_array<const N: usize>(bytes: &[u8]) -> (Zeroizing<[u8; N]>, &[u8]) {
+    bytes.split_first_chunk::<N>().map_or_else(
+        || (Zeroizing::new([0; N]), &[][..]),
+        |(head, rest)| (Zeroizing::new(*head), rest),
+    )
 }
 
 fn stored_from_registration(
@@ -82,20 +135,21 @@ fn stored_from_registration(
     }
 }
 
-impl<S: OwnerWebSurface, R: SecureRandom, C: MonotonicClock> OwnerBridge<S, R, C> {
+impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
     /// Allocate the bridge and its preallocated ceremony buffers.
     #[must_use]
-    pub fn new(surface: S, random: R, clock: C, host: HostPorts, config: BridgeConfig) -> Self {
+    pub fn new(host: H, random: R, clock: C, config: BridgeConfig) -> Self {
         Self {
-            surface,
+            host,
             random,
             clock,
-            host,
-            generation: config.start_generation.max(1),
+            generation: config.start_generation,
             owner_window: config.owner_window,
             status: BridgeStatus::Ready,
             slots: Some(Slots::allocate()),
-            quarantined: None,
+            quarantined: false,
+            started: false,
+            restart: None,
         }
     }
 
@@ -107,38 +161,95 @@ impl<S: OwnerWebSurface, R: SecureRandom, C: MonotonicClock> OwnerBridge<S, R, C
 
     /// Poll a quarantined ceremony for its browser exit; cleanup completing clears the status.
     pub fn poll_quarantine(&mut self) -> BridgeStatus {
-        if let Some(mut driver) = self.quarantined.take() {
-            let mut env = StepEnv {
-                surface: &mut self.surface,
-                clock: &self.clock,
-                loopback: &mut *self.host.loopback,
-                store: &mut *self.host.store,
-            };
-            if driver.poll_cleanup(&mut env) {
+        if self.quarantined {
+            if let Some(driver) = self.host.poll_quarantine() {
+                self.generation = driver.generation();
                 self.slots = Some(driver.into_slots());
+                self.quarantined = false;
                 self.status = BridgeStatus::Ready;
-            } else {
-                self.quarantined = Some(driver);
             }
         }
         self.status
     }
 
-    /// Probe stale cleanup records at process start (ADR-110 §16).
+    /// Probe stale cleanup records at process start (ADR-110 §16): the first pass.
+    ///
+    /// While a recorded browser process is still present the status is
+    /// `Quarantined(StaleProcessPresent)` and the result is `Waiting`: the host calls
+    /// [`OwnerBridge::poll_restart_check`] at the instant it names, once a second for 30 s. The
+    /// portable core never sleeps.
+    ///
+    /// It must run before any ceremony: its orphan-folder sweep would remove the folder of a live
+    /// ceremony. A bridge that ever started a ceremony refuses it.
     ///
     /// # Errors
     ///
-    /// Returns `Quarantine(StaleProcessPresent)` when a recorded browser process is still
-    /// present, or `Unavailable(InterfaceUnavailable)` when the store cannot be read.
-    pub fn restart_check(&mut self, probe: &mut dyn ProcessProbe) -> Result<(), BridgeError> {
-        let outcome = restart_check(&mut *self.host.store, probe, &self.clock);
-        self.status = BridgeStatus::after(outcome.err());
-        outcome
+    /// Returns `Unavailable(InterfaceUnavailable)` when a ceremony was ever started or the store
+    /// cannot list its records, and `Quarantine(StaleProcessPresent)` when a record cannot be
+    /// decoded or does not name the folder its ceremony ID derives. The last two hold the bridge
+    /// in their status until the next check succeeds.
+    pub fn start_restart_check(
+        &mut self,
+        store: &mut dyn CleanupStore,
+        probe: &mut dyn ProcessProbe,
+    ) -> Result<RestartProgress, BridgeError> {
+        if self.started {
+            return Err(BridgeError::Unavailable(
+                UnavailableCode::InterfaceUnavailable,
+            ));
+        }
+        let now = self.clock.now();
+        let outcome = restart::begin(store, probe, now);
+        self.settle_restart(outcome)
+    }
+
+    /// Probe again if the next probe is due; call it at the instant [`RestartProgress::Waiting`]
+    /// named. Without a pending check it reports `Done` with nothing deferred.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Quarantine(StaleProcessPresent)` once a recorded process is still present after
+    /// 30 repeats; the surface then stays quarantined.
+    pub fn poll_restart_check(
+        &mut self,
+        store: &mut dyn CleanupStore,
+        probe: &mut dyn ProcessProbe,
+    ) -> Result<RestartProgress, BridgeError> {
+        let Some(pending) = self.restart.take() else {
+            return Ok(RestartProgress::Done { deferred: 0 });
+        };
+        let now = self.clock.now();
+        let outcome = restart::poll(pending, store, probe, now);
+        self.settle_restart(outcome)
+    }
+
+    fn settle_restart(
+        &mut self,
+        outcome: Result<restart::Progress, BridgeError>,
+    ) -> Result<RestartProgress, BridgeError> {
+        self.restart = None;
+        match outcome {
+            Ok(restart::Progress::Done(deferred)) => {
+                self.status = BridgeStatus::Ready;
+                Ok(RestartProgress::Done { deferred })
+            }
+            Ok(restart::Progress::Waiting(pending)) => {
+                let wake = pending.wake();
+                self.restart = Some(pending);
+                self.status = BridgeStatus::Quarantined(QuarantineCode::StaleProcessPresent);
+                Ok(RestartProgress::Waiting { wake })
+            }
+            Err(error) => {
+                self.status = BridgeStatus::after_restart(Some(error));
+                Err(error)
+            }
+        }
     }
 
     fn begin(&mut self) -> Result<(), BridgeError> {
         self.status.admission()?;
         self.status = BridgeStatus::Busy;
+        self.started = true;
         Ok(())
     }
 
@@ -174,12 +285,12 @@ impl<S: OwnerWebSurface, R: SecureRandom, C: MonotonicClock> OwnerBridge<S, R, C
         let (fresh_prf, _) = split_array::<32>(rest);
         Ok(CeremonyPlan {
             kind: request.kind,
-            ceremony_id: CeremonyId::from_bytes(id),
-            challenge: WebAuthnChallenge::from_bytes(challenge),
-            user_handle: OwnerUserHandle::from_bytes(user_handle),
+            ceremony_id: CeremonyId::from_bytes(*id),
+            challenge,
+            user_handle,
             prf_input: request
                 .prf_input
-                .unwrap_or_else(|| PrfInput::from_bytes(fresh_prf)),
+                .map_or(fresh_prf, |input| Zeroizing::new(*input.as_bytes())),
             stored: request.stored,
             t0,
             generation: self.generation,
@@ -190,29 +301,19 @@ impl<S: OwnerWebSurface, R: SecureRandom, C: MonotonicClock> OwnerBridge<S, R, C
 
     fn run_ceremony(&mut self, plan: CeremonyPlan) -> Result<Verified, BridgeError> {
         let slots = self.slots.take().unwrap_or_else(Slots::allocate);
-        let mut driver = CeremonyDriver::new(plan, slots);
-        let mut env = StepEnv {
-            surface: &mut self.surface,
-            clock: &self.clock,
-            loopback: &mut *self.host.loopback,
-            store: &mut *self.host.store,
-        };
-        let result = drive(&mut driver, &mut env);
-        self.generation = driver.generation();
-        self.conclude(driver, result)
+        let reply = self.host.run(CeremonyDriver::new(plan, slots));
+        self.conclude(reply)
     }
 
-    fn conclude(
-        &mut self,
-        driver: CeremonyDriver,
-        result: Result<Verified, BridgeError>,
-    ) -> Result<Verified, BridgeError> {
-        if matches!(result, Err(BridgeError::Quarantine(_))) {
-            self.quarantined = Some(driver);
-        } else {
+    fn conclude(&mut self, reply: CeremonyReply) -> Result<Verified, BridgeError> {
+        if let Some(driver) = reply.driver {
+            self.generation = driver.generation();
             self.slots = Some(driver.into_slots());
         }
-        result
+        // A host that keeps a quarantined driver says so by the result alone, so a host that also
+        // returns the driver cannot make the quarantine permanent.
+        self.quarantined = matches!(reply.result, Err(BridgeError::Quarantine(_)));
+        reply.result
     }
 
     fn create_ceremony(
@@ -226,7 +327,7 @@ impl<S: OwnerWebSurface, R: SecureRandom, C: MonotonicClock> OwnerBridge<S, R, C
             budget: None,
             owner_window: context.owner_window,
         })?;
-        let (user_handle, prf_input) = (plan.user_handle, plan.prf_input);
+        let (user_handle, prf_input) = (plan.owner_user_handle(), plan.prf_input_value());
         let registration = self
             .run_ceremony(plan)
             .and_then(Verified::into_registration)?;
@@ -265,7 +366,9 @@ impl<S: OwnerWebSurface, R: SecureRandom, C: MonotonicClock> OwnerBridge<S, R, C
     ) -> Result<(), BridgeError> {
         self.begin()?;
         let outcome = self.enroll_steps(context, port).map_err(|failure| {
-            port.abandon(failure.candidate);
+            if let Some(candidate) = failure.candidate {
+                port.abandon(candidate);
+            }
             failure.error
         });
         self.with_slots(Slots::wipe_all);
@@ -279,10 +382,7 @@ impl<S: OwnerWebSurface, R: SecureRandom, C: MonotonicClock> OwnerBridge<S, R, C
         port: &mut P,
     ) -> Result<(), EnrollFailure<P::Candidate>> {
         let created = self.create_ceremony(context)?;
-        let budget = Budget {
-            start: self.clock.now(),
-            limit: ENROLLMENT_BUDGET,
-        };
+        let budget = Budget::enrollment(self.clock.now());
         require_unbound(port, &created.registration)?;
         let stored = self.source_prf(&created, budget)?;
         let (candidate, sealed) = self

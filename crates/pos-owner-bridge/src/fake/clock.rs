@@ -11,13 +11,12 @@ use crate::{MonotonicClock, SecureRandom, UnavailableCode};
 pub type ActivitySource = Box<dyn Fn() -> Option<Duration>>;
 
 struct ClockState {
-    base: Instant,
+    base: Cell<Instant>,
     offset: Cell<Duration>,
     activity: RefCell<Option<ActivitySource>>,
 }
 
-/// A shared fake monotonic clock: `pause` advances it instead of sleeping, and `pause_for` skips
-/// dead time up to the next moment anything can happen.
+/// A shared fake monotonic clock that only moves when a test or the fake stepper advances it.
 #[derive(Clone)]
 pub struct FakeClock {
     state: Rc<ClockState>,
@@ -29,14 +28,14 @@ impl FakeClock {
     pub fn start() -> Self {
         Self {
             state: Rc::new(ClockState {
-                base: Instant::now(),
+                base: Cell::new(Instant::now()),
                 offset: Cell::new(Duration::ZERO),
                 activity: RefCell::new(None),
             }),
         }
     }
 
-    /// Install the source of the next outside activity that `pause_for` must not skip past.
+    /// Install the source of the next outside activity that `skip` must not jump over.
     pub fn set_activity_source(&self, source: ActivitySource) {
         *self.state.activity.borrow_mut() = Some(source);
     }
@@ -46,6 +45,23 @@ impl FakeClock {
         self.state.offset.set(self.state.offset.get() + duration);
     }
 
+    /// Shift the clock's origin so that its current time is exactly `instant`, keeping the elapsed
+    /// time (and so every scheduled offset) unchanged. A host calls this with a ceremony's T0
+    /// when the owner thread drew it from another clock, so the ceremony's bounds do not depend on
+    /// how the two clocks' origins happen to be scheduled.
+    pub fn align_to(&self, instant: Instant) {
+        let origin = instant
+            .checked_sub(self.state.offset.get())
+            .unwrap_or(instant);
+        self.state.base.set(origin);
+    }
+
+    /// How far `instant` is from the clock's start (zero for an earlier instant).
+    #[must_use]
+    pub fn offset_of(&self, instant: Instant) -> Duration {
+        instant.saturating_duration_since(self.state.base.get())
+    }
+
     /// The time elapsed since the clock started.
     #[must_use]
     pub fn elapsed(&self) -> Duration {
@@ -53,25 +69,25 @@ impl FakeClock {
     }
 }
 
-impl MonotonicClock for FakeClock {
-    fn now(&self) -> Instant {
-        self.state.base + self.state.offset.get()
-    }
-
-    fn pause(&self, duration: Duration) {
-        self.advance(duration);
-    }
-
-    fn pause_for(&self, interval: Duration, wake: Option<Instant>) {
-        let now = self.state.base + self.state.offset.get();
+impl FakeClock {
+    /// Move time forward by one timer interval, or skip dead time up to the next instant at which
+    /// anything can happen: the driver's `wake` or the next scheduled surface or page activity.
+    pub fn skip(&self, interval: Duration, wake: Option<Instant>) {
+        let now = self.state.base.get() + self.state.offset.get();
         let until_wake = wake.map(|instant| instant.saturating_duration_since(now));
         let activity = self.state.activity.borrow();
         let until_activity = activity
             .as_ref()
             .and_then(|source| source())
             .map(|at| at.saturating_sub(self.state.offset.get()));
-        let skip = [until_wake, until_activity].into_iter().flatten().min();
-        self.advance(skip.map_or(interval, |gap| gap.max(interval)));
+        let gap = [until_wake, until_activity].into_iter().flatten().min();
+        self.advance(gap.map_or(interval, |gap| gap.max(interval)));
+    }
+}
+
+impl MonotonicClock for FakeClock {
+    fn now(&self) -> Instant {
+        self.state.base.get() + self.state.offset.get()
     }
 }
 

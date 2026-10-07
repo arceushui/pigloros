@@ -1,6 +1,6 @@
 //! Fake listener view, cleanup store and process probe.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use pos_owner_bridge_codec::ImagePathSha256;
@@ -13,6 +13,8 @@ use crate::{
 #[derive(Debug)]
 struct LoopbackState {
     served: ServedSnapshot,
+    script: Vec<ServedSnapshot>,
+    reads: Cell<usize>,
     fail_probes_from: Option<u32>,
     resets: u32,
     probes: u32,
@@ -31,6 +33,15 @@ impl FakeLoopback {
             count,
             integrity_ok,
         };
+    }
+
+    /// Script what successive reads of the served count return, counting from the next
+    /// navigation: read `n` returns `script[n]`, and the last entry repeats. An empty script
+    /// returns the value last given to [`FakeLoopback::set_served`] instead.
+    pub fn script_served(&self, script: &[ServedSnapshot]) {
+        let mut state = self.state.borrow_mut();
+        state.script = script.to_vec();
+        state.reads.set(0);
     }
 
     /// Make the IPv6-absence probe fail from its `n`-th run on (1-based); `None` never fails.
@@ -60,6 +71,8 @@ impl Default for FakeLoopback {
                     count: 0,
                     integrity_ok: true,
                 },
+                script: Vec::new(),
+                reads: Cell::new(0),
                 fail_probes_from: None,
                 resets: 0,
                 probes: 0,
@@ -72,6 +85,7 @@ impl LoopbackPort for FakeLoopback {
     fn begin_navigation(&mut self) {
         let mut state = self.state.borrow_mut();
         state.resets += 1;
+        state.reads.set(0);
         state.served = ServedSnapshot {
             count: 0,
             integrity_ok: true,
@@ -79,7 +93,15 @@ impl LoopbackPort for FakeLoopback {
     }
 
     fn served(&self) -> ServedSnapshot {
-        self.state.borrow().served
+        let state = self.state.borrow();
+        let read = state.reads.get();
+        state.reads.set(read + 1);
+        let last = state.script.len().saturating_sub(1);
+        state
+            .script
+            .get(read.min(last))
+            .copied()
+            .unwrap_or(state.served)
     }
 
     fn probe_ipv6(&mut self) -> Result<(), BridgeError> {
@@ -107,13 +129,17 @@ pub enum StoreOp {
     List,
     /// `remove_folder`.
     Remove,
+    /// `folders`.
+    Folders,
 }
 
 #[derive(Debug, Default)]
 struct StoreState {
     records: Vec<Vec<u8>>,
+    folders: Vec<String>,
     removed: Vec<String>,
     failing: Vec<StoreOp>,
+    strict_missing: bool,
 }
 
 /// An in-memory cleanup store with scripted failures.
@@ -123,6 +149,12 @@ pub struct FakeStore {
 }
 
 impl FakeStore {
+    /// Make `remove_folder` fail for a folder that does not exist, as a store that violates the
+    /// idempotence contract would.
+    pub fn fail_on_missing_folders(&self, strict: bool) {
+        self.state.borrow_mut().strict_missing = strict;
+    }
+
     /// Make exactly the operations in `ops` fail.
     pub fn set_failing(&self, ops: &[StoreOp]) {
         self.state.borrow_mut().failing = ops.to_vec();
@@ -131,6 +163,17 @@ impl FakeStore {
     /// Pre-load an encoded record, as left by a crashed run.
     pub fn preload(&self, record: Vec<u8>) {
         self.state.borrow_mut().records.push(record);
+    }
+
+    /// Pre-create a user-data folder, as left by a crashed run.
+    pub fn preload_folder(&self, name: &str) {
+        self.state.borrow_mut().folders.push(name.to_owned());
+    }
+
+    /// The user-data folders that still exist.
+    #[must_use]
+    pub fn folders_now(&self) -> Vec<String> {
+        self.state.borrow().folders.clone()
     }
 
     /// The encoded records still stored.
@@ -177,11 +220,23 @@ impl CleanupStore for FakeStore {
         Ok(self.state.borrow().records.clone())
     }
 
+    fn folders(&mut self) -> Result<Vec<String>, CleanupError> {
+        if self.fails(StoreOp::Folders) {
+            return Err(CleanupError);
+        }
+        Ok(self.state.borrow().folders.clone())
+    }
+
     fn remove_folder(&mut self, folder_name: &str) -> Result<(), CleanupError> {
         if self.fails(StoreOp::Remove) {
             return Err(CleanupError);
         }
-        self.state.borrow_mut().removed.push(folder_name.to_owned());
+        let mut state = self.state.borrow_mut();
+        if state.strict_missing && !state.folders.iter().any(|name| name == folder_name) {
+            return Err(CleanupError);
+        }
+        state.removed.push(folder_name.to_owned());
+        state.folders.retain(|name| name != folder_name);
         Ok(())
     }
 }

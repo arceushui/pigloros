@@ -8,15 +8,18 @@ use pos_owner_bridge::fake::buffers::LogEntry;
 use pos_owner_bridge::fake::clock::{FakeClock, FakeRandom};
 use pos_owner_bridge::fake::honest::{CreatePrf, HonestConfig, HonestPage};
 use pos_owner_bridge::fake::host::{FakeLoopback, FakeStore};
-use pos_owner_bridge::fake::signer::ReplyShape;
+use pos_owner_bridge::fake::stepper::FakeHost;
 use pos_owner_bridge::fake::surface::{FakeSurface, SurfaceConfig};
 use pos_owner_bridge::{
-    BridgeConfig, BridgeError, BridgeStatus, HostPorts, LifecycleCode, OwnerBridge, OwnerError,
+    BridgeConfig, BridgeError, BridgeStatus, LifecycleCode, OwnerBridge, OwnerError,
     OwnerErrorKind, ProtocolCode, QuarantineCode, RejectedCode, SecureRandom, SurfaceEvent,
     UnavailableCode,
 };
 
-use super::{context, honest, Boxed, Call, FakeEnrollment, Hook, Rig, TestResult, CREDENTIAL_ID};
+use super::{
+    context, honest, no_prf, wrong_key, Boxed, Call, FakeEnrollment, Hook, Moment, Rig, TestResult,
+    CREDENTIAL_ID,
+};
 
 type Request = ([u8; 16], [u8; 32], [u8; 32], Option<[u8; 32]>);
 
@@ -85,14 +88,58 @@ fn a_substituted_prf_at_confirmation_leaves_no_binding() -> TestResult {
     );
     assert_eq!(
         port.calls,
-        [
-            Call::Unbound,
-            Call::Seal,
-            Call::Confirm,
-            Call::Abandon { candidate: true }
-        ]
+        [Call::Unbound, Call::Seal, Call::Confirm, Call::Abandon]
     );
     assert!(port.committed.is_none());
+    Ok(())
+}
+
+#[test]
+fn an_illegal_observation_after_the_create_verification_calls_no_port_method() -> TestResult {
+    let mut rig = Rig::with_hook(
+        honest(0),
+        Hook::Storm(vec![9]),
+        FakeRandom::seeded(1),
+        BridgeConfig::default(),
+    )?;
+    let mut port = FakeEnrollment::new();
+    let outcome = rig.bridge.enroll(&context(), &mut port);
+    assert_eq!(
+        outcome,
+        Err(BridgeError::Protocol(ProtocolCode::UnexpectedState))
+    );
+    assert!(rig
+        .surface
+        .log()
+        .iter()
+        .any(|entry| matches!(entry, LogEntry::HostCopy { state: 3, .. })));
+    assert!(port.calls.is_empty());
+    assert!(port.seal_prf.is_none());
+    Ok(())
+}
+
+#[test]
+fn a_second_document_completion_after_the_create_consumption_calls_no_port_method() -> TestResult {
+    for moment in [Moment::Consumed, Moment::Closing] {
+        let mut rig = Rig::with_hook(
+            honest(0),
+            Hook::SecondCompletion(moment),
+            FakeRandom::seeded(1),
+            BridgeConfig::default(),
+        )?;
+        let mut port = FakeEnrollment::new();
+        let outcome = rig.bridge.enroll(&context(), &mut port);
+        assert_eq!(
+            outcome,
+            Err(BridgeError::Protocol(ProtocolCode::DuplicateDocumentLoad)),
+            "{moment:?}"
+        );
+        assert!(port.calls.is_empty(), "{moment:?}");
+        let log = rig.surface.log();
+        assert!(log.contains(&LogEntry::ExitObserved), "{moment:?}");
+        assert!(log.contains(&LogEntry::Finished), "{moment:?}");
+        assert_eq!(rig.bridge.status(), BridgeStatus::Ready);
+    }
     Ok(())
 }
 
@@ -105,7 +152,7 @@ fn a_fingerprint_that_differs_is_an_enrollment_confirmation_failure() -> TestRes
         outcome,
         Err(BridgeError::Rejected(RejectedCode::EnrollmentConfirmation))
     );
-    assert_eq!(port.calls.last(), Some(&Call::Abandon { candidate: true }));
+    assert_eq!(port.calls.last(), Some(&Call::Abandon));
     assert!(!port.calls.contains(&Call::Commit));
     Ok(())
 }
@@ -119,38 +166,26 @@ fn an_already_bound_credential_is_rejected_before_sealing() -> TestResult {
         outcome,
         Err(BridgeError::Rejected(RejectedCode::CredentialAlreadyBound))
     );
-    assert_eq!(
-        port.calls,
-        [Call::Unbound, Call::Abandon { candidate: false }]
-    );
+    assert_eq!(port.calls, [Call::Unbound]);
     Ok(())
 }
 
 #[test]
-fn owner_port_failures_are_wrapped_and_abandon_exactly_once() -> TestResult {
+fn owner_port_failures_are_wrapped_and_abandon_only_a_sealed_candidate_before_commit() -> TestResult
+{
     type Prepare = fn(&mut FakeEnrollment);
     let cases: [(Prepare, Vec<Call>); 3] = [
         (
             |port| port.unbound_error = Some(OWNER_FAILURE),
-            vec![Call::Unbound, Call::Abandon { candidate: false }],
+            vec![Call::Unbound],
         ),
         (
             |port| port.seal_error = Some(OWNER_FAILURE),
-            vec![
-                Call::Unbound,
-                Call::Seal,
-                Call::Abandon { candidate: false },
-            ],
+            vec![Call::Unbound, Call::Seal],
         ),
         (
             |port| port.commit_error = Some(OWNER_FAILURE),
-            vec![
-                Call::Unbound,
-                Call::Seal,
-                Call::Confirm,
-                Call::Commit,
-                Call::Abandon { candidate: false },
-            ],
+            vec![Call::Unbound, Call::Seal, Call::Confirm, Call::Commit],
         ),
     ];
     for (prepare, expected) in cases {
@@ -176,16 +211,8 @@ fn a_failed_create_never_reaches_the_owner_port_beyond_abandon() -> TestResult {
         outcome,
         Err(BridgeError::Lifecycle(LifecycleCode::ClientFailed))
     );
-    assert_eq!(port.calls, [Call::Abandon { candidate: false }]);
+    assert!(port.calls.is_empty());
     Ok(())
-}
-
-const fn wrong_key(shape: &mut ReplyShape) {
-    shape.wrong_key = true;
-}
-
-const fn no_prf(shape: &mut ReplyShape) {
-    shape.prf = None;
 }
 
 #[test]
@@ -197,15 +224,12 @@ fn a_confirmation_that_fails_verification_abandons_the_sealed_candidate() -> Tes
     let (mut rig, mut port) = rig_with(page)?;
     let outcome = rig.bridge.enroll(&context(), &mut port);
     assert_eq!(outcome, Err(BridgeError::Rejected(RejectedCode::Signature)));
-    assert_eq!(
-        port.calls,
-        [Call::Unbound, Call::Seal, Call::Abandon { candidate: true }]
-    );
+    assert_eq!(port.calls, [Call::Unbound, Call::Seal, Call::Abandon]);
     Ok(())
 }
 
 #[test]
-fn a_failed_source_assertion_abandons_before_sealing() -> TestResult {
+fn a_source_assertion_without_a_prf_fails_closed_before_sealing() -> TestResult {
     let page = HonestConfig {
         create_prf: CreatePrf::EnabledOnly,
         tweak: Some(no_prf),
@@ -215,12 +239,9 @@ fn a_failed_source_assertion_abandons_before_sealing() -> TestResult {
     let outcome = rig.bridge.enroll(&context(), &mut port);
     assert_eq!(
         outcome,
-        Err(BridgeError::Lifecycle(LifecycleCode::ClientFailed))
+        Err(BridgeError::Unavailable(UnavailableCode::PrfUnsupported))
     );
-    assert_eq!(
-        port.calls,
-        [Call::Unbound, Call::Abandon { candidate: false }]
-    );
+    assert_eq!(port.calls, [Call::Unbound]);
     Ok(())
 }
 
@@ -235,10 +256,7 @@ fn the_total_enrollment_budget_fails_the_confirmation_ceremony() -> TestResult {
             LifecycleCode::EnrollmentBudgetExceeded
         ))
     );
-    assert_eq!(
-        port.calls,
-        [Call::Unbound, Call::Seal, Call::Abandon { candidate: true }]
-    );
+    assert_eq!(port.calls, [Call::Unbound, Call::Seal, Call::Abandon]);
     Ok(())
 }
 
@@ -259,10 +277,7 @@ fn an_rng_failure_starts_no_environment_and_is_not_sticky() -> TestResult {
 
 #[test]
 fn generation_exhaustion_makes_the_surface_unavailable_until_restart() -> TestResult {
-    let config = BridgeConfig {
-        start_generation: u32::MAX,
-        ..BridgeConfig::default()
-    };
+    let config = BridgeConfig::default().with_start_generation(u32::MAX);
     let mut rig = Rig::with_hook(honest(0), Hook::None, FakeRandom::seeded(1), config)?;
     let mut port = FakeEnrollment::new();
     let exhausted = BridgeError::Unavailable(UnavailableCode::GenerationExhausted);
@@ -311,7 +326,7 @@ fn a_quarantined_surface_refuses_ceremonies_until_the_exit_arrives() -> TestResu
         rig.bridge.status(),
         BridgeStatus::Quarantined(QuarantineCode::CleanupTimeout)
     );
-    assert!(port.calls.contains(&Call::Abandon { candidate: false }));
+    assert!(port.calls.is_empty());
     port.calls.clear();
     assert_eq!(rig.bridge.enroll(&context(), &mut port), Err(quarantined));
     assert!(port.calls.is_empty());
@@ -341,12 +356,7 @@ fn a_binding_that_violates_the_closed_schema_abandons_the_sealed_candidate() -> 
     );
     assert_eq!(
         port.calls,
-        [
-            Call::Unbound,
-            Call::Seal,
-            Call::Confirm,
-            Call::Abandon { candidate: true }
-        ]
+        [Call::Unbound, Call::Seal, Call::Confirm, Call::Abandon]
     );
     Ok(())
 }
@@ -360,10 +370,7 @@ fn an_rng_failure_at_a_later_ceremony_abandons_the_enrollment() -> TestResult {
         outcome,
         Err(BridgeError::Unavailable(UnavailableCode::RngUnavailable))
     );
-    assert_eq!(
-        port.calls,
-        [Call::Unbound, Call::Seal, Call::Abandon { candidate: true }]
-    );
+    assert_eq!(port.calls, [Call::Unbound, Call::Seal, Call::Abandon]);
     Ok(())
 }
 
@@ -397,11 +404,8 @@ fn each_ceremony_draws_its_random_block_in_the_documented_layout() -> TestResult
         inner: FakeRandom::seeded(7),
         lengths: Rc::clone(&lengths),
     };
-    let host = HostPorts {
-        loopback: Box::new(loopback),
-        store: Box::new(FakeStore::default()),
-    };
-    let mut bridge = OwnerBridge::new(surface, random, clock, host, BridgeConfig::default());
+    let host = FakeHost::new(clock.clone(), surface, loopback, FakeStore::default());
+    let mut bridge = OwnerBridge::new(host, random, clock, BridgeConfig::default());
     let mut port = FakeEnrollment::new();
     bridge.enroll(&context(), &mut port)?;
     assert_eq!(*lengths.borrow(), [112, 48]);
@@ -461,14 +465,9 @@ fn the_confirmation_counter_must_advance_past_the_source_assertion_counter() -> 
     };
     let (mut rig, mut port) = rig_with(regress)?;
     let outcome = rig.bridge.enroll(&context(), &mut port);
-    assert_eq!(
-        outcome,
-        Err(BridgeError::Rejected(RejectedCode::CounterRegression))
-    );
-    assert_eq!(
-        port.calls,
-        [Call::Unbound, Call::Seal, Call::Abandon { candidate: true }]
-    );
+    // The codec reports every Get verification failure alike (Redmine #563).
+    assert_eq!(outcome, Err(BridgeError::Rejected(RejectedCode::Signature)));
+    assert_eq!(port.calls, [Call::Unbound, Call::Seal, Call::Abandon]);
     let advance = HonestConfig {
         create_prf: CreatePrf::EnabledOnly,
         get_counters: vec![5, 6],

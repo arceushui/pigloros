@@ -46,4 +46,16 @@ impl BridgeStatus {
             _ => Self::Ready,
         }
     }
+
+    /// The status after a restart check that failed with `error`.
+    ///
+    /// Unlike a ceremony, a restart check that cannot read the cleanup store leaves the bridge
+    /// without proof that no stale browser holds a folder, so every `Unavailable` code holds.
+    #[must_use]
+    pub const fn after_restart(error: Option<BridgeError>) -> Self {
+        match error {
+            Some(BridgeError::Unavailable(code)) => Self::Unavailable(code),
+            other => Self::after(other),
+        }
+    }
 }

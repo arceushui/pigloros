@@ -1,36 +1,40 @@
 //! The owner-port seam on Linux: state machine, timing bounds, D2 call order, quarantine and
 //! the 10,000-seed oracle, all driven by `FakeSurface` and fake owner ports.
 
+mod channel;
 mod driver_paths;
 mod enrollment;
 mod fakes;
 mod oracle;
 mod quarantine;
-mod release_loop;
 mod timing;
 mod unlock;
 
+use std::cell::{Cell, RefCell};
 use std::error::Error;
+use std::rc::Rc;
 use std::time::Duration;
 
-use pos_owner_bridge::ceremony::driver::{drive, CeremonyDriver, StepEnv};
-use pos_owner_bridge::ceremony::plan::{CeremonyPlan, Slots, StoredGet, Verified};
+use pos_owner_bridge::ceremony::driver::{CeremonyDriver, StepEnv};
+use pos_owner_bridge::ceremony::plan::{CeremonyPlan, StoredGet, Verified};
 use pos_owner_bridge::fake::buffers::{Actor, Buffers, LogEntry};
 use pos_owner_bridge::fake::clock::{FakeClock, FakeRandom};
 use pos_owner_bridge::fake::honest::{HonestConfig, HonestPage};
 use pos_owner_bridge::fake::host::{FakeLoopback, FakeStore};
-use pos_owner_bridge::fake::signer::FIXTURE_COSE_KEY;
+use pos_owner_bridge::fake::signer::{Backup, ReplyShape, FIXTURE_COSE_KEY};
+use pos_owner_bridge::fake::stepper::{FakeHost, FakeStepper};
 use pos_owner_bridge::fake::surface::{
     FakeSurface, FakeSurfaceHandle, HookPhase, HostOp, PageModel, SurfaceConfig,
 };
 use pos_owner_bridge::{
     BindingUpdate, BridgeConfig, BridgeError, ConfirmedBinding, EnrollmentContext, EnrollmentPort,
-    HostPorts, MonotonicClock, OwnerBridge, OwnerError, OwnerErrorKind, PrfOutput, RootFingerprint,
-    UnlockPort,
+    MonotonicClock, OwnerBridge, OwnerError, OwnerErrorKind, PrfOutput, RootFingerprint,
+    SurfaceEvent, UnlockPort,
 };
 use pos_owner_bridge_codec::{
     CeremonyId, CeremonyKind, CoseEs256PublicKey, OwnerBridgeCodecError, OwnerUserHandle, PrfInput,
-    SubjectId, WebAuthnChallenge,
+    SubjectCredentialBindingInputV1, SubjectCredentialBindingV1, SubjectId, TransportCodes,
+    WebAuthnChallenge,
 };
 use sha2::{Digest, Sha256};
 
@@ -74,37 +78,81 @@ fn user_handle() -> OwnerUserHandle {
 }
 
 fn stored_fixture(sign_count: u32) -> Result<StoredGet, Box<dyn Error>> {
-    Ok(StoredGet {
-        credential_id: CREDENTIAL_ID.to_vec(),
+    Ok(StoredGet::new(
+        CREDENTIAL_ID.to_vec(),
+        user_handle(),
+        CoseEs256PublicKey::from_canonical_encoding(&FIXTURE_COSE_KEY).boxed()?,
+        false,
+        false,
+        sign_count,
+    ))
+}
+
+fn create_plan(clock: &FakeClock) -> CeremonyPlan {
+    CeremonyPlan::for_test(
+        CeremonyKind::Create,
+        CeremonyId::from_bytes(bytes16(0)),
+        WebAuthnChallenge::from_bytes(bytes32(0x20)),
+        user_handle(),
+        PrfInput::from_bytes(bytes32(0x60)),
+        clock.now(),
+    )
+}
+
+fn get_plan(clock: &FakeClock, stored: StoredGet) -> CeremonyPlan {
+    CeremonyPlan::for_test(
+        CeremonyKind::Get,
+        CeremonyId::from_bytes(bytes16(0)),
+        WebAuthnChallenge::from_bytes(bytes32(0x20)),
+        user_handle(),
+        PrfInput::from_bytes(bytes32(0x60)),
+        clock.now(),
+    )
+    .with_stored(Some(stored))
+}
+
+fn unlock_binding(
+    owner: &str,
+    sign_count: u32,
+) -> Result<SubjectCredentialBindingV1<'_>, Box<dyn std::error::Error>> {
+    SubjectCredentialBindingV1::new(SubjectCredentialBindingInputV1 {
+        owner_id: owner,
+        subject_id: SubjectId::from_bytes(bytes16(0x10)),
+        epoch: 1,
+        credential_id: &CREDENTIAL_ID,
         user_handle: user_handle(),
         public_key: CoseEs256PublicKey::from_canonical_encoding(&FIXTURE_COSE_KEY).boxed()?,
         backup_eligible: false,
         backup_state: false,
         sign_count,
+        transports: TransportCodes::new(&[0]).boxed()?,
     })
+    .boxed()
 }
 
-fn create_plan(clock: &FakeClock) -> CeremonyPlan {
-    CeremonyPlan {
-        kind: CeremonyKind::Create,
-        ceremony_id: CeremonyId::from_bytes(bytes16(0)),
-        challenge: WebAuthnChallenge::from_bytes(bytes32(0x20)),
-        user_handle: user_handle(),
-        prf_input: PrfInput::from_bytes(bytes32(0x60)),
-        stored: None,
-        t0: clock.now(),
-        generation: 1,
-        owner_window: None,
-        budget: None,
-    }
+/// Reply tweaks the tests share: each makes one thing about a fixture reply wrong.
+const fn wrong_key(shape: &mut ReplyShape) {
+    shape.wrong_key = true;
 }
 
-fn get_plan(clock: &FakeClock, stored: StoredGet) -> CeremonyPlan {
-    CeremonyPlan {
-        kind: CeremonyKind::Get,
-        stored: Some(stored),
-        ..create_plan(clock)
-    }
+fn wrong_raw_id(shape: &mut ReplyShape) {
+    shape.raw_id = Some(vec![9, 9]);
+}
+
+const fn wrong_user_handle(shape: &mut ReplyShape) {
+    shape.user_handle = Some(OwnerUserHandle::from_bytes([1; 32]));
+}
+
+const fn eligible(shape: &mut ReplyShape) {
+    shape.backup = Backup::Eligible;
+}
+
+const fn no_prf(shape: &mut ReplyShape) {
+    shape.prf = None;
+}
+
+fn malformed_prf(shape: &mut ReplyShape) {
+    shape.prf_item = Some(vec![0x41, 0x07]);
 }
 
 fn expected_prf(config: &HonestConfig) -> [u8; 32] {
@@ -115,7 +163,7 @@ fn expected_prf(config: &HonestConfig) -> [u8; 32] {
 }
 
 fn new_driver(plan: CeremonyPlan) -> CeremonyDriver {
-    CeremonyDriver::new(plan, Slots::allocate())
+    CeremonyDriver::for_test(plan)
 }
 
 /// A fake surface rig for driving one `CeremonyDriver` directly.
@@ -125,6 +173,7 @@ struct DriverRig {
     store: FakeStore,
     surface: FakeSurface,
     handle: FakeSurfaceHandle,
+    steps: u32,
 }
 
 impl DriverRig {
@@ -138,12 +187,17 @@ impl DriverRig {
         surface: SurfaceConfig,
     ) -> Result<Self, Box<dyn Error>> {
         let clock = FakeClock::start();
-        let page = Wrapped::new(page, hook, clock.clone())?;
-        Ok(Self::build(clock, Box::new(page), surface))
+        let loopback = FakeLoopback::default();
+        let page = Wrapped::new(page, hook, clock.clone(), loopback.clone())?;
+        Ok(Self::build(clock, loopback, Box::new(page), surface))
     }
 
-    fn build(clock: FakeClock, page: Box<dyn PageModel>, surface: SurfaceConfig) -> Self {
-        let loopback = FakeLoopback::default();
+    fn build(
+        clock: FakeClock,
+        loopback: FakeLoopback,
+        page: Box<dyn PageModel>,
+        surface: SurfaceConfig,
+    ) -> Self {
         let surface = FakeSurface::new(clock.clone(), loopback.clone(), page, surface);
         let handle = surface.handle();
         Self {
@@ -152,6 +206,7 @@ impl DriverRig {
             store: FakeStore::default(),
             surface,
             handle,
+            steps: 0,
         }
     }
 
@@ -167,8 +222,16 @@ impl DriverRig {
     /// Run `plan` to completion and return its result and the finished driver.
     fn run(&mut self, plan: CeremonyPlan) -> (Result<Verified, BridgeError>, CeremonyDriver) {
         let mut driver = new_driver(plan);
-        let result = drive(&mut driver, &mut self.env());
+        let result = self.step_to_end(&mut driver);
         (result, driver)
+    }
+
+    /// Step `driver` to the end with the fake stepper.
+    fn step_to_end(&mut self, driver: &mut CeremonyDriver) -> Result<Verified, BridgeError> {
+        let mut stepper = FakeStepper::new(self.clock.clone());
+        let result = stepper.run(driver, &mut self.env());
+        self.steps += stepper.steps();
+        result
     }
 }
 
@@ -179,13 +242,15 @@ fn honest(prf_listener_delay_ms: u64) -> HonestConfig {
     }
 }
 
-/// A full bridge rig with fake host ports.
+/// A full bridge rig: the owner-thread bridge over a fake host that owns the surface.
 struct Rig {
     clock: FakeClock,
     loopback: FakeLoopback,
     store: FakeStore,
     surface: FakeSurfaceHandle,
-    bridge: OwnerBridge<FakeSurface, FakeRandom, FakeClock>,
+    steps: Rc<Cell<u32>>,
+    t0s: Rc<RefCell<Vec<Duration>>>,
+    bridge: OwnerBridge<FakeHost, FakeRandom, FakeClock>,
 }
 
 impl Rig {
@@ -212,7 +277,7 @@ impl Rig {
         let clock = FakeClock::start();
         let loopback = FakeLoopback::default();
         let store = FakeStore::default();
-        let page = Wrapped::new(page, hook, clock.clone())?;
+        let page = Wrapped::new(page, hook, clock.clone(), loopback.clone())?;
         let surface = FakeSurface::new(
             clock.clone(),
             loopback.clone(),
@@ -220,16 +285,16 @@ impl Rig {
             surface_config,
         );
         let handle = surface.handle();
-        let host = HostPorts {
-            loopback: Box::new(loopback.clone()),
-            store: Box::new(store.clone()),
-        };
-        let bridge = OwnerBridge::new(surface, random, clock.clone(), host, config);
+        let host = FakeHost::new(clock.clone(), surface, loopback.clone(), store.clone());
+        let (steps, t0s) = (host.steps_counter(), host.t0_log());
+        let bridge = OwnerBridge::new(host, random, clock.clone(), config);
         Ok(Self {
             clock,
             loopback,
             store,
             surface: handle,
+            steps,
+            t0s,
             bridge,
         })
     }
@@ -251,7 +316,7 @@ enum Call {
     Seal,
     Confirm,
     Commit,
-    Abandon { candidate: bool },
+    Abandon,
     Open,
     Persist,
     Release,
@@ -378,10 +443,8 @@ impl EnrollmentPort for FakeEnrollment {
         Ok(())
     }
 
-    fn abandon(&mut self, candidate: Option<Candidate>) {
-        self.calls.push(Call::Abandon {
-            candidate: candidate.is_some(),
-        });
+    fn abandon(&mut self, _candidate: Candidate) {
+        self.calls.push(Call::Abandon);
     }
 }
 
@@ -469,6 +532,25 @@ enum Hook {
     },
     /// The page stores this value just before the host's `READY -> CONSUMING` CAS.
     RaceConsume(u32),
+    /// Just before the host's end-of-ceremony release CAS from a state past `EMPTY`, the page's
+    /// own compare-exchange `from -> to` lands.
+    RaceEnd {
+        from: u32,
+        to: u32,
+    },
+    /// This lifecycle event surfaces right after the page starts its `WebAuthn` call.
+    LifecycleAfterReceived(SurfaceEvent),
+    /// The listener reports a second document completion at this moment.
+    SecondCompletion(Moment),
+}
+
+/// When a second document completion reaches the listener.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Moment {
+    /// Right after the host won the consuming compare-exchange: the release phase sees it.
+    Consumed,
+    /// Right before the host zeroes and closes the buffers: the exit phase sees it.
+    Closing,
 }
 
 /// The honest page plus one scripted deviation.
@@ -479,10 +561,17 @@ struct Wrapped {
     armed: bool,
     storm: Vec<u32>,
     retires: u32,
+    injected: bool,
+    loopback: FakeLoopback,
 }
 
 impl Wrapped {
-    fn new(config: HonestConfig, hook: Hook, clock: FakeClock) -> Result<Self, Box<dyn Error>> {
+    fn new(
+        config: HonestConfig,
+        hook: Hook,
+        clock: FakeClock,
+        loopback: FakeLoopback,
+    ) -> Result<Self, Box<dyn Error>> {
         let storm = match &hook {
             Hook::Storm(values) => values.clone(),
             _ => Vec::new(),
@@ -494,7 +583,33 @@ impl Wrapped {
             armed: false,
             storm,
             retires: 0,
+            injected: false,
+            loopback,
         })
+    }
+
+    /// A second document completion reaches the listener at its scripted moment.
+    fn complete_again(&self, op: HostOp, phase: HookPhase) {
+        let Hook::SecondCompletion(moment) = self.hook else {
+            return;
+        };
+        let due = match moment {
+            Moment::Consumed => matches!(
+                (op, phase),
+                (
+                    HostOp::Cas {
+                        new: 3,
+                        won: Some(true),
+                        ..
+                    },
+                    HookPhase::After
+                )
+            ),
+            Moment::Closing => matches!((op, phase), (HostOp::ZeroClose { .. }, HookPhase::Before)),
+        };
+        if due {
+            self.loopback.set_served(2, true);
+        }
     }
 
     fn storm_store(&mut self, buffers: &mut Buffers, pair: usize) {
@@ -507,6 +622,7 @@ impl Wrapped {
 
 impl PageModel for Wrapped {
     fn on_script_start(&mut self, buffers: &mut Buffers, at: Duration) {
+        self.injected = false;
         self.inner.on_script_start(buffers, at);
     }
 
@@ -519,6 +635,16 @@ impl PageModel for Wrapped {
 
     fn advance(&mut self, buffers: &mut Buffers, now: Duration) {
         self.inner.advance(buffers, now);
+        if let Hook::LifecycleAfterReceived(event) = self.hook {
+            let started = buffers
+                .log
+                .iter()
+                .any(|entry| matches!(entry, LogEntry::PageWebAuthn { .. }));
+            if started && !self.injected {
+                self.injected = true;
+                buffers.schedule(now, event);
+            }
+        }
     }
 
     fn next_activity(&self) -> Option<Duration> {
@@ -527,6 +653,7 @@ impl PageModel for Wrapped {
 
     fn on_host_op(&mut self, buffers: &mut Buffers, now: Duration, op: HostOp, phase: HookPhase) {
         self.inner.on_host_op(buffers, now, op, phase);
+        self.complete_again(op, phase);
         match (&self.hook, op, phase) {
             (Hook::TearBetweenCopies, HostOp::Copy { pair, count: 1 }, HookPhase::After) => {
                 buffers.set_reply_byte(pair, 80, 0xee);
@@ -578,6 +705,18 @@ impl PageModel for Wrapped {
                 },
                 HookPhase::Before,
             ) => buffers.store(Actor::Page, pair, *value),
+            (
+                Hook::RaceEnd { from, to },
+                HostOp::Cas {
+                    pair,
+                    current: 1..=7,
+                    new: 4,
+                    ..
+                },
+                HookPhase::Before,
+            ) => {
+                buffers.cas(Actor::Page, pair, *from, *to);
+            }
             (
                 Hook::AfterRetire,
                 HostOp::Cas {

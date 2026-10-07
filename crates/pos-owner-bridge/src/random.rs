@@ -1,6 +1,6 @@
 //! Production randomness and time ports (ADR-110 §6).
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::UnavailableCode;
 
@@ -14,20 +14,11 @@ pub trait SecureRandom {
     fn fill(&mut self, out: &mut [u8]) -> Result<(), UnavailableCode>;
 }
 
-/// A monotonic clock that can also pause the calling thread.
+/// A monotonic clock. The portable core only reads it; it never sleeps (ADR-110 §6, §10): the
+/// host owns the timer and its callbacks.
 pub trait MonotonicClock {
     /// Return the current monotonic instant.
     fn now(&self) -> Instant;
-
-    /// Block for `duration`; tests advance a fake clock instead.
-    fn pause(&self, duration: Duration);
-
-    /// Pause for one pump interval. `wake` is the next instant at which the ceremony itself
-    /// needs attention (`_wake`). A real clock ignores it, because surface events must be polled at the
-    /// pump interval; a fake clock may skip ahead to it when nothing else can happen sooner.
-    fn pause_for(&self, interval: Duration, _wake: Option<Instant>) {
-        self.pause(interval);
-    }
 }
 
 /// The operating-system CSPRNG (`getrandom`).
@@ -47,9 +38,5 @@ pub struct SystemClock;
 impl MonotonicClock for SystemClock {
     fn now(&self) -> Instant {
         Instant::now()
-    }
-
-    fn pause(&self, duration: Duration) {
-        std::thread::sleep(duration);
     }
 }

@@ -57,6 +57,9 @@ pub enum AbortBehavior {
     Late,
     /// A control page that releases before its handler runs.
     ReleaseFirst,
+    /// A hostile page that ignores every release request and its own deadline. The host must
+    /// still finish its cleanup on timers alone.
+    NeverRelease,
 }
 
 /// A deviation applied to the published reply.
@@ -558,7 +561,7 @@ impl HonestPage {
     fn release_requested(&mut self, buffers: &mut Buffers, at: Duration) {
         self.active
             .clone()
-            .filter(|active| !active.done)
+            .filter(|active| !active.done && self.config.abort != AbortBehavior::NeverRelease)
             .into_iter()
             .for_each(|active| {
                 if active.responded {
@@ -587,7 +590,8 @@ impl HonestPage {
                 let later = at + ABORT_WAIT + Duration::from_millis(100);
                 self.schedule(later, Task::Handler { type_error: true });
             }
-            AbortBehavior::ReleaseFirst => {
+            // `NeverRelease` never gets here: `release_requested` and `deadline` skip it.
+            AbortBehavior::ReleaseFirst | AbortBehavior::NeverRelease => {
                 self.release_active(buffers);
                 self.handler(buffers, true);
             }
@@ -625,6 +629,10 @@ impl HonestPage {
 
     fn deadline(&mut self, buffers: &mut Buffers, at: Duration) {
         self.expired = true;
+        buffers.log.push(LogEntry::PageDeadline { at });
+        if self.config.abort == AbortBehavior::NeverRelease {
+            return;
+        }
         let pending = self
             .active
             .as_ref()

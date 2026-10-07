@@ -14,6 +14,8 @@ use pos_owner_bridge_codec::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::ceremony::{replace_prf, PRF_NULL};
+
 /// The test-only scalar `d = 1`.
 pub const FIXTURE_SCALAR: [u8; 32] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
@@ -108,8 +110,12 @@ pub enum Backup {
 pub struct ReplyShape {
     /// The authenticator signature counter.
     pub sign_count: u32,
-    /// The PRF `first` result, when the authenticator returns one.
+    /// The PRF `first` result, when the authenticator returns one. A Get reply without one is
+    /// encoded the way the packaged page encodes an absent PRF: as CBOR `null`.
     pub prf: Option<[u8; 32]>,
+    /// A raw CBOR item that replaces the PRF item of the encoded reply, to model a page that
+    /// reports a malformed PRF.
+    pub prf_item: Option<Vec<u8>>,
     /// The Create `prf.enabled` flag.
     pub prf_enabled: bool,
     /// The backup flags.
@@ -129,6 +135,7 @@ impl ReplyShape {
         Self {
             sign_count,
             prf,
+            prf_item: None,
             prf_enabled: true,
             backup: Backup::None,
             user_handle: None,
@@ -144,6 +151,12 @@ pub struct FixtureSigner {
     other: SigningKey,
     scalars: Scalars,
     credential_id: Vec<u8>,
+}
+
+/// Replace the PRF item of an encoded reply with the raw CBOR `item`, when there is one.
+fn patch_prf(encoded: Vec<u8>, item: Option<&[u8]>) -> Vec<u8> {
+    item.and_then(|item| replace_prf(&encoded, item))
+        .unwrap_or(encoded)
 }
 
 /// Append a CBOR byte-string header for a length of at least 24.
@@ -302,14 +315,14 @@ impl FixtureSigner {
             })
             .and_then(|reply| encode_attestation_reply(&reply, &mut buffer))?;
         buffer.truncate(length);
-        Ok(buffer)
+        Ok(patch_prf(buffer, shape.prf_item.as_deref()))
     }
 
     /// Encode the `AssertionReplyV1` payload of a Get ceremony.
     ///
     /// # Errors
     ///
-    /// Returns the codec failure if a field exceeds its closed bound, including a missing PRF.
+    /// Returns the codec failure if a field exceeds its closed bound.
     pub fn assertion_payload(
         &self,
         ceremony_id: CeremonyId,
@@ -336,23 +349,19 @@ impl FixtureSigner {
         let signature = self.signature(shape, &authenticator_data, &client_data);
         let raw_id = shape.raw_id.as_deref().unwrap_or(&self.credential_id);
         let mut buffer = vec![0_u8; 8_192];
-        let length = shape
-            .prf
-            .map(PrfResult::from_bytes)
-            .ok_or(OwnerBridgeCodecError::InvalidPayload)
-            .and_then(|prf| {
-                AssertionReplyV1::new(
-                    ceremony_id,
-                    raw_id,
-                    &client_data,
-                    &authenticator_data,
-                    &signature,
-                    shape.user_handle,
-                    prf,
-                )
-            })
-            .and_then(|reply| encode_assertion_reply(&reply, &mut buffer))?;
+        let placeholder = PrfResult::from_bytes(shape.prf.unwrap_or([0; 32]));
+        let length = AssertionReplyV1::new(
+            ceremony_id,
+            raw_id,
+            &client_data,
+            &authenticator_data,
+            &signature,
+            shape.user_handle,
+            placeholder,
+        )
+        .and_then(|reply| encode_assertion_reply(&reply, &mut buffer))?;
         buffer.truncate(length);
-        Ok(buffer)
+        let absent = shape.prf.is_none().then_some(&PRF_NULL[..]);
+        Ok(patch_prf(buffer, shape.prf_item.as_deref().or(absent)))
     }
 }

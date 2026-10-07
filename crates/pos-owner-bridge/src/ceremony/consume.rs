@@ -1,15 +1,35 @@
 //! Reply consumption: A/B copies, header and payload checks, and verification (ADR-110 §5.6).
+//!
+//! The merged codec verifier reports every verification failure as one error, so a failed
+//! Create is `Rejected(AttestationFormat)` and a failed Get is `Rejected(Signature)` until
+//! Redmine #563 lets the codec report its reason. The bridge itself still distinguishes the
+//! checks it makes before verifying: a credential ID or user handle that is not the stored one,
+//! a ceremony ID that is not the outstanding one, and a required PRF that is absent or malformed.
+//!
+//! The closed codec decoder rejects a Get reply whose PRF is not a 32-byte string, but the
+//! packaged page reports an absent PRF as CBOR `null` there, and a Create reply may carry a
+//! malformed PRF too. When a reply fails to decode, the bridge swaps its PRF item for a valid
+//! stand-in and decodes again: if only the PRF was wrong, the failure is
+//! `Unavailable(PrfUnsupported)` (ADR-110 §1 and §7), otherwise it is the codec's own protocol
+//! error.
+//!
+//! Precedence: a reply that fails to decode only because its PRF is absent or malformed is
+//! `PrfUnsupported` even when its signature would not have verified, because the signature is
+//! never reached. That failure is not user-retryable, which fits ADR-110 §1: a real ceremony needs
+//! a present, correctly shaped PRF result. This scan is a temporary bridge-side lenient decode,
+//! to be removed when Redmine #563 gives the codec a PRF-state reason.
 
 use pos_owner_bridge_codec::{
-    decode_assertion_reply, decode_attestation_reply, parse_assertion_authenticator_data,
-    verify_assertion_reply, verify_attestation_reply, AssertionAuthenticatorData, AssertionReplyV1,
-    AssertionVerificationContext, AttestationReplyV1, CeremonyKind, ControlState,
-    CreateVerificationContext, OwnerBridgeCodecError, StoredCredential, CONTROL_HEADER_BYTES,
+    decode_assertion_reply, decode_attestation_reply, verify_assertion_reply,
+    verify_attestation_reply, AssertionReplyV1, AssertionVerificationContext, AttestationReplyV1,
+    CeremonyId, CeremonyKind, ControlState, CreateVerificationContext, OwnerBridgeCodecError,
+    StoredCredential, CONTROL_HEADER_BYTES,
 };
 use zeroize::Zeroizing;
 
-use super::plan::{Assertion, CeremonyPlan, Registration, StoredGet, Verified};
+use super::plan::{Assertion, CeremonyPlan, Registration, Verified};
 use super::release::read_state;
+use super::{protocol_from_codec, replace_prf, PRF_PLACEHOLDER};
 use crate::{
     BridgeError, OwnerWebSurface, ProtocolCode, RejectedCode, ReplyImage, SurfaceError,
     UnavailableCode,
@@ -17,25 +37,15 @@ use crate::{
 
 const HEADER: usize = CONTROL_HEADER_BYTES;
 
-/// Map a codec failure while decoding a reply to its protocol code.
-#[must_use]
-pub const fn protocol_from_codec(error: OwnerBridgeCodecError) -> BridgeError {
-    let code = match error {
-        OwnerBridgeCodecError::NonCanonicalCbor => ProtocolCode::NonCanonical,
-        OwnerBridgeCodecError::BoundsExceeded
-        | OwnerBridgeCodecError::BufferTooSmall
-        | OwnerBridgeCodecError::InvalidControlBounds => ProtocolCode::LengthOutOfBounds,
-        _ => ProtocolCode::Malformed,
-    };
-    BridgeError::Protocol(code)
-}
-
 /// Copy the full reply capacity and require the state word to still be `CONSUMING`.
 ///
 /// # Errors
 ///
 /// Returns the surface failure, or `Protocol(CopyMismatch)` when the state changed.
-pub fn snapshot(surface: &dyn OwnerWebSurface, image: &mut ReplyImage) -> Result<(), BridgeError> {
+pub(super) fn snapshot(
+    surface: &dyn OwnerWebSurface,
+    image: &mut ReplyImage,
+) -> Result<(), BridgeError> {
     surface.reply_copy(image).map_err(SurfaceError::error)?;
     match read_state(surface) {
         Ok(ControlState::Consuming) => Ok(()),
@@ -56,11 +66,14 @@ fn same_range(initial: &[u8; HEADER], header: &[u8; HEADER], from: usize, to: us
 ///
 /// Returns `CeremonyIdMismatch`, `GenerationMismatch`, `KindMismatch`, `HeaderTampered` or
 /// `LengthOutOfBounds`, in that order.
-pub fn check_reply_header(initial: &[u8; HEADER], copy: &[u8]) -> Result<usize, BridgeError> {
-    let (header, _) = copy
-        .split_first_chunk::<HEADER>()
-        .unwrap_or((&[0; HEADER], &[]));
+pub(super) fn check_reply_header(
+    initial: &[u8; HEADER],
+    copy: &[u8],
+) -> Result<usize, BridgeError> {
     let protocol = |code| Err(BridgeError::Protocol(code));
+    let Some((header, _)) = copy.split_first_chunk::<HEADER>() else {
+        return protocol(ProtocolCode::LengthOutOfBounds);
+    };
     if !same_range(initial, header, 16, 32) {
         return protocol(ProtocolCode::CeremonyIdMismatch);
     }
@@ -92,7 +105,7 @@ fn registration_from(
     if !reply.prf_enabled() {
         return Err(BridgeError::Unavailable(UnavailableCode::PrfUnsupported));
     }
-    let context = CreateVerificationContext::new(plan.ceremony_id, plan.challenge);
+    let context = CreateVerificationContext::new(plan.ceremony_id, plan.challenge());
     let verified = verify_attestation_reply(reply, context)
         .or(Err(BridgeError::Rejected(RejectedCode::AttestationFormat)))?;
     let first = verified.prf_first();
@@ -108,30 +121,6 @@ fn registration_from(
         sign_count: verified.sign_count(),
         prf_present: first.is_some(),
     })
-}
-
-const fn counter_regressed(stored: u32, new: u32) -> bool {
-    new <= stored && (new != 0 || stored != 0)
-}
-
-const fn classify_authenticator(
-    data: AssertionAuthenticatorData,
-    stored: &StoredGet,
-) -> RejectedCode {
-    if data.backup_eligible() != stored.backup_eligible {
-        RejectedCode::BackupFlags
-    } else if counter_regressed(stored.sign_count, data.sign_count()) {
-        RejectedCode::CounterRegression
-    } else {
-        RejectedCode::Signature
-    }
-}
-
-fn classify_assertion_failure(reply: &AssertionReplyV1<'_>, stored: &StoredGet) -> RejectedCode {
-    parse_assertion_authenticator_data(reply.authenticator_data())
-        .map_or(RejectedCode::Signature, |data| {
-            classify_authenticator(data, stored)
-        })
 }
 
 fn assertion_from(
@@ -161,9 +150,9 @@ fn assertion_from(
     .map_err(protocol_from_codec)
     .and_then(|credential| {
         let context =
-            AssertionVerificationContext::new(plan.ceremony_id, plan.challenge, credential);
+            AssertionVerificationContext::new(plan.ceremony_id, plan.challenge(), credential);
         verify_assertion_reply(reply, context)
-            .map_err(|_| BridgeError::Rejected(classify_assertion_failure(reply, stored)))
+            .or(Err(BridgeError::Rejected(RejectedCode::Signature)))
     })?;
     prf.copy_from_slice(verified.prf_first().as_bytes());
     Ok(Assertion {
@@ -172,27 +161,55 @@ fn assertion_from(
     })
 }
 
+fn ceremony_id_of(kind: CeremonyKind, payload: &[u8]) -> Result<CeremonyId, OwnerBridgeCodecError> {
+    match kind {
+        CeremonyKind::Create => {
+            decode_attestation_reply(payload).map(AttestationReplyV1::ceremony_id)
+        }
+        CeremonyKind::Get => decode_assertion_reply(payload).map(AssertionReplyV1::ceremony_id),
+    }
+}
+
+/// The failure of a reply that did not decode (see the module documentation).
+fn decode_failure(
+    plan: &CeremonyPlan,
+    payload: &[u8],
+    error: OwnerBridgeCodecError,
+) -> BridgeError {
+    let standin = replace_prf(payload, &PRF_PLACEHOLDER);
+    let id = standin.map(|bytes| ceremony_id_of(plan.kind, &bytes));
+    match id {
+        Some(Ok(id)) if id == plan.ceremony_id => {
+            BridgeError::Unavailable(UnavailableCode::PrfUnsupported)
+        }
+        Some(Ok(_)) => BridgeError::Protocol(ProtocolCode::CeremonyIdMismatch),
+        _ => protocol_from_codec(error),
+    }
+}
+
 /// Decode, check and verify the payload held in copy A, writing the PRF into `prf`.
 ///
 /// # Errors
 ///
 /// Returns the decode failure as a protocol error, a ceremony-ID mismatch, or the
 /// verification failure as a rejection.
-pub fn parse_and_verify(
+pub(super) fn parse_and_verify(
     plan: &CeremonyPlan,
     payload: &[u8],
     prf: &mut Zeroizing<[u8; 32]>,
 ) -> Result<Verified, BridgeError> {
     match plan.kind {
         CeremonyKind::Create => {
-            let reply = decode_attestation_reply(payload).map_err(protocol_from_codec)?;
+            let reply = decode_attestation_reply(payload)
+                .map_err(|error| decode_failure(plan, payload, error))?;
             if reply.ceremony_id() != plan.ceremony_id {
                 return Err(BridgeError::Protocol(ProtocolCode::CeremonyIdMismatch));
             }
             registration_from(&reply, plan, prf).map(Verified::Registration)
         }
         CeremonyKind::Get => {
-            let reply = decode_assertion_reply(payload).map_err(protocol_from_codec)?;
+            let reply = decode_assertion_reply(payload)
+                .map_err(|error| decode_failure(plan, payload, error))?;
             if reply.ceremony_id() != plan.ceremony_id {
                 return Err(BridgeError::Protocol(ProtocolCode::CeremonyIdMismatch));
             }
@@ -200,3 +217,6 @@ pub fn parse_and_verify(
         }
     }
 }
+
+#[cfg(all(test, feature = "test-support"))]
+mod tests;

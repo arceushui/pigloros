@@ -1,15 +1,29 @@
 //! Loopback binding with the IPv4-only fallback and its explicit IPv6-absence probe (ADR-110 §4).
 
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
+use std::net::TcpListener;
 
 use thiserror::Error;
 
 use crate::{BridgeError, UnavailableCode};
 
-/// Platform error values meaning "no IPv6 loopback here": Linux `EAFNOSUPPORT` and
-/// `EADDRNOTAVAIL`, and Windows `WSAEAFNOSUPPORT` and `WSAEADDRNOTAVAIL`.
-const IPV6_UNAVAILABLE_CODES: [i32; 4] = [97, 99, 10047, 10049];
+#[cfg(feature = "test-support")]
+use std::net::{Ipv4Addr, Ipv6Addr};
+
+/// Platform error values meaning "no IPv6 loopback here": `EAFNOSUPPORT` and `EADDRNOTAVAIL`.
+///
+/// ADR-110 §4 names the Windows values (`WSAEAFNOSUPPORT` 10047 and `WSAEADDRNOTAVAIL` 10049);
+/// the Linux values let the portable core and its tests run on the CI platform, and macOS is
+/// listed for development. Any other platform has no values, so every IPv6 failure there is
+/// `Other` and the listener fails closed with `PortUnavailable` rather than guessing.
+#[cfg(target_os = "linux")]
+const IPV6_UNAVAILABLE_CODES: [i32; 2] = [97, 99];
+#[cfg(target_os = "macos")]
+const IPV6_UNAVAILABLE_CODES: [i32; 2] = [47, 49];
+#[cfg(windows)]
+const IPV6_UNAVAILABLE_CODES: [i32; 2] = [10047, 10049];
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+const IPV6_UNAVAILABLE_CODES: [i32; 0] = [];
 
 /// The closed result of one failed bind.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -35,8 +49,10 @@ pub fn classify_bind_error(error: &io::Error) -> BindError {
     }
 }
 
-/// Supplies exclusive loopback sockets. The Windows shim implements this with
-/// `SO_EXCLUSIVEADDRUSE`; [`StdBinder`] is the portable implementation.
+/// Supplies exclusive loopback sockets.
+///
+/// The Windows shim implements this with `SO_EXCLUSIVEADDRUSE` and `listen(4)` (ADR-110 §4);
+/// behind the `test-support` feature, `StdBinder` is a plain `std::net` implementation for tests.
 pub trait LoopbackBinder: Send {
     /// Bind `127.0.0.1` on the owner port.
     ///
@@ -74,13 +90,13 @@ pub enum Ipv6Mode {
 
 /// The sockets bound at startup.
 #[derive(Debug)]
-pub struct LoopbackSockets {
+pub(super) struct LoopbackSockets {
     /// The IPv4 loopback socket.
-    pub v4: TcpListener,
+    pub(super) v4: TcpListener,
     /// The IPv6 loopback socket, when the IPv6 loopback exists.
-    pub v6: Option<TcpListener>,
+    pub(super) v6: Option<TcpListener>,
     /// Whether IPv6 is held or absent.
-    pub mode: Ipv6Mode,
+    pub(super) mode: Ipv6Mode,
 }
 
 /// Check that the IPv6 loopback is still absent with the same platform error value.
@@ -88,7 +104,7 @@ pub struct LoopbackSockets {
 /// # Errors
 ///
 /// Returns `Unavailable(LoopbackChanged)` when the probe succeeds or fails differently.
-pub fn check_ipv6_absent(
+pub(super) fn check_ipv6_absent(
     binder: &mut dyn LoopbackBinder,
     startup_error: i32,
 ) -> Result<(), BridgeError> {
@@ -105,7 +121,9 @@ pub fn check_ipv6_absent(
 /// Returns `Unavailable(PortUnavailable)` when IPv4 cannot be bound or IPv6 fails for any
 /// reason other than absence, and `Unavailable(LoopbackChanged)` when the startup probe
 /// disagrees with the startup failure.
-pub fn bind_loopback(binder: &mut dyn LoopbackBinder) -> Result<LoopbackSockets, BridgeError> {
+pub(super) fn bind_loopback(
+    binder: &mut dyn LoopbackBinder,
+) -> Result<LoopbackSockets, BridgeError> {
     let port_unavailable = BridgeError::Unavailable(UnavailableCode::PortUnavailable);
     let v4 = binder.bind_v4().or(Err(port_unavailable))?;
     let v6_result = binder.bind_v6();
@@ -128,11 +146,18 @@ pub fn bind_loopback(binder: &mut dyn LoopbackBinder) -> Result<LoopbackSockets,
 }
 
 /// Binds with `std::net`; `port` is the owner port, or `0` for an ephemeral test port.
+///
+/// This binder is NOT exclusive: it sets neither `SO_EXCLUSIVEADDRUSE` nor the ADR-110 §4
+/// backlog of four, so another local process can share the port on some platforms. It exists for
+/// tests only and is therefore compiled only with the `test-support` feature. Production code
+/// obtains its binder from the platform shim (Redmine #535).
+#[cfg(feature = "test-support")]
 #[derive(Clone, Copy, Debug)]
 pub struct StdBinder {
     port: u16,
 }
 
+#[cfg(feature = "test-support")]
 impl StdBinder {
     /// Bind on `port`.
     #[must_use]
@@ -141,6 +166,7 @@ impl StdBinder {
     }
 }
 
+#[cfg(feature = "test-support")]
 fn classified(result: io::Result<TcpListener>) -> Result<TcpListener, BindError> {
     match result {
         Ok(listener) => Ok(listener),
@@ -148,6 +174,7 @@ fn classified(result: io::Result<TcpListener>) -> Result<TcpListener, BindError>
     }
 }
 
+#[cfg(feature = "test-support")]
 impl LoopbackBinder for StdBinder {
     fn bind_v4(&mut self) -> Result<TcpListener, BindError> {
         classified(TcpListener::bind((Ipv4Addr::LOCALHOST, self.port)))

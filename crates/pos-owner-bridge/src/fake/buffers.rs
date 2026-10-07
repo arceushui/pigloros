@@ -176,6 +176,11 @@ pub enum LogEntry {
         /// Whether its compare-exchange threw because the buffer was already detached.
         type_error: bool,
     },
+    /// The page deadline fired.
+    PageDeadline {
+        /// When.
+        at: Duration,
+    },
     /// A scripted misbehaviour wrote into the read-only request buffer.
     RequestWritten {
         /// The pair index.
@@ -203,8 +208,10 @@ pub struct Pair {
     pub generation: u32,
     /// The ceremony ID carried by both headers.
     pub ceremony_id: [u8; 16],
-    /// The request buffer bytes.
+    /// The request buffer bytes; the host zeroes them when it closes the pair.
     pub request: Vec<u8>,
+    /// The request payload exactly as posted, kept after the host zeroes `request`.
+    pub payload: Vec<u8>,
     /// The reply buffer bytes; the live state word is `state`, not these bytes.
     pub reply: Vec<u8>,
     /// The live reply state word.
@@ -224,6 +231,7 @@ static NO_PAIR: Pair = Pair {
     generation: 0,
     ceremony_id: [0; 16],
     request: Vec::new(),
+    payload: Vec::new(),
     reply: Vec::new(),
     state: 0,
     state_changed_at: Duration::ZERO,
