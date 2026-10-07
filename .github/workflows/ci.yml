@@ -408,6 +408,8 @@ jobs:
           grep --fixed-strings \
             "secure conformance fixture snapshot generation requires Linux openat2" \
             "${RUNNER_TEMP}/conformance-non-linux.log"
+      - name: Check pos-store without the Linux-only Plugin trust registry
+        run: cargo check -p pos-store --locked
       - name: Exercise unsupported recipient export decryption boundary
         run: cargo test -p pos-store --test recipient_export_decryption_unsupported_public --locked -- --include-ignored
 
@@ -1183,6 +1185,10 @@ jobs:
         run: |
           python scripts/check_trusted_clock_port_impls.py
           python scripts/test_check_trusted_clock_port_impls.py
+      - name: Check Plugin trust registry confinement policy
+        run: |
+          python scripts/check_plugin_trust_registry_impls.py
+          python scripts/test_check_plugin_trust_registry_impls.py
       - name: Check PMF1 golden vectors match their generator
         run: python scripts/generate_pmf1_golden_vectors.py --check
       - name: Check independent owner-bridge codec vectors

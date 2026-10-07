@@ -9,7 +9,7 @@ publish.workspace = true
 # Backend features — sqlite is on by default; disable with --no-default-features
 [features]
 default = ["sqlite"]
-sqlite = ["dep:rusqlite", "dep:pos-conformance"]
+sqlite = ["dep:rusqlite"]
 # Exposes recipient-export acceptance fixtures only. Never enable this in a
 # deployable dependency graph; CI enforces that policy.
 test-support = ["sqlite", "pos-core/test-support"]
@@ -30,15 +30,18 @@ thiserror = { workspace = true }
 zeroize = { workspace = true }
 
 # Linux-only: recipient-key custody uses openat2/renameat2 semantics (libc, rustix);
-# the trust policy registry reads conformance snapshots (pos-conformance).
+# the trust policy registries read conformance snapshots (pos-conformance), which
+# fails to build elsewhere, so non-Linux builds expose no Plugin admission surface.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }
 rustix = { workspace = true }
-pos-conformance = { path = "../pos-conformance", optional = true }
+pos-conformance = { path = "../pos-conformance" }
 
 [dev-dependencies]
 ed25519-dalek = { workspace = true }
 pos-core = { path = "../pos-core", features = ["test-support"] }
+# Test-only PMF1 projection fixtures for the Plugin trust registry vectors.
+pos-crypto = { path = "../pos-crypto", features = ["test-support"] }
 # Test-only SQLite limit control injects query binding failures.
 rusqlite = { workspace = true, features = ["limits"] }
 tempfile = "3"

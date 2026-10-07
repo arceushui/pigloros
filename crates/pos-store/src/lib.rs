@@ -49,6 +49,14 @@ extern crate self as pos_store;
 #[path = "../tests/support/fae1_fixture.rs"]
 pub mod fae1_fixture;
 
+// Test-only. The shared Plugin trust registry fixtures under `tests/support` serve the public
+// vectors and the Memory adapter's fault-injection tests; the items are `pub` for the same
+// reason as the `FAE1` fixture above.
+#[cfg(all(test, target_os = "linux"))]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../tests/support/plugin_trust_registry_fixtures.rs"]
+pub mod plugin_trust_registry_fixtures;
+
 pub mod fork_admission_authority;
 pub mod fork_attribution_authority_import;
 pub mod fork_attribution_issuer_policy;
@@ -56,6 +64,8 @@ pub mod fork_delivery_journal;
 pub mod fork_event_authority;
 pub mod fork_manifest_publication;
 pub mod memory;
+#[cfg(target_os = "linux")]
+pub mod plugin_trust_registry;
 pub mod stitch;
 mod timeline_range;
 pub mod trusted_clock;
