@@ -1063,7 +1063,9 @@ fn a_release_with_a_bad_signature_is_refused_before_the_registry() -> TestResult
 #[test]
 fn a_release_signed_by_an_unlisted_key_is_refused_before_the_registry() -> TestResult {
     // PTR1 lists a different key for the publisher's epoch 1 than the one that signed.
-    let listed = SigningKey::from_bytes(&[0x5a; 32]).verifying_key().to_bytes();
+    let listed = SigningKey::from_bytes(&[0x5a; 32])
+        .verifying_key()
+        .to_bytes();
     let mut world = World::build(Some(listed), true)?;
     let published = world.publish(Shape::first())?;
     let material = world.material()?;
