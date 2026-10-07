@@ -56,6 +56,13 @@ type Error = CommunityPluginHostErrorV1;
 /// a hosted, Candidate or Stable execution boundary, and no hosted
 /// conformance claim.
 ///
+/// # Calling thread
+/// The worker binds `PR_SET_PDEATHSIG(SIGKILL)`, which Linux delivers when the
+/// *thread* that spawned it exits, not when the process does. Call the
+/// supervisor from a thread that outlives the call (not from a short-lived
+/// pool or `spawn_blocking` thread), or a live invocation is killed and
+/// reported as `WorkerCrashed`.
+///
 /// # Process-wide effect
 /// Before every launch the supervisor marks close-on-exec every descriptor,
 /// from 3 upwards, that the host process inherited without that flag. This

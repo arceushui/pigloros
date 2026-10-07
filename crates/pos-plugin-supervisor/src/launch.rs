@@ -111,7 +111,7 @@ pub struct WorkerResourceCeilingsV1 {
     pub core_bytes: u64,
 }
 
-/// The `RLIMIT_DATA` ceiling for `memory_bytes` of guest memory.
+/// The `RLIMIT_DATA` ceiling for the guest memory budget.
 ///
 /// An `AddressSanitizer` build (`asan_build`, set by `build.rs`) lifts this
 /// one ceiling: the sanitizer's shadow mapping is charged against it and
