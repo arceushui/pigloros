@@ -1129,6 +1129,17 @@ mod tests {
     }
 
     #[test]
+    fn reference_rosters_of_two_runs_compare_equal() {
+        let first = run_builtin_reference_experiment_fixture(StoreConfig::Memory, 1);
+        let second = run_builtin_reference_experiment_fixture(StoreConfig::Memory, 1);
+        let (first, second) = (first.test_ok(), second.test_ok());
+        let baseline = first.manifest.plugin_roster();
+        let candidate = second.manifest.plugin_roster();
+        let compared = pos_core::compare_manifest_plugin_rosters_v1(baseline, candidate);
+        assert_eq!(compared.map(pos_core::RosterEquivalenceV1::slot_count), Ok(2));
+    }
+
+    #[test]
     fn cmd_experiment_reproduce_requires_owner_verified_policy() {
         let dir = tempfile::tempdir().test_ok();
         let path = dir

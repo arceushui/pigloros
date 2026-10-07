@@ -65,6 +65,7 @@ mod adapter;
 mod authorized_pass;
 mod catalogue;
 mod human_admission;
+mod local_seal;
 mod manifest_roster;
 mod profile_composition;
 mod scheduled_admission;
@@ -1301,9 +1302,19 @@ impl PluginRegistry {
     /// deployment qualification. The returned capability is tied to this
     /// registry instance and expires after any registration change.
     ///
+    /// Admission completes each Plugin's generated executable budget (ADR-088
+    /// R3). Every local Plugin shares one execution profile, so every closure
+    /// must reserve CPU for the whole composition: one row per registered
+    /// Plugin, sorted by `PluginId`, each with that Plugin's own values. The
+    /// registry re-derives each EBP1, the EOP1 that names it, the OPC1 closure
+    /// and the native pin before it seals the batch, so EOP1 digests and pins
+    /// read before admission are superseded. A failed admission changes
+    /// nothing.
+    ///
     /// # Errors
     /// Rejects an empty, replay, air-gapped, already sealed, unpinned,
-    /// slotless, or incomplete registry.
+    /// slotless, or incomplete registry, and a composition of more than 256
+    /// Plugins, whose reservation table does not fit one EBP1.
     pub fn admit_local_manifest_registration(
         &mut self,
         owner_id: OwnerIdV1,
@@ -1319,28 +1330,15 @@ impl PluginRegistry {
             return Err(ManifestRegistrationErrorV1::EmptyBatch);
         }
         let owner_reference = pos_core::ArtifactRegistrationV1::owner_reference(&owner_id);
+        let reservations = self.composition_cpu_reservations();
         let mut rows = Vec::with_capacity(self.plugins.len());
+        let mut sealed = Vec::with_capacity(self.plugins.len());
         for (plugin_id, entry) in &self.plugins {
-            let admission = entry
-                .output_admission
-                .as_ref()
-                .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
-            let closure = admission
-                .closure()
-                .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
-            let row = ManifestAdmissionCatalogRowV1 {
-                stable_slot: Self::local_entry_slot(*plugin_id, entry)?,
-                plugin_id: *plugin_id,
-                plugin_name: entry.name.clone(),
-                plugin_version: entry.version.clone(),
-                implementation_hash: admission.policy().fields().implementation_hash,
-                eop1_native_digest: admission.policy_digest(),
-                closure_hash: closure.manifest_closure_hash(),
-            };
             // This requires the available native pin, so the local catalog
             // never contains an unpinned row.
-            Self::validate_manifest_entry_fields(&row, entry)?;
+            let (row, parts) = Self::sealed_local_entry(*plugin_id, entry, &reservations)?;
             rows.push(row);
+            sealed.push(parts);
         }
         rows.sort_unstable_by(|left, right| left.stable_slot.cmp(&right.stable_slot));
         let catalog = ManifestAdmissionCatalogV1::new(ManifestAdmissionCatalogInputV1 {
@@ -1353,6 +1351,7 @@ impl PluginRegistry {
             .adapter_admission_for_catalog(&catalog)
             .map_err(|_| ManifestRegistrationErrorV1::IncompleteBatch)?;
 
+        self.install_sealed_entries(sealed);
         self.registration_revision += 1;
         self.manifest_batch = Some(catalog.clone());
         Ok(self.bind_admitted_composition(catalog, adapter_admission))
@@ -1714,16 +1713,24 @@ impl PluginRegistry {
         row: &ManifestAdmissionCatalogRowV1,
         entry: &PluginEntry,
     ) -> Result<(), ManifestRegistrationErrorV1> {
-        let registration = entry
-            .registration
-            .as_ref()
-            .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
-        let admission = entry
-            .output_admission
-            .as_ref()
-            .ok_or(ManifestRegistrationErrorV1::UnverifiedRegistration)?;
+        let registration = entry.registration.as_ref();
+        let admission = entry.output_admission.as_ref();
+        Self::validate_manifest_parts(row, entry, registration, admission)
+    }
+
+    /// Check one catalog row against an entry's name and version and the given pin and
+    /// admission, which are either the entry's own or their re-derived local replacements.
+    fn validate_manifest_parts(
+        row: &ManifestAdmissionCatalogRowV1,
+        entry: &PluginEntry,
+        registration: Option<&PluginRegistrationV1>,
+        admission: Option<&OutputAdmissionV1>,
+    ) -> Result<(), ManifestRegistrationErrorV1> {
+        use crate::composition::ManifestRegistrationErrorV1::UnverifiedRegistration;
+        let registration = registration.ok_or(UnverifiedRegistration)?;
+        let admission = admission.ok_or(UnverifiedRegistration)?;
         let Some(closure) = admission.closure() else {
-            return Err(ManifestRegistrationErrorV1::UnverifiedRegistration);
+            return Err(UnverifiedRegistration);
         };
         // A retained closure is only constructed together with its owner token.
         if registration.availability() != PluginAvailabilityV1::Available
@@ -1731,7 +1738,7 @@ impl PluginRegistry {
             || registration.pin().isolation() != PluginIsolationV1::OperatorTrustedNative
             || registration.pin().configuration_digest() != admission.policy_digest()
         {
-            return Err(ManifestRegistrationErrorV1::UnverifiedRegistration);
+            return Err(UnverifiedRegistration);
         }
         if entry.name != row.plugin_name
             || entry.version != row.plugin_version
@@ -3028,6 +3035,11 @@ impl PluginRegistry {
     ///
     /// The public test `manifest_slots_public` runs this same flow.
     ///
+    /// The generated budget first reserves CPU for this Plugin alone; the
+    /// complete composition table is added by
+    /// [`Self::admit_local_manifest_registration`], which also replaces this
+    /// Plugin's EOP1 digest and pin.
+    ///
     /// # Errors
     /// Returns a duplicate-slot, policy, pin, duplicate-role, or Plugin
     /// registration error before mutation.
@@ -3133,6 +3145,10 @@ impl PluginRegistry {
             })
     }
 
+    /// The shared generated budget, reserving CPU for `plugin` alone.
+    ///
+    /// Local admission later widens the reservation table to the complete
+    /// composition; see [`Self::admit_local_manifest_registration`].
     fn generated_budget_input(plugin: &dyn Plugin) -> pos_core::ExecutableBudgetPolicyInputV1 {
         pos_core::ExecutableBudgetPolicyInputV1 {
             revision: 1,
@@ -5988,6 +6004,40 @@ mod tests {
             .admit_local_manifest_registration(owner, 1)
             .test_ok();
         assert_eq!(admitted.catalog().as_input().rows[0].plugin_id, id);
+    }
+
+    #[test]
+    fn local_admission_rejects_a_pin_that_does_not_bind_the_generated_policy() {
+        let plugin = simple_plugin("local-fixture", &[]);
+        let id = plugin.id;
+        let owner = OwnerIdV1::from_static("local-admission-fixture");
+        let mut registry = gated_registry();
+        let slot = ManifestSlotV1::try_new("local-fixture").test_ok();
+        registry
+            .register_local(&plugin, slot, vec!["local.fixture".to_owned()], None, None)
+            .test_ok();
+        let entry = registry.plugins.get_mut(&id).test_ok();
+        let valid = entry.registration.clone().test_ok();
+        let generated = entry.output_admission.as_ref().test_ok().policy_digest();
+        let foreign = crate::composition::PluginPinV1::try_new(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::OperatorTrustedNative,
+            Hash::from_bytes([7; 32]),
+            valid.pin().roles().to_vec(),
+        )
+        .test_ok();
+        let available = PluginAvailabilityV1::Available;
+        entry.registration = Some(PluginRegistrationV1::new(foreign, available));
+        assert!(matches!(
+            registry.admit_local_manifest_registration(owner, 1),
+            Err(ManifestRegistrationErrorV1::UnverifiedRegistration)
+        ));
+        assert!(registry.manifest_batch.is_none());
+        let entry = registry.plugins.get(&id).test_ok();
+        let kept = entry.output_admission.as_ref().test_ok().policy_digest();
+        assert_eq!(kept, generated);
+        let pin = entry.registration.as_ref().test_ok().pin();
+        assert_eq!(pin.configuration_digest(), Hash::from_bytes([7; 32]));
     }
 
     #[test]
