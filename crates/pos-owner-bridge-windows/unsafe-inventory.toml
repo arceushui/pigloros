@@ -1,0 +1,5 @@
+# Each explicit unsafe block in src/ffi is recorded here before it is merged.
+# The policy checker requires its source location, operation, invariant and a
+# hosted test function that exercises the block. The initial shim has no FFI
+# block yet, so this inventory is intentionally empty. Future entries use
+# `[[block]]`; leave this file table-free until the first block exists.
