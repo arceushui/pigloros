@@ -23,8 +23,7 @@ const GUEST_V1_INTERFACE: &str = "pigloros:plugin/guest-v1@0.1.0";
 
 /// One `guest-v1` export that the host may invoke.
 ///
-/// `migrate-state` is deliberately absent: a V1 host never invokes it. The
-/// discriminants follow [`GuestExport::ALL`], so they index export tables.
+/// `migrate-state` is deliberately absent: a V1 host never invokes it.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum GuestExport {
     /// `describe: func() -> result<plugin-descriptor, plugin-error>`.

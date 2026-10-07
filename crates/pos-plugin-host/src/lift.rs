@@ -217,7 +217,7 @@ fn coordinate_bytes(value: &Val) -> Lifted<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::lower::byte_list;
-    use crate::test_values::{digest_val, record, text_val};
+    use crate::test_values::{digest_val, digests_val, record, text_val};
 
     fn some(value: Val) -> Val {
         Val::Option(Some(Box::new(value)))
@@ -394,16 +394,13 @@ mod tests {
 
     #[test]
     fn digest_lists_are_strictly_increasing() {
-        let list_of = |digests: &[[u8; 32]]| {
-            Val::List(digests.iter().map(|digest| digest_val(digest)).collect())
-        };
         assert_eq!(
-            ordered_digests(&list_of(&[[1; 32], [2; 32]])),
+            ordered_digests(&digests_val(&[[1; 32], [2; 32]])),
             Ok(vec![[1; 32], [2; 32]])
         );
-        assert_eq!(ordered_digests(&list_of(&[[2; 32], [1; 32]])), Err(INVALID));
-        assert_eq!(ordered_digests(&list_of(&[[1; 32], [1; 32]])), Err(INVALID));
-        assert_eq!(ordered_digests(&list_of(&[])), Ok(Vec::new()));
+        assert_eq!(ordered_digests(&digests_val(&[[2; 32], [1; 32]])), Err(INVALID));
+        assert_eq!(ordered_digests(&digests_val(&[[1; 32], [1; 32]])), Err(INVALID));
+        assert_eq!(ordered_digests(&digests_val(&[])), Ok(Vec::new()));
         assert_eq!(
             ordered_digests(&Val::List(vec![digest_val(&[1; 31])])),
             Err(INVALID)

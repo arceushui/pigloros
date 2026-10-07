@@ -1,4 +1,7 @@
 //! Releases, executions and invocations shared by the engine test suites.
+//!
+//! `release`, `negotiate`, `ARTIFACT` and `ok` mirror `src/test_values.rs`: an
+//! integration-test crate cannot see that `cfg(test)` module, so keep them in step.
 
 use pos_crypto::plugin_execution::{
     DeterministicBudgetV1, PluginAbiRequirementV1, PluginExecutionProjectionFixtureV1,

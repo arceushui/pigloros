@@ -294,6 +294,8 @@ mod tests {
         [digest_val(domain), Val::U64(7), Val::U32(length)]
     }
 
+    /// The `bounded-text` argument reuses `digest_val`; `lift::text` ignores the
+    /// field name, and the message may be invalid UTF-8.
     fn log_params(message: &[u8]) -> [Val; 2] {
         [Val::U16(1), digest_val(message)]
     }
