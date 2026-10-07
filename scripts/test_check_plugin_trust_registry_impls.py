@@ -24,6 +24,7 @@ REGISTRY_FILE = "crates/pos-store/src/plugin_trust_registry/types.rs"
 ADAPTER_FILE = "crates/pos-store/src/memory/plugin_trust_registry.rs"
 SQLITE_ADAPTER_FILE = "crates/pos-store/src/sqlite/plugin_trust_registry.rs"
 SQLITE_SIBLING_FILE = "crates/pos-store/src/sqlite/plugin_trust_registry_rows.rs"
+SQLITE_SCHEMA_FILE = "crates/pos-store/src/sqlite/plugin_trust_registry_schema.rs"
 
 
 def registry(text: str) -> dict[str, str]:
@@ -67,6 +68,7 @@ ALLOWED = {
         "#[cfg(test)]\n#[path = \"plugin_trust_registry_tests.rs\"]\nmod tests;\n"
     ),
     SQLITE_SIBLING_FILE: "pub(super) fn insert_ledger() {}\n",
+    SQLITE_SCHEMA_FILE: "pub(super) fn validate() {}\n",
     "crates/pos-store/src/sqlite/plugin_trust_registry_tests.rs": (
         GATE + IMPORT + "fn t(s: &mut S) { s.admit(a); s.rollback(a); s.provision(a); }\n"
     ),
@@ -201,7 +203,7 @@ def main() -> None:
         if result.returncode == 0 or relative not in result.stderr:
             raise SystemExit(f"{relative} was not rejected")
     for label, text in FORBIDDEN_NAMES.items():
-        for relative in (REGISTRY_FILE, ADAPTER_FILE, SQLITE_ADAPTER_FILE, SQLITE_SIBLING_FILE):
+        for relative in (REGISTRY_FILE, ADAPTER_FILE, SQLITE_ADAPTER_FILE, SQLITE_SIBLING_FILE, SQLITE_SCHEMA_FILE):
             result = run({**ALLOWED, relative: text})
             if result.returncode == 0 or relative not in result.stderr:
                 raise SystemExit(f"{label} in {relative} was not rejected")

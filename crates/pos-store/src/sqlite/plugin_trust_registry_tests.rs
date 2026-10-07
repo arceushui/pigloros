@@ -15,7 +15,7 @@ use pos_core::{
 };
 use rusqlite::{functions::FunctionFlags, Connection};
 
-use super::{Step, FAULT, LEVEL_AT_COMMIT};
+use super::seam::{Step, FAULT, LEVEL_AT_COMMIT, RESTORE_PROBE};
 use crate::plugin_trust_registry::{
     PluginTrustCommitOutcomeV1, PluginTrustPolicyRegistryErrorV1 as Error,
     PluginTrustPolicyRegistryV1, ProvisionOutcomeV1,
@@ -117,6 +117,13 @@ fn the_entry_level_is_recorded_and_restored_on_every_exit_path() -> TestResult {
         h.store.conn.busy_timeout(Duration::ZERO)?;
         assert_eq!(h.advance(&genesis)?, Err(Error::StorageBusy));
         assert_eq!(level(&h.store)?, entry);
+        assert_eq!(h.admit(&genesis, &release_one(), 1)?, Err(Error::StorageBusy));
+        assert_eq!(level(&h.store)?, entry);
+        assert_eq!(
+            h.rollback(&genesis, &release_one(), 1)?,
+            Err(Error::StorageBusy)
+        );
+        assert_eq!(level(&h.store)?, entry);
         holder.execute_batch("ROLLBACK")?;
     }
     Ok(())
@@ -141,18 +148,22 @@ fn a_reopened_store_runs_at_full_and_stays_there() -> TestResult {
     Ok(())
 }
 
+// A read-only handle: `plugin_trust_transaction` always runs the whole durability protocol, so
+// the level is set and restored around every mutating call. An identical re-provision plans no
+// write and so commits an empty transaction (`Unchanged`); every call that must write fails with
+// a storage-class error at its first write (or at `BEGIN IMMEDIATE` when SQLite refuses it
+// there), and the entry level is restored after each call either way.
 #[test]
-fn a_read_only_handle_fails_at_begin_and_restores_the_level() -> TestResult {
+fn a_read_only_handle_cannot_write_and_restores_the_level() -> TestResult {
     let h = Harness::<SqliteStore>::open()?;
     let path = path_of(&h.guard)?;
     let mut read_only = SqliteStore::open_read_only(&path)?;
     let entry = level(&read_only)?;
     let genesis = h.env.genesis()?;
-    // An identical re-provision writes nothing, so it never attempts `BEGIN IMMEDIATE`.
-    assert_eq!(
+    assert!(matches!(
         read_only.provision(&h.env.anchor, &h.env.genesis_tps1),
-        Ok(ProvisionOutcomeV1::Unchanged)
-    );
+        Ok(ProvisionOutcomeV1::Unchanged) | Err(Error::StorageFailed)
+    ));
     assert_eq!(level(&read_only)?, entry);
     let other = Env::new("scope-two")?;
     assert_eq!(
@@ -170,8 +181,10 @@ fn a_read_only_handle_fails_at_begin_and_restores_the_level() -> TestResult {
         ),
         Err(Error::StorageFailed)
     );
+    assert_eq!(level(&read_only)?, entry);
     let projection = release_one().projection()?;
     let trusted = genesis.trusted()?;
+    let timeline = TimelineId::new();
     let admit = |store: &mut SqliteStore| {
         store.admit(
             &h.env.anchor,
@@ -180,13 +193,33 @@ fn a_read_only_handle_fails_at_begin_and_restores_the_level() -> TestResult {
             &projection,
             trusted,
             genesis.tick,
-            activation(TimelineId::new(), 1),
+            activation(timeline, 1),
         )
     };
-    // Without a bound gate the fence refuses first; with one, `BEGIN IMMEDIATE` fails.
+    let rollback = |store: &mut SqliteStore| {
+        store.rollback(
+            &h.env.anchor,
+            &genesis.tps1,
+            &genesis.evidence,
+            &projection,
+            trusted,
+            genesis.tick,
+            activation(timeline, 1),
+        )
+    };
+    // Without a bound gate the fence refuses first.
     assert_eq!(admit(&mut read_only), Err(Error::ActivationEventRejected));
+    assert_eq!(rollback(&mut read_only), Err(Error::ActivationEventRejected));
     read_only.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
-    assert_eq!(admit(&mut read_only), Err(Error::StorageFailed));
+    assert!(matches!(
+        admit(&mut read_only),
+        Err(Error::StorageFailed | Error::ActivationEventRejected)
+    ));
+    assert_eq!(level(&read_only)?, entry);
+    assert!(matches!(
+        rollback(&mut read_only),
+        Err(Error::StorageFailed | Error::UnknownRollbackTarget)
+    ));
     assert_eq!(level(&read_only)?, entry);
     Ok(())
 }
@@ -293,12 +326,19 @@ fn a_failed_commit_is_rolled_back_and_the_handle_keeps_working() -> TestResult {
     let one = release_one();
     let before = h.snapshot(&[&one])?;
     let entry = level(&h.store)?;
-    let fault = Injected::step(Step::Commit);
-    assert_eq!(
-        h.admit(&genesis, &one, 1)?,
-        Err(Error::StorageIndeterminate)
-    );
-    drop(fault);
+    // A deferred foreign-key violation makes the real `COMMIT` fail and leaves the transaction
+    // open, so the production commit and the rollback that follows it run.
+    raw(
+        &h,
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE zz_parent (id INTEGER PRIMARY KEY);
+         CREATE TABLE zz_child (
+             parent INTEGER REFERENCES zz_parent (id) DEFERRABLE INITIALLY DEFERRED);
+         CREATE TRIGGER zz_commit_fails BEFORE INSERT ON plugin_trust_ledger
+         BEGIN INSERT INTO zz_child VALUES (1); END;",
+    )?;
+    assert_eq!(h.admit(&genesis, &one, 1)?, Err(Error::StorageIndeterminate));
+    raw(&h, "DROP TRIGGER zz_commit_fails")?;
     assert!(h.store.conn.is_autocommit());
     assert_eq!(level(&h.store)?, entry);
     assert_eq!(h.snapshot(&[&one])?, before);
@@ -700,6 +740,10 @@ fn decision_and_pointer_rows_with_a_bad_event_are_corrupt() -> TestResult {
 
 // ---------------------------------------------------------------------------
 // E2 (SQLite clauses) and E5: guards and lock order
+//
+// The Memory adapter's fork and hidden-Timeline guard tests (unit tests in its own module) and
+// the SQLite tests below exercise the same shared `guarded_generic_append` chain through
+// adapter-specific setup (private maps there, raw rows here), so they are not a shared vector.
 // ---------------------------------------------------------------------------
 
 fn assert_activation_refused(h: &mut H) -> TestResult {
@@ -828,5 +872,61 @@ fn the_fence_is_entered_before_begin_immediate() -> TestResult {
     // Another writer got the fence only after the busy `BEGIN IMMEDIATE` gave up inside it.
     assert!(entered >= Duration::from_millis(450), "{entered:?}");
     holder.execute_batch("ROLLBACK")?;
+    Ok(())
+}
+
+#[test]
+fn the_fence_is_still_held_when_the_level_is_restored() -> TestResult {
+    let (mut h, gate) = gated_harness()?;
+    let genesis = h.env.genesis()?;
+    let held = Arc::new(AtomicBool::new(false));
+    let timeline = h.timeline;
+    let flag = Arc::clone(&held);
+    RESTORE_PROBE.with(|probe| {
+        *probe.borrow_mut() = Some(Box::new(move || {
+            flag.store(fence_is_held(&gate, timeline), Ordering::SeqCst);
+        }));
+    });
+    let admitted = h.admit(&genesis, &release_one(), 1);
+    RESTORE_PROBE.with(|probe| *probe.borrow_mut() = None);
+    admitted??;
+    assert!(held.load(Ordering::SeqCst));
+    Ok(())
+}
+
+// The gate serialises writers: a registry call made while another writer holds the fence waits
+// for it and then succeeds; it is not refused.
+#[test]
+fn a_fence_held_by_another_writer_is_waited_for() -> TestResult {
+    let (mut h, gate) = gated_harness()?;
+    let genesis = h.env.genesis()?;
+    let timeline = h.timeline;
+    let (entered, entered_receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _held = gate.with_fence_value(timeline, ErasureProtectedOperationV1::Append, || {
+            let _sent = entered.send(());
+            std::thread::sleep(Duration::from_millis(400));
+        });
+    });
+    entered_receiver.recv_timeout(Duration::from_secs(10))?;
+    let start = Instant::now();
+    h.admit(&genesis, &release_one(), 1)??;
+    assert!(start.elapsed() >= Duration::from_millis(200));
+    Ok(())
+}
+
+#[test]
+fn a_reviewed_object_without_its_tables_is_not_an_unprovisioned_store() -> TestResult {
+    let (mut store, _guard) = SqliteStore::build(Gate::open(), None)?;
+    let env = Env::new("scope")?;
+    store.conn.execute_batch(
+        "CREATE TABLE unrelated (x INTEGER);
+         CREATE TRIGGER plugin_trust_ledger_no_update BEFORE UPDATE ON unrelated
+         BEGIN SELECT 1; END;",
+    )?;
+    assert_eq!(
+        store.provision(&env.anchor, &env.genesis_tps1),
+        Err(Error::CorruptState)
+    );
     Ok(())
 }

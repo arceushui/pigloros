@@ -6,6 +6,11 @@
 //! decoder needs but that is NULL, or a value of the wrong storage class, surfaces as
 //! `CorruptState` through [`storage_error`].
 //!
+//! Limits: the active pointer is not cross-checked against the decision table (no foreign keys;
+//! the plan functions only ever write a pointer in the same transaction as its decision or after
+//! reading a retained one), and `decode_decision` and `decode_rollback` stay separate because
+//! their output types differ in every field name they fill.
+//!
 //! `u64` coordinates (epochs, versions, Ticks, positions, sequences) are stored as the `INTEGER`
 //! with the same 64 bits, so every `u64` round-trips and no `CHECK` compares them.
 
@@ -25,6 +30,21 @@ pub(super) type RegistryResult<T> = Result<T, PluginTrustPolicyRegistryErrorV1>;
 
 /// A retained `(version or epoch, complete-record digest)` floor pair.
 type Pair = (u64, [u8; 32]);
+
+/// The stored `kind` codes of a ledger row; the schema `CHECK` allows exactly `1..=4`.
+const KIND_PROVISION: i64 = 1;
+const KIND_ADVANCE: i64 = 2;
+const KIND_ADMISSION: i64 = 3;
+const KIND_ROLLBACK: i64 = 4;
+
+const fn ledger_kind_code(kind: PluginTrustLedgerKindV1) -> i64 {
+    match kind {
+        PluginTrustLedgerKindV1::Provision => KIND_PROVISION,
+        PluginTrustLedgerKindV1::Advance => KIND_ADVANCE,
+        PluginTrustLedgerKindV1::Admission => KIND_ADMISSION,
+        PluginTrustLedgerKindV1::Rollback => KIND_ROLLBACK,
+    }
+}
 
 /// Classify a failed statement.
 ///
@@ -218,16 +238,16 @@ fn decode_active(row: &Row<'_>) -> RegistryResult<ActiveReleaseV1> {
 
 fn decode_ledger_body(kind: i64, row: &Row<'_>) -> RegistryResult<PluginTrustLedgerBodyV1> {
     match kind {
-        1 => Ok(PluginTrustLedgerBodyV1::Provision),
-        2 => Ok(PluginTrustLedgerBodyV1::Advance {
+        KIND_PROVISION => Ok(PluginTrustLedgerBodyV1::Provision),
+        KIND_ADVANCE => Ok(PluginTrustLedgerBodyV1::Advance {
             utc: column(row, "trusted_utc")?,
             tick: unsigned(row, "tick")?,
         }),
-        3 => Ok(PluginTrustLedgerBodyV1::Admission {
+        KIND_ADMISSION => Ok(PluginTrustLedgerBodyV1::Admission {
             decision: Box::new(decode_decision(row)?),
             previous_active_pmf1_digest: column(row, "previous_active_pmf1_digest")?,
         }),
-        4 => Ok(PluginTrustLedgerBodyV1::Rollback(Box::new(
+        KIND_ROLLBACK => Ok(PluginTrustLedgerBodyV1::Rollback(Box::new(
             decode_rollback(row)?,
         ))),
         _ => Err(PluginTrustPolicyRegistryErrorV1::CorruptState),
@@ -238,7 +258,7 @@ fn decode_ledger(row: &Row<'_>) -> RegistryResult<PluginTrustLedgerRowV1> {
     let kind: i64 = column(row, "kind")?;
     let body = decode_ledger_body(kind, row)?;
     // A `Provision` row creates no floor; every later row carries both.
-    let (ptr1_floor, prv1_floor) = if kind == 1 {
+    let (ptr1_floor, prv1_floor) = if kind == KIND_PROVISION {
         (None, None)
     } else {
         (
@@ -517,15 +537,6 @@ pub(super) fn upsert_active(
             ":event_origin_logical_seq": event.origin_logical_seq,
         },
     )
-}
-
-const fn ledger_kind_code(kind: PluginTrustLedgerKindV1) -> i64 {
-    match kind {
-        PluginTrustLedgerKindV1::Provision => 1,
-        PluginTrustLedgerKindV1::Advance => 2,
-        PluginTrustLedgerKindV1::Admission => 3,
-        PluginTrustLedgerKindV1::Rollback => 4,
-    }
 }
 
 /// The PMF1 previous-release digest an `Admission` row records; no other kind has one.

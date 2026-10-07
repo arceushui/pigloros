@@ -266,7 +266,12 @@ pub(super) fn validate(connection: &Connection) -> RegistryResult<SchemaStateV1>
         .filter(|reviewed| stored.iter().any(|found| found.name == reviewed.name))
         .count();
     if tables == 0 {
-        return Ok(SchemaStateV1::Absent);
+        // A reviewed-name trigger or index without its table is not a clean, unprovisioned store.
+        return if stored.is_empty() {
+            Ok(SchemaStateV1::Absent)
+        } else {
+            Err(PluginTrustPolicyRegistryErrorV1::CorruptState)
+        };
     }
     let exact = tables == TABLE_COUNT
         && REVIEWED
