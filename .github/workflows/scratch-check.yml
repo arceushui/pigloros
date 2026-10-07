@@ -59,4 +59,4 @@ jobs:
           CARGO_TERM_COLOR=never cargo clippy --keep-going --message-format=short --locked --workspace --all-targets --all-features -- -D warnings -W clippy::pedantic 2>&1 | grep -E 'error|warning' | grep -E 'crates/pos-(conformance|crypto|plugin-publisher|plugin-release|store)' | sort -u | head -80
       - name: targeted tests
         run: |
-          CARGO_TERM_COLOR=never cargo test --locked -p ${{ matrix.pkg }} ${{ matrix.test }} 2>&1 | grep -E -A14 '^---- |^error(\[|:)|test result' | head -200
+          CARGO_TERM_COLOR=never cargo test --locked --no-fail-fast -p ${{ matrix.pkg }} ${{ matrix.test }} 2>&1 | grep -E -A14 '^---- |^error(\[|:)|test result' | head -200
