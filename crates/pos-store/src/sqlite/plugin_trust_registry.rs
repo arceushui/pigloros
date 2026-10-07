@@ -105,10 +105,8 @@ fn step_sql(step: Step, sql: String) -> String {
     }
 }
 
-// The test variant reads a thread-local, so the two variants share one non-const signature.
 #[cfg(not(test))]
-#[allow(clippy::missing_const_for_fn)]
-fn step_sql(_step: Step, sql: String) -> String {
+const fn step_sql(_step: Step, sql: String) -> String {
     sql
 }
 
