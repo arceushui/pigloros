@@ -15,15 +15,15 @@ test-support = []
 pos-core = { path = "../pos-core" }
 pos-crypto = { path = "../pos-crypto" }
 pos-plugin-release = { path = "../pos-plugin-release" }
-# The installer calls the Plugin trust policy registry port (ADR-103 revision 4).
-# The port and the Memory adapter need no `sqlite` feature, so rusqlite stays out
-# of this crate's own dependency set. pos-store never depends on this crate.
-pos-store = { path = "../pos-store", default-features = false }
 thiserror = { workspace = true }
 
-# Linux-only, like the crate itself: pos-conformance (the anchor type) builds only there.
+# Linux-only, like the crate itself: pos-conformance (the anchor type) builds only there,
+# and pos-store exposes the Plugin trust policy registry port only on Linux
+# (ADR-103 revision 4). The port needs no `sqlite` feature, so rusqlite stays out of
+# this crate's own dependency set. pos-store never depends on this crate.
 [target.'cfg(target_os = "linux")'.dependencies]
 pos-conformance = { path = "../pos-conformance" }
+pos-store = { path = "../pos-store", default-features = false }
 
 [dev-dependencies]
 blake3 = { workspace = true }

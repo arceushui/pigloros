@@ -16,11 +16,14 @@ source of every `.rs` file outside the top-level build and tooling directories:
    `advance_policy` follow the same allow-list. Files under a `tests`
    directory, gated fixture files, and `#[cfg(test)]` items are tests.
 3. `admit` and `rollback` may be called only from tests and `test-support`
-   fixtures (decision 1), with one exception: the signed installer module
-   `crates/pos-plugin-publisher/src/install.rs` (#573) is the only non-test
-   call site of `admit`, and the only non-test file that may construct
-   `TrustedUtcSecondV1` outside the trusted host, because it verifies the
-   PMF1 release signature before it calls `admit`. It may not call
+   fixtures (decision 1), with one exception. ADR-103 revision 4 names no
+   installer exemption; decision 1 only says the supported order is
+   verify-then-admit (the port has no signature input). The signed installer
+   module `crates/pos-plugin-publisher/src/install.rs` (#573) is that
+   sanctioned verify-then-admit caller, so it is the only non-test call site
+   of `admit` and the only non-test file that may construct
+   `TrustedUtcSecondV1` outside the trusted host. It verifies the PMF1
+   release signature before it calls `admit`. It may not call
    `rollback`, `provision`, or `advance_policy`, nor implement the port. Any
    other call site, including one inside `pos-store`, is rejected. A file can
    call a method of the port only after naming the trait or glob importing
@@ -50,7 +53,8 @@ from check_trusted_clock_port_impls import (
 
 PORT = "PluginTrustPolicyRegistryV1"
 ALLOWED_PREFIXES = ("crates/pos-store/", "crates/pos-runtime/")
-INSTALLER_FILE = "crates/pos-plugin-publisher/src/install.rs"
+# Not in ADR-103 revision 4: the sanctioned verify-then-admit caller (#573), see rule 3.
+ALLOWED_CALL_BY_FILE = "crates/pos-plugin-publisher/src/install.rs"
 GUARDED_NAMES = (PORT, "TrustedUtcSecondV1", "PluginTrustPolicyAnchorV1")
 RECEIPT_TYPES = (
     "AdmittedPluginReleaseReceiptV1",
@@ -248,7 +252,7 @@ def file_findings(relative: str, code: str) -> list[str]:
     is_test = gated or "tests" in Path(relative).parts
     live = strip_test_items(code)
     aware = REGISTRY_AWARE.search(live) is not None
-    installer = relative == INSTALLER_FILE
+    installer = relative == ALLOWED_CALL_BY_FILE
     found: list[str] = []
     if REGISTRY_MODULE.match(relative):
         found.extend(forbidden_name_findings(relative, live))
@@ -264,7 +268,10 @@ def file_findings(relative: str, code: str) -> list[str]:
             found.append(f"{relative}: registry anchor or setup call outside the trusted host")
     call = ROLLBACK_CALL if installer else ADMISSION_CALL
     if not is_test and aware and call.search(live):
-        found.append(f"{relative}: admit or rollback called outside tests and the installer")
+        found.append(
+            f"{relative}: admit or rollback called outside tests, test-support, "
+            "and the sanctioned installer module"
+        )
     return found
 
 

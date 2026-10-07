@@ -56,9 +56,12 @@ pub enum PluginReleaseInstallErrorV1 {
     /// The closure's PMF1 failed strict decoding, binding, or digest checks.
     #[error(transparent)]
     Manifest(#[from] PluginManifestErrorV1),
-    /// The trust evidence does not authorize this release: expired, unknown or
-    /// revoked key, ungranted Plugin ID, revoked artifact, or revocation
-    /// capacity exhausted.
+    /// The caller's trust evidence does not authorize this release: expired,
+    /// unknown or revoked key, ungranted Plugin ID, revoked artifact, or
+    /// revocation capacity exhausted. It is raised by the installer's own
+    /// `authorize_release` before the signature and the registry; the
+    /// registry's own `Registry(Trust(..))` is the same check re-run inside
+    /// `admit` and is reachable only after the signature verified.
     #[error(transparent)]
     Authorization(#[from] PluginTrustErrorV1),
     /// The PMF1 signature failed verification under the authorized key.

@@ -5,7 +5,7 @@
 //! OCI store, trust evidence is built from independently encoded PTR1, PRV1,
 //! and TPS1 records, and admission runs against the Memory adapter of the
 //! Plugin trust policy registry through a call-recording spy. Every refusal
-//! before the registry is checked against a byte-identical registry state, an
+//! before the registry is checked against an observable-state-identical registry, an
 //! empty `admit` log, and an unconsumed trusted wall source.
 #![cfg(target_os = "linux")]
 
@@ -685,7 +685,7 @@ struct Snapshot {
 }
 
 /// The installation was refused before the registry: exactly `expected`, no
-/// `admit` call, no clock sample, and a byte-identical registry state.
+/// `admit` call, no clock sample, and an observable-state-identical registry.
 fn assert_refused_before_registry(
     world: &mut World,
     address: &BundleAddressV1,
@@ -798,6 +798,8 @@ fn a_changed_activation_identity_for_the_same_release_conflicts() -> TestResult 
     let mut world = World::new()?;
     let published = world.publish(Shape::first())?;
     assert!(world.install(published.address(), 1)?.is_ok());
+    let digests = [pmf1_digest(&world.store.read_verified(published.address())?)];
+    let before = world.snapshot(&digests)?;
     let result = world.install(published.address(), 2)?;
     assert_eq!(
         result.err(),
@@ -805,6 +807,7 @@ fn a_changed_activation_identity_for_the_same_release_conflicts() -> TestResult 
             PluginTrustPolicyRegistryErrorV1::ReleaseConflict
         ))
     );
+    assert_eq!(world.snapshot(&digests)?, before);
     Ok(())
 }
 
@@ -868,7 +871,7 @@ fn the_release_chain_is_enforced_by_the_registry_and_passes_through() -> TestRes
 // ---------------------------------------------------------------------------
 
 #[test]
-fn every_registry_error_passes_through_typed_and_commits_nothing() -> TestResult {
+fn every_registry_error_variant_passes_through_typed() -> TestResult {
     let errors = [
         PluginTrustPolicyRegistryErrorV1::MissingState,
         PluginTrustPolicyRegistryErrorV1::CorruptState,
@@ -904,6 +907,38 @@ fn every_registry_error_passes_through_typed_and_commits_nothing() -> TestResult
         assert_eq!(world.snapshot(&digests)?, before);
     }
     assert_eq!(world.registry.admits.len(), errors.len());
+    Ok(())
+}
+
+/// A real registry refusal, not a forced one: the sampled UTC second is below
+/// the retained highest second (the policy snapshot carries that high-water
+/// mark), and the observable registry state is identical before and after.
+#[test]
+fn a_real_registry_refusal_leaves_the_observable_state_identical() -> TestResult {
+    let mut world = World::new()?;
+    let first = world.publish(Shape::first())?;
+    assert!(world.install(first.address(), 1)?.is_ok());
+    let second = world.publish(Shape {
+        version: "2.0.0",
+        previous: Some(first.release_digest()),
+        ..Shape::first()
+    })?;
+    let digests = [pmf1_digest(&world.store.read_verified(second.address())?)];
+    let before = world.snapshot(&digests)?;
+    assert_eq!(before.policy.highest_trusted_utc_second(), Some(UTC));
+    let earlier = world.policy.material(&Spec {
+        utc_offset: -1,
+        ..Spec::default()
+    })?;
+    let mut source = wall(earlier.utc)?;
+    let result = world.install_with(second.address(), &earlier, &mut source, 2);
+    assert_eq!(
+        result.err(),
+        Some(PluginReleaseInstallErrorV1::Registry(
+            PluginTrustPolicyRegistryErrorV1::TrustedTimeRegressed
+        ))
+    );
+    assert_eq!(world.snapshot(&digests)?, before);
     Ok(())
 }
 
