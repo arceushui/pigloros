@@ -1,7 +1,9 @@
 //! The Plugin trust policy registry port.
 
 use pos_conformance::PluginTrustPolicyAnchorV1;
-use pos_crypto::plugin_trust::{ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1};
+use pos_crypto::plugin_trust::{
+    ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
+};
 
 use super::error::PluginTrustPolicyRegistryErrorV1;
 use super::types::{

@@ -145,7 +145,10 @@ fn a_tps1_only_artifact_denial_blocks_admission_but_not_advance_policy() -> Test
             &two,
             RegistryError::Bridge(PluginTrustBridgeErrorV1::TpsArtifactDenied),
         )?;
-        assert_eq!(h.advance(&material)??.outcome, PolicyAdvanceKindV1::Advanced);
+        assert_eq!(
+            h.advance(&material)??.outcome,
+            PolicyAdvanceKindV1::Advanced
+        );
         h.assert_admit_denied(
             &material,
             &two,
@@ -177,7 +180,9 @@ fn ptr1_floor_follows_the_lower_equal_fork_and_descendant_rules() -> TestResult 
         h.advance(&h.same_policy(51, 6)?)??.outcome,
         PolicyAdvanceKindV1::Unchanged
     );
-    let two = h.env.material(&spec(2, 2).at(52, 7), &tps_after(&genesis))?;
+    let two = h
+        .env
+        .material(&spec(2, 2).at(52, 7), &tps_after(&genesis))?;
     h.advance(&two)??;
     assert_eq!(h.policy()?.ptr1_floor(), Some(two.terminal_root()));
 
@@ -217,7 +222,9 @@ fn ptr1_floor_follows_the_lower_equal_fork_and_descendant_rules() -> TestResult 
 fn prv1_floor_follows_the_equal_fork_and_descendant_rules_independently() -> TestResult {
     let mut h = Harness::new()?;
     let genesis = h.env.genesis()?;
-    let two = h.env.material(&spec(2, 2).at(51, 6), &tps_after(&genesis))?;
+    let two = h
+        .env
+        .material(&spec(2, 2).at(51, 6), &tps_after(&genesis))?;
     let three = h.env.material(&spec(3, 3).at(52, 7), &tps_after(&two))?;
     h.advance(&genesis)??;
     h.advance(&two)??;
@@ -235,7 +242,9 @@ fn prv1_floor_follows_the_equal_fork_and_descendant_rules_independently() -> Tes
     h.assert_advance_denied(&fork, fork_error(PluginFloorKindV1::Revocation))?;
 
     // Older PRV1 evidence carries an older TPS1, so it fails the continuity step.
-    let older = h.env.material(&spec(2, 2).at(53, 8), &tps_after(&genesis))?;
+    let older = h
+        .env
+        .material(&spec(2, 2).at(53, 8), &tps_after(&genesis))?;
     h.assert_advance_denied(
         &older,
         RegistryError::Bridge(PluginTrustBridgeErrorV1::StaleSnapshot),
@@ -279,11 +288,15 @@ fn rollback_moves_the_pointer_to_a_retained_release_and_never_lowers_a_floor() -
     let genesis = h.env.genesis()?;
     let one = release_one();
     let two = release_two();
-    let later = h.env.material(&spec(2, 2).at(51, 6), &tps_after(&genesis))?;
+    let later = h
+        .env
+        .material(&spec(2, 2).at(51, 6), &tps_after(&genesis))?;
     h.advance(&later)??;
     let before = h.snapshot(&[&one, &two])?;
 
-    let material = h.env.material(&spec(2, 2).at(52, 7), &tps_after(&genesis))?;
+    let material = h
+        .env
+        .material(&spec(2, 2).at(52, 7), &tps_after(&genesis))?;
     let receipt = h.rollback(&material, &one, 5)??;
     assert_eq!(receipt.outcome(), PluginTrustCommitOutcomeV1::Committed);
     assert_eq!(receipt.scope(), "scope");
@@ -366,9 +379,15 @@ fn an_identical_rollback_replays_and_any_other_identity_is_target_active() -> Te
     assert_eq!(after.policy.highest_trusted_utc_second(), Some(52));
 
     // Another payload, another Timeline identity, or newer evidence is another identity.
-    h.assert_rollback_denied(&h.same_policy(53, 8)?, &one, RegistryError::RollbackTargetActive)?;
+    h.assert_rollback_denied(
+        &h.same_policy(53, 8)?,
+        &one,
+        RegistryError::RollbackTargetActive,
+    )?;
     let genesis = h.env.genesis()?;
-    let newer = h.env.material(&spec(2, 2).at(54, 9), &tps_after(&genesis))?;
+    let newer = h
+        .env
+        .material(&spec(2, 2).at(54, 9), &tps_after(&genesis))?;
     h.advance(&newer)??;
     assert_eq!(
         h.rollback_with(&newer, &one, activation(h.timeline, 7))?,
@@ -393,7 +412,11 @@ fn an_unknown_rollback_target_is_one_never_admitted_in_this_scope() -> TestResul
     let mut h = two_releases()?;
     let genesis = h.env.genesis()?;
     let never_admitted = ManifestSpec::new("plugin-a", 0x99, 0x19, None);
-    h.assert_rollback_denied(&genesis, &never_admitted, RegistryError::UnknownRollbackTarget)?;
+    h.assert_rollback_denied(
+        &genesis,
+        &never_admitted,
+        RegistryError::UnknownRollbackTarget,
+    )?;
 
     // A digest retained only under another scope, while this scope has an active pointer.
     let other = Env::new("scope-two")?;
@@ -481,10 +504,18 @@ fn rollback_reports_policy_denials_before_an_unknown_target() -> TestResult {
     )?;
 
     // Once the policy advanced, older evidence fails in its own step.
-    let current = h.env.material(&spec(2, 2).at(51, 6), &tps_after(&genesis))?;
+    let current = h
+        .env
+        .material(&spec(2, 2).at(51, 6), &tps_after(&genesis))?;
     h.advance(&current)??;
-    let older_root = h.env.material(&spec(1, 3).at(52, 7), &tps_after(&current))?;
-    h.assert_rollback_denied(&older_root, &target, rollback_error(PluginFloorKindV1::Root))?;
+    let older_root = h
+        .env
+        .material(&spec(1, 3).at(52, 7), &tps_after(&current))?;
+    h.assert_rollback_denied(
+        &older_root,
+        &target,
+        rollback_error(PluginFloorKindV1::Root),
+    )?;
     let older_tps = h.same_policy(52, 7)?;
     h.assert_rollback_denied(
         &older_tps,
@@ -504,7 +535,11 @@ fn rollback_ignores_the_chain_rule_and_the_forward_move_is_also_a_rollback() -> 
     h.admit(&genesis, &one, 1)??;
     h.admit(&genesis, &two, 2)??;
     h.admit(&genesis, &three, 3)??;
-    h.admit(&genesis, &ManifestSpec::new("plugin-b", 0x21, 0x31, None), 4)??;
+    h.admit(
+        &genesis,
+        &ManifestSpec::new("plugin-b", 0x21, 0x31, None),
+        4,
+    )??;
 
     // R1 is neither the active release nor its successor, yet it is a valid target.
     h.rollback(&genesis, &one, 5)??;
@@ -517,7 +552,11 @@ fn rollback_ignores_the_chain_rule_and_the_forward_move_is_also_a_rollback() -> 
 
     // With R1 active and R2 retained, R3 (linked to R2) is not admissible.
     let relinked_three = ManifestSpec::new("plugin-a", 0x09, 0x13, Some(0x12));
-    h.assert_admit_denied(&genesis, &relinked_three, RegistryError::ReleaseChainViolation)?;
+    h.assert_admit_denied(
+        &genesis,
+        &relinked_three,
+        RegistryError::ReleaseChainViolation,
+    )?;
     h.rollback(&genesis, &two, 6)??;
     assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x03; 32]);
     h.admit(&genesis, &relinked_three, 7)??;
@@ -845,7 +884,10 @@ fn retained_records_report_every_fact_of_the_transaction_that_made_them() -> Tes
     assert_eq!(decision.tps1_epoch(), 2);
     assert_eq!(decision.tps1_effective_position(), 11);
     assert_eq!(decision.terminal_root(), material.terminal_root());
-    assert_eq!(decision.terminal_revocation(), material.terminal_revocation());
+    assert_eq!(
+        decision.terminal_revocation(),
+        material.terminal_revocation()
+    );
     assert_eq!(decision.trusted_utc_second(), 51);
     assert_eq!(decision.tick(), 6);
     assert_eq!(

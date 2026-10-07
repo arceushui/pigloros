@@ -16,7 +16,9 @@ use std::collections::BTreeMap;
 
 use pos_conformance::{PluginFloorStateV1, PluginTrustPolicyAnchorV1};
 use pos_core::{ErasureProtectedOperationV1, TimelineId};
-use pos_crypto::plugin_trust::{ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1};
+use pos_crypto::plugin_trust::{
+    ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
+};
 
 use super::MemoryStore;
 use crate::plugin_trust_registry::logic::{
@@ -64,13 +66,15 @@ impl MemoryScopeV1 {
         writes.policy.apply(&mut self.retained.policy);
         let key = writes.decision.pmf1_digest;
         self.decisions.insert(key, writes.decision);
-        self.active.insert(writes.active.plugin_id.clone(), writes.active);
+        self.active
+            .insert(writes.active.plugin_id.clone(), writes.active);
         self.ledger.push(writes.row);
     }
 
     fn commit_rollback(&mut self, writes: RollbackWritesV1) {
         writes.policy.apply(&mut self.retained.policy);
-        self.active.insert(writes.active.plugin_id.clone(), writes.active);
+        self.active
+            .insert(writes.active.plugin_id.clone(), writes.active);
         self.ledger.push(writes.row);
     }
 
@@ -178,11 +182,18 @@ impl MemoryStore {
     ) -> RegistryResult<ActivationEventIdentityV1> {
         let timeline = activation.timeline;
         let payload_digest = activation.payload_digest();
-        if *self.hasher.hash_payload(&activation.draft.payload).as_bytes() != payload_digest {
+        if *self
+            .hasher
+            .hash_payload(&activation.draft.payload)
+            .as_bytes()
+            != payload_digest
+        {
             return Err(PluginTrustPolicyRegistryErrorV1::ActivationEventRejected);
         }
         self.guarded_generic_append(timeline, std::slice::from_ref(&activation.draft))
-            .or(Err(PluginTrustPolicyRegistryErrorV1::ActivationEventRejected))
+            .or(Err(
+                PluginTrustPolicyRegistryErrorV1::ActivationEventRejected,
+            ))
             .and_then(|events| {
                 events
                     .into_iter()
@@ -203,7 +214,9 @@ impl MemoryStore {
         let append = ErasureProtectedOperationV1::Append;
         let fenced = self.with_erasure_fence(timeline, append, |store| Ok(operation(store)));
         fenced
-            .or(Err(PluginTrustPolicyRegistryErrorV1::ActivationEventRejected))
+            .or(Err(
+                PluginTrustPolicyRegistryErrorV1::ActivationEventRejected,
+            ))
             .and_then(std::convert::identity)
     }
 
@@ -492,7 +505,9 @@ mod tests {
         );
         assert_eq!(store.ledger("scope")?, ledger);
         assert_eq!(store.read(timeline, SeqRange::all())?, events);
-        let active = store.active_release("scope", "plugin-a")?.ok_or("no pointer")?;
+        let active = store
+            .active_release("scope", "plugin-a")?
+            .ok_or("no pointer")?;
         assert_eq!(active.pmf1_digest(), [0x03; 32]);
         Ok(())
     }
@@ -507,7 +522,10 @@ mod tests {
         let genesis = env.genesis()?;
         let utc = genesis.trusted()?;
         let input = policy_input(&env.anchor, &genesis, utc);
-        let lost = faults(None, Some(PluginTrustPolicyRegistryErrorV1::StorageIndeterminate));
+        let lost = faults(
+            None,
+            Some(PluginTrustPolicyRegistryErrorV1::StorageIndeterminate),
+        );
         let one = release_one().projection()?;
         assert_eq!(
             store.admit_with_faults(&input, &one, &activation(timeline, 1), lost),
@@ -526,7 +544,10 @@ mod tests {
             genesis.tick,
             activation(timeline, 1),
         )?;
-        assert_eq!(retry.outcome(), PluginTrustCommitOutcomeV1::IdempotentReplay);
+        assert_eq!(
+            retry.outcome(),
+            PluginTrustCommitOutcomeV1::IdempotentReplay
+        );
         assert_eq!(retry.decision(), &committed);
         assert_eq!(store.read(timeline, SeqRange::all())?.len(), 1);
 
@@ -544,7 +565,9 @@ mod tests {
             store.rollback_with_faults(&input, &one, &activation(timeline, 3), lost),
             Err(PluginTrustPolicyRegistryErrorV1::StorageIndeterminate)
         );
-        let active = store.active_release("scope", "plugin-a")?.ok_or("no pointer")?;
+        let active = store
+            .active_release("scope", "plugin-a")?
+            .ok_or("no pointer")?;
         assert_eq!(active.pmf1_digest(), [0x01; 32]);
         let events = store.read(timeline, SeqRange::all())?.len();
         let replay = store.rollback(
@@ -556,7 +579,10 @@ mod tests {
             genesis.tick,
             activation(timeline, 3),
         )?;
-        assert_eq!(replay.outcome(), PluginTrustCommitOutcomeV1::IdempotentReplay);
+        assert_eq!(
+            replay.outcome(),
+            PluginTrustCommitOutcomeV1::IdempotentReplay
+        );
         assert_eq!(replay.activation_event(), active.activation_event());
         assert_eq!(store.read(timeline, SeqRange::all())?.len(), events);
         Ok(())
@@ -572,7 +598,13 @@ mod tests {
             } = Harness::new()?;
             let genesis = env.genesis()?;
             let utc = genesis.trusted()?;
-            store.advance_policy(&env.anchor, &genesis.tps1, &genesis.evidence, utc, genesis.tick)?;
+            store.advance_policy(
+                &env.anchor,
+                &genesis.tps1,
+                &genesis.evidence,
+                utc,
+                genesis.tick,
+            )?;
             let state = store
                 .plugin_trust
                 .scopes

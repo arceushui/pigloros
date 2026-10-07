@@ -539,9 +539,7 @@ impl PluginTrustLedgerBodyV1 {
         match self {
             Self::Provision => None,
             Self::Advance { utc, tick } => Some((*utc, *tick)),
-            Self::Admission { decision, .. } => {
-                Some((decision.trusted_utc_second, decision.tick))
-            }
+            Self::Admission { decision, .. } => Some((decision.trusted_utc_second, decision.tick)),
             Self::Rollback(facts) => Some((facts.trusted_utc_second, facts.tick)),
         }
     }

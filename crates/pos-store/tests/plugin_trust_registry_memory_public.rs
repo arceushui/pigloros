@@ -317,10 +317,7 @@ fn utc_floor_is_raised_by_every_committed_transaction_and_replay() -> TestResult
     // A lower second fails closed in every operation and changes nothing.
     let before = h.snapshot(&[&one])?;
     let lower = h.same_policy(50, 5)?;
-    assert_eq!(
-        h.advance(&lower)?,
-        Err(RegistryError::TrustedTimeRegressed)
-    );
+    assert_eq!(h.advance(&lower)?, Err(RegistryError::TrustedTimeRegressed));
     assert_eq!(
         h.admit(&lower, &two, 2)?,
         Err(RegistryError::TrustedTimeRegressed)
@@ -359,10 +356,9 @@ fn utc_floor_is_raised_by_every_committed_transaction_and_replay() -> TestResult
     assert_eq!(h.policy()?.highest_trusted_utc_second(), Some(55));
 
     // A committed advance raises it too.
-    let later = h.env.material(
-        &spec(2, 2).at(56, 12),
-        &tps_after(&genesis),
-    )?;
+    let later = h
+        .env
+        .material(&spec(2, 2).at(56, 12), &tps_after(&genesis))?;
     assert_eq!(h.advance(&later)??.outcome, PolicyAdvanceKindV1::Advanced);
     assert_eq!(h.policy()?.highest_trusted_utc_second(), Some(56));
     Ok(())
@@ -482,7 +478,11 @@ fn release_chain_is_independent_per_plugin_id_and_per_scope() -> TestResult {
     h.admit(&genesis, &release_two(), 2)??;
 
     // Another Plugin ID has its own chain: its first activation needs no link.
-    h.admit(&genesis, &ManifestSpec::new("plugin-b", 0x21, 0x31, None), 3)??;
+    h.admit(
+        &genesis,
+        &ManifestSpec::new("plugin-b", 0x21, 0x31, None),
+        3,
+    )??;
     assert_eq!(h.active("plugin-a")?.pmf1_digest(), [0x03; 32]);
     assert_eq!(h.active("plugin-b")?.pmf1_digest(), [0x21; 32]);
     assert_eq!(h.active("plugin-b")?.plugin_id(), "plugin-b");
@@ -531,7 +531,11 @@ fn the_disclosed_chain_deadlock_needs_a_publisher_relink() -> TestResult {
     h.rollback(&genesis, &one, 3)??;
 
     // R3 links to R2, but the active release is R1.
-    h.assert_admit_denied(&genesis, &release_three(), RegistryError::ReleaseChainViolation)?;
+    h.assert_admit_denied(
+        &genesis,
+        &release_three(),
+        RegistryError::ReleaseChainViolation,
+    )?;
 
     // R2 later became revoked, so rolling back to it is denied too.
     let revoked = h.env.material(
@@ -549,7 +553,11 @@ fn the_disclosed_chain_deadlock_needs_a_publisher_relink() -> TestResult {
     )?;
 
     // A release re-linked to R1 is accepted.
-    h.admit(&genesis, &ManifestSpec::new("plugin-a", 0x08, 0x16, Some(0x11)), 4)??;
+    h.admit(
+        &genesis,
+        &ManifestSpec::new("plugin-a", 0x08, 0x16, Some(0x11)),
+        4,
+    )??;
     Ok(())
 }
 
@@ -788,8 +796,8 @@ fn a_store_with_another_payload_hasher_can_never_activate() -> TestResult {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn an_identical_admission_returns_the_original_receipt_and_commits_only_the_utc_raise(
-) -> TestResult {
+fn an_identical_admission_returns_the_original_receipt_and_commits_only_the_utc_raise() -> TestResult
+{
     let mut h = Harness::new()?;
     let genesis = h.env.genesis()?;
     let one = release_one();
@@ -865,7 +873,9 @@ fn newer_valid_evidence_conflicts_and_is_recorded_only_by_advance_policy() -> Te
     let genesis = h.env.genesis()?;
     let one = release_one();
     h.admit(&genesis, &one, 1)??;
-    let newer = h.env.material(&spec(2, 2).at(51, 6), &tps_after(&genesis))?;
+    let newer = h
+        .env
+        .material(&spec(2, 2).at(51, 6), &tps_after(&genesis))?;
     h.assert_admit_denied(&newer, &one, RegistryError::ReleaseConflict)?;
     assert_eq!(h.policy()?.tps1_epoch(), 1);
     let advanced = h.advance(&newer)??;
@@ -881,7 +891,9 @@ fn older_or_forked_evidence_fails_in_its_own_step_before_the_stored_decision() -
     let genesis = h.env.genesis()?;
     let one = release_one();
     h.admit(&genesis, &one, 1)??;
-    let current = h.env.material(&spec(2, 2).at(51, 6), &tps_after(&genesis))?;
+    let current = h
+        .env
+        .material(&spec(2, 2).at(51, 6), &tps_after(&genesis))?;
     h.advance(&current)??;
 
     // Older TPS1 and PRV1 evidence.
@@ -893,7 +905,9 @@ fn older_or_forked_evidence_fails_in_its_own_step_before_the_stored_decision() -
     )?;
 
     // An older PTR1 under a newer policy epoch.
-    let older_root = h.env.material(&spec(1, 3).at(52, 7), &tps_after(&current))?;
+    let older_root = h
+        .env
+        .material(&spec(1, 3).at(52, 7), &tps_after(&current))?;
     h.assert_admit_denied(
         &older_root,
         &one,

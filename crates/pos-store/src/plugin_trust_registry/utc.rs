@@ -27,10 +27,13 @@ impl TrustedUtcSecondV1 {
     ) -> Result<Self, PluginTrustPolicyRegistryErrorV1> {
         source
             .sample()
-            .or(Err(PluginTrustPolicyRegistryErrorV1::TrustedTimeUnavailable))
+            .or(Err(
+                PluginTrustPolicyRegistryErrorV1::TrustedTimeUnavailable,
+            ))
             .and_then(|sample| {
-                i64::try_from(sample.as_micros() / MICROS_PER_SECOND)
-                    .or(Err(PluginTrustPolicyRegistryErrorV1::TrustedTimeUnavailable))
+                i64::try_from(sample.as_micros() / MICROS_PER_SECOND).or(Err(
+                    PluginTrustPolicyRegistryErrorV1::TrustedTimeUnavailable,
+                ))
             })
             .map(Self)
     }

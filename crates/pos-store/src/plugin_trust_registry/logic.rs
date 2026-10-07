@@ -8,9 +8,10 @@
 //! only in how they read, lock, and persist.
 
 use pos_conformance::{
-    authenticate_plugin_tps1_v1, check_plugin_tps1_artifact_denial_v1, check_plugin_tps1_genesis_v1,
-    check_plugin_tps1_successor_v1, plan_plugin_floor_transition_v1, verify_plugin_tps1_policy_v1,
-    AuthenticatedPluginTps1V1, PluginFloorStateV1, PluginTrustPolicyAnchorV1,
+    authenticate_plugin_tps1_v1, check_plugin_tps1_artifact_denial_v1,
+    check_plugin_tps1_genesis_v1, check_plugin_tps1_successor_v1, plan_plugin_floor_transition_v1,
+    verify_plugin_tps1_policy_v1, AuthenticatedPluginTps1V1, PluginFloorStateV1,
+    PluginTrustPolicyAnchorV1,
 };
 use pos_crypto::plugin_trust::{
     ResolvedPluginTrustAuthorizationV1, ValidatedPluginManifestProjectionV1,
@@ -630,7 +631,12 @@ mod tests {
         // Each component alone breaks the identity.
         let newer = env.material(&spec(2, 2), &tps_after(&genesis))?;
         let newer_tps1 = authenticated(&env, &newer)?;
-        assert!(!same_decision_identity(&decision, &newer_tps1, &same, &input));
+        assert!(!same_decision_identity(
+            &decision,
+            &newer_tps1,
+            &same,
+            &input
+        ));
         let other_root = env.material(
             &Spec {
                 root_variant: 1,
@@ -652,7 +658,10 @@ mod tests {
             },
             &TpsSpec::default(),
         )?;
-        assert_ne!(other_revocation.terminal_revocation(), genesis.terminal_revocation());
+        assert_ne!(
+            other_revocation.terminal_revocation(),
+            genesis.terminal_revocation()
+        );
         assert!(!same_decision_identity(
             &decision,
             &tps1,
@@ -712,7 +721,10 @@ mod tests {
         assert_eq!(replay, Some(facts.clone()));
 
         // Anything but an identical earlier rollback row is not a replay.
-        assert_eq!(identical_rollback(None, [1; 32], &tps1, &same, &input), None);
+        assert_eq!(
+            identical_rollback(None, [1; 32], &tps1, &same, &input),
+            None
+        );
         assert_eq!(
             identical_rollback(Some(row(&facts)), [9; 32], &tps1, &same, &input),
             None
@@ -783,7 +795,9 @@ mod tests {
         let genesis = env.genesis()?;
         let authorize = |manifest: &ManifestSpec| {
             Ok::<_, Box<dyn std::error::Error>>(
-                genesis.evidence.authorize_release(&manifest.projection()?)?,
+                genesis
+                    .evidence
+                    .authorize_release(&manifest.projection()?)?,
             )
         };
         let active = ActiveReleaseV1 {

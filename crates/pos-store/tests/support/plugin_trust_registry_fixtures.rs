@@ -18,8 +18,9 @@ use pos_conformance::{
 };
 use pos_core::{
     store::{EventStore, SeqRange},
-    trusted_clock::ScriptedTrustedWallSourceV1, CanonicalBytes, EntityId, ErasureContainmentGateV1,
-    Event, EventDraft, Kind, OwnerIdV1, TimelineId,
+    trusted_clock::ScriptedTrustedWallSourceV1,
+    CanonicalBytes, EntityId, ErasureContainmentGateV1, Event, EventDraft, Kind, OwnerIdV1,
+    TimelineId,
 };
 use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, PluginManifestProjectionFixtureV1, TrustedPluginRootAnchorV1,
@@ -220,7 +221,11 @@ fn ptr1(scope: &str, version: u64, previous: Option<[u8; 32]>, variant: u8) -> T
                 bytes_value(root_public()),
             ])]),
             Value::Array(vec![other, publisher(1), publisher(2)]),
-            Value::Array(vec![grant("plugin-a"), grant("plugin-b"), grant("plugin-c")]),
+            Value::Array(vec![
+                grant("plugin-a"),
+                grant("plugin-b"),
+                grant("plugin-c"),
+            ]),
         ],
         ROOT_SIGNATURE_DOMAIN,
     )
@@ -703,7 +708,7 @@ pub fn tps_after(previous: &Material) -> TpsSpec {
 }
 
 /// Everything observable about one scope and its activation Timeline.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Snapshot {
     pub policy: RetainedPolicyStateV1,
     pub ledger: Vec<PluginTrustLedgerRowV1>,
@@ -783,10 +788,7 @@ impl Harness {
     ///
     /// # Errors
     /// Returns the fixture construction or registry error.
-    pub fn advance(
-        &mut self,
-        material: &Material,
-    ) -> TestResult<Registry<PolicyAdvanceOutcomeV1>> {
+    pub fn advance(&mut self, material: &Material) -> TestResult<Registry<PolicyAdvanceOutcomeV1>> {
         Ok(self.store.advance_policy(
             &self.env.anchor,
             &material.tps1,
