@@ -15,6 +15,9 @@ use pos_owner_bridge_codec::{
 const BASELINE: &str = include_str!("../../../fixtures/owner-bridge/webauthn-es256-v1.fixture");
 const REASONS: &str = include_str!("../../../fixtures/owner-bridge/webauthn-reasons-v1.fixture");
 
+/// The number of cases the generator writes today.
+const MINIMUM_CASES: usize = 73;
+
 /// A case name that no fixture line uses, so every field keeps its baseline.
 const NO_CASE: &str = "baseline";
 
@@ -44,13 +47,17 @@ const ALL_REASONS: [(&str, VerificationReason); 21] = [
 
 #[test]
 fn every_fixture_case_reports_its_exact_reason() -> Result<(), OwnerBridgeCodecError> {
+    let mut replayed = 0;
     for line in REASONS.lines() {
         let Some(case) = line.strip_prefix("case=") else {
             continue;
         };
+        replayed += 1;
         let expected = reason_named(case_value(case, "reason")?)?;
         assert_eq!(run_case(case)?, Some(expected), "{case}");
     }
+    // A truncated fixture must fail instead of replaying fewer cases.
+    assert!(replayed >= MINIMUM_CASES, "{replayed}");
     Ok(())
 }
 

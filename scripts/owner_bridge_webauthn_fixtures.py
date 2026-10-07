@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Generate the portable closed-ES256 WebAuthn fixture for ADR-110.
+"""Generate the portable closed-ES256 WebAuthn fixtures for ADR-110.
 
 The generator is deliberately stdlib-only and does not invoke Rust.  It
-implements the small P-256/RFC-6979 signing subset needed to produce a public
-test fixture for the owner-bridge verifier.  The fixture private scalar is
+implements the small P-256/RFC-6979 signing subset needed to produce public
+test fixtures for the owner-bridge verifier.  The fixture private scalar is
 ``d = 1`` and is test data only; it is never a deployment credential.
+
+Two fixtures are produced:
+
+* ``fixtures/owner-bridge/webauthn-es256-v1.fixture``: one valid Create and
+  Get ceremony (``--print``).
+* ``fixtures/owner-bridge/webauthn-reasons-v1.fixture``: one independently
+  signed case per verifier fault, each naming the exact ``VerificationReason``
+  the Rust verifier must report (``--print-reasons``).
 
 Usage:
     python3 scripts/owner_bridge_webauthn_fixtures.py --check
-    python3 scripts/owner_bridge_webauthn_fixtures.py --print
+    python3 scripts/owner_bridge_webauthn_fixtures.py --print > webauthn-es256-v1.fixture
+    python3 scripts/owner_bridge_webauthn_fixtures.py --print-reasons > webauthn-reasons-v1.fixture
 """
 
 from __future__ import annotations
@@ -440,6 +449,12 @@ def create_cases() -> dict[str, dict[str, str]]:
             "Malformed",
             attestation_object=attestation(get_auth_data(flags=0x05, counter=0)),
         ),
+        "create_authenticator_data_too_short": create_case(
+            "Malformed", attestation_object=attestation(bytes(36))
+        ),
+        "create_authenticator_data_too_long": create_case(
+            "Malformed", attestation_object=attestation(create_auth_data(suffix=bytes(1_000)))
+        ),
         "create_attestation_format_packed": create_case(
             "AttestationFormat",
             attestation_object=attestation(create_auth_data(), fmt="packed"),
@@ -581,6 +596,22 @@ def get_cases() -> dict[str, dict[str, str]]:
             "Signature", signature=corrupted(sign(get_auth_data(), ASSERTION_CLIENT_DATA))
         ),
         "get_signature_not_der": get_case("Signature", signature=bytes(8)),
+        "get_unauthenticated_counter": get_case(
+            "Signature",
+            authenticator_data=get_auth_data(counter=4),
+            signature=corrupted(sign(get_auth_data(counter=4), ASSERTION_CLIENT_DATA)),
+            stored_sign_count="5",
+        ),
+        "get_unauthenticated_backup_flags": get_case(
+            "Signature",
+            authenticator_data=get_auth_data(flags=0x0D),
+            signature=corrupted(sign(get_auth_data(flags=0x0D), ASSERTION_CLIENT_DATA)),
+        ),
+        "get_unauthenticated_user_handle": get_case(
+            "Signature",
+            user_handle=OTHER_HANDLE,
+            signature=corrupted(sign(get_auth_data(), ASSERTION_CLIENT_DATA)),
+        ),
         "get_signature_other_message": get_case(
             "Signature", signature=sign(get_auth_data(counter=2), ASSERTION_CLIENT_DATA)
         ),
@@ -660,24 +691,29 @@ def check() -> None:
     for path, expected in ((FIXTURE_PATH, fixture_text()), (REASONS_PATH, reasons_text())):
         actual = path.read_text(encoding="utf-8")
         if actual != expected:
+            flag = "--print" if path == FIXTURE_PATH else "--print-reasons"
             raise AssertionError(
-                f"{path.name} drifted; regenerate from the independent script"
+                f"{path.relative_to(ROOT)} drifted; regenerate it with {flag}"
             )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="verify the committed fixture")
-    parser.add_argument("--print", action="store_true", help="print the generated fixture")
+    parser.add_argument("--print", action="store_true", help="print the valid-ceremony fixture")
+    parser.add_argument(
+        "--print-reasons", action="store_true", help="print the per-reason fixture cases"
+    )
     arguments = parser.parse_args()
     if arguments.print:
         print(fixture_text(), end="")
+    if arguments.print_reasons:
         print(reasons_text(), end="")
     if arguments.check:
         check()
-        print("owner-bridge WebAuthn fixture: ALL MATCH")
-    if not arguments.check and not arguments.print:
-        parser.error("choose --check or --print")
+        print("owner-bridge WebAuthn fixtures: ALL MATCH")
+    if not (arguments.check or arguments.print or arguments.print_reasons):
+        parser.error("choose --check, --print or --print-reasons")
     return 0
 
 

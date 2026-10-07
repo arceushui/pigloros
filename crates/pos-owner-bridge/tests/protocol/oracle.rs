@@ -1364,8 +1364,8 @@ fn is_clean_apart_from_tweak(sc: &Scenario) -> bool {
 
 /// The one ADR-110 §11 error a scenario must report when a reply tweak is its only defect.
 ///
-/// A stored counter ahead of the reply would be checked before the signature, so the wrong key
-/// is only expected to report `Signature` with a zero stored counter.
+/// The signature is verified before the backup flags, user handle and counter, so a wrong key is
+/// `Signature` whatever the stored counter is, and the other tweaks are authenticated defects.
 fn expected_tweak_error(sc: &Scenario) -> Option<BridgeError> {
     let only_tweak = must_fail_reasons(sc) == ["tweak"] && is_clean_apart_from_tweak(sc);
     let rejected = |code| Some(BridgeError::Rejected(code));
@@ -1375,7 +1375,7 @@ fn expected_tweak_error(sc: &Scenario) -> Option<BridgeError> {
         "wrong_handle" => rejected(RejectedCode::UserHandleMismatch),
         "eligible" => rejected(RejectedCode::BackupFlags),
         "no_prf" => Some(BridgeError::Unavailable(UnavailableCode::PrfUnsupported)),
-        "wrong_key" if sc.stored_counter == 0 => rejected(RejectedCode::Signature),
+        "wrong_key" => rejected(RejectedCode::Signature),
         _ => None,
     }
 }

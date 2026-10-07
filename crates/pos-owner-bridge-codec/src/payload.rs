@@ -4,7 +4,7 @@ use crate::{
         CborReader, CborWriter, PROTOCOL_VERSION,
     },
     CeremonyId, OwnerBridgeCodecError, OwnerUserHandle, PrfInput, PrfResult, TransportCodes,
-    VerificationReason, WebAuthnChallenge,
+    VerificationReason, WebAuthnChallenge, MAX_AUTHENTICATOR_DATA_BYTES,
 };
 
 const CREATE_OPTIONS_MAGIC: [u8; 4] = *b"WCR1";
@@ -19,7 +19,6 @@ const REQUIRED_CODE: u64 = 0;
 const MAX_CREDENTIAL_ID_BYTES: usize = 1_024;
 const MAX_CLIENT_DATA_BYTES: usize = 4_096;
 const MAX_ATTESTATION_OBJECT_BYTES: usize = 65_536;
-const MAX_AUTHENTICATOR_DATA_BYTES: usize = 1_024;
 const MIN_AUTHENTICATOR_DATA_BYTES: usize = 37;
 const MAX_SIGNATURE_BYTES: usize = 80;
 const MIN_SIGNATURE_BYTES: usize = 8;

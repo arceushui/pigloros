@@ -8,6 +8,10 @@
 //! lifecycle policy; those belong to the `pos-owner-bridge` Module in the
 //! next stack slice.
 
+/// The closed upper bound on authenticator-data bytes (ADR-110 §5.4 and §7), shared by the
+/// payload decoder, the authenticator-data parser and the signed-message buffer.
+const MAX_AUTHENTICATOR_DATA_BYTES: usize = 1_024;
+
 mod authenticator_data;
 // Public module reachability keeps these crate-only fixed-buffer helpers
 // compatible with both `unreachable_pub` and Clippy's `redundant_pub_crate`

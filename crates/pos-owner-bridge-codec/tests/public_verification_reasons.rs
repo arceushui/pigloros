@@ -77,8 +77,5 @@ fn a_verification_reason_wraps_into_the_codec_error() {
         error,
         OwnerBridgeCodecError::Verification(Reason::PrfMalformed)
     );
-    assert_eq!(
-        error.to_string(),
-        "owner-bridge reply field violates a closed rule"
-    );
+    assert_eq!(error.to_string(), "PRF fields are malformed");
 }

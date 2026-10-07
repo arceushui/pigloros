@@ -5,13 +5,16 @@ use crate::{
     parse_assertion_authenticator_data, parse_none_attestation_object, validate_client_data_json,
     AssertionAuthenticatorData, AssertionReplyV1, AttestationReplyV1, CeremonyId,
     CoseEs256PublicKey, OwnerBridgeCodecError, OwnerUserHandle, PrfResult, TransportCodes,
-    VerificationReason, WebAuthnChallenge,
+    VerificationReason, WebAuthnChallenge, MAX_AUTHENTICATOR_DATA_BYTES,
 };
 
 const MIN_CREDENTIAL_ID_BYTES: usize = 1;
 const MAX_CREDENTIAL_ID_BYTES: usize = 1_024;
-/// The 1,024-byte authenticator-data bound plus the 32-byte client-data digest.
-const SIGNED_MESSAGE_BYTES: usize = 1_056;
+/// The authenticator-data bound plus the 32-byte client-data digest.
+const SIGNED_MESSAGE_BYTES: usize = MAX_AUTHENTICATOR_DATA_BYTES + 32;
+// The buffer is sized for the closed 1,024-byte bound; a change to either constant must be
+// made on purpose.
+const _: () = assert!(SIGNED_MESSAGE_BYTES == 1_056);
 
 /// Host-owned invariants for verifying a Create reply.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -220,9 +223,15 @@ pub fn verify_attestation_reply<'a>(
 ///
 /// # Errors
 ///
-/// Returns the closed [`VerificationReason`] of the first failed check:
-/// ceremony ID, credential ID, client data, authenticator data, backup
-/// eligibility, user handle, counter, stored public key, or signature.
+/// Returns the closed [`VerificationReason`] of the first failed check, in this order:
+/// ceremony ID, credential ID, client data, authenticator data (RP ID hash, flags and
+/// extensions), the stored public key, the signature, and only then the checks that compare the
+/// reply with the stored binding: backup eligibility, user handle and counter.
+///
+/// The signature comes first on purpose (a decider ruling; ADR-110 §7 lists the signature
+/// bullet before the backup-eligibility and counter bullets), so `BackupFlags`,
+/// `UserHandleMismatch` and `CounterRegression` can only describe an authenticated reply. A
+/// forged reply fails with `Signature` and can never raise a counter-regression security event.
 pub fn verify_assertion_reply(
     reply: &AssertionReplyV1<'_>,
     context: AssertionVerificationContext<'_>,
@@ -239,7 +248,6 @@ pub fn verify_assertion_reply(
         &context.challenge,
     )?;
     let data = parse_assertion_authenticator_data(reply.authenticator_data())?;
-    check_stored_binding(reply, data, context.credential)?;
     let verifying_key = validating_key(context.credential.public_key)?;
     verify_signature(
         &verifying_key,
@@ -247,6 +255,7 @@ pub fn verify_assertion_reply(
         reply.client_data_json(),
         reply.signature(),
     )?;
+    check_stored_binding(reply, data, context.credential)?;
     Ok(VerifiedAssertion {
         backup_state: data.backup_state(),
         sign_count: data.sign_count(),
@@ -254,6 +263,8 @@ pub fn verify_assertion_reply(
     })
 }
 
+/// Compare an authenticated reply with the stored binding. It runs only after the signature
+/// verified.
 fn check_stored_binding(
     reply: &AssertionReplyV1<'_>,
     data: AssertionAuthenticatorData,

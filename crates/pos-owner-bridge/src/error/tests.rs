@@ -11,7 +11,7 @@ const fn rejected(code: RejectedCode) -> BridgeError {
 #[test]
 fn every_verification_reason_maps_to_its_adr_code() {
     let prf = BridgeError::Unavailable(UnavailableCode::PrfUnsupported);
-    let cases = [
+    let cases: [(Reason, BridgeError); 21] = [
         (
             Reason::CeremonyIdMismatch,
             BridgeError::Protocol(ProtocolCode::CeremonyIdMismatch),

@@ -71,7 +71,8 @@ pub enum RejectedCode {
     Signature,
     /// The credential ID did not match the stored credential.
     CredentialMismatch,
-    /// The reply user handle was present and not the stored handle, or was not 32 bytes.
+    /// The reply user handle was present and not the stored handle, or was not 32 bytes
+    /// (ADR-110 §5.4 reports both as `UserHandleMismatch`).
     UserHandleMismatch,
     /// The assertion counter did not advance. This is also a security event for the owner.
     CounterRegression,

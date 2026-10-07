@@ -1,8 +1,7 @@
-use crate::{OwnerBridgeCodecError, VerificationReason};
+use crate::{OwnerBridgeCodecError, VerificationReason, MAX_AUTHENTICATOR_DATA_BYTES};
 use p256::ecdsa::VerifyingKey;
 
 const MIN_AUTHENTICATOR_DATA_BYTES: usize = 37;
-const MAX_AUTHENTICATOR_DATA_BYTES: usize = 1_024;
 const MIN_CREDENTIAL_ID_BYTES: usize = 1;
 const MAX_CREDENTIAL_ID_BYTES: usize = 1_024;
 const MAX_ATTESTATION_OBJECT_BYTES: usize = 65_536;
@@ -15,7 +14,7 @@ const FLAG_UV: u8 = 1 << 2;
 const FLAG_BE: u8 = 1 << 3;
 const FLAG_BS: u8 = 1 << 4;
 /// Authenticator-data flag bits 1 and 5 are reserved and must be zero.
-const FLAG_RESERVED_MASK: u8 = 0x22;
+const FLAG_RESERVED_MASK: u8 = (1 << 1) + (1 << 5);
 const FLAG_AT: u8 = 1 << 6;
 const FLAG_ED: u8 = 1 << 7;
 
@@ -239,7 +238,9 @@ fn read_attestation_envelope(input: &[u8]) -> Result<&[u8], VerificationReason> 
             if seen & ATTESTATION_AUTH_DATA_FIELD != 0 {
                 return Err(reader.fault);
             }
-            auth_data = reader.bytes(MIN_AUTHENTICATOR_DATA_BYTES, MAX_AUTHENTICATOR_DATA_BYTES)?;
+            // The length bound is checked by `parse_authenticator_data_prefix`, which reports an
+            // out-of-range authenticator-data length as `Malformed`, not as an envelope fault.
+            auth_data = reader.bytes(0, usize::MAX)?;
             seen |= ATTESTATION_AUTH_DATA_FIELD;
         } else {
             return Err(reader.fault);
@@ -316,6 +317,11 @@ const fn check_authenticator_flags(flags: u8) -> Result<(), VerificationReason> 
     }
 }
 
+/// Check the extension map and that nothing follows the parsed data.
+///
+/// Trailing bytes after a map-less authenticator-data image are reported as `Extensions`
+/// (ADR-110 §7: "`ED = 0` with trailing bytes"), which also covers trailing bytes after the
+/// COSE key of a Create reply.
 fn finish_authenticator_data(
     input: &[u8],
     mut offset: usize,
@@ -689,7 +695,9 @@ fn duplicate_map_key_before<'a>(
             return false;
         }
         // Every preceding member completed `map_key`, policy validation, and
-        // `validate_value` in the outer traversal before this replay begins.
+        // `validate_value` in the outer traversal before this replay begins. The value is
+        // skipped at depth 0 only to advance the offset: it was already checked at its real
+        // depth, so the depth limit cannot reject it here.
         let prior_key = reader.map_key().unwrap_or(key);
         if prior_key.equals(key) {
             return true;

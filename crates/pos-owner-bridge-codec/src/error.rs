@@ -37,6 +37,8 @@ pub enum OwnerBridgeCodecError {
     Verification(VerificationReason),
 }
 
+/// Lets a caller that returns [`OwnerBridgeCodecError`] use `?` on a verifier result. The public
+/// tests rely on it.
 impl From<VerificationReason> for OwnerBridgeCodecError {
     fn from(reason: VerificationReason) -> Self {
         Self::Verification(reason)
@@ -59,7 +61,7 @@ impl OwnerBridgeCodecError {
             Self::BoundsExceeded => "owner-bridge input exceeds a closed bound",
             Self::TrailingBytes => "owner-bridge input has trailing bytes",
             Self::InvalidPayload => "owner-bridge payload violates its closed schema",
-            Self::Verification(_) => "owner-bridge reply field violates a closed rule",
+            Self::Verification(reason) => reason.message(),
         }
     }
 }
@@ -125,9 +127,9 @@ pub enum VerificationReason {
     PrfAbsent,
 }
 
-impl fmt::Display for VerificationReason {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
+impl VerificationReason {
+    const fn message(self) -> &'static str {
+        match self {
             Self::CeremonyIdMismatch => "reply ceremony ID does not match the open ceremony",
             Self::PrfUnsupported => "credential reports no PRF support",
             Self::Malformed => "reply is structurally malformed",
@@ -149,7 +151,12 @@ impl fmt::Display for VerificationReason {
             Self::BackupFlags => "authenticator backup flags are inconsistent",
             Self::PrfMalformed => "PRF fields are malformed",
             Self::PrfAbsent => "required PRF result is absent",
-        };
-        formatter.write_str(message)
+        }
+    }
+}
+
+impl fmt::Display for VerificationReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message())
     }
 }
