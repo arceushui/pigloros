@@ -160,7 +160,9 @@ impl ComponentHost {
                 call(&mut store, instance, index, args).map(|value| (value, after_startup))
             })
             .and_then(|(value, after_startup)| {
-                store.get_fuel().map(|after_call| (value, after_startup, after_call))
+                store
+                    .get_fuel()
+                    .map(|after_call| (value, after_startup, after_call))
             });
         let (value, after_startup, after_call) = outcome.map_err(|error| classify(&error))?;
         let state = store.into_data();
