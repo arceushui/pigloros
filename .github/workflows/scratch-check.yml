@@ -11,6 +11,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - ref: redmine/575-trust-authorization-accessors
+            id: p575
+            pkg: pos-crypto
+            test: ""
           - ref: redmine/567-plugin-trust-bridge
             id: p567
             pkg: pos-conformance
