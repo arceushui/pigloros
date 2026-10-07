@@ -4,7 +4,7 @@ use crate::{
         CborReader, CborWriter, PROTOCOL_VERSION,
     },
     CeremonyId, OwnerBridgeCodecError, OwnerUserHandle, PrfInput, PrfResult, TransportCodes,
-    WebAuthnChallenge,
+    VerificationReason, WebAuthnChallenge,
 };
 
 const CREATE_OPTIONS_MAGIC: [u8; 4] = *b"WCR1";
@@ -458,9 +458,10 @@ pub fn decode_attestation_reply(
     let transports = read_transports(&mut reader)?;
     let prf_enabled = reader.boolean()?;
     let prf_first = reader
-        .optional_fixed_bytes::<32>()?
+        .optional_fixed_bytes::<32>()
+        .map_err(prf_fault)?
         .map(PrfResult::from_bytes);
-    reader.null()?;
+    reader.null().map_err(prf_fault)?;
     reader.finish()?;
     AttestationReplyV1::new(
         ceremony_id,
@@ -519,10 +520,11 @@ pub fn decode_assertion_reply(input: &[u8]) -> Result<AssertionReplyV1<'_>, Owne
         reader.bytes(MIN_AUTHENTICATOR_DATA_BYTES, MAX_AUTHENTICATOR_DATA_BYTES)?;
     let signature = reader.bytes(MIN_SIGNATURE_BYTES, MAX_SIGNATURE_BYTES)?;
     let user_handle = reader
-        .optional_fixed_bytes::<32>()?
+        .optional_fixed_bytes::<32>()
+        .map_err(user_handle_fault)?
         .map(OwnerUserHandle::from_bytes);
-    let prf_first = PrfResult::from_bytes(reader.fixed_bytes()?);
-    reader.null()?;
+    let prf_first = PrfResult::from_bytes(reader.fixed_bytes().map_err(prf_fault)?);
+    reader.null().map_err(prf_fault)?;
     reader.finish()?;
     AssertionReplyV1::new(
         ceremony_id,
@@ -533,6 +535,28 @@ pub fn decode_assertion_reply(input: &[u8]) -> Result<AssertionReplyV1<'_>, Owne
         user_handle,
         prf_first,
     )
+}
+
+/// Name the verification reason for a reply field of the wrong shape.
+///
+/// A wrong type, wrong length, or truncated field becomes `reason`. Every
+/// other failure, such as a non-shortest encoding, keeps its own error.
+const fn field_fault(
+    error: OwnerBridgeCodecError,
+    reason: VerificationReason,
+) -> OwnerBridgeCodecError {
+    match error {
+        OwnerBridgeCodecError::InvalidCbor => OwnerBridgeCodecError::Verification(reason),
+        other => other,
+    }
+}
+
+const fn prf_fault(error: OwnerBridgeCodecError) -> OwnerBridgeCodecError {
+    field_fault(error, VerificationReason::PrfMalformed)
+}
+
+const fn user_handle_fault(error: OwnerBridgeCodecError) -> OwnerBridgeCodecError {
+    field_fault(error, VerificationReason::UserHandleMismatch)
 }
 
 fn write_optional_fixed<const N: usize>(writer: &mut CborWriter<'_>, value: Option<&[u8; N]>) {

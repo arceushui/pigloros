@@ -3,7 +3,7 @@ use pos_owner_bridge_codec::{
     parse_none_attestation_object, verify_assertion_reply, verify_attestation_reply,
     AssertionReplyV1, AssertionVerificationContext, AttestationReplyV1, CeremonyId,
     CreateVerificationContext, OwnerBridgeCodecError, OwnerUserHandle, PrfResult, StoredCredential,
-    TransportCodes, WebAuthnChallenge,
+    TransportCodes, VerificationReason as Reason, WebAuthnChallenge,
 };
 use sha2::{Digest, Sha256};
 
@@ -99,7 +99,7 @@ fn public_verifier_rejects_invalid_create_replies() -> Result<(), OwnerBridgeCod
             &disabled_prf,
             CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
         ),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::PrfUnsupported)
     );
 
     let mut invalid_point_key = cose_key();
@@ -120,7 +120,7 @@ fn public_verifier_rejects_invalid_create_replies() -> Result<(), OwnerBridgeCod
             &invalid_point_reply,
             CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
         ),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::CoseKey)
     );
     Ok(())
 }
@@ -141,7 +141,7 @@ fn public_verifier_rejects_identity_and_counter_violations() -> Result<(), Owner
         None,
         PRF_RESULT,
     )?;
-    assert_invalid_assertion(&wrong_raw_id, credential);
+    assert_invalid_assertion(&wrong_raw_id, credential, Reason::CredentialMismatch);
 
     let wrong_handle = AssertionReplyV1::new(
         CEREMONY_ID,
@@ -152,7 +152,7 @@ fn public_verifier_rejects_identity_and_counter_violations() -> Result<(), Owner
         Some(OwnerUserHandle::from_bytes([0; 32])),
         PRF_RESULT,
     )?;
-    assert_invalid_assertion(&wrong_handle, credential);
+    assert_invalid_assertion(&wrong_handle, credential, Reason::UserHandleMismatch);
 
     let repeated_counter_data = assertion_authenticator_data(0x05, 1);
     let repeated_counter_length =
@@ -166,7 +166,7 @@ fn public_verifier_rejects_identity_and_counter_violations() -> Result<(), Owner
         None,
         PRF_RESULT,
     )?;
-    assert_invalid_assertion(&repeated_counter, credential);
+    assert_invalid_assertion(&repeated_counter, credential, Reason::CounterRegression);
     Ok(())
 }
 
@@ -190,7 +190,11 @@ fn public_verifier_rejects_backup_and_signature_violations() -> Result<(), Owner
         None,
         PRF_RESULT,
     )?;
-    assert_invalid_assertion(&backup_eligibility_mismatch, credential);
+    assert_invalid_assertion(
+        &backup_eligibility_mismatch,
+        credential,
+        Reason::BackupFlags,
+    );
 
     let final_signature_length = sign_assertion(&assertion_data, GET_CLIENT_DATA, &mut signature)?;
     let mut invalid_signature = signature;
@@ -204,7 +208,7 @@ fn public_verifier_rejects_backup_and_signature_violations() -> Result<(), Owner
         None,
         PRF_RESULT,
     )?;
-    assert_invalid_assertion(&invalid_signature_reply, credential);
+    assert_invalid_assertion(&invalid_signature_reply, credential, Reason::Signature);
 
     let mut nonminimal_der_signature = Vec::from(&signature[..final_signature_length]);
     let encoded_length = nonminimal_der_signature[1];
@@ -218,7 +222,7 @@ fn public_verifier_rejects_backup_and_signature_violations() -> Result<(), Owner
         None,
         PRF_RESULT,
     )?;
-    assert_invalid_assertion(&nonminimal_der_reply, credential);
+    assert_invalid_assertion(&nonminimal_der_reply, credential, Reason::Signature);
     Ok(())
 }
 
@@ -320,7 +324,7 @@ fn public_verifier_rejects_bad_reply_subcomponents() -> Result<(), OwnerBridgeCo
             &mismatched_ceremony,
             CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
         ),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::CeremonyIdMismatch)
     );
 
     let invalid_client_data = AttestationReplyV1::new(
@@ -337,7 +341,7 @@ fn public_verifier_rejects_bad_reply_subcomponents() -> Result<(), OwnerBridgeCo
             &invalid_client_data,
             CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
         ),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::Malformed)
     );
 
     let malformed_attestation = AttestationReplyV1::new(
@@ -354,7 +358,7 @@ fn public_verifier_rejects_bad_reply_subcomponents() -> Result<(), OwnerBridgeCo
             &malformed_attestation,
             CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
         ),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::AttestationFormat)
     );
 
     let credential = fixture_credential(0)?;
@@ -370,7 +374,11 @@ fn public_verifier_rejects_bad_reply_subcomponents() -> Result<(), OwnerBridgeCo
         None,
         PRF_RESULT,
     )?;
-    assert_invalid_assertion(&invalid_assertion_client_data, credential);
+    assert_invalid_assertion(
+        &invalid_assertion_client_data,
+        credential,
+        Reason::Malformed,
+    );
 
     let malformed_assertion_data = [0; 37];
     let malformed_assertion = AssertionReplyV1::new(
@@ -382,7 +390,7 @@ fn public_verifier_rejects_bad_reply_subcomponents() -> Result<(), OwnerBridgeCo
         None,
         PRF_RESULT,
     )?;
-    assert_invalid_assertion(&malformed_assertion, credential);
+    assert_invalid_assertion(&malformed_assertion, credential, Reason::RpIdHash);
 
     let mut invalid_point_key = cose_key();
     invalid_point_key[10..42].fill(0);
@@ -407,7 +415,7 @@ fn public_verifier_rejects_bad_reply_subcomponents() -> Result<(), OwnerBridgeCo
         None,
         PRF_RESULT,
     )?;
-    assert_invalid_assertion(&valid_assertion, invalid_point_credential);
+    assert_invalid_assertion(&valid_assertion, invalid_point_credential, Reason::CoseKey);
     Ok(())
 }
 
@@ -437,13 +445,17 @@ fn fixture_credential(sign_count: u32) -> Result<StoredCredential<'static>, Owne
     )
 }
 
-fn assert_invalid_assertion(reply: &AssertionReplyV1<'_>, credential: StoredCredential<'_>) {
+fn assert_invalid_assertion(
+    reply: &AssertionReplyV1<'_>,
+    credential: StoredCredential<'_>,
+    reason: Reason,
+) {
     assert_eq!(
         verify_assertion_reply(
             reply,
             AssertionVerificationContext::new(CEREMONY_ID, CHALLENGE, credential),
         ),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(reason)
     );
 }
 

@@ -41,7 +41,7 @@ pub use durable::{
     encode_subject_credential_binding, CleanupRecordV1, SubjectCredentialBindingInputV1,
     SubjectCredentialBindingV1, MAX_CLEANUP_RECORD_BYTES, MAX_SUBJECT_CREDENTIAL_BINDING_BYTES,
 };
-pub use error::OwnerBridgeCodecError;
+pub use error::{OwnerBridgeCodecError, VerificationReason};
 pub use http::{admit_loopback_http_request, LoopbackRequestDisposition};
 pub use payload::{
     decode_assertion_reply, decode_attestation_reply, decode_create_options, decode_get_options,

@@ -1,6 +1,7 @@
 use pos_owner_bridge_codec::{
     admit_loopback_http_request, validate_client_data_json, CeremonyKind,
-    LoopbackRequestDisposition, OwnerBridgeCodecError, WebAuthnChallenge,
+    LoopbackRequestDisposition, OwnerBridgeCodecError, VerificationReason as Reason,
+    WebAuthnChallenge,
 };
 
 const CHALLENGE: WebAuthnChallenge = WebAuthnChallenge::from_bytes([
@@ -29,106 +30,124 @@ fn public_client_data_accepts_closed_strings_booleans_and_escaped_unknown_fields
 fn public_client_data_rejects_invalid_envelope_and_required_fields() {
     assert_eq!(
         validate_client_data_json(b"", CeremonyKind::Create, &CHALLENGE),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
+        Err(Reason::Malformed)
     );
-    let invalid_inputs: [(&str, &[u8]); 9] = [
-        ("invalid utf8", b"\xff"),
-        ("array", b"[]"),
-        ("empty object", b"{}"),
+    let invalid_inputs: [(&str, &[u8], Reason); 9] = [
+        ("invalid utf8", b"\xff", Reason::Malformed),
+        ("array", b"[]", Reason::Malformed),
+        ("empty object", b"{}", Reason::Malformed),
         (
             "missing type",
             b"{\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\"}",
+            Reason::ClientDataType,
         ),
         (
             "missing challenge",
             b"{\"type\":\"webauthn.create\",\"origin\":\"http://localhost:49291\"}",
+            Reason::Challenge,
         ),
         (
             "missing origin",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\"}",
+            Reason::Origin,
         ),
         (
             "type boolean",
             b"{\"type\":false,\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\"}",
+            Reason::ClientDataType,
         ),
         (
             "challenge boolean",
             b"{\"type\":\"webauthn.create\",\"challenge\":false,\"origin\":\"http://localhost:49291\"}",
+            Reason::Challenge,
         ),
         (
             "origin boolean",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":false}",
+            Reason::Origin,
         ),
     ];
-    for (label, input) in invalid_inputs {
+    for (label, input, reason) in invalid_inputs {
         assert_eq!(
             validate_client_data_json(input, CeremonyKind::Create, &CHALLENGE),
-            Err(OwnerBridgeCodecError::InvalidPayload),
+            Err(reason),
             "{label}"
         );
     }
     assert_eq!(
         validate_client_data_json(&[b'x'; 4_097], CeremonyKind::Create, &CHALLENGE),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
+        Err(Reason::Malformed)
     );
 }
 
 #[test]
 fn public_client_data_rejects_closed_value_mismatches_and_duplicates() {
-    let invalid_inputs: [(&str, &[u8]); 12] = [
+    let invalid_inputs: [(&str, &[u8], Reason); 12] = [
         (
             "wrong ceremony type",
             b"{\"type\":\"webauthn.get\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\"}",
+            Reason::ClientDataType,
         ),
         (
             "wrong challenge",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"origin\":\"http://localhost:49291\"}",
+            Reason::Challenge,
         ),
         (
             "escaped challenge",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj\\u0038\",\"origin\":\"http://localhost:49291\"}",
+            Reason::Challenge,
         ),
         (
             "wrong origin",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"https://localhost:49291\"}",
+            Reason::Origin,
         ),
         (
             "cross origin true",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"crossOrigin\":true}",
+            Reason::CrossOrigin,
         ),
         (
             "cross origin string",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"crossOrigin\":\"false\"}",
+            Reason::CrossOrigin,
         ),
         (
             "top origin",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"topOrigin\":false}",
+            Reason::CrossOrigin,
         ),
         (
             "token binding",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"tokenBinding\":false}",
+            Reason::CrossOrigin,
         ),
         (
             "duplicate raw key",
             b"{\"type\":\"webauthn.create\",\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\"}",
+            Reason::Malformed,
         ),
         (
             "duplicate escaped key",
             b"{\"type\":\"webauthn.create\",\"\\u0074ype\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\"}",
+            Reason::Malformed,
         ),
         (
             "unknown number",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":1}",
+            Reason::Malformed,
         ),
         (
             "unknown object",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":{}}",
+            Reason::Malformed,
         ),
     ];
-    for (label, input) in invalid_inputs {
+    for (label, input, reason) in invalid_inputs {
         assert_eq!(
             validate_client_data_json(input, CeremonyKind::Create, &CHALLENGE),
-            Err(OwnerBridgeCodecError::InvalidPayload),
+            Err(reason),
             "{label}"
         );
     }
@@ -136,48 +155,57 @@ fn public_client_data_rejects_closed_value_mismatches_and_duplicates() {
 
 #[test]
 fn public_client_data_rejects_malformed_json_strings_and_trailing_content() {
-    let invalid_inputs: [(&str, &[u8]); 9] = [
+    let invalid_inputs: [(&str, &[u8], Reason); 9] = [
         (
             "invalid escape",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":\"\\q\"}",
+            Reason::Malformed,
         ),
         (
             "unpaired high surrogate",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":\"\\uD800\"}",
+            Reason::Malformed,
         ),
         (
             "unpaired low surrogate",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":\"\\uDC00\"}",
+            Reason::Malformed,
         ),
         (
             "control character",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":\"\n\"}",
+            Reason::Malformed,
         ),
         (
             "trailing comma",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",}",
+            Reason::Malformed,
         ),
         (
             "invalid member delimiter",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\";}",
+            Reason::Malformed,
         ),
         (
             "trailing bytes",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\"}x",
+            Reason::Malformed,
         ),
         (
             "unclosed string",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291}",
+            Reason::Malformed,
         ),
         (
             "non boolean literal",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":null}",
+            Reason::Malformed,
         ),
     ];
-    for (label, input) in invalid_inputs {
+    for (label, input, reason) in invalid_inputs {
         assert_eq!(
             validate_client_data_json(input, CeremonyKind::Create, &CHALLENGE),
-            Err(OwnerBridgeCodecError::InvalidPayload),
+            Err(reason),
             "{label}"
         );
     }
@@ -197,47 +225,56 @@ fn public_client_data_exercises_every_json_escape_and_parser_rejection() {
     .concat();
     assert_eq!(
         validate_client_data_json(&duplicate_escaped_key, CeremonyKind::Create, &CHALLENGE),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::Malformed)
     );
 
     let mut truncated_escape = Vec::from(UNKNOWN_VALUE_PREFIX);
     truncated_escape.extend_from_slice(b"\"\\");
     let mut truncated_unicode = Vec::from(UNKNOWN_VALUE_PREFIX);
     truncated_unicode.extend_from_slice(br#""\u001"#);
-    let invalid_inputs: [(&str, &[u8]); 7] = [
-        ("key without a string", b"{true:false}"),
+    let invalid_inputs: [(&str, &[u8], Reason); 7] = [
+        ("key without a string", b"{true:false}", Reason::Malformed),
         (
             "member without a colon",
             b"{\"type\" \"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\"}",
+            Reason::Malformed,
         ),
         (
             "truncated true literal",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":tru}",
+            Reason::Malformed,
         ),
         (
             "truncated false literal",
             b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"unknown\":fal}",
+            Reason::Malformed,
         ),
         (
             "non-hex unicode escape",
             br#"{"type":"webauthn.create","challenge":"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8","origin":"http://localhost:49291","unknown":"\u00g0"}"#,
+            Reason::Malformed,
         ),
         (
             "high surrogate followed by a non-low surrogate",
             br#"{"type":"webauthn.create","challenge":"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8","origin":"http://localhost:49291","unknown":"\uD800\u0041"}"#,
+            Reason::Malformed,
         ),
-        ("truncated unicode escape", &truncated_unicode),
+        (
+            "truncated unicode escape",
+            &truncated_unicode,
+            Reason::Malformed,
+        ),
     ];
-    for (label, input) in invalid_inputs {
+    for (label, input, reason) in invalid_inputs {
         assert_eq!(
             validate_client_data_json(input, CeremonyKind::Create, &CHALLENGE),
-            Err(OwnerBridgeCodecError::InvalidPayload),
+            Err(reason),
             "{label}"
         );
     }
     assert_eq!(
         validate_client_data_json(&truncated_escape, CeremonyKind::Create, &CHALLENGE),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::Malformed)
     );
 }
 
@@ -420,6 +457,6 @@ fn public_http_admission_preserves_the_fixed_document_and_not_found_split() {
     );
     assert_eq!(
         validate_client_data_json(CREATE_CLIENT_DATA, CeremonyKind::Get, &CHALLENGE),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::ClientDataType)
     );
 }

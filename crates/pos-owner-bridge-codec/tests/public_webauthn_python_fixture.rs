@@ -2,7 +2,7 @@ use pos_owner_bridge_codec::{
     verify_assertion_reply, verify_attestation_reply, AssertionReplyV1,
     AssertionVerificationContext, AttestationReplyV1, CeremonyId, CreateVerificationContext,
     OwnerBridgeCodecError, OwnerUserHandle, PrfResult, StoredCredential, TransportCodes,
-    WebAuthnChallenge,
+    VerificationReason, WebAuthnChallenge,
 };
 
 const FIXTURE: &str = include_str!("../../../fixtures/owner-bridge/webauthn-es256-v1.fixture");
@@ -95,7 +95,7 @@ fn public_verifier_accepts_independently_generated_python_fixture(
             &invalid_reply,
             AssertionVerificationContext::new(ceremony_id, challenge, credential),
         ),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(VerificationReason::Signature)
     );
     Ok(())
 }

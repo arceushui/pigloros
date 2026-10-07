@@ -1,7 +1,7 @@
 use pos_owner_bridge_codec::{
     parse_assertion_authenticator_data, parse_none_attestation_object, CoseEs256PublicKey,
     OwnerBridgeCodecError, OwnerUserHandle, SubjectCredentialBindingInputV1,
-    SubjectCredentialBindingV1, SubjectId, TransportCodes,
+    SubjectCredentialBindingV1, SubjectId, TransportCodes, VerificationReason as Reason,
 };
 
 const CREDENTIAL_ID: [u8; 2] = [0x80, 0x81];
@@ -13,7 +13,7 @@ const RP_ID_HASH: [u8; 32] = [
 #[test]
 fn public_none_attestation_parser_accepts_the_closed_baseline() -> Result<(), OwnerBridgeCodecError>
 {
-    let authenticator_data = create_authenticator_data(cose_key());
+    let authenticator_data = create_authenticator_data(&cose_key());
     let attestation = none_attestation_object(&authenticator_data)?;
     let parsed = parse_none_attestation_object(&attestation, &CREDENTIAL_ID)?;
     assert_eq!(parsed.credential_id(), CREDENTIAL_ID);
@@ -27,7 +27,7 @@ fn public_none_attestation_parser_accepts_the_closed_baseline() -> Result<(), Ow
 #[test]
 fn public_none_attestation_parser_rejects_closed_envelope_variations(
 ) -> Result<(), OwnerBridgeCodecError> {
-    let authenticator_data = create_authenticator_data(cose_key());
+    let authenticator_data = create_authenticator_data(&cose_key());
     let attestation = none_attestation_object(&authenticator_data)?;
 
     let mut wrong_format = attestation.clone();
@@ -42,27 +42,25 @@ fn public_none_attestation_parser_rejects_closed_envelope_variations(
     unknown_field[4] = b'x';
     assert_invalid_attestation(&unknown_field, &CREDENTIAL_ID);
 
-    assert_invalid_attestation(&attestation, &[0x81, 0x80]);
+    assert_eq!(
+        parse_none_attestation_object(&attestation, &[0x81, 0x80]),
+        Err(Reason::CredentialMismatch)
+    );
     assert_invalid_attestation(b"\xa2\x63fmt\x64none\x67attStmt\xa0", &CREDENTIAL_ID);
 
     let mut trailing = attestation;
     trailing.push(0);
-    assert_eq!(
-        parse_none_attestation_object(&trailing, &CREDENTIAL_ID),
-        Err(OwnerBridgeCodecError::TrailingBytes)
-    );
-    assert_eq!(
-        parse_none_attestation_object(&[], &CREDENTIAL_ID),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
-    );
+    assert_invalid_attestation(&trailing, &CREDENTIAL_ID);
+    assert_invalid_attestation(&[], &CREDENTIAL_ID);
     let oversized = vec![0; 65_537];
-    assert_eq!(
-        parse_none_attestation_object(&oversized, &CREDENTIAL_ID),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
-    );
+    assert_invalid_attestation(&oversized, &CREDENTIAL_ID);
     assert_eq!(
         parse_none_attestation_object(b"\xa3\x63fmt\x64none\x67attStmt\xa0\x68authData\x40", &[]),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
+        Err(Reason::CredentialMismatch)
+    );
+    assert_eq!(
+        parse_none_attestation_object(&trailing[..30], &[0; 1_025]),
+        Err(Reason::CredentialMismatch)
     );
     Ok(())
 }
@@ -70,7 +68,7 @@ fn public_none_attestation_parser_rejects_closed_envelope_variations(
 #[test]
 fn public_none_attestation_parser_rejects_duplicate_fields_and_wrong_cbor_types(
 ) -> Result<(), OwnerBridgeCodecError> {
-    let authenticator_data = create_authenticator_data(cose_key());
+    let authenticator_data = create_authenticator_data(&cose_key());
     let attestation = none_attestation_object(&authenticator_data)?;
 
     let mut wrong_format_type = attestation.clone();
@@ -102,28 +100,26 @@ fn public_none_attestation_parser_rejects_truncated_cbor_claims(
     ] {
         assert_invalid_attestation(envelope, &CREDENTIAL_ID);
     }
-    assert_eq!(
-        parse_none_attestation_object(b"\xa3\x63fmt\x78\x18", &CREDENTIAL_ID),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
-    );
+    assert_invalid_attestation(b"\xa3\x63fmt\x78\x18", &CREDENTIAL_ID);
 
-    let authenticator_data = create_authenticator_data(cose_key());
+    let authenticator_data = create_authenticator_data(&cose_key());
     let missing_attested_fields = assertion_authenticator_data(0x45, &[]);
-    assert_invalid_attestation(
-        &none_attestation_object(&missing_attested_fields)?,
-        &CREDENTIAL_ID,
-    );
-    assert_invalid_attestation(
-        &none_attestation_object(&authenticator_data[..55])?,
-        &CREDENTIAL_ID,
-    );
+    for truncated in [&missing_attested_fields[..], &authenticator_data[..55]] {
+        assert_eq!(
+            parse_none_attestation_object(&none_attestation_object(truncated)?, &CREDENTIAL_ID),
+            Err(Reason::Malformed)
+        );
+    }
 
     let mut truncated_algorithm_head = authenticator_data;
     truncated_algorithm_head[57 + 4] = 0x3b;
     truncated_algorithm_head.truncate(57 + 5);
-    assert_invalid_attestation(
-        &none_attestation_object(&truncated_algorithm_head)?,
-        &CREDENTIAL_ID,
+    assert_eq!(
+        parse_none_attestation_object(
+            &none_attestation_object(&truncated_algorithm_head)?,
+            &CREDENTIAL_ID,
+        ),
+        Err(Reason::CoseKey)
     );
     Ok(())
 }
@@ -131,25 +127,28 @@ fn public_none_attestation_parser_rejects_truncated_cbor_claims(
 #[test]
 fn public_none_attestation_parser_rejects_authenticator_and_cose_fields(
 ) -> Result<(), OwnerBridgeCodecError> {
-    let authenticator_data = create_authenticator_data(cose_key());
+    let authenticator_data = create_authenticator_data(&cose_key());
 
     let mut wrong_rp_id = authenticator_data.clone();
     wrong_rp_id[0] ^= 1;
-    assert_invalid_attestation(&none_attestation_object(&wrong_rp_id)?, &CREDENTIAL_ID);
+    assert_eq!(
+        parse_none_attestation_object(&none_attestation_object(&wrong_rp_id)?, &CREDENTIAL_ID),
+        Err(Reason::RpIdHash)
+    );
 
-    for (label, flags) in [
-        ("missing user presence", 0x44),
-        ("missing user verification", 0x41),
-        ("reserved low bit", 0x47),
-        ("reserved high bit", 0x65),
-        ("backup state without eligibility", 0x55),
-        ("missing attested credential data", 0x05),
+    for (label, flags, reason) in [
+        ("missing user presence", 0x44, Reason::UserPresence),
+        ("missing user verification", 0x41, Reason::UserVerification),
+        ("reserved low bit", 0x47, Reason::Malformed),
+        ("reserved high bit", 0x65, Reason::Malformed),
+        ("backup state, no eligibility", 0x55, Reason::BackupFlags),
+        ("missing attested credential data", 0x05, Reason::Malformed),
     ] {
         let mut mutated = authenticator_data.clone();
         mutated[32] = flags;
         assert_eq!(
             parse_none_attestation_object(&none_attestation_object(&mutated)?, &CREDENTIAL_ID),
-            Err(OwnerBridgeCodecError::InvalidPayload),
+            Err(reason),
             "{label}"
         );
     }
@@ -161,19 +160,29 @@ fn public_none_attestation_parser_rejects_authenticator_and_cose_fields(
             &none_attestation_object(&zero_credential_length)?,
             &CREDENTIAL_ID,
         ),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
+        Err(Reason::Malformed)
     );
 
-    for (label, cose_offset, value) in [
-        ("wrong key type", 2, 1),
-        ("wrong algorithm", 4, 0x25),
-        ("wrong curve", 6, 2),
+    let mut oversized_credential_length = authenticator_data.clone();
+    oversized_credential_length[53..55].copy_from_slice(&1_025_u16.to_be_bytes());
+    assert_eq!(
+        parse_none_attestation_object(
+            &none_attestation_object(&oversized_credential_length)?,
+            &CREDENTIAL_ID,
+        ),
+        Err(Reason::Malformed)
+    );
+
+    for (label, cose_offset, value, reason) in [
+        ("wrong key type", 2, 1, Reason::CoseKey),
+        ("wrong algorithm", 4, 0x25, Reason::Algorithm),
+        ("wrong curve", 6, 2, Reason::CoseKey),
     ] {
         let mut mutated = authenticator_data.clone();
         mutated[57 + cose_offset] = value;
         assert_eq!(
             parse_none_attestation_object(&none_attestation_object(&mutated)?, &CREDENTIAL_ID),
-            Err(OwnerBridgeCodecError::InvalidPayload),
+            Err(reason),
             "{label}"
         );
     }
@@ -181,15 +190,51 @@ fn public_none_attestation_parser_rejects_authenticator_and_cose_fields(
     wrong_x_width[57 + 8] = 0x57;
     assert_eq!(
         parse_none_attestation_object(&none_attestation_object(&wrong_x_width)?, &CREDENTIAL_ID),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
+        Err(Reason::CoseKey)
     );
+    Ok(())
+}
+
+#[test]
+fn public_attestation_parser_reports_a_foreign_algorithm_before_the_key_shape(
+) -> Result<(), OwnerBridgeCodecError> {
+    let key = cose_key();
+    let mut eddsa = b"\xa4\x01\x01\x03\x27\x20\x06\x21\x58\x20".to_vec();
+    eddsa.extend_from_slice(&key[10..42]);
+    let mut rs256 = b"\xa5\x01\x02\x03\x39\x01\x00\x20\x01\x21".to_vec();
+    rs256.extend_from_slice(&key[8..10]);
+    rs256.extend_from_slice(&key[10..42]);
+    rs256.extend_from_slice(&key[42..]);
+    for foreign in [eddsa, rs256] {
+        assert_cose_reason(&foreign, Reason::Algorithm)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn public_attestation_parser_defers_to_the_key_shape_when_no_algorithm_is_found(
+) -> Result<(), OwnerBridgeCodecError> {
+    let key = cose_key();
+    let mut duplicate_algorithm = b"\xa5\x01\x02\x03\x26\x03\x26\x20\x01".to_vec();
+    duplicate_algorithm.extend_from_slice(&key[7..42]);
+    let malformed_keys: [&[u8]; 6] = [
+        b"\x80",
+        b"\xa1\x40",
+        b"\xa1\x01\xf9\x00\x00",
+        b"\xa1\x01\x02",
+        b"\xa1\x03\x61a",
+        &duplicate_algorithm,
+    ];
+    for malformed in malformed_keys {
+        assert_cose_reason(malformed, Reason::CoseKey)?;
+    }
     Ok(())
 }
 
 #[test]
 fn public_durable_binding_rejects_a_non_curve_attestation_key() -> Result<(), OwnerBridgeCodecError>
 {
-    let mut authenticator_data = create_authenticator_data(cose_key());
+    let mut authenticator_data = create_authenticator_data(&cose_key());
     authenticator_data[57 + 10..57 + 42].fill(0);
     let attestation = none_attestation_object(&authenticator_data)?;
     let parsed = parse_none_attestation_object(&attestation, &CREDENTIAL_ID)?;
@@ -215,7 +260,7 @@ fn public_durable_binding_rejects_a_non_curve_attestation_key() -> Result<(), Ow
 #[test]
 fn public_authenticator_parsers_reject_every_truncated_public_record(
 ) -> Result<(), OwnerBridgeCodecError> {
-    let authenticator_data = create_authenticator_data(cose_key());
+    let authenticator_data = create_authenticator_data(&cose_key());
     let attestation = none_attestation_object(&authenticator_data)?;
     for length in 0..attestation.len() {
         assert!(
@@ -251,40 +296,38 @@ fn public_assertion_authenticator_parser_enforces_flags_and_exact_length(
         9
     );
 
+    for (flags, backup_state) in [(0x0d, false), (0x1d, true)] {
+        let data = assertion_authenticator_data(flags, &[]);
+        let parsed = parse_assertion_authenticator_data(&data)?;
+        assert!(parsed.backup_eligible());
+        assert_eq!(parsed.backup_state(), backup_state);
+    }
+
     let mut wrong_rp_id = baseline.clone();
     wrong_rp_id[0] ^= 1;
-    assert_invalid_assertion_data(&wrong_rp_id);
+    assert_assertion_data_reason(&wrong_rp_id, Reason::RpIdHash);
 
-    for (label, flags) in [
-        ("missing user presence", 0x04),
-        ("missing user verification", 0x01),
-        ("reserved low bit", 0x07),
-        ("reserved high bit", 0x25),
-        ("backup state without eligibility", 0x15),
-        ("attested credential data on assertion", 0x45),
+    for (label, flags, reason) in [
+        ("missing user presence", 0x04, Reason::UserPresence),
+        ("missing user verification", 0x01, Reason::UserVerification),
+        ("reserved low bit", 0x07, Reason::Malformed),
+        ("reserved high bit", 0x25, Reason::Malformed),
+        ("backup state, no eligibility", 0x15, Reason::BackupFlags),
+        ("attested credential data on assertion", 0x45, Reason::Malformed),
     ] {
         let data = assertion_authenticator_data(flags, &[]);
         assert_eq!(
             parse_assertion_authenticator_data(&data),
-            Err(OwnerBridgeCodecError::InvalidPayload),
+            Err(reason),
             "{label}"
         );
     }
 
     let mut trailing = baseline;
     trailing.push(0);
-    assert_eq!(
-        parse_assertion_authenticator_data(&trailing),
-        Err(OwnerBridgeCodecError::TrailingBytes)
-    );
-    assert_eq!(
-        parse_assertion_authenticator_data(&[0; 36]),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
-    );
-    assert_eq!(
-        parse_assertion_authenticator_data(&[0; 1_025]),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
-    );
+    assert_assertion_data_reason(&trailing, Reason::Extensions);
+    assert_assertion_data_reason(&[0; 36], Reason::Malformed);
+    assert_assertion_data_reason(&[0; 1_025], Reason::Malformed);
     Ok(())
 }
 
@@ -298,7 +341,7 @@ fn public_assertion_authenticator_parser_enforces_the_extension_profile(
     );
     assert_eq!(
         parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, &[])),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
+        Err(Reason::Extensions)
     );
 
     let invalid_extensions: [(&str, &[u8]); 4] = [
@@ -311,7 +354,7 @@ fn public_assertion_authenticator_parser_enforces_the_extension_profile(
         let data = assertion_authenticator_data(0x85, extension);
         assert_eq!(
             parse_assertion_authenticator_data(&data),
-            Err(OwnerBridgeCodecError::InvalidPayload),
+            Err(Reason::Extensions),
             "{label}"
         );
     }
@@ -320,7 +363,7 @@ fn public_assertion_authenticator_parser_enforces_the_extension_profile(
             0x85,
             b"\xa1\x61x\xf5\x00",
         )),
-        Err(OwnerBridgeCodecError::TrailingBytes)
+        Err(Reason::Extensions)
     );
 
     let mut too_many_entries = Vec::from([0xb1]);
@@ -329,13 +372,13 @@ fn public_assertion_authenticator_parser_enforces_the_extension_profile(
     }
     assert_eq!(
         parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, &too_many_entries)),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
+        Err(Reason::Extensions)
     );
 
     let nested_too_deep = b"\xa1\x61a\xa1\x61b\xa1\x61c\xa1\x61d\xa1\x61e\xf5";
     assert_eq!(
         parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, nested_too_deep)),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
+        Err(Reason::Extensions)
     );
     let nested_array_too_deep = b"\xa1\x61a\x81\x81\x81\x81\xf5";
     assert_eq!(
@@ -343,7 +386,7 @@ fn public_assertion_authenticator_parser_enforces_the_extension_profile(
             0x85,
             nested_array_too_deep,
         )),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
+        Err(Reason::Extensions)
     );
     Ok(())
 }
@@ -371,7 +414,7 @@ fn public_assertion_extension_parser_accepts_every_closed_value_class(
     for (label, extension) in invalid_extensions {
         assert_eq!(
             parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, extension)),
-            Err(OwnerBridgeCodecError::InvalidPayload),
+            Err(Reason::Extensions),
             "{label}"
         );
     }
@@ -380,7 +423,7 @@ fn public_assertion_extension_parser_accepts_every_closed_value_class(
             0x85,
             b"\xa1\x61x\x58\x18",
         )),
-        Err(OwnerBridgeCodecError::BoundsExceeded)
+        Err(Reason::Extensions)
     );
     Ok(())
 }
@@ -393,7 +436,7 @@ fn public_assertion_extension_parser_rejects_truncated_cbor_values() {
     ] {
         assert_eq!(
             parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, extension)),
-            Err(OwnerBridgeCodecError::InvalidPayload)
+            Err(Reason::Extensions)
         );
     }
     for extension in [
@@ -402,7 +445,7 @@ fn public_assertion_extension_parser_rejects_truncated_cbor_values() {
     ] {
         assert_eq!(
             parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, extension)),
-            Err(OwnerBridgeCodecError::BoundsExceeded)
+            Err(Reason::Extensions)
         );
     }
 }
@@ -412,13 +455,13 @@ fn public_assertion_extension_parser_rejects_malformed_map_keys_and_counted_text
     for extension in [b"\xa1\x61\xff\xf4".as_slice(), b"\xa1\x40\xf4".as_slice()] {
         assert_eq!(
             parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, extension)),
-            Err(OwnerBridgeCodecError::InvalidPayload)
+            Err(Reason::Extensions)
         );
     }
     for extension in [b"\xa1\x78\x18".as_slice(), b"\xa1\x61x\x78\x18".as_slice()] {
         assert_eq!(
             parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, extension)),
-            Err(OwnerBridgeCodecError::BoundsExceeded)
+            Err(Reason::Extensions)
         );
     }
 }
@@ -546,21 +589,27 @@ fn public_cose_canonical_decoder_rejects_alternate_encodings_and_invalid_points(
     Ok(())
 }
 
+fn assert_cose_reason(cose: &[u8], reason: Reason) -> Result<(), OwnerBridgeCodecError> {
+    let attestation = none_attestation_object(&create_authenticator_data(cose))?;
+    assert_eq!(
+        parse_none_attestation_object(&attestation, &CREDENTIAL_ID),
+        Err(reason)
+    );
+    Ok(())
+}
+
 fn assert_invalid_attestation(attestation: &[u8], raw_id: &[u8]) {
     assert_eq!(
         parse_none_attestation_object(attestation, raw_id),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::AttestationFormat)
     );
 }
 
-fn assert_invalid_assertion_data(input: &[u8]) {
-    assert_eq!(
-        parse_assertion_authenticator_data(input),
-        Err(OwnerBridgeCodecError::InvalidPayload)
-    );
+fn assert_assertion_data_reason(input: &[u8], reason: Reason) {
+    assert_eq!(parse_assertion_authenticator_data(input), Err(reason));
 }
 
-fn create_authenticator_data(cose_key: [u8; 77]) -> Vec<u8> {
+fn create_authenticator_data(cose_key: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(134);
     output.extend_from_slice(&RP_ID_HASH);
     output.push(0x45);
@@ -568,7 +617,7 @@ fn create_authenticator_data(cose_key: [u8; 77]) -> Vec<u8> {
     output.extend_from_slice(&[0; 16]);
     output.extend_from_slice(&2_u16.to_be_bytes());
     output.extend_from_slice(&CREDENTIAL_ID);
-    output.extend_from_slice(&cose_key);
+    output.extend_from_slice(cose_key);
     output
 }
 

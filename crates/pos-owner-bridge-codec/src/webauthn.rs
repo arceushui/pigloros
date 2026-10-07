@@ -3,8 +3,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     parse_assertion_authenticator_data, parse_none_attestation_object, validate_client_data_json,
-    AssertionReplyV1, AttestationReplyV1, CeremonyId, CoseEs256PublicKey, OwnerBridgeCodecError,
-    OwnerUserHandle, PrfResult, TransportCodes, WebAuthnChallenge,
+    AssertionAuthenticatorData, AssertionReplyV1, AttestationReplyV1, CeremonyId,
+    CoseEs256PublicKey, OwnerBridgeCodecError, OwnerUserHandle, PrfResult, TransportCodes,
+    VerificationReason, WebAuthnChallenge,
 };
 
 const MIN_CREDENTIAL_ID_BYTES: usize = 1;
@@ -184,15 +185,18 @@ impl VerifiedAssertion {
 ///
 /// # Errors
 ///
-/// Returns a closed [`OwnerBridgeCodecError`] when the ceremony ID, client
-/// data, attestation object, COSE point, flags, or PRF shape violates the
-/// closed `WebAuthn` Create contract.
+/// Returns the closed [`VerificationReason`] of the first failed check:
+/// ceremony ID, PRF support, client data, attestation object, authenticator
+/// data, COSE key, or public-key point.
 pub fn verify_attestation_reply<'a>(
     reply: &AttestationReplyV1<'a>,
     context: CreateVerificationContext,
-) -> Result<VerifiedRegistration<'a>, OwnerBridgeCodecError> {
-    if reply.ceremony_id() != context.ceremony_id || !reply.prf_enabled() {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
+) -> Result<VerifiedRegistration<'a>, VerificationReason> {
+    if reply.ceremony_id() != context.ceremony_id {
+        return Err(VerificationReason::CeremonyIdMismatch);
+    }
+    if !reply.prf_enabled() {
+        return Err(VerificationReason::PrfUnsupported);
     }
     validate_client_data_json(
         reply.client_data_json(),
@@ -216,17 +220,18 @@ pub fn verify_attestation_reply<'a>(
 ///
 /// # Errors
 ///
-/// Returns a closed [`OwnerBridgeCodecError`] when any `WebAuthn` assertion
-/// invariant, strict DER signature, ES256 verification, credential/user-handle
-/// equality, backup flag, counter, or PRF requirement fails.
+/// Returns the closed [`VerificationReason`] of the first failed check:
+/// ceremony ID, credential ID, client data, authenticator data, backup
+/// eligibility, user handle, counter, stored public key, or signature.
 pub fn verify_assertion_reply(
     reply: &AssertionReplyV1<'_>,
     context: AssertionVerificationContext<'_>,
-) -> Result<VerifiedAssertion, OwnerBridgeCodecError> {
-    if reply.ceremony_id() != context.ceremony_id
-        || reply.raw_id() != context.credential.credential_id
-    {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
+) -> Result<VerifiedAssertion, VerificationReason> {
+    if reply.ceremony_id() != context.ceremony_id {
+        return Err(VerificationReason::CeremonyIdMismatch);
+    }
+    if reply.raw_id() != context.credential.credential_id {
+        return Err(VerificationReason::CredentialMismatch);
     }
     validate_client_data_json(
         reply.client_data_json(),
@@ -234,14 +239,7 @@ pub fn verify_assertion_reply(
         &context.challenge,
     )?;
     let data = parse_assertion_authenticator_data(reply.authenticator_data())?;
-    if data.backup_eligible() != context.credential.backup_eligible
-        || (reply
-            .user_handle()
-            .is_some_and(|handle| handle != context.credential.user_handle))
-        || !counter_advanced(context.credential.sign_count, data.sign_count())
-    {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
-    }
+    check_stored_binding(reply, data, context.credential)?;
     let verifying_key = validating_key(context.credential.public_key)?;
     verify_signature(
         &verifying_key,
@@ -256,17 +254,36 @@ pub fn verify_assertion_reply(
     })
 }
 
+fn check_stored_binding(
+    reply: &AssertionReplyV1<'_>,
+    data: AssertionAuthenticatorData,
+    credential: StoredCredential<'_>,
+) -> Result<(), VerificationReason> {
+    let handle_mismatch = reply
+        .user_handle()
+        .is_some_and(|handle| handle != credential.user_handle);
+    if data.backup_eligible() != credential.backup_eligible {
+        Err(VerificationReason::BackupFlags)
+    } else if handle_mismatch {
+        Err(VerificationReason::UserHandleMismatch)
+    } else if !counter_advanced(credential.sign_count, data.sign_count()) {
+        Err(VerificationReason::CounterRegression)
+    } else {
+        Ok(())
+    }
+}
+
 const fn counter_advanced(stored: u32, current: u32) -> bool {
     (stored == 0 && current == 0) || current > stored
 }
 
-fn validate_public_key(key: CoseEs256PublicKey) -> Result<(), OwnerBridgeCodecError> {
+fn validate_public_key(key: CoseEs256PublicKey) -> Result<(), VerificationReason> {
     validating_key(key).map(|_| ())
 }
 
-fn validating_key(key: CoseEs256PublicKey) -> Result<VerifyingKey, OwnerBridgeCodecError> {
+fn validating_key(key: CoseEs256PublicKey) -> Result<VerifyingKey, VerificationReason> {
     VerifyingKey::from_sec1_bytes(&key.uncompressed_sec1_bytes())
-        .map_err(|_| OwnerBridgeCodecError::InvalidPayload)
+        .or(Err(VerificationReason::CoseKey))
 }
 
 fn verify_signature(
@@ -274,9 +291,8 @@ fn verify_signature(
     authenticator_data: &[u8],
     client_data_json: &[u8],
     signature_bytes: &[u8],
-) -> Result<(), OwnerBridgeCodecError> {
-    let signature =
-        Signature::from_der(signature_bytes).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
+) -> Result<(), VerificationReason> {
+    let signature = Signature::from_der(signature_bytes).or(Err(VerificationReason::Signature))?;
 
     let client_data_digest: [u8; 32] = Sha256::digest(client_data_json).into();
     // `verify_signature` is private and reached only through
@@ -287,5 +303,5 @@ fn verify_signature(
     signed_message[authenticator_data.len()..message_length].copy_from_slice(&client_data_digest);
     verifying_key
         .verify(&signed_message[..message_length], &signature)
-        .map_err(|_| OwnerBridgeCodecError::InvalidPayload)
+        .or(Err(VerificationReason::Signature))
 }

@@ -5,7 +5,7 @@ use pos_owner_bridge_codec::{
     parse_none_attestation_object, validate_client_data_json, AssertionReplyV1, AttestationReplyV1,
     CeremonyId, CeremonyKind, ControlState, CreateOptionsV1, GetOptionsV1,
     LoopbackRequestDisposition, OwnerBridgeCodecError, OwnerBridgeControlV1, OwnerUserHandle,
-    PrfInput, PrfResult, TransportCodes, WebAuthnChallenge,
+    PrfInput, PrfResult, TransportCodes, VerificationReason as Reason, WebAuthnChallenge,
 };
 
 const CEREMONY_ID: CeremonyId = CeremonyId::from_bytes([
@@ -175,25 +175,25 @@ fn public_client_data_validation_enforces_the_closed_web_authn_shape() {
     let duplicate_after_unescaping = b"{\"type\":\"webauthn.create\",\"\\u0074ype\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\"}";
     assert_eq!(
         validate_client_data_json(duplicate_after_unescaping, CeremonyKind::Create, &CHALLENGE),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::Malformed)
     );
 
     let escaped_challenge = b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj\\u0038\",\"origin\":\"http://localhost:49291\"}";
     assert_eq!(
         validate_client_data_json(escaped_challenge, CeremonyKind::Create, &CHALLENGE),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::Challenge)
     );
 
     let cross_origin = b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"crossOrigin\":true}";
     assert_eq!(
         validate_client_data_json(cross_origin, CeremonyKind::Create, &CHALLENGE),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::CrossOrigin)
     );
 
     let top_origin = b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\",\"topOrigin\":false}";
     assert_eq!(
         validate_client_data_json(top_origin, CeremonyKind::Create, &CHALLENGE),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::CrossOrigin)
     );
 }
 
@@ -228,14 +228,14 @@ fn public_authenticator_parsers_enforce_none_cose_and_extension_rules(
     duplicate_extension[37..].copy_from_slice(&[0xa2, 0x61, b'x', 0xf5, 0x61, b'x', 0xf4]);
     assert_eq!(
         parse_assertion_authenticator_data(&duplicate_extension),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::Extensions)
     );
 
     let mut backup_state_without_eligibility = assertion;
     backup_state_without_eligibility[32] = 0x95;
     assert_eq!(
         parse_assertion_authenticator_data(&backup_state_without_eligibility),
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(Reason::BackupFlags)
     );
     Ok(())
 }

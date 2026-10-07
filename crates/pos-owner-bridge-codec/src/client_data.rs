@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
-use crate::{CeremonyKind, OwnerBridgeCodecError, WebAuthnChallenge};
+use crate::{CeremonyKind, VerificationReason, WebAuthnChallenge};
 
 const MAX_CLIENT_DATA_BYTES: usize = 4_096;
 const OWNER_ORIGIN: &str = "http://localhost:49291";
@@ -9,8 +9,6 @@ const GET_TYPE: &str = "webauthn.get";
 const CLIENT_DATA_TYPE_FIELD: u8 = 1;
 const CLIENT_DATA_CHALLENGE_FIELD: u8 = 2;
 const CLIENT_DATA_ORIGIN_FIELD: u8 = 4;
-const REQUIRED_CLIENT_DATA_FIELDS: u8 =
-    CLIENT_DATA_TYPE_FIELD | CLIENT_DATA_CHALLENGE_FIELD | CLIENT_DATA_ORIGIN_FIELD;
 
 /// Validate closed `WebAuthn` `clientDataJSON` for one ceremony and challenge.
 ///
@@ -20,18 +18,19 @@ const REQUIRED_CLIENT_DATA_FIELDS: u8 =
 ///
 /// # Errors
 ///
-/// Returns [`OwnerBridgeCodecError::InvalidPayload`] for malformed JSON,
-/// duplicate keys, an unsupported value shape, or a client-data value that
-/// does not satisfy the closed ADR-110 `WebAuthn` contract. Returns
-/// [`OwnerBridgeCodecError::BoundsExceeded`] when `input` is empty or exceeds
-/// the fixed 4,096-byte bridge limit.
+/// Returns [`VerificationReason::Malformed`] for malformed JSON, duplicate
+/// keys, an unsupported value shape, or an empty or oversized input. Returns
+/// [`VerificationReason::ClientDataType`], [`VerificationReason::Challenge`],
+/// or [`VerificationReason::Origin`] when that member is wrong or absent, and
+/// [`VerificationReason::CrossOrigin`] when `crossOrigin` is not `false` or
+/// `topOrigin` or `tokenBinding` is present.
 pub fn validate_client_data_json(
     input: &[u8],
     kind: CeremonyKind,
     challenge: &WebAuthnChallenge,
-) -> Result<(), OwnerBridgeCodecError> {
+) -> Result<(), VerificationReason> {
     if input.is_empty() || input.len() > MAX_CLIENT_DATA_BYTES {
-        return Err(OwnerBridgeCodecError::BoundsExceeded);
+        return Err(VerificationReason::Malformed);
     }
 
     let mut parser = JsonParser::new(input)?;
@@ -48,14 +47,14 @@ pub fn validate_client_data_json(
 
     parser.skip_whitespace();
     if parser.peek_byte() == Some(b'}') {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
+        return Err(VerificationReason::Malformed);
     }
 
     loop {
         let key_start = parser.offset;
         let key = parser.parse_string()?;
         if duplicate_key_before(parser.input, members_start, key_start, key) {
-            return Err(OwnerBridgeCodecError::InvalidPayload);
+            return Err(VerificationReason::Malformed);
         }
         parser.skip_whitespace();
         parser.expect_byte(b':')?;
@@ -75,19 +74,31 @@ pub fn validate_client_data_json(
             Some(b',') => {
                 parser.skip_whitespace();
                 if parser.peek_byte() == Some(b'}') {
-                    return Err(OwnerBridgeCodecError::InvalidPayload);
+                    return Err(VerificationReason::Malformed);
                 }
             }
             Some(b'}') => break,
-            _ => return Err(OwnerBridgeCodecError::InvalidPayload),
+            _ => return Err(VerificationReason::Malformed),
         }
     }
 
     parser.skip_whitespace();
-    if parser.offset != input.len() || seen_fields != REQUIRED_CLIENT_DATA_FIELDS {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
+    if parser.offset != input.len() {
+        return Err(VerificationReason::Malformed);
     }
-    Ok(())
+    require_client_data_fields(seen_fields)
+}
+
+const fn require_client_data_fields(seen_fields: u8) -> Result<(), VerificationReason> {
+    if seen_fields & CLIENT_DATA_TYPE_FIELD == 0 {
+        Err(VerificationReason::ClientDataType)
+    } else if seen_fields & CLIENT_DATA_CHALLENGE_FIELD == 0 {
+        Err(VerificationReason::Challenge)
+    } else if seen_fields & CLIENT_DATA_ORIGIN_FIELD == 0 {
+        Err(VerificationReason::Origin)
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_client_data_member(
@@ -96,20 +107,20 @@ fn validate_client_data_member(
     expected_type: &str,
     expected_challenge: &[u8; 43],
     seen_fields: &mut u8,
-) -> Result<(), OwnerBridgeCodecError> {
+) -> Result<(), VerificationReason> {
     if key.equals_text("type") {
-        validate_text_client_data_member(value, expected_type)?;
+        validate_text_client_data_member(value, expected_type, VerificationReason::ClientDataType)?;
         *seen_fields |= CLIENT_DATA_TYPE_FIELD;
     } else if key.equals_text("challenge") {
         validate_challenge_client_data_member(value, expected_challenge)?;
         *seen_fields |= CLIENT_DATA_CHALLENGE_FIELD;
     } else if key.equals_text("origin") {
-        validate_text_client_data_member(value, OWNER_ORIGIN)?;
+        validate_text_client_data_member(value, OWNER_ORIGIN, VerificationReason::Origin)?;
         *seen_fields |= CLIENT_DATA_ORIGIN_FIELD;
     } else if key.equals_text("crossOrigin") {
         validate_cross_origin_client_data_member(value)?;
     } else if key.equals_text("topOrigin") || key.equals_text("tokenBinding") {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
+        return Err(VerificationReason::CrossOrigin);
     }
     Ok(())
 }
@@ -117,38 +128,35 @@ fn validate_client_data_member(
 fn validate_text_client_data_member(
     value: JsonValue<'_>,
     expected: &str,
-) -> Result<(), OwnerBridgeCodecError> {
-    let JsonValue::String(value) = value else {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
-    };
-    if value.equals_text(expected) {
-        Ok(())
-    } else {
-        Err(OwnerBridgeCodecError::InvalidPayload)
+    fault: VerificationReason,
+) -> Result<(), VerificationReason> {
+    match value {
+        JsonValue::String(text) if text.equals_text(expected) => Ok(()),
+        _ => Err(fault),
     }
 }
 
 fn validate_challenge_client_data_member(
     value: JsonValue<'_>,
     expected_challenge: &[u8; 43],
-) -> Result<(), OwnerBridgeCodecError> {
-    let JsonValue::String(value) = value else {
-        return Err(OwnerBridgeCodecError::InvalidPayload);
-    };
-    if !value.contains_escape && value.raw.as_bytes() == &expected_challenge[..] {
-        Ok(())
-    } else {
-        Err(OwnerBridgeCodecError::InvalidPayload)
+) -> Result<(), VerificationReason> {
+    match value {
+        JsonValue::String(text) if challenge_matches(text, expected_challenge) => Ok(()),
+        _ => Err(VerificationReason::Challenge),
     }
+}
+
+fn challenge_matches(text: JsonString<'_>, expected_challenge: &[u8; 43]) -> bool {
+    !text.contains_escape && text.raw.as_bytes() == &expected_challenge[..]
 }
 
 const fn validate_cross_origin_client_data_member(
     value: JsonValue<'_>,
-) -> Result<(), OwnerBridgeCodecError> {
+) -> Result<(), VerificationReason> {
     if matches!(value, JsonValue::Boolean(false)) {
         Ok(())
     } else {
-        Err(OwnerBridgeCodecError::InvalidPayload)
+        Err(VerificationReason::CrossOrigin)
     }
 }
 
@@ -253,41 +261,41 @@ impl JsonString<'_> {
         Some(scalar)
     }
 
-    fn decode_unicode_escape(&self, offset: &mut usize) -> Result<u32, OwnerBridgeCodecError> {
+    fn decode_unicode_escape(&self, offset: &mut usize) -> Result<u32, VerificationReason> {
         let first = self.decode_code_unit(offset)?;
         if (0xd800..=0xdbff).contains(&first) {
             if self.raw.as_bytes().get(*offset..*offset + 2) != Some(b"\\u") {
-                return Err(OwnerBridgeCodecError::InvalidPayload);
+                return Err(VerificationReason::Malformed);
             }
             *offset += 2;
             let second = self.decode_code_unit(offset)?;
             if !(0xdc00..=0xdfff).contains(&second) {
-                return Err(OwnerBridgeCodecError::InvalidPayload);
+                return Err(VerificationReason::Malformed);
             }
             let high = u32::from(first - 0xd800);
             let low = u32::from(second - 0xdc00);
             return Ok(0x1_0000 + (high << 10) + low);
         }
         if (0xdc00..=0xdfff).contains(&first) {
-            return Err(OwnerBridgeCodecError::InvalidPayload);
+            return Err(VerificationReason::Malformed);
         }
         Ok(u32::from(first))
     }
 
-    fn decode_code_unit(&self, offset: &mut usize) -> Result<u16, OwnerBridgeCodecError> {
+    fn decode_code_unit(&self, offset: &mut usize) -> Result<u16, VerificationReason> {
         let end = *offset + 4;
         let digits = self
             .raw
             .as_bytes()
             .get(*offset..end)
-            .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
+            .ok_or(VerificationReason::Malformed)?;
         let mut value = 0_u16;
         for &digit in digits {
             let nibble = match digit {
                 b'0'..=b'9' => digit - b'0',
                 b'a'..=b'f' => digit - b'a' + 10,
                 b'A'..=b'F' => digit - b'A' + 10,
-                _ => return Err(OwnerBridgeCodecError::InvalidPayload),
+                _ => return Err(VerificationReason::Malformed),
             };
             value = (value << 4) | u16::from(nibble);
         }
@@ -302,9 +310,9 @@ struct JsonParser<'a> {
 }
 
 impl<'a> JsonParser<'a> {
-    fn new(input: &'a [u8]) -> Result<Self, OwnerBridgeCodecError> {
+    fn new(input: &'a [u8]) -> Result<Self, VerificationReason> {
         let input =
-            core::str::from_utf8(input).map_err(|_| OwnerBridgeCodecError::InvalidPayload)?;
+            core::str::from_utf8(input).map_err(|_| VerificationReason::Malformed)?;
         Ok(Self { input, offset: 0 })
     }
 
@@ -317,7 +325,7 @@ impl<'a> JsonParser<'a> {
         }
     }
 
-    fn parse_string(&mut self) -> Result<JsonString<'a>, OwnerBridgeCodecError> {
+    fn parse_string(&mut self) -> Result<JsonString<'a>, VerificationReason> {
         self.expect_byte(b'"')?;
         let start = self.offset;
         let mut contains_escape = false;
@@ -325,7 +333,7 @@ impl<'a> JsonParser<'a> {
         loop {
             let byte = self
                 .take_byte()
-                .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
+                .ok_or(VerificationReason::Malformed)?;
             match byte {
                 b'"' => {
                     return Ok(JsonString {
@@ -337,13 +345,13 @@ impl<'a> JsonParser<'a> {
                     contains_escape = true;
                     self.validate_escape()?;
                 }
-                0x00..=0x1f => return Err(OwnerBridgeCodecError::InvalidPayload),
+                0x00..=0x1f => return Err(VerificationReason::Malformed),
                 _ => {}
             }
         }
     }
 
-    fn parse_value(&mut self) -> Result<JsonValue<'a>, OwnerBridgeCodecError> {
+    fn parse_value(&mut self) -> Result<JsonValue<'a>, VerificationReason> {
         match self.peek_byte() {
             Some(b'"') => self.parse_string().map(JsonValue::String),
             Some(b't') => {
@@ -354,14 +362,14 @@ impl<'a> JsonParser<'a> {
                 self.expect_literal(b"false")?;
                 Ok(JsonValue::Boolean(false))
             }
-            _ => Err(OwnerBridgeCodecError::InvalidPayload),
+            _ => Err(VerificationReason::Malformed),
         }
     }
 
-    fn validate_escape(&mut self) -> Result<(), OwnerBridgeCodecError> {
+    fn validate_escape(&mut self) -> Result<(), VerificationReason> {
         let escape = self
             .take_byte()
-            .ok_or(OwnerBridgeCodecError::InvalidPayload)?;
+            .ok_or(VerificationReason::Malformed)?;
         match escape {
             b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => Ok(()),
             b'u' => {
@@ -374,24 +382,24 @@ impl<'a> JsonParser<'a> {
                 self.offset = offset;
                 Ok(())
             }
-            _ => Err(OwnerBridgeCodecError::InvalidPayload),
+            _ => Err(VerificationReason::Malformed),
         }
     }
 
-    fn expect_literal(&mut self, expected: &[u8]) -> Result<(), OwnerBridgeCodecError> {
+    fn expect_literal(&mut self, expected: &[u8]) -> Result<(), VerificationReason> {
         let end = self.offset + expected.len();
         if self.input.as_bytes().get(self.offset..end) != Some(expected) {
-            return Err(OwnerBridgeCodecError::InvalidPayload);
+            return Err(VerificationReason::Malformed);
         }
         self.offset = end;
         Ok(())
     }
 
-    fn expect_byte(&mut self, expected: u8) -> Result<(), OwnerBridgeCodecError> {
+    fn expect_byte(&mut self, expected: u8) -> Result<(), VerificationReason> {
         if self.take_byte() == Some(expected) {
             Ok(())
         } else {
-            Err(OwnerBridgeCodecError::InvalidPayload)
+            Err(VerificationReason::Malformed)
         }
     }
 
