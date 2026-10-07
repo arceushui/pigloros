@@ -86,6 +86,17 @@ fn canonical_fixture_closure_bytes(source: &FixtureBinding) -> Vec<u8> {
     bytes
 }
 
+fn replay_identity_of(
+    closure_bytes: &[u8],
+    output_policy_bytes: &[u8],
+) -> Result<pos_core::Hash, Box<dyn std::error::Error>> {
+    let closure = pos_runtime::OutputPolicyClosureV1::from_manifest_canonical_bytes_v1(
+        closure_bytes,
+        output_policy_bytes,
+    )?;
+    Ok(closure.replay_identity_digest())
+}
+
 fn assert_artifact_shape_rejections(source: &FixtureBinding) {
     assert!(matches!(
         validate_output_policy_artifacts_v1(
@@ -499,7 +510,7 @@ fn verified_output_policy_closure_round_trips_and_rejects_malformed_wire() -> Te
 }
 
 #[test]
-fn verified_output_policy_closure_is_retained_with_stable_identity() -> TestResult {
+fn verified_output_policy_closure_has_a_stable_identity_across_fresh_plugin_ids() -> TestResult {
     let plugin = FixturePlugin {
         id: PluginId::new(),
     };
@@ -514,16 +525,18 @@ fn verified_output_policy_closure_is_retained_with_stable_identity() -> TestResu
         None,
         Some(Box::new(FixtureDriver)),
     )?;
-    let (_, retained) = registry
-        .replay_policy_closures()
-        .next()
-        .ok_or_else(|| std::io::Error::other("verified closure was not retained"))?;
-    assert_eq!(retained, expected_bytes);
+    let identity = replay_identity_of(&expected_bytes, &source.output_policy_bytes)?;
+    assert_eq!(registry.retained_closure_replay_identities(), [identity]);
+    // The registry retains exactly the canonical OPC1 encoding, byte for byte.
+    let rows = registry.plugin_ownership_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1.as_deref(), Some(expected_bytes.as_slice()));
 
     let fresh_plugin = FixturePlugin {
         id: PluginId::new(),
     };
     let fresh_source = verified_binding(&fresh_plugin)?;
+    let fresh_bytes = canonical_fixture_closure_bytes(&fresh_source);
     let mut fresh_registry = PluginRegistry::new().with_erasure_gate(std::sync::Arc::new(
         pos_core::ErasureContainmentGateV1::new_test_open(),
     ));
@@ -533,15 +546,13 @@ fn verified_output_policy_closure_is_retained_with_stable_identity() -> TestResu
         None,
         Some(Box::new(FixtureDriver)),
     )?;
-    let (_, fresh_retained) = fresh_registry
-        .replay_policy_closures()
-        .next()
-        .ok_or_else(|| std::io::Error::other("fresh closure was not retained"))?;
-    assert_ne!(retained, fresh_retained);
+    assert_ne!(expected_bytes, fresh_bytes);
+    let fresh_identity = replay_identity_of(&fresh_bytes, &fresh_source.output_policy_bytes)?;
     assert_eq!(
-        registry.replay_policy_closure_identities().next(),
-        fresh_registry.replay_policy_closure_identities().next()
+        fresh_registry.retained_closure_replay_identities(),
+        [fresh_identity]
     );
+    assert_eq!(identity, fresh_identity);
     Ok(())
 }
 
@@ -1555,7 +1566,6 @@ fn verified_registration_rejects_a_policy_recorded_for_another_plugin_identity()
         ))
     ));
     assert!(registry.is_empty());
-    assert!(registry.output_policy_digests().next().is_none());
-    assert!(registry.replay_policy_closures().next().is_none());
+    assert_eq!(registry.retained_manifest_plugin_roster(), Ok(None));
     Ok(())
 }

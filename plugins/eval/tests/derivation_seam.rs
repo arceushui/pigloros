@@ -700,10 +700,7 @@ fn the_derivation_mapping_enters_evals_pinned_configuration_identity() {
             max_drafts,
             &EvalDiagnosticsV1::default(),
         );
-        registry
-            .replay_policy_closure_identities()
-            .map(|(_, digest)| digest)
-            .collect::<Vec<_>>()
+        registry.retained_closure_replay_identities()
     };
     assert_eq!(identity(64), identity(64));
     assert_ne!(identity(3), identity(64));

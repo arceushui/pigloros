@@ -44,7 +44,8 @@ struct RegistrySnapshot {
     descriptions: Vec<(String, String)>,
     plugins: usize,
     drivers: usize,
-    policies: Vec<(String, Hash)>,
+    /// Owned Event types and exact retained closure bytes, one row per Plugin.
+    ownership: Vec<(Vec<String>, Option<Vec<u8>>)>,
     routes: Vec<String>,
 }
 
@@ -84,10 +85,7 @@ fn snapshot(registry: &PluginRegistry, probes: &[&str]) -> RegistrySnapshot {
         descriptions,
         plugins: registry.len(),
         drivers: registry.driver_count(),
-        policies: registry
-            .replay_policy_identities()
-            .map(|(name, digest)| (name.to_owned(), digest))
-            .collect(),
+        ownership: registry.plugin_ownership_rows(),
         routes: routes(registry, probes),
     }
 }

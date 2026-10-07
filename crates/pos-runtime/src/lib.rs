@@ -84,8 +84,8 @@ pub use registry::{
     HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
     InstalledPluginFactoryV1, InstalledPluginProductV1, LocalAdapterErrorV1,
     LocalAdapterIdempotencyKeyV1, LocalAdapterProviderResponseV1, LocalAdapterProviderV1,
-    LocalAdapterSessionV1, NoActionApproverV1, OperationContext, PluginRegistry,
-    ScheduledDriverBindingV1, ScheduledPassAdmissionV1, ScheduledProfileErrorV1,
+    LocalAdapterSessionV1, ManifestRosterBuildErrorV1, NoActionApproverV1, OperationContext,
+    PluginRegistry, ScheduledDriverBindingV1, ScheduledPassAdmissionV1, ScheduledProfileErrorV1,
     StagedGrowthBoundV1, StagedReducerAdmissionErrorV1, StagedReducerAdmissionV1,
     EMPTY_CONFIGURATION_DETAILS_V1, MAX_STAGED_CALLBACK_BOUND_V1,
 };
@@ -113,3 +113,11 @@ pub use world_profile::HostWorldProfileV1;
 pub use world_replay::{
     VerifiedWorldReplayV1, WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
 };
+
+// Length-framed hashing shared by the output-admission and staged-catalogue identities: each field
+// goes in behind its little-endian `u64` length, so adjacent fields cannot run together.
+fn hash_framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    let bytes_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    hasher.update(&bytes_len.to_le_bytes());
+    hasher.update(bytes);
+}

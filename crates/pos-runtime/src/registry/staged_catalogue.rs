@@ -236,10 +236,10 @@ fn staged_reducer_identity<P: Plugin>(
 ) -> Hash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"pigloros/staged-reducer-identity/v1");
-    super::hash_framed(&mut hasher, factory_id.as_bytes());
-    super::hash_framed(&mut hasher, plugin.name().as_bytes());
-    super::hash_framed(&mut hasher, plugin.version().as_bytes());
-    super::hash_framed(&mut hasher, configuration_details);
+    crate::hash_framed(&mut hasher, factory_id.as_bytes());
+    crate::hash_framed(&mut hasher, plugin.name().as_bytes());
+    crate::hash_framed(&mut hasher, plugin.version().as_bytes());
+    crate::hash_framed(&mut hasher, configuration_details);
     hasher.update(&admission.callback_bound.as_micros().to_le_bytes());
     hasher.update(&admission.growth_bound.per_payload_byte.to_le_bytes());
     hasher.update(&admission.growth_bound.constant_bytes.to_le_bytes());

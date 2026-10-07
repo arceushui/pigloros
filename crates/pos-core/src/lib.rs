@@ -570,7 +570,10 @@ pub use key_registry::{
     KeyRegistryHistoricalDecryptionPortV1, KeyRegistryPortV1, KeyRegistrySigningPortV1,
     KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, OwnerIdV1,
 };
-pub use manifest::{AdapterRecord, ReproManifest};
+pub use manifest::{
+    checked_repro_manifest_input_len, AdapterRecord, ReproManifest, ReproManifestError,
+    MAX_REPRO_MANIFEST_ADAPTER_RECORDS, MAX_REPRO_MANIFEST_INPUT_BYTES,
+};
 pub use owntracks_enrollment::{
     OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStateV1, OwnTracksEnrollmentStatusV1,
     OwnTracksEnrollmentStatusViewV1, OwnTracksEnrollmentStore,

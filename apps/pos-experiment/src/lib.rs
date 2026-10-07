@@ -29,7 +29,7 @@ use pos_core::{
     ids::{EntityId, TimelineId},
     store::{EventReadBounds, EventStore, SeqRange},
     ConsentAuthority, ConsentCapabilityToken, ConsentGate, CoreError, ErasureContainmentGateV1,
-    ErasureGate, ErasureHostErrorV1, ErasureProtectedOperationV1, Event,
+    ErasureGate, ErasureHostErrorV1, ErasureProtectedOperationV1, Event, ManifestPluginRosterV1,
     PipelineSecurityRevisionsV1, ReproManifest, Seq, Timeline, TimelineMeta,
 };
 use pos_runtime::{LocalScheduledAdmissionHostV1, PluginRegistry, ScheduledAdmissionStoreV1};
@@ -746,6 +746,8 @@ pub enum ExperimentError {
     ActionRejected(#[from] pos_core::ActionRejected),
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),
+    #[error("the admitted Plugin roster cannot be recorded in the manifest: {0}")]
+    ManifestRoster(pos_runtime::ManifestRosterBuildErrorV1),
     #[error("a fresh PluginRegistry factory is required to run a forked experiment session")]
     MissingForkRegistryFactory,
     #[error("the experiment store has no accurate recovery recipe")]
@@ -1442,6 +1444,47 @@ impl Experiment {
     pub fn without_consent_gate(mut self) -> Self {
         self.registry = self.registry.without_consent_gate();
         self
+    }
+
+    /// Register a local Plugin in the host's stable manifest slot.
+    ///
+    /// The slot is the host-authored name of this Plugin's place in the composition; see
+    /// [`PluginRegistry::register_local`] for its grammar. Register every Plugin this way, then
+    /// call [`Self::admit_local_manifest_registration`], and the completed run records them in its
+    /// manifest roster.
+    ///
+    /// # Errors
+    /// Returns the slot, policy, pin, or registration error before any mutation.
+    pub fn register_local(
+        &mut self,
+        plugin: &dyn pos_core::Plugin,
+        slot: pos_runtime::ManifestSlotV1,
+        roles: Vec<String>,
+        reducer: Option<Box<dyn pos_core::Reducer>>,
+        driver: Option<Box<dyn pos_runtime::Driver>>,
+    ) -> Result<(), pos_runtime::RuntimeError> {
+        self.registry
+            .register_local(plugin, slot, roles, reducer, driver)
+            .and_then(|()| self.registry.compose_non_participant_drivers())
+    }
+
+    /// Admit every Plugin registered with [`Self::register_local`] as one complete composition.
+    ///
+    /// Call this once, after the last registration. The completed run's manifest then carries
+    /// the admitted roster. A run that was never admitted, for example one whose Plugins were
+    /// added with [`Self::register_generated`], records an empty roster, which is not a Replay
+    /// claim.
+    ///
+    /// # Errors
+    /// Returns the closed registration error for an empty, incomplete, unpinned or already
+    /// admitted registry.
+    pub fn admit_local_manifest_registration(
+        &mut self,
+        owner_id: pos_core::OwnerIdV1,
+        configuration_generation: u64,
+    ) -> Result<pos_runtime::AdmittedCompositionV1, pos_runtime::ManifestRegistrationErrorV1> {
+        self.registry
+            .admit_local_manifest_registration(owner_id, configuration_generation)
     }
 
     /// Register a plugin (wires schemas + reducer + driver).
@@ -2849,12 +2892,7 @@ impl ExperimentSession {
 
         let timeline_id = self.timeline.id();
         let timeline_head = self.boundary.folded_through;
-        let plugin_versions: Vec<(String, String)> = self
-            .registry
-            .plugin_versions()
-            .map(|(name, version)| (name.to_owned(), version.to_owned()))
-            .collect();
-        let replay_policy_evidence = ReplayPolicyManifestEvidence::from_registry(&self.registry);
+        let plugin_roster = registry_plugin_roster(&self.registry);
         let consent_gate = self
             .operation_token
             .as_ref()
@@ -2875,35 +2913,33 @@ impl ExperimentSession {
         let store_config = self.recovery_store_config;
         lock_store(&self.store)
             .and_then(|store| chain_head(&**store, timeline_id))
-            .map(|chain_head| {
-                let mut manifest = ReproManifest::new(timeline_id, chain_head, WallTime::now());
-                for (name, version) in &plugin_versions {
-                    manifest = manifest.with_plugin_version(name, version.clone());
-                }
-                manifest = replay_policy_evidence.add_to_manifest(manifest);
-                manifest
-                    .adapter_records
-                    .push(pos_core::manifest::AdapterRecord {
-                        plugin_id: pos_core::ids::PluginId::new(),
-                        call_index: 0,
-                        input_hash: Hash::zero(),
-                        output_hash: Hash::from_bytes(
-                            *blake3::hash(timeline_id.to_string().as_bytes()).as_bytes(),
-                        ),
-                        wall_time: WallTime::now(),
-                    });
-
-                RunResult {
+            .and_then(|chain_head| {
+                let adapter_record = pos_core::manifest::AdapterRecord {
+                    plugin_id: pos_core::ids::PluginId::new(),
+                    call_index: 0,
+                    input_hash: Hash::zero(),
+                    output_hash: Hash::from_bytes(
+                        *blake3::hash(timeline_id.to_string().as_bytes()).as_bytes(),
+                    ),
+                    wall_time: WallTime::now(),
+                };
+                plugin_roster.map(|plugin_roster| RunResult {
                     timeline_id,
                     ticks,
                     total_events,
                     timeline_head: timeline_head.as_u64(),
-                    manifest,
+                    manifest: ReproManifest::recorded(
+                        timeline_id,
+                        chain_head,
+                        WallTime::now(),
+                        plugin_roster,
+                        Some(adapter_record),
+                    ),
                     projections,
                     consent_gate,
                     protected_token,
                     store_config,
-                }
+                })
             })
     }
 }
@@ -2997,10 +3033,11 @@ fn build_backtest_run_result(
     ticks: u64,
     total_events: u64,
     timeline_head: pos_core::clock::Seq,
-    manifest: ReproManifest,
+    chain_head: pos_core::Hash,
     store_config: StoreConfig,
 ) -> Result<RunResult, ExperimentError> {
     let history = read_completed_prefix(store, timeline_id, timeline_head)?;
+    let manifest = manifest_for_registry(timeline_id, chain_head, &registry);
     let projections = registry
         .into_authorized_projections(
             timeline_id,
@@ -3010,7 +3047,7 @@ fn build_backtest_run_result(
             Some(&history),
         )
         .map_err(ExperimentError::Runtime)?;
-    Ok(RunResult {
+    manifest.map(|manifest| RunResult {
         timeline_id,
         ticks,
         total_events,
@@ -3085,62 +3122,28 @@ fn compute_retained_calibration_report(
         .map_err(|error| ExperimentError::Store(pos_core::CoreError::Storage(error.to_string())))
 }
 
-struct ReplayPolicyManifestEvidence {
-    output_policy_digests: Vec<(String, Hash)>,
-    replay_policy_identities: Vec<(String, Hash)>,
-    replay_policy_closures: Vec<(String, Vec<u8>)>,
-    replay_policy_closure_identities: Vec<(String, Hash)>,
-}
-
-impl ReplayPolicyManifestEvidence {
-    fn from_registry(registry: &pos_runtime::PluginRegistry) -> Self {
-        Self {
-            output_policy_digests: registry
-                .output_policy_digests()
-                .map(|(name, digest)| (name.to_owned(), digest))
-                .collect(),
-            replay_policy_identities: registry
-                .replay_policy_identities()
-                .map(|(name, identity)| (name.to_owned(), identity))
-                .collect(),
-            replay_policy_closures: registry
-                .replay_policy_closures()
-                .map(|(name, closure)| (name.to_owned(), closure))
-                .collect(),
-            replay_policy_closure_identities: registry
-                .replay_policy_closure_identities()
-                .map(|(name, identity)| (name.to_owned(), identity))
-                .collect(),
-        }
-    }
-
-    fn add_to_manifest(self, mut manifest: ReproManifest) -> ReproManifest {
-        for (name, digest) in self.output_policy_digests {
-            manifest = manifest.with_output_policy_digest(name, digest);
-        }
-        for (name, identity) in self.replay_policy_identities {
-            manifest = manifest.with_replay_policy_identity(name, identity);
-        }
-        for (name, closure) in self.replay_policy_closures {
-            manifest = manifest.with_replay_policy_closure(name, closure);
-        }
-        for (name, identity) in self.replay_policy_closure_identities {
-            manifest = manifest.with_replay_policy_closure_identity(name, identity);
-        }
-        manifest
-    }
+// The roster of the composition the registry has admitted. A registry that was never admitted,
+// for example one built with `register` or `register_generated` rather than `register_local`,
+// records an empty roster: it names no Plugin, is not a Replay claim, and cannot pass the
+// installed verifier against an admitted composition. A roster that fails to build is an error,
+// never an empty or partial roster.
+fn registry_plugin_roster(
+    registry: &PluginRegistry,
+) -> Result<ManifestPluginRosterV1, ExperimentError> {
+    registry
+        .retained_manifest_plugin_roster()
+        .map(|roster| roster.unwrap_or_else(ManifestPluginRosterV1::empty))
+        .map_err(ExperimentError::ManifestRoster)
 }
 
 fn manifest_for_registry(
     timeline_id: pos_core::ids::TimelineId,
     chain_head: pos_core::Hash,
     registry: &pos_runtime::PluginRegistry,
-) -> ReproManifest {
-    ReplayPolicyManifestEvidence::from_registry(registry).add_to_manifest(ReproManifest::new(
-        timeline_id,
-        chain_head,
-        WallTime::now(),
-    ))
+) -> Result<ReproManifest, ExperimentError> {
+    registry_plugin_roster(registry).map(|roster| {
+        ReproManifest::recorded(timeline_id, chain_head, WallTime::now(), roster, None)
+    })
 }
 
 impl BacktestRunner {
@@ -3266,8 +3269,6 @@ impl BacktestRunner {
             lift_vs_persistence,
         ) = backtest_metrics(train_ticks, train_events, eval_ticks, eval_events);
 
-        let train_manifest = manifest_for_registry(train_tl_id, train_chain_head, &train_registry);
-        let eval_manifest = manifest_for_registry(eval_tl_id, eval_chain_head, &eval_registry);
         let eval_head_seq = store.logical_head(eval_tl_id)?;
         let train_result = build_backtest_run_result(
             store,
@@ -3276,7 +3277,7 @@ impl BacktestRunner {
             train_ticks,
             train_events,
             train_head_seq,
-            train_manifest,
+            train_chain_head,
             store_config.clone(),
         )?;
         let eval_result = build_backtest_run_result(
@@ -3286,7 +3287,7 @@ impl BacktestRunner {
             eval_ticks,
             eval_events,
             eval_head_seq,
-            eval_manifest,
+            eval_chain_head,
             store_config,
         )?;
 
@@ -3445,10 +3446,12 @@ pub mod tests {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(
+            manifest: pos_core::ReproManifest::recorded(
                 timeline_id,
-                pos_core::crypto::Hash::zero(),
-                pos_core::clock::WallTime::from_micros(0),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: None,
@@ -3463,7 +3466,7 @@ pub mod tests {
             ))
             .test_ok();
 
-        assert_eq!(manifest.manifest.timeline_id, timeline_id);
+        assert_eq!(manifest.manifest.timeline_id(), timeline_id);
         assert_eq!(manifest.recipe.host_id, "test-host");
         assert_eq!(manifest.recipe.format_version, 1);
         assert_eq!(
@@ -3522,10 +3525,12 @@ pub mod tests {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(
+            manifest: pos_core::ReproManifest::recorded(
                 timeline_id,
-                pos_core::crypto::Hash::zero(),
-                pos_core::clock::WallTime::from_micros(0),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
             ),
             projections: pos_state::ProjectionRegistry::new()
                 .with_erasure_gate(erasure_gate.clone()),
@@ -6950,7 +6955,7 @@ pub mod tests {
 
         let result = exp.run().test_ok();
         // The manifest should have the same timeline_id as the result
-        assert_eq!(result.manifest.timeline_id, result.timeline_id);
+        assert_eq!(result.manifest.timeline_id(), result.timeline_id);
     }
 
     #[test]
@@ -6970,7 +6975,7 @@ pub mod tests {
 
         let result = exp.run().test_ok();
         // head_hash should not be zero since events were committed
-        assert_ne!(result.manifest.head_hash, pos_core::crypto::Hash::zero());
+        assert_ne!(result.manifest.head_hash(), pos_core::crypto::Hash::zero());
     }
 
     #[test]
@@ -6983,7 +6988,7 @@ pub mod tests {
         });
         // No plugins registered → no events → head_hash stays zero
         let result = exp.run().test_ok();
-        assert_eq!(result.manifest.head_hash, pos_core::crypto::Hash::zero());
+        assert_eq!(result.manifest.head_hash(), pos_core::crypto::Hash::zero());
         assert_eq!(result.total_events, 0);
     }
 
@@ -7103,10 +7108,12 @@ pub mod tests {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(
+            manifest: pos_core::ReproManifest::recorded(
                 pos_core::ids::TimelineId::new(),
-                pos_core::crypto::Hash::zero(),
-                pos_core::clock::WallTime::from_micros(0),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: None,
@@ -7197,13 +7204,52 @@ pub mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn run_result_manifest_has_plugin_versions() {
+    fn run_result_manifest_records_the_admitted_plugin_roster() {
         let entity = EntityId::new();
         let plugin = make_plugin("manifest-plugin", &["manifest.event"]);
         let driver = FixedDriver::new(entity, "manifest.event", 1);
 
         let mut exp = Experiment::new(ExperimentConfig {
-            name: "manifest-versions-test".to_owned(),
+            name: "manifest-roster-test".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        });
+        let slot = pos_runtime::ManifestSlotV1::try_new("manifest.primary").test_ok();
+        let roles = vec!["manifest-role".to_owned()];
+        exp.register_local(&plugin, slot, roles, None, Some(Box::new(driver)))
+            .test_ok();
+        let owner = pos_core::OwnerIdV1::from_static("experiment-app");
+        exp.admit_local_manifest_registration(owner, 1).test_ok();
+        let result = exp.run().test_ok();
+
+        let rows = result.manifest.plugin_roster().entries();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].stable_slot(), "manifest.primary");
+        assert_eq!(rows[0].plugin_id(), plugin.id);
+        assert_eq!(rows[0].plugin_name(), "manifest-plugin");
+        assert_eq!(rows[0].plugin_version(), "0.1.0");
+        assert!(rows[0].closure_bytes().starts_with(b"OPC1"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn manifest_roster_errors_name_the_failed_rule() {
+        let rule = pos_core::ManifestPluginRosterErrorV1::RosterTooLarge;
+        let failure = pos_runtime::ManifestRosterBuildErrorV1::Roster(rule);
+        let message = ExperimentError::ManifestRoster(failure).to_string();
+        assert!(message.starts_with("the admitted Plugin roster cannot be recorded"));
+        assert!(message.contains("use at most 256 entries"));
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn run_result_manifest_has_an_empty_roster_without_admission() {
+        let entity = EntityId::new();
+        let plugin = make_plugin("unadmitted-plugin", &["unadmitted.event"]);
+        let driver = FixedDriver::new(entity, "unadmitted.event", 1);
+
+        let mut exp = Experiment::new(ExperimentConfig {
+            name: "manifest-empty-roster-test".to_owned(),
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         });
@@ -7211,16 +7257,7 @@ pub mod tests {
             .test_ok();
         let result = exp.run().test_ok();
 
-        // Manifest should have plugin_versions populated
-        assert!(!result.manifest.plugin_versions.is_empty());
-        assert!(result
-            .manifest
-            .plugin_versions
-            .contains_key("manifest-plugin"));
-        assert_eq!(
-            result.manifest.plugin_versions.get("manifest-plugin"),
-            Some(&"0.1.0".to_owned())
-        );
+        assert!(result.manifest.plugin_roster().entries().is_empty());
     }
 
     #[test]
@@ -7240,7 +7277,7 @@ pub mod tests {
         let result = exp.run().test_ok();
 
         // Manifest should have adapter_records populated
-        assert!(!result.manifest.adapter_records.is_empty());
+        assert!(!result.manifest.adapter_records().is_empty());
     }
 
     #[test]
@@ -7274,8 +7311,8 @@ pub mod tests {
             hasher.update(e.payload_hash.as_bytes());
         }
         let expected = Hash::from_bytes(*hasher.finalize().as_bytes());
-        assert_eq!(result.manifest.head_hash, expected);
-        assert_ne!(result.manifest.head_hash, Hash::zero());
+        assert_eq!(result.manifest.head_hash(), expected);
+        assert_ne!(result.manifest.head_hash(), Hash::zero());
     }
 
     #[test]
@@ -7307,7 +7344,13 @@ pub mod tests {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(timeline.id(), Hash::zero(), WallTime::from_micros(0)),
+            manifest: pos_core::ReproManifest::recorded(
+                timeline.id(),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
+            ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: Some(Arc::new(authority)),
             protected_token: Some(token),
@@ -7558,7 +7601,7 @@ mod coverage_entrypoints {
     };
     use super::*;
     use pos_core::store::EventStore;
-    use pos_core::{Capability, ConsentGrantedV1, Hash, Plugin, PluginId};
+    use pos_core::{Capability, ConsentGrantedV1, Plugin, PluginId};
     use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
 
     struct CoveragePlugin {
@@ -8101,10 +8144,12 @@ mod coverage_entrypoints {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(
+            manifest: pos_core::ReproManifest::recorded(
                 pos_core::ids::TimelineId::new(),
-                pos_core::crypto::Hash::from_bytes([0; 32]),
-                pos_core::clock::WallTime::from_micros(0),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: None,
@@ -8156,7 +8201,13 @@ mod coverage_entrypoints {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(timeline, Hash::zero(), WallTime::from_micros(0)),
+            manifest: pos_core::ReproManifest::recorded(
+                timeline,
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
+            ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: Some(Arc::new(authority.clone())),
             protected_token: Some(token.clone()),
@@ -8186,7 +8237,13 @@ mod coverage_entrypoints {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(durable_timeline, Hash::zero(), WallTime::from_micros(0)),
+            manifest: pos_core::ReproManifest::recorded(
+                durable_timeline,
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
+            ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: Some(Arc::new(authority.clone())),
             protected_token: Some(durable_token.clone()),
@@ -8563,10 +8620,12 @@ mod coverage_entrypoints {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(
+            manifest: pos_core::ReproManifest::recorded(
                 timeline.id(),
-                pos_core::crypto::Hash::zero(),
-                pos_core::clock::WallTime::from_micros(0),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: None,
@@ -8592,10 +8651,12 @@ mod coverage_entrypoints {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(
+            manifest: pos_core::ReproManifest::recorded(
                 timeline.id(),
-                pos_core::crypto::Hash::zero(),
-                pos_core::clock::WallTime::from_micros(0),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: None,
@@ -8638,10 +8699,12 @@ mod coverage_entrypoints {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(
+            manifest: pos_core::ReproManifest::recorded(
                 timeline.id(),
-                pos_core::crypto::Hash::zero(),
-                pos_core::clock::WallTime::from_micros(0),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: Some(Arc::new(authority)),
@@ -8715,10 +8778,12 @@ mod coverage_entrypoints {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(
+            manifest: pos_core::ReproManifest::recorded(
                 timeline.id(),
-                pos_core::crypto::Hash::zero(),
-                pos_core::clock::WallTime::from_micros(0),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: Some(Arc::clone(&gate)),
@@ -8731,10 +8796,12 @@ mod coverage_entrypoints {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(
+            manifest: pos_core::ReproManifest::recorded(
                 timeline.id(),
-                pos_core::crypto::Hash::zero(),
-                pos_core::clock::WallTime::from_micros(0),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: Some(Arc::clone(&gate)),
@@ -8753,10 +8820,12 @@ mod coverage_entrypoints {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(
+            manifest: pos_core::ReproManifest::recorded(
                 timeline.id(),
-                pos_core::crypto::Hash::zero(),
-                pos_core::clock::WallTime::from_micros(0),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: Some(Arc::clone(&gate)),
@@ -8805,10 +8874,12 @@ mod coverage_entrypoints {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(
+            manifest: pos_core::ReproManifest::recorded(
                 timeline.id(),
-                pos_core::crypto::Hash::zero(),
-                pos_core::clock::WallTime::from_micros(0),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: Some(Arc::new(authority)),
@@ -8916,10 +8987,12 @@ mod coverage_entrypoints {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(
+            manifest: pos_core::ReproManifest::recorded(
                 pos_core::ids::TimelineId::new(),
-                pos_core::crypto::Hash::zero(),
-                pos_core::clock::WallTime::from_micros(0),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: None,
@@ -9385,8 +9458,17 @@ mod backtest_tests {
         let tl_id = pos_core::ids::TimelineId::new();
         drop(driver.step(tl_id, pos_runtime::ObservationView::empty()));
         let mut reg = pos_runtime::PluginRegistry::new();
-        reg.register_generated(&plugin, None, Some(Box::new(driver)))
-            .test_ok();
+        let slot = pos_runtime::ManifestSlotV1::try_new("backtest.plugin").test_ok();
+        reg.register_local(
+            &plugin,
+            slot,
+            vec!["backtest-role".to_owned()],
+            None,
+            Some(Box::new(driver)),
+        )
+        .test_ok();
+        let owner = pos_core::OwnerIdV1::from_static("backtest-app");
+        reg.admit_local_manifest_registration(owner, 1).test_ok();
         reg
     }
 
@@ -9412,26 +9494,12 @@ mod backtest_tests {
             result.train_result.timeline_id,
             result.eval_result.timeline_id
         );
-        assert!(result
-            .train_result
-            .manifest
-            .output_policy_digests
-            .contains_key("bt-plugin"));
-        assert!(result
-            .train_result
-            .manifest
-            .replay_policy_identities
-            .contains_key("bt-plugin"));
-        assert!(result
-            .eval_result
-            .manifest
-            .output_policy_digests
-            .contains_key("bt-plugin"));
-        assert!(result
-            .eval_result
-            .manifest
-            .replay_policy_identities
-            .contains_key("bt-plugin"));
+        for phase in [&result.train_result, &result.eval_result] {
+            let rows = phase.manifest.plugin_roster().entries();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].stable_slot(), "backtest.plugin");
+            assert_eq!(rows[0].plugin_name(), "bt-plugin");
+        }
         // Lift metrics should be populated
         assert!(result.train_avg_events_per_tick > 0.0);
         assert!(result.eval_avg_events_per_tick > 0.0);
@@ -10226,10 +10294,12 @@ mod fault_injection_tests {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(
+            manifest: pos_core::ReproManifest::recorded(
                 pos_core::ids::TimelineId::new(),
-                pos_core::crypto::Hash::zero(),
-                pos_core::clock::WallTime::from_micros(0),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: None,
@@ -10252,10 +10322,12 @@ mod fault_injection_tests {
             ticks: 0,
             total_events: 0,
             timeline_head: 0,
-            manifest: ReproManifest::new(
+            manifest: pos_core::ReproManifest::recorded(
                 timeline_id,
-                pos_core::crypto::Hash::zero(),
-                pos_core::clock::WallTime::from_micros(0),
+                pos_core::Hash::zero(),
+                pos_core::WallTime::from_micros(0),
+                pos_core::ManifestPluginRosterV1::empty(),
+                None,
             ),
             projections: pos_state::ProjectionRegistry::new(),
             consent_gate: Some(Arc::new(authority.clone())),
