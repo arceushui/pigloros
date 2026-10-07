@@ -18,6 +18,8 @@ use std::io::Write;
 /// Whole flags are matched, in the two spellings `RUSTFLAGS` uses
 /// (`-Z sanitizer=address` and `-Zsanitizer=address`), so that an unrelated
 /// flag that merely contains the text cannot silently lift the data ceiling.
+/// A combined spelling such as `-Zsanitizer=address,leak` is deliberately not
+/// matched: the ceiling then stays and the worker fails closed.
 fn sanitizes_address(flags: &str) -> bool {
     let flags: Vec<&str> = flags.split('\x1f').collect();
     flags.contains(&"-Zsanitizer=address")

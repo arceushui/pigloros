@@ -25,6 +25,7 @@ use std::time::Duration;
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
 use rustix::process::{prlimit, Pid, Resource, Rlimit};
 
+#[cfg(not(asan_build))]
 use crate::frame::{WorkerFrameLimitsV1, MIB};
 use crate::ipc::MAX_WORKER_COMPONENT_BYTES_V1;
 
@@ -55,6 +56,7 @@ pub const RUNTIME_ENVIRONMENT: &[&str] = if cfg!(coverage) {
 
 /// Data-segment bytes the worker runtime needs beyond guest memory and the
 /// request: the compiled Component, the engine and the process itself.
+#[cfg(not(asan_build))]
 const WORKER_RUNTIME_DATA_BYTES: u64 = 512 * MIB as u64;
 /// CPU seconds granted beyond the whole watchdog seconds, so the wall-time
 /// watchdog, not the CPU ceiling, stops a long invocation.
@@ -116,7 +118,8 @@ pub struct WorkerResourceCeilingsV1 {
 /// would stop every instrumented worker from starting. No other build lifts
 /// it, and the other ceilings are never lifted.
 ///
-/// `u64::MAX` is `RLIM_INFINITY`, which `prlimit` reads as no ceiling.
+/// `u64::MAX` is `RLIM_INFINITY`, which `prlimit` reads as no ceiling. The
+/// supervisor and the worker must be built with the same flags (see `build.rs`).
 #[cfg(asan_build)]
 const fn data_ceiling(_memory_bytes: u64) -> u64 {
     u64::MAX
