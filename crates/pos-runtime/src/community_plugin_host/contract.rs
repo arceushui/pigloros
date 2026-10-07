@@ -173,7 +173,8 @@ pub struct PluginOutputV1 {
 pub struct PluginDescriptorV1 {
     /// Plugin ID, equal to the negotiated PMF1 Plugin ID.
     pub plugin_id: String,
-    /// Release semver text, 1-64 bytes.
+    /// Release semver text. The host lifts it as UTF-8 text without a length
+    /// check: revision 6 does not list one, and the manifest is the authority.
     pub release_semver: String,
     /// World, equal to the negotiated world.
     pub world: String,
