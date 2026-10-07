@@ -127,10 +127,7 @@ impl HostState {
     pub(crate) const fn new(inputs: HostInputs, limits: &DeterministicBudgetV1) -> Self {
         Self {
             inputs,
-            memory: MemoryLimiter {
-                limit: limits.memory_bytes,
-                reserved: 0,
-            },
+            memory: MemoryLimiter::new(limits.memory_bytes),
             budget: CallBudget::new(limits),
             log: Vec::new(),
         }
@@ -143,8 +140,20 @@ impl HostState {
 /// commit still counts, which only makes the limit stricter. A denial is an
 /// error, never a silent `-1`, so it is always `MemoryLimitExceeded`.
 pub(crate) struct MemoryLimiter {
-    pub(crate) limit: u64,
-    pub(crate) reserved: u64,
+    limit: u64,
+    reserved: u64,
+}
+
+impl MemoryLimiter {
+    /// A limiter that has reserved nothing yet and refuses beyond `limit` bytes.
+    pub(crate) const fn new(limit: u64) -> Self {
+        Self { limit, reserved: 0 }
+    }
+
+    /// Bytes reserved so far.
+    pub(crate) const fn reserved_bytes(&self) -> u64 {
+        self.reserved
+    }
 }
 
 impl ResourceLimiter for MemoryLimiter {

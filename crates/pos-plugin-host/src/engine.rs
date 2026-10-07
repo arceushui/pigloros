@@ -320,7 +320,7 @@ impl ComponentHost {
             metering: MeteringV1 {
                 startup_fuel: limits.fuel.saturating_sub(after_startup),
                 call_fuel: after_startup.saturating_sub(after_call),
-                memory_bytes: state.memory.reserved,
+                memory_bytes: state.memory.reserved_bytes(),
                 host_calls: limits.host_calls.saturating_sub(state.budget.host_calls),
             },
             operational_log: state.log,
