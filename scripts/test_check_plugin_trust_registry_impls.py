@@ -22,6 +22,8 @@ ANCHOR = "fn f() { PluginTrustPolicyAnchorV1::new(a, b, c, d, e); }\n"
 UTC = "fn f(s: &mut S) { TrustedUtcSecondV1::from_source(s); }\n"
 REGISTRY_FILE = "crates/pos-store/src/plugin_trust_registry/types.rs"
 ADAPTER_FILE = "crates/pos-store/src/memory/plugin_trust_registry.rs"
+SQLITE_ADAPTER_FILE = "crates/pos-store/src/sqlite/plugin_trust_registry.rs"
+SQLITE_SIBLING_FILE = "crates/pos-store/src/sqlite/plugin_trust_registry_rows.rs"
 
 
 def registry(text: str) -> dict[str, str]:
@@ -55,6 +57,19 @@ ALLOWED = {
         "    fn rollback(&mut self) { self.rollback_with_faults(); }\n}\n"
         "#[cfg(test)]\nmod tests {\n    fn t(s: &mut S) { s.admit(a); s.rollback(a); }\n}\n"
     ),
+    "crates/pos-store/src/sqlite.rs": (
+        LINUX + "mod plugin_trust_registry;\n" + LINUX + "mod plugin_trust_registry_rows;\n"
+    ),
+    SQLITE_ADAPTER_FILE: (
+        "impl PluginTrustPolicyRegistryV1 for SqliteStore {\n"
+        "    fn admit(&mut self) { self.admit_in_transaction(); }\n"
+        "    fn rollback(&mut self) { self.rollback_in_transaction(); }\n}\n"
+        "#[cfg(test)]\n#[path = \"plugin_trust_registry_tests.rs\"]\nmod tests;\n"
+    ),
+    SQLITE_SIBLING_FILE: "pub(super) fn insert_ledger() {}\n",
+    "crates/pos-store/src/sqlite/plugin_trust_registry_tests.rs": (
+        GATE + IMPORT + "fn t(s: &mut S) { s.admit(a); s.rollback(a); s.provision(a); }\n"
+    ),
     "crates/pos-store/tests/registry_public.rs": IMPORT + CALLS + ANCHOR + UTC,
     "crates/pos-runtime/src/host.rs": IMPL + IMPORT + ANCHOR + UTC + CALLS.replace(
         "s.admit(a); s.rollback(a); ", ""
@@ -81,6 +96,10 @@ ALLOWED = {
 
 REJECTED = {
     "crates/pos-state/src/forged.rs": IMPL,
+    "crates/pos-state/src/sqlite/plugin_trust_registry.rs": IMPL,
+    "crates/pos-store/src/sqlite/plugin_trust_registry_calls.rs": (
+        IMPORT + "fn f(s: &mut S) { s.admit(a); }\n"
+    ),
     "crates/pos-time/src/forged.rs": GENERIC_IMPL,
     "crates/pos-core/src/ungated.rs": '#[cfg(feature = "test-support")]\n' + IMPL,
     "crates/x/src/target/forged.rs": IMPL,
@@ -182,7 +201,7 @@ def main() -> None:
         if result.returncode == 0 or relative not in result.stderr:
             raise SystemExit(f"{relative} was not rejected")
     for label, text in FORBIDDEN_NAMES.items():
-        for relative in (REGISTRY_FILE, ADAPTER_FILE):
+        for relative in (REGISTRY_FILE, ADAPTER_FILE, SQLITE_ADAPTER_FILE, SQLITE_SIBLING_FILE):
             result = run({**ALLOWED, relative: text})
             if result.returncode == 0 or relative not in result.stderr:
                 raise SystemExit(f"{label} in {relative} was not rejected")

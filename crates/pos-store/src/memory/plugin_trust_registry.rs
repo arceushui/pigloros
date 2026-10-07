@@ -473,6 +473,7 @@ mod tests {
             mut store,
             env,
             timeline,
+            ..
         } = Harness::new()?;
         let genesis = env.genesis()?;
         let utc = genesis.trusted()?;
@@ -531,6 +532,7 @@ mod tests {
             mut store,
             env,
             timeline,
+            ..
         } = Harness::new()?;
         let genesis = env.genesis()?;
         let utc = genesis.trusted()?;
@@ -608,6 +610,7 @@ mod tests {
                 mut store,
                 env,
                 timeline,
+                ..
             } = Harness::new()?;
             let genesis = env.genesis()?;
             let utc = genesis.trusted()?;
@@ -677,6 +680,7 @@ mod tests {
             mut store,
             env,
             timeline,
+            ..
         } = h;
         let genesis = env.genesis()?;
         let before = store.retained_policy_state("scope")?;
