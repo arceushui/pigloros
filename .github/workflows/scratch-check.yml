@@ -11,10 +11,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - ref: redmine/569-plugin-trust-registry-sqlite
-            id: p569
-            pkg: pos-store
-            test: ""
           - ref: redmine/573-signed-installer
             id: p573
             pkg: "pos-plugin-publisher"
