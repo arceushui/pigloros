@@ -115,14 +115,20 @@ pub struct WorkerResourceCeilingsV1 {
 /// one ceiling: the sanitizer's shadow mapping is charged against it and
 /// would stop every instrumented worker from starting. No other build lifts
 /// it, and the other ceilings are never lifted.
+///
+/// `u64::MAX` is `RLIM_INFINITY`, which `prlimit` reads as no ceiling.
+#[cfg(asan_build)]
+const fn data_ceiling(_memory_bytes: u64) -> u64 {
+    u64::MAX
+}
+
+/// The `RLIMIT_DATA` ceiling for `memory_bytes` of guest memory: the guest
+/// memory, twice the largest request frame and the worker runtime.
+#[cfg(not(asan_build))]
 const fn data_ceiling(memory_bytes: u64) -> u64 {
-    if cfg!(asan_build) {
-        u64::MAX
-    } else {
-        memory_bytes
-            .saturating_add(2 * WorkerFrameLimitsV1::REQUEST_BYTES as u64)
-            .saturating_add(WORKER_RUNTIME_DATA_BYTES)
-    }
+    memory_bytes
+        .saturating_add(2 * WorkerFrameLimitsV1::REQUEST_BYTES as u64)
+        .saturating_add(WORKER_RUNTIME_DATA_BYTES)
 }
 
 impl WorkerResourceCeilingsV1 {
@@ -256,12 +262,6 @@ mod tests {
         let ceilings =
             WorkerResourceCeilingsV1::for_invocation(&limits, Duration::from_millis(3_500));
         assert_eq!(ceilings.cpu_seconds, 5);
-        let request = WorkerFrameLimitsV1::REQUEST_BYTES as u64;
-        let data = 65_536 + 2 * request + 512 * MIB as u64;
-        assert_eq!(
-            ceilings.data_bytes,
-            if cfg!(asan_build) { u64::MAX } else { data }
-        );
         let file_size = 65_536 + 33_554_432 + PROFILE_FILE_BYTES;
         assert_eq!(ceilings.file_size_bytes, file_size);
         assert_eq!(ceilings.core_bytes, 0);
@@ -276,6 +276,29 @@ mod tests {
         assert_eq!(entries[3].0, Resource::Core);
         let longest = WorkerResourceCeilingsV1::for_invocation(&limits, Duration::MAX);
         assert_eq!(longest.cpu_seconds, u64::MAX);
+    }
+
+    #[cfg(not(asan_build))]
+    #[test]
+    fn the_data_ceiling_is_memory_requests_and_runtime() {
+        let limits = DeterministicBudgetV1 {
+            memory_bytes: 65_536,
+            ..DeterministicBudgetV1::MINIMA
+        };
+        let ceilings = WorkerResourceCeilingsV1::for_invocation(&limits, Duration::from_secs(1));
+        let request = WorkerFrameLimitsV1::REQUEST_BYTES as u64;
+        assert_eq!(ceilings.data_bytes, 65_536 + 2 * request + 512 * MIB as u64);
+    }
+
+    #[cfg(asan_build)]
+    #[test]
+    fn an_asan_build_lifts_only_the_data_ceiling() {
+        let ceilings = WorkerResourceCeilingsV1::for_invocation(
+            &DeterministicBudgetV1::MINIMA,
+            Duration::from_secs(1),
+        );
+        assert_eq!(ceilings.data_bytes, u64::MAX);
+        assert_eq!(ceilings.core_bytes, 0);
     }
 
     #[test]

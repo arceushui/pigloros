@@ -22,7 +22,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use rustix::fs::Dir;
 use rustix::process::{getppid, set_parent_process_death_signal, Pid, Signal};
 
-use crate::frame::{read_frame, write_frame, WorkerFrameLimitsV1};
+use crate::frame::{read_frame, require_end, write_frame, WorkerFrameLimitsV1};
 use crate::ipc::{
     decode_worker_request_v1, encode_worker_response_v1, WorkerOutcomeV1, WorkerRequestV1,
 };
@@ -150,10 +150,11 @@ fn descriptor_numbers(entries: Dir, own: i32) -> Option<Vec<i32>> {
 ///
 /// # Errors
 /// Returns `Request` for a truncated, over-limit or malformed frame or
-/// envelope.
+/// envelope, or for any byte after the frame.
 pub fn read_request(reader: &mut impl Read) -> Result<WorkerRequestV1, WorkerProcessErrorV1> {
     read_frame(reader, WorkerFrameLimitsV1::REQUEST_BYTES)
         .ok()
+        .and_then(|bytes| require_end(reader).ok().map(|()| bytes))
         .and_then(|bytes| decode_worker_request_v1(&bytes).ok())
         .ok_or(WorkerProcessErrorV1::Request)
 }
@@ -247,18 +248,31 @@ mod tests {
         let forwarded = FORWARDED_ENVIRONMENT.iter().map(OsString::from);
         assert_eq!(verify_environment(forwarded), Ok(()));
         assert_eq!(verify_environment(std::iter::empty()), Ok(()));
-        // The profile runtime's own marker is accepted only in a coverage build.
-        let marker = std::iter::once(OsString::from("__LLVM_PROFILE_RT_INIT_ONCE"));
-        assert_eq!(verify_environment(marker).is_ok(), cfg!(coverage));
-        assert_eq!(
-            RUNTIME_ENVIRONMENT.contains(&"__LLVM_PROFILE_RT_INIT_ONCE"),
-            cfg!(coverage)
-        );
         let extra = std::iter::once(OsString::from("PATH"));
         assert_eq!(
             verify_environment(extra),
             Err(WorkerProcessErrorV1::Environment)
         );
+    }
+
+    /// The profile runtime's own marker is accepted only in a coverage build.
+    #[cfg(coverage)]
+    #[test]
+    fn a_coverage_build_accepts_the_profile_runtime_marker() {
+        let marker = std::iter::once(OsString::from("__LLVM_PROFILE_RT_INIT_ONCE"));
+        assert_eq!(verify_environment(marker), Ok(()));
+        assert!(RUNTIME_ENVIRONMENT.contains(&"__LLVM_PROFILE_RT_INIT_ONCE"));
+    }
+
+    #[cfg(not(coverage))]
+    #[test]
+    fn a_production_build_refuses_the_profile_runtime_marker() {
+        let marker = std::iter::once(OsString::from("__LLVM_PROFILE_RT_INIT_ONCE"));
+        assert_eq!(
+            verify_environment(marker),
+            Err(WorkerProcessErrorV1::Environment)
+        );
+        assert!(RUNTIME_ENVIRONMENT.is_empty());
     }
 
     #[test]
@@ -289,6 +303,12 @@ mod tests {
         let mut framed = Vec::new();
         assert!(write_frame(&mut framed, &bytes, bytes.len()).is_ok());
         assert_eq!(read_request(&mut framed.as_slice()), Ok(request()));
+        let mut trailing = framed.clone();
+        trailing.push(0);
+        assert_eq!(
+            read_request(&mut trailing.as_slice()),
+            Err(WorkerProcessErrorV1::Request)
+        );
         let malformed: &[u8] = &[0, 0, 0, 1, 0];
         assert_eq!(
             read_request(&mut &malformed[..]),

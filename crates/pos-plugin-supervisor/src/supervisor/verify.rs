@@ -16,6 +16,12 @@ use pos_runtime::community_plugin_host::{
 /// The Plugin ID, world, ABI major, declared minors and required features
 /// must equal the negotiated release, and the manifest and release digests
 /// must be the 32 zero bytes V1 requires.
+///
+/// The descriptor type carries no `migrations`, capability or dependency
+/// lists: `pos_plugin_host`'s `describe`, which the worker engine runs,
+/// rejects a non-empty `migrations` and more than 256 capabilities or
+/// dependencies before the descriptor is framed. The supervisor-side decode
+/// (`read_descriptor`) bounds the lists it does carry.
 pub(super) fn verify_descriptor(
     descriptor: &PluginDescriptorV1,
     negotiated: &NegotiatedCommunityPluginV1,
