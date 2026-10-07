@@ -15,28 +15,8 @@ jobs:
             id: p569
             pkg: pos-store
             test: ""
-          - ref: redmine/568-plugin-trust-registry-port
-            id: p568
-            pkg: pos-store
-            test: ""
-          - ref: redmine/575-trust-authorization-accessors
-            id: p575
-            pkg: pos-crypto
-            test: ""
-          - ref: redmine/567-plugin-trust-bridge
-            id: p567
-            pkg: pos-conformance
-            test: "--test plugin_trust_bridge_public"
-          - ref: redmine/570-pmf1-encoder-signature
-            id: p570
-            pkg: pos-crypto
-            test: ""
-          - ref: redmine/571-release-publisher
-            id: p571
-            pkg: "pos-plugin-publisher -p pos-plugin-release"
-            test: ""
-          - ref: redmine/572-historical-verifier
-            id: p572
+          - ref: redmine/573-signed-installer
+            id: p573
             pkg: "pos-plugin-publisher"
             test: ""
     steps:
