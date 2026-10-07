@@ -6,9 +6,10 @@
 //! digest is recomputed from the verified blob bytes, and the unsigned
 //! manifest and release digests are recomputed before the ADR-103 release
 //! projection exists. Artifact content (WIT archive, in-toto, SPDX, licence
-//! text, schema JSON) is not validated here, and no signature is verified by
-//! decoding. The `encode` child module is the matching producer; both share
-//! the digest helpers below, so there is one formula for every PMF1 digest.
+//! text, schema JSON) is not validated here, and decoding never checks field
+//! 26's signature. The `encode` child module is the matching producer; both
+//! share the digest helpers below, so there is one formula for every PMF1
+//! digest.
 //! The `signature` child module re-decodes a closure and verifies field 26
 //! under a key resolved by the ADR-103 trust authorization.
 

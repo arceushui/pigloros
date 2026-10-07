@@ -30,8 +30,20 @@ const ROLE_CODE: u64 = 3;
 const UNSIGNED_FIELDS: usize = 25;
 /// Elements of the complete PMF1 array.
 const COMPLETE_FIELDS: usize = 28;
-/// Epoch that stands in for field 26 while a draft is checked.
-const PLACEHOLDER_EPOCH: u64 = 1;
+/// Epoch of the throwaway field 26 used only to validate a draft.
+const VALIDATION_ONLY_EPOCH: u64 = 1;
+/// The PMF1 version written to field 1.
+const PMF1_VERSION: u64 = 1;
+/// Field 16: PMF1 V1 declares no migration, so it is the empty array.
+const NO_MIGRATIONS: usize = 0;
+/// The only ABI major a dependency descriptor may name in V1.
+const DEPENDENCY_ABI_MAJOR: u64 = 0;
+/// Elements of field 26, `[algorithm, role_code, epoch, signature]`.
+const SIGNATURE_FIELDS: usize = 4;
+/// Elements of an `ArtifactDescriptorV1` and of a `SchemaDescriptorV1`.
+const DESCRIPTOR_FIELDS: usize = 4;
+/// Upper bound of bytes that fields 25-27 add after the unsigned array.
+const SIGNED_TAIL_MAX: usize = 140;
 
 /// The exact bytes of one artifact and the raw SHA-256 of those bytes.
 ///
@@ -62,6 +74,10 @@ pub struct PluginSchemaInputV1<'a> {
 
 /// One `DependencyDescriptorV1` (field 17), fixed to the V1 world and ABI
 /// major.
+///
+/// Members are raw primitives on purpose: the strict decoder, which runs on
+/// every draft before it can be signed, is the single validator of their
+/// grammar and ranges.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginDependencyInputV1 {
     /// The ID-grammar dependency ID.
@@ -140,7 +156,7 @@ impl PluginReleaseDraftV1<'_> {
         let mut out = Out(Vec::new());
         out.array(UNSIGNED_FIELDS);
         out.text(MAGIC);
-        out.unsigned(1);
+        out.unsigned(PMF1_VERSION);
         out.text(&self.plugin_id);
         out.text(&self.release_version);
         out.text(WORLD);
@@ -162,7 +178,7 @@ impl PluginReleaseDraftV1<'_> {
             release_digest: release,
             owner: self.owner,
         };
-        unsigned.with_signature(PLACEHOLDER_EPOCH, [0; 64])?;
+        unsigned.validate()?;
         Ok(unsigned)
     }
 
@@ -195,7 +211,7 @@ impl PluginReleaseDraftV1<'_> {
             out.capability(capability);
         }
         out.budget(&self.budget);
-        out.array(0);
+        out.array(NO_MIGRATIONS);
     }
 
     /// Fields 17-20.
@@ -250,6 +266,15 @@ impl UnsignedPluginReleaseV1 {
         &self.unsigned
     }
 
+    /// Run the decoder over this document with a throwaway signature.
+    ///
+    /// Decoding checks structure, relations, and digests only and never a
+    /// signature, so any well-formed field 26 stands in for the real one.
+    fn validate(&self) -> Result<(), PluginManifestErrorV1> {
+        self.with_signature(VALIDATION_ONLY_EPOCH, [0; 64])
+            .map(drop)
+    }
+
     /// Assemble the complete 28-field PMF1 with field 26
     /// `[1, 3, epoch, signature]`.
     ///
@@ -261,12 +286,14 @@ impl UnsignedPluginReleaseV1 {
         epoch: u64,
         signature: [u8; 64],
     ) -> Result<Vec<u8>, PluginManifestErrorV1> {
-        let mut out = Out(Vec::with_capacity(self.unsigned.len() + 140));
+        let mut out = Out(Vec::with_capacity(self.unsigned.len() + SIGNED_TAIL_MAX));
         out.array(COMPLETE_FIELDS);
+        // Invariant: only `unsigned()` builds this type, and it always begins
+        // with the two-byte `UNSIGNED_HEAD` of the 25-element array.
         out.0
             .extend_from_slice(&self.unsigned[UNSIGNED_HEAD.len()..]);
         out.bytes(&self.manifest_digest);
-        out.array(4);
+        out.array(SIGNATURE_FIELDS);
         out.unsigned(ALGORITHM_ED25519);
         out.unsigned(ROLE_CODE);
         out.unsigned(epoch);
@@ -285,6 +312,9 @@ fn accept(bytes: &[u8]) -> Result<(), PluginManifestErrorV1> {
 }
 
 /// A canonical CBOR writer for the PMF1 V1 subset.
+///
+/// Lengths convert with `as u64`: `usize` is at most 64 bits on every target
+/// this repository supports, so the cast never truncates.
 struct Out(Vec<u8>);
 
 impl Out {
@@ -359,7 +389,7 @@ impl Out {
     /// inner BLAKE3 digest.
     fn artifact(&mut self, role: &Role, input: &PluginArtifactInputV1<'_>) -> Digest {
         let blake3 = role_digest(role.domain, input.bytes);
-        self.array(4);
+        self.array(DESCRIPTOR_FIELDS);
         self.text(role.media_type);
         self.unsigned(input.bytes.len() as u64);
         self.bytes(&blake3);
@@ -369,7 +399,7 @@ impl Out {
 
     /// `[schema_id, schema_version, artifact, max_bytes]`.
     fn schema(&mut self, schema: &PluginSchemaInputV1<'_>) {
-        self.array(4);
+        self.array(DESCRIPTOR_FIELDS);
         self.unsigned(u64::from(schema.id));
         self.unsigned(u64::from(schema.version));
         self.artifact(&SCHEMA, &schema.artifact);
@@ -410,7 +440,7 @@ impl Out {
         self.text(&dependency.dependency_id);
         self.bytes(&dependency.release_digest);
         self.text(WORLD);
-        self.unsigned(0);
+        self.unsigned(DEPENDENCY_ABI_MAJOR);
         self.unsigned(u64::from(dependency.min_minor));
         self.unsigned(u64::from(dependency.max_minor));
         self.texts(&dependency.required_features);

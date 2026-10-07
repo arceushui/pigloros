@@ -72,7 +72,8 @@ impl VerifiedPluginReleaseSignatureV1 {
         self.epoch
     }
 
-    /// The public key the signature verified under.
+    /// The raw Ed25519 public key the signature verified under, as resolved by
+    /// the trust authorization.
     #[must_use]
     pub const fn public_key(&self) -> [u8; 32] {
         self.public_key
