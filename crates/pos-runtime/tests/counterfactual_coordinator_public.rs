@@ -2141,16 +2141,18 @@ fn failed_recovery_read_keeps_the_commit_outcome_unknown() -> TestResult {
 // ---------------------------------------------------------------------------
 
 /// Admit the base request through the recording path with `stager`.
-fn admit_recording<B: RecordingBackend>(
-    setup: &mut Setup<B>,
-    stager: &mut DeclaringStager,
-) -> Admission {
-    setup.coordinator.admit_with_dependencies(
-        &request(&setup.fixture),
-        &Authority::default(),
-        &mut setup.source,
-        stager,
-    )
+///
+/// A macro, not a function: the admission error is too large to return from
+/// a helper (`result_large_err`).
+macro_rules! admit_recording {
+    ($setup:expr, $stager:expr) => {
+        $setup.coordinator.admit_with_dependencies(
+            &request(&$setup.fixture),
+            &Authority::default(),
+            &mut $setup.source,
+            $stager,
+        )
+    };
 }
 
 /// The base graph's first-Tick record: Tick 11 with the `FixedPolicy` root
@@ -2161,7 +2163,7 @@ fn first_tick_dependencies_are_recorded_with_the_commit<B: RecordingBackend>() -
     let mut setup = setup::<B>(&BASE)?;
     let fork = setup.fixture.fork;
     let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
-    let receipt = admit_recording(&mut setup, &mut stager)?;
+    let receipt = admit_recording!(setup, &mut stager)?;
     let generation = ForkGenerationV1 {
         fork,
         generation: 1,
@@ -2311,7 +2313,7 @@ fn rejected_declarations_are_typed_and_commit_nothing<B: RecordingBackend>() -> 
         let mut stager =
             DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
         stager.tamper = Some((FIRST_RECORD_TICK, tamper));
-        let result = admit_recording(&mut setup, &mut stager);
+        let result = admit_recording!(setup, &mut stager);
         let outcome = (result, stager.inner);
         let rejected = AdmissionError::DependencyDeclarationRejected(expected);
         assert_rejected(&setup, &outcome, &rejected, 1)?;
@@ -2328,7 +2330,7 @@ fn rejected_declarations_are_typed_and_commit_nothing<B: RecordingBackend>() -> 
         // the same staged inputs.
         let mut retry =
             DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
-        let receipt = admit_recording(&mut setup, &mut retry)?;
+        let receipt = admit_recording!(setup, &mut retry)?;
         assert_eq!(retry.inner.seen, outcome.1.seen);
         let declared = retry.declarations.get(&FIRST_RECORD_TICK).cloned();
         assert_eq!(
@@ -2344,7 +2346,7 @@ fn drafts_are_checked_before_the_declaration<B: RecordingBackend>() -> TestResul
     let mut setup = setup::<B>(&BASE)?;
     let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(0))?;
     stager.tamper = Some((FIRST_RECORD_TICK, root_at_the_cut));
-    let result = admit_recording(&mut setup, &mut stager);
+    let result = admit_recording!(setup, &mut stager);
     assert_rejected(
         &setup,
         &(result, stager.inner),
@@ -2358,7 +2360,7 @@ fn drafts_are_checked_before_the_declaration<B: RecordingBackend>() -> TestResul
         ..Stager::drafting(0)
     };
     let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, failing)?;
-    let result = admit_recording(&mut setup, &mut stager);
+    let result = admit_recording!(setup, &mut stager);
     assert_rejected(
         &setup,
         &(result, stager.inner),
@@ -2374,7 +2376,7 @@ fn recording_commit_outcomes_are_resolved_like_plain_ones() -> TestResult {
     // had been reported, and the record is readable at the generation.
     let mut landed = setup::<Rigged<LANDED_UNKNOWN>>(&BASE)?;
     let mut stager = DeclaringStager::new(&landed.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
-    let receipt = admit_recording(&mut landed, &mut stager)?;
+    let receipt = admit_recording!(landed, &mut stager)?;
     let generation = receipt.generation();
     assert_eq!(generation.generation, 1);
     assert_eq!(landed.coordinator.store().recovery_reads.get(), 1);
@@ -2387,7 +2389,7 @@ fn recording_commit_outcomes_are_resolved_like_plain_ones() -> TestResult {
     // admission may be retried.
     let mut lost = setup::<Rigged<LOST_UNKNOWN>>(&BASE)?;
     let mut stager = DeclaringStager::new(&lost.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
-    let result = admit_recording(&mut lost, &mut stager);
+    let result = admit_recording!(lost, &mut stager);
     assert_rejected(
         &lost,
         &(result, stager.inner),
@@ -2406,7 +2408,7 @@ fn recording_commit_outcomes_are_resolved_like_plain_ones() -> TestResult {
     // A rejected and a conflicting commit map as on the plain path.
     let mut failing = setup::<Rigged<COMMIT_FAILS>>(&BASE)?;
     let mut stager = DeclaringStager::new(&failing.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
-    let result = admit_recording(&mut failing, &mut stager);
+    let result = admit_recording!(failing, &mut stager);
     assert_rejected(
         &failing,
         &(result, stager.inner),
@@ -2416,7 +2418,7 @@ fn recording_commit_outcomes_are_resolved_like_plain_ones() -> TestResult {
     let mut conflicting = setup::<Rigged<COMMIT_CONFLICTS>>(&BASE)?;
     let mut stager =
         DeclaringStager::new(&conflicting.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
-    let result = admit_recording(&mut conflicting, &mut stager);
+    let result = admit_recording!(conflicting, &mut stager);
     assert_rejected(
         &conflicting,
         &(result, stager.inner),
