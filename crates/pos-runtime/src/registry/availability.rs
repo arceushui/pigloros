@@ -80,6 +80,8 @@ impl PluginRegistry {
     fn ensure_available(&self, plugin_id: PluginId) -> Result<(), RuntimeError> {
         match self.availability(plugin_id) {
             Some(availability) if availability != PluginAvailabilityV1::Available => {
+                // Keep in step with the community adapter's own refusal in
+                // `pos-plugin-supervisor` `adapter.rs` (`ensure_available`): same error.
                 Err(PluginCompositionErrorV1::ImplementationUnavailable {
                     plugin_id,
                     availability,

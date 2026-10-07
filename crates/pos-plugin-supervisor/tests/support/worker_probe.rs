@@ -116,9 +116,10 @@ fn serve_draft(request: &WorkerRequestV1) -> Option<ExitCode> {
     let mut parts = request.component.splitn(2, |byte| *byte == b':');
     let mode = parts.next()?;
     let event_type = String::from_utf8_lossy(parts.next()?).into_owned();
-    let invocation = match &request.call {
-        WorkerCallV1::Reduce(invocation) | WorkerCallV1::Drive(invocation) => invocation,
-        WorkerCallV1::Describe => return None,
+    // A describe call (and an unknown mode) takes the shared `None` path.
+    let (WorkerCallV1::Reduce(invocation) | WorkerCallV1::Drive(invocation)) = &request.call
+    else {
+        return None;
     };
     let prior = &invocation.prior_state_bytes;
     let (payload, dependency_digests, state) = match mode {

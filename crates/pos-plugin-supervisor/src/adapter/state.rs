@@ -51,6 +51,8 @@ pub enum ReceiptDispositionV1 {
 /// invocation keeps its receipt too, with the closed `failure` and, for a
 /// guest-declared failure, the guest's exact `plugin-error` (code, field
 /// ordinal and related digest). Nothing here is persisted or authoritative.
+/// The effective limits fixed at negotiation are
+/// [`CommunityInvocationReceiptV1::limits()`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommunityInvocationReceiptV1 {
     /// The host-built invocation's ID.
@@ -61,8 +63,6 @@ pub struct CommunityInvocationReceiptV1 {
     /// The V1 output digest the guest returned, or `None` when it returned
     /// its own `plugin-error` or no return at all.
     pub output_digest: Option<[u8; 32]>,
-    /// The effective limits fixed at negotiation.
-    pub limits: EffectiveExecutionLimitsV1,
     /// The deterministic metering the worker reported, or `None` when the
     /// invocation ended without a report (a crash, a watchdog stop, an engine
     /// failure or a supervisor check).
@@ -76,6 +76,14 @@ pub struct CommunityInvocationReceiptV1 {
     pub guest_error: Option<GuestPluginErrorV1>,
     /// What became of the staged result.
     pub disposition: ReceiptDispositionV1,
+}
+
+impl CommunityInvocationReceiptV1 {
+    /// The effective limits fixed at negotiation.
+    #[must_use]
+    pub const fn limits(&self) -> EffectiveExecutionLimitsV1 {
+        self.negotiated.limits()
+    }
 }
 
 #[derive(Debug)]
@@ -107,7 +115,8 @@ impl Shared {
     }
 
     /// The lock, whose data stays consistent across a holder's panic because
-    /// every update is a single assignment.
+    /// each update is made under one guard and leaves `Inner` valid at every
+    /// panic point.
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }

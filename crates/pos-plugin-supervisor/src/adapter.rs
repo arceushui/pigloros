@@ -24,6 +24,9 @@
 //!   [`Driver::commit_step()`] only after the whole batch commits. An abort
 //!   discards it, and a store outcome that is unknown keeps it staged for
 //!   `recover_scheduled_pass`.
+//! - A draft that declares `dependency_digests` is `UnsupportedSchema`: no
+//!   `EventDraft` field can commit them, so the adapter refuses them rather
+//!   than dropping them silently.
 //! - Trace annotations are validated by the engine and the supervisor and
 //!   then dropped; only their count survives, in the receipt.
 //!
@@ -167,6 +170,8 @@ impl CommunityDriverV1 {
     fn ensure_available(&self) -> Result<(), RuntimeError> {
         match self.shared.availability() {
             PluginAvailabilityV1::Available => Ok(()),
+            // Keep in step with the registry's own pass-time refusal in
+            // `pos-runtime` `registry/availability.rs`: same error, same fields.
             availability => Err(PluginCompositionErrorV1::ImplementationUnavailable {
                 plugin_id: self.shared.plugin_id(),
                 availability,
@@ -250,7 +255,6 @@ impl CommunityDriverV1 {
             invocation_id,
             negotiated: self.negotiated.clone(),
             output_digest: parts.output_digest,
-            limits: self.negotiated.limits(),
             metering: parts.metering,
             dropped_trace_annotations: parts.dropped_trace_annotations,
             failure: parts.failure,

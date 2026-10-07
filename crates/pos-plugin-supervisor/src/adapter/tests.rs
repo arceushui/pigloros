@@ -245,7 +245,7 @@ fn a_valid_output_is_staged_with_a_receipt_until_the_batch_commits() {
     assert_eq!(receipt.invocation_id, [3; 16]);
     assert_eq!(receipt.negotiated, driver.negotiated);
     assert_eq!(receipt.output_digest, Some(digest));
-    assert_eq!(receipt.limits, driver.negotiated.limits());
+    assert_eq!(receipt.limits(), driver.negotiated.limits());
     assert_eq!(receipt.metering, Some(METERING));
     assert_eq!(receipt.failure, None);
     assert_eq!(receipt.guest_error, None);
@@ -360,7 +360,6 @@ fn driver_receipt(driver: &CommunityDriverV1) -> CommunityInvocationReceiptV1 {
         invocation_id: [0; 16],
         negotiated: driver.negotiated.clone(),
         output_digest: None,
-        limits: driver.negotiated.limits(),
         metering: Some(METERING),
         dropped_trace_annotations: 0,
         failure: None,

@@ -292,7 +292,7 @@ fn a_pass_commits_every_draft_atomically_and_only_then_the_state() {
 
     let receipts = alpha.receipts();
     assert_eq!(receipts[0].negotiated.plugin_id(), "alpha");
-    assert_eq!(receipts[0].limits, receipts[0].negotiated.limits());
+    assert_eq!(receipts[0].limits(), receipts[0].negotiated.limits());
     assert_eq!(receipts[0].metering, Some(test_support::METERING));
     assert!(receipts[0].output_digest.is_some());
 
