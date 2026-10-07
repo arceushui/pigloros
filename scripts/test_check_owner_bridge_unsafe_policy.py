@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -172,22 +173,28 @@ def write(root: Path, relative: str, content: str) -> None:
 
 
 @contextlib.contextmanager
-def tree(extra: dict[str, str | None] | None = None) -> Iterator[Path]:
+def tree(extra: dict[str, str | None] | None = None, links: dict[str, str] | None = None) -> Iterator[Path]:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         for relative, content in {**BASE_FILES, **(extra or {})}.items():
             if content is not None:
                 write(root, relative, content)
+        for link, target in (links or {}).items():
+            path = root / link
+            path.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(target, path, target_is_directory=(path.parent / target).is_dir())
         yield root
 
 
-def fixture(extra: dict[str, str | None] | None = None) -> list[str]:
-    with tree(extra) as root:
+def fixture(extra: dict[str, str | None] | None = None, links: dict[str, str] | None = None) -> list[str]:
+    with tree(extra, links) as root:
         return CHECKER.violations(root)
 
 
-def require_accepted(name: str, extra: dict[str, str | None] | None = None) -> None:
-    found = fixture(extra)
+def require_accepted(
+    name: str, extra: dict[str, str | None] | None = None, links: dict[str, str] | None = None
+) -> None:
+    found = fixture(extra, links)
     if found:
         raise SystemExit(f"{name} was rejected, expected no violations: {found}")
 
@@ -198,8 +205,9 @@ def require_rejected(
     expected: list[str],
     *,
     prefixes: bool = False,
+    links: dict[str, str] | None = None,
 ) -> None:
-    found = fixture(extra)
+    found = fixture(extra, links)
     wanted = sorted(expected)
     matches = (
         len(found) == len(wanted) and all(actual.startswith(prefix) for actual, prefix in zip(found, wanted))
@@ -212,6 +220,14 @@ def require_rejected(
 
 def at(path: str, line: int, message: str) -> str:
     return f"{path}:{line}: {message}"
+
+
+ROOT_FORBID = (
+    f"{LIB}: crate root must not hold a crate-wide #![forbid(unsafe_code)]; forbid each non-ffi mod instead"
+)
+SYMLINK = "symlinks are forbidden under a scanned workspace member"
+MULTI_BLOCK = "more than one unsafe block on a line; put each block on its own line so the inventory counts match"
+INCLUDE_OUTSIDE = "include! must name a .rs file inside a scanned workspace member"
 
 
 def nonblock(path: str, line: int, kind: str) -> str:
@@ -244,6 +260,7 @@ def test_masker() -> None:
         ("'\\\"' unsafe {}", True),
         ("'\"' unsafe {}", True),
         ("b'\\'' unsafe {}", True),
+        (r'br#"a\"#; unsafe{}', True),
         ("'u' unsafe {}", True),
         ("'\\u{1F600}' unsafe {}", True),
         ("fn f<'a>(x: &'a u8) { unsafe {} }", True),
@@ -375,6 +392,7 @@ def test_unsafe_evasions() -> None:
         r'let s = b"\""; unsafe {}',
         "let s = '\"'; unsafe {}",
         "let s = r#\"a\"#; unsafe {}",
+        r'let s = br#"a\"#; unsafe{}',
     ):
         require_rejected(
             f"unsafe after {statement}",
@@ -434,7 +452,7 @@ def test_ffi_surface() -> None:
     require_rejected(
         "unsafe no_mangle attribute",
         {OPS: CFG + "#[unsafe(no_mangle)]\npub fn f() {}\n"},
-        [nonblock(OPS, 2, "attribute"), at(OPS, 2, "#[no_mangle] creates FFI surface and is forbidden")],
+        [nonblock(OPS, 2, "attribute"), at(OPS, 2, "no_mangle creates FFI surface and is forbidden")],
     )
     for name, attribute in (
         ("no_mangle", "#[no_mangle]"),
@@ -444,12 +462,12 @@ def test_ffi_surface() -> None:
         require_rejected(
             f"{name} attribute",
             {OPS: CFG + f"{attribute}\npub fn f() {{}}\n"},
-            [at(OPS, 2, f"#[{name}] creates FFI surface and is forbidden")],
+            [at(OPS, 2, f"{name} creates FFI surface and is forbidden")],
         )
     require_rejected(
         "no_mangle attribute in a safe crate",
         {SAFE_LIB_PATH: FORBID + "#[no_mangle]\npub fn f() {}\n"},
-        [at(SAFE_LIB_PATH, 2, "#[no_mangle] creates FFI surface and is forbidden")],
+        [at(SAFE_LIB_PATH, 2, "no_mangle creates FFI surface and is forbidden")],
     )
     extern_definition = "extern fn definition creates FFI surface and is forbidden"
     require_rejected("extern C fn in the shim", {OPS: CFG + 'pub extern "C" fn f() {}\n'}, [at(OPS, 2, extern_definition)])
@@ -638,6 +656,8 @@ def test_inventory() -> None:
         ("without #[test]", CFG + FORBID + "\nfn ffi_fixture() {}\n"),
         ("ignored", CFG + FORBID + "\n#[test]\n#[ignore]\nfn ffi_fixture() {}\n"),
         ("ignored with a reason", CFG + FORBID + '\n#[ignore = "slow"]\n#[test]\nfn ffi_fixture() {}\n'),
+        ("cfg'd out", CFG + FORBID + "\n#[cfg(any())]\n#[test]\nfn ffi_fixture() {}\n"),
+        ("conditionally ignored", CFG + FORBID + "\n#[test]\n#[cfg_attr(windows, ignore)]\nfn ffi_fixture() {}\n"),
         ("only in a comment", CFG + FORBID + "\n// #[test]\n// fn ffi_fixture() {}\n"),
         ("test attribute is not directly attached", CFG + FORBID + "\n#[test]\nconst X: u8 = 1;\nfn ffi_fixture() {}\n"),
     ):
@@ -740,6 +760,156 @@ def test_manifests() -> None:
     )
 
 
+def test_hardening() -> None:
+    require_rejected("two blocks on one line", ffi_case("// SAFETY: fixture.", "unsafe { a() }; unsafe { b() };"), [at(OPS, 5, MULTI_BLOCK)])
+    require_rejected(
+        "SAFETY above an earlier terminated statement",
+        ffi_case("// SAFETY: fixture.", "let _a = 1;", "unsafe {};", line=6),
+        [at(OPS, 6, "unsafe block lacks // SAFETY:")],
+    )
+    require_rejected(
+        "SAFETY above an enclosing if",
+        ffi_case("// SAFETY: fixture.", "if true {", "unsafe {}", "}", line=6),
+        [at(OPS, 6, "unsafe block lacks // SAFETY:")],
+    )
+    require_rejected(
+        "trailing SAFETY comment after code",
+        ffi_case("let _a = 1; // SAFETY: fixture.", "unsafe {}", line=5),
+        [at(OPS, 5, "unsafe block lacks // SAFETY:")],
+    )
+    require_accepted(
+        "SAFETY above a statement continued without terminators",
+        ffi_case("// SAFETY: fixture.", "let _v = id(", "    1,", "    unsafe {},", ");", line=7),
+    )
+    for word in ("no_mangle", "export_name", "link_section"):
+        require_rejected(
+            f"macro-spelled {word}",
+            {SAFE_LIB_PATH: FORBID + f"macro_rules! m {{ ($a:meta) => {{ #[$a] fn f() {{}} }} }} m!({word});\n"},
+            [at(SAFE_LIB_PATH, 2, f"{word} creates FFI surface and is forbidden")],
+        )
+    require_rejected(
+        "macro-spelled extern ABI",
+        {SAFE_LIB_PATH: FORBID + 'macro_rules! m { ($abi:literal) => { pub extern $abi fn f() {} } } m!("C");\n'},
+        [at(SAFE_LIB_PATH, 2, "extern fn definition creates FFI surface and is forbidden")],
+    )
+    require_rejected(
+        "OUT_DIR include escaping the output directory",
+        {SAFE_LIB_PATH: FORBID + 'include!(concat!(env!("OUT_DIR"), "/../../../../outside/x.rs"));\n'},
+        [at(SAFE_LIB_PATH, 2, INCLUDE_OUTSIDE)],
+    )
+    require_rejected(
+        "OUT_DIR include in the shim",
+        {HOST: HOST_MODULE + 'include!(concat!(env!("OUT_DIR"), "/g.rs"));\n'},
+        [at(HOST, 4, "include! is forbidden in the shim: it can pull in files outside the scanned tree")],
+    )
+    require_rejected(
+        "hyphenated unsafe-code lint in a member",
+        {"crates/safe/Cargo.toml": MEMBER_MANIFEST + '\n[lints.rust]\n"unsafe-code" = "allow"\n'},
+        ["crates/safe/Cargo.toml: non-shim crate configures unsafe_code"],
+    )
+    require_rejected(
+        "root unsafe_code is not forbid",
+        {"Cargo.toml": root_manifest().replace('unsafe_code = "forbid"', 'unsafe_code = "allow"')},
+        ['Cargo.toml: [workspace.lints.rust] unsafe_code must be "forbid"'],
+    )
+    require_accepted(
+        "root unsafe_code forbid as a table",
+        {"Cargo.toml": root_manifest().replace('unsafe_code = "forbid"', 'unsafe_code = { level = "forbid" }')},
+    )
+    helper = {"crates/helper/Cargo.toml": MEMBER_MANIFEST.replace("member", "helper"), "crates/helper/src/lib.rs": "pub fn h() {}\n"}
+    not_member = "crates/safe/Cargo.toml: path dependency ../helper is inside the workspace but is not a listed member"
+    require_rejected(
+        "path dependency on an unlisted in-workspace crate",
+        {**helper, "crates/safe/Cargo.toml": MEMBER_MANIFEST + '\n[dependencies]\nhelper = { path = "../helper" }\n'},
+        [not_member],
+    )
+    require_rejected(
+        "target-specific path dependency on an unlisted crate",
+        {
+            **helper,
+            "crates/safe/Cargo.toml": MEMBER_MANIFEST + "\n[target.'cfg(windows)'.dev-dependencies]\nhelper = { path = \"../helper\" }\n",
+        },
+        [not_member],
+    )
+    require_rejected(
+        "workspace dependency path on an unlisted crate",
+        {**helper, "Cargo.toml": root_manifest() + '\n[workspace.dependencies]\nhelper = { path = "crates/helper" }\n'},
+        ["Cargo.toml: path dependency crates/helper is inside the workspace but is not a listed member"],
+    )
+    require_accepted(
+        "path dependencies on a member, outside the workspace, and on an excluded crate",
+        {
+            **helper,
+            "Cargo.toml": root_manifest().replace("members = [", 'exclude = ["crates/helper"]\nmembers = ['),
+            "crates/safe/Cargo.toml": MEMBER_MANIFEST
+            + '\n[dependencies]\nshim = { path = "../pos-owner-bridge-windows" }\nfar = { path = "../../../far" }\nhelper = { path = "../helper" }\n',
+        },
+    )
+    require_accepted("byte-order mark on a shim module and the crate root", {HOST: "\ufeff" + HOST_MODULE, LIB: "\ufeff" + SHIM_LIB})
+    require_accepted("combined forbid list in a module", {HOST: CFG + "#![forbid(dead_code, unsafe_code)]\n"})
+    for name, source in (
+        ("a forbid list", CFG + "#![forbid(unsafe_code, dead_code)]\n"),
+        ("a conditional forbid", CFG + "#![cfg_attr(all(), forbid(unsafe_code))]\n"),
+    ):
+        require_rejected(f"crate root with {name}", {LIB: source}, [ROOT_FORBID])
+
+
+def symlinks_available() -> bool:
+    with tempfile.TemporaryDirectory() as directory:
+        try:
+            os.symlink(".", Path(directory) / "probe", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            return False
+    return True
+
+
+def test_symlinks() -> None:
+    if not symlinks_available():
+        if sys.platform == "win32":
+            print("SKIPPED symlink tests: this Windows account may not create symlinks")
+            return
+        raise SystemExit("symlinks cannot be created on this platform; the symlink tests must not pass silently")
+    outside = {"outside/mod.rs": "pub unsafe fn evil2() {}\n"}
+    require_rejected(
+        "directory symlink hiding an unsafe module",
+        {SAFE_LIB_PATH: FORBID + "mod sub;\n", **outside},
+        [f"crates/safe/src/sub: {SYMLINK}"],
+        links={"crates/safe/src/sub": "../../../outside"},
+    )
+    expected = [f"crates/safe/src/link: {SYMLINK}"]
+    if os.name != "nt":
+        expected.append(at(SAFE_LIB_PATH, 2, INCLUDE_OUTSIDE))
+    require_rejected(
+        "include through a symlinked directory resolves physically",
+        {
+            SAFE_LIB_PATH: FORBID + 'include!("link/../x.rs");\n',
+            "crates/safe/src/x.rs": "pub fn x() {}\n",
+            "outside/keep.rs": "pub fn keep() {}\n",
+            "x.rs": "pub unsafe fn evil() {}\n",
+        },
+        expected,
+        links={"crates/safe/src/link": "../../../outside"},
+    )
+    require_rejected(
+        "src/ffi directory symlink in the shim",
+        {"outside/ops.rs": ffi_source(*STANDARD_BODY)},
+        [f"{SHIM}/src/ffi: {SYMLINK}"],
+        links={f"{SHIM}/src/ffi": "../../../outside"},
+    )
+    require_rejected(
+        "file symlink",
+        {},
+        [f"crates/safe/src/alias.rs: {SYMLINK}"],
+        links={"crates/safe/src/alias.rs": "lib.rs"},
+    )
+    require_rejected(
+        "workspace member reached through a symlink",
+        {"Cargo.toml": root_manifest("crates/linked")},
+        ["Cargo.toml: workspace member crates/linked traverses a symlink"],
+        links={"crates/linked": "safe"},
+    )
+
+
 def run_cli(extra: dict[str, str | None] | None = None) -> subprocess.CompletedProcess[str]:
     with tree(extra) as root:
         return subprocess.run(
@@ -775,6 +945,8 @@ def main() -> None:
     test_inventory()
     test_manifests()
     test_cli()
+    test_hardening()
+    test_symlinks()
     print("owner-bridge unsafe-policy checker rejects every forged boundary")
 
 

@@ -26,6 +26,27 @@ Policy, enforced over every ``.rs`` file under every workspace member (except
   scanned member (``concat!(env!("CARGO_MANIFEST_DIR"), "...")`` is resolved
   against the member; ``concat!(env!("OUT_DIR"), "...")`` names build-script
   output and is allowed); the data forms are allowed there.
+* Symlinks (file or directory) under a scanned member are rejected, because
+  neither the walk nor rustc's module resolution would agree on where they
+  lead. Include and ``#[path]`` targets are resolved physically.
+* The bare words ``no_mangle``, ``export_name`` and ``link_section`` and
+  ``extern <abi> fn`` (also with a macro ``$abi``) are rejected anywhere in
+  code, so macro-spelled forms cannot evade the attribute checks.
+* A path dependency that lives inside the workspace root but is not a listed
+  member is rejected (Cargo would silently add it as a member).
+* The root ``[workspace.lints.rust] unsafe_code`` must be ``forbid``, and no
+  non-shim manifest may configure ``unsafe_code`` (or ``unsafe-code``).
+* One unsafe block per line: the inventory is keyed by file and line, so a
+  second block on the same line is rejected rather than undercounted. A SAFETY
+  comment above a multi-line statement serves every block inside it, but each
+  block still needs its own inventory record on its own line.
+* ``include!(concat!(env!("OUT_DIR"), "<relative path>"))`` is allowed in
+  non-shim members: it names build-script output that no source scan can see.
+  That is a deliberate trade-off; the workspace ``forbid(unsafe_code)`` lint
+  still compiles over generated code on Linux. The literal part must be
+  relative with no ``..`` component.
+* Sources are read with ``utf-8-sig`` so a byte-order mark, which rustc
+  accepts, does not defeat the leading-attribute checks.
 * The shim manifest repeats the workspace lint tables except for the four
   ADR-approved entries. Other members configure no ``unsafe_code`` lint.
 * Every shim source file (all of ``src``, ``tests``, ``examples``, ``benches``;
@@ -61,7 +82,10 @@ UNSAFE_TOKEN = re.compile(r"(?<!\w)unsafe(?!\w)")
 UNSAFE_BLOCK = re.compile(r"(?<!\w)unsafe\s*\{")
 UNSAFE_KIND = re.compile(r"unsafe\s*(\w+|\()")
 ATTRIBUTE_START = re.compile(r"#\s*(!?)\s*\[")
-BANNED_ATTRIBUTE = re.compile(r"(?<!\w)(no_mangle|export_name|link_section)(?!\w)")
+BANNED_WORD = re.compile(r"(?<!\w)(no_mangle|export_name|link_section)(?!\w)")
+FORBIDS_UNSAFE = re.compile(r"(?<!\w)forbid\([^)]*(?<!\w)unsafe_code(?!\w)")
+DEPENDENCY_TABLES = frozenset({"dependencies", "dev-dependencies", "build-dependencies"})
+LIVE_TEST_CFGS = ("cfg(test)", "cfg(windows)")
 PATH_ATTRIBUTE = re.compile(r"(?<!\w)path\s*=")
 PATH_LITERAL = re.compile(r'path\s*=\s*"([^"\\]*)"')
 INCLUDE_MACRO = re.compile(r"(?<!\w)(include(?:_str|_bytes)?)\s*!")
@@ -69,7 +93,7 @@ INCLUDE_LITERAL = re.compile(r'\s*[(\[{]\s*"([^"\\]*)"\s*[)\]}]')
 GENERATED_INCLUDE = re.compile(
     r'\s*[(\[{]\s*concat!\s*\(\s*env!\s*\(\s*"(OUT_DIR|CARGO_MANIFEST_DIR)"\s*\)\s*,\s*"([^"\\]*)"\s*,?\s*\)\s*[)\]}]'
 )
-EXTERN_FN = re.compile(r"(?<!\w)extern\s+fn\s+\w")
+EXTERN_FN = re.compile(r"(?<!\w)extern\s+(?:\$\w+\s+)?fn\s+[\w$]")
 MOD_DECLARATION = re.compile(r"(?<!\w)(?P<visibility>pub\s*(?:\([^)]*\)\s*)?)?mod\s+(?P<name>\w+)\s*[;{]")
 FUNCTION = re.compile(r"(?<!\w)fn\s+(\w+)")
 FUNCTION_MODIFIERS = re.compile(r"(?:(?:pub(?:\s*\([^)]*\))?|async|const)\s+)*\Z")
@@ -351,7 +375,7 @@ def _function_spans(code: str) -> tuple[tuple[str, int, int], ...]:
 
 def _toml(root: Path, path: Path, found: list[str]) -> dict[str, object] | None:
     try:
-        return tomllib.loads(path.read_text(encoding="utf-8"))
+        return tomllib.loads(path.read_text(encoding="utf-8-sig"))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError, OSError) as error:
         found.append(f"{path.relative_to(root).as_posix()}: malformed TOML: {error}")
         return None
@@ -369,25 +393,48 @@ def _workspace_members(root_manifest: dict[str, object]) -> tuple[str, ...]:
 
 def _contains_unsafe_code_lint(value: object) -> bool:
     if isinstance(value, dict):
-        return any(key == "unsafe_code" or _contains_unsafe_code_lint(item) for key, item in value.items())
+        return any(key.replace("-", "_") == "unsafe_code" or _contains_unsafe_code_lint(item) for key, item in value.items())
     if isinstance(value, list):
         return any(_contains_unsafe_code_lint(item) for item in value)
     return False
 
 
-def _rust_files(directory: Path) -> tuple[Path, ...]:
-    """Return every ``.rs`` file under a crate, skipping only ``<crate>/target``."""
+def _walk(directory: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """Return ``(rust files, symlinks)`` under a crate without following links.
+
+    Only ``<crate>/target`` is skipped.
+    """
+    files: list[Path] = []
+    links: list[Path] = []
     if not directory.is_dir():
-        return ()
-    return tuple(
-        path
-        for path in sorted(directory.rglob("*.rs"))
-        if path.is_file() and path.relative_to(directory).parts[:1] != ("target",)
-    )
+        return (), ()
+    for current, dirnames, filenames in os.walk(directory, followlinks=False):
+        here = Path(current)
+        if here == directory:
+            dirnames[:] = [name for name in dirnames if name != "target"]
+        dirnames.sort()
+        links.extend(here / name for name in dirnames + filenames if (here / name).is_symlink())
+        files.extend(here / name for name in sorted(filenames) if name.endswith(".rs") and (here / name).is_file())
+    return tuple(sorted(files)), tuple(sorted(links))
+
+
+def _path_dependencies(value: object, parent: str = "") -> list[str]:
+    found: list[str] = []
+    if isinstance(value, dict):
+        if parent in DEPENDENCY_TABLES:
+            found.extend(item["path"] for item in value.values() if isinstance(item, dict) and isinstance(item.get("path"), str))
+        for key, item in value.items():
+            found.extend(_path_dependencies(item, key))
+    return found
+
+
+def _plain_relative(literal: str) -> bool:
+    stripped = literal.lstrip("/")
+    return bool(stripped) and "\\" not in literal and ".." not in PurePosixPath(stripped).parts
 
 
 def _read(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="replace")
+    return path.read_text(encoding="utf-8-sig", errors="replace")
 
 
 def _expected_shim_lints(root_manifest: dict[str, object]) -> tuple[dict[str, object], dict[str, object]] | None:
@@ -441,6 +488,33 @@ def _check_shim_lints(root_manifest: dict[str, object], shim_manifest: dict[str,
             found.append(f"{SHIM}/Cargo.toml: [lints.{name}] differs from ADR-110 policy in {', '.join(differences)}")
 
 
+def _check_root_lints(root_manifest: dict[str, object], found: list[str]) -> None:
+    workspace = root_manifest.get("workspace")
+    lints = workspace.get("lints") if isinstance(workspace, dict) else None
+    rust = lints.get("rust") if isinstance(lints, dict) else None
+    if isinstance(rust, dict):
+        value = rust.get("unsafe_code")
+        level = value.get("level") if isinstance(value, dict) else value
+        if level != "forbid":
+            found.append('Cargo.toml: [workspace.lints.rust] unsafe_code must be "forbid"')
+
+
+def _check_path_dependencies(
+    root: Path,
+    directory: Path,
+    manifest: dict[str, object],
+    scanned_dirs: tuple[Path, ...],
+    excluded: set[Path],
+    found: list[str],
+) -> None:
+    """Flag in-workspace path dependencies that Cargo would add as unlisted members."""
+    label = (directory / "Cargo.toml").relative_to(root).as_posix()
+    for relative in _path_dependencies(manifest):
+        target = (directory / relative).resolve()
+        if target != root and target.is_relative_to(root) and target not in scanned_dirs and target not in excluded:
+            found.append(f"{label}: path dependency {relative} is inside the workspace but is not a listed member")
+
+
 def _scanned_rust_file(target: Path, scanned_dirs: tuple[Path, ...]) -> bool:
     if target.suffix != ".rs" or not target.is_file():
         return False
@@ -471,33 +545,38 @@ def _check_surface(
         if strict_includes:
             found.append(f"{at(offset)}: {kind} is forbidden in the shim: it can pull in files outside the scanned tree")
         elif not data:
-            target = None if literal is None else Path(os.path.normpath(base / literal)).resolve()
+            target = None if literal is None else (base / literal).resolve()
             if target is None or not _scanned_rust_file(target, scanned_dirs):
                 found.append(f"{at(offset)}: {kind} must name a .rs file inside a scanned workspace member")
 
+    for match in BANNED_WORD.finditer(code):
+        found.append(f"{at(match.start())}: {match.group(1)} creates FFI surface and is forbidden")
     for attribute in attributes:
-        for match in BANNED_ATTRIBUTE.finditer(attribute.content):
-            found.append(f"{at(attribute.start)}: #[{match.group(1)}] creates FFI surface and is forbidden")
         if PATH_ATTRIBUTE.search(attribute.content):
             literal = PATH_LITERAL.search(text[attribute.start : attribute.end])
             inclusion(attribute.start, "#[path]", literal.group(1) if literal else None, path.parent, data=False)
     for match in INCLUDE_MACRO.finditer(code):
         name = match.group(1)
+        data = name != "include"
         literal = INCLUDE_LITERAL.match(text, match.end())
         if literal:
-            inclusion(match.start(), f"{name}!", literal.group(1), path.parent, data=name != "include")
+            inclusion(match.start(), f"{name}!", literal.group(1), path.parent, data=data)
             continue
         generated = GENERATED_INCLUDE.match(text, match.end())
         if generated and generated.group(1) == "CARGO_MANIFEST_DIR":
-            inclusion(match.start(), f"{name}!", generated.group(2).lstrip("/"), crate_dir, data=name != "include")
+            inclusion(match.start(), f"{name}!", generated.group(2).lstrip("/"), crate_dir, data=data)
+        elif generated and not strict_includes and _plain_relative(generated.group(2)):
+            continue
         else:
-            inclusion(match.start(), f"{name}!", None, crate_dir, data=name != "include" or generated is not None)
+            inclusion(match.start(), f"{name}!", None, crate_dir, data=data)
     for match in EXTERN_FN.finditer(code):
         found.append(f"{at(match.start())}: extern fn definition creates FFI surface and is forbidden")
 
 
 def _has_safety_comment(scanned: Scan, line: int, column: int) -> bool:
     """Accept a ``// SAFETY:`` comment above the block or its statement start."""
+    # A comment above a multi-line statement serves every block inside it;
+    # each block still needs its own inventory record.
     anchor = line
     if not scanned.code_lines[line][:column].strip():
         while anchor > 0:
@@ -518,6 +597,20 @@ def _has_safety_comment(scanned: Scan, line: int, column: int) -> bool:
     return False
 
 
+def _is_live_test(attached: tuple[str, ...]) -> bool:
+    """A ``#[test]`` that is neither ignored nor cfg'd out or ignored conditionally."""
+    if "test" not in attached:
+        return False
+    for item in attached:
+        if item.startswith("ignore"):
+            return False
+        if item.startswith("cfg(") and item not in LIVE_TEST_CFGS:
+            return False
+        if item.startswith("cfg_attr(") and "ignore" in item:
+            return False
+    return True
+
+
 def _hosted_test_exists(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], name: str) -> bool:
     """Return whether a shim ``tests/`` or ``src/`` file holds a live ``#[test]``."""
     expression = re.compile(rf"(?<!\w)fn\s+{re.escape(name)}(?!\w)")
@@ -528,7 +621,7 @@ def _hosted_test_exists(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], na
             modifiers = FUNCTION_MODIFIERS.search(scanned.code[: match.start()])
             start = modifiers.start() if modifiers else match.start()
             attached = _outer_attributes_before(scanned.code, attributes, start)
-            if "test" in attached and not any(item.startswith("ignore") for item in attached):
+            if _is_live_test(attached):
                 return True
     return False
 
@@ -536,7 +629,7 @@ def _hosted_test_exists(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], na
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
     blocks: dict[tuple[str, int], UnsafeBlock] = {}
     scans: dict[str, tuple[Scan, tuple[Attribute, ...]]] = {}
-    for source in _rust_files(shim):
+    for source in _walk(shim)[0]:
         relative = source.relative_to(shim).as_posix()
         label = f"{SHIM}/{relative}"
         text = _read(source)
@@ -550,7 +643,7 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
         if relative != "build.rs" and "cfg(windows)" not in leading:
             found.append(f"{label}: must start with #![cfg(windows)]")
         if relative == "src/lib.rs":
-            if "forbid(unsafe_code)" in leading:
+            if any(FORBIDS_UNSAFE.search(_normalized(a.content)) for a in attributes if a.inner):
                 found.append(
                     f"{label}: crate root must not hold a crate-wide #![forbid(unsafe_code)]; "
                     "forbid each non-ffi mod instead"
@@ -559,12 +652,12 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
                 if match.group("name") == "ffi":
                     continue
                 start = match.start("visibility") if match.group("visibility") else match.start()
-                if "forbid(unsafe_code)" not in _outer_attributes_before(code, attributes, start):
+                if not any(FORBIDS_UNSAFE.match(item) for item in _outer_attributes_before(code, attributes, start)):
                     found.append(
                         f"{label}:{_line_of(code, match.start())}: mod {match.group('name')} "
                         "must carry #[forbid(unsafe_code)]"
                     )
-        elif not is_ffi and "forbid(unsafe_code)" not in leading:
+        elif not is_ffi and not any(FORBIDS_UNSAFE.match(item) for item in leading):
             found.append(f"{label}: non-ffi module must forbid unsafe_code")
         block_starts = {match.start() for match in UNSAFE_BLOCK.finditer(code)}
         spans = _function_spans(code)
@@ -579,6 +672,11 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
                 )
             elif not is_ffi:
                 found.append(f"{label}:{line}: unsafe blocks belong only in src/ffi")
+            elif (relative, line) in blocks:
+                found.append(
+                    f"{label}:{line}: more than one unsafe block on a line; "
+                    "put each block on its own line so the inventory counts match"
+                )
             else:
                 column = token.start() - (code.rfind("\n", 0, token.start()) + 1)
                 if not _has_safety_comment(scanned, line - 1, column):
@@ -589,7 +687,7 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
 
 
 def _check_member_sources(root: Path, directory: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> None:
-    for source in _rust_files(directory):
+    for source in _walk(directory)[0]:
         label = source.relative_to(root).as_posix()
         text = _read(source)
         scanned = scan(text)
@@ -698,23 +796,36 @@ def violations(root: Path) -> list[str]:
         directory = (root / member).resolve()
         if not directory.is_relative_to(root):
             found.append(f"Cargo.toml: workspace member {member} is outside the repository")
+        elif directory != Path(os.path.normpath(root / member)):
+            found.append(f"Cargo.toml: workspace member {member} traverses a symlink")
         elif not (directory / "Cargo.toml").is_file():
             found.append(f"{member}/Cargo.toml: workspace member manifest is missing")
         else:
             directories[member] = directory
     scanned_dirs = tuple(directories.values())
+    _check_root_lints(root_manifest, found)
+    workspace = root_manifest.get("workspace")
+    exclude = workspace.get("exclude", []) if isinstance(workspace, dict) else []
+    excluded = {(root / item).resolve() for item in exclude if isinstance(item, str)}
+    _check_path_dependencies(root, root, root_manifest, scanned_dirs, excluded, found)
+    for directory in scanned_dirs:
+        for link in _walk(directory)[1]:
+            found.append(f"{link.relative_to(root).as_posix()}: symlinks are forbidden under a scanned workspace member")
 
     shim = directories.get(SHIM)
     if shim is not None:
         shim_manifest = _toml(root, shim / "Cargo.toml", found)
         if shim_manifest is not None:
             _check_shim_lints(root_manifest, shim_manifest, found)
+            _check_path_dependencies(root, shim, shim_manifest, scanned_dirs, excluded, found)
         _check_inventory(shim, root, _check_shim_sources(shim, scanned_dirs, found), found)
 
     for member, directory in directories.items():
         if member == SHIM:
             continue
         manifest = _toml(root, directory / "Cargo.toml", found)
+        if manifest is not None:
+            _check_path_dependencies(root, directory, manifest, scanned_dirs, excluded, found)
         if manifest is not None and _contains_unsafe_code_lint(manifest.get("lints", {})):
             found.append(f"{member}/Cargo.toml: non-shim crate configures unsafe_code")
         _check_member_sources(root, directory, scanned_dirs, found)
