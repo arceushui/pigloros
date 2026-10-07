@@ -32,8 +32,22 @@ Policy, enforced over every ``.rs`` file under every workspace member (except
 * The bare words ``no_mangle``, ``export_name`` and ``link_section`` and
   ``extern <abi> fn`` (also with a macro ``$abi``) are rejected anywhere in
   code, so macro-spelled forms cannot evade the attribute checks.
-* A path dependency that lives inside the workspace root but is not a listed
-  member is rejected (Cargo would silently add it as a member).
+* Any path dependency (``dependencies``, ``dev-dependencies``,
+  ``build-dependencies``, ``target.*`` tables, ``workspace.dependencies``,
+  ``[patch.*]`` and ``[replace]``) must name a scanned member: dependency
+  crates do not inherit the workspace ``forbid``, so unscanned unsafe in one
+  would compile for Windows.
+* Cargo target paths (``lib.path``, ``bin|test|bench|example[].path`` and
+  ``package.build``) must name a ``.rs`` file inside the crate directory.
+* ``include``, ``include_str`` and ``include_bytes`` may not be imported
+  (``use``) or named as a path segment without ``!``: an alias would hide the
+  include target. A local identifier of that name is fine.
+* A hosted test must live in a file compiled from a crate root (``src/lib.rs``,
+  ``src/main.rs``, ``src/bin``, top-level ``tests``) through ``mod name;``
+  declarations that are not cfg'd out (only ``cfg(test)``, ``cfg(windows)`` and
+  ``cfg(all(test, windows))`` count as live). Declarations inside inline
+  ``mod x { }`` blocks and explicit ``[[test]]`` paths are not followed, so a
+  test reachable only that way is rejected.
 * The root ``[workspace.lints.rust] unsafe_code`` must be ``forbid``, and no
   non-shim manifest may configure ``unsafe_code`` (or ``unsafe-code``).
 * One unsafe block per line: the inventory is keyed by file and line, so a
@@ -84,8 +98,13 @@ UNSAFE_KIND = re.compile(r"unsafe\s*(\w+|\()")
 ATTRIBUTE_START = re.compile(r"#\s*(!?)\s*\[")
 BANNED_WORD = re.compile(r"(?<!\w)(no_mangle|export_name|link_section)(?!\w)")
 FORBIDS_UNSAFE = re.compile(r"(?<!\w)forbid\([^)]*(?<!\w)unsafe_code(?!\w)")
-DEPENDENCY_TABLES = frozenset({"dependencies", "dev-dependencies", "build-dependencies"})
-LIVE_TEST_CFGS = ("cfg(test)", "cfg(windows)")
+DEPENDENCY_TABLES = frozenset(
+    {"dependencies", "dev-dependencies", "build-dependencies", "dev_dependencies", "build_dependencies", "replace"}
+)
+LIVE_TEST_CFGS = ("cfg(test)", "cfg(windows)", "cfg(all(test,windows))", "cfg(all(windows,test))")
+USE_STATEMENT = re.compile(r"(?<!\w)use\s[^;]*;")
+INCLUDE_WORD = re.compile(r"(?<!\w)(include(?:_str|_bytes)?)(?!\w)(?!\s*!)")
+MOD_FILE_DECLARATION = re.compile(r"(?<!\w)(?P<visibility>pub\s*(?:\([^)]*\)\s*)?)?mod\s+(?P<name>\w+)\s*;")
 PATH_ATTRIBUTE = re.compile(r"(?<!\w)path\s*=")
 PATH_LITERAL = re.compile(r'path\s*=\s*"([^"\\]*)"')
 INCLUDE_MACRO = re.compile(r"(?<!\w)(include(?:_str|_bytes)?)\s*!")
@@ -421,8 +440,12 @@ def _walk(directory: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
 def _path_dependencies(value: object, parent: str = "") -> list[str]:
     found: list[str] = []
     if isinstance(value, dict):
-        if parent in DEPENDENCY_TABLES:
-            found.extend(item["path"] for item in value.values() if isinstance(item, dict) and isinstance(item.get("path"), str))
+        tables = list(value.values()) if parent == "patch" else [value]
+        for table in tables if parent in {"patch", *DEPENDENCY_TABLES} else []:
+            if isinstance(table, dict):
+                found.extend(
+                    item["path"] for item in table.values() if isinstance(item, dict) and isinstance(item.get("path"), str)
+                )
         for key, item in value.items():
             found.extend(_path_dependencies(item, key))
     return found
@@ -504,15 +527,42 @@ def _check_path_dependencies(
     directory: Path,
     manifest: dict[str, object],
     scanned_dirs: tuple[Path, ...],
-    excluded: set[Path],
     found: list[str],
 ) -> None:
-    """Flag in-workspace path dependencies that Cargo would add as unlisted members."""
+    """Flag path dependencies (all tables, patch and replace) on anything but a scanned member.
+
+    Dependency crates do not inherit the workspace ``forbid``, so unscanned unsafe
+    in one would be compiled for Windows.
+    """
     label = (directory / "Cargo.toml").relative_to(root).as_posix()
     for relative in _path_dependencies(manifest):
-        target = (directory / relative).resolve()
-        if target != root and target.is_relative_to(root) and target not in scanned_dirs and target not in excluded:
-            found.append(f"{label}: path dependency {relative} is inside the workspace but is not a listed member")
+        if (directory / relative).resolve() not in scanned_dirs:
+            found.append(f"{label}: path dependency {relative} must name a listed workspace member")
+
+
+def _target_paths(manifest: dict[str, object]) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    library = manifest.get("lib")
+    if isinstance(library, dict) and isinstance(library.get("path"), str):
+        found.append(("lib.path", library["path"]))
+    for key in ("bin", "test", "bench", "example"):
+        items = manifest.get(key)
+        if isinstance(items, list):
+            found.extend(
+                (f"{key}.path", item["path"]) for item in items if isinstance(item, dict) and isinstance(item.get("path"), str)
+            )
+    package = manifest.get("package")
+    if isinstance(package, dict) and isinstance(package.get("build"), str):
+        found.append(("package.build", package["build"]))
+    return found
+
+
+def _check_target_paths(root: Path, directory: Path, manifest: dict[str, object], found: list[str]) -> None:
+    """Cargo target paths must name a ``.rs`` file inside the crate's own directory."""
+    label = (directory / "Cargo.toml").relative_to(root).as_posix()
+    for key, relative in _target_paths(manifest):
+        if not _scanned_rust_file((directory / relative).resolve(), (directory,)):
+            found.append(f"{label}: {key} {relative} must name a .rs file inside the crate directory")
 
 
 def _scanned_rust_file(target: Path, scanned_dirs: tuple[Path, ...]) -> bool:
@@ -569,6 +619,15 @@ def _check_surface(
             continue
         else:
             inclusion(match.start(), f"{name}!", None, crate_dir, data=data)
+    use_spans = [use.span() for use in USE_STATEMENT.finditer(code)]
+    for match in INCLUDE_WORD.finditer(code):
+        imported = any(begin <= match.start() < end for begin, end in use_spans)
+        if not imported and not code[: match.start()].rstrip().endswith("::"):
+            continue
+        found.append(
+            f"{at(match.start())}: {match.group(1)} must only be used as the {match.group(1)}! macro; "
+            "an import or alias would hide the include target"
+        )
     for match in EXTERN_FN.finditer(code):
         found.append(f"{at(match.start())}: extern fn definition creates FFI surface and is forbidden")
 
@@ -611,11 +670,53 @@ def _is_live_test(attached: tuple[str, ...]) -> bool:
     return True
 
 
+def _crate_roots(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]]) -> list[str]:
+    roots: list[str] = []
+    for relative in scans:
+        parts = relative.split("/")
+        if (
+            relative in ("src/lib.rs", "src/main.rs")
+            or (parts[0] == "src" and len(parts) > 2 and parts[1] == "bin" and (len(parts) == 3 or parts[3:] == ["main.rs"]))
+            or (parts[0] == "tests" and (len(parts) == 2 or parts[2:] == ["main.rs"]))
+        ):
+            roots.append(relative)
+    return roots
+
+
+def _reachable_files(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]]) -> set[str]:
+    """Return files compiled via crate roots and non-cfg'd ``mod name;`` declarations.
+
+    Declarations inside inline ``mod x { }`` blocks are not followed, so a test
+    file reachable only that way is treated as unreachable (fails closed).
+    """
+    roots = _crate_roots(scans)
+    reachable: set[str] = set()
+    pending = list(roots)
+    while pending:
+        relative = pending.pop()
+        if relative in reachable or relative not in scans:
+            continue
+        reachable.add(relative)
+        scanned, attributes = scans[relative]
+        here = PurePosixPath(relative)
+        base = here.parent if relative in roots or here.name == "mod.rs" else here.parent / here.stem
+        for match in MOD_FILE_DECLARATION.finditer(scanned.code):
+            start = match.start("visibility") if match.group("visibility") else match.start()
+            attached = _outer_attributes_before(scanned.code, attributes, start)
+            if any(item.startswith("cfg(") and item not in LIVE_TEST_CFGS for item in attached):
+                continue
+            name = match.group("name")
+            pending.append((base / f"{name}.rs").as_posix())
+            pending.append((base / name / "mod.rs").as_posix())
+    return reachable
+
+
 def _hosted_test_exists(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], name: str) -> bool:
-    """Return whether a shim ``tests/`` or ``src/`` file holds a live ``#[test]``."""
+    """Return whether a compiled shim ``tests/`` or ``src/`` file holds a live ``#[test]``."""
     expression = re.compile(rf"(?<!\w)fn\s+{re.escape(name)}(?!\w)")
+    reachable = _reachable_files(scans)
     for relative, (scanned, attributes) in scans.items():
-        if not relative.startswith(("tests/", "src/")):
+        if relative not in reachable or not relative.startswith(("tests/", "src/")):
             continue
         for match in expression.finditer(scanned.code):
             modifiers = FUNCTION_MODIFIERS.search(scanned.code[: match.start()])
@@ -794,20 +895,19 @@ def violations(root: Path) -> list[str]:
             found.append(f"Cargo.toml: glob workspace member {member} cannot be audited; list members explicitly")
             continue
         directory = (root / member).resolve()
-        if not directory.is_relative_to(root):
-            found.append(f"Cargo.toml: workspace member {member} is outside the repository")
+        if (root / member).is_symlink():
+            found.append(f"Cargo.toml: workspace member {member} is a symlink")
         elif directory != Path(os.path.normpath(root / member)):
             found.append(f"Cargo.toml: workspace member {member} traverses a symlink")
+        elif not directory.is_relative_to(root):
+            found.append(f"Cargo.toml: workspace member {member} is outside the repository")
         elif not (directory / "Cargo.toml").is_file():
             found.append(f"{member}/Cargo.toml: workspace member manifest is missing")
         else:
             directories[member] = directory
     scanned_dirs = tuple(directories.values())
     _check_root_lints(root_manifest, found)
-    workspace = root_manifest.get("workspace")
-    exclude = workspace.get("exclude", []) if isinstance(workspace, dict) else []
-    excluded = {(root / item).resolve() for item in exclude if isinstance(item, str)}
-    _check_path_dependencies(root, root, root_manifest, scanned_dirs, excluded, found)
+    _check_path_dependencies(root, root, root_manifest, scanned_dirs, found)
     for directory in scanned_dirs:
         for link in _walk(directory)[1]:
             found.append(f"{link.relative_to(root).as_posix()}: symlinks are forbidden under a scanned workspace member")
@@ -817,7 +917,8 @@ def violations(root: Path) -> list[str]:
         shim_manifest = _toml(root, shim / "Cargo.toml", found)
         if shim_manifest is not None:
             _check_shim_lints(root_manifest, shim_manifest, found)
-            _check_path_dependencies(root, shim, shim_manifest, scanned_dirs, excluded, found)
+            _check_path_dependencies(root, shim, shim_manifest, scanned_dirs, found)
+            _check_target_paths(root, shim, shim_manifest, found)
         _check_inventory(shim, root, _check_shim_sources(shim, scanned_dirs, found), found)
 
     for member, directory in directories.items():
@@ -825,7 +926,8 @@ def violations(root: Path) -> list[str]:
             continue
         manifest = _toml(root, directory / "Cargo.toml", found)
         if manifest is not None:
-            _check_path_dependencies(root, directory, manifest, scanned_dirs, excluded, found)
+            _check_path_dependencies(root, directory, manifest, scanned_dirs, found)
+            _check_target_paths(root, directory, manifest, found)
         if manifest is not None and _contains_unsafe_code_lint(manifest.get("lints", {})):
             found.append(f"{member}/Cargo.toml: non-shim crate configures unsafe_code")
         _check_member_sources(root, directory, scanned_dirs, found)

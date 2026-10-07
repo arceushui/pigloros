@@ -342,6 +342,7 @@ def test_accepted() -> None:
         {
             **ffi_case(*STANDARD_BODY),
             f"{SHIM}/tests/ffi.rs": None,
+            LIB: CFG + "\n#[forbid(unsafe_code)]\nmod host;\n",
             HOST: HOST_MODULE + "\n#[test]\n#[cfg(windows)]\npub async fn ffi_fixture() {}\n",
         },
     )
@@ -817,7 +818,7 @@ def test_hardening() -> None:
         {"Cargo.toml": root_manifest().replace('unsafe_code = "forbid"', 'unsafe_code = { level = "forbid" }')},
     )
     helper = {"crates/helper/Cargo.toml": MEMBER_MANIFEST.replace("member", "helper"), "crates/helper/src/lib.rs": "pub fn h() {}\n"}
-    not_member = "crates/safe/Cargo.toml: path dependency ../helper is inside the workspace but is not a listed member"
+    not_member = "crates/safe/Cargo.toml: path dependency ../helper must name a listed workspace member"
     require_rejected(
         "path dependency on an unlisted in-workspace crate",
         {**helper, "crates/safe/Cargo.toml": MEMBER_MANIFEST + '\n[dependencies]\nhelper = { path = "../helper" }\n'},
@@ -834,15 +835,120 @@ def test_hardening() -> None:
     require_rejected(
         "workspace dependency path on an unlisted crate",
         {**helper, "Cargo.toml": root_manifest() + '\n[workspace.dependencies]\nhelper = { path = "crates/helper" }\n'},
-        ["Cargo.toml: path dependency crates/helper is inside the workspace but is not a listed member"],
+        ["Cargo.toml: path dependency crates/helper must name a listed workspace member"],
+    )
+    for name, manifest_path, text, dependency in (
+        ("outside the workspace", "crates/safe/Cargo.toml", '\n[dependencies]\nfar = { path = "../../../far" }\n', "../../../far"),
+        ("an excluded crate", "crates/safe/Cargo.toml", '\n[build-dependencies]\nghost = { path = "../ghost" }\n', "../ghost"),
+        ("a subtable", "crates/safe/Cargo.toml", '\n[dependencies.helper]\npath = "../helper"\n', "../helper"),
+        ("dev_dependencies", "crates/safe/Cargo.toml", '\n[dev_dependencies]\nhelper = { path = "../helper" }\n', "../helper"),
+        ("patch", "Cargo.toml", '\n[patch.crates-io]\nhelper = { path = "crates/helper" }\n', "crates/helper"),
+        ("replace", "Cargo.toml", '\n[replace]\n"helper:0.1.0" = { path = "crates/helper" }\n', "crates/helper"),
+        ("shim dependency", f"{SHIM}/Cargo.toml", '\n[dependencies]\nhelper = { path = "../helper" }\n', "../helper"),
+    ):
+        base = {"Cargo.toml": root_manifest(), "crates/safe/Cargo.toml": MEMBER_MANIFEST, f"{SHIM}/Cargo.toml": SHIM_MANIFEST}[manifest_path]
+        extra = {**helper, manifest_path: base + text}
+        if name == "an excluded crate":
+            extra["Cargo.toml"] = root_manifest().replace("members = [", 'exclude = ["crates/ghost"]\nmembers = [')
+            extra["crates/ghost/Cargo.toml"] = MEMBER_MANIFEST.replace("member", "ghost")
+        require_rejected(
+            f"path dependency on {name}",
+            extra,
+            [f"{manifest_path}: path dependency {dependency} must name a listed workspace member"],
+        )
+    require_accepted(
+        "path dependency on a scanned member",
+        {"crates/safe/Cargo.toml": MEMBER_MANIFEST + '\n[dependencies]\nshim = { path = "../pos-owner-bridge-windows" }\n'},
+    )
+    for key, manifest_text, files, shown in (
+        ("lib.path", '\n[lib]\npath = "../../../o5/l.rs"\n', {}, "../../../o5/l.rs"),
+        ("bin.path", '\n[[bin]]\nname = "g"\npath = "../ghost/src/l.rs"\n', {"crates/ghost/src/l.rs": "pub fn g() {}\n"}, "../ghost/src/l.rs"),
+        ("test.path", '\n[[test]]\nname = "t"\npath = "../../../o5/t.rs"\n', {}, "../../../o5/t.rs"),
+        ("bench.path", '\n[[bench]]\nname = "b"\npath = "../ghost/b.rs"\n', {"crates/ghost/b.rs": "fn b() {}\n"}, "../ghost/b.rs"),
+        ("example.path", '\n[[example]]\nname = "e"\npath = "src/missing.rs"\n', {}, "src/missing.rs"),
+    ):
+        require_rejected(
+            f"{key} outside the crate directory",
+            {"crates/safe/Cargo.toml": MEMBER_MANIFEST + manifest_text, **files},
+            [f"crates/safe/Cargo.toml: {key} {shown} must name a .rs file inside the crate directory"],
+        )
+    require_rejected(
+        "package.build outside the crate directory",
+        {"crates/safe/Cargo.toml": MEMBER_MANIFEST.replace('version = "0.1.0"', 'version = "0.1.0"\nbuild = "../build.rs"'), "crates/build.rs": "fn main() {}\n"},
+        ["crates/safe/Cargo.toml: package.build ../build.rs must name a .rs file inside the crate directory"],
+    )
+    require_rejected(
+        "shim lib.path outside the crate directory",
+        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST + '\n[lib]\npath = "../safe/src/lib.rs"\n'},
+        [f"{SHIM}/Cargo.toml: lib.path ../safe/src/lib.rs must name a .rs file inside the crate directory"],
     )
     require_accepted(
-        "path dependencies on a member, outside the workspace, and on an excluded crate",
+        "target paths inside the crate directory",
         {
-            **helper,
-            "Cargo.toml": root_manifest().replace("members = [", 'exclude = ["crates/helper"]\nmembers = ['),
-            "crates/safe/Cargo.toml": MEMBER_MANIFEST
-            + '\n[dependencies]\nshim = { path = "../pos-owner-bridge-windows" }\nfar = { path = "../../../far" }\nhelper = { path = "../helper" }\n',
+            "crates/safe/Cargo.toml": MEMBER_MANIFEST.replace('version = "0.1.0"', 'version = "0.1.0"\nbuild = "build.rs"')
+            + '\n[lib]\npath = "src/lib.rs"\n\n[[bin]]\nname = "b"\npath = "src/bin/b.rs"\n',
+            "crates/safe/src/bin/b.rs": FORBID + "fn main() {}\n",
+            "crates/safe/build.rs": FORBID + "fn main() {}\n",
+        },
+    )
+    require_accepted(
+        "a local identifier named include",
+        {SAFE_LIB_PATH: FORBID + "pub fn f(include: bool) -> bool {\n    include\n}\n"},
+    )
+    for spelling, word in (
+        ("use core::include as inc;", "include"),
+        ("use std::include;", "include"),
+        ("use std::include_str;", "include_str"),
+        ("use core::include_bytes as b;", "include_bytes"),
+        ("let _f = core::include;", "include"),
+        ("use std::{include as i, vec};", "include"),
+    ):
+        require_rejected(
+            f"aliased include: {spelling}",
+            {SAFE_LIB_PATH: FORBID + spelling + "\n"},
+            [at(SAFE_LIB_PATH, 2, f"{word} must only be used as the {word}! macro; an import or alias would hide the include target")],
+        )
+    test_source = HOST_MODULE + "\n#[test]\nfn ffi_fixture() {}\n"
+    unreachable_message = f"{INV}: hosted test ffi_fixture for src/ffi/ops.rs:5 is not a live #[test] function under tests/ or src/"
+    require_rejected(
+        "hosted test in a file no mod declares",
+        {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": None, HOST: test_source},
+        [unreachable_message],
+    )
+    require_rejected(
+        "hosted test below a cfg'd-out mod",
+        {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": None, HOST: test_source, LIB: CFG + "\n#[forbid(unsafe_code)]\n#[cfg(any())]\nmod host;\n"},
+        [unreachable_message],
+    )
+    require_rejected(
+        "hosted test in tests/ below an undeclared directory",
+        {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": None, f"{SHIM}/tests/deep/x.rs": test_source},
+        [unreachable_message],
+    )
+    for name, lib in (
+        ("cfg(test)", "#[cfg(test)]"),
+        ("cfg(all(test, windows))", "#[cfg(all(test, windows))]"),
+    ):
+        require_accepted(
+            f"hosted test below {name} mod",
+            {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": None, HOST: test_source, LIB: CFG + f"\n#[forbid(unsafe_code)]\n{lib}\nmod host;\n"},
+        )
+    require_accepted(
+        "hosted test in a nested module file and a tests/ helper module",
+        {
+            **ffi_case(*STANDARD_BODY),
+            f"{SHIM}/tests/ffi.rs": CFG + FORBID + "\nmod support;\n",
+            f"{SHIM}/tests/support/mod.rs": CFG + FORBID + "\n#[test]\nfn ffi_fixture() {}\n",
+        },
+    )
+    require_accepted(
+        "hosted test in a nested src module",
+        {
+            **ffi_case(*STANDARD_BODY),
+            f"{SHIM}/tests/ffi.rs": None,
+            LIB: CFG + "\n#[forbid(unsafe_code)]\nmod host;\n",
+            HOST: HOST_MODULE + "mod inner;\n",
+            f"{SHIM}/src/host/inner.rs": CFG + FORBID + "\n#[test]\nfn ffi_fixture() {}\n",
         },
     )
     require_accepted("byte-order mark on a shim module and the crate root", {HOST: "\ufeff" + HOST_MODULE, LIB: "\ufeff" + SHIM_LIB})
@@ -905,8 +1011,20 @@ def test_symlinks() -> None:
     require_rejected(
         "workspace member reached through a symlink",
         {"Cargo.toml": root_manifest("crates/linked")},
-        ["Cargo.toml: workspace member crates/linked traverses a symlink"],
+        ["Cargo.toml: workspace member crates/linked is a symlink"],
         links={"crates/linked": "safe"},
+    )
+    require_rejected(
+        "workspace member symlinked outside the repository",
+        {"Cargo.toml": root_manifest("crates/pt")},
+        ["Cargo.toml: workspace member crates/pt is a symlink"],
+        links={"crates/pt": "../../pt-outside"},
+    )
+    require_rejected(
+        "workspace member below a symlinked directory",
+        {"Cargo.toml": root_manifest("crates/deep/safe")},
+        ["Cargo.toml: workspace member crates/deep/safe traverses a symlink"],
+        links={"crates/deep": "."},
     )
 
 
