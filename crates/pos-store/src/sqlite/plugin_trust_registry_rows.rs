@@ -79,7 +79,6 @@ const fn from_sql_u64(value: i64) -> u64 {
     u64::from_ne_bytes(value.to_ne_bytes())
 }
 
-
 /// Reads the columns of one row. The first failed read is kept and later reads return
 /// placeholders, so a decoder is straight-line code whose one failure branch is [`Self::finish`].
 pub(super) struct Columns<'a, 'row> {
@@ -172,11 +171,7 @@ pub(super) fn query_many<T>(
 }
 
 /// Run one statement that must change exactly one row.
-fn execute_one(
-    connection: &Connection,
-    sql: &str,
-    params: impl Params,
-) -> RegistryResult<()> {
+fn execute_one(connection: &Connection, sql: &str, params: impl Params) -> RegistryResult<()> {
     match connection.execute(sql, params) {
         Ok(1) => Ok(()),
         Ok(_) => Err(PluginTrustPolicyRegistryErrorV1::StorageFailed),

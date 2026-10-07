@@ -965,7 +965,8 @@ fn a_failing_read_statement_is_storage_failed() -> TestResult {
         Err(Error::StorageFailed)
     );
     assert_eq!(
-        h.store.retained_release_decision("scope", one.pmf1_digest()),
+        h.store
+            .retained_release_decision("scope", one.pmf1_digest()),
         Err(Error::StorageFailed)
     );
     assert_eq!(h.store.ledger("scope"), Err(Error::StorageFailed));
@@ -979,12 +980,16 @@ fn a_failing_write_statement_is_storage_failed() -> TestResult {
     let mut h = Harness::<SqliteStore>::open()?;
     let other = Env::new("scope-two")?;
     // The schema probe binds seven variables; every insert binds more.
-    h.store.conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 7)?;
+    h.store
+        .conn
+        .set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 7)?;
     assert_eq!(
         h.store.provision(&other.anchor, &other.genesis_tps1),
         Err(Error::StorageFailed)
     );
-    h.store.conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 32_766)?;
+    h.store
+        .conn
+        .set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 32_766)?;
     assert_eq!(
         h.store.retained_policy_state("scope-two"),
         Err(Error::MissingState)
@@ -996,7 +1001,9 @@ fn a_failing_write_statement_is_storage_failed() -> TestResult {
 fn a_failing_schema_probe_is_storage_failed_everywhere() -> TestResult {
     let mut h = Harness::<SqliteStore>::open()?;
     let genesis = h.env.genesis()?;
-    h.store.conn.set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 6)?;
+    h.store
+        .conn
+        .set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 6)?;
     assert_eq!(h.advance(&genesis)?, Err(Error::StorageFailed));
     assert_eq!(h.store.ledger("scope"), Err(Error::StorageFailed));
     assert_eq!(
@@ -1016,7 +1023,9 @@ fn a_failing_schema_creation_is_storage_failed_and_leaves_no_tables() -> TestRes
         store.provision(&env.anchor, &env.genesis_tps1),
         Err(Error::StorageFailed)
     );
-    store.conn.set_limit(Limit::SQLITE_LIMIT_SQL_LENGTH, 1_000_000)?;
+    store
+        .conn
+        .set_limit(Limit::SQLITE_LIMIT_SQL_LENGTH, 1_000_000)?;
     assert_eq!(
         store.retained_policy_state("scope"),
         Err(Error::MissingState)
