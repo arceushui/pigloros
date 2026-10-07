@@ -156,11 +156,11 @@ impl ComponentHost {
             .set_fuel(limits.fuel)
             .and_then(|()| component.pre.instantiate(&mut store))
             .and_then(|instance| {
-                let after_startup = remaining_fuel(&store)?;
+                let after_startup = store.get_fuel()?;
                 call(&mut store, instance, index, args).map(|value| (value, after_startup))
             })
             .and_then(|(value, after_startup)| {
-                remaining_fuel(&store).map(|after_call| (value, after_startup, after_call))
+                store.get_fuel().map(|after_call| (value, after_startup, after_call))
             });
         let (value, after_startup, after_call) = outcome.map_err(|error| classify(&error))?;
         let state = store.into_data();
@@ -214,9 +214,4 @@ fn call(
             let [value] = results;
             value
         })
-}
-
-/// Fuel left in the store; fails only if the engine does not meter fuel.
-fn remaining_fuel(store: &Store<HostState>) -> wasmtime::Result<u64> {
-    store.get_fuel()
 }
