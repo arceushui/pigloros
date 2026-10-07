@@ -17,7 +17,9 @@ use pos_core::{
     CanonicalBytes, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
     KeyRegistryErrorV1, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PublicKey, Signature,
 };
-use pos_crypto::key_roles::{destroy_registered_signing_key, SigningKeyMaterial};
+use pos_crypto::key_roles::{
+    destroy_registered_signing_key, sign_for_registered_role, SigningKeyMaterial,
+};
 use pos_crypto::plugin_execution::{
     DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
 };
@@ -549,14 +551,24 @@ fn a_retained_signature_must_match_the_exact_draft_epoch_and_key() -> TestResult
         publish_signed_plugin_release_v1(&draft, &corrupted, &key, &store),
         invalid_signature()
     );
-    // The same signature claimed for another epoch, even epoch zero.
-    for epoch in [0, 2] {
-        let moved = PluginReleaseSignatureV1::new(epoch, *signature.signature());
-        assert_eq!(
-            publish_signed_plugin_release_v1(&draft, &moved, &key, &store),
-            invalid_signature()
-        );
-    }
+    // The same signature claimed for another epoch; epoch zero is no PMF1 at all.
+    assert_eq!(signature.epoch(), 1);
+    let moved = PluginReleaseSignatureV1::new(2, *signature.signature());
+    assert_eq!(
+        publish_signed_plugin_release_v1(&draft, &moved, &key, &store),
+        invalid_signature()
+    );
+    let zero = PluginReleaseSignatureV1::new(0, *signature.signature());
+    assert!(matches!(
+        publish_signed_plugin_release_v1(&draft, &zero, &key, &store),
+        Err(PluginReleasePublishErrorV1::Manifest(_))
+    ));
+    // An invalid draft is rejected before any signature check.
+    let empty = make_draft(OWNER, 60, 60)?;
+    assert!(matches!(
+        publish_signed_plugin_release_v1(&empty, &signature, &key, &store),
+        Err(PluginReleasePublishErrorV1::Manifest(_))
+    ));
     // A key that is not a curve point (y = 2 has no x).
     let mut off_curve = [0; 32];
     off_curve[0] = 2;
@@ -674,4 +686,40 @@ fn the_largest_epoch_signs_and_publishes() -> TestResult {
     let published = publish_plugin_release_v1(&mut registry, &material, epoch, &draft, &store)?;
     let bundle = store.read_verified(published.address())?;
     assert_independent(bundle.pmf1(), epoch, &material.public_verification_key())
+}
+
+#[test]
+fn a_draft_whose_artifacts_cannot_form_a_closure_is_rejected() -> TestResult {
+    let root = PrivateRoot::new()?;
+    let store = root.store()?;
+    let (mut registry, material) = publisher_registry()?;
+    // The SBOM and the licence share bytes, so their OCI digests collide.
+    let mut shared = default_draft()?;
+    shared.licences = vec![input(SBOM_BYTES)];
+    assert_eq!(
+        sign_plugin_release_v1(&mut registry, &material, 1, &shared),
+        Err(PluginReleasePublishErrorV1::Closure(
+            ReleaseSourceErrorV1::DuplicateMember
+        ))
+    );
+    // A wrong caller SHA-256 only fails once the closure is decoded, even when a
+    // signature over that exact draft exists.
+    let mut wrong = default_draft()?;
+    wrong.component.sha256 = [0; 32];
+    let digest = wrong.unsigned()?.release_digest();
+    let key_identity = identity(OWNER, KeyRoleV1::PluginReleaseSigning, 1)?;
+    let signed = sign_for_registered_role(
+        &mut registry,
+        &material,
+        key_identity,
+        &CanonicalBytes::from_vec(digest.to_vec()),
+    )?;
+    let signature = PluginReleaseSignatureV1::new(1, *signed.as_bytes());
+    let key = material.public_verification_key();
+    assert!(matches!(
+        publish_signed_plugin_release_v1(&wrong, &signature, &key, &store),
+        Err(PluginReleasePublishErrorV1::Manifest(_))
+    ));
+    assert!(store.recover_all()?.committed.is_empty());
+    Ok(())
 }

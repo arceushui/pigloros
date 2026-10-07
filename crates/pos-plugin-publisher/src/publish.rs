@@ -168,7 +168,7 @@ pub fn sign_plugin_release_v1<R: KeyRegistrySigningPortV1>(
 /// discoverable only at its durable index transition.
 ///
 /// # Errors
-/// Returns `Manifest` for an invalid draft, `InvalidSignature` when the
+/// Returns `Manifest` for an invalid draft or epoch zero, `InvalidSignature` when the
 /// signature or key does not verify, `Closure` when the artifacts cannot form
 /// a closure, and `Publication` for a store failure, which may be
 /// `OutcomeUnknown(address)`.
@@ -181,11 +181,11 @@ pub fn publish_signed_plugin_release_v1(
     let unsigned = draft.unsigned()?;
     let identity = signing_identity(&unsigned, signature.epoch);
     let release_digest = unsigned.release_digest();
+    let pmf1 = unsigned.with_signature(signature.epoch, *signature.signature())?;
     let payload = release_payload(&unsigned);
     if !signature_verifies(public_key, identity, &payload, &signature.signature) {
         return Err(PluginReleasePublishErrorV1::InvalidSignature);
     }
-    let pmf1 = unsigned.with_signature(signature.epoch, *signature.signature())?;
     let bundle = assemble(draft, &pmf1)?;
     let outcome = store.publish(&bundle)?;
     Ok(PublishedPluginReleaseV1 {
