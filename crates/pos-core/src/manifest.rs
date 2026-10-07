@@ -339,6 +339,18 @@ pub struct ReproManifest {
     label: Option<String>,
 }
 
+// The caps `ReproManifest::new` enforces, kept apart so the constructor stays a straight line.
+fn check_caps(records: usize, label: Option<&str>) -> Result<(), ReproManifestError> {
+    if records > MAX_REPRO_MANIFEST_ADAPTER_RECORDS {
+        return Err(too_many(RECORDS));
+    }
+    let len = label.map_or(0, str::len);
+    if len > MAX_REPRO_MANIFEST_LABEL_BYTES_V1 {
+        return Err(ReproManifestError::LabelTooLong { len });
+    }
+    Ok(())
+}
+
 impl ReproManifest {
     /// Validate and build one manifest.
     ///
@@ -352,14 +364,7 @@ impl ReproManifest {
         adapter_records: Vec<AdapterRecord>,
         label: Option<String>,
     ) -> Result<Self, ReproManifestError> {
-        if adapter_records.len() > MAX_REPRO_MANIFEST_ADAPTER_RECORDS {
-            return Err(too_many(RECORDS));
-        }
-        let len = label.as_deref().map_or(0, str::len);
-        if len > MAX_REPRO_MANIFEST_LABEL_BYTES_V1 {
-            return Err(ReproManifestError::LabelTooLong { len });
-        }
-        Ok(Self {
+        check_caps(adapter_records.len(), label.as_deref()).map(|()| Self {
             timeline_id,
             head_hash,
             created_at,
