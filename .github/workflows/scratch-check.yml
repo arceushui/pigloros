@@ -1,0 +1,37 @@
+name: scratch-check
+on:
+  push:
+    branches: [scratch/check448]
+permissions:
+  contents: write
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ref: redmine/567-plugin-trust-bridge
+            id: p567
+            pkg: pos-conformance
+            test: plugin_trust_bridge_public
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+      - name: rustfmt and publish patch
+        run: |
+          cargo fmt --all
+          git --no-pager diff --stat
+          git diff > /tmp/fmt.patch
+          git config user.name ci && git config user.email ci@example.com
+          git checkout -q -B out-${{ matrix.id }}
+          mkdir -p fmtout && cp /tmp/fmt.patch fmtout/${{ matrix.id }}.patch
+          git add -f fmtout && git commit -q -m out && git push -q -f origin out-${{ matrix.id }}:refs/heads/scratch/out-${{ matrix.id }}
+          git checkout -q -f ${{ matrix.ref }} 2>/dev/null || git checkout -q -f HEAD~1
+      - name: clippy keep-going
+        run: |
+          CARGO_TERM_COLOR=never cargo clippy --keep-going --message-format=short --locked --workspace --all-targets --all-features -- -D warnings -W clippy::pedantic 2>&1 | grep -E 'error|warning' | grep -E '${{ matrix.pkg }}' | sort -u | head -80
+      - name: targeted tests
+        run: |
+          CARGO_TERM_COLOR=never cargo test --locked -p ${{ matrix.pkg }} --test ${{ matrix.test }} 2>&1 | grep -E 'test result|FAILED|panicked|error(\[|:)|failures:' | head -60
