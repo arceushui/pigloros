@@ -613,7 +613,7 @@ def decode_cases() -> dict[str, dict[str, str]]:
             "PrfMalformed", "assertion", replace(assertion_fields, 8, PRF_FIRST[:31])
         ),
         "decode_get_prf_null": decode_case(
-            "PrfMalformed", "assertion", replace(assertion_fields, 8, None)
+            "PrfAbsent", "assertion", replace(assertion_fields, 8, None)
         ),
         "decode_get_prf_second_present": decode_case(
             "PrfMalformed", "assertion", replace(assertion_fields, 9, PRF_FIRST)

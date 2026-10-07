@@ -18,7 +18,7 @@ const REASONS: &str = include_str!("../../../fixtures/owner-bridge/webauthn-reas
 /// A case name that no fixture line uses, so every field keeps its baseline.
 const NO_CASE: &str = "baseline";
 
-const ALL_REASONS: [(&str, VerificationReason); 20] = [
+const ALL_REASONS: [(&str, VerificationReason); 21] = [
     ("CeremonyIdMismatch", VerificationReason::CeremonyIdMismatch),
     ("PrfUnsupported", VerificationReason::PrfUnsupported),
     ("Malformed", VerificationReason::Malformed),
@@ -39,6 +39,7 @@ const ALL_REASONS: [(&str, VerificationReason); 20] = [
     ("CounterRegression", VerificationReason::CounterRegression),
     ("BackupFlags", VerificationReason::BackupFlags),
     ("PrfMalformed", VerificationReason::PrfMalformed),
+    ("PrfAbsent", VerificationReason::PrfAbsent),
 ];
 
 #[test]
@@ -57,10 +58,7 @@ fn every_fixture_case_reports_its_exact_reason() -> Result<(), OwnerBridgeCodecE
 fn every_verification_reason_has_a_fixture_case() {
     for (name, _) in ALL_REASONS {
         let wanted = format!(".reason={name}");
-        assert!(
-            REASONS.lines().any(|line| line.contains(&wanted)),
-            "{name}"
-        );
+        assert!(REASONS.lines().any(|line| line.contains(&wanted)), "{name}");
     }
 }
 
@@ -126,11 +124,8 @@ fn run_get(case: &str) -> Result<Option<VerificationReason>, OwnerBridgeCodecErr
     let stored_id = baseline_bytes("credential_id")?;
     let stored_handle = OwnerUserHandle::from_bytes(baseline_array("user_handle")?);
     let client_data = case_bytes(case, "client_data_json", "assertion_client_data_json")?;
-    let authenticator_data = case_bytes(
-        case,
-        "authenticator_data",
-        "assertion_authenticator_data",
-    )?;
+    let authenticator_data =
+        case_bytes(case, "authenticator_data", "assertion_authenticator_data")?;
     let signature = case_bytes(case, "signature", "assertion_signature_der")?;
     let raw_id = case_bytes(case, "raw_id", "credential_id")?;
     let handle = case_optional_array(case, "user_handle")?;

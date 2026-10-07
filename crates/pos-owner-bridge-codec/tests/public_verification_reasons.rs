@@ -1,19 +1,13 @@
 use pos_owner_bridge_codec::{OwnerBridgeCodecError, VerificationReason as Reason};
 
-const MESSAGES: [(Reason, &str); 20] = [
+const MESSAGES: [(Reason, &str); 21] = [
     (
         Reason::CeremonyIdMismatch,
         "reply ceremony ID does not match the open ceremony",
     ),
-    (
-        Reason::PrfUnsupported,
-        "credential reports no PRF support",
-    ),
+    (Reason::PrfUnsupported, "credential reports no PRF support"),
     (Reason::Malformed, "reply is structurally malformed"),
-    (
-        Reason::Origin,
-        "client data origin is not the owner origin",
-    ),
+    (Reason::Origin, "client data origin is not the owner origin"),
     (Reason::RpIdHash, "authenticator RP ID hash is wrong"),
     (
         Reason::ClientDataType,
@@ -63,6 +57,7 @@ const MESSAGES: [(Reason, &str); 20] = [
         "authenticator backup flags are inconsistent",
     ),
     (Reason::PrfMalformed, "PRF fields are malformed"),
+    (Reason::PrfAbsent, "required PRF result is absent"),
 ];
 
 #[test]

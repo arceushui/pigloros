@@ -313,7 +313,11 @@ fn public_assertion_authenticator_parser_enforces_flags_and_exact_length(
         ("reserved low bit", 0x07, Reason::Malformed),
         ("reserved high bit", 0x25, Reason::Malformed),
         ("backup state, no eligibility", 0x15, Reason::BackupFlags),
-        ("attested credential data on assertion", 0x45, Reason::Malformed),
+        (
+            "attested credential data on assertion",
+            0x45,
+            Reason::Malformed,
+        ),
     ] {
         let data = assertion_authenticator_data(flags, &[]);
         assert_eq!(

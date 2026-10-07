@@ -116,6 +116,8 @@ pub enum VerificationReason {
     BackupFlags,
     /// A PRF field of the reply has the wrong shape or `second` is not null.
     PrfMalformed,
+    /// A Get reply carries no PRF result (`null`) where one is required.
+    PrfAbsent,
 }
 
 impl fmt::Display for VerificationReason {
@@ -141,6 +143,7 @@ impl fmt::Display for VerificationReason {
             Self::CounterRegression => "assertion counter did not advance",
             Self::BackupFlags => "authenticator backup flags are inconsistent",
             Self::PrfMalformed => "PRF fields are malformed",
+            Self::PrfAbsent => "required PRF result is absent",
         };
         formatter.write_str(message)
     }

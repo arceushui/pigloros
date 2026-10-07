@@ -416,7 +416,7 @@ fn parse_cose_es256_key(input: &[u8]) -> Result<(CoseEs256PublicKey, usize), Ver
 
 /// Report `Algorithm` when the first COSE label `3` holds a non-ES256 value.
 ///
-/// An EdDSA or RSA key has a different shape, so this scan runs before the
+/// An `EdDSA` or RSA key has a different shape, so this scan runs before the
 /// closed-shape parse and lets those keys report the algorithm rather than a
 /// generic key failure. A scan that cannot reach an integer label `3` defers
 /// to the closed-shape parse, which then rejects the key as `CoseKey`.
@@ -659,10 +659,7 @@ impl<'a> AuthenticatorCborReader<'a> {
     }
 
     fn byte(&mut self) -> Result<u8, VerificationReason> {
-        let byte = *self
-            .input
-            .get(self.offset)
-            .ok_or(self.fault)?;
+        let byte = *self.input.get(self.offset).ok_or(self.fault)?;
         self.offset += 1;
         Ok(byte)
     }

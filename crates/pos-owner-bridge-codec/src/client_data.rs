@@ -311,8 +311,7 @@ struct JsonParser<'a> {
 
 impl<'a> JsonParser<'a> {
     fn new(input: &'a [u8]) -> Result<Self, VerificationReason> {
-        let input =
-            core::str::from_utf8(input).map_err(|_| VerificationReason::Malformed)?;
+        let input = core::str::from_utf8(input).map_err(|_| VerificationReason::Malformed)?;
         Ok(Self { input, offset: 0 })
     }
 
@@ -331,9 +330,7 @@ impl<'a> JsonParser<'a> {
         let mut contains_escape = false;
 
         loop {
-            let byte = self
-                .take_byte()
-                .ok_or(VerificationReason::Malformed)?;
+            let byte = self.take_byte().ok_or(VerificationReason::Malformed)?;
             match byte {
                 b'"' => {
                     return Ok(JsonString {
@@ -367,9 +364,7 @@ impl<'a> JsonParser<'a> {
     }
 
     fn validate_escape(&mut self) -> Result<(), VerificationReason> {
-        let escape = self
-            .take_byte()
-            .ok_or(VerificationReason::Malformed)?;
+        let escape = self.take_byte().ok_or(VerificationReason::Malformed)?;
         match escape {
             b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => Ok(()),
             b'u' => {

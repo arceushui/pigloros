@@ -23,6 +23,8 @@ const MAX_AUTHENTICATOR_DATA_BYTES: usize = 1_024;
 const MIN_AUTHENTICATOR_DATA_BYTES: usize = 37;
 const MAX_SIGNATURE_BYTES: usize = 80;
 const MIN_SIGNATURE_BYTES: usize = 8;
+const PRF_ABSENT: OwnerBridgeCodecError =
+    OwnerBridgeCodecError::Verification(VerificationReason::PrfAbsent);
 
 /// Host-supplied Create options encoded into a request buffer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -523,7 +525,11 @@ pub fn decode_assertion_reply(input: &[u8]) -> Result<AssertionReplyV1<'_>, Owne
         .optional_fixed_bytes::<32>()
         .map_err(user_handle_fault)?
         .map(OwnerUserHandle::from_bytes);
-    let prf_first = PrfResult::from_bytes(reader.fixed_bytes().map_err(prf_fault)?);
+    let prf_first = reader
+        .optional_fixed_bytes::<32>()
+        .map_err(prf_fault)?
+        .map(PrfResult::from_bytes)
+        .ok_or(PRF_ABSENT)?;
     reader.null().map_err(prf_fault)?;
     reader.finish()?;
     AssertionReplyV1::new(
