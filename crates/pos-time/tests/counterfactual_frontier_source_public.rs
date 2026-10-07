@@ -521,11 +521,13 @@ impl CounterfactualFrontierSourceV1 for Graph {
 }
 
 /// The derivation of `source` for `plan`, as the coordinator requests it.
-fn derive(
-    source: &mut impl CounterfactualFrontierSourceV1,
-    plan: &CounterfactualPlanV1,
-) -> Result<CounterfactualFrontierDerivationV1, AdmissionError> {
-    source.derive_frontier(plan, FRONTIER_ID, PROVENANCE)
+///
+/// A macro, not a function: the admission error is too large to return from
+/// a helper (`result_large_err`).
+macro_rules! derivation {
+    ($source:expr_2021, $plan:expr_2021) => {
+        $source.derive_frontier($plan, FRONTIER_ID, PROVENANCE)
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -752,7 +754,7 @@ fn recorded_source(
 fn matches_the_hand_built_source_for_every_page_size() -> TestResult {
     let plan = plan(|_| {})?;
     let mut hand_built = graph_with(&plan, &[])?;
-    let expected = derive(&mut hand_built, &plan)?;
+    let expected = derivation!(&mut hand_built, &plan)?;
     let expected_graph = hand_built.graph(&plan)?;
     let (prefix, fork) = split_rows(&hand_built)?;
     let counts = [prefix.0.len(), prefix.1.len(), fork.0.len(), fork.1.len()];
@@ -761,7 +763,7 @@ fn matches_the_hand_built_source_for_every_page_size() -> TestResult {
         let port = FakePort::recorded(prefix.clone(), 1, vec![(1, fork.clone())]);
         let mut source = production(port, 1, limit);
         assert_eq!(source.page_limit(), limit);
-        assert_eq!(derive(&mut source, &plan)?, expected);
+        assert_eq!(derivation!(&mut source, &plan)?, expected);
         assert_eq!(source.recorded_graph(&plan)?, expected_graph);
         assert_eq!(
             source.recorded_graph_digest(&plan)?,
@@ -796,24 +798,24 @@ fn matches_the_hand_built_source_for_every_page_size() -> TestResult {
 fn reads_only_the_committed_generation() -> TestResult {
     let plan = plan(|_| {})?;
     let mut hand_built = graph_with(&plan, &[])?;
-    let expected = derive(&mut hand_built, &plan)?;
+    let expected = derivation!(&mut hand_built, &plan)?;
     let (prefix, fork) = split_rows(&hand_built)?;
     // Generation 1 is quarantined behind generation 2, which holds the same rows.
     let both = || vec![(1, fork.clone()), (2, fork.clone())];
     let mut stale = production(FakePort::recorded(prefix.clone(), 2, both()), 1, 3);
     assert_eq!(
-        derive(&mut stale, &plan),
+        derivation!(&mut stale, &plan),
         Err(AdmissionError::Store(StoreError::MixedForkGeneration))
     );
     let mut current = production(FakePort::recorded(prefix.clone(), 2, both()), 2, 3);
-    assert_eq!(derive(&mut current, &plan)?, expected);
+    assert_eq!(derivation!(&mut current, &plan)?, expected);
     // Rows recorded only under the quarantined generation never contribute:
     // generation 2 is empty, so only the prefix remains and no Intervention
     // node exists.
     let quarantined = vec![(1, fork)];
     let mut source = production(FakePort::recorded(prefix, 2, quarantined), 2, 3);
     assert_eq!(
-        derive(&mut source, &plan),
+        derivation!(&mut source, &plan),
         Err(AdmissionError::DependencyGraphInvalid)
     );
     Ok(())
@@ -826,7 +828,7 @@ fn reports_a_missing_edge_under_reject_and_falls_back_under_full_suffix() -> Tes
     let incomplete = graph_with(&reject, &[omitted])?;
     let mut source = recorded_source(&incomplete, 4)?;
     assert_eq!(
-        derive(&mut source, &reject),
+        derivation!(&mut source, &reject),
         Err(AdmissionError::DependencyGraphIncomplete(
             UnknownEdgeCoordinateV1 {
                 consumer: incomplete.nodes[WORLD_D].node.clone(),
@@ -838,12 +840,12 @@ fn reports_a_missing_edge_under_reject_and_falls_back_under_full_suffix() -> Tes
     // carries, derive the full-suffix frontier.
     let fallback = plan(|plan| plan.unknown_edge_policy = UnknownEdgePolicyV1::FullSuffixFromCut)?;
     let mut hand_built = graph_with(&fallback, &[omitted])?;
-    let expected = derive(&mut hand_built, &fallback)?;
+    let expected = derivation!(&mut hand_built, &fallback)?;
     assert_eq!(
         expected.frontier.unknown_edge_policy,
         UnknownEdgePolicyV1::FullSuffixFromCut
     );
-    assert_eq!(derive(&mut source, &fallback)?, expected);
+    assert_eq!(derivation!(&mut source, &fallback)?, expected);
     assert_eq!(
         source.recorded_graph_digest(&fallback)?,
         hand_built.graph_digest(&fallback)?
@@ -861,7 +863,7 @@ fn reports_an_edge_whose_consumer_is_not_recorded() -> TestResult {
     fork.0.retain(|node| *node.coordinate() != view);
     let mut source = production(FakePort::recorded(prefix, 1, vec![(1, fork)]), 1, 4);
     assert_eq!(
-        derive(&mut source, &plan),
+        derivation!(&mut source, &plan),
         Err(AdmissionError::UnknownDependencyEdge(
             UnknownEdgeCoordinateV1 {
                 consumer: hand_built.nodes[VIEW].node.clone(),
@@ -879,7 +881,7 @@ fn other_rejections_are_invalid_graphs() -> TestResult {
     // no record, so no Intervention node exists.
     let empty = FakePort::recorded((Vec::new(), Vec::new()), 1, Vec::new());
     assert_eq!(
-        derive(&mut production(empty, 1, 4), &plan),
+        derivation!(&mut production(empty, 1, 4), &plan),
         Err(AdmissionError::DependencyGraphInvalid)
     );
     // Bounds above the hard maximum are the validator's `FieldOutOfBounds`.
@@ -893,7 +895,7 @@ fn other_rejections_are_invalid_graphs() -> TestResult {
     let mut oversized = RecordedFrontierSourceV1::new(port, generation(1), bounds);
     assert_eq!(oversized.bounds(), bounds);
     assert_eq!(
-        derive(&mut oversized, &plan),
+        derivation!(&mut oversized, &plan),
         Err(AdmissionError::DependencyGraphInvalid)
     );
     // A derivation failure over a valid graph: zero provenance.
@@ -916,19 +918,19 @@ fn port_failures_are_store_errors() -> TestResult {
     let mut port = recorded();
     port.prefixes.clear();
     assert_eq!(
-        derive(&mut production(port, 1, 4), &plan),
+        derivation!(&mut production(port, 1, 4), &plan),
         Err(AdmissionError::Store(StoreError::ForkNotFound))
     );
     let mut port = recorded();
     port.forks.clear();
     assert_eq!(
-        derive(&mut production(port, 1, 4), &plan),
+        derivation!(&mut production(port, 1, 4), &plan),
         Err(AdmissionError::Store(StoreError::ForkNotFound))
     );
     let mut port = recorded();
     port.fault = Some(StoreError::StorageFailure);
     assert_eq!(
-        derive(&mut production(port, 1, 4), &plan),
+        derivation!(&mut production(port, 1, 4), &plan),
         Err(AdmissionError::Store(StoreError::StorageFailure))
     );
     Ok(())
@@ -948,7 +950,7 @@ fn corrupt_stored_rows_are_corrupt_state() -> TestResult {
         4,
     );
     assert_eq!(
-        derive(&mut source, &plan),
+        derivation!(&mut source, &plan),
         Err(AdmissionError::Store(StoreError::CorruptState))
     );
     // A prefix that serves the Fork's nodes too continues behind a cursor past
@@ -957,7 +959,7 @@ fn corrupt_stored_rows_are_corrupt_state() -> TestResult {
     beyond.0.extend(fork.0.clone());
     let mut source = production(FakePort::recorded(beyond, 1, vec![(1, fork)]), 1, 1);
     assert_eq!(
-        derive(&mut source, &plan),
+        derivation!(&mut source, &plan),
         Err(AdmissionError::Store(StoreError::CorruptState))
     );
     Ok(())
@@ -1033,9 +1035,9 @@ fn bounds_the_generation_at_the_plan_horizon() -> TestResult {
         .filter(|&(consumer, _)| consumer != WEATHER)
         .collect();
     let mut hand_built = connect(nodes, &specs, &[]);
-    let expected = derive(&mut hand_built, &short)?;
+    let expected = derivation!(&mut hand_built, &short)?;
     let mut source = production(FakePort::recorded(prefix, 1, vec![(1, fork)]), 1, 1);
-    assert_eq!(derive(&mut source, &short)?, expected);
+    assert_eq!(derivation!(&mut source, &short)?, expected);
     assert_eq!(
         source.recorded_graph_digest(&short)?,
         hand_built.graph_digest(&short)?
@@ -1434,7 +1436,7 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
         facts,
     } = seed(&mut store)?;
     let plan = &host.plan;
-    let expected = derive(&mut graph, plan)?;
+    let expected = derivation!(&mut graph, plan)?;
     let mut coordinator = CounterfactualCoordinatorV1::new(store.clone());
     let request = admission_request(&host);
     // Generation 1 is admitted from the hand-built graph and records it.
@@ -1446,7 +1448,7 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
     // the second Intervention's record is not committed yet.
     let mut early = recorded(&store)?;
     assert_eq!(
-        derive(&mut early, plan),
+        derivation!(&mut early, plan),
         Err(AdmissionError::DependencyGraphInvalid)
     );
     let run = coordinator
@@ -1460,7 +1462,7 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
         complete.recorded_graph_digest(plan)?,
         *facts.dependency_graph_digest.as_bytes()
     );
-    assert_eq!(derive(&mut complete, plan)?, expected);
+    assert_eq!(derivation!(&mut complete, plan)?, expected);
     // Generation 2 is admitted from the recorded graph alone and recomputed.
     let mut again = DeclaringStager::new(&graph)?;
     let second =
@@ -1476,11 +1478,11 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
         third.recorded_graph_digest(plan)?,
         expected.frontier.dependency_graph_digest
     );
-    assert_eq!(derive(&mut third, plan)?, expected);
+    assert_eq!(derivation!(&mut third, plan)?, expected);
     // The quarantined generation 1 never contributes, and an unknown Fork is
     // never an empty graph.
     assert_eq!(
-        derive(&mut complete, plan),
+        derivation!(&mut complete, plan),
         Err(AdmissionError::Store(StoreError::MixedForkGeneration))
     );
     let unknown = ForkGenerationV1 {
@@ -1489,7 +1491,7 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
     };
     let mut source = RecordedFrontierSourceV1::new(store.clone(), unknown, BOUNDS);
     assert_eq!(
-        derive(&mut source, plan),
+        derivation!(&mut source, plan),
         Err(AdmissionError::Store(StoreError::ForkNotFound))
     );
     Ok(())
