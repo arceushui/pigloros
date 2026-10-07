@@ -1225,7 +1225,12 @@ fn policy_bridge_error_precedence_matches_the_documented_order() -> TestResult {
     let (evidence, revoked_id) = other_revocation_evidence()?;
     let policy = |snapshot: TrustPolicySnapshotV1, utc: i64, tick: u64| -> TestResult<_> {
         let authenticated = authed(snapshot)?;
-        Ok(verify_plugin_tps1_policy_v1(&authenticated, &evidence, utc, tick))
+        Ok(verify_plugin_tps1_policy_v1(
+            &authenticated,
+            &evidence,
+            utc,
+            tick,
+        ))
     };
     let mapped = || base_snapshot(vec![revoked_id.clone()], vec![[0x77; 32]]);
     assert_eq!(policy(mapped(), 50, 5)?, Ok(()));
@@ -1293,7 +1298,7 @@ fn policy_bridge_error_precedence_matches_the_documented_order() -> TestResult {
     Ok(())
 }
 
-fn wrong_epoch(mut snapshot: TrustPolicySnapshotV1) -> TrustPolicySnapshotV1 {
+const fn wrong_epoch(mut snapshot: TrustPolicySnapshotV1) -> TrustPolicySnapshotV1 {
     snapshot.epoch = 2;
     snapshot
 }
