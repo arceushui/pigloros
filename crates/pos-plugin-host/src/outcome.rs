@@ -78,7 +78,6 @@ const fn fault_failure(fault: HostFault) -> InvocationFailure {
     match fault {
         HostFault::CallRejected => InvocationFailure::HostCallRejected,
         HostFault::MemoryLimit => InvocationFailure::MemoryLimitExceeded,
-        HostFault::MissingExport => InvocationFailure::Rejected,
     }
 }
 
@@ -89,8 +88,6 @@ mod tests {
 
     #[test]
     fn host_faults_and_traps_map_to_closed_failures() {
-        let missing = wasmtime::Error::new(HostFault::MissingExport);
-        assert_eq!(classify(&missing), InvocationFailure::Rejected);
         let memory = wasmtime::Error::new(HostFault::MemoryLimit);
         assert_eq!(classify(&memory), InvocationFailure::MemoryLimitExceeded);
         let rejected = wasmtime::Error::new(HostFault::CallRejected);

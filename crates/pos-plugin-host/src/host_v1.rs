@@ -45,8 +45,6 @@ pub(crate) enum HostFault {
     CallRejected,
     /// Linear-memory growth beyond the invocation's memory limit.
     MemoryLimit,
-    /// An export resolved at load time is not a function of the instance.
-    MissingExport,
 }
 
 impl fmt::Display for HostFault {
@@ -54,7 +52,6 @@ impl fmt::Display for HostFault {
         formatter.write_str(match self {
             Self::CallRejected => "host-v1 call rejected",
             Self::MemoryLimit => "linear memory limit exceeded",
-            Self::MissingExport => "guest-v1 export missing from the instance",
         })
     }
 }
@@ -73,8 +70,20 @@ pub(crate) struct HostState {
 /// Reservations are never returned: a reservation that Wasmtime later fails to
 /// commit still counts, which only makes the limit stricter.
 pub(crate) struct MemoryLimiter {
-    pub(crate) limit: usize,
-    pub(crate) reserved: usize,
+    limit: usize,
+    reserved: usize,
+}
+
+impl MemoryLimiter {
+    /// A limiter that has reserved nothing yet and refuses beyond `limit` bytes.
+    pub(crate) const fn new(limit: usize) -> Self {
+        Self { limit, reserved: 0 }
+    }
+
+    /// Bytes reserved so far, widened losslessly (`usize` is at most 64 bits).
+    pub(crate) const fn reserved_bytes(&self) -> u64 {
+        self.reserved as u64
+    }
 }
 
 impl ResourceLimiter for MemoryLimiter {
@@ -301,27 +310,21 @@ mod tests {
 
     #[test]
     fn memory_reservations_stop_exactly_at_the_limit() {
-        let mut limiter = MemoryLimiter {
-            limit: 131_072,
-            reserved: 0,
-        };
+        let mut limiter = MemoryLimiter::new(131_072);
         assert!(matches!(limiter.memory_growing(0, 65_536, None), Ok(true)));
         assert!(matches!(
             limiter.memory_growing(65_536, 131_072, None),
             Ok(true)
         ));
-        assert_eq!(limiter.reserved, 131_072);
+        assert_eq!(limiter.reserved_bytes(), 131_072);
         let denied = limiter.memory_growing(131_072, 196_608, None);
         assert!(denied.is_err_and(|error| error.is::<HostFault>()));
-        assert_eq!(limiter.reserved, 131_072);
+        assert_eq!(limiter.reserved_bytes(), 131_072);
     }
 
     #[test]
     fn tables_stop_at_the_element_ceiling() {
-        let mut limiter = MemoryLimiter {
-            limit: 0,
-            reserved: 0,
-        };
+        let mut limiter = MemoryLimiter::new(0);
         let largest = limiter.table_growing(0, MAX_TABLE_ELEMENTS, None);
         assert!(matches!(largest, Ok(true)));
         let beyond = limiter.table_growing(0, MAX_TABLE_ELEMENTS + 1, None);
@@ -334,10 +337,6 @@ mod tests {
         assert_eq!(
             HostFault::MemoryLimit.to_string(),
             "linear memory limit exceeded"
-        );
-        assert_eq!(
-            HostFault::MissingExport.to_string(),
-            "guest-v1 export missing from the instance"
         );
     }
 }

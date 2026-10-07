@@ -4,7 +4,7 @@ use wasmtime::component::types::ComponentItem;
 use wasmtime::component::{Component, ComponentExportIndex, Instance, InstancePre, Linker, Val};
 use wasmtime::{Config, Engine, OptLevel, Store, Strategy, WasmBacktraceDetails};
 
-use crate::host_v1::{self, HostFault, HostInputs, HostState, MemoryLimiter};
+use crate::host_v1::{self, HostInputs, HostState, MemoryLimiter};
 use crate::outcome::{classify, InvocationFailure, InvocationReport, LoadError};
 use crate::MAX_WASM_STACK_BYTES;
 
@@ -137,10 +137,10 @@ impl ComponentHost {
         limits: InvocationLimits,
         inputs: HostInputs,
     ) -> Result<InvocationReport, InvocationFailure> {
-        let memory = MemoryLimiter {
-            limit: usize::try_from(limits.memory_bytes).unwrap_or(usize::MAX),
-            reserved: 0,
-        };
+        // A limit above the address space saturates: no guest can reserve more
+        // than `usize::MAX` bytes, so saturating never admits extra memory.
+        let limit = usize::try_from(limits.memory_bytes).unwrap_or(usize::MAX);
+        let memory = MemoryLimiter::new(limit);
         let mut store = Store::new(
             &self.engine,
             HostState {
@@ -156,17 +156,19 @@ impl ComponentHost {
             .set_fuel(limits.fuel)
             .and_then(|()| component.pre.instantiate(&mut store))
             .and_then(|instance| {
-                let after_startup = remaining_fuel(&store);
+                let after_startup = remaining_fuel(&store)?;
                 call(&mut store, instance, index, args).map(|value| (value, after_startup))
+            })
+            .and_then(|(value, after_startup)| {
+                remaining_fuel(&store).map(|after_call| (value, after_startup, after_call))
             });
-        let after_call = remaining_fuel(&store);
-        let (value, after_startup) = outcome.map_err(|error| classify(&error))?;
+        let (value, after_startup, after_call) = outcome.map_err(|error| classify(&error))?;
         let state = store.into_data();
         Ok(InvocationReport {
             value,
             startup_fuel: limits.fuel.saturating_sub(after_startup),
             call_fuel: after_startup.saturating_sub(after_call),
-            memory_bytes: u64::try_from(state.memory.reserved).unwrap_or(u64::MAX),
+            memory_bytes: state.memory.reserved_bytes(),
             operational_log: state.log,
         })
     }
@@ -206,8 +208,7 @@ fn call(
     let mut results = [Val::Bool(false)];
     instance
         .get_func(&mut *store, index)
-        .ok_or(HostFault::MissingExport)
-        .map_err(wasmtime::Error::new)
+        .ok_or_else(|| wasmtime::Error::msg("guest-v1 export missing from the instance"))
         .and_then(|func| func.call(&mut *store, args, &mut results))
         .map(|()| {
             let [value] = results;
@@ -215,7 +216,7 @@ fn call(
         })
 }
 
-/// Fuel left in the store; the pinned engine always meters fuel.
-fn remaining_fuel(store: &Store<HostState>) -> u64 {
-    store.get_fuel().unwrap_or_default()
+/// Fuel left in the store; fails only if the engine does not meter fuel.
+fn remaining_fuel(store: &Store<HostState>) -> wasmtime::Result<u64> {
+    store.get_fuel()
 }
