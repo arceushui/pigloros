@@ -1136,7 +1136,10 @@ mod tests {
         let baseline = first.manifest.plugin_roster();
         let candidate = second.manifest.plugin_roster();
         let compared = pos_core::compare_manifest_plugin_rosters_v1(baseline, candidate);
-        assert_eq!(compared.map(pos_core::RosterEquivalenceV1::slot_count), Ok(2));
+        assert_eq!(
+            compared.map(pos_core::RosterEquivalenceV1::slot_count),
+            Ok(2)
+        );
     }
 
     #[test]

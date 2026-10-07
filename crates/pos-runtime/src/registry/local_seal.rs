@@ -65,7 +65,8 @@ impl PluginRegistry {
         plugin_id: PluginId,
         entry: &PluginEntry,
         reservations: &[PluginCpuReservationV1],
-    ) -> Result<(ManifestAdmissionCatalogRowV1, SealedLocalEntry), ManifestRegistrationErrorV1> {
+    ) -> Result<(ManifestAdmissionCatalogRowV1, SealedLocalEntry), ManifestRegistrationErrorV1>
+    {
         let admission = entry
             .output_admission
             .as_ref()

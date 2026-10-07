@@ -1069,7 +1069,9 @@ impl OutputPolicyClosureV1 {
     /// identity [`Self::from_artifacts`] checks still holds, so no re-verification is needed.
     #[must_use]
     pub(crate) fn with_budget(&self, budget: ExecutableBudgetPolicyV1) -> Self {
-        let policy = self.output_policy.with_executable_profile_hash(budget.digest());
+        let policy = self
+            .output_policy
+            .with_executable_profile_hash(budget.digest());
         Self {
             output_policy_bytes: policy.to_canonical_cbor(),
             executable_budget_bytes: budget.to_canonical_cbor(),

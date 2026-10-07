@@ -432,7 +432,9 @@ fn raised_reservation(
     }
     let (slot, id, digest) = (row.stable_slot(), row.plugin_id(), policy.digest());
     let (name, version) = (row.plugin_name(), row.plugin_version());
-    Ok(ManifestPluginEntryV1::new(slot, id, name, version, digest, closure)?)
+    Ok(ManifestPluginEntryV1::new(
+        slot, id, name, version, digest, closure,
+    )?)
 }
 
 // The roster with `owner`'s reservation raised in the closure of every slot `edited` selects.
@@ -481,11 +483,18 @@ fn a_changed_reservation_still_reports_a_mismatch() -> TestResult {
 fn only_a_successful_admission_rebinds_the_generated_pins() -> TestResult {
     let mut registry = PluginRegistry::new();
     register(&mut registry, &RosterPlugin::new("weather"), "weather")?;
-    register(&mut registry, &RosterPlugin::new("tally").reducer_only(), "tally")?;
+    register(
+        &mut registry,
+        &RosterPlugin::new("tally").reducer_only(),
+        "tally",
+    )?;
     let before = registry.composition();
     let owner = OwnerIdV1::from_static("roster-app");
     let zero = registry.admit_local_manifest_registration(owner, 0);
-    assert!(matches!(zero, Err(ManifestRegistrationErrorV1::IncompleteBatch)));
+    assert!(matches!(
+        zero,
+        Err(ManifestRegistrationErrorV1::IncompleteBatch)
+    ));
     assert_eq!(registry.composition(), before);
     let admitted = registry.admit_local_manifest_registration(owner, 1)?;
     assert_ne!(registry.composition(), before);
