@@ -103,13 +103,13 @@ use crate::fork_delivery_journal::{
 };
 use crate::fork_event_authority::{
     classified_event_matches_operation, fork_append_request, permitted_fork_admission,
-    preflight_classifier_sources, recover_classified_operation,
+    preflight_classifier_sources, recover_classified_operation, AuthorityValidatorV1,
+    ValidatedAdmissionV1, ValidatedOriginV1,
 };
 use crate::fork_manifest_publication::{
     authorize_publication, publication_parent_head, publication_sources,
     recovered_publication_receipt, require_absent_publication_graph, sign_publication,
-    trusted_committed_manifest, validate_publication_request, AbsentPublicationPreflightV1,
-    CommittedPublicationRowsV1, CommittedPublicationSourcesV1, PublicationGraphV1,
+    validate_publication_request, AbsentPublicationPreflightV1, PublicationGraphV1,
     PublicationSourceErrorV1, PublicationSourceResultV1, PublicationSourcesV1, PublicationSuffixV1,
 };
 use crate::{
@@ -122,6 +122,7 @@ use crate::{
 mod counterfactual_store;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
+mod fork_code_two_read;
 mod pipeline_admission;
 
 #[cfg(test)]
@@ -2188,16 +2189,7 @@ impl MemoryStore {
             .fork_classifier_tables
             .get(&child_timeline_id)
             .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        let mut registrations = self
-            .fork_classifier_registrations
-            .values()
-            .filter(|registration| registration.input().child_timeline_id == child_timeline_id);
-        let registration = registrations
-            .next()
-            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        if registrations.next().is_some() {
-            return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
-        }
+        let registration = self.child_registration(child_timeline_id)?;
         let source = self
             .fork_classifier_sources
             .get(&(
@@ -2303,7 +2295,7 @@ impl MemoryStore {
                 .map(|event| (table, event))
         })
         .and_then(|(table, event)| {
-            self.validate_classified_records(operation, &event, &table)
+            self.validate_classified_records(operation, &event, &table, ValidatedOriginV1::Local)
                 .map(|_| event)
         })
     }
@@ -2314,6 +2306,7 @@ impl MemoryStore {
         operation: &ForkAppendOperationV1,
         event: &Event,
         table: &ForkClassifierTableV1,
+        origin: ValidatedOriginV1,
     ) -> Result<(EventOriginRecordV1, Option<ForkInterventionAdmissionV1>), ForkEventAuthorityErrorV1>
     {
         let input = operation.input();
@@ -2327,19 +2320,19 @@ impl MemoryStore {
                     .classify_identity(&input.source)
                     .ok(),
             )
-            .filter(|(origin, classification)| {
+            .filter(|(record, classification)| {
                 let (expected_origin, expected_intervention) =
                     operation.expected_provenance(table, *classification);
                 event.id == input.event_id
                     && event.seq.as_u64() == input.logical_seq
-                    && classified_event_matches_operation(event, operation)
-                    && **origin == expected_origin
-                    && origin.digest() == input.event_origin_digest
+                    && classified_event_matches_operation(event, operation, origin)
+                    && **record == expected_origin
+                    && record.digest() == input.event_origin_digest
                     && intervention == expected_intervention.as_ref()
                     && intervention.map(ForkInterventionAdmissionV1::digest)
                         == input.intervention_admission_digest
             })
-            .map(|(origin, _)| (origin.clone(), intervention.cloned()))
+            .map(|(record, _)| (record.clone(), intervention.cloned()))
             .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
     }
 
@@ -2569,76 +2562,11 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
         )>,
         ForkEventAuthorityErrorV1,
     > {
-        let prefix = self
-            .logical_prefix(child_timeline_id)
-            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        let events = &self.state(child_timeline_id).events;
-        let logical_seqs = events
-            .iter()
-            .filter_map(|event| {
-                prefix
-                    .checked_add(event.seq.as_u64())
-                    .map(|logical_seq| (event.id, logical_seq))
-            })
-            .collect::<HashMap<_, _>>();
-        let anchored =
-            |event_id: EventId, logical_seq: u64| logical_seqs.get(&event_id) == Some(&logical_seq);
-        let orphaned_operation = self.fork_append_operations.values().any(|operation| {
-            operation.input().child_timeline_id == child_timeline_id
-                && !anchored(operation.input().event_id, operation.input().logical_seq)
-        });
-        let orphaned_origin = self.fork_event_origins.values().any(|origin| {
-            origin.input().fork_timeline_id == child_timeline_id
-                && !anchored(origin.input().event_id, origin.input().logical_seq)
-        });
-        let orphaned_intervention = self.fork_intervention_admissions.values().any(|record| {
-            record.input().fork_timeline_id == child_timeline_id
-                && !anchored(record.input().event_id, record.input().logical_seq)
-        });
-        if orphaned_operation || orphaned_origin || orphaned_intervention {
-            return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
-        }
-        if events.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut operations = HashMap::with_capacity(logical_seqs.len());
-        for operation in self.fork_append_operations.values() {
-            if logical_seqs.contains_key(&operation.input().event_id)
-                && operations
-                    .insert(operation.input().event_id, operation)
-                    .is_some()
-            {
-                return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
-            }
-        }
-        let (admission, table, _) = self.classified_authority_graph(child_timeline_id)?;
-        events
-            .iter()
-            .filter_map(|event| {
-                prefix
-                    .checked_add(event.seq.as_u64())
-                    .filter(|logical_seq| *logical_seq >= from_logical_seq)
-                    .map(|logical_seq| (event, logical_seq))
-            })
-            .map(|(event, logical_seq)| {
-                let operation = operations
-                    .get(&event.id)
-                    .copied()
-                    .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-                if operation.input().logical_seq != logical_seq
-                    || operation.input().fork_admission_digest != admission.digest()
-                    || operation.input().classifier_revision_digest != table.digest()
-                {
-                    return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
-                }
-                let committed = Event {
-                    seq: Seq::from_u64(logical_seq),
-                    ..event.clone()
-                };
-                self.validate_classified_records(operation, &committed, &table)
-                    .map(|(origin, intervention)| (origin, intervention, operation.clone()))
-            })
-            .collect()
+        self.read_fork_event_suffix_as(
+            child_timeline_id,
+            from_logical_seq,
+            AuthorityValidatorV1::CodeTwoAware,
+        )
     }
 }
 
@@ -2701,26 +2629,33 @@ impl MemoryStore {
 }
 
 impl MemoryStore {
-    /// Read the admitted Fork's immutable `FAR1`.
+    /// Read the admitted Fork's immutable `FAR1` under one explicit R6.9
+    /// validator: issuance and recovery pass validator (a), which requires
+    /// the `Local` origin and its `FCC1` row, and only a read passes (b).
     fn fork_publication_admission(
         &self,
         child_timeline_id: TimelineId,
-    ) -> PublicationSourceResultV1<ForkAdmissionRecordV1> {
-        self.fork_admissions
-            .get(&child_timeline_id)
-            .cloned()
-            .ok_or(PublicationSourceErrorV1::Invalid)
+        validator: AuthorityValidatorV1,
+    ) -> PublicationSourceResultV1<ValidatedAdmissionV1> {
+        self.validated_admission(child_timeline_id, validator)
+            .map_err(PublicationSourceErrorV1::from)
     }
 
-    /// Read the admitted child's classified suffix after its parent cut.
+    /// Read the admitted child's classified suffix after its parent cut under
+    /// one explicit R6.9 validator.
     fn fork_publication_suffix(
         &self,
         child_timeline_id: TimelineId,
         parent_logical_head: PublicationSourceResultV1<u64>,
+        validator: AuthorityValidatorV1,
     ) -> PublicationSourceResultV1<PublicationSuffixV1> {
         parent_logical_head.and_then(|parent_logical_head| {
-            self.read_fork_event_suffix(child_timeline_id, parent_logical_head.saturating_add(1))
-                .map_err(PublicationSourceErrorV1::from)
+            self.read_fork_event_suffix_as(
+                child_timeline_id,
+                parent_logical_head.saturating_add(1),
+                validator,
+            )
+            .map_err(PublicationSourceErrorV1::from)
         })
     }
 
@@ -2773,8 +2708,10 @@ impl MemoryStore {
         request: &ForkManifestPublicationRequestV1,
     ) -> Result<PublicationSourcesV1, ForkManifestPublicationErrorV1> {
         let child = request.child_timeline_id;
-        let admission = self.fork_publication_admission(child);
-        let suffix = self.fork_publication_suffix(child, publication_parent_head(&admission));
+        let validator = AuthorityValidatorV1::LocalOnly;
+        let admission = self.fork_publication_admission(child, validator);
+        let suffix =
+            self.fork_publication_suffix(child, publication_parent_head(&admission), validator);
         let head_and_chain = self
             .logical_head_unchecked(child)
             .and_then(|head| {
@@ -2839,7 +2776,11 @@ impl ForkManifestPublicationPortV1 for MemoryStore {
         validate_publication_request(&request)?;
         if let Some(operation) = self.fork_publication_operations.get(&request.operation_id) {
             let input = operation.input();
-            let committed = self.read_committed(input.child_timeline_id, input.final_logical_head);
+            let committed = self.read_committed_as(
+                input.child_timeline_id,
+                input.final_logical_head,
+                AuthorityValidatorV1::LocalOnly,
+            );
             return recovered_publication_receipt(operation, &request, committed);
         }
         let key = (
@@ -2860,47 +2801,11 @@ impl ForkManifestPublicationPortV1 for MemoryStore {
         child_timeline_id: TimelineId,
         final_logical_head: u64,
     ) -> Result<crate::CommittedForkManifestV1, ForkManifestPublicationErrorV1> {
-        self.fork_publication_bindings
-            .get(&(child_timeline_id, final_logical_head))
-            .copied()
-            .ok_or(ForkManifestPublicationErrorV1::PublicationMissing)
-            .and_then(|binding| {
-                let input = binding.input();
-                let artifact = self
-                    .fork_publication_artifacts
-                    .get(&input.signed_manifest_record_id)
-                    .cloned();
-                self.fork_publication_operations
-                    .get(&input.operation_id)
-                    .cloned()
-                    .zip(artifact)
-                    .map(|(operation, artifact)| CommittedPublicationRowsV1 {
-                        child_timeline_id,
-                        final_logical_head,
-                        binding,
-                        operation,
-                        artifact,
-                    })
-                    .ok_or(ForkManifestPublicationErrorV1::PublicationConflict)
-            })
-            .and_then(|rows| {
-                let admission = self.fork_publication_admission(child_timeline_id);
-                let head = Seq::from_u64(final_logical_head);
-                let final_chain_head_hash = self
-                    .compute_chain_hash_at_unchecked(child_timeline_id, head)
-                    .map_err(PublicationSourceErrorV1::from);
-                let suffix = self.fork_publication_suffix(
-                    child_timeline_id,
-                    publication_parent_head(&admission),
-                );
-                let sources = CommittedPublicationSourcesV1 {
-                    admission,
-                    final_chain_head_hash,
-                    suffix,
-                    registry: Ok(self.key_registry.clone()),
-                };
-                trusted_committed_manifest(&rows, sources)
-            })
+        self.read_committed_as(
+            child_timeline_id,
+            final_logical_head,
+            AuthorityValidatorV1::CodeTwoAware,
+        )
     }
 }
 
@@ -7075,6 +6980,118 @@ mod tests {
         );
         assert_eq!(store.read_fork_event_suffix(child_timeline_id, 1)?.len(), 1);
         Ok((store, child_timeline_id, suffix_operation, event))
+    }
+
+    /// Register the fixture creator's attribution key in the store and build
+    /// the publication request for the child at `head`, with its signer.
+    fn publication_setup(
+        store: &mut MemoryStore,
+        child: TimelineId,
+        head: u64,
+    ) -> Result<
+        (
+            ForkManifestPublicationRequestV1,
+            KeyRegistryStateV1,
+            pos_crypto::key_roles::SigningKeyMaterial,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let (private_key, _) = pos_crypto::signing::generate_keypair();
+        let material = pos_crypto::key_roles::SigningKeyMaterial::new(private_key);
+        let identity = KeyIdentityV1::new("owner", KeyRoleV1::SubjectAttributionSigning, 1);
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(
+            identity,
+            material.material_digest(),
+            Some(material.public_verification_key()),
+        ))?;
+        store.key_registry = Some(registry.clone());
+        let request = ForkManifestPublicationRequestV1 {
+            operation_id: Hash::from_bytes([0x71; 32]),
+            child_timeline_id: child,
+            expected_final_logical_head: head,
+            signing_identity: identity,
+            private_material_digest: material.material_digest(),
+            public_verification_key: material.public_verification_key(),
+            expected_registry: registry.clone(),
+        };
+        Ok((request, registry, material))
+    }
+
+    /// Commit with the fixture signer, and report whether the signer ran.
+    fn commit_with_signer(
+        store: &mut MemoryStore,
+        request: ForkManifestPublicationRequestV1,
+        registry: &KeyRegistryStateV1,
+        material: &pos_crypto::key_roles::SigningKeyMaterial,
+    ) -> (
+        Result<ForkPublicationReceiptV1, ForkManifestPublicationErrorV1>,
+        bool,
+    ) {
+        let invoked = std::cell::Cell::new(false);
+        let mut signing = registry.clone();
+        let identity = request.signing_identity;
+        let result = store.commit_authorized(request, |_, bytes| {
+            invoked.set(true);
+            pos_crypto::key_roles::sign_for_registered_role(
+                &mut signing,
+                material,
+                identity,
+                &CanonicalBytes::from_vec(bytes.to_vec()),
+            )
+        });
+        (result, invoked.get())
+    }
+
+    /// ADR-105 r6 R6.9 hardening: `MemoryStore` publication issuance and the
+    /// committed read now require the `Local` origin and its `FCC1` receipt,
+    /// as `SQLite` always did; only a read may also accept a code-2 `FAR1`.
+    #[test]
+    fn memory_publication_requires_the_local_admission_receipt(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, child, _, _) = classified_suffix_store()?;
+        for validator in [
+            AuthorityValidatorV1::LocalOnly,
+            AuthorityValidatorV1::CodeTwoAware,
+        ] {
+            assert_eq!(
+                store
+                    .fork_publication_admission(child, validator)
+                    .map(|admission| admission.origin()),
+                Ok(ValidatedOriginV1::Local)
+            );
+        }
+        let (request, registry, material) = publication_setup(&mut store, child, 1)?;
+        let (committed, invoked) = commit_with_signer(&mut store, request, &registry, &material);
+        assert!(invoked);
+        assert_eq!(committed?.final_logical_head, 1);
+        assert!(store.read_committed(child, 1).is_ok());
+        store.fork_admission_operations.clear();
+        assert_eq!(
+            store.read_committed(child, 1).err(),
+            Some(ForkManifestPublicationErrorV1::PublicationConflict)
+        );
+        for validator in [
+            AuthorityValidatorV1::LocalOnly,
+            AuthorityValidatorV1::CodeTwoAware,
+        ] {
+            assert_eq!(
+                store.fork_publication_admission(child, validator).err(),
+                Some(PublicationSourceErrorV1::Invalid)
+            );
+        }
+
+        // A new issuance without the receipt is refused before the signer runs.
+        let (mut store, child, _, _) = classified_suffix_store()?;
+        store.fork_admission_operations.clear();
+        let (request, registry, material) = publication_setup(&mut store, child, 1)?;
+        let (refused, invoked) = commit_with_signer(&mut store, request, &registry, &material);
+        assert_eq!(
+            refused,
+            Err(ForkManifestPublicationErrorV1::CorruptAuthority)
+        );
+        assert!(!invoked);
+        Ok(())
     }
 
     #[test]
