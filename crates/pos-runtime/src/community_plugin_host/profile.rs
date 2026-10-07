@@ -142,9 +142,7 @@ impl CeilingValuesV1 {
         .find(|&(valid, _)| !valid)
         .map(|(_, limit)| limit)
     }
-}
 
-impl CeilingValuesV1 {
     /// Clamp `budget` member by member; a budget above a ceiling is clamped.
     ///
     /// This and [`Self::first_out_of_range`] are the one place that knows
