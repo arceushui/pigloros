@@ -14,7 +14,11 @@ jobs:
           - ref: redmine/567-plugin-trust-bridge
             id: p567
             pkg: pos-conformance
-            test: plugin_trust_bridge_public
+            test: "--test plugin_trust_bridge_public"
+          - ref: redmine/570-pmf1-encoder-signature
+            id: p570
+            pkg: pos-crypto
+            test: ""
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,4 +38,4 @@ jobs:
           CARGO_TERM_COLOR=never cargo clippy --keep-going --message-format=short --locked --workspace --all-targets --all-features -- -D warnings -W clippy::pedantic 2>&1 | grep -E 'error|warning' | grep -E '${{ matrix.pkg }}' | sort -u | head -80
       - name: targeted tests
         run: |
-          CARGO_TERM_COLOR=never cargo test --locked -p ${{ matrix.pkg }} --test ${{ matrix.test }} 2>&1 | grep -E 'test result|FAILED|panicked|error(\[|:)|failures:' | head -60
+          CARGO_TERM_COLOR=never cargo test --locked -p ${{ matrix.pkg }} ${{ matrix.test }} 2>&1 | grep -E -A14 '^---- |^error(\[|:)|test result' | head -200
