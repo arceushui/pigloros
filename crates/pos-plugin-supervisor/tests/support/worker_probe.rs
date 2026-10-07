@@ -117,8 +117,7 @@ fn serve_draft(request: &WorkerRequestV1) -> Option<ExitCode> {
     let mode = parts.next()?;
     let event_type = String::from_utf8_lossy(parts.next()?).into_owned();
     // A describe call (and an unknown mode) takes the shared `None` path.
-    let (WorkerCallV1::Reduce(invocation) | WorkerCallV1::Drive(invocation)) = &request.call
-    else {
+    let (WorkerCallV1::Reduce(invocation) | WorkerCallV1::Drive(invocation)) = &request.call else {
         return None;
     };
     let prior = &invocation.prior_state_bytes;
