@@ -2145,7 +2145,7 @@ fn failed_recovery_read_keeps_the_commit_outcome_unknown() -> TestResult {
 /// A macro, not a function: the admission error is too large to return from
 /// a helper (`result_large_err`).
 macro_rules! admit_recording {
-    ($setup:expr, $stager:expr) => {
+    ($setup:ident, $stager:expr_2021) => {
         $setup.coordinator.admit_with_dependencies(
             &request(&$setup.fixture),
             &Authority::default(),
