@@ -14,11 +14,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "blake3.h"
 #include "community_plugin.h"
 
 #define FNV_OFFSET UINT64_C(0xcbf29ce484222325)
 #define FNV_PRIME UINT64_C(0x00000100000001b3)
 #define RANDOM_BYTES 16u
+// The host's V1 `output-digest` domain; the NUL is part of it.
+static const char OUTPUT_DIGEST_DOMAIN[] = "PiglorOS.Plugin.Output.v1";
 
 typedef pigloros_plugin_contract_v1_bytes_t bytes_t;
 typedef pigloros_plugin_contract_v1_bounded_text_t bounded_text_t;
@@ -73,6 +76,68 @@ static void little_endian(uint64_t value, uint8_t out[8]) {
   }
 }
 
+static void put_count(blake3_hasher *hasher, size_t count) {
+  uint8_t prefix[8];
+  for (unsigned index = 0; index < 8; ++index) {
+    prefix[index] = (uint8_t)((uint64_t)count >> (8u * (7u - index)));
+  }
+  blake3_hasher_update(hasher, prefix, sizeof prefix);
+}
+
+static void put_bytes(blake3_hasher *hasher, const bytes_t *bytes) {
+  put_count(hasher, bytes->len);
+  blake3_hasher_update(hasher, bytes->ptr, bytes->len);
+}
+
+static void put_u32(blake3_hasher *hasher, uint32_t value) {
+  uint8_t encoded[4];
+  for (unsigned index = 0; index < 4; ++index) {
+    encoded[index] = (uint8_t)(value >> (8u * (3u - index)));
+  }
+  blake3_hasher_update(hasher, encoded, sizeof encoded);
+}
+
+static void put_digests(blake3_hasher *hasher,
+                        const pigloros_plugin_contract_v1_list_digest32_t *list) {
+  put_count(hasher, list->len);
+  for (size_t index = 0; index < list->len; ++index) {
+    put_bytes(hasher, &list->ptr[index].value);
+  }
+}
+
+// The V1 `output-digest` over fields 0-5 of `output`.
+static void seal_output(plugin_output_t *output) {
+  blake3_hasher hasher;
+  blake3_hasher_init(&hasher);
+  blake3_hasher_update(&hasher, OUTPUT_DIGEST_DOMAIN,
+                       sizeof OUTPUT_DIGEST_DOMAIN);
+  put_bytes(&hasher, &output->invocation_id);
+  put_count(&hasher, output->event_drafts.len);
+  for (size_t index = 0; index < output->event_drafts.len; ++index) {
+    const event_draft_t *draft = &output->event_drafts.ptr[index];
+    put_u32(&hasher, draft->event_schema_id);
+    put_bytes(&hasher, &draft->entity_id);
+    put_bytes(&hasher, &draft->event_type.utf8);
+    put_bytes(&hasher, &draft->canonical_payload);
+    put_digests(&hasher, &draft->dependency_digests);
+  }
+  put_bytes(&hasher, &output->next_state_schema.value);
+  put_bytes(&hasher, &output->next_state_bytes);
+  put_count(&hasher, output->trace_annotations.len);
+  for (size_t index = 0; index < output->trace_annotations.len; ++index) {
+    const pigloros_plugin_contract_v1_trace_annotation_t *annotation =
+        &output->trace_annotations.ptr[index];
+    put_u32(&hasher, annotation->annotation_schema_id);
+    put_bytes(&hasher, &annotation->canonical_bytes);
+    put_digests(&hasher, &annotation->dependency_digests);
+  }
+  put_digests(&hasher, &output->consumed_dependencies);
+  output->output_digest.value.len = BLAKE3_OUT_LEN;
+  output->output_digest.value.ptr = checked_malloc(BLAKE3_OUT_LEN);
+  blake3_hasher_finalize(&hasher, output->output_digest.value.ptr,
+                         BLAKE3_OUT_LEN);
+}
+
 static bool is_trap_observation(const bytes_t *observation) {
   static const uint8_t trap[] = {'t', 'r', 'a', 'p'};
   return observation->len == sizeof trap &&
@@ -107,12 +172,7 @@ static void fill_output(const plugin_invocation_t *input, uint64_t hash,
   ret->next_state_schema.value = copy_bytes(
       input->prior_state_schema.value.ptr, input->prior_state_schema.value.len);
   ret->next_state_bytes = copy_bytes(state, sizeof state);
-  ret->output_digest.value.len = 4 * sizeof state;
-  ret->output_digest.value.ptr = checked_malloc(4 * sizeof state);
-  for (unsigned copy = 0; copy < 4; ++copy) {
-    memcpy(ret->output_digest.value.ptr + copy * sizeof state, state,
-           sizeof state);
-  }
+  seal_output(ret);
 }
 
 static bool invoke(plugin_invocation_t *input, const char *message,
@@ -159,8 +219,8 @@ bool exports_pigloros_plugin_guest_v1_describe(
   ret->release_semver = text("0.1.0");
   ret->world = text("pigloros:plugin/community-plugin@0.1.0");
   ret->abi_major = 0;
-  ret->min_abi_minor = 1;
-  ret->max_abi_minor = 1;
+  ret->min_abi_minor = 0;
+  ret->max_abi_minor = 0;
   ret->event_schema_digests.len = 1;
   ret->event_schema_digests.ptr = checked_malloc(sizeof(digest32_t));
   ret->event_schema_digests.ptr[0] = filled_digest(1);

@@ -1,110 +1,192 @@
 //! Closed load and invocation outcomes.
+//!
+//! A failed invocation returns only the closed
+//! [`CommunityPluginHostErrorV1`]: no guest output, log or runtime message
+//! survives it. A completed invocation returns the guest's validated typed
+//! return, which may be the guest's own `plugin-error`.
 
-use wasmtime::component::Val;
+use std::fmt;
+
+use pos_runtime::community_plugin_host::CommunityPluginHostErrorV1;
 use wasmtime::Trap;
 
-use crate::host_v1::{HostFault, OperationalLogRecord};
+use crate::host_v1::HostFault;
+use crate::runtime::trap_outcome;
 
 /// Why a Component could not be loaded.
+///
+/// Every refusal is the closed `IncompatibleAbi`, a pre-execution rejection
+/// (owner decision of 2026-10-06): see the `From` conversion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoadError {
     /// The bytes are not a valid Component for the pinned engine.
     InvalidComponent,
-    /// The Component needs an import that the `host-v1` linker does not provide.
+    /// The Component imports a function that is not a `host-v1` function with
+    /// its exact type, or anything else the `host-v1` linker does not provide.
     ImportDenied,
     /// `guest-v1` does not export `describe`, `reduce` and `drive` as functions.
     MissingGuestExport,
+    /// A `describe`, `reduce` or `drive` export does not have its exact WIT
+    /// signature.
+    MistypedGuestExport,
 }
 
-/// The lifted result and the measured budget of one successful invocation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct InvocationReport {
-    /// The export's lifted return value, not yet validated as guest output.
-    pub value: Val,
-    /// Fuel consumed while instantiating the Component.
-    pub startup_fuel: u64,
-    /// Fuel consumed by the call itself.
-    pub call_fuel: u64,
-    /// Linear memory reserved across all of the Component's memories, in bytes.
-    pub memory_bytes: u64,
-    /// Accepted `record-operational-log` calls, in call order.
-    pub operational_log: Vec<OperationalLogRecord>,
+impl fmt::Display for LoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidComponent => "not a valid community Plugin Component",
+            Self::ImportDenied => "community Plugin Component import denied",
+            Self::MissingGuestExport => "community Plugin Component lacks a guest-v1 export",
+            Self::MistypedGuestExport => "community Plugin guest-v1 export has the wrong type",
+        })
+    }
 }
 
-/// Why an invocation ended without a result.
+impl std::error::Error for LoadError {}
+
+impl From<LoadError> for CommunityPluginHostErrorV1 {
+    /// Every load refusal is `IncompatibleAbi`.
+    fn from(_: LoadError) -> Self {
+        Self::IncompatibleAbi
+    }
+}
+
+/// The negotiated record's profile does not pin this engine's runtime.
 ///
-/// No variant carries guest output, so nothing from a failed invocation can be
-/// committed.
+/// Execution requires the profile's pinned runtime to equal
+/// [`crate::runtime::pinned_runtime`]: the same version, features, Engine
+/// configuration and complete trap table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InvocationFailure {
-    /// Wasmtime fuel ran out (`Trap::OutOfFuel`): the authoritative `FuelExhausted`.
-    FuelExhausted,
-    /// The limiter denied linear-memory growth: `MemoryLimitExceeded`.
-    MemoryLimitExceeded,
-    /// The epoch deadline elapsed (`Trap::Interrupt`): the operational
-    /// `OperationalWatchdogStop`, never an authoritative result.
-    OperationalWatchdogStop,
-    /// A `host-v1` call carried arguments, or exceeded a count, that the host
-    /// refuses.
-    HostCallRejected,
-    /// Any other Wasmtime trap, before #541 maps it to a canonical trap class.
-    ComponentTrap(Trap),
-    /// Wasmtime refused the invocation without a trap, for example because the
-    /// arguments do not match the export's type.
-    Rejected,
+pub struct RuntimeNotPinnedV1;
+
+impl fmt::Display for RuntimeNotPinnedV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("execution profile does not pin this engine's runtime")
+    }
 }
+
+impl std::error::Error for RuntimeNotPinnedV1 {}
 
 /// Classify the error that ended an invocation.
-pub(crate) fn classify(error: &wasmtime::Error) -> InvocationFailure {
+///
+/// A host refusal maps to its own error, and a trap to its pinned trap-table
+/// outcome. Any other error is the host's own Canonical ABI lift or lowering
+/// failing on guest-provided values, such as a guest return that does not
+/// lift: `InvalidGuestOutput`, never a trap.
+///
+/// In Wasmtime 49.0.2 the host lifts a guest return in Rust and reports a
+/// malformed value with a plain error, never a `Trap` code: for example
+/// `bail!("list pointer/length out of bounds of memory")` in
+/// `src/runtime/component/func/typed.rs` and the field and case checks in
+/// `src/runtime/component/values.rs`. The lift trap codes
+/// (`InvalidChar`, `ListOutOfBounds`, ...) are raised only by fused adapters
+/// compiled in `wasmtime-environ`'s `src/fact/trampoline.rs`, between
+/// Components inside one guest.
+pub(crate) fn classify(error: &wasmtime::Error) -> CommunityPluginHostErrorV1 {
     error.downcast_ref::<HostFault>().map_or_else(
         || {
             error
                 .downcast_ref::<Trap>()
-                .map_or(InvocationFailure::Rejected, |trap| trap_failure(*trap))
+                .map_or(CommunityPluginHostErrorV1::InvalidGuestOutput, |trap| {
+                    trap_outcome(*trap).error()
+                })
         },
-        |fault| fault_failure(*fault),
+        |fault| fault.error(),
     )
-}
-
-const fn trap_failure(trap: Trap) -> InvocationFailure {
-    match trap {
-        Trap::OutOfFuel => InvocationFailure::FuelExhausted,
-        Trap::Interrupt => InvocationFailure::OperationalWatchdogStop,
-        other => InvocationFailure::ComponentTrap(other),
-    }
-}
-
-const fn fault_failure(fault: HostFault) -> InvocationFailure {
-    match fault {
-        HostFault::CallRejected => InvocationFailure::HostCallRejected,
-        HostFault::MemoryLimit => InvocationFailure::MemoryLimitExceeded,
-    }
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use pos_runtime::community_plugin_host::{ComponentTrapClassV1, TrapReproductionV1};
+
     use super::*;
 
+    type Error = CommunityPluginHostErrorV1;
+
     #[test]
-    fn host_faults_and_traps_map_to_closed_failures() {
-        let memory = wasmtime::Error::new(HostFault::MemoryLimit);
-        assert_eq!(classify(&memory), InvocationFailure::MemoryLimitExceeded);
-        let rejected = wasmtime::Error::new(HostFault::CallRejected);
-        assert_eq!(classify(&rejected), InvocationFailure::HostCallRejected);
-        let fuel = wasmtime::Error::new(Trap::OutOfFuel);
-        assert_eq!(classify(&fuel), InvocationFailure::FuelExhausted);
-        let interrupt = wasmtime::Error::new(Trap::Interrupt);
+    fn refusals_have_stable_messages() {
+        let messages = [
+            (
+                LoadError::InvalidComponent,
+                "not a valid community Plugin Component",
+            ),
+            (
+                LoadError::ImportDenied,
+                "community Plugin Component import denied",
+            ),
+            (
+                LoadError::MissingGuestExport,
+                "community Plugin Component lacks a guest-v1 export",
+            ),
+            (
+                LoadError::MistypedGuestExport,
+                "community Plugin guest-v1 export has the wrong type",
+            ),
+        ];
+        for (refusal, message) in messages {
+            assert_eq!(refusal.to_string(), message);
+            let error: &dyn std::error::Error = &refusal;
+            assert!(error.source().is_none());
+        }
         assert_eq!(
-            classify(&interrupt),
-            InvocationFailure::OperationalWatchdogStop
+            RuntimeNotPinnedV1.to_string(),
+            "execution profile does not pin this engine's runtime"
         );
-        let stack = wasmtime::Error::new(Trap::StackOverflow);
-        assert_eq!(
-            classify(&stack),
-            InvocationFailure::ComponentTrap(Trap::StackOverflow)
-        );
-        let other = wasmtime::Error::msg("not a trap");
-        assert_eq!(classify(&other), InvocationFailure::Rejected);
+        let error: &dyn std::error::Error = &RuntimeNotPinnedV1;
+        assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn every_load_refusal_is_incompatible_abi() {
+        let refusals = [
+            LoadError::InvalidComponent,
+            LoadError::ImportDenied,
+            LoadError::MissingGuestExport,
+            LoadError::MistypedGuestExport,
+        ];
+        for refusal in refusals {
+            assert_eq!(Error::from(refusal), Error::IncompatibleAbi);
+        }
+    }
+
+    #[test]
+    fn host_faults_traps_and_lift_failures_map_to_closed_errors() {
+        let cases = [
+            (
+                wasmtime::Error::new(HostFault::MemoryLimit),
+                Error::MemoryLimitExceeded,
+            ),
+            (
+                wasmtime::Error::new(HostFault::HostCallLimit),
+                Error::HostCallLimitExceeded,
+            ),
+            (wasmtime::Error::new(Trap::OutOfFuel), Error::FuelExhausted),
+            (
+                wasmtime::Error::new(Trap::Interrupt),
+                Error::OperationalWatchdogStop,
+            ),
+            (
+                wasmtime::Error::new(Trap::StackOverflow),
+                Error::ComponentTrap {
+                    class: ComponentTrapClassV1::StackExhausted,
+                    reproduction: TrapReproductionV1::Unverified,
+                },
+            ),
+            (
+                wasmtime::Error::new(Trap::NullReference),
+                Error::ComponentTrap {
+                    class: ComponentTrapClassV1::Other,
+                    reproduction: TrapReproductionV1::Unverified,
+                },
+            ),
+            (
+                wasmtime::Error::msg("list pointer/length out of bounds of memory"),
+                Error::InvalidGuestOutput,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(classify(&error), expected);
+        }
     }
 }

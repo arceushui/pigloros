@@ -44,6 +44,11 @@ fetch wit-bindgen \
 fetch wasi-sdk \
   https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz \
   b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4
+# BLAKE3 C sources for the C guest's `output-digest`; the same release as the
+# workspace `blake3` crate. Only the portable implementation is compiled.
+fetch blake3 \
+  https://github.com/BLAKE3-team/BLAKE3/archive/refs/tags/1.8.7.tar.gz \
+  c6782a28842b1c0478524ac06a4f2ede784038ee298d6e2162c0b089c4306a3c
 
 "${tools_dir}/wasm-tools/wasm-tools" --version
 "${tools_dir}/wit-bindgen/wit-bindgen" --version

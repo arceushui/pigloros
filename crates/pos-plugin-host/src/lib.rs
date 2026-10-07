@@ -1,47 +1,65 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
 
-//! Community Plugin Component host for ADR-061 revision 4, as amended by
-//! revision 5.
+//! In-worker community Plugin Component engine (ADR-061 revisions 4 to 6).
 //!
-//! This is slice 1 (#539) of the #538 host: the exact Wasmtime pin, a
-//! deterministic engine configuration and a linker that provides only the
-//! `host-v1` imports of the `pigloros:plugin/community-plugin@0.1.0` world.
-//! It carries the compatibility prototype evidence recorded in
-//! `docs/evidence/adr-061-r4-prototype.md`.
+//! Revision 6, which records the owner decisions of 2026-10-06, is pending.
 //!
-//! Later slices build on it:
-//! - #540 negotiates the PMF1 execution projection and the execution profile;
-//! - #541 completes the in-worker engine (trap classes, host-call counters,
-//!   output validation);
-//! - #542 runs it in a supervised worker process;
-//! - #543 commits approved output atomically at the Tick Boundary.
+//! This crate runs one Component of the `pigloros:plugin/community-plugin@0.1.0`
+//! world on the exact Wasmtime pin:
+//! - [`runtime`] records the pin, its resolved features, the Engine
+//!   configuration and the trap table that execution profiles carry;
+//! - [`ComponentHost::load`] compiles a Component and refuses, before any
+//!   execution, every import that is not a `host-v1` function with its exact
+//!   type, and any Component whose `describe`, `reduce` and `drive` exports
+//!   are missing or not of their exact type;
+//! - [`ComponentHost::describe`], [`ComponentHost::reduce`] and
+//!   [`ComponentHost::drive`] run one export in a fresh store under the
+//!   negotiated effective limits: fuel, linear memory, host calls,
+//!   operational log calls and bytes, and the `EventDraft`, state and output
+//!   bounds. `migrate-state` is never invoked.
 //!
-//! The host never commits anything. Every invocation runs in a fresh store, and
-//! a failed invocation returns only a closed [`InvocationFailure`]: the guest's
-//! output and operational logs are dropped with that store.
+//! Execution needs a [`PinnedExecutionV1`]: a negotiated release
+//! (`pos-runtime`'s `NegotiatedCommunityPluginV1`) whose execution profile
+//! pins exactly this engine's runtime.
 //!
-//! The prototype passes guest arguments and results as Wasmtime's dynamic
-//! `Val`, and reports other traps as the raw Wasmtime `Trap`. #541 replaces
-//! both with validated host types and the revision 4 trap-class table.
+//! The guest contract types (invocation, output, descriptor, guest error,
+//! report, invocation options and the output digest) live in
+//! `pos_runtime::community_plugin_host`, which links no WebAssembly runtime,
+//! so the supervisor and the commit use them without Wasmtime. This crate
+//! keeps only what needs Wasmtime: loading, lifting, lowering and the trap
+//! mapping.
+//!
+//! The engine never commits anything. A failed invocation returns only the
+//! closed `CommunityPluginHostErrorV1`; the guest's output and operational
+//! logs are dropped with its store, and raw runtime messages and backtraces
+//! never leave the engine. A completed invocation returns the fully validated
+//! output, or the guest's own validated `plugin-error`, for the supervisor to
+//! approve and commit at the Tick Boundary.
+//!
+//! The evidence for the pin and the compatibility gates is in
+//! `docs/evidence/adr-061-r4-prototype.md`. Later slices build on this crate:
+//! #542 runs it in a supervised worker process, and #543 commits approved
+//! output atomically at the Tick Boundary.
 
 // Public modules keep crate-only items compatible with both `unreachable_pub`
 // and Clippy's `redundant_pub_crate`.
+pub mod describe;
 pub mod engine;
 pub mod host_v1;
+pub mod lift;
+pub mod lower;
 pub mod outcome;
+pub mod output;
+pub mod runtime;
+pub mod signatures;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub mod test_values;
 
-pub use engine::{ComponentHost, GuestExport, InvocationLimits, LoadedComponent};
-pub use host_v1::{HostInputs, OperationalLogRecord};
-pub use outcome::{InvocationFailure, InvocationReport, LoadError};
-pub use wasmtime::{component::Val, Trap};
-
-/// Exact Wasmtime release of the host (ADR-061 revision 4, decision 2).
-///
-/// A new pin is a new execution-profile version.
-pub const WASMTIME_VERSION: &str = "49.0.2";
-
-/// Pinned Wasm stack ceiling, in bytes, for every invocation.
-///
-/// A deeper guest call stack traps with `StackOverflow`.
-pub const MAX_WASM_STACK_BYTES: usize = 512 * 1024;
+pub use engine::{ComponentHost, GuestExport, LoadedComponent, PinnedExecutionV1};
+pub use outcome::{LoadError, RuntimeNotPinnedV1};
+pub use runtime::{
+    pinned_runtime, MAX_WASM_STACK_BYTES, PINNED_ENGINE_CONFIG, RESOLVED_WASMTIME_FEATURES,
+    WASMTIME_VERSION,
+};

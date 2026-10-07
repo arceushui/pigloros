@@ -8,7 +8,16 @@ publish.workspace = true
 
 [dependencies]
 blake3 = { workspace = true }
+pos-crypto = { path = "../pos-crypto" }
+# The closed host error, the execution profile and the negotiated record.
+# pos-runtime never depends on this crate: the core never loads a Component.
+pos-runtime = { path = "../pos-runtime" }
 wasmtime = { workspace = true }
+
+[dev-dependencies]
+# Engine tests build execution projections without a release closure.
+pos-crypto = { path = "../pos-crypto", features = ["test-support"] }
+wat = { workspace = true }
 
 [lints]
 workspace = true
