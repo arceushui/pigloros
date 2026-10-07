@@ -24,6 +24,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
+pos-crypto = { path = "../pos-crypto", features = ["test-support"] }
 pos-reference = { path = "../pos-reference" }
 
 [target.'cfg(unix)'.dependencies]
