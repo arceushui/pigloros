@@ -17,7 +17,8 @@ pub enum HostFailureClassV1 {
     ///
     /// No Event, state or guest failure is fabricated from it. The ADR-061
     /// failure table has no row for these errors, so this class is the
-    /// host's typing of them, pending conformance (#194, #544).
+    /// host's typing of them, pending conformance (#194, #544). It extends the
+    /// ADR's two classes, so the ADR amendment or #544 should ratify it.
     PreExecutionRejection,
 }
 

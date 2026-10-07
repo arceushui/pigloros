@@ -31,7 +31,6 @@ type ExecutionBounds<'a> = (Vec<Capability<'a>>, DeterministicBudgetV1);
 type Dependency<'a> = (&'a str, Digest);
 /// Fields 17-20: dependency release digests, provenance and SBOM, licences.
 type SupplyChain = (Vec<Digest>, [Artifact; 2], Vec<Artifact>);
-/// The ADR-103 release projection and the execution projection of one PMF1.
 /// An artifact with its position in PMF1 field order.
 type Positioned = (usize, Artifact);
 
@@ -64,16 +63,35 @@ const UNSIGNED_HEAD: [u8; 2] = [0x98, 0x19];
 const HEX: &[u8; 16] = b"0123456789abcdef";
 /// `DeterministicBudgetV1` member bounds after `memory_bytes`, in field order.
 const BUDGET: [(u64, u64); 7] = [
-    (MINIMA.fuel, MAXIMA.fuel),
-    (MINIMA.host_calls, MAXIMA.host_calls),
-    (MINIMA.event_count, MAXIMA.event_count),
-    (MINIMA.event_bytes, MAXIMA.event_bytes),
-    (MINIMA.state_bytes, MAXIMA.state_bytes),
-    (MINIMA.log_calls, MAXIMA.log_calls),
-    (MINIMA.log_bytes, MAXIMA.log_bytes),
+    (
+        DeterministicBudgetV1::MINIMA.fuel,
+        DeterministicBudgetV1::MAXIMA.fuel,
+    ),
+    (
+        DeterministicBudgetV1::MINIMA.host_calls,
+        DeterministicBudgetV1::MAXIMA.host_calls,
+    ),
+    (
+        DeterministicBudgetV1::MINIMA.event_count,
+        DeterministicBudgetV1::MAXIMA.event_count,
+    ),
+    (
+        DeterministicBudgetV1::MINIMA.event_bytes,
+        DeterministicBudgetV1::MAXIMA.event_bytes,
+    ),
+    (
+        DeterministicBudgetV1::MINIMA.state_bytes,
+        DeterministicBudgetV1::MAXIMA.state_bytes,
+    ),
+    (
+        DeterministicBudgetV1::MINIMA.log_calls,
+        DeterministicBudgetV1::MAXIMA.log_calls,
+    ),
+    (
+        DeterministicBudgetV1::MINIMA.log_bytes,
+        DeterministicBudgetV1::MAXIMA.log_bytes,
+    ),
 ];
-const MINIMA: DeterministicBudgetV1 = DeterministicBudgetV1::MINIMA;
-const MAXIMA: DeterministicBudgetV1 = DeterministicBudgetV1::MAXIMA;
 
 /// A closed PMF1 V1 projection failure (ADR-061 revision 3, section 8).
 ///
@@ -654,7 +672,11 @@ fn read_budget(
     reader: &mut Pmf1Reader<'_>,
 ) -> Result<DeterministicBudgetV1, PluginManifestErrorV1> {
     reader.fixed_array(8)?;
-    let memory_bytes = unsigned_in(reader, MINIMA.memory_bytes, MAXIMA.memory_bytes)?;
+    let memory_bytes = unsigned_in(
+        reader,
+        DeterministicBudgetV1::MINIMA.memory_bytes,
+        DeterministicBudgetV1::MAXIMA.memory_bytes,
+    )?;
     require(reader, memory_bytes.is_multiple_of(WASM_PAGE_BYTES_V1))?;
     let mut members = [0; BUDGET.len()];
     for (member, (minimum, maximum)) in members.iter_mut().zip(BUDGET) {

@@ -14,12 +14,10 @@ use crate::composition::PluginExecutionModeV1;
 
 use super::error::{CommunityPluginHostErrorV1, ComponentTrapClassV1, TrapReproductionV1};
 
-const MINIMA: DeterministicBudgetV1 = DeterministicBudgetV1::MINIMA;
 /// The `wasmtime::Trap` code that is the authoritative `FuelExhausted`.
 const OUT_OF_FUEL_TRAP_CODE: &str = "OutOfFuel";
 /// The `wasmtime::Trap` code that is the operational watchdog stop.
 const INTERRUPT_TRAP_CODE: &str = "Interrupt";
-const MAXIMA: DeterministicBudgetV1 = DeterministicBudgetV1::MAXIMA;
 
 /// A live Execution Mode that runs community Plugin Components.
 ///
@@ -121,27 +119,49 @@ pub struct CeilingValuesV1 {
 impl CeilingValuesV1 {
     /// The first member, in budget order, outside its PMF1 V1 range.
     fn first_out_of_range(self) -> Option<ExecutionLimitV1> {
-        let memory = (MINIMA.memory_bytes..=MAXIMA.memory_bytes).contains(&self.memory_bytes)
+        let (minima, maxima) = (DeterministicBudgetV1::MINIMA, DeterministicBudgetV1::MAXIMA);
+        let memory = (minima.memory_bytes..=maxima.memory_bytes).contains(&self.memory_bytes)
             && self.memory_bytes.is_multiple_of(WASM_PAGE_BYTES_V1);
         [
             (memory, ExecutionLimitV1::MemoryBytes),
-            (self.fuel >= MINIMA.fuel, ExecutionLimitV1::Fuel),
+            (self.fuel >= minima.fuel, ExecutionLimitV1::Fuel),
             (
-                self.host_calls <= MAXIMA.host_calls,
+                self.host_calls <= maxima.host_calls,
                 ExecutionLimitV1::HostCalls,
             ),
             (
-                self.event_bytes <= MAXIMA.event_bytes,
+                self.event_bytes <= maxima.event_bytes,
                 ExecutionLimitV1::EventBytes,
             ),
             (
-                self.log_bytes <= MAXIMA.log_bytes,
+                self.log_bytes <= maxima.log_bytes,
                 ExecutionLimitV1::LogBytes,
             ),
         ]
         .into_iter()
         .find(|&(valid, _)| !valid)
         .map(|(_, limit)| limit)
+    }
+}
+
+impl CeilingValuesV1 {
+    /// Clamp `budget` member by member; a budget above a ceiling is clamped.
+    ///
+    /// This and [`Self::first_out_of_range`] are the one place that knows
+    /// which members are profile-limited (`min(PMF1 budget, ceiling)`) and
+    /// which are WIT-limited (`min(PMF1 budget, WIT maximum)`).
+    fn clamp(self, budget: DeterministicBudgetV1) -> DeterministicBudgetV1 {
+        let wit = DeterministicBudgetV1::MAXIMA;
+        DeterministicBudgetV1 {
+            memory_bytes: budget.memory_bytes.min(self.memory_bytes),
+            fuel: budget.fuel.min(self.fuel),
+            host_calls: budget.host_calls.min(self.host_calls),
+            event_count: budget.event_count.min(wit.event_count),
+            event_bytes: budget.event_bytes.min(self.event_bytes),
+            state_bytes: budget.state_bytes.min(wit.state_bytes),
+            log_calls: budget.log_calls.min(wit.log_calls),
+            log_bytes: budget.log_bytes.min(self.log_bytes),
+        }
     }
 }
 
@@ -163,9 +183,9 @@ impl CommunityPluginCeilingsV1 {
         values: CeilingValuesV1 {
             memory_bytes: 1_024 * WASM_PAGE_BYTES_V1,
             fuel: 1_000_000_000,
-            host_calls: MAXIMA.host_calls,
-            event_bytes: MAXIMA.event_bytes,
-            log_bytes: MAXIMA.log_bytes,
+            host_calls: DeterministicBudgetV1::MAXIMA.host_calls,
+            event_bytes: DeterministicBudgetV1::MAXIMA.event_bytes,
+            log_bytes: DeterministicBudgetV1::MAXIMA.log_bytes,
         },
     };
 
@@ -176,11 +196,15 @@ impl CommunityPluginCeilingsV1 {
     /// that is outside its PMF1 V1 range, or a memory ceiling that is not a
     /// whole number of 65,536-byte pages.
     pub fn new(values: CeilingValuesV1) -> Result<Self, CommunityPluginProfileErrorV1> {
-        values
-            .first_out_of_range()
-            .map_or(Ok(Self { values }), |limit| {
-                Err(CommunityPluginProfileErrorV1::CeilingOutOfRange { limit })
-            })
+        if let Some(limit) = values.first_out_of_range() {
+            return Err(CommunityPluginProfileErrorV1::CeilingOutOfRange { limit });
+        }
+        Ok(Self { values })
+    }
+
+    /// Clamp a PMF1 budget by these ceilings and the WIT ceilings.
+    pub(super) fn clamp(&self, budget: DeterministicBudgetV1) -> DeterministicBudgetV1 {
+        self.values.clamp(budget)
     }
 
     /// The validated ceiling values.
@@ -243,6 +267,10 @@ impl TrapTableEntryV1 {
 /// A listed code that the pinned version lacks is simply absent from its
 /// table; an unlisted code is `other`.
 fn adr_outcome(trap_code: &str) -> TrapOutcomeV1 {
+    // Only `OutOfFuel` and `Interrupt` have named constants: they are the two
+    // codes with a bespoke outcome that the pinned-runtime docs and #541
+    // refer to. Every other code is a row of the decision 6 class table, which
+    // is read here as literals.
     let class = match trap_code {
         OUT_OF_FUEL_TRAP_CODE => return TrapOutcomeV1::FuelExhausted,
         INTERRUPT_TRAP_CODE => return TrapOutcomeV1::WatchdogStop,
@@ -307,15 +335,15 @@ impl PinnedComponentRuntimeV1 {
             .iter()
             .position(|entry| !entry.is_classified())
             .map(|index| CommunityPluginProfileErrorV1::MisclassifiedTrapCode { index });
-        duplicate.or(misclassified).map_or(
-            Ok(Self {
-                wasmtime_version,
-                resolved_features,
-                engine,
-                trap_table,
-            }),
-            Err,
-        )
+        if let Some(error) = duplicate.or(misclassified) {
+            return Err(error);
+        }
+        Ok(Self {
+            wasmtime_version,
+            resolved_features,
+            engine,
+            trap_table,
+        })
     }
 
     /// The exact pinned Wasmtime version.

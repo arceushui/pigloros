@@ -76,14 +76,14 @@ impl CommunityPluginHostAbiV1 {
         let failure = (min_minor > max_minor)
             .then_some(CommunityPluginHostAbiErrorV1::EmptyMinorRange)
             .or_else(|| feature_failure(&features));
-        failure.map_or(
-            Ok(Self {
-                min_minor,
-                max_minor,
-                features,
-            }),
-            Err,
-        )
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(Self {
+            min_minor,
+            max_minor,
+            features,
+        })
     }
 
     /// The lowest supported ABI minor.
@@ -133,19 +133,8 @@ impl EffectiveExecutionLimitsV1 {
     /// Clamp `budget` by `ceilings` and the WIT ceilings.
     #[must_use]
     pub fn clamp(budget: DeterministicBudgetV1, ceilings: CommunityPluginCeilingsV1) -> Self {
-        let ceiling = ceilings.values();
-        let wit = DeterministicBudgetV1::MAXIMA;
         Self {
-            limits: DeterministicBudgetV1 {
-                memory_bytes: budget.memory_bytes.min(ceiling.memory_bytes),
-                fuel: budget.fuel.min(ceiling.fuel),
-                host_calls: budget.host_calls.min(ceiling.host_calls),
-                event_count: budget.event_count.min(wit.event_count),
-                event_bytes: budget.event_bytes.min(ceiling.event_bytes),
-                state_bytes: budget.state_bytes.min(wit.state_bytes),
-                log_calls: budget.log_calls.min(wit.log_calls),
-                log_bytes: budget.log_bytes.min(ceiling.log_bytes),
-            },
+            limits: ceilings.clamp(budget),
         }
     }
 
