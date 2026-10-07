@@ -755,7 +755,7 @@ fn installs_a_signed_release_and_returns_the_admission_and_execution_projection(
     assert_eq!(signature.release_digest(), published.release_digest());
     assert_eq!(signature.owner(), OwnerIdV1::new(OWNER)?);
     assert_eq!(signature.epoch(), 1);
-    assert_eq!(signature.public_key(), world.key_bytes(&publisher));
+    assert_eq!(signature.public_key(), key_bytes(&world.publisher));
     // Content validation was explicitly not performed (#574).
     assert_eq!(
         installed.content_validation(),
