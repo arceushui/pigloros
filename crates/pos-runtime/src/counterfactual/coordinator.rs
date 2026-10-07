@@ -1449,11 +1449,12 @@ fn stage_declared_tick(
     tick: u64,
     after_tick: u64,
 ) -> Result<(PipelineDraftBatchV1, TickDependencyRecordV1), CounterfactualAdmissionErrorV1> {
-    let staged = stager
+    let declaration = stager
         .stage_tick_with_dependencies(&tick_inputs(plan, generation, tick))
         .or(Err(CounterfactualAdmissionErrorV1::PluginFailure))?;
-    let batch = bounded_batch(staged.drafts)?;
-    declared_record(tick, after_tick, staged.nodes, staged.edges).map(|record| (batch, record))
+    let batch = bounded_batch(declaration.drafts)?;
+    declared_record(tick, after_tick, declaration.nodes, declaration.edges)
+        .map(|record| (batch, record))
 }
 
 /// Validate one declaration as the provisional record of `tick` whose nodes
