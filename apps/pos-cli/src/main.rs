@@ -1898,7 +1898,7 @@ mod coverage_tests {
     fn verify_mismatch_returns_err() {
         // Cover the MISMATCH path without calling process::exit
         // by calling cmd_experiment_verify with a manifest that won't match.
-        use pos_core::{clock::WallTime, ids::TimelineId};
+        use pos_core::ids::TimelineId;
         use std::io::Write;
         use tempfile::NamedTempFile;
 
@@ -2048,7 +2048,6 @@ mod main_coverage {
     fn verify_ok_path_when_manifest_matches_empty_store() {
         // Cover the scoped timeline-head-only verification message.
         // An empty Timeline matches a manifest with the zero head hash.
-        use pos_core::clock::WallTime;
         use pos_store::StoreConfig;
         use tempfile::NamedTempFile;
 
