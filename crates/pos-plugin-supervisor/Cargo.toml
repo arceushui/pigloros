@@ -1,0 +1,46 @@
+[package]
+name = "pos-plugin-supervisor"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Exposes the shared test fixtures and builds the `pos-plugin-worker-probe`
+# fault-injection worker, for tests only. Never enable in deployable builds;
+# the probe is not a Component worker. Enforced by
+# scripts/check_test_support_features.py in CI.
+test-support = ["pos-crypto/test-support"]
+
+[dependencies]
+# Safe `set_fds_cloexec_threadsafe`: marks every descriptor the supervisor
+# process inherited (for example a build tool's jobserver pipe) close-on-exec
+# before each launch. Closing or flagging a raw descriptor needs `unsafe`,
+# which this workspace forbids; the crate is MIT and depends only on `libc`
+# and `cfg-if`.
+close_fds = "=0.3.2"
+pos-crypto = { path = "../pos-crypto" }
+pos-runtime = { path = "../pos-runtime" }
+# `process` provides prlimit, PR_SET_PDEATHSIG and getppid as safe calls. The
+# worker lists its open descriptors through `/proc/self/fd` with the `fs`
+# feature, which the workspace dependency already enables. `stdio` is used only
+# by the test probe, to close its stdout while it keeps running.
+rustix = { workspace = true, features = ["process", "stdio"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Supervisor tests build negotiated releases without a release closure.
+pos-crypto = { path = "../pos-crypto", features = ["test-support"] }
+
+[[bin]]
+name = "pos-plugin-worker-probe"
+path = "tests/support/worker_probe.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "supervisor_public"
+required-features = ["test-support"]
+
+[lints]
+workspace = true

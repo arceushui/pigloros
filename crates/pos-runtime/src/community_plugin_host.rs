@@ -24,7 +24,8 @@ pub use error::{
 };
 pub use negotiation::{
     negotiate_community_plugin_v1, CommunityPluginHostAbiErrorV1, CommunityPluginHostAbiV1,
-    EffectiveExecutionLimitsV1, NegotiatedCommunityPluginV1, COMMUNITY_PLUGIN_ABI_MAJOR_V1,
+    EffectiveExecutionLimitsV1, NegotiatedCommunityPluginV1, NegotiatedTransportErrorV1,
+    NegotiatedTransportV1, COMMUNITY_PLUGIN_ABI_MAJOR_V1,
 };
 pub use profile::{
     CeilingValuesV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
