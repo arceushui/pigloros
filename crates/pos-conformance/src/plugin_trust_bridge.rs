@@ -17,7 +17,7 @@ use pos_crypto::plugin_trust::{
 };
 use thiserror::Error;
 
-use crate::trust_policy_snapshot::{MAX_REVOKED_ARTIFACTS, MAX_REVOKED_KEYS, MAX_TRUST_ROOTS};
+use crate::{TPS1_MAX_REVOKED_ARTIFACTS, TPS1_MAX_REVOKED_KEYS, TPS1_MAX_TRUST_ROOTS};
 use crate::TrustPolicySnapshotV1;
 
 /// The only operator role ADR-103 accepts for the Plugin TPS1 signature.
@@ -341,7 +341,10 @@ fn check_revoked_key_mapping(
     if actual.iter().any(|key_id| !expected.contains(*key_id)) {
         return Err(PluginTrustBridgeErrorV1::ReservedPrefix);
     }
-    if expected.iter().any(|key_id| !actual.contains(key_id.as_str())) {
+    if expected
+        .iter()
+        .any(|key_id| !actual.contains(key_id.as_str()))
+    {
         return Err(PluginTrustBridgeErrorV1::BridgeRevocationMismatch);
     }
     Ok(())
@@ -364,16 +367,19 @@ fn check_artifact_mapping(
     }
 }
 
-/// The TPS1 `trust_roots` key ID for one PTR1 root key ID: `ptr1-` plus 64
-/// lowercase hexadecimal digits (69 ASCII bytes).
+/// The TPS1 `trust_roots` key ID for one PTR1 root key ID.
+///
+/// It is `ptr1-` plus 64 lowercase hexadecimal digits (69 ASCII bytes).
 #[must_use]
 pub fn plugin_root_key_id_v1(root_key_id: [u8; 32]) -> String {
     prefixed_hex(PLUGIN_ROOT_KEY_ID_PREFIX_V1, &root_key_id)
 }
 
-/// The TPS1 `revoked_key_ids` entry for one PRV1 publisher-key denial: `pkr1-`
-/// plus the lowercase hexadecimal BLAKE3-256 of the domain-separated canonical
-/// CBOR array `[owner_text, 3, epoch, public_key]` (69 ASCII bytes).
+/// The TPS1 `revoked_key_ids` entry for one PRV1 publisher-key denial.
+///
+/// It is `pkr1-` plus the lowercase hexadecimal BLAKE3-256 of the
+/// domain-separated canonical CBOR array `[owner_text, 3, epoch, public_key]`
+/// (69 ASCII bytes).
 #[must_use]
 pub fn plugin_revoked_key_id_v1(owner: &OwnerIdV1, epoch: u64, public_key: [u8; 32]) -> String {
     let mut preimage = REVOKED_KEY_DOMAIN.to_vec();
@@ -412,23 +418,25 @@ fn push_cbor_head(out: &mut Vec<u8>, major: u8, value: u64) {
     if value < 24 {
         out.push(major | bytes[7]);
     } else if value <= 0xff {
-        out.push(major | 24);
+        out.push(major | 0x18);
         out.push(bytes[7]);
     } else if value <= 0xffff {
-        out.push(major | 25);
+        out.push(major | 0x19);
         out.extend_from_slice(&bytes[6..]);
     } else if value <= 0xffff_ffff {
-        out.push(major | 26);
+        out.push(major | 0x1a);
         out.extend_from_slice(&bytes[4..]);
     } else {
-        out.push(major | 27);
+        out.push(major | 0x1b);
         out.extend_from_slice(&bytes);
     }
 }
 
-/// Enforce TPS1's global caps on the complete entry totals (Plugin entries
-/// plus every retained non-Plugin entry). The bridge reserves no hidden
-/// capacity and never drops, compresses, or reorders either class.
+/// Enforce TPS1's global caps on the complete entry totals.
+///
+/// Totals include Plugin entries plus every retained non-Plugin entry. The
+/// bridge reserves no hidden capacity and never drops, compresses, or
+/// reorders either class.
 ///
 /// # Errors
 /// Returns `TpsCapExceeded` when any total is above 64 roots, 4096 revoked key
@@ -438,9 +446,9 @@ pub const fn check_plugin_tps1_global_caps_v1(
     revoked_key_ids: usize,
     revoked_artifact_digests: usize,
 ) -> Result<(), PluginTrustBridgeErrorV1> {
-    if trust_roots > MAX_TRUST_ROOTS
-        || revoked_key_ids > MAX_REVOKED_KEYS
-        || revoked_artifact_digests > MAX_REVOKED_ARTIFACTS
+    if trust_roots > TPS1_MAX_TRUST_ROOTS
+        || revoked_key_ids > TPS1_MAX_REVOKED_KEYS
+        || revoked_artifact_digests > TPS1_MAX_REVOKED_ARTIFACTS
     {
         Err(PluginTrustBridgeErrorV1::TpsCapExceeded)
     } else {
@@ -477,9 +485,16 @@ struct CivilTime {
 impl CivilTime {
     fn parse(bytes: &[u8]) -> Option<Self> {
         let separators_exact = bytes.len() == OFFLINE_VALID_THROUGH_BYTES_V1
-            && [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':'), (19, b'Z')]
-                .iter()
-                .all(|&(index, separator)| bytes[index] == separator);
+            && [
+                (4, b'-'),
+                (7, b'-'),
+                (10, b'T'),
+                (13, b':'),
+                (16, b':'),
+                (19, b'Z'),
+            ]
+            .iter()
+            .all(|&(index, separator)| bytes[index] == separator);
         if !separators_exact {
             return None;
         }
@@ -613,8 +628,8 @@ fn advance_proof(
     candidate: (u64, [u8; 32]),
     history: &[(u64, [u8; 32])],
 ) -> Result<PluginFloorTransitionV1, PluginFloorErrorV1> {
-    let well_formed = history.last() == Some(&candidate)
-        && history.windows(2).all(|pair| pair[0].0 < pair[1].0);
+    let well_formed =
+        history.last() == Some(&candidate) && history.windows(2).all(|pair| pair[0].0 < pair[1].0);
     if !well_formed {
         return Err(PluginFloorErrorV1::Discontinuity(kind));
     }

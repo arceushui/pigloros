@@ -28,7 +28,7 @@ const EVALUATION_TICK: u64 = 5;
 // Python `cryptography` Ed25519 over operator seed `[0x11; 32]`.
 const OPERATOR_PUBLIC_KEY_HEX: &str =
     "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737";
-const GOLDEN_PREIMAGE_HEX: &str = "5069676c6f724f532e545053312e6f70657261746f722d7369676e61747572652e7631008b6454505331016d706c7567696e2e676f6c64656e020781847845707472312d6162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616203674564323535313958204242424242424242424242424242424242424242424242424242424242424242816f7265766f6b65642e6578616d706c658158201111111111111111111111111111111111111111111111111111111111111111818266706c7567696e65312e322e3374323033302d30312d30315430303a30303a30305a58202222222222222222222222222222222222222222222222222222222222222222";
+const GOLDEN_PREIMAGE_HEX: &str = "5069676c6f724f532e545053312e6f70657261746f722d7369676e61747572652e7631008b6454505331016d706c7567696e2e676f6c64656e020781847845707472312d6162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616203674564323535313958204242424242424242424242424242424242424242424242424242424242424242816f7265766f6b65642e6578616d706c658158201111111111111111111111111111111111111111111111111111111111111111818266706c7567696e65312e322e3374323033302d30312d30315430303a30303a30305a58202222222222222222222222222222222222222222222222222222222222222222";
 const GOLDEN_TPS1_HEX: &str = "8c6454505331016d706c7567696e2e676f6c64656e020781847845707472312d6162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616203674564323535313958204242424242424242424242424242424242424242424242424242424242424242816f7265766f6b65642e6578616d706c658158201111111111111111111111111111111111111111111111111111111111111111818266706c7567696e65312e322e3374323033302d30312d30315430303a30303a30305a58202222222222222222222222222222222222222222222222222222222222222222584019cddc75717cbe12b3cd9a6e2ccbb478a80333dc0bdb925d56e70ec6d23761fc16ed351cf94f64a8328a8a41c1f7d2a59bcee61a515fed9e527211ef4e8d780f";
 const GOLDEN_TPS1_DIGEST_HEX: &str =
     "915d839fa1d921bf2cca5e21c40169b16b3e5f32ef80b4a91d956dca2b1cb931";
@@ -93,7 +93,9 @@ fn authentication_rejects_scope_key_signature_and_encoding_faults() -> TestResul
         authenticate_plugin_tps1_v1(&wrong_scope, &bytes),
         Err(PluginTrustBridgeErrorV1::ScopeMismatch)
     );
-    let foreign_key = SigningKey::from_bytes(&[0x12; 32]).verifying_key().to_bytes();
+    let foreign_key = SigningKey::from_bytes(&[0x12; 32])
+        .verifying_key()
+        .to_bytes();
     assert_eq!(
         authenticate_plugin_tps1_v1(&anchor_for("plugin.golden", foreign_key)?, &bytes),
         Err(PluginTrustBridgeErrorV1::InvalidOperatorSignature)
@@ -145,7 +147,12 @@ fn anchor_requires_plugin_scope_literal_role_and_valid_operator_key() -> TestRes
     );
     let longest = "a".repeat(128);
     assert!(anchor_for(&longest, operator).is_ok());
-    for scope in [String::new(), "a".repeat(129), "Upper".to_owned(), "-lead".to_owned()] {
+    for scope in [
+        String::new(),
+        "a".repeat(129),
+        "Upper".to_owned(),
+        "-lead".to_owned(),
+    ] {
         assert_eq!(
             PluginTrustPolicyAnchorV1::new(
                 &scope,
@@ -157,7 +164,12 @@ fn anchor_requires_plugin_scope_literal_role_and_valid_operator_key() -> TestRes
             Err(PluginTrustBridgeErrorV1::InvalidAnchorScope)
         );
     }
-    for role in ["", "artifact-root", "Deployment-Operator", "deployment-operator "] {
+    for role in [
+        "",
+        "artifact-root",
+        "Deployment-Operator",
+        "deployment-operator ",
+    ] {
         assert_eq!(
             PluginTrustPolicyAnchorV1::new("scope", [3; 32], operator, role, [4; 32]),
             Err(PluginTrustBridgeErrorV1::InvalidAnchorRole)
@@ -185,34 +197,81 @@ fn root_key_ids_are_ptr1_prefixed_lowercase_hex() -> TestResult {
     id[31] = 0xfe;
     let expected = format!("ptr1-01{}fe", "ab".repeat(30));
     assert_eq!(plugin_root_key_id_v1(id), expected);
-    assert_eq!(plugin_root_key_id_v1(id).len(), PLUGIN_TPS1_BRIDGE_ID_BYTES_V1);
+    assert_eq!(
+        plugin_root_key_id_v1(id).len(),
+        PLUGIN_TPS1_BRIDGE_ID_BYTES_V1
+    );
     assert_eq!(PLUGIN_TPS1_BRIDGE_ID_BYTES_V1, 69);
     assert_eq!(
         plugin_root_key_id_v1([0; 32]),
         format!("ptr1-{}", "0".repeat(64))
     );
-    assert!(!plugin_root_key_id_v1([0xff; 32]).bytes().any(|byte| byte.is_ascii_uppercase()));
+    assert!(!plugin_root_key_id_v1([0xff; 32])
+        .bytes()
+        .any(|byte| byte.is_ascii_uppercase()));
     Ok(())
 }
 
 const PKR1_OWNER_VECTORS: [(usize, &str); 4] = [
-    (1, "pkr1-e7f765d7236d71b88d6a71f871a9319f8a7a8c9c8d749e03b39a258e65b54b0a"),
-    (23, "pkr1-bf2e72068a8bb10fb932d46b985e53ff0404f1916aeb406cf3d1d0faef30e4a4"),
-    (24, "pkr1-af7ee8ed6bccbe3ccddba7ee4c04d8398c9c521ba5e407ea767eb6b2d593e245"),
-    (128, "pkr1-d82975fe9f4500e6b06a5ed7dd853f649e8835d9d9c2da98cd3c68045b074997"),
+    (
+        1,
+        "pkr1-e7f765d7236d71b88d6a71f871a9319f8a7a8c9c8d749e03b39a258e65b54b0a",
+    ),
+    (
+        23,
+        "pkr1-bf2e72068a8bb10fb932d46b985e53ff0404f1916aeb406cf3d1d0faef30e4a4",
+    ),
+    (
+        24,
+        "pkr1-af7ee8ed6bccbe3ccddba7ee4c04d8398c9c521ba5e407ea767eb6b2d593e245",
+    ),
+    (
+        128,
+        "pkr1-d82975fe9f4500e6b06a5ed7dd853f649e8835d9d9c2da98cd3c68045b074997",
+    ),
 ];
 
 const PKR1_EPOCH_VECTORS: [(u64, &str); 10] = [
-    (0, "pkr1-1dc148c8083b04f076ec896911e401026e5656c671159e427874fd5946654bb0"),
-    (23, "pkr1-250e91319a0e6847e233fa6da13ce2e2f1db951e5ae540cc176d353eb5fba7c8"),
-    (24, "pkr1-8a4ec94b0a01299916f9b0cb6b6af9feccdfad143cdbc1d12ac196847e3445bd"),
-    (255, "pkr1-6e5978fa7eb3aa802880d42bdfe3c22a388ba2bad9a91e734d0203a3f870dc3d"),
-    (256, "pkr1-2cc4575ce30e4debad86619ef3823e9fe986bddf58e0a83235302965149c0d00"),
-    (65_535, "pkr1-28890dffe454eb08e400787f9835c92ae7583f00d51d0c1ae2d6403075b82118"),
-    (65_536, "pkr1-ff0f68103bdfc51543f5feaa884252dd937b78825b74afd0280435403ccc7475"),
-    (4_294_967_295, "pkr1-e27f0fed0d2dba715dc4b3456bb985292a206c4a68153385e9d983cfc5f4838e"),
-    (4_294_967_296, "pkr1-52f526936a18585582bd4a61f68dcbe1083caa98745fd2745cefa26a6ca750c3"),
-    (u64::MAX, "pkr1-0c5287914ee70f744029c1355f064c1a339cad7b82322b73376e936885528752"),
+    (
+        0,
+        "pkr1-1dc148c8083b04f076ec896911e401026e5656c671159e427874fd5946654bb0",
+    ),
+    (
+        23,
+        "pkr1-250e91319a0e6847e233fa6da13ce2e2f1db951e5ae540cc176d353eb5fba7c8",
+    ),
+    (
+        24,
+        "pkr1-8a4ec94b0a01299916f9b0cb6b6af9feccdfad143cdbc1d12ac196847e3445bd",
+    ),
+    (
+        255,
+        "pkr1-6e5978fa7eb3aa802880d42bdfe3c22a388ba2bad9a91e734d0203a3f870dc3d",
+    ),
+    (
+        256,
+        "pkr1-2cc4575ce30e4debad86619ef3823e9fe986bddf58e0a83235302965149c0d00",
+    ),
+    (
+        65_535,
+        "pkr1-28890dffe454eb08e400787f9835c92ae7583f00d51d0c1ae2d6403075b82118",
+    ),
+    (
+        65_536,
+        "pkr1-ff0f68103bdfc51543f5feaa884252dd937b78825b74afd0280435403ccc7475",
+    ),
+    (
+        4_294_967_295,
+        "pkr1-e27f0fed0d2dba715dc4b3456bb985292a206c4a68153385e9d983cfc5f4838e",
+    ),
+    (
+        4_294_967_296,
+        "pkr1-52f526936a18585582bd4a61f68dcbe1083caa98745fd2745cefa26a6ca750c3",
+    ),
+    (
+        u64::MAX,
+        "pkr1-0c5287914ee70f744029c1355f064c1a339cad7b82322b73376e936885528752",
+    ),
 ];
 
 #[test]
@@ -256,7 +315,11 @@ fn offline_valid_through_accepts_only_exact_real_gregorian_utc() -> TestResult {
     ] {
         assert_eq!(parse_offline_valid_through_v1(text), Ok(seconds), "{text}");
     }
-    for text in ["0000-02-29T00:00:00Z", "2024-04-30T00:00:00Z", "2024-12-31T23:59:59Z"] {
+    for text in [
+        "0000-02-29T00:00:00Z",
+        "2024-04-30T00:00:00Z",
+        "2024-12-31T23:59:59Z",
+    ] {
         assert!(parse_offline_valid_through_v1(text).is_ok(), "{text}");
     }
     Ok(())
@@ -345,7 +408,12 @@ fn floor_transition_initializes_unchanged_and_rejects_lower_or_forked_coordinate
             Ok(PluginFloorTransitionV1::Unchanged)
         );
         assert_eq!(
-            transition(kind, Some(pair(5, 1)), pair(5, 2), &[pair(4, 1), pair(5, 2)]),
+            transition(
+                kind,
+                Some(pair(5, 1)),
+                pair(5, 2),
+                &[pair(4, 1), pair(5, 2)]
+            ),
             Err(PluginFloorErrorV1::Fork(kind))
         );
         assert_eq!(
@@ -369,10 +437,18 @@ fn floor_transition_advances_only_with_exact_retained_pair_terminating_at_candid
         let retained = Some(pair(2, 2));
         let advance = Ok(PluginFloorTransitionV1::Advance);
         assert_eq!(
-            transition(kind, retained, pair(3, 3), &[pair(1, 1), pair(2, 2), pair(3, 3)]),
+            transition(
+                kind,
+                retained,
+                pair(3, 3),
+                &[pair(1, 1), pair(2, 2), pair(3, 3)]
+            ),
             advance
         );
-        assert_eq!(transition(kind, retained, pair(3, 3), &[pair(2, 2), pair(3, 3)]), advance);
+        assert_eq!(
+            transition(kind, retained, pair(3, 3), &[pair(2, 2), pair(3, 3)]),
+            advance
+        );
         assert_eq!(
             transition(
                 kind,
@@ -383,7 +459,12 @@ fn floor_transition_advances_only_with_exact_retained_pair_terminating_at_candid
             advance
         );
         assert_eq!(
-            transition(kind, retained, pair(3, 3), &[pair(1, 1), pair(2, 8), pair(3, 3)]),
+            transition(
+                kind,
+                retained,
+                pair(3, 3),
+                &[pair(1, 1), pair(2, 8), pair(3, 3)]
+            ),
             Err(PluginFloorErrorV1::Fork(kind))
         );
         assert_eq!(
@@ -403,7 +484,12 @@ fn floor_transition_advances_only_with_exact_retained_pair_terminating_at_candid
             Err(PluginFloorErrorV1::Discontinuity(kind))
         );
         assert_eq!(
-            transition(kind, retained, pair(3, 3), &[pair(2, 2), pair(3, 3), pair(4, 4)]),
+            transition(
+                kind,
+                retained,
+                pair(3, 3),
+                &[pair(2, 2), pair(3, 3), pair(4, 4)]
+            ),
             Err(PluginFloorErrorV1::Discontinuity(kind))
         );
     }
@@ -415,23 +501,48 @@ fn floor_transition_rejects_duplicate_and_reordered_membership_proofs() {
         let retained = Some(pair(2, 2));
         let discontinuity = Err(PluginFloorErrorV1::Discontinuity(kind));
         assert_eq!(
-            transition(kind, retained, pair(3, 3), &[pair(2, 2), pair(2, 2), pair(3, 3)]),
+            transition(
+                kind,
+                retained,
+                pair(3, 3),
+                &[pair(2, 2), pair(2, 2), pair(3, 3)]
+            ),
             discontinuity
         );
         assert_eq!(
-            transition(kind, retained, pair(3, 3), &[pair(2, 2), pair(3, 3), pair(3, 3)]),
+            transition(
+                kind,
+                retained,
+                pair(3, 3),
+                &[pair(2, 2), pair(3, 3), pair(3, 3)]
+            ),
             discontinuity
         );
         assert_eq!(
-            transition(kind, retained, pair(3, 3), &[pair(3, 3), pair(2, 2), pair(3, 3)]),
+            transition(
+                kind,
+                retained,
+                pair(3, 3),
+                &[pair(3, 3), pair(2, 2), pair(3, 3)]
+            ),
             discontinuity
         );
         assert_eq!(
-            transition(kind, retained, pair(4, 4), &[pair(3, 3), pair(2, 2), pair(4, 4)]),
+            transition(
+                kind,
+                retained,
+                pair(4, 4),
+                &[pair(3, 3), pair(2, 2), pair(4, 4)]
+            ),
             discontinuity
         );
         assert_eq!(
-            transition(kind, retained, pair(3, 3), &[pair(2, 2), pair(2, 7), pair(3, 3)]),
+            transition(
+                kind,
+                retained,
+                pair(3, 3),
+                &[pair(2, 2), pair(2, 7), pair(3, 3)]
+            ),
             discontinuity
         );
     }
@@ -512,13 +623,19 @@ fn signed_record(mut fields: Vec<Value>, domain: &[u8]) -> TestResult<Vec<u8>> {
     encode(&Value::Array(fields))
 }
 
-/// A PTR1 for scope `scope` granting `plugin-a` to `publisher`, valid at UTC 0..100.
+/// A PTR1 for `scope`: `publisher` holds `plugin-a`; `other-a` is also a known key.
 fn ptr1(version: u64, previous: Option<[u8; 32]>) -> TestResult<Vec<u8>> {
     let publisher = Value::Array(vec![
         Value::Text("publisher".to_owned()),
         unsigned(3),
         unsigned(1),
         bytes_value(publisher_public()),
+    ]);
+    let other = Value::Array(vec![
+        Value::Text("other-a".to_owned()),
+        unsigned(3),
+        unsigned(1),
+        bytes_value(other_publisher_public()),
     ]);
     let grant = Value::Array(vec![
         Value::Text("plugin-a".to_owned()),
@@ -538,7 +655,7 @@ fn ptr1(version: u64, previous: Option<[u8; 32]>) -> TestResult<Vec<u8>> {
                 bytes_value(root_key_id(root_public())),
                 bytes_value(root_public()),
             ])]),
-            Value::Array(vec![publisher]),
+            Value::Array(vec![other, publisher]),
             Value::Array(vec![grant]),
         ],
         ROOT_SIGNATURE_DOMAIN,
@@ -723,7 +840,9 @@ fn evidence_floor_plan_judges_root_and_revocation_independently() -> TestResult 
     );
     assert_eq!(
         plan(present(good_root, (0, [9; 32])), &evidence),
-        Err(PluginFloorErrorV1::Discontinuity(PluginFloorKindV1::Revocation))
+        Err(PluginFloorErrorV1::Discontinuity(
+            PluginFloorKindV1::Revocation
+        ))
     );
     assert_eq!(
         plan(present((3, [9; 32]), (1, [9; 32])), &evidence),
@@ -804,16 +923,14 @@ fn bridge(
     tps1: &[u8],
     evidence: &VerifiedPluginTrustEvidenceV1,
 ) -> TestResult<Result<(), PluginTrustBridgeErrorV1>> {
-    Ok(
-        verify_plugin_tps1_bridge_v1(
-            &operator_anchor()?,
-            tps1,
-            evidence,
-            &good_manifest()?,
-            EVALUATION_UTC,
-        )
-        .map(|_| ()),
+    Ok(verify_plugin_tps1_bridge_v1(
+        &operator_anchor()?,
+        tps1,
+        evidence,
+        &good_manifest()?,
+        EVALUATION_UTC,
     )
+    .map(|_| ()))
 }
 
 fn other_revocation_evidence() -> TestResult<(VerifiedPluginTrustEvidenceV1, String)> {
@@ -822,7 +939,10 @@ fn other_revocation_evidence() -> TestResult<(VerifiedPluginTrustEvidenceV1, Str
         vec![revoked_artifact([0x77; 32])],
     )?;
     let owner = OwnerIdV1::new("other-a")?;
-    Ok((evidence, plugin_revoked_key_id_v1(&owner, 1, other_publisher_public())))
+    Ok((
+        evidence,
+        plugin_revoked_key_id_v1(&owner, 1, other_publisher_public()),
+    ))
 }
 
 #[test]
@@ -850,8 +970,14 @@ fn complete_bridge_accepts_exact_mapping_and_returns_authenticated_facts() -> Te
     assert_eq!(verified.tps1().epoch(), 1);
     assert_eq!(verified.tps1().effective_timeline_position(), 9);
     assert_eq!(verified.authorization().pmf1_digest(), [0x11; 32]);
-    assert_eq!(verified.authorization().resolved_public_key(), publisher_public());
-    assert_eq!(verified.authorization().terminal_root(), evidence.terminal_root());
+    assert_eq!(
+        verified.authorization().resolved_public_key(),
+        publisher_public()
+    );
+    assert_eq!(
+        verified.authorization().terminal_root(),
+        evidence.terminal_root()
+    );
     Ok(())
 }
 
@@ -929,7 +1055,11 @@ fn bridge_requires_utc_strictly_before_offline_valid_through() -> TestResult {
         bridge(&sign(with_expiry("1970-01-01T00:00:51Z"))?, &evidence)?,
         Ok(())
     );
-    for text in ["1970-01-01T00:00:50Z", "1970-01-01T00:00:49Z", "1969-12-31T23:59:59Z"] {
+    for text in [
+        "1970-01-01T00:00:50Z",
+        "1970-01-01T00:00:49Z",
+        "1969-12-31T23:59:59Z",
+    ] {
         assert_eq!(
             bridge(&sign(with_expiry(text))?, &evidence)?,
             Err(PluginTrustBridgeErrorV1::Expired),
@@ -1019,7 +1149,12 @@ fn bridge_requires_exactly_the_effective_prv1_key_denials() -> TestResult {
     let wrong_key = plugin_revoked_key_id_v1(&owner, 1, publisher_public());
     let foreign =
         plugin_revoked_key_id_v1(&OwnerIdV1::new("other-b")?, 1, other_publisher_public());
-    for wrong in [wrong_epoch, wrong_key, foreign, format!("pkr1-{}", "ab".repeat(31))] {
+    for wrong in [
+        wrong_epoch,
+        wrong_key,
+        foreign,
+        format!("pkr1-{}", "ab".repeat(31)),
+    ] {
         let substituted = base_snapshot(vec![wrong.clone()], artifacts.clone());
         assert_eq!(
             bridge(&sign(substituted)?, &evidence)?,
@@ -1083,11 +1218,15 @@ fn bridge_recomputes_release_authorization_from_the_evidence() -> TestResult {
     };
     assert_eq!(
         run(manifest("unknown", 40, 60)?),
-        Err(PluginTrustBridgeErrorV1::Trust(PluginTrustErrorV1::UnknownPublisherKey))
+        Err(PluginTrustBridgeErrorV1::Trust(
+            PluginTrustErrorV1::UnknownPublisherKey
+        ))
     );
     assert_eq!(
         run(manifest("publisher", 51, 60)?),
-        Err(PluginTrustBridgeErrorV1::Trust(PluginTrustErrorV1::ManifestExpired))
+        Err(PluginTrustBridgeErrorV1::Trust(
+            PluginTrustErrorV1::ManifestExpired
+        ))
     );
     assert_eq!(run(manifest("publisher", 50, 51)?), Ok(()));
     Ok(())
@@ -1103,7 +1242,9 @@ fn bridge_denies_a_release_whose_publisher_key_is_effectively_revoked() -> TestR
     let tps1 = sign(base_snapshot(vec![revoked_id], Vec::new()))?;
     assert_eq!(
         bridge(&tps1, &evidence)?,
-        Err(PluginTrustBridgeErrorV1::Trust(PluginTrustErrorV1::PublisherKeyRevoked))
+        Err(PluginTrustBridgeErrorV1::Trust(
+            PluginTrustErrorV1::PublisherKeyRevoked
+        ))
     );
     Ok(())
 }
