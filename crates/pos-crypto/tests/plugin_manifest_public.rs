@@ -18,9 +18,9 @@ use pos_crypto::plugin_execution::{
     PluginExecutionProjectionV1, WASM_PAGE_BYTES_V1,
 };
 use pos_crypto::plugin_manifest::{
-    verify_plugin_release_signature_v1, PluginArtifactInputV1, PluginDependencyInputV1,
-    PluginManifestErrorV1, PluginReleaseDraftV1, PluginReleaseSignatureErrorV1,
-    PluginSchemaInputV1, VerifiedPluginReleaseSignatureV1,
+    decode_plugin_release_signature_claim_v1, verify_plugin_release_signature_v1,
+    PluginArtifactInputV1, PluginDependencyInputV1, PluginManifestErrorV1, PluginReleaseDraftV1,
+    PluginReleaseSignatureErrorV1, PluginSchemaInputV1, VerifiedPluginReleaseSignatureV1,
 };
 use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, PluginTrustErrorV1, ResolvedPluginTrustAuthorizationV1,
@@ -2624,6 +2624,38 @@ fn an_encoded_and_signed_release_verifies_end_to_end() -> TestResult {
     let verified = verify_plugin_release_signature_v1(&bundle, &fact)?;
     assert_eq!(verified.release_digest(), unsigned.release_digest());
     assert_eq!(verified.epoch(), 5);
+    Ok(())
+}
+
+#[test]
+fn the_signature_claim_decodes_from_the_closure_alone() -> TestResult {
+    let draft = default_draft()?;
+    let unsigned = draft.unsigned()?;
+    let signature = ed25519(
+        8,
+        &role_message("publisher", 3, 5, &unsigned.release_digest())?,
+    );
+    let pmf1 = unsigned.with_signature(5, signature)?;
+    let digest = *blake3::hash(&pmf1).as_bytes();
+    let release = Release::new()?;
+    let bundle = closure(pmf1.clone(), &release.members)??;
+    let claim = decode_plugin_release_signature_claim_v1(&bundle)?;
+    assert_eq!(claim.pmf1_digest(), digest);
+    assert_eq!(claim.release_digest(), unsigned.release_digest());
+    assert_eq!(claim.owner(), OwnerIdV1::new("publisher")?);
+    assert_eq!(claim.epoch(), 5);
+    assert_eq!(claim.signature(), signature);
+    // A claim is not a verification: a wrong signature still decodes.
+    let wrong = unsigned.with_signature(5, [0; 64])?;
+    let wrong_claim =
+        decode_plugin_release_signature_claim_v1(&closure(wrong, &release.members)??)?;
+    assert_eq!(wrong_claim.signature(), [0; 64]);
+    // A tampered release digest (the last byte of field 27) is a decode error.
+    let mut tampered = pmf1;
+    let last = tampered.len() - 1;
+    tampered[last] ^= 1;
+    let tampered_bundle = closure(tampered, &release.members)??;
+    assert!(decode_plugin_release_signature_claim_v1(&tampered_bundle).is_err());
     Ok(())
 }
 
