@@ -10,6 +10,9 @@
 use std::{error::Error, sync::Arc};
 
 use ed25519_dalek::{Signer, SigningKey};
+use pos_core::fork_authentication::{
+    ForkAuthenticationAdapterPolicyV1, ForkAuthenticationPolicyV1,
+};
 use pos_core::{
     store::{EventStore, SeqRange, TimelineExport},
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
@@ -36,13 +39,18 @@ use pos_core::{
     RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, Signature,
     SignedForkReproManifestV1, TimelineEventEnvelopeV1, TimelineId, TimelineMeta,
 };
+use pos_crypto::fork_authentication::{
+    ForkAuthenticationAdapterSigningKeyV1, ForkHostSigningKeyV1,
+};
 use pos_crypto::key_roles::{
     sign_for_registered_role, sign_timeline_event_for_registered_role, SigningKeyMaterial,
 };
 use pos_store::{
     export_timeline_own, import_timeline_verified_v1, memory::MemoryStore,
-    AuthenticatedOperatorPolicyPinV1, ForkAttributionAuthorityImportRequestV1,
-    ForkAttributionIssuerPolicyInstallationPortV1,
+    AuthenticatedOperatorPolicyPinV1, ForkAdmissionAuthorityBootstrapPortV1,
+    ForkAdmissionAuthoritySessionV1, ForkAttributionAuthorityImportPortV1,
+    ForkAttributionAuthorityImportRequestV1, ForkAttributionIssuerPolicyInstallationPortV1,
+    ForkEventPermitIssuerPortV1, ForkEventProvenanceAuthorityPortV1, ForkManifestPublicationPortV1,
 };
 
 pub type Fallible<T> = Result<T, Box<dyn Error>>;
@@ -264,6 +272,80 @@ pub fn attribution_identity(creator: &'static str, epoch: u64) -> KeyIdentityV1 
     KeyIdentityV1::new(creator, KeyRoleV1::SubjectAttributionSigning, epoch)
 }
 
+/// The creator's attribution-signing key material, which signed every fixture
+/// `FSM1` unless a `Spec` overrides the signer.
+#[must_use]
+pub fn attribution_material() -> SigningKeyMaterial {
+    material(0x71)
+}
+
+/// The registrar identifier of the destination's own local classifier.
+pub const GATEWAY_REGISTRAR: &str = "piglor-gateway.local-fork-classifier/v1";
+
+/// One adapter that imports `FAE1`, reads imported Forks, and opens a local
+/// Fork admission authority session.
+pub trait Port:
+    ForkAttributionAuthorityImportPortV1
+    + EventStore
+    + ForkEventProvenanceAuthorityPortV1
+    + ForkEventPermitIssuerPortV1
+    + ForkManifestPublicationPortV1
+    + ForkAdmissionAuthorityBootstrapPortV1
+{
+}
+
+impl<T> Port for T where
+    T: ForkAttributionAuthorityImportPortV1
+        + EventStore
+        + ForkEventProvenanceAuthorityPortV1
+        + ForkEventPermitIssuerPortV1
+        + ForkManifestPublicationPortV1
+        + ForkAdmissionAuthorityBootstrapPortV1
+{
+}
+
+/// Open a live Fork admission authority session on one store.
+///
+/// # Errors
+/// Returns the store or signing error.
+pub fn open_session<S: ForkAdmissionAuthorityBootstrapPortV1>(
+    store: &mut S,
+) -> Fallible<ForkAdmissionAuthoritySessionV1> {
+    let host = ForkHostSigningKeyV1::from_seed([111; 32])?;
+    let adapter = ForkAuthenticationAdapterSigningKeyV1::from_seed([112; 32])?;
+    let policy = ForkAuthenticationPolicyV1::new(vec![ForkAuthenticationAdapterPolicyV1 {
+        adapter_id: "test-adapter".to_owned(),
+        verifying_key: adapter.public_key(),
+        minimum_assurance: 1,
+        registry_bindings: vec![hash(3)],
+    }])?;
+    let key = PublicKey::from_bytes(host.public_key());
+    let initialize = store.begin_fork_admission_initialize(key, policy.digest()?)?;
+    store.finalize_fork_admission_initialize(
+        &initialize,
+        &host.sign_initialize(&initialize.to_canonical_cbor()?)?,
+    )?;
+    let open = store.begin_fork_admission_open(key, policy.digest()?)?;
+    let signature = host.sign_open(&open.to_canonical_cbor()?)?;
+    Ok(store.finalize_fork_admission_open(&open, &signature)?)
+}
+
+/// An `FCS1` of the destination's fixed local registrar, byte-equal to the
+/// one that a `Spec` naming [`GATEWAY_REGISTRAR`] imports.
+///
+/// # Errors
+/// Returns the record construction error.
+pub fn gateway_source() -> Fallible<ForkClassifierSourceV1> {
+    Ok(ForkClassifierSourceV1::new(ForkClassifierSourceInputV1 {
+        room_revision_descriptor_hash: hash(0x41),
+        registrar_identifier: GATEWAY_REGISTRAR.to_owned(),
+        routes: vec![
+            route("route-a", ROUTE_A_SCHEMA, true)?,
+            route("route-b", ROUTE_B_SCHEMA, false)?,
+        ],
+    })?)
+}
+
 /// The first item of a list.
 ///
 /// # Errors
@@ -387,6 +469,31 @@ fn provenance(
 }
 
 impl World {
+    /// The world's registry plus a live attribution-signing key of `creator`
+    /// made from `seed`.
+    ///
+    /// Seed `0x71` is the exact record that an imported `FPO1` retains, so a
+    /// destination holding it agrees with the retained evidence; any other
+    /// seed is a different record for the same key identity (ADR-105
+    /// erratum E12).
+    ///
+    /// # Errors
+    /// Returns the registry error.
+    pub fn registry_with_attribution_key(
+        &self,
+        creator: &'static str,
+        seed: u8,
+    ) -> Fallible<KeyRegistryStateV1> {
+        let attribution = material(seed);
+        let mut registry = self.registry.clone();
+        registry.register_key(KeyRegistrationV1::new(
+            attribution_identity(creator, 1),
+            attribution.material_digest(),
+            Some(attribution.public_verification_key()),
+        ))?;
+        Ok(registry)
+    }
+
     /// A world with one signed Fork child of `shape`.
     ///
     /// # Errors

@@ -2,13 +2,14 @@
 //!
 //! `POB1`, `FAR1`, and `FPO1` end with `authority-origin-v1`. Inside `FAE1`
 //! that field is exactly `[2, authority_origin_digest]`, which every shared
-//! ADR-099 decoder still rejects until #519 activates code-2 trusted reads.
-//! These wrappers accept that code-2 form and nothing else, and only on the
-//! import path: each one validates the record's local projection (the same
-//! bytes with `[1]` in place of `[2, digest]`) with the unchanged strict local
-//! decoder, so every other field keeps exactly its accepted rules and
-//! canonical form. The projection never leaves this module, and every digest
-//! is computed over the exact code-2 bytes.
+//! ADR-099 decoder rejects, and keeps rejecting (ADR-105 r6 R6.9). These
+//! wrappers accept that code-2 form and nothing else, and only on the import
+//! path and on the code-2 trusted reads: each one validates the record's local
+//! projection (the same bytes with `[1]` in place of `[2, digest]`) with the
+//! unchanged strict local decoder, so every other field keeps exactly its
+//! accepted rules and canonical form. Every digest is computed over the exact
+//! code-2 bytes, and the projection accessors never make a record local
+//! authority.
 
 use super::{
     authority_envelope::MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1, domain_digest,
@@ -147,8 +148,6 @@ impl ImportedPrincipalOwnerBindingV1 {
     /// `Local`; the carried code-2 origin is
     /// [`Self::authority_origin_digest`]. It is never an authority: it only
     /// lets an import adapter key and compare the carried record.
-    ///
-    /// NOTE(#519): revisit this accessor when code 2 is activated.
     #[must_use]
     pub const fn input(&self) -> &PrincipalOwnerBindingInputV1 {
         self.binding.input()
@@ -221,8 +220,6 @@ impl ImportedForkAdmissionRecordV1 {
     /// `FAR1` fields 2–13. The projected origin member is not field 14.
     ///
     /// This is the local projection only, never an authority.
-    ///
-    /// NOTE(#519): revisit this accessor when code 2 is activated.
     #[must_use]
     pub const fn fields(&self) -> &ForkAdmissionRecordInputV1 {
         self.record.input()
@@ -289,10 +286,19 @@ impl ImportedForkPublicationOperationV1 {
     /// `FPO1` fields 2–12. The projected origin member is not field 13.
     ///
     /// This is the local projection only, never an authority.
-    ///
-    /// NOTE(#519): revisit this accessor when code 2 is activated.
     #[must_use]
     pub const fn fields(&self) -> &ForkPublicationOperationInputV1 {
         self.operation.input()
+    }
+
+    /// The whole local projection of this `FPO1`: the same fields with the
+    /// local `[1]` origin in place of the code-2 origin.
+    ///
+    /// ADR-105 r6 R6.9: the code-2 publication read returns it as the
+    /// authorization projection, next to [`Self::authority_origin_digest`]. It
+    /// is never publication authority by itself.
+    #[must_use]
+    pub const fn projection(&self) -> &ForkPublicationOperationV1 {
+        &self.operation
     }
 }

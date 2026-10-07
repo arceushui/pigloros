@@ -5,8 +5,9 @@
 //! The code-2 `POB1`, `FAR1`, and `FPO1` have no local projection that could
 //! carry their origin, so they live in separate imported maps, as do the
 //! imported `FCS1` custody store, the `IKR1`/`IKT1` evidence, and the `IFA1`
-//! admission with its exact `FAE1` bytes. Every local trusted read
-//! therefore stays closed to code 2 until #519.
+//! admission with its exact `FAE1` bytes. Every local-only validator
+//! therefore stays closed to code 2; only the code-2-aware reads of
+//! `fork_code_two_read` open it (ADR-105 r6 R6.9).
 //!
 //! The adapter checks every occupancy key first and only then stages the
 //! child Timeline. Staging is the one fallible mutation: a later failure
@@ -31,14 +32,14 @@ use crate::fork_attribution_authority_import::{
 
 /// The child Fork and stored admission of one committed import.
 pub(super) struct ImportedAttributionV1 {
-    child: TimelineId,
-    stored: StoredImportV1,
+    pub(super) child: TimelineId,
+    pub(super) stored: StoredImportV1,
 }
 
 /// The imported `IKR1` and optional `IKT1` of one import.
 pub(super) struct ImportedKeyEvidenceV1 {
-    record: ImportedKeyRecordV1,
-    tombstone: Option<ImportedKeyTombstoneV1>,
+    pub(super) record: ImportedKeyRecordV1,
+    pub(super) tombstone: Option<ImportedKeyTombstoneV1>,
 }
 
 impl ForkAttributionAuthorityImportPortV1 for MemoryStore {

@@ -35,8 +35,7 @@ use pos_store::{
     ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
     ForkAttributionAuthorityImportErrorV1 as ImportError, ForkAttributionAuthorityImportPortV1,
     ForkAttributionAuthorityImportReceiptV1 as Receipt,
-    ForkAttributionAuthorityImportRequestV1 as Request, ForkEventAuthorityErrorV1,
-    ForkEventProvenanceAuthorityPortV1, ForkManifestPublicationErrorV1,
+    ForkAttributionAuthorityImportRequestV1 as Request, ForkEventProvenanceAuthorityPortV1,
     ForkManifestPublicationPortV1,
 };
 
@@ -563,22 +562,32 @@ fn an_unequal_import_reuse_or_occupied_child_is_a_conflict() -> Fallible<()> {
     })
 }
 
-/// Check that an imported Fork stays unreadable and closed to local appends.
-fn assert_code_two_is_unreadable<S>(store: &mut S, world: &World, built: &Built) -> Fallible<()>
+/// Check that an imported Fork is readable through the code-2 reads (ADR-105
+/// r6 R6.9) and stays closed to local appends.
+fn assert_code_two_reads_and_closed_appends<S>(
+    store: &mut S,
+    world: &World,
+    built: &Built,
+) -> Fallible<()>
 where
     S: Destination + ForkManifestPublicationPortV1,
 {
     prepare(store, world, built)?;
     import(store, world, built)?;
+    // No key is in the destination's live registry: the publication read takes
+    // the retained key from the import evidence (ADR-105 erratum E12).
     let child = world.child_at(0)?.id;
     let head = PARENT_CUT + 4;
     assert_eq!(
-        store.read_fork_event_suffix(child, PARENT_CUT + 1),
-        Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+        store.read_fork_event_suffix(child, PARENT_CUT + 1)?.len(),
+        4
     );
     assert_eq!(
-        store.read_committed(child, head),
-        Err(ForkManifestPublicationErrorV1::PublicationConflict)
+        store
+            .read_committed(child, head)?
+            .receipt
+            .final_logical_head,
+        head
     );
     let draft = EventDraft::new(
         EntityId::new(),
@@ -590,12 +599,12 @@ where
 }
 
 #[test]
-fn imported_code_two_stays_unreadable_and_closed_to_local_appends() -> Fallible<()> {
+fn imported_code_two_is_readable_and_closed_to_local_appends() -> Fallible<()> {
     let world = World::new(Shape::Mixed, false)?;
     let built = world.build(&Spec::default())?;
-    assert_code_two_is_unreadable(&mut MemoryStore::new(), &world, &built)?;
+    assert_code_two_reads_and_closed_appends(&mut MemoryStore::new(), &world, &built)?;
     let mut sqlite = SqliteStore::open_in_memory()?;
-    assert_code_two_is_unreadable(&mut sqlite, &world, &built)
+    assert_code_two_reads_and_closed_appends(&mut sqlite, &world, &built)
 }
 
 #[test]

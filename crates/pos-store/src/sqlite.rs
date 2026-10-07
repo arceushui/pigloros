@@ -124,14 +124,16 @@ use crate::fork_delivery_journal::{
 };
 use crate::fork_event_authority::{
     classified_event_matches_operation, fork_append_request, permitted_fork_admission,
-    preflight_classifier_sources, recover_classified_operation,
+    preflight_classifier_sources, recover_classified_operation, AuthorityValidatorV1,
+    ValidatedAdmissionV1, ValidatedOriginV1,
 };
 use crate::fork_manifest_publication::{
-    authorize_publication, publication_parent_head, publication_sources,
-    recovered_publication_receipt, require_absent_publication_graph, sign_publication,
-    trusted_committed_manifest, validate_publication_request, AbsentPublicationPreflightV1,
-    CommittedPublicationRowsV1, CommittedPublicationSourcesV1, PublicationGraphV1,
-    PublicationSourceErrorV1, PublicationSourceResultV1, PublicationSourcesV1, PublicationSuffixV1,
+    authorize_publication, publication_operation_decoder, publication_parent_head,
+    publication_sources, recovered_publication_receipt, require_absent_publication_graph,
+    sign_publication, trusted_committed_manifest, validate_publication_request,
+    AbsentPublicationPreflightV1, CommittedPublicationRowsV1, CommittedPublicationSourcesV1,
+    PublicationGraphV1, PublicationSourceErrorV1, PublicationSourceResultV1, PublicationSourcesV1,
+    PublicationSuffixV1,
 };
 use crate::{
     ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
@@ -143,9 +145,13 @@ use crate::{
 mod counterfactual_store;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
+mod fork_code_two_read;
 mod local_cut_owner;
 mod pipeline_admission;
 
+use fork_code_two_read::{
+    sqlite_retained_key_evidence, sqlite_validated_admission, sqlite_validated_graph,
+};
 use local_cut_owner::{
     sqlite_manifest_or_local_cut_owner_has_rows, sqlite_sync_local_cut_owner_after_admission,
     sqlite_validate_local_cut_owner_admission, LOCAL_CUT_OWNER_SCHEMA_SQL,
@@ -1643,22 +1649,27 @@ impl SqliteStore {
         &self,
         child_timeline_id: TimelineId,
         from_logical_seq: u64,
+        validator: AuthorityValidatorV1,
     ) -> Result<ForkEventSuffixV1, ForkEventAuthorityErrorV1> {
         let prefix = read_origin_prefix(&self.conn, child_timeline_id)
             .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
         let rows = sqlite_fork_suffix_rows(&self.conn, child_timeline_id)?;
         // The immutable authority graph is validated once; its error is
         // surfaced only when the child actually has classified Events.
-        let graph =
-            sqlite_classified_authority_graph(&self.conn, self.hasher.as_ref(), child_timeline_id);
+        let graph = sqlite_validated_graph(
+            &self.conn,
+            self.hasher.as_ref(),
+            child_timeline_id,
+            validator,
+        );
         let mut result = Vec::new();
         for row in rows {
             let (event_id, logical_seq, operation) = sqlite_decode_fork_suffix_row(prefix, row)
                 .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-            let (admission, table, _) = graph.as_ref().map_err(|error| *error)?;
+            let graph = graph.as_ref().map_err(|error| *error)?;
             if operation.input().child_timeline_id != child_timeline_id
-                || operation.input().fork_admission_digest != admission.digest()
-                || operation.input().classifier_revision_digest != table.digest()
+                || operation.input().fork_admission_digest != graph.admission.digest()
+                || operation.input().classifier_revision_digest != graph.table.digest()
                 || operation.input().event_id != event_id
                 || operation.input().logical_seq != logical_seq
             {
@@ -1667,8 +1678,12 @@ impl SqliteStore {
             if logical_seq < from_logical_seq {
                 continue;
             }
-            let (origin, intervention) =
-                sqlite_validate_classified_records(&self.conn, &operation, table)?;
+            let (origin, intervention) = sqlite_validate_classified_records(
+                &self.conn,
+                &operation,
+                &graph.table,
+                graph.admission.origin(),
+            )?;
             result.push((origin, intervention, operation));
         }
         Ok(result)
@@ -11601,8 +11616,11 @@ impl ForkEventProvenanceAuthorityPortV1 for SqliteStore {
             .execute_batch("BEGIN DEFERRED")
             .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
             .and_then(|()| {
-                let result =
-                    self.read_fork_event_suffix_in_transaction(child_timeline_id, from_logical_seq);
+                let result = self.read_fork_event_suffix_in_transaction(
+                    child_timeline_id,
+                    from_logical_seq,
+                    AuthorityValidatorV1::CodeTwoAware,
+                );
                 finish_fork_event_transaction(&self.conn, result)
             })
     }
@@ -12547,6 +12565,25 @@ impl SqliteStore {
         )
     }
 
+    /// Read the `FPO1` stored for one operation ID with the authority origin it
+    /// carries, for a trusted read; a noncanonical row is `invalid`.
+    fn fork_publication_operation_with_origin(
+        &self,
+        operation_id: Hash,
+        invalid: ForkManifestPublicationErrorV1,
+        validator: AuthorityValidatorV1,
+    ) -> Result<
+        Option<(pos_core::ForkPublicationOperationV1, ValidatedOriginV1)>,
+        ForkManifestPublicationErrorV1,
+    > {
+        self.fork_publication_row(
+            FORK_PUBLICATION_OPERATION_SQL,
+            params![operation_id.as_bytes().as_slice()],
+            publication_operation_decoder(validator),
+            invalid,
+        )
+    }
+
     /// Read and strictly decode the `FPB1` stored for one Fork/head key.
     fn fork_publication_binding(
         &self,
@@ -12577,13 +12614,22 @@ impl SqliteStore {
         )
     }
 
-    /// Read the admitted Fork's immutable `FAR1` in the open transaction.
+    /// Read the admitted Fork's immutable `FAR1` in the open transaction under
+    /// one explicit R6.9 validator: issuance and recovery pass validator (a),
+    /// which requires the `Local` origin and its `FCC1` row, and only a read
+    /// passes (b).
     fn fork_publication_admission(
         &self,
         child_timeline_id: TimelineId,
-    ) -> PublicationSourceResultV1<ForkAdmissionRecordV1> {
-        sqlite_local_fork_admission(&self.conn, self.hasher.as_ref(), child_timeline_id)
-            .map_err(PublicationSourceErrorV1::from)
+        validator: AuthorityValidatorV1,
+    ) -> PublicationSourceResultV1<ValidatedAdmissionV1> {
+        sqlite_validated_admission(
+            &self.conn,
+            self.hasher.as_ref(),
+            child_timeline_id,
+            validator,
+        )
+        .map_err(PublicationSourceErrorV1::from)
     }
 
     /// Read the admitted child's classified suffix after its parent cut.
@@ -12591,11 +12637,13 @@ impl SqliteStore {
         &self,
         child_timeline_id: TimelineId,
         parent_logical_head: PublicationSourceResultV1<u64>,
+        validator: AuthorityValidatorV1,
     ) -> PublicationSourceResultV1<PublicationSuffixV1> {
         parent_logical_head.and_then(|parent_logical_head| {
             self.read_fork_event_suffix_in_transaction(
                 child_timeline_id,
                 parent_logical_head.saturating_add(1),
+                validator,
             )
             .map_err(PublicationSourceErrorV1::from)
         })
@@ -12608,8 +12656,10 @@ impl SqliteStore {
         request: &ForkManifestPublicationRequestV1,
     ) -> Result<PublicationSourcesV1, ForkManifestPublicationErrorV1> {
         let child = request.child_timeline_id;
-        let admission = self.fork_publication_admission(child);
-        let suffix = self.fork_publication_suffix(child, publication_parent_head(&admission));
+        let validator = AuthorityValidatorV1::LocalOnly;
+        let admission = self.fork_publication_admission(child, validator);
+        let suffix =
+            self.fork_publication_suffix(child, publication_parent_head(&admission), validator);
         let head_and_chain = Self::logical_head_unchecked_on(&self.conn, child)
             .and_then(|head| {
                 Self::compute_chain_hash_at_unchecked_on(
@@ -12673,8 +12723,11 @@ impl SqliteStore {
         request: &ForkManifestPublicationRequestV1,
     ) -> Result<pos_core::ForkPublicationReceiptV1, ForkManifestPublicationErrorV1> {
         let input = operation.input();
-        let committed =
-            self.read_committed_fork_publication(input.child_timeline_id, input.final_logical_head);
+        let committed = self.read_committed_fork_publication(
+            input.child_timeline_id,
+            input.final_logical_head,
+            AuthorityValidatorV1::LocalOnly,
+        );
         recovered_publication_receipt(operation, request, committed)
     }
 
@@ -12765,26 +12818,31 @@ impl SqliteStore {
         &self,
         child_timeline_id: TimelineId,
         final_logical_head: u64,
+        validator: AuthorityValidatorV1,
     ) -> Result<CommittedPublicationRowsV1, ForkManifestPublicationErrorV1> {
         self.fork_publication_binding(child_timeline_id, final_logical_head)
             .and_then(|binding| binding.ok_or(ForkManifestPublicationErrorV1::PublicationMissing))
             .and_then(|binding| {
                 let input = binding.input();
-                self.fork_publication_operation(
+                self.fork_publication_operation_with_origin(
                     input.operation_id,
                     ForkManifestPublicationErrorV1::PublicationConflict,
+                    validator,
                 )
                 .and_then(|operation| {
                     self.fork_publication_artifact(input.signed_manifest_record_id)
                         .map(|artifact| operation.zip(artifact))
                 })
                 .and_then(|rows| rows.ok_or(ForkManifestPublicationErrorV1::PublicationConflict))
-                .map(|(operation, artifact)| CommittedPublicationRowsV1 {
-                    child_timeline_id,
-                    final_logical_head,
-                    binding,
-                    operation,
-                    artifact,
+                .map(|((operation, origin), artifact)| {
+                    CommittedPublicationRowsV1 {
+                        child_timeline_id,
+                        final_logical_head,
+                        binding,
+                        operation,
+                        origin,
+                        artifact,
+                    }
                 })
             })
     }
@@ -12794,13 +12852,16 @@ impl SqliteStore {
         &self,
         child_timeline_id: TimelineId,
         final_logical_head: u64,
+        validator: AuthorityValidatorV1,
     ) -> Result<crate::CommittedForkManifestV1, ForkManifestPublicationErrorV1> {
-        self.committed_fork_publication_rows(child_timeline_id, final_logical_head)
+        self.committed_fork_publication_rows(child_timeline_id, final_logical_head, validator)
             .and_then(|rows| {
-                let admission = self.fork_publication_admission(child_timeline_id);
+                let admission = self.fork_publication_admission(child_timeline_id, validator);
+                let retained = sqlite_retained_key_evidence(&self.conn, &admission);
                 let suffix = self.fork_publication_suffix(
                     child_timeline_id,
                     publication_parent_head(&admission),
+                    validator,
                 );
                 let final_chain_head_hash = Self::compute_chain_hash_at_unchecked_on(
                     &self.conn,
@@ -12813,6 +12874,7 @@ impl SqliteStore {
                     sqlite_load_key_registry(&self.conn).map_err(PublicationSourceErrorV1::from);
                 let sources = CommittedPublicationSourcesV1 {
                     admission,
+                    retained,
                     final_chain_head_hash,
                     suffix,
                     registry,
@@ -12851,8 +12913,11 @@ impl ForkManifestPublicationPortV1 for SqliteStore {
         rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)
             .map_err(ForkManifestPublicationErrorV1::from)
             .and_then(|transaction| {
-                let result =
-                    self.read_committed_fork_publication(child_timeline_id, final_logical_head);
+                let result = self.read_committed_fork_publication(
+                    child_timeline_id,
+                    final_logical_head,
+                    AuthorityValidatorV1::CodeTwoAware,
+                );
                 finish_fork_publication_transaction(transaction, result)
             })
     }
@@ -12877,13 +12942,19 @@ fn finish_fork_publication_transaction<T>(
     }
 }
 
+/// The one `FAR1` row of a child Fork, local or imported.
+const FORK_ADMISSION_FAR1_SQL: &str = "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1";
+/// The one `FCR1` row of a child Fork, local or imported.
+const FORK_CLASSIFIER_REGISTRATION_SQL: &str =
+    "SELECT fcr1_cbor FROM fork_classifier_registrations WHERE child_id = ?1";
+
 fn sqlite_local_fork_admission(
     conn: &Connection,
     hasher: &dyn Hasher,
     child_timeline_id: TimelineId,
 ) -> Result<ForkAdmissionRecordV1, ForkEventAuthorityErrorV1> {
     conn.query_row(
-        "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1",
+        FORK_ADMISSION_FAR1_SQL,
         params![child_timeline_id.to_string()],
         |row| row.get::<_, Vec<u8>>(0),
     )
@@ -13040,7 +13111,9 @@ fn sqlite_validate_classified_provenance(
         input.fork_admission_digest,
         input.classifier_revision_digest,
     )
-    .and_then(|(_, table)| sqlite_validate_classified_records(conn, operation, &table))
+    .and_then(|(_, table)| {
+        sqlite_validate_classified_records(conn, operation, &table, ValidatedOriginV1::Local)
+    })
     .map(|_| ())
 }
 
@@ -13049,6 +13122,7 @@ fn sqlite_validate_classified_records(
     conn: &Connection,
     operation: &ForkAppendOperationV1,
     table: &ForkClassifierTableV1,
+    origin: ValidatedOriginV1,
 ) -> Result<(EventOriginRecordV1, Option<ForkInterventionAdmissionV1>), ForkEventAuthorityErrorV1> {
     let input = operation.input();
     sqlite_classified_event(conn, operation)
@@ -13060,7 +13134,7 @@ fn sqlite_validate_classified_records(
                 })
                 .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
         })
-        .and_then(|(event, origin, intervention)| {
+        .and_then(|(event, record, intervention)| {
             // An unclassifiable FOP1 source is corrupt authority, exactly like
             // any record that differs from its expected provenance.
             ForkEventClassifierV1::from_table(table)
@@ -13069,16 +13143,16 @@ fn sqlite_validate_classified_records(
                 .filter(|classification| {
                     let (expected_origin, expected_intervention) =
                         operation.expected_provenance(table, *classification);
-                    classified_event_matches_operation(&event, operation)
-                        && origin == expected_origin
-                        && origin.digest() == input.event_origin_digest
+                    classified_event_matches_operation(&event, operation, origin)
+                        && record == expected_origin
+                        && record.digest() == input.event_origin_digest
                         && intervention == expected_intervention
                         && intervention
                             .as_ref()
                             .map(ForkInterventionAdmissionV1::digest)
                             == input.intervention_admission_digest
                 })
-                .map(|_| (origin, intervention))
+                .map(|_| (record, intervention))
                 .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
         })
 }
@@ -13105,7 +13179,7 @@ fn sqlite_classified_authority_graph(
         .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
     let registration_bytes = conn
         .query_row(
-            "SELECT fcr1_cbor FROM fork_classifier_registrations WHERE child_id = ?1",
+            FORK_CLASSIFIER_REGISTRATION_SQL,
             params![child_id.to_string()],
             |row| row.get::<_, Vec<u8>>(0),
         )
