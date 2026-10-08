@@ -522,6 +522,29 @@ fn every_descriptor_and_dependency_digest_is_revocable() -> TestResult {
 }
 
 #[test]
+fn authorization_accessors_carry_field_24_and_exact_plugin_id_from_real_pmf1() -> TestResult {
+    let evidence = evidence(Vec::new(), Vec::new(), 4)?;
+    let absent = Release::new()?;
+    let fact = evidence.authorize_release(&absent.project()??)?;
+    assert_eq!(fact.plugin_id(), "plugin-a");
+    assert_eq!(fact.release_digest(), absent.release_digest()?);
+    assert_eq!(fact.previous_release_digest(), None);
+    assert!(!fact.descriptor_digests().is_empty());
+    assert!(fact
+        .descriptor_digests()
+        .windows(2)
+        .all(|pair| pair[0] < pair[1]));
+    assert!(!fact.descriptor_digests().contains(&fact.release_digest()));
+    let present = Release::sealed_with(24, &bytes([0x24; 32]))?;
+    let linked = evidence.authorize_release(&present.project()??)?;
+    assert_eq!(linked.previous_release_digest(), Some([0x24; 32]));
+    assert_eq!(linked.release_digest(), present.release_digest()?);
+    assert_ne!(linked.release_digest(), fact.release_digest());
+    assert!(!linked.descriptor_digests().contains(&[0x24; 32]));
+    Ok(())
+}
+
+#[test]
 fn previous_manifest_framing_and_signature_digests_are_not_descriptors() -> TestResult {
     let release = Release::sealed_with(24, &bytes([0x24; 32]))?;
     let pmf1 = release.pmf1();
