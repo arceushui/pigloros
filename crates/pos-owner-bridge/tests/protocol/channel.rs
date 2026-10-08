@@ -125,7 +125,7 @@ fn a_quarantined_ceremony_stays_with_the_surface_thread_until_its_exit_arrives()
     assert!(reply.driver.is_none());
     assert!(host.poll_quarantine().driver.is_none());
     drop(host);
-    assert!(surface.join().is_ok());
+    assert!(matches!(surface.join(), Ok(Ok(_))));
 }
 
 #[test]

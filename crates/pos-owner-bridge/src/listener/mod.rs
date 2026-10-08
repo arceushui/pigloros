@@ -10,6 +10,10 @@
 //! bound turns a delay that long into `Lifecycle(ReadinessTimeout)`, which the user may retry.
 //! The attack cannot make the host accept a wrong document, because only the pinned bytes are
 //! ever served and the served-once ledger counts completed responses; it can only deny service.
+//!
+//! A response still in flight from the previous navigation can raise the next navigation's
+//! served count after the ledger was reset. That fails closed: the ceremony sees a spurious
+//! `DuplicateDocumentLoad` and ends, and the host never accepts a wrong document.
 
 // The seam is `bind` (the `LoopbackBinder` a platform shim implements) and the listener below.
 mod assets;

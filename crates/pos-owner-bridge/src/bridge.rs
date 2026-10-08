@@ -279,6 +279,14 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
         self.status = BridgeStatus::after(result.as_ref().err().copied());
     }
 
+    /// Zero the slots the bridge holds. While a quarantined driver holds them there is nothing
+    /// to wipe and nothing is allocated (ADR-110 §5.6 allocates once, at construction).
+    fn wipe_slots(&mut self) {
+        if let Some(slots) = self.slots.as_deref_mut() {
+            slots.wipe_all();
+        }
+    }
+
     fn with_slots<T>(&mut self, operation: impl FnOnce(&mut Slots) -> T) -> T {
         let mut slots = self.slots.take().unwrap_or_else(Slots::allocate);
         let outcome = operation(&mut slots);
@@ -395,7 +403,7 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
             }
             failure.error
         });
-        self.with_slots(Slots::wipe_all);
+        self.wipe_slots();
         self.end(&outcome);
         outcome
     }
@@ -513,7 +521,7 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
     ) -> Result<P::Session, BridgeError> {
         self.begin()?;
         let outcome = self.unlock_steps(binding, prf_input, port);
-        self.with_slots(Slots::wipe_all);
+        self.wipe_slots();
         self.end(&outcome);
         outcome
     }

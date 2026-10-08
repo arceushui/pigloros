@@ -53,11 +53,11 @@ fn serves_the_exact_pinned_owner_response_once() -> TestResult {
 #[test]
 fn serves_over_ipv6_when_the_ipv6_loopback_is_held() -> TestResult {
     let listener = start(ListenerConfig::adr())?;
+    // This only exercises the IPv6 serve path on a host that has an IPv6 loopback; the held-v6
+    // path is also covered in `listener/tests.rs`.
     if let Some(v6) = listener.v6_addr() {
         assert!(is_the_pinned_owner_response(&exchange(v6, OWNER_REQUEST)?));
         assert_eq!(listener.served().count, 1);
-    } else {
-        assert!(listener.v6_addr().is_none());
     }
     Ok(())
 }

@@ -106,8 +106,8 @@ pub enum Step {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Phase {
     Opening,
-    AwaitingLoad,
-    Posted,
+    AwaitingLoad { navigation: NavigationId },
+    Posted { navigation: NavigationId },
     Releasing { since: Instant, state_live: bool },
     AwaitingExit { since: Instant },
     Quarantined,
@@ -123,7 +123,6 @@ pub struct CeremonyDriver {
     reply_header: [u8; HEADER],
     identity: Option<ProcessIdentity>,
     record: Option<Vec<u8>>,
-    navigation: Option<NavigationId>,
     loaded: Option<NavigationId>,
     posts: u8,
     post_returned_at: Instant,
@@ -150,7 +149,6 @@ impl CeremonyDriver {
             reply_header: [0; HEADER],
             identity: None,
             record: None,
-            navigation: None,
             loaded: None,
             posts: 0,
             post_returned_at: t0,
@@ -234,8 +232,8 @@ impl CeremonyDriver {
         }
         match self.phase {
             Phase::Opening => self.open(env, now),
-            Phase::AwaitingLoad => self.await_load(env, now),
-            Phase::Posted => self.posted(env, now),
+            Phase::AwaitingLoad { navigation } => self.await_load(env, now, navigation),
+            Phase::Posted { navigation } => self.posted(env, now, navigation),
             Phase::Releasing { since, state_live } => self.releasing(env, now, since, state_live),
             Phase::AwaitingExit { since } => self.awaiting_exit(env, now, since),
             Phase::Quarantined | Phase::Done => Step::Done,
@@ -262,8 +260,8 @@ impl CeremonyDriver {
     #[must_use]
     pub fn next_wake(&self) -> Option<Instant> {
         let phase = match self.phase {
-            Phase::Opening | Phase::AwaitingLoad => self.load_wake(),
-            Phase::Posted => self.posted_wake(),
+            Phase::Opening | Phase::AwaitingLoad { .. } => self.load_wake(),
+            Phase::Posted { .. } => self.posted_wake(),
             Phase::Releasing { since, .. } => Some(since + RELEASE_WINDOW),
             Phase::AwaitingExit { since } => Some(since + EXIT_WINDOW),
             Phase::Quarantined | Phase::Done => None,
@@ -306,7 +304,7 @@ impl CeremonyDriver {
     const fn pre_release(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Opening | Phase::AwaitingLoad | Phase::Posted
+            Phase::Opening | Phase::AwaitingLoad { .. } | Phase::Posted { .. }
         )
     }
 
@@ -354,7 +352,7 @@ impl CeremonyDriver {
     }
 
     fn apply_loaded(&mut self, id: NavigationId) -> Option<BridgeError> {
-        if self.phase == Phase::AwaitingLoad && self.loaded.is_none() {
+        if matches!(self.phase, Phase::AwaitingLoad { .. }) && self.loaded.is_none() {
             self.loaded = Some(id);
             None
         } else {
@@ -416,22 +414,26 @@ impl CeremonyDriver {
         env.loopback.begin_navigation();
         match env.surface.navigate() {
             Ok(navigation) => {
-                self.navigation = Some(navigation);
-                self.phase = Phase::AwaitingLoad;
+                self.phase = Phase::AwaitingLoad { navigation };
                 Step::Pending
             }
             Err(error) => self.fail(env, now, error.error()),
         }
     }
 
-    fn await_load(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
+    fn await_load(
+        &mut self,
+        env: &mut StepEnv<'_>,
+        now: Instant,
+        navigation: NavigationId,
+    ) -> Step {
         if let Some(error) = self.pre_post_failure(now) {
             return self.fail(env, now, error);
         }
         let Some(loaded) = self.loaded else {
             return Step::Pending;
         };
-        if self.navigation != Some(loaded) {
+        if navigation != loaded {
             let violation = BridgeError::Lifecycle(LifecycleCode::NavigationViolation);
             let error = self.bump_generation().err().unwrap_or(violation);
             return self.fail(env, now, error);
@@ -442,7 +444,7 @@ impl CeremonyDriver {
         if self.served_settling(env.loopback.served(), now) {
             return Step::Pending;
         }
-        self.post_pair(env, now)
+        self.post_pair(env, now, navigation)
     }
 
     /// Whether a served count of zero may still be the benign race with the listener thread.
@@ -499,7 +501,7 @@ impl CeremonyDriver {
             .map_err(protocol_from_codec)
     }
 
-    fn post_pair(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
+    fn post_pair(&mut self, env: &mut StepEnv<'_>, now: Instant, navigation: NavigationId) -> Step {
         if let Err(error) = check_served(env.loopback.served()) {
             return self.fail(env, now, error);
         }
@@ -524,7 +526,7 @@ impl CeremonyDriver {
         }
         let guard = PostGuard {
             generation: self.generation,
-            navigation_id: self.navigation.unwrap_or(NavigationId(0)),
+            navigation_id: navigation,
             served_count: served.count,
         };
         if let Err(error) = env.surface.post(&guard) {
@@ -533,11 +535,11 @@ impl CeremonyDriver {
         self.posts += 1;
         self.post_returned_at = env.clock.now();
         self.last_poll = None;
-        self.phase = Phase::Posted;
+        self.phase = Phase::Posted { navigation };
         Step::Pending
     }
 
-    fn posted(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
+    fn posted(&mut self, env: &mut StepEnv<'_>, now: Instant, navigation: NavigationId) -> Step {
         if let Some(error) = self.budget_failure(now) {
             return self.fail(env, now, error);
         }
@@ -552,7 +554,7 @@ impl CeremonyDriver {
         match self.known {
             ControlState::Ready => self.consume(env, now),
             ControlState::Failed => self.fail(env, now, lifecycle(LifecycleCode::ClientFailed)),
-            ControlState::Empty => self.await_receipt(env, now),
+            ControlState::Empty => self.await_receipt(env, now, navigation),
             _ => self.await_reply(env, now),
         }
     }
@@ -586,7 +588,12 @@ impl CeremonyDriver {
         self.known = observed;
     }
 
-    fn await_receipt(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
+    fn await_receipt(
+        &mut self,
+        env: &mut StepEnv<'_>,
+        now: Instant,
+        navigation: NavigationId,
+    ) -> Step {
         if expired(now, self.plan.t0, READINESS) {
             return self.timing_failure(env, now);
         }
@@ -596,17 +603,20 @@ impl CeremonyDriver {
         if self.posts >= MAX_POSTS {
             return self.timing_failure(env, now);
         }
-        self.retire_and_repost(env, now)
+        self.retire_and_repost(env, now, navigation)
     }
 
     fn await_reply(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
-        let over = self
-            .first_past_empty
-            .is_some_and(|first| expired(now, first, INTERACTION));
-        if over {
+        if self.interaction_over(now) {
             return self.fail(env, now, lifecycle(LifecycleCode::InteractionTimeout));
         }
         Step::Pending
+    }
+
+    /// Whether the interaction window, which ends at the `READY -> CONSUMING` CAS, has run out.
+    fn interaction_over(&self, now: Instant) -> bool {
+        self.first_past_empty
+            .is_some_and(|first| expired(now, first, INTERACTION))
     }
 
     fn timing_failure(&mut self, env: &StepEnv<'_>, now: Instant) -> Step {
@@ -630,7 +640,12 @@ impl CeremonyDriver {
         Step::Pending
     }
 
-    fn retire_and_repost(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
+    fn retire_and_repost(
+        &mut self,
+        env: &mut StepEnv<'_>,
+        now: Instant,
+        navigation: NavigationId,
+    ) -> Step {
         match release_loop(env.surface, ControlState::Empty, ReleaseMode::Timing) {
             Ok(Some(advanced)) => return self.void_timing_failure(advanced, now),
             Err(error) => return self.fail_unexpected(error, now),
@@ -644,10 +659,15 @@ impl CeremonyDriver {
         if let Err(error) = self.bump_generation() {
             return self.fail(env, now, error);
         }
-        self.post_pair(env, now)
+        self.post_pair(env, now, navigation)
     }
 
     fn consume(&mut self, env: &mut StepEnv<'_>, now: Instant) -> Step {
+        // ADR-110 §6: the interaction window ends at the CAS, so a READY first read after it
+        // is not consumed.
+        if self.interaction_over(now) {
+            return self.fail(env, now, lifecycle(LifecycleCode::InteractionTimeout));
+        }
         if expired(now, self.plan.t0, CHALLENGE_TTL) {
             return self.fail(env, now, lifecycle(LifecycleCode::ChallengeExpired));
         }

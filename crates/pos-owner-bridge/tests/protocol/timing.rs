@@ -149,6 +149,42 @@ fn the_driver_reports_the_next_instant_it_needs_attention() -> TestResult {
     Ok(())
 }
 
+/// Run a ceremony whose page answers one second after `RECEIVED`, jump the clock by `jump` right
+/// after the first state past `EMPTY` was observed, and report the result.
+fn consumed_after_jump(jump: Duration) -> Result<bool, Box<dyn std::error::Error>> {
+    let page = HonestConfig {
+        respond_after: Some(Duration::from_secs(1)),
+        ..honest(0)
+    };
+    let mut rig = DriverRig::new(page, SurfaceConfig::default())?;
+    let plan = create_plan(&rig.clock);
+    let mut driver = new_driver(plan);
+    for _ in 0..100 {
+        driver.step(&mut rig.env());
+        let now = rig.clock.now();
+        let wake = driver.next_wake().ok_or("the driver has no wake")?;
+        if wake.saturating_duration_since(now) > Duration::from_mins(1) {
+            break;
+        }
+        rig.clock.advance(Duration::from_millis(10));
+    }
+    rig.clock.advance(jump);
+    driver.step(&mut rig.env());
+    match rig.step_to_end(&mut driver) {
+        Ok(_) => Ok(true),
+        Err(BridgeError::Lifecycle(LifecycleCode::InteractionTimeout)) => Ok(false),
+        Err(error) => Err(format!("unexpected failure: {error:?}").into()),
+    }
+}
+
+#[test]
+fn a_ready_first_read_after_the_interaction_window_is_not_consumed() -> TestResult {
+    let inside = INTERACTION - Duration::from_secs(1);
+    assert!(consumed_after_jump(inside)?);
+    assert!(!consumed_after_jump(INTERACTION)?);
+    Ok(())
+}
+
 #[test]
 fn an_enrollment_budget_pulls_the_wake_forward() -> TestResult {
     let rig = DriverRig::new(honest(0), SurfaceConfig::default())?;
