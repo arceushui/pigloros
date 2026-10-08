@@ -408,8 +408,10 @@ fn public_verifier_rejects_an_off_curve_stored_key() -> Result<(), OwnerBridgeCo
     invalid_point_key[10..42].fill(0);
     let invalid_point_authenticator_data = create_authenticator_data(invalid_point_key);
     let invalid_point_attestation = none_attestation_object(&invalid_point_authenticator_data);
-    let parsed_invalid_point =
-        verified(parse_none_attestation_object(&invalid_point_attestation, &CREDENTIAL_ID))?;
+    let parsed_invalid_point = verified(parse_none_attestation_object(
+        &invalid_point_attestation,
+        &CREDENTIAL_ID,
+    ))?;
     let invalid_point_credential = StoredCredential::new(
         &CREDENTIAL_ID,
         USER_HANDLE,
