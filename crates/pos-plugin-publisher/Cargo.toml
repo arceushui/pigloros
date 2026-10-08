@@ -1,0 +1,21 @@
+[package]
+name = "pos-plugin-publisher"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pos-core = { path = "../pos-core" }
+pos-crypto = { path = "../pos-crypto" }
+pos-plugin-release = { path = "../pos-plugin-release" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+blake3 = { workspace = true }
+ciborium = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

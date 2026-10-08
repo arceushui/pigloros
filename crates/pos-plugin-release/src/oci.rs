@@ -1,14 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use sha2::{Digest as _, Sha256};
+use crate::{
+    sha256_digest, ARTIFACT_TYPE, COMPONENT_MEDIA_TYPE, EMPTY_CONFIG_DIGEST,
+    EMPTY_CONFIG_MEDIA_TYPE, LICENCE_MEDIA_TYPE, MANIFEST_MEDIA_TYPE, MIGRATION_FIXTURE_MEDIA_TYPE,
+    PMF1_MEDIA_TYPE, PROVENANCE_MEDIA_TYPE, SBOM_MEDIA_TYPE, SCHEMA_MEDIA_TYPE, WIT_MEDIA_TYPE,
+};
 
-const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
-const ARTIFACT_TYPE: &str = "application/vnd.pigloros.plugin.release.v1";
-const EMPTY_CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.empty.v1+json";
-const EMPTY_CONFIG_DIGEST: &str =
-    "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
-#[cfg(test)]
-const EMPTY_CONFIG_BYTES: &[u8] = b"{}";
 const MAX_MANIFEST_BYTES: usize = crate::MAX_JCS_BYTES;
 const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
 const MAX_LICENCES: usize = 32;
@@ -400,19 +397,11 @@ fn layer_role<'a>(
     media_type: &str,
 ) -> Result<(&'a str, u8), ReleaseSourceErrorV1> {
     let fixed = match member {
-        "pmf1" => Some((
-            "pmf1",
-            0,
-            "application/vnd.pigloros.plugin.manifest.v1+cbor",
-        )),
-        "component" => Some((
-            "component",
-            1,
-            "application/vnd.pigloros.plugin.component.v1+wasm",
-        )),
-        "wit" => Some(("wit", 2, "application/vnd.pigloros.plugin.wit.v1+tar")),
-        "provenance" => Some(("provenance", 4, "application/vnd.in-toto+json")),
-        "sbom" => Some(("sbom", 5, "application/spdx+json")),
+        "pmf1" => Some(("pmf1", 0, PMF1_MEDIA_TYPE)),
+        "component" => Some(("component", 1, COMPONENT_MEDIA_TYPE)),
+        "wit" => Some(("wit", 2, WIT_MEDIA_TYPE)),
+        "provenance" => Some(("provenance", 4, PROVENANCE_MEDIA_TYPE)),
+        "sbom" => Some(("sbom", 5, SBOM_MEDIA_TYPE)),
         _ => None,
     };
     if let Some((role, rank, required_media_type)) = fixed {
@@ -423,18 +412,13 @@ fn layer_role<'a>(
         };
     }
     for (prefix, role, rank, required_media_type) in [
-        (
-            "schema/",
-            "schema",
-            3,
-            "application/vnd.pigloros.plugin.schema.v1+json",
-        ),
-        ("licence/", "licence", 6, "text/plain; charset=utf-8"),
+        ("schema/", "schema", 3, SCHEMA_MEDIA_TYPE),
+        ("licence/", "licence", 6, LICENCE_MEDIA_TYPE),
         (
             "migration-fixture/",
             "migration-fixture",
             7,
-            "application/vnd.pigloros.plugin.migration-fixture.v1+cbor",
+            MIGRATION_FIXTURE_MEDIA_TYPE,
         ),
     ] {
         if let Some(suffix) = member.strip_prefix(prefix) {
@@ -495,19 +479,10 @@ fn valid_sha256_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn sha256_digest(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::from("sha256:");
-    for byte in Sha256::digest(bytes) {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::EMPTY_CONFIG_BYTES;
 
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn digest(bytes: &[u8]) -> String {
