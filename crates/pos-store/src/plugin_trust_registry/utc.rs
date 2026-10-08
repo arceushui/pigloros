@@ -18,7 +18,7 @@ impl TrustedUtcSecondV1 {
     /// Sample `source` once and floor the microseconds to whole seconds.
     ///
     /// A sample is a non-negative microsecond count bounded by `i64::MAX`, so
-    /// the integer division equals the floor and cannot overflow.
+    /// the integer division equals the floor and always fits an `i64`.
     ///
     /// # Errors
     /// Returns `TrustedTimeUnavailable` when the source fails.
@@ -30,12 +30,10 @@ impl TrustedUtcSecondV1 {
             .or(Err(
                 PluginTrustPolicyRegistryErrorV1::TrustedTimeUnavailable,
             ))
-            .and_then(|sample| {
-                i64::try_from(sample.as_micros() / MICROS_PER_SECOND).or(Err(
-                    PluginTrustPolicyRegistryErrorV1::TrustedTimeUnavailable,
-                ))
+            .map(|sample| {
+                // The quotient is at most `i64::MAX / 1_000_000`, so the saturation never applies.
+                Self(i64::try_from(sample.as_micros() / MICROS_PER_SECOND).unwrap_or(i64::MAX))
             })
-            .map(Self)
     }
 
     /// The UTC second since the Unix epoch.

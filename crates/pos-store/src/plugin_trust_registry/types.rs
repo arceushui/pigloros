@@ -39,6 +39,7 @@ pub struct ActivationEventIdentityV1 {
     pub(crate) event_type: String,
     pub(crate) schema_version: SchemaVersion,
     pub(crate) payload_digest: [u8; 32],
+    /// The first-commit logical sequence: the typed `Seq` refinement of the ADR's `Option<u64>`.
     pub(crate) origin_logical_seq: Option<Seq>,
 }
 

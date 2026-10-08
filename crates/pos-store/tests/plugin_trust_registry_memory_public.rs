@@ -678,6 +678,40 @@ fn a_geographic_activation_draft_is_rejected_like_a_generic_append() -> TestResu
 }
 
 #[test]
+fn an_erased_activation_timeline_refuses_the_activation_event() -> TestResult {
+    let gate = std::sync::Arc::new(pos_core::ErasureContainmentGateV1::new_test_open());
+    let mut store = MemoryStore::new();
+    store.bind_erasure_gate(std::sync::Arc::clone(&gate))?;
+    let timeline = store.create_timeline("erased")?.id();
+    let env = Env::new("scope")?;
+    store.provision(&env.anchor, &env.genesis_tps1)?;
+    let genesis = env.genesis()?;
+    assert_eq!(
+        gate.complete_timeline_erasure_for_test(timeline),
+        Ok(pos_core::ErasureLifecycleV1::Complete)
+    );
+    let before_policy = store.retained_policy_state("scope")?;
+    let before_ledger = store.ledger("scope")?;
+    assert_eq!(
+        store.admit(
+            &env.anchor,
+            &genesis.tps1,
+            &genesis.evidence,
+            &release_one().projection()?,
+            genesis.trusted()?,
+            genesis.tick,
+            activation(timeline, 1)
+        ),
+        Err(RegistryError::ActivationEventRejected)
+    );
+    assert_eq!(store.retained_policy_state("scope")?, before_policy);
+    assert_eq!(store.ledger("scope")?, before_ledger);
+    assert_eq!(store.active_release("scope", "plugin-a")?, None);
+    assert_eq!(store.retained_release_decision("scope", [0x01; 32])?, None);
+    Ok(())
+}
+
+#[test]
 fn a_store_without_an_erasure_gate_cannot_admit_or_roll_back() -> TestResult {
     let mut store = MemoryStore::new().without_erasure_gate();
     let env = Env::new("scope")?;
