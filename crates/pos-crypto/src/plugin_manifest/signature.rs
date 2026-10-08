@@ -107,8 +107,8 @@ pub fn verify_plugin_release_signature_v1(
         KeyIdentityV1::from_parts(signed.owner, KeyRoleV1::PluginReleaseSigning, signed.epoch);
     let payload = CanonicalBytes::from_vec(signed.release_digest.to_vec());
     let signature = Signature::from_bytes(signed.signature);
-    // PTR1 decoding already proved the key is a curve point, so a key that
-    // does not parse and a signature that does not verify fail identically.
+    // PTR1 decoding already proved the key is a curve point; a key that still
+    // fails to parse is rejected like a signature that does not verify.
     let valid = VerifyingKey::from_bytes(&public_key)
         .is_ok_and(|key| verify_for_role(&key, identity, &payload, &signature).is_ok());
     if !valid {

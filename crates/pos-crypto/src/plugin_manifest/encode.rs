@@ -42,8 +42,9 @@ const DEPENDENCY_ABI_MAJOR: u64 = 0;
 const SIGNATURE_FIELDS: usize = 4;
 /// Elements of an `ArtifactDescriptorV1` and of a `SchemaDescriptorV1`.
 const DESCRIPTOR_FIELDS: usize = 4;
-/// Upper bound of bytes that fields 25-27 add after the unsigned array.
-const SIGNED_TAIL_MAX: usize = 140;
+/// Upper bound of bytes that fields 25-27 add after the unsigned array: the 34-byte field 25 and
+/// field 27, and the field 26 array with its epoch in a 9-byte head.
+const SIGNED_TAIL_MAX: usize = 146;
 
 /// The exact bytes of one artifact and the raw SHA-256 of those bytes.
 ///
