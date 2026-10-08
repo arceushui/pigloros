@@ -270,14 +270,14 @@ def test_masker() -> None:
         ("let unsafe_code = 1;", False),
     )
     for source, visible in cases:
-        code = CHECKER.code_only(source)
+        code = CHECKER.scan(source).code
         newlines = [index for index, character in enumerate(source) if character == "\n"]
         if len(code) != len(source) or [i for i, c in enumerate(code) if c == "\n"] != newlines:
             raise SystemExit(f"masker changed offsets for {source!r}")
         if bool(CHECKER.UNSAFE_TOKEN.search(code)) != visible:
             raise SystemExit(f"masker mishandled {source!r}: visible={not visible}, code={code!r}")
     multiline = "let s = \"a\nunsafe {}\nb\"; unsafe {}\n"
-    code = CHECKER.code_only(multiline)
+    code = CHECKER.scan(multiline).code
     if len(CHECKER.UNSAFE_TOKEN.findall(code)) != 1 or code.count("\n") != multiline.count("\n"):
         raise SystemExit(f"masker mishandled a multi-line string: {code!r}")
 

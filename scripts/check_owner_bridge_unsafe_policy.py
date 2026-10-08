@@ -335,11 +335,6 @@ def scan(text: str) -> Scan:
     return Scan(code, tuple(code.split("\n")), comments, tuple(raw_identifiers))
 
 
-def code_only(text: str) -> str:
-    """Mask comments and literals while preserving source offsets and lines."""
-    return scan(text).code
-
-
 def _line_of(code: str, offset: int) -> int:
     return code.count("\n", 0, offset) + 1
 
