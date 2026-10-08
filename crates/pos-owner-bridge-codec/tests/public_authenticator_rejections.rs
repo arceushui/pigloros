@@ -4,6 +4,12 @@ use pos_owner_bridge_codec::{
     SubjectCredentialBindingV1, SubjectId, TransportCodes, VerificationReason as Reason,
 };
 
+/// Bytes of a valid attestation object up to and including the `authData` byte-string head.
+const TRUNCATED_ATTESTATION_LENGTH: usize = 30;
+
+/// One byte past the 1,024-byte credential-ID bound.
+const OVERSIZED_EXPECTED_CREDENTIAL_ID: [u8; 1_025] = [0; 1_025];
+
 const CREDENTIAL_ID: [u8; 2] = [0x80, 0x81];
 const RP_ID_HASH: [u8; 32] = [
     0x49, 0x96, 0x0d, 0xe5, 0x88, 0x0e, 0x8c, 0x68, 0x74, 0x34, 0x17, 0x0f, 0x64, 0x76, 0x60, 0x5b,
@@ -62,8 +68,10 @@ fn public_none_attestation_parser_rejects_closed_envelope_variations(
         parse_none_attestation_object(b"\xa3\x63fmt\x64none\x67attStmt\xa0\x68authData\x40", &[]),
         Err(Reason::CredentialMismatch)
     );
+    // The expected ID is over the bound, so the truncated `authData` claim is never read.
+    let truncated = &trailing[..TRUNCATED_ATTESTATION_LENGTH];
     assert_eq!(
-        parse_none_attestation_object(&trailing[..30], &[0; 1_025]),
+        parse_none_attestation_object(truncated, &OVERSIZED_EXPECTED_CREDENTIAL_ID),
         Err(Reason::CredentialMismatch)
     );
     Ok(())

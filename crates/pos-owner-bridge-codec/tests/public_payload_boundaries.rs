@@ -6,6 +6,15 @@ use pos_owner_bridge_codec::{
     VerificationReason as Reason, WebAuthnChallenge,
 };
 
+/// A CBOR byte-string head (`0x58 0x20`) plus its 32 content bytes.
+const FIXED_BYTES_ITEM: usize = 2 + 32;
+
+/// An Assertion reply ends with the PRF result item, then the null `second` item.
+const RESULT_ITEM_FROM_END: usize = FIXED_BYTES_ITEM + 1;
+
+/// The user-handle item sits directly before the PRF result item.
+const HANDLE_ITEM_FROM_END: usize = FIXED_BYTES_ITEM + RESULT_ITEM_FROM_END;
+
 const CEREMONY_ID: CeremonyId = CeremonyId::from_bytes([
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 ]);
@@ -808,14 +817,14 @@ fn public_reply_decoders_keep_noncanonical_lengths_apart_from_field_faults(
     let assertion_length = encode_assertion_reply(&assertion, &mut assertion_bytes)?;
     let encoded = &assertion_bytes[..assertion_length];
     let mut noncanonical_handle = Vec::from(encoded);
-    let handle_head = assertion_length - 69;
+    let handle_head = assertion_length - HANDLE_ITEM_FROM_END;
     noncanonical_handle.splice(handle_head..handle_head + 2, [0x59, 0, 0x20]);
     assert_eq!(
         decode_assertion_reply(&noncanonical_handle),
         Err(OwnerBridgeCodecError::NonCanonicalCbor)
     );
     let mut noncanonical_result = Vec::from(encoded);
-    let result_head = assertion_length - 35;
+    let result_head = assertion_length - RESULT_ITEM_FROM_END;
     noncanonical_result.splice(result_head..result_head + 2, [0x59, 0, 0x20]);
     assert_eq!(
         decode_assertion_reply(&noncanonical_result),

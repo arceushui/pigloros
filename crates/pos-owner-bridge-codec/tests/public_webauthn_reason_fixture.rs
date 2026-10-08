@@ -45,6 +45,35 @@ const ALL_REASONS: [(&str, VerificationReason); 21] = [
     ("PrfAbsent", VerificationReason::PrfAbsent),
 ];
 
+/// The row of `ALL_REASONS` that must name `reason`.
+///
+/// The match has no wildcard, so a new variant fails to compile until it is listed here.
+const fn position(reason: VerificationReason) -> usize {
+    match reason {
+        VerificationReason::CeremonyIdMismatch => 0,
+        VerificationReason::PrfUnsupported => 1,
+        VerificationReason::Malformed => 2,
+        VerificationReason::Origin => 3,
+        VerificationReason::RpIdHash => 4,
+        VerificationReason::ClientDataType => 5,
+        VerificationReason::Challenge => 6,
+        VerificationReason::CrossOrigin => 7,
+        VerificationReason::UserPresence => 8,
+        VerificationReason::UserVerification => 9,
+        VerificationReason::AttestationFormat => 10,
+        VerificationReason::Algorithm => 11,
+        VerificationReason::CoseKey => 12,
+        VerificationReason::Extensions => 13,
+        VerificationReason::Signature => 14,
+        VerificationReason::CredentialMismatch => 15,
+        VerificationReason::UserHandleMismatch => 16,
+        VerificationReason::CounterRegression => 17,
+        VerificationReason::BackupFlags => 18,
+        VerificationReason::PrfMalformed => 19,
+        VerificationReason::PrfAbsent => 20,
+    }
+}
+
 #[test]
 fn every_fixture_case_reports_its_exact_reason() -> Result<(), OwnerBridgeCodecError> {
     let mut replayed = 0;
@@ -63,9 +92,9 @@ fn every_fixture_case_reports_its_exact_reason() -> Result<(), OwnerBridgeCodecE
 
 #[test]
 fn every_verification_reason_has_a_fixture_case() {
-    for (name, _) in ALL_REASONS {
-        let wanted = format!(".reason={name}");
-        assert!(REASONS.lines().any(|line| line.contains(&wanted)), "{name}");
+    for (index, (name, reason)) in ALL_REASONS.iter().enumerate() {
+        assert_eq!(position(*reason), index);
+        assert!(REASONS.lines().any(|line| names_reason(line, name)), "{name}");
     }
 }
 
@@ -74,6 +103,10 @@ fn the_baseline_replies_still_verify() -> Result<(), OwnerBridgeCodecError> {
     assert_eq!(run_create(NO_CASE)?, None);
     assert_eq!(run_get(NO_CASE)?, None);
     Ok(())
+}
+
+fn names_reason(line: &str, name: &str) -> bool {
+    line.split_once(".reason=").is_some_and(|(_, value)| value == name)
 }
 
 fn run_case(case: &str) -> Result<Option<VerificationReason>, OwnerBridgeCodecError> {

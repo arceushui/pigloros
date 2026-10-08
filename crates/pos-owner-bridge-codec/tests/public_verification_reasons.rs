@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use pos_owner_bridge_codec::{OwnerBridgeCodecError, VerificationReason as Reason};
 
 const MESSAGES: [(Reason, &str); 21] = [
@@ -60,14 +62,44 @@ const MESSAGES: [(Reason, &str); 21] = [
     (Reason::PrfAbsent, "required PRF result is absent"),
 ];
 
-#[test]
-fn every_verification_reason_has_one_distinct_message() {
-    for (index, (reason, message)) in MESSAGES.iter().enumerate() {
-        assert_eq!(reason.to_string(), *message);
-        for (other, _) in MESSAGES.iter().skip(index + 1) {
-            assert_ne!(reason, other);
-        }
+/// The row of `MESSAGES` that must describe `reason`.
+///
+/// The match has no wildcard, so a new variant fails to compile until it is listed here.
+const fn position(reason: Reason) -> usize {
+    match reason {
+        Reason::CeremonyIdMismatch => 0,
+        Reason::PrfUnsupported => 1,
+        Reason::Malformed => 2,
+        Reason::Origin => 3,
+        Reason::RpIdHash => 4,
+        Reason::ClientDataType => 5,
+        Reason::Challenge => 6,
+        Reason::CrossOrigin => 7,
+        Reason::UserPresence => 8,
+        Reason::UserVerification => 9,
+        Reason::AttestationFormat => 10,
+        Reason::Algorithm => 11,
+        Reason::CoseKey => 12,
+        Reason::Extensions => 13,
+        Reason::Signature => 14,
+        Reason::CredentialMismatch => 15,
+        Reason::UserHandleMismatch => 16,
+        Reason::CounterRegression => 17,
+        Reason::BackupFlags => 18,
+        Reason::PrfMalformed => 19,
+        Reason::PrfAbsent => 20,
     }
+}
+
+#[test]
+fn every_verification_reason_has_its_message_and_all_messages_differ() {
+    let mut distinct = BTreeSet::new();
+    for (index, (reason, message)) in MESSAGES.iter().enumerate() {
+        assert_eq!(position(*reason), index);
+        assert_eq!(reason.to_string(), *message);
+        assert!(distinct.insert(reason.to_string()), "{message}");
+    }
+    assert_eq!(distinct.len(), MESSAGES.len());
 }
 
 #[test]

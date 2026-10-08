@@ -8,6 +8,35 @@ const fn rejected(code: RejectedCode) -> BridgeError {
     BridgeError::Rejected(code)
 }
 
+/// The row of the mapping table that must cover `reason`.
+///
+/// The match has no wildcard, so a new variant fails to compile until it is listed here.
+const fn position(reason: Reason) -> usize {
+    match reason {
+        Reason::CeremonyIdMismatch => 0,
+        Reason::Malformed => 1,
+        Reason::PrfUnsupported => 2,
+        Reason::PrfMalformed => 3,
+        Reason::PrfAbsent => 4,
+        Reason::Origin => 5,
+        Reason::RpIdHash => 6,
+        Reason::ClientDataType => 7,
+        Reason::Challenge => 8,
+        Reason::CrossOrigin => 9,
+        Reason::UserPresence => 10,
+        Reason::UserVerification => 11,
+        Reason::AttestationFormat => 12,
+        Reason::Algorithm => 13,
+        Reason::CoseKey => 14,
+        Reason::Extensions => 15,
+        Reason::Signature => 16,
+        Reason::CredentialMismatch => 17,
+        Reason::UserHandleMismatch => 18,
+        Reason::CounterRegression => 19,
+        Reason::BackupFlags => 20,
+    }
+}
+
 #[test]
 fn every_verification_reason_maps_to_its_adr_code() {
     let prf = BridgeError::Unavailable(UnavailableCode::PrfUnsupported);
@@ -58,7 +87,8 @@ fn every_verification_reason_maps_to_its_adr_code() {
         ),
         (Reason::BackupFlags, rejected(RejectedCode::BackupFlags)),
     ];
-    for (reason, expected) in cases {
+    for (index, (reason, expected)) in cases.into_iter().enumerate() {
+        assert_eq!(position(reason), index);
         assert_eq!(BridgeError::from_verification_reason(reason), expected);
     }
 }
