@@ -287,11 +287,13 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
         }
     }
 
-    fn with_slots<T>(&mut self, operation: impl FnOnce(&mut Slots) -> T) -> T {
-        let mut slots = self.slots.take().unwrap_or_else(Slots::allocate);
-        let outcome = operation(&mut slots);
-        self.slots = Some(slots);
-        outcome
+    /// Run `operation` on the slots the bridge holds. They are absent only while a driver holds
+    /// them, which `begin` never admits; the bridge fails closed rather than allocate new ones.
+    fn with_slots<T>(&mut self, operation: impl FnOnce(&mut Slots) -> T) -> Result<T, BridgeError> {
+        self.slots
+            .as_deref_mut()
+            .map(operation)
+            .ok_or(BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))
     }
 
     fn draw_plan(&mut self, request: PlanRequest) -> Result<CeremonyPlan, BridgeError> {
@@ -330,7 +332,10 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
     }
 
     fn run_ceremony(&mut self, plan: CeremonyPlan) -> Result<Verified, BridgeError> {
-        let slots = self.slots.take().unwrap_or_else(Slots::allocate);
+        let slots = self
+            .slots
+            .take()
+            .ok_or(BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))?;
         let reply = self.host.run(CeremonyDriver::new(plan, slots));
         self.conclude(reply)
     }
@@ -422,7 +427,7 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
                 let sealed = port.seal_candidate(PrfOutput::new(&slots.create_prf), context);
                 slots.create_prf.fill(0);
                 sealed
-            })
+            })?
             .map_err(BridgeError::Owner)?;
         let run = EnrollmentRun {
             context,
@@ -447,7 +452,7 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
         self.with_slots(|slots| {
             slots.create_prf.copy_from_slice(slots.prf.as_slice());
             slots.prf.fill(0);
-        });
+        })?;
         Ok(stored)
     }
 
@@ -498,7 +503,7 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
                 let confirmed = port.confirm_candidate(candidate, PrfOutput::new(&slots.prf));
                 slots.prf.fill(0);
                 confirmed
-            })
+            })?
             .map_err(BridgeError::Owner)?;
         if sealed.constant_time_eq(&confirmed) {
             Ok(assertion)
@@ -546,7 +551,7 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
                 let pending = port.open_pending(PrfOutput::new(&slots.prf));
                 slots.prf.fill(0);
                 pending
-            })
+            })?
             .map_err(BridgeError::Owner)?;
         let update = BindingUpdate {
             sign_count: assertion.sign_count,
