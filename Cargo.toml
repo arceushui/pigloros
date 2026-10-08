@@ -10,6 +10,7 @@ members = [
   "crates/pos-conformance",
   "crates/pos-reference",
   "crates/pos-plugin-release",
+  "crates/pos-plugin-publisher",
   "crates/pos-owner-bridge-codec",
   "crates/pos-plugin-host",
   "crates/pos-plugin-supervisor",

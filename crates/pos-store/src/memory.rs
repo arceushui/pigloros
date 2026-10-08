@@ -124,6 +124,8 @@ mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
 mod pipeline_admission;
+#[cfg(target_os = "linux")]
+mod plugin_trust_registry;
 
 #[cfg(test)]
 thread_local! {
@@ -209,6 +211,9 @@ fn fail_next_visible_delete_for_test() {
 
 /// In-memory event store. Thread-unsafe — intended for single-threaded tests and benchmarks.
 pub struct MemoryStore {
+    /// ADR-103 Plugin trust policy registry state, one record set per policy scope.
+    #[cfg(target_os = "linux")]
+    plugin_trust: plugin_trust_registry::MemoryPluginTrustStateV1,
     /// Complete state per timeline. Keeping this together makes missing companion state
     /// unrepresentable.
     timelines: HashMap<TimelineId, TimelineState>,
@@ -714,6 +719,8 @@ impl MemoryStore {
         let erasure_gate_bound = false;
 
         Self {
+            #[cfg(target_os = "linux")]
+            plugin_trust: plugin_trust_registry::MemoryPluginTrustStateV1::default(),
             timelines: HashMap::new(),
             event_ids: HashSet::new(),
             append_identities: HashMap::new(),
@@ -5077,10 +5084,7 @@ impl EventStore for MemoryStore {
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError> {
         self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
-            crate::ensure_non_geographic_drafts(drafts, timeline)
-                .and_then(|()| store.ensure_generic_fork_append_is_rejected(timeline))
-                .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
-                .and_then(|()| store.append_visible(timeline, drafts))
+            store.guarded_generic_append(timeline, drafts)
         })
     }
 
@@ -5683,6 +5687,22 @@ impl MemoryStore {
     fn fork_is_admitted(&self, timeline: TimelineId) -> bool {
         self.fork_admissions.contains_key(&timeline)
             || self.imported_fork_admissions.contains_key(&timeline)
+    }
+
+    /// The generic append guards, in order, inside an already held erasure fence.
+    ///
+    /// `EventStore::append` and the Plugin trust registry's activation append
+    /// both run exactly this chain, so the registry can never place an Event on
+    /// a Timeline, or with a draft, that a generic append would refuse.
+    fn guarded_generic_append(
+        &mut self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, CoreError> {
+        crate::ensure_non_geographic_drafts(drafts, timeline)
+            .and_then(|()| self.ensure_generic_fork_append_is_rejected(timeline))
+            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
+            .and_then(|()| self.append_visible(timeline, drafts))
     }
 
     /// ADR-099 reserves every admitted Fork's append boundary for its

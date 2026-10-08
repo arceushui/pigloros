@@ -348,6 +348,10 @@ impl VerifiedPluginTrustEvidenceV1 {
         Ok(ResolvedPluginTrustAuthorizationV1 {
             public_key: publisher.public,
             pmf1_digest: manifest.pmf1_digest,
+            plugin_id: manifest.plugin_id.clone(),
+            release_digest: manifest.release_digest,
+            descriptor_digests: manifest.descriptor_digests.clone(),
+            previous_release_digest: manifest.previous_release_digest,
             terminal_root: (self.root_version, self.root_digest),
             terminal_revocation: (self.policy_epoch, self.revocation_digest),
             evaluation_utc_second: self.evaluation_utc_second,
@@ -375,6 +379,7 @@ pub struct ValidatedPluginManifestProjectionV1 {
     pub(crate) not_before: i64,
     pub(crate) not_after: i64,
     pub(crate) release_digest: [u8; 32],
+    pub(crate) previous_release_digest: Option<[u8; 32]>,
     pub(crate) descriptor_digests: Vec<[u8; 32]>,
 }
 
@@ -437,6 +442,8 @@ pub struct PluginManifestProjectionFixtureV1 {
     pub not_after: i64,
     /// PMF1 release digest.
     pub release_digest: [u8; 32],
+    /// PMF1 field 24: the previous release digest, or `None` when it is null.
+    pub previous_release_digest: Option<[u8; 32]>,
     /// Every reachable descriptor digest, strictly sorted.
     pub descriptor_digests: Vec<[u8; 32]>,
 }
@@ -453,6 +460,7 @@ impl From<PluginManifestProjectionFixtureV1> for ValidatedPluginManifestProjecti
             not_before: fixture.not_before,
             not_after: fixture.not_after,
             release_digest: fixture.release_digest,
+            previous_release_digest: fixture.previous_release_digest,
             descriptor_digests: fixture.descriptor_digests,
         }
     }
@@ -464,10 +472,14 @@ impl From<PluginManifestProjectionFixtureV1> for ValidatedPluginManifestProjecti
 /// terminal PTR1/PRV1 coordinates, and the evaluation UTC second and Tick of
 /// the evidence that produced it. It is not a PMF1 signature verification,
 /// TPS1 authentication, release admission, or activation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedPluginTrustAuthorizationV1 {
     public_key: [u8; 32],
     pmf1_digest: [u8; 32],
+    plugin_id: String,
+    release_digest: [u8; 32],
+    descriptor_digests: Vec<[u8; 32]>,
+    previous_release_digest: Option<[u8; 32]>,
     terminal_root: (u64, [u8; 32]),
     terminal_revocation: (u64, [u8; 32]),
     evaluation_utc_second: i64,
@@ -485,6 +497,31 @@ impl ResolvedPluginTrustAuthorizationV1 {
     #[must_use]
     pub const fn pmf1_digest(&self) -> [u8; 32] {
         self.pmf1_digest
+    }
+
+    /// The exact PMF1 field 2 Plugin ID text matched against the grant.
+    #[must_use]
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    /// The PMF1 field 27 release digest that `authorize_release` checked.
+    #[must_use]
+    pub const fn release_digest(&self) -> [u8; 32] {
+        self.release_digest
+    }
+
+    /// The complete strictly sorted descriptor digest list that
+    /// `authorize_release` checked against the artifact denials.
+    #[must_use]
+    pub fn descriptor_digests(&self) -> &[[u8; 32]] {
+        &self.descriptor_digests
+    }
+
+    /// PMF1 field 24: the previous release digest, or `None` when it is null.
+    #[must_use]
+    pub const fn previous_release_digest(&self) -> Option<[u8; 32]> {
+        self.previous_release_digest
     }
 
     /// Terminal PTR1 version and complete-record digest of the evidence.

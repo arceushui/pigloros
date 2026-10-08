@@ -148,6 +148,14 @@ mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
 mod local_cut_owner;
 mod pipeline_admission;
+// The Plugin trust registry needs `pos-conformance`, which builds only on Linux, so non-Linux
+// builds expose no Plugin admission surface.
+#[cfg(target_os = "linux")]
+mod plugin_trust_registry;
+#[cfg(target_os = "linux")]
+mod plugin_trust_registry_rows;
+#[cfg(target_os = "linux")]
+mod plugin_trust_registry_schema;
 
 use fork_code_two_read::{
     sqlite_retained_key_evidence, sqlite_validated_admission, sqlite_validated_graph,
@@ -271,6 +279,10 @@ pub struct SqliteStore {
     /// in autocommit has settled that; while set and the connection is inside
     /// a transaction, counterfactual port reads are refused.
     counterfactual_write_in_doubt: Cell<bool>,
+    /// Whether a Plugin trust registry durability restore failed on this handle; while set,
+    /// every registry call fails with `StorePoisoned` until the store is dropped and reopened.
+    #[cfg(target_os = "linux")]
+    plugin_trust_poisoned: Cell<bool>,
     #[cfg(test)]
     destruction_transaction_hook:
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
@@ -2017,6 +2029,8 @@ impl SqliteStore {
             fork_admission_authority_enabled: true,
             fork_admission_authority_runtime: ForkAdmissionAuthorityStateV1::default(),
             counterfactual_write_in_doubt: Cell::new(false),
+            #[cfg(target_os = "linux")]
+            plugin_trust_poisoned: Cell::new(false),
             #[cfg(test)]
             destruction_transaction_hook: None,
         };
@@ -3912,6 +3926,22 @@ impl SqliteStore {
         Ok(count)
     }
 
+    /// The generic append guards, in order, inside an already held erasure fence.
+    ///
+    /// `EventStore::append` and the Plugin trust registry's activation append both run exactly
+    /// this chain, so the registry can never place an Event on a Timeline, or with a draft, that a
+    /// generic append would refuse.
+    fn guarded_generic_append(
+        &self,
+        timeline: TimelineId,
+        drafts: &[EventDraft],
+    ) -> Result<Vec<Event>, CoreError> {
+        crate::ensure_non_geographic_drafts(drafts, timeline)
+            .and_then(|()| self.ensure_generic_fork_append_is_rejected(timeline))
+            .and_then(|()| self.ensure_generic_timeline_visibility(timeline))
+            .and_then(|()| self.append_visible(timeline, drafts))
+    }
+
     fn append_visible(
         &self,
         timeline: TimelineId,
@@ -5599,10 +5629,7 @@ impl EventStore for SqliteStore {
         drafts: &[EventDraft],
     ) -> Result<Vec<Event>, CoreError> {
         self.with_erasure_fence(timeline, ErasureProtectedOperationV1::Append, |store| {
-            crate::ensure_non_geographic_drafts(drafts, timeline)
-                .and_then(|()| store.ensure_generic_fork_append_is_rejected(timeline))
-                .and_then(|()| store.ensure_generic_timeline_visibility(timeline))
-                .and_then(|()| store.append_visible(timeline, drafts))
+            store.guarded_generic_append(timeline, drafts)
         })
     }
 

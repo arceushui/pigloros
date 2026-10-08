@@ -6,7 +6,24 @@
 //! digest is recomputed from the verified blob bytes, and the unsigned
 //! manifest and release digests are recomputed before the ADR-103 release
 //! projection exists. Artifact content (WIT archive, in-toto, SPDX, licence
-//! text, schema JSON) is not validated here, and no signature is verified.
+//! text, schema JSON) is not validated here, and decoding never checks field
+//! 26's signature. The `encode` child module is the matching producer; both
+//! share the digest helpers below, so there is one formula for every PMF1
+//! digest.
+//! The `signature` child module re-decodes a closure and verifies field 26
+//! under a key resolved by the ADR-103 trust authorization.
+
+mod encode;
+mod signature;
+
+pub use encode::{
+    PluginArtifactInputV1, PluginDependencyInputV1, PluginReleaseDraftV1, PluginSchemaInputV1,
+    UnsignedPluginReleaseV1,
+};
+pub use signature::{
+    decode_plugin_release_signature_claim_v1, verify_plugin_release_signature_v1,
+    PluginReleaseSignatureClaimV1, PluginReleaseSignatureErrorV1, VerifiedPluginReleaseSignatureV1,
+};
 
 use std::collections::BTreeSet;
 
@@ -303,6 +320,9 @@ struct SignedFields {
     manifest_digest: Digest,
     role: u64,
     epoch: u64,
+    /// Field 26's 64-byte signature. It is reachable only through the
+    /// signature verification module, never through a projection.
+    signature: [u8; 64],
     release_digest: Digest,
 }
 
@@ -386,6 +406,7 @@ fn release_projection(validated: ValidatedPmf1<'_>) -> ValidatedPluginManifestPr
         not_before: pmf1.signed.not_before,
         not_after: pmf1.signed.not_after,
         release_digest: pmf1.signed.release_digest,
+        previous_release_digest: pmf1.signed.previous,
         descriptor_digests,
     }
 }
@@ -754,7 +775,7 @@ fn read_signed_fields(reader: &mut Pmf1Reader<'_>) -> Result<SignedFields, Plugi
     unsigned_in(reader, 1, 1)?;
     let role = unsigned_in(reader, 3, 3)?;
     let epoch = unsigned_in(reader, 1, u64::MAX)?;
-    reader.bytes::<64>()?;
+    let signature = reader.bytes::<64>()?;
     reader.at(27);
     let release_digest = reader.bytes()?;
     reader.at(DOCUMENT);
@@ -768,6 +789,7 @@ fn read_signed_fields(reader: &mut Pmf1Reader<'_>) -> Result<SignedFields, Plugi
         manifest_digest,
         role,
         epoch,
+        signature,
         release_digest,
     })
 }
@@ -889,24 +911,40 @@ fn check_inner_digests(
         })
 }
 
+/// Field 25: `BLAKE3(manifest domain || u64be(len) || unsigned)` where
+/// `unsigned` is the concatenation of `parts`, the canonical 25-element array
+/// of fields 0-24.
+fn unsigned_manifest_digest(parts: &[&[u8]]) -> Digest {
+    let length = parts.iter().fold(0, |total, part| total + part.len());
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(MANIFEST_DOMAIN);
+    hasher.update(&(length as u64).to_be_bytes());
+    for part in parts {
+        hasher.update(part);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// Field 27: `BLAKE3(release domain || unsigned digest || component BLAKE3 ||
+/// WIT BLAKE3)`.
+fn release_digest(unsigned: &Digest, component: &Digest, wit: &Digest) -> Digest {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(RELEASE_DOMAIN);
+    hasher.update(unsigned);
+    hasher.update(component);
+    hasher.update(wit);
+    *hasher.finalize().as_bytes()
+}
+
 /// Phase 4: field 25, then field 27.
 fn check_signed_digests(bytes: &[u8], pmf1: &Pmf1<'_>) -> Result<(), PluginManifestErrorV1> {
     let end = pmf1.signed.unsigned_end;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(MANIFEST_DOMAIN);
-    hasher.update(&(end as u64).to_be_bytes());
-    hasher.update(&UNSIGNED_HEAD);
-    hasher.update(&bytes[UNSIGNED_HEAD.len()..end]);
-    let unsigned = *hasher.finalize().as_bytes();
+    let unsigned = unsigned_manifest_digest(&[&UNSIGNED_HEAD, &bytes[UNSIGNED_HEAD.len()..end]]);
     if unsigned != pmf1.signed.manifest_digest {
         return Err(PluginManifestErrorV1::UnsignedManifestDigestMismatch);
     }
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(RELEASE_DOMAIN);
-    hasher.update(&unsigned);
-    hasher.update(&pmf1.component.blake3);
-    hasher.update(&pmf1.wit.blake3);
-    if *hasher.finalize().as_bytes() != pmf1.signed.release_digest {
+    let release = release_digest(&unsigned, &pmf1.component.blake3, &pmf1.wit.blake3);
+    if release != pmf1.signed.release_digest {
         return Err(PluginManifestErrorV1::ReleaseDigestMismatch);
     }
     Ok(())

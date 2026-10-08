@@ -40,6 +40,7 @@ fn manifest() -> Result<PluginManifestProjectionFixtureV1, Box<dyn std::error::E
         not_before: 40,
         not_after: 60,
         release_digest: RELEASE_DIGEST,
+        previous_release_digest: None,
         descriptor_digests: vec![FIRST_DESCRIPTOR, NESTED_DESCRIPTOR],
     })
 }
@@ -100,6 +101,58 @@ fn release_query_resolves_key_and_binds_complete_manifest_fact() -> TestResult {
     assert_eq!(fact.terminal_root(), evidence.terminal_root());
     assert_eq!(fact.terminal_revocation(), evidence.terminal_revocation());
     assert_eq!(fact.evaluation_coordinates(), (50, 4));
+    Ok(())
+}
+
+#[test]
+fn authorization_accessors_return_exactly_the_authorized_fixture_release() -> TestResult {
+    let evidence = verified(Vec::new(), Vec::new(), 4)?;
+    let absent =
+        evidence.authorize_release(&ValidatedPluginManifestProjectionV1::from(manifest()?))?;
+    assert_eq!(absent.plugin_id(), "plugin-a");
+    assert_eq!(absent.release_digest(), [0x22; 32]);
+    assert_eq!(
+        absent.descriptor_digests(),
+        [[0x30; 32], [0x33; 32]].as_slice()
+    );
+    assert_eq!(absent.previous_release_digest(), None);
+    let mut linked = manifest()?;
+    linked.previous_release_digest = Some([0x21; 32]);
+    let present = evidence.authorize_release(&ValidatedPluginManifestProjectionV1::from(linked))?;
+    assert_eq!(present.previous_release_digest(), Some([0x21; 32]));
+    assert_eq!(present.plugin_id(), absent.plugin_id());
+    assert_eq!(present.descriptor_digests(), absent.descriptor_digests());
+    assert_eq!(present.release_digest(), absent.release_digest());
+    assert_eq!(present.clone(), present);
+    assert_ne!(present, absent);
+    Ok(())
+}
+
+#[test]
+fn authorization_accessors_match_the_golden_closure_and_fixture() -> TestResult {
+    let ptr1 = hex_bytes(PTR1_HEX)?;
+    let prv1 = hex_bytes(PRV1_HEX)?;
+    let anchor = TrustedPluginRootAnchorV1::new("trust.example", digest(&ptr1))?;
+    let evidence = verify_plugin_trust_v1(&anchor, &[&ptr1], &[&prv1], 0, 9)?;
+    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&golden_bundle()?)?;
+    let real = evidence.authorize_release(&projection)?;
+    let fixture = evidence
+        .authorize_release(&ValidatedPluginManifestProjectionV1::from(golden_fixture()?))?;
+    assert_eq!(real.plugin_id(), "alpha/plugin");
+    assert_eq!(
+        real.release_digest(),
+        golden_digest(GOLDEN_RELEASE_DIGEST_HEX)?
+    );
+    assert_eq!(
+        real.previous_release_digest(),
+        Some(golden_digest(GOLDEN_PREVIOUS_RELEASE_HEX)?)
+    );
+    let expected = GOLDEN_DESCRIPTOR_DIGESTS_HEX
+        .iter()
+        .map(|hex| golden_digest(hex))
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(real.descriptor_digests(), expected.as_slice());
+    assert_eq!(real, fixture);
     Ok(())
 }
 
@@ -376,6 +429,7 @@ fn golden_fixture() -> Result<PluginManifestProjectionFixtureV1, Box<dyn std::er
         not_before: -100,
         not_after: 100,
         release_digest: golden_digest(GOLDEN_RELEASE_DIGEST_HEX)?,
+        previous_release_digest: Some(golden_digest(GOLDEN_PREVIOUS_RELEASE_HEX)?),
         descriptor_digests: GOLDEN_DESCRIPTOR_DIGESTS_HEX
             .iter()
             .map(|hex| golden_digest(hex))

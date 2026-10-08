@@ -1,0 +1,37 @@
+[package]
+name = "pos-plugin-publisher"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Declared so the registry spy fixture under `tests/support` can carry the gate
+# `scripts/check_plugin_trust_registry_impls.py` requires. It exposes nothing.
+[features]
+test-support = []
+
+[dependencies]
+pos-core = { path = "../pos-core" }
+pos-crypto = { path = "../pos-crypto" }
+pos-plugin-release = { path = "../pos-plugin-release" }
+thiserror = { workspace = true }
+
+# Linux-only, like the crate itself: pos-conformance (the anchor type) builds only there,
+# and pos-store exposes the Plugin trust policy registry port only on Linux
+# (ADR-103 revision 4). The port needs no `sqlite` feature, so rusqlite stays out of
+# this crate's own dependency set. pos-store never depends on this crate.
+[target.'cfg(target_os = "linux")'.dependencies]
+pos-conformance = { path = "../pos-conformance" }
+pos-store = { path = "../pos-store", default-features = false }
+
+[dev-dependencies]
+blake3 = { workspace = true }
+ciborium = { workspace = true }
+ed25519-dalek = { workspace = true }
+# Test-only: the scripted trusted wall source and the open erasure gate.
+pos-core = { path = "../pos-core", features = ["test-support"] }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true
