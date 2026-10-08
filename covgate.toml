@@ -1,6 +1,22 @@
+# covgate matches each changed file against exactly one scoped gate (an overlap
+# is an error), so the Windows owner-bridge shim is carved out of the
+# repository-wide gate and given its own gates below.
 [[gates]]
 name = "new-production-rust-code"
 include = ["**/src/**/*.rs"]
 exclude = ["crates/pos-owner-bridge-windows/**"]
 fail-under-lines = 99
 fail-under-regions = 99
+
+[[gates]]
+name = "owner-bridge-windows-shim"
+include = ["crates/pos-owner-bridge-windows/src/**/*.rs"]
+exclude = ["crates/pos-owner-bridge-windows/src/ffi/**"]
+fail-under-lines = 99
+fail-under-regions = 99
+
+[[gates]]
+name = "owner-bridge-windows-ffi"
+include = ["crates/pos-owner-bridge-windows/src/ffi/**"]
+fail-under-lines = 95
+fail-under-regions = 80

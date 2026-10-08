@@ -33,7 +33,10 @@ production code or avoid writing a reachable behavior test.
 The same coverage job runs `covgate` 0.2.0 against the exact pull-request base
 (or the previous commit on a push). Its checked-in configuration applies the
 same 99% line and 99% region thresholds to changed production Rust files under
-`**/src/**/*.rs`. `covgate` reads the detailed LLVM JSON report produced by the
+`**/src/**/*.rs`, except `crates/pos-owner-bridge-windows`, which has its own
+root gates: 99% lines and regions for `src` outside `src/ffi`, and 95% lines and
+80% regions for `src/ffi` (Windows-only code, so these gates are vacuous in the
+Linux coverage job). `covgate` reads the detailed LLVM JSON report produced by the
 completed `cargo llvm-cov` run, so the diff gate and repository-wide gate use the
 same test execution and native coverage data. Install the local tool with:
 
