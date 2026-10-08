@@ -33,7 +33,7 @@ use crate::plugin_trust_registry::{
 pub(super) type RegistryResult<T> = Result<T, PluginTrustPolicyRegistryErrorV1>;
 
 /// A retained `(version or epoch, complete-record digest)` floor pair.
-type Pair = (u64, [u8; 32]);
+type FloorPair = (u64, [u8; 32]);
 
 /// The stored `kind` codes of a ledger row; the schema `CHECK` allows exactly `1..=4`.
 const KIND_PROVISION: i64 = 1;
@@ -96,14 +96,25 @@ impl<'a, 'row> Columns<'a, 'row> {
 
     pub(super) fn get<T: FromSql + Default>(&self, name: &str) -> T {
         self.row.get(name).unwrap_or_else(|error| {
-            self.failure.set(Some(storage_error(&error)));
+            self.record(storage_error(&error));
             T::default()
         })
     }
 
+    /// Keep `error` unless an earlier read already failed.
+    fn record(&self, error: PluginTrustPolicyRegistryErrorV1) {
+        self.failure.set(self.failure.get().or(Some(error)));
+    }
+
     fn corrupt(&self) {
+        self.record(PluginTrustPolicyRegistryErrorV1::CorruptState);
+    }
+
+    /// The first failed read, or `CorruptState` when the decoder itself rejected the row.
+    fn failure_or_corrupt(&self) -> PluginTrustPolicyRegistryErrorV1 {
         self.failure
-            .set(Some(PluginTrustPolicyRegistryErrorV1::CorruptState));
+            .get()
+            .unwrap_or(PluginTrustPolicyRegistryErrorV1::CorruptState)
     }
 
     fn unsigned(&self, name: &str) -> u64 {
@@ -111,12 +122,12 @@ impl<'a, 'row> Columns<'a, 'row> {
     }
 
     /// A floor pair that must be present.
-    fn required_pair(&self, version: &str, digest: &str) -> Pair {
+    fn required_pair(&self, version: &str, digest: &str) -> FloorPair {
         (self.unsigned(version), self.get(digest))
     }
 
     /// A floor pair that is absent or complete; one column without the other is `CorruptState`.
-    fn optional_pair(&self, version: &str, digest: &str) -> Option<Pair> {
+    fn optional_pair(&self, version: &str, digest: &str) -> Option<FloorPair> {
         match (
             self.get::<Option<i64>>(version),
             self.get::<Option<[u8; 32]>>(digest),
@@ -237,12 +248,12 @@ fn decode_scope(scope: &str, row: &Row<'_>) -> RegistryResult<RetainedScopeV1> {
         &cols.get::<String>("anchor_operator_role"),
         cols.get("anchor_genesis_tps1_digest"),
     ) else {
-        return Err(PluginTrustPolicyRegistryErrorV1::CorruptState);
+        return Err(cols.failure_or_corrupt());
     };
     let tps1_digest: [u8; 32] = cols.get("tps1_digest");
     let tps1_bytes: Vec<u8> = cols.get("tps1_bytes");
     if *blake3::hash(&tps1_bytes).as_bytes() != tps1_digest {
-        return Err(PluginTrustPolicyRegistryErrorV1::CorruptState);
+        return Err(cols.failure_or_corrupt());
     }
     cols.finish(RetainedScopeV1 {
         anchor,
@@ -667,4 +678,44 @@ pub(super) fn insert_ledger(
             ":event_origin_logical_seq": event.origin_logical_seq,
         },
     )
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    /// `finish` of a row read as `first` then `second`, over a one-column in-memory row.
+    fn finished_after(
+        first: fn(&Columns<'_, '_>),
+        second: fn(&Columns<'_, '_>),
+    ) -> Result<RegistryResult<()>, rusqlite::Error> {
+        Connection::open_in_memory()?.query_row("SELECT 1 AS present", [], |row| {
+            let cols = Columns::new(row);
+            first(&cols);
+            second(&cols);
+            Ok(cols.finish(()))
+        })
+    }
+
+    fn missing_column(cols: &Columns<'_, '_>) {
+        let _: i64 = cols.get("absent");
+    }
+
+    fn rejected_row(cols: &Columns<'_, '_>) {
+        cols.corrupt();
+    }
+
+    #[test]
+    fn the_first_failed_read_is_the_one_reported() -> Result<(), rusqlite::Error> {
+        assert_eq!(
+            finished_after(missing_column, rejected_row)?,
+            Err(PluginTrustPolicyRegistryErrorV1::StorageFailed)
+        );
+        assert_eq!(
+            finished_after(rejected_row, missing_column)?,
+            Err(PluginTrustPolicyRegistryErrorV1::CorruptState)
+        );
+        Ok(())
+    }
 }
