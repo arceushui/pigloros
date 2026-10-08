@@ -179,7 +179,7 @@ fn consumed_after_jump(jump: Duration) -> Result<bool, Box<dyn std::error::Error
 
 #[test]
 fn a_ready_first_read_after_the_interaction_window_is_not_consumed() -> TestResult {
-    let inside = INTERACTION - Duration::from_secs(1);
+    let inside = Duration::from_secs(119);
     assert!(consumed_after_jump(inside)?);
     assert!(!consumed_after_jump(INTERACTION)?);
     Ok(())
