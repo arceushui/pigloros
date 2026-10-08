@@ -7,6 +7,10 @@
 //! here is recomputed from the public encodings, independently of the registry.
 //! The public tests and the adapter unit tests include this one file; the
 //! items are public so that no test crate sees them as unused.
+//!
+//! [`Backend`] abstracts the store under test, so the shared vectors run unchanged on the
+//! Memory adapter and on the `SQLite` adapter: [`Harness`] is generic over it and defaults to
+//! `MemoryStore`, and [`Guard`] keeps the `SQLite` file's temporary directory alive.
 
 use std::{error::Error, sync::Arc};
 
@@ -19,13 +23,15 @@ use pos_conformance::{
 use pos_core::{
     store::{EventStore, SeqRange},
     trusted_clock::ScriptedTrustedWallSourceV1,
-    CanonicalBytes, EntityId, ErasureContainmentGateV1, Event, EventDraft, Kind, OwnerIdV1,
+    CanonicalBytes, EntityId, ErasureContainmentGateV1, Event, EventDraft, Hasher, Kind, OwnerIdV1,
     TimelineId,
 };
 use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, PluginManifestProjectionFixtureV1, TrustedPluginRootAnchorV1,
     ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
+#[cfg(feature = "sqlite")]
+use pos_store::sqlite::SqliteStore;
 use pos_store::{
     memory::MemoryStore,
     plugin_trust_registry::{
@@ -662,15 +668,82 @@ pub fn activation(timeline: TimelineId, tag: u8) -> ActivationEventInputV1 {
     }
 }
 
-/// A Memory store with an open erasure gate and one activation Timeline.
+/// The erasure gate a fixture store starts with.
+pub enum Gate {
+    /// A test-open gate that this handle also holds, so a test can block a Timeline.
+    Bound(Arc<ErasureContainmentGateV1>),
+    /// No gate at all: protected operations fail closed.
+    Absent,
+    /// The constructor's own fail-closed gate, never bound by a host.
+    FailClosed,
+}
+
+impl Gate {
+    /// A bound gate that admits every protected operation.
+    #[must_use]
+    pub fn open() -> Self {
+        Self::Bound(Arc::new(ErasureContainmentGateV1::new_test_open()))
+    }
+}
+
+/// Keeps the temporary directory of a file-backed fixture store alive; `None` for Memory.
+pub struct Guard {
+    pub directory: Option<tempfile::TempDir>,
+}
+
+/// A store under test: a Plugin trust registry that also appends and reads Events.
+pub trait Backend: PluginTrustPolicyRegistryV1 + EventStore + Sized {
+    /// A fresh store with `gate` and `hasher` (BLAKE3 when `None`).
+    ///
+    /// # Errors
+    /// Returns the fixture construction error.
+    fn build(gate: Gate, hasher: Option<Box<dyn Hasher>>) -> TestResult<(Self, Guard)>;
+}
+
+impl Backend for MemoryStore {
+    fn build(gate: Gate, hasher: Option<Box<dyn Hasher>>) -> TestResult<(Self, Guard)> {
+        let mut store = hasher.map_or_else(Self::new, Self::with_hasher);
+        match gate {
+            Gate::Bound(gate) => store.bind_erasure_gate(gate)?,
+            Gate::Absent => store = store.without_erasure_gate(),
+            Gate::FailClosed => {}
+        }
+        Ok((store, Guard { directory: None }))
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl Backend for SqliteStore {
+    fn build(gate: Gate, hasher: Option<Box<dyn Hasher>>) -> TestResult<(Self, Guard)> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("plugin-trust.db");
+        let path = path.to_str().ok_or("the temporary path is not UTF-8")?;
+        let mut store = match hasher {
+            Some(hasher) => Self::open_with_hasher(path, hasher)?,
+            None => Self::open(path)?,
+        };
+        match gate {
+            Gate::Bound(gate) => store.bind_erasure_gate(gate)?,
+            Gate::Absent => store = store.without_erasure_gate(),
+            Gate::FailClosed => {}
+        }
+        Ok((
+            store,
+            Guard {
+                directory: Some(directory),
+            },
+        ))
+    }
+}
+
+/// A store with an open erasure gate and one activation Timeline.
 ///
 /// # Errors
 /// Returns the fixture construction or registry error.
-pub fn bound_store() -> TestResult<(MemoryStore, TimelineId)> {
-    let mut store = MemoryStore::new();
-    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+pub fn bound_store<B: Backend>() -> TestResult<(B, TimelineId, Guard)> {
+    let (mut store, guard) = B::build(Gate::open(), None)?;
     let timeline = store.create_timeline("plugin-activation")?.id();
-    Ok((store, timeline))
+    Ok((store, timeline, guard))
 }
 
 /// The first release of `plugin-a`.
@@ -717,26 +790,40 @@ pub struct Snapshot {
     pub events: Vec<Event>,
 }
 
-/// One Memory store with one provisioned scope and one activation Timeline.
-pub struct Harness {
-    pub store: MemoryStore,
+/// One store with one provisioned scope and one activation Timeline.
+///
+/// `store` is declared before `guard`, so a file-backed store closes before its directory goes.
+pub struct Harness<S = MemoryStore> {
+    pub store: S,
     pub env: Env,
     pub timeline: TimelineId,
+    pub guard: Guard,
 }
 
 impl Harness {
-    /// A fixture step.
+    /// A Memory harness.
     ///
     /// # Errors
     /// Returns the fixture construction or registry error.
     pub fn new() -> TestResult<Self> {
-        let (mut store, timeline) = bound_store()?;
+        Self::open()
+    }
+}
+
+impl<S: Backend> Harness<S> {
+    /// A fixture step.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
+    pub fn open() -> TestResult<Self> {
+        let (mut store, timeline, guard) = bound_store::<S>()?;
         let env = Env::new("scope")?;
         store.provision(&env.anchor, &env.genesis_tps1)?;
         Ok(Self {
             store,
             env,
             timeline,
+            guard,
         })
     }
 

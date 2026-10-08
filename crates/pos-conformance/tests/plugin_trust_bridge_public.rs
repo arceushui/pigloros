@@ -153,6 +153,7 @@ fn anchor_requires_plugin_scope_literal_role_and_valid_operator_key() -> TestRes
         [4; 32],
     )?;
     assert_eq!(anchor.scope(), "plugin.golden");
+    assert_eq!(anchor.ptr1_genesis_digest(), [3; 32]);
     assert_eq!(anchor.operator_key(), operator);
     assert_eq!(anchor.operator_role(), "deployment-operator");
     assert_eq!(anchor.genesis_tps1_digest(), [4; 32]);

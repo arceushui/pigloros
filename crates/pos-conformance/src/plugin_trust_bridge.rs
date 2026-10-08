@@ -118,6 +118,7 @@ pub enum PluginTrustBridgeErrorV1 {
 pub struct PluginTrustPolicyAnchorV1 {
     root_anchor: TrustedPluginRootAnchorV1,
     scope: String,
+    ptr1_genesis_digest: [u8; 32],
     operator_key: [u8; 32],
     genesis_tps1_digest: [u8; 32],
 }
@@ -137,8 +138,8 @@ impl PluginTrustPolicyAnchorV1 {
         operator_role: &str,
         genesis_tps1_digest: [u8; 32],
     ) -> Result<Self, PluginTrustBridgeErrorV1> {
-        // The error is closed and secret-free, so the cause is dropped. The scope is stored
-        // again below because the pos-crypto anchor exposes no getter.
+        // The error is closed and secret-free, so the cause is dropped. The scope and the PTR1
+        // genesis digest are stored again below because the pos-crypto anchor exposes no getter.
         let root_anchor = TrustedPluginRootAnchorV1::new(scope, ptr1_genesis_digest)
             .map_err(|_| PluginTrustBridgeErrorV1::InvalidAnchorScope)?;
         if operator_role != PLUGIN_OPERATOR_ROLE_V1 {
@@ -149,6 +150,7 @@ impl PluginTrustPolicyAnchorV1 {
         Ok(Self {
             root_anchor,
             scope: scope.to_owned(),
+            ptr1_genesis_digest,
             operator_key,
             genesis_tps1_digest,
         })
@@ -158,6 +160,12 @@ impl PluginTrustPolicyAnchorV1 {
     #[must_use]
     pub fn scope(&self) -> &str {
         &self.scope
+    }
+
+    /// The pinned PTR1 genesis complete-record digest, which a durable registry persists.
+    #[must_use]
+    pub const fn ptr1_genesis_digest(&self) -> [u8; 32] {
+        self.ptr1_genesis_digest
     }
 
     /// The pinned PTR1 genesis anchor for #423's stateless verifier.
