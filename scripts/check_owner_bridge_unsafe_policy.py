@@ -53,6 +53,8 @@ Policy, enforced over every ``.rs`` file under every workspace member (except
   must carry no ``ignore``, and the file may carry no inner cfg other than
   ``cfg(test)``, ``cfg(windows)`` and ``cfg(all(test, windows))`` (a ``cfg_attr``
   that adds a cfg is dead; so is any other cfg on the test or an enclosing mod).
+* A ``#[cfg(test)] mod tests`` in ``src/lib.rs`` must itself carry
+  ``#[forbid(unsafe_code)]`` like every other non-ffi file-scope ``mod``.
 * In the shim, ``macro_rules!``/``macro`` definitions, raw identifiers
   (``r#cfg`` resolves to the builtin) and macro invocations whose arguments
   contain ``mod``, ``fn``, ``impl``, ``trait`` or an attribute are rejected,
@@ -83,8 +85,10 @@ Policy, enforced over every ``.rs`` file under every workspace member (except
   accepts, does not defeat the leading-attribute checks.
 * The shim manifest repeats the workspace lint tables except for the four
   ADR-approved entries. Other members configure no ``unsafe_code`` lint.
-* Every shim source file (all of ``src``, ``tests``, ``examples``, ``benches``;
-  ``build.rs`` is exempt because a cfg-empty build script has no ``main``)
+* A shim ``build.rs`` is rejected outright, and the ffi module must be
+  ``src/ffi/mod.rs`` (``src/ffi.rs`` is rejected) so that ``src/ffi/`` holds
+  every unsafe file.
+* Every shim source file (all of ``src``, ``tests``, ``examples``, ``benches``)
   starts with ``#![cfg(windows)]``. Every shim file outside ``src/ffi`` starts
   with ``#![forbid(unsafe_code)]``, except the crate root ``src/lib.rs``: an
   inner forbid at the crate root is crate-wide and cannot be relaxed in
@@ -825,7 +829,11 @@ def _declares_test_module(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], 
             continue
         start = match.start("visibility") if match.group("visibility") else match.start()
         attached = _outer_attributes_before(scanned.code, attributes, start)
-        if _enclosing_mods(scanned.code, attributes, start) == () and any(item in TEST_MOD_CFGS for item in attached):
+        if (
+            _enclosing_mods(scanned.code, attributes, start) == ()
+            and any(item in TEST_MOD_CFGS for item in attached)
+            and not any(_dead_cfg(item) for item in attached)
+        ):
             files.extend(("src/tests.rs", "src/tests/mod.rs"))
     return files
 
@@ -899,6 +907,11 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
     for source in _walk(shim)[0]:
         relative = source.relative_to(shim).as_posix()
         label = f"{SHIM}/{relative}"
+        if relative == "build.rs":
+            found.append(f"{label}: build scripts are forbidden in the shim")
+            continue
+        if relative == "src/ffi.rs":
+            found.append(f"{label}: the ffi module must be src/ffi/mod.rs, not src/ffi.rs")
         text = _read(source)
         scanned = scan(text)
         code = scanned.code
@@ -913,7 +926,7 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
         _check_surface(label, source, shim, text, scanned, attributes, scanned_dirs, True, found, asm_spans)
         _check_shim_macros(label, scanned, found)
         leading = _leading_inner_attributes(code, attributes)
-        if relative != "build.rs" and "cfg(windows)" not in leading:
+        if "cfg(windows)" not in leading:
             found.append(f"{label}: must start with #![cfg(windows)]")
         if relative == "src/lib.rs":
             if any(FORBIDS_UNSAFE.search(_normalized(a.content)) for a in attributes if a.inner):

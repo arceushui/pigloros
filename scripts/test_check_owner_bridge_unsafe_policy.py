@@ -350,7 +350,6 @@ def test_accepted() -> None:
         "doc comment and bracketed attributes before the cfg and forbid lines",
         {HOST: '//! Host.\n#![cfg_attr(docsrs, doc = "x]y")]\n// note\n' + CFG + "/* c */\n" + FORBID},
     )
-    require_accepted("build.rs needs no cfg(windows)", {f"{SHIM}/build.rs": FORBID + "fn main() {}\n"})
     require_accepted("target directory beside src is skipped", {"crates/safe/target/gen.rs": "unsafe {}\n"})
     require_accepted(
         "include of a scanned sibling file",
@@ -486,12 +485,11 @@ def test_ffi_surface() -> None:
         ("tests/t.rs", CFG + FORBID + "fn t() { unsafe {} }\n"),
         ("examples/e.rs", CFG + FORBID + "fn main() { unsafe {} }\n"),
         ("benches/b.rs", CFG + FORBID + "fn b() { unsafe {} }\n"),
-        ("build.rs", FORBID + "fn main() { unsafe {} }\n"),
     ):
         require_rejected(
             f"unsafe block in shim {relative}",
             {f"{SHIM}/{relative}": source},
-            [at(f"{SHIM}/{relative}", 3 if source.startswith(CFG) else 2, "unsafe blocks belong only in src/ffi")],
+            [at(f"{SHIM}/{relative}", 3, "unsafe blocks belong only in src/ffi")],
         )
     require_rejected(
         "shim examples file without cfg(windows)",
@@ -1111,6 +1109,57 @@ def test_structural_rules() -> None:
         ("mod tests; to src/tests/mod.rs", {LIB: lib(forbid + "pub(crate) mod tests;\n".replace("pub(crate) mod tests;\n", "#[cfg(all(test, windows))]\npub(crate) mod tests;\n")), f"{SHIM}/src/tests/mod.rs": inner_test}),
     ):
         require_accepted(f"structural hosted test: {name}", {**base, **files})
+    for name, source in (
+        ("plain", "fn main() {}\n"),
+        ("with cfg(windows)", CFG + FORBID + "fn main() {}\n"),
+        ("with unsafe", FORBID + "fn main() { unsafe {} }\n"),
+    ):
+        require_rejected(f"shim build.rs {name}", {f"{SHIM}/build.rs": source}, [f"{SHIM}/build.rs: build scripts are forbidden in the shim"])
+    require_rejected(
+        "src/ffi.rs instead of src/ffi/mod.rs",
+        {f"{SHIM}/src/ffi.rs": CFG + "\n"},
+        [f"{SHIM}/src/ffi.rs: the ffi module must be src/ffi/mod.rs, not src/ffi.rs", f"{SHIM}/src/ffi.rs: non-ffi module must forbid unsafe_code"],
+    )
+    require_accepted("src/ffi/mod.rs is the ffi module", {f"{SHIM}/src/ffi/mod.rs": CFG + "\n"})
+    # stacked dead cfgs beside a live cfg(test)
+    dead_stacks = (
+        "#[cfg(test)]\n#[cfg(any())]\n",
+        "#[cfg(any())]\n#[cfg(test)]\n",
+        "#[cfg(test)]\n#[cfg_attr(windows, cfg(any()))]\n",
+        "#[cfg(test)]\n#[cfg(unix)]\n",
+        "#[cfg(test)]\n#[cfg(not(windows))]\n",
+    )
+    for stack in dead_stacks:
+        label = stack.replace("\n", " ").strip()
+        require_rejected(
+            f"stacked dead cfg on mod tests; {label}",
+            {**base, LIB: lib(forbid + stack + "mod tests;\n"), f"{SHIM}/src/tests.rs": inner_test},
+            missing,
+        )
+        require_rejected(
+            f"stacked dead cfg on inline mod tests {label}",
+            {**base, LIB: lib(forbid + stack + root_test)},
+            missing,
+        )
+        require_rejected(
+            f"stacked dead cfg on the test fn {label}",
+            {**base, f"{SHIM}/tests/ffi.rs": CFG + FORBID + "\n" + stack + "#[test]\nfn ffi_fixture() {}\n"},
+            missing,
+        )
+    require_rejected(
+        "stacked dead cfg on a mod in a tests/ file's test",
+        {**base, f"{SHIM}/tests/ffi.rs": CFG + FORBID + "\n#[cfg(windows)]\n#[cfg(unix)]\nmod m {\n    #[test]\n    fn ffi_fixture() {}\n}\n"},
+        missing,
+    )
+    require_rejected(
+        "stacked dead inner cfg after a live one on src/tests.rs",
+        {**base, LIB: lib(forbid + "#[cfg(test)]\nmod tests;\n"), f"{SHIM}/src/tests.rs": CFG + "#![cfg(test)]\n#![cfg(unix)]\n" + FORBID + "#[test]\nfn ffi_fixture() {}\n"},
+        missing,
+    )
+    require_accepted(
+        "stacked live cfgs",
+        {**base, LIB: lib(forbid + "#[cfg(test)]\n#[cfg(windows)]\n#[cfg(all(test, windows))]\n" + root_test)},
+    )
     # (e) nested mod inside an already-forbidden inline mod needs no redundant forbid
     require_accepted("nested mod inherits the forbid", {LIB: lib(forbid + "mod a {\n    mod b;\n}\n"), f"{SHIM}/src/a/b.rs": HOST_MODULE})
     require_rejected(
