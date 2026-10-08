@@ -14,10 +14,10 @@
 //! `u64` coordinates (epochs, versions, Ticks, positions, sequences) are stored as the `INTEGER`
 //! with the same 64 bits, so every `u64` round-trips and no `CHECK` compares them.
 
-use pos_conformance::PluginTrustPolicyAnchorV1;
-use pos_core::{EventId, SchemaVersion, Seq, TimelineId};
 use std::cell::Cell;
 
+use pos_conformance::PluginTrustPolicyAnchorV1;
+use pos_core::{EventId, SchemaVersion, Seq, TimelineId};
 use rusqlite::{
     named_params, types::FromSql, Connection, ErrorCode, OptionalExtension, Params, Row,
 };

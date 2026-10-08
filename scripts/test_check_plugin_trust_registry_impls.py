@@ -203,7 +203,13 @@ def main() -> None:
         if result.returncode == 0 or relative not in result.stderr:
             raise SystemExit(f"{relative} was not rejected")
     for label, text in FORBIDDEN_NAMES.items():
-        for relative in (REGISTRY_FILE, ADAPTER_FILE, SQLITE_ADAPTER_FILE, SQLITE_SIBLING_FILE, SQLITE_SCHEMA_FILE):
+        for relative in (
+            REGISTRY_FILE,
+            ADAPTER_FILE,
+            SQLITE_ADAPTER_FILE,
+            SQLITE_SIBLING_FILE,
+            SQLITE_SCHEMA_FILE,
+        ):
             result = run({**ALLOWED, relative: text})
             if result.returncode == 0 or relative not in result.stderr:
                 raise SystemExit(f"{label} in {relative} was not rejected")

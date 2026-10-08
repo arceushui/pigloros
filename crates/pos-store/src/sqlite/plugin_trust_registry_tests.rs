@@ -859,12 +859,12 @@ fn the_fence_is_entered_before_begin_immediate() -> TestResult {
     let path = path_of(&h.guard)?;
     let holder = Connection::open(&path)?;
     holder.execute_batch("BEGIN IMMEDIATE")?;
-    h.store.conn.busy_timeout(Duration::from_millis(600))?;
+    h.store.conn.busy_timeout(Duration::from_millis(1500))?;
     let timeline = h.timeline;
     let start = Instant::now();
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(150));
+        std::thread::sleep(Duration::from_millis(400));
         let entered = gate
             .with_fence_value(timeline, ErasureProtectedOperationV1::Append, || ())
             .is_ok();
@@ -880,7 +880,7 @@ fn the_fence_is_entered_before_begin_immediate() -> TestResult {
     );
     let entered = receiver.recv_timeout(Duration::from_secs(10))?;
     // Another writer got the fence only after the busy `BEGIN IMMEDIATE` gave up inside it.
-    assert!(entered >= Duration::from_millis(450), "{entered:?}");
+    assert!(entered >= Duration::from_millis(1000), "{entered:?}");
     holder.execute_batch("ROLLBACK")?;
     Ok(())
 }
