@@ -332,8 +332,9 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
             self.generation = driver.generation();
             self.slots = Some(driver.into_slots());
         }
-        // A host that keeps a quarantined driver says so by the result alone, so a host that also
-        // returns the driver cannot make the quarantine permanent.
+        // A host that keeps a quarantined driver says so by the result alone. A host that also
+        // returns the driver breaks that contract and leaves the bridge quarantined (fail
+        // closed): only `poll_quarantine` clears the flag.
         self.quarantined = matches!(reply.result, Err(BridgeError::Quarantine(_)));
         reply.result
     }
