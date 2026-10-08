@@ -386,6 +386,7 @@ fn release_projection(validated: ValidatedPmf1<'_>) -> ValidatedPluginManifestPr
         not_before: pmf1.signed.not_before,
         not_after: pmf1.signed.not_after,
         release_digest: pmf1.signed.release_digest,
+        previous_release_digest: pmf1.signed.previous,
         descriptor_digests,
     }
 }
