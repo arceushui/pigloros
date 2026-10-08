@@ -48,7 +48,8 @@ pub enum UnavailableCode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RejectedCode {
     /// A Create reply failed verification. Until #563 this covers every Create verification
-    /// failure the codec reports: client data, origin, flags, attestation format, algorithm and key.
+    /// failure the codec reports: client data, origin, flags, attestation format, algorithm and
+    /// key.
     AttestationFormat,
     /// A Get reply failed verification. Until #563 this covers every Get verification
     /// failure the codec reports: client data, flags, signature, counter and backup flags.

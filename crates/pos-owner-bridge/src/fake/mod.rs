@@ -1,4 +1,5 @@
-//! Deterministic fakes: a scripted page, `FakeSurface`, a fixture authenticator, and the host ports.
+//! Deterministic fakes: a scripted page, `FakeSurface`, a fixture authenticator, and the host
+//! ports.
 //!
 //! Everything here is behind the `test-support` feature and must never reach a deployable graph.
 

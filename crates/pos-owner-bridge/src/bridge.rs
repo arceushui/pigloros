@@ -90,6 +90,7 @@ pub struct OwnerBridge<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> {
     quarantined: bool,
     started: bool,
     restart: Option<Pending>,
+    restart_failure: Option<BridgeError>,
 }
 
 /// An enrollment failure and the candidate that still needs `abandon`.
@@ -150,6 +151,7 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
             quarantined: false,
             started: false,
             restart: None,
+            restart_failure: None,
         }
     }
 
@@ -167,14 +169,19 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
         self.slots.as_deref().is_none_or(Slots::secrets_clear)
     }
 
-    /// Poll a quarantined ceremony for its browser exit; cleanup completing clears the status.
+    /// Poll the quarantined ceremonies for their browser exit; the status clears once the last
+    /// quarantined driver the host holds has finished its cleanup.
     pub fn poll_quarantine(&mut self) -> BridgeStatus {
         if self.quarantined {
-            if let Some(driver) = self.host.poll_quarantine() {
+            let polled = self.host.poll_quarantine();
+            if let Some(driver) = polled.driver {
                 self.generation = driver.generation();
                 self.slots = Some(driver.into_slots());
-                self.quarantined = false;
-                self.status = BridgeStatus::Ready;
+                // Another driver the host still holds may have a live browser.
+                self.quarantined = polled.remaining;
+                if !polled.remaining {
+                    self.status = BridgeStatus::Ready;
+                }
             }
         }
         self.status
@@ -212,14 +219,16 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
     }
 
     /// Probe again if the next probe is due; call it at the instant [`RestartProgress::Waiting`]
-    /// named. Without a pending check it reports `Done` with nothing deferred while the status
-    /// admits ceremonies; [`OwnerBridge::status`] is authoritative.
+    /// named. Without a pending check it reports `Done` with nothing deferred, unless the last
+    /// restart check ended in a failure: then it returns that failure again. A ceremony's
+    /// quarantine or a latched `Unavailable` status is not a restart-check failure and is not
+    /// reported here; [`OwnerBridge::status`] is authoritative.
     ///
     /// # Errors
     ///
     /// Returns `Quarantine(StaleProcessPresent)` once a recorded process is still present after
-    /// 30 repeats; the surface then stays quarantined, and so does every later poll: with nothing
-    /// pending it returns the error its status refuses ceremonies with.
+    /// 30 repeats; the surface then stays quarantined, and so does every later poll until a new
+    /// check succeeds.
     pub fn poll_restart_check(
         &mut self,
         store: &mut dyn CleanupStore,
@@ -227,9 +236,8 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
     ) -> Result<RestartProgress, BridgeError> {
         let Some(pending) = self.restart.take() else {
             return self
-                .status
-                .admission()
-                .map(|()| RestartProgress::Done { deferred: 0 });
+                .restart_failure
+                .map_or(Ok(RestartProgress::Done { deferred: 0 }), Err);
         };
         let now = self.clock.now();
         let outcome = restart::poll(pending, store, probe, now);
@@ -241,6 +249,7 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
         outcome: Result<restart::Progress, BridgeError>,
     ) -> Result<RestartProgress, BridgeError> {
         self.restart = None;
+        self.restart_failure = outcome.as_ref().err().copied();
         match outcome {
             Ok(restart::Progress::Done(deferred)) => {
                 self.status = BridgeStatus::Ready;
@@ -367,8 +376,8 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
         self.run_ceremony(plan).and_then(Verified::into_assertion)
     }
 
-    /// Run enrollment E1 to E5 (ADR-110 §8). A failure after `seal_candidate` returned a candidate and
-    /// before `commit` calls `abandon` once; no other failure does.
+    /// Run enrollment E1 to E5 (ADR-110 §8). A failure after `seal_candidate` returned a candidate
+    /// and before `commit` calls `abandon` once; no other failure does.
     ///
     /// # Errors
     ///

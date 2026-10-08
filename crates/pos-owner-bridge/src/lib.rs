@@ -28,7 +28,7 @@ pub use error::{
 };
 pub use host::{
     cleanup_record_bytes, folder_name, CeremonyHost, CeremonyReply, CleanupError, CleanupStore,
-    LoopbackPort, ProbeResult, ProcessProbe, QuarantineKeeper, ServedSnapshot,
+    LoopbackPort, ProbeResult, ProcessProbe, QuarantineKeeper, QuarantinePoll, ServedSnapshot,
 };
 pub use prf::PrfOutput;
 pub use random::{MonotonicClock, OsRandom, SecureRandom, SystemClock};

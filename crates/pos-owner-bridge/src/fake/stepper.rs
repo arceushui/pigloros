@@ -14,7 +14,9 @@ use crate::ceremony::driver::{CeremonyDriver, Step, StepEnv};
 use crate::ceremony::plan::Verified;
 use crate::ceremony::timing::TIMER_INTERVAL;
 use crate::channel::{SurfaceEndpoint, SurfaceRequest};
-use crate::{BridgeError, CeremonyHost, CeremonyReply, ProtocolCode, QuarantineKeeper};
+use crate::{
+    BridgeError, CeremonyHost, CeremonyReply, ProtocolCode, QuarantineKeeper, QuarantinePoll,
+};
 
 /// The most steps one ceremony may take under the default limit. A legitimate ceremony ends in a
 /// few thousand: the longest wait is the two-minute interaction bound at a 50 ms cadence.
@@ -164,7 +166,7 @@ impl CeremonyHost for FakeHost {
         self.keeper.finish(driver, result)
     }
 
-    fn poll_quarantine(&mut self) -> Option<CeremonyDriver> {
+    fn poll_quarantine(&mut self) -> QuarantinePoll {
         let mut env = StepEnv {
             surface: &mut self.surface,
             clock: &self.clock,

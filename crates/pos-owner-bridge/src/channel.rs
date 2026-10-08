@@ -18,8 +18,9 @@
 //! capacity-one channel counts as accepted: the owner side cannot tell it was never received) may
 //! have a browser still alive, so the ceremony ends fail-closed as `Quarantine(CleanupTimeout)`
 //! and the surface stays quarantined; a host must therefore keep the endpoint alive until a
-//! quarantine has been polled to completion. A surface thread that is already gone when the driver is handed over fails the
-//! ceremony as `Unavailable(InterfaceUnavailable)` and the driver comes back untouched.
+//! quarantine has been polled to completion. A surface thread that is already gone when the
+//! driver is handed over fails the ceremony as `Unavailable(InterfaceUnavailable)` and the
+//! driver comes back untouched.
 //!
 //! # Implementing a host on an STA thread
 //!
@@ -35,7 +36,9 @@
 use std::sync::mpsc::{sync_channel, Receiver, RecvError, SyncSender, TryRecvError};
 
 use crate::ceremony::driver::CeremonyDriver;
-use crate::{BridgeError, CeremonyHost, CeremonyReply, QuarantineCode, UnavailableCode};
+use crate::{
+    BridgeError, CeremonyHost, CeremonyReply, QuarantineCode, QuarantinePoll, UnavailableCode,
+};
 
 const UNAVAILABLE: BridgeError = BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable);
 
@@ -52,7 +55,7 @@ pub enum SurfaceRequest {
 
 enum Reply {
     Run(CeremonyReply),
-    Poll(Option<CeremonyDriver>),
+    Poll(QuarantinePoll),
 }
 
 /// The owner thread's half: a [`CeremonyHost`] that forwards each command to the surface thread.
@@ -109,11 +112,13 @@ impl CeremonyHost for ChannelHost {
         }
     }
 
-    fn poll_quarantine(&mut self) -> Option<CeremonyDriver> {
-        self.requests.send(SurfaceRequest::PollQuarantine).ok()?;
+    fn poll_quarantine(&mut self) -> QuarantinePoll {
+        if self.requests.send(SurfaceRequest::PollQuarantine).is_err() {
+            return QuarantinePoll::default();
+        }
         match self.replies.recv() {
-            Ok(Reply::Poll(driver)) => driver,
-            Ok(Reply::Run(_)) | Err(RecvError) => None,
+            Ok(Reply::Poll(poll)) => poll,
+            Ok(Reply::Run(_)) | Err(RecvError) => QuarantinePoll::default(),
         }
     }
 }
@@ -142,7 +147,7 @@ impl SurfaceEndpoint {
 
     /// Answer a `PollQuarantine` command. Returns `false` when the owner side is gone.
     #[must_use]
-    pub fn reply_poll(&self, driver: Option<CeremonyDriver>) -> bool {
-        self.replies.send(Reply::Poll(driver)).is_ok()
+    pub fn reply_poll(&self, poll: QuarantinePoll) -> bool {
+        self.replies.send(Reply::Poll(poll)).is_ok()
     }
 }

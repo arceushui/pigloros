@@ -118,6 +118,15 @@ pub struct CeremonyReply {
     pub driver: Option<CeremonyDriver>,
 }
 
+/// What polling the quarantined ceremonies returns.
+#[derive(Default)]
+pub struct QuarantinePoll {
+    /// A driver whose browser exit and cleanup finished, if one did.
+    pub driver: Option<CeremonyDriver>,
+    /// Whether the host still holds another quarantined driver, whose browser may be alive.
+    pub remaining: bool,
+}
+
 /// The surface thread's bookkeeping for quarantined ceremonies.
 ///
 /// It keeps each driver until its cleanup finished, so every host applies the same policy: a
@@ -157,13 +166,18 @@ impl QuarantineKeeper {
     }
 
     /// Run `cleaned` (typically `CeremonyDriver::poll_cleanup` with the host's `StepEnv`) on each
-    /// kept driver and hand back the first one that reports its cleanup finished.
-    pub fn poll(
-        &mut self,
-        mut cleaned: impl FnMut(&mut CeremonyDriver) -> bool,
-    ) -> Option<CeremonyDriver> {
-        let index = self.held.iter_mut().position(&mut cleaned)?;
-        Some(self.held.remove(index))
+    /// kept driver and hand back the first one that reports its cleanup finished, with whether
+    /// any other driver is still kept.
+    pub fn poll(&mut self, mut cleaned: impl FnMut(&mut CeremonyDriver) -> bool) -> QuarantinePoll {
+        let driver = self
+            .held
+            .iter_mut()
+            .position(&mut cleaned)
+            .map(|index| self.held.remove(index));
+        QuarantinePoll {
+            driver,
+            remaining: !self.held.is_empty(),
+        }
     }
 }
 
@@ -179,9 +193,10 @@ pub trait CeremonyHost {
     /// Run `driver` to the end and return its result.
     fn run(&mut self, driver: CeremonyDriver) -> CeremonyReply;
 
-    /// Poll a quarantined ceremony for its browser exit. Returns the driver once its cleanup
-    /// finished, and `None` while it is still quarantined or when nothing is.
-    fn poll_quarantine(&mut self) -> Option<CeremonyDriver>;
+    /// Poll the quarantined ceremonies for their browser exit. The result carries a driver once
+    /// its cleanup finished, and says whether another quarantined driver is still held: the
+    /// bridge stays quarantined until none is.
+    fn poll_quarantine(&mut self) -> QuarantinePoll;
 }
 
 /// Encode the cleanup record that precedes buffer creation (ADR-110 §16).

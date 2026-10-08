@@ -786,6 +786,68 @@ fn expected_release(abort: AbortBehavior, at: Duration) -> Duration {
     }
 }
 
+/// The pair the host posted last in `slice`: the one its ceremony ended with.
+fn active_pair(slice: &[LogEntry]) -> Option<usize> {
+    slice.iter().rev().find_map(|entry| match entry {
+        LogEntry::Post { pair, .. } => Some(*pair),
+        _ => None,
+    })
+}
+
+/// Whether the page released a buffer of `pair` no later than `limit`.
+fn released_by(slice: &[LogEntry], pair: usize, limit: Duration) -> bool {
+    slice.iter().any(|entry| {
+        matches!(entry, LogEntry::PageReleased { pair: p, at, .. } if *p == pair && *at <= limit)
+    })
+}
+
+/// I14 for the active pair: a host that reached cleanup with a page that holds the pair asks it
+/// to release (the host's winning CAS to `ReleaseRequested`) or the page already released it, and
+/// the page releases before the test's `settle()` advance, not only at its own deadline. A
+/// retired or never-activated pair, a held-back delivery, a hostile state hook or a state fault
+/// is not the host's release request, so those are not held to it.
+fn check_release_request(ev: &Evidence, sc: &Scenario, slice: &[LogEntry]) -> Failure {
+    let Some(active) = active_pair(slice) else {
+        return Ok(());
+    };
+    let followed = sc.page.delivery == Delivery::Normal
+        && quiet_state_hook(&sc.hook)
+        && sc.surface.faults.state.is_none();
+    let requested = slice.iter().any(|entry| {
+        matches!(
+            entry,
+            LogEntry::Cas { actor: Actor::Host, pair, new: 4, won: true, .. } if *pair == active
+        )
+    });
+    let received = slice
+        .iter()
+        .any(|entry| matches!(entry, LogEntry::PageReceived { pair, .. } if *pair == active));
+    let closed = slice
+        .iter()
+        .any(|entry| matches!(entry, LogEntry::ZeroClose { pair, .. } if *pair == active));
+    let early = released_by(slice, active, ev.elapsed);
+    if followed && received && closed && !requested && !early {
+        return fail(
+            "I14 release request",
+            format!("the host cleaned up pair {active} without ever asking the page to release it"),
+        );
+    }
+    let released = slice
+        .iter()
+        .any(|entry| matches!(entry, LogEntry::PageReleased { pair, .. } if *pair == active));
+    if followed && requested && released && !early {
+        return fail(
+            "I14 release before settle",
+            format!(
+                "the active pair {active} was released only after the host finished at {:?}: \
+                 only the settle() advance made the page release",
+                ev.elapsed
+            ),
+        );
+    }
+    Ok(())
+}
+
 /// I12 and I14 retention: every buffer of every ceremony is released, and each page releases
 /// everything it held within 500 ms after its deadline fired.
 fn check_retention(ev: &Evidence, sc: &Scenario) -> Failure {
@@ -793,39 +855,7 @@ fn check_retention(ev: &Evidence, sc: &Scenario) -> Failure {
         return Ok(());
     }
     for slice in slices(&ev.log) {
-        // The active pair is the last one the host posted. Only for it can the host's release
-        // request be what makes the page release: a retired or never-activated pair, or a page
-        // holding a buffer back, releases at the page's own deadline.
-        let active = slice.iter().rev().find_map(|entry| match entry {
-            LogEntry::Post { pair, .. } => Some(*pair),
-            _ => None,
-        });
-        let requested = sc.page.delivery == Delivery::Normal
-            && slice.iter().any(|entry| {
-                matches!(
-                    entry,
-                    LogEntry::Cas { actor: Actor::Host, pair, new: 4, won: true, .. }
-                        if Some(*pair) == active
-                )
-            });
-        let late = slice.iter().find_map(|entry| match entry {
-            LogEntry::PageReleased { pair, at, .. }
-                if requested && Some(*pair) == active && *at > ev.elapsed =>
-            {
-                Some((*pair, *at))
-            }
-            _ => None,
-        });
-        if let Some((pair, at)) = late {
-            return fail(
-                "I14 release before settle",
-                format!(
-                    "the active pair {pair} was released at {at:?}, after the host finished at \
-                     {:?}: only the settle() advance made the page release",
-                    ev.elapsed
-                ),
-            );
-        }
+        check_release_request(ev, sc, slice)?;
     }
     for pair in &ev.pairs {
         for (delivered, released) in pair.delivered.iter().zip(pair.released) {
@@ -1412,5 +1442,103 @@ fn ten_thousand_seeded_interleavings_hold_every_invariant() -> TestResult {
         tally.completed.iter().all(|completed| *completed > 0),
         "{tally:?}"
     );
+    Ok(())
+}
+
+/// A scenario whose page follows the protocol: Normal delivery, a handler that runs, no hook.
+fn followed_scenario() -> Result<Scenario, AnyError> {
+    for index in 0..1_000 {
+        let sc = scenario(SEED_BASE + index)?;
+        if sc.page.delivery == Delivery::Normal
+            && sc.page.abort == AbortBehavior::Runs
+            && matches!(sc.hook, Hook::None)
+            && sc.surface.faults.state.is_none()
+        {
+            return Ok(sc);
+        }
+    }
+    Err("no scenario with a protocol-following page".into())
+}
+
+/// The evidence of a host that posted pair 0, whose page received it, and that cleaned up at
+/// 10 s; `release_request` and `page_release` add the host's CAS and the page's release.
+fn cleaned_up(release_request: bool, page_release: Option<Duration>) -> Evidence {
+    let at = Duration::from_secs(1);
+    let mut log = vec![
+        LogEntry::Opened { at },
+        LogEntry::Post {
+            pair: 0,
+            generation: 1,
+            at,
+        },
+        LogEntry::PageReceived {
+            pair: 0,
+            role: Role::Request,
+        },
+    ];
+    if release_request {
+        log.push(LogEntry::Cas {
+            actor: Actor::Host,
+            pair: 0,
+            current: 3,
+            new: 4,
+            won: true,
+            at,
+        });
+    }
+    if let Some(released) = page_release {
+        log.push(LogEntry::PageReleased {
+            pair: 0,
+            role: Role::Request,
+            at: released,
+        });
+    }
+    log.push(LogEntry::ZeroClose {
+        pair: 0,
+        state: 4,
+        at: Duration::from_secs(10),
+    });
+    Evidence {
+        log,
+        pairs: Vec::new(),
+        elapsed: Duration::from_secs(10),
+        error: None,
+        ok: true,
+        records_left: 0,
+        prf_zero: true,
+        port_calls: Vec::new(),
+        port_sealed: None,
+        port_confirmed: None,
+        port_at_calls: Vec::new(),
+        quarantine_refused: true,
+        steps: 0,
+        t0s: Vec::new(),
+    }
+}
+
+#[test]
+fn the_retention_check_catches_a_host_that_never_asks_the_page_to_release() -> TestResult {
+    let sc = followed_scenario()?;
+    let silent = check_retention(&cleaned_up(false, None), &sc);
+    assert!(
+        matches!(&silent, Err(message) if message.contains("without ever asking")),
+        "{silent:?}"
+    );
+    // A page that released on its own before the host finished is not the host's fault.
+    let own = check_retention(&cleaned_up(false, Some(Duration::from_secs(5))), &sc);
+    assert_eq!(own, Ok(()));
+    Ok(())
+}
+
+#[test]
+fn the_retention_check_catches_a_release_that_only_the_settle_advance_caused() -> TestResult {
+    let sc = followed_scenario()?;
+    let late = check_retention(&cleaned_up(true, Some(Duration::from_secs(155))), &sc);
+    assert!(
+        matches!(&late, Err(message) if message.contains("release before settle")),
+        "{late:?}"
+    );
+    let prompt = check_retention(&cleaned_up(true, Some(Duration::from_secs(2))), &sc);
+    assert_eq!(prompt, Ok(()));
     Ok(())
 }

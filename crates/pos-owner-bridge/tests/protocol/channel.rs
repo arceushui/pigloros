@@ -1,7 +1,7 @@
 //! The owner-thread and surface-thread hand-off: the driver moves as an owned `Send` value, the
 //! owner thread blocks on the reply, and every way the channel can fail is a clean error.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::mpsc::TryRecvError;
 use std::thread;
@@ -16,7 +16,7 @@ use pos_owner_bridge::fake::stepper::FakeHost;
 use pos_owner_bridge::fake::surface::{FakeSurface, SurfaceConfig};
 use pos_owner_bridge::{
     BridgeConfig, BridgeError, BridgeStatus, CeremonyHost, CeremonyReply, OwnerBridge,
-    QuarantineCode, QuarantineKeeper, SystemClock, UnavailableCode,
+    QuarantineCode, QuarantineKeeper, QuarantinePoll, SystemClock, UnavailableCode,
 };
 
 use super::{
@@ -123,7 +123,7 @@ fn a_quarantined_ceremony_stays_with_the_surface_thread_until_its_exit_arrives()
     let reply = host.run(driver());
     assert!(matches!(reply.result, Err(BridgeError::Quarantine(_))));
     assert!(reply.driver.is_none());
-    assert!(host.poll_quarantine().is_none());
+    assert!(host.poll_quarantine().driver.is_none());
     drop(host);
     assert!(surface.join().is_ok());
 }
@@ -135,7 +135,7 @@ fn a_surface_thread_that_is_gone_fails_the_ceremony_and_returns_the_driver() {
     let reply = host.run(driver());
     assert_eq!(reply.result.err(), Some(UNAVAILABLE));
     assert!(reply.driver.is_some());
-    assert!(host.poll_quarantine().is_none());
+    assert!(host.poll_quarantine().driver.is_none());
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn a_reply_of_the_wrong_kind_is_a_failure_not_a_result() {
     let (mut host, endpoint) = channel();
     let surface = thread::spawn(move || {
         let first = endpoint.recv();
-        let delivered_poll = endpoint.reply_poll(None);
+        let delivered_poll = endpoint.reply_poll(QuarantinePoll::default());
         let second = endpoint.recv();
         let delivered_run = endpoint.reply_run(CeremonyReply {
             result: Err(UNAVAILABLE),
@@ -172,7 +172,7 @@ fn a_reply_of_the_wrong_kind_is_a_failure_not_a_result() {
     });
     let reply = host.run(driver());
     assert_eq!(reply.result.err(), Some(ABANDONED));
-    assert!(host.poll_quarantine().is_none());
+    assert!(host.poll_quarantine().driver.is_none());
     assert_eq!(surface.join().ok(), Some((true, true, true, true)));
 }
 
@@ -183,15 +183,15 @@ fn the_endpoint_can_poll_without_blocking_and_notices_a_missing_owner() {
     let surface = thread::spawn(move || {
         let request = endpoint.recv();
         let polled = matches!(request, Some(SurfaceRequest::PollQuarantine));
-        let delivered = endpoint.reply_poll(None);
+        let delivered = endpoint.reply_poll(QuarantinePoll::default());
         let end = endpoint.recv();
         // The owner drops its request sender before its reply receiver, so one reply may still
         // be buffered; the second one cannot be, and fails once the receiver is gone.
-        let buffered = endpoint.reply_poll(None);
-        let delivered_last = endpoint.reply_poll(None);
+        let buffered = endpoint.reply_poll(QuarantinePoll::default());
+        let delivered_last = endpoint.reply_poll(QuarantinePoll::default());
         (polled, delivered, end.is_none(), buffered && delivered_last)
     });
-    assert!(host.poll_quarantine().is_none());
+    assert!(host.poll_quarantine().driver.is_none());
     drop(host);
     assert_eq!(surface.join().ok(), Some((true, true, true, false)));
 }
@@ -270,8 +270,11 @@ impl CeremonyHost for ConfusedHost {
         }
     }
 
-    fn poll_quarantine(&mut self) -> Option<CeremonyDriver> {
-        self.release.borrow_mut().take()
+    fn poll_quarantine(&mut self) -> QuarantinePoll {
+        QuarantinePoll {
+            driver: self.release.borrow_mut().take(),
+            remaining: false,
+        }
     }
 }
 
@@ -308,13 +311,15 @@ fn the_quarantine_keeper_keeps_only_a_quarantined_driver_until_its_cleanup_finis
     let mut keeper = QuarantineKeeper::new();
     let returned = keeper.finish(driver(), Err(UNAVAILABLE));
     assert!(returned.driver.is_some());
-    assert!(keeper.poll(|_| true).is_none());
+    assert!(keeper.poll(|_| true).driver.is_none());
     let kept = keeper.finish(driver(), Err(ABANDONED));
     assert!(kept.driver.is_none());
     assert_eq!(kept.result.err(), Some(ABANDONED));
-    assert!(keeper.poll(|_| false).is_none());
-    assert!(keeper.poll(|_| true).is_some());
-    assert!(keeper.poll(|_| true).is_none());
+    let waiting = keeper.poll(|_| false);
+    assert!(waiting.driver.is_none() && waiting.remaining);
+    let cleaned = keeper.poll(|_| true);
+    assert!(cleaned.driver.is_some() && !cleaned.remaining);
+    assert!(keeper.poll(|_| true).driver.is_none());
 }
 
 #[test]
@@ -327,9 +332,68 @@ fn a_second_quarantine_keeps_both_drivers_until_each_is_cleaned() {
     assert!(second.driver.is_none());
     // Only the second driver reports its cleanup done: the first stays held.
     let cleaned = keeper.poll(|held| held.generation() == 5);
-    assert_eq!(cleaned.map(|held| held.generation()), Some(5));
-    assert!(keeper.poll(|held| held.generation() == 5).is_none());
+    assert!(cleaned.remaining);
+    assert_eq!(cleaned.driver.map(|held| held.generation()), Some(5));
+    let none = keeper.poll(|held| held.generation() == 5);
+    assert!(none.driver.is_none() && none.remaining);
     let rest = keeper.poll(|_| true);
-    assert_eq!(rest.map(|held| held.generation()), Some(1));
-    assert!(keeper.poll(|_| true).is_none());
+    assert!(!rest.remaining);
+    assert_eq!(rest.driver.map(|held| held.generation()), Some(1));
+    assert!(keeper.poll(|_| true).driver.is_none());
+}
+
+/// A host over a keeper the test shares, so it can add a second quarantined driver and choose
+/// which one reports its cleanup done.
+struct SharedKeeperHost {
+    keeper: Rc<RefCell<QuarantineKeeper>>,
+    clean_the_extra: Rc<Cell<bool>>,
+}
+
+impl CeremonyHost for SharedKeeperHost {
+    fn run(&mut self, driver: CeremonyDriver) -> CeremonyReply {
+        self.keeper.borrow_mut().finish(driver, Err(ABANDONED))
+    }
+
+    fn poll_quarantine(&mut self) -> QuarantinePoll {
+        let extra = self.clean_the_extra.get();
+        self.keeper
+            .borrow_mut()
+            .poll(|held| (held.generation() == 5) == extra)
+    }
+}
+
+#[test]
+fn the_bridge_stays_quarantined_until_the_host_holds_no_quarantined_driver() -> TestResult {
+    let keeper = Rc::new(RefCell::new(QuarantineKeeper::new()));
+    let clean_the_extra = Rc::new(Cell::new(false));
+    let host = SharedKeeperHost {
+        keeper: Rc::clone(&keeper),
+        clean_the_extra: Rc::clone(&clean_the_extra),
+    };
+    let mut bridge = OwnerBridge::new(
+        host,
+        FakeRandom::seeded(9),
+        FakeClock::start(),
+        BridgeConfig::default(),
+    );
+    let binding = unlock_binding("owner", 0)?;
+    let mut port = FakeUnlock::new();
+    assert_eq!(
+        bridge.unlock(&binding, &bytes32(0x60), &mut port).err(),
+        Some(ABANDONED)
+    );
+    // A second quarantined driver is a host bug, but its browser may be alive.
+    let extra = CeremonyDriver::for_test(create_plan(&FakeClock::start()).with_generation(5));
+    assert!(keeper
+        .borrow_mut()
+        .finish(extra, Err(ABANDONED))
+        .driver
+        .is_none());
+    let quarantined = BridgeStatus::Quarantined(QuarantineCode::CleanupTimeout);
+    // The bridge's own driver is cleaned first: the extra one is still held.
+    assert_eq!(bridge.poll_quarantine(), quarantined);
+    assert_eq!(bridge.poll_quarantine(), quarantined);
+    clean_the_extra.set(true);
+    assert_eq!(bridge.poll_quarantine(), BridgeStatus::Ready);
+    Ok(())
 }

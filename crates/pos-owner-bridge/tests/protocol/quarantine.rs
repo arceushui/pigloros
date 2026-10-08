@@ -4,13 +4,14 @@ use std::time::Duration;
 
 use pos_owner_bridge::fake::clock::FakeRandom;
 use pos_owner_bridge::fake::host::{FakeProbe, StoreOp};
+use pos_owner_bridge::fake::surface::SurfaceConfig;
 use pos_owner_bridge::{
-    folder_name, BridgeError, BridgeStatus, MonotonicClock, ProbeResult, QuarantineCode,
-    RestartProgress, UnavailableCode,
+    folder_name, BridgeConfig, BridgeError, BridgeStatus, MonotonicClock, ProbeResult,
+    QuarantineCode, RestartProgress, UnavailableCode,
 };
 use pos_owner_bridge_codec::{encode_cleanup_record, CeremonyId, CleanupRecordV1, ImagePathSha256};
 
-use super::{bytes16, context, honest, Boxed, FakeEnrollment, Rig, TestResult};
+use super::{bytes16, context, honest, Boxed, FakeEnrollment, Hook, Rig, TestResult};
 
 fn record() -> Result<(Vec<u8>, String), Box<dyn std::error::Error>> {
     let id = CeremonyId::from_bytes(bytes16(0));
@@ -218,6 +219,50 @@ fn an_unreadable_store_makes_the_surface_unavailable_until_a_check_succeeds() ->
     rig.store.set_failing(&[]);
     assert_eq!(restart(&mut rig, &mut probe), Ok(0));
     assert_eq!(rig.bridge.status(), BridgeStatus::Ready);
+    Ok(())
+}
+
+#[test]
+fn a_ceremony_quarantine_or_latch_is_not_a_restart_check_failure() -> TestResult {
+    let surface = SurfaceConfig {
+        exit_delay: None,
+        ..SurfaceConfig::default()
+    };
+    let mut held = Rig::with_surface(
+        honest(0),
+        Hook::None,
+        FakeRandom::seeded(1),
+        BridgeConfig::default(),
+        surface,
+    )?;
+    let mut port = FakeEnrollment::new();
+    let quarantine = BridgeError::Quarantine(QuarantineCode::CleanupTimeout);
+    assert_eq!(held.bridge.enroll(&context(), &mut port), Err(quarantine));
+    let mut probe = FakeProbe::new(Vec::new());
+    // The status refuses ceremonies, but no restart check failed: the poll has nothing to report.
+    assert_eq!(
+        held.bridge.poll_restart_check(&mut held.store, &mut probe),
+        Ok(RestartProgress::Done { deferred: 0 })
+    );
+    assert_eq!(
+        held.bridge.status(),
+        BridgeStatus::Quarantined(QuarantineCode::CleanupTimeout)
+    );
+    let mut latched = rig()?;
+    latched.loopback.fail_probes_from(Some(1));
+    let changed = BridgeError::Unavailable(UnavailableCode::LoopbackChanged);
+    assert_eq!(latched.bridge.enroll(&context(), &mut port), Err(changed));
+    assert_eq!(
+        latched
+            .bridge
+            .poll_restart_check(&mut latched.store, &mut probe),
+        Ok(RestartProgress::Done { deferred: 0 })
+    );
+    assert_eq!(
+        latched.bridge.status(),
+        BridgeStatus::Unavailable(UnavailableCode::LoopbackChanged)
+    );
+    assert_eq!(probe.calls(), 0);
     Ok(())
 }
 
