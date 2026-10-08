@@ -1028,6 +1028,127 @@ def test_symlinks() -> None:
     )
 
 
+def hosted_missing() -> list[str]:
+    return [f"{INV}: hosted test ffi_fixture for src/ffi/ops.rs:5 is not a live #[test] function under tests/ or src/"]
+
+
+def test_hosted_liveness() -> None:
+    test = "#[test]\nfn ffi_fixture() {}\n"
+    for name, source in (
+        ("second inner cfg(any())", CFG + "#![cfg(any())]\n" + FORBID + "\n" + test),
+        ("inner cfg after items", CFG + FORBID + "\n" + test + "#![cfg(any())]\n"),
+        ("inner cfg(not(windows))", CFG + "#![cfg(not(windows))]\n" + FORBID + "\n" + test),
+        ("inner cfg_attr that adds a cfg", CFG + "#![cfg_attr(windows, cfg(any()))]\n" + FORBID + "\n" + test),
+        ("cfg(any()) on enclosing inline mod", CFG + FORBID + "\n#[cfg(any())]\nmod m {\n    " + test.replace("\n", "\n    ") + "}\n"),
+        ("cfg_attr cfg on enclosing mod", CFG + FORBID + "\n#[cfg_attr(windows, cfg(any()))]\nmod m {\n    " + test + "}\n"),
+        ("inner cfg inside inline mod", CFG + FORBID + "\nmod m {\n    #![cfg(any())]\n    " + test + "}\n"),
+        ("nested inside another fn", CFG + FORBID + "\nfn outer() {\n    " + test.replace("\n", "\n    ") + "}\n"),
+        ("inside macro_rules! body", CFG + FORBID + "\nmacro_rules! m {\n    () => {\n        " + test + "    };\n}\n"),
+        ("on an impl method", CFG + FORBID + "\nstruct S;\nimpl S {\n    " + test + "}\n"),
+        ("inside a trait", CFG + FORBID + "\ntrait T {\n    " + test + "}\n"),
+        ("fn inside a live mod", CFG + FORBID + "\nmod m {\n    fn outer() {\n        " + test + "    }\n}\n"),
+        ("cfg_attr adding cfg on the test", CFG + FORBID + "\n#[test]\n#[cfg_attr(windows, cfg(any()))]\nfn ffi_fixture() {}\n"),
+    ):
+        require_rejected(f"hosted test {name}", {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": source}, hosted_missing())
+    for name, source in (
+        ("at file scope", CFG + FORBID + "\n" + test),
+        ("inner cfg(test)", CFG + "#![cfg(test)]\n" + FORBID + "\n" + test),
+        ("inner cfg(all(test, windows))", CFG + "#![cfg(all(test, windows))]\n" + FORBID + "\n" + test),
+        ("in a live inline mod", CFG + FORBID + "\n#[cfg(test)]\nmod m {\n    " + test.replace("\n", "\n    ") + "}\n"),
+        ("in nested live inline mods", CFG + FORBID + "\npub mod a {\n    #[cfg(windows)]\n    mod b {\n        " + test + "    }\n}\n"),
+        ("after an earlier item", CFG + FORBID + "\nfn helper() {}\nconst X: u8 = 1;\n" + test),
+    ):
+        require_accepted(f"hosted test {name}", {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": source})
+    for name, addition in (
+        ("lib.test = false", "\n[lib]\ntest = false\n"),
+        ("lib.harness = false", "\n[lib]\nharness = false\n"),
+        ("test.test = false", '\n[[test]]\nname = "ffi"\ntest = false\n'),
+        ("test.harness = false", '\n[[test]]\nname = "ffi"\nharness = false\n'),
+        ("bin.test = false", '\n[[bin]]\nname = "x"\ntest = false\n'),
+    ):
+        flag = name.split(" = ")[0]
+        require_rejected(
+            f"shim manifest {name}",
+            {f"{SHIM}/Cargo.toml": SHIM_MANIFEST + addition},
+            [f"{SHIM}/Cargo.toml: {flag} = false disables hosted tests"],
+        )
+    require_rejected(
+        "shim manifest autotests = false",
+        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST.replace('version = "0.1.0"\n', 'version = "0.1.0"\nautotests = false\n')},
+        [f"{SHIM}/Cargo.toml: package.autotests = false hides hosted tests"],
+    )
+    require_accepted(
+        "shim manifest with plain test targets",
+        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST + '\n[lib]\ntest = true\n\n[[test]]\nname = "ffi"\n'},
+    )
+
+
+def test_review_findings() -> None:
+    no_lints = '[package]\nname = "member"\nversion = "0.1.0"\n'
+    for name, manifest in (("absent", no_lints), ("false", no_lints + "\n[lints]\nworkspace = false\n")):
+        require_rejected(
+            f"member lints.workspace {name}",
+            {"crates/safe/Cargo.toml": manifest},
+            ["crates/safe/Cargo.toml: non-shim crate must set [lints] workspace = true"],
+        )
+    asm_message = "asm! is only allowed inside an unsafe block in src/ffi"
+    global_message = "creates FFI surface without an unsafe block and is forbidden"
+    require_rejected(
+        "global_asm in a safe crate",
+        {SAFE_LIB_PATH: FORBID + 'core::arch::global_asm!("nop");\n'},
+        [at(SAFE_LIB_PATH, 2, f"global_asm {global_message}")],
+    )
+    require_rejected(
+        "aliased global_asm in the shim",
+        {OPS: CFG + "use core::arch::global_asm as g;\n"},
+        [at(OPS, 2, f"global_asm {global_message}")],
+    )
+    require_rejected(
+        "naked_asm in a safe crate",
+        {SAFE_LIB_PATH: FORBID + 'naked_asm!("ret");\n'},
+        [at(SAFE_LIB_PATH, 2, f"naked_asm {global_message}")],
+    )
+    require_rejected("asm in a safe crate", {SAFE_LIB_PATH: FORBID + 'fn f() { asm!("nop"); }\n'}, [at(SAFE_LIB_PATH, 2, asm_message)])
+    require_rejected(
+        "asm outside an unsafe block in an ffi file",
+        {OPS: CFG + 'pub fn call() {\n    asm!("nop");\n}\n'},
+        [at(OPS, 3, asm_message)],
+    )
+    require_rejected(
+        "asm in a non-ffi shim file",
+        {HOST: CFG + FORBID + 'pub fn host() {\n    asm!("nop");\n}\n'},
+        [at(HOST, 4, asm_message)],
+    )
+    require_accepted("asm inside an inventoried ffi unsafe block", ffi_case("// SAFETY: fixture.", 'unsafe { asm!("nop") }'))
+    for name, attribute in (
+        ("link", '#[link(name = "x")]'),
+        ("spaced link", '#[ link (name = "x")]'),
+        ("unsafe link", '#[unsafe(link(name = "x"))]'),
+        ("cfg_attr link", '#[cfg_attr(windows, link(name = "x"))]'),
+        ("bare link", "#[link]"),
+    ):
+        found = fixture({SAFE_LIB_PATH: FORBID + attribute + "\nextern {}\n"})
+        if not any("#[link] creates FFI surface" in item for item in found):
+            raise SystemExit(f"{name} attribute was not rejected: {found}")
+    require_accepted("link_name is not link", {SAFE_LIB_PATH: FORBID + '#[link_name = "x"]\nfn f() {}\n'})
+    require_rejected(
+        "forbid of another path ending in unsafe_code",
+        {HOST: CFG + "#![forbid(foo::unsafe_code)]\n"},
+        [f"{HOST}: non-ffi module must forbid unsafe_code"],
+    )
+    require_rejected(
+        "forbid of a path with a prefix word",
+        {HOST: CFG + "#![forbid(my_unsafe_code)]\n"},
+        [f"{HOST}: non-ffi module must forbid unsafe_code"],
+    )
+    require_accepted("forbid with unsafe_code among several lints", {HOST: CFG + "#![forbid(clippy::all, unsafe_code)]\n"})
+    require_rejected(
+        "lib.rs mod forbidden only by a foreign unsafe_code path",
+        {LIB: SHIM_LIB + "#[forbid(foo::unsafe_code)]\nmod host;\n", HOST: HOST_MODULE},
+        [f"{LIB}:5: mod host must carry #[forbid(unsafe_code)]"],
+    )
+
+
 def run_cli(extra: dict[str, str | None] | None = None) -> subprocess.CompletedProcess[str]:
     with tree(extra) as root:
         return subprocess.run(
@@ -1065,6 +1186,8 @@ def main() -> None:
     test_cli()
     test_hardening()
     test_symlinks()
+    test_hosted_liveness()
+    test_review_findings()
     print("owner-bridge unsafe-policy checker rejects every forged boundary")
 
 

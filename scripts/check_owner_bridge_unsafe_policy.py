@@ -48,6 +48,13 @@ Policy, enforced over every ``.rs`` file under every workspace member (except
   ``cfg(all(test, windows))`` count as live). Declarations inside inline
   ``mod x { }`` blocks and explicit ``[[test]]`` paths are not followed, so a
   test reachable only that way is rejected.
+* Hosted tests must be a ``#[test]`` at file scope or inside live inline ``mod``
+  blocks only (no ``fn``, ``impl``, ``trait`` or ``macro_rules!`` body), the
+  file may carry no inner cfg other than the live ones, and the shim manifest
+  may not set ``test = false``, ``harness = false`` or ``autotests = false``.
+* ``global_asm!``/``naked_asm!`` (even aliased), ``asm!`` outside an inventoried
+  unsafe block of ``src/ffi``, and ``#[link(...)]`` are rejected.
+* Every non-shim manifest must set ``[lints] workspace = true``.
 * The root ``[workspace.lints.rust] unsafe_code`` must be ``forbid``, and no
   non-shim manifest may configure ``unsafe_code`` (or ``unsafe-code``).
 * One unsafe block per line: the inventory is keyed by file and line, so a
@@ -97,7 +104,12 @@ UNSAFE_BLOCK = re.compile(r"(?<!\w)unsafe\s*\{")
 UNSAFE_KIND = re.compile(r"unsafe\s*(\w+|\()")
 ATTRIBUTE_START = re.compile(r"#\s*(!?)\s*\[")
 BANNED_WORD = re.compile(r"(?<!\w)(no_mangle|export_name|link_section)(?!\w)")
-FORBIDS_UNSAFE = re.compile(r"(?<!\w)forbid\([^)]*(?<!\w)unsafe_code(?!\w)")
+# ``unsafe_code`` must be a bare element of ``forbid(...)``: ``foo::unsafe_code`` is another lint.
+FORBIDS_UNSAFE = re.compile(r"(?<!\w)forbid\((?:[^()]*,)?unsafe_code(?=[,)])")
+GLOBAL_ASM_WORD = re.compile(r"(?<!\w)(global_asm|naked_asm)(?!\w)")
+ASM_MACRO = re.compile(r"(?<!\w)asm\s*!")
+LINK_ATTRIBUTE = re.compile(r"(?<!\w)link\s*(?:\(|\Z)")
+INLINE_MOD_HEADER = re.compile(r"\s*(?:pub\s*(?:\([^)]*\)\s*)?)?mod\s+\w+\s*")
 DEPENDENCY_TABLES = frozenset(
     {"dependencies", "dev-dependencies", "build-dependencies", "dev_dependencies", "build_dependencies", "replace"}
 )
@@ -488,6 +500,25 @@ def _table_differences(actual: object, expected: dict[str, object]) -> list[str]
     )
 
 
+def _check_test_targets(manifest: dict[str, object], found: list[str]) -> None:
+    """The shim's hosted tests must stay discoverable and run by the default harness."""
+    label = f"{SHIM}/Cargo.toml"
+    package = manifest.get("package")
+    if isinstance(package, dict) and package.get("autotests") is False:
+        found.append(f"{label}: package.autotests = false hides hosted tests")
+    tables: list[tuple[str, object]] = [("lib", manifest.get("lib"))]
+    for key in ("bin", "test"):
+        items = manifest.get(key)
+        if isinstance(items, list):
+            tables.extend((key, item) for item in items)
+    for key, table in tables:
+        if not isinstance(table, dict):
+            continue
+        for flag in ("test", "harness"):
+            if table.get(flag) is False:
+                found.append(f"{label}: {key}.{flag} = false disables hosted tests")
+
+
 def _check_shim_lints(root_manifest: dict[str, object], shim_manifest: dict[str, object], found: list[str]) -> None:
     expected = _expected_shim_lints(root_manifest)
     if expected is None:
@@ -584,8 +615,13 @@ def _check_surface(
     scanned_dirs: tuple[Path, ...],
     strict_includes: bool,
     found: list[str],
+    asm_spans: tuple[tuple[int, int], ...] = (),
 ) -> None:
-    """Reject attributes, macros and definitions that create unaudited surface."""
+    """Reject attributes, macros and definitions that create unaudited surface.
+
+    ``asm!`` is only accepted inside ``asm_spans`` (the inventoried unsafe
+    blocks of ``src/ffi``); ``global_asm`` and ``naked_asm`` never are.
+    """
     code = scanned.code
 
     def at(offset: int) -> str:
@@ -601,7 +637,14 @@ def _check_surface(
 
     for match in BANNED_WORD.finditer(code):
         found.append(f"{at(match.start())}: {match.group(1)} creates FFI surface and is forbidden")
+    for match in GLOBAL_ASM_WORD.finditer(code):
+        found.append(f"{at(match.start())}: {match.group(1)} creates FFI surface without an unsafe block and is forbidden")
+    for match in ASM_MACRO.finditer(code):
+        if not any(begin <= match.start() < end for begin, end in asm_spans):
+            found.append(f"{at(match.start())}: asm! is only allowed inside an unsafe block in src/ffi")
     for attribute in attributes:
+        if LINK_ATTRIBUTE.search(attribute.content):
+            found.append(f"{at(attribute.start)}: #[link] creates FFI surface and is forbidden")
         if PATH_ATTRIBUTE.search(attribute.content):
             literal = PATH_LITERAL.search(text[attribute.start : attribute.end])
             inclusion(attribute.start, "#[path]", literal.group(1) if literal else None, path.parent, data=False)
@@ -665,7 +708,51 @@ def _is_live_test(attached: tuple[str, ...]) -> bool:
             return False
         if item.startswith("cfg(") and item not in LIVE_TEST_CFGS:
             return False
-        if item.startswith("cfg_attr(") and "ignore" in item:
+        if item.startswith("cfg_attr(") and ("ignore" in item or "cfg(" in item):
+            return False
+    return True
+
+
+def _dead_cfg(content: str) -> bool:
+    """Return whether a normalized attribute is a cfg that could compile the item out."""
+    return (content.startswith("cfg(") and content not in LIVE_TEST_CFGS) or (
+        content.startswith("cfg_attr(") and "cfg(" in content
+    )
+
+
+def _file_is_live(attributes: Iterable[Attribute]) -> bool:
+    """Reject any inner cfg other than the live ones, wherever it sits in the file."""
+    return not any(attribute.inner and _dead_cfg(_normalized(attribute.content)) for attribute in attributes)
+
+
+def _module_scope_is_live(code: str, attributes: tuple[Attribute, ...], offset: int) -> bool:
+    """Return whether ``offset`` sits at file scope or only inside live inline ``mod`` blocks.
+
+    A ``fn``, ``impl``, ``trait``, ``macro_rules!`` or any other enclosing block
+    makes a ``#[test]`` unreachable by the harness, and a cfg on an enclosing
+    module can compile it out.
+    """
+    stack: list[tuple[int, int]] = []
+    boundary = 0
+    for index in range(offset):
+        character = code[index]
+        if character == "{":
+            stack.append((boundary, index))
+            boundary = index + 1
+        elif character == "}":
+            if stack:
+                stack.pop()
+            boundary = index + 1
+        elif character == ";":
+            boundary = index + 1
+    for begin, end in stack:
+        header = code[begin:end]
+        for attribute in attributes:
+            if begin <= attribute.start and attribute.end <= end:
+                if not attribute.inner and _dead_cfg(_normalized(attribute.content)):
+                    return False
+                header = header[: attribute.start - begin] + _blank(code[attribute.start : attribute.end]) + header[attribute.end - begin :]
+        if not INLINE_MOD_HEADER.fullmatch(header):
             return False
     return True
 
@@ -716,13 +803,13 @@ def _hosted_test_exists(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], na
     expression = re.compile(rf"(?<!\w)fn\s+{re.escape(name)}(?!\w)")
     reachable = _reachable_files(scans)
     for relative, (scanned, attributes) in scans.items():
-        if relative not in reachable or not relative.startswith(("tests/", "src/")):
+        if relative not in reachable or not relative.startswith(("tests/", "src/")) or not _file_is_live(attributes):
             continue
         for match in expression.finditer(scanned.code):
             modifiers = FUNCTION_MODIFIERS.search(scanned.code[: match.start()])
             start = modifiers.start() if modifiers else match.start()
             attached = _outer_attributes_before(scanned.code, attributes, start)
-            if _is_live_test(attached):
+            if _is_live_test(attached) and _module_scope_is_live(scanned.code, attributes, start):
                 return True
     return False
 
@@ -738,9 +825,14 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
         code = scanned.code
         attributes = _attributes(code)
         scans[relative] = (scanned, attributes)
-        _check_surface(label, source, shim, text, scanned, attributes, scanned_dirs, True, found)
-        leading = _leading_inner_attributes(code, attributes)
         is_ffi = relative.startswith("src/ffi/")
+        asm_spans = (
+            tuple((match.start(), _matching_brace(code, match.end() - 1)) for match in UNSAFE_BLOCK.finditer(code))
+            if is_ffi
+            else ()
+        )
+        _check_surface(label, source, shim, text, scanned, attributes, scanned_dirs, True, found, asm_spans)
+        leading = _leading_inner_attributes(code, attributes)
         if relative != "build.rs" and "cfg(windows)" not in leading:
             found.append(f"{label}: must start with #![cfg(windows)]")
         if relative == "src/lib.rs":
@@ -919,6 +1011,7 @@ def violations(root: Path) -> list[str]:
             _check_shim_lints(root_manifest, shim_manifest, found)
             _check_path_dependencies(root, shim, shim_manifest, scanned_dirs, found)
             _check_target_paths(root, shim, shim_manifest, found)
+            _check_test_targets(shim_manifest, found)
         _check_inventory(shim, root, _check_shim_sources(shim, scanned_dirs, found), found)
 
     for member, directory in directories.items():
@@ -928,8 +1021,12 @@ def violations(root: Path) -> list[str]:
         if manifest is not None:
             _check_path_dependencies(root, directory, manifest, scanned_dirs, found)
             _check_target_paths(root, directory, manifest, found)
-        if manifest is not None and _contains_unsafe_code_lint(manifest.get("lints", {})):
-            found.append(f"{member}/Cargo.toml: non-shim crate configures unsafe_code")
+        if manifest is not None:
+            lints = manifest.get("lints")
+            if not isinstance(lints, dict) or lints.get("workspace") is not True:
+                found.append(f"{member}/Cargo.toml: non-shim crate must set [lints] workspace = true")
+            if _contains_unsafe_code_lint(manifest.get("lints", {})):
+                found.append(f"{member}/Cargo.toml: non-shim crate configures unsafe_code")
         _check_member_sources(root, directory, scanned_dirs, found)
     return sorted(set(found))
 
