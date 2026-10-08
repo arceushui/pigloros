@@ -880,7 +880,11 @@ def test_hardening() -> None:
     require_rejected(
         "shim lib.path outside the crate directory",
         {f"{SHIM}/Cargo.toml": SHIM_MANIFEST + '\n[lib]\npath = "../safe/src/lib.rs"\n'},
-        [f"{SHIM}/Cargo.toml: lib.path ../safe/src/lib.rs must name a .rs file inside the crate directory"],
+        [
+            f"{SHIM}/Cargo.toml: lib.path ../safe/src/lib.rs must name a .rs file inside the crate directory",
+            f"{SHIM}/Cargo.toml: lib.path is not allowed on shim targets: it replaces auto-discovery "
+            "and hides which file cargo compiles",
+        ],
     )
     require_accepted(
         "target paths inside the crate directory",
@@ -1149,6 +1153,96 @@ def test_review_findings() -> None:
     )
 
 
+def test_reachability_and_targets() -> None:
+    test_source = HOST_MODULE + "\n#[test]\nfn ffi_fixture() {}\n"
+    base = {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": None}
+    inner_test = CFG + FORBID + "\n#[test]\nfn ffi_fixture() {}\n"
+
+    def lib(declarations: str) -> str:
+        return CFG + "\n" + declarations
+
+    for name, declarations, files in (
+        ("cfg_attr adding a dead cfg", "#[forbid(unsafe_code)]\n#[cfg_attr(all(), cfg(any()))]\nmod host;\n", {HOST: test_source}),
+        (
+            "mod inside a dead inline mod",
+            "#[cfg(any())]\n#[forbid(unsafe_code)]\nmod x {\n    #[forbid(unsafe_code)]\n    mod tests;\n}\n",
+            {f"{SHIM}/src/x/tests.rs": inner_test},
+        ),
+        (
+            "mod inside an uninvoked macro_rules!",
+            "macro_rules! m {\n    () => {\n        #[forbid(unsafe_code)]\n        mod tests;\n    };\n}\n",
+            {f"{SHIM}/src/tests.rs": inner_test},
+        ),
+        (
+            "mod inside a fn body",
+            "fn f() {\n    #[forbid(unsafe_code)]\n    mod tests;\n}\n",
+            {f"{SHIM}/src/tests.rs": inner_test},
+        ),
+        (
+            "mod inside an impl",
+            "struct S;\nimpl S {\n    #[forbid(unsafe_code)]\n    mod tests;\n}\n",
+            {f"{SHIM}/src/tests.rs": inner_test},
+        ),
+        (
+            "file in the wrong directory for a live inline mod",
+            "#[forbid(unsafe_code)]\nmod x {\n    #[forbid(unsafe_code)]\n    mod tests;\n}\n",
+            {f"{SHIM}/src/tests.rs": inner_test},
+        ),
+        (
+            "file below a parent with a dead inner cfg",
+            "#[forbid(unsafe_code)]\nmod host;\n",
+            {HOST: CFG + "#![cfg(any())]\n" + FORBID + "mod inner;\n", f"{SHIM}/src/host/inner.rs": inner_test},
+        ),
+    ):
+        require_rejected(
+            f"hosted test reachability: {name}",
+            {**base, LIB: lib(declarations), **files},
+            [f"{INV}: hosted test ffi_fixture for src/ffi/ops.rs:5 is not a live #[test] function under tests/ or src/"],
+        )
+    for name, declarations, files in (
+        (
+            "mod in a live inline mod resolves in the nested directory",
+            "#[forbid(unsafe_code)]\nmod x {\n    #[forbid(unsafe_code)]\n    mod tests;\n}\n",
+            {f"{SHIM}/src/x/tests.rs": inner_test},
+        ),
+        (
+            "mod in nested live inline mods",
+            "#[forbid(unsafe_code)]\n#[cfg(test)]\nmod x {\n    #[forbid(unsafe_code)]\n    pub mod y {\n        #[forbid(unsafe_code)]\n        mod tests;\n    }\n}\n",
+            {f"{SHIM}/src/x/y/tests.rs": inner_test},
+        ),
+        (
+            "mod in a nested file's inline mod",
+            "#[forbid(unsafe_code)]\nmod host;\n",
+            {HOST: HOST_MODULE + "mod x {\n    #[forbid(unsafe_code)]\n    mod tests;\n}\n", f"{SHIM}/src/host/x/tests.rs": inner_test},
+        ),
+    ):
+        require_accepted(f"hosted test reachability: {name}", {**base, LIB: lib(declarations), **files})
+    target_message = "{key}.path is not allowed on shim targets: it replaces auto-discovery and hides which file cargo compiles"
+    shim_tests = {**ffi_case(*STANDARD_BODY), f"{SHIM}/src/ffi/a.rs": CFG + "\n"}
+    for key, addition in (
+        ("test", '\n[[test]]\nname = "ffi"\npath = "src/ffi/a.rs"\n'),
+        ("bin", '\n[[bin]]\nname = "b"\npath = "src/b.rs"\n'),
+        ("bench", '\n[[bench]]\nname = "b"\npath = "src/b.rs"\n'),
+        ("example", '\n[[example]]\nname = "e"\npath = "src/b.rs"\n'),
+        ("lib", '\n[lib]\npath = "src/other.rs"\n'),
+    ):
+        require_rejected(
+            f"shim {key}.path",
+            {**shim_tests, f"{SHIM}/src/b.rs": CFG + FORBID, f"{SHIM}/src/other.rs": CFG + FORBID, f"{SHIM}/Cargo.toml": SHIM_MANIFEST + addition},
+            [f"{SHIM}/Cargo.toml: " + target_message.format(key=key)],
+        )
+    require_accepted(
+        "shim lib.path = src/lib.rs",
+        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST + '\n[lib]\npath = "src/lib.rs"\n'},
+    )
+    for key in ("test", "bin", "bench", "example"):
+        require_rejected(
+            f"shim {key}.required-features",
+            {f"{SHIM}/Cargo.toml": SHIM_MANIFEST + f'\n[[{key}]]\nname = "ffi"\nrequired-features = ["x"]\n'},
+            [f"{SHIM}/Cargo.toml: {key}.required-features can silently skip hosted tests"],
+        )
+
+
 def run_cli(extra: dict[str, str | None] | None = None) -> subprocess.CompletedProcess[str]:
     with tree(extra) as root:
         return subprocess.run(
@@ -1188,6 +1282,7 @@ def main() -> None:
     test_symlinks()
     test_hosted_liveness()
     test_review_findings()
+    test_reachability_and_targets()
     print("owner-bridge unsafe-policy checker rejects every forged boundary")
 
 

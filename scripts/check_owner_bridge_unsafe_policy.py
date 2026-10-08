@@ -44,14 +44,18 @@ Policy, enforced over every ``.rs`` file under every workspace member (except
   include target. A local identifier of that name is fine.
 * A hosted test must live in a file compiled from a crate root (``src/lib.rs``,
   ``src/main.rs``, ``src/bin``, top-level ``tests``) through ``mod name;``
-  declarations that are not cfg'd out (only ``cfg(test)``, ``cfg(windows)`` and
-  ``cfg(all(test, windows))`` count as live). Declarations inside inline
-  ``mod x { }`` blocks and explicit ``[[test]]`` paths are not followed, so a
-  test reachable only that way is rejected.
+  declarations that are live: at file scope or inside live inline ``mod x { }``
+  blocks (resolved in ``x/``, as rustc does), with no cfg other than
+  ``cfg(test)``, ``cfg(windows)`` and ``cfg(all(test, windows))`` (a ``cfg_attr``
+  that adds a cfg is dead). Declarations inside ``fn``, ``impl``, ``trait`` or
+  ``macro_rules!`` bodies, or in a file with a dead inner cfg, are not followed.
 * Hosted tests must be a ``#[test]`` at file scope or inside live inline ``mod``
   blocks only (no ``fn``, ``impl``, ``trait`` or ``macro_rules!`` body), the
   file may carry no inner cfg other than the live ones, and the shim manifest
-  may not set ``test = false``, ``harness = false`` or ``autotests = false``.
+  may not set ``test = false``, ``harness = false`` or ``autotests = false``,
+  ``required-features`` on any target, or ``path`` on any target (``lib.path``
+  may only be ``src/lib.rs``): a target ``name`` therefore always maps to the
+  auto-discovered ``tests/<name>.rs`` / ``src/bin/<name>.rs``.
 * ``global_asm!``/``naked_asm!`` (even aliased), ``asm!`` outside an inventoried
   unsafe block of ``src/ffi``, and ``#[link(...)]`` are rejected.
 * Every non-shim manifest must set ``[lints] workspace = true``.
@@ -109,7 +113,7 @@ FORBIDS_UNSAFE = re.compile(r"(?<!\w)forbid\((?:[^()]*,)?unsafe_code(?=[,)])")
 GLOBAL_ASM_WORD = re.compile(r"(?<!\w)(global_asm|naked_asm)(?!\w)")
 ASM_MACRO = re.compile(r"(?<!\w)asm\s*!")
 LINK_ATTRIBUTE = re.compile(r"(?<!\w)link\s*(?:\(|\Z)")
-INLINE_MOD_HEADER = re.compile(r"\s*(?:pub\s*(?:\([^)]*\)\s*)?)?mod\s+\w+\s*")
+INLINE_MOD_HEADER = re.compile(r"\s*(?:pub\s*(?:\([^)]*\)\s*)?)?mod\s+(?P<name>\w+)\s*")
 DEPENDENCY_TABLES = frozenset(
     {"dependencies", "dev-dependencies", "build-dependencies", "dev_dependencies", "build_dependencies", "replace"}
 )
@@ -507,7 +511,7 @@ def _check_test_targets(manifest: dict[str, object], found: list[str]) -> None:
     if isinstance(package, dict) and package.get("autotests") is False:
         found.append(f"{label}: package.autotests = false hides hosted tests")
     tables: list[tuple[str, object]] = [("lib", manifest.get("lib"))]
-    for key in ("bin", "test"):
+    for key in ("bin", "test", "bench", "example"):
         items = manifest.get(key)
         if isinstance(items, list):
             tables.extend((key, item) for item in items)
@@ -517,6 +521,13 @@ def _check_test_targets(manifest: dict[str, object], found: list[str]) -> None:
         for flag in ("test", "harness"):
             if table.get(flag) is False:
                 found.append(f"{label}: {key}.{flag} = false disables hosted tests")
+        if "required-features" in table or "required_features" in table:
+            found.append(f"{label}: {key}.required-features can silently skip hosted tests")
+        if "path" in table and not (key == "lib" and table["path"] == "src/lib.rs"):
+            found.append(
+                f"{label}: {key}.path is not allowed on shim targets: it replaces auto-discovery "
+                "and hides which file cargo compiles"
+            )
 
 
 def _check_shim_lints(root_manifest: dict[str, object], shim_manifest: dict[str, object], found: list[str]) -> None:
@@ -725,12 +736,12 @@ def _file_is_live(attributes: Iterable[Attribute]) -> bool:
     return not any(attribute.inner and _dead_cfg(_normalized(attribute.content)) for attribute in attributes)
 
 
-def _module_scope_is_live(code: str, attributes: tuple[Attribute, ...], offset: int) -> bool:
-    """Return whether ``offset`` sits at file scope or only inside live inline ``mod`` blocks.
+def _inline_mod_names(code: str, attributes: tuple[Attribute, ...], offset: int) -> tuple[str, ...] | None:
+    """Return the inline ``mod`` names enclosing ``offset``, or None if it is not plainly compiled.
 
-    A ``fn``, ``impl``, ``trait``, ``macro_rules!`` or any other enclosing block
-    makes a ``#[test]`` unreachable by the harness, and a cfg on an enclosing
-    module can compile it out.
+    ``()`` means file scope. A ``fn``, ``impl``, ``trait``, ``macro_rules!`` or any
+    other enclosing block makes a ``#[test]`` or ``mod name;`` unreachable by the
+    harness or rustc, and a dead cfg on an enclosing module can compile it out.
     """
     stack: list[tuple[int, int]] = []
     boundary = 0
@@ -745,16 +756,19 @@ def _module_scope_is_live(code: str, attributes: tuple[Attribute, ...], offset: 
             boundary = index + 1
         elif character == ";":
             boundary = index + 1
+    names: list[str] = []
     for begin, end in stack:
         header = code[begin:end]
         for attribute in attributes:
             if begin <= attribute.start and attribute.end <= end:
                 if not attribute.inner and _dead_cfg(_normalized(attribute.content)):
-                    return False
+                    return None
                 header = header[: attribute.start - begin] + _blank(code[attribute.start : attribute.end]) + header[attribute.end - begin :]
-        if not INLINE_MOD_HEADER.fullmatch(header):
-            return False
-    return True
+        header_match = INLINE_MOD_HEADER.fullmatch(header)
+        if not header_match:
+            return None
+        names.append(header_match.group("name"))
+    return tuple(names)
 
 
 def _crate_roots(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]]) -> list[str]:
@@ -771,10 +785,13 @@ def _crate_roots(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]]) -> list[s
 
 
 def _reachable_files(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]]) -> set[str]:
-    """Return files compiled via crate roots and non-cfg'd ``mod name;`` declarations.
+    """Return files compiled via crate roots and live ``mod name;`` declarations.
 
-    Declarations inside inline ``mod x { }`` blocks are not followed, so a test
-    file reachable only that way is treated as unreachable (fails closed).
+    A declaration is followed when it sits at file scope or inside live inline
+    ``mod x { }`` blocks (resolved in the nested ``x/`` directory, as rustc
+    does). Declarations inside ``fn``, ``impl``, ``macro_rules!`` or any other
+    block, behind a dead cfg (including ``cfg_attr`` adding one) or in a file with
+    a dead inner cfg are not followed.
     """
     roots = _crate_roots(scans)
     reachable: set[str] = set()
@@ -785,16 +802,20 @@ def _reachable_files(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]]) -> se
             continue
         reachable.add(relative)
         scanned, attributes = scans[relative]
+        if not _file_is_live(attributes):
+            continue
         here = PurePosixPath(relative)
         base = here.parent if relative in roots or here.name == "mod.rs" else here.parent / here.stem
         for match in MOD_FILE_DECLARATION.finditer(scanned.code):
             start = match.start("visibility") if match.group("visibility") else match.start()
             attached = _outer_attributes_before(scanned.code, attributes, start)
-            if any(item.startswith("cfg(") and item not in LIVE_TEST_CFGS for item in attached):
+            nested = _inline_mod_names(scanned.code, attributes, start)
+            if nested is None or any(_dead_cfg(item) for item in attached):
                 continue
             name = match.group("name")
-            pending.append((base / f"{name}.rs").as_posix())
-            pending.append((base / name / "mod.rs").as_posix())
+            directory = base.joinpath(*nested)
+            pending.append((directory / f"{name}.rs").as_posix())
+            pending.append((directory / name / "mod.rs").as_posix())
     return reachable
 
 
@@ -809,7 +830,7 @@ def _hosted_test_exists(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], na
             modifiers = FUNCTION_MODIFIERS.search(scanned.code[: match.start()])
             start = modifiers.start() if modifiers else match.start()
             attached = _outer_attributes_before(scanned.code, attributes, start)
-            if _is_live_test(attached) and _module_scope_is_live(scanned.code, attributes, start):
+            if _is_live_test(attached) and _inline_mod_names(scanned.code, attributes, start) is not None:
                 return True
     return False
 
