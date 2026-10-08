@@ -11,6 +11,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - ref: redmine/568-plugin-trust-registry-port
+            id: p568
+            pkg: pos-store
+            test: ""
           - ref: redmine/569-plugin-trust-registry-sqlite
             id: p569
             pkg: pos-store
