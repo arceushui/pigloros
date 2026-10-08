@@ -21,8 +21,8 @@ pub use encode::{
     UnsignedPluginReleaseV1,
 };
 pub use signature::{
-    verify_plugin_release_signature_v1, PluginReleaseSignatureErrorV1,
-    VerifiedPluginReleaseSignatureV1,
+    decode_plugin_release_signature_claim_v1, verify_plugin_release_signature_v1,
+    PluginReleaseSignatureClaimV1, PluginReleaseSignatureErrorV1, VerifiedPluginReleaseSignatureV1,
 };
 
 use std::collections::BTreeSet;

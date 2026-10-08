@@ -80,6 +80,75 @@ impl VerifiedPluginReleaseSignatureV1 {
     }
 }
 
+/// The signature claim of one strictly decoded PMF1: what field 26 asserts,
+/// before any key has judged it.
+///
+/// It is produced only by [`decode_plugin_release_signature_claim_v1()`] from
+/// the closure's own bytes. It proves nothing: whether the signature verifies,
+/// which key may verify it, and whether the release is admitted are separate
+/// questions for the caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PluginReleaseSignatureClaimV1 {
+    pmf1_digest: Digest,
+    release_digest: Digest,
+    owner: OwnerIdV1,
+    epoch: u64,
+    signature: [u8; 64],
+}
+
+impl PluginReleaseSignatureClaimV1 {
+    /// BLAKE3-256 of the complete PMF1 bytes that were decoded.
+    #[must_use]
+    pub const fn pmf1_digest(&self) -> Digest {
+        self.pmf1_digest
+    }
+
+    /// The claimed field 27 release digest (the signed payload).
+    #[must_use]
+    pub const fn release_digest(&self) -> Digest {
+        self.release_digest
+    }
+
+    /// The claimed signing identity's owner (field 21).
+    #[must_use]
+    pub const fn owner(&self) -> OwnerIdV1 {
+        self.owner
+    }
+
+    /// The claimed signing key epoch (field 26).
+    #[must_use]
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The 64 signature bytes (field 26).
+    #[must_use]
+    pub const fn signature(&self) -> [u8; 64] {
+        self.signature
+    }
+}
+
+/// Decode, bind, and digest-check `bundle`, then return its signature claim.
+///
+/// The same phases as [`verify_plugin_release_signature_v1()`] run, but no key
+/// is consulted: the caller judges the claim under whichever key it retains.
+///
+/// # Errors
+/// Returns the strict decode, closure, or digest failure.
+pub fn decode_plugin_release_signature_claim_v1(
+    bundle: &VerifiedReleaseBundleV1,
+) -> Result<PluginReleaseSignatureClaimV1, PluginManifestErrorV1> {
+    let validated = validate_bundle(bundle)?;
+    let signed = &validated.pmf1.signed;
+    Ok(PluginReleaseSignatureClaimV1 {
+        pmf1_digest: validated.pmf1_digest,
+        release_digest: signed.release_digest,
+        owner: signed.owner,
+        epoch: signed.epoch,
+        signature: signed.signature,
+    })
+}
+
 /// Verify field 26 of the PMF1 in `bundle` under the authorization's key.
 ///
 /// The bundle is decoded, bound, and digest-checked again. The authorization's

@@ -1,20 +1,20 @@
 //! The sign, assemble, self-check, publish sequence.
 
 use pos_core::{
-    CanonicalBytes, KeyIdentityV1, KeyRegistryErrorV1, KeyRegistrySigningPortV1, KeyRoleV1,
-    PublicKey, Signature,
+    KeyIdentityV1, KeyRegistryErrorV1, KeyRegistrySigningPortV1, KeyRoleV1, PublicKey, Signature,
 };
-use pos_crypto::key_roles::{sign_for_registered_role, verify_for_role, SigningKeyMaterial};
+use pos_crypto::key_roles::{sign_for_registered_role, SigningKeyMaterial};
 use pos_crypto::plugin_manifest::{
     PluginManifestErrorV1, PluginReleaseDraftV1, UnsignedPluginReleaseV1,
 };
 use pos_crypto::plugin_trust::ValidatedPluginManifestProjectionV1;
-use pos_crypto::signing::verifying_key_from_public_key;
 use pos_plugin_release::{
     build_oci_closure_v1, BundleAddressV1, LocalOciPublicationErrorV1, LocalOciPublisherV1,
     PublishOutcomeV1, ReleaseClosureInputV1, ReleaseSourceErrorV1, VerifiedReleaseBundleV1,
 };
 use thiserror::Error;
+
+use crate::{digest_payload, signature_verifies};
 
 /// A closed failure of Plugin release publication.
 ///
@@ -148,8 +148,8 @@ pub fn sign_plugin_release_v1<R: KeyRegistrySigningPortV1>(
     // signed. The composite path therefore assembles twice (pre-sign, final).
     assemble(draft, &unsigned.with_signature(epoch, [0; 64])?)?;
     let identity = signing_identity(&unsigned, epoch);
-    let signature =
-        sign_for_registered_role(registry, signing_key, identity, &release_payload(&unsigned))?;
+    let payload = digest_payload(&unsigned.release_digest());
+    let signature = sign_for_registered_role(registry, signing_key, identity, &payload)?;
     Ok(PluginReleaseSignatureV1 { epoch, signature })
 }
 
@@ -182,7 +182,7 @@ pub fn publish_signed_plugin_release_v1(
     let identity = signing_identity(&unsigned, signature.epoch);
     let release_digest = unsigned.release_digest();
     let pmf1 = unsigned.with_signature(signature.epoch, *signature.signature())?;
-    let payload = release_payload(&unsigned);
+    let payload = digest_payload(&release_digest);
     if !signature_verifies(public_key, identity, &payload, &signature.signature) {
         return Err(PluginReleasePublishErrorV1::InvalidSignature);
     }
@@ -218,24 +218,6 @@ pub fn publish_plugin_release_v1<R: KeyRegistrySigningPortV1>(
 /// `(draft owner, PluginReleaseSigning, epoch)`.
 const fn signing_identity(unsigned: &UnsignedPluginReleaseV1, epoch: u64) -> KeyIdentityV1 {
     KeyIdentityV1::from_parts(unsigned.owner(), KeyRoleV1::PluginReleaseSigning, epoch)
-}
-
-/// Whether `signature` is a valid role-bound signature by `public_key`; a key
-/// that is not a curve point fails the same way a wrong signature does (pinned
-/// by a test).
-fn signature_verifies(
-    public_key: &PublicKey,
-    identity: KeyIdentityV1,
-    payload: &CanonicalBytes,
-    signature: &Signature,
-) -> bool {
-    verifying_key_from_public_key(public_key)
-        .is_ok_and(|key| verify_for_role(&key, identity, payload, signature).is_ok())
-}
-
-/// The exact 32 raw bytes of field 27.
-fn release_payload(unsigned: &UnsignedPluginReleaseV1) -> CanonicalBytes {
-    CanonicalBytes::from_vec(unsigned.release_digest().to_vec())
 }
 
 /// Build the closure of `pmf1` and the draft's artifacts, then decode it
