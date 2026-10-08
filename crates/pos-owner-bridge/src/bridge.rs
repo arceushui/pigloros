@@ -21,6 +21,9 @@ use crate::{
     QuarantineCode, RejectedCode, RootFingerprint, SecureRandom, UnavailableCode, UnlockPort,
 };
 
+/// The failure when the slots are not in the bridge's hands, which `begin` never admits.
+const SLOTS_HELD: BridgeError = BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable);
+
 /// Bridge construction options.
 ///
 /// The ceremony generation starts at the ADR-110 §6 value of 1; only tests can start it elsewhere.
@@ -290,10 +293,7 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
     /// Run `operation` on the slots the bridge holds. They are absent only while a driver holds
     /// them, which `begin` never admits; the bridge fails closed rather than allocate new ones.
     fn with_slots<T>(&mut self, operation: impl FnOnce(&mut Slots) -> T) -> Result<T, BridgeError> {
-        self.slots
-            .as_deref_mut()
-            .map(operation)
-            .ok_or(BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))
+        self.slots.as_deref_mut().map(operation).ok_or(SLOTS_HELD)
     }
 
     fn draw_plan(&mut self, request: PlanRequest) -> Result<CeremonyPlan, BridgeError> {
@@ -332,10 +332,7 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
     }
 
     fn run_ceremony(&mut self, plan: CeremonyPlan) -> Result<Verified, BridgeError> {
-        let slots = self
-            .slots
-            .take()
-            .ok_or(BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable))?;
+        let slots = self.slots.take().ok_or(SLOTS_HELD)?;
         let reply = self.host.run(CeremonyDriver::new(plan, slots));
         self.conclude(reply)
     }
