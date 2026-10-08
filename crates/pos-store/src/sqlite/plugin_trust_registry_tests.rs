@@ -880,7 +880,7 @@ fn the_fence_is_entered_before_begin_immediate() -> TestResult {
     );
     let entered = receiver.recv_timeout(Duration::from_secs(10))?;
     // Another writer got the fence only after the busy `BEGIN IMMEDIATE` gave up inside it.
-    assert!(entered >= Duration::from_millis(1000), "{entered:?}");
+    assert!(entered >= Duration::from_secs(1), "{entered:?}");
     holder.execute_batch("ROLLBACK")?;
     Ok(())
 }
