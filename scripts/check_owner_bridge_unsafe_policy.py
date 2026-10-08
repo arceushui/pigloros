@@ -37,25 +37,34 @@ Policy, enforced over every ``.rs`` file under every workspace member (except
   ``[patch.*]`` and ``[replace]``) must name a scanned member: dependency
   crates do not inherit the workspace ``forbid``, so unscanned unsafe in one
   would compile for Windows.
-* Cargo target paths (``lib.path``, ``bin|test|bench|example[].path`` and
+* In non-shim members, cargo target paths (``lib.path``, ``bin|test|bench|example[].path`` and
   ``package.build``) must name a ``.rs`` file inside the crate directory.
 * ``include``, ``include_str`` and ``include_bytes`` may not be imported
   (``use``) or named as a path segment without ``!``: an alias would hide the
   include target. A local identifier of that name is fine.
-* A hosted test must live in a file compiled from a crate root (``src/lib.rs``,
-  ``src/main.rs``, ``src/bin``, top-level ``tests``) through ``mod name;``
-  declarations that are live: at file scope or inside live inline ``mod x { }``
-  blocks (resolved in ``x/``, as rustc does), with no cfg other than
+* Hosted tests are accepted in exactly three places: a top-level
+  ``tests/<name>.rs`` integration test (its own crate root); an inline
+  ``#[cfg(test)] mod tests { }`` (or ``cfg(all(test, windows))``) in the crate
+  root ``src/lib.rs`` / ``src/main.rs``; or ``src/tests.rs`` /
+  ``src/tests/mod.rs`` named by a file-scope ``#[cfg(test)] mod tests;`` in the
+  crate root. No other ``mod name;`` file is followed, so a test elsewhere is
+  not counted. The ``#[test]`` must be at file scope or inside live inline
+  ``mod`` blocks (never inside a ``fn``, ``impl``, ``trait`` or other block),
+  must carry no ``ignore``, and the file may carry no inner cfg other than
   ``cfg(test)``, ``cfg(windows)`` and ``cfg(all(test, windows))`` (a ``cfg_attr``
-  that adds a cfg is dead). Declarations inside ``fn``, ``impl``, ``trait`` or
-  ``macro_rules!`` bodies, or in a file with a dead inner cfg, are not followed.
-* Hosted tests must be a ``#[test]`` at file scope or inside live inline ``mod``
-  blocks only (no ``fn``, ``impl``, ``trait`` or ``macro_rules!`` body), the
-  file may carry no inner cfg other than the live ones, and the shim manifest
-  may not set ``test = false``, ``harness = false`` or ``autotests = false``,
-  ``required-features`` on any target, or ``path`` on any target (``lib.path``
-  may only be ``src/lib.rs``): a target ``name`` therefore always maps to the
-  auto-discovered ``tests/<name>.rs`` / ``src/bin/<name>.rs``.
+  that adds a cfg is dead; so is any other cfg on the test or an enclosing mod).
+* In the shim, ``macro_rules!``/``macro`` definitions, raw identifiers
+  (``r#cfg`` resolves to the builtin) and macro invocations whose arguments
+  contain ``mod``, ``fn``, ``impl``, ``trait`` or an attribute are rejected,
+  because they can hide never-compiled tests or modules from the scan.
+* The shim manifest is checked against a key allowlist: ``[package]`` keeps
+  descriptive keys only (no ``autobins``, ``autolib``, ``autotests``,
+  ``autoexamples``, ``autobenches``, ``build``, ``default-run`` ...), ``[lib]``
+  only ``name`` and ``crate-type``, and ``[[bin]]``, ``[[test]]``, ``[[bench]]``
+  and ``[[example]]`` only ``name``. ``test``, ``harness``, ``path``,
+  ``required-features``, ``doctest`` and every other key are rejected, so a
+  target ``name`` always maps to the auto-discovered file and the default
+  harness runs it. Dotted and inline table forms are normalized by the parser.
 * ``global_asm!``/``naked_asm!`` (even aliased), ``asm!`` outside an inventoried
   unsafe block of ``src/ffi``, and ``#[link(...)]`` are rejected.
 * Every non-shim manifest must set ``[lints] workspace = true``.
@@ -80,13 +89,13 @@ Policy, enforced over every ``.rs`` file under every workspace member (except
   with ``#![forbid(unsafe_code)]``, except the crate root ``src/lib.rs``: an
   inner forbid at the crate root is crate-wide and cannot be relaxed in
   ``ffi``. The root therefore must not contain it, and instead every non-ffi
-  ``mod`` declaration in ``src/lib.rs`` carries ``#[forbid(unsafe_code)]``.
+  file-scope ``mod`` declaration in ``src/lib.rs`` carries ``#[forbid(unsafe_code)]``.
 * Workspace members must be listed explicitly; globs and missing member
   manifests are errors, never silently skipped.
 
-Hosted tests named by the inventory may live in any shim ``tests/`` or ``src/``
-file: ADR-110 requires a hosted test but names no directory. The function must
-carry ``#[test]`` and must not be ``#[ignore]``d.
+A mod nested inside an inline ``mod`` in ``src/lib.rs`` inherits that mod's
+forbid and needs none of its own. The test function named by the inventory must
+carry ``#[test]``.
 """
 
 from __future__ import annotations
@@ -121,6 +130,10 @@ LIVE_TEST_CFGS = ("cfg(test)", "cfg(windows)", "cfg(all(test,windows))", "cfg(al
 USE_STATEMENT = re.compile(r"(?<!\w)use\s[^;]*;")
 INCLUDE_WORD = re.compile(r"(?<!\w)(include(?:_str|_bytes)?)(?!\w)(?!\s*!)")
 MOD_FILE_DECLARATION = re.compile(r"(?<!\w)(?P<visibility>pub\s*(?:\([^)]*\)\s*)?)?mod\s+(?P<name>\w+)\s*;")
+MACRO_INVOCATION = re.compile(r"(?<!\w)(\w+)\s*!\s*(?=[(\[{])")
+MACRO_HIDES_ITEMS = re.compile(r"(?<!\w)(?:mod|fn|impl|trait|macro_rules|macro)(?!\w)|#\s*!?\s*\[")
+MACRO_DEFINITION = re.compile(r"(?<!\w)(macro_rules|macro)(?!\w)")
+TEST_MOD_CFGS = ("cfg(test)", "cfg(all(test,windows))", "cfg(all(windows,test))")
 PATH_ATTRIBUTE = re.compile(r"(?<!\w)path\s*=")
 PATH_LITERAL = re.compile(r'path\s*=\s*"([^"\\]*)"')
 INCLUDE_MACRO = re.compile(r"(?<!\w)(include(?:_str|_bytes)?)\s*!")
@@ -144,6 +157,7 @@ class Scan:
     code: str
     code_lines: tuple[str, ...]
     comments: dict[int, str]
+    raw_identifiers: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -245,6 +259,7 @@ def scan(text: str) -> Scan:
     underscores so it is neither a keyword nor lost. Lifetimes stay code.
     """
     pieces: list[str] = []
+    raw_identifiers: list[int] = []
     comments: dict[int, str] = {}
     length = len(text)
     index = 0
@@ -257,6 +272,7 @@ def scan(text: str) -> Scan:
         if mode == "keep":
             pieces.append(segment)
         elif mode == "ident":
+            raw_identifiers.append(index)
             pieces.append("_" * len(segment))
         else:
             pieces.append(_blank(segment))
@@ -312,7 +328,7 @@ def scan(text: str) -> Scan:
         else:
             emit(index + 1, "keep")
     code = "".join(pieces)
-    return Scan(code, tuple(code.split("\n")), comments)
+    return Scan(code, tuple(code.split("\n")), comments, tuple(raw_identifiers))
 
 
 def code_only(text: str) -> str:
@@ -504,30 +520,51 @@ def _table_differences(actual: object, expected: dict[str, object]) -> list[str]
     )
 
 
-def _check_test_targets(manifest: dict[str, object], found: list[str]) -> None:
-    """The shim's hosted tests must stay discoverable and run by the default harness."""
+PACKAGE_KEYS = frozenset(
+    {
+        "name", "version", "edition", "rust-version", "license", "license-file", "publish",
+        "description", "authors", "repository", "homepage", "documentation", "readme", "keywords", "categories",
+    }
+)
+TOP_LEVEL_KEYS = frozenset(
+    {"package", "lints", "lib", "bin", "test", "bench", "example", "features",
+     "dependencies", "dev-dependencies", "build-dependencies", "target"}
+)
+LIB_KEYS = frozenset({"name", "crate-type"})
+TARGET_KEYS = frozenset({"name"})
+
+
+def _check_shim_manifest_keys(manifest: dict[str, object], found: list[str]) -> None:
+    """Allow only manifest keys that leave cargo's target discovery untouched.
+
+    ``test``, ``harness``, ``path``, ``required-features``, ``doctest``, every
+    ``package.auto*`` switch and any other key could stop cargo from compiling
+    or running a file the checker believes is a hosted test, so everything not
+    listed is rejected. TOML parsing normalizes dotted and inline forms.
+    """
     label = f"{SHIM}/Cargo.toml"
+    for key in sorted(set(manifest) - TOP_LEVEL_KEYS):
+        found.append(f"{label}: top-level key {key} is not allowed in the shim manifest")
     package = manifest.get("package")
-    if isinstance(package, dict) and package.get("autotests") is False:
-        found.append(f"{label}: package.autotests = false hides hosted tests")
-    tables: list[tuple[str, object]] = [("lib", manifest.get("lib"))]
-    for key in ("bin", "test", "bench", "example"):
-        items = manifest.get(key)
-        if isinstance(items, list):
-            tables.extend((key, item) for item in items)
-    for key, table in tables:
-        if not isinstance(table, dict):
+    if isinstance(package, dict):
+        for key in sorted(set(package) - PACKAGE_KEYS):
+            found.append(f"{label}: package.{key} is not allowed in the shim manifest")
+    library = manifest.get("lib")
+    if isinstance(library, dict):
+        for key in sorted(set(library) - LIB_KEYS):
+            found.append(f"{label}: lib.{key} is not allowed in the shim manifest")
+    elif library is not None:
+        found.append(f"{label}: lib must be a table")
+    for kind in ("bin", "test", "bench", "example"):
+        items = manifest.get(kind)
+        if items is None:
             continue
-        for flag in ("test", "harness"):
-            if table.get(flag) is False:
-                found.append(f"{label}: {key}.{flag} = false disables hosted tests")
-        if "required-features" in table or "required_features" in table:
-            found.append(f"{label}: {key}.required-features can silently skip hosted tests")
-        if "path" in table and not (key == "lib" and table["path"] == "src/lib.rs"):
-            found.append(
-                f"{label}: {key}.path is not allowed on shim targets: it replaces auto-discovery "
-                "and hides which file cargo compiles"
-            )
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            found.append(f"{label}: {kind} must be an array of tables")
+            continue
+        for item in items:
+            for key in sorted(set(item) - TARGET_KEYS):
+                found.append(f"{label}: {kind}.{key} is not allowed in the shim manifest")
 
 
 def _check_shim_lints(root_manifest: dict[str, object], shim_manifest: dict[str, object], found: list[str]) -> None:
@@ -736,12 +773,15 @@ def _file_is_live(attributes: Iterable[Attribute]) -> bool:
     return not any(attribute.inner and _dead_cfg(_normalized(attribute.content)) for attribute in attributes)
 
 
-def _inline_mod_names(code: str, attributes: tuple[Attribute, ...], offset: int) -> tuple[str, ...] | None:
-    """Return the inline ``mod`` names enclosing ``offset``, or None if it is not plainly compiled.
+def _enclosing_mods(
+    code: str, attributes: tuple[Attribute, ...], offset: int
+) -> tuple[tuple[str, tuple[str, ...]], ...] | None:
+    """Return ``(name, normalized outer attributes)`` of the inline mods enclosing ``offset``.
 
-    ``()`` means file scope. A ``fn``, ``impl``, ``trait``, ``macro_rules!`` or any
-    other enclosing block makes a ``#[test]`` or ``mod name;`` unreachable by the
-    harness or rustc, and a dead cfg on an enclosing module can compile it out.
+    ``()`` means file scope; None means the position is inside a ``fn``, ``impl``,
+    ``trait`` or any other block, or behind a dead cfg, so a ``#[test]`` there
+    may never be compiled. Macros that could hide items are banned in the shim,
+    so tracking braces is complete.
     """
     stack: list[tuple[int, int]] = []
     boundary = 0
@@ -756,83 +796,101 @@ def _inline_mod_names(code: str, attributes: tuple[Attribute, ...], offset: int)
             boundary = index + 1
         elif character == ";":
             boundary = index + 1
-    names: list[str] = []
+    names: list[tuple[str, tuple[str, ...]]] = []
     for begin, end in stack:
         header = code[begin:end]
+        outer: list[str] = []
         for attribute in attributes:
             if begin <= attribute.start and attribute.end <= end:
-                if not attribute.inner and _dead_cfg(_normalized(attribute.content)):
-                    return None
+                if not attribute.inner:
+                    outer.append(_normalized(attribute.content))
+                    if _dead_cfg(outer[-1]):
+                        return None
                 header = header[: attribute.start - begin] + _blank(code[attribute.start : attribute.end]) + header[attribute.end - begin :]
         header_match = INLINE_MOD_HEADER.fullmatch(header)
         if not header_match:
             return None
-        names.append(header_match.group("name"))
+        names.append((header_match.group("name"), tuple(outer)))
     return tuple(names)
 
 
-def _crate_roots(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]]) -> list[str]:
-    roots: list[str] = []
-    for relative in scans:
-        parts = relative.split("/")
-        if (
-            relative in ("src/lib.rs", "src/main.rs")
-            or (parts[0] == "src" and len(parts) > 2 and parts[1] == "bin" and (len(parts) == 3 or parts[3:] == ["main.rs"]))
-            or (parts[0] == "tests" and (len(parts) == 2 or parts[2:] == ["main.rs"]))
-        ):
-            roots.append(relative)
-    return roots
-
-
-def _reachable_files(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]]) -> set[str]:
-    """Return files compiled via crate roots and live ``mod name;`` declarations.
-
-    A declaration is followed when it sits at file scope or inside live inline
-    ``mod x { }`` blocks (resolved in the nested ``x/`` directory, as rustc
-    does). Declarations inside ``fn``, ``impl``, ``macro_rules!`` or any other
-    block, behind a dead cfg (including ``cfg_attr`` adding one) or in a file with
-    a dead inner cfg are not followed.
-    """
-    roots = _crate_roots(scans)
-    reachable: set[str] = set()
-    pending = list(roots)
-    while pending:
-        relative = pending.pop()
-        if relative in reachable or relative not in scans:
+def _declares_test_module(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], root: str) -> list[str]:
+    """Return the sibling files a ``#[cfg(test)] mod tests;`` at file scope of ``root`` names."""
+    if root not in scans:
+        return []
+    scanned, attributes = scans[root]
+    files: list[str] = []
+    for match in MOD_FILE_DECLARATION.finditer(scanned.code):
+        if match.group("name") != "tests":
             continue
-        reachable.add(relative)
-        scanned, attributes = scans[relative]
-        if not _file_is_live(attributes):
-            continue
-        here = PurePosixPath(relative)
-        base = here.parent if relative in roots or here.name == "mod.rs" else here.parent / here.stem
-        for match in MOD_FILE_DECLARATION.finditer(scanned.code):
-            start = match.start("visibility") if match.group("visibility") else match.start()
-            attached = _outer_attributes_before(scanned.code, attributes, start)
-            nested = _inline_mod_names(scanned.code, attributes, start)
-            if nested is None or any(_dead_cfg(item) for item in attached):
-                continue
-            name = match.group("name")
-            directory = base.joinpath(*nested)
-            pending.append((directory / f"{name}.rs").as_posix())
-            pending.append((directory / name / "mod.rs").as_posix())
-    return reachable
+        start = match.start("visibility") if match.group("visibility") else match.start()
+        attached = _outer_attributes_before(scanned.code, attributes, start)
+        if _enclosing_mods(scanned.code, attributes, start) == () and any(item in TEST_MOD_CFGS for item in attached):
+            files.extend(("src/tests.rs", "src/tests/mod.rs"))
+    return files
 
 
 def _hosted_test_exists(scans: dict[str, tuple[Scan, tuple[Attribute, ...]]], name: str) -> bool:
-    """Return whether a compiled shim ``tests/`` or ``src/`` file holds a live ``#[test]``."""
+    """Return whether a live ``#[test]`` named ``name`` sits in an accepted hosted-test place.
+
+    Accepted: a top-level ``tests/<file>.rs`` integration test (its own crate
+    root); an inline ``#[cfg(test)] mod tests { }`` in the crate root
+    ``src/lib.rs`` or ``src/main.rs``; or the file ``src/tests.rs`` /
+    ``src/tests/mod.rs`` named by a ``#[cfg(test)] mod tests;`` at file scope of
+    the crate root. The test must not be inside a ``fn``, ``impl``, ``trait`` or
+    dead-cfg block, and the file may carry no dead inner cfg. No other ``mod``
+    file is followed.
+    """
     expression = re.compile(rf"(?<!\w)fn\s+{re.escape(name)}(?!\w)")
-    reachable = _reachable_files(scans)
+    test_files = {file for root in ("src/lib.rs", "src/main.rs") for file in _declares_test_module(scans, root)}
     for relative, (scanned, attributes) in scans.items():
-        if relative not in reachable or not relative.startswith(("tests/", "src/")) or not _file_is_live(attributes):
+        integration = PurePosixPath(relative).parent.as_posix() == "tests"
+        root = relative in ("src/lib.rs", "src/main.rs")
+        if not (integration or root or relative in test_files) or not _file_is_live(attributes):
             continue
         for match in expression.finditer(scanned.code):
             modifiers = FUNCTION_MODIFIERS.search(scanned.code[: match.start()])
             start = modifiers.start() if modifiers else match.start()
             attached = _outer_attributes_before(scanned.code, attributes, start)
-            if _is_live_test(attached) and _inline_mod_names(scanned.code, attributes, start) is not None:
-                return True
+            mods = _enclosing_mods(scanned.code, attributes, start)
+            if mods is None or not _is_live_test(attached):
+                continue
+            if root and not (mods and mods[0][0] == "tests" and any(item in TEST_MOD_CFGS for item in mods[0][1])):
+                continue
+            return True
     return False
+
+
+def _group_end(code: str, start: int) -> int:
+    depth = 0
+    for index in range(start, len(code)):
+        if code[index] in "([{":
+            depth += 1
+        elif code[index] in ")]}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return len(code)
+
+
+def _check_shim_macros(label: str, scanned: Scan, found: list[str]) -> None:
+    """Ban raw identifiers, macro definitions and macros that could hide items or tests.
+
+    ``r#cfg`` resolves to the builtin attribute, a declarative macro can swallow
+    ``mod x;`` or ``#[test] fn`` without ever compiling it, and a lexical scan
+    cannot follow either, so the shim may not use them.
+    """
+    code = scanned.code
+    for offset in scanned.raw_identifiers:
+        found.append(f"{label}:{_line_of(code, offset)}: raw identifiers are forbidden in the shim")
+    for match in MACRO_DEFINITION.finditer(code):
+        found.append(f"{label}:{_line_of(code, match.start())}: {match.group(1)} definitions are forbidden in the shim")
+    for match in MACRO_INVOCATION.finditer(code):
+        if MACRO_HIDES_ITEMS.search(code, match.end(), _group_end(code, match.end())):
+            found.append(
+                f"{label}:{_line_of(code, match.start())}: macro {match.group(1)}! with items or attributes "
+                "in its arguments is forbidden in the shim: it can hide never-compiled tests or modules"
+            )
 
 
 def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[str]) -> ShimScan:
@@ -853,6 +911,7 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
             else ()
         )
         _check_surface(label, source, shim, text, scanned, attributes, scanned_dirs, True, found, asm_spans)
+        _check_shim_macros(label, scanned, found)
         leading = _leading_inner_attributes(code, attributes)
         if relative != "build.rs" and "cfg(windows)" not in leading:
             found.append(f"{label}: must start with #![cfg(windows)]")
@@ -866,6 +925,9 @@ def _check_shim_sources(shim: Path, scanned_dirs: tuple[Path, ...], found: list[
                 if match.group("name") == "ffi":
                     continue
                 start = match.start("visibility") if match.group("visibility") else match.start()
+                if _enclosing_mods(code, attributes, start):
+                    # Nested in an inline mod that itself must carry the forbid, which it inherits.
+                    continue
                 if not any(FORBIDS_UNSAFE.match(item) for item in _outer_attributes_before(code, attributes, start)):
                     found.append(
                         f"{label}:{_line_of(code, match.start())}: mod {match.group('name')} "
@@ -1031,8 +1093,7 @@ def violations(root: Path) -> list[str]:
         if shim_manifest is not None:
             _check_shim_lints(root_manifest, shim_manifest, found)
             _check_path_dependencies(root, shim, shim_manifest, scanned_dirs, found)
-            _check_target_paths(root, shim, shim_manifest, found)
-            _check_test_targets(shim_manifest, found)
+            _check_shim_manifest_keys(shim_manifest, found)
         _check_inventory(shim, root, _check_shim_sources(shim, scanned_dirs, found), found)
 
     for member, directory in directories.items():

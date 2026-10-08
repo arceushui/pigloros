@@ -342,8 +342,8 @@ def test_accepted() -> None:
         {
             **ffi_case(*STANDARD_BODY),
             f"{SHIM}/tests/ffi.rs": None,
-            LIB: CFG + "\n#[forbid(unsafe_code)]\nmod host;\n",
-            HOST: HOST_MODULE + "\n#[test]\n#[cfg(windows)]\npub async fn ffi_fixture() {}\n",
+            LIB: CFG
+            + "\n#[forbid(unsafe_code)]\n#[cfg(test)]\nmod tests {\n    #[test]\n    #[cfg(windows)]\n    pub async fn ffi_fixture() {}\n}\n",
         },
     )
     require_accepted(
@@ -877,15 +877,6 @@ def test_hardening() -> None:
         {"crates/safe/Cargo.toml": MEMBER_MANIFEST.replace('version = "0.1.0"', 'version = "0.1.0"\nbuild = "../build.rs"'), "crates/build.rs": "fn main() {}\n"},
         ["crates/safe/Cargo.toml: package.build ../build.rs must name a .rs file inside the crate directory"],
     )
-    require_rejected(
-        "shim lib.path outside the crate directory",
-        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST + '\n[lib]\npath = "../safe/src/lib.rs"\n'},
-        [
-            f"{SHIM}/Cargo.toml: lib.path ../safe/src/lib.rs must name a .rs file inside the crate directory",
-            f"{SHIM}/Cargo.toml: lib.path is not allowed on shim targets: it replaces auto-discovery "
-            "and hides which file cargo compiles",
-        ],
-    )
     require_accepted(
         "target paths inside the crate directory",
         {
@@ -912,49 +903,6 @@ def test_hardening() -> None:
             {SAFE_LIB_PATH: FORBID + spelling + "\n"},
             [at(SAFE_LIB_PATH, 2, f"{word} must only be used as the {word}! macro; an import or alias would hide the include target")],
         )
-    test_source = HOST_MODULE + "\n#[test]\nfn ffi_fixture() {}\n"
-    unreachable_message = f"{INV}: hosted test ffi_fixture for src/ffi/ops.rs:5 is not a live #[test] function under tests/ or src/"
-    require_rejected(
-        "hosted test in a file no mod declares",
-        {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": None, HOST: test_source},
-        [unreachable_message],
-    )
-    require_rejected(
-        "hosted test below a cfg'd-out mod",
-        {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": None, HOST: test_source, LIB: CFG + "\n#[forbid(unsafe_code)]\n#[cfg(any())]\nmod host;\n"},
-        [unreachable_message],
-    )
-    require_rejected(
-        "hosted test in tests/ below an undeclared directory",
-        {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": None, f"{SHIM}/tests/deep/x.rs": test_source},
-        [unreachable_message],
-    )
-    for name, lib in (
-        ("cfg(test)", "#[cfg(test)]"),
-        ("cfg(all(test, windows))", "#[cfg(all(test, windows))]"),
-    ):
-        require_accepted(
-            f"hosted test below {name} mod",
-            {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": None, HOST: test_source, LIB: CFG + f"\n#[forbid(unsafe_code)]\n{lib}\nmod host;\n"},
-        )
-    require_accepted(
-        "hosted test in a nested module file and a tests/ helper module",
-        {
-            **ffi_case(*STANDARD_BODY),
-            f"{SHIM}/tests/ffi.rs": CFG + FORBID + "\nmod support;\n",
-            f"{SHIM}/tests/support/mod.rs": CFG + FORBID + "\n#[test]\nfn ffi_fixture() {}\n",
-        },
-    )
-    require_accepted(
-        "hosted test in a nested src module",
-        {
-            **ffi_case(*STANDARD_BODY),
-            f"{SHIM}/tests/ffi.rs": None,
-            LIB: CFG + "\n#[forbid(unsafe_code)]\nmod host;\n",
-            HOST: HOST_MODULE + "mod inner;\n",
-            f"{SHIM}/src/host/inner.rs": CFG + FORBID + "\n#[test]\nfn ffi_fixture() {}\n",
-        },
-    )
     require_accepted("byte-order mark on a shim module and the crate root", {HOST: "\ufeff" + HOST_MODULE, LIB: "\ufeff" + SHIM_LIB})
     require_accepted("combined forbid list in a module", {HOST: CFG + "#![forbid(dead_code, unsafe_code)]\n"})
     for name, source in (
@@ -1047,7 +995,6 @@ def test_hosted_liveness() -> None:
         ("cfg_attr cfg on enclosing mod", CFG + FORBID + "\n#[cfg_attr(windows, cfg(any()))]\nmod m {\n    " + test + "}\n"),
         ("inner cfg inside inline mod", CFG + FORBID + "\nmod m {\n    #![cfg(any())]\n    " + test + "}\n"),
         ("nested inside another fn", CFG + FORBID + "\nfn outer() {\n    " + test.replace("\n", "\n    ") + "}\n"),
-        ("inside macro_rules! body", CFG + FORBID + "\nmacro_rules! m {\n    () => {\n        " + test + "    };\n}\n"),
         ("on an impl method", CFG + FORBID + "\nstruct S;\nimpl S {\n    " + test + "}\n"),
         ("inside a trait", CFG + FORBID + "\ntrait T {\n    " + test + "}\n"),
         ("fn inside a live mod", CFG + FORBID + "\nmod m {\n    fn outer() {\n        " + test + "    }\n}\n"),
@@ -1063,30 +1010,6 @@ def test_hosted_liveness() -> None:
         ("after an earlier item", CFG + FORBID + "\nfn helper() {}\nconst X: u8 = 1;\n" + test),
     ):
         require_accepted(f"hosted test {name}", {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": source})
-    for name, addition in (
-        ("lib.test = false", "\n[lib]\ntest = false\n"),
-        ("lib.harness = false", "\n[lib]\nharness = false\n"),
-        ("test.test = false", '\n[[test]]\nname = "ffi"\ntest = false\n'),
-        ("test.harness = false", '\n[[test]]\nname = "ffi"\nharness = false\n'),
-        ("bin.test = false", '\n[[bin]]\nname = "x"\ntest = false\n'),
-    ):
-        flag = name.split(" = ")[0]
-        require_rejected(
-            f"shim manifest {name}",
-            {f"{SHIM}/Cargo.toml": SHIM_MANIFEST + addition},
-            [f"{SHIM}/Cargo.toml: {flag} = false disables hosted tests"],
-        )
-    require_rejected(
-        "shim manifest autotests = false",
-        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST.replace('version = "0.1.0"\n', 'version = "0.1.0"\nautotests = false\n')},
-        [f"{SHIM}/Cargo.toml: package.autotests = false hides hosted tests"],
-    )
-    require_accepted(
-        "shim manifest with plain test targets",
-        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST + '\n[lib]\ntest = true\n\n[[test]]\nname = "ffi"\n'},
-    )
-
-
 def test_review_findings() -> None:
     no_lints = '[package]\nname = "member"\nversion = "0.1.0"\n'
     for name, manifest in (("absent", no_lints), ("false", no_lints + "\n[lints]\nworkspace = false\n")):
@@ -1153,94 +1076,153 @@ def test_review_findings() -> None:
     )
 
 
-def test_reachability_and_targets() -> None:
-    test_source = HOST_MODULE + "\n#[test]\nfn ffi_fixture() {}\n"
-    base = {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": None}
+def test_structural_rules() -> None:
     inner_test = CFG + FORBID + "\n#[test]\nfn ffi_fixture() {}\n"
+    base = {**ffi_case(*STANDARD_BODY), f"{SHIM}/tests/ffi.rs": None}
+    missing = hosted_missing()
+    root_test = "mod tests {\n    #[test]\n    fn ffi_fixture() {}\n}\n"
+    forbid = "#[forbid(unsafe_code)]\n"
 
     def lib(declarations: str) -> str:
         return CFG + "\n" + declarations
 
-    for name, declarations, files in (
-        ("cfg_attr adding a dead cfg", "#[forbid(unsafe_code)]\n#[cfg_attr(all(), cfg(any()))]\nmod host;\n", {HOST: test_source}),
-        (
-            "mod inside a dead inline mod",
-            "#[cfg(any())]\n#[forbid(unsafe_code)]\nmod x {\n    #[forbid(unsafe_code)]\n    mod tests;\n}\n",
-            {f"{SHIM}/src/x/tests.rs": inner_test},
-        ),
-        (
-            "mod inside an uninvoked macro_rules!",
-            "macro_rules! m {\n    () => {\n        #[forbid(unsafe_code)]\n        mod tests;\n    };\n}\n",
-            {f"{SHIM}/src/tests.rs": inner_test},
-        ),
-        (
-            "mod inside a fn body",
-            "fn f() {\n    #[forbid(unsafe_code)]\n    mod tests;\n}\n",
-            {f"{SHIM}/src/tests.rs": inner_test},
-        ),
-        (
-            "mod inside an impl",
-            "struct S;\nimpl S {\n    #[forbid(unsafe_code)]\n    mod tests;\n}\n",
-            {f"{SHIM}/src/tests.rs": inner_test},
-        ),
-        (
-            "file in the wrong directory for a live inline mod",
-            "#[forbid(unsafe_code)]\nmod x {\n    #[forbid(unsafe_code)]\n    mod tests;\n}\n",
-            {f"{SHIM}/src/tests.rs": inner_test},
-        ),
-        (
-            "file below a parent with a dead inner cfg",
-            "#[forbid(unsafe_code)]\nmod host;\n",
-            {HOST: CFG + "#![cfg(any())]\n" + FORBID + "mod inner;\n", f"{SHIM}/src/host/inner.rs": inner_test},
-        ),
+    for name, files in (
+        ("test in a src module file that lib.rs declares", {LIB: lib(forbid + "mod host;\n"), HOST: inner_test}),
+        ("orphan src file", {HOST: inner_test}),
+        ("mod tests without cfg(test)", {LIB: lib(forbid + root_test)}),
+        ("mod tests with cfg(windows) only", {LIB: lib(forbid + "#[cfg(windows)]\n" + root_test)}),
+        ("inline mod not named tests", {LIB: lib(forbid + "#[cfg(test)]\n" + root_test.replace("mod tests", "mod other"))}),
+        ("cfg_attr adding a dead cfg on mod tests", {LIB: lib(forbid + "#[cfg_attr(all(), cfg(any()))]\n#[cfg(test)]\n" + root_test)}),
+        ("dead cfg on mod tests", {LIB: lib(forbid + "#[cfg(any())]\n#[cfg(test)]\n" + root_test)}),
+        ("mod tests; behind a dead cfg", {LIB: lib(forbid + "#[cfg(any())]\nmod tests;\n"), f"{SHIM}/src/tests.rs": inner_test}),
+        ("mod tests; without cfg(test)", {LIB: lib(forbid + "mod tests;\n"), f"{SHIM}/src/tests.rs": inner_test}),
+        ("mod tests; inside an inline mod", {LIB: lib(forbid + "#[cfg(test)]\nmod x {\n    mod tests;\n}\n"), f"{SHIM}/src/tests.rs": inner_test}),
+        ("mod tests; target with a dead inner cfg", {LIB: lib(forbid + "#[cfg(test)]\nmod tests;\n"), f"{SHIM}/src/tests.rs": CFG + "#![cfg(any())]\n" + FORBID + "#[test]\nfn ffi_fixture() {}\n"}),
+        ("test in tests/ below a directory", {f"{SHIM}/tests/deep/x.rs": inner_test}),
+        ("test in a file a tests/ file declares", {f"{SHIM}/tests/ffi.rs": CFG + FORBID + "mod support;\n", f"{SHIM}/tests/support/mod.rs": inner_test}),
+        ("test in examples", {f"{SHIM}/examples/e.rs": inner_test}),
     ):
-        require_rejected(
-            f"hosted test reachability: {name}",
-            {**base, LIB: lib(declarations), **files},
-            [f"{INV}: hosted test ffi_fixture for src/ffi/ops.rs:5 is not a live #[test] function under tests/ or src/"],
-        )
-    for name, declarations, files in (
-        (
-            "mod in a live inline mod resolves in the nested directory",
-            "#[forbid(unsafe_code)]\nmod x {\n    #[forbid(unsafe_code)]\n    mod tests;\n}\n",
-            {f"{SHIM}/src/x/tests.rs": inner_test},
-        ),
-        (
-            "mod in nested live inline mods",
-            "#[forbid(unsafe_code)]\n#[cfg(test)]\nmod x {\n    #[forbid(unsafe_code)]\n    pub mod y {\n        #[forbid(unsafe_code)]\n        mod tests;\n    }\n}\n",
-            {f"{SHIM}/src/x/y/tests.rs": inner_test},
-        ),
-        (
-            "mod in a nested file's inline mod",
-            "#[forbid(unsafe_code)]\nmod host;\n",
-            {HOST: HOST_MODULE + "mod x {\n    #[forbid(unsafe_code)]\n    mod tests;\n}\n", f"{SHIM}/src/host/x/tests.rs": inner_test},
-        ),
+        require_rejected(f"structural hosted test: {name}", {**base, **files}, missing)
+    for name, files in (
+        ("inline cfg(test) mod tests in lib.rs", {LIB: lib(forbid + "#[cfg(test)]\n" + root_test)}),
+        ("inline cfg(all(test, windows)) mod tests", {LIB: lib(forbid + "#[cfg(all(test, windows))]\n" + root_test)}),
+        ("nested live mod in mod tests", {LIB: lib(forbid + "#[cfg(test)]\nmod tests {\n    mod inner {\n        #[test]\n        fn ffi_fixture() {}\n    }\n}\n")}),
+        ("mod tests; to src/tests.rs", {LIB: lib(forbid + "#[cfg(test)]\nmod tests;\n"), f"{SHIM}/src/tests.rs": inner_test}),
+        ("mod tests; to src/tests/mod.rs", {LIB: lib(forbid + "pub(crate) mod tests;\n".replace("pub(crate) mod tests;\n", "#[cfg(all(test, windows))]\npub(crate) mod tests;\n")), f"{SHIM}/src/tests/mod.rs": inner_test}),
     ):
-        require_accepted(f"hosted test reachability: {name}", {**base, LIB: lib(declarations), **files})
-    target_message = "{key}.path is not allowed on shim targets: it replaces auto-discovery and hides which file cargo compiles"
-    shim_tests = {**ffi_case(*STANDARD_BODY), f"{SHIM}/src/ffi/a.rs": CFG + "\n"}
-    for key, addition in (
-        ("test", '\n[[test]]\nname = "ffi"\npath = "src/ffi/a.rs"\n'),
-        ("bin", '\n[[bin]]\nname = "b"\npath = "src/b.rs"\n'),
-        ("bench", '\n[[bench]]\nname = "b"\npath = "src/b.rs"\n'),
-        ("example", '\n[[example]]\nname = "e"\npath = "src/b.rs"\n'),
-        ("lib", '\n[lib]\npath = "src/other.rs"\n'),
-    ):
-        require_rejected(
-            f"shim {key}.path",
-            {**shim_tests, f"{SHIM}/src/b.rs": CFG + FORBID, f"{SHIM}/src/other.rs": CFG + FORBID, f"{SHIM}/Cargo.toml": SHIM_MANIFEST + addition},
-            [f"{SHIM}/Cargo.toml: " + target_message.format(key=key)],
-        )
-    require_accepted(
-        "shim lib.path = src/lib.rs",
-        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST + '\n[lib]\npath = "src/lib.rs"\n'},
+        require_accepted(f"structural hosted test: {name}", {**base, **files})
+    # (e) nested mod inside an already-forbidden inline mod needs no redundant forbid
+    require_accepted("nested mod inherits the forbid", {LIB: lib(forbid + "mod a {\n    mod b;\n}\n"), f"{SHIM}/src/a/b.rs": HOST_MODULE})
+    require_rejected(
+        "mod inside a fn body in lib.rs still needs its own forbid",
+        {LIB: lib("fn f() {\n    mod b;\n}\n")},
+        [f"{LIB}:4: mod b must carry #[forbid(unsafe_code)]"],
     )
-    for key in ("test", "bin", "bench", "example"):
+    # (a) macros that could hide items or tests, and macro definitions, raw identifiers
+    macro_message = "with items or attributes in its arguments is forbidden in the shim: it can hide never-compiled tests or modules"
+    for name, source, line, expected in (
+        ("paren macro hiding a test", "d!( #[test] fn ffi_fixture() {} );\n", 4, f"macro d! {macro_message}"),
+        ("bracket macro hiding a test", "d![ #[test] fn ffi_fixture() {} ];\n", 4, f"macro d! {macro_message}"),
+        ("brace macro hiding a mod", "d! { mod x; }\n", 4, f"macro d! {macro_message}"),
+        ("paren macro hiding a forbidden mod", "d!( #[forbid(unsafe_code)] mod x; );\n", 4, f"macro d! {macro_message}"),
+        ("spaced bang", "d ! ( fn f() {} );\n", 4, f"macro d! {macro_message}"),
+        ("path macro", "crate::d!(fn f() {});\n", 4, f"macro d! {macro_message}"),
+        ("macro_rules brace", "macro_rules! d { () => {}; }\n", 4, "macro_rules definitions are forbidden in the shim"),
+        ("macro_rules paren", "macro_rules! d ( () => ( mod x; ) );\n", 4, "macro_rules definitions are forbidden in the shim"),
+        ("macro 2.0 definition", "pub macro d() {}\n", 4, "macro definitions are forbidden in the shim"),
+        ("raw identifier in an attribute", "#[r#cfg(any())]\nfn f() {}\n", 4, "raw identifiers are forbidden in the shim"),
+        ("raw ignore", "#[r#ignore]\nfn f() {}\n", 4, "raw identifiers are forbidden in the shim"),
+        ("raw path", '#[r#path = "x.rs"]\nfn f() {}\n', 4, "raw identifiers are forbidden in the shim"),
+        ("raw identifier as a name", "fn r#type() {}\n", 4, "raw identifiers are forbidden in the shim"),
+    ):
+        found = fixture({HOST: HOST_MODULE + source})
+        line_prefix = f"{HOST}:{line}: "
+        if not any(item.startswith(line_prefix) and expected in item for item in found):
+            raise SystemExit(f"shim {name} not rejected as '{expected}': {found}")
+    require_accepted(
+        "benign macros, bang operators and a raw string",
+        {HOST: HOST_MODULE + 'pub fn m(a: u8) -> bool {\n    let _s = r#"x"#;\n    let b = !(a == 1);\n    b && a != 2 && matches!(a, 3 | 4)\n}\n'},
+    )
+    require_accepted("raw identifier outside the shim", {SAFE_LIB_PATH: FORBID + "pub fn r#type() {}\n"})
+
+    # (b), (c) and the manifest allowlist
+    reasons = {
+        "package.autobins": ('version = "0.1.0"\n', 'version = "0.1.0"\nautobins = false\n'),
+        "package.autolib": ('version = "0.1.0"\n', 'version = "0.1.0"\nautolib = false\n'),
+        "package.autotests": ('version = "0.1.0"\n', 'version = "0.1.0"\nautotests = false\n'),
+        "package.autoexamples": ('version = "0.1.0"\n', 'version = "0.1.0"\nautoexamples = false\n'),
+        "package.autobenches": ('version = "0.1.0"\n', 'version = "0.1.0"\nautobenches = false\n'),
+        "package.build": ('version = "0.1.0"\n', 'version = "0.1.0"\nbuild = "build.rs"\n'),
+        "package.default-run": ('version = "0.1.0"\n', 'version = "0.1.0"\ndefault-run = "x"\n'),
+    }
+    for key, (old, new) in reasons.items():
         require_rejected(
-            f"shim {key}.required-features",
-            {f"{SHIM}/Cargo.toml": SHIM_MANIFEST + f'\n[[{key}]]\nname = "ffi"\nrequired-features = ["x"]\n'},
-            [f"{SHIM}/Cargo.toml: {key}.required-features can silently skip hosted tests"],
+            f"shim manifest {key}",
+            {f"{SHIM}/Cargo.toml": SHIM_MANIFEST.replace(old, new)},
+            [f"{SHIM}/Cargo.toml: {key} is not allowed in the shim manifest"],
         )
+    require_rejected(
+        "shim manifest dotted autobins",
+        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST.replace('version = "0.1.0"\n', 'version = "0.1.0"\nautobins.workspace = true\n')},
+        [f"{SHIM}/Cargo.toml: package.autobins is not allowed in the shim manifest"],
+    )
+    require_rejected(
+        "shim manifest inline package table",
+        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST.replace('[package]\nname = "pos-owner-bridge-windows"\nversion = "0.1.0"\n', 'package = { name = "pos-owner-bridge-windows", version = "0.1.0", autolib = false }\n')},
+        [f"{SHIM}/Cargo.toml: package.autolib is not allowed in the shim manifest"],
+    )
+    for table, key, line in (
+        ("lib", "test", "test = false"),
+        ("lib", "harness", "harness = false"),
+        ("lib", "path", 'path = "src/lib.rs"'),
+        ("lib", "doctest", "doctest = false"),
+        ("lib", "required-features", 'required-features = ["x"]'),
+        ("test", "test", "test = false"),
+        ("test", "harness", "harness = false"),
+        ("test", "path", 'path = "src/ffi/a.rs"'),
+        ("test", "required-features", 'required-features = ["x"]'),
+        ("bin", "required-features", 'required-features = ["x"]'),
+        ("bin", "path", 'path = "src/b.rs"'),
+        ("bin", "test", "test = false"),
+        ("bench", "required-features", 'required-features = ["x"]'),
+        ("bench", "harness", "harness = false"),
+        ("example", "path", 'path = "src/b.rs"'),
+    ):
+        header = "[lib]" if table == "lib" else f'[[{table}]]\nname = "ffi"'
+        require_rejected(
+            f"shim manifest {table}.{key}",
+            {f"{SHIM}/Cargo.toml": SHIM_MANIFEST + f"\n{header}\n{line}\n"},
+            [f"{SHIM}/Cargo.toml: {table}.{key} is not allowed in the shim manifest"],
+        )
+    require_rejected(
+        "shim manifest dotted lib key",
+        {f"{SHIM}/Cargo.toml": "lib.test = false\n" + SHIM_MANIFEST},
+        [f"{SHIM}/Cargo.toml: lib.test is not allowed in the shim manifest"],
+    )
+    require_rejected(
+        "shim manifest inline test array",
+        {f"{SHIM}/Cargo.toml": 'test = [{ name = "ffi", harness = false }]\n' + SHIM_MANIFEST},
+        [f"{SHIM}/Cargo.toml: test.harness is not allowed in the shim manifest"],
+    )
+    require_rejected(
+        "shim manifest non-table lib",
+        {f"{SHIM}/Cargo.toml": "lib = 1\n" + SHIM_MANIFEST},
+        [f"{SHIM}/Cargo.toml: lib must be a table"],
+    )
+    require_rejected(
+        "shim manifest test is not an array of tables",
+        {f"{SHIM}/Cargo.toml": "test = 1\n" + SHIM_MANIFEST},
+        [f"{SHIM}/Cargo.toml: test must be an array of tables"],
+    )
+    require_rejected(
+        "shim manifest unknown top-level key",
+        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST + "\n[profile.dev]\nopt-level = 1\n"},
+        [f"{SHIM}/Cargo.toml: top-level key profile is not allowed in the shim manifest"],
+    )
+    require_accepted(
+        "shim manifest with named plain targets",
+        {f"{SHIM}/Cargo.toml": SHIM_MANIFEST + '\n[lib]\nname = "pos_owner_bridge_windows"\ncrate-type = ["rlib"]\n\n[[test]]\nname = "ffi"\n\n[[bin]]\nname = "b"\n'},
+    )
 
 
 def run_cli(extra: dict[str, str | None] | None = None) -> subprocess.CompletedProcess[str]:
@@ -1282,7 +1264,7 @@ def main() -> None:
     test_symlinks()
     test_hosted_liveness()
     test_review_findings()
-    test_reachability_and_targets()
+    test_structural_rules()
     print("owner-bridge unsafe-policy checker rejects every forged boundary")
 
 
