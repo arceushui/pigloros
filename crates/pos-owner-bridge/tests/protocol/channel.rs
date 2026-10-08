@@ -26,6 +26,8 @@ use super::{
 
 const UNAVAILABLE: BridgeError = BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable);
 
+const PRF_UNSUPPORTED: BridgeError = BridgeError::Unavailable(UnavailableCode::PrfUnsupported);
+
 /// A surface thread that vanished after accepting a driver: its browser may still be alive.
 const ABANDONED: BridgeError = BridgeError::Quarantine(QuarantineCode::CleanupTimeout);
 
@@ -395,5 +397,70 @@ fn the_bridge_stays_quarantined_until_the_host_holds_no_quarantined_driver() -> 
     assert_eq!(bridge.poll_quarantine(), quarantined);
     clean_the_extra.set(true);
     assert_eq!(bridge.poll_quarantine(), BridgeStatus::Ready);
+    Ok(())
+}
+
+/// A host that breaks the contract by dropping the driver without a quarantine: after one reply
+/// the bridge no longer holds its slots.
+struct DroppingHost {
+    inner: FakeHost,
+    fail_first: Option<BridgeError>,
+}
+
+impl CeremonyHost for DroppingHost {
+    fn run(&mut self, driver: CeremonyDriver) -> CeremonyReply {
+        if let Some(error) = self.fail_first.take() {
+            return CeremonyReply {
+                result: Err(error),
+                driver: None,
+            };
+        }
+        let mut reply = self.inner.run(driver);
+        reply.driver = None;
+        reply
+    }
+
+    fn poll_quarantine(&mut self) -> QuarantinePoll {
+        self.inner.poll_quarantine()
+    }
+}
+
+type DroppingBridge = OwnerBridge<DroppingHost, FakeRandom, FakeClock>;
+
+fn dropping_bridge(
+    fail_first: Option<BridgeError>,
+) -> Result<DroppingBridge, Box<dyn std::error::Error>> {
+    let clock = FakeClock::start();
+    let loopback = FakeLoopback::default();
+    let page = HonestPage::new(honest(0)).map_err(|error| error.to_string())?;
+    let config = SurfaceConfig::default();
+    let surface = FakeSurface::new(clock.clone(), loopback.clone(), Box::new(page), config);
+    let inner = FakeHost::new(clock.clone(), surface, loopback, FakeStore::default());
+    let host = DroppingHost { inner, fail_first };
+    Ok(OwnerBridge::new(
+        host,
+        FakeRandom::seeded(6),
+        clock,
+        BridgeConfig::default(),
+    ))
+}
+
+#[test]
+fn a_host_that_drops_the_driver_leaves_the_bridge_failing_closed_but_ready() -> TestResult {
+    let mut port = FakeEnrollment::new();
+    // The first ceremony fails and the host keeps no driver: the next calls have no slots.
+    let mut failed = dropping_bridge(Some(PRF_UNSUPPORTED))?;
+    assert_eq!(failed.enroll(&context(), &mut port), Err(PRF_UNSUPPORTED));
+    assert_eq!(failed.status(), BridgeStatus::Ready);
+    assert_eq!(failed.enroll(&context(), &mut port), Err(UNAVAILABLE));
+    let binding = unlock_binding("owner", 0)?;
+    let mut unlock = FakeUnlock::new();
+    let refused = failed.unlock(&binding, &bytes32(0x60), &mut unlock).err();
+    assert_eq!(refused, Some(UNAVAILABLE));
+    assert_eq!(failed.status(), BridgeStatus::Ready);
+    // A ceremony that succeeds and whose driver is dropped: the enrollment then needs the slots.
+    let mut late = dropping_bridge(None)?;
+    assert_eq!(late.enroll(&context(), &mut port), Err(UNAVAILABLE));
+    assert_eq!(late.status(), BridgeStatus::Ready);
     Ok(())
 }

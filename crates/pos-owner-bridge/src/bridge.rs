@@ -21,7 +21,7 @@ use crate::{
     QuarantineCode, RejectedCode, RootFingerprint, SecureRandom, UnavailableCode, UnlockPort,
 };
 
-/// The failure when the slots are not in the bridge's hands, which `begin` never admits.
+/// The failure when the slots are not in the bridge's hands: a host dropped the driver.
 const SLOTS_HELD: BridgeError = BridgeError::Unavailable(UnavailableCode::InterfaceUnavailable);
 
 /// Bridge construction options.
@@ -282,16 +282,18 @@ impl<H: CeremonyHost, R: SecureRandom, C: MonotonicClock> OwnerBridge<H, R, C> {
         self.status = BridgeStatus::after(result.as_ref().err().copied());
     }
 
-    /// Zero the slots the bridge holds. While a quarantined driver holds them there is nothing
-    /// to wipe and nothing is allocated (ADR-110 §5.6 allocates once, at construction).
+    /// Zero the slots the bridge holds. While a driver holds them, or a host dropped it, there is
+    /// nothing to wipe and nothing is allocated.
     fn wipe_slots(&mut self) {
         if let Some(slots) = self.slots.as_deref_mut() {
             slots.wipe_all();
         }
     }
 
-    /// Run `operation` on the slots the bridge holds. They are absent only while a driver holds
-    /// them, which `begin` never admits; the bridge fails closed rather than allocate new ones.
+    /// Run `operation` on the slots the bridge holds. They are absent while a quarantined driver
+    /// holds them, or when a host broke its contract and dropped the driver without a quarantine;
+    /// `begin` admits the second case, and the bridge then fails each call with `SLOTS_HELD`
+    /// rather than allocate new slots (ADR-110 §5.6 allocates once, at construction).
     fn with_slots<T>(&mut self, operation: impl FnOnce(&mut Slots) -> T) -> Result<T, BridgeError> {
         self.slots.as_deref_mut().map(operation).ok_or(SLOTS_HELD)
     }
