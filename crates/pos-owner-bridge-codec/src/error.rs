@@ -37,14 +37,6 @@ pub enum OwnerBridgeCodecError {
     Verification(VerificationReason),
 }
 
-/// Lets a caller that returns [`OwnerBridgeCodecError`] use `?` on a verifier result. The public
-/// tests rely on it.
-impl From<VerificationReason> for OwnerBridgeCodecError {
-    fn from(reason: VerificationReason) -> Self {
-        Self::Verification(reason)
-    }
-}
-
 impl OwnerBridgeCodecError {
     const fn message(self) -> &'static str {
         match self {

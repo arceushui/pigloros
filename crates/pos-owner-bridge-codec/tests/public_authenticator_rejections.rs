@@ -4,6 +4,10 @@ use pos_owner_bridge_codec::{
     SubjectCredentialBindingV1, SubjectId, TransportCodes, VerificationReason as Reason,
 };
 
+mod common;
+
+use common::verified;
+
 const CREDENTIAL_ID: [u8; 2] = [0x80, 0x81];
 const RP_ID_HASH: [u8; 32] = [
     0x49, 0x96, 0x0d, 0xe5, 0x88, 0x0e, 0x8c, 0x68, 0x74, 0x34, 0x17, 0x0f, 0x64, 0x76, 0x60, 0x5b,
@@ -15,7 +19,7 @@ fn public_none_attestation_parser_accepts_the_closed_baseline() -> Result<(), Ow
 {
     let authenticator_data = create_authenticator_data(&cose_key());
     let attestation = none_attestation_object(&authenticator_data)?;
-    let parsed = parse_none_attestation_object(&attestation, &CREDENTIAL_ID)?;
+    let parsed = verified(parse_none_attestation_object(&attestation, &CREDENTIAL_ID))?;
     assert_eq!(parsed.credential_id(), CREDENTIAL_ID);
     assert_eq!(parsed.sign_count(), 7);
     assert!(!parsed.backup_eligible());
@@ -291,7 +295,8 @@ fn public_parsers_accept_the_exact_limits() -> Result<(), OwnerBridgeCodecError>
     ];
     for extension in &accepted {
         let data = assertion_authenticator_data(0x85, extension);
-        assert_eq!(parse_assertion_authenticator_data(&data)?.sign_count(), 9);
+        let parsed = verified(parse_assertion_authenticator_data(&data))?;
+        assert_eq!(parsed.sign_count(), 9);
     }
     let largest_data = assertion_authenticator_data(0x85, &accepted[3]);
     assert_eq!(largest_data.len(), 1_024);
@@ -303,7 +308,7 @@ fn public_parsers_accept_the_exact_limits() -> Result<(), OwnerBridgeCodecError>
     let mut backed_up = create_authenticator_data(&cose_key());
     backed_up[32] = 0x5d;
     let attestation = none_attestation_object(&backed_up)?;
-    let parsed = parse_none_attestation_object(&attestation, &CREDENTIAL_ID)?;
+    let parsed = verified(parse_none_attestation_object(&attestation, &CREDENTIAL_ID))?;
     assert!(parsed.backup_eligible());
     assert!(parsed.backup_state());
     Ok(())
@@ -315,7 +320,7 @@ fn public_durable_binding_rejects_a_non_curve_attestation_key() -> Result<(), Ow
     let mut authenticator_data = create_authenticator_data(&cose_key());
     authenticator_data[57 + 10..57 + 42].fill(0);
     let attestation = none_attestation_object(&authenticator_data)?;
-    let parsed = parse_none_attestation_object(&attestation, &CREDENTIAL_ID)?;
+    let parsed = verified(parse_none_attestation_object(&attestation, &CREDENTIAL_ID))?;
 
     assert_eq!(
         SubjectCredentialBindingV1::new(SubjectCredentialBindingInputV1 {
@@ -369,14 +374,12 @@ fn public_authenticator_parsers_reject_every_truncated_public_record(
 fn public_assertion_authenticator_parser_enforces_flags_and_exact_length(
 ) -> Result<(), OwnerBridgeCodecError> {
     let baseline = assertion_authenticator_data(0x05, &[]);
-    assert_eq!(
-        parse_assertion_authenticator_data(&baseline)?.sign_count(),
-        9
-    );
+    let parsed_baseline = verified(parse_assertion_authenticator_data(&baseline))?;
+    assert_eq!(parsed_baseline.sign_count(), 9);
 
     for (flags, backup_state) in [(0x0d, false), (0x1d, true)] {
         let data = assertion_authenticator_data(flags, &[]);
-        let parsed = parse_assertion_authenticator_data(&data)?;
+        let parsed = verified(parse_assertion_authenticator_data(&data))?;
         assert!(parsed.backup_eligible());
         assert_eq!(parsed.backup_state(), backup_state);
     }
@@ -417,10 +420,8 @@ fn public_assertion_authenticator_parser_enforces_flags_and_exact_length(
 fn public_assertion_authenticator_parser_enforces_the_extension_profile(
 ) -> Result<(), OwnerBridgeCodecError> {
     let valid_extension = assertion_authenticator_data(0x85, b"\xa1\x61x\xf5");
-    assert_eq!(
-        parse_assertion_authenticator_data(&valid_extension)?.sign_count(),
-        9
-    );
+    let parsed_extension = verified(parse_assertion_authenticator_data(&valid_extension))?;
+    assert_eq!(parsed_extension.sign_count(), 9);
     assert_eq!(
         parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, &[])),
         Err(Reason::Extensions)
@@ -477,8 +478,9 @@ fn public_assertion_authenticator_parser_enforces_the_extension_profile(
 fn public_assertion_extension_parser_accepts_every_closed_value_class(
 ) -> Result<(), OwnerBridgeCodecError> {
     let extension = extension_map_with_every_closed_value_class();
-    let parsed =
-        parse_assertion_authenticator_data(&assertion_authenticator_data(0x85, &extension))?;
+    let parsed = verified(parse_assertion_authenticator_data(
+        &assertion_authenticator_data(0x85, &extension),
+    ))?;
     assert_eq!(parsed.sign_count(), 9);
 
     let invalid_extensions: [(&str, &[u8]); 4] = [

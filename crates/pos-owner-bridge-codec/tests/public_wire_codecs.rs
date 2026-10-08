@@ -8,6 +8,10 @@ use pos_owner_bridge_codec::{
     PrfInput, PrfResult, TransportCodes, VerificationReason as Reason, WebAuthnChallenge,
 };
 
+mod common;
+
+use common::verified;
+
 const CEREMONY_ID: CeremonyId = CeremonyId::from_bytes([
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 ]);
@@ -210,7 +214,7 @@ fn public_authenticator_parsers_enforce_none_cose_and_extension_rules(
     authenticator_data[57..].copy_from_slice(&cose_key);
 
     let attestation = none_attestation_object(&authenticator_data);
-    let create = parse_none_attestation_object(&attestation, &[0x80, 0x81])?;
+    let create = verified(parse_none_attestation_object(&attestation, &[0x80, 0x81]))?;
     assert_eq!(create.credential_id(), &[0x80, 0x81]);
     assert_eq!(create.sign_count(), 7);
     assert_eq!(create.public_key().canonical_encoding(), cose_key);
@@ -220,7 +224,7 @@ fn public_authenticator_parsers_enforce_none_cose_and_extension_rules(
     assertion[32] = 0x85;
     assertion[33..37].copy_from_slice(&9_u32.to_be_bytes());
     assertion[37..].copy_from_slice(&[0xa1, 0x62, b't', b'x', 0xf5]);
-    let parsed_assertion = parse_assertion_authenticator_data(&assertion)?;
+    let parsed_assertion = verified(parse_assertion_authenticator_data(&assertion))?;
     assert_eq!(parsed_assertion.sign_count(), 9);
 
     let mut duplicate_extension = [0; 44];

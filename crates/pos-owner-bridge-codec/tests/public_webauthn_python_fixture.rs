@@ -5,6 +5,10 @@ use pos_owner_bridge_codec::{
     VerificationReason, WebAuthnChallenge,
 };
 
+mod common;
+
+use common::verified;
+
 const FIXTURE: &str = include_str!("../../../fixtures/owner-bridge/webauthn-es256-v1.fixture");
 
 #[test]
@@ -26,10 +30,10 @@ fn public_verifier_accepts_independently_generated_python_fixture(
         true,
         Some(prf_first),
     )?;
-    let registration = verify_attestation_reply(
+    let registration = verified(verify_attestation_reply(
         &registration_reply,
         CreateVerificationContext::new(ceremony_id, challenge),
-    )?;
+    ))?;
     let public_key_cose = fixture_bytes("public_key_cose")?;
     let public_key_encoding = registration.public_key().canonical_encoding();
     assert_eq!(public_key_encoding.as_slice(), public_key_cose.as_slice());
@@ -54,10 +58,10 @@ fn public_verifier_accepts_independently_generated_python_fixture(
         None,
         prf_first,
     )?;
-    let assertion = verify_assertion_reply(
+    let assertion = verified(verify_assertion_reply(
         &assertion_reply,
         AssertionVerificationContext::new(ceremony_id, challenge, credential),
-    )?;
+    ))?;
     assert_eq!(assertion.sign_count(), fixture_u32("assertion_sign_count")?);
     assert_eq!(assertion.prf_first(), prf_first);
 
@@ -72,10 +76,10 @@ fn public_verifier_accepts_independently_generated_python_fixture(
         prf_first,
     )?;
     assert_eq!(
-        verify_assertion_reply(
+        verified(verify_assertion_reply(
             &high_s_reply,
             AssertionVerificationContext::new(ceremony_id, challenge, credential),
-        )?,
+        ))?,
         assertion
     );
 

@@ -7,6 +7,10 @@ use pos_owner_bridge_codec::{
 };
 use sha2::{Digest, Sha256};
 
+mod common;
+
+use common::verified;
+
 const CEREMONY_ID: CeremonyId = CeremonyId::from_bytes([
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 ]);
@@ -43,10 +47,10 @@ fn public_verifier_accepts_closed_create_and_assertion() -> Result<(), OwnerBrid
         true,
         Some(PRF_RESULT),
     )?;
-    let registration = verify_attestation_reply(
+    let registration = verified(verify_attestation_reply(
         &registration_reply,
         CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
-    )?;
+    ))?;
     assert_eq!(registration.credential_id(), CREDENTIAL_ID);
     assert_eq!(registration.sign_count(), 0);
     assert_eq!(registration.prf_first(), Some(PRF_RESULT));
@@ -71,10 +75,10 @@ fn public_verifier_accepts_closed_create_and_assertion() -> Result<(), OwnerBrid
         Some(USER_HANDLE),
         PRF_RESULT,
     )?;
-    let assertion = verify_assertion_reply(
+    let assertion = verified(verify_assertion_reply(
         &assertion_reply,
         AssertionVerificationContext::new(CEREMONY_ID, CHALLENGE, credential),
-    )?;
+    ))?;
     assert_eq!(assertion.sign_count(), 1);
     assert!(!assertion.backup_state());
     assert_eq!(assertion.prf_first(), PRF_RESULT);
@@ -240,10 +244,10 @@ fn public_verifier_preserves_registration_hints_and_accepts_zero_counter(
         true,
         Some(PRF_RESULT),
     )?;
-    let registration = verify_attestation_reply(
+    let registration = verified(verify_attestation_reply(
         &registration_reply,
         CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
-    )?;
+    ))?;
     assert_eq!(registration.transports().as_slice(), &[0, 2]);
     assert!(!registration.backup_eligible());
     assert!(!registration.backup_state());
@@ -268,10 +272,10 @@ fn public_verifier_preserves_registration_hints_and_accepts_zero_counter(
         None,
         PRF_RESULT,
     )?;
-    let assertion = verify_assertion_reply(
+    let assertion = verified(verify_assertion_reply(
         &assertion_reply,
         AssertionVerificationContext::new(CEREMONY_ID, CHALLENGE, credential),
-    )?;
+    ))?;
     assert!(!assertion.backup_state());
     assert_eq!(assertion.sign_count(), 0);
     assert_eq!(assertion.prf_first(), PRF_RESULT);
@@ -405,7 +409,7 @@ fn public_verifier_rejects_an_off_curve_stored_key() -> Result<(), OwnerBridgeCo
     let invalid_point_authenticator_data = create_authenticator_data(invalid_point_key);
     let invalid_point_attestation = none_attestation_object(&invalid_point_authenticator_data);
     let parsed_invalid_point =
-        parse_none_attestation_object(&invalid_point_attestation, &CREDENTIAL_ID)?;
+        verified(parse_none_attestation_object(&invalid_point_attestation, &CREDENTIAL_ID))?;
     let invalid_point_credential = StoredCredential::new(
         &CREDENTIAL_ID,
         USER_HANDLE,
@@ -442,10 +446,10 @@ fn public_verifier_reports_backup_flags_and_counter() -> Result<(), OwnerBridgeC
         true,
         None,
     )?;
-    let registration = verify_attestation_reply(
+    let registration = verified(verify_attestation_reply(
         &reply,
         CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
-    )?;
+    ))?;
     assert!(registration.backup_eligible());
     assert!(registration.backup_state());
     assert_eq!(registration.sign_count(), 7);
@@ -470,10 +474,10 @@ fn public_verifier_reports_backup_flags_and_counter() -> Result<(), OwnerBridgeC
         None,
         PRF_RESULT,
     )?;
-    let assertion = verify_assertion_reply(
+    let assertion = verified(verify_assertion_reply(
         &assertion_reply,
         AssertionVerificationContext::new(CEREMONY_ID, CHALLENGE, credential),
-    )?;
+    ))?;
     assert!(assertion.backup_state());
     assert_eq!(assertion.sign_count(), 8);
     Ok(())
@@ -491,10 +495,10 @@ fn fixture_credential(sign_count: u32) -> Result<StoredCredential<'static>, Owne
         true,
         None,
     )?;
-    let registration = verify_attestation_reply(
+    let registration = verified(verify_attestation_reply(
         &reply,
         CreateVerificationContext::new(CEREMONY_ID, CHALLENGE),
-    )?;
+    ))?;
     StoredCredential::new(
         &CREDENTIAL_ID,
         USER_HANDLE,
