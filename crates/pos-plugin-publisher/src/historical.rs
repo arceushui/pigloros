@@ -67,9 +67,10 @@ pub enum SigningKeyStateV1 {
 /// validity interval, so the only honest report is that admission was not
 /// evaluated. Only the installer's admission path may decide installability.
 ///
-/// The enum is deliberately closed (no `#[non_exhaustive]`): wiring admission
-/// (#573) adds a new type or variant in a coordinated breaking change, since
-/// the product is unreleased and types are replaced in place.
+/// The enum is deliberately closed (no `#[non_exhaustive]`): the installer
+/// (#573) decides admission through its own receipt, and any change here is a
+/// coordinated breaking change, since the product is unreleased and types are
+/// replaced in place.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CurrentAdmissionV1 {
     /// No trust policy, revocation state, interval or clock was consulted.

@@ -20,6 +20,11 @@ GLOB = "use pos_store::plugin_trust_registry::*;\n"
 CALLS = "fn f(s: &mut S) { s.admit(a); s.rollback(a); s.provision(a); s.advance_policy(a); }\n"
 ANCHOR = "fn f() { PluginTrustPolicyAnchorV1::new(a, b, c, d, e); }\n"
 UTC = "fn f(s: &mut S) { TrustedUtcSecondV1::from_source(s); }\n"
+INSTALLER_FILE = "crates/pos-plugin-publisher/src/install.rs"
+INSTALLER_SIBLING = "crates/pos-plugin-publisher/src/other.rs"
+INSTALLER_BODY = (
+    IMPORT + "fn f(s: &mut S, w: &mut W) { TrustedUtcSecondV1::from_source(w); s.admit(a); }\n"
+)
 REGISTRY_FILE = "crates/pos-store/src/plugin_trust_registry/types.rs"
 ADAPTER_FILE = "crates/pos-store/src/memory/plugin_trust_registry.rs"
 SQLITE_ADAPTER_FILE = "crates/pos-store/src/sqlite/plugin_trust_registry.rs"
@@ -88,12 +93,15 @@ ALLOWED = {
     "crates/pos-state/src/defines.rs": (
         "struct ActiveReleaseV1 { a: u8 }\nimpl ActiveReleaseV1 { }\n"
         "enum PluginRollbackReceiptV1 { }\nfn f() -> RollbackFactsV1 { x }\n"
+        "fn g(&self) -> &ActiveReleaseV1 { &self.a }\n"
     ),
     "crates/pos-state/src/test_only.rs": IMPORT + "#[cfg(test)]\nmod tests {\n" + CALLS + "}\n",
     "crates/pos-state/src/gated_item.rs": (
         IMPORT + '#[cfg(any(test, feature = "test-support"))]\nfn f(s: &mut S) { s.admit(a); }\n'
     ),
     "target/debug/build/generated.rs": IMPL + IMPORT + CALLS,
+    INSTALLER_FILE: INSTALLER_BODY,
+    "crates/pos-plugin-publisher/tests/installer_public.rs": IMPORT + CALLS,
 }
 
 REJECTED = {
@@ -152,6 +160,9 @@ REJECTED = {
     "crates/pos-store/src/sqlite.rs": (
         LINUX + "mod a;\nfn f() {}\nstruct S {\n    state: plugin_trust_registry::State,\n}\n"
     ),
+    INSTALLER_SIBLING: INSTALLER_BODY,
+    "crates/pos-plugin-publisher/src/install_copy.rs": IMPORT + "fn f(s: &mut S) { s.admit(a); }\n",
+    "crates/pos-plugin-publisher/src/utc.rs": UTC,
     "crates/pos-store/src/blank_gap.rs": (
         LINUX + "const X: u8 = 1;\npub mod plugin_trust_registry;\n"
     ),
@@ -179,6 +190,19 @@ FORBIDDEN_NAMES = {
 }
 
 
+# The installer file is rejected, not exempted, for everything except `admit` and
+# the one trusted-time construction.
+INSTALLER_REJECTED = {
+    "rollback": IMPORT + "fn f(s: &mut S) { s.rollback(a); }\n",
+    "provision": IMPORT + "fn f(s: &mut S) { s.provision(a, b); }\n",
+    "advance": IMPORT + "fn f(s: &mut S) { s.advance_policy(a); }\n",
+    "anchor": ANCHOR,
+    "impl": IMPL,
+    "receipt": "fn f() { let _ = AdmittedPluginReleaseReceiptV1 { a: 1 }; }\n",
+    "path_rollback": IMPORT + "fn f(s: &mut S) { MemoryStore::rollback(s, a); }\n",
+}
+
+
 def run(files: dict[str, str]) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -202,6 +226,10 @@ def main() -> None:
         result = run({**ALLOWED, relative: text})
         if result.returncode == 0 or relative not in result.stderr:
             raise SystemExit(f"{relative} was not rejected")
+    for label, text in INSTALLER_REJECTED.items():
+        result = run({**ALLOWED, INSTALLER_FILE: INSTALLER_BODY + text})
+        if result.returncode == 0 or INSTALLER_FILE not in result.stderr:
+            raise SystemExit(f"installer {label} was not rejected")
     for label, text in FORBIDDEN_NAMES.items():
         for relative in (
             REGISTRY_FILE,
