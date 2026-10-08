@@ -71,11 +71,7 @@ fn every_verification_reason_has_one_distinct_message() {
 }
 
 #[test]
-fn a_verification_reason_wraps_into_the_codec_error() {
-    let error = OwnerBridgeCodecError::from(Reason::PrfMalformed);
-    assert_eq!(
-        error,
-        OwnerBridgeCodecError::Verification(Reason::PrfMalformed)
-    );
+fn a_verification_reason_is_carried_by_the_codec_error() {
+    let error = OwnerBridgeCodecError::Verification(Reason::PrfMalformed);
     assert_eq!(error.to_string(), "PRF fields are malformed");
 }

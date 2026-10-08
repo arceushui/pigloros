@@ -4,15 +4,15 @@ use pos_owner_bridge_codec::{
     SubjectCredentialBindingV1, SubjectId, TransportCodes, VerificationReason as Reason,
 };
 
-mod common;
-
-use common::verified;
-
 const CREDENTIAL_ID: [u8; 2] = [0x80, 0x81];
 const RP_ID_HASH: [u8; 32] = [
     0x49, 0x96, 0x0d, 0xe5, 0x88, 0x0e, 0x8c, 0x68, 0x74, 0x34, 0x17, 0x0f, 0x64, 0x76, 0x60, 0x5b,
     0x8f, 0xe4, 0xae, 0xb9, 0xa2, 0x86, 0x32, 0xc7, 0x99, 0x5c, 0xf3, 0xba, 0x83, 0x1d, 0x97, 0x63,
 ];
+
+fn verified<T>(result: Result<T, Reason>) -> Result<T, OwnerBridgeCodecError> {
+    result.map_err(OwnerBridgeCodecError::Verification)
+}
 
 #[test]
 fn public_none_attestation_parser_accepts_the_closed_baseline() -> Result<(), OwnerBridgeCodecError>

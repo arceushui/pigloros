@@ -7,10 +7,6 @@ use pos_owner_bridge_codec::{
 };
 use sha2::{Digest, Sha256};
 
-mod common;
-
-use common::verified;
-
 const CEREMONY_ID: CeremonyId = CeremonyId::from_bytes([
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 ]);
@@ -33,6 +29,10 @@ const FIXTURE_PRIVATE_KEY: [u8; 32] = [
 ];
 const CREATE_CLIENT_DATA: &[u8] = b"{\"type\":\"webauthn.create\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\"}";
 const GET_CLIENT_DATA: &[u8] = b"{\"type\":\"webauthn.get\",\"challenge\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\",\"origin\":\"http://localhost:49291\"}";
+
+fn verified<T>(result: Result<T, Reason>) -> Result<T, OwnerBridgeCodecError> {
+    result.map_err(OwnerBridgeCodecError::Verification)
+}
 
 #[test]
 fn public_verifier_accepts_closed_create_and_assertion() -> Result<(), OwnerBridgeCodecError> {

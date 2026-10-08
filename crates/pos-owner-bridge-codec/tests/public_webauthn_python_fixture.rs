@@ -5,11 +5,11 @@ use pos_owner_bridge_codec::{
     VerificationReason, WebAuthnChallenge,
 };
 
-mod common;
-
-use common::verified;
-
 const FIXTURE: &str = include_str!("../../../fixtures/owner-bridge/webauthn-es256-v1.fixture");
+
+fn verified<T>(result: Result<T, VerificationReason>) -> Result<T, OwnerBridgeCodecError> {
+    result.map_err(OwnerBridgeCodecError::Verification)
+}
 
 #[test]
 fn public_verifier_accepts_independently_generated_python_fixture(
