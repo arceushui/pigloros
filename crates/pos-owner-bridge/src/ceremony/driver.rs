@@ -351,7 +351,7 @@ impl CeremonyDriver {
         None
     }
 
-    fn apply_loaded(&mut self, id: NavigationId) -> Option<BridgeError> {
+    const fn apply_loaded(&mut self, id: NavigationId) -> Option<BridgeError> {
         if matches!(self.phase, Phase::AwaitingLoad { .. }) && self.loaded.is_none() {
             self.loaded = Some(id);
             None
