@@ -94,7 +94,8 @@ fn every_fixture_case_reports_its_exact_reason() -> Result<(), OwnerBridgeCodecE
 fn every_verification_reason_has_a_fixture_case() {
     for (index, (name, reason)) in ALL_REASONS.iter().enumerate() {
         assert_eq!(position(*reason), index);
-        assert!(REASONS.lines().any(|line| names_reason(line, name)), "{name}");
+        let found = REASONS.lines().any(|line| names_reason(line, name));
+        assert!(found, "{name}");
     }
 }
 
@@ -106,7 +107,8 @@ fn the_baseline_replies_still_verify() -> Result<(), OwnerBridgeCodecError> {
 }
 
 fn names_reason(line: &str, name: &str) -> bool {
-    line.split_once(".reason=").is_some_and(|(_, value)| value == name)
+    let split = line.split_once(".reason=");
+    split.is_some_and(|(_, value)| value == name)
 }
 
 fn run_case(case: &str) -> Result<Option<VerificationReason>, OwnerBridgeCodecError> {
