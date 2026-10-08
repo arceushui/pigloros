@@ -340,11 +340,11 @@ pub fn check_plugin_tps1_genesis_v1(
 /// epoch must be strictly greater (gaps are allowed) and the predecessor
 /// digest must equal the retained full digest.
 ///
+/// The primitive arguments are deliberate: slice 2 is the sole consumer.
+///
 /// # Errors
 /// Returns `StaleSnapshot` for an equal or lower epoch (checked first) and
 /// `SnapshotDiscontinuity` for a wrong or null predecessor.
-///
-/// The primitive arguments are deliberate: slice 2 is the sole consumer.
 pub fn check_plugin_tps1_successor_v1(
     retained_epoch: u64,
     retained_digest: [u8; 32],
