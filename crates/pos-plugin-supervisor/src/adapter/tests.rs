@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use pos_core::{EntityId, Kind};
 use pos_runtime::community_plugin_host::{
-    plugin_output_digest_v1, AtomicCommitFailureV1, ComponentTrapClassV1, EventDraftV1,
-    FieldRefV1, GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1, RevocationBasisV1,
-    TraceAnnotationV1, TrapReproductionV1, TrustDenialBasisV1,
+    plugin_output_digest_v1, AtomicCommitFailureV1, ComponentTrapClassV1, EventDraftV1, FieldRefV1,
+    GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1, RevocationBasisV1, TraceAnnotationV1,
+    TrapReproductionV1, TrustDenialBasisV1,
 };
 use ulid::Ulid;
 
