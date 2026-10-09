@@ -539,18 +539,20 @@ fn validate_node_range(
     }
 }
 
+/// A root consumes no input and matches the plan's provenance when the plan
+/// binds it. A `Committed` root the plan does not bind is accepted, because
+/// the prefix records the roots of factual Ticks; a `Provisional` root must
+/// be bound.
 fn validate_root(
     bindings: &PlanBindings<'_>,
     node: &DependencyGraphNodeV1,
 ) -> Result<(), DependencyGraphErrorV1> {
     let root = is_root(node.class);
+    let bound = bindings.root_binding(node).map(|b| b.provenance_digest);
+    let unbound_ok = node.origin == DependencyGraphNodeOriginV1::Committed;
     if root && !node.input_digests.is_empty() {
         Err(DependencyGraphErrorV1::UnclosedEndogenousInput)
-    } else if root
-        && bindings
-            .root_binding(node)
-            .is_none_or(|binding| binding.provenance_digest != node.provenance_digest)
-    {
+    } else if root && !bound.map_or(unbound_ok, |digest| digest == node.provenance_digest) {
         Err(DependencyGraphErrorV1::RootNotInPlan)
     } else {
         Ok(())

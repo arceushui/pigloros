@@ -22,6 +22,7 @@ use pos_conformance::{
     DependencyNodeV1, ExecutionProfileV1, ReplayClaimV1, TrustPolicySnapshotV1,
     UnknownEdgePolicyV1,
 };
+use pos_core::counterfactual_store::test_fixtures::SeededFactualTickV1;
 use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
     ArtifactTransitionRuleV1, CanonicalBytes, CoreError, CounterfactualBasisV1,
@@ -1223,6 +1224,9 @@ trait Backend:
     + Sized
 {
     fn open() -> TestResult<Self>;
+
+    /// Seed committed factual Ticks into the prefix of `timeline`.
+    fn seed_prefix(&mut self, timeline: TimelineId, ticks: &[SeededFactualTickV1]) -> TestResult;
 }
 
 fn open_gate() -> Arc<ErasureContainmentGateV1> {
@@ -1235,6 +1239,10 @@ impl Backend for MemoryStore {
         store.bind_erasure_gate(open_gate())?;
         Ok(store)
     }
+
+    fn seed_prefix(&mut self, timeline: TimelineId, ticks: &[SeededFactualTickV1]) -> TestResult {
+        Ok(self.seed_factual_prefix(timeline, ticks)?)
+    }
 }
 
 impl Backend for SqliteStore {
@@ -1242,6 +1250,10 @@ impl Backend for SqliteStore {
         let mut store = Self::open_in_memory()?;
         store.bind_erasure_gate(open_gate())?;
         Ok(store)
+    }
+
+    fn seed_prefix(&mut self, timeline: TimelineId, ticks: &[SeededFactualTickV1]) -> TestResult {
+        Ok(self.seed_factual_prefix(timeline, ticks)?)
     }
 }
 
@@ -1497,3 +1509,124 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
     Ok(())
 }
 both_backends!(admits_the_next_generation_from_the_recorded_graph);
+
+/// The base graph plus a committed `ExogenousFrozen` root at Tick 6 that the
+/// plan does not bind, consumed by `PARENT`.
+fn unbound_root_graph(plan: &CounterfactualPlanV1) -> TestResult<Graph> {
+    let mut nodes = base_nodes(plan)?;
+    nodes.insert(
+        1,
+        node(6, 0, "env", [0x51; 32], DependencyClassV1::ExogenousFrozen),
+    );
+    let shift = |position: usize| position + usize::from(position >= 1);
+    let mut specs: Vec<(usize, usize)> = EDGE_SPECS
+        .iter()
+        .map(|&(consumer, source)| (shift(consumer), shift(source)))
+        .collect();
+    specs.push((shift(PARENT), 1));
+    Ok(connect(nodes, &specs, &[]))
+}
+
+/// The committed Ticks of `graph`, one seeded Tick per record Tick, each
+/// owning one `seq`.
+fn prefix_ticks(graph: &Graph) -> TestResult<Vec<SeededFactualTickV1>> {
+    let mut by_tick: BTreeMap<u64, Declaration> = BTreeMap::new();
+    for node in graph
+        .nodes
+        .iter()
+        .filter(|node| node.origin == Origin::Committed)
+    {
+        by_tick
+            .entry(node.node.tick)
+            .or_default()
+            .0
+            .push(node_record(node)?);
+    }
+    for edge in graph
+        .edges
+        .iter()
+        .filter(|edge| edge.consumer.tick <= PARENT_CUT_TICK)
+    {
+        by_tick
+            .entry(edge.consumer.tick)
+            .or_default()
+            .1
+            .push(edge_record(edge)?);
+    }
+    let mut ticks = Vec::new();
+    for (index, (tick, mut declaration)) in by_tick.into_iter().enumerate() {
+        sort_declaration(&mut declaration);
+        let (nodes, edges) = declaration;
+        let seq = Seq::from_u64(u64::try_from(index)? + 1);
+        ticks.push(SeededFactualTickV1 {
+            record: TickDependencyRecordV1::try_new(
+                tick,
+                RecordedNodeOriginV1::Committed,
+                nodes,
+                edges,
+            )?,
+            first_seq: seq,
+            last_seq: seq,
+            event_nodes: Vec::new(),
+        });
+    }
+    Ok(ticks)
+}
+
+/// Serves parent-prefix reads from an adapter and Fork reads from scripted
+/// rows.
+struct PrefixOverStore<B> {
+    store: B,
+    fork: FakePort,
+}
+
+impl<B: CounterfactualDependencyReadPortV1> CounterfactualDependencyReadPortV1
+    for PrefixOverStore<B>
+{
+    fn read_dependency_nodes(
+        &self,
+        request: &DependencyPageRequestV1,
+    ) -> Result<DependencyPageV1<DependencyNodeRecordV1>, StoreError> {
+        match request.scope() {
+            DependencyReadScopeV1::ParentPrefix { .. } => self.store.read_dependency_nodes(request),
+            DependencyReadScopeV1::ForkGeneration(_) => self.fork.read_dependency_nodes(request),
+        }
+    }
+
+    fn read_dependency_edges(
+        &self,
+        request: &DependencyPageRequestV1,
+    ) -> Result<DependencyPageV1<DependencyEdgeRecordV1>, StoreError> {
+        match request.scope() {
+            DependencyReadScopeV1::ParentPrefix { .. } => self.store.read_dependency_edges(request),
+            DependencyReadScopeV1::ForkGeneration(_) => self.fork.read_dependency_edges(request),
+        }
+    }
+}
+
+fn derives_over_a_seeded_prefix_with_an_unbound_committed_root<B: Backend>() -> TestResult {
+    let plan = plan(|_| {})?;
+    let mut hand_built = unbound_root_graph(&plan)?;
+    let expected = derivation!(&mut hand_built, &plan)?;
+    let mut store = B::open()?;
+    store.create_timeline_with_meta(TimelineMeta {
+        id: root_id(),
+        ..TimelineMeta::root("factual")
+    })?;
+    store.seed_prefix(root_id(), &prefix_ticks(&hand_built)?)?;
+    let (_, fork) = split_rows(&hand_built)?;
+    let port = PrefixOverStore {
+        store,
+        fork: FakePort::recorded((Vec::new(), Vec::new()), 1, vec![(1, fork)]),
+    };
+    let mut source = RecordedFrontierSourceV1::new(port, generation(1), BOUNDS);
+    assert_eq!(derivation!(&mut source, &plan)?, expected);
+    let recorded = source.recorded_graph(&plan)?;
+    assert_eq!(recorded, hand_built.graph(&plan)?);
+    assert!(recorded
+        .nodes()
+        .iter()
+        .any(|node| node.node.artifact_digest == [0x51; 32]));
+    Ok(())
+}
+both_backends!(derives_over_a_seeded_prefix_with_an_unbound_committed_root);
