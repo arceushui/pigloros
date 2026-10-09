@@ -11,9 +11,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - ref: redmine/584-host-pass-seam
-            id: p584
-            base: redmine/583-driver-wiring
+          - ref: redmine/585-handoff
+            id: p585
+            base: redmine/584-host-pass-seam
             pkg: "-p pos-runtime -p pos-plugin-host -p pos-plugin-supervisor -p pos-plugin-publisher -p pos-crypto -p pos-plugin-release -p pos-plugin-worker"
     steps:
       - uses: actions/checkout@v4
