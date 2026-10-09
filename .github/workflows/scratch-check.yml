@@ -11,18 +11,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - ref: redmine/568-plugin-trust-registry-port
-            id: p568
-            pkg: pos-store
-            test: ""
-          - ref: redmine/569-plugin-trust-registry-sqlite
-            id: p569
-            pkg: pos-store
-            test: ""
-          - ref: redmine/573-signed-installer
-            id: p573
-            pkg: "pos-plugin-publisher"
-            test: ""
+          - ref: redmine/579-signed-release-test-world
+            id: p579
+            pkg: pos-plugin-publisher
+            test: "--all-features"
     steps:
       - uses: actions/checkout@v4
         with:
