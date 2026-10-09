@@ -435,6 +435,25 @@ fn graph_with(plan: &CounterfactualPlanV1, omitted: &[(usize, usize)]) -> TestRe
     Ok(connect(base_nodes(plan)?, &EDGE_SPECS, omitted))
 }
 
+/// The base graph without `EARLY_WORLD` and the edges that touch it.
+///
+/// `EARLY_WORLD` is a provisional endogenous node at Tick 10, before the
+/// first recomputation Tick 11: the parent prefix cannot hold it (it is
+/// after the cut) and the Fork never records a Tick 10 record, so no
+/// production flow could record it. The seeded scenarios use this graph, in
+/// which the prefix and the Fork together record every node and edge.
+fn recordable_graph(plan: &CounterfactualPlanV1) -> TestResult<Graph> {
+    let mut nodes = base_nodes(plan)?;
+    nodes.remove(EARLY_WORLD);
+    let shift = |position: usize| position - usize::from(position > EARLY_WORLD);
+    let specs: Vec<(usize, usize)> = EDGE_SPECS
+        .iter()
+        .filter(|&&(consumer, source)| consumer != EARLY_WORLD && source != EARLY_WORLD)
+        .map(|&(consumer, source)| (shift(consumer), shift(source)))
+        .collect();
+    Ok(connect(nodes, &specs, &[]))
+}
+
 /// Whether `edge` is consumed at or before the cut, so the parent prefix
 /// records it; the Fork records every other edge.
 const fn in_prefix(edge: &InputDependencyV1) -> bool {
@@ -1403,7 +1422,7 @@ fn seed<B: Backend>(store: &mut Shared<B>) -> TestResult<Seeded> {
         .collect();
     store.append(root_id(), &raw)?;
     let host = host(|_| {})?;
-    let graph = graph_with(&host.plan, &[])?;
+    let graph = recordable_graph(&host.plan)?;
     store
         .lock()
         .seed_prefix(root_id(), &prefix_ticks(&graph)?)?;
