@@ -24,6 +24,8 @@ use pos_conformance::{
     ReplayClaimV1, SuffixInvalidationReasonV1, SuffixInvalidationV1, TrustPolicySnapshotV1,
     UnknownEdgePolicyV1,
 };
+use pos_core::counterfactual_store::test_fixtures::SeededFactualTickV1;
+use pos_core::factual_dependency::BoundFactualNodeV1;
 use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
     ArtifactTransitionRuleV1, CanonicalBytes, CoreError, CounterfactualAdapterSealV1,
@@ -35,10 +37,11 @@ use pos_core::{
     DependencyEdgeRecordV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
     DependencyPageRequestV1, DependencyPageV1, DependencyReadScopeV1, EntityId,
     ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    Event, EventDraft, EventStore, ForkGenerationV1, Hash, InvalidationConflictV1, Kind,
+    Event, EventDraft, EventStore, FactualCutV1, FactualHeadV1, FactualOwnerIdV1,
+    FactualPrefixReadPortV1, ForkGenerationV1, Hash, InvalidationConflictV1, Kind,
     PipelineContractErrorV1, PipelineDraftBatchV1, RecordedDependencyClassV1, RecordedNodeOriginV1,
-    RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, SeqRange,
-    TickDependencyRecordV1, Timeline, TimelineId, MAX_DEPENDENCY_PAGE_ROWS_V1,
+    RecordedSetCountsV1, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
+    Seq, SeqRange, TickDependencyRecordV1, Timeline, TimelineId, MAX_DEPENDENCY_PAGE_ROWS_V1,
     MAX_FORK_EVENT_TYPE_BYTES_V1,
 };
 use pos_runtime::counterfactual::coordinator::{
@@ -154,16 +157,26 @@ fn draft(value: u8) -> EventDraft {
 
 trait Backend: EventStore + CounterfactualStorePortV1 + Sized {
     fn open() -> TestResult<Self>;
+
+    /// Seed committed factual Ticks into the prefix of `timeline`.
+    fn seed_prefix(&mut self, timeline: TimelineId, ticks: &[SeededFactualTickV1]) -> TestResult;
 }
 
-/// A backend that also records and reads dependency records.
+/// A backend that also records and reads dependency records and reads the
+/// recorded factual prefix.
 trait RecordingBackend:
-    Backend + CounterfactualDependencyRecordingPortV1 + CounterfactualDependencyReadPortV1
+    Backend
+    + CounterfactualDependencyRecordingPortV1
+    + CounterfactualDependencyReadPortV1
+    + FactualPrefixReadPortV1
 {
 }
 
 impl<B> RecordingBackend for B where
-    B: Backend + CounterfactualDependencyRecordingPortV1 + CounterfactualDependencyReadPortV1
+    B: Backend
+        + CounterfactualDependencyRecordingPortV1
+        + CounterfactualDependencyReadPortV1
+        + FactualPrefixReadPortV1
 {
 }
 
@@ -180,6 +193,10 @@ impl Backend for MemoryStore {
         store.bind_erasure_gate(open_gate())?;
         Ok(store)
     }
+
+    fn seed_prefix(&mut self, timeline: TimelineId, ticks: &[SeededFactualTickV1]) -> TestResult {
+        Ok(self.seed_factual_prefix(timeline, ticks)?)
+    }
 }
 
 impl Backend for SqliteStore {
@@ -187,6 +204,10 @@ impl Backend for SqliteStore {
         let mut store = Self::open_in_memory()?;
         store.bind_erasure_gate(open_gate())?;
         Ok(store)
+    }
+
+    fn seed_prefix(&mut self, timeline: TimelineId, ticks: &[SeededFactualTickV1]) -> TestResult {
+        Ok(self.seed_factual_prefix(timeline, ticks)?)
     }
 }
 
@@ -210,6 +231,8 @@ const RECOVERY_READ_FAILS: u8 = 6;
 const OTHER_RECEIPT: u8 = 7;
 /// [`Rigged`] mode: every call is delegated.
 const DELEGATES: u8 = 8;
+/// [`Rigged`] mode: the factual prefix read fails.
+const PREFIX_READ_FAILS: u8 = 9;
 
 /// A `MemoryStore` with one rigged operation, chosen by `MODE`; every other
 /// call is delegated. It records every command it is asked to commit and
@@ -388,6 +411,51 @@ impl<const MODE: u8> CounterfactualDependencyReadPortV1 for Rigged<MODE> {
     }
 }
 
+impl<const MODE: u8> FactualPrefixReadPortV1 for Rigged<MODE> {
+    fn last_committed_factual_tick(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<FactualHeadV1, CoreError> {
+        self.store.last_committed_factual_tick(timeline)
+    }
+
+    fn cut_tick_at(&self, timeline: TimelineId, seq: Seq) -> Result<FactualCutV1, CoreError> {
+        if MODE == PREFIX_READ_FAILS {
+            Err(CoreError::ArtifactUnavailable)
+        } else {
+            self.store.cut_tick_at(timeline, seq)
+        }
+    }
+
+    fn nodes_for_committed_events(
+        &self,
+        timeline: TimelineId,
+        seqs: &[Seq],
+    ) -> Result<Vec<Option<DependencyNodeRecordV1>>, CoreError> {
+        self.store.nodes_for_committed_events(timeline, seqs)
+    }
+
+    fn nodes_by_digest(
+        &self,
+        timeline: TimelineId,
+        digests: &[Hash],
+    ) -> Result<Vec<Option<BoundFactualNodeV1>>, CoreError> {
+        self.store.nodes_by_digest(timeline, digests)
+    }
+
+    fn last_step_node(
+        &self,
+        timeline: TimelineId,
+        owner: &FactualOwnerIdV1,
+    ) -> Result<Option<DependencyNodeRecordV1>, CoreError> {
+        self.store.last_step_node(timeline, owner)
+    }
+
+    fn factual_set_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
+        self.store.factual_set_counts(timeline)
+    }
+}
+
 impl<const MODE: u8> Rigged<MODE> {
     /// Record `command` and make the commit call `commit` as `MODE` rigs it.
     fn rigged_commit(
@@ -417,6 +485,10 @@ impl<const MODE: u8> Backend for Rigged<MODE> {
             commands: Vec::new(),
             recovery_reads: Cell::new(0),
         })
+    }
+
+    fn seed_prefix(&mut self, timeline: TimelineId, ticks: &[SeededFactualTickV1]) -> TestResult {
+        <MemoryStore as Backend>::seed_prefix(&mut self.store, timeline, ticks)
     }
 }
 
@@ -1052,11 +1124,47 @@ struct Setup<B> {
     fixture: Fixture,
 }
 
-/// A factual root with two Events, a Fork at `Seq` 2, and published facts.
+/// A committed factual Tick of one step node that owns `first..=last`.
+fn seeded_tick(tick: u64, first: u64, last: u64) -> TestResult<SeededFactualTickV1> {
+    let step = DependencyNodeRecordV1::try_new(
+        DependencyNodeCoordinateV1::try_new(
+            tick,
+            0,
+            "factual".to_owned(),
+            0,
+            40,
+            Hash::from_bytes([u8::try_from(tick)?; 32]),
+        )?,
+        RecordedDependencyClassV1::EndogenousRecomputed,
+        RecordedNodeOriginV1::Committed,
+        Vec::new(),
+        Hash::from_bytes(NODE_PROVENANCE),
+    )?;
+    Ok(SeededFactualTickV1 {
+        record: TickDependencyRecordV1::try_new(
+            tick,
+            RecordedNodeOriginV1::Committed,
+            vec![step],
+            Vec::new(),
+        )?,
+        first_seq: Seq::from_u64(first),
+        last_seq: Seq::from_u64(last),
+        event_nodes: Vec::new(),
+    })
+}
+
+/// A factual root with two Events whose recorded prefix ends Tick
+/// `PARENT_CUT_TICK` at the cut, a Fork at `Seq` 2, and published facts.
 fn setup<B: Backend>(spec: &Spec) -> TestResult<Setup<B>> {
+    setup_seeded(spec, &[seeded_tick(PARENT_CUT_TICK, CUT_SEQ, CUT_SEQ)?])
+}
+
+/// [`setup`] over a root whose recorded prefix is `prefix`.
+fn setup_seeded<B: Backend>(spec: &Spec, prefix: &[SeededFactualTickV1]) -> TestResult<Setup<B>> {
     let mut store = B::open()?;
     let root = store.create_timeline("factual")?.id();
     store.append(root, &[draft(1), draft(2)])?;
+    store.seed_prefix(root, prefix)?;
     let fork = store
         .fork(root, Seq::from_u64(CUT_SEQ), "counterfactual")?
         .id();
@@ -2369,6 +2477,83 @@ fn drafts_are_checked_before_the_declaration<B: RecordingBackend>() -> TestResul
     )
 }
 both_backends!(drafts_are_checked_before_the_declaration);
+
+/// The recorded prefix of a root, as the Ticks to seed.
+type PrefixCase = fn() -> TestResult<Vec<SeededFactualTickV1>>;
+
+/// Tick 9 ends before the cut and Event 2 is an unrecorded tail Event.
+fn trailing_tail_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
+    Ok(vec![seeded_tick(PARENT_CUT_TICK, 1, CUT_SEQ - 1)?])
+}
+
+/// Tick 9 owns Events 2 and 3: the cut keeps its first Event.
+fn mid_tick_at_first_seq_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
+    Ok(vec![
+        seeded_tick(PARENT_CUT_TICK - 1, 1, CUT_SEQ - 1)?,
+        seeded_tick(PARENT_CUT_TICK, CUT_SEQ, CUT_SEQ + 1)?,
+    ])
+}
+
+/// Tick 9 owns Events 1 through 3: the cut falls strictly inside it.
+fn mid_tick_inside_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
+    Ok(vec![seeded_tick(PARENT_CUT_TICK, CUT_SEQ - 1, CUT_SEQ + 1)?])
+}
+
+/// Tick 8 ends at the cut, so the plan's cut Tick 9 is not the derived one.
+fn other_cut_tick_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
+    Ok(vec![seeded_tick(PARENT_CUT_TICK - 1, 1, CUT_SEQ)?])
+}
+
+/// No Tick is recorded, so the derived cut Tick is 0.
+fn empty_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
+    Ok(Vec::new())
+}
+
+const REFUSED_PREFIXES: [PrefixCase; 4] = [
+    mid_tick_at_first_seq_prefix,
+    mid_tick_inside_prefix,
+    other_cut_tick_prefix,
+    empty_prefix,
+];
+
+fn the_parent_cut_must_be_a_recorded_tick_boundary<B: RecordingBackend>() -> TestResult {
+    for prefix in REFUSED_PREFIXES {
+        let mut setup = setup_seeded::<B>(&BASE, &prefix()?)?;
+        let mut stager =
+            DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
+        let result = admit_recording!(setup, &mut stager);
+        let outcome = (result, stager.inner);
+        assert_rejected(&setup, &outcome, &AdmissionError::ParentCutNotFound, 0)?;
+        assert_eq!(setup.source.calls, 0);
+
+        // The plain path uses a host-built graph and is unchanged.
+        assert!(admit(&mut setup).0.is_ok());
+    }
+
+    // A cut after the last recorded Tick, in the unrecorded tail, is a
+    // boundary of that Tick.
+    let mut setup = setup_seeded::<B>(&BASE, &trailing_tail_prefix()?)?;
+    let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
+    let receipt = admit_recording!(setup, &mut stager)?;
+    assert_eq!(receipt.generation().generation, 1);
+    Ok(())
+}
+both_backends!(the_parent_cut_must_be_a_recorded_tick_boundary);
+
+#[test]
+fn a_failed_prefix_read_is_a_store_failure_before_staging() -> TestResult {
+    let mut setup = setup::<Rigged<PREFIX_READ_FAILS>>(&BASE)?;
+    let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
+    let result = admit_recording!(setup, &mut stager);
+    assert_rejected(
+        &setup,
+        &(result, stager.inner),
+        &AdmissionError::Store(CounterfactualStoreErrorV1::StorageFailure),
+        0,
+    )?;
+    assert_eq!(setup.source.calls, 0);
+    Ok(())
+}
 
 #[test]
 fn recording_commit_outcomes_are_resolved_like_plain_ones() -> TestResult {

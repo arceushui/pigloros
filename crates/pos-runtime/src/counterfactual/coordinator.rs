@@ -149,6 +149,15 @@
 //!   `ParentCutNotFound`. The new generation is the prior generation plus
 //!   one; an exhausted generation wraps and is rejected by the `SIV1`
 //!   validation as `Invalidation(PriorGenerationMismatch)`.
+//! - **Recorded parent cut.** The recording path
+//!   ([`CounterfactualCoordinatorV1::admit_with_dependencies`] and
+//!   `recompute_suffix_with_dependencies`) also reads the parent's recorded
+//!   factual prefix right after the Fork check: the cut `Seq` must not fall
+//!   inside a recorded Tick, and the plan's `parent_cut_tick` must be the
+//!   highest recorded Tick that ends at or before it; otherwise the cut is
+//!   `ParentCutNotFound` before any frontier derivation or staging, and a
+//!   failed read is `Store(StorageFailure)`. The plain path uses a host-built
+//!   graph and does not read the prefix.
 //! - **Epochs.** The trust epoch is the TPS1 epoch of the plan, after the
 //!   host TPS1 snapshot is proven to be the plan's. The revocation and erasure
 //!   epochs are the host's current epochs. All three, with the plan digest,
@@ -289,11 +298,13 @@ use pos_core::{
     CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
     CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
     CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1,
-    DependencyEdgeRecordV1, DependencyNodeRecordV1, EventDraft, EventStore, ForkGenerationV1, Hash,
-    InvalidationConflictV1, PipelineContractErrorV1, PipelineDraftBatchV1,
-    RecomputationFrontierBytesV1, RecordedNodeOriginV1, ReplayClaimEvaluationV1,
-    SuffixInvalidationBytesV1, TickDependencyRecordV1, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
+    DependencyEdgeRecordV1, DependencyNodeRecordV1, EventDraft, EventStore, FactualCutV1,
+    FactualPrefixReadPortV1, ForkGenerationV1, Hash, InvalidationConflictV1,
+    PipelineContractErrorV1, PipelineDraftBatchV1, RecomputationFrontierBytesV1,
+    RecordedNodeOriginV1, ReplayClaimEvaluationV1, Seq, SuffixInvalidationBytesV1,
+    TickDependencyRecordV1, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
 };
+use ulid::Ulid;
 
 /// `SIV1` artifact class of every invalidated endogenous output.
 pub const ENDOGENOUS_ARTIFACT_CLASS_V1: &str = "EndogenousRecomputed";
@@ -705,7 +716,11 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     /// # Errors
     /// Returns the first closed safe error, as [`Self::admit`] does, and
     /// [`CounterfactualAdmissionErrorV1::DependencyDeclarationRejected`] for
-    /// a declaration the seam rejects before any store call; the store's
+    /// a declaration the seam rejects before any store call. The Fork's cut
+    /// must not be mid-Tick and `plan.parent_cut_tick` must equal the cut
+    /// Tick of the parent's recorded prefix, otherwise
+    /// [`CounterfactualAdmissionErrorV1::ParentCutNotFound`]; a failed
+    /// prefix read is [`CounterfactualAdmissionErrorV1::Store`]. The store's
     /// `BindingMismatch` for a record it rejects is
     /// [`CounterfactualAdmissionErrorV1::Store`]. Every error except
     /// [`CounterfactualAdmissionErrorV1::CommitOutcomeUnknown`] commits
@@ -718,7 +733,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         stager: &mut impl CounterfactualDeclaringTickStagerV1,
     ) -> Result<CounterfactualGenerationReceiptV1, CounterfactualAdmissionErrorV1>
     where
-        S: CounterfactualDependencyRecordingPortV1,
+        S: CounterfactualDependencyRecordingPortV1 + FactualPrefixReadPortV1,
     {
         self.admit_through(
             request,
@@ -746,7 +761,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         }
         authorize(plan, authority)?;
         check_host_state(request)?;
-        let basis = fork_basis(&self.store, request)?;
+        let basis = self.checked_basis::<M>(request)?;
         check_persisted_facts(request, &basis)?;
         let derivation = frontier_source.derive_frontier(
             plan,
@@ -788,6 +803,17 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             })
             .map_err(CounterfactualAdmissionErrorV1::Store)?;
         self.commit::<M>(&command, &record)
+    }
+
+    /// Read the Fork's persisted basis and check its recorded parent cut,
+    /// then check the cut through `M`; nothing is derived or staged first.
+    fn checked_basis<M: TickSeamV1<S>>(
+        &self,
+        request: &CounterfactualAdmissionRequestV1<'_>,
+    ) -> Result<CounterfactualBasisV1, CounterfactualAdmissionErrorV1> {
+        let basis = fork_basis(&self.store, request)?;
+        M::check_parent_cut(&self.store, request.plan)?;
+        Ok(basis)
     }
 
     /// Resolve an admission whose commit outcome was unknown by reading the
@@ -1320,6 +1346,13 @@ pub(crate) trait TickSeamV1<S> {
         after_tick: u64,
     ) -> Result<(PipelineDraftBatchV1, Self::Record), CounterfactualAdmissionErrorV1>;
 
+    /// Check that the Fork's cut is a counterfactual parent cut of `plan`
+    /// before any frontier derivation or staging.
+    fn check_parent_cut(
+        store: &S,
+        plan: &CounterfactualPlanV1,
+    ) -> Result<(), CounterfactualAdmissionErrorV1>;
+
     /// Make the one invalidation commit call.
     fn commit_invalidation(
         store: &mut S,
@@ -1355,6 +1388,13 @@ impl<S: CounterfactualStorePortV1, T: CounterfactualTickStagerV1> TickSeamV1<S>
         stage_tick(self.0, plan, generation, tick).map(|batch| (batch, ()))
     }
 
+    fn check_parent_cut(
+        _store: &S,
+        _plan: &CounterfactualPlanV1,
+    ) -> Result<(), CounterfactualAdmissionErrorV1> {
+        Ok(())
+    }
+
     fn commit_invalidation(
         store: &mut S,
         command: &CounterfactualInvalidationCommandV1,
@@ -1378,8 +1418,10 @@ impl<S: CounterfactualStorePortV1, T: CounterfactualTickStagerV1> TickSeamV1<S>
 /// through the recording port.
 pub(crate) struct RecordingSeamV1<'a, T>(pub(crate) &'a mut T);
 
-impl<S: CounterfactualDependencyRecordingPortV1, T: CounterfactualDeclaringTickStagerV1>
-    TickSeamV1<S> for RecordingSeamV1<'_, T>
+impl<S, T> TickSeamV1<S> for RecordingSeamV1<'_, T>
+where
+    S: CounterfactualDependencyRecordingPortV1 + FactualPrefixReadPortV1,
+    T: CounterfactualDeclaringTickStagerV1,
 {
     type Record = TickDependencyRecordV1;
 
@@ -1392,6 +1434,23 @@ impl<S: CounterfactualDependencyRecordingPortV1, T: CounterfactualDeclaringTickS
     ) -> Result<(PipelineDraftBatchV1, TickDependencyRecordV1), CounterfactualAdmissionErrorV1>
     {
         stage_declared_tick(self.0, plan, generation, tick, after_tick)
+    }
+
+    fn check_parent_cut(
+        store: &S,
+        plan: &CounterfactualPlanV1,
+    ) -> Result<(), CounterfactualAdmissionErrorV1> {
+        let parent = Ulid::from(u128::from_be_bytes(plan.parent_timeline_id));
+        let cut = store
+            .cut_tick_at(
+                TimelineId::from_ulid(parent),
+                Seq::from_u64(plan.parent_cut_seq),
+            )
+            .or(Err(STORAGE_FAILURE))?;
+        match cut {
+            FactualCutV1::Boundary { cut_tick } if cut_tick == plan.parent_cut_tick => Ok(()),
+            _ => Err(CounterfactualAdmissionErrorV1::ParentCutNotFound),
+        }
     }
 
     fn commit_invalidation(
