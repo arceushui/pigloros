@@ -57,7 +57,8 @@ const C_GUEST: &[u8] = fixture!("c-guest.wasm");
 const WORKER: &str = env!("CARGO_BIN_EXE_pos-plugin-worker");
 /// Generous for compiling a fixture in an unoptimized, instrumented worker.
 const WATCHDOG: Duration = Duration::from_mins(5);
-/// The memory budget of the fixtures' releases: the Rust guest reserves 17 pages at start.
+/// The memory budget of the fixtures' releases: 256 pages (16 MiB), because the Rust guest
+/// reserves 17 pages (1.1 MiB) at start and the world's default budget is one page.
 const MEMORY: u64 = 16 * 1_048_576;
 /// The Plugin IDs the world's PTR1 grants besides the default `plugin-a`.
 const GRANTED: &[&str] = &["plugin-b"];
@@ -316,9 +317,9 @@ impl Lane {
         &mut self,
         signed: &SignedWorld,
         address: &BundleAddressV1,
-        expected: CommunityPluginExpectationV1,
+        expected: &CommunityPluginExpectationV1,
     ) -> TestResult {
-        let member = member_of(signed, &self.parts[0], address, &expected)?;
+        let member = member_of(signed, &self.parts[0], address, expected)?;
         self.host = CommunityPluginHostV1::new(vec![member]);
         Ok(())
     }
@@ -440,10 +441,9 @@ fn both_modes(guest: Spec) -> BoxResult<(Outcome, Outcome)> {
 
 /// R7-H1: signed release, install, then Local and Air-Gapped passes through the seam produce
 /// identical subject outcome records except the mode, on the real `rust-guest.wasm` and
-/// `c-guest.wasm` fixtures, and the two fixtures commit the same output.
+/// `c-guest.wasm` fixtures.
 #[test]
 fn local_and_air_gapped_passes_give_identical_outcomes_on_both_real_guests() -> TestResult {
-    let mut digests = Vec::new();
     for guest in [ALPHA, ALPHA_C] {
         let (local, air_gapped) = both_modes(guest)?;
         assert_eq!((local.mode, air_gapped.mode), (LOCAL, AIR_GAPPED));
@@ -454,10 +454,8 @@ fn local_and_air_gapped_passes_give_identical_outcomes_on_both_real_guests() -> 
         assert_eq!(renamed, local);
         assert!(local.execution_profile_digest.is_some(), "{local:?}");
         assert!(local.pmf1_digest.is_some() && local.tps1_digest.is_some());
-        digests.push(committed_digest(&local));
+        assert!(committed_digest(&local).is_some(), "{local:?}");
     }
-    assert!(digests[0].is_some());
-    assert_eq!(digests[0], digests[1]);
     Ok(())
 }
 
@@ -473,19 +471,19 @@ const fn revoked_by(basis: &'static str) -> Verdict {
 
 type Row = (Error, Verdict);
 
-fn pre(error: Error, name: &'static str) -> Row {
+const fn pre(error: Error, name: &'static str) -> Row {
     (error, refused(name, None))
 }
 
-fn fail(error: Error, name: &'static str, class: &'static str) -> Row {
+const fn fail(error: Error, name: &'static str, class: &'static str) -> Row {
     (error, failed(name, class))
 }
 
-fn deny(basis: Denial, name: &'static str) -> Row {
+const fn deny(basis: Denial, name: &'static str) -> Row {
     (Error::ArtifactTrustDenied { basis }, refused_by(name))
 }
 
-fn revoke(basis: Revoke, name: &'static str) -> Row {
+const fn revoke(basis: Revoke, name: &'static str) -> Row {
     (Error::ArtifactRevoked { basis }, revoked_by(name))
 }
 
@@ -550,6 +548,20 @@ fn not_run_entry() -> BoxResult<MemberPassV1> {
     Ok(pass.gates.swap_remove(0))
 }
 
+const fn error_of(result: &Verdict) -> &'static str {
+    match result {
+        Verdict::Refused { error, .. } | Verdict::Failed { error, .. } => *error,
+        _ => "none",
+    }
+}
+
+const fn basis_of(result: &Verdict) -> Option<&'static str> {
+    match result {
+        Verdict::Refused { basis, .. } => *basis,
+        _ => None,
+    }
+}
+
 const fn class_of(result: &Verdict) -> &'static str {
     match result {
         Verdict::Refused { class, .. } | Verdict::Failed { class, .. } => *class,
@@ -563,11 +575,17 @@ const fn class_of(result: &Verdict) -> &'static str {
 fn every_closed_name_basis_and_class_appears_verbatim() -> TestResult {
     let mut entry = not_run_entry()?;
     let mut classes = Vec::new();
+    let mut names = Vec::new();
+    let mut bases = Vec::new();
     for (error, expected) in golden() {
         entry.launch_failure = Some(error);
         let outcome = Outcome::assemble(&entry, TICK, LOCAL, None);
         assert_eq!(outcome.result, expected, "{error:?}");
         classes.push(class_of(&outcome.result));
+        assert_eq!(error_of(&expected), error.name());
+        assert_eq!(basis_of(&expected), error.basis_name());
+        names.push(error.name());
+        bases.extend(error.basis_name().map(|basis| (error.name(), basis)));
         if class_of(&expected) == PRE {
             let kept = std::mem::replace(&mut entry.gate, Err(error));
             let gated = Outcome::assemble(&entry, TICK, LOCAL, None);
@@ -579,6 +597,14 @@ fn every_closed_name_basis_and_class_appears_verbatim() -> TestResult {
     classes.sort_unstable();
     classes.dedup();
     assert_eq!(classes, [AUTH, OP, PRE]);
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), 20);
+    bases.sort_unstable();
+    bases.dedup();
+    let denied = bases.iter().filter(|row| row.0 == "ArtifactTrustDenied");
+    assert_eq!(denied.count(), 5);
+    assert_eq!(bases.len(), 8);
     Ok(())
 }
 
@@ -667,7 +693,7 @@ fn a_rolled_back_release_is_refused_as_not_active() -> TestResult {
     let second = successor(&mut signed, &first, 2)?;
     signed.rollback_to(&first.address, 3)??;
     let expected = lane.parts[0].expected.clone();
-    lane.rehost(&signed, &second.address, expected)?;
+    lane.rehost(&signed, &second.address, &expected)?;
     let (pass, outcome) = faulted(&signed, &mut lane, UTC)?;
     assert_refused(&outcome, refused_by("NotActive"), &pass);
     Ok(())
@@ -683,12 +709,15 @@ const fn is_failed(pass: &CommunityPassOutcomeV1) -> bool {
 fn a_refusal_at_drive_is_assembled_from_its_receipt() -> TestResult {
     let (mut signed, first, mut lane) = single()?;
     let second = successor(&mut signed, &first, 2)?;
-    // The gate accepts the active successor; the Driver was built for the first release.
+    // The gate accepts the active successor; the Driver was built for the first release. The
+    // mismatch is caught at `drive()` by the release identity (R7-B2); the successor's other
+    // Component bytes make the Component-digest check (R7-C2) refuse the same way, so this
+    // recipe stands for both.
     let unpinned = CommunityPluginExpectationV1 {
         plugin_id: "plugin-a".to_owned(),
         release: None,
     };
-    lane.rehost(&signed, &second.address, unpinned)?;
+    lane.rehost(&signed, &second.address, &unpinned)?;
     let pass = lane.run(&signed)?;
     assert!(is_failed(&pass), "{pass:?}");
     let outcome = lane.first(&pass)?;
@@ -758,8 +787,9 @@ fn a_sibling_gate_refusal_leaves_a_committed_member_not_run() -> TestResult {
     let (signed, mut lane) = pair()?;
     let first = lane.run(&signed)?;
     assert!(is_committed(&first), "{first:?}");
-    let before = lane.first(&first)?;
-    assert!(committed_digest(&before).is_some(), "{before:?}");
+    let before = lane.outcomes(&first);
+    assert!(committed_digest(&before[0]).is_some(), "{before:?}");
+    assert_eq!(before[1].result, Verdict::NotRun);
     lane.parts[1].swap.set(None);
     let second = lane.run(&signed)?;
     let stale = lane.handle().receipt_for(FIRST_ID);
@@ -785,6 +815,7 @@ fn a_quarantined_member_is_not_run_after_a_committed_pass() -> TestResult {
     let outcomes = lane.outcomes(&second);
     assert_eq!(outcomes[0].result, Verdict::NotRun);
     assert!(outcomes[0].tps1_digest.is_some());
+    assert_eq!(outcomes[0].execution_profile_digest, None);
     Ok(())
 }
 

@@ -6,15 +6,19 @@ The community Plugin worker supervisor and the host pass member (ADR-061 revisio
 ## Handoff to #194
 
 `CommunityPluginSubjectOutcomeV1` is the stable outcome record of one Plugin in one host pass.
-`CommunityPluginSubjectOutcomeV1::assemble(entry, tick, mode, receipt)` builds it, and is total,
-from a `MemberPassV1` of `CommunityPassOutcomeV1::gates` and the invocation receipt found with
-`CommunityPluginHandleV1::receipt_for()` for the entry's `invocation_id`.
-
-The EAI1/EAO1 subject adapter binary is owned by #194. Results are Local-relaxation engineering evidence, not hosted conformance.
+`CommunityPluginSubjectOutcomeV1::assemble(entry, tick, mode, receipt)` builds it, and is
+total, from a `MemberPassV1` of `CommunityPassOutcomeV1::gates` and the invocation receipt
+found with `CommunityPluginHandleV1::receipt_for()` for the entry's `invocation_id`. The
+caller passes no receipt when the entry has no `invocation_id`: `assemble` compares no IDs.
 
 The record carries the exact closed strings of ADR-061 revision 7 decisions 3 and 5 (error,
 basis and class names), the content-validation fact (`NotPerformed` until #574) and the
 execution profile digest. It carries no claim of signature validity: a release that fails the
 gate is `Refused`, and nothing else says it was verified.
 
-`scripts/check_handoff_readme.py` checks the two sentences above on every CI run.
+The EAI1/EAO1 subject adapter binary is owned by #194.
+
+Results are Local-relaxation engineering evidence, not hosted conformance.
+
+`scripts/check_handoff_readme.py` checks the ownership sentence and the evidence sentence
+above on every CI run.

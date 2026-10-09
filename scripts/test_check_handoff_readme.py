@@ -15,18 +15,22 @@ README = "crates/pos-plugin-supervisor/README.md"
 OWNER = "The EAI1/EAO1 subject adapter binary is owned by #194."
 EVIDENCE = "Results are Local-relaxation engineering evidence, not hosted conformance."
 
+WRAPPED_OWNER = OWNER.replace(" is ", "\nis ")
+WRAPPED_EVIDENCE = EVIDENCE.replace(" not ", "\n  not ")
+REWORDED_OWNER = OWNER.replace("owned by", "owned by the team of")
+
 ACCEPTED = {
     "both sentences": f"# Title\n\n{OWNER} {EVIDENCE}\n",
     "other text around them": f"intro\n\n{OWNER}\n\nmiddle\n\n{EVIDENCE}\n\noutro\n",
-    "line-wrapped sentences": OWNER.replace(" is ", "\nis ") + "\n" + EVIDENCE.replace(" not ", "\n  not ") + "\n",
+    "line-wrapped sentences": f"{WRAPPED_OWNER}\n{WRAPPED_EVIDENCE}\n",
 }
 REJECTED = {
     "empty file": "",
     "ownership only": OWNER + "\n",
     "evidence only": EVIDENCE + "\n",
-    "ownership reworded": OWNER.replace("owned by", "owned by the team of") + "\n" + EVIDENCE + "\n",
-    "evidence reworded": OWNER + "\n" + EVIDENCE.replace("not hosted", "hosted") + "\n",
-    "evidence cased": OWNER + "\n" + EVIDENCE.lower() + "\n",
+    "ownership reworded": f"{REWORDED_OWNER}\n{EVIDENCE}\n",
+    "evidence reworded": f"{OWNER}\n{EVIDENCE.replace('not hosted', 'hosted')}\n",
+    "evidence cased": f"{OWNER}\n{EVIDENCE.lower()}\n",
 }
 
 
@@ -57,7 +61,12 @@ def main() -> None:
     result = run(None)
     if result.returncode == 0 or "does not exist" not in result.stderr:
         raise SystemExit("a missing README was not rejected")
-    real = subprocess.run([sys.executable, str(CHECKER)], capture_output=True, text=True, check=False)
+    real = subprocess.run(
+        [sys.executable, str(CHECKER)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     if real.returncode != 0:
         raise SystemExit(f"the repository README was rejected:\n{real.stderr}")
     print("the handoff README checker rejects every missing sentence")
