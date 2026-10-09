@@ -1416,12 +1416,13 @@ const DIGEST_NODES_SQL: &str = "SELECT n.tick, n.scheduler_position, n.owner_id,
      LEFT JOIN counterfactual_dependency_event_nodes AS b
        ON b.timeline_id = n.timeline_id AND b.artifact_digest = n.artifact_digest";
 
-// `ORDER BY tick DESC, scheduler_position DESC` equals the in-memory adapter's
-// last write wins over the canonical node order. If slice 8 adds a
-// `scheduler_position >= 1` filter to the step lookup, it must be applied to
-// both adapters.
 /// The latest step node (output ordinal zero) of an owner (`?3`) in the prefix
 /// set (`?2`) at or below the bound (`?4`).
+///
+/// `ORDER BY tick DESC, scheduler_position DESC` equals the in-memory
+/// adapter's last write wins over the canonical node order. If slice 8 adds a
+/// `scheduler_position >= 1` filter to the step lookup, it must be applied to
+/// both adapters.
 const STEP_NODE_SQL: &str = "SELECT tick, scheduler_position, owner_id, output_ordinal,
             schema_id, artifact_digest, class, origin, input_digests, provenance_digest
      FROM counterfactual_dependency_nodes
@@ -1723,7 +1724,9 @@ fn stored_seq(value: i64) -> Result<Seq, CoreError> {
 /// A node row with its request index (the column after the node columns).
 fn indexed_node_row(row: &Row<'_>) -> rusqlite::Result<(usize, NodeRowV1)> {
     // `usize` is not `FromSql`; the index is a position in a request, far
-    // below `u32::MAX`, and `u32` widens to `usize` on every supported target.
+    // below `u32::MAX`. `u32` widens to `usize` on every supported target
+    // (all have at least 32-bit pointers), so the cast never truncates and
+    // no truncation lint applies.
     row.get::<_, u32>(10)
         .and_then(|slot| node_row(row).map(|node| (slot as usize, node)))
 }
