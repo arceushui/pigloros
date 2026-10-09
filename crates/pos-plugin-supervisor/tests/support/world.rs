@@ -246,7 +246,7 @@ impl World {
             program: program.into(),
             members_added: Vec::new(),
             store,
-            registry: PluginRegistry::new().with_erasure_gate(Arc::clone(&gate)),
+            registry: PluginRegistry::new().with_erasure_gate(gate.clone()),
             gate,
             timeline,
             members: 0,

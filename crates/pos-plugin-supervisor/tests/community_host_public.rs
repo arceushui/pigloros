@@ -792,7 +792,13 @@ fn a_pass_closes_the_authorizations_it_issued() -> TestResult {
     let (mut host, stash) = rig.probes(&[Mode::Stash, Mode::Stash])?;
     let outcome = rig.run_probes(&mut host)?;
     // The slots stayed empty, so the Drivers could not launch.
-    let failed = matches!(outcome.result, PassResultV1::Failed { host: Some(TSU), .. });
+    let failed = matches!(
+        outcome.result,
+        PassResultV1::Failed {
+            host: Some(TSU),
+            ..
+        }
+    );
     assert!(failed, "{outcome:?}");
     assert_eq!(stash.borrow().len(), 2);
     assert!(stash_is_closed(&stash));
@@ -867,7 +873,13 @@ fn a_failed_admission_discards_the_pass_and_empties_every_slot() -> TestResult {
     let registry = &rig.signed.registry;
     let host = &mut rig.host;
     let outcome = host.run_pass(&mut rig.pass.registry, registry, &mut clock, request);
-    let failed = matches!(outcome.result, PassResultV1::Failed { host: Some(COMMIT_FAILED), .. });
+    let failed = matches!(
+        outcome.result,
+        PassResultV1::Failed {
+            host: Some(COMMIT_FAILED),
+            ..
+        }
+    );
     assert!(failed, "{outcome:?}");
     for handle in [rig.handle(0), rig.handle(1)] {
         assert_eq!(handle.committed_state(), initial());
@@ -986,7 +998,13 @@ fn a_failing_context_source_leaves_no_invocation_id() -> TestResult {
     let second = rig.run()?;
     assert_eq!(invocation_ids(&second), [None, None]);
     assert_eq!(launch_failures(&second), [Some(INVALID), None]);
-    let failed = matches!(second.result, PassResultV1::Failed { host: Some(INVALID), .. });
+    let failed = matches!(
+        second.result,
+        PassResultV1::Failed {
+            host: Some(INVALID),
+            ..
+        }
+    );
     assert!(failed, "{second:?}");
     Ok(())
 }

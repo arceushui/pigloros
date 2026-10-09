@@ -304,9 +304,7 @@ fn gate_member<M: CommunityPluginMemberV1>(
         member.trust_material(),
         pass,
     );
-    attempt.map(|(gated, authorization)| {
-        (GateSummaryV1::of(&gated), authorization)
-    })
+    attempt.map(|(gated, authorization)| (GateSummaryV1::of(&gated), authorization))
 }
 
 /// The verdict of a gated member, recording the refusal of one that was refused. An
