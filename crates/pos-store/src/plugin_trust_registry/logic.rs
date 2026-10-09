@@ -10,10 +10,10 @@
 //! every record layout; they differ only in how they read, lock, and persist.
 
 use pos_conformance::{
-    authenticate_plugin_tps1_v1, check_plugin_tps1_artifact_denial_v1, check_plugin_tps1_genesis_v1,
-    check_plugin_tps1_successor_v1, plan_plugin_floor_transition_v1, verify_plugin_tps1_policy_v1,
-    AuthenticatedPluginTps1V1, PluginFloorPlanV1, PluginFloorStateV1, PluginFloorTransitionV1,
-    PluginTrustPolicyAnchorV1,
+    authenticate_plugin_tps1_v1, check_plugin_tps1_artifact_denial_v1,
+    check_plugin_tps1_genesis_v1, check_plugin_tps1_successor_v1, plan_plugin_floor_transition_v1,
+    verify_plugin_tps1_policy_v1, AuthenticatedPluginTps1V1, PluginFloorPlanV1, PluginFloorStateV1,
+    PluginFloorTransitionV1, PluginTrustPolicyAnchorV1,
 };
 use pos_crypto::plugin_trust::{
     ResolvedPluginTrustAuthorizationV1, ValidatedPluginManifestProjectionV1,
@@ -29,6 +29,9 @@ use super::types::{
 use super::utc::TrustedUtcSecondV1;
 
 type RegistryResult<T> = Result<T, PluginTrustPolicyRegistryErrorV1>;
+
+/// A retained `(version or epoch, complete-record digest)` floor pair.
+type FloorPair = (u64, [u8; 32]);
 
 /// The retained anchor and policy state of one scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -342,8 +345,8 @@ fn check_release(
 /// the registry has not adopted.
 const fn unchanged_floors(
     floors: &PluginFloorStateV1,
-    plan: &PluginFloorPlanV1,
-) -> Option<((u64, [u8; 32]), (u64, [u8; 32]))> {
+    plan: PluginFloorPlanV1,
+) -> Option<(FloorPair, FloorPair)> {
     match (floors, plan.root, plan.revocation) {
         (
             PluginFloorStateV1::Present { root, revocation },
@@ -383,7 +386,7 @@ pub(crate) fn plan_evaluate(
     }
     check_bridge(&checked, input)?;
     let (authorization, plan) = check_release_tail(&checked, input, projection)?;
-    let (root, revocation) = unchanged_floors(&checked.floors, &plan)
+    let (root, revocation) = unchanged_floors(&checked.floors, plan)
         .ok_or(PluginTrustPolicyRegistryErrorV1::PolicyNotAdvanced)?;
     let scope = input.anchor.scope();
     let active = tx
@@ -948,7 +951,7 @@ mod tests {
         let present = PluginFloorStateV1::Present { root, revocation };
         let plan = |root, revocation| PluginFloorPlanV1 { root, revocation };
         assert_eq!(
-            unchanged_floors(&present, &plan(Unchanged, Unchanged)),
+            unchanged_floors(&present, plan(Unchanged, Unchanged)),
             Some((root, revocation))
         );
         for (root_plan, revocation_plan) in [
@@ -958,14 +961,11 @@ mod tests {
             (Unchanged, Initialize),
         ] {
             let moved = plan(root_plan, revocation_plan);
-            assert_eq!(unchanged_floors(&present, &moved), None);
+            assert_eq!(unchanged_floors(&present, moved), None);
         }
         let absent = PluginFloorStateV1::Absent;
-        assert_eq!(
-            unchanged_floors(&absent, &plan(Initialize, Initialize)),
-            None
-        );
-        assert_eq!(unchanged_floors(&absent, &plan(Unchanged, Unchanged)), None);
+        assert_eq!(unchanged_floors(&absent, plan(Initialize, Initialize)), None);
+        assert_eq!(unchanged_floors(&absent, plan(Unchanged, Unchanged)), None);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Crate-internal vectors of the `SQLite` Plugin trust policy registry (slice #569): T1-T4, E5,
 //! F3, the `SQLite` clauses of E2, and the partial-floor vector of H1; and the in-crate vectors of
 //! the read-only current-release evaluation (ADR-103 revision 5, slice #580): the `SQLite` rows of
-//! EV2 and EV5, EV9, EV9b, and EV10 to EV14. They write raw SQL against the adapter's tables and
+//! EV2 and EV5, EV9, `EV9b`, and EV10 to EV14. They write raw SQL against the adapter's tables and
 //! drive the durability fault hooks of the parent module.
 // The gate below is also what `scripts/check_plugin_trust_registry_impls.py` reads to treat this
 // file as test code, so it is not redundant.
@@ -1356,8 +1356,10 @@ fn an_evaluation_reads_one_snapshot_while_a_second_handle_commits() -> TestResul
     assert!(committed.load(Ordering::SeqCst));
     assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest());
     // The commit is visible to the next call, which finds the predecessor no longer active.
+    // Only registry calls follow: the first handle's Event reads would refuse after another
+    // handle wrote (the erasure inventory version moved).
     assert_eq!(h.active("plugin-a")?.pmf1_digest(), two.pmf1_digest());
-    h.assert_evaluate_denied(&genesis, &one, Error::ReleaseNotActive)?;
+    assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::ReleaseNotActive));
     assert!(h.evaluate(&genesis, &two)?.is_ok());
     Ok(())
 }
