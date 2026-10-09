@@ -1,0 +1,14 @@
+diff --git a/crates/pos-runtime/tests/community_install_public.rs b/crates/pos-runtime/tests/community_install_public.rs
+index f0f2f148..f7d3fb58 100644
+--- a/crates/pos-runtime/tests/community_install_public.rs
++++ b/crates/pos-runtime/tests/community_install_public.rs
+@@ -8,8 +8,8 @@
+ use std::cell::Cell;
+ 
+ use ciborium::Value;
+-use pos_core::event::{Event, SchemaVersion};
+ use pos_conformance::PluginTrustPolicyAnchorV1;
++use pos_core::event::{Event, SchemaVersion};
+ use pos_core::ids::{EntityId, TimelineId};
+ use pos_core::store::{EventStore, SeqRange};
+ use pos_plugin_publisher::test_support::{
