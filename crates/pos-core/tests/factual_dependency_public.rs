@@ -514,6 +514,10 @@ fn the_preflight_reserves_one_worst_case_record() {
 #[test]
 fn the_error_names_render_a_safe_code() {
     assert_eq!(
+        FactualError::UndeclarableInput.to_string(),
+        "a declared dependency input is not one the Driver could have read"
+    );
+    assert_eq!(
         FactualError::UnresolvedInput.to_string(),
         "a declared dependency input resolves to no recorded node"
     );

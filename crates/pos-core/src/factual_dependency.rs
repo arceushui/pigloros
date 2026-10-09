@@ -11,6 +11,11 @@
 //! It names no backend type, reads no store, and changes no store behaviour: the
 //! registry builder and the adapters that consume it land in later slices.
 //!
+//! The two `PipelineOutcomeV1` outcomes `InvalidDependencyDeclaration` and
+//! `DependencySetExhausted` are produced by the store in a later slice (Redmine
+//! #603 and the slices 7b, 8, and 9 tickets #604 and #605). Here they are
+//! covered by direct tests of the outcome mappers.
+//!
 //! # Derivations
 //!
 //! Every domain-tagged preimage is a domain tag, a zero byte, and fixed-width
@@ -92,6 +97,12 @@ const EDGE_MAGIC: &[u8] = b"IDP1";
 /// safe code, never a payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum FactualDependencyErrorV1 {
+    /// A declared input names something the Driver could not have read.
+    ///
+    /// The registry builder of a later slice (Redmine #603, slice 7b)
+    /// produces it; this slice only defines the closed name.
+    #[error("a declared dependency input is not one the Driver could have read")]
+    UndeclarableInput,
     /// A declared input resolves to no recorded node.
     #[error("a declared dependency input resolves to no recorded node")]
     UnresolvedInput,
@@ -320,6 +331,9 @@ pub fn factual_classification_bundle_digest() -> Hash {
 ///
 /// # Errors
 /// Returns [`FactualDependencyErrorV1::SetExhausted`] at the threshold.
+///
+/// The bound is shared with `TickDependencyRecordV1::ensure_set_capacity`: a
+/// change to the set bounds or their arithmetic must touch both functions.
 pub const fn ensure_factual_set_headroom(
     counts: RecordedSetCountsV1,
 ) -> Result<(), FactualDependencyErrorV1> {

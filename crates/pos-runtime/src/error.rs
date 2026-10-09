@@ -231,7 +231,10 @@ const fn outcome_discriminant(outcome: &pos_core::PipelineOutcomeV1) -> &'static
         Outcome::InvalidProviderResult => "InvalidProviderResult",
         Outcome::Committed(_) => "Committed",
         Outcome::RecoveredDuplicate(_) => "RecoveredDuplicate",
-        _ => conflict_outcome_discriminant(outcome),
+        Outcome::DomainConflict
+        | Outcome::AdmissionConflict
+        | Outcome::InvalidDependencyDeclaration
+        | Outcome::DependencySetExhausted => conflict_outcome_discriminant(outcome),
     }
 }
 
@@ -242,6 +245,7 @@ const fn conflict_outcome_discriminant(outcome: &pos_core::PipelineOutcomeV1) ->
         Outcome::DomainConflict => "DomainConflict",
         Outcome::AdmissionConflict => "AdmissionConflict",
         Outcome::InvalidDependencyDeclaration => "InvalidDependencyDeclaration",
+        // Reached only by `DependencySetExhausted`, the last routed variant.
         _ => "DependencySetExhausted",
     }
 }

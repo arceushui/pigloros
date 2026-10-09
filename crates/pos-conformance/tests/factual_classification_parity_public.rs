@@ -62,8 +62,9 @@ fn every_factual_rule_is_a_valid_idp1_rule_with_the_core_class_code() -> TestRes
 
 #[test]
 fn the_class_codes_are_the_conformance_wire_codes() -> TestResult {
-    for class in RecordedDependencyClassV1::ALL {
-        assert_eq!(class_of(class.code())?.wire_code(), class.code());
+    for (class, wire) in RecordedDependencyClassV1::ALL.into_iter().zip(0_u8..) {
+        assert_eq!(class.code(), wire);
+        assert_eq!(class_of(wire)?.wire_code(), wire);
     }
     Ok(())
 }

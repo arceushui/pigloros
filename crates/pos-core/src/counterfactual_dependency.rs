@@ -910,6 +910,9 @@ impl TickDependencyRecordV1 {
     /// [`MAX_RECORDED_DEPENDENCY_NODES_V1`] nodes,
     /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] edges, or
     /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] declared inputs.
+    ///
+    /// The bound is shared with the factual preflight
+    /// `ensure_factual_set_headroom`: a change must touch both functions.
     pub fn ensure_set_capacity(&self, recorded: RecordedSetCountsV1) -> DependencyResult<()> {
         if recorded.nodes.saturating_add(self.nodes.len()) > MAX_RECORDED_DEPENDENCY_NODES_V1
             || recorded.edges.saturating_add(self.edges.len()) > MAX_RECORDED_DEPENDENCY_EDGES_V1

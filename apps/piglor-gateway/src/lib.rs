@@ -1797,7 +1797,11 @@ fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> Gatew
         | PipelineOutcomeV1::RecoveredDuplicate(_) => GatewayError::ActionRejected(
             ActionRejected::DomainValidationFailed("action was not admitted".to_owned()),
         ),
-        _ => authority_or_dependency_error(outcome),
+        PipelineOutcomeV1::AuthorityRevoked
+        | PipelineOutcomeV1::AuthorityExpired
+        | PipelineOutcomeV1::PolicyIndeterminate
+        | PipelineOutcomeV1::InvalidDependencyDeclaration
+        | PipelineOutcomeV1::DependencySetExhausted => authority_or_dependency_error(outcome),
     }
 }
 
@@ -1810,6 +1814,7 @@ const fn authority_or_dependency_error(outcome: &PipelineOutcomeV1) -> GatewayEr
         }
         PipelineOutcomeV1::PolicyIndeterminate => GatewayError::AuthorizationUnavailable,
         PipelineOutcomeV1::InvalidDependencyDeclaration => GatewayError::ActionAdmissionUnavailable,
+        // Reached only by `DependencySetExhausted`, the last routed variant.
         _ => GatewayError::DependencySetExhausted,
     }
 }

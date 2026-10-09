@@ -600,6 +600,7 @@ impl GatewayError {
     }
 }
 
+/// Extracted from `status_code` to keep its complexity from regressing.
 const fn action_rejected_status(rejected: &ActionRejected) -> StatusCode {
     match rejected {
         ActionRejected::UnknownEventType => StatusCode::BAD_REQUEST,
@@ -611,6 +612,7 @@ const fn action_rejected_status(rejected: &ActionRejected) -> StatusCode {
     }
 }
 
+/// Extracted from `status_code` to keep its complexity from regressing.
 const fn ledger_status(error: &pos_plugin_ledger::LedgerError) -> StatusCode {
     match error {
         pos_plugin_ledger::LedgerError::InvalidPrediction(_) => StatusCode::UNPROCESSABLE_ENTITY,
