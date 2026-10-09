@@ -2232,31 +2232,31 @@ fn c14_a_pre_schema_file_reads_dependencies_as_not_found() {
 const OWNER_A: &str = "plugin:a";
 const OWNER_B: &str = "plugin:b";
 const OWNER_C: &str = "plugin:c";
-/// Digest salt of the root Timeline's nodes, and of the Fork's.
-const ROOT_SALT: u8 = 0;
-const FORK_SALT: u8 = 100;
+/// Digest lane of the root Timeline's nodes, and of the Fork's.
+const ROOT_LANE: u8 = 0;
+const FORK_LANE: u8 = 100;
 
-/// The artifact digest of a seeded node, apart per Timeline by `salt`.
-const fn seeded_digest(salt: u8, tick: u8, ordinal: u8) -> Hash {
-    hash(salt + tick * 16 + ordinal)
+/// The artifact digest of a seeded node, apart per Timeline by `lane`.
+const fn seeded_digest(lane: u8, tick: u8, ordinal: u8) -> Hash {
+    hash(lane + tick * 16 + ordinal)
 }
 
 /// A committed node of `owner` at `tick`: the step node at ordinal zero, then
 /// the Event-backed nodes.
-fn seeded_node(salt: u8, tick: u8, owner: &str, ordinal: u8) -> NodeRow {
-    let digest = seeded_digest(salt, tick, ordinal);
+fn seeded_node(lane: u8, tick: u8, owner: &str, ordinal: u8) -> NodeRow {
+    let digest = seeded_digest(lane, tick, ordinal);
     let coordinate = coord_at(u64::from(tick), owner, u32::from(ordinal), digest);
     committed_node(coordinate, Vec::new())
 }
 
 /// A committed factual Tick owning the `seq` range `first..=last`: a step node
 /// of `owner` and one Event-backed node per `seq`.
-fn seeded_tick(salt: u8, tick: u8, owner: &str, first: u64, last: u64) -> SeededFactualTickV1 {
-    let mut nodes = vec![seeded_node(salt, tick, owner, 0)];
+fn seeded_tick(lane: u8, tick: u8, owner: &str, first: u64, last: u64) -> SeededFactualTickV1 {
+    let mut nodes = vec![seeded_node(lane, tick, owner, 0)];
     let mut event_nodes = Vec::new();
     for (ordinal, seq) in (1_u8..).zip(first..=last) {
-        nodes.push(seeded_node(salt, tick, owner, ordinal));
-        event_nodes.push((Seq::from_u64(seq), seeded_digest(salt, tick, ordinal)));
+        nodes.push(seeded_node(lane, tick, owner, ordinal));
+        event_nodes.push((Seq::from_u64(seq), seeded_digest(lane, tick, ordinal)));
     }
     let at = u64::from(tick);
     let record = ok(TickRecord::try_new(at, COMMITTED, nodes, Vec::new()));
@@ -2271,15 +2271,15 @@ fn seeded_tick(salt: u8, tick: u8, owner: &str, first: u64, last: u64) -> Seeded
 /// The root Timeline's Ticks: 1 owns `seq` 2 to 4, 2 owns 5, 3 owns 6 to 8.
 fn root_ticks() -> [SeededFactualTickV1; 3] {
     [
-        seeded_tick(ROOT_SALT, 1, OWNER_A, 2, 4),
-        seeded_tick(ROOT_SALT, 2, OWNER_B, 5, 5),
-        seeded_tick(ROOT_SALT, 3, OWNER_C, 6, 8),
+        seeded_tick(ROOT_LANE, 1, OWNER_A, 2, 4),
+        seeded_tick(ROOT_LANE, 2, OWNER_B, 5, 5),
+        seeded_tick(ROOT_LANE, 3, OWNER_C, 6, 8),
     ]
 }
 
 /// The Fork's own Tick: 3 owns `seq` 9.
 fn fork_tick() -> SeededFactualTickV1 {
-    seeded_tick(FORK_SALT, 3, OWNER_A, 9, 9)
+    seeded_tick(FORK_LANE, 3, OWNER_A, 9, 9)
 }
 
 /// A root Timeline with 14 Events and three seeded Ticks, a Fork of it at
@@ -2463,11 +2463,11 @@ fn f4_event_nodes_resolve_through_ancestry_and_stop_at_each_cut() {
     // The root's Tick 3 binds 6 and 8 above the Fork's cut.
     let expected = vec![
         None,
-        Some(seeded_node(ROOT_SALT, 1, OWNER_A, 1)),
-        Some(seeded_node(ROOT_SALT, 2, OWNER_B, 1)),
+        Some(seeded_node(ROOT_LANE, 1, OWNER_A, 1)),
+        Some(seeded_node(ROOT_LANE, 2, OWNER_B, 1)),
         None,
         None,
-        Some(seeded_node(FORK_SALT, 3, OWNER_A, 1)),
+        Some(seeded_node(FORK_LANE, 3, OWNER_A, 1)),
         None,
     ];
     assert_eq!(resolved, expected);
@@ -2475,15 +2475,15 @@ fn f4_event_nodes_resolve_through_ancestry_and_stop_at_each_cut() {
     let own = seq_list(&[6, 8]);
     let resolved = ok(store.nodes_for_committed_events(lineage.root, &own));
     let expected = vec![
-        Some(seeded_node(ROOT_SALT, 3, OWNER_C, 1)),
-        Some(seeded_node(ROOT_SALT, 3, OWNER_C, 3)),
+        Some(seeded_node(ROOT_LANE, 3, OWNER_C, 1)),
+        Some(seeded_node(ROOT_LANE, 3, OWNER_C, 3)),
     ];
     assert_eq!(resolved, expected);
 
     // The deepest Fork cuts the Fork's own Tick away too.
     let both = seq_list(&[2, 9]);
     let resolved = ok(store.nodes_for_committed_events(lineage.deep, &both));
-    let expected = vec![Some(seeded_node(ROOT_SALT, 1, OWNER_A, 1)), None];
+    let expected = vec![Some(seeded_node(ROOT_LANE, 1, OWNER_A, 1)), None];
     assert_eq!(resolved, expected);
 }
 
@@ -2492,7 +2492,7 @@ fn f4_a_binding_to_an_unrecorded_node_resolves_to_nothing() {
     let fixture = fixture();
     let root = fixture.root;
     let mut store = open(&fixture.path);
-    let mut tick = seeded_tick(ROOT_SALT, 1, OWNER_A, 1, 1);
+    let mut tick = seeded_tick(ROOT_LANE, 1, OWNER_A, 1, 1);
     tick.event_nodes = vec![(Seq::from_u64(1), hash(250))];
     ok(store.seed_factual_prefix(root, &[tick]));
 
@@ -2506,34 +2506,34 @@ fn f5_nodes_resolve_by_digest_with_their_bound_seq() {
     let lineage = lineage();
     let store = &lineage.store;
     let digests = [
-        seeded_digest(ROOT_SALT, 1, 0),
-        seeded_digest(ROOT_SALT, 1, 1),
+        seeded_digest(ROOT_LANE, 1, 0),
+        seeded_digest(ROOT_LANE, 1, 1),
         // The root's Tick 3 is above the Fork's cut.
-        seeded_digest(ROOT_SALT, 3, 0),
-        seeded_digest(FORK_SALT, 3, 0),
-        seeded_digest(FORK_SALT, 3, 1),
+        seeded_digest(ROOT_LANE, 3, 0),
+        seeded_digest(FORK_LANE, 3, 0),
+        seeded_digest(FORK_LANE, 3, 1),
         hash(250),
     ];
 
     let resolved = ok(store.nodes_by_digest(lineage.mid, &digests));
 
     let expected = vec![
-        Some((seeded_node(ROOT_SALT, 1, OWNER_A, 0), None)),
+        Some((seeded_node(ROOT_LANE, 1, OWNER_A, 0), None)),
         Some((
-            seeded_node(ROOT_SALT, 1, OWNER_A, 1),
+            seeded_node(ROOT_LANE, 1, OWNER_A, 1),
             Some(Seq::from_u64(2)),
         )),
         None,
-        Some((seeded_node(FORK_SALT, 3, OWNER_A, 0), None)),
+        Some((seeded_node(FORK_LANE, 3, OWNER_A, 0), None)),
         Some((
-            seeded_node(FORK_SALT, 3, OWNER_A, 1),
+            seeded_node(FORK_LANE, 3, OWNER_A, 1),
             Some(Seq::from_u64(9)),
         )),
         None,
     ];
     assert_eq!(resolved, expected);
     let own = ok(store.nodes_by_digest(lineage.root, &digests[2..3]));
-    let step = seeded_node(ROOT_SALT, 3, OWNER_C, 0);
+    let step = seeded_node(ROOT_LANE, 3, OWNER_C, 0);
     assert_eq!(own, vec![Some((step, None))]);
 }
 
@@ -2541,21 +2541,21 @@ fn f5_nodes_resolve_by_digest_with_their_bound_seq() {
 fn f6_the_latest_step_node_of_an_owner_stops_at_each_cut() {
     let lineage = lineage();
     let store = &lineage.store;
-    let step = |salt, tick, name| Some(seeded_node(salt, tick, name, 0));
+    let step = |lane, tick, name| Some(seeded_node(lane, tick, name, 0));
     let latest = |timeline, name: &str| ok(store.last_step_node(timeline, &owner_id(name)));
 
-    assert_eq!(latest(lineage.root, OWNER_A), step(ROOT_SALT, 1, OWNER_A));
-    assert_eq!(latest(lineage.root, OWNER_B), step(ROOT_SALT, 2, OWNER_B));
-    assert_eq!(latest(lineage.root, OWNER_C), step(ROOT_SALT, 3, OWNER_C));
+    assert_eq!(latest(lineage.root, OWNER_A), step(ROOT_LANE, 1, OWNER_A));
+    assert_eq!(latest(lineage.root, OWNER_B), step(ROOT_LANE, 2, OWNER_B));
+    assert_eq!(latest(lineage.root, OWNER_C), step(ROOT_LANE, 3, OWNER_C));
     assert_eq!(latest(lineage.root, "plugin:none"), None);
     // The Fork's own Tick wins over the inherited one; the root's Tick 3 is
     // above its cut.
-    assert_eq!(latest(lineage.mid, OWNER_A), step(FORK_SALT, 3, OWNER_A));
-    assert_eq!(latest(lineage.mid, OWNER_B), step(ROOT_SALT, 2, OWNER_B));
+    assert_eq!(latest(lineage.mid, OWNER_A), step(FORK_LANE, 3, OWNER_A));
+    assert_eq!(latest(lineage.mid, OWNER_B), step(ROOT_LANE, 2, OWNER_B));
     assert_eq!(latest(lineage.mid, OWNER_C), None);
     // The deepest Fork cuts the Fork's own Tick away too.
-    assert_eq!(latest(lineage.deep, OWNER_A), step(ROOT_SALT, 1, OWNER_A));
-    assert_eq!(latest(lineage.deep, OWNER_B), step(ROOT_SALT, 2, OWNER_B));
+    assert_eq!(latest(lineage.deep, OWNER_A), step(ROOT_LANE, 1, OWNER_A));
+    assert_eq!(latest(lineage.deep, OWNER_B), step(ROOT_LANE, 2, OWNER_B));
 }
 
 #[test]
@@ -2672,8 +2672,8 @@ fn f10_a_failed_seed_installs_nothing_and_a_reopen_serves_the_seeded_rows() {
     // The second Tick repeats the first one's number, which the record Tick
     // guard refuses after the first Tick's rows went in.
     let repeated = [
-        seeded_tick(ROOT_SALT, 1, OWNER_A, 2, 3),
-        seeded_tick(ROOT_SALT, 1, OWNER_B, 2, 3),
+        seeded_tick(ROOT_LANE, 1, OWNER_A, 2, 3),
+        seeded_tick(ROOT_LANE, 1, OWNER_B, 2, 3),
     ];
     assert!(store.seed_factual_prefix(root, &repeated).is_err());
     assert_eq!(recorded_rows(&fixture.path, root), [0; 3]);
@@ -2706,7 +2706,7 @@ fn f11_deleting_a_timeline_purges_its_commit_ranges_and_bindings() {
 /// A replacing insert of a new `seq` that binds a digest the Timeline already
 /// binds: only the digest guard refuses it.
 fn digest_replace_statement(root: TimelineId) -> String {
-    let bound = hex(seeded_digest(ROOT_SALT, 1, 1).as_bytes());
+    let bound = hex(seeded_digest(ROOT_LANE, 1, 1).as_bytes());
     let bindings = "counterfactual_dependency_event_nodes";
     format!("INSERT OR REPLACE INTO {bindings} VALUES ('{root}', 99, 1, X'{bound}')")
 }
@@ -2780,7 +2780,7 @@ fn f13_corrupt_stored_rows_fail_the_factual_reads() {
         (store, lineage)
     };
     let step = owner_id(OWNER_A);
-    let digests = [seeded_digest(ROOT_SALT, 1, 1)];
+    let digests = [seeded_digest(ROOT_LANE, 1, 1)];
 
     let (store, lineage) = corrupted("nodes", "class = 9", "WHERE owner_id = 'plugin:a'");
     assert!(store.nodes_by_digest(lineage.root, &digests).is_err());
@@ -2822,9 +2822,9 @@ fn f14_the_exact_schema_lists_the_factual_indexes() {
 fn f4_a_batched_request_mixes_segments_misses_and_duplicates() {
     let lineage = lineage();
     let store = &lineage.store;
-    let fork = Some(seeded_node(FORK_SALT, 3, OWNER_A, 1));
-    let first = Some(seeded_node(ROOT_SALT, 1, OWNER_A, 1));
-    let second = Some(seeded_node(ROOT_SALT, 2, OWNER_B, 1));
+    let fork = Some(seeded_node(FORK_LANE, 3, OWNER_A, 1));
+    let first = Some(seeded_node(ROOT_LANE, 1, OWNER_A, 1));
+    let second = Some(seeded_node(ROOT_LANE, 2, OWNER_B, 1));
 
     // The Fork's own segment, the root's, misses, and repeated `seq`s, in one
     // request that is answered in request order.
@@ -2864,24 +2864,24 @@ fn f4_a_batched_request_mixes_segments_misses_and_duplicates() {
 fn f5_a_batched_digest_request_mixes_segments_misses_and_duplicates() {
     let lineage = lineage();
     let store = &lineage.store;
-    let fork_step = Some((seeded_node(FORK_SALT, 3, OWNER_A, 0), None));
+    let fork_step = Some((seeded_node(FORK_LANE, 3, OWNER_A, 0), None));
     let fork_event = Some((
-        seeded_node(FORK_SALT, 3, OWNER_A, 1),
+        seeded_node(FORK_LANE, 3, OWNER_A, 1),
         Some(Seq::from_u64(9)),
     ));
     let root_event = Some((
-        seeded_node(ROOT_SALT, 1, OWNER_A, 1),
+        seeded_node(ROOT_LANE, 1, OWNER_A, 1),
         Some(Seq::from_u64(2)),
     ));
     let digests = [
-        seeded_digest(FORK_SALT, 3, 1),
-        seeded_digest(ROOT_SALT, 1, 1),
+        seeded_digest(FORK_LANE, 3, 1),
+        seeded_digest(ROOT_LANE, 1, 1),
         hash(250),
-        seeded_digest(FORK_SALT, 3, 0),
-        seeded_digest(FORK_SALT, 3, 1),
+        seeded_digest(FORK_LANE, 3, 0),
+        seeded_digest(FORK_LANE, 3, 1),
         // The root's Tick 3 is above the Fork's cut.
-        seeded_digest(ROOT_SALT, 3, 1),
-        seeded_digest(ROOT_SALT, 1, 1),
+        seeded_digest(ROOT_LANE, 3, 1),
+        seeded_digest(ROOT_LANE, 1, 1),
     ];
 
     let resolved = ok(store.nodes_by_digest(lineage.mid, &digests));
@@ -2908,8 +2908,8 @@ fn f5_a_batched_digest_request_mixes_segments_misses_and_duplicates() {
             Hash::from_bytes(bytes)
         })
         .collect();
-    wide[0] = seeded_digest(FORK_SALT, 3, 1);
-    wide[16_383] = seeded_digest(ROOT_SALT, 1, 1);
+    wide[0] = seeded_digest(FORK_LANE, 3, 1);
+    wide[16_383] = seeded_digest(ROOT_LANE, 1, 1);
     let largest = ok(store.nodes_by_digest(lineage.mid, &wide));
     assert_eq!(largest.len(), wide.len());
     assert_eq!(largest.iter().flatten().count(), 2);
@@ -2921,30 +2921,30 @@ fn f4_the_nearest_segment_wins_when_two_segments_hold_a_seq_or_a_digest() {
     let child = fork_at(&mut lineage.store, lineage.root, 7);
     // The child's own Tick binds `seq` 2 to a node of another owner that reuses
     // the digest of the root's node for that `seq`.
-    let shadow = seeded_tick(ROOT_SALT, 1, OWNER_B, 2, 2);
+    let shadow = seeded_tick(ROOT_LANE, 1, OWNER_B, 2, 2);
     ok(lineage.store.seed_factual_prefix(child, &[shadow]));
     let store = &lineage.store;
 
     let seqs = seq_list(&[2, 3]);
     let events = ok(store.nodes_for_committed_events(child, &seqs));
-    let own = Some(seeded_node(ROOT_SALT, 1, OWNER_B, 1));
-    let inherited = Some(seeded_node(ROOT_SALT, 1, OWNER_A, 2));
+    let own = Some(seeded_node(ROOT_LANE, 1, OWNER_B, 1));
+    let inherited = Some(seeded_node(ROOT_LANE, 1, OWNER_A, 2));
     assert_eq!(events, vec![own, inherited]);
     let root_events = ok(store.nodes_for_committed_events(lineage.root, &seqs));
-    let root_own = Some(seeded_node(ROOT_SALT, 1, OWNER_A, 1));
+    let root_own = Some(seeded_node(ROOT_LANE, 1, OWNER_A, 1));
     assert_eq!(root_events[0], root_own);
 
     let digests = [
-        seeded_digest(ROOT_SALT, 1, 1),
-        seeded_digest(ROOT_SALT, 1, 2),
+        seeded_digest(ROOT_LANE, 1, 1),
+        seeded_digest(ROOT_LANE, 1, 2),
     ];
     let bound = ok(store.nodes_by_digest(child, &digests));
     let near = Some((
-        seeded_node(ROOT_SALT, 1, OWNER_B, 1),
+        seeded_node(ROOT_LANE, 1, OWNER_B, 1),
         Some(Seq::from_u64(2)),
     ));
     let far = Some((
-        seeded_node(ROOT_SALT, 1, OWNER_A, 2),
+        seeded_node(ROOT_LANE, 1, OWNER_A, 2),
         Some(Seq::from_u64(3)),
     ));
     assert_eq!(bound, vec![near, far]);
