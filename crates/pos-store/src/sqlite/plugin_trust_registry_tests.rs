@@ -1065,21 +1065,35 @@ fn evaluate_on(
     ))
 }
 
-/// A poisoned handle refuses an evaluation before the anchor, the TPS1 bytes, the release, and
-/// the clock are looked at.
-fn assert_poisoned_before_anything(h: &H) -> TestResult {
-    let stale = h.same_policy(40, 5)?;
-    let bad = ManifestSpec::new("plugin-z", 0x51, 0x51, None);
+/// An anchor that differs from the harness anchor in one field.
+fn changed_anchor(h: &H) -> TestResult<pos_conformance::PluginTrustPolicyAnchorV1> {
     let anchors = h.env.anchors_with_one_changed_field()?;
-    let anchor = anchors.first().ok_or("no changed anchor")?;
-    let result = h.store.evaluate_current_release(
+    anchors.into_iter().next().ok_or_else(|| "no anchor".into())
+}
+
+/// Evaluate with `anchor`, garbage TPS1 bytes, an unauthorized release, and the stale evidence.
+fn evaluate_garbled(
+    h: &H,
+    anchor: &pos_conformance::PluginTrustPolicyAnchorV1,
+    stale: &Material,
+) -> TestResult<Result<CurrentReleaseEvaluationV1, Error>> {
+    let bad = ManifestSpec::new("plugin-z", 0x51, 0x51, None);
+    Ok(h.store.evaluate_current_release(
         anchor,
         b"garbage",
         &stale.evidence,
         &bad.projection()?,
         stale.trusted()?,
         stale.tick,
-    );
+    ))
+}
+
+/// A poisoned handle refuses an evaluation before the anchor, the TPS1 bytes, the release, and
+/// the clock are looked at.
+fn assert_poisoned_before_anything(h: &H) -> TestResult {
+    let stale = h.same_policy(40, 5)?;
+    let anchor = changed_anchor(h)?;
+    let result = evaluate_garbled(h, &anchor, &stale)?;
     assert_eq!(result, Err(Error::StorePoisoned));
     Ok(())
 }
