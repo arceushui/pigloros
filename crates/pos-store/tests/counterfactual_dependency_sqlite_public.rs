@@ -2703,10 +2703,17 @@ fn f11_deleting_a_timeline_purges_its_commit_ranges_and_bindings() {
     assert_eq!(factual_rows(&lineage.path, root), [0, 0]);
 }
 
+/// A replacing insert of a new `seq` that binds a digest the Timeline already
+/// binds: only the digest guard refuses it.
+fn digest_replace_statement(root: TimelineId) -> String {
+    let bound = hex(seeded_digest(ROOT_SALT, 1, 1).as_bytes());
+    let bindings = "counterfactual_dependency_event_nodes";
+    format!("INSERT OR REPLACE INTO {bindings} VALUES ('{root}', 99, 1, X'{bound}')")
+}
+
 /// Statements the guards of the two factual tables refuse outside a purge.
 fn refused_statements(root: TimelineId) -> Vec<String> {
     let other = hex(hash(250).as_bytes());
-    let bound = hex(seeded_digest(ROOT_SALT, 1, 1).as_bytes());
     let ranges = "counterfactual_dependency_commit_ranges";
     let bindings = "counterfactual_dependency_event_nodes";
     vec![
@@ -2717,7 +2724,7 @@ fn refused_statements(root: TimelineId) -> Vec<String> {
         // A replacing insert of a held key or digest.
         format!("INSERT OR REPLACE INTO {ranges} VALUES ('{root}', 1, 2, 4)"),
         format!("INSERT OR REPLACE INTO {bindings} VALUES ('{root}', 2, 1, X'{other}')"),
-        format!("INSERT INTO {bindings} VALUES ('{root}', 99, 1, X'{bound}')"),
+        digest_replace_statement(root),
         // Rows that break a check.
         format!("INSERT INTO {ranges} VALUES ('{root}', 9, 5, 4)"),
         format!("INSERT INTO {ranges} VALUES ('{root}', 0, 5, 6)"),
@@ -2742,6 +2749,13 @@ fn f12_only_a_marked_purge_passes_the_factual_guards() {
         assert!(execute(path, &marked).is_err(), "{marked}");
     }
     assert_eq!(factual_rows(path, root), [3, 7]);
+    // The digest guard itself refuses the replacing insert, by its own text.
+    let statement = digest_replace_statement(root);
+    let refusal = err(execute(path, &statement)).to_string();
+    assert!(
+        refusal.contains("event node digest is already recorded"),
+        "{refusal}"
+    );
 
     let purge = format!(
         "BEGIN;
@@ -2801,5 +2815,181 @@ fn f14_the_exact_schema_lists_the_factual_indexes() {
         assert!(refused.contains(name));
         assert_eq!(open_error(SqliteStore::open(text)), "");
         assert_eq!(open_error(SqliteStore::open_read_only(text)), "");
+    }
+}
+
+#[test]
+fn f4_a_batched_request_mixes_segments_misses_and_duplicates() {
+    let lineage = lineage();
+    let store = &lineage.store;
+    let fork = Some(seeded_node(FORK_SALT, 3, OWNER_A, 1));
+    let first = Some(seeded_node(ROOT_SALT, 1, OWNER_A, 1));
+    let second = Some(seeded_node(ROOT_SALT, 2, OWNER_B, 1));
+
+    // The Fork's own segment, the root's, misses, and repeated `seq`s, in one
+    // request that is answered in request order.
+    let seqs = seq_list(&[9, 2, 99, 9, 5, 2, 6, 1]);
+    let resolved = ok(store.nodes_for_committed_events(lineage.mid, &seqs));
+    let expected = vec![
+        fork.clone(),
+        first.clone(),
+        None,
+        fork,
+        second,
+        first,
+        None,
+        None,
+    ];
+    assert_eq!(resolved, expected);
+
+    // A request that the newest segment answers in full is complete.
+    let pair = seq_list(&[9, 9]);
+    let own = ok(store.nodes_for_committed_events(lineage.mid, &pair));
+    assert_eq!(own.len(), 2);
+    assert!(own.iter().all(Option::is_some));
+
+    // An empty request is answered, and a request at the contract's largest
+    // size is one statement per segment, not one per `seq`.
+    let none = ok(store.nodes_for_committed_events(lineage.mid, &[]));
+    assert!(none.is_empty());
+    let all: Vec<u64> = (1..=16_384).collect();
+    let largest = seq_list(&all);
+    let wide = ok(store.nodes_for_committed_events(lineage.root, &largest));
+    assert_eq!(wide.len(), all.len());
+    assert_eq!(wide.iter().flatten().count(), 7);
+}
+
+#[test]
+fn f5_a_batched_digest_request_mixes_segments_misses_and_duplicates() {
+    let lineage = lineage();
+    let store = &lineage.store;
+    let fork_step = Some((seeded_node(FORK_SALT, 3, OWNER_A, 0), None));
+    let fork_event = Some((
+        seeded_node(FORK_SALT, 3, OWNER_A, 1),
+        Some(Seq::from_u64(9)),
+    ));
+    let root_event = Some((
+        seeded_node(ROOT_SALT, 1, OWNER_A, 1),
+        Some(Seq::from_u64(2)),
+    ));
+    let digests = [
+        seeded_digest(FORK_SALT, 3, 1),
+        seeded_digest(ROOT_SALT, 1, 1),
+        hash(250),
+        seeded_digest(FORK_SALT, 3, 0),
+        seeded_digest(FORK_SALT, 3, 1),
+        // The root's Tick 3 is above the Fork's cut.
+        seeded_digest(ROOT_SALT, 3, 1),
+        seeded_digest(ROOT_SALT, 1, 1),
+    ];
+
+    let resolved = ok(store.nodes_by_digest(lineage.mid, &digests));
+
+    let expected = vec![
+        fork_event.clone(),
+        root_event.clone(),
+        None,
+        fork_step,
+        fork_event,
+        None,
+        root_event,
+    ];
+    assert_eq!(resolved, expected);
+    let none = ok(store.nodes_by_digest(lineage.mid, &[]));
+    assert!(none.is_empty());
+}
+
+#[test]
+fn f4_the_nearest_segment_wins_when_two_segments_hold_a_seq_or_a_digest() {
+    let mut lineage = lineage();
+    let child = fork_at(&mut lineage.store, lineage.root, 7);
+    // The child's own Tick binds `seq` 2 to a node of another owner that reuses
+    // the digest of the root's node for that `seq`.
+    let shadow = seeded_tick(ROOT_SALT, 1, OWNER_B, 2, 2);
+    ok(lineage.store.seed_factual_prefix(child, &[shadow]));
+    let store = &lineage.store;
+
+    let seqs = seq_list(&[2, 3]);
+    let events = ok(store.nodes_for_committed_events(child, &seqs));
+    let own = Some(seeded_node(ROOT_SALT, 1, OWNER_B, 1));
+    let inherited = Some(seeded_node(ROOT_SALT, 1, OWNER_A, 2));
+    assert_eq!(events, vec![own, inherited]);
+    let root_events = ok(store.nodes_for_committed_events(lineage.root, &seqs));
+    let root_own = Some(seeded_node(ROOT_SALT, 1, OWNER_A, 1));
+    assert_eq!(root_events[0], root_own);
+
+    let digests = [
+        seeded_digest(ROOT_SALT, 1, 1),
+        seeded_digest(ROOT_SALT, 1, 2),
+    ];
+    let bound = ok(store.nodes_by_digest(child, &digests));
+    let near = Some((
+        seeded_node(ROOT_SALT, 1, OWNER_B, 1),
+        Some(Seq::from_u64(2)),
+    ));
+    let far = Some((
+        seeded_node(ROOT_SALT, 1, OWNER_A, 2),
+        Some(Seq::from_u64(3)),
+    ));
+    assert_eq!(bound, vec![near, far]);
+}
+
+#[test]
+fn f2_cut_tick_at_is_a_boundary_on_a_timeline_without_ticks_and_at_seq_zero() {
+    let mut lineage = lineage();
+    let bare = ok(lineage.store.create_timeline("factual-bare-cut")).id();
+    let events: Vec<EventDraft> = (0..3).map(|value| draft(value, "factual")).collect();
+    ok(lineage.store.append(bare, &events));
+    let store = &lineage.store;
+
+    // No Tick is recorded, so every `seq`, beyond the head too, is a boundary.
+    for seq in [0, 1, 3, 50] {
+        let cut = store.cut_tick_at(bare, Seq::from_u64(seq));
+        assert_eq!(ok(cut), boundary(0));
+    }
+    let zero = store.cut_tick_at(bare, Seq::ZERO);
+    assert_eq!(ok(zero), boundary(0));
+    // `Seq::ZERO` precedes the first Tick of a recorded Timeline too.
+    let root_zero = store.cut_tick_at(lineage.root, Seq::ZERO);
+    assert_eq!(ok(root_zero), boundary(0));
+}
+
+#[test]
+fn f3_a_split_tick_clipped_at_two_levels_is_a_boundary_for_the_deepest_fork() {
+    let lineage = lineage();
+    // The Fork at 7 sees the root through 6 and the middle Fork through 7. The
+    // root's Tick 3 (6 to 8) and the middle Fork's Tick 3 (9) both end above
+    // those limits, so neither splits a cut here; only Tick 1 (2 to 4) does.
+    let cases = [
+        (3, mid_tick(0, 1)),
+        (4, boundary(1)),
+        (5, boundary(2)),
+        (6, boundary(2)),
+        (7, boundary(2)),
+        (8, boundary(2)),
+        (9, boundary(2)),
+        (12, boundary(2)),
+    ];
+    for (seq, expected) in cases {
+        let cut = lineage.store.cut_tick_at(lineage.deep, Seq::from_u64(seq));
+        assert_eq!(ok(cut), expected);
+    }
+}
+
+#[test]
+fn f8_paging_resumes_after_a_cursor_inside_an_ancestor_segment() {
+    let lineage = lineage();
+    let store = &lineage.store;
+    let scope = prefix_scope(lineage.mid, 9);
+    let all = ok(nodes(store, scope, 50));
+    assert_eq!(all.len(), 8);
+
+    // Rows 0 to 5 are the root's segment, rows 6 and 7 the Fork's own.
+    for (index, limit) in [(1_usize, 50_usize), (1, 3), (5, 50), (5, 1)] {
+        let after = Some(all[index].cursor());
+        let page = ok(store.read_dependency_nodes(&request(scope, after, limit)));
+        let rest = &all[index + 1..];
+        assert_eq!(page.items(), &rest[..rest.len().min(limit)]);
+        assert_eq!(page.next().is_some(), rest.len() > limit);
     }
 }

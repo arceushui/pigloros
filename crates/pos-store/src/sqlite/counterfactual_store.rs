@@ -29,7 +29,7 @@
 //! first version of the schema: a file written by an earlier build, whose
 //! delete guards lack the purge-marker condition, fails the exact validation
 //! below with a storage error and must be recreated. A writable open of such
-//! a file still creates the tables, index, and triggers it lacks before
+//! a file still creates the tables, indexes, and triggers it lacks before
 //! validation fails, so a rejected file may gain those additive objects; its
 //! old delete guards stay and every later open still fails. A file with the
 //! exact storage schema that only lacks the dependency tables gains them
@@ -39,7 +39,7 @@
 //! by the previous schema and never opened writably since therefore refuses to
 //! open until one writable open adds the dependency tables, which is
 //! acceptable under the no-migration, replacement-first rule.
-//! Every open validates the exact table shapes, the index, and the trigger
+//! Every open validates the exact table shapes, the indexes, and the trigger
 //! bodies, and fails closed with a storage error on any drift. A read-only
 //! open of a file written before this schema, which has no counterfactual
 //! table, index, or trigger at all, accepts the file as holding no
@@ -164,9 +164,9 @@
 //!   delete still aborts. The marker is an accident guard for the generic
 //!   delete path, not an authorization boundary: a client with write access
 //!   to the database file can already drop the triggers, and the marker
-//!   table has no guard of its own. The tombstone is a generation floor: its own guards
-//!   refuse a delete and any change that lowers it, while raising it (an
-//!   update or a replacing insert) is allowed; the replacing insert passes
+//!   table has no guard of its own. The tombstone is a generation floor: its
+//!   own guards refuse a delete and any change that lowers it, while raising
+//!   it (an update or a replacing insert) is allowed; the replacing insert passes
 //!   only because `recursive_triggers` is off, so the replaced row fires no
 //!   delete guard. No port read touches the tombstone, so every read of a
 //!   deleted Fork stays `ForkNotFound`, matching the `MemoryStore` adapter.
