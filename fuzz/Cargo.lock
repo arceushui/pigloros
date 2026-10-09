@@ -1012,6 +1012,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-plugin-publisher"
+version = "0.1.0"
+dependencies = [
+ "pos-conformance",
+ "pos-core",
+ "pos-crypto",
+ "pos-plugin-release",
+ "pos-store",
+ "thiserror",
+]
+
+[[package]]
 name = "pos-plugin-release"
 version = "0.1.0"
 dependencies = [
@@ -1055,6 +1067,7 @@ dependencies = [
  "pos-conformance",
  "pos-core",
  "pos-crypto",
+ "pos-plugin-publisher",
  "pos-plugin-release",
  "pos-state",
  "pos-store",
