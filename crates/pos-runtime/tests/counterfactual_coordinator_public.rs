@@ -2503,7 +2503,7 @@ fn trailing_tail_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
 
 /// Tick 9 starts at the cut. The seeded prefix may extend past the appended
 /// Events: the seed seam checks nothing about them. Both the mid-Tick check and
-/// the cut-Tick mismatch refuse it; the isolated MidTick case is
+/// the cut-Tick mismatch refuse it; the isolated `MidTick` case is
 /// `mid_tick_after_the_cut_tick_prefix`.
 fn mid_tick_at_first_seq_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
     Ok(vec![
