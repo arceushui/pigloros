@@ -1211,7 +1211,11 @@ fn edge_bytes(parts: &EdgeParts<'_>) -> Vec<u8> {
     encode_head(&mut out, CBOR_UNSIGNED, 1);
     push_node(&mut out, parts.consumer);
     push_node(&mut out, source);
-    encode_head(&mut out, CBOR_UNSIGNED, u64::from(parts.source.class.code()));
+    encode_head(
+        &mut out,
+        CBOR_UNSIGNED,
+        u64::from(parts.source.class.code()),
+    );
     encode_head(&mut out, CBOR_ARRAY, 2);
     encode_head(&mut out, CBOR_UNSIGNED, source.tick());
     encode_head(&mut out, CBOR_UNSIGNED, parts.consumer.tick());
@@ -1248,8 +1252,7 @@ pub fn assemble_factual_tick(
 ) -> Result<FactualTickDependenciesV1, FactualDependencyErrorV1> {
     match shape {
         FactualTickShapeV1::Scheduled(scheduled) => {
-            let mut assembly =
-                FactualAssembly::new(context, PipelineIngressV1::ScheduledAiDriver);
+            let mut assembly = FactualAssembly::new(context, PipelineIngressV1::ScheduledAiDriver);
             assembly.scheduled(scheduled)?;
             assembly.build()
         }
