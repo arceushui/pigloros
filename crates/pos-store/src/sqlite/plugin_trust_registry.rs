@@ -1,4 +1,4 @@
-//! `SQLite` adapter for the ADR-103 revision 4 Plugin trust policy registry port.
+//! `SQLite` adapter for the ADR-103 revisions 4 and 5 Plugin trust policy registry port.
 //!
 //! The adapter is `impl PluginTrustPolicyRegistryV1 for SqliteStore`, so the registry rows and
 //! the activation Event share the store's one connection and one WAL database transaction. The
@@ -7,6 +7,12 @@
 //! [`SqliteTransactionV1`] and orders the locks.
 //!
 //! # Lock order and durability (decisions 3 and 7)
+//!
+//! Only the mutating operations run the protocol below. The single-statement reads
+//! (`retained_release_decision`, `active_release`, `retained_policy_state`, `ledger`) run the
+//! poison check and the schema check with no transaction. `evaluate_current_release` (revision 5)
+//! is a read too, but it reads several rows that must agree, so it runs the poison check and then
+//! one plain deferred `BEGIN` read transaction (`plugin_trust_read_transaction`).
 //!
 //! A mutating operation runs, in this order: the poison check (`StorePoisoned`); for `admit` and
 //! `rollback` the erasure fence of the activation Timeline (`ActivationEventRejected`), which
@@ -21,6 +27,9 @@
 //! inside a transaction. A connection that is still inside a transaction then, or a restore that
 //! fails, poisons the handle: the operation returns `StorageIndeterminate` and every later
 //! registry call, reads included, returns `StorePoisoned` until the store is dropped and reopened.
+//! A read transaction whose `ROLLBACK` leaves the connection inside that transaction poisons the
+//! handle the same way, but returns the work's error (or `StorageFailed`), because nothing was
+//! written.
 //!
 //! The activation Event is appended inside the open transaction through the same guard chain as
 //! `EventStore::append` (`guarded_generic_append`); `append_visible` opens a savepoint inside the
@@ -37,15 +46,15 @@ use super::plugin_trust_registry_rows::{self as rows, storage_error, RegistryRes
 use super::plugin_trust_registry_schema as schema;
 use super::SqliteStore;
 use crate::plugin_trust_registry::logic::{
-    plan_admit, plan_advance, plan_provision, plan_rollback, AdmitPlanV1, AdvancePlanV1,
-    PluginTrustTransactionV1, PolicyInputV1, RetainedScopeV1, RollbackPlanV1,
+    plan_admit, plan_advance, plan_evaluate, plan_provision, plan_rollback, AdmitPlanV1,
+    AdvancePlanV1, PluginTrustTransactionV1, PolicyInputV1, RetainedScopeV1, RollbackPlanV1,
 };
 use crate::plugin_trust_registry::{
     ActivationEventIdentityV1, ActivationEventInputV1, ActiveReleaseV1,
-    AdmittedPluginReleaseReceiptV1, PluginRollbackReceiptV1, PluginTrustCommitOutcomeV1,
-    PluginTrustLedgerRowV1, PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1,
-    PolicyAdvanceOutcomeV1, ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1,
-    TrustedUtcSecondV1,
+    AdmittedPluginReleaseReceiptV1, CurrentReleaseEvaluationV1, PluginRollbackReceiptV1,
+    PluginTrustCommitOutcomeV1, PluginTrustLedgerRowV1, PluginTrustPolicyRegistryErrorV1,
+    PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1, ProvisionOutcomeV1, RetainedPolicyStateV1,
+    RetainedReleaseDecisionV1, TrustedUtcSecondV1,
 };
 
 fn query_journal(connection: &Connection) -> rusqlite::Result<String> {
@@ -120,6 +129,18 @@ mod seam {
         /// Runs just before the restore statement, while the erasure fence is still held.
         pub(super) static RESTORE_PROBE: RefCell<Option<Box<dyn Fn()>>> =
             const { RefCell::new(None) };
+        /// Runs inside an evaluation's read transaction, right after its schema check, so a
+        /// test can commit a write through a second handle after the snapshot began.
+        pub(super) static SNAPSHOT_PROBE: RefCell<Option<Box<dyn Fn()>>> =
+            const { RefCell::new(None) };
+    }
+
+    pub(super) fn snapshot_probe() {
+        SNAPSHOT_PROBE.with(|probe| {
+            if let Some(probe) = probe.borrow().as_ref() {
+                probe();
+            }
+        });
     }
 
     fn injected(step: Step) -> bool {
@@ -283,7 +304,8 @@ impl SqliteStore {
         }
     }
 
-    /// Record a failed restore: the connection's level is unknown until the store is reopened.
+    /// Record a failed restore, or a read that could not leave its own transaction: the
+    /// connection's state is unknown until the store is reopened.
     fn poison_plugin_trust(&self) {
         self.plugin_trust_poisoned.set(true);
     }
@@ -489,6 +511,65 @@ impl SqliteStore {
         }
     }
 
+    /// Roll back a read transaction's work, and poison the handle if the connection is still
+    /// inside the transaction afterwards.
+    ///
+    /// The caller returns its own error; a failed `ROLLBACK` is ignored by
+    /// `rollback_to_autocommit`.
+    fn abandon_read(&self) {
+        if !rollback_to_autocommit(&self.conn) {
+            self.poison_plugin_trust();
+        }
+    }
+
+    /// `COMMIT` a read transaction. A failed `COMMIT` is `StorageFailed`: nothing was written,
+    /// so there is no unknown outcome, and the transaction is rolled back like a failed work.
+    fn finish_read<T>(&self, value: T) -> RegistryResult<T> {
+        if commit(&self.conn).is_ok() {
+            Ok(value)
+        } else {
+            self.abandon_read();
+            Err(PluginTrustPolicyRegistryErrorV1::StorageFailed)
+        }
+    }
+
+    /// Run `work` in one plain deferred `BEGIN` read transaction, so every row it combines is one
+    /// committed snapshot.
+    ///
+    /// Order: the poison check, then the `BEGIN` itself. Inside a caller's transaction the nested
+    /// `BEGIN` fails with `StorageFailed` and no `ROLLBACK` is issued, because it would end the
+    /// caller's transaction. A busy database surfaces at the first read, not at the `BEGIN`. No
+    /// WAL requirement, no `synchronous` change, no `BEGIN IMMEDIATE`: a read-only handle works.
+    fn plugin_trust_read_transaction<T>(
+        &self,
+        work: impl FnOnce(&Self) -> RegistryResult<T>,
+    ) -> RegistryResult<T> {
+        self.ensure_plugin_trust_usable()?;
+        self.conn
+            .execute_batch("BEGIN")
+            .map_err(|error| storage_error(&error))?;
+        match work(self) {
+            Ok(value) => self.finish_read(value),
+            Err(error) => {
+                self.abandon_read();
+                Err(error)
+            }
+        }
+    }
+
+    fn evaluate_in_read(
+        &self,
+        input: &PolicyInputV1<'_>,
+        projection: &ValidatedPluginManifestProjectionV1,
+    ) -> RegistryResult<CurrentReleaseEvaluationV1> {
+        let connection = &self.conn;
+        schema::require_present(connection)?;
+        #[cfg(test)]
+        seam::snapshot_probe();
+        let transaction = SqliteTransactionV1 { connection };
+        plan_evaluate(&transaction, input, projection)
+    }
+
     /// Run a read on the validated schema; a poisoned handle fails first.
     fn plugin_trust_read<T>(
         &self,
@@ -627,6 +708,27 @@ impl PluginTrustPolicyRegistryV1 for SqliteStore {
         self.plugin_trust_read(|connection| {
             require_scope(connection, scope)?;
             rows::load_ledger(connection, scope)
+        })
+    }
+
+    fn evaluate_current_release(
+        &self,
+        anchor: &PluginTrustPolicyAnchorV1,
+        tps1_bytes: &[u8],
+        evidence: &VerifiedPluginTrustEvidenceV1,
+        projection: &ValidatedPluginManifestProjectionV1,
+        trusted_utc: TrustedUtcSecondV1,
+        tick: u64,
+    ) -> RegistryResult<CurrentReleaseEvaluationV1> {
+        let input = PolicyInputV1 {
+            anchor,
+            tps1_bytes,
+            evidence,
+            utc: trusted_utc,
+            tick,
+        };
+        self.plugin_trust_read_transaction(|store: &Self| {
+            store.evaluate_in_read(&input, projection)
         })
     }
 }

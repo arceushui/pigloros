@@ -1,4 +1,4 @@
-//! `MemoryStore` adapter for the ADR-103 revision 4 Plugin trust policy registry port.
+//! `MemoryStore` adapter for the ADR-103 revisions 4 and 5 Plugin trust policy registry port.
 //!
 //! The registry state is one more `MemoryStore` field, so an activation Event
 //! shares the store's single mutable owner with the decision that authorized
@@ -11,6 +11,9 @@
 //! `EventStore::append`: the erasure fence is the outermost scope, then the
 //! non-geographic draft, fork, and visibility guards, then the append itself.
 //! This adapter is test-only parity for the durable `SQLite` adapter.
+//!
+//! `evaluate_current_release` (revision 5) reads the committed state through `&self`: the
+//! adapter has no lock, so nothing is written and no snapshot is taken.
 
 use std::collections::BTreeMap;
 
@@ -22,16 +25,16 @@ use pos_crypto::plugin_trust::{
 
 use super::MemoryStore;
 use crate::plugin_trust_registry::logic::{
-    plan_admit, plan_advance, plan_provision, plan_rollback, AdmitPlanV1, AdmitWritesV1,
-    AdvancePlanV1, PluginTrustTransactionV1, PolicyInputV1, ProvisionWriteV1, RetainedScopeV1,
-    RollbackPlanV1, RollbackWritesV1,
+    plan_admit, plan_advance, plan_evaluate, plan_provision, plan_rollback, AdmitPlanV1,
+    AdmitWritesV1, AdvancePlanV1, PluginTrustTransactionV1, PolicyInputV1, ProvisionWriteV1,
+    RetainedScopeV1, RollbackPlanV1, RollbackWritesV1,
 };
 use crate::plugin_trust_registry::{
     ActivationEventIdentityV1, ActivationEventInputV1, ActiveReleaseV1,
-    AdmittedPluginReleaseReceiptV1, PluginRollbackReceiptV1, PluginTrustCommitOutcomeV1,
-    PluginTrustLedgerRowV1, PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1,
-    PolicyAdvanceOutcomeV1, ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1,
-    TrustedUtcSecondV1,
+    AdmittedPluginReleaseReceiptV1, CurrentReleaseEvaluationV1, PluginRollbackReceiptV1,
+    PluginTrustCommitOutcomeV1, PluginTrustLedgerRowV1, PluginTrustPolicyRegistryErrorV1,
+    PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1, ProvisionOutcomeV1, RetainedPolicyStateV1,
+    RetainedReleaseDecisionV1, TrustedUtcSecondV1,
 };
 
 type RegistryResult<T> = Result<T, PluginTrustPolicyRegistryErrorV1>;
@@ -427,6 +430,25 @@ impl PluginTrustPolicyRegistryV1 for MemoryStore {
             .scope_state(scope)
             .map(|state| state.ledger.clone())
     }
+
+    fn evaluate_current_release(
+        &self,
+        anchor: &PluginTrustPolicyAnchorV1,
+        tps1_bytes: &[u8],
+        evidence: &VerifiedPluginTrustEvidenceV1,
+        projection: &ValidatedPluginManifestProjectionV1,
+        trusted_utc: TrustedUtcSecondV1,
+        tick: u64,
+    ) -> RegistryResult<CurrentReleaseEvaluationV1> {
+        let input = PolicyInputV1 {
+            anchor,
+            tps1_bytes,
+            evidence,
+            utc: trusted_utc,
+            tick,
+        };
+        plan_evaluate(&self.plugin_trust, &input, projection)
+    }
 }
 
 #[cfg(test)]
@@ -733,5 +755,101 @@ mod tests {
         .map_err(|error| format!("{error:?}"))?;
         h.store.fork_admissions.insert(fork, admission);
         assert_activation_refused(h)
+    }
+
+    fn scope_mut(store: &mut MemoryStore) -> TestResult<&mut MemoryScopeV1> {
+        Ok(store
+            .plugin_trust
+            .scopes
+            .get_mut("scope")
+            .ok_or("no scope")?)
+    }
+
+    /// EV5 corruption rows: the pointer equals the authorization, and its decision is missing or
+    /// disagrees with the pointer or the authorization.
+    #[test]
+    fn an_evaluation_with_a_missing_or_inconsistent_decision_is_corrupt_state() -> TestResult {
+        let one = release_one();
+        for case in 0..5 {
+            let mut h = Harness::new()?;
+            let genesis = h.env.genesis()?;
+            h.admit(&genesis, &one, 1)??;
+            let state = scope_mut(&mut h.store)?;
+            match case {
+                // (a) The pointer's decision is absent.
+                0 => state.decisions.clear(),
+                // (b) The decision has another Plugin ID than the pointer.
+                1 => {
+                    for decision in state.decisions.values_mut() {
+                        decision.plugin_id = "plugin-b".to_owned();
+                    }
+                }
+                // (c) Only the decision's release digest changed.
+                2 => {
+                    for decision in state.decisions.values_mut() {
+                        decision.release_digest = [0; 32];
+                    }
+                }
+                // (d) The pointer and the decision agree on a digest the authorization lacks.
+                3 => {
+                    for decision in state.decisions.values_mut() {
+                        decision.release_digest = [0; 32];
+                    }
+                    for active in state.active.values_mut() {
+                        active.release_digest = [0; 32];
+                    }
+                }
+                // (e) Only the pointer's release digest is wrong.
+                _ => {
+                    for active in state.active.values_mut() {
+                        active.release_digest = [0; 32];
+                    }
+                }
+            }
+            assert_eq!(
+                h.evaluate(&genesis, &one)?,
+                Err(PluginTrustPolicyRegistryErrorV1::CorruptState),
+                "case {case}"
+            );
+        }
+        Ok(())
+    }
+
+    /// EV2: one floor present and the other absent is corrupt state after the anchor comparison
+    /// and before the UTC check.
+    #[test]
+    fn a_partial_floor_pair_fails_an_evaluation_after_the_anchor_before_the_clock() -> TestResult {
+        let one = release_one();
+        for partial_root in [true, false] {
+            let mut h = Harness::new()?;
+            let genesis = h.env.genesis()?;
+            h.admit(&genesis, &one, 1)??;
+            let state = scope_mut(&mut h.store)?;
+            if partial_root {
+                state.retained.policy.prv1_floor = None;
+            } else {
+                state.retained.policy.ptr1_floor = None;
+            }
+            for anchor in h.env.anchors_with_one_changed_field()? {
+                let result = h.store.evaluate_current_release(
+                    &anchor,
+                    &genesis.tps1,
+                    &genesis.evidence,
+                    &one.projection()?,
+                    genesis.trusted()?,
+                    genesis.tick,
+                );
+                assert_eq!(
+                    result,
+                    Err(PluginTrustPolicyRegistryErrorV1::AnchorMismatch)
+                );
+            }
+            // A UTC second below the retained highest would regress, but the shape comes first.
+            assert_eq!(
+                h.evaluate(&h.same_policy(40, 5)?, &one)?,
+                Err(PluginTrustPolicyRegistryErrorV1::CorruptState)
+            );
+        }
+        Ok(())
     }
 }

@@ -279,7 +279,8 @@ pub struct SqliteStore {
     /// in autocommit has settled that; while set and the connection is inside
     /// a transaction, counterfactual port reads are refused.
     counterfactual_write_in_doubt: Cell<bool>,
-    /// Whether a Plugin trust registry durability restore failed on this handle; while set,
+    /// Whether a Plugin trust registry durability restore failed on this handle, or a read
+    /// transaction of `evaluate_current_release` could not leave its own transaction; while set,
     /// every registry call fails with `StorePoisoned` until the store is dropped and reopened.
     #[cfg(target_os = "linux")]
     plugin_trust_poisoned: Cell<bool>,
