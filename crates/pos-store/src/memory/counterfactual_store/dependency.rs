@@ -78,6 +78,7 @@ use std::ops::Bound;
 
 #[cfg(any(test, feature = "test-support"))]
 use pos_core::counterfactual_store::test_fixtures::SeededFactualTickV1;
+use pos_core::factual_dependency::BoundFactualNodeV1;
 use pos_core::{
     CoreError, CounterfactualBasisV1, CounterfactualDependencyErrorV1,
     CounterfactualDependencyReadPortV1, CounterfactualDependencyRecordingPortV1,
@@ -245,7 +246,7 @@ impl VisibleSetV1<'_> {
     }
 
     /// The node with the artifact digest and its bound `seq`, if visible.
-    fn digest_node(&self, digest: &Hash) -> Option<(DependencyNodeRecordV1, Option<Seq>)> {
+    fn digest_node(&self, digest: &Hash) -> Option<BoundFactualNodeV1> {
         let key = self.rows.digests.get(digest);
         let seen = key.filter(|held| held.tick() <= self.bound);
         let node = seen.and_then(|held| self.rows.nodes.get(held));
@@ -758,7 +759,7 @@ impl FactualPrefixReadPortV1 for MemoryStore {
         &self,
         timeline: TimelineId,
         digests: &[Hash],
-    ) -> Result<Vec<Option<(DependencyNodeRecordV1, Option<Seq>)>>, CoreError> {
+    ) -> Result<Vec<Option<BoundFactualNodeV1>>, CoreError> {
         self.read_factual(timeline, |sets| {
             let found = |digest: &Hash| first_visible(sets, |set| set.digest_node(digest));
             digests.iter().map(found).collect::<Vec<_>>()
