@@ -465,8 +465,9 @@ fn the_confirmation_counter_must_advance_past_the_source_assertion_counter() -> 
     };
     let (mut rig, mut port) = rig_with(regress)?;
     let outcome = rig.bridge.enroll(&context(), &mut port);
-    // The codec reports every Get verification failure alike (Redmine #563).
-    assert_eq!(outcome, Err(BridgeError::Rejected(RejectedCode::Signature)));
+    let regression = BridgeError::Rejected(RejectedCode::CounterRegression);
+    assert_eq!(outcome, Err(regression));
+    assert!(regression.is_security_event());
     assert_eq!(port.calls, [Call::Unbound, Call::Seal, Call::Abandon]);
     let advance = HonestConfig {
         create_prf: CreatePrf::EnabledOnly,

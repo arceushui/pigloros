@@ -338,8 +338,8 @@ fn every_verification_failure_is_classified() -> TestResult {
             0,
             rejected(RejectedCode::UserHandleMismatch),
         ),
-        (eligible, 0, rejected(RejectedCode::Signature)),
-        (|_| {}, 5, rejected(RejectedCode::Signature)),
+        (eligible, 0, rejected(RejectedCode::BackupFlags)),
+        (|_| {}, 5, rejected(RejectedCode::CounterRegression)),
         (
             no_prf,
             0,
@@ -420,7 +420,7 @@ fn a_create_without_a_returned_prf_registers_without_one() -> TestResult {
 }
 
 #[test]
-fn an_attestation_that_fails_verification_is_rejected() -> TestResult {
+fn an_attestation_with_malformed_client_data_is_a_protocol_error() -> TestResult {
     let reply = AttestationReplyV1::new(
         CeremonyId::from_bytes(bytes16(0)),
         &CREDENTIAL_ID,
@@ -437,7 +437,7 @@ fn an_attestation_that_fails_verification_is_rejected() -> TestResult {
     let mut rig = DriverRig::new(tampered(Tamper::Raw(payload)), SurfaceConfig::default())?;
     let plan = create_plan(&rig.clock);
     let (result, _) = rig.run(plan);
-    assert_eq!(failure(&result)?, rejected(RejectedCode::AttestationFormat));
+    assert_eq!(failure(&result)?, protocol(ProtocolCode::Malformed));
     Ok(())
 }
 
@@ -1156,7 +1156,7 @@ fn an_equal_counter_or_a_zero_after_a_nonzero_counter_is_a_regression() -> TestR
         };
         let (mut rig, plan) = get_rig(page, stored)?;
         let (result, _) = rig.run(plan);
-        assert_eq!(failure(&result)?, rejected(RejectedCode::Signature));
+        assert_eq!(failure(&result)?, rejected(RejectedCode::CounterRegression));
     }
     Ok(())
 }
