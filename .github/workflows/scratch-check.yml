@@ -11,9 +11,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - ref: redmine/579-signed-release-test-world
-            id: p579
-            pkg: pos-plugin-publisher
+          - ref: redmine/577-failure-surface
+            id: p577
+            pkg: "-p pos-runtime -p pos-plugin-supervisor"
+            test: "--all-features"
+          - ref: redmine/578-airgapped-profile
+            id: p578
+            pkg: "-p pos-runtime -p pos-plugin-supervisor -p pos-plugin-worker"
+            test: "--all-features"
+          - ref: redmine/580-read-only-evaluation
+            id: p580
+            pkg: "-p pos-store -p pos-plugin-publisher"
             test: "--all-features"
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +40,7 @@ jobs:
           git checkout -q -f ${{ matrix.ref }} 2>/dev/null || git checkout -q -f HEAD~1
       - name: clippy keep-going
         run: |
-          CARGO_TERM_COLOR=never cargo clippy --keep-going --message-format=short --locked --workspace --all-targets --all-features -- -D warnings -W clippy::pedantic 2>&1 | grep -E 'error|warning' | grep -E 'crates/pos-(conformance|crypto|plugin-publisher|plugin-release|store)' | sort -u | head -80
+          CARGO_TERM_COLOR=never cargo clippy --keep-going --message-format=short --locked --workspace --all-targets --all-features -- -D warnings -W clippy::pedantic 2>&1 | grep -E 'error|warning' | grep -E '(crates|apps)/' | sort -u | head -80
       - name: targeted tests
         run: |
-          CARGO_TERM_COLOR=never cargo test --locked --no-fail-fast -p ${{ matrix.pkg }} ${{ matrix.test }} 2>&1 | grep -E -A14 '^---- |^error(\[|:)|test result' | head -200
+          CARGO_TERM_COLOR=never cargo test --locked --no-fail-fast ${{ matrix.pkg }} ${{ matrix.test }} 2>&1 | grep -E -A14 '^---- |^error(\[|:)|test result' | head -200
