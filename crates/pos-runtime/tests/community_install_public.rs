@@ -52,7 +52,7 @@ fn run(
     let registry = &mut world.registry;
     let store = &world.store;
     Ok(install_community_release_v1(
-        store, address, registry, &mut clock, request,
+        store, address, registry, &mut clock, &request,
     ))
 }
 
@@ -169,7 +169,7 @@ fn a_source_that_would_change_on_a_second_read_cannot_affect_the_install() -> Te
     };
     let registry = &mut world.registry;
     let address = first.address();
-    let result = install_community_release_v1(&source, address, registry, &mut clock, request);
+    let result = install_community_release_v1(&source, address, registry, &mut clock, &request);
     let installed = result?;
     assert_eq!(source.reads.get(), 1);
     let decision = installed.admission().decision();
@@ -254,7 +254,7 @@ fn a_bundle_of_another_address_is_not_found_and_installs_nothing() -> TestResult
     };
     let registry = &mut world.registry;
     let address = first.address();
-    let result = install_community_release_v1(&source, address, registry, &mut clock, request);
+    let result = install_community_release_v1(&source, address, registry, &mut clock, &request);
     assert_eq!(
         result.err(),
         Some(Fault::Source(ReleaseSourceErrorV1::NotFound))

@@ -96,7 +96,7 @@ pub fn install_community_release_v1(
     address: &BundleAddressV1,
     registry: &mut impl PluginTrustPolicyRegistryV1,
     wall: &mut impl TrustedWallSourceV1,
-    request: CommunityInstallRequestV1<'_>,
+    request: &CommunityInstallRequestV1<'_>,
 ) -> Result<InstalledPluginReleaseV1, CommunityInstallErrorV1> {
     let bundle = source
         .read_verified(address)
