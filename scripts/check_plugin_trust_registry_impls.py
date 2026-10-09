@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restrict the ADR-103 revision 4 Plugin trust policy registry to the trusted composition.
+"""Restrict the ADR-103 revisions 4 and 5 Plugin trust policy registry to the trusted composition.
 
 `PluginTrustPolicyRegistryV1` is a trusted-host port: a registry that retains
 untruthful state, a forged trusted UTC second, or a caller-made receipt can
@@ -16,18 +16,23 @@ source of every `.rs` file outside the top-level build and tooling directories:
    `advance_policy` follow the same allow-list. Files under a `tests`
    directory, gated fixture files, and `#[cfg(test)]` items are tests.
 3. `admit` and `rollback` may be called only from tests and `test-support`
-   fixtures (decision 1), with one exception. ADR-103 revision 4 names no
-   installer exemption; decision 1 only says the supported order is
-   verify-then-admit (the port has no signature input). The signed installer
-   module `crates/pos-plugin-publisher/src/install.rs` (#573) is that
-   sanctioned verify-then-admit caller, so it is the only non-test call site
-   of `admit` and the only non-test file that may construct
-   `TrustedUtcSecondV1` outside the trusted host. It verifies the PMF1
-   release signature before it calls `admit`. It may not call
-   `rollback`, `provision`, or `advance_policy`, nor implement the port. Any
-   other call site, including one inside `pos-store`, is rejected. A file can
-   call a method of the port only after naming the trait or glob importing
-   its module, so method names are checked only in such files.
+   fixtures (revision 4 decisions 1 and 10), with one exception. Revision 4
+   names no installer exemption; decision 1 only says the supported order is
+   verify-then-admit (the port has no signature input). ADR-103 revision 5
+   (decision 3) ratifies the exemption that #573 shipped: the signed installer
+   module `crates/pos-plugin-publisher/src/install.rs` is the sole non-test
+   verify-then-admit caller, so it is the only non-test call site of `admit`
+   and the only non-test file that may construct `TrustedUtcSecondV1` outside
+   the trusted host, until the later amendment that adds the PMF1 signature
+   token. It verifies the PMF1 release signature before it calls `admit`. It
+   may not call `rollback`, `provision`, or `advance_policy`, nor implement the
+   port. `rollback` has no production entry point: no non-test file may call
+   it. Any other call site, including one inside `pos-store`, is rejected. A
+   file can call a method of the port only after naming the trait or glob
+   importing its module, so method names are checked only in such files.
+   `evaluate_current_release` is read-only and returns no authority token, so
+   it has no call-site rule; `CurrentReleaseEvaluationV1` is one of the
+   receipt types of rule 1, so only the trusted host constructs one.
 4. Every public item of the registry modules (functions, types, constants,
    fields, enum variants, and re-exports) is linted against the forbidden-name
    list: no name may contain `signature`, `verified_signature`, `is_admitted`,
@@ -53,7 +58,8 @@ from check_trusted_clock_port_impls import (
 
 PORT = "PluginTrustPolicyRegistryV1"
 ALLOWED_PREFIXES = ("crates/pos-store/", "crates/pos-runtime/")
-# Not in ADR-103 revision 4: the sanctioned verify-then-admit caller (#573), see rule 3.
+# Named by ADR-103 revision 5 (not by revision 4): the sanctioned verify-then-admit caller (#573),
+# until the signature-token amendment; see rule 3.
 ALLOWED_CALL_BY_FILE = "crates/pos-plugin-publisher/src/install.rs"
 GUARDED_NAMES = (PORT, "TrustedUtcSecondV1", "PluginTrustPolicyAnchorV1")
 RECEIPT_TYPES = (
@@ -65,6 +71,7 @@ RECEIPT_TYPES = (
     "PluginTrustLedgerRowV1",
     "ActivationEventIdentityV1",
     "RollbackFactsV1",
+    "CurrentReleaseEvaluationV1",
 )
 FORBIDDEN_TERMS = (
     "signature",

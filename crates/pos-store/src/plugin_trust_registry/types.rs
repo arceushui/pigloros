@@ -4,7 +4,7 @@
 //! crate-private, so only the registry adapters can mint one, and it exposes
 //! read accessors only. None of them carries a PMF1 signature-validity claim,
 //! and no registry method accepts one as live authority (ADR-103 revision 4,
-//! decision 1).
+//! decision 1, and revision 5 for [`CurrentReleaseEvaluationV1`]).
 
 use pos_core::{Event, EventDraft, EventId, SchemaVersion, Seq, TimelineId};
 
@@ -486,6 +486,109 @@ impl RetainedPolicyStateV1 {
     #[must_use]
     pub const fn highest_trusted_utc_second(&self) -> Option<i64> {
         self.highest_trusted_utc_second
+    }
+}
+
+/// The result of one read-only current-release evaluation (ADR-103 revision 5).
+///
+/// It claims one thing only: at the trusted UTC second and Tick it records, under the retained
+/// policy, the exact release passed every trust-policy check and is the active release of its
+/// Plugin ID. It confers no authority at any other coordinates, is not a receipt, is not stored,
+/// and no method of the port accepts it. It carries no signature-validity claim.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CurrentReleaseEvaluationV1 {
+    pub(crate) scope: String,
+    pub(crate) plugin_id: String,
+    pub(crate) pmf1_digest: [u8; 32],
+    pub(crate) release_digest: [u8; 32],
+    pub(crate) previous_release_digest: Option<[u8; 32]>,
+    pub(crate) tps1_digest: [u8; 32],
+    pub(crate) tps1_epoch: u64,
+    pub(crate) tps1_effective_position: u64,
+    pub(crate) ptr1_floor: (u64, [u8; 32]),
+    pub(crate) prv1_floor: (u64, [u8; 32]),
+    pub(crate) trusted_utc_second: i64,
+    pub(crate) tick: u64,
+    pub(crate) activation_event: ActivationEventIdentityV1,
+}
+
+impl CurrentReleaseEvaluationV1 {
+    /// The exact policy scope.
+    #[must_use]
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    /// The exact Plugin ID.
+    #[must_use]
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
+    }
+
+    /// The active release's complete PMF1 digest.
+    #[must_use]
+    pub const fn pmf1_digest(&self) -> [u8; 32] {
+        self.pmf1_digest
+    }
+
+    /// The active release's PMF1 release digest.
+    #[must_use]
+    pub const fn release_digest(&self) -> [u8; 32] {
+        self.release_digest
+    }
+
+    /// The active release's PMF1 previous-release digest.
+    #[must_use]
+    pub const fn previous_release_digest(&self) -> Option<[u8; 32]> {
+        self.previous_release_digest
+    }
+
+    /// The retained TPS1 full-byte digest at the time of the call.
+    #[must_use]
+    pub const fn tps1_digest(&self) -> [u8; 32] {
+        self.tps1_digest
+    }
+
+    /// The retained TPS1 epoch at the time of the call.
+    #[must_use]
+    pub const fn tps1_epoch(&self) -> u64 {
+        self.tps1_epoch
+    }
+
+    /// The retained TPS1 effective Timeline position at the time of the call.
+    #[must_use]
+    pub const fn tps1_effective_position(&self) -> u64 {
+        self.tps1_effective_position
+    }
+
+    /// The retained PTR1 `(root_version, digest)` floor at the time of the call.
+    #[must_use]
+    pub const fn ptr1_floor(&self) -> (u64, [u8; 32]) {
+        self.ptr1_floor
+    }
+
+    /// The retained PRV1 `(policy_epoch, digest)` floor at the time of the call.
+    #[must_use]
+    pub const fn prv1_floor(&self) -> (u64, [u8; 32]) {
+        self.prv1_floor
+    }
+
+    /// The trusted UTC second the evaluation ran at.
+    #[must_use]
+    pub const fn trusted_utc_second(&self) -> i64 {
+        self.trusted_utc_second
+    }
+
+    /// The host Tick the evaluation ran at.
+    #[must_use]
+    pub const fn tick(&self) -> u64 {
+        self.tick
+    }
+
+    /// The identity of the Event that made the evaluated release active.
+    #[must_use]
+    pub const fn activation_event(&self) -> &ActivationEventIdentityV1 {
+        &self.activation_event
     }
 }
 

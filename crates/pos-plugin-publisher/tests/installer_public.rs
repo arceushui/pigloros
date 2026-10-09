@@ -267,6 +267,8 @@ fn every_registry_error_variant_passes_through_typed() -> TestResult {
         PluginTrustPolicyRegistryErrorV1::StorageFailed,
         PluginTrustPolicyRegistryErrorV1::StorageIndeterminate,
         PluginTrustPolicyRegistryErrorV1::StorePoisoned,
+        PluginTrustPolicyRegistryErrorV1::PolicyNotAdvanced,
+        PluginTrustPolicyRegistryErrorV1::ReleaseNotActive,
         PluginTrustPolicyRegistryErrorV1::Bridge(PluginTrustBridgeErrorV1::EvaluationUtcMismatch),
         PluginTrustPolicyRegistryErrorV1::Floor(pos_conformance::PluginFloorErrorV1::Rollback(
             PluginFloorKindV1::Root,

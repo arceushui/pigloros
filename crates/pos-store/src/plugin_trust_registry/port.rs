@@ -1,4 +1,4 @@
-//! The Plugin trust policy registry port.
+//! The Plugin trust policy registry port (ADR-103 revisions 4 and 5).
 
 use pos_conformance::PluginTrustPolicyAnchorV1;
 use pos_crypto::plugin_trust::{
@@ -8,12 +8,12 @@ use pos_crypto::plugin_trust::{
 use super::error::PluginTrustPolicyRegistryErrorV1;
 use super::types::{
     ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
-    PluginRollbackReceiptV1, PluginTrustLedgerRowV1, PolicyAdvanceOutcomeV1, ProvisionOutcomeV1,
-    RetainedPolicyStateV1, RetainedReleaseDecisionV1,
+    CurrentReleaseEvaluationV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
+    PolicyAdvanceOutcomeV1, ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1,
 };
 use super::utc::TrustedUtcSecondV1;
 
-/// The durable Plugin trust policy registry (ADR-103 revision 4).
+/// The durable Plugin trust policy registry (ADR-103 revisions 4 and 5).
 ///
 /// Only the private trusted composition boundary constructs the anchor,
 /// trusted-time, Tick, and manifest-projection inputs;
@@ -24,8 +24,9 @@ use super::utc::TrustedUtcSecondV1;
 /// them as live authority.
 ///
 /// Writes take `&mut self` and commit all of their state or none; reads take
-/// `&self`. A write validates the signed TPS1 bytes itself with
-/// `authenticate_plugin_tps1_v1`; no caller supplies an authenticated TPS1.
+/// `&self`, and so does the read-only `evaluate_current_release`. A write validates the
+/// signed TPS1 bytes itself with `authenticate_plugin_tps1_v1`; no caller supplies an
+/// authenticated TPS1.
 pub trait PluginTrustPolicyRegistryV1 {
     /// Create the scope from the signed genesis TPS1, or confirm it already exists.
     ///
@@ -119,4 +120,23 @@ pub trait PluginTrustPolicyRegistryV1 {
         &self,
         scope: &str,
     ) -> Result<Vec<PluginTrustLedgerRowV1>, PluginTrustPolicyRegistryErrorV1>;
+
+    /// Re-run the admission checks of `projection` at a fresh UTC second and Tick and require
+    /// it to be the active release of its Plugin ID, writing nothing.
+    ///
+    /// Takes no Event input, never adopts newer policy, and never raises the highest trusted
+    /// UTC second. The returned value is not a receipt and no method accepts it.
+    ///
+    /// # Errors
+    /// Returns the closed registry error of the first failing step, including
+    /// `PolicyNotAdvanced` and `ReleaseNotActive`.
+    fn evaluate_current_release(
+        &self,
+        anchor: &PluginTrustPolicyAnchorV1,
+        tps1_bytes: &[u8],
+        evidence: &VerifiedPluginTrustEvidenceV1,
+        projection: &ValidatedPluginManifestProjectionV1,
+        trusted_utc: TrustedUtcSecondV1,
+        tick: u64,
+    ) -> Result<CurrentReleaseEvaluationV1, PluginTrustPolicyRegistryErrorV1>;
 }

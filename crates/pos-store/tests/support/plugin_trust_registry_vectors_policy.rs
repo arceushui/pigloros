@@ -1004,6 +1004,14 @@ fn registry_error_messages_are_stable_and_secret_free() {
             RegistryError::StorePoisoned,
             "registry storage handle is poisoned",
         ),
+        (
+            RegistryError::PolicyNotAdvanced,
+            "Plugin trust policy has not been adopted by the registry",
+        ),
+        (
+            RegistryError::ReleaseNotActive,
+            "release is not the active release of its Plugin ID",
+        ),
     ];
     for (error, message) in direct {
         assert_eq!(error.to_string(), message);

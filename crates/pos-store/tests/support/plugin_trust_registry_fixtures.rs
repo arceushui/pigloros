@@ -1,4 +1,4 @@
-//! Shared Plugin trust policy registry fixtures (ADR-103 revision 4).
+//! Shared Plugin trust policy registry fixtures (ADR-103 revisions 4 and 5).
 //!
 //! One [`Env`] is one policy scope with an operator key, a PTR1 root key, and
 //! publisher keys. [`Spec`] picks the PTR1/PRV1 chain shape and the evaluation
@@ -36,9 +36,9 @@ use pos_store::{
     memory::MemoryStore,
     plugin_trust_registry::{
         ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
-        PluginRollbackReceiptV1, PluginTrustLedgerRowV1, PluginTrustPolicyRegistryV1,
-        PolicyAdvanceOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1,
-        TrustedUtcSecondV1,
+        CurrentReleaseEvaluationV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
+        PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1, RetainedPolicyStateV1,
+        RetainedReleaseDecisionV1, TrustedUtcSecondV1,
     },
 };
 
@@ -993,6 +993,74 @@ impl<S: Backend> Harness<S> {
     ) -> TestResult {
         let before = self.snapshot(&[manifest])?;
         assert_eq!(self.admit(material, manifest, 1)?, Err(expected));
+        assert_eq!(self.snapshot(&[manifest])?, before);
+        Ok(())
+    }
+
+    /// Evaluate `manifest` read-only with `material`, its own TPS1 bytes, and its own coordinates.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error; the registry result is the value.
+    pub fn evaluate(
+        &self,
+        material: &Material,
+        manifest: &ManifestSpec,
+    ) -> TestResult<Registry<CurrentReleaseEvaluationV1>> {
+        self.evaluate_bytes(&material.tps1, material, manifest)
+    }
+
+    /// Evaluate with `tps1` as the supplied TPS1 bytes and the evidence and coordinates of
+    /// `material`.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error; the registry result is the value.
+    pub fn evaluate_bytes(
+        &self,
+        tps1: &[u8],
+        material: &Material,
+        manifest: &ManifestSpec,
+    ) -> TestResult<Registry<CurrentReleaseEvaluationV1>> {
+        self.evaluate_raw(tps1, material, manifest, material.utc, material.tick)
+    }
+
+    /// Evaluate with every input explicit: `tps1`, the evidence of `material`, and the call's
+    /// own UTC second and Tick.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error; the registry result is the value.
+    pub fn evaluate_raw(
+        &self,
+        tps1: &[u8],
+        material: &Material,
+        manifest: &ManifestSpec,
+        utc: i64,
+        tick: u64,
+    ) -> TestResult<Registry<CurrentReleaseEvaluationV1>> {
+        Ok(self.store.evaluate_current_release(
+            &self.env.anchor,
+            tps1,
+            &material.evidence,
+            &manifest.projection()?,
+            trusted(utc)?,
+            tick,
+        ))
+    }
+
+    /// Evaluate `manifest` and assert that exactly `expected` came back with nothing changed.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
+    ///
+    /// # Panics
+    /// Panics when the assertion fails.
+    pub fn assert_evaluate_denied(
+        &self,
+        material: &Material,
+        manifest: &ManifestSpec,
+        expected: RegistryError,
+    ) -> TestResult {
+        let before = self.snapshot(&[manifest])?;
+        assert_eq!(self.evaluate(material, manifest)?, Err(expected));
         assert_eq!(self.snapshot(&[manifest])?, before);
         Ok(())
     }
