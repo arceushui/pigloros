@@ -1291,6 +1291,9 @@ pub enum FactualCutV1 {
     },
 }
 
+/// A recorded node with the `seq` it is bound to, when it is an Event node.
+pub type BoundFactualNodeV1 = (DependencyNodeRecordV1, Option<Seq>);
+
 /// Host-only reads over a Timeline's recorded factual prefix.
 ///
 /// Every method resolves through the Timeline's fork ancestry, stopping at
@@ -1334,7 +1337,7 @@ pub trait FactualPrefixReadPortV1 {
         &self,
         timeline: TimelineId,
         digests: &[Hash],
-    ) -> Result<Vec<Option<(DependencyNodeRecordV1, Option<Seq>)>>, CoreError>;
+    ) -> Result<Vec<Option<BoundFactualNodeV1>>, CoreError>;
 
     /// Return the latest step node of an owner, if one is recorded.
     ///

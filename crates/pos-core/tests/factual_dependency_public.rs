@@ -1260,7 +1260,7 @@ impl FactualPrefixReadPortV1 for FakeStore {
         &self,
         _timeline: TimelineId,
         digests: &[Hash],
-    ) -> Result<Vec<Option<(DependencyNodeRecordV1, Option<Seq>)>>, CoreError> {
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, CoreError> {
         Ok(digests
             .iter()
             .map(|digest| self.by_digest.get(digest).cloned())
