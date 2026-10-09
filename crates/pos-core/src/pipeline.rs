@@ -699,6 +699,10 @@ pub enum PipelineOutcomeV1 {
     AdmissionConflict,
     Committed(PipelineCommitReceiptV1),
     RecoveredDuplicate(PipelineCommitReceiptV1),
+    /// The basis declares a factual Tick dependency record the store refuses.
+    InvalidDependencyDeclaration,
+    /// The Timeline's recorded dependency set accepts no further Tick.
+    DependencySetExhausted,
 }
 
 fn invalid_draft(draft: &EventDraft) -> bool {

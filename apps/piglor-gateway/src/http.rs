@@ -580,6 +580,7 @@ impl GatewayError {
             | Self::ForkDepthTooLarge { .. }
             | Self::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::EventReadTimeExceeded { .. } => StatusCode::GATEWAY_TIMEOUT,
+            Self::DependencySetExhausted => StatusCode::INSUFFICIENT_STORAGE,
             Self::CompatibilityReadTruncated { .. }
             | Self::IngressConflict
             | Self::ActionObservationStale
@@ -2087,6 +2088,8 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
         let r = GatewayError::ActionAdmissionUnavailable.into_response();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let r = GatewayError::DependencySetExhausted.into_response();
+        assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
         let r = GatewayError::AuthorizationDenied.into_response();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
         let r = GatewayError::ActionRegistry(pos_runtime::RuntimeError::UnknownEventType(

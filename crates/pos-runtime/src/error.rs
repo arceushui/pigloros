@@ -233,6 +233,8 @@ const fn outcome_discriminant(outcome: &pos_core::PipelineOutcomeV1) -> &'static
         Outcome::AdmissionConflict => "AdmissionConflict",
         Outcome::Committed(_) => "Committed",
         Outcome::RecoveredDuplicate(_) => "RecoveredDuplicate",
+        Outcome::InvalidDependencyDeclaration => "InvalidDependencyDeclaration",
+        Outcome::DependencySetExhausted => "DependencySetExhausted",
     }
 }
 
@@ -330,6 +332,27 @@ mod tests {
         };
         assert!(e.to_string().contains("Live"));
         assert!(e.to_string().contains("Replay"));
+    }
+
+    #[test]
+    fn the_dependency_outcomes_are_named_by_their_discriminant() {
+        use pos_core::PipelineOutcomeV1;
+
+        for (outcome, name) in [
+            (
+                PipelineOutcomeV1::InvalidDependencyDeclaration,
+                "InvalidDependencyDeclaration",
+            ),
+            (
+                PipelineOutcomeV1::DependencySetExhausted,
+                "DependencySetExhausted",
+            ),
+        ] {
+            assert_eq!(
+                RuntimeError::ScheduledPassNotAdmitted(Box::new(outcome)).to_string(),
+                format!("scheduled pass was not admitted: {name}")
+            );
+        }
     }
 
     #[test]

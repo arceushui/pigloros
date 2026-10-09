@@ -1608,6 +1608,10 @@ pub enum GatewayError {
     /// human action; a host fault, never a rejection of the proposal.
     #[error("human action admission is unavailable")]
     ActionAdmissionUnavailable,
+    /// The Timeline's recorded dependency set accepts no further Tick; the
+    /// limit is permanent, so retrying the same request cannot help.
+    #[error("timeline dependency set is exhausted")]
+    DependencySetExhausted,
     /// The provider-neutral host authorization decision denied the operation.
     #[error("authorization denied")]
     AuthorizationDenied,
@@ -1787,6 +1791,8 @@ fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> Gatew
         }
         PipelineOutcomeV1::PolicyIndeterminate => GatewayError::AuthorizationUnavailable,
         PipelineOutcomeV1::ResourceExhausted => GatewayError::EventLimitReached { maximum },
+        PipelineOutcomeV1::InvalidDependencyDeclaration => GatewayError::ActionAdmissionUnavailable,
+        PipelineOutcomeV1::DependencySetExhausted => GatewayError::DependencySetExhausted,
         PipelineOutcomeV1::InvalidObservation
         | PipelineOutcomeV1::AdmissionConflict
         | PipelineOutcomeV1::DomainConflict => GatewayError::ActionObservationStale,
