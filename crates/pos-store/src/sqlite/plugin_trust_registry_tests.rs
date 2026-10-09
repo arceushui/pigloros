@@ -1065,6 +1065,25 @@ fn evaluate_on(
     ))
 }
 
+/// A poisoned handle refuses an evaluation before the anchor, the TPS1 bytes, the release, and
+/// the clock are looked at.
+fn assert_poisoned_before_anything(h: &H) -> TestResult {
+    let stale = h.same_policy(40, 5)?;
+    let bad = ManifestSpec::new("plugin-z", 0x51, 0x51, None);
+    let anchors = h.env.anchors_with_one_changed_field()?;
+    let anchor = anchors.first().ok_or("no changed anchor")?;
+    let result = h.store.evaluate_current_release(
+        anchor,
+        b"garbage",
+        &stale.evidence,
+        &bad.projection()?,
+        stale.trusted()?,
+        stale.tick,
+    );
+    assert_eq!(result, Err(Error::StorePoisoned));
+    Ok(())
+}
+
 /// Installs the evaluation snapshot probe and clears it when dropped.
 struct Probe;
 
@@ -1103,18 +1122,23 @@ fn an_evaluation_reports_schema_and_scope_row_corruption_before_the_anchor() -> 
         let h = admitted()?;
         raw(&h, sql)?;
         let genesis = h.env.genesis()?;
+        // Garbage TPS1 bytes, an unauthorized release, and a stale clock fail later steps too.
+        let stale = h.same_policy(40, 5)?;
+        let bad = ManifestSpec::new("plugin-z", 0x51, 0x51, None);
         for anchor in h.env.anchors_with_one_changed_field()? {
             let result = h.store.evaluate_current_release(
                 &anchor,
-                &genesis.tps1,
-                &genesis.evidence,
-                &one.projection()?,
-                genesis.trusted()?,
-                genesis.tick,
+                b"garbage",
+                &stale.evidence,
+                &bad.projection()?,
+                stale.trusted()?,
+                stale.tick,
             );
             assert_eq!(result, Err(Error::CorruptState), "{sql}");
             assert!(h.store.conn.is_autocommit(), "{sql}");
         }
+        let corrupt = h.evaluate_raw(b"garbage", &stale, &bad, 40, 5)?;
+        assert_eq!(corrupt, Err(Error::CorruptState), "{sql}");
         let evaluated = h.evaluate(&genesis, &one)?;
         assert_eq!(evaluated, Err(Error::CorruptState), "{sql}");
     }
@@ -1294,6 +1318,7 @@ fn a_handle_poisoned_by_a_restore_failure_refuses_an_evaluation() -> TestResult 
     );
     drop(fault);
     assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::StorePoisoned));
+    assert_poisoned_before_anything(&h)?;
     Ok(())
 }
 
@@ -1334,6 +1359,30 @@ fn an_evaluation_reads_one_snapshot_while_a_second_handle_commits() -> TestResul
     assert_eq!(h.active("plugin-a")?.pmf1_digest(), two.pmf1_digest());
     h.assert_evaluate_denied(&genesis, &one, Error::ReleaseNotActive)?;
     assert!(h.evaluate(&genesis, &two)?.is_ok());
+    Ok(())
+}
+
+// EV10, schema: the schema check is inside the snapshot. A second handle drops a table the
+// evaluation still has to read, after the schema check; the evaluation does not observe it.
+#[test]
+fn an_evaluation_validates_the_schema_inside_its_snapshot() -> TestResult {
+    let h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let one = release_one();
+    let path = path_of(&h.guard)?;
+    let dropped = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&dropped);
+    let probe = Probe::set(move || {
+        let result = Connection::open(&path)
+            .and_then(|other| other.execute_batch("DROP TABLE plugin_trust_decisions"));
+        flag.store(result.is_ok(), Ordering::SeqCst);
+    });
+    let evaluation = h.evaluate(&genesis, &one)??;
+    drop(probe);
+    assert!(dropped.load(Ordering::SeqCst));
+    assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest());
+    // The next call sees the partial table set.
+    assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::CorruptState));
     Ok(())
 }
 
@@ -1396,6 +1445,7 @@ fn a_stuck_rollback_after_a_failed_evaluation_poisons_every_later_call() -> Test
     // before it could try a nested `BEGIN`.
     assert!(!h.store.conn.is_autocommit());
     assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::StorePoisoned));
+    assert_poisoned_before_anything(&h)?;
     assert_eq!(h.advance(&genesis)?, Err(Error::StorePoisoned));
     assert_eq!(h.admit(&genesis, &one, 2)?, Err(Error::StorePoisoned));
     let store = &h.store;

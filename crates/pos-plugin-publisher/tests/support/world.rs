@@ -253,7 +253,7 @@ impl World {
     /// A default world whose spy registry stamps its evaluations from `clock`.
     ///
     /// The test creates the `Arc` once and shares it with every other recorder that must be
-    /// ordered against the registry (see `SpyRegistry::with_clock`).
+    /// ordered against the registry (it becomes the spy's `clock`).
     ///
     /// # Errors
     /// Returns the fixture construction or registry error.

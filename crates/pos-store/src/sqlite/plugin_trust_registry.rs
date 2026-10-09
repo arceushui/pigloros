@@ -542,13 +542,13 @@ impl SqliteStore {
     /// WAL requirement, no `synchronous` change, no `BEGIN IMMEDIATE`: a read-only handle works.
     fn plugin_trust_read_transaction<T>(
         &self,
-        work: impl FnOnce(&Self) -> RegistryResult<T>,
+        work: impl FnOnce() -> RegistryResult<T>,
     ) -> RegistryResult<T> {
         self.ensure_plugin_trust_usable()?;
         self.conn
             .execute_batch("BEGIN")
             .map_err(|error| storage_error(&error))?;
-        match work(self) {
+        match work() {
             Ok(value) => self.finish_read(value),
             Err(error) => {
                 self.abandon_read();
@@ -727,9 +727,7 @@ impl PluginTrustPolicyRegistryV1 for SqliteStore {
             utc: trusted_utc,
             tick,
         };
-        self.plugin_trust_read_transaction(|store: &Self| {
-            store.evaluate_in_read(&input, projection)
-        })
+        self.plugin_trust_read_transaction(|| self.evaluate_in_read(&input, projection))
     }
 }
 
