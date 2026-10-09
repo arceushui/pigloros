@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use pos_core::counterfactual_store::test_fixtures::{
-    frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, text_field, uint,
-    SeededFactualTickV1,
+    frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, text_field,
+    uint, SeededFactualTickV1,
 };
 use pos_core::{
     CanonicalBytes, CoreError, CounterfactualBasisV1, CounterfactualDependencyErrorV1,
@@ -1626,7 +1626,9 @@ fn f8_parent_prefix_reads_stitch_ancestors_through_their_cuts() {
     let store = &lineage.store;
     let [first, second, third] = root_ticks();
     let rows = |ticks: &[&SeededFactualTickV1]| -> Vec<NodeRow> {
-        let nodes = ticks.iter().flat_map(|seeded| seeded.record.nodes().to_vec());
+        let nodes = ticks
+            .iter()
+            .flat_map(|seeded| seeded.record.nodes().to_vec());
         sorted(nodes.collect())
     };
     let inherited = rows(&[&first, &second]);
