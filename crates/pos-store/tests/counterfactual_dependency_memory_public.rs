@@ -1716,3 +1716,63 @@ fn f9_factual_reads_fail_closed_without_a_gate_or_past_a_blocked_ancestor() {
         CoreError::ErasureContainmentUnavailable
     ));
 }
+
+#[test]
+fn f2_cut_tick_at_is_a_boundary_on_a_timeline_without_ticks_and_at_seq_zero() {
+    let mut lineage = lineage();
+    let bare = ok(lineage.store.create_timeline("factual-bare-cut")).id();
+    let events: Vec<EventDraft> = (0..3).map(draft).collect();
+    ok(lineage.store.append(bare, &events));
+    let store = &lineage.store;
+
+    // No Tick is recorded, so every `seq`, beyond the head too, is a boundary.
+    for seq in [0, 1, 3, 50] {
+        let cut = store.cut_tick_at(bare, Seq::from_u64(seq));
+        assert_eq!(ok(cut), boundary(0));
+    }
+    let zero = store.cut_tick_at(bare, Seq::ZERO);
+    assert_eq!(ok(zero), boundary(0));
+    // `Seq::ZERO` precedes the first Tick of a recorded Timeline too.
+    let root_zero = store.cut_tick_at(lineage.root, Seq::ZERO);
+    assert_eq!(ok(root_zero), boundary(0));
+}
+
+#[test]
+fn f3_a_split_tick_clipped_at_two_levels_is_a_boundary_for_the_deepest_fork() {
+    let lineage = lineage();
+    // The Fork at 7 sees the root through 6 and the middle Fork through 7. The
+    // root's Tick 3 (6 to 8) and the middle Fork's Tick 3 (9) both end above
+    // those limits, so neither splits a cut here; only Tick 1 (2 to 4) does.
+    let cases = [
+        (3, mid_tick(0, 1)),
+        (4, boundary(1)),
+        (5, boundary(2)),
+        (6, boundary(2)),
+        (7, boundary(2)),
+        (8, boundary(2)),
+        (9, boundary(2)),
+        (12, boundary(2)),
+    ];
+    for (seq, expected) in cases {
+        let cut = lineage.store.cut_tick_at(lineage.deep, Seq::from_u64(seq));
+        assert_eq!(ok(cut), expected);
+    }
+}
+
+#[test]
+fn f8_paging_resumes_after_a_cursor_inside_an_ancestor_segment() {
+    let lineage = lineage();
+    let store = &lineage.store;
+    let scope = prefix_scope(lineage.mid, 9);
+    let all = ok(collect_nodes(store, scope, 50));
+    assert_eq!(all.len(), 8);
+
+    // Rows 0 to 5 are the root's segment, rows 6 and 7 the Fork's own.
+    for (index, limit) in [(1_usize, 50_usize), (1, 3), (5, 50), (5, 1)] {
+        let after = Some(all[index].cursor());
+        let page = ok(store.read_dependency_nodes(&request(scope, after, limit)));
+        let rest = &all[index + 1..];
+        assert_eq!(page.items(), &rest[..rest.len().min(limit)]);
+        assert_eq!(page.next().is_some(), rest.len() > limit);
+    }
+}
