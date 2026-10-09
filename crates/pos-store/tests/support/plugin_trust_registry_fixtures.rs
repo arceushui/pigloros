@@ -405,6 +405,25 @@ pub fn tps1(
     evidence: &VerifiedPluginTrustEvidenceV1,
     spec: &TpsSpec,
 ) -> TestResult<Vec<u8>> {
+    tps1_signed_by(scope, evidence, spec, &operator_signer())
+}
+
+/// A key that is not the pinned operator key.
+#[must_use]
+pub fn foreign_operator_signer() -> SigningKey {
+    SigningKey::from_bytes(&[0x12; 32])
+}
+
+/// The TPS1 of [`tps1`], signed by `signer` instead of the pinned operator key.
+///
+/// # Errors
+/// Returns the fixture construction or registry error.
+pub fn tps1_signed_by(
+    scope: &str,
+    evidence: &VerifiedPluginTrustEvidenceV1,
+    spec: &TpsSpec,
+    signer: &SigningKey,
+) -> TestResult<Vec<u8>> {
     let version = evidence.terminal_root().0;
     let mut trust_roots = evidence
         .terminal_root_keys()
@@ -453,7 +472,7 @@ pub fn tps1(
         previous_snapshot_digest: spec.previous,
         operator_signature: [0; 64],
     };
-    snapshot.operator_signature = operator_signer()
+    snapshot.operator_signature = signer
         .sign(&snapshot.operator_signature_message_v1()?)
         .to_bytes();
     Ok(snapshot.to_canonical_cbor()?)

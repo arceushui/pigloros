@@ -770,46 +770,43 @@ mod tests {
     #[test]
     fn an_evaluation_with_a_missing_or_inconsistent_decision_is_corrupt_state() -> TestResult {
         let one = release_one();
-        for case in 0..5 {
+        let cases: [(&str, fn(&mut MemoryScopeV1)); 5] = [
+            ("a: the pointer's decision is absent", |state| {
+                state.decisions.clear();
+            }),
+            ("b: the decision has another Plugin ID", |state| {
+                for decision in state.decisions.values_mut() {
+                    decision.plugin_id = "plugin-b".to_owned();
+                }
+            }),
+            ("c: only the decision's release digest changed", |state| {
+                for decision in state.decisions.values_mut() {
+                    decision.release_digest = [0; 32];
+                }
+            }),
+            ("d: pointer and decision agree on a wrong digest", |state| {
+                for decision in state.decisions.values_mut() {
+                    decision.release_digest = [0; 32];
+                }
+                for active in state.active.values_mut() {
+                    active.release_digest = [0; 32];
+                }
+            }),
+            ("e: only the pointer's release digest is wrong", |state| {
+                for active in state.active.values_mut() {
+                    active.release_digest = [0; 32];
+                }
+            }),
+        ];
+        for (label, corrupt) in cases {
             let mut h = Harness::new()?;
             let genesis = h.env.genesis()?;
             h.admit(&genesis, &one, 1)??;
-            let state = scope_mut(&mut h.store)?;
-            match case {
-                // (a) The pointer's decision is absent.
-                0 => state.decisions.clear(),
-                // (b) The decision has another Plugin ID than the pointer.
-                1 => {
-                    for decision in state.decisions.values_mut() {
-                        decision.plugin_id = "plugin-b".to_owned();
-                    }
-                }
-                // (c) Only the decision's release digest changed.
-                2 => {
-                    for decision in state.decisions.values_mut() {
-                        decision.release_digest = [0; 32];
-                    }
-                }
-                // (d) The pointer and the decision agree on a digest the authorization lacks.
-                3 => {
-                    for decision in state.decisions.values_mut() {
-                        decision.release_digest = [0; 32];
-                    }
-                    for active in state.active.values_mut() {
-                        active.release_digest = [0; 32];
-                    }
-                }
-                // (e) Only the pointer's release digest is wrong.
-                _ => {
-                    for active in state.active.values_mut() {
-                        active.release_digest = [0; 32];
-                    }
-                }
-            }
+            corrupt(scope_mut(&mut h.store)?);
             assert_eq!(
                 h.evaluate(&genesis, &one)?,
                 Err(PluginTrustPolicyRegistryErrorV1::CorruptState),
-                "case {case}"
+                "{label}"
             );
         }
         Ok(())

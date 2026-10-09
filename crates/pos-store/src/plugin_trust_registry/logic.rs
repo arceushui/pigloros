@@ -1,7 +1,7 @@
 //! The adapter-independent decision logic of the Plugin trust policy registry.
 //!
 //! Each `plan_*` function reads the retained state through the abstract
-//! `PluginTrustTransactionV1`, runs the ADR-103 revision 4 steps in their
+//! `PluginTrustTransactionV1`, runs the ADR-103 revisions 4 and 5 steps in their
 //! contract order, and returns a plan of writes. An adapter applies the plan
 //! inside its own transaction. `plan_evaluate` (revision 5) runs the same
 //! checks, with the differences that decision 2 lists, and returns the
@@ -185,9 +185,9 @@ enum Continuity {
 /// The shared steps that follow the transaction prefix, up to and including TPS1 continuity.
 ///
 /// Order: scope row (`MissingState`); anchor (`AnchorMismatch`); floor shape
-/// (`CorruptState`); UTC regression; TPS1 authentication; TPS1 continuity. The
-/// continuity result is returned so that `plan_evaluate` can refuse a valid
-/// successor before the bridge, where the writes continue to the bridge.
+/// (`CorruptState`); UTC regression; TPS1 authentication; TPS1 continuity. The continuity
+/// result is returned so that `plan_evaluate` can refuse a valid successor before the bridge,
+/// whereas the writes continue to the bridge.
 fn check_policy_prefix(
     tx: &impl PluginTrustTransactionV1,
     input: &PolicyInputV1<'_>,
@@ -378,7 +378,7 @@ pub(crate) fn plan_evaluate(
     projection: &ValidatedPluginManifestProjectionV1,
 ) -> RegistryResult<CurrentReleaseEvaluationV1> {
     let (checked, continuity) = check_policy_prefix(tx, input)?;
-    if continuity == Continuity::Successor {
+    if matches!(continuity, Continuity::Successor) {
         return Err(PluginTrustPolicyRegistryErrorV1::PolicyNotAdvanced);
     }
     check_bridge(&checked, input)?;
