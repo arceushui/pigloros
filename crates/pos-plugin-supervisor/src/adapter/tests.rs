@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use pos_core::{EntityId, Kind};
 use pos_runtime::community_plugin_host::{
-    plugin_output_digest_v1, EventDraftV1, FieldRefV1, GuestPluginErrorV1, MeteringV1,
-    PluginErrorCodeV1, TraceAnnotationV1,
+    plugin_output_digest_v1, AtomicCommitFailureV1, ComponentTrapClassV1, EventDraftV1,
+    FieldRefV1, GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1, RevocationBasisV1,
+    TraceAnnotationV1, TrapReproductionV1, TrustDenialBasisV1,
 };
 use ulid::Ulid;
 
@@ -304,6 +305,47 @@ fn driver_receipt(driver: &CommunityDriverV1) -> CommunityInvocationReceiptV1 {
         guest_error: None,
         disposition: ReceiptDispositionV1::Discarded,
     }
+}
+
+/// Every closed error with the availability its failure puts a Plugin in.
+fn every_error() -> Vec<(Error, Option<PluginAvailabilityV1>)> {
+    use PluginAvailabilityV1 as Availability;
+    let trap = Error::ComponentTrap {
+        class: ComponentTrapClassV1::Other,
+        reproduction: TrapReproductionV1::Unverified,
+    };
+    let denied = Error::ArtifactTrustDenied {
+        basis: TrustDenialBasisV1::Untrusted,
+    };
+    let revoked = Error::ArtifactRevoked {
+        basis: RevocationBasisV1::Artifact,
+    };
+    let commit = Error::AtomicCommitFailed {
+        failure: AtomicCommitFailureV1::DeterministicTypedResult,
+    };
+    let exhausted = Some(Availability::ResourceExhausted);
+    vec![
+        (Error::InvalidManifest, None),
+        (denied, None),
+        (revoked, Some(Availability::Revoked)),
+        (Error::IncompatibleAbi, None),
+        (Error::MissingFeature { index: 0 }, None),
+        (Error::CapabilityDenied { index: 0 }, None),
+        (Error::InvalidInvocation, None),
+        (Error::InvalidGuestOutput, None),
+        (Error::UnsupportedSchema, None),
+        (Error::StateMigrationFailed, None),
+        (Error::GuestDeclaredFailure, None),
+        (trap, Some(Availability::Trapped)),
+        (Error::WorkerCrashed, Some(Availability::Unavailable)),
+        (Error::FuelExhausted, exhausted),
+        (Error::MemoryLimitExceeded, exhausted),
+        (Error::HostCallLimitExceeded, exhausted),
+        (Error::OutputLimitExceeded, exhausted),
+        (Error::DeterministicDeadlineExceeded, None),
+        (Error::OperationalWatchdogStop, None),
+        (commit, None),
+    ]
 }
 
 #[test]

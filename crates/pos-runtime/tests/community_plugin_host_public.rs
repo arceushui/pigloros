@@ -17,8 +17,9 @@ use pos_runtime::community_plugin_host::{
     CommunityPluginHostAbiErrorV1, CommunityPluginHostAbiV1, CommunityPluginHostErrorV1,
     CommunityPluginModeV1, CommunityPluginProfileErrorV1, ComponentTrapClassV1,
     EffectiveExecutionLimitsV1, ExecutionLimitV1, HostFailureClassV1, NegotiatedCommunityPluginV1,
-    PassFailureV1, PinnedComponentRuntimeV1, PinnedEngineConfigV1, RevocationBasisV1, TrapOutcomeV1,
-    TrapReproductionV1, TrapTableEntryV1, TrustDenialBasisV1, COMMUNITY_PLUGIN_ABI_MAJOR_V1,
+    PassFailureV1, PinnedComponentRuntimeV1, PinnedEngineConfigV1, RevocationBasisV1,
+    TrapOutcomeV1, TrapReproductionV1, TrapTableEntryV1, TrustDenialBasisV1,
+    COMMUNITY_PLUGIN_ABI_MAJOR_V1,
 };
 use pos_runtime::{PluginAvailabilityV1, PluginExecutionModeV1, RuntimeError};
 
@@ -80,13 +81,17 @@ const REVOCATION_BASES: [(RevocationBasisV1, &str); 3] = [
 const ERRORS: [(Error, &str, HostFailureClassV1, bool); 22] = [
     (Error::InvalidManifest, "InvalidManifest", REJECTION, true),
     (
-        Error::ArtifactTrustDenied { basis: TRUST_EXPIRED },
+        Error::ArtifactTrustDenied {
+            basis: TRUST_EXPIRED,
+        },
         "ArtifactTrustDenied",
         REJECTION,
         true,
     ),
     (
-        Error::ArtifactRevoked { basis: REVOKED_ARTIFACT },
+        Error::ArtifactRevoked {
+            basis: REVOKED_ARTIFACT,
+        },
         "ArtifactRevoked",
         REJECTION,
         true,
