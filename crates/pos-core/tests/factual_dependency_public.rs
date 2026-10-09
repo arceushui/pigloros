@@ -162,7 +162,7 @@ fn ingress(seq: u64, payload: u8) -> FactualIngressEventV1 {
     }
 }
 
-fn scheduled(drivers: Vec<FactualDriverStepV1>) -> FactualScheduledTickV1 {
+const fn scheduled(drivers: Vec<FactualDriverStepV1>) -> FactualScheduledTickV1 {
     FactualScheduledTickV1 {
         snapshot_digest: hash(0x51),
         prefix_contents: Vec::new(),
@@ -930,7 +930,7 @@ fn assembly_is_deterministic_and_the_digest_binds_every_part() {
         rebuilt(TICK, &record, &bindings, &events[..1]).digest(),
         digest
     );
-    let mut swapped = bindings.clone();
+    let mut swapped = bindings;
     swapped.reverse();
     assert_ne!(rebuilt(TICK, &record, &swapped, &events).digest(), digest);
     let other = ok(assemble(
