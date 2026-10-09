@@ -18,46 +18,32 @@ use pos_plugin_publisher::test_support::{
     world::{register, wall, Config, World},
     BoxResult,
 };
-use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1, VerifiedReleaseBundleV1};
+use pos_plugin_release::{
+    BundleAddressV1, ContentValidationV1, ReleaseSourceV1, VerifiedReleaseBundleV1,
+};
 use pos_runtime::community_plugin_host::{
     gate_community_release_v1, CommunityPassAuthorizationV1, CommunityPassV1,
-    CommunityPluginExpectationV1, CommunityPluginHostErrorV1, CommunityPluginTrustMaterialV1,
-    GatedCommunityReleaseV1, PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1,
-    RevocationBasisV1, TrustDenialBasisV1,
+    CommunityPluginExpectationV1, CommunityPluginTrustMaterialV1, GatedCommunityReleaseV1,
+    PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1, ReleaseIdentityV1,
 };
 use pos_store::plugin_trust_registry::{
     PluginTrustPolicyRegistryErrorV1 as Reg, PluginTrustPolicyRegistryV1, TrustedUtcSecondV1,
 };
 
+#[path = "common/host_errors.rs"]
+pub mod host_errors;
 #[path = "common/scripted_registry.rs"]
-mod scripted_registry;
+pub mod scripted_registry;
 
+use host_errors::{Error, ARTIFACT, EXPIRED, KEY, MISMATCH, NOT_ACTIVE, OPERATOR, TSU, UNTRUSTED};
 use scripted_registry::Scripted;
 
-type Error = CommunityPluginHostErrorV1;
 type Gate = Result<(GatedCommunityReleaseV1, CommunityPassAuthorizationV1), Error>;
 type TestResult = BoxResult<()>;
 
 const PLUGIN_ID: &str = "plugin-a";
 /// A release digest that no fixture release has.
 const UNRELATED: [u8; 32] = [0x77; 32];
-
-const fn denied(basis: TrustDenialBasisV1) -> Error {
-    Error::ArtifactTrustDenied { basis }
-}
-
-const fn revoked(basis: RevocationBasisV1) -> Error {
-    Error::ArtifactRevoked { basis }
-}
-
-const EXPIRED: Error = denied(TrustDenialBasisV1::Expired);
-const NOT_ACTIVE: Error = denied(TrustDenialBasisV1::NotActive);
-const UNTRUSTED: Error = denied(TrustDenialBasisV1::Untrusted);
-const MISMATCH: Error = denied(TrustDenialBasisV1::PolicyMismatch);
-const TSU: Error = denied(TrustDenialBasisV1::TrustStateUnavailable);
-const KEY: Error = revoked(RevocationBasisV1::PublisherKey);
-const ARTIFACT: Error = revoked(RevocationBasisV1::Artifact);
-const OPERATOR: Error = revoked(RevocationBasisV1::OperatorDenial);
 
 /// A material source the test can swap between passes and whose reads it counts.
 struct Source {
@@ -66,14 +52,14 @@ struct Source {
 }
 
 impl Source {
-    fn of(material: CommunityPluginTrustMaterialV1) -> Self {
+    const fn of(material: CommunityPluginTrustMaterialV1) -> Self {
         Self {
             current: RefCell::new(Some(material)),
             reads: Cell::new(0),
         }
     }
 
-    fn unavailable() -> Self {
+    const fn unavailable() -> Self {
         Self {
             current: RefCell::new(None),
             reads: Cell::new(0),
@@ -226,6 +212,9 @@ fn an_installed_active_release_gates_ok_with_the_registry_facts() -> TestResult 
     assert_eq!(gated.component(), component);
     assert_eq!(gated.component_digest(), component_digest_v1(&component));
     assert_eq!(gated.tps1_digest(), retained.tps1_digest());
+    let validation = gated.content_validation();
+    assert_eq!(validation, ContentValidationV1::NotPerformed);
+    assert_eq!(gated.identity(), authorization.identity());
     assert_eq!((gated.utc_second(), gated.tick()), (50, TICK));
     assert_eq!(gated.execution().plugin_id(), PLUGIN_ID);
     assert_eq!(authorization.plugin_id(), PLUGIN_ID);
@@ -299,6 +288,8 @@ fn expiry_rows_map_to_expired() -> TestResult {
     // The manifest is valid for seconds `[40, 60)`; the PTR1 and PRV1 records until 100.
     assert!(rig.gate(59, TICK)?.is_ok());
     assert_eq!(rig.error(60, TICK)?, Some(EXPIRED));
+    // The world gives the PTR1 and the PRV1 the same expiry (second 100), so their expiry is one
+    // fixture: `verify_plugin_trust_v1` reports `Expired` for either.
     assert_eq!(rig.error(100, TICK)?, Some(EXPIRED));
     // The TPS1 of this world is valid offline until second 55.
     let world = World::with_config(Config {
@@ -371,8 +362,7 @@ fn unreadable_material_and_a_poisoned_handle_map_to_unavailable() -> TestResult 
     assert_eq!(gate.err(), Some(TSU));
     let reg = Scripted::failing(&rig.world.registry, Reg::StorePoisoned);
     let (address, source) = (&rig.address, &rig.source);
-    let gate =
-        gate_community_release_v1(&reg, &expected, &rig.world.store, address, source, &pass);
+    let gate = gate_community_release_v1(&reg, &expected, &rig.world.store, address, source, &pass);
     assert_eq!(gate.err(), Some(TSU));
     assert_eq!(reg.calls(), 1);
     Ok(())
@@ -451,10 +441,10 @@ fn the_gate_reads_no_clock() -> TestResult {
     let mut source = wall(50)?;
     let utc = TrustedUtcSecondV1::from_source(&mut source)?;
     let pass = CommunityPassV1::open_for_test(utc, TICK);
-    assert_eq!(source.remaining(), 0);
     let expected = expectation(PLUGIN_ID);
     let (gate, _) = run(&rig.world, &expected, &rig.address, &rig.source, &pass);
     assert!(gate.is_ok());
+    assert_eq!(source.remaining(), 0);
     assert_eq!(pass.utc(), utc);
     assert_eq!(pass.tick(), TICK);
     Ok(())
@@ -497,9 +487,10 @@ fn a_stored_admission_gives_no_authority() -> TestResult {
     Ok(())
 }
 
-/// R7-G10: an offline-bundle-shaped source gives identical results, and expired bundles fail.
+/// R7-G10: an offline-bundle-shaped source gives identical results, and a bundle whose records
+/// have expired at the pass second fails closed.
 #[test]
-fn an_offline_bundle_source_gives_identical_results() -> TestResult {
+fn an_offline_bundle_source_gives_identical_results_and_expires_with_its_records() -> TestResult {
     let rig = Rig::new()?;
     let offline = OfflineBundle(current(&rig.world)?);
     let expected = expectation(PLUGIN_ID);
@@ -518,7 +509,8 @@ fn an_offline_bundle_source_gives_identical_results() -> TestResult {
 #[test]
 fn two_launches_at_one_tick_need_two_gate_calls() -> TestResult {
     let rig = Rig::new()?;
-    let before = rig.world.snapshot(&[])?;
+    let pmf1 = pmf1_digest(&rig.world.store.read_verified(&rig.address)?);
+    let before = rig.world.snapshot(&[pmf1])?;
     let pass = open_pass(50, TICK)?;
     let expected = expectation(PLUGIN_ID);
     let (first, _) = run(&rig.world, &expected, &rig.address, &rig.source, &pass);
@@ -527,7 +519,7 @@ fn two_launches_at_one_tick_need_two_gate_calls() -> TestResult {
     assert_eq!(first.tick(), second.tick());
     assert_eq!(first.component_digest(), second.component_digest());
     assert!(first.is_pass_open() && second.is_pass_open());
-    assert_eq!(rig.world.snapshot(&[])?, before);
+    assert_eq!(rig.world.snapshot(&[pmf1])?, before);
     Ok(())
 }
 
@@ -616,6 +608,10 @@ fn the_component_source_is_the_resupplied_pair() -> TestResult {
     };
     let (gate, calls) = run(&rig.world, &paired, other.address(), &rig.source, &pass);
     assert_eq!((gate.err(), calls), (Some(NOT_ACTIVE), 0));
+    // Without a pair the registry decides: the pointer names another release.
+    let (gate, calls) = run(&rig.world, &expected, other.address(), &rig.source, &pass);
+    assert_eq!(gate.err(), Some(NOT_ACTIVE));
+    assert!(calls >= 1);
     // A release published under another Plugin ID is refused before any registry call.
     let foreign = rig.world.publish(Shape {
         plugin_id: "plugin-b",
@@ -634,16 +630,14 @@ fn the_component_source_is_the_resupplied_pair() -> TestResult {
 #[test]
 fn a_test_support_authorization_has_arbitrary_fields_and_follows_its_pass() -> TestResult {
     let pass = open_pass(50, TICK)?;
-    let authorization = CommunityPassAuthorizationV1::for_test(
-        &pass,
-        "plugin-x",
-        [1; 32],
-        [2; 32],
-        [3; 32],
-        99,
-        [4; 32],
-    );
+    let identity = ReleaseIdentityV1 {
+        pmf1_digest: [1; 32],
+        release_digest: [2; 32],
+    };
+    let authorization =
+        CommunityPassAuthorizationV1::for_test(&pass, "plugin-x", identity, [3; 32], 99, [4; 32]);
     assert_eq!(authorization.plugin_id(), "plugin-x");
+    assert_eq!(authorization.identity(), identity);
     assert_eq!(authorization.pmf1_digest(), [1; 32]);
     assert_eq!(authorization.release_digest(), [2; 32]);
     assert_eq!(authorization.component_digest(), [3; 32]);

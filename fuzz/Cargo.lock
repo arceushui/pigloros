@@ -1055,6 +1055,7 @@ dependencies = [
  "pos-conformance",
  "pos-core",
  "pos-crypto",
+ "pos-plugin-release",
  "pos-state",
  "pos-store",
  "serde_json",

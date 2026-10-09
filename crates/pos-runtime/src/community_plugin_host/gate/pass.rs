@@ -13,7 +13,8 @@ use pos_store::plugin_trust_registry::TrustedUtcSecondV1;
 /// flag, so closing the pass revokes all of them at once. Only the creator of a pass closes it.
 ///
 /// Before the host pass seam exists the only constructor and closer are the `test-support`
-/// pair: a crate-internal pair would be dead code.
+/// pair: a crate-internal pair would be dead code. #584 adds the crate-internal constructor and
+/// closer that the host pass seam uses.
 #[derive(Debug)]
 pub struct CommunityPassV1 {
     utc: TrustedUtcSecondV1,
@@ -22,7 +23,7 @@ pub struct CommunityPassV1 {
 }
 
 impl CommunityPassV1 {
-    /// An open pass at `utc` and `tick`, for tests.
+    /// An open pass at `utc` and `tick`, for tests (#584 adds the crate-internal constructor).
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn open_for_test(utc: TrustedUtcSecondV1, tick: u64) -> Self {
@@ -33,7 +34,8 @@ impl CommunityPassV1 {
         }
     }
 
-    /// Close the pass, for tests: every authorization of the pass reports it closed.
+    /// Close the pass, for tests: every authorization of the pass reports it closed (#584 adds
+    /// the crate-internal closer).
     #[cfg(any(test, feature = "test-support"))]
     pub fn close_for_test(&self) {
         self.open.store(false, Ordering::Release);

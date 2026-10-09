@@ -9,13 +9,26 @@ use pos_plugin_release::ContentValidationV1;
 
 use super::pass::CommunityPassV1;
 
+/// The pair of digests that identifies one release: the complete canonical PMF1 and the PMF1
+/// release digest.
+///
+/// A named pair keeps the two 32-byte values from being swapped positionally.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReleaseIdentityV1 {
+    /// BLAKE3-256 of the complete canonical PMF1 bytes.
+    pub pmf1_digest: [u8; 32],
+    /// The PMF1 release digest.
+    pub release_digest: [u8; 32],
+}
+
 /// A release the execution-time trust gate accepted.
 ///
 /// It has no public constructor (a `test-support` constructor exists for tests) and read
 /// accessors only. It proves the gate at its own UTC second and Tick only; negotiation and
 /// Driver construction confer no authority to execute at any other Tick. It is the only input a
-/// Driver can be built from. It owns the Component bytes (up to 33 MiB).
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Driver can be built from. It owns the Component bytes (up to 33 MiB), so it is not `Clone`
+/// and its `Debug` output shows lengths and digests only.
+#[derive(Eq, PartialEq)]
 pub struct GatedCommunityReleaseV1 {
     execution: PluginExecutionProjectionV1,
     component: Vec<u8>,
@@ -56,6 +69,15 @@ impl GatedCommunityReleaseV1 {
     #[must_use]
     pub fn plugin_id(&self) -> &str {
         self.execution.plugin_id()
+    }
+
+    /// The complete-PMF1 and release digests as one pair.
+    #[must_use]
+    pub const fn identity(&self) -> ReleaseIdentityV1 {
+        ReleaseIdentityV1 {
+            pmf1_digest: self.execution.pmf1_digest(),
+            release_digest: self.execution.release_digest(),
+        }
     }
 
     /// BLAKE3-256 of the complete canonical PMF1 bytes.
@@ -116,6 +138,21 @@ impl GatedCommunityReleaseV1 {
     }
 }
 
+impl std::fmt::Debug for GatedCommunityReleaseV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatedCommunityReleaseV1")
+            .field("plugin_id", &self.plugin_id())
+            .field("identity", &self.identity())
+            .field("component_len", &self.component.len())
+            .field("component_digest", &self.component_digest)
+            .field("tps1_digest", &self.tps1_digest)
+            .field("utc_second", &self.utc_second)
+            .field("tick", &self.tick)
+            .finish()
+    }
+}
+
 /// The one-shot proof that a release was gated for a pass.
 ///
 /// It is opaque, neither `Clone` nor `Copy`, and consumed by value by exactly one worker launch.
@@ -125,8 +162,7 @@ impl GatedCommunityReleaseV1 {
 #[derive(Debug)]
 pub struct CommunityPassAuthorizationV1 {
     plugin_id: String,
-    pmf1_digest: [u8; 32],
-    release_digest: [u8; 32],
+    identity: ReleaseIdentityV1,
     component_digest: [u8; 32],
     tick: u64,
     tps1_digest: [u8; 32],
@@ -136,15 +172,14 @@ pub struct CommunityPassAuthorizationV1 {
 impl CommunityPassAuthorizationV1 {
     /// The authorization of `gated` in `pass`.
     pub(super) fn issue(gated: &GatedCommunityReleaseV1, pass: &CommunityPassV1) -> Self {
-        Self {
-            plugin_id: gated.plugin_id().to_owned(),
-            pmf1_digest: gated.pmf1_digest(),
-            release_digest: gated.release_digest(),
-            component_digest: gated.component_digest(),
-            tick: gated.tick(),
-            tps1_digest: gated.tps1_digest(),
-            pass_open: pass.open_flag(),
-        }
+        Self::assemble(
+            pass,
+            gated.plugin_id(),
+            gated.identity(),
+            gated.component_digest(),
+            gated.tick(),
+            gated.tps1_digest(),
+        )
     }
 
     /// An authorization of `pass` with arbitrary field values, for tests that exercise a
@@ -154,16 +189,32 @@ impl CommunityPassAuthorizationV1 {
     pub fn for_test(
         pass: &CommunityPassV1,
         plugin_id: &str,
-        pmf1_digest: [u8; 32],
-        release_digest: [u8; 32],
+        identity: ReleaseIdentityV1,
+        component_digest: [u8; 32],
+        tick: u64,
+        tps1_digest: [u8; 32],
+    ) -> Self {
+        Self::assemble(
+            pass,
+            plugin_id,
+            identity,
+            component_digest,
+            tick,
+            tps1_digest,
+        )
+    }
+
+    fn assemble(
+        pass: &CommunityPassV1,
+        plugin_id: &str,
+        identity: ReleaseIdentityV1,
         component_digest: [u8; 32],
         tick: u64,
         tps1_digest: [u8; 32],
     ) -> Self {
         Self {
             plugin_id: plugin_id.to_owned(),
-            pmf1_digest,
-            release_digest,
+            identity,
             component_digest,
             tick,
             tps1_digest,
@@ -177,16 +228,22 @@ impl CommunityPassAuthorizationV1 {
         &self.plugin_id
     }
 
+    /// The complete-PMF1 and release digests as one pair.
+    #[must_use]
+    pub const fn identity(&self) -> ReleaseIdentityV1 {
+        self.identity
+    }
+
     /// BLAKE3-256 of the complete canonical PMF1 bytes.
     #[must_use]
     pub const fn pmf1_digest(&self) -> [u8; 32] {
-        self.pmf1_digest
+        self.identity.pmf1_digest
     }
 
     /// The PMF1 release digest.
     #[must_use]
     pub const fn release_digest(&self) -> [u8; 32] {
-        self.release_digest
+        self.identity.release_digest
     }
 
     /// The Component digest of the bytes the gate re-read.

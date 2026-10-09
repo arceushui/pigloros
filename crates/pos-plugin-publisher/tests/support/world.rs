@@ -31,9 +31,7 @@ use pos_store::plugin_trust_registry::{
     RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
 };
 
-use super::encoding::{
-    Material, Policy, Revocations, Spec, FAR_FUTURE, OTHER_OWNER, OWNER, SCOPE,
-};
+use super::encoding::{Material, Policy, Revocations, Spec, FAR_FUTURE, OTHER_OWNER, OWNER, SCOPE};
 use super::release::{address_of, closure, make_draft, PrivateRoot, Shape};
 use super::spy_registry::SpyRegistry;
 use super::BoxResult;

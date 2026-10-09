@@ -30,6 +30,7 @@ pub struct Scripted<'a> {
 
 impl<'a> Scripted<'a> {
     /// A wrapper that delegates every read and counts the calls.
+    #[must_use]
     pub const fn counting(inner: &'a SpyRegistry) -> Self {
         Self {
             inner,
@@ -39,6 +40,7 @@ impl<'a> Scripted<'a> {
     }
 
     /// A wrapper whose `evaluate_current_release` returns `error`.
+    #[must_use]
     pub const fn failing(inner: &'a SpyRegistry, error: Reg) -> Self {
         Self {
             inner,
@@ -48,6 +50,7 @@ impl<'a> Scripted<'a> {
     }
 
     /// How many calls the wrapper received.
+    #[must_use]
     pub fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
