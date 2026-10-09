@@ -19,7 +19,7 @@ use pos_crypto::plugin_trust::{
 };
 use pos_plugin_publisher::{
     test_support::{
-        encoding::{Material, Spec, OWNER, SCOPE, TICK, UTC},
+        encoding::{Material, Revocations, Spec, OWNER, SCOPE, TICK, UTC},
         release::{pmf1_digest, Shape, REAL_COMPONENT_BYTES},
         spy_registry::Call,
         world::{key_bytes, register, wall, Config, World},
@@ -541,5 +541,21 @@ fn a_direct_admission_plants_a_release_with_a_bad_signature() -> TestResult {
         active.as_ref().map(ActiveReleaseV1::pmf1_digest),
         Some(digest)
     );
+    Ok(())
+}
+
+/// R7-T1 (#581): the builder refuses a terminal record Tick below the previous record's.
+#[test]
+fn a_record_tick_below_the_previous_record_is_refused() -> TestResult {
+    let world = World::new()?;
+    let spec = Spec {
+        adopted: vec![Revocations {
+            epochs: Vec::new(),
+            artifacts: Vec::new(),
+            tick: TICK + 4,
+        }],
+        ..Spec::default()
+    };
+    assert!(world.policy.material(&spec).is_err());
     Ok(())
 }

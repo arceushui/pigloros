@@ -165,13 +165,14 @@ fn verify_signature(
 
 /// The verified bytes of the closure's `component` layer.
 ///
-/// The closure rules and the projection guarantee exactly one such layer.
+/// A total expression: the closure rules and the projection guarantee exactly one `component`
+/// layer, so the empty default is never produced for a closure that reached this call.
 fn component_bytes(bundle: &VerifiedReleaseBundleV1) -> Vec<u8> {
     bundle
         .members()
         .iter()
         .zip(bundle.member_bytes())
-        .filter(|(member, _)| member.member() == COMPONENT_MEMBER)
-        .flat_map(|(_, bytes)| bytes.iter().copied())
-        .collect()
+        .find(|(member, _)| member.member() == COMPONENT_MEMBER)
+        .map(|(_, bytes)| bytes.to_vec())
+        .unwrap_or_default()
 }

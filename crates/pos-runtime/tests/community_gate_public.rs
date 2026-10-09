@@ -338,10 +338,15 @@ fn unknown_key_and_ungranted_plugin_id_map_to_untrusted() -> TestResult {
 #[test]
 fn stale_forked_and_unadopted_policy_map_to_policy_mismatch() -> TestResult {
     let mut rig = Rig::new()?;
+    let retained = rig.world.registry.retained_policy_state(SCOPE)?.tps1_digest();
     let forked = rig.world.forked_floor_material()?;
+    // A fork carries the retained TPS1 bytes; only its PRV1 record differs.
+    assert_eq!(forked.tps1_digest(), retained);
     rig.source.set(trust_material(&rig.world, &forked));
     assert_eq!(rig.error(50, TICK)?, Some(MISMATCH));
     let newer = rig.world.unadopted_material(&[UNRELATED], TICK)?;
+    // Newer unadopted policy is a different TPS1.
+    assert_ne!(newer.tps1_digest(), retained);
     rig.source.set(trust_material(&rig.world, &newer));
     assert_eq!(rig.error(50, TICK)?, Some(MISMATCH));
     rig.sync()?;
@@ -584,6 +589,12 @@ fn a_closed_pass_is_refused_with_no_registry_call() -> TestResult {
     let (gate, calls) = run(&rig.world, &expected, &rig.address, &rig.source, &pass);
     assert_eq!(gate.err(), Some(TSU));
     assert_eq!((calls, rig.source.reads.get()), (0, 1));
+    // The closed pass wins over a wrong expectation and unavailable material.
+    let wrong = expectation("plugin-z");
+    let broken = Source::unavailable();
+    let (gate, calls) = run(&rig.world, &wrong, &rig.address, &broken, &pass);
+    assert_eq!(gate.err(), Some(TSU));
+    assert_eq!((calls, broken.reads.get()), (0, 0));
     Ok(())
 }
 
@@ -623,7 +634,7 @@ fn the_component_source_is_the_resupplied_pair() -> TestResult {
     // Without a pair the registry decides: the pointer names another release.
     let (gate, calls) = run(&rig.world, &expected, other.address(), &rig.source, &pass);
     assert_eq!(gate.err(), Some(NOT_ACTIVE));
-    assert!(calls >= 1);
+    assert_eq!(calls, 1);
     // A release published under another Plugin ID is refused before any registry call.
     let foreign = rig.world.publish(Shape {
         plugin_id: "plugin-b",

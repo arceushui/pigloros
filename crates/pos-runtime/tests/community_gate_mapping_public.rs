@@ -24,10 +24,136 @@ use host_errors::{
     Error as Host, ARTIFACT, EXPIRED, INVALID, KEY, MISMATCH, NOT_ACTIVE, OPERATOR, TSU, UNTRUSTED,
 };
 
-/// Assert every `(input, expected)` row.
-fn check<T: Copy + std::fmt::Debug>(rows: &[(T, Host)], map: fn(T) -> Host) {
+/// Assert every `(input, expected)` row, and that the rows list each of the `arms` variants of
+/// the input enum exactly once. `index` is an exhaustive `match` over the enum, so a variant
+/// added later fails to compile there, and a forgotten or duplicated row fails the count.
+fn check<T: Copy + std::fmt::Debug>(
+    rows: &[(T, Host)],
+    map: fn(T) -> Host,
+    index: fn(T) -> usize,
+    arms: usize,
+) {
     for (input, expected) in rows {
         assert_eq!(map(*input), *expected, "{input:?}");
+    }
+    let mut listed = rows.iter().map(|(input, _)| index(*input)).collect::<Vec<_>>();
+    listed.sort_unstable();
+    assert_eq!(listed, (0..arms).collect::<Vec<_>>());
+}
+
+const fn source_index(error: ReleaseSourceErrorV1) -> usize {
+    match error {
+        ReleaseSourceErrorV1::InvalidAddress => 0,
+        ReleaseSourceErrorV1::NotFound => 1,
+        ReleaseSourceErrorV1::BoundsExceeded => 2,
+        ReleaseSourceErrorV1::InvalidLayout => 3,
+        ReleaseSourceErrorV1::InvalidDescriptor => 4,
+        ReleaseSourceErrorV1::DigestMismatch => 5,
+        ReleaseSourceErrorV1::SizeMismatch => 6,
+        ReleaseSourceErrorV1::DuplicateMember => 7,
+        ReleaseSourceErrorV1::UnsupportedMediaType => 8,
+        ReleaseSourceErrorV1::Uncommitted => 9,
+        ReleaseSourceErrorV1::Io => 10,
+        ReleaseSourceErrorV1::LockUnavailable => 11,
+        ReleaseSourceErrorV1::RecoveryRequired => 12,
+    }
+}
+
+const fn trust_ix(error: PluginTrustErrorV1) -> usize {
+    match error {
+        PluginTrustErrorV1::InvalidEncoding => 0,
+        PluginTrustErrorV1::BoundsExceeded => 1,
+        PluginTrustErrorV1::InvalidSignature => 2,
+        PluginTrustErrorV1::UnknownRootKey => 3,
+        PluginTrustErrorV1::ThresholdNotMet => 4,
+        PluginTrustErrorV1::AnchorMismatch => 5,
+        PluginTrustErrorV1::ChainDiscontinuity => 6,
+        PluginTrustErrorV1::DigestMismatch => 7,
+        PluginTrustErrorV1::Expired => 8,
+        PluginTrustErrorV1::RootHistoryCapacityExceeded => 9,
+        PluginTrustErrorV1::RevocationHistoryCapacityExceeded => 10,
+        PluginTrustErrorV1::RevocationCapacityExhausted => 11,
+        PluginTrustErrorV1::IncompleteManifestProjection => 12,
+        PluginTrustErrorV1::ManifestExpired => 13,
+        PluginTrustErrorV1::UnknownPublisherKey => 14,
+        PluginTrustErrorV1::PluginIdNotGranted => 15,
+        PluginTrustErrorV1::PublisherKeyRevoked => 16,
+        PluginTrustErrorV1::ArtifactRevoked => 17,
+    }
+}
+
+const fn sig_ix(error: PluginReleaseSignatureErrorV1) -> usize {
+    match error {
+        PluginReleaseSignatureErrorV1::Manifest(_) => 0,
+        PluginReleaseSignatureErrorV1::AuthorizationMismatch => 1,
+        PluginReleaseSignatureErrorV1::InvalidSignature => 2,
+    }
+}
+
+const fn bridge_index(error: PluginTrustBridgeErrorV1) -> usize {
+    match error {
+        PluginTrustBridgeErrorV1::InvalidAnchorScope => 0,
+        PluginTrustBridgeErrorV1::InvalidAnchorRole => 1,
+        PluginTrustBridgeErrorV1::InvalidAnchorOperatorKey => 2,
+        PluginTrustBridgeErrorV1::InvalidSnapshot => 3,
+        PluginTrustBridgeErrorV1::InvalidOperatorSignature => 4,
+        PluginTrustBridgeErrorV1::ScopeMismatch => 5,
+        PluginTrustBridgeErrorV1::EpochMismatch => 6,
+        PluginTrustBridgeErrorV1::EvaluationUtcMismatch => 7,
+        PluginTrustBridgeErrorV1::EvaluationTickMismatch => 8,
+        PluginTrustBridgeErrorV1::InvalidUtcFormat => 9,
+        PluginTrustBridgeErrorV1::Expired => 10,
+        PluginTrustBridgeErrorV1::BridgeRootMismatch => 11,
+        PluginTrustBridgeErrorV1::BridgeRevocationMismatch => 12,
+        PluginTrustBridgeErrorV1::ReservedPrefix => 13,
+        PluginTrustBridgeErrorV1::TpsCapExceeded => 14,
+        PluginTrustBridgeErrorV1::InvalidGenesis => 15,
+        PluginTrustBridgeErrorV1::StaleSnapshot => 16,
+        PluginTrustBridgeErrorV1::SnapshotDiscontinuity => 17,
+        PluginTrustBridgeErrorV1::TpsArtifactDenied => 18,
+    }
+}
+
+const fn kind_index(kind: PluginFloorKindV1) -> usize {
+    match kind {
+        PluginFloorKindV1::Root => 0,
+        PluginFloorKindV1::Revocation => 1,
+    }
+}
+
+const fn floor_index(error: PluginFloorErrorV1) -> usize {
+    match error {
+        PluginFloorErrorV1::PartialFloorState => 0,
+        PluginFloorErrorV1::Rollback(kind) => 1 + kind_index(kind),
+        PluginFloorErrorV1::Fork(kind) => 3 + kind_index(kind),
+        PluginFloorErrorV1::Discontinuity(kind) => 5 + kind_index(kind),
+    }
+}
+
+const fn registry_index(error: Reg) -> usize {
+    match error {
+        Reg::MissingState => 0,
+        Reg::CorruptState => 1,
+        Reg::AnchorMismatch => 2,
+        Reg::TrustedTimeUnavailable => 3,
+        Reg::TrustedTimeRegressed => 4,
+        Reg::ReleaseChainViolation => 5,
+        Reg::ReleaseConflict => 6,
+        Reg::UnknownRollbackTarget => 7,
+        Reg::NoActiveRelease => 8,
+        Reg::RollbackTargetActive => 9,
+        Reg::ActivationEventRejected => 10,
+        Reg::NestedTransaction => 11,
+        Reg::WalRequired => 12,
+        Reg::StorageBusy => 13,
+        Reg::StorageFailed => 14,
+        Reg::StorageIndeterminate => 15,
+        Reg::StorePoisoned => 16,
+        Reg::PolicyNotAdvanced => 17,
+        Reg::ReleaseNotActive => 18,
+        Reg::Bridge(_) => 19,
+        Reg::Floor(_) => 20,
+        Reg::Trust(_) => 21,
     }
 }
 
@@ -49,7 +175,7 @@ fn release_source_errors_map_to_unavailable_or_invalid_manifest() {
         (S::DuplicateMember, INVALID),
         (S::UnsupportedMediaType, INVALID),
     ];
-    check(&rows, host_error_for_release_source_v1);
+    check(&rows, host_error_for_release_source_v1, source_index, 13);
 }
 
 #[test]
@@ -76,7 +202,7 @@ fn verifier_errors_map_by_whether_the_material_verifies() {
         (T::PublisherKeyRevoked, TSU),
         (T::ArtifactRevoked, TSU),
     ];
-    check(&rows, host_error_for_trust_verification_v1);
+    check(&rows, host_error_for_trust_verification_v1, trust_ix, 18);
 }
 
 #[test]
@@ -102,7 +228,7 @@ fn authorization_errors_map_with_the_registry_trust_rows() {
         (T::RootHistoryCapacityExceeded, TSU),
         (T::RevocationHistoryCapacityExceeded, TSU),
     ];
-    check(&rows, host_error_for_trust_authorization_v1);
+    check(&rows, host_error_for_trust_authorization_v1, trust_ix, 18);
 }
 
 #[test]
@@ -114,7 +240,7 @@ fn signature_errors_map_to_untrusted_or_invalid_manifest() {
         (G::AuthorizationMismatch, INVALID),
         (G::Manifest(manifest), INVALID),
     ];
-    check(&rows, host_error_for_release_signature_v1);
+    check(&rows, host_error_for_release_signature_v1, sig_ix, 3);
 }
 
 #[test]
@@ -139,8 +265,12 @@ fn registry_errors_map_row_by_row() {
         (Reg::NestedTransaction, TSU),
         (Reg::WalRequired, TSU),
         (Reg::StorageIndeterminate, TSU),
+        // One representative of each wrapper; the wrapped variants have their own tests below.
+        (Reg::Bridge(PluginTrustBridgeErrorV1::InvalidSnapshot), UNTRUSTED),
+        (Reg::Floor(PluginFloorErrorV1::PartialFloorState), TSU),
+        (Reg::Trust(PluginTrustErrorV1::ManifestExpired), EXPIRED),
     ];
-    check(&rows, host_error_for_registry_v1);
+    check(&rows, host_error_for_registry_v1, registry_index, 22);
 }
 
 #[test]
@@ -167,8 +297,12 @@ fn registry_bridge_errors_map_row_by_row() {
         (B::InvalidGenesis, TSU),
         (B::TpsCapExceeded, TSU),
     ];
-    let wrapped = rows.map(|(inner, expected)| (Reg::Bridge(inner), expected));
-    check(&wrapped, host_error_for_registry_v1);
+    check(
+        &rows,
+        |inner| host_error_for_registry_v1(Reg::Bridge(inner)),
+        bridge_index,
+        19,
+    );
 }
 
 #[test]
@@ -181,11 +315,12 @@ fn registry_floor_errors_map_row_by_row() {
         rows.push((PluginFloorErrorV1::Fork(kind), MISMATCH));
         rows.push((PluginFloorErrorV1::Discontinuity(kind), MISMATCH));
     }
-    let wrapped = rows
-        .into_iter()
-        .map(|(inner, expected)| (Reg::Floor(inner), expected))
-        .collect::<Vec<_>>();
-    check(&wrapped, host_error_for_registry_v1);
+    check(
+        &rows,
+        |inner| host_error_for_registry_v1(Reg::Floor(inner)),
+        floor_index,
+        7,
+    );
 }
 
 #[test]
@@ -211,11 +346,13 @@ fn registry_trust_errors_use_the_authorization_rows() {
         T::PublisherKeyRevoked,
         T::ArtifactRevoked,
     ];
-    for variant in variants {
-        assert_eq!(
-            host_error_for_registry_v1(Reg::Trust(variant)),
-            host_error_for_trust_authorization_v1(variant),
-            "{variant:?}"
-        );
-    }
+    let rows = variants.map(|variant| {
+        (variant, host_error_for_trust_authorization_v1(variant))
+    });
+    check(
+        &rows,
+        |inner| host_error_for_registry_v1(Reg::Trust(inner)),
+        trust_ix,
+        18,
+    );
 }

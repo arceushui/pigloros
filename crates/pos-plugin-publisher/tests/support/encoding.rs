@@ -315,6 +315,10 @@ fn revocation_chain(policy: Policy, spec: &Spec, root_digest: [u8; 32]) -> BoxRe
         artifacts: spec.revoked_artifacts.clone(),
         tick: spec.record_tick,
     };
+    let last_tick = spec.adopted.last().map_or(0, |last| last.tick);
+    if last_tick > spec.record_tick {
+        return Err("record Ticks must be non-decreasing".into());
+    }
     let mut seen = FirstSeen::default();
     let mut records: Vec<Vec<u8>> = Vec::new();
     for (index, revocations) in spec.adopted.iter().chain([&terminal]).enumerate() {
