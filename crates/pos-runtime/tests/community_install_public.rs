@@ -23,7 +23,7 @@ use pos_plugin_release::{
 };
 use pos_runtime::community_plugin_host::{
     install_community_release_v1, ActivationTargetV1, CommunityInstallErrorV1,
-    CommunityInstallRequestV1, PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1,
+    CommunityInstallRequestV1,
 };
 use pos_store::plugin_trust_registry::PluginTrustCommitOutcomeV1;
 
@@ -80,8 +80,11 @@ impl ReleaseSourceV1 for Flipping {
     ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
         let reads = self.reads.get();
         self.reads.set(reads + 1);
-        let bundle = if reads == 0 { &self.first } else { &self.second };
-        Ok(bundle.clone())
+        if reads == 0 {
+            Ok(self.first.clone())
+        } else {
+            Ok(self.second.clone())
+        }
     }
 }
 
@@ -99,12 +102,10 @@ fn the_first_install_commits_one_activation_event_on_the_supplied_timeline() -> 
     let committed = events(&world)?;
     assert_eq!(committed.len(), 1);
     let event = &committed[0];
-    assert_eq!(
-        event.event_type.as_str(),
-        PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1
-    );
     let reserved = "pigloros.plugin.release-activated";
     assert_eq!(event.event_type.as_str(), reserved);
+    let origin = event.origin.as_ref();
+    assert_eq!(origin.map(|o| o.origin_timeline_id), Some(world.timeline));
     assert_eq!(event.schema_version, SchemaVersion::V1);
     assert_eq!(event.entity, entity);
     let expected = Value::Array(vec![
@@ -122,7 +123,9 @@ fn the_first_install_commits_one_activation_event_on_the_supplied_timeline() -> 
 fn a_replay_with_another_entity_appends_no_second_event() -> TestResult {
     let mut world = World::new()?;
     let published = world.publish(Shape::first())?;
-    let first = install(&mut world, published.address(), EntityId::new())??;
+    let entity = EntityId::new();
+    let first = install(&mut world, published.address(), entity)??;
+    let first_event = events(&world)?.remove(0);
     let replay = install(&mut world, published.address(), EntityId::new())??;
     assert_eq!(
         replay.admission().outcome(),
@@ -132,7 +135,10 @@ fn a_replay_with_another_entity_appends_no_second_event() -> TestResult {
         replay.admission().decision().release_digest(),
         first.admission().decision().release_digest()
     );
-    assert_eq!(events(&world)?.len(), 1);
+    let committed = events(&world)?;
+    assert_eq!(committed.len(), 1);
+    assert_eq!(committed[0].entity, entity);
+    assert_eq!(committed[0].id, first_event.id);
     Ok(())
 }
 
@@ -169,7 +175,12 @@ fn a_source_that_would_change_on_a_second_read_cannot_affect_the_install() -> Te
     let decision = installed.admission().decision();
     assert_eq!(decision.release_digest(), first.release_digest());
     assert_ne!(first.release_digest(), second.release_digest());
-    assert_eq!(events(&world)?.len(), 1);
+    let committed = events(&world)?;
+    assert_eq!(committed.len(), 1);
+    let payload: Value = ciborium::from_reader(committed[0].payload.as_slice())?;
+    let digest = Value::Bytes(first.release_digest().to_vec());
+    let items = payload.as_array();
+    assert_eq!(items.and_then(|items| items.get(3)), Some(&digest));
     Ok(())
 }
 
@@ -203,6 +214,51 @@ fn an_installer_refusal_is_reported_as_install() -> TestResult {
     let result = run(&mut world, address, &material, EntityId::new())?;
     let refused = matches!(result, Err(Fault::Install(Refusal::Authorization(_))));
     assert!(refused);
+    assert!(world.registry.admits.is_empty());
+    assert!(events(&world)?.is_empty());
+    Ok(())
+}
+
+/// A hostile source that returns one fixed bundle whatever address is asked for.
+struct Fixed(VerifiedReleaseBundleV1);
+
+impl ReleaseSourceV1 for Fixed {
+    fn read_verified(
+        &self,
+        _: &BundleAddressV1,
+    ) -> Result<VerifiedReleaseBundleV1, ReleaseSourceErrorV1> {
+        Ok(self.0.clone())
+    }
+}
+
+#[test]
+fn a_bundle_of_another_address_is_not_found_and_installs_nothing() -> TestResult {
+    let mut world = World::new()?;
+    let first = world.publish(Shape::first())?;
+    let other = Shape {
+        version: "1.0.1",
+        ..world.first_shape()
+    };
+    let second = world.publish(other)?;
+    let source = Fixed(world.store.read_verified(second.address())?);
+    let material = world.material()?;
+    let mut clock = wall(material.utc)?;
+    let request = CommunityInstallRequestV1 {
+        anchor: &world.anchor,
+        tps1_bytes: &material.tps1,
+        evidence: &material.evidence,
+        target: ActivationTargetV1 {
+            timeline: world.timeline,
+            entity: EntityId::new(),
+        },
+    };
+    let registry = &mut world.registry;
+    let address = first.address();
+    let result = install_community_release_v1(&source, address, registry, &mut clock, request);
+    assert_eq!(
+        result.err(),
+        Some(Fault::Source(ReleaseSourceErrorV1::NotFound))
+    );
     assert!(world.registry.admits.is_empty());
     assert!(events(&world)?.is_empty());
     Ok(())

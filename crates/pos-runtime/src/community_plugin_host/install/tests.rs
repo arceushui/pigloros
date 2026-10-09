@@ -10,7 +10,13 @@ const GOLDEN: &str = "846f706c7567696e2d706f6c6963792d616e6578616d706c652e706c75
 const GOLDEN_DIGEST: &str = "bef112d44e3c3d728354a491969f1fa20f6ce21c707eb9a67d89b5e333a9faf6";
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        output.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+    }
+    output
 }
 
 #[test]
