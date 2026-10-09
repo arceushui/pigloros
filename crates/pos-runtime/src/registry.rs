@@ -948,15 +948,22 @@ fn reject_host_owned_draft_slice(drafts: &[EventDraft]) -> Result<(), RuntimeErr
 
 /// The closed error for a draft of a host-owned Event type, if it is one.
 fn host_owned_draft_error(draft: &EventDraft) -> Option<RuntimeError> {
-    let event_type = draft.event_type.as_str().to_owned();
+    let kind = draft.event_type.as_str();
+    let event_type = || kind.to_owned();
     if pos_core::is_consent_event_type(&draft.event_type)
-        || event_type == pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
+        || kind == pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
     {
-        Some(RuntimeError::ConsentDraft { event_type })
+        Some(RuntimeError::ConsentDraft {
+            event_type: event_type(),
+        })
     } else if pos_core::is_geographic_event_type(&draft.event_type) {
-        Some(RuntimeError::GeographicDraft { event_type })
-    } else if event_type == crate::community_plugin_host::PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1 {
-        Some(RuntimeError::ReservedHostDraft { event_type })
+        Some(RuntimeError::GeographicDraft {
+            event_type: event_type(),
+        })
+    } else if kind == crate::community_plugin_host::PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1 {
+        Some(RuntimeError::ReservedHostDraft {
+            event_type: event_type(),
+        })
     } else {
         None
     }

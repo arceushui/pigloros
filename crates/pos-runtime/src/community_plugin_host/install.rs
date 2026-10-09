@@ -68,10 +68,16 @@ pub enum CommunityInstallErrorV1 {
     /// The closure's PMF1 failed strict decoding, binding, or digest checks.
     #[error(transparent)]
     Manifest(PluginManifestErrorV1),
-    /// The signed installer refused the release.
+    /// The signed installer refused the release. Its `Source` and `Manifest` variants cannot
+    /// occur here: the installer reads the one-shot source and projects the same bundle the
+    /// wrapper already read and projected.
     #[error(transparent)]
     Install(PluginReleaseInstallErrorV1),
 }
+
+/// The source returned a bundle that is not the one at the requested address.
+const WRONG_ADDRESS: CommunityInstallErrorV1 =
+    CommunityInstallErrorV1::Source(ReleaseSourceErrorV1::NotFound);
 
 /// Install the community release at `address`, committing its activation Event.
 ///
@@ -83,7 +89,8 @@ pub enum CommunityInstallErrorV1 {
 ///
 /// # Errors
 /// Returns `Source` when the closure cannot be read, `Manifest` when its PMF1 is not a canonical
-/// V1 manifest, and `Install` for every refusal of the signed installer.
+/// V1 manifest, and `Install` for every refusal of the signed installer. A source that returns a
+/// bundle of another address is `Source(NotFound)`.
 pub fn install_community_release_v1(
     source: &impl ReleaseSourceV1,
     address: &BundleAddressV1,
@@ -94,6 +101,9 @@ pub fn install_community_release_v1(
     let bundle = source
         .read_verified(address)
         .map_err(CommunityInstallErrorV1::Source)?;
+    if bundle.address() != address {
+        return Err(WRONG_ADDRESS);
+    }
     let execution = PluginExecutionProjectionV1::from_verified_bundle(&bundle)
         .map_err(CommunityInstallErrorV1::Manifest)?;
     let activation = activation_input(request.anchor.scope(), &execution, request.target);
