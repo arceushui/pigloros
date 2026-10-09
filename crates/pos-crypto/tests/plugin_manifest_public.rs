@@ -18,9 +18,10 @@ use pos_crypto::plugin_execution::{
     PluginExecutionProjectionV1, WASM_PAGE_BYTES_V1,
 };
 use pos_crypto::plugin_manifest::{
-    decode_plugin_release_signature_claim_v1, verify_plugin_release_signature_v1,
-    PluginArtifactInputV1, PluginDependencyInputV1, PluginManifestErrorV1, PluginReleaseDraftV1,
-    PluginReleaseSignatureErrorV1, PluginSchemaInputV1, VerifiedPluginReleaseSignatureV1,
+    component_digest_v1, decode_plugin_release_signature_claim_v1,
+    verify_plugin_release_signature_v1, PluginArtifactInputV1, PluginDependencyInputV1,
+    PluginManifestErrorV1, PluginReleaseDraftV1, PluginReleaseSignatureErrorV1, PluginSchemaInputV1,
+    VerifiedPluginReleaseSignatureV1,
 };
 use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, PluginTrustErrorV1, ResolvedPluginTrustAuthorizationV1,
@@ -2847,4 +2848,12 @@ fn a_bundle_that_fails_decoding_yields_the_decoder_error_not_a_verdict() -> Test
         assert_eq!(verdict?, expected, "case {index}");
     }
     Ok(())
+}
+
+#[test]
+fn the_component_digest_is_the_domain_separated_length_prefixed_blake3() {
+    let domain = b"PiglorOS.Plugin.Component.v1\0";
+    for bytes in [&b""[..], b"\0asm component", &[0xa5; 300]] {
+        assert_eq!(component_digest_v1(bytes), domain_digest(domain, bytes));
+    }
 }

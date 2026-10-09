@@ -5,18 +5,17 @@
 //! that the invocation, its result and the `ReproManifest` record.
 
 use pos_crypto::plugin_execution::{
-    is_valid_id_v1, DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
-    PluginExecutionProjectionV1, COMMUNITY_PLUGIN_WORLD_V1,
+    is_valid_id_v1, DeterministicBudgetV1, PluginCapabilityDescriptorV1,
 };
 
-use super::error::CommunityPluginHostErrorV1;
-use super::profile::{
-    CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1, CommunityPluginModeV1,
-    PinnedComponentRuntimeV1,
-};
+use super::profile::{CommunityPluginCeilingsV1, CommunityPluginModeV1, PinnedComponentRuntimeV1};
 
+#[cfg(target_os = "linux")]
+mod gated;
 mod transport;
 
+#[cfg(target_os = "linux")]
+pub use gated::negotiate_community_plugin_v1;
 pub use transport::{NegotiatedTransportErrorV1, NegotiatedTransportV1};
 
 /// The only ABI major of the community Plugin world in ABI 0.x.
@@ -154,7 +153,7 @@ impl EffectiveExecutionLimitsV1 {
 /// It is `ReproManifest` input: world, release identity, negotiated ABI,
 /// not-granted capabilities, mode, effective limits, the pinned runtime and
 /// the digest of the execution profile.
-/// Only [`negotiate_community_plugin_v1`] constructs it; a worker process
+/// Only `negotiate_community_plugin_v1` (Linux only) constructs it; a worker process
 /// rebuilds the supervisor's record with
 /// [`NegotiatedCommunityPluginV1::from_transport`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -252,82 +251,4 @@ impl NegotiatedCommunityPluginV1 {
     pub const fn execution_profile_digest(&self) -> Option<[u8; 32]> {
         self.execution_profile_digest
     }
-}
-
-/// Negotiate one validated release against the host ABI and profile.
-///
-/// The checks run in ADR-061 validation order: ABI major and highest common
-/// minor, every required feature, then capability attenuation. Budgets are
-/// then clamped. No worker exists yet, so a failure launches nothing.
-///
-/// This function cannot check that `execution` is bound to an authorized
-/// release. #544 must wrap it behind `PluginExecutionProjectionV1::is_bound_to`
-/// and the trust-authorization gate before it becomes the public host
-/// surface; until then it is not the #194 surface.
-///
-/// # Errors
-/// Returns `IncompatibleAbi` for an ABI major other than 0 or no common
-/// minor, `MissingFeature` for the first required feature the host lacks,
-/// and `CapabilityDenied` for the first required capability.
-pub fn negotiate_community_plugin_v1(
-    execution: &PluginExecutionProjectionV1,
-    host: &CommunityPluginHostAbiV1,
-    profile: &CommunityPluginExecutionProfileV1,
-) -> Result<NegotiatedCommunityPluginV1, CommunityPluginHostErrorV1> {
-    let abi_minor = negotiate_minor(execution.abi(), host)?;
-    require_features(execution.abi(), host)?;
-    let not_granted_capabilities = attenuate(execution.capabilities())?;
-    Ok(NegotiatedCommunityPluginV1 {
-        world: COMMUNITY_PLUGIN_WORLD_V1,
-        plugin_id: execution.plugin_id().to_owned(),
-        pmf1_digest: execution.pmf1_digest(),
-        release_digest: execution.release_digest(),
-        abi_minor,
-        declared_minors: (execution.abi().min_minor, execution.abi().max_minor),
-        required_features: execution.abi().required_features.clone(),
-        not_granted_capabilities,
-        mode: profile.mode(),
-        limits: EffectiveExecutionLimitsV1::clamp(execution.budget(), profile.ceilings()),
-        runtime: profile.runtime().cloned(),
-        execution_profile_digest: profile.digest(),
-    })
-}
-
-/// ABI major 0 and the highest minor both sides support.
-fn negotiate_minor(
-    abi: &PluginAbiRequirementV1,
-    host: &CommunityPluginHostAbiV1,
-) -> Result<u16, CommunityPluginHostErrorV1> {
-    let lowest = abi.min_minor.max(host.min_minor);
-    let highest = abi.max_minor.min(host.max_minor);
-    let compatible = abi.major == COMMUNITY_PLUGIN_ABI_MAJOR_V1 && lowest <= highest;
-    compatible
-        .then_some(highest)
-        .ok_or(CommunityPluginHostErrorV1::IncompatibleAbi)
-}
-
-/// Every required feature is one the host provides.
-fn require_features(
-    abi: &PluginAbiRequirementV1,
-    host: &CommunityPluginHostAbiV1,
-) -> Result<(), CommunityPluginHostErrorV1> {
-    abi.required_features
-        .iter()
-        .position(|feature| !host.features.contains(feature))
-        .map_or(Ok(()), |index| {
-            Err(CommunityPluginHostErrorV1::MissingFeature { index })
-        })
-}
-
-/// Deny every required capability; record every optional one as not granted.
-fn attenuate(
-    capabilities: &[PluginCapabilityDescriptorV1],
-) -> Result<Vec<PluginCapabilityDescriptorV1>, CommunityPluginHostErrorV1> {
-    capabilities
-        .iter()
-        .position(|capability| capability.required)
-        .map_or_else(
-            || Ok(capabilities.to_vec()),
-            |index| Err(CommunityPluginHostErrorV1::CapabilityDenied { index }),
-        )
 }

@@ -20,5 +20,14 @@ pub mod release;
 pub mod spy_registry;
 pub mod world;
 
+// Re-exports, so that a test of another crate that gates or installs a release on this world
+// needs no direct dependency for the release, anchor and clock types it passes around.
+pub use pos_conformance::PluginTrustPolicyAnchorV1;
+pub use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
+pub use pos_crypto::plugin_trust::TrustedPluginRootAnchorV1;
+pub use pos_plugin_release::{
+    build_oci_closure_v1, BundleAddressV1, ReleaseClosureInputV1, ReleaseSourceV1,
+};
+
 /// A boxed error result, the result type of every fixture step.
 pub type BoxResult<T> = Result<T, Box<dyn std::error::Error>>;

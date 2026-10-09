@@ -4,6 +4,7 @@ use pos_crypto::plugin_execution::{
 
 use super::super::negotiate_community_plugin_v1;
 use super::*;
+use crate::community_plugin_host::gate::GatedCommunityReleaseV1;
 use crate::community_plugin_host::profile::{
     CeilingValuesV1, CommunityPluginCeilingsV1, PinnedComponentRuntimeV1, PinnedEngineConfigV1,
 };
@@ -60,7 +61,8 @@ fn negotiated() -> NegotiatedCommunityPluginV1 {
         budget: DeterministicBudgetV1::MAXIMA,
     };
     let execution = PluginExecutionProjectionV1::from(fixture);
-    negotiate_community_plugin_v1(&execution, &host(), &profile(CommunityPluginModeV1::Local))
+    let gated = GatedCommunityReleaseV1::for_test(execution, Vec::new());
+    negotiate_community_plugin_v1(&gated, &host(), &profile(CommunityPluginModeV1::Local))
         .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))))
 }
 

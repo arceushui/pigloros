@@ -12,7 +12,7 @@ publish.workspace = true
 # recorder, for tests only. Never enable in deployable builds;
 # the probe is not a Component worker. Enforced by
 # scripts/check_test_support_features.py in CI.
-test-support = ["pos-crypto/test-support"]
+test-support = ["pos-crypto/test-support", "pos-runtime/test-support"]
 
 [dependencies]
 # Safe `set_fds_cloexec_threadsafe`: marks every descriptor the supervisor

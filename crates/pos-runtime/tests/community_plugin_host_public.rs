@@ -3,7 +3,9 @@
 //! Execution projections come from the `pos-crypto` `test-support` fixture,
 //! which models caller-fabricated PMF1 requirements, so every negotiation
 //! rejection path is reachable without publishing a release closure. The
-//! real projection is covered by `pos-crypto`'s PMF1 tests.
+//! real projection is covered by `pos-crypto`'s PMF1 tests. The gated release comes from the
+//! `test-support` constructor, so no gate runs here. Linux only, like the gate and negotiation.
+#![cfg(target_os = "linux")]
 
 use pos_core::{CoreError, PipelineOutcomeV1};
 use pos_crypto::plugin_execution::{
@@ -16,9 +18,9 @@ use pos_runtime::community_plugin_host::{
     CeilingValuesV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
     CommunityPluginHostAbiErrorV1, CommunityPluginHostAbiV1, CommunityPluginHostErrorV1,
     CommunityPluginModeV1, CommunityPluginProfileErrorV1, ComponentTrapClassV1,
-    EffectiveExecutionLimitsV1, ExecutionLimitV1, HostFailureClassV1, NegotiatedCommunityPluginV1,
-    PassFailureV1, PinnedComponentRuntimeV1, PinnedEngineConfigV1, RevocationBasisV1,
-    TrapOutcomeV1, TrapReproductionV1, TrapTableEntryV1, TrustDenialBasisV1,
+    EffectiveExecutionLimitsV1, ExecutionLimitV1, GatedCommunityReleaseV1, HostFailureClassV1,
+    NegotiatedCommunityPluginV1, PassFailureV1, PinnedComponentRuntimeV1, PinnedEngineConfigV1,
+    RevocationBasisV1, TrapOutcomeV1, TrapReproductionV1, TrapTableEntryV1, TrustDenialBasisV1,
     COMMUNITY_PLUGIN_ABI_MAJOR_V1,
 };
 use pos_runtime::{PluginAvailabilityV1, PluginExecutionModeV1, RuntimeError};
@@ -238,6 +240,11 @@ fn fixture() -> PluginExecutionProjectionFixtureV1 {
     }
 }
 
+/// `execution` as the gate would yield it, with no Component bytes.
+fn gated(execution: PluginExecutionProjectionV1) -> GatedCommunityReleaseV1 {
+    GatedCommunityReleaseV1::for_test(execution, Vec::new())
+}
+
 const fn local() -> CommunityPluginExecutionProfileV1 {
     CommunityPluginExecutionProfileV1::new(
         CommunityPluginModeV1::Local,
@@ -250,7 +257,7 @@ fn negotiate(
     requirements: PluginExecutionProjectionFixtureV1,
     host: &CommunityPluginHostAbiV1,
 ) -> Negotiation {
-    let execution = PluginExecutionProjectionV1::from(requirements);
+    let execution = gated(PluginExecutionProjectionV1::from(requirements));
     negotiate_community_plugin_v1(&execution, host, &local())
 }
 
@@ -832,7 +839,7 @@ fn negotiation_records_the_release_abi_and_not_granted_capabilities() -> TestRes
         CommunityPluginCeilingsV1::V1,
         Some(runtime()?),
     );
-    let execution = PluginExecutionProjectionV1::from(requirements);
+    let execution = gated(PluginExecutionProjectionV1::from(requirements));
     let host = CommunityPluginHostAbiV1::v1();
     let negotiated = negotiate_community_plugin_v1(&execution, &host, &profile)?;
     assert_eq!(negotiated.world(), COMMUNITY_PLUGIN_WORLD_V1);
@@ -976,7 +983,7 @@ fn budgets_above_a_ceiling_are_clamped_not_rejected() -> TestResult {
     assert_eq!(below.values(), SMALL_BUDGET);
     let mut requirements = fixture();
     requirements.budget = above;
-    let execution = PluginExecutionProjectionV1::from(requirements);
+    let execution = gated(PluginExecutionProjectionV1::from(requirements));
     let profile =
         CommunityPluginExecutionProfileV1::new(CommunityPluginModeV1::AirGapped, ceilings, None);
     let host = CommunityPluginHostAbiV1::v1();
@@ -989,7 +996,7 @@ fn budgets_above_a_ceiling_are_clamped_not_rejected() -> TestResult {
 #[test]
 fn parity_profiles_negotiate_identical_limits_in_both_modes() -> TestResult {
     let ceilings = CommunityPluginCeilingsV1::new(ceiling_values(WASM_PAGE_BYTES_V1, 2_000, 20))?;
-    let execution = PluginExecutionProjectionV1::from(fixture());
+    let execution = gated(PluginExecutionProjectionV1::from(fixture()));
     let host = CommunityPluginHostAbiV1::v1();
     let recorded = runtime()?;
     let [local, air_gapped] =
@@ -1142,7 +1149,7 @@ fn a_profile_without_a_runtime_has_no_digest_and_neither_has_its_record() -> Tes
         None,
     );
     assert_eq!(bare.digest(), None);
-    let execution = PluginExecutionProjectionV1::from(fixture());
+    let execution = gated(PluginExecutionProjectionV1::from(fixture()));
     let host = CommunityPluginHostAbiV1::v1();
     let negotiated = negotiate_community_plugin_v1(&execution, &host, &bare)?;
     assert_eq!(negotiated.execution_profile_digest(), None);
