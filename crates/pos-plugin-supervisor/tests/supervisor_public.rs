@@ -52,12 +52,17 @@ fn invocation() -> PluginInvocationV1 {
 }
 
 /// The one-shot authorization of the fixture release holding `component`.
-fn authorization(component: &[u8]) -> Option<CommunityPassAuthorizationV1> {
-    Some(test_support::authorization_for(&negotiated(), component))
+fn authorization(component: &[u8]) -> CommunityPassAuthorizationV1 {
+    test_support::authorization_for(&negotiated(), component)
 }
 
 fn describe_on(worker: &CommunityPluginSupervisorV1, component: &[u8]) -> Described {
-    worker.describe(authorization(component), &negotiated(), component, INPUTS)
+    worker.describe(
+        Some(authorization(component)),
+        &negotiated(),
+        component,
+        INPUTS,
+    )
 }
 
 fn reduce_on(
@@ -66,7 +71,7 @@ fn reduce_on(
     call: &PluginInvocationV1,
 ) -> Produced {
     worker.reduce(
-        authorization(component),
+        Some(authorization(component)),
         &negotiated(),
         component,
         call,
@@ -80,7 +85,7 @@ fn drive_on(
     call: &PluginInvocationV1,
 ) -> Produced {
     worker.drive(
-        authorization(component),
+        Some(authorization(component)),
         &negotiated(),
         component,
         call,
@@ -447,10 +452,10 @@ fn an_authorization_for_another_release_or_other_bytes_is_not_active() {
         |fields| fields.component_digest = component_digest_v1(b"other bytes"),
     ];
     for change in changes {
-        let mut changed = fixture_fields(b"output");
-        change(&mut changed);
-        let refused = refusals(&unlaunchable(), &pass, &changed, b"output");
-        assert_eq!(refused, [Some(NOT_ACTIVE); 3], "{changed:?}");
+        let mut forged = fixture_fields(b"output");
+        change(&mut forged);
+        let refused = refusals(&unlaunchable(), &pass, &forged, b"output");
+        assert_eq!(refused, [Some(NOT_ACTIVE); 3], "{forged:?}");
     }
 }
 
@@ -470,7 +475,7 @@ fn the_refusals_apply_in_the_order_of_decision_3() {
     let foreign = Some(foreign.issue(&pass));
     let misdirected = worker.drive(foreign, &record, b"output", &crooked, INPUTS);
     assert_eq!(misdirected, Err(NOT_ACTIVE));
-    let known = authorization(b"output");
+    let known = Some(authorization(b"output"));
     let malformed = worker.reduce(known, &record, b"output", &crooked, INPUTS);
     assert_eq!(malformed, Err(Error::InvalidInvocation));
 }
