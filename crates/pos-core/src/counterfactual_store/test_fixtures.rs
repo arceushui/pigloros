@@ -8,7 +8,7 @@
 //! an independent check of it. Available only with the `test-support`
 //! feature.
 
-use crate::Hash;
+use crate::{Hash, Seq, TickDependencyRecordV1};
 
 /// `RCF1` self-digest domain.
 pub const FRONTIER_DOMAIN: &[u8] = b"PiglorOS.RecomputationFrontier.v1";
@@ -156,4 +156,21 @@ pub fn invalidation_frame(fields: &[u8], padding: usize) -> Vec<u8> {
         fields,
         padding,
     )
+}
+
+/// One committed factual Tick a store test seeds without a pipeline commit.
+///
+/// The record is the Tick's committed record; `first_seq` and `last_seq`
+/// bound the contiguous Events it owns, and each `event_nodes` entry binds
+/// one of those Events to the Event-backed node that stands for it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeededFactualTickV1 {
+    /// The Tick's committed record.
+    pub record: TickDependencyRecordV1,
+    /// The first `seq` the Tick owns.
+    pub first_seq: Seq,
+    /// The last `seq` the Tick owns.
+    pub last_seq: Seq,
+    /// The `(seq, node artifact digest)` binding of each Event-backed node.
+    pub event_nodes: Vec<(Seq, Hash)>,
 }
