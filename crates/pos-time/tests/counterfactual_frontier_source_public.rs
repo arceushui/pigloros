@@ -1528,7 +1528,8 @@ fn unbound_root_graph(plan: &CounterfactualPlanV1) -> TestResult<Graph> {
 }
 
 /// The committed Ticks of `graph`, one seeded Tick per record Tick, each
-/// owning one `seq`.
+/// owning one `seq`. `event_nodes` is empty, so the seed seam checks nothing
+/// about Event bindings.
 fn prefix_ticks(graph: &Graph) -> TestResult<Vec<SeededFactualTickV1>> {
     let mut by_tick: BTreeMap<u64, Declaration> = BTreeMap::new();
     for node in graph
