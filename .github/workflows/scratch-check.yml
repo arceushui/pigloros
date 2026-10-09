@@ -11,9 +11,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - ref: redmine/581-gate-and-world-builders
-            id: p581
-            base: redmine/580-read-only-evaluation
+          - ref: redmine/582-install-entry
+            id: p582
+            base: redmine/581-gate-and-world-builders
             pkg: "-p pos-runtime -p pos-plugin-host -p pos-plugin-supervisor -p pos-plugin-publisher -p pos-crypto -p pos-plugin-release -p pos-plugin-worker"
     steps:
       - uses: actions/checkout@v4
