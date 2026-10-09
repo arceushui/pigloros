@@ -1204,6 +1204,10 @@ jobs:
         run: python scripts/owner_bridge_webauthn_fixtures.py --check
       - name: Test Wasmtime pin checker
         run: python scripts/test_check_wasmtime_feature_pin.py
+      - name: Check owner-bridge Windows unsafe policy
+        run: |
+          python scripts/check_owner_bridge_unsafe_policy.py
+          python scripts/test_check_owner_bridge_unsafe_policy.py
 
   modules-structure:
     name: modules-structure (reports only)

@@ -15,6 +15,7 @@ members = [
   "crates/pos-owner-bridge-codec",
   "crates/pos-plugin-host",
   "crates/pos-plugin-supervisor",
+  "crates/pos-owner-bridge-windows",
   "plugins/entities/rule-agent",
   "plugins/observations/synthetic",
   "plugins/eval",
