@@ -1,4 +1,4 @@
-//! Failure classes: quarantine and the pass-level commit classification.
+//! Quarantine mapping and pass-level failure classification.
 
 use pos_core::CoreError;
 

@@ -57,8 +57,8 @@ const REPRODUCED: TrapReproductionV1 = TrapReproductionV1::ReproducedByConforman
 const UNVERIFIED: TrapReproductionV1 = TrapReproductionV1::Unverified;
 const TYPED: AtomicCommitFailureV1 = AtomicCommitFailureV1::DeterministicTypedResult;
 const UNTYPED: AtomicCommitFailureV1 = AtomicCommitFailureV1::Operational;
-const EXPIRED: TrustDenialBasisV1 = TrustDenialBasisV1::Expired;
-const ARTIFACT: RevocationBasisV1 = RevocationBasisV1::Artifact;
+const TRUST_EXPIRED: TrustDenialBasisV1 = TrustDenialBasisV1::Expired;
+const REVOKED_ARTIFACT: RevocationBasisV1 = RevocationBasisV1::Artifact;
 /// Every trust-denial basis with its exact ADR-061 revision 7 name.
 const TRUST_BASES: [(TrustDenialBasisV1, &str); 5] = [
     (TrustDenialBasisV1::Expired, "Expired"),
@@ -80,13 +80,13 @@ const REVOCATION_BASES: [(RevocationBasisV1, &str); 3] = [
 const ERRORS: [(Error, &str, HostFailureClassV1, bool); 22] = [
     (Error::InvalidManifest, "InvalidManifest", REJECTION, true),
     (
-        Error::ArtifactTrustDenied { basis: EXPIRED },
+        Error::ArtifactTrustDenied { basis: TRUST_EXPIRED },
         "ArtifactTrustDenied",
         REJECTION,
         true,
     ),
     (
-        Error::ArtifactRevoked { basis: ARTIFACT },
+        Error::ArtifactRevoked { basis: REVOKED_ARTIFACT },
         "ArtifactRevoked",
         REJECTION,
         true,

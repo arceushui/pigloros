@@ -282,7 +282,24 @@ impl CommunityPluginHostErrorV1 {
         match self {
             Self::ArtifactTrustDenied { basis } => Some(basis.name()),
             Self::ArtifactRevoked { basis } => Some(basis.name()),
-            _ => None,
+            Self::InvalidManifest
+            | Self::IncompatibleAbi
+            | Self::MissingFeature { .. }
+            | Self::CapabilityDenied { .. }
+            | Self::InvalidInvocation
+            | Self::InvalidGuestOutput
+            | Self::UnsupportedSchema
+            | Self::StateMigrationFailed
+            | Self::GuestDeclaredFailure
+            | Self::ComponentTrap { .. }
+            | Self::WorkerCrashed
+            | Self::FuelExhausted
+            | Self::MemoryLimitExceeded
+            | Self::HostCallLimitExceeded
+            | Self::OutputLimitExceeded
+            | Self::DeterministicDeadlineExceeded
+            | Self::OperationalWatchdogStop
+            | Self::AtomicCommitFailed { .. } => None,
         }
     }
 

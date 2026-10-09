@@ -324,7 +324,9 @@ const fn failure(
 
 /// Run one pass whose second member fails as `failure` says, and check that
 /// the whole pass is discarded and only that member is marked.
-fn check_failure(failure: &Failure) {
+///
+/// Returns the pass error, so a caller can inspect what the real pass raised.
+fn check_failure(failure: &Failure) -> RuntimeError {
     let mut world = World::new();
     let alpha = world.add("alpha", "community.alpha", b"draft:community.alpha", PROMPT);
     let beta = world.add(
@@ -368,6 +370,7 @@ fn check_failure(failure: &Failure) {
         Some(PluginAvailabilityV1::Available)
     );
     assert_eq!(world.registry.availability(b), Some(quarantine));
+    error
 }
 
 #[test]
@@ -413,8 +416,12 @@ fn a_draft_with_dependency_digests_is_unsupported_schema_and_authoritative() {
     // `check_failure` asserts the whole pass is discarded: no Event, no state,
     // no quarantine, and the receipt disposition is `Discarded`.
     let unsupported = Error::UnsupportedSchema;
-    check_failure(&failure(b"deps:community.beta", unsupported, None));
-    assert_eq!(unsupported.class(), HostFailureClassV1::Authoritative);
+    let raised = check_failure(&failure(b"deps:community.beta", unsupported, None));
+    let PassFailureV1::Host(host) = classify_pass_failure(&raised) else {
+        std::panic::resume_unwind(Box::new("the pass raised no host error"))
+    };
+    assert_eq!(host, unsupported);
+    assert_eq!(host.class(), HostFailureClassV1::Authoritative);
 }
 
 #[test]
