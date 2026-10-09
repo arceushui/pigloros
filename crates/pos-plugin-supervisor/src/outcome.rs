@@ -85,13 +85,19 @@ impl CommunityPluginSubjectOutcomeV1 {
     /// Assemble the record of `entry`, total over every entry and receipt.
     ///
     /// `tick` and `mode` come from the caller, because a refused gate supplies neither; when
-    /// `receipt` exists its negotiated mode wins over `mode`. `receipt` is the one the caller
-    /// found with `CommunityPluginHandleV1::receipt_for()` for `entry.invocation_id`; the caller
-    /// passes `None` when that ID is `None`, because `assemble` compares no IDs. The
-    /// result precedence is: a gate error is `Refused`; else a receipt governs (its failure is
-    /// `Refused` for the class `PreExecutionRejection` and `Failed` otherwise, and with no
-    /// failure its disposition gives `Staged`, `Committed` or `Discarded`); else the pass's
-    /// `launch_failure` is `Refused` or `Failed` by class; else `NotRun`.
+    /// `receipt` exists its negotiated mode wins over `mode`.
+    ///
+    /// `receipt` is the one the caller found with `CommunityPluginHandleV1::receipt_for()` for
+    /// `entry.invocation_id`; the caller passes `None` when that ID is `None`, because
+    /// `assemble` compares no IDs.
+    ///
+    /// The result precedence is:
+    /// - a gate error is `Refused`;
+    /// - else a receipt governs: its failure is `Refused` for the class `PreExecutionRejection`
+    ///   and `Failed` otherwise, and with no failure its disposition gives `Staged`,
+    ///   `Committed` or `Discarded`;
+    /// - else the pass's `launch_failure` is `Refused` or `Failed` by class;
+    /// - else `NotRun`.
     #[must_use]
     pub fn assemble(
         entry: &MemberPassV1,
