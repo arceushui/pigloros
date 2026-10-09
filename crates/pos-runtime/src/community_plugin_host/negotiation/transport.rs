@@ -239,6 +239,6 @@ fn limits_fit(limits: DeterministicBudgetV1, profile: &CommunityPluginExecutionP
         && EffectiveExecutionLimitsV1::clamp(limits, profile.ceilings()).values() == limits
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;

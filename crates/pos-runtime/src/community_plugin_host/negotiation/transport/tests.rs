@@ -1,3 +1,6 @@
+// The gate and negotiation are Linux-only.
+#![cfg(target_os = "linux")]
+
 use pos_crypto::plugin_execution::{
     PluginAbiRequirementV1, PluginExecutionProjectionFixtureV1, PluginExecutionProjectionV1,
 };
