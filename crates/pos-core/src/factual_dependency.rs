@@ -8,14 +8,17 @@
 //! constants, the host-local errors, and the read port the host uses to
 //! resolve a Timeline's recorded prefix ([`FactualPrefixReadPortV1`]).
 //!
-//! It names no backend type, reads no store, and changes no behaviour: the
+//! It names no backend type, reads no store, and changes no store behaviour: the
 //! registry builder and the adapters that consume it land in later slices.
 //!
 //! # Derivations
 //!
-//! Every preimage is a domain tag, a zero byte, and fixed-width big-endian
-//! fields. Variable-length fields (owners, rule IDs, event types) carry a
-//! big-endian `u64` length prefix.
+//! Every domain-tagged preimage is a domain tag, a zero byte, and fixed-width
+//! big-endian fields. Variable-length fields (owners, rule IDs) carry a
+//! big-endian `u64` length prefix; the ADR amendment of R3.3.3 records this
+//! prefix width. [`factual_step_content_digest`] and
+//! [`factual_ingress_content_digest`] are deliberately untagged: the ADR
+//! (R3.3.2) defines them as a plain digest of their fields.
 //!
 //! - Owner IDs ([`factual_owner_id`]) are `plugin:` and the lowercase hex of a
 //!   BLAKE3 digest; a slotted and a slotless entry use different preimage tags
@@ -33,6 +36,7 @@
 use std::collections::BTreeMap;
 
 use crate::output_policy::OutputAuthorityV1;
+use crate::pipeline::ingress_tag;
 use crate::{
     encode_bytes, encode_hash, encode_head, pipeline_draft_vector_digest_v1, CoreError,
     CounterfactualDependencyErrorV1, DependencyEdgeRecordV1, DependencyNodeCoordinateV1,
@@ -88,9 +92,6 @@ const EDGE_MAGIC: &[u8] = b"IDP1";
 /// safe code, never a payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum FactualDependencyErrorV1 {
-    /// A declared input names something the Driver could not have read.
-    #[error("a declared dependency input is not one the Driver could have read")]
-    UndeclarableInput,
     /// A declared input resolves to no recorded node.
     #[error("a declared dependency input resolves to no recorded node")]
     UnresolvedInput,
@@ -139,6 +140,11 @@ pub struct FactualOwnerIdV1(String);
 
 impl FactualOwnerIdV1 {
     /// Wrap an owner ID; a node coordinate validates the length.
+    ///
+    /// Production derives IDs through [`factual_owner_id`] or
+    /// [`FactualOwnerIdV1::host`]; this constructor exists for hosts and tests
+    /// that already hold an ID. It adds no validation: the contract has no
+    /// owner-identity error (R3.8.2).
     #[must_use]
     pub const fn new(owner: String) -> Self {
         Self(owner)
@@ -277,6 +283,9 @@ impl FactualRuleV1 {
 /// Encode the classification bundle: a deterministic CBOR array of
 /// `[rule_id, rule_version, class_code]` entries, sorted by rule ID and
 /// version.
+///
+/// The rule ID is a CBOR text string; the ADR amendment of R3.5.3 records
+/// this encoding.
 #[must_use]
 pub fn factual_classification_bundle_bytes() -> Vec<u8> {
     let mut rules = FactualRuleV1::ALL;
@@ -382,13 +391,6 @@ fn finish(hasher: &blake3::Hasher) -> Hash {
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
-const fn ingress_code(ingress: PipelineIngressV1) -> u8 {
-    match ingress {
-        PipelineIngressV1::HumanProposedAction => 1,
-        PipelineIngressV1::ScheduledAiDriver => 2,
-    }
-}
-
 /// Derive the schema ID of an Event-backed node from its Event type.
 ///
 /// It is the first four bytes, big-endian, of a domain-tagged digest of the
@@ -425,6 +427,9 @@ pub fn factual_artifact_digest(
 
 /// Derive the provenance digest of a node.
 ///
+/// The length prefixes are big-endian `u64`s; the ADR amendment of R3.3.3
+/// records this width.
+///
 /// `responsible_owner` is the Driver owner ID or the host owner literal, and
 /// `policy_identity` the Driver's replay identity (zero for host nodes).
 #[must_use]
@@ -438,7 +443,7 @@ pub fn factual_provenance_digest(
     let mut hasher = domain_hasher(PROVENANCE_DOMAIN);
     hasher.update(&context.timeline_id.inner().to_bytes());
     hasher.update(&context.attempt_id.as_bytes());
-    hasher.update(&[ingress_code(ingress)]);
+    hasher.update(&[ingress_tag(ingress)]);
     hasher.update(context.evidence_digest.as_bytes());
     hasher.update(context.authority_grant.as_bytes());
     update_prefixed(&mut hasher, responsible_owner.as_bytes());
@@ -464,6 +469,8 @@ pub fn factual_output_content_digest(draft: &EventDraft) -> Hash {
 
 /// Content digest of a step node: the Driver's replay identity and the digest
 /// of its own output vector with wall times cleared.
+///
+/// The preimage is deliberately untagged, as the ADR defines it (R3.3.2).
 #[must_use]
 pub fn factual_step_content_digest(replay_identity: Hash, drafts: &[EventDraft]) -> Hash {
     let cleared: Vec<EventDraft> = drafts.iter().map(without_wall_time).collect();
@@ -474,6 +481,8 @@ pub fn factual_step_content_digest(replay_identity: Hash, drafts: &[EventDraft])
 }
 
 /// Content digest of an ingress node: the payload hash and the Event's `seq`.
+///
+/// The preimage is deliberately untagged, as the ADR defines it (R3.3.2).
 #[must_use]
 pub fn factual_ingress_content_digest(payload_hash: Hash, seq: Seq) -> Hash {
     let mut hasher = blake3::Hasher::new();
@@ -758,7 +767,7 @@ pub enum FactualTickShapeV1 {
 }
 
 /// Where one input of a node comes from.
-enum Source {
+enum FactualSource {
     /// A node of this Tick, by index into the specs.
     Node(usize),
     /// A node of an earlier Tick.
@@ -766,7 +775,7 @@ enum Source {
 }
 
 /// A node before its coordinate exists.
-struct NodeSpec {
+struct FactualNodeSpec {
     scheduler_position: u32,
     owner: String,
     output_ordinal: u32,
@@ -774,7 +783,7 @@ struct NodeSpec {
     content: Hash,
     rule: FactualRuleV1,
     policy_identity: Hash,
-    sources: Vec<Source>,
+    sources: Vec<FactualSource>,
 }
 
 fn host_spec(
@@ -783,8 +792,8 @@ fn host_spec(
     schema_id: u32,
     content: Hash,
     rule: FactualRuleV1,
-) -> NodeSpec {
-    NodeSpec {
+) -> FactualNodeSpec {
+    FactualNodeSpec {
         scheduler_position: 0,
         owner: owner.as_str().to_owned(),
         output_ordinal,
@@ -809,18 +818,18 @@ impl HostNodes {
         &self,
         tick: u64,
         input: &FactualInputV1,
-    ) -> Result<Source, FactualDependencyErrorV1> {
+    ) -> Result<FactualSource, FactualDependencyErrorV1> {
         match input {
             FactualInputV1::PrefixNode(index) => lookup(&self.prefix, *index),
             FactualInputV1::HistoryNode(index) => lookup(&self.history, *index),
             FactualInputV1::IngressEvent(seq) => self
                 .ingress
                 .get(seq)
-                .map(|index| Source::Node(*index))
+                .map(|index| FactualSource::Node(*index))
                 .ok_or(FactualDependencyErrorV1::UnresolvedInput),
             FactualInputV1::Prior(prior) => {
                 if prior.coordinate.tick() < tick {
-                    Ok(Source::Prior(prior.clone()))
+                    Ok(FactualSource::Prior(prior.clone()))
                 } else {
                     Err(FactualDependencyErrorV1::UnresolvedInput)
                 }
@@ -833,29 +842,26 @@ impl HostNodes {
         tick: u64,
         first: usize,
         inputs: &[FactualInputV1],
-    ) -> Result<Vec<Source>, FactualDependencyErrorV1> {
+    ) -> Result<Vec<FactualSource>, FactualDependencyErrorV1> {
         inputs
             .iter()
             .map(|input| self.resolve(tick, input))
             .collect::<Result<Vec<_>, _>>()
             .map(|resolved| {
-                std::iter::once(Source::Node(first))
+                std::iter::once(FactualSource::Node(first))
                     .chain(resolved)
                     .collect()
             })
     }
 }
 
-fn lookup(nodes: &[usize], index: u32) -> Result<Source, FactualDependencyErrorV1> {
-    usize::try_from(index)
-        .ok()
-        .and_then(|position| nodes.get(position))
-        .map(|node| Source::Node(*node))
+/// Resolve a node index of this Tick; `u32` to `usize` is lossless on every
+/// supported target.
+fn lookup(nodes: &[usize], index: u32) -> Result<FactualSource, FactualDependencyErrorV1> {
+    nodes
+        .get(index as usize)
+        .map(|node| FactualSource::Node(*node))
         .ok_or(FactualDependencyErrorV1::UnresolvedInput)
-}
-
-fn small(index: usize) -> u32 {
-    u32::try_from(index).unwrap_or(u32::MAX)
 }
 
 fn ensure_ascending_events(
@@ -872,23 +878,26 @@ fn ensure_ascending_events(
 }
 
 /// A source's coordinate and class.
-type Resolved = (DependencyNodeCoordinateV1, RecordedDependencyClassV1);
+struct FactualResolved {
+    coordinate: DependencyNodeCoordinateV1,
+    class: RecordedDependencyClassV1,
+}
 
 /// One node and the edges it consumes.
-struct Row {
+struct FactualRow {
     node: DependencyNodeRecordV1,
     edges: Vec<DependencyEdgeRecordV1>,
 }
 
-struct Assembly<'a> {
+struct FactualAssembly<'a> {
     context: &'a FactualTickContextV1,
     ingress: PipelineIngressV1,
-    specs: Vec<NodeSpec>,
+    specs: Vec<FactualNodeSpec>,
     output_specs: Vec<usize>,
     event_specs: Vec<(Seq, usize)>,
 }
 
-impl<'a> Assembly<'a> {
+impl<'a> FactualAssembly<'a> {
     const fn new(context: &'a FactualTickContextV1, ingress: PipelineIngressV1) -> Self {
         Self {
             context,
@@ -899,7 +908,7 @@ impl<'a> Assembly<'a> {
         }
     }
 
-    fn push(&mut self, spec: NodeSpec) -> usize {
+    fn push(&mut self, spec: FactualNodeSpec) -> usize {
         let index = self.specs.len();
         self.specs.push(spec);
         index
@@ -912,20 +921,19 @@ impl<'a> Assembly<'a> {
         rule: FactualRuleV1,
         contents: &[Hash],
     ) -> Vec<usize> {
-        contents
-            .iter()
-            .enumerate()
+        (0_u32..)
+            .zip(contents)
             .map(|(ordinal, content)| {
-                self.push(host_spec(owner, small(ordinal), schema_id, *content, rule))
+                self.push(host_spec(owner, ordinal, schema_id, *content, rule))
             })
             .collect()
     }
 
     fn human(&mut self, drafts: &[EventDraft]) {
-        for (ordinal, draft) in drafts.iter().enumerate() {
+        for (ordinal, draft) in (0_u32..).zip(drafts) {
             let index = self.push(host_spec(
                 FactualHostOwnerV1::Ingress,
-                small(ordinal),
+                ordinal,
                 factual_event_schema_id(draft.event_type.as_str()),
                 factual_output_content_digest(draft),
                 FactualRuleV1::ExternalIngress,
@@ -940,8 +948,8 @@ impl<'a> Assembly<'a> {
     ) -> Result<(), FactualDependencyErrorV1> {
         ensure_ascending_events(&scheduled.ingress_events)?;
         let host = self.host_nodes(scheduled);
-        for (index, driver) in scheduled.drivers.iter().enumerate() {
-            self.driver(&host, small(index + 1), driver)?;
+        for (position, driver) in (1_u32..).zip(&scheduled.drivers) {
+            self.driver(&host, position, driver)?;
         }
         Ok(())
     }
@@ -967,10 +975,10 @@ impl<'a> Assembly<'a> {
             &scheduled.history_contents,
         );
         let mut ingress = BTreeMap::new();
-        for (ordinal, event) in scheduled.ingress_events.iter().enumerate() {
+        for (ordinal, event) in (0_u32..).zip(&scheduled.ingress_events) {
             let index = self.push(host_spec(
                 FactualHostOwnerV1::Ingress,
-                small(ordinal),
+                ordinal,
                 factual_event_schema_id(&event.event_type),
                 factual_ingress_content_digest(event.payload_hash, event.seq),
                 FactualRuleV1::ExternalIngress,
@@ -999,7 +1007,7 @@ impl<'a> Assembly<'a> {
             .map(|output| output.draft.clone())
             .collect();
         let sources = host.resolve_all(tick, host.snapshot, &driver.step_inputs)?;
-        let step = self.push(NodeSpec {
+        let step = self.push(FactualNodeSpec {
             scheduler_position: position,
             owner: driver.owner.as_str().to_owned(),
             output_ordinal: 0,
@@ -1009,12 +1017,12 @@ impl<'a> Assembly<'a> {
             policy_identity: driver.policy_identity,
             sources,
         });
-        for (offset, output) in driver.outputs.iter().enumerate() {
+        for (ordinal, output) in (1_u32..).zip(&driver.outputs) {
             let sources = host.resolve_all(tick, step, &output.direct_inputs)?;
-            let index = self.push(NodeSpec {
+            let index = self.push(FactualNodeSpec {
                 scheduler_position: position,
                 owner: driver.owner.as_str().to_owned(),
-                output_ordinal: small(offset + 1),
+                output_ordinal: ordinal,
                 schema_id: factual_event_schema_id(output.draft.event_type.as_str()),
                 content: factual_output_content_digest(&output.draft),
                 rule: FactualRuleV1::for_authority(output.authority),
@@ -1051,10 +1059,20 @@ impl<'a> Assembly<'a> {
             .collect()
     }
 
-    fn resolved(&self, coordinates: &[DependencyNodeCoordinateV1], source: &Source) -> Resolved {
+    fn resolved(
+        &self,
+        coordinates: &[DependencyNodeCoordinateV1],
+        source: &FactualSource,
+    ) -> FactualResolved {
         match source {
-            Source::Node(index) => (coordinates[*index].clone(), self.specs[*index].rule.class()),
-            Source::Prior(prior) => (prior.coordinate.clone(), prior.class),
+            FactualSource::Node(index) => FactualResolved {
+                coordinate: coordinates[*index].clone(),
+                class: self.specs[*index].rule.class(),
+            },
+            FactualSource::Prior(prior) => FactualResolved {
+                coordinate: prior.coordinate.clone(),
+                class: prior.class,
+            },
         }
     }
 
@@ -1062,19 +1080,19 @@ impl<'a> Assembly<'a> {
         &self,
         coordinates: &[DependencyNodeCoordinateV1],
         index: usize,
-    ) -> Result<Row, FactualDependencyErrorV1> {
+    ) -> Result<FactualRow, FactualDependencyErrorV1> {
         let spec = &self.specs[index];
         let consumer = &coordinates[index];
         let class = spec.rule.class();
-        let sources: BTreeMap<Hash, Resolved> = spec
+        let sources: BTreeMap<Hash, FactualResolved> = spec
             .sources
             .iter()
             .map(|input| self.resolved(coordinates, input))
-            .map(|resolved| (resolved.0.artifact_digest(), resolved))
+            .map(|resolved| (resolved.coordinate.artifact_digest(), resolved))
             .collect();
         if sources
             .values()
-            .any(|(_, source_class)| breaks_class_rule(*source_class, class))
+            .any(|resolved| breaks_class_rule(resolved.class, class))
         {
             return Err(FactualDependencyErrorV1::ClassRuleViolation);
         }
@@ -1098,19 +1116,18 @@ impl<'a> Assembly<'a> {
                 DependencyEdgeRecordV1::try_from_canonical(
                     edge_bytes(&parts),
                     consumer.clone(),
-                    input.0.artifact_digest(),
+                    input.coordinate.artifact_digest(),
                 )
             })
-            .collect::<Result<Vec<_>, _>>();
-        DependencyNodeRecordV1::try_new(
+            .collect::<Result<Vec<_>, CounterfactualDependencyErrorV1>>()?;
+        let node = DependencyNodeRecordV1::try_new(
             consumer.clone(),
             class,
             RecordedNodeOriginV1::Committed,
             sources.keys().copied().collect(),
             provenance,
-        )
-        .and_then(|node| edges.map(|edges| Row { node, edges }))
-        .map_err(FactualDependencyErrorV1::from)
+        )?;
+        Ok(FactualRow { node, edges })
     }
 
     fn build(&self) -> Result<FactualTickDependenciesV1, FactualDependencyErrorV1> {
@@ -1122,19 +1139,17 @@ impl<'a> Assembly<'a> {
                 .cmp(&coordinates[*right].position_key())
         });
         let mut rank = vec![0_u32; order.len()];
-        for (position, spec_index) in order.iter().enumerate() {
-            rank[*spec_index] = small(position);
+        for (position, spec_index) in (0_u32..).zip(&order) {
+            rank[*spec_index] = position;
         }
         let built = order
             .iter()
             .map(|index| self.row(&coordinates, *index))
             .collect::<Result<Vec<_>, _>>()?;
-        let output_bindings: Vec<OutputNodeBindingV1> = self
-            .output_specs
-            .iter()
-            .enumerate()
+        let output_bindings: Vec<OutputNodeBindingV1> = (0_u32..)
+            .zip(&self.output_specs)
             .map(|(draft_index, spec_index)| OutputNodeBindingV1 {
-                draft_index: small(draft_index),
+                draft_index,
                 node_index: rank[*spec_index],
             })
             .collect();
@@ -1173,7 +1188,7 @@ const fn breaks_class_rule(
 /// The fields of one `IDP1` edge that its two nodes do not carry.
 struct EdgeParts<'a> {
     consumer: &'a DependencyNodeCoordinateV1,
-    source: &'a Resolved,
+    source: &'a FactualResolved,
     authorization: Hash,
     rule: FactualRuleV1,
     provenance: Hash,
@@ -1190,13 +1205,13 @@ fn push_node(out: &mut Vec<u8>, node: &DependencyNodeCoordinateV1) {
 }
 
 fn edge_bytes(parts: &EdgeParts<'_>) -> Vec<u8> {
-    let (source, source_class) = parts.source;
+    let source = &parts.source.coordinate;
     let mut out = vec![EDGE_ARRAY_HEAD];
     encode_bytes(&mut out, EDGE_MAGIC, CBOR_TEXT);
     encode_head(&mut out, CBOR_UNSIGNED, 1);
     push_node(&mut out, parts.consumer);
     push_node(&mut out, source);
-    encode_head(&mut out, CBOR_UNSIGNED, u64::from(source_class.code()));
+    encode_head(&mut out, CBOR_UNSIGNED, u64::from(parts.source.class.code()));
     encode_head(&mut out, CBOR_ARRAY, 2);
     encode_head(&mut out, CBOR_UNSIGNED, source.tick());
     encode_head(&mut out, CBOR_UNSIGNED, parts.consumer.tick());
@@ -1222,18 +1237,25 @@ fn edge_bytes(parts: &EdgeParts<'_>) -> Vec<u8> {
 /// `ClassRuleViolation` for a presentation-only input of a node of another
 /// class; and `Record(..)` for ingress Events not in strictly ascending
 /// `seq` order and for any fault of the record contract.
+///
+/// The derivation of the host edges (b) to (f) of R3.4.2 and the 255 and
+/// 4,095 caps on the declared input lists belong to the registry builder of
+/// slice 7b, which resolves the inputs before this call. Host nodes that no
+/// node consumes are not flagged here.
 pub fn assemble_factual_tick(
     context: &FactualTickContextV1,
     shape: &FactualTickShapeV1,
 ) -> Result<FactualTickDependenciesV1, FactualDependencyErrorV1> {
     match shape {
         FactualTickShapeV1::Scheduled(scheduled) => {
-            let mut assembly = Assembly::new(context, PipelineIngressV1::ScheduledAiDriver);
+            let mut assembly =
+                FactualAssembly::new(context, PipelineIngressV1::ScheduledAiDriver);
             assembly.scheduled(scheduled)?;
             assembly.build()
         }
         FactualTickShapeV1::Human(drafts) => {
-            let mut assembly = Assembly::new(context, PipelineIngressV1::HumanProposedAction);
+            let mut assembly =
+                FactualAssembly::new(context, PipelineIngressV1::HumanProposedAction);
             assembly.human(drafts);
             assembly.build()
         }

@@ -580,6 +580,8 @@ impl GatewayError {
             | Self::ForkDepthTooLarge { .. }
             | Self::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::EventReadTimeExceeded { .. } => StatusCode::GATEWAY_TIMEOUT,
+            // 507: the Timeline's recorded dependency set is full for good, so
+            // the failure is permanent for that Timeline and a retry cannot help.
             Self::DependencySetExhausted => StatusCode::INSUFFICIENT_STORAGE,
             Self::CompatibilityReadTruncated { .. }
             | Self::IngressConflict

@@ -517,7 +517,7 @@ impl PipelineAdmissionBasisV1 {
     }
 }
 
-const fn ingress_tag(ingress: PipelineIngressV1) -> u8 {
+pub(crate) const fn ingress_tag(ingress: PipelineIngressV1) -> u8 {
     match ingress {
         PipelineIngressV1::HumanProposedAction => 1,
         PipelineIngressV1::ScheduledAiDriver => 2,

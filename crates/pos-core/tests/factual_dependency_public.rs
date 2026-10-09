@@ -514,10 +514,6 @@ fn the_preflight_reserves_one_worst_case_record() {
 #[test]
 fn the_error_names_render_a_safe_code() {
     assert_eq!(
-        FactualError::UndeclarableInput.to_string(),
-        "a declared dependency input is not one the Driver could have read"
-    );
-    assert_eq!(
         FactualError::UnresolvedInput.to_string(),
         "a declared dependency input resolves to no recorded node"
     );
@@ -1037,7 +1033,7 @@ fn a_human_tick_records_one_human_ingress_node_per_draft() {
 }
 
 #[test]
-fn unresolvable_inputs_are_rejected_at_the_first_stepnd_at_the_output() {
+fn unresolvable_inputs_are_rejected_at_the_step_and_at_the_output() {
     let at_step = |input| assemble_scheduled(vec![driver(OWNER_A, vec![input], Vec::new())]);
     let at_output = |input| {
         assemble_scheduled(vec![driver(
@@ -1199,7 +1195,9 @@ struct FakeTick {
     last_seq: u64,
 }
 
-/// Reference model of the read port: the semantics a store must give.
+/// In-memory model of the read port. This is a contract test of the port
+/// semantics a store must give, not a store: real adapters are checked
+/// against the same expectations in their own crates.
 #[derive(Default)]
 struct FakeStore {
     ticks: Vec<FakeTick>,
