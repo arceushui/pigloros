@@ -248,6 +248,13 @@ struct RevocationRecord<'a> {
 
 fn prv1(record: &RevocationRecord<'_>) -> TestResult<Vec<u8>> {
     let spec = record.spec;
+    // Only the terminal record carries the spec's revocation Tick, so a later record that adds
+    // a revocation keeps the digest of every earlier record: the earlier floors stay ancestors.
+    let record_tick = if record.terminal {
+        spec.revocation_tick
+    } else {
+        TICK
+    };
     let (keys, artifacts) = if record.terminal {
         let mut epochs = spec.revoked_publisher_epochs.clone();
         epochs.sort_unstable();
@@ -293,7 +300,7 @@ fn prv1(record: &RevocationRecord<'_>) -> TestResult<Vec<u8>> {
             signed(ROOT_EXPIRES + i64::from(spec.revocation_variant)),
             bytes_value(record.root_digest),
             record.previous.map_or(Value::Null, bytes_value),
-            unsigned(spec.revocation_tick),
+            unsigned(record_tick),
             Value::Array(keys),
             Value::Array(artifacts),
         ],
