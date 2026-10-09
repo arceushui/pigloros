@@ -104,6 +104,14 @@ impl GatedCommunityReleaseV1 {
         &self.component
     }
 
+    /// The Component bytes, moved out of the release.
+    ///
+    /// A Driver is built from the gated release by value and owns the bytes it executes.
+    #[must_use]
+    pub fn into_component(self) -> Vec<u8> {
+        self.component
+    }
+
     /// `component_digest_v1` of [`Self::component()`], computed from the bytes held.
     #[must_use]
     pub const fn component_digest(&self) -> [u8; 32] {

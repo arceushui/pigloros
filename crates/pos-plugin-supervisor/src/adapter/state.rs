@@ -9,9 +9,10 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use pos_core::PluginId;
+use pos_plugin_release::ContentValidationV1;
 use pos_runtime::community_plugin_host::{
-    quarantine_for, CommunityPluginHostErrorV1, EffectiveExecutionLimitsV1, GuestPluginErrorV1,
-    MeteringV1, NegotiatedCommunityPluginV1,
+    quarantine_for, CommunityPassAuthorizationV1, CommunityPluginHostErrorV1,
+    EffectiveExecutionLimitsV1, GuestPluginErrorV1, MeteringV1, NegotiatedCommunityPluginV1,
 };
 use pos_runtime::{PluginAvailabilityV1, PluginRegistry, RuntimeError};
 
@@ -50,7 +51,8 @@ pub enum ReceiptDispositionV1 {
 /// guest-declared failure, the guest's exact `plugin-error` (code, field
 /// ordinal and related digest). Nothing here is persisted or authoritative.
 /// The effective limits fixed at negotiation are
-/// [`CommunityInvocationReceiptV1::limits()`].
+/// [`CommunityInvocationReceiptV1::limits()`]; the profile digest the
+/// invocation was bound to is `negotiated.execution_profile_digest()`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommunityInvocationReceiptV1 {
     /// The host-built invocation's ID.
@@ -74,6 +76,9 @@ pub struct CommunityInvocationReceiptV1 {
     pub guest_error: Option<GuestPluginErrorV1>,
     /// What became of the staged result.
     pub disposition: ReceiptDispositionV1,
+    /// What was checked about the release content: until #574 the constant
+    /// `NotPerformed` (ADR-061 revision 7 decision 12).
+    pub content_validation: ContentValidationV1,
 }
 
 impl CommunityInvocationReceiptV1 {
@@ -90,6 +95,12 @@ struct Inner {
     last_failure: Option<CommunityPluginHostErrorV1>,
     receipts: VecDeque<CommunityInvocationReceiptV1>,
     committed: CommunityStateV1,
+    /// The one-shot authorization offered for the current pass.
+    slot: Option<CommunityPassAuthorizationV1>,
+    /// The failure the current pass produced for this Plugin.
+    pass_failure: Option<CommunityPluginHostErrorV1>,
+    /// The invocation ID the Driver built for the current pass.
+    pass_invocation_id: Option<[u8; 16]>,
 }
 
 /// State shared between one adapter and its host handle.
@@ -108,6 +119,9 @@ impl Shared {
                 last_failure: None,
                 receipts: VecDeque::new(),
                 committed: initial,
+                slot: None,
+                pass_failure: None,
+                pass_invocation_id: None,
             }),
         }
     }
@@ -132,13 +146,58 @@ impl Shared {
     }
 
     /// Mark the failing Plugin, and quarantine it when the failure class
-    /// quarantines. Another Plugin's state is never touched.
+    /// quarantines. Another Plugin's state is never touched. The failure is
+    /// also the current pass's.
     pub(super) fn record_failure(&self, error: CommunityPluginHostErrorV1) {
         let mut inner = self.lock();
         inner.last_failure = Some(error);
+        inner.pass_failure = Some(error);
         if let Some(availability) = quarantine_for(error) {
             inner.availability = availability;
         }
+    }
+
+    /// Start a pass: forget the previous pass's failure and invocation ID, then
+    /// keep `authorization` unless an earlier one still occupies the slot.
+    pub(super) fn offer(
+        &self,
+        authorization: CommunityPassAuthorizationV1,
+    ) -> Result<(), CommunityPluginHostErrorV1> {
+        let mut inner = self.lock();
+        inner.pass_failure = None;
+        inner.pass_invocation_id = None;
+        if inner.slot.is_some() {
+            Err(CommunityPluginHostErrorV1::InvalidInvocation)
+        } else {
+            inner.slot = Some(authorization);
+            Ok(())
+        }
+    }
+
+    /// End a pass: drop an unconsumed authorization and the pass's failure and
+    /// invocation ID.
+    pub(super) fn close(&self) {
+        let mut inner = self.lock();
+        inner.slot = None;
+        inner.pass_failure = None;
+        inner.pass_invocation_id = None;
+    }
+
+    /// Read the offered authorization without taking it.
+    pub(super) fn peek<T>(
+        &self,
+        read: impl FnOnce(&CommunityPassAuthorizationV1) -> T,
+    ) -> Option<T> {
+        self.lock().slot.as_ref().map(read)
+    }
+
+    /// Take the offered authorization: a launch consumes it.
+    pub(super) fn take_authorization(&self) -> Option<CommunityPassAuthorizationV1> {
+        self.lock().slot.take()
+    }
+
+    pub(super) fn set_invocation_id(&self, invocation_id: [u8; 16]) {
+        self.lock().pass_invocation_id = Some(invocation_id);
     }
 
     pub(super) fn push_receipt(&self, receipt: CommunityInvocationReceiptV1) {
@@ -224,6 +283,66 @@ impl CommunityPluginHandleV1 {
     #[must_use]
     pub fn receipts(&self) -> Vec<CommunityInvocationReceiptV1> {
         self.shared.lock().receipts.iter().cloned().collect()
+    }
+
+    /// The newest retained receipt of the invocation `invocation_id`, if any.
+    ///
+    /// Fixtures reuse a constant ID, so the newest match wins (non-durable).
+    #[must_use]
+    pub fn receipt_for(&self, invocation_id: [u8; 16]) -> Option<CommunityInvocationReceiptV1> {
+        self.shared
+            .lock()
+            .receipts
+            .iter()
+            .rev()
+            .find(|receipt| receipt.invocation_id == invocation_id)
+            .cloned()
+    }
+
+    /// The failure the current pass produced for this Plugin, if any.
+    ///
+    /// Set by [`Self::record_refusal()`] and by the Driver's own failure path;
+    /// cleared by [`Self::offer_authorization()`] and [`Self::close_pass()`].
+    /// It is distinct from [`Self::last_failure()`], which every failure sets
+    /// and only [`Self::clear_quarantine()`] clears.
+    #[must_use]
+    pub fn pass_failure(&self) -> Option<CommunityPluginHostErrorV1> {
+        self.shared.lock().pass_failure
+    }
+
+    /// The invocation ID the Driver built for the current pass, set once the
+    /// host's context source has answered and cleared with the pass failure.
+    #[must_use]
+    pub fn pass_invocation_id(&self) -> Option<[u8; 16]> {
+        self.shared.lock().pass_invocation_id
+    }
+
+    /// Offer this pass's one-shot authorization to the Driver.
+    ///
+    /// Starts the pass: the previous pass's failure and invocation ID are
+    /// cleared first.
+    ///
+    /// # Errors
+    /// Returns `InvalidInvocation` when an earlier authorization still occupies
+    /// the slot; the earlier one is kept and `authorization` is dropped.
+    pub fn offer_authorization(
+        &self,
+        authorization: CommunityPassAuthorizationV1,
+    ) -> Result<(), CommunityPluginHostErrorV1> {
+        self.shared.offer(authorization)
+    }
+
+    /// Record a failure the host raised for this Plugin outside `step`, as a
+    /// failure raised inside `step` would be: it sets the last failure and the
+    /// pass failure and applies the failure class's quarantine.
+    pub fn record_refusal(&self, error: CommunityPluginHostErrorV1) {
+        self.shared.record_failure(error);
+    }
+
+    /// End the pass: drop an unconsumed authorization and clear the pass
+    /// failure and invocation ID.
+    pub fn close_pass(&self) {
+        self.shared.close();
     }
 
     /// The last committed Plugin state (non-durable).
