@@ -103,6 +103,23 @@ struct Inner {
     pass_invocation_id: Option<[u8; 16]>,
 }
 
+impl Inner {
+    /// Keep `authorization` and forget the previous pass's failure and invocation ID, unless an
+    /// earlier authorization still occupies the slot, in which case nothing changes.
+    fn start_pass(
+        &mut self,
+        authorization: CommunityPassAuthorizationV1,
+    ) -> Result<(), CommunityPluginHostErrorV1> {
+        if self.slot.is_some() {
+            return Err(CommunityPluginHostErrorV1::InvalidInvocation);
+        }
+        self.slot = Some(authorization);
+        self.pass_failure = None;
+        self.pass_invocation_id = None;
+        Ok(())
+    }
+}
+
 /// State shared between one adapter and its host handle.
 #[derive(Debug)]
 pub(super) struct Shared {
@@ -164,15 +181,7 @@ impl Shared {
         &self,
         authorization: CommunityPassAuthorizationV1,
     ) -> Result<(), CommunityPluginHostErrorV1> {
-        let mut inner = self.lock();
-        if inner.slot.is_some() {
-            Err(CommunityPluginHostErrorV1::InvalidInvocation)
-        } else {
-            inner.slot = Some(authorization);
-            inner.pass_failure = None;
-            inner.pass_invocation_id = None;
-            Ok(())
-        }
+        self.lock().start_pass(authorization)
     }
 
     /// End a pass: drop an unconsumed authorization and the pass's failure and
