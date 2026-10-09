@@ -10,10 +10,12 @@
 //! simulation_time, call]`:
 //! - `negotiation` is the supervisor's negotiated record, `[world, plugin_id,
 //!   pmf1_digest, release_digest, abi_major, abi_minor, [declared_min,
-//!   declared_max], [feature...], [capability...], mode, [limit x 8]]`. A
-//!   capability is its nine PMF1 fields in order; `mode` is 0 for Local and 1
-//!   for Air-Gapped; the limits are the `DeterministicBudgetV1` members in
-//!   PMF1 order;
+//!   declared_max], [feature...], [capability...], mode, [limit x 8],
+//!   [profile_digest?]]`. A capability is its nine PMF1 fields in order;
+//!   `mode` is 0 for Local and 1 for Air-Gapped; the limits are the
+//!   `DeterministicBudgetV1` members in PMF1 order; the execution profile
+//!   digest is an array of zero items (the record has no digest) or one
+//!   32-byte string;
 //! - `call` is `[0]` for `describe`, or `[1, invocation]` for `reduce` and
 //!   `[2, invocation]` for `drive`.
 //!
@@ -39,12 +41,15 @@ use pos_runtime::community_plugin_host::{
     PluginOutputV1, TrapReproductionV1,
 };
 
+use crate::launch::MODES;
 use self::contract::{
     read_descriptor, read_guest_error, read_invocation, read_log, read_metering, read_output,
     write_descriptor, write_guest_error, write_invocation, write_log, write_metering, write_output,
 };
+
 use self::wire::{
-    read_bytes, read_code, read_list, read_text, read_u16, require, Decoded, EnvelopeReader, Writer,
+    read_bytes, read_code, read_digests, read_list, read_text, read_u16, require, Decoded,
+    EnvelopeReader, Writer,
 };
 
 /// Magic text of a worker request envelope.
@@ -80,10 +85,6 @@ const VERSION: u64 = 1;
 const MAX_TEXT_BYTES: usize = 128;
 const MAX_PATTERN_BYTES: usize = 512;
 const MAX_LIST: usize = 256;
-const MODES: [CommunityPluginModeV1; 2] = [
-    CommunityPluginModeV1::Local,
-    CommunityPluginModeV1::AirGapped,
-];
 
 /// A malformed, non-canonical, truncated, out-of-bounds or unencodable
 /// worker envelope.
@@ -214,7 +215,7 @@ fn write_negotiation(writer: &mut Writer, negotiation: &NegotiatedTransportV1) {
     let (declared_min, declared_max) = negotiation.declared_minors;
     let limits = &negotiation.limits;
     writer
-        .array(11)
+        .array(12)
         .text(&negotiation.world)
         .text(&negotiation.plugin_id)
         .bytes(&negotiation.pmf1_digest)
@@ -244,6 +245,7 @@ fn write_negotiation(writer: &mut Writer, negotiation: &NegotiatedTransportV1) {
     ] {
         writer.unsigned(member);
     }
+    writer.digests(negotiation.execution_profile_digest.as_slice());
 }
 
 fn write_capability(writer: &mut Writer, capability: &PluginCapabilityDescriptorV1) {
@@ -261,7 +263,7 @@ fn write_capability(writer: &mut Writer, capability: &PluginCapabilityDescriptor
 }
 
 fn read_negotiation(reader: &mut EnvelopeReader<'_>) -> Decoded<NegotiatedTransportV1> {
-    reader.fixed_array(11)?;
+    reader.fixed_array(12)?;
     let world = read_text(reader, MAX_TEXT_BYTES)?;
     let plugin_id = read_text(reader, MAX_TEXT_BYTES)?;
     let pmf1_digest = reader.bytes()?;
@@ -270,6 +272,11 @@ fn read_negotiation(reader: &mut EnvelopeReader<'_>) -> Decoded<NegotiatedTransp
     let abi_minor = read_u16(reader)?;
     reader.fixed_array(2)?;
     let declared_minors = (read_u16(reader)?, read_u16(reader)?);
+    let required_features =
+        read_list(reader, MAX_LIST, |reader| read_text(reader, MAX_TEXT_BYTES))?;
+    let not_granted_capabilities = read_list(reader, MAX_LIST, read_capability)?;
+    let mode = read_mode(reader)?;
+    let (limits, execution_profile_digest) = read_limits_and_digest(reader)?;
     Ok(NegotiatedTransportV1 {
         world,
         plugin_id,
@@ -278,11 +285,29 @@ fn read_negotiation(reader: &mut EnvelopeReader<'_>) -> Decoded<NegotiatedTransp
         abi_major,
         abi_minor,
         declared_minors,
-        required_features: read_list(reader, MAX_LIST, |reader| read_text(reader, MAX_TEXT_BYTES))?,
-        not_granted_capabilities: read_list(reader, MAX_LIST, read_capability)?,
-        mode: MODES[read_code(reader, MODES.len())?],
-        limits: read_limits(reader)?,
+        required_features,
+        not_granted_capabilities,
+        mode,
+        limits,
+        execution_profile_digest,
     })
+}
+
+/// The mode, by its wire code.
+fn read_mode(reader: &mut EnvelopeReader<'_>) -> Decoded<CommunityPluginModeV1> {
+    Ok(MODES[read_code(reader, MODES.len())?])
+}
+
+/// The optional profile digest: an array of zero items or one digest.
+fn read_profile_digest(reader: &mut EnvelopeReader<'_>) -> Decoded<Option<[u8; 32]>> {
+    Ok(read_digests(reader, 1)?.into_iter().next())
+}
+
+/// The limits and the profile digest that follow them.
+fn read_limits_and_digest(
+    reader: &mut EnvelopeReader<'_>,
+) -> Decoded<(DeterministicBudgetV1, Option<[u8; 32]>)> {
+    Ok((read_limits(reader)?, read_profile_digest(reader)?))
 }
 
 fn read_capability(reader: &mut EnvelopeReader<'_>) -> Decoded<PluginCapabilityDescriptorV1> {

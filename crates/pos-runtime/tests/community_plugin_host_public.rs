@@ -1002,3 +1002,191 @@ fn parity_profiles_negotiate_identical_limits_in_both_modes() -> TestResult {
     assert_eq!(in_local.limits().values().memory_bytes, WASM_PAGE_BYTES_V1);
     Ok(())
 }
+
+/// R7-D1: the digest of the golden profile, computed offline with `b3sum`.
+const R7_D1_DIGEST: [u8; 32] = [
+    0x9d, 0xf8, 0x1c, 0xeb, 0x0d, 0x02, 0x96, 0x65, 0xc3, 0x31, 0x7e, 0x72, 0x73, 0x63, 0x85, 0xb2,
+    0x1a, 0xf9, 0x51, 0x20, 0x0b, 0xab, 0xd3, 0x0c, 0xbb, 0xfc, 0x7d, 0x0a, 0x8d, 0x11, 0xe1, 0x00,
+];
+
+fn golden_runtime(
+    version: &str,
+    resolved: &[&str],
+    engine: PinnedEngineConfigV1,
+    rows: Vec<TrapTableEntryV1>,
+) -> Result<PinnedComponentRuntimeV1, ProfileError> {
+    PinnedComponentRuntimeV1::new(version.to_owned(), features(resolved), engine, rows)
+}
+
+fn golden_rows() -> Vec<TrapTableEntryV1> {
+    vec![
+        entry("OutOfFuel", TrapOutcomeV1::FuelExhausted),
+        entry("Interrupt", TrapOutcomeV1::WatchdogStop),
+        entry(
+            "UnreachableCodeReached",
+            TrapOutcomeV1::Trap(ComponentTrapClassV1::Unreachable),
+        ),
+    ]
+}
+
+fn digest_of(
+    mode: CommunityPluginModeV1,
+    ceilings: CommunityPluginCeilingsV1,
+    runtime: PinnedComponentRuntimeV1,
+) -> Option<[u8; 32]> {
+    CommunityPluginExecutionProfileV1::new(mode, ceilings, Some(runtime)).digest()
+}
+
+/// R7-P1: the golden digest, mode exclusion, member sensitivity, order
+/// independence and the absent digest of a profile without a runtime.
+#[test]
+fn the_profile_digest_matches_its_golden_vector_and_ignores_the_mode() -> TestResult {
+    let sorted = ["component-model", "cranelift", "runtime"];
+    let golden = golden_runtime("fixture-1", &sorted, ENGINE, golden_rows())?;
+    let ceilings = CommunityPluginCeilingsV1::V1;
+    let local = digest_of(CommunityPluginModeV1::Local, ceilings, golden.clone());
+    assert_eq!(local, Some(R7_D1_DIGEST));
+    let air_gapped = digest_of(CommunityPluginModeV1::AirGapped, ceilings, golden);
+    assert_eq!(air_gapped, local);
+    let mut rows = golden_rows();
+    rows.reverse();
+    let recorded = ["runtime", "component-model", "cranelift"];
+    let reordered = golden_runtime("fixture-1", &recorded, ENGINE, rows)?;
+    let mode = CommunityPluginModeV1::Local;
+    assert_eq!(digest_of(mode, ceilings, reordered), local);
+    Ok(())
+}
+
+#[test]
+fn every_single_profile_member_changes_the_digest() -> TestResult {
+    let sorted = ["component-model", "cranelift", "runtime"];
+    let mode = CommunityPluginModeV1::Local;
+    let values = CommunityPluginCeilingsV1::V1.values();
+    let lowered = |change: fn(&mut CeilingValuesV1)| {
+        let mut values = values;
+        change(&mut values);
+        CommunityPluginCeilingsV1::new(values)
+    };
+    let ceilings = [
+        lowered(|v| v.memory_bytes -= WASM_PAGE_BYTES_V1)?,
+        lowered(|v| v.fuel -= 1)?,
+        lowered(|v| v.host_calls -= 1)?,
+        lowered(|v| v.event_bytes -= 1)?,
+        lowered(|v| v.log_bytes -= 1)?,
+    ];
+    let mut seen = std::collections::BTreeSet::from([R7_D1_DIGEST]);
+    for changed in ceilings {
+        let digest = digest_of(mode, changed, golden_runtime_of(&sorted)?);
+        assert!(digest.is_some_and(|digest| seen.insert(digest)));
+    }
+    let stack = PinnedEngineConfigV1 {
+        max_wasm_stack: ENGINE.max_wasm_stack + 1,
+        ..ENGINE
+    };
+    let no_fuel = PinnedEngineConfigV1 {
+        consume_fuel: false,
+        ..ENGINE
+    };
+    let no_epoch = PinnedEngineConfigV1 {
+        epoch_interruption: false,
+        ..ENGINE
+    };
+    let mut other_row = golden_rows();
+    other_row[2] = entry(
+        "StackOverflow",
+        TrapOutcomeV1::Trap(ComponentTrapClassV1::StackExhausted),
+    );
+    let mut fewer_rows = golden_rows();
+    fewer_rows.pop();
+    let mut more_rows = golden_rows();
+    more_rows.push(entry(
+        "NullReference",
+        TrapOutcomeV1::Trap(ComponentTrapClassV1::Other),
+    ));
+    // The outcome is a function of the code, so a row differing from another
+    // only in its code (same outcome) is the closest pair a valid runtime has.
+    let mut other_code_row = golden_rows();
+    other_code_row.push(entry(
+        "NullPointer",
+        TrapOutcomeV1::Trap(ComponentTrapClassV1::Other),
+    ));
+    let extra = ["cranelift", "runtime", "z"];
+    let runtimes = [
+        golden_runtime("fixture-2", &sorted, ENGINE, golden_rows())?,
+        golden_runtime("fixture-1", &sorted[1..], ENGINE, golden_rows())?,
+        golden_runtime("fixture-1", &extra, ENGINE, golden_rows())?,
+        golden_runtime("fixture-1", &sorted, stack, golden_rows())?,
+        golden_runtime("fixture-1", &sorted, no_fuel, golden_rows())?,
+        golden_runtime("fixture-1", &sorted, no_epoch, golden_rows())?,
+        golden_runtime("fixture-1", &sorted, ENGINE, other_row)?,
+        golden_runtime("fixture-1", &sorted, ENGINE, fewer_rows)?,
+        golden_runtime("fixture-1", &sorted, ENGINE, more_rows)?,
+        golden_runtime("fixture-1", &sorted, ENGINE, other_code_row)?,
+    ];
+    for runtime in runtimes {
+        let digest = digest_of(mode, CommunityPluginCeilingsV1::V1, runtime);
+        assert!(digest.is_some_and(|digest| seen.insert(digest)));
+    }
+    Ok(())
+}
+
+fn golden_runtime_of(resolved: &[&str]) -> Result<PinnedComponentRuntimeV1, ProfileError> {
+    golden_runtime("fixture-1", resolved, ENGINE, golden_rows())
+}
+
+#[test]
+fn a_profile_without_a_runtime_has_no_digest_and_neither_has_its_record() -> TestResult {
+    let bare = CommunityPluginExecutionProfileV1::new(
+        CommunityPluginModeV1::Local,
+        CommunityPluginCeilingsV1::V1,
+        None,
+    );
+    assert_eq!(bare.digest(), None);
+    let execution = PluginExecutionProjectionV1::from(fixture());
+    let host = CommunityPluginHostAbiV1::v1();
+    let negotiated = negotiate_community_plugin_v1(&execution, &host, &bare)?;
+    assert_eq!(negotiated.execution_profile_digest(), None);
+    let recorded = runtime()?;
+    let full = CommunityPluginExecutionProfileV1::new(
+        CommunityPluginModeV1::AirGapped,
+        CommunityPluginCeilingsV1::V1,
+        Some(recorded),
+    );
+    let negotiated = negotiate_community_plugin_v1(&execution, &host, &full)?;
+    assert_eq!(negotiated.execution_profile_digest(), full.digest());
+    assert!(full.digest().is_some());
+    Ok(())
+}
+
+fn feature_runtime(
+    resolved: &[&str],
+    rows: Vec<TrapTableEntryV1>,
+) -> Result<PinnedComponentRuntimeV1, ProfileError> {
+    golden_runtime("fixture-1", resolved, ENGINE, rows)
+}
+
+/// R7-P7: a repeated feature text is rejected at the first repeat.
+#[test]
+fn a_duplicate_feature_is_rejected_at_the_first_repeat() {
+    assert_eq!(
+        feature_runtime(&["a", "b", "a", "b"], golden_rows()),
+        Err(ProfileError::DuplicateFeature { index: 2 })
+    );
+    assert_eq!(
+        feature_runtime(&["a", "a"], golden_rows()),
+        Err(ProfileError::DuplicateFeature { index: 1 })
+    );
+    assert!(feature_runtime(&["a", "b"], golden_rows()).is_ok());
+    assert!(feature_runtime(&[], golden_rows()).is_ok());
+    // The feature rule is checked before the trap table rules.
+    let other = TrapOutcomeV1::Trap(ComponentTrapClassV1::Other);
+    let repeated_rows = vec![entry("NullReference", other), entry("NullReference", other)];
+    assert_eq!(
+        feature_runtime(&["a", "a"], repeated_rows),
+        Err(ProfileError::DuplicateFeature { index: 1 })
+    );
+    assert_eq!(
+        ProfileError::DuplicateFeature { index: 2 }.to_string(),
+        "community Plugin runtime repeats feature 2"
+    );
+}

@@ -6,6 +6,7 @@
 //! them, and the guest contract types that cross the Component boundary. It
 //! loads, launches and executes nothing, and links no WebAssembly runtime.
 
+pub mod cbor;
 mod contract;
 mod error;
 mod failure;

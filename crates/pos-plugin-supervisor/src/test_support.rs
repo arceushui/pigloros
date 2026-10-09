@@ -124,12 +124,32 @@ pub fn optional_capability() -> PluginCapabilityDescriptorV1 {
 }
 
 /// `plugin_id` declaring ABI 0.0 and `budget`, negotiated by the V1 host under
-/// the Local profile.
+/// the Local profile, which records no runtime and so no profile digest.
 #[must_use]
 pub fn negotiated_with(
     plugin_id: &str,
     budget: DeterministicBudgetV1,
     capabilities: Vec<PluginCapabilityDescriptorV1>,
+) -> NegotiatedCommunityPluginV1 {
+    let profile = CommunityPluginExecutionProfileV1::new(
+        CommunityPluginModeV1::Local,
+        CommunityPluginCeilingsV1::V1,
+        None,
+    );
+    negotiated_under(plugin_id, budget, capabilities, &profile)
+}
+
+/// As [`negotiated_with`], negotiated under `profile`.
+///
+/// A worker serves a record only when its profile digest is the worker's own,
+/// so a test that runs a real worker passes a profile with the worker's pinned
+/// runtime and mode.
+#[must_use]
+pub fn negotiated_under(
+    plugin_id: &str,
+    budget: DeterministicBudgetV1,
+    capabilities: Vec<PluginCapabilityDescriptorV1>,
+    profile: &CommunityPluginExecutionProfileV1,
 ) -> NegotiatedCommunityPluginV1 {
     let fixture = PluginExecutionProjectionFixtureV1 {
         pmf1_digest: [0x11; 32],
@@ -144,16 +164,11 @@ pub fn negotiated_with(
         capabilities,
         budget,
     };
-    let profile = CommunityPluginExecutionProfileV1::new(
-        CommunityPluginModeV1::Local,
-        CommunityPluginCeilingsV1::V1,
-        None,
-    );
     let execution = PluginExecutionProjectionV1::from(fixture);
     ok(negotiate_community_plugin_v1(
         &execution,
         &CommunityPluginHostAbiV1::v1(),
-        &profile,
+        profile,
     ))
 }
 
