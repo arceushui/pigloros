@@ -121,6 +121,9 @@ pub enum RuntimeError {
     #[error("driver emitted core-owned geographic event type '{event_type}'")]
     GeographicDraft { event_type: String },
 
+    #[error("driver emitted host-owned event type '{event_type}'")]
+    ReservedHostDraft { event_type: String },
+
     #[error("plugin '{name}' cannot claim Gateway-owned consent event type '{event_type}'")]
     ReservedConsentEventType { name: String, event_type: String },
 

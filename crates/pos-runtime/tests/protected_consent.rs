@@ -22,6 +22,9 @@ use std::{
     time::Duration,
 };
 
+/// The host-owned activation Event type (ADR-061 revision 7 decision 9).
+const RESERVED_ACTIVATION_TYPE: &str = "pigloros.plugin.release-activated";
+
 /// The one-member Fork ancestry of a fixture Timeline with no parent.
 fn root_ancestry(timeline: pos_core::TimelineId) -> Vec<pos_core::TimelineMeta> {
     vec![pos_core::TimelineMeta {
@@ -2230,4 +2233,42 @@ fn protected_recovery_fails_closed_after_the_consent_gate_is_unbound() {
         RuntimeError::ConsentOperationUnavailable
     ));
     assert_eq!(test_ok(store.logical_head(timeline)), Seq::ZERO);
+}
+
+struct ActivationDraftDriver;
+
+impl Driver for ActivationDraftDriver {
+    fn name(&self) -> &'static str {
+        "activation-draft"
+    }
+
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        Ok(StepOutput::new(vec![EventDraft::new(
+            EntityId::new(),
+            Kind::new(RESERVED_ACTIVATION_TYPE),
+            CanonicalBytes::from_static(b"activation"),
+        )]))
+    }
+}
+
+fn step_error(registry: &mut PluginRegistry, timeline: TimelineId) -> RuntimeError {
+    test_err(registry.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO))
+}
+
+/// R7-A3: the host-owned activation type is rejected from a Driver even when its Plugin owns it,
+/// and the rejected pass leaves nothing pending.
+#[test]
+fn a_driver_draft_of_the_reserved_activation_type_is_rejected_and_discarded() {
+    let timeline = TimelineId::new();
+    let mut registry = PluginRegistry::new();
+    register_output_driver(
+        &mut registry,
+        RESERVED_ACTIVATION_TYPE,
+        Box::new(ActivationDraftDriver),
+    );
+    for _ in 0..2 {
+        let error = step_error(&mut registry, timeline);
+        assert!(matches!(error, RuntimeError::ReservedHostDraft { .. }));
+        assert!(error.to_string().contains(RESERVED_ACTIVATION_TYPE));
+    }
 }
