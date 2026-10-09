@@ -1803,7 +1803,7 @@ fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> Gatew
 
 /// Authority and policy failures reuse the authorization errors; the two
 /// dependency faults are a host fault and a permanent per-Timeline limit.
-fn authority_or_dependency_error(outcome: &PipelineOutcomeV1) -> GatewayError {
+const fn authority_or_dependency_error(outcome: &PipelineOutcomeV1) -> GatewayError {
     match outcome {
         PipelineOutcomeV1::AuthorityRevoked | PipelineOutcomeV1::AuthorityExpired => {
             GatewayError::AuthorizationDenied
