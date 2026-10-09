@@ -1,0 +1,70 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 7b47ffc0..f0bc226a 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -5243,6 +5243,7 @@ dependencies = [
+  "close_fds",
+  "pos-core",
+  "pos-crypto",
++ "pos-plugin-publisher",
+  "pos-plugin-release",
+  "pos-runtime",
+  "pos-store",
+diff --git a/crates/pos-plugin-supervisor/tests/community_host_public.rs b/crates/pos-plugin-supervisor/tests/community_host_public.rs
+index e683a0de..a38ceb2b 100644
+--- a/crates/pos-plugin-supervisor/tests/community_host_public.rs
++++ b/crates/pos-plugin-supervisor/tests/community_host_public.rs
+@@ -638,7 +638,10 @@ fn every_slot_is_empty_after_a_failure_while_staging() -> TestResult {
+         std::panic::resume_unwind(Box::new(format!("the pass did not fail: {failed:?}")))
+     };
+     assert_eq!(*failure, PassFailureV1::Host(Error::FuelExhausted));
+-    assert!(matches!(**error, RuntimeError::CommunityPlugin(Error::FuelExhausted)));
++    assert!(matches!(
++        **error,
++        RuntimeError::CommunityPlugin(Error::FuelExhausted)
++    ));
+     assert!(rig.handle(1).receipts().is_empty());
+     assert!(rig.all_slots_empty());
+     Ok(())
+@@ -651,7 +654,13 @@ fn every_slot_is_empty_after_a_driver_panics() -> TestResult {
+     let mut rig = Rig::new(&[PANIC_ALPHA, BETA])?;
+     let failed = rig.run()?;
+     assert!(
+-        matches!(failed.result, PassResultV1::Failed { failure: PassFailureV1::Unrelated, .. }),
++        matches!(
++            failed.result,
++            PassResultV1::Failed {
++                failure: PassFailureV1::Unrelated,
++                ..
++            }
++        ),
+         "{failed:?}"
+     );
+     assert!(rig.all_slots_empty());
+@@ -818,7 +827,13 @@ fn a_quarantined_member_is_not_run_and_carries_nothing() -> TestResult {
+     assert_eq!(alpha.availability(), Availability::ResourceExhausted);
+     let second = rig.run()?;
+     assert!(
+-        matches!(second.result, PassResultV1::Failed { failure: PassFailureV1::Unrelated, .. }),
++        matches!(
++            second.result,
++            PassResultV1::Failed {
++                failure: PassFailureV1::Unrelated,
++                ..
++            }
++        ),
+         "{second:?}"
+     );
+     assert_eq!(invocation_ids(&second), [None, None]);
+diff --git a/crates/pos-plugin-supervisor/tests/support/mod.rs b/crates/pos-plugin-supervisor/tests/support/mod.rs
+index 7e9f3c56..c6ffe0c1 100644
+--- a/crates/pos-plugin-supervisor/tests/support/mod.rs
++++ b/crates/pos-plugin-supervisor/tests/support/mod.rs
+@@ -17,4 +17,6 @@ pub mod ports;
+ pub mod world;
+ 
+ pub use ports::{LostPort, StampedPort};
+-pub use world::{initial, GatedMember, GatedSpec, PanickingSource, Prepared, Source, Staged, World};
++pub use world::{
++    initial, GatedMember, GatedSpec, PanickingSource, Prepared, Source, Staged, World,
++};
