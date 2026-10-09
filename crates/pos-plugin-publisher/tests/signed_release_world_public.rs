@@ -30,7 +30,7 @@ use pos_plugin_publisher::{
 use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
 use pos_store::plugin_trust_registry::{
     ActiveReleaseV1, PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1,
-    PolicyAdvanceKindV1, TrustedUtcSecondV1,
+    PolicyAdvanceKindV1,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -512,17 +512,7 @@ fn the_forked_floor_material_is_refused_as_a_fork() -> TestResult {
     let forked = world.forked_floor_material()?;
     assert_eq!(forked.tps1, genuine.tps1);
     assert_ne!(forked.prv1_records(), genuine.prv1_records());
-    let bundle = world.store.read_verified(&address)?;
-    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
-    let utc = TrustedUtcSecondV1::from_source(&mut wall(UTC)?)?;
-    let refused = world.registry.evaluate_current_release(
-        &world.anchor,
-        &forked.tps1,
-        &forked.evidence,
-        &projection,
-        utc,
-        TICK,
-    );
+    let refused = world.evaluate_material_at(&address, &forked, UTC, TICK)?;
     assert_eq!(
         refused.err(),
         Some(PluginTrustPolicyRegistryErrorV1::Floor(

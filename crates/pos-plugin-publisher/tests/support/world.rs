@@ -734,6 +734,31 @@ impl World {
         ))
     }
 
+    /// Evaluate the release at `target` read-only with explicit `material` (not the world's
+    /// current evidence), at the trusted UTC second `utc` and the Tick `tick`.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error; the registry result is the value.
+    pub fn evaluate_material_at(
+        &self,
+        target: &BundleAddressV1,
+        material: &Material,
+        utc: i64,
+        tick: u64,
+    ) -> BoxResult<Registry<CurrentReleaseEvaluationV1>> {
+        let bundle = self.store.read_verified(target)?;
+        let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
+        let trusted = TrustedUtcSecondV1::from_source(&mut wall(utc)?)?;
+        Ok(self.registry.evaluate_current_release(
+            &self.anchor,
+            &material.tps1,
+            &material.evidence,
+            &projection,
+            trusted,
+            tick,
+        ))
+    }
+
     /// Everything observable about the registry and the activation Timeline,
     /// with the retained decision of each PMF1 digest in `digests`.
     ///
