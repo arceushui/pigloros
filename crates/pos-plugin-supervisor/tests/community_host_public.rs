@@ -96,7 +96,7 @@ struct Spec {
 
 impl Spec {
     /// The release shape that publishes this member's Plugin and probe behaviour.
-    fn shape(&self) -> Shape {
+    const fn shape(&self) -> Shape {
         Shape {
             plugin_id: self.plugin_id,
             component: self.component,
@@ -435,11 +435,11 @@ fn committed_events(outcome: &CommunityPassOutcomeV1) -> Option<usize> {
     }
 }
 
-fn is_refused(outcome: &CommunityPassOutcomeV1) -> bool {
+const fn is_refused(outcome: &CommunityPassOutcomeV1) -> bool {
     matches!(outcome.result, PassResultV1::Refused)
 }
 
-fn is_in_doubt(outcome: &CommunityPassOutcomeV1) -> bool {
+const fn is_in_doubt(outcome: &CommunityPassOutcomeV1) -> bool {
     matches!(outcome.result, PassResultV1::InDoubt)
 }
 
@@ -644,7 +644,10 @@ fn every_slot_is_empty_after_a_failure_while_staging() -> TestResult {
         std::panic::resume_unwind(Box::new(format!("the pass did not fail: {failed:?}")))
     };
     assert_eq!(*host, Some(Error::FuelExhausted));
-    assert!(matches!(**error, RuntimeError::CommunityPlugin(Error::FuelExhausted)));
+    assert!(matches!(
+        **error,
+        RuntimeError::CommunityPlugin(Error::FuelExhausted)
+    ));
     assert!(rig.handle(1).receipts().is_empty());
     assert!(rig.all_slots_empty());
     Ok(())

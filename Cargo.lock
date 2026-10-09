@@ -5243,6 +5243,7 @@ dependencies = [
  "close_fds",
  "pos-core",
  "pos-crypto",
+ "pos-plugin-publisher",
  "pos-plugin-release",
  "pos-runtime",
  "pos-store",

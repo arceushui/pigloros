@@ -17,4 +17,6 @@ pub mod ports;
 pub mod world;
 
 pub use ports::{FailingPort, LostPort, StampedPort};
-pub use world::{initial, GatedMember, GatedSpec, PanickingSource, Prepared, Source, Staged, World};
+pub use world::{
+    initial, GatedMember, GatedSpec, PanickingSource, Prepared, Source, Staged, World,
+};
