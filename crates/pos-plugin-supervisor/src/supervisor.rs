@@ -127,8 +127,10 @@ impl CommunityPluginSupervisorV1 {
         component: &[u8],
         host_inputs: HostInputs,
     ) -> Result<InvocationReportV1<PluginDescriptorV1>, Error> {
-        check_describe(authorization, negotiated, component)?;
-        match self.run(negotiated, component, host_inputs, WorkerCallV1::Describe)? {
+        let call = WorkerCallV1::Describe;
+        let launched = check_describe(authorization, negotiated, component)
+            .and_then(|()| self.run(negotiated, component, host_inputs, call));
+        match launched? {
             WorkerReturnV1::Described(report) => checked(report, |descriptor| {
                 verify_descriptor(descriptor, negotiated)
             }),
