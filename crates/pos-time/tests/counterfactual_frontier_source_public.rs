@@ -1612,7 +1612,10 @@ fn unbound_root_graph(plan: &CounterfactualPlanV1) -> TestResult<Graph> {
 
 /// The committed Ticks of `graph`, one seeded Tick per record Tick, each
 /// owning the one `seq` that is its Tick number. `event_nodes` is empty, so
-/// the seed seam checks nothing about Event bindings.
+/// the seed seam checks nothing about Event bindings. The seeded prefix is
+/// sparse by design: only Ticks carrying a node or edge appear, with
+/// `seq == tick` and the last Tick equal to `PARENT_CUT_TICK`. The dense
+/// one-Event Tick shape is covered by the pos-runtime `dense_prefix` cases.
 fn prefix_ticks(graph: &Graph) -> TestResult<Vec<SeededFactualTickV1>> {
     let mut by_tick: BTreeMap<u64, Declaration> = BTreeMap::new();
     for node in graph

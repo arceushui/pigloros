@@ -119,6 +119,8 @@ const INTERVENTION_PROVENANCE: [u8; 32] = [6; 32];
 const ENDOGENOUS_AUTHORIZATION: [u8; 32] = [0x72; 32];
 const NODE_PROVENANCE: [u8; 32] = [0x71; 32];
 const PARENT_CUT_TICK: u64 = 9;
+/// The Event count of a dense root: one Event per Tick, so `Seq` equals the Tick.
+const DENSE_EVENTS: u64 = PARENT_CUT_TICK;
 const FIRST_TICK: u64 = 10;
 const HORIZON_TICK: u64 = 20;
 /// The global frontier, the first recomputation Tick.
@@ -2857,7 +2859,9 @@ fn trailing_tail_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
 }
 
 /// Tick 9 starts at the cut. The seeded prefix may extend past the appended
-/// Events: the seed seam checks nothing about them.
+/// Events: the seed seam checks nothing about them. Both the mid-Tick check and
+/// the cut-Tick mismatch refuse it; the isolated MidTick case is
+/// `mid_tick_after_the_cut_tick_prefix`.
 fn mid_tick_at_first_seq_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
     Ok(vec![
         seeded_tick(PARENT_CUT_TICK - 1, 1, CUT_SEQ - 1)?,
@@ -2927,20 +2931,20 @@ fn the_parent_cut_must_be_a_recorded_tick_boundary<B: RecordingBackend>() -> Tes
 }
 both_backends!(the_parent_cut_must_be_a_recorded_tick_boundary);
 
-/// One Event per Tick, `Seq` equal to the Tick, for Ticks `1..=PARENT_CUT_TICK`.
+/// One Event per Tick, `Seq` equal to the Tick, for Ticks `1..=DENSE_EVENTS`.
 fn dense_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
-    (1..=PARENT_CUT_TICK)
+    (1..=DENSE_EVENTS)
         .map(|tick| seeded_tick(tick, tick, tick))
         .collect()
 }
 
 fn a_dense_recorded_prefix_is_accepted<B: RecordingBackend>() -> TestResult {
-    // The root has PARENT_CUT_TICK Events and is cut after the last one.
+    // The root has DENSE_EVENTS Events and is cut after the last one.
     let mut setup = setup_recording_cut_in(
         B::open()?,
-        |plan| plan.parent_cut_seq = PARENT_CUT_TICK,
+        |plan| plan.parent_cut_seq = DENSE_EVENTS,
         &dense_prefix()?,
-        PARENT_CUT_TICK,
+        DENSE_EVENTS,
     )?;
     let mut stager = DeclaringStager::new(&setup.source, Stager::default())?;
     assert!(run_recording(&mut setup, &mut stager).is_ok());
