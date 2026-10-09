@@ -5243,6 +5243,7 @@ dependencies = [
  "close_fds",
  "pos-core",
  "pos-crypto",
+ "pos-plugin-release",
  "pos-runtime",
  "pos-store",
  "rustix 1.1.5",
