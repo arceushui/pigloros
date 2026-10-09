@@ -56,7 +56,7 @@ required-features = ["test-support"]
 
 # CI runs `--all-features`, so this test always builds there.
 [[test]]
-name = "counterfactual_dependency_memory_public"
+name = "counterfactual_dependency_memory_prefix_public"
 required-features = ["test-support"]
 
 [lints]

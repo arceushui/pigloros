@@ -133,15 +133,19 @@ pub(in crate::memory) struct DependencyRowsV1 {
     edges: BTreeMap<RowKey, DependencyEdgeRecordV1>,
     /// Commit ranges of the committed factual Ticks, by last `seq`.
     commit_ranges: BTreeMap<u64, CommitRange>,
+    // Invariant: `event_nodes`, `bound_seqs` and `digest_rows` are kept in sync
+    // by `install_factual_tick` and `index_node`.
     /// Event-backed node bindings, by committed `seq`.
     event_nodes: BTreeMap<u64, EventBinding>,
-    /// Row keys of the nodes, by artifact digest.
-    digests: BTreeMap<Hash, RowKey>,
+    /// Row keys of the nodes, by artifact digest. Artifact digests are unique
+    /// within a Timeline's set, so a digest names at most one node.
+    digest_rows: BTreeMap<Hash, RowKey>,
     /// The `seq` each Event-backed node is bound to, by artifact digest.
     bound_seqs: BTreeMap<Hash, u64>,
     /// Row keys of the step nodes (output ordinal zero), by owner and Tick.
     owners: BTreeMap<FactualOwnerIdV1, BTreeMap<u64, RowKey>>,
-    /// Stored row counts of the set.
+    /// Stored row counts of the set. Only the prefix set fills them; they are
+    /// the set's own, not the ancestry's.
     counts: RecordedSetCountsV1,
 }
 
@@ -157,7 +161,9 @@ struct VisibleSetV1<'a> {
     rows: &'a DependencyRowsV1,
     /// Last `seq` a Tick of the set may end on to be visible.
     limit: u64,
-    /// Highest Tick number of the set that is visible, not a `seq`.
+    /// Highest Tick number of the set that is visible, not a `seq`. Tick-0 rows
+    /// only live in Fork sets, which are not read through this view, so a bound
+    /// of 0 hides every row of a prefix set.
     bound: u64,
 }
 
@@ -175,7 +181,7 @@ impl DependencyRowsV1 {
             edges: BTreeMap::new(),
             commit_ranges: BTreeMap::new(),
             event_nodes: BTreeMap::new(),
-            digests: BTreeMap::new(),
+            digest_rows: BTreeMap::new(),
             bound_seqs: BTreeMap::new(),
             owners: BTreeMap::new(),
             counts: RecordedSetCountsV1 {
@@ -222,7 +228,7 @@ impl DependencyRowsV1 {
 
     /// The recorded node with the artifact digest.
     fn node_with(&self, digest: &Hash) -> Option<DependencyNodeRecordV1> {
-        let key = self.digests.get(digest);
+        let key = self.digest_rows.get(digest);
         key.and_then(|held| self.nodes.get(held)).cloned()
     }
 }
@@ -247,7 +253,7 @@ impl VisibleSetV1<'_> {
 
     /// The node with the artifact digest and its bound `seq`, if visible.
     fn digest_node(&self, digest: &Hash) -> Option<BoundFactualNodeV1> {
-        let key = self.rows.digests.get(digest);
+        let key = self.rows.digest_rows.get(digest);
         let seen = key.filter(|held| held.tick() <= self.bound);
         let node = seen.and_then(|held| self.rows.nodes.get(held));
         node.map(|found| {
@@ -589,9 +595,9 @@ impl MemoryStore {
         })
     }
 
-    /// The stored committed prefix rows of a parent Timeline, if any.
-    fn prefix_rows(&self, parent: TimelineId) -> &DependencyRowsV1 {
-        self.dependency_prefixes.get(&parent).unwrap_or(&NO_ROWS)
+    /// The stored committed prefix rows of a Timeline, if any.
+    fn prefix_rows(&self, timeline: TimelineId) -> &DependencyRowsV1 {
+        self.dependency_prefixes.get(&timeline).unwrap_or(&NO_ROWS)
     }
 
     /// The Timeline's own committed prefix set and each ancestor's, root
@@ -649,21 +655,19 @@ impl MemoryStore {
         state.and_then(|persisted| persisted.page_of_current(request, select))
     }
 
+    /// One page of a Timeline's committed prefix rows, stitched over its
+    /// ancestry. The fence layer is the factual reads' `read_fenced`; the
+    /// page's own contract failure stays a nested `StoreError` for
+    /// `fenced_result` to lift.
     fn read_prefix_page<T: DependencyPagedRowV1 + Clone>(
         &self,
-        parent: TimelineId,
+        timeline: TimelineId,
         request: &DependencyPageRequestV1,
         select: Select<T>,
     ) -> Result<DependencyPageV1<T>, StoreError> {
-        let read = self.with_erasure_read_fence(parent, READ, |store| {
-            store
-                .ensure_generic_timeline_visibility(parent)
-                .and_then(|()| store.authorize_inherited_scopes(parent, READ))
-                .and_then(|()| store.visible_sets(parent))
-                .map(|sets| {
-                    let segments = segments_of(&sets, select);
-                    page_after(&segments, request)
-                })
+        let read = self.read_factual(timeline, |sets| {
+            let segments = segments_of(sets, select);
+            page_after(&segments, request)
         });
         fenced_result(read)
     }
@@ -788,8 +792,9 @@ impl FactualPrefixReadPortV1 for MemoryStore {
         })
     }
 
-    /// The stored row counts of the Timeline's own set; each set is capped on
-    /// its own (ADR-064 R3.10), so an ancestor's rows do not count here.
+    /// The stored row counts of the Timeline's own set. This is the deliberate
+    /// reading of R3.7.6 "through ancestry": the R3.10 caps are per set, so an
+    /// ancestor's rows do not count here. The `SQLite` adapter reads the same.
     fn factual_set_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
         self.read_fenced(timeline, |store| Ok(store.prefix_rows(timeline).counts))
     }
@@ -799,6 +804,11 @@ impl FactualPrefixReadPortV1 for MemoryStore {
 impl DependencyRowsV1 {
     /// Install one committed factual Tick: its rows, commit range, Event
     /// bindings, indexes, and counts. Infallible.
+    ///
+    /// Tick numbers must increase from an ancestor to its descendants:
+    /// `page_after` stitches the segments in ancestry order and relies on a
+    /// later segment's rows sorting after every earlier row. Slice 8 enforces
+    /// it at the commit; the test seam does not check it.
     ///
     /// The one install path of a Timeline's committed prefix set: the
     /// `test-support` seeding function calls it now, and the pipeline commit
@@ -839,7 +849,8 @@ impl DependencyRowsV1 {
     fn index_node(&mut self, row: &DependencyNodeRecordV1) {
         let coordinate = row.coordinate();
         let digest = coordinate.artifact_digest();
-        self.digests.insert(digest, row.cursor());
+        let previous = self.digest_rows.insert(digest, row.cursor());
+        debug_assert!(previous.is_none(), "artifact digest reused within a set");
         if coordinate.output_ordinal() == 0 {
             let owner = FactualOwnerIdV1::new(coordinate.owner_id().to_owned());
             let ticks = self.owners.entry(owner).or_default();
@@ -1047,6 +1058,10 @@ mod tests {
         ok(point.ok_or("not a Fork")).0
     }
 
+    /// Offset of a seeded prefix Tick's `seq` above its Tick number.
+    const PREFIX_SEQ_OFFSET: u64 = 1000;
+
+    /// A committed record of `tick` with the nodes and edges.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn committed_record(
         tick: u64,
@@ -1072,8 +1087,8 @@ mod tests {
     }
 
     /// Install the records into the Timeline's committed prefix set through the
-    /// install path, each as the single-`seq` Tick it numbers plus 1000, which
-    /// is far above any Fork point.
+    /// install path, each as the single-`seq` Tick it numbers plus
+    /// `PREFIX_SEQ_OFFSET`, which is far above any Fork point.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn seed_prefix(
         store: &mut MemoryStore,
@@ -1082,7 +1097,7 @@ mod tests {
     ) {
         let rows = store.dependency_prefixes.entry(parent).or_default();
         for record in records {
-            let seq = Seq::from_u64(record.tick().saturating_add(1000));
+            let seq = Seq::from_u64(record.tick().saturating_add(PREFIX_SEQ_OFFSET));
             rows.install_factual_tick(record, seq, seq, &[]);
         }
     }
@@ -1439,7 +1454,7 @@ mod tests {
         let seeded = ok(store.dependency_prefixes.get(&fork).ok_or("not seeded"));
         assert!(!seeded.commit_ranges.is_empty());
         assert!(!seeded.event_nodes.is_empty());
-        assert!(!seeded.digests.is_empty());
+        assert!(!seeded.digest_rows.is_empty());
         assert!(!seeded.bound_seqs.is_empty());
         assert!(!seeded.owners.is_empty());
         assert_eq!(seeded.counts.nodes, 1);
@@ -1455,5 +1470,16 @@ mod tests {
         assert!(store.dependency_prefixes.contains_key(&root));
         ok(store.delete_timeline(root));
         assert!(store.dependency_prefixes.is_empty());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "artifact digest reused")]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_reused_artifact_digest_in_one_set_is_refused() {
+        let (mut store, fork) = recorded_store();
+        let root = parent_of(&store, fork);
+        ok(store.seed_factual_prefix(root, &[seeded_tick("p", 40)]));
+        ok(store.seed_factual_prefix(root, &[seeded_tick("q", 40)]));
     }
 }
