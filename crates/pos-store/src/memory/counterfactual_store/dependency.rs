@@ -127,6 +127,8 @@ struct EventBinding {
 ///
 /// Fork sets carry empty factual indexes by design: only a Timeline's
 /// committed prefix set is filled through `install_factual_tick`.
+///
+/// When slice 8 unifies the set counts, `ForkDependencySetV1.counts` goes away.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(in crate::memory) struct DependencyRowsV1 {
     nodes: BTreeMap<RowKey, DependencyNodeRecordV1>,
@@ -656,7 +658,7 @@ impl MemoryStore {
     }
 
     /// One page of a Timeline's committed prefix rows, stitched over its
-    /// ancestry. The fence layer is the factual reads' `read_fenced`; the
+    /// ancestry, read via `read_factual` (fenced by `read_fenced`); the
     /// page's own contract failure stays a nested `StoreError` for
     /// `fenced_result` to lift.
     fn read_prefix_page<T: DependencyPagedRowV1 + Clone>(
@@ -794,7 +796,8 @@ impl FactualPrefixReadPortV1 for MemoryStore {
 
     /// The stored row counts of the Timeline's own set. This is the deliberate
     /// reading of R3.7.6 "through ancestry": the R3.10 caps are per set, so an
-    /// ancestor's rows do not count here. The `SQLite` adapter reads the same.
+    /// ancestor's rows do not count here. The `SQLite` adapter (slice 3 of this
+    /// stack) reads the same.
     fn factual_set_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
         self.read_fenced(timeline, |store| Ok(store.prefix_rows(timeline).counts))
     }
@@ -809,6 +812,9 @@ impl DependencyRowsV1 {
     /// `page_after` stitches the segments in ancestry order and relies on a
     /// later segment's rows sorting after every earlier row. Slice 8 enforces
     /// it at the commit; the test seam does not check it.
+    ///
+    /// A reused artifact digest is likewise unchecked here: `index_node` panics
+    /// in debug builds, and `bound_seqs` silently overwrites the earlier seq.
     ///
     /// The one install path of a Timeline's committed prefix set: the
     /// `test-support` seeding function calls it now, and the pipeline commit
@@ -864,7 +870,9 @@ impl MemoryStore {
     /// Seed committed factual Ticks into a Timeline's committed prefix set,
     /// through the install path the pipeline commit uses.
     ///
-    /// Test seam only: it checks nothing about the Ticks it is given.
+    /// Test seam only: it checks nothing about the Ticks it is given. A reused
+    /// artifact digest panics in debug builds and is undefined in release;
+    /// slice 8 makes it a real error.
     ///
     /// # Errors
     /// Returns `TimelineNotFound` for an unknown Timeline.
