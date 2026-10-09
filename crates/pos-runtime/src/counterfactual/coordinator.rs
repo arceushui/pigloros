@@ -955,7 +955,7 @@ fn check_artifact(
     }
 }
 
-/// Read the Fork's persisted basis and check its recorded parent cut.
+/// Read the Fork's persisted basis and check its fork point against the plan.
 fn fork_basis<S: EventStore + CounterfactualStorePortV1>(
     store: &S,
     request: &CounterfactualAdmissionRequestV1<'_>,
@@ -1440,7 +1440,7 @@ where
         store: &S,
         plan: &CounterfactualPlanV1,
     ) -> Result<(), CounterfactualAdmissionErrorV1> {
-        let parent = Ulid::from(u128::from_be_bytes(plan.parent_timeline_id));
+        let parent = Ulid::from_bytes(plan.parent_timeline_id);
         let cut = store
             .cut_tick_at(
                 TimelineId::from_ulid(parent),

@@ -1161,12 +1161,25 @@ fn setup<B: Backend>(spec: &Spec) -> TestResult<Setup<B>> {
 
 /// [`setup`] over a root whose recorded prefix is `prefix`.
 fn setup_seeded<B: Backend>(spec: &Spec, prefix: &[SeededFactualTickV1]) -> TestResult<Setup<B>> {
+    setup_cut(spec, prefix, CUT_SEQ)
+}
+
+/// [`setup_seeded`] over a root of `cut_seq` Events cut after the last one;
+/// `spec` must make the plan's parent cut `Seq` the same.
+fn setup_cut<B: Backend>(
+    spec: &Spec,
+    prefix: &[SeededFactualTickV1],
+    cut_seq: u64,
+) -> TestResult<Setup<B>> {
     let mut store = B::open()?;
     let root = store.create_timeline("factual")?.id();
-    store.append(root, &[draft(1), draft(2)])?;
+    let drafts = (1..=cut_seq)
+        .map(|value| Ok(draft(u8::try_from(value)?)))
+        .collect::<Result<Vec<_>, std::num::TryFromIntError>>()?;
+    store.append(root, &drafts)?;
     store.seed_prefix(root, prefix)?;
     let fork = store
-        .fork(root, Seq::from_u64(CUT_SEQ), "counterfactual")?
+        .fork(root, Seq::from_u64(cut_seq), "counterfactual")?
         .id();
     let profile = ExecutionProfileV1::from_canonical_cbor(&draft_execution_profile_bytes_v1(
         "deterministic-local-v1",
@@ -2486,7 +2499,8 @@ fn trailing_tail_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
     Ok(vec![seeded_tick(PARENT_CUT_TICK, 1, CUT_SEQ - 1)?])
 }
 
-/// Tick 9 owns Events 2 and 3: the cut keeps its first Event.
+/// Tick 9 starts at the cut. The seeded prefix may extend past the appended
+/// Events: the seed seam checks nothing about them.
 fn mid_tick_at_first_seq_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
     Ok(vec![
         seeded_tick(PARENT_CUT_TICK - 1, 1, CUT_SEQ - 1)?,
@@ -2494,9 +2508,12 @@ fn mid_tick_at_first_seq_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
     ])
 }
 
-/// Tick 9 owns Events 1 through 3: the cut falls strictly inside it.
+/// Tick 9 spans the cut, which falls strictly inside it. The seeded prefix may
+/// extend past the appended Events: the seed seam checks nothing about them.
 fn mid_tick_inside_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
-    Ok(vec![seeded_tick(PARENT_CUT_TICK, CUT_SEQ - 1, CUT_SEQ + 1)?])
+    Ok(vec![
+        seeded_tick(PARENT_CUT_TICK, CUT_SEQ - 1, CUT_SEQ + 1)?,
+    ])
 }
 
 /// Tick 8 ends at the cut, so the plan's cut Tick 9 is not the derived one.
@@ -2539,6 +2556,28 @@ fn the_parent_cut_must_be_a_recorded_tick_boundary<B: RecordingBackend>() -> Tes
     Ok(())
 }
 both_backends!(the_parent_cut_must_be_a_recorded_tick_boundary);
+
+/// The root is cut after its `PARENT_CUT_TICK`-th Event.
+const DENSE: Spec = Spec {
+    plan: |plan| plan.parent_cut_seq = PARENT_CUT_TICK,
+    ..BASE
+};
+
+/// One Event per Tick, `Seq` equal to the Tick, for Ticks `1..=PARENT_CUT_TICK`.
+fn dense_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
+    (1..=PARENT_CUT_TICK)
+        .map(|tick| seeded_tick(tick, tick, tick))
+        .collect()
+}
+
+fn a_dense_recorded_prefix_is_accepted<B: RecordingBackend>() -> TestResult {
+    let mut setup = setup_cut::<B>(&DENSE, &dense_prefix()?, PARENT_CUT_TICK)?;
+    let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
+    let receipt = admit_recording!(setup, &mut stager)?;
+    assert_eq!(receipt.generation().generation, 1);
+    Ok(())
+}
+both_backends!(a_dense_recorded_prefix_is_accepted);
 
 #[test]
 fn a_failed_prefix_read_is_a_store_failure_before_staging() -> TestResult {

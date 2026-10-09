@@ -435,6 +435,12 @@ fn graph_with(plan: &CounterfactualPlanV1, omitted: &[(usize, usize)]) -> TestRe
     Ok(connect(base_nodes(plan)?, &EDGE_SPECS, omitted))
 }
 
+/// Whether `edge` is consumed at or before the cut, so the parent prefix
+/// records it; the Fork records every other edge.
+const fn in_prefix(edge: &InputDependencyV1) -> bool {
+    edge.consumer.tick <= PARENT_CUT_TICK
+}
+
 /// The graph a Fork alone records: the provisional nodes of `full` and the
 /// edges they consume. Their sources may lie in the committed prefix.
 fn fork_part(full: &Graph) -> Graph {
@@ -448,7 +454,7 @@ fn fork_part(full: &Graph) -> Graph {
         edges: full
             .edges
             .iter()
-            .filter(|edge| edge.consumer.tick > PARENT_CUT_TICK)
+            .filter(|edge| !in_prefix(edge))
             .cloned()
             .collect(),
     }
@@ -611,7 +617,7 @@ fn split_rows(graph: &Graph) -> TestResult<(Rows, Rows)> {
     }
     for edge in &graph.edges {
         let record = edge_record(edge)?;
-        if edge.consumer.tick <= PARENT_CUT_TICK {
+        if in_prefix(edge) {
             prefix.1.push(record);
         } else {
             fork.1.push(record);
@@ -1597,16 +1603,17 @@ fn prefix_ticks(graph: &Graph) -> TestResult<Vec<SeededFactualTickV1>> {
             .0
             .push(node_record(node)?);
     }
-    for edge in graph
-        .edges
-        .iter()
-        .filter(|edge| edge.consumer.tick <= PARENT_CUT_TICK)
-    {
+    for edge in graph.edges.iter().filter(|edge| in_prefix(edge)) {
         by_tick
             .entry(edge.consumer.tick)
             .or_default()
             .1
             .push(edge_record(edge)?);
+    }
+    // Only Ticks that record a node are seeded, so the Ticks are sparse; the
+    // last one must be the cut Tick for the parent cut to derive.
+    if by_tick.keys().next_back() != Some(&PARENT_CUT_TICK) {
+        return Err("the committed prefix does not end at the cut Tick".into());
     }
     let mut ticks = Vec::new();
     for (tick, mut declaration) in by_tick {

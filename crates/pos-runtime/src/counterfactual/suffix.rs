@@ -169,6 +169,12 @@
 //!   forbids for an incomplete suffix, `Exact` and
 //!   `ExactAuthoritativeWithRedactedViews`, to `StructuralOnly`, the
 //!   strongest permitted claim; every other claim is kept unchanged.
+//! - **Recorded parent cut.** The recording path
+//!   ([`CounterfactualCoordinatorV1::recompute_suffix_with_dependencies`])
+//!   checks the parent cut after `committed_invalidation` and before any Tick
+//!   is staged: `cut_tick_at` at the plan's parent cut `Seq` must be a
+//!   `Boundary` at the plan's parent cut Tick, otherwise the error is
+//!   `ParentCutNotFound`. The plain path does not read the parent prefix.
 //! - **Terminal codes.** A stale Tick basis is `InvalidationConflict`; a
 //!   stager failure, an empty, malformed, or oversized staged batch, a
 //!   reserved Event type, and a rejected dependency declaration are

@@ -1272,28 +1272,27 @@ fn boundary_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
     Ok(vec![seeded_tick(PARENT_CUT_TICK, CUT_SEQ, CUT_SEQ)?])
 }
 
-/// Seed `store` with a factual root of two Events and the recorded `prefix`,
-/// a Fork at `Seq` 2 with fixed IDs, and the published facts of the plan.
+/// Seed `store` with a factual root of `cut_seq` Events and the recorded
+/// `prefix`, a Fork at `Seq` `cut_seq` with fixed IDs, and the published facts
+/// of the plan.
 fn seed<B: Backend>(
     store: &mut B,
     edit: fn(&mut CounterfactualPlanV1),
     prefix: &[SeededFactualTickV1],
+    cut_seq: u64,
 ) -> TestResult<Seeded> {
     store.create_timeline_with_meta(TimelineMeta {
         id: root_id(),
         ..TimelineMeta::root("factual")
     })?;
-    store.append(
-        root_id(),
-        &[
-            event_draft("factual.tick", vec![1]),
-            event_draft("factual.tick", vec![2]),
-        ],
-    )?;
+    let drafts = (1..=cut_seq)
+        .map(|value| Ok(event_draft("factual.tick", vec![u8::try_from(value)?])))
+        .collect::<Result<Vec<_>, std::num::TryFromIntError>>()?;
+    store.append(root_id(), &drafts)?;
     store.seed_prefix(root_id(), prefix)?;
     store.create_timeline_with_meta(TimelineMeta {
         id: fork_id(),
-        ..TimelineMeta::forked_from(root_id(), Seq::from_u64(CUT_SEQ), "counterfactual")
+        ..TimelineMeta::forked_from(root_id(), Seq::from_u64(cut_seq), "counterfactual")
     })?;
     let profile = ExecutionProfileV1::from_canonical_cbor(&draft_execution_profile_bytes_v1(
         "deterministic-local-v1",
@@ -1339,7 +1338,7 @@ fn setup_prefixed_in<B: Backend>(
         claim,
         facts,
         mut source,
-    } = seed(&mut store, edit, prefix)?;
+    } = seed(&mut store, edit, prefix, CUT_SEQ)?;
     let mut coordinator = CounterfactualCoordinatorV1::new(store);
     let receipt = coordinator.admit(
         &admission_request(&plan, &profile, &snapshot, &claim),
@@ -1372,9 +1371,20 @@ fn setup_recording_in<B: RecordingBackend>(
 
 /// [`setup_recording_in`] over a root whose recorded prefix is `prefix`.
 fn setup_recording_prefixed_in<B: RecordingBackend>(
+    store: B,
+    edit: fn(&mut CounterfactualPlanV1),
+    prefix: &[SeededFactualTickV1],
+) -> TestResult<Setup<B>> {
+    setup_recording_cut_in(store, edit, prefix, CUT_SEQ)
+}
+
+/// [`setup_recording_prefixed_in`] over a root of `cut_seq` Events cut at the
+/// last one; `edit` must make the plan's parent cut `Seq` the same.
+fn setup_recording_cut_in<B: RecordingBackend>(
     mut store: B,
     edit: fn(&mut CounterfactualPlanV1),
     prefix: &[SeededFactualTickV1],
+    cut_seq: u64,
 ) -> TestResult<Setup<B>> {
     let Seeded {
         plan,
@@ -1383,7 +1393,7 @@ fn setup_recording_prefixed_in<B: RecordingBackend>(
         claim,
         facts,
         mut source,
-    } = seed(&mut store, edit, prefix)?;
+    } = seed(&mut store, edit, prefix, cut_seq)?;
     let mut coordinator = CounterfactualCoordinatorV1::new(store);
     let mut stager = DeclaringStager::new(&source, Stager::default())?;
     let receipt = coordinator.admit_with_dependencies(
@@ -2846,7 +2856,8 @@ fn trailing_tail_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
     Ok(vec![seeded_tick(PARENT_CUT_TICK, 1, CUT_SEQ - 1)?])
 }
 
-/// Tick 9 owns Events 2 and 3: the cut keeps its first Event.
+/// Tick 9 starts at the cut. The seeded prefix may extend past the appended
+/// Events: the seed seam checks nothing about them.
 fn mid_tick_at_first_seq_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
     Ok(vec![
         seeded_tick(PARENT_CUT_TICK - 1, 1, CUT_SEQ - 1)?,
@@ -2854,9 +2865,12 @@ fn mid_tick_at_first_seq_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
     ])
 }
 
-/// Tick 9 owns Events 1 through 3: the cut falls strictly inside it.
+/// Tick 9 spans the cut, which falls strictly inside it. The seeded prefix may
+/// extend past the appended Events: the seed seam checks nothing about them.
 fn mid_tick_inside_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
-    Ok(vec![seeded_tick(PARENT_CUT_TICK, CUT_SEQ - 1, CUT_SEQ + 1)?])
+    Ok(vec![
+        seeded_tick(PARENT_CUT_TICK, CUT_SEQ - 1, CUT_SEQ + 1)?,
+    ])
 }
 
 /// Tick 8 ends at the cut, so the plan's cut Tick 9 is not the derived one.
@@ -2894,13 +2908,34 @@ fn the_parent_cut_must_be_a_recorded_tick_boundary<B: RecordingBackend>() -> Tes
 
     // A cut after the last recorded Tick, in the unrecorded tail, is a
     // boundary of that Tick.
-    let mut setup =
-        setup_recording_prefixed_in(B::open()?, |_| {}, &trailing_tail_prefix()?)?;
+    let mut setup = setup_recording_prefixed_in(B::open()?, |_| {}, &trailing_tail_prefix()?)?;
     let mut stager = DeclaringStager::new(&setup.source, Stager::default())?;
     assert_eq!(run_recording(&mut setup, &mut stager)?, reference()?);
     Ok(())
 }
 both_backends!(the_parent_cut_must_be_a_recorded_tick_boundary);
+
+/// One Event per Tick, `Seq` equal to the Tick, for Ticks `1..=PARENT_CUT_TICK`.
+fn dense_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
+    (1..=PARENT_CUT_TICK)
+        .map(|tick| seeded_tick(tick, tick, tick))
+        .collect()
+}
+
+fn a_dense_recorded_prefix_is_accepted<B: RecordingBackend>() -> TestResult {
+    // The root has PARENT_CUT_TICK Events and is cut after the last one.
+    let mut setup = setup_recording_cut_in(
+        B::open()?,
+        |plan| plan.parent_cut_seq = PARENT_CUT_TICK,
+        &dense_prefix()?,
+        PARENT_CUT_TICK,
+    )?;
+    let mut stager = DeclaringStager::new(&setup.source, Stager::default())?;
+    assert!(run_recording(&mut setup, &mut stager).is_ok());
+    assert!(!stager.inner.seen.is_empty());
+    Ok(())
+}
+both_backends!(a_dense_recorded_prefix_is_accepted);
 
 #[test]
 fn a_failed_prefix_read_is_a_store_failure_before_staging() -> TestResult {
