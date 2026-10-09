@@ -22,6 +22,8 @@ use std::{
     time::Duration,
 };
 
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
 /// The host-owned activation Event type (ADR-061 revision 7 decision 9).
 const RESERVED_ACTIVATION_TYPE: &str = "pigloros.plugin.release-activated";
 
@@ -2251,16 +2253,12 @@ impl Driver for ActivationDraftDriver {
     }
 }
 
-fn step_error(registry: &mut PluginRegistry, timeline: TimelineId) -> RuntimeError {
-    test_err(registry.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO))
-}
-
 /// R7-A3: the host-owned activation type is rejected from a Driver even when its Plugin owns it,
 /// and the rejected pass leaves nothing pending and nothing committed.
 #[test]
-fn a_driver_draft_of_the_reserved_activation_type_is_rejected_and_discarded() {
-    let timeline = TimelineId::new();
-    let store = admission_store();
+fn a_driver_draft_of_the_reserved_activation_type_is_rejected_and_discarded() -> TestResult {
+    let mut store = admission_store();
+    let timeline = store.create_timeline("reserved-activation")?.id();
     let mut registry = PluginRegistry::new();
     register_output_driver(
         &mut registry,
@@ -2270,10 +2268,14 @@ fn a_driver_draft_of_the_reserved_activation_type_is_rejected_and_discarded() {
     let owned = registry.plugin_ownership_rows();
     assert_eq!(owned.len(), 1);
     assert_eq!(owned[0].0, [RESERVED_ACTIVATION_TYPE]);
-    for _ in 0..2 {
-        let error = step_error(&mut registry, timeline);
-        assert!(matches!(error, RuntimeError::ReservedHostDraft { .. }));
-        assert!(error.to_string().contains(RESERVED_ACTIVATION_TYPE));
+    for round in 0..2 {
+        let result = registry.step_all_anchored(timeline, &root_ancestry(timeline), Seq::ZERO);
+        let rejected = matches!(&result, Err(RuntimeError::ReservedHostDraft { .. }));
+        assert!(rejected, "round {round}: unexpected result {result:?}");
+        if let Err(error) = result {
+            assert!(error.to_string().contains(RESERVED_ACTIVATION_TYPE));
+        }
     }
-    assert_eq!(test_ok(store.logical_head(timeline)), Seq::ZERO);
+    assert_eq!(store.logical_head(timeline)?, Seq::ZERO);
+    Ok(())
 }
