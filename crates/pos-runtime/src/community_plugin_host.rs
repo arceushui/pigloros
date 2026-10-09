@@ -33,7 +33,7 @@ pub use gate::{
     host_error_for_release_source_v1, host_error_for_trust_authorization_v1,
     host_error_for_trust_verification_v1, CommunityPassAuthorizationV1, CommunityPassV1,
     CommunityPluginExpectationV1, CommunityPluginTrustMaterialV1, GatedCommunityReleaseV1,
-    PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1,
+    PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1, ReleaseIdentityV1,
 };
 #[cfg(target_os = "linux")]
 pub use negotiation::negotiate_community_plugin_v1;

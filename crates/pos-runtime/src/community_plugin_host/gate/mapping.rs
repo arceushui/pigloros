@@ -36,6 +36,9 @@ pub(super) const NOT_ACTIVE: CommunityPluginHostErrorV1 = denied(TrustDenialBasi
 
 /// The host error of a release source failure.
 ///
+/// Public so that the R7-F5 public vector can enumerate every input variant; the gate is the
+/// only production caller.
+///
 /// A source that could not produce a closure is `TrustStateUnavailable`; a closure that was
 /// produced but is malformed is `InvalidManifest`.
 #[must_use]
@@ -60,6 +63,8 @@ pub const fn host_error_for_release_source_v1(
 }
 
 /// The host error of a failed `verify_plugin_trust_v1` (gate step 5).
+///
+/// Public for the R7-F5 public vector; the gate is the only production caller.
 ///
 /// The variants that only `authorize_release` raises are unreachable from the verifier and map
 /// defensively to `TrustStateUnavailable`.
@@ -92,6 +97,8 @@ pub const fn host_error_for_trust_verification_v1(
 /// The host error of a failed `authorize_release`, as the registry wraps it in `Trust(..)` and
 /// as the gate's own direct call raises it (gate step 7).
 ///
+/// Public for the R7-F5 public vector; the gate is the only production caller.
+///
 /// Every variant without a row of its own is `TrustStateUnavailable`.
 #[must_use]
 pub const fn host_error_for_trust_authorization_v1(
@@ -121,6 +128,8 @@ pub const fn host_error_for_trust_authorization_v1(
 }
 
 /// The host error of a failed PMF1 release signature check (gate step 7).
+///
+/// Public for the R7-F5 public vector; the gate is the only production caller.
 #[must_use]
 pub const fn host_error_for_release_signature_v1(
     error: PluginReleaseSignatureErrorV1,
@@ -172,6 +181,8 @@ const fn floor_error(error: PluginFloorErrorV1) -> CommunityPluginHostErrorV1 {
 }
 
 /// The host error of a refused `evaluate_current_release` (gate step 6).
+///
+/// Public for the R7-F5 public vector; the gate is the only production caller.
 ///
 /// Variants that no read-only evaluation raises are mapped defensively to
 /// `TrustStateUnavailable`.

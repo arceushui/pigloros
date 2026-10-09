@@ -20,8 +20,8 @@ use pos_crypto::plugin_execution::{
 use pos_crypto::plugin_manifest::{
     component_digest_v1, decode_plugin_release_signature_claim_v1,
     verify_plugin_release_signature_v1, PluginArtifactInputV1, PluginDependencyInputV1,
-    PluginManifestErrorV1, PluginReleaseDraftV1, PluginReleaseSignatureErrorV1, PluginSchemaInputV1,
-    VerifiedPluginReleaseSignatureV1,
+    PluginManifestErrorV1, PluginReleaseDraftV1, PluginReleaseSignatureErrorV1,
+    PluginSchemaInputV1, VerifiedPluginReleaseSignatureV1,
 };
 use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, PluginTrustErrorV1, ResolvedPluginTrustAuthorizationV1,

@@ -30,7 +30,7 @@ pub use material::{
     CommunityPluginTrustMaterialV1, PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1,
 };
 pub use pass::CommunityPassV1;
-pub use released::{CommunityPassAuthorizationV1, GatedCommunityReleaseV1};
+pub use released::{CommunityPassAuthorizationV1, GatedCommunityReleaseV1, ReleaseIdentityV1};
 
 /// What the composition expects the address to hold.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,11 +58,11 @@ const COMPONENT_MEMBER: &str = "component";
 /// Returns the closed host error that decision 3 of ADR-061 revision 7 assigns to the first
 /// failing step.
 pub fn gate_community_release_v1(
-    registry: &impl PluginTrustPolicyRegistryV1,
+    registry: &(impl PluginTrustPolicyRegistryV1 + ?Sized),
     expected: &CommunityPluginExpectationV1,
-    source: &dyn ReleaseSourceV1,
+    source: &(impl ReleaseSourceV1 + ?Sized),
     address: &BundleAddressV1,
-    material: &dyn PluginTrustMaterialSourceV1,
+    material: &(impl PluginTrustMaterialSourceV1 + ?Sized),
     pass: &CommunityPassV1,
 ) -> Result<(GatedCommunityReleaseV1, CommunityPassAuthorizationV1), CommunityPluginHostErrorV1> {
     if !pass.is_open() {
@@ -155,13 +155,13 @@ fn verify_signature(
 
 /// The verified bytes of the closure's `component` layer.
 ///
-/// The closure rules and the projection guarantee the layer exists.
+/// The closure rules and the projection guarantee exactly one such layer.
 fn component_bytes(bundle: &VerifiedReleaseBundleV1) -> Vec<u8> {
     bundle
         .members()
         .iter()
         .zip(bundle.member_bytes())
-        .find(|(member, _)| member.member() == COMPONENT_MEMBER)
-        .map(|(_, bytes)| bytes.to_vec())
-        .unwrap_or_default()
+        .filter(|(member, _)| member.member() == COMPONENT_MEMBER)
+        .flat_map(|(_, bytes)| bytes.iter().copied())
+        .collect()
 }
