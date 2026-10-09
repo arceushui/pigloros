@@ -368,13 +368,7 @@ fn a_record_launches_with_the_token_of_its_mode() {
         let worker = supervisor(ARGV_PROBE, PROMPT);
         let call = test_support::invocation_for(b"observation", &record);
         let authorization = test_support::authorization_for(&record, b"component");
-        let report = ok(worker.drive(
-            Some(authorization),
-            &record,
-            b"component",
-            &call,
-            INPUTS,
-        ));
+        let report = ok(worker.drive(Some(authorization), &record, b"component", &call, INPUTS));
         let recorded = ok(report.result).next_state_bytes;
         let expected = format!("{} {token}", std::process::id());
         assert_eq!(String::from_utf8_lossy(&recorded), expected, "{mode:?}");

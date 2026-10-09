@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 #[cfg(any(test, feature = "test-support"))]
-use pos_core::ScriptedTrustedWallSourceV1;
+use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
 #[cfg(any(test, feature = "test-support"))]
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryErrorV1;
 use pos_store::plugin_trust_registry::TrustedUtcSecondV1;

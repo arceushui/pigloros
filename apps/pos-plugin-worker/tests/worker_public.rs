@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
 use pos_plugin_host::pinned_runtime;
-use pos_plugin_supervisor::test_support::{authorization_for, invocation_for, negotiated_under, ok};
+use pos_plugin_supervisor::test_support::{
+    authorization_for, invocation_for, negotiated_under, ok,
+};
 use pos_plugin_supervisor::{CommunityPluginSupervisorV1, WorkerProgramV1};
 use pos_runtime::community_plugin_host::{
     CeilingValuesV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,

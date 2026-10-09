@@ -120,11 +120,7 @@ struct Rig {
 }
 
 impl Rig {
-    fn under(
-        program: &str,
-        component: &[u8],
-        profile: &CommunityPluginExecutionProfileV1,
-    ) -> Self {
+    fn under(program: &str, component: &[u8], profile: &CommunityPluginExecutionProfileV1) -> Self {
         let (settings, log) = driver_settings(program);
         let config = test_support::config_under(PLUGIN, component, profile, settings);
         let (driver, handle) = CommunityDriverV1::new(config);
@@ -361,7 +357,8 @@ fn an_offer_into_an_occupied_slot_is_refused_and_keeps_the_first() {
     // The refused offer did not start a pass: this pass's failure is still there.
     assert_eq!(rig.handle.pass_failure(), Some(Error::InvalidManifest));
     let _staged = ok(rig.step());
-    assert_eq!(locked(&rig.log).bindings[0].tick, TICK);
+    let bindings = locked(&rig.log).bindings.clone();
+    assert!(bindings.iter().all(|binding| binding.tick == TICK));
 }
 
 /// R7-B9: a failing step and `record_refusal` set the pass failure, `invoke` sets the invocation
