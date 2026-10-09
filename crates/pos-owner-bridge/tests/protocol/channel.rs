@@ -446,9 +446,9 @@ fn dropping_bridge(
 }
 
 #[test]
-fn a_host_that_drops_the_driver_leaves_the_bridge_failing_closed_but_ready() -> TestResult {
+fn a_failed_ceremony_with_a_dropped_driver_leaves_no_slots_for_later_calls() -> TestResult {
     let mut port = FakeEnrollment::new();
-    // The first ceremony fails and the host keeps no driver: the next calls have no slots.
+    // The ceremony fails and the host keeps no driver: the next calls have no slots.
     let mut failed = dropping_bridge(Some(PRF_UNSUPPORTED))?;
     assert_eq!(failed.enroll(&context(), &mut port), Err(PRF_UNSUPPORTED));
     assert_eq!(failed.status(), BridgeStatus::Ready);
@@ -458,9 +458,18 @@ fn a_host_that_drops_the_driver_leaves_the_bridge_failing_closed_but_ready() -> 
     let refused = failed.unlock(&binding, &bytes32(0x60), &mut unlock).err();
     assert_eq!(refused, Some(UNAVAILABLE));
     assert_eq!(failed.status(), BridgeStatus::Ready);
-    // A ceremony that succeeds and whose driver is dropped: the enrollment then needs the slots.
+    assert!(port.calls.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_successful_ceremony_with_a_dropped_driver_fails_enrollment_at_the_slots() -> TestResult {
+    let mut port = FakeEnrollment::new();
     let mut late = dropping_bridge(None)?;
     assert_eq!(late.enroll(&context(), &mut port), Err(UNAVAILABLE));
     assert_eq!(late.status(), BridgeStatus::Ready);
+    // The create ceremony ran and the registration was checked as unbound; the failure then
+    // came from the slots (`with_slots`), before any seal, abandon or commit.
+    assert_eq!(port.calls, [Call::Unbound]);
     Ok(())
 }
