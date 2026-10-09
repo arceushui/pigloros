@@ -560,10 +560,9 @@ fn validate_root(
         return Err(DependencyGraphErrorV1::UnclosedEndogenousInput);
     }
     let accepts_unbound = node.origin == DependencyGraphNodeOriginV1::Committed;
-    let matches_plan = match bindings.root_binding(node) {
-        Some(binding) => binding.provenance_digest == node.provenance_digest,
-        None => accepts_unbound,
-    };
+    let matches_plan = bindings.root_binding(node).map_or(accepts_unbound, |binding| {
+        binding.provenance_digest == node.provenance_digest
+    });
     if matches_plan {
         Ok(())
     } else {
