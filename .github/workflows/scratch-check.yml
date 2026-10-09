@@ -43,3 +43,6 @@ jobs:
           CARGO_TERM_COLOR=never cargo test --no-fail-fast ${{ matrix.pkg }} --all-features > /tmp/test.log 2>&1 || true
           grep -E '^error|^test .* FAILED|^---- |test result: FAILED|panicked' /tmp/test.log | head -80
           grep -c 'test result: ok' /tmp/test.log
+      - name: handoff tests with output
+        run: |
+          RUST_BACKTRACE=0 cargo test -p pos-plugin-worker --all-features --test handoff_public the_outcome_carries_the_validation_fact -- --nocapture --test-threads=1 2>&1 | tail -60 | cut -c1-1500
