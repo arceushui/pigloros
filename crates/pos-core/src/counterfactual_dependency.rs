@@ -808,6 +808,21 @@ pub struct RecordedSetCountsV1 {
     pub inputs: usize,
 }
 
+/// Whether adding a Tick's counts to the recorded counts passes a set bound.
+///
+/// Shared by [`TickDependencyRecordV1::ensure_set_capacity`] and the factual
+/// preflight, so the bound and its saturating arithmetic live in one place.
+pub(crate) const fn set_bound_exceeded(
+    recorded: RecordedSetCountsV1,
+    nodes: usize,
+    edges: usize,
+    inputs: usize,
+) -> bool {
+    recorded.nodes.saturating_add(nodes) > MAX_RECORDED_DEPENDENCY_NODES_V1
+        || recorded.edges.saturating_add(edges) > MAX_RECORDED_DEPENDENCY_EDGES_V1
+        || recorded.inputs.saturating_add(inputs) > MAX_RECORDED_DEPENDENCY_EDGES_V1
+}
+
 /// The nodes and edges of one Tick, committed with that Tick's Events.
 ///
 /// Nodes are strictly ascending by [`DependencyNodeCoordinateV1::position_key`]
@@ -910,15 +925,9 @@ impl TickDependencyRecordV1 {
     /// [`MAX_RECORDED_DEPENDENCY_NODES_V1`] nodes,
     /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] edges, or
     /// [`MAX_RECORDED_DEPENDENCY_EDGES_V1`] declared inputs.
-    ///
-    /// The bound is shared with the factual preflight
-    /// `ensure_factual_set_headroom`: a change must touch both functions.
     pub fn ensure_set_capacity(&self, recorded: RecordedSetCountsV1) -> DependencyResult<()> {
-        if recorded.nodes.saturating_add(self.nodes.len()) > MAX_RECORDED_DEPENDENCY_NODES_V1
-            || recorded.edges.saturating_add(self.edges.len()) > MAX_RECORDED_DEPENDENCY_EDGES_V1
-            || recorded.inputs.saturating_add(self.declared_input_count())
-                > MAX_RECORDED_DEPENDENCY_EDGES_V1
-        {
+        let (nodes, edges) = (self.nodes.len(), self.edges.len());
+        if set_bound_exceeded(recorded, nodes, edges, self.declared_input_count()) {
             Err(CounterfactualDependencyErrorV1::FieldOutOfBounds)
         } else {
             Ok(())

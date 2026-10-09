@@ -1782,40 +1782,59 @@ fn action_admission_error(error: HumanActionAdmissionErrorV1, maximum: u64) -> G
     }
 }
 
-/// A store outcome names no protected record: authority failures reuse the
-/// authorization errors, and a stale cursor or domain state is one shape.
-fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> GatewayError {
+/// The Gateway error family of a not-admitted store outcome.
+#[derive(Clone, Copy)]
+enum NotAdmitted {
+    AuthorityDenied,
+    PolicyUnavailable,
+    LimitReached,
+    HostFault,
+    SetExhausted,
+    Stale,
+    Rejected,
+}
+
+/// Classify every outcome; the match has no wildcard, so a new
+/// `PipelineOutcomeV1` variant fails to compile until it is routed here.
+const fn not_admitted_family(outcome: &PipelineOutcomeV1) -> NotAdmitted {
     match outcome {
-        PipelineOutcomeV1::ResourceExhausted => GatewayError::EventLimitReached { maximum },
+        PipelineOutcomeV1::AuthorityRevoked | PipelineOutcomeV1::AuthorityExpired => {
+            NotAdmitted::AuthorityDenied
+        }
+        PipelineOutcomeV1::PolicyIndeterminate => NotAdmitted::PolicyUnavailable,
+        PipelineOutcomeV1::ResourceExhausted => NotAdmitted::LimitReached,
+        PipelineOutcomeV1::InvalidDependencyDeclaration => NotAdmitted::HostFault,
+        PipelineOutcomeV1::DependencySetExhausted => NotAdmitted::SetExhausted,
         PipelineOutcomeV1::InvalidObservation
         | PipelineOutcomeV1::AdmissionConflict
-        | PipelineOutcomeV1::DomainConflict => GatewayError::ActionObservationStale,
+        | PipelineOutcomeV1::DomainConflict => NotAdmitted::Stale,
         PipelineOutcomeV1::Rejected
         | PipelineOutcomeV1::InvalidPluginResult
         | PipelineOutcomeV1::InvalidProviderResult
         | PipelineOutcomeV1::Committed(_)
-        | PipelineOutcomeV1::RecoveredDuplicate(_) => GatewayError::ActionRejected(
-            ActionRejected::DomainValidationFailed("action was not admitted".to_owned()),
-        ),
-        PipelineOutcomeV1::AuthorityRevoked
-        | PipelineOutcomeV1::AuthorityExpired
-        | PipelineOutcomeV1::PolicyIndeterminate
-        | PipelineOutcomeV1::InvalidDependencyDeclaration
-        | PipelineOutcomeV1::DependencySetExhausted => authority_or_dependency_error(outcome),
+        | PipelineOutcomeV1::RecoveredDuplicate(_) => NotAdmitted::Rejected,
     }
 }
 
-/// Authority and policy failures reuse the authorization errors; the two
-/// dependency faults are a host fault and a permanent per-Timeline limit.
-const fn authority_or_dependency_error(outcome: &PipelineOutcomeV1) -> GatewayError {
-    match outcome {
-        PipelineOutcomeV1::AuthorityRevoked | PipelineOutcomeV1::AuthorityExpired => {
-            GatewayError::AuthorizationDenied
-        }
-        PipelineOutcomeV1::PolicyIndeterminate => GatewayError::AuthorizationUnavailable,
-        PipelineOutcomeV1::InvalidDependencyDeclaration => GatewayError::ActionAdmissionUnavailable,
-        // Reached only by `DependencySetExhausted`, the last routed variant.
-        _ => GatewayError::DependencySetExhausted,
+/// A store outcome names no protected record: authority failures reuse the
+/// authorization errors, the dependency faults are a host fault and a
+/// permanent per-Timeline limit, and a stale cursor or domain state is one shape.
+fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> GatewayError {
+    not_admitted_error(not_admitted_family(outcome), maximum)
+}
+
+/// The stable Gateway error of one family; the match has no wildcard.
+fn not_admitted_error(family: NotAdmitted, maximum: u64) -> GatewayError {
+    match family {
+        NotAdmitted::AuthorityDenied => GatewayError::AuthorizationDenied,
+        NotAdmitted::PolicyUnavailable => GatewayError::AuthorizationUnavailable,
+        NotAdmitted::LimitReached => GatewayError::EventLimitReached { maximum },
+        NotAdmitted::HostFault => GatewayError::ActionAdmissionUnavailable,
+        NotAdmitted::SetExhausted => GatewayError::DependencySetExhausted,
+        NotAdmitted::Stale => GatewayError::ActionObservationStale,
+        NotAdmitted::Rejected => GatewayError::ActionRejected(
+            ActionRejected::DomainValidationFailed("action was not admitted".to_owned()),
+        ),
     }
 }
 

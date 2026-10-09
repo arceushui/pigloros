@@ -154,7 +154,7 @@ pub enum RuntimeError {
     #[error("scheduled pass admission basis is invalid: {0}")]
     PipelineContract(pos_core::PipelineContractErrorV1),
 
-    #[error("scheduled pass was not admitted: {}", outcome_discriminant(.0))]
+    #[error("scheduled pass was not admitted: {}", outcome_name(.0))]
     ScheduledPassNotAdmitted(Box<pos_core::PipelineOutcomeV1>),
 
     #[error("no scheduled pass admission is in doubt")]
@@ -217,8 +217,9 @@ impl From<crate::OutputAdmissionErrorV1> for RuntimeError {
 }
 
 /// Name only the outcome discriminant so a rendered error never carries
-/// receipt data such as Event identities or digests.
-const fn outcome_discriminant(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
+/// receipt data such as Event identities or digests. This is a flat name
+/// table: it has no wildcard, so every new outcome must add an arm here.
+const fn outcome_name(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
     use pos_core::PipelineOutcomeV1 as Outcome;
     match outcome {
         Outcome::Rejected => "Rejected",
@@ -231,22 +232,10 @@ const fn outcome_discriminant(outcome: &pos_core::PipelineOutcomeV1) -> &'static
         Outcome::InvalidProviderResult => "InvalidProviderResult",
         Outcome::Committed(_) => "Committed",
         Outcome::RecoveredDuplicate(_) => "RecoveredDuplicate",
-        Outcome::DomainConflict
-        | Outcome::AdmissionConflict
-        | Outcome::InvalidDependencyDeclaration
-        | Outcome::DependencySetExhausted => conflict_outcome_discriminant(outcome),
-    }
-}
-
-/// The discriminant of the outcomes that name a conflict or a dependency fault.
-const fn conflict_outcome_discriminant(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
-    use pos_core::PipelineOutcomeV1 as Outcome;
-    match outcome {
         Outcome::DomainConflict => "DomainConflict",
         Outcome::AdmissionConflict => "AdmissionConflict",
         Outcome::InvalidDependencyDeclaration => "InvalidDependencyDeclaration",
-        // Reached only by `DependencySetExhausted`, the last routed variant.
-        _ => "DependencySetExhausted",
+        Outcome::DependencySetExhausted => "DependencySetExhausted",
     }
 }
 

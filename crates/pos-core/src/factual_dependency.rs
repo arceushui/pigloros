@@ -12,9 +12,8 @@
 //! registry builder and the adapters that consume it land in later slices.
 //!
 //! The two `PipelineOutcomeV1` outcomes `InvalidDependencyDeclaration` and
-//! `DependencySetExhausted` are produced by the store in a later slice (Redmine
-//! #603 and the slices 7b, 8, and 9 tickets #604 and #605). Here they are
-//! covered by direct tests of the outcome mappers.
+//! `DependencySetExhausted` are produced by the store in a later slice (ADR-064
+//! R3.4 and R3.6). Here they are covered by direct tests of the outcome mappers.
 //!
 //! # Derivations
 //!
@@ -40,6 +39,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::counterfactual_dependency::set_bound_exceeded;
 use crate::output_policy::OutputAuthorityV1;
 use crate::pipeline::ingress_tag;
 use crate::{
@@ -47,8 +47,7 @@ use crate::{
     CounterfactualDependencyErrorV1, DependencyEdgeRecordV1, DependencyNodeCoordinateV1,
     DependencyNodeRecordV1, EventDraft, Hash, PipelineAdmissionPortV1, PipelineAttemptIdV1,
     PipelineIngressV1, RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq,
-    TickDependencyRecordV1, TimelineId, MAX_RECORDED_DEPENDENCY_EDGES_V1,
-    MAX_RECORDED_DEPENDENCY_NODES_V1, MAX_TICK_DEPENDENCY_EDGES_V1, MAX_TICK_DEPENDENCY_NODES_V1,
+    TickDependencyRecordV1, TimelineId, MAX_TICK_DEPENDENCY_EDGES_V1, MAX_TICK_DEPENDENCY_NODES_V1,
 };
 
 /// Maximum Event inputs of one step node: forwarded this pass plus carried.
@@ -56,9 +55,13 @@ pub const MAX_FORWARDED_EVENTS_PER_DRIVER_V1: usize = 3_837;
 /// Maximum Driver-declared step-level inputs of one step node.
 pub const MAX_STEP_INPUTS_PER_DRIVER_V1: usize = 255;
 /// Maximum Driver-declared draft-specific inputs of one output node.
+///
+/// ADR-064 R3.4.7: 4,095 plus the one host-derived step node is 4,096.
 pub const MAX_OUTPUT_DIRECT_INPUTS_V1: usize = 4_095;
 /// Maximum host-derived non-Event inputs of one step node: the snapshot,
 /// step-chain, verified-prefix, and history nodes.
+///
+/// ADR-064 R3.6.1: 4 + 3,837 + 255 is the 4,096 inputs of one step node.
 pub const MAX_HOST_DERIVED_STEP_INPUTS_V1: usize = 4;
 /// Maximum distinct Events a pass declares individually on its step nodes.
 pub const MAX_FACTUAL_FORWARDED_EVENTS_PER_TICK_V1: usize = 16_384;
@@ -99,8 +102,8 @@ const EDGE_MAGIC: &[u8] = b"IDP1";
 pub enum FactualDependencyErrorV1 {
     /// A declared input names something the Driver could not have read.
     ///
-    /// The registry builder of a later slice (Redmine #603, slice 7b)
-    /// produces it; this slice only defines the closed name.
+    /// The registry builder (ADR-064 R3.4) produces it; this module only
+    /// defines the closed name.
     #[error("a declared dependency input is not one the Driver could have read")]
     UndeclarableInput,
     /// A declared input resolves to no recorded node.
@@ -327,22 +330,20 @@ pub fn factual_classification_bundle_digest() -> Hash {
 ///
 /// The preflight reserves a full record: it fails when the nodes, edges, or
 /// declared inputs already recorded, plus one Tick's maximum, pass the set
-/// bound.
+/// bound. The bound and its arithmetic are shared with
+/// `TickDependencyRecordV1::ensure_set_capacity`.
 ///
 /// # Errors
 /// Returns [`FactualDependencyErrorV1::SetExhausted`] at the threshold.
-///
-/// The bound is shared with `TickDependencyRecordV1::ensure_set_capacity`: a
-/// change to the set bounds or their arithmetic must touch both functions.
 pub const fn ensure_factual_set_headroom(
     counts: RecordedSetCountsV1,
 ) -> Result<(), FactualDependencyErrorV1> {
-    if counts.nodes.saturating_add(MAX_TICK_DEPENDENCY_NODES_V1) > MAX_RECORDED_DEPENDENCY_NODES_V1
-        || counts.edges.saturating_add(MAX_TICK_DEPENDENCY_EDGES_V1)
-            > MAX_RECORDED_DEPENDENCY_EDGES_V1
-        || counts.inputs.saturating_add(MAX_TICK_DEPENDENCY_EDGES_V1)
-            > MAX_RECORDED_DEPENDENCY_EDGES_V1
-    {
+    if set_bound_exceeded(
+        counts,
+        MAX_TICK_DEPENDENCY_NODES_V1,
+        MAX_TICK_DEPENDENCY_EDGES_V1,
+        MAX_TICK_DEPENDENCY_EDGES_V1,
+    ) {
         Err(FactualDependencyErrorV1::SetExhausted)
     } else {
         Ok(())
@@ -1257,8 +1258,8 @@ fn edge_bytes(parts: &EdgeParts<'_>) -> Vec<u8> {
 /// `seq` order and for any fault of the record contract.
 ///
 /// The derivation of the host edges (b) to (f) of R3.4.2 and the 255 and
-/// 4,095 caps on the declared input lists belong to the registry builder of
-/// slice 7b, which resolves the inputs before this call. Host nodes that no
+/// 4,095 caps on the declared input lists belong to the registry builder
+/// (R3.4), which resolves the inputs before this call. Host nodes that no
 /// node consumes are not flagged here.
 pub fn assemble_factual_tick(
     context: &FactualTickContextV1,

@@ -164,7 +164,7 @@ pub fn invalidation_frame(fields: &[u8], padding: usize) -> Vec<u8> {
 /// bound the contiguous Events it owns, and each `event_nodes` entry binds
 /// one of those Events to the Event-backed node that stands for it.
 ///
-/// No test in this slice uses it yet; the next slice's store tests seed with it.
+/// `seed_factual_prefix` seeds it into the Memory and SQLite adapters.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SeededFactualTickV1 {
     /// The Tick's committed record.
