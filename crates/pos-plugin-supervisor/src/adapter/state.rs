@@ -157,19 +157,20 @@ impl Shared {
         }
     }
 
-    /// Start a pass: forget the previous pass's failure and invocation ID, then
-    /// keep `authorization` unless an earlier one still occupies the slot.
+    /// Start a pass: keep `authorization` and forget the previous pass's failure
+    /// and invocation ID, unless an earlier authorization still occupies the
+    /// slot, in which case nothing changes.
     pub(super) fn offer(
         &self,
         authorization: CommunityPassAuthorizationV1,
     ) -> Result<(), CommunityPluginHostErrorV1> {
         let mut inner = self.lock();
-        inner.pass_failure = None;
-        inner.pass_invocation_id = None;
         if inner.slot.is_some() {
             Err(CommunityPluginHostErrorV1::InvalidInvocation)
         } else {
             inner.slot = Some(authorization);
+            inner.pass_failure = None;
+            inner.pass_invocation_id = None;
             Ok(())
         }
     }
@@ -196,6 +197,7 @@ impl Shared {
         self.lock().slot.take()
     }
 
+    /// Remember the ID of the invocation the Driver built for this pass.
     pub(super) fn set_invocation_id(&self, invocation_id: [u8; 16]) {
         self.lock().pass_invocation_id = Some(invocation_id);
     }
@@ -304,14 +306,19 @@ impl CommunityPluginHandleV1 {
     /// Set by [`Self::record_refusal()`] and by the Driver's own failure path;
     /// cleared by [`Self::offer_authorization()`] and [`Self::close_pass()`].
     /// It is distinct from [`Self::last_failure()`], which every failure sets
-    /// and only [`Self::clear_quarantine()`] clears.
+    /// and only [`Self::clear_quarantine()`] clears. It stays set after a
+    /// successful retry within the same pass, until the next offer or close.
+    ///
+    /// A quarantined Driver is refused before it runs, outside the failure
+    /// path, so it leaves this `None`: the host seam reports it as not run.
     #[must_use]
     pub fn pass_failure(&self) -> Option<CommunityPluginHostErrorV1> {
         self.shared.lock().pass_failure
     }
 
     /// The invocation ID the Driver built for the current pass, set once the
-    /// host's context source has answered and cleared with the pass failure.
+    /// host's context source has answered; cleared by
+    /// [`Self::offer_authorization()`] and [`Self::close_pass()`].
     #[must_use]
     pub fn pass_invocation_id(&self) -> Option<[u8; 16]> {
         self.shared.lock().pass_invocation_id
@@ -320,11 +327,12 @@ impl CommunityPluginHandleV1 {
     /// Offer this pass's one-shot authorization to the Driver.
     ///
     /// Starts the pass: the previous pass's failure and invocation ID are
-    /// cleared first.
+    /// cleared.
     ///
     /// # Errors
     /// Returns `InvalidInvocation` when an earlier authorization still occupies
-    /// the slot; the earlier one is kept and `authorization` is dropped.
+    /// the slot; the earlier one is kept, this pass's failure and invocation ID
+    /// are left as they are, and `authorization` is dropped.
     pub fn offer_authorization(
         &self,
         authorization: CommunityPassAuthorizationV1,

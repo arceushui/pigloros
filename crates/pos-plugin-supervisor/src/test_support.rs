@@ -15,21 +15,34 @@ use pos_crypto::plugin_manifest::component_digest_v1;
 use pos_runtime::community_plugin_host::{
     negotiate_community_plugin_v1, plugin_output_digest_v1, ArtifactRefV1,
     CommunityPassAuthorizationV1, CommunityPassV1, CommunityPluginCeilingsV1,
-    CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginModeV1,
-    EventDraftV1, GatedCommunityReleaseV1, MeteringV1, NegotiatedCommunityPluginV1,
-    OperationalLogRecord, PinnedComponentRuntimeV1, PinnedEngineConfigV1, PluginDescriptorV1,
-    PluginInvocationV1, PluginOutputV1, ReleaseIdentityV1, TimelinePositionV1, TraceAnnotationV1,
-    TrapOutcomeV1, TrapTableEntryV1,
+    CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginHostErrorV1,
+    CommunityPluginModeV1, EventDraftV1, GatedCommunityReleaseV1, MeteringV1,
+    NegotiatedCommunityPluginV1, OperationalLogRecord, PinnedComponentRuntimeV1,
+    PinnedEngineConfigV1, PluginDescriptorV1, PluginInvocationV1, PluginOutputV1,
+    ReleaseIdentityV1, TimelinePositionV1, TraceAnnotationV1, TrapOutcomeV1, TrapTableEntryV1,
+    TrustDenialBasisV1,
 };
 use pos_runtime::{DomainImplementationKindV1, PluginIsolationV1, PluginPinV1};
 
 use crate::adapter::{CommunityDriverConfigV1, CommunityDriverSettingsV1, InvocationBindingV1};
+
+type Error = CommunityPluginHostErrorV1;
 
 /// A budget small enough that the worker's data ceiling stays far below 1 GiB.
 pub const SMALL_BUDGET: DeterministicBudgetV1 = DeterministicBudgetV1 {
     memory_bytes: 65_536,
     fuel: 1_000,
     ..DeterministicBudgetV1::MAXIMA
+};
+
+/// No trust state exists for the pass.
+pub const UNAVAILABLE: Error = Error::ArtifactTrustDenied {
+    basis: TrustDenialBasisV1::TrustStateUnavailable,
+};
+
+/// The authorization, or the gated release, is not for this release or these bytes.
+pub const NOT_ACTIVE: Error = Error::ArtifactTrustDenied {
+    basis: TrustDenialBasisV1::NotActive,
 };
 
 /// The Tick of the fixture invocations and of the fixture authorizations.

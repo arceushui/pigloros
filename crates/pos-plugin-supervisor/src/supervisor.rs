@@ -55,7 +55,7 @@ use crate::ipc::{
 };
 use crate::launch::{launch, LaunchedWorker, WorkerProgramV1, WorkerResourceCeilingsV1};
 
-mod authorize;
+pub mod authorize;
 mod verify;
 
 /// The longest wall-time watchdog a supervisor accepts.
