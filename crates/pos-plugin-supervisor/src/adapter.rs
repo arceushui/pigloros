@@ -87,8 +87,7 @@ pub use self::state::{
     CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1, ReceiptDispositionV1,
     MAX_RETAINED_RECEIPTS_V1,
 };
-use crate::supervisor::authorize::{NOT_ACTIVE, UNAVAILABLE};
-use crate::supervisor::CommunityPluginSupervisorV1;
+use crate::supervisor::{CommunityPluginSupervisorV1, NOT_ACTIVE, UNAVAILABLE};
 
 type Error = CommunityPluginHostErrorV1;
 

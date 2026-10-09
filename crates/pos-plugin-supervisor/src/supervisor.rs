@@ -44,6 +44,7 @@ use std::time::{Duration, Instant};
 use pos_runtime::community_plugin_host::{
     CommunityPassAuthorizationV1, CommunityPluginHostErrorV1, HostInputs, InvocationReportV1,
     NegotiatedCommunityPluginV1, PluginDescriptorV1, PluginInvocationV1, PluginOutputV1,
+    TrustDenialBasisV1,
 };
 
 use self::authorize::{check_describe, check_invocation};
@@ -55,7 +56,7 @@ use crate::ipc::{
 };
 use crate::launch::{launch, LaunchedWorker, WorkerProgramV1, WorkerResourceCeilingsV1};
 
-pub mod authorize;
+mod authorize;
 mod verify;
 
 /// The longest wall-time watchdog a supervisor accepts.
@@ -64,6 +65,17 @@ pub const MAX_WORKER_WATCHDOG: Duration = Duration::from_hours(1);
 const EXIT_POLL: Duration = Duration::from_millis(1);
 
 type Error = CommunityPluginHostErrorV1;
+
+/// The refusal when no trust state exists for the pass: no authorization, or one of a closed
+/// pass.
+pub const UNAVAILABLE: Error = Error::ArtifactTrustDenied {
+    basis: TrustDenialBasisV1::TrustStateUnavailable,
+};
+/// The refusal when an authorization (or a gated release) is not for this release or these
+/// bytes.
+pub const NOT_ACTIVE: Error = Error::ArtifactTrustDenied {
+    basis: TrustDenialBasisV1::NotActive,
+};
 
 /// Launches one fresh worker per invocation under a wall-time watchdog.
 ///

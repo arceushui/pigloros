@@ -10,19 +10,12 @@
 use pos_crypto::plugin_manifest::component_digest_v1;
 use pos_runtime::community_plugin_host::{
     CommunityPassAuthorizationV1, CommunityPluginHostErrorV1, NegotiatedCommunityPluginV1,
-    PluginInvocationV1, TrustDenialBasisV1,
+    PluginInvocationV1,
 };
+
+use super::{NOT_ACTIVE, UNAVAILABLE};
 
 type Error = CommunityPluginHostErrorV1;
-
-/// No trust state exists for the pass.
-pub(crate) const UNAVAILABLE: Error = Error::ArtifactTrustDenied {
-    basis: TrustDenialBasisV1::TrustStateUnavailable,
-};
-/// The authorization (or gated release) is not for this Driver or for the bytes it holds.
-pub(crate) const NOT_ACTIVE: Error = Error::ArtifactTrustDenied {
-    basis: TrustDenialBasisV1::NotActive,
-};
 
 /// Refusals 1 and 2 of decision 3, the only ones `describe` has.
 pub(super) fn check_describe(

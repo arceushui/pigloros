@@ -114,9 +114,14 @@ impl Inner {
             return Err(CommunityPluginHostErrorV1::InvalidInvocation);
         }
         self.slot = Some(authorization);
+        self.forget_pass_values();
+        Ok(())
+    }
+
+    /// Forget the failure and the invocation ID of the pass.
+    fn forget_pass_values(&mut self) {
         self.pass_failure = None;
         self.pass_invocation_id = None;
-        Ok(())
     }
 }
 
@@ -189,8 +194,7 @@ impl Shared {
     pub(super) fn close(&self) {
         let mut inner = self.lock();
         inner.slot = None;
-        inner.pass_failure = None;
-        inner.pass_invocation_id = None;
+        inner.forget_pass_values();
     }
 
     /// Read the offered authorization without taking it.

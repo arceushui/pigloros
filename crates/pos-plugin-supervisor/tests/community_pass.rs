@@ -128,7 +128,7 @@ struct Member {
 }
 
 struct World {
-    members_added: Vec<Member>,
+    registered: Vec<Member>,
     store: MemoryStore,
     registry: PluginRegistry,
     gate: Arc<ErasureContainmentGateV1>,
@@ -144,7 +144,7 @@ impl World {
         let () = ok(store.bind_erasure_gate(Arc::clone(&gate)));
         let timeline = ok(store.create_timeline("community-pass")).id();
         Self {
-            members_added: Vec::new(),
+            registered: Vec::new(),
             store,
             registry: PluginRegistry::new().with_erasure_gate(gate.clone()),
             gate,
@@ -186,7 +186,7 @@ impl World {
         };
         let (driver, handle) =
             CommunityDriverV1::new(test_support::config_with(name, component, settings));
-        self.members_added.push(Member {
+        self.registered.push(Member {
             handle: handle.clone(),
             negotiated: negotiated_with(name, SMALL_BUDGET, Vec::new()),
             component: component.to_vec(),
@@ -204,7 +204,7 @@ impl World {
     /// Start a pass for every member: drop what the last pass left in its slot and
     /// offer a fresh authorization, as the host pass seam will (#584).
     fn offer_all(&self) {
-        for member in &self.members_added {
+        for member in &self.registered {
             member.handle.close_pass();
             let authorization =
                 test_support::authorization_for(&member.negotiated, &member.component);
