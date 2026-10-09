@@ -33,6 +33,16 @@ mod install;
 #[cfg(target_os = "linux")]
 mod publish;
 
+// Test-only. The shared signed-release test world lives under `tests/support`, outside the
+// production-coverage globs, like the Plugin trust registry fixtures of `pos-store`. It serves
+// this crate's public installer vectors and the tests of other crates that enable the
+// `test-support` feature from their `[dev-dependencies]`;
+// `scripts/check_test_support_features.py` keeps the feature out of deployable graphs. The
+// items are `pub` so that no consumer sees them as unused.
+#[cfg(all(target_os = "linux", feature = "test-support"))]
+#[path = "../tests/support/mod.rs"]
+pub mod test_support;
+
 #[cfg(target_os = "linux")]
 pub use historical::{
     verify_plugin_release_historical_v1, CurrentAdmissionV1, HistoricalReleaseVerificationV1,

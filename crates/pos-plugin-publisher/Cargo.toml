@@ -6,10 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Declared so the registry spy fixture under `tests/support` can carry the gate
-# `scripts/check_plugin_trust_registry_impls.py` requires. It exposes nothing.
+# Compiles the shared signed-release test world (`tests/support`). Never enable it in a
+# deployable dependency graph; `scripts/check_test_support_features.py` enforces that. The
+# world's own dependencies are optional and exist only under this feature.
 [features]
-test-support = []
+test-support = [
+  "dep:blake3",
+  "dep:ciborium",
+  "dep:ed25519-dalek",
+  "dep:sha2",
+  "pos-core/test-support",
+]
 
 [dependencies]
 pos-core = { path = "../pos-core" }
@@ -24,6 +31,11 @@ thiserror = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 pos-conformance = { path = "../pos-conformance" }
 pos-store = { path = "../pos-store", default-features = false }
+# The test world's record encoders and signers (feature `test-support` only).
+blake3 = { workspace = true, optional = true }
+ciborium = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 blake3 = { workspace = true }
@@ -32,6 +44,14 @@ ed25519-dalek = { workspace = true }
 # Test-only: the scripted trusted wall source and the open erasure gate.
 pos-core = { path = "../pos-core", features = ["test-support"] }
 sha2 = { workspace = true }
+
+[[test]]
+name = "installer_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "signed_release_world_public"
+required-features = ["test-support"]
 
 [lints]
 workspace = true

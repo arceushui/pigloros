@@ -1,0 +1,212 @@
+//! The shared signed-release test world at the public seam.
+//!
+//! These vectors exercise the parts of `pos_plugin_publisher::test_support`
+//! that the installer vectors in `installer_public.rs` do not reach: a world
+//! parametrised by Plugin, owner, Component, and validity interval, evidence
+//! at expired coordinates and with revocations, registry policy advances that
+//! revoke a publisher key or a release, and an operator rollback. Each helper
+//! is checked against the real registry, not a stub.
+#![cfg(target_os = "linux")]
+
+use pos_crypto::plugin_trust::PluginTrustErrorV1;
+use pos_plugin_publisher::{
+    test_support::{
+        encoding::{OWNER, SCOPE},
+        release::{pmf1_digest, Shape},
+        world::{key_bytes, register, wall, Config, World},
+        BoxResult,
+    },
+    PluginReleaseInstallErrorV1,
+};
+use pos_plugin_release::ReleaseSourceV1;
+use pos_store::plugin_trust_registry::{
+    ActiveReleaseV1, PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1,
+    PolicyAdvanceKindV1,
+};
+
+type TestResult = BoxResult<()>;
+
+const fn authorization_error(error: PluginTrustErrorV1) -> PluginReleaseInstallErrorV1 {
+    PluginReleaseInstallErrorV1::Authorization(error)
+}
+
+#[test]
+fn a_world_for_another_plugin_installs_its_own_component_and_interval() -> TestResult {
+    let mut world = World::with_config(Config {
+        plugin_id: "plugin-z",
+        owner: "owner-z",
+        ..Config::default()
+    })?;
+    let shape = Shape {
+        version: "3.1.0",
+        component: b"\0asm another component",
+        not_before: 10,
+        not_after: 90,
+        ..world.first_shape()
+    };
+    let published = world.publish(shape)?;
+    let digest = pmf1_digest(&world.store.read_verified(published.address())?);
+    let installed = world
+        .install(published.address(), 1)?
+        .map_err(|error| format!("install failed: {error}"))?;
+    assert_eq!(installed.admission().decision().plugin_id(), "plugin-z");
+    assert_eq!(installed.admission().decision().pmf1_digest(), digest);
+    let snapshot = world.snapshot(&[digest])?;
+    assert_eq!(
+        snapshot.active.as_ref().map(ActiveReleaseV1::pmf1_digest),
+        Some(digest)
+    );
+    assert_eq!(snapshot.events.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_release_signed_at_an_unlisted_epoch_is_refused_before_the_registry() -> TestResult {
+    let mut world = World::new()?;
+    let second = register(&mut world.keys, OWNER, 2)?;
+    assert_ne!(key_bytes(&second), key_bytes(&world.publisher));
+    let shape = Shape {
+        epoch: 2,
+        ..world.first_shape()
+    };
+    let published = world.publish_with(&second, shape)?;
+    let refused = world.install(published.address(), 1)?;
+    assert_eq!(
+        refused.err(),
+        Some(authorization_error(PluginTrustErrorV1::UnknownPublisherKey))
+    );
+    assert!(world.registry.admits.is_empty());
+    Ok(())
+}
+
+#[test]
+fn evidence_at_expired_coordinates_is_refused_before_the_registry() -> TestResult {
+    let mut world = World::new()?;
+    let published = world.publish(Shape::first())?;
+    let expired = world.expired_material()?;
+    let early = world.not_yet_valid_material()?;
+    for material in [expired, early] {
+        let mut source = wall(material.utc)?;
+        let result = world.install_with(published.address(), &material, &mut source, 1);
+        assert_eq!(
+            result.err(),
+            Some(authorization_error(PluginTrustErrorV1::ManifestExpired))
+        );
+        assert_eq!(source.remaining(), 1);
+    }
+    assert!(world.registry.admits.is_empty());
+    Ok(())
+}
+
+#[test]
+fn evidence_with_a_revoked_key_or_release_is_refused_before_the_registry() -> TestResult {
+    let mut world = World::new()?;
+    let published = world.publish(Shape::first())?;
+    let keys = world.key_revoked_material(&[1])?;
+    let mut source = wall(keys.utc)?;
+    let result = world.install_with(published.address(), &keys, &mut source, 1);
+    assert_eq!(
+        result.err(),
+        Some(authorization_error(PluginTrustErrorV1::PublisherKeyRevoked))
+    );
+    let artifacts = world.artifact_revoked_material(&[published.release_digest()])?;
+    let mut source = wall(artifacts.utc)?;
+    let result = world.install_with(published.address(), &artifacts, &mut source, 1);
+    assert_eq!(
+        result.err(),
+        Some(authorization_error(PluginTrustErrorV1::ArtifactRevoked))
+    );
+    assert!(world.registry.admits.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_policy_advance_revoking_the_publisher_key_blocks_later_installs() -> TestResult {
+    let mut world = World::new()?;
+    let first = world.publish(Shape::first())?;
+    assert!(world.install(first.address(), 1)?.is_ok());
+    let second = world.publish(Shape {
+        version: "2.0.0",
+        previous: Some(first.release_digest()),
+        ..Shape::first()
+    })?;
+    let outcome = world
+        .advance_revoking_keys(&[1])?
+        .map_err(|error| format!("advance failed: {error}"))?;
+    assert_eq!(outcome.outcome, PolicyAdvanceKindV1::Advanced);
+    assert_eq!(outcome.tps1_epoch, 2);
+    // The world's evidence follows the committed advance exactly.
+    let retained = world.registry.retained_policy_state(SCOPE)?;
+    assert_eq!(retained.tps1_epoch(), 2);
+    assert_eq!(retained.tps1_digest(), world.material()?.tps1_digest());
+    let refused = world.install(second.address(), 2)?;
+    assert_eq!(
+        refused.err(),
+        Some(authorization_error(PluginTrustErrorV1::PublisherKeyRevoked))
+    );
+    assert_eq!(world.registry.admits.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_policy_advance_revoking_a_release_blocks_installing_it() -> TestResult {
+    let mut world = World::new()?;
+    let published = world.publish(Shape::first())?;
+    let outcome = world
+        .advance_revoking_artifacts(&[published.release_digest()])?
+        .map_err(|error| format!("advance failed: {error}"))?;
+    assert_eq!(outcome.outcome, PolicyAdvanceKindV1::Advanced);
+    let refused = world.install(published.address(), 1)?;
+    assert_eq!(
+        refused.err(),
+        Some(authorization_error(PluginTrustErrorV1::ArtifactRevoked))
+    );
+    assert!(world.registry.admits.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_refused_policy_advance_leaves_the_world_evidence_unchanged() -> TestResult {
+    let mut world = World::new()?;
+    let published = world.publish(Shape::first())?;
+    assert!(world.install(published.address(), 1)?.is_ok());
+    let before = world.material()?.tps1;
+    // Evidence one second before the retained highest trusted second regresses.
+    world.spec.utc_offset = -1;
+    let refused = world.advance_revoking_keys(&[1])?;
+    assert_eq!(
+        refused.err(),
+        Some(PluginTrustPolicyRegistryErrorV1::TrustedTimeRegressed)
+    );
+    assert_eq!(world.spec.extra_epochs, 0);
+    assert_eq!(world.previous, None);
+    world.spec.utc_offset = 0;
+    assert_eq!(world.material()?.tps1, before);
+    Ok(())
+}
+
+#[test]
+fn an_operator_rollback_reactivates_the_earlier_release() -> TestResult {
+    let mut world = World::new()?;
+    let first = world.publish(Shape::first())?;
+    assert!(world.install(first.address(), 1)?.is_ok());
+    let second = world.publish(Shape {
+        version: "2.0.0",
+        previous: Some(first.release_digest()),
+        ..Shape::first()
+    })?;
+    assert!(world.install(second.address(), 2)?.is_ok());
+    let first_digest = pmf1_digest(&world.store.read_verified(first.address())?);
+    let second_digest = pmf1_digest(&world.store.read_verified(second.address())?);
+    let receipt = world
+        .rollback_to(first.address(), 3)?
+        .map_err(|error| format!("rollback failed: {error}"))?;
+    assert_eq!(receipt.target_pmf1_digest(), first_digest);
+    assert_eq!(receipt.replaced_pmf1_digest(), second_digest);
+    let active = world.snapshot(&[])?.active;
+    assert_eq!(
+        active.as_ref().map(ActiveReleaseV1::pmf1_digest),
+        Some(first_digest)
+    );
+    Ok(())
+}
