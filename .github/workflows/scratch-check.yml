@@ -11,36 +11,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - ref: redmine/577-failure-surface
-            id: p577
-            pkg: "-p pos-runtime -p pos-plugin-supervisor"
-            test: "--all-features"
-          - ref: redmine/578-airgapped-profile
-            id: p578
-            pkg: "-p pos-runtime -p pos-plugin-supervisor -p pos-plugin-worker"
-            test: "--all-features"
-          - ref: redmine/580-read-only-evaluation
-            id: p580
-            pkg: "-p pos-store -p pos-plugin-publisher"
-            test: "--all-features"
+          - ref: redmine/581-gate-and-world-builders
+            id: p581
+            base: redmine/580-read-only-evaluation
+            pkg: "-p pos-runtime -p pos-plugin-host -p pos-plugin-supervisor -p pos-plugin-publisher -p pos-crypto -p pos-plugin-release -p pos-plugin-worker"
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ matrix.ref }}
-      - name: rustfmt and publish patch
+          fetch-depth: 0
+      - name: lock, rustfmt (workspace and standalone) and publish patch
         run: |
           cargo metadata --format-version 1 >/dev/null
+          (cd fuzz && cargo metadata --format-version 1 >/dev/null) || true
           cargo fmt --all
+          for f in $(git diff --name-only origin/${{ matrix.base }}...HEAD -- '*.rs'); do [ -f "$f" ] && rustfmt --edition 2021 --config max_width=100 --config style_edition=2021 "$f"; done
           git --no-pager diff --stat
           git diff > /tmp/fmt.patch
           git config user.name ci && git config user.email ci@example.com
           git checkout -q -B out-${{ matrix.id }}
           mkdir -p fmtout && cp /tmp/fmt.patch fmtout/${{ matrix.id }}.patch
           git add -f fmtout && git commit -q -m out && git push -q -f origin out-${{ matrix.id }}:refs/heads/scratch/out-${{ matrix.id }}
-          git checkout -q -f ${{ matrix.ref }} 2>/dev/null || git checkout -q -f HEAD~1
+          git checkout -q -f ${{ matrix.ref }}
+          git apply /tmp/fmt.patch
       - name: clippy keep-going
         run: |
-          CARGO_TERM_COLOR=never cargo clippy --keep-going --message-format=short --locked --workspace --all-targets --all-features -- -D warnings -W clippy::pedantic 2>&1 | grep -E 'error|warning' | grep -E '(crates|apps)/' | sort -u | head -80
-      - name: targeted tests
+          CARGO_TERM_COLOR=never cargo clippy --keep-going --message-format=short --workspace --all-targets --all-features -- -D warnings -W clippy::pedantic > /tmp/clippy.log 2>&1 || true
+          grep -E 'error|warning' /tmp/clippy.log | grep -E '(crates|apps)/' | sort -u | head -80
+      - name: tests
         run: |
-          CARGO_TERM_COLOR=never cargo test --locked --no-fail-fast ${{ matrix.pkg }} ${{ matrix.test }} 2>&1 | grep -E -A14 '^---- |^error(\[|:)|test result' | head -200
+          CARGO_TERM_COLOR=never cargo test --no-fail-fast ${{ matrix.pkg }} --all-features > /tmp/test.log 2>&1 || true
+          grep -E '^error|^test .* FAILED|^---- |test result: FAILED|panicked' /tmp/test.log | head -80
+          grep -c 'test result: ok' /tmp/test.log
