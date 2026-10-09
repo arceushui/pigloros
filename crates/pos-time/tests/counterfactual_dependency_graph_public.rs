@@ -624,7 +624,7 @@ fn keeps_nodes_inside_their_origin_window() -> TestResult {
 }
 
 #[test]
-fn rejects_bound_roots_that_disagree_with_the_plan() -> TestResult {
+fn rejects_provisional_roots_unbound_or_mismatched_by_the_plan() -> TestResult {
     let mut consuming_root = graph()?;
     consuming_root.nodes[EXOGENOUS].input_digests = vec![[0x11; 32]];
     assert_eq!(
@@ -632,8 +632,15 @@ fn rejects_bound_roots_that_disagree_with_the_plan() -> TestResult {
         Err(GraphError::UnclosedEndogenousInput)
     );
 
-    // The `FIXED` edits make a provisional root the plan does not bind: it
-    // sits above the cut, so `validate_root` has no committed exemption.
+    // Every edit is rejected as `RootNotInPlan`. Bound roots with a wrong
+    // provenance digest: `EXOGENOUS` (committed), `FIXED` and
+    // `INTERVENTION_B` (provisional). The other edits leave a provisional
+    // root the plan does not bind (a changed class, schema, effective tick, or
+    // artifact digest), and above the cut `validate_root` has no committed
+    // exemption for it. A bound committed `FixedPolicy` or
+    // `InterventionAssigned` root cannot be built here: `FIXED` and the
+    // Interventions sit at or above `FIRST_TICK`, where a committed origin is
+    // out of range, and moving one below the cut breaks the node order.
     let edits: [fn(&mut [Node]); 9] = [
         |nodes| nodes[EXOGENOUS].provenance_digest = [0x63; 32],
         |nodes| nodes[FIXED].class = DependencyClassV1::ExogenousFrozen,
@@ -670,6 +677,12 @@ fn accepts_committed_roots_the_plan_does_not_bind() -> TestResult {
     for edit in edits {
         assert_eq!(edited(edit)?, Ok(()));
     }
+    // The edge out of an unbound committed root carries no plan authorization
+    // to check, so any authorization digest is accepted.
+    let mut unauthorized = graph_with(|nodes| nodes[EXOGENOUS].node.schema_id = 2)?;
+    let position = edge_position(&unauthorized, PARENT, EXOGENOUS)?;
+    unauthorized.edges[position].authorization_digest = [0x99; 32];
+    assert_eq!(validate(unauthorized).map(drop), Ok(()));
     // An unbound committed root still declares no input.
     let mut consuming = graph()?;
     consuming.nodes[EXOGENOUS].node.schema_id = 2;

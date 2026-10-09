@@ -1516,13 +1516,15 @@ const UNBOUND_ROOT_DIGEST: [u8; 32] = [0x51; 32];
 const UNBOUND_ROOT_TICK: u64 = 6;
 /// Scheduler position of the unbound root.
 const UNBOUND_ROOT_POSITION: u32 = 0;
+/// Node position of the unbound root in the hand-built graph.
+const UNBOUND_ROOT_INDEX: usize = 1;
 
 /// The base graph plus a committed `ExogenousFrozen` root at
 /// `UNBOUND_ROOT_TICK` that the plan does not bind, consumed by `PARENT`.
 fn unbound_root_graph(plan: &CounterfactualPlanV1) -> TestResult<Graph> {
     let mut nodes = base_nodes(plan)?;
     nodes.insert(
-        1,
+        UNBOUND_ROOT_INDEX,
         node(
             UNBOUND_ROOT_TICK,
             UNBOUND_ROOT_POSITION,
@@ -1531,12 +1533,12 @@ fn unbound_root_graph(plan: &CounterfactualPlanV1) -> TestResult<Graph> {
             DependencyClassV1::ExogenousFrozen,
         ),
     );
-    let shift = |position: usize| position + usize::from(position >= 1);
+    let shift = |position: usize| position + usize::from(position >= UNBOUND_ROOT_INDEX);
     let mut specs: Vec<(usize, usize)> = EDGE_SPECS
         .iter()
         .map(|&(consumer, source)| (shift(consumer), shift(source)))
         .collect();
-    specs.push((shift(PARENT), 1));
+    specs.push((shift(PARENT), UNBOUND_ROOT_INDEX));
     Ok(connect(nodes, &specs, &[]))
 }
 
@@ -1637,10 +1639,13 @@ fn derives_over_a_seeded_prefix_with_an_unbound_committed_root<B: Backend>() -> 
     assert_eq!(derivation!(&mut source, &plan)?, expected);
     let recorded = source.recorded_graph(&plan)?;
     assert_eq!(recorded, hand_built.graph(&plan)?);
-    assert!(recorded
-        .nodes()
-        .iter()
-        .any(|node| node.node.artifact_digest == UNBOUND_ROOT_DIGEST));
+    assert!(
+        recorded
+            .nodes()
+            .iter()
+            .any(|node| node.node.artifact_digest == UNBOUND_ROOT_DIGEST),
+        "the unbound root must survive the round trip"
+    );
     Ok(())
 }
 both_backends!(derives_over_a_seeded_prefix_with_an_unbound_committed_root);
