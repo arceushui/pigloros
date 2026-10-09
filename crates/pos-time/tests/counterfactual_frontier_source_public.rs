@@ -1510,13 +1510,26 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
 }
 both_backends!(admits_the_next_generation_from_the_recorded_graph);
 
-/// The base graph plus a committed `ExogenousFrozen` root at Tick 6 that the
-/// plan does not bind, consumed by `PARENT`.
+/// Artifact digest of the committed root the plan does not bind.
+const UNBOUND_ROOT_DIGEST: [u8; 32] = [0x51; 32];
+/// Tick of the unbound root, inside the committed prefix.
+const UNBOUND_ROOT_TICK: u64 = 6;
+/// Scheduler position of the unbound root.
+const UNBOUND_ROOT_POSITION: u32 = 0;
+
+/// The base graph plus a committed `ExogenousFrozen` root at
+/// `UNBOUND_ROOT_TICK` that the plan does not bind, consumed by `PARENT`.
 fn unbound_root_graph(plan: &CounterfactualPlanV1) -> TestResult<Graph> {
     let mut nodes = base_nodes(plan)?;
     nodes.insert(
         1,
-        node(6, 0, "env", [0x51; 32], DependencyClassV1::ExogenousFrozen),
+        node(
+            UNBOUND_ROOT_TICK,
+            UNBOUND_ROOT_POSITION,
+            "env",
+            UNBOUND_ROOT_DIGEST,
+            DependencyClassV1::ExogenousFrozen,
+        ),
     );
     let shift = |position: usize| position + usize::from(position >= 1);
     let mut specs: Vec<(usize, usize)> = EDGE_SPECS
@@ -1627,7 +1640,7 @@ fn derives_over_a_seeded_prefix_with_an_unbound_committed_root<B: Backend>() -> 
     assert!(recorded
         .nodes()
         .iter()
-        .any(|node| node.node.artifact_digest == [0x51; 32]));
+        .any(|node| node.node.artifact_digest == UNBOUND_ROOT_DIGEST));
     Ok(())
 }
 both_backends!(derives_over_a_seeded_prefix_with_an_unbound_committed_root);

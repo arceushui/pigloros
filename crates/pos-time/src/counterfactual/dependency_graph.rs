@@ -54,11 +54,11 @@
 //!   plan by `(schema_id, artifact_digest, provenance_digest)`; a `Committed`
 //!   root the plan does not bind is accepted, since the inherited prefix
 //!   records the roots of factual Ticks, while every `Provisional` root must
-//!   be bound. An
-//!   `InterventionAssigned` node's artifact digest is its INT1 record digest,
-//!   so two Interventions assigning the same value stay distinct; its Tick,
-//!   schema, and provenance are the Intervention's effective Tick, target
-//!   schema, and provenance, and every plan Intervention has exactly one.
+//!   be bound. An `InterventionAssigned` node's artifact digest is its INT1
+//!   record digest, so two Interventions assigning the same value stay
+//!   distinct; its Tick, schema, and provenance are the Intervention's
+//!   effective Tick, target schema, and provenance, and every plan
+//!   Intervention has exactly one.
 //! - An edge carries the class of its source node. A `PresentationOnly`
 //!   output may only feed another `PresentationOnly` node, so presentation
 //!   never reaches authoritative state. An edge out of a root carries the
@@ -559,10 +559,11 @@ fn validate_root(
     if !node.input_digests.is_empty() {
         return Err(DependencyGraphErrorV1::UnclosedEndogenousInput);
     }
-    let unbound_ok = node.origin == DependencyGraphNodeOriginV1::Committed;
-    let matches_plan = bindings.root_binding(node).map_or(unbound_ok, |binding| {
-        binding.provenance_digest == node.provenance_digest
-    });
+    let accepts_unbound = node.origin == DependencyGraphNodeOriginV1::Committed;
+    let matches_plan = match bindings.root_binding(node) {
+        Some(binding) => binding.provenance_digest == node.provenance_digest,
+        None => accepts_unbound,
+    };
     if matches_plan {
         Ok(())
     } else {

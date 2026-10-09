@@ -632,9 +632,16 @@ fn rejects_bound_roots_that_disagree_with_the_plan() -> TestResult {
         Err(GraphError::UnclosedEndogenousInput)
     );
 
-    let edits: [fn(&mut [Node]); 7] = [
+    // The `FIXED` edits make a provisional root the plan does not bind: it
+    // sits above the cut, so `validate_root` has no committed exemption.
+    let edits: [fn(&mut [Node]); 9] = [
         |nodes| nodes[EXOGENOUS].provenance_digest = [0x63; 32],
         |nodes| nodes[FIXED].class = DependencyClassV1::ExogenousFrozen,
+        |nodes| nodes[FIXED].node.schema_id = 4,
+        |nodes| {
+            nodes[FIXED].class = DependencyClassV1::ExogenousFrozen;
+            nodes[FIXED].node.schema_id = 4;
+        },
         |nodes| nodes[FIXED].provenance_digest = [0x63; 32],
         |nodes| {
             nodes[INTERVENTION_B].node.tick = 11;
@@ -677,22 +684,6 @@ fn accepts_committed_roots_the_plan_does_not_bind() -> TestResult {
         edited(|nodes| nodes[EXOGENOUS].class = DependencyClassV1::InterventionAssigned)?,
         Err(GraphError::InterventionNodeMissing)
     );
-    // A root the plan binds is still checked, and a provisional root must be
-    // bound.
-    assert_eq!(
-        edited(|nodes| {
-            nodes[FIXED].class = DependencyClassV1::ExogenousFrozen;
-            nodes[FIXED].node.schema_id = 4;
-        })?,
-        Err(GraphError::RootNotInPlan)
-    );
-    let rebound: [fn(&mut [Node]); 2] = [
-        |nodes| nodes[EXOGENOUS].provenance_digest = [0x63; 32],
-        |nodes| nodes[FIXED].node.schema_id = 4,
-    ];
-    for edit in rebound {
-        assert_eq!(edited(edit)?, Err(GraphError::RootNotInPlan));
-    }
     Ok(())
 }
 
