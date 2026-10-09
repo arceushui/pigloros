@@ -127,7 +127,6 @@ fn sorted<T: DependencyPagedRowV1>(mut rows: Vec<T>) -> Vec<T> {
     rows
 }
 
-
 const OWNER_A: &str = "plugin:a";
 const OWNER_B: &str = "plugin:b";
 const OWNER_C: &str = "plugin:c";

@@ -14,8 +14,7 @@
 use std::sync::Arc;
 
 use pos_core::counterfactual_store::test_fixtures::{
-    frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, text_field,
-    uint,
+    frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, text_field, uint,
 };
 use pos_core::{
     CanonicalBytes, CoreError, CounterfactualBasisV1, CounterfactualDependencyErrorV1,
