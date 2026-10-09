@@ -320,8 +320,9 @@ impl CommunityDriverV1 {
         timeline: TimelineId,
         observation: &ObservationView<'_>,
     ) -> Result<StepOutput, Error> {
-        let binding = self.binding()?;
-        let context = self.source.context(timeline, observation, binding)?;
+        let context = self
+            .binding()
+            .and_then(|binding| self.source.context(timeline, observation, binding))?;
         let invocation = with_prior_state(context.invocation, self.shared.committed_state());
         let id = invocation.invocation_id;
         self.shared.set_invocation_id(id);
