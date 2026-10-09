@@ -757,6 +757,9 @@ mod tests {
         assert_activation_refused(h)
     }
 
+    /// One way to corrupt the committed state of a scope.
+    type Corruption = fn(&mut MemoryScopeV1);
+
     fn scope_mut(store: &mut MemoryStore) -> TestResult<&mut MemoryScopeV1> {
         Ok(store
             .plugin_trust
@@ -770,7 +773,7 @@ mod tests {
     #[test]
     fn an_evaluation_with_a_missing_or_inconsistent_decision_is_corrupt_state() -> TestResult {
         let one = release_one();
-        let cases: [(&str, fn(&mut MemoryScopeV1)); 5] = [
+        let cases: [(&str, Corruption); 5] = [
             ("a: the pointer's decision is absent", |state| {
                 state.decisions.clear();
             }),
