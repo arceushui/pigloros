@@ -130,19 +130,19 @@ fn sorted<T: DependencyPagedRowV1>(mut rows: Vec<T>) -> Vec<T> {
 const OWNER_A: &str = "plugin:a";
 const OWNER_B: &str = "plugin:b";
 const OWNER_C: &str = "plugin:c";
-/// Digest salt of the root Timeline's nodes, and of the Fork's.
-const ROOT_SALT: u8 = 0;
-const FORK_SALT: u8 = 100;
+/// Digest lane of the root Timeline's nodes, and of the Fork's.
+const ROOT_LANE: u8 = 0;
+const FORK_LANE: u8 = 100;
 
-/// The artifact digest of a seeded node, apart per Timeline by `salt`.
-const fn seeded_digest(salt: u8, tick: u8, ordinal: u8) -> Hash {
-    hash(salt + tick * 16 + ordinal)
+/// The artifact digest of a seeded node, apart per Timeline by `lane`.
+const fn seeded_digest(lane: u8, tick: u8, ordinal: u8) -> Hash {
+    hash(lane + tick * 16 + ordinal)
 }
 
 /// A committed node of `owner` at `tick`: the step node at ordinal zero, then
 /// the Event-backed nodes.
-fn seeded_node(salt: u8, tick: u8, owner: &str, ordinal: u8) -> NodeRow {
-    let digest = seeded_digest(salt, tick, ordinal);
+fn seeded_node(lane: u8, tick: u8, owner: &str, ordinal: u8) -> NodeRow {
+    let digest = seeded_digest(lane, tick, ordinal);
     let at = u64::from(tick);
     let owner_id = owner.to_owned();
     let position = u32::from(ordinal);
@@ -154,12 +154,12 @@ fn seeded_node(salt: u8, tick: u8, owner: &str, ordinal: u8) -> NodeRow {
 
 /// A committed factual Tick owning the `seq` range `first..=last`: a step node
 /// of `owner` and one Event-backed node per `seq`.
-fn seeded_tick(salt: u8, tick: u8, owner: &str, first: u64, last: u64) -> SeededFactualTickV1 {
-    let mut nodes = vec![seeded_node(salt, tick, owner, 0)];
+fn seeded_tick(lane: u8, tick: u8, owner: &str, first: u64, last: u64) -> SeededFactualTickV1 {
+    let mut nodes = vec![seeded_node(lane, tick, owner, 0)];
     let mut event_nodes = Vec::new();
     for (ordinal, seq) in (1_u8..).zip(first..=last) {
-        nodes.push(seeded_node(salt, tick, owner, ordinal));
-        event_nodes.push((Seq::from_u64(seq), seeded_digest(salt, tick, ordinal)));
+        nodes.push(seeded_node(lane, tick, owner, ordinal));
+        event_nodes.push((Seq::from_u64(seq), seeded_digest(lane, tick, ordinal)));
     }
     let at = u64::from(tick);
     let record = ok(TickRecord::try_new(at, COMMITTED, nodes, Vec::new()));
@@ -174,15 +174,15 @@ fn seeded_tick(salt: u8, tick: u8, owner: &str, first: u64, last: u64) -> Seeded
 /// The root Timeline's Ticks: 1 owns `seq` 2 to 4, 2 owns 5, 3 owns 6 to 8.
 fn root_ticks() -> [SeededFactualTickV1; 3] {
     [
-        seeded_tick(ROOT_SALT, 1, OWNER_A, 2, 4),
-        seeded_tick(ROOT_SALT, 2, OWNER_B, 5, 5),
-        seeded_tick(ROOT_SALT, 3, OWNER_C, 6, 8),
+        seeded_tick(ROOT_LANE, 1, OWNER_A, 2, 4),
+        seeded_tick(ROOT_LANE, 2, OWNER_B, 5, 5),
+        seeded_tick(ROOT_LANE, 3, OWNER_C, 6, 8),
     ]
 }
 
 /// The Fork's own Tick: 3 owns `seq` 9.
 fn fork_tick() -> SeededFactualTickV1 {
-    seeded_tick(FORK_SALT, 3, OWNER_A, 9, 9)
+    seeded_tick(FORK_LANE, 3, OWNER_A, 9, 9)
 }
 
 /// A root Timeline with 14 Events and three seeded Ticks, a Fork of it at
@@ -338,11 +338,11 @@ fn f4_event_nodes_resolve_through_ancestry_and_stop_at_each_cut() {
     // The root's Tick 3 binds 6 and 8 above the Fork's cut.
     let expected = vec![
         None,
-        Some(seeded_node(ROOT_SALT, 1, OWNER_A, 1)),
-        Some(seeded_node(ROOT_SALT, 2, OWNER_B, 1)),
+        Some(seeded_node(ROOT_LANE, 1, OWNER_A, 1)),
+        Some(seeded_node(ROOT_LANE, 2, OWNER_B, 1)),
         None,
         None,
-        Some(seeded_node(FORK_SALT, 3, OWNER_A, 1)),
+        Some(seeded_node(FORK_LANE, 3, OWNER_A, 1)),
         None,
     ];
     assert_eq!(resolved, expected);
@@ -350,15 +350,15 @@ fn f4_event_nodes_resolve_through_ancestry_and_stop_at_each_cut() {
     let own = seq_list(&[6, 8]);
     let resolved = ok(store.nodes_for_committed_events(lineage.root, &own));
     let expected = vec![
-        Some(seeded_node(ROOT_SALT, 3, OWNER_C, 1)),
-        Some(seeded_node(ROOT_SALT, 3, OWNER_C, 3)),
+        Some(seeded_node(ROOT_LANE, 3, OWNER_C, 1)),
+        Some(seeded_node(ROOT_LANE, 3, OWNER_C, 3)),
     ];
     assert_eq!(resolved, expected);
 
     // The deepest Fork cuts the Fork's own Tick away too.
     let both = seq_list(&[2, 9]);
     let resolved = ok(store.nodes_for_committed_events(lineage.deep, &both));
-    let expected = vec![Some(seeded_node(ROOT_SALT, 1, OWNER_A, 1)), None];
+    let expected = vec![Some(seeded_node(ROOT_LANE, 1, OWNER_A, 1)), None];
     assert_eq!(resolved, expected);
 }
 
@@ -368,7 +368,7 @@ fn f4_a_binding_to_an_unrecorded_node_resolves_to_nothing() {
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     ok(store.bind_erasure_gate(gate));
     let root = ok(store.create_timeline("factual-dangling")).id();
-    let mut tick = seeded_tick(ROOT_SALT, 1, OWNER_A, 1, 1);
+    let mut tick = seeded_tick(ROOT_LANE, 1, OWNER_A, 1, 1);
     tick.event_nodes = vec![(Seq::from_u64(1), hash(250))];
     ok(store.seed_factual_prefix(root, &[tick]));
 
@@ -382,34 +382,34 @@ fn f5_nodes_resolve_by_digest_with_their_bound_seq() {
     let lineage = lineage();
     let store = &lineage.store;
     let digests = [
-        seeded_digest(ROOT_SALT, 1, 0),
-        seeded_digest(ROOT_SALT, 1, 1),
+        seeded_digest(ROOT_LANE, 1, 0),
+        seeded_digest(ROOT_LANE, 1, 1),
         // The root's Tick 3 is above the Fork's cut.
-        seeded_digest(ROOT_SALT, 3, 0),
-        seeded_digest(FORK_SALT, 3, 0),
-        seeded_digest(FORK_SALT, 3, 1),
+        seeded_digest(ROOT_LANE, 3, 0),
+        seeded_digest(FORK_LANE, 3, 0),
+        seeded_digest(FORK_LANE, 3, 1),
         hash(250),
     ];
 
     let resolved = ok(store.nodes_by_digest(lineage.mid, &digests));
 
     let expected = vec![
-        Some((seeded_node(ROOT_SALT, 1, OWNER_A, 0), None)),
+        Some((seeded_node(ROOT_LANE, 1, OWNER_A, 0), None)),
         Some((
-            seeded_node(ROOT_SALT, 1, OWNER_A, 1),
+            seeded_node(ROOT_LANE, 1, OWNER_A, 1),
             Some(Seq::from_u64(2)),
         )),
         None,
-        Some((seeded_node(FORK_SALT, 3, OWNER_A, 0), None)),
+        Some((seeded_node(FORK_LANE, 3, OWNER_A, 0), None)),
         Some((
-            seeded_node(FORK_SALT, 3, OWNER_A, 1),
+            seeded_node(FORK_LANE, 3, OWNER_A, 1),
             Some(Seq::from_u64(9)),
         )),
         None,
     ];
     assert_eq!(resolved, expected);
     let own = ok(store.nodes_by_digest(lineage.root, &digests[2..3]));
-    let step = seeded_node(ROOT_SALT, 3, OWNER_C, 0);
+    let step = seeded_node(ROOT_LANE, 3, OWNER_C, 0);
     assert_eq!(own, vec![Some((step, None))]);
 }
 
@@ -417,21 +417,21 @@ fn f5_nodes_resolve_by_digest_with_their_bound_seq() {
 fn f6_the_latest_step_node_of_an_owner_stops_at_each_cut() {
     let lineage = lineage();
     let store = &lineage.store;
-    let step = |salt, tick, name| Some(seeded_node(salt, tick, name, 0));
+    let step = |lane, tick, name| Some(seeded_node(lane, tick, name, 0));
     let latest = |timeline, name: &str| ok(store.last_step_node(timeline, &owner(name)));
 
-    assert_eq!(latest(lineage.root, OWNER_A), step(ROOT_SALT, 1, OWNER_A));
-    assert_eq!(latest(lineage.root, OWNER_B), step(ROOT_SALT, 2, OWNER_B));
-    assert_eq!(latest(lineage.root, OWNER_C), step(ROOT_SALT, 3, OWNER_C));
+    assert_eq!(latest(lineage.root, OWNER_A), step(ROOT_LANE, 1, OWNER_A));
+    assert_eq!(latest(lineage.root, OWNER_B), step(ROOT_LANE, 2, OWNER_B));
+    assert_eq!(latest(lineage.root, OWNER_C), step(ROOT_LANE, 3, OWNER_C));
     assert_eq!(latest(lineage.root, "plugin:none"), None);
     // The Fork's own Tick wins over the inherited one; the root's Tick 3 is
     // above its cut.
-    assert_eq!(latest(lineage.mid, OWNER_A), step(FORK_SALT, 3, OWNER_A));
-    assert_eq!(latest(lineage.mid, OWNER_B), step(ROOT_SALT, 2, OWNER_B));
+    assert_eq!(latest(lineage.mid, OWNER_A), step(FORK_LANE, 3, OWNER_A));
+    assert_eq!(latest(lineage.mid, OWNER_B), step(ROOT_LANE, 2, OWNER_B));
     assert_eq!(latest(lineage.mid, OWNER_C), None);
     // The deepest Fork cuts the Fork's own Tick away too.
-    assert_eq!(latest(lineage.deep, OWNER_A), step(ROOT_SALT, 1, OWNER_A));
-    assert_eq!(latest(lineage.deep, OWNER_B), step(ROOT_SALT, 2, OWNER_B));
+    assert_eq!(latest(lineage.deep, OWNER_A), step(ROOT_LANE, 1, OWNER_A));
+    assert_eq!(latest(lineage.deep, OWNER_B), step(ROOT_LANE, 2, OWNER_B));
 }
 
 #[test]
