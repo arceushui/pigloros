@@ -11,9 +11,11 @@ members = [
   "crates/pos-reference",
   "crates/pos-plugin-release",
   "crates/pos-plugin-publisher",
+  "crates/pos-owner-bridge",
   "crates/pos-owner-bridge-codec",
   "crates/pos-plugin-host",
   "crates/pos-plugin-supervisor",
+  "crates/pos-owner-bridge-windows",
   "plugins/entities/rule-agent",
   "plugins/observations/synthetic",
   "plugins/eval",
@@ -75,6 +77,7 @@ zeroize = "1.9"
 httparse = { version = "=1.10.1", default-features = false }
 base64 = { version = "=0.22.1", default-features = false }
 p256 = { version = "=0.14.0", default-features = false, features = ["ecdsa"] }
+getrandom = "=0.4.3"
 
 # Error handling
 thiserror = "2"

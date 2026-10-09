@@ -2,8 +2,18 @@ use pos_owner_bridge_codec::{
     decode_assertion_reply, decode_attestation_reply, decode_create_options, decode_get_options,
     encode_assertion_reply, encode_attestation_reply, encode_create_options, encode_get_options,
     AssertionReplyV1, AttestationReplyV1, CeremonyId, CreateOptionsV1, GetOptionsV1,
-    OwnerBridgeCodecError, OwnerUserHandle, PrfInput, PrfResult, TransportCodes, WebAuthnChallenge,
+    OwnerBridgeCodecError, OwnerUserHandle, PrfInput, PrfResult, TransportCodes,
+    VerificationReason as Reason, WebAuthnChallenge,
 };
+
+/// A CBOR byte-string head (`0x58 0x20`) plus its 32 content bytes.
+const FIXED_BYTES_ITEM: usize = 2 + 32;
+
+/// An Assertion reply ends with the PRF result item, then the null `second` item.
+const RESULT_ITEM_FROM_END: usize = FIXED_BYTES_ITEM + 1;
+
+/// The user-handle item sits directly before the PRF result item.
+const HANDLE_ITEM_FROM_END: usize = FIXED_BYTES_ITEM + RESULT_ITEM_FROM_END;
 
 const CEREMONY_ID: CeremonyId = CeremonyId::from_bytes([
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
@@ -261,7 +271,7 @@ fn public_payload_decoders_reject_noncanonical_and_closed_schema_variations(
     invalid_optional[null_offset] = 0xf4;
     assert_eq!(
         decode_attestation_reply(&invalid_optional),
-        Err(OwnerBridgeCodecError::InvalidCbor)
+        Err(OwnerBridgeCodecError::Verification(Reason::PrfMalformed))
     );
     let boolean_offset = attestation_bytes
         .iter()
@@ -606,13 +616,13 @@ fn public_attestation_decoder_rejects_each_closed_schema_field() -> Result<(), O
             "optional PRF width",
             35,
             0xf4,
-            OwnerBridgeCodecError::InvalidCbor,
+            OwnerBridgeCodecError::Verification(Reason::PrfMalformed),
         ),
         (
             "required null",
             69,
             0xf4,
-            OwnerBridgeCodecError::InvalidCbor,
+            OwnerBridgeCodecError::Verification(Reason::PrfMalformed),
         ),
     ] {
         let mut malformed = attestation_bytes;
@@ -746,14 +756,19 @@ fn public_assertion_decoder_rejects_each_closed_schema_field() -> Result<(), Own
             "user-handle width",
             78,
             0xf4,
-            OwnerBridgeCodecError::InvalidCbor,
+            OwnerBridgeCodecError::Verification(Reason::UserHandleMismatch),
         ),
-        ("PRF width", 79, 0x51, OwnerBridgeCodecError::InvalidCbor),
+        (
+            "PRF width",
+            79,
+            0x51,
+            OwnerBridgeCodecError::Verification(Reason::PrfMalformed),
+        ),
         (
             "required null",
             113,
             0xf4,
-            OwnerBridgeCodecError::InvalidCbor,
+            OwnerBridgeCodecError::Verification(Reason::PrfMalformed),
         ),
     ] {
         let mut malformed = assertion_bytes;
@@ -764,6 +779,57 @@ fn public_assertion_decoder_rejects_each_closed_schema_field() -> Result<(), Own
             "assertion {label}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn public_reply_decoders_keep_noncanonical_lengths_apart_from_field_faults(
+) -> Result<(), OwnerBridgeCodecError> {
+    let credential_id = [0x80, 0x81];
+    let attestation = AttestationReplyV1::new(
+        CEREMONY_ID,
+        &credential_id,
+        b"{}",
+        b"\xa0",
+        TransportCodes::new(&[0])?,
+        true,
+        Some(PRF_RESULT),
+    )?;
+    let mut attestation_bytes = [0; 70];
+    let attestation_length = encode_attestation_reply(&attestation, &mut attestation_bytes)?;
+    let mut noncanonical_prf = Vec::from(&attestation_bytes[..attestation_length]);
+    noncanonical_prf.splice(35..37, [0x59, 0, 0x20]);
+    assert_eq!(
+        decode_attestation_reply(&noncanonical_prf),
+        Err(OwnerBridgeCodecError::NonCanonicalCbor)
+    );
+
+    let assertion = AssertionReplyV1::new(
+        CEREMONY_ID,
+        &credential_id,
+        b"{}",
+        &[0; 37],
+        &[0; 8],
+        Some(USER_HANDLE),
+        PRF_RESULT,
+    )?;
+    let mut assertion_bytes = [0; 160];
+    let assertion_length = encode_assertion_reply(&assertion, &mut assertion_bytes)?;
+    let encoded = &assertion_bytes[..assertion_length];
+    let mut noncanonical_handle = Vec::from(encoded);
+    let handle_head = assertion_length - HANDLE_ITEM_FROM_END;
+    noncanonical_handle.splice(handle_head..handle_head + 2, [0x59, 0, 0x20]);
+    assert_eq!(
+        decode_assertion_reply(&noncanonical_handle),
+        Err(OwnerBridgeCodecError::NonCanonicalCbor)
+    );
+    let mut noncanonical_result = Vec::from(encoded);
+    let result_head = assertion_length - RESULT_ITEM_FROM_END;
+    noncanonical_result.splice(result_head..result_head + 2, [0x59, 0, 0x20]);
+    assert_eq!(
+        decode_assertion_reply(&noncanonical_result),
+        Err(OwnerBridgeCodecError::NonCanonicalCbor)
+    );
     Ok(())
 }
 

@@ -5080,6 +5080,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-owner-bridge"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "p256",
+ "pos-owner-bridge-codec",
+ "sha2 0.11.0",
+ "thiserror 2.0.21",
+ "zeroize",
+]
+
+[[package]]
 name = "pos-owner-bridge-codec"
 version = "0.1.0"
 dependencies = [
@@ -5088,6 +5100,10 @@ dependencies = [
  "p256",
  "sha2 0.11.0",
 ]
+
+[[package]]
+name = "pos-owner-bridge-windows"
+version = "0.1.0"
 
 [[package]]
 name = "pos-plugin-agent"

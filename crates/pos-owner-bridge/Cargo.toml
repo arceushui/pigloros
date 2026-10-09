@@ -1,0 +1,34 @@
+[package]
+name = "pos-owner-bridge"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Exposes `FakeSurface`, the fixture signer and the deterministic ports that
+# drive full enrollment and unlock flows without a WebView. This feature is
+# intentionally off in deployable dependency graphs.
+test-support = ["dep:p256"]
+
+[dependencies]
+getrandom = { workspace = true }
+p256 = { workspace = true, optional = true }
+pos-owner-bridge-codec = { path = "../pos-owner-bridge-codec" }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "protocol"
+path = "tests/protocol/main.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "listener_serving"
+path = "tests/listener_serving.rs"
+required-features = ["test-support"]

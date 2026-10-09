@@ -1197,11 +1197,17 @@ jobs:
       - name: Check PMF1 golden vectors match their generator
         run: python scripts/generate_pmf1_golden_vectors.py --check
       - name: Check independent owner-bridge codec vectors
-        run: python scripts/owner_bridge_vectors.py --check
+        run: |
+          python scripts/owner_bridge_vectors.py --check
+          python scripts/test_owner_bridge_vectors.py
       - name: Check independent owner-bridge WebAuthn fixture
         run: python scripts/owner_bridge_webauthn_fixtures.py --check
       - name: Test Wasmtime pin checker
         run: python scripts/test_check_wasmtime_feature_pin.py
+      - name: Check owner-bridge Windows unsafe policy
+        run: |
+          python scripts/check_owner_bridge_unsafe_policy.py
+          python scripts/test_check_owner_bridge_unsafe_policy.py
 
   modules-structure:
     name: modules-structure (reports only)
