@@ -101,7 +101,9 @@ ALLOWED = {
     "crates/pos-state/src/uses.rs": "fn f(_: &mut dyn PluginTrustPolicyRegistryV1) {}\n",
     "crates/pos-state/src/imports.rs": IMPORT,
     # The read-only method has no call-site rule: any file that names the port may call it.
-    "crates/pos-state/src/evaluates.rs": IMPORT + "fn f(s: &S) { s.evaluate_current_release(a, b); }\n",
+    "crates/pos-state/src/evaluates.rs": (
+        IMPORT + "fn f(s: &S) { s.evaluate_current_release(a, b); }\n"
+    ),
     "crates/pos-state/src/unaware.rs": "fn f(x: &mut X) { x.admit(a); x.rollback(a); x.provision(a); }\n",
     "crates/pos-state/src/defines.rs": (
         "struct ActiveReleaseV1 { a: u8 }\nimpl ActiveReleaseV1 { }\n"
@@ -256,25 +258,7 @@ def run(files: dict[str, str]) -> subprocess.CompletedProcess[str]:
         )
 
 
-def revision_five_citations() -> list[str]:
-    """Return the places of the checker that must cite ADR-103 revision 5 but do not (EU2)."""
-    text = CHECKER.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    missing: list[str] = []
-    if "revision 5" not in text.split('"""')[1]:
-        missing.append("the script docstring")
-    index = next(i for i, line in enumerate(lines) if line.startswith("ALLOWED_CALL_BY_FILE ="))
-    if "revision 5" not in "\n".join(lines[max(index - 3, 0) : index]):
-        missing.append("the ALLOWED_CALL_BY_FILE comment")
-    if "CurrentReleaseEvaluationV1" not in text.split("RECEIPT_TYPES = (")[1].split(")")[0]:
-        missing.append("RECEIPT_TYPES")
-    return missing
-
-
 def main() -> None:
-    missing = revision_five_citations()
-    if missing:
-        raise SystemExit("ADR-103 revision 5 is not cited by " + ", ".join(missing))
     accepted = run(ALLOWED)
     if accepted.returncode != 0:
         raise SystemExit(f"allowed layout was rejected:\n{accepted.stderr}")

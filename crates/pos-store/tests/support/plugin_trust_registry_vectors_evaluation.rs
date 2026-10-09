@@ -9,8 +9,9 @@
 // constants, and each refusal names the exact error variant the contract assigns it.
 
 use crate::fixtures::{
-    activation, bound_store, release_one, release_two, spec, tps_after, Env, Harness, ManifestSpec,
-    Material, Registry, RegistryError, Spec, TestResult, TpsSpec,
+    activation, bound_store, foreign_operator_signer, release_one, release_two, spec,
+    tps1_signed_by, tps_after, Env, Harness, ManifestSpec, Material, Registry, RegistryError, Spec,
+    TestResult, TpsSpec,
 };
 use pos_conformance::{PluginFloorErrorV1, PluginFloorKindV1, PluginTrustBridgeErrorV1};
 use pos_crypto::plugin_trust::PluginTrustErrorV1;
@@ -179,6 +180,18 @@ fn tps1_authentication_and_continuity_precede_the_bridge() -> TestResult {
         h.evaluate_raw(&next.tps1, &next, &bad, 55, 9)?,
         Err(RegistryError::PolicyNotAdvanced)
     );
+    // A TPS1 signed by another operator key fails the pinned key, with the stale bridge
+    // evidence, the wrong coordinates, and the unauthorized release failing later steps too.
+    let forged = tps1_signed_by(
+        &h.env.scope,
+        &genesis.evidence,
+        &TpsSpec::default(),
+        &foreign_operator_signer(),
+    )?;
+    assert_eq!(
+        h.evaluate_raw(&forged, &next, &bad, 55, 9)?,
+        Err(bridge(PluginTrustBridgeErrorV1::InvalidOperatorSignature))
+    );
     Ok(())
 }
 
@@ -261,6 +274,21 @@ fn release_authorization_precedes_the_tps1_artifact_denial_and_the_floor_plan() 
     assert_eq!(
         h.evaluate(&adopted, &one)?,
         Err(bridge(PluginTrustBridgeErrorV1::TpsArtifactDenied))
+    );
+    // Other Trust failures also precede the denial, for releases the TPS1 denies.
+    let at_sixty = h.env.material(&spec(1, 2).at(60, 6), &denying)?;
+    let expired = ManifestSpec {
+        not_after: 55,
+        ..release_one()
+    };
+    assert_eq!(
+        h.evaluate(&at_sixty, &expired)?,
+        Err(trust(PluginTrustErrorV1::ManifestExpired))
+    );
+    let ungranted = ManifestSpec::new("plugin-z", 0x01, 0x11, None);
+    assert_eq!(
+        h.evaluate(&adopted, &ungranted)?,
+        Err(trust(PluginTrustErrorV1::PluginIdNotGranted))
     );
     Ok(())
 }
@@ -398,8 +426,13 @@ fn an_adopted_revocation_refuses_the_release_although_its_receipt_is_unchanged()
         revocation_tick: 6,
         ..artifact.clone()
     };
+    let key_at_the_tick = Spec {
+        revocation_tick: 6,
+        ..key.clone()
+    };
     let cases = [
         (key, PluginTrustErrorV1::PublisherKeyRevoked),
+        (key_at_the_tick, PluginTrustErrorV1::PublisherKeyRevoked),
         (artifact, PluginTrustErrorV1::ArtifactRevoked),
         (at_the_tick, PluginTrustErrorV1::ArtifactRevoked),
     ];
@@ -535,14 +568,15 @@ fn a_scope_that_was_provisioned_but_never_adopted_is_not_advanced() -> TestResul
 fn older_root_evidence_and_a_pending_revocation_disagree_with_the_retained_tps1() -> TestResult {
     let mut h = admitted()?;
     let genesis = h.env.genesis()?;
-    let one = release_one();
+    let bad = unauthorized();
     // The retained policy is PTR1 version 2, PRV1 epoch 2.
     let newer = h.env.material(&spec(2, 2).at(51, 6), &tps_after(&genesis))?;
     h.advance(&newer)??;
-    // Evidence of PTR1 version 1 with the same key set against the retained version-2 TPS1.
+    // Evidence of PTR1 version 1 with the same key set against the retained version-2 TPS1; the
+    // unauthorized release would fail the next step, so the bridge error comes first.
     let older = h.env.material(&spec(1, 2).at(52, 7), &tps_after(&genesis))?;
     assert_eq!(
-        h.evaluate_bytes(&newer.tps1, &older, &one)?,
+        h.evaluate_bytes(&newer.tps1, &older, &bad)?,
         Err(bridge(PluginTrustBridgeErrorV1::BridgeRootMismatch))
     );
 
@@ -550,23 +584,65 @@ fn older_root_evidence_and_a_pending_revocation_disagree_with_the_retained_tps1(
     // absent from the retained TPS1 until then.
     let mut h = admitted()?;
     let genesis = h.env.genesis()?;
+    let one = release_one();
     let pending = Spec {
         epochs: 2,
         revoked_artifacts: vec![[0x77; 32]],
         revocation_tick: 9,
         ..Spec::default()
     };
-    let retained = h
-        .env
-        .material(&pending.at(51, 6), &tps_after(&genesis))?;
+    let retained = h.env.material(&pending.at(51, 6), &tps_after(&genesis))?;
     h.advance(&retained)??;
     assert!(h.evaluate(&retained, &one)?.is_ok());
-    let effective = h
-        .env
-        .material(&pending.at(52, 9), &tps_after(&genesis))?;
+    let effective = h.env.material(&pending.at(52, 9), &tps_after(&genesis))?;
     assert_eq!(
-        h.evaluate_bytes(&retained.tps1, &effective, &one)?,
+        h.evaluate_bytes(&retained.tps1, &effective, &bad)?,
         Err(bridge(PluginTrustBridgeErrorV1::BridgeRevocationMismatch))
+    );
+    Ok(())
+}
+
+#[test]
+fn the_bridge_reports_expiry_then_root_then_revocation_mappings() -> TestResult {
+    let bad = unauthorized();
+    // Expiry precedes the root mapping: the retained TPS1 of PTR1 version 2 is valid through
+    // second 60, and the evidence at second 60 is of version 1.
+    let mut h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let short = TpsSpec {
+        offline_valid_through: "1970-01-01T00:01:00Z".to_owned(),
+        ..tps_after(&genesis)
+    };
+    let newer = h.env.material(&spec(2, 2).at(51, 6), &short)?;
+    h.advance(&newer)??;
+    let older = h.env.material(&spec(1, 2).at(60, 7), &short)?;
+    assert_ne!(older.tps1, newer.tps1);
+    assert_eq!(
+        h.evaluate_bytes(&newer.tps1, &older, &bad)?,
+        Err(bridge(PluginTrustBridgeErrorV1::Expired))
+    );
+
+    // The root mapping precedes the revocation mapping: version-1 evidence against the retained
+    // version-2 TPS1, with a revocation that became effective and is absent from that TPS1.
+    let mut h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let pending = Spec {
+        roots: 2,
+        epochs: 2,
+        revoked_artifacts: vec![[0x77; 32]],
+        revocation_tick: 9,
+        ..Spec::default()
+    };
+    let retained = h.env.material(&pending.at(51, 6), &tps_after(&genesis))?;
+    h.advance(&retained)??;
+    let both = Spec {
+        roots: 1,
+        ..pending
+    };
+    let failing = h.env.material(&both.at(52, 9), &tps_after(&genesis))?;
+    assert_eq!(
+        h.evaluate_bytes(&retained.tps1, &failing, &bad)?,
+        Err(bridge(PluginTrustBridgeErrorV1::BridgeRootMismatch))
     );
     Ok(())
 }

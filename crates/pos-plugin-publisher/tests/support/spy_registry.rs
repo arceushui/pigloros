@@ -7,10 +7,10 @@
 //! through it.
 //!
 //! The ordered [`SpyRegistry::calls`] log holds both kinds of call in call order. An evaluation
-//! entry carries a stamp: a spy built with [`SpyRegistry::with_clock`] records
-//! `fetch_add(1) + 1` of the shared clock for every evaluation (a 1-based `u64`), and a spy built
-//! with [`SpyRegistry::new`] has no clock and records stamp 0, so stamp 0 means "no clock". An
-//! `admit` never touches the clock and is unstamped.
+//! entry carries a stamp: a spy whose [`SpyRegistry::clock`] is set (the world does so for
+//! `World::with_clock`) records `fetch_add(1) + 1` of the shared clock for every evaluation (a
+//! 1-based `u64`), and a spy built with [`SpyRegistry::new`] has no clock and records stamp 0, so
+//! stamp 0 means "no clock". An `admit` never touches the clock and is unstamped.
 
 use std::{
     cell::RefCell,
@@ -82,18 +82,6 @@ impl SpyRegistry {
             forced: None,
             calls: RefCell::new(Vec::new()),
             clock: None,
-        }
-    }
-
-    /// A spy over `store` that stamps every evaluation from the shared `clock`.
-    #[must_use]
-    pub const fn with_clock(store: MemoryStore, clock: Arc<AtomicU64>) -> Self {
-        Self {
-            store,
-            admits: Vec::new(),
-            forced: None,
-            calls: RefCell::new(Vec::new()),
-            clock: Some(clock),
         }
     }
 
