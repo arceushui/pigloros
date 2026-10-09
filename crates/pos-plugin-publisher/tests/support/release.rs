@@ -134,6 +134,10 @@ pub struct Shape {
     /// The deterministic memory budget of the release, in bytes. The default is one page; a
     /// real Component needs more than its initial memory.
     pub memory_bytes: u64,
+    /// The highest ABI minor the release declares.
+    pub abi_max_minor: u16,
+    /// Whether the release requires the `clock` host feature.
+    pub clock: bool,
 }
 
 impl Shape {
@@ -152,6 +156,8 @@ impl Shape {
             epoch: 1,
             required_capability: true,
             memory_bytes: 65_536,
+            abi_max_minor: 1,
+            clock: true,
         }
     }
 
@@ -170,6 +176,17 @@ impl Shape {
     pub const fn with_memory_bytes(self, memory_bytes: u64) -> Self {
         Self {
             memory_bytes,
+            ..self
+        }
+    }
+
+    /// This shape declaring only what the V1 host ABI of the real worker provides: ABI 0.0 and
+    /// no required feature. The real worker rejects a record negotiated under any wider ABI.
+    #[must_use]
+    pub const fn with_worker_abi(self) -> Self {
+        Self {
+            abi_max_minor: 0,
+            clock: false,
             ..self
         }
     }
@@ -195,8 +212,12 @@ pub fn make_draft<'a>(shape: Shape) -> BoxResult<PluginReleaseDraftV1<'a>> {
         abi: PluginAbiRequirementV1 {
             major: 0,
             min_minor: 0,
-            max_minor: 1,
-            required_features: vec!["clock".to_owned()],
+            max_minor: shape.abi_max_minor,
+            required_features: if shape.clock {
+                vec!["clock".to_owned()]
+            } else {
+                Vec::new()
+            },
         },
         component: input(shape.component),
         wit: input(WIT_BYTES),

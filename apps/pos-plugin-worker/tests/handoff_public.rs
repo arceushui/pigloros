@@ -99,6 +99,7 @@ impl Spec {
             ..Shape::first()
         }
         .with_optional_capability()
+        .with_worker_abi()
         .with_memory_bytes(MEMORY)
     }
 }
@@ -419,10 +420,16 @@ const fn failed(error: &'static str, class: &'static str) -> Verdict {
     Verdict::Failed { error, class }
 }
 
+/// Assert that `pass` committed, printing the lane's first receipts when it did not.
+fn assert_committed(lane: &Lane, pass: &CommunityPassOutcomeV1) {
+    let receipts = lane.handle().receipts();
+    assert!(is_committed(pass), "{pass:?} {receipts:?}");
+}
+
 /// Run one pass of the lane and assemble its first outcome, which must be committed.
 fn committed(lane: &mut Lane, signed: &SignedWorld) -> BoxResult<Outcome> {
     let pass = lane.run(signed)?;
-    assert!(is_committed(&pass), "{pass:?}");
+    assert_committed(lane, &pass);
     lane.first(&pass)
 }
 
@@ -785,7 +792,7 @@ fn the_outcome_carries_the_validation_fact_and_no_signature_claim() -> TestResul
 fn a_sibling_gate_refusal_leaves_a_committed_member_not_run() -> TestResult {
     let (signed, mut lane) = pair()?;
     let first = lane.run(&signed)?;
-    assert!(is_committed(&first), "{first:?}");
+    assert_committed(&lane, &first);
     let before = lane.outcomes(&first);
     assert!(committed_digest(&before[0]).is_some(), "{before:?}");
     assert_eq!(before[1].result, Verdict::NotRun);
@@ -807,7 +814,7 @@ fn a_sibling_gate_refusal_leaves_a_committed_member_not_run() -> TestResult {
 fn a_quarantined_member_is_not_run_after_a_committed_pass() -> TestResult {
     let (signed, mut lane) = pair()?;
     let first = lane.run(&signed)?;
-    assert!(is_committed(&first), "{first:?}");
+    assert_committed(&lane, &first);
     lane.handle().record_refusal(Error::FuelExhausted);
     let second = lane.run(&signed)?;
     assert!(lane.handle().receipt_for(FIRST_ID).is_some());
@@ -823,7 +830,7 @@ fn a_quarantined_member_is_not_run_after_a_committed_pass() -> TestResult {
 fn a_failing_context_after_a_committed_pass_is_not_committed() -> TestResult {
     let (signed, mut lane) = pair()?;
     let first = lane.run(&signed)?;
-    assert!(is_committed(&first), "{first:?}");
+    assert_committed(&lane, &first);
     lane.refuse.store(true, Ordering::SeqCst);
     let second = lane.run(&signed)?;
     assert!(lane.handle().receipt_for(FIRST_ID).is_some());
