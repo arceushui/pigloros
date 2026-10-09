@@ -33,16 +33,19 @@ fn activation_payload_matches_the_golden_vector() {
 }
 
 #[test]
-fn activation_payload_depends_only_on_its_four_fields() {
-    let first = activation_payload("scope", "plugin-a", &[1; 32], &[2; 32]);
-    assert_eq!(
-        first,
-        activation_payload("scope", "plugin-a", &[1; 32], &[2; 32])
-    );
-    assert_ne!(
-        first,
-        activation_payload("scope", "plugin-a", &[1; 32], &[3; 32])
-    );
+fn activation_payload_depends_on_each_of_its_four_fields() {
+    let base = activation_payload("scope", "plugin-a", &[1; 32], &[2; 32]);
+    let same = activation_payload("scope", "plugin-a", &[1; 32], &[2; 32]);
+    assert_eq!(base, same);
+    let varied = [
+        activation_payload("other", "plugin-a", &[1; 32], &[2; 32]),
+        activation_payload("scope", "plugin-b", &[1; 32], &[2; 32]),
+        activation_payload("scope", "plugin-a", &[9; 32], &[2; 32]),
+        activation_payload("scope", "plugin-a", &[1; 32], &[3; 32]),
+    ];
+    for payload in varied {
+        assert_ne!(base, payload);
+    }
 }
 
 #[test]
