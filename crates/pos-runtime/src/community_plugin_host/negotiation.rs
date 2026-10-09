@@ -152,7 +152,8 @@ impl EffectiveExecutionLimitsV1 {
 /// The negotiated execution tuple of one community Plugin release.
 ///
 /// It is `ReproManifest` input: world, release identity, negotiated ABI,
-/// not-granted capabilities, mode, effective limits and the pinned runtime.
+/// not-granted capabilities, mode, effective limits, the pinned runtime and
+/// the digest of the execution profile.
 /// Only [`negotiate_community_plugin_v1`] constructs it; a worker process
 /// rebuilds the supervisor's record with
 /// [`NegotiatedCommunityPluginV1::from_transport`].
@@ -169,6 +170,7 @@ pub struct NegotiatedCommunityPluginV1 {
     mode: CommunityPluginModeV1,
     limits: EffectiveExecutionLimitsV1,
     runtime: Option<PinnedComponentRuntimeV1>,
+    execution_profile_digest: Option<[u8; 32]>,
 }
 
 impl NegotiatedCommunityPluginV1 {
@@ -241,6 +243,14 @@ impl NegotiatedCommunityPluginV1 {
     pub const fn runtime(&self) -> Option<&PinnedComponentRuntimeV1> {
         self.runtime.as_ref()
     }
+
+    /// The digest of the profile used, or `None` when it recorded no runtime.
+    ///
+    /// Every launch with a record that has no digest is refused.
+    #[must_use]
+    pub const fn execution_profile_digest(&self) -> Option<[u8; 32]> {
+        self.execution_profile_digest
+    }
 }
 
 /// Negotiate one validated release against the host ABI and profile.
@@ -278,6 +288,7 @@ pub fn negotiate_community_plugin_v1(
         mode: profile.mode(),
         limits: EffectiveExecutionLimitsV1::clamp(execution.budget(), profile.ceilings()),
         runtime: profile.runtime().cloned(),
+        execution_profile_digest: profile.digest(),
     })
 }
 

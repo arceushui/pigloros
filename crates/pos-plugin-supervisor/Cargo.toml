@@ -8,7 +8,8 @@ publish.workspace = true
 
 [features]
 # Exposes the shared test fixtures and builds the `pos-plugin-worker-probe`
-# fault-injection worker, for tests only. Never enable in deployable builds;
+# fault-injection worker and the `pos-plugin-worker-argv-probe` argument
+# recorder, for tests only. Never enable in deployable builds;
 # the probe is not a Component worker. Enforced by
 # scripts/check_test_support_features.py in CI.
 test-support = ["pos-crypto/test-support"]
@@ -44,6 +45,12 @@ pos-store = { path = "../pos-store" }
 [[bin]]
 name = "pos-plugin-worker-probe"
 path = "tests/support/worker_probe.rs"
+required-features = ["test-support"]
+
+# Records the arguments it was launched with, for the mode token tests.
+[[bin]]
+name = "pos-plugin-worker-argv-probe"
+path = "tests/support/argv_probe.rs"
 required-features = ["test-support"]
 
 [[test]]

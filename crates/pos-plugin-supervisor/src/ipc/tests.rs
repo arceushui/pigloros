@@ -53,6 +53,19 @@ fn requests_round_trip_every_call_and_mode() {
 }
 
 #[test]
+fn the_profile_digest_is_an_optional_thirty_two_byte_string() {
+    let mut digested = request(WorkerCallV1::Describe);
+    digested.negotiation.execution_profile_digest = Some([0x9d; 32]);
+    assert_eq!(round_trip_request(&digested).as_ref(), Ok(&digested));
+    let with = ok(encode_worker_request_v1(&digested));
+    let without = ok(encode_worker_request_v1(&request(WorkerCallV1::Describe)));
+    assert_eq!(with.len(), without.len() + 34);
+    let marker = [0x81, 0x58, 0x20, 0x9d];
+    assert!(with.windows(4).any(|window| window == marker));
+    assert!(!without.windows(4).any(|window| window == marker));
+}
+
+#[test]
 fn every_head_width_is_written_in_shortest_form() {
     for (value, length) in [
         (0, 1),
@@ -86,7 +99,7 @@ fn the_describe_request_has_its_golden_prefix_and_suffix() {
     prefix.extend_from_slice(b"PWQ1");
     prefix.extend_from_slice(&[0x01, 0x49]);
     prefix.extend_from_slice(b"component");
-    prefix.extend_from_slice(&[0x8b, 0x78, 0x26]);
+    prefix.extend_from_slice(&[0x8c, 0x78, 0x26]);
     prefix.extend_from_slice(b"pigloros:plugin/community-plugin@0.1.0");
     assert!(bytes.starts_with(&prefix));
     let suffix = [0x19, 0xea, 0x60, 0x18, 0x2a, 0x81, 0x00];

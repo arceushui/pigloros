@@ -10,13 +10,16 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use pos_plugin_supervisor::test_support::{self, negotiated_with, ok, METERING, SMALL_BUDGET};
+use pos_plugin_supervisor::test_support::{
+    self, negotiated_under, negotiated_with, ok, METERING, SMALL_BUDGET,
+};
 use pos_plugin_supervisor::{
     CommunityPluginSupervisorV1, WorkerProgramV1, WorkerResourceCeilingsV1, FORWARDED_ENVIRONMENT,
     RUNTIME_ENVIRONMENT,
 };
 use pos_runtime::community_plugin_host::{
-    CommunityPluginHostErrorV1, ComponentTrapClassV1, HostInputs, InvocationReportV1,
+    CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1, CommunityPluginHostErrorV1,
+    CommunityPluginModeV1, ComponentTrapClassV1, HostInputs, InvocationReportV1,
     NegotiatedCommunityPluginV1, PluginInvocationV1, PluginOutputV1, TrapReproductionV1,
 };
 
@@ -25,6 +28,7 @@ type Error = CommunityPluginHostErrorV1;
 type Produced = Result<InvocationReportV1<PluginOutputV1>, Error>;
 
 const PROBE: &str = env!("CARGO_BIN_EXE_pos-plugin-worker-probe");
+const ARGV_PROBE: &str = env!("CARGO_BIN_EXE_pos-plugin-worker-argv-probe");
 /// A generous watchdog for invocations that should finish promptly.
 const PROMPT: Duration = Duration::from_mins(1);
 /// A short watchdog for invocations that must be stopped.
@@ -298,4 +302,25 @@ fn a_worker_dies_with_its_supervisor() -> TestResult {
     });
     assert!(dead.is_some(), "worker {worker} outlived its supervisor");
     Ok(())
+}
+
+/// R7-P6: the argv-recording worker shows that a record of mode M always
+/// launches with exactly the supervisor's process ID and the token for M.
+#[test]
+fn a_record_launches_with_the_token_of_its_mode() {
+    let modes = [
+        (CommunityPluginModeV1::Local, "local"),
+        (CommunityPluginModeV1::AirGapped, "air-gapped"),
+    ];
+    for (mode, token) in modes {
+        let ceilings = CommunityPluginCeilingsV1::V1;
+        let profile = CommunityPluginExecutionProfileV1::new(mode, ceilings, None);
+        let record = negotiated_under("plugin-a", SMALL_BUDGET, Vec::new(), &profile);
+        assert_eq!(record.mode(), mode);
+        let worker = supervisor(ARGV_PROBE, PROMPT);
+        let report = ok(worker.drive(&record, b"component", &invocation(), INPUTS));
+        let recorded = ok(report.result).next_state_bytes;
+        let expected = format!("{} {token}", std::process::id());
+        assert_eq!(String::from_utf8_lossy(&recorded), expected, "{mode:?}");
+    }
 }
