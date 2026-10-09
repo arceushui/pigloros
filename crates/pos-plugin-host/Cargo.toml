@@ -17,6 +17,8 @@ wasmtime = { workspace = true }
 [dev-dependencies]
 # Engine tests build execution projections without a release closure.
 pos-crypto = { path = "../pos-crypto", features = ["test-support"] }
+# Engine tests wrap those projections in the gated release the negotiation takes.
+pos-runtime = { path = "../pos-runtime", features = ["test-support"] }
 wat = { workspace = true }
 
 [lints]

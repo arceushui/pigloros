@@ -30,9 +30,11 @@ use pos_plugin_publisher::test_support::{
 };
 use pos_plugin_publisher::{
     publish_plugin_release_v1, sign_plugin_release_v1, verify_plugin_release_historical_v1,
-    ContentValidationV1, PluginReleaseInstallErrorV1, ReleaseSignatureMathV1, SigningKeyStateV1,
+    PluginReleaseInstallErrorV1, ReleaseSignatureMathV1, SigningKeyStateV1,
 };
-use pos_plugin_release::{BundleAddressV1, ReleaseSourceErrorV1, ReleaseSourceV1};
+use pos_plugin_release::{
+    BundleAddressV1, ContentValidationV1, ReleaseSourceErrorV1, ReleaseSourceV1,
+};
 use pos_store::plugin_trust_registry::{
     ActiveReleaseV1, PluginTrustCommitOutcomeV1, PluginTrustPolicyRegistryErrorV1,
     PluginTrustPolicyRegistryV1,

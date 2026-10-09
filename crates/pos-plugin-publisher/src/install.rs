@@ -38,7 +38,8 @@ use pos_crypto::plugin_trust::{
     PluginTrustErrorV1, ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
 use pos_plugin_release::{
-    BundleAddressV1, ReleaseSourceErrorV1, ReleaseSourceV1, VerifiedReleaseBundleV1,
+    BundleAddressV1, ContentValidationV1, ReleaseSourceErrorV1, ReleaseSourceV1,
+    VerifiedReleaseBundleV1,
 };
 use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, AdmittedPluginReleaseReceiptV1, PluginTrustPolicyRegistryErrorV1,
@@ -91,18 +92,6 @@ pub struct PluginInstallRequestV1<'a> {
     pub evidence: &'a VerifiedPluginTrustEvidenceV1,
     /// The already validated activation Event, built by the composition.
     pub activation: ActivationEventInputV1,
-}
-
-/// What the installer did and did not check about the release content.
-///
-/// The enum is deliberately closed (no `#[non_exhaustive]`): content
-/// validation (#574) replaces it in place in a coordinated breaking change,
-/// since the product is unreleased.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ContentValidationV1 {
-    /// Descriptor digests and bytes were verified; WIT, provenance, SBOM,
-    /// licence, and schema content were not validated (follow-up #574).
-    NotPerformed,
 }
 
 /// One installed release: the registry's admission receipt, the execution
