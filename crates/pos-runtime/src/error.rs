@@ -229,12 +229,20 @@ const fn outcome_discriminant(outcome: &pos_core::PipelineOutcomeV1) -> &'static
         Outcome::ResourceExhausted => "ResourceExhausted",
         Outcome::InvalidPluginResult => "InvalidPluginResult",
         Outcome::InvalidProviderResult => "InvalidProviderResult",
-        Outcome::DomainConflict => "DomainConflict",
-        Outcome::AdmissionConflict => "AdmissionConflict",
         Outcome::Committed(_) => "Committed",
         Outcome::RecoveredDuplicate(_) => "RecoveredDuplicate",
+        _ => conflict_outcome_discriminant(outcome),
+    }
+}
+
+/// The discriminant of the outcomes that name a conflict or a dependency fault.
+const fn conflict_outcome_discriminant(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
+    use pos_core::PipelineOutcomeV1 as Outcome;
+    match outcome {
+        Outcome::DomainConflict => "DomainConflict",
+        Outcome::AdmissionConflict => "AdmissionConflict",
         Outcome::InvalidDependencyDeclaration => "InvalidDependencyDeclaration",
-        Outcome::DependencySetExhausted => "DependencySetExhausted",
+        _ => "DependencySetExhausted",
     }
 }
 

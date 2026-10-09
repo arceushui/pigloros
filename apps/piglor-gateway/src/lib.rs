@@ -1786,13 +1786,7 @@ fn action_admission_error(error: HumanActionAdmissionErrorV1, maximum: u64) -> G
 /// authorization errors, and a stale cursor or domain state is one shape.
 fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> GatewayError {
     match outcome {
-        PipelineOutcomeV1::AuthorityRevoked | PipelineOutcomeV1::AuthorityExpired => {
-            GatewayError::AuthorizationDenied
-        }
-        PipelineOutcomeV1::PolicyIndeterminate => GatewayError::AuthorizationUnavailable,
         PipelineOutcomeV1::ResourceExhausted => GatewayError::EventLimitReached { maximum },
-        PipelineOutcomeV1::InvalidDependencyDeclaration => GatewayError::ActionAdmissionUnavailable,
-        PipelineOutcomeV1::DependencySetExhausted => GatewayError::DependencySetExhausted,
         PipelineOutcomeV1::InvalidObservation
         | PipelineOutcomeV1::AdmissionConflict
         | PipelineOutcomeV1::DomainConflict => GatewayError::ActionObservationStale,
@@ -1803,6 +1797,20 @@ fn action_not_admitted_error(outcome: &PipelineOutcomeV1, maximum: u64) -> Gatew
         | PipelineOutcomeV1::RecoveredDuplicate(_) => GatewayError::ActionRejected(
             ActionRejected::DomainValidationFailed("action was not admitted".to_owned()),
         ),
+        _ => authority_or_dependency_error(outcome),
+    }
+}
+
+/// Authority and policy failures reuse the authorization errors; the two
+/// dependency faults are a host fault and a permanent per-Timeline limit.
+fn authority_or_dependency_error(outcome: &PipelineOutcomeV1) -> GatewayError {
+    match outcome {
+        PipelineOutcomeV1::AuthorityRevoked | PipelineOutcomeV1::AuthorityExpired => {
+            GatewayError::AuthorizationDenied
+        }
+        PipelineOutcomeV1::PolicyIndeterminate => GatewayError::AuthorizationUnavailable,
+        PipelineOutcomeV1::InvalidDependencyDeclaration => GatewayError::ActionAdmissionUnavailable,
+        _ => GatewayError::DependencySetExhausted,
     }
 }
 

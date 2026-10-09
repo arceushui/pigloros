@@ -561,13 +561,7 @@ impl GatewayError {
             | Self::ConsentCodec(_)
             | Self::ConsentGrantSequenceMismatch
             | Self::ConsentRevocationFenceMismatch => StatusCode::BAD_REQUEST,
-            Self::ActionRejected(ar) => match ar {
-                ActionRejected::UnknownEventType => StatusCode::BAD_REQUEST,
-                ActionRejected::CapabilityNotGranted => StatusCode::FORBIDDEN,
-                ActionRejected::InvalidActorEntityId
-                | ActionRejected::DomainValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
-                ActionRejected::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            },
+            Self::ActionRejected(ar) => action_rejected_status(ar),
             Self::Consent(_)
             | Self::LedgerWriteDisabled
             | Self::AuthorizationDenied
@@ -601,13 +595,26 @@ impl GatewayError {
             | Self::LedgerUnavailable
             | Self::OwnTracksOwnerKeyUnavailable
             | Self::ActionAdmissionUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Ledger(le) => match le {
-                pos_plugin_ledger::LedgerError::InvalidPrediction(_) => {
-                    StatusCode::UNPROCESSABLE_ENTITY
-                }
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            },
+            Self::Ledger(le) => ledger_status(le),
         }
+    }
+}
+
+const fn action_rejected_status(rejected: &ActionRejected) -> StatusCode {
+    match rejected {
+        ActionRejected::UnknownEventType => StatusCode::BAD_REQUEST,
+        ActionRejected::CapabilityNotGranted => StatusCode::FORBIDDEN,
+        ActionRejected::InvalidActorEntityId | ActionRejected::DomainValidationFailed(_) => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+        ActionRejected::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+    }
+}
+
+const fn ledger_status(error: &pos_plugin_ledger::LedgerError) -> StatusCode {
+    match error {
+        pos_plugin_ledger::LedgerError::InvalidPrediction(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
