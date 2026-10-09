@@ -139,8 +139,10 @@
 //!   the ancestry once and run one statement per segment for the whole request
 //!   (R3.7.6), binding the requested `seq`s or digests as one JSON array that
 //!   `json_each` joins. A request resolves in the nearest segment that holds
-//!   it, so a segment only gets the requests the newer segments left open and
-//!   an empty request runs no statement.
+//!   it, so a segment only gets the requests the newer segments left open. An
+//!   empty request runs no lookup statement (the schema probe and the ancestry
+//!   walk still run); a request costs the ancestry-walk statements plus at most
+//!   one lookup statement per segment.
 //! - **`SQLite`-only differences.** `SQLite` stores signed 64-bit integers, so:
 //!   a record Tick above `i64::MAX` is `FieldOutOfBounds` before any fence,
 //!   Fork lookup, or transaction, and a first Tick above it is rejected the
@@ -1382,12 +1384,15 @@ const SPLIT_SQL: &str = "SELECT tick FROM (
 /// prefix set of a Timeline (`?2`), if the Tick is at or below the bound
 /// (`?3`) and the node is in the set of generation `?4`. The last column is the
 /// array index of the request, so one statement serves a whole request;
-/// duplicates in the array each yield their own row.
+/// duplicates in the array each yield their own row. The first join is a
+/// `CROSS JOIN` only to force the join order: `SQLite` never reorders it, so
+/// `json_each` stays the outer loop and the tables are probed by index. With an
+/// `ON` clause it is still an inner join.
 const EVENT_NODES_SQL: &str = "SELECT n.tick, n.scheduler_position, n.owner_id,
             n.output_ordinal, n.schema_id, n.artifact_digest, n.class, n.origin,
             n.input_digests, n.provenance_digest, j.key
      FROM json_each(?1) AS j
-     JOIN counterfactual_dependency_event_nodes AS e
+     CROSS JOIN counterfactual_dependency_event_nodes AS e
        ON e.timeline_id = ?2 AND e.seq = j.value AND e.tick <= ?3
      JOIN counterfactual_dependency_nodes AS n
        ON n.timeline_id = e.timeline_id AND n.generation = ?4
@@ -1397,12 +1402,15 @@ const EVENT_NODES_SQL: &str = "SELECT n.tick, n.scheduler_position, n.owner_id,
 /// (`?1`) in the prefix set of generation `?4` of a Timeline (`?2`), if their
 /// Tick is at or below the bound (`?3`). The last columns are the array index
 /// of the request and the `seq` the digest is bound to, if any (the binding
-/// is not filtered by Tick, as in the in-memory adapter).
+/// is not filtered by Tick, as in the in-memory adapter). The first join is a
+/// `CROSS JOIN` to force `json_each` as the outer loop, as in the event
+/// statement. It needs `SQLite` 3.41+ (`unhex`); the crate uses the bundled
+/// build.
 const DIGEST_NODES_SQL: &str = "SELECT n.tick, n.scheduler_position, n.owner_id,
             n.output_ordinal, n.schema_id, n.artifact_digest, n.class, n.origin,
             n.input_digests, n.provenance_digest, j.key, b.seq
      FROM json_each(?1) AS j
-     JOIN counterfactual_dependency_nodes AS n
+     CROSS JOIN counterfactual_dependency_nodes AS n
        ON n.timeline_id = ?2 AND n.generation = ?4
       AND n.artifact_digest = unhex(j.value) AND n.tick <= ?3
      LEFT JOIN counterfactual_dependency_event_nodes AS b
@@ -1531,7 +1539,8 @@ fn first_found<'a, T>(
 }
 
 /// The hits of one batched statement: the position in the pending requests
-/// and the hit.
+/// and the hit. The slot is a position in the pending list, not a request
+/// index.
 type HitsV1<R> = Result<Vec<(usize, R)>, CoreError>;
 
 /// Resolve `count` requests over the segments, newest first, with one batched
@@ -1544,7 +1553,8 @@ fn resolve_batch<R>(
     count: usize,
     fetch: impl Fn(&SegmentV1, &[usize]) -> HitsV1<R>,
 ) -> Result<Vec<Option<R>>, CoreError> {
-    let mut found: Vec<Option<R>> = std::iter::repeat_with(|| None).take(count).collect();
+    let mut found: Vec<Option<R>> = Vec::new();
+    found.resize_with(count, || None);
     let mut pending: Vec<usize> = (0..count).collect();
     for segment in path.iter().rev() {
         if pending.is_empty() {

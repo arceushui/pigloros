@@ -2849,7 +2849,8 @@ fn f4_a_batched_request_mixes_segments_misses_and_duplicates() {
     assert!(own.iter().all(Option::is_some));
 
     // An empty request is answered, and a request at the contract's largest
-    // size is one statement per segment, not one per `seq`.
+    // size is answered in full. That it costs one lookup per segment is
+    // structural, by construction of `resolve_batch`; no count is asserted.
     let none = ok(store.nodes_for_committed_events(lineage.mid, &[]));
     assert!(none.is_empty());
     let all: Vec<u64> = (1..=16_384).collect();
@@ -2897,6 +2898,21 @@ fn f5_a_batched_digest_request_mixes_segments_misses_and_duplicates() {
     assert_eq!(resolved, expected);
     let none = ok(store.nodes_by_digest(lineage.mid, &[]));
     assert!(none.is_empty());
+
+    // A request at the contract's largest size: derived digests miss, and the
+    // two seeded ones at the ends hit.
+    let mut wide: Vec<Hash> = (0..16_384_u32)
+        .map(|index| {
+            let mut bytes = [0xEE; 32];
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            Hash::from_bytes(bytes)
+        })
+        .collect();
+    wide[0] = seeded_digest(FORK_SALT, 3, 1);
+    wide[16_383] = seeded_digest(ROOT_SALT, 1, 1);
+    let largest = ok(store.nodes_by_digest(lineage.mid, &wide));
+    assert_eq!(largest.len(), wide.len());
+    assert_eq!(largest.iter().flatten().count(), 2);
 }
 
 #[test]
