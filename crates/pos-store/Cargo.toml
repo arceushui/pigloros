@@ -59,5 +59,9 @@ required-features = ["test-support"]
 name = "counterfactual_dependency_memory_prefix_public"
 required-features = ["test-support"]
 
+[[test]]
+name = "counterfactual_dependency_sqlite_public"
+required-features = ["test-support"]
+
 [lints]
 workspace = true
