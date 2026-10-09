@@ -1722,8 +1722,10 @@ fn stored_seq(value: i64) -> Result<Seq, CoreError> {
 
 /// A node row with its request index (the column after the node columns).
 fn indexed_node_row(row: &Row<'_>) -> rusqlite::Result<(usize, NodeRowV1)> {
-    row.get(10)
-        .and_then(|slot| node_row(row).map(|node| (slot, node)))
+    // `usize` is not `FromSql`; the index is a position in a request, far
+    // below `u32::MAX`, and `u32` widens to `usize` on every supported target.
+    row.get::<_, u32>(10)
+        .and_then(|slot| node_row(row).map(|node| (slot as usize, node)))
 }
 
 /// A node row with its request index and the bound `seq`, if any.
