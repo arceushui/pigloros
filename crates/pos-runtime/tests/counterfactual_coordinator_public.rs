@@ -421,7 +421,7 @@ impl<const MODE: u8> FactualPrefixReadPortV1 for Rigged<MODE> {
 
     fn cut_tick_at(&self, timeline: TimelineId, seq: Seq) -> Result<FactualCutV1, CoreError> {
         if MODE == PREFIX_READ_FAILS {
-            Err(CoreError::ArtifactUnavailable)
+            Err(CoreError::Storage("injected read failure".to_owned()))
         } else {
             self.store.cut_tick_at(timeline, seq)
         }
@@ -2518,14 +2518,24 @@ fn mid_tick_inside_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
     )?])
 }
 
+/// Tick 9 ends before the cut and Tick 10 starts at it, so the derived cut
+/// Tick is the plan's 9 and only the mid-Tick check refuses it.
+fn mid_tick_after_the_cut_tick_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
+    Ok(vec![
+        seeded_tick(PARENT_CUT_TICK, 1, CUT_SEQ - 1)?,
+        seeded_tick(PARENT_CUT_TICK + 1, CUT_SEQ, CUT_SEQ + 1)?,
+    ])
+}
+
 /// Tick 8 ends at the cut, so the plan's cut Tick 9 is not the derived one.
 fn other_cut_tick_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
     Ok(vec![seeded_tick(PARENT_CUT_TICK - 1, 1, CUT_SEQ)?])
 }
 
-const REFUSED_PREFIXES: [PrefixCase; 3] = [
+const REFUSED_PREFIXES: [PrefixCase; 4] = [
     mid_tick_at_first_seq_prefix,
     mid_tick_inside_prefix,
+    mid_tick_after_the_cut_tick_prefix,
     other_cut_tick_prefix,
 ];
 

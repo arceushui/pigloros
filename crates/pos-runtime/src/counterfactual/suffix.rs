@@ -826,6 +826,10 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
 
 /// Map a parent cut check error: a failed read is the store's, any other
 /// error is the rejected cut.
+///
+/// `TickSeamV1::check_parent_cut` yields only `Store(StorageFailure)` or
+/// `ParentCutNotFound` today; a new admission error there must update this
+/// mapping.
 const fn parent_cut_error(error: &CounterfactualAdmissionErrorV1) -> CounterfactualSuffixErrorV1 {
     match error {
         CounterfactualAdmissionErrorV1::Store(store) => CounterfactualSuffixErrorV1::Store(*store),

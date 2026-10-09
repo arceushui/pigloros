@@ -1586,7 +1586,9 @@ const UNBOUND_ROOT_POSITION: u32 = 0;
 const UNBOUND_ROOT_INDEX: usize = 1;
 
 /// The base graph plus a committed `ExogenousFrozen` root at
-/// `UNBOUND_ROOT_TICK` that the plan does not bind, consumed by `PARENT`.
+/// `UNBOUND_ROOT_TICK` that the plan does not bind, consumed by `PARENT`. It
+/// keeps the base graph (with `EARLY_WORLD`): this is a source-only differential
+/// scenario.
 fn unbound_root_graph(plan: &CounterfactualPlanV1) -> TestResult<Graph> {
     let mut nodes = base_nodes(plan)?;
     nodes.insert(

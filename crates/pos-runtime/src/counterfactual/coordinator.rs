@@ -805,8 +805,8 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         self.commit::<M>(&command, &record)
     }
 
-    /// Read the Fork's persisted basis and check its recorded parent cut,
-    /// then check the cut through `M`; nothing is derived or staged first.
+    /// Read the Fork's persisted basis (fork point matches the plan), then
+    /// run M's recorded parent cut check; nothing is derived or staged first.
     fn checked_basis<M: TickSeamV1<S>>(
         &self,
         request: &CounterfactualAdmissionRequestV1<'_>,
