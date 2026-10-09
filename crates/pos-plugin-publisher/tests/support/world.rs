@@ -253,7 +253,7 @@ impl World {
     /// A default world whose spy registry stamps its evaluations from `clock`.
     ///
     /// The test creates the `Arc` once and shares it with every other recorder that must be
-    /// ordered against the registry (it becomes the spy's `clock`).
+    /// ordered against the registry (see `SpyRegistry::with_clock`).
     ///
     /// # Errors
     /// Returns the fixture construction or registry error.
@@ -287,7 +287,9 @@ impl World {
         memory.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
         let timeline = memory.create_timeline("plugin-activation")?.id();
         let mut registry = SpyRegistry::new(memory);
-        registry.clock = config.clock;
+        if let Some(clock) = config.clock {
+            registry = SpyRegistry::with_clock(registry.store, clock);
+        }
         if config.provision {
             registry.provision(&anchor, &genesis_tps1)?;
         }

@@ -258,7 +258,27 @@ def run(files: dict[str, str]) -> subprocess.CompletedProcess[str]:
         )
 
 
+def revision_five_citations() -> list[str]:
+    """Return the places of the checker that must cite ADR-103 revision 5 but do not (EU2)."""
+    text = CHECKER.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    docstring = text.split('"""')[1]
+    index = next(i for i, line in enumerate(lines) if line.startswith("ALLOWED_CALL_BY_FILE ="))
+    comment = "\n".join(lines[max(index - 3, 0) : index])
+    return [
+        place
+        for place, text in (
+            ("the script docstring", docstring),
+            ("the ALLOWED_CALL_BY_FILE comment", comment),
+        )
+        if "revision 5" not in text and "revisions 4 and 5" not in text
+    ]
+
+
 def main() -> None:
+    missing = revision_five_citations()
+    if missing:
+        raise SystemExit("ADR-103 revision 5 is not cited by " + ", ".join(missing))
     accepted = run(ALLOWED)
     if accepted.returncode != 0:
         raise SystemExit(f"allowed layout was rejected:\n{accepted.stderr}")

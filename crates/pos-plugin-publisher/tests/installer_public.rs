@@ -1,5 +1,5 @@
 //! The signed Plugin release installer at the public seam (ADR-061 revision 2,
-//! ADR-103 revision 4).
+//! ADR-103 revisions 4 and 5).
 //!
 //! Releases are signed and published by the #571 publisher into a real local
 //! OCI store, trust evidence is built from independently encoded PTR1, PRV1,

@@ -252,6 +252,12 @@ fn a_retained_tps1_that_is_expired_is_refused_before_release_authorization() -> 
         h.evaluate(&expired, &bad)?,
         Err(bridge(PluginTrustBridgeErrorV1::Expired))
     );
+    // The call's coordinates are checked before the expiry: a wrong Tick on the same expired
+    // TPS1 is a Tick mismatch.
+    assert_eq!(
+        h.evaluate_raw(&adopted.tps1, &expired, &bad, 60, 7)?,
+        Err(bridge(PluginTrustBridgeErrorV1::EvaluationTickMismatch))
+    );
     Ok(())
 }
 

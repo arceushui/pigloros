@@ -1,4 +1,4 @@
-//! Public acceptance vectors for the ADR-103 revision 4 Plugin trust policy registry port on
+//! Public acceptance vectors for the ADR-103 revisions 4 and 5 Plugin trust policy registry port on
 //! the `SQLite` adapter (slice #569): the shared vectors C1, D1-D3, E1-E3, and F1-F2, plus the
 //! `SQLite`-only clauses of S1 and restart retention.
 #![cfg(all(target_os = "linux", feature = "sqlite"))]

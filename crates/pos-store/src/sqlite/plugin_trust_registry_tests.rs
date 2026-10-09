@@ -1140,14 +1140,7 @@ fn an_evaluation_reports_schema_and_scope_row_corruption_before_the_anchor() -> 
         let stale = h.same_policy(40, 5)?;
         let bad = ManifestSpec::new("plugin-z", 0x51, 0x51, None);
         for anchor in h.env.anchors_with_one_changed_field()? {
-            let result = h.store.evaluate_current_release(
-                &anchor,
-                b"garbage",
-                &stale.evidence,
-                &bad.projection()?,
-                stale.trusted()?,
-                stale.tick,
-            );
+            let result = evaluate_garbled(&h, &anchor, &stale)?;
             assert_eq!(result, Err(Error::CorruptState), "{sql}");
             assert!(h.store.conn.is_autocommit(), "{sql}");
         }
