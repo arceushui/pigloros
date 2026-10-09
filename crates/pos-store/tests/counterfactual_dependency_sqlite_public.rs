@@ -2237,7 +2237,7 @@ const ROOT_SALT: u8 = 0;
 const FORK_SALT: u8 = 100;
 
 /// The artifact digest of a seeded node, apart per Timeline by `salt`.
-fn seeded_digest(salt: u8, tick: u8, ordinal: u8) -> Hash {
+const fn seeded_digest(salt: u8, tick: u8, ordinal: u8) -> Hash {
     hash(salt + tick * 16 + ordinal)
 }
 
