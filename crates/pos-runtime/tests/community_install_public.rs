@@ -9,7 +9,8 @@ use std::cell::Cell;
 
 use ciborium::Value;
 use pos_core::event::{Event, SchemaVersion};
-use pos_core::ids::EntityId;
+use pos_conformance::PluginTrustPolicyAnchorV1;
+use pos_core::ids::{EntityId, TimelineId};
 use pos_core::store::{EventStore, SeqRange};
 use pos_plugin_publisher::test_support::{
     encoding::{Material, SCOPE},
@@ -32,6 +33,21 @@ type Installed = Result<InstalledPluginReleaseV1, CommunityInstallErrorV1>;
 type Fault = CommunityInstallErrorV1;
 type Refusal = PluginReleaseInstallErrorV1;
 
+/// The wrapper request of `material` on `timeline`, activating on `entity`.
+fn request_for<'a>(
+    anchor: &'a PluginTrustPolicyAnchorV1,
+    timeline: TimelineId,
+    material: &'a Material,
+    entity: EntityId,
+) -> CommunityInstallRequestV1<'a> {
+    CommunityInstallRequestV1 {
+        anchor,
+        tps1_bytes: &material.tps1,
+        evidence: &material.evidence,
+        target: ActivationTargetV1 { timeline, entity },
+    }
+}
+
 /// One wrapper call on the world's store, registry, anchor and Timeline.
 fn run(
     world: &mut World,
@@ -40,15 +56,7 @@ fn run(
     entity: EntityId,
 ) -> BoxResult<Installed> {
     let mut clock = wall(material.utc)?;
-    let request = CommunityInstallRequestV1 {
-        anchor: &world.anchor,
-        tps1_bytes: &material.tps1,
-        evidence: &material.evidence,
-        target: ActivationTargetV1 {
-            timeline: world.timeline,
-            entity,
-        },
-    };
+    let request = request_for(&world.anchor, world.timeline, material, entity);
     let registry = &mut world.registry;
     let store = &world.store;
     Ok(install_community_release_v1(
@@ -158,15 +166,8 @@ fn a_source_that_would_change_on_a_second_read_cannot_affect_the_install() -> Te
     };
     let material = world.material()?;
     let mut clock = wall(material.utc)?;
-    let request = CommunityInstallRequestV1 {
-        anchor: &world.anchor,
-        tps1_bytes: &material.tps1,
-        evidence: &material.evidence,
-        target: ActivationTargetV1 {
-            timeline: world.timeline,
-            entity: EntityId::new(),
-        },
-    };
+    let entity = EntityId::new();
+    let request = request_for(&world.anchor, world.timeline, &material, entity);
     let registry = &mut world.registry;
     let address = first.address();
     let result = install_community_release_v1(&source, address, registry, &mut clock, &request);
@@ -243,15 +244,8 @@ fn a_bundle_of_another_address_is_not_found_and_installs_nothing() -> TestResult
     let source = Fixed(world.store.read_verified(second.address())?);
     let material = world.material()?;
     let mut clock = wall(material.utc)?;
-    let request = CommunityInstallRequestV1 {
-        anchor: &world.anchor,
-        tps1_bytes: &material.tps1,
-        evidence: &material.evidence,
-        target: ActivationTargetV1 {
-            timeline: world.timeline,
-            entity: EntityId::new(),
-        },
-    };
+    let entity = EntityId::new();
+    let request = request_for(&world.anchor, world.timeline, &material, entity);
     let registry = &mut world.registry;
     let address = first.address();
     let result = install_community_release_v1(&source, address, registry, &mut clock, &request);

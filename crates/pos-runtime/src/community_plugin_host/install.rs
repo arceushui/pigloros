@@ -81,6 +81,9 @@ const WRONG_ADDRESS: CommunityInstallErrorV1 =
 
 /// Install the community release at `address`, committing its activation Event.
 ///
+/// The bundle the source returns must be the one at `address`; this pre-check runs before any
+/// projection, so a source that answers with another release's bundle installs nothing.
+///
 /// The closure is read once from `source`; the Plugin ID and the digests of the activation
 /// payload come from its projection, and the installer receives that same bundle through a
 /// one-shot source, so a source whose closure would change on a second read cannot affect the
