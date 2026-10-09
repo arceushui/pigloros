@@ -964,7 +964,10 @@ mod tests {
             assert_eq!(unchanged_floors(&present, moved), None);
         }
         let absent = PluginFloorStateV1::Absent;
-        assert_eq!(unchanged_floors(&absent, plan(Initialize, Initialize)), None);
+        assert_eq!(
+            unchanged_floors(&absent, plan(Initialize, Initialize)),
+            None
+        );
         assert_eq!(unchanged_floors(&absent, plan(Unchanged, Unchanged)), None);
     }
 
