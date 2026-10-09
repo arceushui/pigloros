@@ -43,3 +43,6 @@ jobs:
           CARGO_TERM_COLOR=never cargo test --no-fail-fast ${{ matrix.pkg }} --all-features > /tmp/test.log 2>&1 || true
           grep -E '^error|^test .* FAILED|^---- |test result: FAILED|panicked' /tmp/test.log | head -80
           grep -c 'test result: ok' /tmp/test.log
+      - name: reserved draft test with output
+        run: |
+          RUST_BACKTRACE=1 cargo test -p pos-runtime --all-features --test protected_consent a_driver_draft_of_the_reserved -- --nocapture --test-threads=1 2>&1 | tail -40
