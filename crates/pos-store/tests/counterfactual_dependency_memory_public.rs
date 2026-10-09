@@ -17,7 +17,7 @@ use pos_core::counterfactual_store::test_fixtures::{
     frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, text_field, uint,
 };
 use pos_core::{
-    CanonicalBytes, CoreError, CounterfactualBasisV1, CounterfactualDependencyErrorV1,
+    CanonicalBytes, CounterfactualBasisV1, CounterfactualDependencyErrorV1,
     CounterfactualDependencyReadPortV1, CounterfactualDependencyRecordingPortV1,
     CounterfactualFactsV1, CounterfactualGenerationReceiptV1, CounterfactualInvalidationCommandV1,
     CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
