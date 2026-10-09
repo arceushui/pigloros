@@ -383,10 +383,12 @@ fn settle(outcome: Result<Option<PipelineCommitReceiptV1>, RuntimeError>) -> Pas
     outcome.map_or_else(failed, committed)
 }
 
+/// A committed pass, with its commit receipt when it had any Event.
 fn committed(receipt: Option<PipelineCommitReceiptV1>) -> PassResultV1 {
     PassResultV1::Committed(receipt.map(Box::new))
 }
 
+/// A failed pass, or an in-doubt one: `InDoubt` is never reported as a failure.
 fn failed(error: RuntimeError) -> PassResultV1 {
     match classify_pass_failure(&error) {
         PassFailureV1::InDoubt => PassResultV1::InDoubt,

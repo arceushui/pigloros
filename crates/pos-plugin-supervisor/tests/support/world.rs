@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use pos_core::trusted_clock::TrustedWallSourceV1;
 use pos_core::{
-    AppendDedupKey, AppendDedupScope, AppendIdentity, ErasureContainmentGateV1, Event, EventStore,
-    Hash, PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineCommitReceiptV1,
+    AppendDedupKey, AppendDedupScope, AppendIdentity, ErasureContainmentGateV1, ErasureGate, Event,
+    EventStore, Hash, PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineCommitReceiptV1,
     PipelineEvidenceRefV1, PipelineSecurityRevisionsV1, PluginId, Seq, SeqRange, TimelineId,
     TimelineMeta,
 };
@@ -221,7 +221,7 @@ pub struct GatedMember {
 /// A registry over an in-memory store, and the Drivers registered in it.
 pub struct World {
     program: PathBuf,
-    members_added: Vec<Member>,
+    fixture_members: Vec<Member>,
     /// The store the passes commit to.
     pub store: MemoryStore,
     /// The registry the Drivers are registered in.
@@ -230,8 +230,8 @@ pub struct World {
     pub gate: Arc<ErasureContainmentGateV1>,
     /// The Timeline the passes run on.
     pub timeline: TimelineId,
-    members: u8,
-    attempts: u8,
+    member_count: u8,
+    attempt_count: u8,
 }
 
 impl World {
@@ -239,18 +239,21 @@ impl World {
     #[must_use]
     pub fn new(program: impl Into<PathBuf>) -> Self {
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        // The registry takes the trait object, so this clone must unsize: `Arc::clone(&gate)`
+        // would infer the trait object as the clone's type and fail to type-check.
+        let shared: Arc<dyn ErasureGate> = gate.clone();
         let mut store = MemoryStore::new();
         let () = ok(store.bind_erasure_gate(Arc::clone(&gate)));
         let timeline = ok(store.create_timeline("community-pass")).id();
         Self {
             program: program.into(),
-            members_added: Vec::new(),
+            fixture_members: Vec::new(),
             store,
-            registry: PluginRegistry::new().with_erasure_gate(gate.clone()),
+            registry: PluginRegistry::new().with_erasure_gate(shared),
             gate,
             timeline,
-            members: 0,
-            attempts: 0,
+            member_count: 0,
+            attempt_count: 0,
         }
     }
 
@@ -280,7 +283,7 @@ impl World {
 
     /// Register `driver` of `plugin` under the pin of the member added last.
     fn register(&mut self, plugin: &DriverPlugin, driver: CommunityDriverV1) {
-        let pin = community_pin(self.members, &format!("community-{}", plugin.name));
+        let pin = community_pin(self.member_count, &format!("community-{}", plugin.name));
         let () = ok(register_community_driver(
             &mut self.registry,
             plugin,
@@ -300,18 +303,18 @@ impl World {
         component: &[u8],
         watchdog: Duration,
     ) -> CommunityPluginHandleV1 {
-        self.members += 1;
+        self.member_count += 1;
         let plugin = DriverPlugin {
             id: PluginId::new(),
             name,
             event_type,
             has_driver: true,
         };
-        let source = Box::new(Source::numbered(self.members));
+        let source = Box::new(Source::numbered(self.member_count));
         let settings = self.settings_for(&plugin, watchdog, source);
         let (driver, handle) =
             CommunityDriverV1::new(test_support::config_with(name, component, settings));
-        self.members_added.push(Member {
+        self.fixture_members.push(Member {
             handle: handle.clone(),
             negotiated: negotiated_with(name, SMALL_BUDGET, Vec::new()),
             component: component.to_vec(),
@@ -333,7 +336,7 @@ impl World {
             source,
             register,
         } = spec;
-        self.members += 1;
+        self.member_count += 1;
         let identity = gated.identity();
         let expected = CommunityPluginExpectationV1 {
             plugin_id: gated.plugin_id().to_owned(),
@@ -363,7 +366,7 @@ impl World {
     /// Start a pass for every member added by [`Self::add`]: drop what the last pass left in its
     /// slot and offer a fresh test authorization.
     pub fn offer_all(&self) {
-        for member in &self.members_added {
+        for member in &self.fixture_members {
             member.handle.close_pass();
             let authorization =
                 test_support::authorization_for(&member.negotiated, &member.component);
@@ -423,8 +426,8 @@ impl World {
         revisions: PipelineSecurityRevisionsV1,
         head: Seq,
     ) -> ScheduledPassAdmissionV1 {
-        self.attempts += 1;
-        let key = self.attempts;
+        self.attempt_count += 1;
+        let key = self.attempt_count;
         ScheduledPassAdmissionV1 {
             attempt_id: ok(PipelineAttemptIdV1::try_new([key; 16])),
             idempotency: AppendIdentity::new(
