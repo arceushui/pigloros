@@ -338,7 +338,11 @@ fn unknown_key_and_ungranted_plugin_id_map_to_untrusted() -> TestResult {
 #[test]
 fn stale_forked_and_unadopted_policy_map_to_policy_mismatch() -> TestResult {
     let mut rig = Rig::new()?;
-    let retained = rig.world.registry.retained_policy_state(SCOPE)?.tps1_digest();
+    let retained = rig
+        .world
+        .registry
+        .retained_policy_state(SCOPE)?
+        .tps1_digest();
     let forked = rig.world.forked_floor_material()?;
     // A fork carries the retained TPS1 bytes; only its PRV1 record differs.
     assert_eq!(forked.tps1_digest(), retained);

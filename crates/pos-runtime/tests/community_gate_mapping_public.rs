@@ -36,7 +36,10 @@ fn check<T: Copy + std::fmt::Debug>(
     for (input, expected) in rows {
         assert_eq!(map(*input), *expected, "{input:?}");
     }
-    let mut listed = rows.iter().map(|(input, _)| index(*input)).collect::<Vec<_>>();
+    let mut listed = rows
+        .iter()
+        .map(|(input, _)| index(*input))
+        .collect::<Vec<_>>();
     listed.sort_unstable();
     assert_eq!(listed, (0..arms).collect::<Vec<_>>());
 }
@@ -266,7 +269,10 @@ fn registry_errors_map_row_by_row() {
         (Reg::WalRequired, TSU),
         (Reg::StorageIndeterminate, TSU),
         // One representative of each wrapper; the wrapped variants have their own tests below.
-        (Reg::Bridge(PluginTrustBridgeErrorV1::InvalidSnapshot), UNTRUSTED),
+        (
+            Reg::Bridge(PluginTrustBridgeErrorV1::InvalidSnapshot),
+            UNTRUSTED,
+        ),
         (Reg::Floor(PluginFloorErrorV1::PartialFloorState), TSU),
         (Reg::Trust(PluginTrustErrorV1::ManifestExpired), EXPIRED),
     ];
@@ -346,9 +352,7 @@ fn registry_trust_errors_use_the_authorization_rows() {
         T::PublisherKeyRevoked,
         T::ArtifactRevoked,
     ];
-    let rows = variants.map(|variant| {
-        (variant, host_error_for_trust_authorization_v1(variant))
-    });
+    let rows = variants.map(|variant| (variant, host_error_for_trust_authorization_v1(variant)));
     check(
         &rows,
         |inner| host_error_for_registry_v1(Reg::Trust(inner)),
