@@ -32,8 +32,9 @@
 //!
 //! # Quarantine
 //! A failure quarantines the failing Plugin and nobody else; see
-//! [`quarantine_for()`]. The adapter refuses to run while quarantined, and the
-//! host mirrors the quarantine into the registry with
+//! [`quarantine_for()`](pos_runtime::community_plugin_host::quarantine_for).
+//! The adapter refuses to run while quarantined, and the host mirrors the
+//! quarantine into the registry with
 //! [`CommunityPluginHandleV1::sync_registry()`]. The registry's pass-time
 //! check is registry-wide: while any selected Driver is quarantined, the
 //! registry refuses the whole pass before any Driver runs, so a quarantined
@@ -42,12 +43,12 @@
 //! nothing and adds no new failure.
 //!
 //! # Classification of a failed pass
-//! The host passes the error of a failed pass to [`classify_pass_failure()`].
+//! The host passes the error of a failed pass to
+//! [`classify_pass_failure()`](pos_runtime::community_plugin_host::classify_pass_failure).
 //! A commit failure has no failing Plugin, so no handle is marked by it; a
 //! host error raised while staging was already recorded by the failing
 //! adapter's own `step`, so there is no separate recording call.
 
-mod failure;
 mod output;
 mod state;
 
@@ -66,7 +67,6 @@ use pos_runtime::{
     StepOutput,
 };
 
-pub use self::failure::{classify_pass_failure, quarantine_for, PassFailureV1};
 use self::output::mapped_drafts;
 use self::state::Shared;
 pub use self::state::{

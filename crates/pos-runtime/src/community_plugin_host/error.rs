@@ -13,13 +13,80 @@ pub enum HostFailureClassV1 {
     /// No authoritative Event, state, retry or guest failure is fabricated
     /// from it, and it never substitutes for a deterministic outcome.
     Operational,
-    /// A refusal before any worker or invocation exists.
+    /// A host refusal before any guest code runs (ADR-061 revision 7
+    /// decision 5).
     ///
-    /// No Event, state or guest failure is fabricated from it. The ADR-061
-    /// failure table has no row for these errors, so this class is the
-    /// host's typing of them, pending conformance (#194, #544). It extends the
-    /// ADR's two classes, so the ADR amendment or #544 should ratify it.
+    /// The whole pass is discarded, and no Event, state, retry or guest
+    /// failure is fabricated from it.
     PreExecutionRejection,
+}
+
+impl HostFailureClassV1 {
+    /// The exact class name, the variant name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Authoritative => "Authoritative",
+            Self::Operational => "Operational",
+            Self::PreExecutionRejection => "PreExecutionRejection",
+        }
+    }
+}
+
+/// Why a release was not trusted (ADR-061 revision 7 decision 3).
+///
+/// A closed, `Copy` basis with no strings, paths or key material.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrustDenialBasisV1 {
+    /// A time outside a validity window.
+    Expired,
+    /// The release is not the active release.
+    NotActive,
+    /// The trust material does not verify.
+    Untrusted,
+    /// The material verifies but differs from the retained state.
+    PolicyMismatch,
+    /// The trust state is unreadable or unusable.
+    TrustStateUnavailable,
+}
+
+impl TrustDenialBasisV1 {
+    /// The exact basis name, the variant name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Expired => "Expired",
+            Self::NotActive => "NotActive",
+            Self::Untrusted => "Untrusted",
+            Self::PolicyMismatch => "PolicyMismatch",
+            Self::TrustStateUnavailable => "TrustStateUnavailable",
+        }
+    }
+}
+
+/// What revoked a release (ADR-061 revision 7 decision 3).
+///
+/// A closed, `Copy` basis with no strings, paths or key material.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RevocationBasisV1 {
+    /// The publisher key is revoked.
+    PublisherKey,
+    /// The release artifact is revoked.
+    Artifact,
+    /// The operator denied the artifact.
+    OperatorDenial,
+}
+
+impl RevocationBasisV1 {
+    /// The exact basis name, the variant name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::PublisherKey => "PublisherKey",
+            Self::Artifact => "Artifact",
+            Self::OperatorDenial => "OperatorDenial",
+        }
+    }
 }
 
 /// The profile-defined canonical trap class (ADR-061 revision 4 decision 6).
@@ -97,10 +164,16 @@ pub enum CommunityPluginHostErrorV1 {
     InvalidManifest,
     /// The release is not authorized by the admitted trust evidence.
     #[error("community Plugin artifact trust denied")]
-    ArtifactTrustDenied,
+    ArtifactTrustDenied {
+        /// Why the release is not trusted.
+        basis: TrustDenialBasisV1,
+    },
     /// The release or one of its descriptors is revoked.
     #[error("community Plugin artifact revoked")]
-    ArtifactRevoked,
+    ArtifactRevoked {
+        /// What revoked the release.
+        basis: RevocationBasisV1,
+    },
     /// No common ABI minor, or an ABI major other than 0.
     #[error("community Plugin ABI is incompatible with the host")]
     IncompatibleAbi,
@@ -177,8 +250,8 @@ impl CommunityPluginHostErrorV1 {
     pub const fn name(self) -> &'static str {
         match self {
             Self::InvalidManifest => "InvalidManifest",
-            Self::ArtifactTrustDenied => "ArtifactTrustDenied",
-            Self::ArtifactRevoked => "ArtifactRevoked",
+            Self::ArtifactTrustDenied { .. } => "ArtifactTrustDenied",
+            Self::ArtifactRevoked { .. } => "ArtifactRevoked",
             Self::IncompatibleAbi => "IncompatibleAbi",
             Self::MissingFeature { .. } => "MissingFeature",
             Self::CapabilityDenied { .. } => "CapabilityDenied",
@@ -199,22 +272,32 @@ impl CommunityPluginHostErrorV1 {
         }
     }
 
+    /// The basis name of a trust denial or a revocation, if this error has
+    /// one (ADR-061 revision 7 decision 3).
+    ///
+    /// Every other error has none. [`Self::name()`] is unchanged: the basis is
+    /// reported next to the name, never in place of it.
+    #[must_use]
+    pub const fn basis_name(self) -> Option<&'static str> {
+        match self {
+            Self::ArtifactTrustDenied { basis } => Some(basis.name()),
+            Self::ArtifactRevoked { basis } => Some(basis.name()),
+            _ => None,
+        }
+    }
+
     /// The ADR-061 classification of this error.
     ///
-    /// - Pre-execution rejections happen before any worker or invocation
-    ///   exists, and nothing is fabricated from them. The ADR-061 failure
-    ///   table has no row for them; this class is the host's typing of them,
-    ///   pending conformance (#194, #544). `IncompatibleAbi`,
-    ///   `MissingFeature` and `CapabilityDenied` are deterministic typed
-    ///   outcomes of the manifest and the host profile
-    ///   (the corrective amendment's "capability denial, incompatible WIT
-    ///   world" typed deterministic failure outcomes). `ArtifactTrustDenied`
-    ///   and `ArtifactRevoked` depend on mutable trust state (#424, #401).
+    /// - Pre-execution rejections are host refusals before any guest code
+    ///   runs (revision 7 decision 5): exactly `InvalidManifest`,
+    ///   `ArtifactTrustDenied`, `ArtifactRevoked`, `IncompatibleAbi`,
+    ///   `MissingFeature`, `CapabilityDenied` and `InvalidInvocation`.
     /// - The guest-output and deterministic-limit rows of the failure table
     ///   are authoritative, as are `StateMigrationFailed` and
     ///   `DeterministicDeadlineExceeded`, which a V1 host never produces.
     ///   `GuestDeclaredFailure` and `InvalidGuestOutput` are constructed only
-    ///   after a valid deterministic invocation.
+    ///   after a valid deterministic invocation, and so is `UnsupportedSchema`
+    ///   (a returned draft the host cannot commit).
     /// - `ComponentTrap` is authoritative only when conformance reproduces
     ///   it, and `AtomicCommitFailed` only with a deterministic typed result.
     ///   Otherwise both are operational, like worker crashes and watchdog
@@ -223,14 +306,14 @@ impl CommunityPluginHostErrorV1 {
     pub const fn class(self) -> HostFailureClassV1 {
         match self {
             Self::InvalidManifest
-            | Self::ArtifactTrustDenied
-            | Self::ArtifactRevoked
+            | Self::ArtifactTrustDenied { .. }
+            | Self::ArtifactRevoked { .. }
             | Self::IncompatibleAbi
             | Self::MissingFeature { .. }
             | Self::CapabilityDenied { .. }
-            | Self::InvalidInvocation
-            | Self::UnsupportedSchema => HostFailureClassV1::PreExecutionRejection,
+            | Self::InvalidInvocation => HostFailureClassV1::PreExecutionRejection,
             Self::InvalidGuestOutput
+            | Self::UnsupportedSchema
             | Self::StateMigrationFailed
             | Self::GuestDeclaredFailure
             | Self::FuelExhausted

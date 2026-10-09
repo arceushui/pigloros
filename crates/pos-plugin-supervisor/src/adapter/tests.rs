@@ -1,27 +1,24 @@
-//! Unit tests of the adapter's mapping, staging, receipts, quarantine table
-//! and registration. The pass-level tests are in `tests/community_pass.rs`.
+//! Unit tests of the adapter's mapping, staging, receipts and
+//! registration. The pass-level tests are in `tests/community_pass.rs`.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pos_core::{CoreError, EntityId, Kind, PipelineOutcomeV1};
+use pos_core::{EntityId, Kind};
 use pos_runtime::community_plugin_host::{
-    plugin_output_digest_v1, AtomicCommitFailureV1, ComponentTrapClassV1, EventDraftV1, FieldRefV1,
-    GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1, TraceAnnotationV1, TrapReproductionV1,
+    plugin_output_digest_v1, EventDraftV1, FieldRefV1, GuestPluginErrorV1, MeteringV1,
+    PluginErrorCodeV1, TraceAnnotationV1,
 };
 use ulid::Ulid;
 
-use super::failure::commit_failed;
 use super::output::{map_draft, mapped_drafts};
 use super::*;
 use crate::launch::WorkerProgramV1;
 use crate::test_support::{
     self, community_pin, err, ok, pin_of, DriverPlugin, METERING, SMALL_BUDGET,
 };
-
-const DENIED: Error = commit_failed(AtomicCommitFailureV1::DeterministicTypedResult);
 
 fn plugin(id: PluginId, has_driver: bool) -> DriverPlugin {
     DriverPlugin {
@@ -123,65 +120,6 @@ fn fixture(
         initial_state: initial(),
     });
     (driver, handle, calls)
-}
-
-fn every_error() -> Vec<(Error, Option<PluginAvailabilityV1>)> {
-    use PluginAvailabilityV1 as Availability;
-    let trap = Error::ComponentTrap {
-        class: ComponentTrapClassV1::Other,
-        reproduction: TrapReproductionV1::Unverified,
-    };
-    let exhausted = Some(Availability::ResourceExhausted);
-    vec![
-        (Error::InvalidManifest, None),
-        (Error::ArtifactTrustDenied, None),
-        (Error::ArtifactRevoked, Some(Availability::Revoked)),
-        (Error::IncompatibleAbi, None),
-        (Error::MissingFeature { index: 0 }, None),
-        (Error::CapabilityDenied { index: 0 }, None),
-        (Error::InvalidInvocation, None),
-        (Error::InvalidGuestOutput, None),
-        (Error::UnsupportedSchema, None),
-        (Error::StateMigrationFailed, None),
-        (Error::GuestDeclaredFailure, None),
-        (trap, Some(Availability::Trapped)),
-        (Error::WorkerCrashed, Some(Availability::Unavailable)),
-        (Error::FuelExhausted, exhausted),
-        (Error::MemoryLimitExceeded, exhausted),
-        (Error::HostCallLimitExceeded, exhausted),
-        (Error::OutputLimitExceeded, exhausted),
-        (Error::DeterministicDeadlineExceeded, None),
-        (Error::OperationalWatchdogStop, None),
-        (DENIED, None),
-    ]
-}
-
-#[test]
-fn only_traps_resource_limits_revocation_and_crashes_quarantine() {
-    for (error, expected) in every_error() {
-        assert_eq!(quarantine_for(error), expected, "{error:?}");
-    }
-}
-
-#[test]
-fn a_failed_pass_is_classified_by_its_commit_contract() {
-    let host = PassFailureV1::Host;
-    let operational = commit_failed(AtomicCommitFailureV1::Operational);
-    let rejected = Box::new(PipelineOutcomeV1::Rejected);
-    let not_admitted = RuntimeError::ScheduledPassNotAdmitted(rejected);
-    let unknown = RuntimeError::Store(CoreError::StorageOutcomeUnknown("lost".to_owned()));
-    let frozen = RuntimeError::Store(CoreError::ErasureAccessFrozen);
-    let crashed = RuntimeError::from(Error::WorkerCrashed);
-    assert_eq!(classify_pass_failure(&not_admitted), host(DENIED));
-    assert_eq!(classify_pass_failure(&unknown), PassFailureV1::InDoubt);
-    assert_eq!(classify_pass_failure(&frozen), host(operational));
-    assert_eq!(classify_pass_failure(&crashed), host(Error::WorkerCrashed));
-    for unrelated in [
-        RuntimeError::PendingDriverStep,
-        RuntimeError::NoScheduledAdmissionInDoubt,
-    ] {
-        assert_eq!(classify_pass_failure(&unrelated), PassFailureV1::Unrelated);
-    }
 }
 
 #[test]

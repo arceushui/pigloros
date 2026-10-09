@@ -1,16 +1,20 @@
 //! Failure classes: quarantine and the pass-level commit classification.
 
 use pos_core::CoreError;
-use pos_runtime::community_plugin_host::{AtomicCommitFailureV1, CommunityPluginHostErrorV1};
-use pos_runtime::{PluginAvailabilityV1, RuntimeError};
+
+use super::error::{AtomicCommitFailureV1, CommunityPluginHostErrorV1};
+use crate::{PluginAvailabilityV1, RuntimeError};
 
 /// The availability a Plugin's failure puts it in, if the failure quarantines.
 ///
 /// - a trap is `Trapped`;
 /// - a deterministic resource-limit failure is `ResourceExhausted`;
-/// - a revoked artifact is `Revoked`;
+/// - a revoked artifact, whatever its basis, is `Revoked`;
 /// - a worker crash is `Unavailable`: ADR-061 quarantines and reports it, and
 ///   it fabricates no Event, state or guest failure.
+///
+/// A trust denial, whatever its basis, and `UnsupportedSchema` quarantine
+/// nothing: the Plugin is gated again at the next pass.
 ///
 /// Every other failure discards the pass and marks only the failing Plugin;
 /// it quarantines nothing. The operational wall-time watchdog stop is such a
@@ -26,10 +30,10 @@ pub const fn quarantine_for(error: CommunityPluginHostErrorV1) -> Option<PluginA
         | Error::MemoryLimitExceeded
         | Error::HostCallLimitExceeded
         | Error::OutputLimitExceeded => Some(PluginAvailabilityV1::ResourceExhausted),
-        Error::ArtifactRevoked => Some(PluginAvailabilityV1::Revoked),
+        Error::ArtifactRevoked { .. } => Some(PluginAvailabilityV1::Revoked),
         Error::WorkerCrashed => Some(PluginAvailabilityV1::Unavailable),
         Error::InvalidManifest
-        | Error::ArtifactTrustDenied
+        | Error::ArtifactTrustDenied { .. }
         | Error::IncompatibleAbi
         | Error::MissingFeature { .. }
         | Error::CapabilityDenied { .. }
@@ -91,6 +95,6 @@ pub const fn classify_pass_failure(error: &RuntimeError) -> PassFailureV1 {
 }
 
 /// `AtomicCommitFailed` with the given class.
-pub(super) const fn commit_failed(failure: AtomicCommitFailureV1) -> CommunityPluginHostErrorV1 {
+const fn commit_failed(failure: AtomicCommitFailureV1) -> CommunityPluginHostErrorV1 {
     CommunityPluginHostErrorV1::AtomicCommitFailed { failure }
 }

@@ -10,12 +10,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use pos_core::PluginId;
 use pos_runtime::community_plugin_host::{
-    CommunityPluginHostErrorV1, EffectiveExecutionLimitsV1, GuestPluginErrorV1, MeteringV1,
-    NegotiatedCommunityPluginV1,
+    quarantine_for, CommunityPluginHostErrorV1, EffectiveExecutionLimitsV1, GuestPluginErrorV1,
+    MeteringV1, NegotiatedCommunityPluginV1,
 };
 use pos_runtime::{PluginAvailabilityV1, PluginRegistry, RuntimeError};
-
-use super::failure::quarantine_for;
 
 /// The most receipts a handle retains; the oldest is dropped beyond it.
 pub const MAX_RETAINED_RECEIPTS_V1: usize = 256;
