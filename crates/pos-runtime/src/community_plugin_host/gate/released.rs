@@ -149,7 +149,7 @@ impl std::fmt::Debug for GatedCommunityReleaseV1 {
             .field("tps1_digest", &self.tps1_digest)
             .field("utc_second", &self.utc_second)
             .field("tick", &self.tick)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
