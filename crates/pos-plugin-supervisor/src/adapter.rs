@@ -92,7 +92,6 @@ use crate::supervisor::CommunityPluginSupervisorV1;
 
 type Error = CommunityPluginHostErrorV1;
 
-
 /// The host-built inputs of one invocation.
 ///
 /// `Driver::step` carries no invocation ID, artifact reference, profile digest
