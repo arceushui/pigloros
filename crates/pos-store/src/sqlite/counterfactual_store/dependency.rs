@@ -1730,8 +1730,7 @@ fn indexed_node_row(row: &Row<'_>) -> rusqlite::Result<(usize, NodeRowV1)> {
 
 /// A node row with its request index and the bound `seq`, if any.
 fn bound_node_row(row: &Row<'_>) -> rusqlite::Result<(usize, NodeRowV1, Option<i64>)> {
-    indexed_node_row(row)
-        .and_then(|(slot, node)| row.get(11).map(|seq| (slot, node, seq)))
+    indexed_node_row(row).and_then(|(slot, node)| row.get(11).map(|seq| (slot, node, seq)))
 }
 
 /// The nodes bound to the requested `seq`s in a segment, by one statement.
