@@ -53,5 +53,14 @@ required-features = ["test-support"]
 name = "signed_release_world_public"
 required-features = ["test-support"]
 
+# cargo-shear classifies everything under `tests/` as test code, so it sees the world's four
+# optional dependencies as dev-only ("misplaced") and the `#[path]`-included `tests/support/mod.rs`
+# as unlinked. Both are intended: the world is a library module that other crates reach through
+# the `test-support` feature, and it lives under `tests/support` to stay outside the production
+# coverage glob (`**/src/**/*.rs`).
+[package.metadata.cargo-shear]
+ignored = ["blake3", "ciborium", "ed25519-dalek", "sha2"]
+ignored-paths = ["tests/support/mod.rs"]
+
 [lints]
 workspace = true

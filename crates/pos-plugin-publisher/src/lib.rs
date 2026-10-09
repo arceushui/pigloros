@@ -23,6 +23,10 @@
 //! installer vectors and by other crates' tests. The `installer_public` and
 //! `signed_release_world_public` test targets declare `required-features`, so a plain
 //! `cargo test -p pos-plugin-publisher` skips them; run with `--all-features`.
+//!
+//! Layout rule: the world lives under `tests/support` and is included by `#[path]`, so it stays
+//! outside the `**/src/**/*.rs` production-coverage glob; `cargo-shear` is told about its
+//! optional dependencies and its root file through `[package.metadata.cargo-shear]`.
 
 #[cfg(target_os = "linux")]
 use pos_core::{CanonicalBytes, KeyIdentityV1, PublicKey, Signature};
