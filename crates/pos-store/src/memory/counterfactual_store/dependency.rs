@@ -46,11 +46,17 @@
 //!   coordinator (#552). A Memory Fork row has no cut Tick, only a
 //!   `fork_point` (a parent Timeline and a `Seq`), so the adapter cannot
 //!   compare, and roots may legitimately carry Ticks below the first Tick.
-//! - **Committed prefix.** The committed prefix of a parent Timeline is kept
-//!   once per parent Timeline, outside any Fork, and served as
-//!   [`DependencyReadScopeV1::ParentPrefix`] up to its `through_tick`. No write
-//!   path exists for it yet (#554), so it stays empty in production and the
-//!   unit tests seed it directly. Deleting the parent Timeline purges it.
+//! - **Committed prefix.** The committed prefix of a Timeline is kept once
+//!   per Timeline, outside any Fork, and served as
+//!   [`DependencyReadScopeV1::ParentPrefix`] up to its `through_tick`, stitched
+//!   with every ancestor's set through that ancestor's cut Tick. The set also
+//!   keeps the factual indexes behind [`FactualPrefixReadPortV1`]: the commit
+//!   range of each Tick keyed by its last `seq`, the Tick and node digest bound
+//!   to each committed `seq`, the nodes by artifact digest, the step nodes by
+//!   owner and Tick, and the row counts. No write path exists for it yet
+//!   (#554), so it stays empty in production; the `test-support` seeding
+//!   function installs Ticks through the one install function the pipeline
+//!   commit will call. Deleting the Timeline purges it.
 //! - **Reads and fences.** A parent-prefix read of an unknown or concealed
 //!   Timeline is `ForkNotFound`, and one of an existing Timeline without rows
 //!   is an empty page. It runs under that Timeline's own erasure read fence
@@ -70,14 +76,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 
+#[cfg(any(test, feature = "test-support"))]
+use pos_core::counterfactual_store::test_fixtures::SeededFactualTickV1;
 use pos_core::{
-    CounterfactualBasisV1, CounterfactualDependencyErrorV1, CounterfactualDependencyReadPortV1,
-    CounterfactualDependencyRecordingPortV1, CounterfactualInvalidationCommandV1,
-    CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualTickOutcomeV1,
-    DependencyEdgeRecordV1, DependencyNodeRecordV1, DependencyPageCursorV1,
-    DependencyPageRequestV1, DependencyPageV1, DependencyPagedRowV1, DependencyReadScopeV1,
-    ErasureProtectedOperationV1, ForkGenerationV1, Hash, PipelineDraftBatchV1, RecordedSetCountsV1,
-    TickDependencyRecordV1, TimelineId,
+    CoreError, CounterfactualBasisV1, CounterfactualDependencyErrorV1,
+    CounterfactualDependencyReadPortV1, CounterfactualDependencyRecordingPortV1,
+    CounterfactualInvalidationCommandV1, CounterfactualInvalidationOutcomeV1,
+    CounterfactualStoreErrorV1, CounterfactualTickOutcomeV1, DependencyEdgeRecordV1,
+    DependencyNodeRecordV1, DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1,
+    DependencyPagedRowV1, DependencyReadScopeV1, ErasureProtectedOperationV1, FactualCutV1,
+    FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, ForkGenerationV1, Hash,
+    PipelineDraftBatchV1, RecordedSetCountsV1, Seq, TickDependencyRecordV1, TimelineId,
 };
 
 use super::{fenced_result, CounterfactualForkStateV1};
@@ -98,11 +107,45 @@ static NO_ROWS: DependencyRowsV1 = DependencyRowsV1::new();
 /// The set of a generation that has no record.
 static NO_SET: ForkDependencySetV1 = ForkDependencySetV1::new();
 
-/// The nodes and edges of one recorded set.
+/// The Tick number and first `seq` of one committed factual Tick.
+type CommitRange = (u64, u64);
+/// The Tick that recorded an Event-backed node and the node's artifact digest.
+type EventBinding = (u64, Hash);
+
+/// The nodes and edges of one recorded set, with the factual indexes of a
+/// Timeline's committed prefix.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(in crate::memory) struct DependencyRowsV1 {
     nodes: BTreeMap<RowKey, DependencyNodeRecordV1>,
     edges: BTreeMap<RowKey, DependencyEdgeRecordV1>,
+    /// Commit ranges of the committed factual Ticks, by last `seq`.
+    commit_ranges: BTreeMap<u64, CommitRange>,
+    /// Event-backed node bindings, by committed `seq`.
+    event_nodes: BTreeMap<u64, EventBinding>,
+    /// Row keys of the nodes, by artifact digest.
+    digests: BTreeMap<Hash, RowKey>,
+    /// The `seq` each Event-backed node is bound to, by artifact digest.
+    bound_seqs: BTreeMap<Hash, u64>,
+    /// Row keys of the step nodes (output ordinal zero), by owner and Tick.
+    owners: BTreeMap<String, BTreeMap<u64, RowKey>>,
+    /// Stored row counts of the set.
+    counts: RecordedSetCountsV1,
+}
+
+/// The head of a Timeline without a recorded Tick.
+const NO_HEAD: FactualHeadV1 = FactualHeadV1 {
+    tick: 0,
+    last_seq: Seq::ZERO,
+};
+
+/// One segment of a Timeline's fork ancestry, as far as it is visible.
+struct VisibleSetV1<'a> {
+    /// The segment's own committed prefix set.
+    rows: &'a DependencyRowsV1,
+    /// Last `seq` a Tick of the set may end on to be visible.
+    limit: u64,
+    /// Highest Tick of the set that is visible.
+    bound: u64,
 }
 
 /// Each row with the cursor that keys it.
@@ -115,6 +158,16 @@ impl DependencyRowsV1 {
         Self {
             nodes: BTreeMap::new(),
             edges: BTreeMap::new(),
+            commit_ranges: BTreeMap::new(),
+            event_nodes: BTreeMap::new(),
+            digests: BTreeMap::new(),
+            bound_seqs: BTreeMap::new(),
+            owners: BTreeMap::new(),
+            counts: RecordedSetCountsV1 {
+                nodes: 0,
+                edges: 0,
+                inputs: 0,
+            },
         }
     }
 
@@ -123,6 +176,111 @@ impl DependencyRowsV1 {
         self.nodes.extend(keyed(record.nodes()));
         self.edges.extend(keyed(record.edges()));
     }
+
+    /// The set as seen through the Ticks that end at or before `limit`.
+    fn visible_through(&self, limit: u64) -> VisibleSetV1<'_> {
+        let head = self.head_through(limit);
+        VisibleSetV1 {
+            rows: self,
+            limit,
+            bound: head.map_or(0, |found| found.tick),
+        }
+    }
+
+    /// The highest Tick that ends at or before `limit`.
+    fn head_through(&self, limit: u64) -> Option<FactualHeadV1> {
+        let ended = self.commit_ranges.range(..=limit).next_back();
+        ended.map(|(last, (tick, _))| FactualHeadV1 {
+            tick: *tick,
+            last_seq: Seq::from_u64(*last),
+        })
+    }
+
+    /// The Tick that `at` splits: it starts at or before `at`, ends after it,
+    /// and ends within `limit`.
+    fn split_by(&self, at: u64, limit: u64) -> Option<u64> {
+        let after = (Bound::Excluded(at), Bound::Unbounded);
+        let next = self.commit_ranges.range(after).next();
+        next.filter(|(last, (_, first))| **last <= limit && *first <= at)
+            .map(|(_, (tick, _))| *tick)
+    }
+
+    /// The recorded node with the artifact digest.
+    fn node_with(&self, digest: &Hash) -> Option<DependencyNodeRecordV1> {
+        let key = self.digests.get(digest);
+        key.and_then(|held| self.nodes.get(held)).cloned()
+    }
+}
+
+impl VisibleSetV1<'_> {
+    /// The highest visible Tick that ends at or before `at`.
+    fn head_through(&self, at: u64) -> Option<FactualHeadV1> {
+        self.rows.head_through(at.min(self.limit))
+    }
+
+    /// The visible Tick that `at` splits.
+    fn split_by(&self, at: u64) -> Option<u64> {
+        self.rows.split_by(at, self.limit)
+    }
+
+    /// The node bound to the committed `seq`, if its Tick is visible.
+    fn event_node(&self, seq: u64) -> Option<DependencyNodeRecordV1> {
+        let binding = self.rows.event_nodes.get(&seq);
+        let seen = binding.filter(|(tick, _)| *tick <= self.bound);
+        seen.and_then(|(_, digest)| self.rows.node_with(digest))
+    }
+
+    /// The node with the artifact digest and its bound `seq`, if visible.
+    fn digest_node(&self, digest: &Hash) -> Option<(DependencyNodeRecordV1, Option<Seq>)> {
+        let key = self.rows.digests.get(digest);
+        let seen = key.filter(|held| held.tick() <= self.bound);
+        let node = seen.and_then(|held| self.rows.nodes.get(held));
+        node.map(|found| {
+            let bound = self.rows.bound_seqs.get(digest);
+            (found.clone(), bound.copied().map(Seq::from_u64))
+        })
+    }
+
+    /// The latest visible step node of the owner.
+    fn step_node(&self, owner: &str) -> Option<DependencyNodeRecordV1> {
+        let ticks = self.rows.owners.get(owner);
+        let latest = ticks.and_then(|held| held.range(..=self.bound).next_back());
+        latest
+            .and_then(|(_, key)| self.rows.nodes.get(key))
+            .cloned()
+    }
+}
+
+/// The result `pick` finds in the visible sets, searching from the
+/// Timeline's own set up through its ancestors.
+fn first_visible<T>(
+    sets: &[VisibleSetV1<'_>],
+    pick: impl Fn(&VisibleSetV1<'_>) -> Option<T>,
+) -> Option<T> {
+    sets.iter().rev().find_map(pick)
+}
+
+/// Where a Fork at `at` cuts the visible Ticks.
+fn factual_cut(sets: &[VisibleSetV1<'_>], at: u64) -> FactualCutV1 {
+    let ended = first_visible(sets, |set| set.head_through(at));
+    let cut_tick = ended.map_or(0, |found| found.tick);
+    let split = sets.iter().find_map(|set| set.split_by(at));
+    let mid = |split_tick| FactualCutV1::MidTick {
+        cut_tick,
+        split_tick,
+    };
+    split.map_or(FactualCutV1::Boundary { cut_tick }, mid)
+}
+
+/// The rows of one kind of the visible segments, in ancestry order, each
+/// with the highest Tick it may serve.
+fn segments_of<'a, T>(
+    sets: &[VisibleSetV1<'a>],
+    select: Select<T>,
+) -> Vec<(&'a BTreeMap<RowKey, T>, u64)> {
+    sets.iter()
+        .map(|set| (select(set.rows), set.bound))
+        .collect()
 }
 
 /// The provisional rows of one Fork generation.
@@ -198,12 +356,7 @@ impl ForkDependencySetV1 {
         for row in record.nodes() {
             self.digests.insert(row.coordinate().artifact_digest());
         }
-        let counts = self.counts;
-        self.counts = RecordedSetCountsV1 {
-            nodes: counts.nodes.saturating_add(record.nodes().len()),
-            edges: counts.edges.saturating_add(record.edges().len()),
-            inputs: counts.inputs.saturating_add(record.declared_input_count()),
-        };
+        self.counts = counted(self.counts, record);
         self.last_record_tick = Some(record.tick());
     }
 }
@@ -247,8 +400,17 @@ impl CounterfactualForkStateV1 {
         let current = request.scope().ensure_current(self.generation);
         current.and_then(|()| {
             let rows = self.current_set().map_or(&NO_ROWS, |held| &held.rows);
-            page_after(select(rows), request)
+            page_after(&[(select(rows), u64::MAX)], request)
         })
+    }
+}
+
+/// The stored counts grown by one record.
+fn counted(counts: RecordedSetCountsV1, record: &TickDependencyRecordV1) -> RecordedSetCountsV1 {
+    RecordedSetCountsV1 {
+        nodes: counts.nodes.saturating_add(record.nodes().len()),
+        edges: counts.edges.saturating_add(record.edges().len()),
+        inputs: counts.inputs.saturating_add(record.declared_input_count()),
     }
 }
 
@@ -263,18 +425,24 @@ fn require_that(holds: bool, error: StoreError) -> Result<(), StoreError> {
     holds.then_some(()).ok_or(error)
 }
 
-/// Page the rows after the request cursor and within its Tick bound.
+/// Page the rows of the segments, in order, after the request cursor and
+/// within its Tick bound and each segment's own Tick bound.
 fn page_after<T: DependencyPagedRowV1 + Clone>(
-    rows: &BTreeMap<RowKey, T>,
+    segments: &[(&BTreeMap<RowKey, T>, u64)],
     request: &DependencyPageRequestV1,
 ) -> Result<DependencyPageV1<T>, StoreError> {
     let through = request.scope().through_tick().unwrap_or(u64::MAX);
     let after = request.after().cloned();
     let start = after.map_or(Bound::Unbounded, Bound::Excluded);
     let limit = request.limit().saturating_add(1);
-    let later = rows.range((start, Bound::Unbounded));
-    let within = later.take_while(|(cursor, _)| cursor.tick() <= through);
-    let window: Vec<T> = within.take(limit).map(|(_, row)| row.clone()).collect();
+    let mut window: Vec<T> = Vec::new();
+    for (rows, bound) in segments {
+        let ceiling = through.min(*bound);
+        let later = rows.range((start.clone(), Bound::Unbounded));
+        let within = later.take_while(|(cursor, _)| cursor.tick() <= ceiling);
+        let room = limit.saturating_sub(window.len());
+        window.extend(within.take(room).map(|(_, row)| row.clone()));
+    }
     DependencyPageV1::from_ordered(request, &window)
         .map_err(StoreError::from)
         .and_then(|page| revalidated(request, &page))
@@ -380,14 +548,48 @@ impl MemoryStore {
         self.dependency_prefixes.get(&parent).unwrap_or(&NO_ROWS)
     }
 
-    /// One page of a parent Timeline's committed prefix rows.
-    fn prefix_page<T: DependencyPagedRowV1 + Clone>(
+    /// The Timeline's own committed prefix set and each ancestor's, root
+    /// first, every ancestor's through its cut.
+    fn visible_sets(&self, timeline: TimelineId) -> Result<Vec<VisibleSetV1<'_>>, CoreError> {
+        self.fork_chain(timeline).map(|chain| {
+            let ancestors = chain.timelines.iter().zip(chain.fork_seqs.iter());
+            let mut sets: Vec<VisibleSetV1<'_>> = ancestors
+                .map(|(id, fork)| self.prefix_rows(*id).visible_through(fork.as_u64()))
+                .collect();
+            sets.push(VisibleSetV1 {
+                rows: self.prefix_rows(timeline),
+                limit: u64::MAX,
+                bound: u64::MAX,
+            });
+            sets
+        })
+    }
+
+    /// Run a factual read under the Timeline's erasure read fence and its
+    /// inherited scopes.
+    fn read_fenced<T>(
         &self,
-        parent: TimelineId,
-        request: &DependencyPageRequestV1,
-        select: Select<T>,
-    ) -> Result<DependencyPageV1<T>, StoreError> {
-        page_after(select(self.prefix_rows(parent)), request)
+        timeline: TimelineId,
+        read: impl Fn(&Self) -> Result<T, CoreError>,
+    ) -> Result<T, CoreError> {
+        self.with_erasure_read_fence(timeline, READ, |store| {
+            store
+                .ensure_generic_timeline_visibility(timeline)
+                .and_then(|()| store.authorize_inherited_scopes(timeline, READ))
+                .and_then(|()| read(store))
+        })
+    }
+
+    /// Run a factual read over the Timeline's visible sets.
+    fn read_factual<T>(
+        &self,
+        timeline: TimelineId,
+        read: impl Fn(&[VisibleSetV1<'_>]) -> T,
+    ) -> Result<T, CoreError> {
+        self.read_fenced(timeline, |store| {
+            let sets = store.visible_sets(timeline);
+            sets.map(|found| read(found.as_slice()))
+        })
     }
 
     /// One page of a Fork generation's rows, once the Fork resolves.
@@ -411,7 +613,11 @@ impl MemoryStore {
             store
                 .ensure_generic_timeline_visibility(parent)
                 .and_then(|()| store.authorize_inherited_scopes(parent, READ))
-                .map(|()| store.prefix_page(parent, request, select))
+                .and_then(|()| store.visible_sets(parent))
+                .map(|sets| {
+                    let segments = segments_of(&sets, select);
+                    page_after(&segments, request)
+                })
         });
         fenced_result(read)
     }
@@ -486,6 +692,125 @@ impl CounterfactualDependencyReadPortV1 for MemoryStore {
         request: &DependencyPageRequestV1,
     ) -> Result<DependencyPageV1<DependencyEdgeRecordV1>, CounterfactualStoreErrorV1> {
         self.read_dependency_page(request, |rows| &rows.edges)
+    }
+}
+
+impl FactualPrefixReadPortV1 for MemoryStore {
+    fn last_committed_factual_tick(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<FactualHeadV1, CoreError> {
+        self.read_factual(timeline, |sets| {
+            let found = first_visible(sets, |set| set.head_through(u64::MAX));
+            found.unwrap_or(NO_HEAD)
+        })
+    }
+
+    fn cut_tick_at(&self, timeline: TimelineId, seq: Seq) -> Result<FactualCutV1, CoreError> {
+        self.read_factual(timeline, |sets| factual_cut(sets, seq.as_u64()))
+    }
+
+    fn nodes_for_committed_events(
+        &self,
+        timeline: TimelineId,
+        seqs: &[Seq],
+    ) -> Result<Vec<Option<DependencyNodeRecordV1>>, CoreError> {
+        self.read_factual(timeline, |sets| {
+            let found = |seq: &Seq| first_visible(sets, |set| set.event_node(seq.as_u64()));
+            seqs.iter().map(found).collect::<Vec<_>>()
+        })
+    }
+
+    fn nodes_by_digest(
+        &self,
+        timeline: TimelineId,
+        digests: &[Hash],
+    ) -> Result<Vec<Option<(DependencyNodeRecordV1, Option<Seq>)>>, CoreError> {
+        self.read_factual(timeline, |sets| {
+            let found = |digest: &Hash| first_visible(sets, |set| set.digest_node(digest));
+            digests.iter().map(found).collect::<Vec<_>>()
+        })
+    }
+
+    fn last_step_node(
+        &self,
+        timeline: TimelineId,
+        owner: &FactualOwnerIdV1,
+    ) -> Result<Option<DependencyNodeRecordV1>, CoreError> {
+        self.read_factual(timeline, |sets| {
+            first_visible(sets, |set| set.step_node(owner.as_str()))
+        })
+    }
+
+    fn factual_set_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
+        self.read_fenced(timeline, |store| Ok(store.prefix_rows(timeline).counts))
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl DependencyRowsV1 {
+    /// Install one committed factual Tick: its rows, commit range, Event
+    /// bindings, indexes, and counts. Infallible.
+    ///
+    /// The one install path of a Timeline's committed prefix set: the
+    /// `test-support` seeding function calls it now, and the pipeline commit
+    /// calls it once it records factual Ticks.
+    pub(in crate::memory) fn install_factual_tick(
+        &mut self,
+        record: &TickDependencyRecordV1,
+        first_seq: Seq,
+        last_seq: Seq,
+        event_nodes: &[(Seq, Hash)],
+    ) {
+        let tick = record.tick();
+        self.extend(record);
+        for row in record.nodes() {
+            self.index_node(row);
+        }
+        let range = (tick, first_seq.as_u64());
+        self.commit_ranges.insert(last_seq.as_u64(), range);
+        for (seq, digest) in event_nodes {
+            self.event_nodes.insert(seq.as_u64(), (tick, *digest));
+            self.bound_seqs.insert(*digest, seq.as_u64());
+        }
+        self.counts = counted(self.counts, record);
+    }
+
+    /// Index a node by artifact digest and, when it is a step node, by owner.
+    fn index_node(&mut self, row: &DependencyNodeRecordV1) {
+        let coordinate = row.coordinate();
+        let digest = coordinate.artifact_digest();
+        self.digests.insert(digest, row.cursor());
+        if coordinate.output_ordinal() == 0 {
+            let owner = coordinate.owner_id().to_owned();
+            let ticks = self.owners.entry(owner).or_default();
+            ticks.insert(coordinate.tick(), row.cursor());
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl MemoryStore {
+    /// Seed committed factual Ticks into a Timeline's committed prefix set,
+    /// through the install path the pipeline commit uses.
+    ///
+    /// Test seam only: it checks nothing about the Ticks it is given.
+    ///
+    /// # Errors
+    /// Returns `TimelineNotFound` for an unknown Timeline.
+    #[doc(hidden)]
+    pub fn seed_factual_prefix(
+        &mut self,
+        timeline: TimelineId,
+        ticks: &[SeededFactualTickV1],
+    ) -> Result<(), CoreError> {
+        self.timeline(timeline)?;
+        let rows = self.dependency_prefixes.entry(timeline).or_default();
+        for seeded in ticks {
+            let (first, last) = (seeded.first_seq, seeded.last_seq);
+            rows.install_factual_tick(&seeded.record, first, last, &seeded.event_nodes);
+        }
+        Ok(())
     }
 }
 
