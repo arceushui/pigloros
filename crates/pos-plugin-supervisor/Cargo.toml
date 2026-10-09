@@ -87,12 +87,12 @@ name = "community_host_public"
 required-features = ["test-support"]
 
 # cargo-shear classifies everything under `tests/` as test code, so it sees the pass harness only
-# through the feature-gated `#[path]` module in `src/lib.rs`: the optional `pos-store` looks
-# unused and the root file `tests/support/mod.rs` looks unlinked. Both are intended: the harness
-# is a library module that other crates reach through the `test-support` feature, and it lives
-# under `tests/support` to stay outside the production-coverage glob (`**/src/**/*.rs`).
+# through the feature-gated `#[path]` module in `src/lib.rs`: the root file `tests/support/mod.rs`
+# looks unlinked. That is intended: the harness is a library module that other crates reach
+# through the `test-support` feature, and it lives under `tests/support` to stay outside the
+# production-coverage glob (`**/src/**/*.rs`). The optional `pos-store` is used by the
+# integration tests, so it needs no ignore entry.
 [package.metadata.cargo-shear]
-ignored = ["pos-store"]
 ignored-paths = ["tests/support/mod.rs"]
 
 [lints]
