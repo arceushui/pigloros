@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use pos_crypto::plugin_manifest::component_digest_v1;
 use pos_plugin_supervisor::test_support::{
-    self, negotiated_under, negotiated_with, ok, AuthorizationFields, METERING, SMALL_BUDGET,
+    self, negotiated_under, negotiated_with, ok, AuthorizationFields, METERING, NOT_ACTIVE,
+    SMALL_BUDGET, UNAVAILABLE,
 };
 use pos_plugin_supervisor::{
     CommunityPluginSupervisorV1, WorkerProgramV1, WorkerResourceCeilingsV1, FORWARDED_ENVIRONMENT,
@@ -22,7 +23,7 @@ use pos_runtime::community_plugin_host::{
     CommunityPassAuthorizationV1, CommunityPassV1, CommunityPluginCeilingsV1,
     CommunityPluginExecutionProfileV1, CommunityPluginHostErrorV1, CommunityPluginModeV1,
     ComponentTrapClassV1, HostInputs, InvocationReportV1, NegotiatedCommunityPluginV1,
-    PluginDescriptorV1, PluginInvocationV1, PluginOutputV1, TrapReproductionV1, TrustDenialBasisV1,
+    PluginDescriptorV1, PluginInvocationV1, PluginOutputV1, TrapReproductionV1,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -40,14 +41,6 @@ const SHORT: Duration = Duration::from_secs(1);
 const STOPPED_WITHIN: Duration = Duration::from_secs(30);
 const EXIT_HELPER: &str = "POS_PLUGIN_SUPERVISOR_EXIT_HELPER";
 const INPUTS: HostInputs = HostInputs { simulation_time: 7 };
-/// No trust state exists for the pass.
-const UNAVAILABLE: Error = Error::ArtifactTrustDenied {
-    basis: TrustDenialBasisV1::TrustStateUnavailable,
-};
-/// The authorization is not for this release or these bytes.
-const NOT_ACTIVE: Error = Error::ArtifactTrustDenied {
-    basis: TrustDenialBasisV1::NotActive,
-};
 
 fn negotiated() -> NegotiatedCommunityPluginV1 {
     negotiated_with("plugin-a", SMALL_BUDGET, Vec::new())

@@ -16,7 +16,8 @@ use pos_crypto::plugin_execution::PluginCapabilityDescriptorV1;
 use pos_crypto::plugin_manifest::component_digest_v1;
 use pos_plugin_release::ContentValidationV1;
 use pos_plugin_supervisor::test_support::{
-    self, err, negotiated_under, ok, AuthorizationFields, SMALL_BUDGET, TICK, TPS1_DIGEST,
+    self, err, negotiated_under, ok, AuthorizationFields, NOT_ACTIVE, SMALL_BUDGET, TICK,
+    TPS1_DIGEST, UNAVAILABLE,
 };
 use pos_plugin_supervisor::{
     CommunityDriverConfigV1, CommunityDriverSettingsV1, CommunityDriverV1, CommunityPluginHandleV1,
@@ -26,9 +27,8 @@ use pos_plugin_supervisor::{
 use pos_runtime::community_plugin_host::{
     CommunityPassV1, CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1,
     CommunityPluginHostErrorV1, GatedCommunityReleaseV1, HostInputs, NegotiatedCommunityPluginV1,
-    TrustDenialBasisV1,
 };
-use pos_runtime::{Driver, ObservationView, RuntimeError, StepOutput};
+use pos_runtime::{Driver, ObservationView, PluginCompositionErrorV1, RuntimeError, StepOutput};
 
 type Error = CommunityPluginHostErrorV1;
 
@@ -40,12 +40,6 @@ const PLUGIN: &str = "plugin-a";
 const DRAFT: &[u8] = b"draft:community.alpha";
 /// The fixture invocation ID.
 const INVOCATION_ID: [u8; 16] = [0x11; 16];
-const UNAVAILABLE: Error = Error::ArtifactTrustDenied {
-    basis: TrustDenialBasisV1::TrustStateUnavailable,
-};
-const NOT_ACTIVE: Error = Error::ArtifactTrustDenied {
-    basis: TrustDenialBasisV1::NotActive,
-};
 
 /// What the context source saw and what it will refuse.
 #[derive(Default)]
@@ -97,8 +91,9 @@ impl InvocationContextSourceV1 for Source {
 
 fn driver_settings(program: &str) -> (CommunityDriverSettingsV1, SharedLog) {
     let log = SharedLog::default();
+    let watchdog = Duration::from_mins(1);
     let supervisor = WorkerProgramV1::new(PathBuf::from(program))
-        .and_then(|program| CommunityPluginSupervisorV1::new(program, Duration::from_mins(1)));
+        .and_then(|program| CommunityPluginSupervisorV1::new(program, watchdog));
     let settings = CommunityDriverSettingsV1 {
         plugin_id: PluginId::new(),
         name: "wiring",
@@ -309,10 +304,15 @@ fn a_receipt_records_the_content_validation_and_the_profile_digest() {
     let _staged = ok(rig.step());
     let receipts = rig.handle.receipts();
     assert_eq!(receipts.len(), 1);
-    assert_eq!(receipts[0].content_validation, ContentValidationV1::NotPerformed);
+    assert_eq!(
+        receipts[0].content_validation,
+        ContentValidationV1::NotPerformed
+    );
     let digest = receipts[0].negotiated.execution_profile_digest();
-    assert_eq!(digest, rig.record.execution_profile_digest());
     assert!(digest.is_some());
+    // It is the digest the bound invocation carried.
+    let bound = locked(&rig.log).bindings[0].execution_profile_digest;
+    assert_eq!(digest, bound);
 }
 
 /// R7-B8: a Driver is built only from a gated release of the expected Plugin ID.
@@ -353,9 +353,13 @@ fn an_offer_into_an_occupied_slot_is_refused_and_keeps_the_first() {
     rig.offer();
     let mut later = rig.authorization();
     later.tick += 5;
+    rig.refuse_next(Error::InvalidManifest);
+    assert_eq!(rig.refused(), Error::InvalidManifest);
     let second = later.issue(&test_support::open_pass());
     let refused = rig.handle.offer_authorization(second);
     assert_eq!(refused, Err(Error::InvalidInvocation));
+    // The refused offer did not start a pass: this pass's failure is still there.
+    assert_eq!(rig.handle.pass_failure(), Some(Error::InvalidManifest));
     let _staged = ok(rig.step());
     assert_eq!(locked(&rig.log).bindings[0].tick, TICK);
 }
@@ -373,22 +377,44 @@ fn the_pass_failure_and_the_invocation_id_live_for_one_pass() {
     assert_eq!(rig.refused(), Error::InvalidManifest);
     assert_eq!(rig.handle.pass_failure(), Some(Error::InvalidManifest));
     assert_eq!(rig.handle.pass_invocation_id(), None);
-    rig.handle.close_pass();
-    assert_eq!(rig.handle.pass_failure(), None);
-    // A launch sets the ID; the next pass's offer clears it.
-    rig.offer();
+    // The successful retry sets the ID; the earlier failure stays until the pass ends.
     let _staged = ok(rig.step());
     assert_eq!(rig.handle.pass_invocation_id(), Some(INVOCATION_ID));
-    assert_eq!(rig.handle.pass_failure(), None);
+    assert_eq!(rig.handle.pass_failure(), Some(Error::InvalidManifest));
+    // An offer starts the next pass and clears both.
     rig.offer();
+    assert_eq!(rig.handle.pass_failure(), None);
     assert_eq!(rig.handle.pass_invocation_id(), None);
-    // The host's own refusal is the pass failure and also the last failure.
+    // `close_pass` clears the ID of a launched pass and a host refusal.
+    let _staged = ok(rig.step());
     rig.handle.record_refusal(Error::WorkerCrashed);
     assert_eq!(rig.handle.pass_failure(), Some(Error::WorkerCrashed));
     assert_eq!(rig.handle.last_failure(), Some(Error::WorkerCrashed));
+    assert_eq!(rig.handle.pass_invocation_id(), Some(INVOCATION_ID));
     rig.handle.close_pass();
     assert_eq!(rig.handle.pass_failure(), None);
+    assert_eq!(rig.handle.pass_invocation_id(), None);
     assert_eq!(rig.handle.last_failure(), Some(Error::WorkerCrashed));
+}
+
+/// R7-B1: a step that fails before the launch because the Plugin is unavailable leaves the
+/// authorization in the slot. The refusal is not recorded as this pass's failure.
+#[test]
+fn an_unavailable_plugin_keeps_the_authorization_and_records_no_pass_failure() {
+    let mut rig = Rig::new(MISSING, DRAFT);
+    rig.handle.record_refusal(Error::WorkerCrashed);
+    rig.handle.close_pass();
+    rig.offer();
+    assert!(matches!(
+        err(rig.step()),
+        RuntimeError::Composition(PluginCompositionErrorV1::ImplementationUnavailable { .. })
+    ));
+    assert_eq!(rig.calls(), 0);
+    assert_eq!(rig.handle.pass_failure(), None);
+    let occupied = test_support::open_pass();
+    let again = rig.authorization().issue(&occupied);
+    let refused = rig.handle.offer_authorization(again);
+    assert_eq!(refused, Err(Error::InvalidInvocation));
 }
 
 /// R7-B9: `receipt_for` returns the newest receipt of a repeated ID and `None` for an unknown

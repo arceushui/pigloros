@@ -72,7 +72,7 @@ use pos_runtime::community_plugin_host::{
     negotiate_community_plugin_v1, CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1,
     CommunityPluginHostErrorV1, GatedCommunityReleaseV1, GuestPluginErrorV1, HostInputs,
     InvocationReportV1, MeteringV1, NegotiatedCommunityPluginV1, PluginInvocationV1,
-    PluginOutputV1, TrustDenialBasisV1,
+    PluginOutputV1,
 };
 use pos_runtime::{
     DomainImplementationKindV1, Driver, ObservationView, PluginAvailabilityV1,
@@ -87,18 +87,11 @@ pub use self::state::{
     CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1, ReceiptDispositionV1,
     MAX_RETAINED_RECEIPTS_V1,
 };
+use crate::supervisor::authorize::{NOT_ACTIVE, UNAVAILABLE};
 use crate::supervisor::CommunityPluginSupervisorV1;
 
 type Error = CommunityPluginHostErrorV1;
 
-/// No authorization is offered for the pass, so no trust state exists for it.
-const UNAVAILABLE: Error = Error::ArtifactTrustDenied {
-    basis: TrustDenialBasisV1::TrustStateUnavailable,
-};
-/// The gated release is not the one the member expects.
-const NOT_ACTIVE: Error = Error::ArtifactTrustDenied {
-    basis: TrustDenialBasisV1::NotActive,
-};
 
 /// The host-built inputs of one invocation.
 ///
@@ -191,6 +184,22 @@ pub struct CommunityDriverSettingsV1 {
 ///     content_validation: todo!(),
 /// };
 /// ```
+///
+/// ```compile_fail,E0616
+/// use pos_plugin_supervisor::CommunityDriverConfigV1;
+///
+/// fn read(config: &CommunityDriverConfigV1) {
+///     let _negotiated = &config.negotiated;
+/// }
+/// ```
+///
+/// ```compile_fail,E0616
+/// use pos_plugin_supervisor::CommunityDriverConfigV1;
+///
+/// fn read(config: &CommunityDriverConfigV1) {
+///     let _component = &config.component;
+/// }
+/// ```
 pub struct CommunityDriverConfigV1 {
     settings: CommunityDriverSettingsV1,
     negotiated: NegotiatedCommunityPluginV1,
@@ -219,9 +228,9 @@ impl CommunityDriverConfigV1 {
         expected_plugin_id: &str,
         settings: CommunityDriverSettingsV1,
     ) -> Result<Self, Error> {
-        (gated.plugin_id() == expected_plugin_id)
-            .then_some(())
-            .ok_or(NOT_ACTIVE)?;
+        if gated.plugin_id() != expected_plugin_id {
+            return Err(NOT_ACTIVE);
+        }
         let negotiated = negotiate_community_plugin_v1(&gated, host_abi, profile)?;
         Ok(Self {
             settings,
@@ -435,6 +444,9 @@ impl Driver for CommunityDriverV1 {
         observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
         // A step left unresolved cannot be committed any more: drop its state.
+        // A quarantined Driver is refused below, outside `record_failure`: that
+        // refusal is not this pass's failure (`pass_failure()` stays `None`), so
+        // the host seam reports such a member as not run.
         self.staged = None;
         self.shared.discard();
         self.ensure_available()?;
