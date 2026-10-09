@@ -175,7 +175,9 @@ fn tps1_authentication_and_continuity_precede_the_bridge() -> TestResult {
         Err(bridge(PluginTrustBridgeErrorV1::SnapshotDiscontinuity))
     );
     // A valid successor is not adopted by an evaluation, whatever else is wrong with the call.
-    let next = h.env.material(&spec(1, 2).at(51, 6), &tps_after(&genesis))?;
+    let next = h
+        .env
+        .material(&spec(1, 2).at(51, 6), &tps_after(&genesis))?;
     assert_eq!(
         h.evaluate_raw(&next.tps1, &next, &bad, 55, 9)?,
         Err(RegistryError::PolicyNotAdvanced)
@@ -206,7 +208,9 @@ fn the_bridge_checks_run_in_order_before_release_authorization() -> TestResult {
         Err(bridge(PluginTrustBridgeErrorV1::ScopeMismatch))
     );
     // Evidence of epoch 2 against the retained epoch-1 TPS1, with the wrong coordinates too.
-    let next = h.env.material(&spec(1, 2).at(51, 6), &tps_after(&genesis))?;
+    let next = h
+        .env
+        .material(&spec(1, 2).at(51, 6), &tps_after(&genesis))?;
     assert_eq!(
         h.evaluate_raw(&genesis.tps1, &next, &bad, 55, 9)?,
         Err(bridge(PluginTrustBridgeErrorV1::EpochMismatch))
@@ -534,7 +538,9 @@ fn a_valid_successor_policy_is_refused_until_it_is_adopted() -> TestResult {
     let mut h = admitted()?;
     let genesis = h.env.genesis()?;
     let one = release_one();
-    let next = h.env.material(&spec(1, 2).at(51, 6), &tps_after(&genesis))?;
+    let next = h
+        .env
+        .material(&spec(1, 2).at(51, 6), &tps_after(&genesis))?;
     // New evidence with new bytes that the registry never adopted.
     h.assert_evaluate_denied(&next, &one, RegistryError::PolicyNotAdvanced)?;
     // The old evidence with the retained bytes still succeeds.
@@ -570,11 +576,15 @@ fn older_root_evidence_and_a_pending_revocation_disagree_with_the_retained_tps1(
     let genesis = h.env.genesis()?;
     let bad = unauthorized();
     // The retained policy is PTR1 version 2, PRV1 epoch 2.
-    let newer = h.env.material(&spec(2, 2).at(51, 6), &tps_after(&genesis))?;
+    let newer = h
+        .env
+        .material(&spec(2, 2).at(51, 6), &tps_after(&genesis))?;
     h.advance(&newer)??;
     // Evidence of PTR1 version 1 with the same key set against the retained version-2 TPS1; the
     // unauthorized release would fail the next step, so the bridge error comes first.
-    let older = h.env.material(&spec(1, 2).at(52, 7), &tps_after(&genesis))?;
+    let older = h
+        .env
+        .material(&spec(1, 2).at(52, 7), &tps_after(&genesis))?;
     assert_eq!(
         h.evaluate_bytes(&newer.tps1, &older, &bad)?,
         Err(bridge(PluginTrustBridgeErrorV1::BridgeRootMismatch))
@@ -737,7 +747,9 @@ fn the_policy_facts_follow_the_retained_policy_after_an_adoption() -> TestResult
     let mut h = admitted()?;
     let genesis = h.env.genesis()?;
     let one = release_one();
-    let newer = h.env.material(&spec(2, 2).at(52, 7), &tps_after(&genesis))?;
+    let newer = h
+        .env
+        .material(&spec(2, 2).at(52, 7), &tps_after(&genesis))?;
     h.advance(&newer)??;
     let decision = h
         .store
