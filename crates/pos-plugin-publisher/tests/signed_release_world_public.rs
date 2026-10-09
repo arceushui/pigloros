@@ -180,7 +180,7 @@ fn a_refused_policy_advance_leaves_the_world_evidence_unchanged() -> TestResult 
         refused.err(),
         Some(PluginTrustPolicyRegistryErrorV1::TrustedTimeRegressed)
     );
-    assert_eq!(world.spec.extra_epochs, 0);
+    assert!(world.spec.adopted.is_empty());
     assert_eq!(world.previous, None);
     world.spec.utc_offset = 0;
     assert_eq!(world.material()?.tps1, before);
@@ -221,42 +221,61 @@ fn an_operator_rollback_reactivates_the_earlier_release() -> TestResult {
 
 #[test]
 fn sequential_policy_advances_keep_every_earlier_revocation() -> TestResult {
-    let mut world = World::new()?;
-    let first = world.publish(Shape::first())?;
-    let second = world.publish(Shape {
-        version: "2.0.0",
-        ..Shape::first()
+    let mut world = World::with_config(Config {
+        second_epoch_key: true,
+        ..Config::default()
     })?;
+    // The epoch-1 release is signed before the epoch-2 key joins the Key registry.
+    let signed_by_one = world.publish(Shape::first())?;
+    world.register_second_epoch()?;
+    let second_epoch = Shape {
+        version: "2.0.0",
+        epoch: 2,
+        ..Shape::first()
+    };
+    let revoked = world.publish_second_epoch(second_epoch)?;
+    let third_epoch = Shape {
+        version: "3.0.0",
+        ..second_epoch
+    };
+    let clean = world.publish_second_epoch(third_epoch)?;
+    // Advance 1 revokes one epoch-2 release digest: PRV1 epoch 2.
     let artifacts = world
-        .advance_revoking_artifacts(&[second.release_digest()])?
+        .advance_revoking_artifacts(&[revoked.release_digest()])?
         .map_err(|error| format!("artifact advance failed: {error}"))?;
     assert_eq!(artifacts.tps1_epoch, 2);
-    let refused = world.install(second.address(), 1)?;
+    let refused = world.install(revoked.address(), 1)?;
     assert_eq!(
         refused.err(),
         Some(authorization_error(PluginTrustErrorV1::ArtifactRevoked))
     );
+    // Advance 2 revokes the epoch-1 key: PRV1 epoch 3 keeps the artifact revocation.
     let keys = world
         .advance_revoking_keys(&[1])?
         .map_err(|error| format!("key advance failed: {error}"))?;
     assert_eq!(keys.outcome, PolicyAdvanceKindV1::Advanced);
     assert_eq!(keys.tps1_epoch, 3);
-    // The registry accepted a TPS1 that maps both revocations.
-    assert_eq!(world.spec.extra_epochs, 2);
+    assert_eq!(world.spec.adopted.len(), 2);
     assert_eq!(world.spec.revoked_epochs, [1]);
-    assert_eq!(world.spec.revoked_artifacts, [second.release_digest()]);
+    assert_eq!(world.spec.revoked_artifacts, [revoked.release_digest()]);
     let retained = world.registry.retained_policy_state(SCOPE)?;
     assert_eq!(retained.tps1_epoch(), 3);
     assert_eq!(retained.tps1_digest(), world.material()?.tps1_digest());
-    // Both releases are now refused: the key revocation outranks the artifact one.
-    for address in [first.address(), second.address()] {
-        let refused = world.install(address, 1)?;
-        assert_eq!(
-            refused.err(),
-            Some(authorization_error(PluginTrustErrorV1::PublisherKeyRevoked))
-        );
-    }
+    // The key revocation is enforced, and so is the artifact revocation of advance 1.
+    let refused = world.install(signed_by_one.address(), 1)?;
+    assert_eq!(
+        refused.err(),
+        Some(authorization_error(PluginTrustErrorV1::PublisherKeyRevoked))
+    );
+    let refused = world.install(revoked.address(), 1)?;
+    assert_eq!(
+        refused.err(),
+        Some(authorization_error(PluginTrustErrorV1::ArtifactRevoked))
+    );
     assert!(world.registry.admits.is_empty());
+    // A release signed by the unrevoked epoch-2 key and not revoked itself still installs.
+    assert!(world.install(clean.address(), 1)?.is_ok());
+    assert_eq!(world.registry.admits.len(), 1);
     Ok(())
 }
 

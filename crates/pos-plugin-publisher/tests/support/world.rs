@@ -30,7 +30,7 @@ use pos_store::plugin_trust_registry::{
     RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
 };
 
-use super::encoding::{Material, Policy, Spec, OTHER_OWNER, OWNER, SCOPE, TICK};
+use super::encoding::{Material, Policy, Revocations, Spec, OTHER_OWNER, OWNER, SCOPE, TICK};
 use super::release::{address_of, closure, make_draft, PrivateRoot, Shape};
 use super::spy_registry::SpyRegistry;
 use super::BoxResult;
@@ -92,8 +92,28 @@ pub fn register(
     owner: &str,
     epoch: u64,
 ) -> BoxResult<SigningKeyMaterial> {
+    let material = generate_key();
+    register_key(keys, owner, epoch, &material)?;
+    Ok(material)
+}
+
+/// A fresh Plugin release signing key that is not registered anywhere yet.
+#[must_use]
+pub fn generate_key() -> SigningKeyMaterial {
     let (signing_key, _verifying_key) = generate_keypair();
-    let material = SigningKeyMaterial::new(signing_key);
+    SigningKeyMaterial::new(signing_key)
+}
+
+/// Register `material` as the Plugin release signing key of `owner` at `epoch`.
+///
+/// # Errors
+/// Returns the owner identifier or key registration error.
+pub fn register_key(
+    keys: &mut KeyRegistryStateV1,
+    owner: &str,
+    epoch: u64,
+    material: &SigningKeyMaterial,
+) -> BoxResult<()> {
     keys.register_key(KeyRegistrationV1::new(
         KeyIdentityV1::new(
             OwnerIdV1::new(owner)?,
@@ -103,7 +123,7 @@ pub fn register(
         material.material_digest(),
         Some(material.public_verification_key()),
     ))?;
-    Ok(material)
+    Ok(())
 }
 
 fn publish_signed(
@@ -117,12 +137,15 @@ fn publish_signed(
     Ok(published)
 }
 
-/// `spec` with one more chained PRV1 epoch.
-fn next_epoch(spec: Spec) -> Spec {
-    Spec {
-        extra_epochs: spec.extra_epochs + 1,
-        ..spec
-    }
+/// `spec` with its terminal PRV1 record adopted as an immutable earlier record and a new
+/// terminal record that so far carries the same revocations.
+fn next_epoch(spec: &Spec) -> Spec {
+    let mut next = spec.clone();
+    next.adopted.push(Revocations {
+        epochs: spec.revoked_epochs.clone(),
+        artifacts: spec.revoked_artifacts.clone(),
+    });
+    next
 }
 
 /// Who may publish which Plugin, whether the PTR1 lists the real publisher key,
@@ -138,6 +161,9 @@ pub struct Config {
     pub listed_key: Option<[u8; 32]>,
     /// Whether to provision the registry from the genesis TPS1.
     pub provision: bool,
+    /// Whether the PTR1 also lists an epoch-2 key for the publisher. The key is generated but
+    /// not registered until `World::register_second_epoch`.
+    pub second_epoch_key: bool,
 }
 
 impl Default for Config {
@@ -147,12 +173,13 @@ impl Default for Config {
             owner: OWNER,
             listed_key: None,
             provision: true,
+            second_epoch_key: false,
         }
     }
 }
 
 /// Everything observable about the registry and the activation Timeline.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Snapshot {
     /// The retained policy state.
     pub policy: RetainedPolicyStateV1,
@@ -178,6 +205,8 @@ pub struct World {
     pub publisher: SigningKeyMaterial,
     /// The other owner's epoch-1 key.
     pub other: SigningKeyMaterial,
+    /// The publisher's epoch-2 key, when the config asked for one.
+    pub second: Option<SigningKeyMaterial>,
     /// The public keys and grants the PTR1 lists.
     pub policy: Policy,
     /// The registry anchor of the policy.
@@ -225,10 +254,11 @@ impl World {
         let mut keys = KeyRegistryStateV1::new();
         let publisher = register(&mut keys, config.owner, 1)?;
         let other = register(&mut keys, OTHER_OWNER, 1)?;
+        let second = config.second_epoch_key.then(generate_key);
         let policy = Policy {
             other: key_bytes(&other),
             publisher_one: config.listed_key.unwrap_or_else(|| key_bytes(&publisher)),
-            publisher_two: None,
+            publisher_two: second.as_ref().map(key_bytes),
             plugin_id: config.plugin_id,
             owner: config.owner,
         };
@@ -246,6 +276,7 @@ impl World {
             keys,
             publisher,
             other,
+            second,
             policy,
             anchor,
             registry,
@@ -284,6 +315,24 @@ impl World {
         shape: Shape,
     ) -> BoxResult<PublishedPluginReleaseV1> {
         publish_signed(&mut self.keys, signer, &self.store, shape)
+    }
+
+    /// Register the epoch-2 key (see `Config::second_epoch_key`) for the publisher.
+    ///
+    /// # Errors
+    /// Returns an error when the world has no epoch-2 key, or the registration error.
+    pub fn register_second_epoch(&mut self) -> BoxResult<()> {
+        let second = self.second.as_ref().ok_or("no epoch-2 key")?;
+        register_key(&mut self.keys, self.policy.owner, 2, second)
+    }
+
+    /// Sign and publish a release with the epoch-2 key; the shape's epoch should be 2.
+    ///
+    /// # Errors
+    /// Returns an error when the world has no epoch-2 key, or the draft or publication error.
+    pub fn publish_second_epoch(&mut self, shape: Shape) -> BoxResult<PublishedPluginReleaseV1> {
+        let second = self.second.as_ref().ok_or("no epoch-2 key")?;
+        publish_signed(&mut self.keys, second, &self.store, shape)
     }
 
     /// Publish arbitrary PMF1 bytes bound to the default draft's artifacts.
@@ -433,7 +482,8 @@ impl World {
         &mut self,
         epochs: &[u64],
     ) -> BoxResult<Registry<PolicyAdvanceOutcomeV1>> {
-        let next = next_epoch(self.revoking_keys(epochs));
+        let mut next = next_epoch(&self.spec);
+        next.revoked_epochs.extend_from_slice(epochs);
         self.advance_to(next)
     }
 
@@ -448,7 +498,8 @@ impl World {
         &mut self,
         digests: &[[u8; 32]],
     ) -> BoxResult<Registry<PolicyAdvanceOutcomeV1>> {
-        let next = next_epoch(self.revoking_artifacts(digests));
+        let mut next = next_epoch(&self.spec);
+        next.revoked_artifacts.extend_from_slice(digests);
         self.advance_to(next)
     }
 

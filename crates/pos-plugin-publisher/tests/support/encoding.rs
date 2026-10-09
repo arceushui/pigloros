@@ -108,7 +108,20 @@ pub struct Policy {
     pub owner: &'static str,
 }
 
-/// The evaluation coordinates and the revocations of one evidence.
+/// The revocations one PRV1 record carries, cumulative over every earlier record.
+#[derive(Clone, Debug, Default)]
+pub struct Revocations {
+    /// Publisher key epochs revoked.
+    pub epochs: Vec<u64>,
+    /// Release digests revoked.
+    pub artifacts: Vec<[u8; 32]>,
+}
+
+/// The evaluation coordinates and the PRV1 history of one evidence.
+///
+/// The history is the `adopted` records, which are immutable once a registry has
+/// retained them, followed by one terminal record carrying `revoked_epochs` and
+/// `revoked_artifacts`.
 #[derive(Clone, Default)]
 pub struct Spec {
     /// Added to [`UTC`] to get the evaluation second.
@@ -117,9 +130,8 @@ pub struct Spec {
     pub revoked_epochs: Vec<u64>,
     /// Release digests the terminal PRV1 revokes.
     pub revoked_artifacts: Vec<[u8; 32]>,
-    /// PRV1 records chained after the first one; only the last carries the
-    /// revocations, so a policy advance needs at least one.
-    pub extra_epochs: u64,
+    /// The revocations of the PRV1 records before the terminal one, oldest first.
+    pub adopted: Vec<Revocations>,
 }
 
 impl Spec {
@@ -172,17 +184,12 @@ fn ptr1(policy: Policy) -> BoxResult<Vec<u8>> {
 
 fn prv1(
     policy: Policy,
-    spec: &Spec,
+    revocations: &Revocations,
     root_digest: [u8; 32],
     epoch: u64,
     previous: Option<[u8; 32]>,
-    terminal: bool,
 ) -> BoxResult<Vec<u8>> {
-    let mut epochs = if terminal {
-        spec.revoked_epochs.clone()
-    } else {
-        Vec::new()
-    };
+    let mut epochs = revocations.epochs.clone();
     epochs.sort_unstable();
     let keys = epochs
         .into_iter()
@@ -202,11 +209,7 @@ fn prv1(
             ])
         })
         .collect::<Vec<_>>();
-    let mut digests = if terminal {
-        spec.revoked_artifacts.clone()
-    } else {
-        Vec::new()
-    };
+    let mut digests = revocations.artifacts.clone();
     digests.sort_unstable();
     let artifacts = digests
         .into_iter()
@@ -237,13 +240,18 @@ fn prv1(
     )
 }
 
-/// The PRV1 history of `spec`: `1 + extra_epochs` chained records.
+/// The PRV1 history of `spec`: the adopted records unchanged, then the terminal
+/// record, each chained to the previous one by its full-byte digest.
 fn revocation_chain(policy: Policy, spec: &Spec, root_digest: [u8; 32]) -> BoxResult<Vec<Vec<u8>>> {
-    let last = 1 + spec.extra_epochs;
+    let terminal = Revocations {
+        epochs: spec.revoked_epochs.clone(),
+        artifacts: spec.revoked_artifacts.clone(),
+    };
     let mut records: Vec<Vec<u8>> = Vec::new();
-    for epoch in 1..=last {
+    for (index, revocations) in spec.adopted.iter().chain([&terminal]).enumerate() {
+        let epoch = u64::try_from(index)? + 1;
         let previous = records.last().map(|record| digest(record));
-        let record = prv1(policy, spec, root_digest, epoch, previous, epoch == last)?;
+        let record = prv1(policy, revocations, root_digest, epoch, previous)?;
         records.push(record);
     }
     Ok(records)
