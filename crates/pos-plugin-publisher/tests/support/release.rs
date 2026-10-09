@@ -128,6 +128,9 @@ pub struct Shape {
     pub not_after: i64,
     /// The publisher key epoch that signs the release.
     pub epoch: u64,
+    /// Whether the one declared capability is required. A required capability is denied by
+    /// negotiation, so a release that a Driver is built from declares it optional.
+    pub required_capability: bool,
 }
 
 impl Shape {
@@ -144,6 +147,17 @@ impl Shape {
             not_before: 40,
             not_after: 60,
             epoch: 1,
+            required_capability: true,
+        }
+    }
+
+    /// This shape declaring its one capability as optional, so negotiation records it as not
+    /// granted instead of denying the release.
+    #[must_use]
+    pub const fn with_optional_capability(self) -> Self {
+        Self {
+            required_capability: false,
+            ..self
         }
     }
 
@@ -182,7 +196,7 @@ pub fn make_draft<'a>(shape: Shape) -> BoxResult<PluginReleaseDraftV1<'a>> {
             resource_pattern: "state/*".to_owned(),
             purpose: "Read Plugin state".to_owned(),
             audience: "plugin".to_owned(),
-            required: true,
+            required: shape.required_capability,
             max_calls: 10,
             max_request_bytes: 1_024,
             max_response_bytes: 2_048,

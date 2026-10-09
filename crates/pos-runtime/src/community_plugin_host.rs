@@ -17,6 +17,8 @@ mod failure;
 #[cfg(target_os = "linux")]
 mod gate;
 #[cfg(target_os = "linux")]
+mod host;
+#[cfg(target_os = "linux")]
 mod install;
 mod negotiation;
 mod profile;
@@ -40,6 +42,11 @@ pub use gate::{
     host_error_for_trust_verification_v1, CommunityPassAuthorizationV1, CommunityPassV1,
     CommunityPluginExpectationV1, CommunityPluginTrustMaterialV1, GatedCommunityReleaseV1,
     PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1, ReleaseIdentityV1,
+};
+#[cfg(target_os = "linux")]
+pub use host::{
+    CommunityPassOutcomeV1, CommunityPassRequestV1, CommunityPluginHostV1, CommunityPluginMemberV1,
+    CommunityStageV1, GateSummaryV1, MemberPassV1, PassResultV1,
 };
 #[cfg(target_os = "linux")]
 pub use install::{

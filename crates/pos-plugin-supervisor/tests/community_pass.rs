@@ -7,35 +7,21 @@
 //! prior state into the Event and appends `+` to it, and the other names are
 //! the probe's faults (see `tests/support/worker_probe.rs`).
 
-use std::num::NonZeroUsize;
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use pos_core::{
-    AppendDedupKey, AppendDedupScope, AppendIdentity, CanonicalBytes, CoreError, EntityId,
-    ErasureContainmentGateV1, Event, EventDraft, EventStore, Hash, Kind, PipelineAdmissionBasisV1,
-    PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineEvidenceRefV1,
-    PipelineOutcomeV1, PipelineReceiptLookupV1, PipelineSecurityRevisionsV1, PluginId,
-    PurgeOutcome, Seq, SeqRange, TimelineId,
+    CanonicalBytes, CoreError, EntityId, Event, EventDraft, EventStore, Kind, PipelineOutcomeV1,
 };
-use pos_plugin_supervisor::test_support::{
-    self, community_pin, err, negotiated_with, ok, DriverPlugin, SMALL_BUDGET,
-};
-use pos_plugin_supervisor::{
-    register_community_driver, CommunityDriverSettingsV1, CommunityDriverV1,
-    CommunityPluginHandleV1, CommunityPluginSupervisorV1, CommunityStateV1, InvocationBindingV1,
-    InvocationContextSourceV1, InvocationContextV1, ReceiptDispositionV1, WorkerProgramV1,
-};
+use pos_plugin_supervisor::pass_harness::{initial, LostPort, World};
+use pos_plugin_supervisor::test_support::{self, err, ok};
+use pos_plugin_supervisor::{CommunityPluginHandleV1, ReceiptDispositionV1};
 use pos_runtime::community_plugin_host::{
     classify_pass_failure, AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
-    HostFailureClassV1, HostInputs, NegotiatedCommunityPluginV1, PassFailureV1, TrapReproductionV1,
+    HostFailureClassV1, PassFailureV1, TrapReproductionV1,
 };
 use pos_runtime::{
-    LocalScheduledAdmissionHostV1, ObservationView, PluginAvailabilityV1, PluginCompositionErrorV1,
-    PluginRegistry, RuntimeError, ScheduledDriverBindingV1, ScheduledPassAdmissionV1,
+    PluginAvailabilityV1, PluginCompositionErrorV1, RuntimeError, ScheduledDriverBindingV1,
 };
-use pos_store::memory::MemoryStore;
 
 type Error = CommunityPluginHostErrorV1;
 
@@ -49,224 +35,9 @@ const NOT_ADMITTED: Error = Error::AtomicCommitFailed {
     failure: AtomicCommitFailureV1::DeterministicTypedResult,
 };
 
-/// The host's invocation inputs, one distinct invocation ID per member.
-struct Source {
-    invocation_id: [u8; 16],
-}
-
-impl InvocationContextSourceV1 for Source {
-    fn context(
-        &mut self,
-        timeline: TimelineId,
-        observation: &ObservationView<'_>,
-        binding: InvocationBindingV1,
-    ) -> Result<InvocationContextV1, Error> {
-        let mut invocation = test_support::bound(test_support::invocation(b"observation"), binding);
-        invocation.invocation_id = self.invocation_id;
-        invocation.timeline_position.timeline_id = timeline.inner().to_bytes();
-        invocation.timeline_position.seq = observation
-            .anchor()
-            .map_or(0, |anchor| anchor.observed_through().as_u64());
-        Ok(InvocationContextV1 {
-            invocation,
-            host_inputs: HostInputs { simulation_time: 1 },
-        })
-    }
-}
-
-fn initial() -> CommunityStateV1 {
-    CommunityStateV1 {
-        schema: [9; 32],
-        bytes: b"initial".to_vec(),
-    }
-}
-
-/// Port that commits through the real store and then loses the outcome.
-struct LostPort<'a>(&'a mut MemoryStore);
-
-impl PipelineAdmissionPortV1 for LostPort<'_> {
-    fn admit_pipeline_batch(
-        &mut self,
-        basis: &PipelineAdmissionBasisV1,
-    ) -> Result<PipelineOutcomeV1, CoreError> {
-        self.0.admit_pipeline_batch(basis).and_then(|_| {
-            Err(CoreError::StorageOutcomeUnknown(
-                "injected lost commit acknowledgement".to_owned(),
-            ))
-        })
-    }
-
-    fn lookup_pipeline_receipt(
-        &mut self,
-        timeline: TimelineId,
-        key: AppendDedupKey,
-        attempt_id: PipelineAttemptIdV1,
-    ) -> Result<PipelineReceiptLookupV1, CoreError> {
-        self.0.lookup_pipeline_receipt(timeline, key, attempt_id)
-    }
-
-    fn purge_expired_pipeline_receipts_bounded(
-        &mut self,
-        limit: NonZeroUsize,
-    ) -> Result<PurgeOutcome, CoreError> {
-        self.0.purge_expired_pipeline_receipts_bounded(limit)
-    }
-}
-
-/// One staged scheduled pass and the host inputs of its commit.
-#[derive(Debug)]
-struct Staged {
-    head: Seq,
-    revisions: PipelineSecurityRevisionsV1,
-}
-
-/// One registered member and what its pass authorization is for.
-struct Member {
-    handle: CommunityPluginHandleV1,
-    negotiated: NegotiatedCommunityPluginV1,
-    component: Vec<u8>,
-}
-
-struct World {
-    registered: Vec<Member>,
-    store: MemoryStore,
-    registry: PluginRegistry,
-    gate: Arc<ErasureContainmentGateV1>,
-    timeline: TimelineId,
-    members: u8,
-    attempts: u8,
-}
-
-impl World {
-    fn new() -> Self {
-        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-        let mut store = MemoryStore::new();
-        let () = ok(store.bind_erasure_gate(Arc::clone(&gate)));
-        let timeline = ok(store.create_timeline("community-pass")).id();
-        Self {
-            registered: Vec::new(),
-            store,
-            registry: PluginRegistry::new().with_erasure_gate(gate.clone()),
-            gate,
-            timeline,
-            members: 0,
-            attempts: 0,
-        }
-    }
-
-    /// Register one community Plugin whose Component bytes name the probe's
-    /// behaviour.
-    fn add(
-        &mut self,
-        name: &'static str,
-        event_type: &'static str,
-        component: &[u8],
-        watchdog: Duration,
-    ) -> CommunityPluginHandleV1 {
-        self.members += 1;
-        let plugin = DriverPlugin {
-            id: PluginId::new(),
-            name,
-            event_type,
-            has_driver: true,
-        };
-        let supervisor = WorkerProgramV1::new(PathBuf::from(PROBE))
-            .and_then(|program| CommunityPluginSupervisorV1::new(program, watchdog));
-        let settings = CommunityDriverSettingsV1 {
-            plugin_id: plugin.id,
-            name,
-            tick_interval: Duration::from_millis(100),
-            subscriptions: Vec::new(),
-            supervisor: supervisor
-                .unwrap_or_else(|| std::panic::resume_unwind(Box::new("invalid supervisor"))),
-            source: Box::new(Source {
-                invocation_id: [self.members; 16],
-            }),
-            initial_state: initial(),
-        };
-        let (driver, handle) =
-            CommunityDriverV1::new(test_support::config_with(name, component, settings));
-        self.registered.push(Member {
-            handle: handle.clone(),
-            negotiated: negotiated_with(name, SMALL_BUDGET, Vec::new()),
-            component: component.to_vec(),
-        });
-        let pin = community_pin(self.members, &format!("community-{name}"));
-        let () = ok(register_community_driver(
-            &mut self.registry,
-            &plugin,
-            pin,
-            driver,
-        ));
-        handle
-    }
-
-    /// Start a pass for every member: drop what the last pass left in its slot and
-    /// offer a fresh authorization, as the host pass seam will (#584).
-    fn offer_all(&self) {
-        for member in &self.registered {
-            member.handle.close_pass();
-            let authorization =
-                test_support::authorization_for(&member.negotiated, &member.component);
-            let () = ok(member.handle.offer_authorization(authorization));
-        }
-    }
-
-    /// Observe, then stage one anchored pass over the committed prefix.
-    fn stage(&mut self) -> Result<Staged, RuntimeError> {
-        self.offer_all();
-        let revisions = LocalScheduledAdmissionHostV1::shared()?.observe(
-            &self.registry,
-            &mut self.store,
-            self.timeline,
-        )?;
-        let head = self.store.logical_head(self.timeline)?;
-        let prefix = self.store.read(self.timeline, SeqRange::all())?;
-        let chain = pos_core::fork_ancestry(&self.store, self.timeline)?;
-        self.registry
-            .step_all_anchored_with_events(self.timeline, &chain, head, &prefix)
-            .map(|_| Staged { head, revisions })
-    }
-
-    /// The host's admission inputs for the staged pass, fresh each time.
-    fn admission(&mut self, staged: &Staged) -> ScheduledPassAdmissionV1 {
-        self.attempts += 1;
-        let key = self.attempts;
-        ScheduledPassAdmissionV1 {
-            attempt_id: ok(PipelineAttemptIdV1::try_new([key; 16])),
-            idempotency: AppendIdentity::new(
-                AppendDedupKey::from_keyed_hash([key; 32]),
-                AppendDedupScope::from_keyed_hash([62; 32]),
-            ),
-            provider_validation: ok(PipelineEvidenceRefV1::try_new(Hash::from_bytes([60; 32]))),
-            security_revisions: staged.revisions,
-            commit_head: staged.head,
-            commit_now_secs: 1,
-        }
-    }
-
-    fn admit(&mut self, staged: &Staged) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
-        let admission = self.admission(staged);
-        self.registry
-            .admit_scheduled_pass(&mut self.store, &admission)
-    }
-
-    /// Stage and atomically admit one whole pass.
-    fn pass(&mut self) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
-        let staged = self.stage()?;
-        self.admit(&staged)
-    }
-
-    fn events(&self) -> Vec<Event> {
-        ok(self.store.read(self.timeline, SeqRange::all()))
-    }
-
-    /// Mirror each handle's availability into the registry.
-    fn sync(&mut self, handles: &[&CommunityPluginHandleV1]) {
-        for handle in handles {
-            let () = ok(handle.sync_registry(&mut self.registry));
-        }
-    }
+/// A pass world whose Drivers launch the probe worker.
+fn new_world() -> World {
+    World::new(PROBE)
 }
 
 fn payloads(events: &[Event]) -> Vec<Vec<u8>> {
@@ -286,7 +57,7 @@ fn dispositions(handle: &CommunityPluginHandleV1) -> Vec<ReceiptDispositionV1> {
 
 #[test]
 fn a_pass_commits_every_draft_atomically_and_only_then_the_state() {
-    let mut world = World::new();
+    let mut world = new_world();
     let alpha = world.add("alpha", "community.alpha", b"chain:community.alpha", PROMPT);
     let beta = world.add("beta", "community.beta", b"draft:community.beta", PROMPT);
     for handle in [&alpha, &beta] {
@@ -354,7 +125,7 @@ const fn failure(
 ///
 /// Returns the pass error, so a caller can inspect what the real pass raised.
 fn check_failure(failure: &Failure) -> RuntimeError {
-    let mut world = World::new();
+    let mut world = new_world();
     let alpha = world.add("alpha", "community.alpha", b"draft:community.alpha", PROMPT);
     let beta = world.add(
         "beta",
@@ -461,7 +232,7 @@ fn a_watchdog_stop_discards_the_pass_without_quarantine() {
 
 #[test]
 fn a_quarantined_plugin_blocks_passes_in_memory_until_the_host_clears_it() {
-    let mut world = World::new();
+    let mut world = new_world();
     let alpha = world.add("alpha", "community.alpha", b"draft:community.alpha", PROMPT);
     let beta = world.add("beta", "community.beta", b"fuel", PROMPT);
     let error = err(world.pass());
@@ -500,7 +271,7 @@ fn a_quarantined_plugin_blocks_passes_in_memory_until_the_host_clears_it() {
 
 #[test]
 fn a_typed_non_commit_and_a_store_error_discard_the_pass_and_classify() {
-    let mut world = World::new();
+    let mut world = new_world();
     let alpha = world.add("alpha", "community.alpha", b"chain:community.alpha", PROMPT);
     let beta = world.add("beta", "community.beta", b"draft:community.beta", PROMPT);
 
@@ -561,7 +332,7 @@ fn a_typed_non_commit_and_a_store_error_discard_the_pass_and_classify() {
 
 #[test]
 fn a_lost_commit_outcome_keeps_the_staged_state_for_recovery() {
-    let mut world = World::new();
+    let mut world = new_world();
     let alpha = world.add("alpha", "community.alpha", b"chain:community.alpha", PROMPT);
     let beta = world.add("beta", "community.beta", b"draft:community.beta", PROMPT);
     let staged = ok(world.stage());
@@ -595,7 +366,7 @@ fn a_lost_commit_outcome_keeps_the_staged_state_for_recovery() {
 
 #[test]
 fn abandoning_an_in_doubt_pass_discards_the_staged_state() {
-    let mut world = World::new();
+    let mut world = new_world();
     let alpha = world.add("alpha", "community.alpha", b"chain:community.alpha", PROMPT);
     let staged = ok(world.stage());
     let admission = world.admission(&staged);
