@@ -240,6 +240,7 @@ fn add_member(
         name: spec.plugin_id,
         event_type: spec.event_type,
         gated,
+        profile: test_support::fixture_profile(),
         watchdog: PROMPT,
         source: source_for(spec, number, refuse),
         register: spec.registered,

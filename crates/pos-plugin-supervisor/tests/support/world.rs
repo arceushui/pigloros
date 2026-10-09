@@ -14,10 +14,10 @@ use pos_core::{
     TimelineMeta,
 };
 use pos_runtime::community_plugin_host::{
-    CommunityPassOutcomeV1, CommunityPassRequestV1, CommunityPluginExpectationV1,
-    CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, CommunityPluginHostV1,
-    CommunityPluginMemberV1, CommunityStageV1, GatedCommunityReleaseV1, HostInputs,
-    NegotiatedCommunityPluginV1,
+    CommunityPassOutcomeV1, CommunityPassRequestV1, CommunityPluginExecutionProfileV1,
+    CommunityPluginExpectationV1, CommunityPluginHostAbiV1, CommunityPluginHostErrorV1,
+    CommunityPluginHostV1, CommunityPluginMemberV1, CommunityStageV1, GatedCommunityReleaseV1,
+    HostInputs, NegotiatedCommunityPluginV1,
 };
 use pos_runtime::{
     LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, RuntimeError,
@@ -201,6 +201,9 @@ pub struct GatedSpec {
     /// The gated release the Driver is built from; its Component bytes name the probe's
     /// behaviour.
     pub gated: GatedCommunityReleaseV1,
+    /// The host profile the Driver negotiates under: the fixture profile for the probe worker,
+    /// or the profile of the real worker's pinned runtime and the wanted mode.
+    pub profile: CommunityPluginExecutionProfileV1,
     /// The worker watchdog.
     pub watchdog: Duration,
     /// The source of the Driver's invocations.
@@ -332,6 +335,7 @@ impl World {
             name,
             event_type,
             gated,
+            profile,
             watchdog,
             source,
             register,
@@ -352,7 +356,7 @@ impl World {
         let config = CommunityDriverConfigV1::from_gated(
             gated,
             &host_abi(),
-            &test_support::fixture_profile(),
+            &profile,
             &expected.plugin_id,
             settings,
         )?;

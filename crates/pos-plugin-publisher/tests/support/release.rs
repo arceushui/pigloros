@@ -131,6 +131,9 @@ pub struct Shape {
     /// Whether the one declared capability is required. A required capability is denied by
     /// negotiation, so a release that a Driver is built from declares it optional.
     pub required_capability: bool,
+    /// The deterministic memory budget of the release, in bytes. The default is one page; a
+    /// real Component needs more than its initial memory.
+    pub memory_bytes: u64,
 }
 
 impl Shape {
@@ -148,6 +151,7 @@ impl Shape {
             not_after: 60,
             epoch: 1,
             required_capability: true,
+            memory_bytes: 65_536,
         }
     }
 
@@ -157,6 +161,15 @@ impl Shape {
     pub const fn with_optional_capability(self) -> Self {
         Self {
             required_capability: false,
+            ..self
+        }
+    }
+
+    /// This shape with a deterministic memory budget of `memory_bytes`, a whole number of pages.
+    #[must_use]
+    pub const fn with_memory_bytes(self, memory_bytes: u64) -> Self {
+        Self {
+            memory_bytes,
             ..self
         }
     }
@@ -202,7 +215,7 @@ pub fn make_draft<'a>(shape: Shape) -> BoxResult<PluginReleaseDraftV1<'a>> {
             max_response_bytes: 2_048,
         }],
         budget: DeterministicBudgetV1 {
-            memory_bytes: 65_536,
+            memory_bytes: shape.memory_bytes,
             fuel: 1 << 40,
             host_calls: 256,
             event_count: 24,
