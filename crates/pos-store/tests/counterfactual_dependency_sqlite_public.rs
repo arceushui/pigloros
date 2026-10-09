@@ -2147,7 +2147,7 @@ fn c14_drifted_dependency_tables_are_rejected_on_every_open() {
         let text = fixture_path_str(&fixture);
         assert!(refuses(text, &name), "{fragment}");
     }
-    for table in ["records", "nodes", "edges"] {
+    for table in ["records", "nodes", "edges", "commit_ranges", "event_nodes"] {
         let fixture = fixture();
         let name = format!("counterfactual_dependency_{table}");
         ok(execute(
@@ -2216,6 +2216,13 @@ fn c14_a_pre_schema_file_reads_dependencies_as_not_found() {
     // The factual reads fail closed: the tables are absent and cannot be made.
     for timeline in [root, fork] {
         assert!(factual_reads_fail(&read_only, timeline));
+    }
+    // So do the reads with nothing to look up, which touch no table.
+    for timeline in [root, fork] {
+        let events = read_only.nodes_for_committed_events(timeline, &[]);
+        assert!(matches!(err(events), CoreError::Storage(_)));
+        let bound = read_only.nodes_by_digest(timeline, &[]);
+        assert!(matches!(err(bound), CoreError::Storage(_)));
     }
 }
 

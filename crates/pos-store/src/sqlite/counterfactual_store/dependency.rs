@@ -41,7 +41,9 @@
 //!   a digest lookup.
 //! - The index `counterfactual_dependency_nodes_by_owner` on the nodes table,
 //!   over `(timeline_id, generation, owner_id, tick)`, serves the latest step
-//!   node of an owner.
+//!   node of an owner. Both index names carry no `idx_` prefix, on purpose:
+//!   they follow the module's trigger naming,
+//!   `counterfactual_dependency_<table>_<what>`.
 //!
 //! A set is addressed by a Timeline ID and a generation key. A Fork
 //! generation's provisional rows use the generation itself (at least `1`); the
@@ -106,18 +108,24 @@
 //!   point. It stitches the Timeline's own committed prefix set with every
 //!   ancestor's set through that ancestor's cut, as the Memory adapter does:
 //!   an ancestor's Ticks are visible when they end at or before the fork
-//!   point `seq`, a lookup that finds nothing continues in the next older set,
-//!   and a `seq` inside a Tick is a mid-Tick cut. A parent-prefix page read
-//!   stitches the same way, each ancestor serving only its visible Ticks. An
-//!   unknown or concealed
-//!   Timeline, or one whose ancestor was deleted, is `TimelineNotFound`. A
-//!   stored row that fails re-validation is a storage fault, and so is any
-//!   read of a pre-schema read-only file, which holds none of the tables. The
-//!   set counts are the sums of the Timeline's own record rows.
+//!   point `seq`, a lookup that finds nothing continues in the next older
+//!   set, and a `seq` inside a Tick is a mid-Tick cut. A parent-prefix page
+//!   read stitches the same way, each ancestor serving only its visible
+//!   Ticks. An unknown or concealed Timeline, or one whose ancestor was
+//!   deleted, is `TimelineNotFound`. A stored row that fails re-validation
+//!   is a storage fault, and so is any read of a pre-schema read-only file,
+//!   which holds none of the tables, even a read with nothing to look up.
+//!   The set counts are the sums of the Timeline's own record rows.
 //! - **Seeding.** The insert function behind `seed_factual_prefix` records one
 //!   committed Tick: its record, nodes, and edges under the prefix key, its
 //!   commit range, and its Event bindings, in one transaction. It exists only
 //!   with `test-support` until the pipeline commit calls it.
+//! - **Event binding digest key.** This is a decision beyond the ADR's list of
+//!   tables, keys, and guards: `counterfactual_dependency_event_nodes` has
+//!   `UNIQUE (timeline_id, artifact_digest)` and the `digest_not_replaced`
+//!   guard trigger. The lookup of the `seq` a digest is bound to needs that
+//!   index, and the key mirrors the in-memory adapter's single-valued
+//!   `bound_seqs`, which holds at most one `seq` per digest.
 //! - **`SQLite`-only differences.** `SQLite` stores signed 64-bit integers, so:
 //!   a record Tick above `i64::MAX` is `FieldOutOfBounds` before any fence,
 //!   Fork lookup, or transaction, and a first Tick above it is rejected the
@@ -544,13 +552,10 @@ impl DependencySetV1 {
     }
 }
 
-/// One page read: its set, the last Tick it may return, the key it resumes
-/// after, and one more than the page limit.
+/// One page read: its set and its window.
 struct PageQueryV1<'a> {
     set: &'a DependencySetV1,
-    through: i64,
-    after: &'a CursorKeyV1,
-    limit: i64,
+    window: PageWindowV1<'a>,
 }
 
 /// Raw node columns after the set, in the node SELECT column order: position
@@ -580,11 +585,12 @@ type EdgeRowV1 = (i64, i64, String, i64, Vec<u8>, i64, Vec<u8>, Vec<u8>);
 type SetStateRowV1 = (i64, i64, i64, Option<i64>, Option<i64>);
 
 /// One page window: the last Tick it may return, the key it resumes after,
-/// and one more than the page limit.
+/// and the most rows it may return (one more than the page limit for a whole
+/// page).
 struct PageWindowV1<'a> {
-    through: i64,
+    tick_bound: i64,
     after: &'a CursorKeyV1,
-    limit: i64,
+    row_limit: i64,
 }
 
 /// Reads one kind of row for a page query.
@@ -768,7 +774,7 @@ const EDGE_PAGE_SQL: &str = "SELECT tick, scheduler_position, owner_id, output_o
 
 /// Read and decode one page of node rows after the cursor.
 fn node_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<DependencyNodeRecordV1>> {
-    let (tick, position, owner, ordinal, _) = query.after;
+    let (tick, position, owner, ordinal, _) = query.window.after;
     conn.prepare_cached(NODE_PAGE_SQL)
         .and_then(|mut statement| {
             statement
@@ -776,12 +782,12 @@ fn node_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<Dependenc
                     params![
                         query.set.timeline,
                         query.set.generation,
-                        query.through,
+                        query.window.tick_bound,
                         tick,
                         position,
                         owner,
                         ordinal,
-                        query.limit
+                        query.window.row_limit
                     ],
                     |row| <NodeRowV1>::try_from(row),
                 )
@@ -793,7 +799,7 @@ fn node_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<Dependenc
 
 /// Read and decode one page of edge rows after the cursor.
 fn edge_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<DependencyEdgeRecordV1>> {
-    let (tick, position, owner, ordinal, source) = query.after;
+    let (tick, position, owner, ordinal, source) = query.window.after;
     conn.prepare_cached(EDGE_PAGE_SQL)
         .and_then(|mut statement| {
             statement
@@ -801,13 +807,13 @@ fn edge_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<Dependenc
                     params![
                         query.set.timeline,
                         query.set.generation,
-                        query.through,
+                        query.window.tick_bound,
                         tick,
                         position,
                         owner,
                         ordinal,
                         source,
-                        query.limit
+                        query.window.row_limit
                     ],
                     |row| <EdgeRowV1>::try_from(row),
                 )
@@ -817,8 +823,9 @@ fn edge_rows(conn: &Connection, query: &PageQueryV1<'_>) -> Staged<Vec<Dependenc
         .map(|raw| raw.into_iter().map(decode_edge).collect())
 }
 
-/// Read the rows of every segment, in ancestry order, up to the window limit
-/// in all; each segment serves only the Ticks it may show.
+/// Read the rows of every segment, in ancestry order, up to the window's row
+/// limit in all; each segment serves only the Ticks it may show, and a window
+/// already full skips the remaining segments.
 fn window_rows<T>(
     conn: &Connection,
     rows: PageRowsFnV1<T>,
@@ -828,11 +835,17 @@ fn window_rows<T>(
     let start: Staged<Vec<T>> = Ok(Ok(Vec::new()));
     segments.iter().fold(start, |held, segment| {
         then_staged(held, |mut found| {
+            let row_limit = window.row_limit - sql_count(found.len());
+            if row_limit <= 0 {
+                return Ok(Ok(found));
+            }
             let query = PageQueryV1 {
                 set: &segment.set,
-                through: window.through.min(segment.bound),
-                after: window.after,
-                limit: window.limit - sql_count(found.len()),
+                window: PageWindowV1 {
+                    tick_bound: window.tick_bound.min(segment.tick_bound),
+                    after: window.after,
+                    row_limit,
+                },
             };
             then_staged(rows(conn, &query), |more| {
                 found.extend(more);
@@ -1093,33 +1106,15 @@ fn insert_dependency_record(
 }
 
 impl SqliteStore {
-    /// Require a visible parent Timeline, under its own erasure scopes and
-    /// the schema. A pre-schema read-only file holds no counterfactual state.
-    fn visible_dependency_parent(&self, timeline: TimelineId) -> Staged<()> {
-        self.ensure_generic_timeline_visibility(timeline)
-            .and_then(|()| {
-                self.authorize_inherited_scopes(timeline, ErasureProtectedOperationV1::Read)
-            })
-            .and_then(|()| {
-                counterfactual_schema_present(&self.conn).map(|present| {
-                    if present {
-                        Ok(())
-                    } else {
-                        Err(StoreError::ForkNotFound)
-                    }
-                })
-            })
-    }
-
     /// Resolve a read scope to its segments, oldest first: a visible
     /// Timeline's committed prefix stitched with every ancestor's through its
-    /// cut, or a published Fork's committed generation.
+    /// cut, or a published Fork's committed generation. A parent that exists
+    /// on a pre-schema read-only file is `ForkNotFound`.
     fn dependency_segments(&self, scope: DependencyReadScopeV1) -> Staged<Vec<SegmentV1>> {
         match scope {
             DependencyReadScopeV1::ParentPrefix { timeline, .. } => {
-                then_staged(self.visible_dependency_parent(timeline), |()| {
-                    self.factual_path(timeline).map(Ok)
-                })
+                let path = self.factual_path(timeline);
+                path.map(|found| found.ok_or(StoreError::ForkNotFound))
             }
             DependencyReadScopeV1::ForkGeneration(at) => {
                 then_staged(self.visible_counterfactual_fork(at.fork), |()| {
@@ -1143,24 +1138,18 @@ impl SqliteStore {
         cursor_key(request.after())
             .and_then(|after| {
                 let scope = request.scope();
-                let limit = sql_count(request.limit().saturating_add(1));
-                let through = scope.through_tick().map_or(i64::MAX, sql_tick);
-                let fenced = self.with_erasure_read_fence(
-                    fence_timeline(scope),
-                    ErasureProtectedOperationV1::Read,
-                    |store| {
-                        store.in_counterfactual_read(|store| {
-                            then_staged(store.dependency_segments(scope), |segments| {
-                                let window = PageWindowV1 {
-                                    through,
-                                    after: &after,
-                                    limit,
-                                };
-                                window_rows(&store.conn, rows, &segments, &window)
-                            })
+                let window = PageWindowV1 {
+                    tick_bound: scope.through_tick().map_or(i64::MAX, sql_tick),
+                    after: &after,
+                    row_limit: sql_count(request.limit().saturating_add(1)),
+                };
+                let fenced = self.with_erasure_read_fence(fence_timeline(scope), READ, |store| {
+                    store.in_counterfactual_read(|store| {
+                        then_staged(store.dependency_segments(scope), |segments| {
+                            window_rows(&store.conn, rows, &segments, &window)
                         })
-                    },
-                );
+                    })
+                });
                 settle(fenced)
             })
             .and_then(|fetched| build_page(request, &fetched))
@@ -1321,7 +1310,7 @@ impl CounterfactualDependencyRecordingPortV1 for SqliteStore {
     }
 }
 
-/// The erasure operation of every factual prefix read.
+/// The erasure operation of every read of this module.
 const READ: ErasureProtectedOperationV1 = ErasureProtectedOperationV1::Read;
 
 /// The head of a Timeline without a recorded Tick.
@@ -1335,9 +1324,9 @@ struct SegmentV1 {
     /// The segment's recorded set.
     set: DependencySetV1,
     /// Last `seq` a Tick of the segment may end on to be visible.
-    limit: i64,
+    last_seq_limit: i64,
     /// Highest Tick of the segment that is visible.
-    bound: i64,
+    tick_bound: i64,
 }
 
 /// At most one node, or the store's fault.
@@ -1389,6 +1378,10 @@ const DIGEST_NODE_SQL: &str = "SELECT tick, scheduler_position, owner_id, output
 
 /// The latest step node (output ordinal zero) of an owner (`?3`) in the prefix
 /// set (`?2`) at or below the bound (`?4`).
+// `ORDER BY tick DESC, scheduler_position DESC` equals the in-memory adapter's
+// last write wins over the canonical node order. If slice 8 adds a
+// `scheduler_position >= 1` filter to the step lookup, it must be applied to
+// both adapters.
 const STEP_NODE_SQL: &str = "SELECT tick, scheduler_position, owner_id, output_ordinal,
             schema_id, artifact_digest, class, origin, input_digests, provenance_digest
      FROM counterfactual_dependency_nodes
@@ -1400,14 +1393,31 @@ const STEP_NODE_SQL: &str = "SELECT tick, scheduler_position, owner_id, output_o
 const BOUND_SEQ_SQL: &str = "SELECT seq FROM counterfactual_dependency_event_nodes
      WHERE timeline_id = ?1 AND artifact_digest = ?2";
 
-/// The error of a stored row that fails the contract's checks.
+/// The message of a factual read on a file without the counterfactual schema.
+const SCHEMA_ABSENT: &str = "factual prefix read needs the counterfactual schema";
+
+/// The error of a closed rejection in a factual read: a stored row that fails
+/// the contract's checks is corrupt, and any other rejection is a failed read.
 fn factual_fault(error: StoreError) -> CoreError {
-    CoreError::Storage(format!("factual prefix row is corrupt: {error:?}"))
+    CoreError::Storage(match error {
+        StoreError::CorruptState => "factual prefix row is corrupt".to_owned(),
+        other => format!("factual prefix read failed: {other:?}"),
+    })
 }
 
-/// Settle a staged read: a closed rejection is a corrupt row here.
+/// Settle a staged read: a closed rejection becomes a storage fault.
 fn unstaged<T>(staged: Staged<T>) -> Result<T, CoreError> {
     staged.and_then(|inner| inner.map_err(factual_fault))
+}
+
+/// The fault of a factual read on a file without the counterfactual schema.
+fn schema_absent() -> CoreError {
+    CoreError::Storage(SCHEMA_ABSENT.to_owned())
+}
+
+/// The segments of a file that holds the schema, or its fault.
+fn schema_required(path: Option<Vec<SegmentV1>>) -> Result<Vec<SegmentV1>, CoreError> {
+    path.ok_or_else(schema_absent)
 }
 
 /// Narrow a stored integer to `u64`; a negative is a corrupt row.
@@ -1491,7 +1501,8 @@ fn segment_head(
     segment: &SegmentV1,
     at: i64,
 ) -> Result<Option<FactualHeadV1>, CoreError> {
-    let found = head_through(conn, &segment.set.timeline, at.min(segment.limit));
+    let upto = at.min(segment.last_seq_limit);
+    let found = head_through(conn, &segment.set.timeline, upto);
     found.and_then(|row| row.map(head_of).transpose())
 }
 
@@ -1504,7 +1515,7 @@ fn segment_split(
     let found = optional_row(
         conn,
         SPLIT_SQL,
-        params![segment.set.timeline, at, segment.limit],
+        params![segment.set.timeline, at, segment.last_seq_limit],
         first_column,
     );
     found.and_then(|row| row.map(stored_unsigned).transpose())
@@ -1529,12 +1540,12 @@ fn ancestor_segment(
     cut: Seq,
 ) -> Result<SegmentV1, CoreError> {
     let set = DependencySetV1::new(ancestor, PREFIX_GENERATION);
-    let limit = seq_as_i64(cut);
-    let head = head_through(conn, &set.timeline, limit);
+    let last_seq_limit = seq_as_i64(cut);
+    let head = head_through(conn, &set.timeline, last_seq_limit);
     head.map(|found| SegmentV1 {
-        bound: found.map_or(0, |(tick, _)| tick),
+        tick_bound: found.map_or(0, |(tick, _)| tick),
         set,
-        limit,
+        last_seq_limit,
     })
 }
 
@@ -1542,8 +1553,8 @@ fn ancestor_segment(
 const fn whole(set: DependencySetV1) -> SegmentV1 {
     SegmentV1 {
         set,
-        limit: i64::MAX,
-        bound: i64::MAX,
+        last_seq_limit: i64::MAX,
+        tick_bound: i64::MAX,
     }
 }
 
@@ -1596,29 +1607,32 @@ fn cut_of(ended: Option<FactualHeadV1>, split: Option<u64>) -> FactualCutV1 {
 
 /// The node bound to a committed `seq` in a segment.
 fn event_node(conn: &Connection, segment: &SegmentV1, seq: i64) -> NodeLookupV1 {
+    let timeline = &segment.set.timeline;
     node_lookup(
         conn,
         EVENT_NODE_SQL,
-        params![segment.set.timeline, seq, segment.bound, PREFIX_GENERATION],
+        params![timeline, seq, segment.tick_bound, PREFIX_GENERATION],
     )
 }
 
 /// The node with an artifact digest in a segment.
 fn node_by_digest(conn: &Connection, segment: &SegmentV1, digest: &Hash) -> NodeLookupV1 {
+    let timeline = &segment.set.timeline;
     let bytes = digest.as_bytes().as_slice();
     node_lookup(
         conn,
         DIGEST_NODE_SQL,
-        params![segment.set.timeline, PREFIX_GENERATION, bytes, segment.bound],
+        params![timeline, PREFIX_GENERATION, bytes, segment.tick_bound],
     )
 }
 
 /// The latest step node of an owner in a segment.
 fn step_node(conn: &Connection, segment: &SegmentV1, owner: &str) -> NodeLookupV1 {
+    let timeline = &segment.set.timeline;
     node_lookup(
         conn,
         STEP_NODE_SQL,
-        params![segment.set.timeline, PREFIX_GENERATION, owner, segment.bound],
+        params![timeline, PREFIX_GENERATION, owner, segment.tick_bound],
     )
 }
 
@@ -1689,15 +1703,24 @@ fn prefix_counts(
 }
 
 impl SqliteStore {
-    /// The Timeline's ancestry as segments, once it is visible and readable.
-    fn factual_path(&self, timeline: TimelineId) -> Result<Vec<SegmentV1>, CoreError> {
+    /// The Timeline's ancestry as segments, once it is visible and readable
+    /// under its own and its ancestors' erasure scopes; `None` when the file
+    /// holds no counterfactual schema, so no table can be read.
+    fn factual_path(&self, timeline: TimelineId) -> Result<Option<Vec<SegmentV1>>, CoreError> {
         self.ensure_generic_timeline_visibility(timeline)
             .and_then(|()| self.authorized_fork_chain(timeline, READ))
-            .and_then(|chain| path_of(&self.conn, timeline, &chain))
+            .and_then(|chain| {
+                counterfactual_schema_present(&self.conn).and_then(|present| {
+                    present
+                        .then(|| path_of(&self.conn, timeline, &chain))
+                        .transpose()
+                })
+            })
     }
 
     /// Run a factual read under the Timeline's erasure read fence and its
-    /// inherited scopes, at one read point.
+    /// inherited scopes, at one read point. A file without the counterfactual
+    /// schema is a storage fault, even for a read with nothing to look up.
     fn read_factual<T>(
         &self,
         timeline: TimelineId,
@@ -1705,7 +1728,7 @@ impl SqliteStore {
     ) -> Result<T, CoreError> {
         let fenced = self.with_erasure_read_fence(timeline, READ, |store| {
             store.in_counterfactual_read(|held| {
-                let path = held.factual_path(timeline);
+                let path = held.factual_path(timeline).and_then(schema_required);
                 path.and_then(|found| read(&held.conn, &found)).map(Ok)
             })
         });
@@ -1822,7 +1845,13 @@ impl SqliteStore {
     /// Seed committed factual Ticks into a Timeline's committed prefix set,
     /// through the install path the pipeline commit uses, in one transaction.
     ///
-    /// Test seam only: it checks nothing about the Ticks it is given.
+    /// Test seam only. Unlike the in-memory seam, which checks nothing about
+    /// the Ticks it is given, this one is validated by the schema's `CHECK`
+    /// constraints and guard triggers: a prefix node needs the `Committed`
+    /// origin (generation `-1` requires origin code `0`), a record Tick must
+    /// be above every Tick already recorded, a commit range must satisfy its
+    /// `CHECK`s, and the duplicate-key triggers refuse a repeated key or
+    /// artifact digest. A refused Tick rolls back the whole seeding call.
     ///
     /// # Errors
     /// Returns `TimelineNotFound` for an unknown Timeline, or the store's
@@ -1884,7 +1913,8 @@ mod tests {
         ))
     }
 
-    /// Rows of the three dependency tables.
+    /// Rows of the record, node, and edge tables, which a recording write
+    /// fills; the commit range and Event binding tables are not counted.
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn recorded(store: &SqliteStore) -> i64 {
         ok(store.conn.query_row(
@@ -2024,6 +2054,44 @@ mod tests {
             })
         );
         assert_eq!(recorded(&again), 4);
+    }
+
+    /// The text of a storage fault, or a marker for any other outcome.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fault_text<T>(result: Result<T, CoreError>) -> String {
+        match result {
+            Err(CoreError::Storage(text)) => text,
+            _ => "not a storage fault".to_owned(),
+        }
+    }
+
+    /// A corrupt row keeps its own message; any other rejection reads as a
+    /// failed read, never as a corrupt row.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_factual_fault_names_corruption_only_for_corrupt_state() {
+        assert_eq!(
+            fault_text::<()>(Err(factual_fault(StoreError::CorruptState))),
+            "factual prefix row is corrupt"
+        );
+        assert_eq!(
+            fault_text::<()>(Err(factual_fault(StoreError::ForkNotFound))),
+            "factual prefix read failed: ForkNotFound"
+        );
+        let settled = unstaged::<()>(Ok(Err(StoreError::BindingMismatch)));
+        assert_eq!(
+            fault_text(settled),
+            "factual prefix read failed: BindingMismatch"
+        );
+    }
+
+    /// A file without the counterfactual schema is a fault with its own text.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_missing_schema_is_a_storage_fault() {
+        assert_eq!(fault_text::<()>(Err(schema_absent())), SCHEMA_ABSENT);
+        assert!(schema_required(Some(Vec::new())).is_ok());
+        assert_eq!(fault_text(schema_required(None)), SCHEMA_ABSENT);
     }
 
     /// The `CHECK` text repeats the contract's bounds as literals; each must

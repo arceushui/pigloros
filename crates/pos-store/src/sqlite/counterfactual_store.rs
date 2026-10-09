@@ -24,18 +24,18 @@
 //! purge tables (`counterfactual_fork_tombstones`,
 //! `counterfactual_purge_fence`), three lookup indexes, and thirty-two guard
 //! triggers (fifteen on the storage and purge tables, seventeen on the
-//! dependency tables) are created with
-//! `IF NOT EXISTS` by every writable open, so creation is additive and
-//! idempotent. This is the one normative first version of the schema: a file
-//! written by an earlier build, whose delete guards lack the purge-marker
-//! condition, fails the exact validation below with a storage error and must
-//! be recreated. A writable open of such a file still creates the tables,
-//! index, and triggers it lacks before validation fails, so a rejected file
-//! may gain those additive objects; its old delete guards stay and every later
-//! open still fails. A file with the exact storage schema that only lacks the
-//! dependency tables gains them empty on a writable open (there is nothing to
-//! migrate, and no migration exists), and a read-only open of it fails the
-//! validation with a missing-table error. A read-only open of a file written
+//! dependency tables) are created with `IF NOT EXISTS` by every writable
+//! open, so creation is additive and idempotent. This is the one normative
+//! first version of the schema: a file written by an earlier build, whose
+//! delete guards lack the purge-marker condition, fails the exact validation
+//! below with a storage error and must be recreated. A writable open of such
+//! a file still creates the tables, index, and triggers it lacks before
+//! validation fails, so a rejected file may gain those additive objects; its
+//! old delete guards stay and every later open still fails. A file with the
+//! exact storage schema that only lacks the dependency tables gains them
+//! empty on a writable open (there is nothing to migrate, and no migration
+//! exists), and a read-only open of it fails the validation with a
+//! missing-table error. A read-only open of a file written
 //! by the previous schema and never opened writably since therefore refuses to
 //! open until one writable open adds the dependency tables, which is
 //! acceptable under the no-migration, replacement-first rule.
@@ -43,7 +43,8 @@
 //! bodies, and fails closed with a storage error on any drift. A read-only
 //! open of a file written before this schema, which has no counterfactual
 //! table, index, or trigger at all, accepts the file as holding no
-//! counterfactual state: every port read reports `ForkNotFound`. Any
+//! counterfactual state: every Fork port read reports `ForkNotFound`, and a
+//! factual prefix read is a storage fault (see the `dependency` module). Any
 //! counterfactual object that is present must still be complete and exact.
 //! The triggers make the database itself refuse to decrease a Fork
 //! generation, and, outside a purge, to delete a Fork row, a quarantine row,
@@ -156,15 +157,14 @@
 //!   inserts a marker row for that Fork into `counterfactual_purge_fence`,
 //!   deletes the Timeline's dependency edge, node, record, commit range, and
 //!   Event node rows (a Fork's generations' and a Timeline's committed
-//!   prefix), the Fork's
-//!   artifact, quarantine, generation, and Fork rows,
+//!   prefix), the Fork's artifact, quarantine, generation, and Fork rows,
 //!   upserts one `counterfactual_fork_tombstones` row holding only the
 //!   Fork's last generation, and deletes the marker. Only the nine delete
 //!   guards honor a marker, and only for the marked Timeline, so any other
-//!   delete still aborts. The marker is an accident guard for the generic delete
-//!   path, not an authorization boundary: a client with write access to the
-//!   database file can already drop the triggers, and the marker table has no
-//!   guard of its own. The tombstone is a generation floor: its own guards
+//!   delete still aborts. The marker is an accident guard for the generic
+//!   delete path, not an authorization boundary: a client with write access
+//!   to the database file can already drop the triggers, and the marker
+//!   table has no guard of its own. The tombstone is a generation floor: its own guards
 //!   refuse a delete and any change that lowers it, while raising it (an
 //!   update or a replacing insert) is allowed; the replacing insert passes
 //!   only because `recursive_triggers` is off, so the replaced row fires no
