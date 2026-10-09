@@ -114,13 +114,18 @@ type Projections = (
 /// Both projections of one closure, bound to each other; any failure is `InvalidManifest`.
 fn project(bundle: &VerifiedReleaseBundleV1) -> Result<Projections, CommunityPluginHostErrorV1> {
     let invalid = CommunityPluginHostErrorV1::InvalidManifest;
-    let projection =
-        ValidatedPluginManifestProjectionV1::from_verified_bundle(bundle).or(Err(invalid))?;
-    let execution = PluginExecutionProjectionV1::from_verified_bundle(bundle).or(Err(invalid))?;
-    execution
-        .is_bound_to(&projection)
-        .then_some((projection, execution))
-        .ok_or(invalid)
+    ValidatedPluginManifestProjectionV1::from_verified_bundle(bundle)
+        .and_then(|projection| {
+            PluginExecutionProjectionV1::from_verified_bundle(bundle)
+                .map(|execution| (projection, execution))
+        })
+        .or(Err(invalid))
+        .and_then(|(projection, execution)| {
+            execution
+                .is_bound_to(&projection)
+                .then_some((projection, execution))
+                .ok_or(invalid)
+        })
 }
 
 /// The Plugin ID, and the release pair when one is expected, equal the composition's.
@@ -140,17 +145,22 @@ fn slices(records: &[Vec<u8>]) -> Vec<&[u8]> {
 }
 
 /// Step 7: authorize the release under the evidence and verify field 26 under the resolved key.
+///
+/// The registry authorized the same projection under the same evidence at step 6, so the
+/// authorization cannot fail here; its error is still mapped, without a separate branch.
 fn verify_signature(
     bundle: &VerifiedReleaseBundleV1,
     evidence: &VerifiedPluginTrustEvidenceV1,
     projection: &ValidatedPluginManifestProjectionV1,
 ) -> Result<(), CommunityPluginHostErrorV1> {
-    let authorization = evidence
+    evidence
         .authorize_release(projection)
-        .map_err(host_error_for_trust_authorization_v1)?;
-    verify_plugin_release_signature_v1(bundle, &authorization)
-        .map(|_| ())
-        .map_err(host_error_for_release_signature_v1)
+        .map_err(host_error_for_trust_authorization_v1)
+        .and_then(|authorization| {
+            verify_plugin_release_signature_v1(bundle, &authorization)
+                .map(|_| ())
+                .map_err(host_error_for_release_signature_v1)
+        })
 }
 
 /// The verified bytes of the closure's `component` layer.

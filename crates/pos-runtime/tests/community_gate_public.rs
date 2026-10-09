@@ -215,6 +215,11 @@ fn an_installed_active_release_gates_ok_with_the_registry_facts() -> TestResult 
     let validation = gated.content_validation();
     assert_eq!(validation, ContentValidationV1::NotPerformed);
     assert_eq!(gated.identity(), authorization.identity());
+    let shown = format!("{gated:?}");
+    assert!(shown.contains("GatedCommunityReleaseV1"));
+    assert!(shown.contains("plugin-a"));
+    assert!(shown.contains("component_len: 14"));
+    assert!(!shown.contains("asm component"));
     assert_eq!((gated.utc_second(), gated.tick()), (50, TICK));
     assert_eq!(gated.execution().plugin_id(), PLUGIN_ID);
     assert_eq!(authorization.plugin_id(), PLUGIN_ID);
@@ -607,6 +612,13 @@ fn the_component_source_is_the_resupplied_pair() -> TestResult {
         ..expectation(PLUGIN_ID)
     };
     let (gate, calls) = run(&rig.world, &paired, other.address(), &rig.source, &pass);
+    assert_eq!((gate.err(), calls), (Some(NOT_ACTIVE), 0));
+    // The right complete-PMF1 digest with another release digest is refused the same way.
+    let wrong_release = CommunityPluginExpectationV1 {
+        release: Some((first_pmf1, [0; 32])),
+        ..expectation(PLUGIN_ID)
+    };
+    let (gate, calls) = run(&rig.world, &wrong_release, &rig.address, &rig.source, &pass);
     assert_eq!((gate.err(), calls), (Some(NOT_ACTIVE), 0));
     // Without a pair the registry decides: the pointer names another release.
     let (gate, calls) = run(&rig.world, &expected, other.address(), &rig.source, &pass);
