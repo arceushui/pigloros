@@ -46,11 +46,9 @@ pub trait CommunityPluginMemberV1 {
     /// The member's Plugin.
     fn plugin(&self) -> PluginId;
 
-    /// The PMF1 Plugin ID text the composition expects at the member's address.
-    fn expected_plugin_id(&self) -> &str;
-
-    /// The `(complete-PMF1 digest, release digest)` pair the member's Driver was built for.
-    fn expected_release(&self) -> Option<([u8; 32], [u8; 32])>;
+    /// What the composition expects at the member's address: the PMF1 Plugin ID text and, when
+    /// a Driver was built, the `(complete-PMF1 digest, release digest)` pair it was built for.
+    fn expectation(&self) -> &CommunityPluginExpectationV1;
 
     /// The source of the release closure.
     fn release_source(&self) -> &dyn ReleaseSourceV1;
@@ -90,7 +88,7 @@ pub trait CommunityPluginMemberV1 {
 }
 
 /// Which anchored stage call of the registry a pass uses.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub enum CommunityStageV1<'a> {
     /// `step_all_anchored`.
     Anchored,
@@ -117,13 +115,13 @@ pub struct CommunityPassRequestV1<'a> {
 }
 
 /// The verdict on one member: the gate's summary, or the error that refused it.
-type Verdict = Result<GateSummaryV1, CommunityPluginHostErrorV1>;
+type MemberVerdict = Result<GateSummaryV1, CommunityPluginHostErrorV1>;
 
 /// A member's summary and its one-shot authorization.
-type Authorized = (GateSummaryV1, CommunityPassAuthorizationV1);
+type Cleared = (GateSummaryV1, CommunityPassAuthorizationV1);
 
 /// The result of gating one member.
-type Gated = Result<Authorized, CommunityPluginHostErrorV1>;
+type GateAttempt = Result<Cleared, CommunityPluginHostErrorV1>;
 
 /// Closes the pass on every exit, including a panic that unwinds out of a member.
 ///
@@ -168,12 +166,6 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
         Self { members }
     }
 
-    /// The members, in host schedule order.
-    #[must_use]
-    pub fn members(&self) -> &[M] {
-        &self.members
-    }
-
     /// Run one pass: sample, gate, stage, admit, classify, close and sync.
     ///
     /// One trusted UTC second is sampled for the whole pass. A failed sample refuses every
@@ -194,13 +186,13 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
             || (refuse_all(&self.members), PassResultV1::Refused),
             |pass| self.run_open(registry, trust, pass, request),
         );
-        let mut gates = report(&self.members, verdicts);
+        let mut entries = report(&self.members, verdicts);
         drop(guard);
-        sync_all(&self.members, registry, &mut gates);
+        sync_all(&self.members, registry, &mut entries);
         CommunityPassOutcomeV1 {
             tick,
             utc: utc.map(TrustedUtcSecondV1::as_i64),
-            gates,
+            gates: entries,
             result,
         }
     }
@@ -223,21 +215,7 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
         tick: u64,
     ) -> Result<PolicyAdvanceOutcomeV1, PluginTrustPolicyRegistryErrorV1> {
         self.members.iter().for_each(M::close_pass);
-        let utc = TrustedUtcSecondV1::from_source(wall)?;
-        let evidence = verify_plugin_trust_v1(
-            material.root_anchor(),
-            &slices(material.roots()),
-            &slices(material.revocations()),
-            utc.as_i64(),
-            tick,
-        )?;
-        trust.advance_policy(
-            material.policy_anchor(),
-            material.tps1_bytes(),
-            &evidence,
-            utc,
-            tick,
-        )
+        TrustedUtcSecondV1::from_source(wall).and_then(|utc| advance(trust, material, utc, tick))
     }
 
     /// Steps 2 to 5 of a pass whose sample succeeded.
@@ -247,12 +225,12 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
         trust: &impl PluginTrustPolicyRegistryV1,
         pass: &CommunityPassV1,
         request: CommunityPassRequestV1<'_>,
-    ) -> (Vec<Verdict>, PassResultV1) {
-        let gated = match self.gate_all(trust, pass) {
-            Ok(gated) => gated,
+    ) -> (Vec<MemberVerdict>, PassResultV1) {
+        let cleared = match self.gate_all(trust, pass) {
+            Ok(cleared) => cleared,
             Err(verdicts) => return (verdicts, PassResultV1::Refused),
         };
-        let verdicts = offer_all(&self.members, gated);
+        let verdicts = offer_all(&self.members, cleared);
         let result = if verdicts.iter().all(Result::is_ok) {
             settle(stage_and_admit(registry, request))
         } else {
@@ -267,22 +245,49 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
         &self,
         trust: &impl PluginTrustPolicyRegistryV1,
         pass: &CommunityPassV1,
-    ) -> Result<Vec<Authorized>, Vec<Verdict>> {
+    ) -> Result<Vec<Cleared>, Vec<MemberVerdict>> {
         let roster = &self.members;
-        let gates: Vec<Gated> = roster
+        let attempts: Vec<GateAttempt> = roster
             .iter()
             .map(|member| gate_member(trust, member, pass))
             .collect();
-        if gates.iter().all(Result::is_ok) {
-            return Ok(gates.into_iter().flatten().collect());
+        if attempts.iter().all(Result::is_ok) {
+            return Ok(attempts.into_iter().flatten().collect());
         }
         let verdicts = roster
             .iter()
-            .zip(gates)
-            .map(|(member, gate)| refuse(member, gate))
+            .zip(attempts)
+            .map(|(member, attempt)| refuse(member, attempt))
             .collect();
         Err(verdicts)
     }
+}
+
+/// Verify the PTR1 and PRV1 records of `material` at `utc` and `tick`, then record the policy.
+fn advance(
+    trust: &mut impl PluginTrustPolicyRegistryV1,
+    material: &CommunityPluginTrustMaterialV1,
+    utc: TrustedUtcSecondV1,
+    tick: u64,
+) -> Result<PolicyAdvanceOutcomeV1, PluginTrustPolicyRegistryErrorV1> {
+    let verified = verify_plugin_trust_v1(
+        material.root_anchor(),
+        &slices(material.roots()),
+        &slices(material.revocations()),
+        utc.as_i64(),
+        tick,
+    );
+    verified
+        .map_err(PluginTrustPolicyRegistryErrorV1::Trust)
+        .and_then(|evidence| {
+            trust.advance_policy(
+                material.policy_anchor(),
+                material.tps1_bytes(),
+                &evidence,
+                utc,
+                tick,
+            )
+        })
 }
 
 /// Gate one member against the registry with its own source, address and material.
@@ -290,30 +295,28 @@ fn gate_member<M: CommunityPluginMemberV1>(
     trust: &impl PluginTrustPolicyRegistryV1,
     member: &M,
     pass: &CommunityPassV1,
-) -> Gated {
-    let expected = CommunityPluginExpectationV1 {
-        plugin_id: member.expected_plugin_id().to_owned(),
-        release: member.expected_release(),
-    };
-    let gate = gate_community_release_v1(
+) -> GateAttempt {
+    let attempt = gate_community_release_v1(
         trust,
-        &expected,
+        member.expectation(),
         member.release_source(),
         member.release_address(),
         member.trust_material(),
         pass,
     );
-    gate.map(|(gated, authorization)| (GateSummaryV1::of(&gated), authorization))
+    attempt.map(|(gated, authorization)| {
+        (GateSummaryV1::of(&gated), authorization)
+    })
 }
 
 /// The verdict of a gated member, recording the refusal of one that was refused. An
 /// authorization of a member that passed is dropped: the pass is refused as a whole.
-fn refuse<M: CommunityPluginMemberV1>(member: &M, gate: Gated) -> Verdict {
-    note(member, gate.map(|(summary, _authorization)| summary))
+fn refuse<M: CommunityPluginMemberV1>(member: &M, attempt: GateAttempt) -> MemberVerdict {
+    note(member, attempt.map(|(summary, _authorization)| summary))
 }
 
 /// `verdict`, after recording the refusal it carries, if any, for `member`.
-fn note<M: CommunityPluginMemberV1>(member: &M, verdict: Verdict) -> Verdict {
+fn note<M: CommunityPluginMemberV1>(member: &M, verdict: MemberVerdict) -> MemberVerdict {
     if let Err(error) = &verdict {
         member.record_refusal(*error);
     }
@@ -321,7 +324,7 @@ fn note<M: CommunityPluginMemberV1>(member: &M, verdict: Verdict) -> Verdict {
 }
 
 /// Refuse every member for want of a trusted second.
-fn refuse_all<M: CommunityPluginMemberV1>(roster: &[M]) -> Vec<Verdict> {
+fn refuse_all<M: CommunityPluginMemberV1>(roster: &[M]) -> Vec<MemberVerdict> {
     roster
         .iter()
         .map(|member| {
@@ -334,10 +337,13 @@ fn refuse_all<M: CommunityPluginMemberV1>(roster: &[M]) -> Vec<Verdict> {
 /// Offer each authorization to its member's slot, in order. The first member whose slot is
 /// occupied has its refusal recorded and its verdict replaced by the error; later members are
 /// not offered.
-fn offer_all<M: CommunityPluginMemberV1>(roster: &[M], gated: Vec<Authorized>) -> Vec<Verdict> {
+fn offer_all<M: CommunityPluginMemberV1>(
+    roster: &[M],
+    cleared: Vec<Cleared>,
+) -> Vec<MemberVerdict> {
     let mut refused = false;
-    let mut verdicts = Vec::with_capacity(gated.len());
-    for (member, (summary, authorization)) in roster.iter().zip(gated) {
+    let mut verdicts = Vec::with_capacity(cleared.len());
+    for (member, (summary, authorization)) in roster.iter().zip(cleared) {
         let offered = if refused {
             Ok(())
         } else {
@@ -386,22 +392,29 @@ fn committed(receipt: Option<PipelineCommitReceiptV1>) -> PassResultV1 {
 fn failed(error: RuntimeError) -> PassResultV1 {
     match classify_pass_failure(&error) {
         PassFailureV1::InDoubt => PassResultV1::InDoubt,
-        failure => PassResultV1::Failed {
-            failure,
+        PassFailureV1::Host(host) => PassResultV1::Failed {
+            host: Some(host),
+            error: Box::new(error),
+        },
+        PassFailureV1::Unrelated => PassResultV1::Failed {
+            host: None,
             error: Box::new(error),
         },
     }
 }
 
 /// The members' entries, reading what this pass produced before the pass is closed.
-fn report<M: CommunityPluginMemberV1>(roster: &[M], verdicts: Vec<Verdict>) -> Vec<MemberPassV1> {
+fn report<M: CommunityPluginMemberV1>(
+    roster: &[M],
+    verdicts: Vec<MemberVerdict>,
+) -> Vec<MemberPassV1> {
     roster
         .iter()
         .zip(verdicts)
-        .map(|(member, gate)| MemberPassV1 {
+        .map(|(member, verdict)| MemberPassV1 {
             plugin: member.plugin(),
-            expected_plugin_id: member.expected_plugin_id().to_owned(),
-            gate,
+            expected_plugin_id: member.expectation().plugin_id.clone(),
+            gate: verdict,
             invocation_id: member.pass_invocation_id(),
             launch_failure: member.pass_failure(),
             sync: Ok(()),
@@ -413,9 +426,9 @@ fn report<M: CommunityPluginMemberV1>(roster: &[M], verdicts: Vec<Verdict>) -> V
 fn sync_all<M: CommunityPluginMemberV1>(
     roster: &[M],
     registry: &mut PluginRegistry,
-    gates: &mut [MemberPassV1],
+    entries: &mut [MemberPassV1],
 ) {
-    for (member, entry) in roster.iter().zip(gates) {
+    for (member, entry) in roster.iter().zip(entries) {
         entry.sync = member.sync_registry(registry);
     }
 }

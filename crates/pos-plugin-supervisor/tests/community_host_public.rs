@@ -25,18 +25,20 @@ use pos_plugin_publisher::test_support::{
 };
 use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
 use pos_plugin_supervisor::pass_harness::{
-    initial, GatedSpec, LostPort, PanickingSource, Source, StampedPort, World as PassWorld,
+    initial, FailingPort, GatedSpec, LostPort, PanickingSource, Source, StampedPort,
+    World as PassWorld,
 };
 use pos_plugin_supervisor::test_support::{self, err};
 use pos_plugin_supervisor::{
     CommunityMemberV1, CommunityPluginHandleV1, InvocationContextSourceV1, ReceiptDispositionV1,
 };
 use pos_runtime::community_plugin_host::{
-    gate_community_release_v1, CommunityPassAuthorizationV1, CommunityPassOutcomeV1,
-    CommunityPassV1, CommunityPluginExpectationV1, CommunityPluginHostErrorV1,
-    CommunityPluginHostV1, CommunityPluginMemberV1, CommunityPluginTrustMaterialV1, MemberPassV1,
-    PassFailureV1, PassResultV1, PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1,
-    RevocationBasisV1, TrustDenialBasisV1,
+    gate_community_release_v1, AtomicCommitFailureV1, CommunityPassAuthorizationV1,
+    CommunityPassOutcomeV1, CommunityPassV1, CommunityPluginExpectationV1,
+    CommunityPluginHostErrorV1, CommunityPluginHostV1, CommunityPluginMemberV1,
+    CommunityPluginTrustMaterialV1, CommunityStageV1, MemberPassV1, PassResultV1,
+    PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1, RevocationBasisV1,
+    TrustDenialBasisV1,
 };
 use pos_runtime::{PluginAvailabilityV1 as Availability, PluginRegistry, RuntimeError};
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryErrorV1 as Reg;
@@ -53,6 +55,8 @@ const PROMPT: Duration = Duration::from_mins(1);
 const GRANTED: &[&str] = &["plugin-b", "plugin-c"];
 /// A release digest that no fixture release has.
 const UNRELATED: [u8; 32] = [0x77; 32];
+/// A sample second that differs from the second the world's evidence is built at.
+const SAMPLE: i64 = 55;
 /// The registry's mirror of an available Plugin.
 const AVAILABLE: Option<Availability> = Some(Availability::Available);
 /// The registry's mirror of a revoked Plugin.
@@ -74,6 +78,10 @@ const KEY: Error = Error::ArtifactRevoked {
     basis: RevocationBasisV1::PublisherKey,
 };
 const INVALID: Error = Error::InvalidInvocation;
+/// The classification of a store error at admission.
+const COMMIT_FAILED: Error = Error::AtomicCommitFailed {
+    failure: AtomicCommitFailureV1::Operational,
+};
 
 /// One member of a rig: the Plugin ID, the Event type it owns, the probe behaviour, and whether
 /// its Driver misbehaves or stays out of the registry.
@@ -174,8 +182,7 @@ struct Part {
     handle: CommunityPluginHandleV1,
     address: BundleAddressV1,
     swap: Swap,
-    plugin_id: &'static str,
-    pair: Option<([u8; 32], [u8; 32])>,
+    expected: CommunityPluginExpectationV1,
     release: [u8; 32],
 }
 
@@ -241,8 +248,7 @@ fn add_member(
         handle: built.handle,
         address: published.address().clone(),
         swap,
-        plugin_id: spec.plugin_id,
-        pair: built.expected.release,
+        expected: built.expected,
         release: published.release_digest(),
     })
 }
@@ -288,8 +294,7 @@ impl Rig {
                 Box::new(self.signed.root.store()?),
                 address.clone(),
                 Box::new(part.swap.clone()),
-                part.plugin_id.to_owned(),
-                part.pair,
+                part.expected.clone(),
             ))
         };
         self.parts.iter().zip(addresses).map(member).collect()
@@ -455,12 +460,12 @@ fn the_sample_precedes_every_gate_and_every_gate_precedes_admission() -> TestRes
     let clock = Arc::new(AtomicU64::new(0));
     let mut rig = Rig::build(&[ALPHA, BETA], Some(Arc::clone(&clock)))?;
     let before = rig.signed.registry.calls.borrow().len();
-    let mut wall = ScriptedTrustedWallSourceV1::from_micros([50_700_000, 60_000_000]);
+    let mut wall = ScriptedTrustedWallSourceV1::from_micros([55_700_000, 60_000_000]);
     let (outcome, admits) = rig.run_stamped(&clock, &mut wall)?;
 
     // One sample, floored to its second; the pass carries the explicit Tick.
     assert_eq!(wall.remaining(), 1);
-    assert_eq!((outcome.utc, outcome.tick), (Some(UTC), TICK));
+    assert_eq!((outcome.utc, outcome.tick), (Some(SAMPLE), TICK));
     assert_eq!(committed_events(&outcome), Some(2), "{outcome:?}");
     let calls = rig.signed.registry.calls.borrow().clone();
     let evaluations: Vec<_> = calls
@@ -472,7 +477,7 @@ fn the_sample_precedes_every_gate_and_every_gate_precedes_admission() -> TestRes
         })
         .collect();
     assert_eq!(evaluations.len(), 2, "{calls:?}");
-    let at_the_sample = |(_, utc, tick): &(u64, i64, u64)| (*utc, *tick) == (UTC, TICK);
+    let at_the_sample = |(_, utc, tick): &(u64, i64, u64)| (*utc, *tick) == (SAMPLE, TICK);
     assert!(evaluations.iter().all(at_the_sample));
     // Every gate stamp is below the one stamp of the admission.
     assert_eq!(admits.len(), 1);
@@ -481,6 +486,7 @@ fn the_sample_precedes_every_gate_and_every_gate_precedes_admission() -> TestRes
     // Close and sync, as post-conditions: every slot is empty, the registry is mirrored.
     assert!(rig.all_slots_empty());
     assert_eq!(rig.registry_availability(0), AVAILABLE);
+    assert_eq!(rig.registry_availability(1), AVAILABLE);
     assert!(outcome.gates.iter().all(|entry| entry.sync.is_ok()));
     Ok(())
 }
@@ -634,10 +640,10 @@ fn every_slot_is_empty_after_a_success_and_after_a_refusal() -> TestResult {
 fn every_slot_is_empty_after_a_failure_while_staging() -> TestResult {
     let mut rig = Rig::new(&[FUEL_ALPHA, BETA])?;
     let failed = rig.run()?;
-    let PassResultV1::Failed { failure, error } = &failed.result else {
+    let PassResultV1::Failed { host, error } = &failed.result else {
         std::panic::resume_unwind(Box::new(format!("the pass did not fail: {failed:?}")))
     };
-    assert_eq!(*failure, PassFailureV1::Host(Error::FuelExhausted));
+    assert_eq!(*host, Some(Error::FuelExhausted));
     assert!(matches!(**error, RuntimeError::CommunityPlugin(Error::FuelExhausted)));
     assert!(rig.handle(1).receipts().is_empty());
     assert!(rig.all_slots_empty());
@@ -651,88 +657,179 @@ fn every_slot_is_empty_after_a_driver_panics() -> TestResult {
     let mut rig = Rig::new(&[PANIC_ALPHA, BETA])?;
     let failed = rig.run()?;
     assert!(
-        matches!(failed.result, PassResultV1::Failed { failure: PassFailureV1::Unrelated, .. }),
+        matches!(failed.result, PassResultV1::Failed { host: None, .. }),
         "{failed:?}"
     );
     assert!(rig.all_slots_empty());
     Ok(())
 }
 
-/// A member that delegates to a real one and panics when its entry is read.
-struct Panicky(CommunityMemberV1);
+/// How a probe member treats the authorization offered to it.
+#[derive(Clone, Copy)]
+enum Mode {
+    /// Offer it to the real member.
+    Forward,
+    /// Keep it in the stash and leave the member's slot empty.
+    Stash,
+    /// Panic instead of offering it.
+    PanicOffer,
+    /// Offer it, and panic when the member's invocation ID is read.
+    PanicId,
+}
 
-impl CommunityPluginMemberV1 for Panicky {
+/// The authorizations that probe members kept.
+type Stash = Rc<RefCell<Vec<CommunityPassAuthorizationV1>>>;
+
+/// A member that delegates to a real one, except as its mode says.
+struct Probe {
+    inner: CommunityMemberV1,
+    mode: Mode,
+    stash: Stash,
+}
+
+impl CommunityPluginMemberV1 for Probe {
     fn plugin(&self) -> PluginId {
-        self.0.plugin()
+        self.inner.plugin()
     }
 
-    fn expected_plugin_id(&self) -> &str {
-        self.0.expected_plugin_id()
-    }
-
-    fn expected_release(&self) -> Option<([u8; 32], [u8; 32])> {
-        self.0.expected_release()
+    fn expectation(&self) -> &CommunityPluginExpectationV1 {
+        self.inner.expectation()
     }
 
     fn release_source(&self) -> &dyn ReleaseSourceV1 {
-        self.0.release_source()
+        self.inner.release_source()
     }
 
     fn release_address(&self) -> &BundleAddressV1 {
-        self.0.release_address()
+        self.inner.release_address()
     }
 
     fn trust_material(&self) -> &dyn PluginTrustMaterialSourceV1 {
-        self.0.trust_material()
+        self.inner.trust_material()
     }
 
     fn offer_authorization(
         &self,
         authorization: CommunityPassAuthorizationV1,
     ) -> Result<(), Error> {
-        self.0.offer_authorization(authorization)
+        match self.mode {
+            Mode::Stash => {
+                self.stash.borrow_mut().push(authorization);
+                Ok(())
+            }
+            Mode::PanicOffer => std::panic::resume_unwind(Box::new("the offer panicked")),
+            Mode::Forward | Mode::PanicId => self.inner.offer_authorization(authorization),
+        }
     }
 
     fn record_refusal(&self, error: Error) {
-        self.0.record_refusal(error);
+        self.inner.record_refusal(error);
     }
 
     fn close_pass(&self) {
-        self.0.close_pass();
+        self.inner.close_pass();
     }
 
     fn pass_failure(&self) -> Option<Error> {
-        self.0.pass_failure()
+        self.inner.pass_failure()
     }
 
     fn pass_invocation_id(&self) -> Option<[u8; 16]> {
-        std::panic::resume_unwind(Box::new("the member panicked"))
+        if matches!(self.mode, Mode::PanicId) {
+            std::panic::resume_unwind(Box::new("the member panicked"));
+        }
+        self.inner.pass_invocation_id()
     }
 
     fn sync_registry(&self, registry: &mut PluginRegistry) -> Result<(), RuntimeError> {
-        self.0.sync_registry(registry)
+        self.inner.sync_registry(registry)
     }
 }
 
-/// R7-S5: a panic that unwinds out of a member still closes the pass and empties every slot.
+impl Rig {
+    /// A host over probe members, one per mode in order, and the stash they share.
+    fn probes(&self, modes: &[Mode]) -> BoxResult<(CommunityPluginHostV1<Probe>, Stash)> {
+        let stash = Stash::default();
+        let members = self.members_at(&self.addresses())?;
+        let probe = |(inner, mode): (CommunityMemberV1, &Mode)| Probe {
+            inner,
+            mode: *mode,
+            stash: Rc::clone(&stash),
+        };
+        let probes: Vec<Probe> = members.into_iter().zip(modes).map(probe).collect();
+        Ok((CommunityPluginHostV1::new(probes), stash))
+    }
+
+    /// One pass of `host` at the rig's second and Tick; a panic out of `run_pass` is the error.
+    fn run_probes(
+        &mut self,
+        host: &mut CommunityPluginHostV1<Probe>,
+    ) -> BoxResult<CommunityPassOutcomeV1> {
+        let mut clock = wall(UTC)?;
+        let prepared = self.pass.prepare()?;
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            let request = prepared.request(TICK, &mut self.pass.store);
+            let registry = &self.signed.registry;
+            host.run_pass(&mut self.pass.registry, registry, &mut clock, request)
+        }));
+        caught.map_err(|_| "the pass panicked".into())
+    }
+}
+
+/// Whether every authorization the probes kept reports its pass closed.
+fn stash_is_closed(stash: &Stash) -> bool {
+    let kept = stash.borrow();
+    !kept.is_empty() && kept.iter().all(|held| !held.is_pass_open())
+}
+
+/// R7-S5: the pass-open flag is closed when `run_pass` returns normally.
+#[test]
+fn a_pass_closes_the_authorizations_it_issued() -> TestResult {
+    let mut rig = Rig::new(&[ALPHA, BETA])?;
+    let (mut host, stash) = rig.probes(&[Mode::Stash, Mode::Stash])?;
+    let outcome = rig.run_probes(&mut host)?;
+    // The slots stayed empty, so the Drivers could not launch.
+    let failed = matches!(outcome.result, PassResultV1::Failed { host: Some(TSU), .. });
+    assert!(failed, "{outcome:?}");
+    assert_eq!(stash.borrow().len(), 2);
+    assert!(stash_is_closed(&stash));
+    Ok(())
+}
+
+/// R7-S5: a panic that unwinds out of a member still closes the pass-open flag and the slots.
 #[test]
 fn a_panic_out_of_a_member_still_closes_the_pass() -> TestResult {
-    let mut rig = Rig::new(&[FUEL_ALPHA, BETA])?;
-    let members = rig.members_at(&rig.addresses())?;
-    let mut host = CommunityPluginHostV1::new(members.into_iter().map(Panicky).collect());
-    let mut clock = wall(UTC)?;
-    let prepared = rig.pass.prepare()?;
-    let caught = catch_unwind(AssertUnwindSafe(|| {
-        let request = prepared.request(TICK, &mut rig.pass.store);
-        let registry = &rig.signed.registry;
-        host.run_pass(&mut rig.pass.registry, registry, &mut clock, request)
-    }));
-    assert!(caught.is_err(), "the panic must unwind");
-    // The second member was never stepped, so its authorization sat in its slot at the panic.
-    assert_eq!(rig.handle(0).receipts().len(), 1);
-    assert!(rig.handle(1).receipts().is_empty());
+    let mut rig = Rig::new(&[ALPHA, BETA])?;
+    let (mut host, stash) = rig.probes(&[Mode::Stash, Mode::PanicId])?;
+    let outcome = rig.run_probes(&mut host);
+    assert!(outcome.is_err(), "the panic must unwind");
+    assert!(stash_is_closed(&stash));
     assert!(rig.all_slots_empty());
     Ok(())
+}
+
+/// R7-S5: a panic in the second member's offer leaves the first member's slot occupied at the
+/// unwind, and the guard empties it.
+#[test]
+fn a_panic_in_an_offer_leaves_no_slot_occupied() -> TestResult {
+    let mut rig = Rig::new(&[ALPHA, BETA])?;
+    let (mut host, _stash) = rig.probes(&[Mode::Forward, Mode::PanicOffer])?;
+    let outcome = rig.run_probes(&mut host);
+    assert!(outcome.is_err(), "the panic must unwind");
+    assert!(rig.nothing_launched());
+    assert!(rig.all_slots_empty());
+    Ok(())
+}
+
+/// One pass whose admission loses the commit acknowledgement.
+fn lost_commit(rig: &mut Rig) -> BoxResult<CommunityPassOutcomeV1> {
+    let mut clock = wall(UTC)?;
+    let prepared = rig.pass.prepare()?;
+    let mut port = LostPort(&mut rig.pass.store);
+    let request = prepared.request(TICK, &mut port);
+    let registry = &rig.signed.registry;
+    let host = &mut rig.host;
+    Ok(host.run_pass(&mut rig.pass.registry, registry, &mut clock, request))
 }
 
 /// R7-S5: a lost commit acknowledgement is reported `InDoubt` and keeps the staged state for
@@ -740,13 +837,7 @@ fn a_panic_out_of_a_member_still_closes_the_pass() -> TestResult {
 #[test]
 fn a_lost_commit_is_in_doubt_and_keeps_the_staged_state() -> TestResult {
     let mut rig = Rig::new(&[CHAIN_ALPHA, BETA])?;
-    let mut clock = wall(UTC)?;
-    let prepared = rig.pass.prepare()?;
-    let mut port = LostPort(&mut rig.pass.store);
-    let request = prepared.request(TICK, &mut port);
-    let registry = &rig.signed.registry;
-    let host = &mut rig.host;
-    let outcome = host.run_pass(&mut rig.pass.registry, registry, &mut clock, request);
+    let outcome = lost_commit(&mut rig)?;
     assert!(is_in_doubt(&outcome), "{outcome:?}");
     for handle in [rig.handle(0), rig.handle(1)] {
         assert_eq!(handle.committed_state(), initial());
@@ -758,6 +849,62 @@ fn a_lost_commit_is_in_doubt_and_keeps_the_staged_state() -> TestResult {
     let recovered = rig.pass.registry.recover_scheduled_pass(store)?;
     assert_eq!(recovered.map(|r| r.committed_events().len()), Some(2));
     assert_eq!(rig.handle(0).committed_state().bytes, b"initial+");
+    Ok(())
+}
+
+/// R7-S5: a deterministic admission failure is a failed pass, not in doubt; the staged state is
+/// discarded and every slot is empty.
+#[test]
+fn a_failed_admission_discards_the_pass_and_empties_every_slot() -> TestResult {
+    let mut rig = Rig::new(&[CHAIN_ALPHA, BETA])?;
+    let mut clock = wall(UTC)?;
+    let prepared = rig.pass.prepare()?;
+    let mut port = FailingPort(&mut rig.pass.store);
+    let request = prepared.request(TICK, &mut port);
+    let registry = &rig.signed.registry;
+    let host = &mut rig.host;
+    let outcome = host.run_pass(&mut rig.pass.registry, registry, &mut clock, request);
+    let failed = matches!(outcome.result, PassResultV1::Failed { host: Some(COMMIT_FAILED), .. });
+    assert!(failed, "{outcome:?}");
+    for handle in [rig.handle(0), rig.handle(1)] {
+        assert_eq!(handle.committed_state(), initial());
+        assert_eq!(dispositions(handle), [ReceiptDispositionV1::Discarded]);
+    }
+    assert!(rig.all_slots_empty());
+    Ok(())
+}
+
+/// Whether `shown` mentions every word.
+fn mentions(shown: &str, words: &[&str]) -> bool {
+    words.iter().all(|word| shown.contains(word))
+}
+
+/// Every result and the stage call format, so that a failed assertion can show them.
+#[test]
+fn outcomes_and_stage_calls_format() -> TestResult {
+    let mut committed = Rig::new(&[ALPHA, BETA])?;
+    let shown = format!("{:?}", committed.run()?);
+    let words = ["Committed", "plugin-a", "MemberPassV1", "tps1_digest"];
+    assert!(mentions(&shown, &words), "{shown}");
+
+    let mut refused = Rig::new(&[ALPHA])?;
+    refused.swap(0).set(None);
+    let shown = format!("{:?}", refused.run()?);
+    let words = ["Refused", "TrustStateUnavailable"];
+    assert!(mentions(&shown, &words), "{shown}");
+
+    let mut failed = Rig::new(&[FUEL_ALPHA, BETA])?;
+    let shown = format!("{:?}", failed.run()?);
+    assert!(mentions(&shown, &["Failed", "FuelExhausted"]), "{shown}");
+
+    let mut doubtful = Rig::new(&[ALPHA])?;
+    let shown = format!("{:?}", lost_commit(&mut doubtful)?);
+    assert!(mentions(&shown, &["InDoubt"]), "{shown}");
+
+    let events = [];
+    let with_events = format!("{:?}", CommunityStageV1::WithEvents(&events));
+    assert!(mentions(&with_events, &["WithEvents"]), "{with_events}");
+    assert_eq!(format!("{:?}", CommunityStageV1::Anchored), "Anchored");
     Ok(())
 }
 
@@ -818,7 +965,7 @@ fn a_quarantined_member_is_not_run_and_carries_nothing() -> TestResult {
     assert_eq!(alpha.availability(), Availability::ResourceExhausted);
     let second = rig.run()?;
     assert!(
-        matches!(second.result, PassResultV1::Failed { failure: PassFailureV1::Unrelated, .. }),
+        matches!(second.result, PassResultV1::Failed { host: None, .. }),
         "{second:?}"
     );
     assert_eq!(invocation_ids(&second), [None, None]);
@@ -836,11 +983,8 @@ fn a_failing_context_source_leaves_no_invocation_id() -> TestResult {
     let second = rig.run()?;
     assert_eq!(invocation_ids(&second), [None, None]);
     assert_eq!(launch_failures(&second), [Some(INVALID), None]);
-    let failure = PassFailureV1::Host(INVALID);
-    assert!(
-        matches!(second.result, PassResultV1::Failed { failure: found, .. } if found == failure),
-        "{second:?}"
-    );
+    let failed = matches!(second.result, PassResultV1::Failed { host: Some(INVALID), .. });
+    assert!(failed, "{second:?}");
     Ok(())
 }
 
@@ -998,9 +1142,6 @@ fn a_revocation_adopted_through_the_host_refuses_from_its_tick() -> TestResult {
 fn the_resupplied_pairs_after_a_restart_are_the_ones_the_pass_uses() -> TestResult {
     let mut rig = Rig::new(&[ALPHA, BETA])?;
     rig.restart()?;
-    let members = rig.host.members();
-    assert_eq!(members.len(), 2);
-    assert_eq!(members[0].handle().plugin_id(), rig.handle(0).plugin_id());
     let restarted = rig.run()?;
     assert_eq!(committed_events(&restarted), Some(2), "{restarted:?}");
 
@@ -1026,9 +1167,13 @@ fn the_resupplied_pairs_after_a_restart_are_the_ones_the_pass_uses() -> TestResu
     for (address, expected) in wrong {
         let members = rig.members_at(&[address.clone(), own[1].clone()])?;
         rig.host = CommunityPluginHostV1::new(members);
+        let before = rig.signed.registry.calls.borrow().len();
         let refused = rig.run()?;
+        let after = rig.signed.registry.calls.borrow().len();
         assert!(is_refused(&refused), "{refused:?}");
         assert_eq!(gate_errors(&refused), [Some(expected), None]);
+        // Only the second member, at its own address, reached the registry.
+        assert_eq!(after - before, 1);
     }
     Ok(())
 }

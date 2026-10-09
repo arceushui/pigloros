@@ -42,6 +42,34 @@ impl PipelineAdmissionPortV1 for LostPort<'_> {
     }
 }
 
+/// A port whose admission fails with a deterministic store error, not an unknown outcome.
+pub struct FailingPort<'a>(pub &'a mut MemoryStore);
+
+impl PipelineAdmissionPortV1 for FailingPort<'_> {
+    fn admit_pipeline_batch(
+        &mut self,
+        _basis: &PipelineAdmissionBasisV1,
+    ) -> Result<PipelineOutcomeV1, CoreError> {
+        Err(CoreError::ErasureAccessFrozen)
+    }
+
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: TimelineId,
+        key: AppendDedupKey,
+        attempt_id: PipelineAttemptIdV1,
+    ) -> Result<PipelineReceiptLookupV1, CoreError> {
+        self.0.lookup_pipeline_receipt(timeline, key, attempt_id)
+    }
+
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        limit: NonZeroUsize,
+    ) -> Result<PurgeOutcome, CoreError> {
+        self.0.purge_expired_pipeline_receipts_bounded(limit)
+    }
+}
+
 /// A port that stamps every admit call from a shared clock and then delegates.
 ///
 /// The stamp is `fetch_add(1) + 1` of the clock, so it is ordered against every other recorder

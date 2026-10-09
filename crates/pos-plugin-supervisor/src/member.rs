@@ -2,15 +2,15 @@
 //!
 //! [`CommunityMemberV1`] wraps the Driver's [`CommunityPluginHandleV1`] and holds what the
 //! composition supplies for that member: the release source, the bundle address, the trust
-//! material source, the expected Plugin ID and the expected release pair. It implements
+//! material source and the expectation (the Plugin ID and the release pair). It implements
 //! pos-runtime's `CommunityPluginMemberV1`, so `CommunityPluginHostV1` can gate, offer and
 //! close each member's pass without knowing the Driver.
 
 use pos_core::PluginId;
 use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
 use pos_runtime::community_plugin_host::{
-    CommunityPassAuthorizationV1, CommunityPluginHostErrorV1, CommunityPluginMemberV1,
-    PluginTrustMaterialSourceV1,
+    CommunityPassAuthorizationV1, CommunityPluginExpectationV1, CommunityPluginHostErrorV1,
+    CommunityPluginMemberV1, PluginTrustMaterialSourceV1,
 };
 use pos_runtime::{PluginRegistry, RuntimeError};
 
@@ -19,47 +19,38 @@ use crate::adapter::CommunityPluginHandleV1;
 /// One member of the host pass seam.
 ///
 /// The composition builds it from the handle that `CommunityDriverV1::new` returned for the
-/// Driver it registered with `register_community_driver`. The Plugin ID text given here is the
-/// one the gate expects at the address; the Driver's own copy was checked once by
-/// `CommunityDriverConfigV1::from_gated`, and a divergence between the two fails closed as
-/// `ArtifactTrustDenied{NotActive}`.
+/// Driver it registered with `register_community_driver`. The Driver config keeps no expected
+/// Plugin ID (`from_gated` only checks the one passed to it), so the expectation given here is
+/// the one the gate uses on every pass: a member copy that differs from the closure at the
+/// address fails closed as `ArtifactTrustDenied{NotActive}`.
 pub struct CommunityMemberV1 {
     handle: CommunityPluginHandleV1,
     source: Box<dyn ReleaseSourceV1>,
     address: BundleAddressV1,
     material: Box<dyn PluginTrustMaterialSourceV1>,
-    expected_plugin_id: String,
-    expected_release: Option<([u8; 32], [u8; 32])>,
+    expectation: CommunityPluginExpectationV1,
 }
 
 impl CommunityMemberV1 {
     /// A member for `handle`, whose closure the composition re-supplies at `address` in
-    /// `source`, whose trust material comes from `material`, and which is expected to hold the
-    /// Plugin `expected_plugin_id` and, when a Driver was built, the release pair
-    /// `expected_release` (the complete-PMF1 and release digests the Driver was built for).
+    /// `source`, whose trust material comes from `material`, and which is expected to hold what
+    /// `expectation` says: the Plugin ID and, when a Driver was built, the release pair (the
+    /// complete-PMF1 and release digests the Driver was built for).
     #[must_use]
     pub const fn new(
         handle: CommunityPluginHandleV1,
         source: Box<dyn ReleaseSourceV1>,
         address: BundleAddressV1,
         material: Box<dyn PluginTrustMaterialSourceV1>,
-        expected_plugin_id: String,
-        expected_release: Option<([u8; 32], [u8; 32])>,
+        expectation: CommunityPluginExpectationV1,
     ) -> Self {
         Self {
             handle,
             source,
             address,
             material,
-            expected_plugin_id,
-            expected_release,
+            expectation,
         }
-    }
-
-    /// The Driver's handle.
-    #[must_use]
-    pub const fn handle(&self) -> &CommunityPluginHandleV1 {
-        &self.handle
     }
 }
 
@@ -68,12 +59,8 @@ impl CommunityPluginMemberV1 for CommunityMemberV1 {
         self.handle.plugin_id()
     }
 
-    fn expected_plugin_id(&self) -> &str {
-        &self.expected_plugin_id
-    }
-
-    fn expected_release(&self) -> Option<([u8; 32], [u8; 32])> {
-        self.expected_release
+    fn expectation(&self) -> &CommunityPluginExpectationV1 {
+        &self.expectation
     }
 
     fn release_source(&self) -> &dyn ReleaseSourceV1 {

@@ -57,6 +57,7 @@ fn host_abi() -> CommunityPluginHostAbiV1 {
 /// The host's invocation inputs, one distinct invocation ID per member.
 ///
 /// A source built with [`Self::switched`] refuses with `InvalidInvocation` while its flag is set.
+#[derive(Debug)]
 pub struct Source {
     invocation_id: [u8; 16],
     refuse: Option<Arc<AtomicBool>>,
@@ -112,6 +113,7 @@ impl InvocationContextSourceV1 for Source {
 /// A source that panics while the Driver builds its invocation.
 ///
 /// It unwinds with `std::panic::resume_unwind`, since `clippy::panic` is denied.
+#[derive(Debug)]
 pub struct PanickingSource;
 
 impl InvocationContextSourceV1 for PanickingSource {
@@ -148,6 +150,7 @@ struct Observed {
 }
 
 /// The inputs of one `run_pass`, which its request borrows.
+#[derive(Debug)]
 pub struct Prepared {
     timeline: TimelineId,
     ancestry: Vec<TimelineMeta>,
@@ -207,6 +210,7 @@ pub struct GatedSpec {
 }
 
 /// What the composition keeps of a Driver built from a gated release.
+#[derive(Debug)]
 pub struct GatedMember {
     /// The Driver's handle.
     pub handle: CommunityPluginHandleV1,
@@ -242,7 +246,7 @@ impl World {
             program: program.into(),
             members_added: Vec::new(),
             store,
-            registry: PluginRegistry::new().with_erasure_gate(gate.clone()),
+            registry: PluginRegistry::new().with_erasure_gate(Arc::clone(&gate)),
             gate,
             timeline,
             members: 0,
@@ -254,6 +258,35 @@ impl World {
         let supervisor = WorkerProgramV1::new(self.program.clone())
             .and_then(|program| CommunityPluginSupervisorV1::new(program, watchdog));
         supervisor.unwrap_or_else(|| std::panic::resume_unwind(Box::new("invalid supervisor")))
+    }
+
+    /// The settings of a Driver of `plugin` over `source`, on this world's worker.
+    fn settings_for(
+        &self,
+        plugin: &DriverPlugin,
+        watchdog: Duration,
+        source: Box<dyn InvocationContextSourceV1>,
+    ) -> CommunityDriverSettingsV1 {
+        CommunityDriverSettingsV1 {
+            plugin_id: plugin.id,
+            name: plugin.name,
+            tick_interval: Duration::from_millis(100),
+            subscriptions: Vec::new(),
+            supervisor: self.supervisor(watchdog),
+            source,
+            initial_state: initial(),
+        }
+    }
+
+    /// Register `driver` of `plugin` under the pin of the member added last.
+    fn register(&mut self, plugin: &DriverPlugin, driver: CommunityDriverV1) {
+        let pin = community_pin(self.members, &format!("community-{}", plugin.name));
+        let () = ok(register_community_driver(
+            &mut self.registry,
+            plugin,
+            pin,
+            driver,
+        ));
     }
 
     /// Register one community Plugin whose Component bytes name the probe's behaviour.
@@ -274,15 +307,8 @@ impl World {
             event_type,
             has_driver: true,
         };
-        let settings = CommunityDriverSettingsV1 {
-            plugin_id: plugin.id,
-            name,
-            tick_interval: Duration::from_millis(100),
-            subscriptions: Vec::new(),
-            supervisor: self.supervisor(watchdog),
-            source: Box::new(Source::numbered(self.members)),
-            initial_state: initial(),
-        };
+        let source = Box::new(Source::numbered(self.members));
+        let settings = self.settings_for(&plugin, watchdog, source);
         let (driver, handle) =
             CommunityDriverV1::new(test_support::config_with(name, component, settings));
         self.members_added.push(Member {
@@ -290,13 +316,7 @@ impl World {
             negotiated: negotiated_with(name, SMALL_BUDGET, Vec::new()),
             component: component.to_vec(),
         });
-        let pin = community_pin(self.members, &format!("community-{name}"));
-        let () = ok(register_community_driver(
-            &mut self.registry,
-            &plugin,
-            pin,
-            driver,
-        ));
+        self.register(&plugin, driver);
         handle
     }
 
@@ -325,15 +345,7 @@ impl World {
             event_type,
             has_driver: true,
         };
-        let settings = CommunityDriverSettingsV1 {
-            plugin_id: plugin.id,
-            name,
-            tick_interval: Duration::from_millis(100),
-            subscriptions: Vec::new(),
-            supervisor: self.supervisor(watchdog),
-            source,
-            initial_state: initial(),
-        };
+        let settings = self.settings_for(&plugin, watchdog, source);
         let config = CommunityDriverConfigV1::from_gated(
             gated,
             &host_abi(),
@@ -343,13 +355,7 @@ impl World {
         )?;
         let (driver, handle) = CommunityDriverV1::new(config);
         if register {
-            let pin = community_pin(self.members, &format!("community-{name}"));
-            let () = ok(register_community_driver(
-                &mut self.registry,
-                &plugin,
-                pin,
-                driver,
-            ));
+            self.register(&plugin, driver);
         }
         Ok(GatedMember { handle, expected })
     }

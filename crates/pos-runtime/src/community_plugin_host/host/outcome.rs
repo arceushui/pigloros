@@ -3,13 +3,11 @@
 use pos_core::{PipelineCommitReceiptV1, PluginId};
 use pos_plugin_release::ContentValidationV1;
 
-use crate::community_plugin_host::{
-    CommunityPluginHostErrorV1, GatedCommunityReleaseV1, PassFailureV1,
-};
+use crate::community_plugin_host::{CommunityPluginHostErrorV1, GatedCommunityReleaseV1};
 use crate::RuntimeError;
 
 /// What the gate established about one member's release in this pass.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct GateSummaryV1 {
     /// The exact PMF1 Plugin ID text of the gated release.
     pub plugin_id: String,
@@ -64,10 +62,11 @@ pub enum PassResultV1 {
     Refused,
     /// The whole batch committed, with the commit receipt when the pass had any Event.
     Committed(Option<Box<PipelineCommitReceiptV1>>),
-    /// The pass failed and was discarded.
+    /// The pass failed and was discarded. An outcome in doubt is `InDoubt`, never a failure.
     Failed {
-        /// The classification of `error`: a host error or an unrelated one, never in doubt.
-        failure: PassFailureV1,
+        /// The closed host error that discarded the pass, or `None` when the error is the
+        /// host's own and not a community Plugin host failure.
+        host: Option<CommunityPluginHostErrorV1>,
         /// The registry's own error.
         error: Box<RuntimeError>,
     },
