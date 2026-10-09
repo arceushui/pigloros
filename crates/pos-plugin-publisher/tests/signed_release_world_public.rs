@@ -8,17 +8,24 @@
 //! is checked against the real registry, not a stub.
 #![cfg(target_os = "linux")]
 
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+
+use pos_conformance::PluginTrustBridgeErrorV1;
 use pos_crypto::plugin_trust::{PluginTrustErrorV1, ValidatedPluginManifestProjectionV1};
 use pos_plugin_publisher::{
     test_support::{
-        encoding::{OWNER, SCOPE},
+        encoding::{OWNER, SCOPE, TICK},
         release::{pmf1_digest, Shape, REAL_COMPONENT_BYTES},
+        spy_registry::Call,
         world::{key_bytes, register, wall, Config, World},
         BoxResult,
     },
     PluginReleaseInstallErrorV1,
 };
-use pos_plugin_release::ReleaseSourceV1;
+use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
 use pos_store::plugin_trust_registry::{
     ActiveReleaseV1, PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1,
     PolicyAdvanceKindV1,
@@ -302,5 +309,110 @@ fn a_release_carrying_the_real_component_installs_with_its_digests() -> TestResu
     let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
     assert!(installed.execution().is_bound_to(&projection));
     assert_eq!(installed.execution().pmf1_digest(), pmf1_digest(&bundle));
+    Ok(())
+}
+
+/// The world holding its installed first release, with that release's address and PMF1 digest.
+type InstalledWorld = (World, BundleAddressV1, [u8; 32]);
+
+/// Install the first release into `world`.
+fn installed_world(mut world: World) -> BoxResult<InstalledWorld> {
+    let published = world.publish(Shape::first())?;
+    let digest = pmf1_digest(&world.store.read_verified(published.address())?);
+    world
+        .install(published.address(), 1)?
+        .map_err(|error| format!("install failed: {error}"))?;
+    Ok((world, published.address().clone(), digest))
+}
+
+/// EV15: with a clock the spy stamps evaluations 1-based and strictly increasing, an `admit`
+/// is one unstamped entry that leaves the clock alone, the evaluation delegates and returns the
+/// inner result, and the `forced` error does not apply to it.
+#[test]
+fn a_clocked_spy_stamps_every_evaluation_and_leaves_admits_unstamped() -> TestResult {
+    let clock = Arc::new(AtomicU64::new(0));
+    let (mut world, address, digest) = installed_world(World::with_clock(Arc::clone(&clock))?)?;
+    let admit = world.registry.admits.first().cloned().ok_or("no admit")?;
+    assert_eq!(world.registry.admits.len(), 1);
+    assert_eq!(
+        world.registry.calls.borrow().as_slice(),
+        [Call::Admit(admit)]
+    );
+    assert_eq!(clock.load(Ordering::SeqCst), 0);
+
+    let utc = world.material()?.utc;
+    let evaluation = world.evaluate_at(&address, utc, TICK)??;
+    assert_eq!(evaluation.pmf1_digest(), digest);
+    assert_eq!(evaluation.plugin_id(), "plugin-a");
+    assert_eq!(evaluation.trusted_utc_second(), utc);
+    assert_eq!(evaluation.tick(), TICK);
+    assert_eq!(clock.load(Ordering::SeqCst), 1);
+
+    // The forced error is an `admit` injection only, and the inner result is returned as is.
+    world.registry.forced = Some(PluginTrustPolicyRegistryErrorV1::StorageFailed);
+    let wrong_utc = world.evaluate_at(&address, utc + 1, TICK)?;
+    assert_eq!(
+        wrong_utc.err(),
+        Some(PluginTrustPolicyRegistryErrorV1::Bridge(
+            PluginTrustBridgeErrorV1::EvaluationUtcMismatch
+        ))
+    );
+    let wrong_tick = world.evaluate_at(&address, utc, TICK + 1)?;
+    assert_eq!(
+        wrong_tick.err(),
+        Some(PluginTrustPolicyRegistryErrorV1::Bridge(
+            PluginTrustBridgeErrorV1::EvaluationTickMismatch
+        ))
+    );
+    assert_eq!(clock.load(Ordering::SeqCst), 3);
+    assert_eq!(world.registry.admits.len(), 1);
+    let stamps = world.registry.calls.borrow().clone();
+    assert_eq!(stamps.len(), 4);
+    assert_eq!(
+        stamps[1..],
+        [
+            Call::Evaluate {
+                stamp: 1,
+                utc,
+                tick: TICK,
+            },
+            Call::Evaluate {
+                stamp: 2,
+                utc: utc + 1,
+                tick: TICK,
+            },
+            Call::Evaluate {
+                stamp: 3,
+                utc,
+                tick: TICK + 1,
+            },
+        ]
+    );
+    Ok(())
+}
+
+/// EV15: a spy without a clock records stamp 0, and a following `admit` still appends one entry.
+#[test]
+fn an_unclocked_spy_records_stamp_zero() -> TestResult {
+    let (mut world, address, _) = installed_world(World::new()?)?;
+    let utc = world.material()?.utc;
+    world.evaluate_at(&address, utc, TICK)??;
+    world.evaluate_at(&address, utc, TICK)??;
+    let evaluate = Call::Evaluate {
+        stamp: 0,
+        utc,
+        tick: TICK,
+    };
+    let calls = world.registry.calls.borrow().clone();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[1..], [evaluate.clone(), evaluate]);
+    // The replay appends exactly one more `Admit` entry and appears in `admits`.
+    world
+        .install(&address, 1)?
+        .map_err(|error| format!("replay failed: {error}"))?;
+    assert_eq!(world.registry.admits.len(), 2);
+    let calls = world.registry.calls.borrow().clone();
+    assert_eq!(calls.len(), 4);
+    assert!(matches!(calls.last(), Some(Call::Admit(_))));
     Ok(())
 }

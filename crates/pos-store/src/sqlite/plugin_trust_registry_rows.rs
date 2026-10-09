@@ -6,10 +6,12 @@
 //! decoder needs but that is NULL, or a value of the wrong storage class, surfaces as
 //! `CorruptState` through [`storage_error`].
 //!
-//! Limits: the active pointer is not cross-checked against the decision table (no foreign keys;
-//! the plan functions only ever write a pointer in the same transaction as its decision or after
-//! reading a retained one), and `decode_decision` and `decode_rollback` stay separate because
-//! their output types differ in every field name they fill.
+//! Limits: no foreign key ties the active pointer to the decision table, and the row decoders do
+//! not cross-check them (the write plans only ever write a pointer in the same transaction as its
+//! decision or after reading a retained one). `plan_evaluate` (ADR-103 revision 5, step 11) does
+//! cross-check the pointer's decision, as `CorruptState`, for the one pointer it reads.
+//! `decode_decision` and `decode_rollback` stay separate because their output types differ in
+//! every field name they fill.
 //!
 //! `u64` coordinates (epochs, versions, Ticks, positions, sequences) are stored as the `INTEGER`
 //! with the same 64 bits, so every `u64` round-trips and no `CHECK` compares them.
