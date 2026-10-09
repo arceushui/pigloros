@@ -41,11 +41,11 @@ use pos_runtime::community_plugin_host::{
     PluginOutputV1, TrapReproductionV1,
 };
 
-use crate::launch::MODES;
 use self::contract::{
     read_descriptor, read_guest_error, read_invocation, read_log, read_metering, read_output,
     write_descriptor, write_guest_error, write_invocation, write_log, write_metering, write_output,
 };
+use crate::launch::MODES;
 
 use self::wire::{
     read_bytes, read_code, read_digests, read_list, read_text, read_u16, require, Decoded,
