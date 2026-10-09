@@ -92,12 +92,34 @@ fn every_verification_reason_maps_to_its_adr_code() {
     }
 }
 
+const REJECTED_REASONS: [Reason; 16] = [
+    Reason::Origin,
+    Reason::RpIdHash,
+    Reason::ClientDataType,
+    Reason::Challenge,
+    Reason::CrossOrigin,
+    Reason::UserPresence,
+    Reason::UserVerification,
+    Reason::AttestationFormat,
+    Reason::Algorithm,
+    Reason::CoseKey,
+    Reason::Extensions,
+    Reason::Signature,
+    Reason::CredentialMismatch,
+    Reason::UserHandleMismatch,
+    Reason::CounterRegression,
+    Reason::BackupFlags,
+];
+
 #[test]
 fn every_verification_rejection_is_user_retryable_and_a_missing_prf_is_not() {
+    for reason in REJECTED_REASONS {
+        let error = BridgeError::from_verification_reason(reason);
+        assert!(matches!(error, BridgeError::Rejected(_)));
+        assert!(error.is_user_retryable());
+    }
     let prf = BridgeError::from_verification_reason(Reason::PrfAbsent);
     assert!(!prf.is_user_retryable());
-    let origin = BridgeError::from_verification_reason(Reason::Origin);
-    assert!(origin.is_user_retryable());
 }
 
 #[test]
