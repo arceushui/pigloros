@@ -8,8 +8,8 @@
 use std::cell::Cell;
 
 use ciborium::Value;
-use pos_core::event::{Event, SchemaVersion};
 use pos_conformance::PluginTrustPolicyAnchorV1;
+use pos_core::event::{Event, SchemaVersion};
 use pos_core::ids::{EntityId, TimelineId};
 use pos_core::store::{EventStore, SeqRange};
 use pos_plugin_publisher::test_support::{
