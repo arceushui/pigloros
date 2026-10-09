@@ -119,7 +119,7 @@ impl Inner {
     }
 
     /// Forget the failure and the invocation ID of the pass.
-    fn forget_pass_values(&mut self) {
+    const fn forget_pass_values(&mut self) {
         self.pass_failure = None;
         self.pass_invocation_id = None;
     }
