@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pos_core::counterfactual_store::test_fixtures::{
-    frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, text_field, uint,
-    SeededFactualTickV1,
+    frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, text_field,
+    uint, SeededFactualTickV1,
 };
 use pos_core::{
     CanonicalBytes, CoreError, CounterfactualAdapterSealV1, CounterfactualDependencyErrorV1,
@@ -24,8 +24,8 @@ use pos_core::{
     DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1, DependencyPagedRowV1,
     DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
     ErasureProtectedEffectDispositionV1, EventDraft, EventStore, FactualCutV1, FactualHeadV1,
-    FactualOwnerIdV1, FactualPrefixReadPortV1, ForkGenerationV1, Hash, InvalidationConflictV1, Kind,
-    PipelineDraftBatchV1, RecomputationFrontierBytesV1, RecordedDependencyClassV1,
+    FactualOwnerIdV1, FactualPrefixReadPortV1, ForkGenerationV1, Hash, InvalidationConflictV1,
+    Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1, RecordedDependencyClassV1,
     RecordedNodeOriginV1, RecordedSetCountsV1, Seq, SuffixInvalidationBytesV1,
     TickDependencyRecordV1, TimelineId, TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1,
     MAX_RECORDED_DEPENDENCY_EDGES_V1, MAX_RECORDED_DEPENDENCY_NODES_V1,

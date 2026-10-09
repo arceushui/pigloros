@@ -1581,8 +1581,7 @@ fn path_of(
 /// The head of the Timeline's factual history.
 fn last_head(conn: &Connection, path: &[SegmentV1]) -> Result<FactualHeadV1, CoreError> {
     let head = |segment: &SegmentV1| segment_head(conn, segment, i64::MAX);
-    first_found(path.iter().rev(), head)
-        .map(|found| found.unwrap_or(NO_HEAD))
+    first_found(path.iter().rev(), head).map(|found| found.unwrap_or(NO_HEAD))
 }
 
 /// Where a cut at `seq` falls in the visible Ticks.
