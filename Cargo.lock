@@ -404,6 +404,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -894,7 +900,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d17df73b26adfb8be89f0716b8667c60660bdd2d589863b8901caca58c99841"
 dependencies = [
  "async-lock",
- "base64",
+ "base64 0.22.1",
  "bevy_animation",
  "bevy_app",
  "bevy_asset",
@@ -5095,7 +5101,7 @@ dependencies = [
 name = "pos-owner-bridge-codec"
 version = "0.1.0"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "httparse",
  "p256",
  "sha2 0.11.0",
