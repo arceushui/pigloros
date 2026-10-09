@@ -140,7 +140,7 @@ fn require_expected(
     matches.then_some(()).ok_or(mapping::NOT_ACTIVE)
 }
 
-fn slices(records: &[Vec<u8>]) -> Vec<&[u8]> {
+pub(in crate::community_plugin_host) fn slices(records: &[Vec<u8>]) -> Vec<&[u8]> {
     records.iter().map(Vec::as_slice).collect()
 }
 
