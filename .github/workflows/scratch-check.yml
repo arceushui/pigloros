@@ -11,9 +11,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - ref: redmine/583-driver-wiring
-            id: p583
-            base: redmine/582-install-entry
+          - ref: redmine/584-host-pass-seam
+            id: p584
+            base: redmine/583-driver-wiring
             pkg: "-p pos-runtime -p pos-plugin-host -p pos-plugin-supervisor -p pos-plugin-publisher -p pos-crypto -p pos-plugin-release -p pos-plugin-worker"
     steps:
       - uses: actions/checkout@v4
@@ -43,6 +43,3 @@ jobs:
           CARGO_TERM_COLOR=never cargo test --no-fail-fast ${{ matrix.pkg }} --all-features > /tmp/test.log 2>&1 || true
           grep -E '^error|^test .* FAILED|^---- |test result: FAILED|panicked' /tmp/test.log | head -80
           grep -c 'test result: ok' /tmp/test.log
-      - name: reserved draft test with output
-        run: |
-          RUST_BACKTRACE=1 cargo test -p pos-runtime --all-features --test protected_consent a_driver_draft_of_the_reserved -- --nocapture --test-threads=1 2>&1 | tail -40
