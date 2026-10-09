@@ -2523,21 +2523,21 @@ fn other_cut_tick_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
     Ok(vec![seeded_tick(PARENT_CUT_TICK - 1, 1, CUT_SEQ)?])
 }
 
-/// No Tick is recorded, so the derived cut Tick is 0.
-fn empty_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
-    Ok(Vec::new())
-}
-
-const REFUSED_PREFIXES: [PrefixCase; 4] = [
+const REFUSED_PREFIXES: [PrefixCase; 3] = [
     mid_tick_at_first_seq_prefix,
     mid_tick_inside_prefix,
     other_cut_tick_prefix,
-    empty_prefix,
 ];
 
 fn the_parent_cut_must_be_a_recorded_tick_boundary<B: RecordingBackend>() -> TestResult {
-    for prefix in REFUSED_PREFIXES {
-        let mut setup = setup_seeded::<B>(&BASE, &prefix()?)?;
+    let mut prefixes = Vec::new();
+    for case in REFUSED_PREFIXES {
+        prefixes.push(case()?);
+    }
+    // No Tick is recorded, so the derived cut Tick is 0.
+    prefixes.push(Vec::new());
+    for prefix in prefixes {
+        let mut setup = setup_seeded::<B>(&BASE, &prefix)?;
         let mut stager =
             DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
         let result = admit_recording!(setup, &mut stager);
