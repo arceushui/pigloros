@@ -469,6 +469,20 @@ fn page_after<T: DependencyPagedRowV1 + Clone>(
     let after = request.after().cloned();
     let start = after.map_or(Bound::Unbounded, Bound::Excluded);
     let limit = request.limit().saturating_add(1);
+    let window = window_of(segments, through, &start, limit);
+    DependencyPageV1::from_ordered(request, &window)
+        .map_err(StoreError::from)
+        .and_then(|page| revalidated(request, &page))
+}
+
+/// The first `limit` rows of the segments, in order, after the cursor `start`
+/// and within the Tick bound `through` and each segment's own Tick bound.
+fn window_of<T: Clone>(
+    segments: &[Segment<'_, T>],
+    through: u64,
+    start: &Bound<RowKey>,
+    limit: usize,
+) -> Vec<T> {
     let mut window: Vec<T> = Vec::new();
     for segment in segments {
         let ceiling = through.min(segment.bound);
@@ -477,9 +491,7 @@ fn page_after<T: DependencyPagedRowV1 + Clone>(
         let room = limit.saturating_sub(window.len());
         window.extend(within.take(room).map(|(_, row)| row.clone()));
     }
-    DependencyPageV1::from_ordered(request, &window)
-        .map_err(StoreError::from)
-        .and_then(|page| revalidated(request, &page))
+    window
 }
 
 /// Re-validate a page of stored rows; a failure is corrupt state, not a
