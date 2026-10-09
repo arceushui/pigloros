@@ -181,7 +181,8 @@ impl CommunityPluginSupervisorV1 {
         let request = encode_worker_request_v1(&request).map_err(|_| Error::InvalidInvocation)?;
         let ceilings = WorkerResourceCeilingsV1::for_invocation(&limits, self.watchdog);
         let deadline = Instant::now() + self.watchdog;
-        let worker = launch(&self.program, &ceilings).ok_or(Error::WorkerCrashed)?;
+        let worker =
+            launch(&self.program, &ceilings, negotiated.mode()).ok_or(Error::WorkerCrashed)?;
         let frames = WorkerFrameLimitsV1::for_limits(&limits);
         let response = supervise(worker, &request, frames, deadline)?;
         decode_worker_response_v1(&response).map_err(|_| Error::WorkerCrashed)?

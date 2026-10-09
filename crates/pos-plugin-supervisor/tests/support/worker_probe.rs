@@ -35,7 +35,7 @@ const FUEL: [u8; 10] = [0x83, 0x64, b'P', b'W', b'R', b'1', 0x01, 0x82, 0x02, 0x
 
 fn main() -> ExitCode {
     let request = prepare_worker_process(std::env::args_os())
-        .and_then(|()| read_request(&mut std::io::stdin().lock()));
+        .and_then(|_mode| read_request(&mut std::io::stdin().lock()));
     request.map_or_else(|_| ExitCode::from(2), |request| serve(&request))
 }
 

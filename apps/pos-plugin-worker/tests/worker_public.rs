@@ -9,11 +9,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
-use pos_plugin_supervisor::test_support::{invocation, negotiated_with, ok};
+use pos_plugin_host::pinned_runtime;
+use pos_plugin_supervisor::test_support::{invocation, negotiated_under, ok};
 use pos_plugin_supervisor::{CommunityPluginSupervisorV1, WorkerProgramV1};
 use pos_runtime::community_plugin_host::{
-    CommunityPluginHostErrorV1, ComponentTrapClassV1, HostInputs, NegotiatedCommunityPluginV1,
-    TrapReproductionV1,
+    CeilingValuesV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
+    CommunityPluginHostErrorV1, CommunityPluginModeV1, ComponentTrapClassV1, HostInputs,
+    NegotiatedCommunityPluginV1, TrapReproductionV1,
 };
 
 /// Bytes of one committed compatibility fixture.
@@ -38,8 +40,27 @@ const INPUTS: HostInputs = HostInputs {
 
 type Error = CommunityPluginHostErrorV1;
 
+const LOCAL: CommunityPluginModeV1 = CommunityPluginModeV1::Local;
+const AIR_GAPPED: CommunityPluginModeV1 = CommunityPluginModeV1::AirGapped;
+
+/// The profile of a host in `mode`: what the worker's own profile equals.
+fn profile(
+    mode: CommunityPluginModeV1,
+    ceilings: CommunityPluginCeilingsV1,
+) -> CommunityPluginExecutionProfileV1 {
+    CommunityPluginExecutionProfileV1::new(mode, ceilings, Some(ok(pinned_runtime())))
+}
+
+fn negotiated_in(
+    budget: DeterministicBudgetV1,
+    mode: CommunityPluginModeV1,
+) -> NegotiatedCommunityPluginV1 {
+    let profile = profile(mode, CommunityPluginCeilingsV1::V1);
+    negotiated_under(PLUGIN_ID, budget, Vec::new(), &profile)
+}
+
 fn negotiated(budget: DeterministicBudgetV1) -> NegotiatedCommunityPluginV1 {
-    negotiated_with(PLUGIN_ID, budget, Vec::new())
+    negotiated_in(budget, LOCAL)
 }
 
 fn supervisor() -> CommunityPluginSupervisorV1 {
@@ -97,4 +118,54 @@ fn bytes_that_do_not_implement_the_world_are_incompatible() {
         supervisor().describe(&negotiated(ROOMY), b"not a component", INPUTS),
         Err(Error::IncompatibleAbi)
     );
+}
+
+/// R7-P4: on the real `rust-guest.wasm`, Local and Air-Gapped launches give
+/// the same results, and the two records differ only in the recorded mode.
+///
+/// The receipt half of the vector (the Driver adapter's receipts differing only
+/// in the recorded mode) is deferred to the adapter ticket (#583/#584); this
+/// test compares the negotiated records the receipts embed.
+#[test]
+fn local_and_air_gapped_launches_produce_identical_results() {
+    let call = invocation(b"observation");
+    let run = |mode| {
+        let negotiated = negotiated_in(ROOMY, mode);
+        let supervisor = supervisor();
+        let described = ok(supervisor.describe(&negotiated, RUST_GUEST, INPUTS));
+        let reduced = ok(supervisor.reduce(&negotiated, RUST_GUEST, &call, INPUTS));
+        let driven = ok(supervisor.drive(&negotiated, RUST_GUEST, &call, INPUTS));
+        (negotiated, (described, reduced, driven))
+    };
+    let (local, local_reports) = run(LOCAL);
+    let (air_gapped, air_gapped_reports) = run(AIR_GAPPED);
+    // Output digest, state, drafts, metering and log: the whole reports.
+    assert_eq!(local_reports, air_gapped_reports);
+    assert!(local_reports.2.metering.call_fuel > 0);
+    assert_eq!(local.mode(), LOCAL);
+    assert_eq!(air_gapped.mode(), AIR_GAPPED);
+    assert!(local.execution_profile_digest().is_some());
+    let mut recorded = local.to_transport();
+    recorded.mode = AIR_GAPPED;
+    assert_eq!(recorded, air_gapped.to_transport());
+}
+
+/// R7-P8: a host profile with non-V1 ceilings has another digest, its record
+/// gets no reply from the worker, and the launch ends `WorkerCrashed`.
+#[test]
+fn a_host_profile_with_non_v1_ceilings_ends_worker_crashed() {
+    let values = CeilingValuesV1 {
+        memory_bytes: 512 * 65_536,
+        ..CommunityPluginCeilingsV1::V1.values()
+    };
+    let narrower = ok(CommunityPluginCeilingsV1::new(values));
+    let host_profile = profile(LOCAL, narrower);
+    assert_ne!(
+        host_profile.digest(),
+        profile(LOCAL, CommunityPluginCeilingsV1::V1).digest()
+    );
+    let record = negotiated_under(PLUGIN_ID, ROOMY, Vec::new(), &host_profile);
+    assert_eq!(record.execution_profile_digest(), host_profile.digest());
+    let launched = supervisor().describe(&record, RUST_GUEST, INPUTS);
+    assert_eq!(launched, Err(Error::WorkerCrashed));
 }
