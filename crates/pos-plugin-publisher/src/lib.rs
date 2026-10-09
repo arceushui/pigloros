@@ -18,6 +18,11 @@
 //! trust evidence, verifies its PMF1 signature, and only then asks the Plugin
 //! trust policy registry to admit it. It does not validate artifact content
 //! (follow-up #574) and builds no activation Event (the caller supplies it).
+//!
+//! The `test-support` feature compiles the shared signed-release test world used by the
+//! installer vectors and by other crates' tests. The `installer_public` and
+//! `signed_release_world_public` test targets declare `required-features`, so a plain
+//! `cargo test -p pos-plugin-publisher` skips them; run with `--all-features`.
 
 #[cfg(target_os = "linux")]
 use pos_core::{CanonicalBytes, KeyIdentityV1, PublicKey, Signature};

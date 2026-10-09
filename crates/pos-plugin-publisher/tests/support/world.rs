@@ -106,13 +106,33 @@ pub fn register(
     Ok(material)
 }
 
+fn publish_signed(
+    keys: &mut KeyRegistryStateV1,
+    signer: &SigningKeyMaterial,
+    store: &LocalOciPublisherV1,
+    shape: Shape,
+) -> BoxResult<PublishedPluginReleaseV1> {
+    let draft = make_draft(shape)?;
+    let published = publish_plugin_release_v1(keys, signer, shape.epoch, &draft, store)?;
+    Ok(published)
+}
+
+/// `spec` with one more chained PRV1 epoch.
+fn next_epoch(spec: Spec) -> Spec {
+    Spec {
+        extra_epochs: spec.extra_epochs + 1,
+        ..spec
+    }
+}
+
 /// Who may publish which Plugin, whether the PTR1 lists the real publisher key,
 /// and whether the registry is provisioned.
 #[derive(Clone, Copy)]
 pub struct Config {
     /// The Plugin ID the PTR1 grants to the publisher.
     pub plugin_id: &'static str,
-    /// The publisher owner.
+    /// The publisher owner. Must differ from `OTHER_OWNER`, whose epoch-1 key the world
+    /// also registers: the same owner and epoch would be registered twice.
     pub owner: &'static str,
     /// Replaces the key the PTR1 lists for the publisher's epoch 1.
     pub listed_key: Option<[u8; 32]>,
@@ -250,13 +270,7 @@ impl World {
     /// # Errors
     /// Returns the draft or publication error.
     pub fn publish(&mut self, shape: Shape) -> BoxResult<PublishedPluginReleaseV1> {
-        Ok(publish_plugin_release_v1(
-            &mut self.keys,
-            &self.publisher,
-            shape.epoch,
-            &make_draft(shape)?,
-            &self.store,
-        )?)
+        publish_signed(&mut self.keys, &self.publisher, &self.store, shape)
     }
 
     /// Sign and publish a release with `signer`, registered for the shape's
@@ -269,13 +283,7 @@ impl World {
         signer: &SigningKeyMaterial,
         shape: Shape,
     ) -> BoxResult<PublishedPluginReleaseV1> {
-        Ok(publish_plugin_release_v1(
-            &mut self.keys,
-            signer,
-            shape.epoch,
-            &make_draft(shape)?,
-            &self.store,
-        )?)
+        publish_signed(&mut self.keys, signer, &self.store, shape)
     }
 
     /// Publish arbitrary PMF1 bytes bound to the default draft's artifacts.
@@ -353,8 +361,7 @@ impl World {
     /// # Errors
     /// Returns the fixture construction or trust verification error.
     pub fn key_revoked_material(&self, epochs: &[u64]) -> BoxResult<Material> {
-        let mut spec = self.spec.clone();
-        spec.revoked_epochs.extend_from_slice(epochs);
+        let spec = self.revoking_keys(epochs);
         self.policy.material_chained(&spec, self.previous)
     }
 
@@ -364,9 +371,20 @@ impl World {
     /// # Errors
     /// Returns the fixture construction or trust verification error.
     pub fn artifact_revoked_material(&self, digests: &[[u8; 32]]) -> BoxResult<Material> {
+        let spec = self.revoking_artifacts(digests);
+        self.policy.material_chained(&spec, self.previous)
+    }
+
+    fn revoking_keys(&self, epochs: &[u64]) -> Spec {
+        let mut spec = self.spec.clone();
+        spec.revoked_epochs.extend_from_slice(epochs);
+        spec
+    }
+
+    fn revoking_artifacts(&self, digests: &[[u8; 32]]) -> Spec {
         let mut spec = self.spec.clone();
         spec.revoked_artifacts.extend_from_slice(digests);
-        self.policy.material_chained(&spec, self.previous)
+        spec
     }
 
     /// Install with explicit evidence and wall source.
@@ -415,9 +433,7 @@ impl World {
         &mut self,
         epochs: &[u64],
     ) -> BoxResult<Registry<PolicyAdvanceOutcomeV1>> {
-        let mut next = self.spec.clone();
-        next.extra_epochs += 1;
-        next.revoked_epochs.extend_from_slice(epochs);
+        let next = next_epoch(self.revoking_keys(epochs));
         self.advance_to(next)
     }
 
@@ -432,9 +448,7 @@ impl World {
         &mut self,
         digests: &[[u8; 32]],
     ) -> BoxResult<Registry<PolicyAdvanceOutcomeV1>> {
-        let mut next = self.spec.clone();
-        next.extra_epochs += 1;
-        next.revoked_artifacts.extend_from_slice(digests);
+        let next = next_epoch(self.revoking_artifacts(digests));
         self.advance_to(next)
     }
 

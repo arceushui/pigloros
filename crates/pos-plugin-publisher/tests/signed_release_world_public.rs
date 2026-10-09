@@ -8,11 +8,11 @@
 //! is checked against the real registry, not a stub.
 #![cfg(target_os = "linux")]
 
-use pos_crypto::plugin_trust::PluginTrustErrorV1;
+use pos_crypto::plugin_trust::{PluginTrustErrorV1, ValidatedPluginManifestProjectionV1};
 use pos_plugin_publisher::{
     test_support::{
         encoding::{OWNER, SCOPE},
-        release::{pmf1_digest, Shape},
+        release::{pmf1_digest, Shape, REAL_COMPONENT_BYTES},
         world::{key_bytes, register, wall, Config, World},
         BoxResult,
     },
@@ -23,6 +23,7 @@ use pos_store::plugin_trust_registry::{
     ActiveReleaseV1, PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1,
     PolicyAdvanceKindV1,
 };
+use sha2::{Digest as _, Sha256};
 
 type TestResult = BoxResult<()>;
 
@@ -171,6 +172,7 @@ fn a_refused_policy_advance_leaves_the_world_evidence_unchanged() -> TestResult 
     let published = world.publish(Shape::first())?;
     assert!(world.install(published.address(), 1)?.is_ok());
     let before = world.material()?.tps1;
+    let before_state = world.snapshot(&[])?;
     // Evidence one second before the retained highest trusted second regresses.
     world.spec.utc_offset = -1;
     let refused = world.advance_revoking_keys(&[1])?;
@@ -182,6 +184,7 @@ fn a_refused_policy_advance_leaves_the_world_evidence_unchanged() -> TestResult 
     assert_eq!(world.previous, None);
     world.spec.utc_offset = 0;
     assert_eq!(world.material()?.tps1, before);
+    assert_eq!(world.snapshot(&[])?, before_state);
     Ok(())
 }
 
@@ -203,10 +206,82 @@ fn an_operator_rollback_reactivates_the_earlier_release() -> TestResult {
         .map_err(|error| format!("rollback failed: {error}"))?;
     assert_eq!(receipt.target_pmf1_digest(), first_digest);
     assert_eq!(receipt.replaced_pmf1_digest(), second_digest);
-    let active = world.snapshot(&[])?.active;
+    let snapshot = world.snapshot(&[first_digest, second_digest])?;
     assert_eq!(
-        active.as_ref().map(ActiveReleaseV1::pmf1_digest),
+        snapshot.active.as_ref().map(ActiveReleaseV1::pmf1_digest),
         Some(first_digest)
     );
+    // The evidence is unchanged, both decisions stay retained, and three activations exist.
+    let current = world.material()?.tps1_digest();
+    assert_eq!(snapshot.policy.tps1_digest(), current);
+    assert!(snapshot.decisions.iter().all(Option::is_some));
+    assert_eq!(snapshot.events.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn sequential_policy_advances_keep_every_earlier_revocation() -> TestResult {
+    let mut world = World::new()?;
+    let first = world.publish(Shape::first())?;
+    let second = world.publish(Shape {
+        version: "2.0.0",
+        ..Shape::first()
+    })?;
+    let artifacts = world
+        .advance_revoking_artifacts(&[second.release_digest()])?
+        .map_err(|error| format!("artifact advance failed: {error}"))?;
+    assert_eq!(artifacts.tps1_epoch, 2);
+    let refused = world.install(second.address(), 1)?;
+    assert_eq!(
+        refused.err(),
+        Some(authorization_error(PluginTrustErrorV1::ArtifactRevoked))
+    );
+    let keys = world
+        .advance_revoking_keys(&[1])?
+        .map_err(|error| format!("key advance failed: {error}"))?;
+    assert_eq!(keys.outcome, PolicyAdvanceKindV1::Advanced);
+    assert_eq!(keys.tps1_epoch, 3);
+    // The registry accepted a TPS1 that maps both revocations.
+    assert_eq!(world.spec.extra_epochs, 2);
+    assert_eq!(world.spec.revoked_epochs, [1]);
+    assert_eq!(world.spec.revoked_artifacts, [second.release_digest()]);
+    let retained = world.registry.retained_policy_state(SCOPE)?;
+    assert_eq!(retained.tps1_epoch(), 3);
+    assert_eq!(retained.tps1_digest(), world.material()?.tps1_digest());
+    // Both releases are now refused: the key revocation outranks the artifact one.
+    for address in [first.address(), second.address()] {
+        let refused = world.install(address, 1)?;
+        assert_eq!(
+            refused.err(),
+            Some(authorization_error(PluginTrustErrorV1::PublisherKeyRevoked))
+        );
+    }
+    assert!(world.registry.admits.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_release_carrying_the_real_component_installs_with_its_digests() -> TestResult {
+    let mut world = World::new()?;
+    let component = REAL_COMPONENT_BYTES;
+    let shape = Shape::first().with_real_component();
+    assert_eq!(shape.component, component);
+    // A WebAssembly Component preamble: magic, then version 13 with layer 1.
+    assert_eq!(component.get(..8), Some(&b"\0asm\x0d\0\x01\0"[..]));
+    let published = world.publish(shape)?;
+    let bundle = world.store.read_verified(published.address())?;
+    // The component layer is the file's bytes, and the PMF1 descriptor names its SHA-256.
+    let member_listed = bundle.member_bytes().any(|bytes| bytes == component);
+    assert!(member_listed);
+    let sha256 = Sha256::digest(component);
+    let pmf1 = bundle.pmf1();
+    let digest_listed = pmf1.windows(32).any(|window| window == sha256.as_slice());
+    assert!(digest_listed);
+    let installed = world
+        .install(published.address(), 1)?
+        .map_err(|error| format!("install failed: {error}"))?;
+    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
+    assert!(installed.execution().is_bound_to(&projection));
+    assert_eq!(installed.execution().pmf1_digest(), pmf1_digest(&bundle));
     Ok(())
 }

@@ -28,8 +28,12 @@ use super::BoxResult;
 
 static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
 
-/// The default Component bytes of a release.
+/// The default Component bytes of a release: a fake that is not a valid WebAssembly Component.
 pub const COMPONENT_BYTES: &[u8] = b"\0asm component";
+/// A real WebAssembly Component: the compatibility prototype's Rust guest fixture.
+pub const REAL_COMPONENT_BYTES: &[u8] = include_bytes!(
+    "../../../../plugins/community/examples/compatibility-prototype/fixtures/rust-guest.wasm"
+);
 const WIT_BYTES: &[u8] = b"wit archive";
 const EVENT_SCHEMA: &[u8] = br#"{"$id":"event"}"#;
 const STATE_SCHEMA: &[u8] = br#"{"$id":"state"}"#;
@@ -140,6 +144,15 @@ impl Shape {
             not_before: 40,
             not_after: 60,
             epoch: 1,
+        }
+    }
+
+    /// This shape carrying the real WebAssembly Component instead of the fake bytes.
+    #[must_use]
+    pub const fn with_real_component(self) -> Self {
+        Self {
+            component: REAL_COMPONENT_BYTES,
+            ..self
         }
     }
 }
