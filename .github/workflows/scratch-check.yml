@@ -33,7 +33,7 @@ jobs:
           mkdir -p fmtout && cp /tmp/fmt.patch fmtout/${{ matrix.id }}.patch
           git add -f fmtout && git commit -q -m out && git push -q -f origin out-${{ matrix.id }}:refs/heads/scratch/out-${{ matrix.id }}
           git checkout -q -f ${{ matrix.ref }}
-          git apply /tmp/fmt.patch
+          git apply --allow-empty /tmp/fmt.patch
       - name: clippy keep-going
         run: |
           CARGO_TERM_COLOR=never cargo clippy --keep-going --message-format=short --workspace --all-targets --all-features -- -D warnings -W clippy::pedantic > /tmp/clippy.log 2>&1 || true
