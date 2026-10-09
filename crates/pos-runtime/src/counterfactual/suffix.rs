@@ -583,8 +583,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         request: &CounterfactualSuffixRequestV1<'_>,
     ) -> Result<(CounterfactualBasisV1, SuffixInvalidationV1), CounterfactualSuffixErrorV1> {
         let committed = self.committed_invalidation(request)?;
-        M::check_parent_cut(&self.store, request.plan)
-            .map_err(|error| parent_cut_error(&error))?;
+        M::check_parent_cut(&self.store, request.plan).map_err(|error| parent_cut_error(&error))?;
         Ok(committed)
     }
 

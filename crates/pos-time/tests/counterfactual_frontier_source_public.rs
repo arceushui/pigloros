@@ -1404,7 +1404,9 @@ fn seed<B: Backend>(store: &mut Shared<B>) -> TestResult<Seeded> {
     store.append(root_id(), &raw)?;
     let host = host(|_| {})?;
     let graph = graph_with(&host.plan, &[])?;
-    store.lock().seed_prefix(root_id(), &prefix_ticks(&graph)?)?;
+    store
+        .lock()
+        .seed_prefix(root_id(), &prefix_ticks(&graph)?)?;
     store.create_timeline_with_meta(TimelineMeta {
         id: fork_id(),
         ..TimelineMeta::forked_from(root_id(), Seq::from_u64(CUT_SEQ), "counterfactual")

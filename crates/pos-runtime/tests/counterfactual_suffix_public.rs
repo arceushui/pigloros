@@ -2868,9 +2868,11 @@ fn mid_tick_at_first_seq_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
 /// Tick 9 spans the cut, which falls strictly inside it. The seeded prefix may
 /// extend past the appended Events: the seed seam checks nothing about them.
 fn mid_tick_inside_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
-    Ok(vec![
-        seeded_tick(PARENT_CUT_TICK, CUT_SEQ - 1, CUT_SEQ + 1)?,
-    ])
+    Ok(vec![seeded_tick(
+        PARENT_CUT_TICK,
+        CUT_SEQ - 1,
+        CUT_SEQ + 1,
+    )?])
 }
 
 /// Tick 8 ends at the cut, so the plan's cut Tick 9 is not the derived one.
