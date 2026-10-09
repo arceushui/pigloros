@@ -558,7 +558,7 @@ fn not_run_entry() -> BoxResult<MemberPassV1> {
 
 const fn error_of(result: &Verdict) -> &'static str {
     match result {
-        Verdict::Refused { error, .. } | Verdict::Failed { error, .. } => *error,
+        Verdict::Refused { error, .. } | Verdict::Failed { error, .. } => error,
         _ => "none",
     }
 }
@@ -572,7 +572,7 @@ const fn basis_of(result: &Verdict) -> Option<&'static str> {
 
 const fn class_of(result: &Verdict) -> &'static str {
     match result {
-        Verdict::Refused { class, .. } | Verdict::Failed { class, .. } => *class,
+        Verdict::Refused { class, .. } | Verdict::Failed { class, .. } => class,
         _ => "none",
     }
 }
