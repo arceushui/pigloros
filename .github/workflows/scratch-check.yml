@@ -11,10 +11,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - ref: redmine/585-handoff
-            id: p585
-            base: redmine/584-host-pass-seam
-            pkg: "-p pos-runtime -p pos-plugin-host -p pos-plugin-supervisor -p pos-plugin-publisher -p pos-crypto -p pos-plugin-release -p pos-plugin-worker"
+          - ref: redmine/578-airgapped-profile
+            id: f578
+            base: redmine/577-failure-surface
+            pkg: "-p pos-plugin-supervisor"
+          - ref: redmine/582-install-entry
+            id: f582
+            base: redmine/581-gate-and-world-builders
+            pkg: "-p pos-runtime"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,12 +38,3 @@ jobs:
           git add -f fmtout && git commit -q -m out && git push -q -f origin out-${{ matrix.id }}:refs/heads/scratch/out-${{ matrix.id }}
           git checkout -q -f ${{ matrix.ref }}
           git apply --allow-empty /tmp/fmt.patch
-      - name: clippy keep-going
-        run: |
-          CARGO_TERM_COLOR=never cargo clippy --keep-going --message-format=short --workspace --all-targets --all-features -- -D warnings -W clippy::pedantic > /tmp/clippy.log 2>&1 || true
-          grep -E 'error|warning' /tmp/clippy.log | grep -E '(crates|apps)/' | sort -u | head -80
-      - name: tests
-        run: |
-          CARGO_TERM_COLOR=never cargo test --no-fail-fast ${{ matrix.pkg }} --all-features > /tmp/test.log 2>&1 || true
-          grep -E '^error|^test .* FAILED|^---- |test result: FAILED|panicked' /tmp/test.log | head -80
-          grep -c 'test result: ok' /tmp/test.log
