@@ -57,8 +57,11 @@ fn the_profile_digest_is_an_optional_thirty_two_byte_string() {
     let mut digested = request(WorkerCallV1::Describe);
     digested.negotiation.execution_profile_digest = Some([0x9d; 32]);
     assert_eq!(round_trip_request(&digested).as_ref(), Ok(&digested));
+    let mut bare = request(WorkerCallV1::Describe);
+    bare.negotiation.execution_profile_digest = None;
+    assert_eq!(round_trip_request(&bare).as_ref(), Ok(&bare));
     let with = ok(encode_worker_request_v1(&digested));
-    let without = ok(encode_worker_request_v1(&request(WorkerCallV1::Describe)));
+    let without = ok(encode_worker_request_v1(&bare));
     assert_eq!(with.len(), without.len() + 34);
     let marker = [0x81, 0x58, 0x20, 0x9d];
     assert!(with.windows(4).any(|window| window == marker));

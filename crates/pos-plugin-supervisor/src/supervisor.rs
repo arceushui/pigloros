@@ -6,7 +6,20 @@
 //! it exactly one request frame, reads at most one response frame, and reaps
 //! the worker. Nothing is retried: a later operator retry is a new invocation.
 //!
+//! Each call takes the one-shot [`CommunityPassAuthorizationV1`] of its pass by
+//! value (`None` when the host has none) and consumes it whether or not the
+//! launch happens (ADR-061 revision 7 decisions 3 and 8).
+//!
 //! Outcomes are classified in this order:
+//! 0. Before any worker exists the authorization is checked, in this order:
+//!    `None`, or an authorization of a closed pass, is
+//!    `ArtifactTrustDenied{TrustStateUnavailable}`; a Plugin ID, complete-PMF1
+//!    digest or release digest other than the negotiated record's, or a
+//!    Component digest other than the held bytes', is
+//!    `ArtifactTrustDenied{NotActive}`; and for `reduce` and `drive` an invalid
+//!    invocation, or one whose Tick, TPS1 digest or profile digest is not the
+//!    authorization's (or the record has no profile digest), is
+//!    `InvalidInvocation`. `describe` has only the first two.
 //! 1. An invocation outside its WIT bounds, or a request the IPC cannot
 //!    carry, is `InvalidInvocation`, and no worker starts. A Component above
 //!    the 32 MiB PMF1 bound is such a request.
@@ -29,10 +42,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use pos_runtime::community_plugin_host::{
-    CommunityPluginHostErrorV1, HostInputs, InvocationReportV1, NegotiatedCommunityPluginV1,
-    PluginDescriptorV1, PluginInvocationV1, PluginOutputV1,
+    CommunityPassAuthorizationV1, CommunityPluginHostErrorV1, HostInputs, InvocationReportV1,
+    NegotiatedCommunityPluginV1, PluginDescriptorV1, PluginInvocationV1, PluginOutputV1,
 };
 
+use self::authorize::{check_describe, check_invocation};
 use self::verify::{verify_descriptor, verify_output};
 use crate::frame::{read_frame, require_end, write_frame, FrameFaultV1, WorkerFrameLimitsV1};
 use crate::ipc::{
@@ -41,6 +55,7 @@ use crate::ipc::{
 };
 use crate::launch::{launch, LaunchedWorker, WorkerProgramV1, WorkerResourceCeilingsV1};
 
+mod authorize;
 mod verify;
 
 /// The longest wall-time watchdog a supervisor accepts.
@@ -99,15 +114,20 @@ impl CommunityPluginSupervisorV1 {
     /// close-on-exec (see the type's `Process-wide effect`).
     ///
     /// # Errors
-    /// Returns the closed error that ended the invocation (see the module
-    /// documentation), or `InvalidGuestOutput` when the descriptor does not
-    /// describe `negotiated`.
+    /// Returns `ArtifactTrustDenied` for a missing or closed-pass
+    /// `authorization` (`TrustStateUnavailable`) or one that is not for
+    /// `negotiated` and `component` (`NotActive`), before any worker starts.
+    /// Then it returns the closed error that ended the invocation (see the
+    /// module documentation), or `InvalidGuestOutput` when the descriptor does
+    /// not describe `negotiated`.
     pub fn describe(
         &self,
+        authorization: Option<CommunityPassAuthorizationV1>,
         negotiated: &NegotiatedCommunityPluginV1,
         component: &[u8],
         host_inputs: HostInputs,
     ) -> Result<InvocationReportV1<PluginDescriptorV1>, Error> {
+        check_describe(authorization, negotiated, component)?;
         match self.run(negotiated, component, host_inputs, WorkerCallV1::Describe)? {
             WorkerReturnV1::Described(report) => checked(report, |descriptor| {
                 verify_descriptor(descriptor, negotiated)
@@ -122,18 +142,20 @@ impl CommunityPluginSupervisorV1 {
     /// close-on-exec (see the type's `Process-wide effect`).
     ///
     /// # Errors
-    /// Returns `InvalidInvocation` before any worker starts for an invocation
-    /// outside its WIT bounds, then the closed error that ended the
-    /// invocation, or `InvalidGuestOutput` when the output fails the
-    /// supervisor's checks.
+    /// Returns the refusals of [`Self::describe`] and then `InvalidInvocation`
+    /// before any worker starts for an invocation outside its WIT bounds or
+    /// not bound to `authorization` and `negotiated`, then the closed error
+    /// that ended the invocation, or `InvalidGuestOutput` when the output
+    /// fails the supervisor's checks.
     pub fn reduce(
         &self,
+        authorization: Option<CommunityPassAuthorizationV1>,
         negotiated: &NegotiatedCommunityPluginV1,
         component: &[u8],
         invocation: &PluginInvocationV1,
         host_inputs: HostInputs,
     ) -> Result<InvocationReportV1<PluginOutputV1>, Error> {
-        invocation.validate()?;
+        check_invocation(authorization, negotiated, component, invocation)?;
         let call = WorkerCallV1::Reduce(invocation.clone());
         let outcome = self.run(negotiated, component, host_inputs, call)?;
         produced(outcome, negotiated, invocation)
@@ -148,12 +170,13 @@ impl CommunityPluginSupervisorV1 {
     /// As [`Self::reduce`].
     pub fn drive(
         &self,
+        authorization: Option<CommunityPassAuthorizationV1>,
         negotiated: &NegotiatedCommunityPluginV1,
         component: &[u8],
         invocation: &PluginInvocationV1,
         host_inputs: HostInputs,
     ) -> Result<InvocationReportV1<PluginOutputV1>, Error> {
-        invocation.validate()?;
+        check_invocation(authorization, negotiated, component, invocation)?;
         let call = WorkerCallV1::Drive(invocation.clone());
         let outcome = self.run(negotiated, component, host_inputs, call)?;
         produced(outcome, negotiated, invocation)

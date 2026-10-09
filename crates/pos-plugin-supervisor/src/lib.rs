@@ -57,9 +57,10 @@ pub mod worker_process;
 pub mod test_support;
 
 pub use adapter::{
-    register_community_driver, CommunityDriverConfigV1, CommunityDriverV1,
-    CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1,
-    InvocationContextSourceV1, InvocationContextV1, ReceiptDispositionV1, MAX_RETAINED_RECEIPTS_V1,
+    register_community_driver, CommunityDriverConfigV1, CommunityDriverSettingsV1,
+    CommunityDriverV1, CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1,
+    InvocationBindingV1, InvocationContextSourceV1, InvocationContextV1, ReceiptDispositionV1,
+    MAX_RETAINED_RECEIPTS_V1,
 };
 pub use frame::{FrameFaultV1, WorkerFrameLimitsV1};
 pub use ipc::{

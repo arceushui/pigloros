@@ -17,9 +17,7 @@ use ulid::Ulid;
 use super::output::{map_draft, mapped_drafts};
 use super::*;
 use crate::launch::WorkerProgramV1;
-use crate::test_support::{
-    self, community_pin, err, ok, pin_of, DriverPlugin, METERING, SMALL_BUDGET,
-};
+use crate::test_support::{self, community_pin, err, ok, pin_of, DriverPlugin, METERING};
 
 fn plugin(id: PluginId, has_driver: bool) -> DriverPlugin {
     DriverPlugin {
@@ -41,12 +39,16 @@ impl InvocationContextSourceV1 for FixedSource {
         &mut self,
         _: TimelineId,
         _: &ObservationView<'_>,
+        binding: InvocationBindingV1,
     ) -> Result<InvocationContextV1, Error> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.refusal.map_or_else(
             || {
                 Ok(InvocationContextV1 {
-                    invocation: test_support::invocation(b"observation"),
+                    invocation: test_support::bound(
+                        test_support::invocation(b"observation"),
+                        binding,
+                    ),
                     host_inputs: HostInputs { simulation_time: 1 },
                 })
             },
@@ -105,22 +107,28 @@ fn fixture(
     let calls = Arc::new(AtomicUsize::new(0));
     let supervisor = WorkerProgramV1::new(PathBuf::from("/worker"))
         .and_then(|program| CommunityPluginSupervisorV1::new(program, Duration::from_secs(1)));
-    let (driver, handle) = CommunityDriverV1::new(CommunityDriverConfigV1 {
+    let settings = CommunityDriverSettingsV1 {
         plugin_id: PluginId::new(),
         name: "community-fixture",
         tick_interval: Duration::from_millis(250),
         subscriptions: vec![ProjectionKey::new(EntityId::new())],
         supervisor: supervisor
             .unwrap_or_else(|| std::panic::resume_unwind(Box::new("invalid supervisor"))),
-        negotiated: test_support::negotiated_with("plugin-a", SMALL_BUDGET, Vec::new()),
-        component: b"component".to_vec(),
         source: Box::new(FixedSource {
             calls: Arc::clone(&calls),
             refusal,
         }),
         initial_state: initial(),
-    });
+    };
+    let config = test_support::config_with("plugin-a", b"component", settings);
+    let (driver, handle) = CommunityDriverV1::new(config);
     (driver, handle, calls)
+}
+
+/// Offer the authorization of the Driver's own release and bytes for a pass.
+fn offer(driver: &CommunityDriverV1, handle: &CommunityPluginHandleV1) {
+    let authorization = test_support::authorization_for(&driver.negotiated, &driver.component);
+    let () = ok(handle.offer_authorization(authorization));
 }
 
 #[test]
@@ -304,6 +312,7 @@ fn driver_receipt(driver: &CommunityDriverV1) -> CommunityInvocationReceiptV1 {
         failure: None,
         guest_error: None,
         disposition: ReceiptDispositionV1::Discarded,
+        content_validation: ContentValidationV1::NotPerformed,
     }
 }
 
@@ -352,6 +361,7 @@ fn every_error() -> Vec<(Error, Option<PluginAvailabilityV1>)> {
 fn a_refused_invocation_marks_or_quarantines_only_by_its_class() {
     for (error, quarantine) in every_error() {
         let (mut driver, handle, calls) = fixture(Some(error));
+        offer(&driver, &handle);
         let failed = err(driver.step(TimelineId::new(), ObservationView::empty()));
         assert!(
             matches!(failed, RuntimeError::CommunityPlugin(refused) if refused == error),
@@ -370,6 +380,7 @@ fn a_refused_invocation_marks_or_quarantines_only_by_its_class() {
 #[test]
 fn a_quarantined_adapter_refuses_to_run_until_it_is_cleared() {
     let (mut driver, handle, calls) = fixture(Some(Error::FuelExhausted));
+    offer(&driver, &handle);
     assert!(driver
         .step(TimelineId::new(), ObservationView::empty())
         .is_err());
@@ -418,6 +429,7 @@ fn a_quarantined_adapter_refuses_to_run_until_it_is_cleared() {
 #[test]
 fn syncing_an_unregistered_plugin_leaves_the_handle_quarantined() {
     let (mut driver, handle, _) = fixture(Some(Error::WorkerCrashed));
+    offer(&driver, &handle);
     assert!(driver
         .step(TimelineId::new(), ObservationView::empty())
         .is_err());
@@ -438,6 +450,7 @@ fn syncing_an_unregistered_plugin_leaves_the_handle_quarantined() {
 #[test]
 fn a_step_drops_a_stale_staged_state_first() {
     let (mut driver, handle, _) = fixture(Some(Error::InvalidInvocation));
+    offer(&driver, &handle);
     let _staged = ok(driver.accept([1; 16], report(output(vec![draft("a.b", b"p")]))));
     assert!(driver.staged.is_some());
     assert!(driver

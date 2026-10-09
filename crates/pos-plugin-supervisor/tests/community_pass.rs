@@ -23,13 +23,13 @@ use pos_plugin_supervisor::test_support::{
     self, community_pin, err, negotiated_with, ok, DriverPlugin, SMALL_BUDGET,
 };
 use pos_plugin_supervisor::{
-    register_community_driver, CommunityDriverConfigV1, CommunityDriverV1, CommunityPluginHandleV1,
-    CommunityPluginSupervisorV1, CommunityStateV1, InvocationContextSourceV1, InvocationContextV1,
-    ReceiptDispositionV1, WorkerProgramV1,
+    register_community_driver, CommunityDriverSettingsV1, CommunityDriverV1,
+    CommunityPluginHandleV1, CommunityPluginSupervisorV1, CommunityStateV1, InvocationBindingV1,
+    InvocationContextSourceV1, InvocationContextV1, ReceiptDispositionV1, WorkerProgramV1,
 };
 use pos_runtime::community_plugin_host::{
     classify_pass_failure, AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
-    HostFailureClassV1, HostInputs, PassFailureV1, TrapReproductionV1,
+    HostFailureClassV1, HostInputs, NegotiatedCommunityPluginV1, PassFailureV1, TrapReproductionV1,
 };
 use pos_runtime::{
     LocalScheduledAdmissionHostV1, ObservationView, PluginAvailabilityV1, PluginCompositionErrorV1,
@@ -59,8 +59,9 @@ impl InvocationContextSourceV1 for Source {
         &mut self,
         timeline: TimelineId,
         observation: &ObservationView<'_>,
+        binding: InvocationBindingV1,
     ) -> Result<InvocationContextV1, Error> {
-        let mut invocation = test_support::invocation(b"observation");
+        let mut invocation = test_support::bound(test_support::invocation(b"observation"), binding);
         invocation.invocation_id = self.invocation_id;
         invocation.timeline_position.timeline_id = timeline.inner().to_bytes();
         invocation.timeline_position.seq = observation
@@ -119,7 +120,15 @@ struct Staged {
     revisions: PipelineSecurityRevisionsV1,
 }
 
+/// One registered member and what its pass authorization is for.
+struct Member {
+    handle: CommunityPluginHandleV1,
+    negotiated: NegotiatedCommunityPluginV1,
+    component: Vec<u8>,
+}
+
 struct World {
+    members_added: Vec<Member>,
     store: MemoryStore,
     registry: PluginRegistry,
     gate: Arc<ErasureContainmentGateV1>,
@@ -135,6 +144,7 @@ impl World {
         let () = ok(store.bind_erasure_gate(Arc::clone(&gate)));
         let timeline = ok(store.create_timeline("community-pass")).id();
         Self {
+            members_added: Vec::new(),
             store,
             registry: PluginRegistry::new().with_erasure_gate(gate.clone()),
             gate,
@@ -162,19 +172,24 @@ impl World {
         };
         let supervisor = WorkerProgramV1::new(PathBuf::from(PROBE))
             .and_then(|program| CommunityPluginSupervisorV1::new(program, watchdog));
-        let (driver, handle) = CommunityDriverV1::new(CommunityDriverConfigV1 {
+        let settings = CommunityDriverSettingsV1 {
             plugin_id: plugin.id,
             name,
             tick_interval: Duration::from_millis(100),
             subscriptions: Vec::new(),
             supervisor: supervisor
                 .unwrap_or_else(|| std::panic::resume_unwind(Box::new("invalid supervisor"))),
-            negotiated: negotiated_with(name, SMALL_BUDGET, Vec::new()),
-            component: component.to_vec(),
             source: Box::new(Source {
                 invocation_id: [self.members; 16],
             }),
             initial_state: initial(),
+        };
+        let (driver, handle) =
+            CommunityDriverV1::new(test_support::config_with(name, component, settings));
+        self.members_added.push(Member {
+            handle: handle.clone(),
+            negotiated: negotiated_with(name, SMALL_BUDGET, Vec::new()),
+            component: component.to_vec(),
         });
         let pin = community_pin(self.members, &format!("community-{name}"));
         let () = ok(register_community_driver(
@@ -186,8 +201,20 @@ impl World {
         handle
     }
 
+    /// Start a pass for every member: drop what the last pass left in its slot and
+    /// offer a fresh authorization, as the host pass seam will (#584).
+    fn offer_all(&self) {
+        for member in &self.members_added {
+            member.handle.close_pass();
+            let authorization =
+                test_support::authorization_for(&member.negotiated, &member.component);
+            let () = ok(member.handle.offer_authorization(authorization));
+        }
+    }
+
     /// Observe, then stage one anchored pass over the committed prefix.
     fn stage(&mut self) -> Result<Staged, RuntimeError> {
+        self.offer_all();
         let revisions = LocalScheduledAdmissionHostV1::shared()?.observe(
             &self.registry,
             &mut self.store,

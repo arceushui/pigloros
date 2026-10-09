@@ -10,12 +10,13 @@ use std::time::Duration;
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
 use pos_plugin_host::pinned_runtime;
-use pos_plugin_supervisor::test_support::{invocation, negotiated_under, ok};
+use pos_plugin_supervisor::test_support::{authorization_for, invocation_for, negotiated_under, ok};
 use pos_plugin_supervisor::{CommunityPluginSupervisorV1, WorkerProgramV1};
 use pos_runtime::community_plugin_host::{
     CeilingValuesV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
     CommunityPluginHostErrorV1, CommunityPluginModeV1, ComponentTrapClassV1, HostInputs,
-    NegotiatedCommunityPluginV1, TrapReproductionV1,
+    InvocationReportV1, NegotiatedCommunityPluginV1, PluginDescriptorV1, PluginInvocationV1,
+    PluginOutputV1, TrapReproductionV1,
 };
 
 /// Bytes of one committed compatibility fixture.
@@ -71,10 +72,39 @@ fn supervisor() -> CommunityPluginSupervisorV1 {
 
 const ROOMY: DeterministicBudgetV1 = DeterministicBudgetV1::MAXIMA;
 
+type Described = Result<InvocationReportV1<PluginDescriptorV1>, Error>;
+type Produced = Result<InvocationReportV1<PluginOutputV1>, Error>;
+
+/// `describe` of `guest` in a fresh worker, given a fresh authorization of `record`.
+fn describe(record: &NegotiatedCommunityPluginV1, guest: &[u8]) -> Described {
+    let authorization = Some(authorization_for(record, guest));
+    supervisor().describe(authorization, record, guest, INPUTS)
+}
+
+/// `reduce` of `guest` in a fresh worker, given a fresh authorization of `record`.
+fn reduce(
+    record: &NegotiatedCommunityPluginV1,
+    guest: &[u8],
+    invocation: &PluginInvocationV1,
+) -> Produced {
+    let authorization = Some(authorization_for(record, guest));
+    supervisor().reduce(authorization, record, guest, invocation, INPUTS)
+}
+
+/// `drive` of `guest` in a fresh worker, given a fresh authorization of `record`.
+fn drive(
+    record: &NegotiatedCommunityPluginV1,
+    guest: &[u8],
+    invocation: &PluginInvocationV1,
+) -> Produced {
+    let authorization = Some(authorization_for(record, guest));
+    supervisor().drive(authorization, record, guest, invocation, INPUTS)
+}
+
 #[test]
 fn both_fixtures_describe_the_negotiated_plugin_in_fresh_workers() {
     for guest in [RUST_GUEST, C_GUEST] {
-        let report = ok(supervisor().describe(&negotiated(ROOMY), guest, INPUTS));
+        let report = ok(describe(&negotiated(ROOMY), guest));
         assert_eq!(ok(report.result).plugin_id, PLUGIN_ID);
         assert!(report.metering.call_fuel > 0);
     }
@@ -83,26 +113,24 @@ fn both_fixtures_describe_the_negotiated_plugin_in_fresh_workers() {
 #[test]
 fn both_fixtures_reduce_and_drive_identically() {
     let negotiated = negotiated(ROOMY);
-    let call = invocation(b"observation");
+    let invocation = invocation_for(b"observation", &negotiated);
     let mut outputs = Vec::new();
     for guest in [RUST_GUEST, C_GUEST] {
-        let reduced = ok(supervisor().reduce(&negotiated, guest, &call, INPUTS));
-        let driven = ok(supervisor().drive(&negotiated, guest, &call, INPUTS));
+        let reduced = ok(reduce(&negotiated, guest, &invocation));
+        let driven = ok(drive(&negotiated, guest, &invocation));
         outputs.push((ok(reduced.result), ok(driven.result)));
     }
     assert_eq!(outputs[0], outputs[1]);
-    assert_eq!(outputs[0].0.invocation_id, call.invocation_id);
+    assert_eq!(outputs[0].0.invocation_id, invocation.invocation_id);
     assert_ne!(outputs[0].0, outputs[0].1);
 }
 
 #[test]
 fn deterministic_failures_are_authoritative_in_the_worker() {
     let starved = negotiated(DeterministicBudgetV1 { fuel: 1, ..ROOMY });
-    assert_eq!(
-        supervisor().describe(&starved, C_GUEST, INPUTS),
-        Err(Error::FuelExhausted)
-    );
-    let trap = supervisor().reduce(&negotiated(ROOMY), RUST_GUEST, &invocation(b"trap"), INPUTS);
+    assert_eq!(describe(&starved, C_GUEST), Err(Error::FuelExhausted));
+    let record = negotiated(ROOMY);
+    let trap = reduce(&record, RUST_GUEST, &invocation_for(b"trap", &record));
     assert_eq!(
         trap,
         Err(Error::ComponentTrap {
@@ -114,10 +142,8 @@ fn deterministic_failures_are_authoritative_in_the_worker() {
 
 #[test]
 fn bytes_that_do_not_implement_the_world_are_incompatible() {
-    assert_eq!(
-        supervisor().describe(&negotiated(ROOMY), b"not a component", INPUTS),
-        Err(Error::IncompatibleAbi)
-    );
+    let incompatible = describe(&negotiated(ROOMY), b"not a component");
+    assert_eq!(incompatible, Err(Error::IncompatibleAbi));
 }
 
 /// R7-P4: on the real `rust-guest.wasm`, Local and Air-Gapped launches give
@@ -128,13 +154,12 @@ fn bytes_that_do_not_implement_the_world_are_incompatible() {
 /// test compares the negotiated records the receipts embed.
 #[test]
 fn local_and_air_gapped_launches_produce_identical_results() {
-    let call = invocation(b"observation");
     let run = |mode| {
         let negotiated = negotiated_in(ROOMY, mode);
-        let supervisor = supervisor();
-        let described = ok(supervisor.describe(&negotiated, RUST_GUEST, INPUTS));
-        let reduced = ok(supervisor.reduce(&negotiated, RUST_GUEST, &call, INPUTS));
-        let driven = ok(supervisor.drive(&negotiated, RUST_GUEST, &call, INPUTS));
+        let invocation = invocation_for(b"observation", &negotiated);
+        let described = ok(describe(&negotiated, RUST_GUEST));
+        let reduced = ok(reduce(&negotiated, RUST_GUEST, &invocation));
+        let driven = ok(drive(&negotiated, RUST_GUEST, &invocation));
         (negotiated, (described, reduced, driven))
     };
     let (local, local_reports) = run(LOCAL);
@@ -166,6 +191,6 @@ fn a_host_profile_with_non_v1_ceilings_ends_worker_crashed() {
     );
     let record = negotiated_under(PLUGIN_ID, ROOMY, Vec::new(), &host_profile);
     assert_eq!(record.execution_profile_digest(), host_profile.digest());
-    let launched = supervisor().describe(&record, RUST_GUEST, INPUTS);
+    let launched = describe(&record, RUST_GUEST);
     assert_eq!(launched, Err(Error::WorkerCrashed));
 }
