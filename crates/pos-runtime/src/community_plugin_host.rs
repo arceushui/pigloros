@@ -6,12 +6,18 @@
 //! them, and the guest contract types that cross the Component boundary. It
 //! loads, launches and executes nothing, and links no WebAssembly runtime.
 
+/// The reserved Event type of the host-owned activation Event (ADR-061 revision 7 decision 9),
+/// schema version 1. A Driver draft of this type is rejected whatever its Plugin declares.
+pub const PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1: &str = "pigloros.plugin.release-activated";
+
 pub mod cbor;
 mod contract;
 mod error;
 mod failure;
 #[cfg(target_os = "linux")]
 mod gate;
+#[cfg(target_os = "linux")]
+mod install;
 mod negotiation;
 mod profile;
 
@@ -34,6 +40,11 @@ pub use gate::{
     host_error_for_trust_verification_v1, CommunityPassAuthorizationV1, CommunityPassV1,
     CommunityPluginExpectationV1, CommunityPluginTrustMaterialV1, GatedCommunityReleaseV1,
     PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1, ReleaseIdentityV1,
+};
+#[cfg(target_os = "linux")]
+pub use install::{
+    install_community_release_v1, ActivationTargetV1, CommunityInstallErrorV1,
+    CommunityInstallRequestV1,
 };
 #[cfg(target_os = "linux")]
 pub use negotiation::negotiate_community_plugin_v1;

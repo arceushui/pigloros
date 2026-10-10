@@ -942,24 +942,31 @@ fn reject_host_owned_drafts(output: &StepOutput) -> Result<(), RuntimeError> {
 fn reject_host_owned_draft_slice(drafts: &[EventDraft]) -> Result<(), RuntimeError> {
     drafts
         .iter()
-        .find(|draft| {
-            pos_core::is_geographic_event_type(&draft.event_type)
-                || pos_core::is_consent_event_type(&draft.event_type)
-                || draft.event_type.as_str() == pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
+        .find_map(host_owned_draft_error)
+        .map_or(Ok(()), Err)
+}
+
+/// The closed error for a draft of a host-owned Event type, if it is one.
+fn host_owned_draft_error(draft: &EventDraft) -> Option<RuntimeError> {
+    let kind = draft.event_type.as_str();
+    let owned = || kind.to_owned();
+    if pos_core::is_consent_event_type(&draft.event_type)
+        || kind == pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
+    {
+        Some(RuntimeError::ConsentDraft {
+            event_type: owned(),
         })
-        .map_or(Ok(()), |draft| {
-            if pos_core::is_consent_event_type(&draft.event_type)
-                || draft.event_type.as_str() == pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
-            {
-                Err(RuntimeError::ConsentDraft {
-                    event_type: draft.event_type.as_str().to_owned(),
-                })
-            } else {
-                Err(RuntimeError::GeographicDraft {
-                    event_type: draft.event_type.as_str().to_owned(),
-                })
-            }
+    } else if pos_core::is_geographic_event_type(&draft.event_type) {
+        Some(RuntimeError::GeographicDraft {
+            event_type: owned(),
         })
+    } else if kind == crate::community_plugin_host::PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1 {
+        Some(RuntimeError::ReservedHostDraft {
+            event_type: owned(),
+        })
+    } else {
+        None
+    }
 }
 
 fn reject_unowned_plugin_drafts(
