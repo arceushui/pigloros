@@ -1,0 +1,95 @@
+//! The open Tick-Boundary pass the gate runs inside (ADR-061 revision 7 decision 2).
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+#[cfg(any(test, feature = "test-support"))]
+use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
+#[cfg(any(test, feature = "test-support"))]
+use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryErrorV1;
+use pos_store::plugin_trust_registry::TrustedUtcSecondV1;
+
+/// One open pass: the trusted UTC second sampled once for every member, the explicit Tick from
+/// the owner of the Tick Boundary, and a pass-open flag that is cleared when the pass closes.
+///
+/// The gate takes these values and never reads a clock. The Tick is never read from trust
+/// material, evidence or an invocation. Every authorization the gate issues shares the pass-open
+/// flag, so closing the pass revokes all of them at once. Only the creator of a pass closes it.
+///
+/// The host pass seam creates the pass at its sample and closes it at the end of `run_pass`
+/// through the crate-internal constructor and closer. The `test-support` pair builds and closes a
+/// pass for tests that run no seam.
+#[derive(Debug)]
+pub struct CommunityPassV1 {
+    utc: TrustedUtcSecondV1,
+    tick: u64,
+    open: Arc<AtomicBool>,
+}
+
+impl CommunityPassV1 {
+    /// An open pass at `utc` and `tick`, created by the host pass seam at its sample.
+    pub(in crate::community_plugin_host) fn open(utc: TrustedUtcSecondV1, tick: u64) -> Self {
+        Self {
+            utc,
+            tick,
+            open: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    /// Close the pass: every authorization of the pass reports it closed. Only the creator of a
+    /// pass, the host pass seam, closes it.
+    pub(in crate::community_plugin_host) fn close(&self) {
+        self.open.store(false, Ordering::Release);
+    }
+
+    /// An open pass at `utc` and `tick`, for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn open_for_test(utc: TrustedUtcSecondV1, tick: u64) -> Self {
+        Self::open(utc, tick)
+    }
+
+    /// An open pass at the whole trusted UTC second `utc_second` and `tick`, for tests that cannot
+    /// construct a `TrustedUtcSecondV1` themselves (only the trusted host may).
+    ///
+    /// # Errors
+    /// Returns the registry's `TrustedTimeUnavailable` when the scripted sample is unusable.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_at_for_test(
+        utc_second: u32,
+        tick: u64,
+    ) -> Result<Self, PluginTrustPolicyRegistryErrorV1> {
+        let micros = u64::from(utc_second) * 1_000_000;
+        let mut wall = ScriptedTrustedWallSourceV1::from_micros([micros]);
+        TrustedUtcSecondV1::from_source(&mut wall).map(|utc| Self::open_for_test(utc, tick))
+    }
+
+    /// Close the pass, for tests: every authorization of the pass reports it closed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn close_for_test(&self) {
+        self.close();
+    }
+
+    /// The trusted UTC second shared by every member of the pass.
+    #[must_use]
+    pub const fn utc(&self) -> TrustedUtcSecondV1 {
+        self.utc
+    }
+
+    /// The Tick of the pass.
+    #[must_use]
+    pub const fn tick(&self) -> u64 {
+        self.tick
+    }
+
+    /// Whether the pass is still open.
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.open.load(Ordering::Acquire)
+    }
+
+    /// The shared pass-open flag an authorization keeps.
+    pub(super) fn open_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.open)
+    }
+}

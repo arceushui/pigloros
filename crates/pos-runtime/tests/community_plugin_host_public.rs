@@ -3,23 +3,27 @@
 //! Execution projections come from the `pos-crypto` `test-support` fixture,
 //! which models caller-fabricated PMF1 requirements, so every negotiation
 //! rejection path is reachable without publishing a release closure. The
-//! real projection is covered by `pos-crypto`'s PMF1 tests.
+//! real projection is covered by `pos-crypto`'s PMF1 tests. The gated release comes from the
+//! `test-support` constructor, so no gate runs here. Linux only, like the gate and negotiation.
+#![cfg(target_os = "linux")]
 
+use pos_core::{CoreError, PipelineOutcomeV1};
 use pos_crypto::plugin_execution::{
     DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
     PluginExecutionProjectionFixtureV1, PluginExecutionProjectionV1, COMMUNITY_PLUGIN_WORLD_V1,
     WASM_PAGE_BYTES_V1,
 };
 use pos_runtime::community_plugin_host::{
-    negotiate_community_plugin_v1, AtomicCommitFailureV1, CeilingValuesV1,
-    CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1, CommunityPluginHostAbiErrorV1,
-    CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, CommunityPluginModeV1,
-    CommunityPluginProfileErrorV1, ComponentTrapClassV1, EffectiveExecutionLimitsV1,
-    ExecutionLimitV1, HostFailureClassV1, NegotiatedCommunityPluginV1, PinnedComponentRuntimeV1,
-    PinnedEngineConfigV1, TrapOutcomeV1, TrapReproductionV1, TrapTableEntryV1,
+    classify_pass_failure, negotiate_community_plugin_v1, quarantine_for, AtomicCommitFailureV1,
+    CeilingValuesV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
+    CommunityPluginHostAbiErrorV1, CommunityPluginHostAbiV1, CommunityPluginHostErrorV1,
+    CommunityPluginModeV1, CommunityPluginProfileErrorV1, ComponentTrapClassV1,
+    EffectiveExecutionLimitsV1, ExecutionLimitV1, GatedCommunityReleaseV1, HostFailureClassV1,
+    NegotiatedCommunityPluginV1, PassFailureV1, PinnedComponentRuntimeV1, PinnedEngineConfigV1,
+    RevocationBasisV1, TrapOutcomeV1, TrapReproductionV1, TrapTableEntryV1, TrustDenialBasisV1,
     COMMUNITY_PLUGIN_ABI_MAJOR_V1,
 };
-use pos_runtime::PluginExecutionModeV1;
+use pos_runtime::{PluginAvailabilityV1, PluginExecutionModeV1, RuntimeError};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 type Negotiation = Result<NegotiatedCommunityPluginV1, Error>;
@@ -56,16 +60,44 @@ const REPRODUCED: TrapReproductionV1 = TrapReproductionV1::ReproducedByConforman
 const UNVERIFIED: TrapReproductionV1 = TrapReproductionV1::Unverified;
 const TYPED: AtomicCommitFailureV1 = AtomicCommitFailureV1::DeterministicTypedResult;
 const UNTYPED: AtomicCommitFailureV1 = AtomicCommitFailureV1::Operational;
+const TRUST_EXPIRED: TrustDenialBasisV1 = TrustDenialBasisV1::Expired;
+const REVOKED_ARTIFACT: RevocationBasisV1 = RevocationBasisV1::Artifact;
+/// Every trust-denial basis with its exact ADR-061 revision 7 name.
+const TRUST_BASES: [(TrustDenialBasisV1, &str); 5] = [
+    (TrustDenialBasisV1::Expired, "Expired"),
+    (TrustDenialBasisV1::NotActive, "NotActive"),
+    (TrustDenialBasisV1::Untrusted, "Untrusted"),
+    (TrustDenialBasisV1::PolicyMismatch, "PolicyMismatch"),
+    (
+        TrustDenialBasisV1::TrustStateUnavailable,
+        "TrustStateUnavailable",
+    ),
+];
+/// Every revocation basis with its exact ADR-061 revision 7 name.
+const REVOCATION_BASES: [(RevocationBasisV1, &str); 3] = [
+    (RevocationBasisV1::PublisherKey, "PublisherKey"),
+    (RevocationBasisV1::Artifact, "Artifact"),
+    (RevocationBasisV1::OperatorDenial, "OperatorDenial"),
+];
 /// Every closed error with its ADR name, class and V1 production.
 const ERRORS: [(Error, &str, HostFailureClassV1, bool); 22] = [
     (Error::InvalidManifest, "InvalidManifest", REJECTION, true),
     (
-        Error::ArtifactTrustDenied,
+        Error::ArtifactTrustDenied {
+            basis: TRUST_EXPIRED,
+        },
         "ArtifactTrustDenied",
         REJECTION,
         true,
     ),
-    (Error::ArtifactRevoked, "ArtifactRevoked", REJECTION, true),
+    (
+        Error::ArtifactRevoked {
+            basis: REVOKED_ARTIFACT,
+        },
+        "ArtifactRevoked",
+        REJECTION,
+        true,
+    ),
     (Error::IncompatibleAbi, "IncompatibleAbi", REJECTION, true),
     (
         Error::MissingFeature { index: 2 },
@@ -94,7 +126,7 @@ const ERRORS: [(Error, &str, HostFailureClassV1, bool); 22] = [
     (
         Error::UnsupportedSchema,
         "UnsupportedSchema",
-        REJECTION,
+        AUTHORITATIVE,
         true,
     ),
     (
@@ -208,6 +240,11 @@ fn fixture() -> PluginExecutionProjectionFixtureV1 {
     }
 }
 
+/// `execution` as the gate would yield it, with no Component bytes.
+fn gated(execution: PluginExecutionProjectionV1) -> GatedCommunityReleaseV1 {
+    GatedCommunityReleaseV1::for_test(execution, Vec::new())
+}
+
 const fn local() -> CommunityPluginExecutionProfileV1 {
     CommunityPluginExecutionProfileV1::new(
         CommunityPluginModeV1::Local,
@@ -220,7 +257,7 @@ fn negotiate(
     requirements: PluginExecutionProjectionFixtureV1,
     host: &CommunityPluginHostAbiV1,
 ) -> Negotiation {
-    let execution = PluginExecutionProjectionV1::from(requirements);
+    let execution = gated(PluginExecutionProjectionV1::from(requirements));
     negotiate_community_plugin_v1(&execution, host, &local())
 }
 
@@ -302,6 +339,148 @@ fn every_closed_error_has_its_adr_name_class_and_v1_production() {
         Error::MissingFeature { index: 2 }.to_string(),
         "community Plugin requires unsupported feature 2"
     );
+}
+
+/// Every error name once, with every basis value for the two payload errors.
+fn every_error_with_every_basis() -> Vec<Error> {
+    let mut errors = vec![
+        Error::InvalidManifest,
+        Error::IncompatibleAbi,
+        Error::MissingFeature { index: 0 },
+        Error::CapabilityDenied { index: 0 },
+        Error::InvalidInvocation,
+        Error::InvalidGuestOutput,
+        Error::UnsupportedSchema,
+        Error::StateMigrationFailed,
+        Error::GuestDeclaredFailure,
+        Error::WorkerCrashed,
+        Error::FuelExhausted,
+        Error::MemoryLimitExceeded,
+        Error::HostCallLimitExceeded,
+        Error::OutputLimitExceeded,
+        Error::DeterministicDeadlineExceeded,
+        Error::OperationalWatchdogStop,
+    ];
+    errors.extend(TRUST_BASES.map(|(basis, _)| Error::ArtifactTrustDenied { basis }));
+    errors.extend(REVOCATION_BASES.map(|(basis, _)| Error::ArtifactRevoked { basis }));
+    for reproduction in [REPRODUCED, UNVERIFIED] {
+        let class = TRAP;
+        errors.push(Error::ComponentTrap {
+            class,
+            reproduction,
+        });
+    }
+    for failure in [TYPED, UNTYPED] {
+        errors.push(Error::AtomicCommitFailed { failure });
+    }
+    errors
+}
+
+const fn assert_copy<T: Copy>() {}
+
+/// R7-F1: the class over all 20 names with every basis value.
+#[test]
+fn pre_execution_rejection_is_exactly_the_seven_names() {
+    let rejections = [
+        "InvalidManifest",
+        "ArtifactTrustDenied",
+        "ArtifactRevoked",
+        "IncompatibleAbi",
+        "MissingFeature",
+        "CapabilityDenied",
+        "InvalidInvocation",
+    ];
+    for error in every_error_with_every_basis() {
+        let expected = rejections.contains(&error.name());
+        assert_eq!(error.class() == REJECTION, expected, "{error:?}");
+    }
+    assert_eq!(Error::UnsupportedSchema.class(), AUTHORITATIVE);
+    for (basis, _) in TRUST_BASES {
+        let denied = Error::ArtifactTrustDenied { basis };
+        assert_eq!(denied.class(), REJECTION, "{basis:?}");
+    }
+    for (basis, _) in REVOCATION_BASES {
+        let revoked = Error::ArtifactRevoked { basis };
+        assert_eq!(revoked.class(), REJECTION, "{basis:?}");
+    }
+}
+
+/// R7-F2: names are unchanged by a basis, and bases have exact names.
+#[test]
+fn basis_names_are_exact_and_the_error_name_ignores_the_basis() {
+    assert_copy::<Error>();
+    for (basis, name) in TRUST_BASES {
+        assert_eq!(basis.name(), name);
+        let denied = Error::ArtifactTrustDenied { basis };
+        assert_eq!(denied.name(), "ArtifactTrustDenied");
+        assert_eq!(denied.basis_name(), Some(name));
+    }
+    for (basis, name) in REVOCATION_BASES {
+        assert_eq!(basis.name(), name);
+        let revoked = Error::ArtifactRevoked { basis };
+        assert_eq!(revoked.name(), "ArtifactRevoked");
+        assert_eq!(revoked.basis_name(), Some(name));
+    }
+    let every = every_error_with_every_basis();
+    let names = every.iter().copied().map(Error::name);
+    let distinct = names.collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(distinct.len(), 20);
+    for error in every {
+        let has_basis = matches!(
+            error,
+            Error::ArtifactTrustDenied { .. } | Error::ArtifactRevoked { .. }
+        );
+        assert_eq!(error.basis_name().is_some(), has_basis, "{error:?}");
+    }
+}
+
+/// R7-F3: the quarantine mapping and the pass-failure classification.
+#[test]
+fn quarantine_for_keeps_the_accepted_mappings_and_revocation_quarantines() {
+    use PluginAvailabilityV1 as Availability;
+    for error in every_error_with_every_basis() {
+        let expected = match error {
+            Error::ArtifactRevoked { .. } => Some(Availability::Revoked),
+            Error::ComponentTrap { .. } => Some(Availability::Trapped),
+            Error::FuelExhausted
+            | Error::MemoryLimitExceeded
+            | Error::HostCallLimitExceeded
+            | Error::OutputLimitExceeded => Some(Availability::ResourceExhausted),
+            Error::WorkerCrashed => Some(Availability::Unavailable),
+            _ => None,
+        };
+        assert_eq!(quarantine_for(error), expected, "{error:?}");
+    }
+}
+
+#[test]
+fn a_failed_pass_is_classified_by_its_commit_contract() {
+    let host = PassFailureV1::Host;
+    let typed = Error::AtomicCommitFailed { failure: TYPED };
+    let untyped = Error::AtomicCommitFailed { failure: UNTYPED };
+    let rejected = Box::new(PipelineOutcomeV1::Rejected);
+    let not_admitted = RuntimeError::ScheduledPassNotAdmitted(rejected);
+    let unknown = RuntimeError::Store(CoreError::StorageOutcomeUnknown("lost".to_owned()));
+    let frozen = RuntimeError::Store(CoreError::ErasureAccessFrozen);
+    let crashed = RuntimeError::from(Error::WorkerCrashed);
+    assert_eq!(classify_pass_failure(&not_admitted), host(typed));
+    assert_eq!(classify_pass_failure(&unknown), PassFailureV1::InDoubt);
+    assert_eq!(classify_pass_failure(&frozen), host(untyped));
+    assert_eq!(classify_pass_failure(&crashed), host(Error::WorkerCrashed));
+    for unrelated in [
+        RuntimeError::PendingDriverStep,
+        RuntimeError::NoScheduledAdmissionInDoubt,
+    ] {
+        assert_eq!(classify_pass_failure(&unrelated), PassFailureV1::Unrelated);
+    }
+}
+
+/// R7-F6: the three class names.
+#[test]
+fn failure_classes_have_their_exact_names() {
+    assert_eq!(AUTHORITATIVE.name(), "Authoritative");
+    assert_eq!(OPERATIONAL.name(), "Operational");
+    assert_eq!(REJECTION.name(), "PreExecutionRejection");
 }
 
 #[test]
@@ -660,7 +839,7 @@ fn negotiation_records_the_release_abi_and_not_granted_capabilities() -> TestRes
         CommunityPluginCeilingsV1::V1,
         Some(runtime()?),
     );
-    let execution = PluginExecutionProjectionV1::from(requirements);
+    let execution = gated(PluginExecutionProjectionV1::from(requirements));
     let host = CommunityPluginHostAbiV1::v1();
     let negotiated = negotiate_community_plugin_v1(&execution, &host, &profile)?;
     assert_eq!(negotiated.world(), COMMUNITY_PLUGIN_WORLD_V1);
@@ -804,7 +983,7 @@ fn budgets_above_a_ceiling_are_clamped_not_rejected() -> TestResult {
     assert_eq!(below.values(), SMALL_BUDGET);
     let mut requirements = fixture();
     requirements.budget = above;
-    let execution = PluginExecutionProjectionV1::from(requirements);
+    let execution = gated(PluginExecutionProjectionV1::from(requirements));
     let profile =
         CommunityPluginExecutionProfileV1::new(CommunityPluginModeV1::AirGapped, ceilings, None);
     let host = CommunityPluginHostAbiV1::v1();
@@ -817,7 +996,7 @@ fn budgets_above_a_ceiling_are_clamped_not_rejected() -> TestResult {
 #[test]
 fn parity_profiles_negotiate_identical_limits_in_both_modes() -> TestResult {
     let ceilings = CommunityPluginCeilingsV1::new(ceiling_values(WASM_PAGE_BYTES_V1, 2_000, 20))?;
-    let execution = PluginExecutionProjectionV1::from(fixture());
+    let execution = gated(PluginExecutionProjectionV1::from(fixture()));
     let host = CommunityPluginHostAbiV1::v1();
     let recorded = runtime()?;
     let [local, air_gapped] =
@@ -829,4 +1008,192 @@ fn parity_profiles_negotiate_identical_limits_in_both_modes() -> TestResult {
     assert_ne!(in_local.mode(), in_air_gapped.mode());
     assert_eq!(in_local.limits().values().memory_bytes, WASM_PAGE_BYTES_V1);
     Ok(())
+}
+
+/// R7-D1: the digest of the golden profile, computed offline with `b3sum`.
+const R7_D1_DIGEST: [u8; 32] = [
+    0x9d, 0xf8, 0x1c, 0xeb, 0x0d, 0x02, 0x96, 0x65, 0xc3, 0x31, 0x7e, 0x72, 0x73, 0x63, 0x85, 0xb2,
+    0x1a, 0xf9, 0x51, 0x20, 0x0b, 0xab, 0xd3, 0x0c, 0xbb, 0xfc, 0x7d, 0x0a, 0x8d, 0x11, 0xe1, 0x00,
+];
+
+fn golden_runtime(
+    version: &str,
+    resolved: &[&str],
+    engine: PinnedEngineConfigV1,
+    rows: Vec<TrapTableEntryV1>,
+) -> Result<PinnedComponentRuntimeV1, ProfileError> {
+    PinnedComponentRuntimeV1::new(version.to_owned(), features(resolved), engine, rows)
+}
+
+fn golden_rows() -> Vec<TrapTableEntryV1> {
+    vec![
+        entry("OutOfFuel", TrapOutcomeV1::FuelExhausted),
+        entry("Interrupt", TrapOutcomeV1::WatchdogStop),
+        entry(
+            "UnreachableCodeReached",
+            TrapOutcomeV1::Trap(ComponentTrapClassV1::Unreachable),
+        ),
+    ]
+}
+
+fn digest_of(
+    mode: CommunityPluginModeV1,
+    ceilings: CommunityPluginCeilingsV1,
+    runtime: PinnedComponentRuntimeV1,
+) -> Option<[u8; 32]> {
+    CommunityPluginExecutionProfileV1::new(mode, ceilings, Some(runtime)).digest()
+}
+
+/// R7-P1: the golden digest, mode exclusion, member sensitivity, order
+/// independence and the absent digest of a profile without a runtime.
+#[test]
+fn the_profile_digest_matches_its_golden_vector_and_ignores_the_mode() -> TestResult {
+    let sorted = ["component-model", "cranelift", "runtime"];
+    let golden = golden_runtime("fixture-1", &sorted, ENGINE, golden_rows())?;
+    let ceilings = CommunityPluginCeilingsV1::V1;
+    let local = digest_of(CommunityPluginModeV1::Local, ceilings, golden.clone());
+    assert_eq!(local, Some(R7_D1_DIGEST));
+    let air_gapped = digest_of(CommunityPluginModeV1::AirGapped, ceilings, golden);
+    assert_eq!(air_gapped, local);
+    let mut rows = golden_rows();
+    rows.reverse();
+    let recorded = ["runtime", "component-model", "cranelift"];
+    let reordered = golden_runtime("fixture-1", &recorded, ENGINE, rows)?;
+    let mode = CommunityPluginModeV1::Local;
+    assert_eq!(digest_of(mode, ceilings, reordered), local);
+    Ok(())
+}
+
+#[test]
+fn every_single_profile_member_changes_the_digest() -> TestResult {
+    let sorted = ["component-model", "cranelift", "runtime"];
+    let mode = CommunityPluginModeV1::Local;
+    let values = CommunityPluginCeilingsV1::V1.values();
+    let lowered = |change: fn(&mut CeilingValuesV1)| {
+        let mut values = values;
+        change(&mut values);
+        CommunityPluginCeilingsV1::new(values)
+    };
+    let ceilings = [
+        lowered(|v| v.memory_bytes -= WASM_PAGE_BYTES_V1)?,
+        lowered(|v| v.fuel -= 1)?,
+        lowered(|v| v.host_calls -= 1)?,
+        lowered(|v| v.event_bytes -= 1)?,
+        lowered(|v| v.log_bytes -= 1)?,
+    ];
+    let mut seen = std::collections::BTreeSet::from([R7_D1_DIGEST]);
+    for changed in ceilings {
+        let digest = digest_of(mode, changed, golden_runtime_of(&sorted)?);
+        assert!(digest.is_some_and(|digest| seen.insert(digest)));
+    }
+    let stack = PinnedEngineConfigV1 {
+        max_wasm_stack: ENGINE.max_wasm_stack + 1,
+        ..ENGINE
+    };
+    let no_fuel = PinnedEngineConfigV1 {
+        consume_fuel: false,
+        ..ENGINE
+    };
+    let no_epoch = PinnedEngineConfigV1 {
+        epoch_interruption: false,
+        ..ENGINE
+    };
+    let mut other_row = golden_rows();
+    other_row[2] = entry(
+        "StackOverflow",
+        TrapOutcomeV1::Trap(ComponentTrapClassV1::StackExhausted),
+    );
+    let mut fewer_rows = golden_rows();
+    fewer_rows.pop();
+    let mut more_rows = golden_rows();
+    more_rows.push(entry(
+        "NullReference",
+        TrapOutcomeV1::Trap(ComponentTrapClassV1::Other),
+    ));
+    // The outcome is a function of the code, so a row differing from another
+    // only in its code (same outcome) is the closest pair a valid runtime has.
+    let mut other_code_row = golden_rows();
+    other_code_row.push(entry(
+        "NullPointer",
+        TrapOutcomeV1::Trap(ComponentTrapClassV1::Other),
+    ));
+    let extra = ["cranelift", "runtime", "z"];
+    let runtimes = [
+        golden_runtime("fixture-2", &sorted, ENGINE, golden_rows())?,
+        golden_runtime("fixture-1", &sorted[1..], ENGINE, golden_rows())?,
+        golden_runtime("fixture-1", &extra, ENGINE, golden_rows())?,
+        golden_runtime("fixture-1", &sorted, stack, golden_rows())?,
+        golden_runtime("fixture-1", &sorted, no_fuel, golden_rows())?,
+        golden_runtime("fixture-1", &sorted, no_epoch, golden_rows())?,
+        golden_runtime("fixture-1", &sorted, ENGINE, other_row)?,
+        golden_runtime("fixture-1", &sorted, ENGINE, fewer_rows)?,
+        golden_runtime("fixture-1", &sorted, ENGINE, more_rows)?,
+        golden_runtime("fixture-1", &sorted, ENGINE, other_code_row)?,
+    ];
+    for runtime in runtimes {
+        let digest = digest_of(mode, CommunityPluginCeilingsV1::V1, runtime);
+        assert!(digest.is_some_and(|digest| seen.insert(digest)));
+    }
+    Ok(())
+}
+
+fn golden_runtime_of(resolved: &[&str]) -> Result<PinnedComponentRuntimeV1, ProfileError> {
+    golden_runtime("fixture-1", resolved, ENGINE, golden_rows())
+}
+
+#[test]
+fn a_profile_without_a_runtime_has_no_digest_and_neither_has_its_record() -> TestResult {
+    let bare = CommunityPluginExecutionProfileV1::new(
+        CommunityPluginModeV1::Local,
+        CommunityPluginCeilingsV1::V1,
+        None,
+    );
+    assert_eq!(bare.digest(), None);
+    let execution = gated(PluginExecutionProjectionV1::from(fixture()));
+    let host = CommunityPluginHostAbiV1::v1();
+    let negotiated = negotiate_community_plugin_v1(&execution, &host, &bare)?;
+    assert_eq!(negotiated.execution_profile_digest(), None);
+    let recorded = runtime()?;
+    let full = CommunityPluginExecutionProfileV1::new(
+        CommunityPluginModeV1::AirGapped,
+        CommunityPluginCeilingsV1::V1,
+        Some(recorded),
+    );
+    let negotiated = negotiate_community_plugin_v1(&execution, &host, &full)?;
+    assert_eq!(negotiated.execution_profile_digest(), full.digest());
+    assert!(full.digest().is_some());
+    Ok(())
+}
+
+fn feature_runtime(
+    resolved: &[&str],
+    rows: Vec<TrapTableEntryV1>,
+) -> Result<PinnedComponentRuntimeV1, ProfileError> {
+    golden_runtime("fixture-1", resolved, ENGINE, rows)
+}
+
+/// R7-P7: a repeated feature text is rejected at the first repeat.
+#[test]
+fn a_duplicate_feature_is_rejected_at_the_first_repeat() {
+    assert_eq!(
+        feature_runtime(&["a", "b", "a", "b"], golden_rows()),
+        Err(ProfileError::DuplicateFeature { index: 2 })
+    );
+    assert_eq!(
+        feature_runtime(&["a", "a"], golden_rows()),
+        Err(ProfileError::DuplicateFeature { index: 1 })
+    );
+    assert!(feature_runtime(&["a", "b"], golden_rows()).is_ok());
+    assert!(feature_runtime(&[], golden_rows()).is_ok());
+    // The feature rule is checked before the trap table rules.
+    let other = TrapOutcomeV1::Trap(ComponentTrapClassV1::Other);
+    let repeated_rows = vec![entry("NullReference", other), entry("NullReference", other)];
+    assert_eq!(
+        feature_runtime(&["a", "a"], repeated_rows),
+        Err(ProfileError::DuplicateFeature { index: 1 })
+    );
+    assert_eq!(
+        ProfileError::DuplicateFeature { index: 2 }.to_string(),
+        "community Plugin runtime repeats feature 2"
+    );
 }

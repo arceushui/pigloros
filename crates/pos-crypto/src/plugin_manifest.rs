@@ -892,6 +892,16 @@ fn role_digest(domain: &[u8], bytes: &[u8]) -> Digest {
     *hasher.finalize().as_bytes()
 }
 
+/// The inner BLAKE3 digest of Component bytes: `BLAKE3("PiglorOS.Plugin.Component.v1\0" ||
+/// u64be(length) || bytes)` (ADR-061 revision 3, "Hash bytes and domain separation").
+///
+/// It is the digest PMF1 field 9 records for the `component` layer, computed from the bytes
+/// alone, so a caller can check the exact bytes it hands out.
+#[must_use]
+pub fn component_digest_v1(bytes: &[u8]) -> [u8; 32] {
+    role_digest(COMPONENT.domain, bytes)
+}
+
 /// Phase 3: every inner BLAKE3 digest; the first mismatch in PMF1 field and
 /// position order is reported. Phase 2 proved `E` equal to the layers.
 fn check_inner_digests(

@@ -25,6 +25,15 @@ pos-crypto = { path = "../../crates/pos-crypto", features = ["test-support"] }
 pos-plugin-supervisor = { path = "../../crates/pos-plugin-supervisor", features = [
   "test-support",
 ] }
+# The handoff vectors gate real releases and run host passes over real Drivers.
+pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
+
+# The handoff vectors run on the shared signed-release test world (ADR-061 revision 7, #579 and
+# #585).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+pos-plugin-publisher = { path = "../../crates/pos-plugin-publisher", features = [
+  "test-support",
+] }
 
 [lints]
 workspace = true

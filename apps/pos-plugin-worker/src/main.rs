@@ -18,8 +18,8 @@ fn main() -> std::process::ExitCode {
 mod tests {
     #[test]
     fn a_test_process_is_not_a_supervised_worker() {
-        // The test harness's arguments are not a single supervisor PID, so the
-        // worker refuses before it reads a request.
+        // The test harness's arguments are not a supervisor PID and a mode
+        // token, so the worker refuses before it reads a request.
         let code = super::main();
         assert_eq!(
             format!("{code:?}"),

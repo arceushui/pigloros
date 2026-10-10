@@ -218,7 +218,8 @@ jobs:
         run: >
           cargo test -p pos-store --no-default-features
           --test plugin_trust_registry_memory_public
-          --test plugin_trust_registry_memory_policy_public --locked
+          --test plugin_trust_registry_memory_policy_public
+          --test plugin_trust_registry_memory_evaluation_public --locked
       - name: cargo check (all features, all targets)
         run: cargo check --workspace --all-targets --all-features --locked
       - name: Prove reference evaluator implementation independence
@@ -1194,6 +1195,10 @@ jobs:
         run: |
           python scripts/check_plugin_trust_registry_impls.py
           python scripts/test_check_plugin_trust_registry_impls.py
+      - name: Check the community Plugin supervisor handoff README
+        run: |
+          python scripts/check_handoff_readme.py
+          python scripts/test_check_handoff_readme.py
       - name: Check PMF1 golden vectors match their generator
         run: python scripts/generate_pmf1_golden_vectors.py --check
       - name: Check independent owner-bridge codec vectors

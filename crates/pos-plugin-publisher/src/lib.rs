@@ -18,6 +18,15 @@
 //! trust evidence, verifies its PMF1 signature, and only then asks the Plugin
 //! trust policy registry to admit it. It does not validate artifact content
 //! (follow-up #574) and builds no activation Event (the caller supplies it).
+//!
+//! The `test-support` feature compiles the shared signed-release test world used by the
+//! installer vectors and by other crates' tests. The `installer_public` and
+//! `signed_release_world_public` test targets declare `required-features`, so a plain
+//! `cargo test -p pos-plugin-publisher` skips them; run with `--all-features`.
+//!
+//! Layout rule: the world lives under `tests/support` and is included by `#[path]`, so it stays
+//! outside the `**/src/**/*.rs` production-coverage glob; `cargo-shear` is told about its
+//! optional dependencies and its root file through `[package.metadata.cargo-shear]`.
 
 #[cfg(target_os = "linux")]
 use pos_core::{CanonicalBytes, KeyIdentityV1, PublicKey, Signature};
@@ -33,6 +42,16 @@ mod install;
 #[cfg(target_os = "linux")]
 mod publish;
 
+// Test-only. The shared signed-release test world lives under `tests/support`, outside the
+// production-coverage globs, like the Plugin trust registry fixtures of `pos-store`. It serves
+// this crate's public installer vectors and the tests of other crates that enable the
+// `test-support` feature from their `[dev-dependencies]`;
+// `scripts/check_test_support_features.py` keeps the feature out of deployable graphs. The
+// items are `pub` so that no consumer sees them as unused.
+#[cfg(all(target_os = "linux", feature = "test-support"))]
+#[path = "../tests/support/mod.rs"]
+pub mod test_support;
+
 #[cfg(target_os = "linux")]
 pub use historical::{
     verify_plugin_release_historical_v1, CurrentAdmissionV1, HistoricalReleaseVerificationV1,
@@ -41,8 +60,8 @@ pub use historical::{
 
 #[cfg(target_os = "linux")]
 pub use install::{
-    install_plugin_release_v1, ContentValidationV1, InstalledPluginReleaseV1,
-    PluginInstallRequestV1, PluginReleaseInstallErrorV1,
+    install_plugin_release_v1, InstalledPluginReleaseV1, PluginInstallRequestV1,
+    PluginReleaseInstallErrorV1,
 };
 
 #[cfg(target_os = "linux")]

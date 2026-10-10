@@ -1,10 +1,12 @@
-//! The Plugin trust policy registry port (ADR-103 revision 4, slice #568).
+//! The Plugin trust policy registry port (ADR-103 revisions 4 and 5, slices #568 and #580).
 //!
 //! The registry persists the operator-pinned anchor, the authenticated TPS1
 //! continuity, the PTR1/PRV1 floors, the highest trusted UTC second, the
 //! scoped release chain, and an append-only ledger. Every admission and every
 //! rollback commits its decision, its activation Event, the active pointer,
-//! and its ledger row in one transaction, or commits nothing.
+//! and its ledger row in one transaction, or commits nothing. The read-only
+//! `evaluate_current_release` (revision 5) re-runs the admission checks at a
+//! fresh UTC second and Tick against the retained state and writes nothing.
 //!
 //! A decision, receipt, retained record, or ledger row claims trust-policy
 //! admission only. The PMF1 publisher signature is verified nowhere in this
@@ -28,8 +30,9 @@ pub use error::PluginTrustPolicyRegistryErrorV1;
 pub use port::PluginTrustPolicyRegistryV1;
 pub use types::{
     ActivationEventIdentityV1, ActivationEventInputV1, ActiveReleaseV1,
-    AdmittedPluginReleaseReceiptV1, PluginRollbackReceiptV1, PluginTrustCommitOutcomeV1,
-    PluginTrustLedgerKindV1, PluginTrustLedgerRowV1, PolicyAdvanceKindV1, PolicyAdvanceOutcomeV1,
-    ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1,
+    AdmittedPluginReleaseReceiptV1, CurrentReleaseEvaluationV1, PluginRollbackReceiptV1,
+    PluginTrustCommitOutcomeV1, PluginTrustLedgerKindV1, PluginTrustLedgerRowV1,
+    PolicyAdvanceKindV1, PolicyAdvanceOutcomeV1, ProvisionOutcomeV1, RetainedPolicyStateV1,
+    RetainedReleaseDecisionV1,
 };
 pub use utc::TrustedUtcSecondV1;

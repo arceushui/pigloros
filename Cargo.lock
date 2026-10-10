@@ -5259,6 +5259,8 @@ dependencies = [
  "close_fds",
  "pos-core",
  "pos-crypto",
+ "pos-plugin-publisher",
+ "pos-plugin-release",
  "pos-runtime",
  "pos-store",
  "rustix 1.1.5",
@@ -5284,6 +5286,7 @@ version = "0.1.0"
 dependencies = [
  "pos-crypto",
  "pos-plugin-host",
+ "pos-plugin-publisher",
  "pos-plugin-supervisor",
  "pos-runtime",
 ]
@@ -5346,6 +5349,8 @@ dependencies = [
  "pos-conformance",
  "pos-core",
  "pos-crypto",
+ "pos-plugin-publisher",
+ "pos-plugin-release",
  "pos-state",
  "pos-store",
  "pos-time",

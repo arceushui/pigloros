@@ -29,6 +29,12 @@ ulid = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pos-conformance = { path = "../pos-conformance" }
+# The execution-time trust gate yields `ContentValidationV1` and reads release closures
+# through `ReleaseSourceV1`.
+pos-plugin-release = { path = "../pos-plugin-release" }
+# The install entry wraps the signed installer (ADR-061 revision 7 decision 9). The `test-support`
+# dev-dependency entry below stays alongside this normal one.
+pos-plugin-publisher = { path = "../pos-plugin-publisher" }
 
 [dev-dependencies]
 ciborium = { workspace = true }
@@ -47,6 +53,22 @@ tempfile = { workspace = true }
 # pos-time links pos-conformance, which builds only on Linux.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 pos-time = { path = "../pos-time" }
+# The gate vectors run on the shared signed-release test world (ADR-061 revision 7, #579).
+pos-plugin-publisher = { path = "../pos-plugin-publisher", features = [
+  "test-support",
+] }
+
+[[test]]
+name = "community_gate_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "community_plugin_host_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "community_install_public"
+required-features = ["test-support"]
 
 [[test]]
 name = "counterfactual_suffix_public"

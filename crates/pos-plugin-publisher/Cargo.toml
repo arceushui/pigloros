@@ -6,10 +6,17 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Declared so the registry spy fixture under `tests/support` can carry the gate
-# `scripts/check_plugin_trust_registry_impls.py` requires. It exposes nothing.
+# Compiles the shared signed-release test world (`tests/support`). Never enable it in a
+# deployable dependency graph; `scripts/check_test_support_features.py` enforces that. The
+# world's own dependencies are optional and exist only under this feature.
 [features]
-test-support = []
+test-support = [
+  "dep:blake3",
+  "dep:ciborium",
+  "dep:ed25519-dalek",
+  "dep:sha2",
+  "pos-core/test-support",
+]
 
 [dependencies]
 pos-core = { path = "../pos-core" }
@@ -19,11 +26,16 @@ thiserror = { workspace = true }
 
 # Linux-only, like the crate itself: pos-conformance (the anchor type) builds only there,
 # and pos-store exposes the Plugin trust policy registry port only on Linux
-# (ADR-103 revision 4). The port needs no `sqlite` feature, so rusqlite stays out of
+# (ADR-103 revisions 4 and 5). The port needs no `sqlite` feature, so rusqlite stays out of
 # this crate's own dependency set. pos-store never depends on this crate.
 [target.'cfg(target_os = "linux")'.dependencies]
 pos-conformance = { path = "../pos-conformance" }
 pos-store = { path = "../pos-store", default-features = false }
+# The test world's record encoders and signers (feature `test-support` only).
+blake3 = { workspace = true, optional = true }
+ciborium = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 blake3 = { workspace = true }
@@ -32,6 +44,23 @@ ed25519-dalek = { workspace = true }
 # Test-only: the scripted trusted wall source and the open erasure gate.
 pos-core = { path = "../pos-core", features = ["test-support"] }
 sha2 = { workspace = true }
+
+[[test]]
+name = "installer_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "signed_release_world_public"
+required-features = ["test-support"]
+
+# cargo-shear classifies everything under `tests/` as test code, so it sees the world's four
+# optional dependencies as dev-only ("misplaced") and the `#[path]`-included `tests/support/mod.rs`
+# as unlinked. Both are intended: the world is a library module that other crates reach through
+# the `test-support` feature, and it lives under `tests/support` to stay outside the production
+# coverage glob (`**/src/**/*.rs`).
+[package.metadata.cargo-shear]
+ignored = ["blake3", "ciborium", "ed25519-dalek", "sha2"]
+ignored-paths = ["tests/support/mod.rs"]
 
 [lints]
 workspace = true
