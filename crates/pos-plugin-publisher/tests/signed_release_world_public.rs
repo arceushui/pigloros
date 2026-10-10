@@ -13,11 +13,13 @@ use std::sync::{
     Arc,
 };
 
-use pos_conformance::PluginTrustBridgeErrorV1;
-use pos_crypto::plugin_trust::{PluginTrustErrorV1, ValidatedPluginManifestProjectionV1};
+use pos_conformance::{PluginFloorErrorV1, PluginFloorKindV1, PluginTrustBridgeErrorV1};
+use pos_crypto::plugin_trust::{
+    verify_plugin_trust_v1, PluginTrustErrorV1, ValidatedPluginManifestProjectionV1,
+};
 use pos_plugin_publisher::{
     test_support::{
-        encoding::{OWNER, SCOPE, TICK},
+        encoding::{Material, Revocations, Spec, OWNER, SCOPE, TICK, UTC},
         release::{pmf1_digest, Shape, REAL_COMPONENT_BYTES},
         spy_registry::Call,
         world::{key_bytes, register, wall, Config, World},
@@ -414,5 +416,146 @@ fn an_unclocked_spy_records_stamp_zero() -> TestResult {
     let calls = world.registry.calls.borrow().clone();
     assert_eq!(calls.len(), 4);
     assert!(matches!(calls.last(), Some(Call::Admit(_))));
+    Ok(())
+}
+
+/// The number of artifact revocations effective at the evidence's Tick.
+fn denials(material: &Material) -> usize {
+    material.evidence.effective_artifact_revocations().count()
+}
+
+/// R7-T1 (#581): the `Material` accessors expose the raw records and the anchor the evidence
+/// was verified from, so a consumer can verify them again.
+#[test]
+fn material_accessors_reproduce_the_evidence() -> TestResult {
+    let mut world = World::new()?;
+    world.advance_revoking_keys(&[1])??;
+    let material = world.material()?;
+    assert_eq!(material.prv1_records().len(), 2);
+    let records = material
+        .prv1_records()
+        .iter()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let again = verify_plugin_trust_v1(
+        material.root_anchor(),
+        &[material.ptr1()],
+        &records,
+        material.utc,
+        TICK,
+    )?;
+    assert_eq!(again.terminal_root(), material.evidence.terminal_root());
+    assert_eq!(
+        again.terminal_revocation(),
+        material.evidence.terminal_revocation()
+    );
+    Ok(())
+}
+
+/// R7-T1 (#581): a new revocation takes the Tick of the record that first lists it, a carried
+/// one keeps its Tick, and record Ticks are non-decreasing (the verifier accepts the history).
+#[test]
+fn a_revocation_takes_the_tick_of_the_record_that_first_lists_it() -> TestResult {
+    let mut world = World::new()?;
+    let first = [0x01; 32];
+    let second = [0x02; 32];
+    // Adopted at Tick 8, before the Tick 9 revocation is effective.
+    world.advance_revoking_artifacts_at(&[first], 9, 8)??;
+    assert_eq!(denials(&world.material()?), 0);
+    world.advance_revoking_artifacts_at(&[second], 12, 11)??;
+    let effective_at = |tick: u64| -> BoxResult<Vec<[u8; 32]>> {
+        let spec = Spec {
+            tick,
+            ..world.spec.clone()
+        };
+        let material = world.policy.material(&spec)?;
+        Ok(material.evidence.effective_artifact_revocations().collect())
+    };
+    assert!(effective_at(8)?.is_empty());
+    assert_eq!(effective_at(9)?, [first]);
+    assert_eq!(effective_at(11)?, [first]);
+    assert_eq!(effective_at(12)?, [first, second]);
+    Ok(())
+}
+
+/// R7-T1 (#581): the TPS1-only denial is adopted through `advance_policy`, no PRV1 record lists
+/// it, and the registry then refuses the release with the operator's denial.
+#[test]
+fn an_operator_denial_is_adopted_without_a_revocation_entry() -> TestResult {
+    let mut world = World::new()?;
+    let published = world.publish(Shape::first())?;
+    world
+        .install(published.address(), 1)?
+        .map_err(|error| format!("install failed: {error}"))?;
+    let address = published.address().clone();
+    world.advance_operator_denying(&[published.release_digest()])??;
+    assert!(world.spec.revoked_artifacts.is_empty());
+    let retained = world.registry.retained_policy_state(SCOPE)?;
+    assert_eq!(retained.tps1_digest(), world.material()?.tps1_digest());
+    assert_eq!(denials(&world.material()?), 0);
+    let refused = world.evaluate_at(&address, UTC, TICK)?;
+    assert_eq!(
+        refused.err(),
+        Some(PluginTrustPolicyRegistryErrorV1::Bridge(
+            PluginTrustBridgeErrorV1::TpsArtifactDenied
+        ))
+    );
+    Ok(())
+}
+
+/// R7-T1 (#581): the forked-floor material has the retained TPS1 bytes and a same-epoch PRV1
+/// record of a different digest, which the registry refuses as a fork.
+#[test]
+fn the_forked_floor_material_is_refused_as_a_fork() -> TestResult {
+    let (world, address, _) = installed_world(World::new()?)?;
+    let genuine = world.material()?;
+    let forked = world.forked_floor_material()?;
+    assert_eq!(forked.tps1, genuine.tps1);
+    assert_ne!(forked.prv1_records(), genuine.prv1_records());
+    let refused = world.evaluate_material_at(&address, &forked, UTC, TICK)?;
+    assert_eq!(
+        refused.err(),
+        Some(PluginTrustPolicyRegistryErrorV1::Floor(
+            PluginFloorErrorV1::Fork(PluginFloorKindV1::Revocation)
+        ))
+    );
+    Ok(())
+}
+
+/// R7-T1 (#581): a release with an invalid field-26 signature is refused by the installer's
+/// signature check, but a direct registry admission plants it as the active release.
+#[test]
+fn a_direct_admission_plants_a_release_with_a_bad_signature() -> TestResult {
+    let mut world = World::new()?;
+    let address = world.publish_with_signature(Shape::first(), [0; 64])?;
+    let refused = world.install(&address, 1)?;
+    let signature_refused = matches!(refused, Err(PluginReleaseInstallErrorV1::Signature(_)));
+    assert!(signature_refused);
+    assert!(world.registry.admits.is_empty());
+    world
+        .admit_directly(&address, 1)?
+        .map_err(|error| format!("direct admission failed: {error}"))?;
+    let digest = pmf1_digest(&world.store.read_verified(&address)?);
+    let active = world.snapshot(&[])?.active;
+    assert_eq!(
+        active.as_ref().map(ActiveReleaseV1::pmf1_digest),
+        Some(digest)
+    );
+    Ok(())
+}
+
+/// R7-T1 (#581): the builder refuses a terminal record Tick below the previous record's.
+#[test]
+fn a_record_tick_below_the_previous_record_is_refused() -> TestResult {
+    let world = World::new()?;
+    let spec = Spec {
+        adopted: vec![Revocations {
+            epochs: Vec::new(),
+            artifacts: Vec::new(),
+            tick: TICK + 4,
+        }],
+        ..Spec::default()
+    };
+    assert!(world.policy.material(&spec).is_err());
     Ok(())
 }

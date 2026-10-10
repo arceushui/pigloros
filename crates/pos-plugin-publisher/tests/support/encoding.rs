@@ -8,6 +8,8 @@
 //! [`Material`] bundles the verified evidence with the operator-signed TPS1
 //! that exactly maps it.
 
+use std::collections::BTreeMap;
+
 use ciborium::value::Value;
 use ed25519_dalek::{Signer, SigningKey};
 use pos_conformance::{
@@ -28,10 +30,12 @@ pub const OTHER_OWNER: &str = "other-a";
 pub const SCOPE: &str = "scope";
 /// The default evaluation UTC second, inside the default release interval.
 pub const UTC: i64 = 50;
-/// The evaluation Tick, also the Tick at which every revocation takes effect.
+/// The default evaluation Tick, also the default Tick of every PRV1 record and so the Tick at which
+/// every revocation takes effect.
 pub const TICK: u64 = 5;
 
-const FAR_FUTURE: &str = "2030-01-01T00:00:00Z";
+/// The default instant until which a TPS1 is valid offline, far beyond every fixture second.
+pub const FAR_FUTURE: &str = "2030-01-01T00:00:00Z";
 const ROOT_EXPIRES: i64 = 100;
 const ROOT_SIGNATURE_DOMAIN: &[u8] = b"pigloros/plugin-trust-root/v1\0";
 const REVOCATION_SIGNATURE_DOMAIN: &[u8] = b"pigloros/plugin-revocation/v1\0";
@@ -106,32 +110,61 @@ pub struct Policy {
     pub plugin_id: &'static str,
     /// The publisher owner.
     pub owner: &'static str,
+    /// The instant (`YYYY-MM-DDTHH:MM:SSZ`) until which every TPS1 of the world is valid offline.
+    pub tps1_valid_through: &'static str,
 }
 
 /// The revocations one PRV1 record carries, cumulative over every earlier record.
-#[derive(Clone, Debug, Default)]
+///
+/// The verifier's Tick rules shape the encoding: a new entry takes the Tick of the record that
+/// first lists it, carried entries keep theirs, and record Ticks are non-decreasing. A record
+/// therefore carries one `tick`, and each entry's own Tick is derived from the history.
+#[derive(Clone, Debug)]
 pub struct Revocations {
     /// Publisher key epochs revoked.
     pub epochs: Vec<u64>,
     /// Release digests revoked.
     pub artifacts: Vec<[u8; 32]>,
+    /// The Tick of this PRV1 record.
+    pub tick: u64,
 }
 
 /// The evaluation coordinates and the PRV1 history of one evidence.
 ///
 /// The history is the `adopted` records, which are immutable once a registry has
 /// retained them, followed by one terminal record carrying `revoked_epochs` and
-/// `revoked_artifacts`.
-#[derive(Clone, Default)]
+/// `revoked_artifacts`. Every entry takes the Tick of the record that first lists it.
+#[derive(Clone)]
 pub struct Spec {
     /// Added to [`UTC`] to get the evaluation second.
     pub utc_offset: i64,
+    /// The evaluation Tick.
+    pub tick: u64,
+    /// The Tick of the terminal PRV1 record, and so of every entry it lists first. It must not
+    /// be below the Tick of the last adopted record.
+    pub record_tick: u64,
     /// Publisher key epochs the terminal PRV1 revokes.
     pub revoked_epochs: Vec<u64>,
     /// Release digests the terminal PRV1 revokes.
     pub revoked_artifacts: Vec<[u8; 32]>,
     /// The revocations of the PRV1 records before the terminal one, oldest first.
     pub adopted: Vec<Revocations>,
+    /// Release digests that only the operator's TPS1 denies; no PRV1 record lists them.
+    pub operator_denied: Vec<[u8; 32]>,
+}
+
+impl Default for Spec {
+    fn default() -> Self {
+        Self {
+            utc_offset: 0,
+            tick: TICK,
+            record_tick: TICK,
+            revoked_epochs: Vec::new(),
+            revoked_artifacts: Vec::new(),
+            adopted: Vec::new(),
+            operator_denied: Vec::new(),
+        }
+    }
 }
 
 impl Spec {
@@ -182,9 +215,41 @@ fn ptr1(policy: Policy) -> BoxResult<Vec<u8>> {
     )
 }
 
+/// The Tick at which each revocation first appeared: the record Tick of the earliest record that
+/// lists it. A carried entry keeps that Tick in every later record.
+#[derive(Default)]
+struct FirstSeen {
+    epochs: BTreeMap<u64, u64>,
+    artifacts: BTreeMap<[u8; 32], u64>,
+}
+
+impl FirstSeen {
+    /// Record `revocations` as the next record: entries not seen before take its Tick.
+    fn record(&mut self, revocations: &Revocations) {
+        let tick = revocations.tick;
+        for epoch in &revocations.epochs {
+            self.epochs.entry(*epoch).or_insert(tick);
+        }
+        for artifact in &revocations.artifacts {
+            self.artifacts.entry(*artifact).or_insert(tick);
+        }
+    }
+
+    /// The Tick at which key epoch `epoch` first appeared.
+    fn epoch_tick(&self, epoch: u64, default: u64) -> u64 {
+        self.epochs.get(&epoch).copied().unwrap_or(default)
+    }
+
+    /// The Tick at which release digest `artifact` first appeared.
+    fn artifact_tick(&self, artifact: [u8; 32], default: u64) -> u64 {
+        self.artifacts.get(&artifact).copied().unwrap_or(default)
+    }
+}
+
 fn prv1(
     policy: Policy,
     revocations: &Revocations,
+    seen: &FirstSeen,
     root_digest: [u8; 32],
     epoch: u64,
     previous: Option<[u8; 32]>,
@@ -198,12 +263,13 @@ fn prv1(
                 (2, Some(key)) => key,
                 _ => policy.publisher_one,
             };
+            let tick = seen.epoch_tick(revoked, revocations.tick);
             Value::Array(vec![
                 text(policy.owner),
                 unsigned(3),
                 unsigned(revoked),
                 bytes_value(key),
-                unsigned(TICK),
+                unsigned(tick),
                 unsigned(1),
                 Value::Null,
             ])
@@ -214,9 +280,10 @@ fn prv1(
     let artifacts = digests
         .into_iter()
         .map(|revoked| {
+            let tick = seen.artifact_tick(revoked, revocations.tick);
             Value::Array(vec![
                 bytes_value(revoked),
-                unsigned(TICK),
+                unsigned(tick),
                 unsigned(1),
                 Value::Null,
             ])
@@ -232,7 +299,7 @@ fn prv1(
             signed(ROOT_EXPIRES),
             bytes_value(root_digest),
             previous.map_or(Value::Null, bytes_value),
-            unsigned(TICK),
+            unsigned(revocations.tick),
             Value::Array(keys),
             Value::Array(artifacts),
         ],
@@ -246,18 +313,26 @@ fn revocation_chain(policy: Policy, spec: &Spec, root_digest: [u8; 32]) -> BoxRe
     let terminal = Revocations {
         epochs: spec.revoked_epochs.clone(),
         artifacts: spec.revoked_artifacts.clone(),
+        tick: spec.record_tick,
     };
+    let last_tick = spec.adopted.last().map_or(0, |last| last.tick);
+    if last_tick > spec.record_tick {
+        return Err("record Ticks must be non-decreasing".into());
+    }
+    let mut seen = FirstSeen::default();
     let mut records: Vec<Vec<u8>> = Vec::new();
     for (index, revocations) in spec.adopted.iter().chain([&terminal]).enumerate() {
+        seen.record(revocations);
         let epoch = u64::try_from(index)? + 1;
         let previous = records.last().map(|record| digest(record));
-        let record = prv1(policy, revocations, root_digest, epoch, previous)?;
+        let record = prv1(policy, revocations, &seen, root_digest, epoch, previous)?;
         records.push(record);
     }
     Ok(records)
 }
 
-/// Verified evidence and the operator-signed TPS1 that exactly maps it.
+/// Verified evidence and the operator-signed TPS1 that exactly maps it, with the records and the
+/// anchor the evidence was verified from.
 pub struct Material {
     /// The verified PTR1/PRV1 evidence.
     pub evidence: VerifiedPluginTrustEvidenceV1,
@@ -265,6 +340,9 @@ pub struct Material {
     pub tps1: Vec<u8>,
     /// The evaluation UTC second the evidence was verified at.
     pub utc: i64,
+    ptr1: Vec<u8>,
+    prv1: Vec<Vec<u8>>,
+    root_anchor: TrustedPluginRootAnchorV1,
 }
 
 impl Material {
@@ -273,11 +351,31 @@ impl Material {
     pub fn tps1_digest(&self) -> [u8; 32] {
         digest(&self.tps1)
     }
+
+    /// The raw bytes of the PTR1 record the evidence was verified from.
+    #[must_use]
+    pub fn ptr1(&self) -> &[u8] {
+        &self.ptr1
+    }
+
+    /// The raw bytes of every PRV1 record, oldest first.
+    #[must_use]
+    pub fn prv1_records(&self) -> &[Vec<u8>] {
+        &self.prv1
+    }
+
+    /// The operator-pinned PTR1 anchor the evidence was verified under.
+    #[must_use]
+    pub const fn root_anchor(&self) -> &TrustedPluginRootAnchorV1 {
+        &self.root_anchor
+    }
 }
 
 fn tps1(
     evidence: &VerifiedPluginTrustEvidenceV1,
     previous: Option<[u8; 32]>,
+    operator_denied: &[[u8; 32]],
+    valid_through: &str,
 ) -> BoxResult<Vec<u8>> {
     let version = evidence.terminal_root().0;
     let mut trust_roots = evidence
@@ -297,8 +395,10 @@ fn tps1(
     revoked_key_ids.sort();
     let mut revoked_artifact_digests = evidence
         .effective_artifact_revocations()
+        .chain(operator_denied.iter().copied())
         .collect::<Vec<_>>();
     revoked_artifact_digests.sort_unstable();
+    revoked_artifact_digests.dedup();
     let mut snapshot = TrustPolicySnapshotV1 {
         policy_id: SCOPE.to_owned(),
         epoch: evidence.terminal_revocation().0,
@@ -307,7 +407,7 @@ fn tps1(
         revoked_key_ids,
         revoked_artifact_digests,
         minimum_versions: Vec::new(),
-        offline_valid_through: FAR_FUTURE.to_owned(),
+        offline_valid_through: valid_through.to_owned(),
         previous_snapshot_digest: previous,
         operator_signature: [0; 64],
     };
@@ -336,12 +436,21 @@ impl Policy {
         let revocations = revocation_chain(self, spec, digest(&root))?;
         let records = revocations.iter().map(Vec::as_slice).collect::<Vec<_>>();
         let anchor = TrustedPluginRootAnchorV1::new(SCOPE, digest(&root))?;
+        let tick = spec.tick;
         let evidence =
-            verify_plugin_trust_v1(&anchor, &[root.as_slice()], &records, spec.utc(), TICK)?;
+            verify_plugin_trust_v1(&anchor, &[root.as_slice()], &records, spec.utc(), tick)?;
         Ok(Material {
-            tps1: tps1(&evidence, previous)?,
+            tps1: tps1(
+                &evidence,
+                previous,
+                &spec.operator_denied,
+                self.tps1_valid_through,
+            )?,
             evidence,
             utc: spec.utc(),
+            ptr1: root,
+            prv1: revocations,
+            root_anchor: anchor,
         })
     }
 

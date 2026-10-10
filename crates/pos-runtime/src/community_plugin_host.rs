@@ -10,6 +10,8 @@ pub mod cbor;
 mod contract;
 mod error;
 mod failure;
+#[cfg(target_os = "linux")]
+mod gate;
 mod negotiation;
 mod profile;
 
@@ -25,10 +27,20 @@ pub use error::{
     RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
 };
 pub use failure::{classify_pass_failure, quarantine_for, PassFailureV1};
+#[cfg(target_os = "linux")]
+pub use gate::{
+    gate_community_release_v1, host_error_for_registry_v1, host_error_for_release_signature_v1,
+    host_error_for_release_source_v1, host_error_for_trust_authorization_v1,
+    host_error_for_trust_verification_v1, CommunityPassAuthorizationV1, CommunityPassV1,
+    CommunityPluginExpectationV1, CommunityPluginTrustMaterialV1, GatedCommunityReleaseV1,
+    PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1, ReleaseIdentityV1,
+};
+#[cfg(target_os = "linux")]
+pub use negotiation::negotiate_community_plugin_v1;
 pub use negotiation::{
-    negotiate_community_plugin_v1, CommunityPluginHostAbiErrorV1, CommunityPluginHostAbiV1,
-    EffectiveExecutionLimitsV1, NegotiatedCommunityPluginV1, NegotiatedTransportErrorV1,
-    NegotiatedTransportV1, COMMUNITY_PLUGIN_ABI_MAJOR_V1,
+    CommunityPluginHostAbiErrorV1, CommunityPluginHostAbiV1, EffectiveExecutionLimitsV1,
+    NegotiatedCommunityPluginV1, NegotiatedTransportErrorV1, NegotiatedTransportV1,
+    COMMUNITY_PLUGIN_ABI_MAJOR_V1,
 };
 pub use profile::{
     CeilingValuesV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,

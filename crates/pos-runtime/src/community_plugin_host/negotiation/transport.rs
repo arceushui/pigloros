@@ -4,7 +4,7 @@
 //! record to a fresh worker process as a [`NegotiatedTransportV1`]. The worker
 //! rebuilds [`NegotiatedCommunityPluginV1`] with
 //! [`NegotiatedCommunityPluginV1::from_transport`]: the only public way to
-//! build a record besides [`super::negotiate_community_plugin_v1`]. It re-checks
+//! build a record besides `negotiate_community_plugin_v1`. It re-checks
 //! every invariant negotiation establishes, against the worker's own host ABI
 //! and execution profile, and takes the runtime identity from that profile,
 //! never from the transport.

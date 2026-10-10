@@ -60,8 +60,8 @@ pub use historical::{
 
 #[cfg(target_os = "linux")]
 pub use install::{
-    install_plugin_release_v1, ContentValidationV1, InstalledPluginReleaseV1,
-    PluginInstallRequestV1, PluginReleaseInstallErrorV1,
+    install_plugin_release_v1, InstalledPluginReleaseV1, PluginInstallRequestV1,
+    PluginReleaseInstallErrorV1,
 };
 
 #[cfg(target_os = "linux")]

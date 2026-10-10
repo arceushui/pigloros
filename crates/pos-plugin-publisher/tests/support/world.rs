@@ -25,12 +25,13 @@ use pos_crypto::signing::generate_keypair;
 use pos_plugin_release::{BundleAddressV1, LocalOciPublisherV1, ReleaseSourceV1};
 use pos_store::memory::MemoryStore;
 use pos_store::plugin_trust_registry::{
-    ActivationEventInputV1, ActiveReleaseV1, CurrentReleaseEvaluationV1, PluginRollbackReceiptV1,
-    PluginTrustLedgerRowV1, PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1,
-    PolicyAdvanceOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
+    ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
+    CurrentReleaseEvaluationV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
+    PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1,
+    RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
 };
 
-use super::encoding::{Material, Policy, Revocations, Spec, OTHER_OWNER, OWNER, SCOPE, TICK};
+use super::encoding::{Material, Policy, Revocations, Spec, FAR_FUTURE, OTHER_OWNER, OWNER, SCOPE};
 use super::release::{address_of, closure, make_draft, PrivateRoot, Shape};
 use super::spy_registry::SpyRegistry;
 use super::BoxResult;
@@ -144,6 +145,7 @@ fn next_epoch(spec: &Spec) -> Spec {
     next.adopted.push(Revocations {
         epochs: spec.revoked_epochs.clone(),
         artifacts: spec.revoked_artifacts.clone(),
+        tick: spec.record_tick,
     });
     next
 }
@@ -169,6 +171,8 @@ pub struct Config {
     /// The clock the spy registry stamps its `evaluate_current_release` calls with; `None`
     /// builds the spy without a clock, so it records stamp 0.
     pub clock: Option<Arc<AtomicU64>>,
+    /// The instant (`YYYY-MM-DDTHH:MM:SSZ`) until which every TPS1 is valid offline.
+    pub tps1_valid_through: &'static str,
 }
 
 impl Default for Config {
@@ -180,6 +184,7 @@ impl Default for Config {
             provision: true,
             second_epoch_key: false,
             clock: None,
+            tps1_valid_through: FAR_FUTURE,
         }
     }
 }
@@ -281,6 +286,7 @@ impl World {
             publisher_two: second.as_ref().map(key_bytes),
             plugin_id: config.plugin_id,
             owner: config.owner,
+            tps1_valid_through: config.tps1_valid_through,
         };
         let (anchor, genesis_tps1) = policy.anchor()?;
         let mut memory = MemoryStore::new();
@@ -497,6 +503,8 @@ impl World {
     /// Advance the registry policy by one PRV1 epoch that revokes the
     /// publisher key `epochs`, keeping every earlier revocation.
     ///
+    /// The new record and the evaluation keep the current Ticks.
+    ///
     /// Test fixture only: production has no policy-advance entry point.
     ///
     /// # Errors
@@ -513,6 +521,8 @@ impl World {
     /// Advance the registry policy by one PRV1 epoch that revokes the release
     /// `digests`, keeping every earlier revocation.
     ///
+    /// The new record and the evaluation keep the current Ticks.
+    ///
     /// Test fixture only: production has no policy-advance entry point.
     ///
     /// # Errors
@@ -526,9 +536,103 @@ impl World {
         self.advance_to(next)
     }
 
-    /// Advance to `next`, chaining its TPS1 to the retained one. The world's
-    /// current evidence follows only a committed advance.
-    fn advance_to(&mut self, next: Spec) -> BoxResult<Registry<PolicyAdvanceOutcomeV1>> {
+    /// As [`Self::advance_revoking_artifacts()`], with the new PRV1 record at Tick
+    /// `record_tick` (the Tick at which every new revocation takes effect) and the advance
+    /// evaluated at Tick `tick`.
+    ///
+    /// A revocation with `record_tick` above `tick` is adopted before it is effective. The
+    /// record Tick must not be below the Tick of the record before it.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error; the registry result is the value.
+    pub fn advance_revoking_artifacts_at(
+        &mut self,
+        digests: &[[u8; 32]],
+        record_tick: u64,
+        tick: u64,
+    ) -> BoxResult<Registry<PolicyAdvanceOutcomeV1>> {
+        let mut next = next_epoch(&self.spec);
+        next.revoked_artifacts.extend_from_slice(digests);
+        next.record_tick = record_tick;
+        next.tick = tick;
+        self.advance_to(next)
+    }
+
+    /// Advance the registry policy by one PRV1 epoch, with no new PRV1 revocation, whose TPS1
+    /// also denies the release `digests`: a denial that only the operator's TPS1 carries.
+    ///
+    /// The TPS1 is adopted through `advance_policy` (the gate requires the supplied TPS1 to be
+    /// the retained one byte for byte), and the world's current evidence follows it.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error; the registry result is the value.
+    pub fn advance_operator_denying(
+        &mut self,
+        digests: &[[u8; 32]],
+    ) -> BoxResult<Registry<PolicyAdvanceOutcomeV1>> {
+        let mut next = next_epoch(&self.spec);
+        next.operator_denied.extend_from_slice(digests);
+        self.advance_to(next)
+    }
+
+    /// Advance the registry policy by one PRV1 epoch with no new revocation, evaluated
+    /// `utc_offset` seconds after the default second. The world's evidence follows it, so a
+    /// later advance, install or evidence is built at that second.
+    ///
+    /// Test fixture only: production has no policy-advance entry point.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error; the registry result is the value.
+    pub fn advance_policy_at(
+        &mut self,
+        utc_offset: i64,
+    ) -> BoxResult<Registry<PolicyAdvanceOutcomeV1>> {
+        let mut next = next_epoch(&self.spec);
+        next.utc_offset = utc_offset;
+        self.advance_to(next)
+    }
+
+    /// Evidence and a valid TPS1 successor of the retained TPS1 for a PRV1 epoch that revokes
+    /// the release `digests` at the record Tick `record_tick`, which the registry has not
+    /// adopted. The world is left unchanged.
+    ///
+    /// # Errors
+    /// Returns the fixture construction, registry read or trust verification error.
+    pub fn unadopted_material(
+        &self,
+        digests: &[[u8; 32]],
+        record_tick: u64,
+    ) -> BoxResult<Material> {
+        let previous = Some(self.registry.retained_policy_state(SCOPE)?.tps1_digest());
+        let mut next = next_epoch(&self.spec);
+        next.revoked_artifacts.extend_from_slice(digests);
+        next.record_tick = record_tick;
+        self.policy.material_chained(&next, previous)
+    }
+
+    /// The current evidence with its terminal PRV1 record forked: the same epoch, the same
+    /// entries and the same TPS1 bytes, and a record Tick one higher, so the record digest
+    /// differs from the retained one.
+    ///
+    /// The terminal record must list no revocation that no earlier record carries; otherwise
+    /// that revocation's Tick moves too.
+    ///
+    /// # Errors
+    /// Returns the fixture construction or trust verification error.
+    pub fn forked_floor_material(&self) -> BoxResult<Material> {
+        let spec = Spec {
+            record_tick: self.spec.record_tick + 1,
+            ..self.spec.clone()
+        };
+        self.policy.material_chained(&spec, self.previous)
+    }
+
+    /// Advance to `next`, chaining its TPS1 to the retained one, at the evaluation Tick
+    /// `next.tick`. The world's current evidence follows only a committed advance.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error; the registry result is the value.
+    pub fn advance_to(&mut self, next: Spec) -> BoxResult<Registry<PolicyAdvanceOutcomeV1>> {
         let previous = Some(self.registry.retained_policy_state(SCOPE)?.tps1_digest());
         let material = self.policy.material_chained(&next, previous)?;
         let mut source = wall(material.utc)?;
@@ -538,7 +642,7 @@ impl World {
             &material.tps1,
             &material.evidence,
             utc,
-            TICK,
+            next.tick,
         );
         if advanced.is_ok() {
             self.spec = next;
@@ -570,7 +674,36 @@ impl World {
             &material.evidence,
             &projection,
             utc,
-            TICK,
+            self.spec.tick,
+            activation(self.timeline, tag),
+        ))
+    }
+
+    /// Admit the release at `address` straight through the registry with the current evidence,
+    /// bypassing the installer: no PMF1 signature is checked, because the registry does not
+    /// check it (`registry` is a public field).
+    ///
+    /// Together with `publish_with_signature` it plants a release whose field 26 is invalid
+    /// as the active release, which only the execution gate's own signature check refuses.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error; the registry result is the value.
+    pub fn admit_directly(
+        &mut self,
+        address: &BundleAddressV1,
+        tag: u8,
+    ) -> BoxResult<Registry<AdmittedPluginReleaseReceiptV1>> {
+        let bundle = self.store.read_verified(address)?;
+        let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
+        let material = self.material()?;
+        let utc = TrustedUtcSecondV1::from_source(&mut wall(material.utc)?)?;
+        Ok(self.registry.admit(
+            &self.anchor,
+            &material.tps1,
+            &material.evidence,
+            &projection,
+            utc,
+            self.spec.tick,
             activation(self.timeline, tag),
         ))
     }
@@ -592,6 +725,31 @@ impl World {
         let bundle = self.store.read_verified(target)?;
         let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
         let material = self.material()?;
+        let trusted = TrustedUtcSecondV1::from_source(&mut wall(utc)?)?;
+        Ok(self.registry.evaluate_current_release(
+            &self.anchor,
+            &material.tps1,
+            &material.evidence,
+            &projection,
+            trusted,
+            tick,
+        ))
+    }
+
+    /// Evaluate the release at `target` read-only with explicit `material` (not the world's
+    /// current evidence), at the trusted UTC second `utc` and the Tick `tick`.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error; the registry result is the value.
+    pub fn evaluate_material_at(
+        &self,
+        target: &BundleAddressV1,
+        material: &Material,
+        utc: i64,
+        tick: u64,
+    ) -> BoxResult<Registry<CurrentReleaseEvaluationV1>> {
+        let bundle = self.store.read_verified(target)?;
+        let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
         let trusted = TrustedUtcSecondV1::from_source(&mut wall(utc)?)?;
         Ok(self.registry.evaluate_current_release(
             &self.anchor,

@@ -7,8 +7,8 @@ use pos_crypto::plugin_execution::{
 use pos_runtime::community_plugin_host::{
     negotiate_community_plugin_v1, ArtifactRefV1, CommunityPluginCeilingsV1,
     CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginModeV1,
-    NegotiatedCommunityPluginV1, PinnedComponentRuntimeV1, PluginInvocationV1, TimelinePositionV1,
-    MAX_OBSERVATION_BYTES_V1, MAX_STATE_BYTES_V1,
+    GatedCommunityReleaseV1, NegotiatedCommunityPluginV1, PinnedComponentRuntimeV1,
+    PluginInvocationV1, TimelinePositionV1, MAX_OBSERVATION_BYTES_V1, MAX_STATE_BYTES_V1,
 };
 use wasmtime::component::Val;
 
@@ -52,7 +52,8 @@ pub(crate) fn negotiate(
         CommunityPluginCeilingsV1::V1,
         runtime,
     );
-    ok(negotiate_community_plugin_v1(release, host, &profile))
+    let gated = GatedCommunityReleaseV1::for_test(release.clone(), Vec::new());
+    ok(negotiate_community_plugin_v1(&gated, host, &profile))
 }
 
 /// The `plugin-a` release under the V1 host and a profile that pins this

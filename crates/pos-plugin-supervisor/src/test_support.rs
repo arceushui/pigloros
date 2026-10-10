@@ -14,9 +14,9 @@ use pos_crypto::plugin_execution::{
 use pos_runtime::community_plugin_host::{
     negotiate_community_plugin_v1, plugin_output_digest_v1, ArtifactRefV1,
     CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1,
-    CommunityPluginModeV1, EventDraftV1, MeteringV1, NegotiatedCommunityPluginV1,
-    OperationalLogRecord, PluginDescriptorV1, PluginInvocationV1, PluginOutputV1,
-    TimelinePositionV1, TraceAnnotationV1,
+    CommunityPluginModeV1, EventDraftV1, GatedCommunityReleaseV1, MeteringV1,
+    NegotiatedCommunityPluginV1, OperationalLogRecord, PluginDescriptorV1, PluginInvocationV1,
+    PluginOutputV1, TimelinePositionV1, TraceAnnotationV1,
 };
 use pos_runtime::{DomainImplementationKindV1, PluginIsolationV1, PluginPinV1};
 
@@ -165,8 +165,9 @@ pub fn negotiated_under(
         budget,
     };
     let execution = PluginExecutionProjectionV1::from(fixture);
+    let gated = GatedCommunityReleaseV1::for_test(execution, Vec::new());
     ok(negotiate_community_plugin_v1(
-        &execution,
+        &gated,
         &CommunityPluginHostAbiV1::v1(),
         profile,
     ))

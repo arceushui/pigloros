@@ -5346,6 +5346,8 @@ dependencies = [
  "pos-conformance",
  "pos-core",
  "pos-crypto",
+ "pos-plugin-publisher",
+ "pos-plugin-release",
  "pos-state",
  "pos-store",
  "pos-time",
