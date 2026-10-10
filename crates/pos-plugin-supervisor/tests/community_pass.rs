@@ -23,14 +23,13 @@ use pos_plugin_supervisor::test_support::{
     self, community_pin, err, negotiated_with, ok, DriverPlugin, SMALL_BUDGET,
 };
 use pos_plugin_supervisor::{
-    classify_pass_failure, register_community_driver, CommunityDriverConfigV1, CommunityDriverV1,
-    CommunityPluginHandleV1, CommunityPluginSupervisorV1, CommunityStateV1,
-    InvocationContextSourceV1, InvocationContextV1, PassFailureV1, ReceiptDispositionV1,
-    WorkerProgramV1,
+    register_community_driver, CommunityDriverConfigV1, CommunityDriverV1, CommunityPluginHandleV1,
+    CommunityPluginSupervisorV1, CommunityStateV1, InvocationContextSourceV1, InvocationContextV1,
+    ReceiptDispositionV1, WorkerProgramV1,
 };
 use pos_runtime::community_plugin_host::{
-    AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1, HostInputs,
-    TrapReproductionV1,
+    classify_pass_failure, AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
+    HostFailureClassV1, HostInputs, PassFailureV1, TrapReproductionV1,
 };
 use pos_runtime::{
     LocalScheduledAdmissionHostV1, ObservationView, PluginAvailabilityV1, PluginCompositionErrorV1,
@@ -325,7 +324,9 @@ const fn failure(
 
 /// Run one pass whose second member fails as `failure` says, and check that
 /// the whole pass is discarded and only that member is marked.
-fn check_failure(failure: &Failure) {
+///
+/// Returns the pass error, so a caller can inspect what the real pass raised.
+fn check_failure(failure: &Failure) -> RuntimeError {
     let mut world = World::new();
     let alpha = world.add("alpha", "community.alpha", b"draft:community.alpha", PROMPT);
     let beta = world.add(
@@ -369,6 +370,7 @@ fn check_failure(failure: &Failure) {
         Some(PluginAvailabilityV1::Available)
     );
     assert_eq!(world.registry.availability(b), Some(quarantine));
+    error
 }
 
 #[test]
@@ -403,11 +405,23 @@ fn an_invalid_output_discards_the_pass_and_only_marks_that_plugin() {
         (&b"bad-digest"[..], Error::InvalidGuestOutput),
         (&b"guest-error"[..], Error::GuestDeclaredFailure),
         (&b"draft:Not.An.Id"[..], Error::InvalidGuestOutput),
-        // Dependency digests have no EventDraft field: a distinct refusal.
-        (&b"deps:community.beta"[..], Error::UnsupportedSchema),
     ] {
         check_failure(&failure(component, error, None));
     }
+}
+
+/// R7-F4: a valid guest output the host cannot commit is authoritative.
+#[test]
+fn a_draft_with_dependency_digests_is_unsupported_schema_and_authoritative() {
+    // `check_failure` asserts the whole pass is discarded: no Event, no state,
+    // no quarantine, and the receipt disposition is `Discarded`.
+    let unsupported = Error::UnsupportedSchema;
+    let raised = check_failure(&failure(b"deps:community.beta", unsupported, None));
+    let PassFailureV1::Host(host) = classify_pass_failure(&raised) else {
+        std::panic::resume_unwind(Box::new("the pass raised no host error"))
+    };
+    assert_eq!(host, unsupported);
+    assert_eq!(host.class(), HostFailureClassV1::Authoritative);
 }
 
 #[test]

@@ -5,21 +5,23 @@
 //! rejection path is reachable without publishing a release closure. The
 //! real projection is covered by `pos-crypto`'s PMF1 tests.
 
+use pos_core::{CoreError, PipelineOutcomeV1};
 use pos_crypto::plugin_execution::{
     DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
     PluginExecutionProjectionFixtureV1, PluginExecutionProjectionV1, COMMUNITY_PLUGIN_WORLD_V1,
     WASM_PAGE_BYTES_V1,
 };
 use pos_runtime::community_plugin_host::{
-    negotiate_community_plugin_v1, AtomicCommitFailureV1, CeilingValuesV1,
-    CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1, CommunityPluginHostAbiErrorV1,
-    CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, CommunityPluginModeV1,
-    CommunityPluginProfileErrorV1, ComponentTrapClassV1, EffectiveExecutionLimitsV1,
-    ExecutionLimitV1, HostFailureClassV1, NegotiatedCommunityPluginV1, PinnedComponentRuntimeV1,
-    PinnedEngineConfigV1, TrapOutcomeV1, TrapReproductionV1, TrapTableEntryV1,
+    classify_pass_failure, negotiate_community_plugin_v1, quarantine_for, AtomicCommitFailureV1,
+    CeilingValuesV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
+    CommunityPluginHostAbiErrorV1, CommunityPluginHostAbiV1, CommunityPluginHostErrorV1,
+    CommunityPluginModeV1, CommunityPluginProfileErrorV1, ComponentTrapClassV1,
+    EffectiveExecutionLimitsV1, ExecutionLimitV1, HostFailureClassV1, NegotiatedCommunityPluginV1,
+    PassFailureV1, PinnedComponentRuntimeV1, PinnedEngineConfigV1, RevocationBasisV1,
+    TrapOutcomeV1, TrapReproductionV1, TrapTableEntryV1, TrustDenialBasisV1,
     COMMUNITY_PLUGIN_ABI_MAJOR_V1,
 };
-use pos_runtime::PluginExecutionModeV1;
+use pos_runtime::{PluginAvailabilityV1, PluginExecutionModeV1, RuntimeError};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 type Negotiation = Result<NegotiatedCommunityPluginV1, Error>;
@@ -56,16 +58,44 @@ const REPRODUCED: TrapReproductionV1 = TrapReproductionV1::ReproducedByConforman
 const UNVERIFIED: TrapReproductionV1 = TrapReproductionV1::Unverified;
 const TYPED: AtomicCommitFailureV1 = AtomicCommitFailureV1::DeterministicTypedResult;
 const UNTYPED: AtomicCommitFailureV1 = AtomicCommitFailureV1::Operational;
+const TRUST_EXPIRED: TrustDenialBasisV1 = TrustDenialBasisV1::Expired;
+const REVOKED_ARTIFACT: RevocationBasisV1 = RevocationBasisV1::Artifact;
+/// Every trust-denial basis with its exact ADR-061 revision 7 name.
+const TRUST_BASES: [(TrustDenialBasisV1, &str); 5] = [
+    (TrustDenialBasisV1::Expired, "Expired"),
+    (TrustDenialBasisV1::NotActive, "NotActive"),
+    (TrustDenialBasisV1::Untrusted, "Untrusted"),
+    (TrustDenialBasisV1::PolicyMismatch, "PolicyMismatch"),
+    (
+        TrustDenialBasisV1::TrustStateUnavailable,
+        "TrustStateUnavailable",
+    ),
+];
+/// Every revocation basis with its exact ADR-061 revision 7 name.
+const REVOCATION_BASES: [(RevocationBasisV1, &str); 3] = [
+    (RevocationBasisV1::PublisherKey, "PublisherKey"),
+    (RevocationBasisV1::Artifact, "Artifact"),
+    (RevocationBasisV1::OperatorDenial, "OperatorDenial"),
+];
 /// Every closed error with its ADR name, class and V1 production.
 const ERRORS: [(Error, &str, HostFailureClassV1, bool); 22] = [
     (Error::InvalidManifest, "InvalidManifest", REJECTION, true),
     (
-        Error::ArtifactTrustDenied,
+        Error::ArtifactTrustDenied {
+            basis: TRUST_EXPIRED,
+        },
         "ArtifactTrustDenied",
         REJECTION,
         true,
     ),
-    (Error::ArtifactRevoked, "ArtifactRevoked", REJECTION, true),
+    (
+        Error::ArtifactRevoked {
+            basis: REVOKED_ARTIFACT,
+        },
+        "ArtifactRevoked",
+        REJECTION,
+        true,
+    ),
     (Error::IncompatibleAbi, "IncompatibleAbi", REJECTION, true),
     (
         Error::MissingFeature { index: 2 },
@@ -94,7 +124,7 @@ const ERRORS: [(Error, &str, HostFailureClassV1, bool); 22] = [
     (
         Error::UnsupportedSchema,
         "UnsupportedSchema",
-        REJECTION,
+        AUTHORITATIVE,
         true,
     ),
     (
@@ -302,6 +332,148 @@ fn every_closed_error_has_its_adr_name_class_and_v1_production() {
         Error::MissingFeature { index: 2 }.to_string(),
         "community Plugin requires unsupported feature 2"
     );
+}
+
+/// Every error name once, with every basis value for the two payload errors.
+fn every_error_with_every_basis() -> Vec<Error> {
+    let mut errors = vec![
+        Error::InvalidManifest,
+        Error::IncompatibleAbi,
+        Error::MissingFeature { index: 0 },
+        Error::CapabilityDenied { index: 0 },
+        Error::InvalidInvocation,
+        Error::InvalidGuestOutput,
+        Error::UnsupportedSchema,
+        Error::StateMigrationFailed,
+        Error::GuestDeclaredFailure,
+        Error::WorkerCrashed,
+        Error::FuelExhausted,
+        Error::MemoryLimitExceeded,
+        Error::HostCallLimitExceeded,
+        Error::OutputLimitExceeded,
+        Error::DeterministicDeadlineExceeded,
+        Error::OperationalWatchdogStop,
+    ];
+    errors.extend(TRUST_BASES.map(|(basis, _)| Error::ArtifactTrustDenied { basis }));
+    errors.extend(REVOCATION_BASES.map(|(basis, _)| Error::ArtifactRevoked { basis }));
+    for reproduction in [REPRODUCED, UNVERIFIED] {
+        let class = TRAP;
+        errors.push(Error::ComponentTrap {
+            class,
+            reproduction,
+        });
+    }
+    for failure in [TYPED, UNTYPED] {
+        errors.push(Error::AtomicCommitFailed { failure });
+    }
+    errors
+}
+
+const fn assert_copy<T: Copy>() {}
+
+/// R7-F1: the class over all 20 names with every basis value.
+#[test]
+fn pre_execution_rejection_is_exactly_the_seven_names() {
+    let rejections = [
+        "InvalidManifest",
+        "ArtifactTrustDenied",
+        "ArtifactRevoked",
+        "IncompatibleAbi",
+        "MissingFeature",
+        "CapabilityDenied",
+        "InvalidInvocation",
+    ];
+    for error in every_error_with_every_basis() {
+        let expected = rejections.contains(&error.name());
+        assert_eq!(error.class() == REJECTION, expected, "{error:?}");
+    }
+    assert_eq!(Error::UnsupportedSchema.class(), AUTHORITATIVE);
+    for (basis, _) in TRUST_BASES {
+        let denied = Error::ArtifactTrustDenied { basis };
+        assert_eq!(denied.class(), REJECTION, "{basis:?}");
+    }
+    for (basis, _) in REVOCATION_BASES {
+        let revoked = Error::ArtifactRevoked { basis };
+        assert_eq!(revoked.class(), REJECTION, "{basis:?}");
+    }
+}
+
+/// R7-F2: names are unchanged by a basis, and bases have exact names.
+#[test]
+fn basis_names_are_exact_and_the_error_name_ignores_the_basis() {
+    assert_copy::<Error>();
+    for (basis, name) in TRUST_BASES {
+        assert_eq!(basis.name(), name);
+        let denied = Error::ArtifactTrustDenied { basis };
+        assert_eq!(denied.name(), "ArtifactTrustDenied");
+        assert_eq!(denied.basis_name(), Some(name));
+    }
+    for (basis, name) in REVOCATION_BASES {
+        assert_eq!(basis.name(), name);
+        let revoked = Error::ArtifactRevoked { basis };
+        assert_eq!(revoked.name(), "ArtifactRevoked");
+        assert_eq!(revoked.basis_name(), Some(name));
+    }
+    let every = every_error_with_every_basis();
+    let names = every.iter().copied().map(Error::name);
+    let distinct = names.collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(distinct.len(), 20);
+    for error in every {
+        let has_basis = matches!(
+            error,
+            Error::ArtifactTrustDenied { .. } | Error::ArtifactRevoked { .. }
+        );
+        assert_eq!(error.basis_name().is_some(), has_basis, "{error:?}");
+    }
+}
+
+/// R7-F3: the quarantine mapping and the pass-failure classification.
+#[test]
+fn quarantine_for_keeps_the_accepted_mappings_and_revocation_quarantines() {
+    use PluginAvailabilityV1 as Availability;
+    for error in every_error_with_every_basis() {
+        let expected = match error {
+            Error::ArtifactRevoked { .. } => Some(Availability::Revoked),
+            Error::ComponentTrap { .. } => Some(Availability::Trapped),
+            Error::FuelExhausted
+            | Error::MemoryLimitExceeded
+            | Error::HostCallLimitExceeded
+            | Error::OutputLimitExceeded => Some(Availability::ResourceExhausted),
+            Error::WorkerCrashed => Some(Availability::Unavailable),
+            _ => None,
+        };
+        assert_eq!(quarantine_for(error), expected, "{error:?}");
+    }
+}
+
+#[test]
+fn a_failed_pass_is_classified_by_its_commit_contract() {
+    let host = PassFailureV1::Host;
+    let typed = Error::AtomicCommitFailed { failure: TYPED };
+    let untyped = Error::AtomicCommitFailed { failure: UNTYPED };
+    let rejected = Box::new(PipelineOutcomeV1::Rejected);
+    let not_admitted = RuntimeError::ScheduledPassNotAdmitted(rejected);
+    let unknown = RuntimeError::Store(CoreError::StorageOutcomeUnknown("lost".to_owned()));
+    let frozen = RuntimeError::Store(CoreError::ErasureAccessFrozen);
+    let crashed = RuntimeError::from(Error::WorkerCrashed);
+    assert_eq!(classify_pass_failure(&not_admitted), host(typed));
+    assert_eq!(classify_pass_failure(&unknown), PassFailureV1::InDoubt);
+    assert_eq!(classify_pass_failure(&frozen), host(untyped));
+    assert_eq!(classify_pass_failure(&crashed), host(Error::WorkerCrashed));
+    for unrelated in [
+        RuntimeError::PendingDriverStep,
+        RuntimeError::NoScheduledAdmissionInDoubt,
+    ] {
+        assert_eq!(classify_pass_failure(&unrelated), PassFailureV1::Unrelated);
+    }
+}
+
+/// R7-F6: the three class names.
+#[test]
+fn failure_classes_have_their_exact_names() {
+    assert_eq!(AUTHORITATIVE.name(), "Authoritative");
+    assert_eq!(OPERATIONAL.name(), "Operational");
+    assert_eq!(REJECTION.name(), "PreExecutionRejection");
 }
 
 #[test]

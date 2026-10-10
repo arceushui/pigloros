@@ -8,6 +8,7 @@
 
 mod contract;
 mod error;
+mod failure;
 mod negotiation;
 mod profile;
 
@@ -20,8 +21,9 @@ pub use contract::{
 };
 pub use error::{
     AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1, HostFailureClassV1,
-    TrapReproductionV1,
+    RevocationBasisV1, TrapReproductionV1, TrustDenialBasisV1,
 };
+pub use failure::{classify_pass_failure, quarantine_for, PassFailureV1};
 pub use negotiation::{
     negotiate_community_plugin_v1, CommunityPluginHostAbiErrorV1, CommunityPluginHostAbiV1,
     EffectiveExecutionLimitsV1, NegotiatedCommunityPluginV1, NegotiatedTransportErrorV1,
