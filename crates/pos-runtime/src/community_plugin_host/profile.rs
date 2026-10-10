@@ -12,12 +12,15 @@ use pos_crypto::plugin_execution::{DeterministicBudgetV1, WASM_PAGE_BYTES_V1};
 
 use crate::composition::PluginExecutionModeV1;
 
+use super::cbor;
 use super::error::{CommunityPluginHostErrorV1, ComponentTrapClassV1, TrapReproductionV1};
 
 /// The `wasmtime::Trap` code that is the authoritative `FuelExhausted`.
 const OUT_OF_FUEL_TRAP_CODE: &str = "OutOfFuel";
 /// The `wasmtime::Trap` code that is the operational watchdog stop.
 const INTERRUPT_TRAP_CODE: &str = "Interrupt";
+/// The domain of the execution profile digest: 35 ASCII bytes and a `0x00`.
+const PROFILE_DIGEST_DOMAIN: &[u8; 36] = b"PiglorOS.Plugin.ExecutionProfile.v1\0";
 
 /// A live Execution Mode that runs community Plugin Components.
 ///
@@ -83,6 +86,12 @@ pub enum CommunityPluginProfileErrorV1 {
     CeilingOutOfRange {
         /// The rejected member.
         limit: ExecutionLimitV1,
+    },
+    /// A pinned runtime feature text appears more than once.
+    #[error("community Plugin runtime repeats feature {index}")]
+    DuplicateFeature {
+        /// Position of the first repeat in the resolved features.
+        index: usize,
     },
     /// A pinned runtime trap code appears more than once.
     #[error("community Plugin trap table repeats code {index}")]
@@ -224,6 +233,15 @@ pub enum TrapOutcomeV1 {
 }
 
 impl TrapOutcomeV1 {
+    /// The outcome name the profile digest records (ADR-061 revision 7).
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Trap(class) => class.name(),
+            Self::FuelExhausted => "FuelExhausted",
+            Self::WatchdogStop => "OperationalWatchdogStop",
+        }
+    }
+
     /// The closed host error this outcome reports.
     ///
     /// A trap is `Unverified`: only conformance establishes reproduction.
@@ -318,7 +336,8 @@ impl PinnedComponentRuntimeV1 {
     /// row for `OutOfFuel`, `Interrupt` and every other pinned trap code.
     ///
     /// # Errors
-    /// Returns `DuplicateTrapCode` for the first repeated trap code, then
+    /// Returns `DuplicateFeature` for the first repeated feature text, then
+    /// `DuplicateTrapCode` for the first repeated trap code, then
     /// `MisclassifiedTrapCode` for the first code whose outcome breaks the
     /// ADR-061 table: `OutOfFuel` must yield `FuelExhausted`, `Interrupt`
     /// the watchdog stop, and every other code one trap class.
@@ -328,13 +347,15 @@ impl PinnedComponentRuntimeV1 {
         engine: PinnedEngineConfigV1,
         trap_table: Vec<TrapTableEntryV1>,
     ) -> Result<Self, CommunityPluginProfileErrorV1> {
-        let duplicate = first_duplicate(&trap_table)
+        let repeated_feature = first_repeat(resolved_features.iter().map(String::as_str))
+            .map(|index| CommunityPluginProfileErrorV1::DuplicateFeature { index });
+        let duplicate = first_repeat(trap_table.iter().map(|entry| entry.trap_code.as_str()))
             .map(|index| CommunityPluginProfileErrorV1::DuplicateTrapCode { index });
         let misclassified = trap_table
             .iter()
             .position(|entry| !entry.is_classified())
             .map(|index| CommunityPluginProfileErrorV1::MisclassifiedTrapCode { index });
-        if let Some(error) = duplicate.or(misclassified) {
+        if let Some(error) = repeated_feature.or(duplicate).or(misclassified) {
             return Err(error);
         }
         Ok(Self {
@@ -370,12 +391,13 @@ impl PinnedComponentRuntimeV1 {
     }
 }
 
-/// The position of the first trap code that an earlier row already names.
-fn first_duplicate(trap_table: &[TrapTableEntryV1]) -> Option<usize> {
+/// The position of the first text that an earlier one already equals.
+fn first_repeat<'a>(texts: impl Iterator<Item = &'a str>) -> Option<usize> {
     let mut seen = BTreeSet::new();
-    trap_table
-        .iter()
-        .position(|entry| !seen.insert(entry.trap_code.as_str()))
+    texts
+        .enumerate()
+        .find(|&(_, text)| !seen.insert(text))
+        .map(|(index, _)| index)
 }
 
 /// The host-owned community Plugin execution profile for one live mode.
@@ -437,4 +459,68 @@ impl CommunityPluginExecutionProfileV1 {
     pub const fn runtime(&self) -> Option<&PinnedComponentRuntimeV1> {
         self.runtime.as_ref()
     }
+
+    /// The execution profile digest, or `None` when no runtime is recorded.
+    ///
+    /// `BLAKE3(domain || u64be(len(body)) || body)`, with `domain` the 36
+    /// bytes `PiglorOS.Plugin.ExecutionProfile.v1\0` and `body` the canonical
+    /// CBOR of `[ceilings, runtime]` (ADR-061 revision 7 decision 7). The
+    /// features and the trap rows are sorted by their UTF-8 bytes first, so
+    /// the digest does not depend on the order a constructor recorded them,
+    /// and the mode is excluded, so Local and Air-Gapped profiles with equal
+    /// ceilings and runtime have equal digests.
+    #[must_use]
+    pub fn digest(&self) -> Option<[u8; 32]> {
+        self.runtime.as_ref().map(|runtime| {
+            let body = profile_body(self.ceilings.values(), runtime);
+            let length = cbor::length(body.len());
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(PROFILE_DIGEST_DOMAIN);
+            hasher.update(&length.to_be_bytes());
+            hasher.update(&body);
+            *hasher.finalize().as_bytes()
+        })
+    }
+}
+
+/// The canonical CBOR `[ceilings, runtime]` of the profile digest.
+fn profile_body(ceilings: CeilingValuesV1, runtime: &PinnedComponentRuntimeV1) -> Vec<u8> {
+    let mut out = Vec::new();
+    cbor::array(&mut out, 2);
+    cbor::array(&mut out, 5);
+    for member in [
+        ceilings.memory_bytes,
+        ceilings.fuel,
+        ceilings.host_calls,
+        ceilings.event_bytes,
+        ceilings.log_bytes,
+    ] {
+        cbor::unsigned(&mut out, member);
+    }
+    cbor::array(&mut out, 4);
+    cbor::text(&mut out, runtime.wasmtime_version());
+    let mut features: Vec<&str> = runtime
+        .resolved_features()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    features.sort_unstable();
+    cbor::array(&mut out, features.len());
+    for feature in features {
+        cbor::text(&mut out, feature);
+    }
+    let engine = runtime.engine();
+    cbor::array(&mut out, 3);
+    cbor::unsigned(&mut out, engine.max_wasm_stack);
+    cbor::boolean(&mut out, engine.consume_fuel);
+    cbor::boolean(&mut out, engine.epoch_interruption);
+    let mut rows: Vec<&TrapTableEntryV1> = runtime.trap_table().iter().collect();
+    rows.sort_unstable_by(|left, right| left.trap_code.cmp(&right.trap_code));
+    cbor::array(&mut out, rows.len());
+    for row in rows {
+        cbor::array(&mut out, 2);
+        cbor::text(&mut out, &row.trap_code);
+        cbor::text(&mut out, row.outcome.name());
+    }
+    out
 }

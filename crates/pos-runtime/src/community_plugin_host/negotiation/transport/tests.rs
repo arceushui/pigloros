@@ -5,7 +5,7 @@ use pos_crypto::plugin_execution::{
 use super::super::negotiate_community_plugin_v1;
 use super::*;
 use crate::community_plugin_host::profile::{
-    CommunityPluginCeilingsV1, PinnedComponentRuntimeV1, PinnedEngineConfigV1,
+    CeilingValuesV1, CommunityPluginCeilingsV1, PinnedComponentRuntimeV1, PinnedEngineConfigV1,
 };
 
 type Error = NegotiatedTransportErrorV1;
@@ -159,6 +159,40 @@ fn the_mode_must_match_the_worker_profile() {
 }
 
 #[test]
+fn the_profile_digest_must_be_the_worker_profile_digest() {
+    let record = negotiated();
+    let own = profile(CommunityPluginModeV1::Local).digest();
+    assert!(own.is_some());
+    assert_eq!(record.execution_profile_digest(), own);
+    assert_eq!(record.to_transport().execution_profile_digest, own);
+    assert_eq!(
+        rejected(|t| t.execution_profile_digest = None),
+        Some(Error::ProfileDigest)
+    );
+    let flipped = |t: &mut NegotiatedTransportV1| {
+        t.execution_profile_digest = own.map(|mut digest| {
+            digest[31] ^= 1;
+            digest
+        });
+    };
+    assert_eq!(rejected(flipped), Some(Error::ProfileDigest));
+    // The digest covers the ceilings: a record negotiated under other ceilings
+    // is not the worker's.
+    let values = CeilingValuesV1 {
+        memory_bytes: 2 * WASM_PAGE_BYTES_V1,
+        ..CommunityPluginCeilingsV1::V1.values()
+    };
+    let narrower = CommunityPluginCeilingsV1::new(values)
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(format!("{error:?}"))));
+    let other = CommunityPluginExecutionProfileV1::new(
+        CommunityPluginModeV1::Local,
+        narrower,
+        Some(runtime()),
+    );
+    assert_ne!(other.digest(), own);
+}
+
+#[test]
 fn limits_must_be_a_clamped_budget() {
     let ceilings = CommunityPluginCeilingsV1::V1.values();
     let wit = DeterministicBudgetV1::MAXIMA;
@@ -204,5 +238,9 @@ fn errors_have_stable_messages() {
     assert_eq!(
         Error::Runtime.to_string(),
         "community Plugin profile pins no runtime"
+    );
+    assert_eq!(
+        Error::ProfileDigest.to_string(),
+        "transported community Plugin profile digest differs from the profile"
     );
 }

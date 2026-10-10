@@ -19,7 +19,7 @@ use super::{
     COMMUNITY_PLUGIN_ABI_MAJOR_V1,
 };
 use crate::community_plugin_host::profile::{
-    CommunityPluginExecutionProfileV1, CommunityPluginModeV1,
+    CommunityPluginExecutionProfileV1, CommunityPluginModeV1, PinnedComponentRuntimeV1,
 };
 
 /// PMF1 V1 bound on capability descriptors (field 14).
@@ -50,6 +50,8 @@ pub struct NegotiatedTransportV1 {
     pub mode: CommunityPluginModeV1,
     /// The effective limits fixed at negotiation.
     pub limits: DeterministicBudgetV1,
+    /// The digest of the negotiating profile, if it recorded a runtime.
+    pub execution_profile_digest: Option<[u8; 32]>,
 }
 
 /// Why a transported record was rejected.
@@ -83,6 +85,9 @@ pub enum NegotiatedTransportErrorV1 {
     /// The worker's profile records no pinned runtime.
     #[error("community Plugin profile pins no runtime")]
     Runtime,
+    /// The profile digest differs from the digest of the worker's profile.
+    #[error("transported community Plugin profile digest differs from the profile")]
+    ProfileDigest,
 }
 
 type Checked = Result<(), NegotiatedTransportErrorV1>;
@@ -103,6 +108,7 @@ impl NegotiatedCommunityPluginV1 {
             not_granted_capabilities: self.not_granted_capabilities.clone(),
             mode: self.mode,
             limits: self.limits.values(),
+            execution_profile_digest: self.execution_profile_digest,
         }
     }
 
@@ -119,7 +125,8 @@ impl NegotiatedCommunityPluginV1 {
     /// # Errors
     /// Returns the first failed check, in this order: `World`, `PluginId`,
     /// `Abi` (major 0 and the highest minor common to the declared range and
-    /// `host`), `Feature`, `Capabilities`, `Mode`, `Limits` and `Runtime`.
+    /// `host`), `Feature`, `Capabilities`, `Mode`, `Limits`, `Runtime` and
+    /// `ProfileDigest` (the digest equals the digest of `profile`).
     pub fn from_transport(
         transport: NegotiatedTransportV1,
         host: &CommunityPluginHostAbiV1,
@@ -150,10 +157,7 @@ impl NegotiatedCommunityPluginV1 {
             limits_fit(transport.limits, profile),
             NegotiatedTransportErrorV1::Limits,
         )?;
-        let runtime = profile
-            .runtime()
-            .cloned()
-            .ok_or(NegotiatedTransportErrorV1::Runtime)?;
+        let runtime = profile_runtime(&transport, profile)?;
         Ok(Self {
             world: COMMUNITY_PLUGIN_WORLD_V1,
             plugin_id: transport.plugin_id,
@@ -168,8 +172,25 @@ impl NegotiatedCommunityPluginV1 {
                 limits: transport.limits,
             },
             runtime: Some(runtime),
+            execution_profile_digest: transport.execution_profile_digest,
         })
     }
+}
+
+/// The profile's pinned runtime, once the transported digest is the profile's.
+fn profile_runtime(
+    transport: &NegotiatedTransportV1,
+    profile: &CommunityPluginExecutionProfileV1,
+) -> Result<PinnedComponentRuntimeV1, NegotiatedTransportErrorV1> {
+    let runtime = profile
+        .runtime()
+        .cloned()
+        .ok_or(NegotiatedTransportErrorV1::Runtime)?;
+    check(
+        transport.execution_profile_digest == profile.digest(),
+        NegotiatedTransportErrorV1::ProfileDigest,
+    )?;
+    Ok(runtime)
 }
 
 const fn check(valid: bool, error: NegotiatedTransportErrorV1) -> Checked {

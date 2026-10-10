@@ -5,8 +5,8 @@
 use std::sync::atomic::AtomicU64;
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
-use pos_plugin_supervisor::test_support::{negotiated_with, ok};
-use pos_runtime::community_plugin_host::HostInputs;
+use pos_plugin_supervisor::test_support::{negotiated_under, ok};
+use pos_runtime::community_plugin_host::{CeilingValuesV1, HostInputs};
 
 use super::*;
 
@@ -17,8 +17,32 @@ const PLUGIN_ID: &str = "pigloros.compatibility-prototype";
 
 type Error = CommunityPluginHostErrorV1;
 
+const LOCAL: CommunityPluginModeV1 = CommunityPluginModeV1::Local;
+const AIR_GAPPED: CommunityPluginModeV1 = CommunityPluginModeV1::AirGapped;
+
+/// The profile a worker of `mode` builds for itself.
+fn profile(
+    mode: CommunityPluginModeV1,
+    ceilings: CommunityPluginCeilingsV1,
+) -> CommunityPluginExecutionProfileV1 {
+    CommunityPluginExecutionProfileV1::new(mode, ceilings, Some(ok(pinned_runtime())))
+}
+
 fn request(call: WorkerCallV1) -> WorkerRequestV1 {
-    let negotiated = negotiated_with(PLUGIN_ID, DeterministicBudgetV1::MAXIMA, Vec::new());
+    request_in(call, LOCAL)
+}
+
+/// A request whose record the supervisor negotiated for `mode`.
+fn request_in(call: WorkerCallV1, mode: CommunityPluginModeV1) -> WorkerRequestV1 {
+    request_under(call, &profile(mode, CommunityPluginCeilingsV1::V1))
+}
+
+fn request_under(
+    call: WorkerCallV1,
+    profile: &CommunityPluginExecutionProfileV1,
+) -> WorkerRequestV1 {
+    let budget = DeterministicBudgetV1::MAXIMA;
+    let negotiated = negotiated_under(PLUGIN_ID, budget, Vec::new(), profile);
     WorkerRequestV1 {
         component: RUST_GUEST.to_vec(),
         negotiation: negotiated.to_transport(),
@@ -38,24 +62,65 @@ fn host() -> ComponentHost {
 fn a_rejected_transport_gets_no_reply() {
     let mut foreign = request(WorkerCallV1::Describe);
     foreign.negotiation.world.push('x');
-    assert_eq!(run(&host(), foreign, EPOCH_TICK), None);
+    assert_eq!(run(&host(), foreign, EPOCH_TICK, LOCAL), None);
 }
 
+/// R7-P3: a record is served by the worker of its own mode and by no other.
 #[test]
-fn a_record_for_another_mode_gets_no_reply() {
-    let mut air_gapped = request(WorkerCallV1::Describe);
-    air_gapped.negotiation.mode = CommunityPluginModeV1::AirGapped;
-    assert_eq!(run(&host(), air_gapped, EPOCH_TICK), None);
-    // The same record is served once it is the worker's own mode.
-    let local = request(WorkerCallV1::Describe);
-    assert!(run(&host(), local, EPOCH_TICK).is_some());
+fn a_record_is_served_only_by_the_worker_of_its_mode() {
+    let host = host();
+    for (record, worker) in [(AIR_GAPPED, LOCAL), (LOCAL, AIR_GAPPED)] {
+        let other = request_in(WorkerCallV1::Describe, record);
+        assert_eq!(run(&host, other, EPOCH_TICK, worker), None);
+    }
+    for mode in [LOCAL, AIR_GAPPED] {
+        let own = request_in(WorkerCallV1::Describe, mode);
+        assert!(run(&host, own, EPOCH_TICK, mode).is_some());
+    }
+}
+
+/// R7-P5: a transported digest that is not the worker's own gets no reply.
+#[test]
+fn a_record_with_a_foreign_profile_digest_gets_no_reply() {
+    let host = host();
+    let own = request(WorkerCallV1::Describe);
+    let digest = own.negotiation.execution_profile_digest;
+    assert!(digest.is_some());
+    let mut flipped = own.clone();
+    flipped.negotiation.execution_profile_digest = digest.map(|mut digest| {
+        digest[0] ^= 1;
+        digest
+    });
+    assert_eq!(run(&host, flipped, EPOCH_TICK, LOCAL), None);
+    let mut missing = own.clone();
+    missing.negotiation.execution_profile_digest = None;
+    assert_eq!(run(&host, missing, EPOCH_TICK, LOCAL), None);
+    assert!(run(&host, own, EPOCH_TICK, LOCAL).is_some());
+}
+
+/// R7-P8: ceilings other than V1 change the digest, so the worker, which
+/// rebuilds the V1 ceilings, gets no reply.
+#[test]
+fn a_record_negotiated_under_other_ceilings_gets_no_reply() {
+    let values = CeilingValuesV1 {
+        memory_bytes: 512 * 65_536,
+        ..CommunityPluginCeilingsV1::V1.values()
+    };
+    let narrower = ok(CommunityPluginCeilingsV1::new(values));
+    let host_profile = profile(LOCAL, narrower);
+    let own = profile(LOCAL, CommunityPluginCeilingsV1::V1);
+    assert_ne!(host_profile.digest(), own.digest());
+    let request = request_under(WorkerCallV1::Describe, &host_profile);
+    let transported = request.negotiation.execution_profile_digest;
+    assert_eq!(transported, host_profile.digest());
+    assert_eq!(run(&host(), request, EPOCH_TICK, LOCAL), None);
 }
 
 #[test]
 fn an_elapsed_watchdog_stops_the_guest_with_the_operational_error() {
     let mut elapsed = request(WorkerCallV1::Describe);
     elapsed.watchdog_millis = 0;
-    let outcome = run(&host(), elapsed, EPOCH_TICK);
+    let outcome = run(&host(), elapsed, EPOCH_TICK, LOCAL);
     assert_eq!(outcome, Some(Err(Error::OperationalWatchdogStop)));
 }
 
