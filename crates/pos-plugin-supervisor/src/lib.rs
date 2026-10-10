@@ -41,6 +41,9 @@
 //! The [`CommunityMemberV1`] wraps a Driver's handle for pos-runtime's `CommunityPluginHostV1`,
 //! which sequences each host pass (#584).
 //!
+//! [`CommunityPluginSubjectOutcomeV1`] is the stable per-Plugin outcome record of a host pass
+//! for the #194 subject adapter, which owns the EAI1/EAO1 wire code (#585). See the README.
+//!
 //! Launching a worker has one process-wide effect: see
 //! [`CommunityPluginSupervisorV1`].
 //!
@@ -54,6 +57,7 @@ pub mod frame;
 pub mod ipc;
 pub mod launch;
 mod member;
+mod outcome;
 pub mod supervisor;
 pub mod worker_process;
 
@@ -84,6 +88,8 @@ pub use launch::{
     WorkerProgramV1, WorkerResourceCeilingsV1, FORWARDED_ENVIRONMENT, RUNTIME_ENVIRONMENT,
 };
 pub use member::CommunityMemberV1;
+pub use outcome::{CommunityPluginSubjectOutcomeV1, CommunityPluginSubjectResultV1};
+pub use pos_plugin_release::ContentValidationV1;
 pub use supervisor::{CommunityPluginSupervisorV1, MAX_WORKER_WATCHDOG};
 pub use worker_process::{
     open_descriptors, prepare_worker_process, read_request, write_response, WorkerProcessErrorV1,
