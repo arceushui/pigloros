@@ -1,10 +1,13 @@
 //! Crate-internal vectors of the `SQLite` Plugin trust policy registry (slice #569): T1-T4, E5,
-//! F3, the `SQLite` clauses of E2, and the partial-floor vector of H1. They write raw SQL against
-//! the adapter's tables and drive the durability fault hooks of the parent module.
+//! F3, the `SQLite` clauses of E2, and the partial-floor vector of H1; and the in-crate vectors of
+//! the read-only current-release evaluation (ADR-103 revision 5, slice #580): the `SQLite` rows of
+//! EV2 and EV5, EV9, `EV9b`, and EV10 to EV14. They write raw SQL against the adapter's tables and
+//! drive the durability fault hooks of the parent module.
 // The gate below is also what `scripts/check_plugin_trust_registry_impls.py` reads to treat this
 // file as test code, so it is not redundant.
 #![cfg(any(test, feature = "test-support"))]
 
+use std::cell::RefCell;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc,
@@ -17,14 +20,14 @@ use pos_core::{
 };
 use rusqlite::{functions::FunctionFlags, limits::Limit, Connection};
 
-use super::seam::{Step, FAULT, LEVEL_AT_COMMIT, RESTORE_PROBE};
+use super::seam::{Step, FAULT, LEVEL_AT_COMMIT, RESTORE_PROBE, SNAPSHOT_PROBE};
 use crate::plugin_trust_registry::{
-    PluginTrustCommitOutcomeV1, PluginTrustPolicyRegistryErrorV1 as Error,
-    PluginTrustPolicyRegistryV1, ProvisionOutcomeV1,
+    CurrentReleaseEvaluationV1, PluginTrustCommitOutcomeV1,
+    PluginTrustPolicyRegistryErrorV1 as Error, PluginTrustPolicyRegistryV1, ProvisionOutcomeV1,
 };
 use crate::plugin_trust_registry_fixtures::{
     activation, release_one, release_three, release_two, Backend, Env, Gate, Guard, Harness,
-    TestResult,
+    ManifestSpec, Material, TestResult,
 };
 use crate::sqlite::SqliteStore;
 
@@ -1030,5 +1033,457 @@ fn a_failing_schema_creation_is_storage_failed_and_leaves_no_tables() -> TestRes
         store.retained_policy_state("scope"),
         Err(Error::MissingState)
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ADR-103 revision 5: the read-only current-release evaluation
+// ---------------------------------------------------------------------------
+
+/// A harness with `release_one` active under the genesis policy at UTC second 50 and Tick 5.
+fn admitted() -> TestResult<H> {
+    let mut h = Harness::<SqliteStore>::open()?;
+    let genesis = h.env.genesis()?;
+    h.admit(&genesis, &release_one(), 1)??;
+    Ok(h)
+}
+
+/// Evaluate on `store`, which may be another handle on the harness's file.
+fn evaluate_on(
+    store: &SqliteStore,
+    h: &H,
+    material: &Material,
+    manifest: &ManifestSpec,
+) -> TestResult<Result<CurrentReleaseEvaluationV1, Error>> {
+    Ok(store.evaluate_current_release(
+        &h.env.anchor,
+        &material.tps1,
+        &material.evidence,
+        &manifest.projection()?,
+        material.trusted()?,
+        material.tick,
+    ))
+}
+
+/// An anchor that differs from the harness anchor in one field.
+fn changed_anchor(h: &H) -> TestResult<pos_conformance::PluginTrustPolicyAnchorV1> {
+    let anchors = h.env.anchors_with_one_changed_field()?;
+    anchors.into_iter().next().ok_or_else(|| "no anchor".into())
+}
+
+/// Evaluate with `anchor`, garbage TPS1 bytes, an unauthorized release, and the stale evidence.
+fn evaluate_garbled(
+    h: &H,
+    anchor: &pos_conformance::PluginTrustPolicyAnchorV1,
+    stale: &Material,
+) -> TestResult<Result<CurrentReleaseEvaluationV1, Error>> {
+    let bad = ManifestSpec::new("plugin-z", 0x51, 0x51, None);
+    Ok(h.store.evaluate_current_release(
+        anchor,
+        b"garbage",
+        &stale.evidence,
+        &bad.projection()?,
+        stale.trusted()?,
+        stale.tick,
+    ))
+}
+
+/// A poisoned handle refuses an evaluation before the anchor, the TPS1 bytes, the release, and
+/// the clock are looked at.
+fn assert_poisoned_before_anything(h: &H) -> TestResult {
+    let stale = h.same_policy(40, 5)?;
+    let anchor = changed_anchor(h)?;
+    let result = evaluate_garbled(h, &anchor, &stale)?;
+    assert_eq!(result, Err(Error::StorePoisoned));
+    Ok(())
+}
+
+/// Installs the evaluation snapshot probe and clears it when dropped.
+struct Probe;
+
+impl Probe {
+    fn set(probe: impl Fn() + 'static) -> Self {
+        SNAPSHOT_PROBE.with(|slot| *slot.borrow_mut() = Some(Box::new(probe)));
+        Self
+    }
+}
+
+impl Drop for Probe {
+    fn drop(&mut self) {
+        SNAPSHOT_PROBE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+// EV2, step 2: a schema difference, a partial table set, and an undecodable scope row are
+// `CorruptState` before the anchor is compared, and the read transaction is rolled back.
+#[test]
+fn an_evaluation_reports_schema_and_scope_row_corruption_before_the_anchor() -> TestResult {
+    let one = release_one();
+    let cases = [
+        "DROP TABLE plugin_trust_decisions",
+        "DROP TABLE plugin_trust_ledger",
+        "ALTER TABLE plugin_trust_scopes ADD COLUMN extra TEXT",
+        "DROP TRIGGER plugin_trust_ledger_no_update",
+        "UPDATE plugin_trust_scopes SET prv1_epoch = NULL",
+        "UPDATE plugin_trust_scopes SET ptr1_digest = NULL",
+        "UPDATE plugin_trust_scopes SET tps1_digest = zeroblob(32)",
+        "UPDATE plugin_trust_scopes SET anchor_operator_role = 'other'",
+        "PRAGMA ignore_check_constraints = ON;
+         UPDATE plugin_trust_scopes SET anchor_operator_key = zeroblob(31);
+         PRAGMA ignore_check_constraints = OFF;",
+    ];
+    for sql in cases {
+        let h = admitted()?;
+        raw(&h, sql)?;
+        let genesis = h.env.genesis()?;
+        // Garbage TPS1 bytes, an unauthorized release, and a stale clock fail later steps too.
+        let stale = h.same_policy(40, 5)?;
+        let bad = ManifestSpec::new("plugin-z", 0x51, 0x51, None);
+        for anchor in h.env.anchors_with_one_changed_field()? {
+            let result = evaluate_garbled(&h, &anchor, &stale)?;
+            assert_eq!(result, Err(Error::CorruptState), "{sql}");
+            assert!(h.store.conn.is_autocommit(), "{sql}");
+        }
+        let corrupt = h.evaluate_raw(b"garbage", &stale, &bad, 40, 5)?;
+        assert_eq!(corrupt, Err(Error::CorruptState), "{sql}");
+        let evaluated = h.evaluate(&genesis, &one)?;
+        assert_eq!(evaluated, Err(Error::CorruptState), "{sql}");
+    }
+    Ok(())
+}
+
+// EV2, step 2 and 3: one floor present and the other absent decodes (each pair is whole) and is
+// `CorruptState` after the anchor comparison and before the UTC check.
+#[test]
+fn a_single_absent_floor_is_corrupt_after_the_anchor_and_before_the_clock() -> TestResult {
+    let one = release_one();
+    for sql in [
+        "UPDATE plugin_trust_scopes SET prv1_epoch = NULL, prv1_digest = NULL",
+        "UPDATE plugin_trust_scopes SET ptr1_version = NULL, ptr1_digest = NULL",
+    ] {
+        let h = admitted()?;
+        raw(&h, sql)?;
+        let genesis = h.env.genesis()?;
+        for anchor in h.env.anchors_with_one_changed_field()? {
+            let result = h.store.evaluate_current_release(
+                &anchor,
+                &genesis.tps1,
+                &genesis.evidence,
+                &one.projection()?,
+                genesis.trusted()?,
+                genesis.tick,
+            );
+            assert_eq!(result, Err(Error::AnchorMismatch), "{sql}");
+        }
+        let stale = h.same_policy(40, 5)?;
+        assert_eq!(h.evaluate(&stale, &one)?, Err(Error::CorruptState), "{sql}");
+    }
+    Ok(())
+}
+
+// EV2, step 2: an unprovisioned store is `MissingState`, and EV13: a failing work ends with
+// `ROLLBACK`, returns the work's error, and leaves the connection in autocommit.
+#[test]
+fn a_failing_evaluation_rolls_back_and_returns_the_works_error() -> TestResult {
+    let (store, _guard) = SqliteStore::build(Gate::open(), None)?;
+    let env = Env::new("scope")?;
+    let genesis = env.genesis()?;
+    let result = store.evaluate_current_release(
+        &env.anchor,
+        &genesis.tps1,
+        &genesis.evidence,
+        &release_one().projection()?,
+        genesis.trusted()?,
+        genesis.tick,
+    );
+    assert_eq!(result, Err(Error::MissingState));
+    assert!(store.conn.is_autocommit());
+
+    let h = admitted()?;
+    let one = release_one();
+    let stale = h.same_policy(49, 5)?;
+    assert_eq!(h.evaluate(&stale, &one)?, Err(Error::TrustedTimeRegressed));
+    assert!(h.store.conn.is_autocommit());
+    assert!(h.evaluate(&h.env.genesis()?, &one)?.is_ok());
+    Ok(())
+}
+
+// EV2, faults: a failing read statement and a failing schema probe are `StorageFailed` and end
+// through `ROLLBACK`; `StorageBusy` fires at the first read of a locked rollback-journal store.
+#[test]
+fn a_failing_read_statement_or_schema_probe_fails_an_evaluation_cleanly() -> TestResult {
+    let h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let one = release_one();
+    h.store.conn.set_limit(Limit::SQLITE_LIMIT_COLUMN, 12)?;
+    assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::StorageFailed));
+    assert!(h.store.conn.is_autocommit());
+    h.store.conn.set_limit(Limit::SQLITE_LIMIT_COLUMN, 2000)?;
+    h.store
+        .conn
+        .set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 6)?;
+    assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::StorageFailed));
+    assert!(h.store.conn.is_autocommit());
+    h.store
+        .conn
+        .set_limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER, 32_766)?;
+    assert!(h.evaluate(&genesis, &one)?.is_ok());
+    Ok(())
+}
+
+#[test]
+fn a_locked_rollback_journal_store_is_busy_at_the_first_read_and_needs_no_wal() -> TestResult {
+    let h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let one = release_one();
+    let mode: String = h
+        .store
+        .conn
+        .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))?;
+    assert_eq!(mode, "delete");
+    h.store.conn.busy_timeout(Duration::ZERO)?;
+    let holder = Connection::open(path_of(&h.guard)?)?;
+    holder.execute_batch("BEGIN EXCLUSIVE")?;
+    assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::StorageBusy));
+    assert!(h.store.conn.is_autocommit());
+    holder.execute_batch("ROLLBACK")?;
+    // The read path does not require WAL: the same call now succeeds on the DELETE-mode store.
+    assert!(h.evaluate(&genesis, &one)?.is_ok());
+    Ok(())
+}
+
+// EV5, corruption rows with the pointer equal to the authorization.
+#[test]
+fn an_evaluation_with_a_missing_or_inconsistent_decision_is_corrupt_state() -> TestResult {
+    let one = release_one();
+    let cases = [
+        // (a) The pointer's decision is absent.
+        "DELETE FROM plugin_trust_decisions",
+        // (b) The decision has another Plugin ID than the pointer.
+        "UPDATE plugin_trust_decisions SET plugin_id = 'plugin-b'",
+        // (c) Only the decision's release digest changed.
+        "UPDATE plugin_trust_decisions SET release_digest = zeroblob(32)",
+        // (d) The pointer and the decision agree on a release digest the authorization lacks.
+        "UPDATE plugin_trust_decisions SET release_digest = zeroblob(32);
+         UPDATE plugin_trust_active SET release_digest = zeroblob(32);",
+        // (e) Only the pointer's release digest is wrong.
+        "UPDATE plugin_trust_active SET release_digest = zeroblob(32)",
+    ];
+    for sql in cases {
+        let h = admitted()?;
+        raw(&h, sql)?;
+        let genesis = h.env.genesis()?;
+        assert_eq!(
+            h.evaluate(&genesis, &one)?,
+            Err(Error::CorruptState),
+            "{sql}"
+        );
+        assert!(h.store.conn.is_autocommit(), "{sql}");
+    }
+    Ok(())
+}
+
+// EV9: a read-only handle evaluates, and (like any handle) is poisoned by a stuck `ROLLBACK`.
+#[test]
+fn a_read_only_handle_evaluates_and_is_poisoned_by_a_stuck_rollback() -> TestResult {
+    let h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let one = release_one();
+    let read_only = SqliteStore::open_read_only(&path_of(&h.guard)?)?;
+    let entry = level(&read_only)?;
+    let evaluation = evaluate_on(&read_only, &h, &genesis, &one)??;
+    assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest());
+    assert_eq!(level(&read_only)?, entry);
+
+    let stale = h.same_policy(40, 5)?;
+    let stuck = Injected::step(Step::Rollback);
+    assert_eq!(
+        evaluate_on(&read_only, &h, &stale, &one)?,
+        Err(Error::TrustedTimeRegressed)
+    );
+    drop(stuck);
+    assert!(!read_only.conn.is_autocommit());
+    assert_eq!(
+        evaluate_on(&read_only, &h, &genesis, &one)?,
+        Err(Error::StorePoisoned)
+    );
+    // The flag is per handle: the writer handle is unaffected.
+    assert!(h.evaluate(&genesis, &one)?.is_ok());
+    Ok(())
+}
+
+// EV9b: a read-write handle poisoned by a restore failure refuses an evaluation.
+#[test]
+fn a_handle_poisoned_by_a_restore_failure_refuses_an_evaluation() -> TestResult {
+    let mut h = Harness::<SqliteStore>::open()?;
+    let genesis = h.env.genesis()?;
+    let one = release_one();
+    let fault = Injected::step(Step::Restore);
+    assert_eq!(
+        h.admit(&genesis, &one, 1)?,
+        Err(Error::StorageIndeterminate)
+    );
+    drop(fault);
+    assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::StorePoisoned));
+    assert_poisoned_before_anything(&h)?;
+    Ok(())
+}
+
+// EV10: the evaluation reads one committed snapshot. A second handle commits a successor release
+// after the evaluation's schema check; the evaluation does not observe it.
+#[test]
+fn an_evaluation_reads_one_snapshot_while_a_second_handle_commits() -> TestResult {
+    let h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let (one, two) = (release_one(), release_two());
+    let writer = RefCell::new(open_gated(&path_of(&h.guard)?)?);
+    let env = Env::new("scope")?;
+    let material = env.genesis()?;
+    let projection = two.projection()?;
+    let timeline = h.timeline;
+    let committed = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&committed);
+    let probe = Probe::set(move || {
+        let admitted = material.trusted().is_ok_and(|utc| {
+            let receipt = writer.borrow_mut().admit(
+                &env.anchor,
+                &material.tps1,
+                &material.evidence,
+                &projection,
+                utc,
+                material.tick,
+                activation(timeline, 2),
+            );
+            receipt.is_ok()
+        });
+        flag.store(admitted, Ordering::SeqCst);
+    });
+    let evaluation = h.evaluate(&genesis, &one)??;
+    drop(probe);
+    assert!(committed.load(Ordering::SeqCst));
+    assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest());
+    // The commit is visible to the next call, which finds the predecessor no longer active.
+    // Only registry calls follow: the first handle's Event reads would refuse after another
+    // handle wrote (the erasure inventory version moved).
+    assert_eq!(h.active("plugin-a")?.pmf1_digest(), two.pmf1_digest());
+    assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::ReleaseNotActive));
+    assert!(h.evaluate(&genesis, &two)?.is_ok());
+    Ok(())
+}
+
+// EV10, schema: the schema check is inside the snapshot. A second handle drops a table the
+// evaluation still has to read, after the schema check; the evaluation does not observe it.
+#[test]
+fn an_evaluation_validates_the_schema_inside_its_snapshot() -> TestResult {
+    let h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let one = release_one();
+    let path = path_of(&h.guard)?;
+    let dropped = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&dropped);
+    let probe = Probe::set(move || {
+        let result = Connection::open(&path)
+            .and_then(|other| other.execute_batch("DROP TABLE plugin_trust_decisions"));
+        flag.store(result.is_ok(), Ordering::SeqCst);
+    });
+    let evaluation = h.evaluate(&genesis, &one)??;
+    drop(probe);
+    assert!(dropped.load(Ordering::SeqCst));
+    assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest());
+    // The next call sees the partial table set.
+    assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::CorruptState));
+    Ok(())
+}
+
+// EV12: inside a caller's transaction or savepoint the nested `BEGIN` fails with `StorageFailed`,
+// no `ROLLBACK` is issued, the caller's work survives, and the handle is not poisoned.
+#[test]
+fn an_evaluation_inside_a_callers_transaction_fails_and_leaves_it_untouched() -> TestResult {
+    let h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let one = release_one();
+    for (open, close) in [
+        ("BEGIN", "COMMIT"),
+        ("SAVEPOINT outer_scope", "RELEASE outer_scope"),
+    ] {
+        raw(&h, open)?;
+        raw(&h, "CREATE TABLE zz_marker (x INTEGER)")?;
+        assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::StorageFailed));
+        assert!(!h.store.conn.is_autocommit());
+        let rows: i64 = h
+            .store
+            .conn
+            .query_row("SELECT count(*) FROM zz_marker", [], |row| row.get(0))?;
+        assert_eq!(rows, 0);
+        raw(&h, close)?;
+        assert!(h.store.conn.is_autocommit());
+        raw(&h, "DROP TABLE zz_marker")?;
+        assert!(h.evaluate(&genesis, &one)?.is_ok());
+    }
+    Ok(())
+}
+
+// EV13: a `COMMIT` that succeeds but reports failure is `StorageFailed`; the `ROLLBACK` that
+// follows is a no-op, the connection ends in autocommit, and the handle keeps working.
+#[test]
+fn a_lost_commit_acknowledgement_fails_an_evaluation_without_poisoning() -> TestResult {
+    let h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let one = release_one();
+    let lost = Injected::step(Step::LostAcknowledgement);
+    assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::StorageFailed));
+    drop(lost);
+    assert!(h.store.conn.is_autocommit());
+    assert!(h.evaluate(&genesis, &one)?.is_ok());
+    Ok(())
+}
+
+// EV14: a `ROLLBACK` that never runs (the seam holds one fault, so no `COMMIT` failure can be
+// combined) leaves the work's own transaction open: the call returns the work's error and every
+// later call returns `StorePoisoned` until the store is reopened.
+#[test]
+fn a_stuck_rollback_after_a_failed_evaluation_poisons_every_later_call() -> TestResult {
+    let mut h = admitted()?;
+    let genesis = h.env.genesis()?;
+    let one = release_one();
+    let stale = h.same_policy(49, 5)?;
+    let stuck = Injected::step(Step::Rollback);
+    assert_eq!(h.evaluate(&stale, &one)?, Err(Error::TrustedTimeRegressed));
+    drop(stuck);
+    // The connection is still in the evaluation's transaction, and the next call is refused
+    // before it could try a nested `BEGIN`.
+    assert!(!h.store.conn.is_autocommit());
+    assert_eq!(h.evaluate(&genesis, &one)?, Err(Error::StorePoisoned));
+    assert_poisoned_before_anything(&h)?;
+    assert_eq!(h.advance(&genesis)?, Err(Error::StorePoisoned));
+    assert_eq!(h.admit(&genesis, &one, 2)?, Err(Error::StorePoisoned));
+    let store = &h.store;
+    assert_eq!(
+        store.retained_policy_state("scope"),
+        Err(Error::StorePoisoned)
+    );
+    assert_eq!(store.ledger("scope"), Err(Error::StorePoisoned));
+    assert_eq!(
+        store.active_release("scope", "plugin-a"),
+        Err(Error::StorePoisoned)
+    );
+
+    // Reopening restores service; nothing was written.
+    let path = path_of(&h.guard)?;
+    let Harness {
+        store, env, guard, ..
+    } = h;
+    drop(store);
+    let reopened = open_gated(&path)?;
+    let evaluation = reopened.evaluate_current_release(
+        &env.anchor,
+        &genesis.tps1,
+        &genesis.evidence,
+        &one.projection()?,
+        genesis.trusted()?,
+        genesis.tick,
+    )?;
+    assert_eq!(evaluation.pmf1_digest(), one.pmf1_digest());
+    drop(guard);
     Ok(())
 }

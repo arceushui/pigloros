@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Adversarial tests for the Plugin trust policy registry checker."""
+"""Adversarial tests for the Plugin trust policy registry checker (ADR-103 revisions 4 and 5)."""
 
 from __future__ import annotations
 
@@ -55,7 +55,17 @@ ALLOWED = {
         + 'pub const NOTE: &str = "signature is_live";\n'
         + "pub enum PluginTrustPolicyRegistryErrorV1 {\n"
         + '    #[error("a, b")]\n    MissingState,\n    Bridge(#[from] Inner),\n}\n'
-        + "pub use types::{ActiveReleaseV1, RetainedPolicyStateV1};\n"
+        + "pub use types::{ActiveReleaseV1, CurrentReleaseEvaluationV1, RetainedPolicyStateV1};\n"
+        # ADR-103 revision 5 (EU1): the type, its accessors, and the two variants pass the lint;
+        # the trait method carries no `pub`, so the name lint does not see it.
+        + "pub struct CurrentReleaseEvaluationV1 { pub(crate) scope: u8 }\n"
+        + "impl CurrentReleaseEvaluationV1 {\n"
+        + "    pub fn scope(&self) -> u8 { 1 }\n"
+        + "    pub const fn pmf1_digest(&self) -> u8 { 2 }\n"
+        + "    pub const fn ptr1_floor(&self) -> u8 { 3 }\n}\n"
+        + "pub enum Revision5Error { PolicyNotAdvanced, ReleaseNotActive }\n"
+        + "impl PluginTrustPolicyRegistryV1 for Other {\n"
+        + "    fn evaluate_current_release(&self) {}\n}\n"
         + "/// Never claims `signature` validity or is_live authority.\n"
     ),
     ADAPTER_FILE: (
@@ -90,6 +100,10 @@ ALLOWED = {
     "crates/pos-state/src/path_test_only.rs": IMPORT + "#[cfg(test)]\nmod tests { fn t(s: &mut S) { MemoryStore::admit(s, a); } }\n",
     "crates/pos-state/src/uses.rs": "fn f(_: &mut dyn PluginTrustPolicyRegistryV1) {}\n",
     "crates/pos-state/src/imports.rs": IMPORT,
+    # The read-only method has no call-site rule: any file that names the port may call it.
+    "crates/pos-state/src/evaluates.rs": (
+        IMPORT + "fn f(s: &S) { s.evaluate_current_release(a, b); }\n"
+    ),
     "crates/pos-state/src/unaware.rs": "fn f(x: &mut X) { x.admit(a); x.rollback(a); x.provision(a); }\n",
     "crates/pos-state/src/defines.rs": (
         "struct ActiveReleaseV1 { a: u8 }\nimpl ActiveReleaseV1 { }\n"
@@ -128,6 +142,12 @@ REJECTED = {
     "crates/pos-state/src/receipt.rs": "fn f() -> R { AdmittedPluginReleaseReceiptV1 { a: 1 } }\n",
     "crates/pos-state/src/rollback_receipt.rs": "fn f() { let _ = PluginRollbackReceiptV1 { a: 1 }; }\n",
     "crates/pos-state/src/ledger.rs": "fn f() { let _ = PluginTrustLedgerRowV1 { a: 1 }; }\n",
+    "crates/pos-state/src/evaluation.rs": (
+        "fn f() { let _ = CurrentReleaseEvaluationV1 { a: 1 }; }\n"
+    ),
+    "crates/pos-plugin-publisher/tests/support/ungated_evaluation.rs": (
+        "fn f() { let _ = CurrentReleaseEvaluationV1 { a: 1 }; }\n"
+    ),
     "crates/pos-state/src/anchor.rs": ANCHOR,
     "crates/pos-state/src/provision.rs": IMPORT + "fn f(s: &mut S) { s.provision(a, b); }\n",
     "crates/pos-state/src/advance.rs": IMPORT + "fn f(s: &mut S) { s.advance_policy(a); }\n",
@@ -195,6 +215,12 @@ FORBIDDEN_NAMES = {
     "enum_variant_attr": 'pub enum K {\n    #[error("a, b")]\n    IsAdmitted(u8),\n}\n',
     "enum_variant_struct": "pub enum K { A { x: u8 }, VerifiedSignature { y: u8 } }\n",
     "field": "pub struct S { pub signature: u8 }\n",
+    "evaluation_is_live_release": "impl R { pub fn is_live_release(&self) -> bool { true } }\n",
+    "evaluation_live_authority_of": "pub fn live_authority_of() {}\n",
+    "evaluation_signature_accessor": (
+        "impl CurrentReleaseEvaluationV1 { pub fn signature_ok(&self) -> bool { true } }\n"
+    ),
+    "evaluation_snake_signature": "impl R { pub fn release_signature(&self) -> u8 { 0 } }\n",
     "constant": "pub const IS_LIVE: bool = false;\n",
     "static_item": "pub static SIGNATURE_OK: bool = false;\n",
     "type_alias": "pub type SignatureResult = u8;\n",
@@ -232,7 +258,27 @@ def run(files: dict[str, str]) -> subprocess.CompletedProcess[str]:
         )
 
 
+def revision_five_citations() -> list[str]:
+    """Return the places of the checker that must cite ADR-103 revision 5 but do not (EU2)."""
+    text = CHECKER.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    docstring = text.split('"""')[1]
+    index = next(i for i, line in enumerate(lines) if line.startswith("ALLOWED_CALL_BY_FILE ="))
+    comment = "\n".join(lines[max(index - 3, 0) : index])
+    return [
+        place
+        for place, text in (
+            ("the script docstring", docstring),
+            ("the ALLOWED_CALL_BY_FILE comment", comment),
+        )
+        if "revision 5" not in text and "revisions 4 and 5" not in text
+    ]
+
+
 def main() -> None:
+    missing = revision_five_citations()
+    if missing:
+        raise SystemExit("ADR-103 revision 5 is not cited by " + ", ".join(missing))
     accepted = run(ALLOWED)
     if accepted.returncode != 0:
         raise SystemExit(f"allowed layout was rejected:\n{accepted.stderr}")

@@ -218,7 +218,8 @@ jobs:
         run: >
           cargo test -p pos-store --no-default-features
           --test plugin_trust_registry_memory_public
-          --test plugin_trust_registry_memory_policy_public --locked
+          --test plugin_trust_registry_memory_policy_public
+          --test plugin_trust_registry_memory_evaluation_public --locked
       - name: cargo check (all features, all targets)
         run: cargo check --workspace --all-targets --all-features --locked
       - name: Prove reference evaluator implementation independence

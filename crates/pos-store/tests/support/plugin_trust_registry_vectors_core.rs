@@ -1,6 +1,6 @@
 // This file is `include!`d by the adapter test crates, so rustfmt does not format it; keep it in
 // rustfmt style by hand.
-// Shared public acceptance vectors of the ADR-103 revision 4 Plugin trust policy registry port:
+// Shared public acceptance vectors of the ADR-103 revisions 4 and 5 Plugin registry port:
 // C1, D1-D3, E1-E3, and F1-F2. The including module declares `type Store: Backend` and sees
 // the crate's `fixtures` module, so one body runs the vectors on every adapter and a vector is
 // written once. The file is `include!`d, never a module of its own.

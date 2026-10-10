@@ -1,4 +1,4 @@
-//! Public acceptance vectors for the ADR-103 revision 4 Plugin trust policy registry port on
+//! Public acceptance vectors for the ADR-103 revisions 4 and 5 Plugin trust policy registry port on
 //! the Memory adapter (slice #568): C1, D1-D3, E1-E3, and F1-F2.
 //!
 //! The vectors are written once, in `support/plugin_trust_registry_vectors_core.rs`, and run

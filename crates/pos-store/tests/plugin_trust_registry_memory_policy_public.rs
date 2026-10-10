@@ -1,4 +1,4 @@
-//! Public acceptance vectors for the ADR-103 revision 4 Plugin trust policy registry port on
+//! Public acceptance vectors for the ADR-103 revisions 4 and 5 Plugin trust policy registry port on
 //! the Memory adapter (slice #568): G1, H1, R1-R6, S1, S2, X1, and the retained-record
 //! accessors.
 //!

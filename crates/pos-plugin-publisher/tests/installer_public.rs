@@ -1,5 +1,5 @@
 //! The signed Plugin release installer at the public seam (ADR-061 revision 2,
-//! ADR-103 revision 4).
+//! ADR-103 revisions 4 and 5).
 //!
 //! Releases are signed and published by the #571 publisher into a real local
 //! OCI store, trust evidence is built from independently encoded PTR1, PRV1,
@@ -267,6 +267,8 @@ fn every_registry_error_variant_passes_through_typed() -> TestResult {
         PluginTrustPolicyRegistryErrorV1::StorageFailed,
         PluginTrustPolicyRegistryErrorV1::StorageIndeterminate,
         PluginTrustPolicyRegistryErrorV1::StorePoisoned,
+        PluginTrustPolicyRegistryErrorV1::PolicyNotAdvanced,
+        PluginTrustPolicyRegistryErrorV1::ReleaseNotActive,
         PluginTrustPolicyRegistryErrorV1::Bridge(PluginTrustBridgeErrorV1::EvaluationUtcMismatch),
         PluginTrustPolicyRegistryErrorV1::Floor(pos_conformance::PluginFloorErrorV1::Rollback(
             PluginFloorKindV1::Root,

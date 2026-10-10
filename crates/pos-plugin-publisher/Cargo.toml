@@ -26,7 +26,7 @@ thiserror = { workspace = true }
 
 # Linux-only, like the crate itself: pos-conformance (the anchor type) builds only there,
 # and pos-store exposes the Plugin trust policy registry port only on Linux
-# (ADR-103 revision 4). The port needs no `sqlite` feature, so rusqlite stays out of
+# (ADR-103 revisions 4 and 5). The port needs no `sqlite` feature, so rusqlite stays out of
 # this crate's own dependency set. pos-store never depends on this crate.
 [target.'cfg(target_os = "linux")'.dependencies]
 pos-conformance = { path = "../pos-conformance" }

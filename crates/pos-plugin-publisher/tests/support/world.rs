@@ -10,7 +10,7 @@
 //! and performs an operator rollback; both are test fixtures only, because
 //! production has no entry point for either.
 
-use std::sync::Arc;
+use std::sync::{atomic::AtomicU64, Arc};
 
 use pos_conformance::PluginTrustPolicyAnchorV1;
 use pos_core::{
@@ -25,9 +25,9 @@ use pos_crypto::signing::generate_keypair;
 use pos_plugin_release::{BundleAddressV1, LocalOciPublisherV1, ReleaseSourceV1};
 use pos_store::memory::MemoryStore;
 use pos_store::plugin_trust_registry::{
-    ActivationEventInputV1, ActiveReleaseV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
-    PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1,
-    RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
+    ActivationEventInputV1, ActiveReleaseV1, CurrentReleaseEvaluationV1, PluginRollbackReceiptV1,
+    PluginTrustLedgerRowV1, PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1,
+    PolicyAdvanceOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1, TrustedUtcSecondV1,
 };
 
 use super::encoding::{Material, Policy, Revocations, Spec, OTHER_OWNER, OWNER, SCOPE, TICK};
@@ -149,8 +149,10 @@ fn next_epoch(spec: &Spec) -> Spec {
 }
 
 /// Who may publish which Plugin, whether the PTR1 lists the real publisher key,
-/// and whether the registry is provisioned.
-#[derive(Clone, Copy)]
+/// whether the registry is provisioned, and the shared clock of the spy registry.
+///
+/// `Config` is `Clone` and not `Copy`, because the clock is an `Arc`; callers pass it by value.
+#[derive(Clone)]
 pub struct Config {
     /// The Plugin ID the PTR1 grants to the publisher.
     pub plugin_id: &'static str,
@@ -164,6 +166,9 @@ pub struct Config {
     /// Whether the PTR1 also lists an epoch-2 key for the publisher. The key is generated but
     /// not registered until `World::register_second_epoch`.
     pub second_epoch_key: bool,
+    /// The clock the spy registry stamps its `evaluate_current_release` calls with; `None`
+    /// builds the spy without a clock, so it records stamp 0.
+    pub clock: Option<Arc<AtomicU64>>,
 }
 
 impl Default for Config {
@@ -174,6 +179,7 @@ impl Default for Config {
             listed_key: None,
             provision: true,
             second_epoch_key: false,
+            clock: None,
         }
     }
 }
@@ -244,6 +250,20 @@ impl World {
         })
     }
 
+    /// A default world whose spy registry stamps its evaluations from `clock`.
+    ///
+    /// The test creates the `Arc` once and shares it with every other recorder that must be
+    /// ordered against the registry (see `SpyRegistry::with_clock`).
+    ///
+    /// # Errors
+    /// Returns the fixture construction or registry error.
+    pub fn with_clock(clock: Arc<AtomicU64>) -> BoxResult<Self> {
+        Self::with_config(Config {
+            clock: Some(clock),
+            ..Config::default()
+        })
+    }
+
     /// A world for `config`.
     ///
     /// # Errors
@@ -267,6 +287,9 @@ impl World {
         memory.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
         let timeline = memory.create_timeline("plugin-activation")?.id();
         let mut registry = SpyRegistry::new(memory);
+        if let Some(clock) = config.clock {
+            registry = SpyRegistry::with_clock(registry.store, clock);
+        }
         if config.provision {
             registry.provision(&anchor, &genesis_tps1)?;
         }
@@ -549,6 +572,34 @@ impl World {
             utc,
             TICK,
             activation(self.timeline, tag),
+        ))
+    }
+
+    /// Evaluate the release at `target` read-only through the spy registry with the current
+    /// evidence, at the trusted UTC second `utc` and the Tick `tick`.
+    ///
+    /// The evidence is built at the default coordinates, so another `utc` or `tick` is refused
+    /// by the registry's coordinate checks; the call is recorded either way.
+    ///
+    /// # Errors
+    /// Returns the fixture construction error; the registry result is the value.
+    pub fn evaluate_at(
+        &self,
+        target: &BundleAddressV1,
+        utc: i64,
+        tick: u64,
+    ) -> BoxResult<Registry<CurrentReleaseEvaluationV1>> {
+        let bundle = self.store.read_verified(target)?;
+        let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
+        let material = self.material()?;
+        let trusted = TrustedUtcSecondV1::from_source(&mut wall(utc)?)?;
+        Ok(self.registry.evaluate_current_release(
+            &self.anchor,
+            &material.tps1,
+            &material.evidence,
+            &projection,
+            trusted,
+            tick,
         ))
     }
 

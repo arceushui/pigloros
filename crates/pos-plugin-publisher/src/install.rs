@@ -1,4 +1,4 @@
-//! The signed Plugin release installer (ADR-061 revision 2, ADR-103 revision 4).
+//! The signed Plugin release installer (ADR-061 revision 2, ADR-103 revisions 4 and 5).
 //!
 //! One call installs one release in a fixed, fail-closed order. Nothing before
 //! the last step changes any registry state, and the registry is never
@@ -12,6 +12,10 @@
 //! 4. verify the PMF1 release signature under the resolved key;
 //! 5. sample the sealed trusted wall source;
 //! 6. only then call the registry's `admit` with the evidence's own Tick.
+//!
+//! ADR-103 revision 5 names this module the sole non-test caller of the registry's `admit`
+//! (verify-then-admit) until the later amendment that adds the PMF1 signature token; it may not
+//! call `rollback`, `provision`, or `advance_policy`.
 //!
 //! The installer accepts no projection, public key, clock value, or Tick from
 //! its caller, and it builds no activation Event: the trusted composition

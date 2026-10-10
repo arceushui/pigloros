@@ -1,17 +1,19 @@
 //! The adapter-independent decision logic of the Plugin trust policy registry.
 //!
 //! Each `plan_*` function reads the retained state through the abstract
-//! `PluginTrustTransactionV1`, runs the ADR-103 revision 4 steps in their
+//! `PluginTrustTransactionV1`, runs the ADR-103 revisions 4 and 5 steps in their
 //! contract order, and returns a plan of writes. An adapter applies the plan
-//! inside its own transaction. The Memory and `SQLite` adapters therefore share
-//! every check, every error precedence, and every record layout; they differ
-//! only in how they read, lock, and persist.
+//! inside its own transaction. `plan_evaluate` (revision 5) runs the same
+//! checks, with the differences that decision 2 lists, and returns the
+//! read-only evaluation instead of a plan: it writes nothing. The Memory and
+//! `SQLite` adapters therefore share every check, every error precedence, and
+//! every record layout; they differ only in how they read, lock, and persist.
 
 use pos_conformance::{
     authenticate_plugin_tps1_v1, check_plugin_tps1_artifact_denial_v1,
     check_plugin_tps1_genesis_v1, check_plugin_tps1_successor_v1, plan_plugin_floor_transition_v1,
-    verify_plugin_tps1_policy_v1, AuthenticatedPluginTps1V1, PluginFloorStateV1,
-    PluginTrustPolicyAnchorV1,
+    verify_plugin_tps1_policy_v1, AuthenticatedPluginTps1V1, PluginFloorPlanV1, PluginFloorStateV1,
+    PluginFloorTransitionV1, PluginTrustPolicyAnchorV1,
 };
 use pos_crypto::plugin_trust::{
     ResolvedPluginTrustAuthorizationV1, ValidatedPluginManifestProjectionV1,
@@ -20,13 +22,16 @@ use pos_crypto::plugin_trust::{
 
 use super::error::PluginTrustPolicyRegistryErrorV1;
 use super::types::{
-    ActivationEventIdentityV1, ActivationEventInputV1, ActiveReleaseV1, PluginTrustLedgerBodyV1,
-    PluginTrustLedgerRowV1, PolicyAdvanceKindV1, PolicyAdvanceOutcomeV1, RetainedPolicyStateV1,
-    RetainedReleaseDecisionV1, RollbackFactsV1,
+    ActivationEventIdentityV1, ActivationEventInputV1, ActiveReleaseV1, CurrentReleaseEvaluationV1,
+    PluginTrustLedgerBodyV1, PluginTrustLedgerRowV1, PolicyAdvanceKindV1, PolicyAdvanceOutcomeV1,
+    RetainedPolicyStateV1, RetainedReleaseDecisionV1, RollbackFactsV1,
 };
 use super::utc::TrustedUtcSecondV1;
 
 type RegistryResult<T> = Result<T, PluginTrustPolicyRegistryErrorV1>;
+
+/// A retained `(version or epoch, complete-record digest)` floor pair.
+type FloorPair = (u64, [u8; 32]);
 
 /// The retained anchor and policy state of one scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -171,16 +176,25 @@ struct CheckedPolicyV1 {
     tps1: AuthenticatedPluginTps1V1,
 }
 
-/// The shared steps that follow the transaction prefix.
+/// How the supplied TPS1 relates to the retained one, once it is authenticated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Continuity {
+    /// The supplied bytes are the retained bytes.
+    Retained,
+    /// The supplied bytes are a valid successor of the retained TPS1.
+    Successor,
+}
+
+/// The shared steps that follow the transaction prefix, up to and including TPS1 continuity.
 ///
 /// Order: scope row (`MissingState`); anchor (`AnchorMismatch`); floor shape
-/// (`CorruptState`); UTC regression; TPS1 authentication; TPS1 continuity;
-/// the projection-free policy bridge, whose coordinate checks bind the
-/// evidence to the transaction's UTC second and Tick.
-fn check_policy(
+/// (`CorruptState`); UTC regression; TPS1 authentication; TPS1 continuity. The continuity
+/// result is returned so that `plan_evaluate` can refuse a valid successor before the bridge,
+/// whereas the writes continue to the bridge.
+fn check_policy_prefix(
     tx: &impl PluginTrustTransactionV1,
     input: &PolicyInputV1<'_>,
-) -> RegistryResult<CheckedPolicyV1> {
+) -> RegistryResult<(CheckedPolicyV1, Continuity)> {
     let scope = tx
         .scope(input.anchor.scope())?
         .ok_or(PluginTrustPolicyRegistryErrorV1::MissingState)?;
@@ -198,15 +212,42 @@ fn check_policy(
         return Err(PluginTrustPolicyRegistryErrorV1::TrustedTimeRegressed);
     }
     let tps1 = authenticate_plugin_tps1_v1(input.anchor, input.tps1_bytes)?;
-    if tps1.bytes() != scope.policy.tps1_bytes.as_slice() {
+    let continuity = if tps1.bytes() == scope.policy.tps1_bytes.as_slice() {
+        Continuity::Retained
+    } else {
         check_plugin_tps1_successor_v1(scope.policy.tps1_epoch, scope.policy.tps1_digest, &tps1)?;
-    }
-    verify_plugin_tps1_policy_v1(&tps1, input.evidence, input.utc.as_i64(), input.tick)?;
-    Ok(CheckedPolicyV1 {
+        Continuity::Successor
+    };
+    let checked = CheckedPolicyV1 {
         scope,
         floors,
         tps1,
-    })
+    };
+    Ok((checked, continuity))
+}
+
+/// The projection-free policy bridge, whose coordinate checks bind the evidence to the
+/// transaction's UTC second and Tick.
+fn check_bridge(checked: &CheckedPolicyV1, input: &PolicyInputV1<'_>) -> RegistryResult<()> {
+    verify_plugin_tps1_policy_v1(
+        &checked.tps1,
+        input.evidence,
+        input.utc.as_i64(),
+        input.tick,
+    )?;
+    Ok(())
+}
+
+/// The shared steps that follow the transaction prefix.
+///
+/// Order: the prefix of `check_policy_prefix`, then the bridge of `check_bridge`.
+fn check_policy(
+    tx: &impl PluginTrustTransactionV1,
+    input: &PolicyInputV1<'_>,
+) -> RegistryResult<CheckedPolicyV1> {
+    let (checked, _) = check_policy_prefix(tx, input)?;
+    check_bridge(&checked, input)?;
+    Ok(checked)
 }
 
 const fn policy_write(tps1: AuthenticatedPluginTps1V1, input: &PolicyInputV1<'_>) -> PolicyWriteV1 {
@@ -271,20 +312,107 @@ pub(crate) fn plan_advance(
     })
 }
 
+/// The release-dependent tail shared by `admit`, `rollback` and the evaluation.
+///
+/// Order: `authorize_release` (`Trust`); the TPS1 artifact-denial check; the floor plan.
+fn check_release_tail(
+    checked: &CheckedPolicyV1,
+    input: &PolicyInputV1<'_>,
+    projection: &ValidatedPluginManifestProjectionV1,
+) -> RegistryResult<(ResolvedPluginTrustAuthorizationV1, PluginFloorPlanV1)> {
+    let authorization = input.evidence.authorize_release(projection)?;
+    check_plugin_tps1_artifact_denial_v1(&checked.tps1, &authorization)?;
+    let plan = plan_plugin_floor_transition_v1(&checked.floors, input.evidence)?;
+    Ok((authorization, plan))
+}
+
 /// The release-dependent prefix of `admit` and `rollback`.
 ///
-/// Order: the shared prefix; `authorize_release` (`Trust`); the TPS1
-/// artifact-denial check; the floor plan.
+/// Order: the shared prefix; the release tail. The floor plan only has to succeed.
 fn check_release(
     tx: &impl PluginTrustTransactionV1,
     input: &PolicyInputV1<'_>,
     projection: &ValidatedPluginManifestProjectionV1,
 ) -> RegistryResult<(CheckedPolicyV1, ResolvedPluginTrustAuthorizationV1)> {
     let checked = check_policy(tx, input)?;
-    let authorization = input.evidence.authorize_release(projection)?;
-    check_plugin_tps1_artifact_denial_v1(&checked.tps1, &authorization)?;
-    plan_plugin_floor_transition_v1(&checked.floors, input.evidence)?;
+    let (authorization, _plan) = check_release_tail(&checked, input, projection)?;
     Ok((checked, authorization))
+}
+
+/// The retained floors when the plan leaves both exactly as they are, else `None`.
+///
+/// Absent floors (`Initialize`) and floors that the evidence would move (`Advance`) are policy
+/// the registry has not adopted.
+const fn unchanged_floors(
+    floors: &PluginFloorStateV1,
+    plan: PluginFloorPlanV1,
+) -> Option<(FloorPair, FloorPair)> {
+    match (floors, plan.root, plan.revocation) {
+        (
+            PluginFloorStateV1::Present { root, revocation },
+            PluginFloorTransitionV1::Unchanged,
+            PluginFloorTransitionV1::Unchanged,
+        ) => Some((*root, *revocation)),
+        _ => None,
+    }
+}
+
+/// Whether the retained decision describes the release the pointer names and the authorization
+/// authorized (a stored invariant: any difference is corrupt state).
+fn decision_describes(
+    decision: &RetainedReleaseDecisionV1,
+    active: &ActiveReleaseV1,
+    authorization: &ResolvedPluginTrustAuthorizationV1,
+) -> bool {
+    decision.plugin_id == active.plugin_id
+        && decision.release_digest == active.release_digest
+        && decision.release_digest == authorization.release_digest()
+}
+
+/// Decide `evaluate_current_release`: read-only, writes nothing.
+///
+/// Order: the shared prefix; a valid TPS1 successor is `PolicyNotAdvanced`; the bridge; the
+/// release tail; floors that are not exactly unchanged are `PolicyNotAdvanced`; the pointer of
+/// `(scope, Plugin ID)` must name the authorized complete-PMF1 digest (`ReleaseNotActive`); the
+/// retained decision of the pointer must describe that release (`CorruptState`).
+pub(crate) fn plan_evaluate(
+    tx: &impl PluginTrustTransactionV1,
+    input: &PolicyInputV1<'_>,
+    projection: &ValidatedPluginManifestProjectionV1,
+) -> RegistryResult<CurrentReleaseEvaluationV1> {
+    let (checked, continuity) = check_policy_prefix(tx, input)?;
+    if matches!(continuity, Continuity::Successor) {
+        return Err(PluginTrustPolicyRegistryErrorV1::PolicyNotAdvanced);
+    }
+    check_bridge(&checked, input)?;
+    let (authorization, plan) = check_release_tail(&checked, input, projection)?;
+    let (root, revocation) = unchanged_floors(&checked.floors, plan)
+        .ok_or(PluginTrustPolicyRegistryErrorV1::PolicyNotAdvanced)?;
+    let scope = input.anchor.scope();
+    let active = tx
+        .active(scope, authorization.plugin_id())?
+        .filter(|active| active.pmf1_digest == authorization.pmf1_digest())
+        .ok_or(PluginTrustPolicyRegistryErrorV1::ReleaseNotActive)?;
+    let decision = tx
+        .decision(scope, active.pmf1_digest)?
+        .filter(|decision| decision_describes(decision, &active, &authorization))
+        .ok_or(PluginTrustPolicyRegistryErrorV1::CorruptState)?;
+    let policy = &checked.scope.policy;
+    Ok(CurrentReleaseEvaluationV1 {
+        scope: decision.scope,
+        plugin_id: decision.plugin_id,
+        pmf1_digest: decision.pmf1_digest,
+        release_digest: decision.release_digest,
+        previous_release_digest: decision.previous_release_digest,
+        tps1_digest: policy.tps1_digest,
+        tps1_epoch: policy.tps1_epoch,
+        tps1_effective_position: policy.tps1_effective_position,
+        ptr1_floor: root,
+        prv1_floor: revocation,
+        trusted_utc_second: input.utc.as_i64(),
+        tick: input.tick,
+        activation_event: active.activation_event,
+    })
 }
 
 /// The outcome of `plan_admit`.
@@ -814,6 +942,81 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn only_floors_that_stay_exactly_as_retained_count_as_adopted() {
+        use PluginFloorTransitionV1::{Advance, Initialize, Unchanged};
+
+        let root = (1, [1; 32]);
+        let revocation = (2, [2; 32]);
+        let present = PluginFloorStateV1::Present { root, revocation };
+        let plan = |root, revocation| PluginFloorPlanV1 { root, revocation };
+        assert_eq!(
+            unchanged_floors(&present, plan(Unchanged, Unchanged)),
+            Some((root, revocation))
+        );
+        for (root_plan, revocation_plan) in [
+            (Advance, Unchanged),
+            (Unchanged, Advance),
+            (Initialize, Unchanged),
+            (Unchanged, Initialize),
+        ] {
+            let moved = plan(root_plan, revocation_plan);
+            assert_eq!(unchanged_floors(&present, moved), None);
+        }
+        let absent = PluginFloorStateV1::Absent;
+        assert_eq!(
+            unchanged_floors(&absent, plan(Initialize, Initialize)),
+            None
+        );
+        assert_eq!(unchanged_floors(&absent, plan(Unchanged, Unchanged)), None);
+    }
+
+    #[test]
+    fn a_decision_describes_the_pointer_and_the_authorization_only_when_all_agree() -> TestResult {
+        let env = Env::new("scope")?;
+        let genesis = env.genesis()?;
+        let tps1 = authenticated(&env, &genesis)?;
+        let input = activation(TimelineId::new(), 1);
+        // release_one authorizes release digest 0x11 of "plugin-a".
+        let authorization = genesis
+            .evidence
+            .authorize_release(&release_one().projection()?)?;
+        let active = |release: u8| ActiveReleaseV1 {
+            scope: "scope".to_owned(),
+            plugin_id: "plugin-a".to_owned(),
+            pmf1_digest: [0x01; 32],
+            release_digest: [release; 32],
+            activation_event: identity(&input),
+        };
+        let decision = |plugin: &str, release: u8| RetainedReleaseDecisionV1 {
+            plugin_id: plugin.to_owned(),
+            release_digest: [release; 32],
+            ..decision_of(&tps1, &genesis, &input)
+        };
+        assert!(decision_describes(
+            &decision("plugin-a", 0x11),
+            &active(0x11),
+            &authorization
+        ));
+        // Each disagreement alone: the Plugin ID, the pointer's release, the authorization's.
+        assert!(!decision_describes(
+            &decision("plugin-b", 0x11),
+            &active(0x11),
+            &authorization
+        ));
+        assert!(!decision_describes(
+            &decision("plugin-a", 0x11),
+            &active(0x12),
+            &authorization
+        ));
+        assert!(!decision_describes(
+            &decision("plugin-a", 0x12),
+            &active(0x12),
+            &authorization
+        ));
+        Ok(())
+    }
+
     /// The read that a `FailingTx` fails.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Read {
@@ -874,6 +1077,57 @@ mod tests {
         fn next_row_seq(&self, _scope: &str) -> RegistryResult<u64> {
             self.gate(Read::NextRowSeq, 1)
         }
+    }
+
+    #[test]
+    fn the_evaluation_propagates_each_failed_transaction_read() -> TestResult {
+        let env = Env::new("scope")?;
+        let genesis = env.genesis()?;
+        let tps1 = authenticated(&env, &genesis)?;
+        let input = activation(TimelineId::new(), 1);
+        let policy = policy_input(&env, &genesis)?;
+        let retained = RetainedScopeV1 {
+            anchor: env.anchor.clone(),
+            policy: RetainedPolicyStateV1 {
+                scope: "scope".to_owned(),
+                tps1_epoch: tps1.epoch(),
+                tps1_digest: tps1.digest(),
+                tps1_effective_position: tps1.effective_timeline_position(),
+                tps1_bytes: tps1.bytes().to_vec(),
+                ptr1_floor: Some(genesis.terminal_root()),
+                prv1_floor: Some(genesis.terminal_revocation()),
+                highest_trusted_utc_second: None,
+            },
+        };
+        let active = ActiveReleaseV1 {
+            scope: "scope".to_owned(),
+            plugin_id: "plugin-a".to_owned(),
+            pmf1_digest: [0x01; 32],
+            release_digest: [0x11; 32],
+            activation_event: identity(&input),
+        };
+        let decision = RetainedReleaseDecisionV1 {
+            pmf1_digest: [0x01; 32],
+            release_digest: [0x11; 32],
+            ..decision_of(&tps1, &genesis, &input)
+        };
+        let tx = |fail: Read| FailingTx {
+            fail,
+            scope: Some(retained.clone()),
+            decision: Some(decision.clone()),
+            active: Some(active.clone()),
+        };
+        let projection = release_one().projection()?;
+        let failed = Some(PluginTrustPolicyRegistryErrorV1::StorageFailed);
+        for read in [Read::Scope, Read::Active, Read::Decision] {
+            let plan = plan_evaluate(&tx(read), &policy, &projection);
+            assert_eq!(plan.err(), failed);
+        }
+        // No evaluation read touches the ledger: the same transaction otherwise evaluates.
+        let evaluation = plan_evaluate(&tx(Read::LatestRow), &policy, &projection)?;
+        assert_eq!(evaluation.pmf1_digest(), [0x01; 32]);
+        assert_eq!(evaluation.activation_event(), &active.activation_event);
+        Ok(())
     }
 
     #[test]
