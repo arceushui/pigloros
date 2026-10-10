@@ -23,6 +23,7 @@ use pos_conformance::{
     UnknownEdgePolicyV1,
 };
 use pos_core::counterfactual_store::test_fixtures::SeededFactualTickV1;
+use pos_core::factual_dependency::BoundFactualNodeV1;
 use pos_core::{
     ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
     ArtifactTransitionRuleV1, CanonicalBytes, CoreError, CounterfactualBasisV1,
@@ -33,10 +34,11 @@ use pos_core::{
     DependencyNodeCoordinateV1, DependencyNodeRecordV1, DependencyPageRequestV1, DependencyPageV1,
     DependencyPagedRowV1, DependencyReadScopeV1, EntityId, ErasureArtifactClassV1,
     ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft,
-    EventReadBounds, EventStore, ForkGenerationV1, Hash, Kind, PipelineDraftBatchV1,
-    RecordedDependencyClassV1, RecordedNodeOriginV1, RegisteredArtifactV1, ReplayClaimEvaluationV1,
-    ReplayClaimEvaluatorV1, Seq, SeqRange, TickDependencyRecordV1, Timeline, TimelineId,
-    TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1,
+    EventReadBounds, EventStore, FactualCutV1, FactualHeadV1, FactualOwnerIdV1,
+    FactualPrefixReadPortV1, ForkGenerationV1, Hash, Kind, PipelineDraftBatchV1,
+    RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, RegisteredArtifactV1,
+    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, SeqRange, TickDependencyRecordV1,
+    Timeline, TimelineId, TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1,
 };
 use pos_runtime::counterfactual::coordinator::{
     CounterfactualAdmissionErrorV1 as AdmissionError, CounterfactualAdmissionRequestV1,
@@ -99,21 +101,6 @@ const EDGE_SPECS: [(usize, usize); 14] = [
     (VIEW, WORLD_D),
     (WEATHER, EXOGENOUS),
 ];
-/// The base-graph positions a Fork alone records: the committed `PARENT` and
-/// the unrecomputed `EARLY_WORLD` are left out and `EXOGENOUS` moves to the
-/// first Tick, so every node is provisional and lies at or after it.
-const FORK_ONLY: [usize; 10] = [
-    EXOGENOUS,
-    FIXED,
-    INTERVENTION_A,
-    WORLD_A,
-    AGENT_C,
-    INTERVENTION_B,
-    AGENT_B,
-    WORLD_D,
-    VIEW,
-    WEATHER,
-];
 const BOUNDS: Bounds = Bounds {
     max_nodes: 5_000,
     max_edges: 5_000,
@@ -132,7 +119,8 @@ const FIRST_TICK: u64 = 10;
 const HORIZON_TICK: u64 = 20;
 /// The global frontier of the base graph, the first recomputation Tick.
 const FRONTIER_TICK: u64 = 11;
-const CUT_SEQ: u64 = 2;
+/// The root's raw Event count: Tick 9 of the seeded prefix ends at its last.
+const CUT_SEQ: u64 = 9;
 const FRONTIER_ID: [u8; 16] = [0x81; 16];
 const INVALIDATION_ID: [u8; 16] = [0x91; 16];
 const PROVENANCE: [u8; 32] = [0x82; 32];
@@ -447,23 +435,48 @@ fn graph_with(plan: &CounterfactualPlanV1, omitted: &[(usize, usize)]) -> TestRe
     Ok(connect(base_nodes(plan)?, &EDGE_SPECS, omitted))
 }
 
-/// The graph a Fork alone records: the [`FORK_ONLY`] nodes, all provisional,
-/// with every base edge between them and the frozen input of `WORLD_A`.
-fn fork_graph(plan: &CounterfactualPlanV1) -> TestResult<Graph> {
-    let base = base_nodes(plan)?;
-    let mut nodes: Vec<Node> = FORK_ONLY
-        .iter()
-        .map(|&position| base[position].clone())
-        .collect();
-    nodes[0].node.tick = FIRST_TICK;
-    nodes[0].origin = Origin::Provisional;
-    let position = |wanted: usize| FORK_ONLY.iter().position(|&kept| kept == wanted);
+/// The base graph without `EARLY_WORLD` and the edges that touch it.
+///
+/// `EARLY_WORLD` is a provisional endogenous node at Tick 10, before the
+/// first recomputation Tick 11: the parent prefix cannot hold it (it is
+/// after the cut) and the Fork never records a Tick 10 record, so no
+/// production flow could record it. The seeded scenarios use this graph, in
+/// which the prefix and the Fork together record every node and edge.
+fn recordable_graph(plan: &CounterfactualPlanV1) -> TestResult<Graph> {
+    let mut nodes = base_nodes(plan)?;
+    nodes.remove(EARLY_WORLD);
+    let shift = |position: usize| position - usize::from(position > EARLY_WORLD);
     let specs: Vec<(usize, usize)> = EDGE_SPECS
         .iter()
-        .chain(&[(WORLD_A, EXOGENOUS)])
-        .filter_map(|&(consumer, source)| position(consumer).zip(position(source)))
+        .filter(|&&(consumer, source)| consumer != EARLY_WORLD && source != EARLY_WORLD)
+        .map(|&(consumer, source)| (shift(consumer), shift(source)))
         .collect();
     Ok(connect(nodes, &specs, &[]))
+}
+
+/// Whether `edge` is consumed at or before the cut, so the parent prefix
+/// records it; the Fork records every other edge.
+const fn in_prefix(edge: &InputDependencyV1) -> bool {
+    edge.consumer.tick <= PARENT_CUT_TICK
+}
+
+/// The graph a Fork alone records: the provisional nodes of `full` and the
+/// edges they consume. Their sources may lie in the committed prefix.
+fn fork_part(full: &Graph) -> Graph {
+    Graph {
+        nodes: full
+            .nodes
+            .iter()
+            .filter(|node| node.origin == Origin::Provisional)
+            .cloned()
+            .collect(),
+        edges: full
+            .edges
+            .iter()
+            .filter(|edge| !in_prefix(edge))
+            .cloned()
+            .collect(),
+    }
 }
 
 // `graph_error` and `Graph::derive_frontier` below are a deliberate,
@@ -623,7 +636,7 @@ fn split_rows(graph: &Graph) -> TestResult<(Rows, Rows)> {
     }
     for edge in &graph.edges {
         let record = edge_record(edge)?;
-        if edge.consumer.tick <= PARENT_CUT_TICK {
+        if in_prefix(edge) {
             prefix.1.push(record);
         } else {
             fork.1.push(record);
@@ -1215,12 +1228,55 @@ impl<B: CounterfactualDependencyReadPortV1> CounterfactualDependencyReadPortV1 f
     }
 }
 
-/// A store adapter that records and reads dependency records.
+impl<B: FactualPrefixReadPortV1> FactualPrefixReadPortV1 for Shared<B> {
+    fn last_committed_factual_tick(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<FactualHeadV1, CoreError> {
+        self.lock().last_committed_factual_tick(timeline)
+    }
+
+    fn cut_tick_at(&self, timeline: TimelineId, seq: Seq) -> Result<FactualCutV1, CoreError> {
+        self.lock().cut_tick_at(timeline, seq)
+    }
+
+    fn nodes_for_committed_events(
+        &self,
+        timeline: TimelineId,
+        seqs: &[Seq],
+    ) -> Result<Vec<Option<DependencyNodeRecordV1>>, CoreError> {
+        self.lock().nodes_for_committed_events(timeline, seqs)
+    }
+
+    fn nodes_by_digest(
+        &self,
+        timeline: TimelineId,
+        digests: &[Hash],
+    ) -> Result<Vec<Option<BoundFactualNodeV1>>, CoreError> {
+        self.lock().nodes_by_digest(timeline, digests)
+    }
+
+    fn last_step_node(
+        &self,
+        timeline: TimelineId,
+        owner: &FactualOwnerIdV1,
+    ) -> Result<Option<DependencyNodeRecordV1>, CoreError> {
+        self.lock().last_step_node(timeline, owner)
+    }
+
+    fn factual_set_counts(&self, timeline: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
+        self.lock().factual_set_counts(timeline)
+    }
+}
+
+/// A store adapter that records and reads dependency records and the
+/// recorded factual prefix.
 trait Backend:
     EventStore
     + CounterfactualStorePortV1
     + CounterfactualDependencyRecordingPortV1
     + CounterfactualDependencyReadPortV1
+    + FactualPrefixReadPortV1
     + Sized
 {
     fn open() -> TestResult<Self>;
@@ -1343,34 +1399,38 @@ impl CounterfactualDeclaringTickStagerV1 for DeclaringStager {
     }
 }
 
-/// The plan, the hand-built Fork graph, and the published facts of one
-/// seeded store.
+/// The plan, the hand-built graph, its Fork part, and the published facts of
+/// one seeded store.
 struct Seeded {
     host: Host,
     graph: Graph,
+    fork: Graph,
     facts: CounterfactualFactsV1,
 }
 
-/// Seed `store` with a factual root of two Events, a Fork at `Seq` 2, and the
-/// published facts of the plan, whose graph digest is the hand-built one.
+/// Seed `store` with a factual root of [`CUT_SEQ`] Events whose recorded
+/// prefix is the committed part of the hand-built graph, a Fork at
+/// [`CUT_SEQ`], and the published facts of the plan, whose graph digest is
+/// the hand-built one.
 fn seed<B: Backend>(store: &mut Shared<B>) -> TestResult<Seeded> {
     store.create_timeline_with_meta(TimelineMeta {
         id: root_id(),
         ..TimelineMeta::root("factual")
     })?;
-    store.append(
-        root_id(),
-        &[
-            event_draft("factual.tick", vec![1]),
-            event_draft("factual.tick", vec![2]),
-        ],
-    )?;
+    let raw: Vec<EventDraft> = (1..=CUT_SEQ)
+        .map(|number| event_draft("factual.tick", number.to_be_bytes().to_vec()))
+        .collect();
+    store.append(root_id(), &raw)?;
+    let host = host(|_| {})?;
+    let graph = recordable_graph(&host.plan)?;
+    store
+        .lock()
+        .seed_prefix(root_id(), &prefix_ticks(&graph)?)?;
     store.create_timeline_with_meta(TimelineMeta {
         id: fork_id(),
         ..TimelineMeta::forked_from(root_id(), Seq::from_u64(CUT_SEQ), "counterfactual")
     })?;
-    let host = host(|_| {})?;
-    let graph = fork_graph(&host.plan)?;
+    let fork = fork_part(&graph);
     let facts = CounterfactualFactsV1 {
         plan_digest: Hash::from_bytes(host.plan.plan_digest),
         dependency_graph_digest: Hash::from_bytes(graph.graph_digest(&host.plan)?),
@@ -1379,7 +1439,12 @@ fn seed<B: Backend>(store: &mut Shared<B>) -> TestResult<Seeded> {
         erasure_epoch: ERASURE_EPOCH,
     };
     store.publish_counterfactual_facts(fork_id(), facts)?;
-    Ok(Seeded { host, graph, facts })
+    Ok(Seeded {
+        host,
+        graph,
+        fork,
+        facts,
+    })
 }
 
 fn admission_request(host: &Host) -> CounterfactualAdmissionRequestV1<'_> {
@@ -1445,6 +1510,7 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
     let Seeded {
         host,
         mut graph,
+        fork,
         facts,
     } = seed(&mut store)?;
     let plan = &host.plan;
@@ -1452,7 +1518,7 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
     let mut coordinator = CounterfactualCoordinatorV1::new(store.clone());
     let request = admission_request(&host);
     // Generation 1 is admitted from the hand-built graph and records it.
-    let mut stager = DeclaringStager::new(&graph)?;
+    let mut stager = DeclaringStager::new(&fork)?;
     let first =
         coordinator.admit_with_dependencies(&request, &Authority, &mut graph, &mut stager)?;
     assert_eq!(first.generation(), generation(1));
@@ -1476,7 +1542,7 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
     );
     assert_eq!(derivation!(&mut complete, plan)?, expected);
     // Generation 2 is admitted from the recorded graph alone and recomputed.
-    let mut again = DeclaringStager::new(&graph)?;
+    let mut again = DeclaringStager::new(&fork)?;
     let second =
         coordinator.admit_with_dependencies(&request, &Authority, &mut complete, &mut again)?;
     assert_eq!(second.generation(), generation(2));
@@ -1520,7 +1586,9 @@ const UNBOUND_ROOT_POSITION: u32 = 0;
 const UNBOUND_ROOT_INDEX: usize = 1;
 
 /// The base graph plus a committed `ExogenousFrozen` root at
-/// `UNBOUND_ROOT_TICK` that the plan does not bind, consumed by `PARENT`.
+/// `UNBOUND_ROOT_TICK` that the plan does not bind, consumed by `PARENT`. It
+/// keeps the base graph (with `EARLY_WORLD`): this is a source-only differential
+/// scenario.
 fn unbound_root_graph(plan: &CounterfactualPlanV1) -> TestResult<Graph> {
     let mut nodes = base_nodes(plan)?;
     nodes.insert(
@@ -1543,8 +1611,11 @@ fn unbound_root_graph(plan: &CounterfactualPlanV1) -> TestResult<Graph> {
 }
 
 /// The committed Ticks of `graph`, one seeded Tick per record Tick, each
-/// owning one `seq`. `event_nodes` is empty, so the seed seam checks nothing
-/// about Event bindings.
+/// owning the one `seq` that is its Tick number. `event_nodes` is empty, so
+/// the seed seam checks nothing about Event bindings. The seeded prefix is
+/// sparse by design: only Ticks carrying a node or edge appear, with
+/// `seq == tick` and the last Tick equal to `PARENT_CUT_TICK`. The dense
+/// one-Event Tick shape is covered by the pos-runtime `dense_prefix` cases.
 fn prefix_ticks(graph: &Graph) -> TestResult<Vec<SeededFactualTickV1>> {
     let mut by_tick: BTreeMap<u64, Declaration> = BTreeMap::new();
     for node in graph
@@ -1558,22 +1629,23 @@ fn prefix_ticks(graph: &Graph) -> TestResult<Vec<SeededFactualTickV1>> {
             .0
             .push(node_record(node)?);
     }
-    for edge in graph
-        .edges
-        .iter()
-        .filter(|edge| edge.consumer.tick <= PARENT_CUT_TICK)
-    {
+    for edge in graph.edges.iter().filter(|edge| in_prefix(edge)) {
         by_tick
             .entry(edge.consumer.tick)
             .or_default()
             .1
             .push(edge_record(edge)?);
     }
+    // Only Ticks that record a node are seeded, so the Ticks are sparse; the
+    // last one must be the cut Tick for the parent cut to derive.
+    if by_tick.keys().next_back() != Some(&PARENT_CUT_TICK) {
+        return Err("the committed prefix does not end at the cut Tick".into());
+    }
     let mut ticks = Vec::new();
-    for (index, (tick, mut declaration)) in by_tick.into_iter().enumerate() {
+    for (tick, mut declaration) in by_tick {
         sort_declaration(&mut declaration);
         let (nodes, edges) = declaration;
-        let seq = Seq::from_u64(u64::try_from(index)? + 1);
+        let seq = Seq::from_u64(tick);
         ticks.push(SeededFactualTickV1 {
             record: TickDependencyRecordV1::try_new(
                 tick,

@@ -45,6 +45,8 @@ pos-core = { path = "../pos-core", features = [
 ] }
 # Negotiation tests build execution projections without a release closure.
 pos-crypto = { path = "../pos-crypto", features = ["test-support"] }
+# The parent-cut cases seed a root's recorded factual prefix in the adapters.
+pos-store = { path = "../pos-store", features = ["test-support"] }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
 
