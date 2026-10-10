@@ -3,6 +3,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+#[cfg(any(test, feature = "test-support"))]
+use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
+#[cfg(any(test, feature = "test-support"))]
+use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryErrorV1;
 use pos_store::plugin_trust_registry::TrustedUtcSecondV1;
 
 /// One open pass: the trusted UTC second sampled once for every member, the explicit Tick from
@@ -32,6 +36,21 @@ impl CommunityPassV1 {
             tick,
             open: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    /// An open pass at the whole trusted UTC second `utc_second` and `tick`, for tests that cannot
+    /// construct a `TrustedUtcSecondV1` themselves (only the trusted host may).
+    ///
+    /// # Errors
+    /// Returns the registry's `TrustedTimeUnavailable` when the scripted sample is unusable.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_at_for_test(
+        utc_second: u32,
+        tick: u64,
+    ) -> Result<Self, PluginTrustPolicyRegistryErrorV1> {
+        let micros = u64::from(utc_second) * 1_000_000;
+        let mut wall = ScriptedTrustedWallSourceV1::from_micros([micros]);
+        TrustedUtcSecondV1::from_source(&mut wall).map(|utc| Self::open_for_test(utc, tick))
     }
 
     /// Close the pass, for tests: every authorization of the pass reports it closed (#584 adds

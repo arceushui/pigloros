@@ -42,6 +42,17 @@
 //! [`CommunityPluginHandleV1::clear_quarantine()`]. A refused pass stages
 //! nothing and adds no new failure.
 //!
+//! # Authorization
+//! Every launch consumes the one-shot
+//! [`CommunityPassAuthorizationV1`](pos_runtime::community_plugin_host::CommunityPassAuthorizationV1)
+//! that the host offered with [`CommunityPluginHandleV1::offer_authorization()`]
+//! for the pass. A `step` peeks at it, derives the [`InvocationBindingV1`] the
+//! context source copies into the invocation, calls the source, and only then
+//! takes it for the launch; a step that fails before the launch leaves it in
+//! the slot until [`CommunityPluginHandleV1::close_pass()`] drops it. A second
+//! step in the same pass finds the slot empty and is refused with
+//! `ArtifactTrustDenied{TrustStateUnavailable}` before the source runs.
+//!
 //! # Classification of a failed pass
 //! The host passes the error of a failed pass to
 //! [`classify_pass_failure()`](pos_runtime::community_plugin_host::classify_pass_failure).
@@ -56,9 +67,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pos_core::{Plugin, PluginId, TimelineId};
+use pos_plugin_release::ContentValidationV1;
 use pos_runtime::community_plugin_host::{
-    CommunityPluginHostErrorV1, GuestPluginErrorV1, HostInputs, InvocationReportV1, MeteringV1,
-    NegotiatedCommunityPluginV1, PluginInvocationV1, PluginOutputV1,
+    negotiate_community_plugin_v1, CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1,
+    CommunityPluginHostErrorV1, GatedCommunityReleaseV1, GuestPluginErrorV1, HostInputs,
+    InvocationReportV1, MeteringV1, NegotiatedCommunityPluginV1, PluginInvocationV1,
+    PluginOutputV1,
 };
 use pos_runtime::{
     DomainImplementationKindV1, Driver, ObservationView, PluginAvailabilityV1,
@@ -73,7 +87,7 @@ pub use self::state::{
     CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1, ReceiptDispositionV1,
     MAX_RETAINED_RECEIPTS_V1,
 };
-use crate::supervisor::CommunityPluginSupervisorV1;
+use crate::supervisor::{CommunityPluginSupervisorV1, NOT_ACTIVE, UNAVAILABLE};
 
 type Error = CommunityPluginHostErrorV1;
 
@@ -92,6 +106,27 @@ pub struct InvocationContextV1 {
     pub host_inputs: HostInputs,
 }
 
+/// The values the Driver binds every invocation to (ADR-061 revision 7
+/// decision 8).
+///
+/// The Driver derives them from its authorization (Tick and TPS1 digest) and
+/// from its negotiated record (profile digest) before it calls the source. The
+/// source copies them into the invocation and chooses none of them; the
+/// supervisor refuses an invocation that carries other values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvocationBindingV1 {
+    /// The Tick of the pass: the invocation's `timeline_position.tick`.
+    pub tick: u64,
+    /// The authenticated TPS1 digest: the invocation's
+    /// `trust_policy_snapshot_digest`.
+    pub tps1_digest: [u8; 32],
+    /// The negotiated record's profile digest, or `None` when it carries none.
+    /// The invocation's field is a bare `[u8; 32]`, so for `None` the source
+    /// writes zeros and the supervisor refuses the launch with
+    /// `InvalidInvocation`.
+    pub execution_profile_digest: Option<[u8; 32]>,
+}
+
 /// A host-supplied source of invocation contexts, one per `step`.
 ///
 /// It runs inside the Driver step with the Timeline and the Driver's own
@@ -99,7 +134,7 @@ pub struct InvocationContextV1 {
 /// `ArtifactRevoked` from the host's trust evidence: it discards the pass and
 /// quarantines or marks the Plugin like any other failure of its class.
 pub trait InvocationContextSourceV1: Send + Sync {
-    /// Build the next invocation's context.
+    /// Build the next invocation's context, copying `binding` into it.
     ///
     /// # Errors
     /// Returns the closed host error that refuses the invocation.
@@ -107,11 +142,13 @@ pub trait InvocationContextSourceV1: Send + Sync {
         &mut self,
         timeline: TimelineId,
         observation: &ObservationView<'_>,
+        binding: InvocationBindingV1,
     ) -> Result<InvocationContextV1, CommunityPluginHostErrorV1>;
 }
 
-/// What the host supplies to build one community Driver adapter.
-pub struct CommunityDriverConfigV1 {
+/// What the host supplies, besides the gated release, to build one community
+/// Driver adapter.
+pub struct CommunityDriverSettingsV1 {
     /// The Plugin this Driver belongs to.
     pub plugin_id: PluginId,
     /// The Driver's diagnostic name.
@@ -122,14 +159,84 @@ pub struct CommunityDriverConfigV1 {
     pub subscriptions: Vec<ProjectionKey>,
     /// The supervisor that launches each worker.
     pub supervisor: CommunityPluginSupervisorV1,
-    /// The negotiated release.
-    pub negotiated: NegotiatedCommunityPluginV1,
-    /// The verified Component bytes.
-    pub component: Vec<u8>,
     /// The source of every invocation's host-built inputs.
     pub source: Box<dyn InvocationContextSourceV1>,
     /// The Plugin state before the first committed step (non-durable).
     pub initial_state: CommunityStateV1,
+}
+
+/// What builds one community Driver adapter.
+///
+/// It has no public constructor but [`Self::from_gated()`]: the negotiated
+/// release and the Component bytes are private and come only from a
+/// [`GatedCommunityReleaseV1`], so a Driver cannot be built around bytes the
+/// trust gate did not hand out.
+///
+/// ```compile_fail,E0451
+/// use pos_plugin_supervisor::CommunityDriverConfigV1;
+///
+/// let _config = CommunityDriverConfigV1 {
+///     settings: todo!(),
+///     negotiated: todo!(),
+///     component: Vec::new(),
+///     content_validation: todo!(),
+/// };
+/// ```
+///
+/// ```compile_fail,E0616
+/// use pos_plugin_supervisor::CommunityDriverConfigV1;
+///
+/// fn read(config: &CommunityDriverConfigV1) {
+///     let _negotiated = &config.negotiated;
+/// }
+/// ```
+///
+/// ```compile_fail,E0616
+/// use pos_plugin_supervisor::CommunityDriverConfigV1;
+///
+/// fn read(config: &CommunityDriverConfigV1) {
+///     let _component = &config.component;
+/// }
+/// ```
+pub struct CommunityDriverConfigV1 {
+    settings: CommunityDriverSettingsV1,
+    negotiated: NegotiatedCommunityPluginV1,
+    component: Vec<u8>,
+    content_validation: ContentValidationV1,
+}
+
+impl CommunityDriverConfigV1 {
+    /// Negotiate `gated` and keep its Component bytes (ADR-061 revision 7
+    /// decisions 2 and 8).
+    ///
+    /// It takes the gated release by value because it owns the Component bytes
+    /// (up to 33 MiB). The release authorizes execution only at its own UTC
+    /// second and Tick; each launch needs its pass authorization.
+    /// `expected_plugin_id` is the PMF1 Plugin ID text the member expects; the
+    /// config does not keep it.
+    ///
+    /// # Errors
+    /// Returns `ArtifactTrustDenied{NotActive}` when the gated release is for
+    /// another Plugin ID, then the negotiation refusals (`IncompatibleAbi`,
+    /// `MissingFeature`, `CapabilityDenied`).
+    pub fn from_gated(
+        gated: GatedCommunityReleaseV1,
+        host_abi: &CommunityPluginHostAbiV1,
+        profile: &CommunityPluginExecutionProfileV1,
+        expected_plugin_id: &str,
+        settings: CommunityDriverSettingsV1,
+    ) -> Result<Self, Error> {
+        if gated.plugin_id() != expected_plugin_id {
+            return Err(NOT_ACTIVE);
+        }
+        let negotiated = negotiate_community_plugin_v1(&gated, host_abi, profile)?;
+        Ok(Self {
+            settings,
+            negotiated,
+            content_validation: gated.content_validation(),
+            component: gated.into_component(),
+        })
+    }
 }
 
 /// A community Plugin's [`Driver`], running `drive` in supervised workers.
@@ -140,6 +247,7 @@ pub struct CommunityDriverV1 {
     supervisor: CommunityPluginSupervisorV1,
     negotiated: NegotiatedCommunityPluginV1,
     component: Vec<u8>,
+    content_validation: ContentValidationV1,
     source: Box<dyn InvocationContextSourceV1>,
     shared: Arc<Shared>,
     /// The next state staged by the pending step, adopted only on commit.
@@ -150,16 +258,23 @@ impl CommunityDriverV1 {
     /// Build the adapter and the host's handle on its in-memory state.
     #[must_use]
     pub fn new(config: CommunityDriverConfigV1) -> (Self, CommunityPluginHandleV1) {
-        let shared = Arc::new(Shared::new(config.plugin_id, config.initial_state));
+        let CommunityDriverConfigV1 {
+            settings,
+            negotiated,
+            component,
+            content_validation,
+        } = config;
+        let shared = Arc::new(Shared::new(settings.plugin_id, settings.initial_state));
         let handle = CommunityPluginHandleV1::new(Arc::clone(&shared));
         let driver = Self {
-            name: config.name,
-            tick_interval: config.tick_interval,
-            subscriptions: config.subscriptions,
-            supervisor: config.supervisor,
-            negotiated: config.negotiated,
-            component: config.component,
-            source: config.source,
+            name: settings.name,
+            tick_interval: settings.tick_interval,
+            subscriptions: settings.subscriptions,
+            supervisor: settings.supervisor,
+            negotiated,
+            component,
+            content_validation,
+            source: settings.source,
             shared,
             staged: None,
         };
@@ -180,18 +295,40 @@ impl CommunityDriverV1 {
         }
     }
 
+    /// The bindings of the offered authorization, read without taking it.
+    ///
+    /// An empty slot is `TrustStateUnavailable`, before the source runs.
+    fn binding(&self) -> Result<InvocationBindingV1, Error> {
+        let profile = self.negotiated.execution_profile_digest();
+        self.shared
+            .peek(|authorization| InvocationBindingV1 {
+                tick: authorization.tick(),
+                tps1_digest: authorization.tps1_digest(),
+                execution_profile_digest: profile,
+            })
+            .ok_or(UNAVAILABLE)
+    }
+
     /// Run one `drive` and stage its result.
+    ///
+    /// The authorization is peeked before the source runs and taken only after
+    /// it answered, so a step that fails before the launch leaves it in the
+    /// slot until the host closes the pass.
     fn invoke(
         &mut self,
         timeline: TimelineId,
         observation: &ObservationView<'_>,
     ) -> Result<StepOutput, Error> {
-        let context = self.source.context(timeline, observation)?;
+        let context = self
+            .binding()
+            .and_then(|binding| self.source.context(timeline, observation, binding))?;
         let invocation = with_prior_state(context.invocation, self.shared.committed_state());
         let id = invocation.invocation_id;
+        self.shared.set_invocation_id(id);
         let report = self
             .supervisor
             .drive(
+                self.shared.take_authorization(),
                 &self.negotiated,
                 &self.component,
                 &invocation,
@@ -260,6 +397,7 @@ impl CommunityDriverV1 {
             failure: parts.failure,
             guest_error: parts.guest_error,
             disposition: parts.disposition,
+            content_validation: self.content_validation,
         });
     }
 }
@@ -305,6 +443,9 @@ impl Driver for CommunityDriverV1 {
         observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
         // A step left unresolved cannot be committed any more: drop its state.
+        // A quarantined Driver is refused below, outside `record_failure`: that
+        // refusal is not this pass's failure (`pass_failure()` stays `None`), so
+        // the host seam reports such a member as not run.
         self.staged = None;
         self.shared.discard();
         self.ensure_available()?;
