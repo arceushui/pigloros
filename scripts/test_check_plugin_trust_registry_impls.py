@@ -22,6 +22,7 @@ ANCHOR = "fn f() { PluginTrustPolicyAnchorV1::new(a, b, c, d, e); }\n"
 UTC = "fn f(s: &mut S) { TrustedUtcSecondV1::from_source(s); }\n"
 INSTALLER_FILE = "crates/pos-plugin-publisher/src/install.rs"
 INSTALLER_SIBLING = "crates/pos-plugin-publisher/src/other.rs"
+TEST_WORLD_FILE = "crates/pos-plugin-publisher/tests/support/world.rs"
 INSTALLER_BODY = (
     IMPORT + "fn f(s: &mut S, w: &mut W) { TrustedUtcSecondV1::from_source(w); s.admit(a); }\n"
 )
@@ -102,6 +103,10 @@ ALLOWED = {
     "target/debug/build/generated.rs": IMPL + IMPORT + CALLS,
     INSTALLER_FILE: INSTALLER_BODY,
     "crates/pos-plugin-publisher/tests/installer_public.rs": IMPORT + CALLS,
+    # The shared signed-release test world (#579): gated fixture files under `tests/support`,
+    # included into the library by `#[path]` under the `test-support` feature.
+    TEST_WORLD_FILE: GATE + IMPL + IMPORT + CALLS + ANCHOR + UTC,
+    "crates/pos-plugin-publisher/tests/support/mod.rs": GATE + "pub mod world;\n",
 }
 
 REJECTED = {
@@ -163,6 +168,15 @@ REJECTED = {
     INSTALLER_SIBLING: INSTALLER_BODY,
     "crates/pos-plugin-publisher/src/install_copy.rs": IMPORT + "fn f(s: &mut S) { s.admit(a); }\n",
     "crates/pos-plugin-publisher/src/utc.rs": UTC,
+    # A sibling of the world fixture without the fixture gate is not a fixture.
+    "crates/pos-plugin-publisher/tests/support/ungated_impl.rs": IMPL,
+    "crates/pos-plugin-publisher/tests/support/ungated_utc.rs": UTC,
+    "crates/pos-plugin-publisher/tests/support/ungated_receipt.rs": (
+        "fn f() { let _ = PluginRollbackReceiptV1 { a: 1 }; }\n"
+    ),
+    "crates/pos-plugin-publisher/tests/support/feature_only.rs": (
+        '#![cfg(feature = "test-support")]\n' + IMPL
+    ),
     "crates/pos-store/src/blank_gap.rs": (
         LINUX + "const X: u8 = 1;\npub mod plugin_trust_registry;\n"
     ),
