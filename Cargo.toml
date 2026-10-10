@@ -104,7 +104,7 @@ proptest = "1"
 tempfile = "3"
 # Component text fixtures for the community Plugin host tests; the same
 # wasm-tools release (wasmparser 0.258) that builds the guest fixtures.
-wat = "=1.258.3"
+wat = "=1.261.0"
 
 # Data files
 toml = "1.1"
