@@ -19,7 +19,8 @@
 //! 2. the CFP1 plan itself, whose digest binds the [`UnknownEdgePolicyV1`]
 //!    that validation applies;
 //! 3. every node: coordinate fields, provenance, declared inputs, the Tick
-//!    window of its origin, and, for root classes, its exact plan binding;
+//!    window of its origin, and, for root classes, agreement with the plan
+//!    binding (a `Committed` root the plan does not bind is accepted);
 //! 4. the IDP1 records and edge-list order;
 //! 5. every edge: both endpoints, the consumer's declaration of the input,
 //!    the horizon, the class rules, and the plan authorization of root
@@ -48,13 +49,16 @@
 //!   the cut is recomputed.
 //! - `ExogenousFrozen`, `FixedPolicy`, and `InterventionAssigned` nodes are
 //!   roots: they declare no input, since an edge from recomputed state into
-//!   a purported frozen value makes it endogenous. An `ExogenousFrozen` or
-//!   `FixedPolicy` node must equal a descriptor of the same class in the plan
-//!   by `(schema_id, artifact_digest, provenance_digest)`. An
-//!   `InterventionAssigned` node's artifact digest is its INT1 record digest,
-//!   so two Interventions assigning the same value stay distinct; its Tick,
-//!   schema, and provenance are the Intervention's effective Tick, target
-//!   schema, and provenance, and every plan Intervention has exactly one.
+//!   a purported frozen value makes it endogenous. A bound `ExogenousFrozen`
+//!   or `FixedPolicy` node must equal a descriptor of the same class in the
+//!   plan by `(schema_id, artifact_digest, provenance_digest)`; a `Committed`
+//!   root the plan does not bind is accepted, since the inherited prefix
+//!   records the roots of factual Ticks, while every `Provisional` root must
+//!   be bound. An `InterventionAssigned` node's artifact digest is its INT1
+//!   record digest, so two Interventions assigning the same value stay
+//!   distinct; its Tick, schema, and provenance are the Intervention's
+//!   effective Tick, target schema, and provenance, and every plan
+//!   Intervention has exactly one.
 //! - An edge carries the class of its source node. A `PresentationOnly`
 //!   output may only feed another `PresentationOnly` node, so presentation
 //!   never reaches authoritative state. An edge out of a root carries the
@@ -141,7 +145,9 @@ pub enum DependencyGraphErrorV1 {
     /// A node or edge Tick lies outside the window of its origin or horizon.
     #[error("dependency-graph coordinate is out of range")]
     OutOfRange,
-    /// A frozen, fixed-policy, or Intervention node is not bound by the plan.
+    /// A `Provisional` frozen, fixed-policy, or Intervention node is not bound
+    /// by the plan, or a bound root disagrees with the plan's provenance. A
+    /// `Committed` root the plan does not bind is accepted.
     #[error("dependency-graph root node is not bound by the plan")]
     RootNotInPlan,
     /// A frozen, fixed-policy, or Intervention node declares an input.
@@ -539,21 +545,30 @@ fn validate_node_range(
     }
 }
 
+/// A root consumes no input and matches the plan's provenance when the plan
+/// binds it. A `Committed` root the plan does not bind is accepted, because
+/// the prefix records the roots of factual Ticks; a `Provisional` root must
+/// be bound.
 fn validate_root(
     bindings: &PlanBindings<'_>,
     node: &DependencyGraphNodeV1,
 ) -> Result<(), DependencyGraphErrorV1> {
-    let root = is_root(node.class);
-    if root && !node.input_digests.is_empty() {
-        Err(DependencyGraphErrorV1::UnclosedEndogenousInput)
-    } else if root
-        && bindings
-            .root_binding(node)
-            .is_none_or(|binding| binding.provenance_digest != node.provenance_digest)
-    {
-        Err(DependencyGraphErrorV1::RootNotInPlan)
-    } else {
+    if !is_root(node.class) {
+        return Ok(());
+    }
+    if !node.input_digests.is_empty() {
+        return Err(DependencyGraphErrorV1::UnclosedEndogenousInput);
+    }
+    let accepts_unbound = node.origin == DependencyGraphNodeOriginV1::Committed;
+    let matches_plan = bindings
+        .root_binding(node)
+        .map_or(accepts_unbound, |binding| {
+            binding.provenance_digest == node.provenance_digest
+        });
+    if matches_plan {
         Ok(())
+    } else {
+        Err(DependencyGraphErrorV1::RootNotInPlan)
     }
 }
 
