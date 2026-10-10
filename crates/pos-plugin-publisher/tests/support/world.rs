@@ -163,6 +163,8 @@ pub struct Config {
     pub owner: &'static str,
     /// Replaces the key the PTR1 lists for the publisher's epoch 1.
     pub listed_key: Option<[u8; 32]>,
+    /// Further Plugin IDs the PTR1 grants to the publisher.
+    pub extra_plugin_ids: &'static [&'static str],
     /// Whether to provision the registry from the genesis TPS1.
     pub provision: bool,
     /// Whether the PTR1 also lists an epoch-2 key for the publisher. The key is generated but
@@ -181,6 +183,7 @@ impl Default for Config {
             plugin_id: Shape::first().plugin_id,
             owner: OWNER,
             listed_key: None,
+            extra_plugin_ids: &[],
             provision: true,
             second_epoch_key: false,
             clock: None,
@@ -285,6 +288,7 @@ impl World {
             publisher_one: config.listed_key.unwrap_or_else(|| key_bytes(&publisher)),
             publisher_two: second.as_ref().map(key_bytes),
             plugin_id: config.plugin_id,
+            extra_plugin_ids: config.extra_plugin_ids,
             owner: config.owner,
             tps1_valid_through: config.tps1_valid_through,
         };
@@ -603,11 +607,32 @@ impl World {
         digests: &[[u8; 32]],
         record_tick: u64,
     ) -> BoxResult<Material> {
+        let (_, _, material) = self.unadopted_advance(digests, record_tick, self.spec.tick)?;
+        Ok(material)
+    }
+
+    /// As [`Self::unadopted_material()`], evaluated at the Tick `tick`, with the `Spec` and the
+    /// predecessor TPS1 digest it was built from.
+    ///
+    /// A test that adopts the material through the host's policy refresh (not through
+    /// [`Self::advance_to()`]) then stores the returned pair in `spec` and `previous`, so that
+    /// the world's current evidence follows the adoption.
+    ///
+    /// # Errors
+    /// Returns the fixture construction, registry read or trust verification error.
+    pub fn unadopted_advance(
+        &self,
+        digests: &[[u8; 32]],
+        record_tick: u64,
+        tick: u64,
+    ) -> BoxResult<(Spec, Option<[u8; 32]>, Material)> {
         let previous = Some(self.registry.retained_policy_state(SCOPE)?.tps1_digest());
         let mut next = next_epoch(&self.spec);
         next.revoked_artifacts.extend_from_slice(digests);
         next.record_tick = record_tick;
-        self.policy.material_chained(&next, previous)
+        next.tick = tick;
+        let material = self.policy.material_chained(&next, previous)?;
+        Ok((next, previous, material))
     }
 
     /// The current evidence with its terminal PRV1 record forked: the same epoch, the same

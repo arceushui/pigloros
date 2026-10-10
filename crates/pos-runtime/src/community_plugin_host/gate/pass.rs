@@ -16,9 +16,9 @@ use pos_store::plugin_trust_registry::TrustedUtcSecondV1;
 /// material, evidence or an invocation. Every authorization the gate issues shares the pass-open
 /// flag, so closing the pass revokes all of them at once. Only the creator of a pass closes it.
 ///
-/// Before the host pass seam exists the only constructor and closer are the `test-support`
-/// pair: a crate-internal pair would be dead code. #584 adds the crate-internal constructor and
-/// closer that the host pass seam uses.
+/// The host pass seam creates the pass at its sample and closes it at the end of `run_pass`
+/// through the crate-internal constructor and closer. The `test-support` pair builds and closes a
+/// pass for tests that run no seam.
 #[derive(Debug)]
 pub struct CommunityPassV1 {
     utc: TrustedUtcSecondV1,
@@ -27,15 +27,26 @@ pub struct CommunityPassV1 {
 }
 
 impl CommunityPassV1 {
-    /// An open pass at `utc` and `tick`, for tests (#584 adds the crate-internal constructor).
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn open_for_test(utc: TrustedUtcSecondV1, tick: u64) -> Self {
+    /// An open pass at `utc` and `tick`, created by the host pass seam at its sample.
+    pub(in crate::community_plugin_host) fn open(utc: TrustedUtcSecondV1, tick: u64) -> Self {
         Self {
             utc,
             tick,
             open: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    /// Close the pass: every authorization of the pass reports it closed. Only the creator of a
+    /// pass, the host pass seam, closes it.
+    pub(in crate::community_plugin_host) fn close(&self) {
+        self.open.store(false, Ordering::Release);
+    }
+
+    /// An open pass at `utc` and `tick`, for tests.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn open_for_test(utc: TrustedUtcSecondV1, tick: u64) -> Self {
+        Self::open(utc, tick)
     }
 
     /// An open pass at the whole trusted UTC second `utc_second` and `tick`, for tests that cannot
@@ -53,11 +64,10 @@ impl CommunityPassV1 {
         TrustedUtcSecondV1::from_source(&mut wall).map(|utc| Self::open_for_test(utc, tick))
     }
 
-    /// Close the pass, for tests: every authorization of the pass reports it closed (#584 adds
-    /// the crate-internal closer).
+    /// Close the pass, for tests: every authorization of the pass reports it closed.
     #[cfg(any(test, feature = "test-support"))]
     pub fn close_for_test(&self) {
-        self.open.store(false, Ordering::Release);
+        self.close();
     }
 
     /// The trusted UTC second shared by every member of the pass.

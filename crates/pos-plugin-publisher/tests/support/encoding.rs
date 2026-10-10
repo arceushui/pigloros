@@ -108,6 +108,9 @@ pub struct Policy {
     pub publisher_two: Option<[u8; 32]>,
     /// The Plugin ID the PTR1 grants to the publisher.
     pub plugin_id: &'static str,
+    /// Further Plugin IDs the PTR1 grants to the publisher, for a world that installs several
+    /// Plugins into one registry.
+    pub extra_plugin_ids: &'static [&'static str],
     /// The publisher owner.
     pub owner: &'static str,
     /// The instant (`YYYY-MM-DDTHH:MM:SSZ`) until which every TPS1 of the world is valid offline.
@@ -175,6 +178,17 @@ impl Spec {
     }
 }
 
+/// The Plugin ID grants of the PTR1, strictly ascending by Plugin ID as the verifier requires.
+fn grants(policy: Policy) -> Vec<Value> {
+    let mut ids = vec![policy.plugin_id];
+    ids.extend_from_slice(policy.extra_plugin_ids);
+    ids.sort_unstable();
+    ids.dedup();
+    ids.into_iter()
+        .map(|id| Value::Array(vec![text(id), text(policy.owner)]))
+        .collect()
+}
+
 fn ptr1(policy: Policy) -> BoxResult<Vec<u8>> {
     let publisher = |owner: &str, epoch: u64, key: [u8; 32]| {
         Value::Array(vec![
@@ -206,10 +220,7 @@ fn ptr1(policy: Policy) -> BoxResult<Vec<u8>> {
                 bytes_value(root_public()),
             ])]),
             Value::Array(publishers),
-            Value::Array(vec![Value::Array(vec![
-                text(policy.plugin_id),
-                text(policy.owner),
-            ])]),
+            Value::Array(grants(policy)),
         ],
         ROOT_SIGNATURE_DOMAIN,
     )

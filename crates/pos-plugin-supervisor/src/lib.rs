@@ -38,6 +38,9 @@
 //! `Driver` trait, so a community Plugin's output commits atomically through
 //! the scheduled-pass pipeline (#543).
 //!
+//! The [`CommunityMemberV1`] wraps a Driver's handle for pos-runtime's `CommunityPluginHostV1`,
+//! which sequences each host pass (#584).
+//!
 //! Launching a worker has one process-wide effect: see
 //! [`CommunityPluginSupervisorV1`].
 //!
@@ -50,11 +53,22 @@ pub mod adapter;
 pub mod frame;
 pub mod ipc;
 pub mod launch;
+mod member;
 pub mod supervisor;
 pub mod worker_process;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+
+// Test-only. The pass harness (the pass world, the stamping admission port and the lost-commit
+// port) lives under `tests/support`, outside the `**/src/**/*.rs` production-coverage glob, like
+// the signed-release world of `pos-plugin-publisher`: it serves this crate's pass tests and the
+// tests of other crates that enable `test-support` from their `[dev-dependencies]`
+// (`scripts/check_test_support_features.py` keeps the feature out of deployable graphs). The
+// items are `pub` so that no consumer sees them as unused.
+#[cfg(feature = "test-support")]
+#[path = "../tests/support/mod.rs"]
+pub mod pass_harness;
 
 pub use adapter::{
     register_community_driver, CommunityDriverConfigV1, CommunityDriverSettingsV1,
@@ -69,6 +83,7 @@ pub use ipc::{
 pub use launch::{
     WorkerProgramV1, WorkerResourceCeilingsV1, FORWARDED_ENVIRONMENT, RUNTIME_ENVIRONMENT,
 };
+pub use member::CommunityMemberV1;
 pub use supervisor::{CommunityPluginSupervisorV1, MAX_WORKER_WATCHDOG};
 pub use worker_process::{
     open_descriptors, prepare_worker_process, read_request, write_response, WorkerProcessErrorV1,

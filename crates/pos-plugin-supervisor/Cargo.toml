@@ -11,8 +11,14 @@ publish.workspace = true
 # fault-injection worker and the `pos-plugin-worker-argv-probe` argument
 # recorder, for tests only. Never enable in deployable builds;
 # the probe is not a Component worker. Enforced by
-# scripts/check_test_support_features.py in CI.
-test-support = ["pos-crypto/test-support", "pos-runtime/test-support"]
+# scripts/check_test_support_features.py in CI. It also compiles the pass harness
+# (`tests/support`), which commits to the optional in-memory store dependency.
+test-support = [
+  "pos-crypto/test-support",
+  "pos-core/test-support",
+  "pos-runtime/test-support",
+  "dep:pos-store",
+]
 
 [dependencies]
 # Safe `set_fds_cloexec_threadsafe`: marks every descriptor the supervisor
@@ -26,6 +32,10 @@ pos-crypto = { path = "../pos-crypto" }
 # `ContentValidationV1` appears in the invocation receipt.
 pos-plugin-release = { path = "../pos-plugin-release" }
 pos-runtime = { path = "../pos-runtime" }
+# The pass harness (feature `test-support`) commits to the in-memory store. The default features
+# stay off to keep this declaration minimal; `pos-runtime` already depends on `pos-store` with
+# them, so the resolved graph is unchanged.
+pos-store = { path = "../pos-store", default-features = false, optional = true }
 # `process` provides prlimit, PR_SET_PDEATHSIG and getppid as safe calls. The
 # worker lists its open descriptors through `/proc/self/fd` with the `fs`
 # feature, which the workspace dependency already enables. `stdio` is used only
@@ -41,8 +51,13 @@ pos-core = { path = "../pos-core", features = ["test-support"] }
 pos-crypto = { path = "../pos-crypto", features = ["test-support"] }
 # The pass-level tests admit scheduled passes through the local host.
 pos-runtime = { path = "../pos-runtime", features = ["test-support"] }
-# The pass-level tests commit to an in-memory store.
-pos-store = { path = "../pos-store" }
+
+# The host pass seam vectors run on the shared signed-release test world (ADR-061 revision 7,
+# #579 and #584).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+pos-plugin-publisher = { path = "../pos-plugin-publisher", features = [
+  "test-support",
+] }
 
 [[bin]]
 name = "pos-plugin-worker-probe"
@@ -66,6 +81,19 @@ required-features = ["test-support"]
 [[test]]
 name = "community_wiring_public"
 required-features = ["test-support"]
+
+[[test]]
+name = "community_host_public"
+required-features = ["test-support"]
+
+# cargo-shear classifies everything under `tests/` as test code, so it sees the pass harness only
+# through the feature-gated `#[path]` module in `src/lib.rs`: the root file `tests/support/mod.rs`
+# looks unlinked. That is intended: the harness is a library module that other crates reach
+# through the `test-support` feature, and it lives under `tests/support` to stay outside the
+# production-coverage glob (`**/src/**/*.rs`). The optional `pos-store` is used by the
+# integration tests, so it needs no ignore entry.
+[package.metadata.cargo-shear]
+ignored-paths = ["tests/support/mod.rs"]
 
 [lints]
 workspace = true
