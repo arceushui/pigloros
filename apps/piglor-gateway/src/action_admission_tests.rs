@@ -765,6 +765,14 @@ fn every_not_admitted_outcome_maps_to_a_stable_gateway_error() {
             PipelineOutcomeV1::InvalidProviderResult,
             "action was not admitted",
         ),
+        (
+            PipelineOutcomeV1::InvalidDependencyDeclaration,
+            "human action admission is unavailable",
+        ),
+        (
+            PipelineOutcomeV1::DependencySetExhausted,
+            "timeline dependency set is exhausted",
+        ),
     ];
     for (outcome, expected) in cases {
         let error = crate::action_command_error(
