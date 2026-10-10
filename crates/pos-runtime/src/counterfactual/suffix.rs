@@ -169,6 +169,12 @@
 //!   forbids for an incomplete suffix, `Exact` and
 //!   `ExactAuthoritativeWithRedactedViews`, to `StructuralOnly`, the
 //!   strongest permitted claim; every other claim is kept unchanged.
+//! - **Recorded parent cut.** The recording path
+//!   ([`CounterfactualCoordinatorV1::recompute_suffix_with_dependencies`])
+//!   checks the parent cut after `committed_invalidation` and before any Tick
+//!   is staged: `cut_tick_at` at the plan's parent cut `Seq` must be a
+//!   `Boundary` at the plan's parent cut Tick, otherwise the error is
+//!   `ParentCutNotFound`. The plain path does not read the parent prefix.
 //! - **Terminal codes.** A stale Tick basis is `InvalidationConflict`; a
 //!   stager failure, an empty, malformed, or oversized staged batch, a
 //!   reserved Event type, and a rejected dependency declaration are
@@ -215,9 +221,9 @@ use pos_core::{
     CounterfactualDependencyErrorV1, CounterfactualDependencyRecordingPortV1,
     CounterfactualFactsV1, CounterfactualGenerationReceiptV1, CounterfactualStoreErrorV1,
     CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId, Event, EventDraft,
-    EventReadBounds, EventStore, Hash, InvalidationConflictV1, Kind, PipelineContractErrorV1,
-    PipelineDraftBatchV1, Seq, SeqRange, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
-    MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
+    EventReadBounds, EventStore, FactualPrefixReadPortV1, Hash, InvalidationConflictV1, Kind,
+    PipelineContractErrorV1, PipelineDraftBatchV1, Seq, SeqRange, TimelineId,
+    MAX_FORK_EVENT_TYPE_BYTES_V1, MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
 };
 
 use super::coordinator::{
@@ -316,6 +322,10 @@ pub enum CounterfactualSuffixErrorV1 {
     /// The committed generation's `SIV1` does not bind the plan.
     #[error("counterfactual suffix does not belong to the plan")]
     PlanMismatch,
+    /// The Fork's cut is mid-Tick, or the plan's parent cut Tick is not the
+    /// cut Tick derived from the parent's recorded prefix.
+    #[error("counterfactual parent cut was not found")]
+    ParentCutNotFound,
     /// The committed invalidation or suffix Events do not match the receipt.
     #[error("counterfactual suffix does not match the committed generation")]
     RecoveryMismatch,
@@ -501,15 +511,18 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     /// the module documentation.
     ///
     /// # Errors
-    /// Exactly those of [`Self::recompute_suffix`]: a rejected declaration is
-    /// a Tick failure reported in the returned run, not an error.
+    /// Those of [`Self::recompute_suffix`]: a rejected declaration is a Tick
+    /// failure reported in the returned run, not an error. A mid-Tick cut or
+    /// a `parent_cut_tick` that is not the parent's recorded cut Tick is
+    /// [`CounterfactualSuffixErrorV1::ParentCutNotFound`], before any Tick is
+    /// staged.
     pub fn recompute_suffix_with_dependencies(
         &mut self,
         request: &CounterfactualSuffixRequestV1<'_>,
         stager: &mut impl CounterfactualDeclaringTickStagerV1,
     ) -> Result<CounterfactualSuffixRunV1, CounterfactualSuffixErrorV1>
     where
-        S: CounterfactualDependencyRecordingPortV1,
+        S: CounterfactualDependencyRecordingPortV1 + FactualPrefixReadPortV1,
     {
         self.recompute_suffix_through(request, &mut RecordingSeamV1(stager))
     }
@@ -533,7 +546,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         if request.result_id == [0; 16] || request.evaluator_identity_digest == [0; 32] {
             return Err(CounterfactualSuffixErrorV1::InvalidResultIdentity);
         }
-        let (basis, invalidation) = self.committed_invalidation(request)?;
+        let (basis, invalidation) = self.checked_invalidation::<M>(request)?;
         let context = SuffixContextV1 {
             plan,
             receipt: request.receipt,
@@ -561,6 +574,17 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             }
         };
         failure.and_then(|failure| finish(&context, progress, failure))
+    }
+
+    /// [`Self::committed_invalidation`], then the parent cut check of `M`;
+    /// nothing is staged first.
+    fn checked_invalidation<M: TickSeamV1<S>>(
+        &self,
+        request: &CounterfactualSuffixRequestV1<'_>,
+    ) -> Result<(CounterfactualBasisV1, SuffixInvalidationV1), CounterfactualSuffixErrorV1> {
+        let committed = self.committed_invalidation(request)?;
+        M::check_parent_cut(&self.store, request.plan).map_err(|error| parent_cut_error(&error))?;
+        Ok(committed)
     }
 
     /// Read the persisted basis, prove the receipt's generation is the
@@ -797,6 +821,19 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             }
             _ => Err(CounterfactualSuffixErrorV1::TickOutcomeUnknown),
         }
+    }
+}
+
+/// Map a parent cut check error: a failed read is the store's, any other
+/// error is the rejected cut.
+///
+/// `TickSeamV1::check_parent_cut` yields only `Store(StorageFailure)` or
+/// `ParentCutNotFound` today; a new admission error there must update this
+/// mapping.
+const fn parent_cut_error(error: &CounterfactualAdmissionErrorV1) -> CounterfactualSuffixErrorV1 {
+    match error {
+        CounterfactualAdmissionErrorV1::Store(store) => CounterfactualSuffixErrorV1::Store(*store),
+        _ => CounterfactualSuffixErrorV1::ParentCutNotFound,
     }
 }
 

@@ -904,7 +904,7 @@ fn corrupt_persisted_state_is_rejected_closed() {
 }
 
 /// Every counterfactual index and guard trigger, with a weakened body.
-const SCHEMA_OBJECTS: [(&str, &str, &str); 26] = [
+const SCHEMA_OBJECTS: [(&str, &str, &str); 35] = [
     (
         "INDEX",
         "idx_counterfactual_quarantine_artifact",
@@ -1035,6 +1035,51 @@ const SCHEMA_OBJECTS: [(&str, &str, &str); 26] = [
         "counterfactual_dependency_edges_not_replaced",
         "BEFORE INSERT ON counterfactual_dependency_edges BEGIN SELECT 1; END",
     ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_commit_ranges_retained",
+        "BEFORE DELETE ON counterfactual_dependency_commit_ranges BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_commit_ranges_immutable",
+        "BEFORE UPDATE ON counterfactual_dependency_commit_ranges BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_commit_ranges_not_replaced",
+        "BEFORE INSERT ON counterfactual_dependency_commit_ranges BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_event_nodes_retained",
+        "BEFORE DELETE ON counterfactual_dependency_event_nodes BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_event_nodes_immutable",
+        "BEFORE UPDATE ON counterfactual_dependency_event_nodes BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_event_nodes_seq_not_replaced",
+        "BEFORE INSERT ON counterfactual_dependency_event_nodes BEGIN SELECT 1; END",
+    ),
+    (
+        "TRIGGER",
+        "counterfactual_dependency_event_nodes_digest_not_replaced",
+        "BEFORE INSERT ON counterfactual_dependency_event_nodes BEGIN SELECT 1; END",
+    ),
+    (
+        "INDEX",
+        "counterfactual_dependency_commit_ranges_by_last_seq",
+        "ON counterfactual_dependency_commit_ranges(timeline_id)",
+    ),
+    (
+        "INDEX",
+        "counterfactual_dependency_nodes_by_owner",
+        "ON counterfactual_dependency_nodes(timeline_id)",
+    ),
 ];
 
 #[test]
@@ -1063,7 +1108,9 @@ fn the_schema_is_additive_idempotent_and_validated_on_every_open() {
          DROP TABLE counterfactual_purge_fence;
          DROP TABLE counterfactual_dependency_records;
          DROP TABLE counterfactual_dependency_nodes;
-         DROP TABLE counterfactual_dependency_edges;",
+         DROP TABLE counterfactual_dependency_edges;
+         DROP TABLE counterfactual_dependency_commit_ranges;
+         DROP TABLE counterfactual_dependency_event_nodes;",
     ));
     assert_eq!(open_read_only(), "");
     assert_eq!(open_writable(), "");
@@ -1434,7 +1481,9 @@ fn a_pre_schema_file_opens_read_only_without_counterfactual_state() {
          DROP TABLE counterfactual_purge_fence;
          DROP TABLE counterfactual_dependency_records;
          DROP TABLE counterfactual_dependency_nodes;
-         DROP TABLE counterfactual_dependency_edges;",
+         DROP TABLE counterfactual_dependency_edges;
+         DROP TABLE counterfactual_dependency_commit_ranges;
+         DROP TABLE counterfactual_dependency_event_nodes;",
     ));
     let mut read_only = ok(SqliteStore::open_read_only(path_text));
     ok(read_only.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));

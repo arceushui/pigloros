@@ -517,7 +517,7 @@ impl PipelineAdmissionBasisV1 {
     }
 }
 
-const fn ingress_tag(ingress: PipelineIngressV1) -> u8 {
+pub(crate) const fn ingress_tag(ingress: PipelineIngressV1) -> u8 {
     match ingress {
         PipelineIngressV1::HumanProposedAction => 1,
         PipelineIngressV1::ScheduledAiDriver => 2,
@@ -699,6 +699,10 @@ pub enum PipelineOutcomeV1 {
     AdmissionConflict,
     Committed(PipelineCommitReceiptV1),
     RecoveredDuplicate(PipelineCommitReceiptV1),
+    /// The basis declares a factual Tick dependency record the store refuses.
+    InvalidDependencyDeclaration,
+    /// The Timeline's recorded dependency set accepts no further Tick.
+    DependencySetExhausted,
 }
 
 fn invalid_draft(draft: &EventDraft) -> bool {

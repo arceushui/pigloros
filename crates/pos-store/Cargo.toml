@@ -54,5 +54,14 @@ harness = false
 name = "recipient_export_publication_faults_public"
 required-features = ["test-support"]
 
+# CI runs `--all-features`, so this test always builds there.
+[[test]]
+name = "counterfactual_dependency_memory_prefix_public"
+required-features = ["test-support"]
+
+[[test]]
+name = "counterfactual_dependency_sqlite_public"
+required-features = ["test-support"]
+
 [lints]
 workspace = true

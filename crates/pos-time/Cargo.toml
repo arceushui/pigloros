@@ -26,7 +26,7 @@ ulid = { workspace = true }
 pos-core = { path = "../pos-core", features = ["test-support"] }
 pos-runtime = { path = "../pos-runtime", features = ["test-support"] }
 pos-plugin-world = { path = "../../plugins/world" }
-pos-store = { path = "../pos-store", features = ["sqlite"] }
+pos-store = { path = "../pos-store", features = ["sqlite", "test-support"] }
 
 [lints]
 workspace = true

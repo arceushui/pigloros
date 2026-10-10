@@ -561,13 +561,7 @@ impl GatewayError {
             | Self::ConsentCodec(_)
             | Self::ConsentGrantSequenceMismatch
             | Self::ConsentRevocationFenceMismatch => StatusCode::BAD_REQUEST,
-            Self::ActionRejected(ar) => match ar {
-                ActionRejected::UnknownEventType => StatusCode::BAD_REQUEST,
-                ActionRejected::CapabilityNotGranted => StatusCode::FORBIDDEN,
-                ActionRejected::InvalidActorEntityId
-                | ActionRejected::DomainValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
-                ActionRejected::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            },
+            Self::ActionRejected(ar) => action_rejected_status(ar),
             Self::Consent(_)
             | Self::LedgerWriteDisabled
             | Self::AuthorizationDenied
@@ -580,6 +574,9 @@ impl GatewayError {
             | Self::ForkDepthTooLarge { .. }
             | Self::EventResponseTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::EventReadTimeExceeded { .. } => StatusCode::GATEWAY_TIMEOUT,
+            // 507: the Timeline's recorded dependency set is full for good, so
+            // the failure is permanent for that Timeline and a retry cannot help.
+            Self::DependencySetExhausted => StatusCode::INSUFFICIENT_STORAGE,
             Self::CompatibilityReadTruncated { .. }
             | Self::IngressConflict
             | Self::ActionObservationStale
@@ -598,13 +595,28 @@ impl GatewayError {
             | Self::LedgerUnavailable
             | Self::OwnTracksOwnerKeyUnavailable
             | Self::ActionAdmissionUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Ledger(le) => match le {
-                pos_plugin_ledger::LedgerError::InvalidPrediction(_) => {
-                    StatusCode::UNPROCESSABLE_ENTITY
-                }
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            },
+            Self::Ledger(le) => ledger_status(le),
         }
+    }
+}
+
+/// Extracted from `status_code` to keep its complexity from regressing.
+const fn action_rejected_status(rejected: &ActionRejected) -> StatusCode {
+    match rejected {
+        ActionRejected::UnknownEventType => StatusCode::BAD_REQUEST,
+        ActionRejected::CapabilityNotGranted => StatusCode::FORBIDDEN,
+        ActionRejected::InvalidActorEntityId | ActionRejected::DomainValidationFailed(_) => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+        ActionRejected::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+    }
+}
+
+/// Extracted from `status_code` to keep its complexity from regressing.
+const fn ledger_status(error: &pos_plugin_ledger::LedgerError) -> StatusCode {
+    match error {
+        pos_plugin_ledger::LedgerError::InvalidPrediction(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -2087,6 +2099,8 @@ osf_link = \"https://osf.io/example\"\n";
         assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
         let r = GatewayError::ActionAdmissionUnavailable.into_response();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let r = GatewayError::DependencySetExhausted.into_response();
+        assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
         let r = GatewayError::AuthorizationDenied.into_response();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
         let r = GatewayError::ActionRegistry(pos_runtime::RuntimeError::UnknownEventType(

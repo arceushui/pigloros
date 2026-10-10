@@ -157,7 +157,7 @@ pub enum RuntimeError {
     #[error("scheduled pass admission basis is invalid: {0}")]
     PipelineContract(pos_core::PipelineContractErrorV1),
 
-    #[error("scheduled pass was not admitted: {}", outcome_discriminant(.0))]
+    #[error("scheduled pass was not admitted: {}", outcome_name(.0))]
     ScheduledPassNotAdmitted(Box<pos_core::PipelineOutcomeV1>),
 
     #[error("no scheduled pass admission is in doubt")]
@@ -220,8 +220,9 @@ impl From<crate::OutputAdmissionErrorV1> for RuntimeError {
 }
 
 /// Name only the outcome discriminant so a rendered error never carries
-/// receipt data such as Event identities or digests.
-const fn outcome_discriminant(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
+/// receipt data such as Event identities or digests. This is a flat name
+/// table: it has no wildcard, so every new outcome must add an arm here.
+const fn outcome_name(outcome: &pos_core::PipelineOutcomeV1) -> &'static str {
     use pos_core::PipelineOutcomeV1 as Outcome;
     match outcome {
         Outcome::Rejected => "Rejected",
@@ -232,10 +233,12 @@ const fn outcome_discriminant(outcome: &pos_core::PipelineOutcomeV1) -> &'static
         Outcome::ResourceExhausted => "ResourceExhausted",
         Outcome::InvalidPluginResult => "InvalidPluginResult",
         Outcome::InvalidProviderResult => "InvalidProviderResult",
-        Outcome::DomainConflict => "DomainConflict",
-        Outcome::AdmissionConflict => "AdmissionConflict",
         Outcome::Committed(_) => "Committed",
         Outcome::RecoveredDuplicate(_) => "RecoveredDuplicate",
+        Outcome::DomainConflict => "DomainConflict",
+        Outcome::AdmissionConflict => "AdmissionConflict",
+        Outcome::InvalidDependencyDeclaration => "InvalidDependencyDeclaration",
+        Outcome::DependencySetExhausted => "DependencySetExhausted",
     }
 }
 
@@ -333,6 +336,27 @@ mod tests {
         };
         assert!(e.to_string().contains("Live"));
         assert!(e.to_string().contains("Replay"));
+    }
+
+    #[test]
+    fn the_dependency_outcomes_are_named_by_their_discriminant() {
+        use pos_core::PipelineOutcomeV1;
+
+        for (outcome, name) in [
+            (
+                PipelineOutcomeV1::InvalidDependencyDeclaration,
+                "InvalidDependencyDeclaration",
+            ),
+            (
+                PipelineOutcomeV1::DependencySetExhausted,
+                "DependencySetExhausted",
+            ),
+        ] {
+            assert_eq!(
+                RuntimeError::ScheduledPassNotAdmitted(Box::new(outcome)).to_string(),
+                format!("scheduled pass was not admitted: {name}")
+            );
+        }
     }
 
     #[test]

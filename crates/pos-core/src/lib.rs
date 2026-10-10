@@ -27,6 +27,7 @@ pub mod erasure;
 pub mod error;
 pub mod event;
 pub mod executable_budget;
+pub mod factual_dependency;
 pub mod fork_admission;
 pub mod fork_admission_authority;
 pub mod fork_admission_command;
@@ -477,6 +478,22 @@ pub use executable_budget::{
     ExecutableBudgetErrorV1, ExecutableBudgetPolicyInputV1, ExecutableBudgetPolicyV1,
     FidelityBudgetV1, PluginCpuReservationV1, WorkloadProfileV1,
     MAX_EXECUTABLE_BUDGET_POLICY_BYTES_V1, MAX_PLUGIN_CPU_RESERVATIONS_V1,
+};
+pub use factual_dependency::{
+    assemble_factual_tick, ensure_factual_set_headroom, factual_artifact_digest,
+    factual_classification_bundle_bytes, factual_classification_bundle_digest,
+    factual_event_schema_id, factual_history_content_digest, factual_ingress_content_digest,
+    factual_output_content_digest, factual_owner_id, factual_provenance_digest,
+    factual_step_content_digest, factual_verified_prefix_content_digest, EventNodeBindingV1,
+    FactualAdmissionPortV1, FactualCutV1, FactualDependencyErrorV1, FactualDriverStepV1,
+    FactualEventRefV1, FactualHeadV1, FactualHostOwnerV1, FactualIngressEventV1, FactualInputV1,
+    FactualNodeKeyV1, FactualOutputV1, FactualOwnerIdV1, FactualOwnerSourceV1,
+    FactualPrefixReadPortV1, FactualPriorNodeV1, FactualRuleV1, FactualScheduledTickV1,
+    FactualTickContextV1, FactualTickDependenciesV1, FactualTickShapeV1, OutputNodeBindingV1,
+    FACTUAL_HISTORY_SCHEMA_ID_V1, FACTUAL_PREFIX_SCHEMA_ID_V1, FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
+    FACTUAL_STEP_SCHEMA_ID_V1, MAX_FACTUAL_FORWARDED_EDGES_PER_TICK_V1,
+    MAX_FACTUAL_FORWARDED_EVENTS_PER_TICK_V1, MAX_FORWARDED_EVENTS_PER_DRIVER_V1,
+    MAX_HOST_DERIVED_STEP_INPUTS_V1, MAX_OUTPUT_DIRECT_INPUTS_V1, MAX_STEP_INPUTS_PER_DRIVER_V1,
 };
 pub use fork_admission::{
     ForkAdmissionErrorV1, ForkAdmissionOperationKindV1, ForkAdmissionOperationResultV1,

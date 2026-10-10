@@ -3,8 +3,10 @@
 //!
 //! Every test name starts with the id of the shared conformance checklist item
 //! it proves (C1 to C13), so the `SQLite` adapter's tests correspond one to one.
-//! State-private cases (injected failures, lowered set counts, the seeded
-//! committed prefix, corrupt stored rows) are in-module tests of the adapter.
+//! The factual prefix reads (ADR-064 Revision 3) are proved in
+//! `counterfactual_dependency_memory_prefix_public.rs`.
+//! State-private cases (injected failures, lowered set counts, corrupt stored
+//! rows) are in-module tests of the adapter.
 //!
 //! Checklist id C3 is split: provisional-only is proved here, and set capacity
 //! is proved in the in-module tests.
