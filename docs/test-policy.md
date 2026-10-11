@@ -130,7 +130,9 @@ configuration, and ignore any profile default filter. Repository
 `.config/nextest.toml` is deliberately forbidden by the executable ASan policy:
 it could otherwise add a filter or experimental execution wrapper outside the
 reviewed shard command. Adding nextest configuration requires an explicit
-policy-contract change and adversarial coverage first.
+policy-contract change and adversarial coverage first. Nextest also emits
+successful test output at the end of each partition without indentation, so
+the existing LSan report validator receives every printed suppression table.
 
 The job uses the dated `nightly-2026-07-01` toolchain rather than a floating
 nightly. The 2026-08-07 nightly (`rustc 1.99.0-nightly`) crashed its bundled

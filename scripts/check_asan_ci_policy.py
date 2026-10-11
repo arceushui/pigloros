@@ -27,6 +27,8 @@ nextest_args=(
   --target x86_64-unknown-linux-gnu
   --user-config-file none
   --ignore-default-filter
+  --success-output final
+  --no-output-indent
 )
 run_asan_tests() {
   ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \\

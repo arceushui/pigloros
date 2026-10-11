@@ -349,6 +349,19 @@ class AsanCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(enable_user_configuration)
 
+    def test_requires_visible_unindented_nextest_success_output(self) -> None:
+        for option in ("--success-output final", "--no-output-indent"):
+            with self.subTest(option=option):
+                def hide_passing_lsan_reports(
+                    workflow: dict, output_option: str = option
+                ) -> None:
+                    test_step = self.asan_step(workflow)
+                    test_step["run"] = test_step["run"].replace(
+                        f"  {output_option}\n", ""
+                    )
+
+                self.assert_rejected(hide_passing_lsan_reports)
+
     def test_requires_setup_symbolizer_executable_check(self) -> None:
         def remove_symbolizer_executable_check(workflow: dict) -> None:
             symbolizer_step = self.symbolizer_step(workflow)
