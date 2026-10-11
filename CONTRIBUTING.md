@@ -271,8 +271,10 @@ flowchart TD
 ```
 
 ASan remains final. The previously dominant `bundle_contract_public` target is
-split through nextest's native `slice:1/2` partitioning; the other test groups
-remain unchanged.
+split through nextest's native `slice:1/2` partitioning. The non-conformance
+workspace remainder uses the same disjoint slices, while `remainder-1` retains
+the conformance library, binaries, and profile/provider targets. The selected
+packages, features, test targets, and sanitizer scope remain unchanged.
 
 ```mermaid
 flowchart LR
