@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contract tests for the documentation-only Rust scope filter."""
+"""Contract tests for CI change scope and the core Rust gate policy."""
 
 from __future__ import annotations
 
@@ -12,10 +12,18 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FILTER_PATH = ROOT / ".github" / "rust-scope.yml"
+CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 WORKFLOW_PATHS = (
-    ROOT / ".github" / "workflows" / "ci.yml",
+    CI_WORKFLOW_PATH,
     ROOT / ".github" / "workflows" / "codeql.yml",
 )
+RUST_CACHE_ACTION = "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16"
+TRUSTED_MAIN_SAVE_IF = "${{ github.ref == 'refs/heads/main' }}"
+CORE_CACHE_KEYS = {
+    "test": "test",
+    "clippy": "clippy",
+    "coverage": "coverage",
+}
 EXPECTED_EXCLUDES = {
     "!**/*.md",
     "!**/*.mdx",
@@ -24,6 +32,8 @@ EXPECTED_EXCLUDES = {
     "!.agents/**",
     "!docs/**",
 }
+
+
 def load_patterns() -> list[str]:
     with FILTER_PATH.open(encoding="utf-8") as stream:
         filters = yaml.safe_load(stream)
@@ -33,6 +43,14 @@ def load_patterns() -> list[str]:
     if not all(isinstance(pattern, str) for pattern in patterns):
         raise AssertionError("rust-scope.yml patterns must be strings")
     return patterns
+
+
+def load_workflow(workflow_path: pathlib.Path) -> dict:
+    with workflow_path.open(encoding="utf-8") as stream:
+        workflow = yaml.safe_load(stream)
+    if not isinstance(workflow, dict):
+        raise AssertionError(f"{workflow_path} must contain a mapping")
+    return workflow
 
 
 def excluded(path: str, patterns: list[str]) -> bool:
@@ -48,7 +66,7 @@ def rust_gate_required(paths: list[str], patterns: list[str]) -> bool:
     return any(not excluded(path, patterns) for path in paths)
 
 
-class RustScopePolicyTests(unittest.TestCase):
+class CiWorkflowPolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.patterns = load_patterns()
@@ -60,8 +78,7 @@ class RustScopePolicyTests(unittest.TestCase):
     def test_scope_jobs_use_trusted_base_and_fail_closed(self) -> None:
         for workflow_path in WORKFLOW_PATHS:
             with self.subTest(workflow=workflow_path.name):
-                with workflow_path.open(encoding="utf-8") as stream:
-                    workflow = yaml.safe_load(stream)
+                workflow = load_workflow(workflow_path)
                 scope_name = (
                     "ci_change_scope" if workflow_path.name == "ci.yml" else "codeql_change_scope"
                 )
@@ -108,9 +125,7 @@ class RustScopePolicyTests(unittest.TestCase):
         self.assertTrue(rust_gate_required(["old.rs", "moved.md"], self.patterns))
 
     def test_ci_gate_distinguishes_scope_skips_from_unconditional_jobs(self) -> None:
-        workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
-        with workflow_path.open(encoding="utf-8") as stream:
-            workflow = yaml.safe_load(stream)
+        workflow = load_workflow(CI_WORKFLOW_PATH)
         gate = workflow["jobs"]["ci-gate"]
         self.assertIn("ci_change_scope", gate["needs"])
         self.assertEqual(
@@ -133,9 +148,7 @@ class RustScopePolicyTests(unittest.TestCase):
         self.assertIn('"${SCOPE_JOB_RESULT}" != "success"', run)
 
     def test_core_gates_run_after_successful_preflight_on_push(self) -> None:
-        workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
-        with workflow_path.open(encoding="utf-8") as stream:
-            workflow = yaml.safe_load(stream)
+        workflow = load_workflow(CI_WORKFLOW_PATH)
         expected_if = (
             "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
             "(needs.ci_change_scope.outputs.rust == 'true' || "
@@ -147,10 +160,31 @@ class RustScopePolicyTests(unittest.TestCase):
                 self.assertEqual(job["needs"], ["ci_change_scope", "preflight-gate"])
                 self.assertEqual(job["if"], expected_if)
 
+    def test_core_rust_caches_restore_on_prs_and_save_only_from_main(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        for job_name, shared_key in CORE_CACHE_KEYS.items():
+            with self.subTest(job=job_name):
+                steps = workflow["jobs"][job_name]["steps"]
+                cache_steps = [
+                    step
+                    for step in steps
+                    if isinstance(step, dict)
+                    and isinstance(step.get("uses"), str)
+                    and step["uses"].startswith("Swatinem/rust-cache@")
+                ]
+                self.assertEqual(len(cache_steps), 1)
+                cache_step = cache_steps[0]
+                self.assertEqual(cache_step["uses"], RUST_CACHE_ACTION)
+                self.assertEqual(
+                    cache_step.get("with"),
+                    {
+                        "shared-key": shared_key,
+                        "save-if": TRUSTED_MAIN_SAVE_IF,
+                    },
+                )
+
     def test_conformance_materialization_honors_rust_scope(self) -> None:
-        workflow_path = ROOT / ".github" / "workflows" / "ci.yml"
-        with workflow_path.open(encoding="utf-8") as stream:
-            workflow = yaml.safe_load(stream)
+        workflow = load_workflow(CI_WORKFLOW_PATH)
         materialization = workflow["jobs"]["materialize-conformance-bundles"]
         self.assertIn("ci_change_scope", materialization["needs"])
         self.assertEqual(

@@ -1105,12 +1105,8 @@ jobs:
         run: bash scripts/check-pinned-dependencies.sh
       - name: Test pinned dependency checker
         run: bash scripts/test-check-pinned-dependencies.sh
-      - name: Test Rust scope filter policy
-        run: python scripts/test_rust_scope_policy.py
-      - name: Check core Rust cache policy
-        run: python scripts/check_core_rust_cache_policy.py
-      - name: Test core Rust cache policy checker
-        run: python scripts/test_check_core_rust_cache_policy.py
+      - name: Test CI workflow policy
+        run: python scripts/test_ci_workflow_policy.py
       - name: Check ASan CI policy
         run: bash scripts/check-asan-ci-policy.sh
       - name: Test ASan CI policy checker
