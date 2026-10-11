@@ -206,6 +206,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo check (no default features)
         run: cargo check --workspace --all-targets --no-default-features --locked
       - name: cargo check (all features, all targets)
@@ -430,6 +431,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: clippy
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Reject new lint suppressions
         run: bash scripts/check-no-new-lint-suppressions.sh origin/main
       - name: cargo clippy (workspace lint policy, pedantic, deny warnings)
@@ -471,6 +473,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: coverage
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Generate one complete report, then let covgate check the changed
       # production diff before spending time on the repository-wide floor.
       - name: Generate coverage report for changed-code gate
@@ -1104,6 +1107,10 @@ jobs:
         run: bash scripts/test-check-pinned-dependencies.sh
       - name: Test Rust scope filter policy
         run: python scripts/test_rust_scope_policy.py
+      - name: Check core Rust cache policy
+        run: python scripts/check_core_rust_cache_policy.py
+      - name: Test core Rust cache policy checker
+        run: python scripts/test_check_core_rust_cache_policy.py
       - name: Check ASan CI policy
         run: bash scripts/check-asan-ci-policy.sh
       - name: Test ASan CI policy checker
