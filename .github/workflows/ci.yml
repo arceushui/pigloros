@@ -762,12 +762,12 @@ jobs:
       max-parallel: 5
       matrix:
         shard:
+          - remainder-1
+          - remainder-2
           - bundle-coverage
           - bundle-public-1
           - bundle-public-2
           - moat-proof
-          - remainder-1
-          - remainder-2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rm -f rust-toolchain.toml

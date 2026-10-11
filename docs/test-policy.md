@@ -114,7 +114,9 @@ the two `pos-conformance` bundle integration targets independently. The
 `remainder-1` also runs the `pos-conformance` library, binaries, and the
 profile/provider integration targets. Each shard serializes Cargo build/link
 jobs and bounds test threads at two, including the explicit cargo-nextest
-`--test-threads 2` cap. The required
+`--test-threads 2` cap. The two long remainder shards are scheduled first
+under the five-runner cap, so both begin together while the short moat shard
+waits. The required
 `asan (address sanitizer)` aggregate runs with `always()` and succeeds only when
 every shard succeeds. Partitioning reduces wall-clock time by repeating setup
 and build work on independent runners; it does not remove a package, feature,

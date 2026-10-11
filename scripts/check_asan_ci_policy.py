@@ -109,12 +109,12 @@ EXPECTED_STRATEGY = {
     "max-parallel": 5,
     "matrix": {
         "shard": [
+            "remainder-1",
+            "remainder-2",
             "bundle-coverage",
             "bundle-public-1",
             "bundle-public-2",
             "moat-proof",
-            "remainder-1",
-            "remainder-2",
         ]
     },
 }
