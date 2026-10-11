@@ -54,11 +54,16 @@ case "${ASAN_SHARD}" in
     run_asan_tests -p pos-conformance \\
       --test moat_proof_public
     ;;
-  remainder)
-    run_asan_tests --workspace --exclude pos-conformance --tests
+  remainder-1)
+    run_asan_partition --workspace --exclude pos-conformance --tests \\
+      --partition slice:1/2 --test-threads 2
     run_asan_tests -p pos-conformance --lib --bins \\
       --test profile_contract_public \\
       --test provider_contract_public
+    ;;
+  remainder-2)
+    run_asan_partition --workspace --exclude pos-conformance --tests \\
+      --partition slice:2/2 --test-threads 2
     ;;
   *)
     printf 'unknown ASan shard: %s\\n' "${ASAN_SHARD}" >&2
@@ -108,7 +113,8 @@ EXPECTED_STRATEGY = {
             "bundle-public-1",
             "bundle-public-2",
             "moat-proof",
-            "remainder",
+            "remainder-1",
+            "remainder-2",
         ]
     },
 }
@@ -146,8 +152,11 @@ EXPECTED_SETUP_STEPS = [
         "with": {"toolchain": "nightly-2026-07-01", "components": "rust-src"},
     },
     {
-        "name": "Install cargo-nextest for partitioned public bundle tests",
-        "if": "${{ startsWith(matrix.shard, 'bundle-public-') }}",
+        "name": "Install cargo-nextest for partitioned ASan tests",
+        "if": (
+            "${{ startsWith(matrix.shard, 'bundle-public-') || "
+            "startsWith(matrix.shard, 'remainder-') }}"
+        ),
         "uses": "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29",
         "with": {"tool": "cargo-nextest"},
     },

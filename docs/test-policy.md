@@ -105,14 +105,16 @@ device creation itself is not portable on GitHub's hosted GPU-less runners.
 ## Resource-intensive sanitizer jobs
 
 The complete workspace ASan gate retains all features and test targets, but
-partitions their execution across four hosted shards because Cargo runs separate
+partitions their execution across six hosted shards because Cargo runs separate
 test executables serially. The `bundle-coverage` and `bundle-public` shards run
 the two `pos-conformance` bundle integration targets independently. The
-`moat-proof` shard runs the slow moat integration target independently, while
-`remainder` runs `--workspace --exclude pos-conformance --tests`, then the
-`pos-conformance` library, binaries, and the profile/provider integration
-targets. Each shard serializes Cargo build/link jobs and bounds test threads at
-two. The required
+`moat-proof` shard runs the slow moat integration target independently.
+`remainder-1` and `remainder-2` use cargo-nextest's disjoint `slice:1/2` and
+`slice:2/2` partitions over `--workspace --exclude pos-conformance --tests`;
+`remainder-1` also runs the `pos-conformance` library, binaries, and the
+profile/provider integration targets. Each shard serializes Cargo build/link
+jobs and bounds test threads at two, including the explicit cargo-nextest
+`--test-threads 2` cap. The required
 `asan (address sanitizer)` aggregate runs with `always()` and succeeds only when
 every shard succeeds. Partitioning reduces wall-clock time by repeating setup
 and build work on independent runners; it does not remove a package, feature,
@@ -138,7 +140,7 @@ backtraces without full type and variable metadata. This changes artifact size
 only; sanitizer instrumentation, debug assertions, packages, features, test
 targets, and execution scope remain.
 
-`scripts/check-asan-ci-policy.sh` enforces the exact shard matrix, target
+`scripts/check_asan_ci_policy.py` enforces the exact shard matrix, target
 partition, per-shard resource settings, fail-closed aggregate, and complete
 ASan scope by parsing the workflow's executable YAML semantics. Adversarial
 fixtures prove that disabled/non-failing steps, environment-based test runners,
