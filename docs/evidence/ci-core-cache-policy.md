@@ -20,14 +20,16 @@ protects the `pull_request` and `main` push triggers, the core jobs'
 main-push reachability, the unconditional scope and preflight prerequisites,
 the three cache identities, the pinned action revision, and the main-only
 write condition. The contract requires the unfiltered `pull_request` trigger
-and the sole `main` push branch, avoiding ordered branch-exclusion patterns
-that can superficially contain `main` while suppressing its event. It also
-requires each cache step to run on pull requests, so a step-level condition
-cannot turn a restore into a silent skip. Adversarial mutations prove those
-trigger, prerequisite, reachability, and restore-path protections fail closed.
-It reuses the existing pinned-PyYAML policy-test harness. It deliberately
-replaces a standalone checker and its self-test: direct assertions are enough
-for this small, repository-specific workflow invariant.
+and the exact `push: {branches: [main]}` mapping, so neither ordered
+branch-exclusion nor path filters can superficially retain `main` while
+suppressing a trusted writer. The `pinned-dependencies` policy job must itself
+remain main-reachable and a required preflight input. It also requires each
+cache step to run on pull requests, so a step-level condition cannot turn a
+restore into a silent skip. Adversarial mutations prove those trigger,
+prerequisite, reachability, and restore-path protections fail closed. It
+reuses the existing pinned-PyYAML policy-test harness. It deliberately replaces
+a standalone checker and its self-test: direct assertions are enough for this
+small, repository-specific workflow invariant.
 
 Shell `grep` is not used because it cannot reliably associate YAML fields with
 the intended job. Adding `yq` would introduce a second parser/tool dependency
