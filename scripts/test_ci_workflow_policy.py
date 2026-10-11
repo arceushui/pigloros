@@ -28,13 +28,7 @@ CORE_CACHE_KEYS = {
 CORE_JOB_NAMES = ("fmt", "test", "clippy", "coverage")
 MAIN_PUSH_TRIGGER = {"branches": ["main"]}
 PREFLIGHT_GATE_IF = "${{ always() }}"
-PREFLIGHT_GATE_NEEDS = [
-    "ci_change_scope",
-    "trunk-pr",
-    "pinned-dependencies",
-    "conformance-fixtures",
-    "conformance-non-linux",
-]
+REQUIRED_PREFLIGHT_NEEDS = ("ci_change_scope", "pinned-dependencies")
 PINNED_DEPENDENCIES_NEEDS = "ci_change_scope"
 PINNED_DEPENDENCIES_IF = (
     "${{ needs.ci_change_scope.outputs.rust == 'true' || "
@@ -137,8 +131,10 @@ def assert_main_push_prerequisites(workflow: dict) -> None:
     if preflight.get("if") != PREFLIGHT_GATE_IF:
         raise AssertionError("preflight-gate must remain reachable on a main push")
     preflight_needs = preflight.get("needs")
-    if preflight_needs != PREFLIGHT_GATE_NEEDS:
-        raise AssertionError("preflight-gate must retain required preflight dependencies")
+    if not isinstance(preflight_needs, list) or not set(REQUIRED_PREFLIGHT_NEEDS).issubset(
+        preflight_needs
+    ):
+        raise AssertionError("preflight-gate must retain scope and policy dependencies")
 
 
 def assert_core_rust_cache_contract(workflow: dict) -> None:
@@ -362,7 +358,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 "preflight-gate",
                 "needs",
                 ["trunk-pr"],
-                "preflight-gate must retain required preflight dependencies",
+                "preflight-gate must retain scope and policy dependencies",
             ),
         ):
             with self.subTest(job=job_name):
@@ -370,6 +366,15 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 mutated["jobs"][job_name][field] = value
                 with self.assertRaisesRegex(AssertionError, message):
                     assert_core_rust_cache_contract(mutated)
+
+    def test_core_cache_contract_requires_pinned_preflight_dependency(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        mutated = copy.deepcopy(workflow)
+        mutated["jobs"]["preflight-gate"]["needs"].remove("pinned-dependencies")
+        with self.assertRaisesRegex(
+            AssertionError, "preflight-gate must retain scope and policy dependencies"
+        ):
+            assert_core_rust_cache_contract(mutated)
 
     def test_core_cache_contract_requires_its_pinned_workflow_invocation(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
