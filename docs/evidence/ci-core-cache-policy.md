@@ -17,14 +17,17 @@ than `refs/heads/main`.
 The compact executable contract in
 [`scripts/test_ci_workflow_policy.py`](../../scripts/test_ci_workflow_policy.py)
 protects the `pull_request` and `main` push triggers, the core jobs'
-main-push reachability, the three cache identities, the pinned action
-revision, and the main-only write condition. It also requires each cache step
-to run on pull requests, so a step-level condition cannot turn a restore into a
-silent skip. Adversarial mutations prove those trigger, reachability, and
-restore-path protections fail closed. It reuses the existing pinned-PyYAML
-policy-test harness. It deliberately replaces a standalone checker and its
-self-test: direct assertions are enough for this small, repository-specific
-workflow invariant.
+main-push reachability, the unconditional scope and preflight prerequisites,
+the three cache identities, the pinned action revision, and the main-only
+write condition. The contract requires the unfiltered `pull_request` trigger
+and the sole `main` push branch, avoiding ordered branch-exclusion patterns
+that can superficially contain `main` while suppressing its event. It also
+requires each cache step to run on pull requests, so a step-level condition
+cannot turn a restore into a silent skip. Adversarial mutations prove those
+trigger, prerequisite, reachability, and restore-path protections fail closed.
+It reuses the existing pinned-PyYAML policy-test harness. It deliberately
+replaces a standalone checker and its self-test: direct assertions are enough
+for this small, repository-specific workflow invariant.
 
 Shell `grep` is not used because it cannot reliably associate YAML fields with
 the intended job. Adding `yq` would introduce a second parser/tool dependency
