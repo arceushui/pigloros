@@ -148,7 +148,7 @@ flowchart TD
     C --> R["cargo-crap"]
     R --> N["Normal checks: at most eight runners"]
     N --> M["Mutation: at most eight shards"]
-    M --> A["ASan: five shards"]
+    M --> A["ASan: six shards"]
     A --> G["ci-gate"]
     P -. "failure" .-> X["Stop downstream work"]
     C -. "failure" .-> X
@@ -280,12 +280,14 @@ flowchart LR
     M --> P2["bundle-public 2/2"]
     M --> C["bundle coverage"]
     M --> O["moat proof"]
-    M --> R["remainder"]
+    M --> R1["remainder-1"]
+    M --> R2["remainder-2"]
     P1 --> G["asan-gate"]
     P2 --> G
     C --> G
     O --> G
-    R --> G
+    R1 --> G
+    R2 --> G
 ```
 
 All features, ignored tests, sanitizer instrumentation, leak detection, and the

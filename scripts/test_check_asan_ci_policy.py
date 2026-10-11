@@ -47,6 +47,21 @@ class AsanCiPolicyTests(unittest.TestCase):
     def test_repository_workflow_passes(self) -> None:
         CHECKER.check_workflow(ROOT / ".github" / "workflows" / "ci.yml")
 
+    def test_rejects_repository_nextest_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace_root = pathlib.Path(directory)
+            config_directory = workspace_root / ".config"
+            config_directory.mkdir()
+            (config_directory / "nextest.toml").write_text(
+                '[profile.default]\ndefault-filter = "none()"\n', encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                CHECKER.PolicyError, "no repository configuration"
+            ):
+                CHECKER.check_workflow(
+                    ROOT / ".github" / "workflows" / "ci.yml", workspace_root
+                )
+
     def test_repository_has_only_the_two_approved_suppressions(self) -> None:
         CHECKER.check_suppression_file(SUPPRESSION_PATH)
 
@@ -308,6 +323,32 @@ class AsanCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(float_cargo_selector)
 
+    def test_requires_pinned_nextest_version_and_no_fallback(self) -> None:
+        def float_nextest_installer(workflow: dict) -> None:
+            installer = self.nextest_installer_step(workflow)
+            installer["with"]["tool"] = "cargo-nextest"
+            installer["with"].pop("fallback")
+
+        self.assert_rejected(float_nextest_installer)
+
+    def test_requires_nextest_default_filter_bypass(self) -> None:
+        def remove_default_filter_bypass(workflow: dict) -> None:
+            test_step = self.asan_step(workflow)
+            test_step["run"] = test_step["run"].replace(
+                "  --ignore-default-filter\n", ""
+            )
+
+        self.assert_rejected(remove_default_filter_bypass)
+
+    def test_requires_nextest_user_configuration_disabled(self) -> None:
+        def enable_user_configuration(workflow: dict) -> None:
+            test_step = self.asan_step(workflow)
+            test_step["run"] = test_step["run"].replace(
+                "  --user-config-file none\n", ""
+            )
+
+        self.assert_rejected(enable_user_configuration)
+
     def test_requires_setup_symbolizer_executable_check(self) -> None:
         def remove_symbolizer_executable_check(workflow: dict) -> None:
             symbolizer_step = self.symbolizer_step(workflow)
@@ -430,6 +471,14 @@ class AsanCiPolicyTests(unittest.TestCase):
             step
             for step in workflow["jobs"]["asan"]["steps"]
             if step.get("name") == "Verify ASan symbolizer"
+        )
+
+    @staticmethod
+    def nextest_installer_step(workflow: dict) -> dict:
+        return next(
+            step
+            for step in workflow["jobs"]["asan"]["steps"]
+            if step.get("name") == "Install cargo-nextest for partitioned ASan tests"
         )
 
     @classmethod

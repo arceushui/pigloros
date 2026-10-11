@@ -779,7 +779,8 @@ jobs:
         if: ${{ startsWith(matrix.shard, 'bundle-public-') || startsWith(matrix.shard, 'remainder-') }}
         uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.146
+          fallback: none
       - name: Verify ASan symbolizer
         run: |
           symbolizer="/usr/bin/llvm-symbolizer-18"
@@ -830,6 +831,8 @@ jobs:
           nextest_args=(
             +nightly-2026-07-01 nextest run --all-features --locked -Z build-std
             --target x86_64-unknown-linux-gnu
+            --user-config-file none
+            --ignore-default-filter
           )
           run_asan_tests() {
             ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \

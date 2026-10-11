@@ -125,6 +125,13 @@ test target, sanitizer, or coverage requirement. ASan plus
 can exhaust the runner's available resources and crash with `SIGBUS` before any
 test executes.
 
+The ASan nextest commands pin cargo-nextest 0.9.146, disable user
+configuration, and ignore any profile default filter. Repository
+`.config/nextest.toml` is deliberately forbidden by the executable ASan policy:
+it could otherwise add a filter or experimental execution wrapper outside the
+reviewed shard command. Adding nextest configuration requires an explicit
+policy-contract change and adversarial coverage first.
+
 The job uses the dated `nightly-2026-07-01` toolchain rather than a floating
 nightly. The 2026-08-07 nightly (`rustc 1.99.0-nightly`) crashed its bundled
 lld with `SIGBUS` both with concurrent links and after Cargo serialization,
@@ -166,7 +173,7 @@ counts are not cross-run invariants because LSan evaluates reachability and
 records matched suppressions separately in each test process.
 
 The complete workspace/all-features/all-test-target ASan scope and
-`detect_leaks=1` remain unchanged across the four shards. A separate 1,234-byte
+`detect_leaks=1` remain unchanged across the six shards. A separate 1,234-byte
 intentional leak runs under the same sanitizer, symbolizer, suppression file,
 and options; it must exit nonzero, report exactly one allocation, and match
 neither approved rule.
