@@ -16,11 +16,11 @@ use pos_runtime::community_plugin_host::{
     ComponentTrapClassV1, PinnedComponentRuntimeV1, PinnedEngineConfigV1, TrapOutcomeV1,
     TrapTableEntryV1,
 };
+#[cfg(test)]
+use pos_runtime::community_plugin_host::CommunityPluginProfileErrorV1;
 use wasmtime::Trap;
 
 use crate::lift::widen;
-#[cfg(test)]
-use pos_runtime::community_plugin_host::CommunityPluginProfileErrorV1;
 
 /// Exact Wasmtime release of the host (ADR-061 revision 4, decision 2).
 ///
@@ -52,7 +52,7 @@ pub const PINNED_ENGINE_CONFIG: PinnedEngineConfigV1 = PinnedEngineConfigV1 {
     epoch_interruption: true,
 };
 
-/// The runtime identity of this engine, for the execution profile.
+/// The test-only derivation of the runtime, checked against `pinned_runtime_v1`.
 ///
 /// The trap table has one row for every `wasmtime::Trap` code of the pinned
 /// version, in code order, so it names `OutOfFuel`, `Interrupt` and every

@@ -54,8 +54,9 @@ impl GuestExport {
 /// A negotiated release whose profile pins this engine's runtime.
 ///
 /// Building one is the precondition of every invocation: the profile must
-/// record exactly [`pos_runtime::community_plugin_host::pinned_runtime_v1`], whose validated trap table has a row for
-/// `OutOfFuel`, `Interrupt` and every other pinned trap code.
+/// record exactly [`pos_runtime::community_plugin_host::pinned_runtime_v1`],
+/// whose validated trap table has a row for `OutOfFuel`, `Interrupt` and every
+/// other pinned trap code.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PinnedExecutionV1 {
     negotiated: NegotiatedCommunityPluginV1,

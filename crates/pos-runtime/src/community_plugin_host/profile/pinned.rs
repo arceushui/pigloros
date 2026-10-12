@@ -33,11 +33,6 @@ const PINNED_ENGINE: PinnedEngineConfigV1 = PinnedEngineConfigV1 {
     epoch_interruption: true,
 };
 
-/// The outcome name of `OutOfFuel`, as `TrapOutcomeV1::name` writes it.
-const FUEL_EXHAUSTED_NAME: &str = "FuelExhausted";
-/// The outcome name of `Interrupt`, as `TrapOutcomeV1::name` writes it.
-const WATCHDOG_STOP_NAME: &str = "OperationalWatchdogStop";
-
 // Short names for the outcomes of the table rows below.
 const UNREACHABLE: TrapOutcomeV1 = TrapOutcomeV1::Trap(ComponentTrapClassV1::Unreachable);
 const MEMORY: TrapOutcomeV1 = TrapOutcomeV1::Trap(ComponentTrapClassV1::MemoryOutOfBounds);
@@ -103,15 +98,17 @@ const PINNED_TRAP_TABLE: [(&str, TrapOutcomeV1); 50] = [
     ("UncaughtException", OTHER),
 ];
 
-/// The closed trap classes, for reading an outcome name.
-const TRAP_CLASSES: [ComponentTrapClassV1; 7] = [
-    ComponentTrapClassV1::Unreachable,
-    ComponentTrapClassV1::MemoryOutOfBounds,
-    ComponentTrapClassV1::TableOutOfBounds,
-    ComponentTrapClassV1::IndirectCall,
-    ComponentTrapClassV1::IntegerArithmetic,
-    ComponentTrapClassV1::StackExhausted,
-    ComponentTrapClassV1::Other,
+/// The closed outcomes of ADR-061 revision 4 decision 6, for reading a name.
+const CLOSED_OUTCOMES: [TrapOutcomeV1; 9] = [
+    UNREACHABLE,
+    MEMORY,
+    TABLE,
+    INDIRECT,
+    INTEGER,
+    STACK,
+    OTHER,
+    FUEL,
+    WATCHDOG,
 ];
 
 /// The runtime identity of the worker, built from the constants.
@@ -137,14 +134,9 @@ pub fn pinned_runtime_v1() -> PinnedComponentRuntimeV1 {
 impl TrapOutcomeV1 {
     /// The outcome with the closed outcome name `name`, if there is one.
     fn from_name(name: &str) -> Option<Self> {
-        match name {
-            FUEL_EXHAUSTED_NAME => Some(Self::FuelExhausted),
-            WATCHDOG_STOP_NAME => Some(Self::WatchdogStop),
-            _ => TRAP_CLASSES
-                .into_iter()
-                .find(|class| class.name() == name)
-                .map(Self::Trap),
-        }
+        CLOSED_OUTCOMES
+            .into_iter()
+            .find(|outcome| outcome.name() == name)
     }
 }
 
@@ -156,6 +148,9 @@ impl TrapTableEntryV1 {
     /// `stack-exhausted`, `other`, `FuelExhausted` and
     /// `OperationalWatchdogStop`. It returns `None` for an unknown name or an
     /// outcome that the decision 6 table does not give `trap_code`.
+    ///
+    /// The conformance adapter (slice S2, #615) is the production consumer;
+    /// until it lands only tests call this.
     #[must_use]
     pub fn from_adr_outcome(trap_code: &str, outcome_name: &str) -> Option<Self> {
         TrapOutcomeV1::from_name(outcome_name)
@@ -171,6 +166,9 @@ impl TrapTableEntryV1 {
 ///
 /// The digest excludes the mode (ADR-061 revision 7 decision 7), so none is
 /// taken. It returns `None` when `ceilings` is outside its PMF1 V1 ranges.
+///
+/// The conformance adapter (slice S2, #615) computes `profile_digest` through
+/// it; until it lands only tests call this.
 #[must_use]
 pub fn profile_digest_of(
     ceilings: CeilingValuesV1,
