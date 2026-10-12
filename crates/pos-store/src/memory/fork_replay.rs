@@ -7,7 +7,7 @@ use pos_core::{Event, TimelineId};
 use super::MemoryStore;
 use crate::{
     fork_event_authority::AuthorityValidatorV1,
-    fork_replay::{charge_registry, sizes::CanonicalSizeV1},
+    fork_replay::{charge_registry, CanonicalSizeV1},
     ForkReplayAuthorityEvidenceV1, ForkReplayAuthorityReadErrorV1 as Error,
     ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1, ForkReplayRequirementV1,
 };
