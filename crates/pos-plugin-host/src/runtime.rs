@@ -3,18 +3,24 @@
 //! ADR-061 revision 4 decision 2 records the exact Wasmtime version, its
 //! resolved feature set, the Engine configuration and the trap table in the
 //! execution profile. This module is their single source: the engine builds
-//! its configuration from [`PINNED_ENGINE_CONFIG`], and [`pinned_runtime`]
-//! derives the trap table from the pinned `wasmtime::Trap` codes themselves.
+//! its configuration from [`PINNED_ENGINE_CONFIG`], and the test-only
+//! `derived_runtime` derives the trap table from the pinned `wasmtime::Trap`
+//! codes themselves. The constant that production code records is
+//! [`pos_runtime::community_plugin_host::pinned_runtime_v1`]; a unit test here
+//! proves the derivation equals it, so a Wasmtime change that alters either
+//! fails that test.
 
 use std::sync::LazyLock;
 
 use pos_runtime::community_plugin_host::{
-    CommunityPluginProfileErrorV1, ComponentTrapClassV1, PinnedComponentRuntimeV1,
-    PinnedEngineConfigV1, TrapOutcomeV1, TrapTableEntryV1,
+    ComponentTrapClassV1, PinnedComponentRuntimeV1, PinnedEngineConfigV1, TrapOutcomeV1,
+    TrapTableEntryV1,
 };
 use wasmtime::Trap;
 
 use crate::lift::widen;
+#[cfg(test)]
+use pos_runtime::community_plugin_host::CommunityPluginProfileErrorV1;
 
 /// Exact Wasmtime release of the host (ADR-061 revision 4, decision 2).
 ///
@@ -56,7 +62,8 @@ pub const PINNED_ENGINE_CONFIG: PinnedEngineConfigV1 = PinnedEngineConfigV1 {
 ///
 /// Returns the profile's trap-table rejection; the pinned table satisfies it,
 /// and a test proves that.
-pub fn pinned_runtime() -> Result<PinnedComponentRuntimeV1, CommunityPluginProfileErrorV1> {
+#[cfg(test)]
+pub fn derived_runtime() -> Result<PinnedComponentRuntimeV1, CommunityPluginProfileErrorV1> {
     PinnedComponentRuntimeV1::new(
         WASMTIME_VERSION.to_owned(),
         RESOLVED_WASMTIME_FEATURES.map(str::to_owned).to_vec(),
@@ -67,7 +74,7 @@ pub fn pinned_runtime() -> Result<PinnedComponentRuntimeV1, CommunityPluginProfi
 
 /// Whether `runtime` records exactly this engine's runtime.
 ///
-/// It compares the same values [`pinned_runtime`] records, without building
+/// It compares the same values the pinned runtime records, without building
 /// (and so without re-validating) a second runtime.
 pub(crate) fn is_pinned_runtime(runtime: &PinnedComponentRuntimeV1) -> bool {
     runtime.wasmtime_version() == WASMTIME_VERSION
@@ -126,6 +133,7 @@ pub(crate) const fn trap_outcome(trap: Trap) -> TrapOutcomeV1 {
 mod tests {
     use super::*;
     use crate::test_values::ok;
+    use pos_runtime::community_plugin_host::pinned_runtime_v1;
 
     use ComponentTrapClassV1 as Class;
 
@@ -233,7 +241,7 @@ mod tests {
 
     #[test]
     fn the_trap_table_has_one_row_per_pinned_code_in_code_order() {
-        let runtime = ok(pinned_runtime());
+        let runtime = ok(derived_runtime());
         let codes: Vec<&str> = runtime
             .trap_table()
             .iter()
@@ -251,8 +259,29 @@ mod tests {
     }
 
     #[test]
+    fn the_derived_runtime_equals_the_constant_and_is_accepted() {
+        let constant = pinned_runtime_v1();
+        assert_eq!(ok(derived_runtime()), constant);
+        assert!(is_pinned_runtime(&constant));
+    }
+
+    #[test]
+    fn a_constant_missing_one_row_is_not_the_pinned_runtime() {
+        let constant = pinned_runtime_v1();
+        let mut rows = constant.trap_table().to_vec();
+        rows.pop();
+        let shorter = ok(PinnedComponentRuntimeV1::new(
+            constant.wasmtime_version().to_owned(),
+            constant.resolved_features().to_vec(),
+            constant.engine(),
+            rows,
+        ));
+        assert!(!is_pinned_runtime(&shorter));
+    }
+
+    #[test]
     fn the_runtime_records_the_pin_features_and_engine_config() {
-        let runtime = ok(pinned_runtime());
+        let runtime = ok(derived_runtime());
         assert_eq!(runtime.wasmtime_version(), "49.0.3");
         assert_eq!(runtime.resolved_features(), RESOLVED_WASMTIME_FEATURES);
         assert_eq!(

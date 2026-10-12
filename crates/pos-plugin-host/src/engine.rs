@@ -54,8 +54,8 @@ impl GuestExport {
 /// A negotiated release whose profile pins this engine's runtime.
 ///
 /// Building one is the precondition of every invocation: the profile must
-/// record exactly [`crate::runtime::pinned_runtime`], whose validated trap table has a row
-/// for `OutOfFuel`, `Interrupt` and every other pinned trap code.
+/// record exactly [`pos_runtime::community_plugin_host::pinned_runtime_v1`], whose validated trap table has a row for
+/// `OutOfFuel`, `Interrupt` and every other pinned trap code.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PinnedExecutionV1 {
     negotiated: NegotiatedCommunityPluginV1,
@@ -67,7 +67,7 @@ impl PinnedExecutionV1 {
     /// # Errors
     ///
     /// Returns [`RuntimeNotPinnedV1`] when the profile records no runtime or a
-    /// runtime other than [`crate::runtime::pinned_runtime`].
+    /// runtime other than [`pos_runtime::community_plugin_host::pinned_runtime_v1`].
     pub fn new(negotiated: NegotiatedCommunityPluginV1) -> Result<Self, RuntimeNotPinnedV1> {
         negotiated
             .runtime()

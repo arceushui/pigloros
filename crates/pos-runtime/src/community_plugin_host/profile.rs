@@ -15,6 +15,10 @@ use crate::composition::PluginExecutionModeV1;
 use super::cbor;
 use super::error::{CommunityPluginHostErrorV1, ComponentTrapClassV1, TrapReproductionV1};
 
+mod pinned;
+
+pub use pinned::{pinned_runtime_v1, profile_digest_of};
+
 /// The `wasmtime::Trap` code that is the authoritative `FuelExhausted`.
 const OUT_OF_FUEL_TRAP_CODE: &str = "OutOfFuel";
 /// The `wasmtime::Trap` code that is the operational watchdog stop.
@@ -524,3 +528,7 @@ fn profile_body(ceilings: CeilingValuesV1, runtime: &PinnedComponentRuntimeV1) -
     }
     out
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;

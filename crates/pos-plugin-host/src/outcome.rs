@@ -54,7 +54,7 @@ impl From<LoadError> for CommunityPluginHostErrorV1 {
 /// The negotiated record's profile does not pin this engine's runtime.
 ///
 /// Execution requires the profile's pinned runtime to equal
-/// [`crate::runtime::pinned_runtime`]: the same version, features, Engine
+/// [`pos_runtime::community_plugin_host::pinned_runtime_v1`]: the same version, features, Engine
 /// configuration and complete trap table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeNotPinnedV1;
