@@ -1320,7 +1320,9 @@ impl ErasureExecutionHostV1 {
         composition: &ErasureCoordinatorCompositionV1,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
-        Self::recover_with_composition(Box::new(store), composition, limits)
+        store.detach_fixture_gate_for_host()
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)
+            .and_then(|store| Self::recover_with_composition(Box::new(store), composition, limits))
     }
 
     /// Recover one store after installing its explicit authority composition.

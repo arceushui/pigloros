@@ -21,7 +21,7 @@ impl ForkReplayAuthorityReadPortV1 for MemoryStore {
         budget: &mut ForkReplayReadBudgetV1<'_>,
     ) -> ReadResult<ForkReplayAuthorityEvidenceV1> {
         self.preflight_replay_ancestry(requirement.child_timeline_id(), budget)?;
-        self.preflight_replay_records(budget)?;
+        self.preflight_replay_records(requirement, budget)?;
         let committed = self
             .read_committed_as(
                 requirement.child_timeline_id(),
@@ -61,32 +61,54 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// The current native validators scan these maps when rejecting orphan or
-    /// duplicated rows. Preflight bounds those scans and every canonical value
-    /// before their vector/table copies. Unrelated scanned rows are not free.
-    fn preflight_replay_records(&self, budget: &mut ForkReplayReadBudgetV1<'_>) -> ReadResult<()> {
-        charge_records(self.fork_admissions.values(), budget)?;
-        charge_records(self.imported_fork_admissions.values(), budget)?;
-        charge_records(self.fork_principal_owner_bindings.values(), budget)?;
-        charge_records(self.imported_fork_principal_owner_bindings.values(), budget)?;
-        charge_records(self.fork_classifier_sources.values(), budget)?;
-        charge_records(self.imported_fork_classifier_sources.values(), budget)?;
-        charge_records(self.fork_classifier_tables.values(), budget)?;
-        charge_records(self.fork_classifier_registrations.values(), budget)?;
+    /// Indexed records belong only to this selected publication. Broader scans
+    /// are retained only where validator (b) genuinely checks orphans/duplicates.
+    fn preflight_replay_records(&self, requirement: &ForkReplayRequirementV1, budget: &mut ForkReplayReadBudgetV1<'_>) -> ReadResult<()> {
+        let child = requirement.child_timeline_id();
+        let local = self.fork_admissions.get(&child);
+        charge_records(local.into_iter(), budget)?;
+        charge_records(self.imported_fork_admissions.get(&child).into_iter(), budget)?;
+        if local.is_some() {
+            for binding in self.fork_principal_owner_bindings.values() {
+                budget.charge_rows(1)?;
+                // The local validator searches this map by its FAR1 digest.
+                budget.charge_bytes(binding.canonical_size())?;
+            }
+        }
+        if let Some(table) = self.fork_classifier_tables.get(&child) {
+            charge_records(std::iter::once(table), budget)?;
+            charge_records(self.imported_fork_classifier_sources.get(&table.input().source_configuration_revision_digest).into_iter(), budget)?;
+            let key = (table.input().room_revision_descriptor_hash, table.input().registrar_identifier.clone());
+            charge_records(self.fork_classifier_sources.get(&key).into_iter(), budget)?;
+        }
+        for registration in self.fork_classifier_registrations.values() {
+            budget.charge_rows(1)?;
+            if registration.input().child_timeline_id == child {
+                budget.charge_bytes(registration.canonical_size())?;
+            }
+        }
         charge_records(self.fork_append_operations.values(), budget)?;
         charge_records(self.fork_event_origins.values(), budget)?;
         charge_records(self.fork_intervention_admissions.values(), budget)?;
-        charge_records(self.fork_publication_operations.values(), budget)?;
-        charge_records(self.imported_fork_publication_operations.values(), budget)?;
-        charge_records(self.fork_publication_bindings.values(), budget)?;
-        charge_records(self.fork_publication_artifacts.values(), budget)?;
+        if let Some(binding) = self.fork_publication_bindings.get(&(child, requirement.publication_logical_head().as_u64())) {
+            charge_records(std::iter::once(binding), budget)?;
+            let input = binding.input();
+            charge_records(self.fork_publication_operations.get(&input.operation_id).into_iter(), budget)?;
+            charge_records(self.imported_fork_publication_operations.get(&input.operation_id).into_iter(), budget)?;
+            charge_records(self.fork_publication_artifacts.get(&input.signed_manifest_record_id).into_iter(), budget)?;
+        }
         for row in self.imported_fork_attributions.values() {
             budget.charge_rows(1)?;
-            budget.charge_bytes(row.stored.admission_bytes.len())?;
-        }
-        for evidence in self.imported_fork_key_evidence.values() {
-            charge_records(std::iter::once(&evidence.record), budget)?;
-            charge_records(evidence.tombstone.iter(), budget)?;
+            if row.child == child {
+                budget.charge_bytes(row.stored.admission_bytes.len())?;
+                // The preflight's own canonical decoder is charged too.
+                budget.charge_bytes(row.stored.admission_bytes.len())?;
+                let admission = pos_core::ImportedForkAttributionAdmissionV1::from_canonical_cbor(&row.stored.admission_bytes).map_err(|_| Error::CorruptAuthority)?;
+                if let Some(evidence) = self.imported_fork_key_evidence.get(&admission.input().import_operation_id) {
+                    charge_records(std::iter::once(&evidence.record), budget)?;
+                    charge_records(evidence.tombstone.iter(), budget)?;
+                }
+            }
         }
         if let Some(registry) = &self.key_registry {
             charge_registry(registry, budget)?;
