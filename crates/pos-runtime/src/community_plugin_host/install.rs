@@ -160,9 +160,7 @@ const fn host_error_for_installer_v1(
         PluginReleaseInstallErrorV1::Authorization(inner) => {
             host_error_for_trust_authorization_v1(inner)
         }
-        PluginReleaseInstallErrorV1::Signature(inner) => {
-            host_error_for_release_signature_v1(inner)
-        }
+        PluginReleaseInstallErrorV1::Signature(inner) => host_error_for_release_signature_v1(inner),
         PluginReleaseInstallErrorV1::Registry(inner) => host_error_for_registry_v1(inner),
     }
 }

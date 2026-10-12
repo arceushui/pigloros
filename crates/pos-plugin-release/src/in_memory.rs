@@ -5,6 +5,10 @@
 //! read, so a fault inside any held byte is found at the read and nothing is cached. It exists
 //! for evaluation worlds that carry their releases as bytes and must not need a SHA-256
 //! dependency of their own.
+//!
+//! Because `from_bytes` keys each blob by the SHA-256 of its own bytes, a blob whose bytes were
+//! altered is found as an unexpected key (`BoundsExceeded`); `DigestMismatch` is unreachable
+//! through this source.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

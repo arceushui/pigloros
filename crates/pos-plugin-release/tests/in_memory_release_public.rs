@@ -206,10 +206,16 @@ fn every_fault_inside_the_held_bytes_is_the_verifiers_closed_error_at_every_read
     assert_eq!(read_error(entry_of(&good_layers())?)?, None);
 
     // A flipped blob byte: the blob is keyed by its own digest, which the manifest does not name.
+    // The control with the unflipped blob passes; the flipped one has the same manifest and
+    // address but a different blob set, and fails. `DigestMismatch` is unreachable here.
     let mut flipped = good_layers();
     let manifest = manifest_of(&flipped);
+    let control = InMemoryReleaseEntryV1::from_bytes(manifest.clone(), bytes_of(&flipped))?;
     flipped[1].bytes[0] ^= 1;
+    assert_ne!(flipped[1].bytes, good_layers()[1].bytes);
     let entry = InMemoryReleaseEntryV1::from_bytes(manifest, bytes_of(&flipped))?;
+    assert_eq!(entry.address(), control.address());
+    assert_eq!(read_error(control)?, None);
     assert_eq!(read_error(entry)?, Some(S::BoundsExceeded));
 
     // A wrong layer size: the descriptor says one byte more than the blob holds.

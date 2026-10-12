@@ -45,6 +45,11 @@ impl CommunityPluginTrustMaterialV1 {
     /// Material from raw bytes: the anchor, the signed TPS1 bytes, and the ordered PTR1 and
     /// PRV1 record bytes (oldest first).
     ///
+    /// An empty TPS1 is accepted here like any other malformed record (the ADR names only the
+    /// two histories as plain emptiness); the gate refuses it. The histories are named `roots`
+    /// and `revocations` rather than the ADR's `ptr1_records` and `prv1_records` because
+    /// clippy's `similar_names` rejects that pair.
+    ///
     /// # Errors
     /// Returns `Empty` for an empty PTR1 or PRV1 history and `Anchor` when the scope or the
     /// operator key is not valid. Nothing else is checked: the gate verifies every record on

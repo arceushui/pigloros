@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Adversarial tests for the Plugin trust policy registry checker (ADR-103 revisions 4 and 5)."""
+"""Adversarial tests for the Plugin trust policy registry checker (ADR-103 revisions 4 and 5,
+ADR-061 revision 8 rule 6)."""
 
 from __future__ import annotations
 
@@ -133,7 +134,6 @@ ALLOWED = {
     # Rule 6: the trusted composition, the conformance adapter and any `tests` directory may name
     # the from-bytes APIs; a comment or a longer identifier is not a name.
     "crates/pos-runtime/src/community_plugin_host/trust_bytes.rs": CONFINED_ALL,
-    "crates/pos-runtime/tests/community_trust_bytes_public.rs": CONFINED_ALL,
     "apps/pos-plugin-conformance-adapter/src/world.rs": CONFINED_ALL,
     "apps/pos-plugin-conformance-adapter/tests/world.rs": CONFINED_ALL,
     "crates/pos-plugin-supervisor/tests/members.rs": CONFINED_ALL,
@@ -238,6 +238,12 @@ CONFINED_REJECTED = {
     )
 }
 CONFINED_REJECTED["crates/pos-state/src/tests.rs"] = CONFINED_ALL
+# One file naming every confined name is rejected too.
+CONFINED_REJECTED["crates/pos-state/src/all_names.rs"] = CONFINED_ALL
+# A `#[cfg(test)]` item outside the allowed prefixes is not exempt: only a `tests` directory is.
+CONFINED_REJECTED["crates/pos-state/src/cfg_test_item.rs"] = (
+    "#[cfg(test)]\nmod tests {\n    " + CONFINED["fixed_source"] + "}\n"
+)
 
 FORBIDDEN_NAMES = {
     "fn_signature": "pub fn signature_valid() {}\n",

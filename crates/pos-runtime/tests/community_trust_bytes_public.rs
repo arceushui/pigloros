@@ -233,3 +233,18 @@ fn the_anchor_bytes_and_errors_compare_clone_and_describe_themselves() -> TestRe
     assert_ne!(Bytes::Anchor, Bytes::Empty);
     Ok(())
 }
+
+#[test]
+fn an_empty_tps1_is_accepted_at_construction_and_refused_by_the_gate() -> TestResult {
+    let (world, address) = installed()?;
+    let material = world.material()?;
+    let anchor = anchor_bytes(&world.anchor);
+    let roots = vec![material.ptr1().to_vec()];
+    let revocations = material.prv1_records().to_vec();
+    let built = CommunityPluginTrustMaterialV1::from_bytes_v1(&anchor, vec![], roots, revocations)?;
+    assert!(built.tps1_bytes().is_empty());
+    let source = FixedTrustMaterialSourceV1::new(built);
+    let refused = gate(&world, &address, &source)?;
+    assert!(refused.is_err());
+    Ok(())
+}
