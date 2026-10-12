@@ -4,7 +4,6 @@
 /// this one seam lets the forwarding macros reach either without a trait
 /// import at each expansion site.
 #[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
 trait FactualReadsV1 {
     fn factual_reads(&self) -> &dyn pos_core::FactualPrefixReadPortV1;
 }
