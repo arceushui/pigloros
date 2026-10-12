@@ -819,9 +819,7 @@ fn committed_graph_is_consistent(
             )
             .is_ok()
         && manifest.intervention_sequences == trusted.intervention_sequences
-        && trusted
-            .key_evidence
-            .accepts(trusted.registry, operation)
+        && trusted.key_evidence.accepts(trusted.registry, operation)
 }
 
 /// Where a trusted read takes the retained `FPO1`/`FSM1` verification key
