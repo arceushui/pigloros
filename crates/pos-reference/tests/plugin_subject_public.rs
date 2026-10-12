@@ -10,8 +10,8 @@ use std::io;
 use std::sync::OnceLock;
 
 use pos_reference::evaluator::{
-    evaluate, AdapterError, CaseAttempt, ResourceUsage, SubjectAdapter, SubjectObservation,
-    SubjectResult,
+    evaluate, AdapterError, CaseAttempt, EvaluatorError, ResourceUsage, SubjectAdapter,
+    SubjectObservation, SubjectResult,
 };
 use pos_reference::evaluator_build_identity::VerifiedEvaluatorBuildIdentity;
 use pos_reference::evaluator_domain::{ClaimLayer, FixtureFamily, SafeErrorCode};
@@ -34,6 +34,21 @@ const FAILURE_FAMILIES: [(u8, &str); 4] = [
     (2, "malformed-payload"),
     (3, "resource-limit"),
     (5, "incompatible-contract"),
+];
+
+const FAMILY_COUNT: u8 = 7;
+
+type Counter = fn(&mut ResourceUsage) -> &mut u64;
+
+const COUNTERS: [(&str, Counter); 8] = [
+    ("memory_bytes", |usage| &mut usage.memory_bytes),
+    ("cpu_fuel", |usage| &mut usage.cpu_fuel),
+    ("host_calls", |usage| &mut usage.host_calls),
+    ("event_count", |usage| &mut usage.event_count),
+    ("output_bytes", |usage| &mut usage.output_bytes),
+    ("storage_bytes", |usage| &mut usage.storage_bytes),
+    ("execution_steps", |usage| &mut usage.execution_steps),
+    ("simulation_time_ns", |usage| &mut usage.simulation_time_ns),
 ];
 
 const OUTPUT_FAMILIES: [u8; 3] = [0, 4, 6];
@@ -79,7 +94,8 @@ fn evaluator_identity() -> TestResult<VerifiedEvaluatorBuildIdentity> {
     }
 }
 
-/// Lowercase hexadecimal, written out here so that no test expectation reuses crate code.
+/// Lowercase hexadecimal. Only the hex and record construction is independent of the crate;
+/// `IND1_DIGEST` is the anchor that pins the expected value.
 fn hexadecimal(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut value = String::with_capacity(bytes.len() * 2);
@@ -113,6 +129,11 @@ fn independent_record(digest: &str) -> Vec<u8> {
 }
 
 /// The hand-written oracle members; the failure families carry typed failures instead.
+///
+/// The `pos.1` and `del.1` subcase shapes are illustrative; S5 (R8-S7) owns the real record
+/// shape. The placeholder members at ordinals 1, 2, 3 and 5 are written into the bundle but no
+/// oracle references them, and the corpus payload is one opaque byte per family: both are inert
+/// by design.
 fn oracle_records() -> Vec<Vec<u8>> {
     let positive = format!(
         "{{\"id\":\"pos.1\",\"kind\":\"committed\",\"output_digest\":\"{}\"}}",
@@ -123,7 +144,7 @@ fn oracle_records() -> Vec<Vec<u8>> {
          \"retained_metadata\":{{\"invocation_id_hex\":\"{}\",\"plugin_id\":\"fixture.plugin\"}}}}",
         "22".repeat(16)
     );
-    (0_u8..7)
+    (0..FAMILY_COUNT)
         .map(|case| match case {
             0 => oracle_record(case, "positive", &positive),
             4 => oracle_record(case, "deletion-redaction", &deletion),
@@ -205,11 +226,11 @@ fn expect_status(report: &ConformanceReport, family: u8, expected: CaseStatus) -
 }
 
 fn expect_all(report: &ConformanceReport, expected: CaseStatus) -> TestResult {
-    (0_u8..7).try_for_each(|family| expect_status(report, family, expected))
+    (0..FAMILY_COUNT).try_for_each(|family| expect_status(report, family, expected))
 }
 
-/// Usage that sits exactly at the fixture budget, with `extra` added to one field.
-fn usage_at(budget: DeterministicBudget, field: usize, extra: u64) -> ResourceUsage {
+/// Usage that sits exactly at the fixture budget, with `extra` added to one counter.
+fn usage_at(budget: DeterministicBudget, counter: Counter, extra: u64) -> ResourceUsage {
     let mut usage = ResourceUsage {
         memory_bytes: budget.memory_bytes,
         cpu_fuel: budget.cpu_fuel,
@@ -220,21 +241,12 @@ fn usage_at(budget: DeterministicBudget, field: usize, extra: u64) -> ResourceUs
         execution_steps: budget.execution_steps,
         simulation_time_ns: budget.simulation_time_ns,
     };
-    match field {
-        0 => usage.memory_bytes += extra,
-        1 => usage.cpu_fuel += extra,
-        2 => usage.host_calls += extra,
-        3 => usage.event_count += extra,
-        4 => usage.output_bytes += extra,
-        5 => usage.storage_bytes += extra,
-        6 => usage.execution_steps += extra,
-        _ => usage.simulation_time_ns += extra,
-    }
+    *counter(&mut usage) += extra;
     usage
 }
 
 #[test]
-fn plugin_attempts_expose_only_the_public_plugin_inputs() -> TestResult {
+fn plugin_attempts_carry_plugin_layer_and_no_network() -> TestResult {
     let (corpus, records) = plugin_fixtures()?;
     let mut attempts = Vec::new();
     let report = run(&corpus, |attempt| {
@@ -242,7 +254,7 @@ fn plugin_attempts_expose_only_the_public_plugin_inputs() -> TestResult {
         Ok(observe(faithful(attempt.family, &records)))
     })?;
     expect_all(&report, CaseStatus::Pass)?;
-    assert_eq!(attempts.len(), 7, "one attempt per family");
+    assert_eq!(attempts.len(), usize::from(FAMILY_COUNT), "attempts");
     for attempt in &attempts {
         assert_eq!(attempt.claim_layer, ClaimLayer::PluginConformance);
         assert!(!attempt.network_allowed, "{}", attempt.case_id);
@@ -250,7 +262,7 @@ fn plugin_attempts_expose_only_the_public_plugin_inputs() -> TestResult {
     assert!(report
         .cases
         .iter()
-        .all(|case| case.claim_layer == ClaimLayer::PluginConformance));
+        .all(|outcome| outcome.claim_layer == ClaimLayer::PluginConformance));
     Ok(())
 }
 
@@ -396,7 +408,7 @@ fn unavailable_is_neither_pass_nor_fail() -> TestResult {
     let (corpus, records) = plugin_fixtures()?;
     let report = run(&corpus, |_| Ok(observe(SubjectResult::Unavailable)))?;
     expect_all(&report, CaseStatus::Unavailable)?;
-    for family in 0_u8..7 {
+    for family in 0..FAMILY_COUNT {
         let outcome = case(&report, family)?;
         assert_eq!(outcome.actual_digest, None, "case-{family} digest");
         assert_eq!(outcome.actual_error, None, "case-{family} error");
@@ -420,30 +432,48 @@ fn unavailable_is_neither_pass_nor_fail() -> TestResult {
 }
 
 #[test]
+fn lost_authenticated_evidence_is_an_evaluator_error_not_a_case_status() -> TestResult {
+    let (corpus, _) = plugin_fixtures()?;
+    let mut adapter = Scripted {
+        subject_digest: corpus.subject_digest,
+        script: |_: &CaseAttempt| Err(AdapterError::AuthenticatedEvidenceFailure),
+    };
+    let result = evaluate(
+        &corpus.request,
+        &corpus.archive,
+        &corpus.trust_policy,
+        &evaluator_identity()?,
+        &mut adapter,
+    );
+    assert_eq!(result.err(), Some(EvaluatorError::AdapterIdentity));
+    Ok(())
+}
+
+#[test]
 fn usage_at_the_budget_passes_and_one_above_fails_for_every_counter() -> TestResult {
     let (corpus, records) = plugin_fixtures()?;
-    for field in 0..8 {
+    for (name, counter) in COUNTERS {
         let at_budget = run(&corpus, |attempt| {
             Ok(SubjectObservation {
                 result: faithful(attempt.family, &records),
-                usage: usage_at(attempt.budget, field, 0),
+                usage: usage_at(attempt.budget, counter, 0),
             })
         })?;
         expect_all(&at_budget, CaseStatus::Pass)
-            .map_err(|error| io::Error::other(format!("counter {field} at budget: {error}")))?;
+            .map_err(|error| io::Error::other(format!("counter {name} at budget: {error}")))?;
         let above = run(&corpus, |attempt| {
             Ok(SubjectObservation {
                 result: faithful(attempt.family, &records),
-                usage: usage_at(attempt.budget, field, 1),
+                usage: usage_at(attempt.budget, counter, 1),
             })
         })?;
         expect_all(&above, CaseStatus::Fail)
-            .map_err(|error| io::Error::other(format!("counter {field} above: {error}")))?;
-        for family in 0_u8..7 {
+            .map_err(|error| io::Error::other(format!("counter {name} above: {error}")))?;
+        for family in 0..FAMILY_COUNT {
             assert_eq!(
                 case(&above, family)?.actual_error,
                 Some(SafeErrorCode::ResourceLimitExceeded),
-                "counter {field}, case-{family}"
+                "counter {name}, case-{family}"
             );
         }
     }

@@ -710,7 +710,9 @@ pub fn mixed_oracle_corpus() -> TestResult<Corpus> {
 /// Families 1, 2, 3 and 5 carry the typed failure oracles `capability-denied`,
 /// `malformed-payload`, `resource-limit` and `incompatible-contract` owned by the
 /// fixture provider; the remaining families carry the supplied oracle member for
-/// their ordinal, one entry per family.
+/// their ordinal, one entry per family. The records at ordinals 1, 2, 3 and 5 are
+/// written as fixture members but no oracle references them, so their content is
+/// opaque and inert by design, as is the one-byte payload of every family.
 ///
 /// # Errors
 /// Returns an error if canonical encoding or fixture construction fails.
@@ -1575,8 +1577,7 @@ fn fixtures(
                 members,
                 &evidence_path,
                 &output_path,
-                options.mixed_oracles,
-                options.plugin_records.is_some(),
+                oracle_mode(options),
                 options.failure_outcome,
                 family,
             )?;
@@ -1634,12 +1635,46 @@ fn plugin_record(records: Option<&[Vec<u8>]>, family: u64) -> TestResult<Option<
     Ok(Some(record.as_slice()))
 }
 
-const fn plugin_failure_code(family: u64) -> &'static str {
-    match family {
-        1 => "capability-denied",
-        2 => "malformed-payload",
-        3 => "resource-limit",
-        _ => "incompatible-contract",
+/// How `fixture_expectation` derives the oracle of each family.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FixtureOracleMode {
+    Default,
+    Mixed,
+    Plugin,
+}
+
+const fn oracle_mode(options: CorpusOptions<'_>) -> FixtureOracleMode {
+    if options.plugin_records.is_some() {
+        FixtureOracleMode::Plugin
+    } else if options.mixed_oracles {
+        FixtureOracleMode::Mixed
+    } else {
+        FixtureOracleMode::Default
+    }
+}
+
+const fn typed_failure_code(mode: FixtureOracleMode, family: u64) -> Option<&'static str> {
+    match (mode, family) {
+        (FixtureOracleMode::Plugin, 1) => Some("capability-denied"),
+        (FixtureOracleMode::Plugin, 2) => Some("malformed-payload"),
+        (FixtureOracleMode::Plugin, 3) => Some("resource-limit"),
+        (FixtureOracleMode::Plugin, 5) => Some("incompatible-contract"),
+        (FixtureOracleMode::Mixed, 1) => Some("denied"),
+        _ => None,
+    }
+}
+
+fn typed_failure_expectation(
+    code: &str,
+    failure_outcome: Option<u8>,
+    auxiliary: Value,
+) -> FixtureExpectation {
+    let failure = array(vec![text("test-provider"), text("1.0.0"), text(code)]);
+    FixtureExpectation {
+        auxiliary,
+        oracle: array(vec![uint(1), Value::Null, failure.clone(), Value::Null]),
+        expected_outcome: uint(u64::from(failure_outcome.unwrap_or(2))),
+        expected_error: failure,
     }
 }
 
@@ -1647,8 +1682,7 @@ fn fixture_expectation(
     members: &BTreeMap<String, (Vec<u8>, u8)>,
     evidence_path: &str,
     output_path: &str,
-    mixed_oracles: bool,
-    plugin: bool,
+    mode: FixtureOracleMode,
     failure_outcome: Option<u8>,
     family: u64,
 ) -> TestResult<FixtureExpectation> {
@@ -1658,29 +1692,12 @@ fn fixture_expectation(
             descriptor(members, output_path)?,
         ]))
     };
-    Ok(match (plugin, mixed_oracles, family) {
-        (true, _, 1 | 2 | 3 | 5) => {
-            let code = plugin_failure_code(family);
-            let failure = array(vec![text("test-provider"), text("1.0.0"), text(code)]);
-            FixtureExpectation {
-                auxiliary: output_and_evidence()?,
-                oracle: array(vec![uint(1), Value::Null, failure.clone(), Value::Null]),
-                expected_outcome: uint(u64::from(failure_outcome.unwrap_or(2))),
-                expected_error: failure,
-            }
-        }
-        (false, true, 1) => FixtureExpectation {
-            auxiliary: output_and_evidence()?,
-            oracle: array(vec![
-                uint(1),
-                Value::Null,
-                array(vec![text("test-provider"), text("1.0.0"), text("denied")]),
-                Value::Null,
-            ]),
-            expected_outcome: uint(u64::from(failure_outcome.unwrap_or(2))),
-            expected_error: array(vec![text("test-provider"), text("1.0.0"), text("denied")]),
-        },
-        (false, true, 2) => FixtureExpectation {
+    if let Some(code) = typed_failure_code(mode, family) {
+        let auxiliary = output_and_evidence()?;
+        return Ok(typed_failure_expectation(code, failure_outcome, auxiliary));
+    }
+    Ok(match (mode, family) {
+        (FixtureOracleMode::Mixed, 2) => FixtureExpectation {
             auxiliary: output_and_evidence()?,
             oracle: array(vec![
                 uint(2),
