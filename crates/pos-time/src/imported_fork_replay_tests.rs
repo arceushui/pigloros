@@ -113,20 +113,17 @@ fn run_on_host(mut host: ErasureExecutionHostV1, child: TimelineId, fault: Fault
     let mut reads = host.read_sender()?;
     FOLDED_EVENTS.store(0, Ordering::SeqCst);
     let result = with_release(|release| crate::replay(&mut reads, child, &mut registry, &closure, release, &fixture.fold()));
-    match fault {
-        Fault::None => {
+    if let Fault::None = fault {
             result?;
-            assert!(FOLDED_EVENTS.load(Ordering::SeqCst) >= PARENT_CUT as usize);
+            assert!(FOLDED_EVENTS.load(Ordering::SeqCst) >= usize::try_from(PARENT_CUT)?);
             with_release(|release| crate::replay_at(&mut reads, child, Seq::from_u64(2), &mut registry, &closure, release, &fixture.fold()))?;
-        }
-        _ => {
+    } else {
             assert_eq!(result.map_err(|error| error.to_string()), Err(CoreError::ArtifactUnavailable.to_string()));
             if matches!(fault, Fault::FinalIdentity) {
                 assert!(FOLDED_EVENTS.load(Ordering::SeqCst) > 0);
             } else {
                 assert_eq!(FOLDED_EVENTS.load(Ordering::SeqCst), 0);
             }
-        }
     }
     Ok(())
 }
@@ -180,20 +177,17 @@ fn compare_on_host(mut host: ErasureExecutionHostV1, requirements: [ForkReplayRe
     let mut reads = host.read_sender()?;
     FOLDED_EVENTS.store(0, Ordering::SeqCst);
     let result = with_release(|release| crate::compare(&mut reads, timelines, Seq::from_u64(PARENT_CUT), [&mut a, &mut b], [&closures[0], &closures[1]], release, [&fixture_a.fold(), &fixture_b.fold()]));
-    match fault {
-        Fault::None => {
+    if let Fault::None = fault {
             let diff = result?;
             assert_eq!(diff.fork_seq, Seq::from_u64(PARENT_CUT));
             assert!(!diff.diverged_entities.is_empty());
-        }
-        _ => {
+    } else {
             assert_eq!(result.map(|_| ()).map_err(|error| error.to_string()), Err(CoreError::ArtifactUnavailable.to_string()));
             if matches!(fault, Fault::FinalIdentity) {
                 assert!(FOLDED_EVENTS.load(Ordering::SeqCst) > 0);
             } else {
                 assert_eq!(FOLDED_EVENTS.load(Ordering::SeqCst), 0);
             }
-        }
     }
     Ok(())
 }
