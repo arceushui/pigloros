@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use pos_conformance::PluginTrustPolicyAnchorV1;
 use pos_core::event::{CanonicalBytes, EventDraft, Kind};
 use pos_core::ids::{EntityId, TimelineId};
-use pos_core::trusted_clock::TrustedWallSourceV1;
+use pos_core::trusted_clock::PluginTrustWallSourceV1;
 use pos_crypto::plugin_execution::PluginExecutionProjectionV1;
 use pos_crypto::plugin_manifest::PluginManifestErrorV1;
 use pos_crypto::plugin_trust::VerifiedPluginTrustEvidenceV1;
@@ -98,7 +98,7 @@ pub fn install_community_release_v1(
     source: &impl ReleaseSourceV1,
     address: &BundleAddressV1,
     registry: &mut impl PluginTrustPolicyRegistryV1,
-    wall: &mut impl TrustedWallSourceV1,
+    wall: &mut impl PluginTrustWallSourceV1,
     request: &CommunityInstallRequestV1<'_>,
 ) -> Result<InstalledPluginReleaseV1, CommunityInstallErrorV1> {
     let bundle = source

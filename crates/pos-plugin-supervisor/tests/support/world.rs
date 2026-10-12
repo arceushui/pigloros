@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pos_core::trusted_clock::TrustedWallSourceV1;
+use pos_core::trusted_clock::PluginTrustWallSourceV1;
 use pos_core::{
     AppendDedupKey, AppendDedupScope, AppendIdentity, ErasureContainmentGateV1, ErasureGate, Event,
     EventStore, FactualAdmissionPortV1, Hash, PipelineAttemptIdV1, PipelineCommitReceiptV1,
@@ -499,7 +499,7 @@ impl World {
         &mut self,
         host: &mut CommunityPluginHostV1<M>,
         trust: &impl PluginTrustPolicyRegistryV1,
-        wall: &mut impl TrustedWallSourceV1,
+        wall: &mut impl PluginTrustWallSourceV1,
         tick: u64,
     ) -> Result<CommunityPassOutcomeV1, RuntimeError> {
         let prepared = self.prepare()?;

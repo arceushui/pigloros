@@ -15,6 +15,11 @@ test-support = []
 # it outside dev-dependencies; scripts/check_counterfactual_adapter_seal.py
 # enforces that in CI.
 counterfactual-adapter = []
+# Exposes `FixtureEvaluationInstantV1` and `FixtureWallSourceV1`, a Plugin trust
+# wall source that returns one fixture-supplied instant (ADR-061 revision 8). Only
+# the Plugin-conformance adapter may enable it, in `[dependencies]`;
+# scripts/check_fixture_instant_confinement.py enforces that in CI.
+fixture-instant = []
 
 [dependencies]
 blake3 = { workspace = true }
