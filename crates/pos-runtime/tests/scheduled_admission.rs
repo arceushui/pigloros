@@ -71,6 +71,9 @@ const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
 }
 
+/// The one authority grant every admission in this file runs under.
+const GRANT: Hash = hash(1);
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn entity(value: u128) -> EntityId {
     EntityId::from_ulid(Ulid::from(value))
@@ -97,7 +100,7 @@ fn authority_timeline() -> TimelineId {
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn root_grant() -> CapabilityGrantV1 {
     ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
-        grant_id: hash(1),
+        grant_id: GRANT,
         grantor: principal(1),
         grantee: AuthorityGranteeV1::Principal(principal(2)),
         trust_domain: "local.test".to_owned(),
@@ -178,7 +181,7 @@ fn publish(
     ok(store.set_pipeline_admission_fence(
         timeline,
         ok(PipelineAdmissionFenceV1::try_new(
-            hash(1),
+            GRANT,
             revisions,
             None,
             budget,
@@ -206,7 +209,7 @@ impl Host {
         let root = root_grant();
         ok(store.issue_capability_grant(ok(authority.authorize_grant(&root)), &root));
         let current = revisions(
-            &ok(store.load_authority(hash(1))),
+            &ok(store.load_authority(GRANT)),
             pipeline_erasure_revision_v1(gate.inventory_generation().ok()),
         );
         publish(store, timeline, current, budget);
@@ -233,7 +236,7 @@ impl Host {
     fn revoke_root(&self, store: &mut dyn Harness) {
         let revocation = ok(CapabilityRevocationV1::try_from_draft(
             CapabilityRevocationDraftV1 {
-                grant_id: hash(1),
+                grant_id: GRANT,
                 authority_timeline: authority_timeline(),
                 fence_position: Seq::from_u64(2),
                 revocation_epoch: 1,
@@ -266,7 +269,7 @@ impl Host {
             provider_validation: ok(PipelineEvidenceRefV1::try_new(hash(60))),
             security_revisions: self.revisions,
             // The grant `publish` names in the Timeline's fence.
-            authority_grant: hash(1),
+            authority_grant: GRANT,
             commit_head: ok(store.logical_head(self.timeline)),
             commit_now_secs: 1,
         }
@@ -714,7 +717,7 @@ impl PipelineAdmissionPortV1 for LostOutcomePort<'_> {
     }
 }
 
-impl pos_core::FactualPrefixReadPortV1 for LostOutcomePort<'_> {
+impl FactualPrefixReadPortV1 for LostOutcomePort<'_> {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn last_committed_factual_tick(
         &self,
@@ -1221,13 +1224,13 @@ impl PipelineAdmissionPortV1 for FenceRejectingPorts<'_> {
     }
 }
 
-impl pos_core::FactualPrefixReadPortV1 for FenceRejectingPorts<'_> {
+impl FactualPrefixReadPortV1 for FenceRejectingPorts<'_> {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn last_committed_factual_tick(
         &self,
         timeline: pos_core::TimelineId,
     ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
-        pos_core::FactualPrefixReadPortV1::last_committed_factual_tick(&*self.inner, timeline)
+        FactualPrefixReadPortV1::last_committed_factual_tick(&*self.inner, timeline)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1236,7 +1239,7 @@ impl pos_core::FactualPrefixReadPortV1 for FenceRejectingPorts<'_> {
         timeline: pos_core::TimelineId,
         seq: pos_core::Seq,
     ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
-        pos_core::FactualPrefixReadPortV1::cut_tick_at(&*self.inner, timeline, seq)
+        FactualPrefixReadPortV1::cut_tick_at(&*self.inner, timeline, seq)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1245,7 +1248,7 @@ impl pos_core::FactualPrefixReadPortV1 for FenceRejectingPorts<'_> {
         timeline: pos_core::TimelineId,
         seqs: &[pos_core::Seq],
     ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
-        pos_core::FactualPrefixReadPortV1::nodes_for_committed_events(&*self.inner, timeline, seqs)
+        FactualPrefixReadPortV1::nodes_for_committed_events(&*self.inner, timeline, seqs)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1257,7 +1260,7 @@ impl pos_core::FactualPrefixReadPortV1 for FenceRejectingPorts<'_> {
         Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
         pos_core::CoreError,
     > {
-        pos_core::FactualPrefixReadPortV1::nodes_by_digest(&*self.inner, timeline, digests)
+        FactualPrefixReadPortV1::nodes_by_digest(&*self.inner, timeline, digests)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1266,7 +1269,7 @@ impl pos_core::FactualPrefixReadPortV1 for FenceRejectingPorts<'_> {
         timeline: pos_core::TimelineId,
         owner: &pos_core::FactualOwnerIdV1,
     ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
-        pos_core::FactualPrefixReadPortV1::last_step_node(&*self.inner, timeline, owner)
+        FactualPrefixReadPortV1::last_step_node(&*self.inner, timeline, owner)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -1274,7 +1277,7 @@ impl pos_core::FactualPrefixReadPortV1 for FenceRejectingPorts<'_> {
         &self,
         timeline: pos_core::TimelineId,
     ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
-        pos_core::FactualPrefixReadPortV1::factual_set_counts(&*self.inner, timeline)
+        FactualPrefixReadPortV1::factual_set_counts(&*self.inner, timeline)
     }
 }
 
@@ -1639,7 +1642,7 @@ impl PipelineAdmissionPortV1 for DigestRecordingPort<'_> {
     }
 }
 
-impl pos_core::FactualPrefixReadPortV1 for DigestRecordingPort<'_> {
+impl FactualPrefixReadPortV1 for DigestRecordingPort<'_> {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn last_committed_factual_tick(
         &self,

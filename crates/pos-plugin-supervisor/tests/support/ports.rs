@@ -43,7 +43,7 @@ impl PipelineAdmissionPortV1 for LostPort<'_> {
     }
 }
 
-impl pos_core::FactualPrefixReadPortV1 for LostPort<'_> {
+impl FactualPrefixReadPortV1 for LostPort<'_> {
     fn last_committed_factual_tick(
         &self,
         timeline: pos_core::TimelineId,
@@ -122,7 +122,7 @@ impl PipelineAdmissionPortV1 for FailingPort<'_> {
     }
 }
 
-impl pos_core::FactualPrefixReadPortV1 for FailingPort<'_> {
+impl FactualPrefixReadPortV1 for FailingPort<'_> {
     fn last_committed_factual_tick(
         &self,
         timeline: pos_core::TimelineId,
@@ -230,7 +230,7 @@ impl PipelineAdmissionPortV1 for StampedPort<'_> {
     }
 }
 
-impl pos_core::FactualPrefixReadPortV1 for StampedPort<'_> {
+impl FactualPrefixReadPortV1 for StampedPort<'_> {
     fn last_committed_factual_tick(
         &self,
         timeline: pos_core::TimelineId,
