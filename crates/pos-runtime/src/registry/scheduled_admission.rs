@@ -3,7 +3,7 @@
 //! An anchored `step_all`/cadenced pass stages every due Driver against one
 //! shared base snapshot. This module turns that complete staged pass into one
 //! [`PipelineAdmissionBasisV1`] on the `ScheduledAiDriver` path and commits it
-//! through the host-only [`PipelineAdmissionPortV1`]: the store compares the
+//! through the host-only [`FactualAdmissionPortV1`]: the store compares the
 //! basis and assigns Event identity and Timeline Order inside one transaction,
 //! and staged Driver and cadence state commits only after that batch commits.
 //!
@@ -16,8 +16,8 @@
 //! view, and every view is revalidated against current authority first.
 
 use pos_core::{
-    AppendIdentity, CoreError, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
-    PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1,
+    AppendIdentity, CoreError, FactualAdmissionPortV1, Hash, PipelineAdmissionBasisDraftV1,
+    PipelineAdmissionBasisV1, PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1,
     PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineDraftBatchV1, PipelineEvidenceRefV1,
     PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
     PipelineSecurityRevisionsV1, Seq, TentativePipelineResultV1, PIPELINE_CONTRACT_VERSION_V1,
@@ -33,16 +33,18 @@ use crate::error::RuntimeError;
 /// Every field is issued by the trusted host, never by a Driver or provider:
 /// the attempt and idempotency identities, the reference to the host's ADR-046
 /// provider-validation evidence, the security revisions read from the
-/// host-published admission fence when the pass was observed, and the Logical
-/// Head and clock the host read after the pass finished. The observation
-/// anchor itself is never the expected head, so an Event committed while the
-/// pass ran does not by itself invalidate its shared base snapshot.
+/// host-published admission fence when the pass was observed, the authority
+/// grant that fence names, and the Logical Head and clock the host read after
+/// the pass finished. The observation anchor itself is never the expected
+/// head, so an Event committed while the pass ran does not by itself
+/// invalidate its shared base snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScheduledPassAdmissionV1 {
     pub attempt_id: PipelineAttemptIdV1,
     pub idempotency: AppendIdentity,
     pub provider_validation: PipelineEvidenceRefV1,
     pub security_revisions: PipelineSecurityRevisionsV1,
+    pub authority_grant: Hash,
     pub commit_head: Seq,
     pub commit_now_secs: u64,
 }
@@ -79,7 +81,7 @@ impl PluginRegistry {
     /// basis for [`Self::recover_scheduled_pass`].
     pub fn admit_scheduled_pass(
         &mut self,
-        port: &mut dyn PipelineAdmissionPortV1,
+        port: &mut dyn FactualAdmissionPortV1,
         admission: &ScheduledPassAdmissionV1,
     ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
         let Some(pending) = self.pending_step.take() else {
@@ -138,7 +140,7 @@ impl PluginRegistry {
     /// basis for [`Self::recover_scheduled_pass`].
     pub fn admit_authorized_scheduled_pass(
         &mut self,
-        port: &mut dyn PipelineAdmissionPortV1,
+        port: &mut dyn FactualAdmissionPortV1,
         admission: &ScheduledPassAdmissionV1,
         authorities: &[AuthorizedViewAuthorityV1<'_>],
     ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
@@ -159,7 +161,7 @@ impl PluginRegistry {
     /// Submit a prepared basis, commit an empty pass, or abort on error.
     fn settle_prepared_pass(
         &mut self,
-        port: &mut dyn PipelineAdmissionPortV1,
+        port: &mut dyn FactualAdmissionPortV1,
         pending: PendingStep,
         admission: &ScheduledPassAdmissionV1,
         prepared: Result<Option<PipelineAdmissionBasisV1>, RuntimeError>,
@@ -202,7 +204,7 @@ impl PluginRegistry {
     /// in doubt, otherwise the same outcomes as [`Self::admit_scheduled_pass`].
     pub fn recover_scheduled_pass(
         &mut self,
-        port: &mut dyn PipelineAdmissionPortV1,
+        port: &mut dyn FactualAdmissionPortV1,
     ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
         let Some(in_doubt) = self.in_doubt_admission.take() else {
             return Err(RuntimeError::NoScheduledAdmissionInDoubt);
@@ -212,7 +214,7 @@ impl PluginRegistry {
 
     fn finish_scheduled_admission(
         &mut self,
-        port: &mut dyn PipelineAdmissionPortV1,
+        port: &mut dyn FactualAdmissionPortV1,
         attempt: InDoubtAdmission,
     ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
         match self.admit_within_consent_fence(port, &attempt) {
@@ -237,7 +239,7 @@ impl PluginRegistry {
     /// Submit the basis, holding the consent token fence for a protected pass.
     fn admit_within_consent_fence(
         &self,
-        port: &mut dyn PipelineAdmissionPortV1,
+        port: &mut dyn FactualAdmissionPortV1,
         attempt: &InDoubtAdmission,
     ) -> Result<PipelineOutcomeV1, RuntimeError> {
         let mut admit = || {

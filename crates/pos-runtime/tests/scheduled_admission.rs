@@ -11,9 +11,9 @@ use pos_core::{
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentAuthority, ConsentGrantedV1,
-    ConsentRevokedV1, CoreError, DelegateClassV1, EntityId, ErasureContainmentGateV1, Event,
-    EventDraft, EventStore, Hash, Kind, PersistedAuthorityV1, PipelineAdmissionBasisV1,
+    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1,
+    CoreError, DelegateClassV1, EntityId, ErasureContainmentGateV1, Event, EventDraft, EventStore,
+    FactualPrefixReadPortV1, Hash, Kind, PersistedAuthorityV1, PipelineAdmissionBasisV1,
     PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
     PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
     PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin,
@@ -43,6 +43,7 @@ trait Harness:
     ScheduledAdmissionStoreV1
     + EventStore
     + PipelineAdmissionPortV1
+    + FactualPrefixReadPortV1
     + PipelineAdmissionFencePublisherV1
     + AuthorityPersistencePortV1
 {
@@ -264,6 +265,8 @@ impl Host {
             ),
             provider_validation: ok(PipelineEvidenceRefV1::try_new(hash(60))),
             security_revisions: self.revisions,
+            // The grant `publish` names in the Timeline's fence.
+            authority_grant: hash(1),
             commit_head: ok(store.logical_head(self.timeline)),
             commit_now_secs: 1,
         }
@@ -708,6 +711,63 @@ impl PipelineAdmissionPortV1 for LostOutcomePort<'_> {
     ) -> Result<pos_core::PipelineReceiptLookupV1, pos_core::CoreError> {
         self.inner
             .lookup_pipeline_receipt(timeline, key, attempt_id)
+    }
+}
+
+impl pos_core::FactualPrefixReadPortV1 for LostOutcomePort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        self.inner.last_committed_factual_tick(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        self.inner.cut_tick_at(timeline, seq)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        self.inner.nodes_for_committed_events(timeline, seqs)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<
+        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
+        pos_core::CoreError,
+    > {
+        self.inner.nodes_by_digest(timeline, digests)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        self.inner.last_step_node(timeline, owner)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        self.inner.factual_set_counts(timeline)
     }
 }
 
@@ -1161,6 +1221,63 @@ impl PipelineAdmissionPortV1 for FenceRejectingPorts<'_> {
     }
 }
 
+impl pos_core::FactualPrefixReadPortV1 for FenceRejectingPorts<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::last_committed_factual_tick(&*self.inner, timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::cut_tick_at(&*self.inner, timeline, seq)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::nodes_for_committed_events(&*self.inner, timeline, seqs)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<
+        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
+        pos_core::CoreError,
+    > {
+        pos_core::FactualPrefixReadPortV1::nodes_by_digest(&*self.inner, timeline, digests)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::last_step_node(&*self.inner, timeline, owner)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::factual_set_counts(&*self.inner, timeline)
+    }
+}
+
 impl PipelineAdmissionFencePublisherV1 for FenceRejectingPorts<'_> {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn set_pipeline_admission_fence(
@@ -1519,6 +1636,63 @@ impl PipelineAdmissionPortV1 for DigestRecordingPort<'_> {
     ) -> Result<pos_core::PipelineReceiptLookupV1, CoreError> {
         self.inner
             .lookup_pipeline_receipt(timeline, key, attempt_id)
+    }
+}
+
+impl pos_core::FactualPrefixReadPortV1 for DigestRecordingPort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        self.inner.last_committed_factual_tick(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        self.inner.cut_tick_at(timeline, seq)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        self.inner.nodes_for_committed_events(timeline, seqs)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<
+        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
+        pos_core::CoreError,
+    > {
+        self.inner.nodes_by_digest(timeline, digests)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        self.inner.last_step_node(timeline, owner)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        self.inner.factual_set_counts(timeline)
     }
 }
 

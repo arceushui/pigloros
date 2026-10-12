@@ -96,6 +96,57 @@ impl PipelineAdmissionPortV1 for AckPort<'_> {
     }
 }
 
+impl pos_core::FactualPrefixReadPortV1 for AckPort<'_> {
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        self.store.last_committed_factual_tick(timeline)
+    }
+
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        self.store.cut_tick_at(timeline, seq)
+    }
+
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        self.store.nodes_for_committed_events(timeline, seqs)
+    }
+
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<
+        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
+        pos_core::CoreError,
+    > {
+        self.store.nodes_by_digest(timeline, digests)
+    }
+
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        self.store.last_step_node(timeline, owner)
+    }
+
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        self.store.factual_set_counts(timeline)
+    }
+}
+
 /// One store whose Timeline holds the base cut, the participant's persisted
 /// grant, and an admission fence published over that grant.
 struct FencedStore {
@@ -163,6 +214,7 @@ impl FencedStore {
             ),
             provider_validation: PipelineEvidenceRefV1::try_new(digest(60)).test_ok(),
             security_revisions: self.revisions,
+            authority_grant: self.participant.grant.grant_id(),
             commit_head: self
                 .store
                 .logical_head(self.participant.timeline_id)

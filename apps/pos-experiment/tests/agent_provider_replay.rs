@@ -701,6 +701,61 @@ impl PipelineAdmissionPortV1 for SharedMemoryAdapter {
     }
 }
 
+impl pos_core::FactualPrefixReadPortV1 for SharedMemoryAdapter {
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::last_committed_factual_tick(&*self.store(), timeline)
+    }
+
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::cut_tick_at(&*self.store(), timeline, seq)
+    }
+
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::nodes_for_committed_events(
+            &*self.store(),
+            timeline,
+            seqs,
+        )
+    }
+
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<
+        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
+        pos_core::CoreError,
+    > {
+        pos_core::FactualPrefixReadPortV1::nodes_by_digest(&*self.store(), timeline, digests)
+    }
+
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::last_step_node(&*self.store(), timeline, owner)
+    }
+
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        pos_core::FactualPrefixReadPortV1::factual_set_counts(&*self.store(), timeline)
+    }
+}
+
 impl PipelineAdmissionFencePublisherV1 for SharedMemoryAdapter {
     fn set_pipeline_admission_fence(
         &mut self,
