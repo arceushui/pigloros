@@ -7,7 +7,7 @@ mod fixture;
 
 use fixture::{pin_policy, request_for, Fallible, Port, Shape, Spec, World, PARENT_CUT};
 use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
-use pos_core::{ErasurePersistencePortV1, ErasureProtectedEffectDispositionV1, Hash, Seq};
+use pos_core::{ErasureInventoryPersistencePortV1, ErasureProtectedEffectDispositionV1, Hash, Seq};
 use pos_store::{
     memory::MemoryStore, sqlite::SqliteStore, ForkReplayAuthorityReadErrorV1 as Error,
     ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
@@ -15,7 +15,7 @@ use pos_store::{
 };
 use std::time::Duration;
 
-fn exercise<S: Port + ForkReplayAuthorityReadPortV1 + ErasurePersistencePortV1>(
+fn exercise<S: Port + ForkReplayAuthorityReadPortV1 + ErasureInventoryPersistencePortV1>(
     store: &mut S,
     shape: Shape,
 ) -> Fallible<()> {
