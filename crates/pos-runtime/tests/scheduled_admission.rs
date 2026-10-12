@@ -2328,7 +2328,7 @@ fn observe_refuses_an_exhausted_timeline_before_any_driver_steps() {
         let host = ok(LocalScheduledAdmissionHostV1::shared());
         for payloads in &payload_sets {
             let log = Log::default();
-            let mut registry = PluginRegistry::new().with_erasure_gate(Arc::clone(&gate));
+            let mut registry = PluginRegistry::new().with_erasure_gate(gate.clone());
             register(&mut registry, driver("first", payloads.clone(), &log));
 
             // A pass that stages nothing is refused as well: `observe` cannot

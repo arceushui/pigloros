@@ -2621,7 +2621,7 @@ impl PluginRegistry {
             entry.event_cursor,
         );
         let observations = if observation.verified_prefix_required {
-            observations.with_verified_prefix_events(subscribed_events.clone())
+            observations.with_verified_prefix_events(subscribed_events)
         } else {
             observations
         };
