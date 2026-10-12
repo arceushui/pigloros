@@ -1760,7 +1760,7 @@ fn action_command_error(error: executor::ActionCommandError, maximum: u64) -> Ga
     match error {
         executor::ActionCommandError::Executor(error) => error.into(),
         executor::ActionCommandError::Authorization(error) => map_authorization_error(error),
-        executor::ActionCommandError::Admission(error) => action_admission_error(error, maximum),
+        executor::ActionCommandError::Admission(error) => human_admission_failure(error, maximum),
         #[cfg(test)]
         executor::ActionCommandError::AdmissionUnavailable => {
             GatewayError::ActionAuthorizationUnavailable
@@ -1768,7 +1768,11 @@ fn action_command_error(error: executor::ActionCommandError, maximum: u64) -> Ga
     }
 }
 
-fn action_admission_error(error: HumanActionAdmissionErrorV1, maximum: u64) -> GatewayError {
+/// The Gateway error of a failed human-action admission.
+///
+/// Every `HumanActionAdmissionErrorV1` variant has its own arm and the match
+/// has no wildcard, so a new variant fails to compile until it is routed here.
+fn human_admission_failure(error: HumanActionAdmissionErrorV1, maximum: u64) -> GatewayError {
     match error {
         HumanActionAdmissionErrorV1::Submission(error) => error.into(),
         HumanActionAdmissionErrorV1::IdempotencyConflict => GatewayError::IngressConflict,
