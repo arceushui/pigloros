@@ -4,11 +4,13 @@
 /// this one seam lets the forwarding macros reach either without a trait
 /// import at each expansion site.
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 trait FactualReadsV1 {
     fn factual_reads(&self) -> &dyn pos_core::FactualPrefixReadPortV1;
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 impl FactualReadsV1 for pos_store::memory::MemoryStore {
     fn factual_reads(&self) -> &dyn pos_core::FactualPrefixReadPortV1 {
         self
@@ -16,6 +18,7 @@ impl FactualReadsV1 for pos_store::memory::MemoryStore {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 impl FactualReadsV1 for Box<dyn pos_runtime::ScheduledAdmissionStoreV1> {
     fn factual_reads(&self) -> &dyn pos_core::FactualPrefixReadPortV1 {
         &**self
