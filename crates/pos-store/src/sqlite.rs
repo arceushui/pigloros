@@ -9550,9 +9550,7 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
         if self.writer_reservation_connection.is_some() {
             // Never reuse a snapshot that predates the writer reservation.
-            if !self.conn.is_autocommit()
-                || self.conn.execute_batch("BEGIN DEFERRED").is_err()
-            {
+            if !self.conn.is_autocommit() || self.conn.execute_batch("BEGIN DEFERRED").is_err() {
                 drop(interval_connection.execute_batch("ROLLBACK"));
                 return Err(ErasureErrorV1::ReceiptCommitFailed);
             }
@@ -12997,7 +12995,10 @@ impl SqliteStore {
                     retained,
                     final_chain_head_hash,
                     suffix,
-                    registry: registry.as_ref().map(Option::as_ref).map_err(|error| *error),
+                    registry: registry
+                        .as_ref()
+                        .map(Option::as_ref)
+                        .map_err(|error| *error),
                 };
                 trusted_committed_manifest(&rows, sources)
             })

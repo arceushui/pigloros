@@ -355,8 +355,14 @@ fn read_complete_world_replay(
         return Err(CoreError::ArtifactUnavailable);
     }
 
-    budget.check_time().map_err(|_| CoreError::ArtifactUnavailable)?;
-    let bounds = bounds.with_max_total_bytes(bounds.max_total_bytes().min(budget.remaining_native_bytes()));
+    budget
+        .check_time()
+        .map_err(|_| CoreError::ArtifactUnavailable)?;
+    let bounds = bounds.with_max_total_bytes(
+        bounds
+            .max_total_bytes()
+            .min(budget.remaining_native_bytes()),
+    );
     let events = sender
         .read_bounded(timeline, range, bounds)
         .map_err(host_error_to_core)?;
@@ -368,17 +374,26 @@ fn read_complete_world_replay(
         return Err(CoreError::ArtifactUnavailable);
     }
     for event in &events {
-        budget.charge_rows(1).map_err(|_| CoreError::ArtifactUnavailable)?;
-        budget.charge_bytes(event.payload.as_slice().len()).map_err(|_| CoreError::ArtifactUnavailable)?;
-        budget.charge_bytes(event.event_type.as_str().len()).map_err(|_| CoreError::ArtifactUnavailable)?;
+        budget
+            .charge_bytes(event.payload.as_slice().len())
+            .map_err(|_| CoreError::ArtifactUnavailable)?;
+        budget
+            .charge_bytes(event.event_type.as_str().len())
+            .map_err(|_| CoreError::ArtifactUnavailable)?;
     }
-    budget.check_time().map_err(|_| CoreError::ArtifactUnavailable)?;
+    budget
+        .check_time()
+        .map_err(|_| CoreError::ArtifactUnavailable)?;
     Ok(events)
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod inherited_scope_tests;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+pub mod imported_fork_replay_tests;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -767,8 +782,7 @@ pub mod test_support {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{
-        handoff_with_p2_on, host_error_to_core, observed_world_replay_use,
-        ReleaseHealthV1,
+        handoff_with_p2_on, host_error_to_core, observed_world_replay_use, ReleaseHealthV1,
     };
     use pos_core::trusted_clock::{
         ScriptedGuardMonotonicSourceV1, StagedArtifactBytesV1, StagedProtectedOutputV1,
@@ -790,9 +804,15 @@ mod tests {
         let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
         let started = clock.mark();
         let limits = crate::test_support::test_ok(pos_store::ForkReplayReadLimitsV1::new(
-            8, 1_024, 262_144, 256 * 1024 * 1024, 30_000_000,
+            8,
+            1_024,
+            262_144,
+            256 * 1024 * 1024,
+            30_000_000,
         ));
-        let mut budget = crate::test_support::test_ok(pos_store::ForkReplayReadBudgetV1::new(limits, started, &mut clock));
+        let mut budget = crate::test_support::test_ok(pos_store::ForkReplayReadBudgetV1::new(
+            limits, started, &mut clock,
+        ));
         super::read_complete_world_replay(sender, requested_use, bounds, &mut budget)
     }
 

@@ -23,6 +23,9 @@ pos-conformance = { path = "../pos-conformance" }
 ulid = { workspace = true }
 
 [dev-dependencies]
+ed25519-dalek = { workspace = true }
+pos-crypto = { path = "../pos-crypto" }
+tempfile = { workspace = true }
 pos-core = { path = "../pos-core", features = ["test-support"] }
 pos-runtime = { path = "../pos-runtime", features = ["test-support"] }
 pos-plugin-world = { path = "../../plugins/world" }
