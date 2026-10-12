@@ -2067,6 +2067,9 @@ fn participant_bound_drivers_never_stage_outside_their_authorized_views() {
 
 /// The recorded-set counts one node, edge or declared input past the preflight
 /// threshold: one worst-case Tick no longer fits.
+///
+/// The thresholds are the caps less one worst-case Tick: 934,464 nodes is
+/// 1,000,000 - 65,536, and 3,737,856 edges or inputs is 4,000,000 - 262,144.
 const fn exhausted_counts() -> [RecordedSetCountsV1; 3] {
     [
         RecordedSetCountsV1 {
@@ -2088,6 +2091,8 @@ const fn exhausted_counts() -> [RecordedSetCountsV1; 3] {
 }
 
 /// The counts exactly at the threshold: one worst-case Tick still fits.
+///
+/// 934,464 is 1,000,000 - 65,536 and 3,737,856 is 4,000,000 - 262,144.
 const AT_THRESHOLD: RecordedSetCountsV1 = RecordedSetCountsV1 {
     nodes: 934_464,
     edges: 3_737_856,

@@ -728,6 +728,9 @@ fn a_failed_lookup_stops_before_approval() {
 
 /// The recorded-set counts one node, edge or declared input past the preflight
 /// threshold: one worst-case Tick no longer fits.
+///
+/// The thresholds are the caps less one worst-case Tick: 934,464 nodes is
+/// 1,000,000 - 65,536, and 3,737,856 edges or inputs is 4,000,000 - 262,144.
 const fn exhausted_counts() -> [RecordedSetCountsV1; 3] {
     [
         RecordedSetCountsV1 {
@@ -749,6 +752,8 @@ const fn exhausted_counts() -> [RecordedSetCountsV1; 3] {
 }
 
 /// The counts exactly at the threshold: one worst-case Tick still fits.
+///
+/// 934,464 is 1,000,000 - 65,536 and 3,737,856 is 4,000,000 - 262,144.
 const AT_THRESHOLD: RecordedSetCountsV1 = RecordedSetCountsV1 {
     nodes: 934_464,
     edges: 3_737_856,
@@ -854,7 +859,8 @@ fn an_exhausted_timeline_refuses_the_action_before_the_approver_runs() {
                 counts,
             };
             let walk = proposal(actor, b"walk");
-            let refused = err(harness.registry.admit_human_action(&mut port, &walk, &attempt));
+            let registry = &harness.registry;
+            let refused = err(registry.admit_human_action(&mut port, &walk, &attempt));
             assert!(
                 matches!(
                     refused,
@@ -876,7 +882,8 @@ fn an_exhausted_timeline_refuses_the_action_before_the_approver_runs() {
             counts: AT_THRESHOLD,
         };
         let walk = proposal(actor, b"walk");
-        ok(harness.registry.admit_human_action(&mut port, &walk, &attempt));
+        let registry = &harness.registry;
+        ok(registry.admit_human_action(&mut port, &walk, &attempt));
         assert_eq!(approvals(&harness), 1, "{name}");
         assert_eq!(events(&harness), 1, "{name}");
     }
