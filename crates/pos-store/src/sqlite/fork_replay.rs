@@ -58,10 +58,10 @@ impl SqliteStore {
                 "SELECT coalesce(length(CAST(name AS BLOB)), 0) +
                  coalesce(length(CAST(parent_id AS BLOB)), 0)
                  FROM timelines WHERE id = ?1",
-                [timeline.to_string()], |row| row.get::<_, usize>(0),
+                [timeline.to_string()], |row| row.get::<_, i64>(0),
             ).optional().map_err(|_| Error::StorageUnavailable)?
                 .ok_or(Error::Unavailable)?;
-            budget.charge_bytes(metadata_bytes)?;
+            budget.charge_bytes(usize::try_from(metadata_bytes).map_err(|_| Error::CorruptAuthority)?)?;
             let mut statement = self.conn.prepare(
                 "SELECT length(payload), length(CAST(event_type AS BLOB))
                  FROM events WHERE timeline_id = ?1 ORDER BY seq",
@@ -70,8 +70,8 @@ impl SqliteStore {
                 .map_err(|_| Error::StorageUnavailable)?;
             while let Some(row) = events.next().map_err(|_| Error::StorageUnavailable)? {
                 budget.charge_rows(1)?;
-                let payload = row.get::<_, usize>(0).map_err(|_| Error::CorruptAuthority)?;
-                let kind = row.get::<_, usize>(1).map_err(|_| Error::CorruptAuthority)?;
+                let payload = row_length(row, 0)?;
+                let kind = row_length(row, 1)?;
                 budget.charge_bytes(payload)?;
                 budget.charge_bytes(kind)?;
             }
@@ -115,7 +115,7 @@ impl SqliteStore {
                 match kind.as_str() {
                     "null" if column == "ikt1_cbor" => {}
                     "blob" => budget.charge_bytes(
-                        row.get::<_, usize>(1).map_err(|_| Error::CorruptAuthority)?,
+                        row_length(row, 1)?,
                     )?,
                     _ => return Err(Error::CorruptAuthority),
                 }
@@ -123,4 +123,9 @@ impl SqliteStore {
         }
         budget.check_time()
     }
+}
+
+fn row_length(row: &rusqlite::Row<'_>, column: usize) -> ReadResult<usize> {
+    let length = row.get::<_, i64>(column).map_err(|_| Error::CorruptAuthority)?;
+    usize::try_from(length).map_err(|_| Error::CorruptAuthority)
 }

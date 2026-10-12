@@ -39,7 +39,7 @@ const ID: usize = 18;
 
 fn routes(value: &[ForkExternalInputRouteV1]) -> usize {
     head(value.len() as u64) + value.iter()
-        .map(|row| 1 + string(row.source.route().len()) + HASH + 1)
+        .map(|row| 1 + string(row.source().route().len()) + HASH + 1)
         .sum::<usize>()
 }
 
