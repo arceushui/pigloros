@@ -3,7 +3,7 @@
 //! Diagnostic read-port parity; these structural reads cannot release Replay.
 
 #[path = "support/fae1_fixture.rs"]
-mod fixture;
+pub mod fixture;
 
 use fixture::{pin_policy, request_for, Fallible, Port, Shape, Spec, World, PARENT_CUT};
 use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
