@@ -44,8 +44,8 @@ use pos_store::{
     ForkClassifierRegistrationReceiptV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
     ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryStartupOutcomeV1,
     ForkDeliveryTupleV1, ForkEventAuthorityErrorV1, ForkEventPermitIssuerPortV1,
-    ForkEventPermitIssuerV1, ForkEventProvenanceAuthorityPortV1, StoreConfig,
-    ForkReplayAuthorityEvidenceV1, ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1,
+    ForkEventPermitIssuerV1, ForkEventProvenanceAuthorityPortV1, ForkReplayAuthorityEvidenceV1,
+    ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1, StoreConfig,
 };
 use std::num::NonZeroUsize;
 
@@ -1343,6 +1343,19 @@ impl ErasureExecutionHostV1 {
     ) -> Result<Self, ErasureHostErrorV1> {
         let store = open_host_store(config).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
         Self::recover_with_composition(store, composition, limits)
+    }
+
+    /// Recover an exclusively owned, prepopulated nonproduction Memory fixture.
+    ///
+    /// # Errors
+    /// Retains the normal composition's complete inventory and gate checks.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn recover_memory_fixture_with_authority(
+        store: pos_store::memory::MemoryStore,
+        composition: &ErasureCoordinatorCompositionV1,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        Self::recover_with_composition(Box::new(store), composition, limits)
     }
 
     /// Recover one store after installing its explicit authority composition.
@@ -4117,7 +4130,9 @@ impl ErasureReadSenderV1<'_> {
         {
             return Err(ErasureHostErrorV1::Conflict);
         }
-        budget.check_time().map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        budget
+            .check_time()
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
         let Some(sources) = capability.fork_sources() else {
             // This variant is minted only by the installed owner, which
             // attests an ordinary complete history without attribution.
@@ -4131,10 +4146,14 @@ impl ErasureReadSenderV1<'_> {
         let mut head = capability.requested_use().source_logical_head();
         let mut required_index = 0;
         for (depth, source) in sources.iter().enumerate() {
-            budget.charge_node(depth).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+            budget
+                .charge_node(depth)
+                .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
             if depth > capability.read_bounds().max_fork_depth()
                 || next != Some(source.timeline_id())
-                || sources[..depth].iter().any(|previous| previous.timeline_id() == source.timeline_id())
+                || sources[..depth]
+                    .iter()
+                    .any(|previous| previous.timeline_id() == source.timeline_id())
             {
                 return Err(ErasureHostErrorV1::Conflict);
             }
@@ -4146,8 +4165,13 @@ impl ErasureReadSenderV1<'_> {
                 }
                 required_index += 1;
             }
-            let timeline = self.host.store.host_store().get_timeline(source.timeline_id())
-                .map_store_error()?.ok_or(ErasureHostErrorV1::Conflict)?;
+            let timeline = self
+                .host
+                .store
+                .host_store()
+                .get_timeline(source.timeline_id())
+                .map_store_error()?
+                .ok_or(ErasureHostErrorV1::Conflict)?;
             next = timeline.meta.fork_point.map(|(parent, cut)| {
                 head = cut;
                 parent
@@ -4158,7 +4182,10 @@ impl ErasureReadSenderV1<'_> {
         }
         let mut evidence = Vec::new();
         for requirement in capability.fork_requirements() {
-            let verified = self.host.store.host_store()
+            let verified = self
+                .host
+                .store
+                .host_store()
                 .validate_fork_replay_authority(requirement, budget)
                 .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
             evidence.push(verified);
@@ -5771,8 +5798,10 @@ mod tests {
             &self,
             requirement: &pos_store::ForkReplayRequirementV1,
             budget: &mut ForkReplayReadBudgetV1<'_>,
-        ) -> Result<ForkReplayAuthorityEvidenceV1, pos_store::ForkReplayAuthorityReadErrorV1> {
-            self.inner.validate_fork_replay_authority(requirement, budget)
+        ) -> Result<ForkReplayAuthorityEvidenceV1, pos_store::ForkReplayAuthorityReadErrorV1>
+        {
+            self.inner
+                .validate_fork_replay_authority(requirement, budget)
         }
     }
 
