@@ -2,9 +2,11 @@
 //! decision 5), at the public seam.
 //!
 //! Every variant of `CommunityInstallErrorV1` and of `PluginReleaseInstallErrorV1` has a row,
-//! and the wrapped source, trust, signature and registry errors are listed row by row. `index`
-//! is an exhaustive `match` over both enums, so a variant added later fails to compile there,
-//! and the coverage check fails until the new variant has a row and the mapping handles it.
+//! and the wrapped source, trust, signature and registry errors are listed row by row. The
+//! totality of the wrapped enums is enforced at compile time by the exhaustive matches without a
+//! wildcard arm in `gate/mapping.rs` and `install.rs`; `index` below is an exhaustive `match`
+//! over both install enums, so a variant added later fails to compile there until it is given a
+//! row. The run-time check only proves that today's rows cover every arm of `index`.
 #![cfg(target_os = "linux")]
 
 use pos_crypto::plugin_manifest::{PluginManifestErrorV1, PluginReleaseSignatureErrorV1 as Sig};
@@ -23,6 +25,8 @@ use host_errors::{
     Error as Host, ARTIFACT, EXPIRED, INVALID, KEY, MISMATCH, NOT_ACTIVE, TSU, UNTRUSTED,
 };
 
+/// The number of arms `index` distinguishes: two outer ones and five wrapped ones.
+const ARMS: usize = 7;
 const MANIFEST: PluginManifestErrorV1 = PluginManifestErrorV1::InvalidEncoding { ordinal: 3 };
 /// Every variant of the source error, which the mapping sends to two answers.
 const SOURCES: [S; 13] = [
@@ -106,7 +110,7 @@ fn every_variant_of_both_install_errors_has_a_row() {
         listed.push(index(input));
     }
     listed.sort_unstable();
-    assert_eq!(listed, (0..7).collect::<Vec<_>>());
+    assert_eq!(listed, (0..ARMS).collect::<Vec<_>>());
 }
 
 #[test]

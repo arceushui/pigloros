@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Restrict the ADR-103 revisions 4 and 5 Plugin trust policy registry to the trusted composition.
+"""Restrict the ADR-103 revisions 4 and 5 Plugin trust policy registry to the trusted composition
+(and, since ADR-061 revision 8, the from-bytes trust APIs of rule 6).
 
 `PluginTrustPolicyRegistryV1` is a trusted-host port: a registry that retains
 untruthful state, a forged trusted UTC second, or a caller-made receipt can
@@ -47,7 +48,8 @@ source of every `.rs` file outside the top-level build and tooling directories:
    under `crates/pos-runtime/`, `apps/pos-plugin-conformance-adapter/`, and a
    `tests` directory: they build anchors and provision registries from raw bytes.
    The bare token `from_bytes_v1` is confined, so an aliased type cannot reach the
-   constructor. Revision 5 did not contemplate these APIs.
+   constructor. `#[cfg(test)]` items outside those prefixes are NOT exempt: only a
+   `tests` directory is. Revision 5 did not contemplate these APIs.
 """
 
 from __future__ import annotations
@@ -66,6 +68,8 @@ from check_trusted_clock_port_impls import (
 PORT = "PluginTrustPolicyRegistryV1"
 ALLOWED_PREFIXES = ("crates/pos-store/", "crates/pos-runtime/")
 # Rule 6 (ADR-061 revision 8 decision 5): the from-bytes trust APIs and the evaluation world.
+# `CommunityEvaluationWorldV1` (#614, S1c2) and the adapter prefix (#615, S2) do not exist yet;
+# they are confined ahead of time so their slices need no change to this script.
 CONFINED_PREFIXES = ("crates/pos-runtime/", "apps/pos-plugin-conformance-adapter/")
 CONFINED_NAME = re.compile(
     r"\b(?:from_bytes_v1|FixedTrustMaterialSourceV1|CommunityTrustAnchorBytesV1"
