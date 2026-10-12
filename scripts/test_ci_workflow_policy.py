@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""Contract tests for CI change scope and the core Rust gate policy."""
+
+from __future__ import annotations
+
+import copy
+import fnmatch
+import pathlib
+import unittest
+
+import yaml
+
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+FILTER_PATH = ROOT / ".github" / "rust-scope.yml"
+CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+WORKFLOW_PATHS = (
+    CI_WORKFLOW_PATH,
+    ROOT / ".github" / "workflows" / "codeql.yml",
+)
+RUST_CACHE_ACTION = "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16"
+TRUSTED_MAIN_SAVE_IF = "${{ github.ref == 'refs/heads/main' }}"
+CORE_CACHE_KEYS = {
+    "test": "test",
+    "clippy": "clippy",
+    "coverage": "coverage",
+}
+CORE_JOB_NAMES = ("fmt", "test", "clippy", "coverage")
+MAIN_PUSH_TRIGGER = {"branches": ["main"]}
+PREFLIGHT_GATE_IF = "${{ always() }}"
+REQUIRED_PREFLIGHT_NEEDS = ("ci_change_scope", "pinned-dependencies")
+PINNED_DEPENDENCIES_NEEDS = "ci_change_scope"
+PINNED_DEPENDENCIES_IF = (
+    "${{ needs.ci_change_scope.outputs.rust == 'true' || "
+    "github.event_name != 'pull_request' }}"
+)
+CI_WORKFLOW_POLICY_TEST_STEP = {
+    "name": "Test CI workflow policy",
+    "run": "python scripts/test_ci_workflow_policy.py",
+}
+EXPECTED_EXCLUDES = {
+    "!**/*.md",
+    "!**/*.mdx",
+    "!**/*.adoc",
+    "!**/*.rst",
+    "!.agents/**",
+    "!docs/**",
+}
+CORE_JOB_NEEDS = ["ci_change_scope", "preflight-gate"]
+CORE_JOB_IF = (
+    "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
+    "(needs.ci_change_scope.outputs.rust == 'true' || "
+    "github.event_name != 'pull_request') }}"
+)
+
+
+def load_patterns() -> list[str]:
+    with FILTER_PATH.open(encoding="utf-8") as stream:
+        filters = yaml.safe_load(stream)
+    if not isinstance(filters, dict) or not isinstance(filters.get("rust"), list):
+        raise AssertionError("rust-scope.yml must define a rust pattern list")
+    patterns = filters["rust"]
+    if not all(isinstance(pattern, str) for pattern in patterns):
+        raise AssertionError("rust-scope.yml patterns must be strings")
+    return patterns
+
+
+def load_workflow(workflow_path: pathlib.Path) -> dict:
+    with workflow_path.open(encoding="utf-8") as stream:
+        workflow = yaml.safe_load(stream)
+    if not isinstance(workflow, dict):
+        raise AssertionError(f"{workflow_path} must contain a mapping")
+    return workflow
+
+
+def workflow_triggers(workflow: dict) -> dict:
+    """Return the top-level event mapping across PyYAML's YAML 1.1 key forms."""
+    triggers = workflow.get("on")
+    if triggers is None:
+        triggers = workflow.get(True)
+    if not isinstance(triggers, dict):
+        raise AssertionError("ci.yml must define an event mapping")
+    return triggers
+
+
+def assert_core_jobs_run_on_main_push(workflow: dict) -> None:
+    """Require the core Rust gates to remain reachable after a trusted main push."""
+    for job_name in CORE_JOB_NAMES:
+        job = workflow["jobs"].get(job_name)
+        if not isinstance(job, dict):
+            raise AssertionError(f"missing core Rust job: {job_name}")
+        if job.get("needs") != CORE_JOB_NEEDS:
+            raise AssertionError(f"{job_name} must wait for successful preflight")
+        if job.get("if") != CORE_JOB_IF:
+            raise AssertionError(f"{job_name} must remain reachable on a main push")
+
+
+def assert_main_push_prerequisites(workflow: dict) -> None:
+    """Keep the scope and preflight path available to every main push."""
+    jobs = workflow.get("jobs")
+    if not isinstance(jobs, dict):
+        raise AssertionError("ci.yml must define a jobs mapping")
+
+    scope = jobs.get("ci_change_scope")
+    if not isinstance(scope, dict):
+        raise AssertionError("ci.yml must define ci_change_scope")
+    if "needs" in scope:
+        raise AssertionError("ci_change_scope must have no prerequisites")
+    if "if" in scope:
+        raise AssertionError("ci_change_scope must remain unconditional")
+
+    pinned_dependencies = jobs.get("pinned-dependencies")
+    if not isinstance(pinned_dependencies, dict):
+        raise AssertionError("ci.yml must define pinned-dependencies")
+    if pinned_dependencies.get("needs") != PINNED_DEPENDENCIES_NEEDS:
+        raise AssertionError("pinned-dependencies must wait for ci_change_scope")
+    if pinned_dependencies.get("if") != PINNED_DEPENDENCIES_IF:
+        raise AssertionError(
+            "pinned-dependencies must remain reachable on a main push"
+        )
+    pinned_steps = pinned_dependencies.get("steps")
+    if (
+        not isinstance(pinned_steps, list)
+        or CI_WORKFLOW_POLICY_TEST_STEP not in pinned_steps
+    ):
+        raise AssertionError("pinned-dependencies must run the CI workflow policy test")
+
+    preflight = jobs.get("preflight-gate")
+    if not isinstance(preflight, dict):
+        raise AssertionError("ci.yml must define preflight-gate")
+    if preflight.get("if") != PREFLIGHT_GATE_IF:
+        raise AssertionError("preflight-gate must remain reachable on a main push")
+    preflight_needs = preflight.get("needs")
+    if not isinstance(preflight_needs, list) or not set(REQUIRED_PREFLIGHT_NEEDS).issubset(
+        preflight_needs
+    ):
+        raise AssertionError("preflight-gate must retain scope and policy dependencies")
+
+
+def assert_core_rust_cache_contract(workflow: dict) -> None:
+    """Require the trusted writer and PR restore paths for core Rust caches."""
+    triggers = workflow_triggers(workflow)
+    if "pull_request" not in triggers or triggers["pull_request"] is not None:
+        raise AssertionError("ci.yml must retain an unfiltered pull_request trigger for cache restores")
+
+    push = triggers.get("push")
+    if push != MAIN_PUSH_TRIGGER:
+        raise AssertionError("ci.yml must retain a main push trigger for trusted cache writers")
+
+    assert_main_push_prerequisites(workflow)
+    assert_core_jobs_run_on_main_push(workflow)
+    for job_name, shared_key in CORE_CACHE_KEYS.items():
+        steps = workflow["jobs"][job_name]["steps"]
+        cache_steps = [
+            step
+            for step in steps
+            if isinstance(step, dict)
+            and isinstance(step.get("uses"), str)
+            and step["uses"].startswith("Swatinem/rust-cache@")
+        ]
+        if len(cache_steps) != 1:
+            raise AssertionError(f"{job_name} must contain exactly one Rust cache step")
+        cache_step = cache_steps[0]
+        if cache_step["uses"] != RUST_CACHE_ACTION:
+            raise AssertionError(f"{job_name} must use the pinned Rust cache action")
+        if cache_step.get("with") != {
+            "shared-key": shared_key,
+            "save-if": TRUSTED_MAIN_SAVE_IF,
+        }:
+            raise AssertionError(f"{job_name} cache must use the trusted-main policy")
+        if "if" in cache_step:
+            raise AssertionError(f"{job_name} cache must remain reachable on pull requests")
+
+
+def excluded(path: str, patterns: list[str]) -> bool:
+    return any(
+        fnmatch.fnmatchcase(path, pattern[1:])
+        or fnmatch.fnmatchcase(path, pattern[1:].removeprefix("**/"))
+        for pattern in patterns
+        if pattern.startswith("!")
+    )
+
+
+def rust_gate_required(paths: list[str], patterns: list[str]) -> bool:
+    return any(not excluded(path, patterns) for path in paths)
+
+
+class CiWorkflowPolicyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.patterns = load_patterns()
+
+    def test_filter_has_conservative_positive_default(self) -> None:
+        self.assertEqual(self.patterns[0], "**")
+        self.assertEqual(set(self.patterns[1:]), EXPECTED_EXCLUDES)
+
+    def test_scope_jobs_use_trusted_base_and_fail_closed(self) -> None:
+        for workflow_path in WORKFLOW_PATHS:
+            with self.subTest(workflow=workflow_path.name):
+                workflow = load_workflow(workflow_path)
+                scope_name = (
+                    "ci_change_scope" if workflow_path.name == "ci.yml" else "codeql_change_scope"
+                )
+                scope = workflow["jobs"][scope_name]
+                steps = scope["steps"]
+                self.assertEqual(
+                    steps[0]["with"]["ref"],
+                    "${{ github.event.pull_request.base.sha }}",
+                )
+                filter_step = next(step for step in steps if step.get("id") == "scope")
+                self.assertEqual(filter_step["with"]["filters"], ".github/rust-scope.yml")
+                self.assertIn("hashFiles('.github/rust-scope.yml') != ''", filter_step["if"])
+                self.assertIs(filter_step["continue-on-error"], True)
+                fallback_step = next(step for step in steps if step.get("id") == "fallback")
+                self.assertEqual(fallback_step["if"], "steps.scope.outcome == 'failure'")
+                self.assertIn("printf 'rust=true\\n' >> \"$GITHUB_OUTPUT\"", fallback_step["run"])
+                full_step = next(step for step in steps if step.get("id") == "full")
+                self.assertIn("hashFiles('.github/rust-scope.yml') == ''", full_step["if"])
+                self.assertEqual(
+                    scope["outputs"]["rust"],
+                    "${{ steps.fallback.outputs.rust || steps.scope.outputs.rust || "
+                    "steps.full.outputs.rust }}",
+                )
+
+    def test_documentation_only_paths_skip_rust_gate(self) -> None:
+        paths = [
+            "README.md",
+            "guide/topic.mdx",
+            "adr/decision.adoc",
+            "notes/history.rst",
+            ".agents/skills/example.md",
+            "docs/reference.txt",
+        ]
+        self.assertFalse(rust_gate_required(paths, self.patterns))
+
+    def test_unknown_and_build_inputs_require_rust_gate(self) -> None:
+        paths = ("src/lib.rs", "Cargo.toml", "plugin.wit", ".github/workflows/ci.yml")
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertTrue(rust_gate_required([path], self.patterns))
+
+    def test_deleted_and_renamed_rust_inputs_require_rust_gate(self) -> None:
+        self.assertTrue(rust_gate_required(["old.rs"], self.patterns))
+        self.assertTrue(rust_gate_required(["old.rs", "moved.md"], self.patterns))
+
+    def test_ci_gate_distinguishes_scope_skips_from_unconditional_jobs(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        gate = workflow["jobs"]["ci-gate"]
+        self.assertIn("ci_change_scope", gate["needs"])
+        self.assertEqual(
+            gate["steps"][0]["env"]["SCOPE_JOB_RESULT"],
+            "${{ needs.ci_change_scope.result }}",
+        )
+        self.assertEqual(
+            gate["steps"][0]["env"]["RUST_SCOPE_RESULT"],
+            "${{ needs.ci_change_scope.outputs.rust }}",
+        )
+        run = gate["steps"][0]["run"]
+        normalized_run = " ".join(run.replace("\\\n", " ").split())
+        self.assertIn(
+            "for result_name in PREFLIGHT_RESULT CORE_RESULT STANDARD_RESULT ASAN_RESULT",
+            normalized_run,
+        )
+        self.assertIn('expected_mutation=skipped', run)
+        self.assertIn('expected_mutation=success', run)
+        self.assertIn('"${RUST_SCOPE_RESULT}" = true', run)
+        self.assertIn('"${SCOPE_JOB_RESULT}" != "success"', run)
+
+    def test_core_gates_run_after_successful_preflight_on_push(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        assert_core_jobs_run_on_main_push(workflow)
+
+    def test_core_rust_caches_restore_on_prs_and_save_only_from_main(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        assert_core_rust_cache_contract(workflow)
+
+    def test_core_cache_contract_rejects_missing_pull_request_trigger(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        mutated = copy.deepcopy(workflow)
+        del workflow_triggers(mutated)["pull_request"]
+        with self.assertRaisesRegex(AssertionError, "pull_request"):
+            assert_core_rust_cache_contract(mutated)
+
+    def test_core_cache_contract_rejects_filtered_pull_request_trigger(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        mutated = copy.deepcopy(workflow)
+        workflow_triggers(mutated)["pull_request"] = {"branches": ["release"]}
+        with self.assertRaisesRegex(AssertionError, "unfiltered pull_request"):
+            assert_core_rust_cache_contract(mutated)
+
+    def test_core_cache_contract_rejects_missing_main_push_trigger(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        mutated = copy.deepcopy(workflow)
+        workflow_triggers(mutated)["push"]["branches"] = ["release"]
+        with self.assertRaisesRegex(AssertionError, "main push"):
+            assert_core_rust_cache_contract(mutated)
+
+    def test_core_cache_contract_rejects_excluded_main_push_trigger(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        mutated = copy.deepcopy(workflow)
+        workflow_triggers(mutated)["push"]["branches"] = ["main", "!main"]
+        with self.assertRaisesRegex(AssertionError, "main push"):
+            assert_core_rust_cache_contract(mutated)
+
+    def test_core_cache_contract_rejects_path_filtered_main_push_trigger(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        for field, patterns in (
+            ("paths", ["crates/**"]),
+            ("paths-ignore", ["**"]),
+        ):
+            with self.subTest(field=field):
+                mutated = copy.deepcopy(workflow)
+                workflow_triggers(mutated)["push"][field] = patterns
+                with self.assertRaisesRegex(AssertionError, "main push"):
+                    assert_core_rust_cache_contract(mutated)
+
+    def test_core_cache_contract_rejects_unreachable_main_core_job(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        mutated = copy.deepcopy(workflow)
+        mutated["jobs"]["fmt"]["if"] = "${{ github.event_name == 'pull_request' }}"
+        with self.assertRaisesRegex(AssertionError, "reachable on a main push"):
+            assert_core_rust_cache_contract(mutated)
+
+    def test_core_cache_contract_rejects_unreachable_main_prerequisites(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        for job_name, field, value, message in (
+            (
+                "ci_change_scope",
+                "if",
+                "${{ github.event_name == 'pull_request' }}",
+                "ci_change_scope must remain unconditional",
+            ),
+            (
+                "ci_change_scope",
+                "needs",
+                ["trunk-pr"],
+                "ci_change_scope must have no prerequisites",
+            ),
+            (
+                "pinned-dependencies",
+                "if",
+                "${{ github.event_name == 'pull_request' }}",
+                "pinned-dependencies must remain reachable on a main push",
+            ),
+            (
+                "pinned-dependencies",
+                "needs",
+                "trunk-pr",
+                "pinned-dependencies must wait for ci_change_scope",
+            ),
+            (
+                "preflight-gate",
+                "if",
+                "${{ github.event_name == 'pull_request' }}",
+                "preflight-gate must remain reachable on a main push",
+            ),
+            (
+                "preflight-gate",
+                "needs",
+                ["trunk-pr"],
+                "preflight-gate must retain scope and policy dependencies",
+            ),
+        ):
+            with self.subTest(job=job_name):
+                mutated = copy.deepcopy(workflow)
+                mutated["jobs"][job_name][field] = value
+                with self.assertRaisesRegex(AssertionError, message):
+                    assert_core_rust_cache_contract(mutated)
+
+    def test_core_cache_contract_requires_pinned_preflight_dependency(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        mutated = copy.deepcopy(workflow)
+        mutated["jobs"]["preflight-gate"]["needs"].remove("pinned-dependencies")
+        with self.assertRaisesRegex(
+            AssertionError, "preflight-gate must retain scope and policy dependencies"
+        ):
+            assert_core_rust_cache_contract(mutated)
+
+    def test_core_cache_contract_requires_its_pinned_workflow_invocation(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        mutated = copy.deepcopy(workflow)
+        mutated["jobs"]["pinned-dependencies"]["steps"].remove(
+            CI_WORKFLOW_POLICY_TEST_STEP
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "run the CI workflow policy test"
+        ):
+            assert_core_rust_cache_contract(mutated)
+
+    def test_core_cache_contract_rejects_conditional_pr_restore(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        mutated = copy.deepcopy(workflow)
+        cache_step = next(
+            step
+            for step in mutated["jobs"]["test"]["steps"]
+            if str(step.get("uses", "")).startswith("Swatinem/rust-cache@")
+        )
+        cache_step["if"] = "${{ github.event_name == 'push' }}"
+        with self.assertRaisesRegex(AssertionError, "reachable on pull requests"):
+            assert_core_rust_cache_contract(mutated)
+
+    def test_conformance_materialization_honors_rust_scope(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        materialization = workflow["jobs"]["materialize-conformance-bundles"]
+        self.assertIn("ci_change_scope", materialization["needs"])
+        self.assertEqual(
+            materialization["if"],
+            "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+            "needs.conformance-fixtures.result == 'success' && "
+            "needs.cargo-crap.result == 'success' && "
+            "(needs.ci_change_scope.outputs.rust == 'true' || "
+            "github.event_name != 'pull_request') }}",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
