@@ -268,14 +268,14 @@ fn require_world_replay(
     sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
     closure: &pos_core::WorldReplayClosureV1,
     requested_use: &pos_runtime::WorldReplayUseV1,
-) -> Result<pos_core::EventReadBounds, pos_core::CoreError> {
+) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_core::CoreError> {
     let verified = sender
         .admit_world_replay(closure, requested_use)
         .map_err(host_error_to_core)?;
     verified
         .require_authoritative_use()
         .map_err(|_| pos_core::CoreError::ArtifactUnavailable)?;
-    Ok(verified.read_bounds())
+    Ok(verified)
 }
 
 /// Return `registry`'s canonical consumer selection before any host read.
@@ -330,6 +330,7 @@ fn read_complete_world_replay(
     sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
     requested_use: &pos_runtime::WorldReplayUseV1,
     bounds: pos_core::EventReadBounds,
+    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
 ) -> Result<Vec<pos_core::Event>, pos_core::CoreError> {
     use pos_core::CoreError;
 
@@ -354,6 +355,8 @@ fn read_complete_world_replay(
         return Err(CoreError::ArtifactUnavailable);
     }
 
+    budget.check_time().map_err(|_| CoreError::ArtifactUnavailable)?;
+    let bounds = bounds.with_max_total_bytes(bounds.max_total_bytes().min(budget.remaining_native_bytes()));
     let events = sender
         .read_bounded(timeline, range, bounds)
         .map_err(host_error_to_core)?;
@@ -364,6 +367,12 @@ fn read_complete_world_replay(
     {
         return Err(CoreError::ArtifactUnavailable);
     }
+    for event in &events {
+        budget.charge_rows(1).map_err(|_| CoreError::ArtifactUnavailable)?;
+        budget.charge_bytes(event.payload.as_slice().len()).map_err(|_| CoreError::ArtifactUnavailable)?;
+        budget.charge_bytes(event.event_type.as_str().len()).map_err(|_| CoreError::ArtifactUnavailable)?;
+    }
+    budget.check_time().map_err(|_| CoreError::ArtifactUnavailable)?;
     Ok(events)
 }
 
@@ -759,7 +768,7 @@ pub mod test_support {
 mod tests {
     use super::{
         handoff_with_p2_on, host_error_to_core, observed_world_replay_use,
-        read_complete_world_replay, ReleaseHealthV1,
+        ReleaseHealthV1,
     };
     use pos_core::trusted_clock::{
         ScriptedGuardMonotonicSourceV1, StagedArtifactBytesV1, StagedProtectedOutputV1,
@@ -771,6 +780,21 @@ mod tests {
     };
     use pos_runtime::{WorldReplayUseV1, GUARD_RELEASE_LATE_SIGNAL};
     use std::time::Duration;
+
+    fn read_complete_world_replay(
+        sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
+        requested_use: &WorldReplayUseV1,
+        bounds: EventReadBounds,
+    ) -> Result<Vec<pos_core::Event>, CoreError> {
+        use pos_core::trusted_clock::GuardMonotonicSourceV1;
+        let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
+        let started = clock.mark();
+        let limits = crate::test_support::test_ok(pos_store::ForkReplayReadLimitsV1::new(
+            8, 1_024, 262_144, 256 * 1024 * 1024, 30_000_000,
+        ));
+        let mut budget = crate::test_support::test_ok(pos_store::ForkReplayReadBudgetV1::new(limits, started, &mut clock));
+        super::read_complete_world_replay(sender, requested_use, bounds, &mut budget)
+    }
 
     /// A refused handoff whose P2 measurement lands past `g0 + 30 s` records
     /// the late signal; nothing is handed over and no overrun is recorded.
