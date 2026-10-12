@@ -12,9 +12,7 @@ use pos_core::{
     ImportedKeyTombstoneV1, ImportedPrincipalOwnerBindingV1, PrincipalOwnerBindingV1,
 };
 
-pub trait CanonicalSizeV1 {
-    fn canonical_size(&self) -> usize;
-}
+use super::CanonicalSizeV1;
 
 /// One preferred CBOR length/integer head, without a payload.
 const fn head(value: u64) -> usize {
