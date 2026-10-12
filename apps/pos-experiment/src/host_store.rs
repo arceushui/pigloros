@@ -954,6 +954,11 @@ mod host_store_tests {
         Ok(())
     }
 
+    /// The forwarders run over an empty Timeline: the host exclusively owns its
+    /// store and `seed_factual_prefix` is a Memory-adapter test seam that is
+    /// unreachable through the hosted wrapper, so no prefix can be seeded here.
+    /// The decorator forwarder test in `pos-runtime` seeds one and asserts the
+    /// non-empty results.
     #[test]
     fn hosted_store_forwards_every_factual_prefix_read() -> Result<(), Box<dyn std::error::Error>> {
         use pos_core::{FactualCutV1, FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1};
