@@ -367,24 +367,26 @@ fn register_ephemeral_producer(registry: &mut PluginRegistry) {
         max_cpu_us,
         shared_host_cpu_reservation_us: 0,
     };
-    let budget = ok(ExecutableBudgetPolicyV1::new(ExecutableBudgetPolicyInputV1 {
-        revision: 1,
-        workload_profile: WorkloadProfileV1::Interactive,
-        cut_budget_family: 0,
-        max_event_bytes: 4_096,
-        fidelity_budgets: [
-            fidelity(0, 1_000, 64 * 1024 * 1024, 500_000),
-            fidelity(1, 1_000, 64 * 1024 * 1024, 250_000),
-            fidelity(2, 1_000, 16 * 1024 * 1024, 50_000),
-        ],
-        plugin_cpu_reservations: vec![PluginCpuReservationV1 {
-            plugin_id,
-            cpu_reservations_us: [10; 3],
-        }],
-        accounting_semantics: 0,
-        execution_profile_hash: Hash::from_bytes([0x41; 32]),
-        max_pass_wall_duration_us: 1_000,
-    }));
+    let budget = ok(ExecutableBudgetPolicyV1::new(
+        ExecutableBudgetPolicyInputV1 {
+            revision: 1,
+            workload_profile: WorkloadProfileV1::Interactive,
+            cut_budget_family: 0,
+            max_event_bytes: 4_096,
+            fidelity_budgets: [
+                fidelity(0, 1_000, 64 * 1024 * 1024, 500_000),
+                fidelity(1, 1_000, 64 * 1024 * 1024, 250_000),
+                fidelity(2, 1_000, 16 * 1024 * 1024, 50_000),
+            ],
+            plugin_cpu_reservations: vec![PluginCpuReservationV1 {
+                plugin_id,
+                cpu_reservations_us: [10; 3],
+            }],
+            accounting_semantics: 0,
+            execution_profile_hash: Hash::from_bytes([0x41; 32]),
+            max_pass_wall_duration_us: 1_000,
+        },
+    ));
     let declaration = ok(OutputDeclarationV1::new(
         EPHEMERAL.to_owned(),
         OutputAuthorityV1::Ephemeral,
@@ -571,7 +573,10 @@ fn entry_of_marker(registry: &PluginRegistry, marker: u64) -> &PluginEntry {
 
 /// The owner ID of the test Driver with this marker.
 fn owner_of_marker(registry: &PluginRegistry, marker: u64) -> String {
-    entry_of_marker(registry, marker).owner_id.as_str().to_owned()
+    entry_of_marker(registry, marker)
+        .owner_id
+        .as_str()
+        .to_owned()
 }
 
 fn policy_identity_of(registry: &PluginRegistry, marker: u64) -> Hash {

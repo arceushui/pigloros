@@ -495,11 +495,19 @@ mod tests {
         assert_eq!(plans[0].cursor, Seq::from_u64(THROUGH));
 
         // One new Event on a full set collapses it; room 1 forwards one.
-        let full = [SteppedDriver::new(carried(1, 3_837), 3_837, pairs(3_838, 3_839))];
+        let full = [SteppedDriver::new(
+            carried(1, 3_837),
+            3_837,
+            pairs(3_838, 3_839),
+        )];
         let plans = plan(&full);
         assert!(plans[0].collapse);
         assert_eq!(seq_of(&plans[0]), [3_838, 3_839]);
-        let almost = [SteppedDriver::new(carried(1, 3_836), 3_836, pairs(3_837, 3_838))];
+        let almost = [SteppedDriver::new(
+            carried(1, 3_836),
+            3_836,
+            pairs(3_837, 3_838),
+        )];
         let plans = plan(&almost);
         assert!(!plans[0].collapse);
         assert_eq!(seq_of(&plans[0]), [3_837]);
@@ -518,7 +526,11 @@ mod tests {
                 SteppedDriver::new(carried(first, first + 3_836), 15_348, Vec::new())
             })
             .collect();
-        drivers.push(SteppedDriver::new(carried(15_349, 16_448), 15_348, Vec::new()));
+        drivers.push(SteppedDriver::new(
+            carried(15_349, 16_448),
+            15_348,
+            Vec::new(),
+        ));
         drivers[3].fresh = vec![pair(50_000)];
         let plans = plan(&drivers);
         assert_eq!(collapses(&plans), [false, false, false, true, false]);
@@ -565,7 +577,11 @@ mod tests {
                 SteppedDriver::new(carried(first, first + 3_836), 20_000, Vec::new())
             })
             .collect();
-        drivers.push(SteppedDriver::new(carried(15_349, 16_383), 20_000, Vec::new()));
+        drivers.push(SteppedDriver::new(
+            carried(15_349, 16_383),
+            20_000,
+            Vec::new(),
+        ));
         drivers.push(SteppedDriver::new(BTreeMap::new(), 0, pairs(1, 2)));
         let plans = plan(&drivers);
         assert!(collapses(&plans).iter().all(|collapse| !collapse));
@@ -579,7 +595,11 @@ mod tests {
         let mut drivers = vec![SteppedDriver::new(carried(1, 100), 0, Vec::new())];
         for index in 0..6_u64 {
             let first = 101 + 3_000 * index;
-            drivers.push(SteppedDriver::new(carried(first, first + 2_999), 0, Vec::new()));
+            drivers.push(SteppedDriver::new(
+                carried(first, first + 2_999),
+                0,
+                Vec::new(),
+            ));
         }
         let plans = plan(&drivers);
         assert_eq!(
