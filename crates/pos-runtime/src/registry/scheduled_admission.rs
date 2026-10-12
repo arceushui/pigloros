@@ -76,7 +76,9 @@ impl PluginRegistry {
     /// pass, which commits only through
     /// [`Self::admit_authorized_scheduled_pass`]. Also returns a consent,
     /// schema, or [`RuntimeError::PipelineContract`] error, a
-    /// [`RuntimeError::ScheduledPassNotAdmitted`] outcome, or a store error.
+    /// [`RuntimeError::ScheduledPassNotAdmitted`] outcome, a
+    /// [`RuntimeError::DependencyDeclaration`] error when a timeline set is
+    /// exhausted (`SetExhausted`), or a store error.
     /// Every error aborts all staged Driver state and commits no Event, except
     /// [`pos_core::CoreError::StorageOutcomeUnknown`], which retains the exact
     /// basis for [`Self::recover_scheduled_pass`].
@@ -135,7 +137,9 @@ impl PluginRegistry {
     /// closed authority error covers a pass that is not participant-authorized
     /// and unpaired or stale authority. Also returns a
     /// [`RuntimeError::PipelineContract`] error, a
-    /// [`RuntimeError::ScheduledPassNotAdmitted`] outcome, or a store error.
+    /// [`RuntimeError::ScheduledPassNotAdmitted`] outcome, a
+    /// [`RuntimeError::DependencyDeclaration`] error when a timeline set is
+    /// exhausted (`SetExhausted`), or a store error.
     /// Every error aborts all staged Driver state and commits no Event, except
     /// [`pos_core::CoreError::StorageOutcomeUnknown`], which retains the exact
     /// basis for [`Self::recover_scheduled_pass`].
@@ -167,6 +171,10 @@ impl PluginRegistry {
         admission: &ScheduledPassAdmissionV1,
         prepared: Result<Option<PipelineAdmissionBasisV1>, RuntimeError>,
     ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
+        // Slice 7b folds this call into the builder as its first port read:
+        // after output admission and schema validation and before
+        // `build_basis` (ADR-064 R3.8.1). Until then it runs here, after the
+        // basis is prepared.
         let prepared = preflight_prepared_pass(port, &pending, prepared);
         match prepared {
             Ok(Some(basis)) => self.finish_scheduled_admission(

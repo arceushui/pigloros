@@ -1140,6 +1140,7 @@ impl pos_core::FactualPrefixReadPortV1 for ExhaustedPort {
         &self,
         _: pos_core::TimelineId,
     ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        // One node past the preflight threshold of 1,000,000 - 65,536 = 934,464.
         Ok(pos_core::RecordedSetCountsV1 {
             nodes: 934_465,
             edges: 0,

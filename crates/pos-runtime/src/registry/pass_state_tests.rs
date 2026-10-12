@@ -66,10 +66,11 @@ impl Driver for Probe {
         _: TimelineId,
         observations: ObservationView<'_>,
     ) -> Result<StepOutput, RuntimeError> {
+        let events = observations.events();
         self.seen
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend(observations.events().iter().map(|event| event.seq.as_u64()));
+            .extend(events.iter().map(|event| event.seq.as_u64()));
         Ok(StepOutput::empty())
     }
 }
@@ -420,7 +421,7 @@ fn an_ephemeral_declared_event_is_not_forwarded_but_the_history_node_keeps_it() 
     registry.register_test_driver(Box::new(consumer));
     ok(registry.compose_non_participant_drivers());
     let timeline = TimelineId::new();
-    let events = vec![event(1, EPHEMERAL), event(2, PLAIN), event(3, EPHEMERAL)];
+    let events = [event(1, EPHEMERAL), event(2, PLAIN), event(3, EPHEMERAL)];
 
     assert!(step(&mut registry, timeline, 3, &events).is_empty());
     assert_eq!(taken(&seen), [2]);
@@ -449,7 +450,7 @@ fn a_restore_sets_one_shared_pending_history_node_and_the_restored_head() {
     ok(registry.restore_driver_state(&restore_segment(timeline, 3), &events));
 
     // The consent Event is host control-plane history: it is not covered.
-    let covered = vec![refs(1, 1)[0], refs(3, 3)[0]];
+    let covered = [refs(1, 1)[0], refs(3, 3)[0]];
     let one = Seq::from_u64(1);
     let expected = factual_history_content_digest(Hash::zero(), one, Seq::from_u64(3), &covered);
     for id in ids(&registry) {
@@ -556,8 +557,8 @@ fn slotless_vector(policy_identity: Hash, name: &str, rank: u32) -> String {
     format!("plugin:{}", hasher.finalize().to_hex())
 }
 
-/// The owner ID of the test Driver with this marker.
-fn owner_of_marker(registry: &PluginRegistry, marker: u64) -> String {
+/// The entry of the test Driver with this marker.
+fn entry_of_marker(registry: &PluginRegistry, marker: u64) -> &PluginEntry {
     let wanted = Duration::from_nanos(marker);
     let entry = registry.plugins.values().find(|entry| {
         entry
@@ -565,18 +566,17 @@ fn owner_of_marker(registry: &PluginRegistry, marker: u64) -> String {
             .as_ref()
             .is_some_and(|driver| driver.tick_interval() == wanted)
     });
-    some(entry).owner_id.as_str().to_owned()
+    some(entry)
+}
+
+/// The owner ID of the test Driver with this marker.
+fn owner_of_marker(registry: &PluginRegistry, marker: u64) -> String {
+    entry_of_marker(registry, marker).owner_id.as_str().to_owned()
 }
 
 fn policy_identity_of(registry: &PluginRegistry, marker: u64) -> Hash {
-    let wanted = Duration::from_nanos(marker);
-    let entry = registry.plugins.values().find(|entry| {
-        entry
-            .driver
-            .as_ref()
-            .is_some_and(|driver| driver.tick_interval() == wanted)
-    });
-    let admission = some(some(entry).output_admission.as_ref());
+    let entry = entry_of_marker(registry, marker);
+    let admission = some(entry.output_admission.as_ref());
     some(admission.closure()).replay_identity_digest()
 }
 

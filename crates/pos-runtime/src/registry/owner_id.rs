@@ -18,8 +18,9 @@ impl PluginRegistry {
     /// The owner ID a new entry takes, derived from its slot or from its
     /// closure identity and name.
     ///
-    /// Every `PluginEntry` is built after one call to this helper, so an
-    /// entry without an owner ID does not compile.
+    /// Every `PluginEntry` is built after one call to this helper. The struct
+    /// literal requires the owner ID field, so an entry cannot be built
+    /// without some owner ID, but nothing forces it to come from this helper.
     pub(super) fn factual_owner_id_for(
         &self,
         slot: Option<&ManifestSlotV1>,

@@ -83,13 +83,13 @@ impl EventLoad {
     }
 
     /// Whether a sum is at or above its cap: no headroom is left.
-    const fn at_cap(&self) -> bool {
+    fn at_cap(&self) -> bool {
         self.holders.len() >= MAX_FACTUAL_FORWARDED_EVENTS_PER_TICK_V1
             || self.edges >= MAX_FACTUAL_FORWARDED_EDGES_PER_TICK_V1
     }
 
     /// Whether a sum is above its cap.
-    const fn over_cap(&self) -> bool {
+    fn over_cap(&self) -> bool {
         self.holders.len() > MAX_FACTUAL_FORWARDED_EVENTS_PER_TICK_V1
             || self.edges > MAX_FACTUAL_FORWARDED_EDGES_PER_TICK_V1
     }
@@ -114,6 +114,9 @@ pub(super) fn plan_forwarding(
 
 /// Step (A), the per-Driver rule of R3.4.8.
 ///
+/// The room is sized here, against the Driver's own carried set as it stands
+/// before steps (B) and (C), and is not recomputed afterwards.
+///
 /// With room left the lowest new Events are forwarded. With no room and new
 /// Events the carried set collapses and the lowest new Events are forwarded
 /// into the emptied set. With no new Events nothing changes.
@@ -132,6 +135,11 @@ fn apply_room_rule(input: &ForwardInput<'_>) -> Working {
 /// Step (B), the pass-level accounting: collapse the largest remaining
 /// carried set (ties: the lowest schedule position) while a sum is at or above
 /// its cap, so that at least one new pair always fits.
+///
+/// Step (B) only collapses: it never re-sizes a forwarded list. The fixed order
+/// is (A) then (B) then (C), so a Driver's room was computed in step (A) from
+/// its own carried set before any step (B) collapse, and a later collapse of
+/// that set does not give the Driver more room. Step (C) only trims.
 ///
 /// Returns the load of the carried sets that remain.
 fn collapse_to_pass_budget(inputs: &[ForwardInput<'_>], work: &mut [Working]) -> EventLoad {
@@ -165,7 +173,7 @@ fn largest_carried(inputs: &[ForwardInput<'_>], work: &[Working]) -> usize {
 }
 
 /// The size of a Driver's carried set once the collapses so far are applied.
-const fn live_size(input: &ForwardInput<'_>, driver: &Working) -> usize {
+fn live_size(input: &ForwardInput<'_>, driver: &Working) -> usize {
     if driver.collapse {
         0
     } else {
@@ -264,6 +272,12 @@ impl PluginRegistry {
     ///
     /// An Ephemeral output cannot affect authoritative State, so such an Event
     /// is not forwarded as a Driver input on the Tick path (D9).
+    ///
+    /// Every declaration of an admitted output policy names an Event type its
+    /// own Plugin owns (a foreign declaration is refused at registration with
+    /// `CapabilityMismatch`), and one Event type has one owner. Flattening the
+    /// declarations of all entries is therefore the same as keying each by the
+    /// `owned_event_types` of the Plugin that declares it.
     fn ephemeral_event_types(&self) -> Vec<Kind> {
         self.plugins
             .values()
@@ -394,13 +408,13 @@ mod tests {
     }
 
     /// One stepped Driver: its carried set, cursor and new forwardable Events.
-    struct Driver {
+    struct SteppedDriver {
         carried: BTreeMap<Seq, Hash>,
         cursor: u64,
         fresh: Vec<ForwardedPair>,
     }
 
-    impl Driver {
+    impl SteppedDriver {
         const fn new(carried: BTreeMap<Seq, Hash>, cursor: u64, fresh: Vec<ForwardedPair>) -> Self {
             Self {
                 carried,
@@ -410,7 +424,7 @@ mod tests {
         }
     }
 
-    fn plan(drivers: &[Driver]) -> Vec<ForwardPlan> {
+    fn plan(drivers: &[SteppedDriver]) -> Vec<ForwardPlan> {
         let inputs: Vec<ForwardInput<'_>> = drivers
             .iter()
             .map(|driver| ForwardInput {
@@ -431,7 +445,7 @@ mod tests {
     }
 
     /// Every Driver's forwarded list is a `seq`-ordered prefix of its new Events.
-    fn assert_prefixes(drivers: &[Driver], plans: &[ForwardPlan]) {
+    fn assert_prefixes(drivers: &[SteppedDriver], plans: &[ForwardPlan]) {
         for (driver, planned) in drivers.iter().zip(plans) {
             let kept = planned.forwarded.len();
             assert_eq!(planned.forwarded.as_slice(), &driver.fresh[..kept]);
@@ -446,7 +460,7 @@ mod tests {
     fn the_worked_example_forwards_the_room_trims_the_rest_then_collapses() {
         // c = 100, n = 5,000: room = 3,737.
         let fresh = pairs(101, 5_100);
-        let drivers = [Driver::new(carried(1, 100), 100, fresh)];
+        let drivers = [SteppedDriver::new(carried(1, 100), 100, fresh)];
         let plans = plan(&drivers);
         assert!(!plans[0].collapse);
         assert_eq!(plans[0].forwarded.len(), 3_737);
@@ -455,7 +469,7 @@ mod tests {
 
         // After an empty pass c = 3,837; the 1,263 trimmed Events are new.
         let fresh = pairs(3_838, 5_100);
-        let drivers = [Driver::new(carried(1, 3_837), 3_837, fresh)];
+        let drivers = [SteppedDriver::new(carried(1, 3_837), 3_837, fresh)];
         let plans = plan(&drivers);
         assert!(plans[0].collapse);
         assert_eq!(plans[0].forwarded.len(), 1_263);
@@ -465,27 +479,27 @@ mod tests {
     #[test]
     fn the_room_rule_is_exact_at_its_boundaries() {
         // n = 3,737 fits; n = 3,738 trims one.
-        let exact = [Driver::new(carried(1, 100), 100, pairs(101, 3_837))];
+        let exact = [SteppedDriver::new(carried(1, 100), 100, pairs(101, 3_837))];
         let plans = plan(&exact);
         assert_eq!(plans[0].forwarded.len(), 3_737);
         assert_eq!(plans[0].cursor, Seq::from_u64(THROUGH));
-        let over = [Driver::new(carried(1, 100), 100, pairs(101, 3_838))];
+        let over = [SteppedDriver::new(carried(1, 100), 100, pairs(101, 3_838))];
         let plans = plan(&over);
         assert_eq!(plans[0].forwarded.len(), 3_737);
         assert_eq!(plans[0].cursor, Seq::from_u64(3_837));
 
         // A full set with no new Event keeps its set and moves its cursor.
-        let idle = [Driver::new(carried(1, 3_837), 3_837, Vec::new())];
+        let idle = [SteppedDriver::new(carried(1, 3_837), 3_837, Vec::new())];
         let plans = plan(&idle);
         assert!(!plans[0].collapse && plans[0].forwarded.is_empty());
         assert_eq!(plans[0].cursor, Seq::from_u64(THROUGH));
 
         // One new Event on a full set collapses it; room 1 forwards one.
-        let full = [Driver::new(carried(1, 3_837), 3_837, pairs(3_838, 3_839))];
+        let full = [SteppedDriver::new(carried(1, 3_837), 3_837, pairs(3_838, 3_839))];
         let plans = plan(&full);
         assert!(plans[0].collapse);
         assert_eq!(seq_of(&plans[0]), [3_838, 3_839]);
-        let almost = [Driver::new(carried(1, 3_836), 3_836, pairs(3_837, 3_838))];
+        let almost = [SteppedDriver::new(carried(1, 3_836), 3_836, pairs(3_837, 3_838))];
         let plans = plan(&almost);
         assert!(!plans[0].collapse);
         assert_eq!(seq_of(&plans[0]), [3_837]);
@@ -497,14 +511,14 @@ mod tests {
         // Four Drivers hold 3,837 each and one holds 1,100: 16,448 in all. The
         // fourth has new Events, so rule (2) collapses it first and the sum
         // falls under the cap. Largest-first alone would have collapsed the
-        // first Driver (lowest position at equal size) and then the fourth.
-        let mut drivers: Vec<Driver> = (0..4_u64)
+        // first Driver (lowest position at equal size) instead.
+        let mut drivers: Vec<SteppedDriver> = (0..4_u64)
             .map(|index| {
                 let first = 1 + 3_837 * index;
-                Driver::new(carried(first, first + 3_836), 15_348, Vec::new())
+                SteppedDriver::new(carried(first, first + 3_836), 15_348, Vec::new())
             })
             .collect();
-        drivers.push(Driver::new(carried(15_349, 16_448), 15_348, Vec::new()));
+        drivers.push(SteppedDriver::new(carried(15_349, 16_448), 15_348, Vec::new()));
         drivers[3].fresh = vec![pair(50_000)];
         let plans = plan(&drivers);
         assert_eq!(collapses(&plans), [false, false, false, true, false]);
@@ -512,12 +526,60 @@ mod tests {
     }
 
     #[test]
+    fn a_step_b_collapse_does_not_resize_the_forwarded_list_of_step_a() {
+        // The first Driver carries 3,000 Events and has 1,000 new ones: step
+        // (A) leaves room for 837 and forwards them. Seven more Drivers carry
+        // 2,048 distinct Events each, so the carried sum is 17,336 and step (B)
+        // collapses the largest set, the first Driver's. The collapse does not
+        // re-room it: it keeps the 837 of step (A) and the other new Events
+        // wait for a later pass.
+        let first = SteppedDriver::new(carried(1, 3_000), 3_000, pairs(3_001, 4_000));
+        let mut drivers = vec![first];
+        for index in 0..7_u64 {
+            let first = 10_001 + 2_048 * index;
+            let set = carried(first, first + 2_047);
+            drivers.push(SteppedDriver::new(set, 30_000, Vec::new()));
+        }
+        let plans = plan(&drivers);
+        let mut expected = [false; 8];
+        expected[0] = true;
+        assert_eq!(collapses(&plans), expected);
+        assert_eq!(plans[0].forwarded.len(), 837);
+        assert_eq!(seq_of(&plans[0]).last(), Some(&3_837));
+        assert_eq!(plans[0].cursor, Seq::from_u64(3_837));
+        assert_prefixes(&drivers, &plans);
+    }
+
+    #[test]
+    fn a_seq_carried_and_forwarded_to_two_drivers_counts_once_in_the_distinct_sum() {
+        // The distinct cap counts the union of the carried and the forwarded
+        // Events of the pass: a `seq` that one Driver carries and another is
+        // forwarded is one distinct Event, not two. The first four Drivers
+        // carry 3,837 Events each and the fifth 1,035: 16,383 distinct, one
+        // under the cap of 16,384. The sixth Driver is forwarded `seq` 1 and
+        // 2, which the first Driver already carries. The union stays 16,383 and
+        // nothing is trimmed; an additive count would reach 16,385 and trim.
+        let mut drivers: Vec<SteppedDriver> = (0..4_u64)
+            .map(|index| {
+                let first = 1 + 3_837 * index;
+                SteppedDriver::new(carried(first, first + 3_836), 20_000, Vec::new())
+            })
+            .collect();
+        drivers.push(SteppedDriver::new(carried(15_349, 16_383), 20_000, Vec::new()));
+        drivers.push(SteppedDriver::new(BTreeMap::new(), 0, pairs(1, 2)));
+        let plans = plan(&drivers);
+        assert!(collapses(&plans).iter().all(|collapse| !collapse));
+        assert_eq!(seq_of(&plans[5]), [1, 2]);
+        assert_eq!(plans[5].cursor, Seq::from_u64(THROUGH));
+    }
+
+    #[test]
     fn the_loop_collapses_the_largest_set_and_the_lowest_position_at_a_tie() {
         // 18,100 distinct Events: the sets of 3,000 tie, the first one goes.
-        let mut drivers = vec![Driver::new(carried(1, 100), 0, Vec::new())];
+        let mut drivers = vec![SteppedDriver::new(carried(1, 100), 0, Vec::new())];
         for index in 0..6_u64 {
             let first = 101 + 3_000 * index;
-            drivers.push(Driver::new(carried(first, first + 2_999), 0, Vec::new()));
+            drivers.push(SteppedDriver::new(carried(first, first + 2_999), 0, Vec::new()));
         }
         let plans = plan(&drivers);
         assert_eq!(
@@ -529,10 +591,10 @@ mod tests {
     #[test]
     fn the_loop_repeats_while_a_sum_stays_at_or_above_its_cap() {
         // Six full sets hold 23,022 distinct Events: two collapses are needed.
-        let drivers: Vec<Driver> = (0..6_u64)
+        let drivers: Vec<SteppedDriver> = (0..6_u64)
             .map(|index| {
                 let first = 1 + 3_837 * index;
-                Driver::new(carried(first, first + 3_836), 23_022, Vec::new())
+                SteppedDriver::new(carried(first, first + 3_836), 23_022, Vec::new())
             })
             .collect();
         let plans = plan(&drivers);
@@ -543,10 +605,10 @@ mod tests {
     #[test]
     fn vector_one_distinct_cap_sum_exactly_at_the_cap_collapses_once_more() {
         // Eight Drivers carry 2,048 distinct Events each: 16,384 in all.
-        let mut drivers: Vec<Driver> = (0..8_u64)
+        let mut drivers: Vec<SteppedDriver> = (0..8_u64)
             .map(|index| {
                 let first = 1 + 2_048 * index;
-                Driver::new(carried(first, first + 2_047), 16_384, Vec::new())
+                SteppedDriver::new(carried(first, first + 2_047), 16_384, Vec::new())
             })
             .collect();
         drivers[7].fresh = vec![pair(50_000)];
@@ -562,8 +624,8 @@ mod tests {
     #[test]
     fn vector_two_edge_cap_sum_exactly_at_the_cap_collapses_once_more() {
         // 64 Drivers carry the same 2,048 Events: 131,072 edges, 2,048 distinct.
-        let mut drivers: Vec<Driver> = (0..64)
-            .map(|_| Driver::new(carried(1, 2_048), 2_048, Vec::new()))
+        let mut drivers: Vec<SteppedDriver> = (0..64)
+            .map(|_| SteppedDriver::new(carried(1, 2_048), 2_048, Vec::new()))
             .collect();
         drivers[63].fresh = vec![pair(3_000)];
         let plans = plan(&drivers);
@@ -577,11 +639,11 @@ mod tests {
     fn vector_three_one_edge_of_headroom_forwards_one_pair_then_collapses() {
         // 63 Drivers carry 2,048 shared Events and one carries 2,047: 131,071
         // edges. Two Drivers want one new Event.
-        let build = |wanting: [usize; 2]| -> Vec<Driver> {
-            let mut drivers: Vec<Driver> = (0..63)
-                .map(|_| Driver::new(carried(1, 2_048), 2_048, Vec::new()))
+        let build = |wanting: [usize; 2]| -> Vec<SteppedDriver> {
+            let mut drivers: Vec<SteppedDriver> = (0..63)
+                .map(|_| SteppedDriver::new(carried(1, 2_048), 2_048, Vec::new()))
                 .collect();
-            drivers.push(Driver::new(carried(1, 2_047), 2_048, Vec::new()));
+            drivers.push(SteppedDriver::new(carried(1, 2_047), 2_048, Vec::new()));
             for position in wanting {
                 drivers[position].fresh = vec![pair(3_000)];
             }
@@ -616,8 +678,8 @@ mod tests {
         // 40 Drivers want the same 3,837 Events: 153,480 edges against 131,072.
         // 22,408 pairs go: seqs 3,837 down to 3,278 for everyone, then the
         // eight highest positions lose seq 3,277 as well.
-        let drivers: Vec<Driver> = (0..40)
-            .map(|_| Driver::new(BTreeMap::new(), 0, pairs(1, 3_837)))
+        let drivers: Vec<SteppedDriver> = (0..40)
+            .map(|_| SteppedDriver::new(BTreeMap::new(), 0, pairs(1, 3_837)))
             .collect();
         let plans = plan(&drivers);
         assert_prefixes(&drivers, &plans);
@@ -632,10 +694,10 @@ mod tests {
     #[test]
     fn the_distinct_cap_trims_from_the_tail_of_the_last_scheduled_driver() {
         // Five Drivers want 3,837 distinct Events each: 19,185 against 16,384.
-        let drivers: Vec<Driver> = (0..5_u64)
+        let drivers: Vec<SteppedDriver> = (0..5_u64)
             .map(|index| {
                 let first = 1 + 3_837 * index;
-                Driver::new(BTreeMap::new(), 0, pairs(first, first + 3_836))
+                SteppedDriver::new(BTreeMap::new(), 0, pairs(first, first + 3_836))
             })
             .collect();
         let plans = plan(&drivers);
