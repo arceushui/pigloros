@@ -58,7 +58,44 @@ ADMISSION_FORWARDED = "forwards local-admission-host"
 OUTSIDE = "names the fixture evaluation instant types outside their owners"
 GLOB = "glob re-exports trusted_clock"
 
+# Extra trees that must pass, each on top of the allowed tree.
+EXTRA_ALLOWED = {
+    "test-support forwarding in another crate": (
+        "crates/pos-plugin-supervisor/Cargo.toml",
+        '[features]\ntest-support = ["pos-runtime/local-admission-host"]\n',
+    ),
+    "glob over another module": (
+        "crates/pos-core/src/lib.rs",
+        "pub use clock::*;\npub use trusted_clock_fixture::*;\n",
+    ),
+}
+
 REJECTED_MANIFESTS = {
+    "inherited dependency with features": (
+        "crates/pos-store/Cargo.toml",
+        '[dependencies]\npos-core = { workspace = true, features = ["fixture-instant"] }\n',
+        FEATURE_ENABLED,
+    ),
+    "table-form dependency": (
+        "crates/pos-store/Cargo.toml",
+        '[dependencies.pos-core]\npath = "../pos-core"\nfeatures = ["fixture-instant"]\n',
+        FEATURE_ENABLED,
+    ),
+    "same-name forwarding in another crate": (
+        "crates/pos-store/Cargo.toml",
+        '[features]\nfixture-instant = ["pos-core/fixture-instant"]\n',
+        FEATURE_FORWARDED,
+    ),
+    "test-support feature forwarding the fixture instant": (
+        "crates/pos-store/Cargo.toml",
+        '[features]\ntest-support = ["pos-core/fixture-instant"]\n',
+        FEATURE_FORWARDED,
+    ),
+    "adapter named in workspace dependencies": (
+        "Cargo.toml",
+        "[workspace.dependencies]\n" + ADAPTER,
+        ADAPTER_DEPENDENT,
+    ),
     "dependency of another crate": (
         "crates/pos-store/Cargo.toml",
         "[dependencies]\n" + FIXTURE,
@@ -185,6 +222,21 @@ REJECTED_SOURCES = {
         OUTSIDE,
     ),
     "pos-core lib glob": ("crates/pos-core/src/lib.rs", "pub use trusted_clock::*;\n", GLOB),
+    "pos-core lib self glob": (
+        "crates/pos-core/src/lib.rs",
+        "pub use self::trusted_clock::*;\n",
+        GLOB,
+    ),
+    "pos-core lib braced glob": (
+        "crates/pos-core/src/lib.rs",
+        "pub use trusted_clock::{*};\n",
+        GLOB,
+    ),
+    "pos-core lib self and glob": (
+        "crates/pos-core/src/lib.rs",
+        "pub use trusted_clock::{self, *};\n",
+        GLOB,
+    ),
     "pos-core lib crate glob": (
         "crates/pos-core/src/lib.rs",
         "pub use crate::trusted_clock::*;\n",
@@ -241,6 +293,10 @@ def main() -> None:
     allowed = with_files(allowed_files)
     if allowed.returncode != 0:
         raise SystemExit(f"checker rejected an allowed use:\n{allowed.stderr}")
+    for case, (relative, text) in EXTRA_ALLOWED.items():
+        result = with_files({**allowed_files, relative: text})
+        if result.returncode != 0:
+            raise SystemExit(f"checker rejected {case}:\n{result.stderr}")
     for case, (relative, text, reason) in REJECTED_MANIFESTS.items():
         result = with_files({**allowed_files, relative: text})
         expect_rejected(f"a {case}", result, reason)

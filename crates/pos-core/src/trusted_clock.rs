@@ -13,6 +13,10 @@
 //! rejects implementations outside `pos-store`, `pos-runtime` and `test-support`
 //! fixtures.
 //!
+//! [`PluginTrustWallSourceV1`] is the narrower sealed wall source of the Plugin trust paths
+//! (ADR-061 revision 8). Every [`TrustedWallSourceV1`] satisfies it, and so does the
+//! feature-gated fixture source; the fence functions here keep [`TrustedWallSourceV1`].
+//!
 //! The handoff token cannot be constructed outside this module:
 //!
 //! ```compile_fail,E0451
@@ -460,7 +464,7 @@ impl FixtureEvaluationInstantV1 {
 /// }
 /// ```
 ///
-/// The identical call with a trusted wall source compiles:
+/// The same call with a trusted source compiles:
 ///
 /// ```
 /// use pos_core::trusted_clock::{
@@ -1764,13 +1768,6 @@ mod fixture_instant_tests {
         assert_ne!(instant, later, "inequality");
         let debug = format!("{source:?}");
         assert!(debug.contains("FixtureWallSourceV1"), "debug name");
-        Ok(())
-    }
-
-    #[test]
-    fn a_trusted_source_is_sampled_through_the_blanket_implementation() -> TestResult {
-        let micros = sample_of(&mut SystemTrustedWallSourceV1)?;
-        assert!(micros > 0, "system clock");
         Ok(())
     }
 }

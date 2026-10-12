@@ -1209,7 +1209,7 @@ jobs:
         run: |
           python scripts/check_plugin_trust_registry_impls.py
           python scripts/test_check_plugin_trust_registry_impls.py
-      - name: Check fixture evaluation instant confinement policy
+      - name: Check fixture evaluation instant and admission host confinement policy
         run: |
           python scripts/check_fixture_instant_confinement.py
           python scripts/test_check_fixture_instant_confinement.py
