@@ -5,21 +5,24 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 
+use pos_core::output_policy::OutputAuthorityV1;
 use pos_core::{
-    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
-    AdmissionClock, AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityGranteeV1,
-    AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1,
-    AuthorityRoleV1, CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1,
-    CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1,
-    CoreError, DelegateClassV1, EntityId, ErasureContainmentGateV1, EventDraft, EventStore, Hash,
-    Kind, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
-    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
-    PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1,
-    PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1, PipelineObservationAnchorV1,
-    PipelineOutcomeV1, PipelinePreconditionV1, PipelineReceiptLookupV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, PrincipalRefV1, Seq, SeqRange,
-    TentativePipelineResultV1, TimelineId, WallTime, APPEND_IDENTITY_RETENTION_MICROS,
-    DELEGATE_ACTION_V1, GEOGRAPHIC_EVENT_TYPE, PIPELINE_CONTRACT_VERSION_V1,
+    assemble_factual_tick, pipeline_authority_revision_v1, pipeline_delegation_revision_v1,
+    pipeline_erasure_revision_v1, AdmissionClock, AppendDedupKey, AppendDedupScope, AppendIdentity,
+    AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, CapabilityGrantDraftV1,
+    CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1,
+    CapabilityScopeV1, CoreError, DelegateClassV1, EntityId, ErasureContainmentGateV1, EventDraft,
+    EventStore, FactualDriverStepV1, FactualOutputV1, FactualOwnerIdV1, FactualScheduledTickV1,
+    FactualTickContextV1, FactualTickDependenciesV1, FactualTickShapeV1, Hash, Kind,
+    PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
+    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1,
+    PipelineAttemptV1, PipelineCommitReceiptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1,
+    PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
+    PipelineReceiptLookupV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
+    PrincipalRefV1, Seq, SeqRange, TentativePipelineResultV1, TimelineId, WallTime,
+    APPEND_IDENTITY_RETENTION_MICROS, DELEGATE_ACTION_V1, GEOGRAPHIC_EVENT_TYPE,
+    PIPELINE_CONTRACT_VERSION_V1,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use tempfile::tempdir;
@@ -256,6 +259,8 @@ struct Attempt {
     precondition: PipelinePreconditionV1,
     revisions: PipelineSecurityRevisionsV1,
     drafts: Vec<EventDraft>,
+    /// The factual Tick the attempt declares: the next Tick of its Timeline.
+    tick: u64,
 }
 
 fn attempt(fixture: &Fixture, key: u8, head: u64) -> Attempt {
@@ -267,7 +272,50 @@ fn attempt(fixture: &Fixture, key: u8, head: u64) -> Attempt {
         precondition: PipelinePreconditionV1::ExpectedLogicalHead(Seq::from_u64(head)),
         revisions: fixture.revisions,
         drafts: drafts(&[b"first", b"second", b"third"]),
+        tick: 1,
     }
+}
+
+fn scheduled_shape(drafts: &[EventDraft]) -> FactualTickShapeV1 {
+    let outputs = drafts
+        .iter()
+        .map(|draft| FactualOutputV1 {
+            draft: draft.clone(),
+            authority: OutputAuthorityV1::Authoritative,
+            direct_inputs: Vec::new(),
+        })
+        .collect();
+    let driver = FactualDriverStepV1 {
+        owner: FactualOwnerIdV1::new("plugin:test".to_owned()),
+        policy_identity: hash(8),
+        step_inputs: Vec::new(),
+        outputs,
+    };
+    FactualTickShapeV1::Scheduled(FactualScheduledTickV1 {
+        snapshot_digest: hash(61),
+        prefix_contents: Vec::new(),
+        history_contents: Vec::new(),
+        ingress_events: Vec::new(),
+        drivers: vec![driver],
+    })
+}
+
+/// The factual Tick declaration of a hand-built attempt: a real record for
+/// the Tick the attempt names, under the fence's authority grant.
+fn tick_dependencies(attempt: &Attempt) -> FactualTickDependenciesV1 {
+    let context = FactualTickContextV1 {
+        timeline_id: attempt.timeline,
+        tick: attempt.tick,
+        attempt_id: ok(PipelineAttemptIdV1::try_new([attempt.key; 16])),
+        evidence_digest: hash(60),
+        authority_grant: hash(1),
+    };
+    let drafts = &attempt.drafts;
+    let shape = match attempt.ingress {
+        PipelineIngressV1::HumanProposedAction => FactualTickShapeV1::Human(drafts.clone()),
+        PipelineIngressV1::ScheduledAiDriver => scheduled_shape(drafts),
+    };
+    ok(assemble_factual_tick(&context, &shape))
 }
 
 fn basis(attempt: &Attempt) -> PipelineAdmissionBasisV1 {
@@ -303,6 +351,7 @@ fn basis(attempt: &Attempt) -> PipelineAdmissionBasisV1 {
             precondition: Some(attempt.precondition),
             security_revisions: Some(attempt.revisions),
             batch: Some(ok(PipelineDraftBatchV1::try_new(attempt.drafts.clone()))),
+            dependencies: tick_dependencies(attempt),
         },
     ))
 }
@@ -386,10 +435,10 @@ fn admitted_batch_commits_in_order_with_its_exact_receipt_and_budget() {
         );
         assert_eq!(remaining_budget(store.as_ref(), fixture.timeline), Some(7));
 
-        let next = committed(ok(admit(store.as_mut(), &attempt(&fixture, 2, 3))));
+        let next = committed(ok(admit(store.as_mut(), &attempt_after(&first, 2, 3))));
         assert_eq!(receipt_positions(&next), [4, 5, 6], "{name}");
         assert_eq!(
-            ok(admit(store.as_mut(), &attempt(&fixture, 3, 3))),
+            ok(admit(store.as_mut(), &attempt_after(&first, 3, 3))),
             PipelineOutcomeV1::AdmissionConflict,
             "{name}"
         );
@@ -671,12 +720,15 @@ fn fork_history_and_concurrent_attempts_serialize_on_the_logical_head() {
         committed(ok(admit(store.as_mut(), &attempt(&fixture, 1, 0))));
         let child = ok(store.fork(fixture.timeline, Seq::from_u64(2), "admission-child")).id();
         ok(store.set_pipeline_admission_fence(child, fixture.fence));
-        let child_attempt = |key: u8, head: u64| Attempt {
+        // The child forks inside the parent's first Tick, so its own first Tick
+        // is Tick 1 and the contenders for the next one declare Tick 2.
+        let child_attempt = |key: u8, head: u64, tick: u64| Attempt {
             timeline: child,
+            tick,
             ..attempt(&fixture, key, head)
         };
 
-        let receipt = committed(ok(admit(store.as_mut(), &child_attempt(2, 2))));
+        let receipt = committed(ok(admit(store.as_mut(), &child_attempt(2, 2, 1))));
         assert_eq!(receipt_positions(&receipt), [3, 4, 5], "{name}");
         assert_eq!(event_count(store.as_ref(), child), 5, "{name}");
         assert_eq!(event_count(store.as_ref(), fixture.timeline), 3, "{name}");
@@ -686,7 +738,7 @@ fn fork_history_and_concurrent_attempts_serialize_on_the_logical_head() {
         let handles = [3_u8, 4].map(|key| {
             let shared = Arc::clone(&shared);
             let barrier = Arc::clone(&barrier);
-            let contender = child_attempt(key, 5);
+            let contender = child_attempt(key, 5, 2);
             std::thread::spawn(move || {
                 barrier.wait();
                 let mut guard = ok(shared.lock());
@@ -711,7 +763,8 @@ fn expired_receipts_release_their_key_and_are_purged_in_bounds() {
         let fixture = prepare(store.as_mut());
         let first = attempt(&fixture, 1, 0);
         committed(ok(admit(store.as_mut(), &first)));
-        committed(ok(admit(store.as_mut(), &attempt(&fixture, 2, 3))));
+        let second = attempt_after(&first, 2, 3);
+        committed(ok(admit(store.as_mut(), &second)));
         clock.advance(APPEND_IDENTITY_RETENTION_MICROS);
 
         // A rejected attempt under an expired key leaves its receipt retained.
@@ -721,7 +774,8 @@ fn expired_receipts_release_their_key_and_are_purged_in_bounds() {
             "{name}"
         );
         // A successful commit under an expired key replaces its receipt.
-        let reused = committed(ok(admit(store.as_mut(), &attempt(&fixture, 2, 6))));
+        let third = attempt_after(&second, 2, 6);
+        let reused = committed(ok(admit(store.as_mut(), &third)));
         assert_eq!(receipt_positions(&reused), [7, 8, 9], "{name}");
 
         let limit = ok(NonZeroUsize::new(1).ok_or("limit"));
@@ -738,13 +792,13 @@ fn expired_receipts_release_their_key_and_are_purged_in_bounds() {
             "{name}"
         );
         assert_eq!(
-            ok(admit(store.as_mut(), &attempt(&fixture, 2, 6))),
+            ok(admit(store.as_mut(), &third)),
             PipelineOutcomeV1::RecoveredDuplicate(reused),
             "{name}"
         );
         let fresh = Attempt {
             drafts: drafts(&[b"fresh"]),
-            ..attempt(&fixture, 1, 9)
+            ..attempt_after(&third, 1, 9)
         };
         let fresh_receipt = committed(ok(admit(store.as_mut(), &fresh)));
         assert_eq!(
@@ -778,7 +832,8 @@ fn basis_free_lookup_recovers_only_the_exact_retained_attempt() {
             PipelineReceiptLookupV1::Absent,
             "{name}"
         );
-        let receipt = committed(ok(admit(store.as_mut(), &attempt(&fixture, 1, 0))));
+        let first = attempt(&fixture, 1, 0);
+        let receipt = committed(ok(admit(store.as_mut(), &first)));
 
         assert_eq!(
             ok(lookup(store.as_mut(), fixture.timeline, 1, 1)),
@@ -808,7 +863,7 @@ fn basis_free_lookup_recovers_only_the_exact_retained_attempt() {
             store.as_mut(),
             &Attempt {
                 timeline: child,
-                ..attempt(&fixture, 2, 3)
+                ..attempt_after(&first, 2, 3)
             },
         )));
         assert_eq!(receipt_positions(&child_receipt), [4, 5, 6], "{name}");
@@ -839,8 +894,10 @@ fn subject_scoped_cleanup_releases_admitted_receipts_in_bounds() {
     let clock = TestClock::at(1_000);
     for (name, mut store) in stores(&clock) {
         let fixture = prepare(store.as_mut());
-        let first = committed(ok(admit(store.as_mut(), &attempt(&fixture, 1, 0))));
-        committed(ok(admit(store.as_mut(), &attempt(&fixture, 2, 3))));
+        let first_attempt = attempt(&fixture, 1, 0);
+        let first = committed(ok(admit(store.as_mut(), &first_attempt)));
+        let second_attempt = attempt_after(&first_attempt, 2, 3);
+        committed(ok(admit(store.as_mut(), &second_attempt)));
         let scope = AppendDedupScope::from_keyed_hash([62; 32]);
         let one = ok(NonZeroUsize::new(1).ok_or("limit"));
 
@@ -1004,11 +1061,13 @@ fn sqlite_faults_roll_back_the_complete_batch_and_receipt() {
     assert_eq!(event_count(&corrupted, first.timeline), 3);
 }
 
+/// The attempt that follows a committed `previous` one: the next Tick.
 fn attempt_after(previous: &Attempt, key: u8, head: u64) -> Attempt {
     Attempt {
         key,
         observed_through: head,
         precondition: PipelinePreconditionV1::ExpectedLogicalHead(Seq::from_u64(head)),
+        tick: previous.tick + 1,
         ..previous.clone()
     }
 }
@@ -1038,7 +1097,11 @@ fn sqlite_connections_racing_on_one_logical_head_commit_at_most_once() {
     let handles = [2_u8, 3].map(|key| {
         let barrier = Arc::clone(&barrier);
         let mut store = open_file(&path, &clock);
-        let contender = attempt_after(&fixture_attempt, key, 0);
+        // Nothing committed before the race: both contenders declare Tick 1.
+        let contender = Attempt {
+            key,
+            ..fixture_attempt.clone()
+        };
         std::thread::spawn(move || {
             barrier.wait();
             admit(&mut store, &contender)

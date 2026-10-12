@@ -21,11 +21,15 @@ use pos_core::{
 };
 use pos_state::AuthorizedObservationV1;
 
+use super::factual_dependencies::{split_output, DriverDeclaration, StagedFactual};
 use super::{
-    invoke_driver, staged_drafts, unauthorized, validate_driver_output, AuthorizedPendingStep,
-    OperationContext, PendingStep, PluginEntry, PluginRegistry,
+    invoke_driver, unauthorized, validate_driver_output, AuthorizedPendingStep, OperationContext,
+    PendingStep, PluginEntry, PluginRegistry,
 };
-use crate::{driver::ObservationView, error::RuntimeError};
+use crate::{
+    driver::{ObservationView, StepOutput},
+    error::RuntimeError,
+};
 
 /// One due Driver and the participant-authorized view the host derived for it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -188,6 +192,7 @@ impl PluginRegistry {
         self.restored_binding = None;
         let mut drafts = Vec::new();
         let mut staged = Vec::new();
+        let mut factual = StagedFactual::default();
         for ((index, view), snapshot) in indices.iter().zip(views).zip(snapshots) {
             staged.push(view.plugin_id);
             let invoked = invoke_authorized_entry(
@@ -198,7 +203,10 @@ impl PluginRegistry {
             )
             .and_then(|output| self.check_pass_output(drafts.len(), output));
             match invoked {
-                Ok(output) => drafts.extend(output),
+                Ok((output, declaration)) => {
+                    factual.push_driver(drafts.len(), output.len(), None, declaration);
+                    drafts.extend(output);
+                }
                 Err(error) => {
                     let _ = self.abort_drivers(&staged);
                     return Err(error);
@@ -224,6 +232,7 @@ impl PluginRegistry {
             }),
             scheduled: None,
             forwarded,
+            factual,
         });
         Ok(drafts)
     }
@@ -232,12 +241,13 @@ impl PluginRegistry {
     fn check_pass_output(
         &self,
         staged: usize,
-        output: Vec<EventDraft>,
-    ) -> Result<Vec<EventDraft>, RuntimeError> {
+        output: StepOutput,
+    ) -> Result<(Vec<EventDraft>, DriverDeclaration), RuntimeError> {
+        let (drafts, declaration) = split_output(output);
         self.schemas
-            .validate_batch(&output)
-            .and_then(|()| self.charge_pass_budget(staged, output.len()))
-            .map(|()| output)
+            .validate_batch(&drafts)
+            .and_then(|()| self.charge_pass_budget(staged, drafts.len()))
+            .map(|()| (drafts, declaration))
     }
 }
 
@@ -265,7 +275,7 @@ fn invoke_authorized_entry(
     timeline: TimelineId,
     snapshot: &ObservationSnapshotV1,
     knowledge: &KnowledgeSnapshotV1,
-) -> Result<Vec<EventDraft>, RuntimeError> {
+) -> Result<StepOutput, RuntimeError> {
     let Some(driver) = entry.driver.as_mut() else {
         return Err(RuntimeError::NoDriver {
             name: entry.name.clone(),
@@ -280,8 +290,7 @@ fn invoke_authorized_entry(
         timeline,
         ObservationView::from_authorized_snapshot(snapshot, knowledge),
     );
-    invoked
-        .and_then(|output| validate_driver_output(entry, &output).map(|()| staged_drafts(output)))
+    invoked.and_then(|output| validate_driver_output(entry, &output).map(|()| output))
 }
 
 /// Require exactly one current authority for each view.
