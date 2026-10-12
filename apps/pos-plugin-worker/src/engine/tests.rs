@@ -25,7 +25,7 @@ fn profile(
     mode: CommunityPluginModeV1,
     ceilings: CommunityPluginCeilingsV1,
 ) -> CommunityPluginExecutionProfileV1 {
-    CommunityPluginExecutionProfileV1::new(mode, ceilings, Some(ok(pinned_runtime())))
+    CommunityPluginExecutionProfileV1::new(mode, ceilings, Some(pinned_runtime_v1()))
 }
 
 fn request(call: WorkerCallV1) -> WorkerRequestV1 {

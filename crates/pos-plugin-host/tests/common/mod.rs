@@ -7,9 +7,9 @@ use pos_crypto::plugin_execution::{
     DeterministicBudgetV1, PluginAbiRequirementV1, PluginExecutionProjectionFixtureV1,
     PluginExecutionProjectionV1,
 };
-use pos_plugin_host::{pinned_runtime, PinnedExecutionV1};
+use pos_plugin_host::PinnedExecutionV1;
 use pos_runtime::community_plugin_host::{
-    negotiate_community_plugin_v1, ArtifactRefV1, CommunityPluginCeilingsV1,
+    negotiate_community_plugin_v1, pinned_runtime_v1, ArtifactRefV1, CommunityPluginCeilingsV1,
     CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginModeV1,
     GatedCommunityReleaseV1, HostInputs, InvocationOptionsV1, NegotiatedCommunityPluginV1,
     PinnedComponentRuntimeV1, PluginInvocationV1, TimelinePositionV1,
@@ -100,7 +100,7 @@ pub fn pinned(
     release: &PluginExecutionProjectionV1,
     host: &CommunityPluginHostAbiV1,
 ) -> PinnedExecutionV1 {
-    let runtime = ok(pinned_runtime(), "pinned runtime");
+    let runtime = pinned_runtime_v1();
     ok(
         PinnedExecutionV1::new(negotiate(release, host, Some(runtime))),
         "pinned execution",

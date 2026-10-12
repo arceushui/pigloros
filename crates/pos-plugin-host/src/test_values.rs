@@ -14,7 +14,7 @@ use wasmtime::component::Val;
 
 use crate::engine::PinnedExecutionV1;
 use crate::lift::widen;
-use crate::runtime::pinned_runtime;
+use crate::runtime::derived_runtime;
 
 pub(crate) use crate::lower::{byte_list, record};
 
@@ -59,7 +59,7 @@ pub(crate) fn negotiate(
 /// The `plugin-a` release under the V1 host and a profile that pins this
 /// engine's runtime.
 pub(crate) fn execution() -> PinnedExecutionV1 {
-    let runtime = ok(pinned_runtime());
+    let runtime = ok(derived_runtime());
     let negotiated = negotiate(
         &release(0, &[]),
         &CommunityPluginHostAbiV1::v1(),
