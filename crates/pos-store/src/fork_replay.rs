@@ -11,7 +11,10 @@ use pos_core::{
 };
 
 pub(crate) mod sizes;
-pub(crate) use sizes::CanonicalSizeV1;
+
+pub(crate) trait CanonicalSizeV1 {
+    fn canonical_size(&self) -> usize;
+}
 
 /// Closed failures of the bounded attribution read, without protected details.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
