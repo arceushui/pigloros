@@ -22,6 +22,8 @@ mod host;
 mod install;
 mod negotiation;
 mod profile;
+#[cfg(target_os = "linux")]
+mod trust_bytes;
 
 pub use contract::{
     plugin_output_digest_v1, ArtifactRefV1, EventDraftV1, FieldRefV1, GuestPluginErrorV1,
@@ -50,8 +52,8 @@ pub use host::{
 };
 #[cfg(target_os = "linux")]
 pub use install::{
-    install_community_release_v1, ActivationTargetV1, CommunityInstallErrorV1,
-    CommunityInstallRequestV1,
+    host_error_for_install_v1, install_community_release_v1, ActivationTargetV1,
+    CommunityInstallErrorV1, CommunityInstallRequestV1,
 };
 #[cfg(target_os = "linux")]
 pub use negotiation::negotiate_community_plugin_v1;
@@ -64,4 +66,8 @@ pub use profile::{
     CeilingValuesV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
     CommunityPluginModeV1, CommunityPluginProfileErrorV1, ExecutionLimitV1,
     PinnedComponentRuntimeV1, PinnedEngineConfigV1, TrapOutcomeV1, TrapTableEntryV1,
+};
+#[cfg(target_os = "linux")]
+pub use trust_bytes::{
+    CommunityTrustAnchorBytesV1, CommunityTrustBytesErrorV1, FixedTrustMaterialSourceV1,
 };
