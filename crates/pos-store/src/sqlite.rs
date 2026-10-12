@@ -146,6 +146,7 @@ mod counterfactual_store;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
+mod fork_replay;
 mod local_cut_owner;
 mod pipeline_admission;
 // The Plugin trust registry needs `pos-conformance`, which builds only on Linux, so non-Linux
@@ -9483,17 +9484,35 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         interval_connection
             .execute_batch(begin_immediate_sql())
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
+        if self.writer_reservation_connection.is_some() {
+            // Never reuse a snapshot that predates the writer reservation.
+            if !self.conn.is_autocommit()
+                || self.conn.execute_batch("BEGIN DEFERRED").is_err()
+            {
+                drop(interval_connection.execute_batch("ROLLBACK"));
+                return Err(ErasureErrorV1::ReceiptCommitFailed);
+            }
+        }
         let Ok(observed) = sqlite_data_version(&self.conn) else {
+            if self.writer_reservation_connection.is_some() {
+                drop(self.conn.execute_batch("ROLLBACK"));
+            }
             drop(interval_connection.execute_batch("ROLLBACK"));
             return Err(ErasureErrorV1::ReceiptCommitFailed);
         };
         if self.erasure_gate_bound && observed != self.erasure_inventory_data_version {
+            if self.writer_reservation_connection.is_some() {
+                drop(self.conn.execute_batch("ROLLBACK"));
+            }
             return Err(rollback_stale_protected_effect_interval(
                 interval_connection,
             ));
         }
         if self.erasure_gate_bound {
             let Some(gate) = self.erasure_gate.as_deref() else {
+                if self.writer_reservation_connection.is_some() {
+                    drop(self.conn.execute_batch("ROLLBACK"));
+                }
                 return Err(rollback_stale_protected_effect_interval(
                     interval_connection,
                 ));
@@ -9505,6 +9524,9 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
             )
             .is_err()
             {
+                if self.writer_reservation_connection.is_some() {
+                    drop(self.conn.execute_batch("ROLLBACK"));
+                }
                 return Err(rollback_stale_protected_effect_interval(
                     interval_connection,
                 ));
@@ -9525,6 +9547,12 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
             .writer_reservation_connection
             .as_ref()
             .unwrap_or(&self.conn);
+        if self.writer_reservation_connection.is_some()
+            && self.conn.execute_batch("ROLLBACK").is_err()
+        {
+            drop(interval_connection.execute_batch("ROLLBACK"));
+            return Err(ErasureErrorV1::ReceiptCommitFailed);
+        }
         let statement = match disposition {
             ErasureProtectedEffectDispositionV1::Commit => "COMMIT",
             ErasureProtectedEffectDispositionV1::Rollback => "ROLLBACK",
@@ -12905,7 +12933,7 @@ impl SqliteStore {
                     retained,
                     final_chain_head_hash,
                     suffix,
-                    registry,
+                    registry: registry.as_ref().map(Option::as_ref).map_err(|error| *error),
                 };
                 trusted_committed_manifest(&rows, sources)
             })
