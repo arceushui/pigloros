@@ -8,6 +8,7 @@ use pos_core::{
     trusted_clock::{GuardMonotonicSourceV1, MonotonicMarkV1},
     Hash, Seq, TimelineId,
 };
+use crate::CommittedForkManifestV1;
 
 pub(crate) mod sizes;
 
@@ -182,6 +183,12 @@ impl<'clock> ForkReplayReadBudgetV1<'clock> {
         self.limits
     }
 
+    /// Bytes still available before a bounded Event read allocates its result.
+    #[must_use]
+    pub const fn remaining_native_bytes(&self) -> usize {
+        self.limits.bytes - self.bytes
+    }
+
     /// Check the original guard clock around each bounded batch.
     ///
     /// # Errors
@@ -251,6 +258,34 @@ pub struct ForkReplayAuthorityEvidenceV1 {
 }
 
 impl ForkReplayAuthorityEvidenceV1 {
+    pub(crate) fn from_committed(
+        requirement: ForkReplayRequirementV1,
+        committed: &CommittedForkManifestV1,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> ReadResult<Self> {
+        use sizes::CanonicalSizeV1;
+        if committed.receipt.child_timeline_id != requirement.child
+            || committed.receipt.final_logical_head != requirement.head.as_u64()
+            || committed.record_id != requirement.record
+            || committed.authority_origin_digest != requirement.origin
+        {
+            return Err(ForkReplayAuthorityReadErrorV1::CorruptAuthority);
+        }
+        let size = committed.operation.canonical_size() + requirement.origin.map_or(0, |_| 34);
+        budget.charge_bytes(size)?;
+        let operation_bytes = requirement.origin.map_or_else(
+            || committed.operation.to_canonical_cbor(),
+            |origin| pos_core::ImportedForkPublicationOperationV1::from_local(
+                committed.operation.clone(), origin,
+            ).to_canonical_cbor(),
+        );
+        Ok(Self {
+            requirement,
+            admission_digest: committed.operation.input().admission_digest,
+            operation_id: committed.operation.input().operation_id,
+            operation_bytes,
+        })
+    }
     /// The coordinate that was validated, not a protected-use capability.
     #[must_use]
     pub const fn requirement(&self) -> ForkReplayRequirementV1 {
@@ -274,6 +309,27 @@ impl ForkReplayAuthorityEvidenceV1 {
     pub fn operation_bytes(&self) -> &[u8] {
         &self.operation_bytes
     }
+}
+
+/// Count an existing registry's native CBOR representation without buffering it.
+pub(crate) fn charge_registry(
+    registry: &pos_core::KeyRegistryStateV1,
+    budget: &mut ForkReplayReadBudgetV1<'_>,
+) -> ReadResult<()> {
+    struct Counter<'borrow, 'clock>(&'borrow mut ForkReplayReadBudgetV1<'clock>);
+    impl std::io::Write for Counter<'_, '_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.charge_bytes(bytes.len())
+                .map(|()| bytes.len())
+                .map_err(std::io::Error::other)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    ciborium::into_writer(registry, Counter(budget))
+        .map_err(|_| ForkReplayAuthorityReadErrorV1::BoundsExceeded)
 }
 
 /// Object-safe adapter read bridge. Its implementation must use a held store

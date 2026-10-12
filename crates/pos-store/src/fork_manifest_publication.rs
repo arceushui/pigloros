@@ -365,21 +365,21 @@ pub(crate) struct CommittedPublicationRowsV1 {
 }
 
 /// Trusted sources an adapter read under the same snapshot as the rows.
-pub(crate) struct CommittedPublicationSourcesV1 {
+pub(crate) struct CommittedPublicationSourcesV1<'registry> {
     pub(crate) admission: PublicationSourceResultV1<ValidatedAdmissionV1>,
     pub(crate) retained: PublicationSourceResultV1<RetainedKeyEvidenceV1>,
     pub(crate) final_chain_head_hash: PublicationSourceResultV1<Hash>,
     pub(crate) suffix: PublicationSourceResultV1<PublicationSuffixV1>,
-    pub(crate) registry: PublicationSourceResultV1<Option<KeyRegistryStateV1>>,
+    pub(crate) registry: PublicationSourceResultV1<Option<&'registry KeyRegistryStateV1>>,
 }
 
 /// Comparison sources a trusted read obtained successfully.
-struct TrustedPublicationSourcesV1 {
+struct TrustedPublicationSourcesV1<'registry> {
     admission: ValidatedAdmissionV1,
     key_evidence: RetainedKeyEvidenceV1,
     final_chain_head_hash: Hash,
     intervention_sequences: Vec<u64>,
-    registry: Option<KeyRegistryStateV1>,
+    registry: Option<&'registry KeyRegistryStateV1>,
 }
 
 /// ADR-099 step 1: reject zero epoch, then any role other than exactly
@@ -661,7 +661,7 @@ fn publication_graph(
 /// published head.
 pub(crate) fn trusted_committed_manifest(
     rows: &CommittedPublicationRowsV1,
-    sources: CommittedPublicationSourcesV1,
+    sources: CommittedPublicationSourcesV1<'_>,
 ) -> PublicationResultV1<CommittedForkManifestV1> {
     let CommittedPublicationSourcesV1 {
         admission,
@@ -693,7 +693,7 @@ pub(crate) fn trusted_committed_manifest(
 /// the `FAR1` that validated, before the shared trusted read runs.
 fn verified_committed_origin(
     rows: &CommittedPublicationRowsV1,
-    trusted: &TrustedPublicationSourcesV1,
+    trusted: &TrustedPublicationSourcesV1<'_>,
 ) -> PublicationResultV1<CommittedForkManifestV1> {
     if rows.origin == trusted.admission.origin() {
         verified_committed_manifest(rows, trusted)
@@ -747,7 +747,7 @@ fn decode_publication_operation(bytes: &[u8]) -> DecodedPublicationOperationV1 {
 
 fn verified_committed_manifest(
     rows: &CommittedPublicationRowsV1,
-    trusted: &TrustedPublicationSourcesV1,
+    trusted: &TrustedPublicationSourcesV1<'_>,
 ) -> PublicationResultV1<CommittedForkManifestV1> {
     let outer_bytes = &rows.artifact.input().signed_manifest_bytes;
     SignedForkReproManifestV1::from_canonical_cbor(outer_bytes)
@@ -778,7 +778,7 @@ fn verified_committed_manifest(
 /// Enforce every cross-record and FPO1 source-table equality.
 fn committed_graph_is_consistent(
     rows: &CommittedPublicationRowsV1,
-    trusted: &TrustedPublicationSourcesV1,
+    trusted: &TrustedPublicationSourcesV1<'_>,
     signed: &SignedForkReproManifestV1,
 ) -> bool {
     let record_id = signed.record_id();
@@ -821,7 +821,7 @@ fn committed_graph_is_consistent(
         && manifest.intervention_sequences == trusted.intervention_sequences
         && trusted
             .key_evidence
-            .accepts(trusted.registry.as_ref(), operation)
+            .accepts(trusted.registry, operation)
 }
 
 /// Where a trusted read takes the retained `FPO1`/`FSM1` verification key
