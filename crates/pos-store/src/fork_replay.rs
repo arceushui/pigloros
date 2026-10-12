@@ -11,6 +11,7 @@ use pos_core::{
 };
 
 pub(crate) mod sizes;
+pub(crate) use sizes::CanonicalSizeV1;
 
 /// Closed failures of the bounded attribution read, without protected details.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -286,7 +287,6 @@ impl ForkReplayAuthorityEvidenceV1 {
         committed: &CommittedForkManifestV1,
         budget: &mut ForkReplayReadBudgetV1<'_>,
     ) -> ReadResult<Self> {
-        use sizes::CanonicalSizeV1;
         if committed.receipt.child_timeline_id != requirement.child
             || committed.receipt.final_logical_head != requirement.head.as_u64()
             || committed.record_id != requirement.record
