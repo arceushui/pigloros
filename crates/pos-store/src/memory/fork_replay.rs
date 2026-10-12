@@ -78,6 +78,7 @@ impl MemoryStore {
         if let Some(table) = self.fork_classifier_tables.get(&child) {
             charge_records(std::iter::once(table), budget)?;
             charge_records(self.imported_fork_classifier_sources.get(&table.input().source_configuration_revision_digest).into_iter(), budget)?;
+            budget.charge_bytes(table.input().registrar_identifier.len())?;
             let key = (table.input().room_revision_descriptor_hash, table.input().registrar_identifier.clone());
             charge_records(self.fork_classifier_sources.get(&key).into_iter(), budget)?;
         }

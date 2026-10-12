@@ -120,7 +120,7 @@ fn run_on_host(mut host: ErasureExecutionHostV1, child: TimelineId, fault: Fault
             with_release(|release| crate::replay_at(&mut reads, child, Seq::from_u64(2), &mut registry, &closure, release, &fixture.fold()))?;
         }
         _ => {
-            assert_eq!(result, Err(CoreError::ArtifactUnavailable));
+            assert_eq!(result.map_err(|error| error.to_string()), Err(CoreError::ArtifactUnavailable.to_string()));
             if matches!(fault, Fault::FinalIdentity) {
                 assert!(FOLDED_EVENTS.load(Ordering::SeqCst) > 0);
             } else {
@@ -187,7 +187,7 @@ fn compare_on_host(mut host: ErasureExecutionHostV1, requirements: [ForkReplayRe
             assert!(!diff.diverged_entities.is_empty());
         }
         _ => {
-            assert_eq!(result.map(|_| ()), Err(CoreError::ArtifactUnavailable));
+            assert_eq!(result.map(|_| ()).map_err(|error| error.to_string()), Err(CoreError::ArtifactUnavailable.to_string()));
             if matches!(fault, Fault::FinalIdentity) {
                 assert!(FOLDED_EVENTS.load(Ordering::SeqCst) > 0);
             } else {

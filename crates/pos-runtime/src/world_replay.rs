@@ -403,6 +403,7 @@ pub fn test_verified_world_replay_with_fields_and_bounds(
 }
 
 /// Attach a complete explicit source classification for downstream seam tests.
+///
 /// The constructor deliberately permits inconsistent sets to test host rejection;
 /// it is absent from the deployment dependency graph.
 #[cfg(any(test, feature = "test-support"))]
