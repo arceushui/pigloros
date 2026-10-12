@@ -89,7 +89,7 @@ fn the_constant_profile_digest_is_the_golden_value() -> TestResult {
 }
 
 #[test]
-fn one_changed_trap_row_changes_the_digest() -> TestResult {
+fn one_changed_trap_row_changes_the_digest() {
     let values = CommunityPluginCeilingsV1::V1.values();
     let golden = profile_digest_of(values, pinned_runtime_v1());
     let mut outcome = pinned_runtime_v1();
@@ -101,7 +101,6 @@ fn one_changed_trap_row_changes_the_digest() -> TestResult {
         assert!(digest.is_some(), "a changed row still has a digest");
         assert_ne!(digest, golden, "a changed row left the digest unchanged");
     }
-    Ok(())
 }
 
 #[test]
@@ -155,15 +154,75 @@ fn profile_digest_of_equals_the_r7_d1_vector() -> TestResult {
 
 #[test]
 fn profile_digest_of_refuses_out_of_range_ceilings() -> TestResult {
-    let low_memory = CeilingValuesV1 {
-        memory_bytes: 1,
-        ..R7_D1_CEILINGS
-    };
-    assert_eq!(profile_digest_of(low_memory, r7_d1_runtime()?), None);
-    let more_calls = CeilingValuesV1 {
-        host_calls: R7_D1_CEILINGS.host_calls + 1,
-        ..R7_D1_CEILINGS
-    };
-    assert_eq!(profile_digest_of(more_calls, r7_d1_runtime()?), None);
+    let maxima = DeterministicBudgetV1::MAXIMA;
+    let refused = [
+        CeilingValuesV1 {
+            memory_bytes: 1,
+            ..R7_D1_CEILINGS
+        },
+        CeilingValuesV1 {
+            memory_bytes: WASM_PAGE_BYTES_V1 + 1,
+            ..R7_D1_CEILINGS
+        },
+        CeilingValuesV1 {
+            fuel: 0,
+            ..R7_D1_CEILINGS
+        },
+        CeilingValuesV1 {
+            host_calls: maxima.host_calls + 1,
+            ..R7_D1_CEILINGS
+        },
+        CeilingValuesV1 {
+            event_bytes: maxima.event_bytes + 1,
+            ..R7_D1_CEILINGS
+        },
+        CeilingValuesV1 {
+            log_bytes: maxima.log_bytes + 1,
+            ..R7_D1_CEILINGS
+        },
+    ];
+    for ceilings in refused {
+        assert_eq!(
+            profile_digest_of(ceilings, r7_d1_runtime()?),
+            None,
+            "{ceilings:?}"
+        );
+    }
     Ok(())
+}
+
+/// The position of `class`; the exhaustive match fails to compile when a
+/// class is added, which sends the author to `CLOSED_OUTCOMES`.
+const fn class_position(class: ComponentTrapClassV1) -> usize {
+    match class {
+        ComponentTrapClassV1::Unreachable => 0,
+        ComponentTrapClassV1::MemoryOutOfBounds => 1,
+        ComponentTrapClassV1::TableOutOfBounds => 2,
+        ComponentTrapClassV1::IndirectCall => 3,
+        ComponentTrapClassV1::IntegerArithmetic => 4,
+        ComponentTrapClassV1::StackExhausted => 5,
+        ComponentTrapClassV1::Other => 6,
+    }
+}
+
+#[test]
+fn every_trap_class_is_a_closed_outcome() {
+    let classes = [
+        ComponentTrapClassV1::Unreachable,
+        ComponentTrapClassV1::MemoryOutOfBounds,
+        ComponentTrapClassV1::TableOutOfBounds,
+        ComponentTrapClassV1::IndirectCall,
+        ComponentTrapClassV1::IntegerArithmetic,
+        ComponentTrapClassV1::StackExhausted,
+        ComponentTrapClassV1::Other,
+    ];
+    for (index, class) in classes.into_iter().enumerate() {
+        assert_eq!(class_position(class), index, "{class:?} is out of order");
+        assert_eq!(
+            TrapOutcomeV1::from_name(class.name()),
+            Some(TrapOutcomeV1::Trap(class)),
+            "{class:?}"
+        );
+    }
+    assert_eq!(CLOSED_OUTCOMES.len(), classes.len() + 2);
 }

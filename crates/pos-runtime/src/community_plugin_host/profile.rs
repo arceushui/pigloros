@@ -23,6 +23,10 @@ pub use pinned::{pinned_runtime_v1, profile_digest_of};
 const OUT_OF_FUEL_TRAP_CODE: &str = "OutOfFuel";
 /// The `wasmtime::Trap` code that is the operational watchdog stop.
 const INTERRUPT_TRAP_CODE: &str = "Interrupt";
+/// The outcome name of `OutOfFuel`, as the profile digest records it.
+const FUEL_EXHAUSTED_NAME: &str = "FuelExhausted";
+/// The outcome name of `Interrupt`, as the profile digest records it.
+const WATCHDOG_STOP_NAME: &str = "OperationalWatchdogStop";
 /// The domain of the execution profile digest: 35 ASCII bytes and a `0x00`.
 const PROFILE_DIGEST_DOMAIN: &[u8; 36] = b"PiglorOS.Plugin.ExecutionProfile.v1\0";
 
@@ -241,8 +245,8 @@ impl TrapOutcomeV1 {
     const fn name(self) -> &'static str {
         match self {
             Self::Trap(class) => class.name(),
-            Self::FuelExhausted => "FuelExhausted",
-            Self::WatchdogStop => "OperationalWatchdogStop",
+            Self::FuelExhausted => FUEL_EXHAUSTED_NAME,
+            Self::WatchdogStop => WATCHDOG_STOP_NAME,
         }
     }
 
