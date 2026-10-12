@@ -268,7 +268,7 @@ impl VerifiedWorldReplayV1 {
         self.fork_source_profile
     }
 
-    pub(crate) const fn has_finite_read_bounds(&self) -> bool {
+    pub(crate) fn has_finite_read_bounds(&self) -> bool {
         let bounds = self.read_bounds;
         finite_usize(bounds.max_payload_bytes())
             && finite_usize(bounds.max_event_type_bytes())
