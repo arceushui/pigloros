@@ -148,7 +148,7 @@ flowchart TD
     C --> R["cargo-crap"]
     R --> N["Normal checks: at most eight runners"]
     N --> M["Mutation: at most eight shards"]
-    M --> A["ASan: five shards"]
+    M --> A["ASan: six shards"]
     A --> G["ci-gate"]
     P -. "failure" .-> X["Stop downstream work"]
     C -. "failure" .-> X
@@ -271,8 +271,10 @@ flowchart TD
 ```
 
 ASan remains final. The previously dominant `bundle_contract_public` target is
-split through nextest's native `slice:1/2` partitioning; the other test groups
-remain unchanged.
+split through nextest's native `slice:1/2` partitioning. The non-conformance
+workspace remainder uses the same disjoint slices, while `remainder-1` retains
+the conformance library, binaries, and profile/provider targets. The selected
+packages, features, test targets, and sanitizer scope remain unchanged.
 
 ```mermaid
 flowchart LR
@@ -280,12 +282,14 @@ flowchart LR
     M --> P2["bundle-public 2/2"]
     M --> C["bundle coverage"]
     M --> O["moat proof"]
-    M --> R["remainder"]
+    M --> R1["remainder-1"]
+    M --> R2["remainder-2"]
     P1 --> G["asan-gate"]
     P2 --> G
     C --> G
     O --> G
-    R --> G
+    R1 --> G
+    R2 --> G
 ```
 
 All features, ignored tests, sanitizer instrumentation, leak detection, and the

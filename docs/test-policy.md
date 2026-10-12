@@ -111,14 +111,18 @@ device creation itself is not portable on GitHub's hosted GPU-less runners.
 ## Resource-intensive sanitizer jobs
 
 The complete workspace ASan gate retains all features and test targets, but
-partitions their execution across four hosted shards because Cargo runs separate
+partitions their execution across six hosted shards because Cargo runs separate
 test executables serially. The `bundle-coverage` and `bundle-public` shards run
 the two `pos-conformance` bundle integration targets independently. The
-`moat-proof` shard runs the slow moat integration target independently, while
-`remainder` runs `--workspace --exclude pos-conformance --tests`, then the
-`pos-conformance` library, binaries, and the profile/provider integration
-targets. Each shard serializes Cargo build/link jobs and bounds test threads at
-two. The required
+`moat-proof` shard runs the slow moat integration target independently.
+`remainder-1` and `remainder-2` use cargo-nextest's disjoint `slice:1/2` and
+`slice:2/2` partitions over `--workspace --exclude pos-conformance --tests`;
+`remainder-1` also runs the `pos-conformance` library, binaries, and the
+profile/provider integration targets. Each shard serializes Cargo build/link
+jobs and bounds test threads at two, including the explicit cargo-nextest
+`--test-threads 2` cap. The two long remainder shards are scheduled first
+under the five-runner cap, so both begin together while the short moat shard
+waits. The required
 `asan (address sanitizer)` aggregate runs with `always()` and succeeds only when
 every shard succeeds. Partitioning reduces wall-clock time by repeating setup
 and build work on independent runners; it does not remove a package, feature,
@@ -126,6 +130,15 @@ test target, sanitizer, or coverage requirement. ASan plus
 `build-std` produces unusually large test-binary links; concurrent lld workers
 can exhaust the runner's available resources and crash with `SIGBUS` before any
 test executes.
+
+The ASan nextest commands pin cargo-nextest 0.9.146, disable user
+configuration, and ignore any profile default filter. Repository
+`.config/nextest.toml` is deliberately forbidden by the executable ASan policy:
+it could otherwise add a filter or experimental execution wrapper outside the
+reviewed shard command. Adding nextest configuration requires an explicit
+policy-contract change and adversarial coverage first. Nextest also emits
+successful test output at the end of each partition without indentation, so
+the existing LSan report validator receives every printed suppression table.
 
 The job uses the dated `nightly-2026-07-01` toolchain rather than a floating
 nightly. The 2026-08-07 nightly (`rustc 1.99.0-nightly`) crashed its bundled
@@ -144,7 +157,7 @@ backtraces without full type and variable metadata. This changes artifact size
 only; sanitizer instrumentation, debug assertions, packages, features, test
 targets, and execution scope remain.
 
-`scripts/check-asan-ci-policy.sh` enforces the exact shard matrix, target
+`scripts/check_asan_ci_policy.py` enforces the exact shard matrix, target
 partition, per-shard resource settings, fail-closed aggregate, and complete
 ASan scope by parsing the workflow's executable YAML semantics. Adversarial
 fixtures prove that disabled/non-failing steps, environment-based test runners,
@@ -168,7 +181,7 @@ counts are not cross-run invariants because LSan evaluates reachability and
 records matched suppressions separately in each test process.
 
 The complete workspace/all-features/all-test-target ASan scope and
-`detect_leaks=1` remain unchanged across the four shards. A separate 1,234-byte
+`detect_leaks=1` remain unchanged across the six shards. A separate 1,234-byte
 intentional leak runs under the same sanitizer, symbolizer, suppression file,
 and options; it must exit nonzero, report exactly one allocation, and match
 neither approved rule.
