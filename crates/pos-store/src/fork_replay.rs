@@ -4,11 +4,11 @@
 //! installed runtime verifier's protected-use result selects required evidence;
 //! none of these values grants signing, append or protected-release authority.
 
+use crate::CommittedForkManifestV1;
 use pos_core::{
     trusted_clock::{GuardMonotonicSourceV1, MonotonicMarkV1},
     Hash, Seq, TimelineId,
 };
-use crate::CommittedForkManifestV1;
 
 pub(crate) mod sizes;
 
@@ -54,7 +54,12 @@ impl ForkReplayRequirementV1 {
         if record == Hash::zero() || origin == Some(Hash::zero()) {
             return Err(ForkReplayAuthorityReadErrorV1::CorruptAuthority);
         }
-        Ok(Self { child, head, record, origin })
+        Ok(Self {
+            child,
+            head,
+            record,
+            origin,
+        })
     }
 
     /// The required child Fork.
@@ -105,14 +110,22 @@ impl ForkReplayReadLimitsV1 {
         bytes: usize,
         elapsed_micros: u64,
     ) -> ReadResult<Self> {
-        if [depth, visits, rows, bytes].into_iter().any(|value| value == 0 || value == usize::MAX)
+        if [depth, visits, rows, bytes]
+            .into_iter()
+            .any(|value| value == 0 || value == usize::MAX)
             || bytes > 256 * 1024 * 1024
             || elapsed_micros == 0
             || elapsed_micros > 30_000_000
         {
             return Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded);
         }
-        Ok(Self { depth, visits, rows, bytes, elapsed_micros })
+        Ok(Self {
+            depth,
+            visits,
+            rows,
+            bytes,
+            elapsed_micros,
+        })
     }
 
     /// Parent links allowed in any one traversal, separate from total visits.
@@ -172,7 +185,13 @@ impl<'clock> ForkReplayReadBudgetV1<'clock> {
         clock: &'clock mut dyn GuardMonotonicSourceV1,
     ) -> ReadResult<Self> {
         let mut budget = Self {
-            limits, started, clock, visits: 0, rows: 0, bytes: 0, failed: false,
+            limits,
+            started,
+            clock,
+            visits: 0,
+            rows: 0,
+            bytes: 0,
+            failed: false,
         };
         budget.check_time().map(|()| budget)
     }
@@ -194,8 +213,14 @@ impl<'clock> ForkReplayReadBudgetV1<'clock> {
     /// # Errors
     /// Fails permanently on a regressed/elapsed mark or prior rejected charge.
     pub fn check_time(&mut self) -> ReadResult<()> {
-        let within = !self.failed && self.clock.mark().checked_elapsed_since(self.started)
-            .is_some_and(|elapsed| elapsed.as_micros() <= u128::from(self.limits.elapsed_micros));
+        let within = !self.failed
+            && self
+                .clock
+                .mark()
+                .checked_elapsed_since(self.started)
+                .is_some_and(|elapsed| {
+                    elapsed.as_micros() <= u128::from(self.limits.elapsed_micros)
+                });
         self.accept(within)
     }
 
@@ -229,7 +254,7 @@ impl<'clock> ForkReplayReadBudgetV1<'clock> {
         self.accept(within)
     }
 
-    fn accept(&mut self, within: bool) -> ReadResult<()> {
+    const fn accept(&mut self, within: bool) -> ReadResult<()> {
         if within {
             Ok(())
         } else {
@@ -240,12 +265,10 @@ impl<'clock> ForkReplayReadBudgetV1<'clock> {
 }
 
 fn charge(used: &mut usize, amount: usize, ceiling: usize) -> bool {
-    if let Some(next) = used.checked_add(amount).filter(|next| *next <= ceiling) {
+    used.checked_add(amount).filter(|next| *next <= ceiling).is_some_and(|next| {
         *used = next;
         true
-    } else {
-        false
-    }
+    })
 }
 
 /// Exact, non-authorizing publication evidence returned by an adapter.
@@ -275,9 +298,13 @@ impl ForkReplayAuthorityEvidenceV1 {
         budget.charge_bytes(size)?;
         let operation_bytes = requirement.origin.map_or_else(
             || committed.operation.to_canonical_cbor(),
-            |origin| pos_core::ImportedForkPublicationOperationV1::from_local(
-                committed.operation.clone(), origin,
-            ).to_canonical_cbor(),
+            |origin| {
+                pos_core::ImportedForkPublicationOperationV1::from_local(
+                    committed.operation.clone(),
+                    origin,
+                )
+                .to_canonical_cbor()
+            },
         );
         Ok(Self {
             requirement,
@@ -319,7 +346,8 @@ pub(crate) fn charge_registry(
     struct Counter<'borrow, 'clock>(&'borrow mut ForkReplayReadBudgetV1<'clock>);
     impl std::io::Write for Counter<'_, '_> {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.charge_bytes(bytes.len())
+            self.0
+                .charge_bytes(bytes.len())
                 .map(|()| bytes.len())
                 .map_err(std::io::Error::other)
         }
@@ -332,7 +360,9 @@ pub(crate) fn charge_registry(
         .map_err(|_| ForkReplayAuthorityReadErrorV1::BoundsExceeded)
 }
 
-/// Object-safe adapter read bridge. Its implementation must use a held store
+/// Object-safe adapter read bridge.
+///
+/// Its implementation must use a held store
 /// interval and the existing transaction-internal validator (b), never a new
 /// nested transaction, signer, permit or recovery decision.
 pub trait ForkReplayAuthorityReadPortV1 {

@@ -1,4 +1,4 @@
-//! Allocation preflight for the existing MemoryStore validator-(b) read.
+//! Allocation preflight for the existing `MemoryStore` validator-(b) read.
 
 use std::collections::HashSet;
 
@@ -22,11 +22,13 @@ impl ForkReplayAuthorityReadPortV1 for MemoryStore {
     ) -> ReadResult<ForkReplayAuthorityEvidenceV1> {
         self.preflight_replay_ancestry(requirement.child_timeline_id(), budget)?;
         self.preflight_replay_records(budget)?;
-        let committed = self.read_committed_as(
-            requirement.child_timeline_id(),
-            requirement.publication_logical_head().as_u64(),
-            AuthorityValidatorV1::CodeTwoAware,
-        ).map_err(|_| Error::CorruptAuthority)?;
+        let committed = self
+            .read_committed_as(
+                requirement.child_timeline_id(),
+                requirement.publication_logical_head().as_u64(),
+                AuthorityValidatorV1::CodeTwoAware,
+            )
+            .map_err(|_| Error::CorruptAuthority)?;
         budget.check_time()?;
         ForkReplayAuthorityEvidenceV1::from_committed(*requirement, &committed, budget)
     }

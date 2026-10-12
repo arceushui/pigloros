@@ -2,7 +2,10 @@
 
 use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
 use pos_core::{Hash, Seq, TimelineId};
-use pos_store::{ForkReplayAuthorityReadErrorV1 as Error, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1, ForkReplayRequirementV1};
+use pos_store::{
+    ForkReplayAuthorityReadErrorV1 as Error, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
+    ForkReplayRequirementV1,
+};
 use std::time::Duration;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -16,13 +19,22 @@ fn limits_are_finite_and_their_units_are_independent() -> TestResult {
     assert_eq!(limits.max_native_bytes(), 1_024);
     assert_eq!(limits.max_elapsed_micros(), 10_000);
     for (depth, visits, rows, bytes, time) in [
-        (0, 1, 1, 1, 1), (1, 0, 1, 1, 1), (1, 1, 0, 1, 1), (1, 1, 1, 0, 1),
-        (usize::MAX, 1, 1, 1, 1), (1, usize::MAX, 1, 1, 1),
-        (1, 1, usize::MAX, 1, 1), (1, 1, 1, usize::MAX, 1),
-        (1, 1, 1, 256 * 1024 * 1024 + 1, 1), (1, 1, 1, 1, 0),
+        (0, 1, 1, 1, 1),
+        (1, 0, 1, 1, 1),
+        (1, 1, 0, 1, 1),
+        (1, 1, 1, 0, 1),
+        (usize::MAX, 1, 1, 1, 1),
+        (1, usize::MAX, 1, 1, 1),
+        (1, 1, usize::MAX, 1, 1),
+        (1, 1, 1, usize::MAX, 1),
+        (1, 1, 1, 256 * 1024 * 1024 + 1, 1),
+        (1, 1, 1, 1, 0),
         (1, 1, 1, 1, 30_000_001),
     ] {
-        assert_eq!(ForkReplayReadLimitsV1::new(depth, visits, rows, bytes, time), Err(Error::BoundsExceeded));
+        assert_eq!(
+            ForkReplayReadLimitsV1::new(depth, visits, rows, bytes, time),
+            Err(Error::BoundsExceeded)
+        );
     }
     assert!(ForkReplayReadLimitsV1::new(1, 1, 1, 256 * 1024 * 1024, 30_000_000).is_ok());
     Ok(())
@@ -59,10 +71,19 @@ fn each_exhausted_dimension_and_arithmetic_overflow_closes_the_ledger() -> TestR
         let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1, 1_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
         let rejected = match case {
-            0 => { budget.charge_node(1)?; budget.charge_node(1) },
+            0 => {
+                budget.charge_node(1)?;
+                budget.charge_node(1)
+            }
             1 => budget.charge_node(2),
-            2 => { budget.charge_rows(1)?; budget.charge_rows(usize::MAX) },
-            _ => { budget.charge_bytes(1)?; budget.charge_bytes(usize::MAX) },
+            2 => {
+                budget.charge_rows(1)?;
+                budget.charge_rows(usize::MAX)
+            }
+            _ => {
+                budget.charge_bytes(1)?;
+                budget.charge_bytes(usize::MAX)
+            }
         };
         assert_eq!(rejected, Err(Error::BoundsExceeded));
         assert_eq!(budget.charge_rows(0), Err(Error::BoundsExceeded));
@@ -78,7 +99,11 @@ fn elapsed_checks_share_the_original_guard_epoch_and_reject_regression() -> Test
         let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1, 10)?;
         assert!(ForkReplayReadBudgetV1::new(limits, start, &mut clock).is_err());
     }
-    let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO, Duration::from_micros(10), Duration::from_micros(11)]);
+    let mut clock = ScriptedGuardMonotonicSourceV1::new([
+        Duration::ZERO,
+        Duration::from_micros(10),
+        Duration::from_micros(11),
+    ]);
     let start = clock.mark();
     let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1, 10)?;
     let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
@@ -100,7 +125,12 @@ fn required_coordinates_preserve_local_and_imported_origins() -> TestResult {
     }
     assert!(ForkReplayRequirementV1::new(child, Seq::ZERO, Hash::zero(), None).is_err());
     assert!(ForkReplayRequirementV1::new(child, Seq::ZERO, record, Some(Hash::zero())).is_err());
-    for error in [Error::Unavailable, Error::CorruptAuthority, Error::BoundsExceeded, Error::StorageUnavailable] {
+    for error in [
+        Error::Unavailable,
+        Error::CorruptAuthority,
+        Error::BoundsExceeded,
+        Error::StorageUnavailable,
+    ] {
         assert!(error.to_string().starts_with("Fork Replay"));
     }
     Ok(())

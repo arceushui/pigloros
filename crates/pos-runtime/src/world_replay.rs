@@ -33,7 +33,10 @@ impl WorldReplayForkSourceV1 {
         if required_attribution.is_some_and(|required| required.child_timeline_id() != timeline) {
             return Err(WorldReplayVerificationErrorV1::RequestMismatch);
         }
-        Ok(Self { timeline, required_attribution })
+        Ok(Self {
+            timeline,
+            required_attribution,
+        })
     }
 
     /// The source selected by the installed native owner.
@@ -277,7 +280,9 @@ impl VerifiedWorldReplayV1 {
             && finite_usize(bounds.max_total_bytes())
             && bounds.max_elapsed_micros() != 0
             && bounds.max_elapsed_micros() != u64::MAX
-            && self.fork_source_profile.is_some_and(|profile| profile != Hash::zero())
+            && self
+                .fork_source_profile
+                .is_some_and(|profile| profile != Hash::zero())
     }
 
     /// Require an Exact claim before protected materialization.
@@ -386,8 +391,14 @@ pub fn test_verified_world_replay_with_fields_and_bounds(
         fork_source_profile: Some(Hash::from_bytes([0xf1; 32])),
         fork_sources: None,
         fork_requirements: Vec::new(),
-        fork_read_limits: ForkReplayReadLimitsV1::new(8, 1_024, 262_144, 256 * 1024 * 1024, 30_000_000)
-            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error))),
+        fork_read_limits: ForkReplayReadLimitsV1::new(
+            8,
+            1_024,
+            262_144,
+            256 * 1024 * 1024,
+            30_000_000,
+        )
+        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error))),
     }
 }
 
