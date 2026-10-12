@@ -7,7 +7,9 @@
 //! `test-support` constructor, so no gate runs here. Linux only, like the gate and negotiation.
 #![cfg(target_os = "linux")]
 
-use pos_core::{CoreError, PipelineOutcomeV1};
+use pos_core::{
+    CoreError, CounterfactualDependencyErrorV1, FactualDependencyErrorV1, PipelineOutcomeV1,
+};
 use pos_crypto::plugin_execution::{
     DeterministicBudgetV1, PluginAbiRequirementV1, PluginCapabilityDescriptorV1,
     PluginExecutionProjectionFixtureV1, PluginExecutionProjectionV1, COMMUNITY_PLUGIN_WORLD_V1,
@@ -472,6 +474,20 @@ fn a_failed_pass_is_classified_by_its_commit_contract() {
         RuntimeError::NoScheduledAdmissionInDoubt,
     ] {
         assert_eq!(classify_pass_failure(&unrelated), PassFailureV1::Unrelated);
+    }
+    // D22: the host refuses before the store what the store would refuse with a
+    // typed outcome, so every dependency-declaration variant classifies like a
+    // typed `ScheduledPassNotAdmitted` outcome.
+    for declaration in [
+        FactualDependencyErrorV1::UndeclarableInput,
+        FactualDependencyErrorV1::UnresolvedInput,
+        FactualDependencyErrorV1::ClassRuleViolation,
+        FactualDependencyErrorV1::SetExhausted,
+        FactualDependencyErrorV1::Record(CounterfactualDependencyErrorV1::FieldOutOfBounds),
+    ] {
+        let refused = RuntimeError::DependencyDeclaration(declaration);
+        let class = classify_pass_failure(&refused);
+        assert_eq!(class, host(typed), "{declaration:?}");
     }
 }
 

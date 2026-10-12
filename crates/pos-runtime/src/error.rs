@@ -163,6 +163,12 @@ pub enum RuntimeError {
     #[error("no scheduled pass admission is in doubt")]
     NoScheduledAdmissionInDoubt,
 
+    /// The factual dependency declaration of a pass could not be built or
+    /// checked, so nothing was submitted to the store (ADR-064 Revision 3,
+    /// R3.8.2).
+    #[error(transparent)]
+    DependencyDeclaration(pos_core::FactualDependencyErrorV1),
+
     #[error(
         "driver '{driver}' cadence overflow: previous={previous_ns}ns, interval={interval_ns}ns"
     )]

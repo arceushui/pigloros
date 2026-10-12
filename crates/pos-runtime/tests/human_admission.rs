@@ -8,10 +8,11 @@ use std::sync::{
 
 use pos_core::{
     ActionApprover, ActionRejected, AppendDedupKey, AppendDedupScope, AppendIdentity,
-    CanonicalBytes, Capability, CoreError, EntityId, ErasureContainmentGateV1, EventDraft, Hash,
-    Kind, PipelineAdmissionBasisV1, PipelineAdmissionPortV1, PipelineAttemptIdV1,
-    PipelineContractErrorV1, PipelineEvidenceRefV1, PipelineObservationAnchorV1, PipelineOutcomeV1,
-    PipelineReceiptLookupV1, PipelineSecurityRevisionsV1, Plugin, PluginId, ProposedAction, Seq,
+    CanonicalBytes, Capability, CoreError, EntityId, ErasureContainmentGateV1, EventDraft,
+    FactualDependencyErrorV1, Hash, Kind, PipelineAdmissionBasisV1, PipelineAdmissionPortV1,
+    PipelineAttemptIdV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
+    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelineReceiptLookupV1,
+    PipelineSecurityRevisionsV1, Plugin, PluginId, ProposedAction, RecordedSetCountsV1, Seq,
     SeqRange, TimelineId,
 };
 use pos_runtime::{
@@ -720,5 +721,163 @@ fn a_failed_lookup_stops_before_approval() {
             error.to_string().contains("injected lookup failure"),
             "{name}"
         );
+    }
+}
+
+// ── Set-capacity preflight (ADR-064 Revision 3, R3.10) ─────────────────────
+
+/// The recorded-set counts one node, edge or declared input past the preflight
+/// threshold: one worst-case Tick no longer fits.
+const fn exhausted_counts() -> [RecordedSetCountsV1; 3] {
+    [
+        RecordedSetCountsV1 {
+            nodes: 934_465,
+            edges: 0,
+            inputs: 0,
+        },
+        RecordedSetCountsV1 {
+            nodes: 0,
+            edges: 3_737_857,
+            inputs: 0,
+        },
+        RecordedSetCountsV1 {
+            nodes: 0,
+            edges: 0,
+            inputs: 3_737_857,
+        },
+    ]
+}
+
+/// The counts exactly at the threshold: one worst-case Tick still fits.
+const AT_THRESHOLD: RecordedSetCountsV1 = RecordedSetCountsV1 {
+    nodes: 934_464,
+    edges: 3_737_856,
+    inputs: 3_737_856,
+};
+
+/// A port over the real store that reports fixed recorded-set counts.
+struct SetCountsPort<'a> {
+    inner: &'a mut dyn ScheduledAdmissionStoreV1,
+    counts: RecordedSetCountsV1,
+}
+
+impl PipelineAdmissionPortV1 for SetCountsPort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn admit_pipeline_batch(
+        &mut self,
+        basis: &PipelineAdmissionBasisV1,
+    ) -> Result<PipelineOutcomeV1, CoreError> {
+        self.inner.admit_pipeline_batch(basis)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        limit: std::num::NonZeroUsize,
+    ) -> Result<pos_core::PurgeOutcome, CoreError> {
+        self.inner.purge_expired_pipeline_receipts_bounded(limit)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: TimelineId,
+        key: AppendDedupKey,
+        attempt_id: PipelineAttemptIdV1,
+    ) -> Result<PipelineReceiptLookupV1, CoreError> {
+        self.inner
+            .lookup_pipeline_receipt(timeline, key, attempt_id)
+    }
+}
+
+impl pos_core::FactualPrefixReadPortV1 for SetCountsPort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, CoreError> {
+        self.inner.last_committed_factual_tick(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        timeline: TimelineId,
+        seq: Seq,
+    ) -> Result<pos_core::FactualCutV1, CoreError> {
+        self.inner.cut_tick_at(timeline, seq)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        timeline: TimelineId,
+        seqs: &[Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, CoreError> {
+        self.inner.nodes_for_committed_events(timeline, seqs)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        timeline: TimelineId,
+        digests: &[Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, CoreError> {
+        self.inner.nodes_by_digest(timeline, digests)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        timeline: TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, CoreError> {
+        self.inner.last_step_node(timeline, owner)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(&self, _: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
+        Ok(self.counts)
+    }
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn an_exhausted_timeline_refuses_the_action_before_the_approver_runs() {
+    for mut harness in harnesses() {
+        let name = harness.name;
+        let actor = EntityId::new();
+        for counts in exhausted_counts() {
+            let attempt = admission(&harness, 1, 1, 0);
+            let mut port = SetCountsPort {
+                inner: harness.store.as_mut(),
+                counts,
+            };
+            let walk = proposal(actor, b"walk");
+            let refused = err(harness.registry.admit_human_action(&mut port, &walk, &attempt));
+            assert!(
+                matches!(
+                    refused,
+                    HumanActionAdmissionErrorV1::DependencyDeclaration(
+                        FactualDependencyErrorV1::SetExhausted
+                    )
+                ),
+                "{name}"
+            );
+        }
+        // The approver was never invoked.
+        assert_eq!(approvals(&harness), 0, "{name}");
+        assert_eq!(events(&harness), 0, "{name}");
+
+        // Exactly at the threshold one more worst-case Tick fits.
+        let attempt = admission(&harness, 2, 2, 0);
+        let mut port = SetCountsPort {
+            inner: harness.store.as_mut(),
+            counts: AT_THRESHOLD,
+        };
+        let walk = proposal(actor, b"walk");
+        ok(harness.registry.admit_human_action(&mut port, &walk, &attempt));
+        assert_eq!(approvals(&harness), 1, "{name}");
+        assert_eq!(events(&harness), 1, "{name}");
     }
 }

@@ -24,7 +24,8 @@ use pos_core::{
 };
 
 use super::{
-    unauthorized, AuthorizedViewAuthorityV1, OperationContext, PendingStep, PluginRegistry,
+    ensure_set_headroom, unauthorized, AuthorizedViewAuthorityV1, OperationContext, PendingStep,
+    PluginRegistry,
 };
 use crate::error::RuntimeError;
 
@@ -166,6 +167,7 @@ impl PluginRegistry {
         admission: &ScheduledPassAdmissionV1,
         prepared: Result<Option<PipelineAdmissionBasisV1>, RuntimeError>,
     ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
+        let prepared = preflight_prepared_pass(port, &pending, prepared);
         match prepared {
             Ok(Some(basis)) => self.finish_scheduled_admission(
                 port,
@@ -275,6 +277,25 @@ pub(super) struct InDoubtAdmission {
     basis: PipelineAdmissionBasisV1,
     commit_head: Seq,
     commit_now_secs: u64,
+}
+
+/// The capacity preflight of a prepared pass (ADR-064 Revision 3, R3.10).
+///
+/// It is the first port read of admission and runs before any store call. An
+/// empty pass builds no record and makes no store call, so it is not
+/// preflighted and its cursors still advance on an exhausted Timeline.
+fn preflight_prepared_pass(
+    port: &dyn FactualAdmissionPortV1,
+    pending: &PendingStep,
+    prepared: Result<Option<PipelineAdmissionBasisV1>, RuntimeError>,
+) -> Result<Option<PipelineAdmissionBasisV1>, RuntimeError> {
+    prepared.and_then(|basis| {
+        if pending.staged_drafts.is_empty() {
+            Ok(basis)
+        } else {
+            ensure_set_headroom(port, pending.timeline).map(|()| basis)
+        }
+    })
 }
 
 fn not_admitted(outcome: PipelineOutcomeV1) -> RuntimeError {

@@ -209,6 +209,8 @@ impl PluginRegistry {
             }
         }
         let event_cursors = staged.iter().map(|id| (*id, observed_through)).collect();
+        // An authorized view forwards no committed Event (R3.4.7).
+        let forwarded = staged.iter().map(|_| Vec::new()).collect();
         self.pending_step = Some(PendingStep {
             timeline,
             driver_ids: staged,
@@ -222,6 +224,7 @@ impl PluginRegistry {
                 view_digest: authorized_view_digest(timeline, observed_through, views, snapshots),
             }),
             scheduled: None,
+            forwarded,
         });
         Ok(drafts)
     }
