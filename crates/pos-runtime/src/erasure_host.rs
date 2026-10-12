@@ -4063,7 +4063,8 @@ impl ErasureReadSenderV1<'_> {
         let mut required_index = 0;
         for (depth, source) in sources.iter().enumerate() {
             budget.charge_node(depth).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-            if next != Some(source.timeline_id())
+            if depth > capability.read_bounds().max_fork_depth()
+                || next != Some(source.timeline_id())
                 || sources[..depth].iter().any(|previous| previous.timeline_id() == source.timeline_id())
             {
                 return Err(ErasureHostErrorV1::Conflict);
