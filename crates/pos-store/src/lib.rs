@@ -77,6 +77,7 @@ pub mod fork_attribution_issuer_policy;
 pub mod fork_delivery_journal;
 pub mod fork_event_authority;
 pub mod fork_manifest_publication;
+pub mod fork_replay;
 pub mod memory;
 #[cfg(target_os = "linux")]
 pub mod plugin_trust_registry;
@@ -114,6 +115,11 @@ pub use fork_event_authority::{
 pub use fork_manifest_publication::{
     CommittedForkManifestV1, ForkManifestPublicationErrorV1, ForkManifestPublicationPortV1,
     ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
+};
+pub use fork_replay::{
+    ForkReplayAuthorityEvidenceV1, ForkReplayAuthorityReadErrorV1,
+    ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
+    ForkReplayRequirementV1,
 };
 pub use timeline_range::{
     verify_signed_timeline_range_v1, TimelineSignedRangeClaimV1, TimelineSignedRangeReportV1,
