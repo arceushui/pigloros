@@ -1054,6 +1054,123 @@ impl pos_core::FactualPrefixReadPortV1 for RecordingPort<'_> {
     }
 }
 
+/// A port without a fence that reports a recorded set one node past the
+/// preflight threshold. It counts the batches offered to the store.
+struct ExhaustedPort {
+    offered: usize,
+}
+
+/// The error of a port method the preflight must never reach.
+fn unreached<T>() -> Result<T, pos_core::CoreError> {
+    Err(pos_core::CoreError::Storage(
+        "the preflight reached the store".to_owned(),
+    ))
+}
+
+impl PipelineAdmissionPortV1 for ExhaustedPort {
+    fn admit_pipeline_batch(
+        &mut self,
+        _: &PipelineAdmissionBasisV1,
+    ) -> Result<PipelineOutcomeV1, pos_core::CoreError> {
+        self.offered += 1;
+        unreached()
+    }
+
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        _: std::num::NonZeroUsize,
+    ) -> Result<pos_core::PurgeOutcome, pos_core::CoreError> {
+        unreached()
+    }
+
+    fn lookup_pipeline_receipt(
+        &mut self,
+        _: pos_core::TimelineId,
+        _: pos_core::AppendDedupKey,
+        _: pos_core::PipelineAttemptIdV1,
+    ) -> Result<pos_core::PipelineReceiptLookupV1, pos_core::CoreError> {
+        unreached()
+    }
+}
+
+impl pos_core::FactualPrefixReadPortV1 for ExhaustedPort {
+    fn last_committed_factual_tick(
+        &self,
+        _: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        unreached()
+    }
+
+    fn cut_tick_at(
+        &self,
+        _: pos_core::TimelineId,
+        _: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        unreached()
+    }
+
+    fn nodes_for_committed_events(
+        &self,
+        _: pos_core::TimelineId,
+        _: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        unreached()
+    }
+
+    fn nodes_by_digest(
+        &self,
+        _: pos_core::TimelineId,
+        _: &[pos_core::Hash],
+    ) -> Result<
+        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
+        pos_core::CoreError,
+    > {
+        unreached()
+    }
+
+    fn last_step_node(
+        &self,
+        _: pos_core::TimelineId,
+        _: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        unreached()
+    }
+
+    fn factual_set_counts(
+        &self,
+        _: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        Ok(pos_core::RecordedSetCountsV1 {
+            nodes: 934_465,
+            edges: 0,
+            inputs: 0,
+        })
+    }
+}
+
+#[test]
+fn an_exhausted_timeline_aborts_an_authorized_pass_before_any_store_call() {
+    let fixture = fixture();
+    let (mut registry, state) = registry(&fixture, false);
+    assert_eq!(stage_current(&mut registry, &fixture).test_ok().len(), 1);
+    let evaluation = observation_evaluation(&fixture.observation);
+    let authority = current_authority(&fixture);
+    let current = view_authority(&fixture, &evaluation, &authority);
+
+    let mut port = ExhaustedPort { offered: 0 };
+    let result =
+        registry.admit_authorized_scheduled_pass(&mut port, &unfenced_admission(), &[current]);
+    assert!(matches!(
+        result,
+        Err(RuntimeError::DependencyDeclaration(
+            pos_core::FactualDependencyErrorV1::SetExhausted
+        ))
+    ));
+    assert_eq!(port.offered, 0);
+    let state = observed(&state);
+    assert_eq!((state.aborts, state.commits), (1, 0));
+}
+
 /// Copy what a Driver recorded, releasing its lock at once.
 fn observed(state: &Arc<Mutex<DriverState>>) -> DriverState {
     *state

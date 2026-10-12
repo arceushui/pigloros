@@ -19,13 +19,14 @@
 //! commits no Event and is never re-observed or retried here.
 
 use pos_core::{
-    pipeline_draft_vector_digest_v1, AppendIdentity, CoreError, EventDraft, FactualAdmissionPortV1,
-    FactualDependencyErrorV1, Hash, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
-    PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1,
-    PipelineContractErrorV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
-    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
-    PipelineReceiptLookupV1, PipelineSecurityRevisionsV1, ProposedAction,
-    TentativePipelineResultV1, PIPELINE_CONTRACT_VERSION_V1,
+    ensure_factual_set_headroom, pipeline_draft_vector_digest_v1, AppendIdentity, CoreError,
+    EventDraft, FactualAdmissionPortV1, FactualDependencyErrorV1, Hash,
+    PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1, PipelineAttemptDraftV1,
+    PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1, PipelineContractErrorV1,
+    PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1, PipelineObservationAnchorV1,
+    PipelineOutcomeV1, PipelinePreconditionV1, PipelineReceiptLookupV1,
+    PipelineSecurityRevisionsV1, ProposedAction, TentativePipelineResultV1, TimelineId,
+    PIPELINE_CONTRACT_VERSION_V1,
 };
 
 use super::PluginRegistry;
@@ -150,8 +151,12 @@ impl PluginRegistry {
         proposal: &ProposedAction,
         admission: &HumanActionAdmissionV1,
     ) -> Result<HumanActionReceiptV1, HumanActionAdmissionErrorV1> {
-        self.submit_action(admission.observation.timeline_id(), proposal)
-            .map_err(HumanActionAdmissionErrorV1::Submission)
+        let timeline = admission.observation.timeline_id();
+        ensure_human_set_headroom(port, timeline)
+            .and_then(|()| {
+                self.submit_action(timeline, proposal)
+                    .map_err(HumanActionAdmissionErrorV1::Submission)
+            })
             .and_then(|draft| {
                 human_basis(admission, proposal, draft)
                     .map_err(HumanActionAdmissionErrorV1::Contract)
@@ -162,6 +167,20 @@ impl PluginRegistry {
             })
             .and_then(settle_human_outcome)
     }
+}
+
+/// Refuse the action while the Timeline cannot take one more worst-case Tick
+/// (ADR-064 Revision 3, R3.10), before the `ActionApprover` runs.
+fn ensure_human_set_headroom(
+    port: &dyn FactualAdmissionPortV1,
+    timeline: TimelineId,
+) -> Result<(), HumanActionAdmissionErrorV1> {
+    port.factual_set_counts(timeline)
+        .map_err(HumanActionAdmissionErrorV1::Store)
+        .and_then(|counts| {
+            ensure_factual_set_headroom(counts)
+                .map_err(HumanActionAdmissionErrorV1::DependencyDeclaration)
+        })
 }
 
 /// Keep only an authoritative receipt; every other outcome is typed.
