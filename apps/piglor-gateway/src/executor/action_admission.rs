@@ -215,6 +215,7 @@ impl GatewayActionAdmission<'_> {
                     observation,
                     authorization,
                     security_revisions,
+                    authority_grant: self.authority.0,
                 })
             })
     }

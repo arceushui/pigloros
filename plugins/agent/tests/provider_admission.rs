@@ -171,6 +171,8 @@ fn admission(
         ),
         provider_validation: ok(PipelineEvidenceRefV1::try_new(hash(60))),
         security_revisions: revisions,
+        // The grant `publish` names in the Timeline's fence.
+        authority_grant: hash(1),
         commit_head: ok(store.logical_head(timeline)),
         commit_now_secs: 1,
     }

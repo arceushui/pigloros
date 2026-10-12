@@ -484,6 +484,8 @@ fn admission() -> ScheduledPassAdmissionV1 {
             },
         )
         .test_ok(),
+        // No fence is published: the port never commits.
+        authority_grant: digest(12),
         commit_head: Seq::from_u64(CUT),
         commit_now_secs: 1,
     }

@@ -5017,6 +5017,58 @@ mod tests {
         }
     }
 
+    impl pos_core::FactualPrefixReadPortV1 for FaultStoreV1 {
+        fn last_committed_factual_tick(
+            &self,
+            timeline: TimelineId,
+        ) -> Result<pos_core::FactualHeadV1, CoreError> {
+            pos_core::FactualPrefixReadPortV1::last_committed_factual_tick(&self.inner, timeline)
+        }
+
+        fn cut_tick_at(
+            &self,
+            timeline: TimelineId,
+            seq: pos_core::Seq,
+        ) -> Result<pos_core::FactualCutV1, CoreError> {
+            pos_core::FactualPrefixReadPortV1::cut_tick_at(&self.inner, timeline, seq)
+        }
+
+        fn nodes_for_committed_events(
+            &self,
+            timeline: TimelineId,
+            seqs: &[pos_core::Seq],
+        ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, CoreError> {
+            pos_core::FactualPrefixReadPortV1::nodes_for_committed_events(
+                &self.inner,
+                timeline,
+                seqs,
+            )
+        }
+
+        fn nodes_by_digest(
+            &self,
+            timeline: TimelineId,
+            digests: &[pos_core::Hash],
+        ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, CoreError> {
+            pos_core::FactualPrefixReadPortV1::nodes_by_digest(&self.inner, timeline, digests)
+        }
+
+        fn last_step_node(
+            &self,
+            timeline: TimelineId,
+            owner: &pos_core::FactualOwnerIdV1,
+        ) -> Result<Option<pos_core::DependencyNodeRecordV1>, CoreError> {
+            pos_core::FactualPrefixReadPortV1::last_step_node(&self.inner, timeline, owner)
+        }
+
+        fn factual_set_counts(
+            &self,
+            timeline: TimelineId,
+        ) -> Result<pos_core::RecordedSetCountsV1, CoreError> {
+            pos_core::FactualPrefixReadPortV1::factual_set_counts(&self.inner, timeline)
+        }
+    }
+
     impl pos_core::PipelineAdmissionFencePublisherV1 for FaultStoreV1 {
         fn set_pipeline_admission_fence(
             &mut self,
@@ -6594,6 +6646,40 @@ mod tests {
         fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
+    }
+
+    #[test]
+    fn fault_store_delegates_every_factual_prefix_read() -> Result<(), CoreError> {
+        use pos_core::{FactualCutV1, FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1};
+
+        let mut store = fault_store(FaultModeV1::Passthrough);
+        let timeline = store.create_timeline("fault-factual-reads")?.id();
+        assert_eq!(
+            store.last_committed_factual_tick(timeline)?,
+            FactualHeadV1 {
+                tick: 0,
+                last_seq: pos_core::Seq::ZERO,
+            }
+        );
+        assert_eq!(
+            store.cut_tick_at(timeline, pos_core::Seq::ZERO)?,
+            FactualCutV1::Boundary { cut_tick: 0 }
+        );
+        assert_eq!(
+            store.nodes_for_committed_events(timeline, &[pos_core::Seq::from_u64(1)])?,
+            vec![None]
+        );
+        assert_eq!(
+            store.nodes_by_digest(timeline, &[pos_core::Hash::from_bytes([5; 32])])?,
+            vec![None]
+        );
+        let owner = FactualOwnerIdV1::new("driver.absent".to_owned());
+        assert!(store.last_step_node(timeline, &owner)?.is_none());
+        assert_eq!(
+            store.factual_set_counts(timeline)?,
+            pos_core::RecordedSetCountsV1::default()
+        );
+        Ok(())
     }
 
     #[test]

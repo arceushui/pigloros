@@ -138,6 +138,7 @@ fn proposal(actor: EntityId, payload: &'static [u8]) -> ProposedAction {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn admission(harness: &Harness, key: u8, attempt: u8, observed: u64) -> HumanActionAdmissionV1 {
+    let host = ok(LocalScheduledAdmissionHostV1::shared());
     HumanActionAdmissionV1 {
         attempt_id: ok(PipelineAttemptIdV1::try_new([attempt; 16])),
         idempotency: AppendIdentity::new(
@@ -151,6 +152,7 @@ fn admission(harness: &Harness, key: u8, attempt: u8, observed: u64) -> HumanAct
         )),
         authorization: ok(PipelineEvidenceRefV1::try_new(Hash::from_bytes([5; 32]))),
         security_revisions: harness.revisions,
+        authority_grant: host.authority_grant(),
     }
 }
 
@@ -405,6 +407,63 @@ impl PipelineAdmissionPortV1 for LostOutcomePort<'_> {
     }
 }
 
+impl pos_core::FactualPrefixReadPortV1 for LostOutcomePort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        self.0.last_committed_factual_tick(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        self.0.cut_tick_at(timeline, seq)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        self.0.nodes_for_committed_events(timeline, seqs)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<
+        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
+        pos_core::CoreError,
+    > {
+        self.0.nodes_by_digest(timeline, digests)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        self.0.last_step_node(timeline, owner)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        self.0.factual_set_counts(timeline)
+    }
+}
+
 /// A port whose basis-free lookup never finds a receipt, so only the
 /// store's own exact-retry comparison can recognize a duplicate.
 struct ForgetfulLookupPort<'a>(&'a mut dyn ScheduledAdmissionStoreV1);
@@ -437,6 +496,63 @@ impl PipelineAdmissionPortV1 for ForgetfulLookupPort<'_> {
     }
 }
 
+impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        self.0.last_committed_factual_tick(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        self.0.cut_tick_at(timeline, seq)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        self.0.nodes_for_committed_events(timeline, seqs)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<
+        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
+        pos_core::CoreError,
+    > {
+        self.0.nodes_by_digest(timeline, digests)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        self.0.last_step_node(timeline, owner)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        self.0.factual_set_counts(timeline)
+    }
+}
+
 /// A port whose lookup fails before any approval.
 struct UnavailablePort;
 
@@ -465,6 +581,66 @@ impl PipelineAdmissionPortV1 for UnavailablePort {
         _limit: std::num::NonZeroUsize,
     ) -> Result<pos_core::PurgeOutcome, CoreError> {
         Err(CoreError::Storage("unreachable purge".to_owned()))
+    }
+}
+
+impl pos_core::FactualPrefixReadPortV1 for UnavailablePort {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        _: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        Ok(pos_core::FactualHeadV1 {
+            tick: 0,
+            last_seq: pos_core::Seq::ZERO,
+        })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        _: pos_core::TimelineId,
+        _: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        Ok(pos_core::FactualCutV1::Boundary { cut_tick: 0 })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        _: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        Ok(seqs.iter().map(|_| None).collect())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        _: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<
+        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
+        pos_core::CoreError,
+    > {
+        Ok(digests.iter().map(|_| None).collect())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        _: pos_core::TimelineId,
+        _: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        Ok(None)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(
+        &self,
+        _: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        Ok(pos_core::RecordedSetCountsV1::default())
     }
 }
 

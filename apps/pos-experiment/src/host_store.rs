@@ -1,3 +1,91 @@
+/// Borrow a test store field as the read half of the factual admission port.
+///
+/// A field is either a boxed scheduled-admission store or a `MemoryStore`;
+/// this one seam lets the forwarding macros reach either without a trait
+/// import at each expansion site.
+#[cfg(test)]
+trait FactualReadsV1 {
+    fn factual_reads(&self) -> &dyn pos_core::FactualPrefixReadPortV1;
+}
+
+#[cfg(test)]
+impl FactualReadsV1 for pos_store::memory::MemoryStore {
+    fn factual_reads(&self) -> &dyn pos_core::FactualPrefixReadPortV1 {
+        self
+    }
+}
+
+#[cfg(test)]
+impl FactualReadsV1 for Box<dyn pos_runtime::ScheduledAdmissionStoreV1> {
+    fn factual_reads(&self) -> &dyn pos_core::FactualPrefixReadPortV1 {
+        &**self
+    }
+}
+
+/// Forward the factual prefix reads of a test store decorator to one field
+/// that holds the wrapped store.
+#[cfg(test)]
+macro_rules! forward_factual_prefix_reads {
+    ($store:ty, $field:ident) => {
+        impl pos_core::FactualPrefixReadPortV1 for $store {
+            fn last_committed_factual_tick(
+                &self,
+                timeline: pos_core::TimelineId,
+            ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+                let reads = crate::FactualReadsV1::factual_reads(&self.$field);
+                reads.last_committed_factual_tick(timeline)
+            }
+
+            fn cut_tick_at(
+                &self,
+                timeline: pos_core::TimelineId,
+                seq: pos_core::Seq,
+            ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+                let reads = crate::FactualReadsV1::factual_reads(&self.$field);
+                reads.cut_tick_at(timeline, seq)
+            }
+
+            fn nodes_for_committed_events(
+                &self,
+                timeline: pos_core::TimelineId,
+                seqs: &[pos_core::Seq],
+            ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+                let reads = crate::FactualReadsV1::factual_reads(&self.$field);
+                reads.nodes_for_committed_events(timeline, seqs)
+            }
+
+            fn nodes_by_digest(
+                &self,
+                timeline: pos_core::TimelineId,
+                digests: &[pos_core::Hash],
+            ) -> Result<
+                Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
+                pos_core::CoreError,
+            > {
+                let reads = crate::FactualReadsV1::factual_reads(&self.$field);
+                reads.nodes_by_digest(timeline, digests)
+            }
+
+            fn last_step_node(
+                &self,
+                timeline: pos_core::TimelineId,
+                owner: &pos_core::FactualOwnerIdV1,
+            ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+                let reads = crate::FactualReadsV1::factual_reads(&self.$field);
+                reads.last_step_node(timeline, owner)
+            }
+
+            fn factual_set_counts(
+                &self,
+                timeline: pos_core::TimelineId,
+            ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+                let reads = crate::FactualReadsV1::factual_reads(&self.$field);
+                reads.factual_set_counts(timeline)
+            }
+        }
+    };
+}
+
 /// Forward the scheduled-admission ports of a test store decorator to one
 /// field that holds the wrapped store.
 #[cfg(test)]
@@ -29,6 +117,7 @@ macro_rules! forward_scheduled_admission_ports {
             }
         }
 
+        forward_factual_prefix_reads!($store, $field);
         forward_scheduled_admission_fence_and_authority!($store, $field);
     };
 }
@@ -177,6 +266,60 @@ impl pos_core::PipelineAdmissionPortV1 for HostedExperimentStore {
         attempt_id: pos_core::PipelineAttemptIdV1,
     ) -> Result<pos_core::PipelineReceiptLookupV1, CoreError> {
         self.with_admission(|store| store.lookup_pipeline_receipt(timeline, key, attempt_id))
+            .and_then(std::convert::identity)
+    }
+}
+
+impl pos_core::FactualPrefixReadPortV1 for HostedExperimentStore {
+    fn last_committed_factual_tick(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, CoreError> {
+        self.with_admission(|store| store.last_committed_factual_tick(timeline))
+            .and_then(std::convert::identity)
+    }
+
+    fn cut_tick_at(
+        &self,
+        timeline: TimelineId,
+        seq: Seq,
+    ) -> Result<pos_core::FactualCutV1, CoreError> {
+        self.with_admission(|store| store.cut_tick_at(timeline, seq))
+            .and_then(std::convert::identity)
+    }
+
+    fn nodes_for_committed_events(
+        &self,
+        timeline: TimelineId,
+        seqs: &[Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, CoreError> {
+        self.with_admission(|store| store.nodes_for_committed_events(timeline, seqs))
+            .and_then(std::convert::identity)
+    }
+
+    fn nodes_by_digest(
+        &self,
+        timeline: TimelineId,
+        digests: &[Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, CoreError> {
+        self.with_admission(|store| store.nodes_by_digest(timeline, digests))
+            .and_then(std::convert::identity)
+    }
+
+    fn last_step_node(
+        &self,
+        timeline: TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, CoreError> {
+        self.with_admission(|store| store.last_step_node(timeline, owner))
+            .and_then(std::convert::identity)
+    }
+
+    fn factual_set_counts(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, CoreError> {
+        self.with_admission(|store| store.factual_set_counts(timeline))
             .and_then(std::convert::identity)
     }
 }
@@ -807,6 +950,40 @@ mod host_store_tests {
         assert_eq!(
             store.load_authority(grant.grant_id())?.revocation_epoch(),
             1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hosted_store_forwards_every_factual_prefix_read() -> Result<(), Box<dyn std::error::Error>> {
+        use pos_core::{FactualCutV1, FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1};
+
+        let mut store = HostedExperimentStore::open(pos_store::StoreConfig::Memory)?;
+        let timeline = store.create_timeline("hosted-factual-reads")?.id();
+        assert_eq!(
+            store.last_committed_factual_tick(timeline)?,
+            FactualHeadV1 {
+                tick: 0,
+                last_seq: Seq::ZERO,
+            }
+        );
+        assert_eq!(
+            store.cut_tick_at(timeline, Seq::ZERO)?,
+            FactualCutV1::Boundary { cut_tick: 0 }
+        );
+        assert_eq!(
+            store.nodes_for_committed_events(timeline, &[Seq::from_u64(1)])?,
+            vec![None]
+        );
+        assert_eq!(
+            store.nodes_by_digest(timeline, &[admission_hash(5)])?,
+            vec![None]
+        );
+        let owner = FactualOwnerIdV1::new("driver.absent".to_owned());
+        assert!(store.last_step_node(timeline, &owner)?.is_none());
+        assert_eq!(
+            store.factual_set_counts(timeline)?,
+            pos_core::RecordedSetCountsV1::default()
         );
         Ok(())
     }

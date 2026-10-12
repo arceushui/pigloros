@@ -4276,6 +4276,7 @@ pub mod tests {
     }
 
     forward_scheduled_admission_fence_and_authority!(CaptureAwareStore, base);
+    forward_factual_prefix_reads!(CaptureAwareStore, base);
 
     impl EventStore for CaptureAwareStore {
         fn bind_erasure_gate(
