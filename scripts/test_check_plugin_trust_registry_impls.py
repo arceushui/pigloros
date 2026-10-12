@@ -31,6 +31,15 @@ ADAPTER_FILE = "crates/pos-store/src/memory/plugin_trust_registry.rs"
 SQLITE_ADAPTER_FILE = "crates/pos-store/src/sqlite/plugin_trust_registry.rs"
 SQLITE_SIBLING_FILE = "crates/pos-store/src/sqlite/plugin_trust_registry_rows.rs"
 SQLITE_SCHEMA_FILE = "crates/pos-store/src/sqlite/plugin_trust_registry_schema.rs"
+# Rule 6 (R8-M4): every confined name, as a use, a path call and a type position.
+CONFINED = {
+    "from_bytes_v1": "fn f() { CommunityPluginTrustMaterialV1::from_bytes_v1(a, b, c, d); }\n",
+    "aliased_from_bytes_v1": "fn f() { M::from_bytes_v1(a, b, c, d); }\n",
+    "fixed_source": "use pos_runtime::community_plugin_host::FixedTrustMaterialSourceV1;\n",
+    "anchor_bytes": "fn f(a: &CommunityTrustAnchorBytesV1) {}\n",
+    "world": "struct W { w: CommunityEvaluationWorldV1 }\n",
+}
+CONFINED_ALL = "".join(CONFINED.values())
 
 
 def registry(text: str) -> dict[str, str]:
@@ -121,6 +130,18 @@ ALLOWED = {
     # included into the library by `#[path]` under the `test-support` feature.
     TEST_WORLD_FILE: GATE + IMPL + IMPORT + CALLS + ANCHOR + UTC,
     "crates/pos-plugin-publisher/tests/support/mod.rs": GATE + "pub mod world;\n",
+    # Rule 6: the trusted composition, the conformance adapter and any `tests` directory may name
+    # the from-bytes APIs; a comment or a longer identifier is not a name.
+    "crates/pos-runtime/src/community_plugin_host/trust_bytes.rs": CONFINED_ALL,
+    "crates/pos-runtime/tests/community_trust_bytes_public.rs": CONFINED_ALL,
+    "apps/pos-plugin-conformance-adapter/src/world.rs": CONFINED_ALL,
+    "apps/pos-plugin-conformance-adapter/tests/world.rs": CONFINED_ALL,
+    "crates/pos-plugin-supervisor/tests/members.rs": CONFINED_ALL,
+    "crates/pos-state/src/mentions.rs": (
+        "// from_bytes_v1 FixedTrustMaterialSourceV1 CommunityEvaluationWorldV1\n"
+        "/// CommunityTrustAnchorBytesV1\n"
+        "fn from_bytes_v10() {}\nstruct XFixedTrustMaterialSourceV1;\n"
+    ),
 }
 
 REJECTED = {
@@ -201,6 +222,22 @@ REJECTED = {
         LINUX + "const X: u8 = 1;\npub mod plugin_trust_registry;\n"
     ),
 }
+
+# Rule 6 (R8-M4): a confined name in any other crate, adapter look-alike or non-directory `tests`.
+CONFINED_REJECTED = {
+    f"{place}/{label}.rs": text
+    for label, text in CONFINED.items()
+    for place in (
+        "crates/pos-state/src",
+        "crates/pos-plugin-supervisor/src",
+        "crates/pos-runtime-extra/src",
+        "apps/pos-plugin-conformance-adapter-extra/src",
+        "apps/other/src",
+        "crates/pos-state/src/tests_helper",
+        "crates/pos-state/src/not_tests",
+    )
+}
+CONFINED_REJECTED["crates/pos-state/src/tests.rs"] = CONFINED_ALL
 
 FORBIDDEN_NAMES = {
     "fn_signature": "pub fn signature_valid() {}\n",
@@ -286,6 +323,10 @@ def main() -> None:
         result = run({**ALLOWED, relative: text})
         if result.returncode == 0 or relative not in result.stderr:
             raise SystemExit(f"{relative} was not rejected")
+    for relative, text in CONFINED_REJECTED.items():
+        result = run({**ALLOWED, relative: text})
+        if result.returncode == 0 or relative not in result.stderr:
+            raise SystemExit(f"rule 6: {relative} was not rejected")
     for label, text in INSTALLER_REJECTED.items():
         result = run({**ALLOWED, INSTALLER_FILE: INSTALLER_BODY + text})
         if result.returncode == 0 or INSTALLER_FILE not in result.stderr:

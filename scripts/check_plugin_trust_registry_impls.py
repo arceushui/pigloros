@@ -41,6 +41,13 @@ source of every `.rs` file outside the top-level build and tooling directories:
 5. Every reference to the registry modules from another `pos-store` file sits
    under a `cfg` attribute that names `target_os = "linux"`: non-Linux builds
    expose no admission surface.
+6. (ADR-061 revision 8, decision 5) The byte-built trust material and the in-memory
+   evaluation world, `from_bytes_v1`, `FixedTrustMaterialSourceV1`,
+   `CommunityTrustAnchorBytesV1`, and `CommunityEvaluationWorldV1`, are named only
+   under `crates/pos-runtime/`, `apps/pos-plugin-conformance-adapter/`, and a
+   `tests` directory: they build anchors and provision registries from raw bytes.
+   The bare token `from_bytes_v1` is confined, so an aliased type cannot reach the
+   constructor. Revision 5 did not contemplate these APIs.
 """
 
 from __future__ import annotations
@@ -58,6 +65,12 @@ from check_trusted_clock_port_impls import (
 
 PORT = "PluginTrustPolicyRegistryV1"
 ALLOWED_PREFIXES = ("crates/pos-store/", "crates/pos-runtime/")
+# Rule 6 (ADR-061 revision 8 decision 5): the from-bytes trust APIs and the evaluation world.
+CONFINED_PREFIXES = ("crates/pos-runtime/", "apps/pos-plugin-conformance-adapter/")
+CONFINED_NAME = re.compile(
+    r"\b(?:from_bytes_v1|FixedTrustMaterialSourceV1|CommunityTrustAnchorBytesV1"
+    r"|CommunityEvaluationWorldV1)\b"
+)
 # Named by ADR-103 revision 5 (not by revision 4): the sanctioned verify-then-admit caller (#573),
 # until the signature-token amendment; see rule 3.
 ALLOWED_CALL_BY_FILE = "crates/pos-plugin-publisher/src/install.rs"
@@ -252,6 +265,16 @@ def construction_findings(relative: str, code: str, installer: bool) -> list[str
     return found
 
 
+def confined_name_findings(relative: str, code: str) -> list[str]:
+    """Return the rule 6 finding of one file that names a confined from-bytes API."""
+    if relative.startswith(CONFINED_PREFIXES) or "tests" in Path(relative).parts:
+        return []
+    match = CONFINED_NAME.search(code)
+    if match is None:
+        return []
+    return [f"{relative}: `{match.group(0)}` named outside the trusted composition and tests"]
+
+
 def file_findings(relative: str, code: str) -> list[str]:
     """Return every rule violation of one comment-stripped source file."""
     gated = FIXTURE_GATE.match(code) is not None
@@ -260,7 +283,7 @@ def file_findings(relative: str, code: str) -> list[str]:
     live = strip_test_items(code)
     aware = REGISTRY_AWARE.search(live) is not None
     installer = relative == ALLOWED_CALL_BY_FILE
-    found: list[str] = []
+    found: list[str] = confined_name_findings(relative, code)
     if REGISTRY_MODULE.match(relative):
         found.extend(forbidden_name_findings(relative, live))
     elif relative.startswith("crates/pos-store/src/"):

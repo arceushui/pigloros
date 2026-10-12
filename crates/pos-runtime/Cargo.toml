@@ -73,6 +73,10 @@ name = "community_install_public"
 required-features = ["test-support"]
 
 [[test]]
+name = "community_trust_bytes_public"
+required-features = ["test-support"]
+
+[[test]]
 name = "counterfactual_suffix_public"
 required-features = ["test-support"]
 
