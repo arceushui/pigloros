@@ -86,7 +86,7 @@ fn closure_identity(closure: Option<&OutputPolicyClosureV1>) -> Hash {
     closure.map_or_else(Hash::zero, OutputPolicyClosureV1::replay_identity_digest)
 }
 
-fn entry_identity(entry: &PluginEntry) -> Hash {
+pub(super) fn entry_identity(entry: &PluginEntry) -> Hash {
     let admission = entry.output_admission.as_ref();
     closure_identity(admission.and_then(OutputAdmissionV1::closure))
 }

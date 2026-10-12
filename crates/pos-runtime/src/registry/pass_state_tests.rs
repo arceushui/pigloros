@@ -181,10 +181,7 @@ fn commit_empty(registry: &mut PluginRegistry, through: u64) {
 }
 
 fn pending_content(registry: &PluginRegistry, id: PluginId) -> Option<Hash> {
-    match registry.plugins[&id].history {
-        HistoryInputV1::None => None,
-        HistoryInputV1::Pending { content } => Some(content),
-    }
+    registry.plugins[&id].history.pending_content()
 }
 
 #[test]

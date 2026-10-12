@@ -32,10 +32,13 @@ use pos_core::{
     },
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
     ConsentError, ConsentGate, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureGate,
-    ErasureProtectedOperationV1, FactualOwnerIdV1, OwnerIdV1, Plugin, ProposedAction, Reducer,
-    ScheduledObservationProfileV1, Timeline, TimelineMeta, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ErasureProtectedOperationV1, FactualOwnerIdV1, FactualPriorNodeV1, OwnerIdV1, Plugin,
+    ProposedAction, Reducer, ScheduledObservationProfileV1, Timeline, TimelineMeta,
+    MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
+
+use factual_dependencies::{split_output, verified_prefix_digest, StagedFactual};
 
 use crate::output_admission::OutputPolicySourceV1;
 use crate::{
@@ -65,6 +68,10 @@ mod adapter;
 mod authorized_pass;
 mod availability;
 mod catalogue;
+mod factual_dependencies;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod factual_dependencies_tests;
 mod human_admission;
 mod local_seal;
 mod manifest_roster;
@@ -549,6 +556,7 @@ mod coverage_paths {
             authorized: None,
             scheduled: None,
             forwarded: Vec::new(),
+            factual: StagedFactual::default(),
         });
         registry.abort_step();
 
@@ -562,6 +570,7 @@ mod coverage_paths {
             authorized: None,
             scheduled: None,
             forwarded: Vec::new(),
+            factual: StagedFactual::default(),
         });
         assert!(registry.commit_step_at(Seq::ZERO, 0).is_ok());
     }
@@ -1101,26 +1110,57 @@ struct PluginEntry {
     /// The consumed history the Driver's next recorded step node must cover
     /// (R3.4.10).
     history: HistoryInputV1,
+    /// The Event type of every Event in `carried`: an ingress node's schema ID
+    /// is a function of it (R3.3.2, R3.4.4).
+    carried_kinds: BTreeMap<Seq, Kind>,
+    /// Where the Driver's next step node finds its previous step node
+    /// (R3.4.2(c), R3.8.1).
+    chain: StepChainV1,
 }
 
-/// The consumed-history node a Driver's next recorded step must record.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The consumed-history node a Driver's next recorded step must declare.
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum HistoryInputV1 {
     /// No Event was consumed outside a recorded step.
     None,
-    /// A node over the consumed Events, identified by its content digest.
+    /// A node over the consumed Events, identified by its content digest,
+    /// that the Driver's next step node must record.
     Pending { content: pos_core::Hash },
+    /// A node with this content digest that an earlier Tick of this runtime
+    /// recorded; the Driver's next step node declares it.
+    Recorded {
+        content: pos_core::Hash,
+        node: FactualPriorNodeV1,
+    },
 }
 
 impl HistoryInputV1 {
     /// The content digest the next history node chains onto: the zero digest
     /// when there is none.
-    const fn content(self) -> pos_core::Hash {
+    const fn content(&self) -> pos_core::Hash {
         match self {
             Self::None => pos_core::Hash::zero(),
-            Self::Pending { content } => content,
+            Self::Pending { content } | Self::Recorded { content, .. } => *content,
         }
     }
+
+    /// The content digest of the node the next step node must record.
+    const fn pending_content(&self) -> Option<pos_core::Hash> {
+        match self {
+            Self::Pending { content } => Some(*content),
+            Self::None | Self::Recorded { .. } => None,
+        }
+    }
+}
+
+/// Where a Driver's next step node finds its previous step node (R3.4.2(c)).
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum StepChainV1 {
+    /// The edge resolves through `last_step_node` against the committed
+    /// prefix: after registration and after a restore.
+    Lookup,
+    /// This runtime committed the Driver's latest step node.
+    Recorded { node: FactualPriorNodeV1 },
 }
 
 /// One Driver's Event-observation declarations, captured once at
@@ -1241,6 +1281,8 @@ struct PendingStep {
     /// `driver_ids` order (R3.4.7). A commit that records no Tick appends them
     /// to the Drivers' carried sets.
     forwarded: Vec<Vec<(Seq, pos_core::Hash)>>,
+    /// What the factual Tick declaration of the pass is built from (R3.8.1).
+    factual: StagedFactual,
 }
 
 /// Participant-authorized views of one staged scheduled pass.
@@ -2759,6 +2801,7 @@ impl PluginRegistry {
         let mut all_drafts = Vec::new();
         let mut staged_driver_ids = Vec::new();
         let mut forwarded = Vec::new();
+        let mut factual = StagedFactual::default();
         for (id, plan) in driver_ids.into_iter().zip(plans) {
             let result = self.invoke_selected_driver(
                 id,
@@ -2770,7 +2813,7 @@ impl PluginRegistry {
             );
             match result {
                 Ok(output) => {
-                    let drafts = output.into_drafts();
+                    let (drafts, declaration) = split_output(output);
                     if let Err(error) = self
                         .validate_protected_drafts(timeline, &operation, observed_through, &drafts)
                         .and_then(|()| self.charge_pass_budget(all_drafts.len(), drafts.len()))
@@ -2781,6 +2824,8 @@ impl PluginRegistry {
                     }
                     staged_driver_ids.push(id);
                     event_cursors.push((id, plan.cursor));
+                    let prefix = verified_prefix_digest(&self.plugins[&id], cut, &operation);
+                    factual.push_driver(all_drafts.len(), drafts.len(), prefix, declaration);
                     forwarded.push(plan.forwarded);
                     all_drafts.extend(drafts);
                 }
@@ -2792,6 +2837,7 @@ impl PluginRegistry {
             }
         }
 
+        factual.gather_facts(&forwarded, committed_events, &operation);
         self.pending_step = Some(PendingStep {
             timeline,
             driver_ids: staged_driver_ids,
@@ -2802,6 +2848,7 @@ impl PluginRegistry {
             authorized: None,
             scheduled,
             forwarded,
+            factual,
         });
         Ok(all_drafts)
     }
@@ -2826,11 +2873,20 @@ impl PluginRegistry {
                 self.poisoned_driver = Some(name);
             }
         }
+        let recorded = !pending.staged_drafts.is_empty();
         pass_state::settle_carried_sets(
             &mut self.plugins,
             &pending.driver_ids,
             pending.forwarded,
-            !pending.staged_drafts.is_empty(),
+            &pending.factual.event_facts,
+            recorded,
+        );
+        factual_dependencies::settle_recorded_tick(
+            &mut self.plugins,
+            &pending.driver_ids,
+            pending.factual.step_nodes,
+            &pending.factual.history_recorded,
+            recorded,
         );
         for (id, now_ns) in pending.cadence_updates {
             if let Some(entry) = self.plugins.get_mut(&id) {
@@ -3070,7 +3126,9 @@ impl PluginRegistry {
             }
             entry.event_cursor = restored_head;
             entry.carried.clear();
-            entry.history = history;
+            entry.carried_kinds.clear();
+            entry.history = history.clone();
+            entry.chain = StepChainV1::Lookup;
         }
         self.restored_binding = timeline_segments
             .last()
@@ -3936,6 +3994,8 @@ impl PluginRegistry {
                 owner_id,
                 carried: BTreeMap::new(),
                 history: HistoryInputV1::None,
+                carried_kinds: BTreeMap::new(),
+                chain: StepChainV1::Lookup,
             },
         );
         self.registration_revision += 1;
@@ -4110,6 +4170,8 @@ impl PluginRegistry {
                 owner_id,
                 carried: BTreeMap::new(),
                 history: HistoryInputV1::None,
+                carried_kinds: BTreeMap::new(),
+                chain: StepChainV1::Lookup,
             },
         );
         // A Plugin registered outside a manifest slot can never match the
@@ -4164,6 +4226,8 @@ impl PluginRegistry {
                 owner_id,
                 carried: BTreeMap::new(),
                 history: HistoryInputV1::None,
+                carried_kinds: BTreeMap::new(),
+                chain: StepChainV1::Lookup,
             },
         );
         // A Plugin registered outside a manifest slot can never match the
@@ -4210,6 +4274,8 @@ impl PluginRegistry {
                 owner_id,
                 carried: BTreeMap::new(),
                 history: HistoryInputV1::None,
+                carried_kinds: BTreeMap::new(),
+                chain: StepChainV1::Lookup,
             },
         );
         // A Plugin registered outside a manifest slot can never match the
@@ -5024,6 +5090,8 @@ mod tests {
                 owner_id,
                 carried: BTreeMap::new(),
                 history: HistoryInputV1::None,
+                carried_kinds: BTreeMap::new(),
+                chain: StepChainV1::Lookup,
             },
         );
         registry
@@ -5052,6 +5120,8 @@ mod tests {
                 owner_id,
                 carried: BTreeMap::new(),
                 history: HistoryInputV1::None,
+                carried_kinds: BTreeMap::new(),
+                chain: StepChainV1::Lookup,
             },
         );
         registry
@@ -7987,6 +8057,8 @@ mod tests {
                 owner_id,
                 carried: BTreeMap::new(),
                 history: HistoryInputV1::None,
+                carried_kinds: BTreeMap::new(),
+                chain: StepChainV1::Lookup,
             },
         );
 

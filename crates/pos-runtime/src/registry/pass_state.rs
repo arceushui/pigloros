@@ -26,7 +26,8 @@ use pos_core::{
 };
 
 use super::{
-    subscribed_event_visible, HistoryInputV1, OperationContext, PluginEntry, PluginRegistry,
+    factual_dependencies::EventFact, subscribed_event_visible, HistoryInputV1, OperationContext,
+    PluginEntry, PluginRegistry,
 };
 
 /// One Event forwarded to a Driver: its `seq` and payload hash.
@@ -334,6 +335,7 @@ fn collapse_carried(entry: &mut PluginEntry) {
         content: factual_history_content_digest(entry.history.content(), first, last, &covered),
     };
     entry.carried.clear();
+    entry.carried_kinds.clear();
 }
 
 /// The history state a restore gives every Driver (R3.4.10).
@@ -364,22 +366,37 @@ pub(super) fn restored_history(visible_events: &[Event], restored_head: Seq) -> 
 /// Settle the carried sets of the stepped Drivers when their pass commits.
 ///
 /// A commit that recorded a Tick consumed every carried set in a step node.
-/// A commit that recorded nothing appends the forwarded Events to the sets.
+/// A commit that recorded nothing appends the forwarded Events to the sets,
+/// with their Event types from the pass's facts.
 pub(super) fn settle_carried_sets(
     plugins: &mut IndexMap<PluginId, PluginEntry>,
     driver_ids: &[PluginId],
     forwarded: Vec<Vec<ForwardedPair>>,
+    facts: &BTreeMap<Seq, EventFact>,
     recorded: bool,
 ) {
     for (id, pairs) in driver_ids.iter().zip(forwarded) {
         if let Some(entry) = plugins.get_mut(id) {
             if recorded {
                 entry.carried.clear();
+                entry.carried_kinds.clear();
             } else {
+                entry.carried_kinds.extend(forwarded_kinds(&pairs, facts));
                 entry.carried.extend(pairs);
             }
         }
     }
+}
+
+/// The Event type of each forwarded pair, as the pass saw the Event.
+fn forwarded_kinds(pairs: &[ForwardedPair], facts: &BTreeMap<Seq, EventFact>) -> Vec<(Seq, Kind)> {
+    let mut kinds = Vec::new();
+    for (seq, _) in pairs {
+        if let Some(fact) = facts.get(seq) {
+            kinds.push((*seq, fact.event_type.clone()));
+        }
+    }
+    kinds
 }
 
 #[cfg(test)]

@@ -4,13 +4,14 @@
 use std::sync::{Arc, Barrier};
 
 use pos_core::{
-    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
-    AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityGranteeV1,
-    AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
-    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1,
-    CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
-    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, CoreError, DelegateClassV1,
-    EntityId, ErasureContainmentGateV1, EventDraft, EventStore, Hash, Kind, PersistedAuthorityV1,
+    assemble_factual_tick, pipeline_authority_revision_v1, pipeline_delegation_revision_v1,
+    pipeline_erasure_revision_v1, AppendDedupKey, AppendDedupScope, AppendIdentity,
+    AuthorityGranteeV1, AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1,
+    AuthorityPersistencePortV1, AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1,
+    AuthorityRoleV1, AuthorityViewV1, CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1,
+    CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1,
+    CoreError, DelegateClassV1, EntityId, ErasureContainmentGateV1, EventDraft, EventStore,
+    FactualTickContextV1, FactualTickShapeV1, Hash, Kind, PersistedAuthorityV1,
     PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
     PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1,
     PipelineAttemptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
@@ -234,12 +235,29 @@ fn publish(
         .test_ok();
 }
 
+/// A hand-built basis whose record is the one `assemble_factual_tick` builds
+/// for the named Tick, under the fence `publish` installs.
 fn basis(
     timeline: TimelineId,
+    tick: u64,
     key: u8,
     head: u64,
     revisions: PipelineSecurityRevisionsV1,
 ) -> PipelineAdmissionBasisV1 {
+    let draft = EventDraft::new(
+        entity(5),
+        Kind::new("world.action"),
+        CanonicalBytes::from_vec(vec![key]),
+    );
+    let context = FactualTickContextV1 {
+        timeline_id: timeline,
+        tick,
+        attempt_id: PipelineAttemptIdV1::try_new([key; 16]).test_ok(),
+        evidence_digest: digest(60),
+        authority_grant: digest(2),
+    };
+    let shape = FactualTickShapeV1::Human(vec![draft.clone()]);
+    let dependencies = assemble_factual_tick(&context, &shape).test_ok();
     PipelineAdmissionBasisV1::try_from_draft(PipelineAdmissionBasisDraftV1 {
         contract_version: PIPELINE_CONTRACT_VERSION_V1,
         attempt: Some(
@@ -265,14 +283,8 @@ fn basis(
             head,
         ))),
         security_revisions: Some(revisions),
-        batch: Some(
-            PipelineDraftBatchV1::try_new(vec![EventDraft::new(
-                entity(5),
-                Kind::new("world.action"),
-                CanonicalBytes::from_vec(vec![key]),
-            )])
-            .test_ok(),
-        ),
+        batch: Some(PipelineDraftBatchV1::try_new(vec![draft]).test_ok()),
+        dependencies,
     })
     .test_ok()
 }
@@ -313,18 +325,20 @@ pub fn learned_revocation_is_persisted() -> Capture {
             )
             .test_ok();
         capture.record(store, "learned.records", learned.revocations().len());
+        let stale_basis = basis(timeline, 1, 2, 0, published);
         capture.record(
             store,
             "stale-basis",
-            outcome(backend.admit_pipeline_batch(&basis(timeline, 2, 0, published))),
+            outcome(backend.admit_pipeline_batch(&stale_basis)),
         );
         let refreshed = revisions(&learned);
         capture.record(store, "fence-moved", refreshed != published);
         publish(backend.as_mut(), timeline, refreshed);
+        let refreshed_basis = basis(timeline, 1, 3, 0, refreshed);
         capture.record(
             store,
             "refreshed-basis",
-            outcome(backend.admit_pipeline_batch(&basis(timeline, 3, 0, refreshed))),
+            outcome(backend.admit_pipeline_batch(&refreshed_basis)),
         );
 
         host.persist_authority(
@@ -332,10 +346,11 @@ pub fn learned_revocation_is_persisted() -> Capture {
             &grants.view(&[&grants.sibling, &grants.root], &grants.child),
         )
         .test_ok();
+        let revoked_basis = basis(timeline, 2, 4, 1, refreshed);
         capture.record(
             store,
             "root-revoked",
-            outcome(backend.admit_pipeline_batch(&basis(timeline, 4, 1, refreshed))),
+            outcome(backend.admit_pipeline_batch(&revoked_basis)),
         );
         capture.record(store, "committed", committed(backend.as_ref(), timeline));
     }
@@ -412,7 +427,7 @@ pub fn cross_connection_staleness() -> Capture {
         let mut store = open_file(&path);
         std::thread::spawn(move || {
             barrier.wait();
-            store.admit_pipeline_batch(&basis(timeline, 1, 0, stale))
+            store.admit_pipeline_batch(&basis(timeline, 1, 1, 0, stale))
         })
     };
     let revoking = {
@@ -463,15 +478,17 @@ pub fn cross_connection_staleness() -> Capture {
         "stale-view-reloads-revoked-chain",
         &reloaded == revoked.authority(),
     );
+    let same_connection = basis(timeline, 2, 2, 0, stale);
     capture.record(
         "sqlite",
         "same-connection",
-        outcome(open.admit_pipeline_batch(&basis(timeline, 2, 0, stale))),
+        outcome(open.admit_pipeline_batch(&same_connection)),
     );
+    let fresh_connection = basis(timeline, 2, 3, 0, stale);
     capture.record(
         "sqlite",
         "fresh-connection",
-        outcome(open_file(&path).admit_pipeline_batch(&basis(timeline, 3, 0, stale))),
+        outcome(open_file(&path).admit_pipeline_batch(&fresh_connection)),
     );
     capture.record(
         "sqlite",

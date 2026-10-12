@@ -631,8 +631,8 @@ impl StepOutput {
 
     /// Iterate the drafts in output order.
     ///
-    /// No production caller exists until slice 7b builds declarations from
-    /// the step inputs and outputs; tests and plugin fixtures use it today.
+    /// The registry splits an output into its drafts and declared inputs
+    /// instead; tests and plugin fixtures read the drafts through this.
     #[must_use]
     pub fn drafts(&self) -> impl ExactSizeIterator<Item = &EventDraft> {
         self.outputs.iter().map(|output| &output.draft)

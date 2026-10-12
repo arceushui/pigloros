@@ -21,6 +21,7 @@ use pos_core::{
 };
 use pos_state::AuthorizedObservationV1;
 
+use super::factual_dependencies::{split_output, DriverDeclaration, StagedFactual};
 use super::{
     invoke_driver, unauthorized, validate_driver_output, AuthorizedPendingStep, OperationContext,
     PendingStep, PluginEntry, PluginRegistry,
@@ -191,6 +192,7 @@ impl PluginRegistry {
         self.restored_binding = None;
         let mut drafts = Vec::new();
         let mut staged = Vec::new();
+        let mut factual = StagedFactual::default();
         for ((index, view), snapshot) in indices.iter().zip(views).zip(snapshots) {
             staged.push(view.plugin_id);
             let invoked = invoke_authorized_entry(
@@ -201,7 +203,10 @@ impl PluginRegistry {
             )
             .and_then(|output| self.check_pass_output(drafts.len(), output));
             match invoked {
-                Ok(output) => drafts.extend(output),
+                Ok((output, declaration)) => {
+                    factual.push_driver(drafts.len(), output.len(), None, declaration);
+                    drafts.extend(output);
+                }
                 Err(error) => {
                     let _ = self.abort_drivers(&staged);
                     return Err(error);
@@ -225,6 +230,7 @@ impl PluginRegistry {
             }),
             scheduled: None,
             forwarded,
+            factual,
         });
         Ok(drafts)
     }
@@ -234,12 +240,12 @@ impl PluginRegistry {
         &self,
         staged: usize,
         output: StepOutput,
-    ) -> Result<Vec<EventDraft>, RuntimeError> {
-        let output = output.into_drafts();
+    ) -> Result<(Vec<EventDraft>, DriverDeclaration), RuntimeError> {
+        let (drafts, declaration) = split_output(output);
         self.schemas
-            .validate_batch(&output)
-            .and_then(|()| self.charge_pass_budget(staged, output.len()))
-            .map(|()| output)
+            .validate_batch(&drafts)
+            .and_then(|()| self.charge_pass_budget(staged, drafts.len()))
+            .map(|()| (drafts, declaration))
     }
 }
 
