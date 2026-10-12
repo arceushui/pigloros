@@ -261,10 +261,15 @@ fn subscribed_driver_events(
 /// an Event type its own Plugin owns, so a Driver can never emit another
 /// Plugin's Event type on any path. Last, the Plugin's output-admission
 /// declaration enforces its per-type and batch budgets.
-fn validate_driver_output(entry: &PluginEntry, output: &StepOutput) -> Result<(), RuntimeError> {
-    reject_host_owned_drafts(output)
-        .and_then(|()| reject_unowned_plugin_drafts(output, &entry.owned_event_types))
-        .and_then(|()| validate_plugin_output(entry, &output.drafts))
+fn validate_driver_output(
+    entry: &PluginEntry,
+    output: StepOutput,
+) -> Result<Vec<EventDraft>, RuntimeError> {
+    let drafts = output.into_drafts();
+    reject_host_owned_draft_slice(&drafts)
+        .and_then(|()| reject_unowned_plugin_drafts(&drafts, &entry.owned_event_types))
+        .and_then(|()| validate_plugin_output(entry, &drafts))
+        .map(|()| drafts)
 }
 
 /// Return the one-member Fork ancestry of a fixture Timeline with no parent.
@@ -644,13 +649,11 @@ mod coverage_entrypoints {
             _: TimelineId,
             _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
-            Ok(StepOutput {
-                drafts: vec![EventDraft::new(
-                    EntityId::new(),
-                    Kind::new("coverage.public.tick"),
-                    CanonicalBytes::from_static(b"coverage"),
-                )],
-            })
+            Ok(StepOutput::new(vec![EventDraft::new(
+                EntityId::new(),
+                Kind::new("coverage.public.tick"),
+                CanonicalBytes::from_static(b"coverage"),
+            )]))
         }
 
         fn name(&self) -> &'static str {
@@ -935,10 +938,6 @@ fn validate_recovery_evidence(
     Ok(())
 }
 
-fn reject_host_owned_drafts(output: &StepOutput) -> Result<(), RuntimeError> {
-    reject_host_owned_draft_slice(&output.drafts)
-}
-
 fn reject_host_owned_draft_slice(drafts: &[EventDraft]) -> Result<(), RuntimeError> {
     drafts
         .iter()
@@ -970,11 +969,10 @@ fn host_owned_draft_error(draft: &EventDraft) -> Option<RuntimeError> {
 }
 
 fn reject_unowned_plugin_drafts(
-    output: &StepOutput,
+    drafts: &[EventDraft],
     owned_event_types: &[Kind],
 ) -> Result<(), RuntimeError> {
-    if output
-        .drafts
+    if drafts
         .iter()
         .all(|draft| owned_event_types.contains(&draft.event_type))
     {
@@ -2477,7 +2475,7 @@ impl PluginRegistry {
         snapshot: &ObservationSnapshot,
         committed_events: &[Event],
         operation: &OperationContext,
-    ) -> Result<StepOutput, RuntimeError> {
+    ) -> Result<Vec<EventDraft>, RuntimeError> {
         let Some(entry) = self.plugins.get_mut(&id) else {
             return Err(RuntimeError::NoDriver {
                 name: id.to_string(),
@@ -2492,7 +2490,7 @@ impl PluginRegistry {
         snapshot: &ObservationSnapshot,
         committed_events: &[Event],
         operation: &OperationContext,
-    ) -> Result<StepOutput, RuntimeError> {
+    ) -> Result<Vec<EventDraft>, RuntimeError> {
         let Some(driver) = entry.driver.as_mut() else {
             return Err(RuntimeError::NoDriver {
                 name: entry.name.clone(),
@@ -2531,7 +2529,7 @@ impl PluginRegistry {
             observations
         };
         invoke_driver(driver.as_mut(), timeline, observations)
-            .and_then(|output| validate_driver_output(entry, &output).map(|()| output))
+            .and_then(|output| validate_driver_output(entry, output))
     }
 
     fn collect_anchored_selection(
@@ -2665,17 +2663,10 @@ impl PluginRegistry {
             let result =
                 self.invoke_selected_driver(id, timeline, &snapshot, committed_events, &operation);
             match result {
-                Ok(output) => {
+                Ok(drafts) => {
                     if let Err(error) = self
-                        .validate_protected_drafts(
-                            timeline,
-                            &operation,
-                            observed_through,
-                            &output.drafts,
-                        )
-                        .and_then(|()| {
-                            self.charge_pass_budget(all_drafts.len(), output.drafts.len())
-                        })
+                        .validate_protected_drafts(timeline, &operation, observed_through, &drafts)
+                        .and_then(|()| self.charge_pass_budget(all_drafts.len(), drafts.len()))
                     {
                         staged_driver_ids.push(id);
                         let _ = self.abort_drivers(&staged_driver_ids);
@@ -2683,7 +2674,7 @@ impl PluginRegistry {
                     }
                     staged_driver_ids.push(id);
                     event_cursors.push((id, observed_through));
-                    all_drafts.extend(output.drafts);
+                    all_drafts.extend(drafts);
                 }
                 Err(error) => {
                     staged_driver_ids.push(id);
@@ -4318,8 +4309,7 @@ impl PluginRegistry {
                     stepped_driver_ids.push(*id);
                     let observations = snapshot.view_for(driver.subscriptions());
                     let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                    validate_driver_output(entry, &output)?;
-                    all_drafts.extend(output.drafts);
+                    all_drafts.extend(validate_driver_output(entry, output)?);
                 }
             }
             debug_assert!(due_driver_ids.is_empty());
@@ -4500,9 +4490,9 @@ impl PluginRegistry {
                 staged_driver_ids.push(*plugin_id);
                 let observations = snapshot.view_for(driver.subscriptions());
                 let step_result = invoke_driver(driver.as_mut(), timeline, observations)
-                    .and_then(|output| validate_driver_output(entry, &output).map(|()| output));
+                    .and_then(|output| validate_driver_output(entry, output));
                 match step_result {
-                    Ok(output) => all_drafts.extend(output.drafts),
+                    Ok(drafts) => all_drafts.extend(drafts),
                     Err(error) => {
                         step_error = Some(error);
                         break;

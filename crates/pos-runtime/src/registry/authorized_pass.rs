@@ -275,7 +275,7 @@ fn invoke_authorized_entry(
         timeline,
         ObservationView::from_authorized_snapshot(snapshot, knowledge),
     );
-    invoked.and_then(|output| validate_driver_output(entry, &output).map(|()| output.drafts))
+    invoked.and_then(|output| validate_driver_output(entry, output))
 }
 
 /// Require exactly one current authority for each view.

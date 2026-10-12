@@ -917,15 +917,18 @@ mod tests {
             .step(TimelineId::new(), ObservationView::empty())
             .test_ok();
 
-        assert_eq!(out.drafts.len(), 2);
-        assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_DECISION);
+        assert_eq!(out.drafts().len(), 2);
         assert_eq!(
-            out.drafts[1].event_type.as_str(),
+            out.outputs[0].draft.event_type.as_str(),
+            EVENT_TYPE_DECISION
+        );
+        assert_eq!(
+            out.outputs[1].draft.event_type.as_str(),
             EVENT_TYPE_PREDICTION_SOURCE
         );
-        assert_eq!(out.drafts[1].entity, entity);
+        assert_eq!(out.outputs[1].draft.entity, entity);
         let source: PredictionSourceV1 =
-            ciborium::from_reader(out.drafts[1].payload.as_slice()).test_ok();
+            ciborium::from_reader(out.outputs[1].draft.payload.as_slice()).test_ok();
         assert_eq!(source.version, PREDICTION_SOURCE_VERSION_V1);
         assert!((source.predicted_prob - 0.9).abs() < 1e-10);
         assert_eq!(source.outcome, PredictionOutcomeV1::Observed(true));

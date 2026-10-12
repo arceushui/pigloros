@@ -2502,9 +2502,13 @@ mod tests {
             let output = driver
                 .step(TimelineId::new(), ObservationView::empty())
                 .test_ok();
-            assert_eq!(output.drafts.len(), 2);
-            assert_eq!(output.drafts[0].event_type.as_str(), EVENT_TYPE_CONFIG_V1);
-            let observation = WorldObservationV1::decode(&output.drafts[1].payload).test_ok();
+            assert_eq!(output.drafts().len(), 2);
+            assert_eq!(
+                output.outputs[0].draft.event_type.as_str(),
+                EVENT_TYPE_CONFIG_V1
+            );
+            let observation =
+                WorldObservationV1::decode(&output.outputs[1].draft.payload).test_ok();
             assert_eq!(observation.tick, 0);
             assert_eq!(observation.step_index, 0);
             assert!((observation.pos_x - 1.0).abs() < 0.05);
@@ -3340,11 +3344,14 @@ mod tests {
         let mut driver = WorldDriver::new(vec![], backend, sample_config());
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         // First step: config draft only (no bodies)
-        assert_eq!(out.drafts.len(), 1);
-        assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_CONFIG_V1);
+        assert_eq!(out.drafts().len(), 1);
+        assert_eq!(
+            out.outputs[0].draft.event_type.as_str(),
+            EVENT_TYPE_CONFIG_V1
+        );
         // Second step: no config, no bodies
         let out2 = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert_eq!(out2.drafts.len(), 0);
+        assert_eq!(out2.drafts().len(), 0);
     }
 
     #[test]
@@ -3484,7 +3491,7 @@ mod tests {
         let next = uninterrupted
             .step(timeline, ObservationView::empty())
             .test_ok();
-        let expected = WorldObservationV1::decode(&next.drafts[0].payload).test_ok();
+        let expected = WorldObservationV1::decode(&next.outputs[0].draft.payload).test_ok();
         assert!((expected.pos_x - 0.4).abs() < 0.001);
         assert_eq!(expected.orient_x.to_bits(), 1.0_f32.to_bits());
         assert_eq!(expected.vel_ang_x.to_bits(), 0.25_f32.to_bits());
@@ -3492,8 +3499,7 @@ mod tests {
         assert_eq!(expected.vel_ang_z.to_bits(), 0.75_f32.to_bits());
 
         let events: Vec<Event> = first
-            .drafts
-            .iter()
+            .drafts()
             .enumerate()
             .map(|(index, draft)| {
                 let mut event = make_versioned_event(
@@ -4515,7 +4521,7 @@ mod tests {
         let mut driver = WorldDriver::default();
 
         let output = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        let config = WorldConfigV1::decode(&output.drafts[0].payload).test_ok();
+        let config = WorldConfigV1::decode(&output.outputs[0].draft.payload).test_ok();
 
         assert_eq!(config.backend_id, "simple-kinematic");
         assert_eq!(config.backend_version, "1.0.0");
@@ -4817,14 +4823,20 @@ mod tests {
 
         // First step: config (index 0) + observation (index 1).
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert_eq!(out.drafts.len(), 2);
-        assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_CONFIG_V1);
-        assert_eq!(out.drafts[1].event_type.as_str(), EVENT_TYPE_OBSERVATION_V1);
+        assert_eq!(out.drafts().len(), 2);
+        assert_eq!(
+            out.outputs[0].draft.event_type.as_str(),
+            EVENT_TYPE_CONFIG_V1
+        );
+        assert_eq!(
+            out.outputs[1].draft.event_type.as_str(),
+            EVENT_TYPE_OBSERVATION_V1
+        );
         // Second step: observation only.
         let out2 = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert_eq!(out2.drafts.len(), 1);
+        assert_eq!(out2.drafts().len(), 1);
         assert_eq!(
-            out2.drafts[0].event_type.as_str(),
+            out2.outputs[0].draft.event_type.as_str(),
             EVENT_TYPE_OBSERVATION_V1
         );
     }
@@ -4850,8 +4862,8 @@ mod tests {
 
         // First step: drafts[0]=config, drafts[1]=observation.
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert_eq!(out.drafts.len(), 2);
-        let obs = WorldObservationV1::decode(&out.drafts[1].payload).test_ok();
+        assert_eq!(out.drafts().len(), 2);
+        let obs = WorldObservationV1::decode(&out.outputs[1].draft.payload).test_ok();
         // Positions are quantized to sensor_min_resolution_mm (100mm = 0.1m).
         let expected_x = (7.0_f32 / 0.1).round() * 0.1;
         let expected_y = (13.0_f32 / 0.1).round() * 0.1;
@@ -5069,8 +5081,7 @@ mod tests {
             .step(TimelineId::new(), ObservationView::empty())
             .test_ok();
         let observed_ids: Vec<_> = output
-            .drafts
-            .iter()
+            .drafts()
             .filter(|draft| draft.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
             .map(|draft| {
                 WorldObservationV1::decode(&draft.payload)
@@ -5315,11 +5326,14 @@ mod tests {
 
         // First step: config event only (no bodies → no observations).
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert_eq!(out.drafts.len(), 1);
-        assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_CONFIG_V1);
+        assert_eq!(out.drafts().len(), 1);
+        assert_eq!(
+            out.outputs[0].draft.event_type.as_str(),
+            EVENT_TYPE_CONFIG_V1
+        );
         // Second step: no config, no bodies → no events.
         let out2 = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert_eq!(out2.drafts.len(), 0);
+        assert_eq!(out2.drafts().len(), 0);
     }
 
     #[test]
@@ -5428,8 +5442,8 @@ mod tests {
             );
             let out1 = driver1.step(tl1.id(), ObservationView::empty()).test_ok();
             // drafts[0]=config, drafts[1]=observation
-            assert_eq!(out1.drafts.len(), 2);
-            let obs1 = WorldObservationV1::decode(&out1.drafts[1].payload).test_ok();
+            assert_eq!(out1.drafts().len(), 2);
+            let obs1 = WorldObservationV1::decode(&out1.outputs[1].draft.payload).test_ok();
             assert!((obs1.pos_x - expected_pos_x).abs() < 0.001);
             assert!((obs1.pos_y - expected_pos_y).abs() < 0.001);
 
@@ -5442,14 +5456,14 @@ mod tests {
                 sample_config(),
             );
             let out2 = driver2.step(tl2.id(), ObservationView::empty()).test_ok();
-            assert_eq!(out2.drafts.len(), 2);
-            let obs2 = WorldObservationV1::decode(&out2.drafts[1].payload).test_ok();
+            assert_eq!(out2.drafts().len(), 2);
+            let obs2 = WorldObservationV1::decode(&out2.outputs[1].draft.payload).test_ok();
             assert!((obs2.pos_x - expected_pos_x).abs() < 0.001);
             assert!((obs2.pos_y - expected_pos_y).abs() < 0.001);
             // Byte-identical payloads prove determinism.
             assert_eq!(
-                out1.drafts[1].payload.as_slice(),
-                out2.drafts[1].payload.as_slice()
+                out1.outputs[1].draft.payload.as_slice(),
+                out2.outputs[1].draft.payload.as_slice()
             );
         }
 
@@ -5476,8 +5490,8 @@ mod tests {
             );
             let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
             // drafts[0]=config, drafts[1]=observation
-            assert_eq!(out.drafts.len(), 2);
-            let obs = WorldObservationV1::decode(&out.drafts[1].payload).test_ok();
+            assert_eq!(out.drafts().len(), 2);
+            let obs = WorldObservationV1::decode(&out.outputs[1].draft.payload).test_ok();
             assert_eq!(obs.sensor_kind, SensorKindV1::Proximity.as_u8());
         }
     }
@@ -5570,8 +5584,7 @@ mod tests {
             .step(tl.id(), ObservationView::from_events(&events))
             .test_ok();
         let obs_draft = out
-            .drafts
-            .iter()
+            .drafts()
             .find(|d| d.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
             .test_ok();
         let obs = WorldObservationV1::decode(&obs_draft.payload).test_ok();
@@ -5591,8 +5604,7 @@ mod tests {
             .step(tl.id(), ObservationView::from_events(&events))
             .test_ok();
         let obs_draft = out
-            .drafts
-            .iter()
+            .drafts()
             .find(|d| d.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
             .test_ok();
         let obs = WorldObservationV1::decode(&obs_draft.payload).test_ok();
@@ -5639,8 +5651,7 @@ mod tests {
             .step(tl.id(), ObservationView::from_events(&events))
             .test_ok();
         let obs_draft = out
-            .drafts
-            .iter()
+            .drafts()
             .find(|d| d.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
             .test_ok();
         let obs = WorldObservationV1::decode(&obs_draft.payload).test_ok();
@@ -5686,7 +5697,8 @@ mod tests {
                 ObservationView::from_events(&[make_action_event_from(body_id, &action)]),
             )
             .test_ok();
-        let mut observation = WorldObservationV1::decode(&output.drafts[1].payload).test_ok();
+        let mut observation =
+            WorldObservationV1::decode(&output.outputs[1].draft.payload).test_ok();
         assert!(observation.pos_x.abs() < f32::EPSILON);
         assert!(observation.pos_z.abs() < f32::EPSILON);
         assert_eq!(observation.vel_lin_x.to_bits(), 0.0625_f32.to_bits());
@@ -5701,7 +5713,7 @@ mod tests {
             let output = driver
                 .step(TimelineId::new(), ObservationView::empty())
                 .test_ok();
-            observation = WorldObservationV1::decode(&output.drafts[0].payload).test_ok();
+            observation = WorldObservationV1::decode(&output.outputs[0].draft.payload).test_ok();
         }
         assert_eq!(observation.tick, 3);
         assert_eq!(observation.step_index, 3);
@@ -5799,8 +5811,7 @@ mod tests {
             .step(tl.id(), ObservationView::from_events(&events))
             .test_ok();
         let observation = output
-            .drafts
-            .iter()
+            .drafts()
             .find(|draft| draft.event_type.as_str() == EVENT_TYPE_OBSERVATION_V1)
             .test_ok();
         assert!(WorldObservationV1::decode(&observation.payload).is_ok());
@@ -5899,9 +5910,12 @@ mod tests {
         let output = driver
             .step(TimelineId::new(), ObservationView::from_events(&[accepted]))
             .test_ok();
-        assert_eq!(output.drafts.len(), 2);
-        assert_eq!(output.drafts[0].event_type.as_str(), EVENT_TYPE_CONFIG_V1);
-        let observation = WorldObservationV1::decode(&output.drafts[1].payload).test_ok();
+        assert_eq!(output.drafts().len(), 2);
+        assert_eq!(
+            output.outputs[0].draft.event_type.as_str(),
+            EVENT_TYPE_CONFIG_V1
+        );
+        let observation = WorldObservationV1::decode(&output.outputs[1].draft.payload).test_ok();
         assert_eq!(observation.tick, 0);
         assert_eq!(observation.step_index, 0);
         assert!((observation.pos_x - 2.0).abs() < 0.05);

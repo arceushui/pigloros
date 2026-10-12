@@ -515,19 +515,19 @@ mod tests {
         let overridden_output = overridden
             .step(timeline, ObservationView::empty())
             .test_ok();
-        assert_eq!(default_output.drafts.len(), 1);
-        assert_eq!(overridden_output.drafts.len(), 1);
+        assert_eq!(default_output.drafts().len(), 1);
+        assert_eq!(overridden_output.drafts().len(), 1);
         assert_eq!(
-            default_output.drafts[0].entity,
-            overridden_output.drafts[0].entity
+            default_output.outputs[0].draft.entity,
+            overridden_output.outputs[0].draft.entity
         );
         assert_eq!(
-            default_output.drafts[0].event_type,
-            overridden_output.drafts[0].event_type
+            default_output.outputs[0].draft.event_type,
+            overridden_output.outputs[0].draft.event_type
         );
         assert_eq!(
-            default_output.drafts[0].payload,
-            overridden_output.drafts[0].payload
+            default_output.outputs[0].draft.payload,
+            overridden_output.outputs[0].draft.payload
         );
     }
 
@@ -541,8 +541,8 @@ mod tests {
         let mut driver = AgentDriver::new(entity, policy, vec!["act1".to_owned()]);
 
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert_eq!(out.drafts.len(), 1);
-        assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_ACTION);
+        assert_eq!(out.drafts().len(), 1);
+        assert_eq!(out.outputs[0].draft.event_type.as_str(), EVENT_TYPE_ACTION);
     }
 
     #[test]
@@ -560,7 +560,7 @@ mod tests {
 
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         let payload: ActionPayload =
-            ciborium::from_reader(out.drafts[0].payload.as_slice()).test_ok();
+            ciborium::from_reader(out.outputs[0].draft.payload.as_slice()).test_ok();
 
         assert_eq!(payload.action, "jump");
         assert!((payload.confidence - 1.0).abs() < f64::EPSILON);
@@ -697,7 +697,7 @@ mod tests {
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
 
         let payload: ActionPayload =
-            ciborium::from_reader(out.drafts[0].payload.as_slice()).test_ok();
+            ciborium::from_reader(out.outputs[0].draft.payload.as_slice()).test_ok();
         assert_eq!(payload.tick, 1);
     }
 

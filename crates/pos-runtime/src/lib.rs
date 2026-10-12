@@ -55,8 +55,9 @@ pub use composition::{
     MAX_MANIFEST_SLOT_BYTES_V1, MAX_REQUIRED_PLUGINS_V1,
 };
 pub use driver::{
-    CommittedForkHandoff, Driver, DriverRecoveryEvidence, ObservationView, ProjectionKey,
-    RecoveryEvent, RecoveryEventHeader, SnapshotAnchor, StepOutput, TimelineHistorySegment,
+    CommittedForkHandoff, DeclaredOutputV1, DirectInputRefV1, Driver, DriverRecoveryEvidence,
+    ObservationView, ProjectionKey, RecoveryEvent, RecoveryEventHeader, SnapshotAnchor,
+    StepOutput, TimelineHistorySegment,
 };
 pub use erasure_host::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,
