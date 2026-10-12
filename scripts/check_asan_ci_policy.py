@@ -9,6 +9,7 @@ import sys
 import yaml
 
 
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 EXPECTED_SUPPRESSION = (
     "leak:^<bevy_reflect::utility::GenericTypeCell<"
     "bevy_reflect::type_info::TypeInfo>>::get_or_insert_by_type_id::*$\n"
@@ -24,6 +25,10 @@ cargo_args=(
 nextest_args=(
   +nightly-2026-07-01 nextest run --all-features --locked -Z build-std
   --target x86_64-unknown-linux-gnu
+  --user-config-file none
+  --ignore-default-filter
+  --success-output final
+  --no-output-indent
 )
 run_asan_tests() {
   ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \\
@@ -54,11 +59,16 @@ case "${ASAN_SHARD}" in
     run_asan_tests -p pos-conformance \\
       --test moat_proof_public
     ;;
-  remainder)
-    run_asan_tests --workspace --exclude pos-conformance --tests
+  remainder-1)
+    run_asan_partition --workspace --exclude pos-conformance --tests \\
+      --partition slice:1/2 --test-threads 2
     run_asan_tests -p pos-conformance --lib --bins \\
       --test profile_contract_public \\
       --test provider_contract_public
+    ;;
+  remainder-2)
+    run_asan_partition --workspace --exclude pos-conformance --tests \\
+      --partition slice:2/2 --test-threads 2
     ;;
   *)
     printf 'unknown ASan shard: %s\\n' "${ASAN_SHARD}" >&2
@@ -104,11 +114,12 @@ EXPECTED_STRATEGY = {
     "max-parallel": 5,
     "matrix": {
         "shard": [
+            "remainder-1",
+            "remainder-2",
             "bundle-coverage",
             "bundle-public-1",
             "bundle-public-2",
             "moat-proof",
-            "remainder",
         ]
     },
 }
@@ -146,10 +157,13 @@ EXPECTED_SETUP_STEPS = [
         "with": {"toolchain": "nightly-2026-07-01", "components": "rust-src"},
     },
     {
-        "name": "Install cargo-nextest for partitioned public bundle tests",
-        "if": "${{ startsWith(matrix.shard, 'bundle-public-') }}",
+        "name": "Install cargo-nextest for partitioned ASan tests",
+        "if": (
+            "${{ startsWith(matrix.shard, 'bundle-public-') || "
+            "startsWith(matrix.shard, 'remainder-') }}"
+        ),
         "uses": "taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29",
-        "with": {"tool": "cargo-nextest"},
+        "with": {"tool": "cargo-nextest@0.9.146", "fallback": "none"},
     },
     {
         "name": "Verify ASan symbolizer",
@@ -209,10 +223,19 @@ def check_suppression_file(suppression_path: pathlib.Path) -> None:
     )
 
 
-def check_workflow(workflow_path: pathlib.Path) -> None:
-    check_suppression_file(
-        pathlib.Path(__file__).resolve().parent / "asan" / "bevy-reflect.lsan"
+def check_repository_nextest_configuration(workspace_root: pathlib.Path) -> None:
+    repository_config = workspace_root / ".config" / "nextest.toml"
+    require(
+        not repository_config.exists(),
+        "ASan nextest runs require no repository configuration",
     )
+
+
+def check_workflow(
+    workflow_path: pathlib.Path, workspace_root: pathlib.Path | None = None
+) -> None:
+    check_suppression_file(ROOT / "scripts" / "asan" / "bevy-reflect.lsan")
+    check_repository_nextest_configuration(workspace_root or ROOT)
     with workflow_path.open(encoding="utf-8") as stream:
         workflow = yaml.safe_load(stream)
 
@@ -290,10 +313,9 @@ def check_workflow(workflow_path: pathlib.Path) -> None:
 
 
 def main() -> int:
-    root = pathlib.Path(__file__).resolve().parent.parent
-    workflow = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else root / ".github/workflows/ci.yml"
+    workflow = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / ".github/workflows/ci.yml"
     try:
-        check_workflow(workflow)
+        check_workflow(workflow, ROOT)
     except (OSError, yaml.YAMLError, PolicyError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1

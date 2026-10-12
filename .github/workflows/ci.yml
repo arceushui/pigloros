@@ -817,11 +817,12 @@ jobs:
       max-parallel: 5
       matrix:
         shard:
+          - remainder-1
+          - remainder-2
           - bundle-coverage
           - bundle-public-1
           - bundle-public-2
           - moat-proof
-          - remainder
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rm -f rust-toolchain.toml
@@ -829,11 +830,12 @@ jobs:
         with:
           toolchain: nightly-2026-07-01
           components: rust-src
-      - name: Install cargo-nextest for partitioned public bundle tests
-        if: ${{ startsWith(matrix.shard, 'bundle-public-') }}
+      - name: Install cargo-nextest for partitioned ASan tests
+        if: ${{ startsWith(matrix.shard, 'bundle-public-') || startsWith(matrix.shard, 'remainder-') }}
         uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.146
+          fallback: none
       - name: Verify ASan symbolizer
         run: |
           symbolizer="/usr/bin/llvm-symbolizer-18"
@@ -884,6 +886,10 @@ jobs:
           nextest_args=(
             +nightly-2026-07-01 nextest run --all-features --locked -Z build-std
             --target x86_64-unknown-linux-gnu
+            --user-config-file none
+            --ignore-default-filter
+            --success-output final
+            --no-output-indent
           )
           run_asan_tests() {
             ASAN_SYMBOLIZER_PATH="/usr/bin/llvm-symbolizer-18" \
@@ -914,11 +920,16 @@ jobs:
               run_asan_tests -p pos-conformance \
                 --test moat_proof_public
               ;;
-            remainder)
-              run_asan_tests --workspace --exclude pos-conformance --tests
+            remainder-1)
+              run_asan_partition --workspace --exclude pos-conformance --tests \
+                --partition slice:1/2 --test-threads 2
               run_asan_tests -p pos-conformance --lib --bins \
                 --test profile_contract_public \
                 --test provider_contract_public
+              ;;
+            remainder-2)
+              run_asan_partition --workspace --exclude pos-conformance --tests \
+                --partition slice:2/2 --test-threads 2
               ;;
             *)
               printf 'unknown ASan shard: %s\n' "${ASAN_SHARD}" >&2
