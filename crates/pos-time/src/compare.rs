@@ -219,15 +219,30 @@ fn prepare_comparison<'t>(
     }
     let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
     let mut budget = pos_store::ForkReplayReadBudgetV1::new(
-        verified[0].fork_read_limits(), guard.guard_started_at(), &mut clock,
-    ).map_err(|_| CoreError::ArtifactUnavailable)?;
-    let evidence_a = sender.validate_world_replay_forks(&verified[0], &mut budget)
+        verified[0].fork_read_limits(),
+        guard.guard_started_at(),
+        &mut clock,
+    )
+    .map_err(|_| CoreError::ArtifactUnavailable)?;
+    let evidence_a = sender
+        .validate_world_replay_forks(&verified[0], &mut budget)
         .map_err(crate::host_error_to_core)?;
-    let evidence_b = sender.validate_world_replay_forks(&verified[1], &mut budget)
+    let evidence_b = sender
+        .validate_world_replay_forks(&verified[1], &mut budget)
         .map_err(crate::host_error_to_core)?;
-    let events_a = crate::read_complete_world_replay(sender, &requested_a, verified[0].read_bounds(), &mut budget)?;
+    let events_a = crate::read_complete_world_replay(
+        sender,
+        &requested_a,
+        verified[0].read_bounds(),
+        &mut budget,
+    )?;
     revoked[0] = Some(RevokedSubjectsV1::from_verified_events(&events_a));
-    let events_b = crate::read_complete_world_replay(sender, &requested_b, verified[1].read_bounds(), &mut budget)?;
+    let events_b = crate::read_complete_world_replay(
+        sender,
+        &requested_b,
+        verified[1].read_bounds(),
+        &mut budget,
+    )?;
     revoked[1] = Some(RevokedSubjectsV1::from_verified_events(&events_b));
     require_shared_fork(request.fork_seq, &events_a, &events_b)?;
     let [fold_a, fold_b] = request.folds;
@@ -247,9 +262,11 @@ fn prepare_comparison<'t>(
     if final_verified != verified {
         return Err(CoreError::ArtifactUnavailable);
     }
-    let final_a = sender.validate_world_replay_forks(&final_verified[0], &mut budget)
+    let final_a = sender
+        .validate_world_replay_forks(&final_verified[0], &mut budget)
         .map_err(crate::host_error_to_core)?;
-    let final_b = sender.validate_world_replay_forks(&final_verified[1], &mut budget)
+    let final_b = sender
+        .validate_world_replay_forks(&final_verified[1], &mut budget)
         .map_err(crate::host_error_to_core)?;
     if final_a != evidence_a || final_b != evidence_b {
         return Err(CoreError::ArtifactUnavailable);
@@ -320,6 +337,7 @@ fn require_shared_fork(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use pos_core::store::EventReadBounds;
 
     trait TestValueExt<T> {
         fn test_ok(self) -> T;
