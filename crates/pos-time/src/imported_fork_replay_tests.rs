@@ -23,6 +23,7 @@ use pos_store::{
 use crate::test_support::{ProtectedFixture, with_release};
 
 struct Count;
+static FOLDED_EVENTS: AtomicUsize = AtomicUsize::new(0);
 
 impl Reducer for Count {
     fn initial(&self) -> State {
@@ -32,6 +33,7 @@ impl Reducer for Count {
     }
 
     fn apply(&self, state: &mut State, _event: &pos_core::Event) {
+        FOLDED_EVENTS.fetch_add(1, Ordering::SeqCst);
         let next = state.get("n").and_then(serde_json::Value::as_u64).unwrap_or(0) + 1;
         state.set("n", serde_json::json!(next));
     }
@@ -48,12 +50,14 @@ enum Fault {
     Foreign,
     FinalIdentity,
     NoProfile,
+    UnequalLimits,
 }
 
 struct ImportedVerifier {
     child: TimelineId,
     parent: TimelineId,
     requirement: ForkReplayRequirementV1,
+    secondary: Option<(TimelineId, ForkReplayRequirementV1)>,
     fault: Fault,
     admissions: AtomicUsize,
 }
@@ -66,18 +70,21 @@ impl WorldReplayVerifierV1 for ImportedVerifier {
         generation: ErasureReferenceV1,
     ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
         let phase = self.admissions.fetch_add(1, Ordering::SeqCst);
-        let mut requirement = self.requirement;
-        if matches!(self.fault, Fault::Foreign) || (matches!(self.fault, Fault::FinalIdentity) && phase > 0) {
-            requirement = ForkReplayRequirementV1::new(self.child, requirement.publication_logical_head(), Hash::from_bytes([0xff; 32]), requirement.authority_origin_digest())
+        let child = requested.timeline_id();
+        let mut requirement = self.secondary.filter(|(timeline, _)| *timeline == child).map_or(self.requirement, |(_, required)| required);
+        let initial_admissions = if self.secondary.is_some() { 2 } else { 1 };
+        if matches!(self.fault, Fault::Foreign) || (matches!(self.fault, Fault::FinalIdentity) && phase >= initial_admissions) {
+            requirement = ForkReplayRequirementV1::new(child, requirement.publication_logical_head(), Hash::from_bytes([0xff; 32]), requirement.authority_origin_digest())
                 .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)?;
         }
         let sources = vec![
-            WorldReplayForkSourceV1::new(self.child, Some(requirement))?,
+            WorldReplayForkSourceV1::new(child, Some(requirement))?,
             WorldReplayForkSourceV1::new(self.parent, None)?,
         ];
         let required = if matches!(self.fault, Fault::Omitted) { Vec::new() } else { vec![requirement] };
         let profile = if matches!(self.fault, Fault::NoProfile) { None } else { Some(Hash::from_bytes([0xe1; 32])) };
-        let limits = ForkReplayReadLimitsV1::new(8, 1_024, 65_536, 64 * 1024 * 1024, 30_000_000)
+        let bytes = 64 * 1024 * 1024 + usize::from(matches!(self.fault, Fault::UnequalLimits) && child != self.child);
+        let limits = ForkReplayReadLimitsV1::new(8, 1_024, 65_536, bytes, 30_000_000)
             .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)?;
         Ok(pos_runtime::world_replay::test_verified_world_replay_with_fork_attribution(
             pos_runtime::world_replay::test_verified_world_replay(closure, requested, generation, ErasureReplayClaimV1::Exact),
@@ -104,13 +111,22 @@ fn run_on_host(mut host: ErasureExecutionHostV1, child: TimelineId, fault: Fault
     let closure = WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(child, Hash::from_bytes(generation.digest()))?;
     let mut registry = fixture.registry(gate);
     let mut reads = host.read_sender()?;
+    FOLDED_EVENTS.store(0, Ordering::SeqCst);
     let result = with_release(|release| crate::replay(&mut reads, child, &mut registry, &closure, release, &fixture.fold()));
     match fault {
         Fault::None => {
             result?;
+            assert!(FOLDED_EVENTS.load(Ordering::SeqCst) >= PARENT_CUT as usize);
             with_release(|release| crate::replay_at(&mut reads, child, Seq::from_u64(2), &mut registry, &closure, release, &fixture.fold()))?;
         }
-        _ => assert_eq!(result, Err(CoreError::ArtifactUnavailable)),
+        _ => {
+            assert_eq!(result, Err(CoreError::ArtifactUnavailable));
+            if matches!(fault, Fault::FinalIdentity) {
+                assert!(FOLDED_EVENTS.load(Ordering::SeqCst) > 0);
+            } else {
+                assert_eq!(FOLDED_EVENTS.load(Ordering::SeqCst), 0);
+            }
+        }
     }
     Ok(())
 }
@@ -123,7 +139,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
             let child = world.child_at(0)?.id;
             let mut memory = MemoryStore::new();
             let requirement = populate(&mut memory, &world, shape)?;
-            let verifier = || Arc::new(ImportedVerifier { child, parent: world.root, requirement, fault, admissions: AtomicUsize::new(0) });
+            let verifier = || Arc::new(ImportedVerifier { child, parent: world.root, requirement, secondary: None, fault, admissions: AtomicUsize::new(0) });
             let composition = ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier());
             let host = ErasureExecutionHostV1::recover_memory_fixture_with_authority(memory, &composition, ErasureRecoveryLimitsV1::compiled_maximum())?;
             run_on_host(host, child, fault)?;
@@ -137,6 +153,71 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
             let host = ErasureExecutionHostV1::open_with_authority(StoreConfig::Sqlite { path: path.to_owned() }, &composition, ErasureRecoveryLimitsV1::compiled_maximum())?;
             run_on_host(host, child, fault)?;
         }
+    }
+    Ok(())
+}
+
+fn populate_pair<S: Port>(store: &mut S, world: &World) -> Fallible<[ForkReplayRequirementV1; 2]> {
+    let first = populate(store, world, Shape::Mixed)?;
+    let built = world.build(&Spec { child: 1, ..Spec::default() })?;
+    pin_policy(store, &built.policy)?;
+    store.import_verified(&request_for(world, &built))?;
+    let child = world.child_at(1)?.id;
+    let committed = store.read_committed(child, PARENT_CUT)?;
+    let second = ForkReplayRequirementV1::new(child, Seq::from_u64(PARENT_CUT), committed.record_id, committed.authority_origin_digest)?;
+    Ok([first, second])
+}
+
+fn compare_on_host(mut host: ErasureExecutionHostV1, requirements: [ForkReplayRequirementV1; 2], fault: Fault) -> Fallible<()> {
+    let fixture_a = ProtectedFixture::new("count", count);
+    let fixture_b = fixture_a.rival();
+    let gate = host.containment_gate();
+    let generation = Hash::from_bytes(gate.inventory_generation()?.digest());
+    let timelines = requirements.map(ForkReplayRequirementV1::child_timeline_id);
+    let closures = timelines.map(|timeline| WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(timeline, generation)).into_iter().collect::<Result<Vec<_>, _>>()?;
+    let mut a = fixture_a.registry(gate.clone());
+    let mut b = fixture_b.registry(gate);
+    let mut reads = host.read_sender()?;
+    FOLDED_EVENTS.store(0, Ordering::SeqCst);
+    let result = with_release(|release| crate::compare(&mut reads, timelines, Seq::from_u64(PARENT_CUT), [&mut a, &mut b], [&closures[0], &closures[1]], release, [&fixture_a.fold(), &fixture_b.fold()]));
+    match fault {
+        Fault::None => {
+            let diff = result?;
+            assert_eq!(diff.fork_seq, Seq::from_u64(PARENT_CUT));
+            assert!(!diff.diverged_entities.is_empty());
+        }
+        _ => {
+            assert_eq!(result.map(|_| ()), Err(CoreError::ArtifactUnavailable));
+            if matches!(fault, Fault::FinalIdentity) {
+                assert!(FOLDED_EVENTS.load(Ordering::SeqCst) > 0);
+            } else {
+                assert_eq!(FOLDED_EVENTS.load(Ordering::SeqCst), 0);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn compare_checks_both_imported_arms_before_folding_and_after_both_folds() -> Fallible<()> {
+    for fault in [Fault::None, Fault::Omitted, Fault::FinalIdentity, Fault::UnequalLimits] {
+        let mut world = World::new(Shape::Mixed, false)?;
+        world.add_child(Shape::EmptyUnclassified)?;
+        let mut memory = MemoryStore::new();
+        let requirements = populate_pair(&mut memory, &world)?;
+        let verifier = || Arc::new(ImportedVerifier { child: requirements[0].child_timeline_id(), parent: world.root, requirement: requirements[0], secondary: Some((requirements[1].child_timeline_id(), requirements[1])), fault, admissions: AtomicUsize::new(0) });
+        let composition = ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier());
+        let host = ErasureExecutionHostV1::recover_memory_fixture_with_authority(memory, &composition, ErasureRecoveryLimitsV1::compiled_maximum())?;
+        compare_on_host(host, requirements, fault)?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("compare.sqlite");
+        let path = path.to_str().ok_or("utf-8 path")?;
+        let mut sqlite = SqliteStore::open(path)?;
+        assert_eq!(populate_pair(&mut sqlite, &world)?, requirements);
+        drop(sqlite);
+        let composition = ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier());
+        let host = ErasureExecutionHostV1::open_with_authority(StoreConfig::Sqlite { path: path.to_owned() }, &composition, ErasureRecoveryLimitsV1::compiled_maximum())?;
+        compare_on_host(host, requirements, fault)?;
     }
     Ok(())
 }
