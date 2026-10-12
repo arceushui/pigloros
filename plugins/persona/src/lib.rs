@@ -918,10 +918,8 @@ mod tests {
             .test_ok();
 
         assert_eq!(out.drafts().len(), 2);
-        assert_eq!(
-            out.outputs[0].draft.event_type.as_str(),
-            EVENT_TYPE_DECISION
-        );
+        let kind = out.outputs[0].draft.event_type.as_str();
+        assert_eq!(kind, EVENT_TYPE_DECISION);
         assert_eq!(
             out.outputs[1].draft.event_type.as_str(),
             EVENT_TYPE_PREDICTION_SOURCE

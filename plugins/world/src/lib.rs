@@ -3345,13 +3345,11 @@ mod tests {
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         // First step: config draft only (no bodies)
         assert_eq!(out.drafts().len(), 1);
-        assert_eq!(
-            out.outputs[0].draft.event_type.as_str(),
-            EVENT_TYPE_CONFIG_V1
-        );
+        let kind = out.outputs[0].draft.event_type.as_str();
+        assert_eq!(kind, EVENT_TYPE_CONFIG_V1);
         // Second step: no config, no bodies
         let out2 = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert_eq!(out2.drafts().len(), 0);
+        assert!(out2.outputs.is_empty());
     }
 
     #[test]
@@ -4824,10 +4822,8 @@ mod tests {
         // First step: config (index 0) + observation (index 1).
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(out.drafts().len(), 2);
-        assert_eq!(
-            out.outputs[0].draft.event_type.as_str(),
-            EVENT_TYPE_CONFIG_V1
-        );
+        let kind = out.outputs[0].draft.event_type.as_str();
+        assert_eq!(kind, EVENT_TYPE_CONFIG_V1);
         assert_eq!(
             out.outputs[1].draft.event_type.as_str(),
             EVENT_TYPE_OBSERVATION_V1
@@ -5327,13 +5323,11 @@ mod tests {
         // First step: config event only (no bodies → no observations).
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         assert_eq!(out.drafts().len(), 1);
-        assert_eq!(
-            out.outputs[0].draft.event_type.as_str(),
-            EVENT_TYPE_CONFIG_V1
-        );
+        let kind = out.outputs[0].draft.event_type.as_str();
+        assert_eq!(kind, EVENT_TYPE_CONFIG_V1);
         // Second step: no config, no bodies → no events.
         let out2 = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert_eq!(out2.drafts().len(), 0);
+        assert!(out2.outputs.is_empty());
     }
 
     #[test]

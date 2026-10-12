@@ -260,16 +260,18 @@ fn subscribed_driver_events(
 /// Host-owned Event types are rejected first. Every draft must then carry
 /// an Event type its own Plugin owns, so a Driver can never emit another
 /// Plugin's Event type on any path. Last, the Plugin's output-admission
-/// declaration enforces its per-type and batch budgets.
+/// declaration enforces its per-type and batch budgets. The validated
+/// [`StepOutput`] is returned unchanged, so its step-level inputs and
+/// declared outputs reach the caller intact.
 fn validate_driver_output(
     entry: &PluginEntry,
     output: StepOutput,
-) -> Result<Vec<EventDraft>, RuntimeError> {
-    let drafts = output.into_drafts();
+) -> Result<StepOutput, RuntimeError> {
+    let drafts: Vec<EventDraft> = output.drafts().cloned().collect();
     reject_host_owned_draft_slice(&drafts)
         .and_then(|()| reject_unowned_plugin_drafts(&drafts, &entry.owned_event_types))
         .and_then(|()| validate_plugin_output(entry, &drafts))
-        .map(|()| drafts)
+        .map(|()| output)
 }
 
 /// Return the one-member Fork ancestry of a fixture Timeline with no parent.
@@ -2475,7 +2477,7 @@ impl PluginRegistry {
         snapshot: &ObservationSnapshot,
         committed_events: &[Event],
         operation: &OperationContext,
-    ) -> Result<Vec<EventDraft>, RuntimeError> {
+    ) -> Result<StepOutput, RuntimeError> {
         let Some(entry) = self.plugins.get_mut(&id) else {
             return Err(RuntimeError::NoDriver {
                 name: id.to_string(),
@@ -2490,7 +2492,7 @@ impl PluginRegistry {
         snapshot: &ObservationSnapshot,
         committed_events: &[Event],
         operation: &OperationContext,
-    ) -> Result<Vec<EventDraft>, RuntimeError> {
+    ) -> Result<StepOutput, RuntimeError> {
         let Some(driver) = entry.driver.as_mut() else {
             return Err(RuntimeError::NoDriver {
                 name: entry.name.clone(),
@@ -2663,7 +2665,8 @@ impl PluginRegistry {
             let result =
                 self.invoke_selected_driver(id, timeline, &snapshot, committed_events, &operation);
             match result {
-                Ok(drafts) => {
+                Ok(output) => {
+                    let drafts = output.into_drafts();
                     if let Err(error) = self
                         .validate_protected_drafts(timeline, &operation, observed_through, &drafts)
                         .and_then(|()| self.charge_pass_budget(all_drafts.len(), drafts.len()))
@@ -4309,7 +4312,7 @@ impl PluginRegistry {
                     stepped_driver_ids.push(*id);
                     let observations = snapshot.view_for(driver.subscriptions());
                     let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                    all_drafts.extend(validate_driver_output(entry, output)?);
+                    all_drafts.extend(validate_driver_output(entry, output)?.into_drafts());
                 }
             }
             debug_assert!(due_driver_ids.is_empty());
@@ -4492,7 +4495,7 @@ impl PluginRegistry {
                 let step_result = invoke_driver(driver.as_mut(), timeline, observations)
                     .and_then(|output| validate_driver_output(entry, output));
                 match step_result {
-                    Ok(drafts) => all_drafts.extend(drafts),
+                    Ok(output) => all_drafts.extend(output.into_drafts()),
                     Err(error) => {
                         step_error = Some(error);
                         break;

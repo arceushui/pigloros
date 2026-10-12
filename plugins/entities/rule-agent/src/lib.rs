@@ -281,10 +281,8 @@ mod tests {
         for expected_action in &expected {
             let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
             assert_eq!(out.drafts().len(), 1);
-            assert_eq!(
-                out.outputs[0].draft.event_type.as_str(),
-                EVENT_TYPE_DECISION
-            );
+            let kind = out.outputs[0].draft.event_type.as_str();
+            assert_eq!(kind, EVENT_TYPE_DECISION);
 
             // Decode the payload and verify the action
             let payload: DecisionPayload =

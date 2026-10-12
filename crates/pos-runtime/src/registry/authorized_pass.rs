@@ -25,7 +25,10 @@ use super::{
     invoke_driver, unauthorized, validate_driver_output, AuthorizedPendingStep, OperationContext,
     PendingStep, PluginEntry, PluginRegistry,
 };
-use crate::{driver::ObservationView, error::RuntimeError};
+use crate::{
+    driver::{ObservationView, StepOutput},
+    error::RuntimeError,
+};
 
 /// One due Driver and the participant-authorized view the host derived for it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -227,8 +230,9 @@ impl PluginRegistry {
     fn check_pass_output(
         &self,
         staged: usize,
-        output: Vec<EventDraft>,
+        output: StepOutput,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
+        let output = output.into_drafts();
         self.schemas
             .validate_batch(&output)
             .and_then(|()| self.charge_pass_budget(staged, output.len()))
@@ -260,7 +264,7 @@ fn invoke_authorized_entry(
     timeline: TimelineId,
     snapshot: &ObservationSnapshotV1,
     knowledge: &KnowledgeSnapshotV1,
-) -> Result<Vec<EventDraft>, RuntimeError> {
+) -> Result<StepOutput, RuntimeError> {
     let Some(driver) = entry.driver.as_mut() else {
         return Err(RuntimeError::NoDriver {
             name: entry.name.clone(),

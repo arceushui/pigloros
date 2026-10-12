@@ -630,11 +630,18 @@ impl StepOutput {
     }
 
     /// Iterate the drafts in output order.
+    ///
+    /// No production caller exists until slice 7b builds declarations from
+    /// the step inputs and outputs; tests and plugin fixtures use it today.
+    #[must_use]
     pub fn drafts(&self) -> impl ExactSizeIterator<Item = &EventDraft> {
         self.outputs.iter().map(|output| &output.draft)
     }
 
-    /// Consume the output into its drafts, in output order.
+    /// Consume the output into its drafts, in output order, dropping the
+    /// declared inputs. Callers that only need the drafts (the host's
+    /// final staging step, the pos-experiment app and the end-to-end
+    /// determinism harness) use this instead of widening their own types.
     #[must_use]
     pub fn into_drafts(self) -> Vec<EventDraft> {
         self.outputs
@@ -857,10 +864,8 @@ mod tests {
         driver.step(tl.id(), ObservationView::empty()).test_ok();
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         // tick 3 — payload contains 3u32 as le bytes
-        assert_eq!(
-            out.outputs[0].draft.payload.as_slice(),
-            &3u32.to_le_bytes()
-        );
+        let payload = out.outputs[0].draft.payload.as_slice();
+        assert_eq!(payload, &3u32.to_le_bytes());
     }
 
     #[test]
@@ -870,17 +875,17 @@ mod tests {
         let tl = store.create_timeline("t").test_ok();
         let mut driver = IdleDriver;
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert_eq!(out.drafts().len(), 0);
+        assert!(out.outputs.is_empty());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn step_output_new_and_empty() {
         let out = StepOutput::new(vec![]);
-        assert_eq!(out.drafts().len(), 0);
+        assert!(out.outputs.is_empty());
         assert!(out.step_inputs().is_empty());
         let out2 = StepOutput::empty();
-        assert_eq!(out2.drafts().len(), 0);
+        assert!(out2.outputs.is_empty());
         assert!(out2.step_inputs().is_empty());
         assert!(StepOutput::default().outputs.is_empty());
     }
