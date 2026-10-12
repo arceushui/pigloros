@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Confine the ADR-061 revision 8 fixture evaluation instant to the Plugin-conformance adapter.
+"""Confine the fixture evaluation instant and the local admission host (ADR-061 revision 8).
+
+ADR-061 revision 8 decision 4 lists both policies as confinement rules (1) to (5) of this one
+script, so the script keeps the fixture-instant name the ADR gives it.
 
 `pos_core::trusted_clock::FixtureWallSourceV1` returns one fixture-supplied instant to the
 Plugin trust paths (`PluginTrustWallSourceV1`). It and `FixtureEvaluationInstantV1` exist only
@@ -8,7 +11,9 @@ the types are compiled everywhere in CI, so this checker is the control. It requ
 
 1. `fixture-instant` is enabled only in `[dependencies]` of
    `apps/pos-plugin-conformance-adapter`, and a feature forwards it (`crate/fixture-instant`,
-   `crate?/fixture-instant`) only when the forwarding feature has the same name.
+   `crate?/fixture-instant`) only when the forwarding feature has the same name. Rule 1 is what
+   confines the enablers: a same-name forwarding feature is accepted only in the adapter
+   manifest, because forwarding enables the feature in the dependency.
 2. `fixture-instant` is not reachable from a `default` feature closure, and no `default` feature
    forwards it.
 3. `FixtureWallSourceV1` and `FixtureEvaluationInstantV1` occur (comments ignored) in no `.rs`
@@ -21,8 +26,12 @@ the types are compiled everywhere in CI, so this checker is the control. It requ
 5. `local-admission-host` is enabled only by `apps/pos-experiment`, the adapter and a feature
    named `test-support` that forwards it.
 
-Rules 1, 3 and 4 are vacuous on the real tree until the adapter exists; the companion test
-script exercises them with synthetic manifests and sources.
+Rules 1, 3 and 4 are vacuous on the real tree until the adapter exists (S2, #615; the worker
+dev-dependency from S3b1, #617); the companion test script exercises them with synthetic
+manifests and sources. Whether the adapter may be named in `[workspace.dependencies]` is decided
+by S2 or S3b1; until then such an entry is rejected like any other dependent. Rule 5 accepts any
+feature named `test-support` that forwards `local-admission-host`, in any crate (the pinned
+behaviour of `pos-runtime`'s own `test-support`), and only that.
 
 Stated limits: the check is textual. It does not look at build configuration outside manifests
 (workflows, Dockerfiles, `.cargo/config*`, shell scripts); the only release build selects the one
@@ -54,7 +63,9 @@ ALLOWED_SOURCES = (
 )
 CORE_LIB = "crates/pos-core/src/lib.rs"
 FIXTURE_TYPES = re.compile(r"\b(?:FixtureWallSourceV1|FixtureEvaluationInstantV1)\b")
-GLOB_REEXPORT = re.compile(r"\bpub\s+use\s+(?:(?:crate|self)\s*::\s*)?trusted_clock\s*::\s*\*")
+GLOB_REEXPORT = re.compile(
+    r"\bpub\s+use\s+(?:(?:crate|self)\s*::\s*)?trusted_clock\s*::\s*(?:\*|\{[^;]*\*)"
+)
 SECTIONS = ("dependencies", "build-dependencies", "dev-dependencies")
 
 
@@ -107,7 +118,8 @@ def _fixture_forwards(name: str, manifest: dict) -> list[str]:
     return [
         f"{name}: feature {feature} forwards {FIXTURE_FEATURE}"
         for feature, members in manifest.get("features", {}).items()
-        if feature != FIXTURE_FEATURE and any(_forwards(m, FIXTURE_FEATURE) for m in members)
+        if not (feature == FIXTURE_FEATURE and name == ADAPTER_MANIFEST)
+        and any(_forwards(m, FIXTURE_FEATURE) for m in members)
     ]
 
 

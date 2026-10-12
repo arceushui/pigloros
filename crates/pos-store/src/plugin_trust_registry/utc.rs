@@ -6,11 +6,12 @@ use super::error::PluginTrustPolicyRegistryErrorV1;
 
 const MICROS_PER_SECOND: u64 = 1_000_000;
 
-/// One signed UTC second sampled from the sealed ADR-112 trusted wall source.
+/// One signed UTC second sampled from the sealed `PluginTrustWallSourceV1` (ADR-061 revision 8).
 ///
 /// The only production constructor is [`Self::from_source`]. Because
-/// `PluginTrustWallSourceV1` is sealed, no caller, TPS1, PTR1, PRV1, or Plugin can
-/// supply another source.
+/// `PluginTrustWallSourceV1` is sealed, the source is either a trusted ADR-112 wall source or the
+/// feature-gated fixture instant, which only the Plugin-conformance adapter may enable. No
+/// caller, TPS1, PTR1, PRV1, or Plugin can supply another source.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct TrustedUtcSecondV1(i64);
 
