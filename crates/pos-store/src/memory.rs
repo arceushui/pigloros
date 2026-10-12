@@ -733,6 +733,21 @@ impl MemoryStore {
         self
     }
 
+    /// Transfer a nonproduction fixture from its open test gate to a host.
+    ///
+    /// # Errors
+    /// Refuses to detach a real containment gate or a missing gate.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn detach_fixture_gate_for_host(mut self) -> Result<Self, CoreError> {
+        if self.erasure_gate.as_ref().is_none_or(|gate| !gate.permits_unverified_test_fixture()) {
+            return Err(CoreError::ErasureContainmentUnavailable);
+        }
+        self.erasure_gate_bound = false;
+        self.erasure_inventory_generation = None;
+        self.erasure_topology_requires_permit = false;
+        Ok(self.without_erasure_gate())
+    }
+
     #[must_use]
     fn with_default_components(hasher: Box<dyn Hasher>) -> Self {
         let erasure_gate = Some(Arc::new(ErasureContainmentGateV1::new_fail_closed()));
