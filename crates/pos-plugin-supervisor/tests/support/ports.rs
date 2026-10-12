@@ -71,10 +71,8 @@ impl FactualPrefixReadPortV1 for LostPort<'_> {
         &self,
         timeline: pos_core::TimelineId,
         digests: &[pos_core::Hash],
-    ) -> Result<
-        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
-        pos_core::CoreError,
-    > {
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
         self.0.nodes_by_digest(timeline, digests)
     }
 
@@ -150,10 +148,8 @@ impl FactualPrefixReadPortV1 for FailingPort<'_> {
         &self,
         timeline: pos_core::TimelineId,
         digests: &[pos_core::Hash],
-    ) -> Result<
-        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
-        pos_core::CoreError,
-    > {
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
         self.0.nodes_by_digest(timeline, digests)
     }
 
@@ -258,10 +254,8 @@ impl FactualPrefixReadPortV1 for StampedPort<'_> {
         &self,
         timeline: pos_core::TimelineId,
         digests: &[pos_core::Hash],
-    ) -> Result<
-        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
-        pos_core::CoreError,
-    > {
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
         self.db.nodes_by_digest(timeline, digests)
     }
 

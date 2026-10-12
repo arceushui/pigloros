@@ -11,13 +11,14 @@ use pos_core::{
     AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1,
-    CoreError, DelegateClassV1, EntityId, ErasureContainmentGateV1, Event, EventDraft, EventStore,
-    FactualPrefixReadPortV1, Hash, Kind, PersistedAuthorityV1, PipelineAdmissionBasisV1,
-    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
-    PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
-    PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin,
-    PluginId, PrincipalRefV1, Reducer, Seq, SeqRange, State, TimelineId, DELEGATE_ACTION_V1,
+    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentAuthority, ConsentGrantedV1,
+    ConsentRevokedV1, CoreError, DelegateClassV1, EntityId, ErasureContainmentGateV1, Event,
+    EventDraft, EventStore, FactualPrefixReadPortV1, Hash, Kind, PersistedAuthorityV1,
+    PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1,
+    PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1,
+    PipelineEvidenceRefV1, PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1,
+    PipelineSecurityRevisionsV1, Plugin, PluginId, PrincipalRefV1, Reducer, Seq, SeqRange, State,
+    TimelineId, DELEGATE_ACTION_V1,
 };
 use pos_runtime::{
     Driver, LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, ProjectionKey,
@@ -181,10 +182,7 @@ fn publish(
     ok(store.set_pipeline_admission_fence(
         timeline,
         ok(PipelineAdmissionFenceV1::try_new(
-            GRANT,
-            revisions,
-            None,
-            budget,
+            GRANT, revisions, None, budget,
         )),
     ));
 }
@@ -749,10 +747,8 @@ impl FactualPrefixReadPortV1 for LostOutcomePort<'_> {
         &self,
         timeline: pos_core::TimelineId,
         digests: &[pos_core::Hash],
-    ) -> Result<
-        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
-        pos_core::CoreError,
-    > {
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
         self.inner.nodes_by_digest(timeline, digests)
     }
 
@@ -1256,10 +1252,8 @@ impl FactualPrefixReadPortV1 for FenceRejectingPorts<'_> {
         &self,
         timeline: pos_core::TimelineId,
         digests: &[pos_core::Hash],
-    ) -> Result<
-        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
-        pos_core::CoreError,
-    > {
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
         FactualPrefixReadPortV1::nodes_by_digest(&*self.inner, timeline, digests)
     }
 
@@ -1674,10 +1668,8 @@ impl FactualPrefixReadPortV1 for DigestRecordingPort<'_> {
         &self,
         timeline: pos_core::TimelineId,
         digests: &[pos_core::Hash],
-    ) -> Result<
-        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
-        pos_core::CoreError,
-    > {
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
         self.inner.nodes_by_digest(timeline, digests)
     }
 

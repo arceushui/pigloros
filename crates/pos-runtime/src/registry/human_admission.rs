@@ -23,9 +23,9 @@ use pos_core::{
     FactualDependencyErrorV1, Hash, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
     PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1,
     PipelineContractErrorV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
-    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1, PipelineReceiptLookupV1,
-    PipelineSecurityRevisionsV1, ProposedAction, TentativePipelineResultV1,
-    PIPELINE_CONTRACT_VERSION_V1,
+    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
+    PipelineReceiptLookupV1, PipelineSecurityRevisionsV1, ProposedAction,
+    TentativePipelineResultV1, PIPELINE_CONTRACT_VERSION_V1,
 };
 
 use super::PluginRegistry;
