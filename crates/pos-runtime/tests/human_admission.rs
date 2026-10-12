@@ -439,10 +439,8 @@ impl pos_core::FactualPrefixReadPortV1 for LostOutcomePort<'_> {
         &self,
         timeline: pos_core::TimelineId,
         digests: &[pos_core::Hash],
-    ) -> Result<
-        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
-        pos_core::CoreError,
-    > {
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
         self.0.nodes_by_digest(timeline, digests)
     }
 
@@ -528,10 +526,8 @@ impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
         &self,
         timeline: pos_core::TimelineId,
         digests: &[pos_core::Hash],
-    ) -> Result<
-        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
-        pos_core::CoreError,
-    > {
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
         self.0.nodes_by_digest(timeline, digests)
     }
 
@@ -619,10 +615,8 @@ impl pos_core::FactualPrefixReadPortV1 for UnavailablePort {
         &self,
         _: pos_core::TimelineId,
         digests: &[pos_core::Hash],
-    ) -> Result<
-        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
-        pos_core::CoreError,
-    > {
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
         Ok(digests.iter().map(|_| None).collect())
     }
 

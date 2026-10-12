@@ -936,10 +936,8 @@ impl pos_core::FactualPrefixReadPortV1 for FoldFaultStore {
         &self,
         timeline: pos_core::TimelineId,
         digests: &[pos_core::Hash],
-    ) -> Result<
-        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
-        pos_core::CoreError,
-    > {
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
         pos_core::FactualPrefixReadPortV1::nodes_by_digest(&*self.store(), timeline, digests)
     }
 

@@ -5049,7 +5049,8 @@ mod tests {
             &self,
             timeline: TimelineId,
             digests: &[pos_core::Hash],
-        ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, CoreError> {
+        ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, CoreError>
+        {
             pos_core::FactualPrefixReadPortV1::nodes_by_digest(&self.inner, timeline, digests)
         }
 
