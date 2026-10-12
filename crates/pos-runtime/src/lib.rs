@@ -56,8 +56,8 @@ pub use composition::{
 };
 pub use driver::{
     CommittedForkHandoff, DeclaredOutputV1, DirectInputRefV1, Driver, DriverRecoveryEvidence,
-    ObservationView, ProjectionKey, RecoveryEvent, RecoveryEventHeader, SnapshotAnchor,
-    StepOutput, TimelineHistorySegment,
+    ObservationView, ProjectionKey, RecoveryEvent, RecoveryEventHeader, SnapshotAnchor, StepOutput,
+    TimelineHistorySegment,
 };
 pub use erasure_host::{
     ClosedErasureCoordinatorAuthorityV1, ErasureCommandSenderV1, ErasureCoordinatorAuthorityV1,
