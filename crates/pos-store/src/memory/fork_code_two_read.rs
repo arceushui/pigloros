@@ -345,7 +345,7 @@ impl MemoryStore {
                     retained,
                     final_chain_head_hash,
                     suffix,
-                    registry: Ok(self.key_registry.clone()),
+                    registry: Ok(self.key_registry.as_ref()),
                 };
                 trusted_committed_manifest(&rows, sources)
             })

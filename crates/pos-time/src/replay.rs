@@ -172,13 +172,24 @@ fn prepare_replay<'r>(
         request.range,
         consumer_ids,
     )?;
-    let read_bounds = crate::require_world_replay(sender, request.closure, &requested_use)?;
-    let events = crate::read_complete_world_replay(sender, &requested_use, read_bounds)?;
+    let verified = crate::require_world_replay(sender, request.closure, &requested_use)?;
+    let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
+    let mut budget = pos_store::ForkReplayReadBudgetV1::new(
+        verified.fork_read_limits(), guard.guard_started_at(), &mut clock,
+    ).map_err(|_| CoreError::ArtifactUnavailable)?;
+    let evidence = sender.validate_world_replay_forks(&verified, &mut budget)
+        .map_err(crate::host_error_to_core)?;
+    let events = crate::read_complete_world_replay(sender, &requested_use, verified.read_bounds(), &mut budget)?;
     *revoked = Some(RevokedSubjectsV1::from_verified_events(&events));
     let source = crate::verified_source(request.timeline, request.closure);
     let staged = crate::fold_staged(request.fold, guard, events, source)?;
-    let final_bounds = crate::require_world_replay(sender, request.closure, &requested_use)?;
-    if final_bounds != read_bounds {
+    let final_verified = crate::require_world_replay(sender, request.closure, &requested_use)?;
+    if final_verified != verified {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+    let final_evidence = sender.validate_world_replay_forks(&final_verified, &mut budget)
+        .map_err(crate::host_error_to_core)?;
+    if final_evidence != evidence {
         return Err(CoreError::ArtifactUnavailable);
     }
     crate::handoff_reserve(guard)?;
