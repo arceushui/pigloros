@@ -1121,10 +1121,8 @@ impl pos_core::FactualPrefixReadPortV1 for ExhaustedPort {
         &self,
         _: pos_core::TimelineId,
         _: &[pos_core::Hash],
-    ) -> Result<
-        Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>,
-        pos_core::CoreError,
-    > {
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
         unreached()
     }
 
