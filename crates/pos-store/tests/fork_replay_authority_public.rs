@@ -28,7 +28,10 @@ fn exercise<S: Port + ForkReplayAuthorityReadPortV1 + ErasurePersistencePortV1>(
     let head = PARENT_CUT + shape.events();
     let committed = store.read_committed(child, head)?;
     let requirement = ForkReplayRequirementV1::new(
-        child, Seq::from_u64(head), committed.record_id, committed.authority_origin_digest,
+        child,
+        Seq::from_u64(head),
+        committed.record_id,
+        committed.authority_origin_digest,
     )?;
     let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, 8 * 1024 * 1024, 1_000_000)?;
     let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
@@ -39,25 +42,56 @@ fn exercise<S: Port + ForkReplayAuthorityReadPortV1 + ErasurePersistencePortV1>(
     let second = store.validate_fork_replay_authority(&requirement, &mut budget)?;
     assert_eq!(first, second);
     assert_eq!(first.requirement(), requirement);
-    assert_eq!(first.operation_id(), committed.operation.input().operation_id);
-    assert_eq!(first.admission_digest(), committed.operation.input().admission_digest);
-    let decoded = pos_core::ImportedForkPublicationOperationV1::from_canonical_cbor(first.operation_bytes())?;
-    assert_eq!(decoded.authority_origin_digest(), imported.admission.input().authority_origin_digest);
-    let wrong = ForkReplayRequirementV1::new(child, Seq::from_u64(head), Hash::from_bytes([0xff; 32]), committed.authority_origin_digest)?;
-    assert_eq!(store.validate_fork_replay_authority(&wrong, &mut budget), Err(Error::CorruptAuthority));
-    store.finish_protected_effect_interval(interval, ErasureProtectedEffectDispositionV1::Rollback)?;
+    assert_eq!(
+        first.operation_id(),
+        committed.operation.input().operation_id
+    );
+    assert_eq!(
+        first.admission_digest(),
+        committed.operation.input().admission_digest
+    );
+    let decoded =
+        pos_core::ImportedForkPublicationOperationV1::from_canonical_cbor(first.operation_bytes())?;
+    assert_eq!(
+        decoded.authority_origin_digest(),
+        imported.admission.input().authority_origin_digest
+    );
+    let wrong = ForkReplayRequirementV1::new(
+        child,
+        Seq::from_u64(head),
+        Hash::from_bytes([0xff; 32]),
+        committed.authority_origin_digest,
+    )?;
+    assert_eq!(
+        store.validate_fork_replay_authority(&wrong, &mut budget),
+        Err(Error::CorruptAuthority)
+    );
+    store.finish_protected_effect_interval(
+        interval,
+        ErasureProtectedEffectDispositionV1::Rollback,
+    )?;
     // Diagnostic validation neither signs nor repairs stored authority.
-    assert_eq!(store.import_verified(&request_for(&world, &built))?, imported);
+    assert_eq!(
+        store.import_verified(&request_for(&world, &built))?,
+        imported
+    );
     Ok(())
 }
 
 #[test]
 fn mixed_and_both_empty_imports_validate_identically_on_both_adapters() -> Fallible<()> {
-    for shape in [Shape::Mixed, Shape::EmptyClassified, Shape::EmptyUnclassified] {
+    for shape in [
+        Shape::Mixed,
+        Shape::EmptyClassified,
+        Shape::EmptyUnclassified,
+    ] {
         exercise(&mut MemoryStore::new(), shape)?;
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("fork-replay.sqlite");
-        exercise(&mut SqliteStore::open(path.to_str().ok_or("utf-8 path")?)?, shape)?;
+        exercise(
+            &mut SqliteStore::open(path.to_str().ok_or("utf-8 path")?)?,
+            shape,
+        )?;
     }
     Ok(())
 }
@@ -65,11 +99,19 @@ fn mixed_and_both_empty_imports_validate_identically_on_both_adapters() -> Falli
 #[test]
 fn sqlite_diagnostic_bridge_requires_an_existing_interval() -> Fallible<()> {
     let store = SqliteStore::open(":memory:")?;
-    let requirement = ForkReplayRequirementV1::new(pos_core::TimelineId::new(), Seq::ZERO, Hash::from_bytes([1; 32]), None)?;
+    let requirement = ForkReplayRequirementV1::new(
+        pos_core::TimelineId::new(),
+        Seq::ZERO,
+        Hash::from_bytes([1; 32]),
+        None,
+    )?;
     let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
     let start = clock.mark();
     let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1, 1_000)?;
     let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-    assert_eq!(store.validate_fork_replay_authority(&requirement, &mut budget), Err(Error::StorageUnavailable));
+    assert_eq!(
+        store.validate_fork_replay_authority(&requirement, &mut budget),
+        Err(Error::StorageUnavailable)
+    );
     Ok(())
 }
