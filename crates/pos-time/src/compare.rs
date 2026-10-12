@@ -2,7 +2,7 @@
 //! ancestor and report the entities whose State differs.
 
 use pos_core::staged_install::PreparedInstallPairV1;
-use pos_core::store::{EventReadBounds, SeqRange};
+use pos_core::store::SeqRange;
 use pos_core::trusted_clock::{ApplicableExpiriesV1, ReleaseGuardV1, StagedProtectedOutputV1};
 use pos_core::{
     CoreError, EntityId, ErasureProtectedOperationV1, Event, Seq, TimelineId, WorldReplayClosureV1,
@@ -213,10 +213,21 @@ fn prepare_comparison<'t>(
     let requested_a = comparison_use(sender, a, &request.consumer_ids[0])?;
     let requested_b = comparison_use(sender, b, &request.consumer_ids[1])?;
     let requested_uses = [&requested_a, &requested_b];
-    let read_bounds = require_comparison_artifacts(sender, request.closures, requested_uses)?;
-    let events_a = crate::read_complete_world_replay(sender, &requested_a, read_bounds[0])?;
+    let verified = require_comparison_artifacts(sender, request.closures, requested_uses)?;
+    if verified[0].fork_read_limits() != verified[1].fork_read_limits() {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+    let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
+    let mut budget = pos_store::ForkReplayReadBudgetV1::new(
+        verified[0].fork_read_limits(), guard.guard_started_at(), &mut clock,
+    ).map_err(|_| CoreError::ArtifactUnavailable)?;
+    let evidence_a = sender.validate_world_replay_forks(&verified[0], &mut budget)
+        .map_err(crate::host_error_to_core)?;
+    let evidence_b = sender.validate_world_replay_forks(&verified[1], &mut budget)
+        .map_err(crate::host_error_to_core)?;
+    let events_a = crate::read_complete_world_replay(sender, &requested_a, verified[0].read_bounds(), &mut budget)?;
     revoked[0] = Some(RevokedSubjectsV1::from_verified_events(&events_a));
-    let events_b = crate::read_complete_world_replay(sender, &requested_b, read_bounds[1])?;
+    let events_b = crate::read_complete_world_replay(sender, &requested_b, verified[1].read_bounds(), &mut budget)?;
     revoked[1] = Some(RevokedSubjectsV1::from_verified_events(&events_b));
     require_shared_fork(request.fork_seq, &events_a, &events_b)?;
     let [fold_a, fold_b] = request.folds;
@@ -232,8 +243,15 @@ fn prepare_comparison<'t>(
         events_b,
         crate::verified_source(b, closure_b),
     )?;
-    let final_bounds = require_comparison_artifacts(sender, request.closures, requested_uses)?;
-    if final_bounds != read_bounds {
+    let final_verified = require_comparison_artifacts(sender, request.closures, requested_uses)?;
+    if final_verified != verified {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+    let final_a = sender.validate_world_replay_forks(&final_verified[0], &mut budget)
+        .map_err(crate::host_error_to_core)?;
+    let final_b = sender.validate_world_replay_forks(&final_verified[1], &mut budget)
+        .map_err(crate::host_error_to_core)?;
+    if final_a != evidence_a || final_b != evidence_b {
         return Err(CoreError::ArtifactUnavailable);
     }
     crate::handoff_reserve(guard)?;
@@ -254,7 +272,7 @@ fn require_comparison_artifacts(
     sender: &mut ErasureReadSenderV1<'_>,
     closures: [&WorldReplayClosureV1; 2],
     requested_uses: [&WorldReplayUseV1; 2],
-) -> Result<[EventReadBounds; 2], CoreError> {
+) -> Result<[pos_runtime::VerifiedWorldReplayV1; 2], CoreError> {
     let [closure_a, closure_b] = closures;
     let [requested_a, requested_b] = requested_uses;
     crate::require_world_replay(sender, closure_a, requested_a).and_then(|bounds_a| {

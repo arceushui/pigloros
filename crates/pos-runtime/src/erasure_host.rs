@@ -45,6 +45,7 @@ use pos_store::{
     ForkDeliveryExecutionV1, ForkDeliveryJournalErrorV1, ForkDeliveryStartupOutcomeV1,
     ForkDeliveryTupleV1, ForkEventAuthorityErrorV1, ForkEventPermitIssuerPortV1,
     ForkEventPermitIssuerV1, ForkEventProvenanceAuthorityPortV1, StoreConfig,
+    ForkReplayAuthorityEvidenceV1, ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1,
 };
 use std::num::NonZeroUsize;
 
@@ -176,6 +177,7 @@ trait ErasureHostStore:
     + ForkAdmissionDeliveryJournalPortV1
     + ForkEventPermitIssuerPortV1
     + ForkEventProvenanceAuthorityPortV1
+    + ForkReplayAuthorityReadPortV1
 {
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
@@ -195,7 +197,8 @@ where
         + ForkAdmissionAuthorityPortV1
         + ForkAdmissionDeliveryJournalPortV1
         + ForkEventPermitIssuerPortV1
-        + ForkEventProvenanceAuthorityPortV1,
+        + ForkEventProvenanceAuthorityPortV1
+        + ForkReplayAuthorityReadPortV1,
 {
     fn initialize_timeline_with_key_registry_for_host_transition_result_with_meta(
         &mut self,
@@ -4096,6 +4099,72 @@ impl ErasureReadSenderV1<'_> {
         Ok(capability)
     }
 
+    /// Validate the complete owner-selected Fork classification and its exact
+    /// attribution requirements inside the caller's protected interval.
+    ///
+    /// # Errors
+    /// Fails closed on stale capabilities, incomplete classifications, native
+    /// evidence failure, or exhaustion of the shared operation budget.
+    pub fn validate_world_replay_forks(
+        &mut self,
+        capability: &VerifiedWorldReplayV1,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> Result<Vec<ForkReplayAuthorityEvidenceV1>, ErasureHostErrorV1> {
+        self.host.ensure_generation(self.generation)?;
+        if capability.inventory_generation() != self.generation
+            || capability.fork_source_profile().is_none()
+            || capability.fork_read_limits() != budget.limits()
+        {
+            return Err(ErasureHostErrorV1::Conflict);
+        }
+        budget.check_time().map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+        let Some(sources) = capability.fork_sources() else {
+            // This variant is minted only by the installed owner, which
+            // attests an ordinary complete history without attribution.
+            return if capability.fork_requirements().is_empty() {
+                Ok(Vec::new())
+            } else {
+                Err(ErasureHostErrorV1::Conflict)
+            };
+        };
+        let mut next = Some(capability.timeline_id());
+        let mut head = capability.requested_use().source_logical_head();
+        let mut required_index = 0;
+        for (depth, source) in sources.iter().enumerate() {
+            budget.charge_node(depth).map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+            if next != Some(source.timeline_id())
+                || sources[..depth].iter().any(|previous| previous.timeline_id() == source.timeline_id())
+            {
+                return Err(ErasureHostErrorV1::Conflict);
+            }
+            if let Some(required) = source.required_attribution() {
+                if required.publication_logical_head() != head
+                    || capability.fork_requirements().get(required_index) != Some(&required)
+                {
+                    return Err(ErasureHostErrorV1::Conflict);
+                }
+                required_index += 1;
+            }
+            let timeline = self.host.store.host_store().get_timeline(source.timeline_id())
+                .map_store_error()?.ok_or(ErasureHostErrorV1::Conflict)?;
+            next = timeline.meta.fork_point.map(|(parent, cut)| {
+                head = cut;
+                parent
+            });
+        }
+        if next.is_some() || required_index != capability.fork_requirements().len() {
+            return Err(ErasureHostErrorV1::Conflict);
+        }
+        let mut evidence = Vec::new();
+        for requirement in capability.fork_requirements() {
+            let verified = self.host.store.host_store()
+                .validate_fork_replay_authority(requirement, budget)
+                .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+            evidence.push(verified);
+        }
+        Ok(evidence)
+    }
+
     /// Recover one authoritative, payload-free ERS1 state through the
     /// coordinator that owns this host's installed generation.
     ///
@@ -5693,6 +5762,16 @@ mod tests {
         ) -> Result<pos_store::ForkAppendSourcePermitV1, ForkEventAuthorityErrorV1> {
             self.inner
                 .issue_append_source_permit(issuer, session, child, selected, source)
+        }
+    }
+
+    impl ForkReplayAuthorityReadPortV1 for FaultStoreV1 {
+        fn validate_fork_replay_authority(
+            &self,
+            requirement: &pos_store::ForkReplayRequirementV1,
+            budget: &mut ForkReplayReadBudgetV1<'_>,
+        ) -> Result<ForkReplayAuthorityEvidenceV1, pos_store::ForkReplayAuthorityReadErrorV1> {
+            self.inner.validate_fork_replay_authority(requirement, budget)
         }
     }
 

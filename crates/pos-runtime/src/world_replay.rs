@@ -11,6 +11,43 @@ use pos_core::{
     ErasureProtectedOperationV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash, Seq, TimelineId,
     WorldReplayClosureV1,
 };
+use pos_store::{ForkReplayReadLimitsV1, ForkReplayRequirementV1};
+
+/// One source in an owner-verified complete Fork ancestry classification.
+/// This structural value cannot mint a protected-use capability.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorldReplayForkSourceV1 {
+    timeline: TimelineId,
+    required_attribution: Option<ForkReplayRequirementV1>,
+}
+
+impl WorldReplayForkSourceV1 {
+    /// Bind an optional required publication to its exact source Timeline.
+    ///
+    /// # Errors
+    /// Rejects a publication naming a different Timeline.
+    pub fn new(
+        timeline: TimelineId,
+        required_attribution: Option<ForkReplayRequirementV1>,
+    ) -> Result<Self, WorldReplayVerificationErrorV1> {
+        if required_attribution.is_some_and(|required| required.child_timeline_id() != timeline) {
+            return Err(WorldReplayVerificationErrorV1::RequestMismatch);
+        }
+        Ok(Self { timeline, required_attribution })
+    }
+
+    /// The source selected by the installed native owner.
+    #[must_use]
+    pub const fn timeline_id(&self) -> TimelineId {
+        self.timeline
+    }
+
+    /// Required evidence, never inferred from a missing sidecar.
+    #[must_use]
+    pub const fn required_attribution(&self) -> Option<ForkReplayRequirementV1> {
+        self.required_attribution
+    }
+}
 
 #[cfg(any(test, feature = "test-support"))]
 const TEST_WORLD_REPLAY_READ_BOUNDS: EventReadBounds =
@@ -170,6 +207,13 @@ pub struct VerifiedWorldReplayV1 {
     requested_use: WorldReplayUseV1,
     authorized_optional_view_roots: Vec<Hash>,
     read_bounds: EventReadBounds,
+    // An installed native source profile must attest complete classification.
+    // None is never a deployment capability. Test constructors explicitly
+    // attest an ordinary non-human fixture history unless given a full set.
+    fork_source_profile: Option<Hash>,
+    fork_sources: Option<Vec<WorldReplayForkSourceV1>>,
+    fork_requirements: Vec<ForkReplayRequirementV1>,
+    fork_read_limits: ForkReplayReadLimitsV1,
 }
 
 impl VerifiedWorldReplayV1 {
@@ -203,6 +247,27 @@ impl VerifiedWorldReplayV1 {
         self.read_bounds
     }
 
+    /// Immutable operation-wide attribution/Event ceilings from the owner.
+    #[must_use]
+    pub const fn fork_read_limits(&self) -> ForkReplayReadLimitsV1 {
+        self.fork_read_limits
+    }
+
+    /// The complete required set, selected by the native verifier.
+    #[must_use]
+    pub fn fork_requirements(&self) -> &[ForkReplayRequirementV1] {
+        &self.fork_requirements
+    }
+
+    /// Explicit ancestry classification, or the owner's ordinary-history proof.
+    pub(crate) fn fork_sources(&self) -> Option<&[WorldReplayForkSourceV1]> {
+        self.fork_sources.as_deref()
+    }
+
+    pub(crate) const fn fork_source_profile(&self) -> Option<Hash> {
+        self.fork_source_profile
+    }
+
     pub(crate) const fn has_finite_read_bounds(&self) -> bool {
         let bounds = self.read_bounds;
         finite_usize(bounds.max_payload_bytes())
@@ -212,6 +277,7 @@ impl VerifiedWorldReplayV1 {
             && finite_usize(bounds.max_total_bytes())
             && bounds.max_elapsed_micros() != 0
             && bounds.max_elapsed_micros() != u64::MAX
+            && self.fork_source_profile.is_some_and(|profile| profile != Hash::zero())
     }
 
     /// Require an Exact claim before protected materialization.
@@ -276,7 +342,7 @@ pub fn test_verified_world_replay(
 /// that explicitly enables the `test-support` feature.
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
-pub const fn test_verified_world_replay_with_fields(
+pub fn test_verified_world_replay_with_fields(
     closure_digest: Hash,
     timeline_id: TimelineId,
     source_head: Hash,
@@ -299,7 +365,7 @@ pub const fn test_verified_world_replay_with_fields(
 /// downstream seam tests.
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
-pub const fn test_verified_world_replay_with_fields_and_bounds(
+pub fn test_verified_world_replay_with_fields_and_bounds(
     closure_digest: Hash,
     timeline_id: TimelineId,
     source_head: Hash,
@@ -317,7 +383,31 @@ pub const fn test_verified_world_replay_with_fields_and_bounds(
         requested_use,
         authorized_optional_view_roots: Vec::new(),
         read_bounds,
+        fork_source_profile: Some(Hash::from_bytes([0xf1; 32])),
+        fork_sources: None,
+        fork_requirements: Vec::new(),
+        fork_read_limits: ForkReplayReadLimitsV1::new(8, 1_024, 262_144, 256 * 1024 * 1024, 30_000_000)
+            .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error))),
     }
+}
+
+/// Attach a complete explicit source classification for downstream seam tests.
+/// The constructor deliberately permits inconsistent sets to test host rejection;
+/// it is absent from the deployment dependency graph.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn test_verified_world_replay_with_fork_attribution(
+    mut verified: VerifiedWorldReplayV1,
+    source_profile: Option<Hash>,
+    sources: Vec<WorldReplayForkSourceV1>,
+    requirements: Vec<ForkReplayRequirementV1>,
+    limits: ForkReplayReadLimitsV1,
+) -> VerifiedWorldReplayV1 {
+    verified.fork_source_profile = source_profile;
+    verified.fork_sources = Some(sources);
+    verified.fork_requirements = requirements;
+    verified.fork_read_limits = limits;
+    verified
 }
 
 /// Attach explicit per-view authorization to a downstream seam-test result.
@@ -351,6 +441,10 @@ pub fn test_verified_world_replay_with_authorized_views(
 /// - derive the claim and the optional-view roots it authorizes only through
 ///   [`WorldReplayClosureV1::evaluate`], never by relabelling a degraded
 ///   claim as Exact.
+/// - prove the source profile's complete ancestry classification and exact
+///   required Fork publication coordinates, including code-2 imports. A missing
+///   sidecar never selects ordinary history. Unsupported native extraction is
+///   closed; its deployment completeness/activation owner remains #433.
 ///
 /// The concrete native verifier and its minting path are owned by Redmine
 /// #396 and #397.

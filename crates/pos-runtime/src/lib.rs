@@ -122,7 +122,7 @@ pub use staged_executor::{
 pub use trusted_clock::handoff;
 pub use world_profile::HostWorldProfileV1;
 pub use world_replay::{
-    VerifiedWorldReplayV1, WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
+    VerifiedWorldReplayV1, WorldReplayForkSourceV1, WorldReplayUseV1, WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
 };
 
 // Length-framed hashing shared by the output-admission and staged-catalogue identities: each field
