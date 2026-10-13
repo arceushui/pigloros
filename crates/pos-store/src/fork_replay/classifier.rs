@@ -21,7 +21,12 @@ const TABLE_ROUTES_FIELD: u64 = 7;
 const ROUTE_FIXED_BYTES: usize = 32 + 1;
 
 impl NativeReadContextV1<'_, '_> {
-    fn classifier_allocations(&mut self, bytes: &[u8], registrar_field: u64, routes_field: u64) -> Result<()> {
+    fn classifier_allocations(
+        &mut self,
+        bytes: &[u8],
+        registrar_field: u64,
+        routes_field: u64,
+    ) -> Result<()> {
         if bytes.len() > MAX_FORK_EVENT_CLASSIFIER_TABLE_BYTES_V1 {
             return Err(Error::PublicationConflict);
         }
@@ -36,17 +41,24 @@ impl NativeReadContextV1<'_, '_> {
         }
         for _ in 0..count {
             self.check()?;
-            if routes.head() != Some((4, 3)) { return Err(Error::PublicationConflict); }
+            if routes.head() != Some((4, 3)) {
+                return Err(Error::PublicationConflict);
+            }
             let (major, length) = routes.head().ok_or(Error::PublicationConflict)?;
             if major != 3 || length > MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1 as u64 {
                 return Err(Error::PublicationConflict);
             }
-            let text = routes.take(usize::try_from(length).map_err(|_| Error::PublicationConflict)?)
+            let text = routes
+                .take(usize::try_from(length).map_err(|_| Error::PublicationConflict)?)
                 .ok_or(Error::PublicationConflict)?;
             self.bytes(text.len())?;
-            if routes.head() != Some((2, 32)) { return Err(Error::PublicationConflict); }
+            if routes.head() != Some((2, 32)) {
+                return Err(Error::PublicationConflict);
+            }
             routes.take(32).ok_or(Error::PublicationConflict)?;
-            if !matches!(routes.head(), Some((7, 20 | 21))) { return Err(Error::PublicationConflict); }
+            if !matches!(routes.head(), Some((7, 20 | 21))) {
+                return Err(Error::PublicationConflict);
+            }
             self.bytes(ROUTE_FIXED_BYTES)?;
         }
         // Core's canonical equality buffer, independent of owned route fields.
@@ -58,7 +70,8 @@ impl NativeReadContextV1<'_, '_> {
         if self.budget.is_some() {
             self.classifier_allocations(bytes, SOURCE_REGISTRAR_FIELD, SOURCE_ROUTES_FIELD)?;
         }
-        let value = ForkClassifierSourceV1::from_canonical_cbor(bytes).map_err(|_| Error::PublicationConflict);
+        let value = ForkClassifierSourceV1::from_canonical_cbor(bytes)
+            .map_err(|_| Error::PublicationConflict);
         self.check()?;
         value
     }
@@ -68,12 +81,16 @@ impl NativeReadContextV1<'_, '_> {
         if self.budget.is_some() {
             self.classifier_allocations(bytes, TABLE_REGISTRAR_FIELD, TABLE_ROUTES_FIELD)?;
         }
-        let value = ForkClassifierTableV1::from_canonical_cbor(bytes).map_err(|_| Error::PublicationConflict);
+        let value = ForkClassifierTableV1::from_canonical_cbor(bytes)
+            .map_err(|_| Error::PublicationConflict);
         self.check()?;
         value
     }
 
-    pub(crate) fn classifier_registration(&mut self, bytes: &[u8]) -> Result<ForkClassifierRegistrationV1> {
+    pub(crate) fn classifier_registration(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<ForkClassifierRegistrationV1> {
         self.check()?;
         if self.budget.is_some() {
             if bytes.len() > MAX_FORK_EVENT_CLASSIFIER_REGISTRATION_BYTES_V1 {
@@ -81,7 +98,8 @@ impl NativeReadContextV1<'_, '_> {
             }
             self.bytes(bytes.len())?;
         }
-        let value = ForkClassifierRegistrationV1::from_canonical_cbor(bytes).map_err(|_| Error::PublicationConflict);
+        let value = ForkClassifierRegistrationV1::from_canonical_cbor(bytes)
+            .map_err(|_| Error::PublicationConflict);
         self.check()?;
         value
     }
@@ -99,14 +117,20 @@ mod tests {
     use std::time::Duration;
 
     #[derive(Clone, Copy)]
-    enum Codec { Source, Table, Registration }
+    enum Codec {
+        Source,
+        Table,
+        Registration,
+    }
 
     impl Codec {
         fn accepts(self, bytes: &[u8]) -> bool {
             match self {
                 Self::Source => ForkClassifierSourceV1::from_canonical_cbor(bytes).is_ok(),
                 Self::Table => ForkClassifierTableV1::from_canonical_cbor(bytes).is_ok(),
-                Self::Registration => ForkClassifierRegistrationV1::from_canonical_cbor(bytes).is_ok(),
+                Self::Registration => {
+                    ForkClassifierRegistrationV1::from_canonical_cbor(bytes).is_ok()
+                }
             }
         }
 
@@ -126,22 +150,44 @@ mod tests {
         }
     }
 
-    fn records() -> Fallible<(ForkClassifierSourceV1, ForkClassifierTableV1, ForkClassifierRegistrationV1)> {
+    fn records() -> Fallible<(
+        ForkClassifierSourceV1,
+        ForkClassifierTableV1,
+        ForkClassifierRegistrationV1,
+    )> {
         let world = World::new(Shape::Mixed, false)?;
         let built = world.build(&Spec::default())?;
-        let records = built.envelope.unsigned().input().classifier.as_ref().ok_or("classifier fixture")?;
-        Ok((ForkClassifierSourceV1::from_canonical_cbor(&records.source)?,
+        let records = built
+            .envelope
+            .unsigned()
+            .input()
+            .classifier
+            .as_ref()
+            .ok_or("classifier fixture")?;
+        Ok((
+            ForkClassifierSourceV1::from_canonical_cbor(&records.source)?,
             ForkClassifierTableV1::from_canonical_cbor(&records.table)?,
-            ForkClassifierRegistrationV1::from_canonical_cbor(&records.registration)?))
+            ForkClassifierRegistrationV1::from_canonical_cbor(&records.registration)?,
+        ))
     }
 
     fn assert_parity(codec: Codec, bytes: &[u8]) -> Fallible<()> {
-        assert_eq!(codec.decode(bytes, &mut NativeReadContextV1::ordinary()).is_ok(), codec.accepts(bytes));
+        assert_eq!(
+            codec
+                .decode(bytes, &mut NativeReadContextV1::ordinary())
+                .is_ok(),
+            codec.accepts(bytes)
+        );
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1_000_000, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-        assert_eq!(codec.decode(bytes, &mut NativeReadContextV1::protected(&mut budget)).is_ok(), codec.accepts(bytes));
+        assert_eq!(
+            codec
+                .decode(bytes, &mut NativeReadContextV1::protected(&mut budget))
+                .is_ok(),
+            codec.accepts(bytes)
+        );
         assert!(budget.check_time().is_ok());
         Ok(())
     }
@@ -149,10 +195,15 @@ mod tests {
     #[test]
     fn classifier_carriers_preserve_all_three_strict_native_decoders() -> Fallible<()> {
         let (source, table, registration) = records()?;
-        for (codec, bytes) in [(Codec::Source, source.to_canonical_cbor()),
-            (Codec::Table, table.to_canonical_cbor()), (Codec::Registration, registration.to_canonical_cbor())] {
+        for (codec, bytes) in [
+            (Codec::Source, source.to_canonical_cbor()),
+            (Codec::Table, table.to_canonical_cbor()),
+            (Codec::Registration, registration.to_canonical_cbor()),
+        ] {
             assert_parity(codec, &bytes)?;
-            for end in 0..bytes.len() { assert_parity(codec, &bytes[..end])?; }
+            for end in 0..bytes.len() {
+                assert_parity(codec, &bytes[..end])?;
+            }
             for index in 0..bytes.len() {
                 for replacement in [0, 255] {
                     let mut changed = bytes.clone();
@@ -189,15 +240,29 @@ mod tests {
     #[test]
     fn classifier_decoders_charge_independent_field_and_equality_units() -> Fallible<()> {
         let (source, table, registration) = records()?;
-        let route_bytes: usize = source.input().routes.iter()
-            .map(|route| route.source().route().len() + 32 + 1).sum();
+        let route_bytes: usize = source
+            .input()
+            .routes
+            .iter()
+            .map(|route| route.source().route().len() + 32 + 1)
+            .sum();
         for (codec, bytes, fields) in [
-            (Codec::Source, source.to_canonical_cbor(), source.input().registrar_identifier.len() + route_bytes),
-            (Codec::Table, table.to_canonical_cbor(), table.input().registrar_identifier.len() + route_bytes),
+            (
+                Codec::Source,
+                source.to_canonical_cbor(),
+                source.input().registrar_identifier.len() + route_bytes,
+            ),
+            (
+                Codec::Table,
+                table.to_canonical_cbor(),
+                table.input().registrar_identifier.len() + route_bytes,
+            ),
             (Codec::Registration, registration.to_canonical_cbor(), 0),
         ] {
             let expected = bytes.len() + fields;
-            for limit in 1..=expected { byte_boundary(codec, &bytes, expected, limit)?; }
+            for limit in 1..=expected {
+                byte_boundary(codec, &bytes, expected, limit)?;
+            }
         }
         Ok(())
     }
@@ -205,11 +270,18 @@ mod tests {
     #[test]
     fn classifier_maximum_utf8_fields_and_route_cardinality_have_exact_gates() -> Fallible<()> {
         let (source, table, _) = records()?;
-        let routes: Vec<_> = (0..MAX_FORK_EVENT_CLASSIFIER_ROUTES_V1).map(|index| {
-            pos_core::ForkEventSourceDescriptorV1::new(format!("r{index:04}-{}", "é".repeat(61)), pos_core::Hash::from_bytes([1; 32]))
+        let routes: Vec<_> = (0..MAX_FORK_EVENT_CLASSIFIER_ROUTES_V1)
+            .map(|index| {
+                pos_core::ForkEventSourceDescriptorV1::new(
+                    format!("r{index:04}-{}", "é".repeat(61)),
+                    pos_core::Hash::from_bytes([1; 32]),
+                )
                 .map(|source| pos_core::ForkExternalInputRouteV1::new(source, index % 2 == 0))
-        }).collect::<std::result::Result<_, _>>()?;
-        assert!(routes.iter().all(|route| route.source().route().len() == MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1));
+            })
+            .collect::<std::result::Result<_, _>>()?;
+        assert!(routes
+            .iter()
+            .all(|route| route.source().route().len() == MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1));
         let mut source_fields = source.input().clone();
         source_fields.registrar_identifier = "é".repeat(32);
         source_fields.routes = routes.clone();
@@ -219,7 +291,10 @@ mod tests {
         table_fields.routes = routes;
         let table = ForkClassifierTableV1::new(table_fields)?;
         let fields = 64 + MAX_FORK_EVENT_CLASSIFIER_ROUTES_V1 * (128 + 32 + 1);
-        for (codec, bytes) in [(Codec::Source, source.to_canonical_cbor()), (Codec::Table, table.to_canonical_cbor())] {
+        for (codec, bytes) in [
+            (Codec::Source, source.to_canonical_cbor()),
+            (Codec::Table, table.to_canonical_cbor()),
+        ] {
             assert_parity(codec, &bytes)?;
             let expected = bytes.len() + fields;
             byte_boundary(codec, &bytes, expected, expected)?;

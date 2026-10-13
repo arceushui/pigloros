@@ -13336,45 +13336,67 @@ fn sqlite_classified_authority_graph_with_context(
     ),
     ForkEventAuthorityErrorV1,
 > {
-    use fork_replay_classifier::{classifier_registration_with_context, classifier_source_with_context,
-        classifier_table_with_context, ClassifierKeyV1};
+    use fork_replay_classifier::{
+        classifier_registration_with_context, classifier_source_with_context,
+        classifier_table_with_context, ClassifierKeyV1,
+    };
     use ForkEventAuthorityErrorV1::CorruptAuthority;
     let admission = sqlite_local_fork_admission_with_context(conn, hasher, child_id, context)?;
     context.check().map_err(|_| CorruptAuthority)?;
     let table = classifier_table_with_context(conn, child_id, context)?;
     let registration = classifier_registration_with_context(conn, child_id, context)?;
-    let source = classifier_source_with_context(conn,
+    let source = classifier_source_with_context(
+        conn,
         ClassifierKeyV1::LocalSource {
             descriptor: table.input().room_revision_descriptor_hash,
             registrar: &table.input().registrar_identifier,
-        }, context)?;
-    context.canonical(admission.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+        },
+        context,
+    )?;
+    context
+        .canonical(admission.canonical_cbor_len())
+        .map_err(|_| CorruptAuthority)?;
     let admission_digest = admission.digest();
     context.check().map_err(|_| CorruptAuthority)?;
     if table.input().fork_admission_digest != admission_digest
-        || table.input().room_revision_descriptor_hash != admission.input().room_revision_descriptor_hash
-        || source.input().room_revision_descriptor_hash != table.input().room_revision_descriptor_hash
-        || source.input().registrar_identifier != table.input().registrar_identifier {
+        || table.input().room_revision_descriptor_hash
+            != admission.input().room_revision_descriptor_hash
+        || source.input().room_revision_descriptor_hash
+            != table.input().room_revision_descriptor_hash
+        || source.input().registrar_identifier != table.input().registrar_identifier
+    {
         return Err(CorruptAuthority);
     }
-    context.canonical(source.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+    context
+        .canonical(source.canonical_cbor_len())
+        .map_err(|_| CorruptAuthority)?;
     let source_digest = source.digest();
     context.check().map_err(|_| CorruptAuthority)?;
     if table.input().source_configuration_revision_digest != source_digest
         || table.input().routes != source.input().routes
-        || registration.input().child_timeline_id != child_id { return Err(CorruptAuthority); }
-    context.canonical(admission.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+        || registration.input().child_timeline_id != child_id
+    {
+        return Err(CorruptAuthority);
+    }
+    context
+        .canonical(admission.canonical_cbor_len())
+        .map_err(|_| CorruptAuthority)?;
     let repeated_admission_digest = admission.digest();
     context.check().map_err(|_| CorruptAuthority)?;
     if registration.input().fork_admission_digest != repeated_admission_digest
-        || registration.input().room_revision_descriptor_hash != admission.input().room_revision_descriptor_hash {
+        || registration.input().room_revision_descriptor_hash
+            != admission.input().room_revision_descriptor_hash
+    {
         return Err(CorruptAuthority);
     }
-    context.canonical(table.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+    context
+        .canonical(table.canonical_cbor_len())
+        .map_err(|_| CorruptAuthority)?;
     let table_digest = table.digest();
     context.check().map_err(|_| CorruptAuthority)?;
     let result = (registration.input().classifier_revision_digest == table_digest)
-        .then_some((admission, table, registration)).ok_or(CorruptAuthority);
+        .then_some((admission, table, registration))
+        .ok_or(CorruptAuthority);
     context
         .check()
         .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
@@ -13721,8 +13743,12 @@ fn sqlite_fork_admission_operation(
     kind: ForkAdmissionOperationKindV1,
     operation_id: Hash,
 ) -> Result<Option<ForkAdmissionOperationRowV1>, pos_core::ForkAdmissionErrorV1> {
-    fork_replay_operation::operation_with_context(conn, kind, operation_id,
-        &mut crate::fork_replay::NativeReadContextV1::ordinary())
+    fork_replay_operation::operation_with_context(
+        conn,
+        kind,
+        operation_id,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+    )
 }
 
 fn sqlite_insert_fork_admission_operation(
@@ -14758,8 +14784,12 @@ mod tests {
         let operation_id = Hash::from_bytes([2; 32]);
         let event_id = EventId::new();
         assert!(sqlite_fork_classifier_source(&conn, descriptor_hash, "registrar").is_err());
-        assert!(fork_replay_classifier::classifier_table_with_context(&conn, child_id,
-            &mut crate::fork_replay::NativeReadContextV1::ordinary()).is_err());
+        assert!(fork_replay_classifier::classifier_table_with_context(
+            &conn,
+            child_id,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary()
+        )
+        .is_err());
         assert!(sqlite_fork_classifier_registration(&conn, operation_id).is_err());
         assert!(sqlite_event_origin(&conn, event_id).is_err());
         assert!(sqlite_intervention_admission(&conn, event_id).is_err());
@@ -14799,8 +14829,12 @@ mod tests {
         )?;
 
         assert!(sqlite_fork_classifier_source(&conn, descriptor_hash, "registrar").is_err());
-        assert!(fork_replay_classifier::classifier_table_with_context(&conn, child_id,
-            &mut crate::fork_replay::NativeReadContextV1::ordinary()).is_err());
+        assert!(fork_replay_classifier::classifier_table_with_context(
+            &conn,
+            child_id,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary()
+        )
+        .is_err());
         assert!(sqlite_fork_classifier_registration(&conn, operation_id).is_err());
         assert!(sqlite_event_origin(&conn, event_id).is_err());
         assert!(sqlite_intervention_admission(&conn, event_id).is_err());
