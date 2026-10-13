@@ -4,6 +4,7 @@ use rusqlite::{Connection, Row, Rows, Statement};
 
 use crate::fork_replay::NativeReadContextV1;
 use pos_core::{ForkAdmissionErrorV1 as Error, Hash};
+use super::fork_replay_event::EventCursorV1;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -17,6 +18,8 @@ pub(super) enum SelectedRowV1<'key> {
     ChainFields(&'key str),
     BindingProbe(Hash),
     BindingFields(Hash),
+    EventProbe(&'key str, EventCursorV1),
+    EventFields(&'key str, i64),
 }
 
 impl SelectedRowV1<'_> {
@@ -45,6 +48,11 @@ impl SelectedRowV1<'_> {
                 FROM fork_principal_owner_bindings WHERE operation_id = ?1",
             Self::BindingFields(_) => "SELECT principal_digest, pob1_cbor
                 FROM fork_principal_owner_bindings WHERE operation_id = ?1",
+            Self::EventProbe(_, cursor) => cursor.sql(),
+            Self::EventFields(_, _) => "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
+                causation_id, correlation_id, schema_version, payload_hash, signature,
+                signature_owner_id, signature_role, signature_epoch, origin_timeline_id, origin_logical_seq
+                FROM events WHERE timeline_id = ?1 AND seq = ?2",
         }
     }
 
@@ -61,6 +69,8 @@ impl SelectedRowV1<'_> {
             Self::BindingProbe(operation) | Self::BindingFields(operation) => {
                 statement.query([operation.as_bytes().as_slice()])
             }
+            Self::EventProbe(key, cursor) => cursor.query(statement, key),
+            Self::EventFields(key, seq) => statement.query(rusqlite::params![key, seq]),
         }
     }
 }
