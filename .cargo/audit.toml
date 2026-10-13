@@ -1,0 +1,5 @@
+# cargo-audit policy. Keep in step with [advisories] in deny.toml.
+[advisories]
+# RUSTSEC-2026-0344 (ruzstd < 0.9.1): see the full reason and the removal
+# condition in deny.toml (Redmine #629).
+ignore = ["RUSTSEC-2026-0344"]
