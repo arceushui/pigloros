@@ -10,8 +10,7 @@
 
 use pos_core::{
     ForkClassifierRegistrationV1, ForkClassifierSourceV1, Hasher, ImportedForkAdmissionRecordV1,
-    ImportedForkAttributionAdmissionV1, ImportedForkClassifierGraphV1, ImportedKeyRecordV1,
-    ImportedKeyTombstoneV1, TimelineId,
+    ImportedForkAttributionAdmissionV1, ImportedForkClassifierGraphV1, TimelineId,
 };
 use rusqlite::{params, Connection, OptionalExtension, ToSql};
 
@@ -22,8 +21,9 @@ use super::{
 use crate::{
     fork_event_authority::{
         imported_admission_matches, imported_graph_matches, AuthorityValidatorV1,
-        ValidatedAdmissionV1, ValidatedGraphV1,
+        ValidatedAdmissionV1, ValidatedGraphV1, ValidatedImportV1,
     },
+    fork_replay::NativeReadContextV1,
     fork_manifest_publication::{
         PublicationSourceErrorV1, PublicationSourceResultV1, RetainedImportedKeyV1,
         RetainedKeyEvidenceV1,
@@ -42,6 +42,89 @@ const RETAINED_KEY_SQL: &str = "SELECT evidence.ikr1_cbor, evidence.ikt1_cbor
     JOIN imported_fork_attribution_admissions AS admission
       ON admission.import_operation_id = evidence.import_operation_id
     WHERE evidence.import_operation_id = ?1 AND admission.full_envelope_digest = ?2";
+
+const RETAINED_KEY_PROBE_SQL: &str = "SELECT
+    typeof(evidence.ikr1_cbor) = 'blob', length(evidence.ikr1_cbor),
+    evidence.ikt1_cbor IS NULL OR typeof(evidence.ikt1_cbor) = 'blob', length(evidence.ikt1_cbor)
+    FROM imported_fork_key_evidence AS evidence
+    JOIN imported_fork_attribution_admissions AS admission
+      ON admission.import_operation_id = evidence.import_operation_id
+    WHERE evidence.import_operation_id = ?1 AND admission.full_envelope_digest = ?2";
+
+struct StoredRetainedKeyV1 {
+    record: Vec<u8>,
+    tombstone: Option<Vec<u8>>,
+}
+
+struct RetainedKeyLengthsV1 {
+    record: usize,
+    tombstone: Option<usize>,
+}
+
+fn retained_key_lengths_with_context(
+    conn: &Connection,
+    import: ValidatedImportV1,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationSourceResultV1<RetainedKeyLengthsV1> {
+    use PublicationSourceErrorV1::{Invalid, Storage};
+    let arguments = params![import.import_operation_id.as_bytes().as_slice(),
+        import.full_envelope_digest.as_bytes().as_slice()];
+    context.check().map_err(|_| Invalid)?;
+    let mut statement = conn.prepare(RETAINED_KEY_PROBE_SQL).map_err(|_| Storage)?;
+    context.check().map_err(|_| Invalid)?;
+    let mut rows = statement.query(arguments).map_err(|_| Storage)?;
+    context.row_available().map_err(|_| Invalid)?;
+    let row = rows.next().map_err(|_| Storage)?;
+    context.check().map_err(|_| Invalid)?;
+    let row = row.ok_or(Invalid)?;
+    context.suffix_row().map_err(|_| Invalid)?;
+    let record_is_blob: bool = row.get(0).map_err(|_| Storage)?;
+    let tombstone_is_blob_or_null: bool = row.get(2).map_err(|_| Storage)?;
+    if !record_is_blob || !tombstone_is_blob_or_null {
+        return Err(Storage);
+    }
+    let record_length = row.get::<_, i64>(1).map_err(|_| Storage)?;
+    let record_length = usize::try_from(record_length).map_err(|_| Invalid)?;
+    let tombstone_length = row.get::<_, Option<i64>>(3).map_err(|_| Storage)?
+        .map(usize::try_from).transpose().map_err(|_| Invalid)?;
+    if record_length > pos_core::MAX_IMPORTED_KEY_RECORD_BYTES_V1
+        || tombstone_length.is_some_and(|length| length > pos_core::MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1)
+    {
+        return Err(Invalid);
+    }
+    context.check().map_err(|_| Invalid)?;
+    Ok(RetainedKeyLengthsV1 { record: record_length, tombstone: tombstone_length })
+}
+
+/// Type and size gates precede both raw getters on the same held snapshot.
+fn retained_key_bytes_with_context(
+    conn: &Connection,
+    import: ValidatedImportV1,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationSourceResultV1<StoredRetainedKeyV1> {
+    use PublicationSourceErrorV1::{Invalid, Storage};
+    let lengths = retained_key_lengths_with_context(conn, import, context)?;
+    let arguments = params![import.import_operation_id.as_bytes().as_slice(),
+        import.full_envelope_digest.as_bytes().as_slice()];
+    context.check().map_err(|_| Invalid)?;
+    let mut fetch = conn.prepare(RETAINED_KEY_SQL).map_err(|_| Storage)?;
+    context.check().map_err(|_| Invalid)?;
+    let mut fetched = fetch.query(arguments).map_err(|_| Storage)?;
+    context.row_available().map_err(|_| Invalid)?;
+    let row = fetched.next().map_err(|_| Storage)?;
+    context.check().map_err(|_| Invalid)?;
+    let row = row.ok_or(Invalid)?;
+    context.suffix_row().map_err(|_| Invalid)?;
+    context.bytes(lengths.record).map_err(|_| Invalid)?;
+    let record = row.get::<_, Vec<u8>>(0).map_err(|_| Storage)?;
+    context.check().map_err(|_| Invalid)?;
+    if let Some(length) = lengths.tombstone {
+        context.bytes(length).map_err(|_| Invalid)?;
+    }
+    let tombstone = row.get::<_, Option<Vec<u8>>>(1).map_err(|_| Storage)?;
+    context.check().map_err(|_| Invalid)?;
+    Ok(StoredRetainedKeyV1 { record, tombstone })
+}
 
 /// Read one child's `FAR1` under an explicit R6.9 validator.
 pub(super) fn sqlite_validated_admission(
@@ -98,45 +181,28 @@ fn stored_blob(conn: &Connection, sql: &str, key: &dyn ToSql) -> Option<Vec<u8>>
 pub(super) fn sqlite_retained_key_evidence(
     conn: &Connection,
     admission: &PublicationSourceResultV1<ValidatedAdmissionV1>,
+    context: &mut NativeReadContextV1<'_, '_>,
 ) -> PublicationSourceResultV1<RetainedKeyEvidenceV1> {
+    use PublicationSourceErrorV1::Invalid;
+    context.check().map_err(|_| Invalid)?;
     admission
         .as_ref()
         .ok()
         .and_then(ValidatedAdmissionV1::import)
         .map_or(Ok(RetainedKeyEvidenceV1::LiveRegistry), |import| {
-            conn.query_row(
-                RETAINED_KEY_SQL,
-                params![
-                    import.import_operation_id.as_bytes().as_slice(),
-                    import.full_envelope_digest.as_bytes().as_slice()
-                ],
-                |row| {
-                    row.get::<_, Vec<u8>>(0).and_then(|record| {
-                        row.get::<_, Option<Vec<u8>>>(1)
-                            .map(|tombstone| (record, tombstone))
-                    })
-                },
-            )
-            .optional()
-            .map_err(|_| PublicationSourceErrorV1::Storage)
-            .and_then(|stored| {
-                stored
-                    .and_then(|(record, tombstone)| {
-                        ImportedKeyRecordV1::from_canonical_cbor(&record).ok().zip(
-                            tombstone
-                                .map(|bytes| ImportedKeyTombstoneV1::from_canonical_cbor(&bytes))
-                                .transpose()
-                                .ok(),
-                        )
-                    })
-                    .map(|(record, tombstone)| {
-                        RetainedKeyEvidenceV1::Imported(Box::new(RetainedImportedKeyV1 {
-                            record,
-                            tombstone,
-                        }))
-                    })
-                    .ok_or(PublicationSourceErrorV1::Invalid)
-            })
+            let stored = retained_key_bytes_with_context(conn, import, context)?;
+            let record = context.imported_key_record(&stored.record).map_err(|_| Invalid)?;
+            let tombstone = stored.tombstone.as_ref()
+                .map(|bytes| context.imported_key_tombstone(bytes)).transpose().map_err(|_| Invalid)?;
+            context.canonical(record.canonical_cbor_len()).map_err(|_| Invalid)?;
+            if let Some(tombstone) = tombstone.as_ref() {
+                context.canonical(tombstone.canonical_cbor_len()).map_err(|_| Invalid)?;
+            }
+            let retained = RetainedKeyEvidenceV1::Imported(Box::new(RetainedImportedKeyV1 {
+                record, tombstone,
+            }));
+            context.check().map_err(|_| Invalid)?;
+            Ok(retained)
         })
 }
 
@@ -198,4 +264,154 @@ fn sqlite_imported_graph(
             table: graph.table,
         })
         .ok_or(AuthorityError::CorruptAuthority)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::{
+        fae1_fixture::{pin_policy, request_for, Fallible, Shape, Spec, World},
+        ForkAttributionAuthorityImportPortV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
+    };
+    use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+    use std::time::Duration;
+
+    struct Fixture {
+        store: super::super::SqliteStore,
+        admission: PublicationSourceResultV1<ValidatedAdmissionV1>,
+        expected: RetainedKeyEvidenceV1,
+        bytes: usize,
+    }
+
+    fn fixture(destroyed: bool) -> Fallible<Fixture> {
+        let world = World::new(Shape::Mixed, false)?;
+        let built = world.build(&Spec { destroyed_key: destroyed, ..Spec::default() })?;
+        let mut store = super::super::SqliteStore::open(":memory:")?;
+        world.seed_destination(&mut store)?;
+        pin_policy(&mut store, &built.policy)?;
+        store.import_verified(&request_for(&world, &built))?;
+        let admission = store.fork_publication_admission(world.child_at(0)?.id,
+            AuthorityValidatorV1::CodeTwoAware);
+        let input = built.envelope.unsigned().input();
+        let record = input.key_record;
+        let tombstone = input.key_tombstone;
+        // Raw retrieval + decoder equality + logical result copy, and owner
+        // String: this oracle uses byte encoders, not production length gates.
+        let bytes = record.to_canonical_cbor().len() * 3 + record.identity().owner_id.as_str().len()
+            + tombstone.as_ref().map_or(0, |value| value.to_canonical_cbor().len() * 3
+                + value.identity().owner_id.as_str().len());
+        let expected = RetainedKeyEvidenceV1::Imported(Box::new(RetainedImportedKeyV1 { record, tombstone }));
+        Ok(Fixture { store, admission, expected, bytes })
+    }
+
+    fn assert_byte_boundary(fixture: &Fixture, bytes: usize) -> Fallible<()> {
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(1, 1, 2, bytes, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let result = sqlite_retained_key_evidence(&fixture.store.conn, &fixture.admission,
+            &mut NativeReadContextV1::protected(&mut budget));
+        if bytes == fixture.bytes {
+            assert_eq!(result, Ok(fixture.expected.clone()));
+            assert_eq!(budget.remaining_native_bytes(), 0);
+        } else {
+            assert_eq!(result, Err(PublicationSourceErrorV1::Invalid));
+            assert!(budget.check_time().is_err());
+        }
+        Ok(())
+    }
+
+    fn assert_deadline_boundaries(fixture: &Fixture) -> Fallible<()> {
+        for final_offset in [Duration::ZERO, Duration::from_secs(2)] {
+          let mut completed = false;
+          for marks in 2..128 {
+            let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                std::iter::repeat_n(Duration::from_millis(1), marks).chain([final_offset]));
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 2, fixture.bytes, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let result = sqlite_retained_key_evidence(&fixture.store.conn, &fixture.admission,
+                &mut NativeReadContextV1::protected(&mut budget));
+            if let Ok(retained) = result {
+                assert_eq!(retained, fixture.expected);
+                assert_eq!(budget.remaining_native_bytes(), 0);
+                completed = true;
+                break;
+            }
+            assert!(budget.check_time().is_err());
+          }
+          assert!(completed, "every observable expiry and regression checkpoint was tested");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_key_phase_accounts_live_and_destroyed_blobs_copies_and_deadlines() -> Fallible<()> {
+        for destroyed in [false, true] {
+            let fixture = fixture(destroyed)?;
+            for bytes in 1..=fixture.bytes { assert_byte_boundary(&fixture, bytes)?; }
+            assert_deadline_boundaries(&fixture)?;
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 1, fixture.bytes, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(sqlite_retained_key_evidence(&fixture.store.conn, &fixture.admission,
+                &mut NativeReadContextV1::protected(&mut budget)), Err(PublicationSourceErrorV1::Invalid));
+            assert_eq!(budget.remaining_native_bytes(), fixture.bytes);
+            assert!(budget.check_time().is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn retained_key_type_and_cap_failures_precede_raw_copies() -> Fallible<()> {
+        for (sql, maximum) in [
+            ("UPDATE imported_fork_key_evidence SET ikr1_cbor = ?1", pos_core::MAX_IMPORTED_KEY_RECORD_BYTES_V1),
+            ("UPDATE imported_fork_key_evidence SET ikt1_cbor = ?1", pos_core::MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1),
+        ] {
+            let fixture = fixture(true)?;
+            for (value, expected) in [
+                (rusqlite::types::Value::Blob(vec![0; maximum + 1]), PublicationSourceErrorV1::Invalid),
+                (rusqlite::types::Value::Text("not-a-blob".into()), PublicationSourceErrorV1::Storage),
+            ] {
+                // Impossible stored-state injection exercises only the raw gate.
+                fixture.store.conn.execute(sql, [value])?;
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 2, 64, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                assert_eq!(sqlite_retained_key_evidence(&fixture.store.conn, &fixture.admission,
+                    &mut NativeReadContextV1::protected(&mut budget)), Err(expected));
+                assert_eq!(budget.remaining_native_bytes(), 64);
+                assert!(budget.check_time().is_ok());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn absent_or_unselected_key_evidence_has_no_stored_row_or_blob_unit() -> Fallible<()> {
+        let fixture = fixture(false)?;
+        // The selected import identity is a structural test value; neither an
+        // absent join nor a failed admission may consult other key evidence.
+        let import = ValidatedImportV1 {
+            import_operation_id: pos_core::Hash::from_bytes([253; 32]),
+            full_envelope_digest: pos_core::Hash::from_bytes([254; 32]),
+        };
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 64, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        assert!(matches!(retained_key_bytes_with_context(&fixture.store.conn, import,
+            &mut NativeReadContextV1::protected(&mut budget)), Err(PublicationSourceErrorV1::Invalid)));
+        assert_eq!(budget.remaining_native_bytes(), 64);
+        budget.charge_rows(1)?;
+        assert_eq!(sqlite_retained_key_evidence(&fixture.store.conn, &Err(PublicationSourceErrorV1::Invalid),
+            &mut NativeReadContextV1::ordinary()), Ok(RetainedKeyEvidenceV1::LiveRegistry));
+        // Keep the authentic admitted identity observable, not a fabricated
+        // privileged admission used to exercise a private lookup.
+        assert!(fixture.admission.as_ref().is_ok_and(|admission| admission.import().is_some()));
+        Ok(())
+    }
 }
