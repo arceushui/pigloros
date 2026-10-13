@@ -3,8 +3,8 @@
 use pos_core::{ForkAdmissionErrorV1 as Error, ForkAdmissionHostRecordV1};
 use rusqlite::Connection;
 
-use crate::fork_replay::NativeReadContextV1;
 use super::fork_replay_row::{selected_field_with_context, SelectedRowV1};
+use crate::fork_replay::NativeReadContextV1;
 
 type Result<T> = std::result::Result<T, Error>;
 

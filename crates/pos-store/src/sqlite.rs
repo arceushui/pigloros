@@ -153,8 +153,8 @@ mod fork_code_two_read;
 mod fork_replay;
 mod fork_replay_admission;
 mod fork_replay_binding;
-mod fork_replay_classifier;
 mod fork_replay_child;
+mod fork_replay_classifier;
 mod fork_replay_host;
 mod fork_replay_operation;
 mod fork_replay_publication;
@@ -13875,8 +13875,9 @@ fn sqlite_fork_admission_result_with_context(
             if parent_chain_head != admission.input().parent_chain_head_hash {
                 return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
             }
-            let child_name = sqlite_fork_admission_child_name_with_context(conn, &admission, context)?
-                .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            let child_name =
+                sqlite_fork_admission_child_name_with_context(conn, &admission, context)?
+                    .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
             if fork_commitment_with_context(
                 store_id,
                 binding.input().principal_digest,
