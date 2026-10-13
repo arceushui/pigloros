@@ -821,11 +821,11 @@ impl FactualPrefixReadPortV1 for MemoryStore {
 }
 
 /// The outcome of a declaration that breaks a structural rule of R3.7.2.
-const INVALID: PipelineOutcomeV1 = PipelineOutcomeV1::InvalidDependencyDeclaration;
+const INVALID_DECLARATION: PipelineOutcomeV1 = PipelineOutcomeV1::InvalidDependencyDeclaration;
 /// The outcome of a declaration whose edges name a stale fence grant.
-const STALE_GRANT: PipelineOutcomeV1 = PipelineOutcomeV1::AdmissionConflict;
+const STALE_GRANT_CONFLICT: PipelineOutcomeV1 = PipelineOutcomeV1::AdmissionConflict;
 /// The outcome of a Timeline whose recorded set takes no further Tick.
-const EXHAUSTED: PipelineOutcomeV1 = PipelineOutcomeV1::DependencySetExhausted;
+const SET_EXHAUSTED: PipelineOutcomeV1 = PipelineOutcomeV1::DependencySetExhausted;
 
 /// `Ok` if `holds`, else the outcome that refuses the declaration.
 fn demand(holds: bool, refusal: PipelineOutcomeV1) -> Result<(), PipelineOutcomeV1> {
@@ -876,50 +876,97 @@ fn edge_sources_resolve(record: &TickDependencyRecordV1, sets: &[VisibleSetV1<'_
         })
 }
 
-/// Check the Tick declaration in the order of R3.7.2 and prepare the rows it
-/// installs. Nothing is written.
-fn judge_tick(facts: &TickFacts<'_>) -> Result<FactualInstallV1, PipelineOutcomeV1> {
-    let (timeline, basis) = (facts.timeline, facts.basis);
-    let dependencies = basis.dependencies();
-    let record = dependencies.record();
+/// R3.7.2 (i): every edge carries an authorization digest, and it is the
+/// persisted fence's authority grant. A field that is no digest is a malformed
+/// declaration; a digest of another grant is a fence that has moved.
+fn check_grant(facts: &TickFacts<'_>) -> Result<(), PipelineOutcomeV1> {
+    let basis = facts.basis;
+    let well_formed = declaration::edges_well_formed(basis);
+    let carries = declaration::edges_carry_grant(basis, facts.grant);
+    demand(well_formed, INVALID_DECLARATION)
+        .and_then(|()| demand(carries, STALE_GRANT_CONFLICT))
+}
+
+/// R3.7.2 (ii): the record is a committed one at the next Tick of the prefix.
+fn check_tick(facts: &TickFacts<'_>) -> Result<(), PipelineOutcomeV1> {
+    let basis = facts.basis;
     let head = first_visible(facts.sets, |set| set.head_through(u64::MAX));
     let last = head.map_or(0, |found| found.tick);
-    demand(declaration::edges_carry_grant(basis, facts.grant), STALE_GRANT)?;
-    let next = last.checked_add(1) == Some(dependencies.tick());
-    demand(declaration::declares_committed_tick(basis) && next, INVALID)?;
+    let next = last.checked_add(1) == Some(basis.dependencies().tick());
+    let committed = declaration::declares_committed_tick(basis) && next;
+    demand(committed, INVALID_DECLARATION)
+}
+
+/// R3.7.2 (iii) and (iv): the Event bindings of the drafts and of the
+/// ingress nodes, the snapshot node, and that no ingress Event is already
+/// bound by a visible Tick. Returns every Event-backed node of the Tick.
+fn bound_nodes(facts: &TickFacts<'_>) -> Result<Vec<(Seq, Hash)>, PipelineOutcomeV1> {
+    let (timeline, basis) = (facts.timeline, facts.basis);
     let outputs = declaration::output_event_nodes(timeline, basis, facts.first_seq)
-        .filter(|_| declaration::snapshot_matches(timeline, basis))
-        .ok_or(INVALID)?;
+        .filter(|_| declaration::snapshot_matches(timeline, basis));
     let ingress = declaration::ingress_event_nodes(timeline, basis, &facts.payloads)
         .filter(|nodes| {
             let unbound = |seq: &Seq| !facts.sets.iter().any(|set| set.is_bound(seq.as_u64()));
             nodes.iter().map(|(seq, _)| seq).all(unbound)
-        })
-        .ok_or(INVALID)?;
-    demand(!facts.own.records_any(record), INVALID)?;
-    record
+        });
+    outputs
+        .zip(ingress)
+        .map(|(first, second)| first.into_iter().chain(second).collect())
+        .ok_or(INVALID_DECLARATION)
+}
+
+/// R3.7.2 (v) to (viii): the position keys are new, the set takes the record,
+/// every edge source resolves, and the shape holds.
+fn check_record(facts: &TickFacts<'_>) -> Result<(), PipelineOutcomeV1> {
+    let basis = facts.basis;
+    let record = basis.dependencies().record();
+    let unrecorded = !facts.own.records_any(record);
+    let capacity = record
         .ensure_set_capacity(facts.own.counts)
-        .or(Err(EXHAUSTED))?;
-    demand(edge_sources_resolve(record, facts.sets), INVALID)?;
-    demand(declaration::shape_holds(basis), INVALID)?;
-    let spread = (basis.batch().drafts().len() as u64).saturating_sub(1);
-    Ok(FactualInstallV1 {
+        .or(Err(SET_EXHAUSTED));
+    let resolves = edge_sources_resolve(record, facts.sets);
+    let shaped = declaration::shape_holds(basis);
+    demand(unrecorded, INVALID_DECLARATION)
+        .and_then(|()| capacity)
+        .and_then(|()| demand(resolves, INVALID_DECLARATION))
+        .and_then(|()| demand(shaped, INVALID_DECLARATION))
+}
+
+/// The rows the checked Tick installs, with its Event-backed nodes.
+fn install_of(facts: &TickFacts<'_>, event_nodes: Vec<(Seq, Hash)>) -> FactualInstallV1 {
+    let drafts = facts.basis.batch().drafts().len() as u64;
+    let spread = drafts.saturating_sub(1);
+    FactualInstallV1 {
         first_seq: facts.first_seq,
         last_seq: Seq::from_u64(facts.first_seq.as_u64().saturating_add(spread)),
-        event_nodes: outputs.into_iter().chain(ingress).collect(),
-    })
+        event_nodes,
+    }
+}
+
+/// Check the Tick declaration in the order of R3.7.2 and prepare the rows it
+/// installs. Nothing is written.
+fn judge_tick(facts: &TickFacts<'_>) -> Result<FactualInstallV1, PipelineOutcomeV1> {
+    check_grant(facts)
+        .and_then(|()| check_tick(facts))
+        .and_then(|()| bound_nodes(facts))
+        .and_then(|nodes| check_record(facts).map(|()| nodes))
+        .map(|nodes| install_of(facts, nodes))
 }
 
 impl MemoryStore {
     /// The payload hash of every committed Event the ingress bindings of the
-    /// basis name, by logical `seq`. An Event that does not exist is absent.
+    /// basis name, by logical `seq`. An Event that does not exist is absent,
+    /// and so is any binding past the observation: the read never reaches
+    /// beyond `observed_through`, whatever the bindings declare.
     fn bound_event_payloads(
         &self,
         timeline: TimelineId,
         basis: &PipelineAdmissionBasisV1,
     ) -> Result<BTreeMap<u64, Hash>, CoreError> {
+        let observed = basis.attempt().observation().observed_through();
         let seqs = basis.dependencies().event_nodes().iter().map(|b| b.seq);
-        let range = seqs.clone().min().zip(seqs.max());
+        let within = seqs.filter(|seq| *seq <= observed);
+        let range = within.clone().min().zip(within.max());
         range.map_or_else(
             || Ok(BTreeMap::new()),
             |(from, to)| {
@@ -1043,8 +1090,8 @@ impl DependencyRowsV1 {
     /// Index a node by artifact digest and, when its output ordinal is zero,
     /// by owner.
     ///
-    /// Every ordinal-zero node is indexed, host-owned nodes included; a later
-    /// slice (8) may filter the step nodes on `scheduler_position >= 1`.
+    /// Every ordinal-zero node is indexed, host-owned nodes included; the
+    /// step nodes are not filtered on `scheduler_position >= 1`.
     fn index_node(&mut self, row: &DependencyNodeRecordV1) {
         let coordinate = row.coordinate();
         let digest = coordinate.artifact_digest();
@@ -1064,8 +1111,8 @@ impl MemoryStore {
     /// through the install path the pipeline commit uses.
     ///
     /// Test seam only: it checks nothing about the Ticks it is given. A reused
-    /// artifact digest panics in debug builds and is undefined in release;
-    /// slice 8 makes it a real error.
+    /// artifact digest panics in debug builds and is undefined in release; the
+    /// pipeline commit refuses it as a real error.
     ///
     /// # Errors
     /// Returns `TimelineNotFound` for an unknown Timeline.

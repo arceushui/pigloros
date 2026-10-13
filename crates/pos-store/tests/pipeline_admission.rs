@@ -7,25 +7,26 @@ use std::sync::{Arc, Barrier, Mutex};
 
 use pos_core::output_policy::OutputAuthorityV1;
 use pos_core::{
-    assemble_factual_tick, pipeline_authority_revision_v1, pipeline_delegation_revision_v1,
-    pipeline_erasure_revision_v1, AdmissionClock, AppendDedupKey, AppendDedupScope, AppendIdentity,
-    AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, CapabilityGrantDraftV1,
-    CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1,
-    CapabilityScopeV1, CoreError, CounterfactualDependencyReadPortV1, DelegateClassV1,
-    DependencyEdgeRecordV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
-    DependencyPageRequestV1, DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, Event,
-    EventDraft, EventStore, FactualCutV1, FactualDriverStepV1, FactualHeadV1, FactualIngressEventV1,
-    FactualInputV1, FactualOutputV1, FactualOwnerIdV1, FactualPrefixReadPortV1, FactualPriorNodeV1,
-    FactualScheduledTickV1, FactualTickContextV1, FactualTickDependenciesV1, FactualTickShapeV1,
-    Hash, Kind, OutputNodeBindingV1, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
-    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
-    PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1,
-    PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1, PipelineObservationAnchorV1,
-    PipelineOutcomeV1, PipelinePreconditionV1, PipelineReceiptLookupV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, PrincipalRefV1,
-    RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq, SeqRange,
-    TentativePipelineResultV1, TickDependencyRecordV1, TimelineId, WallTime,
+    assemble_factual_tick, factual_artifact_digest, factual_ingress_content_digest,
+    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
+    AdmissionClock, AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityGranteeV1,
+    AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1,
+    AuthorityRoleV1, CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1,
+    CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1,
+    CoreError, CounterfactualDependencyReadPortV1, DelegateClassV1, DependencyEdgeRecordV1,
+    DependencyNodeCoordinateV1, DependencyNodeRecordV1, DependencyPageRequestV1,
+    DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, Event, EventDraft,
+    EventNodeBindingV1, EventStore, FactualCutV1, FactualDriverStepV1, FactualHeadV1,
+    FactualIngressEventV1, FactualInputV1, FactualNodeKeyV1, FactualOutputV1, FactualOwnerIdV1,
+    FactualPrefixReadPortV1, FactualPriorNodeV1, FactualScheduledTickV1, FactualTickContextV1,
+    FactualTickDependenciesV1, FactualTickShapeV1, Hash, Kind, OutputNodeBindingV1,
+    PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
+    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1,
+    PipelineAttemptV1, PipelineCommitReceiptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1,
+    PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
+    PipelineReceiptLookupV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
+    PrincipalRefV1, RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq,
+    SeqRange, TentativePipelineResultV1, TickDependencyRecordV1, TimelineId, WallTime,
     APPEND_IDENTITY_RETENTION_MICROS, DELEGATE_ACTION_V1, GEOGRAPHIC_EVENT_TYPE,
     MAX_DEPENDENCY_PAGE_ROWS_V1, PIPELINE_CONTRACT_VERSION_V1,
 };
@@ -1270,19 +1271,24 @@ fn recording_stores(clock: &TestClock) -> Vec<(&'static str, Box<dyn RecordingHa
     )]
 }
 
-fn recorded_nodes(
-    store: &dyn RecordingHarness,
-    timeline: TimelineId,
-) -> Vec<DependencyNodeRecordV1> {
+/// The request that reads every recorded row of the Timeline.
+fn all_rows_request(timeline: TimelineId) -> DependencyPageRequestV1 {
     let scope = DependencyReadScopeV1::ParentPrefix {
         timeline,
         through_tick: u64::MAX,
     };
-    let request = ok(DependencyPageRequestV1::try_new(
+    ok(DependencyPageRequestV1::try_new(
         scope,
         None,
         MAX_DEPENDENCY_PAGE_ROWS_V1,
-    ));
+    ))
+}
+
+fn recorded_nodes(
+    store: &dyn RecordingHarness,
+    timeline: TimelineId,
+) -> Vec<DependencyNodeRecordV1> {
+    let request = all_rows_request(timeline);
     ok(store.read_dependency_nodes(&request)).items().to_vec()
 }
 
@@ -1290,15 +1296,7 @@ fn recorded_edges(
     store: &dyn RecordingHarness,
     timeline: TimelineId,
 ) -> Vec<DependencyEdgeRecordV1> {
-    let scope = DependencyReadScopeV1::ParentPrefix {
-        timeline,
-        through_tick: u64::MAX,
-    };
-    let request = ok(DependencyPageRequestV1::try_new(
-        scope,
-        None,
-        MAX_DEPENDENCY_PAGE_ROWS_V1,
-    ));
+    let request = all_rows_request(timeline);
     ok(store.read_dependency_edges(&request)).items().to_vec()
 }
 
@@ -1468,14 +1466,265 @@ fn consumes_as(edge: &DependencyEdgeRecordV1, ordinal: u32) -> bool {
     edge.consumer().owner_id() == "plugin:test" && edge.consumer().output_ordinal() == ordinal
 }
 
-/// The artifact digest of the node of `owner` at ordinal zero.
-fn digest_of_host(record: &TickDependencyRecordV1, owner: &str) -> Hash {
+/// The node of the record whose owner is `owner`.
+fn node_of<'a>(record: &'a TickDependencyRecordV1, owner: &str) -> &'a DependencyNodeRecordV1 {
     let found = record
         .nodes()
         .iter()
-        .find(|node| node.coordinate().owner_id() == owner)
-        .map(|node| node.coordinate().artifact_digest());
-    found.unwrap_or_else(|| std::panic::resume_unwind(Box::new("no such host node")))
+        .find(|node| node.coordinate().owner_id() == owner);
+    found.unwrap_or_else(|| std::panic::resume_unwind(Box::new("no such node")))
+}
+
+/// The artifact digest of the node of `owner` at ordinal zero.
+fn digest_of_host(record: &TickDependencyRecordV1, owner: &str) -> Hash {
+    node_of(record, owner).coordinate().artifact_digest()
+}
+
+/// The artifact digest of the node at `index` of the record.
+fn digest_at(record: &TickDependencyRecordV1, index: u32) -> Hash {
+    let at = ok(usize::try_from(index));
+    record.nodes()[at].coordinate().artifact_digest()
+}
+
+/// The index of the node with the artifact digest `digest` in the record.
+fn index_of(record: &TickDependencyRecordV1, digest: Hash) -> u32 {
+    let nodes = record.nodes();
+    let found = nodes
+        .iter()
+        .position(|node| node.coordinate().artifact_digest() == digest);
+    let at = found.unwrap_or_else(|| std::panic::resume_unwind(Box::new("no such node")));
+    ok(u32::try_from(at))
+}
+
+/// The node with another class and input list, otherwise as it was.
+fn node_like(
+    node: &DependencyNodeRecordV1,
+    class: RecordedDependencyClassV1,
+    inputs: Vec<Hash>,
+) -> DependencyNodeRecordV1 {
+    ok(DependencyNodeRecordV1::try_new(
+        node.coordinate().clone(),
+        class,
+        RecordedNodeOriginV1::Committed,
+        inputs,
+        node.provenance_digest(),
+    ))
+}
+
+/// The ordinal of the nodes `extra_node` adds: no Driver or host node has it.
+const EXTRA_ORDINAL: u32 = 99;
+
+/// A node beside the nodes of a record: the Tick, position, schema and class of
+/// `template`, the ordinal `EXTRA_ORDINAL`, and the given owner and digest.
+fn extra_node(
+    template: &DependencyNodeRecordV1,
+    owner: &str,
+    digest: Hash,
+) -> DependencyNodeRecordV1 {
+    let at = template.coordinate();
+    let coordinate = ok(DependencyNodeCoordinateV1::try_new(
+        at.tick(),
+        at.scheduler_position(),
+        owner.to_owned(),
+        EXTRA_ORDINAL,
+        at.schema_id(),
+        digest,
+    ));
+    ok(DependencyNodeRecordV1::try_new(
+        coordinate,
+        template.class(),
+        RecordedNodeOriginV1::Committed,
+        Vec::new(),
+        template.provenance_digest(),
+    ))
+}
+
+/// The nodes of the record and `node`.
+fn nodes_plus(
+    record: &TickDependencyRecordV1,
+    node: DependencyNodeRecordV1,
+) -> Vec<DependencyNodeRecordV1> {
+    let mut nodes = record.nodes().to_vec();
+    nodes.push(node);
+    nodes
+}
+
+/// A committed record over `nodes`, put in canonical order, with the edges of
+/// `record` whose source is not `dropped`.
+fn record_over(
+    record: &TickDependencyRecordV1,
+    mut nodes: Vec<DependencyNodeRecordV1>,
+    dropped: Option<Hash>,
+) -> TickDependencyRecordV1 {
+    nodes.sort_by(|left, right| left.coordinate().cmp(right.coordinate()));
+    let edges = record
+        .edges()
+        .iter()
+        .filter(|edge| Some(edge.source_digest()) != dropped)
+        .cloned()
+        .collect();
+    ok(TickDependencyRecordV1::try_new(
+        record.tick(),
+        RecordedNodeOriginV1::Committed,
+        nodes,
+        edges,
+    ))
+}
+
+/// The declaration over `record`, every binding of `valid` pointed at the same
+/// node by artifact digest. `renamed` is a node whose digest changed:
+/// `(old digest, new digest)`.
+fn rebound(
+    valid: &FactualTickDependenciesV1,
+    record: TickDependencyRecordV1,
+    renamed: Option<(Hash, Hash)>,
+) -> FactualTickDependenciesV1 {
+    let old = valid.record();
+    let index = |at: u32| {
+        let digest = digest_at(old, at);
+        let (_, now) = renamed
+            .filter(|(from, _)| *from == digest)
+            .unwrap_or((digest, digest));
+        index_of(&record, now)
+    };
+    let outputs = valid
+        .output_bindings()
+        .iter()
+        .map(|binding| OutputNodeBindingV1 {
+            draft_index: binding.draft_index,
+            node_index: index(binding.node_index),
+        })
+        .collect();
+    let events = valid
+        .event_nodes()
+        .iter()
+        .map(|binding| EventNodeBindingV1 {
+            seq: binding.seq,
+            node_index: index(binding.node_index),
+        })
+        .collect();
+    FactualTickDependenciesV1::new(valid.tick(), record, outputs, events)
+}
+
+/// The declaration with `node` added to its record, unbound.
+fn with_node(
+    valid: &FactualTickDependenciesV1,
+    node: DependencyNodeRecordV1,
+) -> FactualTickDependenciesV1 {
+    let record = valid.record();
+    let nodes = nodes_plus(record, node);
+    rebound(valid, record_over(record, nodes, None), None)
+}
+
+/// The declaration with other output bindings, the record unchanged.
+fn redeclared(
+    valid: &FactualTickDependenciesV1,
+    outputs: Vec<OutputNodeBindingV1>,
+) -> FactualTickDependenciesV1 {
+    FactualTickDependenciesV1::new(
+        valid.tick(),
+        valid.record().clone(),
+        outputs,
+        valid.event_nodes().to_vec(),
+    )
+}
+
+/// The declaration with other Event bindings, the record unchanged.
+fn with_events(
+    valid: &FactualTickDependenciesV1,
+    events: Vec<EventNodeBindingV1>,
+) -> FactualTickDependenciesV1 {
+    FactualTickDependenciesV1::new(
+        valid.tick(),
+        valid.record().clone(),
+        valid.output_bindings().to_vec(),
+        events,
+    )
+}
+
+/// The edge with its authorization field replaced by an empty byte string,
+/// which reads back as no digest.
+fn without_authorization(edge: &DependencyEdgeRecordV1) -> DependencyEdgeRecordV1 {
+    let mut field = vec![0x58, 0x20];
+    field.extend_from_slice(hash(1).as_bytes());
+    let bytes = edge.as_bytes();
+    let found = bytes
+        .windows(field.len())
+        .position(|window| window == field.as_slice());
+    let at = found.unwrap_or_else(|| std::panic::resume_unwind(Box::new("no authorization")));
+    let mut cut = bytes[..at].to_vec();
+    cut.push(0x40);
+    cut.extend_from_slice(&bytes[at + field.len()..]);
+    ok(DependencyEdgeRecordV1::try_from_canonical(
+        cut,
+        edge.consumer().clone(),
+        edge.source_digest(),
+    ))
+}
+
+/// The declaration whose first edge carries an authorization that is no digest.
+fn with_unreadable_authorization(valid: &FactualTickDependenciesV1) -> FactualTickDependenciesV1 {
+    let record = valid.record();
+    let mut edges = record.edges().to_vec();
+    edges[0] = without_authorization(&edges[0]);
+    let unreadable = ok(TickDependencyRecordV1::try_new(
+        record.tick(),
+        RecordedNodeOriginV1::Committed,
+        record.nodes().to_vec(),
+        edges,
+    ));
+    with_record(valid, unreadable)
+}
+
+/// The declaration whose ingress node sits at Tick 1, its artifact digest
+/// recomputed for that Tick, so that only its Tick is wrong. The step node no
+/// longer consumes it.
+fn ingress_at_tick_one(
+    timeline: TimelineId,
+    valid: &FactualTickDependenciesV1,
+    event: &Event,
+) -> FactualTickDependenciesV1 {
+    let record = valid.record();
+    let old = node_of(record, "host.ingress");
+    let spot = old.coordinate();
+    let key = FactualNodeKeyV1 {
+        tick: 1,
+        scheduler_position: spot.scheduler_position(),
+        owner: spot.owner_id(),
+        output_ordinal: spot.output_ordinal(),
+        schema_id: spot.schema_id(),
+    };
+    let content = factual_ingress_content_digest(event.payload_hash, event.seq);
+    let digest = factual_artifact_digest(timeline, key, content);
+    let coordinate = ok(DependencyNodeCoordinateV1::try_new(
+        1,
+        spot.scheduler_position(),
+        spot.owner_id().to_owned(),
+        spot.output_ordinal(),
+        spot.schema_id(),
+        digest,
+    ));
+    let moved = ok(DependencyNodeRecordV1::try_new(
+        coordinate,
+        old.class(),
+        RecordedNodeOriginV1::Committed,
+        Vec::new(),
+        old.provenance_digest(),
+    ));
+    let gone = spot.artifact_digest();
+    let mut nodes: Vec<DependencyNodeRecordV1> = record
+        .nodes()
+        .iter()
+        .filter(|node| node.coordinate().artifact_digest() != gone)
+        .map(|node| {
+            let kept = node.input_digests().iter().copied();
+            let inputs = kept.filter(|input| *input != gone).collect();
+            node_like(node, node.class(), inputs)
+        })
+        .collect();
+    nodes.push(moved);
+    let replaced = record_over(record, nodes, Some(gone));
+    rebound(valid, replaced, Some((gone, digest)))
 }
 
 /// Offer `declaration` for `attempt` and require the refusal `expected`, with
@@ -1503,24 +1752,143 @@ type RefusalCase = (
     PipelineOutcomeV1,
 );
 
+/// The refusal of `declaration` as invalid, for the given attempt.
+fn invalid_for(
+    case: &'static str,
+    attempt: Attempt,
+    declaration: FactualTickDependenciesV1,
+) -> RefusalCase {
+    (
+        case,
+        attempt,
+        declaration,
+        PipelineOutcomeV1::InvalidDependencyDeclaration,
+    )
+}
+
+/// What the refusal cases share: the scheduled attempt under test, its correct
+/// declaration (which records the ingress node of Event 4), the Events of the
+/// Timeline and the nodes Tick 1 recorded.
+struct Refusals<'a> {
+    second: &'a Attempt,
+    events: &'a [Event],
+    stored: &'a [DependencyNodeRecordV1],
+    valid: FactualTickDependenciesV1,
+}
+
+impl Refusals<'_> {
+    /// The ingress Events a correct declaration records: Event 4.
+    fn real(&self) -> Vec<FactualIngressEventV1> {
+        vec![ingress_event(&self.events[3])]
+    }
+
+    /// A scheduled declaration over `snapshot`, recording `ingress_events` and
+    /// declaring the `extra` Driver inputs.
+    fn shaped(
+        &self,
+        snapshot: Hash,
+        ingress_events: Vec<FactualIngressEventV1>,
+        extra: Vec<FactualInputV1>,
+    ) -> FactualTickDependenciesV1 {
+        let shape = scheduled_shape_of(&self.second.drafts, snapshot, ingress_events, extra);
+        declared(self.second, hash(1), &shape)
+    }
+
+    /// The refusal of `declaration` as invalid, for the scheduled attempt.
+    fn invalid(&self, case: &'static str, declaration: FactualTickDependenciesV1) -> RefusalCase {
+        invalid_for(case, self.second.clone(), declaration)
+    }
+}
+
 /// Every way the declaration of `second` can be wrong that R3.7.2 names, over
 /// a Timeline whose Tick 1 recorded Events 1 to 3 and whose Event 4 is
 /// unbound. `stored` holds the nodes Tick 1 recorded.
-#[allow(clippy::too_many_lines)]
+///
+/// An oversized record cannot reach the store: `TickDependencyRecordV1::try_new`
+/// refuses it host-side, and that refusal is covered where `try_new` is.
 fn refusal_cases(
     second: &Attempt,
     events: &[Event],
     stored: &[DependencyNodeRecordV1],
 ) -> Vec<RefusalCase> {
-    let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
     let valid = valid_declaration(second, vec![ingress_event(&events[3])]);
-    let record = valid.record();
-    let drafts = &second.drafts;
-    let shaped = |ingress_events: Vec<FactualIngressEventV1>, extra: Vec<FactualInputV1>| {
-        let shape = scheduled_shape_of(drafts, hash(61), ingress_events, extra);
-        declared(second, hash(1), &shape)
+    let refusals = Refusals {
+        second,
+        events,
+        stored,
+        valid,
     };
-    let real = vec![ingress_event(&events[3])];
+    [
+        grant_and_tick_cases(&refusals),
+        output_cases(&refusals),
+        ingress_cases(&refusals),
+        edge_cases(&refusals),
+        node_cases(&refusals),
+        human_cases(&refusals),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// R3.7.2 (i) and (ii): the fence's grant and the Tick. An authorization that
+/// is no digest is a malformed declaration; a digest of another grant is a
+/// fence that moved.
+fn grant_and_tick_cases(r: &Refusals<'_>) -> Vec<RefusalCase> {
+    let (second, valid) = (r.second, &r.valid);
+    let record = valid.record();
+    let shape = scheduled_shape_of(&second.drafts, hash(61), r.real(), Vec::new());
+    let stale = declared(second, hash(2), &shape);
+    let unreadable = with_unreadable_authorization(valid);
+    let moved = Attempt {
+        tick: 3,
+        ..second.clone()
+    };
+    let wrong_tick = valid_declaration(&moved, r.real());
+    let asserted = FactualTickDependenciesV1::new(
+        3,
+        record.clone(),
+        valid.output_bindings().to_vec(),
+        valid.event_nodes().to_vec(),
+    );
+    let origin = RecordedNodeOriginV1::Provisional;
+    let provisional_record = rebuilt(record, origin, inputs_unchanged, |_| true);
+    let provisional = with_record(valid, provisional_record);
+    vec![
+        (
+            "stale fence grant",
+            second.clone(),
+            stale,
+            PipelineOutcomeV1::AdmissionConflict,
+        ),
+        r.invalid("authorization that is no digest", unreadable),
+        invalid_for("wrong Tick", moved, wrong_tick),
+        r.invalid("asserted Tick differs from the record", asserted),
+        r.invalid("provisional record", provisional),
+    ]
+}
+
+/// R3.7.2 (iii), outputs and snapshot.
+fn output_cases(r: &Refusals<'_>) -> Vec<RefusalCase> {
+    let valid = &r.valid;
+    let wrong_snapshot = r.shaped(hash(99), r.real(), Vec::new());
+    let mut swapped = valid.output_bindings().to_vec();
+    let (left, right) = (swapped[0].node_index, swapped[1].node_index);
+    swapped[0].node_index = right;
+    swapped[1].node_index = left;
+    let crossed = redeclared(valid, swapped);
+    let first_two = valid.output_bindings()[..2].to_vec();
+    let short = redeclared(valid, first_two);
+    vec![
+        r.invalid("wrong snapshot digest", wrong_snapshot),
+        r.invalid("output binding names another draft's node", crossed),
+        r.invalid("missing output binding", short),
+    ]
+}
+
+/// R3.7.2 (iv): the Event bindings of the ingress nodes.
+fn ingress_cases(r: &Refusals<'_>) -> Vec<RefusalCase> {
+    let (second, valid) = (r.second, &r.valid);
     let absent = FactualIngressEventV1 {
         seq: Seq::from_u64(99),
         event_type: "world.action".to_owned(),
@@ -1528,8 +1896,60 @@ fn refusal_cases(
     };
     let wrong_hash = FactualIngressEventV1 {
         payload_hash: hash(77),
-        ..ingress_event(&events[3])
+        ..ingress_event(&r.events[3])
     };
+    let missing = r.shaped(hash(61), vec![absent], Vec::new());
+    let bound = r.shaped(hash(61), vec![ingress_event(&r.events[1])], Vec::new());
+    let mismatched = r.shaped(hash(61), vec![wrong_hash], Vec::new());
+    // Event 4 exists, but the observation of this attempt ends at Event 3.
+    let late = Attempt {
+        observed_through: 3,
+        ..second.clone()
+    };
+    let beyond = valid_declaration(&late, r.real());
+    let binding = valid.event_nodes()[0];
+    let twice = with_events(valid, vec![binding, binding]);
+    let earlier = ingress_at_tick_one(second.timeline, valid, &r.events[3]);
+    vec![
+        r.invalid("binding of an Event that does not exist", missing),
+        r.invalid("binding of an Event a Tick already bound", bound),
+        r.invalid("binding with the wrong payload digest", mismatched),
+        invalid_for("binding of an Event past the observation", late, beyond),
+        r.invalid("binding list that repeats a seq", twice),
+        r.invalid("ingress node of another Tick", earlier),
+    ]
+}
+
+/// The inputs of `node`, except that the outputs of the test Driver declare
+/// none.
+fn outputs_unfed(node: &DependencyNodeRecordV1) -> Vec<Hash> {
+    if is_driver_node(node, 1) {
+        Vec::new()
+    } else {
+        inputs_unchanged(node)
+    }
+}
+
+/// The inputs of `node`, without `dropped` when the node is the step or the
+/// output of `ordinal` of the test Driver.
+fn inputs_without(node: &DependencyNodeRecordV1, ordinal: u32, dropped: Hash) -> Vec<Hash> {
+    let kept = node.input_digests().iter().copied();
+    let owned = is_driver_node(node, ordinal);
+    kept.filter(|digest| !owned || *digest != dropped).collect()
+}
+
+/// Whether the edge is not one of the Driver's outputs.
+fn no_output_edge(edge: &DependencyEdgeRecordV1) -> bool {
+    !consumes_as(edge, 1)
+}
+
+/// R3.7.2 (vii) and (viii), the edges: sources that resolve, outputs that
+/// input their step, steps that input the snapshot.
+fn edge_cases(r: &Refusals<'_>) -> Vec<RefusalCase> {
+    let valid = &r.valid;
+    let record = valid.record();
+    let origin = RecordedNodeOriginV1::Committed;
+    let snapshot = digest_of_host(record, "host.observation");
     let ghost = ok(DependencyNodeCoordinateV1::try_new(
         1,
         1,
@@ -1542,205 +1962,71 @@ fn refusal_cases(
         ghost,
         RecordedDependencyClassV1::EndogenousRecomputed,
     ));
-    let mut swapped = valid.output_bindings().to_vec();
-    let (left, right) = (swapped[0].node_index, swapped[1].node_index);
-    swapped[0].node_index = right;
-    swapped[1].node_index = left;
-    let snapshot = digest_of_host(record, "host.observation");
-    let origin = RecordedNodeOriginV1::Committed;
+    let unresolved = r.shaped(hash(61), r.real(), vec![nowhere]);
+    let omitted_record = rebuilt(record, origin, inputs_unchanged, no_output_edge);
+    let unfed_record = rebuilt(record, origin, outputs_unfed, no_output_edge);
+    let blind_inputs = |node: &DependencyNodeRecordV1| inputs_without(node, 0, snapshot);
+    let blind_edges = |edge: &DependencyEdgeRecordV1| {
+        !(consumes_as(edge, 0) && edge.source_digest() == snapshot)
+    };
+    let blind_record = rebuilt(record, origin, blind_inputs, blind_edges);
+    let omitted = with_record(valid, omitted_record);
+    let unfed = with_record(valid, unfed_record);
+    let blind = with_record(valid, blind_record);
+    vec![
+        r.invalid("edge source that resolves nowhere", unresolved),
+        r.invalid("omitted required edge", omitted),
+        r.invalid("output without its step node", unfed),
+        r.invalid("step node without the snapshot node", blind),
+    ]
+}
 
-    // A record that repeats a node Tick 1 recorded, beside its own human node.
+/// R3.7.2 (v) and (viii), the nodes: a position key Tick 1 recorded, and the
+/// class and owner of a host node.
+fn node_cases(r: &Refusals<'_>) -> Vec<RefusalCase> {
+    let valid = &r.valid;
+    let record = valid.record();
+    // The record stays shape-valid: only the repeated node can refuse it.
+    let repeated = with_node(valid, r.stored[0].clone());
+    let exogenous = RecordedDependencyClassV1::ExogenousFrozen;
+    let reclassed = record
+        .nodes()
+        .iter()
+        .map(|node| {
+            let host = node.coordinate().owner_id() == "host.observation";
+            let class = if host { exogenous } else { node.class() };
+            node_like(node, class, inputs_unchanged(node))
+        })
+        .collect();
+    let misclassed = rebound(valid, record_over(record, reclassed, None), None);
+    let template = node_of(record, "host.observation");
+    let stranger = extra_node(template, "host.mystery", hash(0xab));
+    let unknown = with_node(valid, stranger);
+    vec![
+        r.invalid("node repeated from an earlier Tick", repeated),
+        r.invalid("host node of the wrong class", misclassed),
+        r.invalid("host node of an unknown owner", unknown),
+    ]
+}
+
+/// R3.7.2 (iii) and (viii), a human record: one node per draft and no more,
+/// each bound to a draft it was derived from.
+fn human_cases(r: &Refusals<'_>) -> Vec<RefusalCase> {
     let human = Attempt {
         ingress: PipelineIngressV1::HumanProposedAction,
-        drafts: drafts[..1].to_vec(),
-        ..second.clone()
+        drafts: r.second.drafts[..1].to_vec(),
+        ..r.second.clone()
     };
-    let own = declared(
-        &human,
-        hash(1),
-        &FactualTickShapeV1::Human(human.drafts.clone()),
-    );
-    let repeated = ok(TickDependencyRecordV1::try_new(
-        2,
-        origin,
-        vec![stored[0].clone(), own.record().nodes()[0].clone()],
-        Vec::new(),
-    ));
-    let repeating = FactualTickDependenciesV1::new(
-        2,
-        repeated,
-        vec![OutputNodeBindingV1 {
-            draft_index: 0,
-            node_index: 1,
-        }],
-        Vec::new(),
-    );
-
+    let shape = FactualTickShapeV1::Human(human.drafts.clone());
+    let own = declared(&human, hash(1), &shape);
+    let template = &own.record().nodes()[0];
+    let owner = template.coordinate().owner_id();
+    let extra = with_node(&own, extra_node(template, owner, hash(0xac)));
+    let other = FactualTickShapeV1::Human(drafts(&[b"other"]));
+    let rewritten = declared(&human, hash(1), &other);
     vec![
-        (
-            "stale fence grant",
-            second.clone(),
-            declared(
-                second,
-                hash(2),
-                &scheduled_shape_of(drafts, hash(61), real.clone(), Vec::new()),
-            ),
-            PipelineOutcomeV1::AdmissionConflict,
-        ),
-        (
-            "wrong Tick",
-            Attempt {
-                tick: 3,
-                ..second.clone()
-            },
-            valid_declaration(
-                &Attempt {
-                    tick: 3,
-                    ..second.clone()
-                },
-                real.clone(),
-            ),
-            invalid.clone(),
-        ),
-        (
-            "asserted Tick differs from the record",
-            second.clone(),
-            FactualTickDependenciesV1::new(
-                3,
-                record.clone(),
-                valid.output_bindings().to_vec(),
-                valid.event_nodes().to_vec(),
-            ),
-            invalid.clone(),
-        ),
-        (
-            "provisional record",
-            second.clone(),
-            with_record(
-                &valid,
-                rebuilt(
-                    record,
-                    RecordedNodeOriginV1::Provisional,
-                    inputs_unchanged,
-                    |_| true,
-                ),
-            ),
-            invalid.clone(),
-        ),
-        (
-            "wrong snapshot digest",
-            second.clone(),
-            declared(
-                second,
-                hash(1),
-                &scheduled_shape_of(drafts, hash(99), real.clone(), Vec::new()),
-            ),
-            invalid.clone(),
-        ),
-        (
-            "output binding names another draft's node",
-            second.clone(),
-            FactualTickDependenciesV1::new(
-                valid.tick(),
-                record.clone(),
-                swapped,
-                valid.event_nodes().to_vec(),
-            ),
-            invalid.clone(),
-        ),
-        (
-            "missing output binding",
-            second.clone(),
-            FactualTickDependenciesV1::new(
-                valid.tick(),
-                record.clone(),
-                valid.output_bindings()[..2].to_vec(),
-                valid.event_nodes().to_vec(),
-            ),
-            invalid.clone(),
-        ),
-        (
-            "binding of an Event that does not exist",
-            second.clone(),
-            shaped(vec![absent], Vec::new()),
-            invalid.clone(),
-        ),
-        (
-            "binding of an Event a Tick already bound",
-            second.clone(),
-            shaped(vec![ingress_event(&events[1])], Vec::new()),
-            invalid.clone(),
-        ),
-        (
-            "binding with the wrong payload digest",
-            second.clone(),
-            shaped(vec![wrong_hash], Vec::new()),
-            invalid.clone(),
-        ),
-        (
-            "node repeated from an earlier Tick",
-            human,
-            repeating,
-            invalid.clone(),
-        ),
-        (
-            "edge source that resolves nowhere",
-            second.clone(),
-            shaped(real, vec![nowhere]),
-            invalid.clone(),
-        ),
-        (
-            "omitted required edge",
-            second.clone(),
-            with_record(
-                &valid,
-                rebuilt(record, origin, inputs_unchanged, |edge| {
-                    !consumes_as(edge, 1)
-                }),
-            ),
-            invalid.clone(),
-        ),
-        (
-            "output without its step node",
-            second.clone(),
-            with_record(
-                &valid,
-                rebuilt(
-                    record,
-                    origin,
-                    |node| {
-                        if is_driver_node(node, 1) {
-                            Vec::new()
-                        } else {
-                            inputs_unchanged(node)
-                        }
-                    },
-                    |edge| !consumes_as(edge, 1),
-                ),
-            ),
-            invalid.clone(),
-        ),
-        (
-            "step node without the snapshot node",
-            second.clone(),
-            with_record(
-                &valid,
-                rebuilt(
-                    record,
-                    origin,
-                    |node| {
-                        if is_driver_node(node, 0) {
-                            let kept = node.input_digests().iter().copied();
-                            kept.filter(|digest| *digest != snapshot).collect()
-                        } else {
-                            inputs_unchanged(node)
-                        }
-                    },
-                    |edge| !(consumes_as(edge, 0) && edge.source_digest() == snapshot),
-                ),
-            ),
-            invalid,
-        ),
+        invalid_for("human record with an extra node", human.clone(), extra),
+        invalid_for("human output of another digest", human, rewritten),
     ]
 }
 
@@ -1757,11 +2043,13 @@ fn a_commit_records_nodes_edges_range_and_bindings_with_its_events() {
         committed(ok(admit(store.as_mut(), &first)));
         let nodes = recorded_nodes(store.as_ref(), timeline);
         assert_eq!(nodes.len(), 3, "{name}");
-        assert!(recorded_edges(store.as_ref(), timeline).is_empty(), "{name}");
+        let human_edges = recorded_edges(store.as_ref(), timeline);
+        assert!(human_edges.is_empty(), "{name}");
         assert_eq!(head_of(store.as_ref(), timeline), head(1, 3), "{name}");
         let seqs = [1, 2, 3, 4].map(Seq::from_u64);
         let bound = ok(store.nodes_for_committed_events(timeline, &seqs));
-        assert_eq!(bound[..3], [0_usize, 1, 2].map(|at| Some(nodes[at].clone())), "{name}");
+        let expected = [0_usize, 1, 2].map(|at| Some(nodes[at].clone()));
+        assert_eq!(bound[..3], expected, "{name}");
         assert_eq!(bound[3], None, "{name}");
 
         // A scheduled Tick: a snapshot, a step and three outputs, joined by
@@ -1944,7 +2232,8 @@ fn a_fork_binds_only_the_events_of_the_ticks_below_its_cut() {
         };
         let again = valid_declaration(&later, vec![ingress_event(&inherited[1])]);
         let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
-        assert_refused(name, "bound below the cut", store.as_mut(), &later, again, &invalid);
+        let case = "bound below the cut";
+        assert_refused(name, case, store.as_mut(), &later, again, &invalid);
         let plain = valid_declaration(&later, Vec::new());
         committed(ok(store.admit_pipeline_batch(&basis_declaring(&later, plain))));
         assert_eq!(head_of(store.as_ref(), boundary), head(2, 6), "{name}");
