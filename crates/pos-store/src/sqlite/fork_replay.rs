@@ -476,8 +476,12 @@ mod tests {
             + event.correlation_id.map_or(0, |id| id.to_string().len())
             + event.payload_hash.as_bytes().len()
             + event.signature.map_or(0, |_| 64)
-            + event.signature_identity.map_or(0, |identity| identity.owner_id.as_str().len())
-            + event.origin.map_or(0, |origin| origin.origin_timeline_id.to_string().len())
+            + event
+                .signature_identity
+                .map_or(0, |identity| identity.owner_id.as_str().len())
+            + event
+                .origin
+                .map_or(0, |origin| origin.origin_timeline_id.to_string().len())
     }
 
     fn final_event_hash_phase_cost(
