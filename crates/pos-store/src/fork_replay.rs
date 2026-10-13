@@ -13,7 +13,7 @@ use pos_core::{
 pub(crate) mod sizes;
 
 pub(crate) trait CanonicalSizeV1 {
-    fn canonical_size(&self) -> usize;
+    fn canonical_size(&self) -> Result<usize, pos_core::CanonicalLengthErrorV1>;
 }
 
 /// Closed failures of the bounded attribution read, without protected details.
@@ -258,6 +258,16 @@ impl<'clock> ForkReplayReadBudgetV1<'clock> {
         self.accept(within)
     }
 
+    pub(crate) fn charge_canonical(
+        &mut self,
+        length: Result<usize, pos_core::CanonicalLengthErrorV1>,
+    ) -> ReadResult<()> {
+        match length {
+            Ok(bytes) => self.charge_bytes(bytes),
+            Err(_) => self.accept(false),
+        }
+    }
+
     const fn accept(&mut self, within: bool) -> ReadResult<()> {
         if within {
             Ok(())
@@ -299,18 +309,18 @@ impl ForkReplayAuthorityEvidenceV1 {
         {
             return Err(ForkReplayAuthorityReadErrorV1::CorruptAuthority);
         }
-        let size = committed.operation.canonical_size() + requirement.origin.map_or(0, |_| 34);
-        budget.charge_bytes(size)?;
-        let operation_bytes = requirement.origin.map_or_else(
-            || committed.operation.to_canonical_cbor(),
-            |origin| {
-                pos_core::ImportedForkPublicationOperationV1::from_local(
-                    committed.operation.clone(),
-                    origin,
-                )
-                .to_canonical_cbor()
-            },
-        );
+        budget.charge_canonical(committed.operation.canonical_cbor_len())?;
+        let operation_bytes = if let Some(origin) = requirement.origin {
+            // The projected copy and the code-2 encoding are separate work.
+            let imported = pos_core::ImportedForkPublicationOperationV1::from_local(
+                committed.operation.clone(),
+                origin,
+            );
+            budget.charge_canonical(imported.canonical_cbor_len())?;
+            imported.to_canonical_cbor()
+        } else {
+            committed.operation.to_canonical_cbor()
+        };
         Ok(Self {
             requirement,
             admission_digest: committed.operation.input().admission_digest,
@@ -380,4 +390,29 @@ pub trait ForkReplayAuthorityReadPortV1 {
         requirement: &ForkReplayRequirementV1,
         budget: &mut ForkReplayReadBudgetV1<'_>,
     ) -> ReadResult<ForkReplayAuthorityEvidenceV1>;
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod canonical_length_mapping_tests {
+    use super::*;
+    use pos_core::trusted_clock::ScriptedGuardMonotonicSourceV1;
+    use std::time::Duration;
+
+    #[test]
+    fn an_unrepresentable_native_length_permanently_closes_the_operation_ledger() -> ReadResult<()> {
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1, 1_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        // The native counter tests exercise actual overflow arithmetic. This
+        // narrow injection tests only its closed-error mapping without asking
+        // a fixture to allocate a target-address-space-sized string.
+        assert_eq!(
+            budget.charge_canonical(Err(pos_core::CanonicalLengthErrorV1::LengthOverflow)),
+            Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded),
+        );
+        assert_eq!(budget.charge_canonical(Ok(0)), Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded));
+        Ok(())
+    }
 }

@@ -1,6 +1,7 @@
 //! Durable Fork-admission result values.
 
 use ciborium::value::Value;
+use crate::canonical_length::{self, CanonicalEmit, CanonicalSink};
 
 use crate::{
     fork_admission_command::{canonical_bytes, decode, nonzero_hash},
@@ -172,35 +173,52 @@ impl PrincipalOwnerBindingV1 {
         self.canonical_cbor_with_origin(None)
     }
 
+    /// Measure the local POB1 bytes without constructing an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if the canonical length cannot fit `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        canonical_length::measure(self)
+    }
+
     /// Encode these fields with the final `authority-origin-v1` set to the
     /// local `[1]`, or to the code-2 `[2, digest]` for `Some(digest)`.
     ///
     /// Only the ADR-105 code-2 `POB1` encoder passes `Some`.
     pub(crate) fn canonical_cbor_with_origin(&self, imported_origin: Option<Hash>) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.emit_with_origin(&mut out, imported_origin);
+        out
+    }
+
+    fn emit_with_origin(&self, out: &mut impl CanonicalSink, imported_origin: Option<Hash>) {
         let input = self.input();
-        let origin = imported_origin.map_or_else(
-            || vec![Value::Integer(1.into())],
-            |digest| {
-                vec![
-                    Value::Integer(2.into()),
-                    Value::Bytes(digest.as_bytes().to_vec()),
-                ]
-            },
-        );
-        canonical_bytes(&Value::Array(vec![
-            Value::Bytes(b"POB1".to_vec()),
-            Value::Integer(1.into()),
-            Value::Bytes(input.operation_id.as_bytes().to_vec()),
-            Value::Bytes(input.principal_digest.as_bytes().to_vec()),
-            Value::Text(input.owner.as_str().to_owned()),
-            Value::Array(origin),
-        ]))
+        canonical_length::head(out, 4, 6);
+        canonical_length::bytes(out, b"POB1");
+        canonical_length::head(out, 0, 1);
+        canonical_length::bytes(out, input.operation_id.as_bytes());
+        canonical_length::bytes(out, input.principal_digest.as_bytes());
+        canonical_length::text(out, input.owner.as_str());
+        if let Some(digest) = imported_origin {
+            canonical_length::head(out, 4, 2);
+            canonical_length::head(out, 0, 2);
+            canonical_length::bytes(out, digest.as_bytes());
+        } else {
+            canonical_length::head(out, 4, 1);
+            canonical_length::head(out, 0, 1);
+        }
     }
 
     /// Return `BLAKE3("pigloros/principal-owner-binding/v1" || POB1 bytes)`.
     #[must_use]
     pub fn digest(&self) -> Hash {
         digest(PRINCIPAL_OWNER_BINDING_DOMAIN, &self.to_canonical_cbor())
+    }
+}
+
+impl CanonicalEmit for PrincipalOwnerBindingV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        self.emit_with_origin(out, None);
     }
 }
 
