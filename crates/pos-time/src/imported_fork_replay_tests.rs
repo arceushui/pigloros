@@ -56,8 +56,29 @@ enum Fault {
     Omitted,
     Foreign,
     FinalIdentity,
+    FinalRequirements,
+    FinalLimits,
     NoProfile,
     UnequalLimits,
+    NodeLimit,
+    RowLimit,
+    ByteLimit,
+}
+
+impl Fault {
+    const fn after_folding(self) -> bool {
+        matches!(
+            self,
+            Self::FinalIdentity | Self::FinalRequirements | Self::FinalLimits
+        )
+    }
+
+    const fn global_limits(self) -> bool {
+        matches!(
+            self,
+            Self::UnequalLimits | Self::NodeLimit | Self::RowLimit | Self::ByteLimit
+        )
+    }
 }
 
 struct ImportedVerifier {
@@ -66,6 +87,7 @@ struct ImportedVerifier {
     requirement: ForkReplayRequirementV1,
     secondary: Option<(TimelineId, ForkReplayRequirementV1)>,
     fault: Fault,
+    fault_target: Option<TimelineId>,
     admissions: AtomicUsize,
 }
 
@@ -78,13 +100,19 @@ impl WorldReplayVerifierV1 for ImportedVerifier {
     ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
         let phase = self.admissions.fetch_add(1, Ordering::SeqCst);
         let child = requested.timeline_id();
+        let fault = if self.fault_target.is_none_or(|target| target == child) {
+            self.fault
+        } else {
+            Fault::None
+        };
         let mut requirement = self
             .secondary
             .filter(|(timeline, _)| *timeline == child)
             .map_or(self.requirement, |(_, required)| required);
         let initial_admissions = if self.secondary.is_some() { 2 } else { 1 };
-        if matches!(self.fault, Fault::Foreign)
-            || (matches!(self.fault, Fault::FinalIdentity) && phase >= initial_admissions)
+        let final_phase = phase >= initial_admissions;
+        if matches!(fault, Fault::Foreign)
+            || (matches!(fault, Fault::FinalIdentity) && final_phase)
         {
             requirement = ForkReplayRequirementV1::new(
                 child,
@@ -98,19 +126,38 @@ impl WorldReplayVerifierV1 for ImportedVerifier {
             WorldReplayForkSourceV1::new(child, Some(requirement))?,
             WorldReplayForkSourceV1::new(self.parent, None)?,
         ];
-        let required = if matches!(self.fault, Fault::Omitted) {
+        let required = if matches!(fault, Fault::Omitted)
+            || (matches!(fault, Fault::FinalRequirements) && final_phase)
+        {
             Vec::new()
         } else {
             vec![requirement]
         };
-        let profile = if matches!(self.fault, Fault::NoProfile) {
+        let profile = if matches!(fault, Fault::NoProfile) {
             None
         } else {
             Some(Hash::from_bytes([0xe1; 32]))
         };
-        let bytes = 64 * 1024 * 1024
-            + usize::from(matches!(self.fault, Fault::UnequalLimits) && child != self.child);
-        let limits = ForkReplayReadLimitsV1::new(8, 1_024, 65_536, bytes, 30_000_000)
+        let nodes = if fault == Fault::NodeLimit {
+            1
+        } else {
+            1_024
+        };
+        let rows = if fault == Fault::RowLimit {
+            1
+        } else {
+            65_536
+        };
+        let bytes = if fault == Fault::ByteLimit {
+            1
+        } else {
+            64 * 1024 * 1024
+                + usize::from(
+                    (matches!(fault, Fault::UnequalLimits) && child != self.child)
+                        || (matches!(fault, Fault::FinalLimits) && final_phase),
+                )
+        };
+        let limits = ForkReplayReadLimitsV1::new(8, nodes, rows, bytes, 30_000_000)
             .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)?;
         Ok(
             pos_runtime::world_replay::test_verified_world_replay_with_fork_attribution(
@@ -156,6 +203,7 @@ fn populate<S: Port>(
 fn run_on_host(
     mut host: ErasureExecutionHostV1,
     child: TimelineId,
+    publication_head: Seq,
     fault: Fault,
     cut: Option<Seq>,
 ) -> Fallible<()> {
@@ -189,18 +237,21 @@ fn run_on_host(
             &fixture.fold(),
         ),
     });
+    let expected_folded = usize::try_from(cut.unwrap_or(publication_head).as_u64())?;
     if fault == Fault::None {
         result?;
-        let minimum_folded = cut.map_or(PARENT_CUT, Seq::as_u64);
-        assert!(FOLDED_EVENTS.load(Ordering::SeqCst) >= usize::try_from(minimum_folded)?);
+        // The signed fixture has a contiguous logical history. Even though
+        // authority validates the whole suffix, Replay-at may fold only its
+        // requested prefix, including a cut before the child segment.
+        assert_eq!(FOLDED_EVENTS.load(Ordering::SeqCst), expected_folded);
     } else {
         assert_eq!(
             result.map_err(|error| error.to_string()),
             Err(CoreError::ArtifactUnavailable.to_string())
         );
         assert_eq!(registry.state_snapshot(child)?, before);
-        if matches!(fault, Fault::FinalIdentity) {
-            assert!(FOLDED_EVENTS.load(Ordering::SeqCst) > 0);
+        if fault.after_folding() {
+            assert_eq!(FOLDED_EVENTS.load(Ordering::SeqCst), expected_folded);
         } else {
             assert_eq!(FOLDED_EVENTS.load(Ordering::SeqCst), 0);
         }
@@ -220,10 +271,18 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
             Fault::Omitted,
             Fault::Foreign,
             Fault::FinalIdentity,
+            Fault::FinalRequirements,
+            Fault::FinalLimits,
             Fault::NoProfile,
+            Fault::NodeLimit,
+            Fault::RowLimit,
+            Fault::ByteLimit,
         ]
         .into_iter()
-        .flat_map(|fault| [None, Some(Seq::from_u64(2))].map(|cut| (fault, cut)))
+        .flat_map(|fault| {
+            [None, Some(Seq::from_u64(2)), Some(Seq::from_u64(PARENT_CUT))]
+                .map(|cut| (fault, cut))
+        })
         .flat_map(|(fault, cut)| {
             [false, true]
                 .into_iter()
@@ -241,6 +300,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                     requirement,
                     secondary: None,
                     fault,
+                    fault_target: None,
                     admissions: AtomicUsize::new(0),
                 })
             };
@@ -251,7 +311,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 &composition,
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
-            run_on_host(host, child, fault, cut)?;
+            run_on_host(host, child, requirement.publication_logical_head(), fault, cut)?;
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("imported-replay.sqlite");
             let path = path.to_str().ok_or("utf-8 path")?;
@@ -270,7 +330,15 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 &composition,
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
-            run_on_host(host, child, fault, cut)?;
+            run_on_host(host, child, requirement.publication_logical_head(), fault, cut)?;
+            let composition =
+                ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier());
+            let host = ErasureExecutionHostV1::open_read_only_with_authority(
+                path,
+                &composition,
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            )?;
+            run_on_host(host, child, requirement.publication_logical_head(), fault, cut)?;
         }
     }
     Ok(())
@@ -326,10 +394,16 @@ fn compare_on_host(
             [&fixture_a.fold(), &fixture_a.fold()],
         )
     });
+    let expected_folded = requirements.iter().try_fold(0_usize, |sum, requirement| {
+        Ok::<_, Box<dyn std::error::Error>>(
+            sum + usize::try_from(requirement.publication_logical_head().as_u64())?,
+        )
+    })?;
     if fault == Fault::None {
         let diff = result?;
         assert_eq!(diff.fork_seq, Seq::from_u64(PARENT_CUT));
         assert!(!diff.diverged_entities.is_empty());
+        assert_eq!(FOLDED_EVENTS.load(Ordering::SeqCst), expected_folded);
     } else {
         assert_eq!(
             result.map(|_| ()).map_err(|error| error.to_string()),
@@ -337,8 +411,8 @@ fn compare_on_host(
         );
         assert_eq!(a.state_snapshot(timelines[0])?, before_a);
         assert_eq!(b.state_snapshot(timelines[1])?, before_b);
-        if matches!(fault, Fault::FinalIdentity) {
-            assert!(FOLDED_EVENTS.load(Ordering::SeqCst) > 0);
+        if fault.after_folding() {
+            assert_eq!(FOLDED_EVENTS.load(Ordering::SeqCst), expected_folded);
         } else {
             assert_eq!(FOLDED_EVENTS.load(Ordering::SeqCst), 0);
         }
@@ -348,12 +422,26 @@ fn compare_on_host(
 
 #[test]
 fn compare_checks_both_imported_arms_before_folding_and_after_both_folds() -> Fallible<()> {
-    for fault in [
+    for (fault, fault_arm) in [
         Fault::None,
         Fault::Omitted,
+        Fault::Foreign,
         Fault::FinalIdentity,
+        Fault::FinalRequirements,
+        Fault::FinalLimits,
+        Fault::NoProfile,
         Fault::UnequalLimits,
-    ] {
+        Fault::NodeLimit,
+        Fault::RowLimit,
+        Fault::ByteLimit,
+    ]
+    .into_iter()
+    .flat_map(|fault| {
+        [0, 1]
+            .into_iter()
+            .filter(move |arm| *arm == 0 || (fault != Fault::None && !fault.global_limits()))
+            .map(move |arm| (fault, arm))
+    }) {
         let mut world = World::new(Shape::Mixed, false)?;
         world.add_child(Shape::EmptyUnclassified)?;
         let mut memory = MemoryStore::new();
@@ -365,6 +453,15 @@ fn compare_checks_both_imported_arms_before_folding_and_after_both_folds() -> Fa
                 requirement: requirements[0],
                 secondary: Some((requirements[1].child_timeline_id(), requirements[1])),
                 fault,
+                // Resource refusal must use equal limits on both arms, so it
+                // reaches the actual shared ledger rather than only the
+                // earlier mismatched-profile rejection. Other faults target
+                // each arm independently, including changes after both folds.
+                fault_target: if fault.global_limits() {
+                    None
+                } else {
+                    Some(requirements[fault_arm].child_timeline_id())
+                },
                 admissions: AtomicUsize::new(0),
             })
         };
@@ -388,6 +485,14 @@ fn compare_checks_both_imported_arms_before_folding_and_after_both_folds() -> Fa
             StoreConfig::Sqlite {
                 path: path.to_owned(),
             },
+            &composition,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        )?;
+        compare_on_host(host, requirements, fault)?;
+        let composition =
+            ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier());
+        let host = ErasureExecutionHostV1::open_read_only_with_authority(
+            path,
             &composition,
             ErasureRecoveryLimitsV1::compiled_maximum(),
         )?;
