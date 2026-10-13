@@ -67,6 +67,9 @@ pub enum PassFailureV1 {
 /// - A typed non-committed pipeline outcome, surfaced as
 ///   `ScheduledPassNotAdmitted`, is `AtomicCommitFailed` with a deterministic
 ///   typed result, so it is authoritative.
+/// - A dependency-declaration refusal raised by the host before the store is
+///   `AtomicCommitFailed` with a deterministic typed result, like the typed
+///   outcome the store would otherwise return.
 /// - A storage error is `AtomicCommitFailed` and operational, because the
 ///   store's public contract defines no deterministic result for it.
 /// - `StorageOutcomeUnknown` is [`PassFailureV1::InDoubt`].
@@ -82,9 +85,11 @@ pub enum PassFailureV1 {
 pub const fn classify_pass_failure(error: &RuntimeError) -> PassFailureV1 {
     match error {
         RuntimeError::CommunityPlugin(host) => PassFailureV1::Host(*host),
-        RuntimeError::ScheduledPassNotAdmitted(_) => PassFailureV1::Host(commit_failed(
-            AtomicCommitFailureV1::DeterministicTypedResult,
-        )),
+        RuntimeError::ScheduledPassNotAdmitted(_) | RuntimeError::DependencyDeclaration(_) => {
+            PassFailureV1::Host(commit_failed(
+                AtomicCommitFailureV1::DeterministicTypedResult,
+            ))
+        }
         RuntimeError::Store(CoreError::StorageOutcomeUnknown(_)) => PassFailureV1::InDoubt,
         RuntimeError::Store(_) => {
             PassFailureV1::Host(commit_failed(AtomicCommitFailureV1::Operational))

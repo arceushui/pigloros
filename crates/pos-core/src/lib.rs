@@ -127,6 +127,7 @@ pub(crate) enum CborReadError {
 ///
 /// Protocol modules retain their own field bounds, semantic validation, and
 /// public errors. This cursor owns only byte movement and basic CBOR heads.
+#[derive(Clone)]
 pub(crate) struct CborCursor<'a> {
     bytes: &'a [u8],
     offset: usize,

@@ -5017,6 +5017,59 @@ mod tests {
         }
     }
 
+    impl pos_core::FactualPrefixReadPortV1 for FaultStoreV1 {
+        fn last_committed_factual_tick(
+            &self,
+            timeline: TimelineId,
+        ) -> Result<pos_core::FactualHeadV1, CoreError> {
+            pos_core::FactualPrefixReadPortV1::last_committed_factual_tick(&self.inner, timeline)
+        }
+
+        fn cut_tick_at(
+            &self,
+            timeline: TimelineId,
+            seq: pos_core::Seq,
+        ) -> Result<pos_core::FactualCutV1, CoreError> {
+            pos_core::FactualPrefixReadPortV1::cut_tick_at(&self.inner, timeline, seq)
+        }
+
+        fn nodes_for_committed_events(
+            &self,
+            timeline: TimelineId,
+            seqs: &[pos_core::Seq],
+        ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, CoreError> {
+            pos_core::FactualPrefixReadPortV1::nodes_for_committed_events(
+                &self.inner,
+                timeline,
+                seqs,
+            )
+        }
+
+        fn nodes_by_digest(
+            &self,
+            timeline: TimelineId,
+            digests: &[pos_core::Hash],
+        ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, CoreError>
+        {
+            pos_core::FactualPrefixReadPortV1::nodes_by_digest(&self.inner, timeline, digests)
+        }
+
+        fn last_step_node(
+            &self,
+            timeline: TimelineId,
+            owner: &pos_core::FactualOwnerIdV1,
+        ) -> Result<Option<pos_core::DependencyNodeRecordV1>, CoreError> {
+            pos_core::FactualPrefixReadPortV1::last_step_node(&self.inner, timeline, owner)
+        }
+
+        fn factual_set_counts(
+            &self,
+            timeline: TimelineId,
+        ) -> Result<pos_core::RecordedSetCountsV1, CoreError> {
+            pos_core::FactualPrefixReadPortV1::factual_set_counts(&self.inner, timeline)
+        }
+    }
+
     impl pos_core::PipelineAdmissionFencePublisherV1 for FaultStoreV1 {
         fn set_pipeline_admission_fence(
             &mut self,
@@ -6594,6 +6647,69 @@ mod tests {
         fn admit_receipt(&self, _input: &ErasureReceiptInputV1) -> Result<(), ErasureErrorV1> {
             Err(ErasureErrorV1::Unauthorized)
         }
+    }
+
+    /// The inner Memory store is seeded with one committed Tick, so a forwarder
+    /// that returned a constant default would fail. The reads run under the
+    /// open test gate: Memory's factual reads go through its erasure read
+    /// fence, which refuses a store with no bound gate.
+    #[test]
+    fn fault_store_delegates_every_factual_prefix_read() -> Result<(), Box<dyn std::error::Error>> {
+        use pos_core::counterfactual_store::test_fixtures::SeededFactualTickV1;
+        use pos_core::{
+            DependencyNodeCoordinateV1, DependencyNodeRecordV1, FactualCutV1, FactualHeadV1,
+            FactualOwnerIdV1, FactualPrefixReadPortV1, RecordedDependencyClassV1,
+            RecordedNodeOriginV1, Seq, TickDependencyRecordV1,
+        };
+
+        let mut store = fault_store(FaultModeV1::Passthrough);
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let timeline = store.create_timeline("fault-factual-reads")?.id();
+        let digest = pos_core::Hash::from_bytes([5; 32]);
+        let owner_name = "driver.seeded".to_owned();
+        let coordinate =
+            DependencyNodeCoordinateV1::try_new(1, 0, owner_name.clone(), 0, 7, digest)?;
+        let step = DependencyNodeRecordV1::try_new(
+            coordinate,
+            RecordedDependencyClassV1::EndogenousRecomputed,
+            RecordedNodeOriginV1::Committed,
+            Vec::new(),
+            pos_core::Hash::from_bytes([6; 32]),
+        )?;
+        let nodes = vec![step.clone()];
+        let origin = RecordedNodeOriginV1::Committed;
+        let record = TickDependencyRecordV1::try_new(1, origin, nodes, Vec::new())?;
+        let seq = Seq::from_u64(2);
+        let seeded = SeededFactualTickV1 {
+            record,
+            first_seq: seq,
+            last_seq: seq,
+            event_nodes: vec![(seq, digest)],
+        };
+        store.inner.seed_factual_prefix(timeline, &[seeded])?;
+
+        let head = FactualHeadV1 {
+            tick: 1,
+            last_seq: seq,
+        };
+        assert_eq!(store.last_committed_factual_tick(timeline)?, head);
+        let tail = Seq::from_u64(3);
+        assert_eq!(
+            store.cut_tick_at(timeline, tail)?,
+            FactualCutV1::Boundary { cut_tick: 1 }
+        );
+        let absent = Seq::from_u64(9);
+        let events = store.nodes_for_committed_events(timeline, &[seq, absent])?;
+        assert_eq!(events, vec![Some(step.clone()), None]);
+        let absent_digest = pos_core::Hash::from_bytes([7; 32]);
+        let bound = store.nodes_by_digest(timeline, &[digest, absent_digest])?;
+        assert!(bound[0].is_some());
+        assert!(bound[1].is_none());
+        let owner = FactualOwnerIdV1::new(owner_name);
+        assert_eq!(store.last_step_node(timeline, &owner)?, Some(step));
+        let counts = store.factual_set_counts(timeline)?;
+        assert_eq!(counts.nodes, 1);
+        Ok(())
     }
 
     #[test]

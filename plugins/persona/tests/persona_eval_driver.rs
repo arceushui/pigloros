@@ -42,8 +42,8 @@ fn the_driver_cycles_its_pairs_and_emits_one_source_per_step() {
             let output = driver
                 .step(TimelineId::new(), ObservationView::empty())
                 .test_ok();
-            assert_eq!(output.drafts.len(), 2);
-            let source = &output.drafts[1];
+            assert_eq!(output.drafts().len(), 2);
+            let source = &output.outputs[1].draft;
             assert_eq!(source.event_type.as_str(), EVENT_TYPE_PREDICTION_SOURCE);
             assert_eq!(source.entity, entity);
             ciborium::from_reader(source.payload.as_slice()).test_ok()

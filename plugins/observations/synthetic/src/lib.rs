@@ -283,7 +283,8 @@ mod tests {
         let entity = EntityId::new();
         let mut driver = SyntheticDriver::with_amplitude(entity, 2.0);
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        let payload: ObsPayload = ciborium::from_reader(out.drafts[0].payload.as_slice()).test_ok();
+        let payload: ObsPayload =
+            ciborium::from_reader(out.outputs[0].draft.payload.as_slice()).test_ok();
         // tick=0 → sin(0) * 2.0 = 0.0
         assert!((payload.value - 0.0_f64).abs() < f64::EPSILON);
     }
@@ -309,10 +310,10 @@ mod tests {
             let mut driver = SyntheticDriver::new(entity);
             for &expected_val in &expected {
                 let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
-                assert_eq!(out.drafts.len(), 1);
+                assert_eq!(out.drafts().len(), 1);
 
                 let payload: ObsPayload =
-                    ciborium::from_reader(out.drafts[0].payload.as_slice()).test_ok();
+                    ciborium::from_reader(out.outputs[0].draft.payload.as_slice()).test_ok();
                 assert!(
                     (payload.value - expected_val).abs() < f64::EPSILON,
                     "value mismatch: got {}, expected {}",

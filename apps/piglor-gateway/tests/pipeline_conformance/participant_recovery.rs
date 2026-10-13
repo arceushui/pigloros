@@ -56,6 +56,7 @@ struct AckPort<'a> {
     store: &'a mut dyn ScheduledAdmissionStoreV1,
     ack: Ack,
     outcomes: Vec<PipelineOutcomeV1>,
+    bases: Vec<PipelineAdmissionBasisV1>,
 }
 
 fn lost_acknowledgement() -> CoreError {
@@ -67,6 +68,7 @@ impl PipelineAdmissionPortV1 for AckPort<'_> {
         &mut self,
         basis: &PipelineAdmissionBasisV1,
     ) -> Result<PipelineOutcomeV1, CoreError> {
+        self.bases.push(basis.clone());
         if matches!(self.ack, Ack::LostBeforeCommit) {
             return Err(lost_acknowledgement());
         }
@@ -96,12 +98,64 @@ impl PipelineAdmissionPortV1 for AckPort<'_> {
     }
 }
 
+impl pos_core::FactualPrefixReadPortV1 for AckPort<'_> {
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        self.store.last_committed_factual_tick(timeline)
+    }
+
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        self.store.cut_tick_at(timeline, seq)
+    }
+
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        self.store.nodes_for_committed_events(timeline, seqs)
+    }
+
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
+        self.store.nodes_by_digest(timeline, digests)
+    }
+
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        self.store.last_step_node(timeline, owner)
+    }
+
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        self.store.factual_set_counts(timeline)
+    }
+}
+
 /// One store whose Timeline holds the base cut, the participant's persisted
 /// grant, and an admission fence published over that grant.
 struct FencedStore {
     store: Box<dyn ScheduledAdmissionStoreV1>,
     participant: Participant,
     revisions: PipelineSecurityRevisionsV1,
+    /// The basis of the latest participant attempt, retained for an exact
+    /// retry (ADR-064 R3.8): a retry resubmits it and never rebuilds a pass.
+    retained: Option<PipelineAdmissionBasisV1>,
 }
 
 fn fenced(mut store: Box<dyn ScheduledAdmissionStoreV1>) -> FencedStore {
@@ -149,6 +203,7 @@ fn fenced(mut store: Box<dyn ScheduledAdmissionStoreV1>) -> FencedStore {
         store,
         participant,
         revisions,
+        retained: None,
     }
 }
 
@@ -163,6 +218,7 @@ impl FencedStore {
             ),
             provider_validation: PipelineEvidenceRefV1::try_new(digest(60)).test_ok(),
             security_revisions: self.revisions,
+            authority_grant: self.participant.grant.grant_id(),
             commit_head: self
                 .store
                 .logical_head(self.participant.timeline_id)
@@ -218,13 +274,31 @@ impl FencedStore {
             store: self.store.as_mut(),
             ack,
             outcomes: Vec::new(),
+            bases: Vec::new(),
         };
         let result = registry.admit_authorized_scheduled_pass(
             &mut port,
             admission,
             &[self.participant.authority(&evaluation, &current)],
         );
-        (result, port.outcomes)
+        let outcomes = port.outcomes;
+        let bases = port.bases;
+        self.retained = bases.last().cloned();
+        (result, outcomes)
+    }
+
+    /// Resubmit the retained basis of the latest participant attempt through
+    /// a delivering port, as an exact retry.
+    fn resubmit_retained(&mut self) -> Vec<PipelineOutcomeV1> {
+        let retained = self.retained.clone().test_ok();
+        let mut port = AckPort {
+            store: self.store.as_mut(),
+            ack: Ack::Delivered,
+            outcomes: Vec::new(),
+            bases: Vec::new(),
+        };
+        port.admit_pipeline_batch(&retained).test_ok();
+        port.outcomes
     }
 
     /// Recover the registry's in-doubt pass through a delivering port.
@@ -233,6 +307,7 @@ impl FencedStore {
             store: self.store.as_mut(),
             ack: Ack::Delivered,
             outcomes: Vec::new(),
+            bases: Vec::new(),
         };
         let result = registry.recover_scheduled_pass(&mut port);
         (result, port.outcomes)
@@ -370,15 +445,35 @@ fn recover_and_retry(capture: &mut Capture, store: &str, fenced: &mut FencedStor
     let (again, _) = fenced.recover(&mut registry);
     capture.record(store, "second-recovery", error_text(again));
 
-    stage_authorized(&mut registry, &fenced.participant).test_ok();
-    let (retried, outcomes) = fenced.admit_participant(&mut registry, &admission, Ack::Delivered);
+    // An exact retry resubmits the retained basis (ADR-064 R3.8).
+    let outcomes = fenced.resubmit_retained();
     capture.record(store, "retry.outcomes", names(&outcomes));
     capture.record(
         store,
         "retry.receipt-equal",
-        original.is_some() && retried.test_ok() == original,
+        original.is_some() && receipt(&outcomes).cloned() == original,
     );
     capture.record(store, "retry.committed", fenced.committed());
+
+    // A pass rebuilt after the commit declares a different Tick and chain
+    // edge, so its basis differs under the same key: AdmissionConflict.
+    stage_authorized(&mut registry, &fenced.participant).test_ok();
+    let (rebuilt, rebuilt_outcomes) =
+        fenced.admit_participant(&mut registry, &admission, Ack::Delivered);
+    assert!(
+        error_text(rebuilt).ends_with("AdmissionConflict"),
+        "a rebuilt pass under a committed key must be an AdmissionConflict"
+    );
+    assert_eq!(
+        rebuilt_outcomes,
+        vec![PipelineOutcomeV1::AdmissionConflict],
+        "the store must answer the rebuilt basis with AdmissionConflict"
+    );
+    assert_eq!(
+        fenced.committed(),
+        1,
+        "a rebuilt pass records no second row"
+    );
 }
 
 /// Leave one committed and two uncommitted passes in doubt, revoke the
@@ -412,6 +507,7 @@ fn revoke_before_recovery(capture: &mut Capture, store: &str, fenced: &mut Fence
         store: fenced.store.as_mut(),
         ack: Ack::LostBeforeCommit,
         outcomes: Vec::new(),
+        bases: Vec::new(),
     };
     let lost = anchored.admit_scheduled_pass(&mut port, &admission);
     capture.record(store, "anchored.lost", error_text(lost));

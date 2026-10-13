@@ -42,8 +42,8 @@ use ulid::Ulid;
 
 use super::ScheduledAdmissionPortsV1;
 use crate::{
-    HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1, PluginRegistry,
-    RuntimeError, ScheduledPassAdmissionV1,
+    registry::ensure_set_headroom, HumanActionAdmissionErrorV1, HumanActionAdmissionV1,
+    HumanActionReceiptV1, PluginRegistry, RuntimeError, ScheduledPassAdmissionV1,
 };
 
 const TRUST_DOMAIN: &str = "local.experiment";
@@ -104,20 +104,29 @@ impl LocalScheduledAdmissionHostV1 {
     /// remaining Event budget. Call this before staging the pass: the store
     /// rejects its basis if a revision changes before commit.
     ///
+    /// It also refuses every pass on a Timeline whose recorded dependency set
+    /// cannot take one more worst-case Tick, before any Driver steps and
+    /// whether or not the pass would stage a draft (ADR-064 Revision 3, R3.10).
+    /// Nothing is staged then, so the session stays healthy.
+    ///
     /// # Errors
-    /// Returns an authority persistence or store error. The local fence is
-    /// built from a non-zero grant and no domain-state revision, so its
-    /// contract construction does not fail in practice; it stays typed as
-    /// [`RuntimeError::PipelineContract`].
+    /// Returns [`RuntimeError::DependencyDeclaration`] at the reserve threshold
+    /// of the Timeline's recorded dependency set, or an authority persistence
+    /// or store error. The local fence is built from a non-zero grant and no
+    /// domain-state revision, so its contract construction does not fail in
+    /// practice; it stays typed as [`RuntimeError::PipelineContract`].
     pub fn observe(
         &self,
         registry: &PluginRegistry,
         store: &mut dyn ScheduledAdmissionPortsV1,
         timeline: TimelineId,
     ) -> Result<PipelineSecurityRevisionsV1, RuntimeError> {
-        store
-            .pipeline_admission_fence(timeline)
-            .map_err(RuntimeError::Store)
+        ensure_set_headroom(&*store, timeline)
+            .and_then(|()| {
+                store
+                    .pipeline_admission_fence(timeline)
+                    .map_err(RuntimeError::Store)
+            })
             .and_then(|current| {
                 let bound = if current.is_none() {
                     self.bind(store)
@@ -203,6 +212,7 @@ impl LocalScheduledAdmissionHostV1 {
                         ),
                         provider_validation,
                         security_revisions: revisions,
+                        authority_grant: self.authority_grant(),
                         commit_head,
                         commit_now_secs,
                     }
@@ -256,6 +266,7 @@ impl LocalScheduledAdmissionHostV1 {
                         observation,
                         authorization,
                         security_revisions: revisions,
+                        authority_grant: self.authority_grant(),
                     }
                 })
             })

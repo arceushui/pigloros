@@ -427,6 +427,55 @@ impl PipelineAdmissionPortV1 for LostOutcomePort<'_> {
     }
 }
 
+impl pos_core::FactualPrefixReadPortV1 for LostOutcomePort<'_> {
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        self.0.last_committed_factual_tick(timeline)
+    }
+
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        self.0.cut_tick_at(timeline, seq)
+    }
+
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        self.0.nodes_for_committed_events(timeline, seqs)
+    }
+
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
+        self.0.nodes_by_digest(timeline, digests)
+    }
+
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        self.0.last_step_node(timeline, owner)
+    }
+
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        self.0.factual_set_counts(timeline)
+    }
+}
+
 /// A port whose store write fails after a successful receipt lookup.
 pub struct FailingWritePort<'a>(pub &'a mut dyn ScheduledAdmissionStoreV1);
 
@@ -454,6 +503,55 @@ impl PipelineAdmissionPortV1 for FailingWritePort<'_> {
         limit: NonZeroUsize,
     ) -> Result<PurgeOutcome, CoreError> {
         self.0.purge_expired_pipeline_receipts_bounded(limit)
+    }
+}
+
+impl pos_core::FactualPrefixReadPortV1 for FailingWritePort<'_> {
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        self.0.last_committed_factual_tick(timeline)
+    }
+
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        self.0.cut_tick_at(timeline, seq)
+    }
+
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        self.0.nodes_for_committed_events(timeline, seqs)
+    }
+
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
+        self.0.nodes_by_digest(timeline, digests)
+    }
+
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        self.0.last_step_node(timeline, owner)
+    }
+
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        self.0.factual_set_counts(timeline)
     }
 }
 
@@ -488,5 +586,57 @@ impl PipelineAdmissionPortV1 for RecordingPort {
         Err(CoreError::Storage(
             "a recording port retains nothing".to_owned(),
         ))
+    }
+}
+
+impl pos_core::FactualPrefixReadPortV1 for RecordingPort {
+    fn last_committed_factual_tick(
+        &self,
+        _: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        Ok(pos_core::FactualHeadV1 {
+            tick: 0,
+            last_seq: pos_core::Seq::ZERO,
+        })
+    }
+
+    fn cut_tick_at(
+        &self,
+        _: pos_core::TimelineId,
+        _: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        Ok(pos_core::FactualCutV1::Boundary { cut_tick: 0 })
+    }
+
+    fn nodes_for_committed_events(
+        &self,
+        _: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        Ok(seqs.iter().map(|_| None).collect())
+    }
+
+    fn nodes_by_digest(
+        &self,
+        _: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
+        Ok(digests.iter().map(|_| None).collect())
+    }
+
+    fn last_step_node(
+        &self,
+        _: pos_core::TimelineId,
+        _: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        Ok(None)
+    }
+
+    fn factual_set_counts(
+        &self,
+        _: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        Ok(pos_core::RecordedSetCountsV1::default())
     }
 }

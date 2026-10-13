@@ -48,6 +48,9 @@ const fn hash(value: u8) -> Hash {
     Hash::from_bytes([value; 32])
 }
 
+/// The one authority grant every admission in this file runs under.
+const GRANT: Hash = hash(1);
+
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn entity(value: u128) -> EntityId {
     EntityId::from_ulid(Ulid::from(value))
@@ -61,7 +64,7 @@ fn principal(value: u8) -> PrincipalRefV1 {
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn root_grant() -> CapabilityGrantV1 {
     ok(CapabilityGrantV1::try_from_draft(CapabilityGrantDraftV1 {
-        grant_id: hash(1),
+        grant_id: GRANT,
         grantor: principal(1),
         grantee: AuthorityGranteeV1::Principal(principal(2)),
         trust_domain: "local.test".to_owned(),
@@ -117,15 +120,8 @@ fn revisions(
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn publish(store: &mut MemoryStore, timeline: TimelineId, revisions: PipelineSecurityRevisionsV1) {
-    ok(store.set_pipeline_admission_fence(
-        timeline,
-        ok(PipelineAdmissionFenceV1::try_new(
-            hash(1),
-            revisions,
-            None,
-            10,
-        )),
-    ));
+    let fence = PipelineAdmissionFenceV1::try_new(GRANT, revisions, None, 10);
+    ok(store.set_pipeline_admission_fence(timeline, ok(fence)));
 }
 
 /// Bind the erasure gate and persisted authority, then publish the fence.
@@ -145,7 +141,7 @@ fn admission_store(
     ok(store.bind_authority_persistence(host.persistence_binding()));
     let root = root_grant();
     ok(store.issue_capability_grant(ok(host.authorize_grant(&root)), &root));
-    let authority = ok(store.load_authority(hash(1)));
+    let authority = ok(store.load_authority(GRANT));
     let current = revisions(
         pipeline_authority_revision_v1(&authority),
         pipeline_delegation_revision_v1(&authority),
@@ -171,6 +167,8 @@ fn admission(
         ),
         provider_validation: ok(PipelineEvidenceRefV1::try_new(hash(60))),
         security_revisions: revisions,
+        // The grant `publish` names in the Timeline's fence.
+        authority_grant: GRANT,
         commit_head: ok(store.logical_head(timeline)),
         commit_now_secs: 1,
     }

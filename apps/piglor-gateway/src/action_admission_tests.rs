@@ -826,6 +826,29 @@ fn every_not_admitted_outcome_maps_to_a_stable_gateway_error() {
 }
 
 #[test]
+fn an_exhausted_dependency_set_is_a_permanent_limit() {
+    let error = pos_runtime::HumanActionAdmissionErrorV1::DependencyDeclaration(
+        pos_core::FactualDependencyErrorV1::SetExhausted,
+    );
+    assert!(error.to_string().contains("exhausted"), "{error}");
+    assert!(matches!(
+        crate::action_command_error(executor::ActionCommandError::Admission(error), 7),
+        GatewayError::DependencySetExhausted
+    ));
+}
+
+#[test]
+fn any_other_dependency_declaration_fault_is_unavailable() {
+    let error = pos_runtime::HumanActionAdmissionErrorV1::DependencyDeclaration(
+        pos_core::FactualDependencyErrorV1::UnresolvedInput,
+    );
+    assert!(matches!(
+        crate::action_command_error(executor::ActionCommandError::Admission(error), 7),
+        GatewayError::ActionAdmissionUnavailable
+    ));
+}
+
+#[test]
 fn every_authorization_failure_maps_to_a_stable_gateway_error() {
     use crate::GatewayAuthorizationError as Failure;
     let mapped = |failure| {

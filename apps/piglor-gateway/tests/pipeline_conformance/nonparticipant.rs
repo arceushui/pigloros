@@ -115,6 +115,9 @@ impl Driver for ObserverDriver {
 /// Host admission inputs for a port that never commits.
 fn admission(commit_head: Seq) -> ScheduledPassAdmissionV1 {
     let digest = |byte: u8| Hash::from_bytes([byte; 32]);
+    let grant = LocalScheduledAdmissionHostV1::shared()
+        .test_ok()
+        .authority_grant();
     ScheduledPassAdmissionV1 {
         attempt_id: PipelineAttemptIdV1::try_new([1; 16]).test_ok(),
         idempotency: AppendIdentity::new(
@@ -134,6 +137,9 @@ fn admission(commit_head: Seq) -> ScheduledPassAdmissionV1 {
             },
         )
         .test_ok(),
+        // No fence is published and the port never commits: the grant is deliberately
+        // unbound, so no store ever checks it against a fence.
+        authority_grant: grant,
         commit_head,
         commit_now_secs: 0,
     }

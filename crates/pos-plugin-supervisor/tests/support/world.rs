@@ -9,7 +9,7 @@ use std::time::Duration;
 use pos_core::trusted_clock::TrustedWallSourceV1;
 use pos_core::{
     AppendDedupKey, AppendDedupScope, AppendIdentity, ErasureContainmentGateV1, ErasureGate, Event,
-    EventStore, Hash, PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineCommitReceiptV1,
+    EventStore, FactualAdmissionPortV1, Hash, PipelineAttemptIdV1, PipelineCommitReceiptV1,
     PipelineEvidenceRefV1, PipelineSecurityRevisionsV1, PluginId, Seq, SeqRange, TimelineId,
     TimelineMeta,
 };
@@ -165,7 +165,7 @@ impl Prepared {
     pub fn request<'a>(
         &'a self,
         tick: u64,
-        port: &'a mut dyn PipelineAdmissionPortV1,
+        port: &'a mut dyn FactualAdmissionPortV1,
     ) -> CommunityPassRequestV1<'a> {
         CommunityPassRequestV1 {
             tick,
@@ -183,7 +183,7 @@ impl Prepared {
     pub fn anchored_request<'a>(
         &'a self,
         tick: u64,
-        port: &'a mut dyn PipelineAdmissionPortV1,
+        port: &'a mut dyn FactualAdmissionPortV1,
     ) -> CommunityPassRequestV1<'a> {
         CommunityPassRequestV1 {
             stage: CommunityStageV1::Anchored,
@@ -432,6 +432,7 @@ impl World {
     ) -> ScheduledPassAdmissionV1 {
         self.attempt_count += 1;
         let key = self.attempt_count;
+        let host = ok(LocalScheduledAdmissionHostV1::shared());
         ScheduledPassAdmissionV1 {
             attempt_id: ok(PipelineAttemptIdV1::try_new([key; 16])),
             idempotency: AppendIdentity::new(
@@ -440,6 +441,7 @@ impl World {
             ),
             provider_validation: ok(PipelineEvidenceRefV1::try_new(Hash::from_bytes([60; 32]))),
             security_revisions: revisions,
+            authority_grant: host.authority_grant(),
             commit_head: head,
             commit_now_secs: 1,
         }

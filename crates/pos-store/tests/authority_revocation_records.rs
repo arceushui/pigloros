@@ -6,21 +6,22 @@ use std::path::Path;
 use std::sync::{Arc, Barrier};
 
 use pos_core::{
-    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
-    AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityCommitOutcomeV1, AuthorityGranteeV1,
-    AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
-    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1,
-    CanonicalBytes, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
-    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, CoreError, DelegateClassV1,
-    EntityId, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
+    assemble_factual_tick, pipeline_authority_revision_v1, pipeline_delegation_revision_v1,
+    pipeline_erasure_revision_v1, AppendDedupKey, AppendDedupScope, AppendIdentity,
+    AuthorityCommitOutcomeV1, AuthorityGranteeV1, AuthorityPersistenceErrorV1,
+    AuthorityPersistenceHostV1, AuthorityPersistencePortV1, AuthorityPersistenceStateV1,
+    AuthorityRegistrySnapshotV1, AuthorityRoleV1, AuthorityViewV1, CanonicalBytes,
+    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
+    CapabilityScopeDraftV1, CapabilityScopeV1, CoreError, DelegateClassV1, EntityId,
+    ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
     ErasureProtectedEffectDispositionV1, ErasureProtectedEffectIntervalV1, EventDraft, EventStore,
-    Hash, Kind, PersistedAuthorityV1, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
-    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
-    PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineDraftBatchV1,
-    PipelineEvidenceRefV1, PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeV1,
-    PipelinePreconditionV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
-    PrincipalRefV1, Seq, SeqRange, TentativePipelineResultV1, TimelineId, DELEGATE_ACTION_V1,
-    PIPELINE_CONTRACT_VERSION_V1,
+    FactualTickContextV1, FactualTickShapeV1, Hash, Kind, PersistedAuthorityV1,
+    PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
+    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1,
+    PipelineAttemptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
+    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
+    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, PrincipalRefV1, Seq, SeqRange,
+    TentativePipelineResultV1, TimelineId, DELEGATE_ACTION_V1, PIPELINE_CONTRACT_VERSION_V1,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use tempfile::tempdir;
@@ -251,12 +252,29 @@ fn publish(store: &mut dyn Harness, timeline: TimelineId, revisions: PipelineSec
     ));
 }
 
+/// A hand-built basis whose record is the one `assemble_factual_tick` builds
+/// for the named Tick, under the fence `publish` installs.
 fn basis(
     timeline: TimelineId,
+    tick: u64,
     key: u8,
     head: u64,
     revisions: PipelineSecurityRevisionsV1,
 ) -> PipelineAdmissionBasisV1 {
+    let draft = EventDraft::new(
+        entity(5),
+        Kind::new("world.action"),
+        CanonicalBytes::from_vec(vec![key]),
+    );
+    let context = FactualTickContextV1 {
+        timeline_id: timeline,
+        tick,
+        attempt_id: ok(PipelineAttemptIdV1::try_new([key; 16])),
+        evidence_digest: hash(60),
+        authority_grant: hash(2),
+    };
+    let shape = FactualTickShapeV1::Human(vec![draft.clone()]);
+    let dependencies = ok(assemble_factual_tick(&context, &shape));
     ok(PipelineAdmissionBasisV1::try_from_draft(
         PipelineAdmissionBasisDraftV1 {
             contract_version: PIPELINE_CONTRACT_VERSION_V1,
@@ -283,11 +301,8 @@ fn basis(
                 head,
             ))),
             security_revisions: Some(revisions),
-            batch: Some(ok(PipelineDraftBatchV1::try_new(vec![EventDraft::new(
-                entity(5),
-                Kind::new("world.action"),
-                CanonicalBytes::from_vec(vec![key]),
-            )]))),
+            batch: Some(ok(PipelineDraftBatchV1::try_new(vec![draft]))),
+            dependencies,
         },
     ))
 }
@@ -487,8 +502,9 @@ fn a_learned_revocation_is_persisted_and_stales_or_revokes_the_basis_at_commit()
         // chain does not have are rejected.
         let forged = revisions(&current, Some(hash(99)));
         publish(store.as_mut(), timeline, forged);
+        let forged_basis = basis(timeline, 1, 1, 0, forged);
         assert_eq!(
-            ok(store.admit_pipeline_batch(&basis(timeline, 1, 0, forged))),
+            ok(store.admit_pipeline_batch(&forged_basis)),
             PipelineOutcomeV1::AdmissionConflict,
             "{name}"
         );
@@ -502,16 +518,18 @@ fn a_learned_revocation_is_persisted_and_stales_or_revokes_the_basis_at_commit()
             &view(&grants, &[&grants.sibling], &grants.child),
         ));
         assert_eq!(learned.revocations().len(), 1, "{name}");
+        let stale_basis = basis(timeline, 1, 2, 0, published);
         assert_eq!(
-            ok(store.admit_pipeline_batch(&basis(timeline, 2, 0, published))),
+            ok(store.admit_pipeline_batch(&stale_basis)),
             PipelineOutcomeV1::AdmissionConflict,
             "{name}"
         );
         let refreshed = revisions(&learned, None);
         assert_ne!(refreshed, published, "{name}");
         publish(store.as_mut(), timeline, refreshed);
+        let fresh_basis = basis(timeline, 1, 3, 0, refreshed);
         assert!(
-            is_commit(&store.admit_pipeline_batch(&basis(timeline, 3, 0, refreshed))),
+            is_commit(&store.admit_pipeline_batch(&fresh_basis)),
             "{name}"
         );
 
@@ -521,8 +539,9 @@ fn a_learned_revocation_is_persisted_and_stales_or_revokes_the_basis_at_commit()
             store.as_mut(),
             &view(&grants, &[&grants.sibling, &grants.root], &grants.child),
         ));
+        let revoked_basis = basis(timeline, 2, 4, 1, refreshed);
         assert_eq!(
-            ok(store.admit_pipeline_batch(&basis(timeline, 4, 1, refreshed))),
+            ok(store.admit_pipeline_batch(&revoked_basis)),
             PipelineOutcomeV1::AuthorityRevoked,
             "{name}"
         );
@@ -554,7 +573,7 @@ fn sqlite_hosts_racing_a_revocation_never_commit_after_it_is_persisted() {
         let mut store = open_file(&path);
         std::thread::spawn(move || {
             barrier.wait();
-            store.admit_pipeline_batch(&basis(timeline, 1, 0, stale))
+            store.admit_pipeline_batch(&basis(timeline, 1, 1, 0, stale))
         })
     };
     let revoking = {
@@ -588,12 +607,14 @@ fn sqlite_hosts_racing_a_revocation_never_commit_after_it_is_persisted() {
     let reloaded =
         ok(host(&grants).persist_authority(&mut open, &view(&grants, &[], &grants.child)));
     assert_eq!(&reloaded, revoked.authority());
+    let same_connection = basis(timeline, 2, 2, 0, stale);
     assert_eq!(
-        ok(open.admit_pipeline_batch(&basis(timeline, 2, 0, stale))),
+        ok(open.admit_pipeline_batch(&same_connection)),
         PipelineOutcomeV1::AuthorityRevoked
     );
+    let fresh_connection = basis(timeline, 2, 3, 0, stale);
     assert_eq!(
-        ok(open_file(&path).admit_pipeline_batch(&basis(timeline, 3, 0, stale))),
+        ok(open_file(&path).admit_pipeline_batch(&fresh_connection)),
         PipelineOutcomeV1::AuthorityRevoked
     );
     assert_eq!(event_count(&open_file(&path), timeline), before);
@@ -674,9 +695,8 @@ fn an_idempotent_sqlite_replay_writes_no_authority_state_and_keeps_other_connect
     // bound to the file's data version keeps admitting instead of failing
     // closed.
     assert_eq!(data_version(&observer), before);
-    assert!(is_commit(
-        &admitting.admit_pipeline_batch(&basis(timeline, 1, 0, published))
-    ));
+    let first = basis(timeline, 1, 1, 0, published);
+    assert!(is_commit(&admitting.admit_pipeline_batch(&first)));
 }
 
 #[test]
