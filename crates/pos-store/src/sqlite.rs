@@ -13011,11 +13011,12 @@ impl SqliteStore {
                 context,
             );
             context.check()?;
-            let final_chain_head_hash = Self::compute_chain_hash_at_unchecked_on(
+            let final_chain_head_hash = Self::compute_chain_hash_at_with_context_on(
                 &self.conn,
                 self.hasher.as_ref(),
                 child_timeline_id,
                 Seq::from_u64(final_logical_head),
+                context,
             )
             .map_err(PublicationSourceErrorV1::from);
             context.check()?;
