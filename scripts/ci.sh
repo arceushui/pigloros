@@ -35,6 +35,8 @@ python3 "$ROOT/scripts/generate_pmf1_golden_vectors.py" --check
 
 echo "==> Plugin conformance fixtures match their independent generator"
 python3 "$ROOT/scripts/generate_plugin_conformance_fixtures.py" --check
+python3 "$ROOT/scripts/check_plugin_conformance_expected.py"
+python3 "$ROOT/scripts/test_check_plugin_conformance_expected.py"
 
 echo "==> owner-bridge codec vectors match their independent generator"
 python3 "$ROOT/scripts/owner_bridge_vectors.py" --check

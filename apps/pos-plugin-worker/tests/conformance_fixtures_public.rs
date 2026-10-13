@@ -6,8 +6,12 @@
 //! The attempts are built from the files of `fixtures/conformance` and run through the adapter
 //! library's `run_with` with the real worker, so the digests the generator computed from the
 //! specification (`H1` of both guests, `H2` of the carried state, the release identities and
-//! the profile digest of `ind.*`, the `FuelExhausted` of `res.1`, the redaction of `del.1`)
+//! the profile digest of `ind.*`, the `FuelExhausted` of `res.1`,
+//! the redaction of `del.1` and `del.2`)
 //! are the ones the host computes. No fixture type is named here.
+//!
+//! R8-F7b: `res.2` to `res.4` (memory, host-call and `event_bytes` limits of the signed release)
+//! and the `del.2` inputs run on the real worker.
 //!
 //! R8-F2c: the load-time link failures `den.03` to `den.12` of the `denied` family give
 //! `IncompatibleAbi` from the real worker. The `denied` case, which also holds the sub-cases
@@ -120,11 +124,32 @@ fn the_independent_evaluation_literals_are_the_hosts() -> TestResult {
     assert_output_is_the_oracle(FixtureFamily::IndependentEvaluation, ExecutionMode::Local)
 }
 
+/// The IDs of the sub-cases of `resource-exhaustion`, one per limit of the signed release.
+const RESOURCE_LIMITS: [&str; 4] = ["res.1", "res.2", "res.3", "res.4"];
+
 #[test]
-fn a_starved_fuel_budget_is_the_resource_limit_failure() -> TestResult {
-    let observation = observe(FixtureFamily::ResourceExhaustion, ExecutionMode::Local)?;
-    assert_eq!(observation.result, failure("resource-limit"));
-    assert_within_budget(FixtureFamily::ResourceExhaustion, &observation)
+fn starved_budgets_are_the_resource_limit_failure() -> TestResult {
+    for mode in [ExecutionMode::Local, ExecutionMode::AirGapped] {
+        let observation = observe(FixtureFamily::ResourceExhaustion, mode)?;
+        assert_eq!(observation.result, failure("resource-limit"), "{mode:?}");
+        assert_within_budget(FixtureFamily::ResourceExhaustion, &observation)?;
+    }
+    Ok(())
+}
+
+/// R8-F7b: each limit of the signed release gives its own error at pass level. The case code
+/// `resource-limit` is the failure of the family oracle only when every sub-case matched, so
+/// each sub-case is run alone, with a control whose expected error is another well-formed one.
+#[test]
+fn each_resource_limit_gives_its_error_from_the_real_worker() -> TestResult {
+    for id in RESOURCE_LIMITS {
+        let family = FixtureFamily::ResourceExhaustion;
+        let matched = observe_attempt(&one_subcase(family, id, None)?)?;
+        assert_eq!(matched.result, failure("resource-limit"), "{id}");
+        let other = observe_attempt(&one_subcase(family, id, Some("ComponentTrap"))?)?;
+        assert_eq!(other.result, failure("subcase-mismatch"), "{id}");
+    }
+    Ok(())
 }
 
 #[test]
@@ -137,10 +162,10 @@ fn link_failures() -> impl Iterator<Item = String> {
     (3..=12).map(|number| format!("den.{number:02}"))
 }
 
-/// The `denied` attempt with only the sub-case `id`, whose expected `error` is `error` when
+/// The attempt of `family` with only the sub-case `id`, whose expected `error` is `error` when
 /// given.
-fn denied_alone(id: &str, error: Option<&str>) -> TestResult<CaseAttempt> {
-    let attempt = attempt_from_fixture_files(FixtureFamily::Denied, ExecutionMode::Local)?;
+fn one_subcase(family: FixtureFamily, id: &str, error: Option<&str>) -> TestResult<CaseAttempt> {
+    let attempt = attempt_from_fixture_files(family, ExecutionMode::Local)?;
     rewrite_subcases(attempt, |subcase| {
         let keep = subcase["id"] == id;
         if let (true, Some(error)) = (keep, error) {
@@ -148,6 +173,11 @@ fn denied_alone(id: &str, error: Option<&str>) -> TestResult<CaseAttempt> {
         }
         keep
     })
+}
+
+/// The `denied` attempt with only the sub-case `id`.
+fn denied_alone(id: &str, error: Option<&str>) -> TestResult<CaseAttempt> {
+    one_subcase(FixtureFamily::Denied, id, error)
 }
 
 /// A smoke test of the whole `denied` case on the real worker; the `r8_s2_*` tests of

@@ -529,6 +529,9 @@ ROOT_NOT_AFTER = 100
 
 MEMORY_BYTES = 16 * 1_048_576
 ROOMY_FUEL = 1 << 40
+WASM_PAGE_BYTES = 65_536
+ROOMY_HOST_CALLS = 256
+ROOMY_EVENT_BYTES = 4096
 
 
 def tar_archive(name: str, data: bytes) -> bytes:
@@ -570,8 +573,14 @@ def default_capability(required: bool) -> tuple:
     return ("kv", "read", "state/*", "Read Plugin state", "plugin", required, 10, 1024, 2048)
 
 
-def default_budget(fuel: int = ROOMY_FUEL) -> tuple:
-    return (MEMORY_BYTES, fuel, 256, 24, 4096, 4096, 24, 256)
+def default_budget(
+    fuel: int = ROOMY_FUEL,
+    memory: int = MEMORY_BYTES,
+    host_calls: int = ROOMY_HOST_CALLS,
+    event_bytes: int = ROOMY_EVENT_BYTES,
+) -> tuple:
+    """The PMF1 budget (field 15): memory, fuel, host calls, then the five output bounds."""
+    return (memory, fuel, host_calls, 24, event_bytes, 4096, 24, 256)
 
 
 def default_spec(**overrides) -> Pmf1Spec:
@@ -817,6 +826,8 @@ def guest_output(
 
 INITIAL_SCHEMA = bytes([9]) * 32
 INITIAL_STATE = b"initial"
+# The operational log message of the guests' `drive` export (del.2).
+LOG_MESSAGE = "drive"
 PRE_EXECUTION = "PreExecutionRejection"
 IND1_INPUT = "PiglorOS independent fixture plugin-conformance"
 IND1_DIGEST = "92adc8f0b327b091f85e847d3fa1f7cb46e16bdd74f389d79b2e61171c2715c3"
@@ -1336,48 +1347,65 @@ def malformed_subcases() -> list[SubCase]:
     return [*malformed_install_subcases(), *unreadable_subcases(), nested_subcase()]
 
 
-def resource_subcases() -> list[SubCase]:
-    starved = make_release(
-        default_spec(component=component("c-guest.wasm"), budget=default_budget(fuel=1))
+def starved_subcase(sub_id: str, component_name: str, error: str, **limits: int) -> SubCase:
+    """A pass of `component_name` under a release whose budget is lowered by `limits`."""
+    release = make_release(
+        default_spec(component=component(component_name), budget=default_budget(**limits))
     )
-    expect = {"kind": "failed", "error": "FuelExhausted", "class": "Authoritative"}
+    return SubCase(
+        id=sub_id,
+        steps=[install(release), bind(release), run_pass(FIRST_PASS)],
+        expect={"kind": "failed", "error": error, "class": "Authoritative"},
+        entry=None,
+        releases=[release],
+    )
+
+
+def resource_subcases() -> list[SubCase]:
+    """`res.1` to `res.4`: each limit of the signed release gives its own error (R8-F7b)."""
     return [
-        SubCase(
-            id="res.1",
-            steps=[install(starved), bind(starved), run_pass(FIRST_PASS)],
-            expect=expect,
-            entry=None,
-            releases=[starved],
-        )
+        starved_subcase("res.1", "c-guest.wasm", "FuelExhausted", fuel=1),
+        # The prototype guest reserves 17 pages when it starts.
+        starved_subcase(
+            "res.2", "rust-guest.wasm", "MemoryLimitExceeded", memory=WASM_PAGE_BYTES
+        ),
+        # The guest makes 3 host calls (time, random, log).
+        starved_subcase("res.3", "rust-guest.wasm", "HostCallLimitExceeded", host_calls=2),
+        # The guest emits one Event with an 8-byte payload.
+        starved_subcase("res.4", "rust-guest.wasm", "OutputLimitExceeded", event_bytes=1),
     ]
 
 
-def redaction_subcases() -> list[SubCase]:
+def redaction_subcase(sub_id: str, marker: str, sources: list[str]) -> SubCase:
+    """A pass of the redaction inputs, then a `scan` for `marker` over `sources`."""
     rust = rust_release()
-    marker = "synthetic-secret"
     retained = {"plugin_id": PLUGIN_ID, "invocation_id_hex": REDACTION_PASS.invocation_id.hex()}
-    scan = {
-        "step": "scan",
-        "marker": marker,
-        "in": ["events", "state", "outcome"],
-        "retained": retained,
-    }
-    return [
-        SubCase(
-            id="del.1",
-            steps=[install(rust), bind(rust), run_pass(REDACTION_PASS), scan],
-            expect={"kind": "absent", "marker": marker, "retained": retained},
-            entry={
-                "id": "del.1",
-                "kind": "absent",
-                "prohibited_data_present": False,
-                "retained_metadata": {
-                    "invocation_id_hex": retained["invocation_id_hex"],
-                    "plugin_id": PLUGIN_ID,
-                },
+    scan = {"step": "scan", "marker": marker, "in": sources, "retained": retained}
+    return SubCase(
+        id=sub_id,
+        steps=[install(rust), bind(rust), run_pass(REDACTION_PASS), scan],
+        expect={"kind": "absent", "marker": marker, "retained": retained},
+        entry={
+            "id": sub_id,
+            "kind": "absent",
+            "prohibited_data_present": False,
+            "retained_metadata": {
+                "invocation_id_hex": retained["invocation_id_hex"],
+                "plugin_id": PLUGIN_ID,
             },
-            releases=[rust],
-        )
+        },
+        releases=[rust],
+    )
+
+
+def redaction_subcases() -> list[SubCase]:
+    """`del.1` and `del.2`; the log message `drive` must not be in the committed bytes."""
+    _digest, state = drive(REDACTION_PASS, INITIAL_STATE)
+    if LOG_MESSAGE.encode("ascii") in state:
+        raise SystemExit("the committed state of del.2 contains its marker by chance")
+    return [
+        redaction_subcase("del.1", "synthetic-secret", ["events", "state", "outcome"]),
+        redaction_subcase("del.2", LOG_MESSAGE, ["events", "state"]),
     ]
 
 

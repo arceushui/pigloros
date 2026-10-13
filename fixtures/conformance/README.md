@@ -48,9 +48,10 @@ Rust and uses fixed public fixture seeds ("repository-test-fixture-only"); `--ch
 PMF1, PTR1, PRV1, TPS1 and execution-profile vectors of the repository and the official BLAKE3
 vectors (`scripts/data/blake3_test_vectors.json`) before it compares every output. The composites
 carry the first subset of the case catalogue (`pos.1` to `pos.3`, `ind.1` to `ind.4`, `den.01`,
-`den.02`, `mal.1a`, `mal.1b`, `res.1`, `del.1`, `dgr.1`); the remaining sub-cases are added by the
-next slices of #194. Every `expected/plugin-conformance/*.json` stays `pending` with a null result
-and a null time.
+`den.02`, `mal.1a`, `mal.1b`, `res.1`, `del.1`, `dgr.1`) and, since S3b2 and S3b3, every `denied`,
+`malformed`, `downgrade`, `res.1` to `res.4` and `del.1`/`del.2` sub-case. Every
+`expected/plugin-conformance/*.json` stays `pending` with a null result and a null time
+(`scripts/check_plugin_conformance_expected.py` checks it).
 Payloads are RFC 8785 canonical JSON and, like the oracles, end with one LF byte (the adapter reads
 the payload with `serde_json`, which ignores it; the oracle LF is required by ADR-061 revision 8
 decision 2). The `--check` validates every payload against its checked-in schema.
