@@ -153,6 +153,182 @@ fn public_authority_codecs_round_trip_valid_records() -> Result<(), Box<dyn std:
     Ok(())
 }
 
+// An independent copy of the pre-factor generic transport/error table. This
+// exercises public decoding, not the fast-path's private shape predicate.
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod fixed_fah1_parity {
+    use super::*;
+    use std::io::Cursor;
+
+    type CodecResult = Result<ForkAdmissionHostRecordV1, ForkAdmissionAuthorityCodecErrorV1>;
+
+    fn previous_decoder(bytes: &[u8]) -> CodecResult {
+        use ForkAdmissionAuthorityCodecErrorV1::{
+            FieldOutOfBounds, InvalidEncoding, UnsupportedVersion,
+        };
+        if bytes.len() > 109 {
+            return Err(FieldOutOfBounds);
+        }
+        let mut cursor = Cursor::new(bytes);
+        let value: Value = ciborium::from_reader(&mut cursor).map_err(|_| InvalidEncoding)?;
+        if cursor.position() != bytes.len() as u64 {
+            return Err(InvalidEncoding);
+        }
+        let Value::Array(fields) = value else {
+            return Err(InvalidEncoding);
+        };
+        if fields.len() != 5
+            || !matches!(fields.first(), Some(Value::Text(marker)) if marker == "FAH1")
+        {
+            return Err(InvalidEncoding);
+        }
+        match &fields[1] {
+            Value::Integer(version) if *version == 1.into() => {}
+            Value::Integer(_) => return Err(UnsupportedVersion),
+            _ => return Err(InvalidEncoding),
+        }
+        let field = |value: &Value| -> Result<[u8; 32], ForkAdmissionAuthorityCodecErrorV1> {
+            let Value::Bytes(bytes) = value else {
+                return Err(FieldOutOfBounds);
+            };
+            let array = <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| FieldOutOfBounds)?;
+            if array == [0; 32] {
+                return Err(FieldOutOfBounds);
+            }
+            Ok(array)
+        };
+        ForkAdmissionHostRecordV1::new(
+            Hash::from_bytes(field(&fields[2])?),
+            PublicKey::from_bytes(field(&fields[3])?),
+            Hash::from_bytes(field(&fields[4])?),
+        )
+    }
+
+    fn parity(bytes: &[u8]) {
+        assert_eq!(
+            ForkAdmissionHostRecordV1::from_canonical_cbor(bytes),
+            previous_decoder(bytes),
+            "FAH1 public codec parity for {bytes:?}"
+        );
+    }
+
+    fn encode(value: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(value, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn fields() -> Vec<Value> {
+        vec![
+            Value::Text("FAH1".to_owned()),
+            Value::Integer(1.into()),
+            Value::Bytes(vec![1; 32]),
+            Value::Bytes(vec![2; 32]),
+            Value::Bytes(vec![3; 32]),
+        ]
+    }
+
+    #[test]
+    fn fixed_fah1_public_decoder_matches_independent_golden_and_previous_transport(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut golden = vec![0x85, 0x64, b'F', b'A', b'H', b'1', 1];
+        for identity in [1, 2, 3] {
+            golden.extend_from_slice(&[0x58, 32]);
+            golden.extend_from_slice(&[identity; 32]);
+        }
+        assert_eq!(golden.len(), 109);
+        assert_eq!(encode(&Value::Array(fields()))?, golden);
+        let host = ForkAdmissionHostRecordV1::new(hash(1), key(2), hash(3))?;
+        assert_eq!(host.canonical_bytes(), golden);
+        assert_eq!(ForkAdmissionHostRecordV1::from_canonical_cbor(&golden)?, host);
+        parity(&golden);
+        for length in 0..golden.len() {
+            parity(&golden[..length]);
+        }
+        let mut trailing = golden.clone();
+        trailing.push(0);
+        parity(&trailing);
+        for offset in 0..golden.len() {
+            for replacement in [0, 1, 0x17, 0x18, 0x20, 0x58, 0x60, 0x80, 0x9f, 0xf6, 0xff] {
+                let mut mutated = golden.clone();
+                mutated[offset] = replacement;
+                parity(&mutated);
+            }
+        }
+        for start in [9, 43, 77] {
+            let mut zero = golden.clone();
+            zero[start..start + 32].fill(0);
+            parity(&zero);
+            assert_eq!(
+                ForkAdmissionHostRecordV1::from_canonical_cbor(&zero),
+                Err(ForkAdmissionAuthorityCodecErrorV1::FieldOutOfBounds)
+            );
+        }
+        // Correct fields in nonpreferred/indefinite transports exceed the cap.
+        for (range, replacement) in [
+            (0..1, vec![0x98, 5]),
+            (1..2, vec![0x78, 4]),
+            (6..7, vec![0x18, 1]),
+            (7..9, vec![0x59, 0, 32]),
+        ] {
+            let mut nonpreferred = golden.clone();
+            nonpreferred.splice(range, replacement);
+            parity(&nonpreferred);
+        }
+        let mut indefinite = golden;
+        indefinite[0] = 0x9f;
+        indefinite.push(0xff);
+        parity(&indefinite);
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_fah1_public_decoder_preserves_malformed_error_precedence(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        parity(&encode(&Value::Null)?);
+        parity(&encode(&Value::Array(Vec::new()))?);
+        for version in [
+            Value::Integer(0.into()),
+            Value::Integer(2.into()),
+            Value::Integer((-1).into()),
+            Value::Null,
+            Value::Bool(true),
+        ] {
+            let mut values = fields();
+            values[1] = version;
+            parity(&encode(&Value::Array(values.clone()))?);
+            values[2] = Value::Null;
+            parity(&encode(&Value::Array(values.clone()))?);
+            values[0] = Value::Text("FAO1".to_owned());
+            parity(&encode(&Value::Array(values))?);
+        }
+        for index in 2..5 {
+            for invalid in [
+                Value::Null,
+                Value::Integer(1.into()),
+                Value::Bytes(Vec::new()),
+                Value::Bytes(vec![1; 31]),
+                Value::Bytes(vec![1; 33]),
+                Value::Bytes(vec![0; 32]),
+            ] {
+                let mut values = fields();
+                values[index] = invalid;
+                parity(&encode(&Value::Array(values))?);
+            }
+        }
+        for marker in [
+            Value::Text("FAH2".to_owned()),
+            Value::Bytes(b"FAH1".to_vec()),
+            Value::Null,
+        ] {
+            let mut values = fields();
+            values[0] = marker;
+            parity(&encode(&Value::Array(values))?);
+        }
+        Ok(())
+    }
+}
+
 #[test]
 fn public_pob1_codec_is_canonical_bounded_and_closed() -> Result<(), Box<dyn std::error::Error>> {
     let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
