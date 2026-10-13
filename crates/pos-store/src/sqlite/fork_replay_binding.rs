@@ -28,7 +28,9 @@ fn binding_length(
     let mut rows = statement
         .query(params![operation_id.as_bytes().as_slice()])
         .map_err(|_| Error::StorageIndeterminate)?;
-    context.row_available().map_err(|_| Error::CorruptAuthority)?;
+    context
+        .row_available()
+        .map_err(|_| Error::CorruptAuthority)?;
     let Some(row) = rows.next().map_err(|_| Error::StorageIndeterminate)? else {
         return context
             .check()
@@ -47,7 +49,9 @@ fn binding_length(
     let principal_length = row
         .get::<_, i64>(1)
         .map_err(|_| Error::StorageIndeterminate)?;
-    let length = row.get::<_, i64>(3).map_err(|_| Error::StorageIndeterminate)?;
+    let length = row
+        .get::<_, i64>(3)
+        .map_err(|_| Error::StorageIndeterminate)?;
     let length = usize::try_from(length).map_err(|_| Error::CorruptAuthority)?;
     if principal_length != i64::from(HASH_BYTES)
         || length > pos_core::MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1
@@ -76,7 +80,9 @@ pub(super) fn binding_with_context(
     let mut rows = statement
         .query(params![operation_id.as_bytes().as_slice()])
         .map_err(|_| Error::StorageIndeterminate)?;
-    context.row_available().map_err(|_| Error::CorruptAuthority)?;
+    context
+        .row_available()
+        .map_err(|_| Error::CorruptAuthority)?;
     let row = rows
         .next()
         .map_err(|_| Error::StorageIndeterminate)?
@@ -291,7 +297,10 @@ mod tests {
                 } else {
                     NativeReadContextV1::ordinary()
                 };
-                assert_eq!(binding_with_context(&conn, operation, &mut context), Err(error));
+                assert_eq!(
+                    binding_with_context(&conn, operation, &mut context),
+                    Err(error)
+                );
                 assert_eq!(budget.remaining_native_bytes(), 64);
                 assert!(budget.check_time().is_ok());
             }
@@ -405,8 +414,8 @@ mod tests {
     }
 
     #[test]
-    fn principal_result_charges_digest_and_commitment_only_after_their_predecessors(
-    ) -> Fallible<()> {
+    fn principal_result_charges_digest_and_commitment_only_after_their_predecessors() -> Fallible<()>
+    {
         let (_directory, store, binding) = fixture(&"é".repeat(64))?;
         let store_id = Hash::from_bytes([4; 32]);
         let evidence = Hash::from_bytes([5; 32]);
