@@ -53,6 +53,11 @@ impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
         }
     }
 
+    #[cfg(feature = "sqlite")]
+    pub(crate) const fn is_protected(&self) -> bool {
+        self.budget.is_some()
+    }
+
     pub(crate) fn check(&mut self) -> Result<(), crate::ForkManifestPublicationErrorV1> {
         self.budget
             .as_deref_mut()
