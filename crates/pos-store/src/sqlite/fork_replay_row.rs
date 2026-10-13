@@ -26,6 +26,8 @@ pub(super) enum SelectedRowV1<'key> {
     EventOriginBlob(&'key str),
     InterventionProbe(&'key str),
     InterventionBlob(&'key str),
+    SuffixProbe(&'key str, Option<i64>),
+    SuffixFields(&'key str, i64),
 }
 
 impl SelectedRowV1<'_> {
@@ -65,6 +67,9 @@ impl SelectedRowV1<'_> {
                 SELECT typeof(fia1_cbor) = 'blob', length(fia1_cbor)
                 FROM fork_intervention_admissions WHERE event_id = ?1) AS probe ON 1 = 1",
             Self::InterventionBlob(_) => "SELECT fia1_cbor FROM fork_intervention_admissions WHERE event_id = ?1",
+            Self::SuffixProbe(_, None) => super::fork_replay_suffix::FIRST_SUFFIX,
+            Self::SuffixProbe(_, Some(_)) => super::fork_replay_suffix::AFTER_SUFFIX,
+            Self::SuffixFields(_, _) => super::fork_replay_suffix::SUFFIX_FIELDS,
             Self::EventFields(_, _) => "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
                 causation_id, correlation_id, schema_version, payload_hash, signature,
                 signature_owner_id, signature_role, signature_epoch, origin_timeline_id, origin_logical_seq
@@ -92,6 +97,10 @@ impl SelectedRowV1<'_> {
             }
             Self::EventProbe(key, cursor) => cursor.query(statement, key),
             Self::EventFields(key, seq) | Self::ClassifiedEventProbe(key, seq) => {
+                statement.query(rusqlite::params![key, seq])
+            }
+            Self::SuffixProbe(key, None) => statement.query([key]),
+            Self::SuffixProbe(key, Some(seq)) | Self::SuffixFields(key, seq) => {
                 statement.query(rusqlite::params![key, seq])
             }
         }

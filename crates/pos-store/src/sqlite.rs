@@ -159,9 +159,11 @@ mod fork_replay_classifier;
 mod fork_replay_event;
 mod fork_replay_host;
 mod fork_replay_operation;
+mod fork_replay_orphans;
 mod fork_replay_provenance;
 mod fork_replay_publication;
 mod fork_replay_row;
+mod fork_replay_suffix;
 mod local_cut_owner;
 mod pipeline_admission;
 // The Plugin trust registry needs `pos-conformance`, which builds only on Linux, so non-Linux
@@ -1714,6 +1716,11 @@ impl SqliteStore {
         validator: AuthorityValidatorV1,
         context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
     ) -> Result<ForkEventSuffixV1, ForkEventAuthorityErrorV1> {
+        if context.is_protected() {
+            return fork_replay_suffix::read_suffix_with_context(
+                self, child_timeline_id, from_logical_seq, validator, context,
+            );
+        }
         context
             .check()
             .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
@@ -12669,6 +12676,14 @@ fn sqlite_decode_fork_suffix_row(
     prefix: u64,
     row: SqliteForkSuffixRowV1,
 ) -> Option<(EventId, u64, ForkAppendOperationV1)> {
+    sqlite_decode_fork_suffix_row_with_context(prefix, row, &mut crate::fork_replay::NativeReadContextV1::ordinary())
+}
+
+fn sqlite_decode_fork_suffix_row_with_context(
+    prefix: u64,
+    row: SqliteForkSuffixRowV1,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> Option<(EventId, u64, ForkAppendOperationV1)> {
     let (event_id, local_seq, fop1) = row;
     event_id
         .parse::<ulid::Ulid>()
@@ -12678,7 +12693,7 @@ fn sqlite_decode_fork_suffix_row(
                 .ok()
                 .and_then(|local_seq| prefix.checked_add(local_seq)),
         )
-        .zip(fop1.and_then(|bytes| ForkAppendOperationV1::from_canonical_cbor(&bytes).ok()))
+        .zip(fop1.and_then(|bytes| context.append_operation(&bytes).ok()))
         .map(|((event_id, logical_seq), operation)| {
             (EventId::from_ulid(event_id), logical_seq, operation)
         })
