@@ -10,8 +10,8 @@ use super::{
     array,
     authority_envelope::ForkAttributionAuthorityEnvelopeV1,
     authority_issuer::{ForkAttributionIssuerV1, MAX_FORK_ATTRIBUTION_ISSUER_BYTES_V1},
-    canonical, domain_digest, hash, text, timeline, uint,
-    ForkAttributionCodecErrorV1 as Error, Reader, ADMISSION_DOMAIN,
+    canonical, domain_digest, hash, text, timeline, uint, ForkAttributionCodecErrorV1 as Error,
+    Reader, ADMISSION_DOMAIN,
 };
 use crate::{Hash, TimelineId};
 

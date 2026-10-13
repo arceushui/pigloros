@@ -1,7 +1,7 @@
 //! Durable Fork-admission result values.
 
-use ciborium::value::Value;
 use crate::canonical_length::{self, CanonicalEmit, CanonicalSink};
+use ciborium::value::Value;
 
 use crate::{
     fork_admission_command::{decode, nonzero_hash},

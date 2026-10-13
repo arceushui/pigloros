@@ -604,7 +604,6 @@ pub(crate) fn canonical_bytes(value: &Value) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-
 fn bounded_bytes(value: &Value, maximum: usize) -> Result<&[u8], ForkAdmissionCommandCodecErrorV1> {
     match value {
         Value::Bytes(value) if !value.is_empty() && value.len() <= maximum => Ok(value),
