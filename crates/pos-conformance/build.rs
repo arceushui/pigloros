@@ -1664,9 +1664,9 @@ fn emit_strict_oracle(
     }
 }
 
-/// The path under `OUT_DIR` of an embedded byte source, named by its SHA-256 digest.
+/// The path under `OUT_DIR` of an embedded byte source, named by its BLAKE3 digest.
 fn embedded_path(bytes: &[u8]) -> String {
-    format!("embedded/{:x}.bin", Sha256::digest(bytes))
+    format!("embedded/{}.bin", blake3::hash(bytes).to_hex())
 }
 
 /// The `include_bytes!` expression of a byte source that `write_embedded_files` writes: a large
