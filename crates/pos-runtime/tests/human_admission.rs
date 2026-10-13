@@ -465,10 +465,12 @@ impl pos_core::FactualPrefixReadPortV1 for LostOutcomePort<'_> {
 
 /// A port whose basis-free lookup never finds a receipt, so only the
 /// store's own exact-retry comparison can recognize a duplicate. It records
-/// every basis it submits, so a test can resubmit the retained one.
+/// every basis it submits, so a test can resubmit the retained one. When
+/// `replay` holds an outcome, the store is bypassed and that outcome returned.
 struct ForgetfulLookupPort<'a> {
     store: &'a mut dyn ScheduledAdmissionStoreV1,
     submitted: &'a mut Vec<PipelineAdmissionBasisV1>,
+    replay: Option<PipelineOutcomeV1>,
 }
 
 impl PipelineAdmissionPortV1 for ForgetfulLookupPort<'_> {
@@ -478,7 +480,9 @@ impl PipelineAdmissionPortV1 for ForgetfulLookupPort<'_> {
         basis: &PipelineAdmissionBasisV1,
     ) -> Result<PipelineOutcomeV1, CoreError> {
         self.submitted.push(basis.clone());
-        self.store.admit_pipeline_batch(basis)
+        self.replay
+            .clone()
+            .map_or_else(|| self.store.admit_pipeline_batch(basis), Ok)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -689,6 +693,7 @@ fn the_store_comparison_still_recognizes_an_exact_retry() {
             &mut ForgetfulLookupPort {
                 store: harness.store.as_mut(),
                 submitted: &mut submitted,
+                replay: None,
             },
             &action,
             &attempt,
@@ -707,6 +712,34 @@ fn the_store_comparison_still_recognizes_an_exact_retry() {
             PipelineOutcomeV1::RecoveredDuplicate(first.receipt().clone()),
             "{name}"
         );
+        assert_eq!(events(&harness), 1, "{name}");
+    }
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_store_reported_duplicate_is_a_recovered_receipt() {
+    for mut harness in harnesses() {
+        let name = harness.name;
+        let attempt = admission(&harness, 1, 1, 0);
+        let action = proposal(EntityId::new(), b"walk");
+        let committed = ok(admit(&mut harness, &action, &attempt));
+        let replay = PipelineOutcomeV1::RecoveredDuplicate(committed.receipt().clone());
+        let mut submitted = Vec::new();
+
+        let duplicate = ok(harness.registry.admit_human_action(
+            &mut ForgetfulLookupPort {
+                store: harness.store.as_mut(),
+                submitted: &mut submitted,
+                replay: Some(replay),
+            },
+            &action,
+            &attempt,
+        ));
+
+        assert!(duplicate.recovered(), "{name}");
+        assert_eq!(duplicate.receipt(), committed.receipt(), "{name}");
+        assert_eq!(submitted.len(), 1, "{name}");
         assert_eq!(events(&harness), 1, "{name}");
     }
 }
