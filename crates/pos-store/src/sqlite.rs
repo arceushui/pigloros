@@ -1713,7 +1713,11 @@ impl SqliteStore {
     ) -> Result<ForkEventSuffixV1, ForkEventAuthorityErrorV1> {
         if context.is_protected() {
             return fork_replay_suffix::read_suffix_with_context(
-                self, child_timeline_id, from_logical_seq, validator, context,
+                self,
+                child_timeline_id,
+                from_logical_seq,
+                validator,
+                context,
             );
         }
         context
@@ -12630,7 +12634,11 @@ fn sqlite_decode_fork_suffix_row(
     prefix: u64,
     row: SqliteForkSuffixRowV1,
 ) -> Option<(EventId, u64, ForkAppendOperationV1)> {
-    sqlite_decode_fork_suffix_row_with_context(prefix, row, &mut crate::fork_replay::NativeReadContextV1::ordinary())
+    sqlite_decode_fork_suffix_row_with_context(
+        prefix,
+        row,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+    )
 }
 
 fn sqlite_decode_fork_suffix_row_with_context(
