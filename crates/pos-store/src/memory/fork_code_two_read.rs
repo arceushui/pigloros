@@ -22,10 +22,11 @@ use crate::{
         ValidatedAdmissionV1, ValidatedGraphV1, ValidatedImportV1, ValidatedOriginV1,
     },
     fork_manifest_publication::{
-        publication_parent_head, trusted_committed_manifest, CommittedPublicationRowsV1,
+        publication_parent_head, trusted_committed_manifest_with_context, CommittedPublicationRowsV1,
         CommittedPublicationSourcesV1, PublicationSourceErrorV1, PublicationSourceResultV1,
         PublicationSuffixV1, RetainedImportedKeyV1, RetainedKeyEvidenceV1,
     },
+    fork_replay::NativeReadContextV1,
     ForkEventAuthorityErrorV1 as AuthorityError,
     ForkManifestPublicationErrorV1 as PublicationError,
 };
@@ -304,6 +305,22 @@ impl MemoryStore {
         final_logical_head: u64,
         validator: AuthorityValidatorV1,
     ) -> Result<crate::CommittedForkManifestV1, PublicationError> {
+        self.read_committed_with_context(
+            child_timeline_id,
+            final_logical_head,
+            validator,
+            &mut NativeReadContextV1::ordinary(),
+        )
+    }
+
+    pub(super) fn read_committed_with_context(
+        &self,
+        child_timeline_id: TimelineId,
+        final_logical_head: u64,
+        validator: AuthorityValidatorV1,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<crate::CommittedForkManifestV1, PublicationError> {
+        context.check()?;
         self.fork_publication_bindings
             .get(&(child_timeline_id, final_logical_head))
             .copied()
@@ -347,7 +364,7 @@ impl MemoryStore {
                     suffix,
                     registry: Ok(self.key_registry.as_ref()),
                 };
-                trusted_committed_manifest(&rows, sources)
+                trusted_committed_manifest_with_context(&rows, sources, context)
             })
     }
 }
@@ -418,6 +435,63 @@ mod tests {
         Some(AuthorityError::CorruptAuthority),
         Some(PublicationError::PublicationConflict),
     );
+
+    #[test]
+    fn shared_native_batches_charge_exact_buffers_and_latch_inside_validation_expiry() -> Fallible<()> {
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use crate::{ForkReplayAuthorityReadErrorV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1};
+        use std::time::Duration;
+
+        for shape in [Shape::Mixed, Shape::EmptyClassified, Shape::EmptyUnclassified] {
+            let state = imported(shape)?;
+            let committed = state.store.read_committed(state.child, state.head)?;
+            let signed = pos_core::SignedForkReproManifestV1::from_canonical_cbor(&committed.outer_bytes)?;
+            // Independent byte-encoder oracle: actual shared validator buffers
+            // are one FSM1 hash encoding, its nested FRM1, one FRM1 signature
+            // payload, and one retained FSM1 clone. No role-message allocation.
+            let expected = committed.outer_bytes.len() * 2
+                + signed.manifest_bytes().len() * 2
+                + signed.manifest().input().intervention_sequences.len() * std::mem::size_of::<u64>();
+            for (bytes, succeeds) in [(expected, true), (expected - 1, false)] {
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, bytes, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                let result = state.store.read_committed_with_context(
+                    state.child,
+                    state.head,
+                    AuthorityValidatorV1::CodeTwoAware,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
+                if succeeds {
+                    assert_eq!(result?, committed);
+                    assert_eq!(budget.remaining_native_bytes(), 0);
+                } else {
+                    assert_eq!(result, Err(PublicationError::PublicationConflict));
+                    assert_eq!(budget.check_time(), Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded));
+                }
+            }
+            // Expiry occurs after the adapter's entry check, inside shared
+            // validation. It must be latched, not translated into a fresh budget.
+            let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                std::iter::repeat_n(Duration::ZERO, 4).chain([Duration::from_secs(2)]),
+            );
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, expected, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                state.store.read_committed_with_context(
+                    state.child,
+                    state.head,
+                    AuthorityValidatorV1::CodeTwoAware,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                ),
+                Err(PublicationError::PublicationConflict)
+            );
+            assert_eq!(budget.check_time(), Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded));
+        }
+        Ok(())
+    }
 
     type Tamper = fn(&mut Imported) -> Fallible<()>;
 
