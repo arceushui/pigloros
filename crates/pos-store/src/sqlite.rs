@@ -151,6 +151,7 @@ mod fork_replay;
 mod fork_replay_admission;
 mod fork_replay_binding;
 mod fork_replay_classifier;
+mod fork_replay_host;
 mod fork_replay_operation;
 mod fork_replay_publication;
 mod local_cut_owner;
@@ -13773,7 +13774,7 @@ fn sqlite_fork_admission_result_with_context(
     context
         .check()
         .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
-    let store_id = sqlite_fork_admission_store_id(conn)?;
+    let store_id = sqlite_fork_admission_store_id_with_context(conn, context)?;
     context
         .check()
         .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
@@ -13913,7 +13914,7 @@ fn sqlite_fork_principal_owner_binding_with_context(
                 .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
         })
         .and_then(|binding_row| {
-            sqlite_fork_admission_store_id(conn).and_then(|store_id| {
+            sqlite_fork_admission_store_id_with_context(conn, context).and_then(|store_id| {
                 sqlite_principal_owner_result_with_context(conn, store_id, &binding_row, context)
             })
         })
@@ -13927,6 +13928,21 @@ fn sqlite_fork_admission_store_id(
         .host
         .map(|host| host.store_id())
         .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+}
+
+fn sqlite_fork_admission_store_id_with_context(
+    conn: &Connection,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> Result<Hash, pos_core::ForkAdmissionErrorV1> {
+    if context.is_protected() {
+        fork_replay_host::host_with_context(conn, context)
+            .and_then(|host| host.ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority))
+            .map(|host| host.store_id())
+    } else {
+        // Retain the ordinary SqlValue getter/error table, including invalid
+        // UTF-8 TEXT errors. This branch never borrows a protected ledger.
+        sqlite_fork_admission_store_id(conn)
+    }
 }
 
 fn sqlite_decode_principal_owner_binding(
