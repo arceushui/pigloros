@@ -69,7 +69,8 @@ impl SqliteStore {
             // Preserve the old Vec getter's storage-type failure, not validity.
             return Err(Error::StorageIndeterminate);
         }
-        let length: usize = row.get(1).map_err(Error::from)?;
+        let length = row.get::<_, i64>(1).map_err(Error::from)?;
+        let length = usize::try_from(length).map_err(|_| Error::StorageIndeterminate)?;
         if length > maximum {
             return Err(Error::PublicationConflict);
         }
