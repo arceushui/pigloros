@@ -28,7 +28,7 @@ enum PublicationRowV1 {
 }
 
 impl PublicationRowV1 {
-    const fn queries(&self) -> (&'static str, &'static str, usize) {
+    const fn queries(self) -> (&'static str, &'static str, usize) {
         match self {
             Self::Binding => (
                 "SELECT typeof(fpb1_cbor) = 'blob', length(fpb1_cbor) FROM fork_publication_bindings WHERE child_id = ?1 AND final_logical_head = ?2",
@@ -180,7 +180,7 @@ mod tests {
                 PublicationRowV1::Artifact => &artifact_arguments,
             };
             // Stored-state injection isolates raw type/length handling, not authority.
-            let oversized = vec![0; maximum + 1];
+            let oversized = vec![0_u8; maximum + 1];
             store.conn.execute(sql, params![oversized])?;
             assert_raw_gate_refusal(&store, kind, arguments, Error::PublicationConflict)?;
             store.conn.execute(sql, params!["not-a-blob"])?;
