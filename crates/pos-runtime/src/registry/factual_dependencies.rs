@@ -217,6 +217,8 @@ pub(super) fn verified_prefix_digest(
                 });
             }
         }
+        // The order of `committed` is not guaranteed here, and the digest
+        // covers ascending `seq` order, so the order is fixed explicitly.
         handed.sort_unstable_by_key(|event| event.seq);
         factual_verified_prefix_content_digest(observed_through, &handed)
     })
@@ -296,11 +298,13 @@ fn driver_event_seqs(fresh: &[ForwardedPair], carried: &BTreeMap<Seq, Hash>) -> 
 /// the highest Tick the stepped Drivers retain a prior node from.
 ///
 /// While the stores hold factual rows the head is the last committed Tick and
-/// every retained node is committed, so this is the ADR's `last committed Tick
-/// + 1`. Until slices 8-9 write rows the head stays zero, and the retained
-/// nodes keep each Tick strictly later than every Tick this registry itself
-/// recorded, so a chain or history edge always points at an earlier Tick
-/// (R3.4.1). A Tick that would pass `u64::MAX` exhausts the Timeline's set.
+/// every retained node is committed, so this is the ADR's "last committed
+/// Tick plus one". Until slices 8-9 write rows the head stays zero. The Tick
+/// is then strictly later than every prior node the stepped Drivers retain,
+/// so a chain or history edge of those Drivers always points at an earlier
+/// Tick (R3.4.1). That is not a registry-wide guarantee: passes over
+/// different Driver subsets can repeat a Tick until the stores write rows.
+/// A Tick that would pass `u64::MAX` exhausts the Timeline's set.
 pub(super) fn next_scheduled_tick(
     head: u64,
     retained: u64,
@@ -327,10 +331,12 @@ fn retained_tick(entry: &PluginEntry) -> u64 {
 /// The class rule of an output follows the admitted declaration of its Event
 /// type (R3.5.1).
 ///
-/// A Driver registered without an output admission (the generated local
-/// registration) validates no draft and declares no authority; its outputs are
-/// `Authoritative`. Output admission rejects every draft of an admitted Driver
-/// whose type it does not declare, so the default is never taken for one.
+/// Every production registration carries an output admission, which rejects a
+/// draft of a type it does not declare. An entry without one is only the
+/// test-support `register_driver` Driver, which owns no Event type, so
+/// `validate_plugin_output` lets it pass an empty batch alone and this lookup
+/// never sees one of its drafts. The `Authoritative` default is therefore
+/// unreachable today; it stays as the strict fail-closed class.
 fn output_authority(entry: &PluginEntry, event_type: &Kind) -> OutputAuthorityV1 {
     let mut declarations = entry
         .output_admission
@@ -346,6 +352,10 @@ fn output_authority(entry: &PluginEntry, event_type: &Kind) -> OutputAuthorityV1
 ///
 /// Each stepped Driver adds at most one digest, so a list never outgrows the
 /// number of registered Drivers and its positions fit a `u32`.
+///
+/// `next` always equals `order.len()`. It stays a counter so a position needs
+/// no fallible `usize` to `u32` conversion, which would add a branch no
+/// reachable input takes.
 #[derive(Default)]
 struct Interned {
     order: Vec<Hash>,
@@ -407,14 +417,18 @@ impl<'a> DriverScope<'a> {
 
     /// Whether the Driver subscribed to any Event type: a Driver with none
     /// observes no committed Event (R3.4.7).
-    fn subscribes(&self) -> bool {
-        !self.entry.event_observation.event_subscriptions.is_empty()
+    const fn subscribes(&self) -> bool {
+        !self.subscriptions().is_empty()
+    }
+
+    /// The Event types the Driver subscribed to.
+    const fn subscriptions(&self) -> &Vec<Kind> {
+        &self.entry.event_observation.event_subscriptions
     }
 
     /// Whether the pass showed the Event and the Driver subscribed to its type.
     fn subscribed_and_shown(&self, fact: &EventFact) -> bool {
-        let subscriptions = &self.entry.event_observation.event_subscriptions;
-        fact.shown && subscriptions.contains(&fact.event_type)
+        fact.shown && self.subscriptions().contains(&fact.event_type)
     }
 
     /// Whether the recorded node of an Event the pass did not see is of a type

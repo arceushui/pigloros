@@ -30,7 +30,7 @@ use pos_core::{
     PIPELINE_CONTRACT_VERSION_V1,
 };
 
-use super::PluginRegistry;
+use super::{factual_dependencies::next_scheduled_tick, PluginRegistry};
 use crate::error::ActionSubmissionError;
 
 const APPROVAL_DOMAIN: &[u8] = b"PiglorOS.HumanDomainApproval.v1\0";
@@ -208,9 +208,10 @@ fn bound_human_basis(
 ) -> Result<PipelineAdmissionBasisV1, HumanActionAdmissionErrorV1> {
     let drafts = vec![draft];
     let evidence = approval_evidence(admission, proposal, &drafts);
-    let dependencies = human_dependencies(port, admission, evidence, &drafts)?;
-    human_basis(admission, evidence, drafts, dependencies)
-        .map_err(HumanActionAdmissionErrorV1::Contract)
+    human_dependencies(port, admission, evidence, &drafts).and_then(|dependencies| {
+        human_basis(admission, evidence, drafts, dependencies)
+            .map_err(HumanActionAdmissionErrorV1::Contract)
+    })
 }
 
 /// Build the factual Tick declaration of the approved drafts: one
@@ -222,20 +223,25 @@ fn human_dependencies(
     drafts: &[EventDraft],
 ) -> Result<FactualTickDependenciesV1, HumanActionAdmissionErrorV1> {
     let timeline = admission.observation.timeline_id();
-    let head = port
-        .last_committed_factual_tick(timeline)
-        .map_err(HumanActionAdmissionErrorV1::Store)?;
-    let context = FactualTickContextV1 {
-        timeline_id: timeline,
-        // The head is a `u64` Tick count; it cannot reach `u64::MAX` in practice.
-        tick: head.tick.saturating_add(1),
-        attempt_id: admission.attempt_id,
-        evidence_digest: evidence,
-        authority_grant: admission.authority_grant,
-    };
-    let shape = FactualTickShapeV1::Human(drafts.to_vec());
-    assemble_factual_tick(&context, &shape)
-        .map_err(HumanActionAdmissionErrorV1::DependencyDeclaration)
+    port.last_committed_factual_tick(timeline)
+        .map_err(HumanActionAdmissionErrorV1::Store)
+        .and_then(|head| {
+            // A human Tick retains no prior node, so only the head sets it.
+            next_scheduled_tick(head.tick, 0)
+                .map_err(HumanActionAdmissionErrorV1::DependencyDeclaration)
+        })
+        .and_then(|tick| {
+            let context = FactualTickContextV1 {
+                timeline_id: timeline,
+                tick,
+                attempt_id: admission.attempt_id,
+                evidence_digest: evidence,
+                authority_grant: admission.authority_grant,
+            };
+            let shape = FactualTickShapeV1::Human(drafts.to_vec());
+            assemble_factual_tick(&context, &shape)
+                .map_err(HumanActionAdmissionErrorV1::DependencyDeclaration)
+        })
 }
 
 /// Build the `HumanProposedAction` basis for one approved draft.

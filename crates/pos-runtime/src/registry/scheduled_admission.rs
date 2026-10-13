@@ -208,11 +208,13 @@ impl PluginRegistry {
         if pending.staged_drafts.is_empty() {
             return Ok(None);
         }
-        ensure_set_headroom(port, pending.timeline)?;
-        let dependencies = self.scheduled_dependencies(port, pending, admission, anchor)?;
-        build_basis(pending, admission, anchor, dependencies)
-            .map(Some)
-            .map_err(RuntimeError::PipelineContract)
+        ensure_set_headroom(port, pending.timeline)
+            .and_then(|()| self.scheduled_dependencies(port, pending, admission, anchor))
+            .and_then(|dependencies| {
+                build_basis(pending, admission, anchor, dependencies)
+                    .map(Some)
+                    .map_err(RuntimeError::PipelineContract)
+            })
     }
 
     /// Resolve an in-doubt scheduled pass by resubmitting its exact retained basis.

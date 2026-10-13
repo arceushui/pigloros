@@ -694,6 +694,46 @@ fn a_declared_presentation_only_node_breaks_the_class_rule() {
     assert_eq!(err(result), FactualDependencyErrorV1::ClassRuleViolation);
 }
 
+/// The failure of a pass whose one draft declares `inputs`, which must come
+/// before the builder records any node for the commit.
+fn draft_level_failure(
+    inputs: Vec<DirectInputRefV1>,
+    port: &FakePrefix,
+    events: &[Event],
+    through: u64,
+) -> FactualDependencyErrorV1 {
+    let mut registry = declaring_registry(Vec::new(), inputs);
+    let mut pending = staged(&mut registry, TimelineId::new(), through, events);
+    let result = build(&registry, port, &mut pending, through);
+    assert!(pending.factual.step_nodes.is_empty());
+    assert!(pending.factual.history_recorded.is_empty());
+    declaration_error(err(result))
+}
+
+#[test]
+fn a_draft_level_event_above_the_cut_is_undeclarable() {
+    let inputs = vec![committed_event(3)];
+    let error = draft_level_failure(inputs, &FakePrefix::at(4), &plain_events(2), 2);
+    assert_eq!(error, FactualDependencyErrorV1::UndeclarableInput);
+}
+
+#[test]
+fn a_draft_level_event_nobody_knows_is_unresolved() {
+    let inputs = vec![committed_event(2)];
+    let error = draft_level_failure(inputs, &FakePrefix::at(4), &plain_events(1), 2);
+    assert_eq!(error, FactualDependencyErrorV1::UnresolvedInput);
+}
+
+#[test]
+fn a_draft_level_presentation_only_node_breaks_the_class_rule() {
+    let mut port = FakePrefix::at(4);
+    port.digests
+        .insert(hash(55), (presentation_node(hash(55)), None));
+    let inputs = vec![named(hash(55))];
+    let error = draft_level_failure(inputs, &port, &plain_events(1), 1);
+    assert_eq!(error, FactualDependencyErrorV1::ClassRuleViolation);
+}
+
 /// The first `count` of `digests`, each declared by digest.
 fn named_digests(digests: &[Hash], count: usize) -> Vec<DirectInputRefV1> {
     digests[..count].iter().copied().map(named).collect()
@@ -1322,6 +1362,25 @@ fn a_driver_without_subscriptions_cannot_declare_an_event_it_never_saw() {
         .event_subscriptions
         .clear();
     let mut pending = staged(&mut registry, TimelineId::new(), 2, &plain_events(1));
+    let result = build(&registry, &FakePrefix::at(0), &mut pending, 2);
+    let error = declaration_error(err(result));
+    assert_eq!(error, FactualDependencyErrorV1::UndeclarableInput);
+}
+
+/// An authorized view forwards no Event and `gather_facts` is not called, so
+/// the pass holds no fact. A committed Event it declares is still refused as
+/// undeclarable, not unresolved: an authorized Driver subscribes to nothing, and
+/// the readability check runs before the lookup of facts (R3.4.7, R3.6.2).
+#[test]
+fn an_authorized_pass_refuses_a_declared_committed_event_as_undeclarable() {
+    let mut registry = declaring_registry(vec![committed_event(1)], Vec::new());
+    let id = ids(&registry)[0];
+    registry.plugins[&id]
+        .event_observation
+        .event_subscriptions
+        .clear();
+    let mut pending = staged(&mut registry, TimelineId::new(), 0, &[]);
+    assert!(pending.factual.event_facts.is_empty());
     let result = build(&registry, &FakePrefix::at(0), &mut pending, 2);
     let error = declaration_error(err(result));
     assert_eq!(error, FactualDependencyErrorV1::UndeclarableInput);
