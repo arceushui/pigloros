@@ -13,6 +13,8 @@ use pos_core::{
 #[cfg(feature = "sqlite")]
 mod admission;
 #[cfg(feature = "sqlite")]
+mod classifier;
+#[cfg(feature = "sqlite")]
 mod publication;
 #[cfg(feature = "sqlite")]
 mod retained_key;
@@ -27,7 +29,8 @@ fn imported_projection_length(bytes: &[u8]) -> Option<usize> {
     let prefix = bytes.len().checked_sub(IMPORTED_ORIGIN_BYTES)?;
     // Subtraction proves this slice exists; replacing 36 bytes by 2 also
     // cannot overflow the existing input length.
-    bytes[prefix..].starts_with(&IMPORTED_ORIGIN_HEAD)
+    bytes[prefix..]
+        .starts_with(&IMPORTED_ORIGIN_HEAD)
         .then_some(prefix + LOCAL_ORIGIN_BYTES)
 }
 
