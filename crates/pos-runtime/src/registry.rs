@@ -32,8 +32,9 @@ use pos_core::{
     },
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
     ConsentError, ConsentGate, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureGate,
-    ErasureProtectedOperationV1, FactualOwnerIdV1, Hash, OwnerIdV1, Plugin, ProposedAction, Reducer,
-    ScheduledObservationProfileV1, Timeline, TimelineMeta, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ErasureProtectedOperationV1, FactualOwnerIdV1, Hash, OwnerIdV1, Plugin, ProposedAction,
+    Reducer, ScheduledObservationProfileV1, Timeline, TimelineMeta,
+    MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
