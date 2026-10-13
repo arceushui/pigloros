@@ -2458,7 +2458,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[path = "src/catalog_auxiliary.rs"]
 pub mod catalog_auxiliary;
 use catalog_auxiliary::{
-    check_embedded_total, declaration_is_valid, validate_auxiliary_catalog, AuxiliaryEntry, DEFAULT_AUXILIARY_CAP, MAX_EMBEDDED_AUXILIARY_BYTES,
+    check_embedded_total, declaration_is_valid, validate_auxiliary_catalog, AuxiliaryEntry,
+    DEFAULT_AUXILIARY_CAP, MAX_EMBEDDED_AUXILIARY_BYTES,
 };
 
 struct FixtureAuxiliary {
