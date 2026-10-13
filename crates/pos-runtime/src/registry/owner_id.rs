@@ -76,7 +76,7 @@ impl PluginRegistry {
     pub fn factual_owner_ids(&self) -> Vec<(PluginId, FactualOwnerIdV1)> {
         self.plugins
             .iter()
-            .map(|(id, entry)| (*id, entry.owner_id.clone()))
+            .map(|(id, entry)| (*id, entry.pass_state.owner_id.clone()))
             .collect()
     }
 }

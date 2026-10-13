@@ -16,7 +16,10 @@
 //! A collapse is applied to the entry at planning time. The carried-set append
 //! and the cursors are staged in the pending step and applied at commit.
 
-use std::{cmp::Reverse, collections::BTreeMap};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, HashSet},
+};
 
 use indexmap::IndexMap;
 use pos_core::{
@@ -31,6 +34,15 @@ use super::{
 
 /// One Event forwarded to a Driver: its `seq` and payload hash.
 pub(super) type ForwardedPair = (Seq, Hash);
+
+/// The committed prefix a pass observes and the `seq` it is cut at.
+#[derive(Clone, Copy)]
+pub(super) struct PassCut<'a> {
+    /// The last `seq` the pass observes.
+    pub(super) observed_through: Seq,
+    /// The committed Events of the prefix.
+    pub(super) events: &'a [Event],
+}
 
 /// What the plan needs to know about one stepped Driver.
 pub(super) struct ForwardInput<'a> {
@@ -141,44 +153,33 @@ fn apply_room_rule(input: &ForwardInput<'_>) -> Working {
 /// its own carried set before any step (B) collapse, and a later collapse of
 /// that set does not give the Driver more room. Step (C) only trims.
 ///
+/// A collapse never changes the size of another set, so the sets that have
+/// not collapsed are visited once, largest first. The cap cannot be reached
+/// once every one of them has collapsed, because the load is then empty.
+///
 /// Returns the load of the carried sets that remain.
 fn collapse_to_pass_budget(inputs: &[ForwardInput<'_>], work: &mut [Working]) -> EventLoad {
     let mut load = EventLoad::default();
-    for (input, driver) in inputs.iter().zip(work.iter()) {
+    let mut live: Vec<usize> = Vec::new();
+    for (index, (input, driver)) in inputs.iter().zip(work.iter()).enumerate() {
         if !driver.collapse {
+            live.push(index);
             for seq in input.carried.keys() {
                 load.add(*seq);
             }
         }
     }
-    while load.at_cap() {
-        let index = largest_carried(inputs, work);
+    live.sort_by_key(|index| (Reverse(inputs[*index].carried.len()), *index));
+    for index in live {
+        if !load.at_cap() {
+            break;
+        }
         work[index].collapse = true;
         for seq in inputs[index].carried.keys() {
             load.remove(*seq);
         }
     }
     load
-}
-
-/// The position of the largest carried set that has not collapsed, the lowest
-/// position at equal size.
-fn largest_carried(inputs: &[ForwardInput<'_>], work: &[Working]) -> usize {
-    inputs
-        .iter()
-        .zip(work)
-        .enumerate()
-        .max_by_key(|(index, (input, driver))| (live_size(input, driver), Reverse(*index)))
-        .map_or(0, |(index, _)| index)
-}
-
-/// The size of a Driver's carried set once the collapses so far are applied.
-fn live_size(input: &ForwardInput<'_>, driver: &Working) -> usize {
-    if driver.collapse {
-        0
-    } else {
-        input.carried.len()
-    }
 }
 
 /// Step (C): trim the newly forwarded pairs, one `(Driver, Event)` pair at a
@@ -233,10 +234,13 @@ impl PluginRegistry {
     pub(super) fn plan_pass_forwarding(
         &mut self,
         driver_ids: &[PluginId],
-        cut: (Seq, &[Event]),
+        cut: PassCut<'_>,
         operation: &OperationContext,
     ) -> Vec<ForwardPlan> {
-        let (observed_through, committed_events) = cut;
+        let PassCut {
+            observed_through,
+            events: committed_events,
+        } = cut;
         let ephemeral = self.ephemeral_event_types();
         let new_events: Vec<Vec<ForwardedPair>> = driver_ids
             .iter()
@@ -254,7 +258,7 @@ impl PluginRegistry {
             .iter()
             .zip(new_events)
             .map(|(id, fresh)| ForwardInput {
-                carried: &self.plugins[id].carried,
+                carried: &self.plugins[id].pass_state.carried,
                 cursor: self.plugins[id].event_cursor,
                 fresh,
             })
@@ -278,7 +282,7 @@ impl PluginRegistry {
     /// `CapabilityMismatch`), and one Event type has one owner. Flattening the
     /// declarations of all entries is therefore the same as keying each by the
     /// `owned_event_types` of the Plugin that declares it.
-    fn ephemeral_event_types(&self) -> Vec<Kind> {
+    fn ephemeral_event_types(&self) -> HashSet<Kind> {
         self.plugins
             .values()
             .filter_map(|entry| entry.output_admission.as_ref())
@@ -299,7 +303,7 @@ fn fresh_pairs(
     committed_events: &[Event],
     observed_through: Seq,
     operation: &OperationContext,
-    ephemeral: &[Kind],
+    ephemeral: &HashSet<Kind>,
 ) -> Vec<ForwardedPair> {
     let subscriptions = &entry.event_observation.event_subscriptions;
     let mut pairs: Vec<ForwardedPair> = committed_events
@@ -327,13 +331,20 @@ fn covered_events(pairs: impl Iterator<Item = (Seq, Hash)>) -> Vec<FactualEventR
 ///
 /// The new node chains onto the content digest of the state it replaces.
 fn collapse_carried(entry: &mut PluginEntry) {
-    let covered = covered_events(entry.carried.iter().map(|(seq, hash)| (*seq, *hash)));
-    let first = covered.first().map_or(Seq::ZERO, |event| event.seq);
-    let last = covered.last().map_or(Seq::ZERO, |event| event.seq);
-    entry.history = HistoryInputV1::Pending {
-        content: factual_history_content_digest(entry.history.content(), first, last, &covered),
+    let state = &mut entry.pass_state;
+    let covered = covered_events(state.carried.iter().map(|(seq, hash)| (*seq, *hash)));
+    // The carried set is never empty here. Folding the span keeps it total
+    // without a fallback for the empty case.
+    let first = covered
+        .iter()
+        .fold(Seq::from_u64(u64::MAX), |least, event| least.min(event.seq));
+    let last = covered
+        .iter()
+        .fold(Seq::ZERO, |greatest, event| greatest.max(event.seq));
+    state.history = HistoryInputV1::Pending {
+        content: factual_history_content_digest(state.history.content(), first, last, &covered),
     };
-    entry.carried.clear();
+    state.carried.clear();
 }
 
 /// The history state a restore gives every Driver (R3.4.10).
@@ -372,12 +383,11 @@ pub(super) fn settle_carried_sets(
     recorded: bool,
 ) {
     for (id, pairs) in driver_ids.iter().zip(forwarded) {
-        if let Some(entry) = plugins.get_mut(id) {
-            if recorded {
-                entry.carried.clear();
-            } else {
-                entry.carried.extend(pairs);
-            }
+        let state = &mut plugins[id].pass_state;
+        if recorded {
+            state.carried.clear();
+        } else {
+            state.carried.extend(pairs);
         }
     }
 }

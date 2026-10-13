@@ -173,10 +173,6 @@ impl PluginRegistry {
         admission: &ScheduledPassAdmissionV1,
         prepared: Result<Option<PipelineAdmissionBasisV1>, RuntimeError>,
     ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
-        // Slice 7b folds this call into the builder as its first port read:
-        // after output admission and schema validation and before
-        // `build_basis` (ADR-064 R3.8.1). Until then it runs here, after the
-        // basis is prepared.
         let prepared = preflight_prepared_pass(port, &pending, prepared);
         match prepared {
             Ok(Some(basis)) => self.finish_scheduled_admission(
@@ -291,7 +287,8 @@ pub(super) struct InDoubtAdmission {
 
 /// The capacity preflight of a prepared pass (ADR-064 Revision 3, R3.10).
 ///
-/// It is the first port read of admission and runs before any store call. An
+/// It runs once the pass is prepared. No earlier step reads the port, so it is
+/// the first port read of admission and precedes any store call. An
 /// empty pass builds no record and makes no store call, so it is not
 /// preflighted and its cursors still advance on an exhausted Timeline.
 fn preflight_prepared_pass(

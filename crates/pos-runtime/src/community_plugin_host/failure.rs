@@ -85,9 +85,6 @@ pub enum PassFailureV1 {
 pub const fn classify_pass_failure(error: &RuntimeError) -> PassFailureV1 {
     match error {
         RuntimeError::CommunityPlugin(host) => PassFailureV1::Host(*host),
-        // The host refuses before the store what the store would otherwise refuse
-        // with a typed outcome, so the classification does not depend on where
-        // the check ran.
         RuntimeError::ScheduledPassNotAdmitted(_) | RuntimeError::DependencyDeclaration(_) => {
             PassFailureV1::Host(commit_failed(
                 AtomicCommitFailureV1::DeterministicTypedResult,

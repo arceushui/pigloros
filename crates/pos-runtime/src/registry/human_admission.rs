@@ -19,17 +19,16 @@
 //! commits no Event and is never re-observed or retried here.
 
 use pos_core::{
-    ensure_factual_set_headroom, pipeline_draft_vector_digest_v1, AppendIdentity, CoreError,
-    EventDraft, FactualAdmissionPortV1, FactualDependencyErrorV1, Hash,
-    PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1, PipelineAttemptDraftV1,
-    PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1, PipelineContractErrorV1,
-    PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1, PipelineObservationAnchorV1,
-    PipelineOutcomeV1, PipelinePreconditionV1, PipelineReceiptLookupV1,
-    PipelineSecurityRevisionsV1, ProposedAction, TentativePipelineResultV1, TimelineId,
-    PIPELINE_CONTRACT_VERSION_V1,
+    pipeline_draft_vector_digest_v1, AppendIdentity, CoreError, EventDraft, FactualAdmissionPortV1,
+    FactualDependencyErrorV1, Hash, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
+    PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1,
+    PipelineContractErrorV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
+    PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
+    PipelineReceiptLookupV1, PipelineSecurityRevisionsV1, ProposedAction,
+    TentativePipelineResultV1, PIPELINE_CONTRACT_VERSION_V1,
 };
 
-use super::PluginRegistry;
+use super::{ensure_set_headroom_with, PluginRegistry};
 use crate::error::ActionSubmissionError;
 
 const APPROVAL_DOMAIN: &[u8] = b"PiglorOS.HumanDomainApproval.v1\0";
@@ -152,7 +151,15 @@ impl PluginRegistry {
         admission: &HumanActionAdmissionV1,
     ) -> Result<HumanActionReceiptV1, HumanActionAdmissionErrorV1> {
         let timeline = admission.observation.timeline_id();
-        ensure_human_set_headroom(port, timeline)
+        // Refuse the action while the Timeline cannot take one more worst-case
+        // Tick (ADR-064 Revision 3, R3.10), before the `ActionApprover` runs.
+        let headroom = ensure_set_headroom_with(
+            &*port,
+            timeline,
+            HumanActionAdmissionErrorV1::Store,
+            HumanActionAdmissionErrorV1::DependencyDeclaration,
+        );
+        headroom
             .and_then(|()| {
                 self.submit_action(timeline, proposal)
                     .map_err(HumanActionAdmissionErrorV1::Submission)
@@ -167,20 +174,6 @@ impl PluginRegistry {
             })
             .and_then(settle_human_outcome)
     }
-}
-
-/// Refuse the action while the Timeline cannot take one more worst-case Tick
-/// (ADR-064 Revision 3, R3.10), before the `ActionApprover` runs.
-fn ensure_human_set_headroom(
-    port: &dyn FactualAdmissionPortV1,
-    timeline: TimelineId,
-) -> Result<(), HumanActionAdmissionErrorV1> {
-    port.factual_set_counts(timeline)
-        .map_err(HumanActionAdmissionErrorV1::Store)
-        .and_then(|counts| {
-            ensure_factual_set_headroom(counts)
-                .map_err(HumanActionAdmissionErrorV1::DependencyDeclaration)
-        })
 }
 
 /// Keep only an authoritative receipt; every other outcome is typed.

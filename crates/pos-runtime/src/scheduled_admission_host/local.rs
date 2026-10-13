@@ -41,10 +41,9 @@ use pos_core::{
 use ulid::Ulid;
 
 use super::ScheduledAdmissionPortsV1;
-use crate::registry::ensure_set_headroom;
 use crate::{
-    HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1, PluginRegistry,
-    RuntimeError, ScheduledPassAdmissionV1,
+    registry::ensure_set_headroom, HumanActionAdmissionErrorV1, HumanActionAdmissionV1,
+    HumanActionReceiptV1, PluginRegistry, RuntimeError, ScheduledPassAdmissionV1,
 };
 
 const TRUST_DOMAIN: &str = "local.experiment";
