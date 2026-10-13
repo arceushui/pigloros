@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use ed25519_dalek::ed25519::signature::MultipartVerifier;
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use pos_core::{
     deletion_receipt, CanonicalBytes, Hash, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1,
@@ -494,26 +495,50 @@ pub fn verify_for_role(
     if !identity.role.is_signing() {
         return Err(pos_core::CoreError::SignatureVerificationFailed);
     }
-    let message = role_bound_message(identity, payload);
+    let message = RoleMessageParts::new(&identity, payload);
     let signature = ed25519_dalek::Signature::from_bytes(signature.as_bytes());
     verifying_key
-        .verify(&message, &signature)
+        .multipart_verify(&message.slices(), &signature)
         .map_err(|_| pos_core::CoreError::SignatureVerificationFailed)
 }
 
 fn role_bound_message(identity: KeyIdentityV1, payload: &CanonicalBytes) -> Vec<u8> {
-    let owner_bytes = identity.owner_id.as_str().as_bytes();
-    let owner_length = u32::try_from(owner_bytes.len()).unwrap_or_default();
-    let mut message = Vec::with_capacity(
-        ROLE_SIGNATURE_DOMAIN.len() + 4 + owner_bytes.len() + 1 + 8 + payload.len(),
-    );
-    message.extend_from_slice(ROLE_SIGNATURE_DOMAIN);
-    message.extend_from_slice(&owner_length.to_be_bytes());
-    message.extend_from_slice(owner_bytes);
-    message.push(identity.role.code());
-    message.extend_from_slice(&identity.epoch.to_be_bytes());
-    message.extend_from_slice(payload.as_slice());
-    message
+    RoleMessageParts::new(&identity, payload).slices().concat()
+}
+
+/// One framing owner for contiguous signing and allocation-free verification.
+/// Multipart verification uses the same pure Ed25519 primitive as `verify`;
+/// it neither prehashes the payload nor changes the signed message.
+struct RoleMessageParts<'a> {
+    owner_length: [u8; 4],
+    owner: &'a [u8],
+    role: [u8; 1],
+    epoch: [u8; 8],
+    payload: &'a [u8],
+}
+
+impl<'a> RoleMessageParts<'a> {
+    fn new(identity: &'a KeyIdentityV1, payload: &'a CanonicalBytes) -> Self {
+        let owner = identity.owner_id.as_str().as_bytes();
+        Self {
+            owner_length: u32::try_from(owner.len()).unwrap_or_default().to_be_bytes(),
+            owner,
+            role: [identity.role.code()],
+            epoch: identity.epoch.to_be_bytes(),
+            payload: payload.as_slice(),
+        }
+    }
+
+    fn slices(&self) -> [&[u8]; 6] {
+        [
+            ROLE_SIGNATURE_DOMAIN,
+            &self.owner_length,
+            self.owner,
+            &self.role,
+            &self.epoch,
+            self.payload,
+        ]
+    }
 }
 
 #[cfg(test)]
