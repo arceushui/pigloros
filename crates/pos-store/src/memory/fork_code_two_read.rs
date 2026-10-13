@@ -97,18 +97,6 @@ impl MemoryStore {
 
     /// Read one child's classified authority graph under an explicit R6.9
     /// validator.
-    pub(super) fn validated_graph(
-        &self,
-        child_timeline_id: TimelineId,
-        validator: AuthorityValidatorV1,
-    ) -> Result<ValidatedGraphV1, AuthorityError> {
-        self.validated_graph_with_context(
-            child_timeline_id,
-            validator,
-            &mut NativeReadContextV1::ordinary(),
-        )
-    }
-
     fn validated_graph_with_context(
         &self,
         child_timeline_id: TimelineId,
@@ -1182,12 +1170,20 @@ mod tests {
         );
         assert_eq!(
             store
-                .validated_graph(state.child, AuthorityValidatorV1::LocalOnly)
+                .validated_graph_with_context(
+                    state.child,
+                    AuthorityValidatorV1::LocalOnly,
+                    &mut NativeReadContextV1::ordinary(),
+                )
                 .err(),
             Some(AuthorityError::CorruptAuthority)
         );
         assert!(store
-            .validated_graph(state.child, AuthorityValidatorV1::CodeTwoAware)
+            .validated_graph_with_context(
+                state.child,
+                AuthorityValidatorV1::CodeTwoAware,
+                &mut NativeReadContextV1::ordinary(),
+            )
             .is_ok());
         assert_eq!(
             store
@@ -1355,7 +1351,11 @@ mod tests {
         assert_eq!(
             state
                 .store
-                .validated_graph(state.child, AuthorityValidatorV1::LocalOnly)
+                .validated_graph_with_context(
+                    state.child,
+                    AuthorityValidatorV1::LocalOnly,
+                    &mut NativeReadContextV1::ordinary(),
+                )
                 .err(),
             Some(AuthorityError::CorruptAuthority)
         );
