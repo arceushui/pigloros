@@ -5140,6 +5140,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pos-plugin-conformance-adapter"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ciborium",
+ "pos-core",
+ "pos-plugin-publisher",
+ "pos-plugin-release",
+ "pos-plugin-supervisor",
+ "pos-reference",
+ "pos-runtime",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "pos-plugin-eval"
 version = "0.1.0"
 dependencies = [

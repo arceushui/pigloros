@@ -225,6 +225,8 @@ jobs:
         run: cargo check --workspace --all-targets --all-features --locked
       - name: Prove reference evaluator implementation independence
         run: bash scripts/check-reference-evaluator-independence.sh
+      - name: Prove the conformance adapter dependency graph
+        run: bash scripts/check-adapter-graph.sh
       - name: cargo test (all features, no ignored skip)
         run: |
           set -euo pipefail
