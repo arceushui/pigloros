@@ -1,6 +1,6 @@
 //! Durable Fork-admission result values.
 
-use crate::crypto::{self, CanonicalEmit, CanonicalSink};
+use crate::crypto::{self as canonical_length, CanonicalEmit, CanonicalSink};
 use ciborium::value::Value;
 
 use crate::{
