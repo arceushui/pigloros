@@ -30,7 +30,9 @@ impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
     }
 
     pub(crate) const fn protected(budget: &'budget mut ForkReplayReadBudgetV1<'clock>) -> Self {
-        Self { budget: Some(budget) }
+        Self {
+            budget: Some(budget),
+        }
     }
 
     pub(crate) fn check(&mut self) -> Result<(), crate::ForkManifestPublicationErrorV1> {
@@ -67,7 +69,10 @@ impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
             .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
     }
 
-    pub(crate) fn node(&mut self, depth: usize) -> Result<(), crate::ForkManifestPublicationErrorV1> {
+    pub(crate) fn node(
+        &mut self,
+        depth: usize,
+    ) -> Result<(), crate::ForkManifestPublicationErrorV1> {
         self.budget
             .as_deref_mut()
             .map_or(Ok(()), |budget| budget.charge_node(depth))
