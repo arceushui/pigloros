@@ -224,5 +224,5 @@ fn every_trap_class_is_a_closed_outcome() {
             "{class:?}"
         );
     }
-    assert_eq!(CLOSED_OUTCOMES.len(), classes.len() + 2);
+    assert_eq!(pinned::CLOSED_OUTCOMES.len(), classes.len() + 2);
 }

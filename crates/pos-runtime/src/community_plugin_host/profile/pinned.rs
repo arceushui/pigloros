@@ -99,7 +99,7 @@ const PINNED_TRAP_TABLE: [(&str, TrapOutcomeV1); 50] = [
 ];
 
 /// The closed outcomes of ADR-061 revision 4 decision 6, for reading a name.
-const CLOSED_OUTCOMES: [TrapOutcomeV1; 9] = [
+pub(super) const CLOSED_OUTCOMES: [TrapOutcomeV1; 9] = [
     UNREACHABLE,
     MEMORY,
     TABLE,
@@ -133,7 +133,7 @@ pub fn pinned_runtime_v1() -> PinnedComponentRuntimeV1 {
 
 impl TrapOutcomeV1 {
     /// The outcome with the closed outcome name `name`, if there is one.
-    fn from_name(name: &str) -> Option<Self> {
+    pub(super) fn from_name(name: &str) -> Option<Self> {
         CLOSED_OUTCOMES
             .into_iter()
             .find(|outcome| outcome.name() == name)
