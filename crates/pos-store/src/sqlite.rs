@@ -153,6 +153,7 @@ mod fork_code_two_read;
 mod fork_replay;
 mod fork_replay_admission;
 mod fork_replay_binding;
+mod fork_replay_chain;
 mod fork_replay_child;
 mod fork_replay_classifier;
 mod fork_replay_host;
@@ -3316,19 +3317,12 @@ impl SqliteStore {
     ) -> Result<u64, CoreError> {
         let prefix = chain[index].1.as_u64();
         let local_head = Self::get_head_seq_on(conn, timeline)?.as_u64();
-        let length = chain.get(index + 1).map_or(Ok(local_head), |(_, fork)| {
-            fork.as_u64().checked_sub(prefix).ok_or_else(|| {
-                CoreError::Storage(format!(
-                    "Fork point precedes inherited history for timeline {timeline}"
-                ))
-            })
-        })?;
-        if length > local_head {
-            return Err(CoreError::Storage(format!(
-                "Fork point exceeds parent logical Event head for timeline {timeline}"
-            )));
-        }
-        Ok(length)
+        fork_segment_length(
+            prefix,
+            local_head,
+            chain.get(index + 1).map(|(_, fork)| fork.as_u64()),
+        )
+        .map_err(|error| error.into_core(timeline))
     }
 
     fn add_logical_segment(logical_head: u64, segment: u64) -> Result<u64, CoreError> {
@@ -3460,6 +3454,73 @@ enum DecodedForkChainRow {
     },
 }
 
+enum ForkChainRowError<'row> {
+    NegativeHead,
+    RootForkSequence,
+    InvalidParent(&'row str),
+    NegativeForkSequence,
+    MissingForkSequence,
+}
+
+impl ForkChainRowError<'_> {
+    fn into_core(self, current: TimelineId) -> CoreError {
+        match self {
+            Self::NegativeHead => {
+                CoreError::Storage(format!("timeline {current} has a negative Event head"))
+            }
+            Self::RootForkSequence => CoreError::Storage(format!(
+                "root timeline {current} has Fork sequence metadata"
+            )),
+            Self::InvalidParent(parent) => {
+                CoreError::Serialization(format!("invalid ULID: {parent}"))
+            }
+            Self::NegativeForkSequence => CoreError::Storage(format!(
+                "Fork timeline {current} has a negative Fork sequence"
+            )),
+            Self::MissingForkSequence => CoreError::Storage(format!(
+                "Fork timeline {current} is missing its Fork sequence"
+            )),
+        }
+    }
+}
+
+enum ForkSegmentError {
+    BeforeInheritedHistory,
+    BeyondParentHead,
+}
+
+impl ForkSegmentError {
+    fn into_core(self, timeline: TimelineId) -> CoreError {
+        match self {
+            Self::BeforeInheritedHistory => CoreError::Storage(format!(
+                "Fork point precedes inherited history for timeline {timeline}"
+            )),
+            Self::BeyondParentHead => CoreError::Storage(format!(
+                "Fork point exceeds parent logical Event head for timeline {timeline}"
+            )),
+        }
+    }
+}
+
+fn fork_segment_length(
+    prefix: u64,
+    local_head: u64,
+    next_cut: Option<u64>,
+) -> Result<u64, ForkSegmentError> {
+    next_cut
+        .map_or(Ok(local_head), |cut| {
+            cut.checked_sub(prefix)
+                .ok_or(ForkSegmentError::BeforeInheritedHistory)
+        })
+        .and_then(|length| {
+            if length > local_head {
+                Err(ForkSegmentError::BeyondParentHead)
+            } else {
+                Ok(length)
+            }
+        })
+}
+
 impl ForkChainRow {
     fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         row.get(0).and_then(|parent_id| {
@@ -3474,31 +3535,33 @@ impl ForkChainRow {
     }
 
     fn decode(self, current: TimelineId) -> Result<DecodedForkChainRow, CoreError> {
-        let head = u64::try_from(self.head_seq).map_err(|_| {
-            CoreError::Storage(format!("timeline {current} has a negative Event head"))
-        })?;
-        match (self.parent_id, self.fork_seq) {
-            (None, None) => Ok(DecodedForkChainRow::Root { head }),
-            (None, Some(_)) => Err(CoreError::Storage(format!(
-                "root timeline {current} has Fork sequence metadata"
-            ))),
-            (Some(parent), Some(fork_seq)) => {
-                let parent = parse_timeline_id(&parent)?;
-                let fork = u64::try_from(fork_seq).map_err(|_| {
-                    CoreError::Storage(format!(
-                        "Fork timeline {current} has a negative Fork sequence"
-                    ))
-                })?;
-                Ok(DecodedForkChainRow::Fork {
-                    parent,
-                    fork: Seq::from_u64(fork),
-                    head,
-                })
-            }
-            (Some(_), None) => Err(CoreError::Storage(format!(
-                "Fork timeline {current} is missing its Fork sequence"
-            ))),
-        }
+        self.decode_fields().map_err(|error| error.into_core(current))
+    }
+
+    /// One semantic owner for ordinary and protected metadata. The closed
+    /// borrowed cause lets the protected reader avoid diagnostic allocations;
+    /// ordinary callers retain their historical messages and precedence.
+    fn decode_fields(&self) -> Result<DecodedForkChainRow, ForkChainRowError<'_>> {
+        u64::try_from(self.head_seq)
+            .map_err(|_| ForkChainRowError::NegativeHead)
+            .and_then(|head| match (self.parent_id.as_deref(), self.fork_seq) {
+                (None, None) => Ok(DecodedForkChainRow::Root { head }),
+                (None, Some(_)) => Err(ForkChainRowError::RootForkSequence),
+                (Some(parent), Some(fork_seq)) => parent
+                    .parse::<ulid::Ulid>()
+                    .map(TimelineId::from_ulid)
+                    .map_err(|_| ForkChainRowError::InvalidParent(parent))
+                    .and_then(|parent| {
+                        u64::try_from(fork_seq)
+                            .map_err(|_| ForkChainRowError::NegativeForkSequence)
+                            .map(|fork| DecodedForkChainRow::Fork {
+                                parent,
+                                fork: Seq::from_u64(fork),
+                                head,
+                            })
+                    }),
+                (Some(_), None) => Err(ForkChainRowError::MissingForkSequence),
+            })
     }
 }
 
@@ -5215,7 +5278,28 @@ impl SqliteStore {
         timeline: TimelineId,
         at_seq: Seq,
     ) -> Result<Hash, CoreError> {
-        let logical_head = Self::logical_head_unchecked_on(conn, timeline)?;
+        Self::compute_chain_hash_at_with_context_on(
+            conn,
+            hasher,
+            timeline,
+            at_seq,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn compute_chain_hash_at_with_context_on(
+        conn: &Connection,
+        hasher: &dyn Hasher,
+        timeline: TimelineId,
+        at_seq: Seq,
+        context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+    ) -> Result<Hash, CoreError> {
+        let logical_head = if context.is_protected() {
+            fork_replay_chain::logical_head_with_context(conn, timeline, context)
+                .map_err(|_| CoreError::ArtifactUnavailable)
+        } else {
+            Self::logical_head_unchecked_on(conn, timeline)
+        }?;
         if at_seq > logical_head {
             return Err(CoreError::ForkBeyondHead {
                 fork_seq: at_seq.as_u64(),
@@ -13866,11 +13950,12 @@ fn sqlite_fork_admission_result_with_context(
             if binding.input().owner != admission.input().creator {
                 return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
             }
-            let parent_chain_head = SqliteStore::compute_chain_hash_at_unchecked_on(
+            let parent_chain_head = SqliteStore::compute_chain_hash_at_with_context_on(
                 conn,
                 hasher,
                 admission.input().parent_timeline_id,
                 Seq::from_u64(admission.input().parent_logical_head),
+                context,
             )
             .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
             if parent_chain_head != admission.input().parent_chain_head_hash {
