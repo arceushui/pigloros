@@ -72,6 +72,7 @@ validate_json_fixture_adapter() {
       (keys - ["with_operation", "without_operation"] | length) == 0 and
       (.with_operation | type == "object") and
       ((has("without_operation") | not) or (.without_operation | type == "object"))) and
+    all(.auxiliary[]?; . == []) and
     (.fixture_contracts.positive | has("allowed_divergence") | not) and
     .artifact_media_types == {
       schema: "application/schema+json",
@@ -85,6 +86,27 @@ validate_json_fixture_adapter() {
   }
 }
 
+validate_auxiliary_declaration() {
+  local provider_manifest="$1"
+  jq -e --argjson family_names "${family_names}" '
+    (.auxiliary | type == "object") and
+    ((.auxiliary | keys | sort) == ($family_names | sort)) and
+    all(.auxiliary[];
+      type == "array" and length <= 64 and
+      all(.[];
+        type == "object" and (keys | sort) == ["media_type", "path"] and
+        (.path | type == "string" and
+          test("^inputs/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$") and
+          (split("/") | all(. != "." and . != ".."))) and
+        (.media_type | type == "string" and length > 2 and length <= 127 and
+          test("^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$"))) and
+      ([.[].path] | unique | length) == length)
+  ' "${provider_manifest}" >/dev/null || {
+    echo "invalid provider auxiliary declaration: ${provider_manifest#"${fixture_root}/"}" >&2
+    exit 1
+  }
+}
+
 mapfile -t provider_manifest_paths < <(
   jq -r '.fixture_providers[].manifest' "${profile_root}"/*/profile.json | sort -u
 )
@@ -94,6 +116,7 @@ for manifest_path in "${provider_manifest_paths[@]}"; do
     exit 1
   }
   provider_manifest="${fixture_root}/${manifest_path}"
+  validate_auxiliary_declaration "${provider_manifest}"
   adapter_id="$(jq -er '.fixture_adapter.id | select(type == "string" and length > 0)' "${provider_manifest}")" || {
     echo "provider fixture adapter declaration is missing or invalid: ${provider_manifest#"${fixture_root}/"}" >&2
     exit 1

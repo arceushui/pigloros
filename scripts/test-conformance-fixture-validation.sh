@@ -160,6 +160,49 @@ replace_json "${legacy_provider_root}/providers/artifact-integrity/provider.json
 expect_adapter_rejection "${legacy_provider_root}" "provider fixture adapter declaration is missing or invalid"
 expect_rejection "${legacy_provider_root}" "provider fixture adapter declaration is missing or invalid"
 
+missing_auxiliary_root="$(new_fixture_copy missing-auxiliary-key)"
+replace_json "${missing_auxiliary_root}/providers/artifact-integrity/provider.json" 'del(.auxiliary)'
+expect_adapter_rejection "${missing_auxiliary_root}" "invalid provider auxiliary declaration"
+expect_rejection "${missing_auxiliary_root}" "invalid provider auxiliary declaration"
+
+unsafe_auxiliary_root="$(new_fixture_copy unsafe-auxiliary-path)"
+replace_json "${unsafe_auxiliary_root}/providers/artifact-integrity/provider.json" \
+  '.auxiliary.positive = [{path: "inputs/../support/LICENSE", media_type: "application/octet-stream"}]'
+expect_adapter_rejection "${unsafe_auxiliary_root}" "invalid provider auxiliary declaration"
+expect_rejection "${unsafe_auxiliary_root}" "invalid provider auxiliary declaration"
+
+unknown_family_auxiliary_root="$(new_fixture_copy unknown-auxiliary-family)"
+replace_json "${unknown_family_auxiliary_root}/providers/artifact-integrity/provider.json" \
+  '.auxiliary.unknown = []'
+expect_adapter_rejection "${unknown_family_auxiliary_root}" "invalid provider auxiliary declaration"
+expect_rejection "${unknown_family_auxiliary_root}" "invalid provider auxiliary declaration"
+
+json_auxiliary_root="$(new_fixture_copy json-adapter-auxiliary)"
+replace_json "${json_auxiliary_root}/providers/artifact-integrity/provider.json" \
+  '.auxiliary.positive = [{path: "inputs/artifact-integrity/positive.pcw2", media_type: "application/octet-stream"}]'
+expect_adapter_rejection "${json_auxiliary_root}" "invalid pigloros-json-v1 fixture adapter declaration"
+expect_rejection "${json_auxiliary_root}" "invalid pigloros-json-v1 fixture adapter declaration"
+
+opaque_auxiliary_root="$(new_fixture_copy opaque-provider-auxiliary)"
+replace_json "${opaque_auxiliary_root}/providers/artifact-integrity/provider.json" '
+  .fixture_adapter.id = "opaque-provider-v1" |
+  .artifact_media_types = {
+    schema: "application/octet-stream",
+    payload: "application/octet-stream",
+    oracle: "application/octet-stream",
+    evidence_status: "application/octet-stream"
+  } |
+  .auxiliary.positive = [{path: "inputs/artifact-integrity/positive.pcw2", media_type: "application/octet-stream"}]'
+while IFS= read -r schema; do
+  printf 'opaque-schema-v1\n' >"${opaque_auxiliary_root}/${schema}"
+done < <(jq -r '.schemas[]' "${opaque_auxiliary_root}/providers/artifact-integrity/provider.json")
+printf 'auxiliary composite placeholder\n' \
+  >"${opaque_auxiliary_root}/inputs/artifact-integrity/positive.pcw2"
+expect_adapter_acceptance "${opaque_auxiliary_root}"
+rm -- "${opaque_auxiliary_root}/inputs/artifact-integrity/positive.pcw2"
+bash scripts/generate-conformance-fixture-records.sh "${opaque_auxiliary_root}" --write
+expect_rejection "${opaque_auxiliary_root}" "empty conformance fixture"
+
 unknown_authority_root="$(new_fixture_copy unknown-authority-field)"
 replace_json "${unknown_authority_root}/support/draft-execution-authority.json" \
   '.undeclared_authority = true'

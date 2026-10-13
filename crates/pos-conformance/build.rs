@@ -20,6 +20,13 @@ use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Component, Path, PathBuf};
 
+#[path = "src/catalog_auxiliary.rs"]
+mod catalog_auxiliary;
+use catalog_auxiliary::{
+    check_embedded_total, valid_media_type, validate_auxiliary_catalog, AuxiliaryEntry,
+    DEFAULT_AUXILIARY_CAP, MAX_EMBEDDED_AUXILIARY_BYTES,
+};
+
 const PROFILE_COUNT: usize = 7;
 const FIXTURES_PER_PROFILE: usize = 7;
 const JSON_FIXTURE_ADAPTER_ID: &str = "pigloros-json-v1";
@@ -49,6 +56,10 @@ struct SourceSnapshots {
 }
 
 impl SourceSnapshots {
+    fn source_paths(&self) -> BTreeSet<String> {
+        self.sources.keys().cloned().collect()
+    }
+
     fn bytes(&self, relative: &str, description: &str) -> Result<&[u8], io::Error> {
         self.sources
             .get(relative)
@@ -72,11 +83,24 @@ struct FixturePaths {
     input: FixtureAsset,
     evidence_status: FixtureAsset,
     oracle: FixtureAsset,
+    auxiliary: Vec<FixtureAuxiliary>,
 }
 
 struct FixtureAsset {
     relative: String,
     bytes: Vec<u8>,
+}
+
+struct FixtureAuxiliary {
+    asset: FixtureAsset,
+    media_type: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderAuxiliaryEntry {
+    path: String,
+    media_type: String,
 }
 
 struct ProfilePaths {
@@ -728,6 +752,12 @@ fn expected_source_paths(
                 paths.insert(fixture.input.relative.clone());
                 paths.insert(fixture.evidence_status.relative.clone());
                 paths.insert(fixture.oracle.relative.clone());
+                paths.extend(
+                    fixture
+                        .auxiliary
+                        .iter()
+                        .map(|auxiliary| auxiliary.asset.relative.clone()),
+                );
             }
         }
     }
@@ -987,6 +1017,10 @@ fn validate_fixture_provider(
         rust_enum_variant("FixtureAdapter", &adapter_id, "provider fixture adapter id").is_ok()
             && adapter_config.is_object()
     };
+    let declared_families = family_names.iter().collect::<BTreeSet<_>>();
+    let auxiliary_matches_families = json_field(provider, "auxiliary")?
+        .as_object()
+        .is_some_and(|auxiliary| auxiliary.keys().collect::<BTreeSet<_>>() == declared_families);
     let valid = !json_text(provider, "provider_id")?.is_empty()
         && !json_text(provider, "contract_version")?.is_empty()
         && u16::try_from(json_u64(provider, "abi_major")?).is_ok()
@@ -1005,7 +1039,8 @@ fn validate_fixture_provider(
         && support_paths.into_iter().collect::<BTreeSet<_>>().len() == 5
         && json_text(provider, "claim_layer")? == claim_layer
         && json_text(provider, "subject_adapter")? == subject_adapter
-        && contracts_match_families;
+        && contracts_match_families
+        && auxiliary_matches_families;
     if valid {
         Ok(())
     } else {
@@ -1013,17 +1048,6 @@ fn validate_fixture_provider(
             "provider manifest does not match profile claim layer {claim_layer}"
         )))
     }
-}
-
-fn valid_media_type(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 127
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"!#$&^_.+-/".contains(&byte)
-        })
-        && value.split_once('/').is_some_and(|(kind, subtype)| {
-            !kind.is_empty() && !subtype.is_empty() && !subtype.contains('/')
-        })
 }
 
 fn fixture_family_contract(snapshots: &SourceSnapshots) -> Result<FixtureFamilyCatalog, io::Error> {
@@ -1123,6 +1147,62 @@ fn fixture_provider(provider: &Value) -> Result<FixtureProvider, io::Error> {
     })
 }
 
+fn fixture_auxiliary(
+    snapshots: &SourceSnapshots,
+    provider: &Value,
+    family: &str,
+) -> Result<Vec<FixtureAuxiliary>, io::Error> {
+    let declared = json_field(json_field(provider, "auxiliary")?, family)?;
+    let declared: Vec<ProviderAuxiliaryEntry> = serde_json::from_value(declared.clone())
+        .map_err(|error| {
+            invalid_data(format!(
+                "provider auxiliary for {family} is invalid: {error}"
+            ))
+        })?;
+    let entries = declared
+        .into_iter()
+        .map(|entry| AuxiliaryEntry {
+            path: entry.path,
+            media_type: entry.media_type,
+        })
+        .collect::<Vec<_>>();
+    validate_auxiliary_catalog(&snapshots.source_paths(), &entries, DEFAULT_AUXILIARY_CAP)
+        .map_err(|error| invalid_data(error.to_string()))?;
+    entries
+        .into_iter()
+        .map(|entry| {
+            let bytes = snapshots
+                .bytes(&entry.path, "provider auxiliary source")?
+                .to_vec();
+            Ok(FixtureAuxiliary {
+                asset: FixtureAsset {
+                    relative: entry.path,
+                    bytes,
+                },
+                media_type: entry.media_type,
+            })
+        })
+        .collect()
+}
+
+fn auxiliary_in_catalog_order(
+    profiles: &[ProfilePaths],
+) -> impl Iterator<Item = &FixtureAuxiliary> {
+    profiles
+        .iter()
+        .flat_map(|profile| &profile.fixture_providers)
+        .flat_map(|provider| &provider.fixtures)
+        .flat_map(|fixture| &fixture.auxiliary)
+}
+
+fn check_auxiliary_total(profiles: &[ProfilePaths]) -> Result<(), io::Error> {
+    let sizes = auxiliary_in_catalog_order(profiles)
+        .map(|auxiliary| auxiliary.asset.bytes.len())
+        .collect::<Vec<_>>();
+    check_embedded_total(&sizes, MAX_EMBEDDED_AUXILIARY_BYTES)
+        .map_err(|error| invalid_data(error.to_string()))
+}
+
 fn relative_asset(
     snapshots: &SourceSnapshots,
     value: &Value,
@@ -1177,6 +1257,7 @@ fn profile_fixtures(
             let input = relative_asset(snapshots, fixture, "input")?;
             let evidence_status = relative_asset(snapshots, fixture, "expected")?;
             let oracle = relative_asset(snapshots, fixture, "oracle")?;
+            let auxiliary = fixture_auxiliary(snapshots, provider_value, &family)?;
             let family_declaration = family_contract
                 .declarations
                 .get(&family)
@@ -1196,6 +1277,7 @@ fn profile_fixtures(
                 input,
                 evidence_status,
                 oracle,
+                auxiliary,
             })
         })
         .collect()
@@ -1664,10 +1746,37 @@ fn emit_strict_oracle(
     }
 }
 
+fn emit_auxiliary(
+    generated: &mut String,
+    fixture: &FixturePaths,
+    first_auxiliary_index: usize,
+) -> Result<(), std::fmt::Error> {
+    if fixture.auxiliary.is_empty() {
+        return writeln!(generated, "                        auxiliary: &[],");
+    }
+    writeln!(generated, "                        auxiliary: &[")?;
+    for (offset, auxiliary) in fixture.auxiliary.iter().enumerate() {
+        let index = first_auxiliary_index + offset;
+        writeln!(generated, "                            CatalogAuxiliary {{")?;
+        writeln!(
+            generated,
+            "                                media_type: {:?},",
+            auxiliary.media_type
+        )?;
+        writeln!(
+            generated,
+            "                                bytes: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/aux/{index}.bin\")),"
+        )?;
+        writeln!(generated, "                            }},")?;
+    }
+    writeln!(generated, "                        ],")
+}
+
 fn emit_fixture(
     generated: &mut String,
     fixture: &FixturePaths,
     fixture_index: usize,
+    first_auxiliary_index: usize,
 ) -> Result<(), std::fmt::Error> {
     writeln!(
         generated,
@@ -1710,6 +1819,7 @@ fn emit_fixture(
         "                        oracle: &{:?},",
         fixture.oracle.bytes
     )?;
+    emit_auxiliary(generated, fixture, first_auxiliary_index)?;
     emit_strict_oracle(generated, &fixture.strict_oracle)?;
     writeln!(
         generated,
@@ -1844,11 +1954,13 @@ fn emit_fixture_provider(
 fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
     let mut generated = String::new();
     let mut fixture_index = 0;
+    let mut auxiliary_index = 0;
     for profile in profiles {
         for provider in &profile.fixture_providers {
             for fixture in &provider.fixtures {
-                emit_fixture(&mut generated, fixture, fixture_index)?;
+                emit_fixture(&mut generated, fixture, fixture_index, auxiliary_index)?;
                 fixture_index += 1;
+                auxiliary_index += fixture.auxiliary.len();
             }
         }
     }
@@ -2363,6 +2475,7 @@ fn manifest_catalog_root() -> Result<CatalogRoot, Box<dyn Error>> {
 fn discover_build_data(root: &CatalogRoot) -> Result<DiscoveredBuildData, Box<dyn Error>> {
     let snapshots = source_snapshots(root)?;
     let profiles = discover_profiles(root, &snapshots)?;
+    check_auxiliary_total(&profiles)?;
     let source_inventory_digest = verify_source_inventory(&snapshots, &profiles)?;
     Ok((snapshots, profiles, source_inventory_digest))
 }
@@ -2390,6 +2503,21 @@ fn output_directory() -> Result<PathBuf, Box<dyn Error>> {
 fn write_catalog_file(out_dir: &Path, profiles: &[ProfilePaths]) -> Result<(), Box<dyn Error>> {
     let generated = emit_catalog(profiles)?;
     std::fs::write(out_dir.join("conformance_fixture_catalog.rs"), generated)?;
+    write_auxiliary_files(out_dir, profiles)
+}
+
+fn write_auxiliary_files(out_dir: &Path, profiles: &[ProfilePaths]) -> Result<(), Box<dyn Error>> {
+    let directory = out_dir.join("aux");
+    if directory.exists() {
+        std::fs::remove_dir_all(&directory)?;
+    }
+    std::fs::create_dir_all(&directory)?;
+    for (index, auxiliary) in auxiliary_in_catalog_order(profiles).enumerate() {
+        std::fs::write(
+            directory.join(format!("{index}.bin")),
+            &auxiliary.asset.bytes,
+        )?;
+    }
     Ok(())
 }
 

@@ -6206,6 +6206,24 @@ fn deterministic_member_paths_bind_case_layer_execution_and_purpose() {
 }
 
 #[test]
+fn plugin_world_member_paths_match_the_golden_values_per_execution() {
+    let case = "plugin-conformance-positive";
+    let layer = ClaimLayerV1::PluginConformance;
+    let local = fixture_input_member_path(case, layer, &[0x11; 32], "plugin-world");
+    let air_gapped = fixture_input_member_path(case, layer, &[0x22; 32], "plugin-world");
+
+    assert_eq!(
+        local,
+        "inputs/5acdbdb164426ff9a6b40e87c03059febc0c028b147d1f357ada8dad44900f18.bin"
+    );
+    assert_eq!(
+        air_gapped,
+        "inputs/56ec399b081e607e4d2bd6828a39b9ae7f6580315e09c5f922ef5a67ad7e896d.bin"
+    );
+    assert_ne!(local, air_gapped);
+}
+
+#[test]
 fn independent_verifier_preflights_resource_bounds_before_decoding() {
     let oversized_byte_string = [0x5a, 0x04, 0x00, 0x00, 0x01];
     assert_eq!(

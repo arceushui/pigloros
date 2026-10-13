@@ -3,16 +3,16 @@
 use ed25519_dalek::SigningKey;
 use pos_conformance::{
     draft_execution_profile_bytes_v1, draft_release_admission_bytes_v1,
-    draft_trust_policy_snapshot_bytes_v1, expected_result_member_path,
+    draft_trust_policy_snapshot_bytes_v1, expected_result_member_path, fixture_input_member_path,
     verify_archive_release_filename, verify_release_tree_independently, ArtifactDescriptorV1,
     BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, CapabilityPolicyV1,
     ClaimLayerV1, ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV1,
     DeterministicBudgetV1, EvaluatorHardCapsV1, EvaluatorProtocolV1, FixtureContractTransitionV1,
     FixtureDescriptorV1, FixtureFamilyV1, FixtureProvenanceV1, FixtureProviderEntryV1,
     FixtureProviderKeyV1, FixtureProviderPackageV1, FixtureProviderRegistryBindingV1,
-    FixtureProviderRegistryV1, IndependenceRequirementsV1, NamespacedFailureV1,
-    OperationalSafetyV1, ProfileLifecycleV1, ProviderFamilySchemaV1, RedactionStateV1,
-    ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1, VerificationOutcomeV1,
+    FixtureProviderRegistryV1, IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1,
+    ProfileLifecycleV1, ProviderFamilySchemaV1, RedactionStateV1, ReplayClaimV1, StrictOracleKindV1,
+    StrictOracleV1, SubjectAdapterKindV1, VerificationOutcomeV1,
     FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
@@ -201,6 +201,11 @@ struct CatalogFixtureContract {
     minimum_capability_ids: &'static [&'static str],
 }
 
+struct CatalogAuxiliary {
+    media_type: &'static str,
+    bytes: &'static [u8],
+}
+
 struct CatalogFixture {
     case_id: &'static str,
     family: FixtureFamilyV1,
@@ -210,6 +215,7 @@ struct CatalogFixture {
     input: &'static [u8],
     evidence_status: &'static [u8],
     oracle: &'static [u8],
+    auxiliary: &'static [CatalogAuxiliary],
     strict_oracle: CatalogStrictOracle,
     failure_outcome: VerificationOutcomeV1,
     replay_claim: ReplayClaimV1,
@@ -981,11 +987,22 @@ fn fixture_descriptor_from_record(
         fixture.oracle,
     );
     let expectation = fixture_expectation(fixture, &oracle_output);
-    let auxiliary = if expectation.strict_oracle.output.is_some() {
+    let mut auxiliary = if expectation.strict_oracle.output.is_some() {
         vec![evidence]
     } else {
         vec![evidence, oracle_output]
     };
+    auxiliary.extend(
+        auxiliary_artifacts(
+            fixture.auxiliary,
+            fixture.case_id,
+            context.claim_layer,
+            &execution_profile_digest,
+        )
+        .iter()
+        .map(PublicArtifact::descriptor),
+    );
+    sort_auxiliary_by_path(&mut auxiliary);
     let downgrade = fixture.family == FixtureFamilyV1::Downgrade;
     let transition = fixture_downgrade_transition(fixture.family, provider_key);
     trust_policy_snapshot_digest().and_then(|trust_policy_snapshot_digest| {
@@ -1051,6 +1068,49 @@ fn fixture_descriptor_from_record(
             descriptor
         })
     })
+}
+
+const AUXILIARY_MEMBER_NAME: &str = "plugin-world";
+
+fn auxiliary_member_name(index: usize) -> String {
+    if index == 0 {
+        AUXILIARY_MEMBER_NAME.to_owned()
+    } else {
+        format!("{AUXILIARY_MEMBER_NAME}-{index}")
+    }
+}
+
+fn auxiliary_artifacts(
+    auxiliary: &[CatalogAuxiliary],
+    case_id: &str,
+    claim_layer: ClaimLayerV1,
+    execution_profile_digest: &[u8; 32],
+) -> Vec<PublicArtifact> {
+    auxiliary
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| PublicArtifact {
+            path: fixture_input_member_path(
+                case_id,
+                claim_layer,
+                execution_profile_digest,
+                &auxiliary_member_name(index),
+            ),
+            media_type: entry.media_type,
+            bytes: entry.bytes.to_vec(),
+        })
+        .collect()
+}
+
+fn auxiliary_members(artifacts: Vec<PublicArtifact>) -> Vec<BundleMemberV1> {
+    artifacts
+        .into_iter()
+        .map(|artifact| BundleMemberV1::fixture_input(artifact.path, artifact.bytes))
+        .collect()
+}
+
+fn sort_auxiliary_by_path(auxiliary: &mut [ArtifactDescriptorV1]) {
+    auxiliary.sort_by(|left, right| left.member_path.cmp(&right.member_path));
 }
 
 fn fixture_downgrade_transition(
@@ -1210,6 +1270,12 @@ fn bundle_inputs_from_profile(
                 fixture.payload.member_path.clone(),
                 source.input.to_vec(),
             ));
+            members.extend(auxiliary_members(auxiliary_artifacts(
+                source.auxiliary,
+                &fixture.case_id,
+                fixture.claim_layer,
+                &fixture.execution_profile_digest,
+            )));
             let path = expected_result_member_path(
                 &fixture.case_id,
                 fixture.claim_layer,
@@ -1372,4 +1438,80 @@ fn verify_public_archive(
         .and_then(|_| {
             verify_archive_release_filename(archive_bytes, release_filename).map_err(Into::into)
         })
+}
+
+#[cfg(test)]
+mod auxiliary_tests {
+    use super::{
+        artifact_descriptor, auxiliary_artifacts, auxiliary_member_name, auxiliary_members,
+        sort_auxiliary_by_path, CatalogAuxiliary,
+    };
+    use pos_conformance::{fixture_input_member_path, BundleMemberRoleV1, ClaimLayerV1};
+
+    const CASE: &str = "plugin-conformance-positive";
+    const LAYER: ClaimLayerV1 = ClaimLayerV1::PluginConformance;
+    const CATALOG: [CatalogAuxiliary; 2] = [
+        CatalogAuxiliary {
+            media_type: "application/octet-stream",
+            bytes: b"first",
+        },
+        CatalogAuxiliary {
+            media_type: "application/cbor",
+            bytes: b"second",
+        },
+    ];
+
+    #[test]
+    fn member_names_are_indexed_after_the_first() {
+        assert_eq!(auxiliary_member_name(0), "plugin-world");
+        assert_eq!(auxiliary_member_name(2), "plugin-world-2");
+    }
+
+    #[test]
+    fn bundle_paths_reuse_the_input_path_function_per_execution() {
+        let local = auxiliary_artifacts(&CATALOG, CASE, LAYER, &[1; 32]);
+        let air_gapped = auxiliary_artifacts(&CATALOG, CASE, LAYER, &[2; 32]);
+        assert_eq!(
+            local[0].path,
+            fixture_input_member_path(CASE, LAYER, &[1; 32], "plugin-world")
+        );
+        assert_eq!(
+            local[1].path,
+            fixture_input_member_path(CASE, LAYER, &[1; 32], "plugin-world-1")
+        );
+        assert_ne!(local[0].path, air_gapped[0].path);
+        assert!(local[0].path.starts_with("inputs/"));
+        assert_eq!(local[1].media_type, "application/cbor");
+        assert_eq!(local[1].bytes, b"second");
+    }
+
+    #[test]
+    fn no_auxiliary_entries_produce_no_artifacts() {
+        assert!(auxiliary_artifacts(&[], CASE, LAYER, &[1; 32]).is_empty());
+    }
+
+    #[test]
+    fn auxiliary_members_carry_the_fixture_input_role() {
+        let members = auxiliary_members(auxiliary_artifacts(&CATALOG, CASE, LAYER, &[1; 32]));
+        assert_eq!(members.len(), 2);
+        assert!(members
+            .iter()
+            .all(|member| member.role == BundleMemberRoleV1::FixtureInput));
+        assert_eq!(members[0].bytes, b"first");
+    }
+
+    #[test]
+    fn auxiliary_descriptors_materialize_in_path_order() {
+        let mut descriptors = vec![
+            artifact_descriptor("inputs/zz.bin", "a/b", b"z"),
+            artifact_descriptor("expected/mm.bin", "a/b", b"m"),
+            artifact_descriptor("evidence/aa", "a/b", b"a"),
+        ];
+        sort_auxiliary_by_path(&mut descriptors);
+        let paths = descriptors
+            .iter()
+            .map(|descriptor| descriptor.member_path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, ["evidence/aa", "expected/mm.bin", "inputs/zz.bin"]);
+    }
 }
