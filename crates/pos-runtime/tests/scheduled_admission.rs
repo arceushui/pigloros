@@ -4142,7 +4142,7 @@ fn forwarded_events_are_recorded_once_as_ingress_nodes_on_memory() {
         let host = Host::prepare(store.as_mut(), 1_000);
         let log = Log::default();
         let mut registry = host.registry();
-        let (first, plan) = BasisDriver::new("first", &log);
+        let (first, plan) = BasisDriver::new(FIRST, &log);
         register_basis(&mut registry, first.subscribed(INPUT));
         emit(&plan, &[b"a"]);
         append_events(store.as_mut(), &host, INPUT, 3);
