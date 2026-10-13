@@ -2959,7 +2959,7 @@ mod tests {
             .step(TimelineId::new(), ObservationView::from_events(&[event]))
             .test_ok();
         let reaction: AgentReaction =
-            serde_json::from_slice(output.drafts[0].payload.as_slice()).test_ok();
+            serde_json::from_slice(output.outputs[0].draft.payload.as_slice()).test_ok();
         assert_eq!(reaction.action, "accelerate");
     }
 
