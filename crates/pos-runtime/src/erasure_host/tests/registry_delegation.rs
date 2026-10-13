@@ -2,7 +2,9 @@
 //! opened over a fault store is a valid standard host on Linux (R8-W3).
 
 use pos_conformance::PluginTrustPolicyAnchorV1;
-use pos_crypto::plugin_trust::{ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1};
+use pos_crypto::plugin_trust::{
+    ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
+};
 use pos_store::plugin_trust_registry::{
     ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
     CurrentReleaseEvaluationV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
@@ -85,11 +87,7 @@ impl PluginTrustPolicyRegistryV1 for FaultStoreV1 {
         self.inner.retained_release_decision(scope, pmf1_digest)
     }
 
-    fn active_release(
-        &self,
-        scope: &str,
-        plugin_id: &str,
-    ) -> Registry<Option<ActiveReleaseV1>> {
+    fn active_release(&self, scope: &str, plugin_id: &str) -> Registry<Option<ActiveReleaseV1>> {
         self.inner.active_release(scope, plugin_id)
     }
 

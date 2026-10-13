@@ -109,13 +109,7 @@ fn install_and_gate(
         let registry = &*registry;
         let expected = expectation();
         gate_for_driver(
-            registry,
-            &expected,
-            store,
-            &address,
-            &source,
-            &mut clock,
-            TICK,
+            registry, &expected, store, &address, &source, &mut clock, TICK,
         )
     }))?;
     let bundle = store.read_verified(&address)?;
@@ -162,11 +156,7 @@ fn a_release_installed_through_the_facade_is_gated_through_it() -> TestResult {
     let seen = scenario(&mut plain)?;
     assert_eq!(seen[0], "Ok(Created)");
     assert_eq!(seen[1], "Ok(Unchanged)");
-    for line in [
-        "gated=true",
-        "decision=true",
-        "active=true",
-    ] {
+    for line in ["gated=true", "decision=true", "active=true"] {
         let found = seen.iter().any(|seen_line| seen_line == line);
         assert!(found, "{line}: {seen:?}");
     }

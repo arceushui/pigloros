@@ -80,11 +80,7 @@ fn flat<T, E>(result: Result<WorldResult<T>, E>) -> WorldResult<T> {
 fn registry_unit<T, E>(
     result: Result<Result<T, PluginTrustPolicyRegistryErrorV1>, E>,
 ) -> WorldResult<()> {
-    flat(result.map(|inner| {
-        inner
-            .map(|_outcome| ())
-            .map_err(host_error_for_registry_v1)
-    }))
+    flat(result.map(|inner| inner.map(|_outcome| ()).map_err(host_error_for_registry_v1)))
 }
 
 /// The two hosts, the registry the Drivers are registered in, and the Timelines of the world.
@@ -118,8 +114,8 @@ impl CommunityEvaluationWorldV1 {
     /// the refusal of `provision`.
     pub fn open(genesis: &CommunityPluginTrustMaterialV1) -> WorldResult<Self> {
         unavailable(open_parts()).and_then(|parts| {
-            let plugins = PluginRegistry::new()
-                .with_erasure_gate(parts.pass_host.containment_gate());
+            let plugins =
+                PluginRegistry::new().with_erasure_gate(parts.pass_host.containment_gate());
             let mut world = Self {
                 pass_host: parts.pass_host,
                 registry_host: parts.registry_host,
@@ -395,18 +391,16 @@ fn admission_for(attempt: u64, observed: &Observed) -> WorldResult<ScheduledPass
     PipelineAttemptIdV1::try_new(id)
         .and_then(|attempt_id| {
             let content = Hash::from_bytes([PROVIDER_VALIDATION_BYTE; 32]);
-            PipelineEvidenceRefV1::try_new(content).map(|validation| {
-                ScheduledPassAdmissionV1 {
-                    attempt_id,
-                    idempotency: AppendIdentity::new(
-                        AppendDedupKey::from_keyed_hash(key),
-                        AppendDedupScope::from_keyed_hash([SCOPE_BYTE; 32]),
-                    ),
-                    provider_validation: validation,
-                    security_revisions: observed.revisions,
-                    commit_head: observed.head,
-                    commit_now_secs: COMMIT_NOW_SECS,
-                }
+            PipelineEvidenceRefV1::try_new(content).map(|validation| ScheduledPassAdmissionV1 {
+                attempt_id,
+                idempotency: AppendIdentity::new(
+                    AppendDedupKey::from_keyed_hash(key),
+                    AppendDedupScope::from_keyed_hash([SCOPE_BYTE; 32]),
+                ),
+                provider_validation: validation,
+                security_revisions: observed.revisions,
+                commit_head: observed.head,
+                commit_now_secs: COMMIT_NOW_SECS,
             })
         })
         .or(Err(UNAVAILABLE))
