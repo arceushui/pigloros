@@ -211,7 +211,11 @@ fn verify_release(
     expected: &Release,
 ) -> TestResult {
     let bundle = read_release(pieces, release)?;
-    let closure = || bundle.as_ref().ok_or("the closure verifier refused the release");
+    let closure = || {
+        bundle
+            .as_ref()
+            .ok_or("the closure verifier refused the release")
+    };
     match expected {
         Release::Invalid => {
             assert!(refused_by_closure_or_projection(bundle.as_ref()));

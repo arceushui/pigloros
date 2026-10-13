@@ -218,6 +218,9 @@ fn the_denied_sub_cases_split_into_link_failures_and_refusals_before_a_launch() 
     refusals.extend((13..=22).map(|number| format!("den.{number}")));
     assert_eq!(remaining, refusals);
     // The link failures give no verdict without a worker: the case is Unavailable.
-    assert_eq!(observe_without_worker(&attempt)?, SubjectResult::Unavailable);
+    assert_eq!(
+        observe_without_worker(&attempt)?,
+        SubjectResult::Unavailable
+    );
     Ok(())
 }
