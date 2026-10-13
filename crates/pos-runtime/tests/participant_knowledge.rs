@@ -1,24 +1,25 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{
-    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
-    AppendDedupKey, AppendDedupScope, AppendIdentity, ArtifactClaimInputV1, ArtifactDataClassV1,
-    ArtifactOptionalityV1, ArtifactStateV1, ArtifactTransitionRuleV1, AssuranceLevelV1,
-    AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, AuthorityErrorV1,
-    AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
-    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
-    AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes, Capability,
-    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1,
-    ConsentGrantRefV1, ConsentGrantStatusV1, EntityId, ErasureArtifactClassV1,
-    ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, Hash,
-    Kind, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1,
-    ObservationSnapshotV1, PersistedAuthorityV1, PipelineAdmissionBasisV1,
-    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptIdV1,
-    PipelineCommitReceiptV1, PipelineEvidenceRefV1, PipelineOutcomeV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin, PluginId,
-    PrincipalRefV1, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
-    Seq, SeqRange, State, TimelineId, WallTime,
+    factual_artifact_digest, pipeline_authority_revision_v1, pipeline_delegation_revision_v1,
+    pipeline_erasure_revision_v1, AppendDedupKey, AppendDedupScope, AppendIdentity,
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+    ArtifactTransitionRuleV1, AssuranceLevelV1, AuthenticatedPrincipalDraftV1,
+    AuthenticatedPrincipalResultV1, AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1,
+    AuthorityPersistenceHostV1, AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1,
+    AuthorityRoleV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
+    Capability, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
+    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
+    ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, DependencyNodeRecordV1,
+    EntityId, ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, Event, EventDraft, FactualNodeKeyV1, Hash, Kind,
+    KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1, ObservationSnapshotV1,
+    PersistedAuthorityV1, PipelineAdmissionBasisV1, PipelineAdmissionFenceV1,
+    PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineEvidenceRefV1,
+    PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin,
+    PluginId, PrincipalRefV1, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1,
+    ReplayClaimEvaluatorV1, Seq, SeqRange, State, TimelineId, WallTime,
+    FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
 };
 use pos_runtime::{
     AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, Driver, ObservationView, PluginRegistry,
@@ -1925,8 +1926,7 @@ fn admit_recorded(
 ) -> (Seq, Hash) {
     let basis = admit_recorded_basis(registry, prepared, key, views, authorities);
     let observation = basis.attempt().observation();
-    let through = observation.observed_through();
-    (through, observation.snapshot_digest())
+    (observation.observed_through(), observation.snapshot_digest())
 }
 
 #[test]
@@ -2050,7 +2050,7 @@ fn node_at<'a>(
     basis: &'a PipelineAdmissionBasisV1,
     owner: &str,
     ordinal: u32,
-) -> &'a pos_core::DependencyNodeRecordV1 {
+) -> &'a DependencyNodeRecordV1 {
     let nodes = basis.dependencies().record().nodes();
     nodes
         .iter()
@@ -2096,14 +2096,14 @@ fn the_authorized_pass_declares_its_view_digest_and_no_host_derived_events() {
         assert_eq!(host_nodes.count(), 1, "{name}");
 
         // The snapshot node binds the view digest at the Tick's coordinate.
-        let key = pos_core::FactualNodeKeyV1 {
+        let key = FactualNodeKeyV1 {
             tick: 1,
             scheduler_position: 0,
             owner: OBSERVATION,
             output_ordinal: 0,
-            schema_id: pos_core::FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
+            schema_id: FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
         };
-        let snapshot = pos_core::factual_artifact_digest(prepared.timeline, key, bound);
+        let snapshot = factual_artifact_digest(prepared.timeline, key, bound);
         let snapshot_node = node_at(&basis, OBSERVATION, 0);
         let recorded = snapshot_node.coordinate().artifact_digest();
         assert_eq!(recorded, snapshot, "{name}");
@@ -2722,6 +2722,16 @@ fn the_stores_dependency_refusals_abort_the_authorized_pass_and_commit_nothing()
             let seen = observed(&state);
             let counts = (seen.steps, seen.commits, seen.aborts);
             assert_eq!(counts, (1, 0, 1), "{name}");
+
+            // The refused attempt advanced nothing: a delivered retry declares Tick 1.
+            stage_current(&mut registry, &fixture).test_ok();
+            let retry = prepared.admission(31);
+            let delivered = Ack::Delivered;
+            let (admitted, _) =
+                admit_with_ack(&mut registry, &mut prepared, &fixture, &retry, delivered);
+            assert!(admitted.test_ok().is_some(), "{name}");
+            let basis = prepared.retained.as_ref().test_ok();
+            assert_eq!(basis.dependencies().tick(), 1, "{name}");
         }
     }
 }
