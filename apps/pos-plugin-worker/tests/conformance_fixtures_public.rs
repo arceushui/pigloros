@@ -164,7 +164,9 @@ const OUTCOME_MARKER: &str = "compatibility-prototype";
 /// The edit that makes the `scan` of a sub-case search for [`OUTCOME_MARKER`] in the outcome
 /// record only; the expectation names the same marker, as the grammar requires.
 fn scanning_the_outcome(subcase: &mut Value) {
-    let scan = subcase["steps"].as_array_mut().and_then(|steps| steps.last_mut());
+    let scan = subcase["steps"]
+        .as_array_mut()
+        .and_then(|steps| steps.last_mut());
     if let Some(scan) = scan {
         scan["in"] = serde_json::json!(["outcome"]);
         scan["marker"] = OUTCOME_MARKER.into();
