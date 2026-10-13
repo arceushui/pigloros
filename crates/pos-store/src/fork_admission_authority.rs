@@ -447,6 +447,7 @@ fn verified_command(
 }
 
 /// Reconstruct the immutable POC1 commitment from durable POB1 state.
+#[cfg(any(feature = "sqlite", test))]
 pub(crate) fn principal_owner_commitment(
     store_id: Hash,
     binding: &PrincipalOwnerBindingV1,
@@ -455,7 +456,7 @@ pub(crate) fn principal_owner_commitment(
     principal_owner_commitment_input(store_id, binding, evidence_digest).commitment()
 }
 
-fn principal_owner_commitment_input(
+const fn principal_owner_commitment_input(
     store_id: Hash,
     binding: &PrincipalOwnerBindingV1,
     evidence_digest: Hash,
@@ -479,15 +480,21 @@ pub(crate) fn principal_owner_commitment_with_context(
     use pos_core::ForkAdmissionErrorV1::CorruptAuthority;
     context.check().map_err(|_| CorruptAuthority)?;
     let input = principal_owner_commitment_input(store_id, binding, evidence_digest);
-    context.canonical(input.canonical_preimage_len()).map_err(|_| CorruptAuthority)?;
+    context
+        .canonical(input.canonical_preimage_len())
+        .map_err(|_| CorruptAuthority)?;
     let commitment = input.commitment();
-    context.check().map(|()| commitment).map_err(|_| CorruptAuthority)
+    context
+        .check()
+        .map(|()| commitment)
+        .map_err(|_| CorruptAuthority)
 }
 
 /// Reconstruct the immutable FCC1 commitment from the durable FAR1 graph.
 ///
 /// A valid FAR1 has equal parent head, completed Fold Cursor, and post-fold
 /// Tick Boundary, so its parent head is the command cut.
+#[cfg(any(feature = "sqlite", test))]
 pub(crate) fn fork_commitment(
     store_id: Hash,
     principal_digest: Hash,
@@ -495,11 +502,17 @@ pub(crate) fn fork_commitment(
     admission: &ForkAdmissionRecordV1,
     child_name: &str,
 ) -> Hash {
-    fork_commitment_input(store_id, principal_digest, evidence_digest, admission, child_name)
-        .commitment()
+    fork_commitment_input(
+        store_id,
+        principal_digest,
+        evidence_digest,
+        admission,
+        child_name,
+    )
+    .commitment()
 }
 
-fn fork_commitment_input<'name>(
+const fn fork_commitment_input<'name>(
     store_id: Hash,
     principal_digest: Hash,
     evidence_digest: Hash,
@@ -531,10 +544,21 @@ pub(crate) fn fork_commitment_with_context(
 ) -> Result<Hash, pos_core::ForkAdmissionErrorV1> {
     use pos_core::ForkAdmissionErrorV1::CorruptAuthority;
     context.check().map_err(|_| CorruptAuthority)?;
-    let input = fork_commitment_input(store_id, principal_digest, evidence_digest, admission, child_name);
-    context.canonical(input.canonical_preimage_len()).map_err(|_| CorruptAuthority)?;
+    let input = fork_commitment_input(
+        store_id,
+        principal_digest,
+        evidence_digest,
+        admission,
+        child_name,
+    );
+    context
+        .canonical(input.canonical_preimage_len())
+        .map_err(|_| CorruptAuthority)?;
     let commitment = input.commitment();
-    context.check().map(|()| commitment).map_err(|_| CorruptAuthority)
+    context
+        .check()
+        .map(|()| commitment)
+        .map_err(|_| CorruptAuthority)
 }
 
 impl ForkAdmissionAuthoritySessionV1 {

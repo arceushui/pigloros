@@ -11,8 +11,8 @@
 use std::{borrow::Cow, collections::HashMap};
 
 use pos_core::{
-    Event, EventId, ForkAdmissionRecordV1, ForkClassifierRegistrationV1, ForkPublicationOperationV1, Hash,
-    ImportedForkClassifierGraphV1, Seq, TimelineId,
+    Event, EventId, ForkAdmissionRecordV1, ForkClassifierRegistrationV1,
+    ForkPublicationOperationV1, Hash, ImportedForkClassifierGraphV1, Seq, TimelineId,
 };
 
 use super::MemoryStore;
@@ -76,7 +76,9 @@ impl MemoryStore {
         validator: AuthorityValidatorV1,
         context: &mut NativeReadContextV1<'_, '_>,
     ) -> Result<ValidatedAdmissionV1, AuthorityError> {
-        context.check().map_err(|_| AuthorityError::CorruptAuthority)?;
+        context
+            .check()
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
         let local = self
             .validated_local_fork_admission_with_context(child_timeline_id, context)
             .and_then(|admission| local_admission_result(&admission, context));
@@ -99,15 +101,18 @@ impl MemoryStore {
         validator: AuthorityValidatorV1,
         context: &mut NativeReadContextV1<'_, '_>,
     ) -> Result<ValidatedGraphV1, AuthorityError> {
-        context.check().map_err(|_| AuthorityError::CorruptAuthority)?;
-        let local =
-            self.classified_authority_graph_with_context(child_timeline_id, context)
-                .and_then(|(admission, table, _)| {
-                    local_admission_result(&admission, context).map(|admission| ValidatedGraphV1 {
-                        admission, table,
-                    })
-                });
-        context.check().map_err(|_| AuthorityError::CorruptAuthority)?;
+        context
+            .check()
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
+        let local = self
+            .classified_authority_graph_with_context(child_timeline_id, context)
+            .and_then(|(admission, table, _)| {
+                local_admission_result(&admission, context)
+                    .map(|admission| ValidatedGraphV1 { admission, table })
+            });
+        context
+            .check()
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
         match validator {
             AuthorityValidatorV1::LocalOnly => local,
             AuthorityValidatorV1::CodeTwoAware => {
@@ -582,10 +587,17 @@ fn local_admission_result(
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<ValidatedAdmissionV1, AuthorityError> {
     // This bounded native constructor encodes one digest and copies fields.
-    context.canonical(record.canonical_cbor_len()).map_err(|_| AuthorityError::CorruptAuthority)?;
-    context.canonical(record.canonical_cbor_len()).map_err(|_| AuthorityError::CorruptAuthority)?;
+    context
+        .canonical(record.canonical_cbor_len())
+        .map_err(|_| AuthorityError::CorruptAuthority)?;
+    context
+        .canonical(record.canonical_cbor_len())
+        .map_err(|_| AuthorityError::CorruptAuthority)?;
     let admitted = ValidatedAdmissionV1::local(record);
-    context.check().map(|()| admitted).map_err(|_| AuthorityError::CorruptAuthority)
+    context
+        .check()
+        .map(|()| admitted)
+        .map_err(|_| AuthorityError::CorruptAuthority)
 }
 
 fn suffix_logical_seqs(
@@ -689,14 +701,23 @@ mod tests {
 
     fn imported_graph_cost(state: &Imported) -> Fallible<(usize, usize)> {
         let (bytes, rows) = imported_admission_cost(state)?;
-        let table = state.store.fork_classifier_tables.get(&state.child).ok_or("no FCT1")?;
-        let source = state.store.imported_fork_classifier_sources
-            .get(&table.input().source_configuration_revision_digest).ok_or("no FCS1")?;
-        let registration = state.store.child_registration_with_context(
-            state.child, &mut NativeReadContextV1::ordinary(),
-        )?;
+        let table = state
+            .store
+            .fork_classifier_tables
+            .get(&state.child)
+            .ok_or("no FCT1")?;
+        let source = state
+            .store
+            .imported_fork_classifier_sources
+            .get(&table.input().source_configuration_revision_digest)
+            .ok_or("no FCS1")?;
+        let registration = state
+            .store
+            .child_registration_with_context(state.child, &mut NativeReadContextV1::ordinary())?;
         Ok((
-            bytes + source.to_canonical_cbor().len() * 2 + table.to_canonical_cbor().len() * 2
+            bytes
+                + source.to_canonical_cbor().len() * 2
+                + table.to_canonical_cbor().len() * 2
                 + registration.to_canonical_cbor().len(),
             rows + 2 + state.store.fork_classifier_registrations.len(),
         ))
