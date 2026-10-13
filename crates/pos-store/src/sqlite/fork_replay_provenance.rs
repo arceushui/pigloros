@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn complete_imported_predicate_classified_records_have_exact_actual_byte_prefixes() -> Fallible<()> {
-        let (_directory, mut store, closure) = fixture()?;
+        let (_directory, store, closure) = fixture()?;
         let interval = store.begin_protected_effect_interval()?;
         for operation in closure.append_operations() {
             let (bytes, rows, expected) = expected_cost(&store, &closure, operation)?;
