@@ -1,18 +1,13 @@
 //! Selected local POB1 fields at their actual `SQLite` materialization sites.
 
 use pos_core::{ForkAdmissionErrorV1 as Error, Hash, PrincipalOwnerBindingV1};
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 
+use super::fork_replay_row::{selected_field_with_context, SelectedRowV1};
 use crate::fork_replay::NativeReadContextV1;
 
 type Result<T> = std::result::Result<T, Error>;
 
-const BINDING_PROBE_SQL: &str = "SELECT
-    typeof(principal_digest) = 'blob', length(principal_digest),
-    typeof(pob1_cbor) = 'blob', length(pob1_cbor)
-    FROM fork_principal_owner_bindings WHERE operation_id = ?1";
-const BINDING_FETCH_SQL: &str = "SELECT principal_digest, pob1_cbor
-    FROM fork_principal_owner_bindings WHERE operation_id = ?1";
 const HASH_BYTES: u8 = 32;
 
 fn binding_length(
@@ -20,48 +15,44 @@ fn binding_length(
     operation_id: Hash,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<Option<usize>> {
-    context.check().map_err(|_| Error::CorruptAuthority)?;
-    let mut statement = conn
-        .prepare(BINDING_PROBE_SQL)
-        .map_err(|_| Error::StorageIndeterminate)?;
-    context.check().map_err(|_| Error::CorruptAuthority)?;
-    let mut rows = statement
-        .query(params![operation_id.as_bytes().as_slice()])
-        .map_err(|_| Error::StorageIndeterminate)?;
-    context
-        .row_available()
-        .map_err(|_| Error::CorruptAuthority)?;
-    let Some(row) = rows.next().map_err(|_| Error::StorageIndeterminate)? else {
-        return context
-            .check()
-            .map(|()| None)
-            .map_err(|_| Error::CorruptAuthority);
-    };
-    context.suffix_row().map_err(|_| Error::CorruptAuthority)?;
-    for column in [0, 2] {
-        if !row
-            .get::<_, bool>(column)
-            .map_err(|_| Error::StorageIndeterminate)?
-        {
-            return Err(Error::StorageIndeterminate);
-        }
-    }
-    let principal_length = row
-        .get::<_, i64>(1)
-        .map_err(|_| Error::StorageIndeterminate)?;
-    let length = row
-        .get::<_, i64>(3)
-        .map_err(|_| Error::StorageIndeterminate)?;
-    let length = usize::try_from(length).map_err(|_| Error::CorruptAuthority)?;
-    if principal_length != i64::from(HASH_BYTES)
-        || length > pos_core::MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1
-    {
-        return Err(Error::CorruptAuthority);
-    }
-    context
-        .check()
-        .map(|()| Some(length))
-        .map_err(|_| Error::CorruptAuthority)
+    selected_field_with_context(
+        conn,
+        SelectedRowV1::BindingProbe(operation_id),
+        context,
+        |row, _| {
+            [0, 2].into_iter().try_for_each(|column| {
+                row.get::<_, bool>(column)
+                    .map_err(|_| Error::StorageIndeterminate)
+                    .and_then(|blob| {
+                        if blob {
+                            Ok(())
+                        } else {
+                            Err(Error::StorageIndeterminate)
+                        }
+                    })
+            })
+            .and_then(|()| {
+                row.get::<_, i64>(1)
+                    .map_err(|_| Error::StorageIndeterminate)
+            })
+            .and_then(|principal_length| {
+                row.get::<_, i64>(3)
+                    .map_err(|_| Error::StorageIndeterminate)
+                    .and_then(|length| {
+                        usize::try_from(length).map_err(|_| Error::CorruptAuthority)
+                    })
+                    .and_then(|length| {
+                        if principal_length != i64::from(HASH_BYTES)
+                            || length > pos_core::MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1
+                        {
+                            Err(Error::CorruptAuthority)
+                        } else {
+                            Ok(length)
+                        }
+                    })
+            })
+        },
+    )
 }
 
 pub(super) fn binding_with_context(
@@ -69,51 +60,58 @@ pub(super) fn binding_with_context(
     operation_id: Hash,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<Option<PrincipalOwnerBindingV1>> {
-    let Some(length) = binding_length(conn, operation_id, context)? else {
-        return Ok(None);
-    };
-    context.check().map_err(|_| Error::CorruptAuthority)?;
-    let mut statement = conn
-        .prepare(BINDING_FETCH_SQL)
-        .map_err(|_| Error::StorageIndeterminate)?;
-    context.check().map_err(|_| Error::CorruptAuthority)?;
-    let mut rows = statement
-        .query(params![operation_id.as_bytes().as_slice()])
-        .map_err(|_| Error::StorageIndeterminate)?;
-    context
-        .row_available()
-        .map_err(|_| Error::CorruptAuthority)?;
-    let row = rows
-        .next()
-        .map_err(|_| Error::StorageIndeterminate)?
-        .ok_or(Error::CorruptAuthority)?;
-    context.suffix_row().map_err(|_| Error::CorruptAuthority)?;
-    context
-        .bytes(usize::from(HASH_BYTES))
-        .map_err(|_| Error::CorruptAuthority)?;
-    let principal_digest = row
-        .get::<_, Vec<u8>>(0)
-        .map_err(|_| Error::StorageIndeterminate)?;
-    context.check().map_err(|_| Error::CorruptAuthority)?;
-    context.bytes(length).map_err(|_| Error::CorruptAuthority)?;
-    let bytes = row
-        .get::<_, Vec<u8>>(1)
-        .map_err(|_| Error::StorageIndeterminate)?;
-    context.check().map_err(|_| Error::CorruptAuthority)?;
-    // The query key is already a typed Hash. Do not allocate a synthetic key
-    // Vec merely to compare it with the native binding's operation identity.
-    let binding = context
-        .local_principal_binding(&bytes)
-        .map_err(|_| Error::CorruptAuthority)?;
-    if binding.input().operation_id != operation_id
-        || binding.input().principal_digest.as_bytes().as_slice() != principal_digest.as_slice()
-    {
-        return Err(Error::CorruptAuthority);
-    }
-    context
-        .check()
-        .map(|()| Some(binding))
-        .map_err(|_| Error::CorruptAuthority)
+    binding_length(conn, operation_id, context).and_then(|length| {
+        length.map_or(Ok(None), |length| {
+            selected_field_with_context(
+                conn,
+                SelectedRowV1::BindingFields(operation_id),
+                context,
+                |row, context| {
+                    context
+                        .bytes(usize::from(HASH_BYTES))
+                        .map_err(|_| Error::CorruptAuthority)
+                        .and_then(|()| {
+                            row.get::<_, Vec<u8>>(0)
+                                .map_err(|_| Error::StorageIndeterminate)
+                        })
+                        .and_then(|principal_digest| {
+                            context
+                                .check()
+                                .map_err(|_| Error::CorruptAuthority)
+                                .and_then(|()| {
+                                    context.bytes(length).map_err(|_| Error::CorruptAuthority)
+                                })
+                                .and_then(|()| {
+                                    row.get::<_, Vec<u8>>(1)
+                                        .map_err(|_| Error::StorageIndeterminate)
+                                })
+                                .and_then(|bytes| {
+                                    context
+                                        .check()
+                                        .map_err(|_| Error::CorruptAuthority)
+                                        .and_then(|()| {
+                                            context
+                                                .local_principal_binding(&bytes)
+                                                .map_err(|_| Error::CorruptAuthority)
+                                        })
+                                })
+                                .and_then(|binding| {
+                                    // Typed Hash query key: no synthetic Vec.
+                                    if binding.input().operation_id != operation_id
+                                        || binding.input().principal_digest.as_bytes().as_slice()
+                                            != principal_digest.as_slice()
+                                    {
+                                        Err(Error::CorruptAuthority)
+                                    } else {
+                                        Ok(binding)
+                                    }
+                                })
+                        })
+                },
+            )
+            .and_then(|binding| binding.map(Some).ok_or(Error::CorruptAuthority))
+        })
+    })
 }
 
 #[cfg(test)]
@@ -122,6 +120,7 @@ mod tests {
     use super::*;
     use crate::{ForkReplayReadBudgetV1, ForkReplayReadLimitsV1};
     use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+    use rusqlite::params;
     use std::time::Duration;
 
     type Fallible<T> = std::result::Result<T, Box<dyn std::error::Error>>;
