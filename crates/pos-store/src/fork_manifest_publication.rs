@@ -15,12 +15,8 @@ use pos_core::{
     KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, PublicKey, Signature, SignedForkReproManifestV1,
     TimelineId,
 };
-#[cfg(feature = "sqlite")]
-use pos_core::{ForkAttributionCodecErrorV1, ImportedForkPublicationOperationV1};
 use pos_crypto::fork_attribution::verify_local_fork_manifest_signature_only;
 
-#[cfg(feature = "sqlite")]
-use crate::fork_event_authority::AuthorityValidatorV1;
 use crate::{
     fork_event_authority::{ValidatedAdmissionV1, ValidatedOriginV1},
     fork_replay::NativeReadContextV1,
@@ -731,49 +727,6 @@ fn verified_committed_origin(
     } else {
         Err(ForkManifestPublicationErrorV1::PublicationConflict)
     }
-}
-
-/// One stored `FPO1` decoded with its authority origin.
-#[cfg(feature = "sqlite")]
-pub(crate) type DecodedPublicationOperationV1 =
-    Result<(ForkPublicationOperationV1, ValidatedOriginV1), ForkAttributionCodecErrorV1>;
-
-/// The `FPO1` decoder that one R6.9 validator may use.
-///
-/// Validator (a) reads with the strict local decoder alone, which rejects
-/// code 2, so issuance and recovery never decode a code-2 record. Only
-/// validator (b) may fall back to the code-2 decoder.
-#[cfg(feature = "sqlite")]
-pub(crate) fn publication_operation_decoder(
-    validator: AuthorityValidatorV1,
-) -> fn(&[u8]) -> DecodedPublicationOperationV1 {
-    match validator {
-        AuthorityValidatorV1::LocalOnly => decode_local_publication_operation,
-        AuthorityValidatorV1::CodeTwoAware => decode_publication_operation,
-    }
-}
-
-/// Strictly decode one stored `FPO1` as the local record only.
-#[cfg(feature = "sqlite")]
-fn decode_local_publication_operation(bytes: &[u8]) -> DecodedPublicationOperationV1 {
-    ForkPublicationOperationV1::from_canonical_cbor(bytes)
-        .map(|operation| (operation, ValidatedOriginV1::Local))
-}
-
-/// Strictly decode one stored `FPO1` as the local record or, failing that, as
-/// the code-2 record, and report which origin it carries.
-///
-/// ADR-105 r6 R6.9: only read validator (b) reaches this decoder.
-#[cfg(feature = "sqlite")]
-fn decode_publication_operation(bytes: &[u8]) -> DecodedPublicationOperationV1 {
-    decode_local_publication_operation(bytes).or_else(|_| {
-        ImportedForkPublicationOperationV1::from_canonical_cbor(bytes).map(|operation| {
-            (
-                operation.projection().clone(),
-                ValidatedOriginV1::Imported(operation.authority_origin_digest()),
-            )
-        })
-    })
 }
 
 fn verified_committed_manifest(
