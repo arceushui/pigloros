@@ -121,10 +121,8 @@ fn piece_set(published: &Published, anchor_bytes: &[u8]) -> Vec<Vec<u8>> {
 }
 
 fn release_source(published: &Published) -> Result<InMemoryReleaseSourceV1, BoxError> {
-    let entry = InMemoryReleaseEntryV1::from_bytes(
-        published.manifest.clone(),
-        published.layers.clone(),
-    )?;
+    let entry =
+        InMemoryReleaseEntryV1::from_bytes(published.manifest.clone(), published.layers.clone())?;
     Ok(InMemoryReleaseSourceV1::new(vec![entry])?)
 }
 
