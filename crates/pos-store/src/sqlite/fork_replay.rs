@@ -8,9 +8,8 @@ use rusqlite::OptionalExtension;
 use super::SqliteStore;
 use crate::{
     fork_event_authority::AuthorityValidatorV1, fork_replay::NativeReadContextV1,
-    ForkReplayAuthorityEvidenceV1,
-    ForkReplayAuthorityReadErrorV1 as Error, ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1,
-    ForkReplayRequirementV1,
+    ForkReplayAuthorityEvidenceV1, ForkReplayAuthorityReadErrorV1 as Error,
+    ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1, ForkReplayRequirementV1,
 };
 
 type ReadResult<T> = Result<T, Error>;
@@ -253,7 +252,11 @@ mod tests {
 
     #[test]
     fn file_backed_shared_native_batches_charge_exact_buffers_and_latch_expiry() -> Fallible<()> {
-        for shape in [Shape::Mixed, Shape::EmptyClassified, Shape::EmptyUnclassified] {
+        for shape in [
+            Shape::Mixed,
+            Shape::EmptyClassified,
+            Shape::EmptyUnclassified,
+        ] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("native-context.sqlite");
             let mut store = SqliteStore::open(path.to_str().ok_or("UTF-8 path")?)?;
@@ -269,7 +272,8 @@ mod tests {
             // Actual shared buffers, independently measured by byte encoders.
             let expected = committed.outer_bytes.len() * 2
                 + signed.manifest_bytes().len() * 2
-                + signed.manifest().input().intervention_sequences.len() * std::mem::size_of::<u64>();
+                + signed.manifest().input().intervention_sequences.len()
+                    * std::mem::size_of::<u64>();
             let interval = store.begin_protected_effect_interval()?;
             for (bytes, succeeds) in [(expected, true), (expected - 1, false)] {
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
@@ -286,7 +290,10 @@ mod tests {
                     assert_eq!(result?, committed);
                     assert_eq!(budget.remaining_native_bytes(), 0);
                 } else {
-                    assert_eq!(result, Err(ForkManifestPublicationErrorV1::PublicationConflict));
+                    assert_eq!(
+                        result,
+                        Err(ForkManifestPublicationErrorV1::PublicationConflict)
+                    );
                     assert_eq!(budget.check_time(), Err(Error::BoundsExceeded));
                 }
             }
@@ -306,7 +313,10 @@ mod tests {
                 Err(ForkManifestPublicationErrorV1::PublicationConflict)
             );
             assert_eq!(budget.check_time(), Err(Error::BoundsExceeded));
-            store.finish_protected_effect_interval(interval, ErasureProtectedEffectDispositionV1::Rollback)?;
+            store.finish_protected_effect_interval(
+                interval,
+                ErasureProtectedEffectDispositionV1::Rollback,
+            )?;
             assert_eq!(store.read_committed(child, head)?, committed);
         }
         Ok(())
