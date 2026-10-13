@@ -112,8 +112,7 @@ impl WorldReplayVerifierV1 for ImportedVerifier {
             .map_or(self.requirement, |(_, required)| required);
         let initial_admissions = if self.secondary.is_some() { 2 } else { 1 };
         let final_phase = phase >= initial_admissions;
-        if matches!(fault, Fault::Foreign)
-            || (matches!(fault, Fault::FinalIdentity) && final_phase)
+        if matches!(fault, Fault::Foreign) || (matches!(fault, Fault::FinalIdentity) && final_phase)
         {
             requirement = ForkReplayRequirementV1::new(
                 child,
@@ -139,16 +138,8 @@ impl WorldReplayVerifierV1 for ImportedVerifier {
         } else {
             Some(Hash::from_bytes([0xe1; 32]))
         };
-        let nodes = if fault == Fault::NodeLimit {
-            1
-        } else {
-            1_024
-        };
-        let rows = if fault == Fault::RowLimit {
-            1
-        } else {
-            65_536
-        };
+        let nodes = if fault == Fault::NodeLimit { 1 } else { 1_024 };
+        let rows = if fault == Fault::RowLimit { 1 } else { 65_536 };
         let bytes = if fault == Fault::ByteLimit {
             1
         } else {
@@ -281,8 +272,12 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
         ]
         .into_iter()
         .flat_map(|fault| {
-            [None, Some(Seq::from_u64(2)), Some(Seq::from_u64(PARENT_CUT))]
-                .map(|cut| (fault, cut))
+            [
+                None,
+                Some(Seq::from_u64(2)),
+                Some(Seq::from_u64(PARENT_CUT)),
+            ]
+            .map(|cut| (fault, cut))
         })
         .flat_map(|(fault, cut)| {
             [false, true]
@@ -312,7 +307,13 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 &composition,
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
-            run_on_host(host, child, requirement.publication_logical_head(), fault, cut)?;
+            run_on_host(
+                host,
+                child,
+                requirement.publication_logical_head(),
+                fault,
+                cut,
+            )?;
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("imported-replay.sqlite");
             let path = path.to_str().ok_or("utf-8 path")?;
@@ -331,7 +332,13 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 &composition,
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
-            run_on_host(host, child, requirement.publication_logical_head(), fault, cut)?;
+            run_on_host(
+                host,
+                child,
+                requirement.publication_logical_head(),
+                fault,
+                cut,
+            )?;
             let composition =
                 ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier());
             let host = ErasureExecutionHostV1::open_read_only_with_authority(
@@ -339,7 +346,13 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 &composition,
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
-            run_on_host(host, child, requirement.publication_logical_head(), fault, cut)?;
+            run_on_host(
+                host,
+                child,
+                requirement.publication_logical_head(),
+                fault,
+                cut,
+            )?;
         }
     }
     Ok(())
