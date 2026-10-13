@@ -13,6 +13,8 @@ pub(super) enum SelectedRowV1<'key> {
     HostBlob,
     ChildProbe(&'key str),
     ChildFields(&'key str),
+    ChainProbe(&'key str),
+    ChainFields(&'key str),
 }
 
 impl SelectedRowV1<'_> {
@@ -30,6 +32,11 @@ impl SelectedRowV1<'_> {
                 typeof(fork_seq) IN ('null', 'integer')
                 FROM timelines WHERE id = ?1",
             Self::ChildFields(_) => "SELECT name, parent_id, fork_seq FROM timelines WHERE id = ?1",
+            Self::ChainProbe(_) => "SELECT
+                typeof(parent_id) = 'null', typeof(parent_id) = 'text', length(CAST(parent_id AS BLOB)),
+                typeof(fork_seq) IN ('null', 'integer'), typeof(head_seq) = 'integer'
+                FROM timelines WHERE id = ?1",
+            Self::ChainFields(_) => "SELECT parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
         }
     }
 
@@ -39,7 +46,10 @@ impl SelectedRowV1<'_> {
     ) -> rusqlite::Result<Rows<'statement>> {
         match self {
             Self::HostProbe | Self::HostBlob => statement.query([]),
-            Self::ChildProbe(key) | Self::ChildFields(key) => statement.query([key]),
+            Self::ChildProbe(key)
+            | Self::ChildFields(key)
+            | Self::ChainProbe(key)
+            | Self::ChainFields(key) => statement.query([key]),
         }
     }
 }
