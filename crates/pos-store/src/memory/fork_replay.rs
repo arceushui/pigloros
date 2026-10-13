@@ -39,32 +39,6 @@ impl MemoryStore {
         budget: &mut ForkReplayReadBudgetV1<'_>,
     ) -> ReadResult<()> {
         let child = requirement.child_timeline_id();
-        let local = self.fork_admissions.get(&child);
-        charge_records(local.into_iter(), budget)?;
-        if local.is_some() {
-            for binding in self.fork_principal_owner_bindings.values() {
-                budget.charge_rows(1)?;
-                // The local validator searches this map by its FAR1 digest.
-                budget.charge_canonical(binding.canonical_size())?;
-            }
-        }
-        if let Some(table) = self.fork_classifier_tables.get(&child).filter(|_| local.is_some()) {
-            charge_records(std::iter::once(table), budget)?;
-            budget.charge_bytes(table.input().registrar_identifier.len())?;
-            let key = (
-                table.input().room_revision_descriptor_hash,
-                table.input().registrar_identifier.clone(),
-            );
-            charge_records(self.fork_classifier_sources.get(&key).into_iter(), budget)?;
-        }
-        if local.is_some() {
-            for registration in self.fork_classifier_registrations.values() {
-                budget.charge_rows(1)?;
-                if registration.input().child_timeline_id == child {
-                    budget.charge_canonical(registration.canonical_size())?;
-                }
-            }
-        }
         if let Some(binding) = self
             .fork_publication_bindings
             .get(&(child, requirement.publication_logical_head().as_u64()))
