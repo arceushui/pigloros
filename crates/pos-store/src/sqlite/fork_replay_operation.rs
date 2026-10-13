@@ -18,6 +18,74 @@ const OPERATION_FETCH_SQL: &str = "SELECT evidence_digest, commitment, result_di
     FROM fork_admission_operations WHERE kind = ?1 AND operation_id = ?2";
 const HASH_BYTES: u8 = 32;
 
+/// Resolve only the immutable POB1 operation selected by its result digest.
+/// The probe and raw row are separately charged on the held snapshot.
+pub(super) fn principal_operation_id_with_context(
+    conn: &Connection,
+    result_digest: Hash,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> Result<Hash> {
+    context.check().map_err(|_| Error::CorruptAuthority)?;
+    let mut probe = conn
+        .prepare(
+            "SELECT typeof(operation_id) = 'blob', length(operation_id)
+        FROM fork_admission_operations WHERE kind = 1 AND result_digest = ?1",
+        )
+        .map_err(|_| Error::StorageIndeterminate)?;
+    context.check().map_err(|_| Error::CorruptAuthority)?;
+    let mut rows = probe
+        .query(params![result_digest.as_bytes().as_slice()])
+        .map_err(|_| Error::StorageIndeterminate)?;
+    context.row_available().map_err(|_| Error::CorruptAuthority)?;
+    let row = rows
+        .next()
+        .map_err(|_| Error::StorageIndeterminate)?
+        .ok_or(Error::CorruptAuthority)?;
+    context.suffix_row().map_err(|_| Error::CorruptAuthority)?;
+    if !row
+        .get::<_, bool>(0)
+        .map_err(|_| Error::StorageIndeterminate)?
+    {
+        return Err(Error::StorageIndeterminate);
+    }
+    if row
+        .get::<_, i64>(1)
+        .map_err(|_| Error::StorageIndeterminate)?
+        != i64::from(HASH_BYTES)
+    {
+        return Err(Error::CorruptAuthority);
+    }
+    context.check().map_err(|_| Error::CorruptAuthority)?;
+    let mut fetch = conn
+        .prepare(
+            "SELECT operation_id FROM fork_admission_operations
+        WHERE kind = 1 AND result_digest = ?1",
+        )
+        .map_err(|_| Error::StorageIndeterminate)?;
+    context.check().map_err(|_| Error::CorruptAuthority)?;
+    let mut rows = fetch
+        .query(params![result_digest.as_bytes().as_slice()])
+        .map_err(|_| Error::StorageIndeterminate)?;
+    context.row_available().map_err(|_| Error::CorruptAuthority)?;
+    let row = rows
+        .next()
+        .map_err(|_| Error::StorageIndeterminate)?
+        .ok_or(Error::CorruptAuthority)?;
+    context.suffix_row().map_err(|_| Error::CorruptAuthority)?;
+    context
+        .bytes(usize::from(HASH_BYTES))
+        .map_err(|_| Error::CorruptAuthority)?;
+    let bytes = row
+        .get::<_, Vec<u8>>(0)
+        .map_err(|_| Error::StorageIndeterminate)?;
+    context.check().map_err(|_| Error::CorruptAuthority)?;
+    let operation = sqlite_hash(bytes)?;
+    context
+        .check()
+        .map(|()| operation)
+        .map_err(|_| Error::CorruptAuthority)
+}
+
 struct OperationLengthsV1 {
     child: Option<usize>,
 }
@@ -380,6 +448,135 @@ mod tests {
                     assert!(budget.check_time().is_ok());
                 }
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn principal_result_key_lookup_charges_actual_fixed_digest_and_probe_fetch_rows(
+    ) -> Fallible<()> {
+        let (store, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
+        for bytes in 1..=32 {
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 2, bytes, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let result = principal_operation_id_with_context(
+                &store.conn,
+                row.result_digest,
+                &mut NativeReadContextV1::protected(&mut budget),
+            );
+            if bytes == 32 {
+                assert_eq!(result?, row.operation_id);
+                assert_eq!(budget.remaining_native_bytes(), 0);
+            } else {
+                assert_eq!(result, Err(Error::CorruptAuthority));
+                assert!(budget.check_time().is_err());
+            }
+        }
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 32, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        assert_eq!(
+            principal_operation_id_with_context(
+                &store.conn,
+                row.result_digest,
+                &mut NativeReadContextV1::protected(&mut budget)
+            ),
+            Err(Error::CorruptAuthority)
+        );
+        assert!(budget.check_time().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn principal_result_key_lookup_rejects_impossible_type_width_and_absence() -> Fallible<()> {
+        use rusqlite::types::Value;
+        for (value, expected) in [
+            (Value::Text("x".repeat(32)), Error::StorageIndeterminate),
+            (Value::Blob(vec![1; 31]), Error::CorruptAuthority),
+            (Value::Blob(vec![1; 33]), Error::CorruptAuthority),
+        ] {
+            let conn = Connection::open_in_memory()?;
+            // Narrow impossible-state fixture, not an admitted operation.
+            conn.execute_batch(
+                "CREATE TABLE fork_admission_operations
+                (kind INTEGER, operation_id BLOB, result_digest BLOB)",
+            )?;
+            let result = Hash::from_bytes([4; 32]);
+            assert_eq!(
+                conn.execute(
+                    "INSERT INTO fork_admission_operations VALUES (1, ?1, ?2)",
+                    params![value, result.as_bytes().as_slice()]
+                )?,
+                1
+            );
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 2, 32, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                principal_operation_id_with_context(
+                    &conn,
+                    result,
+                    &mut NativeReadContextV1::protected(&mut budget)
+                ),
+                Err(expected)
+            );
+            assert_eq!(budget.remaining_native_bytes(), 32);
+            assert!(budget.check_time().is_ok());
+            conn.execute("DELETE FROM fork_admission_operations", [])?;
+            assert_eq!(
+                principal_operation_id_with_context(
+                    &conn,
+                    result,
+                    &mut NativeReadContextV1::ordinary()
+                ),
+                Err(Error::CorruptAuthority)
+            );
+        }
+        let conn = Connection::open_in_memory()?;
+        assert_eq!(
+            principal_operation_id_with_context(
+                &conn,
+                Hash::from_bytes([4; 32]),
+                &mut NativeReadContextV1::ordinary()
+            ),
+            Err(Error::StorageIndeterminate)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn principal_result_key_lookup_checks_every_original_epoch_boundary() -> Fallible<()> {
+        let (store, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
+        for last in [Duration::ZERO, Duration::from_secs(2)] {
+            let mut completed = false;
+            for marks in 2..160 {
+                let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                    std::iter::repeat_n(Duration::from_millis(1), marks).chain([last]),
+                );
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 2, 32, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                let result = principal_operation_id_with_context(
+                    &store.conn,
+                    row.result_digest,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
+                if let Ok(operation_id) = result {
+                    assert_eq!(operation_id, row.operation_id);
+                    assert_eq!(budget.remaining_native_bytes(), 0);
+                    completed = true;
+                    break;
+                }
+                assert!(budget.check_time().is_err());
+            }
+            assert!(
+                completed,
+                "all key lookup expiry/regression boundaries tested"
+            );
         }
         Ok(())
     }

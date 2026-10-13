@@ -1,10 +1,11 @@
-//! Allocation gates for the existing local and code-2 FAR1 decoders.
+//! Allocation gates for existing local POB1 and local/code-2 FAR1 decoders.
 //!
 //! Borrowed carriers identify only bounded allocation units; Core remains
 //! the sole validator of native fields, origin, semantics and canonical bytes.
 
 use pos_core::{
-    ForkAdmissionRecordV1, ImportedForkAdmissionRecordV1, MAX_FORK_ADMISSION_RECORD_BYTES_V1,
+    ForkAdmissionRecordV1, ImportedForkAdmissionRecordV1, PrincipalOwnerBindingV1,
+    MAX_FORK_ADMISSION_RECORD_BYTES_V1, MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1,
 };
 
 use super::{imported_projection_length, AdmissionCarrierV1, NativeReadContextV1};
@@ -13,10 +14,37 @@ use crate::ForkManifestPublicationErrorV1 as Error;
 type Result<T> = std::result::Result<T, Error>;
 
 const CREATOR_FIELD: u64 = 4;
+const BINDING_OWNER_FIELD: u64 = 4;
 const TEXT_MAJOR: u8 = 3;
 const OWNER_MAX_BYTES: usize = 128;
 
 impl NativeReadContextV1<'_, '_> {
+    pub(crate) fn local_principal_binding(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<PrincipalOwnerBindingV1> {
+        self.check()?;
+        if self.budget.is_some() {
+            if bytes.len() > MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1 {
+                return Err(Error::PublicationConflict);
+            }
+            let owner = AdmissionCarrierV1::field(bytes, BINDING_OWNER_FIELD, TEXT_MAJOR)
+                .filter(|value| value.len() <= OWNER_MAX_BYTES)
+                .ok_or(Error::PublicationConflict)?;
+            self.bytes(owner.len())?;
+            // The borrowed native POB1 decoder rejects a code-2 origin before
+            // creating its equality Vec. No projection is built by this local
+            // decoder; its temporary Owner String is still a real allocation.
+            if imported_projection_length(bytes).is_none() {
+                self.bytes(bytes.len())?;
+            }
+        }
+        let binding = PrincipalOwnerBindingV1::from_canonical_cbor(bytes)
+            .map_err(|_| Error::PublicationConflict);
+        self.check()?;
+        binding
+    }
+
     fn admission_creator(&mut self, bytes: &[u8]) -> Result<()> {
         let creator = AdmissionCarrierV1::field(bytes, CREATOR_FIELD, TEXT_MAJOR)
             .filter(|value| value.len() <= OWNER_MAX_BYTES)
@@ -164,6 +192,106 @@ mod tests {
                 assert_parity(codec, &oversized)?;
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn principal_binding_carrier_preserves_native_local_rejection_and_allocation_units(
+    ) -> Fallible<()> {
+        use pos_core::{
+            Hash, ImportedPrincipalOwnerBindingV1, OwnerIdV1, PrincipalOwnerBindingInputV1,
+        };
+        for owner in ["owner".to_owned(), "é".repeat(64)] {
+            let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
+                operation_id: Hash::from_bytes([1; 32]),
+                principal_digest: Hash::from_bytes([2; 32]),
+                owner: OwnerIdV1::new(owner)?,
+                origin: pos_core::ForkAuthorityOriginV1::Local,
+            })?;
+            let bytes = binding.to_canonical_cbor();
+            let expected = bytes.len() + binding.input().owner.as_str().len();
+            for limit in 1..=expected {
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 1, limit, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                let result =
+                    NativeReadContextV1::protected(&mut budget).local_principal_binding(&bytes);
+                if limit == expected {
+                    assert_eq!(result?, binding);
+                    assert_eq!(budget.remaining_native_bytes(), 0);
+                } else {
+                    assert_eq!(result, Err(Error::PublicationConflict));
+                    assert!(budget.check_time().is_err());
+                }
+            }
+            let imported = ImportedPrincipalOwnerBindingV1::from_local(
+                binding.clone(),
+                Hash::from_bytes([3; 32]),
+            )
+            .to_canonical_cbor();
+            let mut cases = vec![bytes.clone(), imported];
+            cases.extend((0..bytes.len()).map(|end| bytes[..end].to_vec()));
+            for index in 0..bytes.len() {
+                for replacement in [0, 255] {
+                    let mut changed = bytes.clone();
+                    changed[index] = replacement;
+                    cases.push(changed);
+                }
+            }
+            let mut trailing = bytes.clone();
+            trailing.push(0);
+            cases.push(trailing);
+            let mut oversized = bytes;
+            oversized.resize(MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1 + 1, 0);
+            cases.push(oversized);
+            for bytes in cases {
+                let native = PrincipalOwnerBindingV1::from_canonical_cbor(&bytes).is_ok();
+                assert_eq!(
+                    NativeReadContextV1::ordinary()
+                        .local_principal_binding(&bytes)
+                        .is_ok(),
+                    native
+                );
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1_024, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                assert_eq!(
+                    NativeReadContextV1::protected(&mut budget)
+                        .local_principal_binding(&bytes)
+                        .is_ok(),
+                    native
+                );
+                assert!(budget.check_time().is_ok());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn local_principal_binding_does_not_charge_a_code_two_equality_buffer() -> Fallible<()> {
+        let binding = PrincipalOwnerBindingV1::new(pos_core::PrincipalOwnerBindingInputV1 {
+            operation_id: pos_core::Hash::from_bytes([1; 32]),
+            principal_digest: pos_core::Hash::from_bytes([2; 32]),
+            owner: pos_core::OwnerIdV1::new("owner")?,
+            origin: pos_core::ForkAuthorityOriginV1::Local,
+        })?;
+        let bytes = pos_core::ImportedPrincipalOwnerBindingV1::from_local(
+            binding,
+            pos_core::Hash::from_bytes([3; 32]),
+        )
+        .to_canonical_cbor();
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(1, 1, 1, "owner".len(), 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        assert_eq!(
+            NativeReadContextV1::protected(&mut budget).local_principal_binding(&bytes),
+            Err(Error::PublicationConflict)
+        );
+        assert_eq!(budget.remaining_native_bytes(), 0);
+        assert!(budget.check_time().is_ok());
         Ok(())
     }
 
