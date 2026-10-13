@@ -24,10 +24,9 @@ Usage:
 The fixture seeds below are public and used for fixtures only ("repository-test-fixture-only");
 the signatures prove consistency, not publisher identity.
 
-The slices S3b1 and S3b2 ship a real subset of each family (R8-F9): `positive` and
-`independent-evaluation` in full, `res.1` and `del.1`, and with S3b2 every `denied`
-(`den.01` to `den.22`), `malformed` (`mal.1a` to `mal.6`) and `downgrade` (`dgr.1` to
-`dgr.4`) sub-case. `res.2` to `res.4` and `del.2` belong to S3b3.
+The catalogue covers every `denied` (`den.01` to `den.22`), `malformed` (`mal.1a` to `mal.6`)
+and `downgrade` (`dgr.1` to `dgr.4`) sub-case, `positive` and `independent-evaluation` in full,
+and the resource-exhaustion and deletion-redaction sub-cases listed in `SUBCASES`.
 """
 
 from __future__ import annotations

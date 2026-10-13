@@ -150,8 +150,8 @@ fn denied_alone(id: &str, error: Option<&str>) -> TestResult<CaseAttempt> {
     })
 }
 
-/// A smoke test of the whole `denied` case on the real worker; the proof of R8-S2, which also
-/// controls the expiry sub-cases, is in S5.
+/// A smoke test of the whole `denied` case on the real worker; the `r8_s2_*` tests of
+/// `conformance_adapter_public.rs` prove the family and control the expiry sub-cases.
 #[test]
 fn every_denied_sub_case_matches_on_the_real_worker() -> TestResult {
     for mode in [ExecutionMode::Local, ExecutionMode::AirGapped] {
