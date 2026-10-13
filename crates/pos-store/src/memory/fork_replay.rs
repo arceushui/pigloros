@@ -1,9 +1,8 @@
-//! Bounded bridge into the existing MemoryStore validator-(b) implementation.
+//! Bounded bridge into the existing `MemoryStore` validator-(b) implementation.
 
 use super::MemoryStore;
 use crate::{
-    fork_event_authority::AuthorityValidatorV1,
-    fork_replay::NativeReadContextV1,
+    fork_event_authority::AuthorityValidatorV1, fork_replay::NativeReadContextV1,
     ForkReplayAuthorityEvidenceV1, ForkReplayAuthorityReadErrorV1 as Error,
     ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1, ForkReplayRequirementV1,
 };

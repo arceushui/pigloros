@@ -269,7 +269,13 @@ mod tests {
             let head = PARENT_CUT + shape.events();
             let committed = store.read_committed(child, head)?;
             let signed = SignedForkReproManifestV1::from_canonical_cbor(&committed.outer_bytes)?;
-            let owner_bytes = committed.operation.input().signing_identity.owner_id.as_str().len();
+            let owner_bytes = committed
+                .operation
+                .input()
+                .signing_identity
+                .owner_id
+                .as_str()
+                .len();
             let receipt_copy = 32 + 16 + 8 + 32;
             let projection_copy = 32 + 16 + 8 + 32 + 32 + owner_bytes + 1 + 8 + 32 + 32 + 32 + 1;
             let origin_copy = 1 + 32;
@@ -280,7 +286,10 @@ mod tests {
                 + signed.manifest().input().intervention_sequences.len()
                     * std::mem::size_of::<u64>()
                 + committed.binding.to_canonical_cbor().len()
-                + receipt_copy + projection_copy + origin_copy + absent_key_copy;
+                + receipt_copy
+                + projection_copy
+                + origin_copy
+                + absent_key_copy;
             let interval = store.begin_protected_effect_interval()?;
             for (bytes, succeeds) in [(expected, true), (expected - 1, false)] {
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
