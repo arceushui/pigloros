@@ -1,7 +1,8 @@
 //! Host ports for ADR-021 scheduled-pass admission (#480).
 //!
 //! [`ScheduledAdmissionPortsV1`] is the narrow store capability a trusted host
-//! needs to admit a scheduled pass: the admitted-batch port, the
+//! needs to admit a scheduled pass: the factual admission port (the
+//! admitted-batch port and the recorded-prefix reads), the
 //! admission-fence publisher, and authority persistence. It deliberately has
 //! no [`EventStore`] supertrait, so a holder cannot raw-append, create, or
 //! Fork a Timeline through it. [`ScheduledAdmissionStoreV1`] is a complete
@@ -18,8 +19,8 @@
 //! transaction.
 
 use pos_core::{
-    store::EventStore, AuthorityPersistencePortV1, PipelineAdmissionFencePublisherV1,
-    PipelineAdmissionPortV1,
+    store::EventStore, AuthorityPersistencePortV1, FactualAdmissionPortV1,
+    PipelineAdmissionFencePublisherV1,
 };
 
 #[cfg(feature = "local-admission-host")]
@@ -31,17 +32,17 @@ pub use local::LocalScheduledAdmissionHostV1;
 /// Store ports a trusted host needs to admit scheduled passes, and nothing
 /// else.
 ///
-/// The admitted-batch port, the admission-fence publisher, and authority
+/// The factual admission port, the admission-fence publisher, and authority
 /// persistence must belong to the same store as the Timeline, so the store
 /// compares the fence and persisted authority inside its admission
 /// transaction.
 pub trait ScheduledAdmissionPortsV1:
-    PipelineAdmissionPortV1 + PipelineAdmissionFencePublisherV1 + AuthorityPersistencePortV1
+    FactualAdmissionPortV1 + PipelineAdmissionFencePublisherV1 + AuthorityPersistencePortV1
 {
 }
 
 impl<T> ScheduledAdmissionPortsV1 for T where
-    T: PipelineAdmissionPortV1 + PipelineAdmissionFencePublisherV1 + AuthorityPersistencePortV1
+    T: FactualAdmissionPortV1 + PipelineAdmissionFencePublisherV1 + AuthorityPersistencePortV1
 {
 }
 

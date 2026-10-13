@@ -53,7 +53,8 @@ use pos_core::{
     timeline::Timeline,
     ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken, ConsentCodecError,
     ConsentError, ConsentGrantedV1, ConsentRevokedV1, CoreError, ErasureGate, ErasureReferenceV1,
-    PipelineCommitReceiptV1, PipelineOutcomeV1, Plugin, PluginId, ProposedAction,
+    FactualDependencyErrorV1, PipelineCommitReceiptV1, PipelineOutcomeV1, Plugin, PluginId,
+    ProposedAction,
 };
 #[cfg(test)]
 use pos_core::{geo_admission::GeoLocationAdmissionStore, store::EventStore};
@@ -1759,7 +1760,7 @@ fn action_command_error(error: executor::ActionCommandError, maximum: u64) -> Ga
     match error {
         executor::ActionCommandError::Executor(error) => error.into(),
         executor::ActionCommandError::Authorization(error) => map_authorization_error(error),
-        executor::ActionCommandError::Admission(error) => action_admission_error(error, maximum),
+        executor::ActionCommandError::Admission(error) => human_admission_failure(error, maximum),
         #[cfg(test)]
         executor::ActionCommandError::AdmissionUnavailable => {
             GatewayError::ActionAuthorizationUnavailable
@@ -1767,7 +1768,11 @@ fn action_command_error(error: executor::ActionCommandError, maximum: u64) -> Ga
     }
 }
 
-fn action_admission_error(error: HumanActionAdmissionErrorV1, maximum: u64) -> GatewayError {
+/// The Gateway error of a failed human-action admission.
+///
+/// Every `HumanActionAdmissionErrorV1` variant has its own arm and the match
+/// has no wildcard, so a new variant fails to compile until it is routed here.
+fn human_admission_failure(error: HumanActionAdmissionErrorV1, maximum: u64) -> GatewayError {
     match error {
         HumanActionAdmissionErrorV1::Submission(error) => error.into(),
         HumanActionAdmissionErrorV1::IdempotencyConflict => GatewayError::IngressConflict,
@@ -1778,7 +1783,24 @@ fn action_admission_error(error: HumanActionAdmissionErrorV1, maximum: u64) -> G
             ActionRejected::DomainValidationFailed("approved action is not admissible".to_owned()),
         ),
         HumanActionAdmissionErrorV1::HostContract(_) => GatewayError::ActionAdmissionUnavailable,
+        HumanActionAdmissionErrorV1::DependencyDeclaration(error) => {
+            dependency_declaration_error(error)
+        }
         HumanActionAdmissionErrorV1::Store(error) => GatewayError::Store(error),
+    }
+}
+
+/// A failed dependency declaration names no protected record: an exhausted set
+/// is a permanent per-Timeline limit and every other fault is a host fault.
+/// The match has no wildcard, so a new `FactualDependencyErrorV1` variant fails
+/// to compile until it is routed here.
+const fn dependency_declaration_error(error: FactualDependencyErrorV1) -> GatewayError {
+    match error {
+        FactualDependencyErrorV1::SetExhausted => GatewayError::DependencySetExhausted,
+        FactualDependencyErrorV1::UndeclarableInput
+        | FactualDependencyErrorV1::UnresolvedInput
+        | FactualDependencyErrorV1::ClassRuleViolation
+        | FactualDependencyErrorV1::Record(_) => GatewayError::ActionAdmissionUnavailable,
     }
 }
 

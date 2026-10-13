@@ -203,6 +203,7 @@ impl LocalScheduledAdmissionHostV1 {
                         ),
                         provider_validation,
                         security_revisions: revisions,
+                        authority_grant: self.authority_grant(),
                         commit_head,
                         commit_now_secs,
                     }
@@ -256,6 +257,7 @@ impl LocalScheduledAdmissionHostV1 {
                         observation,
                         authorization,
                         security_revisions: revisions,
+                        authority_grant: self.authority_grant(),
                     }
                 })
             })

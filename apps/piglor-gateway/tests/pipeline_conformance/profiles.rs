@@ -29,8 +29,9 @@ use pos_core::{
     TimelineId, WallTime,
 };
 use pos_runtime::{
-    AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, Driver, ObservationView, PluginRegistry,
-    ProjectionKey, RuntimeError, ScheduledDriverBindingV1, ScheduledPassAdmissionV1, StepOutput,
+    AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, Driver, LocalScheduledAdmissionHostV1,
+    ObservationView, PluginRegistry, ProjectionKey, RuntimeError, ScheduledDriverBindingV1,
+    ScheduledPassAdmissionV1, StepOutput,
 };
 use pos_state::{
     AuthorizedObservationV1, ProjectionObservationContextV1, ProjectionObservationPolicyV1,
@@ -465,6 +466,9 @@ fn register_participant(
 
 /// Host admission inputs for a port that never commits.
 fn admission() -> ScheduledPassAdmissionV1 {
+    let grant = LocalScheduledAdmissionHostV1::shared()
+        .test_ok()
+        .authority_grant();
     ScheduledPassAdmissionV1 {
         attempt_id: PipelineAttemptIdV1::try_new([1; 16]).test_ok(),
         idempotency: AppendIdentity::new(
@@ -484,6 +488,9 @@ fn admission() -> ScheduledPassAdmissionV1 {
             },
         )
         .test_ok(),
+        // No fence is published and the port never commits: the grant is deliberately
+        // unbound, so no store ever checks it against a fence.
+        authority_grant: grant,
         commit_head: Seq::from_u64(CUT),
         commit_now_secs: 1,
     }
