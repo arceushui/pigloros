@@ -468,14 +468,18 @@ impl ForkReplayAuthorityEvidenceV1 {
                 &committed.operation,
                 crate::fork_event_authority::ValidatedOriginV1::Imported(origin),
                 &mut context,
-            ).map_err(|_| ForkReplayAuthorityReadErrorV1::BoundsExceeded)?;
-            context.bytes(origin.as_bytes().len())
+            )
+            .map_err(|_| ForkReplayAuthorityReadErrorV1::BoundsExceeded)?;
+            context
+                .bytes(origin.as_bytes().len())
                 .map_err(|_| ForkReplayAuthorityReadErrorV1::BoundsExceeded)?;
             let imported = pos_core::ImportedForkPublicationOperationV1::from_local(
                 committed.operation.clone(),
                 origin,
             );
-            context.check().map_err(|_| ForkReplayAuthorityReadErrorV1::BoundsExceeded)?;
+            context
+                .check()
+                .map_err(|_| ForkReplayAuthorityReadErrorV1::BoundsExceeded)?;
             budget.charge_canonical(imported.canonical_cbor_len())?;
             imported.to_canonical_cbor()
         } else {
