@@ -454,7 +454,7 @@ pub(super) fn classified_event_with_context(
     conn: &Connection,
     operation: &ForkAppendOperationV1,
     context: &mut NativeReadContextV1<'_, '_>,
-) -> std::result::Result<ScopedEventV1, pos_core::ForkEventAuthorityErrorV1> {
+) -> std::result::Result<ScopedEventV1, crate::ForkEventAuthorityErrorV1> {
     let input = operation.input();
     origin_prefix_with_context(conn, input.child_timeline_id, context)
         .and_then(|prefix| {
@@ -490,7 +490,7 @@ pub(super) fn classified_event_with_context(
                     })
                 })
         })
-        .map_err(|_| pos_core::ForkEventAuthorityErrorV1::CorruptAuthority)
+        .map_err(|_| crate::ForkEventAuthorityErrorV1::CorruptAuthority)
 }
 
 fn next_event(
