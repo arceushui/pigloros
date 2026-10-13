@@ -15,11 +15,11 @@ pub enum CanonicalLengthErrorV1 {
     LengthOverflow,
 }
 
-pub(crate) trait CanonicalEmit {
+pub(super) trait CanonicalEmit {
     fn emit(&self, out: &mut impl CanonicalSink);
 }
 
-pub(crate) trait CanonicalSink {
+pub(super) trait CanonicalSink {
     fn extend_from_slice(&mut self, bytes: &[u8]);
 
     fn push(&mut self, byte: u8) {
@@ -88,13 +88,13 @@ impl CanonicalSink for LengthSink {
     }
 }
 
-pub(crate) fn measure(value: &impl CanonicalEmit) -> Result<usize, CanonicalLengthErrorV1> {
+pub(super) fn measure(value: &impl CanonicalEmit) -> Result<usize, CanonicalLengthErrorV1> {
     let mut out = LengthSink::new();
     value.emit(&mut out);
     out.finish()
 }
 
-pub(crate) fn head(out: &mut impl CanonicalSink, major: u8, value: u64) {
+pub(super) fn head(out: &mut impl CanonicalSink, major: u8, value: u64) {
     let tag = major << 5;
     if value < 24 {
         out.push(tag | value.to_be_bytes()[7]);
@@ -112,12 +112,12 @@ pub(crate) fn head(out: &mut impl CanonicalSink, major: u8, value: u64) {
     }
 }
 
-pub(crate) fn bytes(out: &mut impl CanonicalSink, value: &[u8]) {
+pub(super) fn bytes(out: &mut impl CanonicalSink, value: &[u8]) {
     head(out, 2, value.len() as u64);
     out.extend_from_slice(value);
 }
 
-pub(crate) fn text(out: &mut impl CanonicalSink, value: &str) {
+pub(super) fn text(out: &mut impl CanonicalSink, value: &str) {
     head(out, 3, value.len() as u64);
     out.extend_from_slice(value.as_bytes());
 }
