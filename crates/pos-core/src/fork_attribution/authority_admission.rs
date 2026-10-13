@@ -10,7 +10,7 @@ use super::{
     array,
     authority_envelope::ForkAttributionAuthorityEnvelopeV1,
     authority_issuer::{ForkAttributionIssuerV1, MAX_FORK_ATTRIBUTION_ISSUER_BYTES_V1},
-    bytes, canonical, domain_digest, hash, text, timeline, uint,
+    canonical, domain_digest, hash, text, timeline, uint,
     ForkAttributionCodecErrorV1 as Error, Reader, ADMISSION_DOMAIN,
 };
 use crate::{Hash, TimelineId};
@@ -161,7 +161,7 @@ impl CanonicalEmit for ImportedForkAttributionAdmissionV1 {
         hash(out, value.import_operation_id);
         hash(out, value.authority_origin_digest);
         hash(out, value.full_envelope_digest);
-        out.nested(&value.issuer);
+        out.nested_byte_string(&value.issuer);
         hash(out, value.issuer_policy_digest);
         uint(out, value.issuer_policy_generation);
         timeline(out, value.child_timeline_id);
