@@ -256,7 +256,7 @@ mod tests {
             while let Some(row) = rows.next()? { details.push(row.get::<_, String>(3)?); }
             assert!(details.iter().any(|line| line.contains("SEARCH events USING INDEX idx_events_event_id")));
             assert!(!details.iter().any(|line| line.contains("TEMP B-TREE") || line.contains("SCAN events")));
-            if let OrphanKindV1::Operation = kind {
+            if matches!(kind, OrphanKindV1::Operation) {
                 assert!(details.iter().any(|line| line.contains("SEARCH fork_append_operations USING INDEX") && line.contains("child_id=?")));
             }
         }
