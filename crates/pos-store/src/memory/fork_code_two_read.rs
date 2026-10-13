@@ -1084,13 +1084,8 @@ mod tests {
                         std::iter::repeat_n(Duration::ZERO, marks).chain([Duration::from_secs(2)]),
                     );
                     let start = clock.mark();
-                    let limits = ForkReplayReadLimitsV1::new(
-                        1,
-                        visits * 2,
-                        rows * 2,
-                        bytes * 2,
-                        1_000_000,
-                    )?;
+                    let limits =
+                        ForkReplayReadLimitsV1::new(1, visits * 2, rows * 2, bytes * 2, 1_000_000)?;
                     let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
                     let result = state
                         .store

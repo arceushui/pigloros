@@ -128,10 +128,10 @@ use crate::fork_event_authority::{
     ValidatedAdmissionV1, ValidatedOriginV1,
 };
 use crate::fork_manifest_publication::{
-    authorize_publication, publication_operation_decoder, publication_parent_head,
+    authorize_publication, publication_parent_head,
     publication_sources, recovered_publication_receipt, require_absent_publication_graph,
     sign_publication, trusted_committed_manifest_with_context, validate_publication_request,
-    AbsentPublicationPreflightV1, CommittedPublicationRowsV1, CommittedPublicationSourcesV1,
+    AbsentPublicationPreflightV1, CommittedPublicationSourcesV1,
     PublicationGraphV1, PublicationSourceErrorV1, PublicationSourceResultV1, PublicationSourcesV1,
     PublicationSuffixV1,
 };
@@ -147,6 +147,7 @@ mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
 mod fork_replay;
+mod fork_replay_publication;
 mod local_cut_owner;
 mod pipeline_admission;
 // The Plugin trust registry needs `pos-conformance`, which builds only on Linux, so non-Linux
@@ -12635,55 +12636,6 @@ impl SqliteStore {
         )
     }
 
-    /// Read the `FPO1` stored for one operation ID with the authority origin it
-    /// carries, for a trusted read; a noncanonical row is `invalid`.
-    fn fork_publication_operation_with_origin(
-        &self,
-        operation_id: Hash,
-        invalid: ForkManifestPublicationErrorV1,
-        validator: AuthorityValidatorV1,
-    ) -> Result<
-        Option<(pos_core::ForkPublicationOperationV1, ValidatedOriginV1)>,
-        ForkManifestPublicationErrorV1,
-    > {
-        self.fork_publication_row(
-            FORK_PUBLICATION_OPERATION_SQL,
-            params![operation_id.as_bytes().as_slice()],
-            publication_operation_decoder(validator),
-            invalid,
-        )
-    }
-
-    /// Read and strictly decode the `FPB1` stored for one Fork/head key.
-    fn fork_publication_binding(
-        &self,
-        child_timeline_id: TimelineId,
-        final_logical_head: u64,
-    ) -> Result<Option<pos_core::ForkPublicationBindingV1>, ForkManifestPublicationErrorV1> {
-        self.fork_publication_row(
-            FORK_PUBLICATION_BINDING_SQL,
-            params![
-                child_timeline_id.to_string(),
-                sqlite_publication_head(final_logical_head)
-            ],
-            pos_core::ForkPublicationBindingV1::from_canonical_cbor,
-            ForkManifestPublicationErrorV1::PublicationConflict,
-        )
-    }
-
-    /// Read and strictly decode the `FPA1` stored for one record ID.
-    fn fork_publication_artifact(
-        &self,
-        record_id: Hash,
-    ) -> Result<Option<pos_core::ForkPublicationArtifactV1>, ForkManifestPublicationErrorV1> {
-        self.fork_publication_row(
-            FORK_PUBLICATION_ARTIFACT_SQL,
-            params![record_id.as_bytes().as_slice()],
-            pos_core::ForkPublicationArtifactV1::from_canonical_cbor,
-            ForkManifestPublicationErrorV1::PublicationConflict,
-        )
-    }
-
     /// Read the admitted Fork's immutable `FAR1` in the open transaction under
     /// one explicit R6.9 validator: issuance and recovery pass validator (a),
     /// which requires the `Local` origin and its `FCC1` row, and only a read
@@ -12883,40 +12835,6 @@ impl SqliteStore {
         })
     }
 
-    /// Join the committed `FPB1`, `FPO1`, and `FPA1` rows for one key.
-    fn committed_fork_publication_rows(
-        &self,
-        child_timeline_id: TimelineId,
-        final_logical_head: u64,
-        validator: AuthorityValidatorV1,
-    ) -> Result<CommittedPublicationRowsV1<'static>, ForkManifestPublicationErrorV1> {
-        self.fork_publication_binding(child_timeline_id, final_logical_head)
-            .and_then(|binding| binding.ok_or(ForkManifestPublicationErrorV1::PublicationMissing))
-            .and_then(|binding| {
-                let input = binding.input();
-                self.fork_publication_operation_with_origin(
-                    input.operation_id,
-                    ForkManifestPublicationErrorV1::PublicationConflict,
-                    validator,
-                )
-                .and_then(|operation| {
-                    self.fork_publication_artifact(input.signed_manifest_record_id)
-                        .map(|artifact| operation.zip(artifact))
-                })
-                .and_then(|rows| rows.ok_or(ForkManifestPublicationErrorV1::PublicationConflict))
-                .map(|((operation, origin), artifact)| {
-                    CommittedPublicationRowsV1 {
-                        child_timeline_id,
-                        final_logical_head,
-                        binding,
-                        operation,
-                        origin,
-                        artifact: std::borrow::Cow::Owned(artifact),
-                    }
-                })
-            })
-    }
-
     /// Trusted read of one committed graph inside the caller's transaction.
     fn read_committed_fork_publication(
         &self,
@@ -12940,7 +12858,7 @@ impl SqliteStore {
         context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
     ) -> Result<crate::CommittedForkManifestV1, ForkManifestPublicationErrorV1> {
         context.check()?;
-        self.committed_fork_publication_rows(child_timeline_id, final_logical_head, validator)
+        self.committed_publication_rows_with_context(child_timeline_id, final_logical_head, validator, context)
             .and_then(|rows| {
                 let admission = self.fork_publication_admission(child_timeline_id, validator);
                 let retained = sqlite_retained_key_evidence(&self.conn, &admission);

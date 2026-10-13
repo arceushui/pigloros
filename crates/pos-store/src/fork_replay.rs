@@ -10,6 +10,9 @@ use pos_core::{
     Hash, Seq, TimelineId,
 };
 
+#[cfg(feature = "sqlite")]
+mod publication;
+
 /// Private validator context. Only the protected bridge borrows a ledger;
 /// ordinary publication reads retain their existing, non-protected contract.
 /// A failed debit remains latched in the borrowed ledger even when the native
@@ -63,6 +66,20 @@ impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
             .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
     }
 
+    /// Refuse a cursor step before it can inspect a row past the remaining
+    /// ceiling. The caller charges only an actually returned row afterward.
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn row_available(&mut self) -> Result<(), crate::ForkManifestPublicationErrorV1> {
+        self.budget.as_deref_mut().map_or(Ok(()), |budget| {
+            budget.check_time()?;
+            if budget.rows == budget.limits.rows {
+                budget.accept(false)
+            } else {
+                Ok(())
+            }
+        }).map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
+    }
+
     pub(crate) fn node(
         &mut self,
         depth: usize,
@@ -112,12 +129,28 @@ struct AdmissionCarrierV1<'bytes>(&'bytes [u8]);
 
 impl<'bytes> AdmissionCarrierV1<'bytes> {
     fn field(bytes: &'bytes [u8], index: u64, expected_major: u8) -> Option<&'bytes [u8]> {
+        let mut carrier = Self::positioned(bytes, index)?;
+        let (major, length) = carrier.head()?;
+        if major != expected_major {
+            return None;
+        }
+        carrier.take(usize::try_from(length).ok()?)
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn array_field(bytes: &'bytes [u8], index: u64) -> Option<(u64, Self)> {
+        let mut carrier = Self::positioned(bytes, index)?;
+        let (major, count) = carrier.head()?;
+        (major == 4).then_some((count, carrier))
+    }
+
+    fn positioned(bytes: &'bytes [u8], index: u64) -> Option<Self> {
         let mut carrier = Self(bytes);
         let (major, count) = carrier.head()?;
         if major != 4 || count <= index {
             return None;
         }
-        // Both callers supply a fixed native prefix (five or two fields).
+        // Callers supply fixed native prefixes containing only scalar fields.
         for _ in 0..index {
             let (major, length) = carrier.head()?;
             match major {
@@ -128,11 +161,7 @@ impl<'bytes> AdmissionCarrierV1<'bytes> {
                 _ => return None,
             }
         }
-        let (major, length) = carrier.head()?;
-        if major != expected_major {
-            return None;
-        }
-        carrier.take(usize::try_from(length).ok()?)
+        Some(carrier)
     }
 
     fn head(&mut self) -> Option<(u8, u64)> {
