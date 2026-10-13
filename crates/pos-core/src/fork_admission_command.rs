@@ -3,7 +3,7 @@
 //! Decoding proves deterministic-CBOR structure only. The trusted host proof
 //! must be verified under the pinned host key before a store uses a value.
 
-use crate::crypto::{self, CanonicalEmit, CanonicalSink};
+use crate::crypto::{self as canonical_length, CanonicalEmit, CanonicalSink};
 
 use std::io::Cursor;
 
