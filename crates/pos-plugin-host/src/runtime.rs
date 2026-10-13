@@ -12,12 +12,12 @@
 
 use std::sync::LazyLock;
 
+#[cfg(test)]
+use pos_runtime::community_plugin_host::CommunityPluginProfileErrorV1;
 use pos_runtime::community_plugin_host::{
     ComponentTrapClassV1, PinnedComponentRuntimeV1, PinnedEngineConfigV1, TrapOutcomeV1,
     TrapTableEntryV1,
 };
-#[cfg(test)]
-use pos_runtime::community_plugin_host::CommunityPluginProfileErrorV1;
 use wasmtime::Trap;
 
 use crate::lift::widen;
