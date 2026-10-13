@@ -75,7 +75,7 @@ impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
             .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
     }
 
-    /// Refuse a known oversized native row before SQLite fetches its fields.
+    /// Refuse a known oversized native row before `SQLite` fetches its fields.
     /// This is only a prospective check: each actual owned getter is debited
     /// separately, so a decoder that stops early does not invent later copies.
     #[cfg(feature = "sqlite")]
