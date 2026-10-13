@@ -3,7 +3,7 @@
 //! This file is self-contained (no `crate::` paths) so that `build.rs` can pull it in with
 //! `#[path]` while the library compiles it only under `cfg(test)`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// Default maximum number of auxiliary entries per family.
@@ -87,6 +87,17 @@ fn in_inventory_directory(path: &str) -> bool {
         .is_some_and(|(directory, _)| directory == AUXILIARY_DIRECTORY)
 }
 
+/// Whether the per-family entry counts of a provider's `auxiliary` object are acceptable: the
+/// family keys equal the provider's families, and a `pigloros-json-v1` provider has no entries.
+#[must_use]
+pub fn declaration_is_valid(
+    families: &BTreeSet<String>,
+    counts: &BTreeMap<String, usize>,
+    json_adapter: bool,
+) -> bool {
+    counts.keys().eq(families.iter()) && (!json_adapter || counts.values().all(|count| *count == 0))
+}
+
 /// Checks the auxiliary entries of one family against the snapshotted source set (the
 /// inventory digests are verified afterwards).
 ///
@@ -147,10 +158,11 @@ pub fn check_embedded_total(sizes: &[usize], max: usize) -> Result<(), Auxiliary
 #[cfg(test)]
 mod tests {
     use super::{
-        check_embedded_total, valid_media_type, validate_auxiliary_catalog, AuxiliaryCatalogError,
-        AuxiliaryEntry, AUXILIARY_DIRECTORY, DEFAULT_AUXILIARY_CAP, MAX_EMBEDDED_AUXILIARY_BYTES,
+        check_embedded_total, declaration_is_valid, valid_media_type, validate_auxiliary_catalog,
+        AuxiliaryCatalogError, AuxiliaryEntry, AUXILIARY_DIRECTORY, DEFAULT_AUXILIARY_CAP,
+        MAX_EMBEDDED_AUXILIARY_BYTES,
     };
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn entry(path: &str) -> AuxiliaryEntry {
         AuxiliaryEntry {
@@ -277,6 +289,29 @@ mod tests {
         assert_eq!(check_embedded_total(&[max / 2, max / 2], max), Ok(()));
         assert_eq!(check_embedded_total(&[max / 2, max / 2, 1], max), exceeded);
         assert_eq!(check_embedded_total(&[usize::MAX, 1], max), exceeded);
+    }
+
+    fn declaration(families: &[&str], counts: &[(&str, usize)], json: bool) -> bool {
+        let families = families.iter().map(|family| (*family).to_owned()).collect();
+        let counts = counts
+            .iter()
+            .map(|(family, count)| ((*family).to_owned(), *count))
+            .collect::<BTreeMap<_, _>>();
+        declaration_is_valid(&families, &counts, json)
+    }
+
+    #[test]
+    fn declarations_must_cover_exactly_the_families() {
+        assert!(declaration(&["a", "b"], &[("a", 0), ("b", 1)], false));
+        assert!(!declaration(&["a", "b"], &[("a", 0)], false));
+        assert!(!declaration(&["a"], &[("a", 0), ("c", 0)], false));
+        assert!(!declaration(&["a"], &[("b", 0)], false));
+    }
+
+    #[test]
+    fn json_adapter_declarations_must_be_empty() {
+        assert!(declaration(&["a"], &[("a", 0)], true));
+        assert!(!declaration(&["a"], &[("a", 1)], true));
     }
 
     #[test]
