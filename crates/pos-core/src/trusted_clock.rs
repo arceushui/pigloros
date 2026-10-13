@@ -1722,52 +1722,55 @@ pub fn principal_digest(principal: &PrincipalRefV1) -> [u8; 32] {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod fixture_instant_tests {
-    #![cfg(feature = "fixture-instant")]
+    #[cfg(feature = "fixture-instant")]
+    mod cases {
+        use super::super::*;
 
-    use super::*;
+        type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
+        fn sample_of(
+            source: &mut impl PluginTrustWallSourceV1,
+        ) -> Result<u64, TrustedClockErrorV1> {
+            source.sample_plugin_trust().map(WallTime::as_micros)
+        }
 
-    fn sample_of(source: &mut impl PluginTrustWallSourceV1) -> Result<u64, TrustedClockErrorV1> {
-        source.sample_plugin_trust().map(WallTime::as_micros)
-    }
+        #[test]
+        fn the_instant_accepts_zero_and_the_trusted_maximum() -> TestResult {
+            let largest = i64::MAX.unsigned_abs();
+            for micros in [0, 1, largest] {
+                let instant = FixtureEvaluationInstantV1::from_micros(micros)?;
+                let mut source = FixtureWallSourceV1::new(instant);
+                assert_eq!(sample_of(&mut source)?, micros, "accepted {micros}");
+            }
+            Ok(())
+        }
 
-    #[test]
-    fn the_instant_accepts_zero_and_the_trusted_maximum() -> TestResult {
-        let largest = i64::MAX.unsigned_abs();
-        for micros in [0, 1, largest] {
-            let instant = FixtureEvaluationInstantV1::from_micros(micros)?;
+        #[test]
+        fn the_instant_rejects_everything_above_the_trusted_maximum() {
+            let above = i64::MAX.unsigned_abs() + 1;
+            for micros in [above, above + 1, u64::MAX] {
+                let result = FixtureEvaluationInstantV1::from_micros(micros);
+                let expected = Err(TrustedClockErrorV1::SourceUnavailable);
+                assert_eq!(result, expected, "rejected {micros}");
+            }
+        }
+
+        #[test]
+        fn the_source_returns_the_same_instant_at_every_sample() -> TestResult {
+            let instant = FixtureEvaluationInstantV1::from_micros(40_000_000)?;
             let mut source = FixtureWallSourceV1::new(instant);
-            assert_eq!(sample_of(&mut source)?, micros, "accepted {micros}");
+            let mut copy = source.clone();
+            for _ in 0..3 {
+                assert_eq!(sample_of(&mut source)?, 40_000_000, "first source");
+            }
+            assert_eq!(sample_of(&mut copy)?, 40_000_000, "clone");
+            let same = FixtureEvaluationInstantV1::from_micros(40_000_000)?;
+            let later = FixtureEvaluationInstantV1::from_micros(40_000_001)?;
+            assert_eq!(instant, same, "equality");
+            assert_ne!(instant, later, "inequality");
+            let debug = format!("{source:?}");
+            assert!(debug.contains("FixtureWallSourceV1"), "debug name");
+            Ok(())
         }
-        Ok(())
-    }
-
-    #[test]
-    fn the_instant_rejects_everything_above_the_trusted_maximum() {
-        let above = i64::MAX.unsigned_abs() + 1;
-        for micros in [above, above + 1, u64::MAX] {
-            let result = FixtureEvaluationInstantV1::from_micros(micros);
-            let expected = Err(TrustedClockErrorV1::SourceUnavailable);
-            assert_eq!(result, expected, "rejected {micros}");
-        }
-    }
-
-    #[test]
-    fn the_source_returns_the_same_instant_at_every_sample() -> TestResult {
-        let instant = FixtureEvaluationInstantV1::from_micros(40_000_000)?;
-        let mut source = FixtureWallSourceV1::new(instant);
-        let mut copy = source.clone();
-        for _ in 0..3 {
-            assert_eq!(sample_of(&mut source)?, 40_000_000, "first source");
-        }
-        assert_eq!(sample_of(&mut copy)?, 40_000_000, "clone");
-        let same = FixtureEvaluationInstantV1::from_micros(40_000_000)?;
-        let later = FixtureEvaluationInstantV1::from_micros(40_000_001)?;
-        assert_eq!(instant, same, "equality");
-        assert_ne!(instant, later, "inequality");
-        let debug = format!("{source:?}");
-        assert!(debug.contains("FixtureWallSourceV1"), "debug name");
-        Ok(())
     }
 }
