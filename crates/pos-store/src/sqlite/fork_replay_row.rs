@@ -3,7 +3,7 @@
 use rusqlite::{Connection, Row, Rows, Statement};
 
 use crate::fork_replay::NativeReadContextV1;
-use pos_core::ForkAdmissionErrorV1 as Error;
+use pos_core::{ForkAdmissionErrorV1 as Error, Hash};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -15,6 +15,8 @@ pub(super) enum SelectedRowV1<'key> {
     ChildFields(&'key str),
     ChainProbe(&'key str),
     ChainFields(&'key str),
+    BindingProbe(Hash),
+    BindingFields(Hash),
 }
 
 impl SelectedRowV1<'_> {
@@ -37,6 +39,12 @@ impl SelectedRowV1<'_> {
                 typeof(fork_seq) IN ('null', 'integer'), typeof(head_seq) = 'integer'
                 FROM timelines WHERE id = ?1",
             Self::ChainFields(_) => "SELECT parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
+            Self::BindingProbe(_) => "SELECT
+                typeof(principal_digest) = 'blob', length(principal_digest),
+                typeof(pob1_cbor) = 'blob', length(pob1_cbor)
+                FROM fork_principal_owner_bindings WHERE operation_id = ?1",
+            Self::BindingFields(_) => "SELECT principal_digest, pob1_cbor
+                FROM fork_principal_owner_bindings WHERE operation_id = ?1",
         }
     }
 
@@ -50,6 +58,9 @@ impl SelectedRowV1<'_> {
             | Self::ChildFields(key)
             | Self::ChainProbe(key)
             | Self::ChainFields(key) => statement.query([key]),
+            Self::BindingProbe(operation) | Self::BindingFields(operation) => {
+                statement.query([operation.as_bytes().as_slice()])
+            }
         }
     }
 }
