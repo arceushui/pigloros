@@ -3,6 +3,8 @@
 //! These codecs establish neither Fork admission nor append authority. A
 //! trusted host must use them with the admitted-Fork append transaction.
 
+use crate::canonical_length::{head as encode_head, CanonicalEmit, CanonicalSink};
+
 use crate::{CorrelationId, EntityId, EventId, ForkAdmissionRecordV1, Hash, TimelineId, WallTime};
 
 /// Maximum accepted `EOR1` bytes.
@@ -224,13 +226,16 @@ impl ForkClassifierSourceV1 {
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
         let value = &self.0;
         let mut out = Vec::with_capacity(FCS1_FIXED_CAPACITY + value.routes.len() * ROUTE_CAPACITY);
-        encode_array(&mut out, 5);
-        encode_text(&mut out, "FCS1");
-        encode_uint(&mut out, 1);
-        encode_hash(&mut out, value.room_revision_descriptor_hash);
-        encode_text(&mut out, &value.registrar_identifier);
-        encode_routes(&mut out, &value.routes);
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::canonical_length::measure(self)
     }
 
     #[must_use]
@@ -329,16 +334,16 @@ impl ForkClassifierTableV1 {
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
         let value = &self.0;
         let mut out = Vec::with_capacity(FCT1_FIXED_CAPACITY + value.routes.len() * ROUTE_CAPACITY);
-        encode_array(&mut out, 8);
-        encode_text(&mut out, "FCT1");
-        encode_uint(&mut out, 1);
-        encode_timeline(&mut out, value.child_timeline_id);
-        encode_hash(&mut out, value.fork_admission_digest);
-        encode_hash(&mut out, value.room_revision_descriptor_hash);
-        encode_text(&mut out, &value.registrar_identifier);
-        encode_hash(&mut out, value.source_configuration_revision_digest);
-        encode_routes(&mut out, &value.routes);
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::canonical_length::measure(self)
     }
 
     #[must_use]
@@ -418,17 +423,17 @@ impl ForkClassifierRegistrationV1 {
 
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        let value = &self.0;
         let mut out = Vec::with_capacity(MAX_FORK_EVENT_CLASSIFIER_REGISTRATION_BYTES_V1);
-        encode_array(&mut out, 7);
-        encode_text(&mut out, "FCR1");
-        encode_uint(&mut out, 1);
-        encode_hash(&mut out, value.operation_id);
-        encode_timeline(&mut out, value.child_timeline_id);
-        encode_hash(&mut out, value.fork_admission_digest);
-        encode_hash(&mut out, value.room_revision_descriptor_hash);
-        encode_hash(&mut out, value.classifier_revision_digest);
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::canonical_length::measure(self)
     }
 
     #[must_use]
@@ -654,24 +659,17 @@ impl ForkAppendOperationV1 {
     /// Encode exact `FOP1` canonical bytes.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        let value = &self.0;
         let mut out = Vec::with_capacity(FOP1_CAPACITY);
-        encode_array(&mut out, 14);
-        encode_text(&mut out, "FOP1");
-        encode_uint(&mut out, 1);
-        encode_hash(&mut out, value.operation_id);
-        encode_timeline(&mut out, value.child_timeline_id);
-        encode_uint(&mut out, value.logical_seq);
-        encode_event(&mut out, value.event_id);
-        encode_hash(&mut out, value.request_digest);
-        encode_source(&mut out, &value.source);
-        encode_uint(&mut out, value.wall_time.as_micros());
-        encode_hash(&mut out, value.payload_hash);
-        encode_hash(&mut out, value.classifier_revision_digest);
-        encode_hash(&mut out, value.fork_admission_digest);
-        encode_hash(&mut out, value.event_origin_digest);
-        encode_optional_hash(&mut out, value.intervention_admission_digest);
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::canonical_length::measure(self)
     }
 
     #[must_use]
@@ -865,22 +863,17 @@ impl EventOriginRecordV1 {
     /// Encode the exact nine-field deterministic-CBOR `EOR1` array.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        let value = &self.0;
         let mut out = Vec::with_capacity(EOR1_CAPACITY);
-        encode_array(&mut out, 9);
-        encode_text(&mut out, "EOR1");
-        encode_uint(&mut out, 1);
-        encode_timeline(&mut out, value.fork_timeline_id);
-        encode_uint(&mut out, value.logical_seq);
-        encode_event(&mut out, value.event_id);
-        encode_uint(
-            &mut out,
-            u64::from(value.classification.origin() == ForkEventOriginKindV1::ExternalInput),
-        );
-        encode_uint(&mut out, u64::from(value.classification.intervention()));
-        encode_hash(&mut out, value.classifier_revision_digest);
-        encode_hash(&mut out, value.fork_admission_digest);
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::canonical_length::measure(self)
     }
 
     /// Return the domain-separated digest over complete canonical `EOR1` bytes.
@@ -972,20 +965,17 @@ impl ForkInterventionAdmissionV1 {
     /// Encode the exact ten-field deterministic-CBOR `FIA1` array.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        let value = &self.0;
         let mut out = Vec::with_capacity(FIA1_CAPACITY);
-        encode_array(&mut out, 10);
-        encode_text(&mut out, "FIA1");
-        encode_uint(&mut out, 1);
-        encode_hash(&mut out, value.operation_id);
-        encode_timeline(&mut out, value.fork_timeline_id);
-        encode_uint(&mut out, value.logical_seq);
-        encode_event(&mut out, value.event_id);
-        encode_hash(&mut out, value.payload_hash);
-        encode_hash(&mut out, value.room_revision_descriptor_hash);
-        encode_hash(&mut out, value.classifier_revision_digest);
-        encode_hash(&mut out, value.fork_admission_digest);
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::canonical_length::measure(self)
     }
 
     /// Return the domain-separated digest over complete canonical `FIA1` bytes.
@@ -1183,45 +1173,28 @@ fn domain_digest(domain: &[u8], bytes_in: &[u8]) -> Hash {
     Hash::from_bytes(*hasher.finalize().as_bytes())
 }
 
-fn encode_bytes(out: &mut Vec<u8>, value: &[u8]) {
+fn encode_bytes(out: &mut impl CanonicalSink, value: &[u8]) {
     encode_head(out, 2, value.len() as u64);
     out.extend_from_slice(value);
 }
-fn encode_text(out: &mut Vec<u8>, value: &str) {
+fn encode_text(out: &mut impl CanonicalSink, value: &str) {
     encode_head(out, 3, value.len() as u64);
     out.extend_from_slice(value.as_bytes());
 }
-fn encode_timeline(out: &mut Vec<u8>, value: TimelineId) {
+fn encode_timeline(out: &mut impl CanonicalSink, value: TimelineId) {
     encode_bytes(out, &value.inner().to_bytes());
 }
-fn encode_event(out: &mut Vec<u8>, value: EventId) {
+fn encode_event(out: &mut impl CanonicalSink, value: EventId) {
     encode_bytes(out, &value.inner().to_bytes());
 }
-fn encode_hash(out: &mut Vec<u8>, value: Hash) {
+fn encode_hash(out: &mut impl CanonicalSink, value: Hash) {
     encode_bytes(out, value.as_bytes());
 }
-fn encode_array(out: &mut Vec<u8>, value: u64) {
+fn encode_array(out: &mut impl CanonicalSink, value: u64) {
     encode_head(out, 4, value);
 }
-fn encode_uint(out: &mut Vec<u8>, value: u64) {
+fn encode_uint(out: &mut impl CanonicalSink, value: u64) {
     encode_head(out, 0, value);
-}
-fn encode_head(out: &mut Vec<u8>, major: u8, value: u64) {
-    let tag = major << 5;
-    if value < 24 {
-        out.push(tag | value.to_be_bytes()[7]);
-    } else if let Ok(value) = u8::try_from(value) {
-        out.extend_from_slice(&[tag | 0x18, value]);
-    } else if let Ok(value) = u16::try_from(value) {
-        out.push(tag | 0x19);
-        out.extend_from_slice(&value.to_be_bytes());
-    } else if let Ok(value) = u32::try_from(value) {
-        out.push(tag | 0x1a);
-        out.extend_from_slice(&value.to_be_bytes());
-    } else {
-        out.push(tag | 0x1b);
-        out.extend_from_slice(&value.to_be_bytes());
-    }
 }
 fn canonical(actual: &[u8], expected: &[u8]) -> Result<(), ForkEventProvenanceErrorV1> {
     if actual == expected {
@@ -1261,7 +1234,7 @@ fn sort_unique_routes(
     }
 }
 
-fn encode_routes(out: &mut Vec<u8>, routes: &[ForkExternalInputRouteV1]) {
+fn encode_routes(out: &mut impl CanonicalSink, routes: &[ForkExternalInputRouteV1]) {
     encode_array(out, routes.len() as u64);
     for route in routes {
         encode_array(out, 3);
@@ -1271,7 +1244,7 @@ fn encode_routes(out: &mut Vec<u8>, routes: &[ForkExternalInputRouteV1]) {
     }
 }
 
-fn encode_source(out: &mut Vec<u8>, source: &ForkAppendSourceIdentityV1) {
+fn encode_source(out: &mut impl CanonicalSink, source: &ForkAppendSourceIdentityV1) {
     match source {
         ForkAppendSourceIdentityV1::HostInternal => encode_array(out, 1),
         ForkAppendSourceIdentityV1::ExternalInput {
@@ -1289,31 +1262,31 @@ fn encode_source(out: &mut Vec<u8>, source: &ForkAppendSourceIdentityV1) {
     encode_uint(out, 0);
 }
 
-fn encode_entity(out: &mut Vec<u8>, value: EntityId) {
+fn encode_entity(out: &mut impl CanonicalSink, value: EntityId) {
     encode_bytes(out, &value.inner().to_bytes());
 }
-fn encode_optional_event(out: &mut Vec<u8>, value: Option<EventId>) {
+fn encode_optional_event(out: &mut impl CanonicalSink, value: Option<EventId>) {
     if let Some(value) = value {
         encode_event(out, value);
     } else {
         out.push(0xf6);
     }
 }
-fn encode_optional_correlation(out: &mut Vec<u8>, value: Option<CorrelationId>) {
+fn encode_optional_correlation(out: &mut impl CanonicalSink, value: Option<CorrelationId>) {
     if let Some(value) = value {
         encode_bytes(out, &value.inner().to_bytes());
     } else {
         out.push(0xf6);
     }
 }
-fn encode_optional_wall_time(out: &mut Vec<u8>, value: Option<WallTime>) {
+fn encode_optional_wall_time(out: &mut impl CanonicalSink, value: Option<WallTime>) {
     if let Some(value) = value {
         encode_uint(out, value.as_micros());
     } else {
         out.push(0xf6);
     }
 }
-fn encode_optional_hash(out: &mut Vec<u8>, value: Option<Hash>) {
+fn encode_optional_hash(out: &mut impl CanonicalSink, value: Option<Hash>) {
     if let Some(value) = value {
         encode_hash(out, value);
     } else {
@@ -1530,5 +1503,103 @@ impl<'a> Reader<'a> {
         } else {
             Err(ForkEventProvenanceErrorV1::InvalidEncoding)
         }
+    }
+}
+
+impl CanonicalEmit for ForkClassifierSourceV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        let value = &self.0;
+        encode_array(out, 5);
+        encode_text(out, "FCS1");
+        encode_uint(out, 1);
+        encode_hash(out, value.room_revision_descriptor_hash);
+        encode_text(out, &value.registrar_identifier);
+        encode_routes(out, &value.routes);
+    }
+}
+
+impl CanonicalEmit for ForkClassifierTableV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        let value = &self.0;
+        encode_array(out, 8);
+        encode_text(out, "FCT1");
+        encode_uint(out, 1);
+        encode_timeline(out, value.child_timeline_id);
+        encode_hash(out, value.fork_admission_digest);
+        encode_hash(out, value.room_revision_descriptor_hash);
+        encode_text(out, &value.registrar_identifier);
+        encode_hash(out, value.source_configuration_revision_digest);
+        encode_routes(out, &value.routes);
+    }
+}
+
+impl CanonicalEmit for ForkClassifierRegistrationV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        let value = &self.0;
+        encode_array(out, 7);
+        encode_text(out, "FCR1");
+        encode_uint(out, 1);
+        encode_hash(out, value.operation_id);
+        encode_timeline(out, value.child_timeline_id);
+        encode_hash(out, value.fork_admission_digest);
+        encode_hash(out, value.room_revision_descriptor_hash);
+        encode_hash(out, value.classifier_revision_digest);
+    }
+}
+
+impl CanonicalEmit for EventOriginRecordV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        let value = &self.0;
+        encode_array(out, 9);
+        encode_text(out, "EOR1");
+        encode_uint(out, 1);
+        encode_timeline(out, value.fork_timeline_id);
+        encode_uint(out, value.logical_seq);
+        encode_event(out, value.event_id);
+        encode_uint(
+            out,
+            u64::from(value.classification.origin() == ForkEventOriginKindV1::ExternalInput),
+        );
+        encode_uint(out, u64::from(value.classification.intervention()));
+        encode_hash(out, value.classifier_revision_digest);
+        encode_hash(out, value.fork_admission_digest);
+    }
+}
+
+impl CanonicalEmit for ForkInterventionAdmissionV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        let value = &self.0;
+        encode_array(out, 10);
+        encode_text(out, "FIA1");
+        encode_uint(out, 1);
+        encode_hash(out, value.operation_id);
+        encode_timeline(out, value.fork_timeline_id);
+        encode_uint(out, value.logical_seq);
+        encode_event(out, value.event_id);
+        encode_hash(out, value.payload_hash);
+        encode_hash(out, value.room_revision_descriptor_hash);
+        encode_hash(out, value.classifier_revision_digest);
+        encode_hash(out, value.fork_admission_digest);
+    }
+}
+
+impl CanonicalEmit for ForkAppendOperationV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        let value = &self.0;
+        encode_array(out, 14);
+        encode_text(out, "FOP1");
+        encode_uint(out, 1);
+        encode_hash(out, value.operation_id);
+        encode_timeline(out, value.child_timeline_id);
+        encode_uint(out, value.logical_seq);
+        encode_event(out, value.event_id);
+        encode_hash(out, value.request_digest);
+        encode_source(out, &value.source);
+        encode_uint(out, value.wall_time.as_micros());
+        encode_hash(out, value.payload_hash);
+        encode_hash(out, value.classifier_revision_digest);
+        encode_hash(out, value.fork_admission_digest);
+        encode_hash(out, value.event_origin_digest);
+        encode_optional_hash(out, value.intervention_admission_digest);
     }
 }

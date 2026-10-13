@@ -11,6 +11,8 @@
 //! code-2 bytes, and the projection accessors never make a record local
 //! authority.
 
+use crate::canonical_length::{CanonicalEmit, CanonicalSink};
+
 use super::{
     authority_envelope::MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1, domain_digest,
     ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionCodecErrorV1 as Error,
@@ -74,12 +76,6 @@ fn decode_local_binding(bytes_in: &[u8]) -> Result<PrincipalOwnerBindingV1, Erro
     PrincipalOwnerBindingV1::from_canonical_cbor(bytes_in).map_err(|_| Error::InvalidEncoding)
 }
 
-/// Append the code-2 `[2, digest]` origin to one local record body.
-fn with_imported_origin(mut body: Vec<u8>, authority_origin_digest: Hash) -> Vec<u8> {
-    body.extend_from_slice(&IMPORTED_ORIGIN_HEAD);
-    body.extend_from_slice(authority_origin_digest.as_bytes());
-    body
-}
 
 /// One strict code-2 `POB1` carried by `FAE1` field 7.
 ///
@@ -202,7 +198,17 @@ impl ImportedForkAdmissionRecordV1 {
     /// Encode the exact canonical code-2 `FAR1` bytes.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        with_imported_origin(self.record.canonical_body(), self.authority_origin_digest)
+        let mut out = Vec::with_capacity(512);
+        self.emit(&mut out);
+        out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::canonical_length::measure(self)
     }
 
     /// Return the ADR-099 `FAR1` digest over the exact code-2 bytes.
@@ -271,10 +277,17 @@ impl ImportedForkPublicationOperationV1 {
     /// Encode the exact canonical code-2 `FPO1` bytes.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        with_imported_origin(
-            self.operation.canonical_body(),
-            self.authority_origin_digest,
-        )
+        let mut out = Vec::with_capacity(512);
+        self.emit(&mut out);
+        out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::canonical_length::measure(self)
     }
 
     /// The carried code-2 authority-origin digest.
@@ -300,5 +313,21 @@ impl ImportedForkPublicationOperationV1 {
     #[must_use]
     pub const fn projection(&self) -> &ForkPublicationOperationV1 {
         &self.operation
+    }
+}
+
+impl CanonicalEmit for ImportedForkAdmissionRecordV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        self.record.emit_body(out);
+        out.extend_from_slice(&IMPORTED_ORIGIN_HEAD);
+        out.extend_from_slice(self.authority_origin_digest.as_bytes());
+    }
+}
+
+impl CanonicalEmit for ImportedForkPublicationOperationV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        self.operation.emit_body(out);
+        out.extend_from_slice(&IMPORTED_ORIGIN_HEAD);
+        out.extend_from_slice(self.authority_origin_digest.as_bytes());
     }
 }

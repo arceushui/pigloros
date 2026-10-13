@@ -5,6 +5,8 @@
 //! exact #202 Event, and `FTI1` projects the exact #202 `TimelineExport`
 //! metadata. None of these values is creator or publication authority.
 
+use crate::canonical_length::{CanonicalEmit, CanonicalSink};
+
 use super::{
     array, authority_wire, bytes, canonical, hash, text, timeline, uint,
     ForkAttributionCodecErrorV1 as Error, Reader,
@@ -129,13 +131,16 @@ impl ImportedKeyRecordV1 {
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(256);
-        array(&mut out, 7);
-        text(&mut out, "IKR1");
-        uint(&mut out, 1);
-        encode_identity(&mut out, self.identity);
-        authority_wire::encode_optional_hash(&mut out, self.private_material_digest);
-        bytes(&mut out, self.public_verification_key.as_bytes());
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::canonical_length::measure(self)
     }
 
     /// Decode exact canonical `IKR1` bytes.
@@ -237,14 +242,16 @@ impl ImportedKeyTombstoneV1 {
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(256);
-        array(&mut out, 8);
-        text(&mut out, "IKT1");
-        uint(&mut out, 1);
-        encode_identity(&mut out, self.identity);
-        hash(&mut out, self.destroyed_material_digest);
-        hash(&mut out, self.destruction_digest);
-        hash(&mut out, self.deletion_receipt);
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::canonical_length::measure(self)
     }
 
     /// Decode exact canonical `IKT1` bytes.
@@ -365,7 +372,7 @@ impl ForkEventEvidenceV1 {
         Ok(record)
     }
 
-    pub(super) fn encode(&self, out: &mut Vec<u8>) {
+    pub(super) fn encode(&self, out: &mut impl CanonicalSink) {
         array(out, 5);
         text(out, "FEE1");
         uint(out, 1);
@@ -668,7 +675,7 @@ fn attribution_identity(identity: KeyIdentityV1) -> Result<(), Error> {
     }
 }
 
-fn encode_identity(out: &mut Vec<u8>, identity: KeyIdentityV1) {
+fn encode_identity(out: &mut impl CanonicalSink, identity: KeyIdentityV1) {
     text(out, identity.owner_id.as_str());
     uint(out, u64::from(identity.role.code()));
     uint(out, identity.epoch);
@@ -679,4 +686,27 @@ fn read_identity(wire: &mut Reader<'_>) -> Result<KeyIdentityV1, Error> {
     let role = wire.role()?;
     let epoch = wire.uint()?;
     Ok(KeyIdentityV1::from_parts(owner_id, role, epoch))
+}
+
+impl CanonicalEmit for ImportedKeyRecordV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        array(out, 7);
+        text(out, "IKR1");
+        uint(out, 1);
+        encode_identity(out, self.identity);
+        authority_wire::encode_optional_hash(out, self.private_material_digest);
+        bytes(out, self.public_verification_key.as_bytes());
+    }
+}
+
+impl CanonicalEmit for ImportedKeyTombstoneV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        array(out, 8);
+        text(out, "IKT1");
+        uint(out, 1);
+        encode_identity(out, self.identity);
+        hash(out, self.destroyed_material_digest);
+        hash(out, self.destruction_digest);
+        hash(out, self.deletion_receipt);
+    }
 }
