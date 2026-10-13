@@ -12,8 +12,8 @@ use pos_core::{
     FactualDependencyErrorV1, Hash, Kind, PipelineAdmissionBasisV1, PipelineAdmissionPortV1,
     PipelineAttemptIdV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
     PipelineObservationAnchorV1, PipelineOutcomeV1, PipelineReceiptLookupV1,
-    PipelineSecurityRevisionsV1, Plugin, PluginId, ProposedAction, RecordedSetCountsV1, Seq,
-    SeqRange, TimelineId,
+    PipelineSecurityRevisionsV1, Plugin, PluginId, ProposedAction, RecordedDependencyClassV1,
+    RecordedSetCountsV1, Seq, SeqRange, TimelineId,
 };
 use pos_runtime::{
     ActionSubmissionError, HumanActionAdmissionErrorV1, HumanActionAdmissionV1,
@@ -764,6 +764,7 @@ const AT_THRESHOLD: RecordedSetCountsV1 = RecordedSetCountsV1 {
 struct SetCountsPort<'a> {
     inner: &'a mut dyn ScheduledAdmissionStoreV1,
     counts: RecordedSetCountsV1,
+    bases: Vec<PipelineAdmissionBasisV1>,
 }
 
 impl PipelineAdmissionPortV1 for SetCountsPort<'_> {
@@ -772,6 +773,7 @@ impl PipelineAdmissionPortV1 for SetCountsPort<'_> {
         &mut self,
         basis: &PipelineAdmissionBasisV1,
     ) -> Result<PipelineOutcomeV1, CoreError> {
+        self.bases.push(basis.clone());
         self.inner.admit_pipeline_batch(basis)
     }
 
@@ -857,6 +859,7 @@ fn an_exhausted_timeline_refuses_the_action_before_the_approver_runs() {
             let mut port = SetCountsPort {
                 inner: harness.store.as_mut(),
                 counts,
+                bases: Vec::new(),
             };
             let walk = proposal(actor, b"walk");
             let registry = &harness.registry;
@@ -880,11 +883,49 @@ fn an_exhausted_timeline_refuses_the_action_before_the_approver_runs() {
         let mut port = SetCountsPort {
             inner: harness.store.as_mut(),
             counts: AT_THRESHOLD,
+            bases: Vec::new(),
         };
         let walk = proposal(actor, b"walk");
         let registry = &harness.registry;
         ok(registry.admit_human_action(&mut port, &walk, &attempt));
         assert_eq!(approvals(&harness), 1, "{name}");
         assert_eq!(events(&harness), 1, "{name}");
+    }
+}
+
+/// ADR-064 R3.4.5: the basis a human action submits declares one
+/// human-ingress node per approved draft and no edge.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn the_submitted_basis_declares_one_human_ingress_node_per_draft() {
+    for mut harness in harnesses() {
+        let name = harness.name;
+        let attempt = admission(&harness, 1, 1, 0);
+        let mut port = SetCountsPort {
+            inner: harness.store.as_mut(),
+            counts: RecordedSetCountsV1::default(),
+            bases: Vec::new(),
+        };
+        let walk = proposal(EntityId::new(), b"walk");
+        let registry = &harness.registry;
+        ok(registry.admit_human_action(&mut port, &walk, &attempt));
+
+        let dependencies = port.bases[0].dependencies();
+        assert_eq!(dependencies.tick(), 1, "{name}");
+        let record = dependencies.record();
+        let nodes = record.nodes();
+        assert_eq!(nodes.len(), 1, "{name}");
+        assert_eq!(nodes[0].coordinate().owner_id(), "host.ingress", "{name}");
+        let class = RecordedDependencyClassV1::ExogenousFrozen;
+        assert_eq!(nodes[0].class(), class, "{name}");
+        assert!(nodes[0].input_digests().is_empty(), "{name}");
+        assert!(record.edges().is_empty(), "{name}");
+        let bound: Vec<(u32, u32)> = dependencies
+            .output_bindings()
+            .iter()
+            .map(|binding| (binding.draft_index, binding.node_index))
+            .collect();
+        assert_eq!(bound, [(0, 0)], "{name}");
+        assert!(dependencies.event_nodes().is_empty(), "{name}");
     }
 }

@@ -58,6 +58,14 @@ impl<T, E: Debug> TestOk<T> for Result<T, E> {
     }
 }
 
+impl<T> TestOk<T> for Option<T> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|| {
+            std::panic::resume_unwind(Box::new("unexpected missing fixture value"))
+        })
+    }
+}
+
 fn error_text<T>(result: Result<T, RuntimeError>) -> String {
     match result {
         Ok(_) => std::panic::resume_unwind(Box::new("expected runtime error")),
@@ -834,6 +842,9 @@ struct AdmissionStore {
     timeline: TimelineId,
     revisions: PipelineSecurityRevisionsV1,
     authority: AuthorityPersistenceHostV1,
+    /// The basis of the latest delivered or lost attempt, retained for an
+    /// exact retry (ADR-064 R3.8): a retry resubmits it, never a rebuilt pass.
+    retained: Option<PipelineAdmissionBasisV1>,
 }
 
 impl AdmissionStore {
@@ -895,6 +906,7 @@ impl AdmissionStore {
             timeline,
             revisions,
             authority: host,
+            retained: None,
         }
     }
 
@@ -2309,6 +2321,7 @@ struct AckPort<'a> {
     inner: &'a mut dyn ScheduledAdmissionStoreV1,
     ack: Ack,
     outcomes: Vec<PipelineOutcomeV1>,
+    bases: Vec<PipelineAdmissionBasisV1>,
 }
 
 fn lost_acknowledgement() -> pos_core::CoreError {
@@ -2320,6 +2333,7 @@ impl PipelineAdmissionPortV1 for AckPort<'_> {
         &mut self,
         basis: &PipelineAdmissionBasisV1,
     ) -> Result<PipelineOutcomeV1, pos_core::CoreError> {
+        self.bases.push(basis.clone());
         if matches!(self.ack, Ack::LostBeforeCommit) {
             return Err(lost_acknowledgement());
         }
@@ -2421,13 +2435,31 @@ fn admit_with_ack(
         inner: prepared.store.as_mut(),
         ack,
         outcomes: Vec::new(),
+        bases: Vec::new(),
     };
     let result = registry.admit_authorized_scheduled_pass(
         &mut port,
         admission,
         &[view_authority(fixture, &evaluation, &authority)],
     );
-    (result, port.outcomes)
+    let outcomes = port.outcomes;
+    let bases = port.bases;
+    prepared.retained = bases.last().cloned();
+    (result, outcomes)
+}
+
+/// Resubmit the retained basis of the latest attempt through a delivering
+/// [`AckPort`], as an exact retry. Return every store outcome it saw.
+fn resubmit_retained(prepared: &mut AdmissionStore) -> Vec<PipelineOutcomeV1> {
+    let retained = prepared.retained.clone().test_ok();
+    let mut port = AckPort {
+        inner: prepared.store.as_mut(),
+        ack: Ack::Delivered,
+        outcomes: Vec::new(),
+        bases: Vec::new(),
+    };
+    port.admit_pipeline_batch(&retained).test_ok();
+    port.outcomes
 }
 
 /// Recover the in-doubt pass through a delivering [`AckPort`]. Return the
@@ -2440,6 +2472,7 @@ fn recover_with_ack(
         inner: prepared.store.as_mut(),
         ack: Ack::Delivered,
         outcomes: Vec::new(),
+        bases: Vec::new(),
     };
     let result = registry.recover_scheduled_pass(&mut port);
     (result, port.outcomes)
@@ -2500,19 +2533,33 @@ fn in_doubt_authorized_pass_recovers_its_committed_receipt_without_restaging() {
             "{name}"
         );
 
+        // An exact retry resubmits the retained basis (ADR-064 R3.8).
+        let duplicate = resubmit_retained(&mut prepared);
+        assert_eq!(
+            duplicate,
+            vec![PipelineOutcomeV1::RecoveredDuplicate(original)],
+            "{name}: an exact retry returns the same receipt"
+        );
+        assert_eq!(prepared.committed().len(), 1, "{name}");
+
+        // A pass rebuilt after the commit declares a different Tick and
+        // chain edge, so its basis differs under the same key.
         stage_current(&mut registry, &fixture).test_ok();
-        let (retried, duplicate) = admit_with_ack(
+        let (rebuilt, conflict) = admit_with_ack(
             &mut registry,
             &mut prepared,
             &fixture,
             &admission,
             Ack::Delivered,
         );
-        assert_eq!(retried.test_ok(), Some(original.clone()), "{name}");
+        assert!(
+            error_text(rebuilt).ends_with("AdmissionConflict"),
+            "{name}: a rebuilt pass under a committed key conflicts"
+        );
         assert_eq!(
-            duplicate,
-            vec![PipelineOutcomeV1::RecoveredDuplicate(original)],
-            "{name}: an exact retry returns the same receipt"
+            conflict,
+            vec![PipelineOutcomeV1::AdmissionConflict],
+            "{name}"
         );
         assert_eq!(prepared.committed().len(), 1, "{name}");
     }

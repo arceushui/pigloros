@@ -307,9 +307,12 @@ impl PipelineAdmissionPortV1 for MemoryStore {
 mod tests {
     use std::sync::Arc;
 
+    use pos_core::output_policy::OutputAuthorityV1;
     use pos_core::{
-        AppendDedupScope, AppendIdentity, CanonicalBytes, EntityId, ErasureContainmentGateV1,
-        EventDraft, EventStore, Kind, PipelineAdmissionBasisDraftV1, PipelineAttemptDraftV1,
+        assemble_factual_tick, AppendDedupScope, AppendIdentity, CanonicalBytes, EntityId,
+        ErasureContainmentGateV1, EventDraft, EventStore, FactualDriverStepV1, FactualOutputV1,
+        FactualOwnerIdV1, FactualScheduledTickV1, FactualTickContextV1, FactualTickDependenciesV1,
+        FactualTickShapeV1, Kind, PipelineAdmissionBasisDraftV1, PipelineAttemptDraftV1,
         PipelineAttemptIdV1, PipelineAttemptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1,
         PipelineIngressV1, PipelineObservationAnchorV1, PipelinePreconditionV1,
         PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, SeqRange,
@@ -324,6 +327,44 @@ mod tests {
         result.unwrap_or_else(|error| {
             std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
         })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn tick_dependencies(
+        timeline: TimelineId,
+        tick: u64,
+        drafts: &[EventDraft],
+    ) -> FactualTickDependenciesV1 {
+        let context = FactualTickContextV1 {
+            timeline_id: timeline,
+            tick,
+            attempt_id: ok(PipelineAttemptIdV1::try_new([1; 16])),
+            evidence_digest: Hash::from_bytes([5; 32]),
+            authority_grant: Hash::from_bytes([7; 32]),
+        };
+        let outputs = drafts
+            .iter()
+            .map(|draft| FactualOutputV1 {
+                draft: draft.clone(),
+                authority: OutputAuthorityV1::Authoritative,
+                direct_inputs: Vec::new(),
+            })
+            .collect();
+        let driver = FactualDriverStepV1 {
+            owner: FactualOwnerIdV1::new("plugin:test".to_owned()),
+            policy_identity: Hash::from_bytes([8; 32]),
+            step_inputs: Vec::new(),
+            outputs,
+        };
+        let scheduled = FactualScheduledTickV1 {
+            snapshot_digest: Hash::from_bytes([2; 32]),
+            prefix_contents: Vec::new(),
+            history_contents: Vec::new(),
+            ingress_events: Vec::new(),
+            drivers: vec![driver],
+        };
+        let shape = FactualTickShapeV1::Scheduled(scheduled);
+        ok(assemble_factual_tick(&context, &shape))
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -342,7 +383,7 @@ mod tests {
                 AppendDedupScope::from_keyed_hash([4; 32]),
             )),
         }));
-        let drafts = (0..2_u8)
+        let drafts: Vec<EventDraft> = (0..2_u8)
             .map(|index| {
                 EventDraft::new(
                     EntityId::from_ulid(Ulid::from(9_u128)),
@@ -351,6 +392,7 @@ mod tests {
                 )
             })
             .collect();
+        let dependencies = tick_dependencies(timeline, 1, &drafts);
         ok(PipelineAdmissionBasisV1::try_from_draft(
             PipelineAdmissionBasisDraftV1 {
                 contract_version: PIPELINE_CONTRACT_VERSION_V1,
@@ -371,6 +413,7 @@ mod tests {
                     },
                 ))),
                 batch: Some(ok(PipelineDraftBatchV1::try_new(drafts))),
+                dependencies,
             },
         ))
     }

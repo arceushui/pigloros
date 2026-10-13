@@ -29,11 +29,16 @@ use pos_core::{
 };
 
 use super::{
-    subscribed_event_visible, HistoryInputV1, OperationContext, PluginEntry, PluginRegistry,
+    factual_dependencies::EventFact, subscribed_event_visible, HistoryInputV1, OperationContext,
+    PluginEntry, PluginRegistry,
 };
 
 /// One Event forwarded to a Driver: its `seq` and payload hash.
 pub(super) type ForwardedPair = (Seq, Hash);
+
+/// The Events forwarded to a Driver since its last recorded step node: each
+/// `seq` with its payload hash and its Event type (R3.4.8).
+pub(super) type CarriedSet = BTreeMap<Seq, (Hash, Kind)>;
 
 /// The committed prefix a pass observes and the `seq` it is cut at.
 #[derive(Clone, Copy)]
@@ -47,7 +52,7 @@ pub(super) struct PassCut<'a> {
 /// What the plan needs to know about one stepped Driver.
 pub(super) struct ForwardInput<'a> {
     /// The Driver's carried set.
-    pub(super) carried: &'a BTreeMap<Seq, Hash>,
+    pub(super) carried: &'a CarriedSet,
     /// The Driver's Event cursor.
     pub(super) cursor: Seq,
     /// The Driver's new forwardable Events in ascending `seq` order.
@@ -332,7 +337,8 @@ fn covered_events(pairs: impl Iterator<Item = (Seq, Hash)>) -> Vec<FactualEventR
 /// The new node chains onto the content digest of the state it replaces.
 fn collapse_carried(entry: &mut PluginEntry) {
     let state = &mut entry.pass_state;
-    let covered = covered_events(state.carried.iter().map(|(seq, hash)| (*seq, *hash)));
+    let pairs = state.carried.iter().map(|(seq, (hash, _))| (*seq, *hash));
+    let covered = covered_events(pairs);
     // The carried set is never empty here. Folding the span keeps it total
     // without a fallback for the empty case.
     let first = covered
@@ -375,11 +381,14 @@ pub(super) fn restored_history(visible_events: &[Event], restored_head: Seq) -> 
 /// Settle the carried sets of the stepped Drivers when their pass commits.
 ///
 /// A commit that recorded a Tick consumed every carried set in a step node.
-/// A commit that recorded nothing appends the forwarded Events to the sets.
+/// A commit that recorded nothing appends the forwarded Events to the sets,
+/// with their Event types from the pass's facts. The pass saw every Event it
+/// forwarded, so each has a fact.
 pub(super) fn settle_carried_sets(
     plugins: &mut IndexMap<PluginId, PluginEntry>,
     driver_ids: &[PluginId],
     forwarded: Vec<Vec<ForwardedPair>>,
+    facts: &BTreeMap<Seq, EventFact>,
     recorded: bool,
 ) {
     for (id, pairs) in driver_ids.iter().zip(forwarded) {
@@ -387,7 +396,10 @@ pub(super) fn settle_carried_sets(
         if recorded {
             state.carried.clear();
         } else {
-            state.carried.extend(pairs);
+            for (seq, hash) in pairs {
+                let kind = facts[&seq].event_type.clone();
+                state.carried.insert(seq, (hash, kind));
+            }
         }
     }
 }
@@ -413,19 +425,25 @@ mod tests {
         (first..=last).map(pair).collect()
     }
 
-    fn carried(first: u64, last: u64) -> BTreeMap<Seq, Hash> {
-        (first..=last).map(pair).collect()
+    fn carried_entry(seq: u64) -> (Hash, Kind) {
+        (payload(seq), Kind::new("probe.plain"))
+    }
+
+    fn carried(first: u64, last: u64) -> CarriedSet {
+        (first..=last)
+            .map(|seq| (Seq::from_u64(seq), carried_entry(seq)))
+            .collect()
     }
 
     /// One stepped Driver: its carried set, cursor and new forwardable Events.
     struct SteppedDriver {
-        carried: BTreeMap<Seq, Hash>,
+        carried: CarriedSet,
         cursor: u64,
         fresh: Vec<ForwardedPair>,
     }
 
     impl SteppedDriver {
-        const fn new(carried: BTreeMap<Seq, Hash>, cursor: u64, fresh: Vec<ForwardedPair>) -> Self {
+        const fn new(carried: CarriedSet, cursor: u64, fresh: Vec<ForwardedPair>) -> Self {
             Self {
                 carried,
                 cursor,
@@ -694,7 +712,9 @@ mod tests {
         // is exactly at the cap, the now-largest set collapses and the
         // trimmed pair is forwarded.
         let mut next = build([10, 10]);
-        next[3].carried.insert(Seq::from_u64(3_000), payload(3_000));
+        next[3]
+            .carried
+            .insert(Seq::from_u64(3_000), carried_entry(3_000));
         let plans = plan(&next);
         let collapsed = collapses(&plans);
         assert!(collapsed[3]);

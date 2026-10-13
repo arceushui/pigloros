@@ -32,8 +32,8 @@ use pos_core::{
     },
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
     ConsentError, ConsentGate, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureGate,
-    ErasureProtectedOperationV1, FactualOwnerIdV1, Hash, OwnerIdV1, Plugin, ProposedAction,
-    Reducer, ScheduledObservationProfileV1, Timeline, TimelineMeta,
+    ErasureProtectedOperationV1, FactualOwnerIdV1, FactualPriorNodeV1, Hash, OwnerIdV1, Plugin,
+    ProposedAction, Reducer, ScheduledObservationProfileV1, Timeline, TimelineMeta,
     MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
@@ -55,6 +55,7 @@ use crate::{
     error::{ActionSubmissionError, RuntimeError},
     output_admission::{OutputAdmissionV1, OutputPolicyBindingV1, OutputPolicyClosureV1},
     recorder::{RunMode, RECORDER_EVENT_TYPE},
+    registry::factual_dependencies::{split_output, StagedFactual},
     schema::{EventTypeSchema, SchemaRegistry},
 };
 use std::{
@@ -66,6 +67,10 @@ mod adapter;
 mod authorized_pass;
 mod availability;
 mod catalogue;
+mod factual_dependencies;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod factual_dependencies_tests;
 mod human_admission;
 mod local_seal;
 mod manifest_roster;
@@ -84,7 +89,7 @@ mod staged_catalogue;
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod test_ext;
 
-use pass_state::{ForwardedPair, PassCut};
+use pass_state::{CarriedSet, ForwardedPair, PassCut};
 
 pub use adapter::{
     ClosedAdapterTranscriptV1, LocalAdapterErrorV1, LocalAdapterIdempotencyKeyV1,
@@ -579,6 +584,7 @@ mod coverage_paths {
             authorized: None,
             scheduled: None,
             forwarded: Vec::new(),
+            factual: StagedFactual::default(),
         });
         registry.abort_step();
 
@@ -592,6 +598,7 @@ mod coverage_paths {
             authorized: None,
             scheduled: None,
             forwarded: Vec::new(),
+            factual: StagedFactual::default(),
         });
         assert!(registry.commit_step_at(Seq::ZERO, 0).is_ok());
     }
@@ -1127,26 +1134,54 @@ struct PluginEntry {
     event_observation: DriverEventObservation,
     /// What the registry retains of the Driver between passes.
     pass_state: PassState,
+    /// Where the Driver's next step node finds its previous step node
+    /// (R3.4.2(c), R3.8.1).
+    chain: StepChainV1,
 }
 
-/// The consumed-history node a Driver's next recorded step must record.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The consumed-history node a Driver's next recorded step must declare.
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum HistoryInputV1 {
     /// No Event was consumed outside a recorded step.
     None,
-    /// A node over the consumed Events, identified by its content digest.
+    /// A node over the consumed Events, identified by its content digest,
+    /// that the Driver's next step node must record.
     Pending { content: Hash },
+    /// A node with this content digest that an earlier Tick of this runtime
+    /// recorded; the Driver's next step node declares it.
+    Recorded {
+        content: Hash,
+        node: FactualPriorNodeV1,
+    },
 }
 
 impl HistoryInputV1 {
     /// The content digest the next history node chains onto: the zero digest
     /// when there is none.
-    const fn content(self) -> Hash {
+    const fn content(&self) -> Hash {
         match self {
             Self::None => Hash::zero(),
-            Self::Pending { content } => content,
+            Self::Pending { content } | Self::Recorded { content, .. } => *content,
         }
     }
+
+    /// The content digest of the node the next step node must record.
+    const fn pending_content(&self) -> Option<pos_core::Hash> {
+        match self {
+            Self::Pending { content } => Some(*content),
+            Self::None | Self::Recorded { .. } => None,
+        }
+    }
+}
+
+/// Where a Driver's next step node finds its previous step node (R3.4.2(c)).
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum StepChainV1 {
+    /// The edge resolves through `last_step_node` against the committed
+    /// prefix: after registration and after a restore.
+    Lookup,
+    /// This runtime committed the Driver's latest step node.
+    Recorded { node: FactualPriorNodeV1 },
 }
 
 /// The Events one Driver step sees: the committed prefix the host filters and
@@ -1162,9 +1197,10 @@ struct PassState {
     /// The Driver's owner ID in a factual Tick (ADR-064 Revision 3, R3.2.4),
     /// derived once at registration.
     owner_id: FactualOwnerIdV1,
-    /// The `(seq, payload_hash)` of every Event forwarded to the Driver since
-    /// its last recorded step node (R3.4.8).
-    carried: BTreeMap<Seq, Hash>,
+    /// The payload hash and Event type of every Event forwarded to the Driver
+    /// since its last recorded step node (R3.4.8). An ingress node's schema ID
+    /// is a function of the Event type (R3.3.2, R3.4.4).
+    carried: CarriedSet,
     /// The consumed history the Driver's next recorded step node must cover
     /// (R3.4.10).
     history: HistoryInputV1,
@@ -1299,6 +1335,8 @@ struct PendingStep {
     /// `driver_ids` order (R3.4.7). A commit that records no Tick appends them
     /// to the Drivers' carried sets.
     forwarded: Vec<Vec<ForwardedPair>>,
+    /// What the factual Tick declaration of the pass is built from (R3.8.1).
+    factual: StagedFactual,
 }
 
 /// Participant-authorized views of one staged scheduled pass.
@@ -2826,6 +2864,7 @@ impl PluginRegistry {
         let mut all_drafts = Vec::new();
         let mut staged_driver_ids = Vec::new();
         let mut forwarded = Vec::new();
+        let mut factual = StagedFactual::default();
         for (id, plan) in driver_ids.into_iter().zip(plans) {
             let result = self.invoke_selected_driver(
                 id,
@@ -2837,7 +2876,7 @@ impl PluginRegistry {
             );
             match result {
                 Ok(output) => {
-                    let drafts = staged_drafts(output);
+                    let (drafts, declaration) = split_output(output);
                     if let Err(error) = self
                         .validate_protected_drafts(timeline, &operation, observed_through, &drafts)
                         .and_then(|()| self.charge_pass_budget(all_drafts.len(), drafts.len()))
@@ -2848,6 +2887,7 @@ impl PluginRegistry {
                     }
                     staged_driver_ids.push(id);
                     event_cursors.push((id, plan.cursor));
+                    factual.push_driver(all_drafts.len(), drafts.len(), declaration);
                     forwarded.push(plan.forwarded);
                     all_drafts.extend(drafts);
                 }
@@ -2859,6 +2899,10 @@ impl PluginRegistry {
             }
         }
 
+        let ids = &staged_driver_ids;
+        let staged = !all_drafts.is_empty();
+        factual.gather_prefix_digests(staged, &self.plugins, ids, cut, &operation);
+        factual.gather_facts(&forwarded, committed_events, &operation);
         self.pending_step = Some(PendingStep {
             timeline,
             driver_ids: staged_driver_ids,
@@ -2869,6 +2913,7 @@ impl PluginRegistry {
             authorized: None,
             scheduled,
             forwarded,
+            factual,
         });
         Ok(all_drafts)
     }
@@ -2899,6 +2944,14 @@ impl PluginRegistry {
             &mut self.plugins,
             &pending.driver_ids,
             pending.forwarded,
+            &pending.factual.event_facts,
+            recorded,
+        );
+        factual_dependencies::settle_recorded_tick(
+            &mut self.plugins,
+            &pending.driver_ids,
+            pending.factual.step_nodes,
+            &pending.factual.history_recorded,
             recorded,
         );
         for (id, now_ns) in pending.cadence_updates {
@@ -3139,7 +3192,8 @@ impl PluginRegistry {
             }
             entry.event_cursor = restored_head;
             entry.pass_state.carried.clear();
-            entry.pass_state.history = history;
+            entry.pass_state.history = history.clone();
+            entry.chain = StepChainV1::Lookup;
         }
         self.restored_binding = timeline_segments
             .last()
@@ -4003,6 +4057,7 @@ impl PluginRegistry {
                 manifest_slot: options.manifest_slot,
                 event_observation,
                 pass_state: PassState::new(owner_id),
+                chain: StepChainV1::Lookup,
             },
         );
         self.registration_revision += 1;
@@ -4175,6 +4230,7 @@ impl PluginRegistry {
                 manifest_slot: None,
                 event_observation,
                 pass_state: PassState::new(owner_id),
+                chain: StepChainV1::Lookup,
             },
         );
         // A Plugin registered outside a manifest slot can never match the
@@ -4227,6 +4283,7 @@ impl PluginRegistry {
                 manifest_slot: None,
                 event_observation,
                 pass_state: PassState::new(owner_id),
+                chain: StepChainV1::Lookup,
             },
         );
         // A Plugin registered outside a manifest slot can never match the
@@ -4271,6 +4328,7 @@ impl PluginRegistry {
                 manifest_slot: None,
                 event_observation,
                 pass_state: PassState::new(owner_id),
+                chain: StepChainV1::Lookup,
             },
         );
         // A Plugin registered outside a manifest slot can never match the
@@ -5085,6 +5143,7 @@ mod tests {
                 manifest_slot: None,
                 event_observation: DriverEventObservation::default(),
                 pass_state: PassState::new(owner_id),
+                chain: StepChainV1::Lookup,
             },
         );
         registry
@@ -5111,6 +5170,7 @@ mod tests {
                 manifest_slot: None,
                 event_observation: DriverEventObservation::default(),
                 pass_state: PassState::new(owner_id),
+                chain: StepChainV1::Lookup,
             },
         );
         registry
@@ -8007,6 +8067,7 @@ mod tests {
                     verified_prefix_required: false,
                 },
                 pass_state: PassState::new(owner_id),
+                chain: StepChainV1::Lookup,
             },
         );
 

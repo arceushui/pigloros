@@ -112,9 +112,9 @@ fn plain_events(first: u64, last: u64) -> Vec<Event> {
     (first..=last).map(|seq| event(seq, PLAIN)).collect()
 }
 
-fn carried_set(first: u64, last: u64) -> BTreeMap<Seq, Hash> {
+fn carried_set(first: u64, last: u64) -> CarriedSet {
     (first..=last)
-        .map(|seq| (Seq::from_u64(seq), payload_hash(seq)))
+        .map(|seq| (Seq::from_u64(seq), (payload_hash(seq), Kind::new(PLAIN))))
         .collect()
 }
 
@@ -174,10 +174,7 @@ fn commit_empty(registry: &mut PluginRegistry, through: u64) {
 }
 
 fn pending_content(registry: &PluginRegistry, id: PluginId) -> Option<Hash> {
-    match registry.plugins[&id].pass_state.history {
-        HistoryInputV1::None => None,
-        HistoryInputV1::Pending { content } => Some(content),
-    }
+    registry.plugins[&id].pass_state.history.pending_content()
 }
 
 #[test]

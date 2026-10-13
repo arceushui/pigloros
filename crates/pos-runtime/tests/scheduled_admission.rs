@@ -7,25 +7,25 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use pos_core::{
-    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
-    AppendDedupKey, AppendDedupScope, AppendIdentity, AuthorityErrorV1, AuthorityGranteeV1,
-    AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
-    AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, Capability,
-    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentAuthority, ConsentGrantedV1,
-    ConsentRevokedV1, CoreError, DelegateClassV1, EntityId, ErasureContainmentGateV1, Event,
-    EventDraft, EventStore, FactualDependencyErrorV1, FactualPrefixReadPortV1, Hash, Kind,
-    PersistedAuthorityV1, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
-    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptIdV1,
-    PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineEvidenceRefV1, PipelineOutcomeV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin, PluginId,
-    PrincipalRefV1, RecordedSetCountsV1, Reducer, Seq, SeqRange, State, TimelineId,
-    DELEGATE_ACTION_V1,
+    factual_artifact_digest, pipeline_authority_revision_v1, pipeline_delegation_revision_v1,
+    pipeline_erasure_revision_v1, AppendDedupKey, AppendDedupScope, AppendIdentity,
+    AuthorityErrorV1, AuthorityGranteeV1, AuthorityPersistenceErrorV1, AuthorityPersistenceHostV1,
+    AuthorityPersistencePortV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes,
+    Capability, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
+    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentAuthority,
+    ConsentGrantedV1, ConsentRevokedV1, CoreError, DelegateClassV1, EntityId,
+    ErasureContainmentGateV1, Event, EventDraft, EventStore, FactualDependencyErrorV1,
+    FactualNodeKeyV1, FactualPrefixReadPortV1, Hash, Kind, PersistedAuthorityV1,
+    PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1,
+    PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1,
+    PipelineEvidenceRefV1, PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1,
+    PipelineSecurityRevisionsV1, Plugin, PluginId, PrincipalRefV1, RecordedSetCountsV1, Reducer,
+    Seq, SeqRange, State, TimelineId, DELEGATE_ACTION_V1, FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
 };
 use pos_runtime::{
     Driver, LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, ProjectionKey,
     RuntimeError, ScheduledAdmissionStoreV1, ScheduledDriverBindingV1, ScheduledPassAdmissionV1,
-    StepOutput,
+    StepOutput, TimelineHistorySegment,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use ulid::Ulid;
@@ -1068,13 +1068,14 @@ fn protected_pass_binds_its_authorized_snapshot_and_rechecks_consent() {
 
     assert_eq!(stage(&mut registry).len(), 1);
     let admission = host.admission(&store, 1);
-    let first = receipt(registry.admit_scheduled_pass(&mut store, &admission));
+    let _first = receipt(registry.admit_scheduled_pass(&mut store, &admission));
+
+    // A pass rebuilt after the commit declares a different Tick and chain
+    // edge, so under the committed key it conflicts (ADR-064 R3.8). The exact
+    // retry of the retained basis is covered by the recovery fixtures.
     stage(&mut registry);
-    let retried = receipt(registry.admit_scheduled_pass(&mut store, &admission));
-    assert_eq!(
-        retried, first,
-        "an exact retry recovers the original receipt"
-    );
+    let rebuilt = registry.admit_scheduled_pass(&mut store, &admission);
+    assert_eq!(rejection(rebuilt), "AdmissionConflict");
 
     // The same attempt identity over a changed authorized snapshot conflicts.
     fold_projection(&mut store, &mut registry, host.timeline, subject);
@@ -1095,8 +1096,10 @@ fn protected_pass_binds_its_authorized_snapshot_and_rechecks_consent() {
     let revoked = err(host.admit(&mut registry, &mut store, 2));
     assert!(matches!(revoked, RuntimeError::Consent(_)), "{revoked}");
     assert_eq!(committed_events(&store, host.timeline).len(), 3);
-    assert_eq!(count(&log, ":commit"), 2);
-    assert_eq!(count(&log, ":abort"), 2);
+    // One commit (the first pass); the rebuilt pass, the changed snapshot and
+    // the revoked consent each abort their staged Driver.
+    assert_eq!(count(&log, ":commit"), 1);
+    assert_eq!(count(&log, ":abort"), 3);
 }
 
 #[test]
@@ -1605,6 +1608,7 @@ fn fold_subjects(
 struct DigestRecordingPort<'a> {
     inner: &'a mut dyn Harness,
     digests: Vec<Hash>,
+    bases: Vec<PipelineAdmissionBasisV1>,
 }
 
 impl PipelineAdmissionPortV1 for DigestRecordingPort<'_> {
@@ -1615,6 +1619,7 @@ impl PipelineAdmissionPortV1 for DigestRecordingPort<'_> {
     ) -> Result<PipelineOutcomeV1, CoreError> {
         self.digests
             .push(basis.attempt().observation().snapshot_digest());
+        self.bases.push(basis.clone());
         self.inner.admit_pipeline_batch(basis)
     }
 
@@ -1705,6 +1710,7 @@ fn admit_recording_digest(
     let mut port = DigestRecordingPort {
         inner: store,
         digests: Vec::new(),
+        bases: Vec::new(),
     };
     receipt(registry.admit_scheduled_pass(&mut port, &admission));
     assert_eq!(port.digests.len(), 1);
@@ -2353,5 +2359,152 @@ fn observe_refuses_an_exhausted_timeline_before_any_driver_steps() {
         let mut port = CountsPorts::new(store.as_mut(), AT_THRESHOLD);
         ok(host.observe(&registry, &mut port, timeline));
         assert!(ok(store.pipeline_admission_fence(timeline)).is_some());
+    }
+}
+
+/// ADR-064 R3.4: the basis a scheduled pass submits declares its factual
+/// Tick: the snapshot node, a step node per Driver and an output node per
+/// draft, bound to the drafts in vector order.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn the_submitted_basis_declares_the_factual_tick_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 10);
+        let log = Log::default();
+        let mut registry = host.registry();
+        register(&mut registry, driver("first", vec![b"a1", b"a2"], &log));
+        register(&mut registry, driver("second", Vec::new(), &log));
+        let ancestry = root_ancestry(host.timeline);
+        ok(registry.step_all_anchored(host.timeline, &ancestry, Seq::ZERO));
+        let admission = host.admission(store.as_ref(), 1);
+        let mut port = DigestRecordingPort {
+            inner: store.as_mut(),
+            digests: Vec::new(),
+            bases: Vec::new(),
+        };
+        receipt(registry.admit_scheduled_pass(&mut port, &admission));
+        let basis = &port.bases[0];
+        let dependencies = basis.dependencies();
+
+        assert_eq!(dependencies.tick(), 1, "{name}");
+        let nodes = dependencies.record().nodes();
+        let positions: Vec<(u32, u32)> = nodes
+            .iter()
+            .map(|node| {
+                let coordinate = node.coordinate();
+                (coordinate.scheduler_position(), coordinate.output_ordinal())
+            })
+            .collect();
+        assert_eq!(
+            positions,
+            [(0, 0), (1, 0), (1, 1), (1, 2), (2, 0)],
+            "{name}"
+        );
+        let bound: Vec<(u32, u32)> = dependencies
+            .output_bindings()
+            .iter()
+            .map(|binding| (binding.draft_index, binding.node_index))
+            .collect();
+        assert_eq!(bound, [(0, 2), (1, 3)], "{name}");
+        assert!(dependencies.event_nodes().is_empty(), "{name}");
+
+        // The snapshot node binds the digest the basis anchor carries.
+        let key = FactualNodeKeyV1 {
+            tick: 1,
+            scheduler_position: 0,
+            owner: "host.observation",
+            output_ordinal: 0,
+            schema_id: FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
+        };
+        let anchored = basis.attempt().observation().snapshot_digest();
+        let snapshot = factual_artifact_digest(host.timeline, key, anchored);
+        assert_eq!(nodes[0].coordinate().artifact_digest(), snapshot, "{name}");
+    }
+}
+
+/// Step and admit one pass over the Timeline through `cut.0` under the
+/// idempotency key `cut.1`, and return the basis it submitted.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn admit_pass_basis(
+    host: &Host,
+    registry: &mut PluginRegistry,
+    store: &mut dyn Harness,
+    cut: (u64, u8),
+) -> PipelineAdmissionBasisV1 {
+    let (observed, key) = cut;
+    let ancestry = root_ancestry(host.timeline);
+    ok(registry.step_all_anchored(host.timeline, &ancestry, Seq::from_u64(observed)));
+    let admission = host.admission(store, key);
+    let mut port = DigestRecordingPort {
+        inner: store,
+        digests: Vec::new(),
+        bases: Vec::new(),
+    };
+    receipt(registry.admit_scheduled_pass(&mut port, &admission));
+    port.bases.remove(0)
+}
+
+/// The step node of the first Driver in a submitted basis.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn first_step_node(basis: &PipelineAdmissionBasisV1) -> pos_core::DependencyNodeRecordV1 {
+    let nodes = basis.dependencies().record().nodes();
+    let found = nodes.iter().find(|node| {
+        node.coordinate().scheduler_position() == 1 && node.coordinate().output_ordinal() == 0
+    });
+    found
+        .cloned()
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("no first step node")))
+}
+
+/// ADR-064 R3.4.1: until the stores hold factual rows the head stays zero, yet
+/// a second pass declares a Tick later than the first and chains to the first
+/// pass's step node.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_second_pass_declares_a_later_tick_chained_to_the_first_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 10);
+        let log = Log::default();
+        let mut registry = host.registry();
+        register(&mut registry, driver("first", vec![b"a1", b"a2"], &log));
+
+        let first = admit_pass_basis(&host, &mut registry, store.as_mut(), (0, 1));
+        let second = admit_pass_basis(&host, &mut registry, store.as_mut(), (2, 2));
+
+        assert_eq!(first.dependencies().tick(), 1, "{name}");
+        assert_eq!(second.dependencies().tick(), 2, "{name}");
+        let recorded = first_step_node(&first).coordinate().artifact_digest();
+        let step = first_step_node(&second);
+        assert!(step.input_digests().contains(&recorded), "{name}");
+    }
+}
+
+/// A restore resets the chain to a lookup against the store, which holds no
+/// row yet, and the Tick after the restored pass still follows it with a chain
+/// edge. The Tick the restored registry itself declares is deliberately not
+/// pinned: it is transitional until slices 8-9 write rows, after which a
+/// restarted registry declares the head plus one.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_restored_registry_keeps_declaring_later_ticks_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 10);
+        let log = Log::default();
+        let mut registry = host.registry();
+        register(&mut registry, driver("first", vec![b"a1", b"a2"], &log));
+
+        let first = admit_pass_basis(&host, &mut registry, store.as_mut(), (0, 1));
+        assert_eq!(first.dependencies().tick(), 1, "{name}");
+        let events = committed_events(store.as_ref(), host.timeline);
+        let segment = TimelineHistorySegment::new(host.timeline, Seq::from_u64(2));
+        ok(registry.restore_driver_state(&[segment], &events));
+
+        let restored = admit_pass_basis(&host, &mut registry, store.as_mut(), (2, 2));
+        let later = admit_pass_basis(&host, &mut registry, store.as_mut(), (4, 3));
+        let restored_tick = restored.dependencies().tick();
+        assert!(later.dependencies().tick() > restored_tick, "{name}");
+        let recorded = first_step_node(&restored).coordinate().artifact_digest();
+        let step = first_step_node(&later);
+        assert!(step.input_digests().contains(&recorded), "{name}");
     }
 }
