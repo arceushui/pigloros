@@ -13123,9 +13123,7 @@ fn sqlite_local_fork_admission_with_context(
         )
         .ok()
         .flatten()
-        .and_then(|row| {
-            sqlite_fork_admission_result_with_context(conn, hasher, &row, context).ok()
-        })
+        .and_then(|row| sqlite_fork_admission_result_with_context(conn, hasher, &row, context).ok())
         .filter(|result| *result == expected)
         .map(|_| admission)
         .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority);
@@ -13837,9 +13835,7 @@ fn sqlite_fork_admission_result_with_context(
                 .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
             let child_key = child_id.to_string();
             let bytes = fork_replay_admission::recovery_admission_blob_with_context(
-                conn,
-                &child_key,
-                context,
+                conn, &child_key, context,
             )?
             .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
             let admission = context
