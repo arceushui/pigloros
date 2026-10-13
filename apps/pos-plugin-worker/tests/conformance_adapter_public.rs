@@ -629,7 +629,10 @@ fn r8_s8_a_component_piece_changed_without_its_digest_entry_is_not_executed() ->
 fn r8_s8_changing_the_first_expectation_fails_the_case() -> TestResult {
     let family = FixtureFamily::Malformed;
     let unchanged = attempt_from_fixture_files(family, ExecutionMode::Local)?;
-    assert_eq!(observe_attempt(&unchanged)?.result, failure("malformed-payload"));
+    assert_eq!(
+        observe_attempt(&unchanged)?.result,
+        failure("malformed-payload")
+    );
     let mut first = true;
     let changed = rewrite_subcases(unchanged, move |subcase| {
         if std::mem::take(&mut first) {
@@ -637,21 +640,30 @@ fn r8_s8_changing_the_first_expectation_fails_the_case() -> TestResult {
         }
         true
     })?;
-    assert_eq!(observe_attempt(&changed)?.result, failure("subcase-mismatch"));
+    assert_eq!(
+        observe_attempt(&changed)?.result,
+        failure("subcase-mismatch")
+    );
     Ok(())
 }
 
 #[test]
 fn r8_s8_an_instant_across_the_validity_boundary_fails_the_case() -> TestResult {
     let attempt = one_subcase(FixtureFamily::Denied, "den.16", at_instant(59_000_000))?;
-    assert_eq!(observe_attempt(&attempt)?.result, failure("subcase-mismatch"));
+    assert_eq!(
+        observe_attempt(&attempt)?.result,
+        failure("subcase-mismatch")
+    );
     Ok(())
 }
 
 #[test]
 fn r8_s8_an_instant_inside_the_same_window_still_passes() -> TestResult {
     let attempt = one_subcase(FixtureFamily::Denied, "den.16", at_instant(61_000_000))?;
-    assert_eq!(observe_attempt(&attempt)?.result, failure("capability-denied"));
+    assert_eq!(
+        observe_attempt(&attempt)?.result,
+        failure("capability-denied")
+    );
     Ok(())
 }
 

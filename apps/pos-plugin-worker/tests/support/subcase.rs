@@ -1,6 +1,7 @@
-//! Helpers shared by the worker's conformance tests: the observation of an attempt from the
-//! adapter library over the real worker, the provider's typed failures, single-sub-case
-//! attempts and the oracle and budget assertions.
+//! Helpers shared by the worker's conformance tests.
+//!
+//! They cover the observation of an attempt from the adapter library over the real worker, the
+//! provider's typed failures, single-sub-case attempts and the oracle and budget assertions.
 
 use std::path::PathBuf;
 
@@ -71,10 +72,10 @@ pub fn expecting(error: &'static str) -> impl Fn(&mut Value) {
 ///
 /// # Errors
 /// Returns the error of reading the provider manifest.
-pub fn assert_within_budget(
-    family: FixtureFamily,
-    observation: &SubjectObservation,
-) -> TestResult {
+///
+/// # Panics
+/// Panics when a counter exceeds its budget.
+pub fn assert_within_budget(family: FixtureFamily, observation: &SubjectObservation) -> TestResult {
     let (budget, usage) = (family_budget(family)?, observation.usage);
     let pairs = [
         (usage.memory_bytes, budget.memory_bytes),
@@ -97,6 +98,9 @@ pub fn assert_within_budget(
 ///
 /// # Errors
 /// Returns the error of reading the oracle or the provider manifest.
+///
+/// # Panics
+/// Panics when the observation differs from the oracle or exceeds the budget.
 pub fn assert_output_is_the_oracle(
     family: FixtureFamily,
     observation: &SubjectObservation,

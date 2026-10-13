@@ -23,9 +23,7 @@ use pos_reference::evaluator::{SubjectObservation, SubjectResult};
 use pos_reference::evaluator_domain::{ExecutionMode, FixtureFamily};
 use serde_json::Value;
 use support::attempts::{attempt_from_fixture_files, oracle_bytes};
-use support::subcase::{
-    assert_within_budget, expecting, failure, observe_attempt, one_subcase,
-};
+use support::subcase::{assert_within_budget, expecting, failure, observe_attempt, one_subcase};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
