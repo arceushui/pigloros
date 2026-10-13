@@ -146,7 +146,12 @@ fn populate<S: Port>(
     )?)
 }
 
-fn run_on_host(mut host: ErasureExecutionHostV1, child: TimelineId, fault: Fault) -> Fallible<()> {
+fn run_on_host(
+    mut host: ErasureExecutionHostV1,
+    child: TimelineId,
+    fault: Fault,
+    cut: Option<Seq>,
+) -> Fallible<()> {
     let fixture = ProtectedFixture::new("count", count);
     let gate = host.containment_gate();
     let generation = gate.inventory_generation()?;
@@ -158,30 +163,29 @@ fn run_on_host(mut host: ErasureExecutionHostV1, child: TimelineId, fault: Fault
     let before = registry.state_snapshot(child)?;
     let mut reads = host.read_sender()?;
     FOLDED_EVENTS.store(0, Ordering::SeqCst);
-    let result = with_release(|release| {
-        crate::replay(
+    let result = with_release(|release| match cut {
+        None => crate::replay(
             &mut reads,
             child,
             &mut registry,
             &closure,
             release,
             &fixture.fold(),
-        )
+        ),
+        Some(cut) => crate::replay_at(
+            &mut reads,
+            child,
+            cut,
+            &mut registry,
+            &closure,
+            release,
+            &fixture.fold(),
+        ),
     });
     if fault == Fault::None {
         result?;
-        assert!(FOLDED_EVENTS.load(Ordering::SeqCst) >= usize::try_from(PARENT_CUT)?);
-        with_release(|release| {
-            crate::replay_at(
-                &mut reads,
-                child,
-                Seq::from_u64(2),
-                &mut registry,
-                &closure,
-                release,
-                &fixture.fold(),
-            )
-        })?;
+        let minimum_folded = cut.map_or(PARENT_CUT, Seq::as_u64);
+        assert!(FOLDED_EVENTS.load(Ordering::SeqCst) >= usize::try_from(minimum_folded)?);
     } else {
         assert_eq!(
             result.map_err(|error| error.to_string()),
@@ -204,13 +208,16 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
         Shape::EmptyClassified,
         Shape::EmptyUnclassified,
     ] {
-        for fault in [
+        for (fault, cut) in [
             Fault::None,
             Fault::Omitted,
             Fault::Foreign,
             Fault::FinalIdentity,
             Fault::NoProfile,
-        ] {
+        ]
+        .into_iter()
+        .flat_map(|fault| [None, Some(Seq::from_u64(2))].map(|cut| (fault, cut)))
+        {
             let world = World::new(shape, false)?;
             let child = world.child_at(0)?.id;
             let mut memory = MemoryStore::new();
@@ -232,7 +239,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 &composition,
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
-            run_on_host(host, child, fault)?;
+            run_on_host(host, child, fault, cut)?;
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("imported-replay.sqlite");
             let path = path.to_str().ok_or("utf-8 path")?;
@@ -248,7 +255,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 &composition,
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
-            run_on_host(host, child, fault)?;
+            run_on_host(host, child, fault, cut)?;
         }
     }
     Ok(())
