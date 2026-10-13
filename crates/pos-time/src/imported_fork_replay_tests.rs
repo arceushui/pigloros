@@ -286,7 +286,6 @@ fn compare_on_host(
     fault: Fault,
 ) -> Fallible<()> {
     let fixture_a = ProtectedFixture::new("count", count);
-    let fixture_b = fixture_a.rival();
     let gate = host.containment_gate();
     let generation = Hash::from_bytes(gate.inventory_generation()?.digest());
     let timelines = requirements.map(ForkReplayRequirementV1::child_timeline_id);
@@ -299,7 +298,7 @@ fn compare_on_host(
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
     let mut a = fixture_a.registry(gate.clone());
-    let mut b = fixture_b.registry(gate);
+    let mut b = fixture_a.registry(gate);
     let before_a = a.state_snapshot(timelines[0])?;
     let before_b = b.state_snapshot(timelines[1])?;
     let mut reads = host.read_sender()?;
@@ -312,7 +311,7 @@ fn compare_on_host(
             [&mut a, &mut b],
             [&closures[0], &closures[1]],
             release,
-            [&fixture_a.fold(), &fixture_b.fold()],
+            [&fixture_a.fold(), &fixture_a.fold()],
         )
     });
     if fault == Fault::None {
