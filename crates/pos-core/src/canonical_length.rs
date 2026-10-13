@@ -26,7 +26,7 @@ pub(crate) trait CanonicalSink {
         self.extend_from_slice(&[byte]);
     }
 
-    fn nested(&mut self, value: &impl CanonicalEmit);
+    fn nested_byte_string(&mut self, value: &impl CanonicalEmit);
 }
 
 impl CanonicalSink for Vec<u8> {
@@ -34,7 +34,7 @@ impl CanonicalSink for Vec<u8> {
         Self::extend_from_slice(self, bytes);
     }
 
-    fn nested(&mut self, value: &impl CanonicalEmit) {
+    fn nested_byte_string(&mut self, value: &impl CanonicalEmit) {
         let mut inner = Self::new();
         value.emit(&mut inner);
         bytes(self, &inner);
@@ -72,7 +72,7 @@ impl CanonicalSink for LengthSink {
         self.add(bytes.len());
     }
 
-    fn nested(&mut self, value: &impl CanonicalEmit) {
+    fn nested_byte_string(&mut self, value: &impl CanonicalEmit) {
         let start = self.length;
         value.emit(self);
         if let Some((end, start)) = self.length.zip(start) {
@@ -137,7 +137,7 @@ mod tests {
         assert_eq!(out.finish(), Ok(usize::MAX));
         let mut out = LengthSink::new();
         out.add(usize::MAX);
-        out.nested(&OneByte);
+        out.nested_byte_string(&OneByte);
         out.push(1);
         assert_eq!(out.finish(), Err(CanonicalLengthErrorV1::LengthOverflow));
     }
@@ -145,9 +145,9 @@ mod tests {
     #[test]
     fn nested_count_uses_the_same_emitter_without_materializing_a_buffer() {
         let mut bytes = Vec::new();
-        bytes.nested(&OneByte);
+        bytes.nested_byte_string(&OneByte);
         let mut count = LengthSink::new();
-        count.nested(&OneByte);
+        count.nested_byte_string(&OneByte);
         assert_eq!(bytes, [0x41, 1]);
         assert_eq!(count.finish(), Ok(bytes.len()));
     }
