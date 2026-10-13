@@ -24,9 +24,10 @@ Usage:
 The fixture seeds below are public and used for fixtures only ("repository-test-fixture-only");
 the signatures prove consistency, not publisher identity.
 
-The catalogue covers every `denied` (`den.01` to `den.22`), `malformed` (`mal.1a` to `mal.6`)
-and `downgrade` (`dgr.1` to `dgr.4`) sub-case, `positive` and `independent-evaluation` in full,
-and the resource-exhaustion and deletion-redaction sub-cases listed in `SUBCASES`.
+The catalogue holds `positive` and `independent-evaluation` in full, every `denied`
+(`den.01` to `den.22`), `malformed` (`mal.1a` to `mal.6`) and `downgrade` (`dgr.1` to `dgr.4`)
+sub-case, `res.1` to `res.4` (the rust guest under a release whose memory, host-call or
+`event_bytes` budget it exceeds, and the c guest under a fuel budget of 1) and `del.1`, `del.2`.
 """
 
 from __future__ import annotations
