@@ -8,7 +8,10 @@ use super::fork_replay_row::{selected_field_with_context, SelectedRowV1};
 
 type Result<T> = std::result::Result<T, Error>;
 
-fn host_length(conn: &Connection, context: &mut NativeReadContextV1<'_, '_>) -> Result<Option<usize>> {
+fn host_length(
+    conn: &Connection,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> Result<Option<usize>> {
     selected_field_with_context(conn, SelectedRowV1::HostProbe, context, |row, _| {
         row.get::<_, bool>(0)
             .map_err(|_| Error::StorageIndeterminate)
@@ -47,12 +50,19 @@ pub(super) fn host_with_context(
                 context
                     .bytes(length)
                     .map_err(|_| Error::CorruptAuthority)
-                    .and_then(|()| row.get::<_, Vec<u8>>(0).map_err(|_| Error::StorageIndeterminate))
+                    .and_then(|()| {
+                        row.get::<_, Vec<u8>>(0)
+                            .map_err(|_| Error::StorageIndeterminate)
+                    })
                     .and_then(|bytes| {
                         context
                             .check()
                             .map_err(|_| Error::CorruptAuthority)
-                            .and_then(|()| context.host_record(&bytes).map_err(|_| Error::CorruptAuthority))
+                            .and_then(|()| {
+                                context
+                                    .host_record(&bytes)
+                                    .map_err(|_| Error::CorruptAuthority)
+                            })
                     })
             })
             .and_then(|host| host.map(Some).ok_or(Error::CorruptAuthority))
@@ -82,7 +92,11 @@ mod tests {
         )?)
     }
 
-    fn fixture() -> Fallible<(tempfile::TempDir, super::super::SqliteStore, ForkAdmissionHostRecordV1)> {
+    fn fixture() -> Fallible<(
+        tempfile::TempDir,
+        super::super::SqliteStore,
+        ForkAdmissionHostRecordV1,
+    )> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("host.sqlite3");
         let store = super::super::SqliteStore::open(path.to_str().ok_or("host fixture path")?)?;
@@ -186,7 +200,8 @@ mod tests {
     }
 
     #[test]
-    fn impossible_host_types_lengths_and_fences_refuse_before_raw_materialization() -> Fallible<()> {
+    fn impossible_host_types_lengths_and_fences_refuse_before_raw_materialization() -> Fallible<()>
+    {
         let native = host()?.canonical_bytes();
         for (host, fence) in [
             (Value::Null, Value::Integer(0)),
@@ -309,19 +324,27 @@ mod tests {
                 let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1, 1_000_000)?;
                 let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
                 assert_eq!(
-                    NativeReadContextV1::protected(&mut budget).host_record(&bytes).is_ok(),
+                    NativeReadContextV1::protected(&mut budget)
+                        .host_record(&bytes)
+                        .is_ok(),
                     expected
                 );
                 assert_eq!(budget.remaining_native_bytes(), 1);
                 assert!(budget.check_time().is_ok());
-                assert_eq!(NativeReadContextV1::ordinary().host_record(&bytes).is_ok(), expected);
+                assert_eq!(
+                    NativeReadContextV1::ordinary().host_record(&bytes).is_ok(),
+                    expected
+                );
             }
         }
         let conn = raw_fixture()?;
         for start in [9, 43, 77] {
             let mut bytes = native.clone();
             bytes[start..start + 32].fill(0);
-            conn.execute("UPDATE fork_admission_authority SET fah1_cbor = ?1", [bytes])?;
+            conn.execute(
+                "UPDATE fork_admission_authority SET fah1_cbor = ?1",
+                [bytes],
+            )?;
             let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
             let epoch = clock.mark();
             let limits = ForkReplayReadLimitsV1::new(1, 1, 2, 109, 1_000_000)?;
@@ -338,7 +361,9 @@ mod tests {
             let epoch = clock.mark();
             let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1, 1_000_000)?;
             let mut budget = ForkReplayReadBudgetV1::new(limits, epoch, &mut clock)?;
-            assert!(NativeReadContextV1::protected(&mut budget).host_record(&bytes).is_err());
+            assert!(NativeReadContextV1::protected(&mut budget)
+                .host_record(&bytes)
+                .is_err());
             assert!(NativeReadContextV1::ordinary().host_record(&bytes).is_err());
             assert_eq!(budget.remaining_native_bytes(), 1);
         }
