@@ -3,7 +3,9 @@
 
 use pos_core::trusted_clock::{FixtureEvaluationInstantV1, FixtureWallSourceV1};
 use pos_plugin_publisher::test_support::{encoding::TICK, release::Shape, world::World};
-use pos_plugin_release::{BundleAddressV1, InMemoryReleaseEntryV1, ReleaseSourceV1};
+use pos_plugin_release::{
+    BundleAddressV1, InMemoryReleaseEntryV1, ReleaseSourceV1, VerifiedReleaseBundleV1,
+};
 use pos_plugin_supervisor::CommunityPluginSubjectResultV1;
 use pos_reference::evaluator::SubjectResult;
 use pos_reference::evaluator_domain::{ExecutionMode, FixtureFamily};
@@ -56,62 +58,104 @@ struct Real {
     pmf1_digest: [u8; 32],
 }
 
+/// What the signed-release test world published, as bytes.
+struct Published {
+    address: BundleAddressV1,
+    manifest: Vec<u8>,
+    layers: Vec<Vec<u8>>,
+    pmf1_digest: [u8; 32],
+    anchor: CommunityTrustAnchorBytesV1,
+    roots: Vec<Vec<u8>>,
+    revocations: Vec<Vec<u8>>,
+    tps1: Vec<u8>,
+}
+
+fn published() -> Result<Published, BoxError> {
+    let mut publisher = World::build(None, false)?;
+    let current = publisher.material()?;
+    let shape = Shape::first().with_optional_capability().with_worker_abi();
+    let address = publisher.publish(shape)?.address().clone();
+    let bundle = publisher.store.read_verified(&address)?;
+    Ok(Published {
+        address,
+        manifest: bundle.manifest().to_vec(),
+        layers: layers_of(&bundle),
+        pmf1_digest: *blake3::hash(bundle.pmf1()).as_bytes(),
+        anchor: anchor_of(&publisher),
+        roots: vec![current.ptr1().to_vec()],
+        revocations: current.prv1_records().to_vec(),
+        tps1: current.tps1,
+    })
+}
+
+/// The layer pieces of a closure: every blob but the empty config.
+fn layers_of(bundle: &VerifiedReleaseBundleV1) -> Vec<Vec<u8>> {
+    let layers = bundle.blobs().iter();
+    let layers = layers.filter(|blob| blob.digest() != EMPTY_CONFIG);
+    layers.map(|blob| blob.bytes().to_vec()).collect()
+}
+
+fn anchor_of(publisher: &World) -> CommunityTrustAnchorBytesV1 {
+    CommunityTrustAnchorBytesV1 {
+        scope: publisher.anchor.scope().to_owned(),
+        ptr1_genesis_digest: publisher.anchor.ptr1_genesis_digest(),
+        operator_key: publisher.anchor.operator_key(),
+        genesis_tps1_digest: publisher.anchor.genesis_tps1_digest(),
+    }
+}
+
+fn hexes(records: &[Vec<u8>]) -> Vec<String> {
+    records.iter().map(|record| hex_of(record)).collect()
+}
+
+/// Every piece of the release set, sorted and without duplicates.
+fn piece_set(published: &Published, anchor_bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut all = vec![published.manifest.clone(), published.tps1.clone()];
+    all.push(anchor_bytes.to_vec());
+    all.extend(published.layers.clone());
+    all.extend(published.roots.clone());
+    all.extend(published.revocations.clone());
+    all.sort();
+    all.dedup();
+    all
+}
+
+fn release_source(published: &Published) -> Result<InMemoryReleaseSourceV1, BoxError> {
+    let entry = InMemoryReleaseEntryV1::from_bytes(
+        published.manifest.clone(),
+        published.layers.clone(),
+    )?;
+    Ok(InMemoryReleaseSourceV1::new(vec![entry])?)
+}
+
 impl Real {
     fn new() -> Result<Self, BoxError> {
-        let mut publisher = World::build(None, false)?;
-        let current = publisher.material()?;
-        let shape = Shape::first().with_optional_capability().with_worker_abi();
-        let address = publisher.publish(shape)?.address().clone();
-        let bundle = publisher.store.read_verified(&address)?;
-        let manifest = bundle.manifest().to_vec();
-        let layers: Vec<Vec<u8>> = bundle
-            .blobs()
-            .iter()
-            .filter(|blob| blob.digest() != EMPTY_CONFIG)
-            .map(|blob| blob.bytes().to_vec())
-            .collect();
-        let anchor = CommunityTrustAnchorBytesV1 {
-            scope: publisher.anchor.scope().to_owned(),
-            ptr1_genesis_digest: publisher.anchor.ptr1_genesis_digest(),
-            operator_key: publisher.anchor.operator_key(),
-            genesis_tps1_digest: publisher.anchor.genesis_tps1_digest(),
-        };
-        let roots = vec![current.ptr1().to_vec()];
-        let revocations = current.prv1_records().to_vec();
-        let tps1 = current.tps1;
+        let published = published()?;
+        let anchor_bytes = anchor_cbor(&published.anchor)?;
         let material = CommunityPluginTrustMaterialV1::from_bytes_v1(
-            &anchor,
-            tps1.clone(),
-            roots.clone(),
-            revocations.clone(),
+            &published.anchor,
+            published.tps1.clone(),
+            published.roots.clone(),
+            published.revocations.clone(),
         )?;
-        let anchor_bytes = anchor_cbor(&anchor)?;
-        let mut all = vec![manifest.clone(), tps1.clone(), anchor_bytes.clone()];
-        all.extend(layers.clone());
-        all.extend(roots.clone());
-        all.extend(revocations.clone());
-        all.sort();
-        all.dedup();
-        let release = json!({
-            "manifest": hex_of(&manifest),
-            "blobs": layers.iter().map(|blob| hex_of(blob)).collect::<Vec<_>>(),
-        });
-        let material_json = json!({
-            "anchor": hex_of(&anchor_bytes),
-            "tps1": hex_of(&tps1),
-            "ptr1": roots.iter().map(|record| hex_of(record)).collect::<Vec<_>>(),
-            "prv1": revocations.iter().map(|record| hex_of(record)).collect::<Vec<_>>(),
-        });
-        let entry = InMemoryReleaseEntryV1::from_bytes(manifest, layers)?;
+        let all = piece_set(&published, &anchor_bytes);
         Ok(Self {
-            address,
-            source: InMemoryReleaseSourceV1::new(vec![entry])?,
+            source: release_source(&published)?,
             pieces: PiecesV1::from_blobs(all.clone()),
             all,
-            release,
-            material_json,
+            release: json!({
+                "manifest": hex_of(&published.manifest),
+                "blobs": hexes(&published.layers),
+            }),
+            material_json: json!({
+                "anchor": hex_of(&anchor_bytes),
+                "tps1": hex_of(&published.tps1),
+                "ptr1": hexes(&published.roots),
+                "prv1": hexes(&published.revocations),
+            }),
             material,
-            pmf1_digest: *blake3::hash(bundle.pmf1()).as_bytes(),
+            address: published.address,
+            pmf1_digest: published.pmf1_digest,
         })
     }
 
