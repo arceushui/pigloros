@@ -41,10 +41,6 @@ impl MemoryStore {
         let child = requirement.child_timeline_id();
         let local = self.fork_admissions.get(&child);
         charge_records(local.into_iter(), budget)?;
-        charge_records(
-            self.imported_fork_admissions.get(&child).into_iter(),
-            budget,
-        )?;
         if local.is_some() {
             for binding in self.fork_principal_owner_bindings.values() {
                 budget.charge_rows(1)?;
@@ -52,14 +48,8 @@ impl MemoryStore {
                 budget.charge_canonical(binding.canonical_size())?;
             }
         }
-        if let Some(table) = self.fork_classifier_tables.get(&child) {
+        if let Some(table) = self.fork_classifier_tables.get(&child).filter(|_| local.is_some()) {
             charge_records(std::iter::once(table), budget)?;
-            charge_records(
-                self.imported_fork_classifier_sources
-                    .get(&table.input().source_configuration_revision_digest)
-                    .into_iter(),
-                budget,
-            )?;
             budget.charge_bytes(table.input().registrar_identifier.len())?;
             let key = (
                 table.input().room_revision_descriptor_hash,
@@ -67,10 +57,12 @@ impl MemoryStore {
             );
             charge_records(self.fork_classifier_sources.get(&key).into_iter(), budget)?;
         }
-        for registration in self.fork_classifier_registrations.values() {
-            budget.charge_rows(1)?;
-            if registration.input().child_timeline_id == child {
-                budget.charge_canonical(registration.canonical_size())?;
+        if local.is_some() {
+            for registration in self.fork_classifier_registrations.values() {
+                budget.charge_rows(1)?;
+                if registration.input().child_timeline_id == child {
+                    budget.charge_canonical(registration.canonical_size())?;
+                }
             }
         }
         if let Some(binding) = self
@@ -93,25 +85,6 @@ impl MemoryStore {
             )?;
             // The Memory trusted read borrows FPA1, including its cached FSM1;
             // no artifact clone or FPA1 encoding is materialized here.
-        }
-        for row in self.imported_fork_attributions.values() {
-            budget.charge_rows(1)?;
-            if row.child == child {
-                budget.charge_bytes(row.stored.admission_bytes.len())?;
-                // The preflight's own canonical decoder is charged too.
-                budget.charge_bytes(row.stored.admission_bytes.len())?;
-                let admission = pos_core::ImportedForkAttributionAdmissionV1::from_canonical_cbor(
-                    &row.stored.admission_bytes,
-                )
-                .map_err(|_| Error::CorruptAuthority)?;
-                if let Some(evidence) = self
-                    .imported_fork_key_evidence
-                    .get(&admission.input().import_operation_id)
-                {
-                    charge_records(std::iter::once(&evidence.record), budget)?;
-                    charge_records(evidence.tombstone.iter(), budget)?;
-                }
-            }
         }
         if let Some(registry) = &self.key_registry {
             charge_registry(registry, budget)?;
