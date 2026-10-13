@@ -222,7 +222,10 @@ fn expect_status(report: &ConformanceReport, family: u8, expected: CaseStatus) -
     if actual == expected {
         return Ok(());
     }
-    Err(io::Error::other(format!("case-{family}: expected {expected:?}, got {actual:?}")).into())
+    Err(io::Error::other(format!(
+        "case-{family}: expected {expected:?}, got {actual:?}"
+    ))
+    .into())
 }
 
 fn expect_all(report: &ConformanceReport, expected: CaseStatus) -> TestResult {
@@ -276,8 +279,7 @@ fn faithful_subject_passes_with_output_equal_to_the_oracle_member() -> TestResul
     for family in OUTPUT_FAMILIES {
         let outcome = case(&report, family)?;
         assert_eq!(
-            outcome.actual_digest,
-            outcome.expected_digest,
+            outcome.actual_digest, outcome.expected_digest,
             "case-{family} digests"
         );
         assert!(outcome.actual_digest.is_some(), "case-{family} digest");
@@ -316,8 +318,7 @@ fn output_that_differs_by_one_byte_fails_and_the_control_passes() -> TestResult 
                 .map_err(|error| io::Error::other(format!("{label}: {error}")))?;
             let outcome = case(&report, family)?;
             assert_ne!(
-                outcome.actual_digest,
-                outcome.expected_digest,
+                outcome.actual_digest, outcome.expected_digest,
                 "{label}: case-{family} digests differ"
             );
         }
