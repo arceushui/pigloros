@@ -2,9 +2,9 @@
 
 use rusqlite::{Connection, Row, Rows, Statement};
 
+use super::fork_replay_event::EventCursorV1;
 use crate::fork_replay::NativeReadContextV1;
 use pos_core::{ForkAdmissionErrorV1 as Error, Hash};
-use super::fork_replay_event::EventCursorV1;
 
 type Result<T> = std::result::Result<T, Error>;
 

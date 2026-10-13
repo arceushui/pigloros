@@ -87,7 +87,9 @@ impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
             .as_deref_mut()
             .map_or(Ok(()), |budget| {
                 budget.check_time().and_then(|()| {
-                    budget.accept(length.is_some_and(|length| length <= budget.remaining_native_bytes()))
+                    budget.accept(
+                        length.is_some_and(|length| length <= budget.remaining_native_bytes()),
+                    )
                 })
             })
             .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
