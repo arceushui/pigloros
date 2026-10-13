@@ -718,7 +718,7 @@ fn draft_level_failure(
     let result = build(&registry, port, &mut pending, through);
     assert!(pending.factual.step_nodes.is_empty());
     assert!(pending.factual.history_recorded.is_empty());
-    declaration_error(err(result))
+    declaration_error(result.test_err())
 }
 
 #[test]
@@ -1327,14 +1327,15 @@ fn a_failing_read_of_the_prefix_is_the_stores_error() {
 
 /// A prior node of the given Tick, as a Driver retains it.
 fn prior_at_tick(tick: u64, digest: Hash) -> FactualPriorNodeV1 {
-    let coordinate = ok(DependencyNodeCoordinateV1::try_new(
+    let coordinate = DependencyNodeCoordinateV1::try_new(
         tick,
         1,
         "plugin:old".to_owned(),
         0,
         1,
         digest,
-    ));
+    )
+    .test_ok();
     FactualPriorNodeV1::new(coordinate, ENDOGENOUS)
 }
 
@@ -1342,18 +1343,18 @@ fn prior_at_tick(tick: u64, digest: Hash) -> FactualPriorNodeV1 {
 fn declared_tick_at(registry: &mut PluginRegistry, timeline: TimelineId, head: u64) -> u64 {
     let mut pending = staged(registry, timeline, 0, &[]);
     let port = FakePrefix::at(head);
-    ok(build(registry, &port, &mut pending, 0)).tick()
+    build(registry, &port, &mut pending, 0).test_ok().tick()
 }
 
 #[test]
 fn the_factual_tick_follows_the_later_of_the_head_and_the_retained_nodes() {
-    assert_eq!(ok(next_factual_tick(0, 0)), 1);
-    assert_eq!(ok(next_factual_tick(4, 0)), 5);
-    assert_eq!(ok(next_factual_tick(0, 3)), 4);
-    assert_eq!(ok(next_factual_tick(5, 3)), 6);
-    let exhausted = err(next_factual_tick(u64::MAX, 0));
+    assert_eq!(next_factual_tick(0, 0).test_ok(), 1);
+    assert_eq!(next_factual_tick(4, 0).test_ok(), 5);
+    assert_eq!(next_factual_tick(0, 3).test_ok(), 4);
+    assert_eq!(next_factual_tick(5, 3).test_ok(), 6);
+    let exhausted = next_factual_tick(u64::MAX, 0).test_err();
     assert_eq!(exhausted, FactualDependencyErrorV1::SetExhausted);
-    let retained = err(next_factual_tick(0, u64::MAX));
+    let retained = next_factual_tick(0, u64::MAX).test_err();
     assert_eq!(retained, FactualDependencyErrorV1::SetExhausted);
 }
 
@@ -1402,7 +1403,7 @@ fn a_digest_of_an_unseen_subject_controlled_event_is_undeclarable() {
     observation.event_subscriptions.push(Kind::new(sensitive));
     let mut pending = staged(&mut registry, TimelineId::new(), 6, &plain_events(1));
     let result = build(&registry, &port, &mut pending, 6);
-    let error = declaration_error(err(result));
+    let error = declaration_error(result.test_err());
     assert_eq!(error, FactualDependencyErrorV1::UndeclarableInput);
 }
 
@@ -1416,7 +1417,7 @@ fn a_driver_without_subscriptions_cannot_declare_an_event_it_never_saw() {
         .clear();
     let mut pending = staged(&mut registry, TimelineId::new(), 2, &plain_events(1));
     let result = build(&registry, &FakePrefix::at(0), &mut pending, 2);
-    let error = declaration_error(err(result));
+    let error = declaration_error(result.test_err());
     assert_eq!(error, FactualDependencyErrorV1::UndeclarableInput);
 }
 
@@ -1435,7 +1436,7 @@ fn an_authorized_pass_refuses_a_declared_committed_event_as_undeclarable() {
     let mut pending = staged(&mut registry, TimelineId::new(), 0, &[]);
     assert!(pending.factual.event_facts.is_empty());
     let result = build(&registry, &FakePrefix::at(0), &mut pending, 2);
-    let error = declaration_error(err(result));
+    let error = declaration_error(result.test_err());
     assert_eq!(error, FactualDependencyErrorV1::UndeclarableInput);
 }
 
