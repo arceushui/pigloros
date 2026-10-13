@@ -284,41 +284,68 @@ mod borrowed_pob1_parity {
     /// Preserve the previous generic-tree transport as an independent test
     /// oracle. Production now uses borrowed native primitives instead.
     fn previous_decoder(bytes: &[u8]) -> Option<PrincipalOwnerBindingV1> {
-        if bytes.len() > MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1 { return None; }
+        if bytes.len() > MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1 {
+            return None;
+        }
         let mut cursor = Cursor::new(bytes);
         let value: Value = ciborium::from_reader(&mut cursor).ok()?;
         let mut canonical = Vec::new();
         ciborium::into_writer(&value, &mut canonical).ok()?;
-        if usize::try_from(cursor.position()).ok()? != bytes.len() || canonical != bytes { return None; }
-        let Value::Array(fields) = value else { return None; };
+        if usize::try_from(cursor.position()).ok()? != bytes.len() || canonical != bytes {
+            return None;
+        }
+        let Value::Array(fields) = value else {
+            return None;
+        };
         if fields.len() != 6
             || !matches!(&fields[0], Value::Bytes(marker) if marker == b"POB1")
             || !matches!(&fields[1], Value::Integer(version) if *version == 1.into())
-            || !matches!(&fields[5], Value::Array(origin) if origin.len() == 1 && origin[0] == Value::Integer(1.into())) { return None; }
+            || !matches!(&fields[5], Value::Array(origin) if origin.len() == 1 && origin[0] == Value::Integer(1.into()))
+        {
+            return None;
+        }
         let digest = |value: &Value| -> Option<Hash> {
-            let Value::Bytes(value) = value else { return None; };
+            let Value::Bytes(value) = value else {
+                return None;
+            };
             let bytes: [u8; 32] = value.as_slice().try_into().ok()?;
             (bytes != [0; 32]).then_some(Hash::from_bytes(bytes))
         };
-        let Value::Text(owner) = &fields[4] else { return None; };
+        let Value::Text(owner) = &fields[4] else {
+            return None;
+        };
         let binding = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
-            operation_id: digest(&fields[2])?, principal_digest: digest(&fields[3])?,
-            owner: OwnerIdV1::new(owner).ok()?, origin: ForkAuthorityOriginV1::Local,
-        }).ok()?;
+            operation_id: digest(&fields[2])?,
+            principal_digest: digest(&fields[3])?,
+            owner: OwnerIdV1::new(owner).ok()?,
+            origin: ForkAuthorityOriginV1::Local,
+        })
+        .ok()?;
         (binding.to_canonical_cbor() == bytes).then_some(binding)
     }
 
     fn parity(bytes: &[u8]) {
         match previous_decoder(bytes) {
-            Some(expected) => assert_eq!(PrincipalOwnerBindingV1::from_canonical_cbor(bytes), Ok(expected)),
-            None => assert_eq!(PrincipalOwnerBindingV1::from_canonical_cbor(bytes), Err(ForkAdmissionErrorV1::CorruptAuthority)),
+            Some(expected) => assert_eq!(
+                PrincipalOwnerBindingV1::from_canonical_cbor(bytes),
+                Ok(expected)
+            ),
+            None => assert_eq!(
+                PrincipalOwnerBindingV1::from_canonical_cbor(bytes),
+                Err(ForkAdmissionErrorV1::CorruptAuthority)
+            ),
         }
     }
 
     fn fields(owner: &str, origin: Value) -> Value {
-        Value::Array(vec![Value::Bytes(b"POB1".to_vec()), Value::Integer(1.into()),
-            Value::Bytes(hash(1).as_bytes().to_vec()), Value::Bytes(hash(2).as_bytes().to_vec()),
-            Value::Text(owner.to_owned()), origin])
+        Value::Array(vec![
+            Value::Bytes(b"POB1".to_vec()),
+            Value::Integer(1.into()),
+            Value::Bytes(hash(1).as_bytes().to_vec()),
+            Value::Bytes(hash(2).as_bytes().to_vec()),
+            Value::Text(owner.to_owned()),
+            origin,
+        ])
     }
 
     fn encode(value: &Value) -> Fallible<Vec<u8>> {
@@ -328,18 +355,34 @@ mod borrowed_pob1_parity {
     }
 
     #[test]
-    fn public_pob1_borrowed_decoder_matches_previous_transport_and_independent_bytes() -> Fallible<()> {
-        for owner in ["o".to_owned(), "o".repeat(23), "o".repeat(24), "o".repeat(64), "o".repeat(128), "é".repeat(64)] {
-            let bytes = encode(&fields(&owner, Value::Array(vec![Value::Integer(1.into())])))?;
+    fn public_pob1_borrowed_decoder_matches_previous_transport_and_independent_bytes(
+    ) -> Fallible<()> {
+        for owner in [
+            "o".to_owned(),
+            "o".repeat(23),
+            "o".repeat(24),
+            "o".repeat(64),
+            "o".repeat(128),
+            "é".repeat(64),
+        ] {
+            let bytes = encode(&fields(
+                &owner,
+                Value::Array(vec![Value::Integer(1.into())]),
+            ))?;
             let binding = PrincipalOwnerBindingV1::from_canonical_cbor(&bytes)?;
             assert_eq!(binding.input().owner.as_str(), owner);
             assert_eq!(binding.to_canonical_cbor(), bytes);
             let mut hasher = blake3::Hasher::new();
             hasher.update(b"pigloros/principal-owner-binding/v1");
             hasher.update(&bytes);
-            assert_eq!(binding.digest(), Hash::from_bytes(*hasher.finalize().as_bytes()));
+            assert_eq!(
+                binding.digest(),
+                Hash::from_bytes(*hasher.finalize().as_bytes())
+            );
             parity(&bytes);
-            for end in 0..bytes.len() { parity(&bytes[..end]); }
+            for end in 0..bytes.len() {
+                parity(&bytes[..end]);
+            }
             for index in 0..bytes.len() {
                 for replacement in [0, 255] {
                     let mut changed = bytes.clone();
@@ -360,30 +403,59 @@ mod borrowed_pob1_parity {
     }
 
     #[test]
-    fn public_pob1_borrowed_decoder_preserves_shapes_and_local_imported_origin_boundary() -> Fallible<()> {
+    fn public_pob1_borrowed_decoder_preserves_shapes_and_local_imported_origin_boundary(
+    ) -> Fallible<()> {
         for owner in [String::new(), "o".repeat(129), "é".repeat(65)] {
-            parity(&encode(&fields(&owner, Value::Array(vec![Value::Integer(1.into())])))?);
+            parity(&encode(&fields(
+                &owner,
+                Value::Array(vec![Value::Integer(1.into())]),
+            ))?);
         }
-        for origin in [Value::Array(vec![]), Value::Array(vec![Value::Integer(0.into())]),
-            Value::Array(vec![Value::Integer(2.into()), Value::Bytes(hash(3).as_bytes().to_vec())]),
-            Value::Null] {
+        for origin in [
+            Value::Array(vec![]),
+            Value::Array(vec![Value::Integer(0.into())]),
+            Value::Array(vec![
+                Value::Integer(2.into()),
+                Value::Bytes(hash(3).as_bytes().to_vec()),
+            ]),
+            Value::Null,
+        ] {
             parity(&encode(&fields("owner", origin))?);
         }
-        for marker in [Value::Text("POB1".to_owned()), Value::Bytes(b"POB2".to_vec())] {
-            let Value::Array(mut value) = fields("owner", Value::Array(vec![Value::Integer(1.into())])) else { return Err("fixture shape".into()); };
+        for marker in [
+            Value::Text("POB1".to_owned()),
+            Value::Bytes(b"POB2".to_vec()),
+        ] {
+            let Value::Array(mut value) =
+                fields("owner", Value::Array(vec![Value::Integer(1.into())]))
+            else {
+                return Err("fixture shape".into());
+            };
             value[0] = marker;
             parity(&encode(&Value::Array(value))?);
         }
         let local = PrincipalOwnerBindingV1::new(PrincipalOwnerBindingInputV1 {
-            operation_id: hash(1), principal_digest: hash(2), owner: OwnerIdV1::new("é".repeat(64))?,
+            operation_id: hash(1),
+            principal_digest: hash(2),
+            owner: OwnerIdV1::new("é".repeat(64))?,
             origin: ForkAuthorityOriginV1::Local,
         })?;
-        let imported = pos_core::ImportedPrincipalOwnerBindingV1::from_local(local.clone(), hash(3));
+        let imported =
+            pos_core::ImportedPrincipalOwnerBindingV1::from_local(local.clone(), hash(3));
         let bytes = imported.to_canonical_cbor();
-        assert_eq!(bytes.len(), pos_core::MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1);
-        assert_eq!(pos_core::ImportedPrincipalOwnerBindingV1::from_canonical_cbor(&bytes)?, imported);
+        assert_eq!(
+            bytes.len(),
+            pos_core::MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1
+        );
+        assert_eq!(
+            pos_core::ImportedPrincipalOwnerBindingV1::from_canonical_cbor(&bytes)?,
+            imported
+        );
         parity(&bytes);
-        assert_eq!(PrincipalOwnerBindingV1::from_canonical_cbor(&local.to_canonical_cbor())?, local);
+        assert_eq!(
+            PrincipalOwnerBindingV1::from_canonical_cbor(&local.to_canonical_cbor())?,
+            local
+        );
         Ok(())
     }
 }
