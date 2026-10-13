@@ -4,8 +4,7 @@
 //! the sole validator of native fields, origin, semantics and canonical bytes.
 
 use pos_core::{
-    ForkAdmissionRecordV1, ImportedForkAdmissionRecordV1,
-    MAX_FORK_ADMISSION_RECORD_BYTES_V1,
+    ForkAdmissionRecordV1, ImportedForkAdmissionRecordV1, MAX_FORK_ADMISSION_RECORD_BYTES_V1,
 };
 
 use super::{imported_projection_length, AdmissionCarrierV1, NativeReadContextV1};
@@ -83,7 +82,10 @@ mod tests {
     use std::time::Duration;
 
     #[derive(Clone, Copy)]
-    enum Codec { Local, Imported }
+    enum Codec {
+        Local,
+        Imported,
+    }
 
     impl Codec {
         fn accepts(self, bytes: &[u8]) -> bool {
@@ -105,21 +107,35 @@ mod tests {
         let world = World::new(Shape::Mixed, false)?;
         let built = world.build(&Spec::default())?;
         let imported = ImportedForkAdmissionRecordV1::from_canonical_cbor(
-            &built.envelope.unsigned().input().records.fork_admission)?;
+            &built.envelope.unsigned().input().records.fork_admission,
+        )?;
         let mut fields = imported.fields().clone();
         fields.creator = pos_core::OwnerIdV1::new("é".repeat(64))?;
         let local = ForkAdmissionRecordV1::new(fields)?;
-        let imported = ImportedForkAdmissionRecordV1::from_local(local.clone(), imported.authority_origin_digest());
+        let imported = ImportedForkAdmissionRecordV1::from_local(
+            local.clone(),
+            imported.authority_origin_digest(),
+        );
         Ok((local, imported))
     }
 
     fn assert_parity(codec: Codec, bytes: &[u8]) -> Fallible<()> {
-        assert_eq!(codec.decode(bytes, &mut NativeReadContextV1::ordinary()).is_ok(), codec.accepts(bytes));
+        assert_eq!(
+            codec
+                .decode(bytes, &mut NativeReadContextV1::ordinary())
+                .is_ok(),
+            codec.accepts(bytes)
+        );
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 8_192, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-        assert_eq!(codec.decode(bytes, &mut NativeReadContextV1::protected(&mut budget)).is_ok(), codec.accepts(bytes));
+        assert_eq!(
+            codec
+                .decode(bytes, &mut NativeReadContextV1::protected(&mut budget))
+                .is_ok(),
+            codec.accepts(bytes)
+        );
         assert!(budget.check_time().is_ok());
         Ok(())
     }
@@ -130,7 +146,9 @@ mod tests {
         for bytes in [local.to_canonical_cbor(), imported.to_canonical_cbor()] {
             for codec in [Codec::Local, Codec::Imported] {
                 assert_parity(codec, &bytes)?;
-                for end in 0..bytes.len() { assert_parity(codec, &bytes[..end])?; }
+                for end in 0..bytes.len() {
+                    assert_parity(codec, &bytes[..end])?;
+                }
                 for index in 0..bytes.len() {
                     for replacement in [0, 255] {
                         let mut changed = bytes.clone();
@@ -157,7 +175,11 @@ mod tests {
         let owner = local.input().creator.as_str().len();
         for (codec, bytes, expected) in [
             (Codec::Local, local_bytes.clone(), owner + local_bytes.len()),
-            (Codec::Imported, imported_bytes.clone(), owner + local_bytes.len() * 2),
+            (
+                Codec::Imported,
+                imported_bytes.clone(),
+                owner + local_bytes.len() * 2,
+            ),
         ] {
             for limit in 1..=expected {
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
@@ -178,10 +200,15 @@ mod tests {
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, 1, owner, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-        assert_eq!(NativeReadContextV1::protected(&mut budget).local_admission_record(&imported_bytes),
-            Err(Error::PublicationConflict));
+        assert_eq!(
+            NativeReadContextV1::protected(&mut budget).local_admission_record(&imported_bytes),
+            Err(Error::PublicationConflict)
+        );
         assert_eq!(budget.remaining_native_bytes(), 0);
-        assert!(budget.check_time().is_ok(), "native origin rejection is not a fictitious equality debit");
+        assert!(
+            budget.check_time().is_ok(),
+            "native origin rejection is not a fictitious equality debit"
+        );
         Ok(())
     }
 }

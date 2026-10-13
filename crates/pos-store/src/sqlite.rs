@@ -147,6 +147,7 @@ mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
 mod fork_replay;
 mod fork_replay_admission;
+mod fork_replay_classifier;
 mod fork_replay_publication;
 mod local_cut_owner;
 mod pipeline_admission;
@@ -1666,8 +1667,12 @@ impl SqliteStore {
         from_logical_seq: u64,
         validator: AuthorityValidatorV1,
     ) -> Result<ForkEventSuffixV1, ForkEventAuthorityErrorV1> {
-        self.read_fork_event_suffix_in_transaction_with_context(child_timeline_id, from_logical_seq,
-            validator, &mut crate::fork_replay::NativeReadContextV1::ordinary())
+        self.read_fork_event_suffix_in_transaction_with_context(
+            child_timeline_id,
+            from_logical_seq,
+            validator,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
     }
 
     fn read_fork_event_suffix_in_transaction_with_context(
@@ -1677,12 +1682,18 @@ impl SqliteStore {
         validator: AuthorityValidatorV1,
         context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
     ) -> Result<ForkEventSuffixV1, ForkEventAuthorityErrorV1> {
-        context.check().map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+        context
+            .check()
+            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
         let prefix = read_origin_prefix(&self.conn, child_timeline_id)
             .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        context.check().map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+        context
+            .check()
+            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
         let rows = sqlite_fork_suffix_rows(&self.conn, child_timeline_id)?;
-        context.check().map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+        context
+            .check()
+            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
         // The immutable authority graph is validated once; its error is
         // surfaced only when the child actually has classified Events.
         let graph = sqlite_validated_graph(
@@ -1694,7 +1705,9 @@ impl SqliteStore {
         );
         let mut result = Vec::new();
         for row in rows {
-            context.check().map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+            context
+                .check()
+                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
             let (event_id, logical_seq, operation) = sqlite_decode_fork_suffix_row(prefix, row)
                 .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
             let graph = graph.as_ref().map_err(|error| *error)?;
@@ -1716,9 +1729,14 @@ impl SqliteStore {
                 graph.admission.origin(),
             )?;
             result.push((origin, intervention, operation));
-            context.check().map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+            context
+                .check()
+                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
         }
-        context.check().map(|()| result).map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+        context
+            .check()
+            .map(|()| result)
+            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
     }
 
     fn persist_fork_classifier_registration(
@@ -12349,28 +12367,6 @@ pub(crate) fn sqlite_fork_classifier_source(
     })
 }
 
-/// Read and strictly decode the one durable FCT1 selected for a child Fork.
-pub(crate) fn sqlite_fork_classifier_table(
-    conn: &Connection,
-    child_id: TimelineId,
-) -> Result<Option<ForkClassifierTableV1>, CoreError> {
-    conn.query_row(
-        "SELECT fct1_cbor FROM fork_classifier_tables WHERE child_id = ?1",
-        params![child_id.to_string()],
-        |row| row.get::<_, Vec<u8>>(0),
-    )
-    .optional()
-    .map_err(SqliteStore::into_storage_error)
-    .and_then(|bytes| {
-        bytes
-            .map(|bytes| {
-                ForkClassifierTableV1::from_canonical_cbor(&bytes)
-                    .map_err(|_| CoreError::Storage("invalid persisted FCT1".to_owned()))
-            })
-            .transpose()
-    })
-}
-
 /// Read and strictly decode the FCR1 retained for one registration operation.
 pub(crate) fn sqlite_fork_classifier_registration(
     conn: &Connection,
@@ -12646,8 +12642,11 @@ impl SqliteStore {
         child_timeline_id: TimelineId,
         validator: AuthorityValidatorV1,
     ) -> PublicationSourceResultV1<ValidatedAdmissionV1> {
-        self.fork_publication_admission_with_context(child_timeline_id, validator,
-            &mut crate::fork_replay::NativeReadContextV1::ordinary())
+        self.fork_publication_admission_with_context(
+            child_timeline_id,
+            validator,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
     }
 
     fn fork_publication_admission_with_context(
@@ -12673,8 +12672,12 @@ impl SqliteStore {
         parent_logical_head: PublicationSourceResultV1<u64>,
         validator: AuthorityValidatorV1,
     ) -> PublicationSourceResultV1<PublicationSuffixV1> {
-        self.fork_publication_suffix_with_context(child_timeline_id, parent_logical_head, validator,
-            &mut crate::fork_replay::NativeReadContextV1::ordinary())
+        self.fork_publication_suffix_with_context(
+            child_timeline_id,
+            parent_logical_head,
+            validator,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
     }
 
     fn fork_publication_suffix_with_context(
@@ -12889,7 +12892,8 @@ impl SqliteStore {
             context,
         )
         .and_then(|rows| {
-            let admission = self.fork_publication_admission_with_context(child_timeline_id, validator, context);
+            let admission =
+                self.fork_publication_admission_with_context(child_timeline_id, validator, context);
             context.check()?;
             let retained = sqlite_retained_key_evidence(&self.conn, &admission, context);
             context.check()?;
@@ -12995,8 +12999,12 @@ fn sqlite_local_fork_admission(
     hasher: &dyn Hasher,
     child_timeline_id: TimelineId,
 ) -> Result<ForkAdmissionRecordV1, ForkEventAuthorityErrorV1> {
-    sqlite_local_fork_admission_with_context(conn, hasher, child_timeline_id,
-        &mut crate::fork_replay::NativeReadContextV1::ordinary())
+    sqlite_local_fork_admission_with_context(
+        conn,
+        hasher,
+        child_timeline_id,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+    )
 }
 
 fn sqlite_local_fork_admission_with_context(
@@ -13005,13 +13013,20 @@ fn sqlite_local_fork_admission_with_context(
     child_timeline_id: TimelineId,
     context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
 ) -> Result<ForkAdmissionRecordV1, ForkEventAuthorityErrorV1> {
-    context.bytes(ulid::ULID_LEN).map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+    context
+        .bytes(ulid::ULID_LEN)
+        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
     let key = child_timeline_id.to_string();
-    fork_replay_admission::admission_blob_with_context(conn,
-        fork_replay_admission::AdmissionRowV1::Fork, &key, context)
+    fork_replay_admission::admission_blob_with_context(
+        conn,
+        fork_replay_admission::AdmissionRowV1::Fork,
+        &key,
+        context,
+    )
     .and_then(|bytes| bytes.ok_or(ForkEventAuthorityErrorV1::CorruptAuthority))
     .and_then(|bytes| {
-        context.local_admission_record(&bytes)
+        context
+            .local_admission_record(&bytes)
             .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
     })
     .and_then(|admission| {
@@ -13023,13 +13038,16 @@ fn sqlite_local_fork_admission_with_context(
     .and_then(|admission| {
         // A missing or unreadable FCC1 row and a receipt naming another FAR1
         // are all corrupt authority.
-        context.canonical(admission.canonical_cbor_len())
+        context
+            .canonical(admission.canonical_cbor_len())
             .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
         let expected = ForkAdmissionOperationResultV1::Fork(ForkAdmissionReceiptV1 {
             child_id: child_timeline_id,
             admission_digest: admission.digest(),
         });
-        context.check().map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+        context
+            .check()
+            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
         let accepted = sqlite_fork_admission_operation(
             conn,
             ForkAdmissionOperationKindV1::Fork,
@@ -13041,7 +13059,9 @@ fn sqlite_local_fork_admission_with_context(
         .filter(|result| *result == expected)
         .map(|_| admission)
         .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority);
-        context.check().map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+        context
+            .check()
+            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
         accepted
     })
 }
@@ -13229,8 +13249,12 @@ fn sqlite_classified_authority_graph(
     ),
     ForkEventAuthorityErrorV1,
 > {
-    sqlite_classified_authority_graph_with_context(conn, hasher, child_id,
-        &mut crate::fork_replay::NativeReadContextV1::ordinary())
+    sqlite_classified_authority_graph_with_context(
+        conn,
+        hasher,
+        child_id,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+    )
 }
 
 fn sqlite_classified_authority_graph_with_context(
@@ -13238,47 +13262,56 @@ fn sqlite_classified_authority_graph_with_context(
     hasher: &dyn Hasher,
     child_id: TimelineId,
     context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
-) -> Result<(ForkAdmissionRecordV1, ForkClassifierTableV1, ForkClassifierRegistrationV1), ForkEventAuthorityErrorV1> {
+) -> Result<
+    (
+        ForkAdmissionRecordV1,
+        ForkClassifierTableV1,
+        ForkClassifierRegistrationV1,
+    ),
+    ForkEventAuthorityErrorV1,
+> {
+    use fork_replay_classifier::{classifier_registration_with_context, classifier_source_with_context,
+        classifier_table_with_context, ClassifierKeyV1};
+    use ForkEventAuthorityErrorV1::CorruptAuthority;
     let admission = sqlite_local_fork_admission_with_context(conn, hasher, child_id, context)?;
-    context.check().map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-    let table = sqlite_fork_classifier_table(conn, child_id)
-        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?
-        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-    let registration_bytes = conn
-        .query_row(
-            FORK_CLASSIFIER_REGISTRATION_SQL,
-            params![child_id.to_string()],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
-        .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-    let registration = ForkClassifierRegistrationV1::from_canonical_cbor(&registration_bytes)
+    context.check().map_err(|_| CorruptAuthority)?;
+    let table = classifier_table_with_context(conn, child_id, context)?;
+    let registration = classifier_registration_with_context(conn, child_id, context)?;
+    let source = classifier_source_with_context(conn,
+        ClassifierKeyV1::LocalSource {
+            descriptor: table.input().room_revision_descriptor_hash,
+            registrar: &table.input().registrar_identifier,
+        }, context)?;
+    context.canonical(admission.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+    let admission_digest = admission.digest();
+    context.check().map_err(|_| CorruptAuthority)?;
+    if table.input().fork_admission_digest != admission_digest
+        || table.input().room_revision_descriptor_hash != admission.input().room_revision_descriptor_hash
+        || source.input().room_revision_descriptor_hash != table.input().room_revision_descriptor_hash
+        || source.input().registrar_identifier != table.input().registrar_identifier {
+        return Err(CorruptAuthority);
+    }
+    context.canonical(source.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+    let source_digest = source.digest();
+    context.check().map_err(|_| CorruptAuthority)?;
+    if table.input().source_configuration_revision_digest != source_digest
+        || table.input().routes != source.input().routes
+        || registration.input().child_timeline_id != child_id { return Err(CorruptAuthority); }
+    context.canonical(admission.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+    let repeated_admission_digest = admission.digest();
+    context.check().map_err(|_| CorruptAuthority)?;
+    if registration.input().fork_admission_digest != repeated_admission_digest
+        || registration.input().room_revision_descriptor_hash != admission.input().room_revision_descriptor_hash {
+        return Err(CorruptAuthority);
+    }
+    context.canonical(table.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+    let table_digest = table.digest();
+    context.check().map_err(|_| CorruptAuthority)?;
+    let result = (registration.input().classifier_revision_digest == table_digest)
+        .then_some((admission, table, registration)).ok_or(CorruptAuthority);
+    context
+        .check()
         .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-    let source = sqlite_fork_classifier_source(
-        conn,
-        table.input().room_revision_descriptor_hash,
-        &table.input().registrar_identifier,
-    )
-    .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?
-    .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
-    let result = (table.input().fork_admission_digest == admission.digest()
-        && table.input().room_revision_descriptor_hash
-            == admission.input().room_revision_descriptor_hash
-        && source.input().room_revision_descriptor_hash
-            == table.input().room_revision_descriptor_hash
-        && source.input().registrar_identifier == table.input().registrar_identifier
-        && table.input().source_configuration_revision_digest == source.digest()
-        && table.input().routes == source.input().routes
-        && registration.input().child_timeline_id == child_id
-        && registration.input().fork_admission_digest == admission.digest()
-        && registration.input().room_revision_descriptor_hash
-            == admission.input().room_revision_descriptor_hash
-        && registration.input().classifier_revision_digest == table.digest())
-    .then_some((admission, table, registration))
-    .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority);
-    context.check().map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
     result
 }
 
@@ -14696,7 +14729,8 @@ mod tests {
         let operation_id = Hash::from_bytes([2; 32]);
         let event_id = EventId::new();
         assert!(sqlite_fork_classifier_source(&conn, descriptor_hash, "registrar").is_err());
-        assert!(sqlite_fork_classifier_table(&conn, child_id).is_err());
+        assert!(fork_replay_classifier::classifier_table_with_context(&conn, child_id,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary()).is_err());
         assert!(sqlite_fork_classifier_registration(&conn, operation_id).is_err());
         assert!(sqlite_event_origin(&conn, event_id).is_err());
         assert!(sqlite_intervention_admission(&conn, event_id).is_err());
@@ -14736,7 +14770,8 @@ mod tests {
         )?;
 
         assert!(sqlite_fork_classifier_source(&conn, descriptor_hash, "registrar").is_err());
-        assert!(sqlite_fork_classifier_table(&conn, child_id).is_err());
+        assert!(fork_replay_classifier::classifier_table_with_context(&conn, child_id,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary()).is_err());
         assert!(sqlite_fork_classifier_registration(&conn, operation_id).is_err());
         assert!(sqlite_event_origin(&conn, event_id).is_err());
         assert!(sqlite_intervention_admission(&conn, event_id).is_err());
