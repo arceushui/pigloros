@@ -5,7 +5,7 @@
 //! exact #202 Event, and `FTI1` projects the exact #202 `TimelineExport`
 //! metadata. None of these values is creator or publication authority.
 
-use crate::canonical_length::{CanonicalEmit, CanonicalSink};
+use crate::crypto::{CanonicalEmit, CanonicalSink};
 
 use super::{
     array, authority_wire, bytes, canonical, hash, text, timeline, uint,
@@ -140,7 +140,7 @@ impl ImportedKeyRecordV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     /// Decode exact canonical `IKR1` bytes.
@@ -251,7 +251,7 @@ impl ImportedKeyTombstoneV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     /// Decode exact canonical `IKT1` bytes.

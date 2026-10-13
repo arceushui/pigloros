@@ -3,7 +3,7 @@
 //! Both are exact portable values only. Neither installs, pins, or advances
 //! local issuer trust; the operator-pinned policy floor is a separate seam.
 
-use crate::canonical_length::{CanonicalEmit, CanonicalSink};
+use crate::crypto::{CanonicalEmit, CanonicalSink};
 
 use std::collections::BTreeSet;
 
@@ -91,7 +91,7 @@ impl ForkAttributionIssuerV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     /// Decode exact canonical `FAI1` bytes.
