@@ -14,7 +14,6 @@ use serde_json::{json, Value as Json};
 
 use crate::hex;
 use crate::payload::SubCaseV1;
-use crate::schema_digests::placeholder_schema;
 use crate::{PiecesV1, SubCaseRecordV1, SubCaseRunnerV1, SCHEMA_ID};
 
 pub type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -34,6 +33,31 @@ pub fn artifact(bytes: Vec<u8>) -> AttemptArtifact {
     AttemptArtifact {
         digest: digest(&bytes),
         bytes,
+    }
+}
+
+/// The checked-in schema member `name` of the Plugin provider.
+macro_rules! schema {
+    ($name:literal) => {
+        include_bytes!(concat!(
+            "../../../fixtures/conformance/providers/plugin-conformance/schemas/",
+            $name,
+            ".schema.json"
+        ))
+    };
+}
+
+/// The checked-in schema member of `family`: the bytes whose digest `schema_digests` pins.
+#[must_use]
+pub const fn schema_member(family: FixtureFamily) -> &'static [u8] {
+    match family {
+        FixtureFamily::Positive => schema!("positive"),
+        FixtureFamily::Denied => schema!("denied"),
+        FixtureFamily::Malformed => schema!("malformed"),
+        FixtureFamily::ResourceExhaustion => schema!("resource-exhaustion"),
+        FixtureFamily::DeletionRedaction => schema!("deletion-redaction"),
+        FixtureFamily::Downgrade => schema!("downgrade"),
+        FixtureFamily::IndependentEvaluation => schema!("independent-evaluation"),
     }
 }
 
@@ -86,7 +110,7 @@ pub fn attempt(
         family,
         mode,
         fixture_digest: [9; 32],
-        schema: artifact(placeholder_schema(family).to_vec()),
+        schema: artifact(schema_member(family).to_vec()),
         payload: artifact(payload),
         auxiliary: auxiliary.into_iter().map(artifact).collect(),
         budget: DeterministicBudget {

@@ -5,7 +5,6 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use pos_plugin_conformance_adapter::schema_digests::placeholder_schema;
 use pos_reference::adapter_transport::{read_observation, write_attempt};
 use pos_reference::evaluator::{
     AttemptArtifact, AttemptTransportCaps, CaseAttempt, ResourceUsage, SubjectResult,
@@ -16,6 +15,10 @@ use pos_reference::profile::DeterministicBudget;
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_pos-plugin-conformance-adapter");
+/// The checked-in schema member of the positive family.
+const POSITIVE_SCHEMA: &[u8] = include_bytes!(
+    "../../../fixtures/conformance/providers/plugin-conformance/schemas/positive.schema.json"
+);
 
 fn artifact(bytes: &[u8]) -> AttemptArtifact {
     AttemptArtifact {
@@ -33,7 +36,7 @@ fn foreign_layer_attempt() -> CaseAttempt {
         family,
         mode: ExecutionMode::Local,
         fixture_digest: [9; 32],
-        schema: artifact(placeholder_schema(family)),
+        schema: artifact(POSITIVE_SCHEMA),
         payload: artifact(b"{}"),
         auxiliary: Vec::new(),
         budget: DeterministicBudget {

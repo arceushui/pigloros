@@ -29,11 +29,16 @@ pos-plugin-supervisor = { path = "../../crates/pos-plugin-supervisor", features 
 pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
 
 # The handoff vectors run on the shared signed-release test world (ADR-061 revision 7, #579 and
-# #585).
+# #585). The conformance fixture vectors (ADR-061 revision 8, #617) run the adapter library over
+# the real worker and build their attempts with `pos-reference`'s EAI1 types; the adapter's
+# fixture-instant type is reached only through the library (`check_fixture_instant_confinement.py`).
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+blake3 = { workspace = true }
+pos-plugin-conformance-adapter = { path = "../pos-plugin-conformance-adapter" }
 pos-plugin-publisher = { path = "../../crates/pos-plugin-publisher", features = [
   "test-support",
 ] }
+pos-reference = { path = "../../crates/pos-reference" }
 
 [lints]
 workspace = true

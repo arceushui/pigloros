@@ -33,6 +33,9 @@ python3 "$ROOT/scripts/test_check_asan_ci_policy.py"
 echo "==> PMF1 golden vectors match their independent generator"
 python3 "$ROOT/scripts/generate_pmf1_golden_vectors.py" --check
 
+echo "==> Plugin conformance fixtures match their independent generator"
+python3 "$ROOT/scripts/generate_plugin_conformance_fixtures.py" --check
+
 echo "==> owner-bridge codec vectors match their independent generator"
 python3 "$ROOT/scripts/owner_bridge_vectors.py" --check
 
