@@ -38,18 +38,21 @@ const INDEPENDENT_EVALUATION: [u8; 32] = [
     0x12, 0x1c, 0x28, 0xff, 0x7c, 0x90, 0x1c, 0x41, 0x9d, 0xda, 0xc4, 0xab, 0x82, 0x3a, 0xda, 0xff,
 ];
 
+/// The pinned digests, in the wire order of `FixtureFamily`.
+const PINNED: [[u8; 32]; 7] = [
+    POSITIVE,
+    DENIED,
+    MALFORMED,
+    RESOURCE_EXHAUSTION,
+    DELETION_REDACTION,
+    DOWNGRADE,
+    INDEPENDENT_EVALUATION,
+];
+
 /// The pinned digest of the schema member of `family`.
 #[must_use]
-pub const fn pinned_digest(family: FixtureFamily) -> [u8; 32] {
-    match family {
-        FixtureFamily::Positive => POSITIVE,
-        FixtureFamily::Denied => DENIED,
-        FixtureFamily::Malformed => MALFORMED,
-        FixtureFamily::ResourceExhaustion => RESOURCE_EXHAUSTION,
-        FixtureFamily::DeletionRedaction => DELETION_REDACTION,
-        FixtureFamily::Downgrade => DOWNGRADE,
-        FixtureFamily::IndependentEvaluation => INDEPENDENT_EVALUATION,
-    }
+pub fn pinned_digest(family: FixtureFamily) -> [u8; 32] {
+    PINNED[usize::from(family.code())]
 }
 
 #[cfg(test)]

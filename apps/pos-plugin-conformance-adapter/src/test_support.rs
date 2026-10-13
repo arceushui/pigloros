@@ -47,18 +47,21 @@ macro_rules! schema {
     };
 }
 
+/// The checked-in schema members, in the wire order of `FixtureFamily`.
+const SCHEMA_MEMBERS: [&[u8]; 7] = [
+    schema!("positive"),
+    schema!("denied"),
+    schema!("malformed"),
+    schema!("resource-exhaustion"),
+    schema!("deletion-redaction"),
+    schema!("downgrade"),
+    schema!("independent-evaluation"),
+];
+
 /// The checked-in schema member of `family`: the bytes whose digest `schema_digests` pins.
 #[must_use]
-pub const fn schema_member(family: FixtureFamily) -> &'static [u8] {
-    match family {
-        FixtureFamily::Positive => schema!("positive"),
-        FixtureFamily::Denied => schema!("denied"),
-        FixtureFamily::Malformed => schema!("malformed"),
-        FixtureFamily::ResourceExhaustion => schema!("resource-exhaustion"),
-        FixtureFamily::DeletionRedaction => schema!("deletion-redaction"),
-        FixtureFamily::Downgrade => schema!("downgrade"),
-        FixtureFamily::IndependentEvaluation => schema!("independent-evaluation"),
-    }
+pub fn schema_member(family: FixtureFamily) -> &'static [u8] {
+    SCHEMA_MEMBERS[usize::from(family.code())]
 }
 
 /// The canonical `PCW2` composite of `entries`, in the given order.
