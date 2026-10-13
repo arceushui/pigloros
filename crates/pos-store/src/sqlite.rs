@@ -12937,7 +12937,7 @@ impl SqliteStore {
         child_timeline_id: TimelineId,
         final_logical_head: u64,
         validator: AuthorityValidatorV1,
-    ) -> Result<CommittedPublicationRowsV1, ForkManifestPublicationErrorV1> {
+    ) -> Result<CommittedPublicationRowsV1<'static>, ForkManifestPublicationErrorV1> {
         self.fork_publication_binding(child_timeline_id, final_logical_head)
             .and_then(|binding| binding.ok_or(ForkManifestPublicationErrorV1::PublicationMissing))
             .and_then(|binding| {
@@ -12959,7 +12959,7 @@ impl SqliteStore {
                         binding,
                         operation,
                         origin,
-                        artifact,
+                        artifact: std::borrow::Cow::Owned(artifact),
                     }
                 })
             })

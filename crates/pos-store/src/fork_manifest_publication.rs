@@ -4,6 +4,8 @@
 //! provenance and the immutable `FPO1`/`FPB1`/`FPA1` sidecar graph.  It never
 //! accepts manifest bytes or provenance fields from a caller.
 
+use std::borrow::Cow;
+
 use pos_core::{
     CoreError, EventOriginRecordV1, ForkAppendOperationV1, ForkAttributionOriginV1,
     ForkInterventionAdmissionV1, ForkPublicationArtifactInputV1, ForkPublicationArtifactV1,
@@ -355,14 +357,14 @@ pub(crate) struct PublicationGraphV1 {
 }
 
 /// Committed rows an adapter joined for one Fork/head lookup key.
-pub(crate) struct CommittedPublicationRowsV1 {
+pub(crate) struct CommittedPublicationRowsV1<'artifact> {
     pub(crate) child_timeline_id: TimelineId,
     pub(crate) final_logical_head: u64,
     pub(crate) binding: ForkPublicationBindingV1,
     pub(crate) operation: ForkPublicationOperationV1,
     /// The authority origin the stored `FPO1` carries.
     pub(crate) origin: ValidatedOriginV1,
-    pub(crate) artifact: ForkPublicationArtifactV1,
+    pub(crate) artifact: Cow<'artifact, ForkPublicationArtifactV1>,
 }
 
 /// Trusted sources an adapter read under the same snapshot as the rows.
@@ -661,7 +663,7 @@ fn publication_graph(
 /// must equal the durable classified intervention rows at or below the
 /// published head.
 pub(crate) fn trusted_committed_manifest_with_context(
-    rows: &CommittedPublicationRowsV1,
+    rows: &CommittedPublicationRowsV1<'_>,
     sources: CommittedPublicationSourcesV1<'_>,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> PublicationResultV1<CommittedForkManifestV1> {
@@ -719,7 +721,7 @@ fn bounded_intervention_sequences(
 /// ADR-105 r6 R6.9: the stored `FPO1` carries the same authority origin as
 /// the `FAR1` that validated, before the shared trusted read runs.
 fn verified_committed_origin(
-    rows: &CommittedPublicationRowsV1,
+    rows: &CommittedPublicationRowsV1<'_>,
     trusted: &TrustedPublicationSourcesV1<'_>,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> PublicationResultV1<CommittedForkManifestV1> {
@@ -774,7 +776,7 @@ fn decode_publication_operation(bytes: &[u8]) -> DecodedPublicationOperationV1 {
 }
 
 fn verified_committed_manifest(
-    rows: &CommittedPublicationRowsV1,
+    rows: &CommittedPublicationRowsV1<'_>,
     trusted: &TrustedPublicationSourcesV1<'_>,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> PublicationResultV1<CommittedForkManifestV1> {
@@ -817,7 +819,7 @@ fn verified_committed_manifest(
 
 /// Enforce every cross-record and FPO1 source-table equality.
 fn committed_graph_is_consistent(
-    rows: &CommittedPublicationRowsV1,
+    rows: &CommittedPublicationRowsV1<'_>,
     trusted: &TrustedPublicationSourcesV1<'_>,
     signed: &SignedForkReproManifestV1,
     record_id: Hash,
