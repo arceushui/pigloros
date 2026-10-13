@@ -1,4 +1,4 @@
-//! Allocation gates for existing local POB1 and local/code-2 FAR1 decoders.
+//! Allocation gates for existing FAH1, local POB1 and local/code-2 FAR1 decoders.
 //!
 //! Borrowed carriers identify only bounded allocation units; Core remains
 //! the sole validator of native fields, origin, semantics and canonical bytes.
@@ -19,6 +19,27 @@ const TEXT_MAJOR: u8 = 3;
 const OWNER_MAX_BYTES: usize = 128;
 
 impl NativeReadContextV1<'_, '_> {
+    pub(crate) fn host_record(&mut self, bytes: &[u8]) -> Result<pos_core::ForkAdmissionHostRecordV1> {
+        const PREFIX: [u8; 7] = [0x85, 0x64, b'F', b'A', b'H', b'1', 0x01];
+        const HASH_HEAD: [u8; 2] = [0x58, 0x20];
+        self.check().and_then(|()| {
+            // Only this exact transport reaches Core's allocation-free FAH1
+            // path. Core still validates all three native nonzero fields.
+            if self.is_protected()
+                && (bytes.len() != pos_core::MAX_FORK_ADMISSION_HOST_RECORD_BYTES_V1
+                    || bytes[..PREFIX.len()] != PREFIX
+                    || [7, 41, 75]
+                        .iter()
+                        .any(|offset| bytes[*offset..*offset + HASH_HEAD.len()] != HASH_HEAD))
+            {
+                return Err(Error::PublicationConflict);
+            }
+            let host = pos_core::ForkAdmissionHostRecordV1::from_canonical_cbor(bytes)
+                .map_err(|_| Error::PublicationConflict);
+            self.check().and(host)
+        })
+    }
+
     pub(crate) fn local_principal_binding(
         &mut self,
         bytes: &[u8],
