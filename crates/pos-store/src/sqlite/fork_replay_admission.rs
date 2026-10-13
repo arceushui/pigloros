@@ -51,12 +51,12 @@ pub(super) fn recovery_admission_blob_with_context(
     child_key: &str,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> std::result::Result<Option<Vec<u8>>, pos_core::ForkAdmissionErrorV1> {
-    selected_admission_blob(conn, AdmissionRowV1::Fork, child_key, context).map_err(
-        |error| match error {
+    selected_admission_blob(conn, AdmissionRowV1::Fork, child_key, context).map_err(|error| {
+        match error {
             BlobErrorV1::Corrupt => pos_core::ForkAdmissionErrorV1::CorruptAuthority,
             BlobErrorV1::Storage => pos_core::ForkAdmissionErrorV1::StorageIndeterminate,
-        },
-    )
+        }
+    })
 }
 
 fn selected_admission_blob(
@@ -91,10 +91,7 @@ fn selected_admission_blob(
     let bytes = conn
         .query_row(fetch, params![child_key], |row| row.get::<_, Vec<u8>>(0))
         .map_err(|_| Storage)?;
-    context
-        .check()
-        .map(|()| Some(bytes))
-        .map_err(|_| Corrupt)
+    context.check().map(|()| Some(bytes)).map_err(|_| Corrupt)
 }
 
 /// Independent test oracle: byte encoders and logical field lengths only.
@@ -227,11 +224,17 @@ mod tests {
                 RecoveryError::StorageIndeterminate,
             ),
             (
-                rusqlite::types::Value::Blob(vec![0; pos_core::MAX_FORK_ADMISSION_RECORD_BYTES_V1 + 1]),
+                rusqlite::types::Value::Blob(vec![
+                    0;
+                    pos_core::MAX_FORK_ADMISSION_RECORD_BYTES_V1 + 1
+                ]),
                 RecoveryError::CorruptAuthority,
             ),
         ] {
-            assert_eq!(conn.execute("UPDATE fork_admissions SET far1_cbor = ?1", [value])?, 1);
+            assert_eq!(
+                conn.execute("UPDATE fork_admissions SET far1_cbor = ?1", [value])?,
+                1
+            );
             let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
             let start = clock.mark();
             let limits = ForkReplayReadLimitsV1::new(1, 1, 2, 64, 1_000_000)?;
