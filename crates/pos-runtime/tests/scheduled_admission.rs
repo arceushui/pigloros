@@ -1096,8 +1096,10 @@ fn protected_pass_binds_its_authorized_snapshot_and_rechecks_consent() {
     let revoked = err(host.admit(&mut registry, &mut store, 2));
     assert!(matches!(revoked, RuntimeError::Consent(_)), "{revoked}");
     assert_eq!(committed_events(&store, host.timeline).len(), 3);
-    assert_eq!(count(&log, ":commit"), 2);
-    assert_eq!(count(&log, ":abort"), 2);
+    // One commit (the first pass); the rebuilt pass, the changed snapshot and
+    // the revoked consent each abort their staged Driver.
+    assert_eq!(count(&log, ":commit"), 1);
+    assert_eq!(count(&log, ":abort"), 3);
 }
 
 #[test]
