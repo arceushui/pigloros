@@ -3,9 +3,9 @@
 
 use pos_core::trusted_clock::ScriptedTrustedWallSourceV1;
 use pos_plugin_publisher::test_support::{
-    encoding::TICK,
+    encoding::{Material, TICK},
     release::{pmf1_digest, Shape, COMPONENT_BYTES},
-    world::World,
+    world::{Snapshot, World},
     BoxResult,
 };
 
@@ -34,25 +34,40 @@ impl Rig {
 
     /// The first release installed at the evidence second `UTC + offset`.
     fn installed_at_offset(offset: i64) -> BoxResult<Self> {
-        let mut world = World::new()?;
-        world.spec.utc_offset = offset;
-        let published = world.publish(Shape::first())?;
-        world.install(published.address(), 1)??;
-        let current = world.material()?;
-        let material = FixedTrustMaterialSourceV1::new(CommunityPluginTrustMaterialV1::new(
-            world.anchor.clone(),
-            current.root_anchor().clone(),
-            current.tps1.clone(),
-            vec![current.ptr1().to_vec()],
-            current.prv1_records().to_vec(),
-        ));
+        let (world, address, release) = installed_world(offset)?;
+        let material = trust_material(&world, &world.material()?);
         Ok(Self {
-            address: published.address().clone(),
-            release: published.release_digest(),
+            address,
+            release,
             world,
             material,
         })
     }
+}
+
+/// A world whose first release is published and installed at the evidence second
+/// `UTC + offset`, with the address and release digest of that release.
+fn installed_world(offset: i64) -> BoxResult<(World, BundleAddressV1, [u8; 32])> {
+    let mut world = World::new()?;
+    world.spec.utc_offset = offset;
+    let published = world.publish(Shape::first())?;
+    world.install(published.address(), 1)??;
+    Ok((
+        world,
+        published.address().clone(),
+        published.release_digest(),
+    ))
+}
+
+/// The material source of the evidence `current` of `world`.
+fn trust_material(world: &World, current: &Material) -> FixedTrustMaterialSourceV1 {
+    FixedTrustMaterialSourceV1::new(CommunityPluginTrustMaterialV1::new(
+        world.anchor.clone(),
+        current.root_anchor().clone(),
+        current.tps1.clone(),
+        vec![current.ptr1().to_vec()],
+        current.prv1_records().to_vec(),
+    ))
 }
 
 fn expectation() -> CommunityPluginExpectationV1 {
@@ -82,6 +97,12 @@ fn gate_at_second(
         &mut wall,
         TICK,
     )
+}
+
+/// Everything observable about the registry and the activation Timeline of the rig.
+fn snapshot_of(rig: &Rig) -> BoxResult<Snapshot> {
+    let bundle = rig.world.store.read_verified(&rig.address)?;
+    rig.world.snapshot(&[pmf1_digest(&bundle)])
 }
 
 #[test]
@@ -120,12 +141,10 @@ fn the_gated_second_is_the_sampled_one() -> TestResult {
 #[test]
 fn gating_for_a_driver_writes_nothing_to_the_registry() -> TestResult {
     let rig = Rig::new()?;
-    let bundle = rig.world.store.read_verified(&rig.address)?;
-    let digests = [pmf1_digest(&bundle)];
-    let before = rig.world.snapshot(&digests)?;
+    let before = snapshot_of(&rig)?;
     gate_at_second(&rig, 50)?;
     gate_at_second(&rig, 55)?;
-    assert_eq!(rig.world.snapshot(&digests)?, before);
+    assert_eq!(snapshot_of(&rig)?, before);
     Ok(())
 }
 

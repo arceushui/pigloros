@@ -8,7 +8,7 @@ use pos_plugin_publisher::test_support::{
     world::{activation, wall, World},
     BoxResult,
 };
-use pos_plugin_release::ReleaseSourceV1;
+use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
 use pos_store::plugin_trust_registry::TrustedUtcSecondV1;
 
 use super::*;
@@ -78,17 +78,20 @@ fn provision_and_read(
     }))
 }
 
-/// Install the first release through the facade and gate it through the facade.
-fn install_and_gate(
+/// The activation Timeline of a host.
+fn activation_timeline(host_under_test: &mut ErasureExecutionHostV1) -> BoxResult<TimelineId> {
+    let mut sender = host(host_under_test.command_sender())?;
+    Ok(host(sender.create_timeline("activation"))?.id())
+}
+
+/// Publish the first release and install it through the facade.
+fn install_release(
     host_under_test: &mut ErasureExecutionHostV1,
     world: &mut World,
     material: &Material,
-) -> BoxResult<Observed> {
-    let timeline = host(host_under_test.command_sender())
-        .and_then(|mut sender| host(sender.create_timeline("activation")))?
-        .id();
-    let published = world.publish(Shape::first())?;
-    let address = published.address().clone();
+    timeline: TimelineId,
+) -> BoxResult<BundleAddressV1> {
+    let address = world.publish(Shape::first())?.address().clone();
     let request = CommunityInstallRequestV1 {
         anchor: &world.anchor,
         tps1_bytes: &material.tps1,
@@ -103,19 +106,50 @@ fn install_and_gate(
     host(host_under_test.with_plugin_trust_registry(|registry| {
         install_community_release_v1(store, &address, registry, &mut clock, &request)
     }))??;
+    Ok(address)
+}
+
+/// Whether the installed release is gated through the facade.
+fn gated_through_facade(
+    host_under_test: &mut ErasureExecutionHostV1,
+    world: &World,
+    material: &Material,
+    address: &BundleAddressV1,
+) -> BoxResult<bool> {
     let source = trust_material(world, material);
     let mut clock = wall(material.utc)?;
+    let store = &world.store;
     let gated = host(host_under_test.with_plugin_trust_registry(|registry| {
         let registry = &*registry;
         let expected = expectation();
         gate_for_driver(
-            registry, &expected, store, &address, &source, &mut clock, TICK,
+            registry, &expected, store, address, &source, &mut clock, TICK,
         )
     }))?;
-    let bundle = store.read_verified(&address)?;
-    let digest = pmf1_digest(&bundle);
+    Ok(gated.is_ok())
+}
+
+/// The PMF1 digest, the projection and the trusted second of the installed release.
+fn release_inputs(
+    world: &World,
+    material: &Material,
+    address: &BundleAddressV1,
+) -> BoxResult<([u8; 32], ValidatedPluginManifestProjectionV1, TrustedUtcSecondV1)> {
+    let bundle = world.store.read_verified(address)?;
     let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
     let utc = TrustedUtcSecondV1::from_source(&mut wall(material.utc)?)?;
+    Ok((pmf1_digest(&bundle), projection, utc))
+}
+
+/// Advance, roll back and read the registry through the facade.
+fn advance_and_read(
+    host_under_test: &mut ErasureExecutionHostV1,
+    world: &World,
+    material: &Material,
+    address: &BundleAddressV1,
+    timeline: TimelineId,
+) -> BoxResult<Observed> {
+    let (digest, projection, utc) = release_inputs(world, material, address)?;
     let (anchor, tps1, evidence) = (&world.anchor, &material.tps1, &material.evidence);
     host(host_under_test.with_plugin_trust_registry(|registry| {
         let advanced = registry.advance_policy(anchor, tps1, evidence, utc, TICK);
@@ -131,7 +165,6 @@ fn install_and_gate(
         let decision = registry.retained_release_decision(SCOPE, digest);
         let active = registry.active_release(SCOPE, PLUGIN_ID);
         vec![
-            format!("gated={}", gated.is_ok()),
             format!("decision={}", matches!(decision, Ok(Some(_)))),
             format!("active={}", matches!(active, Ok(Some(_)))),
             format!("ledger={:?}", registry.ledger(SCOPE).map(|rows| rows.len())),
@@ -139,6 +172,26 @@ fn install_and_gate(
             format!("rolled={:?}", rolled.err()),
         ]
     }))
+}
+
+/// Install the first release through the facade and gate it through the facade.
+fn install_and_gate(
+    host_under_test: &mut ErasureExecutionHostV1,
+    world: &mut World,
+    material: &Material,
+) -> BoxResult<Observed> {
+    let timeline = activation_timeline(host_under_test)?;
+    let address = install_release(host_under_test, world, material, timeline)?;
+    let gated = gated_through_facade(host_under_test, world, material, &address)?;
+    let mut seen = vec![format!("gated={gated}")];
+    seen.extend(advance_and_read(
+        host_under_test,
+        world,
+        material,
+        &address,
+        timeline,
+    )?);
+    Ok(seen)
 }
 
 /// Drive the whole registry port through the facade of `host_under_test` over a fresh world.

@@ -159,8 +159,7 @@ struct Rig {
 impl Rig {
     fn new() -> BoxResult<Self> {
         let mut publisher = World::new()?;
-        let current = publisher.material()?;
-        let material = trust_material(&publisher, &current);
+        let material = trust_material(&publisher, &publisher.material()?);
         let address = publisher.publish(Shape::first())?.address().clone();
         let eval = CommunityEvaluationWorldV1::open(&material).map_err(|e| format!("{e:?}"))?;
         Ok(Self {
@@ -183,6 +182,14 @@ impl Rig {
             )
             .map_err(|e| format!("{e:?}"))?;
         Ok(installed.admission().outcome())
+    }
+
+    /// A world with the release installed and gated.
+    fn ready() -> BoxResult<Self> {
+        let mut rig = Self::new()?;
+        rig.install()?;
+        rig.gate().map_err(|e| format!("{e:?}"))?;
+        Ok(rig)
     }
 
     fn member(&self) -> BoxResult<FakeMember> {
@@ -216,18 +223,20 @@ impl Rig {
     }
 }
 
+/// Register the staging Driver of `plugin`.
+fn register_staging(rig: &mut Rig, plugin: PluginId) -> BoxResult<()> {
+    let plugins = rig.eval.plugins_mut();
+    plugins.register_generated(&StagingPlugin(plugin), None, Some(Box::new(StagingDriver)))?;
+    plugins.compose_non_participant_drivers()?;
+    Ok(())
+}
+
 /// A world with the release installed and gated, a Driver that stages one Event per step, and
 /// the host of one member.
 fn staged_world() -> BoxResult<(Rig, CommunityPluginHostV1<FakeMember>)> {
-    let mut rig = Rig::new()?;
-    rig.install()?;
-    rig.gate().map_err(|e| format!("{e:?}"))?;
+    let mut rig = Rig::ready()?;
     let member = rig.member()?;
-    let plugin = StagingPlugin(member.plugin);
-    rig.eval
-        .plugins_mut()
-        .register_generated(&plugin, None, Some(Box::new(StagingDriver)))?;
-    rig.eval.plugins_mut().compose_non_participant_drivers()?;
+    register_staging(&mut rig, member.plugin)?;
     Ok((rig, CommunityPluginHostV1::new(vec![member])))
 }
 
