@@ -1537,39 +1537,7 @@ fn fixtures(
                 Value::Null
             };
             let release_binding = if family == 5 {
-                let admission = release_admission(
-                    signing_key,
-                    &case_id,
-                    execution,
-                    trust,
-                    &provider_key(2),
-                    &provider_key(1),
-                    options.release_mutation,
-                )?;
-                let digest = hash(&admission);
-                if !matches!(
-                    options.release_mutation,
-                    Some(ReleaseMutation::MissingMember)
-                ) {
-                    members.insert(
-                        format!("authority/release-admissions/{case_id}.rad1"),
-                        (admission.clone(), 16),
-                    );
-                }
-                if matches!(options.release_mutation, Some(ReleaseMutation::ExtraMember)) {
-                    members.insert(
-                        "authority/release-admissions/extra.rad1".to_owned(),
-                        (admission, 16),
-                    );
-                }
-                if matches!(
-                    options.release_mutation,
-                    Some(ReleaseMutation::MissingBinding)
-                ) {
-                    Value::Null
-                } else {
-                    bytes(&digest)
-                }
+                release_binding(members, signing_key, &case_id, [execution, trust], options)?
             } else {
                 Value::Null
             };
@@ -1615,6 +1583,49 @@ fn fixtures(
             Ok(array(fixture))
         })
         .collect()
+}
+
+fn release_binding(
+    members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    signing_key: &SigningKey,
+    case_id: &str,
+    [execution, trust]: [[u8; 32]; 2],
+    options: CorpusOptions<'_>,
+) -> TestResult<Value> {
+    let admission = release_admission(
+        signing_key,
+        case_id,
+        execution,
+        trust,
+        &provider_key(2),
+        &provider_key(1),
+        options.release_mutation,
+    )?;
+    let digest = hash(&admission);
+    if !matches!(
+        options.release_mutation,
+        Some(ReleaseMutation::MissingMember)
+    ) {
+        members.insert(
+            format!("authority/release-admissions/{case_id}.rad1"),
+            (admission.clone(), 16),
+        );
+    }
+    if matches!(options.release_mutation, Some(ReleaseMutation::ExtraMember)) {
+        members.insert(
+            "authority/release-admissions/extra.rad1".to_owned(),
+            (admission, 16),
+        );
+    }
+    let unbound = matches!(
+        options.release_mutation,
+        Some(ReleaseMutation::MissingBinding)
+    );
+    Ok(if unbound {
+        Value::Null
+    } else {
+        bytes(&digest)
+    })
 }
 
 fn failure_replay_claim(family: u64, state: Option<u8>) -> u8 {

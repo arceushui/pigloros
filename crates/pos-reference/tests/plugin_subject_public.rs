@@ -36,6 +36,10 @@ const FAILURE_FAMILIES: [(u8, &str); 4] = [
     (5, "incompatible-contract"),
 ];
 
+type ByteMutation = fn(&mut Vec<u8>);
+
+type Mutation = (&'static str, ByteMutation);
+
 const FAMILY_COUNT: u8 = 7;
 
 type Counter = fn(&mut ResourceUsage) -> &mut u64;
@@ -290,7 +294,7 @@ fn faithful_subject_passes_with_output_equal_to_the_oracle_member() -> TestResul
 #[test]
 fn output_that_differs_by_one_byte_fails_and_the_control_passes() -> TestResult {
     let (corpus, records) = plugin_fixtures()?;
-    let mutations: [(&str, fn(&mut Vec<u8>)); 5] = [
+    let mutations: [Mutation; 5] = [
         ("flipped first byte", |bytes| bytes[0] ^= 1),
         ("flipped middle byte", |bytes| {
             let middle = bytes.len() / 2;
