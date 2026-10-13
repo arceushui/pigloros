@@ -608,7 +608,10 @@ fn a_retained_mismatch_clears_retained_ok_and_marks_the_entry() -> TestResult {
     assert!(!record.matched);
     let family = FixtureFamily::DeletionRedaction;
     let observed = String::from_utf8(record_bytes("c", family, &[record]))?;
-    assert!(observed.contains("{\"id\":\"del.1\",\"kind\":\"mismatch\"}"), "{observed}");
+    assert!(
+        observed.contains("{\"id\":\"del.1\",\"kind\":\"mismatch\"}"),
+        "{observed}"
+    );
     Ok(())
 }
 

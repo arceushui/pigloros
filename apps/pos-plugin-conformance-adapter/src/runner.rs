@@ -23,9 +23,8 @@ use pos_runtime::community_pin_v1;
 use pos_runtime::community_plugin_host::{
     pinned_runtime_v1, CommunityEvaluationWorldV1, CommunityPluginCeilingsV1,
     CommunityPluginExecutionProfileV1, CommunityPluginExpectationV1, CommunityPluginHostAbiV1,
-    CommunityPluginHostV1, CommunityPluginModeV1,
-    CommunityPluginTrustMaterialV1, FixedTrustMaterialSourceV1, GatedCommunityReleaseV1,
-    ReleaseIdentityV1, TrustDenialBasisV1,
+    CommunityPluginHostV1, CommunityPluginModeV1, CommunityPluginTrustMaterialV1,
+    FixedTrustMaterialSourceV1, GatedCommunityReleaseV1, ReleaseIdentityV1, TrustDenialBasisV1,
 };
 
 use crate::composite::PiecesV1;
