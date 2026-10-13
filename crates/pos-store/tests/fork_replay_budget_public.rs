@@ -112,6 +112,28 @@ fn elapsed_checks_share_the_original_guard_epoch_and_reject_regression() -> Test
 }
 
 #[test]
+fn clock_regression_after_a_valid_charge_latches_even_above_the_original_epoch() -> TestResult {
+    let mut clock = ScriptedGuardMonotonicSourceV1::new([
+        Duration::ZERO,
+        Duration::from_micros(1),
+        Duration::from_micros(8),
+        Duration::from_micros(4),
+        Duration::from_micros(9),
+    ]);
+    let start = clock.mark();
+    let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 10, 10)?;
+    let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+    budget.charge_bytes(3)?;
+    // Four microseconds is still within the original ten-microsecond TTL,
+    // but it regressed from the previously accepted eight-microsecond mark.
+    assert_eq!(budget.check_time(), Err(Error::BoundsExceeded));
+    assert_eq!(budget.remaining_native_bytes(), 7);
+    assert_eq!(budget.charge_bytes(0), Err(Error::BoundsExceeded));
+    assert_eq!(budget.check_time(), Err(Error::BoundsExceeded));
+    Ok(())
+}
+
+#[test]
 fn required_coordinates_preserve_local_and_imported_origins() -> TestResult {
     let child = TimelineId::new();
     let record = Hash::from_bytes([1; 32]);
