@@ -9,14 +9,15 @@
 //! the strict local decoder rejects it, so only this module decodes code 2.
 
 use pos_core::{
-    ForkClassifierRegistrationV1, ForkClassifierSourceV1, Hasher, ImportedForkAdmissionRecordV1,
-    ImportedForkAttributionAdmissionV1, ImportedForkClassifierGraphV1, TimelineId,
+    ForkClassifierRegistrationV1, ForkClassifierSourceV1, Hasher,
+    ImportedForkClassifierGraphV1, TimelineId,
 };
 use rusqlite::{params, Connection, OptionalExtension, ToSql};
 
 use super::{
-    sqlite_classified_authority_graph, sqlite_fork_classifier_table, sqlite_local_fork_admission,
-    FORK_ADMISSION_FAR1_SQL, FORK_CLASSIFIER_REGISTRATION_SQL,
+    fork_replay_admission::{admission_blob_with_context, AdmissionRowV1},
+    sqlite_classified_authority_graph_with_context, sqlite_fork_classifier_table,
+    sqlite_local_fork_admission_with_context, FORK_CLASSIFIER_REGISTRATION_SQL,
 };
 use crate::{
     fork_event_authority::{
@@ -31,8 +32,6 @@ use crate::{
     ForkEventAuthorityErrorV1 as AuthorityError,
 };
 
-const IMPORT_ADMISSION_SQL: &str =
-    "SELECT ifa1_cbor FROM imported_fork_attribution_admissions WHERE child_id = ?1";
 const IMPORTED_SOURCE_SQL: &str =
     "SELECT fcs1_cbor FROM imported_fork_classifier_sources WHERE fcs1_digest = ?1";
 /// The `IKR1` and `IKT1` of an import, selected through the import admission
@@ -144,13 +143,15 @@ pub(super) fn sqlite_validated_admission(
     hasher: &dyn Hasher,
     child_timeline_id: TimelineId,
     validator: AuthorityValidatorV1,
+    context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<ValidatedAdmissionV1, AuthorityError> {
-    let local = sqlite_local_fork_admission(conn, hasher, child_timeline_id)
-        .map(|admission| ValidatedAdmissionV1::local(&admission));
+    let local = sqlite_local_fork_admission_with_context(conn, hasher, child_timeline_id, context)
+        .and_then(|admission| local_admission_result(&admission, context));
+    context.check().map_err(|_| AuthorityError::CorruptAuthority)?;
     match validator {
         AuthorityValidatorV1::LocalOnly => local,
         AuthorityValidatorV1::CodeTwoAware => {
-            local.or_else(|_| sqlite_imported_admission(conn, child_timeline_id))
+            local.or_else(|_| sqlite_imported_admission(conn, child_timeline_id, context))
         }
     }
 }
@@ -162,19 +163,28 @@ pub(super) fn sqlite_validated_graph(
     hasher: &dyn Hasher,
     child_timeline_id: TimelineId,
     validator: AuthorityValidatorV1,
+    context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<ValidatedGraphV1, AuthorityError> {
-    let local = sqlite_classified_authority_graph(conn, hasher, child_timeline_id).map(
-        |(admission, table, _)| ValidatedGraphV1 {
-            admission: ValidatedAdmissionV1::local(&admission),
-            table,
-        },
-    );
+    let local = sqlite_classified_authority_graph_with_context(conn, hasher, child_timeline_id, context)
+        .and_then(|(admission, table, _)| local_admission_result(&admission, context)
+            .map(|admission| ValidatedGraphV1 { admission, table }));
+    context.check().map_err(|_| AuthorityError::CorruptAuthority)?;
     match validator {
         AuthorityValidatorV1::LocalOnly => local,
         AuthorityValidatorV1::CodeTwoAware => {
-            local.or_else(|_| sqlite_imported_graph(conn, child_timeline_id))
+            local.or_else(|_| sqlite_imported_graph(conn, child_timeline_id, context))
         }
     }
+}
+
+fn local_admission_result(
+    record: &pos_core::ForkAdmissionRecordV1,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> Result<ValidatedAdmissionV1, AuthorityError> {
+    context.canonical(record.canonical_cbor_len()).map_err(|_| AuthorityError::CorruptAuthority)?;
+    context.canonical(record.canonical_cbor_len()).map_err(|_| AuthorityError::CorruptAuthority)?;
+    let accepted = ValidatedAdmissionV1::local(record);
+    context.check().map(|()| accepted).map_err(|_| AuthorityError::CorruptAuthority)
 }
 
 /// One stored blob under one key, if any. A read failure is none, like every
@@ -235,16 +245,26 @@ pub(super) fn sqlite_retained_key_evidence(
 fn sqlite_imported_admission(
     conn: &Connection,
     child_timeline_id: TimelineId,
+    context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<ValidatedAdmissionV1, AuthorityError> {
+    use AuthorityError::CorruptAuthority;
+    context.bytes(ulid::ULID_LEN).map_err(|_| CorruptAuthority)?;
     let key = child_timeline_id.to_string();
-    let admission = stored_blob(conn, FORK_ADMISSION_FAR1_SQL, &key)
-        .and_then(|bytes| ImportedForkAdmissionRecordV1::from_canonical_cbor(&bytes).ok())
-        .ok_or(AuthorityError::CorruptAuthority)?;
-    stored_blob(conn, IMPORT_ADMISSION_SQL, &key)
-        .and_then(|bytes| ImportedForkAttributionAdmissionV1::from_canonical_cbor(&bytes).ok())
-        .filter(|record| imported_admission_matches(&admission, record, child_timeline_id))
-        .map(|record| ValidatedAdmissionV1::imported(&admission, &record))
-        .ok_or(AuthorityError::CorruptAuthority)
+    let bytes = admission_blob_with_context(conn, AdmissionRowV1::Fork, &key, context)?
+        .ok_or(CorruptAuthority)?;
+    let admission = context.imported_admission_record(&bytes).map_err(|_| CorruptAuthority)?;
+    let bytes = admission_blob_with_context(conn, AdmissionRowV1::Import, &key, context)?
+        .ok_or(CorruptAuthority)?;
+    let record = context.imported_admission(&bytes).map_err(|_| CorruptAuthority)?;
+    context.canonical(admission.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+    let matches = imported_admission_matches(&admission, &record, child_timeline_id);
+    context.check().map_err(|_| CorruptAuthority)?;
+    if !matches { return Err(CorruptAuthority); }
+    // The accepted result emits the FAR1 digest again and copies its fields.
+    context.canonical(admission.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+    context.canonical(admission.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+    let accepted = ValidatedAdmissionV1::imported(&admission, &record);
+    context.check().map(|()| accepted).map_err(|_| CorruptAuthority)
 }
 
 /// R6.9 (b), `FCS1` resolution: the imported `FCS1` is looked up by `FCT1`
@@ -252,8 +272,10 @@ fn sqlite_imported_admission(
 fn sqlite_imported_graph(
     conn: &Connection,
     child_timeline_id: TimelineId,
+    context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<ValidatedGraphV1, AuthorityError> {
-    let admission = sqlite_imported_admission(conn, child_timeline_id)?;
+    let admission = sqlite_imported_admission(conn, child_timeline_id, context)?;
+    context.check().map_err(|_| AuthorityError::CorruptAuthority)?;
     let table = sqlite_fork_classifier_table(conn, child_timeline_id)
         .ok()
         .flatten()
@@ -281,7 +303,9 @@ fn sqlite_imported_graph(
         table,
         registration,
     };
-    imported_graph_matches(&graph, &admission)
+    let matches = imported_graph_matches(&graph, &admission);
+    context.check().map_err(|_| AuthorityError::CorruptAuthority)?;
+    matches
         .then_some(ValidatedGraphV1 {
             admission,
             table: graph.table,
@@ -298,7 +322,98 @@ mod tests {
         ForkAttributionAuthorityImportPortV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
     };
     use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+    use pos_core::{ErasureInventoryPersistencePortV1, ErasureProtectedEffectDispositionV1};
     use std::time::Duration;
+
+    fn admission_deadline_sweep(
+        store: &super::super::SqliteStore,
+        child: TimelineId,
+        expected: &ValidatedAdmissionV1,
+        bytes: usize,
+    ) -> Fallible<()> {
+        for final_offset in [Duration::ZERO, Duration::from_secs(2)] {
+            let mut completed = false;
+            for marks in 2..256 {
+                let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                    std::iter::repeat_n(Duration::from_millis(1), marks).chain([final_offset]));
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 6, bytes, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                let result = sqlite_validated_admission(&store.conn, store.hasher.as_ref(), child,
+                    AuthorityValidatorV1::CodeTwoAware, &mut NativeReadContextV1::protected(&mut budget));
+                if let Ok(admission) = result {
+                    assert_eq!(&admission, expected);
+                    assert_eq!(budget.remaining_native_bytes(), 0);
+                    completed = true;
+                    break;
+                }
+                assert!(budget.check_time().is_err());
+            }
+            assert!(completed, "all observable admission expiry and regression checkpoints tested");
+        }
+        Ok(())
+    }
+
+    fn admission_byte_boundary(
+        store: &super::super::SqliteStore,
+        child: TimelineId,
+        expected: &ValidatedAdmissionV1,
+        maximum: usize,
+        limit: usize,
+    ) -> Fallible<()> {
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(1, 1, 6, limit, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let result = sqlite_validated_admission(&store.conn, store.hasher.as_ref(), child,
+            AuthorityValidatorV1::CodeTwoAware, &mut NativeReadContextV1::protected(&mut budget));
+        if limit == maximum {
+            assert_eq!(&result?, expected);
+            assert_eq!(budget.remaining_native_bytes(), 0);
+        } else {
+            assert_eq!(result, Err(AuthorityError::CorruptAuthority));
+            assert!(budget.check_time().is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn file_backed_admission_reads_charge_actual_local_first_and_imported_work() -> Fallible<()> {
+        for shape in [Shape::Mixed, Shape::EmptyClassified, Shape::EmptyUnclassified] {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("admission-context.sqlite");
+            let mut store = super::super::SqliteStore::open(path.to_str().ok_or("UTF-8 path")?)?;
+            let world = World::new(shape, false)?;
+            let built = world.build(&Spec::default())?;
+            world.seed_destination(&mut store)?;
+            pin_policy(&mut store, &built.policy)?;
+            store.import_verified(&request_for(&world, &built))?;
+            let child = world.child_at(0)?.id;
+            let expected = store.fork_publication_admission(child, AuthorityValidatorV1::CodeTwoAware)
+                .map_err(|_| "ordinary admission failed")?;
+            let key = child.to_string();
+            let import_bytes: Vec<u8> = store.conn.query_row(
+                "SELECT ifa1_cbor FROM imported_fork_attribution_admissions WHERE child_id = ?1",
+                params![key], |row| row.get(0))?;
+            let bytes = super::super::fork_replay_admission::imported_admission_phase_cost(
+                &built.envelope.unsigned().input().records.fork_admission, &import_bytes)?;
+            let interval = store.begin_protected_effect_interval()?;
+            for limit in 1..=bytes { admission_byte_boundary(&store, child, &expected, bytes, limit)?; }
+            for rows in 1..6 {
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, rows, bytes, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                assert_eq!(sqlite_validated_admission(&store.conn, store.hasher.as_ref(), child,
+                    AuthorityValidatorV1::CodeTwoAware, &mut NativeReadContextV1::protected(&mut budget)),
+                    Err(AuthorityError::CorruptAuthority));
+                assert!(budget.check_time().is_err());
+            }
+            admission_deadline_sweep(&store, child, &expected, bytes)?;
+            store.finish_protected_effect_interval(interval, ErasureProtectedEffectDispositionV1::Rollback)?;
+        }
+        Ok(())
+    }
 
     struct Fixture {
         store: super::super::SqliteStore,

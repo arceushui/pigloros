@@ -12,7 +12,7 @@ use pos_core::{
     MAX_SIGNED_FORK_REPRO_MANIFEST_BYTES_V1,
 };
 
-use super::{AdmissionCarrierV1, NativeReadContextV1};
+use super::{imported_projection_length, AdmissionCarrierV1, NativeReadContextV1};
 use crate::{
     fork_event_authority::{AuthorityValidatorV1, ValidatedOriginV1},
     fork_manifest_publication::{charge_origin_copy, charge_publication_copy},
@@ -23,19 +23,6 @@ type Result<T> = std::result::Result<T, Error>;
 
 const OWNER_FIELD: u64 = 7;
 const OWNER_MAX_BYTES: usize = 128;
-const IMPORTED_ORIGIN_HEAD: [u8; 4] = [0x82, 0x02, 0x58, 0x20];
-const IMPORTED_ORIGIN_BYTES: usize = 36;
-const LOCAL_ORIGIN_BYTES: usize = 2;
-
-fn imported_projection_length(bytes: &[u8]) -> Option<usize> {
-    let prefix = bytes.len().checked_sub(IMPORTED_ORIGIN_BYTES)?;
-    if bytes.get(prefix..)?.starts_with(&IMPORTED_ORIGIN_HEAD) {
-        // Replacing 36 bytes by 2 cannot exceed the existing slice length.
-        Some(prefix + LOCAL_ORIGIN_BYTES)
-    } else {
-        None
-    }
-}
 
 fn bounded_field(bytes: &[u8], field: u64, major: u8, maximum: usize) -> Result<&[u8]> {
     AdmissionCarrierV1::field(bytes, field, major)
