@@ -76,7 +76,6 @@ fn decode_local_binding(bytes_in: &[u8]) -> Result<PrincipalOwnerBindingV1, Erro
     PrincipalOwnerBindingV1::from_canonical_cbor(bytes_in).map_err(|_| Error::InvalidEncoding)
 }
 
-
 /// One strict code-2 `POB1` carried by `FAE1` field 7.
 ///
 /// This value is not admission authority: only a committed `FAE1` import can
