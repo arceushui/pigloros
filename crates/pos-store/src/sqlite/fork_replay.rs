@@ -112,12 +112,6 @@ impl SqliteStore {
         let child = requirement.child_timeline_id();
         let child_key = child.to_string();
         for (table, column, selection) in [
-            ("fork_classifier_tables", "fct1_cbor", "child_id = ?1"),
-            (
-                "fork_classifier_registrations",
-                "fcr1_cbor",
-                "child_id = ?1",
-            ),
             ("fork_append_operations", "fop1_cbor", "child_id = ?1"),
             (
                 "fork_event_origins",
@@ -131,46 +125,6 @@ impl SqliteStore {
             ),
         ] {
             self.preflight_selected_records(table, column, selection, &[&child_key], budget)?;
-        }
-        // Derive source keys only from the selected native FCT1. Its fetched
-        // bytes and decoder re-encoding are charged before either allocates.
-        let table_bytes = self
-            .conn
-            .query_row(
-                "SELECT length(fct1_cbor) FROM fork_classifier_tables WHERE child_id = ?1",
-                [&child_key],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()
-            .map_err(|_| Error::StorageUnavailable)?;
-        if let Some(bytes) = table_bytes {
-            let bytes = usize::try_from(bytes).map_err(|_| Error::CorruptAuthority)?;
-            budget.charge_bytes(bytes)?;
-            budget.charge_bytes(bytes)?;
-            let table = super::sqlite_fork_classifier_table(&self.conn, child)
-                .map_err(|_| Error::CorruptAuthority)?
-                .ok_or(Error::CorruptAuthority)?;
-            let input = table.input();
-            self.preflight_selected_records(
-                "imported_fork_classifier_sources",
-                "fcs1_cbor",
-                "fcs1_digest = ?1",
-                &[&input
-                    .source_configuration_revision_digest
-                    .as_bytes()
-                    .as_slice()],
-                budget,
-            )?;
-            self.preflight_selected_records(
-                "fork_classifier_sources",
-                "fcs1_cbor",
-                "descriptor_hash = ?1 AND registrar_identifier = ?2",
-                &[
-                    &input.room_revision_descriptor_hash.as_bytes().as_slice(),
-                    &input.registrar_identifier,
-                ],
-                budget,
-            )?;
         }
         self.preflight_selected_records(
             "key_registry",
@@ -421,13 +375,21 @@ mod tests {
                 key.to_canonical_cbor().len() * 3 + key.identity().owner_id.as_str().len();
             let import_bytes: Vec<u8> = store.conn.query_row(
                 "SELECT ifa1_cbor FROM imported_fork_attribution_admissions WHERE child_id = ?1",
-                [child.to_string()], |row| row.get(0))?;
-            let admission_phase = super::super::fork_replay_admission::imported_admission_phase_cost(
-                &built.envelope.unsigned().input().records.fork_admission, &import_bytes)?;
+                [child.to_string()],
+                |row| row.get(0),
+            )?;
+            let admission_phase =
+                super::super::fork_replay_admission::imported_admission_phase_cost(
+                    &built.envelope.unsigned().input().records.fork_admission,
+                    &import_bytes,
+                )?;
+            let classifier_phase = super::super::fork_replay_classifier::imported_classifier_phase_cost(
+                built.envelope.unsigned().input().classifier.as_ref())?;
             // Actual shared buffers, independently measured by byte encoders.
             let expected = publication_phase_cost(&committed)?
                 + retained_key_phase
                 + admission_phase * 2
+                + classifier_phase
                 + committed.outer_bytes.len() * 2
                 + signed.manifest_bytes().len() * 2
                 + signed.manifest().input().intervention_sequences.len()

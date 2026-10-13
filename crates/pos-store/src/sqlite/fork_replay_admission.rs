@@ -8,7 +8,10 @@ use crate::{fork_replay::NativeReadContextV1, ForkEventAuthorityErrorV1 as Error
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Copy)]
-pub(super) enum AdmissionRowV1 { Fork, Import }
+pub(super) enum AdmissionRowV1 {
+    Fork,
+    Import,
+}
 
 impl AdmissionRowV1 {
     const fn queries(self) -> (&'static str, &'static str, usize) {
@@ -38,23 +41,33 @@ pub(super) fn admission_blob_with_context(
     context.check().map_err(|_| CorruptAuthority)?;
     let mut statement = conn.prepare(probe).map_err(|_| CorruptAuthority)?;
     context.check().map_err(|_| CorruptAuthority)?;
-    let mut rows = statement.query(params![child_key]).map_err(|_| CorruptAuthority)?;
+    let mut rows = statement
+        .query(params![child_key])
+        .map_err(|_| CorruptAuthority)?;
     context.row_available().map_err(|_| CorruptAuthority)?;
     let Some(row) = rows.next().map_err(|_| CorruptAuthority)? else {
         return context.check().map(|()| None).map_err(|_| CorruptAuthority);
     };
     context.suffix_row().map_err(|_| CorruptAuthority)?;
     let blob: bool = row.get(0).map_err(|_| CorruptAuthority)?;
-    if !blob { return Err(CorruptAuthority); }
+    if !blob {
+        return Err(CorruptAuthority);
+    }
     let length = row.get::<_, i64>(1).map_err(|_| CorruptAuthority)?;
     let length = usize::try_from(length).map_err(|_| CorruptAuthority)?;
-    if length > maximum { return Err(CorruptAuthority); }
+    if length > maximum {
+        return Err(CorruptAuthority);
+    }
     context.check().map_err(|_| CorruptAuthority)?;
     context.suffix_row().map_err(|_| CorruptAuthority)?;
     context.bytes(length).map_err(|_| CorruptAuthority)?;
-    let bytes = conn.query_row(fetch, params![child_key], |row| row.get::<_, Vec<u8>>(0))
+    let bytes = conn
+        .query_row(fetch, params![child_key], |row| row.get::<_, Vec<u8>>(0))
         .map_err(|_| CorruptAuthority)?;
-    context.check().map(|()| Some(bytes)).map_err(|_| CorruptAuthority)
+    context
+        .check()
+        .map(|()| Some(bytes))
+        .map_err(|_| CorruptAuthority)
 }
 
 /// Independent test oracle: byte encoders and logical field lengths only.
@@ -71,9 +84,12 @@ pub(super) fn imported_admission_phase_cost(
     // FAR1: two raw fetches, matcher digest, accepted digest and native field
     // copy. The two local buffers are the real projection/equality Vecs.
     // IFA1: raw fetch plus equality; FAI1: equality plus separate nested Vec.
-    Ok(ulid::ULID_LEN * 2 + fork.to_canonical_cbor().len() * 5
-        + local.len() * 2 + fork.fields().creator.as_str().len() * 2
-        + import.to_canonical_cbor().len() * 2 + issuer.to_canonical_cbor().len() * 2
+    Ok(ulid::ULID_LEN * 2
+        + fork.to_canonical_cbor().len() * 5
+        + local.len() * 2
+        + fork.fields().creator.as_str().len() * 2
+        + import.to_canonical_cbor().len() * 2
+        + issuer.to_canonical_cbor().len() * 2
         + issuer.issuer_id().len())
 }
 
@@ -91,8 +107,16 @@ mod tests {
     #[test]
     fn admission_type_and_cap_probes_refuse_before_raw_retrieval() -> Fallible<()> {
         for (kind, sql, maximum) in [
-            (AdmissionRowV1::Fork, "UPDATE fork_admissions SET far1_cbor = ?1", pos_core::MAX_FORK_ADMISSION_RECORD_BYTES_V1),
-            (AdmissionRowV1::Import, "UPDATE imported_fork_attribution_admissions SET ifa1_cbor = ?1", pos_core::MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1),
+            (
+                AdmissionRowV1::Fork,
+                "UPDATE fork_admissions SET far1_cbor = ?1",
+                pos_core::MAX_FORK_ADMISSION_RECORD_BYTES_V1,
+            ),
+            (
+                AdmissionRowV1::Import,
+                "UPDATE imported_fork_attribution_admissions SET ifa1_cbor = ?1",
+                pos_core::MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1,
+            ),
         ] {
             let world = World::new(Shape::Mixed, false)?;
             let built = world.build(&Spec::default())?;
@@ -101,16 +125,25 @@ mod tests {
             pin_policy(&mut store, &built.policy)?;
             store.import_verified(&request_for(&world, &built))?;
             let key = world.child_at(0)?.id.to_string();
-            for value in [rusqlite::types::Value::Blob(vec![0; maximum + 1]),
-                rusqlite::types::Value::Text("not-a-blob".into())] {
+            for value in [
+                rusqlite::types::Value::Blob(vec![0; maximum + 1]),
+                rusqlite::types::Value::Text("not-a-blob".into()),
+            ] {
                 // Stored-state injection isolates the pre-getter raw gate.
                 store.conn.execute(sql, [value])?;
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
                 let start = clock.mark();
                 let limits = ForkReplayReadLimitsV1::new(1, 1, 2, 64, 1_000_000)?;
                 let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-                assert_eq!(admission_blob_with_context(&store.conn, kind, &key,
-                    &mut NativeReadContextV1::protected(&mut budget)), Err(Error::CorruptAuthority));
+                assert_eq!(
+                    admission_blob_with_context(
+                        &store.conn,
+                        kind,
+                        &key,
+                        &mut NativeReadContextV1::protected(&mut budget)
+                    ),
+                    Err(Error::CorruptAuthority)
+                );
                 assert_eq!(budget.remaining_native_bytes(), 64);
                 assert!(budget.check_time().is_ok());
             }
@@ -126,8 +159,15 @@ mod tests {
             let start = clock.mark();
             let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 64, 1_000_000)?;
             let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-            assert_eq!(admission_blob_with_context(&store.conn, kind, "absent-key",
-                &mut NativeReadContextV1::protected(&mut budget))?, None);
+            assert_eq!(
+                admission_blob_with_context(
+                    &store.conn,
+                    kind,
+                    "absent-key",
+                    &mut NativeReadContextV1::protected(&mut budget)
+                )?,
+                None
+            );
             assert_eq!(budget.remaining_native_bytes(), 64);
             budget.charge_rows(1)?;
         }
