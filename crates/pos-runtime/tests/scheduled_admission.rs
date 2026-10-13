@@ -4213,6 +4213,7 @@ fn a_restored_history_node_is_recorded_once_on_memory() {
 
 /// What a real-store refusal case offers: the authority grant of the pass and
 /// the Ticks later than the registry declared that the store is offered it.
+#[derive(Clone, Copy)]
 struct Offer {
     grant: Hash,
     skew: u64,
