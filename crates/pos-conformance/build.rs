@@ -2430,6 +2430,11 @@ fn output_directory() -> Result<PathBuf, Box<dyn Error>> {
 fn write_catalog_file(out_dir: &Path, profiles: &[ProfilePaths]) -> Result<(), Box<dyn Error>> {
     let generated = emit_catalog(profiles)?;
     std::fs::write(out_dir.join("conformance_fixture_catalog.rs"), generated)?;
+    write_side_files(out_dir, profiles)
+}
+
+/// The embedded byte sources and the auxiliary members next to the generated catalog.
+fn write_side_files(out_dir: &Path, profiles: &[ProfilePaths]) -> Result<(), Box<dyn Error>> {
     write_embedded_files(out_dir, profiles)?;
     write_auxiliary_files(out_dir, profiles)
 }
