@@ -2526,8 +2526,8 @@ fn parse_auxiliary_entries(
     declared: &Value,
     family: &str,
 ) -> Result<Vec<AuxiliaryEntry>, io::Error> {
-    let entries: Vec<ProviderAuxiliaryEntry> = serde_json::from_value(declared.clone())
-        .map_err(|error| {
+    let entries: Vec<ProviderAuxiliaryEntry> =
+        serde_json::from_value(declared.clone()).map_err(|error| {
             invalid_data(format!(
                 "provider auxiliary for {family} is invalid: {error}"
             ))
