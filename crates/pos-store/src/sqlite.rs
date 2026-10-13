@@ -110,12 +110,14 @@ use pos_core::{
 
 use crate::fork_admission_authority::{
     admitted_fork_context_containment, admitted_fork_may_have_changed_topology, advance_wall_fence,
-    begin_initialize, begin_open, finalize_initialize, finalize_open, fork_commitment,
-    principal_owner_commitment, validate_live_session, verify_command, verify_recovery_proof,
-    with_unfenced_fork_containment, ForkAdmissionAuthorityBootstrapPortV1,
+    begin_initialize, begin_open, finalize_initialize, finalize_open, fork_commitment_with_context,
+    principal_owner_commitment_with_context, validate_live_session, verify_command,
+    verify_recovery_proof, with_unfenced_fork_containment, ForkAdmissionAuthorityBootstrapPortV1,
     ForkAdmissionAuthorityErrorV1, ForkAdmissionAuthorityPortV1, ForkAdmissionAuthoritySessionV1,
     ForkAdmissionAuthorityStateV1, ForkAdmissionOperationRowV1, VerifiedForkAdmissionCommandV1,
 };
+#[cfg(test)]
+use crate::fork_admission_authority::{fork_commitment, principal_owner_commitment};
 use crate::fork_delivery_journal::{
     fork_delivery_execution, fork_delivery_may_have_changed_topology,
     ForkAdmissionDeliveryJournalPortV1, ForkDeliveryClaimOutcomeV1, ForkDeliveryClaimV1,
@@ -147,6 +149,7 @@ mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
 mod fork_replay;
 mod fork_replay_admission;
+mod fork_replay_binding;
 mod fork_replay_classifier;
 mod fork_replay_operation;
 mod fork_replay_publication;
@@ -13073,7 +13076,9 @@ fn sqlite_local_fork_admission_with_context(
         )
         .ok()
         .flatten()
-        .and_then(|row| sqlite_fork_admission_result(conn, hasher, &row).ok())
+        .and_then(|row| {
+            sqlite_fork_admission_result_with_context(conn, hasher, &row, context).ok()
+        })
         .filter(|result| *result == expected)
         .map(|_| admission)
         .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority);
@@ -13753,10 +13758,30 @@ fn sqlite_fork_admission_result(
     hasher: &dyn Hasher,
     row: &ForkAdmissionOperationRowV1,
 ) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+    sqlite_fork_admission_result_with_context(
+        conn,
+        hasher,
+        row,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+    )
+}
+
+fn sqlite_fork_admission_result_with_context(
+    conn: &Connection,
+    hasher: &dyn Hasher,
+    row: &ForkAdmissionOperationRowV1,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> Result<ForkAdmissionOperationResultV1, pos_core::ForkAdmissionErrorV1> {
+    context
+        .check()
+        .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
     let store_id = sqlite_fork_admission_store_id(conn)?;
+    context
+        .check()
+        .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
     match (row.kind, row.child_id) {
         (ForkAdmissionOperationKindV1::PrincipalOwner, None) => {
-            sqlite_principal_owner_result(conn, store_id, row)
+            sqlite_principal_owner_result_with_context(conn, store_id, row, context)
                 .map(ForkAdmissionOperationResultV1::PrincipalOwner)
         }
         (ForkAdmissionOperationKindV1::Fork, Some(child_id)) => {
@@ -13777,9 +13802,10 @@ fn sqlite_fork_admission_result(
             {
                 return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
             }
-            let binding = sqlite_fork_principal_owner_binding(
+            let binding = sqlite_fork_principal_owner_binding_with_context(
                 conn,
                 admission.input().principal_owner_binding_digest,
+                context,
             )?;
             if binding.input().owner != admission.input().creator {
                 return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
@@ -13796,13 +13822,14 @@ fn sqlite_fork_admission_result(
             }
             let child_name = sqlite_fork_admission_child_name(conn, &admission)?
                 .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
-            if fork_commitment(
+            if fork_commitment_with_context(
                 store_id,
                 binding.input().principal_digest,
                 row.evidence_digest,
                 &admission,
                 &child_name,
-            ) != row.commitment
+                context,
+            )? != row.commitment
             {
                 return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
             }
@@ -13819,33 +13846,26 @@ fn sqlite_fork_admission_result(
 
 /// Validate one POB1 operation row against its keyed binding and the
 /// reconstructed commitment.
-fn sqlite_principal_owner_result(
+fn sqlite_principal_owner_result_with_context(
     conn: &Connection,
     store_id: Hash,
     row: &ForkAdmissionOperationRowV1,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
 ) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
-    // The key column equals the row's operation ID, so only the other
-    // columns are read back from durable state.
-    let binding = conn
-        .query_row(
-            "SELECT principal_digest, pob1_cbor
-             FROM fork_principal_owner_bindings
-             WHERE operation_id = ?1",
-            params![row.operation_id.as_bytes().as_slice()],
-            |record| {
-                Ok((
-                    row.operation_id.as_bytes().to_vec(),
-                    record.get::<_, Vec<u8>>(0)?,
-                    record.get::<_, Vec<u8>>(1)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)?
-        .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
-        .and_then(sqlite_decode_principal_owner_binding)?;
-    if binding.digest() != row.result_digest
-        || principal_owner_commitment(store_id, &binding, row.evidence_digest) != row.commitment
+    let binding = fork_replay_binding::binding_with_context(conn, row.operation_id, context)?
+        .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+    context
+        .canonical(binding.canonical_cbor_len())
+        .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+    let digest = binding.digest();
+    context
+        .check()
+        .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+    if digest != row.result_digest {
+        return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
+    }
+    if principal_owner_commitment_with_context(store_id, &binding, row.evidence_digest, context)?
+        != row.commitment
     {
         return Err(pos_core::ForkAdmissionErrorV1::CorruptAuthority);
     }
@@ -13861,32 +13881,37 @@ fn sqlite_fork_principal_owner_binding(
     conn: &Connection,
     binding_digest: Hash,
 ) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
-    conn.query_row(
-        "SELECT operation_id FROM fork_admission_operations
-         WHERE kind = 1 AND result_digest = ?1",
-        params![binding_digest.as_bytes().as_slice()],
-        |record| record.get::<_, Vec<u8>>(0),
+    sqlite_fork_principal_owner_binding_with_context(
+        conn,
+        binding_digest,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary(),
     )
-    .optional()
-    .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
-    .and_then(|operation_id| operation_id.ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority))
-    .and_then(sqlite_hash)
-    .and_then(|operation_id| {
-        sqlite_fork_admission_operation(
-            conn,
-            ForkAdmissionOperationKindV1::PrincipalOwner,
-            operation_id,
-        )
-    })
-    .and_then(|binding_row| {
-        binding_row
-            .filter(|binding_row| binding_row.child_id.is_none())
-            .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
-    })
-    .and_then(|binding_row| {
-        sqlite_fork_admission_store_id(conn)
-            .and_then(|store_id| sqlite_principal_owner_result(conn, store_id, &binding_row))
-    })
+}
+
+fn sqlite_fork_principal_owner_binding_with_context(
+    conn: &Connection,
+    binding_digest: Hash,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
+    fork_replay_operation::principal_operation_id_with_context(conn, binding_digest, context)
+        .and_then(|operation_id| {
+            fork_replay_operation::operation_with_context(
+                conn,
+                ForkAdmissionOperationKindV1::PrincipalOwner,
+                operation_id,
+                context,
+            )
+        })
+        .and_then(|binding_row| {
+            binding_row
+                .filter(|binding_row| binding_row.child_id.is_none())
+                .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)
+        })
+        .and_then(|binding_row| {
+            sqlite_fork_admission_store_id(conn).and_then(|store_id| {
+                sqlite_principal_owner_result_with_context(conn, store_id, &binding_row, context)
+            })
+        })
 }
 
 fn sqlite_fork_admission_store_id(
@@ -15366,7 +15391,7 @@ mod tests {
                 "UPDATE fork_principal_owner_bindings SET {column} = 'wrong-type'"
             ))?;
             let observed = if column == "principal_digest" {
-                sqlite_principal_owner_result(
+                sqlite_principal_owner_result_with_context(
                     &conn,
                     Hash::from_bytes([48; 32]),
                     &ForkAdmissionOperationRowV1 {
@@ -15377,6 +15402,7 @@ mod tests {
                         result_digest: binding.digest(),
                         child_id: None,
                     },
+                    &mut crate::fork_replay::NativeReadContextV1::ordinary(),
                 )
                 .map(|_| ())
             } else {
