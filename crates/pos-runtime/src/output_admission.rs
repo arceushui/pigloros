@@ -1570,7 +1570,10 @@ impl OutputAdmissionV1 {
     /// # Errors
     /// Returns a declaration or resource-limit error when any draft exceeds
     /// the bound policy.
-    pub fn validate_batch(&self, drafts: &[EventDraft]) -> Result<(), OutputAdmissionErrorV1> {
+    pub fn validate_batch<'a>(
+        &self,
+        drafts: impl IntoIterator<Item = &'a EventDraft>,
+    ) -> Result<(), OutputAdmissionErrorV1> {
         self.validate_batch_with_usage(drafts, true)
     }
 
@@ -1584,12 +1587,12 @@ impl OutputAdmissionV1 {
     /// # Errors
     /// Returns the same declaration or resource-limit error as [`Self::validate_batch`].
     pub fn validate_action(&self, draft: &EventDraft) -> Result<(), OutputAdmissionErrorV1> {
-        self.validate_batch_with_usage(std::slice::from_ref(draft), false)
+        self.validate_batch_with_usage([draft], false)
     }
 
-    fn validate_batch_with_usage(
+    fn validate_batch_with_usage<'a>(
         &self,
-        drafts: &[EventDraft],
+        drafts: impl IntoIterator<Item = &'a EventDraft>,
         retain_usage: bool,
     ) -> Result<(), OutputAdmissionErrorV1> {
         // Hold the usage lock across validation and commit so concurrent host

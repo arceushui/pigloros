@@ -260,18 +260,20 @@ fn subscribed_driver_events(
 /// Host-owned Event types are rejected first. Every draft must then carry
 /// an Event type its own Plugin owns, so a Driver can never emit another
 /// Plugin's Event type on any path. Last, the Plugin's output-admission
-/// declaration enforces its per-type and batch budgets. The validated
-/// [`StepOutput`] is returned unchanged, so its step-level inputs and
-/// declared outputs reach the caller intact.
-fn validate_driver_output(
-    entry: &PluginEntry,
-    output: StepOutput,
-) -> Result<StepOutput, RuntimeError> {
-    let drafts: Vec<EventDraft> = output.drafts().cloned().collect();
-    reject_host_owned_draft_slice(&drafts)
-        .and_then(|()| reject_unowned_plugin_drafts(&drafts, &entry.owned_event_types))
-        .and_then(|()| validate_plugin_output(entry, &drafts))
-        .map(|()| output)
+/// declaration enforces its per-type and batch budgets.
+fn validate_driver_output(entry: &PluginEntry, output: &StepOutput) -> Result<(), RuntimeError> {
+    reject_host_owned_drafts(output)
+        .and_then(|()| reject_unowned_plugin_drafts(output, &entry.owned_event_types))
+        .and_then(|()| validate_plugin_output(entry, output.drafts()))
+}
+
+/// Consume a validated [`StepOutput`] into its drafts, in output order.
+fn staged_drafts(output: StepOutput) -> Vec<EventDraft> {
+    output
+        .outputs
+        .into_iter()
+        .map(|declared| declared.draft)
+        .collect()
 }
 
 /// Return the one-member Fork ancestry of a fixture Timeline with no parent.
@@ -940,9 +942,9 @@ fn validate_recovery_evidence(
     Ok(())
 }
 
-fn reject_host_owned_draft_slice(drafts: &[EventDraft]) -> Result<(), RuntimeError> {
-    drafts
-        .iter()
+fn reject_host_owned_drafts(output: &StepOutput) -> Result<(), RuntimeError> {
+    output
+        .drafts()
         .find_map(host_owned_draft_error)
         .map_or(Ok(()), Err)
 }
@@ -971,11 +973,11 @@ fn host_owned_draft_error(draft: &EventDraft) -> Option<RuntimeError> {
 }
 
 fn reject_unowned_plugin_drafts(
-    drafts: &[EventDraft],
+    output: &StepOutput,
     owned_event_types: &[Kind],
 ) -> Result<(), RuntimeError> {
-    if drafts
-        .iter()
+    if output
+        .drafts()
         .all(|draft| owned_event_types.contains(&draft.event_type))
     {
         Ok(())
@@ -996,7 +998,10 @@ const fn unauthorized() -> RuntimeError {
 /// whose declared Event types equal the Plugin's owned types, or registers
 /// an entry that owns no Event type and has no declaration. An entry without
 /// a declaration therefore reaches this check only with an empty batch.
-fn validate_plugin_output(entry: &PluginEntry, drafts: &[EventDraft]) -> Result<(), RuntimeError> {
+fn validate_plugin_output<'a>(
+    entry: &PluginEntry,
+    drafts: impl IntoIterator<Item = &'a EventDraft>,
+) -> Result<(), RuntimeError> {
     entry.output_admission.as_ref().map_or(Ok(()), |admission| {
         admission.validate_batch(drafts).map_err(Into::into)
     })
@@ -2531,7 +2536,7 @@ impl PluginRegistry {
             observations
         };
         invoke_driver(driver.as_mut(), timeline, observations)
-            .and_then(|output| validate_driver_output(entry, output))
+            .and_then(|output| validate_driver_output(entry, &output).map(|()| output))
     }
 
     fn collect_anchored_selection(
@@ -2666,7 +2671,7 @@ impl PluginRegistry {
                 self.invoke_selected_driver(id, timeline, &snapshot, committed_events, &operation);
             match result {
                 Ok(output) => {
-                    let drafts = output.into_drafts();
+                    let drafts = staged_drafts(output);
                     if let Err(error) = self
                         .validate_protected_drafts(timeline, &operation, observed_through, &drafts)
                         .and_then(|()| self.charge_pass_budget(all_drafts.len(), drafts.len()))
@@ -4312,7 +4317,8 @@ impl PluginRegistry {
                     stepped_driver_ids.push(*id);
                     let observations = snapshot.view_for(driver.subscriptions());
                     let output = invoke_driver(driver.as_mut(), timeline, observations)?;
-                    all_drafts.extend(validate_driver_output(entry, output)?.into_drafts());
+                    validate_driver_output(entry, &output)?;
+                    all_drafts.extend(staged_drafts(output));
                 }
             }
             debug_assert!(due_driver_ids.is_empty());
@@ -4493,9 +4499,9 @@ impl PluginRegistry {
                 staged_driver_ids.push(*plugin_id);
                 let observations = snapshot.view_for(driver.subscriptions());
                 let step_result = invoke_driver(driver.as_mut(), timeline, observations)
-                    .and_then(|output| validate_driver_output(entry, output));
+                    .and_then(|output| validate_driver_output(entry, &output).map(|()| output));
                 match step_result {
-                    Ok(output) => all_drafts.extend(output.into_drafts()),
+                    Ok(output) => all_drafts.extend(staged_drafts(output)),
                     Err(error) => {
                         step_error = Some(error);
                         break;

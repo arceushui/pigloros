@@ -22,13 +22,10 @@ use pos_core::{
 use pos_state::AuthorizedObservationV1;
 
 use super::{
-    invoke_driver, unauthorized, validate_driver_output, AuthorizedPendingStep, OperationContext,
+    invoke_driver, staged_drafts, unauthorized, validate_driver_output, AuthorizedPendingStep, OperationContext,
     PendingStep, PluginEntry, PluginRegistry,
 };
-use crate::{
-    driver::{ObservationView, StepOutput},
-    error::RuntimeError,
-};
+use crate::{driver::ObservationView, error::RuntimeError};
 
 /// One due Driver and the participant-authorized view the host derived for it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -230,9 +227,8 @@ impl PluginRegistry {
     fn check_pass_output(
         &self,
         staged: usize,
-        output: StepOutput,
+        output: Vec<EventDraft>,
     ) -> Result<Vec<EventDraft>, RuntimeError> {
-        let output = output.into_drafts();
         self.schemas
             .validate_batch(&output)
             .and_then(|()| self.charge_pass_budget(staged, output.len()))
@@ -264,7 +260,7 @@ fn invoke_authorized_entry(
     timeline: TimelineId,
     snapshot: &ObservationSnapshotV1,
     knowledge: &KnowledgeSnapshotV1,
-) -> Result<StepOutput, RuntimeError> {
+) -> Result<Vec<EventDraft>, RuntimeError> {
     let Some(driver) = entry.driver.as_mut() else {
         return Err(RuntimeError::NoDriver {
             name: entry.name.clone(),
@@ -279,7 +275,9 @@ fn invoke_authorized_entry(
         timeline,
         ObservationView::from_authorized_snapshot(snapshot, knowledge),
     );
-    invoked.and_then(|output| validate_driver_output(entry, output))
+    invoked.and_then(|output| {
+        validate_driver_output(entry, &output).map(|()| staged_drafts(output))
+    })
 }
 
 /// Require exactly one current authority for each view.

@@ -630,24 +630,9 @@ impl StepOutput {
     }
 
     /// Iterate the drafts in output order.
-    ///
-    /// No production caller exists until slice 7b builds declarations from
-    /// the step inputs and outputs; tests and plugin fixtures use it today.
     #[must_use]
     pub fn drafts(&self) -> impl ExactSizeIterator<Item = &EventDraft> {
         self.outputs.iter().map(|output| &output.draft)
-    }
-
-    /// Consume the output into its drafts, in output order, dropping the
-    /// declared inputs. Callers that only need the drafts (the host's
-    /// final staging step, the pos-experiment app and the end-to-end
-    /// determinism harness) use this instead of widening their own types.
-    #[must_use]
-    pub fn into_drafts(self) -> Vec<EventDraft> {
-        self.outputs
-            .into_iter()
-            .map(|output| output.draft)
-            .collect()
     }
 
     /// The step-level inputs the Driver declared.
@@ -880,7 +865,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn step_output_new_and_empty() {
+    fn step_output_empty_forms_carry_nothing() {
         let out = StepOutput::new(vec![]);
         assert!(out.outputs.is_empty());
         assert!(out.step_inputs().is_empty());
@@ -934,32 +919,10 @@ mod tests {
         assert_eq!(out.step_inputs(), [step_ref]);
         assert_eq!(out.outputs[0].direct_inputs, [draft_ref]);
         assert!(out.outputs[1].direct_inputs.is_empty());
-        assert_ne!(step_ref, draft_ref);
         let drafts = out.drafts();
         assert_eq!(drafts.len(), 2);
         let kinds: Vec<&str> = drafts.map(|d| d.event_type.as_str()).collect();
         assert_eq!(kinds, ["first", "second"]);
-    }
-
-    #[test]
-    #[cfg_attr(coverage_nightly, coverage(off))]
-    fn step_output_into_drafts_keeps_order_and_drops_inputs() {
-        let first = sample_draft("first");
-        let second = sample_draft("second");
-        let out = StepOutput::declared(
-            vec![DirectInputRefV1::CommittedEvent { seq: Seq::ZERO }],
-            vec![
-                DeclaredOutputV1 {
-                    draft: first.clone(),
-                    direct_inputs: Vec::new(),
-                },
-                DeclaredOutputV1 {
-                    draft: second.clone(),
-                    direct_inputs: Vec::new(),
-                },
-            ],
-        );
-        assert_eq!(out.into_drafts(), [first, second]);
     }
 
     #[test]
