@@ -11,6 +11,12 @@
 //! The tests assert nothing about wall time; the per-launch watchdog of the supervisor is the
 //! adapter's constant. Every result here is Local-relaxation engineering evidence.
 //!
+//! `worker_launches` of a sub-case record is a proxy: it counts the outcomes that carry an
+//! execution profile digest, which a Driver records only after it reached the launch. R8-S9
+//! checks it against the number of pass steps, and the "baseline plus three launches" control
+//! of R8-S2 uses the same proxy. The evaluator-path half of R8-S8 lives in
+//! `crates/pos-reference/tests/plugin_subject_public.rs`.
+//!
 //! The sharing of a family run between tests (`OnceLock`) assumes the single-process `cargo
 //! test` runner; under nextest every test is its own process and recomputes the runs it uses.
 
@@ -33,15 +39,16 @@ use pos_plugin_supervisor::{
     ContentValidationV1, WorkerProgramV1,
 };
 use pos_reference::adapter_transport::{read_observation, write_attempt};
-use pos_reference::evaluator::{CaseAttempt, ResourceUsage, SubjectObservation, SubjectResult};
+use pos_reference::evaluator::{CaseAttempt, SubjectObservation, SubjectResult};
 use pos_reference::evaluator_domain::{ExecutionMode, FixtureFamily};
-use pos_reference::profile::{DeterministicBudget, NamespacedFailure};
 use pos_runtime::community_plugin_host::{
     CommunityPluginHostErrorV1, CommunityPluginModeV1, ReleaseIdentityV1,
 };
 use serde_json::Value;
-use support::attempts::{
-    attempt_from_fixture_files, family_budget, oracle_bytes, rewrite_subcases,
+use support::attempts::{attempt_from_fixture_files, oracle_bytes, rewrite_subcases};
+use support::subcase::{
+    assert_output_is_the_oracle, assert_within_budget, expecting, failure, observe_attempt,
+    one_subcase, WORKER,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -52,8 +59,6 @@ struct Snapshot {
     events: Vec<Vec<u8>>,
     state: Vec<u8>,
 }
-
-const WORKER: &str = env!("CARGO_BIN_EXE_pos-plugin-worker");
 
 const MODES: [ExecutionMode; 2] = [ExecutionMode::Local, ExecutionMode::AirGapped];
 
@@ -69,14 +74,6 @@ const FORBIDDEN_KEYS: [&str; 5] = ["signature", "verified", "safe", "safety", "q
 
 /// The Plugin ID of the compatibility prototype guests.
 const PLUGIN_ID: &str = "pigloros.compatibility-prototype";
-
-fn failure(code_id: &str) -> SubjectResult {
-    SubjectResult::Failure(NamespacedFailure {
-        owner_id: "pigloros.fixture.plugin-conformance".to_owned(),
-        contract_version: "2.0.0".to_owned(),
-        code_id: code_id.to_owned(),
-    })
-}
 
 const fn is_refused_or_failed(outcome: &Outcome) -> bool {
     matches!(
@@ -242,12 +239,6 @@ fn observe_through(
     Ok(read_observation(out.as_slice(), 1_048_576)?)
 }
 
-/// The observation of `attempt` with the real worker.
-fn observe(attempt: &CaseAttempt) -> TestResult<SubjectObservation> {
-    let program = WorkerProgramV1::new(PathBuf::from(WORKER)).ok_or("an invalid worker path")?;
-    observe_through(&SupervisorRunnerV1::new(program), attempt)
-}
-
 /// A family run once in one Execution Mode.
 struct FamilyRun {
     observation: SubjectObservation,
@@ -312,22 +303,6 @@ fn capture_of<'a>(captures: &'a [Capture], id: &str) -> TestResult<&'a Capture> 
         .ok_or_else(|| format!("no record for {id}").into())
 }
 
-/// Whether the usage stays within the declared budget.
-fn within(usage: ResourceUsage, budget: DeterministicBudget) -> bool {
-    [
-        (usage.memory_bytes, budget.memory_bytes),
-        (usage.cpu_fuel, budget.cpu_fuel),
-        (usage.host_calls, budget.host_calls),
-        (usage.event_count, budget.event_count),
-        (usage.output_bytes, budget.output_bytes),
-        (usage.storage_bytes, budget.storage_bytes),
-        (usage.execution_steps, budget.execution_steps),
-        (usage.simulation_time_ns, budget.simulation_time_ns),
-    ]
-    .iter()
-    .all(|(used, limit)| used <= limit)
-}
-
 /// The family fails with `code` after every sub-case in `ids` matched, in both modes.
 fn assert_family_failure(family: FixtureFamily, code: &str, ids: &[&str]) -> TestResult {
     for mode in MODES {
@@ -338,42 +313,18 @@ fn assert_family_failure(family: FixtureFamily, code: &str, ids: &[&str]) -> Tes
             run.captures.iter().all(|capture| capture.record.matched),
             "{family:?} {mode:?}"
         );
-        assert!(
-            within(run.observation.usage, family_budget(family)?),
-            "{family:?} {mode:?}"
-        );
+        assert_within_budget(family, &run.observation)?;
     }
     Ok(())
 }
 
 /// The family gives the oracle member byte for byte, in both modes.
-fn assert_output_is_the_oracle(family: FixtureFamily) -> TestResult {
-    let oracle = SubjectResult::Output(oracle_bytes(family)?);
+fn assert_family_output(family: FixtureFamily) -> TestResult {
     for mode in MODES {
         let run = family_run(family, mode)?;
-        assert_eq!(run.observation.result, oracle, "{family:?} {mode:?}");
-        assert!(
-            within(run.observation.usage, family_budget(family)?),
-            "{family:?} {mode:?}"
-        );
+        assert_output_is_the_oracle(family, &run.observation)?;
     }
     Ok(())
-}
-
-/// The attempt of `family` with only the sub-case `id`, which `edit` may change.
-fn one_subcase(
-    family: FixtureFamily,
-    id: &str,
-    edit: impl Fn(&mut Value),
-) -> TestResult<CaseAttempt> {
-    let attempt = attempt_from_fixture_files(family, ExecutionMode::Local)?;
-    rewrite_subcases(attempt, |subcase| {
-        let keep = subcase["id"] == id;
-        if keep {
-            edit(subcase);
-        }
-        keep
-    })
 }
 
 /// The `pass` steps of a sub-case document.
@@ -411,11 +362,6 @@ fn changing_the_observation(subcase: &mut Value) {
     }
 }
 
-/// The edit that sets the expected `error` of a sub-case.
-fn expecting(error: &'static str) -> impl Fn(&mut Value) {
-    move |subcase| subcase["expect"]["error"] = error.into()
-}
-
 /// The pass steps of sub-case `id` in the checked-in payload of `family`.
 fn pass_count(family: FixtureFamily, id: &str) -> TestResult<u32> {
     let attempt = attempt_from_fixture_files(family, ExecutionMode::Local)?;
@@ -432,7 +378,7 @@ fn pass_count(family: FixtureFamily, id: &str) -> TestResult<u32> {
 
 #[test]
 fn r8_s1_positive_output_is_the_oracle_in_local_and_air_gapped() -> TestResult {
-    assert_output_is_the_oracle(FixtureFamily::Positive)?;
+    assert_family_output(FixtureFamily::Positive)?;
     let local = family_run(FixtureFamily::Positive, ExecutionMode::Local)?;
     let air_gapped = family_run(FixtureFamily::Positive, ExecutionMode::AirGapped)?;
     assert_eq!(local.observation.usage, air_gapped.observation.usage);
@@ -446,7 +392,7 @@ fn r8_s1_positive_output_is_the_oracle_in_local_and_air_gapped() -> TestResult {
 fn r8_s1_the_supervisor_runner_gives_the_positive_oracle() -> TestResult {
     let attempt = attempt_from_fixture_files(FixtureFamily::Positive, ExecutionMode::Local)?;
     let oracle = SubjectResult::Output(oracle_bytes(FixtureFamily::Positive)?);
-    assert_eq!(observe(&attempt)?.result, oracle);
+    assert_eq!(observe_attempt(&attempt)?.result, oracle);
     Ok(())
 }
 
@@ -519,7 +465,7 @@ fn r8_s4_resource_exhaustion_is_resource_limit_within_the_budget() -> TestResult
 
 #[test]
 fn r8_s5_deletion_redaction_output_is_the_oracle() -> TestResult {
-    assert_output_is_the_oracle(FixtureFamily::DeletionRedaction)
+    assert_family_output(FixtureFamily::DeletionRedaction)
 }
 
 fn contains(haystack: &[u8], needle: &str) -> bool {
@@ -592,7 +538,7 @@ fn r8_s6_downgrade_is_incompatible_contract_after_dgr_1_to_dgr_4_matched() -> Te
 
 #[test]
 fn r8_s7_independent_evaluation_output_is_the_oracle() -> TestResult {
-    assert_output_is_the_oracle(FixtureFamily::IndependentEvaluation)
+    assert_family_output(FixtureFamily::IndependentEvaluation)
 }
 
 #[test]
@@ -647,6 +593,10 @@ fn mutating_the_composite(
     Ok(attempt)
 }
 
+// R8-S8, evaluator path: that half lives in `crates/pos-reference/tests/plugin_subject_public.rs`
+// on its hand-written fixtures. The real composite cannot be used there: `pos-reference` may not
+// depend on the host, the adapter or the fixture files, which
+// `check-reference-evaluator-independence.sh` enforces, so it builds its own signed corpus.
 #[test]
 fn r8_s8_one_byte_of_the_composite_is_not_executed() -> TestResult {
     let attempt = attempt_from_fixture_files(FixtureFamily::Malformed, ExecutionMode::Local)?;
@@ -679,7 +629,7 @@ fn r8_s8_a_component_piece_changed_without_its_digest_entry_is_not_executed() ->
 fn r8_s8_changing_the_first_expectation_fails_the_case() -> TestResult {
     let family = FixtureFamily::Malformed;
     let unchanged = attempt_from_fixture_files(family, ExecutionMode::Local)?;
-    assert_eq!(observe(&unchanged)?.result, failure("malformed-payload"));
+    assert_eq!(observe_attempt(&unchanged)?.result, failure("malformed-payload"));
     let mut first = true;
     let changed = rewrite_subcases(unchanged, move |subcase| {
         if std::mem::take(&mut first) {
@@ -687,21 +637,21 @@ fn r8_s8_changing_the_first_expectation_fails_the_case() -> TestResult {
         }
         true
     })?;
-    assert_eq!(observe(&changed)?.result, failure("subcase-mismatch"));
+    assert_eq!(observe_attempt(&changed)?.result, failure("subcase-mismatch"));
     Ok(())
 }
 
 #[test]
 fn r8_s8_an_instant_across_the_validity_boundary_fails_the_case() -> TestResult {
     let attempt = one_subcase(FixtureFamily::Denied, "den.16", at_instant(59_000_000))?;
-    assert_eq!(observe(&attempt)?.result, failure("subcase-mismatch"));
+    assert_eq!(observe_attempt(&attempt)?.result, failure("subcase-mismatch"));
     Ok(())
 }
 
 #[test]
 fn r8_s8_an_instant_inside_the_same_window_still_passes() -> TestResult {
     let attempt = one_subcase(FixtureFamily::Denied, "den.16", at_instant(61_000_000))?;
-    assert_eq!(observe(&attempt)?.result, failure("capability-denied"));
+    assert_eq!(observe_attempt(&attempt)?.result, failure("capability-denied"));
     Ok(())
 }
 
