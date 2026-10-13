@@ -146,15 +146,15 @@ pub const fn host_error_for_install_v1(
     match error {
         CommunityInstallErrorV1::Source(inner) => host_error_for_release_source_v1(inner),
         CommunityInstallErrorV1::Manifest(_) => CommunityPluginHostErrorV1::InvalidManifest,
-        CommunityInstallErrorV1::Install(inner) => host_error_for_installer_v1(inner),
+        CommunityInstallErrorV1::Install(inner) => host_error_for_installer_v1(&inner),
     }
 }
 
 /// The host error of a refusal of the signed installer.
 const fn host_error_for_installer_v1(
-    error: PluginReleaseInstallErrorV1,
+    error: &PluginReleaseInstallErrorV1,
 ) -> CommunityPluginHostErrorV1 {
-    match error {
+    match *error {
         PluginReleaseInstallErrorV1::Source(inner) => host_error_for_release_source_v1(inner),
         PluginReleaseInstallErrorV1::Manifest(_) => CommunityPluginHostErrorV1::InvalidManifest,
         PluginReleaseInstallErrorV1::Authorization(inner) => {
