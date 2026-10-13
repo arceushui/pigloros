@@ -2477,7 +2477,10 @@ fn a_second_pass_declares_a_later_tick_chained_to_the_first_on_both_adapters() {
 }
 
 /// A restore resets the chain to a lookup against the store, which holds no
-/// row yet: the next Tick restarts, and the Tick after it still follows.
+/// row yet, and the Tick after the restored pass still follows it with a chain
+/// edge. The Tick the restored registry itself declares is deliberately not
+/// pinned: it is transitional until slices 8-9 write rows, after which a
+/// restarted registry declares the head plus one.
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn a_restored_registry_keeps_declaring_later_ticks_on_both_adapters() {
@@ -2495,8 +2498,8 @@ fn a_restored_registry_keeps_declaring_later_ticks_on_both_adapters() {
 
         let restored = admit_pass_basis(&host, &mut registry, store.as_mut(), (2, 2));
         let later = admit_pass_basis(&host, &mut registry, store.as_mut(), (4, 3));
-        assert_eq!(restored.dependencies().tick(), 1, "{name}");
-        assert_eq!(later.dependencies().tick(), 2, "{name}");
+        let restored_tick = restored.dependencies().tick();
+        assert!(later.dependencies().tick() > restored_tick, "{name}");
         let recorded = first_step_node(&restored).coordinate().artifact_digest();
         let step = first_step_node(&later);
         assert!(step.input_digests().contains(&recorded), "{name}");
