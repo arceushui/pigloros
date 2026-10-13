@@ -11,7 +11,7 @@
 //! code-2 bytes, and the projection accessors never make a record local
 //! authority.
 
-use crate::canonical_length::{CanonicalEmit, CanonicalSink};
+use crate::crypto::{CanonicalEmit, CanonicalSink};
 
 use super::{
     authority_envelope::MAX_IMPORTED_PRINCIPAL_OWNER_BINDING_BYTES_V1, domain_digest,
@@ -207,7 +207,7 @@ impl ImportedForkAdmissionRecordV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     /// Return the ADR-099 `FAR1` digest over the exact code-2 bytes.
@@ -286,7 +286,7 @@ impl ImportedForkPublicationOperationV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     /// The carried code-2 authority-origin digest.

@@ -3,7 +3,7 @@
 //! These codecs establish neither Fork admission nor append authority. A
 //! trusted host must use them with the admitted-Fork append transaction.
 
-use crate::canonical_length::{head as encode_head, CanonicalEmit, CanonicalSink};
+use crate::crypto::{head as encode_head, CanonicalEmit, CanonicalSink};
 
 use crate::{CorrelationId, EntityId, EventId, ForkAdmissionRecordV1, Hash, TimelineId, WallTime};
 
@@ -235,7 +235,7 @@ impl ForkClassifierSourceV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     #[must_use]
@@ -343,7 +343,7 @@ impl ForkClassifierTableV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     #[must_use]
@@ -433,7 +433,7 @@ impl ForkClassifierRegistrationV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     #[must_use]
@@ -669,7 +669,7 @@ impl ForkAppendOperationV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     #[must_use]
@@ -873,7 +873,7 @@ impl EventOriginRecordV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     /// Return the domain-separated digest over complete canonical `EOR1` bytes.
@@ -975,7 +975,7 @@ impl ForkInterventionAdmissionV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     /// Return the domain-separated digest over complete canonical `FIA1` bytes.
