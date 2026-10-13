@@ -4,6 +4,8 @@
 //! is derived only from an exact `FAE1` plus the admitted policy generation;
 //! this value is not itself proof that any import committed.
 
+use crate::canonical_length::{CanonicalEmit, CanonicalSink};
+
 use super::{
     array,
     authority_envelope::ForkAttributionAuthorityEnvelopeV1,
@@ -108,22 +110,17 @@ impl ImportedForkAttributionAdmissionV1 {
     /// Encode the exact twelve-field deterministic-CBOR `IFA1` array.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        let value = &self.0;
         let mut out = Vec::with_capacity(448);
-        array(&mut out, 12);
-        text(&mut out, "IFA1");
-        uint(&mut out, 1);
-        hash(&mut out, value.import_operation_id);
-        hash(&mut out, value.authority_origin_digest);
-        hash(&mut out, value.full_envelope_digest);
-        bytes(&mut out, &value.issuer.to_canonical_cbor());
-        hash(&mut out, value.issuer_policy_digest);
-        uint(&mut out, value.issuer_policy_generation);
-        timeline(&mut out, value.child_timeline_id);
-        uint(&mut out, value.final_logical_head);
-        hash(&mut out, value.closure_root);
-        hash(&mut out, value.fork_admission_digest);
+        self.emit(&mut out);
         out
+    }
+
+    /// Measure these exact canonical bytes without allocating an encoding buffer.
+    ///
+    /// # Errors
+    /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
+    pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
+        crate::canonical_length::measure(self)
     }
 
     /// Decode exact canonical `IFA1` bytes.
@@ -152,5 +149,24 @@ impl ImportedForkAttributionAdmissionV1 {
         wire.finish()?;
         canonical(bytes_in, &record.to_canonical_cbor())?;
         Ok(record)
+    }
+}
+
+impl CanonicalEmit for ImportedForkAttributionAdmissionV1 {
+    fn emit(&self, out: &mut impl CanonicalSink) {
+        let value = &self.0;
+        array(out, 12);
+        text(out, "IFA1");
+        uint(out, 1);
+        hash(out, value.import_operation_id);
+        hash(out, value.authority_origin_digest);
+        hash(out, value.full_envelope_digest);
+        out.nested(&value.issuer);
+        hash(out, value.issuer_policy_digest);
+        uint(out, value.issuer_policy_generation);
+        timeline(out, value.child_timeline_id);
+        uint(out, value.final_logical_head);
+        hash(out, value.closure_root);
+        hash(out, value.fork_admission_digest);
     }
 }
