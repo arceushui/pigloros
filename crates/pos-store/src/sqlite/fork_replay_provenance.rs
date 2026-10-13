@@ -369,7 +369,9 @@ mod tests {
                 });
                 assert_eq!(result.is_ok(), success);
                 assert_eq!(budget.check_time().is_ok(), success);
-                if success { assert_eq!(budget.remaining_native_bytes(), 0); }
+                if success {
+                    assert_eq!(budget.remaining_native_bytes(), 0);
+                }
             }
         }
         Ok(())
@@ -678,7 +680,9 @@ mod tests {
                 });
                 assert_eq!(result.is_ok(), success);
                 assert_eq!(budget.check_time().is_ok(), success);
-                if success { assert_eq!(budget.remaining_native_bytes(), 0); }
+                if success {
+                    assert_eq!(budget.remaining_native_bytes(), 0);
+                }
             }
         }
         Ok(())
