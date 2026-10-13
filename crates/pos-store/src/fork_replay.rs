@@ -16,6 +16,58 @@ pub(crate) trait CanonicalSizeV1 {
     fn canonical_size(&self) -> Result<usize, pos_core::CanonicalLengthErrorV1>;
 }
 
+/// Private validator context. Only the protected bridge borrows a ledger;
+/// ordinary publication reads retain their existing, non-protected contract.
+/// A failed debit remains latched in the borrowed ledger even when the native
+/// validator translates it to its existing closed error vocabulary.
+pub(crate) struct NativeReadContextV1<'budget, 'clock> {
+    budget: Option<&'budget mut ForkReplayReadBudgetV1<'clock>>,
+}
+
+impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
+    pub(crate) const fn ordinary() -> Self {
+        Self { budget: None }
+    }
+
+    pub(crate) const fn protected(budget: &'budget mut ForkReplayReadBudgetV1<'clock>) -> Self {
+        Self { budget: Some(budget) }
+    }
+
+    pub(crate) fn check(&mut self) -> Result<(), crate::ForkManifestPublicationErrorV1> {
+        self.budget
+            .as_deref_mut()
+            .map_or(Ok(()), ForkReplayReadBudgetV1::check_time)
+            .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
+    }
+
+    pub(crate) fn bytes(
+        &mut self,
+        length: usize,
+    ) -> Result<(), crate::ForkManifestPublicationErrorV1> {
+        self.budget
+            .as_deref_mut()
+            .map_or(Ok(()), |budget| budget.charge_bytes(length))
+            .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
+    }
+
+    pub(crate) fn canonical(
+        &mut self,
+        length: Result<usize, pos_core::CanonicalLengthErrorV1>,
+    ) -> Result<(), crate::ForkManifestPublicationErrorV1> {
+        self.budget
+            .as_deref_mut()
+            .map_or(Ok(()), |budget| budget.charge_canonical(length))
+            .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
+    }
+
+    pub(crate) fn suffix_row(&mut self) -> Result<(), crate::ForkManifestPublicationErrorV1> {
+        self.budget
+            .as_deref_mut()
+            .map_or(Ok(()), |budget| budget.charge_rows(1))
+            .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
+    }
+}
+
 /// Closed failures of the bounded attribution read, without protected details.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ForkReplayAuthorityReadErrorV1 {
