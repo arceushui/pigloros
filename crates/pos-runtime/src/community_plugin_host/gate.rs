@@ -6,13 +6,14 @@
 //! re-verifies the PMF1 release signature. It writes nothing, reads no clock, and caches
 //! nothing. Linux only, like the registry port.
 
+use pos_core::trusted_clock::PluginTrustWallSourceV1;
 use pos_crypto::plugin_execution::PluginExecutionProjectionV1;
 use pos_crypto::plugin_manifest::verify_plugin_release_signature_v1;
 use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
 };
 use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1, VerifiedReleaseBundleV1};
-use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
+use pos_store::plugin_trust_registry::{PluginTrustPolicyRegistryV1, TrustedUtcSecondV1};
 
 use super::error::CommunityPluginHostErrorV1;
 
@@ -31,6 +32,10 @@ pub use material::{
 };
 pub use pass::CommunityPassV1;
 pub use released::{CommunityPassAuthorizationV1, GatedCommunityReleaseV1, ReleaseIdentityV1};
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;
 
 /// What the composition expects the address to hold.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,6 +109,47 @@ pub fn gate_community_release_v1(
     );
     let authorization = CommunityPassAuthorizationV1::issue(&gated, pass);
     Ok((gated, authorization))
+}
+
+/// Gate one release for the first Driver of a Plugin (ADR-061 revision 8 decision 5).
+///
+/// It samples one trusted UTC second from `wall`, opens a pass at that second and `tick`, and
+/// runs the same gate as [`gate_community_release_v1()`]. The authorization of that pass is
+/// dropped, so the gated release proves the gate at its own second and Tick only. The call is
+/// read-only like the gate: it writes nothing to the registry. A failed sample is
+/// `ArtifactTrustDenied{TrustStateUnavailable}` through the registry mapping.
+///
+/// # Errors
+/// Returns the closed host error of the failed sample or of the first failing gate step.
+pub fn gate_for_driver(
+    trust: &(impl PluginTrustPolicyRegistryV1 + ?Sized),
+    expectation: &CommunityPluginExpectationV1,
+    source: &(impl ReleaseSourceV1 + ?Sized),
+    address: &BundleAddressV1,
+    material: &(impl PluginTrustMaterialSourceV1 + ?Sized),
+    wall: &mut impl PluginTrustWallSourceV1,
+    tick: u64,
+) -> Result<GatedCommunityReleaseV1, CommunityPluginHostErrorV1> {
+    TrustedUtcSecondV1::from_source(wall)
+        .map_err(host_error_for_registry_v1)
+        .and_then(|utc| {
+            let pass = CommunityPassV1::open(utc, tick);
+            gate_at(trust, expectation, source, address, material, &pass)
+        })
+}
+
+/// The gated release of `pass`, without its authorization. The pass is a parameter so that a
+/// test can hand in a closed one.
+fn gate_at(
+    trust: &(impl PluginTrustPolicyRegistryV1 + ?Sized),
+    expectation: &CommunityPluginExpectationV1,
+    source: &(impl ReleaseSourceV1 + ?Sized),
+    address: &BundleAddressV1,
+    material: &(impl PluginTrustMaterialSourceV1 + ?Sized),
+    pass: &CommunityPassV1,
+) -> Result<GatedCommunityReleaseV1, CommunityPluginHostErrorV1> {
+    gate_community_release_v1(trust, expectation, source, address, material, pass)
+        .map(|(gated, _authorization)| gated)
 }
 
 type Projections = (

@@ -36,6 +36,8 @@ use pos_core::{
     PreparedOwnTracksIngressV1, Seq, StoredErasureManifestV1, Timeline, TimelineId, TimelineMeta,
     TimelineMode, WallTime,
 };
+#[cfg(target_os = "linux")]
+use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
 use pos_store::{
     ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityPortV1,
     ForkAdmissionAuthoritySessionV1, ForkAdmissionDeliveryJournalPortV1,
@@ -217,6 +219,25 @@ where
         }
     }
 }
+
+/// A standard host store that also carries the Plugin trust policy registry (ADR-061 revision 8
+/// decision 5).
+///
+/// The registry port and its store implementations are Linux only while this module is not, so
+/// the registry cannot be a supertrait of [`ErasureHostStore`]: the standard variant of
+/// [`OwnedErasureStoreV1`] boxes this trait on Linux and the plain host store elsewhere.
+#[cfg(target_os = "linux")]
+trait ErasureHostRegistryStore: ErasureHostStore + PluginTrustPolicyRegistryV1 {}
+
+#[cfg(target_os = "linux")]
+impl<T> ErasureHostRegistryStore for T where T: ErasureHostStore + PluginTrustPolicyRegistryV1 {}
+
+/// The object type of the standard owned store.
+#[cfg(target_os = "linux")]
+type HostStoreObjectV1 = dyn ErasureHostRegistryStore;
+/// The object type of the standard owned store.
+#[cfg(not(target_os = "linux"))]
+type HostStoreObjectV1 = dyn ErasureHostStore;
 
 /// Replaceable host authority used by the erasure coordinator.
 ///
@@ -1113,7 +1134,7 @@ impl<T> ErasureGatewayHostStore for T where
 }
 
 enum OwnedErasureStoreV1 {
-    Standard(Box<dyn ErasureHostStore>),
+    Standard(Box<HostStoreObjectV1>),
     Gateway(Box<dyn ErasureGatewayHostStore>),
 }
 
@@ -1131,15 +1152,29 @@ impl OwnedErasureStoreV1 {
             Self::Standard(_) => Err(ErasureHostErrorV1::AuthorizationDenied),
         }
     }
+
+    /// The Plugin trust policy registry of a standard store; a Gateway store has none.
+    #[cfg(all(target_os = "linux", any(test, feature = "local-admission-host")))]
+    fn registry_store(
+        &mut self,
+    ) -> Result<&mut dyn PluginTrustPolicyRegistryV1, ErasureHostErrorV1> {
+        match self {
+            Self::Standard(store) => {
+                let registry: &mut dyn PluginTrustPolicyRegistryV1 = store.as_mut();
+                Ok(registry)
+            }
+            Self::Gateway(_) => Err(ErasureHostErrorV1::AuthorizationDenied),
+        }
+    }
 }
 
-fn open_host_store(config: StoreConfig) -> Result<Box<dyn ErasureHostStore>, CoreError> {
+fn open_host_store(config: StoreConfig) -> Result<Box<HostStoreObjectV1>, CoreError> {
     match config {
         StoreConfig::Memory => Ok(Box::new(pos_store::memory::MemoryStore::new())),
         StoreConfig::Sqlite { path } => pos_store::sqlite::SqliteStore::open(&path)
-            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>),
+            .map(|store| Box::new(store) as Box<HostStoreObjectV1>),
         StoreConfig::SqliteInMemory => pos_store::sqlite::SqliteStore::open_in_memory()
-            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>),
+            .map(|store| Box::new(store) as Box<HostStoreObjectV1>),
     }
 }
 
@@ -1222,7 +1257,7 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns [`ErasureHostErrorV1::AdapterFailure`] when the adapter refuses
     /// the unique host gate binding.
-    fn new_closed(store: Box<dyn ErasureHostStore>) -> Result<Self, ErasureHostErrorV1> {
+    fn new_closed(store: Box<HostStoreObjectV1>) -> Result<Self, ErasureHostErrorV1> {
         Self::new_closed_store(OwnedErasureStoreV1::Standard(store))
     }
 
@@ -1284,7 +1319,7 @@ impl ErasureExecutionHostV1 {
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
         pos_store::sqlite::SqliteStore::open_read_only(path)
-            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
+            .map(|store| Box::new(store) as Box<HostStoreObjectV1>)
             .map_err(|_| ErasureHostErrorV1::AdapterFailure)
             .and_then(|store| Self::recover_verified_empty_with_limits(store, limits))
     }
@@ -1312,7 +1347,7 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns a closed adapter or recovery error before host publication.
     fn recover_with_composition(
-        store: Box<dyn ErasureHostStore>,
+        store: Box<HostStoreObjectV1>,
         composition: &ErasureCoordinatorCompositionV1,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
@@ -1335,7 +1370,7 @@ impl ErasureExecutionHostV1 {
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
         pos_store::sqlite::SqliteStore::open_read_only(path)
-            .map(|store| Box::new(store) as Box<dyn ErasureHostStore>)
+            .map(|store| Box::new(store) as Box<HostStoreObjectV1>)
             .map_err(|_| ErasureHostErrorV1::AdapterFailure)
             .and_then(|store| Self::recover_with_composition(store, composition, limits))
     }
@@ -2047,6 +2082,31 @@ impl ErasureExecutionHostV1 {
             host: self,
             generation,
         })
+    }
+
+    /// Run one closure on the Plugin trust policy registry of the owned store (ADR-061
+    /// revision 8 decision 5).
+    ///
+    /// The receiver is the host, not the public command sender: the sender is what every holder
+    /// of the host gets, and this method hands out the registry's `admit`, `rollback`,
+    /// `provision` and `advance_policy`, so it is crate private and `CommunityEvaluationWorldV1`
+    /// is its only caller. Like `with_scheduled_admission` it checks the generation before it
+    /// runs the closure; the host has no sender generation, so it checks the one it has
+    /// installed (a closed host is `RecoveryUnavailable`). The closure sees the registry only
+    /// as the port, and the borrow cannot outlive it.
+    ///
+    /// # Errors
+    /// Returns `RecoveryUnavailable` or `StaleGeneration` for a host that is not ready, and
+    /// `AuthorizationDenied` for a Gateway store, which has no registry; the closure runs only
+    /// on success.
+    #[cfg(all(target_os = "linux", any(test, feature = "local-admission-host")))]
+    pub(crate) fn with_plugin_trust_registry<T>(
+        &mut self,
+        operation: impl FnOnce(&mut dyn PluginTrustPolicyRegistryV1) -> T,
+    ) -> Result<T, ErasureHostErrorV1> {
+        self.ready_generation()
+            .and_then(|generation| self.ensure_generation(generation))?;
+        self.store.registry_store().map(operation)
     }
 
     fn ready_generation(&self) -> Result<ErasureReferenceV1, ErasureHostErrorV1> {
@@ -2877,7 +2937,7 @@ impl ErasureExecutionHostV1 {
     /// through [`Self::open_with_authority`].
     #[cfg(test)]
     fn recover_verified_empty(
-        store: Box<dyn ErasureHostStore>,
+        store: Box<HostStoreObjectV1>,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
         Self::recover_verified_empty_with_limits(
@@ -2891,7 +2951,7 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns a closed adapter or recovery error before host publication.
     fn recover_verified_empty_with_limits(
-        mut store: Box<dyn ErasureHostStore>,
+        mut store: Box<HostStoreObjectV1>,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
         let inventory = store
@@ -2917,7 +2977,7 @@ impl ErasureExecutionHostV1 {
     /// verification, current-store matching, or publication fails.
     #[cfg(test)]
     fn recover_from_verified_query<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
-        store: Box<dyn ErasureHostStore>,
+        store: Box<HostStoreObjectV1>,
         query: &mut Q,
         maximum_requests: usize,
     ) -> Result<Self, ErasureHostErrorV1> {
@@ -2933,7 +2993,7 @@ impl ErasureExecutionHostV1 {
     /// # Errors
     /// Returns a closed adapter or recovery error before host publication.
     fn recover_from_verified_query_with_limits<Q: ErasureVerifiedInventoryQueryV1 + ?Sized>(
-        store: Box<dyn ErasureHostStore>,
+        store: Box<HostStoreObjectV1>,
         query: &mut Q,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
@@ -7307,6 +7367,137 @@ mod tests {
             Err(ErasureErrorV1::Unauthorized)
         );
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    mod registry_facade;
+
+    /// The registry port of the fault store delegates to the Memory store it wraps, so a host
+    /// opened over a fault store is a valid standard host on Linux (R8-W3).
+    #[cfg(target_os = "linux")]
+    mod registry_delegation {
+        use pos_conformance::PluginTrustPolicyAnchorV1;
+        use pos_crypto::plugin_trust::{
+            ValidatedPluginManifestProjectionV1, VerifiedPluginTrustEvidenceV1,
+        };
+        use pos_store::plugin_trust_registry::{
+            ActivationEventInputV1, ActiveReleaseV1, AdmittedPluginReleaseReceiptV1,
+            CurrentReleaseEvaluationV1, PluginRollbackReceiptV1, PluginTrustLedgerRowV1,
+            PluginTrustPolicyRegistryErrorV1, PluginTrustPolicyRegistryV1, PolicyAdvanceOutcomeV1,
+            ProvisionOutcomeV1, RetainedPolicyStateV1, RetainedReleaseDecisionV1,
+            TrustedUtcSecondV1,
+        };
+
+        use super::FaultStoreV1;
+
+        type Registry<T> = Result<T, PluginTrustPolicyRegistryErrorV1>;
+
+        impl PluginTrustPolicyRegistryV1 for FaultStoreV1 {
+            fn provision(
+                &mut self,
+                anchor: &PluginTrustPolicyAnchorV1,
+                tps1_bytes: &[u8],
+            ) -> Registry<ProvisionOutcomeV1> {
+                self.inner.provision(anchor, tps1_bytes)
+            }
+
+            fn admit(
+                &mut self,
+                anchor: &PluginTrustPolicyAnchorV1,
+                tps1_bytes: &[u8],
+                evidence: &VerifiedPluginTrustEvidenceV1,
+                projection: &ValidatedPluginManifestProjectionV1,
+                trusted_utc: TrustedUtcSecondV1,
+                tick: u64,
+                activation: ActivationEventInputV1,
+            ) -> Registry<AdmittedPluginReleaseReceiptV1> {
+                self.inner.admit(
+                    anchor,
+                    tps1_bytes,
+                    evidence,
+                    projection,
+                    trusted_utc,
+                    tick,
+                    activation,
+                )
+            }
+
+            fn advance_policy(
+                &mut self,
+                anchor: &PluginTrustPolicyAnchorV1,
+                tps1_bytes: &[u8],
+                evidence: &VerifiedPluginTrustEvidenceV1,
+                trusted_utc: TrustedUtcSecondV1,
+                tick: u64,
+            ) -> Registry<PolicyAdvanceOutcomeV1> {
+                self.inner
+                    .advance_policy(anchor, tps1_bytes, evidence, trusted_utc, tick)
+            }
+
+            fn rollback(
+                &mut self,
+                anchor: &PluginTrustPolicyAnchorV1,
+                tps1_bytes: &[u8],
+                evidence: &VerifiedPluginTrustEvidenceV1,
+                target: &ValidatedPluginManifestProjectionV1,
+                trusted_utc: TrustedUtcSecondV1,
+                tick: u64,
+                activation: ActivationEventInputV1,
+            ) -> Registry<PluginRollbackReceiptV1> {
+                self.inner.rollback(
+                    anchor,
+                    tps1_bytes,
+                    evidence,
+                    target,
+                    trusted_utc,
+                    tick,
+                    activation,
+                )
+            }
+
+            fn retained_release_decision(
+                &self,
+                scope: &str,
+                pmf1_digest: [u8; 32],
+            ) -> Registry<Option<RetainedReleaseDecisionV1>> {
+                self.inner.retained_release_decision(scope, pmf1_digest)
+            }
+
+            fn active_release(
+                &self,
+                scope: &str,
+                plugin_id: &str,
+            ) -> Registry<Option<ActiveReleaseV1>> {
+                self.inner.active_release(scope, plugin_id)
+            }
+
+            fn retained_policy_state(&self, scope: &str) -> Registry<RetainedPolicyStateV1> {
+                self.inner.retained_policy_state(scope)
+            }
+
+            fn ledger(&self, scope: &str) -> Registry<Vec<PluginTrustLedgerRowV1>> {
+                self.inner.ledger(scope)
+            }
+
+            fn evaluate_current_release(
+                &self,
+                anchor: &PluginTrustPolicyAnchorV1,
+                tps1_bytes: &[u8],
+                evidence: &VerifiedPluginTrustEvidenceV1,
+                projection: &ValidatedPluginManifestProjectionV1,
+                trusted_utc: TrustedUtcSecondV1,
+                tick: u64,
+            ) -> Registry<CurrentReleaseEvaluationV1> {
+                self.inner.evaluate_current_release(
+                    anchor,
+                    tps1_bytes,
+                    evidence,
+                    projection,
+                    trusted_utc,
+                    tick,
+                )
+            }
+        }
     }
 
     fn fault_store_with_control(fault: FaultModeV1) -> (FaultStoreV1, Arc<ResolveStateControlV1>) {

@@ -157,7 +157,7 @@ impl InstalledPluginReleaseV1 {
 pub fn install_plugin_release_v1(
     source: &impl ReleaseSourceV1,
     address: &BundleAddressV1,
-    registry: &mut impl PluginTrustPolicyRegistryV1,
+    registry: &mut (impl PluginTrustPolicyRegistryV1 + ?Sized),
     wall: &mut impl PluginTrustWallSourceV1,
     request: PluginInstallRequestV1<'_>,
 ) -> Result<InstalledPluginReleaseV1, PluginReleaseInstallErrorV1> {

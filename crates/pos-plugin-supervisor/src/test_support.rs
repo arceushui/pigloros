@@ -112,12 +112,10 @@ pub fn pin_of(
 /// The pin of a community Plugin.
 #[must_use]
 pub fn community_pin(byte: u8, role: &str) -> PluginPinV1 {
-    pin_of(
-        DomainImplementationKindV1::Plugin,
-        PluginIsolationV1::GovernedCommunity,
-        byte,
-        role,
-    )
+    ok(pos_runtime::community_pin_v1(
+        Hash::from_bytes([byte; 32]),
+        vec![role.to_owned()],
+    ))
 }
 
 /// An optional capability, which negotiation records as not granted.
