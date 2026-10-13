@@ -3527,7 +3527,8 @@ impl ForkChainRow {
     }
 
     fn decode(self, current: TimelineId) -> Result<DecodedForkChainRow, CoreError> {
-        self.decode_fields().map_err(|error| error.into_core(current))
+        self.decode_fields()
+            .map_err(|error| error.into_core(current))
     }
 
     /// One semantic owner for ordinary and protected metadata. The closed
