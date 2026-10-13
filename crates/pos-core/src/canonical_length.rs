@@ -41,7 +41,7 @@ impl CanonicalSink for Vec<u8> {
     }
 }
 
-pub(crate) struct LengthSink {
+struct LengthSink {
     length: Option<usize>,
     maximum: usize,
 }
