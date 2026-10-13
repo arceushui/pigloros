@@ -16,14 +16,14 @@
 
 use pos_core::{
     store::EventReadBounds, trusted_clock::PluginTrustWallSourceV1, AppendDedupKey,
-    AppendDedupScope, AppendIdentity, EntityId, ErasureRecoveryLimitsV1, Event, Hash,
-    PipelineAttemptIdV1, PipelineEvidenceRefV1, PipelineSecurityRevisionsV1, Seq, SeqRange,
+    AppendDedupScope, AppendIdentity, EntityId, ErasureHostErrorV1, ErasureRecoveryLimitsV1, Event,
+    Hash, PipelineAttemptIdV1, PipelineEvidenceRefV1, PipelineSecurityRevisionsV1, Seq, SeqRange,
     TimelineId, TimelineMeta,
 };
 use pos_crypto::plugin_trust::verify_plugin_trust_v1;
 use pos_plugin_publisher::InstalledPluginReleaseV1;
 use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
-use pos_store::plugin_trust_registry::TrustedUtcSecondV1;
+use pos_store::plugin_trust_registry::{PluginTrustPolicyRegistryErrorV1, TrustedUtcSecondV1};
 use pos_store::StoreConfig;
 
 use super::error::{CommunityPluginHostErrorV1, TrustDenialBasisV1};
@@ -41,13 +41,9 @@ use super::install::{
     CommunityInstallRequestV1,
 };
 use crate::{
-    ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, LocalScheduledAdmissionHostV1,
-    PluginRegistry, ScheduledPassAdmissionV1,
+    ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureReadSenderV1,
+    LocalScheduledAdmissionHostV1, PluginRegistry, ScheduledPassAdmissionV1,
 };
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests;
 
 /// `ArtifactTrustDenied{TrustStateUnavailable}`, the answer for every unusable host or store.
 const UNAVAILABLE: CommunityPluginHostErrorV1 = CommunityPluginHostErrorV1::ArtifactTrustDenied {
@@ -57,8 +53,39 @@ const UNAVAILABLE: CommunityPluginHostErrorV1 = CommunityPluginHostErrorV1::Arti
 /// The result of one world operation.
 type WorldResult<T> = Result<T, CommunityPluginHostErrorV1>;
 
-/// The commit time every pass of the world is admitted at.
+/// The commit time every pass of the world is admitted at. Any value works: the local
+/// admission host only records it as the commit time of the Events, and no trust decision of
+/// the world reads it (the gate samples its own second from the caller's wall source).
 const COMMIT_NOW_SECS: u64 = 1;
+
+/// The content of the provider validation evidence of every pass. Any value works: the local
+/// admission host accepts a well-formed reference and the world never resolves it.
+const PROVIDER_VALIDATION_BYTE: u8 = 60;
+
+/// The content of the idempotency scope of every pass. Any value works: the scope only
+/// separates the world's keys from other writers', and the world has none.
+const SCOPE_BYTE: u8 = 62;
+
+/// `ArtifactTrustDenied{TrustStateUnavailable}` for a fault whose payload is not needed.
+fn unavailable<T, E>(result: Result<T, E>) -> WorldResult<T> {
+    result.or(Err(UNAVAILABLE))
+}
+
+/// A host or store fault is `TrustStateUnavailable`; otherwise the operation's own result.
+fn flat<T, E>(result: Result<WorldResult<T>, E>) -> WorldResult<T> {
+    unavailable(result).and_then(std::convert::identity)
+}
+
+/// A registry operation whose outcome is not needed, mapped like the registry refusals.
+fn registry_unit<T, E>(
+    result: Result<Result<T, PluginTrustPolicyRegistryErrorV1>, E>,
+) -> WorldResult<()> {
+    flat(result.map(|inner| {
+        inner
+            .map(|_outcome| ())
+            .map_err(host_error_for_registry_v1)
+    }))
+}
 
 /// The two hosts, the registry the Drivers are registered in, and the Timelines of the world.
 ///
@@ -82,30 +109,30 @@ struct Observed {
 
 impl CommunityEvaluationWorldV1 {
     /// A world whose registry is provisioned from `genesis`: its policy anchor and its signed
-    /// TPS1, which must be the genesis TPS1 the anchor pins.
+    /// TPS1, which must be the genesis TPS1 the anchor pins (the current one is not adopted
+    /// here: `provision` takes the genesis and a newer policy is adopted later by
+    /// [`Self::refresh()`]).
     ///
     /// # Errors
     /// Returns `TrustStateUnavailable` when a host cannot be opened, and the registry mapping of
     /// the refusal of `provision`.
     pub fn open(genesis: &CommunityPluginTrustMaterialV1) -> WorldResult<Self> {
-        open_parts()
-            .or(Err(UNAVAILABLE))
-            .and_then(|(pass_host, registry_host, pass_timeline, activation)| {
-                let plugins = PluginRegistry::new()
-                    .with_erasure_gate(pass_host.containment_gate());
-                let mut world = Self {
-                    pass_host,
-                    registry_host,
-                    plugins,
-                    pass_timeline,
-                    target: ActivationTargetV1 {
-                        timeline: activation,
-                        entity: EntityId::new(),
-                    },
-                    attempts: 0,
-                };
-                world.provision(genesis).map(|()| world)
-            })
+        unavailable(open_parts()).and_then(|parts| {
+            let plugins = PluginRegistry::new()
+                .with_erasure_gate(parts.pass_host.containment_gate());
+            let mut world = Self {
+                pass_host: parts.pass_host,
+                registry_host: parts.registry_host,
+                plugins,
+                pass_timeline: parts.pass_timeline,
+                target: ActivationTargetV1 {
+                    timeline: parts.activation,
+                    entity: EntityId::new(),
+                },
+                attempts: 0,
+            };
+            world.provision(genesis).map(|()| world)
+        })
     }
 
     /// The registry the caller registers its Drivers in.
@@ -117,9 +144,10 @@ impl CommunityEvaluationWorldV1 {
     /// Event on the registry store.
     ///
     /// The world builds the trust evidence at one sampled UTC second and `tick`, and the signed
-    /// installer samples `wall` again for the registry's own second, so the source must return
-    /// the same second twice (the fixture instant does); two seconds are refused by the
-    /// registry's coordinate check. Installing the same release again is the registry's
+    /// installer samples `wall` again for the registry's own second. The wall source is sealed,
+    /// so the world cannot hand the installer the first sample as a one-shot source: the source
+    /// must return the same second twice (the fixture instant does), and two seconds are
+    /// refused (pinned by a test). Installing the same release again is the registry's
     /// idempotent replay.
     ///
     /// # Errors
@@ -153,12 +181,10 @@ impl CommunityEvaluationWorldV1 {
                     evidence: &evidence,
                     target: self.target,
                 };
-                self.registry_host
-                    .with_plugin_trust_registry(|registry| {
-                        install_community_release_v1(source, address, registry, wall, &request)
-                    })
-                    .or(Err(UNAVAILABLE))
-                    .and_then(|installed| installed.map_err(host_error_for_install_v1))
+                let installed = self.registry_host.with_plugin_trust_registry(|registry| {
+                    install_community_release_v1(source, address, registry, wall, &request)
+                });
+                flat(installed.map(|result| result.map_err(host_error_for_install_v1)))
             })
     }
 
@@ -177,20 +203,18 @@ impl CommunityEvaluationWorldV1 {
         wall: &mut impl PluginTrustWallSourceV1,
         tick: u64,
     ) -> WorldResult<GatedCommunityReleaseV1> {
-        self.registry_host
-            .with_plugin_trust_registry(|registry| {
-                gate_for_driver(
-                    &*registry,
-                    expectation,
-                    source,
-                    address,
-                    material,
-                    wall,
-                    tick,
-                )
-            })
-            .or(Err(UNAVAILABLE))
-            .and_then(std::convert::identity)
+        let gated = self.registry_host.with_plugin_trust_registry(|registry| {
+            gate_for_driver(
+                &*registry,
+                expectation,
+                source,
+                address,
+                material,
+                wall,
+                tick,
+            )
+        });
+        flat(gated)
     }
 
     /// Adopt newer policy from `material`: the host's `refresh_policy` on the world's registry.
@@ -205,14 +229,10 @@ impl CommunityEvaluationWorldV1 {
         wall: &mut impl PluginTrustWallSourceV1,
         tick: u64,
     ) -> WorldResult<()> {
-        self.registry_host
-            .with_plugin_trust_registry(|registry| {
-                members
-                    .refresh_policy(registry, material, wall, tick)
-                    .map(|_outcome| ())
-            })
-            .or(Err(UNAVAILABLE))
-            .and_then(|refreshed| refreshed.map_err(host_error_for_registry_v1))
+        let refreshed = self.registry_host.with_plugin_trust_registry(|registry| {
+            members.refresh_policy(registry, material, wall, tick)
+        });
+        registry_unit(refreshed)
     }
 
     /// Run one pass of `members` at `tick` on the pass Timeline, committing through the pass
@@ -235,25 +255,23 @@ impl CommunityEvaluationWorldV1 {
             })
             .and_then(|(observed, admission)| {
                 let (pass_host, plugins) = (&mut self.pass_host, &mut self.plugins);
-                self.registry_host
-                    .with_plugin_trust_registry(|trust| {
-                        pass_host.command_sender().and_then(|mut sender| {
-                            sender.with_scheduled_admission(|ports| {
-                                let request = CommunityPassRequestV1 {
-                                    tick,
-                                    timeline,
-                                    ancestry: &observed.chain,
-                                    observed_through: observed.head,
-                                    stage: CommunityStageV1::WithEvents(&observed.prefix),
-                                    admission,
-                                    port: ports,
-                                };
-                                members.run_pass(plugins, &*trust, wall, request)
-                            })
+                let passed = self.registry_host.with_plugin_trust_registry(|trust| {
+                    pass_host.command_sender().and_then(|mut sender| {
+                        sender.with_scheduled_admission(|ports| {
+                            let request = CommunityPassRequestV1 {
+                                tick,
+                                timeline,
+                                ancestry: &observed.chain,
+                                observed_through: observed.head,
+                                stage: CommunityStageV1::WithEvents(&observed.prefix),
+                                admission,
+                                port: ports,
+                            };
+                            members.run_pass(plugins, &*trust, wall, request)
                         })
                     })
-                    .and_then(std::convert::identity)
-                    .or(Err(UNAVAILABLE))
+                });
+                unavailable(passed.and_then(std::convert::identity))
             })
     }
 
@@ -267,29 +285,31 @@ impl CommunityEvaluationWorldV1 {
 
     fn provision(&mut self, genesis: &CommunityPluginTrustMaterialV1) -> WorldResult<()> {
         let (anchor, tps1) = (genesis.policy_anchor(), genesis.tps1_bytes());
-        self.registry_host
-            .with_plugin_trust_registry(|registry| {
-                registry.provision(anchor, tps1).map(|_outcome| ())
-            })
-            .or(Err(UNAVAILABLE))
-            .and_then(|provisioned| provisioned.map_err(host_error_for_registry_v1))
+        let provisioned = self
+            .registry_host
+            .with_plugin_trust_registry(|registry| registry.provision(anchor, tps1));
+        registry_unit(provisioned)
     }
 }
 
-type Parts = (
-    ErasureExecutionHostV1,
-    ErasureExecutionHostV1,
-    TimelineId,
-    TimelineId,
-);
+/// Both hosts and their Timelines.
+struct Parts {
+    pass_host: ErasureExecutionHostV1,
+    registry_host: ErasureExecutionHostV1,
+    pass_timeline: TimelineId,
+    activation: TimelineId,
+}
 
 /// Both hosts, each with one Timeline: the pass Timeline and the activation Timeline.
-fn open_parts() -> Result<Parts, pos_core::ErasureHostErrorV1> {
+fn open_parts() -> Result<Parts, ErasureHostErrorV1> {
     open_host().and_then(|mut pass_host| {
         open_host().and_then(|mut registry_host| {
             create_timeline(&mut pass_host, "community-pass").and_then(|pass_timeline| {
-                create_timeline(&mut registry_host, "plugin-activation").map(|activation| {
-                    (pass_host, registry_host, pass_timeline, activation)
+                create_timeline(&mut registry_host, "plugin-activation").map(|activation| Parts {
+                    pass_host,
+                    registry_host,
+                    pass_timeline,
+                    activation,
                 })
             })
         })
@@ -297,7 +317,7 @@ fn open_parts() -> Result<Parts, pos_core::ErasureHostErrorV1> {
 }
 
 /// A host over a Memory store with the closed coordinator composition.
-fn open_host() -> Result<ErasureExecutionHostV1, pos_core::ErasureHostErrorV1> {
+fn open_host() -> Result<ErasureExecutionHostV1, ErasureHostErrorV1> {
     ErasureExecutionHostV1::open_with_authority(
         StoreConfig::Memory,
         &ErasureCoordinatorCompositionV1::closed(),
@@ -308,7 +328,7 @@ fn open_host() -> Result<ErasureExecutionHostV1, pos_core::ErasureHostErrorV1> {
 fn create_timeline(
     host: &mut ErasureExecutionHostV1,
     name: &str,
-) -> Result<TimelineId, pos_core::ErasureHostErrorV1> {
+) -> Result<TimelineId, ErasureHostErrorV1> {
     host.command_sender()
         .and_then(|mut sender| sender.create_timeline(name))
         .map(|timeline| timeline.id())
@@ -319,10 +339,19 @@ const fn unbounded() -> EventReadBounds {
     EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX)
 }
 
+/// The whole committed history of `timeline`, through an open reader.
+fn read_whole(
+    reader: &mut ErasureReadSenderV1<'_>,
+    timeline: TimelineId,
+) -> Result<Vec<Event>, ErasureHostErrorV1> {
+    reader.read_bounded(timeline, SeqRange::all(), unbounded())
+}
+
 fn read_all(host: &mut ErasureExecutionHostV1, timeline: TimelineId) -> WorldResult<Vec<Event>> {
-    host.read_sender()
-        .and_then(|mut reader| reader.read_bounded(timeline, SeqRange::all(), unbounded()))
-        .or(Err(UNAVAILABLE))
+    unavailable(
+        host.read_sender()
+            .and_then(|mut reader| read_whole(&mut reader, timeline)),
+    )
 }
 
 /// Observe the pass Timeline before the pass is staged: the admission fence revisions (the
@@ -343,22 +372,18 @@ fn observe(
         .or(Err(UNAVAILABLE))
         .and_then(|revisions| revisions.or(Err(UNAVAILABLE)))
         .and_then(|revisions| {
-            host.read_sender()
-                .and_then(|mut reader| {
-                    reader.logical_head(timeline).and_then(|head| {
-                        reader
-                            .read_bounded(timeline, SeqRange::all(), unbounded())
-                            .and_then(|prefix| {
-                                reader.fork_ancestry(timeline).map(|chain| Observed {
-                                    revisions,
-                                    head,
-                                    prefix,
-                                    chain,
-                                })
-                            })
+            unavailable(host.read_sender().and_then(|mut reader| {
+                reader.logical_head(timeline).and_then(|head| {
+                    read_whole(&mut reader, timeline).and_then(|prefix| {
+                        reader.fork_ancestry(timeline).map(|chain| Observed {
+                            revisions,
+                            head,
+                            prefix,
+                            chain,
+                        })
                     })
                 })
-                .or(Err(UNAVAILABLE))
+            }))
         })
 }
 
@@ -369,12 +394,13 @@ fn admission_for(attempt: u64, observed: &Observed) -> WorldResult<ScheduledPass
     let key = *blake3::hash(&id).as_bytes();
     PipelineAttemptIdV1::try_new(id)
         .and_then(|attempt_id| {
-            PipelineEvidenceRefV1::try_new(Hash::from_bytes([60; 32])).map(|validation| {
+            let content = Hash::from_bytes([PROVIDER_VALIDATION_BYTE; 32]);
+            PipelineEvidenceRefV1::try_new(content).map(|validation| {
                 ScheduledPassAdmissionV1 {
                     attempt_id,
                     idempotency: AppendIdentity::new(
                         AppendDedupKey::from_keyed_hash(key),
-                        AppendDedupScope::from_keyed_hash([62; 32]),
+                        AppendDedupScope::from_keyed_hash([SCOPE_BYTE; 32]),
                     ),
                     provider_validation: validation,
                     security_revisions: observed.revisions,
@@ -385,3 +411,7 @@ fn admission_for(attempt: u64, observed: &Observed) -> WorldResult<ScheduledPass
         })
         .or(Err(UNAVAILABLE))
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;

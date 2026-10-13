@@ -50,6 +50,13 @@ fn expectation() -> CommunityPluginExpectationV1 {
     }
 }
 
+/// `ArtifactTrustDenied{NotActive}`: the release is not the active one of the registry.
+const fn not_active() -> CommunityPluginHostErrorV1 {
+    CommunityPluginHostErrorV1::ArtifactTrustDenied {
+        basis: TrustDenialBasisV1::NotActive,
+    }
+}
+
 struct StagingPlugin(PluginId);
 
 impl Plugin for StagingPlugin {
@@ -188,7 +195,15 @@ impl Rig {
     }
 
     fn gate(&mut self) -> Result<GatedCommunityReleaseV1, CommunityPluginHostErrorV1> {
-        let source = FixedTrustMaterialSourceV1::new(self.material.clone());
+        let material = self.material.clone();
+        self.gate_with(&material)
+    }
+
+    fn gate_with(
+        &mut self,
+        material: &CommunityPluginTrustMaterialV1,
+    ) -> Result<GatedCommunityReleaseV1, CommunityPluginHostErrorV1> {
+        let source = FixedTrustMaterialSourceV1::new(material.clone());
         self.eval.gate_for_driver(
             &expectation(),
             &self.publisher.store,
@@ -200,10 +215,11 @@ impl Rig {
     }
 }
 
-#[test]
-fn install_gate_and_one_pass_commit_one_event_on_each_store() -> TestResult {
+/// A world with the release installed and gated, a Driver that stages one Event per step, and
+/// the host of one member.
+fn staged_world() -> BoxResult<(Rig, CommunityPluginHostV1<FakeMember>)> {
     let mut rig = Rig::new()?;
-    assert_eq!(rig.install()?, PluginTrustCommitOutcomeV1::Committed);
+    rig.install()?;
     rig.gate().map_err(|e| format!("{e:?}"))?;
     let member = rig.member()?;
     let plugin = StagingPlugin(member.plugin);
@@ -211,7 +227,28 @@ fn install_gate_and_one_pass_commit_one_event_on_each_store() -> TestResult {
         .plugins_mut()
         .register_generated(&plugin, None, Some(Box::new(StagingDriver)))?;
     rig.eval.plugins_mut().compose_non_participant_drivers()?;
-    let mut members = CommunityPluginHostV1::new(vec![member]);
+    Ok((rig, CommunityPluginHostV1::new(vec![member])))
+}
+
+#[test]
+fn consecutive_passes_commit_one_event_each_with_fresh_attempts() -> TestResult {
+    let (mut rig, mut members) = staged_world()?;
+    for expected in 1..=2 {
+        let outcome = rig
+            .eval
+            .run_pass(&mut members, &mut one_second(), TICK)
+            .map_err(|e| format!("{e:?}"))?;
+        let committed = matches!(outcome.result, PassResultV1::Committed(Some(_)));
+        assert!(committed, "{:?}", outcome.result);
+        let events = rig.eval.committed_events().map_err(|e| format!("{e:?}"))?;
+        assert_eq!(events.len(), expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn install_gate_and_one_pass_commit_one_event_on_each_store() -> TestResult {
+    let (mut rig, mut members) = staged_world()?;
     let outcome = rig
         .eval
         .run_pass(&mut members, &mut one_second(), TICK)
@@ -250,11 +287,108 @@ fn two_worlds_share_nothing() -> TestResult {
     let mut second = Rig::new()?;
     first.install()?;
     first.gate().map_err(|e| format!("{e:?}"))?;
-    let refused = second.gate().err();
-    let basis = TrustDenialBasisV1::NotActive;
-    let not_active = CommunityPluginHostErrorV1::ArtifactTrustDenied { basis };
-    assert_eq!(refused, Some(not_active));
+    assert_eq!(second.gate().err(), Some(not_active()));
     assert_eq!(second.eval.committed_events().map(|e| e.len()), Ok(0));
+    Ok(())
+}
+
+/// Installing at the first expired second is refused by the trust verification or the registry,
+/// and nothing is activated.
+#[test]
+fn an_install_at_the_expiry_second_is_refused() -> TestResult {
+    let mut rig = Rig::new()?;
+    let mut wall = ScriptedTrustedWallSourceV1::from_micros([60_000_000, 60_000_000]);
+    let refused = rig.eval.install(
+        &rig.publisher.store,
+        &rig.address,
+        &rig.material,
+        &mut wall,
+        TICK,
+    );
+    let basis = TrustDenialBasisV1::Expired;
+    let expired = CommunityPluginHostErrorV1::ArtifactTrustDenied { basis };
+    assert_eq!(refused.err(), Some(expired));
+    assert_eq!(rig.gate().err(), Some(not_active()));
+    Ok(())
+}
+
+/// The installer samples `wall` again: a source that moves to another second between the two
+/// samples is refused, and nothing is activated. This pins the documented choice of `install`.
+#[test]
+fn an_install_whose_two_samples_differ_is_refused() -> TestResult {
+    let mut rig = Rig::new()?;
+    let mut wall = ScriptedTrustedWallSourceV1::from_micros([50_000_000, 51_000_000]);
+    let refused = rig.eval.install(
+        &rig.publisher.store,
+        &rig.address,
+        &rig.material,
+        &mut wall,
+        TICK,
+    );
+    assert!(refused.is_err());
+    assert_eq!(rig.gate().err(), Some(not_active()));
+    Ok(())
+}
+
+/// An address that holds no release of this store is refused by the installer.
+#[test]
+fn an_install_of_an_address_the_store_does_not_hold_is_refused() -> TestResult {
+    let mut rig = Rig::new()?;
+    let other = Rig::new()?;
+    let refused = rig.eval.install(
+        &rig.publisher.store,
+        &other.address,
+        &rig.material,
+        &mut install_wall(),
+        TICK,
+    );
+    assert!(refused.is_err());
+    assert_eq!(rig.gate().err(), Some(not_active()));
+    Ok(())
+}
+
+/// Unverifiable PTR1 bytes fail the trust verification before the installer runs.
+#[test]
+fn unverifiable_trust_material_is_refused_before_the_install() -> TestResult {
+    let mut rig = Rig::new()?;
+    let current = rig.publisher.material()?;
+    let broken = CommunityPluginTrustMaterialV1::new(
+        rig.publisher.anchor.clone(),
+        current.root_anchor().clone(),
+        current.tps1.clone(),
+        vec![vec![0_u8; 4]],
+        current.prv1_records().to_vec(),
+    );
+    let refused = rig.eval.install(
+        &rig.publisher.store,
+        &rig.address,
+        &broken,
+        &mut install_wall(),
+        TICK,
+    );
+    assert!(refused.is_err());
+    assert_ne!(refused.err(), Some(UNAVAILABLE));
+    assert_eq!(rig.gate().err(), Some(not_active()));
+    Ok(())
+}
+
+/// Newer policy is adopted by `refresh`: before it the newer material is a policy mismatch,
+/// after it the gate accepts the newer material.
+#[test]
+fn a_refresh_adopts_a_newer_tps1() -> TestResult {
+    let mut rig = Rig::new()?;
+    rig.install()?;
+    let newer = rig.publisher.unadopted_material(&[[0x77; 32]], TICK)?;
+    let newer = trust_material(&rig.publisher, &newer);
+    let basis = TrustDenialBasisV1::PolicyMismatch;
+    let mismatch = CommunityPluginHostErrorV1::ArtifactTrustDenied { basis };
+    assert_eq!(rig.gate_with(&newer).err(), Some(mismatch));
+    let mut members = CommunityPluginHostV1::new(vec![rig.member()?]);
+    let adopted = rig
+        .eval
+        .refresh(&mut members, &newer, &mut one_second(), TICK);
+    assert_eq!(adopted, Ok(()));
+    assert!(rig.gate_with(&newer).is_ok());
     Ok(())
 }
 

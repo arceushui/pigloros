@@ -33,10 +33,6 @@ pub use material::{
 pub use pass::CommunityPassV1;
 pub use released::{CommunityPassAuthorizationV1, GatedCommunityReleaseV1, ReleaseIdentityV1};
 
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests;
-
 /// What the composition expects the address to hold.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommunityPluginExpectationV1 {
@@ -138,8 +134,10 @@ pub fn gate_for_driver(
         })
 }
 
-/// The gated release of `pass`, without its authorization. The pass is a parameter so that a
-/// test can hand in a closed one.
+/// The gated release of `pass`, without its authorization. It stays a separate function from
+/// [`gate_for_driver()`] because the pass is a parameter: the sampling and the pass opening live
+/// in the wrapper, and a test hands this function a closed pass, which the wrapper can never
+/// produce.
 fn gate_at(
     trust: &(impl PluginTrustPolicyRegistryV1 + ?Sized),
     expectation: &CommunityPluginExpectationV1,
@@ -222,3 +220,7 @@ fn component_bytes(bundle: &VerifiedReleaseBundleV1) -> Vec<u8> {
         .map(|(_, bytes)| bytes.to_vec())
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;

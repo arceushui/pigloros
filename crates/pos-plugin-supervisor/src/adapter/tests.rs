@@ -494,7 +494,7 @@ fn registration_is_pinned_community_and_non_participant() {
     assert_eq!(registry.driver_count(), 1);
 }
 
-/// R8-W4: the production pin is accepted, and is the pin of the test fixtures.
+/// R8-W4: the production pin is accepted, and is the governed community pin.
 #[test]
 fn registration_accepts_the_production_community_pin() {
     let (driver, handle, _) = fixture(None);
@@ -504,7 +504,15 @@ fn registration_accepts_the_production_community_pin() {
         pos_core::Hash::from_bytes([1; 32]),
         vec!["community".to_owned()],
     ));
-    assert_eq!(pin, community_pin(1, "community"));
+    assert_eq!(
+        pin,
+        pin_of(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::GovernedCommunity,
+            1,
+            "community",
+        )
+    );
     let () = ok(register_community_driver(
         &mut registry,
         &plugin,

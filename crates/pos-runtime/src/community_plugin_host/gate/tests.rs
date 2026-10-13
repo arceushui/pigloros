@@ -29,7 +29,13 @@ struct Rig {
 
 impl Rig {
     fn new() -> BoxResult<Self> {
+        Self::installed_at_offset(0)
+    }
+
+    /// The first release installed at the evidence second `UTC + offset`.
+    fn installed_at_offset(offset: i64) -> BoxResult<Self> {
         let mut world = World::new()?;
+        world.spec.utc_offset = offset;
         let published = world.publish(Shape::first())?;
         world.install(published.address(), 1)??;
         let current = world.material()?;
@@ -144,7 +150,19 @@ fn a_registry_refusal_maps_by_the_gate_rows() -> TestResult {
     );
     let basis = TrustDenialBasisV1::NotActive;
     let not_active = CommunityPluginHostErrorV1::ArtifactTrustDenied { basis };
+    // The successor was published and never installed: the registry holds no record of it.
     assert_eq!(refused.err(), Some(not_active));
+    Ok(())
+}
+
+/// The other rows of the registry mapping are pinned exhaustively by
+/// `tests/community_gate_mapping_public.rs` (decision 3);
+/// this one pins the row that only a stored high-water second can reach.
+#[test]
+fn a_gate_second_before_the_install_second_is_trust_state_unavailable() -> TestResult {
+    let rig = Rig::installed_at_offset(5)?;
+    assert_eq!(gate_at_second(&rig, 55)?.utc_second(), 55);
+    assert_eq!(gate_at_second(&rig, 50).err(), Some(TSU));
     Ok(())
 }
 
