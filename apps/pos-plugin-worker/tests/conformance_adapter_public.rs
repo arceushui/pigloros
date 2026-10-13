@@ -282,8 +282,10 @@ fn compute(family: FixtureFamily, mode: ExecutionMode) -> TestResult<FamilyRun> 
 /// One cell per family and mode.
 const RUN_CELLS: usize = FixtureFamily::ALL.len() * 2;
 
-static RUNS: [OnceLock<Result<Arc<FamilyRun>, String>>; RUN_CELLS] =
-    [const { OnceLock::new() }; RUN_CELLS];
+/// The shared result of one run: the run, or the text of the error that stopped it.
+type SharedRun = Result<Arc<FamilyRun>, String>;
+
+static RUNS: [OnceLock<SharedRun>; RUN_CELLS] = [const { OnceLock::new() }; RUN_CELLS];
 
 /// The run of `family` in `mode`, made once and shared by the tests.
 fn family_run(family: FixtureFamily, mode: ExecutionMode) -> TestResult<Arc<FamilyRun>> {
@@ -611,6 +613,9 @@ fn assert_not_executed(attempt: &CaseAttempt) -> TestResult {
     Ok(())
 }
 
+/// Where in the composite bytes to change a byte.
+type Position = fn(&[u8]) -> Option<usize>;
+
 /// `attempt` with one byte of the composite changed at the position `position` finds; the
 /// digest of the member follows the new bytes, as the evaluator delivers it.
 fn mutating_the_composite(
@@ -631,7 +636,7 @@ fn mutating_the_composite(
 #[test]
 fn r8_s8_one_byte_of_the_composite_is_not_executed() -> TestResult {
     let attempt = attempt_from_fixture_files(FixtureFamily::Malformed, ExecutionMode::Local)?;
-    let positions: [fn(&[u8]) -> Option<usize>; 3] = [
+    let positions: [Position; 3] = [
         |_| Some(6),
         |bytes| Some(bytes.len() / 2),
         |bytes| bytes.len().checked_sub(1),
@@ -643,16 +648,16 @@ fn r8_s8_one_byte_of_the_composite_is_not_executed() -> TestResult {
     Ok(())
 }
 
+/// The position of the version bytes of the first Component in the composite.
+fn after_the_component_magic(bytes: &[u8]) -> Option<usize> {
+    let start = bytes.windows(4).position(|window| window == b"\0asm");
+    start.map(|start| start + 4)
+}
+
 #[test]
 fn r8_s8_a_component_piece_changed_without_its_digest_entry_is_not_executed() -> TestResult {
     let attempt = attempt_from_fixture_files(FixtureFamily::Positive, ExecutionMode::Local)?;
-    let in_the_component = |bytes: &[u8]| {
-        bytes
-            .windows(4)
-            .position(|window| window == b"\0asm")
-            .map(|start| start + 4)
-    };
-    let mutated = mutating_the_composite(attempt, in_the_component)?;
+    let mutated = mutating_the_composite(attempt, after_the_component_magic)?;
     assert_not_executed(&mutated)
 }
 
