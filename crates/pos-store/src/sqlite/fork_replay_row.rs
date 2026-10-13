@@ -50,7 +50,10 @@ pub(super) fn selected_field_with_context<'budget, 'clock, T>(
     context
         .check()
         .map_err(|_| Error::CorruptAuthority)
-        .and_then(|()| conn.prepare(query.sql()).map_err(|_| Error::StorageIndeterminate))
+        .and_then(|()| {
+            conn.prepare(query.sql())
+                .map_err(|_| Error::StorageIndeterminate)
+        })
         .and_then(|mut statement| {
             context
                 .check()
