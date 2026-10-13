@@ -17,6 +17,7 @@ pub mod authority;
 #[cfg(test)]
 extern crate self as pos_core;
 
+pub(crate) mod canonical_length;
 pub mod clock;
 pub mod consent;
 pub mod counterfactual_dependency;
@@ -28,7 +29,6 @@ pub mod error;
 pub mod event;
 pub mod executable_budget;
 pub mod factual_dependency;
-pub(crate) mod canonical_length;
 pub use canonical_length::CanonicalLengthErrorV1;
 
 pub mod fork_admission;
