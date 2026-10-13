@@ -1621,11 +1621,7 @@ fn release_binding(
         options.release_mutation,
         Some(ReleaseMutation::MissingBinding)
     );
-    Ok(if unbound {
-        Value::Null
-    } else {
-        bytes(&digest)
-    })
+    Ok(if unbound { Value::Null } else { bytes(&digest) })
 }
 
 fn failure_replay_claim(family: u64, state: Option<u8>) -> u8 {
