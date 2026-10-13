@@ -11,7 +11,11 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-ignore = []
+# RUSTSEC-2026-0344 (ruzstd < 0.9.1, decompression bomb): reached only through
+# bevy_image 0.19.1 (`ruzstd ^0.8`) for the zstd-compressed lookup tables Bevy
+# ships to apps/piglor-world-client. No released Bevy depends on a fixed ruzstd.
+# Remove (here and in .cargo/audit.toml) once Cargo.lock resolves ruzstd >= 0.9.1.
+ignore = ["RUSTSEC-2026-0344"]
 
 [licenses]
 version = 2
