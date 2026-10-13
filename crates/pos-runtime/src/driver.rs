@@ -11,7 +11,7 @@ use pos_core::{
     clock::Seq,
     event::{CanonicalBytes, Event, EventDraft, Kind},
     ids::{EntityId, EventId, TimelineId},
-    KnowledgeSnapshotV1, ObservationSnapshotV1, State,
+    Hash, KnowledgeSnapshotV1, ObservationSnapshotV1, State,
 };
 use std::borrow::Cow;
 
@@ -174,11 +174,37 @@ impl DriverRecoveryEvidence {
 use crate::error::RuntimeError;
 use std::collections::hash_map::Entry;
 
+/// A reference to an input a Driver declares it read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DirectInputRefV1 {
+    /// An Event the Driver holds, named by its Timeline sequence number.
+    CommittedEvent {
+        /// The sequence number of the committed Event.
+        seq: Seq,
+    },
+    /// A recorded node named by its artifact digest.
+    NodeDigest {
+        /// The artifact digest of the recorded node.
+        digest: Hash,
+    },
+}
+
+/// One draft a Driver emits, with the inputs it declares for that draft.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeclaredOutputV1 {
+    /// The draft to be appended to the timeline.
+    pub draft: EventDraft,
+    /// Draft-specific inputs, resolved against the output node of this draft.
+    pub direct_inputs: Vec<DirectInputRefV1>,
+}
+
 /// The output of a single driver step.
 #[derive(Debug, Default)]
 pub struct StepOutput {
-    /// Drafts to be appended to the timeline.
-    pub drafts: Vec<EventDraft>,
+    /// Step-level inputs, resolved against the step node.
+    pub step_inputs: Vec<DirectInputRefV1>,
+    /// Drafts to be appended to the timeline, in order, with their inputs.
+    pub outputs: Vec<DeclaredOutputV1>,
 }
 
 /// Identifies a Timeline entity whose projection state is observed by a driver on a tick.
@@ -572,14 +598,47 @@ impl<'a> ObservationView<'a> {
 }
 
 impl StepOutput {
+    /// Build an output of `drafts` that declare no additional inputs.
     #[must_use]
-    pub const fn new(drafts: Vec<EventDraft>) -> Self {
-        Self { drafts }
+    pub fn new(drafts: Vec<EventDraft>) -> Self {
+        let outputs = drafts
+            .into_iter()
+            .map(|draft| DeclaredOutputV1 {
+                draft,
+                direct_inputs: Vec::new(),
+            })
+            .collect();
+        Self::declared(Vec::new(), outputs)
     }
 
+    /// Build an output with no drafts and no declared inputs.
     #[must_use]
     pub const fn empty() -> Self {
-        Self { drafts: Vec::new() }
+        Self::declared(Vec::new(), Vec::new())
+    }
+
+    /// Build an output from explicit step-level inputs and declared outputs.
+    #[must_use]
+    pub const fn declared(
+        step_inputs: Vec<DirectInputRefV1>,
+        outputs: Vec<DeclaredOutputV1>,
+    ) -> Self {
+        Self {
+            step_inputs,
+            outputs,
+        }
+    }
+
+    /// Iterate the drafts in output order.
+    #[must_use]
+    pub fn drafts(&self) -> impl ExactSizeIterator<Item = &EventDraft> {
+        self.outputs.iter().map(|output| &output.draft)
+    }
+
+    /// The step-level inputs the Driver declared.
+    #[must_use]
+    pub const fn step_inputs(&self) -> &[DirectInputRefV1] {
+        self.step_inputs.as_slice()
     }
 }
 
@@ -775,8 +834,8 @@ mod tests {
         let entity = EntityId::new();
         let mut driver = TickDriver { entity, ticks: 0 };
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert_eq!(out.drafts.len(), 1);
-        assert_eq!(out.drafts[0].event_type.as_str(), "tick.event");
+        assert_eq!(out.drafts().len(), 1);
+        assert_eq!(out.outputs[0].draft.event_type.as_str(), "tick.event");
     }
 
     #[test]
@@ -790,7 +849,8 @@ mod tests {
         driver.step(tl.id(), ObservationView::empty()).test_ok();
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
         // tick 3 — payload contains 3u32 as le bytes
-        assert_eq!(out.drafts[0].payload.as_slice(), &3u32.to_le_bytes());
+        let payload = out.outputs[0].draft.payload.as_slice();
+        assert_eq!(payload, &3u32.to_le_bytes());
     }
 
     #[test]
@@ -800,16 +860,69 @@ mod tests {
         let tl = store.create_timeline("t").test_ok();
         let mut driver = IdleDriver;
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert!(out.drafts.is_empty());
+        assert!(out.outputs.is_empty());
     }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn step_output_new_and_empty() {
+    fn step_output_empty_forms_carry_nothing() {
         let out = StepOutput::new(vec![]);
-        assert!(out.drafts.is_empty());
+        assert!(out.outputs.is_empty());
+        assert!(out.step_inputs().is_empty());
         let out2 = StepOutput::empty();
-        assert!(out2.drafts.is_empty());
+        assert!(out2.outputs.is_empty());
+        assert!(out2.step_inputs().is_empty());
+        assert!(StepOutput::default().outputs.is_empty());
+    }
+
+    fn sample_draft(label: &'static str) -> EventDraft {
+        EventDraft::new(
+            EntityId::new(),
+            Kind::new(label),
+            CanonicalBytes::from_static(b"payload"),
+        )
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn step_output_new_declares_no_inputs() {
+        let out = StepOutput::new(vec![sample_draft("first"), sample_draft("second")]);
+        assert!(out.step_inputs().is_empty());
+        assert_eq!(out.outputs.len(), 2);
+        assert!(out.outputs.iter().all(|o| o.direct_inputs.is_empty()));
+        let kinds: Vec<&str> = out.drafts().map(|d| d.event_type.as_str()).collect();
+        assert_eq!(kinds, ["first", "second"]);
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn step_output_declared_carries_both_input_lists() {
+        let step_ref = DirectInputRefV1::CommittedEvent {
+            seq: Seq::from_u64(3),
+        };
+        let draft_ref = DirectInputRefV1::NodeDigest {
+            digest: Hash::from_bytes([7; 32]),
+        };
+        let out = StepOutput::declared(
+            vec![step_ref],
+            vec![
+                DeclaredOutputV1 {
+                    draft: sample_draft("first"),
+                    direct_inputs: vec![draft_ref],
+                },
+                DeclaredOutputV1 {
+                    draft: sample_draft("second"),
+                    direct_inputs: Vec::new(),
+                },
+            ],
+        );
+        assert_eq!(out.step_inputs(), [step_ref]);
+        assert_eq!(out.outputs[0].direct_inputs, [draft_ref]);
+        assert!(out.outputs[1].direct_inputs.is_empty());
+        let drafts = out.drafts();
+        assert_eq!(drafts.len(), 2);
+        let kinds: Vec<&str> = drafts.map(|d| d.event_type.as_str()).collect();
+        assert_eq!(kinds, ["first", "second"]);
     }
 
     #[test]

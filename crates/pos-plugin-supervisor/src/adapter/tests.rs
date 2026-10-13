@@ -176,7 +176,7 @@ fn a_valid_output_is_staged_with_a_receipt_until_the_batch_commits() {
     let valid = output(vec![draft("community.event", b"payload")]);
     let digest = valid.output_digest;
     let staged = ok(driver.accept([3; 16], report(valid)));
-    assert_eq!(staged.drafts.len(), 1);
+    assert_eq!(staged.drafts().len(), 1);
     assert_eq!(
         driver.staged,
         Some(CommunityStateV1 {

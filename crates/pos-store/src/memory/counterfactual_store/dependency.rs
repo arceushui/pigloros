@@ -53,10 +53,11 @@
 //!   keeps the factual indexes behind [`FactualPrefixReadPortV1`]: the commit
 //!   range of each Tick keyed by its last `seq`, the Tick and node digest bound
 //!   to each committed `seq`, the nodes by artifact digest, the step nodes by
-//!   owner and Tick, and the row counts. No write path exists for it yet
-//!   (#554), so it stays empty in production; the `test-support` seeding
-//!   function installs Ticks through the one install function the pipeline
-//!   commit will call. Deleting the Timeline purges it.
+//!   owner and Tick, and the row counts. The pipeline commit fills it: it
+//!   checks the Tick declaration of the admission basis against the visible
+//!   prefix (R3.7.2) and installs the Tick's rows with its Events through the
+//!   one install function; the `test-support` seeding function installs Ticks
+//!   through the same function. Deleting the Timeline purges it.
 //! - **Reads and fences.** A parent-prefix read of an unknown or concealed
 //!   Timeline is `ForkNotFound`, and one of an existing Timeline without rows
 //!   is an empty page. It runs under that Timeline's own erasure read fence
@@ -87,11 +88,12 @@ use pos_core::{
     DependencyNodeRecordV1, DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1,
     DependencyPagedRowV1, DependencyReadScopeV1, ErasureProtectedOperationV1, FactualCutV1,
     FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, ForkGenerationV1, Hash,
-    PipelineDraftBatchV1, RecordedSetCountsV1, Seq, TickDependencyRecordV1, TimelineId,
+    PipelineAdmissionBasisV1, PipelineDraftBatchV1, PipelineOutcomeV1, RecordedSetCountsV1, Seq,
+    SeqRange, TickDependencyRecordV1, TimelineId,
 };
 
 use super::{fenced_result, CounterfactualForkStateV1};
-use crate::memory::MemoryStore;
+use crate::memory::{factual_declaration as declaration, MemoryStore};
 
 type StoreError = CounterfactualStoreErrorV1;
 /// Rows are keyed by their own page cursor: the canonical coordinate order of
@@ -233,6 +235,15 @@ impl DependencyRowsV1 {
         let key = self.digest_rows.get(digest);
         key.and_then(|held| self.nodes.get(held)).cloned()
     }
+
+    /// Whether the set already holds the position key or the artifact digest
+    /// of a node of the record.
+    fn records_any(&self, record: &TickDependencyRecordV1) -> bool {
+        record.nodes().iter().any(|row| {
+            let digest = row.coordinate().artifact_digest();
+            self.digest_rows.contains_key(&digest) || self.nodes.contains_key(&row.cursor())
+        })
+    }
 }
 
 impl VisibleSetV1<'_> {
@@ -244,6 +255,12 @@ impl VisibleSetV1<'_> {
     /// The visible Tick that `at` splits.
     fn split_by(&self, at: u64) -> Option<u64> {
         self.rows.split_by(at, self.limit)
+    }
+
+    /// Whether a visible Tick binds the committed `seq` to a node.
+    fn is_bound(&self, seq: u64) -> bool {
+        let binding = self.rows.event_nodes.get(&seq);
+        binding.is_some_and(|held| held.tick <= self.bound)
     }
 
     /// The node bound to the committed `seq`, if its Tick is visible.
@@ -803,22 +820,292 @@ impl FactualPrefixReadPortV1 for MemoryStore {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+/// Why a Tick declaration is refused (R3.7.2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::memory) enum TickRefusalV1 {
+    /// The declaration breaks a structural rule.
+    InvalidDeclaration,
+    /// An edge names another authority grant than the persisted fence's.
+    StaleGrant,
+    /// The Timeline's recorded set takes no further Tick.
+    SetExhausted,
+}
+
+impl TickRefusalV1 {
+    /// The pipeline outcome that answers the refusal.
+    pub(in crate::memory) const fn outcome(self) -> PipelineOutcomeV1 {
+        match self {
+            Self::InvalidDeclaration => PipelineOutcomeV1::InvalidDependencyDeclaration,
+            Self::StaleGrant => PipelineOutcomeV1::AdmissionConflict,
+            Self::SetExhausted => PipelineOutcomeV1::DependencySetExhausted,
+        }
+    }
+}
+
+/// `Ok` if `holds`, else the refusal of the declaration.
+const fn demand(holds: bool, refusal: TickRefusalV1) -> Result<(), TickRefusalV1> {
+    if holds {
+        Ok(())
+    } else {
+        Err(refusal)
+    }
+}
+
+/// The rows a checked factual Tick installs with its Events.
+pub(in crate::memory) struct FactualInstallV1 {
+    first_seq: Seq,
+    last_seq: Seq,
+    /// Every Event-backed node of the Tick: the draft nodes and the ingress
+    /// nodes it records, by committed `seq` and artifact digest.
+    event_nodes: Vec<(Seq, Hash)>,
+}
+
+/// What checking a Tick declaration decided.
+pub(in crate::memory) enum PlannedTickV1 {
+    /// The declaration holds: these rows are installed with the Events.
+    Install(FactualInstallV1),
+    /// The declaration is refused: nothing is appended or recorded.
+    Refused(TickRefusalV1),
+}
+
+/// What a Tick declaration is checked against.
+struct TickFacts<'a> {
+    timeline: TimelineId,
+    basis: &'a PipelineAdmissionBasisV1,
+    /// The authority grant of the persisted admission fence.
+    grant: Hash,
+    /// The logical `seq` the batch's first Event takes.
+    first_seq: Seq,
+    /// The Timeline's own committed prefix set.
+    own: &'a DependencyRowsV1,
+    /// The Timeline's visible sets, ancestors first and its own last.
+    sets: &'a [VisibleSetV1<'a>],
+}
+
+/// R3.7.2 (vii): no declared input is left without an edge, and every edge
+/// source is a node of the record (`index`) or a node of the visible prefix at
+/// a strictly lower Tick.
+fn edge_sources_resolve(
+    record: &TickDependencyRecordV1,
+    index: &declaration::DigestIndex<'_>,
+    sets: &[VisibleSetV1<'_>],
+) -> bool {
+    let tick = record.tick();
+    record.uncovered_input_count() == 0
+        && record.edges().iter().all(|edge| {
+            let source = edge.source_digest();
+            index.contains_key(&source)
+                || first_visible(sets, |set| set.digest_node(&source))
+                    .is_some_and(|(found, _)| found.coordinate().tick() < tick)
+        })
+}
+
+/// R3.7.2 (i): every edge carries the persisted fence's authority grant. An
+/// authorization that is no digest cannot equal it, so it is the same
+/// conflict: a fence that has moved.
+fn check_grant(facts: &TickFacts<'_>) -> Result<(), TickRefusalV1> {
+    let carries = declaration::edges_carry_grant(facts.basis, facts.grant);
+    demand(carries, TickRefusalV1::StaleGrant)
+}
+
+/// R3.7.2 (ii): the record is a committed one at the next Tick of the prefix.
+fn check_tick(facts: &TickFacts<'_>) -> Result<(), TickRefusalV1> {
+    let basis = facts.basis;
+    let head = first_visible(facts.sets, |set| set.head_through(u64::MAX));
+    let last = head.map_or(0, |found| found.tick);
+    let next = last.checked_add(1) == Some(basis.dependencies().tick());
+    let committed = declaration::declares_committed_tick(basis) && next;
+    demand(committed, TickRefusalV1::InvalidDeclaration)
+}
+
+/// R3.7.2 (iii) and (iv): the Event bindings of the drafts and of the
+/// ingress nodes, the snapshot node, and that no ingress Event is already
+/// bound by a visible Tick. Returns every Event-backed node of the Tick.
+fn bound_nodes(
+    facts: &TickFacts<'_>,
+    payloads: &BTreeMap<u64, Hash>,
+) -> Result<Vec<(Seq, Hash)>, TickRefusalV1> {
+    let (timeline, basis) = (facts.timeline, facts.basis);
+    let outputs = declaration::output_event_nodes(timeline, basis, facts.first_seq)
+        .filter(|_| declaration::snapshot_matches(timeline, basis));
+    let ingress = declaration::ingress_event_nodes(timeline, basis, payloads).filter(|nodes| {
+        let unbound = |seq: &Seq| !facts.sets.iter().any(|set| set.is_bound(seq.as_u64()));
+        nodes.iter().map(|(seq, _)| seq).all(unbound)
+    });
+    outputs
+        .zip(ingress)
+        .map(|(first, second)| first.into_iter().chain(second).collect())
+        .ok_or(TickRefusalV1::InvalidDeclaration)
+}
+
+/// R3.7.2 (v) to (viii): the position keys are new, the set takes the record,
+/// every edge source resolves, and the shape holds. Each check runs only if
+/// the earlier ones passed.
+fn check_record(facts: &TickFacts<'_>) -> Result<(), TickRefusalV1> {
+    let basis = facts.basis;
+    let record = basis.dependencies().record();
+    let index = declaration::digest_index(record);
+    let invalid = TickRefusalV1::InvalidDeclaration;
+    let unrecorded = demand(!facts.own.records_any(record), invalid);
+    unrecorded
+        .and_then(|()| {
+            let capacity = record.ensure_set_capacity(facts.own.counts);
+            capacity.or(Err(TickRefusalV1::SetExhausted))
+        })
+        .and_then(|()| {
+            let resolves = edge_sources_resolve(record, &index, facts.sets);
+            demand(resolves, invalid)
+        })
+        .and_then(|()| {
+            let shaped = declaration::shape_holds(basis, &index);
+            demand(shaped, invalid)
+        })
+}
+
+/// The rows the checked Tick installs, with its Event-backed nodes.
+fn install_of(facts: &TickFacts<'_>, event_nodes: Vec<(Seq, Hash)>) -> FactualInstallV1 {
+    let drafts = facts.basis.batch().drafts().len() as u64;
+    let spread = drafts.saturating_sub(1);
+    FactualInstallV1 {
+        first_seq: facts.first_seq,
+        last_seq: Seq::from_u64(facts.first_seq.as_u64().saturating_add(spread)),
+        event_nodes,
+    }
+}
+
+/// R3.7.2 (iii) to (viii), once the Events the ingress bindings name are read.
+fn judge_record(
+    facts: &TickFacts<'_>,
+    payloads: &BTreeMap<u64, Hash>,
+) -> Result<FactualInstallV1, TickRefusalV1> {
+    bound_nodes(facts, payloads)
+        .and_then(|nodes| check_record(facts).map(|()| nodes))
+        .map(|nodes| install_of(facts, nodes))
+}
+
+impl MemoryStore {
+    /// The payload hash of every committed Event the ingress bindings of the
+    /// basis name, by logical `seq`. An Event that does not exist is absent,
+    /// and so is any binding past the observation: the read never reaches
+    /// beyond `observed_through`, whatever the bindings declare, and only the
+    /// bound Events are kept.
+    fn bound_event_payloads(
+        &self,
+        timeline: TimelineId,
+        basis: &PipelineAdmissionBasisV1,
+    ) -> Result<BTreeMap<u64, Hash>, CoreError> {
+        let observed = basis.attempt().observation().observed_through();
+        let seqs = basis.dependencies().event_nodes().iter().map(|b| b.seq);
+        let within: BTreeSet<u64> = seqs
+            .filter(|seq| *seq <= observed)
+            .map(Seq::as_u64)
+            .collect();
+        let range = within.first().zip(within.last());
+        range.map_or_else(
+            || Ok(BTreeMap::new()),
+            |(from, to)| {
+                let wanted = SeqRange {
+                    from: Seq::from_u64(*from),
+                    to: Some(Seq::from_u64(*to)),
+                };
+                self.collect_events_in_range(timeline, wanted)
+                    .map(|events| {
+                        events
+                            .iter()
+                            .filter(|event| within.contains(&event.seq.as_u64()))
+                            .map(|event| (event.seq.as_u64(), event.payload_hash))
+                            .collect()
+                    })
+            },
+        )
+    }
+
+    /// Check the factual Tick declaration of `basis` against the Timeline's
+    /// visible committed prefix (R3.7.2), before any Event is appended, and
+    /// prepare the rows the commit installs. Nothing is written.
+    ///
+    /// The grant and the Tick are checked first, from the basis and the
+    /// prefix alone. Only then are the Events the ingress bindings name read,
+    /// so a store failure there follows those two refusals and precedes the
+    /// others.
+    pub(in crate::memory) fn plan_factual_tick(
+        &self,
+        timeline: TimelineId,
+        basis: &PipelineAdmissionBasisV1,
+        grant: Hash,
+        first_seq: Seq,
+    ) -> Result<PlannedTickV1, CoreError> {
+        self.visible_sets(timeline).and_then(|sets| {
+            let facts = TickFacts {
+                timeline,
+                basis,
+                grant,
+                first_seq,
+                own: self.prefix_rows(timeline),
+                sets: &sets,
+            };
+            let fence = check_grant(&facts).and_then(|()| check_tick(&facts));
+            fence.map_or_else(
+                |refusal| Ok(PlannedTickV1::Refused(refusal)),
+                |()| {
+                    self.bound_event_payloads(timeline, basis).map(|payloads| {
+                        judge_record(&facts, &payloads)
+                            .map_or_else(PlannedTickV1::Refused, PlannedTickV1::Install)
+                    })
+                },
+            )
+        })
+    }
+
+    /// Install a checked Tick: its rows, commit range and Event bindings.
+    /// Infallible.
+    pub(in crate::memory) fn install_planned_factual_tick(
+        &mut self,
+        timeline: TimelineId,
+        record: &TickDependencyRecordV1,
+        planned: &FactualInstallV1,
+    ) {
+        let rows = self.dependency_prefixes.entry(timeline).or_default();
+        rows.install_factual_tick(
+            record,
+            planned.first_seq,
+            planned.last_seq,
+            &planned.event_nodes,
+        );
+    }
+}
+
+#[cfg(test)]
+impl MemoryStore {
+    /// Make the Timeline's own recorded set hold `counts`, as if earlier Ticks
+    /// had filled it.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    pub(in crate::memory) fn fill_factual_set_for_test(
+        &mut self,
+        timeline: TimelineId,
+        counts: RecordedSetCountsV1,
+    ) {
+        self.dependency_prefixes.entry(timeline).or_default().counts = counts;
+    }
+}
+
 impl DependencyRowsV1 {
     /// Install one committed factual Tick: its rows, commit range, Event
     /// bindings, indexes, and counts. Infallible.
     ///
     /// Tick numbers must increase from an ancestor to its descendants:
     /// `page_after` stitches the segments in ancestry order and relies on a
-    /// later segment's rows sorting after every earlier row. Slice 8 enforces
-    /// it at the commit; the test seam does not check it.
+    /// later segment's rows sorting after every earlier row. The pipeline
+    /// commit enforces it (`tick == last + 1`); the test seam does not check
+    /// it.
     ///
     /// A reused artifact digest is likewise unchecked here: `index_node` panics
     /// in debug builds, and `bound_seqs` silently overwrites the earlier seq.
+    /// The pipeline commit refuses both before it installs.
     ///
-    /// The one install path of a Timeline's committed prefix set: the
-    /// `test-support` seeding function calls it now, and the pipeline commit
-    /// calls it once it records factual Ticks.
+    /// The one install path of a Timeline's committed prefix set: the pipeline
+    /// commit calls it with the Events, and the `test-support` seeding function
+    /// calls it for seeded Ticks.
     pub(in crate::memory) fn install_factual_tick(
         &mut self,
         record: &TickDependencyRecordV1,
@@ -850,8 +1137,8 @@ impl DependencyRowsV1 {
     /// Index a node by artifact digest and, when its output ordinal is zero,
     /// by owner.
     ///
-    /// Every ordinal-zero node is indexed, host-owned nodes included; a later
-    /// slice (8) may filter the step nodes on `scheduler_position >= 1`.
+    /// Every ordinal-zero node is indexed, host-owned nodes included; the
+    /// step nodes are not filtered on `scheduler_position >= 1`.
     fn index_node(&mut self, row: &DependencyNodeRecordV1) {
         let coordinate = row.coordinate();
         let digest = coordinate.artifact_digest();
@@ -871,8 +1158,8 @@ impl MemoryStore {
     /// through the install path the pipeline commit uses.
     ///
     /// Test seam only: it checks nothing about the Ticks it is given. A reused
-    /// artifact digest panics in debug builds and is undefined in release;
-    /// slice 8 makes it a real error.
+    /// artifact digest panics in debug builds and is undefined in release; the
+    /// pipeline commit refuses it as a real error.
     ///
     /// # Errors
     /// Returns `TimelineNotFound` for an unknown Timeline.

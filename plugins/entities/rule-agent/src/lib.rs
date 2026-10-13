@@ -280,12 +280,13 @@ mod tests {
         let expected = ["idle", "move", "interact", "observe"];
         for expected_action in &expected {
             let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
-            assert_eq!(out.drafts.len(), 1);
-            assert_eq!(out.drafts[0].event_type.as_str(), EVENT_TYPE_DECISION);
+            assert_eq!(out.drafts().len(), 1);
+            let kind = out.outputs[0].draft.event_type.as_str();
+            assert_eq!(kind, EVENT_TYPE_DECISION);
 
             // Decode the payload and verify the action
             let payload: DecisionPayload =
-                ciborium::from_reader(out.drafts[0].payload.as_slice()).test_ok();
+                ciborium::from_reader(out.outputs[0].draft.payload.as_slice()).test_ok();
             assert_eq!(&payload.action, expected_action);
         }
     }
@@ -359,10 +360,10 @@ mod tests {
         let mut driver = RuleAgentDriver::new(entity, plugin.actions().to_vec());
 
         let out = driver.step(tl.id(), ObservationView::empty()).test_ok();
-        assert_eq!(out.drafts.len(), 1);
+        assert_eq!(out.drafts().len(), 1);
 
         let payload: DecisionPayload =
-            ciborium::from_reader(out.drafts[0].payload.as_slice()).test_ok();
+            ciborium::from_reader(out.outputs[0].draft.payload.as_slice()).test_ok();
 
         assert_eq!(payload.action, "idle");
         assert_eq!(payload.tick, 0);

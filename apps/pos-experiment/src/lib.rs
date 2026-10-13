@@ -4276,6 +4276,7 @@ pub mod tests {
     }
 
     forward_scheduled_admission_fence_and_authority!(CaptureAwareStore, base);
+    forward_factual_prefix_reads!(CaptureAwareStore, base);
 
     impl EventStore for CaptureAwareStore {
         fn bind_erasure_gate(
@@ -4382,13 +4383,13 @@ pub mod tests {
             timeline,
             pos_core::clock::Seq::ZERO,
         ));
-        assert_eq!(driver.step(timeline, view).test_ok().drafts.len(), 1);
+        assert_eq!(driver.step(timeline, view).test_ok().drafts().len(), 1);
         driver.commit_step();
         let view = ObservationView::anchored_empty(pos_runtime::SnapshotAnchor::new(
             timeline,
             pos_core::clock::Seq::ZERO,
         ));
-        assert_eq!(driver.step(timeline, view).test_ok().drafts.len(), 1);
+        assert_eq!(driver.step(timeline, view).test_ok().drafts().len(), 1);
         driver.abort_step();
 
         let store_state = Arc::new(Mutex::new(HostTransactionState::default()));
@@ -6881,7 +6882,7 @@ pub mod tests {
         assert_eq!(d.name(), "idle2");
         // Also call step to cover those lines
         let out = d.step(tl.id(), ObservationView::empty()).test_ok();
-        assert!(out.drafts.is_empty());
+        assert!(out.outputs.is_empty());
     }
 
     #[test]
@@ -6914,7 +6915,7 @@ pub mod tests {
         assert_eq!(d.name(), "bad2");
         // Also call step to cover those lines
         let out = d.step(tl.id(), ObservationView::empty()).test_ok();
-        assert_eq!(out.drafts.len(), 1);
+        assert_eq!(out.drafts().len(), 1);
     }
 
     #[test]
@@ -7638,13 +7639,11 @@ mod coverage_entrypoints {
             _: pos_core::ids::TimelineId,
             _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
-            Ok(StepOutput {
-                drafts: vec![EventDraft::new(
-                    EntityId::new(),
-                    Kind::new("coverage.unknown"),
-                    pos_core::CanonicalBytes::from_static(b"unknown"),
-                )],
-            })
+            Ok(StepOutput::new(vec![EventDraft::new(
+                EntityId::new(),
+                Kind::new("coverage.unknown"),
+                pos_core::CanonicalBytes::from_static(b"unknown"),
+            )]))
         }
     }
 
@@ -7660,13 +7659,11 @@ mod coverage_entrypoints {
             _: pos_core::ids::TimelineId,
             _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
-            Ok(StepOutput {
-                drafts: vec![EventDraft::new(
-                    EntityId::new(),
-                    Kind::new("coverage.unknown"),
-                    pos_core::CanonicalBytes::from_static(b"unknown"),
-                )],
-            })
+            Ok(StepOutput::new(vec![EventDraft::new(
+                EntityId::new(),
+                Kind::new("coverage.unknown"),
+                pos_core::CanonicalBytes::from_static(b"unknown"),
+            )]))
         }
     }
 
@@ -7768,13 +7765,11 @@ mod coverage_entrypoints {
             _: pos_core::ids::TimelineId,
             _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
-            Ok(StepOutput {
-                drafts: vec![EventDraft::new(
-                    self.subject,
-                    Kind::new("coverage.failure"),
-                    pos_core::CanonicalBytes::from_static(b"coverage"),
-                )],
-            })
+            Ok(StepOutput::new(vec![EventDraft::new(
+                self.subject,
+                Kind::new("coverage.failure"),
+                pos_core::CanonicalBytes::from_static(b"coverage"),
+            )]))
         }
     }
 
@@ -7821,13 +7816,11 @@ mod coverage_entrypoints {
             _: pos_core::ids::TimelineId,
             _: ObservationView<'_>,
         ) -> Result<StepOutput, RuntimeError> {
-            Ok(StepOutput {
-                drafts: vec![EventDraft::new(
-                    self.entity,
-                    Kind::new("coverage.failure"),
-                    pos_core::CanonicalBytes::from_static(b"backtest"),
-                )],
-            })
+            Ok(StepOutput::new(vec![EventDraft::new(
+                self.entity,
+                Kind::new("coverage.failure"),
+                pos_core::CanonicalBytes::from_static(b"backtest"),
+            )]))
         }
     }
 
@@ -9732,7 +9725,7 @@ mod backtest_tests {
         let out = GoodBtDriver
             .step(tl.id(), pos_runtime::ObservationView::empty())
             .test_ok();
-        assert!(out.drafts.is_empty());
+        assert!(out.outputs.is_empty());
     }
 
     #[test]
@@ -10057,12 +10050,12 @@ mod fault_injection_tests {
         assert!(!emit
             .step(tl.id(), ObservationView::empty())
             .test_ok()
-            .drafts
+            .outputs
             .is_empty());
         assert!(!bad
             .step(tl.id(), ObservationView::empty())
             .test_ok()
-            .drafts
+            .outputs
             .is_empty());
         assert!(fail.step(tl.id(), ObservationView::empty()).is_err());
     }

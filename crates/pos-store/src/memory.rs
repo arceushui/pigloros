@@ -120,6 +120,7 @@ use crate::{
 };
 
 mod counterfactual_store;
+mod factual_declaration;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;

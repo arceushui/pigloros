@@ -7,7 +7,7 @@
 //! never writes registry trust state; only [`CommunityPluginHostV1::refresh_policy()`] does.
 
 use pos_core::{
-    trusted_clock::TrustedWallSourceV1, Event, PipelineAdmissionPortV1, PipelineCommitReceiptV1,
+    trusted_clock::TrustedWallSourceV1, Event, FactualAdmissionPortV1, PipelineCommitReceiptV1,
     PluginId, Seq, TimelineId, TimelineMeta,
 };
 use pos_crypto::plugin_trust::verify_plugin_trust_v1;
@@ -111,7 +111,7 @@ pub struct CommunityPassRequestV1<'a> {
     /// The host-owned inputs that bind the staged pass to its admission basis.
     pub admission: ScheduledPassAdmissionV1,
     /// The admission port the batch commits through.
-    pub port: &'a mut dyn PipelineAdmissionPortV1,
+    pub port: &'a mut dyn FactualAdmissionPortV1,
 }
 
 /// The verdict on one member: the gate's summary, or the error that refused it.
