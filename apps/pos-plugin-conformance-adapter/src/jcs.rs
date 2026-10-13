@@ -15,9 +15,9 @@ pub enum JsonV1 {
     /// A string.
     Text(String),
     /// An array.
-    Array(Vec<JsonV1>),
+    Array(Vec<Self>),
     /// An object; the writer sorts the keys.
-    Object(Vec<(String, JsonV1)>),
+    Object(Vec<(String, Self)>),
 }
 
 impl JsonV1 {

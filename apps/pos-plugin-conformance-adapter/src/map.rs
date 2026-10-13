@@ -71,9 +71,11 @@ pub enum SubResultV1 {
     Operational,
 }
 
-/// The usage of `metering`: `cpu_fuel` is the checked sum of the two fuel counters (overflow is
-/// `None`, which is operational), `memory_bytes` and `host_calls` are direct and the other five
-/// counters are not measured.
+/// The usage of `metering`.
+///
+/// `cpu_fuel` is the checked sum of the two fuel counters (overflow is `None`, which is
+/// operational), `memory_bytes` and `host_calls` are direct and the other five counters are
+/// not measured.
 #[must_use]
 pub fn usage_of(metering: MeteringV1) -> Option<ResourceUsage> {
     metering

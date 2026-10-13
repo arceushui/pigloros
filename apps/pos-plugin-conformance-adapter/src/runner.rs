@@ -41,8 +41,9 @@ use crate::world::{
 /// The outcome records of one pass.
 type Outcomes = Vec<CommunityPluginSubjectOutcomeV1>;
 
-/// The per-launch worker watchdog, in milliseconds: the worker tests' budget for compiling a
-/// Component in an instrumented build. The case `watchdog_ms` is the number of launches of the
+/// The per-launch worker watchdog, in milliseconds.
+///
+/// It is the worker tests' budget for compiling a Component in an instrumented build. The case `watchdog_ms` is the number of launches of the
 /// family times this value.
 pub const LAUNCH_WATCHDOG_MS: u64 = 300_000;
 

@@ -997,8 +997,8 @@ fn a_digest_that_names_no_piece_is_payload_invalid_everywhere() -> TestResult {
     let twice = subcase("x", vec![bind(), bind()], expect.clone());
     assert!(invalid(&twice)?);
     // A member with an explicit `at` whose Plugin no bind named.
-    let member = json!({"plugin_id": "q", "at": "absent"});
-    let document = subcase("x", vec![bind(), pass_step(vec![member])], expect.clone());
+    let explicit = json!({"plugin_id": "q", "at": "absent"});
+    let document = subcase("x", vec![bind(), pass_step(vec![explicit])], expect.clone());
     assert!(invalid(&document)?);
     // A member without `at` whose Plugin no bind named.
     let document = subcase(

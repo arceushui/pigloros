@@ -230,7 +230,9 @@ pub trait WorldPortV1 {
     fn outcome_bytes(&self) -> Vec<u8>;
 }
 
-/// The canonical bytes of the outcome record, the deterministic CBOR array `["POB1", 1,
+/// The canonical bytes of the outcome record.
+///
+/// It is the deterministic CBOR array `["POB1", 1,
 /// plugin_id, pmf1_digest, release_digest, tps1_digest, execution_profile_digest, tick, mode,
 /// content_validation, result]` (ADR-061 revision 8 decision 2).
 #[must_use]

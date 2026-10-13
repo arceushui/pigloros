@@ -201,12 +201,13 @@ fn execute(
     let pinned = schema_digests::pinned_digest(attempt.family);
     let schema_ok = blake3::hash(&attempt.schema.bytes).as_bytes() == &pinned
         && schema_text_is_pinned(&attempt.payload.bytes);
-    let pieces = PiecesV1::find(&attempt.auxiliary).or(Err(AdapterRunErrorV1::NotExecuted));
-    schema_ok
-        .then_some(())
-        .ok_or(AdapterRunErrorV1::NotExecuted)
-        .and_then(|()| pieces)
-        .map(|pieces| decide(runner, attempt, mode, &pieces))
+    if !schema_ok {
+        return Err(AdapterRunErrorV1::NotExecuted);
+    }
+    match PiecesV1::find(&attempt.auxiliary) {
+        Ok(pieces) => Ok(decide(runner, attempt, mode, &pieces)),
+        Err(_fault) => Err(AdapterRunErrorV1::NotExecuted),
+    }
 }
 
 /// Checks (6) and (7) of the order.
