@@ -1,24 +1,25 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use pos_core::{
-    pipeline_authority_revision_v1, pipeline_delegation_revision_v1, pipeline_erasure_revision_v1,
-    AppendDedupKey, AppendDedupScope, AppendIdentity, ArtifactClaimInputV1, ArtifactDataClassV1,
-    ArtifactOptionalityV1, ArtifactStateV1, ArtifactTransitionRuleV1, AssuranceLevelV1,
-    AuthenticatedPrincipalDraftV1, AuthenticatedPrincipalResultV1, AuthorityErrorV1,
-    AuthorityEvaluatorV1, AuthorityGranteeV1, AuthorityPersistenceHostV1,
-    AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1, AuthorityRoleV1,
-    AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes, Capability,
-    CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
-    CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1, ConsentGrantRefDraftV1,
-    ConsentGrantRefV1, ConsentGrantStatusV1, EntityId, ErasureArtifactClassV1,
-    ErasureContainmentGateV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventDraft, Hash,
-    Kind, KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1,
-    ObservationSnapshotV1, PersistedAuthorityV1, PipelineAdmissionBasisV1,
-    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptIdV1,
-    PipelineCommitReceiptV1, PipelineEvidenceRefV1, PipelineOutcomeV1,
-    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin, PluginId,
-    PrincipalRefV1, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1,
-    Seq, SeqRange, State, TimelineId, WallTime,
+    factual_artifact_digest, pipeline_authority_revision_v1, pipeline_delegation_revision_v1,
+    pipeline_erasure_revision_v1, AppendDedupKey, AppendDedupScope, AppendIdentity,
+    ArtifactClaimInputV1, ArtifactDataClassV1, ArtifactOptionalityV1, ArtifactStateV1,
+    ArtifactTransitionRuleV1, AssuranceLevelV1, AuthenticatedPrincipalDraftV1,
+    AuthenticatedPrincipalResultV1, AuthorityErrorV1, AuthorityEvaluatorV1, AuthorityGranteeV1,
+    AuthorityPersistenceHostV1, AuthorityPersistenceStateV1, AuthorityRegistrySnapshotV1,
+    AuthorityRoleV1, AuthorizationRequestDraftV1, AuthorizationRequestV1, CanonicalBytes,
+    Capability, CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1,
+    CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentEvidenceV1,
+    ConsentGrantRefDraftV1, ConsentGrantRefV1, ConsentGrantStatusV1, DependencyNodeRecordV1,
+    EntityId, ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, Event, EventDraft, FactualNodeKeyV1, Hash, Kind,
+    KnowledgeSnapshotDraftV1, KnowledgeSnapshotV1, MemoryPolicyRevisionV1, ObservationSnapshotV1,
+    PersistedAuthorityV1, PipelineAdmissionBasisV1, PipelineAdmissionFenceV1,
+    PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineEvidenceRefV1,
+    PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin,
+    PluginId, PrincipalRefV1, Reducer, RegisteredArtifactV1, ReplayClaimEvaluationV1,
+    ReplayClaimEvaluatorV1, Seq, SeqRange, State, TimelineId, WallTime,
+    FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
 };
 use pos_runtime::{
     AuthorizedDriverViewV1, AuthorizedViewAuthorityV1, Driver, ObservationView, PluginRegistry,
@@ -972,10 +973,10 @@ fn admission_stores() -> Vec<(&'static str, AdmissionStore)> {
     ]
 }
 
-/// Records the observation anchor of every submitted basis.
+/// Records every submitted basis.
 struct RecordingPort<'a> {
     inner: &'a mut dyn ScheduledAdmissionStoreV1,
-    anchors: Vec<(Seq, Hash)>,
+    bases: Vec<PipelineAdmissionBasisV1>,
 }
 
 impl PipelineAdmissionPortV1 for RecordingPort<'_> {
@@ -983,11 +984,7 @@ impl PipelineAdmissionPortV1 for RecordingPort<'_> {
         &mut self,
         basis: &PipelineAdmissionBasisV1,
     ) -> Result<PipelineOutcomeV1, pos_core::CoreError> {
-        let observation = basis.attempt().observation();
-        self.anchors.push((
-            observation.observed_through(),
-            observation.snapshot_digest(),
-        ));
+        self.bases.push(basis.clone());
         self.inner.admit_pipeline_batch(basis)
     }
 
@@ -1886,14 +1883,14 @@ fn revoke(fixture: &mut Fixture) {
         .test_ok();
 }
 
-/// Stage and admit one authorized pass, returning the bound observation anchor.
-fn admit_recorded(
+/// Stage and admit one authorized pass, returning the basis it submitted.
+fn admit_recorded_basis(
     registry: &mut PluginRegistry,
     prepared: &mut AdmissionStore,
     key: u8,
     views: &[AuthorizedDriverViewV1],
     authorities: &[AuthorizedViewAuthorityV1<'_>],
-) -> (Seq, Hash) {
+) -> PipelineAdmissionBasisV1 {
     registry
         .stage_authorized_scheduled_pass(
             prepared.timeline,
@@ -1906,7 +1903,7 @@ fn admit_recorded(
     let admission = prepared.admission(key);
     let mut port = RecordingPort {
         inner: prepared.store.as_mut(),
-        anchors: Vec::new(),
+        bases: Vec::new(),
     };
     let receipt = registry
         .admit_authorized_scheduled_pass(&mut port, &admission, authorities)
@@ -1915,8 +1912,24 @@ fn admit_recorded(
         receipt.map(|receipt| receipt.committed_events().len()),
         Some(views.len())
     );
-    assert_eq!(port.anchors.len(), 1);
-    port.anchors[0]
+    assert_eq!(port.bases.len(), 1);
+    port.bases.remove(0)
+}
+
+/// Stage and admit one authorized pass, returning the bound observation anchor.
+fn admit_recorded(
+    registry: &mut PluginRegistry,
+    prepared: &mut AdmissionStore,
+    key: u8,
+    views: &[AuthorizedDriverViewV1],
+    authorities: &[AuthorizedViewAuthorityV1<'_>],
+) -> (Seq, Hash) {
+    let basis = admit_recorded_basis(registry, prepared, key, views, authorities);
+    let observation = basis.attempt().observation();
+    (
+        observation.observed_through(),
+        observation.snapshot_digest(),
+    )
 }
 
 #[test]
@@ -2005,6 +2018,110 @@ fn each_scheduled_driver_observes_only_its_own_authorized_view() {
         let again = admit_recorded(&mut registry, &mut prepared, 7, &views, &authorities);
         assert_ne!(alone.1, both, "{name}: the basis binds every view");
         assert_eq!(again.1, both, "{name}: the binding is deterministic");
+    }
+}
+
+/// The base cut `AdmissionStore::prepare` commits: twelve Events.
+const BASE_CUT: u64 = 12;
+/// The owner ID of the observation-snapshot node.
+const OBSERVATION: &str = pos_core::FactualHostOwnerV1::Observation.as_str();
+
+/// The authorized-view digest of one view, recomputed independently of the
+/// runtime from its documented layout. The layout is the one the existing
+/// authorized-pass vector fixes: the domain, the Timeline, the base cut, the
+/// number of views, then each view's Plugin, snapshot digest and knowledge
+/// digest.
+fn expected_view_digest(timeline: TimelineId, through: u64, fixture: &Fixture) -> Hash {
+    let evaluation = observation_evaluation(&fixture.observation);
+    let snapshot = fixture
+        .observation
+        .authoritative_snapshot(&evaluation)
+        .test_ok();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.AuthorizedScheduledPass.v1\0");
+    hasher.update(&timeline.inner().to_bytes());
+    hasher.update(&through.to_be_bytes());
+    hasher.update(&1_u64.to_be_bytes());
+    hasher.update(&fixture.plugin_id.inner().to_bytes());
+    hasher.update(snapshot.digest().as_bytes());
+    hasher.update(fixture.knowledge.digest().as_bytes());
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// The node of `owner` at output ordinal `ordinal` in a submitted basis.
+fn node_at<'a>(
+    basis: &'a PipelineAdmissionBasisV1,
+    owner: &str,
+    ordinal: u32,
+) -> &'a DependencyNodeRecordV1 {
+    let nodes = basis.dependencies().record().nodes();
+    nodes
+        .iter()
+        .find(|node| {
+            let coordinate = node.coordinate();
+            coordinate.owner_id() == owner && coordinate.output_ordinal() == ordinal
+        })
+        .test_ok()
+}
+
+/// ADR-064 R3.4.2 and R3.4.7 (Redmine #628): an authorized pass has no
+/// forwarded Event and no carried set. Its Tick declares the snapshot node,
+/// which carries the authorized-view digest the basis binds, and one step node
+/// and one output node per Driver, with no ingress, history or prefix node. The
+/// step node declares the snapshot only, and a later pass chains to it.
+///
+/// The nodes are found by owner and output ordinal, not by position in the
+/// record. The view digest is recomputed with the layout of the existing
+/// authorized-pass vector.
+#[test]
+fn the_authorized_pass_declares_its_view_digest_and_no_host_derived_events() {
+    for (name, mut prepared) in admission_stores() {
+        let fixture = fixture_with_timeline(prepared.timeline);
+        let (mut registry, _) = registry(&fixture, false);
+        let evaluation = observation_evaluation(&fixture.observation);
+        let authority = current_authority(&fixture);
+        let authorities = [view_authority(&fixture, &evaluation, &authority)];
+        let views = [driver_view(&fixture)];
+
+        let basis = admit_recorded_basis(&mut registry, &mut prepared, 5, &views, &authorities);
+        let bound = expected_view_digest(prepared.timeline, BASE_CUT, &fixture);
+        let anchored = basis.attempt().observation().snapshot_digest();
+        assert_eq!(anchored, bound, "{name}");
+        let dependencies = basis.dependencies();
+        assert_eq!(dependencies.tick(), 1, "{name}");
+        assert!(dependencies.event_nodes().is_empty(), "{name}");
+        let nodes = dependencies.record().nodes();
+        assert_eq!(nodes.len(), 3, "{name}");
+        // The snapshot node is the only host node: no ingress, history or prefix node.
+        let host_nodes = nodes
+            .iter()
+            .filter(|node| node.coordinate().scheduler_position() == 0);
+        assert_eq!(host_nodes.count(), 1, "{name}");
+
+        // The snapshot node binds the view digest at the Tick's coordinate.
+        let key = FactualNodeKeyV1 {
+            tick: 1,
+            scheduler_position: 0,
+            owner: OBSERVATION,
+            output_ordinal: 0,
+            schema_id: FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
+        };
+        let snapshot = factual_artifact_digest(prepared.timeline, key, bound);
+        let snapshot_node = node_at(&basis, OBSERVATION, 0);
+        let recorded = snapshot_node.coordinate().artifact_digest();
+        assert_eq!(recorded, snapshot, "{name}");
+        let owners = registry.factual_owner_ids();
+        let owner = owners.first().test_ok().1.as_str();
+        let step = node_at(&basis, owner, 0);
+        assert_eq!(step.input_digests(), [snapshot], "{name}");
+
+        // The next pass declares its own snapshot node and chains to the step node.
+        let step_digest = step.coordinate().artifact_digest();
+        let again = admit_recorded_basis(&mut registry, &mut prepared, 6, &views, &authorities);
+        assert_eq!(again.dependencies().tick(), 2, "{name}");
+        let later = node_at(&again, owner, 0);
+        assert_eq!(later.input_digests().len(), 2, "{name}");
+        assert!(later.input_digests().contains(&step_digest), "{name}");
     }
 }
 
@@ -2313,6 +2430,23 @@ enum Ack {
     Delivered,
     LostAfterCommit,
     LostBeforeCommit,
+    /// The store answers `InvalidDependencyDeclaration` and commits nothing.
+    RefusesInvalidDeclaration,
+    /// The store answers `DependencySetExhausted` and commits nothing.
+    RefusesExhaustedSet,
+}
+
+impl Ack {
+    /// The outcome a refusing port answers instead of committing, if any.
+    const fn refusal(self) -> Option<PipelineOutcomeV1> {
+        match self {
+            Self::RefusesInvalidDeclaration => {
+                Some(PipelineOutcomeV1::InvalidDependencyDeclaration)
+            }
+            Self::RefusesExhaustedSet => Some(PipelineOutcomeV1::DependencySetExhausted),
+            Self::Delivered | Self::LostAfterCommit | Self::LostBeforeCommit => None,
+        }
+    }
 }
 
 /// A port over a prepared store that records every store outcome and can
@@ -2334,6 +2468,10 @@ impl PipelineAdmissionPortV1 for AckPort<'_> {
         basis: &PipelineAdmissionBasisV1,
     ) -> Result<PipelineOutcomeV1, pos_core::CoreError> {
         self.bases.push(basis.clone());
+        if let Some(refusal) = self.ack.refusal() {
+            self.outcomes.push(refusal.clone());
+            return Ok(refusal);
+        }
         if matches!(self.ack, Ack::LostBeforeCommit) {
             return Err(lost_acknowledgement());
         }
@@ -2562,6 +2700,42 @@ fn in_doubt_authorized_pass_recovers_its_committed_receipt_without_restaging() {
             "{name}"
         );
         assert_eq!(prepared.committed().len(), 1, "{name}");
+    }
+}
+
+/// ADR-064 R3.8.2 (Redmine #628): the two dependency outcomes a store may
+/// answer are wrapped as a not-admitted error on the authorized path too. The
+/// staged Driver aborts and nothing commits.
+#[test]
+fn the_stores_dependency_refusals_abort_the_authorized_pass_and_commit_nothing() {
+    for ack in [Ack::RefusesInvalidDeclaration, Ack::RefusesExhaustedSet] {
+        let expected = ack.refusal().test_ok();
+        for (name, mut prepared) in admission_stores() {
+            let fixture = fixture_with_timeline(prepared.timeline);
+            let (mut registry, state) = registry(&fixture, false);
+            let admission = prepared.admission(30);
+            stage_current(&mut registry, &fixture).test_ok();
+
+            let (refused, outcomes) =
+                admit_with_ack(&mut registry, &mut prepared, &fixture, &admission, ack);
+            let text = error_text(refused);
+            assert!(text.ends_with(&format!("{expected:?}")), "{name}: {text}");
+            assert_eq!(outcomes, vec![expected.clone()], "{name}");
+            assert!(prepared.committed().is_empty(), "{name}");
+            let seen = observed(&state);
+            let counts = (seen.steps, seen.commits, seen.aborts);
+            assert_eq!(counts, (1, 0, 1), "{name}");
+
+            // The refused attempt advanced nothing: a delivered retry declares Tick 1.
+            stage_current(&mut registry, &fixture).test_ok();
+            let retry = prepared.admission(31);
+            let delivered = Ack::Delivered;
+            let (admitted, _) =
+                admit_with_ack(&mut registry, &mut prepared, &fixture, &retry, delivered);
+            assert!(admitted.test_ok().is_some(), "{name}");
+            let basis = prepared.retained.as_ref().test_ok();
+            assert_eq!(basis.dependencies().tick(), 1, "{name}");
+        }
     }
 }
 
