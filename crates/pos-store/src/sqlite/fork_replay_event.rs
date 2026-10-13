@@ -1,6 +1,6 @@
 //! Bounded actual Event getters and parent hash inputs in the held snapshot.
 
-use pos_core::{CoreError, Event, ForkAdmissionErrorV1 as Error, Hash, Seq, TimelineId};
+use pos_core::{CoreError, Event, ForkAdmissionErrorV1 as Error, ForkAppendOperationV1, Hash, Seq, TimelineId};
 use rusqlite::{types::FromSql, Connection, Row, Rows, Statement};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -48,6 +48,7 @@ const FIRST_OPEN: &str = event_probe_sql!("seq >= 0");
 const FIRST_CAPPED: &str = event_probe_sql!("seq >= 0 AND seq <= ?2");
 const AFTER_OPEN: &str = event_probe_sql!("seq > ?2");
 const AFTER_CAPPED: &str = event_probe_sql!("seq > ?2 AND seq <= ?3");
+pub(super) const EXACT_EVENT: &str = event_probe_sql!("seq = ?2");
 
 #[derive(Clone, Copy)]
 pub(super) struct EventCursorV1 {
@@ -317,7 +318,17 @@ impl<'read, 'statement, 'budget, 'clock> EventRowReaderV1<'read, 'statement, 'bu
     }
 }
 
-struct ScopedEventV1(Event);
+pub(super) struct ScopedEventV1(Event);
+
+impl ScopedEventV1 {
+    pub(super) const fn new(event: Event) -> Self {
+        Self(event)
+    }
+
+    pub(super) const fn event(&self) -> &Event {
+        &self.0
+    }
+}
 
 impl Drop for ScopedEventV1 {
     fn drop(&mut self) {
@@ -377,6 +388,103 @@ impl ParentHashStateV1 {
     }
 }
 
+fn read_probed_event(
+    conn: &Connection,
+    key: &str,
+    lengths: &EventRowLengthsV1,
+    timeline: TimelineId,
+    prefix: u64,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> Result<ScopedEventV1> {
+    context
+        .require_bytes(lengths.total())
+        .map_err(|_| Error::CorruptAuthority)
+        .and_then(|()| {
+            selected_field_with_context(
+                conn,
+                SelectedRowV1::EventFields(key, lengths.seq),
+                context,
+                |row, context| {
+                    let mut reader = EventRowReaderV1::new(row, context, Some(lengths));
+                    super::decode_event_row_with_reader(&mut reader)
+                        .and_then(|event| super::finalize_sqlite_own_event(event, timeline, prefix))
+                        .map(ScopedEventV1::new)
+                        .map_err(|_| Error::CorruptAuthority)
+                },
+            )
+            .and_then(|event| event.ok_or(Error::CorruptAuthority))
+        })
+}
+
+/// Read only the prefix the existing own-Event decoder consumes. This is one
+/// actual metadata visit, not an ancestry walk: parent/name/head must not add
+/// stronger validation to this lookup. No variable-width field is fetched.
+fn origin_prefix_with_context(
+    conn: &Connection,
+    timeline: TimelineId,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> Result<u64> {
+    context
+        .node(0)
+        .map_err(|_| Error::CorruptAuthority)
+        .and_then(|()| context.bytes(ulid::ULID_LEN).map_err(|_| Error::CorruptAuthority))
+        .and_then(|()| {
+            let key = timeline.to_string();
+            selected_field_with_context(conn, SelectedRowV1::OriginPrefix(&key), context, |row, _| {
+                row.get::<_, Option<i64>>(0)
+                    .map_err(|_| Error::StorageIndeterminate)
+                    .and_then(|fork| super::sqlite_fork_prefix(fork).map_err(|_| Error::CorruptAuthority))
+            })
+            .and_then(|prefix| prefix.ok_or(Error::CorruptAuthority))
+        })
+}
+
+/// Reuse the ordinary classified-Event semantic decoder without collecting a
+/// Vec or releasing plaintext. The caller retains this scrub-on-drop owner
+/// while it validates provenance in the same already-held snapshot.
+pub(super) fn classified_event_with_context(
+    conn: &Connection,
+    operation: &ForkAppendOperationV1,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> std::result::Result<ScopedEventV1, pos_core::ForkEventAuthorityErrorV1> {
+    let input = operation.input();
+    origin_prefix_with_context(conn, input.child_timeline_id, context)
+        .and_then(|prefix| {
+            input.logical_seq.checked_sub(prefix)
+                .ok_or(Error::CorruptAuthority)
+                .map(|local| (prefix, super::seq_as_i64(Seq::from_u64(local))))
+        })
+        .and_then(|(prefix, local)| {
+            context.bytes(ulid::ULID_LEN).map_err(|_| Error::CorruptAuthority)
+                .and_then(|()| {
+                    let key = input.child_timeline_id.to_string();
+                    selected_field_with_context(
+                        conn,
+                        SelectedRowV1::ClassifiedEventProbe(&key, local),
+                        context,
+                        |row, _| EventRowLengthsV1::probe(row),
+                    )
+                    .and_then(|probe| probe.flatten().ok_or(Error::CorruptAuthority))
+                    .and_then(|lengths| read_probed_event(
+                        conn, &key, &lengths, input.child_timeline_id, prefix, context,
+                    ))
+                    .and_then(|mut event| {
+                        prefix.checked_add(event.0.seq.as_u64())
+                            .ok_or(Error::CorruptAuthority)
+                            .and_then(|logical| {
+                                event.0.seq = Seq::from_u64(logical);
+                                if event.0.id == input.event_id && logical == input.logical_seq {
+                                    context.check().map(|()| event).map_err(|_| Error::CorruptAuthority)
+                                } else {
+                                    Err(Error::CorruptAuthority)
+                                }
+                            })
+                    })
+                })
+        })
+        .map_err(|_| pos_core::ForkEventAuthorityErrorV1::CorruptAuthority)
+}
+
 fn next_event(
     conn: &Connection,
     key: &str,
@@ -388,19 +496,10 @@ fn next_event(
         EventRowLengthsV1::probe(row)
     })
     .and_then(|probe| probe.ok_or(Error::StorageIndeterminate))
-    .and_then(|probe| probe.map_or_else(|| Ok(None), |lengths| context.require_bytes(lengths.total())
-            .map_err(|_| Error::CorruptAuthority)
-            .and_then(|()| {
-                selected_field_with_context(conn, SelectedRowV1::EventFields(key, lengths.seq), context, |row, context| {
-                    let mut reader = EventRowReaderV1::new(row, context, Some(&lengths));
-                    super::decode_event_row_with_reader(&mut reader)
-                        .and_then(|event| super::finalize_sqlite_own_event(event, segment.id, segment.fork.map_or(0, Seq::as_u64)))
-                        .map(ScopedEventV1)
-                        .map_err(|_| Error::CorruptAuthority)
-                })
-                .and_then(|event| event.ok_or(Error::CorruptAuthority))
-                .map(|event| Some((lengths.seq, event)))
-            })))
+    .and_then(|probe| probe.map_or_else(|| Ok(None), |lengths| {
+        read_probed_event(conn, key, &lengths, segment.id, segment.fork.map_or(0, Seq::as_u64), context)
+            .map(|event| Some((lengths.seq, event)))
+    }))
 }
 
 fn hash_segment(
