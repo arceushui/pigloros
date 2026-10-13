@@ -74,7 +74,8 @@ fn exercise<S: Port + ForkReplayAuthorityReadPortV1 + ErasureInventoryPersistenc
         let edge_limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, bytes, 1_000_000)?;
         let mut edge_clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let edge_start = edge_clock.mark();
-        let mut edge_budget = ForkReplayReadBudgetV1::new(edge_limits, edge_start, &mut edge_clock)?;
+        let mut edge_budget =
+            ForkReplayReadBudgetV1::new(edge_limits, edge_start, &mut edge_clock)?;
         let result = store.validate_fork_replay_authority(&requirement, &mut edge_budget);
         if succeeds {
             assert_eq!(result?, first);
