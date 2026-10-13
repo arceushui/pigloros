@@ -1355,7 +1355,8 @@ impl ErasureExecutionHostV1 {
         composition: &ErasureCoordinatorCompositionV1,
         limits: ErasureRecoveryLimitsV1,
     ) -> Result<Self, ErasureHostErrorV1> {
-        store.detach_fixture_gate_for_host()
+        store
+            .detach_fixture_gate_for_host()
             .map_err(|_| ErasureHostErrorV1::AdapterFailure)
             .and_then(|store| Self::recover_with_composition(Box::new(store), composition, limits))
     }
