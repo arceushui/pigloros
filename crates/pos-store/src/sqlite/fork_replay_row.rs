@@ -12,6 +12,8 @@ type Result<T> = std::result::Result<T, Error>;
 pub(super) enum SelectedRowV1<'key> {
     HostProbe,
     HostBlob,
+    RegistryProbe,
+    RegistryBlob,
     ChildProbe(&'key str),
     ChildFields(&'key str),
     ChainProbe(&'key str),
@@ -39,6 +41,10 @@ impl SelectedRowV1<'_> {
                 FROM fork_admission_authority WHERE singleton = 1",
             Self::HostBlob => "SELECT fah1_cbor
                 FROM fork_admission_authority WHERE singleton = 1",
+            Self::RegistryProbe => "SELECT probe.* FROM (SELECT 1) AS boundary LEFT JOIN (
+                SELECT typeof(state_cbor) = 'blob', length(state_cbor)
+                FROM key_registry WHERE singleton = 1) AS probe ON 1 = 1",
+            Self::RegistryBlob => "SELECT state_cbor FROM key_registry WHERE singleton = 1",
             Self::ChildProbe(_) => "SELECT
                 typeof(name) = 'null', typeof(name) = 'text', length(CAST(name AS BLOB)),
                 typeof(parent_id) = 'null', typeof(parent_id) = 'text', length(CAST(parent_id AS BLOB)),
@@ -82,7 +88,9 @@ impl SelectedRowV1<'_> {
         statement: &'statement mut Statement<'_>,
     ) -> rusqlite::Result<Rows<'statement>> {
         match self {
-            Self::HostProbe | Self::HostBlob => statement.query([]),
+            Self::HostProbe | Self::HostBlob | Self::RegistryProbe | Self::RegistryBlob => {
+                statement.query([])
+            }
             Self::ChildProbe(key)
             | Self::ChildFields(key)
             | Self::ChainProbe(key)
