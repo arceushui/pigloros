@@ -130,7 +130,7 @@ use crate::fork_event_authority::{
 use crate::fork_manifest_publication::{
     authorize_publication, publication_operation_decoder, publication_parent_head,
     publication_sources, recovered_publication_receipt, require_absent_publication_graph,
-    sign_publication, trusted_committed_manifest, validate_publication_request,
+    sign_publication, trusted_committed_manifest_with_context, validate_publication_request,
     AbsentPublicationPreflightV1, CommittedPublicationRowsV1, CommittedPublicationSourcesV1,
     PublicationGraphV1, PublicationSourceErrorV1, PublicationSourceResultV1, PublicationSourcesV1,
     PublicationSuffixV1,
@@ -12971,6 +12971,22 @@ impl SqliteStore {
         final_logical_head: u64,
         validator: AuthorityValidatorV1,
     ) -> Result<crate::CommittedForkManifestV1, ForkManifestPublicationErrorV1> {
+        self.read_committed_fork_publication_with_context(
+            child_timeline_id,
+            final_logical_head,
+            validator,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn read_committed_fork_publication_with_context(
+        &self,
+        child_timeline_id: TimelineId,
+        final_logical_head: u64,
+        validator: AuthorityValidatorV1,
+        context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+    ) -> Result<crate::CommittedForkManifestV1, ForkManifestPublicationErrorV1> {
+        context.check()?;
         self.committed_fork_publication_rows(child_timeline_id, final_logical_head, validator)
             .and_then(|rows| {
                 let admission = self.fork_publication_admission(child_timeline_id, validator);
@@ -12999,7 +13015,7 @@ impl SqliteStore {
                         .map(Option::as_ref)
                         .map_err(|error| *error),
                 };
-                trusted_committed_manifest(&rows, sources)
+                trusted_committed_manifest_with_context(&rows, sources, context)
             })
     }
 }
