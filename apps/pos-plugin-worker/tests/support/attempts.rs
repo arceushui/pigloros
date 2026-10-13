@@ -118,3 +118,25 @@ pub fn attempt_from_fixture_files(
         },
     })
 }
+
+/// `attempt` with its payload rewritten sub-case by sub-case.
+///
+/// `rewrite` may edit a sub-case of the payload object and returns whether to keep it. The
+/// payload digest of the attempt follows the new bytes; the composite and the other members are
+/// unchanged, so the pieces of the removed sub-cases are simply unused.
+///
+/// # Errors
+/// Returns the error of parsing or writing the payload.
+pub fn rewrite_subcases(
+    mut attempt: CaseAttempt,
+    rewrite: impl FnMut(&mut Value) -> bool,
+) -> TestResult<CaseAttempt> {
+    let mut payload: Value = serde_json::from_slice(&attempt.payload.bytes)?;
+    let subcases = payload["subcases"].as_array_mut().ok_or("no sub-cases")?;
+    subcases.retain_mut(rewrite);
+    let mut bytes = serde_json::to_vec(&payload)?;
+    bytes.push(b'\n');
+    attempt.fixture_digest = *blake3::hash(&bytes).as_bytes();
+    attempt.payload = artifact(bytes);
+    Ok(attempt)
+}

@@ -4,7 +4,11 @@
 //! The test reads the seven composites and payloads of `fixtures/conformance`, and for every
 //! step of every sub-case runs `verify_plugin_trust_v1`, the TPS1 bridge and, for each release,
 //! `verify_plugin_release_signature_v1` at the coordinates of the step. A release that a
-//! sub-case expects to be an `InvalidManifest` must be refused by the strict PMF1 projection.
+//! sub-case expects to be an `InvalidManifest` must be refused by the closure verifier or the
+//! strict PMF1 projection, and a release that a sub-case expects to be `Untrusted` must be
+//! refused by the authorization. A `pass` step of a sub-case that expects a refusal is not
+//! verified: its coordinates are the ones the refusal is about (an expiry, a clock regression, a
+//! revocation). The refreshed materials are verified at their `refresh` step.
 #![cfg(target_os = "linux")]
 
 pub mod support;
@@ -129,13 +133,33 @@ fn verified_evidence(
     Ok(evidence)
 }
 
-/// Verify the release of a `release` object; `invalid` when the sub-case expects the PMF1 to
-/// be refused by the strict projection.
+/// What a sub-case expects of its releases.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Release {
+    /// Authorized under the evidence and signed by the resolved key.
+    Valid,
+    /// Refused by the closure verifier or the strict PMF1 projection.
+    Invalid,
+    /// Refused by the authorization: an unknown publisher key or an ungranted Plugin ID.
+    Untrusted,
+}
+
+fn release_expectation(expect: &Json) -> Release {
+    if expect["error"] == "InvalidManifest" {
+        Release::Invalid
+    } else if expect["basis"] == "Untrusted" {
+        Release::Untrusted
+    } else {
+        Release::Valid
+    }
+}
+
+/// Verify the release of a `release` object as `expected` says.
 fn verify_release(
     pieces: &Pieces,
     release: &Json,
     evidence: &VerifiedPluginTrustEvidenceV1,
-    invalid: bool,
+    expected: Release,
 ) -> TestResult {
     let manifest = piece(pieces, &release["manifest"])?.clone();
     let blobs = release["blobs"]
@@ -147,14 +171,25 @@ fn verify_release(
     let entry = InMemoryReleaseEntryV1::from_bytes(manifest, blobs)?;
     let address = entry.address().clone();
     let source = InMemoryReleaseSourceV1::new(vec![entry])?;
-    let bundle = source.read_verified(&address)?;
-    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle);
-    if invalid {
-        assert!(projection.is_err(), "the PMF1 must be refused");
+    let read = source.read_verified(&address);
+    if expected == Release::Invalid {
+        let refused = match &read {
+            Err(_) => true,
+            Ok(bundle) => {
+                ValidatedPluginManifestProjectionV1::from_verified_bundle(bundle).is_err()
+            }
+        };
+        assert!(refused, "the release must be refused");
         return Ok(());
     }
-    let authorization = evidence.authorize_release(&projection?)?;
-    verify_plugin_release_signature_v1(&bundle, &authorization)?;
+    let bundle = read?;
+    let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
+    let authorization = evidence.authorize_release(&projection);
+    if expected == Release::Untrusted {
+        assert!(authorization.is_err(), "the release must be unauthorized");
+        return Ok(());
+    }
+    verify_plugin_release_signature_v1(&bundle, &authorization?)?;
     Ok(())
 }
 
@@ -168,19 +203,20 @@ fn generated_releases_and_trust_records_pass_the_production_verifiers() -> TestR
         let payload: Json =
             serde_json::from_slice(&std::fs::read(inputs.join(format!("{family}.json")))?)?;
         for subcase in payload["subcases"].as_array().ok_or("no sub-cases")? {
-            let invalid = subcase["expect"]["error"] == "InvalidManifest";
+            let expected = release_expectation(&subcase["expect"]);
+            let refusal = subcase["expect"]["kind"] == "refused";
             let mut last = None;
             for step in subcase["steps"].as_array().ok_or("no steps")? {
                 if let Some(object) = step.get("material").filter(|object| !object.is_null()) {
                     last = Some(material_of(&pieces, object)?);
                 }
                 let Some(material) = &last else { continue };
-                if step["step"] == "scan" {
+                if step["step"] == "scan" || (step["step"] == "pass" && refusal) {
                     continue;
                 }
                 let evidence = verified_evidence(material, step)?;
                 if let Some(release) = step.get("release") {
-                    verify_release(&pieces, release, &evidence, invalid)?;
+                    verify_release(&pieces, release, &evidence, expected)?;
                     releases += 1;
                 }
             }

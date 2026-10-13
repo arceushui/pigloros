@@ -24,9 +24,10 @@ Usage:
 The fixture seeds below are public and used for fixtures only ("repository-test-fixture-only");
 the signatures prove consistency, not publisher identity.
 
-The slice S3b1 ships a real subset of each family (R8-F9): `positive` and
-`independent-evaluation` in full, `den.01` and `den.02`, `mal.1a` and `mal.1b`, `res.1`,
-`del.1` and `dgr.1`.
+The slices S3b1 and S3b2 ship a real subset of each family (R8-F9): `positive` and
+`independent-evaluation` in full, `res.1` and `del.1`, and with S3b2 every `denied`
+(`den.01` to `den.22`), `malformed` (`mal.1a` to `mal.6`) and `downgrade` (`dgr.1` to
+`dgr.4`) sub-case. `res.2` to `res.4` and `del.2` belong to S3b3.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ import json
 import re
 import struct
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -289,14 +290,6 @@ def encode_tps1(
     return golden.cbor(fields + [golden.ed25519_sign(operator_seed, message)])
 
 
-def plugin_tps1(scope: str, epoch: int, root_version: int, root_public: bytes) -> bytes:
-    """The genesis Plugin TPS1 that maps one PTR1 root key and revokes nothing."""
-    roots = [["ptr1-" + root_key_id(root_public).hex(), root_version, "Ed25519", root_public]]
-    return encode_tps1(
-        scope, epoch, 9, roots, [], [], [], TPS1_VALID_THROUGH, None, OPERATOR_SEED
-    )
-
-
 # --- The execution profile digest (EPF1) ---
 
 PROFILE_DOMAIN = b"PiglorOS.Plugin.ExecutionProfile.v1\0"
@@ -459,8 +452,11 @@ def _addressed(prefix: str, role: str, blobs) -> list:
     return [(prefix + digest[len("sha256:") :], role, blob) for digest, blob in entries]
 
 
-def oci_closure(pmf1: bytes, spec: Pmf1Spec) -> tuple[bytes, list[bytes]]:
-    """The JCS OCI manifest and the layer blobs (in layer order) of a release."""
+def oci_closure(pmf1: bytes, spec: Pmf1Spec, tamper=None) -> tuple[bytes, list[bytes]]:
+    """The JCS OCI manifest and the layer blobs (in layer order) of a release.
+
+    `tamper(descriptors, blobs)` may corrupt the descriptors in place and returns the blobs.
+    """
     schemas = [event.document for event in spec.events] + [spec.state.document]
     if spec.configuration is not None:
         schemas.append(spec.configuration.document)
@@ -484,6 +480,9 @@ def oci_closure(pmf1: bytes, spec: Pmf1Spec) -> tuple[bytes, list[bytes]]:
                 "size": len(blob),
             }
         )
+    blobs = [blob for _, _, blob in layers]
+    if tamper is not None:
+        blobs = tamper(descriptors, blobs)
     manifest = golden.jcs(
         {
             "artifactType": "application/vnd.pigloros.plugin.release.v1",
@@ -497,7 +496,7 @@ def oci_closure(pmf1: bytes, spec: Pmf1Spec) -> tuple[bytes, list[bytes]]:
             "schemaVersion": 2,
         }
     )
-    return manifest.encode("utf-8"), [blob for _, _, blob in layers]
+    return manifest.encode("utf-8"), blobs
 
 
 # --- Fixed public documents of the releases ---
@@ -623,11 +622,17 @@ class Release:
         }
 
 
-def make_release(spec: Pmf1Spec, mutate=None) -> Release:
-    """The release of `spec`; `mutate` replaces the PMF1 bytes (the closure is built over them)."""
+def make_release(
+    spec: Pmf1Spec, mutate=None, tamper=None, closure_spec: Pmf1Spec | None = None
+) -> Release:
+    """The release of `spec`.
+
+    `mutate` replaces the PMF1 bytes (the closure is built over them), `tamper` corrupts the OCI
+    descriptors and `closure_spec` builds the closure over another spec than the PMF1's.
+    """
     built = build_pmf1(spec)
     pmf1 = built["complete"] if mutate is None else mutate(built["complete"])
-    manifest, layers = oci_closure(pmf1, spec)
+    manifest, layers = oci_closure(pmf1, spec if closure_spec is None else closure_spec, tamper)
     return Release(
         pmf1=pmf1,
         oci_manifest=manifest,
@@ -643,26 +648,34 @@ def make_release(spec: Pmf1Spec, mutate=None) -> Release:
 
 @dataclass(frozen=True)
 class Trust:
+    """A trust material: the anchor, the TPS1 and the PTR1 and PRV1 histories (oldest first)."""
+
     anchor: bytes
     tps1: bytes
-    ptr1: bytes
-    prv1: bytes
+    ptr1: tuple
+    prv1: tuple
 
     def pieces(self) -> list[bytes]:
-        return [self.anchor, self.tps1, self.ptr1, self.prv1]
+        return [self.anchor, self.tps1, *self.ptr1, *self.prv1]
 
     def reference(self) -> dict:
         digest = lambda data: golden.blake3(data).hex()  # noqa: E731
         return {
             "anchor": digest(self.anchor),
             "tps1": digest(self.tps1),
-            "ptr1": [digest(self.ptr1)],
-            "prv1": [digest(self.prv1)],
+            "ptr1": [digest(record) for record in self.ptr1],
+            "prv1": [digest(record) for record in self.prv1],
         }
 
 
+def root_mapping() -> list:
+    """The TPS1 `trust_roots` row that maps the PTR1 root key."""
+    public = golden.ed25519_public(ROOT_SEED)
+    return [["ptr1-" + root_key_id(public).hex(), 1, "Ed25519", public]]
+
+
 @lru_cache(maxsize=None)
-def trust() -> Trust:
+def make_trust(valid_through: str = TPS1_VALID_THROUGH) -> Trust:
     """The genesis policy: one root, one publisher key and one grant, no revocation."""
     publisher = golden.ed25519_public(PUBLISHER_SEED)
     ptr1 = encode_ptr1(
@@ -671,7 +684,9 @@ def trust() -> Trust:
     prv1 = encode_prv1(
         SCOPE, 1, 0, ROOT_NOT_AFTER, golden.blake3(ptr1), None, TICK, [], [], ROOT_SEED
     )
-    tps1 = plugin_tps1(SCOPE, 1, 1, golden.ed25519_public(ROOT_SEED))
+    tps1 = encode_tps1(
+        SCOPE, 1, 9, root_mapping(), [], [], [], valid_through, None, OPERATOR_SEED
+    )
     anchor = golden.cbor(
         [
             "PCA1",
@@ -682,7 +697,66 @@ def trust() -> Trust:
             golden.blake3(tps1),
         ]
     )
-    return Trust(anchor=anchor, tps1=tps1, ptr1=ptr1, prv1=prv1)
+    return Trust(anchor=anchor, tps1=tps1, ptr1=(ptr1,), prv1=(prv1,))
+
+
+def trust() -> Trust:
+    return make_trust()
+
+
+def revoked_key_id(owner: str, epoch: int, public: bytes) -> str:
+    """The TPS1 `revoked_key_ids` entry of a publisher key: `pkr1-` and a domain-separated hash."""
+    preimage = b"pigloros/plugin-revoked-key-id/v1\0" + golden.cbor(
+        [owner, PUBLISHER_KEY_ROLE, epoch, public]
+    )
+    return "pkr1-" + golden.blake3(preimage).hex()
+
+
+def advanced_trust(
+    base: Trust,
+    key_epochs: tuple = (),
+    artifacts: tuple = (),
+    operator_denied: tuple = (),
+    valid_through: str = TPS1_VALID_THROUGH,
+) -> Trust:
+    """The epoch-2 successor of the genesis `base`: the same PTR1 and a second PRV1 and TPS1.
+
+    The PRV1 record has Tick `LATER_TICK`, which is the Tick at which its entries take effect.
+    `key_epochs` revokes publisher key epochs and `artifacts` release digests (both PRV1 and
+    TPS1 list them); `operator_denied` release digests are denied by the TPS1 alone.
+    """
+    public = golden.ed25519_public(PUBLISHER_SEED)
+    key_rows = [
+        [OWNER, PUBLISHER_KEY_ROLE, epoch, public, LATER_TICK, 1, None] for epoch in key_epochs
+    ]
+    artifact_rows = [[digest, LATER_TICK, 1, None] for digest in sorted(artifacts)]
+    ptr1 = base.ptr1[0]
+    prv1 = encode_prv1(
+        SCOPE,
+        2,
+        0,
+        ROOT_NOT_AFTER,
+        golden.blake3(ptr1),
+        golden.blake3(base.prv1[0]),
+        LATER_TICK,
+        key_rows,
+        artifact_rows,
+        ROOT_SEED,
+    )
+    denied = sorted(set(artifacts) | set(operator_denied))
+    tps1 = encode_tps1(
+        SCOPE,
+        2,
+        9,
+        root_mapping(),
+        sorted(revoked_key_id(OWNER, epoch, public) for epoch in key_epochs),
+        denied,
+        [],
+        valid_through,
+        golden.blake3(base.tps1),
+        OPERATOR_SEED,
+    )
+    return Trust(anchor=base.anchor, tps1=tps1, ptr1=base.ptr1, prv1=(*base.prv1, prv1))
 
 
 # --- The prototype guests ---
@@ -750,28 +824,47 @@ class SubCase:
     expect: dict
     entry: dict | None
     releases: list
+    trusts: list = field(default_factory=list)
+    nested: bytes | None = None
 
 
-def install(release: Release, tick: int = TICK, instant: int = INSTANT) -> dict:
+def material_of(material: Trust | None):
+    return None if material is None else material.reference()
+
+
+def install(
+    release: Release, tick: int = TICK, instant: int = INSTANT, material: Trust | None = ...
+) -> dict:
     return {
         "step": "install",
         "release": release.reference(),
-        "material": trust().reference(),
+        "material": material_of(trust() if material is ... else material),
         "instant_micros": instant,
         "tick": tick,
     }
 
 
-def bind(release: Release, tick: int = TICK, instant: int = INSTANT) -> dict:
+def bind(
+    release: Release, tick: int = TICK, instant: int = INSTANT, material: Trust | None = ...
+) -> dict:
     return {
         "step": "bind",
         "release": release.reference(),
-        "material": trust().reference(),
+        "material": material_of(trust() if material is ... else material),
         "plugin_id": PLUGIN_ID,
         "instant_micros": instant,
         "tick": tick,
         "initial_state": {"schema": INITIAL_SCHEMA.hex(), "bytes": INITIAL_STATE.hex()},
         "event_type": EVENT_TYPE,
+    }
+
+
+def refresh(material: Trust, tick: int, instant: int) -> dict:
+    return {
+        "step": "refresh",
+        "material": material.reference(),
+        "instant_micros": instant,
+        "tick": tick,
     }
 
 
@@ -815,10 +908,10 @@ REDACTION_PASS = PassInputs(
 )
 
 
-def run_pass(inputs: PassInputs) -> dict:
+def run_pass(inputs: PassInputs, member: dict | None = None) -> dict:
     return {
         "step": "pass",
-        "members": [{"plugin_id": PLUGIN_ID}],
+        "members": [{"plugin_id": PLUGIN_ID} if member is None else member],
         "instant_micros": inputs.instant,
         "tick": inputs.tick,
         "invocation_id": inputs.invocation_id.hex(),
@@ -956,6 +1049,146 @@ def refusal_subcase(sub_id: str, steps: list, expect: dict, releases: list) -> S
     return SubCase(id=sub_id, steps=steps, expect=expect, entry=None, releases=releases)
 
 
+IMPORT_DENIALS = (
+    ("den.03", "ambient-wasi-import.wasm"),
+    ("den.04", "ambient-sockets-import.wasm"),
+    ("den.05", "ambient-filesystem-import.wasm"),
+    ("den.06", "ambient-environment-import.wasm"),
+    ("den.07", "ambient-wall-clock-import.wasm"),
+    ("den.08", "ambient-process-exit-import.wasm"),
+    ("den.09", "ambient-thread-spawn-import.wasm"),
+    ("den.10", "undeclared-host-function.wasm"),
+    ("den.11", "mistyped-host-function.wasm"),
+    ("den.12", "no-guest-exports.wasm"),
+)
+EXPIRY_AFTER_ROOT = 200
+TPS1_EXPIRY_SECOND = 90
+TPS1_EXPIRY = "1970-01-01T00:01:30Z"
+REVOKED_PASS = replace(FIRST_PASS, tick=LATER_TICK, instant=LATER_INSTANT)
+
+
+def seconds(count: int) -> int:
+    return count * 1_000_000
+
+
+def link_failure_subcase(sub_id: str, component_name: str) -> SubCase:
+    """A Component the real worker refuses at load: `IncompatibleAbi`."""
+    release = make_release(default_spec(component=component(component_name)))
+    return SubCase(
+        id=sub_id,
+        steps=[install(release), bind(release), run_pass(FIRST_PASS)],
+        expect=refused("IncompatibleAbi"),
+        entry=None,
+        releases=[release],
+    )
+
+
+def settled_subcase(
+    sub_id: str, release: Release, expect: dict, advance: Trust, rest: list
+) -> SubCase:
+    """Install and bind under the genesis policy, refresh to `advance`, then run `rest`."""
+    steps = [
+        install(release),
+        bind(release),
+        refresh(advance, LATER_TICK, LATER_INSTANT),
+        *rest,
+    ]
+    return SubCase(
+        id=sub_id,
+        steps=steps,
+        expect=expect,
+        entry=None,
+        releases=[release],
+        trusts=[advance],
+    )
+
+
+def revocation_subcases() -> list[SubCase]:
+    """`den.13` to `den.15`: a refreshed policy denies the bound release at the next pass."""
+    rust = rust_release()
+    keyed = advanced_trust(trust(), key_epochs=(1,))
+    artifact = advanced_trust(trust(), artifacts=(rust.release_digest,))
+    operator = advanced_trust(trust(), operator_denied=(rust.release_digest,))
+    passes = [run_pass(REVOKED_PASS)]
+    return [
+        settled_subcase(
+            "den.13", rust, refused("ArtifactRevoked", basis="PublisherKey"), keyed, passes
+        ),
+        settled_subcase(
+            "den.14", rust, refused("ArtifactRevoked", basis="Artifact"), artifact, passes
+        ),
+        settled_subcase(
+            "den.15", rust, refused("ArtifactRevoked", basis="OperatorDenial"), operator, passes
+        ),
+    ]
+
+
+def expiry_subcases() -> list[SubCase]:
+    """`den.16` to `den.18`: the pass instant is exactly the end of one validity window."""
+    manifest = rust_release()
+    wide = make_release(default_spec(not_after=EXPIRY_AFTER_ROOT))
+    short_lived = make_trust(TPS1_EXPIRY)
+    expired = refused("ArtifactTrustDenied", basis="Expired")
+
+    def at(release: Release, second: int, material: Trust) -> list:
+        late = replace(FIRST_PASS, instant=seconds(second))
+        return [
+            install(release, material=material),
+            bind(release, material=material),
+            run_pass(late),
+        ]
+
+    return [
+        SubCase(
+            "den.16", at(manifest, NOT_AFTER, trust()), expired, None, [manifest]
+        ),
+        SubCase(
+            "den.17",
+            at(wide, TPS1_EXPIRY_SECOND, short_lived),
+            dict(expired),
+            None,
+            [wide],
+            [short_lived],
+        ),
+        SubCase(
+            "den.18", at(wide, ROOT_NOT_AFTER, trust()), dict(expired), None, [wide]
+        ),
+    ]
+
+
+def policy_subcases() -> list[SubCase]:
+    """`den.19` to `den.22`: untrusted keys and Plugins, unadopted policy, a clock regression."""
+    stranger = make_release(default_spec(owner="stranger"))
+    ungranted = make_release(default_spec(plugin_id="pigloros.ungranted-plugin"))
+    rust = rust_release()
+    newer = advanced_trust(trust())
+    untrusted = refused("ArtifactTrustDenied", basis="Untrusted")
+    regressed = [
+        install(rust, instant=seconds(55)),
+        bind(rust, instant=seconds(55)),
+        run_pass(FIRST_PASS),
+    ]
+    return [
+        SubCase("den.19", [install(stranger)], untrusted, None, [stranger]),
+        SubCase("den.20", [install(ungranted)], dict(untrusted), None, [ungranted]),
+        SubCase(
+            "den.21",
+            [install(rust), bind(rust, material=newer)],
+            refused("ArtifactTrustDenied", basis="PolicyMismatch"),
+            None,
+            [rust],
+            [newer],
+        ),
+        SubCase(
+            "den.22",
+            regressed,
+            refused("ArtifactTrustDenied", basis="TrustStateUnavailable"),
+            None,
+            [rust],
+        ),
+    ]
+
+
 def denied_subcases() -> list[SubCase]:
     capability = make_release(default_spec(capabilities=(default_capability(True),)))
     feature = make_release(default_spec(features=("clock",)))
@@ -972,6 +1205,10 @@ def denied_subcases() -> list[SubCase]:
             refused("MissingFeature", index=0),
             [feature],
         ),
+        *(link_failure_subcase(sub_id, name) for sub_id, name in IMPORT_DENIALS),
+        *revocation_subcases(),
+        *expiry_subcases(),
+        *policy_subcases(),
     ]
 
 
@@ -986,14 +1223,83 @@ def noncanonical_version(pmf1: bytes) -> bytes:
     return pmf1[:head] + b"\x18\x01" + pmf1[head + 1 :]
 
 
-def malformed_subcases() -> list[SubCase]:
-    trailing = make_release(default_spec(), mutate=trailing_byte)
-    noncanonical = make_release(default_spec(), mutate=noncanonical_version)
-    invalid = refused("InvalidManifest")
-    return [
-        refusal_subcase("mal.1a", [install(trailing)], invalid, [trailing]),
-        refusal_subcase("mal.1b", [install(noncanonical)], dict(invalid), [noncanonical]),
+def wrong_media_type(descriptors: list, blobs: list) -> list:
+    """The WIT layer declares the Component media type."""
+    descriptors[2]["mediaType"] = golden.ROLES["component"][0]
+    return blobs
+
+
+def duplicate_member(descriptors: list, blobs: list) -> list:
+    """The WIT layer is the Component blob again: two layers with one digest."""
+    descriptors[2]["digest"] = descriptors[1]["digest"]
+    descriptors[2]["size"] = descriptors[1]["size"]
+    return blobs[:2] + blobs[3:]
+
+
+def wrong_size(descriptors: list, blobs: list) -> list:
+    """The Component descriptor declares one byte more than the blob holds."""
+    descriptors[1]["size"] += 1
+    return blobs
+
+
+def malformed_install_subcases() -> list[SubCase]:
+    """The sub-cases that fail at `install`: the PMF1 projection or the closure verifier."""
+    plain = default_spec()
+    swapped = replace(plain, component=component("c-guest.wasm"))
+    releases = [
+        ("mal.1a", make_release(plain, mutate=trailing_byte)),
+        ("mal.1b", make_release(plain, mutate=noncanonical_version)),
+        ("mal.2", make_release(plain, closure_spec=swapped)),
+        ("mal.3a", make_release(plain, tamper=wrong_media_type)),
+        ("mal.3b", make_release(plain, tamper=duplicate_member)),
+        ("mal.3c", make_release(plain, tamper=wrong_size)),
     ]
+    return [
+        refusal_subcase(sub_id, [install(release)], refused("InvalidManifest"), [release])
+        for sub_id, release in releases
+    ]
+
+
+def unreadable_subcases() -> list[SubCase]:
+    """`mal.4a` to `mal.5b`: the address or the trust material the pass reads is unusable."""
+    rust = rust_release()
+    other = make_release(default_spec(plugin_id="pigloros.other-plugin"))
+    sibling = make_release(default_spec(release_version="1.1.0", previous=rust.release_digest))
+    not_active = refused("ArtifactTrustDenied", basis="NotActive")
+    unavailable = refused("ArtifactTrustDenied", basis="TrustStateUnavailable")
+    bound = [install(rust), bind(rust)]
+
+    def member_at(at) -> dict:
+        return {"plugin_id": PLUGIN_ID, "at": at}
+
+    def reading(sub_id: str, at, expect: dict, releases: list) -> SubCase:
+        steps = [*bound, run_pass(FIRST_PASS, member_at(at))]
+        return SubCase(sub_id, steps, expect, None, [rust, *releases])
+
+    return [
+        reading("mal.4a", other.reference(), not_active, [other]),
+        reading("mal.4b", sibling.reference(), dict(not_active), [sibling]),
+        reading("mal.5a", "absent", unavailable, []),
+        SubCase(
+            "mal.5b",
+            [install(rust), bind(rust, material=None)],
+            dict(unavailable),
+            None,
+            [rust],
+        ),
+    ]
+
+
+NESTED_DOCUMENT = b'{"id":"mal.6.nested","steps":[]}'
+
+
+def nested_subcase() -> SubCase:
+    """`mal.6`: a piece that the adapter decodes as a sub-case document and that is invalid."""
+    return SubCase("mal.6", [], {"kind": "malformed"}, None, [], nested=NESTED_DOCUMENT)
+
+
+def malformed_subcases() -> list[SubCase]:
+    return [*malformed_install_subcases(), *unreadable_subcases(), nested_subcase()]
 
 
 def resource_subcases() -> list[SubCase]:
@@ -1043,16 +1349,34 @@ def redaction_subcases() -> list[SubCase]:
 
 def downgrade_subcases() -> list[SubCase]:
     first = rust_release()
-    successor = make_release(
-        default_spec(release_version="1.1.0", previous=first.release_digest)
-    )
+    successor = make_release(default_spec(release_version="1.1.0", previous=first.release_digest))
+    unlinked = make_release(default_spec(release_version="1.1.0", previous=bytes([0x77]) * 32))
+    major = make_release(default_spec(abi_major=1))
+    minor = make_release(default_spec(abi_min_minor=1, abi_max_minor=1))
+    keyed = advanced_trust(trust(), key_epochs=(1,))
+    abi = refused("IncompatibleAbi")
     return [
         refusal_subcase(
             "dgr.1",
             [install(first), install(successor), bind(first)],
             refused("ArtifactTrustDenied", basis="NotActive"),
             [first, successor],
-        )
+        ),
+        settled_subcase(
+            "dgr.2",
+            first,
+            refused("ArtifactRevoked", basis="PublisherKey"),
+            keyed,
+            [run_pass(REVOKED_PASS)],
+        ),
+        refusal_subcase("dgr.3a", [install(major), bind(major)], abi, [major]),
+        refusal_subcase("dgr.3b", [install(minor), bind(minor)], dict(abi), [minor]),
+        refusal_subcase(
+            "dgr.4",
+            [install(first), install(unlinked)],
+            refused("ArtifactTrustDenied", basis="TrustStateUnavailable"),
+            [first, unlinked],
+        ),
     ]
 
 
@@ -1106,14 +1430,20 @@ class Outputs:
     composite: bytes
 
 
+def subcase_object(sub: SubCase) -> dict:
+    """The payload object of a sub-case."""
+    value = {"id": sub.id, "steps": sub.steps, "expect": sub.expect}
+    if sub.nested is not None:
+        value["nested"] = golden.blake3(sub.nested).hex()
+    return value
+
+
 def render_family(family: str, context: Context) -> Outputs:
     subcases = SUBCASES[family]()
     payload_object = {
         "schema": SCHEMA_ID,
         "family": family,
-        "subcases": [
-            {"id": sub.id, "steps": sub.steps, "expect": sub.expect} for sub in subcases
-        ],
+        "subcases": [subcase_object(sub) for sub in subcases],
     }
     if family == "downgrade":
         payload_object["provider"] = {
@@ -1128,6 +1458,10 @@ def render_family(family: str, context: Context) -> Outputs:
     for sub in subcases:
         for release in sub.releases:
             pieces.extend(release.pieces())
+        for material in sub.trusts:
+            pieces.extend(material.pieces())
+        if sub.nested is not None:
+            pieces.append(sub.nested)
     if context.oracle_kind == "canonical-output":
         oracle_object = {
             "case_id": context.case_id,
