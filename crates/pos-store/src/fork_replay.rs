@@ -72,14 +72,17 @@ impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
     /// ceiling. The caller charges only an actually returned row afterward.
     #[cfg(feature = "sqlite")]
     pub(crate) fn row_available(&mut self) -> Result<(), crate::ForkManifestPublicationErrorV1> {
-        self.budget.as_deref_mut().map_or(Ok(()), |budget| {
-            budget.check_time()?;
-            if budget.rows == budget.limits.rows {
-                budget.accept(false)
-            } else {
-                Ok(())
-            }
-        }).map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
+        self.budget
+            .as_deref_mut()
+            .map_or(Ok(()), |budget| {
+                budget.check_time()?;
+                if budget.rows == budget.limits.rows {
+                    budget.accept(false)
+                } else {
+                    Ok(())
+                }
+            })
+            .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
     }
 
     pub(crate) fn node(

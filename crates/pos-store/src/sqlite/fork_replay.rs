@@ -240,17 +240,27 @@ mod tests {
     /// Byte encoders and logical fields are an independent oracle: no
     /// production length, carrier, debit helper or measured ledger is used.
     fn publication_phase_cost(committed: &crate::CommittedForkManifestV1) -> Fallible<usize> {
-        let owner = committed.operation.input().signing_identity.owner_id.as_str().len();
+        let owner = committed
+            .operation
+            .input()
+            .signing_identity
+            .owner_id
+            .as_str()
+            .len();
         let projection = 32 + 16 + 8 + 32 + 32 + owner + 1 + 8 + 32 + 32 + 32 + 1;
         let local = committed.operation.to_canonical_cbor().len();
         let operation = pos_core::ImportedForkPublicationOperationV1::from_local(
-            committed.operation.clone(), committed.authority_origin_digest.ok_or("no origin")?,
-        ).to_canonical_cbor().len();
-        let artifact = pos_core::ForkPublicationArtifactV1::new(pos_core::ForkPublicationArtifactInputV1 {
-            signed_manifest_record_id: committed.record_id,
-            operation_id: committed.operation.input().operation_id,
-            signed_manifest_bytes: committed.outer_bytes.clone(),
-        })?;
+            committed.operation.clone(),
+            committed.authority_origin_digest.ok_or("no origin")?,
+        )
+        .to_canonical_cbor()
+        .len();
+        let artifact =
+            pos_core::ForkPublicationArtifactV1::new(pos_core::ForkPublicationArtifactInputV1 {
+                signed_manifest_record_id: committed.record_id,
+                operation_id: committed.operation.input().operation_id,
+                signed_manifest_bytes: committed.outer_bytes.clone(),
+            })?;
         let signed = artifact.signed_manifest();
         let artifact_decode = committed.outer_bytes.len() * 3
             + signed.manifest_bytes().len() * 3
@@ -259,8 +269,14 @@ mod tests {
             + artifact.to_canonical_cbor().len();
         Ok(committed.receipt.child_timeline_id.to_string().len()
             + committed.binding.to_canonical_cbor().len() * 3
-            + operation + owner * 2 + local * 2 + projection + 1 + 32
-            + artifact.to_canonical_cbor().len() + artifact_decode)
+            + operation
+            + owner * 2
+            + local * 2
+            + projection
+            + 1
+            + 32
+            + artifact.to_canonical_cbor().len()
+            + artifact_decode)
     }
 
     fn publication_deadline_sweep(
@@ -276,8 +292,11 @@ mod tests {
             let limits = ForkReplayReadLimitsV1::new(1, 1, 6, expected, 1_000_000)?;
             let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
             let result = store.committed_publication_rows_with_context(
-                committed.receipt.child_timeline_id, committed.receipt.final_logical_head,
-                AuthorityValidatorV1::CodeTwoAware, &mut NativeReadContextV1::protected(&mut budget));
+                committed.receipt.child_timeline_id,
+                committed.receipt.final_logical_head,
+                AuthorityValidatorV1::CodeTwoAware,
+                &mut NativeReadContextV1::protected(&mut budget),
+            );
             if result.is_ok() {
                 assert_eq!(budget.remaining_native_bytes(), 0);
                 return Ok(());
@@ -289,7 +308,11 @@ mod tests {
 
     #[test]
     fn file_backed_publication_rows_charge_exact_raw_decode_and_copy_work() -> Fallible<()> {
-        for shape in [Shape::Mixed, Shape::EmptyClassified, Shape::EmptyUnclassified] {
+        for shape in [
+            Shape::Mixed,
+            Shape::EmptyClassified,
+            Shape::EmptyUnclassified,
+        ] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("publication-rows.sqlite");
             let mut store = SqliteStore::open(path.to_str().ok_or("UTF-8 path")?)?;
@@ -309,13 +332,20 @@ mod tests {
                 let start = clock.mark();
                 let limits = ForkReplayReadLimitsV1::new(1, 1, 6, limit, 1_000_000)?;
                 let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-                let result = store.committed_publication_rows_with_context(child, head,
-                    AuthorityValidatorV1::CodeTwoAware, &mut NativeReadContextV1::protected(&mut budget));
+                let result = store.committed_publication_rows_with_context(
+                    child,
+                    head,
+                    AuthorityValidatorV1::CodeTwoAware,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
                 if limit == expected {
                     let rows = result?;
                     assert_eq!(rows.operation, committed.operation);
                     assert_eq!(rows.binding, committed.binding);
-                    assert_eq!(rows.artifact.input().signed_manifest_bytes, committed.outer_bytes);
+                    assert_eq!(
+                        rows.artifact.input().signed_manifest_bytes,
+                        committed.outer_bytes
+                    );
                     assert_eq!(budget.remaining_native_bytes(), 0);
                 } else {
                     assert!(result.is_err());
@@ -327,12 +357,21 @@ mod tests {
                 let start = clock.mark();
                 let limits = ForkReplayReadLimitsV1::new(1, 1, rows, expected, 1_000_000)?;
                 let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-                assert!(store.committed_publication_rows_with_context(child, head,
-                    AuthorityValidatorV1::CodeTwoAware, &mut NativeReadContextV1::protected(&mut budget)).is_err());
+                assert!(store
+                    .committed_publication_rows_with_context(
+                        child,
+                        head,
+                        AuthorityValidatorV1::CodeTwoAware,
+                        &mut NativeReadContextV1::protected(&mut budget)
+                    )
+                    .is_err());
                 assert_eq!(budget.check_time(), Err(Error::BoundsExceeded));
             }
             publication_deadline_sweep(&store, &committed, expected)?;
-            store.finish_protected_effect_interval(interval, ErasureProtectedEffectDispositionV1::Rollback)?;
+            store.finish_protected_effect_interval(
+                interval,
+                ErasureProtectedEffectDispositionV1::Rollback,
+            )?;
         }
         Ok(())
     }
@@ -371,7 +410,8 @@ mod tests {
             let retained_key_phase = key.to_canonical_cbor().len() * 3
                 + key.identity().owner_id.as_str().len();
             // Actual shared buffers, independently measured by byte encoders.
-            let expected = publication_phase_cost(&committed)? + retained_key_phase
+            let expected = publication_phase_cost(&committed)?
+                + retained_key_phase
                 + committed.outer_bytes.len() * 2
                 + signed.manifest_bytes().len() * 2
                 + signed.manifest().input().intervention_sequences.len()
