@@ -36,7 +36,9 @@ pub(super) fn principal_operation_id_with_context(
     let mut rows = probe
         .query(params![result_digest.as_bytes().as_slice()])
         .map_err(|_| Error::StorageIndeterminate)?;
-    context.row_available().map_err(|_| Error::CorruptAuthority)?;
+    context
+        .row_available()
+        .map_err(|_| Error::CorruptAuthority)?;
     let row = rows
         .next()
         .map_err(|_| Error::StorageIndeterminate)?
@@ -66,7 +68,9 @@ pub(super) fn principal_operation_id_with_context(
     let mut rows = fetch
         .query(params![result_digest.as_bytes().as_slice()])
         .map_err(|_| Error::StorageIndeterminate)?;
-    context.row_available().map_err(|_| Error::CorruptAuthority)?;
+    context
+        .row_available()
+        .map_err(|_| Error::CorruptAuthority)?;
     let row = rows
         .next()
         .map_err(|_| Error::StorageIndeterminate)?
@@ -453,8 +457,8 @@ mod tests {
     }
 
     #[test]
-    fn principal_result_key_lookup_charges_actual_fixed_digest_and_probe_fetch_rows(
-    ) -> Fallible<()> {
+    fn principal_result_key_lookup_charges_actual_fixed_digest_and_probe_fetch_rows() -> Fallible<()>
+    {
         let (store, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
         for bytes in 1..=32 {
             let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
