@@ -427,7 +427,7 @@ fn read_probed_event(
 /// Read only the prefix the existing own-Event decoder consumes. This is one
 /// actual metadata visit, not an ancestry walk: parent/name/head must not add
 /// stronger validation to this lookup. No variable-width field is fetched.
-fn origin_prefix_with_context(
+pub(super) fn origin_prefix_with_context(
     conn: &Connection,
     timeline: TimelineId,
     context: &mut NativeReadContextV1<'_, '_>,
