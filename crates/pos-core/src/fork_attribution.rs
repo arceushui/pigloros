@@ -1036,6 +1036,28 @@ fn canonical(actual: &[u8], expected: &[u8]) -> Result<(), ForkAttributionCodecE
     }
 }
 
+/// POB1 uses the same capped borrowed primitives as FAR1, but its marker is
+/// a byte string, not the text marker of the attribution records. This seam
+/// stays crate-private; the POB1 owner validates nonzero hashes and equality.
+pub(crate) fn decode_local_principal_owner_binding_fields(
+    bytes: &[u8],
+) -> Result<crate::PrincipalOwnerBindingInputV1, ForkAttributionCodecErrorV1> {
+    let mut wire = Reader::new(bytes, crate::MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1)?;
+    wire.array(6)?;
+    if wire.fixed::<4>()? != *b"POB1" {
+        return Err(ForkAttributionCodecErrorV1::InvalidEncoding);
+    }
+    wire.version()?;
+    let operation_id = wire.hash()?;
+    let principal_digest = wire.hash()?;
+    let owner = wire.owner()?;
+    let origin = match wire.authority_origin()? {
+        ForkAttributionOriginV1::Local => crate::ForkAuthorityOriginV1::Local,
+    };
+    wire.finish()?;
+    Ok(crate::PrincipalOwnerBindingInputV1 { operation_id, principal_digest, owner, origin })
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     offset: usize,
