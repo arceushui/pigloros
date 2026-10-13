@@ -101,7 +101,8 @@ grep -Fq "provider manifest does not match profile claim layer" "${log}" || {
 cp -- "${backup_root}/provider.json" "${provider}"
 cp -- "${backup_root}/BLAKE3SUMS" "${blake_inventory}"
 cp -- "${backup_root}/SHA256SUMS" "${sha_inventory}"
-jq '.auxiliary.positive = [{
+jq '.fixture_adapter.id = "opaque-provider-v1" |
+    .auxiliary.positive = [{
       path: "inputs/artifact-integrity/missing-control.pcw2",
       media_type: "application/octet-stream"
     }]' "${provider}" >"${replacement}"
@@ -149,7 +150,8 @@ cp -- "${backup_root}/provider.json" "${provider}"
 cp -- "${backup_root}/BLAKE3SUMS" "${blake_inventory}"
 cp -- "${backup_root}/SHA256SUMS" "${sha_inventory}"
 printf 'auxiliary control composite\n' >"${auxiliary_source}"
-jq '.auxiliary.positive = [{
+jq '.fixture_adapter.id = "opaque-provider-v1" |
+    .auxiliary.positive = [{
       path: "inputs/artifact-integrity/auxiliary-control.pcw2",
       media_type: "application/octet-stream"
     }]' "${provider}" >"${replacement}"
