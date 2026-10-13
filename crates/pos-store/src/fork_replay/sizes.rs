@@ -32,7 +32,8 @@ const fn string(length: usize) -> usize {
 /// Four-character marker, version 1 and the definite array head.
 const RECORD_HEADER: usize = 7;
 const HASH: usize = 34;
-const ID: usize = 18;
+// Sixteen UUID bytes use a one-byte CBOR byte-string head (0x50).
+const ID: usize = 17;
 
 fn routes(value: &[ForkExternalInputRouteV1]) -> usize {
     head(value.len() as u64)
