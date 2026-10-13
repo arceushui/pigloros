@@ -21,6 +21,23 @@ const TABLE_ROUTES_FIELD: u64 = 7;
 const ROUTE_FIXED_BYTES: usize = 32 + 1;
 
 impl NativeReadContextV1<'_, '_> {
+    /// `from_table` really encodes one table digest and clones each route.
+    /// Charge those actual units, not the registrar it only borrows.
+    pub(crate) fn classifier_from_table(
+        &mut self,
+        table: &ForkClassifierTableV1,
+    ) -> Result<pos_core::ForkEventClassifierV1> {
+        self.check().and_then(|()| self.canonical(table.canonical_cbor_len()))
+            .and_then(|()| table.input().routes.iter().try_for_each(|route| {
+                self.bytes(route.source().route().len())
+                    .and_then(|()| self.bytes(ROUTE_FIXED_BYTES))
+            }))
+            .and_then(|()| {
+                let classifier = pos_core::ForkEventClassifierV1::from_table(table);
+                self.check().map(|()| classifier)
+            })
+    }
+
     fn classifier_allocations(
         &mut self,
         bytes: &[u8],
