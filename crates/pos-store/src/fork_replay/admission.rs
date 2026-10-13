@@ -19,7 +19,10 @@ const TEXT_MAJOR: u8 = 3;
 const OWNER_MAX_BYTES: usize = 128;
 
 impl NativeReadContextV1<'_, '_> {
-    pub(crate) fn host_record(&mut self, bytes: &[u8]) -> Result<pos_core::ForkAdmissionHostRecordV1> {
+    pub(crate) fn host_record(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<pos_core::ForkAdmissionHostRecordV1> {
         const PREFIX: [u8; 7] = [0x85, 0x64, b'F', b'A', b'H', b'1', 0x01];
         const HASH_HEAD: [u8; 2] = [0x58, 0x20];
         self.check().and_then(|()| {
