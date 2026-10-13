@@ -269,10 +269,12 @@ impl<'clock> ForkReplayReadBudgetV1<'clock> {
 }
 
 fn charge(used: &mut usize, amount: usize, ceiling: usize) -> bool {
-    used.checked_add(amount).filter(|next| *next <= ceiling).is_some_and(|next| {
-        *used = next;
-        true
-    })
+    used.checked_add(amount)
+        .filter(|next| *next <= ceiling)
+        .is_some_and(|next| {
+            *used = next;
+            true
+        })
 }
 
 /// Exact, non-authorizing publication evidence returned by an adapter.
