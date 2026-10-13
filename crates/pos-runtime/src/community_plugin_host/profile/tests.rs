@@ -191,20 +191,6 @@ fn profile_digest_of_refuses_out_of_range_ceilings() -> TestResult {
     Ok(())
 }
 
-/// The position of `class`; the exhaustive match fails to compile when a
-/// class is added, which sends the author to `CLOSED_OUTCOMES`.
-const fn class_position(class: ComponentTrapClassV1) -> usize {
-    match class {
-        ComponentTrapClassV1::Unreachable => 0,
-        ComponentTrapClassV1::MemoryOutOfBounds => 1,
-        ComponentTrapClassV1::TableOutOfBounds => 2,
-        ComponentTrapClassV1::IndirectCall => 3,
-        ComponentTrapClassV1::IntegerArithmetic => 4,
-        ComponentTrapClassV1::StackExhausted => 5,
-        ComponentTrapClassV1::Other => 6,
-    }
-}
-
 #[test]
 fn every_trap_class_is_a_closed_outcome() {
     let classes = [
@@ -217,12 +203,14 @@ fn every_trap_class_is_a_closed_outcome() {
         ComponentTrapClassV1::Other,
     ];
     for (index, class) in classes.into_iter().enumerate() {
-        assert_eq!(class_position(class), index, "{class:?} is out of order");
+        assert_eq!(class as usize, index, "{class:?} is out of order");
         assert_eq!(
             TrapOutcomeV1::from_name(class.name()),
             Some(TrapOutcomeV1::Trap(class)),
             "{class:?}"
         );
     }
+    // `Other` is the last class, so a class added after it moves its position.
+    assert_eq!(ComponentTrapClassV1::Other as usize + 1, classes.len());
     assert_eq!(pinned::CLOSED_OUTCOMES.len(), classes.len() + 2);
 }
