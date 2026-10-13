@@ -211,17 +211,25 @@ impl VariableFieldV1 {
                 }
                 row.get::<_, Option<i64>>(self.length_column)
                     .map_err(|_| Error::StorageIndeterminate)
-                    .and_then(|length| length.map_or(Ok(0), |length| usize::try_from(length)
-                            .map_err(|_| Error::CorruptAuthority)
-                            .and_then(|length| {
-                                let valid = match self.width {
-                                    FieldWidthV1::Fixed(width) => length == width,
-                                    // Same 1..=128-byte contract as OwnerIdV1::new.
-                                    FieldWidthV1::Owner => (1..=128).contains(&length),
-                                    FieldWidthV1::Variable => true,
-                                };
-                                if valid { Ok(length) } else { Err(Error::CorruptAuthority) }
-                            })))
+                    .and_then(|length| {
+                        length.map_or(Ok(0), |length| {
+                            usize::try_from(length)
+                                .map_err(|_| Error::CorruptAuthority)
+                                .and_then(|length| {
+                                    let valid = match self.width {
+                                        FieldWidthV1::Fixed(width) => length == width,
+                                        // Same 1..=128-byte contract as OwnerIdV1::new.
+                                        FieldWidthV1::Owner => (1..=128).contains(&length),
+                                        FieldWidthV1::Variable => true,
+                                    };
+                                    if valid {
+                                        Ok(length)
+                                    } else {
+                                        Err(Error::CorruptAuthority)
+                                    }
+                                })
+                        })
+                    })
             })
     }
 }
