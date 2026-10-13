@@ -58,6 +58,14 @@ impl<T, E: Debug> TestOk<T> for Result<T, E> {
     }
 }
 
+impl<T> TestOk<T> for Option<T> {
+    fn test_ok(self) -> T {
+        self.unwrap_or_else(|| {
+            std::panic::resume_unwind(Box::new("unexpected missing fixture value"))
+        })
+    }
+}
+
 fn error_text<T>(result: Result<T, RuntimeError>) -> String {
     match result {
         Ok(_) => std::panic::resume_unwind(Box::new("expected runtime error")),
