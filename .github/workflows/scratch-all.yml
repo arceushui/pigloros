@@ -1,0 +1,47 @@
+name: scratch-all
+on:
+  push:
+    branches: ['scratch/all-**']
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt
+      - run: |
+          cargo +1.97.1 fmt --all -- --check > fmt.diff || true
+          echo FMT DIFF BEGIN; cat fmt.diff; echo FMT DIFF END
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.97.1 --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: scratch-clippy
+      - run: |
+          cargo +1.97.1 clippy --workspace --all-features --all-targets --locked --keep-going -- -D warnings -W clippy::pedantic > clippy.out 2>&1 || true
+          echo CLIPPY OUT BEGIN
+          grep -E "^(error|warning)(\[|:)|^ *--> " clippy.out | head -400
+          echo CLIPPY OUT END
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.97.1 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: scratch-test
+      - run: |
+          cargo +1.97.1 test --workspace --all-features --locked --no-fail-fast -- --include-ignored > test.out 2>&1 || true
+          echo TEST OUT BEGIN
+          grep -E "^test .* FAILED$|^---- .* stdout ----$|panicked at|^error(\[|:)|^error: test failed|^failures:$|test result: FAILED" test.out | head -300
+          echo TEST OUT END
