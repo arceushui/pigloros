@@ -10,9 +10,9 @@ use pos_conformance::{
     DeterministicBudgetV1, EvaluatorHardCapsV1, EvaluatorProtocolV1, FixtureContractTransitionV1,
     FixtureDescriptorV1, FixtureFamilyV1, FixtureProvenanceV1, FixtureProviderEntryV1,
     FixtureProviderKeyV1, FixtureProviderPackageV1, FixtureProviderRegistryBindingV1,
-    FixtureProviderRegistryV1, IndependenceRequirementsV1, NamespacedFailureV1, OperationalSafetyV1,
-    ProfileLifecycleV1, ProviderFamilySchemaV1, RedactionStateV1, ReplayClaimV1, StrictOracleKindV1,
-    StrictOracleV1, SubjectAdapterKindV1, VerificationOutcomeV1,
+    FixtureProviderRegistryV1, IndependenceRequirementsV1, NamespacedFailureV1,
+    OperationalSafetyV1, ProfileLifecycleV1, ProviderFamilySchemaV1, RedactionStateV1,
+    ReplayClaimV1, StrictOracleKindV1, StrictOracleV1, SubjectAdapterKindV1, VerificationOutcomeV1,
     FIXTURE_PROVIDER_REGISTRY_MEMBER_PATH_V1,
 };
 use sha2::{Digest as Sha2Digest, Sha256};

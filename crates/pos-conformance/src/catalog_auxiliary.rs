@@ -6,9 +6,11 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-/// Default maximum number of auxiliary entries per family; pinned to `MAX_AUXILIARY_ARTIFACTS`.
-/// ADR-061 revision 8 sets 64 per family; CPF1 also counts the fixed evidence and oracle
-/// members in its total of 64 descriptors, a tension left to the S3b1 composite.
+/// Default maximum number of auxiliary entries per family.
+///
+/// Pinned to `MAX_AUXILIARY_ARTIFACTS`. ADR-061 revision 8 sets 64 per family; CPF1 also counts
+/// the fixed evidence and oracle members in its total of 64 descriptors, a tension left to the
+/// S3b1 composite.
 pub const DEFAULT_AUXILIARY_CAP: usize = 64;
 /// Maximum total bytes of embedded auxiliary members over all layers.
 pub const MAX_EMBEDDED_AUXILIARY_BYTES: usize = 4 * 1024 * 1024;
@@ -132,10 +134,7 @@ pub fn validate_auxiliary_catalog(
 ///
 /// Returns [`AuxiliaryCatalogError::EmbeddedTotalExceeded`] when the total exceeds `max` or
 /// overflows.
-pub fn check_embedded_total(
-    sizes: &[usize],
-    max: usize,
-) -> Result<(), AuxiliaryCatalogError> {
+pub fn check_embedded_total(sizes: &[usize], max: usize) -> Result<(), AuxiliaryCatalogError> {
     let total = sizes
         .iter()
         .try_fold(0_usize, |total, size| total.checked_add(*size));

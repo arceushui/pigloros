@@ -1161,8 +1161,8 @@ fn fixture_auxiliary(
     family: &str,
 ) -> Result<Vec<FixtureAuxiliary>, io::Error> {
     let declared = json_field(json_field(provider, "auxiliary")?, family)?;
-    let declared: Vec<ProviderAuxiliaryEntry> = serde_json::from_value(declared.clone())
-        .map_err(|error| {
+    let declared: Vec<ProviderAuxiliaryEntry> =
+        serde_json::from_value(declared.clone()).map_err(|error| {
             invalid_data(format!(
                 "provider auxiliary for {family} is invalid: {error}"
             ))
