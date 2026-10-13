@@ -3,7 +3,7 @@
 //! These extend the parent ADR-099 reader and encoders, so every ADR-105
 //! record keeps exactly the same preferred-serialization profile.
 
-use crate::canonical_length::CanonicalSink;
+use crate::crypto::CanonicalSink;
 
 use super::{bytes, hash, text, ForkAttributionCodecErrorV1 as Error, Reader};
 use crate::{Hash, KeyRoleV1};
