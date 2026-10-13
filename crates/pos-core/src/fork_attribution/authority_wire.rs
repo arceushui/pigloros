@@ -105,7 +105,10 @@ const fn nonempty(value: &[u8]) -> Result<&[u8], Error> {
 }
 
 /// Encode `null / bstr .size N`.
-pub(super) fn encode_optional_fixed<const N: usize>(out: &mut impl CanonicalSink, value: Option<[u8; N]>) {
+pub(super) fn encode_optional_fixed<const N: usize>(
+    out: &mut impl CanonicalSink,
+    value: Option<[u8; N]>,
+) {
     if let Some(value) = value {
         bytes(out, &value);
     } else {

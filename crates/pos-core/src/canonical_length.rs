@@ -48,12 +48,17 @@ struct LengthSink {
 
 impl LengthSink {
     const fn new() -> Self {
-        Self { length: Some(0), maximum: usize::MAX }
+        Self {
+            length: Some(0),
+            maximum: usize::MAX,
+        }
     }
 
     fn add(&mut self, amount: usize) {
         self.length = self.length.and_then(|length| {
-            length.checked_add(amount).filter(|next| *next <= self.maximum)
+            length
+                .checked_add(amount)
+                .filter(|next| *next <= self.maximum)
         });
     }
 
@@ -155,7 +160,10 @@ mod tests {
     #[test]
     fn the_actual_counting_primitive_enforces_a_32_bit_target_ceiling() {
         let maximum = u32::MAX as usize;
-        let mut count = LengthSink { length: Some(maximum - 1), maximum };
+        let mut count = LengthSink {
+            length: Some(maximum - 1),
+            maximum,
+        };
         count.push(1);
         assert_eq!(count.length, Some(maximum));
         count.push(1);

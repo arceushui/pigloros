@@ -135,7 +135,10 @@ fn populate<S: Port>(
     shape: Shape,
     destroyed_key: bool,
 ) -> Fallible<ForkReplayRequirementV1> {
-    let built = world.build(&Spec { destroyed_key, ..Spec::default() })?;
+    let built = world.build(&Spec {
+        destroyed_key,
+        ..Spec::default()
+    })?;
     world.seed_destination(store)?;
     pin_policy(store, &built.policy)?;
     store.import_verified(&request_for(world, &built))?;
@@ -222,7 +225,8 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
         .into_iter()
         .flat_map(|fault| [None, Some(Seq::from_u64(2))].map(|cut| (fault, cut)))
         .flat_map(|(fault, cut)| {
-            [false, true].into_iter()
+            [false, true]
+                .into_iter()
                 .filter(move |destroyed| !*destroyed || fault == Fault::None)
                 .map(move |destroyed| (fault, cut, destroyed))
         })
@@ -253,7 +257,10 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
             let path = directory.path().join("imported-replay.sqlite");
             let path = path.to_str().ok_or("utf-8 path")?;
             let mut sqlite = SqliteStore::open(path)?;
-            assert_eq!(populate(&mut sqlite, &world, shape, destroyed_key)?, requirement);
+            assert_eq!(
+                populate(&mut sqlite, &world, shape, destroyed_key)?,
+                requirement
+            );
             drop(sqlite);
             let composition =
                 ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier());
