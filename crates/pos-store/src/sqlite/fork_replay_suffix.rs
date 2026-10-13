@@ -215,7 +215,8 @@ pub(super) fn read_suffix_with_context(
                             Err(error) => return Err(error),
                         };
                         let decoded = scope.validate_row(row, &mut result, context);
-                        decoded.and_then(|()| context.check().map_err(|_| Error::CorruptAuthority))?;
+                        decoded
+                            .and_then(|()| context.check().map_err(|_| Error::CorruptAuthority))?;
                     }
                 })
         })

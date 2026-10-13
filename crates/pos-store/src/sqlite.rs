@@ -14434,12 +14434,16 @@ fn sqlite_load_key_registry_with_context(
         .map_err(|_| CoreError::ArtifactUnavailable)
         .and_then(|bytes| {
             bytes.map_or(Ok(None), |bytes| {
-                context.check().map_err(|_| CoreError::ArtifactUnavailable)?;
+                context
+                    .check()
+                    .map_err(|_| CoreError::ArtifactUnavailable)?;
                 // The raw fetch is bounded here. Decoder-owned collections
                 // and registry validation still need their native owner;
                 // an outer check is not a claim of complete batch support.
                 let decoded = sqlite_decode_key_registry(&bytes).map(Some);
-                context.check().map_err(|_| CoreError::ArtifactUnavailable)
+                context
+                    .check()
+                    .map_err(|_| CoreError::ArtifactUnavailable)
                     .and(decoded)
             })
         })
