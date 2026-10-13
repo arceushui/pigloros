@@ -4,7 +4,7 @@ use ciborium::value::Value;
 use crate::canonical_length::{self, CanonicalEmit, CanonicalSink};
 
 use crate::{
-    fork_admission_command::{canonical_bytes, decode, nonzero_hash},
+    fork_admission_command::{decode, nonzero_hash},
     Hash, OwnerIdV1, TimelineId,
 };
 
