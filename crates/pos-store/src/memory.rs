@@ -720,7 +720,11 @@ impl MemoryStore {
     /// Refuses to detach a real containment gate or a missing gate.
     #[cfg(any(test, feature = "test-support"))]
     pub fn detach_fixture_gate_for_host(mut self) -> Result<Self, CoreError> {
-        if self.erasure_gate.as_ref().is_none_or(|gate| !gate.permits_unverified_test_fixture()) {
+        if self
+            .erasure_gate
+            .as_ref()
+            .is_none_or(|gate| !gate.permits_unverified_test_fixture())
+        {
             return Err(CoreError::ErasureContainmentUnavailable);
         }
         self.erasure_gate_bound = false;
