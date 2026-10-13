@@ -250,10 +250,10 @@ fn a_null_is_only_accepted_where_the_grammar_says_material_or_null() {
 fn hex_of_the_wrong_length_or_case_is_payload_invalid() {
     let wrong: Vec<(&str, String)> = vec![
         ("/subcases/0/steps/0/release/manifest", "0101".to_owned()),
-        ("/subcases/0/steps/0/release/manifest", H32.to_uppercase()),
+        ("/subcases/0/steps/0/release/manifest", "AB".repeat(32)),
         ("/subcases/0/steps/0/release/blobs/0", format!("{H32}00")),
         ("/subcases/0/steps/3/invocation_id", format!("{H16}00")),
-        ("/subcases/0/steps/3/invocation_id", H16.to_uppercase()),
+        ("/subcases/0/steps/3/invocation_id", "AB".repeat(16)),
         ("/subcases/0/steps/3/random_domain", H32[..62].to_owned()),
         ("/subcases/0/steps/3/observation", "0".to_owned()),
         ("/subcases/0/steps/3/observation", "0F".to_owned()),

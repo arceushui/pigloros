@@ -36,9 +36,17 @@ fn failure(code: &str) -> SubjectResult {
 
 fn two_subcases(family: FixtureFamily) -> Vec<u8> {
     let subcases = vec![blake3_subcase("ind.1", "a"), blake3_subcase("ind.2a", "b")];
-    payload(family_text(family), subcases)
-        .to_string()
-        .into_bytes()
+    let mut document = payload(family_text(family), subcases);
+    if family == FixtureFamily::Downgrade {
+        document["provider"] = json!({
+            "provider_id": PROVIDER_ID,
+            "contract_version": CONTRACT_VERSION,
+            "abi_major": 0,
+            "abi_minor": 0,
+            "from_abi_minor": 1,
+        });
+    }
+    document.to_string().into_bytes()
 }
 
 /// The result of a run, the bytes written and the number of sub-cases the runner was asked for.

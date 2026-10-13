@@ -327,7 +327,7 @@ fn a_step_that_refuses_partway_is_the_result_and_later_steps_do_not_run() -> Tes
     ];
     let expect = json!({"kind": "refused", "error": "ArtifactTrustDenied",
         "class": "PreExecutionRejection", "basis": "TrustStateUnavailable"});
-    let record = run(&mut fake, &subcase("dgr.4", steps.clone(), expect.clone()))?;
+    let record = run(&mut fake, &subcase("dgr.4", steps.clone(), expect))?;
     assert!(record.matched);
     assert_eq!(record.steps_run, 2, "the refusing step is counted");
     assert_eq!(fake.log, ["open", "install", "install"]);
@@ -584,7 +584,10 @@ fn a_scan_reads_only_the_sources_it_names_once_and_in_order() -> TestResult {
 
 #[test]
 fn an_empty_marker_is_in_every_source() -> TestResult {
-    let mut fake = Fake::default();
+    let mut fake = Fake {
+        events: vec![b"x".to_vec()],
+        ..Fake::default()
+    };
     let found = found_by(&mut fake, "")?;
     assert_eq!(
         found.0,

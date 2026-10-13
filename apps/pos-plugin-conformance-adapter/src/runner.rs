@@ -347,7 +347,7 @@ impl WorldPortV1 for EvaluationWorldPortV1 {
             mode,
         } = setup;
         let world = genesis
-            .ok_or(WIRING)
+            .ok_or(UNAVAILABLE)
             .and_then(|genesis| CommunityEvaluationWorldV1::open(&genesis));
         world.map(|world| {
             self.open = Some(OpenWorld {
