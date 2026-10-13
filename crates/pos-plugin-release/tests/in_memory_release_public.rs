@@ -25,7 +25,13 @@ const SBOM: &str = "application/spdx+json";
 const LICENCE: &str = "text/plain; charset=utf-8";
 
 fn sha256(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::from("sha256:");
+    for byte in Sha256::digest(bytes) {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
 }
 
 /// One hand-laid layer: its member annotation, media type, bytes and declared size.
