@@ -114,11 +114,27 @@ impl SqliteStore {
         for (table, column, selection) in [
             ("fork_admissions", "far1_cbor", "child_id = ?1"),
             ("fork_classifier_tables", "fct1_cbor", "child_id = ?1"),
-            ("fork_classifier_registrations", "fcr1_cbor", "child_id = ?1"),
+            (
+                "fork_classifier_registrations",
+                "fcr1_cbor",
+                "child_id = ?1",
+            ),
             ("fork_append_operations", "fop1_cbor", "child_id = ?1"),
-            ("fork_event_origins", "eor1_cbor", "event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)"),
-            ("fork_intervention_admissions", "fia1_cbor", "event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)"),
-            ("imported_fork_attribution_admissions", "ifa1_cbor", "child_id = ?1"),
+            (
+                "fork_event_origins",
+                "eor1_cbor",
+                "event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)",
+            ),
+            (
+                "fork_intervention_admissions",
+                "fia1_cbor",
+                "event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)",
+            ),
+            (
+                "imported_fork_attribution_admissions",
+                "ifa1_cbor",
+                "child_id = ?1",
+            ),
         ] {
             self.preflight_selected_records(table, column, selection, &[&child_key], budget)?;
         }
@@ -407,8 +423,8 @@ mod tests {
             let origin_copy = 1 + 32;
             let absent_key_copy = owner_bytes + 1 + 8 + 1 + 32 + 1 + 32;
             let key = &built.envelope.unsigned().input().key_record;
-            let retained_key_phase = key.to_canonical_cbor().len() * 3
-                + key.identity().owner_id.as_str().len();
+            let retained_key_phase =
+                key.to_canonical_cbor().len() * 3 + key.identity().owner_id.as_str().len();
             // Actual shared buffers, independently measured by byte encoders.
             let expected = publication_phase_cost(&committed)?
                 + retained_key_phase

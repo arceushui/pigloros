@@ -23,11 +23,11 @@ use crate::{
         imported_admission_matches, imported_graph_matches, AuthorityValidatorV1,
         ValidatedAdmissionV1, ValidatedGraphV1, ValidatedImportV1,
     },
-    fork_replay::NativeReadContextV1,
     fork_manifest_publication::{
         PublicationSourceErrorV1, PublicationSourceResultV1, RetainedImportedKeyV1,
         RetainedKeyEvidenceV1,
     },
+    fork_replay::NativeReadContextV1,
     ForkEventAuthorityErrorV1 as AuthorityError,
 };
 
@@ -67,8 +67,10 @@ fn retained_key_lengths_with_context(
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> PublicationSourceResultV1<RetainedKeyLengthsV1> {
     use PublicationSourceErrorV1::{Invalid, Storage};
-    let arguments = params![import.import_operation_id.as_bytes().as_slice(),
-        import.full_envelope_digest.as_bytes().as_slice()];
+    let arguments = params![
+        import.import_operation_id.as_bytes().as_slice(),
+        import.full_envelope_digest.as_bytes().as_slice()
+    ];
     context.check().map_err(|_| Invalid)?;
     let mut statement = conn.prepare(RETAINED_KEY_PROBE_SQL).map_err(|_| Storage)?;
     context.check().map_err(|_| Invalid)?;
@@ -85,15 +87,23 @@ fn retained_key_lengths_with_context(
     }
     let record_length = row.get::<_, i64>(1).map_err(|_| Storage)?;
     let record_length = usize::try_from(record_length).map_err(|_| Invalid)?;
-    let tombstone_length = row.get::<_, Option<i64>>(3).map_err(|_| Storage)?
-        .map(usize::try_from).transpose().map_err(|_| Invalid)?;
+    let tombstone_length = row
+        .get::<_, Option<i64>>(3)
+        .map_err(|_| Storage)?
+        .map(usize::try_from)
+        .transpose()
+        .map_err(|_| Invalid)?;
     if record_length > pos_core::MAX_IMPORTED_KEY_RECORD_BYTES_V1
-        || tombstone_length.is_some_and(|length| length > pos_core::MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1)
+        || tombstone_length
+            .is_some_and(|length| length > pos_core::MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1)
     {
         return Err(Invalid);
     }
     context.check().map_err(|_| Invalid)?;
-    Ok(RetainedKeyLengthsV1 { record: record_length, tombstone: tombstone_length })
+    Ok(RetainedKeyLengthsV1 {
+        record: record_length,
+        tombstone: tombstone_length,
+    })
 }
 
 /// Type and size gates precede both raw getters on the same held snapshot.
@@ -104,8 +114,10 @@ fn retained_key_bytes_with_context(
 ) -> PublicationSourceResultV1<StoredRetainedKeyV1> {
     use PublicationSourceErrorV1::{Invalid, Storage};
     let lengths = retained_key_lengths_with_context(conn, import, context)?;
-    let arguments = params![import.import_operation_id.as_bytes().as_slice(),
-        import.full_envelope_digest.as_bytes().as_slice()];
+    let arguments = params![
+        import.import_operation_id.as_bytes().as_slice(),
+        import.full_envelope_digest.as_bytes().as_slice()
+    ];
     context.check().map_err(|_| Invalid)?;
     let mut fetch = conn.prepare(RETAINED_KEY_SQL).map_err(|_| Storage)?;
     context.check().map_err(|_| Invalid)?;
@@ -191,15 +203,26 @@ pub(super) fn sqlite_retained_key_evidence(
         .and_then(ValidatedAdmissionV1::import)
         .map_or(Ok(RetainedKeyEvidenceV1::LiveRegistry), |import| {
             let stored = retained_key_bytes_with_context(conn, import, context)?;
-            let record = context.imported_key_record(&stored.record).map_err(|_| Invalid)?;
-            let tombstone = stored.tombstone.as_ref()
-                .map(|bytes| context.imported_key_tombstone(bytes)).transpose().map_err(|_| Invalid)?;
-            context.canonical(record.canonical_cbor_len()).map_err(|_| Invalid)?;
+            let record = context
+                .imported_key_record(&stored.record)
+                .map_err(|_| Invalid)?;
+            let tombstone = stored
+                .tombstone
+                .as_ref()
+                .map(|bytes| context.imported_key_tombstone(bytes))
+                .transpose()
+                .map_err(|_| Invalid)?;
+            context
+                .canonical(record.canonical_cbor_len())
+                .map_err(|_| Invalid)?;
             if let Some(tombstone) = tombstone.as_ref() {
-                context.canonical(tombstone.canonical_cbor_len()).map_err(|_| Invalid)?;
+                context
+                    .canonical(tombstone.canonical_cbor_len())
+                    .map_err(|_| Invalid)?;
             }
             let retained = RetainedKeyEvidenceV1::Imported(Box::new(RetainedImportedKeyV1 {
-                record, tombstone,
+                record,
+                tombstone,
             }));
             context.check().map_err(|_| Invalid)?;
             Ok(retained)
@@ -286,23 +309,34 @@ mod tests {
 
     fn fixture(destroyed: bool) -> Fallible<Fixture> {
         let world = World::new(Shape::Mixed, false)?;
-        let built = world.build(&Spec { destroyed_key: destroyed, ..Spec::default() })?;
+        let built = world.build(&Spec {
+            destroyed_key: destroyed,
+            ..Spec::default()
+        })?;
         let mut store = super::super::SqliteStore::open(":memory:")?;
         world.seed_destination(&mut store)?;
         pin_policy(&mut store, &built.policy)?;
         store.import_verified(&request_for(&world, &built))?;
-        let admission = store.fork_publication_admission(world.child_at(0)?.id,
-            AuthorityValidatorV1::CodeTwoAware);
+        let admission = store
+            .fork_publication_admission(world.child_at(0)?.id, AuthorityValidatorV1::CodeTwoAware);
         let input = built.envelope.unsigned().input();
         let record = input.key_record;
         let tombstone = input.key_tombstone;
         // Raw retrieval + decoder equality + logical result copy, and owner
         // String: this oracle uses byte encoders, not production length gates.
-        let bytes = record.to_canonical_cbor().len() * 3 + record.identity().owner_id.as_str().len()
-            + tombstone.as_ref().map_or(0, |value| value.to_canonical_cbor().len() * 3
-                + value.identity().owner_id.as_str().len());
-        let expected = RetainedKeyEvidenceV1::Imported(Box::new(RetainedImportedKeyV1 { record, tombstone }));
-        Ok(Fixture { store, admission, expected, bytes })
+        let bytes = record.to_canonical_cbor().len() * 3
+            + record.identity().owner_id.as_str().len()
+            + tombstone.as_ref().map_or(0, |value| {
+                value.to_canonical_cbor().len() * 3 + value.identity().owner_id.as_str().len()
+            });
+        let expected =
+            RetainedKeyEvidenceV1::Imported(Box::new(RetainedImportedKeyV1 { record, tombstone }));
+        Ok(Fixture {
+            store,
+            admission,
+            expected,
+            bytes,
+        })
     }
 
     fn assert_byte_boundary(fixture: &Fixture, bytes: usize) -> Fallible<()> {
@@ -310,8 +344,11 @@ mod tests {
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, 2, bytes, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-        let result = sqlite_retained_key_evidence(&fixture.store.conn, &fixture.admission,
-            &mut NativeReadContextV1::protected(&mut budget));
+        let result = sqlite_retained_key_evidence(
+            &fixture.store.conn,
+            &fixture.admission,
+            &mut NativeReadContextV1::protected(&mut budget),
+        );
         if bytes == fixture.bytes {
             assert_eq!(result, Ok(fixture.expected.clone()));
             assert_eq!(budget.remaining_native_bytes(), 0);
@@ -324,24 +361,31 @@ mod tests {
 
     fn assert_deadline_boundaries(fixture: &Fixture) -> Fallible<()> {
         for final_offset in [Duration::ZERO, Duration::from_secs(2)] {
-          let mut completed = false;
-          for marks in 2..128 {
-            let mut clock = ScriptedGuardMonotonicSourceV1::new(
-                std::iter::repeat_n(Duration::from_millis(1), marks).chain([final_offset]));
-            let start = clock.mark();
-            let limits = ForkReplayReadLimitsV1::new(1, 1, 2, fixture.bytes, 1_000_000)?;
-            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-            let result = sqlite_retained_key_evidence(&fixture.store.conn, &fixture.admission,
-                &mut NativeReadContextV1::protected(&mut budget));
-            if let Ok(retained) = result {
-                assert_eq!(retained, fixture.expected);
-                assert_eq!(budget.remaining_native_bytes(), 0);
-                completed = true;
-                break;
+            let mut completed = false;
+            for marks in 2..128 {
+                let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                    std::iter::repeat_n(Duration::from_millis(1), marks).chain([final_offset]),
+                );
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 2, fixture.bytes, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                let result = sqlite_retained_key_evidence(
+                    &fixture.store.conn,
+                    &fixture.admission,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
+                if let Ok(retained) = result {
+                    assert_eq!(retained, fixture.expected);
+                    assert_eq!(budget.remaining_native_bytes(), 0);
+                    completed = true;
+                    break;
+                }
+                assert!(budget.check_time().is_err());
             }
-            assert!(budget.check_time().is_err());
-          }
-          assert!(completed, "every observable expiry and regression checkpoint was tested");
+            assert!(
+                completed,
+                "every observable expiry and regression checkpoint was tested"
+            );
         }
         Ok(())
     }
@@ -350,14 +394,22 @@ mod tests {
     fn retained_key_phase_accounts_live_and_destroyed_blobs_copies_and_deadlines() -> Fallible<()> {
         for destroyed in [false, true] {
             let fixture = fixture(destroyed)?;
-            for bytes in 1..=fixture.bytes { assert_byte_boundary(&fixture, bytes)?; }
+            for bytes in 1..=fixture.bytes {
+                assert_byte_boundary(&fixture, bytes)?;
+            }
             assert_deadline_boundaries(&fixture)?;
             let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
             let start = clock.mark();
             let limits = ForkReplayReadLimitsV1::new(1, 1, 1, fixture.bytes, 1_000_000)?;
             let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-            assert_eq!(sqlite_retained_key_evidence(&fixture.store.conn, &fixture.admission,
-                &mut NativeReadContextV1::protected(&mut budget)), Err(PublicationSourceErrorV1::Invalid));
+            assert_eq!(
+                sqlite_retained_key_evidence(
+                    &fixture.store.conn,
+                    &fixture.admission,
+                    &mut NativeReadContextV1::protected(&mut budget)
+                ),
+                Err(PublicationSourceErrorV1::Invalid)
+            );
             assert_eq!(budget.remaining_native_bytes(), fixture.bytes);
             assert!(budget.check_time().is_err());
         }
@@ -367,13 +419,25 @@ mod tests {
     #[test]
     fn retained_key_type_and_cap_failures_precede_raw_copies() -> Fallible<()> {
         for (sql, maximum) in [
-            ("UPDATE imported_fork_key_evidence SET ikr1_cbor = ?1", pos_core::MAX_IMPORTED_KEY_RECORD_BYTES_V1),
-            ("UPDATE imported_fork_key_evidence SET ikt1_cbor = ?1", pos_core::MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1),
+            (
+                "UPDATE imported_fork_key_evidence SET ikr1_cbor = ?1",
+                pos_core::MAX_IMPORTED_KEY_RECORD_BYTES_V1,
+            ),
+            (
+                "UPDATE imported_fork_key_evidence SET ikt1_cbor = ?1",
+                pos_core::MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1,
+            ),
         ] {
             let fixture = fixture(true)?;
             for (value, expected) in [
-                (rusqlite::types::Value::Blob(vec![0; maximum + 1]), PublicationSourceErrorV1::Invalid),
-                (rusqlite::types::Value::Text("not-a-blob".into()), PublicationSourceErrorV1::Storage),
+                (
+                    rusqlite::types::Value::Blob(vec![0; maximum + 1]),
+                    PublicationSourceErrorV1::Invalid,
+                ),
+                (
+                    rusqlite::types::Value::Text("not-a-blob".into()),
+                    PublicationSourceErrorV1::Storage,
+                ),
             ] {
                 // Impossible stored-state injection exercises only the raw gate.
                 fixture.store.conn.execute(sql, [value])?;
@@ -381,8 +445,14 @@ mod tests {
                 let start = clock.mark();
                 let limits = ForkReplayReadLimitsV1::new(1, 1, 2, 64, 1_000_000)?;
                 let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-                assert_eq!(sqlite_retained_key_evidence(&fixture.store.conn, &fixture.admission,
-                    &mut NativeReadContextV1::protected(&mut budget)), Err(expected));
+                assert_eq!(
+                    sqlite_retained_key_evidence(
+                        &fixture.store.conn,
+                        &fixture.admission,
+                        &mut NativeReadContextV1::protected(&mut budget)
+                    ),
+                    Err(expected)
+                );
                 assert_eq!(budget.remaining_native_bytes(), 64);
                 assert!(budget.check_time().is_ok());
             }
@@ -403,15 +473,30 @@ mod tests {
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 64, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-        assert!(matches!(retained_key_bytes_with_context(&fixture.store.conn, import,
-            &mut NativeReadContextV1::protected(&mut budget)), Err(PublicationSourceErrorV1::Invalid)));
+        assert!(matches!(
+            retained_key_bytes_with_context(
+                &fixture.store.conn,
+                import,
+                &mut NativeReadContextV1::protected(&mut budget)
+            ),
+            Err(PublicationSourceErrorV1::Invalid)
+        ));
         assert_eq!(budget.remaining_native_bytes(), 64);
         budget.charge_rows(1)?;
-        assert_eq!(sqlite_retained_key_evidence(&fixture.store.conn, &Err(PublicationSourceErrorV1::Invalid),
-            &mut NativeReadContextV1::ordinary()), Ok(RetainedKeyEvidenceV1::LiveRegistry));
+        assert_eq!(
+            sqlite_retained_key_evidence(
+                &fixture.store.conn,
+                &Err(PublicationSourceErrorV1::Invalid),
+                &mut NativeReadContextV1::ordinary()
+            ),
+            Ok(RetainedKeyEvidenceV1::LiveRegistry)
+        );
         // Keep the authentic admitted identity observable, not a fabricated
         // privileged admission used to exercise a private lookup.
-        assert!(fixture.admission.as_ref().is_ok_and(|admission| admission.import().is_some()));
+        assert!(fixture
+            .admission
+            .as_ref()
+            .is_ok_and(|admission| admission.import().is_some()));
         Ok(())
     }
 }
