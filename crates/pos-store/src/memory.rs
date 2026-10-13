@@ -2336,31 +2336,67 @@ impl MemoryStore {
         origin: ValidatedOriginV1,
     ) -> Result<(EventOriginRecordV1, Option<ForkInterventionAdmissionV1>), ForkEventAuthorityErrorV1>
     {
+        self.validate_classified_records_with_context(
+            operation,
+            event,
+            table,
+            origin,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn validate_classified_records_with_context(
+        &self,
+        operation: &ForkAppendOperationV1,
+        event: &Event,
+        table: &ForkClassifierTableV1,
+        origin: ValidatedOriginV1,
+        context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+    ) -> Result<(EventOriginRecordV1, Option<ForkInterventionAdmissionV1>), ForkEventAuthorityErrorV1>
+    {
+        use ForkEventAuthorityErrorV1::CorruptAuthority;
+
+        context.check().map_err(|_| CorruptAuthority)?;
         let input = operation.input();
         let intervention = self.fork_intervention_admissions.get(&event.id);
-        // A missing EOR1 and an unclassifiable FOP1 source are both corrupt
-        // authority, exactly like any field mismatch below.
-        self.fork_event_origins
-            .get(&event.id)
-            .zip(
-                ForkEventClassifierV1::from_table(table)
-                    .classify_identity(&input.source)
-                    .ok(),
-            )
-            .filter(|(record, classification)| {
-                let (expected_origin, expected_intervention) =
-                    operation.expected_provenance(table, *classification);
-                event.id == input.event_id
-                    && event.seq.as_u64() == input.logical_seq
-                    && classified_event_matches_operation(event, operation, origin)
-                    && **record == expected_origin
-                    && record.digest() == input.event_origin_digest
-                    && intervention == expected_intervention.as_ref()
-                    && intervention.map(ForkInterventionAdmissionV1::digest)
-                        == input.intervention_admission_digest
-            })
-            .map(|(record, _)| (record.clone(), intervention.cloned()))
-            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+        let record = self.fork_event_origins.get(&event.id).ok_or(CorruptAuthority)?;
+        // from_table emits FCT1 once for its digest and clones only its route
+        // metadata. Account for these distinct operations, not a second FCT1.
+        context.canonical(table.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+        for route in &table.input().routes {
+            context.bytes(route.source().route().len()).map_err(|_| CorruptAuthority)?;
+            context.bytes(32 + 1).map_err(|_| CorruptAuthority)?;
+        }
+        let classifier = ForkEventClassifierV1::from_table(table);
+        context.check().map_err(|_| CorruptAuthority)?;
+        let classification = classifier.classify_identity(&input.source).map_err(|_| CorruptAuthority)?;
+        let (expected_origin, expected_intervention) = operation.expected_provenance(table, classification);
+        if event.id != input.event_id || event.seq.as_u64() != input.logical_seq
+            || !classified_event_matches_operation(event, operation, origin)
+            || *record != expected_origin {
+            return Err(CorruptAuthority);
+        }
+        context.canonical(record.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+        let origin_digest = record.digest();
+        context.check().map_err(|_| CorruptAuthority)?;
+        if origin_digest != input.event_origin_digest || intervention != expected_intervention.as_ref() {
+            return Err(CorruptAuthority);
+        }
+        let intervention_digest = if let Some(intervention) = intervention {
+            context.canonical(intervention.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+            let digest = intervention.digest();
+            context.check().map_err(|_| CorruptAuthority)?;
+            Some(digest)
+        } else { None };
+        if intervention_digest != input.intervention_admission_digest {
+            return Err(CorruptAuthority);
+        }
+        context.canonical(record.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+        if let Some(intervention) = intervention {
+            context.canonical(intervention.canonical_cbor_len()).map_err(|_| CorruptAuthority)?;
+        }
+        let provenance = (record.clone(), intervention.cloned());
+        context.check().map(|()| provenance).map_err(|_| CorruptAuthority)
     }
 
     fn validated_local_fork_admission(
