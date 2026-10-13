@@ -78,6 +78,92 @@ impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
             .map_or(Ok(()), |budget| budget.charge_node(depth))
             .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
     }
+
+    /// Locate borrowed allocation carriers, debit, then immediately run the
+    /// existing capped decoder. This gate grants no native validity: magic,
+    /// preferred widths, semantics and exact canonical equality stay in core.
+    pub(crate) fn imported_admission(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<pos_core::ImportedForkAttributionAdmissionV1, crate::ForkManifestPublicationErrorV1>
+    {
+        use crate::ForkManifestPublicationErrorV1::PublicationConflict;
+        self.check()?;
+        if self.budget.is_some() {
+            if bytes.len() > pos_core::MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1 {
+                return Err(PublicationConflict);
+            }
+            let issuer = AdmissionCarrierV1::field(bytes, 5, 2).ok_or(PublicationConflict)?;
+            // The borrowed carrier fits its enclosing <=512-byte record,
+            // which also implies the existing 512-byte FAI1 decoder cap.
+            let identifier = AdmissionCarrierV1::field(issuer, 2, 3).ok_or(PublicationConflict)?;
+            if identifier.len() > pos_core::MAX_FORK_ATTRIBUTION_ISSUER_ID_BYTES_V1 {
+                return Err(PublicationConflict);
+            }
+            self.bytes(identifier.len())?; // FAI1 decoder's issuer String.
+            self.bytes(issuer.len())?; // FAI1 decoder's canonical comparison Vec.
+            self.bytes(bytes.len())?; // IFA1 decoder's canonical comparison Vec.
+            self.bytes(issuer.len())?; // IFA1 emitter's separate nested FAI1 Vec.
+        }
+        let decoded = pos_core::ImportedForkAttributionAdmissionV1::from_canonical_cbor(bytes)
+            .map_err(|_| PublicationConflict);
+        self.check()?;
+        decoded
+    }
+}
+
+/// Borrowed prefix reader for just IFA1 field 5 and FAI1 field 2. It never
+/// constructs a record, follows an input-sized collection, or copies a carrier.
+struct AdmissionCarrierV1<'bytes>(&'bytes [u8]);
+
+impl<'bytes> AdmissionCarrierV1<'bytes> {
+    fn field(bytes: &'bytes [u8], index: u64, expected_major: u8) -> Option<&'bytes [u8]> {
+        let mut carrier = Self(bytes);
+        let (major, count) = carrier.head()?;
+        if major != 4 || count <= index {
+            return None;
+        }
+        // Both callers supply a fixed native prefix (five or two fields).
+        for _ in 0..index {
+            let (major, length) = carrier.head()?;
+            match major {
+                0 | 1 => (),
+                2 | 3 => {
+                    carrier.take(usize::try_from(length).ok()?)?;
+                }
+                _ => return None,
+            }
+        }
+        let (major, length) = carrier.head()?;
+        if major != expected_major {
+            return None;
+        }
+        carrier.take(usize::try_from(length).ok()?)
+    }
+
+    fn head(&mut self) -> Option<(u8, u64)> {
+        let first = self.take(1)?[0];
+        let additional = first & 31;
+        let width = match additional {
+            0..=23 => return Some((first >> 5, u64::from(additional))),
+            24 => 1,
+            25 => 2,
+            26 => 4,
+            27 => 8,
+            _ => return None,
+        };
+        let value = self
+            .take(width)?
+            .iter()
+            .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte));
+        Some((first >> 5, value))
+    }
+
+    fn take(&mut self, length: usize) -> Option<&'bytes [u8]> {
+        let selected = self.0.get(..length)?;
+        self.0 = &self.0[length..];
+        Some(selected)
+    }
 }
 
 /// Closed failures of the bounded attribution read, without protected details.
@@ -286,9 +372,15 @@ impl<'clock> ForkReplayReadBudgetV1<'clock> {
         let within = !self.failed && {
             let mark = self.clock.mark();
             let monotonic = mark.checked_elapsed_since(self.last_mark).is_some();
-            let within = monotonic && mark.checked_elapsed_since(self.started)
-                .is_some_and(|elapsed| elapsed.as_micros() <= u128::from(self.limits.elapsed_micros));
-            if within { self.last_mark = mark; }
+            let within = monotonic
+                && mark
+                    .checked_elapsed_since(self.started)
+                    .is_some_and(|elapsed| {
+                        elapsed.as_micros() <= u128::from(self.limits.elapsed_micros)
+                    });
+            if within {
+                self.last_mark = mark;
+            }
             within
         };
         self.accept(within)
@@ -464,6 +556,170 @@ mod canonical_length_mapping_tests {
     use super::*;
     use pos_core::trusted_clock::ScriptedGuardMonotonicSourceV1;
     use std::time::Duration;
+
+    type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+
+    fn admission(identifier: &str) -> Fallible<pos_core::ImportedForkAttributionAdmissionV1> {
+        use pos_core::{
+            ForkAttributionIssuerV1, ImportedForkAttributionAdmissionInputV1,
+            ImportedForkAttributionAdmissionV1, PublicKey,
+        };
+        let digest = Hash::from_bytes([1; 32]);
+        Ok(ImportedForkAttributionAdmissionV1::new(
+            ImportedForkAttributionAdmissionInputV1 {
+                import_operation_id: digest,
+                authority_origin_digest: digest,
+                full_envelope_digest: digest,
+                issuer: ForkAttributionIssuerV1::new(
+                    identifier,
+                    u64::MAX,
+                    PublicKey::from_bytes([2; 32]),
+                )?,
+                issuer_policy_digest: digest,
+                issuer_policy_generation: u64::MAX,
+                child_timeline_id: TimelineId::new(),
+                final_logical_head: u64::MAX,
+                closure_root: digest,
+                fork_admission_digest: digest,
+            },
+        )?)
+    }
+
+    struct DecoderOutcome {
+        value: Result<pos_core::ImportedForkAttributionAdmissionV1, crate::ForkManifestPublicationErrorV1>,
+        remaining: usize,
+        open: bool,
+    }
+
+    fn decode_with_budget(
+        bytes: &[u8],
+        byte_limit: usize,
+    ) -> Fallible<DecoderOutcome> {
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(1, 1, 1, byte_limit, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let value = NativeReadContextV1::protected(&mut budget).imported_admission(bytes);
+        let remaining = budget.remaining_native_bytes();
+        Ok(DecoderOutcome { value, remaining, open: budget.check_time().is_ok() })
+    }
+
+    #[test]
+    fn imported_decoder_debits_each_real_buffer_and_latches_before_one_under() -> Fallible<()> {
+        for identifier in ["issuer".to_owned(), "🦀".repeat(32)] {
+            let record = admission(&identifier)?;
+            let bytes = record.to_canonical_cbor();
+            // Existing encoders, not the borrowed gate or length methods,
+            // independently measure all four real decoder allocations.
+            let issuer_bytes = record.input().issuer.to_canonical_cbor().len();
+            let exact = identifier.len() + issuer_bytes + bytes.len() + issuer_bytes;
+            let outcome = decode_with_budget(&bytes, exact)?;
+            assert_eq!(outcome.value?, record);
+            assert_eq!(outcome.remaining, 0);
+            assert!(outcome.open);
+            let outcome = decode_with_budget(&bytes, exact - 1)?;
+            assert_eq!(outcome.value, Err(crate::ForkManifestPublicationErrorV1::PublicationConflict));
+            assert!(!outcome.open);
+            assert_eq!(NativeReadContextV1::ordinary().imported_admission(&bytes)?, record);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn imported_decoder_gate_preserves_native_acceptance_on_current_bytes() -> Fallible<()> {
+        use pos_core::ImportedForkAttributionAdmissionV1;
+        let bytes = admission("issuer")?.to_canonical_cbor();
+        let assert_parity = |candidate: &[u8]| -> Fallible<()> {
+            let native = ImportedForkAttributionAdmissionV1::from_canonical_cbor(candidate);
+            let guarded = decode_with_budget(candidate, 65_536)?.value;
+            assert_eq!(guarded.is_ok(), native.is_ok());
+            if let Ok(native) = native {
+                assert_eq!(guarded?, native);
+            }
+            Ok(())
+        };
+        assert_parity(&bytes)?;
+        for end in 0..bytes.len() {
+            assert_parity(&bytes[..end])?;
+        }
+        for index in 0..bytes.len() {
+            for replacement in [0, 0xff] {
+                let mut changed = bytes.clone();
+                changed[index] = replacement;
+                assert_parity(&changed)?;
+            }
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_parity(&trailing)?;
+        assert_parity(&vec![0; pos_core::MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1 + 1])?;
+        for (additional, width) in [(24, 1), (25, 2), (26, 4), (27, 8)] {
+            let mut nonpreferred = vec![0x80 | additional];
+            nonpreferred.extend_from_slice(&12_u64.to_be_bytes()[8 - width..]);
+            nonpreferred.extend_from_slice(&bytes[1..]);
+            assert_parity(&nonpreferred)?;
+        }
+        let mut too_long = admission(&"x".repeat(128))?.to_canonical_cbor();
+        let issuer = AdmissionCarrierV1::field(&too_long, 5, 2).ok_or("no issuer carrier")?;
+        let issuer_start = issuer.as_ptr().addr() - too_long.as_ptr().addr();
+        let identifier = AdmissionCarrierV1::field(issuer, 2, 3).ok_or("no identifier carrier")?;
+        let identifier_start = identifier.as_ptr().addr() - too_long.as_ptr().addr();
+        too_long[issuer_start - 1] += 1;
+        too_long[identifier_start - 1] = 129;
+        too_long.insert(identifier_start + 128, b'x');
+        assert_parity(&too_long)?;
+        // Ordinary callers still use exactly the owning core decoder.
+        assert!(NativeReadContextV1::ordinary().imported_admission(&trailing).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn imported_decoder_checks_original_deadline_before_and_after_its_bounded_batch() -> Fallible<()> {
+        let bytes = admission("issuer")?.to_canonical_cbor();
+        for (zero_marks, final_mark, succeeds) in [
+            (2, Duration::from_secs(2), false),
+            (5, Duration::from_secs(2), false),
+            (7, Duration::from_secs(2), false),
+            (7, Duration::from_secs(1), true),
+        ] {
+            let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                std::iter::repeat_n(Duration::ZERO, zero_marks).chain([final_mark]),
+            );
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 65_536, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let decoded = NativeReadContextV1::protected(&mut budget).imported_admission(&bytes);
+            assert_eq!(decoded.is_ok(), succeeds);
+            assert_eq!(budget.check_time().is_ok(), succeeds);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_carrier_handles_all_definite_widths_and_rejects_bad_prefixes() {
+        let payload = b"issuer";
+        for (additional, width) in [(24, 1), (25, 2), (26, 4), (27, 8)] {
+            let mut bytes = vec![0x83, 0x64];
+            bytes.extend_from_slice(b"FAI1");
+            bytes.push(1);
+            bytes.push(0x60 | additional);
+            bytes.extend_from_slice(&6_u64.to_be_bytes()[8 - width..]);
+            bytes.extend_from_slice(payload);
+            assert_eq!(AdmissionCarrierV1::field(&bytes, 2, 3), Some(payload.as_slice()));
+            // Nonpreferred width remains visible to the core decoder, not
+            // normalized or accepted as native validity by this span reader.
+        }
+        for bytes in [
+            vec![], vec![0x9f], vec![0x80], vec![0x40], vec![0x81, 0x9f],
+            vec![0x81, 0x5f], vec![0x81, 0x78], vec![0x81, 0x7b, 0xff],
+            vec![0x82, 0x81, 0, 0x61, b'x'],
+        ] {
+            assert_eq!(AdmissionCarrierV1::field(&bytes, 0, 3), None);
+            assert_eq!(AdmissionCarrierV1::field(&bytes, 1, 3), None);
+        }
+        assert_eq!(AdmissionCarrierV1::field(&[0x82, 0x20, 0x61, b'x'], 1, 3), Some(b"x".as_slice()));
+        assert_eq!(AdmissionCarrierV1::field(&[0x81, 0x7b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], 0, 3), None);
+    }
 
     #[test]
     fn an_unrepresentable_native_length_permanently_closes_the_operation_ledger() -> ReadResult<()>
