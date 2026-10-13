@@ -34,13 +34,16 @@ impl NativeReadContextV1<'_, '_> {
     pub(crate) fn imported_key_record(&mut self, bytes: &[u8]) -> Result<ImportedKeyRecordV1> {
         self.check()?;
         self.imported_key_allocations(bytes, MAX_IMPORTED_KEY_RECORD_BYTES_V1)?;
-        let record = ImportedKeyRecordV1::from_canonical_cbor(bytes)
-            .map_err(|_| Error::PublicationConflict);
+        let record =
+            ImportedKeyRecordV1::from_canonical_cbor(bytes).map_err(|_| Error::PublicationConflict);
         self.check()?;
         record
     }
 
-    pub(crate) fn imported_key_tombstone(&mut self, bytes: &[u8]) -> Result<ImportedKeyTombstoneV1> {
+    pub(crate) fn imported_key_tombstone(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<ImportedKeyTombstoneV1> {
         self.check()?;
         self.imported_key_allocations(bytes, MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1)?;
         let tombstone = ImportedKeyTombstoneV1::from_canonical_cbor(bytes)
@@ -64,7 +67,10 @@ mod tests {
     type Fallible<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
     #[derive(Clone, Copy)]
-    enum Codec { Record, Tombstone }
+    enum Codec {
+        Record,
+        Tombstone,
+    }
 
     impl Codec {
         fn native_accepts(self, bytes: &[u8]) -> bool {
@@ -83,12 +89,22 @@ mod tests {
     }
 
     fn assert_parity(codec: Codec, bytes: &[u8]) -> Fallible<()> {
+        assert_eq!(
+            codec
+                .decode(bytes, &mut NativeReadContextV1::ordinary())
+                .is_ok(),
+            codec.native_accepts(bytes)
+        );
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 4_096, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-        assert_eq!(codec.decode(bytes, &mut NativeReadContextV1::protected(&mut budget)).is_ok(),
-            codec.native_accepts(bytes));
+        assert_eq!(
+            codec
+                .decode(bytes, &mut NativeReadContextV1::protected(&mut budget))
+                .is_ok(),
+            codec.native_accepts(bytes)
+        );
         assert!(budget.check_time().is_ok());
         Ok(())
     }
@@ -98,12 +114,20 @@ mod tests {
         let owner = OwnerIdV1::new("é".repeat(64))?;
         let identity = KeyIdentityV1::from_parts(owner, KeyRoleV1::SubjectAttributionSigning, 1);
         let record = ImportedKeyRecordV1::new(identity, None, PublicKey::from_bytes([7; 32]))?;
-        let tombstone = ImportedKeyTombstoneV1::new(identity, Hash::from_bytes([1; 32]),
-            Hash::from_bytes([2; 32]), Hash::from_bytes([3; 32]))?;
-        for (codec, bytes) in [(Codec::Record, record.to_canonical_cbor()),
-            (Codec::Tombstone, tombstone.to_canonical_cbor())] {
+        let tombstone = ImportedKeyTombstoneV1::new(
+            identity,
+            Hash::from_bytes([1; 32]),
+            Hash::from_bytes([2; 32]),
+            Hash::from_bytes([3; 32]),
+        )?;
+        for (codec, bytes) in [
+            (Codec::Record, record.to_canonical_cbor()),
+            (Codec::Tombstone, tombstone.to_canonical_cbor()),
+        ] {
             assert_parity(codec, &bytes)?;
-            for end in 0..bytes.len() { assert_parity(codec, &bytes[..end])?; }
+            for end in 0..bytes.len() {
+                assert_parity(codec, &bytes[..end])?;
+            }
             for index in 0..bytes.len() {
                 for replacement in [0, 255] {
                     let mut changed = bytes.clone();
@@ -114,6 +138,13 @@ mod tests {
             let mut trailing = bytes.clone();
             trailing.push(0);
             assert_parity(codec, &trailing)?;
+            let mut over_cap = bytes.clone();
+            let maximum = match codec {
+                Codec::Record => MAX_IMPORTED_KEY_RECORD_BYTES_V1,
+                Codec::Tombstone => MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1,
+            };
+            over_cap.resize(maximum + 1, 0);
+            assert_parity(codec, &over_cap)?;
             let expected = owner.as_str().len() + bytes.len();
             for limit in 1..=expected {
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
