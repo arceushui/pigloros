@@ -42,6 +42,28 @@ const PROJECTION: &str = "agent.scheduled.projection";
 
 type Admitted = Result<Option<PipelineCommitReceiptV1>, RuntimeError>;
 
+/// A committed factual Tick a store seeds without a pipeline commit.
+type SeededTick = pos_core::counterfactual_store::test_fixtures::SeededFactualTickV1;
+
+/// The seeding seam both adapters expose until slices 8 and 9 write rows.
+trait Seed {
+    fn seed(&mut self, timeline: TimelineId, ticks: &[SeededTick]);
+}
+
+impl Seed for MemoryStore {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn seed(&mut self, timeline: TimelineId, ticks: &[SeededTick]) {
+        ok(self.seed_factual_prefix(timeline, ticks));
+    }
+}
+
+impl Seed for SqliteStore {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn seed(&mut self, timeline: TimelineId, ticks: &[SeededTick]) {
+        ok(self.seed_factual_prefix(timeline, ticks));
+    }
+}
+
 trait Harness:
     ScheduledAdmissionStoreV1
     + EventStore
@@ -49,10 +71,11 @@ trait Harness:
     + FactualPrefixReadPortV1
     + PipelineAdmissionFencePublisherV1
     + AuthorityPersistencePortV1
+    + Seed
 {
 }
 
-impl<T: ScheduledAdmissionStoreV1> Harness for T {}
+impl<T: ScheduledAdmissionStoreV1 + Seed> Harness for T {}
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
@@ -2506,5 +2529,1426 @@ fn a_restored_registry_keeps_declaring_later_ticks_on_both_adapters() {
         let recorded = first_step_node(&restored).coordinate().artifact_digest();
         let step = first_step_node(&later);
         assert!(step.input_digests().contains(&recorded), "{name}");
+    }
+}
+
+// ── Registry-driven basis content (ADR-064 Revision 3, Redmine #628) ───────
+//
+// These tests drive the registry over both real adapters and assert the
+// factual Tick declaration each submitted basis carries. The adapters write no
+// factual rows until slices 8 and 9, so a Tick the registry declares never
+// reaches the prefix a later pass reads, and a real adapter's head stays at
+// the last seeded Tick. Two things follow:
+//
+// - A scenario that needs the store to answer from an earlier Tick seeds the
+//   prefix with `seed_factual_prefix` (D16) instead.
+// - A scenario that spans several Ticks of one registry asserts the retained
+//   state (the `Recorded` chain and history nodes) and the declared digests,
+//   which is what the registry knows before slice 8. Slice 8 changes only the
+//   Tick numbers of those tests when it makes the head follow the rows; the
+//   cases that say so below are listed in the pull request.
+
+type NodeRecord = pos_core::DependencyNodeRecordV1;
+type Class = pos_core::RecordedDependencyClassV1;
+type Input = pos_runtime::DirectInputRefV1;
+type Declared = pos_runtime::DeclaredOutputV1;
+type Staged = Result<Vec<EventDraft>, RuntimeError>;
+
+/// The Event type the basis Drivers subscribe to.
+const INPUT: &str = "agent.basis.input";
+/// An Event type none of them subscribes to.
+const OTHER_INPUT: &str = "agent.basis.other_input";
+const ENDOGENOUS: Class = Class::EndogenousRecomputed;
+const PRESENTATION: Class = Class::PresentationOnly;
+const HISTORY: &str = pos_core::FactualHostOwnerV1::History.as_str();
+const INGRESS: &str = pos_core::FactualHostOwnerV1::Ingress.as_str();
+const PREFIX: &str = pos_core::FactualHostOwnerV1::Prefix.as_str();
+const HISTORY_SCHEMA: u32 = pos_core::FACTUAL_HISTORY_SCHEMA_ID_V1;
+const PREFIX_SCHEMA: u32 = pos_core::FACTUAL_PREFIX_SCHEMA_ID_V1;
+/// The payload of the one draft most basis Drivers emit.
+const ONE_DRAFT: &[u8] = b"a";
+
+/// What a basis Driver emits and declares on its next step.
+#[derive(Default)]
+struct Plan {
+    payloads: Vec<&'static [u8]>,
+    step_inputs: Vec<Input>,
+    direct_inputs: Vec<Input>,
+}
+
+impl Plan {
+    /// The step output this plan describes for a Driver owning `event_type`.
+    fn output(&self, event_type: &str) -> StepOutput {
+        let outputs = self
+            .payloads
+            .iter()
+            .copied()
+            .map(|payload| Declared {
+                draft: EventDraft::new(
+                    entity(10),
+                    Kind::new(event_type),
+                    CanonicalBytes::from_static(payload),
+                ),
+                direct_inputs: self.direct_inputs.clone(),
+            })
+            .collect();
+        StepOutput::declared(self.step_inputs.clone(), outputs)
+    }
+}
+
+type SharedPlan = Arc<Mutex<Plan>>;
+
+/// The Event type the basis Driver `name` owns.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn owned_type(name: &str) -> &'static str {
+    match name {
+        "first" => "agent.basis.first",
+        "second" => "agent.basis.second",
+        "third" => "agent.basis.third",
+        _ => "agent.basis.fourth",
+    }
+}
+
+/// Driver whose output and declared inputs a test sets between passes.
+struct BasisDriver {
+    name: &'static str,
+    interval: Duration,
+    subscriptions: Vec<Kind>,
+    verified_prefix: bool,
+    plan: SharedPlan,
+    log: Log,
+}
+
+impl BasisDriver {
+    /// A Driver with no subscription that emits nothing, and its plan.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn new(name: &'static str, log: &Log) -> (Self, SharedPlan) {
+        let plan = SharedPlan::default();
+        let driver = Self {
+            name,
+            interval: Duration::from_nanos(10),
+            subscriptions: Vec::new(),
+            verified_prefix: false,
+            plan: Arc::clone(&plan),
+            log: Arc::clone(log),
+        };
+        (driver, plan)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn subscribed(mut self, event_type: &str) -> Self {
+        self.subscriptions.push(Kind::new(event_type));
+        self
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    const fn verified(mut self) -> Self {
+        self.verified_prefix = true;
+        self
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    const fn every(mut self, interval: Duration) -> Self {
+        self.interval = interval;
+        self
+    }
+}
+
+impl Driver for BasisDriver {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn tick_interval(&self) -> Duration {
+        self.interval
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn event_subscriptions(&self) -> &[Kind] {
+        &self.subscriptions
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn requires_verified_event_prefix(&self) -> bool {
+        self.verified_prefix
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
+        record(&self.log, format!("{}:step", self.name));
+        let plan = self
+            .plan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(plan.output(owned_type(self.name)))
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn commit_step(&mut self) {
+        record(&self.log, format!("{}:commit", self.name));
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn abort_step(&mut self) {
+        record(&self.log, format!("{}:abort", self.name));
+    }
+}
+
+/// Change what a Driver emits and declares from its next step on.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn plan_of(shared: &SharedPlan, change: impl FnOnce(&mut Plan)) {
+    let mut guard = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    change(&mut guard);
+}
+
+/// The Driver emits `payloads` and declares nothing.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn emit(shared: &SharedPlan, payloads: &[&'static [u8]]) {
+    plan_of(shared, |plan| {
+        plan.payloads = payloads.to_vec();
+        plan.step_inputs.clear();
+        plan.direct_inputs.clear();
+    });
+}
+
+/// The Driver emits one draft and declares these inputs.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn declare(shared: &SharedPlan, step_inputs: Vec<Input>, direct_inputs: Vec<Input>) {
+    plan_of(shared, |plan| {
+        plan.payloads = vec![ONE_DRAFT];
+        plan.step_inputs = step_inputs;
+        plan.direct_inputs = direct_inputs;
+    });
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn register_basis(registry: &mut PluginRegistry, driver: BasisDriver) {
+    let plugin = TestPlugin {
+        id: PluginId::new(),
+        name: driver.name,
+        event_type: owned_type(driver.name),
+        reducer: false,
+    };
+    ok(registry.register_generated(&plugin, None, Some(Box::new(driver))));
+    ok(registry.compose_non_participant_drivers());
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+const fn committed(seq: u64) -> Input {
+    Input::CommittedEvent {
+        seq: Seq::from_u64(seq),
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+const fn named(digest: Hash) -> Input {
+    Input::NodeDigest { digest }
+}
+
+/// The first `count` of `digests`, each declared by digest.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn named_inputs(digests: &[Hash], count: usize) -> Vec<Input> {
+    digests[..count].iter().copied().map(named).collect()
+}
+
+/// A digest that no `hash(n)` constant of these tests equals.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn indexed_hash(index: u32) -> Hash {
+    let mut bytes = [0_u8; 32];
+    bytes[0] = 0xA5;
+    bytes[28..].copy_from_slice(&index.to_be_bytes());
+    Hash::from_bytes(bytes)
+}
+
+/// Append `count` Events of `kind` to the Timeline, in batches.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn append_events(store: &mut dyn Harness, host: &Host, kind: &str, count: usize) {
+    let mut left = count;
+    while left > 0 {
+        let batch = left.min(500);
+        let drafts: Vec<EventDraft> = (0..batch)
+            .map(|_| {
+                let payload = CanonicalBytes::from_static(b"basis");
+                EventDraft::new(entity(20), Kind::new(kind), payload)
+            })
+            .collect();
+        ok(store.append(host.timeline, &drafts));
+        left -= batch;
+    }
+}
+
+/// The covered Events of a digest over `events`.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn event_refs(events: &[Event]) -> Vec<pos_core::FactualEventRefV1> {
+    let mut refs = Vec::new();
+    for event in events {
+        refs.push(pos_core::FactualEventRefV1 {
+            seq: event.seq,
+            payload_hash: event.payload_hash,
+        });
+    }
+    refs
+}
+
+// ── Seeded prefix ─────────────────────────────────────────────────────────
+
+/// A node of a seeded Tick, without the fields every seeded node shares.
+struct NodeSpec<'a> {
+    owner: &'a str,
+    ordinal: u32,
+    schema_id: u32,
+    digest: Hash,
+    class: Class,
+}
+
+/// The step node of `owner`: ordinal zero.
+#[cfg_attr(coverage_nightly, coverage(off))]
+const fn step_spec(owner: &str, digest: Hash) -> NodeSpec<'_> {
+    NodeSpec {
+        owner,
+        ordinal: 0,
+        schema_id: pos_core::FACTUAL_STEP_SCHEMA_ID_V1,
+        digest,
+        class: ENDOGENOUS,
+    }
+}
+
+/// A node of `owner` that stands for an Event of the subscribed type.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn event_spec(owner: &str, ordinal: u32, digest: Hash, class: Class) -> NodeSpec<'_> {
+    NodeSpec {
+        owner,
+        ordinal,
+        schema_id: pos_core::factual_event_schema_id(INPUT),
+        digest,
+        class,
+    }
+}
+
+/// The committed node `spec` describes, at scheduler position one.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn seeded_node(tick: u64, spec: &NodeSpec<'_>) -> NodeRecord {
+    let coordinate = ok(pos_core::DependencyNodeCoordinateV1::try_new(
+        tick,
+        1,
+        spec.owner.to_owned(),
+        spec.ordinal,
+        spec.schema_id,
+        spec.digest,
+    ));
+    ok(NodeRecord::try_new(
+        coordinate,
+        spec.class,
+        pos_core::RecordedNodeOriginV1::Committed,
+        Vec::new(),
+        hash(9),
+    ))
+}
+
+/// A committed Tick that owns the `seq` range `range` and binds the Events
+/// of `bound` to their nodes.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn seeded_tick(
+    tick: u64,
+    nodes: Vec<NodeRecord>,
+    range: (u64, u64),
+    bound: Vec<(Seq, Hash)>,
+) -> SeededTick {
+    let record = ok(pos_core::TickDependencyRecordV1::try_new(
+        tick,
+        pos_core::RecordedNodeOriginV1::Committed,
+        nodes,
+        Vec::new(),
+    ));
+    SeededTick {
+        record,
+        first_seq: Seq::from_u64(range.0),
+        last_seq: Seq::from_u64(range.1),
+        event_nodes: bound,
+    }
+}
+
+/// The nodes of the bulk Tick: the 4,096 inputs of a full output node.
+const BULK: u32 = 4_096;
+
+/// A Tick of `BULK` nodes of one owner, each with its own digest. It owns Event 1.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn bulk_tick() -> SeededTick {
+    let owner = "plugin:bulk";
+    let nodes: Vec<NodeRecord> = (0..BULK)
+        .map(|ordinal| {
+            let spec = NodeSpec {
+                owner,
+                ordinal,
+                schema_id: 7,
+                digest: indexed_hash(ordinal),
+                class: ENDOGENOUS,
+            };
+            seeded_node(1, &spec)
+        })
+        .collect();
+    seeded_tick(1, nodes, (1, 1), Vec::new())
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn bulk_digests() -> Vec<Hash> {
+    (0..BULK).map(indexed_hash).collect()
+}
+
+// ── Passes and bases ───────────────────────────────────────────────────────
+
+/// Which Drivers a pass steps.
+#[derive(Clone, Copy)]
+enum Selection {
+    All,
+    /// The Drivers due at this time in nanoseconds.
+    Cadenced(u128),
+}
+
+/// A cut of the Timeline and the committed prefix the host hands a pass.
+struct Cut<'a> {
+    observed: u64,
+    events: &'a [Event],
+    selection: Selection,
+}
+
+/// The pass over every Driver observed through `observed`.
+#[cfg_attr(coverage_nightly, coverage(off))]
+const fn all_at(observed: u64, events: &[Event]) -> Cut<'_> {
+    Cut {
+        observed,
+        events,
+        selection: Selection::All,
+    }
+}
+
+/// The pass over the Drivers due at `now_ns`.
+#[cfg_attr(coverage_nightly, coverage(off))]
+const fn due_at(observed: u64, events: &[Event], now_ns: u128) -> Cut<'_> {
+    Cut {
+        observed,
+        events,
+        selection: Selection::Cadenced(now_ns),
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn step_all_pass(host: &Host, registry: &mut PluginRegistry, cut: &Cut<'_>) -> Staged {
+    let ancestry = root_ancestry(host.timeline);
+    let (timeline, events) = (host.timeline, cut.events);
+    let through = Seq::from_u64(cut.observed);
+    registry.step_all_anchored_with_events(timeline, &ancestry, through, events)
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn step_due_pass(
+    host: &Host,
+    registry: &mut PluginRegistry,
+    cut: &Cut<'_>,
+    now_ns: u128,
+) -> Staged {
+    let ancestry = root_ancestry(host.timeline);
+    let (timeline, events) = (host.timeline, cut.events);
+    let through = Seq::from_u64(cut.observed);
+    registry.tick_cadenced_anchored_with_events(timeline, &ancestry, now_ns, through, events)
+}
+
+/// Step the pass `cut` describes and stage its drafts.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn stage(host: &Host, registry: &mut PluginRegistry, cut: &Cut<'_>) -> Staged {
+    match cut.selection {
+        Selection::All => step_all_pass(host, registry, cut),
+        Selection::Cadenced(now_ns) => step_due_pass(host, registry, cut, now_ns),
+    }
+}
+
+/// Settle a staged pass that has no draft: nothing is admitted.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn settle_empty(host: &Host, registry: &mut PluginRegistry, store: &mut dyn Harness, key: u8) {
+    let admitted = ok(host.admit(registry, store, key));
+    assert!(admitted.is_none());
+}
+
+/// Admit the staged pass and return the basis the store was offered.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn admit_basis(
+    host: &Host,
+    registry: &mut PluginRegistry,
+    store: &mut dyn Harness,
+    key: u8,
+) -> PipelineAdmissionBasisV1 {
+    let admission = host.admission(store, key);
+    let mut port = DigestRecordingPort {
+        inner: store,
+        digests: Vec::new(),
+        bases: Vec::new(),
+    };
+    receipt(registry.admit_scheduled_pass(&mut port, &admission));
+    assert_eq!(port.bases.len(), 1);
+    port.bases.remove(0)
+}
+
+/// Admit the staged pass, which must fail, and return its error with the
+/// number of bases the store was offered.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn admit_failure(
+    host: &Host,
+    registry: &mut PluginRegistry,
+    store: &mut dyn Harness,
+    key: u8,
+) -> (RuntimeError, usize) {
+    let admission = host.admission(store, key);
+    let mut port = DigestRecordingPort {
+        inner: store,
+        digests: Vec::new(),
+        bases: Vec::new(),
+    };
+    let error = err(registry.admit_scheduled_pass(&mut port, &admission));
+    (error, port.bases.len())
+}
+
+/// Step the pass `cut` describes and admit it, returning its basis.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn pass_basis(
+    host: &Host,
+    registry: &mut PluginRegistry,
+    store: &mut dyn Harness,
+    cut: &Cut<'_>,
+    key: u8,
+) -> PipelineAdmissionBasisV1 {
+    ok(stage(host, registry, cut));
+    admit_basis(host, registry, store, key)
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn declaration_error(error: RuntimeError) -> FactualDependencyErrorV1 {
+    match error {
+        RuntimeError::DependencyDeclaration(declaration) => declaration,
+        other => std::panic::resume_unwind(Box::new(format!("unexpected error: {other}"))),
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn declared_nodes(basis: &PipelineAdmissionBasisV1) -> &[NodeRecord] {
+    basis.dependencies().record().nodes()
+}
+
+/// The `seq`s the ingress nodes of a basis are bound to, in the order declared.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn bound_seqs(basis: &PipelineAdmissionBasisV1) -> Vec<u64> {
+    let bindings = basis.dependencies().event_nodes();
+    bindings.iter().map(|b| b.seq.as_u64()).collect()
+}
+
+/// How many nodes of `owner` a basis declares.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn count_owned_by(basis: &PipelineAdmissionBasisV1, owner: &str) -> usize {
+    let nodes = declared_nodes(basis);
+    nodes
+        .iter()
+        .filter(|node| node.coordinate().owner_id() == owner)
+        .count()
+}
+
+/// The node of `owner` at output ordinal `ordinal`.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn node_of(basis: &PipelineAdmissionBasisV1, owner: &str, ordinal: u32) -> NodeRecord {
+    let nodes = declared_nodes(basis);
+    let found = nodes.iter().find(|node| {
+        node.coordinate().owner_id() == owner && node.coordinate().output_ordinal() == ordinal
+    });
+    found
+        .cloned()
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("no such node")))
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn digest_of(basis: &PipelineAdmissionBasisV1, owner: &str, ordinal: u32) -> Hash {
+    let node = node_of(basis, owner, ordinal);
+    node.coordinate().artifact_digest()
+}
+
+/// The inputs the step node of `owner` declares.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn step_inputs_of(basis: &PipelineAdmissionBasisV1, owner: &str) -> Vec<Hash> {
+    let step = node_of(basis, owner, 0);
+    step.input_digests().to_vec()
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn declares(basis: &PipelineAdmissionBasisV1, owner: &str, digest: Hash) -> bool {
+    step_inputs_of(basis, owner).contains(&digest)
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn owner_at(registry: &PluginRegistry, index: usize) -> String {
+    let owners = registry.factual_owner_ids();
+    owners[index].1.as_str().to_owned()
+}
+
+/// The key of a host node, which sits at scheduler position zero.
+#[cfg_attr(coverage_nightly, coverage(off))]
+const fn host_key(tick: u64, owner: &str, ordinal: u32, schema_id: u32) -> FactualNodeKeyV1<'_> {
+    FactualNodeKeyV1 {
+        tick,
+        scheduler_position: 0,
+        owner,
+        output_ordinal: ordinal,
+        schema_id,
+    }
+}
+
+// ── Chain edge across a fresh registry, class rule on a seeded node ───────
+
+/// ADR-064 R3.4.2(c) and D16: a fresh registry over a prefix that already
+/// holds Ticks looks up each Driver's latest step node, declares it as the
+/// chain edge, and declares a Tick after the prefix head. The next pass of the
+/// same registry declares the step node it recorded itself instead.
+///
+/// Until slices 8 and 9 the head stays at the seeded Tick, so the second pass
+/// gets its Tick from the retained node. Slice 8 changes no assertion here.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_fresh_registry_chains_to_the_seeded_step_node_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let mut registry = host.registry();
+        register(&mut registry, driver("first", vec![b"a1"], &log));
+        register(&mut registry, driver("second", Vec::new(), &log));
+        let (first, second) = (owner_at(&registry, 0), owner_at(&registry, 1));
+        append_events(store.as_mut(), &host, INPUT, 2);
+        let seeded = hash(0x41);
+        let step_node = step_spec(&first, seeded);
+        let nodes = vec![seeded_node(3, &step_node)];
+        let tick = seeded_tick(3, nodes, (1, 2), Vec::new());
+        store.seed(host.timeline, &[tick]);
+        let head = ok(store.last_committed_factual_tick(host.timeline));
+        assert_eq!(head.tick, 3, "{name}");
+
+        let one = admit_pass_basis(&host, &mut registry, store.as_mut(), (2, 1));
+        assert_eq!(one.dependencies().tick(), 4, "{name}");
+        let snapshot = digest_of(&one, "host.observation", 0);
+        let inputs = step_inputs_of(&one, &first);
+        assert_eq!(inputs.len(), 2, "{name}");
+        assert!(inputs.contains(&seeded), "{name}");
+        assert!(inputs.contains(&snapshot), "{name}");
+        // The prefix holds no node of the second Driver: the snapshot is its only input.
+        assert_eq!(step_inputs_of(&one, &second), [snapshot], "{name}");
+
+        let two = admit_pass_basis(&host, &mut registry, store.as_mut(), (3, 2));
+        assert_eq!(two.dependencies().tick(), 5, "{name}");
+        let recorded = digest_of(&one, &first, 0);
+        let chained = step_inputs_of(&two, &first);
+        assert!(chained.contains(&recorded), "{name}");
+        assert!(!chained.contains(&seeded), "{name}");
+    }
+}
+
+/// ADR-064 R3.4.4 and R3.5: an Event forwarded to a Driver whose recorded
+/// node is `PresentationOnly` breaks the class rule. The registry refuses the
+/// pass before it offers the store anything, and the staged Driver aborts.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_seeded_presentation_only_event_node_is_refused_before_any_store_call() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (driver, plan) = BasisDriver::new("first", &log);
+        let mut registry = host.registry();
+        register_basis(&mut registry, driver.subscribed(INPUT));
+        emit(&plan, &[b"a"]);
+        append_events(store.as_mut(), &host, INPUT, 2);
+        // Tick 1 owns both Events; the node of Event 1 is presentation only.
+        let step_node = step_spec("plugin:old", hash(0x51));
+        let shown = event_spec("plugin:old", 1, hash(0x52), PRESENTATION);
+        let nodes = vec![seeded_node(1, &step_node), seeded_node(1, &shown)];
+        let bound = vec![(Seq::from_u64(1), hash(0x52))];
+        let tick = seeded_tick(1, nodes, (1, 2), bound);
+        store.seed(host.timeline, &[tick]);
+
+        let events = committed_events(store.as_ref(), host.timeline);
+        ok(stage(&host, &mut registry, &all_at(2, &events)));
+        let (error, offered) = admit_failure(&host, &mut registry, store.as_mut(), 1);
+        assert_eq!(
+            declaration_error(error),
+            FactualDependencyErrorV1::ClassRuleViolation,
+            "{name}"
+        );
+        assert_eq!(offered, 0, "{name}");
+        let trail = entries(&log);
+        assert_eq!(trail, ["first:step", "first:abort"], "{name}");
+        let stored = committed_events(store.as_ref(), host.timeline);
+        assert_eq!(stored.len(), 2, "{name}");
+    }
+}
+
+// ── History nodes: collapse and restore ────────────────────────────────────
+
+/// ADR-064 R3.4.8 and R3.4.10: a Driver whose carried set is full and that
+/// has a new Event collapses the set into one history node. The next recorded
+/// step declares that node, records it once, and consumes it.
+///
+/// The collapsed Events are not declared one by one: only the new Event gets
+/// an ingress node.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_full_carried_set_collapses_into_one_history_node_on_both_adapters() {
+    let full = pos_core::MAX_FORWARDED_EVENTS_PER_DRIVER_V1;
+    let carried = ok(u64::try_from(full));
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (driver, plan) = BasisDriver::new("first", &log);
+        let mut registry = host.registry();
+        register_basis(&mut registry, driver.subscribed(INPUT));
+        append_events(store.as_mut(), &host, INPUT, full + 1);
+        let events = committed_events(store.as_ref(), host.timeline);
+
+        // A pass that stages nothing consumes the first Events into the carried set.
+        ok(stage(&host, &mut registry, &all_at(carried, &events)));
+        settle_empty(&host, &mut registry, store.as_mut(), 1);
+
+        // One new Event finds the set full: the set collapses into a history node.
+        emit(&plan, &[b"a"]);
+        let cut = all_at(carried + 1, &events);
+        let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, 2);
+        assert_eq!(basis.dependencies().tick(), 1, "{name}");
+        assert_eq!(count_owned_by(&basis, HISTORY), 1, "{name}");
+        assert_eq!(count_owned_by(&basis, INGRESS), 1, "{name}");
+        let node = node_of(&basis, HISTORY, 0);
+        let schema = node.coordinate().schema_id();
+        assert_eq!(schema, HISTORY_SCHEMA, "{name}");
+        let covered = event_refs(&events[..full]);
+        let content = pos_core::factual_history_content_digest(
+            Hash::zero(),
+            Seq::from_u64(1),
+            Seq::from_u64(carried),
+            &covered,
+        );
+        let key = host_key(1, HISTORY, 0, HISTORY_SCHEMA);
+        let expected = factual_artifact_digest(host.timeline, key, content);
+        let history = node.coordinate().artifact_digest();
+        assert_eq!(history, expected, "{name}");
+        let owner = owner_at(&registry, 0);
+        // The snapshot, the history node and the new Event's ingress node.
+        let inputs = step_inputs_of(&basis, &owner);
+        assert_eq!(inputs.len(), 3, "{name}");
+        assert!(inputs.contains(&history), "{name}");
+
+        // The next Tick neither records nor declares the consumed history.
+        emit(&plan, &[b"b"]);
+        let latest = committed_events(store.as_ref(), host.timeline);
+        let cut = all_at(carried + 2, &latest);
+        let next = pass_basis(&host, &mut registry, store.as_mut(), &cut, 3);
+        assert_eq!(next.dependencies().tick(), 2, "{name}");
+        assert_eq!(count_owned_by(&next, HISTORY), 0, "{name}");
+        let chain = step_inputs_of(&next, &owner);
+        assert_eq!(chain.len(), 2, "{name}");
+        assert!(!chain.contains(&history), "{name}");
+    }
+}
+
+/// The first Driver steps every ten nanoseconds, the second every million.
+const FAST: Duration = Duration::from_nanos(10);
+const SLOW: Duration = Duration::from_nanos(1_000_000);
+/// After stepping at 100 only the first Driver is due.
+const FIRST_DUE_NS: u128 = 111;
+/// Both Drivers are due again.
+const BOTH_DUE_NS: u128 = 1_000_200;
+
+type Pair = (PluginRegistry, [SharedPlan; 2]);
+
+/// Two Drivers restored over three Events, both stepped once at time 100.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn restored_pair(host: &Host, store: &mut dyn Harness, log: &Log) -> Pair {
+    let (first, first_plan) = BasisDriver::new("first", log);
+    let (second, second_plan) = BasisDriver::new("second", log);
+    let mut registry = host.registry();
+    register_basis(&mut registry, first.every(FAST));
+    register_basis(&mut registry, second.every(SLOW));
+    append_events(store, host, INPUT, 3);
+    // The one step at 100 leaves the second Driver not due before time 1,000,100.
+    ok(stage(host, &mut registry, &due_at(0, &[], 100)));
+    settle_empty(host, &mut registry, store, 1);
+    let events = committed_events(store, host.timeline);
+    let segment = TimelineHistorySegment::new(host.timeline, Seq::from_u64(3));
+    ok(registry.restore_driver_state(&[segment], &events));
+    (registry, [first_plan, second_plan])
+}
+
+/// ADR-064 R3.4.10: a restore gives every Driver the one history node that
+/// covers the visible history. The first Driver to step records it; the
+/// Driver stepped later declares it by artifact digest and records no second
+/// node.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_restored_history_node_is_declared_by_the_driver_stepped_later_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (mut registry, plans) = restored_pair(&host, store.as_mut(), &log);
+        let events = committed_events(store.as_ref(), host.timeline);
+        let (first, second) = (owner_at(&registry, 0), owner_at(&registry, 1));
+
+        // Only the first Driver is due: it records the restored history node.
+        emit(&plans[0], &[b"a"]);
+        let cut = due_at(3, &events, FIRST_DUE_NS);
+        let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, 2);
+        assert_eq!(basis.dependencies().tick(), 1, "{name}");
+        assert_eq!(count_owned_by(&basis, HISTORY), 1, "{name}");
+        assert_eq!(count_owned_by(&basis, &second), 0, "{name}");
+        let covered = event_refs(&events);
+        let content = pos_core::factual_history_content_digest(
+            Hash::zero(),
+            Seq::from_u64(1),
+            Seq::from_u64(3),
+            &covered,
+        );
+        let key = host_key(1, HISTORY, 0, HISTORY_SCHEMA);
+        let expected = factual_artifact_digest(host.timeline, key, content);
+        let history = digest_of(&basis, HISTORY, 0);
+        assert_eq!(history, expected, "{name}");
+        assert!(declares(&basis, &first, history), "{name}");
+
+        // The second Driver steps later and declares the node without recording another.
+        emit(&plans[0], &[]);
+        emit(&plans[1], &[b"b"]);
+        let latest = committed_events(store.as_ref(), host.timeline);
+        let cut = due_at(4, &latest, BOTH_DUE_NS);
+        let later = pass_basis(&host, &mut registry, store.as_mut(), &cut, 3);
+        assert_eq!(later.dependencies().tick(), 2, "{name}");
+        assert_eq!(count_owned_by(&later, HISTORY), 0, "{name}");
+        assert!(declares(&later, &second, history), "{name}");
+        assert!(!declares(&later, &first, history), "{name}");
+        let step_digest = digest_of(&basis, &first, 0);
+        assert!(declares(&later, &first, step_digest), "{name}");
+    }
+}
+
+/// ADR-064 R3.4.10: Drivers stepped in the same pass after a restore share
+/// the one history node.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn drivers_stepped_together_after_a_restore_share_one_history_node() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (mut registry, plans) = restored_pair(&host, store.as_mut(), &log);
+        let events = committed_events(store.as_ref(), host.timeline);
+        emit(&plans[0], &[b"a"]);
+        emit(&plans[1], &[b"b"]);
+        let cut = all_at(3, &events);
+        let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, 2);
+        assert_eq!(count_owned_by(&basis, HISTORY), 1, "{name}");
+        let history = digest_of(&basis, HISTORY, 0);
+        for index in 0..2 {
+            let owner = owner_at(&registry, index);
+            assert!(declares(&basis, &owner, history), "{name}");
+        }
+    }
+}
+
+// ── The verified prefix ───────────────────────────────────────────────────
+
+/// ADR-064 R3.3.1 and R3.4.2(f): Drivers that read the verified prefix declare
+/// a prefix node, shared by every Driver whose prefix digest is equal. A
+/// Driver without the prefix declares none.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn verified_prefix_drivers_declare_one_prefix_node_per_digest_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let mut registry = host.registry();
+        let (first, plan) = BasisDriver::new("first", &log);
+        register_basis(&mut registry, first.verified());
+        let (second, _) = BasisDriver::new("second", &log);
+        register_basis(&mut registry, second.verified());
+        let (third, _) = BasisDriver::new("third", &log);
+        register_basis(&mut registry, third);
+        let (fourth, _) = BasisDriver::new("fourth", &log);
+        register_basis(&mut registry, fourth.verified().subscribed(INPUT));
+        emit(&plan, &[b"a"]);
+        append_events(store.as_mut(), &host, INPUT, 2);
+        let events = committed_events(store.as_ref(), host.timeline);
+        let cut = all_at(2, &events);
+        let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, 1);
+        let tick = basis.dependencies().tick();
+        assert_eq!(count_owned_by(&basis, PREFIX), 2, "{name}");
+
+        // The first two Drivers hand an empty prefix; the fourth hands both Events.
+        let through = Seq::from_u64(2);
+        let empty = pos_core::factual_verified_prefix_content_digest(through, &[]);
+        let handed = event_refs(&events);
+        let full = pos_core::factual_verified_prefix_content_digest(through, &handed);
+        let zero_key = host_key(tick, PREFIX, 0, PREFIX_SCHEMA);
+        let shared = factual_artifact_digest(host.timeline, zero_key, empty);
+        let one_key = host_key(tick, PREFIX, 1, PREFIX_SCHEMA);
+        let apart = factual_artifact_digest(host.timeline, one_key, full);
+        assert_eq!(digest_of(&basis, PREFIX, 0), shared, "{name}");
+        assert_eq!(digest_of(&basis, PREFIX, 1), apart, "{name}");
+
+        let owners: Vec<String> = (0..4).map(|i| owner_at(&registry, i)).collect();
+        assert!(declares(&basis, &owners[0], shared), "{name}");
+        assert!(declares(&basis, &owners[1], shared), "{name}");
+        assert!(!declares(&basis, &owners[2], shared), "{name}");
+        assert!(!declares(&basis, &owners[2], apart), "{name}");
+        assert!(declares(&basis, &owners[3], apart), "{name}");
+        assert!(!declares(&basis, &owners[3], shared), "{name}");
+    }
+}
+
+// ── An in-doubt pass ──────────────────────────────────────────────────────
+
+/// ADR-064 R3.8.1: a pass whose outcome is unknown and that the store
+/// admitted settles the registry's chain and history state when it is
+/// recovered, exactly as a first commit does. The Driver that stepped has its
+/// step node recorded; the restored Driver that did not step still holds the
+/// history node the pass recorded, and declares it by digest in the next Tick
+/// without recording a second one.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_recovered_pass_settles_chain_and_history_like_a_first_commit() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (mut registry, plans) = restored_pair(&host, store.as_mut(), &log);
+        let events = committed_events(store.as_ref(), host.timeline);
+        let (first, second) = (owner_at(&registry, 0), owner_at(&registry, 1));
+
+        emit(&plans[0], &[b"a"]);
+        ok(stage(&host, &mut registry, &due_at(3, &events, FIRST_DUE_NS)));
+        lose_outcome(&host, &mut registry, store.as_mut(), 2);
+        let before = count(&log, "first:commit");
+
+        // The store admitted the batch: recovery resubmits the identical basis.
+        let mut port = DigestRecordingPort {
+            inner: store.as_mut(),
+            digests: Vec::new(),
+            bases: Vec::new(),
+        };
+        let recovered = receipt(registry.recover_scheduled_pass(&mut port));
+        let resubmitted = port.bases.remove(0);
+        assert_eq!(recovered.committed_events().len(), 1, "{name}");
+        assert_eq!(count(&log, "first:commit"), before + 1, "{name}");
+        assert_eq!(count_owned_by(&resubmitted, HISTORY), 1, "{name}");
+        let history = digest_of(&resubmitted, HISTORY, 0);
+        let step_digest = digest_of(&resubmitted, &first, 0);
+
+        // The next Tick wakes the second Driver as well.
+        emit(&plans[0], &[]);
+        emit(&plans[1], &[b"b"]);
+        let latest = committed_events(store.as_ref(), host.timeline);
+        let cut = due_at(4, &latest, BOTH_DUE_NS);
+        let later = pass_basis(&host, &mut registry, store.as_mut(), &cut, 3);
+        assert_eq!(later.dependencies().tick(), 2, "{name}");
+        assert_eq!(count_owned_by(&later, HISTORY), 0, "{name}");
+        assert!(declares(&later, &second, history), "{name}");
+        assert!(declares(&later, &first, step_digest), "{name}");
+        assert!(!declares(&later, &first, history), "{name}");
+    }
+}
+
+// ── Refusals by the store ─────────────────────────────────────────────────
+
+/// Port that reads through the real store and answers every admission with a
+/// fixed outcome, without committing anything.
+struct RefusingPort<'a> {
+    inner: &'a mut dyn Harness,
+    outcome: PipelineOutcomeV1,
+    offered: usize,
+}
+
+impl PipelineAdmissionPortV1 for RefusingPort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn admit_pipeline_batch(
+        &mut self,
+        _: &PipelineAdmissionBasisV1,
+    ) -> Result<PipelineOutcomeV1, CoreError> {
+        self.offered += 1;
+        Ok(self.outcome.clone())
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        limit: NonZeroUsize,
+    ) -> Result<pos_core::store::PurgeOutcome, CoreError> {
+        self.inner.purge_expired_pipeline_receipts_bounded(limit)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: pos_core::TimelineId,
+        key: pos_core::AppendDedupKey,
+        attempt_id: pos_core::PipelineAttemptIdV1,
+    ) -> Result<pos_core::PipelineReceiptLookupV1, pos_core::CoreError> {
+        self.inner
+            .lookup_pipeline_receipt(timeline, key, attempt_id)
+    }
+}
+
+impl FactualPrefixReadPortV1 for RefusingPort<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
+        self.inner.last_committed_factual_tick(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        timeline: pos_core::TimelineId,
+        seq: pos_core::Seq,
+    ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
+        self.inner.cut_tick_at(timeline, seq)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        timeline: pos_core::TimelineId,
+        seqs: &[pos_core::Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
+        self.inner.nodes_for_committed_events(timeline, seqs)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        timeline: pos_core::TimelineId,
+        digests: &[pos_core::Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
+    {
+        self.inner.nodes_by_digest(timeline, digests)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        timeline: pos_core::TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
+        self.inner.last_step_node(timeline, owner)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(
+        &self,
+        timeline: pos_core::TimelineId,
+    ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
+        self.inner.factual_set_counts(timeline)
+    }
+}
+
+/// ADR-064 R3.8.2: the two dependency outcomes the store may return are
+/// wrapped as a not-admitted error, the staged Drivers abort, and nothing
+/// commits. A refused attempt advances nothing: the next pass declares the
+/// same Tick again.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn the_stores_dependency_refusals_abort_the_staged_drivers_on_both_adapters() {
+    let refusals = [
+        PipelineOutcomeV1::InvalidDependencyDeclaration,
+        PipelineOutcomeV1::DependencySetExhausted,
+    ];
+    for outcome in refusals {
+        for (name, mut store) in stores() {
+            let host = Host::prepare(store.as_mut(), 1_000);
+            let log = Log::default();
+            let mut registry = host.registry();
+            register(&mut registry, driver("first", vec![b"a1"], &log));
+            ok(stage(&host, &mut registry, &all_at(0, &[])));
+            let admission = host.admission(store.as_ref(), 1);
+            let mut port = RefusingPort {
+                inner: store.as_mut(),
+                outcome: outcome.clone(),
+                offered: 0,
+            };
+            let refused = rejection(registry.admit_scheduled_pass(&mut port, &admission));
+            assert_eq!(refused, format!("{outcome:?}"), "{name}");
+            assert_eq!(port.offered, 1, "{name}");
+            let trail = entries(&log);
+            assert_eq!(trail, ["first:step@0", "first:abort"], "{name}");
+            let stored = committed_events(store.as_ref(), host.timeline);
+            assert!(stored.is_empty(), "{name}");
+
+            let retry = admit_pass_basis(&host, &mut registry, store.as_mut(), (0, 2));
+            assert_eq!(retry.dependencies().tick(), 1, "{name}");
+        }
+    }
+}
+
+// ── Ingress nodes, the carried set and declared inputs ────────────────────
+
+/// ADR-064 R3.4.4 and R3.7.4: the Events forwarded to the Drivers of a pass,
+/// which have no node in the prefix, get one ingress node each, recorded once
+/// and bound to their `seq` in ascending order. Every Driver that received
+/// them declares the same nodes.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn ingress_nodes_bind_the_forwarded_events_in_ascending_order_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let mut registry = host.registry();
+        let (first, plan) = BasisDriver::new("first", &log);
+        register_basis(&mut registry, first.subscribed(INPUT));
+        let (second, _) = BasisDriver::new("second", &log);
+        register_basis(&mut registry, second.subscribed(INPUT));
+        emit(&plan, &[b"a"]);
+        append_events(store.as_mut(), &host, INPUT, 3);
+        let events = committed_events(store.as_ref(), host.timeline);
+        let cut = all_at(3, &events);
+        let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, 1);
+
+        assert_eq!(bound_seqs(&basis), [1, 2, 3], "{name}");
+        let bindings = basis.dependencies().event_nodes();
+        let nodes = declared_nodes(&basis);
+        let schema = pos_core::factual_event_schema_id(INPUT);
+        for (ordinal, (binding, event)) in (0_u32..).zip(bindings.iter().zip(&events)) {
+            let node = &nodes[ok(usize::try_from(binding.node_index))];
+            let coordinate = node.coordinate();
+            assert_eq!(coordinate.owner_id(), INGRESS, "{name}");
+            assert_eq!(coordinate.output_ordinal(), ordinal, "{name}");
+            assert_eq!(node.class(), Class::ExogenousFrozen, "{name}");
+            let content = pos_core::factual_ingress_content_digest(event.payload_hash, event.seq);
+            let key = host_key(1, INGRESS, ordinal, schema);
+            let expected = factual_artifact_digest(host.timeline, key, content);
+            assert_eq!(coordinate.artifact_digest(), expected, "{name}");
+        }
+        assert_eq!(count_owned_by(&basis, INGRESS), 3, "{name}");
+        // Both Drivers declare the snapshot and the three ingress nodes, once each.
+        for index in 0..2 {
+            let owner = owner_at(&registry, index);
+            assert_eq!(step_inputs_of(&basis, &owner).len(), 4, "{name}");
+        }
+    }
+}
+
+/// ADR-064 R3.4.7 and R3.4.8: the Events a pass consumed without recording a
+/// step node stay in the Driver's carried set with their Event type. The next
+/// recorded step declares them besides its new Events, and a recorded step
+/// consumes the set.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn events_consumed_by_an_empty_pass_are_declared_by_the_next_recorded_step() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (driver, plan) = BasisDriver::new("first", &log);
+        let mut registry = host.registry();
+        register_basis(&mut registry, driver.subscribed(INPUT));
+        append_events(store.as_mut(), &host, INPUT, 2);
+        let events = committed_events(store.as_ref(), host.timeline);
+        ok(stage(&host, &mut registry, &all_at(2, &events)));
+        settle_empty(&host, &mut registry, store.as_mut(), 1);
+
+        append_events(store.as_mut(), &host, INPUT, 1);
+        let events = committed_events(store.as_ref(), host.timeline);
+        emit(&plan, &[b"a"]);
+        let cut = all_at(3, &events);
+        let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, 2);
+        assert_eq!(bound_seqs(&basis), [1, 2, 3], "{name}");
+        // The carried Events keep the Event type they were consumed with.
+        let schema = pos_core::factual_event_schema_id(INPUT);
+        let nodes = declared_nodes(&basis);
+        for binding in basis.dependencies().event_nodes() {
+            let node = &nodes[ok(usize::try_from(binding.node_index))];
+            assert_eq!(node.coordinate().schema_id(), schema, "{name}");
+        }
+
+        // The recorded step consumed the set: the next Tick declares only what is new.
+        append_events(store.as_mut(), &host, INPUT, 1);
+        let latest = committed_events(store.as_ref(), host.timeline);
+        let cut = all_at(5, &latest);
+        let next = pass_basis(&host, &mut registry, store.as_mut(), &cut, 3);
+        assert_eq!(bound_seqs(&next), [5], "{name}");
+    }
+}
+
+/// ADR-064 R3.6.3: equal inputs, however they are declared, are declared
+/// once. A forwarded Event that the prefix holds a node for is declared by
+/// that node, not by an ingress node.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn equal_inputs_declared_in_several_ways_are_declared_once_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (driver, plan) = BasisDriver::new("first", &log);
+        let mut registry = host.registry();
+        register_basis(&mut registry, driver.subscribed(INPUT));
+        append_events(store.as_mut(), &host, INPUT, 3);
+        // Tick 1 owns Event 1: a step node and the node of Event 1.
+        let (step_digest, event_digest) = (hash(0x61), hash(0x62));
+        let step_node = step_spec("plugin:old", step_digest);
+        let event_node = event_spec("plugin:old", 1, event_digest, ENDOGENOUS);
+        let nodes = vec![seeded_node(1, &step_node), seeded_node(1, &event_node)];
+        let bound = vec![(Seq::from_u64(1), event_digest)];
+        let tick = seeded_tick(1, nodes, (1, 1), bound);
+        store.seed(host.timeline, &[tick]);
+
+        // Event 2 is forwarded and declared; the step node is named twice at
+        // step level and once at draft level; Event 3 is forwarded and declared
+        // by the draft.
+        let at_step = vec![committed(2), named(step_digest), named(step_digest)];
+        let at_draft = vec![named(step_digest), committed(3)];
+        declare(&plan, at_step, at_draft);
+        let events = committed_events(store.as_ref(), host.timeline);
+        let cut = all_at(3, &events);
+        let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, 1);
+
+        let owner = owner_at(&registry, 0);
+        // The snapshot, the node of Event 1, the ingress nodes of Events 2 and 3, the named node.
+        let inputs = step_inputs_of(&basis, &owner);
+        assert_eq!(inputs.len(), 5, "{name}");
+        assert!(inputs.contains(&event_digest), "{name}");
+        assert!(inputs.contains(&step_digest), "{name}");
+        assert_eq!(count_owned_by(&basis, INGRESS), 2, "{name}");
+        // The output node declares its step node, the named node and Event 3's ingress node.
+        let output = node_of(&basis, &owner, 1);
+        assert_eq!(output.input_digests().len(), 3, "{name}");
+    }
+}
+
+// ── Declared inputs the registry refuses ──────────────────────────────────
+
+/// The inputs a one-Driver pass declares, and whether the Driver subscribes to
+/// the Event type of the Events the pass handles.
+struct Declares {
+    subscribed: bool,
+    step_inputs: Vec<Input>,
+    direct_inputs: Vec<Input>,
+}
+
+impl Declares {
+    /// Declare `inputs` on the step node.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    const fn steps(subscribed: bool, inputs: Vec<Input>) -> Self {
+        Self {
+            subscribed,
+            step_inputs: inputs,
+            direct_inputs: Vec::new(),
+        }
+    }
+
+    /// Declare `inputs` on the one draft.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    const fn drafts(subscribed: bool, inputs: Vec<Input>) -> Self {
+        Self {
+            subscribed,
+            step_inputs: Vec::new(),
+            direct_inputs: inputs,
+        }
+    }
+}
+
+/// A registry of the one Driver `first`, set to declare `wanted`.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn declaring_registry(host: &Host, log: &Log, wanted: Declares) -> PluginRegistry {
+    let (driver, plan) = BasisDriver::new("first", log);
+    let driver = if wanted.subscribed {
+        driver.subscribed(INPUT)
+    } else {
+        driver
+    };
+    let mut registry = host.registry();
+    register_basis(&mut registry, driver);
+    declare(&plan, wanted.step_inputs, wanted.direct_inputs);
+    registry
+}
+
+/// Run the pass of a Driver that declares `wanted` and return its basis with
+/// the owner ID of the Driver.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn declared_basis(
+    name: &str,
+    host: &Host,
+    store: &mut dyn Harness,
+    wanted: Declares,
+    cut: &Cut<'_>,
+) -> (PipelineAdmissionBasisV1, String) {
+    let log = Log::default();
+    let mut registry = declaring_registry(host, &log, wanted);
+    let basis = pass_basis(host, &mut registry, store, cut, 1);
+    assert_eq!(count(&log, "first:commit"), 1, "{name}");
+    (basis, owner_at(&registry, 0))
+}
+
+/// Run the pass of a Driver that declares `wanted`, which the registry must
+/// refuse before the store is offered anything, and return the error.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn refused_declaration(
+    name: &str,
+    host: &Host,
+    store: &mut dyn Harness,
+    wanted: Declares,
+    cut: &Cut<'_>,
+) -> FactualDependencyErrorV1 {
+    let log = Log::default();
+    let mut registry = declaring_registry(host, &log, wanted);
+    ok(stage(host, &mut registry, cut));
+    let (error, offered) = admit_failure(host, &mut registry, store, 1);
+    assert_eq!(offered, 0, "{name}");
+    let trail = entries(&log);
+    assert_eq!(trail, ["first:step", "first:abort"], "{name}");
+    declaration_error(error)
+}
+
+/// ADR-064 R3.6.2: a Driver may declare only an Event it could have read: one
+/// at or below the cut, of a type it subscribed to, and only if it subscribed
+/// to some type.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn undeclarable_inputs_abort_the_pass_before_any_store_call_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        append_events(store.as_mut(), &host, INPUT, 2);
+        append_events(store.as_mut(), &host, OTHER_INPUT, 1);
+        let events = committed_events(store.as_ref(), host.timeline);
+        let undeclarable = FactualDependencyErrorV1::UndeclarableInput;
+
+        // Event 2 lies above a cut at 1, at step level and at draft level.
+        let cut = all_at(1, &events);
+        let wanted = Declares::steps(true, vec![committed(2)]);
+        let refused = refused_declaration(name, &host, store.as_mut(), wanted, &cut);
+        assert_eq!(refused, undeclarable, "{name}");
+        let wanted = Declares::drafts(true, vec![committed(2)]);
+        let refused = refused_declaration(name, &host, store.as_mut(), wanted, &cut);
+        assert_eq!(refused, undeclarable, "{name}");
+
+        // A Driver that subscribed to no Event type observes none.
+        let cut = all_at(2, &events);
+        let wanted = Declares::steps(false, vec![committed(1)]);
+        let refused = refused_declaration(name, &host, store.as_mut(), wanted, &cut);
+        assert_eq!(refused, undeclarable, "{name}");
+
+        // Event 3 is of a type the Driver did not subscribe to.
+        let cut = all_at(3, &events);
+        let wanted = Declares::steps(true, vec![committed(3)]);
+        let refused = refused_declaration(name, &host, store.as_mut(), wanted, &cut);
+        assert_eq!(refused, undeclarable, "{name}");
+    }
+}
+
+/// ADR-064 R3.6.2: a declared input that resolves to no Event the pass saw
+/// and no recorded node is unresolved.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn unresolved_inputs_abort_the_pass_before_any_store_call_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        append_events(store.as_mut(), &host, INPUT, 3);
+        let events = committed_events(store.as_ref(), host.timeline);
+        let unresolved = FactualDependencyErrorV1::UnresolvedInput;
+
+        // The host hands the pass Events 1 and 2 only, and the prefix holds no node for Event 3.
+        let seen = &events[..2];
+        let cut = all_at(3, seen);
+        let wanted = Declares::steps(true, vec![committed(3)]);
+        let refused = refused_declaration(name, &host, store.as_mut(), wanted, &cut);
+        assert_eq!(refused, unresolved, "{name}");
+
+        // No recorded node has this digest.
+        let cut = all_at(3, &events);
+        let wanted = Declares::steps(false, vec![named(hash(0xEE))]);
+        let refused = refused_declaration(name, &host, store.as_mut(), wanted, &cut);
+        assert_eq!(refused, unresolved, "{name}");
+        let wanted = Declares::drafts(false, vec![named(hash(0xEE))]);
+        let refused = refused_declaration(name, &host, store.as_mut(), wanted, &cut);
+        assert_eq!(refused, unresolved, "{name}");
+    }
+}
+
+/// ADR-064 R3.5: a declared input that resolves to a `PresentationOnly` node
+/// breaks the class rule, at step level and at draft level.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_declared_presentation_only_node_breaks_the_class_rule_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        append_events(store.as_mut(), &host, INPUT, 1);
+        let step_node = step_spec("plugin:old", hash(0x71));
+        let shown = event_spec("plugin:old", 1, hash(0x72), PRESENTATION);
+        let nodes = vec![seeded_node(1, &step_node), seeded_node(1, &shown)];
+        let tick = seeded_tick(1, nodes, (1, 1), Vec::new());
+        store.seed(host.timeline, &[tick]);
+        let events = committed_events(store.as_ref(), host.timeline);
+        let cut = all_at(1, &events);
+        let violated = FactualDependencyErrorV1::ClassRuleViolation;
+
+        let wanted = Declares::steps(false, vec![named(hash(0x72))]);
+        let refused = refused_declaration(name, &host, store.as_mut(), wanted, &cut);
+        assert_eq!(refused, violated, "{name}");
+        let wanted = Declares::drafts(false, vec![named(hash(0x72))]);
+        let refused = refused_declaration(name, &host, store.as_mut(), wanted, &cut);
+        assert_eq!(refused, violated, "{name}");
+    }
+}
+
+const fn bounds_error() -> FactualDependencyErrorV1 {
+    FactualDependencyErrorV1::Record(pos_core::CounterfactualDependencyErrorV1::FieldOutOfBounds)
+}
+
+/// ADR-064 R3.6.1: a Driver may declare 255 step-level inputs, which with the
+/// snapshot node fill a step node. One more is refused before the store is
+/// offered anything.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn the_step_level_declaration_cap_holds_on_both_adapters() {
+    let cap = pos_core::MAX_STEP_INPUTS_PER_DRIVER_V1;
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        append_events(store.as_mut(), &host, INPUT, 1);
+        store.seed(host.timeline, &[bulk_tick()]);
+        let events = committed_events(store.as_ref(), host.timeline);
+        let cut = all_at(1, &events);
+        let digests = bulk_digests();
+
+        let at_cap = Declares::steps(false, named_inputs(&digests, cap));
+        let (basis, owner) = declared_basis(name, &host, store.as_mut(), at_cap, &cut);
+        assert_eq!(basis.dependencies().tick(), 2, "{name}");
+        let inputs = step_inputs_of(&basis, &owner);
+        assert_eq!(inputs.len(), cap + 1, "{name}");
+
+        let over = Declares::steps(false, named_inputs(&digests, cap + 1));
+        let refused = refused_declaration(name, &host, store.as_mut(), over, &cut);
+        assert_eq!(refused, bounds_error(), "{name}");
+    }
+}
+
+/// ADR-064 R3.6.1: a draft may declare 4,095 inputs, which with its step node
+/// fill an output node. One more is refused before the store is offered
+/// anything.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn the_draft_level_declaration_cap_holds_on_both_adapters() {
+    let cap = pos_core::MAX_OUTPUT_DIRECT_INPUTS_V1;
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        append_events(store.as_mut(), &host, INPUT, 1);
+        store.seed(host.timeline, &[bulk_tick()]);
+        let events = committed_events(store.as_ref(), host.timeline);
+        let cut = all_at(1, &events);
+        let digests = bulk_digests();
+
+        let at_cap = Declares::drafts(false, named_inputs(&digests, cap));
+        let (basis, owner) = declared_basis(name, &host, store.as_mut(), at_cap, &cut);
+        assert_eq!(basis.dependencies().tick(), 2, "{name}");
+        let output = node_of(&basis, &owner, 1);
+        assert_eq!(output.input_digests().len(), cap + 1, "{name}");
+
+        let over = Declares::drafts(false, named_inputs(&digests, cap + 1));
+        let refused = refused_declaration(name, &host, store.as_mut(), over, &cut);
+        assert_eq!(refused, bounds_error(), "{name}");
     }
 }
