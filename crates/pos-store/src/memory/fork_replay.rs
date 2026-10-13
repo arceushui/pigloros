@@ -104,9 +104,6 @@ impl MemoryStore {
                 budget.charge_canonical(registration.canonical_size())?;
             }
         }
-        charge_records(self.fork_append_operations.values(), budget)?;
-        charge_records(self.fork_event_origins.values(), budget)?;
-        charge_records(self.fork_intervention_admissions.values(), budget)?;
         if let Some(binding) = self
             .fork_publication_bindings
             .get(&(child, requirement.publication_logical_head().as_u64()))
@@ -125,12 +122,8 @@ impl MemoryStore {
                     .into_iter(),
                 budget,
             )?;
-            charge_records(
-                self.fork_publication_artifacts
-                    .get(&input.signed_manifest_record_id)
-                    .into_iter(),
-                budget,
-            )?;
+            // The Memory trusted read borrows FPA1, including its cached FSM1;
+            // no artifact clone or FPA1 encoding is materialized here.
         }
         for row in self.imported_fork_attributions.values() {
             budget.charge_rows(1)?;
