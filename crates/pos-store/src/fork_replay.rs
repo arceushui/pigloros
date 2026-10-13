@@ -469,16 +469,28 @@ impl ForkReplayAuthorityEvidenceV1 {
         }
         let operation_bytes = if let Some(origin) = requirement.origin {
             // The typed projection creates no local FPO1 byte buffer.
+            let mut context = NativeReadContextV1::protected(budget);
+            crate::fork_manifest_publication::charge_publication_copy(
+                &committed.operation,
+                crate::fork_event_authority::ValidatedOriginV1::Imported(origin),
+                &mut context,
+            ).map_err(|_| ForkReplayAuthorityReadErrorV1::BoundsExceeded)?;
+            context.bytes(origin.as_bytes().len())
+                .map_err(|_| ForkReplayAuthorityReadErrorV1::BoundsExceeded)?;
             let imported = pos_core::ImportedForkPublicationOperationV1::from_local(
                 committed.operation.clone(),
                 origin,
             );
+            context.check().map_err(|_| ForkReplayAuthorityReadErrorV1::BoundsExceeded)?;
             budget.charge_canonical(imported.canonical_cbor_len())?;
             imported.to_canonical_cbor()
         } else {
             budget.charge_canonical(committed.operation.canonical_cbor_len())?;
             committed.operation.to_canonical_cbor()
         };
+        // The evidence copies two native digest fields; no second byte buffer.
+        budget.charge_bytes(32)?;
+        budget.charge_bytes(32)?;
         Ok(Self {
             requirement,
             admission_digest: committed.operation.input().admission_digest,
@@ -509,28 +521,6 @@ impl ForkReplayAuthorityEvidenceV1 {
     pub fn operation_bytes(&self) -> &[u8] {
         &self.operation_bytes
     }
-}
-
-/// Count an existing registry's native CBOR representation without buffering it.
-pub(crate) fn charge_registry(
-    registry: &pos_core::KeyRegistryStateV1,
-    budget: &mut ForkReplayReadBudgetV1<'_>,
-) -> ReadResult<()> {
-    struct Counter<'borrow, 'clock>(&'borrow mut ForkReplayReadBudgetV1<'clock>);
-    impl std::io::Write for Counter<'_, '_> {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .charge_bytes(bytes.len())
-                .map(|()| bytes.len())
-                .map_err(std::io::Error::other)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    ciborium::into_writer(registry, Counter(budget))
-        .map_err(|_| ForkReplayAuthorityReadErrorV1::BoundsExceeded)
 }
 
 /// Object-safe adapter read bridge.
