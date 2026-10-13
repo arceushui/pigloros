@@ -1406,7 +1406,10 @@ impl MemoryStore {
 
     /// Walk the fork chain from `timeline_id` back to the root, returning [root, ..., `timeline_id`].
     fn fork_chain(&self, timeline_id: TimelineId) -> Result<ForkChain, CoreError> {
-        self.fork_chain_with_context(timeline_id, &mut crate::fork_replay::NativeReadContextV1::ordinary())
+        self.fork_chain_with_context(
+            timeline_id,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
     }
 
     fn fork_chain_with_context(
@@ -1419,26 +1422,36 @@ impl MemoryStore {
         let mut visited = HashSet::new();
         let mut current = timeline_id;
         loop {
-            context.node(chain.len()).map_err(|_| CoreError::ArtifactUnavailable)?;
+            context
+                .node(chain.len())
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
             // Two real Timeline ID copies: cycle set and ordered chain.
-            context.bytes(16).map_err(|_| CoreError::ArtifactUnavailable)?;
+            context
+                .bytes(16)
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
             if !visited.insert(current) {
                 return Err(CoreError::Storage(format!(
                     "fork ancestry contains a cycle at timeline {current}"
                 )));
             }
             let meta = self.timeline(current)?;
-            context.bytes(16).map_err(|_| CoreError::ArtifactUnavailable)?;
+            context
+                .bytes(16)
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
             chain.push(current);
             match meta.meta.fork_point {
                 Some((parent, fork_seq)) => {
-                    context.bytes(8).map_err(|_| CoreError::ArtifactUnavailable)?;
+                    context
+                        .bytes(8)
+                        .map_err(|_| CoreError::ArtifactUnavailable)?;
                     fork_seqs.push(fork_seq);
                     current = parent;
                 }
                 None => break,
             }
-            context.check().map_err(|_| CoreError::ArtifactUnavailable)?;
+            context
+                .check()
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
         }
         chain.reverse();
         fork_seqs.reverse();
@@ -1446,7 +1459,10 @@ impl MemoryStore {
             timelines: chain,
             fork_seqs,
         };
-        context.check().map(|()| chain).map_err(|_| CoreError::ArtifactUnavailable)
+        context
+            .check()
+            .map(|()| chain)
+            .map_err(|_| CoreError::ArtifactUnavailable)
     }
 
     /// Walk at most `max_depth` parent links before returning the chain.
@@ -4898,7 +4914,11 @@ impl MemoryStore {
         timeline: TimelineId,
         at_seq: Seq,
     ) -> Result<Hash, CoreError> {
-        self.compute_chain_hash_with_context(timeline, at_seq, &mut crate::fork_replay::NativeReadContextV1::ordinary())
+        self.compute_chain_hash_with_context(
+            timeline,
+            at_seq,
+            &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+        )
     }
 
     fn compute_chain_hash_with_context(
@@ -4916,11 +4936,16 @@ impl MemoryStore {
         let chain = self.fork_chain_with_context(timeline, context)?;
         let mut logical_head = 0_u64;
         for (index, timeline) in chain.timelines.iter().enumerate() {
-            context.node(0).map_err(|_| CoreError::ArtifactUnavailable)?;
+            context
+                .node(0)
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
             let length = chain.segment_length(self, index, *timeline)?;
-            logical_head = logical_head.checked_add(length)
+            logical_head = logical_head
+                .checked_add(length)
                 .ok_or_else(|| CoreError::Storage("logical Timeline head overflow".to_owned()))?;
-            context.check().map_err(|_| CoreError::ArtifactUnavailable)?;
+            context
+                .check()
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
         }
         let logical_head = Seq::from_u64(logical_head);
         if at_seq > logical_head {
@@ -4929,9 +4954,13 @@ impl MemoryStore {
                 head: logical_head.as_u64(),
             });
         }
-        context.check().map_err(|_| CoreError::ArtifactUnavailable)?;
+        context
+            .check()
+            .map_err(|_| CoreError::ArtifactUnavailable)?;
         let mut hash = self.hasher.genesis_hash();
-        context.check().map_err(|_| CoreError::ArtifactUnavailable)?;
+        context
+            .check()
+            .map_err(|_| CoreError::ArtifactUnavailable)?;
         if at_seq == Seq::ZERO {
             return Ok(hash);
         }
@@ -4939,27 +4968,48 @@ impl MemoryStore {
         // No stitched Vec<Event>, payload clone or event-type clone is created.
         let mut logical_offset = 0_u64;
         for (index, timeline) in chain.timelines.iter().enumerate() {
-            context.node(0).map_err(|_| CoreError::ArtifactUnavailable)?;
+            context
+                .node(0)
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
             let length = chain.segment_length(self, index, *timeline)?;
             let end = length.min(at_seq.as_u64() - logical_offset);
             let events = &self.state(*timeline).events;
-            context.check().map_err(|_| CoreError::ArtifactUnavailable)?;
+            context
+                .check()
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
             // Indexed slice selection examines only fixed sequence metadata;
             // its binary search is bounded by the platform's pointer width.
             let selected = events.partition_point(|event| event.seq.as_u64() <= end);
-            context.check().map_err(|_| CoreError::ArtifactUnavailable)?;
+            context
+                .check()
+                .map_err(|_| CoreError::ArtifactUnavailable)?;
             for event in &events[..selected] {
-                context.suffix_row().map_err(|_| CoreError::ArtifactUnavailable)?;
-                context.bytes(event.payload.len()).map_err(|_| CoreError::ArtifactUnavailable)?;
-                context.bytes(ulid::ULID_LEN).map_err(|_| CoreError::ArtifactUnavailable)?;
+                context
+                    .suffix_row()
+                    .map_err(|_| CoreError::ArtifactUnavailable)?;
+                context
+                    .bytes(event.payload.len())
+                    .map_err(|_| CoreError::ArtifactUnavailable)?;
+                context
+                    .bytes(ulid::ULID_LEN)
+                    .map_err(|_| CoreError::ArtifactUnavailable)?;
                 let id_str = event.id.to_string();
-                hash = self.hasher.hash_event(&hash, id_str.as_bytes(), &event.payload);
-                context.check().map_err(|_| CoreError::ArtifactUnavailable)?;
+                hash = self
+                    .hasher
+                    .hash_event(&hash, id_str.as_bytes(), &event.payload);
+                context
+                    .check()
+                    .map_err(|_| CoreError::ArtifactUnavailable)?;
             }
             logical_offset += end;
-            if logical_offset == at_seq.as_u64() { break; }
+            if logical_offset == at_seq.as_u64() {
+                break;
+            }
         }
-        context.check().map(|()| hash).map_err(|_| CoreError::ArtifactUnavailable)
+        context
+            .check()
+            .map(|()| hash)
+            .map_err(|_| CoreError::ArtifactUnavailable)
     }
 
     fn create_timeline_with_meta_unchecked(
