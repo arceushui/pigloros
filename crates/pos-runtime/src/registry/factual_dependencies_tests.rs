@@ -586,14 +586,20 @@ fn declared(
 fn an_event_above_the_cut_is_undeclarable() {
     let port = FakePrefix::at(4);
     let result = declared(vec![committed_event(3)], &port, &plain_events(2), 2);
-    assert_eq!(result.test_err(), FactualDependencyErrorV1::UndeclarableInput);
+    assert_eq!(
+        result.test_err(),
+        FactualDependencyErrorV1::UndeclarableInput
+    );
 }
 
 #[test]
 fn an_event_of_a_type_the_driver_did_not_subscribe_to_is_undeclarable() {
     let events = [event(1, PLAIN), event(2, OTHER)];
     let result = declared(vec![committed_event(2)], &FakePrefix::at(4), &events, 2);
-    assert_eq!(result.test_err(), FactualDependencyErrorV1::UndeclarableInput);
+    assert_eq!(
+        result.test_err(),
+        FactualDependencyErrorV1::UndeclarableInput
+    );
 }
 
 #[test]
@@ -601,14 +607,20 @@ fn an_event_the_pass_does_not_show_is_undeclarable() {
     let consent = pos_core::EVENT_TYPE_CONSENT_GRANTED_V1;
     let events = [event(1, PLAIN), event(2, consent)];
     let result = declared(vec![committed_event(2)], &FakePrefix::at(4), &events, 2);
-    assert_eq!(result.test_err(), FactualDependencyErrorV1::UndeclarableInput);
+    assert_eq!(
+        result.test_err(),
+        FactualDependencyErrorV1::UndeclarableInput
+    );
 }
 
 #[test]
 fn an_event_nobody_knows_is_unresolved_and_a_known_node_is_judged_by_its_schema() {
     let events = plain_events(1);
     let unknown = declared(vec![committed_event(2)], &FakePrefix::at(4), &events, 2);
-    assert_eq!(unknown.test_err(), FactualDependencyErrorV1::UnresolvedInput);
+    assert_eq!(
+        unknown.test_err(),
+        FactualDependencyErrorV1::UnresolvedInput
+    );
 
     // The pass never saw Event 2, but the prefix records a node for it.
     let mut port = FakePrefix::at(4);
@@ -616,7 +628,10 @@ fn an_event_nobody_knows_is_unresolved_and_a_known_node_is_judged_by_its_schema(
     let foreign_node = node("plugin:old", 1, foreign, hash(42));
     port.events.insert(2, foreign_node);
     let result = declared(vec![committed_event(2)], &port, &events, 2);
-    assert_eq!(result.test_err(), FactualDependencyErrorV1::UndeclarableInput);
+    assert_eq!(
+        result.test_err(),
+        FactualDependencyErrorV1::UndeclarableInput
+    );
 
     let own = factual_event_schema_id(PLAIN);
     let own_node = node("plugin:old", 1, own, hash(42));
@@ -645,7 +660,10 @@ fn owner_of_only_driver(deps: &FactualTickDependenciesV1) -> String {
 fn a_declared_digest_must_resolve_and_an_event_node_must_be_readable() {
     let events = plain_events(2);
     let missing = declared(vec![named(hash(50))], &FakePrefix::at(4), &events, 6);
-    assert_eq!(missing.test_err(), FactualDependencyErrorV1::UnresolvedInput);
+    assert_eq!(
+        missing.test_err(),
+        FactualDependencyErrorV1::UnresolvedInput
+    );
 
     let own = factual_event_schema_id(PLAIN);
     let foreign = factual_event_schema_id(OTHER);
@@ -667,7 +685,10 @@ fn a_declared_digest_must_resolve_and_an_event_node_must_be_readable() {
     port.digests.insert(hash(54), readable);
     for refused in [hash(52), hash(53)] {
         let result = declared(vec![named(refused)], &port, &events, 6);
-        assert_eq!(result.test_err(), FactualDependencyErrorV1::UndeclarableInput);
+        assert_eq!(
+            result.test_err(),
+            FactualDependencyErrorV1::UndeclarableInput
+        );
     }
     assert!(declared(vec![named(hash(54))], &port, &events, 6).is_ok());
 }
@@ -678,7 +699,10 @@ fn a_declared_presentation_only_node_breaks_the_class_rule() {
     port.digests
         .insert(hash(55), (presentation_node(hash(55)), None));
     let result = declared(vec![named(hash(55))], &port, &plain_events(1), 1);
-    assert_eq!(result.test_err(), FactualDependencyErrorV1::ClassRuleViolation);
+    assert_eq!(
+        result.test_err(),
+        FactualDependencyErrorV1::ClassRuleViolation
+    );
 }
 
 /// The failure of a pass whose one draft declares `inputs`, which must come
@@ -918,7 +942,10 @@ fn a_restored_history_node_is_recorded_once_and_declared_by_the_driver_stepped_l
     registry.commit_pending_step(pending);
 
     // The first Driver consumed its history; the second declares the node.
-    assert_eq!(registry.plugins[&first_id].pass_state.history, HistoryInputV1::None);
+    assert_eq!(
+        registry.plugins[&first_id].pass_state.history,
+        HistoryInputV1::None
+    );
     let kept = match &registry.plugins[&second_id].pass_state.history {
         HistoryInputV1::Recorded { content, node } => {
             (*content, node.coordinate().artifact_digest())
@@ -1250,7 +1277,10 @@ fn an_in_doubt_pass_recovered_later_settles_the_state_like_a_first_commit() {
     let receipt = registry.recover_scheduled_pass(&mut admitting).test_ok();
     assert!(receipt.is_some());
     assert_eq!(admitting.bases[0].digest(), basis.digest());
-    assert_eq!(registry.plugins[&first_id].pass_state.history, HistoryInputV1::None);
+    assert_eq!(
+        registry.plugins[&first_id].pass_state.history,
+        HistoryInputV1::None
+    );
     assert!(matches!(
         registry.plugins[&first_id].chain,
         StepChainV1::Recorded { .. }

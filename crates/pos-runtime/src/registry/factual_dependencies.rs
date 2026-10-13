@@ -27,7 +27,8 @@ use pos_core::{
 };
 
 use super::{
-    consent_visible_event, driver_visible_event, owner_id::entry_identity,
+    consent_visible_event, driver_visible_event,
+    owner_id::entry_identity,
     pass_state::{CarriedSet, ForwardedPair, PassCut},
     subscribed_event_visible, HistoryInputV1, OperationContext, PendingStep, PluginEntry,
     PluginRegistry, ScheduledPassAdmissionV1, StepChainV1,
@@ -315,10 +316,7 @@ fn driver_event_seqs(fresh: &[ForwardedPair], carried: &CarriedSet) -> BTreeSet<
 /// Tick (R3.4.1). That is not a registry-wide guarantee: passes over
 /// different Driver subsets can repeat a Tick until the stores write rows.
 /// A Tick that would pass `u64::MAX` exhausts the Timeline's set.
-pub(super) fn next_factual_tick(
-    head: u64,
-    retained: u64,
-) -> Result<u64, FactualDependencyErrorV1> {
+pub(super) fn next_factual_tick(head: u64, retained: u64) -> Result<u64, FactualDependencyErrorV1> {
     let latest = head.max(retained);
     let next = latest.checked_add(1);
     next.ok_or(FactualDependencyErrorV1::SetExhausted)
@@ -794,7 +792,10 @@ impl PluginRegistry {
     fn lookup_keys(&self, pending: &PendingStep) -> (BTreeSet<Seq>, BTreeSet<Hash>) {
         let mut seqs = BTreeSet::new();
         for (id, forwarded) in pending.driver_ids.iter().zip(&pending.forwarded) {
-            seqs.extend(driver_event_seqs(forwarded, &self.plugins[id].pass_state.carried));
+            seqs.extend(driver_event_seqs(
+                forwarded,
+                &self.plugins[id].pass_state.carried,
+            ));
         }
         let mut digests = BTreeSet::new();
         for input in pending.factual.declared() {
