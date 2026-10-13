@@ -155,6 +155,7 @@ fn run_on_host(mut host: ErasureExecutionHostV1, child: TimelineId, fault: Fault
         Hash::from_bytes(generation.digest()),
     )?;
     let mut registry = fixture.registry(gate);
+    let before = registry.state_snapshot(child)?;
     let mut reads = host.read_sender()?;
     FOLDED_EVENTS.store(0, Ordering::SeqCst);
     let result = with_release(|release| {
@@ -186,6 +187,7 @@ fn run_on_host(mut host: ErasureExecutionHostV1, child: TimelineId, fault: Fault
             result.map_err(|error| error.to_string()),
             Err(CoreError::ArtifactUnavailable.to_string())
         );
+        assert_eq!(registry.state_snapshot(child)?, before);
         if matches!(fault, Fault::FinalIdentity) {
             assert!(FOLDED_EVENTS.load(Ordering::SeqCst) > 0);
         } else {
@@ -291,6 +293,8 @@ fn compare_on_host(
         .collect::<Result<Vec<_>, _>>()?;
     let mut a = fixture_a.registry(gate.clone());
     let mut b = fixture_b.registry(gate);
+    let before_a = a.state_snapshot(timelines[0])?;
+    let before_b = b.state_snapshot(timelines[1])?;
     let mut reads = host.read_sender()?;
     FOLDED_EVENTS.store(0, Ordering::SeqCst);
     let result = with_release(|release| {
@@ -313,6 +317,8 @@ fn compare_on_host(
             result.map(|_| ()).map_err(|error| error.to_string()),
             Err(CoreError::ArtifactUnavailable.to_string())
         );
+        assert_eq!(a.state_snapshot(timelines[0])?, before_a);
+        assert_eq!(b.state_snapshot(timelines[1])?, before_b);
         if matches!(fault, Fault::FinalIdentity) {
             assert!(FOLDED_EVENTS.load(Ordering::SeqCst) > 0);
         } else {
