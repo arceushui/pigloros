@@ -162,6 +162,7 @@ mod fork_replay_operation;
 mod fork_replay_orphans;
 mod fork_replay_provenance;
 mod fork_replay_publication;
+mod fork_replay_registry;
 mod fork_replay_row;
 mod fork_replay_suffix;
 mod local_cut_owner;
@@ -13086,8 +13087,8 @@ impl SqliteStore {
             )
             .map_err(PublicationSourceErrorV1::from);
             context.check()?;
-            let registry =
-                sqlite_load_key_registry(&self.conn).map_err(PublicationSourceErrorV1::from);
+            let registry = sqlite_load_key_registry_with_context(&self.conn, context)
+                .map_err(PublicationSourceErrorV1::from);
             context.check()?;
             let sources = CommittedPublicationSourcesV1 {
                 admission,
@@ -14458,7 +14459,33 @@ fn sqlite_load_key_registry(conn: &Connection) -> Result<Option<KeyRegistryState
         Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
         Err(error) => return Err(CoreError::Storage(error.to_string())),
     };
-    ciborium::from_reader(state_cbor.as_slice())
+    sqlite_decode_key_registry(&state_cbor).map(Some)
+}
+
+fn sqlite_load_key_registry_with_context(
+    conn: &Connection,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> Result<Option<KeyRegistryStateV1>, CoreError> {
+    if !context.is_protected() {
+        return sqlite_load_key_registry(conn);
+    }
+    fork_replay_registry::stored_registry_with_context(conn, context)
+        .map_err(|_| CoreError::ArtifactUnavailable)
+        .and_then(|bytes| {
+            bytes.map_or(Ok(None), |bytes| {
+                context.check().map_err(|_| CoreError::ArtifactUnavailable)?;
+                // The raw fetch is bounded here. Decoder-owned collections
+                // and registry validation still need their native owner;
+                // an outer check is not a claim of complete batch support.
+                let decoded = sqlite_decode_key_registry(&bytes).map(Some);
+                context.check().map_err(|_| CoreError::ArtifactUnavailable)
+                    .and(decoded)
+            })
+        })
+}
+
+fn sqlite_decode_key_registry(state_cbor: &[u8]) -> Result<KeyRegistryStateV1, CoreError> {
+    ciborium::from_reader(state_cbor)
         .map_err(|error| CoreError::Serialization(error.to_string()))
         .and_then(|registry: KeyRegistryStateV1| {
             registry
@@ -14466,7 +14493,6 @@ fn sqlite_load_key_registry(conn: &Connection) -> Result<Option<KeyRegistryState
                 .map(|()| registry)
                 .map_err(|error| CoreError::Serialization(error.to_string()))
         })
-        .map(Some)
 }
 
 struct SqliteRollbackOnDrop<'a>(&'a Connection);
