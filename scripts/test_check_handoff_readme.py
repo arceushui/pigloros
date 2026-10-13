@@ -89,6 +89,12 @@ def check_rejected() -> None:
             raise SystemExit(f"{label} was not rejected as {reported} alone:\n{result.stderr}")
 
 
+def check_both_reported() -> None:
+    result = run("", "")
+    if result.returncode == 0 or SUPERVISOR not in result.stderr or ADAPTER not in result.stderr:
+        raise SystemExit(f"two failing READMEs were not both reported:\n{result.stderr}")
+
+
 def check_missing_files() -> None:
     for supervisor, adapter, missing in ((None, ALL_THREE, SUPERVISOR), (BOTH, None, ADAPTER)):
         result = run(supervisor, adapter)
@@ -110,6 +116,7 @@ def check_repository() -> None:
 def main() -> None:
     check_accepted()
     check_rejected()
+    check_both_reported()
     check_missing_files()
     check_repository()
     print("the handoff README checker rejects every missing sentence in both READMEs")

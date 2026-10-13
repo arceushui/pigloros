@@ -10,6 +10,9 @@
 //! around every pass. Each family runs once per Execution Mode and the tests share the result.
 //! The tests assert nothing about wall time; the per-launch watchdog of the supervisor is the
 //! adapter's constant. Every result here is Local-relaxation engineering evidence.
+//!
+//! The sharing of a family run between tests (`OnceLock`) assumes the single-process `cargo
+//! test` runner; under nextest every test is its own process and recomputes the runs it uses.
 
 pub mod support;
 
@@ -44,7 +47,11 @@ use support::attempts::{
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 /// The committed Events (payload bytes) and the Driver's committed state.
-type Snapshot = (Vec<Vec<u8>>, Vec<u8>);
+#[derive(Debug, PartialEq, Eq)]
+struct Snapshot {
+    events: Vec<Vec<u8>>,
+    state: Vec<u8>,
+}
 
 const WORKER: &str = env!("CARGO_BIN_EXE_pos-plugin-worker");
 
@@ -105,7 +112,10 @@ struct SpyPort {
 impl SpyPort {
     fn snapshot(&mut self) -> Snapshot {
         let events = self.inner.committed_event_payloads().unwrap_or_default();
-        (events, self.inner.committed_state())
+        Snapshot {
+            events,
+            state: self.inner.committed_state(),
+        }
     }
 }
 
@@ -233,8 +243,8 @@ fn observe_through(
 
 /// The observation of `attempt` with the real worker.
 fn observe(attempt: &CaseAttempt) -> TestResult<SubjectObservation> {
-    let runner = SupervisorRunnerV1::with_program(WORKER).ok_or("a relative program")?;
-    observe_through(&runner, attempt)
+    let program = WorkerProgramV1::new(PathBuf::from(WORKER)).ok_or("an invalid worker path")?;
+    observe_through(&SupervisorRunnerV1::new(program), attempt)
 }
 
 /// A family run once in one Execution Mode.
@@ -270,7 +280,10 @@ fn compute(family: FixtureFamily, mode: ExecutionMode) -> TestResult<FamilyRun> 
 }
 
 /// One cell per family and mode.
-static RUNS: [OnceLock<Result<Arc<FamilyRun>, String>>; 14] = [const { OnceLock::new() }; 14];
+const RUN_CELLS: usize = FixtureFamily::ALL.len() * 2;
+
+static RUNS: [OnceLock<Result<Arc<FamilyRun>, String>>; RUN_CELLS] =
+    [const { OnceLock::new() }; RUN_CELLS];
 
 /// The run of `family` in `mode`, made once and shared by the tests.
 fn family_run(family: FixtureFamily, mode: ExecutionMode) -> TestResult<Arc<FamilyRun>> {
@@ -424,6 +437,16 @@ fn r8_s1_positive_output_is_the_oracle_in_local_and_air_gapped() -> TestResult {
     Ok(())
 }
 
+/// The Migration S5 form: `SupervisorRunnerV1::new` over the worker of this package, without
+/// the recording runner.
+#[test]
+fn r8_s1_the_supervisor_runner_gives_the_positive_oracle() -> TestResult {
+    let attempt = attempt_from_fixture_files(FixtureFamily::Positive, ExecutionMode::Local)?;
+    let oracle = SubjectResult::Output(oracle_bytes(FixtureFamily::Positive)?);
+    assert_eq!(observe(&attempt)?.result, oracle);
+    Ok(())
+}
+
 #[test]
 fn r8_s1_changing_the_observation_by_one_byte_changes_the_committed_digest() -> TestResult {
     let family = FixtureFamily::Positive;
@@ -459,19 +482,20 @@ fn r8_s2_lowering_the_pass_instant_by_a_second_commits_den_16_to_den_18() -> Tes
     let attempt = attempt_from_fixture_files(FixtureFamily::Denied, ExecutionMode::Local)?;
     let spy = Spy::new(&EXPIRY_CONTROLS)?;
     let observation = observe_through(&spy, &attempt)?;
-    let captures = spy.into_captures();
+    let lowered = FamilyRun {
+        observation,
+        captures: spy.into_captures(),
+    };
     for id in EXPIRY_CONTROLS {
-        let record = &capture_of(&captures, id)?.record;
+        let record = &capture_of(&lowered.captures, id)?.record;
         assert!(!record.outcomes.is_empty(), "{id}");
         assert!(record.outcomes.iter().all(is_committed), "{id}");
         assert!(!record.matched, "{id}");
     }
-    let launches: u32 = captures
-        .iter()
-        .map(|capture| capture.record.worker_launches)
-        .sum();
-    assert_eq!(launches, baseline + 3);
-    assert_eq!(observation.result, failure("subcase-mismatch"));
+    // One extra launch for each sub-case that now commits.
+    let extra = u32::try_from(EXPIRY_CONTROLS.len())?;
+    assert_eq!(lowered.launches(), baseline + extra);
+    assert_eq!(lowered.observation.result, failure("subcase-mismatch"));
     Ok(())
 }
 
@@ -506,8 +530,8 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
 fn haystacks(capture: &Capture, with_outcome: bool) -> Vec<Vec<u8>> {
     let mut stacks = Vec::new();
     for pass in &capture.passes {
-        stacks.extend(pass.after.0.iter().cloned());
-        stacks.push(pass.after.1.clone());
+        stacks.extend(pass.after.events.iter().cloned());
+        stacks.push(pass.after.state.clone());
     }
     if with_outcome {
         stacks.extend(capture.record.outcomes.iter().map(outcome_bytes_of));
@@ -515,24 +539,34 @@ fn haystacks(capture: &Capture, with_outcome: bool) -> Vec<Vec<u8>> {
     stacks
 }
 
+/// The scanned records of the sub-case hold bytes, and the outcome record holds other text.
+fn assert_scan_controls(capture: &Capture, id: &str) {
+    let events = capture.passes.last().map(|pass| pass.after.events.len());
+    assert!(events.is_some_and(|count| count > 0), "{id}");
+    let stacks = haystacks(capture, false);
+    assert!(stacks.iter().any(|stack| !stack.is_empty()), "{id}");
+    let outcome_stacks = haystacks(capture, true);
+    assert!(outcome_stacks.iter().any(|stack| contains(stack, PLUGIN_ID)), "{id}");
+}
+
+/// `del.2` excludes the outcome record: the guests' Event type `prototype.driven` contains its
+/// marker `drive`.
+const MARKERS: [(&str, &str, bool); 2] =
+    [("del.1", "synthetic-secret", true), ("del.2", "drive", false)];
+
 #[test]
 fn r8_s5_the_marker_is_in_no_committed_event_state_or_outcome() -> TestResult {
-    // `del.2` excludes the outcome record: the guests' Event type `prototype.driven` contains
-    // its marker `drive`.
-    let markers = [("del.1", "synthetic-secret", true), ("del.2", "drive", false)];
-    let run = family_run(FixtureFamily::DeletionRedaction, ExecutionMode::Local)?;
-    for (id, marker, with_outcome) in markers {
-        let capture = capture_of(&run.captures, id)?;
-        let stacks = haystacks(capture, with_outcome);
-        assert!(stacks.iter().all(|stack| !contains(stack, marker)), "{id}");
-        let scan = capture.record.scan.as_ref().ok_or("no scan")?;
-        assert!(scan.found.is_empty(), "{id}");
-        assert!(scan.retained_ok, "{id}");
-        // The controls: the searched records are not empty and hold other text.
-        let events = capture.passes.last().map(|pass| pass.after.0.len());
-        assert!(events.is_some_and(|count| count > 0), "{id}");
-        let outcome_stacks = haystacks(capture, true);
-        assert!(outcome_stacks.iter().any(|stack| contains(stack, PLUGIN_ID)));
+    for mode in MODES {
+        let run = family_run(FixtureFamily::DeletionRedaction, mode)?;
+        for (id, marker, with_outcome) in MARKERS {
+            let capture = capture_of(&run.captures, id)?;
+            let stacks = haystacks(capture, with_outcome);
+            assert!(stacks.iter().all(|stack| !contains(stack, marker)), "{id} {mode:?}");
+            let scan = capture.record.scan.as_ref().ok_or("no scan")?;
+            assert!(scan.found.is_empty(), "{id} {mode:?}");
+            assert!(scan.retained_ok, "{id} {mode:?}");
+            assert_scan_controls(capture, id);
+        }
     }
     Ok(())
 }
@@ -769,15 +803,17 @@ fn r8_s10_the_outcome_record_has_exactly_the_r7_h3_fields() -> TestResult {
     assert!(matches!(mode, CommunityPluginModeV1::Local));
     assert!(matches!(content_validation, ContentValidationV1::NotPerformed));
     assert!(matches!(result, Verdict::Committed { .. }));
+    // The canonical record is CBOR with no key names; it also holds no such word.
+    let bytes = outcome_bytes_of(outcome);
+    assert!(FORBIDDEN_KEYS.iter().all(|key| !contains(&bytes, key)));
     Ok(())
 }
 
 /// Assert that every unsuccessful pass of the run left the Events and the state as they were,
 /// and report the number of unsuccessful passes and of passes that changed them.
-fn unchanged_by_unsuccessful_passes(run: &FamilyRun) -> (usize, usize) {
+fn assert_unsuccessful_passes_changed_nothing(run: &FamilyRun) -> (usize, usize) {
     let passes = run.captures.iter().flat_map(|capture| &capture.passes);
-    let (unsuccessful, successful): (Vec<_>, Vec<_>) =
-        passes.partition(|pass| pass.unsuccessful);
+    let (unsuccessful, successful): (Vec<_>, Vec<_>) = passes.partition(|pass| pass.unsuccessful);
     for pass in &unsuccessful {
         assert_eq!(pass.before, pass.after);
     }
@@ -788,13 +824,15 @@ fn unchanged_by_unsuccessful_passes(run: &FamilyRun) -> (usize, usize) {
 #[test]
 fn r8_s11_a_refused_or_failed_pass_leaves_events_and_state_unchanged() -> TestResult {
     let (mut unsuccessful, mut changed) = (0, 0);
-    for family in FixtureFamily::ALL.iter().copied() {
-        let counts = unchanged_by_unsuccessful_passes(&family_run(family, ExecutionMode::Local)?);
-        unsuccessful += counts.0;
-        changed += counts.1;
+    for mode in MODES {
+        for family in FixtureFamily::ALL.iter().copied() {
+            let counts = assert_unsuccessful_passes_changed_nothing(&family_run(family, mode)?);
+            unsuccessful += counts.0;
+            changed += counts.1;
+        }
     }
     // The controls: the check saw refused and failed passes, and it sees a pass that commits.
-    assert!(unsuccessful >= 10, "{unsuccessful}");
-    assert!(changed >= 1, "{changed}");
+    assert!(unsuccessful >= 20, "{unsuccessful}");
+    assert!(changed >= 2, "{changed}");
     Ok(())
 }

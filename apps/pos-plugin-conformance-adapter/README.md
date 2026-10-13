@@ -46,6 +46,9 @@ runs them in `apps/pos-plugin-worker/tests/conformance_fixtures_public.rs`. The 
 tests of the whole profile (the `positive`, `denied`, `malformed`, `resource-exhaustion`,
 `deletion-redaction`, `downgrade` and `independent-evaluation` families in both Execution
 Modes, the negative controls, the fresh-worker count and the no-partial-commit check) are
-`apps/pos-plugin-worker/tests/conformance_adapter_public.rs`; they run `run_with` over
-`SupervisorRunnerV1` with the real worker. `scripts/check_handoff_readme.py` pins the three
+`apps/pos-plugin-worker/tests/conformance_adapter_public.rs`. They run `run_with` over a
+recording runner that wraps the real world port (the recorded sub-case records and the committed
+Events and state back the counting and no-partial-commit checks), and over `SupervisorRunnerV1`
+with the real worker for the not-executed, unavailable and positive-oracle cases.
+`scripts/check_handoff_readme.py` pins the three
 sentences at the top of this file.
