@@ -33,7 +33,10 @@ impl SelectedRowV1<'_> {
         }
     }
 
-    fn query<'statement>(self, statement: &'statement mut Statement<'_>) -> rusqlite::Result<Rows<'statement>> {
+    fn query<'statement>(
+        self,
+        statement: &'statement mut Statement<'_>,
+    ) -> rusqlite::Result<Rows<'statement>> {
         match self {
             Self::HostProbe | Self::HostBlob => statement.query([]),
             Self::ChildProbe(key) | Self::ChildFields(key) => statement.query([key]),
@@ -58,7 +61,11 @@ pub(super) fn selected_field_with_context<'budget, 'clock, T>(
             context
                 .check()
                 .map_err(|_| Error::CorruptAuthority)
-                .and_then(|()| query.query(&mut statement).map_err(|_| Error::StorageIndeterminate))
+                .and_then(|()| {
+                    query
+                        .query(&mut statement)
+                        .map_err(|_| Error::StorageIndeterminate)
+                })
                 .and_then(|mut rows| {
                     context
                         .row_available()
