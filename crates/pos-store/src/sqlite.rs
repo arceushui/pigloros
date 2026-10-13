@@ -159,6 +159,7 @@ mod fork_replay_classifier;
 mod fork_replay_event;
 mod fork_replay_host;
 mod fork_replay_operation;
+mod fork_replay_provenance;
 mod fork_replay_publication;
 mod fork_replay_row;
 mod local_cut_owner;
@@ -1753,11 +1754,12 @@ impl SqliteStore {
             if logical_seq < from_logical_seq {
                 continue;
             }
-            let (origin, intervention) = sqlite_validate_classified_records(
+            let (origin, intervention) = sqlite_validate_classified_records_with_context(
                 &self.conn,
                 &operation,
                 &graph.table,
                 graph.admission.origin(),
+                context,
             )?;
             result.push((origin, intervention, operation));
             context
@@ -13358,36 +13360,89 @@ fn sqlite_validate_classified_records(
     table: &ForkClassifierTableV1,
     origin: ValidatedOriginV1,
 ) -> Result<(EventOriginRecordV1, Option<ForkInterventionAdmissionV1>), ForkEventAuthorityErrorV1> {
+    sqlite_validate_classified_records_with_context(
+        conn, operation, table, origin,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary(),
+    )
+}
+
+fn sqlite_validate_classified_records_with_context(
+    conn: &Connection,
+    operation: &ForkAppendOperationV1,
+    table: &ForkClassifierTableV1,
+    origin: ValidatedOriginV1,
+    context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
+) -> Result<(EventOriginRecordV1, Option<ForkInterventionAdmissionV1>), ForkEventAuthorityErrorV1> {
     let input = operation.input();
-    sqlite_classified_event(conn, operation)
+    let event = if context.is_protected() {
+        fork_replay_event::classified_event_with_context(conn, operation, context)
+    } else {
+        sqlite_classified_event(conn, operation).map(fork_replay_event::ScopedEventV1::new)
+    };
+    event
         .and_then(|event| {
-            sqlite_event_origin(conn, input.event_id)
+            let record = if context.is_protected() {
+                fork_replay_provenance::event_origin_with_context(conn, input.event_id, context)
+            } else {
+                sqlite_event_origin(conn, input.event_id)
+                    .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+            };
+            record
                 .and_then(|origin| {
-                    sqlite_intervention_admission(conn, input.event_id)
+                    let intervention = if context.is_protected() {
+                        fork_replay_provenance::intervention_with_context(conn, input.event_id, context)
+                    } else {
+                        sqlite_intervention_admission(conn, input.event_id)
+                            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+                    };
+                    intervention
                         .map(|intervention| (event, origin, intervention))
                 })
-                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
         })
         .and_then(|(event, record, intervention)| {
             // An unclassifiable FOP1 source is corrupt authority, exactly like
             // any record that differs from its expected provenance.
-            ForkEventClassifierV1::from_table(table)
-                .classify_identity(&input.source)
-                .ok()
-                .filter(|classification| {
+            context.classifier_from_table(table)
+                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+                .and_then(|classifier| classifier.classify_identity(&input.source)
+                    .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority))
+                .and_then(|classification| {
                     let (expected_origin, expected_intervention) =
-                        operation.expected_provenance(table, *classification);
-                    classified_event_matches_operation(&event, operation, origin)
-                        && record == expected_origin
-                        && record.digest() == input.event_origin_digest
-                        && intervention == expected_intervention
-                        && intervention
-                            .as_ref()
-                            .map(ForkInterventionAdmissionV1::digest)
-                            == input.intervention_admission_digest
+                        operation.expected_provenance(table, classification);
+                    if !classified_event_matches_operation(event.event(), operation, origin)
+                        || record != expected_origin {
+                        return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
+                    }
+                    context.canonical(record.canonical_cbor_len())
+                        .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+                        .and_then(|()| {
+                            let digest = record.digest();
+                            context.check().map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+                                .and_then(|()| {
+                                    if digest != input.event_origin_digest || intervention != expected_intervention {
+                                        return Err(ForkEventAuthorityErrorV1::CorruptAuthority);
+                                    }
+                                    intervention.as_ref().map(|admission| {
+                                        context.canonical(admission.canonical_cbor_len())
+                                            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+                                            .and_then(|()| {
+                                                let digest = admission.digest();
+                                                context.check().map(|()| digest)
+                                                    .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+                                            })
+                                    }).transpose()
+                                        .and_then(|digest| if digest == input.intervention_admission_digest {
+                                            Ok((record, intervention))
+                                        } else {
+                                            Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+                                        })
+                                })
+                        })
                 })
-                .map(|_| (record, intervention))
-                .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+        })
+        .and_then(|records| {
+            context.check().map(|()| records)
+                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
         })
 }
 
