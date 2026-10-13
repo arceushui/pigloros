@@ -29,6 +29,9 @@ pub mod error;
 pub mod event;
 pub mod executable_budget;
 pub mod factual_dependency;
+mod canonical_length;
+pub use canonical_length::CanonicalLengthErrorV1;
+
 pub mod fork_admission;
 pub mod fork_admission_authority;
 pub mod fork_admission_command;
