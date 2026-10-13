@@ -75,6 +75,24 @@ impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
             .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
     }
 
+    /// Refuse a known oversized native row before SQLite fetches its fields.
+    /// This is only a prospective check: each actual owned getter is debited
+    /// separately, so a decoder that stops early does not invent later copies.
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn require_bytes(
+        &mut self,
+        length: Option<usize>,
+    ) -> Result<(), crate::ForkManifestPublicationErrorV1> {
+        self.budget
+            .as_deref_mut()
+            .map_or(Ok(()), |budget| {
+                budget.check_time().and_then(|()| {
+                    budget.accept(length.is_some_and(|length| length <= budget.remaining_native_bytes()))
+                })
+            })
+            .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
+    }
+
     pub(crate) fn canonical(
         &mut self,
         length: Result<usize, pos_core::CanonicalLengthErrorV1>,
