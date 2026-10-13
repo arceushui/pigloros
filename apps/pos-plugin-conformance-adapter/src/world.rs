@@ -58,9 +58,10 @@ pub struct SubCaseRecordV1 {
     pub committed: Option<[u8; 32]>,
     /// The usage of the sub-case: zero unless it committed.
     pub usage: ResourceUsage,
-    /// The worker launches of the passes. A proxy: it counts the outcomes that carry an
-    /// execution profile digest, which a Driver records only after it reached the launch. S5
-    /// (R8-S9) verifies it against the real worker.
+    /// The worker launches of the passes: the count of outcomes that carry an execution profile
+    /// digest. A proxy (decision 2 lists the field only): a Driver records the digest only
+    /// after it reached the launch. Verified by `r8_s9_*` in
+    /// `apps/pos-plugin-worker/tests/conformance_adapter_public.rs`.
     pub worker_launches: u32,
     /// Whether the sub-result equals `expect`.
     pub matched: bool,
@@ -103,7 +104,8 @@ pub struct ScanResultV1 {
 pub struct SetupArgsV1 {
     /// Every release of the sub-case, or `None` when it names none.
     pub source: Option<InMemoryReleaseSourceV1>,
-    /// The first trust material that any step names: the registry is provisioned from it.
+    /// The first non-null trust material of any step: the registry is provisioned from it.
+    /// With none the world does not open: `TrustStateUnavailable`, `steps_run` 0.
     pub genesis: Option<CommunityPluginTrustMaterialV1>,
     /// The Execution Mode of the attempt.
     pub mode: CommunityPluginModeV1,
@@ -493,6 +495,8 @@ impl Resolver<'_> {
             .transpose()
     }
 
+    /// The member of a pass. Whatever its `at`, its Plugin needs an earlier `bind` step (an
+    /// unbound Plugin is `payload-invalid`); `at: absent` is an address that holds nothing.
     fn member(&mut self, member: &MemberV1) -> Result<PassMemberV1, InvalidCaseV1> {
         let plugin_id = member.plugin_id.as_str();
         let bound = self.bound.get(plugin_id).cloned().ok_or(InvalidCaseV1);
@@ -507,6 +511,8 @@ impl Resolver<'_> {
         })
     }
 
+    /// Resolve one step. A second `bind` of one Plugin ID is `payload-invalid`; `bind` and
+    /// `refresh` set the material that later passes use.
     fn step(&mut self, step: &StepV1) -> Result<ResolvedStepV1, InvalidCaseV1> {
         match step {
             StepV1::Install(install) => Ok(ResolvedStepV1::Install(InstallArgsV1 {

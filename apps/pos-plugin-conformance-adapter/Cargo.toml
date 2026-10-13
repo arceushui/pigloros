@@ -32,7 +32,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-# The signed-release test world is the only source of signed closures before S3b.
+# The runner tests build their releases and trust material on the signed-release test world.
 pos-plugin-publisher = { path = "../../crates/pos-plugin-publisher", features = [
   "test-support",
 ] }

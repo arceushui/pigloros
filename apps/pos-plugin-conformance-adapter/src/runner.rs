@@ -42,8 +42,8 @@ type Outcomes = Vec<CommunityPluginSubjectOutcomeV1>;
 
 /// The per-launch worker watchdog, in milliseconds.
 ///
-/// It is the worker tests' budget for compiling a Component in an instrumented build. The case `watchdog_ms` is the number of launches of the
-/// family times this value.
+/// It is the worker tests' budget for compiling a Component in an instrumented build. The case
+/// `watchdog_ms` is the number of launches of the family times this value.
 pub const LAUNCH_WATCHDOG_MS: u64 = 300_000;
 
 /// `ArtifactTrustDenied{TrustStateUnavailable}`: the state the world needs is unusable.

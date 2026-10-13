@@ -148,9 +148,6 @@ impl TrapTableEntryV1 {
     /// `stack-exhausted`, `other`, `FuelExhausted` and
     /// `OperationalWatchdogStop`. It returns `None` for an unknown name or an
     /// outcome that the decision 6 table does not give `trap_code`.
-    ///
-    /// The conformance adapter (slice S2, #615) is the production consumer;
-    /// until it lands only tests call this.
     #[must_use]
     pub fn from_adr_outcome(trap_code: &str, outcome_name: &str) -> Option<Self> {
         TrapOutcomeV1::from_name(outcome_name)
@@ -167,8 +164,7 @@ impl TrapTableEntryV1 {
 /// The digest excludes the mode (ADR-061 revision 7 decision 7), so none is
 /// taken. It returns `None` when `ceilings` is outside its PMF1 V1 ranges.
 ///
-/// The conformance adapter (slice S2, #615) computes `profile_digest` through
-/// it; until it lands only tests call this.
+/// The conformance adapter computes the `profile_digest` of a payload through it.
 #[must_use]
 pub fn profile_digest_of(
     ceilings: CeilingValuesV1,

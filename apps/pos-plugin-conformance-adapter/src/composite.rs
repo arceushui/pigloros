@@ -66,7 +66,8 @@ impl PiecesV1 {
             .ok_or(PiecesFaultV1::Invalid)
     }
 
-    /// The pieces `blobs`, each addressed by its BLAKE3 digest.
+    /// The pieces `blobs`, each addressed by its BLAKE3 digest (test fixtures only).
+    #[cfg(test)]
     #[must_use]
     pub fn from_blobs(blobs: impl IntoIterator<Item = Vec<u8>>) -> Self {
         let pieces = blobs
@@ -119,7 +120,8 @@ fn pieces_of(value: &Value) -> Option<BTreeMap<[u8; 32], Vec<u8>>> {
     }
 }
 
-/// The pieces of `list`, which must be strictly ascending by digest.
+/// The pieces of `list`, which must be strictly ascending by digest: a duplicate digest and an
+/// unsorted list are both composite faults (a deviation recorded in the PR).
 fn ordered(list: &[Value]) -> Option<BTreeMap<[u8; 32], Vec<u8>>> {
     let mut pieces = BTreeMap::new();
     let mut previous: Option<[u8; 32]> = None;

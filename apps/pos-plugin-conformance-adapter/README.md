@@ -34,5 +34,4 @@ directory cannot be determined.
 
 The adapter links no Wasmtime and none of `pos-plugin-host`, `pos-plugin-worker`,
 `pos-conformance`, `pos-store` or `pos-plugin-publisher` directly (`scripts/check-adapter-graph.sh`).
-`pos-plugin-publisher` with `test-support` is a dev-dependency: the signed-release test world is the
-only source of signed closures before the fixture catalog (S3b).
+`pos-plugin-publisher` with `test-support` is a dev-dependency used by the runner tests.
