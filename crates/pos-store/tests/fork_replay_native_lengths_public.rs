@@ -15,7 +15,7 @@ use pos_core::{
 };
 
 macro_rules! parity {
-    ($record:expr) => {{
+    ($record:expr_2021) => {{
         let record = $record;
         assert_eq!(record.canonical_cbor_len()?, record.to_canonical_cbor().len());
     }};
