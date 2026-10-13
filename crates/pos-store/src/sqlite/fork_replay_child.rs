@@ -16,8 +16,18 @@ struct TextColumnV1 {
     value: usize,
 }
 
-const NAME: TextColumnV1 = TextColumnV1 { null: 0, text: 1, length: 2, value: 0 };
-const PARENT: TextColumnV1 = TextColumnV1 { null: 3, text: 4, length: 5, value: 1 };
+const NAME: TextColumnV1 = TextColumnV1 {
+    null: 0,
+    text: 1,
+    length: 2,
+    value: 0,
+};
+const PARENT: TextColumnV1 = TextColumnV1 {
+    null: 3,
+    text: 4,
+    length: 5,
+    value: 1,
+};
 const FORK_SEQ_TYPE: usize = 6;
 const FORK_SEQ_VALUE: usize = 2;
 
@@ -41,7 +51,9 @@ fn text_length(row: &Row<'_>, column: TextColumnV1) -> Result<Option<usize>> {
                     }
                     row.get::<_, i64>(column.length)
                         .map_err(|_| Error::StorageIndeterminate)
-                        .and_then(|length| usize::try_from(length).map_err(|_| Error::CorruptAuthority))
+                        .and_then(|length| {
+                            usize::try_from(length).map_err(|_| Error::CorruptAuthority)
+                        })
                         .map(Some)
                 })
         })
@@ -56,8 +68,16 @@ fn text_with_context(
     context
         .bytes(length.unwrap_or(0))
         .map_err(|_| Error::CorruptAuthority)
-        .and_then(|()| row.get::<_, Option<String>>(column.value).map_err(|_| Error::StorageIndeterminate))
-        .and_then(|value| context.check().map(|()| value).map_err(|_| Error::CorruptAuthority))
+        .and_then(|()| {
+            row.get::<_, Option<String>>(column.value)
+                .map_err(|_| Error::StorageIndeterminate)
+        })
+        .and_then(|value| {
+            context
+                .check()
+                .map(|()| value)
+                .map_err(|_| Error::CorruptAuthority)
+        })
 }
 
 fn child_lengths(
@@ -65,21 +85,26 @@ fn child_lengths(
     child_key: &str,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<Option<ChildLengthsV1>> {
-    selected_field_with_context(conn, SelectedRowV1::ChildProbe(child_key), context, |row, _| {
-        text_length(row, NAME).and_then(|name| {
-            text_length(row, PARENT).and_then(|parent| {
-                row.get::<_, bool>(FORK_SEQ_TYPE)
-                    .map_err(|_| Error::StorageIndeterminate)
-                    .and_then(|integer_or_null| {
-                        if integer_or_null {
-                            Ok(ChildLengthsV1 { name, parent })
-                        } else {
-                            Err(Error::StorageIndeterminate)
-                        }
-                    })
+    selected_field_with_context(
+        conn,
+        SelectedRowV1::ChildProbe(child_key),
+        context,
+        |row, _| {
+            text_length(row, NAME).and_then(|name| {
+                text_length(row, PARENT).and_then(|parent| {
+                    row.get::<_, bool>(FORK_SEQ_TYPE)
+                        .map_err(|_| Error::StorageIndeterminate)
+                        .and_then(|integer_or_null| {
+                            if integer_or_null {
+                                Ok(ChildLengthsV1 { name, parent })
+                            } else {
+                                Err(Error::StorageIndeterminate)
+                            }
+                        })
+                })
             })
-        })
-    })
+        },
+    )
 }
 
 pub(super) fn child_name_with_context(
@@ -96,13 +121,18 @@ pub(super) fn child_name_with_context(
             child_lengths(conn, &child_key, context).and_then(|lengths| {
                 lengths.map_or(Ok(None), |lengths| {
                     selected_field_with_context(
-                        conn, SelectedRowV1::ChildFields(&child_key), context, |row, context| {
+                        conn,
+                        SelectedRowV1::ChildFields(&child_key),
+                        context,
+                        |row, context| {
                             text_with_context(row, NAME, lengths.name, context).and_then(|name| {
-                                text_with_context(row, PARENT, lengths.parent, context).and_then(|parent| {
-                                    row.get::<_, Option<i64>>(FORK_SEQ_VALUE)
-                                        .map_err(|_| Error::StorageIndeterminate)
-                                        .map(|fork_seq| (name, parent, fork_seq))
-                                })
+                                text_with_context(row, PARENT, lengths.parent, context).and_then(
+                                    |parent| {
+                                        row.get::<_, Option<i64>>(FORK_SEQ_VALUE)
+                                            .map_err(|_| Error::StorageIndeterminate)
+                                            .map(|fork_seq| (name, parent, fork_seq))
+                                    },
+                                )
                             })
                         },
                     )
@@ -116,7 +146,8 @@ pub(super) fn child_name_with_context(
                                 // more permissive ULID parse/normalization.
                                 let parent_key = input.parent_timeline_id.to_string();
                                 let matches = parent.as_deref() == Some(parent_key.as_str())
-                                    && fork_seq.and_then(|seq| u64::try_from(seq).ok())
+                                    && fork_seq
+                                        .and_then(|seq| u64::try_from(seq).ok())
                                         .is_some_and(|seq| seq == input.parent_logical_head);
                                 context
                                     .check()
@@ -162,10 +193,17 @@ mod tests {
         })?)
     }
 
-    fn fixture(name: &str) -> Fallible<(tempfile::TempDir, super::super::SqliteStore, ForkAdmissionRecordV1)> {
+    fn fixture(
+        name: &str,
+    ) -> Fallible<(
+        tempfile::TempDir,
+        super::super::SqliteStore,
+        ForkAdmissionRecordV1,
+    )> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("child.sqlite3");
-        let mut store = super::super::SqliteStore::open(path.to_str().ok_or("child fixture path")?)?;
+        let mut store =
+            super::super::SqliteStore::open(path.to_str().ok_or("child fixture path")?)?;
         // The ordinary fixture Fork must satisfy its erasure prerequisite;
         // this test gate does not mint FCC or protected Replay authority.
         store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open()))?;
@@ -191,7 +229,11 @@ mod tests {
         Ok((conn, admission))
     }
 
-    fn expected_cost(admission: &ForkAdmissionRecordV1, name: Option<&str>, parent: Option<&str>) -> usize {
+    fn expected_cost(
+        admission: &ForkAdmissionRecordV1,
+        name: Option<&str>,
+        parent: Option<&str>,
+    ) -> usize {
         // Independent logical String lengths, not a native length/debit helper
         // or an observed ledger: query key, two raw fields, comparison key.
         admission.input().child_timeline_id.to_string().len()
@@ -212,7 +254,9 @@ mod tests {
                 let limits = ForkReplayReadLimitsV1::new(1, 1, 2, bytes, 1_000_000)?;
                 let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
                 let result = super::super::sqlite_fork_admission_child_name_with_context(
-                    &store.conn, &admission, &mut NativeReadContextV1::protected(&mut budget),
+                    &store.conn,
+                    &admission,
+                    &mut NativeReadContextV1::protected(&mut budget),
                 );
                 if bytes == expected {
                     assert_eq!(result?, Some(name.to_owned()));
@@ -228,7 +272,9 @@ mod tests {
             let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
             assert_eq!(
                 super::super::sqlite_fork_admission_child_name_with_context(
-                    &store.conn, &admission, &mut NativeReadContextV1::protected(&mut budget)
+                    &store.conn,
+                    &admission,
+                    &mut NativeReadContextV1::protected(&mut budget)
                 ),
                 Err(Error::CorruptAuthority)
             );
@@ -236,7 +282,9 @@ mod tests {
             assert!(budget.check_time().is_err());
             assert_eq!(
                 super::super::sqlite_fork_admission_child_name_with_context(
-                    &store.conn, &admission, &mut NativeReadContextV1::ordinary()
+                    &store.conn,
+                    &admission,
+                    &mut NativeReadContextV1::ordinary()
                 )?,
                 Some(name.to_owned())
             );
@@ -259,7 +307,9 @@ mod tests {
                 let limits = ForkReplayReadLimitsV1::new(1, 1, 2, expected, 1_000_000)?;
                 let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
                 let result = super::super::sqlite_fork_admission_child_name_with_context(
-                    &store.conn, &admission, &mut NativeReadContextV1::protected(&mut budget),
+                    &store.conn,
+                    &admission,
+                    &mut NativeReadContextV1::protected(&mut budget),
                 );
                 match result {
                     Ok(name) => {
@@ -279,7 +329,8 @@ mod tests {
     }
 
     #[test]
-    fn child_metadata_preserves_nullable_fields_cut_and_canonical_textual_lineage() -> Fallible<()> {
+    fn child_metadata_preserves_nullable_fields_cut_and_canonical_textual_lineage() -> Fallible<()>
+    {
         let (conn, admission) = raw_fixture()?;
         let parent = admission.input().parent_timeline_id.to_string();
         let lowercase = parent.to_lowercase();
@@ -305,15 +356,21 @@ mod tests {
             let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
             assert_eq!(
                 super::super::sqlite_fork_admission_child_name_with_context(
-                    &conn, &admission, &mut NativeReadContextV1::protected(&mut budget)
-                )?.as_deref(),
+                    &conn,
+                    &admission,
+                    &mut NativeReadContextV1::protected(&mut budget)
+                )?
+                .as_deref(),
                 expected
             );
             assert_eq!(budget.remaining_native_bytes(), 0);
             assert_eq!(
                 super::super::sqlite_fork_admission_child_name_with_context(
-                    &conn, &admission, &mut NativeReadContextV1::ordinary()
-                )?.as_deref(),
+                    &conn,
+                    &admission,
+                    &mut NativeReadContextV1::ordinary()
+                )?
+                .as_deref(),
                 expected
             );
         }
@@ -324,10 +381,22 @@ mod tests {
     fn impossible_child_column_types_fail_before_raw_getters() -> Fallible<()> {
         for (name, parent, fork_seq) in [
             (Value::Blob(vec![1]), Value::Null, Value::Integer(0)),
-            (Value::Text("child".into()), Value::Blob(vec![1]), Value::Integer(0)),
-            (Value::Text("child".into()), Value::Null, Value::Blob(vec![1])),
+            (
+                Value::Text("child".into()),
+                Value::Blob(vec![1]),
+                Value::Integer(0),
+            ),
+            (
+                Value::Text("child".into()),
+                Value::Null,
+                Value::Blob(vec![1]),
+            ),
             (Value::Text("child".into()), Value::Null, Value::Real(0.0)),
-            (Value::Text("child".into()), Value::Null, Value::Text("0".into())),
+            (
+                Value::Text("child".into()),
+                Value::Null,
+                Value::Text("0".into()),
+            ),
         ] {
             let (conn, admission) = raw_fixture()?;
             conn.execute(
@@ -340,7 +409,9 @@ mod tests {
             let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
             assert_eq!(
                 super::super::sqlite_fork_admission_child_name_with_context(
-                    &conn, &admission, &mut NativeReadContextV1::protected(&mut budget)
+                    &conn,
+                    &admission,
+                    &mut NativeReadContextV1::protected(&mut budget)
                 ),
                 Err(Error::StorageIndeterminate)
             );
@@ -348,7 +419,9 @@ mod tests {
             budget.charge_rows(1)?;
             assert_eq!(
                 super::super::sqlite_fork_admission_child_name_with_context(
-                    &conn, &admission, &mut NativeReadContextV1::ordinary()
+                    &conn,
+                    &admission,
+                    &mut NativeReadContextV1::ordinary()
                 ),
                 Err(Error::StorageIndeterminate)
             );
@@ -360,20 +433,26 @@ mod tests {
     fn child_metadata_absence_and_storage_utf8_errors_preserve_owner_contracts() -> Fallible<()> {
         for column in ["name", "parent_id"] {
             let (conn, admission) = raw_fixture()?;
-            conn.execute_batch(&format!("UPDATE timelines SET {column} = CAST(X'FF' AS TEXT)"))?;
+            conn.execute_batch(&format!(
+                "UPDATE timelines SET {column} = CAST(X'FF' AS TEXT)"
+            ))?;
             let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
             let start = clock.mark();
             let limits = ForkReplayReadLimitsV1::new(1, 1, 2, 512, 1_000_000)?;
             let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
             assert_eq!(
                 super::super::sqlite_fork_admission_child_name_with_context(
-                    &conn, &admission, &mut NativeReadContextV1::protected(&mut budget)
+                    &conn,
+                    &admission,
+                    &mut NativeReadContextV1::protected(&mut budget)
                 ),
                 Err(Error::StorageIndeterminate)
             );
             assert_eq!(
                 super::super::sqlite_fork_admission_child_name_with_context(
-                    &conn, &admission, &mut NativeReadContextV1::ordinary()
+                    &conn,
+                    &admission,
+                    &mut NativeReadContextV1::ordinary()
                 ),
                 Err(Error::StorageIndeterminate)
             );
@@ -386,7 +465,9 @@ mod tests {
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
         assert_eq!(
             super::super::sqlite_fork_admission_child_name_with_context(
-                &conn, &admission, &mut NativeReadContextV1::protected(&mut budget)
+                &conn,
+                &admission,
+                &mut NativeReadContextV1::protected(&mut budget)
             )?,
             None
         );
@@ -404,7 +485,11 @@ mod tests {
                 NativeReadContextV1::ordinary()
             };
             assert_eq!(
-                super::super::sqlite_fork_admission_child_name_with_context(&conn, &admission, &mut context),
+                super::super::sqlite_fork_admission_child_name_with_context(
+                    &conn,
+                    &admission,
+                    &mut context
+                ),
                 Err(Error::StorageIndeterminate)
             );
         }
