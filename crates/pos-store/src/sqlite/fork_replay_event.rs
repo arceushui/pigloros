@@ -1,6 +1,8 @@
 //! Bounded actual Event getters and parent hash inputs in the held snapshot.
 
-use pos_core::{CoreError, Event, ForkAdmissionErrorV1 as Error, ForkAppendOperationV1, Hash, Seq, TimelineId};
+use pos_core::{
+    CoreError, Event, ForkAdmissionErrorV1 as Error, ForkAppendOperationV1, Hash, Seq, TimelineId,
+};
 use rusqlite::{types::FromSql, Connection, Row, Rows, Statement};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -435,14 +437,25 @@ pub(super) fn origin_prefix_with_context(
     context
         .node(0)
         .map_err(|_| Error::CorruptAuthority)
-        .and_then(|()| context.bytes(ulid::ULID_LEN).map_err(|_| Error::CorruptAuthority))
+        .and_then(|()| {
+            context
+                .bytes(ulid::ULID_LEN)
+                .map_err(|_| Error::CorruptAuthority)
+        })
         .and_then(|()| {
             let key = timeline.to_string();
-            selected_field_with_context(conn, SelectedRowV1::OriginPrefix(&key), context, |row, _| {
-                row.get::<_, Option<i64>>(0)
-                    .map_err(|_| Error::StorageIndeterminate)
-                    .and_then(|fork| super::sqlite_fork_prefix(fork).map_err(|_| Error::CorruptAuthority))
-            })
+            selected_field_with_context(
+                conn,
+                SelectedRowV1::OriginPrefix(&key),
+                context,
+                |row, _| {
+                    row.get::<_, Option<i64>>(0)
+                        .map_err(|_| Error::StorageIndeterminate)
+                        .and_then(|fork| {
+                            super::sqlite_fork_prefix(fork).map_err(|_| Error::CorruptAuthority)
+                        })
+                },
+            )
             .and_then(|prefix| prefix.ok_or(Error::CorruptAuthority))
         })
 }
@@ -458,12 +471,16 @@ pub(super) fn classified_event_with_context(
     let input = operation.input();
     origin_prefix_with_context(conn, input.child_timeline_id, context)
         .and_then(|prefix| {
-            input.logical_seq.checked_sub(prefix)
+            input
+                .logical_seq
+                .checked_sub(prefix)
                 .ok_or(Error::CorruptAuthority)
                 .map(|local| (prefix, super::seq_as_i64(Seq::from_u64(local))))
         })
         .and_then(|(prefix, local)| {
-            context.bytes(ulid::ULID_LEN).map_err(|_| Error::CorruptAuthority)
+            context
+                .bytes(ulid::ULID_LEN)
+                .map_err(|_| Error::CorruptAuthority)
                 .and_then(|()| {
                     let key = input.child_timeline_id.to_string();
                     selected_field_with_context(
@@ -473,16 +490,27 @@ pub(super) fn classified_event_with_context(
                         |row, _| EventRowLengthsV1::probe(row),
                     )
                     .and_then(|probe| probe.flatten().ok_or(Error::CorruptAuthority))
-                    .and_then(|lengths| read_probed_event(
-                        conn, &key, &lengths, input.child_timeline_id, prefix, context,
-                    ))
+                    .and_then(|lengths| {
+                        read_probed_event(
+                            conn,
+                            &key,
+                            &lengths,
+                            input.child_timeline_id,
+                            prefix,
+                            context,
+                        )
+                    })
                     .and_then(|mut event| {
-                        prefix.checked_add(event.0.seq.as_u64())
+                        prefix
+                            .checked_add(event.0.seq.as_u64())
                             .ok_or(Error::CorruptAuthority)
                             .and_then(|logical| {
                                 event.0.seq = Seq::from_u64(logical);
                                 if event.0.id == input.event_id && logical == input.logical_seq {
-                                    context.check().map(|()| event).map_err(|_| Error::CorruptAuthority)
+                                    context
+                                        .check()
+                                        .map(|()| event)
+                                        .map_err(|_| Error::CorruptAuthority)
                                 } else {
                                     Err(Error::CorruptAuthority)
                                 }
@@ -500,14 +528,29 @@ fn next_event(
     segment: &BoundedForkSegment,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<Option<(i64, ScopedEventV1)>> {
-    selected_field_with_context(conn, SelectedRowV1::EventProbe(key, cursor), context, |row, _| {
-        EventRowLengthsV1::probe(row)
-    })
+    selected_field_with_context(
+        conn,
+        SelectedRowV1::EventProbe(key, cursor),
+        context,
+        |row, _| EventRowLengthsV1::probe(row),
+    )
     .and_then(|probe| probe.ok_or(Error::StorageIndeterminate))
-    .and_then(|probe| probe.map_or_else(|| Ok(None), |lengths| {
-        read_probed_event(conn, key, &lengths, segment.id, segment.fork.map_or(0, Seq::as_u64), context)
-            .map(|event| Some((lengths.seq, event)))
-    }))
+    .and_then(|probe| {
+        probe.map_or_else(
+            || Ok(None),
+            |lengths| {
+                read_probed_event(
+                    conn,
+                    key,
+                    &lengths,
+                    segment.id,
+                    segment.fork.map_or(0, Seq::as_u64),
+                    context,
+                )
+                .map(|event| Some((lengths.seq, event)))
+            },
+        )
+    })
 }
 
 fn hash_segment(
