@@ -1808,7 +1808,7 @@ type RefusalCase = (
 );
 
 /// The refusal of `declaration` as invalid, for the given attempt.
-fn invalid_for(
+const fn invalid_for(
     case: &'static str,
     attempt: Attempt,
     declaration: FactualTickDependenciesV1,
@@ -1822,7 +1822,7 @@ fn invalid_for(
 }
 
 /// The refusal of `declaration` as a conflict, for the given attempt.
-fn conflict_for(
+const fn conflict_for(
     case: &'static str,
     attempt: Attempt,
     declaration: FactualTickDependenciesV1,
@@ -1936,7 +1936,11 @@ fn grant_and_tick_cases(r: &Refusals<'_>) -> Vec<RefusalCase> {
     let provisional = with_record(valid, provisional_record);
     vec![
         conflict_for("stale fence grant", second.clone(), stale),
-        conflict_for("authorization that is no digest", second.clone(), unreadable),
+        conflict_for(
+            "authorization that is no digest",
+            second.clone(),
+            unreadable,
+        ),
         invalid_for("wrong Tick", moved, wrong_tick),
         invalid_for("replay of the last Tick", replayed, replay),
         invalid_for("Tick 0", initial, tick_zero),

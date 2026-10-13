@@ -218,10 +218,7 @@ pub(super) fn shape_holds(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIn
 }
 
 /// Whether one node has the shape its kind requires.
-fn node_shape_holds(
-    node: &DependencyNodeRecordV1,
-    by_digest: &DigestIndex<'_>,
-) -> bool {
+fn node_shape_holds(node: &DependencyNodeRecordV1, by_digest: &DigestIndex<'_>) -> bool {
     let coordinate = node.coordinate();
     if coordinate.scheduler_position() == 0 {
         host_node_shape_holds(node)
@@ -243,10 +240,7 @@ fn host_node_shape_holds(node: &DependencyNodeRecordV1) -> bool {
 }
 
 /// A step node inputs the snapshot node of the record.
-fn step_inputs_snapshot(
-    node: &DependencyNodeRecordV1,
-    by_digest: &DigestIndex<'_>,
-) -> bool {
+fn step_inputs_snapshot(node: &DependencyNodeRecordV1, by_digest: &DigestIndex<'_>) -> bool {
     node.input_digests().iter().any(|digest| {
         by_digest.get(digest).is_some_and(|source| {
             is_host_node(source.coordinate(), FactualHostOwnerV1::Observation)
@@ -255,10 +249,7 @@ fn step_inputs_snapshot(
 }
 
 /// An output node inputs exactly one step node of its Tick, position and owner.
-fn output_inputs_one_step(
-    node: &DependencyNodeRecordV1,
-    by_digest: &DigestIndex<'_>,
-) -> bool {
+fn output_inputs_one_step(node: &DependencyNodeRecordV1, by_digest: &DigestIndex<'_>) -> bool {
     let output = node.coordinate();
     let steps = node
         .input_digests()
