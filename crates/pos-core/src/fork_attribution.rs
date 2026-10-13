@@ -10,7 +10,7 @@
 //! closed in every decoder in this module. Only the import-only typed decoders
 //! of `authority_import` accept code 2, for the `FAE1` closure validator.
 
-use crate::canonical_length::{head, CanonicalEmit, CanonicalSink};
+use crate::crypto::{head, CanonicalEmit, CanonicalSink};
 
 use crate::{Hash, KeyIdentityV1, KeyRoleV1, OwnerIdV1, PublicKey, Signature, TimelineId};
 
@@ -198,7 +198,7 @@ impl ForkAdmissionRecordV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     /// Encode every `FAR1` byte before the final `authority-origin-v1`
@@ -451,7 +451,7 @@ impl ForkReproManifestV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     /// Decode exact canonical `FRM1` bytes.
@@ -626,7 +626,7 @@ impl SignedForkReproManifestV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
     /// Return the ADR-099 record identifier over complete `FSM1` bytes.
     #[must_use]
@@ -722,7 +722,7 @@ impl ForkPublicationOperationV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     /// Encode every `FPO1` byte before the final `authority-origin-v1`
@@ -830,7 +830,7 @@ impl ForkPublicationBindingV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     /// Decode exact canonical `FPB1` bytes.
@@ -916,7 +916,7 @@ impl ForkPublicationArtifactV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     /// Decode exact canonical `FPA1` bytes and its nested `FSM1` bytes.

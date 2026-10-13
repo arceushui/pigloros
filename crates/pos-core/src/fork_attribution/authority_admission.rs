@@ -4,7 +4,7 @@
 //! is derived only from an exact `FAE1` plus the admitted policy generation;
 //! this value is not itself proof that any import committed.
 
-use crate::canonical_length::{CanonicalEmit, CanonicalSink};
+use crate::crypto::{CanonicalEmit, CanonicalSink};
 
 use super::{
     array,
@@ -120,7 +120,7 @@ impl ImportedForkAttributionAdmissionV1 {
     /// # Errors
     /// Returns `LengthOverflow` if checked arithmetic cannot fit the target's `usize`.
     pub fn canonical_cbor_len(&self) -> Result<usize, crate::CanonicalLengthErrorV1> {
-        crate::canonical_length::measure(self)
+        crate::crypto::measure(self)
     }
 
     /// Decode exact canonical `IFA1` bytes.
