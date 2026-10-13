@@ -5,13 +5,14 @@ pub mod fixture;
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 use fixture::{pin_policy, request_for, Fallible, Port, Shape, Spec, World, PARENT_CUT};
 use pos_core::{
-    CoreError, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash, Reducer,
-    Seq, State, TimelineId, WorldReplayClosureV1,
+    store::EventStore, CoreError, ErasureRecoveryLimitsV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, Hash, KeyDestructionRequestV1, KeyRegistryStateV1, Reducer, Seq, State,
+    TimelineId, WorldReplayClosureV1,
 };
 use pos_runtime::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
@@ -497,6 +498,152 @@ fn compare_checks_both_imported_arms_before_folding_and_after_both_folds() -> Fa
             ErasureRecoveryLimitsV1::compiled_maximum(),
         )?;
         compare_on_host(host, requirements, fault)?;
+    }
+    Ok(())
+}
+
+/// Deliberately attempt a valid ordinary write from a different connection
+/// inside the installed test verifier, at every admission phase. This is
+/// adversarial test instrumentation, not a callback from the attribution
+/// bridge or a production verifier qualification.
+struct ReservationVerifier {
+    inner: ImportedVerifier,
+    writer: Mutex<SqliteStore>,
+    next: KeyRegistryStateV1,
+    refused: AtomicUsize,
+}
+
+impl WorldReplayVerifierV1 for ReservationVerifier {
+    fn verify(
+        &self,
+        closure: &WorldReplayClosureV1,
+        requested: &WorldReplayUseV1,
+        generation: ErasureReferenceV1,
+    ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)?;
+        if !matches!(
+            writer.save_key_registry(&self.next),
+            Err(CoreError::Storage(_))
+        ) {
+            return Err(WorldReplayVerificationErrorV1::EvidenceUnavailable);
+        }
+        self.refused.fetch_add(1, Ordering::SeqCst);
+        self.inner.verify(closure, requested, generation)
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ConsumerCall {
+    Replay,
+    ReplayAt,
+    Compare,
+}
+
+fn reservation_verifier(
+    writer: SqliteStore,
+    world: &World,
+    requirements: [ForkReplayRequirementV1; 2],
+    call: ConsumerCall,
+) -> Fallible<(Arc<ReservationVerifier>, KeyRegistryStateV1)> {
+    let before = writer.load_key_registry()?.ok_or("persisted registry")?;
+    let identity = world.anchors.first().ok_or("timeline key")?.0;
+    let material = before
+        .key_record(identity)
+        .and_then(|record| record.private_material_digest)
+        .ok_or("live timeline material")?;
+    let mut next = before.clone();
+    next.begin_key_destruction(KeyDestructionRequestV1::new(
+        identity,
+        material,
+        Hash::from_bytes([0x73; 32]),
+    ))?;
+    next.validate()?;
+    let verifier = Arc::new(ReservationVerifier {
+        inner: ImportedVerifier {
+            child: requirements[0].child_timeline_id(),
+            parent: world.root,
+            requirement: requirements[0],
+            secondary: (call == ConsumerCall::Compare)
+                .then_some((requirements[1].child_timeline_id(), requirements[1])),
+            fault: Fault::None,
+            fault_target: None,
+            admissions: AtomicUsize::new(0),
+        },
+        writer: Mutex::new(writer),
+        next,
+        refused: AtomicUsize::new(0),
+    });
+    Ok((verifier, before))
+}
+
+#[test]
+fn sqlite_protected_consumers_hold_writer_reservation_through_both_phases() -> Fallible<()> {
+    for call in [
+        ConsumerCall::Replay,
+        ConsumerCall::ReplayAt,
+        ConsumerCall::Compare,
+    ] {
+        for read_only in [false, true] {
+            let mut world = World::new(Shape::Mixed, false)?;
+            if call == ConsumerCall::Compare {
+                world.add_child(Shape::EmptyUnclassified)?;
+            }
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("protected-reservation.sqlite");
+            let path = path.to_str().ok_or("utf-8 reservation fixture path")?;
+            let mut writer = SqliteStore::open(path)?;
+            let requirements = if call == ConsumerCall::Compare {
+                populate_pair(&mut writer, &world)?
+            } else {
+                let requirement = populate(&mut writer, &world, Shape::Mixed, false)?;
+                [requirement, requirement]
+            };
+            let (verifier, before) = reservation_verifier(writer, &world, requirements, call)?;
+            let composition = ErasureCoordinatorCompositionV1::closed()
+                .with_world_replay_verifier(verifier.clone());
+            let host = if read_only {
+                ErasureExecutionHostV1::open_read_only_with_authority(
+                    path,
+                    &composition,
+                    ErasureRecoveryLimitsV1::compiled_maximum(),
+                )?
+            } else {
+                ErasureExecutionHostV1::open_with_authority(
+                    StoreConfig::Sqlite {
+                        path: path.to_owned(),
+                    },
+                    &composition,
+                    ErasureRecoveryLimitsV1::compiled_maximum(),
+                )?
+            };
+            match call {
+                ConsumerCall::Replay | ConsumerCall::ReplayAt => run_on_host(
+                    host,
+                    requirements[0].child_timeline_id(),
+                    requirements[0].publication_logical_head(),
+                    Fault::None,
+                    (call == ConsumerCall::ReplayAt).then_some(Seq::from_u64(2)),
+                )?,
+                ConsumerCall::Compare => compare_on_host(host, requirements, Fault::None)?,
+            }
+            assert_eq!(
+                verifier.refused.load(Ordering::SeqCst),
+                if call == ConsumerCall::Compare {
+                    4
+                } else {
+                    2
+                }
+            );
+            let mut writer = verifier.writer.lock().map_err(|_| "probe writer poisoned")?;
+            assert_eq!(writer.load_key_registry()?, Some(before));
+            // The very same request succeeds after release, so earlier
+            // failures were not a malformed replacement or read-only writer.
+            writer.save_key_registry(&verifier.next)?;
+            assert_eq!(writer.load_key_registry()?, Some(verifier.next.clone()));
+        }
     }
     Ok(())
 }
