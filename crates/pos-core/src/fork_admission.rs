@@ -1,12 +1,7 @@
 //! Durable Fork-admission result values.
 
 use crate::crypto::{self as canonical_length, CanonicalEmit, CanonicalSink};
-use ciborium::value::Value;
-
-use crate::{
-    fork_admission_command::{decode, nonzero_hash},
-    Hash, OwnerIdV1, TimelineId,
-};
+use crate::{Hash, OwnerIdV1, TimelineId};
 
 /// Maximum accepted canonical `POB1` bytes.
 ///
@@ -133,29 +128,12 @@ impl PrincipalOwnerBindingV1 {
     /// # Errors
     /// Returns `CorruptAuthority` for malformed or noncanonical durable bytes.
     pub fn from_canonical_cbor(bytes_in: &[u8]) -> Result<Self, ForkAdmissionErrorV1> {
-        let Value::Array(fields) = decode(bytes_in, MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1)
-            .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?
-        else {
-            return Err(ForkAdmissionErrorV1::CorruptAuthority);
-        };
-        if fields.len() != 6
-            || !matches!(&fields[0], Value::Bytes(marker) if marker == b"POB1")
-            || !matches!(&fields[1], Value::Integer(version) if *version == 1.into())
-            || !matches!(&fields[5], Value::Array(origin) if origin.len() == 1 && origin[0] == Value::Integer(1.into()))
-        {
-            return Err(ForkAdmissionErrorV1::CorruptAuthority);
-        }
-        let Value::Text(owner) = &fields[4] else {
-            return Err(ForkAdmissionErrorV1::CorruptAuthority);
-        };
-        // `nonzero_hash` rejects zero digests and `OwnerIdV1::new` validates
-        // the owner, so this decoded input already satisfies `Self::new`.
-        let result = Self(PrincipalOwnerBindingInputV1 {
-            operation_id: durable_hash(&fields[2])?,
-            principal_digest: durable_hash(&fields[3])?,
-            owner: OwnerIdV1::new(owner).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?,
-            origin: ForkAuthorityOriginV1::Local,
-        });
+        // Reuse the native borrowed reader rather than constructing a generic
+        // Value tree and its separate canonicalization buffer. The owner
+        // String and this record's equality Vec are the only decoder buffers.
+        let fields = crate::fork_attribution::decode_local_principal_owner_binding_fields(bytes_in)
+            .map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
+        let result = Self::new(fields).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)?;
         (result.to_canonical_cbor() == bytes_in)
             .then_some(result)
             .ok_or(ForkAdmissionErrorV1::CorruptAuthority)
@@ -238,10 +216,6 @@ pub enum ForkAdmissionOperationResultV1 {
     PrincipalOwner(PrincipalOwnerBindingV1),
     /// The committed child/FAR1 receipt.
     Fork(ForkAdmissionReceiptV1),
-}
-
-fn durable_hash(value: &Value) -> Result<Hash, ForkAdmissionErrorV1> {
-    nonzero_hash(value).map_err(|_| ForkAdmissionErrorV1::CorruptAuthority)
 }
 
 /// Return `BLAKE3(domain || bytes)` for one Fork-admission digest domain.
