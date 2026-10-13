@@ -309,9 +309,8 @@ impl ForkReplayAuthorityEvidenceV1 {
         {
             return Err(ForkReplayAuthorityReadErrorV1::CorruptAuthority);
         }
-        budget.charge_canonical(committed.operation.canonical_cbor_len())?;
         let operation_bytes = if let Some(origin) = requirement.origin {
-            // The projected copy and the code-2 encoding are separate work.
+            // The typed projection creates no local FPO1 byte buffer.
             let imported = pos_core::ImportedForkPublicationOperationV1::from_local(
                 committed.operation.clone(),
                 origin,
@@ -319,6 +318,7 @@ impl ForkReplayAuthorityEvidenceV1 {
             budget.charge_canonical(imported.canonical_cbor_len())?;
             imported.to_canonical_cbor()
         } else {
+            budget.charge_canonical(committed.operation.canonical_cbor_len())?;
             committed.operation.to_canonical_cbor()
         };
         Ok(Self {
