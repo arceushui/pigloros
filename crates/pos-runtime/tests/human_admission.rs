@@ -464,8 +464,12 @@ impl pos_core::FactualPrefixReadPortV1 for LostOutcomePort<'_> {
 }
 
 /// A port whose basis-free lookup never finds a receipt, so only the
-/// store's own exact-retry comparison can recognize a duplicate.
-struct ForgetfulLookupPort<'a>(&'a mut dyn ScheduledAdmissionStoreV1);
+/// store's own exact-retry comparison can recognize a duplicate. It records
+/// every basis it submits, so a test can resubmit the retained one.
+struct ForgetfulLookupPort<'a>(
+    &'a mut dyn ScheduledAdmissionStoreV1,
+    &'a mut Vec<PipelineAdmissionBasisV1>,
+);
 
 impl PipelineAdmissionPortV1 for ForgetfulLookupPort<'_> {
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -473,6 +477,7 @@ impl PipelineAdmissionPortV1 for ForgetfulLookupPort<'_> {
         &mut self,
         basis: &PipelineAdmissionBasisV1,
     ) -> Result<PipelineOutcomeV1, CoreError> {
+        self.1.push(basis.clone());
         self.0.admit_pipeline_batch(basis)
     }
 
@@ -679,21 +684,26 @@ fn the_store_comparison_still_recognizes_an_exact_retry() {
         let actor = EntityId::new();
         let attempt = admission(&harness, 1, 1, 0);
         let action = proposal(actor, b"walk");
+        let mut submitted = Vec::new();
         let first = ok(harness.registry.admit_human_action(
-            &mut ForgetfulLookupPort(harness.store.as_mut()),
+            &mut ForgetfulLookupPort(harness.store.as_mut(), &mut submitted),
             &action,
             &attempt,
         ));
-
-        let retry = ok(harness.registry.admit_human_action(
-            &mut ForgetfulLookupPort(harness.store.as_mut()),
-            &action,
-            &attempt,
-        ));
-
         assert!(!first.recovered(), "{name}");
-        assert!(retry.recovered(), "{name}");
-        assert_eq!(retry.receipt(), first.receipt(), "{name}");
+        assert_eq!(submitted.len(), 1, "{name}");
+
+        // R3.8: the receipt lookup precedes every dependency check, so the
+        // retained basis is an exact retry. A rebuilt basis would declare the
+        // next Tick and conflict on an adapter that records Ticks.
+        let retained = ok(submitted.first().ok_or("no basis was submitted"));
+        let retry = ok(harness.store.admit_pipeline_batch(retained));
+
+        assert_eq!(
+            retry,
+            PipelineOutcomeV1::RecoveredDuplicate(first.receipt().clone()),
+            "{name}"
+        );
         assert_eq!(events(&harness), 1, "{name}");
     }
 }

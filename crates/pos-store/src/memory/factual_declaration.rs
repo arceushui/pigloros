@@ -68,7 +68,7 @@ fn node_at(nodes: &[DependencyNodeRecordV1], index: u32) -> Option<&DependencyNo
 
 /// Whether the basis is that of a scheduled Driver Tick; the other ingress is
 /// a human action.
-fn is_scheduled(basis: &PipelineAdmissionBasisV1) -> bool {
+const fn is_scheduled(basis: &PipelineAdmissionBasisV1) -> bool {
     matches!(
         basis.attempt().ingress(),
         PipelineIngressV1::ScheduledAiDriver

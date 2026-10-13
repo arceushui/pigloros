@@ -883,8 +883,7 @@ fn check_grant(facts: &TickFacts<'_>) -> Result<(), PipelineOutcomeV1> {
     let basis = facts.basis;
     let well_formed = declaration::edges_well_formed(basis);
     let carries = declaration::edges_carry_grant(basis, facts.grant);
-    demand(well_formed, INVALID_DECLARATION)
-        .and_then(|()| demand(carries, STALE_GRANT_CONFLICT))
+    demand(well_formed, INVALID_DECLARATION).and_then(|()| demand(carries, STALE_GRANT_CONFLICT))
 }
 
 /// R3.7.2 (ii): the record is a committed one at the next Tick of the prefix.
@@ -904,8 +903,8 @@ fn bound_nodes(facts: &TickFacts<'_>) -> Result<Vec<(Seq, Hash)>, PipelineOutcom
     let (timeline, basis) = (facts.timeline, facts.basis);
     let outputs = declaration::output_event_nodes(timeline, basis, facts.first_seq)
         .filter(|_| declaration::snapshot_matches(timeline, basis));
-    let ingress = declaration::ingress_event_nodes(timeline, basis, &facts.payloads)
-        .filter(|nodes| {
+    let ingress =
+        declaration::ingress_event_nodes(timeline, basis, &facts.payloads).filter(|nodes| {
             let unbound = |seq: &Seq| !facts.sets.iter().any(|set| set.is_bound(seq.as_u64()));
             nodes.iter().map(|(seq, _)| seq).all(unbound)
         });
@@ -927,7 +926,7 @@ fn check_record(facts: &TickFacts<'_>) -> Result<(), PipelineOutcomeV1> {
     let resolves = edge_sources_resolve(record, facts.sets);
     let shaped = declaration::shape_holds(basis);
     demand(unrecorded, INVALID_DECLARATION)
-        .and_then(|()| capacity)
+        .and(capacity)
         .and_then(|()| demand(resolves, INVALID_DECLARATION))
         .and_then(|()| demand(shaped, INVALID_DECLARATION))
 }
@@ -971,12 +970,13 @@ impl MemoryStore {
             || Ok(BTreeMap::new()),
             |(from, to)| {
                 let wanted = SeqRange { from, to: Some(to) };
-                self.collect_events_in_range(timeline, wanted).map(|events| {
-                    events
-                        .iter()
-                        .map(|event| (event.seq.as_u64(), event.payload_hash))
-                        .collect()
-                })
+                self.collect_events_in_range(timeline, wanted)
+                    .map(|events| {
+                        events
+                            .iter()
+                            .map(|event| (event.seq.as_u64(), event.payload_hash))
+                            .collect()
+                    })
             },
         )
     }
@@ -995,19 +995,20 @@ impl MemoryStore {
         grant: Hash,
         first_seq: Seq,
     ) -> Result<Result<FactualInstallV1, PipelineOutcomeV1>, CoreError> {
-        self.bound_event_payloads(timeline, basis).and_then(|payloads| {
-            self.visible_sets(timeline).map(|sets| {
-                judge_tick(&TickFacts {
-                    timeline,
-                    basis,
-                    grant,
-                    first_seq,
-                    payloads,
-                    own: self.prefix_rows(timeline),
-                    sets: &sets,
+        self.bound_event_payloads(timeline, basis)
+            .and_then(|payloads| {
+                self.visible_sets(timeline).map(|sets| {
+                    judge_tick(&TickFacts {
+                        timeline,
+                        basis,
+                        grant,
+                        first_seq,
+                        payloads,
+                        own: self.prefix_rows(timeline),
+                        sets: &sets,
+                    })
                 })
             })
-        })
     }
 
     /// Install a checked Tick: its rows, commit range and Event bindings.

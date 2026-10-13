@@ -1253,10 +1253,7 @@ fn sqlite_rejects_an_unreleased_receipt_table_or_index_shape_closed() {
 // own slice: that slice adds the adapter to `recording_stores` and every case
 // below runs against it unchanged.
 
-trait RecordingHarness:
-    Harness + CounterfactualDependencyReadPortV1 + FactualPrefixReadPortV1
-{
-}
+trait RecordingHarness: Harness + CounterfactualDependencyReadPortV1 + FactualPrefixReadPortV1 {}
 
 impl<T> RecordingHarness for T where
     T: Harness + CounterfactualDependencyReadPortV1 + FactualPrefixReadPortV1
@@ -1966,9 +1963,8 @@ fn edge_cases(r: &Refusals<'_>) -> Vec<RefusalCase> {
     let omitted_record = rebuilt(record, origin, inputs_unchanged, no_output_edge);
     let unfed_record = rebuilt(record, origin, outputs_unfed, no_output_edge);
     let blind_inputs = |node: &DependencyNodeRecordV1| inputs_without(node, 0, snapshot);
-    let blind_edges = |edge: &DependencyEdgeRecordV1| {
-        !(consumes_as(edge, 0) && edge.source_digest() == snapshot)
-    };
+    let blind_edges =
+        |edge: &DependencyEdgeRecordV1| !(consumes_as(edge, 0) && edge.source_digest() == snapshot);
     let blind_record = rebuilt(record, origin, blind_inputs, blind_edges);
     let omitted = with_record(valid, omitted_record);
     let unfed = with_record(valid, unfed_record);
@@ -2235,7 +2231,9 @@ fn a_fork_binds_only_the_events_of_the_ticks_below_its_cut() {
         let case = "bound below the cut";
         assert_refused(name, case, store.as_mut(), &later, again, &invalid);
         let plain = valid_declaration(&later, Vec::new());
-        committed(ok(store.admit_pipeline_batch(&basis_declaring(&later, plain))));
+        committed(ok(
+            store.admit_pipeline_batch(&basis_declaring(&later, plain))
+        ));
         assert_eq!(head_of(store.as_ref(), boundary), head(2, 6), "{name}");
     }
 }
