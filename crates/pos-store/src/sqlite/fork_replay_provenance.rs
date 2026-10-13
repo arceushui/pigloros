@@ -1,12 +1,12 @@
 //! Actual selected EOR1/FIA1 getters and their existing capped decoders.
 
-use pos_core::{EventId, EventOriginRecordV1, ForkEventAuthorityErrorV1 as Error,
+use pos_core::{EventId, EventOriginRecordV1,
     ForkInterventionAdmissionV1, MAX_EVENT_ORIGIN_RECORD_BYTES_V1,
     MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1};
 use rusqlite::Connection;
 
 use super::fork_replay_row::{selected_field_with_context, SelectedRowV1};
-use crate::fork_replay::NativeReadContextV1;
+use crate::{fork_replay::NativeReadContextV1, ForkEventAuthorityErrorV1 as Error};
 
 type Result<T> = std::result::Result<T, Error>;
 
