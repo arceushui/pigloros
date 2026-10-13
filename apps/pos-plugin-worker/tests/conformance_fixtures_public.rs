@@ -176,7 +176,7 @@ fn output_text(observation: &SubjectObservation) -> TestResult<String> {
 
 /// R8-F7b: the log text `drive` is in no committed Event payload or state of the real worker.
 /// The control scans the outcome record too, which holds the Event type `prototype.driven`, and
-/// then finds the marker.
+/// then finds the marker, so the sub-case is a mismatch.
 #[test]
 fn the_log_text_is_absent_from_events_and_state_but_not_from_the_outcome() -> TestResult {
     let family = FixtureFamily::DeletionRedaction;
@@ -184,7 +184,8 @@ fn the_log_text_is_absent_from_events_and_state_but_not_from_the_outcome() -> Te
     let matched = observe_attempt(&one_subcase(family, "del.2", unchanged)?)?;
     assert!(output_text(&matched)?.contains(absent));
     let control = observe_attempt(&one_subcase(family, "del.2", scanning_the_outcome)?)?;
-    assert!(output_text(&control)?.contains("\"prohibited_data_present\":true"));
+    // A sub-case that did not match is written as `{"id","kind":"mismatch"}`, not as values.
+    assert!(output_text(&control)?.contains("\"id\":\"del.2\",\"kind\":\"mismatch\""));
     Ok(())
 }
 
@@ -215,7 +216,7 @@ fn expecting(error: &'static str) -> impl Fn(&mut Value) {
 }
 
 /// The edit that leaves a sub-case as it is.
-fn unchanged(_subcase: &mut Value) {}
+const fn unchanged(_subcase: &mut Value) {}
 
 /// The IDs of the sub-cases of `family` in its checked-in payload.
 fn subcase_ids(family: FixtureFamily) -> TestResult<Vec<String>> {
