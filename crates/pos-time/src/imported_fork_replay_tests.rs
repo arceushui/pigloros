@@ -229,8 +229,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 .into_iter()
                 .filter(move |destroyed| !*destroyed || fault == Fault::None)
                 .map(move |destroyed| (fault, cut, destroyed))
-        })
-        {
+        }) {
             let world = World::new(shape, false)?;
             let child = world.child_at(0)?.id;
             let mut memory = MemoryStore::new();
