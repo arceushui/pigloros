@@ -164,7 +164,7 @@ fn from_bytes_rejects_an_invalid_anchor_and_empty_histories() -> TestResult {
     ] {
         let anchor = CommunityTrustAnchorBytesV1 {
             scope: scope.clone(),
-            ..valid.clone()
+            ..valid
         };
         let got = build(&anchor, one(), one());
         assert_eq!(got, expected, "scope {scope:?}");
@@ -223,7 +223,7 @@ fn the_anchor_bytes_and_errors_compare_clone_and_describe_themselves() -> TestRe
     let anchor = anchor_bytes(&world.anchor);
     let other = CommunityTrustAnchorBytesV1 {
         scope: "other".to_owned(),
-        ..anchor.clone()
+        ..anchor
     };
     assert_eq!(anchor, anchor.clone());
     assert_ne!(anchor, other);
