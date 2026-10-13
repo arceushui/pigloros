@@ -1055,7 +1055,12 @@ pub(crate) fn decode_local_principal_owner_binding_fields(
         ForkAttributionOriginV1::Local => crate::ForkAuthorityOriginV1::Local,
     };
     wire.finish()?;
-    Ok(crate::PrincipalOwnerBindingInputV1 { operation_id, principal_digest, owner, origin })
+    Ok(crate::PrincipalOwnerBindingInputV1 {
+        operation_id,
+        principal_digest,
+        owner,
+        origin,
+    })
 }
 
 struct Reader<'a> {
