@@ -557,6 +557,9 @@ mod tests {
         let (_directory, mut store, ids) = fixture()?;
         let timeline = store.create_timeline("signed")?.id();
         let mut event = store.read(ids[0], SeqRange::all())?.remove(0);
+        // The production schema owns one globally unique Event ID. This is
+        // a new local commit, not a duplicate import of the root Event.
+        event.id = pos_core::EventId::new();
         event.seq = Seq::from_u64(1);
         event.origin = None;
         event.causation_id = Some(pos_core::EventId::new());
