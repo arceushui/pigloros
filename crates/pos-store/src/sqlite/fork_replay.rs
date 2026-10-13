@@ -7,7 +7,8 @@ use rusqlite::OptionalExtension;
 
 use super::SqliteStore;
 use crate::{
-    fork_event_authority::AuthorityValidatorV1, ForkReplayAuthorityEvidenceV1,
+    fork_event_authority::AuthorityValidatorV1, fork_replay::NativeReadContextV1,
+    ForkReplayAuthorityEvidenceV1,
     ForkReplayAuthorityReadErrorV1 as Error, ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1,
     ForkReplayRequirementV1,
 };
@@ -32,14 +33,14 @@ impl ForkReplayAuthorityReadPortV1 for SqliteStore {
         }
         self.preflight_fork_replay_ancestry(requirement.child_timeline_id(), budget)?;
         self.preflight_fork_replay_records(requirement, budget)?;
-        let committed = self
-            .read_committed_fork_publication(
-                requirement.child_timeline_id(),
-                requirement.publication_logical_head().as_u64(),
-                AuthorityValidatorV1::CodeTwoAware,
-            )
-            .map_err(|_| Error::CorruptAuthority)?;
+        let committed = self.read_committed_fork_publication_with_context(
+            requirement.child_timeline_id(),
+            requirement.publication_logical_head().as_u64(),
+            AuthorityValidatorV1::CodeTwoAware,
+            &mut NativeReadContextV1::protected(budget),
+        );
         budget.check_time()?;
+        let committed = committed.map_err(|_| Error::CorruptAuthority)?;
         ForkReplayAuthorityEvidenceV1::from_committed(*requirement, &committed, budget)
     }
 }
@@ -232,4 +233,82 @@ fn row_length(row: &rusqlite::Row<'_>, column: usize) -> ReadResult<usize> {
         .get::<_, i64>(column)
         .map_err(|_| Error::CorruptAuthority)?;
     usize::try_from(length).map_err(|_| Error::CorruptAuthority)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::{
+        fae1_fixture::{pin_policy, request_for, Fallible, Shape, Spec, World, PARENT_CUT},
+        ForkAttributionAuthorityImportPortV1, ForkManifestPublicationErrorV1,
+        ForkManifestPublicationPortV1, ForkReplayReadLimitsV1,
+    };
+    use pos_core::{
+        trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1},
+        ErasureInventoryPersistencePortV1, ErasureProtectedEffectDispositionV1,
+        SignedForkReproManifestV1,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn file_backed_shared_native_batches_charge_exact_buffers_and_latch_expiry() -> Fallible<()> {
+        for shape in [Shape::Mixed, Shape::EmptyClassified, Shape::EmptyUnclassified] {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("native-context.sqlite");
+            let mut store = SqliteStore::open(path.to_str().ok_or("UTF-8 path")?)?;
+            let world = World::new(shape, false)?;
+            let built = world.build(&Spec::default())?;
+            world.seed_destination(&mut store)?;
+            pin_policy(&mut store, &built.policy)?;
+            store.import_verified(&request_for(&world, &built))?;
+            let child = world.child_at(0)?.id;
+            let head = PARENT_CUT + shape.events();
+            let committed = store.read_committed(child, head)?;
+            let signed = SignedForkReproManifestV1::from_canonical_cbor(&committed.outer_bytes)?;
+            // Actual shared buffers, independently measured by byte encoders.
+            let expected = committed.outer_bytes.len() * 2
+                + signed.manifest_bytes().len() * 2
+                + signed.manifest().input().intervention_sequences.len() * std::mem::size_of::<u64>();
+            let interval = store.begin_protected_effect_interval()?;
+            for (bytes, succeeds) in [(expected, true), (expected - 1, false)] {
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, bytes, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                let result = store.read_committed_fork_publication_with_context(
+                    child,
+                    head,
+                    AuthorityValidatorV1::CodeTwoAware,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
+                if succeeds {
+                    assert_eq!(result?, committed);
+                    assert_eq!(budget.remaining_native_bytes(), 0);
+                } else {
+                    assert_eq!(result, Err(ForkManifestPublicationErrorV1::PublicationConflict));
+                    assert_eq!(budget.check_time(), Err(Error::BoundsExceeded));
+                }
+            }
+            let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                std::iter::repeat_n(Duration::ZERO, 4).chain([Duration::from_secs(2)]),
+            );
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, expected, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                store.read_committed_fork_publication_with_context(
+                    child,
+                    head,
+                    AuthorityValidatorV1::CodeTwoAware,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                ),
+                Err(ForkManifestPublicationErrorV1::PublicationConflict)
+            );
+            assert_eq!(budget.check_time(), Err(Error::BoundsExceeded));
+            store.finish_protected_effect_interval(interval, ErasureProtectedEffectDispositionV1::Rollback)?;
+            assert_eq!(store.read_committed(child, head)?, committed);
+        }
+        Ok(())
+    }
 }

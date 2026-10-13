@@ -7,7 +7,7 @@ use pos_core::{Event, TimelineId};
 use super::MemoryStore;
 use crate::{
     fork_event_authority::AuthorityValidatorV1,
-    fork_replay::{charge_registry, CanonicalSizeV1},
+    fork_replay::{charge_registry, CanonicalSizeV1, NativeReadContextV1},
     ForkReplayAuthorityEvidenceV1, ForkReplayAuthorityReadErrorV1 as Error,
     ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1, ForkReplayRequirementV1,
 };
@@ -22,14 +22,15 @@ impl ForkReplayAuthorityReadPortV1 for MemoryStore {
     ) -> ReadResult<ForkReplayAuthorityEvidenceV1> {
         self.preflight_replay_ancestry(requirement.child_timeline_id(), budget)?;
         self.preflight_replay_records(requirement, budget)?;
-        let committed = self
-            .read_committed_as(
-                requirement.child_timeline_id(),
-                requirement.publication_logical_head().as_u64(),
-                AuthorityValidatorV1::CodeTwoAware,
-            )
-            .map_err(|_| Error::CorruptAuthority)?;
+        let committed = self.read_committed_with_context(
+            requirement.child_timeline_id(),
+            requirement.publication_logical_head().as_u64(),
+            AuthorityValidatorV1::CodeTwoAware,
+            &mut NativeReadContextV1::protected(budget),
+        );
+        // Preserve the latched budget error over native error translation.
         budget.check_time()?;
+        let committed = committed.map_err(|_| Error::CorruptAuthority)?;
         ForkReplayAuthorityEvidenceV1::from_committed(*requirement, &committed, budget)
     }
 }
