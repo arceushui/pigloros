@@ -112,7 +112,6 @@ impl SqliteStore {
         let child = requirement.child_timeline_id();
         let child_key = child.to_string();
         for (table, column, selection) in [
-            ("fork_admissions", "far1_cbor", "child_id = ?1"),
             ("fork_classifier_tables", "fct1_cbor", "child_id = ?1"),
             (
                 "fork_classifier_registrations",
@@ -129,11 +128,6 @@ impl SqliteStore {
                 "fork_intervention_admissions",
                 "fia1_cbor",
                 "event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)",
-            ),
-            (
-                "imported_fork_attribution_admissions",
-                "ifa1_cbor",
-                "child_id = ?1",
             ),
         ] {
             self.preflight_selected_records(table, column, selection, &[&child_key], budget)?;
@@ -425,9 +419,15 @@ mod tests {
             let key = &built.envelope.unsigned().input().key_record;
             let retained_key_phase =
                 key.to_canonical_cbor().len() * 3 + key.identity().owner_id.as_str().len();
+            let import_bytes: Vec<u8> = store.conn.query_row(
+                "SELECT ifa1_cbor FROM imported_fork_attribution_admissions WHERE child_id = ?1",
+                [child.to_string()], |row| row.get(0))?;
+            let admission_phase = super::super::fork_replay_admission::imported_admission_phase_cost(
+                &built.envelope.unsigned().input().records.fork_admission, &import_bytes)?;
             // Actual shared buffers, independently measured by byte encoders.
             let expected = publication_phase_cost(&committed)?
                 + retained_key_phase
+                + admission_phase * 2
                 + committed.outer_bytes.len() * 2
                 + signed.manifest_bytes().len() * 2
                 + signed.manifest().input().intervention_sequences.len()
