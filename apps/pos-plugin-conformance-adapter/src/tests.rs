@@ -41,10 +41,11 @@ fn two_subcases(family: FixtureFamily) -> Vec<u8> {
         .into_bytes()
 }
 
+/// The result of a run, the bytes written and the number of sub-cases the runner was asked for.
+type Run = (Result<(), AdapterRunErrorV1>, Vec<u8>, usize);
+
 /// Run the EAI1 stream of `attempt` through a fake runner that matches every sub-case.
-fn run_matching(
-    attempt: &CaseAttempt,
-) -> Result<(Result<(), AdapterRunErrorV1>, Vec<u8>, usize), Box<dyn std::error::Error>> {
+fn run_matching(attempt: &CaseAttempt) -> Result<Run, Box<dyn std::error::Error>> {
     let runner = FakeRunner::new(|subcase| full(subcase.id.as_str()));
     let mut out = Vec::new();
     let result = run_with(&runner, stream(attempt)?.as_slice(), &mut out);
@@ -295,7 +296,7 @@ fn composite_faults_are_non_executed_outcomes() -> TestResult {
         vec![b"evidence".to_vec()],
         vec![vec![0x83, 0x64]],
         // two composites
-        vec![good.clone(), composite(&[b"c"])?],
+        vec![good, composite(&[b"c"])?],
         // a duplicate piece digest
         vec![composite_of(&[(digest(b"a"), b"a"), (digest(b"a"), b"a")])?],
         // a piece whose digest differs from the BLAKE3 of its bytes

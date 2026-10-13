@@ -47,7 +47,10 @@ fn scan() -> Value {
 }
 
 fn subcase(id: &str, steps: Value, expect: Value) -> Value {
-    json!({"id": id, "steps": steps, "expect": expect})
+    let mut document = json!({"id": id});
+    document["steps"] = steps;
+    document["expect"] = expect;
+    document
 }
 
 /// A payload that uses every object of the grammar once.
@@ -151,10 +154,9 @@ fn changed(change: impl FnOnce(&mut Value)) -> Result<CaseV1, PayloadInvalidV1> 
 }
 
 fn at<'a>(value: &'a mut Value, pointer: &str) -> &'a mut Value {
-    match value.pointer_mut(pointer) {
-        Some(found) => found,
-        None => std::panic::resume_unwind(Box::new(format!("no value at {pointer}"))),
-    }
+    value
+        .pointer_mut(pointer)
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new(format!("no value at {pointer}"))))
 }
 
 #[test]
@@ -205,7 +207,7 @@ fn an_unknown_key_is_payload_invalid_in_every_object() {
 }
 
 #[test]
-fn a_missing_key_is_payload_invalid_in_every_object() -> TestResult {
+fn a_missing_key_is_payload_invalid_in_every_object() {
     for pointer in OBJECTS {
         let mut value = base();
         let keys: Vec<String> = at(&mut value, pointer)
@@ -225,7 +227,6 @@ fn a_missing_key_is_payload_invalid_in_every_object() -> TestResult {
             assert_eq!(result, Err(PayloadInvalidV1), "{pointer} without {key}");
         }
     }
-    Ok(())
 }
 
 #[test]

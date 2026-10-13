@@ -19,14 +19,17 @@ use crate::{PiecesV1, SubCaseRecordV1, SubCaseRunnerV1, SCHEMA_ID};
 
 pub type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+#[must_use]
 pub fn digest(bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
 }
 
+#[must_use]
 pub fn hex_of(bytes: &[u8]) -> String {
     hex::encode(&digest(bytes))
 }
 
+#[must_use]
 pub fn artifact(bytes: Vec<u8>) -> AttemptArtifact {
     AttemptArtifact {
         digest: digest(&bytes),
@@ -35,6 +38,9 @@ pub fn artifact(bytes: Vec<u8>) -> AttemptArtifact {
 }
 
 /// The canonical `PCW2` composite of `entries`, in the given order.
+///
+/// # Errors
+/// Returns the encoding or decoding error.
 pub fn composite_of(entries: &[([u8; 32], &[u8])]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let list = entries
         .iter()
@@ -51,6 +57,7 @@ pub fn composite_of(entries: &[([u8; 32], &[u8])]) -> Result<Vec<u8>, Box<dyn st
 }
 
 /// The entries of `blobs`, sorted by digest.
+#[must_use]
 pub fn sorted<'a>(blobs: &[&'a [u8]]) -> Vec<([u8; 32], &'a [u8])> {
     let mut entries: Vec<([u8; 32], &[u8])> = blobs.iter().map(|b| (digest(b), *b)).collect();
     entries.sort();
@@ -58,6 +65,9 @@ pub fn sorted<'a>(blobs: &[&'a [u8]]) -> Vec<([u8; 32], &'a [u8])> {
 }
 
 /// The canonical `PCW2` composite of `blobs`, sorted by digest.
+///
+/// # Errors
+/// Returns the encoding or decoding error.
 pub fn composite(blobs: &[&[u8]]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     composite_of(&sorted(blobs))
 }
@@ -100,6 +110,9 @@ pub fn attempt(
 }
 
 /// The EAI1 stream of `attempt`.
+///
+/// # Errors
+/// Returns the encoding or decoding error.
 pub fn stream(attempt: &CaseAttempt) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut out = Vec::new();
     write_attempt(&mut out, attempt)?;
@@ -107,11 +120,15 @@ pub fn stream(attempt: &CaseAttempt) -> Result<Vec<u8>, Box<dyn std::error::Erro
 }
 
 /// The observation written to `out`.
+///
+/// # Errors
+/// Returns the encoding or decoding error.
 pub fn observation(out: &[u8]) -> Result<SubjectObservation, Box<dyn std::error::Error>> {
     Ok(read_observation(out, 1_048_576)?)
 }
 
 /// A sub-case that needs no piece: it computes the BLAKE3 of `input`.
+#[must_use]
 pub fn blake3_subcase(id: &str, input: &str) -> Json {
     let expected = hex_of(input.as_bytes());
     json!({
@@ -126,11 +143,15 @@ pub fn blake3_subcase(id: &str, input: &str) -> Json {
 }
 
 /// The payload document of `family` over `subcases`.
+#[must_use]
 pub fn payload(family: &str, subcases: Vec<Json>) -> Json {
-    json!({"schema": SCHEMA_ID, "family": family, "subcases": subcases})
+    let mut document = json!({"schema": SCHEMA_ID, "family": family});
+    document["subcases"] = Json::Array(subcases);
+    document
 }
 
 /// A record of sub-case `id` that matched, with nothing else.
+#[must_use]
 pub fn matched(id: &str) -> SubCaseRecordV1 {
     SubCaseRecordV1 {
         matched: true,
@@ -176,6 +197,7 @@ impl<F: Fn(&SubCaseV1) -> SubCaseRecordV1> SubCaseRunnerV1 for FakeRunner<F> {
 }
 
 /// The Ed25519 base point, a valid verification key.
+#[must_use]
 pub fn operator_key() -> Vec<u8> {
     let mut key = vec![0x66; 32];
     key[0] = 0x58;
@@ -183,6 +205,7 @@ pub fn operator_key() -> Vec<u8> {
 }
 
 /// A canonical `PCA1` anchor piece.
+#[must_use]
 pub fn anchor_bytes() -> Vec<u8> {
     let value = Value::Array(vec![
         Value::Text("PCA1".to_owned()),
@@ -199,6 +222,7 @@ pub fn anchor_bytes() -> Vec<u8> {
 
 /// The pieces every release and material of the interpreter tests names: the releases `a` and
 /// `b`, one TPS1, one PTR1, one PRV1 and a good anchor.
+#[must_use]
 pub fn pieces() -> PiecesV1 {
     PiecesV1::from_blobs([
         b"manifest-a".to_vec(),
@@ -213,6 +237,7 @@ pub fn pieces() -> PiecesV1 {
 }
 
 /// The `release` object of release `name` (`a` or `b`).
+#[must_use]
 pub fn release(name: &str) -> Json {
     json!({
         "manifest": hex_of(format!("manifest-{name}").as_bytes()),
@@ -221,6 +246,7 @@ pub fn release(name: &str) -> Json {
 }
 
 /// The `material` object of the interpreter tests.
+#[must_use]
 pub fn material() -> Json {
     json!({
         "anchor": hex_of(&anchor_bytes()),
@@ -231,11 +257,18 @@ pub fn material() -> Json {
 }
 
 /// A sub-case document.
+#[must_use]
 pub fn subcase(id: &str, steps: Vec<Json>, expect: Json) -> Json {
-    json!({"id": id, "steps": steps, "expect": expect})
+    let mut document = json!({"id": id});
+    document["steps"] = Json::Array(steps);
+    document["expect"] = expect;
+    document
 }
 
 /// The sub-case of `value`.
+///
+/// # Errors
+/// Returns the encoding or decoding error.
 pub fn parsed(value: &Json) -> Result<SubCaseV1, Box<dyn std::error::Error>> {
     Ok(serde_json::from_value(value.clone())?)
 }

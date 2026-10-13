@@ -19,10 +19,6 @@ const TRUST: E = E::ArtifactTrustDenied {
     basis: TrustDenialBasisV1::TrustStateUnavailable,
 };
 
-const NOT_ACTIVE: E = E::ArtifactTrustDenied {
-    basis: TrustDenialBasisV1::NotActive,
-};
-
 const INVOCATION_HEX: &str = "07070707070707070707070707070707";
 
 const fn identity() -> ReleaseIdentityV1 {
@@ -154,26 +150,30 @@ fn install_step(name: &str) -> Value {
 }
 
 fn bind_step(name: &str, plugin: &str, with_material: Value) -> Value {
-    json!({
-        "step": "bind", "release": release(name), "material": with_material,
+    let mut step = json!({
+        "step": "bind", "release": release(name),
         "plugin_id": plugin, "instant_micros": 50_000_000, "tick": 5,
         "initial_state": {"schema": hex::encode(&[1; 32]), "bytes": "696e6974"},
         "event_type": "prototype.driven",
-    })
+    });
+    step["material"] = with_material;
+    step
 }
 
 fn refresh_step(with_material: Value) -> Value {
-    json!({
-        "step": "refresh", "material": with_material, "instant_micros": 55_000_000, "tick": 6,
-    })
+    let mut step = json!({"step": "refresh", "instant_micros": 55_000_000, "tick": 6});
+    step["material"] = with_material;
+    step
 }
 
 fn pass_step(members: Vec<Value>) -> Value {
-    json!({
-        "step": "pass", "members": members, "instant_micros": 50_000_000, "tick": 5,
+    let mut step = json!({
+        "step": "pass", "instant_micros": 50_000_000, "tick": 5,
         "invocation_id": INVOCATION_HEX, "random_domain": hex::encode(&[2; 32]),
         "timeline_seq": 3, "observation": "00ff", "simulation_time": 11,
-    })
+    });
+    step["members"] = Value::Array(members);
+    step
 }
 
 fn member(plugin: &str) -> Value {
@@ -1007,7 +1007,7 @@ fn a_digest_that_names_no_piece_is_payload_invalid_everywhere() -> TestResult {
         expect.clone(),
     );
     assert!(invalid(&document)?);
-    let document = subcase("x", vec![good_pass], expect.clone());
+    let document = subcase("x", vec![good_pass], expect);
     assert!(invalid(&document)?, "a pass before any bind");
     // The nested digest.
     let mut document = subcase("mal.6", Vec::new(), json!({"kind": "malformed"}));

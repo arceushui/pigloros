@@ -277,7 +277,7 @@ fn the_record_result_is_the_setup_refusal_else_the_last_outcome_else_none() {
     };
     let both = SubCaseRecordV1 {
         outcomes: vec![outcome(refused), outcome(committed)],
-        ..empty.clone()
+        ..empty
     };
     assert!(matches!(
         of_record(&both),

@@ -78,7 +78,7 @@ impl Real {
         };
         let roots = vec![current.ptr1().to_vec()];
         let revocations = current.prv1_records().to_vec();
-        let tps1 = current.tps1.clone();
+        let tps1 = current.tps1;
         let material = CommunityPluginTrustMaterialV1::from_bytes_v1(
             &anchor,
             tps1.clone(),
@@ -131,32 +131,11 @@ impl Real {
         })
     }
 
-    fn refresh(&self, material: &Value) -> Value {
-        json!({
-            "step": "refresh", "material": material, "instant_micros": 50_000_000, "tick": TICK,
-        })
-    }
-
-    fn pass(&self, member: &Value) -> Value {
-        json!({
-            "step": "pass", "members": [member], "instant_micros": 50_000_000, "tick": TICK,
-            "invocation_id": INVOCATION_HEX, "random_domain": hex_of(b"domain"),
-            "timeline_seq": 0, "observation": "00", "simulation_time": 1,
-        })
-    }
-
-    fn scan(&self, sources: &[&str], marker: &str) -> Value {
-        json!({
-            "step": "scan", "marker": marker, "in": sources,
-            "retained": {"plugin_id": PLUGIN, "invocation_id_hex": INVOCATION_HEX},
-        })
-    }
-
     fn crash_steps(&self) -> Vec<Value> {
         vec![
             self.install(50_000_000),
             self.bind(&self.material_json),
-            self.pass(&json!({"plugin_id": PLUGIN})),
+            pass_step(&json!({"plugin_id": PLUGIN})),
         ]
     }
 
@@ -169,6 +148,27 @@ impl Real {
             CommunityPluginModeV1::Local,
         ))
     }
+}
+
+fn refresh_step(material: &Value) -> Value {
+    json!({
+        "step": "refresh", "material": material, "instant_micros": 50_000_000, "tick": TICK,
+    })
+}
+
+fn pass_step(member: &Value) -> Value {
+    json!({
+        "step": "pass", "members": [member], "instant_micros": 50_000_000, "tick": TICK,
+        "invocation_id": INVOCATION_HEX, "random_domain": hex_of(b"domain"),
+        "timeline_seq": 0, "observation": "00", "simulation_time": 1,
+    })
+}
+
+fn scan_step(sources: &[&str], marker: &str) -> Value {
+    json!({
+        "step": "scan", "marker": marker, "in": sources,
+        "retained": {"plugin_id": PLUGIN, "invocation_id_hex": INVOCATION_HEX},
+    })
 }
 
 fn runner_for(program: &str) -> Result<SupervisorRunnerV1, BoxError> {
@@ -280,7 +280,7 @@ fn a_scan_reads_the_drivers_state_the_events_and_the_outcome_from_the_world() ->
     let steps = vec![
         real.install(50_000_000),
         real.bind(&real.material_json),
-        real.scan(&["state"], "init"),
+        scan_step(&["state"], "init"),
     ];
     let record = real.run(steps, absent("init"))?;
     let scan = record.scan.ok_or("no scan")?;
@@ -293,7 +293,7 @@ fn a_scan_reads_the_drivers_state_the_events_and_the_outcome_from_the_world() ->
 
     let steps = vec![
         real.install(50_000_000),
-        real.scan(&["events", "outcome", "state"], "init"),
+        scan_step(&["events", "outcome", "state"], "init"),
     ];
     let record = real.run(steps, absent("init"))?;
     let scan = record.scan.ok_or("no scan")?;
@@ -308,7 +308,7 @@ fn a_scan_reads_the_drivers_state_the_events_and_the_outcome_from_the_world() ->
 #[test]
 fn a_refresh_runs_on_the_registry_of_the_world() -> TestResult {
     let real = Real::new()?;
-    let steps = vec![real.install(50_000_000), real.refresh(&real.material_json)];
+    let steps = vec![real.install(50_000_000), refresh_step(&real.material_json)];
     let record = real.run(steps, crashed())?;
     assert_eq!(record.steps_run, 2);
     assert!(!record.matched);
@@ -321,7 +321,7 @@ fn a_step_without_material_or_a_world_without_genesis_is_trust_state_unavailable
     let mut install = real.install(50_000_000);
     install["material"] = Value::Null;
     let record = real.run(
-        vec![real.refresh(&real.material_json), install.clone()],
+        vec![refresh_step(&real.material_json), install.clone()],
         refused_expect("TrustStateUnavailable"),
     )?;
     assert_eq!(record.setup_refusal, Some(TRUST_UNAVAILABLE));
@@ -329,7 +329,7 @@ fn a_step_without_material_or_a_world_without_genesis_is_trust_state_unavailable
     assert!(record.matched);
 
     let record = real.run(
-        vec![real.install(50_000_000), real.refresh(&Value::Null)],
+        vec![real.install(50_000_000), refresh_step(&Value::Null)],
         refused_expect("TrustStateUnavailable"),
     )?;
     assert_eq!(record.setup_refusal, Some(TRUST_UNAVAILABLE));
@@ -357,7 +357,7 @@ fn unreadable_material_and_an_empty_address_are_trust_state_unavailable() -> Tes
     let steps = vec![
         real.install(50_000_000),
         real.bind(&real.material_json),
-        real.pass(&member),
+        pass_step(&member),
     ];
     let record = real.run(steps, refused_expect("TrustStateUnavailable"))?;
     assert_eq!(record.worker_launches, 0);
@@ -368,7 +368,7 @@ fn unreadable_material_and_an_empty_address_are_trust_state_unavailable() -> Tes
     let steps = vec![
         real.install(50_000_000),
         real.bind(&real.material_json),
-        real.pass(&stranger),
+        pass_step(&stranger),
     ];
     let record = real.run(steps, refused_expect("TrustStateUnavailable"))?;
     assert_eq!(record, SubCaseRecordV1::empty("x"));
@@ -454,7 +454,7 @@ fn an_install_at_second_40_and_a_gate_at_second_50_is_ok() -> TestResult {
 #[test]
 fn the_launch_watchdog_is_300_seconds() {
     assert_eq!(LAUNCH_WATCHDOG_MS, 300_000);
-    assert_eq!(launch_watchdog(), Duration::from_secs(300));
+    assert_eq!(launch_watchdog(), Duration::from_mins(5));
 }
 
 #[test]

@@ -72,7 +72,7 @@ fn the_composite_is_the_unique_member_with_the_header() -> TestResult {
     assert_eq!(PiecesV1::find(&others), Err(PiecesFaultV1::Missing));
     assert_eq!(PiecesV1::find(&[]), Err(PiecesFaultV1::Missing));
 
-    let mut with = others.clone();
+    let mut with = others;
     with.insert(1, member(good()?));
     assert!(PiecesV1::find(&with)?.get(&digest(b"beta")).is_some());
 
