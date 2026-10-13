@@ -64,7 +64,14 @@ fn committed(digest: [u8; 32]) -> CommunityPluginSubjectOutcomeV1 {
 
 fn refused(error: &'static str, basis: Option<&'static str>) -> CommunityPluginSubjectOutcomeV1 {
     let class = "PreExecutionRejection";
-    outcome(Result1::Refused { error, basis, class }, false)
+    outcome(
+        Result1::Refused {
+            error,
+            basis,
+            class,
+        },
+        false,
+    )
 }
 
 /// A pure fake of the world: it scripts the answers of the steps and records the calls.
@@ -195,7 +202,12 @@ fn committed_expect(digest: [u8; 32]) -> Value {
 
 fn run(fake: &mut Fake, document: &Value) -> Result<SubCaseRecordV1, Box<dyn std::error::Error>> {
     let subcase = parsed(document)?;
-    Ok(interpret(&subcase, &pieces(), fake, CommunityPluginModeV1::Local))
+    Ok(interpret(
+        &subcase,
+        &pieces(),
+        fake,
+        CommunityPluginModeV1::Local,
+    ))
 }
 
 #[test]
@@ -205,7 +217,10 @@ fn the_result_of_a_two_pass_subcase_is_the_last_pass_and_the_state_is_carried() 
     fake.passes.push_back(Ok(vec![committed([2; 32])]));
     let mut steps = prefix();
     steps.push(pass_step(vec![member("p")]));
-    let record = run(&mut fake, &subcase("pos.3", steps, committed_expect([2; 32])))?;
+    let record = run(
+        &mut fake,
+        &subcase("pos.3", steps, committed_expect([2; 32])),
+    )?;
     assert!(record.matched);
     assert_eq!(record.steps_run, 4);
     assert_eq!(record.outcomes.len(), 2);
@@ -219,7 +234,10 @@ fn the_result_of_a_two_pass_subcase_is_the_last_pass_and_the_state_is_carried() 
         ..ResourceUsage::default()
     };
     assert_eq!(record.usage, usage);
-    assert_eq!(fake.seen_states, vec![b"init".to_vec(), b"state-1".to_vec()]);
+    assert_eq!(
+        fake.seen_states,
+        vec![b"init".to_vec(), b"state-1".to_vec()]
+    );
     assert_eq!(fake.log, ["open", "install", "bind", "pass", "pass"]);
     // The first pass is not the result: an expectation of its digest does not match.
     let mut again = Fake::default();
@@ -227,7 +245,10 @@ fn the_result_of_a_two_pass_subcase_is_the_last_pass_and_the_state_is_carried() 
     again.passes.push_back(Ok(vec![committed([2; 32])]));
     let mut steps = prefix();
     steps.push(pass_step(vec![member("p")]));
-    let first = run(&mut again, &subcase("pos.3", steps, committed_expect([1; 32])))?;
+    let first = run(
+        &mut again,
+        &subcase("pos.3", steps, committed_expect([1; 32])),
+    )?;
     assert!(!first.matched);
     Ok(())
 }
@@ -235,7 +256,11 @@ fn the_result_of_a_two_pass_subcase_is_the_last_pass_and_the_state_is_carried() 
 #[test]
 fn the_setup_opens_the_world_with_the_releases_the_first_material_and_the_mode() -> TestResult {
     let mut fake = Fake::default();
-    let steps = vec![bind_step("a", "p", Value::Null), refresh_step(material()), install_step("b")];
+    let steps = vec![
+        bind_step("a", "p", Value::Null),
+        refresh_step(material()),
+        install_step("b"),
+    ];
     let document = subcase("x", steps, committed_expect([0; 32]));
     let record = interpret(
         &parsed(&document)?,
@@ -246,7 +271,10 @@ fn the_setup_opens_the_world_with_the_releases_the_first_material_and_the_mode()
     let setup = fake.setup.ok_or("the world was not opened")?;
     assert_eq!(setup.mode, CommunityPluginModeV1::AirGapped);
     assert!(setup.source.is_some());
-    assert!(setup.genesis.is_some(), "the refresh material is the first non-null one");
+    assert!(
+        setup.genesis.is_some(),
+        "the refresh material is the first non-null one"
+    );
     assert_eq!(record.steps_run, 3);
     assert_eq!(fake.log, ["open", "bind", "refresh", "install"]);
     assert!(fake.bind_args[0].material.is_none());
@@ -292,7 +320,11 @@ fn a_step_that_refuses_partway_is_the_result_and_later_steps_do_not_run() -> Tes
     let mut fake = Fake::default();
     fake.installs.push_back(Ok(()));
     fake.installs.push_back(Err(TRUST));
-    let steps = vec![install_step("a"), install_step("b"), bind_step("a", "p", material())];
+    let steps = vec![
+        install_step("a"),
+        install_step("b"),
+        bind_step("a", "p", material()),
+    ];
     let expect = json!({"kind": "refused", "error": "ArtifactTrustDenied",
         "class": "PreExecutionRejection", "basis": "TrustStateUnavailable"});
     let record = run(&mut fake, &subcase("dgr.4", steps.clone(), expect.clone()))?;
@@ -424,7 +456,10 @@ fn a_pass_that_does_not_commit_stops_and_the_first_such_outcome_decides() -> Tes
         refused("ArtifactTrustDenied", Some("Expired")),
         committed([3; 32]),
     ]));
-    let record = run(&mut fake, &subcase("x", prefix(), committed_expect([1; 32])))?;
+    let record = run(
+        &mut fake,
+        &subcase("x", prefix(), committed_expect([1; 32])),
+    )?;
     assert_eq!(record.outcomes.len(), 1);
     assert_eq!(record.committed, None);
     assert!(!record.matched);
@@ -432,19 +467,28 @@ fn a_pass_that_does_not_commit_stops_and_the_first_such_outcome_decides() -> Tes
     let mut fake = Fake::default();
     fake.passes
         .push_back(Ok(vec![committed([1; 32]), committed([3; 32])]));
-    let record = run(&mut fake, &subcase("x", prefix(), committed_expect([3; 32])))?;
+    let record = run(
+        &mut fake,
+        &subcase("x", prefix(), committed_expect([3; 32])),
+    )?;
     assert!(record.matched, "no refusal: the last outcome decides");
 
     let mut fake = Fake::default();
     fake.passes.push_back(Ok(Vec::new()));
-    let record = run(&mut fake, &subcase("x", prefix(), committed_expect([3; 32])))?;
+    let record = run(
+        &mut fake,
+        &subcase("x", prefix(), committed_expect([3; 32])),
+    )?;
     assert!(record.outcomes.is_empty());
     assert!(!record.matched, "a pass with no member has no result");
     assert_eq!(record.steps_run, 3);
 
     let mut fake = Fake::default();
     fake.passes.push_back(Err(TRUST));
-    let record = run(&mut fake, &subcase("x", prefix(), committed_expect([3; 32])))?;
+    let record = run(
+        &mut fake,
+        &subcase("x", prefix(), committed_expect([3; 32])),
+    )?;
     assert_eq!(record.setup_refusal, Some(TRUST));
     Ok(())
 }
@@ -452,7 +496,10 @@ fn a_pass_that_does_not_commit_stops_and_the_first_such_outcome_decides() -> Tes
 #[test]
 fn a_committed_digest_that_differs_is_a_mismatch_with_the_observed_digest() -> TestResult {
     let mut fake = Fake::default();
-    let record = run(&mut fake, &subcase("pos.1", prefix(), committed_expect([8; 32])))?;
+    let record = run(
+        &mut fake,
+        &subcase("pos.1", prefix(), committed_expect([8; 32])),
+    )?;
     assert!(!record.matched);
     assert_eq!(record.committed, Some([7; 32]));
     Ok(())
@@ -511,7 +558,10 @@ fn a_scan_finds_the_marker_in_the_source_that_holds_it() -> TestResult {
         ..Fake::default()
     };
     let found = found_by(&mut all, "state-")?;
-    assert_eq!(found.0, [ScanSource::Events, ScanSource::State, ScanSource::Outcome]);
+    assert_eq!(
+        found.0,
+        [ScanSource::Events, ScanSource::State, ScanSource::Outcome]
+    );
     assert!(!found.1);
     Ok(())
 }
@@ -536,7 +586,10 @@ fn a_scan_reads_only_the_sources_it_names_once_and_in_order() -> TestResult {
 fn an_empty_marker_is_in_every_source() -> TestResult {
     let mut fake = Fake::default();
     let found = found_by(&mut fake, "")?;
-    assert_eq!(found.0, [ScanSource::Events, ScanSource::State, ScanSource::Outcome]);
+    assert_eq!(
+        found.0,
+        [ScanSource::Events, ScanSource::State, ScanSource::Outcome]
+    );
     Ok(())
 }
 
@@ -630,7 +683,10 @@ fn computed(
     steps: Vec<Value>,
     fake: &mut Fake,
 ) -> Result<Computed, Box<dyn std::error::Error>> {
-    let record = run(fake, &subcase("ind.x", steps, digest_expect(compute, &"00".repeat(32))))?;
+    let record = run(
+        fake,
+        &subcase("ind.x", steps, digest_expect(compute, &"00".repeat(32))),
+    )?;
     Ok(record.computed)
 }
 
@@ -643,11 +699,20 @@ fn each_compute_kind_has_a_golden() -> TestResult {
     let mut fake = Fake::default();
     let input = "PiglorOS independent fixture plugin-conformance";
     let blake = json!({"what": "blake3_of", "input": input});
-    assert_eq!(computed(&blake, Vec::new(), &mut fake)?, Some(digest_of(BLAKE3_IND_1)?));
-    assert_eq!(computed(&r7_d1(), Vec::new(), &mut fake)?, Some(digest_of(R7_D1)?));
+    assert_eq!(
+        computed(&blake, Vec::new(), &mut fake)?,
+        Some(digest_of(BLAKE3_IND_1)?)
+    );
+    assert_eq!(
+        computed(&r7_d1(), Vec::new(), &mut fake)?,
+        Some(digest_of(R7_D1)?)
+    );
 
     // The expectation compares the computed value with the payload's.
-    let record = run(&mut fake, &subcase("ind.4", Vec::new(), digest_expect(&r7_d1(), R7_D1)))?;
+    let record = run(
+        &mut fake,
+        &subcase("ind.4", Vec::new(), digest_expect(&r7_d1(), R7_D1)),
+    )?;
     assert!(record.matched);
     assert_eq!(record.steps_run, 0);
     let wrong = digest_expect(&r7_d1(), BLAKE3_IND_1);
@@ -659,16 +724,29 @@ fn each_compute_kind_has_a_golden() -> TestResult {
     let pmf1 = json!({"what": "release_identity", "field": "pmf1"});
     let release_field = json!({"what": "release_identity", "field": "release"});
     let output = json!({"what": "output_digest", "pass_index": 0});
-    assert_eq!(computed(&pmf1, prefix(), &mut Fake::default())?, Some([0xa1; 32]));
-    assert_eq!(computed(&release_field, prefix(), &mut Fake::default())?, Some([0xb2; 32]));
-    assert_eq!(computed(&output, prefix(), &mut Fake::default())?, Some([7; 32]));
+    assert_eq!(
+        computed(&pmf1, prefix(), &mut Fake::default())?,
+        Some([0xa1; 32])
+    );
+    assert_eq!(
+        computed(&release_field, prefix(), &mut Fake::default())?,
+        Some([0xb2; 32])
+    );
+    assert_eq!(
+        computed(&output, prefix(), &mut Fake::default())?,
+        Some([7; 32])
+    );
     Ok(())
 }
 
 #[test]
 fn a_compute_that_cannot_exist_is_a_mismatch() -> TestResult {
     let pmf1 = json!({"what": "release_identity", "field": "pmf1"});
-    assert_eq!(computed(&pmf1, Vec::new(), &mut Fake::default())?, None, "no bind");
+    assert_eq!(
+        computed(&pmf1, Vec::new(), &mut Fake::default())?,
+        None,
+        "no bind"
+    );
     assert_eq!(
         computed(&pmf1, vec![install_step("a")], &mut Fake::default())?,
         None,
@@ -676,24 +754,42 @@ fn a_compute_that_cannot_exist_is_a_mismatch() -> TestResult {
     );
     let mut refusing = Fake::default();
     refusing.binds.push_back(Err(TRUST));
-    assert_eq!(computed(&pmf1, prefix(), &mut refusing)?, None, "a refused bind");
+    assert_eq!(
+        computed(&pmf1, prefix(), &mut refusing)?,
+        None,
+        "a refused bind"
+    );
 
     for index in [1, 2, 9_007_199_254_740_991_u64] {
         let output = json!({"what": "output_digest", "pass_index": index});
-        assert_eq!(computed(&output, prefix(), &mut Fake::default())?, None, "{index}");
+        assert_eq!(
+            computed(&output, prefix(), &mut Fake::default())?,
+            None,
+            "{index}"
+        );
     }
     let output = json!({"what": "output_digest", "pass_index": 0});
     let mut refused_pass = Fake::default();
     refused_pass
         .passes
         .push_back(Ok(vec![refused("ArtifactTrustDenied", Some("Expired"))]));
-    assert_eq!(computed(&output, prefix(), &mut refused_pass)?, None, "a pass that refused");
+    assert_eq!(
+        computed(&output, prefix(), &mut refused_pass)?,
+        None,
+        "a pass that refused"
+    );
 
     let mut bad_rows = Vec::new();
     for (path, replacement) in [
         ("traps", json!([["OutOfFuel", "other"]])),
         ("traps", json!([["OutOfFuel", "bogus"]])),
-        ("traps", json!([["OutOfFuel", "FuelExhausted"], ["OutOfFuel", "FuelExhausted"]])),
+        (
+            "traps",
+            json!([
+                ["OutOfFuel", "FuelExhausted"],
+                ["OutOfFuel", "FuelExhausted"]
+            ]),
+        ),
     ] {
         let mut profile = r7_d1();
         profile["runtime"][path] = replacement;
@@ -703,7 +799,11 @@ fn a_compute_that_cannot_exist_is_a_mismatch() -> TestResult {
     small["ceilings"] = json!([1, 2, 3, 4, 5]);
     bad_rows.push(small);
     for profile in bad_rows {
-        assert_eq!(computed(&profile, Vec::new(), &mut Fake::default())?, None, "{profile}");
+        assert_eq!(
+            computed(&profile, Vec::new(), &mut Fake::default())?,
+            None,
+            "{profile}"
+        );
     }
     Ok(())
 }
@@ -717,7 +817,10 @@ fn the_features_and_rows_are_sorted_by_the_encoder_not_by_the_payload() -> TestR
         ["UnreachableCodeReached", "unreachable"],
         ["OutOfFuel", "FuelExhausted"],
     ]);
-    assert_eq!(computed(&reordered, Vec::new(), &mut Fake::default())?, Some(digest_of(R7_D1)?));
+    assert_eq!(
+        computed(&reordered, Vec::new(), &mut Fake::default())?,
+        Some(digest_of(R7_D1)?)
+    );
     Ok(())
 }
 
@@ -728,15 +831,31 @@ fn a_nested_document_decides_the_malformed_expectation() -> TestResult {
     let mut fake = Fake::default();
     let mut document = subcase("mal.6", Vec::new(), json!({"kind": "malformed"}));
     document["nested"] = json!(nested);
-    let record = interpret(&parsed(&document)?, &garbage, &mut fake, CommunityPluginModeV1::Local);
-    assert!(record.matched, "bytes that are not a sub-case document are malformed");
+    let record = interpret(
+        &parsed(&document)?,
+        &garbage,
+        &mut fake,
+        CommunityPluginModeV1::Local,
+    );
+    assert!(
+        record.matched,
+        "bytes that are not a sub-case document are malformed"
+    );
 
     let valid = subcase("n.1", Vec::new(), json!({"kind": "malformed"})).to_string();
     let with_valid = PiecesV1::from_blobs([valid.clone().into_bytes()]);
     document["nested"] = json!(hex::encode(blake3::hash(valid.as_bytes()).as_bytes()));
     let nested = parsed(&document)?;
-    let record = interpret(&nested, &with_valid, &mut fake, CommunityPluginModeV1::Local);
-    assert!(!record.matched, "a well-formed nested document is not malformed");
+    let record = interpret(
+        &nested,
+        &with_valid,
+        &mut fake,
+        CommunityPluginModeV1::Local,
+    );
+    assert!(
+        !record.matched,
+        "a well-formed nested document is not malformed"
+    );
     Ok(())
 }
 
@@ -809,10 +928,21 @@ fn the_material_of_a_pass_is_that_of_the_most_recent_bind_or_refresh() -> TestRe
     };
     let pass_p = pass_step(vec![member("p")]);
     assert!(pass(vec![bind_step("a", "p", material()), pass_p.clone()])?);
-    assert!(!pass(vec![bind_step("a", "p", Value::Null), pass_p.clone()])?);
-    let steps = vec![bind_step("a", "p", material()), refresh_step(Value::Null), pass_p.clone()];
+    assert!(!pass(vec![
+        bind_step("a", "p", Value::Null),
+        pass_p.clone()
+    ])?);
+    let steps = vec![
+        bind_step("a", "p", material()),
+        refresh_step(Value::Null),
+        pass_p.clone(),
+    ];
     assert!(!pass(steps)?, "a refresh with no material replaces it");
-    let steps = vec![bind_step("a", "p", Value::Null), refresh_step(material()), pass_p];
+    let steps = vec![
+        bind_step("a", "p", Value::Null),
+        refresh_step(material()),
+        pass_p,
+    ];
     assert!(pass(steps)?);
     Ok(())
 }
@@ -820,10 +950,18 @@ fn the_material_of_a_pass_is_that_of_the_most_recent_bind_or_refresh() -> TestRe
 #[test]
 fn a_release_named_twice_is_one_entry() -> TestResult {
     // `new` would refuse the duplicate address, so this proves the deduplication.
-    let steps = vec![install_step("a"), bind_step("a", "p", material()), install_step("b")];
+    let steps = vec![
+        install_step("a"),
+        bind_step("a", "p", material()),
+        install_step("b"),
+    ];
     let prepared = build(&subcase("x", steps, committed_expect([0; 32])))?;
     assert!(prepared.source.is_some());
-    let none = build(&subcase("x", vec![refresh_step(material())], committed_expect([0; 32])))?;
+    let none = build(&subcase(
+        "x",
+        vec![refresh_step(material())],
+        committed_expect([0; 32]),
+    ))?;
     assert!(none.source.is_none(), "no release, no source");
     let empty = build(&subcase("x", Vec::new(), committed_expect([0; 32])))?;
     assert!(empty.source.is_none() && empty.genesis.is_none() && empty.steps.is_empty());
@@ -864,7 +1002,11 @@ fn a_digest_that_names_no_piece_is_payload_invalid_everywhere() -> TestResult {
         assert!(invalid(&document)?, "{pointer}");
     }
     // A member without `at` whose Plugin no bind named.
-    let document = subcase("x", vec![bind(), pass_step(vec![member("q")])], expect.clone());
+    let document = subcase(
+        "x",
+        vec![bind(), pass_step(vec![member("q")])],
+        expect.clone(),
+    );
     assert!(invalid(&document)?);
     let document = subcase("x", vec![good_pass], expect.clone());
     assert!(invalid(&document)?, "a pass before any bind");

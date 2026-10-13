@@ -733,7 +733,10 @@ impl Run<'_> {
             .as_ref()
             .map(|bound| bound.plugin_id.clone())
             .unwrap_or_default();
-        let invocation = self.invocation.map(|id| hex::encode(&id)).unwrap_or_default();
+        let invocation = self
+            .invocation
+            .map(|id| hex::encode(&id))
+            .unwrap_or_default();
         self.record.scan = Some(ScanResultV1 {
             found,
             retained_ok: plugin_id == scan.retained_plugin_id
@@ -766,12 +769,12 @@ impl Run<'_> {
     fn compute(&self, compute: &ComputeV1) -> Option<[u8; 32]> {
         match compute {
             ComputeV1::Blake3Of(of) => Some(blake3_of(of.input.as_str())),
-            ComputeV1::ReleaseIdentity(identity) => self.bound.as_ref().map(|bound| {
-                match identity.field {
+            ComputeV1::ReleaseIdentity(identity) => {
+                self.bound.as_ref().map(|bound| match identity.field {
                     IdentityFieldV1::Pmf1 => bound.identity.pmf1_digest,
                     IdentityFieldV1::Release => bound.identity.release_digest,
-                }
-            }),
+                })
+            }
             ComputeV1::OutputDigest(output) => usize::try_from(output.pass_index.0)
                 .ok()
                 .and_then(|index| self.record.outcomes.get(index))
@@ -788,10 +791,9 @@ impl Run<'_> {
     /// Whether the sub-result `result` and the record satisfy the expectation.
     fn matches(&self, subcase: &SubCaseV1, result: Option<SubResultV1>, pieces: &PiecesV1) -> bool {
         match (&subcase.expect, result) {
-            (
-                ExpectV1::Committed(expect),
-                Some(SubResultV1::Committed { output_digest, .. }),
-            ) => output_digest == expect.output_digest.0,
+            (ExpectV1::Committed(expect), Some(SubResultV1::Committed { output_digest, .. })) => {
+                output_digest == expect.output_digest.0
+            }
             (
                 ExpectV1::Refused(expect),
                 Some(SubResultV1::Refused {
@@ -819,10 +821,7 @@ impl Run<'_> {
                 .as_ref()
                 .is_some_and(|scan| scan.found.is_empty() && scan.retained_ok),
             (ExpectV1::Digest(expect), _) => self.record.computed == Some(expect.value.0),
-            (
-                ExpectV1::Committed(_) | ExpectV1::Refused(_) | ExpectV1::Failed(_),
-                _,
-            ) => false,
+            (ExpectV1::Committed(_) | ExpectV1::Refused(_) | ExpectV1::Failed(_), _) => false,
         }
     }
 }
@@ -839,7 +838,10 @@ fn is_committed(outcome: &CommunityPluginSubjectOutcomeV1) -> bool {
 
 /// Whether `haystack` holds `marker`; the empty marker is in every source.
 fn contains(haystack: &[u8], marker: &[u8]) -> bool {
-    marker.is_empty() || haystack.windows(marker.len()).any(|window| window == marker)
+    marker.is_empty()
+        || haystack
+            .windows(marker.len())
+            .any(|window| window == marker)
 }
 
 /// The execution profile digest of a payload's ceilings and runtime.

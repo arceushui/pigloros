@@ -99,11 +99,9 @@ pub fn of_outcome(outcome: &CommunityPluginSubjectOutcomeV1) -> SubResultV1 {
         CommunityPluginSubjectResultV1::Committed {
             output_digest: Some(output_digest),
             metering: Some(metering),
-        } => usage_of(metering).map_or(SubResultV1::Operational, |usage| {
-            SubResultV1::Committed {
-                output_digest,
-                usage,
-            }
+        } => usage_of(metering).map_or(SubResultV1::Operational, |usage| SubResultV1::Committed {
+            output_digest,
+            usage,
         }),
         CommunityPluginSubjectResultV1::Refused {
             error,
@@ -224,7 +222,11 @@ const fn larger(left: ResourceUsage, right: ResourceUsage) -> ResourceUsage {
 
 /// The greater of two counters.
 const fn greater(left: u64, right: u64) -> u64 {
-    if left >= right { left } else { right }
+    if left >= right {
+        left
+    } else {
+        right
+    }
 }
 
 /// The result of the case `case_id` of `family` over the records of its sub-cases.
@@ -290,14 +292,23 @@ pub fn record_bytes(case_id: &str, family: FixtureFamily, records: &[SubCaseReco
 fn entry(family: FixtureFamily, record: &SubCaseRecordV1) -> JsonV1 {
     let id = JsonV1::text(&record.id);
     match (family, record) {
-        (FixtureFamily::Positive, SubCaseRecordV1 { committed: Some(digest), .. }) => {
-            JsonV1::object([
-                ("id", id),
-                ("kind", JsonV1::text("committed")),
-                ("output_digest", JsonV1::text(&hex::encode(digest))),
-            ])
-        }
-        (FixtureFamily::DeletionRedaction, SubCaseRecordV1 { scan: Some(scan), .. }) => {
+        (
+            FixtureFamily::Positive,
+            SubCaseRecordV1 {
+                committed: Some(digest),
+                ..
+            },
+        ) => JsonV1::object([
+            ("id", id),
+            ("kind", JsonV1::text("committed")),
+            ("output_digest", JsonV1::text(&hex::encode(digest))),
+        ]),
+        (
+            FixtureFamily::DeletionRedaction,
+            SubCaseRecordV1 {
+                scan: Some(scan), ..
+            },
+        ) => {
             let retained = JsonV1::object([
                 (
                     "invocation_id_hex",
@@ -315,13 +326,17 @@ fn entry(family: FixtureFamily, record: &SubCaseRecordV1) -> JsonV1 {
                 ("retained_metadata", retained),
             ])
         }
-        (FixtureFamily::IndependentEvaluation, SubCaseRecordV1 { computed: Some(digest), .. }) => {
-            JsonV1::object([
-                ("id", id),
-                ("kind", JsonV1::text("digest")),
-                ("value", JsonV1::text(&hex::encode(digest))),
-            ])
-        }
+        (
+            FixtureFamily::IndependentEvaluation,
+            SubCaseRecordV1 {
+                computed: Some(digest),
+                ..
+            },
+        ) => JsonV1::object([
+            ("id", id),
+            ("kind", JsonV1::text("digest")),
+            ("value", JsonV1::text(&hex::encode(digest))),
+        ]),
         _ => JsonV1::object([("id", id), ("kind", JsonV1::text("mismatch"))]),
     }
 }

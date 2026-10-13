@@ -77,11 +77,7 @@ fn an_attempt_on_stdin_gives_one_observation_on_stdout() -> TestResult {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or("no stdin")?
-        .write_all(&stream)?;
+    child.stdin.take().ok_or("no stdin")?.write_all(&stream)?;
     let output = child.wait_with_output()?;
     assert!(output.status.success());
     let observation = read_observation(output.stdout.as_slice(), 1_048_576)?;
@@ -102,11 +98,7 @@ fn an_attempt_that_is_not_executed_gives_no_observation_and_a_non_zero_exit() ->
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or("no stdin")?
-        .write_all(&stream)?;
+    child.stdin.take().ok_or("no stdin")?.write_all(&stream)?;
     let output = child.wait_with_output()?;
     assert_eq!(output.status.code(), Some(3), "not executed");
     assert!(output.stdout.is_empty());

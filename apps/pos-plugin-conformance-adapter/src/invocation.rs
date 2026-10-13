@@ -13,9 +13,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use pos_core::{Capability, Kind, Plugin, PluginId, TimelineId};
-use pos_plugin_supervisor::{
-    InvocationBindingV1, InvocationContextSourceV1, InvocationContextV1,
-};
+use pos_plugin_supervisor::{InvocationBindingV1, InvocationContextSourceV1, InvocationContextV1};
 use pos_runtime::community_plugin_host::{
     ArtifactRefV1, CommunityPluginHostErrorV1, HostInputs, PluginInvocationV1, TimelinePositionV1,
 };

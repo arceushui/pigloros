@@ -87,7 +87,9 @@ impl<'de> Deserialize<'de> for Hex32 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
         let bytes = hex::decode_array::<32>(&text);
-        bytes.map(Self).ok_or_else(|| de::Error::custom("not hex32"))
+        bytes
+            .map(Self)
+            .ok_or_else(|| de::Error::custom("not hex32"))
     }
 }
 
@@ -99,7 +101,9 @@ impl<'de> Deserialize<'de> for Hex16 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
         let bytes = hex::decode_array::<16>(&text);
-        bytes.map(Self).ok_or_else(|| de::Error::custom("not hex16"))
+        bytes
+            .map(Self)
+            .ok_or_else(|| de::Error::custom("not hex16"))
     }
 }
 

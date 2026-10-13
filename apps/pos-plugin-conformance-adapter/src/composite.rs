@@ -157,14 +157,9 @@ pub fn decode_anchor(bytes: &[u8]) -> Option<CommunityTrustAnchorBytesV1> {
 fn anchor_of(value: &Value) -> Option<CommunityTrustAnchorBytesV1> {
     match value {
         Value::Array(items) => match items.as_slice() {
-            [
-                Value::Text(tag),
-                Value::Integer(version),
-                Value::Text(scope),
-                Value::Bytes(genesis),
-                Value::Bytes(key),
-                Value::Bytes(tps1),
-            ] if tag == "PCA1" && unsigned(version) == Some(1) => {
+            [Value::Text(tag), Value::Integer(version), Value::Text(scope), Value::Bytes(genesis), Value::Bytes(key), Value::Bytes(tps1)]
+                if tag == "PCA1" && unsigned(version) == Some(1) =>
+            {
                 let digests = digest_of(genesis).zip(digest_of(key)).zip(digest_of(tps1));
                 digests.map(|((genesis, key), tps1)| CommunityTrustAnchorBytesV1 {
                     scope: scope.clone(),

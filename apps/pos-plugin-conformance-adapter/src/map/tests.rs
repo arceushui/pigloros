@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use pos_plugin_release::ContentValidationV1;
 use pos_runtime::community_plugin_host::{
-    AtomicCommitFailureV1, ComponentTrapClassV1, CommunityPluginModeV1, RevocationBasisV1,
+    AtomicCommitFailureV1, CommunityPluginModeV1, ComponentTrapClassV1, RevocationBasisV1,
     TrapReproductionV1, TrustDenialBasisV1,
 };
 
@@ -213,7 +213,11 @@ fn every_result_variant_maps_and_an_incomplete_record_is_operational() {
         R::Discarded,
     ];
     for result in operational {
-        assert_eq!(of_outcome(&outcome(result)), SubResultV1::Operational, "{result:?}");
+        assert_eq!(
+            of_outcome(&outcome(result)),
+            SubResultV1::Operational,
+            "{result:?}"
+        );
     }
 }
 
@@ -243,7 +247,11 @@ fn an_unknown_name_or_class_is_operational() {
         },
     ];
     for result in unknown {
-        assert_eq!(of_outcome(&outcome(result)), SubResultV1::Operational, "{result:?}");
+        assert_eq!(
+            of_outcome(&outcome(result)),
+            SubResultV1::Operational,
+            "{result:?}"
+        );
     }
 }
 
@@ -271,12 +279,18 @@ fn the_record_result_is_the_setup_refusal_else_the_last_outcome_else_none() {
         outcomes: vec![outcome(refused), outcome(committed)],
         ..empty.clone()
     };
-    assert!(matches!(of_record(&both), Some(SubResultV1::Committed { .. })));
+    assert!(matches!(
+        of_record(&both),
+        Some(SubResultV1::Committed { .. })
+    ));
     let refusal = SubCaseRecordV1 {
         setup_refusal: Some(E::IncompatibleAbi),
         ..both
     };
-    assert!(matches!(of_record(&refusal), Some(SubResultV1::Refused { .. })));
+    assert!(matches!(
+        of_record(&refusal),
+        Some(SubResultV1::Refused { .. })
+    ));
 }
 
 #[test]
@@ -316,7 +330,11 @@ fn an_operational_result_is_never_a_failure_or_an_output() {
                 ..matched("x")
             };
             let decided = case_result("c", *family, &[record]);
-            assert_eq!(decided.result, SubjectResult::Unavailable, "{family:?} {result:?}");
+            assert_eq!(
+                decided.result,
+                SubjectResult::Unavailable,
+                "{family:?} {result:?}"
+            );
             assert_eq!(decided.usage, ResourceUsage::default());
         }
     }
@@ -350,7 +368,11 @@ fn one_operational_subresult_at_any_position_makes_the_case_unavailable() {
                 })
                 .collect();
             let decided = case_result("c", family, &records);
-            assert_eq!(decided.result, SubjectResult::Unavailable, "{family:?} {position}");
+            assert_eq!(
+                decided.result,
+                SubjectResult::Unavailable,
+                "{family:?} {position}"
+            );
         }
     }
 }
@@ -377,7 +399,11 @@ fn a_failure_family_is_its_fixed_code_when_every_subcase_matched_else_subcase_mi
             let mut records = all.clone();
             records[position].matched = false;
             let decided = case_result("c", family, &records);
-            assert_eq!(failure_of(&decided), Some("subcase-mismatch"), "{family:?} {position}");
+            assert_eq!(
+                failure_of(&decided),
+                Some("subcase-mismatch"),
+                "{family:?} {position}"
+            );
         }
     }
 }
@@ -453,7 +479,11 @@ fn one_mismatch_changes_exactly_its_entry() {
                 || format!("{{\"id\":\"{id}\",\"kind\":\"mismatch\"}}"),
                 |_| committed_entry(&id, "09"),
             );
-            assert_eq!(seen, golden.replacen(&original, &replacement, 1), "{position}");
+            assert_eq!(
+                seen,
+                golden.replacen(&original, &replacement, 1),
+                "{position}"
+            );
             assert_ne!(seen, golden);
         }
     }
@@ -484,7 +514,11 @@ fn the_deletion_and_independent_entries_have_their_shapes() {
         ..SubCaseRecordV1::empty("del.3")
     };
     let records = [absent, present, skipped];
-    let seen = output_of(&case_result("c", FixtureFamily::DeletionRedaction, &records));
+    let seen = output_of(&case_result(
+        "c",
+        FixtureFamily::DeletionRedaction,
+        &records,
+    ));
     let entries = concat!(
         "{\"id\":\"del.1\",\"kind\":\"absent\",\"prohibited_data_present\":false,",
         "\"retained_metadata\":{\"invocation_id_hex\":\"ab\",\"plugin_id\":\"p\"}},",
@@ -504,7 +538,11 @@ fn the_deletion_and_independent_entries_have_their_shapes() {
         ..SubCaseRecordV1::empty("ind.2a")
     };
     let records = [computed, missing];
-    let seen = output_of(&case_result("c", FixtureFamily::IndependentEvaluation, &records));
+    let seen = output_of(&case_result(
+        "c",
+        FixtureFamily::IndependentEvaluation,
+        &records,
+    ));
     let opening = head("independent-evaluation");
     let entries = format!(
         concat!(
@@ -587,7 +625,14 @@ fn the_case_usage_is_the_per_counter_maximum_wherever_the_maximum_is() {
             for slot in 0_u8..3 {
                 let mut usage = ResourceUsage::default();
                 // Every sub-case reports a small value of this counter; one reports the maximum.
-                set(&mut usage, if slot == position { 1_000 } else { 10 + u64::from(slot) });
+                set(
+                    &mut usage,
+                    if slot == position {
+                        1_000
+                    } else {
+                        10 + u64::from(slot)
+                    },
+                );
                 records.push(usage_record("pos", usage));
             }
             set(&mut expected, 1_000);
@@ -617,7 +662,9 @@ fn every_failure_has_the_provider_identity_and_a_code_within_the_grammar() {
         assert_eq!(value.contract_version, "2.0.0");
         assert_eq!(value.code_id, code);
         let mut chars = code.chars();
-        let first = chars.next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+        let first = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
         let rest = chars.all(|c| {
             c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '/' | '-')
         });

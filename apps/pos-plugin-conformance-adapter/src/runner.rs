@@ -16,9 +16,8 @@ use pos_core::Hash;
 use pos_plugin_release::InMemoryReleaseSourceV1;
 use pos_plugin_supervisor::{
     register_community_driver, CommunityDriverConfigV1, CommunityDriverSettingsV1,
-    CommunityDriverV1, CommunityMemberV1, CommunityPluginHandleV1,
-    CommunityPluginSubjectOutcomeV1, CommunityPluginSupervisorV1, CommunityStateV1,
-    WorkerProgramV1,
+    CommunityDriverV1, CommunityMemberV1, CommunityPluginHandleV1, CommunityPluginSubjectOutcomeV1,
+    CommunityPluginSupervisorV1, CommunityStateV1, WorkerProgramV1,
 };
 use pos_runtime::community_pin_v1;
 use pos_runtime::community_plugin_host::{
@@ -290,15 +289,12 @@ impl OpenWorld {
                 (built, handle)
             })
         };
-        self.source
-            .as_ref()
-            .ok_or(UNAVAILABLE)
-            .and_then(|source| {
-                args.members
-                    .iter()
-                    .map(|member| pair(member, source))
-                    .collect()
-            })
+        self.source.as_ref().ok_or(UNAVAILABLE).and_then(|source| {
+            args.members
+                .iter()
+                .map(|member| pair(member, source))
+                .collect()
+        })
     }
 
     fn pass(&mut self, args: &PassArgsV1) -> Result<Outcomes, HostError> {

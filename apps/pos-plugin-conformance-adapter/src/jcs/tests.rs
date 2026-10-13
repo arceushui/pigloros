@@ -15,7 +15,10 @@ fn objects_sort_their_keys_bytewise_and_nest() {
 fn the_line_ends_with_one_lf_and_empty_containers_are_compact() {
     assert_eq!(JsonV1::Array(Vec::new()).line(), b"[]\n");
     assert_eq!(JsonV1::Object(Vec::new()).line(), b"{}\n");
-    assert_eq!(JsonV1::Number(u64::MAX).canonical(), b"18446744073709551615");
+    assert_eq!(
+        JsonV1::Number(u64::MAX).canonical(),
+        b"18446744073709551615"
+    );
 }
 
 #[test]

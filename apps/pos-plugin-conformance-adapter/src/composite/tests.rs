@@ -15,7 +15,10 @@ fn digest(bytes: &[u8]) -> [u8; 32] {
 }
 
 fn pair(digest: &[u8], bytes: &[u8]) -> Value {
-    Value::Array(vec![Value::Bytes(digest.to_vec()), Value::Bytes(bytes.to_vec())])
+    Value::Array(vec![
+        Value::Bytes(digest.to_vec()),
+        Value::Bytes(bytes.to_vec()),
+    ])
 }
 
 /// The pieces of `blobs`, sorted by digest.
@@ -61,7 +64,11 @@ fn a_canonical_composite_gives_its_pieces() -> TestResult {
 
 #[test]
 fn the_composite_is_the_unique_member_with_the_header() -> TestResult {
-    let others = vec![member(b"evidence".to_vec()), member(vec![0x83, 0x64]), member(Vec::new())];
+    let others = vec![
+        member(b"evidence".to_vec()),
+        member(vec![0x83, 0x64]),
+        member(Vec::new()),
+    ];
     assert_eq!(PiecesV1::find(&others), Err(PiecesFaultV1::Missing));
     assert_eq!(PiecesV1::find(&[]), Err(PiecesFaultV1::Missing));
 
@@ -106,7 +113,9 @@ fn a_composite_that_is_not_canonical_cbor_is_invalid() -> TestResult {
 
     // A byte string of a piece in an indefinite-length chunked form.
     let digest_bytes = digest(b"a");
-    let mut chunked = vec![0x83, 0x64, 0x50, 0x43, 0x57, 0x32, 0x01, 0x81, 0x82, 0x58, 0x20];
+    let mut chunked = vec![
+        0x83, 0x64, 0x50, 0x43, 0x57, 0x32, 0x01, 0x81, 0x82, 0x58, 0x20,
+    ];
     chunked.extend(digest_bytes);
     chunked.extend([0x5f, 0x41, b'a', 0xff]);
     assert!(invalid(&chunked), "indefinite-length byte string");
@@ -120,18 +129,53 @@ fn a_composite_of_the_wrong_shape_is_invalid() -> TestResult {
     let shapes = [
         Value::Array(vec![header(), one()]),
         Value::Array(vec![header(), one(), Value::Array(Vec::new()), one()]),
-        Value::Array(vec![Value::Text("PCW3".to_owned()), one(), Value::Array(Vec::new())]),
-        Value::Array(vec![header(), Value::Integer(2_u8.into()), Value::Array(Vec::new())]),
-        Value::Array(vec![header(), Value::Text("1".to_owned()), Value::Array(Vec::new())]),
-        Value::Array(vec![header(), Value::Integer((-1_i8).into()), Value::Array(Vec::new())]),
+        Value::Array(vec![
+            Value::Text("PCW3".to_owned()),
+            one(),
+            Value::Array(Vec::new()),
+        ]),
+        Value::Array(vec![
+            header(),
+            Value::Integer(2_u8.into()),
+            Value::Array(Vec::new()),
+        ]),
+        Value::Array(vec![
+            header(),
+            Value::Text("1".to_owned()),
+            Value::Array(Vec::new()),
+        ]),
+        Value::Array(vec![
+            header(),
+            Value::Integer((-1_i8).into()),
+            Value::Array(Vec::new()),
+        ]),
         Value::Array(vec![header(), one(), Value::Bytes(Vec::new())]),
-        Value::Array(vec![header(), one(), Value::Array(vec![Value::Bytes(Vec::new())])]),
+        Value::Array(vec![
+            header(),
+            one(),
+            Value::Array(vec![Value::Bytes(Vec::new())]),
+        ]),
         composite_of(1, vec![Value::Array(vec![Value::Bytes(vec![0; 32])])]),
-        composite_of(1, vec![Value::Array(vec![bytes(&[0; 32]), bytes(&[]), Value::Null])]),
-        composite_of(1, vec![Value::Array(vec![Value::Text("d".to_owned()), bytes(&[])])]),
-        composite_of(1, vec![Value::Array(vec![bytes(&digest(b"")), Value::Text(String::new())])]),
+        composite_of(
+            1,
+            vec![Value::Array(vec![bytes(&[0; 32]), bytes(&[]), Value::Null])],
+        ),
+        composite_of(
+            1,
+            vec![Value::Array(vec![Value::Text("d".to_owned()), bytes(&[])])],
+        ),
+        composite_of(
+            1,
+            vec![Value::Array(vec![
+                bytes(&digest(b"")),
+                Value::Text(String::new()),
+            ])],
+        ),
         composite_of(1, vec![pair(&digest(b"x")[..31], b"x")]),
-        composite_of(1, vec![pair(&[digest(b"x").as_slice(), b"0"].concat(), b"x")]),
+        composite_of(
+            1,
+            vec![pair(&[digest(b"x").as_slice(), b"0"].concat(), b"x")],
+        ),
     ];
     for shape in shapes {
         // Prefix the header of the composite so the same bytes would also be found.
@@ -153,7 +197,10 @@ fn a_piece_must_hash_to_its_digest() -> TestResult {
 fn pieces_must_be_strictly_ascending_by_digest() -> TestResult {
     let mut list = sorted(&[b"alpha", b"beta"]);
     let duplicate = vec![list[0].clone(), list[0].clone()];
-    assert!(invalid(&encode(&composite_of(1, duplicate))?), "duplicate digest");
+    assert!(
+        invalid(&encode(&composite_of(1, duplicate))?),
+        "duplicate digest"
+    );
     list.reverse();
     assert!(invalid(&encode(&composite_of(1, list))?), "descending");
     Ok(())
@@ -164,7 +211,10 @@ fn from_blobs_addresses_each_blob_by_digest() {
     let pieces = PiecesV1::from_blobs([b"one".to_vec(), b"two".to_vec()]);
     assert_eq!(pieces.get(&digest(b"one")), Some(b"one".as_slice()));
     assert_eq!(pieces.get(&digest(b"two")), Some(b"two".as_slice()));
-    assert_eq!(pieces, PiecesV1::from_blobs([b"two".to_vec(), b"one".to_vec()]));
+    assert_eq!(
+        pieces,
+        PiecesV1::from_blobs([b"two".to_vec(), b"one".to_vec()])
+    );
 }
 
 fn anchor_value(tag: &str, version: u8, scope: Value, lengths: [usize; 3]) -> Value {

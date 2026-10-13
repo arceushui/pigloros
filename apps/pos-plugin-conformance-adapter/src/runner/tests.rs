@@ -13,10 +13,10 @@ use serde_json::{json, Value};
 use super::*;
 use crate::map::{case_result, of_record, SubResultV1};
 use crate::payload::ScanSource;
+use crate::run_with;
 use crate::test_support::{
     attempt, composite, hex_of, observation, parsed, payload, stream, subcase, TestResult,
 };
-use crate::run_with;
 
 type BoxError = Box<dyn std::error::Error>;
 
@@ -163,7 +163,11 @@ impl Real {
     fn run(&self, steps: Vec<Value>, expect: Value) -> Result<SubCaseRecordV1, BoxError> {
         let document = subcase("x", steps, expect);
         let runner = runner_for("/bin/false")?;
-        Ok(runner.run(&parsed(&document)?, &self.pieces, CommunityPluginModeV1::Local))
+        Ok(runner.run(
+            &parsed(&document)?,
+            &self.pieces,
+            CommunityPluginModeV1::Local,
+        ))
     }
 }
 
@@ -188,7 +192,10 @@ fn zeros() -> String {
 fn a_worker_that_exits_without_a_reply_is_a_crash_and_the_case_is_unavailable() -> TestResult {
     let real = Real::new()?;
     for program in ["/bin/false", "/nonexistent/pos-plugin-worker"] {
-        for mode in [CommunityPluginModeV1::Local, CommunityPluginModeV1::AirGapped] {
+        for mode in [
+            CommunityPluginModeV1::Local,
+            CommunityPluginModeV1::AirGapped,
+        ] {
             let document = subcase("res.x", real.crash_steps(), crashed());
             let runner = runner_for(program)?;
             let record = runner.run(&parsed(&document)?, &real.pieces, mode);
@@ -252,7 +259,9 @@ fn bind_gates_the_release_and_reports_its_identity() -> TestResult {
     let release = json!({"what": "release_identity", "field": "release"});
     let expect = json!({"kind": "digest", "compute": release, "value": zeros()});
     let record = real.run(steps, expect)?;
-    assert!(record.computed.is_some_and(|digest| digest != real.pmf1_digest));
+    assert!(record
+        .computed
+        .is_some_and(|digest| digest != real.pmf1_digest));
     Ok(())
 }
 
@@ -275,13 +284,24 @@ fn a_scan_reads_the_drivers_state_the_events_and_the_outcome_from_the_world() ->
     ];
     let record = real.run(steps, absent("init"))?;
     let scan = record.scan.ok_or("no scan")?;
-    assert_eq!(scan.found, [ScanSource::State], "the initial state of the Driver");
+    assert_eq!(
+        scan.found,
+        [ScanSource::State],
+        "the initial state of the Driver"
+    );
     assert_eq!(scan.observed_plugin_id, PLUGIN);
 
-    let steps = vec![real.install(50_000_000), real.scan(&["events", "outcome", "state"], "init")];
+    let steps = vec![
+        real.install(50_000_000),
+        real.scan(&["events", "outcome", "state"], "init"),
+    ];
     let record = real.run(steps, absent("init"))?;
     let scan = record.scan.ok_or("no scan")?;
-    assert_eq!(scan.found, Vec::<ScanSource>::new(), "no Event, no Driver, no outcome");
+    assert_eq!(
+        scan.found,
+        Vec::<ScanSource>::new(),
+        "no Event, no Driver, no outcome"
+    );
     Ok(())
 }
 
@@ -357,7 +377,9 @@ fn unreadable_material_and_an_empty_address_are_trust_state_unavailable() -> Tes
 
 fn fixture_wall(second: u64) -> Result<FixtureWallSourceV1, BoxError> {
     let instant = FixtureEvaluationInstantV1::from_micros(second * 1_000_000);
-    Ok(FixtureWallSourceV1::new(instant.map_err(|e| format!("{e:?}"))?))
+    Ok(FixtureWallSourceV1::new(
+        instant.map_err(|e| format!("{e:?}"))?,
+    ))
 }
 
 const fn expired() -> HostError {
@@ -374,7 +396,8 @@ struct Gates {
 impl Gates {
     fn new() -> Result<Self, BoxError> {
         let real = Real::new()?;
-        let world = CommunityEvaluationWorldV1::open(&real.material).map_err(|e| format!("{e:?}"))?;
+        let world =
+            CommunityEvaluationWorldV1::open(&real.material).map_err(|e| format!("{e:?}"))?;
         Ok(Self { real, world })
     }
 
@@ -450,7 +473,11 @@ fn the_fixture_source_is_accepted_by_a_pass_and_a_refresh() -> TestResult {
         .map_err(|e| format!("{e:?}"))?;
     assert_eq!(pass.utc, Some(50));
     let mut wall = fixture_wall(50)?;
-    drop(gates.world.refresh(&mut host, &gates.real.material, &mut wall, TICK));
+    drop(
+        gates
+            .world
+            .refresh(&mut host, &gates.real.material, &mut wall, TICK),
+    );
     Ok(())
 }
 

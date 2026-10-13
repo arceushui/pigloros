@@ -112,7 +112,11 @@ fn base() -> Value {
             json!([scan()]),
             json!({"kind": "absent", "marker": "m", "retained": retained()}),
         ),
-        subcase("ind.1", json!([]), digest(json!({"what": "blake3_of", "input": "x"}))),
+        subcase(
+            "ind.1",
+            json!([]),
+            digest(json!({"what": "blake3_of", "input": "x"})),
+        ),
         subcase(
             "ind.2a",
             json!([]),
@@ -228,7 +232,10 @@ fn a_missing_key_is_payload_invalid_in_every_object() -> TestResult {
 fn a_null_is_only_accepted_where_the_grammar_says_material_or_null() {
     let null_material = changed(|value| *at(value, "/subcases/0/steps/0/material") = Value::Null);
     assert!(null_material.is_ok());
-    for pointer in ["/subcases/0/steps/0/release", "/subcases/0/steps/1/event_type"] {
+    for pointer in [
+        "/subcases/0/steps/0/release",
+        "/subcases/0/steps/1/event_type",
+    ] {
         let result = changed(|value| *at(value, pointer) = Value::Null);
         assert_eq!(result, Err(PayloadInvalidV1), "{pointer}");
     }
@@ -337,7 +344,11 @@ fn the_family_must_be_the_attempts() {
     let bytes = value.to_string();
     for family in FixtureFamily::ALL {
         let result = CaseV1::parse(bytes.as_bytes(), *family);
-        assert_eq!(result.is_ok(), *family == FixtureFamily::Positive, "{family:?}");
+        assert_eq!(
+            result.is_ok(),
+            *family == FixtureFamily::Positive,
+            "{family:?}"
+        );
     }
 }
 
@@ -372,7 +383,11 @@ fn the_provider_header_is_required_in_downgrade_and_only_there() {
     assert_eq!(nulled, Err(PayloadInvalidV1));
     let mut value = base();
     value["provider"] = header();
-    assert_eq!(parse(&value), Err(PayloadInvalidV1), "provider in another family");
+    assert_eq!(
+        parse(&value),
+        Err(PayloadInvalidV1),
+        "provider in another family"
+    );
 }
 
 #[test]
@@ -391,7 +406,12 @@ fn the_provider_header_equals_the_transition() {
     }
     let unknown = downgrade(|value| value["provider"]["extra"] = json!(1));
     assert_eq!(unknown, Err(PayloadInvalidV1));
-    for key in header().as_object().map(|object| object.keys().cloned()).into_iter().flatten() {
+    for key in header()
+        .as_object()
+        .map(|object| object.keys().cloned())
+        .into_iter()
+        .flatten()
+    {
         let missing = downgrade(|value| {
             if let Some(object) = value["provider"].as_object_mut() {
                 object.remove(&key);
@@ -416,7 +436,11 @@ fn nested_and_the_malformed_expectation_belong_to_mal_6_only() {
     let expecting = changed(|value| {
         *at(value, "/subcases/10/expect") = json!({"kind": "failed", "error": "e", "class": "c"});
     });
-    assert_eq!(expecting, Err(PayloadInvalidV1), "mal.6 expecting something else");
+    assert_eq!(
+        expecting,
+        Err(PayloadInvalidV1),
+        "mal.6 expecting something else"
+    );
     let moved = changed(|value| *at(value, "/subcases/3/expect") = json!({"kind": "malformed"}));
     assert_eq!(moved, Err(PayloadInvalidV1), "malformed outside mal.6");
 }
@@ -516,7 +540,10 @@ fn the_profile_compute_arrays_have_their_exact_shapes() {
         ("runtime/engine", json!([1, true])),
         ("runtime/engine", json!([1, true, false, true])),
         ("runtime/traps", json!([["OutOfFuel"]])),
-        ("runtime/traps", json!([["OutOfFuel", "FuelExhausted", "x"]])),
+        (
+            "runtime/traps",
+            json!([["OutOfFuel", "FuelExhausted", "x"]]),
+        ),
     ];
     for (path, replacement) in wrong {
         let place = format!("{pointer}/{path}");

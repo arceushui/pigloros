@@ -21,7 +21,10 @@ fn the_context_carries_the_inputs_the_constants_and_the_binding() {
     let context = build_context(inputs(), timeline, binding);
     let invocation = context.invocation;
     assert_eq!(invocation.invocation_id, [0x11; 16]);
-    assert_eq!(invocation.timeline_position.timeline_id, timeline.inner().to_bytes());
+    assert_eq!(
+        invocation.timeline_position.timeline_id,
+        timeline.inner().to_bytes()
+    );
     assert_eq!(invocation.timeline_position.seq, 7);
     assert_eq!(invocation.timeline_position.tick, 5);
     assert_eq!(invocation.timeline_position.scheduler_position, 0);
@@ -59,8 +62,14 @@ fn a_missing_profile_digest_is_written_as_zeros() {
 fn the_plugin_owns_the_event_type_of_its_bind_step() {
     let plugin = ConformancePluginV1::new("prototype.driven");
     let capability = plugin.capability();
-    assert_eq!(capability.owned_event_types, vec![Kind::new("prototype.driven")]);
+    assert_eq!(
+        capability.owned_event_types,
+        vec![Kind::new("prototype.driven")]
+    );
     assert!(capability.has_driver);
     assert_eq!(plugin.name(), "conformance");
-    assert_ne!(plugin.id(), ConformancePluginV1::new("prototype.driven").id());
+    assert_ne!(
+        plugin.id(),
+        ConformancePluginV1::new("prototype.driven").id()
+    );
 }

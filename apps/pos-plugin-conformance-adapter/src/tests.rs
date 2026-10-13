@@ -5,12 +5,12 @@ use pos_reference::evaluator_domain::{ClaimLayer, ExecutionMode, FixtureFamily};
 use pos_reference::profile::NamespacedFailure;
 use serde_json::json;
 
+use super::*;
+use crate::payload::family_text;
 use crate::test_support::{
     anchor_bytes, artifact, attempt, blake3_subcase, composite, composite_of, digest, hex_of,
     matched, observation, payload, sorted, stream, FakeRunner, TestResult,
 };
-use super::*;
-use crate::payload::family_text;
 
 fn full(id: &str) -> SubCaseRecordV1 {
     SubCaseRecordV1 {
@@ -36,7 +36,9 @@ fn failure(code: &str) -> SubjectResult {
 
 fn two_subcases(family: FixtureFamily) -> Vec<u8> {
     let subcases = vec![blake3_subcase("ind.1", "a"), blake3_subcase("ind.2a", "b")];
-    payload(family_text(family), subcases).to_string().into_bytes()
+    payload(family_text(family), subcases)
+        .to_string()
+        .into_bytes()
 }
 
 /// Run the EAI1 stream of `attempt` through a fake runner that matches every sub-case.
@@ -106,7 +108,10 @@ fn a_wire_fault_gives_no_stream_and_a_non_zero_exit() -> TestResult {
 #[test]
 fn a_foreign_layer_or_a_replay_or_fork_attempt_is_unavailable_with_zero_usage() -> TestResult {
     let mut attempts = Vec::new();
-    for layer in [ClaimLayer::ArtifactIntegrity, ClaimLayer::GatewayClientConformance] {
+    for layer in [
+        ClaimLayer::ArtifactIntegrity,
+        ClaimLayer::GatewayClientConformance,
+    ] {
         let mut case = attempt(
             FixtureFamily::Positive,
             ExecutionMode::Local,
@@ -184,12 +189,21 @@ fn a_pinned_schema_payload_that_is_not_json_or_invalid_is_payload_invalid() -> T
         b"[]".to_vec(),
         b"{}".to_vec(),
         unknown_key.to_string().into_bytes(),
-        payload("denied", vec![blake3_subcase("ind.1", "a")]).to_string().into_bytes(),
-        json!({"schema": 5, "family": "positive", "subcases": []}).to_string().into_bytes(),
+        payload("denied", vec![blake3_subcase("ind.1", "a")])
+            .to_string()
+            .into_bytes(),
+        json!({"schema": 5, "family": "positive", "subcases": []})
+            .to_string()
+            .into_bytes(),
     ];
     for bytes in payloads {
         let auxiliary = vec![composite(&[])?];
-        let case = attempt(FixtureFamily::Positive, ExecutionMode::Local, bytes, auxiliary);
+        let case = attempt(
+            FixtureFamily::Positive,
+            ExecutionMode::Local,
+            bytes,
+            auxiliary,
+        );
         let (result, out, calls) = run_matching(&case)?;
         assert_eq!(result, Ok(()));
         assert_eq!(calls, 0, "no sub-case runs");
@@ -236,7 +250,10 @@ fn a_digest_that_names_no_piece_or_an_undecodable_anchor_is_payload_invalid() ->
     let (result, out, calls) = run_matching(&complete)?;
     assert_eq!(result, Ok(()));
     assert_eq!(calls, 1, "the control runs");
-    assert!(matches!(observation(&out)?.result, SubjectResult::Output(_)));
+    assert!(matches!(
+        observation(&out)?.result,
+        SubjectResult::Output(_)
+    ));
 
     // The anchor piece is missing, the anchor does not decode, a blob is missing.
     let cases = [
@@ -321,7 +338,10 @@ fn every_sub_case_runs_in_the_mode_of_the_attempt() -> TestResult {
         run_with(&runner, stream(&case)?.as_slice(), Vec::new())?;
         assert_eq!(
             runner.calls(),
-            vec![("ind.1".to_owned(), expected), ("ind.2a".to_owned(), expected)]
+            vec![
+                ("ind.1".to_owned(), expected),
+                ("ind.2a".to_owned(), expected)
+            ]
         );
     }
     Ok(())
@@ -366,8 +386,14 @@ fn the_exit_code_names_the_error() {
     ];
     for (error, code) in codes {
         assert_eq!(error.code(), code);
-        assert_eq!(format!("{:?}", exit_code(Err(error))), format!("{:?}", ExitCode::from(code)));
+        assert_eq!(
+            format!("{:?}", exit_code(Err(error))),
+            format!("{:?}", ExitCode::from(code))
+        );
         assert!(!error.to_string().is_empty());
     }
-    assert_eq!(format!("{:?}", exit_code(Ok(()))), format!("{:?}", ExitCode::SUCCESS));
+    assert_eq!(
+        format!("{:?}", exit_code(Ok(()))),
+        format!("{:?}", ExitCode::SUCCESS)
+    );
 }

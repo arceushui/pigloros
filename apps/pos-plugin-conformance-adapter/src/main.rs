@@ -9,10 +9,8 @@
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
-    let result = pos_plugin_conformance_adapter::run(
-        std::io::stdin().lock(),
-        std::io::stdout().lock(),
-    );
+    let result =
+        pos_plugin_conformance_adapter::run(std::io::stdin().lock(), std::io::stdout().lock());
     pos_plugin_conformance_adapter::exit_code(result)
 }
 

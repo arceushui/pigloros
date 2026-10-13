@@ -67,7 +67,11 @@ impl JsonV1 {
 
 /// The JSON literal of a boolean.
 const fn literal(value: bool) -> &'static str {
-    if value { "true" } else { "false" }
+    if value {
+        "true"
+    } else {
+        "false"
+    }
 }
 
 /// The items of an array, separated by commas.
