@@ -118,7 +118,10 @@ impl NativeReadContextV1<'_, '_> {
         self.check().map(|()| (operation, origin))
     }
 
-    pub(crate) fn publication_artifact(&mut self, bytes: &[u8]) -> Result<ForkPublicationArtifactV1> {
+    pub(crate) fn publication_artifact(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<ForkPublicationArtifactV1> {
         self.check()?;
         if self.budget.is_some() {
             self.publication_artifact_allocations(bytes)?;
@@ -138,8 +141,8 @@ impl NativeReadContextV1<'_, '_> {
         let owner = bounded_field(signed, 2, 3, OWNER_MAX_BYTES)?;
         self.bytes(owner.len())?; // FSM1 decoder's temporary owner String.
         let manifest = bounded_field(signed, 5, 2, MAX_FORK_REPRO_MANIFEST_BYTES_V1)?;
-        let (count, mut sequences) = AdmissionCarrierV1::array_field(manifest, 10)
-            .ok_or(Error::PublicationConflict)?;
+        let (count, mut sequences) =
+            AdmissionCarrierV1::array_field(manifest, 10).ok_or(Error::PublicationConflict)?;
         if count > MAX_FORK_MANIFEST_INTERVENTIONS_V1 as u64 {
             return Err(Error::PublicationConflict);
         }
@@ -164,8 +167,9 @@ mod tests {
     use super::*;
     use crate::{
         fae1_fixture::{pin_policy, request_for, Fallible, Shape, Spec, World, PARENT_CUT},
-        memory::MemoryStore, ForkAttributionAuthorityImportPortV1,
-        ForkManifestPublicationPortV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
+        memory::MemoryStore,
+        ForkAttributionAuthorityImportPortV1, ForkManifestPublicationPortV1,
+        ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
     };
     use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
     use std::time::Duration;
@@ -181,8 +185,10 @@ mod tests {
         fn native_accepts(self, bytes: &[u8]) -> bool {
             match self {
                 Self::Binding => ForkPublicationBindingV1::from_canonical_cbor(bytes).is_ok(),
-                Self::Operation => ForkPublicationOperationV1::from_canonical_cbor(bytes).is_ok()
-                    || ImportedForkPublicationOperationV1::from_canonical_cbor(bytes).is_ok(),
+                Self::Operation => {
+                    ForkPublicationOperationV1::from_canonical_cbor(bytes).is_ok()
+                        || ImportedForkPublicationOperationV1::from_canonical_cbor(bytes).is_ok()
+                }
                 Self::Artifact => ForkPublicationArtifactV1::from_canonical_cbor(bytes).is_ok(),
             }
         }
@@ -190,7 +196,9 @@ mod tests {
         fn decode(self, bytes: &[u8], context: &mut NativeReadContextV1<'_, '_>) -> Result<()> {
             match self {
                 Self::Binding => context.publication_binding(bytes).map(|_| ()),
-                Self::Operation => context.publication_operation(bytes, AuthorityValidatorV1::CodeTwoAware).map(|_| ()),
+                Self::Operation => context
+                    .publication_operation(bytes, AuthorityValidatorV1::CodeTwoAware)
+                    .map(|_| ()),
                 Self::Artifact => context.publication_artifact(bytes).map(|_| ()),
             }
         }
@@ -207,11 +215,13 @@ mod tests {
     }
 
     fn artifact(committed: &crate::CommittedForkManifestV1) -> Fallible<ForkPublicationArtifactV1> {
-        Ok(ForkPublicationArtifactV1::new(pos_core::ForkPublicationArtifactInputV1 {
-            signed_manifest_record_id: committed.record_id,
-            operation_id: committed.operation.input().operation_id,
-            signed_manifest_bytes: committed.outer_bytes.clone(),
-        })?)
+        Ok(ForkPublicationArtifactV1::new(
+            pos_core::ForkPublicationArtifactInputV1 {
+                signed_manifest_record_id: committed.record_id,
+                operation_id: committed.operation.input().operation_id,
+                signed_manifest_bytes: committed.outer_bytes.clone(),
+            },
+        )?)
     }
 
     fn assert_parity(codec: Codec, bytes: &[u8]) -> Fallible<()> {
@@ -219,8 +229,12 @@ mod tests {
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 8 * 1024 * 1024, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-        assert_eq!(codec.decode(bytes, &mut NativeReadContextV1::protected(&mut budget)).is_ok(),
-            codec.native_accepts(bytes));
+        assert_eq!(
+            codec
+                .decode(bytes, &mut NativeReadContextV1::protected(&mut budget))
+                .is_ok(),
+            codec.native_accepts(bytes)
+        );
         assert!(budget.check_time().is_ok());
         Ok(())
     }
@@ -229,7 +243,8 @@ mod tests {
     fn publication_carriers_preserve_strict_native_acceptance_on_current_bytes() -> Fallible<()> {
         let committed = committed()?;
         let imported = ImportedForkPublicationOperationV1::from_local(
-            committed.operation.clone(), committed.authority_origin_digest.ok_or("no origin")?,
+            committed.operation.clone(),
+            committed.authority_origin_digest.ok_or("no origin")?,
         );
         for (codec, bytes) in [
             (Codec::Binding, committed.binding.to_canonical_cbor()),
@@ -258,22 +273,40 @@ mod tests {
     #[test]
     fn publication_decoders_debit_actual_buffers_before_each_allocation() -> Fallible<()> {
         let committed = committed()?;
-        let owner = committed.operation.input().signing_identity.owner_id.as_str().len();
+        let owner = committed
+            .operation
+            .input()
+            .signing_identity
+            .owner_id
+            .as_str()
+            .len();
         let local = committed.operation.to_canonical_cbor();
         let imported = ImportedForkPublicationOperationV1::from_local(
-            committed.operation.clone(), committed.authority_origin_digest.ok_or("no origin")?,
-        ).to_canonical_cbor();
+            committed.operation.clone(),
+            committed.authority_origin_digest.ok_or("no origin")?,
+        )
+        .to_canonical_cbor();
         let artifact = artifact(&committed)?;
         let signed = artifact.signed_manifest();
         let artifact_bytes = artifact.to_canonical_cbor();
-        let artifact_cost = committed.outer_bytes.len() * 3 + signed.manifest_bytes().len() * 3
+        let artifact_cost = committed.outer_bytes.len() * 3
+            + signed.manifest_bytes().len() * 3
             + signed.identity().owner_id.as_str().len()
-            + signed.manifest().input().intervention_sequences.len() * 8 + artifact_bytes.len();
+            + signed.manifest().input().intervention_sequences.len() * 8
+            + artifact_bytes.len();
         let projection = 32 + 16 + 8 + 32 + 32 + owner + 1 + 8 + 32 + 32 + 32 + 1;
         for (codec, bytes, expected) in [
-            (Codec::Binding, committed.binding.to_canonical_cbor(), committed.binding.to_canonical_cbor().len()),
+            (
+                Codec::Binding,
+                committed.binding.to_canonical_cbor(),
+                committed.binding.to_canonical_cbor().len(),
+            ),
             (Codec::Operation, local.clone(), owner + local.len() + 1),
-            (Codec::Operation, imported, owner * 2 + local.len() * 2 + projection + 1 + 32),
+            (
+                Codec::Operation,
+                imported,
+                owner * 2 + local.len() * 2 + projection + 1 + 32,
+            ),
             (Codec::Artifact, artifact_bytes, artifact_cost),
         ] {
             for limit in 1..=expected {
@@ -298,14 +331,19 @@ mod tests {
     fn local_only_decoder_never_promotes_imported_publication_origin() -> Fallible<()> {
         let committed = committed()?;
         let bytes = ImportedForkPublicationOperationV1::from_local(
-            committed.operation, committed.authority_origin_digest.ok_or("no origin")?,
-        ).to_canonical_cbor();
+            committed.operation,
+            committed.authority_origin_digest.ok_or("no origin")?,
+        )
+        .to_canonical_cbor();
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 8 * 1024 * 1024, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-        assert_eq!(NativeReadContextV1::protected(&mut budget)
-            .publication_operation(&bytes, AuthorityValidatorV1::LocalOnly), Err(Error::PublicationConflict));
+        assert_eq!(
+            NativeReadContextV1::protected(&mut budget)
+                .publication_operation(&bytes, AuthorityValidatorV1::LocalOnly),
+            Err(Error::PublicationConflict)
+        );
         assert!(budget.check_time().is_ok());
         Ok(())
     }
@@ -316,22 +354,32 @@ mod tests {
         let original = artifact(&committed)?;
         let mut fields = original.signed_manifest().manifest().input().clone();
         let count = u64::try_from(MAX_FORK_MANIFEST_INTERVENTIONS_V1)?;
-        fields.intervention_sequences = (1..=count).map(|seq| fields.parent_logical_head + seq).collect();
+        fields.intervention_sequences = (1..=count)
+            .map(|seq| fields.parent_logical_head + seq)
+            .collect();
         fields.final_fork_logical_head = fields.parent_logical_head + count;
         let manifest = pos_core::ForkReproManifestV1::new(fields)?;
         let identity = pos_core::KeyIdentityV1::from_parts(
-            pos_core::OwnerIdV1::new("é".repeat(64))?, pos_core::KeyRoleV1::SubjectAttributionSigning, 1,
+            pos_core::OwnerIdV1::new("é".repeat(64))?,
+            pos_core::KeyRoleV1::SubjectAttributionSigning,
+            1,
         );
-        let signed = pos_core::SignedForkReproManifestV1::new(identity, manifest,
-            original.signed_manifest().signature())?;
+        let signed = pos_core::SignedForkReproManifestV1::new(
+            identity,
+            manifest,
+            original.signed_manifest().signature(),
+        )?;
         let artifact = ForkPublicationArtifactV1::new(pos_core::ForkPublicationArtifactInputV1 {
             signed_manifest_record_id: signed.record_id(),
             operation_id: committed.operation.input().operation_id,
             signed_manifest_bytes: signed.to_canonical_cbor(),
         })?;
         let bytes = artifact.to_canonical_cbor();
-        let expected = signed.to_canonical_cbor().len() * 3 + signed.manifest_bytes().len() * 3
-            + identity.owner_id.as_str().len() + MAX_FORK_MANIFEST_INTERVENTIONS_V1 * 8 + bytes.len();
+        let expected = signed.to_canonical_cbor().len() * 3
+            + signed.manifest_bytes().len() * 3
+            + identity.owner_id.as_str().len()
+            + MAX_FORK_MANIFEST_INTERVENTIONS_V1 * 8
+            + bytes.len();
         for (limit, succeeds) in [(expected, true), (expected - 1, false)] {
             let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
             let start = clock.mark();

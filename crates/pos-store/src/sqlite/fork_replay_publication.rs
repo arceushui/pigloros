@@ -14,8 +14,8 @@ use super::{
 };
 use crate::{
     fork_event_authority::AuthorityValidatorV1,
-    fork_manifest_publication::CommittedPublicationRowsV1,
-    fork_replay::NativeReadContextV1, ForkManifestPublicationErrorV1 as Error,
+    fork_manifest_publication::CommittedPublicationRowsV1, fork_replay::NativeReadContextV1,
+    ForkManifestPublicationErrorV1 as Error,
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -77,7 +77,9 @@ impl SqliteStore {
         context.check()?;
         context.suffix_row()?;
         context.bytes(length)?;
-        let bytes = self.conn.query_row(fetch, arguments, |row| row.get::<_, Vec<u8>>(0))
+        let bytes = self
+            .conn
+            .query_row(fetch, arguments, |row| row.get::<_, Vec<u8>>(0))
             .map_err(Error::from)?;
         context.check().map(|()| Some(bytes))
     }
@@ -87,10 +89,22 @@ impl SqliteStore {
         operation: Hash,
         validator: AuthorityValidatorV1,
         context: &mut NativeReadContextV1<'_, '_>,
-    ) -> Result<Option<(pos_core::ForkPublicationOperationV1, crate::fork_event_authority::ValidatedOriginV1)>> {
-        self.publication_blob_with_context(PublicationRowV1::Operation,
-            params![operation.as_bytes().as_slice()], context)
-            .and_then(|bytes| bytes.map(|bytes| context.publication_operation(&bytes, validator)).transpose())
+    ) -> Result<
+        Option<(
+            pos_core::ForkPublicationOperationV1,
+            crate::fork_event_authority::ValidatedOriginV1,
+        )>,
+    > {
+        self.publication_blob_with_context(
+            PublicationRowV1::Operation,
+            params![operation.as_bytes().as_slice()],
+            context,
+        )
+        .and_then(|bytes| {
+            bytes
+                .map(|bytes| context.publication_operation(&bytes, validator))
+                .transpose()
+        })
     }
 
     pub(super) fn committed_publication_rows_with_context(
@@ -102,19 +116,34 @@ impl SqliteStore {
     ) -> Result<CommittedPublicationRowsV1<'static>> {
         context.bytes(ulid::ULID_LEN)?;
         let key = child.to_string();
-        let binding = self.publication_blob_with_context(PublicationRowV1::Binding,
-            params![key, sqlite_publication_head(head)], context)?
+        let binding = self
+            .publication_blob_with_context(
+                PublicationRowV1::Binding,
+                params![key, sqlite_publication_head(head)],
+                context,
+            )?
             .ok_or(Error::PublicationMissing)?;
         let binding = context.publication_binding(&binding)?;
         let fields = binding.input();
-        let operation = self.publication_operation_with_context(fields.operation_id, validator, context)?;
-        let artifact = self.publication_blob_with_context(PublicationRowV1::Artifact,
-            params![fields.signed_manifest_record_id.as_bytes().as_slice()], context)?
-            .map(|bytes| context.publication_artifact(&bytes)).transpose()?;
-        let ((operation, origin), artifact) = operation.zip(artifact).ok_or(Error::PublicationConflict)?;
+        let operation =
+            self.publication_operation_with_context(fields.operation_id, validator, context)?;
+        let artifact = self
+            .publication_blob_with_context(
+                PublicationRowV1::Artifact,
+                params![fields.signed_manifest_record_id.as_bytes().as_slice()],
+                context,
+            )?
+            .map(|bytes| context.publication_artifact(&bytes))
+            .transpose()?;
+        let ((operation, origin), artifact) =
+            operation.zip(artifact).ok_or(Error::PublicationConflict)?;
         context.canonical(binding.canonical_cbor_len())?;
         let rows = CommittedPublicationRowsV1 {
-            child_timeline_id: child, final_logical_head: head, binding, operation, origin,
+            child_timeline_id: child,
+            final_logical_head: head,
+            binding,
+            operation,
+            origin,
             artifact: Cow::Owned(artifact),
         };
         context.check().map(|()| rows)
@@ -142,8 +171,14 @@ mod tests {
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, 2, 64, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-        assert_eq!(store.publication_blob_with_context(kind, arguments,
-            &mut NativeReadContextV1::protected(&mut budget)), Err(expected));
+        assert_eq!(
+            store.publication_blob_with_context(
+                kind,
+                arguments,
+                &mut NativeReadContextV1::protected(&mut budget)
+            ),
+            Err(expected)
+        );
         assert_eq!(budget.remaining_native_bytes(), 64);
         assert!(budget.check_time().is_ok());
         Ok(())
@@ -152,9 +187,21 @@ mod tests {
     #[test]
     fn selected_raw_blob_gates_reject_type_and_size_before_retrieval() -> Fallible<()> {
         for (kind, sql, maximum) in [
-            (PublicationRowV1::Binding, "UPDATE fork_publication_bindings SET fpb1_cbor = ?1", pos_core::MAX_FORK_PUBLICATION_BINDING_BYTES_V1),
-            (PublicationRowV1::Operation, "UPDATE fork_publication_operations SET fpo1_cbor = ?1", pos_core::MAX_FORK_PUBLICATION_OPERATION_BYTES_V1),
-            (PublicationRowV1::Artifact, "UPDATE fork_publication_artifacts SET fpa1_cbor = ?1", pos_core::MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1),
+            (
+                PublicationRowV1::Binding,
+                "UPDATE fork_publication_bindings SET fpb1_cbor = ?1",
+                pos_core::MAX_FORK_PUBLICATION_BINDING_BYTES_V1,
+            ),
+            (
+                PublicationRowV1::Operation,
+                "UPDATE fork_publication_operations SET fpo1_cbor = ?1",
+                pos_core::MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
+            ),
+            (
+                PublicationRowV1::Artifact,
+                "UPDATE fork_publication_artifacts SET fpa1_cbor = ?1",
+                pos_core::MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1,
+            ),
         ] {
             let world = World::new(Shape::Mixed, false)?;
             let built = world.build(&Spec::default())?;
@@ -163,12 +210,21 @@ mod tests {
             pin_policy(&mut store, &built.policy)?;
             store.import_verified(&request_for(&world, &built))?;
             let child = world.child_at(0)?.id.to_string();
-            let binding = store.conn.query_row(super::super::FORK_PUBLICATION_BINDING_SQL,
-                params![child, super::super::sqlite_publication_head(crate::fae1_fixture::PARENT_CUT + Shape::Mixed.events())],
-                |row| row.get::<_, Vec<u8>>(0))?;
+            let binding = store.conn.query_row(
+                super::super::FORK_PUBLICATION_BINDING_SQL,
+                params![
+                    child,
+                    super::super::sqlite_publication_head(
+                        crate::fae1_fixture::PARENT_CUT + Shape::Mixed.events()
+                    )
+                ],
+                |row| row.get::<_, Vec<u8>>(0),
+            )?;
             let binding = pos_core::ForkPublicationBindingV1::from_canonical_cbor(&binding)?;
             let fields = binding.input();
-            let head = super::super::sqlite_publication_head(crate::fae1_fixture::PARENT_CUT + Shape::Mixed.events());
+            let head = super::super::sqlite_publication_head(
+                crate::fae1_fixture::PARENT_CUT + Shape::Mixed.events(),
+            );
             let operation = fields.operation_id.as_bytes().as_slice();
             let record = fields.signed_manifest_record_id.as_bytes().as_slice();
             let binding_arguments: [&dyn ToSql; 2] = [&child, &head];
@@ -196,9 +252,14 @@ mod tests {
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 64, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-        assert_eq!(store.publication_blob_with_context(PublicationRowV1::Operation,
-            params![pos_core::Hash::zero().as_bytes().as_slice()],
-            &mut NativeReadContextV1::protected(&mut budget))?, None);
+        assert_eq!(
+            store.publication_blob_with_context(
+                PublicationRowV1::Operation,
+                params![pos_core::Hash::zero().as_bytes().as_slice()],
+                &mut NativeReadContextV1::protected(&mut budget)
+            )?,
+            None
+        );
         assert_eq!(budget.remaining_native_bytes(), 64);
         budget.charge_rows(1)?;
         Ok(())
