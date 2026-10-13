@@ -133,8 +133,9 @@ fn populate<S: Port>(
     store: &mut S,
     world: &World,
     shape: Shape,
+    destroyed_key: bool,
 ) -> Fallible<ForkReplayRequirementV1> {
-    let built = world.build(&Spec::default())?;
+    let built = world.build(&Spec { destroyed_key, ..Spec::default() })?;
     world.seed_destination(store)?;
     pin_policy(store, &built.policy)?;
     store.import_verified(&request_for(world, &built))?;
@@ -211,7 +212,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
         Shape::EmptyClassified,
         Shape::EmptyUnclassified,
     ] {
-        for (fault, cut) in [
+        for (fault, cut, destroyed_key) in [
             Fault::None,
             Fault::Omitted,
             Fault::Foreign,
@@ -220,11 +221,16 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
         ]
         .into_iter()
         .flat_map(|fault| [None, Some(Seq::from_u64(2))].map(|cut| (fault, cut)))
+        .flat_map(|(fault, cut)| {
+            [false, true].into_iter()
+                .filter(move |destroyed| !*destroyed || fault == Fault::None)
+                .map(move |destroyed| (fault, cut, destroyed))
+        })
         {
             let world = World::new(shape, false)?;
             let child = world.child_at(0)?.id;
             let mut memory = MemoryStore::new();
-            let requirement = populate(&mut memory, &world, shape)?;
+            let requirement = populate(&mut memory, &world, shape, destroyed_key)?;
             let verifier = || {
                 Arc::new(ImportedVerifier {
                     child,
@@ -247,7 +253,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
             let path = directory.path().join("imported-replay.sqlite");
             let path = path.to_str().ok_or("utf-8 path")?;
             let mut sqlite = SqliteStore::open(path)?;
-            assert_eq!(populate(&mut sqlite, &world, shape)?, requirement);
+            assert_eq!(populate(&mut sqlite, &world, shape, destroyed_key)?, requirement);
             drop(sqlite);
             let composition =
                 ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier());
@@ -265,7 +271,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
 }
 
 fn populate_pair<S: Port>(store: &mut S, world: &World) -> Fallible<[ForkReplayRequirementV1; 2]> {
-    let first = populate(store, world, Shape::Mixed)?;
+    let first = populate(store, world, Shape::Mixed, false)?;
     let built = world.build(&Spec::distinct(1))?;
     pin_policy(store, &built.policy)?;
     store.import_verified(&request_for(world, &built))?;
