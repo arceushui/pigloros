@@ -418,7 +418,10 @@ fn result_kind_that_differs_from_the_oracle_kind_fails() -> TestResult {
 #[test]
 fn a_member_that_fails_its_descriptor_digest_never_reaches_the_adapter() -> TestResult {
     let records = oracle_records();
-    for mutation in [BundleMutation::MemberBytes, BundleMutation::DescriptorDigest] {
+    for mutation in [
+        BundleMutation::MemberBytes,
+        BundleMutation::DescriptorDigest,
+    ] {
         let corpus = support::plugin_corpus_with_bundle_mutation(&records, mutation)?;
         let mut launched = 0_u32;
         let result = {

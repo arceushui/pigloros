@@ -185,7 +185,8 @@ struct Spy {
 
 impl Spy {
     fn new(lowered: &'static [&'static str]) -> TestResult<Self> {
-        let program = WorkerProgramV1::new(PathBuf::from(WORKER)).ok_or("an invalid worker path")?;
+        let program =
+            WorkerProgramV1::new(PathBuf::from(WORKER)).ok_or("an invalid worker path")?;
         Ok(Self {
             program,
             lowered,
@@ -548,13 +549,20 @@ fn assert_scan_controls(capture: &Capture, id: &str) {
     let stacks = haystacks(capture, false);
     assert!(stacks.iter().any(|stack| !stack.is_empty()), "{id}");
     let outcome_stacks = haystacks(capture, true);
-    assert!(outcome_stacks.iter().any(|stack| contains(stack, PLUGIN_ID)), "{id}");
+    assert!(
+        outcome_stacks
+            .iter()
+            .any(|stack| contains(stack, PLUGIN_ID)),
+        "{id}"
+    );
 }
 
 /// `del.2` excludes the outcome record: the guests' Event type `prototype.driven` contains its
 /// marker `drive`.
-const MARKERS: [(&str, &str, bool); 2] =
-    [("del.1", "synthetic-secret", true), ("del.2", "drive", false)];
+const MARKERS: [(&str, &str, bool); 2] = [
+    ("del.1", "synthetic-secret", true),
+    ("del.2", "drive", false),
+];
 
 #[test]
 fn r8_s5_the_marker_is_in_no_committed_event_state_or_outcome() -> TestResult {
@@ -563,7 +571,10 @@ fn r8_s5_the_marker_is_in_no_committed_event_state_or_outcome() -> TestResult {
         for (id, marker, with_outcome) in MARKERS {
             let capture = capture_of(&run.captures, id)?;
             let stacks = haystacks(capture, with_outcome);
-            assert!(stacks.iter().all(|stack| !contains(stack, marker)), "{id} {mode:?}");
+            assert!(
+                stacks.iter().all(|stack| !contains(stack, marker)),
+                "{id} {mode:?}"
+            );
             let scan = capture.record.scan.as_ref().ok_or("no scan")?;
             assert!(scan.found.is_empty(), "{id} {mode:?}");
             assert!(scan.retained_ok, "{id} {mode:?}");
@@ -592,7 +603,10 @@ fn r8_s7_ind_1_is_the_checked_in_literal() -> TestResult {
         .record
         .computed
         .ok_or("no computed digest")?;
-    assert_eq!(blake3::Hash::from_bytes(computed).to_hex().as_str(), IND1_DIGEST);
+    assert_eq!(
+        blake3::Hash::from_bytes(computed).to_hex().as_str(),
+        IND1_DIGEST
+    );
     let bytes = oracle_bytes(family)?;
     let oracle: Value = serde_json::from_slice(&bytes)?;
     let first = &oracle["output"]["subcases"][0];
@@ -715,7 +729,11 @@ fn r8_s9_every_pass_is_one_fresh_worker_launch() -> TestResult {
             let run = family_run(family, mode)?;
             for id in launching_ids(family, &run) {
                 let launches = capture_of(&run.captures, &id)?.record.worker_launches;
-                assert_eq!(launches, pass_count(family, &id)?, "{family:?} {mode:?} {id}");
+                assert_eq!(
+                    launches,
+                    pass_count(family, &id)?,
+                    "{family:?} {mode:?} {id}"
+                );
                 assert!(launches > 0, "{id}");
             }
         }
@@ -806,11 +824,19 @@ fn r8_s10_the_outcome_record_has_exactly_the_r7_h3_fields() -> TestResult {
         result,
     } = outcome.clone();
     assert_eq!(plugin_id, PLUGIN_ID);
-    let digests = [pmf1_digest, release_digest, tps1_digest, execution_profile_digest];
+    let digests = [
+        pmf1_digest,
+        release_digest,
+        tps1_digest,
+        execution_profile_digest,
+    ];
     assert!(digests.iter().all(Option::is_some));
     assert_eq!(tick, 5);
     assert!(matches!(mode, CommunityPluginModeV1::Local));
-    assert!(matches!(content_validation, ContentValidationV1::NotPerformed));
+    assert!(matches!(
+        content_validation,
+        ContentValidationV1::NotPerformed
+    ));
     assert!(matches!(result, Verdict::Committed { .. }));
     // The canonical record is CBOR with no key names; it also holds no such word.
     let bytes = outcome_bytes_of(outcome);
