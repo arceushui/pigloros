@@ -20,6 +20,7 @@ use pos_crypto::fork_attribution::verify_local_fork_manifest_signature_only;
 use crate::fork_event_authority::AuthorityValidatorV1;
 use crate::{
     fork_event_authority::{ValidatedAdmissionV1, ValidatedOriginV1},
+    fork_replay::NativeReadContextV1,
     ForkEventAuthorityErrorV1,
 };
 
@@ -659,10 +660,12 @@ fn publication_graph(
 /// Besides the `FPO1` source table, the signed `FRM1` intervention vector
 /// must equal the durable classified intervention rows at or below the
 /// published head.
-pub(crate) fn trusted_committed_manifest(
+pub(crate) fn trusted_committed_manifest_with_context(
     rows: &CommittedPublicationRowsV1,
     sources: CommittedPublicationSourcesV1<'_>,
+    context: &mut NativeReadContextV1<'_, '_>,
 ) -> PublicationResultV1<CommittedForkManifestV1> {
+    context.check()?;
     let CommittedPublicationSourcesV1 {
         admission,
         retained,
@@ -677,16 +680,40 @@ pub(crate) fn trusted_committed_manifest(
             retained.map(|key_evidence| (admission, chain, suffix, key_evidence))
         })
         .and_then(|(admission, chain, suffix, key_evidence)| {
-            registry.map(|registry| TrustedPublicationSourcesV1 {
-                admission,
-                key_evidence,
-                final_chain_head_hash: chain,
-                intervention_sequences: intervention_sequences(suffix, rows.final_logical_head),
-                registry,
+            registry.and_then(|registry| {
+                bounded_intervention_sequences(suffix, rows.final_logical_head, context)
+                    .map(|intervention_sequences| TrustedPublicationSourcesV1 {
+                        admission,
+                        key_evidence,
+                        final_chain_head_hash: chain,
+                        intervention_sequences,
+                        registry,
+                    })
+                    .map_err(|_| PublicationSourceErrorV1::Invalid)
             })
         })
         .map_err(PublicationSourceErrorV1::into_publication_conflict)
-        .and_then(|trusted| verified_committed_origin(rows, &trusted))
+        .and_then(|trusted| verified_committed_origin(rows, &trusted, context))
+}
+
+/// Charge only the vector elements actually copied, before each push. The
+/// suffix row visits also count repeated inspection in this trusted batch.
+fn bounded_intervention_sequences(
+    suffix: PublicationSuffixV1,
+    final_logical_head: u64,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationResultV1<Vec<u64>> {
+    let mut sequences = Vec::new();
+    for (origin, intervention, _) in suffix {
+        context.suffix_row()?;
+        let sequence = origin.input().logical_seq;
+        if intervention.is_some() && sequence <= final_logical_head {
+            context.bytes(std::mem::size_of::<u64>())?;
+            sequences.push(sequence);
+        }
+        context.check()?;
+    }
+    context.check().map(|()| sequences)
 }
 
 /// ADR-105 r6 R6.9: the stored `FPO1` carries the same authority origin as
@@ -694,9 +721,10 @@ pub(crate) fn trusted_committed_manifest(
 fn verified_committed_origin(
     rows: &CommittedPublicationRowsV1,
     trusted: &TrustedPublicationSourcesV1<'_>,
+    context: &mut NativeReadContextV1<'_, '_>,
 ) -> PublicationResultV1<CommittedForkManifestV1> {
     if rows.origin == trusted.admission.origin() {
-        verified_committed_manifest(rows, trusted)
+        verified_committed_manifest(rows, trusted, context)
     } else {
         Err(ForkManifestPublicationErrorV1::PublicationConflict)
     }
@@ -748,31 +776,43 @@ fn decode_publication_operation(bytes: &[u8]) -> DecodedPublicationOperationV1 {
 fn verified_committed_manifest(
     rows: &CommittedPublicationRowsV1,
     trusted: &TrustedPublicationSourcesV1<'_>,
+    context: &mut NativeReadContextV1<'_, '_>,
 ) -> PublicationResultV1<CommittedForkManifestV1> {
     let outer_bytes = &rows.artifact.input().signed_manifest_bytes;
-    SignedForkReproManifestV1::from_canonical_cbor(outer_bytes)
-        .ok()
-        .filter(|signed| {
-            committed_graph_is_consistent(rows, trusted, signed)
-                && verify_local_fork_manifest_signature_only(
-                    signed,
-                    rows.operation.input().public_verification_key,
-                )
-                .is_ok()
-        })
-        .and_then(|signed| {
-            ForkPublicationReceiptV1::from_records(&rows.operation, &rows.binding)
-                .ok()
-                .map(|receipt| CommittedForkManifestV1 {
-                    receipt,
-                    operation: rows.operation.clone(),
-                    authority_origin_digest: rows.origin.imported_digest(),
-                    binding: rows.binding,
-                    record_id: signed.record_id(),
-                    outer_bytes: outer_bytes.clone(),
-                })
-        })
-        .ok_or(ForkManifestPublicationErrorV1::PublicationConflict)
+    // FPA1's immutable native owner has already strictly decoded and bound
+    // these exact FSM1 bytes. Borrow its cached value; do not decode it again.
+    let signed = rows.artifact.signed_manifest();
+    context.check()?;
+    context.canonical(signed.canonical_cbor_len())?;
+    // FSM1's byte emitter actually materializes its nested FRM1 byte string.
+    context.canonical(signed.manifest().canonical_cbor_len())?;
+    let record_id = signed.record_id();
+    context.check()?;
+    if !committed_graph_is_consistent(rows, trusted, signed, record_id) {
+        return Err(ForkManifestPublicationErrorV1::PublicationConflict);
+    }
+    context.check()?;
+    context.canonical(signed.manifest().canonical_cbor_len())?;
+    let verification = verify_local_fork_manifest_signature_only(
+        signed,
+        rows.operation.input().public_verification_key,
+    );
+    context.check()?;
+    verification.map_err(|_| ForkManifestPublicationErrorV1::PublicationConflict)?;
+    let receipt = ForkPublicationReceiptV1::from_records(&rows.operation, &rows.binding)
+        .map_err(|_| ForkManifestPublicationErrorV1::PublicationConflict)?;
+    context.bytes(outer_bytes.len())?;
+    let committed = CommittedForkManifestV1 {
+        receipt,
+        // FPO1's typed projection has no variable-size allocation; no local
+        // canonical bytes are emitted by this clone, including on code 2.
+        operation: rows.operation.clone(),
+        authority_origin_digest: rows.origin.imported_digest(),
+        binding: rows.binding,
+        record_id,
+        outer_bytes: outer_bytes.clone(),
+    };
+    context.check().map(|()| committed)
 }
 
 /// Enforce every cross-record and FPO1 source-table equality.
@@ -780,8 +820,8 @@ fn committed_graph_is_consistent(
     rows: &CommittedPublicationRowsV1,
     trusted: &TrustedPublicationSourcesV1<'_>,
     signed: &SignedForkReproManifestV1,
+    record_id: Hash,
 ) -> bool {
-    let record_id = signed.record_id();
     let binding = rows.binding.input();
     let operation = rows.operation.input();
     let artifact = rows.artifact.input();
