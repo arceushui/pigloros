@@ -1,7 +1,5 @@
 # cargo-audit policy. Keep in step with [advisories] in deny.toml.
 [advisories]
-# RUSTSEC-2026-0344 (ruzstd < 0.9.1, decompression bomb): reached only through
-# bevy_image 0.19.1 (`ruzstd ^0.8`) for the zstd-compressed lookup tables Bevy
-# ships to apps/piglor-world-client. No released Bevy depends on a fixed ruzstd.
-# Remove (here and in deny.toml) once Cargo.lock resolves ruzstd >= 0.9.1.
+# RUSTSEC-2026-0344 (ruzstd < 0.9.1): see the full reason and the removal
+# condition in deny.toml (Redmine #629).
 ignore = ["RUSTSEC-2026-0344"]
