@@ -66,6 +66,13 @@ impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
             .map_or(Ok(()), |budget| budget.charge_rows(1))
             .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
     }
+
+    pub(crate) fn node(&mut self, depth: usize) -> Result<(), crate::ForkManifestPublicationErrorV1> {
+        self.budget
+            .as_deref_mut()
+            .map_or(Ok(()), |budget| budget.charge_node(depth))
+            .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
+    }
 }
 
 /// Closed failures of the bounded attribution read, without protected details.
