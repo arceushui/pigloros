@@ -1,73 +1,15 @@
 //! Actual protected FAH1 probe/fetch rows and bounded native decoding.
 
 use pos_core::{ForkAdmissionErrorV1 as Error, ForkAdmissionHostRecordV1};
-use rusqlite::{Connection, Row};
+use rusqlite::Connection;
 
 use crate::fork_replay::NativeReadContextV1;
+use super::fork_replay_row::{selected_field_with_context, SelectedRowV1};
 
 type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Clone, Copy)]
-enum HostQueryV1 {
-    Probe,
-    Blob,
-}
-
-impl HostQueryV1 {
-    const fn sql(self) -> &'static str {
-        match self {
-            Self::Probe => "SELECT typeof(fah1_cbor) = 'blob', length(fah1_cbor),
-                CASE WHEN typeof(last_authority_wall_time) = 'integer'
-                    AND last_authority_wall_time >= 0 THEN 1 ELSE 0 END
-                FROM fork_admission_authority WHERE singleton = 1",
-            Self::Blob => "SELECT fah1_cbor
-                FROM fork_admission_authority WHERE singleton = 1",
-        }
-    }
-}
-
-fn selected_host_field<'budget, 'clock, T>(
-    conn: &Connection,
-    query: HostQueryV1,
-    context: &mut NativeReadContextV1<'budget, 'clock>,
-    read: impl FnOnce(&Row<'_>, &mut NativeReadContextV1<'budget, 'clock>) -> Result<T>,
-) -> Result<Option<T>> {
-    context
-        .check()
-        .map_err(|_| Error::CorruptAuthority)
-        .and_then(|()| conn.prepare(query.sql()).map_err(|_| Error::StorageIndeterminate))
-        .and_then(|mut statement| {
-            context
-                .check()
-                .map_err(|_| Error::CorruptAuthority)
-                .and_then(|()| statement.query([]).map_err(|_| Error::StorageIndeterminate))
-                .and_then(|mut rows| {
-                    context
-                        .row_available()
-                        .map_err(|_| Error::CorruptAuthority)
-                        .and_then(|()| rows.next().map_err(|_| Error::StorageIndeterminate))
-                        .and_then(|row| match row {
-                            None => context
-                                .check()
-                                .map(|()| None)
-                                .map_err(|_| Error::CorruptAuthority),
-                            Some(row) => context
-                                .suffix_row()
-                                .map_err(|_| Error::CorruptAuthority)
-                                .and_then(|()| read(row, context))
-                                .and_then(|value| {
-                                    context
-                                        .check()
-                                        .map(|()| Some(value))
-                                        .map_err(|_| Error::CorruptAuthority)
-                                }),
-                        })
-                })
-        })
-}
-
 fn host_length(conn: &Connection, context: &mut NativeReadContextV1<'_, '_>) -> Result<Option<usize>> {
-    selected_host_field(conn, HostQueryV1::Probe, context, |row, _| {
+    selected_field_with_context(conn, SelectedRowV1::HostProbe, context, |row, _| {
         row.get::<_, bool>(0)
             .map_err(|_| Error::StorageIndeterminate)
             .and_then(|blob| {
@@ -101,7 +43,7 @@ pub(super) fn host_with_context(
 ) -> Result<Option<ForkAdmissionHostRecordV1>> {
     host_length(conn, context).and_then(|length| {
         length.map_or(Ok(None), |length| {
-            selected_host_field(conn, HostQueryV1::Blob, context, |row, context| {
+            selected_field_with_context(conn, SelectedRowV1::HostBlob, context, |row, context| {
                 context
                     .bytes(length)
                     .map_err(|_| Error::CorruptAuthority)
