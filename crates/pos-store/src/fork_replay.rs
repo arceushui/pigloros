@@ -400,7 +400,8 @@ mod canonical_length_mapping_tests {
     use std::time::Duration;
 
     #[test]
-    fn an_unrepresentable_native_length_permanently_closes_the_operation_ledger() -> ReadResult<()> {
+    fn an_unrepresentable_native_length_permanently_closes_the_operation_ledger() -> ReadResult<()>
+    {
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 1, 1_000)?;
@@ -412,7 +413,10 @@ mod canonical_length_mapping_tests {
             budget.charge_canonical(Err(pos_core::CanonicalLengthErrorV1::LengthOverflow)),
             Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded),
         );
-        assert_eq!(budget.charge_canonical(Ok(0)), Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded));
+        assert_eq!(
+            budget.charge_canonical(Ok(0)),
+            Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded)
+        );
         Ok(())
     }
 }
