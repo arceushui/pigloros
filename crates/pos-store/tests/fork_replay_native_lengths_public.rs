@@ -80,9 +80,9 @@ fn complete_native_surface_matches_live_destroyed_mixed_and_empty_imports() -> F
     Ok(())
 }
 
-fn oracle(value: Value) -> Fallible<Vec<u8>> {
+fn oracle(value: &Value) -> Fallible<Vec<u8>> {
     let mut bytes = Vec::new();
-    ciborium::ser::into_writer(&value, &mut bytes)?;
+    ciborium::ser::into_writer(value, &mut bytes)?;
     Ok(bytes)
 }
 
@@ -99,7 +99,7 @@ fn field(value: pos_core::Hash) -> Value {
 
 #[test]
 fn commitment_lengths_and_digests_match_independent_positional_arrays() -> Fallible<()> {
-    let owner = OwnerIdV1::new(&"x".repeat(128))?;
+    let owner = OwnerIdV1::new("x".repeat(128))?;
     let input = PrincipalOwnerCommitmentInputV1 {
         store_id: hash(1),
         operation_id: hash(2),
@@ -107,7 +107,7 @@ fn commitment_lengths_and_digests_match_independent_positional_arrays() -> Falli
         principal_digest: hash(4),
         owner,
     };
-    let bytes = oracle(Value::Array(vec![
+    let bytes = oracle(&Value::Array(vec![
         field(hash(1)),
         field(hash(2)),
         field(hash(3)),
@@ -149,7 +149,7 @@ fn commitment_lengths_and_digests_match_independent_positional_arrays() -> Falli
                 };
                 let measured = input.canonical_preimage_len()?;
                 let committed = input.commitment();
-                let bytes = oracle(Value::Array(vec![
+                let bytes = oracle(&Value::Array(vec![
                     field(hash(1)),
                     field(hash(2)),
                     field(hash(3)),
