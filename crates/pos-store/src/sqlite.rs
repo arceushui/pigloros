@@ -156,6 +156,7 @@ mod fork_replay_binding;
 mod fork_replay_chain;
 mod fork_replay_child;
 mod fork_replay_classifier;
+mod fork_replay_event;
 mod fork_replay_host;
 mod fork_replay_operation;
 mod fork_replay_publication;
@@ -5294,12 +5295,10 @@ impl SqliteStore {
         at_seq: Seq,
         context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
     ) -> Result<Hash, CoreError> {
-        let logical_head = if context.is_protected() {
-            fork_replay_chain::logical_head_with_context(conn, timeline, context)
-                .map_err(|_| CoreError::ArtifactUnavailable)
-        } else {
-            Self::logical_head_unchecked_on(conn, timeline)
-        }?;
+        if context.is_protected() {
+            return fork_replay_event::chain_hash_with_context(conn, hasher, timeline, at_seq, context);
+        }
+        let logical_head = Self::logical_head_unchecked_on(conn, timeline)?;
         if at_seq > logical_head {
             return Err(CoreError::ForkBeyondHead {
                 fork_seq: at_seq.as_u64(),
@@ -14504,7 +14503,14 @@ fn decode_own_event(
     timeline: TimelineId,
     inherited_prefix: u64,
 ) -> Result<Event, CoreError> {
-    let mut event = decode_event_row(row)?;
+    finalize_sqlite_own_event(decode_event_row(row)?, timeline, inherited_prefix)
+}
+
+fn finalize_sqlite_own_event(
+    mut event: Event,
+    timeline: TimelineId,
+    inherited_prefix: u64,
+) -> Result<Event, CoreError> {
     crate::finalize_committed_origins(timeline, inherited_prefix, std::slice::from_mut(&mut event))
         .inspect_err(|_| {
             let scrubbed =
@@ -14605,19 +14611,22 @@ fn require_event_security_columns(columns: &HashSet<String>) -> Result<(), CoreE
     Ok(())
 }
 
-fn decode_signature(bytes: Option<Vec<u8>>) -> Result<Option<pos_core::Signature>, CoreError> {
+fn decode_signature(
+    bytes: Option<Vec<u8>>,
+    reader: &fork_replay_event::EventRowReaderV1<'_, '_, '_, '_>,
+) -> Result<Option<pos_core::Signature>, CoreError> {
     bytes
         .map(|bytes| {
             bytes
                 .try_into()
                 .map(pos_core::Signature::from_bytes)
-                .map_err(|_| CoreError::Serialization("bad signature length".to_owned()))
+                .map_err(|_| reader.serialization("bad signature length"))
         })
         .transpose()
 }
 
 fn decode_event_security_context(
-    row: &rusqlite::Row<'_>,
+    reader: &mut fork_replay_event::EventRowReaderV1<'_, '_, '_, '_>,
 ) -> Result<
     (
         Option<pos_core::Signature>,
@@ -14626,33 +14635,21 @@ fn decode_event_security_context(
     ),
     CoreError,
 > {
-    let signature_bytes: Option<Vec<u8>> = row
-        .get(10)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let owner_id: Option<String> = row
-        .get(11)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let role: Option<i64> = row
-        .get(12)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let epoch: Option<i64> = row
-        .get(13)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let origin_timeline_id: String = row
-        .get(14)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
-    let origin_logical_seq: i64 = row
-        .get(15)
-        .map_err(|error| CoreError::Storage(error.to_string()))?;
+    let signature_bytes: Option<Vec<u8>> = reader.get(10)?;
+    let owner_id: Option<String> = reader.get(11)?;
+    let role: Option<i64> = reader.get(12)?;
+    let epoch: Option<i64> = reader.get(13)?;
+    let origin_timeline_id: String = reader.get(14)?;
+    let origin_logical_seq: i64 = reader.get(15)?;
     let origin_logical_seq = u64::try_from(origin_logical_seq)
         .ok()
         .filter(|seq| *seq >= 1)
-        .ok_or_else(|| CoreError::Serialization("invalid Event origin sequence".to_owned()))?;
+        .ok_or_else(|| reader.serialization("invalid Event origin sequence"))?;
     Ok((
-        decode_signature(signature_bytes)?,
-        decode_signature_identity(owner_id, role, epoch)?,
+        decode_signature(signature_bytes, reader)?,
+        decode_signature_identity(owner_id, role, epoch, reader)?,
         EventOriginV1 {
-            origin_timeline_id: parse_timeline_id(&origin_timeline_id)?,
+            origin_timeline_id: TimelineId::from_ulid(reader.parse_ulid(&origin_timeline_id)?),
             origin_logical_seq: Seq::from_u64(origin_logical_seq),
         },
     ))
@@ -14670,22 +14667,32 @@ struct RawEventRow {
     schema_version: i64,
 }
 
-fn read_event_row_fields(row: &rusqlite::Row<'_>) -> Result<RawEventRow, CoreError> {
-    let storage_error = |error: rusqlite::Error| CoreError::Storage(error.to_string());
+fn read_event_row_fields(
+    reader: &mut fork_replay_event::EventRowReaderV1<'_, '_, '_, '_>,
+) -> Result<RawEventRow, CoreError> {
     Ok(RawEventRow {
-        seq: row.get(0).map_err(storage_error)?,
-        event_id: row.get(1).map_err(storage_error)?,
-        entity_id: row.get(2).map_err(storage_error)?,
-        event_type: Zeroizing::new(row.get(3).map_err(storage_error)?),
-        payload: Zeroizing::new(row.get(4).map_err(storage_error)?),
-        wall_time: row.get(5).map_err(storage_error)?,
-        causation_id: row.get(6).map_err(storage_error)?,
-        correlation_id: row.get(7).map_err(storage_error)?,
-        schema_version: row.get(8).map_err(storage_error)?,
+        seq: reader.get(0)?,
+        event_id: reader.get(1)?,
+        entity_id: reader.get(2)?,
+        event_type: reader.plaintext(3)?,
+        payload: reader.plaintext(4)?,
+        wall_time: reader.get(5)?,
+        causation_id: reader.get(6)?,
+        correlation_id: reader.get(7)?,
+        schema_version: reader.get(8)?,
     })
 }
 
 fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
+    let mut context = crate::fork_replay::NativeReadContextV1::ordinary();
+    decode_event_row_with_reader(&mut fork_replay_event::EventRowReaderV1::new(
+        row, &mut context, None,
+    ))
+}
+
+fn decode_event_row_with_reader(
+    reader: &mut fork_replay_event::EventRowReaderV1<'_, '_, '_, '_>,
+) -> Result<Event, CoreError> {
     let RawEventRow {
         seq,
         event_id,
@@ -14696,27 +14703,26 @@ fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
         causation_id,
         correlation_id,
         schema_version,
-    } = read_event_row_fields(row)?;
+    } = read_event_row_fields(reader)?;
     if schema_version != i64::from(SchemaVersion::V1.as_u32()) {
-        return Err(CoreError::Serialization(
-            "unsupported event schema version".to_owned(),
-        ));
+        return Err(reader.serialization("unsupported event schema version"));
     }
-    let ph_bytes: Vec<u8> = row.get(9).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let ph_bytes: Vec<u8> = reader.get(9)?;
     let ph_arr: [u8; 32] = ph_bytes
         .try_into()
-        .map_err(|_| CoreError::Serialization("bad hash".to_owned()))?;
-    let (signature, signature_identity, origin) = decode_event_security_context(row)?;
+        .map_err(|_| reader.serialization("bad hash"))?;
+    let (signature, signature_identity, origin) = decode_event_security_context(reader)?;
     let seq = u64::try_from(seq)
-        .map_err(|_| CoreError::Serialization("bad event sequence".to_owned()))?;
+        .map_err(|_| reader.serialization("bad event sequence"))?;
     let wall_time = u64::try_from(wall_time)
-        .map_err(|_| CoreError::Serialization("bad event wall time".to_owned()))?;
-    let id = parse_event_id(&event_id)?;
-    let entity = parse_entity_id(&entity_id)?;
-    let causation_id = causation_id.as_deref().map(parse_event_id).transpose()?;
+        .map_err(|_| reader.serialization("bad event wall time"))?;
+    let id = EventId::from_ulid(reader.parse_ulid(&event_id)?);
+    let entity = EntityId::from_ulid(reader.parse_ulid(&entity_id)?);
+    let causation_id = causation_id.as_deref()
+        .map(|id| reader.parse_ulid(id).map(EventId::from_ulid)).transpose()?;
     let correlation_id = correlation_id
         .as_deref()
-        .map(parse_correlation_id)
+        .map(|id| reader.parse_ulid(id).map(pos_core::CorrelationId::from_ulid))
         .transpose()?;
     let mut event = Event {
         id,
@@ -14745,26 +14751,25 @@ fn decode_signature_identity(
     owner_id: Option<String>,
     role: Option<i64>,
     epoch: Option<i64>,
+    reader: &fork_replay_event::EventRowReaderV1<'_, '_, '_, '_>,
 ) -> Result<Option<KeyIdentityV1>, CoreError> {
     match (owner_id, role, epoch) {
         (None, None, None) => Ok(None),
         (Some(owner_id), Some(role), Some(epoch)) => {
             let owner_id = OwnerIdV1::new(owner_id)
-                .map_err(|_| CoreError::Serialization("bad signature owner".to_owned()))?;
+                .map_err(|_| reader.serialization("bad signature owner"))?;
             Ok(Some(KeyIdentityV1::new(
                 owner_id,
                 KeyRoleV1::from_code(
                     u8::try_from(role)
-                        .map_err(|_| CoreError::Serialization("bad signature role".to_owned()))?,
+                        .map_err(|_| reader.serialization("bad signature role"))?,
                 )
-                .map_err(|_| CoreError::Serialization("bad signature role".to_owned()))?,
+                .map_err(|_| reader.serialization("bad signature role"))?,
                 u64::try_from(epoch)
-                    .map_err(|_| CoreError::Serialization("bad signature epoch".to_owned()))?,
+                    .map_err(|_| reader.serialization("bad signature epoch"))?,
             )))
         }
-        _ => Err(CoreError::Serialization(
-            "signature identity is incomplete".to_owned(),
-        )),
+        _ => Err(reader.serialization("signature identity is incomplete")),
     }
 }
 
@@ -14787,13 +14792,6 @@ fn parse_entity_id(s: &str) -> Result<EntityId, CoreError> {
         .parse::<ulid::Ulid>()
         .map_err(|_| CoreError::Serialization(format!("invalid ULID: {s}")))?;
     Ok(EntityId::from_ulid(ulid))
-}
-
-fn parse_correlation_id(s: &str) -> Result<pos_core::CorrelationId, CoreError> {
-    let ulid = s
-        .parse::<ulid::Ulid>()
-        .map_err(|_| CoreError::Serialization(format!("invalid ULID: {s}")))?;
-    Ok(pos_core::CorrelationId::from_ulid(ulid))
 }
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(4);
@@ -20738,7 +20736,6 @@ mod tests {
         assert!(parse_timeline_id("nope").is_err());
         assert!(parse_event_id("nope").is_err());
         assert!(parse_entity_id("nope").is_err());
-        assert!(parse_correlation_id("nope").is_err());
     }
 
     #[test]
