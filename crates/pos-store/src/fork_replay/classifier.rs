@@ -56,7 +56,9 @@ impl NativeReadContextV1<'_, '_> {
                 return Err(Error::PublicationConflict);
             }
             routes.take(32).ok_or(Error::PublicationConflict)?;
-            if !matches!(routes.head(), Some((7, 20 | 21))) {
+            // Native FCS1/FCT1 encode this logical flag as uint 0/1,
+            // not CBOR's simple false/true values.
+            if !matches!(routes.head(), Some((0, 0 | 1))) {
                 return Err(Error::PublicationConflict);
             }
             self.bytes(ROUTE_FIXED_BYTES)?;
@@ -262,6 +264,51 @@ mod tests {
             let expected = bytes.len() + fields;
             for limit in 1..=expected {
                 byte_boundary(codec, &bytes, expected, limit)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn classifier_intervention_flags_use_native_integer_encoding() -> Fallible<()> {
+        let (source, table, _) = records()?;
+        for intervention in [false, true] {
+            let route = pos_core::ForkExternalInputRouteV1::new(
+                pos_core::ForkEventSourceDescriptorV1::new(
+                    "native-route".to_owned(),
+                    pos_core::Hash::from_bytes([1; 32]),
+                )?,
+                intervention,
+            );
+            let mut source_fields = source.input().clone();
+            source_fields.routes = vec![route.clone()];
+            let source = ForkClassifierSourceV1::new(source_fields)?;
+            let mut table_fields = table.input().clone();
+            table_fields.routes = vec![route];
+            let table = ForkClassifierTableV1::new(table_fields)?;
+            for (codec, bytes, registrar) in [
+                (
+                    Codec::Source,
+                    source.to_canonical_cbor(),
+                    source.input().registrar_identifier.len(),
+                ),
+                (
+                    Codec::Table,
+                    table.to_canonical_cbor(),
+                    table.input().registrar_identifier.len(),
+                ),
+            ] {
+                assert_eq!(bytes.last(), Some(&u8::from(intervention)));
+                assert_parity(codec, &bytes)?;
+                let expected = bytes.len() + registrar + "native-route".len() + 32 + 1;
+                byte_boundary(codec, &bytes, expected, expected)?;
+                byte_boundary(codec, &bytes, expected, expected - 1)?;
+                for nonnative_flag in [0xf4, 0xf5] {
+                    let mut nonnative = bytes.clone();
+                    *nonnative.last_mut().ok_or("native route flag")? = nonnative_flag;
+                    assert!(!codec.accepts(&nonnative));
+                    assert_parity(codec, &nonnative)?;
+                }
             }
         }
         Ok(())
