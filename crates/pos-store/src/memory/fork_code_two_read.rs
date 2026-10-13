@@ -891,12 +891,26 @@ mod tests {
                 }
             }
         }
-        // Suffix indexing and the later shared intervention-selection pass.
-        rows += events.len() * 2
+        let (suffix_bytes, suffix_rows) = imported_suffix_selection_cost(state)?;
+        bytes += suffix_bytes;
+        rows += suffix_rows;
+        let imported = ImportedForkPublicationOperationV1::from_local(
+            committed.operation,
+            committed.authority_origin_digest.ok_or("no origin")?,
+        );
+        bytes += projection + 32 + imported.to_canonical_cbor().len() + 32 + 32;
+        Ok((bytes, rows, if events.is_empty() { 6 } else { 7 }))
+    }
+
+    /// Suffix indexing, native validation and the later shared sequence pass,
+    /// independently derived from stored records and their byte encoders.
+    fn imported_suffix_selection_cost(state: &Imported) -> Fallible<(usize, usize)> {
+        let events = &state.store.state(state.child).events;
+        let mut rows = events.len() * 2
             + state.store.fork_append_operations.len()
             + state.store.fork_event_origins.len()
             + state.store.fork_intervention_admissions.len();
-        bytes += events.len() * (16 + 8);
+        let mut bytes = events.len() * (16 + 8);
         if !events.is_empty() {
             let (graph_bytes, graph_rows) = imported_graph_cost(state)?;
             bytes += graph_bytes;
@@ -938,12 +952,7 @@ mod tests {
                     + operation.to_canonical_cbor().len();
             }
         }
-        let imported = ImportedForkPublicationOperationV1::from_local(
-            committed.operation,
-            committed.authority_origin_digest.ok_or("no origin")?,
-        );
-        bytes += projection + 32 + imported.to_canonical_cbor().len() + 32 + 32;
-        Ok((bytes, rows, if events.is_empty() { 6 } else { 7 }))
+        Ok((bytes, rows))
     }
 
     #[test]
