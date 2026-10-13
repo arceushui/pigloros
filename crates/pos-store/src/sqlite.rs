@@ -128,12 +128,11 @@ use crate::fork_event_authority::{
     ValidatedAdmissionV1, ValidatedOriginV1,
 };
 use crate::fork_manifest_publication::{
-    authorize_publication, publication_parent_head,
-    publication_sources, recovered_publication_receipt, require_absent_publication_graph,
-    sign_publication, trusted_committed_manifest_with_context, validate_publication_request,
-    AbsentPublicationPreflightV1, CommittedPublicationSourcesV1,
-    PublicationGraphV1, PublicationSourceErrorV1, PublicationSourceResultV1, PublicationSourcesV1,
-    PublicationSuffixV1,
+    authorize_publication, publication_parent_head, publication_sources,
+    recovered_publication_receipt, require_absent_publication_graph, sign_publication,
+    trusted_committed_manifest_with_context, validate_publication_request,
+    AbsentPublicationPreflightV1, CommittedPublicationSourcesV1, PublicationGraphV1,
+    PublicationSourceErrorV1, PublicationSourceResultV1, PublicationSourcesV1, PublicationSuffixV1,
 };
 use crate::{
     ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
@@ -12858,36 +12857,41 @@ impl SqliteStore {
         context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
     ) -> Result<crate::CommittedForkManifestV1, ForkManifestPublicationErrorV1> {
         context.check()?;
-        self.committed_publication_rows_with_context(child_timeline_id, final_logical_head, validator, context)
-            .and_then(|rows| {
-                let admission = self.fork_publication_admission(child_timeline_id, validator);
-                let retained = sqlite_retained_key_evidence(&self.conn, &admission, context);
-                let suffix = self.fork_publication_suffix(
-                    child_timeline_id,
-                    publication_parent_head(&admission),
-                    validator,
-                );
-                let final_chain_head_hash = Self::compute_chain_hash_at_unchecked_on(
-                    &self.conn,
-                    self.hasher.as_ref(),
-                    child_timeline_id,
-                    Seq::from_u64(final_logical_head),
-                )
-                .map_err(PublicationSourceErrorV1::from);
-                let registry =
-                    sqlite_load_key_registry(&self.conn).map_err(PublicationSourceErrorV1::from);
-                let sources = CommittedPublicationSourcesV1 {
-                    admission,
-                    retained,
-                    final_chain_head_hash,
-                    suffix,
-                    registry: registry
-                        .as_ref()
-                        .map(Option::as_ref)
-                        .map_err(|error| *error),
-                };
-                trusted_committed_manifest_with_context(&rows, sources, context)
-            })
+        self.committed_publication_rows_with_context(
+            child_timeline_id,
+            final_logical_head,
+            validator,
+            context,
+        )
+        .and_then(|rows| {
+            let admission = self.fork_publication_admission(child_timeline_id, validator);
+            let retained = sqlite_retained_key_evidence(&self.conn, &admission, context);
+            let suffix = self.fork_publication_suffix(
+                child_timeline_id,
+                publication_parent_head(&admission),
+                validator,
+            );
+            let final_chain_head_hash = Self::compute_chain_hash_at_unchecked_on(
+                &self.conn,
+                self.hasher.as_ref(),
+                child_timeline_id,
+                Seq::from_u64(final_logical_head),
+            )
+            .map_err(PublicationSourceErrorV1::from);
+            let registry =
+                sqlite_load_key_registry(&self.conn).map_err(PublicationSourceErrorV1::from);
+            let sources = CommittedPublicationSourcesV1 {
+                admission,
+                retained,
+                final_chain_head_hash,
+                suffix,
+                registry: registry
+                    .as_ref()
+                    .map(Option::as_ref)
+                    .map_err(|error| *error),
+            };
+            trusted_committed_manifest_with_context(&rows, sources, context)
+        })
     }
 }
 
