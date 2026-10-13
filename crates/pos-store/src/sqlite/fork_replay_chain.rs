@@ -161,7 +161,8 @@ fn retain_segment_with_context(
         })
 }
 
-pub(super) fn logical_head_with_context(
+#[cfg(test)]
+fn logical_head_with_context(
     conn: &Connection,
     timeline: TimelineId,
     context: &mut NativeReadContextV1<'_, '_>,
@@ -170,7 +171,7 @@ pub(super) fn logical_head_with_context(
         .and_then(|chain| logical_head_from_chain(&chain, context))
 }
 
-fn logical_head_from_chain(
+pub(super) fn logical_head_from_chain(
     chain: &[BoundedForkSegment],
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<Seq> {
