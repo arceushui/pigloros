@@ -815,7 +815,7 @@ fn the_chain_edge_is_looked_up_once_and_then_retained_by_the_commit() {
     let id = ids(&registry)[0];
     let recorded = match &registry.plugins[&id].chain {
         StepChainV1::Recorded { node } => node.coordinate().artifact_digest(),
-        other => std::panic::resume_unwind(Box::new(format!("not recorded: {other:?}"))),
+        StepChainV1::Lookup => std::panic::resume_unwind(Box::new("chain not recorded")),
     };
     assert_eq!(recorded, step);
 
