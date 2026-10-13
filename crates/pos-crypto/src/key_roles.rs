@@ -529,7 +529,7 @@ impl<'a> RoleMessageParts<'a> {
         }
     }
 
-    fn slices(&self) -> [&[u8]; 6] {
+    const fn slices(&self) -> [&[u8]; 6] {
         [
             ROLE_SIGNATURE_DOMAIN,
             &self.owner_length,
