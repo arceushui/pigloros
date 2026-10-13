@@ -20,37 +20,39 @@ fn binding_length(
         SelectedRowV1::BindingProbe(operation_id),
         context,
         |row, _| {
-            [0, 2].into_iter().try_for_each(|column| {
-                row.get::<_, bool>(column)
-                    .map_err(|_| Error::StorageIndeterminate)
-                    .and_then(|blob| {
-                        if blob {
-                            Ok(())
-                        } else {
-                            Err(Error::StorageIndeterminate)
-                        }
-                    })
-            })
-            .and_then(|()| {
-                row.get::<_, i64>(1)
-                    .map_err(|_| Error::StorageIndeterminate)
-            })
-            .and_then(|principal_length| {
-                row.get::<_, i64>(3)
-                    .map_err(|_| Error::StorageIndeterminate)
-                    .and_then(|length| {
-                        usize::try_from(length).map_err(|_| Error::CorruptAuthority)
-                    })
-                    .and_then(|length| {
-                        if principal_length != i64::from(HASH_BYTES)
-                            || length > pos_core::MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1
-                        {
-                            Err(Error::CorruptAuthority)
-                        } else {
-                            Ok(length)
-                        }
-                    })
-            })
+            [0, 2]
+                .into_iter()
+                .try_for_each(|column| {
+                    row.get::<_, bool>(column)
+                        .map_err(|_| Error::StorageIndeterminate)
+                        .and_then(|blob| {
+                            if blob {
+                                Ok(())
+                            } else {
+                                Err(Error::StorageIndeterminate)
+                            }
+                        })
+                })
+                .and_then(|()| {
+                    row.get::<_, i64>(1)
+                        .map_err(|_| Error::StorageIndeterminate)
+                })
+                .and_then(|principal_length| {
+                    row.get::<_, i64>(3)
+                        .map_err(|_| Error::StorageIndeterminate)
+                        .and_then(|length| {
+                            usize::try_from(length).map_err(|_| Error::CorruptAuthority)
+                        })
+                        .and_then(|length| {
+                            if principal_length != i64::from(HASH_BYTES)
+                                || length > pos_core::MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1
+                            {
+                                Err(Error::CorruptAuthority)
+                            } else {
+                                Ok(length)
+                            }
+                        })
+                })
         },
     )
 }

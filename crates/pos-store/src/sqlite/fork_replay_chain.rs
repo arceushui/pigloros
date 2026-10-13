@@ -70,15 +70,22 @@ fn metadata_with_context(
             })
             .and_then(|length| length.ok_or(Error::CorruptAuthority))
             .and_then(|parent| {
-                selected_field_with_context(conn, SelectedRowV1::ChainFields(&key), context, |row, context| {
-                    context
-                        .bytes(parent.unwrap_or(0))
-                        .map_err(|_| Error::CorruptAuthority)
-                        .and_then(|()| ForkChainRow::read(row).map_err(|_| Error::StorageIndeterminate))
-                        .and_then(|row| {
-                            row.decode_fields().map_err(|_| Error::CorruptAuthority)
-                        })
-                })
+                selected_field_with_context(
+                    conn,
+                    SelectedRowV1::ChainFields(&key),
+                    context,
+                    |row, context| {
+                        context
+                            .bytes(parent.unwrap_or(0))
+                            .map_err(|_| Error::CorruptAuthority)
+                            .and_then(|()| {
+                                ForkChainRow::read(row).map_err(|_| Error::StorageIndeterminate)
+                            })
+                            .and_then(|row| {
+                                row.decode_fields().map_err(|_| Error::CorruptAuthority)
+                            })
+                    },
+                )
                 .and_then(|row| row.ok_or(Error::CorruptAuthority))
             })
         })
@@ -93,7 +100,9 @@ pub(super) fn chain_with_context(
     let mut visited = HashSet::new();
     let mut current = timeline;
     loop {
-        let next = context.node(chain.len()).map_err(|_| Error::CorruptAuthority)
+        let next = context
+            .node(chain.len())
+            .map_err(|_| Error::CorruptAuthority)
             // Logical native unit of the actual cycle-set copy, not Rust
             // object size, padding, capacity or an invented serialization.
             .and_then(|()| context.bytes(16).map_err(|_| Error::CorruptAuthority))
@@ -112,7 +121,10 @@ pub(super) fn chain_with_context(
         }
     }
     chain.reverse();
-    context.check().map(|()| chain).map_err(|_| Error::CorruptAuthority)
+    context
+        .check()
+        .map(|()| chain)
+        .map_err(|_| Error::CorruptAuthority)
 }
 
 fn retain_segment_with_context(
@@ -126,7 +138,9 @@ fn retain_segment_with_context(
         DecodedForkChainRow::Fork { parent, fork, head } => (Some(*fork), Some(*parent), *head),
     };
     // Actual retained Timeline ID and head; non-root entries also retain a cut.
-    context.bytes(16 + 8).map_err(|_| Error::CorruptAuthority)
+    context
+        .bytes(16 + 8)
+        .map_err(|_| Error::CorruptAuthority)
         .and_then(|()| {
             if fork.is_some() {
                 context.bytes(8).map_err(|_| Error::CorruptAuthority)
@@ -135,8 +149,15 @@ fn retain_segment_with_context(
             }
         })
         .and_then(|()| {
-            chain.push(BoundedForkSegment { id: current, fork, head });
-            context.check().map(|()| parent).map_err(|_| Error::CorruptAuthority)
+            chain.push(BoundedForkSegment {
+                id: current,
+                fork,
+                head,
+            });
+            context
+                .check()
+                .map(|()| parent)
+                .map_err(|_| Error::CorruptAuthority)
         })
 }
 
@@ -153,21 +174,33 @@ fn logical_head_from_chain(
     chain: &[BoundedForkSegment],
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<Seq> {
-    chain.iter().enumerate().try_fold(0_u64, |head, (index, segment)| {
-                context.check().map_err(|_| Error::CorruptAuthority)
-                    .and_then(|()| {
-                        // Reuse scalar heads from these exact rows in the
-                        // already-held snapshot; no duplicate native query.
-                        fork_segment_length(
-                            segment.fork.map_or(0, Seq::as_u64),
-                            segment.head,
-                            chain.get(index + 1).and_then(|next| next.fork).map(Seq::as_u64),
-                        ).map_err(|_| Error::CorruptAuthority)
-                    })
-                    .and_then(|length| head.checked_add(length).ok_or(Error::CorruptAuthority))
-            })
+    chain
+        .iter()
+        .enumerate()
+        .try_fold(0_u64, |head, (index, segment)| {
+            context
+                .check()
+                .map_err(|_| Error::CorruptAuthority)
+                .and_then(|()| {
+                    // Reuse scalar heads from these exact rows in the
+                    // already-held snapshot; no duplicate native query.
+                    fork_segment_length(
+                        segment.fork.map_or(0, Seq::as_u64),
+                        segment.head,
+                        chain
+                            .get(index + 1)
+                            .and_then(|next| next.fork)
+                            .map(Seq::as_u64),
+                    )
+                    .map_err(|_| Error::CorruptAuthority)
+                })
+                .and_then(|length| head.checked_add(length).ok_or(Error::CorruptAuthority))
+        })
         .and_then(|head| {
-            context.check().map(|()| Seq::from_u64(head)).map_err(|_| Error::CorruptAuthority)
+            context
+                .check()
+                .map(|()| Seq::from_u64(head))
+                .map_err(|_| Error::CorruptAuthority)
         })
 }
 
@@ -186,15 +219,31 @@ mod tests {
 
     type Fallible<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-    fn append(store: &mut super::super::SqliteStore, timeline: TimelineId, count: usize) -> Fallible<()> {
-        let drafts: Vec<_> = (0..count).map(|_| EventDraft::new(
-            EntityId::new(), Kind::new("ancestry.fixture"), CanonicalBytes::from_vec(vec![0xf6]),
-        )).collect();
+    fn append(
+        store: &mut super::super::SqliteStore,
+        timeline: TimelineId,
+        count: usize,
+    ) -> Fallible<()> {
+        let drafts: Vec<_> = (0..count)
+            .map(|_| {
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("ancestry.fixture"),
+                    CanonicalBytes::from_vec(vec![0xf6]),
+                )
+            })
+            .collect();
         store.append(timeline, &drafts)?;
         Ok(())
     }
 
-    fn fixture(events: bool) -> Fallible<(tempfile::TempDir, super::super::SqliteStore, [TimelineId; 3])> {
+    fn fixture(
+        events: bool,
+    ) -> Fallible<(
+        tempfile::TempDir,
+        super::super::SqliteStore,
+        [TimelineId; 3],
+    )> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("ancestry.sqlite3");
         let mut store = super::super::SqliteStore::open(path.to_str().ok_or("ancestry path")?)?;
@@ -204,11 +253,19 @@ mod tests {
         if events {
             append(&mut store, root, 3)?;
         }
-        let child = store.fork(root, Seq::from_u64(if events { 2 } else { 0 }), "child")?.id();
+        let child = store
+            .fork(root, Seq::from_u64(if events { 2 } else { 0 }), "child")?
+            .id();
         if events {
             append(&mut store, child, 2)?;
         }
-        let grandchild = store.fork(child, Seq::from_u64(if events { 4 } else { 0 }), "grandchild")?.id();
+        let grandchild = store
+            .fork(
+                child,
+                Seq::from_u64(if events { 4 } else { 0 }),
+                "grandchild",
+            )?
+            .id();
         if events {
             append(&mut store, grandchild, 1)?;
         }
@@ -218,10 +275,19 @@ mod tests {
     fn expected_cost(ids: &[TimelineId]) -> usize {
         // Independent inventory of actual copies: cycle-set ID, query String,
         // retained segment ID/head, and for each non-root raw parent/cut.
-        ids.iter().enumerate().map(|(index, id)| {
-            16 + id.to_string().len() + 16 + 8
-                + if index == 0 { 0 } else { ids[index - 1].to_string().len() + 8 }
-        }).sum()
+        ids.iter()
+            .enumerate()
+            .map(|(index, id)| {
+                16 + id.to_string().len()
+                    + 16
+                    + 8
+                    + if index == 0 {
+                        0
+                    } else {
+                        ids[index - 1].to_string().len() + 8
+                    }
+            })
+            .sum()
     }
 
     #[test]
@@ -236,15 +302,25 @@ mod tests {
             for bytes in 1..=expected {
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
                 let start = clock.mark();
-                let limits = ForkReplayReadLimitsV1::new(count.max(1), count, count * 2, bytes, 1_000_000)?;
+                let limits =
+                    ForkReplayReadLimitsV1::new(count.max(1), count, count * 2, bytes, 1_000_000)?;
                 let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-                let result = chain_with_context(&store.conn, timeline, &mut NativeReadContextV1::protected(&mut budget));
+                let result = chain_with_context(
+                    &store.conn,
+                    timeline,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
                 if bytes == expected {
                     let chain = result?;
-                    assert_eq!(chain.iter().map(|segment| segment.id).collect::<Vec<_>>(), selected);
+                    assert_eq!(
+                        chain.iter().map(|segment| segment.id).collect::<Vec<_>>(),
+                        selected
+                    );
                     assert!(chain.iter().all(|segment| segment.head == 0));
                     assert_eq!(chain[0].fork, None);
-                    assert!(chain[1..].iter().all(|segment| segment.fork == Some(Seq::ZERO)));
+                    assert!(chain[1..]
+                        .iter()
+                        .all(|segment| segment.fork == Some(Seq::ZERO)));
                     assert_eq!(budget.remaining_native_bytes(), 0);
                     budget.check_time()?;
                 } else {
@@ -278,8 +354,12 @@ mod tests {
             let limits = ForkReplayReadLimitsV1::new(depth, visits, rows, bytes, 1_000_000)?;
             let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
             let result = (0..walks).try_for_each(|_| {
-                logical_head_with_context(&store.conn, ids[2], &mut NativeReadContextV1::protected(&mut budget))
-                    .map(|head| assert_eq!(head, Seq::ZERO))
+                logical_head_with_context(
+                    &store.conn,
+                    ids[2],
+                    &mut NativeReadContextV1::protected(&mut budget),
+                )
+                .map(|head| assert_eq!(head, Seq::ZERO))
             });
             assert_eq!(result.is_ok(), success);
             if success {
@@ -304,22 +384,37 @@ mod tests {
             for at in [0, expected_head + 1] {
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
                 let start = clock.mark();
-                let limits = ForkReplayReadLimitsV1::new(2, index + 1, (index + 1) * 2, cost, 1_000_000)?;
+                let limits =
+                    ForkReplayReadLimitsV1::new(2, index + 1, (index + 1) * 2, cost, 1_000_000)?;
                 let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
                 let protected = super::super::SqliteStore::compute_chain_hash_at_with_context_on(
-                    &store.conn, store.hasher.as_ref(), ids[index], Seq::from_u64(at),
+                    &store.conn,
+                    store.hasher.as_ref(),
+                    ids[index],
+                    Seq::from_u64(at),
                     &mut NativeReadContextV1::protected(&mut budget),
                 );
                 let public = store.compute_chain_hash_at(ids[index], Seq::from_u64(at));
-                assert_eq!(protected.map_err(|error| error.to_string()), public.map_err(|error| error.to_string()));
+                assert_eq!(
+                    protected.map_err(|error| error.to_string()),
+                    public.map_err(|error| error.to_string())
+                );
                 assert_eq!(budget.remaining_native_bytes(), 0);
                 budget.check_time()?;
             }
             let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
             let start = clock.mark();
-            let limits = ForkReplayReadLimitsV1::new(2, index + 1, (index + 1) * 2, cost, 1_000_000)?;
+            let limits =
+                ForkReplayReadLimitsV1::new(2, index + 1, (index + 1) * 2, cost, 1_000_000)?;
             let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-            assert_eq!(logical_head_with_context(&store.conn, ids[index], &mut NativeReadContextV1::protected(&mut budget))?, ordinary);
+            assert_eq!(
+                logical_head_with_context(
+                    &store.conn,
+                    ids[index],
+                    &mut NativeReadContextV1::protected(&mut budget)
+                )?,
+                ordinary
+            );
         }
         store.conn.execute_batch("ROLLBACK")?;
         Ok(())
@@ -331,41 +426,90 @@ mod tests {
         conn.execute_batch("CREATE TABLE timelines (id, parent_id, fork_seq, head_seq)")?;
         let root = TimelineId::from_ulid(ulid::Ulid::from_bytes([0xab; 16]));
         let child = TimelineId::from_ulid(ulid::Ulid::from_bytes([0xcd; 16]));
-        conn.execute("INSERT INTO timelines VALUES (?1, NULL, NULL, 0)", [root.to_string()])?;
-        conn.execute("INSERT INTO timelines VALUES (?1, ?2, 0, 0)", params![child.to_string(), root.to_string()])?;
+        conn.execute(
+            "INSERT INTO timelines VALUES (?1, NULL, NULL, 0)",
+            [root.to_string()],
+        )?;
+        conn.execute(
+            "INSERT INTO timelines VALUES (?1, ?2, 0, 0)",
+            params![child.to_string(), root.to_string()],
+        )?;
         Ok((conn, root, child))
     }
 
     fn protected_head(conn: &Connection, timeline: TimelineId) -> Result<Seq> {
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
-        let limits = ForkReplayReadLimitsV1::new(4, 8, 16, 4096, 1_000_000).map_err(|_| Error::CorruptAuthority)?;
-        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock).map_err(|_| Error::CorruptAuthority)?;
-        logical_head_with_context(conn, timeline, &mut NativeReadContextV1::protected(&mut budget))
+        let limits = ForkReplayReadLimitsV1::new(4, 8, 16, 4096, 1_000_000)
+            .map_err(|_| Error::CorruptAuthority)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)
+            .map_err(|_| Error::CorruptAuthority)?;
+        logical_head_with_context(
+            conn,
+            timeline,
+            &mut NativeReadContextV1::protected(&mut budget),
+        )
     }
 
     #[test]
-    fn shared_metadata_validation_preserves_ordinary_error_precedence_and_ulid_aliases() -> Fallible<()> {
+    fn shared_metadata_validation_preserves_ordinary_error_precedence_and_ulid_aliases(
+    ) -> Fallible<()> {
         let (conn, root, child) = raw_fixture()?;
         let parent = root.to_string();
         for (parent_value, fork_seq, head_seq, expected) in [
-            (Some("invalid"), Some(-1), -1, format!("timeline {child} has a negative Event head")),
-            (None, Some(-1), 0, format!("root timeline {child} has Fork sequence metadata")),
-            (Some("!!!!!!!!!!!!!!!!!!!!!!!!!!"), Some(-1), 0, "invalid ULID: !!!!!!!!!!!!!!!!!!!!!!!!!!".to_owned()),
-            (Some(parent.as_str()), Some(-1), 0, format!("Fork timeline {child} has a negative Fork sequence")),
-            (Some(parent.as_str()), None, 0, format!("Fork timeline {child} is missing its Fork sequence")),
+            (
+                Some("invalid"),
+                Some(-1),
+                -1,
+                format!("timeline {child} has a negative Event head"),
+            ),
+            (
+                None,
+                Some(-1),
+                0,
+                format!("root timeline {child} has Fork sequence metadata"),
+            ),
+            (
+                Some("!!!!!!!!!!!!!!!!!!!!!!!!!!"),
+                Some(-1),
+                0,
+                "invalid ULID: !!!!!!!!!!!!!!!!!!!!!!!!!!".to_owned(),
+            ),
+            (
+                Some(parent.as_str()),
+                Some(-1),
+                0,
+                format!("Fork timeline {child} has a negative Fork sequence"),
+            ),
+            (
+                Some(parent.as_str()),
+                None,
+                0,
+                format!("Fork timeline {child} is missing its Fork sequence"),
+            ),
         ] {
-            conn.execute("UPDATE timelines SET parent_id = ?1, fork_seq = ?2, head_seq = ?3 WHERE id = ?4", params![parent_value, fork_seq, head_seq, child.to_string()])?;
-            let error = super::super::SqliteStore::logical_head_unchecked_on(&conn, child).err().ok_or("ordinary metadata must fail")?;
+            conn.execute(
+                "UPDATE timelines SET parent_id = ?1, fork_seq = ?2, head_seq = ?3 WHERE id = ?4",
+                params![parent_value, fork_seq, head_seq, child.to_string()],
+            )?;
+            let error = super::super::SqliteStore::logical_head_unchecked_on(&conn, child)
+                .err()
+                .ok_or("ordinary metadata must fail")?;
             assert!(error.to_string().contains(&expected), "{error}");
             assert_eq!(protected_head(&conn, child), Err(Error::CorruptAuthority));
         }
         let lowercase = parent.to_lowercase();
         assert_ne!(lowercase, parent);
         for parent in [&parent, &lowercase] {
-            conn.execute("UPDATE timelines SET parent_id = ?1, fork_seq = 0, head_seq = 0 WHERE id = ?2", params![parent, child.to_string()])?;
+            conn.execute(
+                "UPDATE timelines SET parent_id = ?1, fork_seq = 0, head_seq = 0 WHERE id = ?2",
+                params![parent, child.to_string()],
+            )?;
             assert_eq!(protected_head(&conn, child)?, Seq::ZERO);
-            assert_eq!(super::super::SqliteStore::logical_head_unchecked_on(&conn, child)?, Seq::ZERO);
+            assert_eq!(
+                super::super::SqliteStore::logical_head_unchecked_on(&conn, child)?,
+                Seq::ZERO
+            );
         }
         Ok(())
     }
@@ -373,28 +517,63 @@ mod tests {
     #[test]
     fn invalid_segment_cuts_overflow_cycles_absence_and_storage_fail_closed() -> Fallible<()> {
         let (conn, root, child) = raw_fixture()?;
-        conn.execute("UPDATE timelines SET fork_seq = 1 WHERE id = ?1", [child.to_string()])?;
-        let error = super::super::SqliteStore::logical_head_unchecked_on(&conn, child).err().ok_or("beyond parent")?;
-        assert!(error.to_string().contains("Fork point exceeds parent logical Event head"));
+        conn.execute(
+            "UPDATE timelines SET fork_seq = 1 WHERE id = ?1",
+            [child.to_string()],
+        )?;
+        let error = super::super::SqliteStore::logical_head_unchecked_on(&conn, child)
+            .err()
+            .ok_or("beyond parent")?;
+        assert!(error
+            .to_string()
+            .contains("Fork point exceeds parent logical Event head"));
         assert_eq!(protected_head(&conn, child), Err(Error::CorruptAuthority));
         let grandchild = TimelineId::from_ulid(ulid::Ulid::from_bytes([0xef; 16]));
-        conn.execute("UPDATE timelines SET head_seq = 2 WHERE id = ?1", [root.to_string()])?;
-        conn.execute("INSERT INTO timelines VALUES (?1, ?2, 0, 0)", params![grandchild.to_string(), child.to_string()])?;
-        let error = super::super::SqliteStore::logical_head_unchecked_on(&conn, grandchild).err().ok_or("before inherited")?;
-        assert!(error.to_string().contains("Fork point precedes inherited history"));
-        assert_eq!(protected_head(&conn, grandchild), Err(Error::CorruptAuthority));
+        conn.execute(
+            "UPDATE timelines SET head_seq = 2 WHERE id = ?1",
+            [root.to_string()],
+        )?;
+        conn.execute(
+            "INSERT INTO timelines VALUES (?1, ?2, 0, 0)",
+            params![grandchild.to_string(), child.to_string()],
+        )?;
+        let error = super::super::SqliteStore::logical_head_unchecked_on(&conn, grandchild)
+            .err()
+            .ok_or("before inherited")?;
+        assert!(error
+            .to_string()
+            .contains("Fork point precedes inherited history"));
+        assert_eq!(
+            protected_head(&conn, grandchild),
+            Err(Error::CorruptAuthority)
+        );
         conn.execute("UPDATE timelines SET head_seq = ?1", [i64::MAX])?;
-        conn.execute("UPDATE timelines SET fork_seq = ?1 WHERE id = ?2", params![i64::MAX, child.to_string()])?;
-        conn.execute("UPDATE timelines SET fork_seq = ?1 WHERE id = ?2", params![i64::MAX, grandchild.to_string()])?;
+        conn.execute(
+            "UPDATE timelines SET fork_seq = ?1 WHERE id = ?2",
+            params![i64::MAX, child.to_string()],
+        )?;
+        conn.execute(
+            "UPDATE timelines SET fork_seq = ?1 WHERE id = ?2",
+            params![i64::MAX, grandchild.to_string()],
+        )?;
         // These durable scalar maxima still fit the stitched u64 head.
         assert!(protected_head(&conn, grandchild).is_ok());
-        conn.execute("UPDATE timelines SET parent_id = ?1, fork_seq = 0 WHERE id = ?2", params![grandchild.to_string(), root.to_string()])?;
-        assert_eq!(protected_head(&conn, grandchild), Err(Error::CorruptAuthority));
+        conn.execute(
+            "UPDATE timelines SET parent_id = ?1, fork_seq = 0 WHERE id = ?2",
+            params![grandchild.to_string(), root.to_string()],
+        )?;
+        assert_eq!(
+            protected_head(&conn, grandchild),
+            Err(Error::CorruptAuthority)
+        );
         assert!(super::super::SqliteStore::logical_head_unchecked_on(&conn, grandchild).is_err());
         conn.execute("DELETE FROM timelines WHERE id = ?1", [child.to_string()])?;
         assert_eq!(protected_head(&conn, child), Err(Error::CorruptAuthority));
         conn.execute_batch("DROP TABLE timelines")?;
-        assert_eq!(protected_head(&conn, root), Err(Error::StorageIndeterminate));
+        assert_eq!(
+            protected_head(&conn, root),
+            Err(Error::StorageIndeterminate)
+        );
         Ok(())
     }
 
@@ -408,11 +587,27 @@ mod tests {
             (u64::MAX, 1, Err(Error::CorruptAuthority)),
         ] {
             let chain = [
-                BoundedForkSegment { id: root, fork: None, head: prefix },
-                BoundedForkSegment { id: child, fork: Some(Seq::from_u64(prefix)), head: last_head },
+                BoundedForkSegment {
+                    id: root,
+                    fork: None,
+                    head: prefix,
+                },
+                BoundedForkSegment {
+                    id: child,
+                    fork: Some(Seq::from_u64(prefix)),
+                    head: last_head,
+                },
             ];
-            assert_eq!(logical_head_from_chain(&chain, &mut NativeReadContextV1::ordinary()), expected);
-            assert_eq!(super::super::SqliteStore::add_logical_segment(prefix, last_head).map(Seq::from_u64).map_err(|_| Error::CorruptAuthority), expected);
+            assert_eq!(
+                logical_head_from_chain(&chain, &mut NativeReadContextV1::ordinary()),
+                expected
+            );
+            assert_eq!(
+                super::super::SqliteStore::add_logical_segment(prefix, last_head)
+                    .map(Seq::from_u64)
+                    .map_err(|_| Error::CorruptAuthority),
+                expected
+            );
         }
         Ok(())
     }
@@ -420,26 +615,74 @@ mod tests {
     #[test]
     fn raw_parent_type_width_utf8_and_scalar_types_are_gated_before_getters() -> Fallible<()> {
         for (parent, fork_seq, head, expected) in [
-            (Value::Blob(vec![1; 26]), Value::Integer(0), Value::Integer(0), Error::StorageIndeterminate),
-            (Value::Text("x".repeat(25)), Value::Integer(0), Value::Integer(0), Error::CorruptAuthority),
-            (Value::Text("x".repeat(27)), Value::Integer(0), Value::Integer(0), Error::CorruptAuthority),
-            (Value::Null, Value::Text("0".into()), Value::Integer(0), Error::StorageIndeterminate),
-            (Value::Null, Value::Real(0.0), Value::Integer(0), Error::StorageIndeterminate),
-            (Value::Null, Value::Null, Value::Null, Error::StorageIndeterminate),
-            (Value::Null, Value::Null, Value::Blob(vec![1]), Error::StorageIndeterminate),
+            (
+                Value::Blob(vec![1; 26]),
+                Value::Integer(0),
+                Value::Integer(0),
+                Error::StorageIndeterminate,
+            ),
+            (
+                Value::Text("x".repeat(25)),
+                Value::Integer(0),
+                Value::Integer(0),
+                Error::CorruptAuthority,
+            ),
+            (
+                Value::Text("x".repeat(27)),
+                Value::Integer(0),
+                Value::Integer(0),
+                Error::CorruptAuthority,
+            ),
+            (
+                Value::Null,
+                Value::Text("0".into()),
+                Value::Integer(0),
+                Error::StorageIndeterminate,
+            ),
+            (
+                Value::Null,
+                Value::Real(0.0),
+                Value::Integer(0),
+                Error::StorageIndeterminate,
+            ),
+            (
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Error::StorageIndeterminate,
+            ),
+            (
+                Value::Null,
+                Value::Null,
+                Value::Blob(vec![1]),
+                Error::StorageIndeterminate,
+            ),
         ] {
             let (conn, _, child) = raw_fixture()?;
-            conn.execute("UPDATE timelines SET parent_id = ?1, fork_seq = ?2, head_seq = ?3 WHERE id = ?4", params![parent, fork_seq, head, child.to_string()])?;
+            conn.execute(
+                "UPDATE timelines SET parent_id = ?1, fork_seq = ?2, head_seq = ?3 WHERE id = ?4",
+                params![parent, fork_seq, head, child.to_string()],
+            )?;
             let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
             let start = clock.mark();
             let limits = ForkReplayReadLimitsV1::new(2, 3, 6, 512, 1_000_000)?;
             let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-            assert_eq!(logical_head_with_context(&conn, child, &mut NativeReadContextV1::protected(&mut budget)), Err(expected));
+            assert_eq!(
+                logical_head_with_context(
+                    &conn,
+                    child,
+                    &mut NativeReadContextV1::protected(&mut budget)
+                ),
+                Err(expected)
+            );
             assert_eq!(budget.remaining_native_bytes(), 512 - 16 - 26);
         }
         let (conn, _, child) = raw_fixture()?;
         conn.execute_batch("UPDATE timelines SET parent_id = CAST(X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' AS TEXT)")?;
-        assert_eq!(protected_head(&conn, child), Err(Error::StorageIndeterminate));
+        assert_eq!(
+            protected_head(&conn, child),
+            Err(Error::StorageIndeterminate)
+        );
         Ok(())
     }
 
@@ -449,11 +692,17 @@ mod tests {
         for last in [Duration::ZERO, Duration::from_secs(2)] {
             let mut completed = false;
             for marks in 2..512 {
-                let mut clock = ScriptedGuardMonotonicSourceV1::new(std::iter::repeat_n(Duration::from_millis(1), marks).chain([last]));
+                let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                    std::iter::repeat_n(Duration::from_millis(1), marks).chain([last]),
+                );
                 let start = clock.mark();
                 let limits = ForkReplayReadLimitsV1::new(2, 3, 6, expected_cost(&ids), 1_000_000)?;
                 let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-                let result = logical_head_with_context(&store.conn, ids[2], &mut NativeReadContextV1::protected(&mut budget));
+                let result = logical_head_with_context(
+                    &store.conn,
+                    ids[2],
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
                 if result.is_ok() {
                     assert_eq!(result?, Seq::ZERO);
                     completed = true;
