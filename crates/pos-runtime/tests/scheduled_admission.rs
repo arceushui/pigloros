@@ -1068,13 +1068,14 @@ fn protected_pass_binds_its_authorized_snapshot_and_rechecks_consent() {
 
     assert_eq!(stage(&mut registry).len(), 1);
     let admission = host.admission(&store, 1);
-    let first = receipt(registry.admit_scheduled_pass(&mut store, &admission));
+    let _first = receipt(registry.admit_scheduled_pass(&mut store, &admission));
+
+    // A pass rebuilt after the commit declares a different Tick and chain
+    // edge, so under the committed key it conflicts (ADR-064 R3.8). The exact
+    // retry of the retained basis is covered by the recovery fixtures.
     stage(&mut registry);
-    let retried = receipt(registry.admit_scheduled_pass(&mut store, &admission));
-    assert_eq!(
-        retried, first,
-        "an exact retry recovers the original receipt"
-    );
+    let rebuilt = registry.admit_scheduled_pass(&mut store, &admission);
+    assert_eq!(rejection(rebuilt), "AdmissionConflict");
 
     // The same attempt identity over a changed authorized snapshot conflicts.
     fold_projection(&mut store, &mut registry, host.timeline, subject);
