@@ -12,17 +12,22 @@ use pos_core::{
     AuthorityGranteeV1, AuthorityPersistenceHostV1, AuthorityPersistencePortV1,
     AuthorityRegistrySnapshotV1, AuthorityRoleV1, CanonicalBytes, CapabilityGrantDraftV1,
     CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1, CapabilityScopeDraftV1,
-    CapabilityScopeV1, CoreError, DelegateClassV1, EntityId, ErasureContainmentGateV1, EventDraft,
-    EventStore, FactualDriverStepV1, FactualOutputV1, FactualOwnerIdV1, FactualScheduledTickV1,
-    FactualTickContextV1, FactualTickDependenciesV1, FactualTickShapeV1, Hash, Kind,
-    PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
-    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptDraftV1, PipelineAttemptIdV1,
-    PipelineAttemptV1, PipelineCommitReceiptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1,
-    PipelineIngressV1, PipelineObservationAnchorV1, PipelineOutcomeV1, PipelinePreconditionV1,
-    PipelineReceiptLookupV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1,
-    PrincipalRefV1, Seq, SeqRange, TentativePipelineResultV1, TimelineId, WallTime,
+    CapabilityScopeV1, CoreError, CounterfactualDependencyReadPortV1, DelegateClassV1,
+    DependencyEdgeRecordV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
+    DependencyPageRequestV1, DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, Event,
+    EventDraft, EventStore, FactualCutV1, FactualDriverStepV1, FactualHeadV1, FactualIngressEventV1,
+    FactualInputV1, FactualOutputV1, FactualOwnerIdV1, FactualPrefixReadPortV1, FactualPriorNodeV1,
+    FactualScheduledTickV1, FactualTickContextV1, FactualTickDependenciesV1, FactualTickShapeV1,
+    Hash, Kind, OutputNodeBindingV1, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
+    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
+    PipelineAttemptDraftV1, PipelineAttemptIdV1, PipelineAttemptV1, PipelineCommitReceiptV1,
+    PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1, PipelineObservationAnchorV1,
+    PipelineOutcomeV1, PipelinePreconditionV1, PipelineReceiptLookupV1,
+    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, PrincipalRefV1,
+    RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq, SeqRange,
+    TentativePipelineResultV1, TickDependencyRecordV1, TimelineId, WallTime,
     APPEND_IDENTITY_RETENTION_MICROS, DELEGATE_ACTION_V1, GEOGRAPHIC_EVENT_TYPE,
-    PIPELINE_CONTRACT_VERSION_V1,
+    MAX_DEPENDENCY_PAGE_ROWS_V1, PIPELINE_CONTRACT_VERSION_V1,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use tempfile::tempdir;
@@ -319,6 +324,14 @@ fn tick_dependencies(attempt: &Attempt) -> FactualTickDependenciesV1 {
 }
 
 fn basis(attempt: &Attempt) -> PipelineAdmissionBasisV1 {
+    basis_declaring(attempt, tick_dependencies(attempt))
+}
+
+/// The basis of a hand-built attempt that declares `dependencies`.
+fn basis_declaring(
+    attempt: &Attempt,
+    dependencies: FactualTickDependenciesV1,
+) -> PipelineAdmissionBasisV1 {
     let evidence = ok(PipelineEvidenceRefV1::try_new(hash(60)));
     let tentative_result = match attempt.ingress {
         PipelineIngressV1::HumanProposedAction => {
@@ -351,7 +364,7 @@ fn basis(attempt: &Attempt) -> PipelineAdmissionBasisV1 {
             precondition: Some(attempt.precondition),
             security_revisions: Some(attempt.revisions),
             batch: Some(ok(PipelineDraftBatchV1::try_new(attempt.drafts.clone()))),
-            dependencies: tick_dependencies(attempt),
+            dependencies,
         },
     ))
 }
@@ -1230,4 +1243,710 @@ fn sqlite_rejects_an_unreleased_receipt_table_or_index_shape_closed() {
     assert!(open_read_only().is_some_and(|text| text.contains("pipeline_admission_receipts table")));
     assert!(open_writable().is_some());
     assert!(open_read_only().is_some_and(|text| text.contains("pipeline_admission_receipts table")));
+}
+
+// ── Recorded factual Ticks (ADR-064 Revision 3, R3.7.2, R3.7.4, R3.7.5) ────
+//
+// `MemoryStore` checks the Tick declaration and records its rows with the
+// Events. `SqliteStore` accepts the declaration and records nothing until its
+// own slice: that slice adds the adapter to `recording_stores` and every case
+// below runs against it unchanged.
+
+trait RecordingHarness:
+    Harness + CounterfactualDependencyReadPortV1 + FactualPrefixReadPortV1
+{
+}
+
+impl<T> RecordingHarness for T where
+    T: Harness + CounterfactualDependencyReadPortV1 + FactualPrefixReadPortV1
+{
+}
+
+/// The adapters that record factual Ticks.
+fn recording_stores(clock: &TestClock) -> Vec<(&'static str, Box<dyn RecordingHarness>)> {
+    vec![(
+        "memory",
+        Box::new(MemoryStore::with_clock(Box::new(clock.clone()))),
+    )]
+}
+
+fn recorded_nodes(
+    store: &dyn RecordingHarness,
+    timeline: TimelineId,
+) -> Vec<DependencyNodeRecordV1> {
+    let scope = DependencyReadScopeV1::ParentPrefix {
+        timeline,
+        through_tick: u64::MAX,
+    };
+    let request = ok(DependencyPageRequestV1::try_new(
+        scope,
+        None,
+        MAX_DEPENDENCY_PAGE_ROWS_V1,
+    ));
+    ok(store.read_dependency_nodes(&request)).items().to_vec()
+}
+
+fn recorded_edges(
+    store: &dyn RecordingHarness,
+    timeline: TimelineId,
+) -> Vec<DependencyEdgeRecordV1> {
+    let scope = DependencyReadScopeV1::ParentPrefix {
+        timeline,
+        through_tick: u64::MAX,
+    };
+    let request = ok(DependencyPageRequestV1::try_new(
+        scope,
+        None,
+        MAX_DEPENDENCY_PAGE_ROWS_V1,
+    ));
+    ok(store.read_dependency_edges(&request)).items().to_vec()
+}
+
+const fn head(tick: u64, last_seq: u64) -> FactualHeadV1 {
+    FactualHeadV1 {
+        tick,
+        last_seq: Seq::from_u64(last_seq),
+    }
+}
+
+fn head_of(store: &dyn RecordingHarness, timeline: TimelineId) -> FactualHeadV1 {
+    ok(store.last_committed_factual_tick(timeline))
+}
+
+/// What a refused attempt must leave as it found it: the factual head, the
+/// recorded row counts, the Events and the fence budget.
+fn state_of(
+    store: &dyn RecordingHarness,
+    timeline: TimelineId,
+) -> (FactualHeadV1, RecordedSetCountsV1, usize, Option<u64>) {
+    (
+        head_of(store, timeline),
+        ok(store.factual_set_counts(timeline)),
+        event_count(store, timeline),
+        remaining_budget(store, timeline),
+    )
+}
+
+/// The attempt that follows a committed `previous` one on the scheduled path.
+fn scheduled_after(previous: &Attempt, key: u8, head: u64) -> Attempt {
+    Attempt {
+        ingress: PipelineIngressV1::ScheduledAiDriver,
+        ..attempt_after(previous, key, head)
+    }
+}
+
+/// The shape of a scheduled Tick whose one Driver outputs `drafts` and
+/// consumes the ingress node this Tick records for each of `ingress_events`,
+/// besides the `extra` inputs.
+fn scheduled_shape_of(
+    drafts: &[EventDraft],
+    snapshot: Hash,
+    ingress_events: Vec<FactualIngressEventV1>,
+    extra: Vec<FactualInputV1>,
+) -> FactualTickShapeV1 {
+    let outputs = drafts
+        .iter()
+        .map(|draft| FactualOutputV1 {
+            draft: draft.clone(),
+            authority: OutputAuthorityV1::Authoritative,
+            direct_inputs: Vec::new(),
+        })
+        .collect();
+    let step_inputs = ingress_events
+        .iter()
+        .map(|event| FactualInputV1::IngressEvent(event.seq))
+        .chain(extra)
+        .collect();
+    let driver = FactualDriverStepV1 {
+        owner: FactualOwnerIdV1::new("plugin:test".to_owned()),
+        policy_identity: hash(8),
+        step_inputs,
+        outputs,
+    };
+    FactualTickShapeV1::Scheduled(FactualScheduledTickV1 {
+        snapshot_digest: snapshot,
+        prefix_contents: Vec::new(),
+        history_contents: Vec::new(),
+        ingress_events,
+        drivers: vec![driver],
+    })
+}
+
+/// The declaration of `shape` for the Tick `attempt` names, under `grant`.
+fn declared(
+    attempt: &Attempt,
+    grant: Hash,
+    shape: &FactualTickShapeV1,
+) -> FactualTickDependenciesV1 {
+    let context = FactualTickContextV1 {
+        timeline_id: attempt.timeline,
+        tick: attempt.tick,
+        attempt_id: ok(PipelineAttemptIdV1::try_new([attempt.key; 16])),
+        evidence_digest: hash(60),
+        authority_grant: grant,
+    };
+    ok(assemble_factual_tick(&context, shape))
+}
+
+/// The correct declaration of a scheduled attempt that records ingress nodes
+/// for `ingress_events`.
+fn valid_declaration(
+    attempt: &Attempt,
+    ingress_events: Vec<FactualIngressEventV1>,
+) -> FactualTickDependenciesV1 {
+    let shape = scheduled_shape_of(&attempt.drafts, hash(61), ingress_events, Vec::new());
+    declared(attempt, hash(1), &shape)
+}
+
+fn ingress_event(event: &Event) -> FactualIngressEventV1 {
+    FactualIngressEventV1 {
+        seq: event.seq,
+        event_type: event.event_type.as_str().to_owned(),
+        payload_hash: event.payload_hash,
+    }
+}
+
+/// The declaration with another record, bindings unchanged.
+fn with_record(
+    declaration: &FactualTickDependenciesV1,
+    record: TickDependencyRecordV1,
+) -> FactualTickDependenciesV1 {
+    FactualTickDependenciesV1::new(
+        declaration.tick(),
+        record,
+        declaration.output_bindings().to_vec(),
+        declaration.event_nodes().to_vec(),
+    )
+}
+
+/// The record rebuilt through `try_new`: every node with the input list
+/// `inputs_of` names and the origin `origin`, and the edges `keep_edge` keeps.
+fn rebuilt(
+    record: &TickDependencyRecordV1,
+    origin: RecordedNodeOriginV1,
+    inputs_of: impl Fn(&DependencyNodeRecordV1) -> Vec<Hash>,
+    keep_edge: impl Fn(&DependencyEdgeRecordV1) -> bool,
+) -> TickDependencyRecordV1 {
+    let nodes = record
+        .nodes()
+        .iter()
+        .map(|node| {
+            ok(DependencyNodeRecordV1::try_new(
+                node.coordinate().clone(),
+                node.class(),
+                origin,
+                inputs_of(node),
+                node.provenance_digest(),
+            ))
+        })
+        .collect();
+    let edges = record
+        .edges()
+        .iter()
+        .filter(|edge| keep_edge(edge))
+        .cloned()
+        .collect();
+    ok(TickDependencyRecordV1::try_new(
+        record.tick(),
+        origin,
+        nodes,
+        edges,
+    ))
+}
+
+fn inputs_unchanged(node: &DependencyNodeRecordV1) -> Vec<Hash> {
+    node.input_digests().to_vec()
+}
+
+/// Whether the node is the step node (ordinal zero) or the output node of
+/// that ordinal of the test Driver.
+fn is_driver_node(node: &DependencyNodeRecordV1, ordinal: u32) -> bool {
+    node.coordinate().owner_id() == "plugin:test" && node.coordinate().output_ordinal() == ordinal
+}
+
+fn consumes_as(edge: &DependencyEdgeRecordV1, ordinal: u32) -> bool {
+    edge.consumer().owner_id() == "plugin:test" && edge.consumer().output_ordinal() == ordinal
+}
+
+/// The artifact digest of the node of `owner` at ordinal zero.
+fn digest_of_host(record: &TickDependencyRecordV1, owner: &str) -> Hash {
+    let found = record
+        .nodes()
+        .iter()
+        .find(|node| node.coordinate().owner_id() == owner)
+        .map(|node| node.coordinate().artifact_digest());
+    found.unwrap_or_else(|| std::panic::resume_unwind(Box::new("no such host node")))
+}
+
+/// Offer `declaration` for `attempt` and require the refusal `expected`, with
+/// the store exactly as it was.
+fn assert_refused(
+    name: &str,
+    case: &str,
+    store: &mut dyn RecordingHarness,
+    attempt: &Attempt,
+    declaration: FactualTickDependenciesV1,
+    expected: &PipelineOutcomeV1,
+) {
+    let before = state_of(store, attempt.timeline);
+    let outcome = ok(store.admit_pipeline_batch(&basis_declaring(attempt, declaration)));
+    assert_eq!(&outcome, expected, "{name}: {case}");
+    assert_eq!(state_of(store, attempt.timeline), before, "{name}: {case}");
+}
+
+/// One refused declaration: the case, the attempt, what it declares and the
+/// outcome the store answers.
+type RefusalCase = (
+    &'static str,
+    Attempt,
+    FactualTickDependenciesV1,
+    PipelineOutcomeV1,
+);
+
+/// Every way the declaration of `second` can be wrong that R3.7.2 names, over
+/// a Timeline whose Tick 1 recorded Events 1 to 3 and whose Event 4 is
+/// unbound. `stored` holds the nodes Tick 1 recorded.
+#[allow(clippy::too_many_lines)]
+fn refusal_cases(
+    second: &Attempt,
+    events: &[Event],
+    stored: &[DependencyNodeRecordV1],
+) -> Vec<RefusalCase> {
+    let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
+    let valid = valid_declaration(second, vec![ingress_event(&events[3])]);
+    let record = valid.record();
+    let drafts = &second.drafts;
+    let shaped = |ingress_events: Vec<FactualIngressEventV1>, extra: Vec<FactualInputV1>| {
+        let shape = scheduled_shape_of(drafts, hash(61), ingress_events, extra);
+        declared(second, hash(1), &shape)
+    };
+    let real = vec![ingress_event(&events[3])];
+    let absent = FactualIngressEventV1 {
+        seq: Seq::from_u64(99),
+        event_type: "world.action".to_owned(),
+        payload_hash: hash(70),
+    };
+    let wrong_hash = FactualIngressEventV1 {
+        payload_hash: hash(77),
+        ..ingress_event(&events[3])
+    };
+    let ghost = ok(DependencyNodeCoordinateV1::try_new(
+        1,
+        1,
+        "plugin:ghost".to_owned(),
+        0,
+        7,
+        hash(0xee),
+    ));
+    let nowhere = FactualInputV1::Prior(FactualPriorNodeV1::new(
+        ghost,
+        RecordedDependencyClassV1::EndogenousRecomputed,
+    ));
+    let mut swapped = valid.output_bindings().to_vec();
+    let (left, right) = (swapped[0].node_index, swapped[1].node_index);
+    swapped[0].node_index = right;
+    swapped[1].node_index = left;
+    let snapshot = digest_of_host(record, "host.observation");
+    let origin = RecordedNodeOriginV1::Committed;
+
+    // A record that repeats a node Tick 1 recorded, beside its own human node.
+    let human = Attempt {
+        ingress: PipelineIngressV1::HumanProposedAction,
+        drafts: drafts[..1].to_vec(),
+        ..second.clone()
+    };
+    let own = declared(
+        &human,
+        hash(1),
+        &FactualTickShapeV1::Human(human.drafts.clone()),
+    );
+    let repeated = ok(TickDependencyRecordV1::try_new(
+        2,
+        origin,
+        vec![stored[0].clone(), own.record().nodes()[0].clone()],
+        Vec::new(),
+    ));
+    let repeating = FactualTickDependenciesV1::new(
+        2,
+        repeated,
+        vec![OutputNodeBindingV1 {
+            draft_index: 0,
+            node_index: 1,
+        }],
+        Vec::new(),
+    );
+
+    vec![
+        (
+            "stale fence grant",
+            second.clone(),
+            declared(
+                second,
+                hash(2),
+                &scheduled_shape_of(drafts, hash(61), real.clone(), Vec::new()),
+            ),
+            PipelineOutcomeV1::AdmissionConflict,
+        ),
+        (
+            "wrong Tick",
+            Attempt {
+                tick: 3,
+                ..second.clone()
+            },
+            valid_declaration(
+                &Attempt {
+                    tick: 3,
+                    ..second.clone()
+                },
+                real.clone(),
+            ),
+            invalid.clone(),
+        ),
+        (
+            "asserted Tick differs from the record",
+            second.clone(),
+            FactualTickDependenciesV1::new(
+                3,
+                record.clone(),
+                valid.output_bindings().to_vec(),
+                valid.event_nodes().to_vec(),
+            ),
+            invalid.clone(),
+        ),
+        (
+            "provisional record",
+            second.clone(),
+            with_record(
+                &valid,
+                rebuilt(
+                    record,
+                    RecordedNodeOriginV1::Provisional,
+                    inputs_unchanged,
+                    |_| true,
+                ),
+            ),
+            invalid.clone(),
+        ),
+        (
+            "wrong snapshot digest",
+            second.clone(),
+            declared(
+                second,
+                hash(1),
+                &scheduled_shape_of(drafts, hash(99), real.clone(), Vec::new()),
+            ),
+            invalid.clone(),
+        ),
+        (
+            "output binding names another draft's node",
+            second.clone(),
+            FactualTickDependenciesV1::new(
+                valid.tick(),
+                record.clone(),
+                swapped,
+                valid.event_nodes().to_vec(),
+            ),
+            invalid.clone(),
+        ),
+        (
+            "missing output binding",
+            second.clone(),
+            FactualTickDependenciesV1::new(
+                valid.tick(),
+                record.clone(),
+                valid.output_bindings()[..2].to_vec(),
+                valid.event_nodes().to_vec(),
+            ),
+            invalid.clone(),
+        ),
+        (
+            "binding of an Event that does not exist",
+            second.clone(),
+            shaped(vec![absent], Vec::new()),
+            invalid.clone(),
+        ),
+        (
+            "binding of an Event a Tick already bound",
+            second.clone(),
+            shaped(vec![ingress_event(&events[1])], Vec::new()),
+            invalid.clone(),
+        ),
+        (
+            "binding with the wrong payload digest",
+            second.clone(),
+            shaped(vec![wrong_hash], Vec::new()),
+            invalid.clone(),
+        ),
+        (
+            "node repeated from an earlier Tick",
+            human,
+            repeating,
+            invalid.clone(),
+        ),
+        (
+            "edge source that resolves nowhere",
+            second.clone(),
+            shaped(real, vec![nowhere]),
+            invalid.clone(),
+        ),
+        (
+            "omitted required edge",
+            second.clone(),
+            with_record(
+                &valid,
+                rebuilt(record, origin, inputs_unchanged, |edge| {
+                    !consumes_as(edge, 1)
+                }),
+            ),
+            invalid.clone(),
+        ),
+        (
+            "output without its step node",
+            second.clone(),
+            with_record(
+                &valid,
+                rebuilt(
+                    record,
+                    origin,
+                    |node| {
+                        if is_driver_node(node, 1) {
+                            Vec::new()
+                        } else {
+                            inputs_unchanged(node)
+                        }
+                    },
+                    |edge| !consumes_as(edge, 1),
+                ),
+            ),
+            invalid.clone(),
+        ),
+        (
+            "step node without the snapshot node",
+            second.clone(),
+            with_record(
+                &valid,
+                rebuilt(
+                    record,
+                    origin,
+                    |node| {
+                        if is_driver_node(node, 0) {
+                            let kept = node.input_digests().iter().copied();
+                            kept.filter(|digest| *digest != snapshot).collect()
+                        } else {
+                            inputs_unchanged(node)
+                        }
+                    },
+                    |edge| !(consumes_as(edge, 0) && edge.source_digest() == snapshot),
+                ),
+            ),
+            invalid,
+        ),
+    ]
+}
+
+#[test]
+fn a_commit_records_nodes_edges_range_and_bindings_with_its_events() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in recording_stores(&clock) {
+        let fixture = prepare(store.as_mut());
+        let timeline = fixture.timeline;
+        assert_eq!(head_of(store.as_ref(), timeline), head(0, 0), "{name}");
+
+        // A human action: one human-ingress node per Event and no edge.
+        let first = attempt(&fixture, 1, 0);
+        committed(ok(admit(store.as_mut(), &first)));
+        let nodes = recorded_nodes(store.as_ref(), timeline);
+        assert_eq!(nodes.len(), 3, "{name}");
+        assert!(recorded_edges(store.as_ref(), timeline).is_empty(), "{name}");
+        assert_eq!(head_of(store.as_ref(), timeline), head(1, 3), "{name}");
+        let seqs = [1, 2, 3, 4].map(Seq::from_u64);
+        let bound = ok(store.nodes_for_committed_events(timeline, &seqs));
+        assert_eq!(bound[..3], [0_usize, 1, 2].map(|at| Some(nodes[at].clone())), "{name}");
+        assert_eq!(bound[3], None, "{name}");
+
+        // A scheduled Tick: a snapshot, a step and three outputs, joined by
+        // four edges that all carry the fence's authority grant.
+        let second = scheduled_after(&first, 2, 3);
+        committed(ok(admit(store.as_mut(), &second)));
+        let counts = RecordedSetCountsV1 {
+            nodes: 8,
+            edges: 4,
+            inputs: 4,
+        };
+        assert_eq!(ok(store.factual_set_counts(timeline)), counts, "{name}");
+        assert_eq!(head_of(store.as_ref(), timeline), head(2, 6), "{name}");
+        let edges = recorded_edges(store.as_ref(), timeline);
+        assert!(
+            edges
+                .iter()
+                .all(|edge| edge.authorization_digest() == Some(hash(1))),
+            "{name}"
+        );
+        let output_seqs = [4, 5, 6].map(Seq::from_u64);
+        let outputs = ok(store.nodes_for_committed_events(timeline, &output_seqs));
+        for (ordinal, output) in (1_u32..).zip(&outputs) {
+            let coordinate = output.as_ref().map(DependencyNodeRecordV1::coordinate);
+            let found = coordinate.map(DependencyNodeCoordinateV1::output_ordinal);
+            assert_eq!(found, Some(ordinal), "{name}");
+            let owner = coordinate.map(DependencyNodeCoordinateV1::owner_id);
+            assert_eq!(owner, Some("plugin:test"), "{name}");
+        }
+    }
+}
+
+#[test]
+fn the_store_refuses_a_malformed_declaration_and_records_nothing() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in recording_stores(&clock) {
+        let fixture = prepare(store.as_mut());
+        let timeline = fixture.timeline;
+        let first = attempt(&fixture, 1, 0);
+        committed(ok(admit(store.as_mut(), &first)));
+        // An Event appended outside the Tick path has no node yet.
+        ok(store.append(timeline, &drafts(&[b"raw"])));
+        let events = ok(store.read(timeline, SeqRange::all()));
+        let stored = recorded_nodes(store.as_ref(), timeline);
+        let second = scheduled_after(&first, 2, 4);
+
+        for (case, rejected, declaration, expected) in refusal_cases(&second, &events, &stored) {
+            assert_refused(
+                name,
+                case,
+                store.as_mut(),
+                &rejected,
+                declaration,
+                &expected,
+            );
+        }
+
+        // Nothing a refusal touched was consumed: the correct Tick commits and
+        // records the ingress node of Event 4 once, beside its outputs.
+        let valid = valid_declaration(&second, vec![ingress_event(&events[3])]);
+        let outcome = ok(store.admit_pipeline_batch(&basis_declaring(&second, valid)));
+        let receipt = committed(outcome);
+        assert_eq!(receipt_positions(&receipt), [5, 6, 7], "{name}");
+        assert_eq!(head_of(store.as_ref(), timeline), head(2, 7), "{name}");
+        let counts = RecordedSetCountsV1 {
+            nodes: 9,
+            edges: 5,
+            inputs: 5,
+        };
+        assert_eq!(ok(store.factual_set_counts(timeline)), counts, "{name}");
+        let ingress = ok(store.nodes_for_committed_events(timeline, &[Seq::from_u64(4)]));
+        let owner = ingress[0].as_ref().map(|node| node.coordinate().owner_id());
+        assert_eq!(owner, Some("host.ingress"), "{name}");
+    }
+}
+
+/// R3.7.2 (i): an edge that names another authority grant than the persisted
+/// fence's is the conflict of a moved fence. A human record has no edge, so the
+/// check is vacuous there.
+#[test]
+fn a_stale_fence_grant_is_a_conflict_and_commits_nothing() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in recording_stores(&clock) {
+        let fixture = prepare(store.as_mut());
+        let base = Attempt {
+            ingress: PipelineIngressV1::ScheduledAiDriver,
+            ..attempt(&fixture, 1, 0)
+        };
+        let shape = scheduled_shape_of(&base.drafts, hash(61), Vec::new(), Vec::new());
+        let stale = declared(&base, hash(2), &shape);
+        let conflict = PipelineOutcomeV1::AdmissionConflict;
+        assert_refused(name, "stale grant", store.as_mut(), &base, stale, &conflict);
+
+        // The same attempt under the fence's own grant commits.
+        committed(ok(admit(store.as_mut(), &base)));
+        assert_eq!(head_of(store.as_ref(), base.timeline), head(1, 3), "{name}");
+    }
+}
+
+#[test]
+fn a_retry_records_no_second_row_and_a_rebuilt_tick_conflicts() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in recording_stores(&clock) {
+        let fixture = prepare(store.as_mut());
+        let timeline = fixture.timeline;
+        let first = attempt(&fixture, 1, 0);
+        let receipt = committed(ok(admit(store.as_mut(), &first)));
+        let before = state_of(store.as_ref(), timeline);
+
+        assert_eq!(
+            ok(admit(store.as_mut(), &first)),
+            PipelineOutcomeV1::RecoveredDuplicate(receipt),
+            "{name}"
+        );
+        assert_eq!(state_of(store.as_ref(), timeline), before, "{name}");
+
+        // A pass rebuilt after the commit declares another Tick. Tick 7 is not
+        // the next Tick either, but the receipt lookup precedes every
+        // dependency check, so the answer is the conflict of a changed basis.
+        let later = Attempt {
+            tick: 7,
+            ..first.clone()
+        };
+        assert_eq!(
+            ok(admit(store.as_mut(), &later)),
+            PipelineOutcomeV1::AdmissionConflict,
+            "{name}"
+        );
+        assert_eq!(state_of(store.as_ref(), timeline), before, "{name}");
+    }
+}
+
+#[test]
+fn a_fork_binds_only_the_events_of_the_ticks_below_its_cut() {
+    let clock = TestClock::at(1_000);
+    for (name, mut store) in recording_stores(&clock) {
+        let fixture = prepare(store.as_mut());
+        let parent = fixture.timeline;
+        let first = attempt(&fixture, 1, 0);
+        committed(ok(admit(store.as_mut(), &first)));
+
+        // A Fork inside Tick 1 has cut Tick 0: the parent's bindings of Events
+        // 1 and 2 are invisible to it, so its own first Tick may bind them.
+        let mid = FactualCutV1::MidTick {
+            cut_tick: 0,
+            split_tick: 1,
+        };
+        let cut = ok(store.cut_tick_at(parent, Seq::from_u64(2)));
+        assert_eq!(cut, mid, "{name}");
+        let inside = ok(store.fork(parent, Seq::from_u64(2), "inside")).id();
+        ok(store.set_pipeline_admission_fence(inside, fixture.fence));
+        assert_eq!(head_of(store.as_ref(), inside), head(0, 0), "{name}");
+        let inherited = ok(store.read(inside, SeqRange::all()));
+        let child = Attempt {
+            timeline: inside,
+            tick: 1,
+            ..scheduled_after(&first, 2, 2)
+        };
+        let rebound = vec![ingress_event(&inherited[0]), ingress_event(&inherited[1])];
+        let declaration = valid_declaration(&child, rebound);
+        let outcome = ok(store.admit_pipeline_batch(&basis_declaring(&child, declaration)));
+        assert_eq!(receipt_positions(&committed(outcome)), [3, 4, 5], "{name}");
+        assert_eq!(head_of(store.as_ref(), inside), head(1, 5), "{name}");
+        let seqs = [1, 2].map(Seq::from_u64);
+        let own = ok(store.nodes_for_committed_events(inside, &seqs));
+        let theirs = ok(store.nodes_for_committed_events(parent, &seqs));
+        assert!(own.iter().all(Option::is_some), "{name}");
+        assert!(theirs.iter().all(Option::is_some), "{name}");
+        assert_ne!(own, theirs, "{name}");
+
+        // A Fork on the Tick boundary has cut Tick 1: Event 2 is bound below
+        // the cut and cannot be bound again; without it the first Tick is 2.
+        let boundary = ok(store.fork(parent, Seq::from_u64(3), "boundary")).id();
+        ok(store.set_pipeline_admission_fence(boundary, fixture.fence));
+        assert_eq!(head_of(store.as_ref(), boundary), head(1, 3), "{name}");
+        let inherited = ok(store.read(boundary, SeqRange::all()));
+        let later = Attempt {
+            timeline: boundary,
+            ..scheduled_after(&first, 3, 3)
+        };
+        let again = valid_declaration(&later, vec![ingress_event(&inherited[1])]);
+        let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
+        assert_refused(name, "bound below the cut", store.as_mut(), &later, again, &invalid);
+        let plain = valid_declaration(&later, Vec::new());
+        committed(ok(store.admit_pipeline_batch(&basis_declaring(&later, plain))));
+        assert_eq!(head_of(store.as_ref(), boundary), head(2, 6), "{name}");
+    }
 }

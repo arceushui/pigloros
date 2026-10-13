@@ -276,6 +276,8 @@ const OWNER_TEXT_MAJOR: u8 = 3;
 const EDGE_TAIL_FIELDS: usize = 5;
 /// The range and rule arrays hold only scalars.
 const EDGE_TAIL_ARRAY_DEPTH: u8 = 1;
+/// Edge fields between the source and the authorization: class and range.
+const EDGE_CLASS_AND_RANGE_FIELDS: usize = 2;
 
 /// Closed failures of the dependency record contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -707,6 +709,21 @@ impl DependencyEdgeRecordV1 {
         &self.bytes
     }
 
+    /// Return the authorization digest the edge carries, or `None` when its
+    /// authorization field is not a 32-byte digest.
+    ///
+    /// Construction checks the framing of the field, not its content, so the
+    /// store that records a factual Tick reads it here.
+    #[must_use]
+    pub fn authorization_digest(&self) -> Option<Hash> {
+        let consumer = self.consumer.encoded();
+        self.bytes
+            .strip_prefix(&[EDGE_ARRAY_HEAD])
+            .and_then(|fields| fields.strip_prefix(&EDGE_PREFIX))
+            .and_then(|fields| fields.strip_prefix(consumer.as_slice()))
+            .and_then(|rest| edge_authorization(rest).ok())
+    }
+
     /// Borrow the verified consumer coordinate.
     #[must_use]
     pub const fn consumer(&self) -> &DependencyNodeCoordinateV1 {
@@ -783,6 +800,22 @@ fn source_artifact_digest(rest: &[u8]) -> DependencyResult<Hash> {
                 Err(CounterfactualDependencyErrorV1::InvalidEncoding)
             }
         })
+}
+
+/// Read the authorization digest, the third field after the source node.
+fn edge_authorization(rest: &[u8]) -> DependencyResult<Hash> {
+    let mut cursor = CborCursor::new(rest);
+    malformed(skip_source_head(&mut cursor))
+        .and_then(|()| malformed(cursor.head(OWNER_TEXT_MAJOR)))
+        .and_then(owner_text_length)
+        .and_then(|length| malformed(cursor.take(length)))
+        .and_then(|_| malformed(read_source_digest(&mut cursor)))
+        .and_then(|_| {
+            let skipped = (0..EDGE_CLASS_AND_RANGE_FIELDS)
+                .try_for_each(|_| skip_item(&mut cursor, EDGE_TAIL_ARRAY_DEPTH));
+            malformed(skipped)
+        })
+        .and_then(|()| malformed(read_hash(&mut cursor)))
 }
 
 fn edge_digest(bytes: &[u8]) -> Hash {

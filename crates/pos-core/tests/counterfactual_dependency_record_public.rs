@@ -376,6 +376,40 @@ fn edge_size_bound_is_checked_first() {
 }
 
 #[test]
+fn an_edge_reports_the_authorization_digest_it_carries() {
+    let consumer = coord(17, "a", 1);
+    let source = coord(10, "w", 50);
+    assert_eq!(
+        edge_row(&consumer, &source).authorization_digest(),
+        Some(hash(0x33))
+    );
+
+    // Construction checks only the framing of the field, so an authorization
+    // that is not a 32-byte digest is accepted and reads back as absent.
+    let parts = EdgeParts {
+        tail: [
+            uint(2),
+            vec![0x82],
+            uint(3),
+            uint(5),
+            uint(7),
+            vec![0x82],
+            text_field("adr064.classification"),
+            uint(1),
+            hash_field(hash(0x44)),
+        ]
+        .concat(),
+        ..EdgeParts::new(&consumer, &source)
+    };
+    let edge = ok(EdgeRow::try_from_canonical(
+        parts.bytes(),
+        consumer,
+        source.artifact_digest(),
+    ));
+    assert_eq!(edge.authorization_digest(), None);
+}
+
+#[test]
 fn edges_may_fill_the_size_bound_exactly() {
     let consumer = coord(17, "a", 1);
     let source = coord(10, "w", 50);

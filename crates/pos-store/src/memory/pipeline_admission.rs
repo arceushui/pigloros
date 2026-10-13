@@ -21,7 +21,7 @@ use pos_core::{
     PipelineReceiptLookupV1,
 };
 
-use super::MemoryStore;
+use super::{counterfactual_store::FactualInstallV1, MemoryStore};
 use crate::{
     committed_pipeline_receipt, evaluate_pipeline_admission, install_or_reject,
     recovered_pipeline_receipt, retained_pipeline_receipt, PipelinePersistedStateV1,
@@ -157,8 +157,9 @@ impl MemoryStore {
             })
     }
 
-    /// Stage the complete batch on a copy of the Timeline, then install every
-    /// effect together. A failure before installation leaves no partial state.
+    /// Check the Tick declaration, then stage the complete batch and install
+    /// every effect together. A refused declaration is the commit's outcome;
+    /// nothing is appended or recorded.
     fn install_pipeline_batch(
         &mut self,
         timeline: TimelineId,
@@ -166,6 +167,36 @@ impl MemoryStore {
         now: WallTime,
         prefix: u64,
         next_fence: &PipelineAdmissionFenceV1,
+    ) -> Result<PipelineOutcomeV1, CoreError> {
+        let first_local = self.state(timeline).timeline.head.next().as_u64();
+        crate::checked_logical_head(prefix, first_local)
+            .and_then(|first_logical| {
+                self.plan_factual_tick(
+                    timeline,
+                    basis,
+                    next_fence.authority_grant(),
+                    Seq::from_u64(first_logical),
+                )
+            })
+            .and_then(|planned| match planned {
+                Ok(install) => {
+                    self.stage_pipeline_batch(timeline, basis, now, prefix, next_fence, &install)
+                }
+                Err(refusal) => Ok(refusal),
+            })
+    }
+
+    /// Stage the complete batch on a copy of the Timeline, then install every
+    /// effect, the Tick's dependency rows included, together. A failure before
+    /// installation leaves no partial state.
+    fn stage_pipeline_batch(
+        &mut self,
+        timeline: TimelineId,
+        basis: &PipelineAdmissionBasisV1,
+        now: WallTime,
+        prefix: u64,
+        next_fence: &PipelineAdmissionFenceV1,
+        install: &FactualInstallV1,
     ) -> Result<PipelineOutcomeV1, CoreError> {
         let mut staged = self.state(timeline).clone();
         let first_local_seq = staged.timeline.head.next().as_u64();
@@ -191,6 +222,7 @@ impl MemoryStore {
                 self.event_ids
                     .extend(committed.iter().map(|event| event.id));
                 self.timelines.insert(timeline, staged);
+                self.install_planned_factual_tick(timeline, basis.dependencies().record(), install);
                 self.pipeline_admission_fences.insert(timeline, *next_fence);
                 self.pipeline_admission_receipts.insert(
                     basis.attempt().idempotency().dedup_key,
@@ -310,13 +342,14 @@ mod tests {
     use pos_core::output_policy::OutputAuthorityV1;
     use pos_core::{
         assemble_factual_tick, AppendDedupScope, AppendIdentity, CanonicalBytes, EntityId,
-        ErasureContainmentGateV1, EventDraft, EventStore, FactualDriverStepV1, FactualOutputV1,
-        FactualOwnerIdV1, FactualScheduledTickV1, FactualTickContextV1, FactualTickDependenciesV1,
-        FactualTickShapeV1, Kind, PipelineAdmissionBasisDraftV1, PipelineAttemptDraftV1,
-        PipelineAttemptIdV1, PipelineAttemptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1,
-        PipelineIngressV1, PipelineObservationAnchorV1, PipelinePreconditionV1,
-        PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, SeqRange,
-        TentativePipelineResultV1, PIPELINE_CONTRACT_VERSION_V1,
+        ErasureContainmentGateV1, EventDraft, EventStore, FactualDriverStepV1, FactualHeadV1,
+        FactualOutputV1, FactualOwnerIdV1, FactualPrefixReadPortV1, FactualScheduledTickV1,
+        FactualTickContextV1, FactualTickDependenciesV1, FactualTickShapeV1, Kind,
+        PipelineAdmissionBasisDraftV1, PipelineAttemptDraftV1, PipelineAttemptIdV1,
+        PipelineAttemptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
+        PipelineObservationAnchorV1, PipelinePreconditionV1, PipelineSecurityRevisionsDraftV1,
+        PipelineSecurityRevisionsV1, RecordedSetCountsV1, SeqRange, TentativePipelineResultV1,
+        MAX_RECORDED_DEPENDENCY_NODES_V1, PIPELINE_CONTRACT_VERSION_V1,
     };
     use ulid::Ulid;
 
@@ -367,12 +400,35 @@ mod tests {
         ok(assemble_factual_tick(&context, &shape))
     }
 
+    /// The record of a human action: one human-ingress node per draft.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn human_dependencies(
+        timeline: TimelineId,
+        tick: u64,
+        drafts: &[EventDraft],
+    ) -> FactualTickDependenciesV1 {
+        let context = FactualTickContextV1 {
+            timeline_id: timeline,
+            tick,
+            attempt_id: ok(PipelineAttemptIdV1::try_new([1; 16])),
+            evidence_digest: Hash::from_bytes([5; 32]),
+            authority_grant: Hash::from_bytes([7; 32]),
+        };
+        let shape = FactualTickShapeV1::Human(drafts.to_vec());
+        ok(assemble_factual_tick(&context, &shape))
+    }
+
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn basis(timeline: TimelineId) -> PipelineAdmissionBasisV1 {
+        basis_of(timeline, PipelineIngressV1::ScheduledAiDriver)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn basis_of(timeline: TimelineId, ingress: PipelineIngressV1) -> PipelineAdmissionBasisV1 {
         let attempt = ok(PipelineAttemptV1::try_from_draft(PipelineAttemptDraftV1 {
             contract_version: PIPELINE_CONTRACT_VERSION_V1,
             attempt_id: Some(ok(PipelineAttemptIdV1::try_new([1; 16]))),
-            ingress: Some(PipelineIngressV1::ScheduledAiDriver),
+            ingress: Some(ingress),
             observation: Some(ok(PipelineObservationAnchorV1::try_new(
                 timeline,
                 Seq::ZERO,
@@ -392,14 +448,22 @@ mod tests {
                 )
             })
             .collect();
-        let dependencies = tick_dependencies(timeline, 1, &drafts);
+        let evidence = ok(PipelineEvidenceRefV1::try_new(Hash::from_bytes([5; 32])));
+        let (dependencies, tentative_result) = match ingress {
+            PipelineIngressV1::ScheduledAiDriver => (
+                tick_dependencies(timeline, 1, &drafts),
+                TentativePipelineResultV1::AiProviderValidation(evidence),
+            ),
+            PipelineIngressV1::HumanProposedAction => (
+                human_dependencies(timeline, 1, &drafts),
+                TentativePipelineResultV1::HumanDomainApproval(evidence),
+            ),
+        };
         ok(PipelineAdmissionBasisV1::try_from_draft(
             PipelineAdmissionBasisDraftV1 {
                 contract_version: PIPELINE_CONTRACT_VERSION_V1,
                 attempt: Some(attempt),
-                tentative_result: Some(TentativePipelineResultV1::AiProviderValidation(ok(
-                    PipelineEvidenceRefV1::try_new(Hash::from_bytes([5; 32])),
-                ))),
+                tentative_result: Some(tentative_result),
                 precondition: Some(PipelinePreconditionV1::ExpectedLogicalHead(Seq::ZERO)),
                 security_revisions: Some(ok(PipelineSecurityRevisionsV1::try_from_draft(
                     PipelineSecurityRevisionsDraftV1 {
@@ -447,6 +511,14 @@ mod tests {
         assert!(ok(store.read(timeline, SeqRange::all())).is_empty());
         assert_eq!(ok(store.pipeline_admission_fence(timeline)), Some(fence));
         assert!(store.pipeline_admission_receipts.is_empty());
+        assert!(store.dependency_prefixes.is_empty());
+        assert_eq!(
+            ok(store.last_committed_factual_tick(timeline)),
+            FactualHeadV1 {
+                tick: 0,
+                last_seq: Seq::ZERO,
+            }
+        );
         let retried = ok(store.install_pipeline_batch(
             timeline,
             &basis,
@@ -463,5 +535,55 @@ mod tests {
             std::panic::resume_unwind(Box::new(format!("expected a commit, got {retried:?}")));
         };
         assert_eq!(receipt.committed_events().len(), 2);
+        assert_eq!(
+            ok(store.last_committed_factual_tick(timeline)),
+            FactualHeadV1 {
+                tick: 1,
+                last_seq: Seq::from_u64(2),
+            }
+        );
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn an_exhausted_dependency_set_refuses_both_ingresses_and_commits_nothing() {
+        let ingresses = [
+            PipelineIngressV1::ScheduledAiDriver,
+            PipelineIngressV1::HumanProposedAction,
+        ];
+        for ingress in ingresses {
+            let mut store = MemoryStore::new();
+            let timeline = ok(store.create_timeline("admission-exhausted")).id();
+            ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
+            let basis = basis_of(timeline, ingress);
+            let fence = ok(PipelineAdmissionFenceV1::try_new(
+                Hash::from_bytes([7; 32]),
+                basis.security_revisions(),
+                None,
+                10,
+            ));
+            ok(store.set_pipeline_admission_fence(timeline, fence));
+            let staged_fence = ok(fence.after_commit(2).ok_or("budget"));
+            let full = RecordedSetCountsV1 {
+                nodes: MAX_RECORDED_DEPENDENCY_NODES_V1,
+                edges: 0,
+                inputs: 0,
+            };
+            store.fill_factual_set_for_test(timeline, full);
+
+            let outcome = ok(store.install_pipeline_batch(
+                timeline,
+                &basis,
+                WallTime::from_micros(1),
+                0,
+                &staged_fence,
+            ));
+
+            assert_eq!(outcome, PipelineOutcomeV1::DependencySetExhausted);
+            assert!(ok(store.read(timeline, SeqRange::all())).is_empty());
+            assert_eq!(ok(store.pipeline_admission_fence(timeline)), Some(fence));
+            assert!(store.pipeline_admission_receipts.is_empty());
+            assert_eq!(ok(store.factual_set_counts(timeline)), full);
+        }
     }
 }
