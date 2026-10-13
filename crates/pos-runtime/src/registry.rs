@@ -38,8 +38,6 @@ use pos_core::{
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
-use factual_dependencies::{split_output, StagedFactual};
-
 use crate::output_admission::OutputPolicySourceV1;
 use crate::{
     composition::{
@@ -57,6 +55,7 @@ use crate::{
     error::{ActionSubmissionError, RuntimeError},
     output_admission::{OutputAdmissionV1, OutputPolicyBindingV1, OutputPolicyClosureV1},
     recorder::{RunMode, RECORDER_EVENT_TYPE},
+    registry::factual_dependencies::{split_output, StagedFactual},
     schema::{EventTypeSchema, SchemaRegistry},
 };
 use std::{
@@ -90,7 +89,7 @@ mod staged_catalogue;
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod test_ext;
 
-use pass_state::{ForwardedPair, PassCut};
+use pass_state::{CarriedSet, ForwardedPair, PassCut};
 
 pub use adapter::{
     ClosedAdapterTranscriptV1, LocalAdapterErrorV1, LocalAdapterIdempotencyKeyV1,
@@ -1198,19 +1197,10 @@ struct PassState {
     /// The Driver's owner ID in a factual Tick (ADR-064 Revision 3, R3.2.4),
     /// derived once at registration.
     owner_id: FactualOwnerIdV1,
-    /// The `(seq, payload_hash)` of every Event forwarded to the Driver since
-    /// its last recorded step node (R3.4.8).
-    ///
-    /// Kept beside `carried_kinds`: every key of `carried_kinds` is a key of
-    /// `carried`. `settle_carried_sets` writes both, and `collapse_carried`,
-    /// a restore and a recorded commit clear both. The test
-    /// `the_carried_kinds_never_outlive_the_carried_set` pins the invariant.
-    carried: BTreeMap<Seq, Hash>,
-    /// The Event type of every Event in `carried` whose type the pass saw: an
-    /// ingress node's schema ID is a function of it (R3.3.2, R3.4.4).
-    ///
-    /// Its keys are a subset of the keys of `carried`; see there.
-    carried_kinds: BTreeMap<Seq, Kind>,
+    /// The payload hash and Event type of every Event forwarded to the Driver
+    /// since its last recorded step node (R3.4.8). An ingress node's schema ID
+    /// is a function of the Event type (R3.3.2, R3.4.4).
+    carried: CarriedSet,
     /// The consumed history the Driver's next recorded step node must cover
     /// (R3.4.10).
     history: HistoryInputV1,
@@ -1222,7 +1212,6 @@ impl PassState {
         Self {
             owner_id,
             carried: BTreeMap::new(),
-            carried_kinds: BTreeMap::new(),
             history: HistoryInputV1::None,
         }
     }
@@ -3203,7 +3192,6 @@ impl PluginRegistry {
             }
             entry.event_cursor = restored_head;
             entry.pass_state.carried.clear();
-            entry.pass_state.carried_kinds.clear();
             entry.pass_state.history = history.clone();
             entry.chain = StepChainV1::Lookup;
         }

@@ -112,9 +112,9 @@ fn plain_events(first: u64, last: u64) -> Vec<Event> {
     (first..=last).map(|seq| event(seq, PLAIN)).collect()
 }
 
-fn carried_set(first: u64, last: u64) -> BTreeMap<Seq, Hash> {
+fn carried_set(first: u64, last: u64) -> CarriedSet {
     (first..=last)
-        .map(|seq| (Seq::from_u64(seq), payload_hash(seq)))
+        .map(|seq| (Seq::from_u64(seq), (payload_hash(seq), Kind::new(PLAIN))))
         .collect()
 }
 

@@ -22,7 +22,7 @@ use pos_core::{
 use super::test_ext::{TestErrorExt, TestValueExt};
 use super::*;
 
-use super::factual_dependencies::{next_scheduled_tick, verified_prefix_digest};
+use super::factual_dependencies::{next_factual_tick, verified_prefix_digest};
 use crate::driver::{DeclaredOutputV1, DirectInputRefV1, ObservationView};
 
 const PLAIN: &str = "probe.plain";
@@ -378,7 +378,16 @@ fn build(
     through: u64,
 ) -> Result<FactualTickDependenciesV1, RuntimeError> {
     let anchor = (Seq::from_u64(through), hash(62));
-    registry.scheduled_dependencies(port, pending, &admission(), anchor)
+    let built = registry.scheduled_dependencies(port, pending, &admission(), anchor);
+    // The record's nodes are paired positionally with the stepped Drivers and
+    // the interned history contents, so a length mismatch would truncate.
+    if let Ok(dependencies) = &built {
+        let staged = &pending.factual;
+        assert_eq!(staged.step_nodes.len(), pending.driver_ids.len());
+        let history = count_owned_by(dependencies, "host.history");
+        assert_eq!(staged.history_recorded.len(), history);
+    }
+    built
 }
 
 fn declaration_error(error: RuntimeError) -> FactualDependencyErrorV1 {
@@ -817,9 +826,9 @@ fn events_consumed_in_an_empty_pass_are_carried_into_the_next_recorded_step() {
     let id = ids(&registry)[0];
     let kinds: Vec<(u64, &str)> = registry.plugins[&id]
         .pass_state
-        .carried_kinds
+        .carried
         .iter()
-        .map(|(seq, kind)| (seq.as_u64(), kind.as_str()))
+        .map(|(seq, (_, kind))| (seq.as_u64(), kind.as_str()))
         .collect();
     assert_eq!(kinds, [(1, PLAIN), (2, PLAIN)]);
 
@@ -834,11 +843,10 @@ fn events_consumed_in_an_empty_pass_are_carried_into_the_next_recorded_step() {
     assert_eq!(seqs, [1, 2]);
     registry.commit_pending_step(pending);
     assert!(registry.plugins[&id].pass_state.carried.is_empty());
-    assert!(registry.plugins[&id].pass_state.carried_kinds.is_empty());
 }
 
 #[test]
-fn a_carried_event_whose_type_is_lost_is_unresolved() {
+fn a_carried_event_the_store_lacks_is_recorded_as_an_ingress_node_of_its_own_type() {
     let (first, first_script) = scripted("first", 1, "probe.out.first");
     set_script(&first_script, &[b"a"]);
     let mut registry = registry_with(vec![first]);
@@ -846,11 +854,15 @@ fn a_carried_event_whose_type_is_lost_is_unresolved() {
     registry.plugins[&id]
         .pass_state
         .carried
-        .insert(Seq::from_u64(1), payload_hash(1));
+        .insert(Seq::from_u64(1), (payload_hash(1), Kind::new(PLAIN)));
     let mut pending = staged(&mut registry, TimelineId::new(), 0, &[]);
-    let result = build(&registry, &FakePrefix::at(0), &mut pending, 0);
-    let error = declaration_error(result.test_err());
-    assert_eq!(error, FactualDependencyErrorV1::UnresolvedInput);
+    let deps = build(&registry, &FakePrefix::at(0), &mut pending, 0).test_ok();
+    let seqs: Vec<u64> = deps
+        .event_nodes()
+        .iter()
+        .map(|binding| binding.seq.as_u64())
+        .collect();
+    assert_eq!(seqs, [1]);
 }
 
 const fn restore_segment(timeline: TimelineId, through: u64) -> [TimelineHistorySegment; 1] {
@@ -956,7 +968,7 @@ fn an_empty_pass_leaves_history_and_chain_untouched() {
 }
 
 #[test]
-fn a_restore_resets_the_chain_and_the_carried_kinds() {
+fn a_restore_resets_the_chain_and_the_carried_set() {
     let (first, _) = scripted("first", 1, "probe.out.first");
     let mut registry = registry_with(vec![first]);
     let timeline = TimelineId::new();
@@ -966,13 +978,13 @@ fn a_restore_resets_the_chain_and_the_carried_kinds() {
     let id = ids(&registry)[0];
     let recorded = FactualPriorNodeV1::from_record(&node("plugin:old", 0, 1, hash(45)));
     registry.plugins[&id].chain = StepChainV1::Recorded { node: recorded };
-    assert_eq!(registry.plugins[&id].pass_state.carried_kinds.len(), 2);
+    assert_eq!(registry.plugins[&id].pass_state.carried.len(), 2);
 
     registry
         .restore_driver_state(&restore_segment(timeline, 2), &events)
         .test_ok();
     assert_eq!(registry.plugins[&id].chain, StepChainV1::Lookup);
-    assert!(registry.plugins[&id].pass_state.carried_kinds.is_empty());
+    assert!(registry.plugins[&id].pass_state.carried.is_empty());
 }
 
 #[test]
@@ -1015,7 +1027,10 @@ fn the_verified_prefix_digest_covers_the_events_the_driver_is_handed() {
     let mut registry = registry_with(vec![first]);
     let id = ids(&registry)[0];
     let events = [event(1, PLAIN), event(2, OTHER), event(3, PLAIN)];
-    let cut = (Seq::from_u64(3), events.as_slice());
+    let cut = PassCut {
+        observed_through: Seq::from_u64(3),
+        events: &events,
+    };
     let operation = OperationContext::Public;
     assert_eq!(
         verified_prefix_digest(&registry.plugins[&id], cut, &operation),
@@ -1301,14 +1316,14 @@ fn declared_tick_at(registry: &mut PluginRegistry, timeline: TimelineId, head: u
 }
 
 #[test]
-fn the_scheduled_tick_follows_the_later_of_the_head_and_the_retained_nodes() {
-    assert_eq!(ok(next_scheduled_tick(0, 0)), 1);
-    assert_eq!(ok(next_scheduled_tick(4, 0)), 5);
-    assert_eq!(ok(next_scheduled_tick(0, 3)), 4);
-    assert_eq!(ok(next_scheduled_tick(5, 3)), 6);
-    let exhausted = err(next_scheduled_tick(u64::MAX, 0));
+fn the_factual_tick_follows_the_later_of_the_head_and_the_retained_nodes() {
+    assert_eq!(ok(next_factual_tick(0, 0)), 1);
+    assert_eq!(ok(next_factual_tick(4, 0)), 5);
+    assert_eq!(ok(next_factual_tick(0, 3)), 4);
+    assert_eq!(ok(next_factual_tick(5, 3)), 6);
+    let exhausted = err(next_factual_tick(u64::MAX, 0));
     assert_eq!(exhausted, FactualDependencyErrorV1::SetExhausted);
-    let retained = err(next_scheduled_tick(0, u64::MAX));
+    let retained = err(next_factual_tick(0, u64::MAX));
     assert_eq!(retained, FactualDependencyErrorV1::SetExhausted);
 }
 
@@ -1394,37 +1409,6 @@ fn an_authorized_pass_refuses_a_declared_committed_event_as_undeclarable() {
     assert_eq!(error, FactualDependencyErrorV1::UndeclarableInput);
 }
 
-fn kinds_follow_the_carried_set(registry: &PluginRegistry, id: PluginId) -> bool {
-    let entry = &registry.plugins[&id];
-    let mut kinds = entry.pass_state.carried_kinds.keys();
-    kinds.all(|seq| entry.pass_state.carried.contains_key(seq))
-}
-
-#[test]
-fn the_carried_kinds_never_outlive_the_carried_set() {
-    let (first, first_script) = scripted("first", 1, "probe.out.first");
-    let mut registry = registry_with(vec![first]);
-    let id = ids(&registry)[0];
-    let timeline = TimelineId::new();
-    let pending = staged(&mut registry, timeline, 2, &plain_events(2));
-    registry.commit_pending_step(pending);
-    assert!(kinds_follow_the_carried_set(&registry, id));
-    assert_eq!(registry.plugins[&id].pass_state.carried_kinds.len(), 2);
-
-    let pending = staged(&mut registry, timeline, 4, &plain_events(4));
-    registry.commit_pending_step(pending);
-    assert!(kinds_follow_the_carried_set(&registry, id));
-    assert_eq!(registry.plugins[&id].pass_state.carried.len(), 4);
-    assert_eq!(registry.plugins[&id].pass_state.carried_kinds.len(), 4);
-
-    // A recorded commit empties both together.
-    set_script(&first_script, &[b"a"]);
-    let pending = staged(&mut registry, timeline, 4, &plain_events(4));
-    registry.commit_pending_step(pending);
-    assert!(registry.plugins[&id].pass_state.carried.is_empty());
-    assert!(registry.plugins[&id].pass_state.carried_kinds.is_empty());
-}
-
 /// One Driver that reads the full verified prefix and emits `payloads`.
 fn verified_prefix_registry(payloads: &[&'static [u8]]) -> PluginRegistry {
     let (driver, script) = scripted("first", 1, "probe.out.first");
@@ -1441,7 +1425,7 @@ fn verified_prefix_registry(payloads: &[&'static [u8]]) -> PluginRegistry {
 fn the_verified_prefix_digest_is_gathered_only_for_a_pass_that_stages_a_draft() {
     let mut quiet = verified_prefix_registry(&[]);
     let pending = staged(&mut quiet, TimelineId::new(), 2, &plain_events(2));
-    assert_eq!(pending.factual.prefix_digests, [None]);
+    assert!(pending.factual.prefix_digests.is_empty());
 
     let mut busy = verified_prefix_registry(&[b"a"]);
     let pending = staged(&mut busy, TimelineId::new(), 2, &plain_events(2));

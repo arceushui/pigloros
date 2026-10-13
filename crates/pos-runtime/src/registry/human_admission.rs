@@ -30,9 +30,7 @@ use pos_core::{
     PIPELINE_CONTRACT_VERSION_V1,
 };
 
-use super::{
-    ensure_set_headroom_with, factual_dependencies::next_scheduled_tick, PluginRegistry,
-};
+use super::{ensure_set_headroom_with, factual_dependencies::next_factual_tick, PluginRegistry};
 use crate::error::ActionSubmissionError;
 
 const APPROVAL_DOMAIN: &[u8] = b"PiglorOS.HumanDomainApproval.v1\0";
@@ -225,7 +223,7 @@ fn human_dependencies(
         .map_err(HumanActionAdmissionErrorV1::Store)
         .and_then(|head| {
             // A human Tick retains no prior node, so only the head sets it.
-            next_scheduled_tick(head.tick, 0)
+            next_factual_tick(head.tick, 0)
                 .map_err(HumanActionAdmissionErrorV1::DependencyDeclaration)
         })
         .and_then(|tick| {

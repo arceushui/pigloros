@@ -15,7 +15,7 @@ use std::{
 };
 
 use indexmap::IndexMap;
-use pos_core::output_policy::{OutputAuthorityV1, OutputDeclarationV1};
+use pos_core::output_policy::OutputAuthorityV1;
 use pos_core::{
     assemble_factual_tick, factual_dependency::BoundFactualNodeV1, factual_event_schema_id,
     factual_verified_prefix_content_digest, CoreError, CounterfactualDependencyErrorV1,
@@ -28,8 +28,9 @@ use pos_core::{
 
 use super::{
     consent_visible_event, driver_visible_event, owner_id::entry_identity,
-    pass_state::ForwardedPair, subscribed_event_visible, HistoryInputV1, OperationContext,
-    PendingStep, PluginEntry, PluginRegistry, ScheduledPassAdmissionV1, StepChainV1,
+    pass_state::{CarriedSet, ForwardedPair, PassCut},
+    subscribed_event_visible, HistoryInputV1, OperationContext, PendingStep, PluginEntry,
+    PluginRegistry, ScheduledPassAdmissionV1, StepChainV1,
 };
 use crate::{
     driver::{DirectInputRefV1, StepOutput},
@@ -83,7 +84,11 @@ pub(super) fn split_output(output: StepOutput) -> (Vec<EventDraft>, DriverDeclar
 pub(super) struct StagedFactual {
     /// The range of the staged drafts each stepped Driver staged.
     pub(super) draft_ranges: Vec<Range<usize>>,
-    /// The digest of each stepped Driver's verified prefix, when it has one.
+    /// The digest of each stepped Driver's verified prefix, `None` for a
+    /// Driver that has none.
+    ///
+    /// It is gathered in one pass by `gather_prefix_digests` and stays empty
+    /// for a pass that stages no draft, which declares no Tick.
     pub(super) prefix_digests: Vec<Option<Hash>>,
     /// The step-level inputs each stepped Driver declared.
     pub(super) step_inputs: Vec<Vec<DirectInputRefV1>>,
@@ -98,9 +103,7 @@ pub(super) struct StagedFactual {
 }
 
 impl StagedFactual {
-    /// Keep what one stepped Driver staged. Its verified-prefix digest is
-    /// filled in by `gather_prefix_digests` once the pass is known to stage a
-    /// draft.
+    /// Keep what one stepped Driver staged.
     pub(super) fn push_driver(
         &mut self,
         first_draft: usize,
@@ -108,7 +111,6 @@ impl StagedFactual {
         declaration: DriverDeclaration,
     ) {
         self.draft_ranges.push(first_draft..first_draft + drafts);
-        self.prefix_digests.push(None);
         self.step_inputs.push(declaration.step_inputs);
         self.direct_inputs.extend(declaration.direct_inputs);
     }
@@ -122,15 +124,16 @@ impl StagedFactual {
         staged: bool,
         plugins: &IndexMap<PluginId, PluginEntry>,
         driver_ids: &[PluginId],
-        cut: (Seq, &[Event]),
+        cut: PassCut<'_>,
         operation: &OperationContext,
     ) {
         if !staged {
             return;
         }
-        for (slot, id) in self.prefix_digests.iter_mut().zip(driver_ids) {
-            *slot = verified_prefix_digest(&plugins[id], cut, operation);
-        }
+        self.prefix_digests = driver_ids
+            .iter()
+            .map(|id| verified_prefix_digest(&plugins[id], cut, operation))
+            .collect();
     }
 
     /// Every input a Driver declared, step-level inputs first.
@@ -206,10 +209,13 @@ fn fact_of(event: &Event, operation: &OperationContext) -> EventFact {
 /// show, in ascending `seq` order (R3.3.1).
 pub(super) fn verified_prefix_digest(
     entry: &PluginEntry,
-    cut: (Seq, &[Event]),
+    cut: PassCut<'_>,
     operation: &OperationContext,
 ) -> Option<Hash> {
-    let (observed_through, committed) = cut;
+    let PassCut {
+        observed_through,
+        events: committed,
+    } = cut;
     entry.event_observation.verified_prefix_required.then(|| {
         let subscriptions = &entry.event_observation.event_subscriptions;
         let mut handed = Vec::new();
@@ -221,7 +227,7 @@ pub(super) fn verified_prefix_digest(
                 });
             }
         }
-        // The order of `committed` is not guaranteed here, and the digest
+        // Nothing here relies on the order of `committed`, and the digest
         // covers ascending `seq` order, so the order is fixed explicitly.
         handed.sort_unstable_by_key(|event| event.seq);
         factual_verified_prefix_content_digest(observed_through, &handed)
@@ -293,7 +299,7 @@ const fn declared_too_many() -> FactualDependencyErrorV1 {
 
 /// The Events a step node declares individually: forwarded this pass plus
 /// carried (R3.4.2(b)).
-fn driver_event_seqs(fresh: &[ForwardedPair], carried: &BTreeMap<Seq, Hash>) -> BTreeSet<Seq> {
+fn driver_event_seqs(fresh: &[ForwardedPair], carried: &CarriedSet) -> BTreeSet<Seq> {
     let new_seqs = fresh.iter().map(|pair| pair.0);
     new_seqs.chain(carried.keys().copied()).collect()
 }
@@ -309,7 +315,7 @@ fn driver_event_seqs(fresh: &[ForwardedPair], carried: &BTreeMap<Seq, Hash>) -> 
 /// Tick (R3.4.1). That is not a registry-wide guarantee: passes over
 /// different Driver subsets can repeat a Tick until the stores write rows.
 /// A Tick that would pass `u64::MAX` exhausts the Timeline's set.
-pub(super) fn next_scheduled_tick(
+pub(super) fn next_factual_tick(
     head: u64,
     retained: u64,
 ) -> Result<u64, FactualDependencyErrorV1> {
@@ -332,24 +338,21 @@ fn retained_tick(entry: &PluginEntry) -> u64 {
     chain.max(history)
 }
 
-/// The class rule of an output follows the admitted declaration of its Event
-/// type (R3.5.1).
+/// The class rule of each Event type an entry's admitted policy declares
+/// (R3.5.1).
 ///
-/// Every production registration carries an output admission, which rejects a
-/// draft of a type it does not declare. An entry without one is only the
-/// test-support `register_driver` Driver, which owns no Event type, so
-/// `validate_plugin_output` lets it pass an empty batch alone and this lookup
-/// never sees one of its drafts. The `Authoritative` default is therefore
-/// unreachable today; it stays as the strict fail-closed class.
-fn output_authority(entry: &PluginEntry, event_type: &Kind) -> OutputAuthorityV1 {
-    let mut declarations = entry
+/// Output admission rejects a draft of an undeclared type, so every staged
+/// draft of an entry has an entry here. A registration without an admission is
+/// only the test-support `register_driver` Driver, which owns no Event type and
+/// stages no draft.
+fn output_authorities(entry: &PluginEntry) -> BTreeMap<&str, OutputAuthorityV1> {
+    let declarations = entry
         .output_admission
         .iter()
         .flat_map(|admission| admission.policy().fields().output_declarations.iter());
-    let wanted = event_type.as_str();
-    let matched = declarations.find(|found| found.event_type() == wanted);
-    let default = OutputAuthorityV1::Authoritative;
-    matched.map_or(default, OutputDeclarationV1::authority)
+    declarations
+        .map(|found| (found.event_type(), found.authority()))
+        .collect()
 }
 
 /// The distinct digests of one kind of node a Tick records, in first-use order.
@@ -406,6 +409,7 @@ struct Lookups {
 struct DriverScope<'a> {
     entry: &'a PluginEntry,
     schema_ids: Vec<u32>,
+    authorities: BTreeMap<&'a str, OutputAuthorityV1>,
 }
 
 impl<'a> DriverScope<'a> {
@@ -416,7 +420,11 @@ impl<'a> DriverScope<'a> {
             .filter(|kind| !pos_core::is_subject_controlled_event_type(kind))
             .map(|kind| factual_event_schema_id(kind.as_str()))
             .collect();
-        Self { entry, schema_ids }
+        Self {
+            entry,
+            schema_ids,
+            authorities: output_authorities(entry),
+        }
     }
 
     /// Whether the Driver subscribed to any Event type: a Driver with none
@@ -458,15 +466,13 @@ fn merged_facts(registry: &PluginRegistry, pending: &PendingStep) -> BTreeMap<Se
     let mut events = pending.factual.event_facts.clone();
     for id in &pending.driver_ids {
         let entry = &registry.plugins[id];
-        for (seq, payload_hash) in &entry.pass_state.carried {
-            if let Some(event_type) = entry.pass_state.carried_kinds.get(seq) {
-                let fact = EventFact {
-                    event_type: event_type.clone(),
-                    payload_hash: *payload_hash,
-                    shown: true,
-                };
-                events.entry(*seq).or_insert(fact);
-            }
+        for (seq, (payload_hash, event_type)) in &entry.pass_state.carried {
+            let fact = EventFact {
+                event_type: event_type.clone(),
+                payload_hash: *payload_hash,
+                shown: true,
+            };
+            events.entry(*seq).or_insert(fact);
         }
     }
     events
@@ -568,11 +574,11 @@ impl PassBuild {
         scope: &DriverScope<'_>,
         seq: Seq,
     ) -> Result<FactualInputV1, FactualDependencyErrorV1> {
-        let fact = self.events.get(&seq);
-        let node = self.lookups.events.get(&seq);
         if self.unreadable(scope, seq) {
             return Err(FactualDependencyErrorV1::UndeclarableInput);
         }
+        let fact = self.events.get(&seq);
+        let node = self.lookups.events.get(&seq);
         if fact.is_none() && node.is_none() {
             return Err(FactualDependencyErrorV1::UnresolvedInput);
         }
@@ -640,7 +646,7 @@ impl PassBuild {
         let draft = pending.staged_drafts[draft_index].clone();
         let declared = &pending.factual.direct_inputs[draft_index];
         let direct_inputs = self.declared_inputs(scope, declared)?;
-        let authority = output_authority(scope.entry, &draft.event_type);
+        let authority = scope.authorities[draft.event_type.as_str()];
         Ok(FactualOutputV1 {
             draft,
             authority,
@@ -733,7 +739,7 @@ impl PluginRegistry {
             .last_committed_factual_tick(pending.timeline)
             .map_err(RuntimeError::Store)?;
         let retained = self.highest_retained_tick(pending);
-        next_scheduled_tick(head.tick, retained).map_err(RuntimeError::DependencyDeclaration)
+        next_factual_tick(head.tick, retained).map_err(RuntimeError::DependencyDeclaration)
     }
 
     /// The highest Tick of the prior nodes the stepped Drivers retain.
@@ -762,6 +768,10 @@ impl PluginRegistry {
     }
 
     /// Read the recorded nodes the pass names, with one batched read per kind.
+    ///
+    /// The step chains are read per owner, one `last_step_node` call for each
+    /// stepped Driver whose chain is a lookup: the port answers chains by
+    /// design per owner, not in a batch.
     fn read_lookups(
         &self,
         port: &dyn FactualPrefixReadPortV1,
