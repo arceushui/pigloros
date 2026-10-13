@@ -266,10 +266,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
 
 fn populate_pair<S: Port>(store: &mut S, world: &World) -> Fallible<[ForkReplayRequirementV1; 2]> {
     let first = populate(store, world, Shape::Mixed)?;
-    let built = world.build(&Spec {
-        child: 1,
-        ..Spec::default()
-    })?;
+    let built = world.build(&Spec::distinct(1))?;
     pin_policy(store, &built.policy)?;
     store.import_verified(&request_for(world, &built))?;
     let child = world.child_at(1)?.id;
