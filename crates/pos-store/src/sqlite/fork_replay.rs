@@ -358,47 +358,12 @@ mod tests {
             let child = world.child_at(0)?.id;
             let head = PARENT_CUT + shape.events();
             let committed = store.read_committed(child, head)?;
-            let signed = SignedForkReproManifestV1::from_canonical_cbor(&committed.outer_bytes)?;
-            let owner_bytes = committed
-                .operation
-                .input()
-                .signing_identity
-                .owner_id
-                .as_str()
-                .len();
-            let receipt_copy = 32 + 16 + 8 + 32;
-            let projection_copy = 32 + 16 + 8 + 32 + 32 + owner_bytes + 1 + 8 + 32 + 32 + 32 + 1;
-            let origin_copy = 1 + 32;
-            let absent_key_copy = owner_bytes + 1 + 8 + 1 + 32 + 1 + 32;
-            let key = &built.envelope.unsigned().input().key_record;
-            let retained_key_phase =
-                key.to_canonical_cbor().len() * 3 + key.identity().owner_id.as_str().len();
             let import_bytes: Vec<u8> = store.conn.query_row(
                 "SELECT ifa1_cbor FROM imported_fork_attribution_admissions WHERE child_id = ?1",
                 [child.to_string()],
                 |row| row.get(0),
             )?;
-            let admission_phase =
-                super::super::fork_replay_admission::imported_admission_phase_cost(
-                    &built.envelope.unsigned().input().records.fork_admission,
-                    &import_bytes,
-                )?;
-            let classifier_phase = super::super::fork_replay_classifier::imported_classifier_phase_cost(
-                built.envelope.unsigned().input().classifier.as_ref())?;
-            // Actual shared buffers, independently measured by byte encoders.
-            let expected = publication_phase_cost(&committed)?
-                + retained_key_phase
-                + admission_phase * 2
-                + classifier_phase
-                + committed.outer_bytes.len() * 2
-                + signed.manifest_bytes().len() * 2
-                + signed.manifest().input().intervention_sequences.len()
-                    * std::mem::size_of::<u64>()
-                + committed.binding.to_canonical_cbor().len()
-                + receipt_copy
-                + projection_copy
-                + origin_copy
-                + absent_key_copy;
+            let expected = shared_native_phase_cost(&committed, &built, &import_bytes)?;
             let interval = store.begin_protected_effect_interval()?;
             for (bytes, succeeds) in [(expected, true), (expected - 1, false)] {
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
@@ -445,5 +410,49 @@ mod tests {
             assert_eq!(store.read_committed(child, head)?, committed);
         }
         Ok(())
+    }
+
+    /// Independent byte encoders and logical fields; this oracle does not
+    /// call production length/carrier/ledger helpers or measure a used budget.
+    fn shared_native_phase_cost(
+        committed: &crate::CommittedForkManifestV1,
+        built: &crate::fae1_fixture::Built,
+        import_bytes: &[u8],
+    ) -> Fallible<usize> {
+        let signed = SignedForkReproManifestV1::from_canonical_cbor(&committed.outer_bytes)?;
+        let owner_bytes = committed
+            .operation
+            .input()
+            .signing_identity
+            .owner_id
+            .as_str()
+            .len();
+        let receipt_copy = 32 + 16 + 8 + 32;
+        let projection_copy = 32 + 16 + 8 + 32 + 32 + owner_bytes + 1 + 8 + 32 + 32 + 32 + 1;
+        let origin_copy = 1 + 32;
+        let absent_key_copy = owner_bytes + 1 + 8 + 1 + 32 + 1 + 32;
+        let key = &built.envelope.unsigned().input().key_record;
+        let retained_key_phase =
+            key.to_canonical_cbor().len() * 3 + key.identity().owner_id.as_str().len();
+        let admission_phase = super::super::fork_replay_admission::imported_admission_phase_cost(
+            &built.envelope.unsigned().input().records.fork_admission,
+            import_bytes,
+        )?;
+        let classifier_phase =
+            super::super::fork_replay_classifier::imported_classifier_phase_cost(
+                built.envelope.unsigned().input().classifier.as_ref(),
+            )?;
+        Ok(publication_phase_cost(committed)?
+            + retained_key_phase
+            + admission_phase * 2
+            + classifier_phase
+            + committed.outer_bytes.len() * 2
+            + signed.manifest_bytes().len() * 2
+            + signed.manifest().input().intervention_sequences.len() * std::mem::size_of::<u64>()
+            + committed.binding.to_canonical_cbor().len()
+            + receipt_copy
+            + projection_copy
+            + origin_copy
+            + absent_key_copy)
     }
 }
