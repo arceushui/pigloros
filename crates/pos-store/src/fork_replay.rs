@@ -586,22 +586,26 @@ mod canonical_length_mapping_tests {
     }
 
     struct DecoderOutcome {
-        value: Result<pos_core::ImportedForkAttributionAdmissionV1, crate::ForkManifestPublicationErrorV1>,
+        value: Result<
+            pos_core::ImportedForkAttributionAdmissionV1,
+            crate::ForkManifestPublicationErrorV1,
+        >,
         remaining: usize,
         open: bool,
     }
 
-    fn decode_with_budget(
-        bytes: &[u8],
-        byte_limit: usize,
-    ) -> Fallible<DecoderOutcome> {
+    fn decode_with_budget(bytes: &[u8], byte_limit: usize) -> Fallible<DecoderOutcome> {
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, 1, byte_limit, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
         let value = NativeReadContextV1::protected(&mut budget).imported_admission(bytes);
         let remaining = budget.remaining_native_bytes();
-        Ok(DecoderOutcome { value, remaining, open: budget.check_time().is_ok() })
+        Ok(DecoderOutcome {
+            value,
+            remaining,
+            open: budget.check_time().is_ok(),
+        })
     }
 
     #[test]
@@ -618,9 +622,15 @@ mod canonical_length_mapping_tests {
             assert_eq!(outcome.remaining, 0);
             assert!(outcome.open);
             let outcome = decode_with_budget(&bytes, exact - 1)?;
-            assert_eq!(outcome.value, Err(crate::ForkManifestPublicationErrorV1::PublicationConflict));
+            assert_eq!(
+                outcome.value,
+                Err(crate::ForkManifestPublicationErrorV1::PublicationConflict)
+            );
             assert!(!outcome.open);
-            assert_eq!(NativeReadContextV1::ordinary().imported_admission(&bytes)?, record);
+            assert_eq!(
+                NativeReadContextV1::ordinary().imported_admission(&bytes)?,
+                record
+            );
         }
         Ok(())
     }
@@ -652,7 +662,11 @@ mod canonical_length_mapping_tests {
         let mut trailing = bytes.clone();
         trailing.push(0);
         assert_parity(&trailing)?;
-        assert_parity(&vec![0; pos_core::MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1 + 1])?;
+        assert_parity(&vec![
+            0;
+            pos_core::MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1
+                + 1
+        ])?;
         for (additional, width) in [(24, 1), (25, 2), (26, 4), (27, 8)] {
             let mut nonpreferred = vec![0x80 | additional];
             nonpreferred.extend_from_slice(&12_u64.to_be_bytes()[8 - width..]);
@@ -669,12 +683,15 @@ mod canonical_length_mapping_tests {
         too_long.insert(identifier_start + 128, b'x');
         assert_parity(&too_long)?;
         // Ordinary callers still use exactly the owning core decoder.
-        assert!(NativeReadContextV1::ordinary().imported_admission(&trailing).is_err());
+        assert!(NativeReadContextV1::ordinary()
+            .imported_admission(&trailing)
+            .is_err());
         Ok(())
     }
 
     #[test]
-    fn imported_decoder_checks_original_deadline_before_and_after_its_bounded_batch() -> Fallible<()> {
+    fn imported_decoder_checks_original_deadline_before_and_after_its_bounded_batch() -> Fallible<()>
+    {
         let bytes = admission("issuer")?.to_canonical_cbor();
         for (zero_marks, final_mark, succeeds) in [
             (2, Duration::from_secs(2), false),
@@ -705,20 +722,39 @@ mod canonical_length_mapping_tests {
             bytes.push(0x60 | additional);
             bytes.extend_from_slice(&6_u64.to_be_bytes()[8 - width..]);
             bytes.extend_from_slice(payload);
-            assert_eq!(AdmissionCarrierV1::field(&bytes, 2, 3), Some(payload.as_slice()));
+            assert_eq!(
+                AdmissionCarrierV1::field(&bytes, 2, 3),
+                Some(payload.as_slice())
+            );
             // Nonpreferred width remains visible to the core decoder, not
             // normalized or accepted as native validity by this span reader.
         }
         for bytes in [
-            vec![], vec![0x9f], vec![0x80], vec![0x40], vec![0x81, 0x9f],
-            vec![0x81, 0x5f], vec![0x81, 0x78], vec![0x81, 0x7b, 0xff],
+            vec![],
+            vec![0x9f],
+            vec![0x80],
+            vec![0x40],
+            vec![0x81, 0x9f],
+            vec![0x81, 0x5f],
+            vec![0x81, 0x78],
+            vec![0x81, 0x7b, 0xff],
             vec![0x82, 0x81, 0, 0x61, b'x'],
         ] {
             assert_eq!(AdmissionCarrierV1::field(&bytes, 0, 3), None);
             assert_eq!(AdmissionCarrierV1::field(&bytes, 1, 3), None);
         }
-        assert_eq!(AdmissionCarrierV1::field(&[0x82, 0x20, 0x61, b'x'], 1, 3), Some(b"x".as_slice()));
-        assert_eq!(AdmissionCarrierV1::field(&[0x81, 0x7b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], 0, 3), None);
+        assert_eq!(
+            AdmissionCarrierV1::field(&[0x82, 0x20, 0x61, b'x'], 1, 3),
+            Some(b"x".as_slice())
+        );
+        assert_eq!(
+            AdmissionCarrierV1::field(
+                &[0x81, 0x7b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+                0,
+                3
+            ),
+            None
+        );
     }
 
     #[test]
