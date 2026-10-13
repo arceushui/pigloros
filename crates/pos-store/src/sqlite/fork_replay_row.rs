@@ -99,7 +99,8 @@ impl SelectedRowV1<'_> {
             | Self::EventOriginProbe(key)
             | Self::EventOriginBlob(key)
             | Self::InterventionProbe(key)
-            | Self::InterventionBlob(key) => statement.query([key]),
+            | Self::InterventionBlob(key)
+            | Self::SuffixProbe(key, None) => statement.query([key]),
             Self::BindingProbe(operation) | Self::BindingFields(operation) => {
                 statement.query([operation.as_bytes().as_slice()])
             }
@@ -107,7 +108,6 @@ impl SelectedRowV1<'_> {
             Self::EventFields(key, seq) | Self::ClassifiedEventProbe(key, seq) => {
                 statement.query(rusqlite::params![key, seq])
             }
-            Self::SuffixProbe(key, None) => statement.query([key]),
             Self::SuffixProbe(key, Some(seq)) | Self::SuffixFields(key, seq) => {
                 statement.query(rusqlite::params![key, seq])
             }
