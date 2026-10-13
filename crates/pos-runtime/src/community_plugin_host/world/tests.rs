@@ -50,10 +50,11 @@ fn expectation() -> CommunityPluginExpectationV1 {
     }
 }
 
-/// `ArtifactTrustDenied{NotActive}`: the release is not the active one of the registry.
-const fn not_active() -> CommunityPluginHostErrorV1 {
+/// `ArtifactTrustDenied{PolicyMismatch}`: the registry is provisioned but has adopted no policy
+/// (`PolicyNotAdvanced`), which is the state of a world before its first install or refresh.
+const fn policy_unadopted() -> CommunityPluginHostErrorV1 {
     CommunityPluginHostErrorV1::ArtifactTrustDenied {
-        basis: TrustDenialBasisV1::NotActive,
+        basis: TrustDenialBasisV1::PolicyMismatch,
     }
 }
 
@@ -157,7 +158,7 @@ struct Rig {
 
 impl Rig {
     fn new() -> BoxResult<Self> {
-        let mut publisher = World::build(None, false)?;
+        let mut publisher = World::new()?;
         let current = publisher.material()?;
         let material = trust_material(&publisher, &current);
         let address = publisher.publish(Shape::first())?.address().clone();
@@ -287,7 +288,7 @@ fn two_worlds_share_nothing() -> TestResult {
     let mut second = Rig::new()?;
     first.install()?;
     first.gate().map_err(|e| format!("{e:?}"))?;
-    assert_eq!(second.gate().err(), Some(not_active()));
+    assert_eq!(second.gate().err(), Some(policy_unadopted()));
     assert_eq!(second.eval.committed_events().map(|e| e.len()), Ok(0));
     Ok(())
 }
@@ -308,7 +309,7 @@ fn an_install_at_the_expiry_second_is_refused() -> TestResult {
     let basis = TrustDenialBasisV1::Expired;
     let expired = CommunityPluginHostErrorV1::ArtifactTrustDenied { basis };
     assert_eq!(refused.err(), Some(expired));
-    assert_eq!(rig.gate().err(), Some(not_active()));
+    assert_eq!(rig.gate().err(), Some(policy_unadopted()));
     Ok(())
 }
 
@@ -326,7 +327,7 @@ fn an_install_whose_two_samples_differ_is_refused() -> TestResult {
         TICK,
     );
     assert!(refused.is_err());
-    assert_eq!(rig.gate().err(), Some(not_active()));
+    assert_eq!(rig.gate().err(), Some(policy_unadopted()));
     Ok(())
 }
 
@@ -343,7 +344,7 @@ fn an_install_of_an_address_the_store_does_not_hold_is_refused() -> TestResult {
         TICK,
     );
     assert!(refused.is_err());
-    assert_eq!(rig.gate().err(), Some(not_active()));
+    assert_eq!(rig.gate().err(), Some(policy_unadopted()));
     Ok(())
 }
 
@@ -368,7 +369,7 @@ fn unverifiable_trust_material_is_refused_before_the_install() -> TestResult {
     );
     assert!(refused.is_err());
     assert_ne!(refused.err(), Some(UNAVAILABLE));
-    assert_eq!(rig.gate().err(), Some(not_active()));
+    assert_eq!(rig.gate().err(), Some(policy_unadopted()));
     Ok(())
 }
 
@@ -380,9 +381,7 @@ fn a_refresh_adopts_a_newer_tps1() -> TestResult {
     rig.install()?;
     let newer = rig.publisher.unadopted_material(&[[0x77; 32]], TICK)?;
     let newer = trust_material(&rig.publisher, &newer);
-    let basis = TrustDenialBasisV1::PolicyMismatch;
-    let mismatch = CommunityPluginHostErrorV1::ArtifactTrustDenied { basis };
-    assert_eq!(rig.gate_with(&newer).err(), Some(mismatch));
+    assert_eq!(rig.gate_with(&newer).err(), Some(policy_unadopted()));
     let mut members = CommunityPluginHostV1::new(vec![rig.member()?]);
     let adopted = rig
         .eval

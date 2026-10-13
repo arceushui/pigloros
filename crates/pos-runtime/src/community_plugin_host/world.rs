@@ -105,9 +105,10 @@ struct Observed {
 
 impl CommunityEvaluationWorldV1 {
     /// A world whose registry is provisioned from `genesis`: its policy anchor and its signed
-    /// TPS1, which must be the genesis TPS1 the anchor pins (the current one is not adopted
-    /// here: `provision` takes the genesis and a newer policy is adopted later by
-    /// [`Self::refresh()`]).
+    /// TPS1, which must be the genesis TPS1 the anchor pins (`provision` creates the scope
+    /// and no PTR1 or PRV1 floor, so the policy is adopted by the first [`Self::install()`]
+    /// (the registry's `admit`) or by [`Self::refresh()`] (`advance_policy`); until then a
+    /// gate is `PolicyMismatch`, the registry's `PolicyNotAdvanced`).
     ///
     /// # Errors
     /// Returns `TrustStateUnavailable` when a host cannot be opened, and the registry mapping of
