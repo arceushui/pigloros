@@ -447,7 +447,7 @@ fn verified_command(
 }
 
 /// Reconstruct the immutable POC1 commitment from durable POB1 state.
-#[cfg(any(feature = "sqlite", test))]
+#[cfg(test)]
 pub(crate) fn principal_owner_commitment(
     store_id: Hash,
     binding: &PrincipalOwnerBindingV1,
@@ -494,7 +494,7 @@ pub(crate) fn principal_owner_commitment_with_context(
 ///
 /// A valid FAR1 has equal parent head, completed Fold Cursor, and post-fold
 /// Tick Boundary, so its parent head is the command cut.
-#[cfg(any(feature = "sqlite", test))]
+#[cfg(test)]
 pub(crate) fn fork_commitment(
     store_id: Hash,
     principal_digest: Hash,
