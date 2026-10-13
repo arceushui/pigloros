@@ -27,11 +27,14 @@ impl NativeReadContextV1<'_, '_> {
         &mut self,
         table: &ForkClassifierTableV1,
     ) -> Result<pos_core::ForkEventClassifierV1> {
-        self.check().and_then(|()| self.canonical(table.canonical_cbor_len()))
-            .and_then(|()| table.input().routes.iter().try_for_each(|route| {
-                self.bytes(route.source().route().len())
-                    .and_then(|()| self.bytes(ROUTE_FIXED_BYTES))
-            }))
+        self.check()
+            .and_then(|()| self.canonical(table.canonical_cbor_len()))
+            .and_then(|()| {
+                table.input().routes.iter().try_for_each(|route| {
+                    self.bytes(route.source().route().len())
+                        .and_then(|()| self.bytes(ROUTE_FIXED_BYTES))
+                })
+            })
             .and_then(|()| {
                 let classifier = pos_core::ForkEventClassifierV1::from_table(table);
                 self.check().map(|()| classifier)
