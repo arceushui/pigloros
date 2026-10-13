@@ -1246,7 +1246,7 @@ impl CanonicalEmit for SignedForkReproManifestV1 {
         text(out, self.identity.owner_id.as_str());
         uint(out, u64::from(self.identity.role.code()));
         uint(out, self.identity.epoch);
-        out.nested(&self.manifest);
+        out.nested_byte_string(&self.manifest);
         bytes(out, self.signature.as_bytes());
     }
 }
