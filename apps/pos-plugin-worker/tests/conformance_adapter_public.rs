@@ -591,7 +591,8 @@ fn r8_s7_ind_1_is_the_checked_in_literal() -> TestResult {
         .computed
         .ok_or("no computed digest")?;
     assert_eq!(blake3::Hash::from_bytes(computed).to_hex().as_str(), IND1_DIGEST);
-    let oracle: Value = serde_json::from_slice(&oracle_bytes(family)?)?;
+    let bytes = oracle_bytes(family)?;
+    let oracle: Value = serde_json::from_slice(&bytes)?;
     let first = &oracle["output"]["subcases"][0];
     assert_eq!(first["id"], "ind.1");
     assert_eq!(first["value"], IND1_DIGEST);
@@ -636,7 +637,8 @@ fn r8_s8_one_byte_of_the_composite_is_not_executed() -> TestResult {
         |bytes| bytes.len().checked_sub(1),
     ];
     for position in positions {
-        assert_not_executed(&mutating_the_composite(attempt.clone(), position)?)?;
+        let mutated = mutating_the_composite(attempt.clone(), position)?;
+        assert_not_executed(&mutated)?;
     }
     Ok(())
 }
@@ -650,7 +652,8 @@ fn r8_s8_a_component_piece_changed_without_its_digest_entry_is_not_executed() ->
             .position(|window| window == b"\0asm")
             .map(|start| start + 4)
     };
-    assert_not_executed(&mutating_the_composite(attempt, in_the_component)?)
+    let mutated = mutating_the_composite(attempt, in_the_component)?;
+    assert_not_executed(&mutated)
 }
 
 #[test]
@@ -755,7 +758,8 @@ fn collect_keys(value: &Value, keys: &mut Vec<String>) {
 #[test]
 fn r8_s10_no_oracle_or_output_key_claims_a_safety_property() -> TestResult {
     for family in FixtureFamily::ALL.iter().copied() {
-        let (claims, count) = safety_keys(&oracle_bytes(family)?)?;
+        let oracle = oracle_bytes(family)?;
+        let (claims, count) = safety_keys(&oracle)?;
         assert!(claims.is_empty(), "{family:?} oracle {claims:?}");
         assert!(count > 0, "{family:?} oracle");
     }
@@ -826,7 +830,8 @@ fn r8_s11_a_refused_or_failed_pass_leaves_events_and_state_unchanged() -> TestRe
     let (mut unsuccessful, mut changed) = (0, 0);
     for mode in MODES {
         for family in FixtureFamily::ALL.iter().copied() {
-            let counts = assert_unsuccessful_passes_changed_nothing(&family_run(family, mode)?);
+            let run = family_run(family, mode)?;
+            let counts = assert_unsuccessful_passes_changed_nothing(&run);
             unsuccessful += counts.0;
             changed += counts.1;
         }
