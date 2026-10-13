@@ -1,9 +1,5 @@
 //! Allocation preflight for the existing `MemoryStore` validator-(b) read.
 
-use std::collections::HashSet;
-
-use pos_core::{Event, TimelineId};
-
 use super::MemoryStore;
 use crate::{
     fork_event_authority::AuthorityValidatorV1,
@@ -20,7 +16,6 @@ impl ForkReplayAuthorityReadPortV1 for MemoryStore {
         requirement: &ForkReplayRequirementV1,
         budget: &mut ForkReplayReadBudgetV1<'_>,
     ) -> ReadResult<ForkReplayAuthorityEvidenceV1> {
-        self.preflight_replay_ancestry(requirement.child_timeline_id(), budget)?;
         self.preflight_replay_records(requirement, budget)?;
         let committed = self.read_committed_with_context(
             requirement.child_timeline_id(),
@@ -36,32 +31,6 @@ impl ForkReplayAuthorityReadPortV1 for MemoryStore {
 }
 
 impl MemoryStore {
-    /// Bound each chain and all Event payload copies before the existing reader
-    /// constructs its chain/suffix collections. No metadata is cloned here.
-    fn preflight_replay_ancestry(
-        &self,
-        child: TimelineId,
-        budget: &mut ForkReplayReadBudgetV1<'_>,
-    ) -> ReadResult<()> {
-        let mut visited = HashSet::new();
-        let mut next = Some(child);
-        let mut depth = 0;
-        while let Some(timeline) = next {
-            budget.charge_node(depth)?;
-            if !visited.insert(timeline) {
-                return Err(Error::CorruptAuthority);
-            }
-            let state = self.timelines.get(&timeline).ok_or(Error::Unavailable)?;
-            for event in &state.events {
-                budget.charge_rows(1)?;
-                charge_event(event, budget)?;
-            }
-            next = state.timeline.meta.fork_point.map(|(parent, _)| parent);
-            depth += 1;
-        }
-        Ok(())
-    }
-
     /// Indexed records belong only to this selected publication. Broader scans
     /// are retained only where validator (b) genuinely checks orphans/duplicates.
     fn preflight_replay_records(
@@ -160,9 +129,4 @@ fn charge_records<'record, T: CanonicalSizeV1 + 'record>(
         budget.charge_canonical(record.canonical_size())?;
     }
     Ok(())
-}
-
-fn charge_event(event: &Event, budget: &mut ForkReplayReadBudgetV1<'_>) -> ReadResult<()> {
-    budget.charge_bytes(event.payload.as_slice().len())?;
-    budget.charge_bytes(event.event_type.as_str().len())
 }
