@@ -158,12 +158,18 @@ fn the_synthetic_marker_is_absent_from_every_committed_record() -> TestResult {
     assert_output_is_the_oracle(FixtureFamily::DeletionRedaction, ExecutionMode::Local)
 }
 
-/// The edit that makes the `scan` of a sub-case search the outcome record too.
+/// The marker of the control: the Plugin ID text, which the outcome record holds as CBOR text.
+const OUTCOME_MARKER: &str = "compatibility-prototype";
+
+/// The edit that makes the `scan` of a sub-case search for [`OUTCOME_MARKER`] in the outcome
+/// record only; the expectation names the same marker, as the grammar requires.
 fn scanning_the_outcome(subcase: &mut Value) {
     let scan = subcase["steps"].as_array_mut().and_then(|steps| steps.last_mut());
     if let Some(scan) = scan {
-        scan["in"] = serde_json::json!(["events", "state", "outcome"]);
+        scan["in"] = serde_json::json!(["outcome"]);
+        scan["marker"] = OUTCOME_MARKER.into();
     }
+    subcase["expect"]["marker"] = OUTCOME_MARKER.into();
 }
 
 /// The text of the canonical output the observation gives.
@@ -175,17 +181,21 @@ fn output_text(observation: &SubjectObservation) -> TestResult<String> {
 }
 
 /// R8-F7b: the log text `drive` is in no committed Event payload or state of the real worker.
-/// The control scans the outcome record too, which holds the Event type `prototype.driven`, and
-/// then finds the marker, so the sub-case is a mismatch.
+/// The control searches the outcome record for the Plugin ID text it holds: the scan finds it
+/// there, so the sub-case is written as `{"id","kind":"mismatch"}` and never as an `absent`
+/// entry (the Event type is not in the `POB1` outcome record, so `drive` itself is not used).
 #[test]
-fn the_log_text_is_absent_from_events_and_state_but_not_from_the_outcome() -> TestResult {
+fn the_log_text_is_absent_from_events_and_state_but_a_scan_finds_the_outcome_text() -> TestResult {
     let family = FixtureFamily::DeletionRedaction;
     let absent = "\"id\":\"del.2\",\"kind\":\"absent\",\"prohibited_data_present\":false";
-    let matched = observe_attempt(&one_subcase(family, "del.2", unchanged)?)?;
-    assert!(output_text(&matched)?.contains(absent));
-    let control = observe_attempt(&one_subcase(family, "del.2", scanning_the_outcome)?)?;
-    // A sub-case that did not match is written as `{"id","kind":"mismatch"}`, not as values.
-    assert!(output_text(&control)?.contains("\"id\":\"del.2\",\"kind\":\"mismatch\""));
+    let matched = output_text(&observe_attempt(&one_subcase(family, "del.2", unchanged)?)?)?;
+    assert!(matched.contains(absent), "unexpected output: {matched}");
+    let found = observe_attempt(&one_subcase(family, "del.2", scanning_the_outcome)?)?;
+    let control = output_text(&found)?;
+    assert!(
+        control.contains("\"id\":\"del.2\",\"kind\":\"mismatch\""),
+        "unexpected control output: {control}"
+    );
     Ok(())
 }
 
