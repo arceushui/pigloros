@@ -3,12 +3,15 @@
 #[path = "../../pos-store/tests/support/fae1_fixture.rs"]
 pub mod fixture;
 
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
-use fixture::{Fallible, Port, Shape, Spec, World, PARENT_CUT, pin_policy, request_for};
+use fixture::{pin_policy, request_for, Fallible, Port, Shape, Spec, World, PARENT_CUT};
 use pos_core::{
-    CoreError, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    Hash, Reducer, Seq, State, TimelineId, WorldReplayClosureV1,
+    CoreError, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash, Reducer,
+    Seq, State, TimelineId, WorldReplayClosureV1,
 };
 use pos_runtime::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
