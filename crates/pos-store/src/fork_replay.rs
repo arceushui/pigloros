@@ -13,6 +13,8 @@ use pos_core::{
 #[cfg(feature = "sqlite")]
 mod admission;
 #[cfg(feature = "sqlite")]
+mod append_operation;
+#[cfg(feature = "sqlite")]
 mod classifier;
 #[cfg(feature = "sqlite")]
 mod publication;
