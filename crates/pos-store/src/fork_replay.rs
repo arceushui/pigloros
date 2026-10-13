@@ -10,12 +10,6 @@ use pos_core::{
     Hash, Seq, TimelineId,
 };
 
-pub(crate) mod sizes;
-
-pub(crate) trait CanonicalSizeV1 {
-    fn canonical_size(&self) -> Result<usize, pos_core::CanonicalLengthErrorV1>;
-}
-
 /// Private validator context. Only the protected bridge borrows a ledger;
 /// ordinary publication reads retain their existing, non-protected contract.
 /// A failed debit remains latched in the borrowed ledger even when the native
