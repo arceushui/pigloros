@@ -91,7 +91,7 @@ struct Fake {
     pass_args: Vec<PassArgsV1>,
 }
 
-impl WorldPortV1 for Fake {
+impl StepPortV1 for Fake {
     fn open(&mut self, setup: SetupArgsV1) -> Result<(), E> {
         self.log.push("open");
         self.setup = Some(setup);

@@ -142,12 +142,12 @@ fn base() -> Value {
     })
 }
 
-fn parse(value: &Value) -> Result<CaseV1, PayloadInvalidV1> {
+fn parse(value: &Value) -> Result<CaseV1, InvalidCaseV1> {
     CaseV1::parse(value.to_string().as_bytes(), FixtureFamily::Positive)
 }
 
 /// The payload after `change`, parsed.
-fn changed(change: impl FnOnce(&mut Value)) -> Result<CaseV1, PayloadInvalidV1> {
+fn changed(change: impl FnOnce(&mut Value)) -> Result<CaseV1, InvalidCaseV1> {
     let mut value = base();
     change(&mut value);
     parse(&value)
@@ -202,7 +202,7 @@ const OBJECTS: &[&str] = &[
 fn an_unknown_key_is_payload_invalid_in_every_object() {
     for pointer in OBJECTS {
         let result = changed(|value| at(value, pointer)["extra"] = json!(1));
-        assert_eq!(result, Err(PayloadInvalidV1), "{pointer}");
+        assert_eq!(result, Err(InvalidCaseV1), "{pointer}");
     }
 }
 
@@ -224,7 +224,7 @@ fn a_missing_key_is_payload_invalid_in_every_object() {
                     object.remove(&key);
                 }
             });
-            assert_eq!(result, Err(PayloadInvalidV1), "{pointer} without {key}");
+            assert_eq!(result, Err(InvalidCaseV1), "{pointer} without {key}");
         }
     }
 }
@@ -238,11 +238,11 @@ fn a_null_is_only_accepted_where_the_grammar_says_material_or_null() {
         "/subcases/0/steps/1/event_type",
     ] {
         let result = changed(|value| *at(value, pointer) = Value::Null);
-        assert_eq!(result, Err(PayloadInvalidV1), "{pointer}");
+        assert_eq!(result, Err(InvalidCaseV1), "{pointer}");
     }
     for pointer in ["/subcases/10/nested", "/subcases/0/steps/3/members/2/at"] {
         let result = changed(|value| *at(value, pointer) = Value::Null);
-        assert_eq!(result, Err(PayloadInvalidV1), "{pointer}");
+        assert_eq!(result, Err(InvalidCaseV1), "{pointer}");
     }
 }
 
@@ -263,7 +263,7 @@ fn hex_of_the_wrong_length_or_case_is_payload_invalid() {
     ];
     for (pointer, text) in wrong {
         let result = changed(|value| *at(value, pointer) = json!(text));
-        assert_eq!(result, Err(PayloadInvalidV1), "{pointer} = {text}");
+        assert_eq!(result, Err(InvalidCaseV1), "{pointer} = {text}");
     }
     let empty = changed(|value| *at(value, "/subcases/0/steps/3/observation") = json!(""));
     assert!(empty.is_ok(), "hexb accepts the empty string");
@@ -289,7 +289,7 @@ fn numbers_must_be_integers_from_zero_to_two_to_the_fifty_third_minus_one() {
     ];
     for number in refused {
         let result = changed(|value| *at(value, pointer) = number.clone());
-        assert_eq!(result, Err(PayloadInvalidV1), "{number}");
+        assert_eq!(result, Err(InvalidCaseV1), "{number}");
     }
 }
 
@@ -302,10 +302,10 @@ fn text_is_printable_ascii() {
     }
     for text in ["tab\t", "new\nline", "\u{7f}", "é", "nul\u{0}"] {
         let result = changed(|value| *at(value, pointer) = json!(text));
-        assert_eq!(result, Err(PayloadInvalidV1), "{text:?}");
+        assert_eq!(result, Err(InvalidCaseV1), "{text:?}");
     }
     let number = changed(|value| *at(value, pointer) = json!(5));
-    assert_eq!(number, Err(PayloadInvalidV1));
+    assert_eq!(number, Err(InvalidCaseV1));
 }
 
 #[test]
@@ -318,12 +318,12 @@ fn the_envelope_is_checked() {
     ];
     for (pointer, replacement) in cases {
         let result = changed(|value| *at(value, pointer) = replacement.clone());
-        assert_eq!(result, Err(PayloadInvalidV1), "{pointer}");
+        assert_eq!(result, Err(InvalidCaseV1), "{pointer}");
     }
-    assert_eq!(parse(&json!([])), Err(PayloadInvalidV1));
+    assert_eq!(parse(&json!([])), Err(InvalidCaseV1));
     assert_eq!(
         CaseV1::parse(b"not json", FixtureFamily::Positive),
-        Err(PayloadInvalidV1)
+        Err(InvalidCaseV1)
     );
 }
 
@@ -335,7 +335,7 @@ fn at_most_sixty_four_subcases() -> TestResult {
     value["subcases"] = Value::Array(vec![one.clone(); 64]);
     assert_eq!(parse(&value)?.subcases.len(), 64);
     value["subcases"] = Value::Array(vec![one; 65]);
-    assert_eq!(parse(&value), Err(PayloadInvalidV1));
+    assert_eq!(parse(&value), Err(InvalidCaseV1));
     Ok(())
 }
 
@@ -363,7 +363,7 @@ fn header() -> Value {
     })
 }
 
-fn downgrade(change: impl FnOnce(&mut Value)) -> Result<CaseV1, PayloadInvalidV1> {
+fn downgrade(change: impl FnOnce(&mut Value)) -> Result<CaseV1, InvalidCaseV1> {
     let mut value = base();
     value["family"] = json!("downgrade");
     value["provider"] = header();
@@ -379,14 +379,14 @@ fn the_provider_header_is_required_in_downgrade_and_only_there() {
             object.remove("provider");
         }
     });
-    assert_eq!(removed, Err(PayloadInvalidV1));
+    assert_eq!(removed, Err(InvalidCaseV1));
     let nulled = downgrade(|value| value["provider"] = Value::Null);
-    assert_eq!(nulled, Err(PayloadInvalidV1));
+    assert_eq!(nulled, Err(InvalidCaseV1));
     let mut value = base();
     value["provider"] = header();
     assert_eq!(
         parse(&value),
-        Err(PayloadInvalidV1),
+        Err(InvalidCaseV1),
         "provider in another family"
     );
 }
@@ -403,10 +403,10 @@ fn the_provider_header_equals_the_transition() {
     ];
     for (key, replacement) in wrong {
         let result = downgrade(|value| value["provider"][key] = replacement.clone());
-        assert_eq!(result, Err(PayloadInvalidV1), "{key}");
+        assert_eq!(result, Err(InvalidCaseV1), "{key}");
     }
     let unknown = downgrade(|value| value["provider"]["extra"] = json!(1));
-    assert_eq!(unknown, Err(PayloadInvalidV1));
+    assert_eq!(unknown, Err(InvalidCaseV1));
     for key in header()
         .as_object()
         .map(|object| object.keys().cloned())
@@ -418,32 +418,32 @@ fn the_provider_header_equals_the_transition() {
                 object.remove(&key);
             }
         });
-        assert_eq!(missing, Err(PayloadInvalidV1), "{key}");
+        assert_eq!(missing, Err(InvalidCaseV1), "{key}");
     }
 }
 
 #[test]
 fn nested_and_the_malformed_expectation_belong_to_mal_6_only() {
     let renamed = changed(|value| *at(value, "/subcases/10/id") = json!("mal.7"));
-    assert_eq!(renamed, Err(PayloadInvalidV1), "mal.6 without its id");
+    assert_eq!(renamed, Err(InvalidCaseV1), "mal.6 without its id");
     let without = changed(|value| {
         if let Some(object) = at(value, "/subcases/10").as_object_mut() {
             object.remove("nested");
         }
     });
-    assert_eq!(without, Err(PayloadInvalidV1), "mal.6 without nested");
+    assert_eq!(without, Err(InvalidCaseV1), "mal.6 without nested");
     let elsewhere = changed(|value| at(value, "/subcases/0")["nested"] = json!(H32));
-    assert_eq!(elsewhere, Err(PayloadInvalidV1), "nested outside mal.6");
+    assert_eq!(elsewhere, Err(InvalidCaseV1), "nested outside mal.6");
     let expecting = changed(|value| {
         *at(value, "/subcases/10/expect") = json!({"kind": "failed", "error": "e", "class": "c"});
     });
     assert_eq!(
         expecting,
-        Err(PayloadInvalidV1),
+        Err(InvalidCaseV1),
         "mal.6 expecting something else"
     );
     let moved = changed(|value| *at(value, "/subcases/3/expect") = json!({"kind": "malformed"}));
-    assert_eq!(moved, Err(PayloadInvalidV1), "malformed outside mal.6");
+    assert_eq!(moved, Err(InvalidCaseV1), "malformed outside mal.6");
 }
 
 #[test]
@@ -466,10 +466,10 @@ fn basis_and_index_appear_exactly_for_their_errors() {
                 };
             }
         });
-        assert_eq!(result, Err(PayloadInvalidV1), "{pointer}");
+        assert_eq!(result, Err(InvalidCaseV1), "{pointer}");
     }
     let nulled = changed(|value| *at(value, "/subcases/1/expect/index") = Value::Null);
-    assert_eq!(nulled, Err(PayloadInvalidV1));
+    assert_eq!(nulled, Err(InvalidCaseV1));
 }
 
 #[test]
@@ -492,16 +492,16 @@ fn an_absent_expectation_needs_exactly_one_matching_scan() {
             steps.push(scan());
         }
     });
-    assert_eq!(two, Err(PayloadInvalidV1), "two scans");
+    assert_eq!(two, Err(InvalidCaseV1), "two scans");
     let none = changed(|value| *at(value, "/subcases/5/steps") = json!([]));
-    assert_eq!(none, Err(PayloadInvalidV1), "no scan");
+    assert_eq!(none, Err(InvalidCaseV1), "no scan");
     let marker = changed(|value| *at(value, "/subcases/5/expect/marker") = json!("other"));
-    assert_eq!(marker, Err(PayloadInvalidV1), "another marker");
+    assert_eq!(marker, Err(InvalidCaseV1), "another marker");
     let plugin = changed(|value| *at(value, "/subcases/5/expect/retained/plugin_id") = json!("q"));
-    assert_eq!(plugin, Err(PayloadInvalidV1), "another Plugin ID");
+    assert_eq!(plugin, Err(InvalidCaseV1), "another Plugin ID");
     let pointer = "/subcases/5/expect/retained/invocation_id_hex";
     let id = changed(|value| *at(value, pointer) = json!("x"));
-    assert_eq!(id, Err(PayloadInvalidV1), "another invocation ID");
+    assert_eq!(id, Err(InvalidCaseV1), "another invocation ID");
     let other_steps = changed(|value| {
         *at(value, "/subcases/5/steps") = json!([scan(), {
             "step": "refresh", "material": null, "instant_micros": 1, "tick": 2,
@@ -513,23 +513,23 @@ fn an_absent_expectation_needs_exactly_one_matching_scan() {
 #[test]
 fn a_step_or_expectation_kind_outside_the_grammar_is_payload_invalid() {
     let step = changed(|value| *at(value, "/subcases/0/steps/0/step") = json!("migrate"));
-    assert_eq!(step, Err(PayloadInvalidV1));
+    assert_eq!(step, Err(InvalidCaseV1));
     let untagged = changed(|value| {
         if let Some(object) = at(value, "/subcases/0/steps/0").as_object_mut() {
             object.remove("step");
         }
     });
-    assert_eq!(untagged, Err(PayloadInvalidV1));
+    assert_eq!(untagged, Err(InvalidCaseV1));
     let kind = changed(|value| *at(value, "/subcases/0/expect/kind") = json!("operational"));
-    assert_eq!(kind, Err(PayloadInvalidV1));
+    assert_eq!(kind, Err(InvalidCaseV1));
     let compute = changed(|value| *at(value, "/subcases/6/expect/compute/what") = json!("sha"));
-    assert_eq!(compute, Err(PayloadInvalidV1));
+    assert_eq!(compute, Err(InvalidCaseV1));
     let field = changed(|value| *at(value, "/subcases/7/expect/compute/field") = json!("digest"));
-    assert_eq!(field, Err(PayloadInvalidV1));
+    assert_eq!(field, Err(InvalidCaseV1));
     let source = changed(|value| *at(value, "/subcases/0/steps/4/in") = json!(["logs"]));
-    assert_eq!(source, Err(PayloadInvalidV1));
+    assert_eq!(source, Err(InvalidCaseV1));
     let at_text = changed(|value| *at(value, "/subcases/0/steps/3/members/1/at") = json!("gone"));
-    assert_eq!(at_text, Err(PayloadInvalidV1));
+    assert_eq!(at_text, Err(InvalidCaseV1));
 }
 
 #[test]
@@ -549,7 +549,7 @@ fn the_profile_compute_arrays_have_their_exact_shapes() {
     for (path, replacement) in wrong {
         let place = format!("{pointer}/{path}");
         let result = changed(|value| *at(value, &place) = replacement.clone());
-        assert_eq!(result, Err(PayloadInvalidV1), "{path}");
+        assert_eq!(result, Err(InvalidCaseV1), "{path}");
     }
 }
 
@@ -569,7 +569,7 @@ fn a_nested_document_is_parsed_by_the_same_grammar() -> TestResult {
         nested_key.as_bytes(),
     ];
     for bytes in refused {
-        assert_eq!(SubCaseV1::parse_document(bytes), Err(PayloadInvalidV1));
+        assert_eq!(SubCaseV1::parse_document(bytes), Err(InvalidCaseV1));
     }
     Ok(())
 }

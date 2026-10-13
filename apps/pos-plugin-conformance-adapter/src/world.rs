@@ -1,11 +1,11 @@
 //! The sub-case interpreter and its port (ADR-061 revision 8 decisions 2, 3 and 8).
 //!
-//! [`interpret()`] runs the steps of one sub-case on a [`WorldPortV1`]: the step dispatch
+//! [`interpret()`] runs the steps of one sub-case on a [`StepPortV1`]: the step dispatch
 //! (`install`, `bind`, `refresh`, `pass`, `scan`), the carry of the Driver's state across
 //! passes (the port keeps it), the stop at the first step that refuses or does not commit, the
 //! `compute` of a `digest` expectation, and the comparison of the sub-case result with `expect`.
 //! The port is a trait with one method per step so that the interpreter has a pure fake in its
-//! tests; the real port, [`crate::runner::EvaluationWorldPortV1`], is a logic-free adapter over
+//! tests; the real port, [`crate::runner::EvaluationStepPortV1`], is a logic-free adapter over
 //! the S1c2 world.
 //!
 //! The sub-case result is the outcome of the first step that refuses or fails, otherwise the
@@ -32,7 +32,7 @@ use crate::hex;
 use crate::map::{of_outcome, of_record, SubResultV1};
 pub use crate::payload::ScanSource;
 use crate::payload::{
-    AtV1, ComputeV1, ExpectV1, Hex32, IdentityFieldV1, MaterialV1, MemberV1, PayloadInvalidV1,
+    AtV1, ComputeV1, ExpectV1, Hex32, IdentityFieldV1, MaterialV1, MemberV1, InvalidCaseV1,
     ProfileDigestV1, ReleaseV1, StepV1, SubCaseV1, Text,
 };
 
@@ -183,7 +183,7 @@ pub enum ResolvedStepV1 {
 ///
 /// A refusal is the closed host error of the step. The port keeps the Driver's committed state
 /// across passes and reports the identity of the release that `bind` gated.
-pub trait WorldPortV1 {
+pub trait StepPortV1 {
     /// Open a fresh world for one sub-case.
     ///
     /// # Errors
@@ -367,11 +367,11 @@ impl PreparedV1 {
     /// trust materials.
     ///
     /// # Errors
-    /// Returns [`PayloadInvalidV1`] for a digest that names no piece (the `nested` digest
+    /// Returns [`InvalidCaseV1`] for a digest that names no piece (the `nested` digest
     /// included), an undecodable `PCA1` anchor, an error of `from_bytes_v1`, an error of
     /// `InMemoryReleaseEntryV1::from_bytes` or `InMemoryReleaseSourceV1::new`, a `pass` member
     /// without `at` whose Plugin no earlier `bind` named, or a release that cannot be addressed.
-    pub fn build(subcase: &SubCaseV1, pieces: &PiecesV1) -> Result<Self, PayloadInvalidV1> {
+    pub fn build(subcase: &SubCaseV1, pieces: &PiecesV1) -> Result<Self, InvalidCaseV1> {
         let mut resolver = Resolver {
             pieces,
             addresses: BTreeMap::new(),
@@ -389,7 +389,7 @@ impl PreparedV1 {
         } else {
             InMemoryReleaseSourceV1::new(resolver.entries)
                 .map(Some)
-                .or(Err(PayloadInvalidV1))
+                .or(Err(InvalidCaseV1))
         };
         let nested = subcase
             .nested
@@ -402,7 +402,7 @@ impl PreparedV1 {
                     genesis,
                     steps,
                 })
-                .ok_or(PayloadInvalidV1)
+                .ok_or(InvalidCaseV1)
         })
     }
 }
@@ -438,7 +438,7 @@ fn collect(digests: &[Hex32], pieces: &PiecesV1) -> Option<Vec<Vec<u8>>> {
 fn build_material(
     material: &MaterialV1,
     pieces: &PiecesV1,
-) -> Result<CommunityPluginTrustMaterialV1, PayloadInvalidV1> {
+) -> Result<CommunityPluginTrustMaterialV1, InvalidCaseV1> {
     let anchor = pieces.get(&material.anchor.0).and_then(decode_anchor);
     let tps1 = pieces.get(&material.tps1.0).map(<[u8]>::to_vec);
     let roots = collect(&material.ptr1, pieces);
@@ -446,15 +446,15 @@ fn build_material(
     match (anchor, tps1, roots, revocations) {
         (Some(anchor), Some(tps1), Some(roots), Some(revocations)) => {
             CommunityPluginTrustMaterialV1::from_bytes_v1(&anchor, tps1, roots, revocations)
-                .or(Err(PayloadInvalidV1))
+                .or(Err(InvalidCaseV1))
         }
-        _ => Err(PayloadInvalidV1),
+        _ => Err(InvalidCaseV1),
     }
 }
 
 /// The address that holds nothing: a well-formed digest that no release has.
-fn nothing_address() -> Result<BundleAddressV1, PayloadInvalidV1> {
-    BundleAddressV1::new(format!("sha256:{}", "0".repeat(64)), 1).or(Err(PayloadInvalidV1))
+fn nothing_address() -> Result<BundleAddressV1, InvalidCaseV1> {
+    BundleAddressV1::new(format!("sha256:{}", "0".repeat(64)), 1).or(Err(InvalidCaseV1))
 }
 
 /// Resolves the steps in order, carrying the material and the bound addresses.
@@ -473,11 +473,11 @@ struct Resolver<'a> {
 impl Resolver<'_> {
     /// The address of `release`, building its entry on first use: releases are deduplicated by
     /// their manifest piece digest.
-    fn address(&mut self, release: &ReleaseV1) -> Result<BundleAddressV1, PayloadInvalidV1> {
+    fn address(&mut self, release: &ReleaseV1) -> Result<BundleAddressV1, InvalidCaseV1> {
         if let Some(address) = self.addresses.get(&release.manifest.0) {
             return Ok(address.clone());
         }
-        let entry = entry_of(release, self.pieces).ok_or(PayloadInvalidV1)?;
+        let entry = entry_of(release, self.pieces).ok_or(InvalidCaseV1)?;
         let address = entry.address().clone();
         self.addresses.insert(release.manifest.0, address.clone());
         self.entries.push(entry);
@@ -487,15 +487,15 @@ impl Resolver<'_> {
     fn material_of(
         &self,
         material: Option<&MaterialV1>,
-    ) -> Result<Option<CommunityPluginTrustMaterialV1>, PayloadInvalidV1> {
+    ) -> Result<Option<CommunityPluginTrustMaterialV1>, InvalidCaseV1> {
         material
             .map(|material| build_material(material, self.pieces))
             .transpose()
     }
 
-    fn member(&mut self, member: &MemberV1) -> Result<PassMemberV1, PayloadInvalidV1> {
+    fn member(&mut self, member: &MemberV1) -> Result<PassMemberV1, InvalidCaseV1> {
         let plugin_id = member.plugin_id.as_str();
-        let bound = self.bound.get(plugin_id).cloned().ok_or(PayloadInvalidV1);
+        let bound = self.bound.get(plugin_id).cloned().ok_or(InvalidCaseV1);
         let address = match &member.at {
             None => bound,
             Some(AtV1::Absent(_)) => bound.and_then(|_| nothing_address()),
@@ -507,7 +507,7 @@ impl Resolver<'_> {
         })
     }
 
-    fn step(&mut self, step: &StepV1) -> Result<ResolvedStepV1, PayloadInvalidV1> {
+    fn step(&mut self, step: &StepV1) -> Result<ResolvedStepV1, InvalidCaseV1> {
         match step {
             StepV1::Install(install) => Ok(ResolvedStepV1::Install(InstallArgsV1 {
                 address: self.address(&install.release)?,
@@ -517,7 +517,7 @@ impl Resolver<'_> {
             })),
             StepV1::Bind(bind) => {
                 if self.bound.contains_key(bind.plugin_id.as_str()) {
-                    return Err(PayloadInvalidV1);
+                    return Err(InvalidCaseV1);
                 }
                 let address = self.address(&bind.release)?;
                 let material = self.material_of(bind.material.as_ref())?;
@@ -581,7 +581,7 @@ impl Resolver<'_> {
 pub fn interpret(
     subcase: &SubCaseV1,
     pieces: &PiecesV1,
-    port: &mut dyn WorldPortV1,
+    port: &mut dyn StepPortV1,
     mode: CommunityPluginModeV1,
 ) -> SubCaseRecordV1 {
     let record = SubCaseRecordV1::empty(subcase.id.as_str());
@@ -593,7 +593,7 @@ pub fn interpret(
             invocation: None,
         }
         .execute(prepared, subcase, pieces, mode),
-        Err(PayloadInvalidV1) => record,
+        Err(InvalidCaseV1) => record,
     }
 }
 
@@ -605,7 +605,7 @@ struct Bound {
 
 /// The state of one sub-case run.
 struct Run<'a> {
-    port: &'a mut dyn WorldPortV1,
+    port: &'a mut dyn StepPortV1,
     record: SubCaseRecordV1,
     bound: Option<Bound>,
     /// The invocation ID of the last `pass` step.

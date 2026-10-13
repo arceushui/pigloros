@@ -498,7 +498,7 @@ fn the_fixture_source_is_accepted_by_a_pass_and_a_refresh() -> TestResult {
 
 #[test]
 fn a_port_is_a_world_port_over_the_program_it_was_given() {
-    let port = EvaluationWorldPortV1::new(
+    let port = EvaluationStepPortV1::new(
         WorkerProgramV1::new(PathBuf::from("/bin/false")).unwrap_or_else(|| {
             std::panic::resume_unwind(Box::new("relative"));
         }),

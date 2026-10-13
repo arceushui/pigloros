@@ -1,8 +1,6 @@
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 #![cfg_attr(all(coverage_nightly, test), feature(coverage_attribute))]
-// The ADR fixes the names (`WorldPortV1` in `world`, `PiecesV1` ...).
-#![allow(clippy::module_name_repetitions)]
 
 //! The community Plugin conformance subject adapter (ADR-061 revision 8 decision 2, #615).
 //!
@@ -45,8 +43,8 @@ pub mod schema_digests;
 pub mod world;
 
 pub use composite::{PiecesFaultV1, PiecesV1};
-pub use runner::{EvaluationWorldPortV1, SubCaseRunnerV1, SupervisorRunnerV1};
-pub use world::{interpret, ScanResultV1, ScanSource, SubCaseRecordV1, WorldPortV1};
+pub use runner::{EvaluationStepPortV1, SubCaseRunnerV1, SupervisorRunnerV1};
+pub use world::{interpret, ScanResultV1, ScanSource, SubCaseRecordV1, StepPortV1};
 
 /// The provider ID of every failure the adapter returns.
 pub const PROVIDER_ID: &str = "pigloros.fixture.plugin-conformance";

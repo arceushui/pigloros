@@ -25,7 +25,7 @@ const MALFORMED_SUBCASE: &str = "mal.6";
 /// A payload that is not valid for the grammar: it is the case result `payload-invalid`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("the payload violates the Plugin conformance case grammar")]
-pub struct PayloadInvalidV1;
+pub struct InvalidCaseV1;
 
 /// The payload name of `family`.
 #[must_use]
@@ -441,13 +441,13 @@ impl SubCaseV1 {
     /// The sub-case document `bytes`, as the adapter's own decoder reads a nested piece.
     ///
     /// # Errors
-    /// Returns [`PayloadInvalidV1`] for a document that is not JSON, violates the grammar, or
+    /// Returns [`InvalidCaseV1`] for a document that is not JSON, violates the grammar, or
     /// carries a `nested` key of its own.
-    pub fn parse_document(bytes: &[u8]) -> Result<Self, PayloadInvalidV1> {
-        let parsed = serde_json::from_slice::<Self>(bytes).or(Err(PayloadInvalidV1));
+    pub fn parse_document(bytes: &[u8]) -> Result<Self, InvalidCaseV1> {
+        let parsed = serde_json::from_slice::<Self>(bytes).or(Err(InvalidCaseV1));
         parsed.and_then(|subcase| {
             let valid = subcase.nested.is_none() && subcase.is_wellformed();
-            valid.then_some(subcase).ok_or(PayloadInvalidV1)
+            valid.then_some(subcase).ok_or(InvalidCaseV1)
         })
     }
 
@@ -523,15 +523,15 @@ impl CaseV1 {
     /// Parse and check the payload `bytes` of a case of `family`.
     ///
     /// # Errors
-    /// Returns [`PayloadInvalidV1`] for JSON that violates the grammar, a schema string other
+    /// Returns [`InvalidCaseV1`] for JSON that violates the grammar, a schema string other
     /// than the pinned one, a `family` that differs from the attempt's, more than 64
     /// sub-cases, or a `provider` header that is missing, unexpected or not the transition.
-    pub fn parse(bytes: &[u8], family: FixtureFamily) -> Result<Self, PayloadInvalidV1> {
-        let parsed = serde_json::from_slice::<Self>(bytes).or(Err(PayloadInvalidV1));
+    pub fn parse(bytes: &[u8], family: FixtureFamily) -> Result<Self, InvalidCaseV1> {
+        let parsed = serde_json::from_slice::<Self>(bytes).or(Err(InvalidCaseV1));
         parsed.and_then(|case| case.checked(family))
     }
 
-    fn checked(self, family: FixtureFamily) -> Result<Self, PayloadInvalidV1> {
+    fn checked(self, family: FixtureFamily) -> Result<Self, InvalidCaseV1> {
         let provider = match (family, &self.provider) {
             (FixtureFamily::Downgrade, Some(header)) => header.is_valid(),
             (FixtureFamily::Downgrade, None) | (_, Some(_)) => false,
@@ -542,7 +542,7 @@ impl CaseV1 {
             && self.subcases.len() <= MAX_SUBCASES
             && provider
             && self.subcases.iter().all(SubCaseV1::is_valid);
-        valid.then_some(self).ok_or(PayloadInvalidV1)
+        valid.then_some(self).ok_or(InvalidCaseV1)
     }
 }
 

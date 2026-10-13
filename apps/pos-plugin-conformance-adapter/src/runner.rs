@@ -2,7 +2,7 @@
 //!
 //! [`SubCaseRunnerV1`] is the public seam above the interpreter: the case driver asks it for
 //! the record of each sub-case, and a test-side decorator can record its calls.
-//! [`SupervisorRunnerV1`] builds the real port, [`EvaluationWorldPortV1`], and interprets the
+//! [`SupervisorRunnerV1`] builds the real port, [`EvaluationStepPortV1`], and interprets the
 //! sub-case on it. The port has no logic of its own: it builds the S1c2 world, calls `install`,
 //! `gate_for_driver`, `refresh_policy` and `run_pass` with a fixture wall source at the instant
 //! of the step, builds and registers the Driver of a `bind` step, and reads the world back.
@@ -34,7 +34,7 @@ use crate::invocation::{
 use crate::payload::SubCaseV1;
 use crate::world::{
     interpret, outcome_bytes_of, BindArgsV1, HostError, InstallArgsV1, PassArgsV1, PassMemberV1,
-    RefreshArgsV1, SetupArgsV1, SubCaseRecordV1, WorldPortV1,
+    RefreshArgsV1, SetupArgsV1, SubCaseRecordV1, StepPortV1,
 };
 
 /// The outcome records of one pass.
@@ -106,7 +106,7 @@ impl SubCaseRunnerV1 for SupervisorRunnerV1 {
         pieces: &PiecesV1,
         mode: CommunityPluginModeV1,
     ) -> SubCaseRecordV1 {
-        let mut port = EvaluationWorldPortV1::new(self.program.clone());
+        let mut port = EvaluationStepPortV1::new(self.program.clone());
         interpret(subcase, pieces, &mut port, mode)
     }
 }
@@ -131,13 +131,13 @@ struct OpenWorld {
 }
 
 /// The real port over the S1c2 world: logic-free beyond the wiring.
-pub struct EvaluationWorldPortV1 {
+pub struct EvaluationStepPortV1 {
     program: WorkerProgramV1,
     open: Option<OpenWorld>,
 }
 
-impl EvaluationWorldPortV1 {
-    /// A port whose Drivers launch `program`; it has no world until [`WorldPortV1::open()`].
+impl EvaluationStepPortV1 {
+    /// A port whose Drivers launch `program`; it has no world until [`StepPortV1::open()`].
     #[must_use]
     pub const fn new(program: WorkerProgramV1) -> Self {
         Self {
@@ -338,7 +338,7 @@ impl OpenWorld {
     }
 }
 
-impl WorldPortV1 for EvaluationWorldPortV1 {
+impl StepPortV1 for EvaluationStepPortV1 {
     fn open(&mut self, setup: SetupArgsV1) -> Result<(), HostError> {
         let SetupArgsV1 {
             source,
