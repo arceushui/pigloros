@@ -19,12 +19,13 @@ use pos_core::{
     CapabilityRevocationV1, CapabilityScopeDraftV1, CapabilityScopeV1, ConsentAuthority,
     ConsentGrantedV1, ConsentRevokedV1, CoreError, DelegateClassV1, EntityId,
     ErasureContainmentGateV1, Event, EventDraft, EventStore, FactualDependencyErrorV1,
-    FactualNodeKeyV1, FactualPrefixReadPortV1, Hash, Kind, PersistedAuthorityV1,
-    PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1,
-    PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1,
-    PipelineEvidenceRefV1, PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1,
-    PipelineSecurityRevisionsV1, Plugin, PluginId, PrincipalRefV1, RecordedSetCountsV1, Reducer,
-    Seq, SeqRange, State, TimelineId, DELEGATE_ACTION_V1, FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
+    FactualNodeKeyV1, FactualPrefixReadPortV1, FactualTickDependenciesV1, Hash, Kind,
+    PersistedAuthorityV1, PipelineAdmissionBasisDraftV1, PipelineAdmissionBasisV1,
+    PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1, PipelineAdmissionPortV1,
+    PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineEvidenceRefV1,
+    PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin,
+    PluginId, PrincipalRefV1, RecordedSetCountsV1, Reducer, Seq, SeqRange, State, TimelineId,
+    DELEGATE_ACTION_V1, FACTUAL_SNAPSHOT_SCHEMA_ID_V1, PIPELINE_CONTRACT_VERSION_V1,
 };
 use pos_runtime::{
     Driver, LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, ProjectionKey,
@@ -1659,6 +1660,9 @@ struct DigestRecordingPort<'a> {
     bases: Vec<PipelineAdmissionBasisV1>,
     /// The outcome to answer instead of committing, if any.
     refusal: Option<PipelineOutcomeV1>,
+    /// How many Ticks later than the registry declared the store is offered
+    /// each basis; zero offers it unchanged.
+    skew: u64,
 }
 
 impl<'a> DigestRecordingPort<'a> {
@@ -1670,6 +1674,21 @@ impl<'a> DigestRecordingPort<'a> {
             digests: Vec::new(),
             bases: Vec::new(),
             refusal: None,
+            skew: 0,
+        }
+    }
+
+    /// A port that commits through `inner` a basis whose asserted Tick is
+    /// `skew` Ticks later than the registry declared, as a host that lost a
+    /// race with another commit would offer it.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    const fn skewing(inner: &'a mut dyn Harness, skew: u64) -> Self {
+        Self {
+            inner,
+            digests: Vec::new(),
+            bases: Vec::new(),
+            refusal: None,
+            skew,
         }
     }
 
@@ -1681,8 +1700,33 @@ impl<'a> DigestRecordingPort<'a> {
             digests: Vec::new(),
             bases: Vec::new(),
             refusal: Some(outcome),
+            skew: 0,
         }
     }
+}
+
+/// The basis with its asserted Tick `skew` Ticks later, every other field
+/// unchanged.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn skewed(basis: &PipelineAdmissionBasisV1, skew: u64) -> PipelineAdmissionBasisV1 {
+    let declared = basis.dependencies();
+    let moved = FactualTickDependenciesV1::new(
+        declared.tick().saturating_add(skew),
+        declared.record().clone(),
+        declared.output_bindings().to_vec(),
+        declared.event_nodes().to_vec(),
+    );
+    ok(PipelineAdmissionBasisV1::try_from_draft(
+        PipelineAdmissionBasisDraftV1 {
+            contract_version: PIPELINE_CONTRACT_VERSION_V1,
+            attempt: Some(*basis.attempt()),
+            tentative_result: Some(basis.tentative_result()),
+            precondition: Some(basis.precondition()),
+            security_revisions: Some(basis.security_revisions()),
+            batch: Some(basis.batch().clone()),
+            dependencies: moved,
+        },
+    ))
 }
 
 impl PipelineAdmissionPortV1 for DigestRecordingPort<'_> {
@@ -1697,7 +1741,10 @@ impl PipelineAdmissionPortV1 for DigestRecordingPort<'_> {
         if let Some(outcome) = &self.refusal {
             return Ok(outcome.clone());
         }
-        self.inner.admit_pipeline_batch(basis)
+        if self.skew == 0 {
+            return self.inner.admit_pipeline_batch(basis);
+        }
+        self.inner.admit_pipeline_batch(&skewed(basis, self.skew))
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -4077,5 +4124,124 @@ fn a_saturated_driver_declares_a_step_node_of_exactly_4096_inputs_on_both_adapte
         assert_eq!(declaration_error(error), bounds_error(), "{name}");
         assert_eq!(offered, 0, "{name}");
         assert_eq!(count(&log, "first:abort"), 1, "{name}");
+    }
+}
+
+// ── Recorded rows through the registry (ADR-064 Revision 3, Redmine #604) ──
+//
+// `MemoryStore` records the Tick rows with the Events; `SqliteStore` records
+// none until its own slice, which adds itself to this list.
+
+/// The adapters that record factual Ticks.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn recording_stores() -> Vec<(&'static str, Box<dyn Harness>)> {
+    vec![("memory", Box::new(MemoryStore::new()))]
+}
+
+/// ADR-064 R3.4.4 and R3.7.4: the Events forwarded to a Driver that have no
+/// node get one ingress node each, recorded once with the Tick and bound to
+/// their `seq`. A later pass that forwards a new Event records one more node
+/// and no second node for the earlier Events.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn forwarded_events_are_recorded_once_as_ingress_nodes_on_memory() {
+    for (name, mut store) in recording_stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let mut registry = host.registry();
+        let (first, plan) = BasisDriver::new("first", &log);
+        register_basis(&mut registry, first.subscribed(INPUT));
+        emit(&plan, &[b"a"]);
+        append_events(store.as_mut(), &host, INPUT, 3);
+        let events = committed_events(store.as_ref(), host.timeline);
+        let cut = all_at(3, &events);
+        let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, 1);
+
+        // The snapshot, three ingress nodes, the step node and the one output.
+        let counts = ok(store.factual_set_counts(host.timeline));
+        assert_eq!(counts.nodes, declared_nodes(&basis).len(), "{name}");
+        assert_eq!(counts.nodes, 6, "{name}");
+        let seqs = [1, 2, 3, 4].map(Seq::from_u64);
+        let bound = ok(store.nodes_for_committed_events(host.timeline, &seqs));
+        let owners: Vec<Option<&str>> = bound
+            .iter()
+            .map(|node| node.as_ref().map(|found| found.coordinate().owner_id()))
+            .collect();
+        let driver = owner_at(&registry, 0);
+        let expected = [Some(INGRESS), Some(INGRESS), Some(INGRESS), Some(driver.as_str())];
+        assert_eq!(owners, expected, "{name}");
+
+        // A fourth raw Event is the only one the next pass records a node for.
+        append_events(store.as_mut(), &host, INPUT, 1);
+        let latest = committed_events(store.as_ref(), host.timeline);
+        emit(&plan, &[b"b"]);
+        let cut = all_at(5, &latest);
+        let next = pass_basis(&host, &mut registry, store.as_mut(), &cut, 2);
+        assert_eq!(bound_seqs(&next), [5], "{name}");
+        let after = ok(store.factual_set_counts(host.timeline));
+        assert_eq!(
+            after.nodes,
+            counts.nodes + declared_nodes(&next).len(),
+            "{name}"
+        );
+    }
+}
+
+/// ADR-064 R3.4.10 and R3.7.4: the history node a restore leaves is recorded
+/// once, by the first Driver that steps; the Driver stepped later declares it
+/// by digest and the store resolves it without a second row.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_restored_history_node_is_recorded_once_on_memory() {
+    for (name, mut store) in recording_stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let (mut registry, plans) = restored_pair(&host, store.as_mut(), &log);
+        let events = committed_events(store.as_ref(), host.timeline);
+
+        emit(&plans[0], &[b"a"]);
+        let cut = due_at(3, &events, FIRST_DUE_NS);
+        let basis = pass_basis(&host, &mut registry, store.as_mut(), &cut, 2);
+        let history = digest_of(&basis, HISTORY, 0);
+        let found = ok(store.nodes_by_digest(host.timeline, &[history]));
+        assert!(matches!(found.as_slice(), [Some((_, None))]), "{name}");
+
+        emit(&plans[0], &[]);
+        emit(&plans[1], &[b"b"]);
+        let latest = committed_events(store.as_ref(), host.timeline);
+        let cut = due_at(4, &latest, BOTH_DUE_NS);
+        let later = pass_basis(&host, &mut registry, store.as_mut(), &cut, 3);
+        assert_eq!(count_owned_by(&later, HISTORY), 0, "{name}");
+        let recorded = ok(store.factual_set_counts(host.timeline));
+        let declared = declared_nodes(&basis).len() + declared_nodes(&later).len();
+        assert_eq!(recorded.nodes, declared, "{name}");
+    }
+}
+
+/// ADR-064 R3.8.2 and R3.7.2: a refusal the real store gives, here of an
+/// asserted Tick that is not the next one, is wrapped as a not-admitted error;
+/// the staged Drivers abort, nothing commits, and the retry that declares the
+/// right Tick commits.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn the_memory_stores_own_refusal_aborts_the_staged_drivers() {
+    for (name, mut store) in recording_stores() {
+        let host = Host::prepare(store.as_mut(), 1_000);
+        let log = Log::default();
+        let mut registry = host.registry();
+        register(&mut registry, driver("first", vec![b"a1"], &log));
+        ok(stage(&host, &mut registry, &all_at(0, &[])));
+        let admission = host.admission(store.as_ref(), 1);
+        let mut port = DigestRecordingPort::skewing(store.as_mut(), 4);
+        let refused = rejection(registry.admit_scheduled_pass(&mut port, &admission));
+        let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
+        assert_eq!(refused, format!("{invalid:?}"), "{name}");
+        assert_eq!(port.bases.len(), 1, "{name}");
+        assert_eq!(entries(&log), ["first:step@0", "first:abort"], "{name}");
+        assert!(committed_events(store.as_ref(), host.timeline).is_empty());
+
+        let retry = admit_pass_basis(&host, &mut registry, store.as_mut(), (0, 2));
+        assert_eq!(retry.dependencies().tick(), 1, "{name}");
+        assert_eq!(committed_events(store.as_ref(), host.timeline).len(), 1);
     }
 }
