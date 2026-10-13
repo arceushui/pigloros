@@ -16,25 +16,25 @@ enum ProvenanceRecordV1 {
     Intervention,
 }
 
+struct ProvenanceSelectionV1<'key> {
+    maximum: usize,
+    probe: SelectedRowV1<'key>,
+    blob: SelectedRowV1<'key>,
+}
+
 impl ProvenanceRecordV1 {
-    const fn maximum(self) -> usize {
+    const fn selection(self, key: &str) -> ProvenanceSelectionV1<'_> {
         match self {
-            Self::Origin => MAX_EVENT_ORIGIN_RECORD_BYTES_V1,
-            Self::Intervention => MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1,
-        }
-    }
-
-    const fn probe(self, key: &str) -> SelectedRowV1<'_> {
-        match self {
-            Self::Origin => SelectedRowV1::EventOriginProbe(key),
-            Self::Intervention => SelectedRowV1::InterventionProbe(key),
-        }
-    }
-
-    const fn blob(self, key: &str) -> SelectedRowV1<'_> {
-        match self {
-            Self::Origin => SelectedRowV1::EventOriginBlob(key),
-            Self::Intervention => SelectedRowV1::InterventionBlob(key),
+            Self::Origin => ProvenanceSelectionV1 {
+                maximum: MAX_EVENT_ORIGIN_RECORD_BYTES_V1,
+                probe: SelectedRowV1::EventOriginProbe(key),
+                blob: SelectedRowV1::EventOriginBlob(key),
+            },
+            Self::Intervention => ProvenanceSelectionV1 {
+                maximum: MAX_FORK_INTERVENTION_ADMISSION_BYTES_V1,
+                probe: SelectedRowV1::InterventionProbe(key),
+                blob: SelectedRowV1::InterventionBlob(key),
+            },
         }
     }
 }
@@ -48,7 +48,8 @@ fn stored_record(
     context.bytes(ulid::ULID_LEN).map_err(|_| Error::CorruptAuthority)
         .and_then(|()| {
             let key = event.to_string();
-            selected_field_with_context(conn, record.probe(&key), context, |row, _| {
+            let selection = record.selection(&key);
+            selected_field_with_context(conn, selection.probe, context, |row, _| {
                 // The real scalar boundary row also represents absence; it
                 // is charged without inventing a stored provenance row.
                 row.get::<_, Option<bool>>(0).map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
@@ -56,14 +57,14 @@ fn stored_record(
                         if !blob { return Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate); }
                         row.get::<_, i64>(1).map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
                             .and_then(|length| usize::try_from(length).ok()
-                                .filter(|length| *length <= record.maximum())
+                                .filter(|length| *length <= selection.maximum)
                                 .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority))
                     }).transpose())
             })
             .and_then(|probe| probe.ok_or(pos_core::ForkAdmissionErrorV1::StorageIndeterminate))
             .and_then(|length| length.map_or_else(|| Ok(None), |length| {
                 context.bytes(length).map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)
-                    .and_then(|()| selected_field_with_context(conn, record.blob(&key), context, |row, _| {
+                    .and_then(|()| selected_field_with_context(conn, selection.blob, context, |row, _| {
                         row.get::<_, Vec<u8>>(0).map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
                     }))
                     .and_then(|bytes| bytes.filter(|bytes| bytes.len() == length)
