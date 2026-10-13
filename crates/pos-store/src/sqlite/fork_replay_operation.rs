@@ -387,9 +387,11 @@ mod tests {
     #[test]
     fn invalid_bounded_child_is_parsed_only_after_its_actual_string_gate() -> Fallible<()> {
         let (store, row) = fixture(ForkAdmissionOperationKindV1::Fork)?;
+        // The pinned ULID parser accepts lowercase alphabet characters;
+        // use a character outside that alphabet without changing its policy.
         store.conn.execute(
             "UPDATE fork_admission_operations SET child_id = ?1",
-            ["z".repeat(26)],
+            ["!".repeat(26)],
         )?;
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
