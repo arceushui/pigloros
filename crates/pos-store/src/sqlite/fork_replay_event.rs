@@ -154,9 +154,7 @@ impl VariableFieldV1 {
                 }
                 row.get::<_, Option<i64>>(self.length_column)
                     .map_err(|_| Error::StorageIndeterminate)
-                    .and_then(|length| match length {
-                        None => Ok(0),
-                        Some(length) => usize::try_from(length)
+                    .and_then(|length| length.map_or(Ok(0), |length| usize::try_from(length)
                             .map_err(|_| Error::CorruptAuthority)
                             .and_then(|length| {
                                 let valid = match self.width {
@@ -166,8 +164,7 @@ impl VariableFieldV1 {
                                     FieldWidthV1::Variable => true,
                                 };
                                 if valid { Ok(length) } else { Err(Error::CorruptAuthority) }
-                            }),
-                    })
+                            })))
             })
     }
 }
@@ -199,7 +196,7 @@ impl<'read, 'statement, 'budget, 'clock> EventRowReaderV1<'read, 'statement, 'bu
             })
     }
 
-    fn storage(&self, error: rusqlite::Error) -> CoreError {
+    fn storage(&self, error: &rusqlite::Error) -> CoreError {
         if self.context.is_protected() {
             CoreError::ArtifactUnavailable
         } else {
@@ -227,7 +224,7 @@ impl<'read, 'statement, 'budget, 'clock> EventRowReaderV1<'read, 'statement, 'bu
 
     pub(super) fn get<T: FromSql>(&mut self, column: usize) -> std::result::Result<T, CoreError> {
         self.before(column)
-            .and_then(|()| self.row.get(column).map_err(|error| self.storage(error)))
+            .and_then(|()| self.row.get(column).map_err(|error| self.storage(&error)))
             .and_then(|value| {
                 self.context.check().map(|()| value).map_err(|_| CoreError::ArtifactUnavailable)
             })
@@ -238,7 +235,7 @@ impl<'read, 'statement, 'budget, 'clock> EventRowReaderV1<'read, 'statement, 'bu
         column: usize,
     ) -> std::result::Result<Zeroizing<T>, CoreError> {
         self.before(column)
-            .and_then(|()| self.row.get(column).map(Zeroizing::new).map_err(|error| self.storage(error)))
+            .and_then(|()| self.row.get(column).map(Zeroizing::new).map_err(|error| self.storage(&error)))
             .and_then(|value| {
                 // Own the zeroizing guard before a post-fetch time check can fail.
                 self.context.check().map(|()| value).map_err(|_| CoreError::ArtifactUnavailable)
@@ -304,9 +301,7 @@ fn next_event(
         EventRowLengthsV1::probe(row)
     })
     .and_then(|probe| probe.ok_or(Error::StorageIndeterminate))
-    .and_then(|probe| match probe {
-        None => Ok(None),
-        Some(lengths) => context.require_bytes(lengths.total())
+    .and_then(|probe| probe.map_or_else(|| Ok(None), |lengths| context.require_bytes(lengths.total())
             .map_err(|_| Error::CorruptAuthority)
             .and_then(|()| {
                 selected_field_with_context(conn, SelectedRowV1::EventFields(key, lengths.seq), context, |row, context| {
@@ -318,8 +313,7 @@ fn next_event(
                 })
                 .and_then(|event| event.ok_or(Error::CorruptAuthority))
                 .map(|event| Some((lengths.seq, event)))
-            }),
-    })
+            })))
 }
 
 fn hash_segment(
@@ -614,7 +608,7 @@ mod tests {
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(4, 8, 64, 16_384, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-        Ok(chain_hash_with_context(conn, &pos_crypto::Blake3Hasher, timeline, Seq::from_u64(at),
+        Ok(chain_hash_with_context(conn, &pos_crypto::chain::Blake3Hasher, timeline, Seq::from_u64(at),
             &mut NativeReadContextV1::protected(&mut budget)))
     }
 
@@ -687,7 +681,7 @@ mod tests {
         conn.execute("UPDATE events SET seq = ?1, origin_logical_seq = ?1", [i64::MAX])?;
         conn.execute("UPDATE timelines SET head_seq = ?1", [i64::MAX])?;
         let expected = super::super::SqliteStore::compute_chain_hash_at_unchecked_on(
-            &conn, &pos_crypto::Blake3Hasher, timeline, Seq::from_u64(1))?;
+            &conn, &pos_crypto::chain::Blake3Hasher, timeline, Seq::from_u64(1))?;
         assert_eq!(raw_hash(&conn, timeline, 1)??, expected);
         // SQLite orders an impossible TEXT key after INTEGER keys. A saturating
         // or incrementing cursor must not silently terminate at i64::MAX.
