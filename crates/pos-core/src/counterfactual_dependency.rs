@@ -650,6 +650,8 @@ pub struct DependencyEdgeRecordV1 {
     bytes: Vec<u8>,
     consumer: DependencyNodeCoordinateV1,
     source_digest: Hash,
+    /// The authorization field when it is a 32-byte digest.
+    authorization: Option<Hash>,
     digest: Hash,
 }
 
@@ -687,19 +689,20 @@ impl DependencyEdgeRecordV1 {
                     .strip_prefix(expected_consumer.as_slice())
                     .ok_or(CounterfactualDependencyErrorV1::BindingMismatch)
             })
-            .and_then(source_artifact_digest)
-            .and_then(|extracted| {
+            .and_then(edge_fields)
+            .and_then(|(extracted, authorization)| {
                 if extracted == source_digest {
-                    Ok(())
+                    Ok(authorization)
                 } else {
                     Err(CounterfactualDependencyErrorV1::BindingMismatch)
                 }
             });
-        verified.map(|()| Self {
+        verified.map(|authorization| Self {
             digest: edge_digest(&bytes),
             bytes,
             consumer,
             source_digest,
+            authorization,
         })
     }
 
@@ -715,13 +718,8 @@ impl DependencyEdgeRecordV1 {
     /// Construction checks the framing of the field, not its content, so the
     /// store that records a factual Tick reads it here.
     #[must_use]
-    pub fn authorization_digest(&self) -> Option<Hash> {
-        let consumer = self.consumer.encoded();
-        self.bytes
-            .strip_prefix(&[EDGE_ARRAY_HEAD])
-            .and_then(|fields| fields.strip_prefix(&EDGE_PREFIX))
-            .and_then(|fields| fields.strip_prefix(consumer.as_slice()))
-            .and_then(|rest| edge_authorization(rest).ok())
+    pub const fn authorization_digest(&self) -> Option<Hash> {
+        self.authorization
     }
 
     /// Borrow the verified consumer coordinate.
@@ -780,8 +778,10 @@ fn owner_text_length(length: u64) -> DependencyResult<usize> {
         .ok_or(CounterfactualDependencyErrorV1::FieldOutOfBounds)
 }
 
-/// Read the source node's artifact digest and check the edge tail.
-fn source_artifact_digest(rest: &[u8]) -> DependencyResult<Hash> {
+/// Read the source node's artifact digest and the authorization digest, and
+/// check the edge tail. The authorization is `None` when its field is framed
+/// correctly but is not a 32-byte digest.
+fn edge_fields(rest: &[u8]) -> DependencyResult<(Hash, Option<Hash>)> {
     let mut cursor = CborCursor::new(rest);
     malformed(skip_source_head(&mut cursor))
         .and_then(|()| malformed(cursor.head(OWNER_TEXT_MAJOR)))
@@ -789,33 +789,28 @@ fn source_artifact_digest(rest: &[u8]) -> DependencyResult<Hash> {
         .and_then(|length| malformed(cursor.take(length)))
         .and_then(|_| malformed(read_source_digest(&mut cursor)))
         .and_then(|digest| {
-            let tail = (0..EDGE_TAIL_FIELDS)
-                .try_for_each(|_| skip_item(&mut cursor, EDGE_TAIL_ARRAY_DEPTH));
-            malformed(tail).map(|()| digest)
+            let tail = tail_authorization(&mut cursor);
+            malformed(tail).map(|auth| (digest, auth))
         })
-        .and_then(|digest| {
+        .and_then(|fields| {
             if cursor.is_finished() {
-                Ok(digest)
+                Ok(fields)
             } else {
                 Err(CounterfactualDependencyErrorV1::InvalidEncoding)
             }
         })
 }
 
-/// Read the authorization digest, the third field after the source node.
-fn edge_authorization(rest: &[u8]) -> DependencyResult<Hash> {
-    let mut cursor = CborCursor::new(rest);
-    malformed(skip_source_head(&mut cursor))
-        .and_then(|()| malformed(cursor.head(OWNER_TEXT_MAJOR)))
-        .and_then(owner_text_length)
-        .and_then(|length| malformed(cursor.take(length)))
-        .and_then(|_| malformed(read_source_digest(&mut cursor)))
-        .and_then(|_| {
-            let skipped = (0..EDGE_CLASS_AND_RANGE_FIELDS)
-                .try_for_each(|_| skip_item(&mut cursor, EDGE_TAIL_ARRAY_DEPTH));
-            malformed(skipped)
+/// Skip the edge tail, reading the authorization digest on the way.
+fn tail_authorization(cursor: &mut CborCursor<'_>) -> CursorResult<Option<Hash>> {
+    (0..EDGE_CLASS_AND_RANGE_FIELDS)
+        .try_for_each(|_| skip_item(cursor, EDGE_TAIL_ARRAY_DEPTH))
+        .map(|()| read_hash(&mut cursor.clone()).ok())
+        .and_then(|authorization| {
+            (EDGE_CLASS_AND_RANGE_FIELDS..EDGE_TAIL_FIELDS)
+                .try_for_each(|_| skip_item(cursor, EDGE_TAIL_ARRAY_DEPTH))
+                .map(|()| authorization)
         })
-        .and_then(|()| malformed(read_hash(&mut cursor)))
 }
 
 fn edge_digest(bytes: &[u8]) -> Hash {

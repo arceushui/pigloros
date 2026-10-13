@@ -13,7 +13,7 @@ use pos_core::{
     factual_artifact_digest, factual_ingress_content_digest, factual_output_content_digest,
     DependencyNodeCoordinateV1, DependencyNodeRecordV1, FactualHostOwnerV1, FactualNodeKeyV1,
     FactualRuleV1, Hash, PipelineAdmissionBasisV1, PipelineIngressV1, RecordedNodeOriginV1, Seq,
-    TimelineId, FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
+    TickDependencyRecordV1, TimelineId, FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
 };
 
 /// The rule that fixes the class of the host nodes of each host owner.
@@ -75,16 +75,8 @@ const fn is_scheduled(basis: &PipelineAdmissionBasisV1) -> bool {
     )
 }
 
-/// R3.7.2 (i), well-formedness: every edge carries an authorization that is a
-/// 32-byte digest.
-pub(super) fn edges_well_formed(basis: &PipelineAdmissionBasisV1) -> bool {
-    let edges = basis.dependencies().record().edges();
-    edges
-        .iter()
-        .all(|edge| edge.authorization_digest().is_some())
-}
-
-/// R3.7.2 (i): every edge carries the persisted fence's authority grant.
+/// R3.7.2 (i): every edge carries the persisted fence's authority grant. An
+/// authorization that is no 32-byte digest carries no grant.
 pub(super) fn edges_carry_grant(basis: &PipelineAdmissionBasisV1, grant: Hash) -> bool {
     let edges = basis.dependencies().record().edges();
     edges
@@ -197,7 +189,21 @@ pub(super) fn ingress_event_nodes(
     bound.filter(|_| ascending)
 }
 
-/// R3.7.2 (viii): the structural shape of the record.
+/// The nodes of a record by artifact digest.
+pub(super) type DigestIndex<'a> = BTreeMap<Hash, &'a DependencyNodeRecordV1>;
+
+/// Index the nodes of `record` by artifact digest, once for all the checks
+/// that resolve a digest to a node.
+pub(super) fn digest_index(record: &TickDependencyRecordV1) -> DigestIndex<'_> {
+    record
+        .nodes()
+        .iter()
+        .map(|node| (node.coordinate().artifact_digest(), node))
+        .collect()
+}
+
+/// R3.7.2 (viii): the structural shape of the record, over its `by_digest`
+/// index.
 ///
 /// Every output node inputs exactly one step node of its Tick, position and
 /// owner; every step node inputs the snapshot node; every host node declares
@@ -205,20 +211,16 @@ pub(super) fn ingress_event_nodes(
 /// nothing but its draft nodes. The store cannot check Driver-output classes,
 /// which need the output policy, nor the step-chain, carried-set, history or
 /// verified-prefix content, which need registry state.
-pub(super) fn shape_holds(basis: &PipelineAdmissionBasisV1) -> bool {
+pub(super) fn shape_holds(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIndex<'_>) -> bool {
     let nodes = basis.dependencies().record().nodes();
-    let by_digest: BTreeMap<Hash, &DependencyNodeRecordV1> = nodes
-        .iter()
-        .map(|node| (node.coordinate().artifact_digest(), node))
-        .collect();
     (is_scheduled(basis) || nodes.len() == basis.batch().drafts().len())
-        && nodes.iter().all(|node| node_shape_holds(node, &by_digest))
+        && nodes.iter().all(|node| node_shape_holds(node, by_digest))
 }
 
 /// Whether one node has the shape its kind requires.
 fn node_shape_holds(
     node: &DependencyNodeRecordV1,
-    by_digest: &BTreeMap<Hash, &DependencyNodeRecordV1>,
+    by_digest: &DigestIndex<'_>,
 ) -> bool {
     let coordinate = node.coordinate();
     if coordinate.scheduler_position() == 0 {
@@ -243,7 +245,7 @@ fn host_node_shape_holds(node: &DependencyNodeRecordV1) -> bool {
 /// A step node inputs the snapshot node of the record.
 fn step_inputs_snapshot(
     node: &DependencyNodeRecordV1,
-    by_digest: &BTreeMap<Hash, &DependencyNodeRecordV1>,
+    by_digest: &DigestIndex<'_>,
 ) -> bool {
     node.input_digests().iter().any(|digest| {
         by_digest.get(digest).is_some_and(|source| {
@@ -255,7 +257,7 @@ fn step_inputs_snapshot(
 /// An output node inputs exactly one step node of its Tick, position and owner.
 fn output_inputs_one_step(
     node: &DependencyNodeRecordV1,
-    by_digest: &BTreeMap<Hash, &DependencyNodeRecordV1>,
+    by_digest: &DigestIndex<'_>,
 ) -> bool {
     let output = node.coordinate();
     let steps = node

@@ -21,7 +21,10 @@ use pos_core::{
     PipelineReceiptLookupV1,
 };
 
-use super::{counterfactual_store::FactualInstallV1, MemoryStore};
+use super::{
+    counterfactual_store::{FactualInstallV1, PlannedTickV1},
+    MemoryStore,
+};
 use crate::{
     committed_pipeline_receipt, evaluate_pipeline_admission, install_or_reject,
     recovered_pipeline_receipt, retained_pipeline_receipt, PipelinePersistedStateV1,
@@ -174,10 +177,10 @@ impl MemoryStore {
         let grant = next_fence.authority_grant();
         let planned = self.plan_factual_tick(timeline, basis, grant, first_seq);
         planned.and_then(|checked| match checked {
-            Ok(install) => {
+            PlannedTickV1::Install(install) => {
                 self.stage_pipeline_batch(timeline, basis, now, prefix, next_fence, &install)
             }
-            Err(refusal) => Ok(refusal),
+            PlannedTickV1::Refused(refusal) => Ok(refusal.outcome()),
         })
     }
 

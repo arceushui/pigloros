@@ -466,10 +466,10 @@ impl pos_core::FactualPrefixReadPortV1 for LostOutcomePort<'_> {
 /// A port whose basis-free lookup never finds a receipt, so only the
 /// store's own exact-retry comparison can recognize a duplicate. It records
 /// every basis it submits, so a test can resubmit the retained one.
-struct ForgetfulLookupPort<'a>(
-    &'a mut dyn ScheduledAdmissionStoreV1,
-    &'a mut Vec<PipelineAdmissionBasisV1>,
-);
+struct ForgetfulLookupPort<'a> {
+    store: &'a mut dyn ScheduledAdmissionStoreV1,
+    submitted: &'a mut Vec<PipelineAdmissionBasisV1>,
+}
 
 impl PipelineAdmissionPortV1 for ForgetfulLookupPort<'_> {
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -477,8 +477,8 @@ impl PipelineAdmissionPortV1 for ForgetfulLookupPort<'_> {
         &mut self,
         basis: &PipelineAdmissionBasisV1,
     ) -> Result<PipelineOutcomeV1, CoreError> {
-        self.1.push(basis.clone());
-        self.0.admit_pipeline_batch(basis)
+        self.submitted.push(basis.clone());
+        self.store.admit_pipeline_batch(basis)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -496,7 +496,7 @@ impl PipelineAdmissionPortV1 for ForgetfulLookupPort<'_> {
         &mut self,
         limit: std::num::NonZeroUsize,
     ) -> Result<pos_core::PurgeOutcome, CoreError> {
-        self.0.purge_expired_pipeline_receipts_bounded(limit)
+        self.store.purge_expired_pipeline_receipts_bounded(limit)
     }
 }
 
@@ -506,7 +506,7 @@ impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
         &self,
         timeline: pos_core::TimelineId,
     ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
-        self.0.last_committed_factual_tick(timeline)
+        self.store.last_committed_factual_tick(timeline)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -515,7 +515,7 @@ impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
         timeline: pos_core::TimelineId,
         seq: pos_core::Seq,
     ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
-        self.0.cut_tick_at(timeline, seq)
+        self.store.cut_tick_at(timeline, seq)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -524,7 +524,7 @@ impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
         timeline: pos_core::TimelineId,
         seqs: &[pos_core::Seq],
     ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
-        self.0.nodes_for_committed_events(timeline, seqs)
+        self.store.nodes_for_committed_events(timeline, seqs)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -534,7 +534,7 @@ impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
         digests: &[pos_core::Hash],
     ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
     {
-        self.0.nodes_by_digest(timeline, digests)
+        self.store.nodes_by_digest(timeline, digests)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -543,7 +543,7 @@ impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
         timeline: pos_core::TimelineId,
         owner: &pos_core::FactualOwnerIdV1,
     ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
-        self.0.last_step_node(timeline, owner)
+        self.store.last_step_node(timeline, owner)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -551,7 +551,7 @@ impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
         &self,
         timeline: pos_core::TimelineId,
     ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
-        self.0.factual_set_counts(timeline)
+        self.store.factual_set_counts(timeline)
     }
 }
 
@@ -686,7 +686,10 @@ fn the_store_comparison_still_recognizes_an_exact_retry() {
         let action = proposal(actor, b"walk");
         let mut submitted = Vec::new();
         let first = ok(harness.registry.admit_human_action(
-            &mut ForgetfulLookupPort(harness.store.as_mut(), &mut submitted),
+            &mut ForgetfulLookupPort {
+                store: harness.store.as_mut(),
+                submitted: &mut submitted,
+            },
             &action,
             &attempt,
         ));

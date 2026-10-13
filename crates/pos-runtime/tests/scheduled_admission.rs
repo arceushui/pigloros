@@ -4211,6 +4211,13 @@ fn a_restored_history_node_is_recorded_once_on_memory() {
     }
 }
 
+/// What a real-store refusal case offers: the authority grant of the pass and
+/// the Ticks later than the registry declared that the store is offered it.
+struct Offer {
+    grant: Hash,
+    skew: u64,
+}
+
 /// Stage one Driver over an empty Timeline, offer its pass to the real store
 /// with the authority grant and the Tick skew `offer` names, and require the
 /// refusal `expected`: the staged Driver aborts and nothing commits.
@@ -4219,10 +4226,10 @@ fn assert_real_refusal(
     name: &str,
     store: &mut dyn Harness,
     host: &Host,
-    offer: (Hash, u64),
+    offer: Offer,
     expected: &PipelineOutcomeV1,
 ) {
-    let (grant, skew) = offer;
+    let Offer { grant, skew } = offer;
     let log = Log::default();
     let mut registry = host.registry();
     register(&mut registry, driver("first", vec![b"a1"], &log));
@@ -4257,15 +4264,27 @@ fn the_memory_stores_own_refusal_aborts_the_staged_drivers() {
     for (name, mut store) in recording_stores() {
         let host = Host::prepare(store.as_mut(), 1_000);
         let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
-        assert_real_refusal(name, store.as_mut(), &host, (GRANT, 4), &invalid);
+        let late = Offer {
+            grant: GRANT,
+            skew: 4,
+        };
+        assert_real_refusal(name, store.as_mut(), &host, late, &invalid);
         let conflict = PipelineOutcomeV1::AdmissionConflict;
-        assert_real_refusal(name, store.as_mut(), &host, (hash(2), 0), &conflict);
+        let stale = Offer {
+            grant: hash(2),
+            skew: 0,
+        };
+        assert_real_refusal(name, store.as_mut(), &host, stale, &conflict);
 
         let log = Log::default();
         let mut registry = host.registry();
         register(&mut registry, driver("first", vec![b"a1"], &log));
         let retry = admit_pass_basis(&host, &mut registry, store.as_mut(), (0, 2));
         assert_eq!(retry.dependencies().tick(), 1, "{name}");
-        assert_eq!(committed_events(store.as_ref(), host.timeline).len(), 1);
+        assert_eq!(
+            committed_events(store.as_ref(), host.timeline).len(),
+            1,
+            "{name}"
+        );
     }
 }

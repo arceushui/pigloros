@@ -39,6 +39,7 @@ trait Harness:
     + PipelineAdmissionPortV1
     + PipelineAdmissionFencePublisherV1
     + AuthorityPersistencePortV1
+    + Recorded
 {
 }
 
@@ -47,7 +48,26 @@ impl<T> Harness for T where
         + PipelineAdmissionPortV1
         + PipelineAdmissionFencePublisherV1
         + AuthorityPersistencePortV1
+        + Recorded
 {
+}
+
+/// The factual rows of an adapter, where it records them. `SqliteStore`
+/// records none until its adapter does (slice 9).
+trait Recorded {
+    fn recording(&self) -> Option<&dyn RecordingHarness>;
+}
+
+impl Recorded for MemoryStore {
+    fn recording(&self) -> Option<&dyn RecordingHarness> {
+        Some(self)
+    }
+}
+
+impl Recorded for SqliteStore {
+    fn recording(&self) -> Option<&dyn RecordingHarness> {
+        None
+    }
 }
 
 fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
@@ -732,6 +752,8 @@ fn fork_history_and_concurrent_attempts_serialize_on_the_logical_head() {
     for (name, mut store) in stores(&clock) {
         let fixture = prepare(store.as_mut());
         committed(ok(admit(store.as_mut(), &attempt(&fixture, 1, 0))));
+        let parent = fixture.timeline;
+        assert_recorded(name, store.as_ref(), parent, head(1, 3), 3, &[1, 2, 3]);
         let child = ok(store.fork(fixture.timeline, Seq::from_u64(2), "admission-child")).id();
         ok(store.set_pipeline_admission_fence(child, fixture.fence));
         // The child forks inside the parent's first Tick, so its own first Tick
@@ -746,6 +768,8 @@ fn fork_history_and_concurrent_attempts_serialize_on_the_logical_head() {
         assert_eq!(receipt_positions(&receipt), [3, 4, 5], "{name}");
         assert_eq!(event_count(store.as_ref(), child), 5, "{name}");
         assert_eq!(event_count(store.as_ref(), fixture.timeline), 3, "{name}");
+        assert_recorded(name, store.as_ref(), child, head(1, 5), 3, &[3, 4, 5]);
+        assert_recorded(name, store.as_ref(), parent, head(1, 3), 3, &[1, 2, 3]);
 
         let shared = Arc::new(Mutex::new(store));
         let barrier = Arc::new(Barrier::new(2));
@@ -766,7 +790,12 @@ fn fork_history_and_concurrent_attempts_serialize_on_the_logical_head() {
             outcomes.contains(&PipelineOutcomeV1::AdmissionConflict),
             "{name}"
         );
-        assert_eq!(event_count(ok(shared.lock()).as_ref(), child), 8, "{name}");
+        let guard = ok(shared.lock());
+        assert_eq!(event_count(guard.as_ref(), child), 8, "{name}");
+        // Only the winner recorded its Tick; the loser left no row.
+        let bound = [3, 4, 5, 6, 7, 8];
+        assert_recorded(name, guard.as_ref(), child, head(2, 8), 6, &bound);
+        assert_recorded(name, guard.as_ref(), parent, head(1, 3), 3, &[1, 2, 3]);
     }
 }
 
@@ -848,6 +877,8 @@ fn basis_free_lookup_recovers_only_the_exact_retained_attempt() {
         );
         let first = attempt(&fixture, 1, 0);
         let receipt = committed(ok(admit(store.as_mut(), &first)));
+        let parent = fixture.timeline;
+        assert_recorded(name, store.as_ref(), parent, head(1, 3), 3, &[1, 2, 3]);
 
         assert_eq!(
             ok(lookup(store.as_mut(), fixture.timeline, 1, 1)),
@@ -881,6 +912,7 @@ fn basis_free_lookup_recovers_only_the_exact_retained_attempt() {
             },
         )));
         assert_eq!(receipt_positions(&child_receipt), [4, 5, 6], "{name}");
+        assert_recorded(name, store.as_ref(), child, head(2, 6), 3, &[4, 5, 6]);
         assert_eq!(
             ok(lookup(store.as_mut(), child, 2, 2)),
             PipelineReceiptLookupV1::Retained(child_receipt),
@@ -1320,6 +1352,32 @@ fn state_of(
         event_count(store, timeline),
         remaining_budget(store, timeline),
     )
+}
+
+/// Require, on an adapter that records factual rows, that the Timeline's
+/// factual head is `at`, its own recorded set holds `nodes` nodes of
+/// human-ingress Ticks (no edge, no input) and `bound` are the committed
+/// `seq`s that are bound to a node.
+fn assert_recorded(
+    name: &str,
+    store: &dyn Harness,
+    timeline: TimelineId,
+    at: FactualHeadV1,
+    nodes: usize,
+    bound: &[u64],
+) {
+    if let Some(recording) = store.recording() {
+        assert_eq!(head_of(recording, timeline), at, "{name}");
+        let counts = RecordedSetCountsV1 {
+            nodes,
+            edges: 0,
+            inputs: 0,
+        };
+        assert_eq!(ok(recording.factual_set_counts(timeline)), counts, "{name}");
+        let seqs: Vec<Seq> = bound.iter().copied().map(Seq::from_u64).collect();
+        let found = ok(recording.nodes_for_committed_events(timeline, &seqs));
+        assert!(found.iter().all(Option::is_some), "{name}");
+    }
 }
 
 /// The attempt that follows a committed `previous` one on the scheduled path.
@@ -1763,6 +1821,20 @@ fn invalid_for(
     )
 }
 
+/// The refusal of `declaration` as a conflict, for the given attempt.
+fn conflict_for(
+    case: &'static str,
+    attempt: Attempt,
+    declaration: FactualTickDependenciesV1,
+) -> RefusalCase {
+    (
+        case,
+        attempt,
+        declaration,
+        PipelineOutcomeV1::AdmissionConflict,
+    )
+}
+
 /// What the refusal cases share: the scheduled attempt under test, its correct
 /// declaration (which records the ingress node of Event 4), the Events of the
 /// Timeline and the nodes Tick 1 recorded.
@@ -1829,8 +1901,9 @@ fn refusal_cases(
 }
 
 /// R3.7.2 (i) and (ii): the fence's grant and the Tick. An authorization that
-/// is no digest is a malformed declaration; a digest of another grant is a
-/// fence that moved.
+/// is no digest cannot equal the fence's grant, so it is the same conflict as
+/// a digest of another grant: a fence that moved. The Tick must be the next
+/// one: a replay of the last Tick and Tick 0 are as wrong as one in the future.
 fn grant_and_tick_cases(r: &Refusals<'_>) -> Vec<RefusalCase> {
     let (second, valid) = (r.second, &r.valid);
     let record = valid.record();
@@ -1842,6 +1915,16 @@ fn grant_and_tick_cases(r: &Refusals<'_>) -> Vec<RefusalCase> {
         ..second.clone()
     };
     let wrong_tick = valid_declaration(&moved, r.real());
+    let replayed = Attempt {
+        tick: 1,
+        ..second.clone()
+    };
+    let replay = valid_declaration(&replayed, r.real());
+    let initial = Attempt {
+        tick: 0,
+        ..second.clone()
+    };
+    let tick_zero = valid_declaration(&initial, r.real());
     let asserted = FactualTickDependenciesV1::new(
         3,
         record.clone(),
@@ -1852,14 +1935,11 @@ fn grant_and_tick_cases(r: &Refusals<'_>) -> Vec<RefusalCase> {
     let provisional_record = rebuilt(record, origin, inputs_unchanged, |_| true);
     let provisional = with_record(valid, provisional_record);
     vec![
-        (
-            "stale fence grant",
-            second.clone(),
-            stale,
-            PipelineOutcomeV1::AdmissionConflict,
-        ),
-        r.invalid("authorization that is no digest", unreadable),
+        conflict_for("stale fence grant", second.clone(), stale),
+        conflict_for("authorization that is no digest", second.clone(), unreadable),
         invalid_for("wrong Tick", moved, wrong_tick),
+        invalid_for("replay of the last Tick", replayed, replay),
+        invalid_for("Tick 0", initial, tick_zero),
         r.invalid("asserted Tick differs from the record", asserted),
         r.invalid("provisional record", provisional),
     ]
@@ -2175,6 +2255,12 @@ fn a_retry_records_no_second_row_and_a_rebuilt_tick_conflicts() {
             "{name}"
         );
         assert_eq!(state_of(store.as_ref(), timeline), before, "{name}");
+
+        // Once the receipt expires its key is released (see
+        // `basis_free_lookup_recovers_only_the_exact_retained_attempt`), and
+        // the same basis is judged as a new admission against the head that has
+        // since moved: it is never recovered as a duplicate and records no
+        // second row.
     }
 }
 
