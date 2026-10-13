@@ -89,7 +89,8 @@ pub(super) struct StagedFactual {
     /// Driver that has none.
     ///
     /// It is gathered in one pass by `gather_prefix_digests` and stays empty
-    /// for a pass that stages no draft, which declares no Tick.
+    /// for a pass that stages no draft (which declares no Tick) and for an
+    /// authorized pass (which gathers none): a missing position is `None`.
     pub(super) prefix_digests: Vec<Option<Hash>>,
     /// The step-level inputs each stepped Driver declared.
     pub(super) step_inputs: Vec<Vec<DirectInputRefV1>>,
@@ -661,7 +662,8 @@ impl PassBuild {
     ) -> Result<FactualDriverStepV1, FactualDependencyErrorV1> {
         let scope = DriverScope::new(entry);
         let staged = &pending.factual;
-        let mut step_inputs = self.host_inputs(index, entry, staged.prefix_digests[index]);
+        let prefix = staged.prefix_digests.get(index).copied().flatten();
+        let mut step_inputs = self.host_inputs(index, entry, prefix);
         for seq in driver_event_seqs(&pending.forwarded[index], &entry.pass_state.carried) {
             step_inputs.push(self.event_input(seq)?);
         }

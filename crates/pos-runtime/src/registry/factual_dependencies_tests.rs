@@ -1327,15 +1327,9 @@ fn a_failing_read_of_the_prefix_is_the_stores_error() {
 
 /// A prior node of the given Tick, as a Driver retains it.
 fn prior_at_tick(tick: u64, digest: Hash) -> FactualPriorNodeV1 {
-    let coordinate = DependencyNodeCoordinateV1::try_new(
-        tick,
-        1,
-        "plugin:old".to_owned(),
-        0,
-        1,
-        digest,
-    )
-    .test_ok();
+    let coordinate =
+        DependencyNodeCoordinateV1::try_new(tick, 1, "plugin:old".to_owned(), 0, 1, digest)
+            .test_ok();
     FactualPriorNodeV1::new(coordinate, ENDOGENOUS)
 }
 
