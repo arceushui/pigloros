@@ -12845,7 +12845,7 @@ impl SqliteStore {
         self.committed_publication_rows_with_context(child_timeline_id, final_logical_head, validator, context)
             .and_then(|rows| {
                 let admission = self.fork_publication_admission(child_timeline_id, validator);
-                let retained = sqlite_retained_key_evidence(&self.conn, &admission);
+                let retained = sqlite_retained_key_evidence(&self.conn, &admission, context);
                 let suffix = self.fork_publication_suffix(
                     child_timeline_id,
                     publication_parent_head(&admission),
