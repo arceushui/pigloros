@@ -67,9 +67,11 @@ pub fn oracle_bytes(family: FixtureFamily) -> TestResult<Vec<u8>> {
     Ok(fs::read(path)?)
 }
 
-/// The attempt of `family` in `mode` from the checked-in `inputs/`, schema, composite, oracle
-/// and evidence-status members, in descriptor (bundle path) order. A namespaced-failure oracle
-/// is an auxiliary member, as the evaluator delivers it.
+/// The attempt of `family` in `mode` from the checked-in fixture files.
+///
+/// The members are the `inputs/`, schema, composite, oracle and evidence-status files, in
+/// descriptor (bundle path) order. A namespaced-failure oracle is an auxiliary member, as the
+/// evaluator delivers it.
 ///
 /// The same helper lives in `apps/pos-plugin-conformance-adapter/tests/fixture_attempts_public.rs`
 /// and `apps/pos-plugin-worker/tests/support/attempts.rs`; keep the two in step.
@@ -86,7 +88,9 @@ pub fn attempt_from_fixture_files(
     let payload = read(format!("inputs/plugin-conformance/{name}.json"))?;
     let evidence = read(format!("expected/plugin-conformance/{name}.json"))?;
     let composite = read(format!("inputs/plugin-conformance/{name}.pcw2"))?;
-    let schema = read(format!("providers/plugin-conformance/schemas/{name}.schema.json"))?;
+    let schema = read(format!(
+        "providers/plugin-conformance/schemas/{name}.schema.json"
+    ))?;
     let oracle = oracle_bytes(family)?;
     let kind = serde_json::from_slice::<Value>(&oracle)?["oracle"]["kind"].clone();
     let contract = family_contract(family)?;

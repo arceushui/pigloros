@@ -2697,7 +2697,10 @@ fn collect_plugin_oracles(
             .find(|member| member.path == path)
             .ok_or("the composite member is absent")?;
         support::plugin_composite::pieces_of(&composite.bytes)?;
-        let oracle = match (&fixture.strict_oracle.output, &fixture.strict_oracle.failure) {
+        let oracle = match (
+            &fixture.strict_oracle.output,
+            &fixture.strict_oracle.failure,
+        ) {
             (Some(output), _) => format!("{:?}", output.blake3_digest),
             (None, Some(failure)) => format!(
                 "{}/{}/{}",

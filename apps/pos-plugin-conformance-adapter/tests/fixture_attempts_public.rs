@@ -88,7 +88,9 @@ fn attempt_from_fixture_files(
     let payload = read(format!("inputs/plugin-conformance/{name}.json"))?;
     let evidence = read(format!("expected/plugin-conformance/{name}.json"))?;
     let composite = read(format!("inputs/plugin-conformance/{name}.pcw2"))?;
-    let schema = read(format!("providers/plugin-conformance/schemas/{name}.schema.json"))?;
+    let schema = read(format!(
+        "providers/plugin-conformance/schemas/{name}.schema.json"
+    ))?;
     let oracle = oracle_bytes(family)?;
     let kind = serde_json::from_slice::<Value>(&oracle)?["oracle"]["kind"].clone();
     let contract = family_contract(family)?;

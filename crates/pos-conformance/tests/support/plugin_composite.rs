@@ -22,8 +22,9 @@ pub fn pieces_of(composite: &[u8]) -> TestResult<Pieces> {
     let [Value::Text(tag), Value::Integer(_), Value::Array(list)] = items.as_slice() else {
         return Err("the composite has the wrong shape".into());
     };
-    assert_eq!(tag, "PCW2");
-    assert!(!list.is_empty());
+    if tag != "PCW2" || list.is_empty() {
+        return Err("the composite has the wrong tag or no pieces".into());
+    }
     let mut pieces = Pieces::new();
     for entry in list {
         let Value::Array(pair) = entry else {
@@ -32,7 +33,9 @@ pub fn pieces_of(composite: &[u8]) -> TestResult<Pieces> {
         let [Value::Bytes(named), Value::Bytes(bytes)] = pair.as_slice() else {
             return Err("a piece is not a digest and bytes".into());
         };
-        assert_eq!(blake3::hash(bytes).as_bytes().as_slice(), named.as_slice());
+        if blake3::hash(bytes).as_bytes().as_slice() != named.as_slice() {
+            return Err("a piece digest is wrong".into());
+        }
         pieces.insert(<[u8; 32]>::try_from(named.as_slice())?, bytes.clone());
     }
     Ok(pieces)

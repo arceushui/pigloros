@@ -39,14 +39,35 @@ fn observe(family: FixtureFamily, mode: ExecutionMode) -> TestResult<SubjectObse
 /// The measured usage of the observation stays within the budget the provider declares.
 fn assert_within_budget(family: FixtureFamily, observation: &SubjectObservation) -> TestResult {
     let (budget, usage) = (family_budget(family)?, observation.usage);
-    assert!(usage.memory_bytes <= budget.memory_bytes, "{family:?} {usage:?}");
+    assert!(
+        usage.memory_bytes <= budget.memory_bytes,
+        "{family:?} {usage:?}"
+    );
     assert!(usage.cpu_fuel <= budget.cpu_fuel, "{family:?} {usage:?}");
-    assert!(usage.host_calls <= budget.host_calls, "{family:?} {usage:?}");
-    assert!(usage.event_count <= budget.event_count, "{family:?} {usage:?}");
-    assert!(usage.output_bytes <= budget.output_bytes, "{family:?} {usage:?}");
-    assert!(usage.storage_bytes <= budget.storage_bytes, "{family:?} {usage:?}");
-    assert!(usage.execution_steps <= budget.execution_steps, "{family:?} {usage:?}");
-    assert!(usage.simulation_time_ns <= budget.simulation_time_ns, "{family:?} {usage:?}");
+    assert!(
+        usage.host_calls <= budget.host_calls,
+        "{family:?} {usage:?}"
+    );
+    assert!(
+        usage.event_count <= budget.event_count,
+        "{family:?} {usage:?}"
+    );
+    assert!(
+        usage.output_bytes <= budget.output_bytes,
+        "{family:?} {usage:?}"
+    );
+    assert!(
+        usage.storage_bytes <= budget.storage_bytes,
+        "{family:?} {usage:?}"
+    );
+    assert!(
+        usage.execution_steps <= budget.execution_steps,
+        "{family:?} {usage:?}"
+    );
+    assert!(
+        usage.simulation_time_ns <= budget.simulation_time_ns,
+        "{family:?} {usage:?}"
+    );
     Ok(())
 }
 
