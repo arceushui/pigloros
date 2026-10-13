@@ -151,6 +151,7 @@ mod fork_code_two_read;
 mod fork_replay;
 mod fork_replay_admission;
 mod fork_replay_classifier;
+mod fork_replay_operation;
 mod fork_replay_publication;
 mod local_cut_owner;
 mod pipeline_admission;
@@ -13112,10 +13113,11 @@ fn sqlite_local_fork_admission_with_context(
         context
             .check()
             .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        let accepted = sqlite_fork_admission_operation(
+        let accepted = fork_replay_operation::operation_with_context(
             conn,
             ForkAdmissionOperationKindV1::Fork,
             admission.input().operation_id,
+            context,
         )
         .ok()
         .flatten()
@@ -13719,46 +13721,8 @@ fn sqlite_fork_admission_operation(
     kind: ForkAdmissionOperationKindV1,
     operation_id: Hash,
 ) -> Result<Option<ForkAdmissionOperationRowV1>, pos_core::ForkAdmissionErrorV1> {
-    conn.query_row(
-        "SELECT evidence_digest, commitment, result_digest, child_id
-         FROM fork_admission_operations
-         WHERE kind = ?1 AND operation_id = ?2",
-        params![i64::from(kind.wire()), operation_id.as_bytes().as_slice()],
-        |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        },
-    )
-    .optional()
-    .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
-    .and_then(|record| {
-        record.map_or(
-            Ok(None),
-            |(evidence_digest, commitment, result_digest, child_id)| {
-                child_id
-                    .map(|id| {
-                        id.parse::<ulid::Ulid>()
-                            .map(TimelineId::from_ulid)
-                            .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)
-                    })
-                    .transpose()
-                    .and_then(|child_id| {
-                        Ok(Some(ForkAdmissionOperationRowV1 {
-                            kind,
-                            operation_id,
-                            evidence_digest: sqlite_hash(evidence_digest)?,
-                            commitment: sqlite_hash(commitment)?,
-                            result_digest: sqlite_hash(result_digest)?,
-                            child_id,
-                        }))
-                    })
-            },
-        )
-    })
+    fork_replay_operation::operation_with_context(conn, kind, operation_id,
+        &mut crate::fork_replay::NativeReadContextV1::ordinary())
 }
 
 fn sqlite_insert_fork_admission_operation(
