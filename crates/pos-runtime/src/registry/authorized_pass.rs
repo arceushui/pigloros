@@ -204,7 +204,7 @@ impl PluginRegistry {
             .and_then(|output| self.check_pass_output(drafts.len(), output));
             match invoked {
                 Ok((output, declaration)) => {
-                    factual.push_driver(drafts.len(), output.len(), None, declaration);
+                    factual.push_driver(drafts.len(), output.len(), declaration);
                     drafts.extend(output);
                 }
                 Err(error) => {

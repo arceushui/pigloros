@@ -25,7 +25,7 @@ use pos_core::{
 use pos_runtime::{
     Driver, LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, ProjectionKey,
     RuntimeError, ScheduledAdmissionStoreV1, ScheduledDriverBindingV1, ScheduledPassAdmissionV1,
-    StepOutput,
+    StepOutput, TimelineHistorySegment,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use ulid::Ulid;
@@ -2392,7 +2392,11 @@ fn the_submitted_basis_declares_the_factual_tick_on_both_adapters() {
                 (coordinate.scheduler_position(), coordinate.output_ordinal())
             })
             .collect();
-        assert_eq!(positions, [(0, 0), (1, 0), (1, 1), (1, 2), (2, 0)], "{name}");
+        assert_eq!(
+            positions,
+            [(0, 0), (1, 0), (1, 1), (1, 2), (2, 0)],
+            "{name}"
+        );
         let bound: Vec<(u32, u32)> = dependencies
             .output_bindings()
             .iter()
@@ -2412,5 +2416,89 @@ fn the_submitted_basis_declares_the_factual_tick_on_both_adapters() {
         let anchored = basis.attempt().observation().snapshot_digest();
         let snapshot = factual_artifact_digest(host.timeline, key, anchored);
         assert_eq!(nodes[0].coordinate().artifact_digest(), snapshot, "{name}");
+    }
+}
+
+/// Step and admit one pass over the Timeline through `cut.0` under the
+/// idempotency key `cut.1`, and return the basis it submitted.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn admit_pass_basis(
+    host: &Host,
+    registry: &mut PluginRegistry,
+    store: &mut dyn Harness,
+    cut: (u64, u8),
+) -> PipelineAdmissionBasisV1 {
+    let (observed, key) = cut;
+    let ancestry = root_ancestry(host.timeline);
+    ok(registry.step_all_anchored(host.timeline, &ancestry, Seq::from_u64(observed)));
+    let admission = host.admission(store, key);
+    let mut port = DigestRecordingPort {
+        inner: store,
+        digests: Vec::new(),
+        bases: Vec::new(),
+    };
+    receipt(registry.admit_scheduled_pass(&mut port, &admission));
+    port.bases.remove(0)
+}
+
+/// The step node of the first Driver in a submitted basis.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn first_step_node(basis: &PipelineAdmissionBasisV1) -> pos_core::DependencyNodeRecordV1 {
+    let nodes = basis.dependencies().record().nodes();
+    let found = nodes.iter().find(|node| {
+        node.coordinate().scheduler_position() == 1 && node.coordinate().output_ordinal() == 0
+    });
+    found
+        .cloned()
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("no first step node")))
+}
+
+/// ADR-064 R3.4.1: until the stores hold factual rows the head stays zero, yet
+/// a second pass declares a Tick later than the first and chains to the first
+/// pass's step node.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_second_pass_declares_a_later_tick_chained_to_the_first_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 10);
+        let log = Log::default();
+        let mut registry = host.registry();
+        register(&mut registry, driver("first", vec![b"a1", b"a2"], &log));
+
+        let first = admit_pass_basis(&host, &mut registry, store.as_mut(), (0, 1));
+        let second = admit_pass_basis(&host, &mut registry, store.as_mut(), (2, 2));
+
+        assert_eq!(first.dependencies().tick(), 1, "{name}");
+        assert_eq!(second.dependencies().tick(), 2, "{name}");
+        let recorded = first_step_node(&first).coordinate().artifact_digest();
+        let step = first_step_node(&second);
+        assert!(step.input_digests().contains(&recorded), "{name}");
+    }
+}
+
+/// A restore resets the chain to a lookup against the store, which holds no
+/// row yet: the next Tick restarts, and the Tick after it still follows.
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_restored_registry_keeps_declaring_later_ticks_on_both_adapters() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 10);
+        let log = Log::default();
+        let mut registry = host.registry();
+        register(&mut registry, driver("first", vec![b"a1", b"a2"], &log));
+
+        let first = admit_pass_basis(&host, &mut registry, store.as_mut(), (0, 1));
+        assert_eq!(first.dependencies().tick(), 1, "{name}");
+        let events = committed_events(store.as_ref(), host.timeline);
+        let segment = TimelineHistorySegment::new(host.timeline, Seq::from_u64(2));
+        ok(registry.restore_driver_state(&[segment], &events));
+
+        let restored = admit_pass_basis(&host, &mut registry, store.as_mut(), (2, 2));
+        let later = admit_pass_basis(&host, &mut registry, store.as_mut(), (4, 3));
+        assert_eq!(restored.dependencies().tick(), 1, "{name}");
+        assert_eq!(later.dependencies().tick(), 2, "{name}");
+        let recorded = first_step_node(&restored).coordinate().artifact_digest();
+        let step = first_step_node(&later);
+        assert!(step.input_digests().contains(&recorded), "{name}");
     }
 }

@@ -20,10 +20,10 @@ use pos_core::{
     assemble_factual_tick, factual_dependency::BoundFactualNodeV1, factual_event_schema_id,
     factual_verified_prefix_content_digest, CoreError, CounterfactualDependencyErrorV1,
     DependencyNodeRecordV1, Event, EventDraft, FactualDependencyErrorV1, FactualDriverStepV1,
-    FactualEventRefV1, FactualHostOwnerV1, FactualIngressEventV1, FactualInputV1,
-    FactualOutputV1, FactualPrefixReadPortV1, FactualPriorNodeV1, FactualScheduledTickV1,
-    FactualTickContextV1, FactualTickDependenciesV1, FactualTickShapeV1, Hash, Kind, PluginId,
-    Seq, TickDependencyRecordV1, MAX_OUTPUT_DIRECT_INPUTS_V1, MAX_STEP_INPUTS_PER_DRIVER_V1,
+    FactualEventRefV1, FactualHostOwnerV1, FactualIngressEventV1, FactualInputV1, FactualOutputV1,
+    FactualPrefixReadPortV1, FactualPriorNodeV1, FactualScheduledTickV1, FactualTickContextV1,
+    FactualTickDependenciesV1, FactualTickShapeV1, Hash, Kind, PluginId, Seq,
+    TickDependencyRecordV1, MAX_OUTPUT_DIRECT_INPUTS_V1, MAX_STEP_INPUTS_PER_DRIVER_V1,
 };
 
 use super::{
@@ -98,18 +98,35 @@ pub(super) struct StagedFactual {
 }
 
 impl StagedFactual {
-    /// Keep what one stepped Driver staged.
+    /// Keep what one stepped Driver staged. Its verified-prefix digest is
+    /// filled in by `gather_prefix_digests` once the pass is known to stage a
+    /// draft.
     pub(super) fn push_driver(
         &mut self,
         first_draft: usize,
         drafts: usize,
-        prefix: Option<Hash>,
         declaration: DriverDeclaration,
     ) {
         self.draft_ranges.push(first_draft..first_draft + drafts);
-        self.prefix_digests.push(prefix);
+        self.prefix_digests.push(None);
         self.step_inputs.push(declaration.step_inputs);
         self.direct_inputs.extend(declaration.direct_inputs);
+    }
+
+    /// Keep the verified-prefix digest of every stepped Driver that has one.
+    ///
+    /// A pass that stages no draft records no Tick, so only a pass that staged
+    /// a draft pays for the digests.
+    pub(super) fn gather_prefix_digests(
+        &mut self,
+        plugins: &IndexMap<PluginId, PluginEntry>,
+        driver_ids: &[PluginId],
+        cut: (Seq, &[Event]),
+        operation: &OperationContext,
+    ) {
+        for (slot, id) in self.prefix_digests.iter_mut().zip(driver_ids) {
+            *slot = verified_prefix_digest(&plugins[id], cut, operation);
+        }
     }
 
     /// Every input a Driver declared, step-level inputs first.
@@ -128,7 +145,10 @@ impl StagedFactual {
         let mut wanted: BTreeSet<Seq> = forwarded.iter().flatten().map(|pair| pair.0).collect();
         wanted.extend(self.declared().filter_map(committed_seq));
         for event in committed {
-            if wanted.contains(&event.seq) {
+            if wanted.is_empty() {
+                break;
+            }
+            if wanted.remove(&event.seq) {
                 let fact = fact_of(event, operation);
                 self.event_facts.insert(event.seq, fact);
             }
@@ -272,8 +292,45 @@ fn driver_event_seqs(fresh: &[ForwardedPair], carried: &BTreeMap<Seq, Hash>) -> 
     new_seqs.chain(carried.keys().copied()).collect()
 }
 
+/// The Tick of a scheduled pass: one past the later of the store's head and
+/// the highest Tick the stepped Drivers retain a prior node from.
+///
+/// While the stores hold factual rows the head is the last committed Tick and
+/// every retained node is committed, so this is the ADR's `last committed Tick
+/// + 1`. Until slices 8-9 write rows the head stays zero, and the retained
+/// nodes keep each Tick strictly later than every Tick this registry itself
+/// recorded, so a chain or history edge always points at an earlier Tick
+/// (R3.4.1). A Tick that would pass `u64::MAX` exhausts the Timeline's set.
+pub(super) fn next_scheduled_tick(
+    head: u64,
+    retained: u64,
+) -> Result<u64, FactualDependencyErrorV1> {
+    let latest = head.max(retained);
+    let next = latest.checked_add(1);
+    next.ok_or(FactualDependencyErrorV1::SetExhausted)
+}
+
+/// The Tick of the latest prior node a Driver's step node would declare from
+/// its retained state; zero when it retains none.
+fn retained_tick(entry: &PluginEntry) -> u64 {
+    let chain = match &entry.chain {
+        StepChainV1::Lookup => 0,
+        StepChainV1::Recorded { node } => node.coordinate().tick(),
+    };
+    let history = match &entry.pass_state.history {
+        HistoryInputV1::None | HistoryInputV1::Pending { .. } => 0,
+        HistoryInputV1::Recorded { node, .. } => node.coordinate().tick(),
+    };
+    chain.max(history)
+}
+
 /// The class rule of an output follows the admitted declaration of its Event
 /// type (R3.5.1).
+///
+/// A Driver registered without an output admission (the generated local
+/// registration) validates no draft and declares no authority; its outputs are
+/// `Authoritative`. Output admission rejects every draft of an admitted Driver
+/// whose type it does not declare, so the default is never taken for one.
 fn output_authority(entry: &PluginEntry, event_type: &Kind) -> OutputAuthorityV1 {
     let mut declarations = entry
         .output_admission
@@ -285,14 +342,29 @@ fn output_authority(entry: &PluginEntry, event_type: &Kind) -> OutputAuthorityV1
     matched.map_or(default, OutputDeclarationV1::authority)
 }
 
-/// The position of `digest` in `list`, appending it when it is new.
-fn index_of(list: &mut Vec<Hash>, digest: Hash) -> u32 {
-    if !list.contains(&digest) {
-        list.push(digest);
+/// The distinct digests of one kind of node a Tick records, in first-use order.
+///
+/// Each stepped Driver adds at most one digest, so a list never outgrows the
+/// number of registered Drivers and its positions fit a `u32`.
+#[derive(Default)]
+struct Interned {
+    order: Vec<Hash>,
+    index: BTreeMap<Hash, u32>,
+    next: u32,
+}
+
+impl Interned {
+    /// The position of `digest`, appending it when it is new.
+    fn position(&mut self, digest: Hash) -> u32 {
+        if let Some(found) = self.index.get(&digest) {
+            return *found;
+        }
+        let next = self.next;
+        self.next += 1;
+        self.order.push(digest);
+        self.index.insert(digest, next);
+        next
     }
-    let found = list.iter().position(|known| *known == digest);
-    let position = found.unwrap_or_default();
-    u32::try_from(position).unwrap_or(u32::MAX)
 }
 
 fn zip_found<K: Ord + Copy, V>(keys: &[K], found: Vec<Option<V>>) -> BTreeMap<K, V> {
@@ -327,9 +399,16 @@ impl<'a> DriverScope<'a> {
         let subscriptions = &entry.event_observation.event_subscriptions;
         let schema_ids = subscriptions
             .iter()
+            .filter(|kind| !pos_core::is_subject_controlled_event_type(kind))
             .map(|kind| factual_event_schema_id(kind.as_str()))
             .collect();
         Self { entry, schema_ids }
+    }
+
+    /// Whether the Driver subscribed to any Event type: a Driver with none
+    /// observes no committed Event (R3.4.7).
+    fn subscribes(&self) -> bool {
+        !self.entry.event_observation.event_subscriptions.is_empty()
     }
 
     /// Whether the pass showed the Event and the Driver subscribed to its type.
@@ -340,6 +419,10 @@ impl<'a> DriverScope<'a> {
 
     /// Whether the recorded node of an Event the pass did not see is of a type
     /// the Driver subscribed to, judged by its schema ID.
+    ///
+    /// A schema ID cannot show whether the pass's consent hides the Event, so
+    /// `schema_ids` leaves out the subject-controlled types: an unseen Event of
+    /// such a type is undeclarable (R3.6.2), however it is named.
     fn subscribed_by_schema(&self, node: Option<&DependencyNodeRecordV1>) -> bool {
         node.is_some_and(|node| self.schema_ids.contains(&node.coordinate().schema_id()))
     }
@@ -377,8 +460,8 @@ struct PassBuild {
     lookups: Lookups,
     events: BTreeMap<Seq, EventFact>,
     ingress: BTreeMap<Seq, FactualIngressEventV1>,
-    prefix_contents: Vec<Hash>,
-    history_contents: Vec<Hash>,
+    prefix_contents: Interned,
+    history_contents: Interned,
 }
 
 impl PassBuild {
@@ -393,8 +476,8 @@ impl PassBuild {
             lookups,
             events: merged_facts(registry, pending),
             ingress: BTreeMap::new(),
-            prefix_contents: Vec::new(),
-            history_contents: Vec::new(),
+            prefix_contents: Interned::default(),
+            history_contents: Interned::default(),
         }
     }
 
@@ -405,8 +488,8 @@ impl PassBuild {
     ) -> FactualScheduledTickV1 {
         FactualScheduledTickV1 {
             snapshot_digest,
-            prefix_contents: self.prefix_contents,
-            history_contents: self.history_contents,
+            prefix_contents: self.prefix_contents.order,
+            history_contents: self.history_contents.order,
             ingress_events: self.ingress.into_values().collect(),
             drivers,
         }
@@ -454,6 +537,12 @@ impl PassBuild {
         }
     }
 
+    /// Whether the Driver could not have read the Event at `seq`: it is above
+    /// the cut, or the Driver subscribed to no Event type.
+    fn unreadable(&self, scope: &DriverScope<'_>, seq: Seq) -> bool {
+        seq > self.through || !scope.subscribes()
+    }
+
     /// A declared Event: one the Driver could have read, and one the pass can
     /// resolve to a node or record as an ingress node (R3.6.2).
     fn declared_event(
@@ -463,7 +552,7 @@ impl PassBuild {
     ) -> Result<FactualInputV1, FactualDependencyErrorV1> {
         let fact = self.events.get(&seq);
         let node = self.lookups.events.get(&seq);
-        if seq > self.through {
+        if self.unreadable(scope, seq) {
             return Err(FactualDependencyErrorV1::UndeclarableInput);
         }
         if fact.is_none() && node.is_none() {
@@ -487,6 +576,8 @@ impl PassBuild {
             .digests
             .get(&digest)
             .ok_or(FactualDependencyErrorV1::UnresolvedInput)?;
+        // An Event the pass saw is judged by its fact, consent included; an
+        // unseen one only by a schema ID that no subject-controlled type has.
         if let Some(seq) = bound {
             let fact = self.events.get(seq);
             if *seq > self.through || !scope.declarable(fact, Some(node)) {
@@ -510,13 +601,13 @@ impl PassBuild {
         let history = match &entry.pass_state.history {
             HistoryInputV1::None => None,
             HistoryInputV1::Pending { content } => {
-                let position = index_of(&mut self.history_contents, *content);
+                let position = self.history_contents.position(*content);
                 Some(FactualInputV1::HistoryNode(position))
             }
             HistoryInputV1::Recorded { node, .. } => Some(FactualInputV1::Prior(node.clone())),
         };
         let prefix = prefix.map(|digest| {
-            let position = index_of(&mut self.prefix_contents, digest);
+            let position = self.prefix_contents.position(digest);
             FactualInputV1::PrefixNode(position)
         });
         [chain, history, prefix].into_iter().flatten().collect()
@@ -586,18 +677,15 @@ impl PluginRegistry {
         anchor: (Seq, Hash),
     ) -> Result<FactualTickDependenciesV1, RuntimeError> {
         let (through, snapshot_digest) = anchor;
-        ensure_declared_caps(&pending.factual)
-            .map_err(RuntimeError::DependencyDeclaration)?;
+        ensure_declared_caps(&pending.factual).map_err(RuntimeError::DependencyDeclaration)?;
         let timeline = pending.timeline;
-        let head = port
-            .last_committed_factual_tick(timeline)
-            .map_err(RuntimeError::Store)?;
+        let tick = self.declared_tick(port, pending)?;
         let lookups = self
             .read_lookups(port, pending)
             .map_err(RuntimeError::Store)?;
         let context = FactualTickContextV1 {
             timeline_id: timeline,
-            tick: head.tick.saturating_add(1),
+            tick,
             attempt_id: admission.attempt_id,
             evidence_digest: admission.provider_validation.digest(),
             authority_grant: admission.authority_grant,
@@ -607,11 +695,36 @@ impl PluginRegistry {
             .map_err(RuntimeError::DependencyDeclaration)?;
         let history_contents = scheduled.history_contents.clone();
         let shape = FactualTickShapeV1::Scheduled(scheduled);
-        let dependencies = assemble_factual_tick(&context, &shape)
-            .map_err(RuntimeError::DependencyDeclaration)?;
+        let dependencies =
+            assemble_factual_tick(&context, &shape).map_err(RuntimeError::DependencyDeclaration)?;
         let record = dependencies.record();
         pending.factual.record_nodes(record, &history_contents);
         Ok(dependencies)
+    }
+
+    /// The Tick a scheduled pass declares (R3.4.1, R3.8.1).
+    ///
+    /// The store's head is read through the port; the highest Tick among the
+    /// prior nodes the stepped Drivers retain is read from the registry.
+    fn declared_tick(
+        &self,
+        port: &dyn FactualPrefixReadPortV1,
+        pending: &PendingStep,
+    ) -> Result<u64, RuntimeError> {
+        let head = port
+            .last_committed_factual_tick(pending.timeline)
+            .map_err(RuntimeError::Store)?;
+        let retained = self.highest_retained_tick(pending);
+        next_scheduled_tick(head.tick, retained).map_err(RuntimeError::DependencyDeclaration)
+    }
+
+    /// The highest Tick of the prior nodes the stepped Drivers retain.
+    fn highest_retained_tick(&self, pending: &PendingStep) -> u64 {
+        let mut highest = 0;
+        for id in &pending.driver_ids {
+            highest = highest.max(retained_tick(&self.plugins[id]));
+        }
+        highest
     }
 
     /// Resolve every input of the stepped Drivers into the assembly's shape.
