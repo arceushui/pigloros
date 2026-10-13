@@ -42,4 +42,10 @@ The checked-in Plugin conformance fixtures (`fixtures/conformance`, layer `plugi
 written by `scripts/generate_plugin_conformance_fixtures.py`, which also writes
 `src/schema_digests.rs` (the pinned digest of each family's schema member) and verifies it with
 `--check`. `tests/fixture_attempts_public.rs` builds the attempts from those files; the real worker
-runs them in `apps/pos-plugin-worker/tests/conformance_fixtures_public.rs`.
+runs them in `apps/pos-plugin-worker/tests/conformance_fixtures_public.rs`. The acceptance
+tests of the whole profile (the `positive`, `denied`, `malformed`, `resource-exhaustion`,
+`deletion-redaction`, `downgrade` and `independent-evaluation` families in both Execution
+Modes, the negative controls, the fresh-worker count and the no-partial-commit check) are
+`apps/pos-plugin-worker/tests/conformance_adapter_public.rs`; they run `run_with` over
+`SupervisorRunnerV1` with the real worker. `scripts/check_handoff_readme.py` pins the three
+sentences at the top of this file.

@@ -19,7 +19,7 @@ use pos_reference::evaluator_protocol::{
     CaseOutcome, CaseStatus, ConformanceReport, SubjectAdapterKind,
 };
 use pos_reference::profile::{DeterministicBudget, NamespacedFailure};
-use support::Corpus;
+use support::{BundleMutation, Corpus};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -405,6 +405,36 @@ fn result_kind_that_differs_from_the_oracle_kind_fails() -> TestResult {
     expect_status(&report, 0, CaseStatus::Fail)?;
     expect_status(&report, 1, CaseStatus::Fail)?;
     expect_status(&report, 2, CaseStatus::Pass)?;
+    Ok(())
+}
+
+/// R8-S8, evaluator path: a member whose bytes do not match the descriptor digest of the
+/// signed bundle stops the evaluation before the adapter runs.
+#[test]
+fn a_member_that_fails_its_descriptor_digest_never_reaches_the_adapter() -> TestResult {
+    let records = oracle_records();
+    for mutation in [BundleMutation::MemberBytes, BundleMutation::DescriptorDigest] {
+        let corpus = support::plugin_corpus_with_bundle_mutation(&records, mutation)?;
+        let mut launched = 0_u32;
+        let result = {
+            let mut adapter = Scripted {
+                subject_digest: corpus.subject_digest,
+                script: |attempt: &CaseAttempt| {
+                    launched += 1;
+                    Ok(observe(faithful(attempt.family, &records)))
+                },
+            };
+            evaluate(
+                &corpus.request,
+                &corpus.archive,
+                &corpus.trust_policy,
+                &evaluator_identity()?,
+                &mut adapter,
+            )
+        };
+        assert!(result.is_err());
+        assert_eq!(launched, 0);
+    }
     Ok(())
 }
 
