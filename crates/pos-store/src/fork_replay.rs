@@ -235,6 +235,7 @@ impl ForkReplayReadLimitsV1 {
 pub struct ForkReplayReadBudgetV1<'clock> {
     limits: ForkReplayReadLimitsV1,
     started: MonotonicMarkV1,
+    last_mark: MonotonicMarkV1,
     clock: &'clock mut dyn GuardMonotonicSourceV1,
     visits: usize,
     rows: usize,
@@ -255,6 +256,7 @@ impl<'clock> ForkReplayReadBudgetV1<'clock> {
         let mut budget = Self {
             limits,
             started,
+            last_mark: started,
             clock,
             visits: 0,
             rows: 0,
@@ -281,14 +283,14 @@ impl<'clock> ForkReplayReadBudgetV1<'clock> {
     /// # Errors
     /// Fails permanently on a regressed/elapsed mark or prior rejected charge.
     pub fn check_time(&mut self) -> ReadResult<()> {
-        let within = !self.failed
-            && self
-                .clock
-                .mark()
-                .checked_elapsed_since(self.started)
-                .is_some_and(|elapsed| {
-                    elapsed.as_micros() <= u128::from(self.limits.elapsed_micros)
-                });
+        let within = !self.failed && {
+            let mark = self.clock.mark();
+            let monotonic = mark.checked_elapsed_since(self.last_mark).is_some();
+            let within = monotonic && mark.checked_elapsed_since(self.started)
+                .is_some_and(|elapsed| elapsed.as_micros() <= u128::from(self.limits.elapsed_micros));
+            if within { self.last_mark = mark; }
+            within
+        };
         self.accept(within)
     }
 
