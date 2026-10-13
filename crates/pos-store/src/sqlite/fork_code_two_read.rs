@@ -13,8 +13,10 @@ use rusqlite::{params, Connection};
 
 use super::{
     fork_replay_admission::{admission_blob_with_context, AdmissionRowV1},
-    fork_replay_classifier::{classifier_registration_with_context, classifier_source_with_context,
-        classifier_table_with_context, ClassifierKeyV1},
+    fork_replay_classifier::{
+        classifier_registration_with_context, classifier_source_with_context,
+        classifier_table_with_context, ClassifierKeyV1,
+    },
     sqlite_classified_authority_graph_with_context, sqlite_local_fork_admission_with_context,
 };
 use crate::{
@@ -298,8 +300,11 @@ fn sqlite_imported_graph(
         .map_err(|_| AuthorityError::CorruptAuthority)?;
     let table = classifier_table_with_context(conn, child_timeline_id, context)?;
     let registration = classifier_registration_with_context(conn, child_timeline_id, context)?;
-    let source = classifier_source_with_context(conn,
-        ClassifierKeyV1::ImportedSource(table.input().source_configuration_revision_digest), context)?;
+    let source = classifier_source_with_context(
+        conn,
+        ClassifierKeyV1::ImportedSource(table.input().source_configuration_revision_digest),
+        context,
+    )?;
     let graph = ImportedForkClassifierGraphV1 {
         source,
         table,
@@ -308,8 +313,12 @@ fn sqlite_imported_graph(
     // Core owns the one bounded G1-G8 batch. Gate its source/table digest
     // buffers independently; an invalid early equality can reject before
     // either encoding, so these invalid-input gates are conservative.
-    context.canonical(graph.source.canonical_cbor_len()).map_err(|_| AuthorityError::CorruptAuthority)?;
-    context.canonical(graph.table.canonical_cbor_len()).map_err(|_| AuthorityError::CorruptAuthority)?;
+    context
+        .canonical(graph.source.canonical_cbor_len())
+        .map_err(|_| AuthorityError::CorruptAuthority)?;
+    context
+        .canonical(graph.table.canonical_cbor_len())
+        .map_err(|_| AuthorityError::CorruptAuthority)?;
     let matches = imported_graph_matches(&graph, &admission);
     context
         .check()
@@ -459,14 +468,25 @@ mod tests {
         Ok(())
     }
 
-    fn graph_boundary(store: &super::super::SqliteStore, child: TimelineId,
-        expected: &ValidatedGraphV1, maximum: usize, limit: usize, rows: usize) -> Fallible<()> {
+    fn graph_boundary(
+        store: &super::super::SqliteStore,
+        child: TimelineId,
+        expected: &ValidatedGraphV1,
+        maximum: usize,
+        limit: usize,
+        rows: usize,
+    ) -> Fallible<()> {
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, rows, limit, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-        let result = sqlite_validated_graph(&store.conn, store.hasher.as_ref(), child,
-            AuthorityValidatorV1::CodeTwoAware, &mut NativeReadContextV1::protected(&mut budget));
+        let result = sqlite_validated_graph(
+            &store.conn,
+            store.hasher.as_ref(),
+            child,
+            AuthorityValidatorV1::CodeTwoAware,
+            &mut NativeReadContextV1::protected(&mut budget),
+        );
         if limit == maximum && rows == 12 {
             let actual = result?;
             assert_eq!(actual.admission, expected.admission);
@@ -479,18 +499,28 @@ mod tests {
         Ok(())
     }
 
-    fn graph_deadline_sweep(store: &super::super::SqliteStore, child: TimelineId,
-        expected: &ValidatedGraphV1, bytes: usize) -> Fallible<()> {
+    fn graph_deadline_sweep(
+        store: &super::super::SqliteStore,
+        child: TimelineId,
+        expected: &ValidatedGraphV1,
+        bytes: usize,
+    ) -> Fallible<()> {
         for final_offset in [Duration::ZERO, Duration::from_secs(2)] {
             let mut completed = false;
             for marks in 2..512 {
                 let mut clock = ScriptedGuardMonotonicSourceV1::new(
-                    std::iter::repeat_n(Duration::from_millis(1), marks).chain([final_offset]));
+                    std::iter::repeat_n(Duration::from_millis(1), marks).chain([final_offset]),
+                );
                 let start = clock.mark();
                 let limits = ForkReplayReadLimitsV1::new(1, 1, 12, bytes, 1_000_000)?;
                 let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-                let result = sqlite_validated_graph(&store.conn, store.hasher.as_ref(), child,
-                    AuthorityValidatorV1::CodeTwoAware, &mut NativeReadContextV1::protected(&mut budget));
+                let result = sqlite_validated_graph(
+                    &store.conn,
+                    store.hasher.as_ref(),
+                    child,
+                    AuthorityValidatorV1::CodeTwoAware,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
                 if let Ok(actual) = result {
                     assert_eq!(actual.admission, expected.admission);
                     assert_eq!(actual.table, expected.table);
@@ -500,13 +530,17 @@ mod tests {
                 }
                 assert!(budget.check_time().is_err());
             }
-            assert!(completed, "all observable graph expiry and regression checkpoints tested");
+            assert!(
+                completed,
+                "all observable graph expiry and regression checkpoints tested"
+            );
         }
         Ok(())
     }
 
     #[test]
-    fn file_backed_classifier_graph_charges_selected_rows_fields_and_digest_buffers() -> Fallible<()> {
+    fn file_backed_classifier_graph_charges_selected_rows_fields_and_digest_buffers() -> Fallible<()>
+    {
         for shape in [Shape::Mixed, Shape::EmptyClassified] {
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("classifier-context.sqlite");
@@ -517,18 +551,31 @@ mod tests {
             pin_policy(&mut store, &built.policy)?;
             store.import_verified(&request_for(&world, &built))?;
             let child = world.child_at(0)?.id;
-            let expected = sqlite_validated_graph(&store.conn, store.hasher.as_ref(), child,
-                AuthorityValidatorV1::CodeTwoAware, &mut NativeReadContextV1::ordinary())?;
+            let expected = sqlite_validated_graph(
+                &store.conn,
+                store.hasher.as_ref(),
+                child,
+                AuthorityValidatorV1::CodeTwoAware,
+                &mut NativeReadContextV1::ordinary(),
+            )?;
             let import_bytes: Vec<u8> = store.conn.query_row(
                 "SELECT ifa1_cbor FROM imported_fork_attribution_admissions WHERE child_id = ?1",
-                params![child.to_string()], |row| row.get(0))?;
+                params![child.to_string()],
+                |row| row.get(0),
+            )?;
             let bytes = super::super::fork_replay_admission::imported_admission_phase_cost(
-                &built.envelope.unsigned().input().records.fork_admission, &import_bytes)?
-                + super::super::fork_replay_classifier::imported_classifier_phase_cost(
-                    built.envelope.unsigned().input().classifier.as_ref())?;
+                &built.envelope.unsigned().input().records.fork_admission,
+                &import_bytes,
+            )? + super::super::fork_replay_classifier::imported_classifier_phase_cost(
+                built.envelope.unsigned().input().classifier.as_ref(),
+            )?;
             let interval = store.begin_protected_effect_interval()?;
-            for limit in 1..=bytes { graph_boundary(&store, child, &expected, bytes, limit, 12)?; }
-            for rows in 1..12 { graph_boundary(&store, child, &expected, bytes, bytes, rows)?; }
+            for limit in 1..=bytes {
+                graph_boundary(&store, child, &expected, bytes, limit, 12)?;
+            }
+            for rows in 1..12 {
+                graph_boundary(&store, child, &expected, bytes, bytes, rows)?;
+            }
             graph_deadline_sweep(&store, child, &expected, bytes)?;
             store.finish_protected_effect_interval(
                 interval,

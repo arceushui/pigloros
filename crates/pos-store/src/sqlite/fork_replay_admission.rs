@@ -97,9 +97,7 @@ pub(super) fn imported_admission_phase_cost(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::{
-        fae1_fixture::Fallible, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
-    };
+    use crate::{fae1_fixture::Fallible, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1};
     use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
     use std::time::Duration;
 
@@ -122,10 +120,12 @@ mod tests {
             // impossible persisted bytes to the pre-getter gate. It is not an
             // authenticated import/public-consumer fixture.
             let conn = Connection::open_in_memory()?;
-            conn.execute_batch("CREATE TABLE fork_admissions (child_id TEXT, far1_cbor BLOB);
+            conn.execute_batch(
+                "CREATE TABLE fork_admissions (child_id TEXT, far1_cbor BLOB);
                 CREATE TABLE imported_fork_attribution_admissions (child_id TEXT, ifa1_cbor BLOB);
                 INSERT INTO fork_admissions VALUES ('child', X'00');
-                INSERT INTO imported_fork_attribution_admissions VALUES ('child', X'00');")?;
+                INSERT INTO imported_fork_attribution_admissions VALUES ('child', X'00');",
+            )?;
             let key = "child";
             for value in [
                 rusqlite::types::Value::Blob(vec![0; maximum + 1]),
@@ -140,7 +140,7 @@ mod tests {
                     admission_blob_with_context(
                         &conn,
                         kind,
-                        &key,
+                        key,
                         &mut NativeReadContextV1::protected(&mut budget)
                     ),
                     Err(Error::CorruptAuthority)
