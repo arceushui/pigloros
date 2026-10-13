@@ -20,7 +20,9 @@ use pos_core::{
 };
 
 use super::*;
-use crate::driver::{DeclaredOutputV1, ObservationView};
+
+use super::factual_dependencies::{next_scheduled_tick, verified_prefix_digest};
+use crate::driver::{DeclaredOutputV1, DirectInputRefV1, ObservationView};
 
 const PLAIN: &str = "probe.plain";
 const OTHER: &str = "probe.other";
@@ -481,7 +483,10 @@ fn a_pass_declares_a_snapshot_a_step_per_driver_and_an_output_per_draft() {
     let step = find(&deps, &first_owner, 0);
     assert_eq!(step.input_digests(), [snapshot]);
     let output = find(&deps, &first_owner, 2);
-    assert_eq!(output.input_digests(), [step.coordinate().artifact_digest()]);
+    assert_eq!(
+        output.input_digests(),
+        [step.coordinate().artifact_digest()]
+    );
     // A zero-draft Driver still has a step node.
     assert_eq!(find(&deps, &second_owner, 0).input_digests(), [snapshot]);
 
@@ -666,7 +671,10 @@ fn a_declared_digest_must_resolve_and_an_event_node_must_be_readable() {
     // to, is not; Event 5 is below the cut and the pass never saw it.
     let beyond = (node("plugin:old", 2, own, hash(52)), Some(Seq::from_u64(9)));
     port.digests.insert(hash(52), beyond);
-    let wrong = (node("plugin:old", 3, foreign, hash(53)), Some(Seq::from_u64(5)));
+    let wrong = (
+        node("plugin:old", 3, foreign, hash(53)),
+        Some(Seq::from_u64(5)),
+    );
     port.digests.insert(hash(53), wrong);
     let readable = (node("plugin:old", 4, own, hash(54)), Some(Seq::from_u64(5)));
     port.digests.insert(hash(54), readable);
@@ -826,7 +834,10 @@ fn a_carried_event_whose_type_is_lost_is_unresolved() {
 }
 
 const fn restore_segment(timeline: TimelineId, through: u64) -> [TimelineHistorySegment; 1] {
-    [TimelineHistorySegment::new(timeline, Seq::from_u64(through))]
+    [TimelineHistorySegment::new(
+        timeline,
+        Seq::from_u64(through),
+    )]
 }
 
 #[test]
@@ -840,7 +851,10 @@ fn a_restored_history_node_is_recorded_once_and_declared_by_the_driver_stepped_l
     ok(registry.restore_driver_state(&restore_segment(timeline, 3), &events));
     let (first_id, second_id) = (ids(&registry)[0], ids(&registry)[1]);
     let content = some(registry.plugins[&first_id].history.pending_content());
-    assert_eq!(registry.plugins[&second_id].history.pending_content(), Some(content));
+    assert_eq!(
+        registry.plugins[&second_id].history.pending_content(),
+        Some(content)
+    );
 
     // Only the first Driver is due: the second stepped at 100 and waits 1,000.
     registry.plugins[&second_id].last_tick = Some(100);
@@ -853,7 +867,9 @@ fn a_restored_history_node_is_recorded_once_and_declared_by_the_driver_stepped_l
     assert_eq!(count_owned_by(&deps, "host.history"), 1);
     let recorded = digest_of(&deps, "host.history", 0);
     let first_owner = owner_of(&registry, 0);
-    assert!(find(&deps, &first_owner, 0).input_digests().contains(&recorded));
+    assert!(find(&deps, &first_owner, 0)
+        .input_digests()
+        .contains(&recorded));
     assert_eq!(pending.factual.history_recorded.len(), 1);
     assert_eq!(pending.factual.history_recorded[0].0, content);
     registry.commit_pending_step(pending);
@@ -878,7 +894,9 @@ fn a_restored_history_node_is_recorded_once_and_declared_by_the_driver_stepped_l
     let mut pending = some(registry.pending_step.take());
     let deps = ok(build(&registry, &later, &mut pending, 3));
     assert_eq!(count_owned_by(&deps, "host.history"), 0);
-    assert!(find(&deps, &second_owner, 0).input_digests().contains(&recorded));
+    assert!(find(&deps, &second_owner, 0)
+        .input_digests()
+        .contains(&recorded));
 }
 
 fn node_at(owner: &str, digest: Hash) -> DependencyNodeRecordV1 {
@@ -967,7 +985,9 @@ fn the_verified_prefix_digest_covers_the_events_the_driver_is_handed() {
         None
     );
 
-    registry.plugins[&id].event_observation.verified_prefix_required = true;
+    registry.plugins[&id]
+        .event_observation
+        .verified_prefix_required = true;
     let handed = [
         FactualEventRefV1 {
             seq: Seq::from_u64(1),
@@ -1160,7 +1180,10 @@ fn an_in_doubt_pass_recovered_later_settles_the_state_like_a_first_commit() {
     assert_eq!(lost.bases.len(), 1);
     let basis = lost.bases[0].clone();
     assert_eq!(basis.dependencies().tick(), 3);
-    assert!(registry.plugins[&second_id].history.pending_content().is_some());
+    assert!(registry.plugins[&second_id]
+        .history
+        .pending_content()
+        .is_some());
     assert_eq!(registry.plugins[&first_id].chain, StepChainV1::Lookup);
 
     // Recovery resubmits the retained basis and applies the retained lists.
@@ -1207,4 +1230,153 @@ fn a_failing_read_of_the_prefix_is_the_stores_error() {
             "{read}: {error}"
         );
     }
+}
+
+/// A prior node of the given Tick, as a Driver retains it.
+fn prior_at_tick(tick: u64, digest: Hash) -> FactualPriorNodeV1 {
+    let coordinate = ok(DependencyNodeCoordinateV1::try_new(
+        tick,
+        1,
+        "plugin:old".to_owned(),
+        0,
+        1,
+        digest,
+    ));
+    FactualPriorNodeV1::new(coordinate, ENDOGENOUS)
+}
+
+/// The Tick the next pass declares over a store whose head is `head`.
+fn declared_tick_at(registry: &mut PluginRegistry, timeline: TimelineId, head: u64) -> u64 {
+    let mut pending = staged(registry, timeline, 0, &[]);
+    let port = FakePrefix::at(head);
+    ok(build(registry, &port, &mut pending, 0)).tick()
+}
+
+#[test]
+fn the_scheduled_tick_follows_the_later_of_the_head_and_the_retained_nodes() {
+    assert_eq!(ok(next_scheduled_tick(0, 0)), 1);
+    assert_eq!(ok(next_scheduled_tick(4, 0)), 5);
+    assert_eq!(ok(next_scheduled_tick(0, 3)), 4);
+    assert_eq!(ok(next_scheduled_tick(5, 3)), 6);
+    let exhausted = err(next_scheduled_tick(u64::MAX, 0));
+    assert_eq!(exhausted, FactualDependencyErrorV1::SetExhausted);
+    let retained = err(next_scheduled_tick(0, u64::MAX));
+    assert_eq!(retained, FactualDependencyErrorV1::SetExhausted);
+}
+
+#[test]
+fn the_declared_tick_follows_the_prior_nodes_the_stepped_drivers_retain() {
+    let (first, first_script) = scripted("first", 1, "probe.out.first");
+    set_script(&first_script, &[b"a"]);
+    let mut registry = registry_with(vec![first]);
+    let id = ids(&registry)[0];
+    let timeline = TimelineId::new();
+
+    // Nothing retained and no rows: the first Tick.
+    assert_eq!(declared_tick_at(&mut registry, timeline, 0), 1);
+
+    // A retained step node of Tick 7 puts the next Tick after it, however
+    // low the store's head is.
+    let retained = prior_at_tick(7, hash(72));
+    registry.plugins[&id].chain = StepChainV1::Recorded { node: retained };
+    assert_eq!(declared_tick_at(&mut registry, timeline, 2), 8);
+    // A head past the retained node wins.
+    assert_eq!(declared_tick_at(&mut registry, timeline, 9), 10);
+
+    // A recorded history node counts as well.
+    let content = hash(73);
+    let node = prior_at_tick(12, content);
+    registry.plugins[&id].history = HistoryInputV1::Recorded { content, node };
+    assert_eq!(declared_tick_at(&mut registry, timeline, 2), 13);
+}
+
+#[test]
+fn a_digest_of_an_unseen_subject_controlled_event_is_undeclarable() {
+    // The pass never saw Event 5, and a schema ID cannot show whether this
+    // pass's consent hides an Event of a consent-sensitive type.
+    let sensitive = "model.fit";
+    let schema = factual_event_schema_id(sensitive);
+    let bound = (
+        node("plugin:old", 1, schema, hash(71)),
+        Some(Seq::from_u64(5)),
+    );
+    let mut port = FakePrefix::at(4);
+    port.digests.insert(hash(71), bound);
+
+    let mut registry = declaring_registry(vec![named(hash(71))], Vec::new());
+    let id = ids(&registry)[0];
+    let observation = &mut registry.plugins[&id].event_observation;
+    observation.event_subscriptions.push(Kind::new(sensitive));
+    let mut pending = staged(&mut registry, TimelineId::new(), 6, &plain_events(1));
+    let result = build(&registry, &port, &mut pending, 6);
+    let error = declaration_error(err(result));
+    assert_eq!(error, FactualDependencyErrorV1::UndeclarableInput);
+}
+
+#[test]
+fn a_driver_without_subscriptions_cannot_declare_an_event_it_never_saw() {
+    let mut registry = declaring_registry(vec![committed_event(2)], Vec::new());
+    let id = ids(&registry)[0];
+    registry.plugins[&id]
+        .event_observation
+        .event_subscriptions
+        .clear();
+    let mut pending = staged(&mut registry, TimelineId::new(), 2, &plain_events(1));
+    let result = build(&registry, &FakePrefix::at(0), &mut pending, 2);
+    let error = declaration_error(err(result));
+    assert_eq!(error, FactualDependencyErrorV1::UndeclarableInput);
+}
+
+fn kinds_follow_the_carried_set(registry: &PluginRegistry, id: PluginId) -> bool {
+    let entry = &registry.plugins[&id];
+    let mut kinds = entry.carried_kinds.keys();
+    kinds.all(|seq| entry.carried.contains_key(seq))
+}
+
+#[test]
+fn the_carried_kinds_never_outlive_the_carried_set() {
+    let (first, first_script) = scripted("first", 1, "probe.out.first");
+    let mut registry = registry_with(vec![first]);
+    let id = ids(&registry)[0];
+    let timeline = TimelineId::new();
+    let pending = staged(&mut registry, timeline, 2, &plain_events(2));
+    registry.commit_pending_step(pending);
+    assert!(kinds_follow_the_carried_set(&registry, id));
+    assert_eq!(registry.plugins[&id].carried_kinds.len(), 2);
+
+    let pending = staged(&mut registry, timeline, 4, &plain_events(4));
+    registry.commit_pending_step(pending);
+    assert!(kinds_follow_the_carried_set(&registry, id));
+    assert_eq!(registry.plugins[&id].carried.len(), 4);
+    assert_eq!(registry.plugins[&id].carried_kinds.len(), 4);
+
+    // A recorded commit empties both together.
+    set_script(&first_script, &[b"a"]);
+    let pending = staged(&mut registry, timeline, 4, &plain_events(4));
+    registry.commit_pending_step(pending);
+    assert!(registry.plugins[&id].carried.is_empty());
+    assert!(registry.plugins[&id].carried_kinds.is_empty());
+}
+
+/// One Driver that reads the full verified prefix and emits `payloads`.
+fn verified_prefix_registry(payloads: &[&'static [u8]]) -> PluginRegistry {
+    let (driver, script) = scripted("first", 1, "probe.out.first");
+    set_script(&script, payloads);
+    let mut registry = registry_with(vec![driver]);
+    let id = ids(&registry)[0];
+    registry.plugins[&id]
+        .event_observation
+        .verified_prefix_required = true;
+    registry
+}
+
+#[test]
+fn the_verified_prefix_digest_is_gathered_only_for_a_pass_that_stages_a_draft() {
+    let mut quiet = verified_prefix_registry(&[]);
+    let pending = staged(&mut quiet, TimelineId::new(), 2, &plain_events(2));
+    assert_eq!(pending.factual.prefix_digests, [None]);
+
+    let mut busy = verified_prefix_registry(&[b"a"]);
+    let pending = staged(&mut busy, TimelineId::new(), 2, &plain_events(2));
+    assert!(pending.factual.prefix_digests[0].is_some());
 }

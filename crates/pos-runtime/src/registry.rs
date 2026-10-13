@@ -38,7 +38,7 @@ use pos_core::{
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
-use factual_dependencies::{split_output, verified_prefix_digest, StagedFactual};
+use factual_dependencies::{split_output, StagedFactual};
 
 use crate::output_admission::OutputPolicySourceV1;
 use crate::{
@@ -1106,12 +1106,19 @@ struct PluginEntry {
     owner_id: FactualOwnerIdV1,
     /// The `(seq, payload_hash)` of every Event forwarded to the Driver since
     /// its last recorded step node (R3.4.8).
+    ///
+    /// Kept beside `carried_kinds`: every key of `carried_kinds` is a key of
+    /// `carried`. `settle_carried_sets` writes both, and `collapse_carried`,
+    /// a restore and a recorded commit clear both. The test
+    /// `the_carried_kinds_never_outlive_the_carried_set` pins the invariant.
     carried: BTreeMap<Seq, pos_core::Hash>,
     /// The consumed history the Driver's next recorded step node must cover
     /// (R3.4.10).
     history: HistoryInputV1,
-    /// The Event type of every Event in `carried`: an ingress node's schema ID
-    /// is a function of it (R3.3.2, R3.4.4).
+    /// The Event type of every Event in `carried` whose type the pass saw: an
+    /// ingress node's schema ID is a function of it (R3.3.2, R3.4.4).
+    ///
+    /// Its keys are a subset of the keys of `carried`; see there.
     carried_kinds: BTreeMap<Seq, Kind>,
     /// Where the Driver's next step node finds its previous step node
     /// (R3.4.2(c), R3.8.1).
@@ -2824,8 +2831,7 @@ impl PluginRegistry {
                     }
                     staged_driver_ids.push(id);
                     event_cursors.push((id, plan.cursor));
-                    let prefix = verified_prefix_digest(&self.plugins[&id], cut, &operation);
-                    factual.push_driver(all_drafts.len(), drafts.len(), prefix, declaration);
+                    factual.push_driver(all_drafts.len(), drafts.len(), declaration);
                     forwarded.push(plan.forwarded);
                     all_drafts.extend(drafts);
                 }
@@ -2837,6 +2843,10 @@ impl PluginRegistry {
             }
         }
 
+        if !all_drafts.is_empty() {
+            let ids = &staged_driver_ids;
+            factual.gather_prefix_digests(&self.plugins, ids, cut, &operation);
+        }
         factual.gather_facts(&forwarded, committed_events, &operation);
         self.pending_step = Some(PendingStep {
             timeline,

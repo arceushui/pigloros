@@ -227,6 +227,7 @@ fn human_dependencies(
         .map_err(HumanActionAdmissionErrorV1::Store)?;
     let context = FactualTickContextV1 {
         timeline_id: timeline,
+        // The head is a `u64` Tick count; it cannot reach `u64::MAX` in practice.
         tick: head.tick.saturating_add(1),
         attempt_id: admission.attempt_id,
         evidence_digest: evidence,
