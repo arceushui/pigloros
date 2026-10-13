@@ -1741,9 +1741,6 @@ impl PipelineAdmissionPortV1 for DigestRecordingPort<'_> {
         if let Some(outcome) = &self.refusal {
             return Ok(outcome.clone());
         }
-        if self.skew == 0 {
-            return self.inner.admit_pipeline_batch(basis);
-        }
         self.inner.admit_pipeline_batch(&skewed(basis, self.skew))
     }
 
@@ -4168,8 +4165,8 @@ fn forwarded_events_are_recorded_once_as_ingress_nodes_on_memory() {
             .map(|node| node.as_ref().map(|found| found.coordinate().owner_id()))
             .collect();
         let driver = owner_at(&registry, 0);
-        let expected = [Some(INGRESS), Some(INGRESS), Some(INGRESS), Some(driver.as_str())];
-        assert_eq!(owners, expected, "{name}");
+        assert_eq!(owners[..3], [Some(INGRESS); 3], "{name}");
+        assert_eq!(owners[3], Some(driver.as_str()), "{name}");
 
         // A fourth raw Event is the only one the next pass records a node for.
         append_events(store.as_mut(), &host, INPUT, 1);
@@ -4218,28 +4215,59 @@ fn a_restored_history_node_is_recorded_once_on_memory() {
     }
 }
 
-/// ADR-064 R3.8.2 and R3.7.2: a refusal the real store gives, here of an
-/// asserted Tick that is not the next one, is wrapped as a not-admitted error;
-/// the staged Drivers abort, nothing commits, and the retry that declares the
-/// right Tick commits.
+/// Stage one Driver over an empty Timeline, offer its pass to the real store
+/// with the authority grant and the Tick skew `offer` names, and require the
+/// refusal `expected`: the staged Driver aborts and nothing commits.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn assert_real_refusal(
+    name: &str,
+    store: &mut dyn Harness,
+    host: &Host,
+    offer: (Hash, u64),
+    expected: &PipelineOutcomeV1,
+) {
+    let (grant, skew) = offer;
+    let log = Log::default();
+    let mut registry = host.registry();
+    register(&mut registry, driver("first", vec![b"a1"], &log));
+    ok(stage(host, &mut registry, &all_at(0, &[])));
+    let admission = ScheduledPassAdmissionV1 {
+        authority_grant: grant,
+        ..host.admission(store, 1)
+    };
+    let mut port = DigestRecordingPort::skewing(store, skew);
+    let refused = rejection(registry.admit_scheduled_pass(&mut port, &admission));
+    assert_eq!(refused, format!("{expected:?}"), "{name}");
+    assert_eq!(port.bases.len(), 1, "{name}");
+    assert_eq!(entries(&log), ["first:step@0", "first:abort"], "{name}");
+    assert!(committed_events(store, host.timeline).is_empty(), "{name}");
+}
+
+/// ADR-064 R3.8.2 and R3.7.2: a refusal the real store gives is wrapped as a
+/// not-admitted error; the staged Drivers abort, nothing commits, and the retry
+/// that declares the right Tick under the fence's grant commits.
+///
+/// Two refusals are reachable through the real adapter here: an asserted Tick
+/// that is not the next one (`InvalidDependencyDeclaration`) and edges that
+/// name another authority grant than the persisted fence's
+/// (`AdmissionConflict`). `DependencySetExhausted` needs a recorded set filled
+/// to its bound of a million nodes; the only seam that fills one,
+/// `fill_factual_set_for_test`, exists in the `pos-store` unit tests alone, so
+/// that outcome is covered there
+/// (`an_exhausted_dependency_set_refuses_both_ingresses_and_commits_nothing`).
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn the_memory_stores_own_refusal_aborts_the_staged_drivers() {
     for (name, mut store) in recording_stores() {
         let host = Host::prepare(store.as_mut(), 1_000);
+        let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
+        assert_real_refusal(name, store.as_mut(), &host, (GRANT, 4), &invalid);
+        let conflict = PipelineOutcomeV1::AdmissionConflict;
+        assert_real_refusal(name, store.as_mut(), &host, (hash(2), 0), &conflict);
+
         let log = Log::default();
         let mut registry = host.registry();
         register(&mut registry, driver("first", vec![b"a1"], &log));
-        ok(stage(&host, &mut registry, &all_at(0, &[])));
-        let admission = host.admission(store.as_ref(), 1);
-        let mut port = DigestRecordingPort::skewing(store.as_mut(), 4);
-        let refused = rejection(registry.admit_scheduled_pass(&mut port, &admission));
-        let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
-        assert_eq!(refused, format!("{invalid:?}"), "{name}");
-        assert_eq!(port.bases.len(), 1, "{name}");
-        assert_eq!(entries(&log), ["first:step@0", "first:abort"], "{name}");
-        assert!(committed_events(store.as_ref(), host.timeline).is_empty());
-
         let retry = admit_pass_basis(&host, &mut registry, store.as_mut(), (0, 2));
         assert_eq!(retry.dependencies().tick(), 1, "{name}");
         assert_eq!(committed_events(store.as_ref(), host.timeline).len(), 1);

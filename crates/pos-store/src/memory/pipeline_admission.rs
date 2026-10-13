@@ -151,39 +151,34 @@ impl MemoryStore {
                 let evaluated = evaluate_pipeline_admission(basis, &persisted, |grant| {
                     self.authority_state.resolve(grant)
                 });
+                let first = logical_head.next();
                 install_or_reject(evaluated, |next_fence| {
-                    self.install_pipeline_batch(timeline, basis, now, prefix, next_fence)
+                    self.install_pipeline_batch(timeline, basis, now, prefix, first, next_fence)
                 })
             })
     }
 
     /// Check the Tick declaration, then stage the complete batch and install
     /// every effect together. A refused declaration is the commit's outcome;
-    /// nothing is appended or recorded.
+    /// nothing is appended or recorded. `first_seq` is the logical `seq` the
+    /// batch's first Event takes.
     fn install_pipeline_batch(
         &mut self,
         timeline: TimelineId,
         basis: &PipelineAdmissionBasisV1,
         now: WallTime,
         prefix: u64,
+        first_seq: Seq,
         next_fence: &PipelineAdmissionFenceV1,
     ) -> Result<PipelineOutcomeV1, CoreError> {
-        let first_local = self.state(timeline).timeline.head.next().as_u64();
-        crate::checked_logical_head(prefix, first_local)
-            .and_then(|first_logical| {
-                self.plan_factual_tick(
-                    timeline,
-                    basis,
-                    next_fence.authority_grant(),
-                    Seq::from_u64(first_logical),
-                )
-            })
-            .and_then(|planned| match planned {
-                Ok(install) => {
-                    self.stage_pipeline_batch(timeline, basis, now, prefix, next_fence, &install)
-                }
-                Err(refusal) => Ok(refusal),
-            })
+        let grant = next_fence.authority_grant();
+        let planned = self.plan_factual_tick(timeline, basis, grant, first_seq);
+        planned.and_then(|checked| match checked {
+            Ok(install) => {
+                self.stage_pipeline_batch(timeline, basis, now, prefix, next_fence, &install)
+            }
+            Err(refusal) => Ok(refusal),
+        })
     }
 
     /// Stage the complete batch on a copy of the Timeline, then install every
@@ -219,10 +214,11 @@ impl MemoryStore {
                     })
             })
             .map(|(committed, receipt, expires_at)| {
+                let record = basis.dependencies().record();
                 self.event_ids
                     .extend(committed.iter().map(|event| event.id));
                 self.timelines.insert(timeline, staged);
-                self.install_planned_factual_tick(timeline, basis.dependencies().record(), install);
+                self.install_planned_factual_tick(timeline, record, install);
                 self.pipeline_admission_fences.insert(timeline, *next_fence);
                 self.pipeline_admission_receipts.insert(
                     basis.attempt().idempotency().dedup_key,
@@ -504,6 +500,7 @@ mod tests {
             &basis,
             WallTime::from_micros(1),
             0,
+            Seq::from_u64(1),
             &staged_fence,
         );
 
@@ -524,6 +521,7 @@ mod tests {
             &basis,
             WallTime::from_micros(1),
             0,
+            Seq::from_u64(1),
             &staged_fence,
         ));
         assert_eq!(ok(store.read(timeline, SeqRange::all())).len(), 2);
@@ -576,6 +574,7 @@ mod tests {
                 &basis,
                 WallTime::from_micros(1),
                 0,
+                Seq::from_u64(1),
                 &staged_fence,
             ));
 

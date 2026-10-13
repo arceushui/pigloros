@@ -66,12 +66,28 @@ fn node_at(nodes: &[DependencyNodeRecordV1], index: u32) -> Option<&DependencyNo
     usize::try_from(index).ok().and_then(|at| nodes.get(at))
 }
 
+/// Whether the basis is that of a scheduled Driver Tick; the other ingress is
+/// a human action.
+fn is_scheduled(basis: &PipelineAdmissionBasisV1) -> bool {
+    matches!(
+        basis.attempt().ingress(),
+        PipelineIngressV1::ScheduledAiDriver
+    )
+}
+
+/// R3.7.2 (i), well-formedness: every edge carries an authorization that is a
+/// 32-byte digest.
+pub(super) fn edges_well_formed(basis: &PipelineAdmissionBasisV1) -> bool {
+    let edges = basis.dependencies().record().edges();
+    edges
+        .iter()
+        .all(|edge| edge.authorization_digest().is_some())
+}
+
 /// R3.7.2 (i): every edge carries the persisted fence's authority grant.
 pub(super) fn edges_carry_grant(basis: &PipelineAdmissionBasisV1, grant: Hash) -> bool {
-    basis
-        .dependencies()
-        .record()
-        .edges()
+    let edges = basis.dependencies().record().edges();
+    edges
         .iter()
         .all(|edge| edge.authorization_digest() == Some(grant))
 }
@@ -137,11 +153,7 @@ pub(super) fn snapshot_matches(timeline: TimelineId, basis: &PipelineAdmissionBa
         .map(DependencyNodeRecordV1::coordinate)
         .filter(|coordinate| is_host_node(coordinate, FactualHostOwnerV1::Observation))
         .collect();
-    let human = matches!(
-        basis.attempt().ingress(),
-        PipelineIngressV1::HumanProposedAction
-    );
-    human
+    !is_scheduled(basis)
         || matches!(
             snapshots.as_slice(),
             [only] if only.output_ordinal() == 0
@@ -152,9 +164,10 @@ pub(super) fn snapshot_matches(timeline: TimelineId, basis: &PipelineAdmissionBa
 
 /// R3.7.2 (iv), the part that needs the Events: the bindings are in strictly
 /// ascending `seq` order, each names a committed Event at or below the
-/// observation (`payloads` holds the payload hash of every Event that exists),
-/// and its node of this Tick carries the artifact digest recomputed from the
-/// Event's payload hash and `seq`.
+/// observation, and its node of this Tick carries the artifact digest
+/// recomputed from the Event's payload hash and `seq`. `payloads` holds the
+/// payload hash of every bound Event that exists at or below the observation:
+/// a binding without an entry names no such Event.
 ///
 /// Returns the `(seq, artifact digest)` Event binding of every ingress node.
 pub(super) fn ingress_event_nodes(
@@ -165,7 +178,6 @@ pub(super) fn ingress_event_nodes(
     let dependencies = basis.dependencies();
     let nodes = dependencies.record().nodes();
     let bindings = dependencies.event_nodes();
-    let observed = basis.attempt().observation().observed_through();
     let tick = dependencies.tick();
     let ascending = bindings.windows(2).all(|pair| pair[0].seq < pair[1].seq);
     let bound = bindings
@@ -173,7 +185,6 @@ pub(super) fn ingress_event_nodes(
         .map(|binding| {
             payloads
                 .get(&binding.seq.as_u64())
-                .filter(|_| binding.seq <= observed)
                 .map(|payload_hash| factual_ingress_content_digest(*payload_hash, binding.seq))
                 .and_then(|content| {
                     node_at(nodes, binding.node_index)
@@ -200,11 +211,7 @@ pub(super) fn shape_holds(basis: &PipelineAdmissionBasisV1) -> bool {
         .iter()
         .map(|node| (node.coordinate().artifact_digest(), node))
         .collect();
-    let scheduled = matches!(
-        basis.attempt().ingress(),
-        PipelineIngressV1::ScheduledAiDriver
-    );
-    (scheduled || nodes.len() == basis.batch().drafts().len())
+    (is_scheduled(basis) || nodes.len() == basis.batch().drafts().len())
         && nodes.iter().all(|node| node_shape_holds(node, &by_digest))
 }
 
