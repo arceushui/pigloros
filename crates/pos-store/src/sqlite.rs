@@ -13785,18 +13785,27 @@ fn sqlite_fork_admission_result_with_context(
                 .map(ForkAdmissionOperationResultV1::PrincipalOwner)
         }
         (ForkAdmissionOperationKindV1::Fork, Some(child_id)) => {
-            let bytes = conn
-                .query_row(
-                    "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1",
-                    params![child_id.to_string()],
-                    |record| record.get::<_, Vec<u8>>(0),
-                )
-                .optional()
-                .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)?
-                .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
-            let admission = ForkAdmissionRecordV1::from_canonical_cbor(&bytes)
+            context
+                .bytes(ulid::ULID_LEN)
                 .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
-            if admission.digest() != row.result_digest
+            let child_key = child_id.to_string();
+            let bytes = fork_replay_admission::recovery_admission_blob_with_context(
+                conn,
+                &child_key,
+                context,
+            )?
+            .ok_or(pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            let admission = context
+                .local_admission_record(&bytes)
+                .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            context
+                .canonical(admission.canonical_cbor_len())
+                .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            let digest = admission.digest();
+            context
+                .check()
+                .map_err(|_| pos_core::ForkAdmissionErrorV1::CorruptAuthority)?;
+            if digest != row.result_digest
                 || admission.input().operation_id != row.operation_id
                 || admission.input().child_timeline_id != child_id
             {
