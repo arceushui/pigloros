@@ -116,14 +116,18 @@ impl StagedFactual {
     /// Keep the verified-prefix digest of every stepped Driver that has one.
     ///
     /// A pass that stages no draft records no Tick, so only a pass that staged
-    /// a draft pays for the digests.
+    /// a draft (`staged`) pays for the digests.
     pub(super) fn gather_prefix_digests(
         &mut self,
+        staged: bool,
         plugins: &IndexMap<PluginId, PluginEntry>,
         driver_ids: &[PluginId],
         cut: (Seq, &[Event]),
         operation: &OperationContext,
     ) {
+        if !staged {
+            return;
+        }
         for (slot, id) in self.prefix_digests.iter_mut().zip(driver_ids) {
             *slot = verified_prefix_digest(&plugins[id], cut, operation);
         }

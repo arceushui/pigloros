@@ -2910,10 +2910,9 @@ impl PluginRegistry {
             }
         }
 
-        if !all_drafts.is_empty() {
-            let ids = &staged_driver_ids;
-            factual.gather_prefix_digests(&self.plugins, ids, cut, &operation);
-        }
+        let ids = &staged_driver_ids;
+        let staged = !all_drafts.is_empty();
+        factual.gather_prefix_digests(staged, &self.plugins, ids, cut, &operation);
         factual.gather_facts(&forwarded, committed_events, &operation);
         self.pending_step = Some(PendingStep {
             timeline,
