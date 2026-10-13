@@ -86,6 +86,10 @@ validate_json_fixture_adapter() {
   }
 }
 
+# The 64-entry cap, the inputs/ prefix and the media-type pattern below are copies of
+# DEFAULT_AUXILIARY_CAP and the rules in crates/pos-conformance/src/catalog_auxiliary.rs;
+# build.rs, verify-conformance-fixtures.sh and generate-conformance-fixture-records.sh
+# must agree.
 validate_auxiliary_declaration() {
   local provider_manifest="$1"
   jq -e --argjson family_names "${family_names}" '

@@ -7,20 +7,15 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 /// Default maximum number of auxiliary entries per family; pinned to `MAX_AUXILIARY_ARTIFACTS`.
+/// ADR-061 revision 8 sets 64 per family; CPF1 also counts the fixed evidence and oracle
+/// members in its total of 64 descriptors, a tension left to the S3b1 composite.
 pub(super) const DEFAULT_AUXILIARY_CAP: usize = 64;
 /// Maximum total bytes of embedded auxiliary members over all layers.
 pub(super) const MAX_EMBEDDED_AUXILIARY_BYTES: usize = 4 * 1024 * 1024;
-/// Directories that the source inventories (`SHA256SUMS`, `BLAKE3SUMS`) cover.
-const INVENTORY_DIRECTORIES: [&str; 8] = [
-    "expected-authority",
-    "expected",
-    "inputs",
-    "matrix",
-    "oracles",
-    "profiles",
-    "providers",
-    "support",
-];
+/// The only source directory auxiliary members may live in. The shell validators
+/// (`verify-conformance-fixtures.sh`, `generate-conformance-fixture-records.sh`) and the
+/// fixture README apply the same `inputs/` rule.
+const AUXILIARY_DIRECTORY: &str = "inputs";
 
 /// One `auxiliary` entry of a provider manifest.
 pub(super) struct AuxiliaryEntry {
@@ -48,7 +43,7 @@ impl fmt::Display for AuxiliaryCatalogError {
             }
             Self::UnsafePath(path) => format!("auxiliary path is unsafe or not relative: {path}"),
             Self::OutsideInventory(path) => {
-                format!("auxiliary path is outside inventoried directories: {path}")
+                format!("auxiliary path is outside the inputs directory: {path}")
             }
             Self::DuplicatePath(path) => format!("auxiliary path is declared twice: {path}"),
             Self::MissingSource(path) => {
@@ -86,10 +81,11 @@ fn safe_relative_path(path: &str) -> bool {
 
 fn in_inventory_directory(path: &str) -> bool {
     path.split_once('/')
-        .is_some_and(|(directory, _)| INVENTORY_DIRECTORIES.contains(&directory))
+        .is_some_and(|(directory, _)| directory == AUXILIARY_DIRECTORY)
 }
 
-/// Checks the auxiliary entries of one family against the verified inventoried source set.
+/// Checks the auxiliary entries of one family against the snapshotted source set (the
+/// inventory digests are verified afterwards).
 pub(super) fn validate_auxiliary_catalog(
     sources: &BTreeSet<String>,
     entries: &[AuxiliaryEntry],
@@ -142,7 +138,7 @@ pub(super) fn check_embedded_total(
 mod tests {
     use super::{
         check_embedded_total, valid_media_type, validate_auxiliary_catalog, AuxiliaryCatalogError,
-        AuxiliaryEntry, DEFAULT_AUXILIARY_CAP, INVENTORY_DIRECTORIES, MAX_EMBEDDED_AUXILIARY_BYTES,
+        AuxiliaryEntry, AUXILIARY_DIRECTORY, DEFAULT_AUXILIARY_CAP, MAX_EMBEDDED_AUXILIARY_BYTES,
     };
     use std::collections::BTreeSet;
 
@@ -223,7 +219,7 @@ mod tests {
 
     #[test]
     fn a_path_outside_the_inventoried_directories_is_refused() {
-        for path in ["SHA256SUMS", "published/a.pcw2", "scripts/a.pcw2"] {
+        for path in ["SHA256SUMS", "support/a.pcw2", "published/a.pcw2"] {
             assert_eq!(
                 check(&[path], &[entry(path)]),
                 Err(AuxiliaryCatalogError::OutsideInventory(path.to_owned()))
@@ -232,11 +228,9 @@ mod tests {
     }
 
     #[test]
-    fn every_inventoried_directory_is_accepted() {
-        for directory in INVENTORY_DIRECTORIES {
-            let path = format!("{directory}/a.bin");
-            assert_eq!(check(&[path.as_str()], &[entry(&path)]), Ok(()));
-        }
+    fn the_inputs_directory_is_accepted() {
+        let path = format!("{AUXILIARY_DIRECTORY}/a.bin");
+        assert_eq!(check(&[path.as_str()], &[entry(&path)]), Ok(()));
     }
 
     #[test]
@@ -292,7 +286,7 @@ mod tests {
             [
                 "auxiliary catalog has 65 entries, above the cap 64",
                 "auxiliary path is unsafe or not relative: p",
-                "auxiliary path is outside inventoried directories: p",
+                "auxiliary path is outside the inputs directory: p",
                 "auxiliary path is declared twice: p",
                 "auxiliary path is not an inventoried source: p",
                 "auxiliary media type is invalid: m",

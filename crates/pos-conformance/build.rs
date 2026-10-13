@@ -1018,9 +1018,17 @@ fn validate_fixture_provider(
             && adapter_config.is_object()
     };
     let declared_families = family_names.iter().collect::<BTreeSet<_>>();
-    let auxiliary_matches_families = json_field(provider, "auxiliary")?
-        .as_object()
-        .is_some_and(|auxiliary| auxiliary.keys().collect::<BTreeSet<_>>() == declared_families);
+    let json_adapter = adapter_id == JSON_FIXTURE_ADAPTER_ID;
+    let auxiliary_matches_families =
+        json_field(provider, "auxiliary")?
+            .as_object()
+            .is_some_and(|auxiliary| {
+                auxiliary.keys().collect::<BTreeSet<_>>() == declared_families
+                    && (!json_adapter
+                        || auxiliary
+                            .values()
+                            .all(|entries| entries.as_array().is_some_and(Vec::is_empty)))
+            });
     let valid = !json_text(provider, "provider_id")?.is_empty()
         && !json_text(provider, "contract_version")?.is_empty()
         && u16::try_from(json_u64(provider, "abi_major")?).is_ok()
@@ -2475,8 +2483,8 @@ fn manifest_catalog_root() -> Result<CatalogRoot, Box<dyn Error>> {
 fn discover_build_data(root: &CatalogRoot) -> Result<DiscoveredBuildData, Box<dyn Error>> {
     let snapshots = source_snapshots(root)?;
     let profiles = discover_profiles(root, &snapshots)?;
-    check_auxiliary_total(&profiles)?;
     let source_inventory_digest = verify_source_inventory(&snapshots, &profiles)?;
+    check_auxiliary_total(&profiles)?;
     Ok((snapshots, profiles, source_inventory_digest))
 }
 

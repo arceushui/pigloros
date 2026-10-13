@@ -81,6 +81,10 @@ validate_json_fixture_adapter() {
   }
 }
 
+# The 64-entry cap, the inputs/ prefix and the media-type pattern below are copies of
+# DEFAULT_AUXILIARY_CAP and the rules in crates/pos-conformance/src/catalog_auxiliary.rs;
+# build.rs, verify-conformance-fixtures.sh and generate-conformance-fixture-records.sh
+# must agree.
 validate_auxiliary_declaration() {
   local provider_manifest="$1"
   jq -e --argjson family_names "${family_names}" '
@@ -457,6 +461,14 @@ for layer in "${profile_layers[@]}"; do
        test("^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$")) and
      (.fixture_adapter.config | type == "object") and
      (.auxiliary | type == "object") and
+     (if .claim_layer == "plugin-conformance" then
+        ([.fixture_contracts | to_entries[] | [.key, .value.watchdog_ms]] | sort) == [
+          ["deletion-redaction", 600000], ["denied", 3000000],
+          ["downgrade", 60000], ["independent-evaluation", 300000],
+          ["malformed", 60000], ["positive", 1200000],
+          ["resource-exhaustion", 1200000]
+        ]
+      else true end) and
      (.schemas | length == $family_count) and
      (.fixture_contracts | keys | sort) == ($family_names | sort) and
      all(.fixture_contracts[];

@@ -117,6 +117,25 @@ grep -Fq "auxiliary path is not an inventoried source" "${log}" || {
   exit 1
 }
 
+for auxiliary_edit in 'del(.auxiliary.positive)' '.auxiliary.unknown = []' \
+  '.auxiliary.positive = [{path: "inputs/artifact-integrity/json.pcw2", media_type: "application/octet-stream"}]'; do
+  cp -- "${backup_root}/provider.json" "${provider}"
+  cp -- "${backup_root}/BLAKE3SUMS" "${blake_inventory}"
+  cp -- "${backup_root}/SHA256SUMS" "${sha_inventory}"
+  jq "${auxiliary_edit}" "${provider}" >"${replacement}"
+  mv -- "${replacement}" "${provider}"
+  refresh_inventory_digest "${provider}" "providers/artifact-integrity/provider.json"
+  if CARGO_TARGET_DIR="${negative_target}" cargo check -p pos-conformance --locked >"${log}" 2>&1; then
+    echo "pos-conformance build accepted an invalid auxiliary declaration: ${auxiliary_edit}" >&2
+    exit 1
+  fi
+  grep -Fq "provider manifest does not match profile claim layer" "${log}" || {
+    echo "pos-conformance build rejected the auxiliary declaration for the wrong reason: ${auxiliary_edit}" >&2
+    cat "${log}" >&2
+    exit 1
+  }
+done
+
 add_inventory_entry() {
   local source="$1"
   local relative="$2"
@@ -143,7 +162,7 @@ if ! CARGO_TARGET_DIR="${negative_target}" cargo check -p pos-conformance --lock
   exit 1
 fi
 embedded_catalog="$(
-  grep -rl --include=conformance_fixture_catalog.rs 'aux/0.bin' "${negative_target}" | head -n 1
+  grep -Frl --include=conformance_fixture_catalog.rs -- 'aux/0.bin' "${negative_target}" | head -n 1
 )"
 [[ -n "${embedded_catalog}" ]] || {
   echo "pos-conformance catalog does not embed the auxiliary member" >&2

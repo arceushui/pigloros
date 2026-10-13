@@ -1070,13 +1070,15 @@ fn fixture_descriptor_from_record(
     })
 }
 
-const AUXILIARY_MEMBER_NAME: &str = "plugin-world";
+/// Member name of the first auxiliary composite. ADR-061 revision 8 (S3b) names it
+/// `plugin-world`; the catalog is generic, so the name is only a path-derivation input.
+const AUXILIARY_INPUT_MEMBER: &str = "plugin-world";
 
 fn auxiliary_member_name(index: usize) -> String {
     if index == 0 {
-        AUXILIARY_MEMBER_NAME.to_owned()
+        AUXILIARY_INPUT_MEMBER.to_owned()
     } else {
-        format!("{AUXILIARY_MEMBER_NAME}-{index}")
+        format!("{AUXILIARY_INPUT_MEMBER}-{index}")
     }
 }
 
@@ -1444,9 +1446,14 @@ fn verify_public_archive(
 mod auxiliary_tests {
     use super::{
         artifact_descriptor, auxiliary_artifacts, auxiliary_member_name, auxiliary_members,
-        sort_auxiliary_by_path, CatalogAuxiliary,
+        fixture_context, fixture_descriptor_from_record, layer_catalog, sort_auxiliary_by_path,
+        CatalogAuxiliary, CatalogFixture,
     };
-    use pos_conformance::{fixture_input_member_path, BundleMemberRoleV1, ClaimLayerV1};
+    use pos_conformance::{
+        fixture_input_member_path, BundleMemberRoleV1, ClaimLayerV1, ExecutionModeV1,
+        FixtureProviderKeyV1,
+    };
+    use std::error::Error;
 
     const CASE: &str = "plugin-conformance-positive";
     const LAYER: ClaimLayerV1 = ClaimLayerV1::PluginConformance;
@@ -1513,5 +1520,57 @@ mod auxiliary_tests {
             .map(|descriptor| descriptor.member_path.as_str())
             .collect::<Vec<_>>();
         assert_eq!(paths, ["evidence/aa", "expected/mm.bin", "inputs/zz.bin"]);
+    }
+
+    #[test]
+    fn fixture_descriptors_sort_derived_auxiliary_paths() -> Result<(), Box<dyn Error>> {
+        let first = layer_catalog().entries.remove(0);
+        let layer = layer_catalog().entries.remove(0);
+        let source = first.fixture_providers.into_iter().next();
+        let fixture = source.and_then(|provider| provider.fixtures.into_iter().next());
+        let fixture = fixture.ok_or("the catalog has no fixture")?;
+        let fixture = CatalogFixture {
+            auxiliary: &CATALOG,
+            ..fixture
+        };
+        let context = fixture_context(&layer);
+        let provider = &layer.fixture_providers[0];
+        let key = FixtureProviderKeyV1 {
+            provider_id: provider.provider.provider_id.to_owned(),
+            contract_version: provider.provider.contract_version.to_owned(),
+            abi_major: provider.provider.abi_major,
+            abi_minor: provider.provider.abi_minor,
+        };
+        let paths = |execution: &[u8; 32]| {
+            auxiliary_artifacts(&CATALOG, fixture.case_id, layer.claim_layer, execution)
+                .into_iter()
+                .map(|artifact| artifact.path)
+                .collect::<Vec<_>>()
+        };
+        let execution = (1..=u8::MAX)
+            .map(|byte| [byte; 32])
+            .find(|execution| {
+                let derived = paths(execution);
+                derived[0] > derived[1]
+            })
+            .ok_or("no execution digest derives out-of-order paths")?;
+        let derived = paths(&execution);
+        let descriptor = fixture_descriptor_from_record(
+            &layer,
+            provider,
+            &fixture,
+            &context,
+            &key,
+            execution,
+            ExecutionModeV1::Local,
+        )?;
+        let listed = descriptor
+            .auxiliary
+            .iter()
+            .map(|artifact| artifact.member_path.clone())
+            .collect::<Vec<_>>();
+        assert!(listed.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(derived.iter().all(|path| listed.contains(path)));
+        Ok(())
     }
 }

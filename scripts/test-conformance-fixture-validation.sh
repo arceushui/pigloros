@@ -203,6 +203,11 @@ rm -- "${opaque_auxiliary_root}/inputs/artifact-integrity/positive.pcw2"
 bash scripts/generate-conformance-fixture-records.sh "${opaque_auxiliary_root}" --write
 expect_rejection "${opaque_auxiliary_root}" "empty conformance fixture"
 
+watchdog_root="$(new_fixture_copy plugin-watchdog-drift)"
+replace_json "${watchdog_root}/providers/plugin-conformance/provider.json" \
+  '.fixture_contracts.denied.watchdog_ms = 1000'
+expect_rejection "${watchdog_root}" "invalid provider manifest for plugin-conformance"
+
 unknown_authority_root="$(new_fixture_copy unknown-authority-field)"
 replace_json "${unknown_authority_root}/support/draft-execution-authority.json" \
   '.undeclared_authority = true'
