@@ -224,21 +224,3 @@ fn the_denied_sub_cases_split_into_link_failures_and_refusals_before_a_launch() 
     );
     Ok(())
 }
-
-/// R8-F5 (with `scripts/check_plugin_conformance_expected.py`): the Local and Air-Gapped attempts
-/// of a family carry the same payload digest, and it is the one the pending record binds.
-#[test]
-fn both_modes_bind_the_digest_of_the_pending_record() -> TestResult {
-    for family in FixtureFamily::ALL.iter().copied() {
-        let local = attempt_from_fixture_files(family, ExecutionMode::Local)?;
-        let air_gapped = attempt_from_fixture_files(family, ExecutionMode::AirGapped)?;
-        assert_eq!(local.fixture_digest, air_gapped.fixture_digest, "{family:?}");
-        let name = family_text(family);
-        let path = fixture_root().join(format!("expected/plugin-conformance/{name}.json"));
-        let record: Value = serde_json::from_slice(&fs::read(path)?)?;
-        assert_eq!(record["status"], "pending", "{family:?}");
-        let digest: String = local.fixture_digest.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(record["input_blake3_digest"], digest, "{family:?}");
-    }
-    Ok(())
-}

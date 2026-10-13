@@ -1365,13 +1365,14 @@ def resource_subcases() -> list[SubCase]:
     """`res.1` to `res.4`: each limit of the signed release gives its own error (R8-F7b)."""
     return [
         starved_subcase("res.1", "c-guest.wasm", "FuelExhausted", fuel=1),
-        # The prototype guest reserves 17 pages when it starts.
+        # Restates docs/evidence/adr-061-r4-prototype.md: the guest reserves 17 pages at start.
         starved_subcase(
             "res.2", "rust-guest.wasm", "MemoryLimitExceeded", memory=WASM_PAGE_BYTES
         ),
-        # The guest makes 3 host calls (time, random, log).
+        # Restates the same document: 3 host calls per pass (time, random, log); the real
+        # worker run (R8-F7b) is what proves the guest hits the limit.
         starved_subcase("res.3", "rust-guest.wasm", "HostCallLimitExceeded", host_calls=2),
-        # The guest emits one Event with an 8-byte payload.
+        # Restates the same document: one Event with an 8-byte payload (the 8-byte state).
         starved_subcase("res.4", "rust-guest.wasm", "OutputLimitExceeded", event_bytes=1),
     ]
 
