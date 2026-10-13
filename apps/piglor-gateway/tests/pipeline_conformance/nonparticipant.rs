@@ -137,7 +137,8 @@ fn admission(commit_head: Seq) -> ScheduledPassAdmissionV1 {
             },
         )
         .test_ok(),
-        // No fence is published: the port never commits.
+        // No fence is published and the port never commits: the grant is deliberately
+        // unbound, so no store ever checks it against a fence.
         authority_grant: grant,
         commit_head,
         commit_now_secs: 0,

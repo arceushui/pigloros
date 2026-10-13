@@ -44,6 +44,8 @@ pub struct ScheduledPassAdmissionV1 {
     pub idempotency: AppendIdentity,
     pub provider_validation: PipelineEvidenceRefV1,
     pub security_revisions: PipelineSecurityRevisionsV1,
+    /// The fence grant the admission basis must carry; the store checks it
+    /// against the published fence from slice 8.
     pub authority_grant: Hash,
     pub commit_head: Seq,
     pub commit_now_secs: u64,

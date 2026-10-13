@@ -2,7 +2,8 @@
 ///
 /// A field is either a boxed scheduled-admission store or a `MemoryStore`;
 /// this one seam lets the forwarding macros reach either without a trait
-/// import at each expansion site.
+/// import at each expansion site. The macros name it as `crate::FactualReadsV1`,
+/// which resolves because this file is `include!`d at the crate root.
 #[cfg(test)]
 trait FactualReadsV1 {
     fn factual_reads(&self) -> &dyn pos_core::FactualPrefixReadPortV1;

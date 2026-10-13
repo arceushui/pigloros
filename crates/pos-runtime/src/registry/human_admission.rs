@@ -49,6 +49,8 @@ pub struct HumanActionAdmissionV1 {
     pub observation: PipelineObservationAnchorV1,
     pub authorization: PipelineEvidenceRefV1,
     pub security_revisions: PipelineSecurityRevisionsV1,
+    /// The fence grant the admission basis must carry; the store checks it
+    /// against the published fence from slice 8.
     pub authority_grant: Hash,
 }
 
