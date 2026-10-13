@@ -23,7 +23,11 @@ fn public_role_verification_preserves_independent_contiguous_framing(
     let public_key = public_key_from_verifying_key(&verifying_key);
     let material = SigningKeyMaterial::new(signing_key.clone());
     let owners = ["o".to_owned(), "π".to_owned(), "界".repeat(42) + "ab"];
-    let payloads = [Vec::new(), b"FRM1-shaped payload".to_vec(), vec![91; 65_536]];
+    let payloads = [
+        Vec::new(),
+        b"FRM1-shaped payload".to_vec(),
+        vec![91; 65_536],
+    ];
     for owner in owners {
         let owner_id = OwnerIdV1::new(owner.clone())?;
         for (role, code) in [
@@ -55,11 +59,13 @@ fn public_role_verification_preserves_independent_contiguous_framing(
                         signature
                     );
                     let other_owner = KeyIdentityV1::new("other-owner", role, epoch);
-                    assert!(verify_for_role(&verifying_key, other_owner, &payload, &signature)
-                        .is_err());
+                    assert!(
+                        verify_for_role(&verifying_key, other_owner, &payload, &signature).is_err()
+                    );
                     let other_epoch = KeyIdentityV1::from_parts(owner_id, role, epoch ^ 1);
-                    assert!(verify_for_role(&verifying_key, other_epoch, &payload, &signature)
-                        .is_err());
+                    assert!(
+                        verify_for_role(&verifying_key, other_epoch, &payload, &signature).is_err()
+                    );
                     let mut altered = bytes.clone();
                     altered.push(0);
                     assert!(verify_for_role(
