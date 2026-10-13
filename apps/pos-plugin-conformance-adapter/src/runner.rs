@@ -34,7 +34,7 @@ use crate::invocation::{
 use crate::payload::SubCaseV1;
 use crate::world::{
     interpret, outcome_bytes_of, BindArgsV1, HostError, InstallArgsV1, PassArgsV1, PassMemberV1,
-    RefreshArgsV1, SetupArgsV1, SubCaseRecordV1, StepPortV1,
+    RefreshArgsV1, SetupArgsV1, StepPortV1, SubCaseRecordV1,
 };
 
 /// The outcome records of one pass.

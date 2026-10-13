@@ -44,7 +44,7 @@ pub mod world;
 
 pub use composite::{PiecesFaultV1, PiecesV1};
 pub use runner::{EvaluationStepPortV1, SubCaseRunnerV1, SupervisorRunnerV1};
-pub use world::{interpret, ScanResultV1, ScanSource, SubCaseRecordV1, StepPortV1};
+pub use world::{interpret, ScanResultV1, ScanSource, StepPortV1, SubCaseRecordV1};
 
 /// The provider ID of every failure the adapter returns.
 pub const PROVIDER_ID: &str = "pigloros.fixture.plugin-conformance";

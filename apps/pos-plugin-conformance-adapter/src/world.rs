@@ -32,7 +32,7 @@ use crate::hex;
 use crate::map::{of_outcome, of_record, SubResultV1};
 pub use crate::payload::ScanSource;
 use crate::payload::{
-    AtV1, ComputeV1, ExpectV1, Hex32, IdentityFieldV1, MaterialV1, MemberV1, InvalidCaseV1,
+    AtV1, ComputeV1, ExpectV1, Hex32, IdentityFieldV1, InvalidCaseV1, MaterialV1, MemberV1,
     ProfileDigestV1, ReleaseV1, StepV1, SubCaseV1, Text,
 };
 
