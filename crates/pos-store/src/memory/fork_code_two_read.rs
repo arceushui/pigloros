@@ -22,7 +22,8 @@ use crate::{
         ValidatedAdmissionV1, ValidatedGraphV1, ValidatedImportV1, ValidatedOriginV1,
     },
     fork_manifest_publication::{
-        publication_parent_head, trusted_committed_manifest_with_context,
+        charge_origin_copy, charge_publication_copy, publication_parent_head,
+        trusted_committed_manifest_with_context,
         CommittedPublicationRowsV1, CommittedPublicationSourcesV1, PublicationSourceErrorV1,
         PublicationSourceResultV1, PublicationSuffixV1, RetainedImportedKeyV1,
         RetainedKeyEvidenceV1,
@@ -247,24 +248,27 @@ impl MemoryStore {
         &self,
         operation_id: Hash,
         validator: AuthorityValidatorV1,
-    ) -> Option<(ForkPublicationOperationV1, ValidatedOriginV1)> {
-        let local = self
-            .fork_publication_operations
-            .get(&operation_id)
-            .map(|operation| (operation.clone(), ValidatedOriginV1::Local));
-        match validator {
-            AuthorityValidatorV1::LocalOnly => local,
-            AuthorityValidatorV1::CodeTwoAware => local.or_else(|| {
-                self.imported_fork_publication_operations
-                    .get(&operation_id)
-                    .map(|operation| {
-                        (
-                            operation.projection().clone(),
-                            ValidatedOriginV1::Imported(operation.authority_origin_digest()),
-                        )
-                    })
-            }),
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<Option<(ForkPublicationOperationV1, ValidatedOriginV1)>, PublicationError> {
+        context.check()?;
+        if let Some(operation) = self.fork_publication_operations.get(&operation_id) {
+            context.suffix_row()?;
+            charge_publication_copy(operation, ValidatedOriginV1::Local, context)?;
+            charge_origin_copy(ValidatedOriginV1::Local, context)?;
+            let row = (operation.clone(), ValidatedOriginV1::Local);
+            return context.check().map(|()| Some(row));
         }
+        if validator == AuthorityValidatorV1::LocalOnly {
+            return Ok(None);
+        }
+        let Some(operation) = self.imported_fork_publication_operations.get(&operation_id)
+            else { return Ok(None); };
+        context.suffix_row()?;
+        let origin = ValidatedOriginV1::Imported(operation.authority_origin_digest());
+        charge_publication_copy(operation.projection(), origin, context)?;
+        charge_origin_copy(origin, context)?;
+        let row = (operation.projection().clone(), origin);
+        context.check().map(|()| Some(row))
     }
 
     /// Where the trusted publication read takes the retained key from (ADR-105
@@ -528,30 +532,7 @@ impl MemoryStore {
         context: &mut NativeReadContextV1<'_, '_>,
     ) -> Result<crate::CommittedForkManifestV1, PublicationError> {
         context.check()?;
-        self.fork_publication_bindings
-            .get(&(child_timeline_id, final_logical_head))
-            .copied()
-            .ok_or(PublicationError::PublicationMissing)
-            .and_then(|binding| {
-                let input = binding.input();
-                let artifact = self
-                    .fork_publication_artifacts
-                    .get(&input.signed_manifest_record_id)
-                    .map(Cow::Borrowed);
-                self.publication_operation_row(input.operation_id, validator)
-                    .zip(artifact)
-                    .map(
-                        |((operation, origin), artifact)| CommittedPublicationRowsV1 {
-                            child_timeline_id,
-                            final_logical_head,
-                            binding,
-                            operation,
-                            origin,
-                            artifact,
-                        },
-                    )
-                    .ok_or(PublicationError::PublicationConflict)
-            })
+        self.publication_rows_with_context(child_timeline_id, final_logical_head, validator, context)
             .and_then(|rows| {
                 let admission = self
                     .validated_admission_with_context(child_timeline_id, validator, context)
@@ -579,6 +560,34 @@ impl MemoryStore {
                 };
                 trusted_committed_manifest_with_context(&rows, sources, context)
             })
+    }
+
+    fn publication_rows_with_context(
+        &self,
+        child_timeline_id: TimelineId,
+        final_logical_head: u64,
+        validator: AuthorityValidatorV1,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<CommittedPublicationRowsV1<'_>, PublicationError> {
+        let binding = self.fork_publication_bindings
+            .get(&(child_timeline_id, final_logical_head))
+            .ok_or(PublicationError::PublicationMissing)?;
+        context.suffix_row()?;
+        context.canonical(binding.canonical_cbor_len())?;
+        let binding = *binding;
+        context.check()?;
+        let input = binding.input();
+        let artifact = if let Some(artifact) = self.fork_publication_artifacts.get(&input.signed_manifest_record_id) {
+            context.suffix_row()?;
+            context.check()?;
+            Some(Cow::Borrowed(artifact))
+        } else { None };
+        self.publication_operation_row(input.operation_id, validator, context)?
+            .zip(artifact)
+            .map(|((operation, origin), artifact)| CommittedPublicationRowsV1 {
+                child_timeline_id, final_logical_head, binding, operation, origin, artifact,
+            })
+            .ok_or(PublicationError::PublicationConflict)
     }
 }
 
@@ -724,6 +733,162 @@ mod tests {
     }
 
     #[test]
+    fn publication_rows_gate_selected_native_or_projection_copies_before_materialization() -> Fallible<()> {
+        use crate::{ForkReplayReadBudgetV1, ForkReplayReadLimitsV1};
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+
+        let mut state = imported(Shape::EmptyUnclassified)?;
+        let committed = state.store.read_committed(state.child, state.head)?;
+        let owner = committed.operation.input().signing_identity.owner_id.as_str().len();
+        let projection = 32 + 16 + 8 + 32 + 32 + owner + 1 + 8 + 32 + 32 + 32 + 1;
+        for local in [false, true] {
+            if local {
+                state.store.fork_publication_operations.insert(
+                    committed.operation.input().operation_id, committed.operation.clone(),
+                );
+            }
+            let bytes = committed.binding.to_canonical_cbor().len() + if local {
+                committed.operation.to_canonical_cbor().len() + 1
+            } else { projection + 1 + 32 };
+            for (byte_limit, row_limit, succeeds) in [(bytes, 3, true), (bytes - 1, 3, false), (bytes, 2, false)] {
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, row_limit, byte_limit, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                let rows = state.store.publication_rows_with_context(state.child, state.head,
+                    AuthorityValidatorV1::CodeTwoAware, &mut NativeReadContextV1::protected(&mut budget));
+                if succeeds {
+                    let rows = rows?;
+                    assert_eq!(rows.operation, committed.operation);
+                    assert_eq!(rows.origin, if local { ValidatedOriginV1::Local } else {
+                        ValidatedOriginV1::Imported(committed.authority_origin_digest.ok_or("no origin")?)
+                    });
+                    assert_eq!(budget.remaining_native_bytes(), 0);
+                } else {
+                    assert!(rows.is_err());
+                    assert!(budget.check_time().is_err());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Independent native byte encoders plus logical copy fields; never the
+    /// production length/debit helpers or a ledger measurement as the oracle.
+    fn imported_read_cost(state: &Imported) -> Fallible<(usize, usize, usize)> {
+        let committed = state.store.read_committed(state.child, state.head)?;
+        let owner = committed.operation.input().signing_identity.owner_id.as_str().len();
+        let projection = 32 + 16 + 8 + 32 + 32 + owner + 1 + 8 + 32 + 32 + 32 + 1;
+        let signed = pos_core::SignedForkReproManifestV1::from_canonical_cbor(&committed.outer_bytes)?;
+        let (admission_bytes, admission_rows) = imported_admission_cost(state)?;
+        let evidence = state.store.imported_fork_key_evidence.values().next().ok_or("no IKR1")?;
+        let binding = committed.binding.to_canonical_cbor().len();
+        let origin = 1 + 32;
+        let receipt = 32 + 16 + 8 + 32;
+        let registry_getter = owner + 1 + 8 + 1 + 32 + 1 + 32;
+        let registry_conversion = state.store.key_registry.as_ref()
+            .and_then(|registry| registry.key_record(committed.operation.input().signing_identity))
+            .map_or(0, |key| owner + 1 + 8 + 1 + 32 + if key.private_material_digest.is_some() { 32 } else { 0 });
+        let mut bytes = binding + projection + origin + admission_bytes
+            + evidence.record.to_canonical_cbor().len()
+            + evidence.tombstone.as_ref().map_or(0, |key| key.to_canonical_cbor().len())
+            + 2 * (16 + 16) + 8
+            + committed.outer_bytes.len() * 2 + signed.manifest_bytes().len() * 2
+            + signed.manifest().input().intervention_sequences.len() * 8
+            + receipt + projection + binding + origin + registry_getter + registry_conversion;
+        let mut rows = 3 + admission_rows + 2 + 1;
+        let events = &state.store.state(state.child).events;
+        for (timeline, limit) in [(state.world.root, PARENT_CUT), (state.child, state.head - PARENT_CUT)] {
+            for event in &state.store.state(timeline).events {
+                if event.seq.as_u64() <= limit {
+                    bytes += event.payload.len() + event.id.to_string().len();
+                    rows += 1;
+                }
+            }
+        }
+        // Suffix indexing and the later shared intervention-selection pass.
+        rows += events.len() * 2 + state.store.fork_append_operations.len()
+            + state.store.fork_event_origins.len() + state.store.fork_intervention_admissions.len();
+        bytes += events.len() * (16 + 8);
+        if !events.is_empty() {
+            let (graph_bytes, graph_rows) = imported_graph_cost(state)?;
+            bytes += graph_bytes;
+            rows += graph_rows + events.len() + state.store.fork_append_operations.len();
+            let table = state.store.fork_classifier_tables.get(&state.child).ok_or("no FCT1")?;
+            let classifier_copy = table.input().routes.iter()
+                .map(|route| route.source().route().len() + 32 + 1).sum::<usize>();
+            for event in events {
+                let operation = state.store.fork_append_operations.values()
+                    .find(|operation| operation.input().event_id == event.id).ok_or("no FOP1")?;
+                let origin = state.store.fork_event_origins.get(&event.id).ok_or("no EOR1")?;
+                bytes += 16 + event.payload.len() + event.event_type.as_str().len()
+                    + table.to_canonical_cbor().len() * 2 + classifier_copy
+                    + origin.to_canonical_cbor().len() * 2
+                    + state.store.fork_intervention_admissions.get(&event.id)
+                        .map_or(0, |record| record.to_canonical_cbor().len() * 2)
+                    + operation.to_canonical_cbor().len();
+            }
+        }
+        let imported = ImportedForkPublicationOperationV1::from_local(
+            committed.operation, committed.authority_origin_digest.ok_or("no origin")?);
+        bytes += projection + 32 + imported.to_canonical_cbor().len() + 32 + 32;
+        Ok((bytes, rows, if events.is_empty() { 6 } else { 7 }))
+    }
+
+    #[test]
+    fn protected_memory_port_charges_repeated_imported_reads_with_independent_exact_limits() -> Fallible<()> {
+        use crate::{ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1,
+            ForkReplayReadLimitsV1, ForkReplayRequirementV1};
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use pos_core::{deletion_receipt, KeyDestructionRequestV1};
+        use std::time::Duration;
+        for shape in [Shape::Mixed, Shape::EmptyClassified, Shape::EmptyUnclassified] {
+            for destroyed in [false, true] {
+                let mut state = imported_with(shape, &Spec { destroyed_key: destroyed, ..Spec::default() })?;
+                for local_key in [false, true] {
+                    if local_key {
+                        let mut registry = state.world.registry_with_attribution_key("creator-a", 0x71)?;
+                        if destroyed {
+                            let request = KeyDestructionRequestV1::new(attribution_identity("creator-a", 1),
+                                attribution_material().material_digest(), hash(0x75));
+                            registry.begin_key_destruction(request)?;
+                            registry.complete_key_destruction(request, deletion_receipt(&request))?;
+                        }
+                        state.store.key_registry = Some(registry);
+                    }
+                    let committed = state.store.read_committed(state.child, state.head)?;
+                    let requirement = ForkReplayRequirementV1::new(state.child, Seq::from_u64(state.head),
+                        committed.record_id, committed.authority_origin_digest)?;
+                    let (bytes, rows, visits) = imported_read_cost(&state)?;
+                    for (byte_limit, row_limit, visit_limit, succeeds) in [
+                        (bytes * 2, rows * 2, visits * 2, true),
+                        (bytes * 2 - 1, rows * 2, visits * 2, false),
+                        (bytes * 2, rows * 2 - 1, visits * 2, false),
+                        (bytes * 2, rows * 2, visits * 2 - 1, false),
+                    ] {
+                        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                        let start = clock.mark();
+                        let limits = ForkReplayReadLimitsV1::new(1, visit_limit, row_limit, byte_limit, 1_000_000)?;
+                        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                        let result = state.store.validate_fork_replay_authority(&requirement, &mut budget)
+                            .and_then(|first| state.store.validate_fork_replay_authority(&requirement, &mut budget)
+                                .map(|second| { assert_eq!(first, second); second }));
+                        if succeeds {
+                            assert_eq!(result?.requirement(), requirement);
+                            assert_eq!(budget.remaining_native_bytes(), 0);
+                        } else {
+                            assert!(result.is_err());
+                            assert!(budget.check_time().is_err());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn imported_admission_and_graph_charge_actual_work_with_exact_limits() -> Fallible<()> {
         use crate::{ForkReplayReadBudgetV1, ForkReplayReadLimitsV1};
         use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
@@ -821,7 +986,9 @@ mod tests {
             .publication_operation_row(
                 binding.input().operation_id,
                 AuthorityValidatorV1::CodeTwoAware,
+                &mut NativeReadContextV1::ordinary(),
             )
+            ?
             .ok_or(PublicationError::PublicationConflict)?;
         let artifact = state
             .store
@@ -882,13 +1049,20 @@ mod tests {
             let committed = state.store.read_committed(state.child, state.head)?;
             let signed =
                 pos_core::SignedForkReproManifestV1::from_canonical_cbor(&committed.outer_bytes)?;
+            let owner_bytes = committed.operation.input().signing_identity.owner_id.as_str().len();
+            let receipt_copy = 32 + 16 + 8 + 32;
+            let projection_copy = 32 + 16 + 8 + 32 + 32 + owner_bytes + 1 + 8 + 32 + 32 + 32 + 1;
+            let origin_copy = 1 + 32;
+            let absent_key_copy = owner_bytes + 1 + 8 + 1 + 32 + 1 + 32;
             // Independent byte-encoder oracle: actual shared validator buffers
             // are one FSM1 hash encoding, its nested FRM1, one FRM1 signature
             // payload, and one retained FSM1 clone. No role-message allocation.
             let expected = committed.outer_bytes.len() * 2
                 + signed.manifest_bytes().len() * 2
                 + signed.manifest().input().intervention_sequences.len()
-                    * std::mem::size_of::<u64>();
+                    * std::mem::size_of::<u64>()
+                + committed.binding.to_canonical_cbor().len()
+                + receipt_copy + projection_copy + origin_copy + absent_key_copy;
             for (bytes, succeeds) in [(expected, true), (expected - 1, false)] {
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
                 let start = clock.mark();
@@ -1483,12 +1657,20 @@ mod tests {
             .ok_or("no imported FPO1")?;
         assert!(state
             .store
-            .publication_operation_row(operation, AuthorityValidatorV1::LocalOnly)
+            .publication_operation_row(
+                operation,
+                AuthorityValidatorV1::LocalOnly,
+                &mut NativeReadContextV1::ordinary(),
+            )?
             .is_none());
         assert!(matches!(
             state
                 .store
-                .publication_operation_row(operation, AuthorityValidatorV1::CodeTwoAware),
+                .publication_operation_row(
+                    operation,
+                    AuthorityValidatorV1::CodeTwoAware,
+                    &mut NativeReadContextV1::ordinary(),
+                )?,
             Some((_, ValidatedOriginV1::Imported(_)))
         ));
         Ok(())

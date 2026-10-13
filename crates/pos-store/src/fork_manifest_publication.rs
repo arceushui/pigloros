@@ -11,8 +11,9 @@ use pos_core::{
     ForkInterventionAdmissionV1, ForkPublicationArtifactInputV1, ForkPublicationArtifactV1,
     ForkPublicationBindingInputV1, ForkPublicationBindingV1, ForkPublicationOperationInputV1,
     ForkPublicationOperationV1, ForkPublicationReceiptV1, ForkReproManifestV1, Hash,
-    ImportedKeyRecordV1, ImportedKeyTombstoneV1, KeyIdentityV1, KeyRegistryErrorV1,
-    KeyRegistryStateV1, KeyRoleV1, PublicKey, Signature, SignedForkReproManifestV1, TimelineId,
+    ImportedKeyRecordV1, ImportedKeyTombstoneV1, KeyIdentityV1, KeyRecordV1, KeyRegistryErrorV1,
+    KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, PublicKey, Signature,
+    SignedForkReproManifestV1, TimelineId,
 };
 #[cfg(feature = "sqlite")]
 use pos_core::{ForkAttributionCodecErrorV1, ImportedForkPublicationOperationV1};
@@ -790,7 +791,7 @@ fn verified_committed_manifest(
     context.canonical(signed.manifest().canonical_cbor_len())?;
     let record_id = signed.record_id();
     context.check()?;
-    if !committed_graph_is_consistent(rows, trusted, signed, record_id) {
+    if !committed_graph_is_consistent(rows, trusted, signed, record_id, context)? {
         return Err(ForkManifestPublicationErrorV1::PublicationConflict);
     }
     context.check()?;
@@ -801,13 +802,17 @@ fn verified_committed_manifest(
     );
     context.check()?;
     verification.map_err(|_| ForkManifestPublicationErrorV1::PublicationConflict)?;
+    // FPR1 is not encoded here: only these receipt fields are materialized.
+    charge_logical_fields(context, [HASH_COPY_BYTES, TIMELINE_COPY_BYTES, U64_COPY_BYTES, HASH_COPY_BYTES])?;
     let receipt = ForkPublicationReceiptV1::from_records(&rows.operation, &rows.binding)
         .map_err(|_| ForkManifestPublicationErrorV1::PublicationConflict)?;
+    charge_publication_copy(&rows.operation, rows.origin, context)?;
+    context.canonical(rows.binding.canonical_cbor_len())?;
+    charge_origin_copy(rows.origin, context)?;
     context.bytes(outer_bytes.len())?;
     let committed = CommittedForkManifestV1 {
         receipt,
-        // FPO1's typed projection has no variable-size allocation; no local
-        // canonical bytes are emitted by this clone, including on code 2.
+        // Code-2 projection fields were charged without inventing local bytes.
         operation: rows.operation.clone(),
         authority_origin_digest: rows.origin.imported_digest(),
         binding: rows.binding,
@@ -817,13 +822,96 @@ fn verified_committed_manifest(
     context.check().map(|()| committed)
 }
 
+// Logical data widths of copied fields, not CBOR heads, Rust layout or capacity.
+const HASH_COPY_BYTES: usize = 32;
+const PUBLIC_KEY_COPY_BYTES: usize = 32;
+const TIMELINE_COPY_BYTES: usize = 16;
+const U64_COPY_BYTES: usize = 8;
+const ROLE_COPY_BYTES: usize = 1;
+const ORIGIN_COPY_BYTES: usize = 1;
+const OPTION_TAG_COPY_BYTES: usize = 1;
+
+fn charge_logical_fields(
+    context: &mut NativeReadContextV1<'_, '_>,
+    lengths: impl IntoIterator<Item = usize>,
+) -> PublicationResultV1<()> {
+    // Each debit is checked and latched before the immediately following copy.
+    lengths.into_iter().try_for_each(|length| context.bytes(length))
+}
+
+fn charge_identity_copy(
+    identity: KeyIdentityV1,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationResultV1<()> {
+    charge_logical_fields(context, [identity.owner_id.as_str().len(), ROLE_COPY_BYTES, U64_COPY_BYTES])
+}
+
+/// Charge a full local native copy or just the fields of a code-2 projection.
+/// No code-1 encoding is produced by copying a code-2 projection.
+pub(crate) fn charge_publication_copy(
+    operation: &ForkPublicationOperationV1,
+    origin: ValidatedOriginV1,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationResultV1<()> {
+    match origin {
+        ValidatedOriginV1::Local => context.canonical(operation.canonical_cbor_len()),
+        ValidatedOriginV1::Imported(_) => {
+            charge_logical_fields(context, [HASH_COPY_BYTES, TIMELINE_COPY_BYTES, U64_COPY_BYTES,
+                HASH_COPY_BYTES, HASH_COPY_BYTES])?;
+            charge_identity_copy(operation.input().signing_identity, context)?;
+            charge_logical_fields(context, [HASH_COPY_BYTES, PUBLIC_KEY_COPY_BYTES, HASH_COPY_BYTES,
+                ORIGIN_COPY_BYTES])
+        }
+    }
+}
+
+/// The separately returned origin has a discriminant and optional digest.
+pub(crate) fn charge_origin_copy(
+    origin: ValidatedOriginV1,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationResultV1<()> {
+    context.bytes(OPTION_TAG_COPY_BYTES)?;
+    if origin.imported_digest().is_some() {
+        context.bytes(HASH_COPY_BYTES)?;
+    }
+    Ok(())
+}
+
+fn registry_key_record_with_context(
+    registry: &KeyRegistryStateV1,
+    identity: KeyIdentityV1,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationResultV1<Option<KeyRecordV1>> {
+    context.suffix_row()?;
+    charge_identity_copy(identity, context)?;
+    // The Copy getter cannot expose optional presence before materialization.
+    // Precharge its two documented optional fixed-size payload maxima.
+    charge_logical_fields(context, [OPTION_TAG_COPY_BYTES, HASH_COPY_BYTES,
+        OPTION_TAG_COPY_BYTES, PUBLIC_KEY_COPY_BYTES])?;
+    let record = registry.key_record(identity);
+    context.check().map(|()| record)
+}
+
+fn registry_tombstone_with_context(
+    registry: &KeyRegistryStateV1,
+    identity: KeyIdentityV1,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationResultV1<Option<KeyTombstoneV1>> {
+    context.suffix_row()?;
+    charge_identity_copy(identity, context)?;
+    charge_logical_fields(context, [HASH_COPY_BYTES, HASH_COPY_BYTES, HASH_COPY_BYTES])?;
+    let tombstone = registry.tombstone(identity);
+    context.check().map(|()| tombstone)
+}
+
 /// Enforce every cross-record and FPO1 source-table equality.
 fn committed_graph_is_consistent(
     rows: &CommittedPublicationRowsV1<'_>,
     trusted: &TrustedPublicationSourcesV1<'_>,
     signed: &SignedForkReproManifestV1,
     record_id: Hash,
-) -> bool {
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationResultV1<bool> {
     let binding = rows.binding.input();
     let operation = rows.operation.input();
     let artifact = rows.artifact.input();
@@ -833,7 +921,7 @@ fn committed_graph_is_consistent(
         rows.final_logical_head,
         trusted.final_chain_head_hash,
     );
-    (
+    let consistent = (
         binding.child_timeline_id,
         binding.final_logical_head,
         binding.operation_id,
@@ -860,8 +948,12 @@ fn committed_graph_is_consistent(
                 trusted.admission.fields(),
             )
             .is_ok()
-        && manifest.intervention_sequences == trusted.intervention_sequences
-        && trusted.key_evidence.accepts(trusted.registry, operation)
+        && manifest.intervention_sequences == trusted.intervention_sequences;
+    context.check()?;
+    if !consistent {
+        return Ok(false);
+    }
+    trusted.key_evidence.accepts(trusted.registry, operation, context)
 }
 
 /// Where a trusted read takes the retained `FPO1`/`FSM1` verification key
@@ -893,12 +985,15 @@ impl RetainedKeyEvidenceV1 {
         &self,
         registry: Option<&KeyRegistryStateV1>,
         operation: &ForkPublicationOperationInputV1,
-    ) -> bool {
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> PublicationResultV1<bool> {
         match self {
-            Self::LiveRegistry => retained_key_is_consistent(registry, operation),
+            Self::LiveRegistry => retained_key_is_consistent(registry, operation, context),
             Self::Imported(retained) => {
-                imported_key_is_consistent(&retained.record, retained.tombstone.as_ref(), operation)
-                    && local_key_agrees(&retained.record, registry)
+                if !imported_key_is_consistent(&retained.record, retained.tombstone.as_ref(), operation) {
+                    return Ok(false);
+                }
+                local_key_agrees(&retained.record, registry, context)
             }
         }
     }
@@ -923,12 +1018,23 @@ fn imported_key_is_consistent(
 /// Equality is deliberate and fails closed: a later local rotation or
 /// destruction of an equal-identity key changes the local record, and the
 /// imported publication is then unreadable until the records agree again.
-fn local_key_agrees(record: &ImportedKeyRecordV1, registry: Option<&KeyRegistryStateV1>) -> bool {
-    registry
-        .and_then(|registry| registry.key_record(record.identity()))
-        .is_none_or(|local| {
-            ImportedKeyRecordV1::from_key_record(&local).is_ok_and(|local| local == *record)
-        })
+fn local_key_agrees(
+    record: &ImportedKeyRecordV1,
+    registry: Option<&KeyRegistryStateV1>,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationResultV1<bool> {
+    let Some(registry) = registry else { return Ok(true); };
+    let local = registry_key_record_with_context(registry, record.identity(), context)?;
+    let Some(local) = local else { return Ok(true); };
+    // Only the converted IKR1 fields are copied; no IKR1 encoding is emitted.
+    charge_identity_copy(local.identity, context)?;
+    context.bytes(OPTION_TAG_COPY_BYTES)?;
+    if local.private_material_digest.is_some() {
+        context.bytes(HASH_COPY_BYTES)?;
+    }
+    context.bytes(PUBLIC_KEY_COPY_BYTES)?;
+    let agrees = ImportedKeyRecordV1::from_key_record(&local).is_ok_and(|local| local == *record);
+    context.check().map(|()| agrees)
 }
 
 /// The retained exact-identity key must keep the FPO1 public key, and its
@@ -936,18 +1042,20 @@ fn local_key_agrees(record: &ImportedKeyRecordV1, registry: Option<&KeyRegistryS
 fn retained_key_is_consistent(
     registry: Option<&KeyRegistryStateV1>,
     operation: &ForkPublicationOperationInputV1,
-) -> bool {
-    registry.is_some_and(|registry| {
-        let identity = operation.signing_identity;
-        let record = registry.key_record(identity);
-        record.is_some_and(|record| {
-            record.public_verification_key == Some(operation.public_verification_key)
-        }) && (record.and_then(|record| record.private_material_digest)
-            == Some(operation.private_material_digest)
-            || registry.tombstone(identity).is_some_and(|tombstone| {
-                tombstone.destroyed_material_digest == operation.private_material_digest
-            }))
-    })
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationResultV1<bool> {
+    let Some(registry) = registry else { return Ok(false); };
+    let identity = operation.signing_identity;
+    let record = registry_key_record_with_context(registry, identity, context)?;
+    let Some(record) = record.filter(|record|
+        record.public_verification_key == Some(operation.public_verification_key)
+    ) else { return Ok(false); };
+    if record.private_material_digest == Some(operation.private_material_digest) {
+        return Ok(true);
+    }
+    registry_tombstone_with_context(registry, identity, context).map(|tombstone|
+        tombstone.is_some_and(|tombstone| tombstone.destroyed_material_digest == operation.private_material_digest)
+    )
 }
 
 #[cfg(test)]
@@ -960,6 +1068,137 @@ mod tests {
         PublicationSourceErrorV1 as SourceError,
     };
     use crate::ForkEventAuthorityErrorV1;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// These private-owner checks isolate the pre-copy gates from native wire
+    /// validation. The adapter/consumer regressions exercise the public ports.
+    fn assert_key_copy_gate(
+        bytes: usize,
+        rows: usize,
+        expected: bool,
+        read: impl Fn(&mut super::NativeReadContextV1<'_, '_>) -> super::PublicationResultV1<bool>,
+    ) -> TestResult {
+        use crate::{ForkReplayReadBudgetV1, ForkReplayReadLimitsV1};
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+
+        // Every prefix exercises a different failing debit before either copy.
+        for limit in 1..=bytes * 2 {
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, rows * 2, limit, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let result = {
+                let mut context = super::NativeReadContextV1::protected(&mut budget);
+                read(&mut context).and_then(|first| {
+                    assert_eq!(first, expected);
+                    read(&mut context)
+                })
+            };
+            if limit == bytes * 2 {
+                assert_eq!(result?, expected);
+                assert_eq!(budget.remaining_native_bytes(), 0);
+            } else {
+                assert_eq!(result, Err(PublicationError::PublicationConflict));
+                assert!(budget.check_time().is_err());
+            }
+        }
+        for limit in 1..rows * 2 {
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, limit, bytes * 2, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let mut context = super::NativeReadContextV1::protected(&mut budget);
+            assert_eq!(read(&mut context).and_then(|_| read(&mut context)),
+                Err(PublicationError::PublicationConflict));
+            assert!(budget.check_time().is_err());
+        }
+        // Sweep the original clock through the bounded getter/conversion batch.
+        for marks in 2..64 {
+            let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                std::iter::repeat_n(Duration::ZERO, marks).chain([Duration::from_secs(2)]),
+            );
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, rows * 2, bytes * 2, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let mut context = super::NativeReadContextV1::protected(&mut budget);
+            let result = read(&mut context).and_then(|_| read(&mut context));
+            match result {
+                Ok(value) => assert_eq!(value, expected),
+                Err(error) => {
+                    assert_eq!(error, PublicationError::PublicationConflict);
+                    assert!(budget.check_time().is_err());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn registry_copy_gates_keep_exact_identity_live_destroyed_and_absent_semantics() -> TestResult {
+        use pos_core::{deletion_receipt, KeyDestructionRequestV1, KeyRegistrationV1};
+        use super::*;
+
+        let identity = KeyIdentityV1::new("créateur", KeyRoleV1::SubjectAttributionSigning, 1);
+        let material = Hash::from_bytes([11; 32]);
+        let key = PublicKey::from_bytes([12; 32]);
+        let mut live = KeyRegistryStateV1::new();
+        live.register_key(KeyRegistrationV1::new(identity, material, Some(key)))?;
+        // An unrelated maximum-width owner is never visited or serialized.
+        live.register_key(KeyRegistrationV1::new(
+            KeyIdentityV1::from_parts(pos_core::OwnerIdV1::new("x".repeat(128))?, KeyRoleV1::SubjectAttributionSigning, 1),
+            Hash::from_bytes([13; 32]), Some(PublicKey::from_bytes([14; 32])),
+        ))?;
+        let live_record = ImportedKeyRecordV1::from_key_record(&live.key_record(identity).ok_or("missing key")?)?;
+        let mut destroyed = live.clone();
+        let request = KeyDestructionRequestV1::new(identity, material, Hash::from_bytes([15; 32]));
+        destroyed.begin_key_destruction(request)?;
+        destroyed.complete_key_destruction(request, deletion_receipt(&request))?;
+        let destroyed_record = ImportedKeyRecordV1::from_key_record(&destroyed.key_record(identity).ok_or("missing destroyed key")?)?;
+        let empty = KeyRegistryStateV1::new();
+        let operation = ForkPublicationOperationInputV1 {
+            operation_id: Hash::from_bytes([16; 32]), child_timeline_id: TimelineId::new(),
+            final_logical_head: 4, final_chain_head_hash: Hash::from_bytes([17; 32]),
+            admission_digest: Hash::from_bytes([18; 32]), signing_identity: identity,
+            private_material_digest: material, public_verification_key: key,
+            signed_manifest_record_id: Hash::from_bytes([19; 32]),
+            origin: pos_core::ForkAttributionOriginV1::Local,
+        };
+        let owner = identity.owner_id.as_str().len();
+        let getter = owner + 1 + 8 + 1 + 32 + 1 + 32;
+        let tombstone = owner + 1 + 8 + 32 + 32 + 32;
+        for (registry, bytes, rows, expected) in [
+            (&live, getter, 1, true), (&destroyed, getter + tombstone, 2, true),
+            (&empty, getter, 1, false),
+        ] {
+            assert_key_copy_gate(bytes, rows, expected, |context|
+                retained_key_is_consistent(Some(registry), &operation, context))?;
+        }
+        let mut wrong = operation.clone();
+        wrong.private_material_digest = Hash::from_bytes([20; 32]);
+        for registry in [&live, &destroyed] {
+            assert_key_copy_gate(getter + tombstone, 2, false, |context|
+                retained_key_is_consistent(Some(registry), &wrong, context))?;
+        }
+        wrong.public_verification_key = PublicKey::from_bytes([21; 32]);
+        assert_key_copy_gate(getter, 1, false, |context|
+            retained_key_is_consistent(Some(&live), &wrong, context))?;
+        for (record, registry, copy, expected) in [
+            (&live_record, &live, owner + 1 + 8 + 1 + 32 + 32, true),
+            (&live_record, &destroyed, owner + 1 + 8 + 1 + 32, false),
+            (&destroyed_record, &destroyed, owner + 1 + 8 + 1 + 32, true),
+            (&destroyed_record, &live, owner + 1 + 8 + 1 + 32 + 32, false),
+        ] {
+            assert_key_copy_gate(getter + copy, 1, expected, |context|
+                local_key_agrees(record, Some(registry), context))?;
+        }
+        assert_key_copy_gate(getter, 1, true, |context|
+            local_key_agrees(&live_record, Some(&empty), context))?;
+        assert!(!retained_key_is_consistent(None, &operation, &mut NativeReadContextV1::ordinary())?);
+        assert!(local_key_agrees(&live_record, None, &mut NativeReadContextV1::ordinary())?);
+        Ok(())
+    }
 
     #[test]
     fn registry_authorization_errors_map_one_to_one() {
