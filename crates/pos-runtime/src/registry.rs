@@ -1150,6 +1150,7 @@ impl HistoryInputV1 {
 
 /// The Events one Driver step sees: the committed prefix the host filters and
 /// the pairs the pass forwards to the Driver.
+#[derive(Clone, Copy)]
 struct DriverEvents<'a> {
     committed: &'a [Event],
     forwarded: &'a [ForwardedPair],
