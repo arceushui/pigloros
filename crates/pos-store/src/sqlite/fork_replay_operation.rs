@@ -55,6 +55,33 @@ fn operation_lengths(conn: &Connection, kind: ForkAdmissionOperationKindV1, oper
     context.check().map(|()| Some(OperationLengthsV1 { child })).map_err(|_| Error::CorruptAuthority)
 }
 
+pub(super) fn operation_with_context(conn: &Connection, kind: ForkAdmissionOperationKindV1,
+    operation_id: Hash, context: &mut NativeReadContextV1<'_, '_>) -> Result<Option<ForkAdmissionOperationRowV1>> {
+    let Some(lengths) = operation_lengths(conn, kind, operation_id, context)? else { return Ok(None); };
+    context.check().map_err(|_| Error::CorruptAuthority)?;
+    let mut statement = conn.prepare(OPERATION_FETCH_SQL).map_err(|_| Error::StorageIndeterminate)?;
+    context.check().map_err(|_| Error::CorruptAuthority)?;
+    let mut rows = statement.query(params![i64::from(kind.wire()), operation_id.as_bytes().as_slice()])
+        .map_err(|_| Error::StorageIndeterminate)?;
+    context.row_available().map_err(|_| Error::CorruptAuthority)?;
+    let row = rows.next().map_err(|_| Error::StorageIndeterminate)?.ok_or(Error::CorruptAuthority)?;
+    context.suffix_row().map_err(|_| Error::CorruptAuthority)?;
+    context.bytes(usize::from(HASH_BYTES)).map_err(|_| Error::CorruptAuthority)?;
+    let evidence_digest = row.get::<_, Vec<u8>>(0).map_err(|_| Error::StorageIndeterminate)?;
+    context.bytes(usize::from(HASH_BYTES)).map_err(|_| Error::CorruptAuthority)?;
+    let commitment = row.get::<_, Vec<u8>>(1).map_err(|_| Error::StorageIndeterminate)?;
+    context.bytes(usize::from(HASH_BYTES)).map_err(|_| Error::CorruptAuthority)?;
+    let result_digest = row.get::<_, Vec<u8>>(2).map_err(|_| Error::StorageIndeterminate)?;
+    if let Some(length) = lengths.child { context.bytes(length).map_err(|_| Error::CorruptAuthority)?; }
+    let child = row.get::<_, Option<String>>(3).map_err(|_| Error::StorageIndeterminate)?;
+    context.check().map_err(|_| Error::CorruptAuthority)?;
+    let child_id = child.map(|id| id.parse::<ulid::Ulid>().map(TimelineId::from_ulid)
+        .map_err(|_| Error::CorruptAuthority)).transpose()?;
+    let result = ForkAdmissionOperationRowV1 { kind, operation_id, child_id,
+        evidence_digest: sqlite_hash(evidence_digest)?, commitment: sqlite_hash(commitment)?, result_digest: sqlite_hash(result_digest)? };
+    context.check().map(|()| Some(result)).map_err(|_| Error::CorruptAuthority)
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -215,31 +242,4 @@ mod tests {
         assert!(budget.check_time().is_ok());
         Ok(())
     }
-}
-
-pub(super) fn operation_with_context(conn: &Connection, kind: ForkAdmissionOperationKindV1,
-    operation_id: Hash, context: &mut NativeReadContextV1<'_, '_>) -> Result<Option<ForkAdmissionOperationRowV1>> {
-    let Some(lengths) = operation_lengths(conn, kind, operation_id, context)? else { return Ok(None); };
-    context.check().map_err(|_| Error::CorruptAuthority)?;
-    let mut statement = conn.prepare(OPERATION_FETCH_SQL).map_err(|_| Error::StorageIndeterminate)?;
-    context.check().map_err(|_| Error::CorruptAuthority)?;
-    let mut rows = statement.query(params![i64::from(kind.wire()), operation_id.as_bytes().as_slice()])
-        .map_err(|_| Error::StorageIndeterminate)?;
-    context.row_available().map_err(|_| Error::CorruptAuthority)?;
-    let row = rows.next().map_err(|_| Error::StorageIndeterminate)?.ok_or(Error::CorruptAuthority)?;
-    context.suffix_row().map_err(|_| Error::CorruptAuthority)?;
-    context.bytes(usize::from(HASH_BYTES)).map_err(|_| Error::CorruptAuthority)?;
-    let evidence_digest = row.get::<_, Vec<u8>>(0).map_err(|_| Error::StorageIndeterminate)?;
-    context.bytes(usize::from(HASH_BYTES)).map_err(|_| Error::CorruptAuthority)?;
-    let commitment = row.get::<_, Vec<u8>>(1).map_err(|_| Error::StorageIndeterminate)?;
-    context.bytes(usize::from(HASH_BYTES)).map_err(|_| Error::CorruptAuthority)?;
-    let result_digest = row.get::<_, Vec<u8>>(2).map_err(|_| Error::StorageIndeterminate)?;
-    if let Some(length) = lengths.child { context.bytes(length).map_err(|_| Error::CorruptAuthority)?; }
-    let child = row.get::<_, Option<String>>(3).map_err(|_| Error::StorageIndeterminate)?;
-    context.check().map_err(|_| Error::CorruptAuthority)?;
-    let child_id = child.map(|id| id.parse::<ulid::Ulid>().map(TimelineId::from_ulid)
-        .map_err(|_| Error::CorruptAuthority)).transpose()?;
-    let result = ForkAdmissionOperationRowV1 { kind, operation_id, child_id,
-        evidence_digest: sqlite_hash(evidence_digest)?, commitment: sqlite_hash(commitment)?, result_digest: sqlite_hash(result_digest)? };
-    context.check().map(|()| Some(result)).map_err(|_| Error::CorruptAuthority)
 }
