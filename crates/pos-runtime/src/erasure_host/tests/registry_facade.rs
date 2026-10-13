@@ -134,7 +134,11 @@ fn release_inputs(
     world: &World,
     material: &Material,
     address: &BundleAddressV1,
-) -> BoxResult<([u8; 32], ValidatedPluginManifestProjectionV1, TrustedUtcSecondV1)> {
+) -> BoxResult<(
+    [u8; 32],
+    ValidatedPluginManifestProjectionV1,
+    TrustedUtcSecondV1,
+)> {
     let bundle = world.store.read_verified(address)?;
     let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
     let utc = TrustedUtcSecondV1::from_source(&mut wall(material.utc)?)?;

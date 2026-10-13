@@ -37,9 +37,9 @@ impl Rig {
         let (world, address, release) = installed_world(offset)?;
         let material = trust_material(&world, &world.material()?);
         Ok(Self {
+            world,
             address,
             release,
-            world,
             material,
         })
     }
