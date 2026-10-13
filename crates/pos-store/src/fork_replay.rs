@@ -12,6 +12,8 @@ use pos_core::{
 
 #[cfg(feature = "sqlite")]
 mod publication;
+#[cfg(feature = "sqlite")]
+mod retained_key;
 
 /// Private validator context. Only the protected bridge borrows a ledger;
 /// ordinary publication reads retain their existing, non-protected contract.

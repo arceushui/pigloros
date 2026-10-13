@@ -119,8 +119,6 @@ impl SqliteStore {
             ("fork_event_origins", "eor1_cbor", "event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)"),
             ("fork_intervention_admissions", "fia1_cbor", "event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)"),
             ("imported_fork_attribution_admissions", "ifa1_cbor", "child_id = ?1"),
-            ("imported_fork_key_evidence", "ikr1_cbor", "import_operation_id IN (SELECT import_operation_id FROM imported_fork_attribution_admissions WHERE child_id = ?1)"),
-            ("imported_fork_key_evidence", "ikt1_cbor", "import_operation_id IN (SELECT import_operation_id FROM imported_fork_attribution_admissions WHERE child_id = ?1)"),
         ] {
             self.preflight_selected_records(table, column, selection, &[&child_key], budget)?;
         }
@@ -208,12 +206,7 @@ impl SqliteStore {
             let blob: bool = row.get(0).map_err(|_| Error::StorageUnavailable)?;
             if blob {
                 budget.charge_bytes(row_length(row, 1)?)?;
-            } else if column != "ikt1_cbor"
-                || row
-                    .get::<_, Option<i64>>(1)
-                    .map_err(|_| Error::StorageUnavailable)?
-                    .is_some()
-            {
+            } else {
                 return Err(Error::CorruptAuthority);
             }
         }
@@ -374,8 +367,12 @@ mod tests {
             let projection_copy = 32 + 16 + 8 + 32 + 32 + owner_bytes + 1 + 8 + 32 + 32 + 32 + 1;
             let origin_copy = 1 + 32;
             let absent_key_copy = owner_bytes + 1 + 8 + 1 + 32 + 1 + 32;
+            let key = &built.envelope.unsigned().input().key_record;
+            let retained_key_phase = key.to_canonical_cbor().len() * 3
+                + key.identity().owner_id.as_str().len();
             // Actual shared buffers, independently measured by byte encoders.
-            let expected = publication_phase_cost(&committed)? + committed.outer_bytes.len() * 2
+            let expected = publication_phase_cost(&committed)? + retained_key_phase
+                + committed.outer_bytes.len() * 2
                 + signed.manifest_bytes().len() * 2
                 + signed.manifest().input().intervention_sequences.len()
                     * std::mem::size_of::<u64>()
