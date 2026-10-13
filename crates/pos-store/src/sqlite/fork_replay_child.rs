@@ -140,7 +140,7 @@ mod tests {
         ForkAdmissionRecordInputV1, ForkAttributionOriginV1, Hash, OwnerIdV1, Seq, TimelineId,
     };
     use rusqlite::{params, types::Value};
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     type Fallible<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -166,6 +166,9 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("child.sqlite3");
         let mut store = super::super::SqliteStore::open(path.to_str().ok_or("child fixture path")?)?;
+        // The ordinary fixture Fork must satisfy its erasure prerequisite;
+        // this test gate does not mint FCC or protected Replay authority.
+        store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open()))?;
         let parent = store.create_timeline("parent")?;
         let child = store.fork(parent.id(), Seq::ZERO, name)?;
         // A native structural FAR/metadata fixture. It does not claim a host
