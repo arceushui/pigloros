@@ -62,7 +62,6 @@ impl SourceSnapshots {
 struct FixturePaths {
     case_id: String,
     family_variant: String,
-    schema_path: String,
     contract: CatalogFixtureContract,
     strict_oracle: CatalogStrictOracle,
     failure_outcome: CatalogVerificationOutcome,
@@ -729,7 +728,6 @@ fn expected_source_paths(
                 paths.insert(fixture.input.relative.clone());
                 paths.insert(fixture.evidence_status.relative.clone());
                 paths.insert(fixture.oracle.relative.clone());
-                paths.extend(auxiliary_source_paths(fixture));
             }
         }
     }
@@ -826,7 +824,7 @@ fn verify_source_inventory(
 ) -> Result<[u8; 32], io::Error> {
     let support = support_package_manifest(snapshots)?;
     validate_provider_support_roles(profiles, &support)?;
-    let expected_paths = expected_source_paths(profiles, &support);
+    let expected_paths = expected_paths_with_auxiliary(profiles, &support);
     let declared_paths = snapshots
         .sha256_entries
         .keys()
@@ -1017,6 +1015,17 @@ fn validate_fixture_provider(
     }
 }
 
+fn valid_media_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 127
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"!#$&^_.+-/".contains(&byte)
+        })
+        && value.split_once('/').is_some_and(|(kind, subtype)| {
+            !kind.is_empty() && !subtype.is_empty() && !subtype.contains('/')
+        })
+}
+
 fn fixture_family_contract(snapshots: &SourceSnapshots) -> Result<FixtureFamilyCatalog, io::Error> {
     let bytes = snapshots.bytes(
         "support/fixture-family-contract.json",
@@ -1152,7 +1161,6 @@ fn profile_fixtures(
             }
             let family_variant =
                 rust_enum_variant("FixtureFamilyV1", &family, "profile fixture family")?;
-            let schema_path = json_text(fixture, "schema")?;
             let schema = relative_asset(snapshots, fixture, "schema")?;
             let expected_schema = provider_schemas
                 .get(&family)
@@ -1178,7 +1186,6 @@ fn profile_fixtures(
             Ok(FixturePaths {
                 case_id,
                 family_variant,
-                schema_path,
                 contract,
                 strict_oracle,
                 failure_outcome: family_declaration.failure_outcome,
@@ -1681,7 +1688,7 @@ fn emit_fixture(
     writeln!(
         generated,
         "                        schema_path: {:?},",
-        fixture.schema_path
+        fixture.schema.relative
     )?;
     emit_fixture_contract(generated, fixture)?;
     writeln!(
@@ -2451,8 +2458,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[path = "src/catalog_auxiliary.rs"]
 pub mod catalog_auxiliary;
 use catalog_auxiliary::{
-    check_embedded_total, declaration_is_valid, valid_media_type, validate_auxiliary_catalog,
-    AuxiliaryEntry, DEFAULT_AUXILIARY_CAP, MAX_EMBEDDED_AUXILIARY_BYTES,
+    check_embedded_total, declaration_is_valid, validate_auxiliary_catalog, AuxiliaryEntry, DEFAULT_AUXILIARY_CAP, MAX_EMBEDDED_AUXILIARY_BYTES,
 };
 
 struct FixtureAuxiliary {
@@ -2682,4 +2688,19 @@ fn write_auxiliary_files(out_dir: &Path, profiles: &[ProfilePaths]) -> Result<()
         write_auxiliary_member(&directory, index, auxiliary)?;
     }
     Ok(())
+}
+
+fn expected_paths_with_auxiliary(
+    profiles: &[ProfilePaths],
+    support: &SupportPackageManifest,
+) -> BTreeSet<String> {
+    let mut paths = expected_source_paths(profiles, support);
+    for profile in profiles {
+        for provider in &profile.fixture_providers {
+            for fixture in &provider.fixtures {
+                paths.extend(auxiliary_source_paths(fixture));
+            }
+        }
+    }
+    paths
 }
