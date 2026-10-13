@@ -9,23 +9,23 @@ use std::fmt;
 /// Default maximum number of auxiliary entries per family; pinned to `MAX_AUXILIARY_ARTIFACTS`.
 /// ADR-061 revision 8 sets 64 per family; CPF1 also counts the fixed evidence and oracle
 /// members in its total of 64 descriptors, a tension left to the S3b1 composite.
-pub(super) const DEFAULT_AUXILIARY_CAP: usize = 64;
+pub const DEFAULT_AUXILIARY_CAP: usize = 64;
 /// Maximum total bytes of embedded auxiliary members over all layers.
-pub(super) const MAX_EMBEDDED_AUXILIARY_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_EMBEDDED_AUXILIARY_BYTES: usize = 4 * 1024 * 1024;
 /// The only source directory auxiliary members may live in. The shell validators
 /// (`verify-conformance-fixtures.sh`, `generate-conformance-fixture-records.sh`) and the
 /// fixture README apply the same `inputs/` rule.
 const AUXILIARY_DIRECTORY: &str = "inputs";
 
 /// One `auxiliary` entry of a provider manifest.
-pub(super) struct AuxiliaryEntry {
-    pub(super) path: String,
-    pub(super) media_type: String,
+pub struct AuxiliaryEntry {
+    pub path: String,
+    pub media_type: String,
 }
 
 /// Reasons an auxiliary catalog is refused.
 #[derive(Debug, Eq, PartialEq)]
-pub(super) enum AuxiliaryCatalogError {
+pub enum AuxiliaryCatalogError {
     TooManyEntries { count: usize, cap: usize },
     UnsafePath(String),
     OutsideInventory(String),
@@ -59,7 +59,8 @@ impl fmt::Display for AuxiliaryCatalogError {
 }
 
 /// Returns whether a media type is lowercase `type/subtype` text of at most 127 bytes.
-pub(super) fn valid_media_type(value: &str) -> bool {
+#[must_use]
+pub fn valid_media_type(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 127
         && value.bytes().all(|byte| {
@@ -86,7 +87,12 @@ fn in_inventory_directory(path: &str) -> bool {
 
 /// Checks the auxiliary entries of one family against the snapshotted source set (the
 /// inventory digests are verified afterwards).
-pub(super) fn validate_auxiliary_catalog(
+///
+/// # Errors
+///
+/// Returns the first fault: too many entries, an unsafe or foreign path, a duplicate, a missing
+/// source or an invalid media type.
+pub fn validate_auxiliary_catalog(
     sources: &BTreeSet<String>,
     entries: &[AuxiliaryEntry],
     cap: usize,
@@ -121,7 +127,12 @@ pub(super) fn validate_auxiliary_catalog(
 }
 
 /// Accepts embedded auxiliary sizes whose total is at most `max` bytes.
-pub(super) fn check_embedded_total(
+///
+/// # Errors
+///
+/// Returns [`AuxiliaryCatalogError::EmbeddedTotalExceeded`] when the total exceeds `max` or
+/// overflows.
+pub fn check_embedded_total(
     sizes: &[usize],
     max: usize,
 ) -> Result<(), AuxiliaryCatalogError> {

@@ -22,7 +22,7 @@ pub(crate) const TPS1_MAX_REVOKED_ARTIFACTS: usize = 4_096;
 
 mod bundle_contract;
 #[cfg(test)]
-mod catalog_auxiliary;
+pub mod catalog_auxiliary;
 pub mod counterfactual;
 mod execution_profile;
 mod non_interference;

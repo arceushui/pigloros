@@ -21,7 +21,7 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Component, Path, PathBuf};
 
 #[path = "src/catalog_auxiliary.rs"]
-mod catalog_auxiliary;
+pub mod catalog_auxiliary;
 use catalog_auxiliary::{
     check_embedded_total, valid_media_type, validate_auxiliary_catalog, AuxiliaryEntry,
     DEFAULT_AUXILIARY_CAP, MAX_EMBEDDED_AUXILIARY_BYTES,
