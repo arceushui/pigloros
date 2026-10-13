@@ -5289,7 +5289,9 @@ impl SqliteStore {
         context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
     ) -> Result<Hash, CoreError> {
         if context.is_protected() {
-            return fork_replay_event::chain_hash_with_context(conn, hasher, timeline, at_seq, context);
+            return fork_replay_event::chain_hash_with_context(
+                conn, hasher, timeline, at_seq, context,
+            );
         }
         let logical_head = Self::logical_head_unchecked_on(conn, timeline)?;
         if at_seq > logical_head {
@@ -14640,7 +14642,9 @@ fn read_event_row_fields(
 fn decode_event_row(row: &rusqlite::Row<'_>) -> Result<Event, CoreError> {
     let mut context = crate::fork_replay::NativeReadContextV1::ordinary();
     decode_event_row_with_reader(&mut fork_replay_event::EventRowReaderV1::new(
-        row, &mut context, None,
+        row,
+        &mut context,
+        None,
     ))
 }
 
@@ -14666,17 +14670,22 @@ fn decode_event_row_with_reader(
         .try_into()
         .map_err(|_| reader.serialization("bad hash"))?;
     let (signature, signature_identity, origin) = decode_event_security_context(reader)?;
-    let seq = u64::try_from(seq)
-        .map_err(|_| reader.serialization("bad event sequence"))?;
-    let wall_time = u64::try_from(wall_time)
-        .map_err(|_| reader.serialization("bad event wall time"))?;
+    let seq = u64::try_from(seq).map_err(|_| reader.serialization("bad event sequence"))?;
+    let wall_time =
+        u64::try_from(wall_time).map_err(|_| reader.serialization("bad event wall time"))?;
     let id = EventId::from_ulid(reader.parse_ulid(&event_id)?);
     let entity = EntityId::from_ulid(reader.parse_ulid(&entity_id)?);
-    let causation_id = causation_id.as_deref()
-        .map(|id| reader.parse_ulid(id).map(EventId::from_ulid)).transpose()?;
+    let causation_id = causation_id
+        .as_deref()
+        .map(|id| reader.parse_ulid(id).map(EventId::from_ulid))
+        .transpose()?;
     let correlation_id = correlation_id
         .as_deref()
-        .map(|id| reader.parse_ulid(id).map(pos_core::CorrelationId::from_ulid))
+        .map(|id| {
+            reader
+                .parse_ulid(id)
+                .map(pos_core::CorrelationId::from_ulid)
+        })
         .transpose()?;
     let mut event = Event {
         id,
@@ -14715,12 +14724,10 @@ fn decode_signature_identity(
             Ok(Some(KeyIdentityV1::new(
                 owner_id,
                 KeyRoleV1::from_code(
-                    u8::try_from(role)
-                        .map_err(|_| reader.serialization("bad signature role"))?,
+                    u8::try_from(role).map_err(|_| reader.serialization("bad signature role"))?,
                 )
                 .map_err(|_| reader.serialization("bad signature role"))?,
-                u64::try_from(epoch)
-                    .map_err(|_| reader.serialization("bad signature epoch"))?,
+                u64::try_from(epoch).map_err(|_| reader.serialization("bad signature epoch"))?,
             )))
         }
         _ => Err(reader.serialization("signature identity is incomplete")),

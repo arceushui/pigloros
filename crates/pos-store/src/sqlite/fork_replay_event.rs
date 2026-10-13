@@ -95,16 +95,66 @@ struct VariableFieldV1 {
 }
 
 const VARIABLE_FIELDS: [VariableFieldV1; 10] = [
-    VariableFieldV1 { value_column: 1, type_column: 2, length_column: 3, width: FieldWidthV1::Fixed(ulid::ULID_LEN) },
-    VariableFieldV1 { value_column: 2, type_column: 4, length_column: 5, width: FieldWidthV1::Fixed(ulid::ULID_LEN) },
-    VariableFieldV1 { value_column: 3, type_column: 6, length_column: 7, width: FieldWidthV1::Variable },
-    VariableFieldV1 { value_column: 4, type_column: 8, length_column: 9, width: FieldWidthV1::Variable },
-    VariableFieldV1 { value_column: 6, type_column: 10, length_column: 11, width: FieldWidthV1::Fixed(ulid::ULID_LEN) },
-    VariableFieldV1 { value_column: 7, type_column: 12, length_column: 13, width: FieldWidthV1::Fixed(ulid::ULID_LEN) },
-    VariableFieldV1 { value_column: 9, type_column: 14, length_column: 15, width: FieldWidthV1::Fixed(32) },
-    VariableFieldV1 { value_column: 10, type_column: 16, length_column: 17, width: FieldWidthV1::Fixed(64) },
-    VariableFieldV1 { value_column: 11, type_column: 18, length_column: 19, width: FieldWidthV1::Owner },
-    VariableFieldV1 { value_column: 14, type_column: 20, length_column: 21, width: FieldWidthV1::Fixed(ulid::ULID_LEN) },
+    VariableFieldV1 {
+        value_column: 1,
+        type_column: 2,
+        length_column: 3,
+        width: FieldWidthV1::Fixed(ulid::ULID_LEN),
+    },
+    VariableFieldV1 {
+        value_column: 2,
+        type_column: 4,
+        length_column: 5,
+        width: FieldWidthV1::Fixed(ulid::ULID_LEN),
+    },
+    VariableFieldV1 {
+        value_column: 3,
+        type_column: 6,
+        length_column: 7,
+        width: FieldWidthV1::Variable,
+    },
+    VariableFieldV1 {
+        value_column: 4,
+        type_column: 8,
+        length_column: 9,
+        width: FieldWidthV1::Variable,
+    },
+    VariableFieldV1 {
+        value_column: 6,
+        type_column: 10,
+        length_column: 11,
+        width: FieldWidthV1::Fixed(ulid::ULID_LEN),
+    },
+    VariableFieldV1 {
+        value_column: 7,
+        type_column: 12,
+        length_column: 13,
+        width: FieldWidthV1::Fixed(ulid::ULID_LEN),
+    },
+    VariableFieldV1 {
+        value_column: 9,
+        type_column: 14,
+        length_column: 15,
+        width: FieldWidthV1::Fixed(32),
+    },
+    VariableFieldV1 {
+        value_column: 10,
+        type_column: 16,
+        length_column: 17,
+        width: FieldWidthV1::Fixed(64),
+    },
+    VariableFieldV1 {
+        value_column: 11,
+        type_column: 18,
+        length_column: 19,
+        width: FieldWidthV1::Owner,
+    },
+    VariableFieldV1 {
+        value_column: 14,
+        type_column: 20,
+        length_column: 21,
+        width: FieldWidthV1::Fixed(ulid::ULID_LEN),
+    },
 ];
 
 /// Fixed scalar metadata for the next actual row, not an Event representation.
@@ -126,7 +176,10 @@ impl EventRowLengthsV1 {
                                 return Err(Error::StorageIndeterminate);
                             }
                             VARIABLE_FIELDS.iter().try_fold(
-                                Self { seq, columns: [0; 16] },
+                                Self {
+                                    seq,
+                                    columns: [0; 16],
+                                },
                                 |mut lengths, field| {
                                     field.length(row).map(|length| {
                                         lengths.columns[field.value_column] = length;
@@ -135,12 +188,15 @@ impl EventRowLengthsV1 {
                                 },
                             )
                         })
-                }).transpose()
+                })
+                .transpose()
             })
     }
 
     fn total(&self) -> Option<usize> {
-        self.columns.iter().try_fold(0_usize, |sum, length| sum.checked_add(*length))
+        self.columns
+            .iter()
+            .try_fold(0_usize, |sum, length| sum.checked_add(*length))
     }
 }
 
@@ -183,14 +239,21 @@ impl<'read, 'statement, 'budget, 'clock> EventRowReaderV1<'read, 'statement, 'bu
         context: &'read mut NativeReadContextV1<'budget, 'clock>,
         lengths: Option<&'read EventRowLengthsV1>,
     ) -> Self {
-        Self { row, context, lengths }
+        Self {
+            row,
+            context,
+            lengths,
+        }
     }
 
     fn before(&mut self, column: usize) -> std::result::Result<(), CoreError> {
-        self.context.check().map_err(|_| CoreError::ArtifactUnavailable)
+        self.context
+            .check()
+            .map_err(|_| CoreError::ArtifactUnavailable)
             .and_then(|()| {
                 self.lengths.map_or(Ok(()), |lengths| {
-                    self.context.bytes(lengths.columns[column])
+                    self.context
+                        .bytes(lengths.columns[column])
                         .map_err(|_| CoreError::ArtifactUnavailable)
                 })
             })
@@ -226,7 +289,10 @@ impl<'read, 'statement, 'budget, 'clock> EventRowReaderV1<'read, 'statement, 'bu
         self.before(column)
             .and_then(|()| self.row.get(column).map_err(|error| self.storage(&error)))
             .and_then(|value| {
-                self.context.check().map(|()| value).map_err(|_| CoreError::ArtifactUnavailable)
+                self.context
+                    .check()
+                    .map(|()| value)
+                    .map_err(|_| CoreError::ArtifactUnavailable)
             })
     }
 
@@ -235,10 +301,18 @@ impl<'read, 'statement, 'budget, 'clock> EventRowReaderV1<'read, 'statement, 'bu
         column: usize,
     ) -> std::result::Result<Zeroizing<T>, CoreError> {
         self.before(column)
-            .and_then(|()| self.row.get(column).map(Zeroizing::new).map_err(|error| self.storage(&error)))
+            .and_then(|()| {
+                self.row
+                    .get(column)
+                    .map(Zeroizing::new)
+                    .map_err(|error| self.storage(&error))
+            })
             .and_then(|value| {
                 // Own the zeroizing guard before a post-fetch time check can fail.
-                self.context.check().map(|()| value).map_err(|_| CoreError::ArtifactUnavailable)
+                self.context
+                    .check()
+                    .map(|()| value)
+                    .map_err(|_| CoreError::ArtifactUnavailable)
             })
     }
 }
@@ -247,7 +321,8 @@ struct ScopedEventV1(Event);
 
 impl Drop for ScopedEventV1 {
     fn drop(&mut self) {
-        let scrubbed = pos_core::store::zeroize_event_plaintext_staging(std::slice::from_mut(&mut self.0));
+        let scrubbed =
+            pos_core::store::zeroize_event_plaintext_staging(std::slice::from_mut(&mut self.0));
         debug_assert!(scrubbed);
     }
 }
@@ -260,10 +335,13 @@ struct ParentHashStateV1 {
 
 impl ParentHashStateV1 {
     fn observe(&mut self) -> Result<bool> {
-        self.seen.checked_add(1).ok_or(Error::CorruptAuthority).map(|seen| {
-            self.seen = seen;
-            seen <= self.at.as_u64()
-        })
+        self.seen
+            .checked_add(1)
+            .ok_or(Error::CorruptAuthority)
+            .map(|seen| {
+                self.seen = seen;
+                seen <= self.at.as_u64()
+            })
     }
 
     fn hash_event(
@@ -276,13 +354,22 @@ impl ParentHashStateV1 {
             if !selected {
                 return Ok(());
             }
-            context.bytes(event.payload.len()).map_err(|_| Error::CorruptAuthority)
-                .and_then(|()| context.bytes(ulid::ULID_LEN).map_err(|_| Error::CorruptAuthority))
+            context
+                .bytes(event.payload.len())
+                .map_err(|_| Error::CorruptAuthority)
+                .and_then(|()| {
+                    context
+                        .bytes(ulid::ULID_LEN)
+                        .map_err(|_| Error::CorruptAuthority)
+                })
                 .and_then(|()| {
                     let id = event.id.to_string();
-                    context.check().map_err(|_| Error::CorruptAuthority)
+                    context
+                        .check()
+                        .map_err(|_| Error::CorruptAuthority)
                         .and_then(|()| {
-                            self.hash = hasher.hash_event(&self.hash, id.as_bytes(), &event.payload);
+                            self.hash =
+                                hasher.hash_event(&self.hash, id.as_bytes(), &event.payload);
                             context.check().map_err(|_| Error::CorruptAuthority)
                         })
                 })
@@ -324,7 +411,9 @@ fn hash_segment(
     state: &mut ParentHashStateV1,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<()> {
-    context.bytes(ulid::ULID_LEN).map_err(|_| Error::CorruptAuthority)
+    context
+        .bytes(ulid::ULID_LEN)
+        .map_err(|_| Error::CorruptAuthority)
         .and_then(|()| {
             let key = segment.id.to_string();
             let mut cursor = EventCursorV1 { after: None, to };
@@ -335,7 +424,9 @@ fn hash_segment(
                         // Preserve full validation after at_seq. Scrub before
                         // the post-batch check; no Event clone or Vec escapes.
                         drop(event);
-                        match result.and_then(|()| context.check().map_err(|_| Error::CorruptAuthority)) {
+                        match result
+                            .and_then(|()| context.check().map_err(|_| Error::CorruptAuthority))
+                        {
                             Ok(()) => cursor.after = Some(seq),
                             Err(error) => return Err(error),
                         }
@@ -354,33 +445,57 @@ pub(super) fn chain_hash_with_context(
     at_seq: Seq,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> std::result::Result<Hash, CoreError> {
-    chain_with_context(conn, timeline, context).map_err(|_| CoreError::ArtifactUnavailable)
+    chain_with_context(conn, timeline, context)
+        .map_err(|_| CoreError::ArtifactUnavailable)
         .and_then(|chain| {
-            logical_head_from_chain(&chain, context).map_err(|_| CoreError::ArtifactUnavailable)
+            logical_head_from_chain(&chain, context)
+                .map_err(|_| CoreError::ArtifactUnavailable)
                 .map(|head| (chain, head))
         })
         .and_then(|(chain, head)| {
             if at_seq > head {
-                return Err(CoreError::ForkBeyondHead { fork_seq: at_seq.as_u64(), head: head.as_u64() });
+                return Err(CoreError::ForkBeyondHead {
+                    fork_seq: at_seq.as_u64(),
+                    head: head.as_u64(),
+                });
             }
-            context.check().map_err(|_| CoreError::ArtifactUnavailable)
+            context
+                .check()
+                .map_err(|_| CoreError::ArtifactUnavailable)
                 .and_then(|()| {
-                    let mut state = ParentHashStateV1 { seen: 0, hash: hasher.genesis_hash(), at: at_seq };
+                    let mut state = ParentHashStateV1 {
+                        seen: 0,
+                        hash: hasher.genesis_hash(),
+                        at: at_seq,
+                    };
                     let validation = if at_seq == Seq::ZERO {
                         Ok(())
                     } else {
                         chain.iter().enumerate().try_for_each(|(index, segment)| {
-                            chain.get(index + 1).and_then(|next| next.fork).map(|cut| {
-                                fork_segment_length(segment.fork.map_or(0, Seq::as_u64), segment.head, Some(cut.as_u64()))
-                                    .map(super::u64_as_i64).map_err(|_| CoreError::ArtifactUnavailable)
-                            }).transpose().and_then(|to| {
-                                hash_segment(conn, hasher, segment, to, &mut state, context)
+                            chain
+                                .get(index + 1)
+                                .and_then(|next| next.fork)
+                                .map(|cut| {
+                                    fork_segment_length(
+                                        segment.fork.map_or(0, Seq::as_u64),
+                                        segment.head,
+                                        Some(cut.as_u64()),
+                                    )
+                                    .map(super::u64_as_i64)
                                     .map_err(|_| CoreError::ArtifactUnavailable)
-                            })
+                                })
+                                .transpose()
+                                .and_then(|to| {
+                                    hash_segment(conn, hasher, segment, to, &mut state, context)
+                                        .map_err(|_| CoreError::ArtifactUnavailable)
+                                })
                         })
                     };
                     validation.and_then(|()| {
-                        context.check().map(|()| state.hash).map_err(|_| CoreError::ArtifactUnavailable)
+                        context
+                            .check()
+                            .map(|()| state.hash)
+                            .map_err(|_| CoreError::ArtifactUnavailable)
                     })
                 })
         })
@@ -394,27 +509,40 @@ mod tests {
     use pos_core::{
         store::{EventStore, SeqRange},
         trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1},
-        CanonicalBytes, EntityId, EventDraft, KeyIdentityV1, KeyRoleV1, Kind,
-        Signature,
+        CanonicalBytes, EntityId, EventDraft, KeyIdentityV1, KeyRoleV1, Kind, Signature,
     };
     use rusqlite::{params, types::Value};
     use std::{sync::Arc, time::Duration};
 
     type Fallible<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-    fn append(store: &mut super::super::SqliteStore, timeline: TimelineId, count: usize) -> Fallible<()> {
-        let drafts: Vec<_> = (0..count).map(|index| {
-            EventDraft::new(EntityId::new(), Kind::new("parent.\0é"),
-                CanonicalBytes::from_vec(vec![0x41, u8::try_from(index).unwrap_or_default()]))
-        }).collect();
+    fn append(
+        store: &mut super::super::SqliteStore,
+        timeline: TimelineId,
+        count: usize,
+    ) -> Fallible<()> {
+        let drafts: Vec<_> = (0..count)
+            .map(|index| {
+                EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("parent.\0é"),
+                    CanonicalBytes::from_vec(vec![0x41, u8::try_from(index).unwrap_or_default()]),
+                )
+            })
+            .collect();
         store.append(timeline, &drafts)?;
         Ok(())
     }
 
-    fn fixture() -> Fallible<(tempfile::TempDir, super::super::SqliteStore, [TimelineId; 3])> {
+    fn fixture() -> Fallible<(
+        tempfile::TempDir,
+        super::super::SqliteStore,
+        [TimelineId; 3],
+    )> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("parent-events.sqlite3");
-        let mut store = super::super::SqliteStore::open(path.to_str().ok_or("Event fixture path")?)?;
+        let mut store =
+            super::super::SqliteStore::open(path.to_str().ok_or("Event fixture path")?)?;
         // Public structural setup, not minted FCC/protected-use authority.
         store.bind_erasure_gate(Arc::new(pos_core::ErasureContainmentGateV1::new_test_open()))?;
         let root = store.create_timeline("root")?.id();
@@ -428,26 +556,46 @@ mod tests {
 
     fn raw_cost(event: &Event) -> usize {
         // Independent inventory of the actual SQLite String/Vec getters.
-        event.id.to_string().len() + event.entity.to_string().len()
-            + event.event_type.as_str().len() + event.payload.len()
+        event.id.to_string().len()
+            + event.entity.to_string().len()
+            + event.event_type.as_str().len()
+            + event.payload.len()
             + event.causation_id.map_or(0, |id| id.to_string().len())
             + event.correlation_id.map_or(0, |id| id.to_string().len())
             + event.payload_hash.as_bytes().len()
             + event.signature.map_or(0, |_| 64)
-            + event.signature_identity.map_or(0, |identity| identity.owner_id.as_str().len())
-            + event.origin.map_or(0, |origin| origin.origin_timeline_id.to_string().len())
+            + event
+                .signature_identity
+                .map_or(0, |identity| identity.owner_id.as_str().len())
+            + event
+                .origin
+                .map_or(0, |origin| origin.origin_timeline_id.to_string().len())
     }
 
     fn cost(ids: &[TimelineId], events: &[Event], at: u64) -> Fallible<usize> {
-        let ancestry: usize = ids.iter().enumerate().map(|(index, id)| {
-            16 + id.to_string().len() + 16 + 8
-                + if index == 0 { 0 } else { ids[index - 1].to_string().len() + 8 }
-        }).sum();
-        let hash_inputs: usize = events.iter().take(usize::try_from(at)?).map(|event| {
-            event.id.to_string().len() + event.payload.len()
-        }).sum();
-        Ok(ancestry + ids.iter().map(|id| id.to_string().len()).sum::<usize>()
-            + events.iter().map(raw_cost).sum::<usize>() + hash_inputs)
+        let ancestry: usize = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                16 + id.to_string().len()
+                    + 16
+                    + 8
+                    + if index == 0 {
+                        0
+                    } else {
+                        ids[index - 1].to_string().len() + 8
+                    }
+            })
+            .sum();
+        let hash_inputs: usize = events
+            .iter()
+            .take(usize::try_from(at)?)
+            .map(|event| event.id.to_string().len() + event.payload.len())
+            .sum();
+        Ok(ancestry
+            + ids.iter().map(|id| id.to_string().len()).sum::<usize>()
+            + events.iter().map(raw_cost).sum::<usize>()
+            + hash_inputs)
     }
 
     fn protected_hash(
@@ -460,10 +608,17 @@ mod tests {
         let start = clock.mark();
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
         let result = super::super::SqliteStore::compute_chain_hash_at_with_context_on(
-            &store.conn, store.hasher.as_ref(), timeline, Seq::from_u64(at),
+            &store.conn,
+            store.hasher.as_ref(),
+            timeline,
+            Seq::from_u64(at),
             &mut NativeReadContextV1::protected(&mut budget),
         );
-        Ok((result, budget.remaining_native_bytes(), budget.check_time().is_ok()))
+        Ok((
+            result,
+            budget.remaining_native_bytes(),
+            budget.check_time().is_ok(),
+        ))
     }
 
     #[test]
@@ -478,7 +633,8 @@ mod tests {
                 let rows = count * 3 + events.len() * 2;
                 let ordinary = store.compute_chain_hash_at(timeline, Seq::from_u64(at))?;
                 for bytes in 1..=expected {
-                    let limits = ForkReplayReadLimitsV1::new(count.max(1), count, rows, bytes, 1_000_000)?;
+                    let limits =
+                        ForkReplayReadLimitsV1::new(count.max(1), count, rows, bytes, 1_000_000)?;
                     let (result, remaining, open) = protected_hash(&store, timeline, at, limits)?;
                     if bytes == expected {
                         assert_eq!(result?, ordinary);
@@ -515,15 +671,24 @@ mod tests {
         ] {
             let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
             let start = clock.mark();
-            let limits = ForkReplayReadLimitsV1::new(depth, visits, row_limit, byte_limit, 1_000_000)?;
+            let limits =
+                ForkReplayReadLimitsV1::new(depth, visits, row_limit, byte_limit, 1_000_000)?;
             let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
             let result = (0..walks).try_for_each(|_| {
-                chain_hash_with_context(&store.conn, store.hasher.as_ref(), ids[2], Seq::from_u64(5),
-                    &mut NativeReadContextV1::protected(&mut budget)).map(|_| ())
+                chain_hash_with_context(
+                    &store.conn,
+                    store.hasher.as_ref(),
+                    ids[2],
+                    Seq::from_u64(5),
+                    &mut NativeReadContextV1::protected(&mut budget),
+                )
+                .map(|_| ())
             });
             assert_eq!(result.is_ok(), success);
             assert_eq!(budget.check_time().is_ok(), success);
-            if success { assert_eq!(budget.remaining_native_bytes(), 0); }
+            if success {
+                assert_eq!(budget.remaining_native_bytes(), 0);
+            }
         }
         Ok(())
     }
@@ -540,14 +705,18 @@ mod tests {
         let rows = chain.len() * 3 + events.len() * 2;
         let limits = ForkReplayReadLimitsV1::new(1, 2, rows, bytes, 1_000_000)?;
         let (result, remaining, open) = protected_hash(&store, empty_child, 1, limits)?;
-        assert_eq!(result?, store.compute_chain_hash_at(empty_child, Seq::from_u64(1))?);
+        assert_eq!(
+            result?,
+            store.compute_chain_hash_at(empty_child, Seq::from_u64(1))?
+        );
         assert_eq!(remaining, 0);
         assert!(open);
         Ok(())
     }
 
     #[test]
-    fn signed_causal_unicode_fields_use_the_same_semantic_decoder_and_exact_copies() -> Fallible<()> {
+    fn signed_causal_unicode_fields_use_the_same_semantic_decoder_and_exact_copies() -> Fallible<()>
+    {
         let (_directory, mut store, ids) = fixture()?;
         let timeline = store.create_timeline("signed")?.id();
         let mut event = store.read(ids[0], SeqRange::all())?.remove(0);
@@ -559,7 +728,11 @@ mod tests {
         event.causation_id = Some(pos_core::EventId::new());
         event.correlation_id = Some(pos_core::CorrelationId::new());
         event.signature = Some(Signature::from_bytes([7; 64]));
-        event.signature_identity = Some(KeyIdentityV1::new(pos_core::OwnerIdV1::new("é".repeat(64))?, KeyRoleV1::TimelineIntegritySigning, 1));
+        event.signature_identity = Some(KeyIdentityV1::new(
+            pos_core::OwnerIdV1::new("é".repeat(64))?,
+            KeyRoleV1::TimelineIntegritySigning,
+            1,
+        ));
         store.append_committed(timeline, &[event])?;
         let events = store.read(timeline, SeqRange::all())?;
         let bytes = cost(&[timeline], &events, 1)?;
@@ -569,17 +742,26 @@ mod tests {
             assert_eq!(result.is_ok(), limit == bytes);
             assert_eq!(open, limit == bytes);
             if limit == bytes {
-                assert_eq!(result?, store.compute_chain_hash_at(timeline, Seq::from_u64(1))?);
+                assert_eq!(
+                    result?,
+                    store.compute_chain_hash_at(timeline, Seq::from_u64(1))?
+                );
                 assert_eq!(remaining, 0);
             }
         }
         // ULID aliases accepted by the existing parser remain accepted.
-        store.conn.execute("UPDATE events SET event_id = lower(event_id), entity_id = lower(entity_id),
+        store.conn.execute(
+            "UPDATE events SET event_id = lower(event_id), entity_id = lower(entity_id),
             causation_id = lower(causation_id), correlation_id = lower(correlation_id),
-            origin_timeline_id = lower(origin_timeline_id) WHERE timeline_id = ?1", [timeline.to_string()])?;
+            origin_timeline_id = lower(origin_timeline_id) WHERE timeline_id = ?1",
+            [timeline.to_string()],
+        )?;
         let limits = ForkReplayReadLimitsV1::new(1, 1, 5, bytes, 1_000_000)?;
         let (result, remaining, open) = protected_hash(&store, timeline, 1, limits)?;
-        assert_eq!(result?, store.compute_chain_hash_at(timeline, Seq::from_u64(1))?);
+        assert_eq!(
+            result?,
+            store.compute_chain_hash_at(timeline, Seq::from_u64(1))?
+        );
         assert_eq!(remaining, 0);
         assert!(open);
         Ok(())
@@ -597,19 +779,36 @@ mod tests {
         let timeline = TimelineId::new();
         let key = timeline.to_string();
         conn.execute("INSERT INTO timelines VALUES (?1, NULL, NULL, 1)", [&key])?;
-        conn.execute("INSERT INTO events VALUES (?1, 1, ?2, ?3, 'raw', ?4, 0, NULL, NULL, 1,
+        conn.execute(
+            "INSERT INTO events VALUES (?1, 1, ?2, ?3, 'raw', ?4, 0, NULL, NULL, 1,
             ?5, NULL, NULL, NULL, NULL, ?1, 1)",
-            params![key, pos_core::EventId::new().to_string(), EntityId::new().to_string(), vec![0xf6_u8], vec![1_u8; 32]])?;
+            params![
+                key,
+                pos_core::EventId::new().to_string(),
+                EntityId::new().to_string(),
+                vec![0xf6_u8],
+                vec![1_u8; 32]
+            ],
+        )?;
         Ok((conn, timeline))
     }
 
-    fn raw_hash(conn: &Connection, timeline: TimelineId, at: u64) -> Fallible<std::result::Result<Hash, CoreError>> {
+    fn raw_hash(
+        conn: &Connection,
+        timeline: TimelineId,
+        at: u64,
+    ) -> Fallible<std::result::Result<Hash, CoreError>> {
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(4, 8, 64, 16_384, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-        Ok(chain_hash_with_context(conn, &pos_crypto::chain::Blake3Hasher, timeline, Seq::from_u64(at),
-            &mut NativeReadContextV1::protected(&mut budget)))
+        Ok(chain_hash_with_context(
+            conn,
+            &pos_crypto::chain::Blake3Hasher,
+            timeline,
+            Seq::from_u64(at),
+            &mut NativeReadContextV1::protected(&mut budget),
+        ))
     }
 
     #[test]
@@ -633,17 +832,29 @@ mod tests {
         ] {
             let (conn, timeline) = raw_fixture()?;
             conn.execute(&format!("UPDATE events SET {column} = ?1"), [value])?;
-            assert!(matches!(raw_hash(&conn, timeline, 1)?, Err(CoreError::ArtifactUnavailable)));
+            assert!(matches!(
+                raw_hash(&conn, timeline, 1)?,
+                Err(CoreError::ArtifactUnavailable)
+            ));
         }
         let (conn, timeline) = raw_fixture()?;
         conn.execute_batch("UPDATE events SET payload = zeroblob(32768)")?;
-        assert!(matches!(raw_hash(&conn, timeline, 1)?, Err(CoreError::ArtifactUnavailable)));
+        assert!(matches!(
+            raw_hash(&conn, timeline, 1)?,
+            Err(CoreError::ArtifactUnavailable)
+        ));
         let (conn, timeline) = raw_fixture()?;
         conn.execute_batch("UPDATE events SET event_type = CAST(x'ff' AS TEXT)")?;
-        assert!(matches!(raw_hash(&conn, timeline, 1)?, Err(CoreError::ArtifactUnavailable)));
+        assert!(matches!(
+            raw_hash(&conn, timeline, 1)?,
+            Err(CoreError::ArtifactUnavailable)
+        ));
         let (conn, timeline) = raw_fixture()?;
         conn.execute_batch("UPDATE events SET seq = 'bad'")?;
-        assert!(matches!(raw_hash(&conn, timeline, 1)?, Err(CoreError::ArtifactUnavailable)));
+        assert!(matches!(
+            raw_hash(&conn, timeline, 1)?,
+            Err(CoreError::ArtifactUnavailable)
+        ));
         Ok(())
     }
 
@@ -678,17 +889,27 @@ mod tests {
     #[test]
     fn sparse_rows_keep_ordinary_hash_order_and_i64_max_cursor_does_not_overflow() -> Fallible<()> {
         let (conn, timeline) = raw_fixture()?;
-        conn.execute("UPDATE events SET seq = ?1, origin_logical_seq = ?1", [i64::MAX])?;
+        conn.execute(
+            "UPDATE events SET seq = ?1, origin_logical_seq = ?1",
+            [i64::MAX],
+        )?;
         conn.execute("UPDATE timelines SET head_seq = ?1", [i64::MAX])?;
         let expected = super::super::SqliteStore::compute_chain_hash_at_unchecked_on(
-            &conn, &pos_crypto::chain::Blake3Hasher, timeline, Seq::from_u64(1))?;
+            &conn,
+            &pos_crypto::chain::Blake3Hasher,
+            timeline,
+            Seq::from_u64(1),
+        )?;
         assert_eq!(raw_hash(&conn, timeline, 1)??, expected);
         // SQLite orders an impossible TEXT key after INTEGER keys. A saturating
         // or incrementing cursor must not silently terminate at i64::MAX.
         conn.execute_batch("INSERT INTO events SELECT timeline_id, 'bad', event_id, entity_id, event_type,
             payload, wall_time, causation_id, correlation_id, schema_version, payload_hash, signature,
             signature_owner_id, signature_role, signature_epoch, origin_timeline_id, origin_logical_seq FROM events;")?;
-        assert!(matches!(raw_hash(&conn, timeline, 1)?, Err(CoreError::ArtifactUnavailable)));
+        assert!(matches!(
+            raw_hash(&conn, timeline, 1)?,
+            Err(CoreError::ArtifactUnavailable)
+        ));
         Ok(())
     }
 
@@ -705,11 +926,18 @@ mod tests {
             assert_eq!(budget.check_time().is_ok(), length == Some(8));
         }
         // Arithmetic witness only, not representable as an admitted SQLite row.
-        let lengths = EventRowLengthsV1 { seq: 1, columns: [usize::MAX; 16] };
+        let lengths = EventRowLengthsV1 {
+            seq: 1,
+            columns: [usize::MAX; 16],
+        };
         assert_eq!(lengths.total(), None);
         // Same checked primitive used by the streaming hash owner, not an
         // admitted SQLite history with an impossible number of stored rows.
-        let mut state = ParentHashStateV1 { seen: u64::MAX - 1, hash: Hash::from_bytes([1; 32]), at: Seq::from_u64(u64::MAX) };
+        let mut state = ParentHashStateV1 {
+            seen: u64::MAX - 1,
+            hash: Hash::from_bytes([1; 32]),
+            at: Seq::from_u64(u64::MAX),
+        };
         assert!(state.observe()?);
         assert_eq!(state.seen, u64::MAX);
         assert_eq!(state.observe(), Err(Error::CorruptAuthority));
@@ -723,16 +951,31 @@ mod tests {
             let mut observed_failures = 0;
             let mut observed_successes = 0;
             for boundary in 2..=512 {
-                let initial = if regression { Duration::from_micros(1) } else { Duration::ZERO };
-                let later = if regression { Duration::ZERO } else { Duration::from_micros(11) };
+                let initial = if regression {
+                    Duration::from_micros(1)
+                } else {
+                    Duration::ZERO
+                };
+                let later = if regression {
+                    Duration::ZERO
+                } else {
+                    Duration::from_micros(11)
+                };
                 let marks = std::iter::repeat_n(initial, boundary).chain(std::iter::once(later));
                 let mut clock = ScriptedGuardMonotonicSourceV1::new(marks);
                 let start = clock.mark();
                 let limits = ForkReplayReadLimitsV1::new(2, 3, 64, 16_384, 10)?;
                 let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-                let result = chain_hash_with_context(&store.conn, store.hasher.as_ref(), ids[2], Seq::from_u64(1),
-                    &mut NativeReadContextV1::protected(&mut budget));
-                if result.is_ok() { observed_successes += 1; } else {
+                let result = chain_hash_with_context(
+                    &store.conn,
+                    store.hasher.as_ref(),
+                    ids[2],
+                    Seq::from_u64(1),
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
+                if result.is_ok() {
+                    observed_successes += 1;
+                } else {
                     observed_failures += 1;
                     assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
                     assert!(budget.check_time().is_err());
