@@ -1664,6 +1664,43 @@ fn emit_strict_oracle(
     }
 }
 
+/// The path under `OUT_DIR` of an embedded byte source, named by its SHA-256 digest.
+fn embedded_path(bytes: &[u8]) -> String {
+    format!("embedded/{:x}.bin", Sha256::digest(bytes))
+}
+
+/// The `include_bytes!` expression of a byte source that `write_embedded_files` writes: a large
+/// array literal would be a large stack array for clippy and slow to compile.
+fn include_expression(bytes: &[u8]) -> String {
+    format!(
+        "include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{}\"))",
+        embedded_path(bytes)
+    )
+}
+
+/// Every byte source of the catalog that is embedded with `include_bytes!`, except the
+/// auxiliary members (which have their own numbered files).
+fn embedded_sources(profiles: &[ProfilePaths]) -> Vec<&[u8]> {
+    let mut sources: Vec<&[u8]> = Vec::new();
+    for profile in profiles {
+        sources.push(&profile.normative_requirements.bytes);
+        sources.push(&profile.profile_record);
+        for fixture in profile
+            .fixture_providers
+            .iter()
+            .flat_map(|provider| &provider.fixtures)
+        {
+            sources.extend([
+                fixture.schema.bytes.as_slice(),
+                fixture.input.bytes.as_slice(),
+                fixture.evidence_status.bytes.as_slice(),
+                fixture.oracle.bytes.as_slice(),
+            ]);
+        }
+    }
+    sources
+}
+
 fn emit_fixture(
     generated: &mut String,
     fixture: &FixturePaths,
@@ -1693,23 +1730,23 @@ fn emit_fixture(
     emit_fixture_contract(generated, fixture)?;
     writeln!(
         generated,
-        "                        schema: &{:?},",
-        fixture.schema.bytes
+        "                        schema: {},",
+        include_expression(&fixture.schema.bytes)
     )?;
     writeln!(
         generated,
-        "                        input: &{:?},",
-        fixture.input.bytes
+        "                        input: {},",
+        include_expression(&fixture.input.bytes)
     )?;
     writeln!(
         generated,
-        "                        evidence_status: &{:?},",
-        fixture.evidence_status.bytes
+        "                        evidence_status: {},",
+        include_expression(&fixture.evidence_status.bytes)
     )?;
     writeln!(
         generated,
-        "                        oracle: &{:?},",
-        fixture.oracle.bytes
+        "                        oracle: {},",
+        include_expression(&fixture.oracle.bytes)
     )?;
     emit_oracle_members(generated, fixture, first_auxiliary_index)?;
     writeln!(
@@ -1758,8 +1795,8 @@ fn emit_profile(
     )?;
     writeln!(
         generated,
-        "                normative_requirements: &{:?},",
-        profile.normative_requirements.bytes
+        "                normative_requirements: {},",
+        include_expression(&profile.normative_requirements.bytes)
     )?;
     writeln!(
         generated,
@@ -1768,8 +1805,8 @@ fn emit_profile(
     )?;
     writeln!(
         generated,
-        "                profile_record: &{:?},",
-        profile.profile_record
+        "                profile_record: {},",
+        include_expression(&profile.profile_record)
     )?;
     writeln!(generated, "                fixture_providers: vec![")?;
     let mut fixture_index = first_fixture_index;
@@ -2393,8 +2430,18 @@ fn output_directory() -> Result<PathBuf, Box<dyn Error>> {
 fn write_catalog_file(out_dir: &Path, profiles: &[ProfilePaths]) -> Result<(), Box<dyn Error>> {
     let generated = emit_catalog(profiles)?;
     std::fs::write(out_dir.join("conformance_fixture_catalog.rs"), generated)?;
+    write_embedded_files(out_dir, profiles)?;
     write_auxiliary_files(out_dir, profiles)
 }
+
+fn write_embedded_files(out_dir: &Path, profiles: &[ProfilePaths]) -> Result<(), Box<dyn Error>> {
+    reset_auxiliary_directory(&out_dir.join("embedded"))?;
+    for bytes in embedded_sources(profiles) {
+        std::fs::write(out_dir.join(embedded_path(bytes)), bytes)?;
+    }
+    Ok(())
+}
+
 fn write_authority_file(
     out_dir: &Path,
     authority: &DraftAuthorityDeclaration,
