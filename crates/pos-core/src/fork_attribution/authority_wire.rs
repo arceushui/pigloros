@@ -3,6 +3,8 @@
 //! These extend the parent ADR-099 reader and encoders, so every ADR-105
 //! record keeps exactly the same preferred-serialization profile.
 
+use crate::canonical_length::CanonicalSink;
+
 use super::{bytes, hash, text, ForkAttributionCodecErrorV1 as Error, Reader};
 use crate::{Hash, KeyRoleV1};
 
@@ -103,7 +105,7 @@ const fn nonempty(value: &[u8]) -> Result<&[u8], Error> {
 }
 
 /// Encode `null / bstr .size N`.
-pub(super) fn encode_optional_fixed<const N: usize>(out: &mut Vec<u8>, value: Option<[u8; N]>) {
+pub(super) fn encode_optional_fixed<const N: usize>(out: &mut impl CanonicalSink, value: Option<[u8; N]>) {
     if let Some(value) = value {
         bytes(out, &value);
     } else {
@@ -112,7 +114,7 @@ pub(super) fn encode_optional_fixed<const N: usize>(out: &mut Vec<u8>, value: Op
 }
 
 /// Encode `null / bstr .size 32`.
-pub(super) fn encode_optional_hash(out: &mut Vec<u8>, value: Option<Hash>) {
+pub(super) fn encode_optional_hash(out: &mut impl CanonicalSink, value: Option<Hash>) {
     if let Some(value) = value {
         hash(out, value);
     } else {
@@ -121,7 +123,7 @@ pub(super) fn encode_optional_hash(out: &mut Vec<u8>, value: Option<Hash>) {
 }
 
 /// Encode `null / tstr`.
-pub(super) fn encode_optional_text(out: &mut Vec<u8>, value: Option<&str>) {
+pub(super) fn encode_optional_text(out: &mut impl CanonicalSink, value: Option<&str>) {
     if let Some(value) = value {
         text(out, value);
     } else {

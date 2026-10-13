@@ -79,7 +79,7 @@ impl MemoryStore {
             for binding in self.fork_principal_owner_bindings.values() {
                 budget.charge_rows(1)?;
                 // The local validator searches this map by its FAR1 digest.
-                budget.charge_bytes(binding.canonical_size())?;
+                budget.charge_canonical(binding.canonical_size())?;
             }
         }
         if let Some(table) = self.fork_classifier_tables.get(&child) {
@@ -100,7 +100,7 @@ impl MemoryStore {
         for registration in self.fork_classifier_registrations.values() {
             budget.charge_rows(1)?;
             if registration.input().child_timeline_id == child {
-                budget.charge_bytes(registration.canonical_size())?;
+                budget.charge_canonical(registration.canonical_size())?;
             }
         }
         charge_records(self.fork_append_operations.values(), budget)?;
@@ -163,7 +163,7 @@ fn charge_records<'record, T: CanonicalSizeV1 + 'record>(
 ) -> ReadResult<()> {
     for record in records {
         budget.charge_rows(1)?;
-        budget.charge_bytes(record.canonical_size())?;
+        budget.charge_canonical(record.canonical_size())?;
     }
     Ok(())
 }
