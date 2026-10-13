@@ -499,55 +499,117 @@ mod tests {
         // The fixture has one root and one Fork, not arbitrary ancestry. Count
         // query Strings, visited-set IDs and retained segment ID/head/cut
         // fields, plus the non-root row's actually fetched parent String.
-        let root_fields = root.to_string().len() + 2 * root.inner().to_bytes().len()
-            + 0_u64.to_be_bytes().len();
-        let child_fields = child.to_string().len() + 2 * child.inner().to_bytes().len()
-            + 2 * 0_u64.to_be_bytes().len() + root.to_string().len();
-        let parent = world.source.read(root, SeqRange::bounded(
-            pos_core::Seq::from_u64(1), pos_core::Seq::from_u64(PARENT_CUT),
-        ))?;
+        let root_fields =
+            root.to_string().len() + 2 * root.inner().to_bytes().len() + 0_u64.to_be_bytes().len();
+        let child_fields = child.to_string().len()
+            + 2 * child.inner().to_bytes().len()
+            + 2 * 0_u64.to_be_bytes().len()
+            + root.to_string().len();
+        let parent = world.source.read(
+            root,
+            SeqRange::bounded(
+                pos_core::Seq::from_u64(1),
+                pos_core::Seq::from_u64(PARENT_CUT),
+            ),
+        )?;
         let own = world.source.read_own(child, SeqRange::all())?;
-        let event_work = parent.iter().chain(&own).map(|event| {
-            raw_event_cost(event) + event.id.to_string().len() + event.payload.len()
-        }).sum::<usize>();
-        Ok(root_fields + child_fields + root.to_string().len() + child.to_string().len() + event_work)
+        let event_work = parent
+            .iter()
+            .chain(&own)
+            .map(|event| raw_event_cost(event) + event.id.to_string().len() + event.payload.len())
+            .sum::<usize>();
+        Ok(root_fields
+            + child_fields
+            + root.to_string().len()
+            + child.to_string().len()
+            + event_work)
     }
 
-    fn classified_records_phase_cost(world: &World, built: &crate::fae1_fixture::Built) -> Fallible<usize> {
+    fn classified_records_phase_cost(
+        world: &World,
+        built: &crate::fae1_fixture::Built,
+    ) -> Fallible<usize> {
         let closure = pos_core::ForkAttributionImportClosureV1::validate(&built.envelope)?;
         let Some(graph) = closure.classifier() else {
-            return Ok(5 * closure.fork_admission().fields().child_timeline_id.to_string().len());
+            return Ok(5 * closure
+                .fork_admission()
+                .fields()
+                .child_timeline_id
+                .to_string()
+                .len());
         };
-        let own = world.source.read_own(closure.fork_admission().fields().child_timeline_id, SeqRange::all())?;
+        let own = world.source.read_own(
+            closure.fork_admission().fields().child_timeline_id,
+            SeqRange::all(),
+        )?;
         let classifier = graph.table.to_canonical_cbor().len()
-            + graph.table.input().routes.iter().map(|route| {
-                route.source().route().len() + route.source().schema_digest().as_bytes().len() + 1
-            }).sum::<usize>();
-        closure.append_operations().iter().try_fold(5 * closure.fork_admission().fields().child_timeline_id.to_string().len(), |sum, operation| {
-            let event = own.iter().find(|event| event.id == operation.input().event_id)
-                .ok_or("classified fixture Event")?;
-            let origin = closure.event_origins().iter().find(|record| record.input().event_id == event.id)
-                .ok_or("classified fixture EOR1")?;
-            let intervention = closure.intervention_admissions().iter()
-                .find(|record| record.input().event_id == event.id);
-            // Four classified-lookup query Strings plus the raw suffix Event
-            // ID String. Whole-suffix prefix/orphan/cursor keys are counted
-            // separately above. Include real FOP raw/comparison/source work,
-            // table binding and classifier buffers, and retained fixed fields.
-            let source_strings = match &operation.input().source {
-                pos_core::ForkAppendSourceIdentityV1::HostInternal => 0,
-                pos_core::ForkAppendSourceIdentityV1::ExternalInput { adapter_identifier, source } => adapter_identifier.len() + source.route().len(),
-            };
-            let mut retained = 16 + 8 + 16 + 2 + 32 + 32;
-            if intervention.is_some() { retained += 32 + 16 + 8 + 16 + 32 + 32 + 32 + 32; }
-            retained += 32 + 16 + 8 + 16 + 32 + 8 + 32 + 32 + 32 + 32 + 1;
-            if operation.input().intervention_admission_digest.is_some() { retained += 32; }
-            if let pos_core::ForkAppendSourceIdentityV1::ExternalInput { source, .. } = &operation.input().source { retained += source.schema_digest().as_bytes().len(); }
-            Ok(sum + 5 * event.id.to_string().len() + raw_event_cost(event)
-                + 3 * origin.to_canonical_cbor().len()
-                + intervention.map_or(0, |record| 3 * record.to_canonical_cbor().len())
-                + classifier + graph.table.to_canonical_cbor().len()
-                + 2 * operation.to_canonical_cbor().len() + source_strings + retained)
-        })
+            + graph
+                .table
+                .input()
+                .routes
+                .iter()
+                .map(|route| {
+                    route.source().route().len()
+                        + route.source().schema_digest().as_bytes().len()
+                        + 1
+                })
+                .sum::<usize>();
+        closure.append_operations().iter().try_fold(
+            5 * closure
+                .fork_admission()
+                .fields()
+                .child_timeline_id
+                .to_string()
+                .len(),
+            |sum, operation| {
+                let event = own
+                    .iter()
+                    .find(|event| event.id == operation.input().event_id)
+                    .ok_or("classified fixture Event")?;
+                let origin = closure
+                    .event_origins()
+                    .iter()
+                    .find(|record| record.input().event_id == event.id)
+                    .ok_or("classified fixture EOR1")?;
+                let intervention = closure
+                    .intervention_admissions()
+                    .iter()
+                    .find(|record| record.input().event_id == event.id);
+                // Four classified-lookup query Strings plus the raw suffix Event
+                // ID String. Whole-suffix prefix/orphan/cursor keys are counted
+                // separately above. Include real FOP raw/comparison/source work,
+                // table binding and classifier buffers, and retained fixed fields.
+                let source_strings = match &operation.input().source {
+                    pos_core::ForkAppendSourceIdentityV1::HostInternal => 0,
+                    pos_core::ForkAppendSourceIdentityV1::ExternalInput {
+                        adapter_identifier,
+                        source,
+                    } => adapter_identifier.len() + source.route().len(),
+                };
+                let mut retained = 16 + 8 + 16 + 2 + 32 + 32;
+                if intervention.is_some() {
+                    retained += 32 + 16 + 8 + 16 + 32 + 32 + 32 + 32;
+                }
+                retained += 32 + 16 + 8 + 16 + 32 + 8 + 32 + 32 + 32 + 32 + 1;
+                if operation.input().intervention_admission_digest.is_some() {
+                    retained += 32;
+                }
+                if let pos_core::ForkAppendSourceIdentityV1::ExternalInput { source, .. } =
+                    &operation.input().source
+                {
+                    retained += source.schema_digest().as_bytes().len();
+                }
+                Ok(sum
+                    + 5 * event.id.to_string().len()
+                    + raw_event_cost(event)
+                    + 3 * origin.to_canonical_cbor().len()
+                    + intervention.map_or(0, |record| 3 * record.to_canonical_cbor().len())
+                    + classifier
+                    + graph.table.to_canonical_cbor().len()
+                    + 2 * operation.to_canonical_cbor().len()
+                    + source_strings
+                    + retained)
+            },
+        )
     }
 }
