@@ -32,7 +32,8 @@ carries an adapter allowlist, provider version literal, generic payload template
 second family catalog.
 
 Each provider manifest also carries an `auxiliary` object that maps every family to
-a list of `{ "path", "media_type" }` entries (empty for all seven layers today). A path
+a list of `{ "path", "media_type" }` entries (a provider lists none unless its adapter renders
+auxiliary members). A path
 is a source file under `inputs/` that `SHA256SUMS` and `BLAKE3SUMS` cover; the build
 embeds the verified bytes, and the materializer derives each bundle member path with
 `fixture_input_member_path`. The `pigloros-json-v1` adapter accepts only empty lists.

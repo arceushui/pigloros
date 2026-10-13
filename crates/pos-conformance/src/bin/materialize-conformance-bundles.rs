@@ -1070,7 +1070,7 @@ fn fixture_descriptor_from_record(
     })
 }
 
-/// Member name of the first auxiliary composite. ADR-061 revision 8 (S3b) names it
+/// Member name of the first auxiliary composite. ADR-061 revision 8, decision 7 names it
 /// `plugin-world`; the catalog is generic, so the name is only a path-derivation input.
 const AUXILIARY_INPUT_MEMBER: &str = "plugin-world";
 
