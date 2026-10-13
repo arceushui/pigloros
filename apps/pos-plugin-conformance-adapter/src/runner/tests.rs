@@ -363,7 +363,7 @@ fn unreadable_material_and_an_empty_address_are_trust_state_unavailable() -> Tes
     assert_eq!(record.worker_launches, 0);
     assert!(record.matched, "{record:?}");
 
-    // A member whose Plugin no bind registered cannot be built.
+    // A member whose Plugin no bind registered is payload-invalid: nothing runs.
     let stranger = json!({"plugin_id": "plugin-b", "at": "absent"});
     let steps = vec![
         real.install(50_000_000),
@@ -371,7 +371,7 @@ fn unreadable_material_and_an_empty_address_are_trust_state_unavailable() -> Tes
         real.pass(&stranger),
     ];
     let record = real.run(steps, refused_expect("TrustStateUnavailable"))?;
-    assert_eq!(record.setup_refusal, Some(TRUST_UNAVAILABLE));
+    assert_eq!(record, SubCaseRecordV1::empty("x"));
     Ok(())
 }
 
@@ -444,6 +444,20 @@ fn the_gate_at_the_fixture_instant_honours_the_validity_window() -> TestResult {
 }
 
 #[test]
+fn an_install_at_second_40_and_a_gate_at_second_50_is_ok() -> TestResult {
+    let mut gates = Gates::new()?;
+    gates.install(40)?;
+    assert_eq!(gates.gate(50)?, Ok(()));
+    Ok(())
+}
+
+#[test]
+fn the_launch_watchdog_is_300_seconds() {
+    assert_eq!(LAUNCH_WATCHDOG_MS, 300_000);
+    assert_eq!(launch_watchdog(), Duration::from_secs(300));
+}
+
+#[test]
 fn a_gate_below_the_second_the_installer_committed_is_trust_state_unavailable() -> TestResult {
     let mut gates = Gates::new()?;
     gates.install(55)?;
@@ -473,11 +487,12 @@ fn the_fixture_source_is_accepted_by_a_pass_and_a_refresh() -> TestResult {
         .map_err(|e| format!("{e:?}"))?;
     assert_eq!(pass.utc, Some(50));
     let mut wall = fixture_wall(50)?;
-    drop(
-        gates
-            .world
-            .refresh(&mut host, &gates.real.material, &mut wall, TICK),
-    );
+    let refreshed = gates
+        .world
+        .refresh(&mut host, &gates.real.material, &mut wall, TICK);
+    // The same material is adopted or refused by the registry, never an operational fault.
+    let refused = matches!(refreshed, Err(HostError::ArtifactTrustDenied { .. }));
+    assert!(refreshed.is_ok() || refused, "{refreshed:?}");
     Ok(())
 }
 

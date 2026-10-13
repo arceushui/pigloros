@@ -210,6 +210,10 @@ fn execute(
 }
 
 /// Checks (6) and (7) of the order.
+///
+/// Every sub-case is resolved once here and again inside `interpret`: the resolution is cheap
+/// (it copies the pieces of one sub-case) and keeps the `SubCaseRunnerV1` seam free of a
+/// prepared type, so a fake runner never sees an unresolved payload.
 fn decide(
     runner: &dyn SubCaseRunnerV1,
     attempt: &CaseAttempt,

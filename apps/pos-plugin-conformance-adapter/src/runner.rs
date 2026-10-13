@@ -8,7 +8,7 @@
 //! of the step, builds and registers the Driver of a `bind` step, and reads the world back.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use pos_core::trusted_clock::{FixtureEvaluationInstantV1, FixtureWallSourceV1};
@@ -23,7 +23,7 @@ use pos_runtime::community_pin_v1;
 use pos_runtime::community_plugin_host::{
     pinned_runtime_v1, CommunityEvaluationWorldV1, CommunityPluginCeilingsV1,
     CommunityPluginExecutionProfileV1, CommunityPluginExpectationV1, CommunityPluginHostAbiV1,
-    CommunityPluginHostErrorV1, CommunityPluginHostV1, CommunityPluginModeV1,
+    CommunityPluginHostV1, CommunityPluginModeV1,
     CommunityPluginTrustMaterialV1, FixedTrustMaterialSourceV1, GatedCommunityReleaseV1,
     ReleaseIdentityV1, TrustDenialBasisV1,
 };
@@ -34,14 +34,12 @@ use crate::invocation::{
 };
 use crate::payload::SubCaseV1;
 use crate::world::{
-    interpret, outcome_bytes_of, BindArgsV1, InstallArgsV1, PassArgsV1, PassMemberV1,
+    interpret, outcome_bytes_of, BindArgsV1, HostError, InstallArgsV1, PassArgsV1, PassMemberV1,
     RefreshArgsV1, SetupArgsV1, SubCaseRecordV1, WorldPortV1,
 };
 
 /// The outcome records of one pass.
 type Outcomes = Vec<CommunityPluginSubjectOutcomeV1>;
-
-type HostError = CommunityPluginHostErrorV1;
 
 /// The per-launch worker watchdog, in milliseconds: the worker tests' budget for compiling a
 /// Component in an instrumented build. The case `watchdog_ms` is the number of launches of the
@@ -52,6 +50,18 @@ pub const LAUNCH_WATCHDOG_MS: u64 = 300_000;
 const UNAVAILABLE: HostError = HostError::ArtifactTrustDenied {
     basis: TrustDenialBasisV1::TrustStateUnavailable,
 };
+
+/// The per-launch watchdog the Drivers' supervisors are built with.
+#[must_use]
+pub const fn launch_watchdog() -> Duration {
+    Duration::from_millis(LAUNCH_WATCHDOG_MS)
+}
+
+/// A wiring fault of the port itself (no world, no source, a Driver that cannot be built or
+/// registered): not a verdict on the release, so it is operational (`WorkerCrashed`) and the
+/// case becomes `Unavailable`. `TrustStateUnavailable` is kept for material that is genuinely
+/// absent.
+const WIRING: HostError = HostError::WorkerCrashed;
 
 /// The role of every conformance Driver's pin.
 const PIN_ROLE: &str = "conformance";
@@ -137,7 +147,7 @@ impl EvaluationWorldPortV1 {
     }
 
     fn world(&mut self) -> Result<&mut OpenWorld, HostError> {
-        self.open.as_mut().ok_or(UNAVAILABLE)
+        self.open.as_mut().ok_or(WIRING)
     }
 }
 
@@ -145,7 +155,7 @@ impl EvaluationWorldPortV1 {
 fn fixture_wall(instant_micros: u64) -> Result<FixtureWallSourceV1, HostError> {
     FixtureEvaluationInstantV1::from_micros(instant_micros)
         .map(FixtureWallSourceV1::new)
-        .or(Err(UNAVAILABLE))
+        .or(Err(WIRING))
 }
 
 /// The material source of a step: `None` is the explicit unreadable material.
@@ -164,7 +174,7 @@ impl OpenWorld {
     fn install(&mut self, args: &InstallArgsV1) -> Result<(), HostError> {
         let wall = fixture_wall(args.instant_micros);
         let material = args.material.as_ref().ok_or(UNAVAILABLE);
-        let source = self.source.as_ref().ok_or(UNAVAILABLE);
+        let source = self.source.as_ref().ok_or(WIRING);
         source.and_then(|source| {
             material.and_then(|material| {
                 wall.and_then(|mut wall| {
@@ -183,7 +193,7 @@ impl OpenWorld {
             release: None,
         };
         let wall = fixture_wall(args.instant_micros);
-        let source = self.source.as_ref().ok_or(UNAVAILABLE);
+        let source = self.source.as_ref().ok_or(WIRING);
         source.and_then(|source| {
             wall.and_then(|mut wall| {
                 self.world.gate_for_driver(
@@ -212,10 +222,7 @@ impl OpenWorld {
             CommunityPluginCeilingsV1::V1,
             Some(pinned_runtime_v1()),
         );
-        let supervisor = CommunityPluginSupervisorV1::new(
-            program.clone(),
-            Duration::from_millis(LAUNCH_WATCHDOG_MS),
-        );
+        let supervisor = CommunityPluginSupervisorV1::new(program.clone(), launch_watchdog());
         let pin = community_pin_v1(Hash::from_bytes([1; 32]), vec![PIN_ROLE.to_owned()]);
         let settings = |supervisor| CommunityDriverSettingsV1 {
             plugin_id: pos_core::Plugin::id(&plugin),
@@ -230,7 +237,7 @@ impl OpenWorld {
             },
         };
         supervisor
-            .ok_or(UNAVAILABLE)
+            .ok_or(WIRING)
             .and_then(|supervisor| {
                 CommunityDriverConfigV1::from_gated(
                     gated,
@@ -242,9 +249,9 @@ impl OpenWorld {
             })
             .and_then(|config| {
                 let (driver, handle) = CommunityDriverV1::new(config);
-                let registered = pin.or(Err(UNAVAILABLE)).and_then(|pin| {
+                let registered = pin.or(Err(WIRING)).and_then(|pin| {
                     register_community_driver(self.world.plugins_mut(), &plugin, pin, driver)
-                        .or(Err(UNAVAILABLE))
+                        .or(Err(WIRING))
                 });
                 registered.map(|()| Bound {
                     plugin_id: args.plugin_id.clone(),
@@ -264,7 +271,7 @@ impl OpenWorld {
                 .bound
                 .iter()
                 .find(|bound| bound.plugin_id == member.plugin_id);
-            found.ok_or(UNAVAILABLE).map(|bound| {
+            found.ok_or(WIRING).map(|bound| {
                 *lock(&bound.inputs) = PassInputsV1 {
                     invocation_id: args.invocation_id,
                     random_domain: args.random_domain,
@@ -289,7 +296,7 @@ impl OpenWorld {
                 (built, handle)
             })
         };
-        self.source.as_ref().ok_or(UNAVAILABLE).and_then(|source| {
+        self.source.as_ref().ok_or(WIRING).and_then(|source| {
             args.members
                 .iter()
                 .map(|member| pair(member, source))
@@ -339,7 +346,7 @@ impl WorldPortV1 for EvaluationWorldPortV1 {
             mode,
         } = setup;
         let world = genesis
-            .ok_or(UNAVAILABLE)
+            .ok_or(WIRING)
             .and_then(|genesis| CommunityEvaluationWorldV1::open(&genesis));
         world.map(|world| {
             self.open = Some(OpenWorld {

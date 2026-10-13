@@ -594,7 +594,7 @@ fn an_empty_marker_is_in_every_source() -> TestResult {
 }
 
 #[test]
-fn a_retained_mismatch_clears_retained_ok_and_shows_in_the_entry() -> TestResult {
+fn a_retained_mismatch_clears_retained_ok_and_marks_the_entry() -> TestResult {
     let mut fake = Fake::default();
     let record = run(&mut fake, &scanning("secret", "q"))?;
     let scan = record.scan.clone().ok_or("scan")?;
@@ -605,15 +605,7 @@ fn a_retained_mismatch_clears_retained_ok_and_shows_in_the_entry() -> TestResult
     assert!(!record.matched);
     let family = FixtureFamily::DeletionRedaction;
     let observed = String::from_utf8(record_bytes("c", family, &[record]))?;
-    let expected = format!(
-        concat!(
-            "{{\"id\":\"del.1\",\"kind\":\"absent\",\"prohibited_data_present\":false,",
-            "\"retained_metadata\":{{\"invocation_id_hex\":\"{}\",\"plugin_id\":\"p\"}}}}"
-        ),
-        INVOCATION_HEX
-    );
-    assert!(observed.contains(&expected), "{observed}");
-    assert!(!observed.contains("\"plugin_id\":\"q\""), "{observed}");
+    assert!(observed.contains("{\"id\":\"del.1\",\"kind\":\"mismatch\"}"), "{observed}");
     Ok(())
 }
 
@@ -1001,6 +993,13 @@ fn a_digest_that_names_no_piece_is_payload_invalid_everywhere() -> TestResult {
         *target = nothing.clone();
         assert!(invalid(&document)?, "{pointer}");
     }
+    // A second bind of one Plugin.
+    let twice = subcase("x", vec![bind(), bind()], expect.clone());
+    assert!(invalid(&twice)?);
+    // A member with an explicit `at` whose Plugin no bind named.
+    let member = json!({"plugin_id": "q", "at": "absent"});
+    let document = subcase("x", vec![bind(), pass_step(vec![member])], expect.clone());
+    assert!(invalid(&document)?);
     // A member without `at` whose Plugin no bind named.
     let document = subcase(
         "x",

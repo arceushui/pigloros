@@ -26,8 +26,9 @@ other platforms the library is empty and `main` does nothing.
 - The payload grammar, the `PCW2` composite, the `PCA1` anchor and the oracle record are those of
   ADR-061 revision 8 decisions 7 and 8.
 
-`cargo build -p pos-plugin-conformance-adapter` does not build the worker. Build
-`pos-plugin-worker` into the same target directory first.
+`cargo build -p pos-plugin-conformance-adapter` does not build the worker, so build it first.
+`AdapterRunErrorV1::Worker` (exit code 4) is the documented contract for a binary whose
+directory cannot be determined.
 
 ## Dependencies
 

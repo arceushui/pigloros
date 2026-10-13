@@ -36,7 +36,8 @@ use crate::payload::{
     ProfileDigestV1, ReleaseV1, StepV1, SubCaseV1, Text,
 };
 
-type HostError = CommunityPluginHostErrorV1;
+/// The closed host error of a step.
+pub type HostError = CommunityPluginHostErrorV1;
 
 /// The result of one sub-case.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,7 +58,9 @@ pub struct SubCaseRecordV1 {
     pub committed: Option<[u8; 32]>,
     /// The usage of the sub-case: zero unless it committed.
     pub usage: ResourceUsage,
-    /// The worker launches of the passes, counted from the outcomes that have a receipt.
+    /// The worker launches of the passes. A proxy: it counts the outcomes that carry an
+    /// execution profile digest, which a Driver records only after it reached the launch. S5
+    /// (R8-S9) verifies it against the real worker.
     pub worker_launches: u32,
     /// Whether the sub-result equals `expect`.
     pub matched: bool,
@@ -490,10 +493,11 @@ impl Resolver<'_> {
 
     fn member(&mut self, member: &MemberV1) -> Result<PassMemberV1, PayloadInvalidV1> {
         let plugin_id = member.plugin_id.as_str();
+        let bound = self.bound.get(plugin_id).cloned().ok_or(PayloadInvalidV1);
         let address = match &member.at {
-            None => self.bound.get(plugin_id).cloned().ok_or(PayloadInvalidV1),
-            Some(AtV1::Absent(_)) => nothing_address(),
-            Some(AtV1::Release(release)) => self.address(release),
+            None => bound,
+            Some(AtV1::Absent(_)) => bound.and_then(|_| nothing_address()),
+            Some(AtV1::Release(release)) => bound.and_then(|_| self.address(release)),
         };
         address.map(|address| PassMemberV1 {
             plugin_id: plugin_id.to_owned(),
@@ -510,6 +514,9 @@ impl Resolver<'_> {
                 tick: install.tick.0,
             })),
             StepV1::Bind(bind) => {
+                if self.bound.contains_key(bind.plugin_id.as_str()) {
+                    return Err(PayloadInvalidV1);
+                }
                 let address = self.address(&bind.release)?;
                 let material = self.material_of(bind.material.as_ref())?;
                 self.material.clone_from(&material);

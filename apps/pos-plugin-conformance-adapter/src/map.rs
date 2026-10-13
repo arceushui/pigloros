@@ -44,7 +44,7 @@ pub const KNOWN_ERRORS: [&str; 20] = [
 ];
 
 /// The class name of an authoritative failure.
-const AUTHORITATIVE: &str = "Authoritative";
+const AUTHORITATIVE: &str = HostFailureClassV1::Authoritative.name();
 
 /// One sub-result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -287,11 +287,12 @@ pub fn record_bytes(case_id: &str, family: FixtureFamily, records: &[SubCaseReco
     .line()
 }
 
-/// The entry of one sub-case: its expected values when it matched, else the observed values in
-/// the same shape, else `{"id","kind":"mismatch"}`.
+/// The entry of one sub-case: its values when it matched, else `{"id","kind":"mismatch"}`, so
+/// that a sub-case that did not match can never equal the oracle, whatever it observed.
 fn entry(family: FixtureFamily, record: &SubCaseRecordV1) -> JsonV1 {
     let id = JsonV1::text(&record.id);
     match (family, record) {
+        _ if !record.matched => JsonV1::object([("id", id), ("kind", JsonV1::text("mismatch"))]),
         (
             FixtureFamily::Positive,
             SubCaseRecordV1 {

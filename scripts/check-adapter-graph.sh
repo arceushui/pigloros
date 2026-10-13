@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# The conformance adapter keeps the Wasmtime worker, the trust-holding crates and the
-# test-support fixtures out of its own dependency edges (ADR-061 revision 8 decision 2, R8-A9).
+# The conformance adapter keeps Wasmtime, the worker and the trust-holding crates out of its
+# own dependency edges (ADR-061 revision 8 decision 2, R8-A9).
 set -euo pipefail
 
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
 package='pos-plugin-conformance-adapter'
+
+for tool in cargo jq; do
+  command -v "${tool}" >/dev/null || { printf '%s\n' "${tool} is required" >&2; exit 1; }
+done
 
 # The whole normal graph: no Wasmtime, no host, no worker.
 forbidden_graph='^(wasmtime|pos-plugin-host|pos-plugin-worker) v'

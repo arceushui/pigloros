@@ -459,6 +459,14 @@ fn the_canonical_record_equals_the_hand_written_golden_byte_for_byte() {
     assert!(golden.ends_with("}\n") && !golden[..golden.len() - 1].contains('\n'));
 }
 
+const fn position_digit(position: usize) -> u8 {
+    match position {
+        0 => 1,
+        1 => 2,
+        _ => 3,
+    }
+}
+
 #[test]
 fn one_mismatch_changes_exactly_its_entry() {
     let matching = [
@@ -468,17 +476,14 @@ fn one_mismatch_changes_exactly_its_entry() {
     ];
     let golden = output_of(&case_result("c", FixtureFamily::Positive, &matching));
     for position in 0..3 {
-        // A different digest, or no digest at all (a step failed before the value existed).
-        for observed in [Some([9; 32]), None] {
+        // An observed digest that differs, one equal to the golden, or none at all.
+        for observed in [Some([9; 32]), Some([position_digit(position); 32]), None] {
             let mut records = matching.clone();
             records[position] = committed_record(&records[position].id, observed, false);
             let seen = output_of(&case_result("c", FixtureFamily::Positive, &records));
             let id = format!("pos.{}", position + 1);
             let original = committed_entry(&id, &format!("0{}", position + 1));
-            let replacement = observed.map_or_else(
-                || format!("{{\"id\":\"{id}\",\"kind\":\"mismatch\"}}"),
-                |_| committed_entry(&id, "09"),
-            );
+            let replacement = format!("{{\"id\":\"{id}\",\"kind\":\"mismatch\"}}");
             assert_eq!(
                 seen,
                 golden.replacen(&original, &replacement, 1),
@@ -522,8 +527,7 @@ fn the_deletion_and_independent_entries_have_their_shapes() {
     let entries = concat!(
         "{\"id\":\"del.1\",\"kind\":\"absent\",\"prohibited_data_present\":false,",
         "\"retained_metadata\":{\"invocation_id_hex\":\"ab\",\"plugin_id\":\"p\"}},",
-        "{\"id\":\"del.2\",\"kind\":\"absent\",\"prohibited_data_present\":true,",
-        "\"retained_metadata\":{\"invocation_id_hex\":\"ab\",\"plugin_id\":\"p\"}},",
+        "{\"id\":\"del.2\",\"kind\":\"mismatch\"},",
         "{\"id\":\"del.3\",\"kind\":\"mismatch\"}"
     );
     let opening = head("deletion-redaction");
