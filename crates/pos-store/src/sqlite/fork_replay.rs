@@ -448,6 +448,11 @@ mod tests {
             super::super::fork_replay_classifier::imported_classifier_phase_cost(
                 built.envelope.unsigned().input().classifier.as_ref(),
             )?;
+        // The fixture persists exactly this public registry through the
+        // ordinary Ciborium writer. Count its newly contextual raw fetch,
+        // independently of production probes or measured ledger usage.
+        let mut registry_bytes = Vec::new();
+        ciborium::into_writer(&world.registry, &mut registry_bytes)?;
         Ok(publication_phase_cost(committed)?
             + retained_key_phase
             + admission_phase * 2
@@ -460,6 +465,7 @@ mod tests {
             + projection_copy
             + origin_copy
             + absent_key_copy
+            + registry_bytes.len()
             + final_event_hash_phase_cost(world, committed)?
             + classified_records_phase_cost(world, built)?)
     }
