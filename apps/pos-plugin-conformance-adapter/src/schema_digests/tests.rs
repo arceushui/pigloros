@@ -11,7 +11,6 @@ fn every_family_has_the_digest_of_its_own_schema_member() {
     for (index, digest) in digests.iter().enumerate() {
         let member = schema_member(FixtureFamily::ALL[index]);
         assert_eq!(digest, blake3::hash(member).as_bytes());
-        assert_ne!(*digest, [0; 32]);
         assert!(!digests[..index].contains(digest), "digest {index} repeats");
     }
 }

@@ -19,7 +19,7 @@ use pos_reference::adapter_transport::{read_observation, write_attempt};
 use pos_reference::evaluator::{SubjectObservation, SubjectResult};
 use pos_reference::evaluator_domain::{ExecutionMode, FixtureFamily};
 use pos_reference::profile::NamespacedFailure;
-use support::attempts::{attempt_from_fixture_files, oracle_bytes};
+use support::attempts::{attempt_from_fixture_files, family_budget, oracle_bytes};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -36,7 +36,21 @@ fn observe(family: FixtureFamily, mode: ExecutionMode) -> TestResult<SubjectObse
     Ok(read_observation(out.as_slice(), 1_048_576)?)
 }
 
-/// The observation equals the oracle member byte for byte.
+/// The measured usage of the observation stays within the budget the provider declares.
+fn assert_within_budget(family: FixtureFamily, observation: &SubjectObservation) -> TestResult {
+    let (budget, usage) = (family_budget(family)?, observation.usage);
+    assert!(usage.memory_bytes <= budget.memory_bytes, "{family:?} {usage:?}");
+    assert!(usage.cpu_fuel <= budget.cpu_fuel, "{family:?} {usage:?}");
+    assert!(usage.host_calls <= budget.host_calls, "{family:?} {usage:?}");
+    assert!(usage.event_count <= budget.event_count, "{family:?} {usage:?}");
+    assert!(usage.output_bytes <= budget.output_bytes, "{family:?} {usage:?}");
+    assert!(usage.storage_bytes <= budget.storage_bytes, "{family:?} {usage:?}");
+    assert!(usage.execution_steps <= budget.execution_steps, "{family:?} {usage:?}");
+    assert!(usage.simulation_time_ns <= budget.simulation_time_ns, "{family:?} {usage:?}");
+    Ok(())
+}
+
+/// The observation equals the oracle member byte for byte and stays within the budget.
 fn assert_output_is_the_oracle(family: FixtureFamily, mode: ExecutionMode) -> TestResult {
     let observation = observe(family, mode)?;
     assert_eq!(
@@ -44,7 +58,7 @@ fn assert_output_is_the_oracle(family: FixtureFamily, mode: ExecutionMode) -> Te
         SubjectResult::Output(oracle_bytes(family)?),
         "{family:?} {mode:?}"
     );
-    Ok(())
+    assert_within_budget(family, &observation)
 }
 
 #[test]
@@ -56,9 +70,7 @@ fn both_guests_commit_the_literals_in_local_and_air_gapped() -> TestResult {
     assert_eq!(air_gapped.result, oracle);
     assert_eq!(local.usage, air_gapped.usage);
     assert!(local.usage.cpu_fuel > 0);
-    assert!(local.usage.memory_bytes <= 8_388_608);
-    assert!(local.usage.host_calls <= 100);
-    Ok(())
+    assert_within_budget(FixtureFamily::Positive, &local)
 }
 
 #[test]
@@ -77,7 +89,7 @@ fn a_starved_fuel_budget_is_the_resource_limit_failure() -> TestResult {
             code_id: "resource-limit".to_owned(),
         })
     );
-    Ok(())
+    assert_within_budget(FixtureFamily::ResourceExhaustion, &observation)
 }
 
 #[test]

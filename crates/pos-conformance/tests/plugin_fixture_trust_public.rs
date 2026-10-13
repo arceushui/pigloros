@@ -7,7 +7,8 @@
 //! sub-case expects to be an `InvalidManifest` must be refused by the strict PMF1 projection.
 #![cfg(target_os = "linux")]
 
-use std::collections::BTreeMap;
+pub mod support;
+
 use std::path::PathBuf;
 
 use ciborium::value::Value;
@@ -22,9 +23,9 @@ use pos_crypto::plugin_trust::{
 };
 use pos_plugin_release::{InMemoryReleaseEntryV1, InMemoryReleaseSourceV1, ReleaseSourceV1};
 use serde_json::Value as Json;
+use support::plugin_composite::{pieces_of, Pieces};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-type Pieces = BTreeMap<[u8; 32], Vec<u8>>;
 
 const FAMILIES: [&str; 7] = [
     "positive",
@@ -41,38 +42,12 @@ fn fixture_root() -> PathBuf {
 }
 
 fn digest(text: &str) -> TestResult<[u8; 32]> {
-    if text.len() != 64 {
-        return Err("a digest is 64 hexadecimal digits".into());
-    }
-    let bytes = (0..text.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(&text[index..index + 2], 16))
-        .collect::<Result<Vec<u8>, _>>()?;
-    Ok(<[u8; 32]>::try_from(bytes).map_err(|_| "not 32 bytes")?)
-}
-
-/// The pieces of a composite, each addressed by the BLAKE3 digest of its bytes.
-fn pieces_of(composite: &[u8]) -> TestResult<Pieces> {
-    let value: Value = ciborium::from_reader(composite)?;
-    let Value::Array(items) = value else {
-        return Err("the composite is not an array".into());
-    };
-    let [Value::Text(tag), Value::Integer(_), Value::Array(list)] = items.as_slice() else {
-        return Err("the composite has the wrong shape".into());
-    };
-    assert_eq!(tag, "PCW2");
-    let mut pieces = Pieces::new();
-    for item in list {
-        let Value::Array(pair) = item else {
-            return Err("a piece is not a pair".into());
-        };
-        let [Value::Bytes(named), Value::Bytes(bytes)] = pair.as_slice() else {
-            return Err("a piece is not a digest and bytes".into());
-        };
-        assert_eq!(blake3::hash(bytes).as_bytes().as_slice(), named.as_slice());
-        pieces.insert(<[u8; 32]>::try_from(named.as_slice())?, bytes.clone());
-    }
-    Ok(pieces)
+    let bytes = text
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| Ok(u8::from_str_radix(std::str::from_utf8(pair)?, 16)?))
+        .collect::<TestResult<Vec<u8>>>()?;
+    Ok(<[u8; 32]>::try_from(bytes).map_err(|_| "a digest is 32 bytes of hexadecimal")?)
 }
 
 fn piece<'a>(pieces: &'a Pieces, text: &Json) -> TestResult<&'a Vec<u8>> {

@@ -241,8 +241,14 @@ plugin_provider="providers/plugin-conformance/provider.json"
 jq -e '.contract_version == "2.0.0" and .abi_major == 0 and .abi_minor == 0 and
   has("auxiliary") and .fixture_adapter.id == "plugin-signed-v1"' \
   "${source_root}/${plugin_provider}" >/dev/null
-if grep -rqF 'pigloros.fixture.plugin-conformance@1.0.0' "${source_root}"; then
-  echo "a checked-in fixture file names the Plugin 1.0.0 provider contract" >&2
+if git grep -nIF -e 'plugin-conformance@1.0.0' -- . \
+  ':(exclude)scripts/test-conformance-fixture-validation.sh'; then
+  echo "a checked-in file names the Plugin 1.0.0 provider contract" >&2
+  exit 1
+fi
+if grep -rlE '"contract_version": ?"1\.0\.0"' "${source_root}/oracles/plugin-conformance" \
+  "${source_root}/inputs/plugin-conformance" "${source_root}/providers/plugin-conformance"; then
+  echo "a Plugin fixture file carries the 1.0.0 contract version" >&2
   exit 1
 fi
 
@@ -253,13 +259,16 @@ expect_rejection "${missing_plugin_auxiliary_root}" "invalid provider auxiliary 
 
 old_contract_root="$(new_fixture_copy plugin-old-contract-version)"
 replace_json "${old_contract_root}/${plugin_provider}" '.contract_version = "1.0.0"'
-expect_adapter_rejection "${old_contract_root}" "invalid plugin-signed-v1 fixture adapter declaration"
-expect_rejection "${old_contract_root}" "invalid plugin-signed-v1 fixture adapter declaration"
+expect_adapter_rejection "${old_contract_root}" \
+  "invalid plugin-signed-v1 fixture adapter declaration"
+expect_rejection "${old_contract_root}" \
+  "invalid plugin-signed-v1 fixture adapter declaration"
 
 moved_composite_root="$(new_fixture_copy plugin-moved-composite)"
 replace_json "${moved_composite_root}/${plugin_provider}" \
   '.auxiliary.positive[0].path = "inputs/plugin-conformance/elsewhere.pcw2"'
-expect_adapter_rejection "${moved_composite_root}" "invalid plugin-signed-v1 fixture adapter declaration"
+expect_adapter_rejection "${moved_composite_root}" \
+  "invalid plugin-signed-v1 fixture adapter declaration"
 
 corrupt_composite_root="$(new_fixture_copy plugin-corrupt-composite)"
 printf '\x00' | dd of="${corrupt_composite_root}/inputs/plugin-conformance/positive.pcw2" \

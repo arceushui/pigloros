@@ -51,6 +51,9 @@ carry the first subset of the case catalogue (`pos.1` to `pos.3`, `ind.1` to `in
 `den.02`, `mal.1a`, `mal.1b`, `res.1`, `del.1`, `dgr.1`); the remaining sub-cases are added by the
 next slices of #194. Every `expected/plugin-conformance/*.json` stays `pending` with a null result
 and a null time.
+Payloads are RFC 8785 canonical JSON and, like the oracles, end with one LF byte (the adapter reads
+the payload with `serde_json`, which ignores it; the oracle LF is required by ADR-061 revision 8
+decision 2). The `--check` validates every payload against its checked-in schema.
 
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
 caller, recomputes each BLAKE3 content address, binds the CPF1 profile digest,

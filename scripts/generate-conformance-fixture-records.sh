@@ -224,10 +224,17 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_p
       }
     fi
     # An adapter may also render the auxiliary members the provider declares for the family
-    # (the Plugin composite); one it does not render is left to the verifier to find missing.
+    # (the Plugin composite). `plugin-signed-v1` must render every one of them; an adapter that
+    # renders none is left to the verifier to find the missing file.
     while IFS= read -r auxiliary_path; do
       generated_auxiliary="${generated_root}/${auxiliary_path}"
-      [[ -f "${generated_auxiliary}" ]] || continue
+      if [[ ! -f "${generated_auxiliary}" ]]; then
+        [[ "${adapter_id}" != "plugin-signed-v1" ]] || {
+          echo "adapter did not render the auxiliary member: ${auxiliary_path}" >&2
+          exit 1
+        }
+        continue
+      fi
       if [[ "${mode}" == "--write" ]]; then
         install -m 0644 -- "${generated_auxiliary}" "${fixture_root}/${auxiliary_path}"
       else

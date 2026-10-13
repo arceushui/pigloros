@@ -23,9 +23,9 @@ use pos_reference::evaluator_domain::{ClaimLayer, ExecutionMode, FixtureFamily};
 use pos_reference::profile::{DeterministicBudget, NamespacedFailure};
 use serde_json::Value;
 
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
 const MODES: [ExecutionMode; 2] = [ExecutionMode::Local, ExecutionMode::AirGapped];
+
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/conformance")
@@ -38,8 +38,46 @@ fn artifact(bytes: Vec<u8>) -> AttemptArtifact {
     }
 }
 
+/// The `fixture_contracts` entry of `family` in the provider manifest.
+fn family_contract(family: FixtureFamily) -> TestResult<Value> {
+    let provider = fs::read(fixture_root().join("providers/plugin-conformance/provider.json"))?;
+    let provider: Value = serde_json::from_slice(&provider)?;
+    Ok(provider["fixture_contracts"][family_text(family)].clone())
+}
+
+fn counter(budget: &Value, key: &str) -> TestResult<u64> {
+    Ok(budget[key].as_u64().ok_or("a budget counter is absent")?)
+}
+
+/// The deterministic budget the provider declares for `family`.
+fn family_budget(family: FixtureFamily) -> TestResult<DeterministicBudget> {
+    let contract = family_contract(family)?;
+    let budget = &contract["deterministic_budget"];
+    Ok(DeterministicBudget {
+        memory_bytes: counter(budget, "memory_bytes")?,
+        cpu_fuel: counter(budget, "cpu_fuel")?,
+        host_calls: counter(budget, "host_calls")?,
+        event_count: counter(budget, "event_count")?,
+        output_bytes: counter(budget, "output_bytes")?,
+        storage_bytes: counter(budget, "storage_bytes")?,
+        execution_steps: counter(budget, "execution_steps")?,
+        simulation_time_ns: counter(budget, "simulation_time_ns")?,
+    })
+}
+
+/// The bytes of the oracle member of `family`.
+fn oracle_bytes(family: FixtureFamily) -> TestResult<Vec<u8>> {
+    let name = family_text(family);
+    let path = fixture_root().join(format!("oracles/plugin-conformance/{name}.json"));
+    Ok(fs::read(path)?)
+}
+
 /// The attempt of `family` in `mode` from the checked-in `inputs/`, schema, composite, oracle
-/// and evidence-status members, in descriptor (bundle path) order.
+/// and evidence-status members, in descriptor (bundle path) order. A namespaced-failure oracle
+/// is an auxiliary member, as the evaluator delivers it.
+///
+/// The same helper lives in `apps/pos-plugin-conformance-adapter/tests/fixture_attempts_public.rs`
+/// and `apps/pos-plugin-worker/tests/support/attempts.rs`; keep the two in step.
 fn attempt_from_fixture_files(
     family: FixtureFamily,
     mode: ExecutionMode,
@@ -49,13 +87,13 @@ fn attempt_from_fixture_files(
     let read = |relative: String| fs::read(root.join(relative));
     let payload = read(format!("inputs/plugin-conformance/{name}.json"))?;
     let evidence = read(format!("expected/plugin-conformance/{name}.json"))?;
-    let oracle = read(format!("oracles/plugin-conformance/{name}.json"))?;
     let composite = read(format!("inputs/plugin-conformance/{name}.pcw2"))?;
     let schema = read(format!("providers/plugin-conformance/schemas/{name}.schema.json"))?;
+    let oracle = oracle_bytes(family)?;
     let kind = serde_json::from_slice::<Value>(&oracle)?["oracle"]["kind"].clone();
-    let failure_oracle = kind == "namespaced-failure";
+    let contract = family_contract(family)?;
     let mut auxiliary = vec![artifact(evidence)];
-    if failure_oracle {
+    if kind == "namespaced-failure" {
         auxiliary.push(artifact(oracle));
     }
     auxiliary.push(artifact(composite));
@@ -68,17 +106,8 @@ fn attempt_from_fixture_files(
         schema: artifact(schema),
         payload: artifact(payload),
         auxiliary,
-        budget: DeterministicBudget {
-            memory_bytes: 8_388_608,
-            cpu_fuel: 1_000_000,
-            host_calls: 100,
-            event_count: 1000,
-            output_bytes: 1_048_576,
-            storage_bytes: 8_388_608,
-            execution_steps: 100_000,
-            simulation_time_ns: 1_000_000_000,
-        },
-        watchdog_ms: 3_000_000,
+        budget: family_budget(family)?,
+        watchdog_ms: contract["watchdog_ms"].as_u64().ok_or("no watchdog")?,
         network_allowed: false,
         capability_ids: Vec::new(),
         transport_caps: AttemptTransportCaps {
@@ -118,9 +147,7 @@ fn sub_cases_that_refuse_before_a_launch_give_the_family_failure_without_a_worke
         FixtureFamily::Malformed,
         FixtureFamily::Downgrade,
     ] {
-        let name = family_text(family);
-        let path = fixture_root().join(format!("oracles/plugin-conformance/{name}.json"));
-        let oracle: Value = serde_json::from_slice(&fs::read(path)?)?;
+        let oracle: Value = serde_json::from_slice(&oracle_bytes(family)?)?;
         let text = |key: &str| oracle["oracle"][key].as_str().map(str::to_owned);
         let expected = SubjectResult::Failure(NamespacedFailure {
             owner_id: text("owner_id").ok_or("no owner")?,

@@ -6,10 +6,12 @@ the `plugin-conformance` layer, and of the adapter's `src/schema_digests.rs`. It
 `scripts/conformance-fixture-adapters/plugin-signed-v1.sh render` (through the `render`
 subcommand) and runs offline.
 
-It must not call the implementation as an oracle: no Rust, no cargo and no repository binary
-output. Every expected value is computed here from the public specification (the guest
+It does not use implementation output as an oracle: no Rust, no cargo and no binary of the
+repository. Every expected value is computed here from the public specification (the guest
 behaviour of `docs/evidence/adr-061-r4-prototype.md`, the PMF1, PTR1, PRV1, TPS1 and execution
-profile formats) or is written by hand. It imports the BLAKE3, Ed25519 and CBOR primitives of
+profile formats) or is written by hand; the only checked-in vectors it reads are the
+specification vectors it reproduces in `--check`. It imports the BLAKE3, Ed25519 and CBOR
+primitives of
 `generate_pmf1_golden_vectors.py` and adds keyed BLAKE3 with extendable output, a parameterized
 PMF1 builder, the PTR1, PRV1 and TPS1 encoders and signers, the execution profile digest, and
 the OCI closure and `PCW2` composite builders.
@@ -67,7 +69,7 @@ FAMILIES = (
 CANONICAL_OUTPUT_FAMILIES = ("positive", "deletion-redaction", "independent-evaluation")
 COMPOSITE_MEDIA_TYPE = "application/vnd.pigloros.plugin-world.v2+cbor"
 
-# --- Keyed BLAKE3 and extendable output ---------------------------------------------------------
+# --- Keyed BLAKE3 and extendable output ---
 
 KEYED_HASH = 16
 
@@ -76,7 +78,10 @@ def _key_words(key: bytes) -> list[int]:
     return list(struct.unpack("<8I", key))
 
 
-def _chunk_output(chunk: bytes, counter: int, key_words: list[int], base_flags: int):
+B3Output = tuple[list[int], list[int], int, int, int]
+
+
+def _chunk_output(chunk: bytes, counter: int, key_words: list[int], base_flags: int) -> B3Output:
     cv = list(key_words)
     blocks = [chunk[i : i + 64] for i in range(0, len(chunk), 64)] or [b""]
     for index, block in enumerate(blocks):
@@ -89,11 +94,13 @@ def _chunk_output(chunk: bytes, counter: int, key_words: list[int], base_flags: 
     raise AssertionError("unreachable")
 
 
-def _parent_output(left, right, key_words: list[int], base_flags: int):
+def _parent_output(
+    left: list[int], right: list[int], key_words: list[int], base_flags: int
+) -> B3Output:
     return list(key_words), left + right, 0, 64, base_flags | golden.PARENT
 
 
-def _root_output(data: bytes, key_words: list[int], base_flags: int):
+def _root_output(data: bytes, key_words: list[int], base_flags: int) -> B3Output:
     chunks = [data[i : i + 1024] for i in range(0, len(data), 1024)] or [b""]
     stack: list[list[int]] = []
     for counter, chunk in enumerate(chunks[:-1]):
@@ -129,17 +136,17 @@ def blake3_xof(data: bytes, key: bytes | None, offset: int, length: int) -> byte
     return produced[skip : skip + length]
 
 
-# --- Strict CBOR decoding (self-tests only) ------------------------------------------------------
+# --- Strict CBOR decoding (self-tests only) ---
 
 
-def cbor_decode(data: bytes):
+def cbor_decode(data: bytes) -> object:
     value, end = _decode(data, 0)
     if end != len(data):
         raise ValueError("trailing bytes")
     return value
 
 
-def _decode(data: bytes, pos: int):
+def _decode(data: bytes, pos: int) -> tuple[object, int]:
     initial = data[pos]
     major, info = initial >> 5, initial & 31
     pos += 1
@@ -172,7 +179,7 @@ def _decode(data: bytes, pos: int):
     raise ValueError("unsupported CBOR major type")
 
 
-# --- PTR1, PRV1 and TPS1 --------------------------------------------------------------------------
+# --- PTR1, PRV1 and TPS1 ---
 
 ROOT_SIGNATURE_DOMAIN = b"pigloros/plugin-trust-root/v1\0"
 REVOCATION_SIGNATURE_DOMAIN = b"pigloros/plugin-revocation/v1\0"
@@ -290,7 +297,7 @@ def plugin_tps1(scope: str, epoch: int, root_version: int, root_public: bytes) -
     )
 
 
-# --- The execution profile digest (EPF1) -----------------------------------------------------------
+# --- The execution profile digest (EPF1) ---
 
 PROFILE_DOMAIN = b"PiglorOS.Plugin.ExecutionProfile.v1\0"
 
@@ -338,7 +345,7 @@ def r7_d1_digest() -> bytes:
     )
 
 
-# --- PMF1 -------------------------------------------------------------------------------------------
+# --- PMF1 ---
 
 
 @dataclass(frozen=True)
@@ -442,7 +449,7 @@ def build_pmf1(spec: Pmf1Spec) -> dict:
     }
 
 
-# --- The OCI closure ----------------------------------------------------------------------------------
+# --- The OCI closure ---
 
 
 def _addressed(prefix: str, role: str, blobs) -> list:
@@ -493,7 +500,7 @@ def oci_closure(pmf1: bytes, spec: Pmf1Spec) -> tuple[bytes, list[bytes]]:
     return manifest.encode("utf-8"), [blob for _, _, blob in layers]
 
 
-# --- Fixed public documents of the releases -------------------------------------------------------------
+# --- Fixed public documents of the releases ---
 
 PLUGIN_ID = "pigloros.compatibility-prototype"
 OWNER = "publisher"
@@ -578,6 +585,8 @@ def default_spec(**overrides) -> Pmf1Spec:
         configuration=None,
         capabilities=(default_capability(False),),
         budget=default_budget(),
+        # The `dep` row is kept as the publisher test world declares it (proven on the real
+        # worker); nothing in the gate or the conformance cases reads it.
         dependencies=(("dep", bytes([0x42]) * 32, golden.WORLD, 0, 0, 0, ["clock"], [], 0),),
         provenance=PROVENANCE,
         sbom=SBOM,
@@ -629,7 +638,7 @@ def make_release(spec: Pmf1Spec, mutate=None) -> Release:
     )
 
 
-# --- The trust policy ---------------------------------------------------------------------------------
+# --- The trust policy ---
 
 
 @dataclass(frozen=True)
@@ -676,7 +685,7 @@ def trust() -> Trust:
     return Trust(anchor=anchor, tps1=tps1, ptr1=ptr1, prv1=prv1)
 
 
-# --- The prototype guests --------------------------------------------------------------------------------
+# --- The prototype guests ---
 
 FNV_OFFSET = 0xCBF29CE484222325
 FNV_PRIME = 0x100000001B3
@@ -725,7 +734,7 @@ def guest_output(
     return golden.blake3(b"".join(parts)), next_state
 
 
-# --- Sub-cases -----------------------------------------------------------------------------------------------
+# --- Sub-cases ---
 
 INITIAL_SCHEMA = bytes([9]) * 32
 INITIAL_STATE = b"initial"
@@ -1058,7 +1067,7 @@ SUBCASES = {
 }
 
 
-# --- Outputs ------------------------------------------------------------------------------------------------------
+# --- Outputs ---
 
 
 def jcs(value) -> bytes:
@@ -1160,12 +1169,21 @@ def schema_path(family: str) -> Path:
     return FIXTURES / f"providers/{CLAIM_LAYER}/schemas/{family}.schema.json"
 
 
+def rust_digest_const(name: str, digest: bytes) -> list[str]:
+    """A `[u8; 32]` constant, laid out as rustfmt does: 16 literals per line at max_width 100."""
+    lines = [f"const {name}: [u8; 32] = ["]
+    for start in range(0, 32, 16):
+        lines.append("    " + " ".join(f"0x{byte:02x}," for byte in digest[start : start + 16]))
+    lines.append("];")
+    return lines
+
+
 def schema_digests_rust() -> str:
-    constants = []
+    constants: list[str] = []
     for family in FAMILIES:
         name = family.upper().replace("-", "_")
-        digest = golden.blake3(schema_path(family).read_bytes()).hex()
-        constants.extend(golden.rust_const(name, "&str", f'"{digest}"'))
+        digest = golden.blake3(schema_path(family).read_bytes())
+        constants.extend(rust_digest_const(name, digest))
     arms = "".join(
         f"        FixtureFamily::{''.join(word.title() for word in family.split('-'))}"
         f" => {family.upper().replace('-', '_')},\n"
@@ -1183,19 +1201,16 @@ def schema_digests_rust() -> str:
 
 use pos_reference::evaluator_domain::FixtureFamily;
 
-use crate::hex;
-
 """
     footer = """\
 
 /// The pinned digest of the schema member of `family`.
 #[must_use]
-pub fn pinned_digest(family: FixtureFamily) -> [u8; 32] {
-    let text = match family {
+pub const fn pinned_digest(family: FixtureFamily) -> [u8; 32] {
+    match family {
 """
     tail = """\
-    };
-    hex::decode_array::<32>(text).unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -1205,7 +1220,7 @@ mod tests;
     return header + "\n".join(constants) + "\n" + footer + arms + tail
 
 
-# --- Self-tests (--check) --------------------------------------------------------------------------------------------
+# --- Self-tests (--check) ---
 
 
 def input_bytes(length: int) -> bytes:
@@ -1229,7 +1244,8 @@ def check_blake3_vectors() -> None:
         if golden.blake3(data) != expected[:32]:
             raise SystemExit(f"BLAKE3 hash failed for length {case['input_len']}")
         # The unaligned offsets of the guests' random stream.
-        for offset, length in ((0, 16), (37, 16), (63, 2), (115, 16), (64, 67), (130, 1), (120, 11)):
+        slices = ((0, 16), (37, 16), (63, 2), (115, 16), (64, 67), (130, 1), (120, 11))
+        for offset, length in slices:
             if blake3_xof(data, key, offset, length) != keyed[offset : offset + length]:
                 raise SystemExit(f"keyed XOF slice {offset}+{length} failed")
     if seen != {0, 1, 1024, 1025}:
@@ -1362,6 +1378,82 @@ def check_profile_digest() -> None:
         raise SystemExit("the EPF1 encoder does not reproduce the R7-D1 digest")
 
 
+def _type_ok(value: object, name: str) -> bool:
+    if name == "null":
+        return value is None
+    if name == "boolean":
+        return isinstance(value, bool)
+    if name == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    return {"string": str, "array": list, "object": dict}[name] is type(value)
+
+
+def schema_errors(value: object, schema: dict, root: dict, where: str = "$") -> list[str]:
+    """The violations of the JSON Schema subset the provider schemas use."""
+    if "$ref" in schema:
+        target: object = root
+        for part in schema["$ref"].removeprefix("#/").split("/"):
+            target = target[part]  # type: ignore[index]
+        return schema_errors(value, target, root, where)  # type: ignore[arg-type]
+    found: list[str] = []
+    if "oneOf" in schema:
+        matching = sum(not schema_errors(value, option, root, where) for option in schema["oneOf"])
+        return [] if matching == 1 else [f"{where}: {matching} alternatives match"]
+    types = schema.get("type")
+    if types is not None:
+        names = [types] if isinstance(types, str) else types
+        if not any(_type_ok(value, name) for name in names):
+            return [f"{where}: wrong type"]
+    if "const" in schema and value != schema["const"]:
+        found.append(f"{where}: not the constant")
+    if "enum" in schema and value not in schema["enum"]:
+        found.append(f"{where}: not in the enumeration")
+    if isinstance(value, str) and "pattern" in schema:
+        if re.search(schema["pattern"], value) is None:
+            found.append(f"{where}: pattern")
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value < schema.get("minimum", value) or value > schema.get("maximum", value):
+            found.append(f"{where}: out of range")
+    if isinstance(value, list):
+        found.extend(_array_errors(value, schema, root, where))
+    if isinstance(value, dict):
+        found.extend(_object_errors(value, schema, root, where))
+    return found
+
+
+def _array_errors(value: list, schema: dict, root: dict, where: str) -> list[str]:
+    found: list[str] = []
+    if not schema.get("minItems", 0) <= len(value) <= schema.get("maxItems", len(value)):
+        found.append(f"{where}: item count")
+    for index, item in enumerate(value):
+        prefix = schema.get("prefixItems", [])
+        item_schema = prefix[index] if index < len(prefix) else schema.get("items")
+        if item_schema is not None:
+            found.extend(schema_errors(item, item_schema, root, f"{where}[{index}]"))
+    return found
+
+
+def _object_errors(value: dict, schema: dict, root: dict, where: str) -> list[str]:
+    found = [f"{where}: missing {key}" for key in schema.get("required", []) if key not in value]
+    properties = schema.get("properties", {})
+    for key, item in value.items():
+        if key in properties:
+            found.extend(schema_errors(item, properties[key], root, f"{where}.{key}"))
+        elif schema.get("additionalProperties", True) is False:
+            found.append(f"{where}: unexpected {key}")
+    return found
+
+
+def check_payload_schemas() -> None:
+    """Every generated payload satisfies its checked-in schema member."""
+    for family in FAMILIES:
+        schema = json.loads(schema_path(family).read_text(encoding="utf-8"))
+        outputs = render_family(family, provider_context(family))
+        errors = schema_errors(json.loads(outputs.payload), schema, schema)
+        if errors:
+            raise SystemExit(f"the {family} payload violates its schema: {errors[:3]}")
+
+
 def self_test() -> None:
     golden.self_test()
     golden.ed25519_self_test()
@@ -1370,9 +1462,10 @@ def self_test() -> None:
     check_trust_vectors()
     check_tps1_vector()
     check_profile_digest()
+    check_payload_schemas()
 
 
-# --- Command line ----------------------------------------------------------------------------------------------------------
+# --- Command line ---
 
 
 def provider_context(family: str) -> Context:

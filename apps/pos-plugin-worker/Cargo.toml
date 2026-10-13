@@ -33,12 +33,15 @@ pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
 # the real worker and build their attempts with `pos-reference`'s EAI1 types; the adapter's
 # fixture-instant type is reached only through the library (`check_fixture_instant_confinement.py`).
 [target.'cfg(target_os = "linux")'.dev-dependencies]
+# `blake3` (the EAI1 artifact digests) and `serde_json` (the provider manifest) widen the ADR's
+# dependency statement for this slice: `pos-reference` and `pos-crypto` offer no plain hasher.
 blake3 = { workspace = true }
 pos-plugin-conformance-adapter = { path = "../pos-plugin-conformance-adapter" }
 pos-plugin-publisher = { path = "../../crates/pos-plugin-publisher", features = [
   "test-support",
 ] }
 pos-reference = { path = "../../crates/pos-reference" }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

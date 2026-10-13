@@ -2665,29 +2665,6 @@ fn assert_complete_execution_mode_closure(archive: &[u8]) -> TestResult {
     Ok(())
 }
 
-/// R8-F4: every piece of a `PCW2` composite is addressed by the BLAKE3 digest of its bytes.
-fn assert_composite_digests(composite: &[u8]) -> TestResult {
-    let value: Value = ciborium::from_reader(composite)?;
-    let Value::Array(items) = value else {
-        return Err("the composite is not an array".into());
-    };
-    let [Value::Text(tag), Value::Integer(_), Value::Array(pieces)] = items.as_slice() else {
-        return Err("the composite has the wrong shape".into());
-    };
-    assert_eq!(tag, "PCW2");
-    assert!(!pieces.is_empty());
-    for piece in pieces {
-        let Value::Array(pair) = piece else {
-            return Err("a composite piece is not a pair".into());
-        };
-        let [Value::Bytes(named), Value::Bytes(bytes)] = pair.as_slice() else {
-            return Err("a composite piece is not a digest and bytes".into());
-        };
-        assert_eq!(blake3::hash(bytes).as_bytes().as_slice(), named.as_slice());
-    }
-    Ok(())
-}
-
 /// R8-F4: the Plugin fixtures of one materialized archive carry at most three auxiliary
 /// descriptors and a well-formed composite, and `oracles` collects the oracle of each case so
 /// that the Local and Air-Gapped archives can be compared.
@@ -2719,7 +2696,7 @@ fn collect_plugin_oracles(
             .iter()
             .find(|member| member.path == path)
             .ok_or("the composite member is absent")?;
-        assert_composite_digests(&composite.bytes)?;
+        support::plugin_composite::pieces_of(&composite.bytes)?;
         let oracle = match (&fixture.strict_oracle.output, &fixture.strict_oracle.failure) {
             (Some(output), _) => format!("{:?}", output.blake3_digest),
             (None, Some(failure)) => format!(

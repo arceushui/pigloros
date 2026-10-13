@@ -5316,6 +5316,7 @@ dependencies = [
  "pos-plugin-supervisor",
  "pos-reference",
  "pos-runtime",
+ "serde_json",
 ]
 
 [[package]]
