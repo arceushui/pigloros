@@ -2628,10 +2628,7 @@ struct Plan {
 impl Plan {
     /// A plan of one draft that declares these inputs.
     #[cfg_attr(coverage_nightly, coverage(off))]
-    fn declaring(
-        step_inputs: Vec<DirectInputRefV1>,
-        direct_inputs: Vec<DirectInputRefV1>,
-    ) -> Self {
+    fn declaring(step_inputs: Vec<DirectInputRefV1>, direct_inputs: Vec<DirectInputRefV1>) -> Self {
         Self {
             payloads: vec![ONE_DRAFT],
             step_inputs,

@@ -1926,7 +1926,10 @@ fn admit_recorded(
 ) -> (Seq, Hash) {
     let basis = admit_recorded_basis(registry, prepared, key, views, authorities);
     let observation = basis.attempt().observation();
-    (observation.observed_through(), observation.snapshot_digest())
+    (
+        observation.observed_through(),
+        observation.snapshot_digest(),
+    )
 }
 
 #[test]
