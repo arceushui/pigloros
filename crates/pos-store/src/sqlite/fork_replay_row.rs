@@ -16,10 +16,16 @@ pub(super) enum SelectedRowV1<'key> {
     ChildFields(&'key str),
     ChainProbe(&'key str),
     ChainFields(&'key str),
+    OriginPrefix(&'key str),
     BindingProbe(Hash),
     BindingFields(Hash),
     EventProbe(&'key str, EventCursorV1),
     EventFields(&'key str, i64),
+    ClassifiedEventProbe(&'key str, i64),
+    EventOriginProbe(&'key str),
+    EventOriginBlob(&'key str),
+    InterventionProbe(&'key str),
+    InterventionBlob(&'key str),
 }
 
 impl SelectedRowV1<'_> {
@@ -42,6 +48,7 @@ impl SelectedRowV1<'_> {
                 typeof(fork_seq) IN ('null', 'integer'), typeof(head_seq) = 'integer'
                 FROM timelines WHERE id = ?1",
             Self::ChainFields(_) => "SELECT parent_id, fork_seq, head_seq FROM timelines WHERE id = ?1",
+            Self::OriginPrefix(_) => "SELECT fork_seq FROM timelines WHERE id = ?1",
             Self::BindingProbe(_) => "SELECT
                 typeof(principal_digest) = 'blob', length(principal_digest),
                 typeof(pob1_cbor) = 'blob', length(pob1_cbor)
@@ -49,6 +56,15 @@ impl SelectedRowV1<'_> {
             Self::BindingFields(_) => "SELECT principal_digest, pob1_cbor
                 FROM fork_principal_owner_bindings WHERE operation_id = ?1",
             Self::EventProbe(_, cursor) => cursor.sql(),
+            Self::ClassifiedEventProbe(_, _) => super::fork_replay_event::EXACT_EVENT,
+            Self::EventOriginProbe(_) => "SELECT probe.* FROM (SELECT 1) AS boundary LEFT JOIN (
+                SELECT typeof(eor1_cbor) = 'blob', length(eor1_cbor)
+                FROM fork_event_origins WHERE event_id = ?1) AS probe ON 1 = 1",
+            Self::EventOriginBlob(_) => "SELECT eor1_cbor FROM fork_event_origins WHERE event_id = ?1",
+            Self::InterventionProbe(_) => "SELECT probe.* FROM (SELECT 1) AS boundary LEFT JOIN (
+                SELECT typeof(fia1_cbor) = 'blob', length(fia1_cbor)
+                FROM fork_intervention_admissions WHERE event_id = ?1) AS probe ON 1 = 1",
+            Self::InterventionBlob(_) => "SELECT fia1_cbor FROM fork_intervention_admissions WHERE event_id = ?1",
             Self::EventFields(_, _) => "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
                 causation_id, correlation_id, schema_version, payload_hash, signature,
                 signature_owner_id, signature_role, signature_epoch, origin_timeline_id, origin_logical_seq
@@ -65,12 +81,19 @@ impl SelectedRowV1<'_> {
             Self::ChildProbe(key)
             | Self::ChildFields(key)
             | Self::ChainProbe(key)
-            | Self::ChainFields(key) => statement.query([key]),
+            | Self::ChainFields(key)
+            | Self::OriginPrefix(key)
+            | Self::EventOriginProbe(key)
+            | Self::EventOriginBlob(key)
+            | Self::InterventionProbe(key)
+            | Self::InterventionBlob(key) => statement.query([key]),
             Self::BindingProbe(operation) | Self::BindingFields(operation) => {
                 statement.query([operation.as_bytes().as_slice()])
             }
             Self::EventProbe(key, cursor) => cursor.query(statement, key),
-            Self::EventFields(key, seq) => statement.query(rusqlite::params![key, seq]),
+            Self::EventFields(key, seq) | Self::ClassifiedEventProbe(key, seq) => {
+                statement.query(rusqlite::params![key, seq])
+            }
         }
     }
 }
