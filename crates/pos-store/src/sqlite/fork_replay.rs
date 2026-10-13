@@ -195,6 +195,7 @@ mod tests {
         ForkManifestPublicationPortV1, ForkReplayReadLimitsV1,
     };
     use pos_core::{
+        store::SeqRange,
         trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1},
         ErasureInventoryPersistencePortV1, ErasureProtectedEffectDispositionV1,
         SignedForkReproManifestV1,
@@ -363,7 +364,7 @@ mod tests {
                 [child.to_string()],
                 |row| row.get(0),
             )?;
-            let expected = shared_native_phase_cost(&committed, &built, &import_bytes)?;
+            let expected = shared_native_phase_cost(&committed, &built, &world, &import_bytes)?;
             let interval = store.begin_protected_effect_interval()?;
             for (bytes, succeeds) in [(expected, true), (expected - 1, false)] {
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
@@ -377,7 +378,11 @@ mod tests {
                     &mut NativeReadContextV1::protected(&mut budget),
                 );
                 if succeeds {
-                    assert_eq!(result?, committed);
+                    let actual = result.map_err(|error| format!(
+                        "{shape:?} shared native exact budget {expected} failed: {error}; guard={:?}",
+                        budget.check_time(),
+                    ))?;
+                    assert_eq!(actual, committed);
                     assert_eq!(budget.remaining_native_bytes(), 0);
                 } else {
                     assert_eq!(
@@ -417,6 +422,7 @@ mod tests {
     fn shared_native_phase_cost(
         committed: &crate::CommittedForkManifestV1,
         built: &crate::fae1_fixture::Built,
+        world: &World,
         import_bytes: &[u8],
     ) -> Fallible<usize> {
         let signed = SignedForkReproManifestV1::from_canonical_cbor(&committed.outer_bytes)?;
@@ -453,6 +459,72 @@ mod tests {
             + receipt_copy
             + projection_copy
             + origin_copy
-            + absent_key_copy)
+            + absent_key_copy
+            + final_event_hash_phase_cost(world, committed)?
+            + classified_records_phase_cost(world, built)?)
+    }
+
+    fn raw_event_cost(event: &pos_core::Event) -> usize {
+        // Independently inventory successful SQLite String/Vec getters. This
+        // oracle does not ask the production probe, carrier or ledger for a
+        // total; signature/origin units come from public committed values.
+        event.id.to_string().len()
+            + event.entity.to_string().len()
+            + event.event_type.as_str().len()
+            + event.payload.len()
+            + event.causation_id.map_or(0, |id| id.to_string().len())
+            + event.correlation_id.map_or(0, |id| id.to_string().len())
+            + event.payload_hash.as_bytes().len()
+            + event.signature.map_or(0, |_| 64)
+            + event.signature_identity.map_or(0, |identity| identity.owner_id.as_str().len())
+            + event.origin.map_or(0, |origin| origin.origin_timeline_id.to_string().len())
+    }
+
+    fn final_event_hash_phase_cost(
+        world: &World,
+        committed: &crate::CommittedForkManifestV1,
+    ) -> Fallible<usize> {
+        let root = world.root;
+        let child = committed.receipt.child_timeline_id;
+        // The fixture has one root and one Fork, not arbitrary ancestry. Count
+        // query Strings, visited-set IDs and retained segment ID/head/cut
+        // fields, plus the non-root row's actually fetched parent String.
+        let root_fields = root.to_string().len() + 2 * root.inner().to_bytes().len()
+            + 0_u64.to_be_bytes().len();
+        let child_fields = child.to_string().len() + 2 * child.inner().to_bytes().len()
+            + 2 * 0_u64.to_be_bytes().len() + root.to_string().len();
+        let parent = world.source.read(root, SeqRange::bounded(
+            pos_core::Seq::from_u64(1), pos_core::Seq::from_u64(PARENT_CUT),
+        ))?;
+        let own = world.source.read_own(child, SeqRange::all())?;
+        let event_work = parent.iter().chain(&own).map(|event| {
+            raw_event_cost(event) + event.id.to_string().len() + event.payload.len()
+        }).sum::<usize>();
+        Ok(root_fields + child_fields + root.to_string().len() + child.to_string().len() + event_work)
+    }
+
+    fn classified_records_phase_cost(world: &World, built: &crate::fae1_fixture::Built) -> Fallible<usize> {
+        let closure = pos_core::ForkAttributionImportClosureV1::validate(&built.envelope)?;
+        let Some(graph) = closure.classifier() else { return Ok(0); };
+        let own = world.source.read_own(closure.fork_admission().fields().child_timeline_id, SeqRange::all())?;
+        let classifier = graph.table.to_canonical_cbor().len()
+            + graph.table.input().routes.iter().map(|route| {
+                route.source().route().len() + route.source().schema_digest().as_bytes().len() + 1
+            }).sum::<usize>();
+        closure.append_operations().iter().try_fold(0, |sum, operation| {
+            let event = own.iter().find(|event| event.id == operation.input().event_id)
+                .ok_or("classified fixture Event")?;
+            let origin = closure.event_origins().iter().find(|record| record.input().event_id == event.id)
+                .ok_or("classified fixture EOR1")?;
+            let intervention = closure.intervention_admissions().iter()
+                .find(|record| record.input().event_id == event.id);
+            // Four allocated query Strings: prefix, exact Event, EOR1, FIA1.
+            // Each present provenance record emits raw, comparison and digest
+            // buffers. The classifier emits one table Vec and clones routes.
+            Ok(sum + 4 * event.id.to_string().len() + raw_event_cost(event)
+                + 3 * origin.to_canonical_cbor().len()
+                + intervention.map_or(0, |record| 3 * record.to_canonical_cbor().len())
+                + classifier)
+        })
     }
 }
