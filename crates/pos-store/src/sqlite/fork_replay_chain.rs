@@ -104,7 +104,7 @@ pub(super) fn chain_with_context(
                     Err(Error::CorruptAuthority)
                 }
             })
-            .and_then(|row| retain_segment_with_context(&mut chain, current, row, context));
+            .and_then(|row| retain_segment_with_context(&mut chain, current, &row, context));
         match next {
             Ok(Some(parent)) => current = parent,
             Ok(None) => break,
@@ -118,12 +118,12 @@ pub(super) fn chain_with_context(
 fn retain_segment_with_context(
     chain: &mut Vec<BoundedForkSegment>,
     current: TimelineId,
-    row: DecodedForkChainRow,
+    row: &DecodedForkChainRow,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<Option<TimelineId>> {
     let (fork, parent, head) = match row {
-        DecodedForkChainRow::Root { head } => (None, None, head),
-        DecodedForkChainRow::Fork { parent, fork, head } => (Some(fork), Some(parent), head),
+        DecodedForkChainRow::Root { head } => (None, None, *head),
+        DecodedForkChainRow::Fork { parent, fork, head } => (Some(*fork), Some(*parent), *head),
     };
     // Actual retained Timeline ID and head; non-root entries also retain a cut.
     context.bytes(16 + 8).map_err(|_| Error::CorruptAuthority)
