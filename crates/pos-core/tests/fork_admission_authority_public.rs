@@ -240,7 +240,10 @@ mod fixed_fah1_parity {
         assert_eq!(encode(&Value::Array(fields()))?, golden);
         let host = ForkAdmissionHostRecordV1::new(hash(1), key(2), hash(3))?;
         assert_eq!(host.canonical_bytes(), golden);
-        assert_eq!(ForkAdmissionHostRecordV1::from_canonical_cbor(&golden)?, host);
+        assert_eq!(
+            ForkAdmissionHostRecordV1::from_canonical_cbor(&golden)?,
+            host
+        );
         parity(&golden);
         for length in 0..golden.len() {
             parity(&golden[..length]);
