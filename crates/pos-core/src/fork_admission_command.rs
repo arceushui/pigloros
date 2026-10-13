@@ -604,9 +604,6 @@ pub(crate) fn canonical_bytes(value: &Value) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-fn hash_value(hash: Hash) -> Value {
-    Value::Bytes(hash.as_bytes().to_vec())
-}
 
 fn bounded_bytes(value: &Value, maximum: usize) -> Result<&[u8], ForkAdmissionCommandCodecErrorV1> {
     match value {
