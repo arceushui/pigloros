@@ -972,10 +972,10 @@ fn admission_stores() -> Vec<(&'static str, AdmissionStore)> {
     ]
 }
 
-/// Records the observation anchor of every submitted basis.
+/// Records every submitted basis.
 struct RecordingPort<'a> {
     inner: &'a mut dyn ScheduledAdmissionStoreV1,
-    anchors: Vec<(Seq, Hash)>,
+    bases: Vec<PipelineAdmissionBasisV1>,
 }
 
 impl PipelineAdmissionPortV1 for RecordingPort<'_> {
@@ -983,11 +983,7 @@ impl PipelineAdmissionPortV1 for RecordingPort<'_> {
         &mut self,
         basis: &PipelineAdmissionBasisV1,
     ) -> Result<PipelineOutcomeV1, pos_core::CoreError> {
-        let observation = basis.attempt().observation();
-        self.anchors.push((
-            observation.observed_through(),
-            observation.snapshot_digest(),
-        ));
+        self.bases.push(basis.clone());
         self.inner.admit_pipeline_batch(basis)
     }
 
@@ -1886,14 +1882,14 @@ fn revoke(fixture: &mut Fixture) {
         .test_ok();
 }
 
-/// Stage and admit one authorized pass, returning the bound observation anchor.
-fn admit_recorded(
+/// Stage and admit one authorized pass, returning the basis it submitted.
+fn admit_recorded_basis(
     registry: &mut PluginRegistry,
     prepared: &mut AdmissionStore,
     key: u8,
     views: &[AuthorizedDriverViewV1],
     authorities: &[AuthorizedViewAuthorityV1<'_>],
-) -> (Seq, Hash) {
+) -> PipelineAdmissionBasisV1 {
     registry
         .stage_authorized_scheduled_pass(
             prepared.timeline,
@@ -1906,7 +1902,7 @@ fn admit_recorded(
     let admission = prepared.admission(key);
     let mut port = RecordingPort {
         inner: prepared.store.as_mut(),
-        anchors: Vec::new(),
+        bases: Vec::new(),
     };
     let receipt = registry
         .admit_authorized_scheduled_pass(&mut port, &admission, authorities)
@@ -1915,8 +1911,22 @@ fn admit_recorded(
         receipt.map(|receipt| receipt.committed_events().len()),
         Some(views.len())
     );
-    assert_eq!(port.anchors.len(), 1);
-    port.anchors[0]
+    assert_eq!(port.bases.len(), 1);
+    port.bases.remove(0)
+}
+
+/// Stage and admit one authorized pass, returning the bound observation anchor.
+fn admit_recorded(
+    registry: &mut PluginRegistry,
+    prepared: &mut AdmissionStore,
+    key: u8,
+    views: &[AuthorizedDriverViewV1],
+    authorities: &[AuthorizedViewAuthorityV1<'_>],
+) -> (Seq, Hash) {
+    let basis = admit_recorded_basis(registry, prepared, key, views, authorities);
+    let observation = basis.attempt().observation();
+    let through = observation.observed_through();
+    (through, observation.snapshot_digest())
 }
 
 #[test]
@@ -2005,6 +2015,79 @@ fn each_scheduled_driver_observes_only_its_own_authorized_view() {
         let again = admit_recorded(&mut registry, &mut prepared, 7, &views, &authorities);
         assert_ne!(alone.1, both, "{name}: the basis binds every view");
         assert_eq!(again.1, both, "{name}: the binding is deterministic");
+    }
+}
+
+/// The authorized-view digest of one view, recomputed independently of the
+/// runtime from its documented layout.
+fn expected_view_digest(timeline: TimelineId, through: u64, fixture: &Fixture) -> Hash {
+    let evaluation = observation_evaluation(&fixture.observation);
+    let snapshot = fixture
+        .observation
+        .authoritative_snapshot(&evaluation)
+        .test_ok();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PiglorOS.AuthorizedScheduledPass.v1\0");
+    hasher.update(&timeline.inner().to_bytes());
+    hasher.update(&through.to_be_bytes());
+    hasher.update(&1_u64.to_be_bytes());
+    hasher.update(&fixture.plugin_id.inner().to_bytes());
+    hasher.update(snapshot.digest().as_bytes());
+    hasher.update(fixture.knowledge.digest().as_bytes());
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// ADR-064 R3.4.2 and R3.4.7 (Redmine #628): an authorized pass has no
+/// forwarded Event and no carried set. Its Tick declares the snapshot node,
+/// which carries the authorized-view digest the basis binds, and one step node
+/// and one output node per Driver, with no ingress, history or prefix node. The
+/// step node declares the snapshot only, and a later pass chains to it.
+#[test]
+fn the_authorized_pass_declares_its_view_digest_and_no_host_derived_events() {
+    for (name, mut prepared) in admission_stores() {
+        let fixture = fixture_with_timeline(prepared.timeline);
+        let (mut registry, _) = registry(&fixture, false);
+        let evaluation = observation_evaluation(&fixture.observation);
+        let authority = current_authority(&fixture);
+        let authorities = [view_authority(&fixture, &evaluation, &authority)];
+        let views = [driver_view(&fixture)];
+
+        let basis = admit_recorded_basis(&mut registry, &mut prepared, 5, &views, &authorities);
+        let bound = expected_view_digest(prepared.timeline, 12, &fixture);
+        let anchored = basis.attempt().observation().snapshot_digest();
+        assert_eq!(anchored, bound, "{name}");
+        let dependencies = basis.dependencies();
+        assert_eq!(dependencies.tick(), 1, "{name}");
+        assert!(dependencies.event_nodes().is_empty(), "{name}");
+        let nodes = dependencies.record().nodes();
+        assert_eq!(nodes.len(), 3, "{name}");
+        // The snapshot node is the only host node: no ingress, history or prefix node.
+        let host_nodes = nodes
+            .iter()
+            .filter(|node| node.coordinate().scheduler_position() == 0);
+        assert_eq!(host_nodes.count(), 1, "{name}");
+        let owner = nodes[0].coordinate().owner_id();
+        assert_eq!(owner, "host.observation", "{name}");
+
+        // The snapshot node binds the view digest at the Tick's coordinate.
+        let key = pos_core::FactualNodeKeyV1 {
+            tick: 1,
+            scheduler_position: 0,
+            owner: "host.observation",
+            output_ordinal: 0,
+            schema_id: pos_core::FACTUAL_SNAPSHOT_SCHEMA_ID_V1,
+        };
+        let snapshot = pos_core::factual_artifact_digest(prepared.timeline, key, bound);
+        assert_eq!(nodes[0].coordinate().artifact_digest(), snapshot, "{name}");
+        assert_eq!(nodes[1].input_digests(), [snapshot], "{name}");
+
+        // The next pass declares its own snapshot node and chains to the step node.
+        let step = nodes[1].coordinate().artifact_digest();
+        let again = admit_recorded_basis(&mut registry, &mut prepared, 6, &views, &authorities);
+        assert_eq!(again.dependencies().tick(), 2, "{name}");
+        let later = again.dependencies().record().nodes();
+        assert_eq!(later[1].input_digests().len(), 2, "{name}");
+        assert!(later[1].input_digests().contains(&step), "{name}");
     }
 }
 
