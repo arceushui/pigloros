@@ -28,7 +28,7 @@ use pos_core::{
     TentativePipelineResultV1, PIPELINE_CONTRACT_VERSION_V1,
 };
 
-use super::PluginRegistry;
+use super::{ensure_set_headroom_with, PluginRegistry};
 use crate::error::ActionSubmissionError;
 
 const APPROVAL_DOMAIN: &[u8] = b"PiglorOS.HumanDomainApproval.v1\0";
@@ -150,8 +150,20 @@ impl PluginRegistry {
         proposal: &ProposedAction,
         admission: &HumanActionAdmissionV1,
     ) -> Result<HumanActionReceiptV1, HumanActionAdmissionErrorV1> {
-        self.submit_action(admission.observation.timeline_id(), proposal)
-            .map_err(HumanActionAdmissionErrorV1::Submission)
+        let timeline = admission.observation.timeline_id();
+        // Refuse the action while the Timeline cannot take one more worst-case
+        // Tick (ADR-064 Revision 3, R3.10), before the `ActionApprover` runs.
+        let headroom = ensure_set_headroom_with(
+            &*port,
+            timeline,
+            HumanActionAdmissionErrorV1::Store,
+            HumanActionAdmissionErrorV1::DependencyDeclaration,
+        );
+        headroom
+            .and_then(|()| {
+                self.submit_action(timeline, proposal)
+                    .map_err(HumanActionAdmissionErrorV1::Submission)
+            })
             .and_then(|draft| {
                 human_basis(admission, proposal, draft)
                     .map_err(HumanActionAdmissionErrorV1::Contract)

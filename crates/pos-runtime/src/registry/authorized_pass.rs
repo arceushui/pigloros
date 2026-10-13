@@ -206,6 +206,10 @@ impl PluginRegistry {
             }
         }
         let event_cursors = staged.iter().map(|id| (*id, observed_through)).collect();
+        // An authorized view forwards no committed Event (R3.4.7). Its commit
+        // records a Tick, which consumes every carried set in its step node, so
+        // the sets clear although nothing was forwarded.
+        let forwarded = vec![Vec::new(); staged.len()];
         self.pending_step = Some(PendingStep {
             timeline,
             driver_ids: staged,
@@ -219,6 +223,7 @@ impl PluginRegistry {
                 view_digest: authorized_view_digest(timeline, observed_through, views, snapshots),
             }),
             scheduled: None,
+            forwarded,
         });
         Ok(drafts)
     }

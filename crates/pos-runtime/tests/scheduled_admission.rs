@@ -1,6 +1,7 @@
 //! ADR-021 scheduled AI Driver passes through atomic host admission (#318).
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+use std::cell::Cell;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -13,12 +14,13 @@ use pos_core::{
     CapabilityGrantDraftV1, CapabilityGrantV1, CapabilityRevocationDraftV1, CapabilityRevocationV1,
     CapabilityScopeDraftV1, CapabilityScopeV1, ConsentAuthority, ConsentGrantedV1,
     ConsentRevokedV1, CoreError, DelegateClassV1, EntityId, ErasureContainmentGateV1, Event,
-    EventDraft, EventStore, FactualPrefixReadPortV1, Hash, Kind, PersistedAuthorityV1,
-    PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1, PipelineAdmissionFenceV1,
-    PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineCommitReceiptV1, PipelineContractErrorV1,
-    PipelineEvidenceRefV1, PipelineOutcomeV1, PipelineSecurityRevisionsDraftV1,
-    PipelineSecurityRevisionsV1, Plugin, PluginId, PrincipalRefV1, Reducer, Seq, SeqRange, State,
-    TimelineId, DELEGATE_ACTION_V1,
+    EventDraft, EventStore, FactualDependencyErrorV1, FactualPrefixReadPortV1, Hash, Kind,
+    PersistedAuthorityV1, PipelineAdmissionBasisV1, PipelineAdmissionFencePublisherV1,
+    PipelineAdmissionFenceV1, PipelineAdmissionPortV1, PipelineAttemptIdV1,
+    PipelineCommitReceiptV1, PipelineContractErrorV1, PipelineEvidenceRefV1, PipelineOutcomeV1,
+    PipelineSecurityRevisionsDraftV1, PipelineSecurityRevisionsV1, Plugin, PluginId,
+    PrincipalRefV1, RecordedSetCountsV1, Reducer, Seq, SeqRange, State, TimelineId,
+    DELEGATE_ACTION_V1,
 };
 use pos_runtime::{
     Driver, LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, ProjectionKey,
@@ -2058,5 +2060,298 @@ fn participant_bound_drivers_never_stage_outside_their_authorized_views() {
             committed_events(store.as_ref(), host.timeline).is_empty(),
             "{name}"
         );
+    }
+}
+
+// ── Set-capacity preflight (ADR-064 Revision 3, R3.10) ─────────────────────
+
+/// The recorded-set counts one node, edge or declared input past the preflight
+/// threshold: one worst-case Tick no longer fits.
+///
+/// The thresholds are the caps less one worst-case Tick: 934,464 nodes is
+/// 1,000,000 - 65,536, and 3,737,856 edges or inputs is 4,000,000 - 262,144.
+const fn exhausted_counts() -> [RecordedSetCountsV1; 3] {
+    [
+        RecordedSetCountsV1 {
+            nodes: 934_465,
+            edges: 0,
+            inputs: 0,
+        },
+        RecordedSetCountsV1 {
+            nodes: 0,
+            edges: 3_737_857,
+            inputs: 0,
+        },
+        RecordedSetCountsV1 {
+            nodes: 0,
+            edges: 0,
+            inputs: 3_737_857,
+        },
+    ]
+}
+
+/// The counts exactly at the threshold: one worst-case Tick still fits.
+///
+/// 934,464 is 1,000,000 - 65,536 and 3,737,856 is 4,000,000 - 262,144.
+const AT_THRESHOLD: RecordedSetCountsV1 = RecordedSetCountsV1 {
+    nodes: 934_464,
+    edges: 3_737_856,
+    inputs: 3_737_856,
+};
+
+/// Ports over a real store that report fixed recorded-set counts and count the
+/// batches offered to the store.
+struct CountsPorts<'a> {
+    inner: &'a mut dyn Harness,
+    counts: RecordedSetCountsV1,
+    offered: usize,
+    reads: Cell<usize>,
+}
+
+impl<'a> CountsPorts<'a> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    const fn new(inner: &'a mut dyn Harness, counts: RecordedSetCountsV1) -> Self {
+        Self {
+            inner,
+            counts,
+            offered: 0,
+            reads: Cell::new(0),
+        }
+    }
+}
+
+impl PipelineAdmissionPortV1 for CountsPorts<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn admit_pipeline_batch(
+        &mut self,
+        basis: &PipelineAdmissionBasisV1,
+    ) -> Result<PipelineOutcomeV1, CoreError> {
+        self.offered += 1;
+        self.inner.admit_pipeline_batch(basis)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn purge_expired_pipeline_receipts_bounded(
+        &mut self,
+        limit: NonZeroUsize,
+    ) -> Result<pos_core::store::PurgeOutcome, CoreError> {
+        self.inner.purge_expired_pipeline_receipts_bounded(limit)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn lookup_pipeline_receipt(
+        &mut self,
+        timeline: TimelineId,
+        key: AppendDedupKey,
+        attempt_id: PipelineAttemptIdV1,
+    ) -> Result<pos_core::PipelineReceiptLookupV1, CoreError> {
+        self.inner
+            .lookup_pipeline_receipt(timeline, key, attempt_id)
+    }
+}
+
+impl FactualPrefixReadPortV1 for CountsPorts<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_committed_factual_tick(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<pos_core::FactualHeadV1, CoreError> {
+        self.inner.last_committed_factual_tick(timeline)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn cut_tick_at(
+        &self,
+        timeline: TimelineId,
+        seq: Seq,
+    ) -> Result<pos_core::FactualCutV1, CoreError> {
+        self.inner.cut_tick_at(timeline, seq)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_for_committed_events(
+        &self,
+        timeline: TimelineId,
+        seqs: &[Seq],
+    ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, CoreError> {
+        self.inner.nodes_for_committed_events(timeline, seqs)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn nodes_by_digest(
+        &self,
+        timeline: TimelineId,
+        digests: &[Hash],
+    ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, CoreError> {
+        self.inner.nodes_by_digest(timeline, digests)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn last_step_node(
+        &self,
+        timeline: TimelineId,
+        owner: &pos_core::FactualOwnerIdV1,
+    ) -> Result<Option<pos_core::DependencyNodeRecordV1>, CoreError> {
+        self.inner.last_step_node(timeline, owner)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn factual_set_counts(&self, _: TimelineId) -> Result<RecordedSetCountsV1, CoreError> {
+        self.reads.set(self.reads.get() + 1);
+        Ok(self.counts)
+    }
+}
+
+impl PipelineAdmissionFencePublisherV1 for CountsPorts<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn set_pipeline_admission_fence(
+        &mut self,
+        timeline: TimelineId,
+        fence: PipelineAdmissionFenceV1,
+    ) -> Result<(), CoreError> {
+        self.inner.set_pipeline_admission_fence(timeline, fence)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn pipeline_admission_fence(
+        &self,
+        timeline: TimelineId,
+    ) -> Result<Option<PipelineAdmissionFenceV1>, CoreError> {
+        self.inner.pipeline_admission_fence(timeline)
+    }
+}
+
+impl AuthorityPersistencePortV1 for CountsPorts<'_> {
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn bind_authority_persistence(
+        &mut self,
+        binding: pos_core::AuthorityPersistenceBindingV1,
+    ) -> Result<(), AuthorityPersistenceErrorV1> {
+        self.inner.bind_authority_persistence(binding)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn issue_capability_grant(
+        &mut self,
+        permit: pos_core::AuthorityMutationPermitV1,
+        grant: &CapabilityGrantV1,
+    ) -> Result<pos_core::AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        self.inner.issue_capability_grant(permit, grant)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn revoke_capability_grant(
+        &mut self,
+        permit: pos_core::AuthorityMutationPermitV1,
+        revocation: &CapabilityRevocationV1,
+    ) -> Result<pos_core::AuthorityCommitOutcomeV1, AuthorityPersistenceErrorV1> {
+        self.inner.revoke_capability_grant(permit, revocation)
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn load_authority(
+        &self,
+        leaf_grant_id: Hash,
+    ) -> Result<PersistedAuthorityV1, AuthorityPersistenceErrorV1> {
+        self.inner.load_authority(leaf_grant_id)
+    }
+}
+
+/// Whether `error` is the set-exhaustion refusal of the preflight.
+#[cfg_attr(coverage_nightly, coverage(off))]
+const fn is_set_exhausted(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::DependencyDeclaration(FactualDependencyErrorV1::SetExhausted)
+    )
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn the_preflight_aborts_the_staged_drivers_before_any_store_call() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 10);
+        let log = Log::default();
+        let mut registry = host.registry();
+        register(&mut registry, driver("first", vec![b"a1"], &log));
+        let ancestry = root_ancestry(host.timeline);
+
+        for counts in exhausted_counts() {
+            ok(registry.step_all_anchored(host.timeline, &ancestry, Seq::ZERO));
+            let admission = host.admission(store.as_ref(), 1);
+            let mut port = CountsPorts::new(store.as_mut(), counts);
+            let error = err(registry.admit_scheduled_pass(&mut port, &admission));
+            assert!(is_set_exhausted(&error), "{name}: {error}");
+            assert_eq!((port.offered, port.reads.get()), (0, 1), "{name}");
+        }
+        assert_eq!(count(&log, ":abort"), 3, "{name}");
+        assert_eq!(count(&log, ":commit"), 0, "{name}");
+        assert!(committed_events(store.as_ref(), host.timeline).is_empty());
+
+        // Exactly at the threshold one more worst-case Tick fits.
+        ok(registry.step_all_anchored(host.timeline, &ancestry, Seq::ZERO));
+        let admission = host.admission(store.as_ref(), 2);
+        let mut port = CountsPorts::new(store.as_mut(), AT_THRESHOLD);
+        receipt(registry.admit_scheduled_pass(&mut port, &admission));
+        assert_eq!((port.offered, port.reads.get()), (1, 1), "{name}");
+        assert_eq!(count(&log, ":commit"), 1, "{name}");
+    }
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn an_empty_pass_at_the_threshold_commits_its_cursor_advance_without_a_preflight() {
+    for (name, mut store) in stores() {
+        let host = Host::prepare(store.as_mut(), 10);
+        let log = Log::default();
+        let mut registry = host.registry();
+        register(&mut registry, driver("first", Vec::new(), &log));
+
+        let ancestry = root_ancestry(host.timeline);
+        ok(registry.step_all_anchored(host.timeline, &ancestry, Seq::ZERO));
+        let admission = host.admission(store.as_ref(), 1);
+        let mut port = CountsPorts::new(store.as_mut(), exhausted_counts()[0]);
+        assert!(ok(registry.admit_scheduled_pass(&mut port, &admission)).is_none());
+        assert_eq!((port.offered, port.reads.get()), (0, 0), "{name}");
+        assert_eq!(entries(&log), ["first:step@0", "first:commit"], "{name}");
+    }
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn observe_refuses_an_exhausted_timeline_before_any_driver_steps() {
+    let payload_sets: [Vec<&'static [u8]>; 2] = [Vec::new(), vec![b"a1"]];
+    for (name, mut store) in stores() {
+        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+        ok(store.bind_erasure_gate(Arc::clone(&gate)));
+        let timeline = ok(store.create_timeline("observe-exhausted")).id();
+        let host = ok(LocalScheduledAdmissionHostV1::shared());
+        for payloads in &payload_sets {
+            let log = Log::default();
+            let mut registry = PluginRegistry::new().with_erasure_gate(gate.clone());
+            register(&mut registry, driver("first", payloads.clone(), &log));
+
+            // A pass that stages nothing is refused as well: `observe` cannot
+            // know that before the Drivers step.
+            for counts in exhausted_counts() {
+                let mut port = CountsPorts::new(store.as_mut(), counts);
+                let error = err(host.observe(&registry, &mut port, timeline));
+                assert!(is_set_exhausted(&error), "{name}: {error}");
+            }
+            assert!(ok(store.pipeline_admission_fence(timeline)).is_none());
+            assert!(entries(&log).is_empty(), "{name}");
+
+            // Nothing was staged: the registry has no pending step.
+            let ancestry = root_ancestry(timeline);
+            ok(registry.step_all_anchored(timeline, &ancestry, Seq::ZERO));
+            registry.abort_step();
+        }
+
+        let log = Log::default();
+        let mut registry = PluginRegistry::new().with_erasure_gate(gate);
+        register(&mut registry, driver("first", vec![b"a1"], &log));
+        let mut port = CountsPorts::new(store.as_mut(), AT_THRESHOLD);
+        ok(host.observe(&registry, &mut port, timeline));
+        assert!(ok(store.pipeline_admission_fence(timeline)).is_some());
     }
 }

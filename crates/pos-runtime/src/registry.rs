@@ -32,8 +32,9 @@ use pos_core::{
     },
     ActionApprover, ActionRejected, Capability, ConsentAuthority, ConsentCapabilityToken,
     ConsentError, ConsentGate, ErasureContainmentErrorV1, ErasureContainmentGateV1, ErasureGate,
-    ErasureProtectedOperationV1, OwnerIdV1, Plugin, ProposedAction, Reducer,
-    ScheduledObservationProfileV1, Timeline, TimelineMeta, MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
+    ErasureProtectedOperationV1, FactualOwnerIdV1, Hash, OwnerIdV1, Plugin, ProposedAction,
+    Reducer, ScheduledObservationProfileV1, Timeline, TimelineMeta,
+    MAX_PROPOSED_ACTION_PAYLOAD_BYTES,
 };
 use pos_state::{AuthorizedObservationV1, ProjectionRegistry};
 
@@ -57,7 +58,7 @@ use crate::{
     schema::{EventTypeSchema, SchemaRegistry},
 };
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -68,9 +69,22 @@ mod catalogue;
 mod human_admission;
 mod local_seal;
 mod manifest_roster;
+mod owner_id;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod owner_id_tests;
+mod pass_state;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod pass_state_tests;
 mod profile_composition;
 mod scheduled_admission;
 mod staged_catalogue;
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod test_ext;
+
+use pass_state::{ForwardedPair, PassCut};
 
 pub use adapter::{
     ClosedAdapterTranscriptV1, LocalAdapterErrorV1, LocalAdapterIdempotencyKeyV1,
@@ -243,13 +257,75 @@ fn subscribed_driver_events(
     }
     committed_events
         .iter()
+        .filter(|event| subscribed_event_visible(event, event_subscriptions, operation))
+        .cloned()
+        .collect()
+}
+
+/// Whether one committed Event is subscribed, Driver-visible and shown by this
+/// pass's consent.
+fn subscribed_event_visible(
+    event: &Event,
+    event_subscriptions: &[Kind],
+    operation: &OperationContext,
+) -> bool {
+    event_subscriptions.contains(&event.event_type)
+        && driver_visible_event(event)
+        && consent_visible_event(operation, event)
+}
+
+/// The subscribed Events a pass forwards: those whose `seq` is in the sorted
+/// `forwarded` pairs.
+fn forwarded_event_rows(subscribed: &[Event], forwarded: &[ForwardedPair]) -> Vec<Event> {
+    subscribed
+        .iter()
         .filter(|event| {
-            event_subscriptions.contains(&event.event_type)
-                && driver_visible_event(event)
-                && consent_visible_event(operation, event)
+            forwarded
+                .binary_search_by_key(&event.seq, |pair| pair.0)
+                .is_ok()
         })
         .cloned()
         .collect()
+}
+
+/// Refuse a pass whose Timeline cannot take one more worst-case Tick.
+///
+/// The recorded dependency set reserves one full record (ADR-064 Revision 3,
+/// R3.10). The scheduled and authorized admission paths, the human path and the
+/// local host's `observe` all read the counts through this one check.
+///
+/// # Errors
+/// Returns the store's error, mapped by `store`, when the counts cannot be
+/// read, or the refusal at the reserve threshold, mapped by `declaration`.
+fn ensure_set_headroom_with<P, E>(
+    port: &P,
+    timeline: TimelineId,
+    store: fn(pos_core::CoreError) -> E,
+    declaration: fn(pos_core::FactualDependencyErrorV1) -> E,
+) -> Result<(), E>
+where
+    P: pos_core::FactualPrefixReadPortV1 + ?Sized,
+{
+    port.factual_set_counts(timeline)
+        .map_err(store)
+        .and_then(|counts| pos_core::ensure_factual_set_headroom(counts).map_err(declaration))
+}
+
+/// [`ensure_set_headroom_with`] with the runtime errors.
+///
+/// # Errors
+/// Returns the store's error when the counts cannot be read, or
+/// [`RuntimeError::DependencyDeclaration`] at the reserve threshold.
+pub(crate) fn ensure_set_headroom<P>(port: &P, timeline: TimelineId) -> Result<(), RuntimeError>
+where
+    P: pos_core::FactualPrefixReadPortV1 + ?Sized,
+{
+    ensure_set_headroom_with(
+        port,
+        timeline,
+        RuntimeError::Store,
+        RuntimeError::DependencyDeclaration,
+    )
 }
 
 /// Vet one Driver's output with the single chain every Driver output path
@@ -502,6 +578,7 @@ mod coverage_paths {
             staged_drafts: Vec::new(),
             authorized: None,
             scheduled: None,
+            forwarded: Vec::new(),
         });
         registry.abort_step();
 
@@ -514,6 +591,7 @@ mod coverage_paths {
             staged_drafts: Vec::new(),
             authorized: None,
             scheduled: None,
+            forwarded: Vec::new(),
         });
         assert!(registry.commit_step_at(Seq::ZERO, 0).is_ok());
     }
@@ -1047,6 +1125,60 @@ struct PluginEntry {
     output_admission: Option<OutputAdmissionV1>,
     manifest_slot: Option<ManifestSlotV1>,
     event_observation: DriverEventObservation,
+    /// What the registry retains of the Driver between passes.
+    pass_state: PassState,
+}
+
+/// The consumed-history node a Driver's next recorded step must record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HistoryInputV1 {
+    /// No Event was consumed outside a recorded step.
+    None,
+    /// A node over the consumed Events, identified by its content digest.
+    Pending { content: Hash },
+}
+
+impl HistoryInputV1 {
+    /// The content digest the next history node chains onto: the zero digest
+    /// when there is none.
+    const fn content(self) -> Hash {
+        match self {
+            Self::None => Hash::zero(),
+            Self::Pending { content } => content,
+        }
+    }
+}
+
+/// The Events one Driver step sees: the committed prefix the host filters and
+/// the pairs the pass forwards to the Driver.
+#[derive(Clone, Copy)]
+struct DriverEvents<'a> {
+    committed: &'a [Event],
+    forwarded: &'a [ForwardedPair],
+}
+
+/// What the registry retains of one Driver between factual passes.
+struct PassState {
+    /// The Driver's owner ID in a factual Tick (ADR-064 Revision 3, R3.2.4),
+    /// derived once at registration.
+    owner_id: FactualOwnerIdV1,
+    /// The `(seq, payload_hash)` of every Event forwarded to the Driver since
+    /// its last recorded step node (R3.4.8).
+    carried: BTreeMap<Seq, Hash>,
+    /// The consumed history the Driver's next recorded step node must cover
+    /// (R3.4.10).
+    history: HistoryInputV1,
+}
+
+impl PassState {
+    /// The state of a new entry: nothing carried and no history.
+    const fn new(owner_id: FactualOwnerIdV1) -> Self {
+        Self {
+            owner_id,
+            carried: BTreeMap::new(),
+            history: HistoryInputV1::None,
+        }
+    }
 }
 
 /// One Driver's Event-observation declarations, captured once at
@@ -1162,7 +1294,11 @@ struct PendingStep {
     staged_drafts: Vec<EventDraft>,
     authorized: Option<AuthorizedPendingStep>,
     /// Shared base cut and snapshot digest of an anchored scheduled pass.
-    scheduled: Option<(Seq, pos_core::Hash)>,
+    scheduled: Option<(Seq, Hash)>,
+    /// The `(seq, payload_hash)` pairs each stepped Driver was forwarded, in
+    /// `driver_ids` order (R3.4.7). A commit that records no Tick appends them
+    /// to the Drivers' carried sets.
+    forwarded: Vec<Vec<ForwardedPair>>,
 }
 
 /// Participant-authorized views of one staged scheduled pass.
@@ -1173,7 +1309,7 @@ struct PendingStep {
 struct AuthorizedPendingStep {
     observations: Vec<AuthorizedObservationV1>,
     observed_through: Seq,
-    view_digest: pos_core::Hash,
+    view_digest: Hash,
 }
 
 /// Explicit host operation authorization for a Driver Tick or projection read.
@@ -2481,6 +2617,7 @@ impl PluginRegistry {
         timeline: pos_core::ids::TimelineId,
         snapshot: &ObservationSnapshot,
         committed_events: &[Event],
+        forwarded: &[ForwardedPair],
         operation: &OperationContext,
     ) -> Result<StepOutput, RuntimeError> {
         let Some(entry) = self.plugins.get_mut(&id) else {
@@ -2488,16 +2625,32 @@ impl PluginRegistry {
                 name: id.to_string(),
             });
         };
-        Self::invoke_entry_driver(entry, timeline, snapshot, committed_events, operation)
+        Self::invoke_entry_driver(
+            entry,
+            timeline,
+            snapshot,
+            DriverEvents {
+                committed: committed_events,
+                forwarded,
+            },
+            operation,
+        )
     }
 
+    /// Step one Driver. `events` is the committed prefix the host filtered and
+    /// the `(seq, payload_hash)` pairs the pass forwards to this Driver
+    /// (R3.4.7); only forwarded Events reach `ObservationView::events()`.
     fn invoke_entry_driver(
         entry: &mut PluginEntry,
         timeline: pos_core::ids::TimelineId,
         snapshot: &ObservationSnapshot,
-        committed_events: &[Event],
+        events: DriverEvents<'_>,
         operation: &OperationContext,
     ) -> Result<StepOutput, RuntimeError> {
+        let DriverEvents {
+            committed: committed_events,
+            forwarded,
+        } = events;
         let Some(driver) = entry.driver.as_mut() else {
             return Err(RuntimeError::NoDriver {
                 name: entry.name.clone(),
@@ -2524,14 +2677,15 @@ impl PluginRegistry {
             &observation.event_subscriptions,
             operation,
         );
+        let forwarded_events = forwarded_event_rows(&subscribed_events, forwarded);
         let observations = snapshot.view_for_events_after(
             driver.subscriptions(),
-            &subscribed_events,
+            &forwarded_events,
             &observation.event_subscriptions,
             entry.event_cursor,
         );
         let observations = if observation.verified_prefix_required {
-            observations.with_verified_prefix_events(subscribed_events.clone())
+            observations.with_verified_prefix_events(subscribed_events)
         } else {
             observations
         };
@@ -2664,11 +2818,23 @@ impl PluginRegistry {
                 states.get(key).cloned()
             });
         let scheduled = snapshot.anchored_digest();
+        let cut = PassCut {
+            observed_through,
+            events: committed_events,
+        };
+        let plans = self.plan_pass_forwarding(&driver_ids, cut, &operation);
         let mut all_drafts = Vec::new();
         let mut staged_driver_ids = Vec::new();
-        for id in driver_ids {
-            let result =
-                self.invoke_selected_driver(id, timeline, &snapshot, committed_events, &operation);
+        let mut forwarded = Vec::new();
+        for (id, plan) in driver_ids.into_iter().zip(plans) {
+            let result = self.invoke_selected_driver(
+                id,
+                timeline,
+                &snapshot,
+                committed_events,
+                &plan.forwarded,
+                &operation,
+            );
             match result {
                 Ok(output) => {
                     let drafts = staged_drafts(output);
@@ -2681,7 +2847,8 @@ impl PluginRegistry {
                         return Err(error);
                     }
                     staged_driver_ids.push(id);
-                    event_cursors.push((id, observed_through));
+                    event_cursors.push((id, plan.cursor));
+                    forwarded.push(plan.forwarded);
                     all_drafts.extend(drafts);
                 }
                 Err(error) => {
@@ -2701,6 +2868,7 @@ impl PluginRegistry {
             staged_drafts: all_drafts.clone(),
             authorized: None,
             scheduled,
+            forwarded,
         });
         Ok(all_drafts)
     }
@@ -2725,6 +2893,14 @@ impl PluginRegistry {
                 self.poisoned_driver = Some(name);
             }
         }
+        // A pass that staged a draft records a Tick; any other pass records none.
+        let recorded = !pending.staged_drafts.is_empty();
+        pass_state::settle_carried_sets(
+            &mut self.plugins,
+            &pending.driver_ids,
+            pending.forwarded,
+            recorded,
+        );
         for (id, now_ns) in pending.cadence_updates {
             if let Some(entry) = self.plugins.get_mut(&id) {
                 entry.last_tick = Some(now_ns);
@@ -2916,6 +3092,8 @@ impl PluginRegistry {
             .filter(|event| driver_visible_event(event))
             .cloned()
             .collect();
+        let restored_head = events.last().map_or(Seq::ZERO, |event| event.seq);
+        let history = pass_state::restored_history(&visible_events, restored_head);
         let mut staged_driver_count = 0;
         let mut failure = None;
         for entry in self.plugins.values_mut() {
@@ -2959,7 +3137,9 @@ impl PluginRegistry {
                 self.poisoned_driver = Some(name.clone());
                 return Err(RuntimeError::DriverRestorePanicked { name });
             }
-            entry.event_cursor = events.last().map_or(Seq::ZERO, |event| event.seq);
+            entry.event_cursor = restored_head;
+            entry.pass_state.carried.clear();
+            entry.pass_state.history = history;
         }
         self.restored_binding = timeline_segments
             .last()
@@ -3183,7 +3363,7 @@ impl PluginRegistry {
                 cpu_reservations_us: [10; 3],
             }],
             accounting_semantics: 0,
-            execution_profile_hash: pos_core::Hash::zero(),
+            execution_profile_hash: Hash::zero(),
             max_pass_wall_duration_us: 1_000,
         }
     }
@@ -3807,6 +3987,7 @@ impl PluginRegistry {
             }
         }
 
+        let owner_id = self.owner_id_for_options(&options, &name);
         self.plugins.insert(
             id,
             PluginEntry {
@@ -3821,6 +4002,7 @@ impl PluginRegistry {
                 output_admission: options.output_admission,
                 manifest_slot: options.manifest_slot,
                 event_observation,
+                pass_state: PassState::new(owner_id),
             },
         );
         self.registration_revision += 1;
@@ -3879,7 +4061,7 @@ impl PluginRegistry {
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     #[must_use]
-    pub fn retained_closure_replay_identities(&self) -> Vec<pos_core::Hash> {
+    pub fn retained_closure_replay_identities(&self) -> Vec<Hash> {
         let admissions = self
             .plugins
             .values()
@@ -3977,6 +4159,7 @@ impl PluginRegistry {
             driver.as_ref(),
         )?;
         let name = driver.name().to_owned();
+        let owner_id = self.factual_owner_id_for(None, admission.closure(), &name);
         self.plugins.insert(
             plugin_id,
             PluginEntry {
@@ -3991,6 +4174,7 @@ impl PluginRegistry {
                 output_admission: Some(admission),
                 manifest_slot: None,
                 event_observation,
+                pass_state: PassState::new(owner_id),
             },
         );
         // A Plugin registered outside a manifest slot can never match the
@@ -4027,6 +4211,7 @@ impl PluginRegistry {
         self.restored_binding = None;
         let plugin_id = PluginId::new();
         let name = driver.name().to_owned();
+        let owner_id = self.factual_owner_id_for(None, None, &name);
         self.plugins.insert(
             plugin_id,
             PluginEntry {
@@ -4041,6 +4226,7 @@ impl PluginRegistry {
                 output_admission: None,
                 manifest_slot: None,
                 event_observation,
+                pass_state: PassState::new(owner_id),
             },
         );
         // A Plugin registered outside a manifest slot can never match the
@@ -4069,6 +4255,7 @@ impl PluginRegistry {
             driver.as_ref(),
         )?;
         let name = driver.name().to_owned();
+        let owner_id = self.factual_owner_id_for(None, admission.closure(), &name);
         self.plugins.insert(
             plugin_id,
             PluginEntry {
@@ -4083,6 +4270,7 @@ impl PluginRegistry {
                 output_admission: Some(admission),
                 manifest_slot: None,
                 event_observation,
+                pass_state: PassState::new(owner_id),
             },
         );
         // A Plugin registered outside a manifest slot can never match the
@@ -4604,6 +4792,7 @@ impl Default for PluginRegistry {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::catalogue::{seal_catalogue_bundle, CatalogueEvidenceV1, CatalogueLinksV1};
+    use super::test_ext::{TestErrorExt, TestValueExt};
     use super::*;
     use crate::driver::{ObservationView, SnapshotAnchor, StepOutput};
     use pos_core::{
@@ -4880,6 +5069,7 @@ mod tests {
             Err(ActionRejected::UnknownEventType)
         ));
         let no_approver_id = PluginId::new();
+        let owner_id = registry.factual_owner_id_for(None, None, "no-approver");
         registry.plugins.insert(
             no_approver_id,
             PluginEntry {
@@ -4894,6 +5084,7 @@ mod tests {
                 output_admission: None,
                 manifest_slot: None,
                 event_observation: DriverEventObservation::default(),
+                pass_state: PassState::new(owner_id),
             },
         );
         registry
@@ -4904,6 +5095,7 @@ mod tests {
             Err(ActionRejected::UnknownEventType)
         ));
         let missing_policy_id = PluginId::new();
+        let owner_id = registry.factual_owner_id_for(None, None, "missing-policy");
         registry.plugins.insert(
             missing_policy_id,
             PluginEntry {
@@ -4918,6 +5110,7 @@ mod tests {
                 output_admission: None,
                 manifest_slot: None,
                 event_observation: DriverEventObservation::default(),
+                pass_state: PassState::new(owner_id),
             },
         );
         registry
@@ -5500,43 +5693,6 @@ mod tests {
                 assert!(store.child.is_none());
             }
             assert!(store.delete_called);
-        }
-    }
-
-    trait TestValueExt<T> {
-        fn test_ok(self) -> T;
-    }
-
-    impl<T, E: std::fmt::Debug> TestValueExt<T> for Result<T, E> {
-        fn test_ok(self) -> T {
-            self.unwrap_or_else(|error| {
-                std::panic::resume_unwind(Box::new(format!(
-                    "unexpected registry fixture error: {error:?}"
-                )))
-            })
-        }
-    }
-
-    impl<T> TestValueExt<T> for Option<T> {
-        fn test_ok(self) -> T {
-            self.unwrap_or_else(|| {
-                std::panic::resume_unwind(Box::new("missing registry fixture value"))
-            })
-        }
-    }
-
-    trait TestErrorExt<T, E> {
-        fn test_err(self) -> E;
-    }
-
-    impl<T: std::fmt::Debug, E> TestErrorExt<T, E> for Result<T, E> {
-        fn test_err(self) -> E {
-            match self {
-                Ok(value) => std::panic::resume_unwind(Box::new(format!(
-                    "unexpected successful registry fixture value: {value:?}"
-                ))),
-                Err(error) => error,
-            }
         }
     }
 
@@ -7697,6 +7853,7 @@ mod tests {
                 TimelineId::new(),
                 &snapshot,
                 &[],
+                &[],
                 &OperationContext::Public,
             )
             .test_err();
@@ -7710,6 +7867,7 @@ mod tests {
                 plugin_id,
                 TimelineId::new(),
                 &snapshot,
+                &[],
                 &[],
                 &OperationContext::Public,
             )
@@ -7750,6 +7908,7 @@ mod tests {
                 timeline.id(),
                 &ObservationSnapshot::default(),
                 &[],
+                &[],
                 &OperationContext::Public,
             ),
             Err(RuntimeError::MissingSnapshotAnchor { .. })
@@ -7776,6 +7935,7 @@ mod tests {
                 timeline.id(),
                 &snapshot,
                 &committed,
+                &[],
                 &OperationContext::Public,
             ),
             Err(RuntimeError::InvalidRecoveryEvidence { .. })
@@ -7825,6 +7985,7 @@ mod tests {
         ];
         // Inserted directly, bypassing the registration rule, so that even a
         // snapshot holding host-owned and geographic types is filtered.
+        let owner_id = registry.factual_owner_id_for(None, None, "event-filter");
         registry.plugins.insert(
             plugin_id,
             PluginEntry {
@@ -7845,6 +8006,7 @@ mod tests {
                     event_subscriptions: subscriptions,
                     verified_prefix_required: false,
                 },
+                pass_state: PassState::new(owner_id),
             },
         );
 
@@ -7876,6 +8038,7 @@ mod tests {
                 TimelineId::new(),
                 &ObservationSnapshot::default(),
                 &[ordinary, consent, location, cell],
+                &[(Seq::from_u64(1), Hash::from_bytes([0; 32]))],
                 &OperationContext::Public,
             )
             .test_ok();
@@ -9651,7 +9814,7 @@ mod erasure_gate_coverage {
                 }; 3],
                 plugin_cpu_reservations: vec![],
                 accounting_semantics: 0,
-                execution_profile_hash: pos_core::Hash::zero(),
+                execution_profile_hash: Hash::zero(),
                 max_pass_wall_duration_us: 0,
             },
         );
