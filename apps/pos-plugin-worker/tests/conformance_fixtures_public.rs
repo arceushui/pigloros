@@ -150,6 +150,8 @@ fn denied_alone(id: &str, error: Option<&str>) -> TestResult<CaseAttempt> {
     })
 }
 
+/// A smoke test of the whole `denied` case on the real worker; the proof of R8-S2, which also
+/// controls the expiry sub-cases, is in S5.
 #[test]
 fn every_denied_sub_case_matches_on_the_real_worker() -> TestResult {
     for mode in [ExecutionMode::Local, ExecutionMode::AirGapped] {
@@ -165,8 +167,12 @@ fn each_load_time_link_failure_is_incompatible_abi_from_the_real_worker() -> Tes
     for id in link_failures() {
         let matched = observe_attempt(&denied_alone(&id, None)?)?;
         assert_eq!(matched.result, failure("capability-denied"), "{id}");
-        // The control: the same sub-case expecting another refusal does not match.
-        let other = observe_attempt(&denied_alone(&id, Some("CapabilityDenied"))?)?;
+        // The case code `capability-denied` is the observable of `IncompatibleAbi`: the case is
+        // that failure only when every sub-case matched, and `den.03` to `den.12` expect that
+        // refusal. The control: the same sub-case expecting another well-formed refusal
+        // (`InvalidManifest` needs no `basis` and no `index`) reaches the matcher and does not
+        // match.
+        let other = observe_attempt(&denied_alone(&id, Some("InvalidManifest"))?)?;
         assert_eq!(other.result, failure("subcase-mismatch"), "{id}");
     }
     Ok(())

@@ -129,6 +129,9 @@ fn launches_a_worker(id: &str) -> bool {
 }
 
 /// `attempt` with the sub-cases that launch a worker taken out of its payload.
+///
+/// The worker's `tests/support/attempts.rs` has the general form (`rewrite_subcases`); the two
+/// test crates cannot share a helper, so keep them in step.
 fn without_launches(mut attempt: CaseAttempt) -> TestResult<CaseAttempt> {
     let mut payload: Value = serde_json::from_slice(&attempt.payload.bytes)?;
     let subcases = payload["subcases"].as_array_mut().ok_or("no sub-cases")?;

@@ -121,6 +121,9 @@ pub fn attempt_from_fixture_files(
 
 /// `attempt` with its payload rewritten sub-case by sub-case.
 ///
+/// The adapter's `tests/fixture_attempts_public.rs` keeps a smaller copy (`without_launches`);
+/// the two test crates cannot share a helper, so keep them in step.
+///
 /// `rewrite` may edit a sub-case of the payload object and returns whether to keep it. The
 /// payload digest of the attempt follows the new bytes; the composite and the other members are
 /// unchanged, so the pieces of the removed sub-cases are simply unused.

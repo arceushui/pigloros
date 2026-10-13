@@ -38,7 +38,9 @@ import json
 import re
 import struct
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
@@ -452,7 +454,12 @@ def _addressed(prefix: str, role: str, blobs) -> list:
     return [(prefix + digest[len("sha256:") :], role, blob) for digest, blob in entries]
 
 
-def oci_closure(pmf1: bytes, spec: Pmf1Spec, tamper=None) -> tuple[bytes, list[bytes]]:
+Tamper = Callable[[list, list], list]
+
+
+def oci_closure(
+    pmf1: bytes, spec: Pmf1Spec, tamper: Tamper | None = None
+) -> tuple[bytes, list[bytes]]:
     """The JCS OCI manifest and the layer blobs (in layer order) of a release.
 
     `tamper(descriptors, blobs)` may corrupt the descriptors in place and returns the blobs.
@@ -623,7 +630,10 @@ class Release:
 
 
 def make_release(
-    spec: Pmf1Spec, mutate=None, tamper=None, closure_spec: Pmf1Spec | None = None
+    spec: Pmf1Spec,
+    mutate: Callable[[bytes], bytes] | None = None,
+    tamper: Tamper | None = None,
+    closure_spec: Pmf1Spec | None = None,
 ) -> Release:
     """The release of `spec`.
 
@@ -675,7 +685,7 @@ def root_mapping() -> list:
 
 
 @lru_cache(maxsize=None)
-def make_trust(valid_through: str = TPS1_VALID_THROUGH) -> Trust:
+def trust(valid_through: str = TPS1_VALID_THROUGH) -> Trust:
     """The genesis policy: one root, one publisher key and one grant, no revocation."""
     publisher = golden.ed25519_public(PUBLISHER_SEED)
     ptr1 = encode_ptr1(
@@ -698,10 +708,6 @@ def make_trust(valid_through: str = TPS1_VALID_THROUGH) -> Trust:
         ]
     )
     return Trust(anchor=anchor, tps1=tps1, ptr1=(ptr1,), prv1=(prv1,))
-
-
-def trust() -> Trust:
-    return make_trust()
 
 
 def revoked_key_id(owner: str, epoch: int, public: bytes) -> str:
@@ -828,29 +834,45 @@ class SubCase:
     nested: bytes | None = None
 
 
-def material_of(material: Trust | None):
-    return None if material is None else material.reference()
+class Unreadable:
+    """The material source that cannot be read (`FixedTrustMaterialSourceV1::unavailable()`)."""
+
+
+UNREADABLE = Unreadable()
+
+
+def resolve_material(material: Trust | Unreadable | None) -> dict | None:
+    """The payload `material`: the genesis policy when `None`, `null` when `UNREADABLE`."""
+    if isinstance(material, Unreadable):
+        return None
+    return (trust() if material is None else material).reference()
 
 
 def install(
-    release: Release, tick: int = TICK, instant: int = INSTANT, material: Trust | None = ...
+    release: Release,
+    tick: int = TICK,
+    instant: int = INSTANT,
+    material: Trust | Unreadable | None = None,
 ) -> dict:
     return {
         "step": "install",
         "release": release.reference(),
-        "material": material_of(trust() if material is ... else material),
+        "material": resolve_material(material),
         "instant_micros": instant,
         "tick": tick,
     }
 
 
 def bind(
-    release: Release, tick: int = TICK, instant: int = INSTANT, material: Trust | None = ...
+    release: Release,
+    tick: int = TICK,
+    instant: int = INSTANT,
+    material: Trust | Unreadable | None = None,
 ) -> dict:
     return {
         "step": "bind",
         "release": release.reference(),
-        "material": material_of(trust() if material is ... else material),
+        "material": resolve_material(material),
         "plugin_id": PLUGIN_ID,
         "instant_micros": instant,
         "tick": tick,
@@ -1045,8 +1067,18 @@ def independent_subcases() -> list[SubCase]:
     ]
 
 
-def refusal_subcase(sub_id: str, steps: list, expect: dict, releases: list) -> SubCase:
-    return SubCase(id=sub_id, steps=steps, expect=expect, entry=None, releases=releases)
+def refusal_subcase(
+    sub_id: str, steps: list, expect: dict, releases: list, trusts: list | None = None
+) -> SubCase:
+    """A sub-case with no entry in the oracle record (every `namespaced-failure` family)."""
+    return SubCase(
+        id=sub_id,
+        steps=steps,
+        expect=expect,
+        entry=None,
+        releases=releases,
+        trusts=[] if trusts is None else trusts,
+    )
 
 
 IMPORT_DENIALS = (
@@ -1061,9 +1093,13 @@ IMPORT_DENIALS = (
     ("den.11", "mistyped-host-function.wasm"),
     ("den.12", "no-guest-exports.wasm"),
 )
+# A manifest that outlives the PTR1/PRV1 window (which ends at `ROOT_NOT_AFTER`), so that the
+# policy expiry of `den.17` and `den.18` is the only denial.
 EXPIRY_AFTER_ROOT = 200
 TPS1_EXPIRY_SECOND = 90
-TPS1_EXPIRY = "1970-01-01T00:01:30Z"
+TPS1_EXPIRY = datetime.fromtimestamp(TPS1_EXPIRY_SECOND, timezone.utc).strftime(
+    "%Y-%m-%dT%H:%M:%SZ"
+)
 REVOKED_PASS = replace(FIRST_PASS, tick=LATER_TICK, instant=LATER_INSTANT)
 
 
@@ -1074,12 +1110,11 @@ def seconds(count: int) -> int:
 def link_failure_subcase(sub_id: str, component_name: str) -> SubCase:
     """A Component the real worker refuses at load: `IncompatibleAbi`."""
     release = make_release(default_spec(component=component(component_name)))
-    return SubCase(
-        id=sub_id,
-        steps=[install(release), bind(release), run_pass(FIRST_PASS)],
-        expect=refused("IncompatibleAbi"),
-        entry=None,
-        releases=[release],
+    return refusal_subcase(
+        sub_id,
+        [install(release), bind(release), run_pass(FIRST_PASS)],
+        refused("IncompatibleAbi"),
+        [release],
     )
 
 
@@ -1093,14 +1128,7 @@ def settled_subcase(
         refresh(advance, LATER_TICK, LATER_INSTANT),
         *rest,
     ]
-    return SubCase(
-        id=sub_id,
-        steps=steps,
-        expect=expect,
-        entry=None,
-        releases=[release],
-        trusts=[advance],
-    )
+    return refusal_subcase(sub_id, steps, expect, [release], [advance])
 
 
 def revocation_subcases() -> list[SubCase]:
@@ -1127,8 +1155,10 @@ def expiry_subcases() -> list[SubCase]:
     """`den.16` to `den.18`: the pass instant is exactly the end of one validity window."""
     manifest = rust_release()
     wide = make_release(default_spec(not_after=EXPIRY_AFTER_ROOT))
-    short_lived = make_trust(TPS1_EXPIRY)
-    expired = refused("ArtifactTrustDenied", basis="Expired")
+    short_lived = trust(TPS1_EXPIRY)
+
+    def expired() -> dict:
+        return refused("ArtifactTrustDenied", basis="Expired")
 
     def at(release: Release, second: int, material: Trust) -> list:
         late = replace(FIRST_PASS, instant=seconds(second))
@@ -1139,20 +1169,15 @@ def expiry_subcases() -> list[SubCase]:
         ]
 
     return [
-        SubCase(
-            "den.16", at(manifest, NOT_AFTER, trust()), expired, None, [manifest]
-        ),
-        SubCase(
+        refusal_subcase("den.16", at(manifest, NOT_AFTER, trust()), expired(), [manifest]),
+        refusal_subcase(
             "den.17",
             at(wide, TPS1_EXPIRY_SECOND, short_lived),
-            dict(expired),
-            None,
+            expired(),
             [wide],
             [short_lived],
         ),
-        SubCase(
-            "den.18", at(wide, ROOT_NOT_AFTER, trust()), dict(expired), None, [wide]
-        ),
+        refusal_subcase("den.18", at(wide, ROOT_NOT_AFTER, trust()), expired(), [wide]),
     ]
 
 
@@ -1162,28 +1187,29 @@ def policy_subcases() -> list[SubCase]:
     ungranted = make_release(default_spec(plugin_id="pigloros.ungranted-plugin"))
     rust = rust_release()
     newer = advanced_trust(trust())
-    untrusted = refused("ArtifactTrustDenied", basis="Untrusted")
+
+    def untrusted() -> dict:
+        return refused("ArtifactTrustDenied", basis="Untrusted")
+
     regressed = [
         install(rust, instant=seconds(55)),
         bind(rust, instant=seconds(55)),
         run_pass(FIRST_PASS),
     ]
     return [
-        SubCase("den.19", [install(stranger)], untrusted, None, [stranger]),
-        SubCase("den.20", [install(ungranted)], dict(untrusted), None, [ungranted]),
-        SubCase(
+        refusal_subcase("den.19", [install(stranger)], untrusted(), [stranger]),
+        refusal_subcase("den.20", [install(ungranted)], untrusted(), [ungranted]),
+        refusal_subcase(
             "den.21",
             [install(rust), bind(rust, material=newer)],
             refused("ArtifactTrustDenied", basis="PolicyMismatch"),
-            None,
             [rust],
             [newer],
         ),
-        SubCase(
+        refusal_subcase(
             "den.22",
             regressed,
             refused("ArtifactTrustDenied", basis="TrustStateUnavailable"),
-            None,
             [rust],
         ),
     ]
@@ -1265,37 +1291,46 @@ def unreadable_subcases() -> list[SubCase]:
     rust = rust_release()
     other = make_release(default_spec(plugin_id="pigloros.other-plugin"))
     sibling = make_release(default_spec(release_version="1.1.0", previous=rust.release_digest))
-    not_active = refused("ArtifactTrustDenied", basis="NotActive")
-    unavailable = refused("ArtifactTrustDenied", basis="TrustStateUnavailable")
-    bound = [install(rust), bind(rust)]
 
-    def member_at(at) -> dict:
-        return {"plugin_id": PLUGIN_ID, "at": at}
+    def not_active() -> dict:
+        return refused("ArtifactTrustDenied", basis="NotActive")
+
+    def unavailable() -> dict:
+        return refused("ArtifactTrustDenied", basis="TrustStateUnavailable")
 
     def reading(sub_id: str, at, expect: dict, releases: list) -> SubCase:
-        steps = [*bound, run_pass(FIRST_PASS, member_at(at))]
-        return SubCase(sub_id, steps, expect, None, [rust, *releases])
+        member = {"plugin_id": PLUGIN_ID, "at": at}
+        steps = [install(rust), bind(rust), run_pass(FIRST_PASS, member)]
+        return refusal_subcase(sub_id, steps, expect, [rust, *releases])
 
     return [
-        reading("mal.4a", other.reference(), not_active, [other]),
-        reading("mal.4b", sibling.reference(), dict(not_active), [sibling]),
-        reading("mal.5a", "absent", unavailable, []),
-        SubCase(
+        reading("mal.4a", other.reference(), not_active(), [other]),
+        reading("mal.4b", sibling.reference(), not_active(), [sibling]),
+        reading("mal.5a", "absent", unavailable(), []),
+        refusal_subcase(
             "mal.5b",
-            [install(rust), bind(rust, material=None)],
-            dict(unavailable),
-            None,
+            [install(rust), bind(rust, material=UNREADABLE)],
+            unavailable(),
             [rust],
         ),
     ]
 
 
+# A sub-case document without the required `expect` key: the violation class of the case grammar
+# that the adapter's own nested decoder rejects.
 NESTED_DOCUMENT = b'{"id":"mal.6.nested","steps":[]}'
 
 
 def nested_subcase() -> SubCase:
     """`mal.6`: a piece that the adapter decodes as a sub-case document and that is invalid."""
-    return SubCase("mal.6", [], {"kind": "malformed"}, None, [], nested=NESTED_DOCUMENT)
+    return SubCase(
+        id="mal.6",
+        steps=[],
+        expect={"kind": "malformed"},
+        entry=None,
+        releases=[],
+        nested=NESTED_DOCUMENT,
+    )
 
 
 def malformed_subcases() -> list[SubCase]:
@@ -1354,7 +1389,6 @@ def downgrade_subcases() -> list[SubCase]:
     major = make_release(default_spec(abi_major=1))
     minor = make_release(default_spec(abi_min_minor=1, abi_max_minor=1))
     keyed = advanced_trust(trust(), key_epochs=(1,))
-    abi = refused("IncompatibleAbi")
     return [
         refusal_subcase(
             "dgr.1",
@@ -1362,6 +1396,7 @@ def downgrade_subcases() -> list[SubCase]:
             refused("ArtifactTrustDenied", basis="NotActive"),
             [first, successor],
         ),
+        # The `den.13` shape: see `settled_subcase`.
         settled_subcase(
             "dgr.2",
             first,
@@ -1369,8 +1404,14 @@ def downgrade_subcases() -> list[SubCase]:
             keyed,
             [run_pass(REVOKED_PASS)],
         ),
-        refusal_subcase("dgr.3a", [install(major), bind(major)], abi, [major]),
-        refusal_subcase("dgr.3b", [install(minor), bind(minor)], dict(abi), [minor]),
+        # ADR-061 r8 says `dgr.3a` is `IncompatibleAbi` at the Driver build, but that is
+        # unreachable: the PMF1 decoder accepts only ABI major 0 (`abi_u16_in(reader, 0, 0)`), so
+        # the install is refused by the projection as `InvalidManifest`. An ADR clarification is
+        # owed; this fixture records the reachable refusal.
+        refusal_subcase("dgr.3a", [install(major)], refused("InvalidManifest"), [major]),
+        refusal_subcase(
+            "dgr.3b", [install(minor), bind(minor)], refused("IncompatibleAbi"), [minor]
+        ),
         refusal_subcase(
             "dgr.4",
             [install(first), install(unlinked)],
