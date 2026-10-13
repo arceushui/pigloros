@@ -95,11 +95,12 @@ mod tests {
             material,
             Some(PublicKey::from_bytes([2; 32])),
         ))?;
-        let mut destroyed = live.clone();
+        let mut pending = live.clone();
         let request = KeyDestructionRequestV1::new(identity, material, Hash::from_bytes([3; 32]));
-        destroyed.begin_key_destruction(request)?;
+        pending.begin_key_destruction(request)?;
+        let mut destroyed = pending.clone();
         destroyed.complete_key_destruction(request, pos_core::deletion_receipt(&request))?;
-        Ok(vec![KeyRegistryStateV1::new(), live, destroyed])
+        Ok(vec![KeyRegistryStateV1::new(), live, pending, destroyed])
     }
 
     fn encoded(registry: &KeyRegistryStateV1) -> Fallible<Vec<u8>> {
@@ -115,9 +116,27 @@ mod tests {
         let path = directory.path().join("registry-raw.sqlite3");
         let mut store =
             super::super::SqliteStore::open(path.to_str().ok_or("registry fixture path")?)?;
-        store.save_key_registry(registry)?;
-        assert_eq!(store.load_key_registry()?, Some(registry.clone()));
-        Ok((directory, store))
+        // Native replacement intentionally rejects invented destruction history.
+        // Persist the real lifecycle, including pending, before testing its raw
+        // snapshot. The ordinary rejection must not be weakened for this fixture.
+        if registry.pending_destruction_requests().next().is_some()
+            || registry.committed_destruction_facts().next().is_some()
+        {
+            assert!(matches!(
+                store.save_key_registry(registry),
+                Err(pos_core::CoreError::Serialization(_))
+            ));
+            assert_eq!(store.load_key_registry()?, None);
+        }
+        for state in registries()? {
+            state.validate()?;
+            store.save_key_registry(&state)?;
+            assert_eq!(store.load_key_registry()?, Some(state.clone()));
+            if &state == registry {
+                return Ok((directory, store));
+            }
+        }
+        Err("unknown registry lifecycle fixture".into())
     }
 
     #[test]
