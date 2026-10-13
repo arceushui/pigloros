@@ -124,7 +124,7 @@ use crate::{counterfactual_port_error, COUNTERFACTUAL_SEAL};
 
 mod dependency;
 
-pub(super) use dependency::DependencyRowsV1;
+pub(super) use dependency::{DependencyRowsV1, FactualInstallV1, PlannedTickV1};
 
 /// Test-only fault injected at the staged head, after staging and before
 /// installing anything.

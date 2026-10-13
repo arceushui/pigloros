@@ -464,8 +464,14 @@ impl pos_core::FactualPrefixReadPortV1 for LostOutcomePort<'_> {
 }
 
 /// A port whose basis-free lookup never finds a receipt, so only the
-/// store's own exact-retry comparison can recognize a duplicate.
-struct ForgetfulLookupPort<'a>(&'a mut dyn ScheduledAdmissionStoreV1);
+/// store's own exact-retry comparison can recognize a duplicate. It records
+/// every basis it submits, so a test can resubmit the retained one. When
+/// `replay` holds an outcome, the store is bypassed and that outcome returned.
+struct ForgetfulLookupPort<'a> {
+    store: &'a mut dyn ScheduledAdmissionStoreV1,
+    submitted: &'a mut Vec<PipelineAdmissionBasisV1>,
+    replay: Option<PipelineOutcomeV1>,
+}
 
 impl PipelineAdmissionPortV1 for ForgetfulLookupPort<'_> {
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -473,7 +479,10 @@ impl PipelineAdmissionPortV1 for ForgetfulLookupPort<'_> {
         &mut self,
         basis: &PipelineAdmissionBasisV1,
     ) -> Result<PipelineOutcomeV1, CoreError> {
-        self.0.admit_pipeline_batch(basis)
+        self.submitted.push(basis.clone());
+        self.replay
+            .clone()
+            .map_or_else(|| self.store.admit_pipeline_batch(basis), Ok)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -491,7 +500,7 @@ impl PipelineAdmissionPortV1 for ForgetfulLookupPort<'_> {
         &mut self,
         limit: std::num::NonZeroUsize,
     ) -> Result<pos_core::PurgeOutcome, CoreError> {
-        self.0.purge_expired_pipeline_receipts_bounded(limit)
+        self.store.purge_expired_pipeline_receipts_bounded(limit)
     }
 }
 
@@ -501,7 +510,7 @@ impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
         &self,
         timeline: pos_core::TimelineId,
     ) -> Result<pos_core::FactualHeadV1, pos_core::CoreError> {
-        self.0.last_committed_factual_tick(timeline)
+        self.store.last_committed_factual_tick(timeline)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -510,7 +519,7 @@ impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
         timeline: pos_core::TimelineId,
         seq: pos_core::Seq,
     ) -> Result<pos_core::FactualCutV1, pos_core::CoreError> {
-        self.0.cut_tick_at(timeline, seq)
+        self.store.cut_tick_at(timeline, seq)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -519,7 +528,7 @@ impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
         timeline: pos_core::TimelineId,
         seqs: &[pos_core::Seq],
     ) -> Result<Vec<Option<pos_core::DependencyNodeRecordV1>>, pos_core::CoreError> {
-        self.0.nodes_for_committed_events(timeline, seqs)
+        self.store.nodes_for_committed_events(timeline, seqs)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -529,7 +538,7 @@ impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
         digests: &[pos_core::Hash],
     ) -> Result<Vec<Option<pos_core::factual_dependency::BoundFactualNodeV1>>, pos_core::CoreError>
     {
-        self.0.nodes_by_digest(timeline, digests)
+        self.store.nodes_by_digest(timeline, digests)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -538,7 +547,7 @@ impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
         timeline: pos_core::TimelineId,
         owner: &pos_core::FactualOwnerIdV1,
     ) -> Result<Option<pos_core::DependencyNodeRecordV1>, pos_core::CoreError> {
-        self.0.last_step_node(timeline, owner)
+        self.store.last_step_node(timeline, owner)
     }
 
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -546,7 +555,7 @@ impl pos_core::FactualPrefixReadPortV1 for ForgetfulLookupPort<'_> {
         &self,
         timeline: pos_core::TimelineId,
     ) -> Result<pos_core::RecordedSetCountsV1, pos_core::CoreError> {
-        self.0.factual_set_counts(timeline)
+        self.store.factual_set_counts(timeline)
     }
 }
 
@@ -679,21 +688,58 @@ fn the_store_comparison_still_recognizes_an_exact_retry() {
         let actor = EntityId::new();
         let attempt = admission(&harness, 1, 1, 0);
         let action = proposal(actor, b"walk");
+        let mut submitted = Vec::new();
         let first = ok(harness.registry.admit_human_action(
-            &mut ForgetfulLookupPort(harness.store.as_mut()),
+            &mut ForgetfulLookupPort {
+                store: harness.store.as_mut(),
+                submitted: &mut submitted,
+                replay: None,
+            },
             &action,
             &attempt,
         ));
-
-        let retry = ok(harness.registry.admit_human_action(
-            &mut ForgetfulLookupPort(harness.store.as_mut()),
-            &action,
-            &attempt,
-        ));
-
         assert!(!first.recovered(), "{name}");
-        assert!(retry.recovered(), "{name}");
-        assert_eq!(retry.receipt(), first.receipt(), "{name}");
+        assert_eq!(submitted.len(), 1, "{name}");
+
+        // R3.8: the receipt lookup precedes every dependency check, so the
+        // retained basis is an exact retry. A rebuilt basis would declare the
+        // next Tick and conflict on an adapter that records Ticks.
+        let retained = ok(submitted.first().ok_or("no basis was submitted"));
+        let retry = ok(harness.store.admit_pipeline_batch(retained));
+
+        assert_eq!(
+            retry,
+            PipelineOutcomeV1::RecoveredDuplicate(first.receipt().clone()),
+            "{name}"
+        );
+        assert_eq!(events(&harness), 1, "{name}");
+    }
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn a_store_reported_duplicate_is_a_recovered_receipt() {
+    for mut harness in harnesses() {
+        let name = harness.name;
+        let attempt = admission(&harness, 1, 1, 0);
+        let action = proposal(EntityId::new(), b"walk");
+        let committed = ok(admit(&mut harness, &action, &attempt));
+        let replay = PipelineOutcomeV1::RecoveredDuplicate(committed.receipt().clone());
+        let mut submitted = Vec::new();
+
+        let duplicate = ok(harness.registry.admit_human_action(
+            &mut ForgetfulLookupPort {
+                store: harness.store.as_mut(),
+                submitted: &mut submitted,
+                replay: Some(replay),
+            },
+            &action,
+            &attempt,
+        ));
+
+        assert!(duplicate.recovered(), "{name}");
+        assert_eq!(duplicate.receipt(), committed.receipt(), "{name}");
+        assert_eq!(submitted.len(), 1, "{name}");
         assert_eq!(events(&harness), 1, "{name}");
     }
 }
