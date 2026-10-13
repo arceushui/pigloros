@@ -98,8 +98,7 @@ pub(super) fn imported_admission_phase_cost(
 mod tests {
     use super::*;
     use crate::{
-        fae1_fixture::{pin_policy, request_for, Fallible, Shape, Spec, World},
-        ForkAttributionAuthorityImportPortV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
+        fae1_fixture::Fallible, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
     };
     use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
     use std::time::Duration;
@@ -118,26 +117,28 @@ mod tests {
                 pos_core::MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1,
             ),
         ] {
-            let world = World::new(Shape::Mixed, false)?;
-            let built = world.build(&Spec::default())?;
-            let mut store = super::super::SqliteStore::open(":memory:")?;
-            world.seed_destination(&mut store)?;
-            pin_policy(&mut store, &built.policy)?;
-            store.import_verified(&request_for(&world, &built))?;
-            let key = world.child_at(0)?.id.to_string();
+            // The IFA1 production table rejects >512 bytes at INSERT. This
+            // isolated owner fixture omits only storage constraints to expose
+            // impossible persisted bytes to the pre-getter gate. It is not an
+            // authenticated import/public-consumer fixture.
+            let conn = Connection::open_in_memory()?;
+            conn.execute_batch("CREATE TABLE fork_admissions (child_id TEXT, far1_cbor BLOB);
+                CREATE TABLE imported_fork_attribution_admissions (child_id TEXT, ifa1_cbor BLOB);
+                INSERT INTO fork_admissions VALUES ('child', X'00');
+                INSERT INTO imported_fork_attribution_admissions VALUES ('child', X'00');")?;
+            let key = "child";
             for value in [
                 rusqlite::types::Value::Blob(vec![0; maximum + 1]),
                 rusqlite::types::Value::Text("not-a-blob".into()),
             ] {
-                // Stored-state injection isolates the pre-getter raw gate.
-                store.conn.execute(sql, [value])?;
+                assert_eq!(conn.execute(sql, [value])?, 1);
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
                 let start = clock.mark();
                 let limits = ForkReplayReadLimitsV1::new(1, 1, 2, 64, 1_000_000)?;
                 let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
                 assert_eq!(
                     admission_blob_with_context(
-                        &store.conn,
+                        &conn,
                         kind,
                         &key,
                         &mut NativeReadContextV1::protected(&mut budget)
