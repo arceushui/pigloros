@@ -17,7 +17,7 @@ impl ForkReplayAuthorityReadPortV1 for SqliteStore {
         effective_max_fork_depth: usize,
         budget: &mut ForkReplayReadBudgetV1<'_>,
     ) -> Result<Option<crate::ForkReplayLineageNodeV1>, crate::ForkReplayLineageReadErrorV1> {
-        let mut context = crate::fork_replay::lineage::LineageReadContextV1::new(
+        let mut context = crate::fork_replay::LineageReadContextV1::new(
             budget,
             effective_max_fork_depth,
         )?;
@@ -32,7 +32,7 @@ impl ForkReplayAuthorityReadPortV1 for SqliteStore {
                     Error::StorageUnavailable,
                 ));
             }
-            crate::fork_replay::lineage::read_visible_lineage(
+            crate::fork_replay::read_visible_lineage(
                 timeline_id,
                 depth,
                 context,
