@@ -606,8 +606,7 @@ pub use key_registry::{
     KeyRegistrationV1, KeyRegistryEncryptionPortV1, KeyRegistryErrorV1,
     KeyRegistryHistoricalDecryptionPortV1, KeyRegistryPortV1, KeyRegistryReadErrorV1,
     KeyRegistryReadGuardV1, KeyRegistryReadRefusedV1, KeyRegistryReadWorkV1,
-    KeyRegistrySigningPortV1,
-    KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, OwnerIdV1,
+    KeyRegistrySigningPortV1, KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, OwnerIdV1,
 };
 pub use manifest::{
     checked_repro_manifest_input_len, AdapterRecord, ReproManifest, ReproManifestError,
