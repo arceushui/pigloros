@@ -397,6 +397,10 @@ pub mod imported_fork_replay_tests;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
+mod ordinary_fork_lineage_tests;
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub mod test_support {
     use std::{
         fmt::Debug,
