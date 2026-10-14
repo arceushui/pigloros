@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn file_backed_native_storage_failure_remains_indeterminate() -> Fallible<()> {
+    fn file_backed_registry_storage_failure_remains_indeterminate() -> Fallible<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("native-storage.sqlite");
         let mut store = SqliteStore::open(path.to_str().ok_or("UTF-8 path")?)?;
@@ -295,10 +295,9 @@ mod tests {
             committed.record_id,
             committed.authority_origin_digest,
         )?;
-        // Actual authoritative-source storage fault, not malformed CBOR.
-        store
-            .conn
-            .execute_batch("DROP TABLE imported_fork_attribution_admissions")?;
+        // Reach the guarded registry source's storage mapping, not the
+        // earlier admission validator's distinct corruption boundary.
+        store.conn.execute_batch("DROP TABLE key_registry")?;
         let interval = store.begin_protected_effect_interval()?;
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
