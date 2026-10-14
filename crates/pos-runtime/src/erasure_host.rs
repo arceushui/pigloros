@@ -4110,16 +4110,12 @@ impl ErasureReadSenderV1<'_> {
                 }
                 required_index += 1;
             }
-            let timeline = self
-                .host
-                .store
-                .host_store()
-                .read_fork_replay_lineage_node(
-                    source.timeline_id(),
-                    depth,
-                    effective_max_fork_depth,
-                    budget,
-                );
+            let timeline = self.host.store.host_store().read_fork_replay_lineage_node(
+                source.timeline_id(),
+                depth,
+                effective_max_fork_depth,
+                budget,
+            );
             budget
                 .check_time()
                 .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
