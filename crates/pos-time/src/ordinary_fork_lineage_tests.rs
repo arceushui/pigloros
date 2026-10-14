@@ -6,8 +6,8 @@
 
 use crate::test_support::{with_release, ProtectedFixture};
 use pos_core::{
-    CoreError, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    EventReadBounds, Hash, Reducer, Seq, State, TimelineId, WorldReplayClosureV1,
+    CoreError, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1, EventReadBounds,
+    Hash, Reducer, Seq, State, TimelineId, WorldReplayClosureV1,
 };
 use pos_runtime::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
@@ -123,13 +123,15 @@ impl WorldReplayVerifierV1 for OrdinaryVerifier {
             ErasureReplayClaimV1::Exact,
             bounds,
         );
-        Ok(pos_runtime::world_replay::test_verified_world_replay_with_fork_attribution(
-            verified,
-            Some(Hash::from_bytes([0xc7; 32])),
-            sources,
-            Vec::new(),
-            classification.limits,
-        ))
+        Ok(
+            pos_runtime::world_replay::test_verified_world_replay_with_fork_attribution(
+                verified,
+                Some(Hash::from_bytes([0xc7; 32])),
+                sources,
+                Vec::new(),
+                classification.limits,
+            ),
+        )
     }
 }
 
