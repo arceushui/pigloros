@@ -515,8 +515,10 @@ fn compare_checks_both_imported_arms_before_folding_and_after_both_folds() -> Fa
     Ok(())
 }
 
-/// Deliberately attempt a valid ordinary write from a different connection
-/// inside the installed test verifier, at every admission phase. This is
+/// Deliberately attempt a valid ordinary write on a separate thread and
+/// pre-opened connection inside the test verifier, at every admission phase.
+/// The reader holds its interval while joining the writer's bounded probe.
+/// This is
 /// adversarial test instrumentation, not a callback from the attribution
 /// bridge or a production verifier qualification.
 struct ReservationVerifier {
@@ -533,14 +535,25 @@ impl WorldReplayVerifierV1 for ReservationVerifier {
         requested: &WorldReplayUseV1,
         generation: ErasureReferenceV1,
     ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)?;
-        if !matches!(
-            writer.save_key_registry(&self.next),
-            Err(CoreError::Storage(_))
-        ) {
+        let reader_thread = std::thread::current().id();
+        let refused = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    assert_ne!(std::thread::current().id(), reader_thread);
+                    self.writer
+                        .lock()
+                        .map(|mut writer| {
+                            matches!(
+                                writer.save_key_registry(&self.next),
+                                Err(CoreError::Storage(_))
+                            )
+                        })
+                        .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)
+                })
+                .join()
+                .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)
+        })??;
+        if !refused {
             return Err(WorldReplayVerificationErrorV1::EvidenceUnavailable);
         }
         self.refused.fetch_add(1, Ordering::SeqCst);
