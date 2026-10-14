@@ -347,7 +347,11 @@ fn at_most_sixty_four_subcases() -> TestResult {
 fn at_least_one_subcase_and_no_repeated_id() -> TestResult {
     let mut value = base();
     value["subcases"] = json!([]);
-    assert_eq!(parse(&value), Err(InvalidCaseV1), "an empty case passes vacuously");
+    assert_eq!(
+        parse(&value),
+        Err(InvalidCaseV1),
+        "an empty case passes vacuously"
+    );
     value["subcases"] = Value::Array(vec![plain(1)]);
     assert_eq!(parse(&value)?.subcases.len(), 1);
     value["subcases"] = Value::Array(vec![plain(1), plain(2), plain(1)]);
