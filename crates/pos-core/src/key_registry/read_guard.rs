@@ -75,6 +75,22 @@ impl<'guard> ReadContext<'guard> {
         }
     }
 
+    fn materialize_sum(
+        &mut self,
+        field_bytes: usize,
+        extra_bytes: usize,
+    ) -> Result<(), KeyRegistryReadErrorV1> {
+        self.checkpoint().and_then(|()| {
+            match field_bytes.checked_add(extra_bytes) {
+                Some(bytes) => self.materialize(bytes),
+                None => {
+                    self.refused = true;
+                    Err(KeyRegistryReadErrorV1::ReadRefused)
+                }
+            }
+        })
+    }
+
     /// A native failure still receives its post-step checkpoint. A refusal
     /// takes precedence, including on a malformed snapshot's failure path.
     pub(super) fn step<T>(
@@ -97,7 +113,7 @@ impl<'guard> ReadContext<'guard> {
     ) -> Result<(OwnerIdV1, KeyRoleV1), KeyRegistryReadErrorV1> {
         self.step(|context| {
             context
-                .materialize(owner.as_str().len() + 1)
+                .materialize_sum(owner.as_str().len(), 1)
                 .map(|()| (*owner, *role))
         })
     }
@@ -110,7 +126,7 @@ impl<'guard> ReadContext<'guard> {
     ) -> Result<KeyIdentityV1, KeyRegistryReadErrorV1> {
         self.step(|context| {
             context
-                .materialize(owner.as_str().len() + 9)
+                .materialize_sum(owner.as_str().len(), 9)
                 .map(|()| KeyIdentityV1::from_parts(*owner, *role, *epoch))
         })
     }
@@ -291,18 +307,18 @@ mod tests {
         let state = two_owners()?;
         let mut guard = Guard {
             remaining: 96,
-            // Root checkpoint, two complete record steps (8 observations
+            // Root checkpoint, two complete record steps (9 observations
             // each), high-water entry checkpoint, then two checkpoints for
-            // matched key a. Ordinal 20 is before examining unmatched key b.
-            fail_at: Some(20),
+            // matched key a. Ordinal 22 is before examining unmatched key b.
+            fail_at: Some(22),
             ..Guard::default()
         };
         assert_eq!(
             state.validate_with_read_context(&mut ReadContext::new(&mut guard)),
             Err(KeyRegistryReadErrorV1::ReadRefused)
         );
-        assert_eq!(guard.events.len(), 21);
-        assert_eq!(guard.events[20], KeyRegistryReadWorkV1::Checkpoint);
+        assert_eq!(guard.events.len(), 23);
+        assert_eq!(guard.events[22], KeyRegistryReadWorkV1::Checkpoint);
         assert_eq!(guard.remaining, 28);
         Ok(())
     }
@@ -358,5 +374,25 @@ mod tests {
             "key registry read work refused"
         );
         Ok(())
+    }
+
+    #[test]
+    fn checked_native_unit_overflow_refuses_without_an_invented_debit_and_latches() {
+        let mut guard = Guard {
+            remaining: usize::MAX,
+            ..Guard::default()
+        };
+        let mut context = ReadContext::new(&mut guard);
+        assert_eq!(
+            context.materialize_sum(usize::MAX, 1),
+            Err(KeyRegistryReadErrorV1::ReadRefused)
+        );
+        assert_eq!(context.checkpoint(), Err(KeyRegistryReadErrorV1::ReadRefused));
+        assert_eq!(
+            context.materialize_sum(1, 0),
+            Err(KeyRegistryReadErrorV1::ReadRefused)
+        );
+        assert_eq!(guard.events, [KeyRegistryReadWorkV1::Checkpoint]);
+        assert_eq!(guard.remaining, usize::MAX);
     }
 }
