@@ -10,6 +10,38 @@ use crate::{
 type ReadResult<T> = Result<T, Error>;
 
 impl ForkReplayAuthorityReadPortV1 for SqliteStore {
+    fn read_fork_replay_lineage_node(
+        &self,
+        timeline_id: pos_core::TimelineId,
+        depth: usize,
+        effective_max_fork_depth: usize,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> Result<Option<crate::ForkReplayLineageNodeV1>, crate::ForkReplayLineageReadErrorV1>
+    {
+        let mut context = crate::fork_replay::lineage::LineageReadContextV1::new(
+            budget,
+            effective_max_fork_depth,
+        )?;
+        context.step(|context| {
+            if self.conn.is_autocommit()
+                || self
+                    .writer_reservation_connection
+                    .as_ref()
+                    .is_some_and(rusqlite::Connection::is_autocommit)
+            {
+                return Err(crate::ForkReplayLineageReadErrorV1::Read(
+                    Error::StorageUnavailable,
+                ));
+            }
+            crate::fork_replay::lineage::read_visible_lineage(
+                timeline_id,
+                depth,
+                context,
+                |member, visited, context| self.read_lineage_member(member, visited, context),
+            )
+        })
+    }
+
     fn validate_fork_replay_authority(
         &self,
         requirement: &ForkReplayRequirementV1,
