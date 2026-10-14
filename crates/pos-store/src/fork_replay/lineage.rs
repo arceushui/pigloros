@@ -114,7 +114,13 @@ pub fn remember_member(
     context: &mut LineageReadContextV1<'_, '_>,
 ) -> ReadResult<()> {
     for previous in visited.iter() {
-        context.step(|_| if *previous == timeline { corrupt() } else { Ok(()) })?;
+        context.step(|_| {
+            if *previous == timeline {
+                corrupt()
+            } else {
+                Ok(())
+            }
+        })?;
     }
     context.bytes(16)?;
     visited.push(timeline);

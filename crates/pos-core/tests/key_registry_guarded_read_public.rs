@@ -753,15 +753,18 @@ fn truncated_utf8_tagged_options_and_bignum_faults_match_native_rejection() -> F
 
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn missing_native_fields_and_short_scope_tuples_fail_at_the_public_decode_seam() -> Fallible<()>
-{
+fn missing_native_fields_and_short_scope_tuples_fail_at_the_public_decode_seam() -> Fallible<()> {
     let states = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?;
     for (index, map, required) in [
         (1, "records", &["identity"][..]),
         (
             2,
             "pending_destructions",
-            &["identity", "expected_material_digest", "authorization_digest"][..],
+            &[
+                "identity",
+                "expected_material_digest",
+                "authorization_digest",
+            ][..],
         ),
         (
             3,
