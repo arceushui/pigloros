@@ -141,7 +141,7 @@ impl WorldReplayVerifierV1 for OrdinaryVerifier {
 /// These worked values use the accepted literal native fields, not a measured
 /// ledger or a production length/debit helper:
 /// Memory: 3*65 + 3*41 + 3*16 + 2*24 = 414;
-/// SQLite: 3*143 + 3*93 + 3*16 + 2*24 = 804.
+/// `SQLite`: 3*143 + 3*93 + 3*16 + 2*24 = 804.
 fn limits(
     consumer: Consumer,
     edge: Edge,
@@ -330,7 +330,14 @@ fn explicit_ordinary_lineage_is_bounded_across_both_phases_and_compare_arms() ->
                         &composition,
                         ErasureRecoveryLimitsV1::compiled_maximum(),
                     )?;
-                    exercise(readonly, classification, &verifier, consumer, edge, "SQLite RO")?;
+                    exercise(
+                        readonly,
+                        classification,
+                        &verifier,
+                        consumer,
+                        edge,
+                        "SQLite RO",
+                    )?;
                 }
             }
         }
