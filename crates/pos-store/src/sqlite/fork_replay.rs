@@ -17,10 +17,8 @@ impl ForkReplayAuthorityReadPortV1 for SqliteStore {
         effective_max_fork_depth: usize,
         budget: &mut ForkReplayReadBudgetV1<'_>,
     ) -> Result<Option<crate::ForkReplayLineageNodeV1>, crate::ForkReplayLineageReadErrorV1> {
-        let mut context = crate::fork_replay::LineageReadContextV1::new(
-            budget,
-            effective_max_fork_depth,
-        )?;
+        let mut context =
+            crate::fork_replay::LineageReadContextV1::new(budget, effective_max_fork_depth)?;
         context.step(|context| {
             if self.conn.is_autocommit()
                 || self
