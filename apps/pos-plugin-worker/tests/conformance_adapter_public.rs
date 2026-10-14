@@ -705,7 +705,9 @@ fn r8_s9_every_pass_is_one_fresh_worker_launch() -> TestResult {
 
 #[test]
 fn r8_s9_a_launching_family_without_a_worker_is_unavailable() -> TestResult {
-    let runner = SupervisorRunnerV1::with_program("/bin/false").ok_or("a relative program")?;
+    // An absolute path that holds no program: the launch fails and the member is `WorkerCrashed`.
+    let missing = std::env::temp_dir().join(format!("pigloros-no-worker-{}", std::process::id()));
+    let runner = SupervisorRunnerV1::with_program(missing).ok_or("a relative program")?;
     for family in LAUNCHING_FAMILIES {
         let attempt = attempt_from_fixture_files(family, ExecutionMode::Local)?;
         let observation = observe_through(&runner, &attempt)?;
