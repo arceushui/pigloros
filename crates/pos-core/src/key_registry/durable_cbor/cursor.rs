@@ -111,13 +111,12 @@ impl<'input> Cursor<'input> {
     }
 
     pub(super) fn peek(&mut self, context: &mut ReadContext<'_>) -> Result<Header> {
-        self.header(context).map(|header| {
+        self.header(context).inspect(|&header| {
             self.buffered = Some(header);
-            header
         })
     }
 
-    pub(super) fn return_header(&mut self, header: Header) {
+    pub(super) const fn return_header(&mut self, header: Header) {
         self.buffered = Some(header);
     }
 
