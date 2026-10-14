@@ -2,8 +2,8 @@
 
 use super::SqliteStore;
 use crate::{
-    fork_replay::lineage::{
-        corrupt, gate_error, remember_member, LineageReadContextV1, ReadResult,
+    fork_replay::{
+        corrupt, gate_error, remember_member, LineageReadContextV1, LineageReadResult as ReadResult,
     },
     ForkReplayAuthorityReadErrorV1 as ReadError, ForkReplayLineageNodeV1,
     ForkReplayLineageReadErrorV1 as Error,
