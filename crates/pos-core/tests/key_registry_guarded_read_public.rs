@@ -517,10 +517,10 @@ fn truncation_bit_faults_missing_fields_and_trailing_input_keep_closed_native_pa
         for bit in [1, 0x20, 0x80] {
             let mut changed = bytes.clone();
             changed[index] ^= bit;
-            let _ = parity(&changed);
+            drop(parity(&changed));
         }
     }
-    let mut trailing = bytes.clone();
+    let mut trailing = bytes;
     trailing.extend_from_slice(&[0xff, 0x1c, 0]);
     assert_eq!(parity(&trailing)?, live);
     let original = value(&live)?;
