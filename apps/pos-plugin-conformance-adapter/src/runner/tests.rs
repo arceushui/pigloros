@@ -547,3 +547,19 @@ fn a_port_is_a_world_port_over_the_program_it_was_given() {
     );
     assert_eq!(port.outcome_bytes(), Vec::<u8>::new());
 }
+
+#[test]
+fn a_pass_that_reports_another_number_of_members_is_a_wiring_fault() {
+    let gate = Err(TRUST_UNAVAILABLE);
+    let entry = MemberPassV1 {
+        plugin: pos_core::PluginId::new(),
+        expected_plugin_id: PLUGIN.to_owned(),
+        gate,
+        invocation_id: None,
+        launch_failure: None,
+        sync: Ok(()),
+    };
+    let mode = CommunityPluginModeV1::Local;
+    assert_eq!(assemble_all(&[], &[], 5, mode), Ok(Vec::new()));
+    assert_eq!(assemble_all(&[entry], &[], 5, mode), Err(WIRING));
+}

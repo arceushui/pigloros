@@ -327,15 +327,31 @@ fn the_envelope_is_checked() {
     );
 }
 
+fn plain(index: usize) -> Value {
+    let compute = json!({"what": "blake3_of", "input": "x"});
+    let expect = json!({"kind": "digest", "compute": compute, "value": H32});
+    subcase(&format!("ind.{index}"), json!([]), expect)
+}
+
 #[test]
 fn at_most_sixty_four_subcases() -> TestResult {
-    let mut one = subcase("mal.6", json!([]), json!({"kind": "malformed"}));
-    one["nested"] = json!(H32);
     let mut value = base();
-    value["subcases"] = Value::Array(vec![one.clone(); 64]);
+    value["subcases"] = Value::Array((0..64).map(plain).collect());
     assert_eq!(parse(&value)?.subcases.len(), 64);
-    value["subcases"] = Value::Array(vec![one; 65]);
+    value["subcases"] = Value::Array((0..65).map(plain).collect());
     assert_eq!(parse(&value), Err(InvalidCaseV1));
+    Ok(())
+}
+
+#[test]
+fn at_least_one_subcase_and_no_repeated_id() -> TestResult {
+    let mut value = base();
+    value["subcases"] = json!([]);
+    assert_eq!(parse(&value), Err(InvalidCaseV1), "an empty case passes vacuously");
+    value["subcases"] = Value::Array(vec![plain(1)]);
+    assert_eq!(parse(&value)?.subcases.len(), 1);
+    value["subcases"] = Value::Array(vec![plain(1), plain(2), plain(1)]);
+    assert_eq!(parse(&value), Err(InvalidCaseV1), "a repeated sub-case ID");
     Ok(())
 }
 

@@ -6,6 +6,8 @@
 //! exactly when its condition holds. Digest references are resolved against the composite by
 //! [`crate::world`], not here.
 
+use std::collections::BTreeSet;
+
 use pos_reference::evaluator_domain::FixtureFamily;
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
@@ -531,6 +533,12 @@ impl CaseV1 {
         parsed.and_then(|case| case.checked(family))
     }
 
+    /// Whether no two sub-cases share an ID.
+    fn ids_are_unique(&self) -> bool {
+        let ids: BTreeSet<&str> = self.subcases.iter().map(|s| s.id.as_str()).collect();
+        ids.len() == self.subcases.len()
+    }
+
     fn checked(self, family: FixtureFamily) -> Result<Self, InvalidCaseV1> {
         let provider = match (family, &self.provider) {
             (FixtureFamily::Downgrade, Some(header)) => header.is_valid(),
@@ -539,7 +547,9 @@ impl CaseV1 {
         };
         let valid = self.schema.as_str() == SCHEMA_ID
             && self.family.as_str() == family_text(family)
+            && !self.subcases.is_empty()
             && self.subcases.len() <= MAX_SUBCASES
+            && self.ids_are_unique()
             && provider
             && self.subcases.iter().all(SubCaseV1::is_valid);
         valid.then_some(self).ok_or(InvalidCaseV1)

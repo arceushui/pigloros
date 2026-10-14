@@ -24,7 +24,8 @@ use pos_runtime::community_plugin_host::{
     pinned_runtime_v1, CommunityEvaluationWorldV1, CommunityPluginCeilingsV1,
     CommunityPluginExecutionProfileV1, CommunityPluginExpectationV1, CommunityPluginHostAbiV1,
     CommunityPluginHostV1, CommunityPluginModeV1, CommunityPluginTrustMaterialV1,
-    FixedTrustMaterialSourceV1, GatedCommunityReleaseV1, ReleaseIdentityV1, TrustDenialBasisV1,
+    FixedTrustMaterialSourceV1, GatedCommunityReleaseV1, MemberPassV1, ReleaseIdentityV1,
+    TrustDenialBasisV1,
 };
 
 use crate::composite::PiecesV1;
@@ -116,6 +117,8 @@ struct Bound {
     plugin_id: String,
     handle: CommunityPluginHandleV1,
     inputs: SharedInputsV1,
+    /// The identity of the release this Plugin's `bind` gated.
+    identity: ReleaseIdentityV1,
 }
 
 /// The world of one sub-case and what the port keeps beside it.
@@ -124,8 +127,6 @@ struct OpenWorld {
     source: Option<InMemoryReleaseSourceV1>,
     mode: CommunityPluginModeV1,
     bound: Vec<Bound>,
-    /// The identity of the release the most recent `bind` gated.
-    identity: Option<ReleaseIdentityV1>,
     /// The canonical bytes of the outcome records of the last pass.
     outcome: Vec<u8>,
 }
@@ -168,6 +169,22 @@ fn fixed_source(material: Option<CommunityPluginTrustMaterialV1>) -> FixedTrustM
 
 fn lock(inputs: &SharedInputsV1) -> MutexGuard<'_, PassInputsV1> {
     inputs.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The outcome record of each member of a pass. A pass that reports another number of members
+/// than the port built is a wiring fault, never a silently shortened result.
+fn assemble_all(
+    gates: &[MemberPassV1],
+    handles: &[CommunityPluginHandleV1],
+    tick: u64,
+    mode: CommunityPluginModeV1,
+) -> Result<Outcomes, HostError> {
+    let same = gates.len() == handles.len();
+    let outcomes = gates.iter().zip(handles).map(|(entry, handle)| {
+        let receipt = entry.invocation_id.and_then(|id| handle.receipt_for(id));
+        CommunityPluginSubjectOutcomeV1::assemble(entry, tick, mode, receipt.as_ref())
+    });
+    same.then(|| outcomes.collect()).ok_or(WIRING)
 }
 
 impl OpenWorld {
@@ -215,6 +232,7 @@ impl OpenWorld {
         gated: GatedCommunityReleaseV1,
         program: &WorkerProgramV1,
     ) -> Result<Bound, HostError> {
+        let identity = gated.identity();
         let inputs = SharedInputsV1::default();
         let plugin = ConformancePluginV1::new(&args.event_type);
         let profile = CommunityPluginExecutionProfileV1::new(
@@ -257,6 +275,7 @@ impl OpenWorld {
                     plugin_id: args.plugin_id.clone(),
                     handle,
                     inputs,
+                    identity,
                 })
             })
     }
@@ -281,9 +300,7 @@ impl OpenWorld {
                 };
                 let expectation = CommunityPluginExpectationV1 {
                     plugin_id: member.plugin_id.clone(),
-                    release: self
-                        .identity
-                        .map(|identity| (identity.pmf1_digest, identity.release_digest)),
+                    release: Some((bound.identity.pmf1_digest, bound.identity.release_digest)),
                 };
                 let handle = bound.handle.clone();
                 let built = CommunityMemberV1::new(
@@ -313,22 +330,8 @@ impl OpenWorld {
                 let mut host = CommunityPluginHostV1::new(members);
                 self.world
                     .run_pass(&mut host, &mut wall, args.tick)
-                    .map(|outcome| {
-                        outcome
-                            .gates
-                            .iter()
-                            .zip(&handles)
-                            .map(|(entry, handle)| {
-                                let receipt =
-                                    entry.invocation_id.and_then(|id| handle.receipt_for(id));
-                                CommunityPluginSubjectOutcomeV1::assemble(
-                                    entry,
-                                    args.tick,
-                                    self.mode,
-                                    receipt.as_ref(),
-                                )
-                            })
-                            .collect::<Vec<_>>()
+                    .and_then(|outcome| {
+                        assemble_all(&outcome.gates, &handles, args.tick, self.mode)
                     })
             })
         })
@@ -354,7 +357,6 @@ impl StepPortV1 for EvaluationStepPortV1 {
                 source,
                 mode,
                 bound: Vec::new(),
-                identity: None,
                 outcome: Vec::new(),
             });
         })
@@ -368,10 +370,9 @@ impl StepPortV1 for EvaluationStepPortV1 {
         let program = self.program.clone();
         self.world().and_then(|open| {
             open.gate(args).and_then(|gated| {
-                let identity = gated.identity();
                 open.driver(args, gated, &program).map(|bound| {
+                    let identity = bound.identity;
                     open.bound.push(bound);
-                    open.identity = Some(identity);
                     identity
                 })
             })

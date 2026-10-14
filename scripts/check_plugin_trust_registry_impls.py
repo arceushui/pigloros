@@ -68,8 +68,8 @@ from check_trusted_clock_port_impls import (
 PORT = "PluginTrustPolicyRegistryV1"
 ALLOWED_PREFIXES = ("crates/pos-store/", "crates/pos-runtime/")
 # Rule 6 (ADR-061 revision 8 decision 5): the from-bytes trust APIs and the evaluation world.
-# `CommunityEvaluationWorldV1` lives in `crates/pos-runtime/` since #614 (S1c2); the adapter prefix
-# (#615, S2) does not exist yet and is confined ahead of time.
+# `CommunityEvaluationWorldV1` lives in `crates/pos-runtime/` since #614 (S1c2); the conformance
+# adapter (#615, S2) is the trusted consumer of these names outside it.
 CONFINED_PREFIXES = ("crates/pos-runtime/", "apps/pos-plugin-conformance-adapter/")
 CONFINED_NAME = re.compile(
     r"\b(?:from_bytes_v1|FixedTrustMaterialSourceV1|CommunityTrustAnchorBytesV1"
