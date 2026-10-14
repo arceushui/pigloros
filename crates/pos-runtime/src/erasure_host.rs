@@ -4120,17 +4120,7 @@ impl ErasureReadSenderV1<'_> {
                 .check_time()
                 .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
             let timeline = timeline
-                .map_err(|error| match error {
-                    pos_store::ForkReplayLineageReadErrorV1::Read(_) => {
-                        ErasureHostErrorV1::AdapterFailure
-                    }
-                    pos_store::ForkReplayLineageReadErrorV1::AccessFrozen => {
-                        ErasureHostErrorV1::AccessFrozen
-                    }
-                    pos_store::ForkReplayLineageReadErrorV1::ContainmentUnavailable => {
-                        ErasureHostErrorV1::RecoveryUnavailable
-                    }
-                })?
+                .map_err(map_fork_replay_lineage_error)?
                 .ok_or(ErasureHostErrorV1::Conflict)?;
             if timeline.timeline_id() != &source.timeline_id() {
                 return Err(ErasureHostErrorV1::Conflict);
@@ -4432,6 +4422,18 @@ impl ErasureReadSenderV1<'_> {
             OwnedErasureStoreV1::Gateway(store) => store.protected_logical_head(timeline),
         };
         result.map_store_error()
+    }
+}
+
+const fn map_fork_replay_lineage_error(
+    error: pos_store::ForkReplayLineageReadErrorV1,
+) -> ErasureHostErrorV1 {
+    match error {
+        pos_store::ForkReplayLineageReadErrorV1::Read(_) => ErasureHostErrorV1::AdapterFailure,
+        pos_store::ForkReplayLineageReadErrorV1::AccessFrozen => ErasureHostErrorV1::AccessFrozen,
+        pos_store::ForkReplayLineageReadErrorV1::ContainmentUnavailable => {
+            ErasureHostErrorV1::RecoveryUnavailable
+        }
     }
 }
 
