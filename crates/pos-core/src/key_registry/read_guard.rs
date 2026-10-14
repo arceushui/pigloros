@@ -159,10 +159,7 @@ mod tests {
     }
 
     impl KeyRegistryReadGuardV1 for Guard {
-        fn observe(
-            &mut self,
-            work: KeyRegistryReadWorkV1,
-        ) -> Result<(), KeyRegistryReadRefusedV1> {
+        fn observe(&mut self, work: KeyRegistryReadWorkV1) -> Result<(), KeyRegistryReadRefusedV1> {
             let ordinal = self.events.len();
             self.events.push(work);
             if self.fail_at == Some(ordinal) {
@@ -192,7 +189,8 @@ mod tests {
             material,
             Some(PublicKey::from_bytes([0x32; 32])),
         ))?;
-        let request = KeyDestructionRequestV1::new(identity, material, Hash::from_bytes([0x33; 32]));
+        let request =
+            KeyDestructionRequestV1::new(identity, material, Hash::from_bytes([0x33; 32]));
         let mut pending = live.clone();
         pending.begin_key_destruction(request)?;
         let mut destroyed = pending.clone();
@@ -280,7 +278,10 @@ mod tests {
                     state.validate_with_read_context(&mut context),
                     Err(KeyRegistryReadErrorV1::ReadRefused)
                 );
-                assert_eq!(context.checkpoint(), Err(KeyRegistryReadErrorV1::ReadRefused));
+                assert_eq!(
+                    context.checkpoint(),
+                    Err(KeyRegistryReadErrorV1::ReadRefused)
+                );
                 assert_eq!(
                     context.materialize(1),
                     Err(KeyRegistryReadErrorV1::ReadRefused)
@@ -327,7 +328,11 @@ mod tests {
         let mut state = two_owners()?;
         state
             .records
-            .get_mut(&KeyIdentityV1::new("b", KeyRoleV1::TimelineIntegritySigning, 1))
+            .get_mut(&KeyIdentityV1::new(
+                "b",
+                KeyRoleV1::TimelineIntegritySigning,
+                1,
+            ))
             .ok_or("second record")?
             .private_material_digest = Some(Hash::from_bytes([0x31; 32]));
         assert_eq!(state.validate(), Err(KeyRegistryErrorV1::InvalidState));
@@ -386,7 +391,10 @@ mod tests {
             context.materialize_sum(usize::MAX, 1),
             Err(KeyRegistryReadErrorV1::ReadRefused)
         );
-        assert_eq!(context.checkpoint(), Err(KeyRegistryReadErrorV1::ReadRefused));
+        assert_eq!(
+            context.checkpoint(),
+            Err(KeyRegistryReadErrorV1::ReadRefused)
+        );
         assert_eq!(
             context.materialize_sum(1, 0),
             Err(KeyRegistryReadErrorV1::ReadRefused)
