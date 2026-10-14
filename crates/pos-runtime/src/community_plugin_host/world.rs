@@ -98,6 +98,8 @@ pub struct CommunityEvaluationWorldV1 {
 /// What a pass observes before it is staged.
 struct Observed {
     revisions: PipelineSecurityRevisionsV1,
+    /// The local session grant the fence names; every admission must carry it.
+    authority_grant: Hash,
     head: Seq,
     prefix: Vec<Event>,
     chain: Vec<TimelineMeta>,
@@ -362,18 +364,22 @@ fn observe(
     host.command_sender()
         .and_then(|mut sender| {
             sender.with_scheduled_admission(|ports| {
-                LocalScheduledAdmissionHostV1::shared()
-                    .and_then(|local| local.observe(plugins, ports, timeline))
+                LocalScheduledAdmissionHostV1::shared().and_then(|local| {
+                    local
+                        .observe(plugins, ports, timeline)
+                        .map(|revisions| (revisions, local.authority_grant()))
+                })
             })
         })
         .or(Err(UNAVAILABLE))
         .and_then(|revisions| revisions.or(Err(UNAVAILABLE)))
-        .and_then(|revisions| {
+        .and_then(|(revisions, authority_grant)| {
             unavailable(host.read_sender().and_then(|mut reader| {
                 reader.logical_head(timeline).and_then(|head| {
                     read_whole(&mut reader, timeline).and_then(|prefix| {
                         reader.fork_ancestry(timeline).map(|chain| Observed {
                             revisions,
+                            authority_grant,
                             head,
                             prefix,
                             chain,
@@ -400,6 +406,7 @@ fn admission_for(attempt: u64, observed: &Observed) -> WorldResult<ScheduledPass
                 ),
                 provider_validation: validation,
                 security_revisions: observed.revisions,
+                authority_grant: observed.authority_grant,
                 commit_head: observed.head,
                 commit_now_secs: COMMIT_NOW_SECS,
             })
