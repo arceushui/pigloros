@@ -683,7 +683,7 @@ impl KeyRegistryStateV1 {
                 if identity.role.is_signing() != record.public_verification_key.is_some() {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
                 }
-                let scope = context.scope(&identity.owner_id, &identity.role)?;
+                let scope = context.scope(&identity.owner_id, identity.role)?;
                 if !self.highest_epoch.contains_key(&scope) {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
                 }
@@ -747,7 +747,7 @@ impl KeyRegistryStateV1 {
                 if !self.records.contains_key(identity) {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
                 }
-                let scope = context.scope(owner_id, role)?;
+                let scope = context.scope(owner_id, *role)?;
                 if self.highest_epoch.get(&scope) != Some(&identity.epoch) {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
                 }
@@ -763,11 +763,11 @@ impl KeyRegistryStateV1 {
     ) -> Result<(), KeyRegistryReadErrorV1> {
         for ((owner_id, role), highest_epoch) in &self.highest_epoch {
             context.step(|context| {
-                let identity = context.identity(owner_id, role, highest_epoch)?;
+                let identity = context.identity(owner_id, *role, *highest_epoch)?;
                 if !self.tombstones.contains_key(&identity)
                     && !self.pending_destructions.contains_key(&identity)
                 {
-                    let scope = context.scope(owner_id, role)?;
+                    let scope = context.scope(owner_id, *role)?;
                     if self.active.get(&scope) != Some(&identity) {
                         return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
                     }
@@ -1256,7 +1256,7 @@ impl KeyRegistryStateV1 {
                 {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
                 }
-                let scope = context.scope(&identity.owner_id, &identity.role)?;
+                let scope = context.scope(&identity.owner_id, identity.role)?;
                 if self.active.get(&scope) == Some(identity) {
                     return Err(KeyRegistryReadErrorV1::InvalidSnapshot);
                 }
