@@ -21,6 +21,11 @@ use crate::{Driver, ObservationView, RuntimeError, StepOutput};
 
 type TestResult = BoxResult<()>;
 
+/// The deterministic refusal of an unusable trust state (a failed clock sample).
+const TSU: CommunityPluginHostErrorV1 = CommunityPluginHostErrorV1::ArtifactTrustDenied {
+    basis: TrustDenialBasisV1::TrustStateUnavailable,
+};
+
 const PLUGIN_ID: &str = "plugin-a";
 const EVENT_TYPE: &str = "world.test.staged";
 
@@ -377,7 +382,7 @@ fn unverifiable_trust_material_is_refused_before_the_install() -> TestResult {
         TICK,
     );
     assert!(refused.is_err());
-    assert_ne!(refused.err(), Some(UNAVAILABLE));
+    assert_ne!(refused.err(), Some(TSU));
     assert_eq!(rig.gate().err(), Some(policy_unadopted()));
     Ok(())
 }
@@ -411,7 +416,7 @@ fn a_failed_sample_is_refused_before_any_install() -> TestResult {
         &mut empty,
         TICK,
     );
-    assert_eq!(refused.err(), Some(UNAVAILABLE));
+    assert_eq!(refused.err(), Some(TSU));
     Ok(())
 }
 
@@ -428,12 +433,12 @@ fn a_refresh_with_the_adopted_policy_is_ok_and_a_failed_clock_is_refused() -> Te
     let refused = rig
         .eval
         .refresh(&mut members, &rig.material, &mut empty, TICK);
-    assert_eq!(refused, Err(UNAVAILABLE));
+    assert_eq!(refused, Err(TSU));
     Ok(())
 }
 
 #[test]
-fn a_world_over_a_store_without_a_registry_is_unavailable() -> TestResult {
+fn a_host_fault_is_operational_never_a_trust_verdict() -> TestResult {
     let mut rig = Rig::new()?;
     rig.eval.registry_host = ErasureExecutionHostV1::open_gateway_verified_empty(
         StoreConfig::Memory,
@@ -441,13 +446,14 @@ fn a_world_over_a_store_without_a_registry_is_unavailable() -> TestResult {
     )
     .map_err(|e| format!("{e:?}"))?;
     assert!(rig.install().is_err());
-    assert_eq!(rig.gate().err(), Some(UNAVAILABLE));
+    assert_ne!(OPERATIONAL, TSU);
+    assert_eq!(rig.gate().err(), Some(OPERATIONAL));
     let mut members = CommunityPluginHostV1::new(vec![rig.member()?]);
     let outcome = rig.eval.run_pass(&mut members, &mut one_second(), TICK);
-    assert_eq!(outcome.err(), Some(UNAVAILABLE));
+    assert_eq!(outcome.err(), Some(OPERATIONAL));
     let refreshed = rig
         .eval
         .refresh(&mut members, &rig.material, &mut one_second(), TICK);
-    assert_eq!(refreshed, Err(UNAVAILABLE));
+    assert_eq!(refreshed, Err(OPERATIONAL));
     Ok(())
 }

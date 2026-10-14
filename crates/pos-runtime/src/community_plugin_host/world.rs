@@ -11,8 +11,13 @@
 //! `pos-plugin-supervisor`, which depends on this crate, so the caller builds Drivers and
 //! registers them in [`CommunityEvaluationWorldV1::plugins_mut()`].
 //!
-//! Every fault of the hosts themselves (a host that is not ready, an unavailable store) is
-//! `ArtifactTrustDenied{TrustStateUnavailable}`: the state the world needs is unusable.
+//! Two kinds of failure are kept apart (ADR-061 revision 7 decision 3, O-13). A refusal of the
+//! registry, the gate, the trust verification or the clock keeps the closed host error that
+//! its table row maps to (`TrustStateUnavailable` only where the table says so). A fault of the
+//! hosts themselves (a host that is not ready, a missing registry, an unavailable store or
+//! ledger, a failed observation) is not a trust verdict: it is the operational
+//! [`CommunityPluginHostErrorV1::WorkerCrashed`], which the adapter classifies as
+//! `Unavailable`, so it can never be credited as a matching deterministic refusal.
 
 use pos_core::{
     store::EventReadBounds, trusted_clock::PluginTrustWallSourceV1, AppendDedupKey,
@@ -45,10 +50,8 @@ use crate::{
     LocalScheduledAdmissionHostV1, PluginRegistry, ScheduledPassAdmissionV1,
 };
 
-/// `ArtifactTrustDenied{TrustStateUnavailable}`, the answer for every unusable host or store.
-const UNAVAILABLE: CommunityPluginHostErrorV1 = CommunityPluginHostErrorV1::ArtifactTrustDenied {
-    basis: TrustDenialBasisV1::TrustStateUnavailable,
-};
+/// The operational error of a fault of the world's own hosts or stores: not a trust verdict.
+const OPERATIONAL: CommunityPluginHostErrorV1 = CommunityPluginHostErrorV1::WorkerCrashed;
 
 /// The result of one world operation.
 type WorldResult<T> = Result<T, CommunityPluginHostErrorV1>;
@@ -66,14 +69,19 @@ const PROVIDER_VALIDATION_BYTE: u8 = 60;
 /// separates the world's keys from other writers', and the world has none.
 const SCOPE_BYTE: u8 = 62;
 
-/// `ArtifactTrustDenied{TrustStateUnavailable}` for a fault whose payload is not needed.
-fn unavailable<T, E>(result: Result<T, E>) -> WorldResult<T> {
-    result.or(Err(UNAVAILABLE))
+/// A host or store fault, whose payload is not needed, as the operational error.
+fn operational<T, E>(result: Result<T, E>) -> WorldResult<T> {
+    result.or(Err(OPERATIONAL))
 }
 
-/// A host or store fault is `TrustStateUnavailable`; otherwise the operation's own result.
+/// A host or store fault is operational; otherwise the operation's own result.
 fn flat<T, E>(result: Result<WorldResult<T>, E>) -> WorldResult<T> {
-    unavailable(result).and_then(std::convert::identity)
+    operational(result).and_then(std::convert::identity)
+}
+
+/// Two layers of host or store faults, both operational.
+fn flat_fault<T, E1, E2>(result: Result<Result<T, E1>, E2>) -> WorldResult<T> {
+    operational(result).and_then(operational)
 }
 
 /// A registry operation whose outcome is not needed, mapped like the registry refusals.
@@ -113,10 +121,10 @@ impl CommunityEvaluationWorldV1 {
     /// gate is `PolicyMismatch`, the registry's `PolicyNotAdvanced`).
     ///
     /// # Errors
-    /// Returns `TrustStateUnavailable` when a host cannot be opened, and the registry mapping of
-    /// the refusal of `provision`.
+    /// Returns `WorkerCrashed` (operational) when a host cannot be opened, and the registry
+    /// mapping of the refusal of `provision`.
     pub fn open(genesis: &CommunityPluginTrustMaterialV1) -> WorldResult<Self> {
-        unavailable(open_parts()).and_then(|parts| {
+        operational(open_parts()).and_then(|parts| {
             let plugins =
                 PluginRegistry::new().with_erasure_gate(parts.pass_host.containment_gate());
             let mut world = Self {
@@ -151,7 +159,7 @@ impl CommunityEvaluationWorldV1 {
     ///
     /// # Errors
     /// Returns the host error of the failed sample, of the trust verification, or of the install
-    /// (`host_error_for_install_v1`); `TrustStateUnavailable` when the registry store is
+    /// (`host_error_for_install_v1`); `WorkerCrashed` (operational) when the registry store is
     /// unusable.
     pub fn install(
         &mut self,
@@ -191,8 +199,8 @@ impl CommunityEvaluationWorldV1 {
     /// on the world's registry.
     ///
     /// # Errors
-    /// Returns the host error of the gate, or `TrustStateUnavailable` when the registry store is
-    /// unusable.
+    /// Returns the host error of the gate, or `WorkerCrashed` (operational) when the registry
+    /// store is unusable.
     pub fn gate_for_driver(
         &mut self,
         expectation: &CommunityPluginExpectationV1,
@@ -220,7 +228,7 @@ impl CommunityEvaluationWorldV1 {
     ///
     /// # Errors
     /// Returns the registry mapping (`host_error_for_registry_v1`) of the refusal, or
-    /// `TrustStateUnavailable` when the registry store is unusable.
+    /// `WorkerCrashed` (operational) when the registry store is unusable.
     pub fn refresh<M: CommunityPluginMemberV1>(
         &mut self,
         members: &mut CommunityPluginHostV1<M>,
@@ -238,7 +246,7 @@ impl CommunityEvaluationWorldV1 {
     /// store's admission port and reading trust from the registry store.
     ///
     /// # Errors
-    /// Returns `TrustStateUnavailable` when a store is unusable or the observation fails; the
+    /// Returns `WorkerCrashed` (operational) when a store is unusable or the observation fails; the
     /// pass's own refusals and failures are in the outcome.
     pub fn run_pass<M: CommunityPluginMemberV1>(
         &mut self,
@@ -270,14 +278,14 @@ impl CommunityEvaluationWorldV1 {
                         })
                     })
                 });
-                unavailable(passed.and_then(std::convert::identity))
+                flat_fault(passed)
             })
     }
 
     /// Every Event committed on the pass Timeline.
     ///
     /// # Errors
-    /// Returns `TrustStateUnavailable` when the pass store is unusable.
+    /// Returns `WorkerCrashed` (operational) when the pass store is unusable.
     pub fn committed_events(&mut self) -> WorldResult<Vec<Event>> {
         read_all(&mut self.pass_host, self.pass_timeline)
     }
@@ -347,7 +355,7 @@ fn read_whole(
 }
 
 fn read_all(host: &mut ErasureExecutionHostV1, timeline: TimelineId) -> WorldResult<Vec<Event>> {
-    unavailable(
+    operational(
         host.read_sender()
             .and_then(|mut reader| read_whole(&mut reader, timeline)),
     )
@@ -361,33 +369,30 @@ fn observe(
     plugins: &PluginRegistry,
     timeline: TimelineId,
 ) -> WorldResult<Observed> {
-    host.command_sender()
-        .and_then(|mut sender| {
-            sender.with_scheduled_admission(|ports| {
-                LocalScheduledAdmissionHostV1::shared().and_then(|local| {
-                    local
-                        .observe(plugins, ports, timeline)
-                        .map(|revisions| (revisions, local.authority_grant()))
-                })
+    let observed = host.command_sender().and_then(|mut sender| {
+        sender.with_scheduled_admission(|ports| {
+            LocalScheduledAdmissionHostV1::shared().and_then(|local| {
+                local
+                    .observe(plugins, ports, timeline)
+                    .map(|revisions| (revisions, local.authority_grant()))
             })
         })
-        .or(Err(UNAVAILABLE))
-        .and_then(|revisions| revisions.or(Err(UNAVAILABLE)))
-        .and_then(|(revisions, authority_grant)| {
-            unavailable(host.read_sender().and_then(|mut reader| {
-                reader.logical_head(timeline).and_then(|head| {
-                    read_whole(&mut reader, timeline).and_then(|prefix| {
-                        reader.fork_ancestry(timeline).map(|chain| Observed {
-                            revisions,
-                            authority_grant,
-                            head,
-                            prefix,
-                            chain,
-                        })
+    });
+    flat_fault(observed).and_then(|(revisions, authority_grant)| {
+        operational(host.read_sender().and_then(|mut reader| {
+            reader.logical_head(timeline).and_then(|head| {
+                read_whole(&mut reader, timeline).and_then(|prefix| {
+                    reader.fork_ancestry(timeline).map(|chain| Observed {
+                        revisions,
+                        authority_grant,
+                        head,
+                        prefix,
+                        chain,
                     })
                 })
-            }))
-        })
+            })
+        }))
+    })
 }
 
 /// The host's admission inputs for attempt number `attempt` over `observed`: a fresh attempt
@@ -411,7 +416,7 @@ fn admission_for(attempt: u64, observed: &Observed) -> WorldResult<ScheduledPass
                 commit_now_secs: COMMIT_NOW_SECS,
             })
         })
-        .or(Err(UNAVAILABLE))
+        .or(Err(OPERATIONAL))
 }
 
 #[cfg(test)]

@@ -134,10 +134,10 @@ pub fn gate_for_driver(
         })
 }
 
-/// The gated release of `pass`, without its authorization. It stays a separate function from
-/// [`gate_for_driver()`] because the pass is a parameter: the sampling and the pass opening live
-/// in the wrapper, and a test hands this function a closed pass, which the wrapper can never
-/// produce.
+/// The gated release of `pass`, without its authorization. A test-only seam: production calls
+/// it only through [`gate_for_driver()`], which samples the second and opens the pass. It is a
+/// separate function because the pass is a parameter, so a test can hand it a closed pass,
+/// which the wrapper can never produce.
 fn gate_at(
     trust: &(impl PluginTrustPolicyRegistryV1 + ?Sized),
     expectation: &CommunityPluginExpectationV1,
