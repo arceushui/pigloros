@@ -564,6 +564,26 @@ fn imported_nested_and_max_depth_histories_keep_exact_cuts_and_atomic_public_con
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
             run_cases(host, &world, &verifier)?;
+            // Existing URI support lets the normal host recover imported rows
+            // in memory without adding a test-only public transfer seam. This
+            // is named shared memory, not the private SqliteInMemory variant.
+            let uri = format!(
+                "file:pigloros-561-nested-{}?mode=memory&cache=shared",
+                TimelineId::new(),
+            );
+            let keeper = SqliteStore::open(&uri)?;
+            let mut sqlite = SqliteStore::open(&uri)?;
+            assert_eq!(populate(&mut sqlite, &world, destroyed)?, required);
+            drop(sqlite);
+            let host = ErasureExecutionHostV1::open_with_authority(
+                StoreConfig::Sqlite { path: uri },
+                &composition,
+                ErasureRecoveryLimitsV1::compiled_maximum(),
+            )?;
+            // The gate-unbound keeper issues no command or transaction while
+            // the host owns the recovered adapter and protected read interval.
+            run_cases(host, &world, &verifier)?;
+            drop(keeper);
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("nested-imported.sqlite");
             let path = path.to_str().ok_or("utf-8 path")?;
