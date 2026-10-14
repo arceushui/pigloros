@@ -14,7 +14,7 @@ use pos_store::plugin_trust_registry::PluginTrustCommitOutcomeV1;
 
 use super::*;
 use crate::community_plugin_host::{
-    CommunityPassAuthorizationV1, FixedTrustMaterialSourceV1, PassResultV1,
+    CommunityPassAuthorizationV1, FixedTrustMaterialSourceV1, PassResultV1, TrustDenialBasisV1,
     PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1,
 };
 use crate::{Driver, ObservationView, RuntimeError, StepOutput};

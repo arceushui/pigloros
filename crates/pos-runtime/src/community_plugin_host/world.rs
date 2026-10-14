@@ -31,7 +31,7 @@ use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
 use pos_store::plugin_trust_registry::{PluginTrustPolicyRegistryErrorV1, TrustedUtcSecondV1};
 use pos_store::StoreConfig;
 
-use super::error::{CommunityPluginHostErrorV1, TrustDenialBasisV1};
+use super::error::CommunityPluginHostErrorV1;
 use super::gate::{
     gate_for_driver, host_error_for_registry_v1, host_error_for_trust_verification_v1, slices,
     CommunityPluginExpectationV1, CommunityPluginTrustMaterialV1, GatedCommunityReleaseV1,
