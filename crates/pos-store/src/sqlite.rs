@@ -148,6 +148,7 @@ mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
 mod fork_replay;
+mod fork_replay_lineage;
 mod fork_replay_admission;
 mod fork_replay_binding;
 mod fork_replay_chain;

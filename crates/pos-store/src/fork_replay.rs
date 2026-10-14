@@ -10,6 +10,8 @@ use pos_core::{
     Hash, Seq, TimelineId,
 };
 
+pub(crate) mod lineage;
+
 #[cfg(feature = "sqlite")]
 mod admission;
 #[cfg(feature = "sqlite")]
@@ -617,6 +619,23 @@ impl ForkReplayAuthorityEvidenceV1 {
 /// interval and the existing transaction-internal validator (b), never a new
 /// nested transaction, signer, permit or recovery decision.
 pub trait ForkReplayAuthorityReadPortV1 {
+    /// Read one actual lineage coordinate with bounded full-ancestry visibility.
+    ///
+    /// Reuses the caller's held interval and original operation ledger. The
+    /// effective depth cap is the stricter installed arm/operation ceiling.
+    /// This diagnostic coordinate grants no signing or release authority.
+    ///
+    /// # Errors
+    /// Returns closed read, erasure-access or containment failures. A refused
+    /// ledger takes precedence over an observed native failure.
+    fn read_fork_replay_lineage_node(
+        &self,
+        timeline_id: TimelineId,
+        depth: usize,
+        effective_max_fork_depth: usize,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> Result<Option<ForkReplayLineageNodeV1>, ForkReplayLineageReadErrorV1>;
+
     /// Validate one required publication under the caller's cumulative ledger.
     ///
     /// # Errors
@@ -626,6 +645,51 @@ pub trait ForkReplayAuthorityReadPortV1 {
         requirement: &ForkReplayRequirementV1,
         budget: &mut ForkReplayReadBudgetV1<'_>,
     ) -> ReadResult<ForkReplayAuthorityEvidenceV1>;
+}
+
+/// A visible actual Timeline coordinate, without names, owners or Events.
+#[derive(Debug, Eq, PartialEq)]
+pub struct ForkReplayLineageNodeV1 {
+    timeline_id: TimelineId,
+    fork_point: Option<(TimelineId, Seq)>,
+}
+
+impl ForkReplayLineageNodeV1 {
+    pub(crate) const fn new(
+        timeline_id: TimelineId,
+        fork_point: Option<(TimelineId, Seq)>,
+    ) -> Self {
+        Self {
+            timeline_id,
+            fork_point,
+        }
+    }
+
+    /// Borrow the selected native Timeline identity.
+    #[must_use]
+    pub const fn timeline_id(&self) -> &TimelineId {
+        &self.timeline_id
+    }
+
+    /// Borrow the actual parent/cut, or identify an actual root.
+    #[must_use]
+    pub const fn fork_point(&self) -> Option<&(TimelineId, Seq)> {
+        self.fork_point.as_ref()
+    }
+}
+
+/// Closed lineage failures; no native values or formatted provenance escape.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ForkReplayLineageReadErrorV1 {
+    /// Existing bounded read failure, without changing its four-case contract.
+    #[error("Fork Replay lineage read failed")]
+    Read(ForkReplayAuthorityReadErrorV1),
+    /// The member's installed erasure gate denied Read access.
+    #[error("Fork Replay lineage access is frozen")]
+    AccessFrozen,
+    /// The member's containment or inventory freshness could not be established.
+    #[error("Fork Replay lineage containment is unavailable")]
+    ContainmentUnavailable,
 }
 
 #[cfg(test)]
