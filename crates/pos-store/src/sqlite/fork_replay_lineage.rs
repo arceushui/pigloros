@@ -19,167 +19,6 @@ fn get<T: FromSql>(
     context.step(|_| row.get(column).map_err(|_| STORAGE_ERROR))
 }
 
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-    use super::*;
-    use crate::{ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1};
-    use pos_core::{
-        trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1},
-        CanonicalBytes, EntityId, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
-        ErasureProtectedEffectDispositionV1, EventDraft, EventStore, Kind,
-    };
-    use std::{sync::Arc, time::Duration};
-
-    type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
-
-    fn fixture() -> Fallible<(SqliteStore, TimelineId, TimelineId)> {
-        let mut store = SqliteStore::open(":memory:")?;
-        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
-        let root = store.create_timeline("lineage fault root")?.id();
-        drop(store.append(
-            root,
-            &[EventDraft::new(
-                EntityId::new(),
-                Kind::new("ordinary"),
-                CanonicalBytes::from_static(b"not read by lineage"),
-            )],
-        )?);
-        let child = store.fork(root, Seq::from_u64(1), "lineage fault child")?.id();
-        // Only impossible-state storage fixtures bypass CHECKs; the reader
-        // still crosses its actual public port and the normal installed gate.
-        store
-            .conn
-            .execute_batch("PRAGMA ignore_check_constraints=ON")?;
-        Ok((store, root, child))
-    }
-
-    fn read(
-        store: &SqliteStore,
-        timeline: TimelineId,
-        clock: &mut dyn GuardMonotonicSourceV1,
-    ) -> Fallible<ReadResult<Option<ForkReplayLineageNodeV1>>> {
-        let limits = ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000)?;
-        let start = clock.mark();
-        let mut budget = ForkReplayReadBudgetV1::new(limits, start, clock)?;
-        let interval = store.begin_protected_effect_interval()?;
-        let result = store.read_fork_replay_lineage_node(timeline, 0, 8, &mut budget);
-        store.finish_protected_effect_interval(
-            interval,
-            ErasureProtectedEffectDispositionV1::Rollback,
-        )?;
-        Ok(result)
-    }
-
-    #[test]
-    fn malformed_native_metadata_and_event_rows_fail_through_the_public_port() -> Fallible<()> {
-        for sql in [
-            "UPDATE timelines SET parent_id=NULL WHERE parent_id IS NOT NULL",
-            "UPDATE timelines SET fork_seq=NULL WHERE parent_id IS NOT NULL",
-            "UPDATE timelines SET parent_id='not-an-id' WHERE parent_id IS NOT NULL",
-            "UPDATE timelines SET parent_id='ZZZZZZZZZZZZZZZZZZZZZZZZZZ' WHERE parent_id IS NOT NULL",
-            "UPDATE timelines SET fork_seq=-1 WHERE parent_id IS NOT NULL",
-            "UPDATE timelines SET head_seq=-1 WHERE parent_id IS NOT NULL",
-            "UPDATE timelines SET head_seq='invalid' WHERE parent_id IS NOT NULL",
-            "UPDATE timelines SET parent_id=id,fork_seq=0 WHERE parent_id IS NOT NULL",
-            "UPDATE timelines SET parent_id='00000000000000000000000000' WHERE parent_id IS NOT NULL",
-            "UPDATE events SET seq=0",
-            "UPDATE events SET seq=-1",
-            "UPDATE events SET seq='invalid'",
-            "UPDATE events SET event_type=x'00'",
-        ] {
-            let (store, _, child) = fixture()?;
-            store.conn.execute_batch(sql)?;
-            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
-            assert_eq!(
-                read(&store, child, &mut clock)?,
-                Err(Error::Read(ReadError::CorruptAuthority)),
-                "{sql}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn late_ancestor_presence_and_geographic_events_hide_the_entire_use() -> Fallible<()> {
-        for presence in [true, false] {
-            for kind in ["geo.cell", "geo.location"] {
-                let (store, root, child) = fixture()?;
-                if presence {
-                    store.conn.execute(
-                        "INSERT INTO geographic_presence(timeline_id,has_evidence) VALUES(?1,0)",
-                        [root.to_string()],
-                    )?;
-                } else {
-                    store.conn.execute("UPDATE events SET event_type=?1", [kind])?;
-                }
-                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
-                assert_eq!(read(&store, child, &mut clock)?, Ok(None));
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn original_epoch_expiry_takes_precedence_over_native_storage_faults() -> Fallible<()> {
-        let (store, _, child) = fixture()?;
-        store.conn.execute_batch("DROP TABLE geographic_presence")?;
-        let mut bounds = 0;
-        let mut storage = 0;
-        for marks in 2..256 {
-            let mut clock = ScriptedGuardMonotonicSourceV1::new(
-                std::iter::repeat_n(Duration::ZERO, marks).chain([Duration::from_secs(2)]),
-            );
-            match read(&store, child, &mut clock)? {
-                Err(Error::Read(ReadError::BoundsExceeded)) => bounds += 1,
-                Err(Error::Read(ReadError::StorageUnavailable)) => storage += 1,
-                result => return Err(format!("unexpected native fault result: {result:?}").into()),
-            }
-        }
-        assert!(bounds > 0);
-        assert!(storage > 0);
-        Ok(())
-    }
-
-    #[test]
-    fn either_actual_gate_freshness_query_can_refuse_without_releasing_a_node() -> Fallible<()> {
-        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        for refused in [1, 2] {
-            let (store, root, _) = fixture()?;
-            let interval = store.begin_protected_effect_interval()?;
-            let calls = Arc::new(AtomicUsize::new(0));
-            let observed = Arc::clone(&calls);
-            store.conn.authorizer(Some(move |context: AuthContext<'_>| {
-                if let AuthAction::Pragma { pragma_name, .. } = context.action {
-                    if pragma_name.eq_ignore_ascii_case("data_version")
-                        && observed.fetch_add(1, Ordering::SeqCst) + 1 == refused
-                    {
-                        return Authorization::Deny;
-                    }
-                }
-                Authorization::Allow
-            }))?;
-            let limits = ForkReplayReadLimitsV1::new(8, 8, 64, 4_096, 1_000_000)?;
-            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
-            let start = clock.mark();
-            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
-            assert_eq!(
-                store.read_fork_replay_lineage_node(root, 0, 0, &mut budget),
-                Err(Error::ContainmentUnavailable)
-            );
-            assert_eq!(calls.load(Ordering::SeqCst), refused);
-            store.conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
-            store.finish_protected_effect_interval(
-                interval,
-                ErasureProtectedEffectDispositionV1::Rollback,
-            )?;
-        }
-        Ok(())
-    }
-}
-
 fn integer(
     row: &Row<'_>,
     column: usize,
@@ -471,5 +310,166 @@ impl SqliteStore {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::{ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1};
+    use pos_core::{
+        trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1},
+        CanonicalBytes, EntityId, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
+        ErasureProtectedEffectDispositionV1, EventDraft, EventStore, Kind,
+    };
+    use std::{sync::Arc, time::Duration};
+
+    type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+
+    fn fixture() -> Fallible<(SqliteStore, TimelineId, TimelineId)> {
+        let mut store = SqliteStore::open(":memory:")?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let root = store.create_timeline("lineage fault root")?.id();
+        drop(store.append(
+            root,
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new("ordinary"),
+                CanonicalBytes::from_static(b"not read by lineage"),
+            )],
+        )?);
+        let child = store.fork(root, Seq::from_u64(1), "lineage fault child")?.id();
+        // Only impossible-state storage fixtures bypass CHECKs; the reader
+        // still crosses its actual public port and the normal installed gate.
+        store
+            .conn
+            .execute_batch("PRAGMA ignore_check_constraints=ON")?;
+        Ok((store, root, child))
+    }
+
+    fn read(
+        store: &SqliteStore,
+        timeline: TimelineId,
+        clock: &mut dyn GuardMonotonicSourceV1,
+    ) -> Fallible<ReadResult<Option<ForkReplayLineageNodeV1>>> {
+        let limits = ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000)?;
+        let start = clock.mark();
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, clock)?;
+        let interval = store.begin_protected_effect_interval()?;
+        let result = store.read_fork_replay_lineage_node(timeline, 0, 8, &mut budget);
+        store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
+        Ok(result)
+    }
+
+    #[test]
+    fn malformed_native_metadata_and_event_rows_fail_through_the_public_port() -> Fallible<()> {
+        for sql in [
+            "UPDATE timelines SET parent_id=NULL WHERE parent_id IS NOT NULL",
+            "UPDATE timelines SET fork_seq=NULL WHERE parent_id IS NOT NULL",
+            "UPDATE timelines SET parent_id='not-an-id' WHERE parent_id IS NOT NULL",
+            "UPDATE timelines SET parent_id='ZZZZZZZZZZZZZZZZZZZZZZZZZZ' WHERE parent_id IS NOT NULL",
+            "UPDATE timelines SET fork_seq=-1 WHERE parent_id IS NOT NULL",
+            "UPDATE timelines SET head_seq=-1 WHERE parent_id IS NOT NULL",
+            "UPDATE timelines SET head_seq='invalid' WHERE parent_id IS NOT NULL",
+            "UPDATE timelines SET parent_id=id,fork_seq=0 WHERE parent_id IS NOT NULL",
+            "UPDATE timelines SET parent_id='00000000000000000000000000' WHERE parent_id IS NOT NULL",
+            "UPDATE events SET seq=0",
+            "UPDATE events SET seq=-1",
+            "UPDATE events SET seq='invalid'",
+            "UPDATE events SET event_type=x'00'",
+        ] {
+            let (store, _, child) = fixture()?;
+            store.conn.execute_batch(sql)?;
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            assert_eq!(
+                read(&store, child, &mut clock)?,
+                Err(Error::Read(ReadError::CorruptAuthority)),
+                "{sql}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn late_ancestor_presence_and_geographic_events_hide_the_entire_use() -> Fallible<()> {
+        for presence in [true, false] {
+            for kind in ["geo.cell", "geo.location"] {
+                let (store, root, child) = fixture()?;
+                if presence {
+                    store.conn.execute(
+                        "INSERT INTO geographic_presence(timeline_id,has_evidence) VALUES(?1,0)",
+                        [root.to_string()],
+                    )?;
+                } else {
+                    store.conn.execute("UPDATE events SET event_type=?1", [kind])?;
+                }
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                assert_eq!(read(&store, child, &mut clock)?, Ok(None));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn original_epoch_expiry_takes_precedence_over_native_storage_faults() -> Fallible<()> {
+        let (store, _, child) = fixture()?;
+        store.conn.execute_batch("DROP TABLE geographic_presence")?;
+        let mut bounds = 0;
+        let mut storage = 0;
+        for marks in 2..256 {
+            let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                std::iter::repeat_n(Duration::ZERO, marks).chain([Duration::from_secs(2)]),
+            );
+            match read(&store, child, &mut clock)? {
+                Err(Error::Read(ReadError::BoundsExceeded)) => bounds += 1,
+                Err(Error::Read(ReadError::StorageUnavailable)) => storage += 1,
+                result => return Err(format!("unexpected native fault result: {result:?}").into()),
+            }
+        }
+        assert!(bounds > 0);
+        assert!(storage > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn either_actual_gate_freshness_query_can_refuse_without_releasing_a_node() -> Fallible<()> {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for refused in [1, 2] {
+            let (store, root, _) = fixture()?;
+            let interval = store.begin_protected_effect_interval()?;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&calls);
+            store.conn.authorizer(Some(move |context: AuthContext<'_>| {
+                if let AuthAction::Pragma { pragma_name, .. } = context.action {
+                    if pragma_name.eq_ignore_ascii_case("data_version")
+                        && observed.fetch_add(1, Ordering::SeqCst) + 1 == refused
+                    {
+                        return Authorization::Deny;
+                    }
+                }
+                Authorization::Allow
+            }))?;
+            let limits = ForkReplayReadLimitsV1::new(8, 8, 64, 4_096, 1_000_000)?;
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                store.read_fork_replay_lineage_node(root, 0, 0, &mut budget),
+                Err(Error::ContainmentUnavailable)
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), refused);
+            store.conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+            store.finish_protected_effect_interval(
+                interval,
+                ErasureProtectedEffectDispositionV1::Rollback,
+            )?;
+        }
+        Ok(())
     }
 }
