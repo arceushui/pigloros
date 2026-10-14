@@ -7,10 +7,8 @@
 use crate::CommittedForkManifestV1;
 use pos_core::{
     trusted_clock::{GuardMonotonicSourceV1, MonotonicMarkV1},
-    Hash, Seq, TimelineId,
+    ErasureContainmentErrorV1, Hash, Seq, TimelineId,
 };
-
-pub(crate) mod lineage;
 
 #[cfg(feature = "sqlite")]
 mod admission;
@@ -690,6 +688,141 @@ pub enum ForkReplayLineageReadErrorV1 {
     /// The member's containment or inventory freshness could not be established.
     #[error("Fork Replay lineage containment is unavailable")]
     ContainmentUnavailable,
+}
+
+pub(crate) type LineageReadResult<T> = Result<T, ForkReplayLineageReadErrorV1>;
+
+pub(crate) struct LineageReadContextV1<'budget, 'clock> {
+    budget: &'budget mut ForkReplayReadBudgetV1<'clock>,
+    cap: usize,
+}
+
+impl<'budget, 'clock> LineageReadContextV1<'budget, 'clock> {
+    pub(crate) fn new(
+        budget: &'budget mut ForkReplayReadBudgetV1<'clock>,
+        cap: usize,
+    ) -> LineageReadResult<Self> {
+        budget.check_time().map_err(ForkReplayLineageReadErrorV1::Read)?;
+        budget
+            .accept(cap <= budget.limits().max_fork_depth_per_traversal())
+            .map_err(ForkReplayLineageReadErrorV1::Read)?;
+        Ok(Self { budget, cap })
+    }
+
+    pub(crate) fn check(&mut self) -> LineageReadResult<()> {
+        self.budget
+            .check_time()
+            .map_err(ForkReplayLineageReadErrorV1::Read)
+    }
+
+    /// Always post-check a completed batch, including failed native work.
+    pub(crate) fn step<T>(
+        &mut self,
+        effect: impl FnOnce(&mut Self) -> LineageReadResult<T>,
+    ) -> LineageReadResult<T> {
+        self.check().and_then(|()| {
+            let result = effect(self);
+            self.check().and(result)
+        })
+    }
+
+    pub(crate) fn bytes(&mut self, bytes: usize) -> LineageReadResult<()> {
+        self.budget
+            .charge_bytes(bytes)
+            .map_err(ForkReplayLineageReadErrorV1::Read)
+    }
+
+    pub(crate) fn row(&mut self) -> LineageReadResult<()> {
+        self.budget
+            .charge_rows(1)
+            .map_err(ForkReplayLineageReadErrorV1::Read)
+    }
+
+    fn node(&mut self, depth: Option<usize>) -> LineageReadResult<()> {
+        self.check().and_then(|()| {
+            if let Some(depth) = depth.filter(|depth| *depth <= self.cap) {
+                self.budget
+                    .charge_node(depth)
+                    .map_err(ForkReplayLineageReadErrorV1::Read)
+            } else {
+                self.budget
+                    .accept(false)
+                    .map_err(ForkReplayLineageReadErrorV1::Read)
+            }
+        })
+    }
+}
+
+pub(crate) const fn corrupt<T>() -> LineageReadResult<T> {
+    Err(ForkReplayLineageReadErrorV1::Read(
+        ForkReplayAuthorityReadErrorV1::CorruptAuthority,
+    ))
+}
+
+pub(crate) const fn gate_error(error: ErasureContainmentErrorV1) -> ForkReplayLineageReadErrorV1 {
+    match error {
+        ErasureContainmentErrorV1::AccessFrozen => ForkReplayLineageReadErrorV1::AccessFrozen,
+        ErasureContainmentErrorV1::RecoveryUnavailable => {
+            ForkReplayLineageReadErrorV1::ContainmentUnavailable
+        }
+    }
+}
+
+/// Runs every member inside its adapter's Read fence. The borrowed prefix is
+/// checked and the ID inserted only after the gate grants access.
+pub(crate) fn read_visible_lineage(
+    target: TimelineId,
+    depth: usize,
+    context: &mut LineageReadContextV1<'_, '_>,
+    mut member: impl FnMut(
+        TimelineId,
+        &mut Vec<TimelineId>,
+        &mut LineageReadContextV1<'_, '_>,
+    ) -> LineageReadResult<Option<(ForkReplayLineageNodeV1, Seq)>>,
+) -> LineageReadResult<Option<ForkReplayLineageNodeV1>> {
+    context.step(|context| {
+        let mut visited = Vec::new();
+        let mut current = target;
+        let mut result = None;
+        loop {
+            context.node(depth.checked_add(visited.len()))?;
+            let metadata = member(current, &mut visited, context)?;
+            let Some((node, _head)) = metadata else {
+                return Ok(None);
+            };
+            let parent = node.fork_point();
+            let next = parent
+                .map(|(parent, _)| context.bytes(16).map(|()| *parent))
+                .transpose()?;
+            if result.is_none() {
+                result = Some(node);
+            }
+            if let Some(parent) = next {
+                current = parent;
+            } else {
+                return Ok(result);
+            }
+        }
+    })
+}
+
+pub(crate) fn remember_member(
+    timeline: TimelineId,
+    visited: &mut Vec<TimelineId>,
+    context: &mut LineageReadContextV1<'_, '_>,
+) -> LineageReadResult<()> {
+    for previous in visited.iter() {
+        context.step(|_| {
+            if *previous == timeline {
+                corrupt()
+            } else {
+                Ok(())
+            }
+        })?;
+    }
+    context.bytes(16)?;
+    visited.push(timeline);
+    context.check()
 }
 
 #[cfg(test)]
