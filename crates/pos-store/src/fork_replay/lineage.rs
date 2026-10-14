@@ -6,9 +6,9 @@ use super::{
 };
 use pos_core::{ErasureContainmentErrorV1, Seq, TimelineId};
 
-pub(crate) type ReadResult<T> = Result<T, Error>;
+pub type ReadResult<T> = Result<T, Error>;
 
-pub(crate) struct LineageReadContextV1<'budget, 'clock> {
+pub struct LineageReadContextV1<'budget, 'clock> {
     budget: &'budget mut ForkReplayReadBudgetV1<'clock>,
     cap: usize,
 }
@@ -59,20 +59,20 @@ impl<'budget, 'clock> LineageReadContextV1<'budget, 'clock> {
     }
 }
 
-pub(crate) const fn corrupt<T>() -> ReadResult<T> {
+pub const fn corrupt<T>() -> ReadResult<T> {
     Err(Error::Read(ReadError::CorruptAuthority))
 }
 
-pub(crate) const fn gate_error(error: ErasureContainmentErrorV1) -> Error {
+pub const fn gate_error(error: ErasureContainmentErrorV1) -> Error {
     match error {
         ErasureContainmentErrorV1::AccessFrozen => Error::AccessFrozen,
-        _ => Error::ContainmentUnavailable,
+        ErasureContainmentErrorV1::RecoveryUnavailable => Error::ContainmentUnavailable,
     }
 }
 
 /// Runs every member inside its adapter's Read fence. The borrowed prefix is
 /// checked and the ID inserted only after the gate grants access.
-pub(crate) fn read_visible_lineage(
+pub fn read_visible_lineage(
     target: TimelineId,
     depth: usize,
     context: &mut LineageReadContextV1<'_, '_>,
@@ -108,7 +108,7 @@ pub(crate) fn read_visible_lineage(
     })
 }
 
-pub(crate) fn remember_member(
+pub fn remember_member(
     timeline: TimelineId,
     visited: &mut Vec<TimelineId>,
     context: &mut LineageReadContextV1<'_, '_>,
