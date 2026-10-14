@@ -60,6 +60,16 @@ impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
         self.budget.is_some()
     }
 
+    /// Native work can refuse before issuing a debit (for example when its
+    /// checked field sum fails). Latch that refusal in the original ledger
+    /// without fabricating a charge or sampling the clock again.
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn refuse(&mut self) {
+        if let Some(budget) = self.budget.as_deref_mut() {
+            budget.failed = true;
+        }
+    }
+
     pub(crate) fn check(&mut self) -> Result<(), crate::ForkManifestPublicationErrorV1> {
         self.budget
             .as_deref_mut()
