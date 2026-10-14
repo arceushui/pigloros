@@ -39,7 +39,10 @@ impl ForkReplayAuthorityReadPortV1 for SqliteStore {
             &mut NativeReadContextV1::protected(budget),
         );
         budget.check_time()?;
-        let committed = committed.map_err(|_| Error::CorruptAuthority)?;
+        let committed = committed.map_err(|error| match error {
+            crate::ForkManifestPublicationErrorV1::StorageIndeterminate => Error::StorageUnavailable,
+            _ => Error::CorruptAuthority,
+        })?;
         ForkReplayAuthorityEvidenceV1::from_committed(*requirement, &committed, budget)
     }
 }
@@ -417,6 +420,46 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn file_backed_native_storage_failure_remains_indeterminate() -> Fallible<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("native-storage.sqlite");
+        let mut store = SqliteStore::open(path.to_str().ok_or("UTF-8 path")?)?;
+        let world = World::new(Shape::EmptyUnclassified, false)?;
+        let built = world.build(&Spec::default())?;
+        world.seed_destination(&mut store)?;
+        pin_policy(&mut store, &built.policy)?;
+        store.import_verified(&request_for(&world, &built))?;
+        let child = world.child_at(0)?.id;
+        let committed = store.read_committed(child, PARENT_CUT)?;
+        let requirement = ForkReplayRequirementV1::new(
+            child,
+            pos_core::Seq::from_u64(PARENT_CUT),
+            committed.record_id,
+            committed.authority_origin_digest,
+        )?;
+        // Actual authoritative-source storage fault, not malformed CBOR.
+        // The obsolete coarse record preflight never inspects this table.
+        store
+            .conn
+            .execute_batch("DROP TABLE imported_fork_attribution_admissions")?;
+        let interval = store.begin_protected_effect_interval()?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, 1_000_000, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        assert_eq!(
+            store.validate_fork_replay_authority(&requirement, &mut budget),
+            Err(Error::StorageUnavailable)
+        );
+        assert_eq!(budget.check_time(), Ok(()));
+        store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
+        Ok(())
+    }
+
     /// Independent byte encoders and logical fields; this oracle does not
     /// call production length/carrier/ledger helpers or measure a used budget.
     fn shared_native_phase_cost(
@@ -453,6 +496,22 @@ mod tests {
         // independently of production probes or measured ledger usage.
         let mut registry_bytes = Vec::new();
         ciborium::into_writer(&world.registry, &mut registry_bytes)?;
+        // World::new registers exactly one live integrity-signing key, with
+        // both digests present, plus its active/high-water entries. Inventory
+        // ADR-116's native fields independently; do not measure the ledger.
+        let registry_owner = world
+            .anchors
+            .first()
+            .ok_or("fixture registry anchor")?
+            .0
+            .owner_id
+            .as_str()
+            .len();
+        let identity = 2 * registry_owner + 1 + 8;
+        let scope = 2 * registry_owner + 1;
+        let digest = 32 + 32;
+        let registry_native =
+            3 * identity + 2 * scope + 2 * digest + 8 + 1 + 4 * registry_owner + 44;
         Ok(publication_phase_cost(committed)?
             + retained_key_phase
             + admission_phase * 2
@@ -466,6 +525,7 @@ mod tests {
             + origin_copy
             + absent_key_copy
             + registry_bytes.len()
+            + registry_native
             + final_event_hash_phase_cost(world, committed)?
             + classified_records_phase_cost(world, built)?)
     }
