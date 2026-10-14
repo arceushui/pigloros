@@ -10,8 +10,8 @@ use pos_core::{
 };
 use pos_store::{
     memory::MemoryStore, sqlite::SqliteStore, ForkReplayAuthorityReadErrorV1 as ReadError,
-    ForkReplayAuthorityReadPortV1, ForkReplayLineageReadErrorV1 as Error,
-    ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
+    ForkReplayAuthorityReadPortV1, ForkReplayLineageReadErrorV1 as Error, ForkReplayReadBudgetV1,
+    ForkReplayReadLimitsV1,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -26,7 +26,9 @@ fn bind(store: &mut impl EventStore) -> TestResult {
 /// root ID16 + option1 + local head8 + cycle insertion16; SQLite additionally
 /// copies key26 and raw ID26. A Fork adds parent16/cut8 to the native carrier,
 /// another raw parent26 in SQLite, and one internal continuation16.
-fn empty_chain<S: EventStore + ForkReplayAuthorityReadPortV1 + ErasureInventoryPersistencePortV1>(
+fn empty_chain<
+    S: EventStore + ForkReplayAuthorityReadPortV1 + ErasureInventoryPersistencePortV1,
+>(
     store: &mut S,
     root: TimelineId,
     child: TimelineId,
@@ -117,7 +119,9 @@ fn seed_empty(
     store: &mut impl EventStore,
 ) -> Result<(TimelineId, TimelineId), Box<dyn std::error::Error>> {
     bind(store)?;
-    let root = store.create_timeline(&"private unselected name ".repeat(4_096))?.id();
+    let root = store
+        .create_timeline(&"private unselected name ".repeat(4_096))?
+        .id();
     let child = store.fork(root, Seq::ZERO, "empty child")?.id();
     Ok((root, child))
 }
@@ -143,7 +147,9 @@ fn literal_empty_lineage_limits_repeat_on_memory_sqlite_and_readonly() -> TestRe
     Ok(())
 }
 
-fn candidate_events<S: EventStore + ForkReplayAuthorityReadPortV1 + ErasureInventoryPersistencePortV1>(
+fn candidate_events<
+    S: EventStore + ForkReplayAuthorityReadPortV1 + ErasureInventoryPersistencePortV1,
+>(
     store: &mut S,
     sqlite: bool,
 ) -> TestResult {

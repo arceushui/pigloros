@@ -2,7 +2,9 @@
 
 use super::MemoryStore;
 use crate::{
-    fork_replay::lineage::{corrupt, gate_error, remember_member, LineageReadContextV1, ReadResult},
+    fork_replay::lineage::{
+        corrupt, gate_error, remember_member, LineageReadContextV1, ReadResult,
+    },
     ForkReplayLineageNodeV1, ForkReplayLineageReadErrorV1 as Error,
 };
 use pos_core::{ErasureGate, ErasureProtectedOperationV1, Seq, TimelineId};
@@ -20,13 +22,9 @@ impl MemoryStore {
                     .map_err(|_| Error::ContainmentUnavailable)
             })?;
             let mut result = Err(Error::ContainmentUnavailable);
-            let fenced = gate.with_fence(
-                timeline,
-                ErasureProtectedOperationV1::Read,
-                &mut || {
-                    result = self.lineage_metadata_and_visibility(timeline, visited, context);
-                },
-            );
+            let fenced = gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
+                result = self.lineage_metadata_and_visibility(timeline, visited, context);
+            });
             context.check()?;
             context.step(|_| {
                 crate::validate_bound_erasure_inventory_generation(
@@ -90,9 +88,7 @@ impl MemoryStore {
                 })?;
                 context.bytes(8)?;
                 cursor = event.seq;
-                if context.step(|_| {
-                    Ok(pos_core::is_geographic_event_type(&event.event_type))
-                })? {
+                if context.step(|_| Ok(pos_core::is_geographic_event_type(&event.event_type)))? {
                     return Ok(None);
                 }
             }
@@ -129,7 +125,9 @@ mod tests {
                 CanonicalBytes::from_static(b"uninspected payload"),
             )],
         )?);
-        let child = store.fork(root, Seq::from_u64(1), "memory lineage child")?.id();
+        let child = store
+            .fork(root, Seq::from_u64(1), "memory lineage child")?
+            .id();
         Ok((store, root, child))
     }
 
@@ -159,7 +157,9 @@ mod tests {
             }
             assert_eq!(
                 read(&store, child)?,
-                Err(Error::Read(ForkReplayAuthorityReadErrorV1::CorruptAuthority))
+                Err(Error::Read(
+                    ForkReplayAuthorityReadErrorV1::CorruptAuthority
+                ))
             );
         }
         Ok(())
