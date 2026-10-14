@@ -8,7 +8,10 @@ For the plugin-conformance layer: migration graphs and failure rollback are not
 covered; no sub-case, fixture, or oracle invokes `migrate-state`.
 
 For the plugin-conformance layer: downgrade is expressed only as `NotActive`,
-`ArtifactRevoked`, and `IncompatibleAbi`.
+`ArtifactRevoked`, and `IncompatibleAbi`, and as install refusals: an ABI major other than
+0 is refused at install as `InvalidManifest` because the PMF1 decoder accepts no other
+major, and a release that breaks the release chain is refused as
+`TrustStateUnavailable`.
 
 For the plugin-conformance layer: five usage counters are unmeasured and are
 reported as 0.
