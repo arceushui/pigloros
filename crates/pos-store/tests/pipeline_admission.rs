@@ -1299,10 +1299,8 @@ fn sqlite_an_exhausted_dependency_set_refuses_both_ingresses_and_commits_nothing
                 path.to_str().unwrap_or_default(),
                 Box::new(clock.clone()),
             ));
-            Attempt {
-                ingress,
-                ..attempt(&prepare(&mut store), 1, 0)
-            }
+            let base = attempt(&prepare(&mut store), 1, 0);
+            Attempt { ingress, ..base }
         };
         // A set that earlier Ticks filled to the node cap takes no further Tick.
         execute(
@@ -1350,18 +1348,12 @@ fn all_rows_request(timeline: TimelineId) -> DependencyPageRequestV1 {
     ))
 }
 
-fn recorded_nodes(
-    store: &dyn Harness,
-    timeline: TimelineId,
-) -> Vec<DependencyNodeRecordV1> {
+fn recorded_nodes(store: &dyn Harness, timeline: TimelineId) -> Vec<DependencyNodeRecordV1> {
     let request = all_rows_request(timeline);
     ok(store.read_dependency_nodes(&request)).items().to_vec()
 }
 
-fn recorded_edges(
-    store: &dyn Harness,
-    timeline: TimelineId,
-) -> Vec<DependencyEdgeRecordV1> {
+fn recorded_edges(store: &dyn Harness, timeline: TimelineId) -> Vec<DependencyEdgeRecordV1> {
     let request = all_rows_request(timeline);
     ok(store.read_dependency_edges(&request)).items().to_vec()
 }

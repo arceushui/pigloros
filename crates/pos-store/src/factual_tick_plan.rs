@@ -82,18 +82,20 @@ pub(crate) trait TickPrefixV1 {
 }
 
 /// Why planning stopped: the declaration is refused, or the store failed.
-enum Halt {
+enum PlanHaltV1 {
+    /// The declaration breaks a rule: the commit's outcome, not an error.
     Refused(TickRefusalV1),
+    /// A read of the store failed: the commit is an error.
     Fault(CoreError),
 }
 
-impl From<TickRefusalV1> for Halt {
+impl From<TickRefusalV1> for PlanHaltV1 {
     fn from(refusal: TickRefusalV1) -> Self {
         Self::Refused(refusal)
     }
 }
 
-impl From<CoreError> for Halt {
+impl From<CoreError> for PlanHaltV1 {
     fn from(error: CoreError) -> Self {
         Self::Fault(error)
     }
@@ -117,11 +119,14 @@ fn check_grant(basis: &PipelineAdmissionBasisV1, grant: Hash) -> Result<(), Tick
 }
 
 /// R3.7.2 (ii): the record is a committed one at the next Tick of the prefix.
-fn check_tick<P: TickPrefixV1>(prefix: &P, basis: &PipelineAdmissionBasisV1) -> Result<(), Halt> {
+fn check_tick<P: TickPrefixV1>(
+    prefix: &P,
+    basis: &PipelineAdmissionBasisV1,
+) -> Result<(), PlanHaltV1> {
     let last = prefix.last_tick()?;
     let next = last.checked_add(1) == Some(basis.dependencies().tick());
     let committed = declaration::declares_committed_tick(basis) && next;
-    demand(committed, TickRefusalV1::InvalidDeclaration).map_err(Halt::from)
+    demand(committed, TickRefusalV1::InvalidDeclaration).map_err(PlanHaltV1::from)
 }
 
 /// The payload hash of every committed Event the ingress bindings of the
@@ -167,16 +172,16 @@ fn bound_nodes<P: TickPrefixV1>(
     basis: &PipelineAdmissionBasisV1,
     first_seq: Seq,
     payloads: &BTreeMap<u64, Hash>,
-) -> Result<Vec<(Seq, Hash)>, Halt> {
+) -> Result<Vec<(Seq, Hash)>, PlanHaltV1> {
     let outputs = declaration::output_event_nodes(timeline, basis, first_seq)
         .filter(|_| declaration::snapshot_matches(timeline, basis));
     let ingress = declaration::ingress_event_nodes(timeline, basis, payloads);
     let seqs: Vec<Seq> = ingress.iter().flatten().map(|(seq, _)| *seq).collect();
-    let bound = prefix.any_bound(&seqs)?;
+    let bound = !seqs.is_empty() && prefix.any_bound(&seqs)?;
     outputs
         .zip(ingress.filter(|_| !bound))
         .map(|(first, second)| first.into_iter().chain(second).collect())
-        .ok_or(Halt::Refused(TickRefusalV1::InvalidDeclaration))
+        .ok_or(PlanHaltV1::Refused(TickRefusalV1::InvalidDeclaration))
 }
 
 /// R3.7.2 (vii): no declared input is left without an edge, and every edge
@@ -204,7 +209,10 @@ fn edge_sources_resolve<P: TickPrefixV1>(
 /// R3.7.2 (v) to (viii): the position keys are new, the set takes the record,
 /// every edge source resolves, and the shape holds. Each check runs only if
 /// the earlier ones passed.
-fn check_rows<P: TickPrefixV1>(prefix: &P, basis: &PipelineAdmissionBasisV1) -> Result<(), Halt> {
+fn check_rows<P: TickPrefixV1>(
+    prefix: &P,
+    basis: &PipelineAdmissionBasisV1,
+) -> Result<(), PlanHaltV1> {
     let record = basis.dependencies().record();
     let index = declaration::digest_index(record);
     let invalid = TickRefusalV1::InvalidDeclaration;
@@ -212,7 +220,7 @@ fn check_rows<P: TickPrefixV1>(prefix: &P, basis: &PipelineAdmissionBasisV1) -> 
     let capacity = record.ensure_set_capacity(prefix.counts()?);
     capacity.or(Err(TickRefusalV1::SetExhausted))?;
     demand(edge_sources_resolve(prefix, record, &index)?, invalid)?;
-    demand(declaration::shape_holds(basis, &index), invalid).map_err(Halt::from)
+    demand(declaration::shape_holds(basis, &index), invalid).map_err(PlanHaltV1::from)
 }
 
 /// The rows the checked Tick installs, with its Event-backed nodes.
@@ -240,7 +248,7 @@ fn judge<P: TickPrefixV1>(
     basis: &PipelineAdmissionBasisV1,
     grant: Hash,
     first_seq: Seq,
-) -> Result<FactualInstallV1, Halt> {
+) -> Result<FactualInstallV1, PlanHaltV1> {
     check_grant(basis, grant)?;
     check_tick(prefix, basis)?;
     let payloads = bound_payloads(prefix, basis)?;
@@ -263,7 +271,7 @@ pub(crate) fn plan_tick<P: TickPrefixV1>(
 ) -> Result<PlannedTickV1, CoreError> {
     match judge(prefix, timeline, basis, grant, first_seq) {
         Ok(install) => Ok(PlannedTickV1::Install(install)),
-        Err(Halt::Refused(refusal)) => Ok(PlannedTickV1::Refused(refusal)),
-        Err(Halt::Fault(error)) => Err(error),
+        Err(PlanHaltV1::Refused(refusal)) => Ok(PlannedTickV1::Refused(refusal)),
+        Err(PlanHaltV1::Fault(error)) => Err(error),
     }
 }

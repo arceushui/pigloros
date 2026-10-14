@@ -1923,10 +1923,10 @@ fn insert_commit_range(
     conn: &Connection,
     timeline: &str,
     tick: i64,
-    install: &FactualInstallV1,
+    range: (Seq, Seq),
 ) -> Result<(), CoreError> {
-    let first = seq_as_i64(install.first_seq);
-    let last = seq_as_i64(install.last_seq);
+    let first = seq_as_i64(range.0);
+    let last = seq_as_i64(range.1);
     conn.execute(INSERT_RANGE_SQL, params![timeline, tick, first, last])
         .map(|_| ())
         .map_err(SqliteStore::into_storage_error)
@@ -1937,9 +1937,8 @@ fn insert_event_nodes(
     conn: &Connection,
     timeline: &str,
     tick: i64,
-    install: &FactualInstallV1,
+    bindings: &[(Seq, Hash)],
 ) -> Result<(), CoreError> {
-    let bindings = &install.event_nodes;
     conn.prepare_cached(INSERT_BINDING_SQL)
         .and_then(|mut statement| {
             bindings.iter().try_for_each(|(seq, digest)| {
@@ -1962,13 +1961,14 @@ fn install_factual_tick(
     conn: &Connection,
     timeline: TimelineId,
     record: &TickDependencyRecordV1,
-    install: &FactualInstallV1,
+    range: (Seq, Seq),
+    bindings: &[(Seq, Hash)],
 ) -> Result<(), CoreError> {
     let set = DependencySetV1::new(timeline, PREFIX_GENERATION);
     let tick = sql_tick(record.tick());
     insert_dependency_record(conn, &set, tick, record)
-        .and_then(|()| insert_commit_range(conn, &set.timeline, tick, install))
-        .and_then(|()| insert_event_nodes(conn, &set.timeline, tick, install))
+        .and_then(|()| insert_commit_range(conn, &set.timeline, tick, range))
+        .and_then(|()| insert_event_nodes(conn, &set.timeline, tick, bindings))
 }
 
 /// The Timeline's visible committed prefix, as the Tick checks read it inside
@@ -1990,8 +1990,7 @@ impl TickPrefixV1 for SqlitePrefixV1<'_> {
     }
 
     fn any_bound(&self, seqs: &[Seq]) -> Result<bool, CoreError> {
-        event_nodes(self.conn, &self.path, seqs)
-            .map(|found| found.iter().any(Option::is_some))
+        event_nodes(self.conn, &self.path, seqs).map(|found| found.iter().any(Option::is_some))
     }
 
     fn records_any(&self, record: &TickDependencyRecordV1) -> Result<bool, CoreError> {
@@ -2016,25 +2015,25 @@ impl TickPrefixV1 for SqlitePrefixV1<'_> {
 impl SqliteStore {
     /// Check the factual Tick declaration of `basis` against the Timeline's
     /// visible committed prefix (R3.7.2), before any Event is appended, and
-    /// prepare the rows the commit installs. It reads inside the caller's
-    /// transaction and writes nothing.
+    /// prepare the rows the commit installs. `chain` is the Timeline's fork
+    /// chain the caller has read. It reads inside the caller's transaction and
+    /// writes nothing.
     pub(in crate::sqlite) fn plan_factual_tick(
         &self,
         timeline: TimelineId,
         basis: &PipelineAdmissionBasisV1,
         grant: Hash,
         first_seq: Seq,
+        chain: &[(TimelineId, Seq)],
     ) -> Result<PlannedTickV1, CoreError> {
-        Self::fork_chain_on(&self.conn, timeline)
-            .and_then(|chain| path_of(&self.conn, timeline, &chain))
-            .and_then(|path| {
-                let prefix = SqlitePrefixV1 {
-                    conn: &self.conn,
-                    timeline,
-                    path,
-                };
-                plan_tick(&prefix, timeline, basis, grant, first_seq)
-            })
+        path_of(&self.conn, timeline, chain).and_then(|path| {
+            let prefix = SqlitePrefixV1 {
+                conn: &self.conn,
+                timeline,
+                path,
+            };
+            plan_tick(&prefix, timeline, basis, grant, first_seq)
+        })
     }
 
     /// Install a checked Tick: its rows, commit range and Event bindings, in
@@ -2045,7 +2044,8 @@ impl SqliteStore {
         record: &TickDependencyRecordV1,
         planned: &FactualInstallV1,
     ) -> Result<(), CoreError> {
-        install_factual_tick(&self.conn, timeline, record, planned)
+        let range = (planned.first_seq, planned.last_seq);
+        install_factual_tick(&self.conn, timeline, record, range, &planned.event_nodes)
     }
 }
 
@@ -2079,12 +2079,9 @@ impl SqliteStore {
                     ticks
                         .iter()
                         .try_for_each(|held| {
-                            let install = FactualInstallV1 {
-                                first_seq: held.first_seq,
-                                last_seq: held.last_seq,
-                                event_nodes: held.event_nodes.clone(),
-                            };
-                            install_factual_tick(&tx, timeline, &held.record, &install)
+                            let range = (held.first_seq, held.last_seq);
+                            let bindings = &held.event_nodes;
+                            install_factual_tick(&tx, timeline, &held.record, range, bindings)
                         })
                         .and_then(|()| tx.commit().map_err(Self::into_storage_error))
                 })
