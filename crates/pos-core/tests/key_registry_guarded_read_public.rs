@@ -750,3 +750,66 @@ fn truncated_utf8_tagged_options_and_bignum_faults_match_native_rejection() -> F
     );
     Ok(())
 }
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn missing_native_fields_and_short_scope_tuples_fail_at_the_public_decode_seam() -> Fallible<()>
+{
+    let states = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?;
+    for (index, map, required) in [
+        (1, "records", &["identity"][..]),
+        (
+            2,
+            "pending_destructions",
+            &["identity", "expected_material_digest", "authorization_digest"][..],
+        ),
+        (
+            3,
+            "tombstones",
+            &[
+                "identity",
+                "destroyed_material_digest",
+                "destruction_digest",
+                "deletion_receipt",
+            ][..],
+        ),
+    ] {
+        let original = value(&states[index].0)?;
+        for name in required {
+            let mut changed = original.clone();
+            let (_, native) = fields(field(&mut changed, map)?)?
+                .first_mut()
+                .ok_or("native fixture entry")?;
+            fields(native)?.retain(|(key, _)| *key != Value::Text((*name).to_owned()));
+            // Remove a required wire field below the typed constructors.
+            // Both readers must reject decoding, before registry invariants.
+            assert_eq!(parity(&encoded(&changed)?), Err(ReadError::InvalidSnapshot));
+        }
+    }
+    let original = value(&states[1].0)?;
+    for in_key in [false, true] {
+        for name in ["owner_id", "role", "epoch"] {
+            let mut changed = original.clone();
+            let (key, record_value) = fields(field(&mut changed, "records")?)?
+                .first_mut()
+                .ok_or("identity fixture entry")?;
+            let identity = if in_key {
+                key
+            } else {
+                field(record_value, "identity")?
+            };
+            fields(identity)?.retain(|(key, _)| *key != Value::Text(name.to_owned()));
+            assert_eq!(parity(&encoded(&changed)?), Err(ReadError::InvalidSnapshot));
+        }
+    }
+    for items in [Vec::new(), vec![Value::Text("a".to_owned())]] {
+        let mut changed = original.clone();
+        let (scope, _) = fields(field(&mut changed, "highest_epoch")?)?
+            .first_mut()
+            .ok_or("scope fixture entry")?;
+        *scope = Value::Array(items);
+        // A scope requires both tuple members, unlike an unconsumed third item.
+        assert_eq!(parity(&encoded(&changed)?), Err(ReadError::InvalidSnapshot));
+    }
+    Ok(())
+}
