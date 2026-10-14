@@ -81,7 +81,9 @@ fn parity(bytes: &[u8]) -> Result<KeyRegistryStateV1, ReadError> {
 fn lifecycle(owner: &str, role: KeyRoleV1) -> Fallible<Vec<(KeyRegistryStateV1, usize)>> {
     let identity = KeyIdentityV1::from_parts(OwnerIdV1::new(owner)?, role, 1);
     let material = Hash::from_bytes([0x51; 32]);
-    let key = role.is_signing().then_some(PublicKey::from_bytes([0x52; 32]));
+    let key = role
+        .is_signing()
+        .then_some(PublicKey::from_bytes([0x52; 32]));
     let mut live = KeyRegistryStateV1::new();
     live.register_key(KeyRegistrationV1::new(identity, material, key))?;
     let request = KeyDestructionRequestV1::new(identity, material, Hash::from_bytes([0x53; 32]));
@@ -142,7 +144,10 @@ fn exact_native_units_cover_all_roles_lifecycles_and_max_utf8_owner() -> Fallibl
         }
     }
     // The independently specified one-live-signing fixture is exactly 224.
-    assert_eq!(lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?[1].1, 224);
+    assert_eq!(
+        lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?[1].1,
+        224
+    );
     Ok(())
 }
 
@@ -251,8 +256,9 @@ fn wire(value: &Value, mode: Wire, output: &mut Vec<u8>) -> Fallible<()> {
             }
             Ok(())
         }
-        Value::Text(text) if owner_text(text)
-            && matches!(mode, Wire::SegmentedOwners | Wire::NestedSegments) => {
+        Value::Text(text)
+            if owner_text(text) && matches!(mode, Wire::SegmentedOwners | Wire::NestedSegments) =>
+        {
             output.push(0x7f);
             if mode == Wire::NestedSegments {
                 output.push(0x7f);
@@ -269,9 +275,17 @@ fn wire(value: &Value, mode: Wire, output: &mut Vec<u8>) -> Fallible<()> {
             output.push(0xff);
             Ok(())
         }
-        Value::Bytes(bytes) if matches!(mode,
-            Wire::SegmentedBytes | Wire::NestedByteSegments
-                | Wire::ByteArrays | Wire::IndefiniteByteArrays) => wire_bytes(bytes, mode, output),
+        Value::Bytes(bytes)
+            if matches!(
+                mode,
+                Wire::SegmentedBytes
+                    | Wire::NestedByteSegments
+                    | Wire::ByteArrays
+                    | Wire::IndefiniteByteArrays
+            ) =>
+        {
+            wire_bytes(bytes, mode, output)
+        }
         Value::Integer(integer) if mode == Wire::BigIntegers => {
             let number = u64::try_from(*integer)?;
             title(output, 6, 2, false)?;
@@ -336,7 +350,11 @@ fn wire_map(fields: &[(Value, Value)], mode: Wire, output: &mut Vec<u8>) -> Fall
         title(output, 5, u64::try_from(fields.len())?, mode == Wire::Wide)?;
     }
     for position in 0..fields.len() {
-        let index = if mode == Wire::ReverseMaps { fields.len() - 1 - position } else { position };
+        let index = if mode == Wire::ReverseMaps {
+            fields.len() - 1 - position
+        } else {
+            position
+        };
         let (key, value) = &fields[index];
         if mode == Wire::ByteFieldNames {
             if let Value::Text(text) = key {
@@ -361,15 +379,26 @@ fn value(state: &KeyRegistryStateV1) -> Fallible<Value> {
 
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn pinned_wire_variants_match_ordinary_loading_without_canonical_only_restrictions() -> Fallible<()> {
+fn pinned_wire_variants_match_ordinary_loading_without_canonical_only_restrictions() -> Fallible<()>
+{
     for owner in ["a".to_owned(), "é".repeat(64)] {
         for (state, required) in lifecycle(&owner, KeyRoleV1::TimelineIntegritySigning)? {
             let value = value(&state)?;
             for mode in [
-                Wire::Preferred, Wire::IndefiniteMaps, Wire::SegmentedOwners,
-                Wire::NestedSegments, Wire::SegmentedBytes, Wire::NestedByteSegments,
-                Wire::ByteArrays, Wire::IndefiniteByteArrays, Wire::Tagged, Wire::Wide,
-                Wire::BigIntegers, Wire::ByteFieldNames, Wire::UndefinedOptions, Wire::ReverseMaps,
+                Wire::Preferred,
+                Wire::IndefiniteMaps,
+                Wire::SegmentedOwners,
+                Wire::NestedSegments,
+                Wire::SegmentedBytes,
+                Wire::NestedByteSegments,
+                Wire::ByteArrays,
+                Wire::IndefiniteByteArrays,
+                Wire::Tagged,
+                Wire::Wide,
+                Wire::BigIntegers,
+                Wire::ByteFieldNames,
+                Wire::UndefinedOptions,
+                Wire::ReverseMaps,
             ] {
                 let mut bytes = Vec::new();
                 wire(&value, mode, &mut bytes)?;
@@ -413,8 +442,11 @@ fn record(value: &mut Value) -> Fallible<&mut Value> {
 
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn wrong_length_buffers_stop_before_fixed_copy_and_refusal_wins_after_native_fault() -> Fallible<()> {
-    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?.swap_remove(1).0;
+fn wrong_length_buffers_stop_before_fixed_copy_and_refusal_wins_after_native_fault() -> Fallible<()>
+{
+    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
+        .swap_remove(1)
+        .0;
     for length in [0, 1, 31, 33, 4_097] {
         let mut value = value(&live)?;
         *field(record(&mut value)?, "public_verification_key")? = Value::Bytes(vec![0x52; length]);
@@ -442,7 +474,9 @@ fn wrong_length_buffers_stop_before_fixed_copy_and_refusal_wins_after_native_fau
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn duplicate_map_keys_charge_new_carriers_but_duplicate_struct_fields_do_not_decode_values(
 ) -> Fallible<()> {
-    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?.swap_remove(1).0;
+    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
+        .swap_remove(1)
+        .0;
     let mut duplicate = value(&live)?;
     let records = fields(field(&mut duplicate, "records")?)?;
     records.push(records.first().ok_or("record entry")?.clone());
@@ -470,8 +504,11 @@ fn duplicate_map_keys_charge_new_carriers_but_duplicate_struct_fields_do_not_dec
 
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn truncation_bit_faults_missing_fields_and_trailing_input_keep_closed_native_parity() -> Fallible<()> {
-    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?.swap_remove(1).0;
+fn truncation_bit_faults_missing_fields_and_trailing_input_keep_closed_native_parity(
+) -> Fallible<()> {
+    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
+        .swap_remove(1)
+        .0;
     let bytes = encoded(&live)?;
     for end in 0..bytes.len() {
         assert_eq!(parity(&bytes[..end]), Err(ReadError::InvalidSnapshot));
@@ -487,7 +524,14 @@ fn truncation_bit_faults_missing_fields_and_trailing_input_keep_closed_native_pa
     trailing.extend_from_slice(&[0xff, 0x1c, 0]);
     assert_eq!(parity(&trailing)?, live);
     let original = value(&live)?;
-    for name in ["records", "active", "tombstones", "highest_epoch", "pending_destructions", "version"] {
+    for name in [
+        "records",
+        "active",
+        "tombstones",
+        "highest_epoch",
+        "pending_destructions",
+        "version",
+    ] {
         let mut missing = original.clone();
         fields(&mut missing)?.retain(|(key, _)| *key != Value::Text(name.to_owned()));
         assert_eq!(parity(&encoded(&missing)?), Err(ReadError::InvalidSnapshot));
@@ -497,8 +541,11 @@ fn truncation_bit_faults_missing_fields_and_trailing_input_keep_closed_native_pa
 
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn nested_unknown_values_missing_options_and_recursion_keep_derived_serde_behavior() -> Fallible<()> {
-    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?.swap_remove(1).0;
+fn nested_unknown_values_missing_options_and_recursion_keep_derived_serde_behavior() -> Fallible<()>
+{
+    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
+        .swap_remove(1)
+        .0;
     let long_text = "x".repeat(4_095) + "💠" + &"z".repeat(4_097);
     for ignored in [
         Value::Null,
@@ -507,7 +554,10 @@ fn nested_unknown_values_missing_options_and_recursion_keep_derived_serde_behavi
         Value::Integer((-1).into()),
         Value::Bytes(vec![0x71; 4_097]),
         Value::Text(long_text),
-        Value::Map(vec![(Value::Bytes(vec![0xff]), Value::Array(vec![Value::Bool(false)]))]),
+        Value::Map(vec![(
+            Value::Bytes(vec![0xff]),
+            Value::Array(vec![Value::Bool(false)]),
+        )]),
         Value::Tag(42, Box::new(Value::Null)),
         Value::Tag(2, Box::new(Value::Bytes(vec![0xff; 16]))),
         Value::Tag(3, Box::new(Value::Bytes(vec![0x7f; 16]))),
@@ -529,7 +579,10 @@ fn nested_unknown_values_missing_options_and_recursion_keep_derived_serde_behavi
         }
         let mut root_unknown = value(&live)?;
         fields(&mut root_unknown)?.push((Value::Text("extra".to_owned()), ignored));
-        assert_eq!(parity(&encoded(&root_unknown)?), Err(ReadError::InvalidSnapshot));
+        assert_eq!(
+            parity(&encoded(&root_unknown)?),
+            Err(ReadError::InvalidSnapshot)
+        );
     }
     for depth in [0, 1, 252, 253, 254, 255, 256, 257] {
         let mut ignored = Value::Null;
@@ -545,11 +598,17 @@ fn nested_unknown_values_missing_options_and_recursion_keep_derived_serde_behavi
             assert_eq!(actual, Err(ReadError::InvalidSnapshot));
         }
     }
-    let mut encryption = value(&lifecycle("a", KeyRoleV1::SubjectDataEncryption)?.swap_remove(1).0)?;
+    let mut encryption = value(
+        &lifecycle("a", KeyRoleV1::SubjectDataEncryption)?
+            .swap_remove(1)
+            .0,
+    )?;
     fields(record(&mut encryption)?)?
         .retain(|(name, _)| *name != Value::Text("public_verification_key".to_owned()));
     assert!(parity(&encoded(&encryption)?).is_ok());
-    let destroyed = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?.swap_remove(3).0;
+    let destroyed = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
+        .swap_remove(3)
+        .0;
     let mut missing_option = value(&destroyed)?;
     fields(record(&mut missing_option)?)?
         .retain(|(name, _)| *name != Value::Text("private_material_digest".to_owned()));
@@ -560,10 +619,14 @@ fn nested_unknown_values_missing_options_and_recursion_keep_derived_serde_behavi
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn owner_faults_and_impossible_cardinalities_do_not_allocate_declared_aggregates() -> Fallible<()> {
-    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?.swap_remove(1).0;
+    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
+        .swap_remove(1)
+        .0;
     for text in [String::new(), "a".repeat(129)] {
         let mut changed = value(&live)?;
-        let (key, _) = fields(field(&mut changed, "records")?)?.first_mut().ok_or("record")?;
+        let (key, _) = fields(field(&mut changed, "records")?)?
+            .first_mut()
+            .ok_or("record")?;
         *field(key, "owner_id")? = Value::Text(text.clone());
         let mut guard = Guard::new(text.len());
         let bytes = encoded(&changed)?;
@@ -592,7 +655,10 @@ fn owner_faults_and_impossible_cardinalities_do_not_allocate_declared_aggregates
 }
 
 fn replace_first(bytes: &[u8], needle: &[u8], replacement: &[u8]) -> Fallible<Vec<u8>> {
-    let index = bytes.windows(needle.len()).position(|part| part == needle).ok_or("wire needle")?;
+    let index = bytes
+        .windows(needle.len())
+        .position(|part| part == needle)
+        .ok_or("wire needle")?;
     let mut result = bytes[..index].to_vec();
     result.extend_from_slice(replacement);
     result.extend_from_slice(&bytes[index + needle.len()..]);
@@ -602,7 +668,9 @@ fn replace_first(bytes: &[u8], needle: &[u8], replacement: &[u8]) -> Fallible<Ve
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn pinned_tuple_and_unit_enum_stream_consumption_is_not_silently_tightened() -> Fallible<()> {
-    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?.swap_remove(1).0;
+    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
+        .swap_remove(1)
+        .0;
     let bytes = encoded(&live)?;
     let role = encoded(&Value::Text("TimelineIntegritySigning".to_owned()))?;
     // A unit enum map consumes its header and identifier, not its value.
@@ -621,10 +689,16 @@ fn pinned_tuple_and_unit_enum_stream_consumption_is_not_silently_tightened() -> 
     scope.extend_from_slice(&role);
     let mut longer_scope = scope.clone();
     longer_scope[0] = 0x83; // the third declared element is not consumed
-    assert_eq!(parity(&replace_first(&bytes, &scope, &longer_scope)?)?, live);
+    assert_eq!(
+        parity(&replace_first(&bytes, &scope, &longer_scope)?)?,
+        live
+    );
     let mut indefinite_scope = scope.clone();
     indefinite_scope[0] = 0x9f;
-    assert_eq!(parity(&replace_first(&bytes, &scope, &indefinite_scope)?)?, live);
+    assert_eq!(
+        parity(&replace_first(&bytes, &scope, &indefinite_scope)?)?,
+        live
+    );
     indefinite_scope.push(0xff); // consuming this terminator would change parity
     assert_eq!(
         parity(&replace_first(&bytes, &scope, &indefinite_scope)?),
@@ -636,7 +710,9 @@ fn pinned_tuple_and_unit_enum_stream_consumption_is_not_silently_tightened() -> 
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn truncated_utf8_tagged_options_and_bignum_faults_match_native_rejection() -> Fallible<()> {
-    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?.swap_remove(1).0;
+    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
+        .swap_remove(1)
+        .0;
     let bytes = encoded(&live)?;
     for replacement in [
         vec![0x61, 0xff],
@@ -662,9 +738,15 @@ fn truncated_utf8_tagged_options_and_bignum_faults_match_native_rejection() -> F
         *field(&mut changed, "version")? = integer;
         assert_eq!(parity(&encoded(&changed)?), Err(ReadError::InvalidSnapshot));
     }
-    let destroyed = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?.swap_remove(3).0;
+    let destroyed = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
+        .swap_remove(3)
+        .0;
     let mut tagged_none = value(&destroyed)?;
-    *field(record(&mut tagged_none)?, "private_material_digest")? = Value::Tag(42, Box::new(Value::Null));
-    assert_eq!(parity(&encoded(&tagged_none)?), Err(ReadError::InvalidSnapshot));
+    *field(record(&mut tagged_none)?, "private_material_digest")? =
+        Value::Tag(42, Box::new(Value::Null));
+    assert_eq!(
+        parity(&encoded(&tagged_none)?),
+        Err(ReadError::InvalidSnapshot)
+    );
     Ok(())
 }
