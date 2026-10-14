@@ -1,5 +1,7 @@
 //! ADR-116 witnesses through the public native registry read boundary.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 use ciborium::Value;
 use pos_core::{
     deletion_receipt, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
