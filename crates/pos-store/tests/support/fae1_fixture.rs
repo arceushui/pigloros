@@ -561,12 +561,7 @@ impl World {
     ///
     /// # Errors
     /// Returns the source Fork, signing or export error.
-    pub fn add_child_at(
-        &mut self,
-        parent: TimelineId,
-        cut: Seq,
-        shape: Shape,
-    ) -> Fallible<()> {
+    pub fn add_child_at(&mut self, parent: TimelineId, cut: Seq, shape: Shape) -> Fallible<()> {
         let name = format!("fae1-child-{}", self.children.len());
         let child = self.source.fork(parent, cut, &name)?.id();
         for index in 1..=shape.events() {
