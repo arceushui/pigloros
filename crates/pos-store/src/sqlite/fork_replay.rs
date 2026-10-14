@@ -1,10 +1,5 @@
 //! ADR-114 attribution reads on the already-held `SQLite` read transaction.
 
-use std::collections::HashSet;
-
-use pos_core::{store::EventStore, TimelineId};
-use rusqlite::OptionalExtension;
-
 use super::SqliteStore;
 use crate::{
     fork_event_authority::AuthorityValidatorV1, fork_replay::NativeReadContextV1,
@@ -30,8 +25,9 @@ impl ForkReplayAuthorityReadPortV1 for SqliteStore {
         {
             return Err(Error::StorageUnavailable);
         }
-        self.preflight_fork_replay_ancestry(requirement.child_timeline_id(), budget)?;
-        self.preflight_fork_replay_records(requirement, budget)?;
+        // Actual native owners debit their rows/copies and check the same
+        // original epoch. A second inventory scan would invent duplicate
+        // work and couple this read to records outside its native selection.
         let committed = self.read_committed_fork_publication_with_context(
             requirement.child_timeline_id(),
             requirement.publication_logical_head().as_u64(),
@@ -47,147 +43,6 @@ impl ForkReplayAuthorityReadPortV1 for SqliteStore {
     }
 }
 
-impl SqliteStore {
-    fn preflight_fork_replay_ancestry(
-        &self,
-        child: TimelineId,
-        budget: &mut ForkReplayReadBudgetV1<'_>,
-    ) -> ReadResult<()> {
-        let mut visited = HashSet::new();
-        let mut next = Some(child);
-        let mut depth = 0;
-        while let Some(timeline) = next {
-            budget.charge_node(depth)?;
-            if !visited.insert(timeline) {
-                return Err(Error::CorruptAuthority);
-            }
-            // Measure metadata before get_timeline can clone variable fields.
-            let metadata_bytes = self
-                .conn
-                .query_row(
-                    "SELECT coalesce(length(CAST(name AS BLOB)), 0) +
-                 coalesce(length(CAST(parent_id AS BLOB)), 0)
-                 FROM timelines WHERE id = ?1",
-                    [timeline.to_string()],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()
-                .map_err(|_| Error::StorageUnavailable)?
-                .ok_or(Error::Unavailable)?;
-            budget.charge_bytes(
-                usize::try_from(metadata_bytes).map_err(|_| Error::CorruptAuthority)?,
-            )?;
-            let mut statement = self
-                .conn
-                .prepare(
-                    "SELECT length(payload), length(CAST(event_type AS BLOB))
-                 FROM events WHERE timeline_id = ?1 ORDER BY seq",
-                )
-                .map_err(|_| Error::StorageUnavailable)?;
-            let mut events = statement
-                .query([timeline.to_string()])
-                .map_err(|_| Error::StorageUnavailable)?;
-            while let Some(row) = events.next().map_err(|_| Error::StorageUnavailable)? {
-                budget.charge_rows(1)?;
-                let payload = row_length(row, 0)?;
-                let kind = row_length(row, 1)?;
-                budget.charge_bytes(payload)?;
-                budget.charge_bytes(kind)?;
-            }
-            let meta = self
-                .get_timeline(timeline)
-                .map_err(|_| Error::Unavailable)?
-                .ok_or(Error::Unavailable)?
-                .meta;
-            next = meta.fork_point.map(|(parent, _)| parent);
-            depth += 1;
-        }
-        Ok(())
-    }
-
-    /// Length/count preflight happens on the held snapshot. It retrieves no
-    /// variable-size blob before it has been charged against the ledger.
-    fn preflight_fork_replay_records(
-        &self,
-        requirement: &ForkReplayRequirementV1,
-        budget: &mut ForkReplayReadBudgetV1<'_>,
-    ) -> ReadResult<()> {
-        let child = requirement.child_timeline_id();
-        let child_key = child.to_string();
-        for (table, column, selection) in [
-            ("fork_append_operations", "fop1_cbor", "child_id = ?1"),
-            (
-                "fork_event_origins",
-                "eor1_cbor",
-                "event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)",
-            ),
-            (
-                "fork_intervention_admissions",
-                "fia1_cbor",
-                "event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)",
-            ),
-        ] {
-            self.preflight_selected_records(table, column, selection, &[&child_key], budget)?;
-        }
-        self.preflight_selected_records(
-            "key_registry",
-            "state_cbor",
-            "singleton = 1",
-            &[],
-            budget,
-        )?;
-        // Native orphan-provenance detection examines the fixed child bytes of
-        // every EOR1/FIA1, including unrelated rows, without fetching blobs.
-        for table in ["fork_event_origins", "fork_intervention_admissions"] {
-            let count = self
-                .conn
-                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
-                    row.get::<_, i64>(0)
-                })
-                .map_err(|_| Error::StorageUnavailable)?;
-            budget.charge_rows(usize::try_from(count).map_err(|_| Error::CorruptAuthority)?)?;
-        }
-        budget.check_time()
-    }
-
-    fn preflight_selected_records(
-        &self,
-        table: &str,
-        column: &str,
-        selection: &str,
-        arguments: &[&dyn rusqlite::ToSql],
-        budget: &mut ForkReplayReadBudgetV1<'_>,
-    ) -> ReadResult<()> {
-        let sql = format!(
-            "SELECT typeof({column}) = 'blob', length({column}) FROM {table} WHERE {selection}"
-        );
-        let mut statement = self
-            .conn
-            .prepare(&sql)
-            .map_err(|_| Error::StorageUnavailable)?;
-        let mut records = statement
-            .query(arguments)
-            .map_err(|_| Error::StorageUnavailable)?;
-        while let Some(row) = records.next().map_err(|_| Error::StorageUnavailable)? {
-            budget.charge_rows(1)?;
-            let blob: bool = row.get(0).map_err(|_| Error::StorageUnavailable)?;
-            if blob {
-                budget.charge_bytes(row_length(row, 1)?)?;
-            } else {
-                return Err(Error::CorruptAuthority);
-            }
-        }
-        budget.check_time()
-    }
-}
-
-fn row_length(row: &rusqlite::Row<'_>, column: usize) -> ReadResult<usize> {
-    let length = row
-        .get::<_, i64>(column)
-        .map_err(|_| Error::CorruptAuthority)?;
-    usize::try_from(length).map_err(|_| Error::CorruptAuthority)
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -198,7 +53,7 @@ mod tests {
         ForkManifestPublicationPortV1, ForkReplayReadLimitsV1,
     };
     use pos_core::{
-        store::SeqRange,
+        store::{EventStore, SeqRange},
         trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1},
         ErasureInventoryPersistencePortV1, ErasureProtectedEffectDispositionV1,
         SignedForkReproManifestV1,
@@ -439,7 +294,6 @@ mod tests {
             committed.authority_origin_digest,
         )?;
         // Actual authoritative-source storage fault, not malformed CBOR.
-        // The obsolete coarse record preflight never inspects this table.
         store
             .conn
             .execute_batch("DROP TABLE imported_fork_attribution_admissions")?;
@@ -457,6 +311,91 @@ mod tests {
             interval,
             ErasureProtectedEffectDispositionV1::Rollback,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn file_backed_protected_port_uses_only_actual_native_work_on_one_ledger() -> Fallible<()> {
+        for shape in [
+            Shape::Mixed,
+            Shape::EmptyClassified,
+            Shape::EmptyUnclassified,
+        ] {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("native-port-exact.sqlite");
+            let mut store = SqliteStore::open(path.to_str().ok_or("UTF-8 path")?)?;
+            let world = World::new(shape, false)?;
+            let built = world.build(&Spec::default())?;
+            world.seed_destination(&mut store)?;
+            pin_policy(&mut store, &built.policy)?;
+            store.import_verified(&request_for(&world, &built))?;
+            let child = world.child_at(0)?.id;
+            let head = PARENT_CUT + shape.events();
+            let committed = store.read_committed(child, head)?;
+            let requirement = ForkReplayRequirementV1::new(
+                child,
+                pos_core::Seq::from_u64(head),
+                committed.record_id,
+                committed.authority_origin_digest,
+            )?;
+            let import_bytes: Vec<u8> = store.conn.query_row(
+                "SELECT ifa1_cbor FROM imported_fork_attribution_admissions WHERE child_id = ?1",
+                [child.to_string()],
+                |row| row.get(0),
+            )?;
+            let imported = pos_core::ImportedForkPublicationOperationV1::from_local(
+                committed.operation.clone(),
+                committed.authority_origin_digest.ok_or("imported origin")?,
+            )
+            .to_canonical_cbor();
+            // Literal logical fields of the final projection, its separately
+            // retained origin, emitted FPO1, and two evidence digest copies.
+            let owner = committed
+                .operation
+                .input()
+                .signing_identity
+                .owner_id
+                .as_str()
+                .len();
+            let projection = 32 + 16 + 8 + 32 + 32 + owner + 1 + 8 + 32 + 32 + 32 + 1;
+            let expected = shared_native_phase_cost(&committed, &built, &world, &import_bytes)?
+                + projection
+                + 32
+                + imported.len()
+                + 32
+                + 32;
+            let interval = store.begin_protected_effect_interval()?;
+            for calls in [1, 2] {
+                for succeeds in [false, true] {
+                    let limit = calls * expected - usize::from(!succeeds);
+                    let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                    let start = clock.mark();
+                    let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, limit, 1_000_000)?;
+                    let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                    for call in 1..=calls {
+                        let result =
+                            store.validate_fork_replay_authority(&requirement, &mut budget);
+                        if succeeds || call < calls {
+                            let evidence = result?;
+                            assert_eq!(evidence.requirement(), requirement);
+                            assert_eq!(evidence.operation_bytes(), imported.as_slice());
+                        } else {
+                            assert_eq!(result, Err(Error::BoundsExceeded));
+                            assert_eq!(budget.check_time(), Err(Error::BoundsExceeded));
+                        }
+                    }
+                    if succeeds {
+                        assert_eq!(budget.remaining_native_bytes(), 0);
+                        assert_eq!(budget.check_time(), Ok(()));
+                    }
+                }
+            }
+            store.finish_protected_effect_interval(
+                interval,
+                ErasureProtectedEffectDispositionV1::Rollback,
+            )?;
+            assert_eq!(store.read_committed(child, head)?, committed);
+        }
         Ok(())
     }
 
