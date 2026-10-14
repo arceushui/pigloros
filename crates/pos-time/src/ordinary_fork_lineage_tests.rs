@@ -8,8 +8,8 @@
 use crate::test_support::{with_release, ProtectedFixture};
 use pos_core::{
     CanonicalBytes, CoreError, EntityId, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, EventDraft, EventReadBounds, Hash, Kind, Reducer, Seq, State,
-    TimelineId, WorldReplayClosureV1,
+    ErasureReplayClaimV1, EventDraft, EventReadBounds, Hash, Kind, Reducer, Seq, State, TimelineId,
+    WorldReplayClosureV1,
 };
 use pos_runtime::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
@@ -217,15 +217,9 @@ fn seed(
     } else {
         Seq::ZERO
     };
-    let parent = commands
-        .fork_timeline(root, cut, "ordinary parent")?
-        .id();
-    let first = commands
-        .fork_timeline(parent, cut, "ordinary first")?
-        .id();
-    let second = commands
-        .fork_timeline(parent, cut, "ordinary second")?
-        .id();
+    let parent = commands.fork_timeline(root, cut, "ordinary parent")?.id();
+    let first = commands.fork_timeline(parent, cut, "ordinary first")?.id();
+    let second = commands.fork_timeline(parent, cut, "ordinary second")?.id();
     Ok((root, parent, [first, second], shared_entity))
 }
 
