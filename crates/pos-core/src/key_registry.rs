@@ -13,6 +13,7 @@ use thiserror::Error;
 
 use crate::{Hash, PublicKey};
 
+mod durable_cbor;
 mod read_guard;
 
 pub use read_guard::{
@@ -603,6 +604,23 @@ pub struct KeyRegistryStateV1 {
 }
 
 impl KeyRegistryStateV1 {
+    /// Decode the existing durable V1 CBOR snapshot with native work guards.
+    ///
+    /// The guard receives only checkpoints and exact logical materialization
+    /// quantities. The result is structural registry data, not signing or
+    /// protected-release authority. Ordinary `Deserialize` remains unchanged.
+    ///
+    /// # Errors
+    /// Returns [`KeyRegistryReadErrorV1::InvalidSnapshot`] for a native parse or
+    /// invariant fault, or [`KeyRegistryReadErrorV1::ReadRefused`] immediately
+    /// after the first refusal. No further read work follows a refusal.
+    pub fn from_durable_cbor_with_read_guard(
+        bytes: &[u8],
+        guard: &mut dyn KeyRegistryReadGuardV1,
+    ) -> Result<Self, KeyRegistryReadErrorV1> {
+        durable_cbor::read(bytes, &mut ReadContext::new(guard))
+    }
+
     /// Construct an empty registry.
     #[must_use]
     pub const fn new() -> Self {
@@ -710,8 +728,7 @@ impl KeyRegistryStateV1 {
                 let mut maximum = None;
                 for identity in self.records.keys() {
                     context.step(|_| {
-                        if identity.owner_id.as_str() == owner_id.as_str()
-                            && identity.role == *role
+                        if identity.owner_id.as_str() == owner_id.as_str() && identity.role == *role
                         {
                             maximum = Some(maximum.map_or(identity.epoch, |previous: u64| {
                                 previous.max(identity.epoch)
