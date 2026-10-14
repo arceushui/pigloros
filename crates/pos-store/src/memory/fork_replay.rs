@@ -16,8 +16,7 @@ impl ForkReplayAuthorityReadPortV1 for MemoryStore {
         depth: usize,
         effective_max_fork_depth: usize,
         budget: &mut ForkReplayReadBudgetV1<'_>,
-    ) -> Result<Option<crate::ForkReplayLineageNodeV1>, crate::ForkReplayLineageReadErrorV1>
-    {
+    ) -> Result<Option<crate::ForkReplayLineageNodeV1>, crate::ForkReplayLineageReadErrorV1> {
         let mut context = crate::fork_replay::lineage::LineageReadContextV1::new(
             budget,
             effective_max_fork_depth,

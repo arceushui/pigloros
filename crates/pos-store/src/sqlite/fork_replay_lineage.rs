@@ -2,7 +2,9 @@
 
 use super::SqliteStore;
 use crate::{
-    fork_replay::lineage::{corrupt, gate_error, remember_member, LineageReadContextV1, ReadResult},
+    fork_replay::lineage::{
+        corrupt, gate_error, remember_member, LineageReadContextV1, ReadResult,
+    },
     ForkReplayAuthorityReadErrorV1 as ReadError, ForkReplayLineageNodeV1,
     ForkReplayLineageReadErrorV1 as Error,
 };
@@ -30,10 +32,7 @@ fn integer(
     })
 }
 
-fn parse_id(
-    text: &str,
-    context: &mut LineageReadContextV1<'_, '_>,
-) -> ReadResult<TimelineId> {
+fn parse_id(text: &str, context: &mut LineageReadContextV1<'_, '_>) -> ReadResult<TimelineId> {
     // Use the ordinary native owner's pinned ULID parser, without constructing
     // its formatted CoreError String only to discard that diagnostic.
     context.step(|_| {
@@ -74,7 +73,8 @@ impl SqliteStore {
         read: impl FnOnce(&Row<'_>, &mut LineageReadContextV1<'_, '_>) -> ReadResult<T>,
     ) -> ReadResult<Option<T>> {
         context.step(|context| {
-            let mut statement = context.step(|_| self.conn.prepare(sql).map_err(|_| STORAGE_ERROR))?;
+            let mut statement =
+                context.step(|_| self.conn.prepare(sql).map_err(|_| STORAGE_ERROR))?;
             let mut rows = context.step(|_| statement.query(params).map_err(|_| STORAGE_ERROR))?;
             let row = context.step(|_| rows.next().map_err(|_| STORAGE_ERROR))?;
             if let Some(row) = row {
@@ -130,13 +130,9 @@ impl SqliteStore {
                 .ok_or(Error::ContainmentUnavailable)?;
             self.lineage_freshness(context)?;
             let mut result = Err(Error::ContainmentUnavailable);
-            let fenced = gate.with_fence(
-                timeline,
-                ErasureProtectedOperationV1::Read,
-                &mut || {
-                    result = self.lineage_metadata_and_visibility(timeline, visited, context);
-                },
-            );
+            let fenced = gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
+                result = self.lineage_metadata_and_visibility(timeline, visited, context);
+            });
             // A latched refusal stops semantic work. Otherwise completion F
             // still executes after a native None/error or a gate denial.
             context.check()?;
@@ -225,9 +221,10 @@ impl SqliteStore {
                 let parent = text(row, 1, 26, context)?;
                 let parent = parse_id(&parent, context)?;
                 let cut = integer(row, 2, context)?;
-                Some((parent, u64::try_from(cut).map_err(|_| {
-                    Error::Read(ReadError::CorruptAuthority)
-                })?))
+                Some((
+                    parent,
+                    u64::try_from(cut).map_err(|_| Error::Read(ReadError::CorruptAuthority))?,
+                ))
             } else {
                 for column in [1, 2] {
                     context.step(|_| match row.get_ref(column).map_err(|_| STORAGE_ERROR)? {
@@ -238,8 +235,7 @@ impl SqliteStore {
                 None
             };
             let head = integer(row, 3, context)?;
-            let head = u64::try_from(head)
-                .map_err(|_| Error::Read(ReadError::CorruptAuthority))?;
+            let head = u64::try_from(head).map_err(|_| Error::Read(ReadError::CorruptAuthority))?;
             context.bytes(if fork { 49 } else { 25 })?;
             let node = ForkReplayLineageNodeV1::new(
                 id,
@@ -339,7 +335,9 @@ mod tests {
                 CanonicalBytes::from_static(b"not read by lineage"),
             )],
         )?);
-        let child = store.fork(root, Seq::from_u64(1), "lineage fault child")?.id();
+        let child = store
+            .fork(root, Seq::from_u64(1), "lineage fault child")?
+            .id();
         // Only impossible-state storage fixtures bypass CHECKs; the reader
         // still crosses its actual public port and the normal installed gate.
         store
@@ -405,7 +403,9 @@ mod tests {
                         [root.to_string()],
                     )?;
                 } else {
-                    store.conn.execute("UPDATE events SET event_type=?1", [kind])?;
+                    store
+                        .conn
+                        .execute("UPDATE events SET event_type=?1", [kind])?;
                 }
                 let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
                 assert_eq!(read(&store, child, &mut clock)?, Ok(None));
@@ -445,16 +445,18 @@ mod tests {
             let interval = store.begin_protected_effect_interval()?;
             let calls = Arc::new(AtomicUsize::new(0));
             let observed = Arc::clone(&calls);
-            store.conn.authorizer(Some(move |context: AuthContext<'_>| {
-                if let AuthAction::Pragma { pragma_name, .. } = context.action {
-                    if pragma_name.eq_ignore_ascii_case("data_version")
-                        && observed.fetch_add(1, Ordering::SeqCst) + 1 == refused
-                    {
-                        return Authorization::Deny;
+            store
+                .conn
+                .authorizer(Some(move |context: AuthContext<'_>| {
+                    if let AuthAction::Pragma { pragma_name, .. } = context.action {
+                        if pragma_name.eq_ignore_ascii_case("data_version")
+                            && observed.fetch_add(1, Ordering::SeqCst) + 1 == refused
+                        {
+                            return Authorization::Deny;
+                        }
                     }
-                }
-                Authorization::Allow
-            }))?;
+                    Authorization::Allow
+                }))?;
             let limits = ForkReplayReadLimitsV1::new(8, 8, 64, 4_096, 1_000_000)?;
             let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
             let start = clock.mark();
@@ -464,7 +466,9 @@ mod tests {
                 Err(Error::ContainmentUnavailable)
             );
             assert_eq!(calls.load(Ordering::SeqCst), refused);
-            store.conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+            store
+                .conn
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
             store.finish_protected_effect_interval(
                 interval,
                 ErasureProtectedEffectDispositionV1::Rollback,
