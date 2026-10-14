@@ -23,6 +23,7 @@ use std::sync::{
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+type OrdinaryLineage = (TimelineId, TimelineId, [TimelineId; 2], Option<EntityId>);
 
 struct EmptyReducer;
 
@@ -195,10 +196,7 @@ fn limits(
 fn seed(
     host: &mut ErasureExecutionHostV1,
     consumer: Consumer,
-) -> Result<
-    (TimelineId, TimelineId, [TimelineId; 2], Option<EntityId>),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<OrdinaryLineage, Box<dyn std::error::Error>> {
     let mut commands = host.command_sender()?;
     let root = commands
         .create_timeline(&"unselected private name ".repeat(4_096))?
