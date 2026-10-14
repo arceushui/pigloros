@@ -13048,8 +13048,7 @@ impl SqliteStore {
             )
             .map_err(PublicationSourceErrorV1::from);
             context.check()?;
-            let registry = sqlite_load_key_registry_with_context(&self.conn, context)
-                .map_err(PublicationSourceErrorV1::from);
+            let registry = sqlite_load_key_registry_with_context(&self.conn, context);
             context.check()?;
             let sources = CommittedPublicationSourcesV1 {
                 admission,
@@ -14426,27 +14425,11 @@ fn sqlite_load_key_registry(conn: &Connection) -> Result<Option<KeyRegistryState
 fn sqlite_load_key_registry_with_context(
     conn: &Connection,
     context: &mut crate::fork_replay::NativeReadContextV1<'_, '_>,
-) -> Result<Option<KeyRegistryStateV1>, CoreError> {
+) -> PublicationSourceResultV1<Option<KeyRegistryStateV1>> {
     if !context.is_protected() {
-        return sqlite_load_key_registry(conn);
+        return sqlite_load_key_registry(conn).map_err(PublicationSourceErrorV1::from);
     }
-    fork_replay_registry::stored_registry_with_context(conn, context)
-        .map_err(|_| CoreError::ArtifactUnavailable)
-        .and_then(|bytes| {
-            bytes.map_or(Ok(None), |bytes| {
-                context
-                    .check()
-                    .map_err(|_| CoreError::ArtifactUnavailable)?;
-                // The raw fetch is bounded here. Decoder-owned collections
-                // and registry validation still need their native owner;
-                // an outer check is not a claim of complete batch support.
-                let decoded = sqlite_decode_key_registry(&bytes).map(Some);
-                context
-                    .check()
-                    .map_err(|_| CoreError::ArtifactUnavailable)
-                    .and(decoded)
-            })
-        })
+    fork_replay_registry::loaded_registry_with_context(conn, context)
 }
 
 fn sqlite_decode_key_registry(state_cbor: &[u8]) -> Result<KeyRegistryStateV1, CoreError> {
