@@ -57,6 +57,12 @@ pub mod fae1_fixture;
 #[path = "../tests/support/plugin_trust_registry_fixtures.rs"]
 pub mod plugin_trust_registry_fixtures;
 
+// Public module reachability keeps the crate-only items of the two factual Tick modules
+// compatible with both `unreachable_pub` and Clippy's `redundant_pub_crate` lint.
+#[doc(hidden)]
+pub mod factual_declaration;
+#[doc(hidden)]
+pub mod factual_tick_plan;
 pub mod fork_admission_authority;
 pub mod fork_attribution_authority_import;
 pub mod fork_attribution_issuer_policy;

@@ -28,7 +28,7 @@ use pos_core::{
     PrincipalRefV1, RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq,
     SeqRange, TentativePipelineResultV1, TickDependencyRecordV1, TimelineId, WallTime,
     APPEND_IDENTITY_RETENTION_MICROS, DELEGATE_ACTION_V1, GEOGRAPHIC_EVENT_TYPE,
-    MAX_DEPENDENCY_PAGE_ROWS_V1, PIPELINE_CONTRACT_VERSION_V1,
+    MAX_DEPENDENCY_PAGE_ROWS_V1, MAX_RECORDED_DEPENDENCY_NODES_V1, PIPELINE_CONTRACT_VERSION_V1,
 };
 use pos_store::{memory::MemoryStore, sqlite::SqliteStore};
 use tempfile::tempdir;
@@ -39,7 +39,8 @@ trait Harness:
     + PipelineAdmissionPortV1
     + PipelineAdmissionFencePublisherV1
     + AuthorityPersistencePortV1
-    + Recorded
+    + CounterfactualDependencyReadPortV1
+    + FactualPrefixReadPortV1
 {
 }
 
@@ -48,26 +49,9 @@ impl<T> Harness for T where
         + PipelineAdmissionPortV1
         + PipelineAdmissionFencePublisherV1
         + AuthorityPersistencePortV1
-        + Recorded
+        + CounterfactualDependencyReadPortV1
+        + FactualPrefixReadPortV1
 {
-}
-
-/// The factual rows of an adapter, where it records them. `SqliteStore`
-/// records none until its adapter does (slice 9).
-trait Recorded {
-    fn recording(&self) -> Option<&dyn RecordingHarness>;
-}
-
-impl Recorded for MemoryStore {
-    fn recording(&self) -> Option<&dyn RecordingHarness> {
-        Some(self)
-    }
-}
-
-impl Recorded for SqliteStore {
-    fn recording(&self) -> Option<&dyn RecordingHarness> {
-        None
-    }
 }
 
 fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
@@ -1026,6 +1010,14 @@ fn sqlite_reopen_recovers_the_receipt_and_persisted_fence() {
     assert_eq!(event_count(&reopened, first.timeline), 3);
 }
 
+/// A trigger that aborts every insert into `table`.
+fn insert_fault(table: &str) -> String {
+    format!(
+        "CREATE TRIGGER injected_fault BEFORE INSERT ON {table}
+         BEGIN SELECT RAISE(ABORT, 'injected fault'); END;"
+    )
+}
+
 #[test]
 fn sqlite_faults_roll_back_the_complete_batch_and_receipt() {
     let clock = TestClock::at(1_000);
@@ -1039,17 +1031,29 @@ fn sqlite_faults_roll_back_the_complete_batch_and_receipt() {
         attempt(&prepare(&mut store), 1, 0)
     };
 
-    for trigger in [
+    let empty = RecordedSetCountsV1 {
+        nodes: 0,
+        edges: 0,
+        inputs: 0,
+    };
+    let triggers = [
         "CREATE TRIGGER injected_fault BEFORE INSERT ON events WHEN NEW.seq = 2
-         BEGIN SELECT RAISE(ABORT, 'injected member fault'); END;",
-        "CREATE TRIGGER injected_fault BEFORE INSERT ON pipeline_admission_receipts
-         BEGIN SELECT RAISE(ABORT, 'injected receipt fault'); END;",
-    ] {
-        execute(&path, trigger);
+         BEGIN SELECT RAISE(ABORT, 'injected member fault'); END;"
+            .to_owned(),
+        insert_fault("pipeline_admission_receipts"),
+        insert_fault("counterfactual_dependency_records"),
+        insert_fault("counterfactual_dependency_nodes"),
+        insert_fault("counterfactual_dependency_commit_ranges"),
+        insert_fault("counterfactual_dependency_event_nodes"),
+    ];
+    for trigger in triggers {
+        execute(&path, &trigger);
         let mut faulted = open_file(&path, &clock);
         assert!(admit(&mut faulted, &first).is_err());
         assert_eq!(event_count(&faulted, first.timeline), 0);
         assert_eq!(remaining_budget(&faulted, first.timeline), Some(10));
+        assert_eq!(head_of(&faulted, first.timeline), head(0, 0));
+        assert_eq!(ok(faulted.factual_set_counts(first.timeline)), empty);
         drop(faulted);
         execute(&path, "DROP TRIGGER injected_fault;");
     }
@@ -1278,27 +1282,60 @@ fn sqlite_rejects_an_unreleased_receipt_table_or_index_shape_closed() {
     assert!(open_read_only().is_some_and(|text| text.contains("pipeline_admission_receipts table")));
 }
 
+#[test]
+fn sqlite_an_exhausted_dependency_set_refuses_both_ingresses_and_commits_nothing() {
+    let clock = TestClock::at(1_000);
+    let directory = ok(tempdir());
+    let ingresses = [
+        PipelineIngressV1::HumanProposedAction,
+        PipelineIngressV1::ScheduledAiDriver,
+    ];
+    for (index, ingress) in ingresses.into_iter().enumerate() {
+        let path = directory
+            .path()
+            .join(format!("admission-exhausted-{index}.db"));
+        let first = {
+            let mut store = ok(SqliteStore::open_with_clock(
+                path.to_str().unwrap_or_default(),
+                Box::new(clock.clone()),
+            ));
+            Attempt {
+                ingress,
+                ..attempt(&prepare(&mut store), 1, 0)
+            }
+        };
+        // A set that earlier Ticks filled to the node cap takes no further Tick.
+        execute(
+            &path,
+            &format!(
+                "INSERT INTO counterfactual_dependency_records
+                 (timeline_id, generation, record_tick, node_count, edge_count, input_count)
+                 VALUES ('{}', -1, 0, {MAX_RECORDED_DEPENDENCY_NODES_V1}, 0, 0);",
+                first.timeline
+            ),
+        );
+
+        let mut store = open_file(&path, &clock);
+        assert_eq!(
+            ok(admit(&mut store, &first)),
+            PipelineOutcomeV1::DependencySetExhausted
+        );
+        assert_eq!(event_count(&store, first.timeline), 0);
+        assert_eq!(remaining_budget(&store, first.timeline), Some(10));
+        assert_eq!(head_of(&store, first.timeline), head(0, 0));
+        let full = RecordedSetCountsV1 {
+            nodes: MAX_RECORDED_DEPENDENCY_NODES_V1,
+            edges: 0,
+            inputs: 0,
+        };
+        assert_eq!(ok(store.factual_set_counts(first.timeline)), full);
+    }
+}
+
 // ── Recorded factual Ticks (ADR-064 Revision 3, R3.7.2, R3.7.4, R3.7.5) ────
 //
-// `MemoryStore` checks the Tick declaration and records its rows with the
-// Events. `SqliteStore` accepts the declaration and records nothing until its
-// own slice: that slice adds the adapter to `recording_stores` and every case
-// below runs against it unchanged.
-
-trait RecordingHarness: Harness + CounterfactualDependencyReadPortV1 + FactualPrefixReadPortV1 {}
-
-impl<T> RecordingHarness for T where
-    T: Harness + CounterfactualDependencyReadPortV1 + FactualPrefixReadPortV1
-{
-}
-
-/// The adapters that record factual Ticks.
-fn recording_stores(clock: &TestClock) -> Vec<(&'static str, Box<dyn RecordingHarness>)> {
-    vec![(
-        "memory",
-        Box::new(MemoryStore::with_clock(Box::new(clock.clone()))),
-    )]
-}
+// Both adapters check the Tick declaration and record its rows with the
+// Events, so every case below runs against each of them unchanged.
 
 /// The request that reads every recorded row of the Timeline.
 fn all_rows_request(timeline: TimelineId) -> DependencyPageRequestV1 {
@@ -1314,7 +1351,7 @@ fn all_rows_request(timeline: TimelineId) -> DependencyPageRequestV1 {
 }
 
 fn recorded_nodes(
-    store: &dyn RecordingHarness,
+    store: &dyn Harness,
     timeline: TimelineId,
 ) -> Vec<DependencyNodeRecordV1> {
     let request = all_rows_request(timeline);
@@ -1322,7 +1359,7 @@ fn recorded_nodes(
 }
 
 fn recorded_edges(
-    store: &dyn RecordingHarness,
+    store: &dyn Harness,
     timeline: TimelineId,
 ) -> Vec<DependencyEdgeRecordV1> {
     let request = all_rows_request(timeline);
@@ -1336,14 +1373,14 @@ const fn head(tick: u64, last_seq: u64) -> FactualHeadV1 {
     }
 }
 
-fn head_of(store: &dyn RecordingHarness, timeline: TimelineId) -> FactualHeadV1 {
+fn head_of(store: &dyn Harness, timeline: TimelineId) -> FactualHeadV1 {
     ok(store.last_committed_factual_tick(timeline))
 }
 
 /// What a refused attempt must leave as it found it: the factual head, the
 /// recorded row counts, the Events and the fence budget.
 fn state_of(
-    store: &dyn RecordingHarness,
+    store: &dyn Harness,
     timeline: TimelineId,
 ) -> (FactualHeadV1, RecordedSetCountsV1, usize, Option<u64>) {
     (
@@ -1354,10 +1391,9 @@ fn state_of(
     )
 }
 
-/// Require, on an adapter that records factual rows, that the Timeline's
-/// factual head is `at`, its own recorded set holds `nodes` nodes of
-/// human-ingress Ticks (no edge, no input) and `bound` are the committed
-/// `seq`s that are bound to a node.
+/// Require that the Timeline's factual head is `at`, its own recorded set
+/// holds `nodes` nodes of human-ingress Ticks (no edge, no input) and `bound`
+/// are the committed `seq`s that are bound to a node.
 fn assert_recorded(
     name: &str,
     store: &dyn Harness,
@@ -1366,18 +1402,16 @@ fn assert_recorded(
     nodes: usize,
     bound: &[u64],
 ) {
-    if let Some(recording) = store.recording() {
-        assert_eq!(head_of(recording, timeline), at, "{name}");
-        let counts = RecordedSetCountsV1 {
-            nodes,
-            edges: 0,
-            inputs: 0,
-        };
-        assert_eq!(ok(recording.factual_set_counts(timeline)), counts, "{name}");
-        let seqs: Vec<Seq> = bound.iter().copied().map(Seq::from_u64).collect();
-        let found = ok(recording.nodes_for_committed_events(timeline, &seqs));
-        assert!(found.iter().all(Option::is_some), "{name}");
-    }
+    assert_eq!(head_of(store, timeline), at, "{name}");
+    let counts = RecordedSetCountsV1 {
+        nodes,
+        edges: 0,
+        inputs: 0,
+    };
+    assert_eq!(ok(store.factual_set_counts(timeline)), counts, "{name}");
+    let seqs: Vec<Seq> = bound.iter().copied().map(Seq::from_u64).collect();
+    let found = ok(store.nodes_for_committed_events(timeline, &seqs));
+    assert!(found.iter().all(Option::is_some), "{name}");
 }
 
 /// The attempt that follows a committed `previous` one on the scheduled path.
@@ -1787,7 +1821,7 @@ fn ingress_at_tick_one(
 fn assert_refused(
     name: &str,
     case: &str,
-    store: &mut dyn RecordingHarness,
+    store: &mut dyn Harness,
     attempt: &Attempt,
     declaration: FactualTickDependenciesV1,
     expected: &PipelineOutcomeV1,
@@ -2113,7 +2147,7 @@ fn human_cases(r: &Refusals<'_>) -> Vec<RefusalCase> {
 #[test]
 fn a_commit_records_nodes_edges_range_and_bindings_with_its_events() {
     let clock = TestClock::at(1_000);
-    for (name, mut store) in recording_stores(&clock) {
+    for (name, mut store) in stores(&clock) {
         let fixture = prepare(store.as_mut());
         let timeline = fixture.timeline;
         assert_eq!(head_of(store.as_ref(), timeline), head(0, 0), "{name}");
@@ -2165,7 +2199,7 @@ fn a_commit_records_nodes_edges_range_and_bindings_with_its_events() {
 #[test]
 fn the_store_refuses_a_malformed_declaration_and_records_nothing() {
     let clock = TestClock::at(1_000);
-    for (name, mut store) in recording_stores(&clock) {
+    for (name, mut store) in stores(&clock) {
         let fixture = prepare(store.as_mut());
         let timeline = fixture.timeline;
         let first = attempt(&fixture, 1, 0);
@@ -2212,7 +2246,7 @@ fn the_store_refuses_a_malformed_declaration_and_records_nothing() {
 #[test]
 fn a_stale_fence_grant_is_a_conflict_and_commits_nothing() {
     let clock = TestClock::at(1_000);
-    for (name, mut store) in recording_stores(&clock) {
+    for (name, mut store) in stores(&clock) {
         let fixture = prepare(store.as_mut());
         let base = Attempt {
             ingress: PipelineIngressV1::ScheduledAiDriver,
@@ -2232,7 +2266,7 @@ fn a_stale_fence_grant_is_a_conflict_and_commits_nothing() {
 #[test]
 fn a_retry_records_no_second_row_and_a_rebuilt_tick_conflicts() {
     let clock = TestClock::at(1_000);
-    for (name, mut store) in recording_stores(&clock) {
+    for (name, mut store) in stores(&clock) {
         let fixture = prepare(store.as_mut());
         let timeline = fixture.timeline;
         let first = attempt(&fixture, 1, 0);
@@ -2271,7 +2305,7 @@ fn a_retry_records_no_second_row_and_a_rebuilt_tick_conflicts() {
 #[test]
 fn a_fork_binds_only_the_events_of_the_ticks_below_its_cut() {
     let clock = TestClock::at(1_000);
-    for (name, mut store) in recording_stores(&clock) {
+    for (name, mut store) in stores(&clock) {
         let fixture = prepare(store.as_mut());
         let parent = fixture.timeline;
         let first = attempt(&fixture, 1, 0);

@@ -21,13 +21,12 @@ use pos_core::{
     PipelineReceiptLookupV1,
 };
 
-use super::{
-    counterfactual_store::{FactualInstallV1, PlannedTickV1},
-    MemoryStore,
-};
+use super::MemoryStore;
 use crate::{
-    committed_pipeline_receipt, evaluate_pipeline_admission, install_or_reject,
-    recovered_pipeline_receipt, retained_pipeline_receipt, PipelinePersistedStateV1,
+    committed_pipeline_receipt, evaluate_pipeline_admission,
+    factual_tick_plan::{FactualInstallV1, PlannedTickV1},
+    install_or_reject, recovered_pipeline_receipt, retained_pipeline_receipt,
+    PipelinePersistedStateV1,
 };
 
 #[cfg(test)]
