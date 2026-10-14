@@ -81,12 +81,11 @@ impl<'guard> ReadContext<'guard> {
         extra_bytes: usize,
     ) -> Result<(), KeyRegistryReadErrorV1> {
         self.checkpoint().and_then(|()| {
-            match field_bytes.checked_add(extra_bytes) {
-                Some(bytes) => self.materialize(bytes),
-                None => {
-                    self.refused = true;
-                    Err(KeyRegistryReadErrorV1::ReadRefused)
-                }
+            if let Some(bytes) = field_bytes.checked_add(extra_bytes) {
+                self.materialize(bytes)
+            } else {
+                self.refused = true;
+                Err(KeyRegistryReadErrorV1::ReadRefused)
             }
         })
     }
@@ -109,25 +108,25 @@ impl<'guard> ReadContext<'guard> {
     pub(super) fn scope(
         &mut self,
         owner: &OwnerIdV1,
-        role: &KeyRoleV1,
+        role: KeyRoleV1,
     ) -> Result<(OwnerIdV1, KeyRoleV1), KeyRegistryReadErrorV1> {
         self.step(|context| {
             context
                 .materialize_sum(owner.as_str().len(), 1)
-                .map(|()| (*owner, *role))
+                .map(|()| (*owner, role))
         })
     }
 
     pub(super) fn identity(
         &mut self,
         owner: &OwnerIdV1,
-        role: &KeyRoleV1,
-        epoch: &u64,
+        role: KeyRoleV1,
+        epoch: u64,
     ) -> Result<KeyIdentityV1, KeyRegistryReadErrorV1> {
         self.step(|context| {
             context
                 .materialize_sum(owner.as_str().len(), 9)
-                .map(|()| KeyIdentityV1::from_parts(*owner, *role, *epoch))
+                .map(|()| KeyIdentityV1::from_parts(*owner, role, epoch))
         })
     }
 }
