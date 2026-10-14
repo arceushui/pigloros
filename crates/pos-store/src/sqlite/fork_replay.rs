@@ -36,7 +36,9 @@ impl ForkReplayAuthorityReadPortV1 for SqliteStore {
         );
         budget.check_time()?;
         let committed = committed.map_err(|error| match error {
-            crate::ForkManifestPublicationErrorV1::StorageIndeterminate => Error::StorageUnavailable,
+            crate::ForkManifestPublicationErrorV1::StorageIndeterminate => {
+                Error::StorageUnavailable
+            }
             _ => Error::CorruptAuthority,
         })?;
         ForkReplayAuthorityEvidenceV1::from_committed(*requirement, &committed, budget)

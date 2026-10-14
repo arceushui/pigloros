@@ -289,6 +289,15 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
             let child = world.child_at(0)?.id;
             let mut memory = MemoryStore::new();
             let requirement = populate(&mut memory, &world, shape, destroyed_key)?;
+            let run = |host| {
+                run_on_host(
+                    host,
+                    child,
+                    requirement.publication_logical_head(),
+                    fault,
+                    cut,
+                )
+            };
             let verifier = || {
                 Arc::new(ImportedVerifier {
                     child,
@@ -307,13 +316,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 &composition,
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
-            run_on_host(
-                host,
-                child,
-                requirement.publication_logical_head(),
-                fault,
-                cut,
-            )?;
+            run(host)?;
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("imported-replay.sqlite");
             let path = path.to_str().ok_or("utf-8 path")?;
@@ -332,13 +335,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 &composition,
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
-            run_on_host(
-                host,
-                child,
-                requirement.publication_logical_head(),
-                fault,
-                cut,
-            )?;
+            run(host)?;
             let composition =
                 ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier());
             let host = ErasureExecutionHostV1::open_read_only_with_authority(
@@ -346,13 +343,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 &composition,
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
-            run_on_host(
-                host,
-                child,
-                requirement.publication_logical_head(),
-                fault,
-                cut,
-            )?;
+            run(host)?;
         }
     }
     Ok(())
@@ -668,6 +659,7 @@ fn sqlite_protected_consumers_hold_writer_reservation_through_both_phases() -> F
             // failures were not a malformed replacement or read-only writer.
             writer.save_key_registry(&verifier.next)?;
             assert_eq!(writer.load_key_registry()?, Some(verifier.next.clone()));
+            drop(writer);
         }
     }
     Ok(())
