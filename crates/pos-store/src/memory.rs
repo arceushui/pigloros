@@ -127,6 +127,7 @@ mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
 mod fork_code_two_read;
 mod fork_replay;
+mod fork_replay_lineage;
 mod pipeline_admission;
 #[cfg(target_os = "linux")]
 mod plugin_trust_registry;

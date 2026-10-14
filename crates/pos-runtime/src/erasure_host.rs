@@ -4079,17 +4079,28 @@ impl ErasureReadSenderV1<'_> {
         let mut next = Some(capability.timeline_id());
         let mut head = capability.requested_use().source_logical_head();
         let mut required_index = 0;
+        let effective_max_fork_depth = capability
+            .read_bounds()
+            .max_fork_depth()
+            .min(budget.limits().max_fork_depth_per_traversal());
         for (depth, source) in sources.iter().enumerate() {
             budget
-                .charge_node(depth)
+                .check_time()
                 .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
-            if depth > capability.read_bounds().max_fork_depth()
-                || next != Some(source.timeline_id())
-                || sources[..depth]
-                    .iter()
-                    .any(|previous| previous.timeline_id() == source.timeline_id())
-            {
+            if next != Some(source.timeline_id()) {
                 return Err(ErasureHostErrorV1::Conflict);
+            }
+            for previous in &sources[..depth] {
+                budget
+                    .check_time()
+                    .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+                let duplicate = previous.timeline_id() == source.timeline_id();
+                budget
+                    .check_time()
+                    .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+                if duplicate {
+                    return Err(ErasureHostErrorV1::Conflict);
+                }
             }
             if let Some(required) = source.required_attribution() {
                 if required.publication_logical_head() != head
@@ -4103,14 +4114,44 @@ impl ErasureReadSenderV1<'_> {
                 .host
                 .store
                 .host_store()
-                .get_timeline(source.timeline_id())
-                .map_store_error()?
+                .read_fork_replay_lineage_node(
+                    source.timeline_id(),
+                    depth,
+                    effective_max_fork_depth,
+                    budget,
+                );
+            budget
+                .check_time()
+                .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+            let timeline = timeline
+                .map_err(|error| match error {
+                    pos_store::ForkReplayLineageReadErrorV1::Read(_) => {
+                        ErasureHostErrorV1::AdapterFailure
+                    }
+                    pos_store::ForkReplayLineageReadErrorV1::AccessFrozen => {
+                        ErasureHostErrorV1::AccessFrozen
+                    }
+                    pos_store::ForkReplayLineageReadErrorV1::ContainmentUnavailable => {
+                        ErasureHostErrorV1::RecoveryUnavailable
+                    }
+                })?
                 .ok_or(ErasureHostErrorV1::Conflict)?;
-            next = timeline.meta.fork_point.map(|(parent, cut)| {
-                head = cut;
-                parent
-            });
+            if timeline.timeline_id() != &source.timeline_id() {
+                return Err(ErasureHostErrorV1::Conflict);
+            }
+            next = if let Some((parent, cut)) = timeline.fork_point() {
+                budget
+                    .charge_bytes(24)
+                    .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
+                head = *cut;
+                Some(*parent)
+            } else {
+                None
+            };
         }
+        budget
+            .check_time()
+            .map_err(|_| ErasureHostErrorV1::AdapterFailure)?;
         if next.is_some() || required_index != capability.fork_requirements().len() {
             return Err(ErasureHostErrorV1::Conflict);
         }
@@ -5712,6 +5753,24 @@ mod tests {
     }
 
     impl ForkReplayAuthorityReadPortV1 for FaultStoreV1 {
+        fn read_fork_replay_lineage_node(
+            &self,
+            timeline_id: TimelineId,
+            depth: usize,
+            effective_max_fork_depth: usize,
+            budget: &mut ForkReplayReadBudgetV1<'_>,
+        ) -> Result<
+            Option<pos_store::ForkReplayLineageNodeV1>,
+            pos_store::ForkReplayLineageReadErrorV1,
+        > {
+            self.inner.read_fork_replay_lineage_node(
+                timeline_id,
+                depth,
+                effective_max_fork_depth,
+                budget,
+            )
+        }
+
         fn validate_fork_replay_authority(
             &self,
             requirement: &pos_store::ForkReplayRequirementV1,

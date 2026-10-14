@@ -10,6 +10,26 @@ use crate::{
 type ReadResult<T> = Result<T, Error>;
 
 impl ForkReplayAuthorityReadPortV1 for MemoryStore {
+    fn read_fork_replay_lineage_node(
+        &self,
+        timeline_id: pos_core::TimelineId,
+        depth: usize,
+        effective_max_fork_depth: usize,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> Result<Option<crate::ForkReplayLineageNodeV1>, crate::ForkReplayLineageReadErrorV1>
+    {
+        let mut context = crate::fork_replay::lineage::LineageReadContextV1::new(
+            budget,
+            effective_max_fork_depth,
+        )?;
+        crate::fork_replay::lineage::read_visible_lineage(
+            timeline_id,
+            depth,
+            &mut context,
+            |member, visited, context| self.read_lineage_member(member, visited, context),
+        )
+    }
+
     fn validate_fork_replay_authority(
         &self,
         requirement: &ForkReplayRequirementV1,
