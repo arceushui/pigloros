@@ -57,7 +57,9 @@ fn native_read_error(
     }
 }
 
-struct RegistryReadGuard<'context, 'budget, 'clock>(&'context mut NativeReadContextV1<'budget, 'clock>);
+struct RegistryReadGuard<'context, 'budget, 'clock>(
+    &'context mut NativeReadContextV1<'budget, 'clock>,
+);
 
 impl KeyRegistryReadGuardV1 for RegistryReadGuard<'_, '_, '_> {
     fn observe(
@@ -291,10 +293,7 @@ mod tests {
             Err(Error::CorruptAuthority)
         );
         assert!(budget.check_time().is_err());
-        assert_eq!(
-            super::super::sqlite_load_key_registry(&missing.conn)?,
-            None
-        );
+        assert_eq!(super::super::sqlite_load_key_registry(&missing.conn)?, None);
         Ok(())
     }
 
@@ -541,10 +540,7 @@ mod tests {
         let limits = ForkReplayReadLimitsV1::new(1, 1, 2, 4_096, 1_000_000)?;
         let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
         assert_eq!(
-            loaded_registry_with_context(
-                &conn,
-                &mut NativeReadContextV1::protected(&mut budget)
-            ),
+            loaded_registry_with_context(&conn, &mut NativeReadContextV1::protected(&mut budget)),
             Err(PublicationSourceErrorV1::Storage)
         );
         assert_eq!(budget.check_time(), Ok(()));
@@ -552,7 +548,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_core_origin_refusal_permanently_latches_without_inventing_a_debit() -> Fallible<()> {
+    fn registry_core_origin_refusal_permanently_latches_without_inventing_a_debit() -> Fallible<()>
+    {
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
         let limits = ForkReplayReadLimitsV1::new(1, 1, 2, 4_096, 1_000_000)?;
@@ -593,7 +590,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_native_checkpoints_keep_original_epoch_inside_decode_and_validation() -> Fallible<()> {
+    fn registry_native_checkpoints_keep_original_epoch_inside_decode_and_validation() -> Fallible<()>
+    {
         for (index, registry) in registries()?.into_iter().enumerate() {
             let (_directory, store) = file_fixture(&registry)?;
             let expected = encoded(&registry)?.len() + native_fixture_units(index);
@@ -636,11 +634,10 @@ mod tests {
                         assert_eq!(read, Ok(Some(registry.clone())));
                         assert_eq!(budget.remaining_native_bytes(), 0);
                         break;
-                    } else {
-                        assert_eq!(read, Err(PublicationSourceErrorV1::Invalid));
-                        assert_eq!(budget.check_time(), Err(ReadError::BoundsExceeded));
-                        native_only_failures += usize::from(raw.is_ok());
                     }
+                    assert_eq!(read, Err(PublicationSourceErrorV1::Invalid));
+                    assert_eq!(budget.check_time(), Err(ReadError::BoundsExceeded));
+                    native_only_failures += usize::from(raw.is_ok());
                 }
                 assert!(native_only_failures > 0 && successes > 0);
             }
