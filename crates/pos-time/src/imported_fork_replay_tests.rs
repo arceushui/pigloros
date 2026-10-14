@@ -644,13 +644,12 @@ fn sqlite_protected_consumers_hold_writer_reservation_through_both_phases() -> F
             }
             assert_eq!(
                 verifier.refused.load(Ordering::SeqCst),
-                if call == ConsumerCall::Compare {
-                    4
-                } else {
-                    2
-                }
+                if call == ConsumerCall::Compare { 4 } else { 2 }
             );
-            let mut writer = verifier.writer.lock().map_err(|_| "probe writer poisoned")?;
+            let mut writer = verifier
+                .writer
+                .lock()
+                .map_err(|_| "probe writer poisoned")?;
             assert_eq!(writer.load_key_registry()?, Some(before));
             // The very same request succeeds after release, so earlier
             // failures were not a malformed replacement or read-only writer.
