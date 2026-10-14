@@ -702,7 +702,9 @@ impl<'budget, 'clock> LineageReadContextV1<'budget, 'clock> {
         budget: &'budget mut ForkReplayReadBudgetV1<'clock>,
         cap: usize,
     ) -> LineageReadResult<Self> {
-        budget.check_time().map_err(ForkReplayLineageReadErrorV1::Read)?;
+        budget
+            .check_time()
+            .map_err(ForkReplayLineageReadErrorV1::Read)?;
         budget
             .accept(cap <= budget.limits().max_fork_depth_per_traversal())
             .map_err(ForkReplayLineageReadErrorV1::Read)?;
