@@ -7,9 +7,9 @@ use std::collections::BTreeMap;
 use cursor::{Cursor, Header};
 
 use super::{
-    read_guard::ReadContext, KeyDestructionRequestV1, KeyIdentityV1,
-    KeyRecordV1, KeyRegistryFormatVersionV1, KeyRegistryReadErrorV1 as Error,
-    KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, OwnerIdV1,
+    read_guard::ReadContext, KeyDestructionRequestV1, KeyIdentityV1, KeyRecordV1,
+    KeyRegistryFormatVersionV1, KeyRegistryReadErrorV1 as Error, KeyRegistryStateV1, KeyRoleV1,
+    KeyTombstoneV1, OwnerIdV1,
 };
 use crate::{Hash, PublicKey};
 
@@ -18,7 +18,9 @@ type Result<T> = std::result::Result<T, Error>;
 pub(super) fn read(bytes: &[u8], context: &mut ReadContext<'_>) -> Result<KeyRegistryStateV1> {
     context.step(|context| {
         let registry = Cursor::new(bytes).registry(context)?;
-        registry.validate_with_read_context(context).map(|()| registry)
+        registry
+            .validate_with_read_context(context)
+            .map(|()| registry)
     })
 }
 
