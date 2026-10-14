@@ -136,12 +136,10 @@ impl<'input> Cursor<'input> {
         read: impl FnOnce(&mut Self, &mut ReadContext<'_>) -> Result<T>,
     ) -> Result<T> {
         context.step(|context| {
-            if self.recursion == 0 {
-                return Err(Error::InvalidSnapshot);
-            }
-            self.recursion -= 1;
+            let previous = self.recursion;
+            self.recursion = previous.checked_sub(1).ok_or(Error::InvalidSnapshot)?;
             let result = read(self, context);
-            self.recursion += 1;
+            self.recursion = previous;
             result
         })
     }
