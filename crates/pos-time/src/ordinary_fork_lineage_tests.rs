@@ -1,13 +1,15 @@
 //! ADR-117 explicit ordinary classifications through the protected consumers.
 //!
-//! These are legal empty, two-level Fork histories with no publications. They
-//! deliberately mint Some(complete sources), never the distinct None
-//! attestation bypass. All assertions cross Replay, Replay-at or Compare.
+//! Replay histories are empty; Compare has one real shared Event at cut one.
+//! Every two-level Fork has no publication and deliberately mints Some(complete
+//! sources), never the distinct None attestation bypass. All assertions cross
+//! Replay, Replay-at or Compare without changing their authority preconditions.
 
 use crate::test_support::{with_release, ProtectedFixture};
 use pos_core::{
-    CoreError, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1, EventReadBounds,
-    Hash, Reducer, Seq, State, TimelineId, WorldReplayClosureV1,
+    CanonicalBytes, CoreError, EntityId, ErasureRecoveryLimitsV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, EventDraft, EventReadBounds, Hash, Kind, Reducer, Seq, State,
+    TimelineId, WorldReplayClosureV1,
 };
 use pos_runtime::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
@@ -36,14 +38,14 @@ fn empty_reducer() -> Box<dyn Reducer> {
     Box::new(EmptyReducer)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 enum Consumer {
     Replay,
     ReplayAt,
     Compare,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum Edge {
     Exact,
     OneOver,
@@ -64,6 +66,7 @@ struct Classification {
     root: TimelineId,
     parent: TimelineId,
     arms: [TimelineId; 2],
+    shared_entity: Option<EntityId>,
     limits: ForkReplayReadLimitsV1,
     arm_depth: usize,
 }
@@ -142,19 +145,34 @@ impl WorldReplayVerifierV1 for OrdinaryVerifier {
 /// ledger or a production length/debit helper:
 /// Memory: 3*65 + 3*41 + 3*16 + 2*24 = 414;
 /// `SQLite`: 3*143 + 3*93 + 3*16 + 2*24 = 804.
+/// Compare revisits its one root Event three times per arm-phase. Memory
+/// adds three 8-byte sequence candidates/rows; `SQLite` adds those plus
+/// three actual 8-byte non-geographic type strings/E1 rows: 438/9 versus
+/// 852/30 bytes/rows per arm-phase. The two public Event reads each add
+/// zero payload bytes plus the 8-byte type, once per arm, not per phase.
 fn limits(
     consumer: Consumer,
     edge: Edge,
     sqlite: bool,
 ) -> Result<ForkReplayReadLimitsV1, Box<dyn std::error::Error>> {
-    let arms = if matches!(consumer, Consumer::Compare) {
-        2
+    let (arms, phase_bytes, phase_rows, event_bytes) = if matches!(consumer, Consumer::Compare) {
+        (
+            2,
+            if sqlite { 852 } else { 438 },
+            if sqlite { 30 } else { 9 },
+            16,
+        )
     } else {
-        1
+        (
+            1,
+            if sqlite { 804 } else { 414 },
+            if sqlite { 24 } else { 6 },
+            0,
+        )
     };
     let phases = 2 * arms;
-    let bytes = phases * if sqlite { 804 } else { 414 };
-    let rows = phases * if sqlite { 6 * 4 } else { 6 };
+    let bytes = phases * phase_bytes + event_bytes;
+    let rows = phases * phase_rows;
     let visits = phases * 6;
     let adjust = |value, short| {
         if edge == short {
@@ -176,21 +194,41 @@ fn limits(
 
 fn seed(
     host: &mut ErasureExecutionHostV1,
-) -> Result<(TimelineId, TimelineId, [TimelineId; 2]), Box<dyn std::error::Error>> {
+    consumer: Consumer,
+) -> Result<
+    (TimelineId, TimelineId, [TimelineId; 2], Option<EntityId>),
+    Box<dyn std::error::Error>,
+> {
     let mut commands = host.command_sender()?;
     let root = commands
         .create_timeline(&"unselected private name ".repeat(4_096))?
         .id();
+    let shared_entity = matches!(consumer, Consumer::Compare).then(EntityId::new);
+    let cut = if let Some(entity) = shared_entity {
+        let events = commands.append(
+            root,
+            &[EventDraft::new(
+                entity,
+                Kind::new("ordinary"),
+                CanonicalBytes::from_vec(Vec::new()),
+            )],
+        )?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].seq, Seq::from_u64(1));
+        Seq::from_u64(1)
+    } else {
+        Seq::ZERO
+    };
     let parent = commands
-        .fork_timeline(root, Seq::ZERO, "ordinary parent")?
+        .fork_timeline(root, cut, "ordinary parent")?
         .id();
     let first = commands
-        .fork_timeline(parent, Seq::ZERO, "ordinary first")?
+        .fork_timeline(parent, cut, "ordinary first")?
         .id();
     let second = commands
-        .fork_timeline(parent, Seq::ZERO, "ordinary second")?
+        .fork_timeline(parent, cut, "ordinary second")?
         .id();
-    Ok((root, parent, [first, second]))
+    Ok((root, parent, [first, second], shared_entity))
 }
 
 fn exercise(
@@ -199,7 +237,6 @@ fn exercise(
     verifier: &OrdinaryVerifier,
     consumer: Consumer,
     edge: Edge,
-    backend: &str,
 ) -> TestResult {
     *verifier
         .classification
@@ -242,33 +279,35 @@ fn exercise(
         Consumer::Compare => crate::compare(
             &mut reads,
             [first, second],
-            Seq::ZERO,
+            Seq::from_u64(1),
             [&mut a, &mut b],
             [&first_closure, &second_closure],
             release,
             [&fixture.fold(), &fixture.fold()],
         )
         .map(|diff| {
-            assert_eq!(diff.fork_seq, Seq::ZERO);
+            assert_eq!(diff.fork_seq, Seq::from_u64(1));
             assert!(diff.diverged_entities.is_empty());
         }),
     });
     if edge.succeeds() {
-        result.inspect_err(|error| {
-            eprintln!(
-                "[DEBUG-561-ordinary] consumer={consumer:?} edge={edge:?} backend={backend} admissions={} limits={:?} error={error}",
-                verifier.admissions.load(Ordering::SeqCst),
-                classification.limits,
-            );
-        })?;
+        result?;
     } else {
         assert_eq!(
             result.map_err(|error| error.to_string()),
             Err(CoreError::ArtifactUnavailable.to_string())
         );
     }
-    assert_eq!(a.state_snapshot(first)?, before_a);
-    assert_eq!(b.state_snapshot(second)?, before_b);
+    if let Some(entity) = classification.shared_entity.filter(|_| edge.succeeds()) {
+        for (registry, timeline) in [(&a, first), (&b, second)] {
+            let snapshot = registry.state_snapshot(timeline)?;
+            assert_eq!(snapshot["count"].len(), 1);
+            assert_eq!(snapshot["count"].get(&entity), Some(&State::new()));
+        }
+    } else {
+        assert_eq!(a.state_snapshot(first)?, before_a);
+        assert_eq!(b.state_snapshot(second)?, before_b);
+    }
     let arms = if matches!(consumer, Consumer::Compare) {
         2
     } else {
@@ -302,11 +341,6 @@ fn explicit_ordinary_lineage_is_bounded_across_both_phases_and_compare_arms() ->
             ] {
                 let sqlite = !matches!(&config, StoreConfig::Memory);
                 let file_backed = matches!(&config, StoreConfig::Sqlite { .. });
-                let backend = match &config {
-                    StoreConfig::Memory => "Memory",
-                    StoreConfig::SqliteInMemory => "SQLite in-memory",
-                    StoreConfig::Sqlite { .. } => "SQLite RW",
-                };
                 let verifier = Arc::new(OrdinaryVerifier::new());
                 let composition = ErasureCoordinatorCompositionV1::closed()
                     .with_world_replay_verifier(verifier.clone());
@@ -315,29 +349,23 @@ fn explicit_ordinary_lineage_is_bounded_across_both_phases_and_compare_arms() ->
                     &composition,
                     ErasureRecoveryLimitsV1::compiled_maximum(),
                 )?;
-                let (root, parent, arms) = seed(&mut host)?;
+                let (root, parent, arms, shared_entity) = seed(&mut host, consumer)?;
                 let classification = Classification {
                     root,
                     parent,
                     arms,
+                    shared_entity,
                     limits: limits(consumer, edge, sqlite)?,
                     arm_depth: if edge == Edge::ArmDepthShort { 1 } else { 8 },
                 };
-                exercise(host, classification, &verifier, consumer, edge, backend)?;
+                exercise(host, classification, &verifier, consumer, edge)?;
                 if file_backed {
                     let readonly = ErasureExecutionHostV1::open_read_only_with_authority(
                         path,
                         &composition,
                         ErasureRecoveryLimitsV1::compiled_maximum(),
                     )?;
-                    exercise(
-                        readonly,
-                        classification,
-                        &verifier,
-                        consumer,
-                        edge,
-                        "SQLite RO",
-                    )?;
+                    exercise(readonly, classification, &verifier, consumer, edge)?;
                 }
             }
         }
