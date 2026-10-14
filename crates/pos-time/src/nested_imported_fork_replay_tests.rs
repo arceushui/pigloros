@@ -8,9 +8,8 @@ use crate::imported_fork_replay_tests::fixture::{pin_policy, Fallible, Port, Sha
 use crate::test_support::{with_release, ProtectedFixture};
 use pos_core::{
     store::{EventStore, SeqRange},
-    CoreError, ErasureGate, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, Event, EventReadBounds, Hash, Reducer, Seq, State, TimelineId,
-    WorldReplayClosureV1,
+    CoreError, ErasureGate, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1,
+    Event, EventReadBounds, Hash, Reducer, Seq, State, TimelineId, WorldReplayClosureV1,
 };
 use pos_runtime::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
@@ -162,9 +161,9 @@ impl WorldReplayVerifierV1 for NestedVerifier {
             .sources
             .iter()
             .position(|sources| {
-                sources.first().is_some_and(|source| {
-                    source.timeline_id() == requested.timeline_id()
-                })
+                sources
+                    .first()
+                    .is_some_and(|source| source.timeline_id() == requested.timeline_id())
             })
             .ok_or(WorldReplayVerificationErrorV1::EvidenceUnavailable)?;
         let phase = self.admissions.fetch_add(1, Ordering::SeqCst);
@@ -185,11 +184,7 @@ impl WorldReplayVerifierV1 for NestedVerifier {
         } else if fault == Fault::ExtraRequirement {
             required.push(required[0]);
         }
-        let arm_depth = if fault == Fault::ArmDepthShort {
-            1
-        } else {
-            8
-        };
+        let arm_depth = if fault == Fault::ArmDepthShort { 1 } else { 8 };
         let bounds = EventReadBounds::new_with_total_bytes_and_elapsed(
             1_024,
             128,
@@ -376,7 +371,9 @@ fn seeded_registry(
     let snapshot = registry.state_snapshot(timeline)?;
     assert_eq!(snapshot["count"].len(), 1);
     assert_eq!(
-        snapshot["count"].get(&seed.entity).and_then(|state| state.get("n")),
+        snapshot["count"]
+            .get(&seed.entity)
+            .and_then(|state| state.get("n")),
         Some(&serde_json::json!(2)),
     );
     Ok(registry)
@@ -401,7 +398,10 @@ fn assert_success(
             .collect();
         expected.sort_unstable();
         assert_eq!(diff.diverged_entities, expected);
-        assert_eq!(registries[1].state_snapshot(timelines[1])?["count"].len(), 4);
+        assert_eq!(
+            registries[1].state_snapshot(timelines[1])?["count"].len(),
+            4
+        );
     } else {
         assert!(diff.is_none());
     }
