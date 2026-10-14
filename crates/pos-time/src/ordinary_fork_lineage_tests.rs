@@ -36,14 +36,14 @@ fn empty_reducer() -> Box<dyn Reducer> {
     Box::new(EmptyReducer)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Consumer {
     Replay,
     ReplayAt,
     Compare,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Edge {
     Exact,
     OneOver,
@@ -199,6 +199,7 @@ fn exercise(
     verifier: &OrdinaryVerifier,
     consumer: Consumer,
     edge: Edge,
+    backend: &str,
 ) -> TestResult {
     *verifier
         .classification
@@ -253,7 +254,13 @@ fn exercise(
         }),
     });
     if edge.succeeds() {
-        result?;
+        result.inspect_err(|error| {
+            eprintln!(
+                "[DEBUG-561-ordinary] consumer={consumer:?} edge={edge:?} backend={backend} admissions={} limits={:?} error={error}",
+                verifier.admissions.load(Ordering::SeqCst),
+                classification.limits,
+            );
+        })?;
     } else {
         assert_eq!(
             result.map_err(|error| error.to_string()),
@@ -295,6 +302,11 @@ fn explicit_ordinary_lineage_is_bounded_across_both_phases_and_compare_arms() ->
             ] {
                 let sqlite = !matches!(&config, StoreConfig::Memory);
                 let file_backed = matches!(&config, StoreConfig::Sqlite { .. });
+                let backend = match &config {
+                    StoreConfig::Memory => "Memory",
+                    StoreConfig::SqliteInMemory => "SQLite in-memory",
+                    StoreConfig::Sqlite { .. } => "SQLite RW",
+                };
                 let verifier = Arc::new(OrdinaryVerifier::new());
                 let composition = ErasureCoordinatorCompositionV1::closed()
                     .with_world_replay_verifier(verifier.clone());
@@ -311,14 +323,14 @@ fn explicit_ordinary_lineage_is_bounded_across_both_phases_and_compare_arms() ->
                     limits: limits(consumer, edge, sqlite)?,
                     arm_depth: if edge == Edge::ArmDepthShort { 1 } else { 8 },
                 };
-                exercise(host, classification, &verifier, consumer, edge)?;
+                exercise(host, classification, &verifier, consumer, edge, backend)?;
                 if file_backed {
                     let readonly = ErasureExecutionHostV1::open_read_only_with_authority(
                         path,
                         &composition,
                         ErasureRecoveryLimitsV1::compiled_maximum(),
                     )?;
-                    exercise(readonly, classification, &verifier, consumer, edge)?;
+                    exercise(readonly, classification, &verifier, consumer, edge, "SQLite RO")?;
                 }
             }
         }
