@@ -72,7 +72,9 @@ impl<'input> Cursor<'input> {
             };
             match major {
                 0 => number.map(Header::Positive).ok_or(Error::InvalidSnapshot),
-                1 => number.map(|_| Header::Negative).ok_or(Error::InvalidSnapshot),
+                1 => number
+                    .map(|_| Header::Negative)
+                    .ok_or(Error::InvalidSnapshot),
                 2..=5 => {
                     let length = number
                         .map(usize::try_from)
@@ -267,7 +269,9 @@ impl<'input> Cursor<'input> {
 
     pub(super) fn skip(&mut self, context: &mut ReadContext<'_>) -> Result<()> {
         context.step(|context| match self.header(context)? {
-            Header::Positive(_) | Header::Negative | Header::Float | Header::Simple(20..=23) => Ok(()),
+            Header::Positive(_) | Header::Negative | Header::Float | Header::Simple(20..=23) => {
+                Ok(())
+            }
             Header::Bytes(length) => self.segments(length, false, context, |_, _| Ok(())),
             Header::Text(length) => self.segments(length, true, context, |bytes, _| {
                 std::str::from_utf8(bytes)
