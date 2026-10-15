@@ -3,6 +3,7 @@
 //! The outer fence may inspect ordinary ancestry metadata. Depth assertions
 //! concern the bounded native validation walk, not all reads by that fence.
 
+mod deadline;
 mod repeat;
 
 use super::fixture::{pin_policy, Fallible, Shape, Spec, World};
