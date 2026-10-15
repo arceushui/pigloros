@@ -165,14 +165,17 @@ fn prepare_replay<'r>(
     revoked: &mut Option<RevokedSubjectsV1>,
     registry: &'r mut ProjectionRegistry,
 ) -> Result<StagedProtectedOutputV1<PreparedInstallV1<'r>>, CoreError> {
-    let requested_use = crate::observed_world_replay_use(
+    let (requested_use, verified) = crate::observed_world_replay_use(
         sender,
         request.timeline,
         ErasureProtectedOperationV1::Read,
         request.range,
         consumer_ids,
-    )?;
-    let verified = crate::require_world_replay(sender, request.closure, &requested_use)?;
+    )
+    .and_then(|requested_use| {
+        crate::require_world_replay(sender, request.closure, &requested_use)
+            .map(|verified| (requested_use, verified))
+    })?;
     let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
     let mut budget = pos_store::ForkReplayReadBudgetV1::new(
         verified.fork_read_limits(),
@@ -192,18 +195,37 @@ fn prepare_replay<'r>(
     *revoked = Some(RevokedSubjectsV1::from_verified_events(&events));
     let source = crate::verified_source(request.timeline, request.closure);
     let staged = crate::fold_staged(request.fold, guard, events, source)?;
-    let final_verified = crate::require_world_replay(sender, request.closure, &requested_use)?;
-    if final_verified != verified {
+    revalidate_replay(
+        sender,
+        request.closure,
+        &requested_use,
+        &verified,
+        &evidence,
+        &mut budget,
+    )
+    .and_then(|()| crate::handoff_reserve(guard))?;
+    registry.prepare_install(staged).map_err(crate::unavailable)
+}
+
+/// Recheck the complete authorization and native proof on the original ledger.
+fn revalidate_replay(
+    sender: &mut ErasureReadSenderV1<'_>,
+    closure: &WorldReplayClosureV1,
+    requested_use: &pos_runtime::WorldReplayUseV1,
+    verified: &pos_runtime::VerifiedWorldReplayV1,
+    evidence: &[pos_store::ForkReplayAuthorityEvidenceV1],
+    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
+) -> Result<(), CoreError> {
+    let final_verified = crate::require_world_replay(sender, closure, requested_use)?;
+    if final_verified != *verified {
         return Err(CoreError::ArtifactUnavailable);
     }
     let final_evidence = sender
-        .validate_world_replay_forks(&final_verified, &mut budget)
+        .validate_world_replay_forks(&final_verified, budget)
         .map_err(crate::host_error_to_core)?;
-    if final_evidence != evidence {
-        return Err(CoreError::ArtifactUnavailable);
-    }
-    crate::handoff_reserve(guard)?;
-    registry.prepare_install(staged).map_err(crate::unavailable)
+    (final_evidence.as_slice() == evidence)
+        .then_some(())
+        .ok_or(CoreError::ArtifactUnavailable)
 }
 
 #[cfg(test)]
