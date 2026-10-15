@@ -3543,29 +3543,38 @@ impl MemoryStore {
         context: &mut NativeReadContextV1<'_, '_>,
     ) -> Result<PrincipalOwnerBindingV1, pos_core::ForkAdmissionErrorV1> {
         use pos_core::ForkAdmissionErrorV1::CorruptAuthority;
-        let binding = self
-            .principal_owner_binding_by_digest_with_context(row.result_digest, context)?
-            .ok_or(CorruptAuthority)?;
-        if binding.input().operation_id != row.operation_id {
-            return Err(CorruptAuthority);
-        }
-        let commitment = principal_owner_commitment_with_context(
-            store_id,
-            binding,
-            row.evidence_digest,
-            context,
-        )?;
-        if commitment != row.commitment {
-            return Err(CorruptAuthority);
-        }
-        context
-            .canonical(binding.canonical_cbor_len())
-            .map_err(|_| CorruptAuthority)?;
-        let binding = binding.clone();
-        context
-            .check()
-            .map(|()| binding)
-            .map_err(|_| CorruptAuthority)
+        self.principal_owner_binding_by_digest_with_context(row.result_digest, context)
+            .and_then(|binding| binding.ok_or(CorruptAuthority))
+            .and_then(|binding| {
+                (binding.input().operation_id == row.operation_id)
+                    .then_some(binding)
+                    .ok_or(CorruptAuthority)
+            })
+            .and_then(|binding| {
+                principal_owner_commitment_with_context(
+                    store_id,
+                    binding,
+                    row.evidence_digest,
+                    context,
+                )
+                .and_then(|commitment| {
+                    (commitment == row.commitment)
+                        .then_some(binding)
+                        .ok_or(CorruptAuthority)
+                })
+            })
+            .and_then(|binding| {
+                context
+                    .canonical(binding.canonical_cbor_len())
+                    .map(|()| binding.clone())
+                    .map_err(|_| CorruptAuthority)
+            })
+            .and_then(|binding| {
+                context
+                    .check()
+                    .map(|()| binding)
+                    .map_err(|_| CorruptAuthority)
+            })
     }
 }
 
