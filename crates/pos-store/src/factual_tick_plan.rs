@@ -118,15 +118,28 @@ fn check_grant(basis: &PipelineAdmissionBasisV1, grant: Hash) -> Result<(), Tick
     demand(carries, TickRefusalV1::StaleGrant)
 }
 
+/// [`demand`] as a halt of the plan.
+fn refuse_unless(holds: bool, refusal: TickRefusalV1) -> Result<(), PlanHaltV1> {
+    demand(holds, refusal).map_err(PlanHaltV1::from)
+}
+
+/// Whether the basis declares a committed record at the Tick after `last`.
+fn declares_next_tick(basis: &PipelineAdmissionBasisV1, last: u64) -> bool {
+    let next = last.checked_add(1) == Some(basis.dependencies().tick());
+    declaration::declares_committed_tick(basis) && next
+}
+
 /// R3.7.2 (ii): the record is a committed one at the next Tick of the prefix.
 fn check_tick<P: TickPrefixV1>(
     prefix: &P,
     basis: &PipelineAdmissionBasisV1,
 ) -> Result<(), PlanHaltV1> {
-    let last = prefix.last_tick()?;
-    let next = last.checked_add(1) == Some(basis.dependencies().tick());
-    let committed = declaration::declares_committed_tick(basis) && next;
-    demand(committed, TickRefusalV1::InvalidDeclaration).map_err(PlanHaltV1::from)
+    let invalid = TickRefusalV1::InvalidDeclaration;
+    let judged = |last| refuse_unless(declares_next_tick(basis, last), invalid);
+    prefix
+        .last_tick()
+        .map_err(PlanHaltV1::from)
+        .and_then(judged)
 }
 
 /// The payload hash of every committed Event the ingress bindings of the
@@ -163,6 +176,31 @@ fn bound_payloads<P: TickPrefixV1>(
     )
 }
 
+/// The Event-backed nodes of a Tick: `(seq, artifact digest)` bindings.
+type EventNodesV1 = Vec<(Seq, Hash)>;
+
+/// The ingress nodes, if no visible Tick already binds one of their Events.
+fn unbound_ingress<P: TickPrefixV1>(
+    prefix: &P,
+    ingress: Option<EventNodesV1>,
+) -> Result<Option<EventNodesV1>, CoreError> {
+    let seqs: Vec<Seq> = ingress.iter().flatten().map(|(seq, _)| *seq).collect();
+    let bound = !seqs.is_empty() && prefix.any_bound(&seqs)?;
+    Ok(ingress.filter(|_| !bound))
+}
+
+/// The output nodes followed by the ingress nodes, or the refusal of a
+/// declaration that has either wrong.
+fn joined_nodes(
+    outputs: Option<EventNodesV1>,
+    ingress: Option<EventNodesV1>,
+) -> Result<EventNodesV1, PlanHaltV1> {
+    outputs
+        .zip(ingress)
+        .map(|(first, second)| first.into_iter().chain(second).collect())
+        .ok_or(PlanHaltV1::Refused(TickRefusalV1::InvalidDeclaration))
+}
+
 /// R3.7.2 (iii) and (iv): the Event bindings of the drafts and of the
 /// ingress nodes, the snapshot node, and that no ingress Event is already
 /// bound by a visible Tick. Returns every Event-backed node of the Tick.
@@ -172,16 +210,40 @@ fn bound_nodes<P: TickPrefixV1>(
     basis: &PipelineAdmissionBasisV1,
     first_seq: Seq,
     payloads: &BTreeMap<u64, Hash>,
-) -> Result<Vec<(Seq, Hash)>, PlanHaltV1> {
+) -> Result<EventNodesV1, PlanHaltV1> {
     let outputs = declaration::output_event_nodes(timeline, basis, first_seq)
         .filter(|_| declaration::snapshot_matches(timeline, basis));
     let ingress = declaration::ingress_event_nodes(timeline, basis, payloads);
-    let seqs: Vec<Seq> = ingress.iter().flatten().map(|(seq, _)| *seq).collect();
-    let bound = !seqs.is_empty() && prefix.any_bound(&seqs)?;
-    outputs
-        .zip(ingress.filter(|_| !bound))
-        .map(|(first, second)| first.into_iter().chain(second).collect())
-        .ok_or(PlanHaltV1::Refused(TickRefusalV1::InvalidDeclaration))
+    unbound_ingress(prefix, ingress)
+        .map_err(PlanHaltV1::from)
+        .and_then(|unbound| joined_nodes(outputs, unbound))
+}
+
+/// The edge sources of the record that are no node of the record (`index`).
+fn outside_sources(
+    record: &TickDependencyRecordV1,
+    index: &declaration::DigestIndex<'_>,
+) -> Vec<Hash> {
+    record
+        .edges()
+        .iter()
+        .map(DependencyEdgeRecordV1::source_digest)
+        .filter(|source| !index.contains_key(source))
+        .collect()
+}
+
+/// Whether the `outside` sources are all nodes of the visible prefix at a
+/// Tick below `tick`; there is nothing to look up for none.
+fn outside_resolve<P: TickPrefixV1>(
+    prefix: &P,
+    outside: &[Hash],
+    tick: u64,
+) -> Result<bool, CoreError> {
+    if outside.is_empty() {
+        Ok(true)
+    } else {
+        prefix.sources_below(outside, tick)
+    }
 }
 
 /// R3.7.2 (vii): no declared input is left without an edge, and every edge
@@ -193,17 +255,10 @@ fn edge_sources_resolve<P: TickPrefixV1>(
     index: &declaration::DigestIndex<'_>,
 ) -> Result<bool, CoreError> {
     let covered = record.uncovered_input_count() == 0;
-    let outside: Vec<Hash> = record
-        .edges()
-        .iter()
-        .map(DependencyEdgeRecordV1::source_digest)
-        .filter(|source| !index.contains_key(source))
-        .collect();
-    if covered && !outside.is_empty() {
-        prefix.sources_below(&outside, record.tick())
-    } else {
-        Ok(covered)
-    }
+    let pending = covered.then(|| outside_sources(record, index));
+    pending.map_or(Ok(false), |outside| {
+        outside_resolve(prefix, &outside, record.tick())
+    })
 }
 
 /// R3.7.2 (v) to (viii): the position keys are new, the set takes the record,
