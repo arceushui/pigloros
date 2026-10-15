@@ -189,7 +189,9 @@ fn imported_memory_replay_keeps_one_exact_budget_through_final_validation() -> F
     assert_eq!((rows, visits), (46, 18));
     for (bytes, rows, visits, succeeds) in [
         (bytes, rows, visits, true),
-        (bytes + 1, rows + 1, visits + 1, true),
+        (bytes + 1, rows, visits, true),
+        (bytes, rows + 1, visits, true),
+        (bytes, rows, visits + 1, true),
         (bytes - 1, rows, visits, false),
         (bytes, rows - 1, visits, false),
         (bytes, rows, visits - 1, false),
