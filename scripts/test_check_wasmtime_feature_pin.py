@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECKER = ROOT / "scripts/check_wasmtime_feature_pin.py"
-WASMTIME_ID = "registry+https://github.com/rust-lang/crates.io-index#wasmtime@49.0.2"
+WASMTIME_ID = "registry+https://github.com/rust-lang/crates.io-index#wasmtime@49.0.3"
 HOST_ID = "path+file:///repo/crates/pos-plugin-host#0.1.0"
 RESOLVED = [
     "component-model",
@@ -27,7 +27,7 @@ VALID = {
     "packages": [
         {
             "name": "wasmtime",
-            "version": "49.0.2",
+            "version": "49.0.3",
             "id": WASMTIME_ID,
             "source": "registry+https://github.com/rust-lang/crates.io-index",
             "dependencies": [],
@@ -40,7 +40,7 @@ VALID = {
             "dependencies": [
                 {
                     "name": "wasmtime",
-                    "req": "=49.0.2",
+                    "req": "=49.0.3",
                     "uses_default_features": False,
                     "features": ["component-model", "cranelift", "runtime"],
                 }
@@ -79,7 +79,7 @@ REJECTED = {
     "other source": mutate(
         lambda m: m["packages"][0].update(source="git+https://example.invalid/wasmtime")
     ),
-    "caret requirement": mutate(lambda m: host_dependency(m).update(req="^49.0.2")),
+    "caret requirement": mutate(lambda m: host_dependency(m).update(req="^49.0.3")),
     "default features": mutate(
         lambda m: host_dependency(m).update(uses_default_features=True)
     ),
@@ -108,7 +108,7 @@ REASONS = {
     "missing resolved feature": "resolved features",
     "other version": "resolved to 49.0.1",
     "other source": "not crates.io",
-    "caret requirement": "requirement ^49.0.2",
+    "caret requirement": "requirement ^49.0.3",
     "default features": "default features must be disabled",
     "extra requested feature": "requested features",
     "second dependent": "only pos-plugin-host may depend",
