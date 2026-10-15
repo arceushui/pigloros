@@ -4,6 +4,8 @@
 
 #[path = "key_registry_guarded_read_public/lifecycle_wire_fields.rs"]
 mod lifecycle_wire_fields;
+#[path = "key_registry_guarded_read_public/wire_faults.rs"]
+mod wire_faults;
 
 use ciborium::Value;
 use pos_core::{
