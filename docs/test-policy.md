@@ -73,6 +73,15 @@ Repository
 `.cargo-crap.toml` files are prohibited so a change cannot suppress or truncate
 the report.
 
+The internal-test allowlist includes the `#[cfg(test)]` imported Fork Replay,
+cumulative-budget, native Local replay, and protected-interval cleanup
+companions. Keep these fixtures in their private module trees; moving a private
+unit module beneath `tests/**` does not turn it into a Cargo integration target.
+Each companion has an exact literal path in both baseline and analysis commands,
+mirrored by `scripts/check_cargo_crap_ci_policy.py` and its independent adversarial
+tests. Family wildcards, production neighbours, and score-tolerance changes
+remain rejected; all fixture cases still execute in the workspace test run.
+
 Each successful `main` workflow publishes a 90-day baseline artifact named for
 its exact commit. A pull request downloads the artifact for its base SHA, so
 newly merged functions become existing baseline entries on the next change.
