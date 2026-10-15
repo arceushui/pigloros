@@ -4,7 +4,7 @@
 //! Both pipeline adapters plan a commit the same way: they check the
 //! declaration against the Timeline's visible committed prefix before any
 //! Event is appended, and install the checked rows with the Events. The
-//! checks are written once here, over the [`TickPrefixV1`] each adapter
+//! checks are written once here, over the `TickPrefixV1` each adapter
 //! implements for its own storage. The order is the ADR's: the grant, the
 //! Tick, the Event bindings, then the record. A refusal is the commit's
 //! outcome; a store fault is an error.
