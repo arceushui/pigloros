@@ -178,14 +178,22 @@ enum SqliteReplayAccess {
     HeldMemory,
 }
 
+struct SqliteReplayFixture<'a> {
+    world: &'a World,
+    built: &'a Built,
+    admission: &'a ImportedForkAttributionAdmissionV1,
+}
+
 fn sqlite_replay_case(
     access: SqliteReplayAccess,
-    world: &World,
-    built: &Built,
-    admission: &ImportedForkAttributionAdmissionV1,
+    fixture: &SqliteReplayFixture<'_>,
+    cut: Option<Seq>,
     limits: ForkReplayReadLimitsV1,
     succeeds: bool,
 ) -> Fallible<()> {
+    let world = fixture.world;
+    let built = fixture.built;
+    let admission = fixture.admission;
     let directory = (access != SqliteReplayAccess::HeldMemory)
         .then(tempfile::tempdir)
         .transpose()?;
@@ -249,25 +257,34 @@ fn sqlite_replay_case(
             recovery,
         )?
     };
-    exercise(host, world, &verifier, None, succeeds)?;
+    exercise(host, world, &verifier, cut, succeeds)?;
     drop(keeper);
     Ok(())
 }
 
-fn sqlite_replay_budget_cases(access: SqliteReplayAccess) -> Fallible<()> {
+fn sqlite_replay_budget_cases(access: SqliteReplayAccess, cut: Option<Seq>) -> Fallible<()> {
     let world = World::new(Shape::EmptyUnclassified, false)?;
     assert_eq!(world.children.len(), 1);
     let built = world.build(&Spec::default())?;
     let admission = ImportedForkAttributionAdmissionV1::from_envelope(&built.envelope, 1)?;
     // Selected child/root walk 284, explicit root walk 125, Runtime link 24.
     let lineage_bytes = 284 + 125 + 24;
-    let bytes = 2 * (authority_bytes(&world, &built, &admission)? + lineage_bytes) + 4 * 22;
+    // Only the staged fold follows the cut. Both validations still read the
+    // complete four-Event signed publication, including its inherited prefix.
+    let folded_events = usize::try_from(cut.unwrap_or(Seq::from_u64(4)).as_u64())?;
+    let bytes =
+        2 * (authority_bytes(&world, &built, &admission)? + lineage_bytes) + folded_events * 22;
     // Per validation: lineage 12 freshness/metadata + 8 Event rows; authority
     // publication6 + FAR/IFA6 + key2 + suffix11 + final chain14 + registry2
     // + absent local-key lookup1. Visits: lineage3 + suffix1 + chain2.
     let rows = 2 * (12 + 8 + 6 + 6 + 2 + 11 + 14 + 2 + 1);
     let visits = 2 * (3 + 1 + 2);
     assert_eq!((rows, visits), (124, 12));
+    let fixture = SqliteReplayFixture {
+        world: &world,
+        built: &built,
+        admission: &admission,
+    };
     for (bytes, rows, visits, succeeds) in [
         (bytes, rows, visits, true),
         (bytes + 1, rows, visits, true),
@@ -279,9 +296,8 @@ fn sqlite_replay_budget_cases(access: SqliteReplayAccess) -> Fallible<()> {
     ] {
         sqlite_replay_case(
             access,
-            &world,
-            &built,
-            &admission,
+            &fixture,
+            cut,
             ForkReplayReadLimitsV1::new(8, visits, rows, bytes, 30_000_000)?,
             succeeds,
         )?;
@@ -291,16 +307,39 @@ fn sqlite_replay_budget_cases(access: SqliteReplayAccess) -> Fallible<()> {
 
 #[test]
 fn imported_sqlite_rw_replay_keeps_one_exact_budget_through_final_validation() -> Fallible<()> {
-    sqlite_replay_budget_cases(SqliteReplayAccess::ReadWrite)
+    sqlite_replay_budget_cases(SqliteReplayAccess::ReadWrite, None)
 }
 
 #[test]
 fn imported_sqlite_ro_replay_keeps_one_exact_budget_through_final_validation() -> Fallible<()> {
-    sqlite_replay_budget_cases(SqliteReplayAccess::ReadOnly)
+    sqlite_replay_budget_cases(SqliteReplayAccess::ReadOnly, None)
 }
 
 #[test]
 fn imported_sqlite_held_memory_replay_keeps_one_exact_budget_through_final_validation(
 ) -> Fallible<()> {
-    sqlite_replay_budget_cases(SqliteReplayAccess::HeldMemory)
+    sqlite_replay_budget_cases(SqliteReplayAccess::HeldMemory, None)
+}
+
+fn sqlite_replay_at_budget_cases(access: SqliteReplayAccess) -> Fallible<()> {
+    for cut in [2, 4] {
+        sqlite_replay_budget_cases(access, Some(Seq::from_u64(cut)))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn imported_sqlite_rw_replay_at_keeps_full_authority_budget_at_both_cuts() -> Fallible<()> {
+    sqlite_replay_at_budget_cases(SqliteReplayAccess::ReadWrite)
+}
+
+#[test]
+fn imported_sqlite_ro_replay_at_keeps_full_authority_budget_at_both_cuts() -> Fallible<()> {
+    sqlite_replay_at_budget_cases(SqliteReplayAccess::ReadOnly)
+}
+
+#[test]
+fn imported_sqlite_held_memory_replay_at_keeps_full_authority_budget_at_both_cuts() -> Fallible<()>
+{
+    sqlite_replay_at_budget_cases(SqliteReplayAccess::HeldMemory)
 }
