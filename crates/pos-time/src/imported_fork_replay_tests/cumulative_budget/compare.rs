@@ -21,13 +21,16 @@ use std::sync::{
     Arc,
 };
 
-fn import_arm(
-    store: &mut MemoryStore,
+pub(super) fn import_arm<S>(
+    store: &mut S,
     world: &World,
     built: &Built,
     admission: &ImportedForkAttributionAdmissionV1,
     index: usize,
-) -> Fallible<ForkReplayRequirementV1> {
+) -> Fallible<ForkReplayRequirementV1>
+where
+    S: EventStore + ForkAttributionAuthorityImportPortV1 + ForkManifestPublicationPortV1,
+{
     pin_policy(store, &built.policy)?;
     let imported = store.import_verified(&request_for(world, built))?;
     assert_eq!(&imported.admission, admission);
@@ -42,7 +45,7 @@ fn import_arm(
     )?)
 }
 
-fn exercise(
+pub(super) fn exercise(
     mut host: ErasureExecutionHostV1,
     world: &World,
     verifier: &ImportedVerifier,
