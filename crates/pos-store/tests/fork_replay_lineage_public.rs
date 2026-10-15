@@ -252,7 +252,7 @@ fn native_gate_denials<
     S: EventStore + ForkReplayAuthorityReadPortV1 + ErasureInventoryPersistencePortV1,
 >(
     new_store: impl Fn() -> Result<S, Box<dyn std::error::Error>>,
-    sqlite: bool,
+    expected_ancestor_bytes: usize,
 ) -> TestResult {
     for ancestor in [false, true] {
         for frozen in [false, true] {
@@ -282,11 +282,7 @@ fn native_gate_denials<
             // follows one actual Fork carrier plus its internal parent ID:
             // Memory metadata49 + visitedID16 + parentID16; SQLite also
             // copies key26, rawID26 and rawParent26. Freshness rows are scratch.
-            let prefix = if ancestor {
-                49 + 16 + 16 + if sqlite { 3 * 26 } else { 0 }
-            } else {
-                0
-            };
+            let prefix = if ancestor { expected_ancestor_bytes } else { 0 };
             assert_eq!(budget.remaining_native_bytes(), 1_024 - prefix);
             // A native gate denial is not a failed ledger debit. Keep the
             // closed error distinct from resource/time exhaustion.
@@ -302,6 +298,6 @@ fn native_gate_denials<
 
 #[test]
 fn real_native_gate_denials_keep_both_closed_mappings_on_both_adapters() -> TestResult {
-    native_gate_denials(|| Ok(MemoryStore::new()), false)?;
-    native_gate_denials(|| Ok(SqliteStore::open(":memory:")?), true)
+    native_gate_denials(|| Ok(MemoryStore::new()), 49 + 16 + 16)?;
+    native_gate_denials(|| Ok(SqliteStore::open(":memory:")?), 3 * 26 + 49 + 16 + 16)
 }
