@@ -1,6 +1,8 @@
-//! Independent complete `SQLite` Replay totals for the empty imported segment.
+//! Independent complete `SQLite` Replay/Replay-at/Compare totals.
 //!
 //! Neither a native cost helper nor a measured ledger supplies these units.
+
+mod compare;
 
 use super::super::{
     fixture::{pin_policy, request_for, Built, Fallible, Shape, Spec, World},
@@ -59,8 +61,8 @@ fn registry_bytes(world: &World) -> Fallible<usize> {
     Ok(466 + 3 * identity + 2 * scope + 2 * 64 + 8 + 1 + 4 * owner + 44)
 }
 
-fn final_chain_bytes(world: &World) -> Fallible<usize> {
-    let child = world.child_at(0)?;
+fn final_chain_bytes(world: &World, child_index: usize) -> Fallible<usize> {
+    let child = world.child_at(child_index)?;
     assert_eq!(child.parent, world.root);
     assert_eq!(child.parent_cut, 4);
     assert!(world.source.read_own(child.id, SeqRange::all())?.is_empty());
@@ -98,6 +100,7 @@ fn authority_bytes(
     world: &World,
     built: &Built,
     admission: &ImportedForkAttributionAdmissionV1,
+    child_index: usize,
 ) -> Fallible<usize> {
     let closure = ForkAttributionImportClosureV1::validate(&built.envelope)?;
     assert!(closure.classifier().is_none());
@@ -105,7 +108,10 @@ fn authority_bytes(
     assert!(built.envelope.unsigned().input().key_tombstone.is_none());
     let operation = closure.publication_operation();
     let projection = operation.projection();
-    assert_eq!(projection.input().child_timeline_id, world.child_at(0)?.id);
+    assert_eq!(
+        projection.input().child_timeline_id,
+        world.child_at(child_index)?.id
+    );
     assert!(world
         .registry
         .key_record(projection.input().signing_identity)
@@ -164,7 +170,7 @@ fn authority_bytes(
         + (1 + 32)
         + (owner + 1 + 8 + 1 + 32 + 1 + 32)
         + registry_bytes(world)?
-        + final_chain_bytes(world)?
+        + final_chain_bytes(world, child_index)?
         + projection_fields
         + 32
         + imported_operation
@@ -182,6 +188,25 @@ struct SqliteReplayFixture<'a> {
     world: &'a World,
     built: &'a Built,
     admission: &'a ImportedForkAttributionAdmissionV1,
+}
+
+fn whole_sqlite_budget(
+    fixture: &SqliteReplayFixture<'_>,
+    child_index: usize,
+    folded_events: usize,
+) -> Fallible<(usize, usize, usize)> {
+    // Selected child/root walk 284, explicit root walk 125, Runtime link 24.
+    let lineage_bytes = 284 + 125 + 24;
+    let bytes = 2
+        * (authority_bytes(fixture.world, fixture.built, fixture.admission, child_index)?
+            + lineage_bytes)
+        + folded_events * 22;
+    // Per validation: lineage 12 freshness/metadata + 8 Event rows; authority
+    // publication6 + FAR/IFA6 + key2 + suffix11 + final chain14 + registry2
+    // + absent local-key lookup1. Visits: lineage3 + suffix1 + chain2.
+    let rows = 2 * (12 + 8 + 6 + 6 + 2 + 11 + 14 + 2 + 1);
+    let visits = 2 * (3 + 1 + 2);
+    Ok((bytes, rows, visits))
 }
 
 fn sqlite_replay_case(
@@ -267,24 +292,16 @@ fn sqlite_replay_budget_cases(access: SqliteReplayAccess, cut: Option<Seq>) -> F
     assert_eq!(world.children.len(), 1);
     let built = world.build(&Spec::default())?;
     let admission = ImportedForkAttributionAdmissionV1::from_envelope(&built.envelope, 1)?;
-    // Selected child/root walk 284, explicit root walk 125, Runtime link 24.
-    let lineage_bytes = 284 + 125 + 24;
     // Only the staged fold follows the cut. Both validations still read the
     // complete four-Event signed publication, including its inherited prefix.
     let folded_events = usize::try_from(cut.unwrap_or(Seq::from_u64(4)).as_u64())?;
-    let bytes =
-        2 * (authority_bytes(&world, &built, &admission)? + lineage_bytes) + folded_events * 22;
-    // Per validation: lineage 12 freshness/metadata + 8 Event rows; authority
-    // publication6 + FAR/IFA6 + key2 + suffix11 + final chain14 + registry2
-    // + absent local-key lookup1. Visits: lineage3 + suffix1 + chain2.
-    let rows = 2 * (12 + 8 + 6 + 6 + 2 + 11 + 14 + 2 + 1);
-    let visits = 2 * (3 + 1 + 2);
-    assert_eq!((rows, visits), (124, 12));
     let fixture = SqliteReplayFixture {
         world: &world,
         built: &built,
         admission: &admission,
     };
+    let (bytes, rows, visits) = whole_sqlite_budget(&fixture, 0, folded_events)?;
+    assert_eq!((rows, visits), (124, 12));
     for (bytes, rows, visits, succeeds) in [
         (bytes, rows, visits, true),
         (bytes + 1, rows, visits, true),
