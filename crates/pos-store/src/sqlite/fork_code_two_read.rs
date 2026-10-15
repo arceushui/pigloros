@@ -8,8 +8,13 @@
 //! 6. An imported `FAR1` sits in `fork_admissions` next to the local rows, where
 //! the strict local decoder rejects it, so only this module decodes code 2.
 
+mod retained_key;
+
 use pos_core::{Hasher, ImportedForkClassifierGraphV1, TimelineId};
-use rusqlite::{params, Connection};
+use retained_key::retained_key_bytes_with_context;
+#[cfg(test)]
+use rusqlite::params;
+use rusqlite::Connection;
 
 use super::{
     fork_replay_admission::{admission_blob_with_context, AdmissionRowV1},
@@ -19,10 +24,12 @@ use super::{
     },
     sqlite_classified_authority_graph_with_context, sqlite_local_fork_admission_with_context,
 };
+#[cfg(test)]
+use crate::fork_event_authority::ValidatedImportV1;
 use crate::{
     fork_event_authority::{
         imported_admission_matches, imported_graph_matches, AuthorityValidatorV1,
-        ValidatedAdmissionV1, ValidatedGraphV1, ValidatedImportV1,
+        ValidatedAdmissionV1, ValidatedGraphV1,
     },
     fork_manifest_publication::{
         PublicationSourceErrorV1, PublicationSourceResultV1, RetainedImportedKeyV1,
@@ -31,109 +38,6 @@ use crate::{
     fork_replay::NativeReadContextV1,
     ForkEventAuthorityErrorV1 as AuthorityError,
 };
-
-/// The `IKR1` and `IKT1` of an import, selected through the import admission
-/// whose stored full-envelope digest is the `IFA1` one (ADR-105 erratum E12).
-const RETAINED_KEY_SQL: &str = "SELECT evidence.ikr1_cbor, evidence.ikt1_cbor
-    FROM imported_fork_key_evidence AS evidence
-    JOIN imported_fork_attribution_admissions AS admission
-      ON admission.import_operation_id = evidence.import_operation_id
-    WHERE evidence.import_operation_id = ?1 AND admission.full_envelope_digest = ?2";
-
-const RETAINED_KEY_PROBE_SQL: &str = "SELECT
-    typeof(evidence.ikr1_cbor) = 'blob', length(evidence.ikr1_cbor),
-    evidence.ikt1_cbor IS NULL OR typeof(evidence.ikt1_cbor) = 'blob', length(evidence.ikt1_cbor)
-    FROM imported_fork_key_evidence AS evidence
-    JOIN imported_fork_attribution_admissions AS admission
-      ON admission.import_operation_id = evidence.import_operation_id
-    WHERE evidence.import_operation_id = ?1 AND admission.full_envelope_digest = ?2";
-
-struct StoredRetainedKeyV1 {
-    record: Vec<u8>,
-    tombstone: Option<Vec<u8>>,
-}
-
-struct RetainedKeyLengthsV1 {
-    record: usize,
-    tombstone: Option<usize>,
-}
-
-fn retained_key_lengths_with_context(
-    conn: &Connection,
-    import: ValidatedImportV1,
-    context: &mut NativeReadContextV1<'_, '_>,
-) -> PublicationSourceResultV1<RetainedKeyLengthsV1> {
-    use PublicationSourceErrorV1::{Invalid, Storage};
-    let arguments = params![
-        import.import_operation_id.as_bytes().as_slice(),
-        import.full_envelope_digest.as_bytes().as_slice()
-    ];
-    context.check().map_err(|_| Invalid)?;
-    let mut statement = conn.prepare(RETAINED_KEY_PROBE_SQL).map_err(|_| Storage)?;
-    context.check().map_err(|_| Invalid)?;
-    let mut rows = statement.query(arguments).map_err(|_| Storage)?;
-    context.row_available().map_err(|_| Invalid)?;
-    let row = rows.next().map_err(|_| Storage)?;
-    context.check().map_err(|_| Invalid)?;
-    let row = row.ok_or(Invalid)?;
-    context.suffix_row().map_err(|_| Invalid)?;
-    let record_is_blob: bool = row.get(0).map_err(|_| Storage)?;
-    let tombstone_is_blob_or_null: bool = row.get(2).map_err(|_| Storage)?;
-    if !record_is_blob || !tombstone_is_blob_or_null {
-        return Err(Storage);
-    }
-    let record_length = row.get::<_, i64>(1).map_err(|_| Storage)?;
-    let record_length = usize::try_from(record_length).map_err(|_| Invalid)?;
-    let tombstone_length = row
-        .get::<_, Option<i64>>(3)
-        .map_err(|_| Storage)?
-        .map(usize::try_from)
-        .transpose()
-        .map_err(|_| Invalid)?;
-    if record_length > pos_core::MAX_IMPORTED_KEY_RECORD_BYTES_V1
-        || tombstone_length
-            .is_some_and(|length| length > pos_core::MAX_IMPORTED_KEY_TOMBSTONE_BYTES_V1)
-    {
-        return Err(Invalid);
-    }
-    context.check().map_err(|_| Invalid)?;
-    Ok(RetainedKeyLengthsV1 {
-        record: record_length,
-        tombstone: tombstone_length,
-    })
-}
-
-/// Type and size gates precede both raw getters on the same held snapshot.
-fn retained_key_bytes_with_context(
-    conn: &Connection,
-    import: ValidatedImportV1,
-    context: &mut NativeReadContextV1<'_, '_>,
-) -> PublicationSourceResultV1<StoredRetainedKeyV1> {
-    use PublicationSourceErrorV1::{Invalid, Storage};
-    let lengths = retained_key_lengths_with_context(conn, import, context)?;
-    let arguments = params![
-        import.import_operation_id.as_bytes().as_slice(),
-        import.full_envelope_digest.as_bytes().as_slice()
-    ];
-    context.check().map_err(|_| Invalid)?;
-    let mut fetch = conn.prepare(RETAINED_KEY_SQL).map_err(|_| Storage)?;
-    context.check().map_err(|_| Invalid)?;
-    let mut fetched = fetch.query(arguments).map_err(|_| Storage)?;
-    context.row_available().map_err(|_| Invalid)?;
-    let row = fetched.next().map_err(|_| Storage)?;
-    context.check().map_err(|_| Invalid)?;
-    let row = row.ok_or(Invalid)?;
-    context.suffix_row().map_err(|_| Invalid)?;
-    context.bytes(lengths.record).map_err(|_| Invalid)?;
-    let record = row.get::<_, Vec<u8>>(0).map_err(|_| Storage)?;
-    context.check().map_err(|_| Invalid)?;
-    if let Some(length) = lengths.tombstone {
-        context.bytes(length).map_err(|_| Invalid)?;
-    }
-    let tombstone = row.get::<_, Option<Vec<u8>>>(1).map_err(|_| Storage)?;
-    context.check().map_err(|_| Invalid)?;
-    Ok(StoredRetainedKeyV1 { record, tombstone })
-}
 
 /// Read one child's `FAR1` under an explicit R6.9 validator.
 pub(super) fn sqlite_validated_admission(
