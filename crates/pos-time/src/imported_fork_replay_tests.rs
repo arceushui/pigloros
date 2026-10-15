@@ -3,6 +3,8 @@
 #[path = "../../pos-store/tests/support/fae1_fixture.rs"]
 pub mod fixture;
 
+mod cumulative_budget;
+
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
@@ -89,6 +91,7 @@ struct ImportedVerifier {
     secondary: Option<(TimelineId, ForkReplayRequirementV1)>,
     fault: Fault,
     fault_target: Option<TimelineId>,
+    limits_override: Option<ForkReplayReadLimitsV1>,
     admissions: AtomicUsize,
 }
 
@@ -151,6 +154,7 @@ impl WorldReplayVerifierV1 for ImportedVerifier {
         };
         let limits = ForkReplayReadLimitsV1::new(8, nodes, rows, bytes, 30_000_000)
             .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)?;
+        let limits = self.limits_override.unwrap_or(limits);
         Ok(
             pos_runtime::world_replay::test_verified_world_replay_with_fork_attribution(
                 pos_runtime::world_replay::test_verified_world_replay(
@@ -306,6 +310,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                     secondary: None,
                     fault,
                     fault_target: None,
+                    limits_override: None,
                     admissions: AtomicUsize::new(0),
                 })
             };
@@ -467,6 +472,7 @@ fn compare_checks_both_imported_arms_before_folding_and_after_both_folds() -> Fa
                 } else {
                     Some(requirements[fault_arm].child_timeline_id())
                 },
+                limits_override: None,
                 admissions: AtomicUsize::new(0),
             })
         };
@@ -587,6 +593,7 @@ fn reservation_verifier(
                 .then_some((requirements[1].child_timeline_id(), requirements[1])),
             fault: Fault::None,
             fault_target: None,
+            limits_override: None,
             admissions: AtomicUsize::new(0),
         },
         writer: Mutex::new(writer),
