@@ -590,7 +590,10 @@ where
         ),
     ))?;
     assert!(admitted.is_accepted());
-    assert_eq!(store.protected_logical_head(timeline)?, Seq::from_u64(head + 1));
+    assert_eq!(
+        store.protected_logical_head(timeline)?,
+        Seq::from_u64(head + 1)
+    );
     assert!(store.get_timeline(timeline)?.is_none());
     Ok(())
 }
