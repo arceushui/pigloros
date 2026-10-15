@@ -1,8 +1,11 @@
 //! Legal imported ancestry, publication cuts and nonempty atomic installs.
 //!
-//! Every intermediate import is published at its inherited cut. Only the
-//! source host signs Events; the destination imports code-2 evidence and never
-//! obtains signing or append authority from it.
+//! The all-code-2 matrix publishes intermediate imports at inherited cuts.
+//! The privacy fixture instead keeps ordinary signed intermediates. Only the
+//! source host signs Events; code-2 imports never grant destination signing or
+//! append authority.
+
+mod intermediate_privacy;
 
 use crate::imported_fork_replay_tests::fixture::{pin_policy, Fallible, Port, Shape, Spec, World};
 use crate::test_support::{with_release, ProtectedFixture};
@@ -321,6 +324,7 @@ fn invoke(
     fixture: &ProtectedFixture,
     consumer: Consumer,
     timelines: [TimelineId; 2],
+    own_cut: Seq,
 ) -> Result<Option<crate::ForkDiff>, CoreError> {
     let mut reads = host.read_sender().map_err(crate::host_error_to_core)?;
     let [a, b] = registries;
@@ -336,14 +340,14 @@ fn invoke(
         .map(|()| None),
         Consumer::ReplayAtInherited | Consumer::ReplayAtOwn => {
             let cut = if matches!(consumer, Consumer::ReplayAtInherited) {
-                2
+                Seq::from_u64(2)
             } else {
-                5
+                own_cut
             };
             crate::replay_at(
                 &mut reads,
                 timelines[0],
-                Seq::from_u64(cut),
+                cut,
                 a,
                 closures[0],
                 release,
@@ -461,6 +465,7 @@ fn exercise(
         fixture,
         scenario.consumer,
         timelines,
+        Seq::from_u64(5),
     );
     let supported_depth = verifier.sources[0].len() <= 9;
     let succeeds = supported_depth && scenario.fault == Fault::None;
@@ -558,26 +563,26 @@ fn run_cases(
     Ok(())
 }
 
-/// Admit a legal later root Event without changing any imported child.
-/// Every child still inherits only the root prefix through sequence four.
-fn hide_common_root<S>(store: &mut S, root: TimelineId) -> Fallible<()>
+/// Admit a legal later ordinary-member Event beyond an imported child's cut.
+/// The fixture supplies the independently known pre-admission logical head.
+fn hide_geographic_member<S>(store: &mut S, timeline: TimelineId, head: u64) -> Fallible<()>
 where
     S: EventStore + OwnTracksEnrollmentStore + GeoLocationAdmissionStore,
 {
-    assert_eq!(store.protected_logical_head(root)?, Seq::from_u64(4));
+    assert_eq!(store.protected_logical_head(timeline)?, Seq::from_u64(head));
     let entity = EntityId::new();
     let consent = ([0x41; 32], 8, [0x42; 32]);
     store.pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
-        root,
+        timeline,
         entity,
         GeoLocationAdmissionFenceV1::new(7, consent, (1, false, 9)),
         [0x43; 32],
     ))?;
     let admitted = store.admit_geo_location(GeoLocationAdmissionRequestV1::from_input(
         GeoLocationAdmissionInputV1::new(
-            root,
+            timeline,
             entity,
-            CanonicalBytes::from_static(b"late root geographic admission"),
+            CanonicalBytes::from_static(b"late ordinary-member geographic admission"),
             7,
             consent,
             (1, false, 10),
@@ -585,8 +590,8 @@ where
         ),
     ))?;
     assert!(admitted.is_accepted());
-    assert_eq!(store.protected_logical_head(root)?, Seq::from_u64(5));
-    assert!(store.get_timeline(root)?.is_none());
+    assert_eq!(store.protected_logical_head(timeline)?, Seq::from_u64(head + 1));
+    assert!(store.get_timeline(timeline)?.is_none());
     Ok(())
 }
 
@@ -633,7 +638,7 @@ fn late_common_root_sqlite(
 ) -> Fallible<()> {
     let mut store = SqliteStore::open(path)?;
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
-    hide_common_root(&mut store, world.root)?;
+    hide_geographic_member(&mut store, world.root, 4)?;
     drop(store);
     let host = ErasureExecutionHostV1::open_with_authority(
         StoreConfig::Sqlite {
@@ -674,7 +679,7 @@ fn imported_nested_and_max_depth_histories_keep_exact_cuts_and_atomic_public_con
             if depth <= 8 {
                 let mut memory = MemoryStore::new();
                 assert_eq!(populate(&mut memory, &world, destroyed)?, required);
-                hide_common_root(&mut memory, world.root)?;
+                hide_geographic_member(&mut memory, world.root, 4)?;
                 let host = ErasureExecutionHostV1::recover_memory_fixture_with_authority(
                     memory,
                     &composition,
@@ -730,5 +735,6 @@ fn imported_nested_and_max_depth_histories_keep_exact_cuts_and_atomic_public_con
             }
         }
     }
+    intermediate_privacy::run_cases()?;
     Ok(())
 }
