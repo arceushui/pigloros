@@ -6,15 +6,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pos_core::{EntityId, Kind};
+use pos_core::{EntityId, Hash, Kind};
 use pos_runtime::community_plugin_host::{
     plugin_output_digest_v1, AtomicCommitFailureV1, ComponentTrapClassV1, EventDraftV1, FieldRefV1,
     GuestPluginErrorV1, MeteringV1, PluginErrorCodeV1, RevocationBasisV1, TraceAnnotationV1,
     TrapReproductionV1, TrustDenialBasisV1,
 };
+use pos_runtime::DirectInputRefV1;
 use ulid::Ulid;
 
-use super::output::{map_draft, mapped_drafts};
+use super::output::{map_draft, mapped_drafts, mapped_output};
 use super::*;
 use crate::launch::WorkerProgramV1;
 use crate::test_support::{self, community_pin, err, ok, pin_of, DriverPlugin, METERING};
@@ -131,6 +132,13 @@ fn offer(driver: &CommunityDriverV1, handle: &CommunityPluginHandleV1) {
     let () = ok(handle.offer_authorization(authorization));
 }
 
+/// The `NodeDigest` inputs a guest digest list declares.
+fn node_inputs<const N: usize>(digests: [[u8; 32]; N]) -> [DirectInputRefV1; N] {
+    digests.map(|digest| DirectInputRefV1::NodeDigest {
+        digest: Hash::from_bytes(digest),
+    })
+}
+
 #[test]
 fn a_draft_maps_to_an_event_draft_or_is_rejected() {
     let mapped = ok(map_draft(&EventDraftV1 {
@@ -138,27 +146,59 @@ fn a_draft_maps_to_an_event_draft_or_is_rejected() {
         ..draft("community.event", b"payload")
     }));
     let entity = EntityId::from_ulid(Ulid::from(u128::from_be_bytes(*b"0123456789abcdef")));
-    assert_eq!(mapped.entity, entity);
-    assert_eq!(mapped.event_type, Kind::new("community.event"));
-    assert_eq!(mapped.payload.as_slice(), b"payload");
-    assert_eq!(mapped.causation_id, None);
+    assert_eq!(mapped.draft.entity, entity);
+    assert_eq!(mapped.draft.event_type, Kind::new("community.event"));
+    assert_eq!(mapped.draft.payload.as_slice(), b"payload");
+    assert_eq!(mapped.draft.causation_id, None);
+    assert!(mapped.direct_inputs.is_empty());
 
-    let with_dependency = EventDraftV1 {
-        dependency_digests: vec![[1; 32]],
-        ..draft("community.event", b"p")
-    };
     for malformed in [draft("Community.Event", b"p"), draft("", b"p")] {
         assert_eq!(map_draft(&malformed), Err(Error::InvalidGuestOutput));
     }
-    // Dependency digests have nowhere to go: a distinct, closed refusal.
-    assert_eq!(map_draft(&with_dependency), Err(Error::UnsupportedSchema));
+}
+
+#[test]
+fn a_drafts_dependency_digests_map_to_its_node_digest_inputs() {
+    let with_dependencies = EventDraftV1 {
+        dependency_digests: vec![[1; 32], [2; 32]],
+        ..draft("community.event", b"p")
+    };
+    let mapped = ok(map_draft(&with_dependencies));
+    let inputs = node_inputs([[1; 32], [2; 32]]);
+    assert_eq!(mapped.direct_inputs, inputs);
+}
+
+#[test]
+fn consumed_dependencies_map_to_step_inputs_and_annotations_stay_dropped() {
+    let mut consumed = output(vec![EventDraftV1 {
+        dependency_digests: vec![[7; 32]],
+        ..draft("a.b", b"one")
+    }]);
+    consumed.consumed_dependencies = vec![[3; 32], [4; 32]];
+    let step = ok(mapped_output(&consumed, 100));
+    let step_inputs = node_inputs([[3; 32], [4; 32]]);
+    assert_eq!(step.step_inputs(), step_inputs);
+    assert_eq!(step.outputs.len(), 1);
+    let draft_input = DirectInputRefV1::NodeDigest {
+        digest: Hash::from_bytes([7; 32]),
+    };
+    assert_eq!(step.outputs[0].direct_inputs, [draft_input]);
+    // The fixture carries one annotation; it declares nothing.
+    assert_eq!(consumed.trace_annotations.len(), 1);
+
+    let none = ok(mapped_output(&output(Vec::new()), 0));
+    assert!(none.step_inputs().is_empty());
+    assert_eq!(
+        mapped_output(&consumed, 2).map(|_| ()),
+        Err(Error::OutputLimitExceeded)
+    );
 }
 
 #[test]
 fn drafts_are_mapped_in_the_guests_order_within_the_event_bytes_limit() {
     let two = output(vec![draft("a.b", b"one"), draft("c.d", b"two")]);
     let drafts = ok(mapped_drafts(&two, 6));
-    let payloads: Vec<&[u8]> = drafts.iter().map(|d| d.payload.as_slice()).collect();
+    let payloads: Vec<&[u8]> = drafts.iter().map(|d| d.draft.payload.as_slice()).collect();
     assert_eq!(payloads, [&b"one"[..], &b"two"[..]]);
     assert_eq!(mapped_drafts(&two, 5), Err(Error::OutputLimitExceeded));
     // Nothing above the limit is mapped partly; a bad draft stops the vector.

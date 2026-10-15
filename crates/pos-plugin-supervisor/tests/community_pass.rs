@@ -10,14 +10,15 @@
 use std::time::Duration;
 
 use pos_core::{
-    CanonicalBytes, CoreError, EntityId, Event, EventDraft, EventStore, Kind, PipelineOutcomeV1,
+    CanonicalBytes, CoreError, CounterfactualDependencyErrorV1, EntityId, Event, EventDraft,
+    EventStore, FactualDependencyErrorV1, Kind, PipelineOutcomeV1,
 };
 use pos_plugin_supervisor::pass_harness::{initial, LostPort, World};
 use pos_plugin_supervisor::test_support::{self, err, ok};
 use pos_plugin_supervisor::{CommunityPluginHandleV1, ReceiptDispositionV1};
 use pos_runtime::community_plugin_host::{
     classify_pass_failure, AtomicCommitFailureV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
-    HostFailureClassV1, PassFailureV1, TrapReproductionV1,
+    PassFailureV1, TrapReproductionV1,
 };
 use pos_runtime::{
     PluginAvailabilityV1, PluginCompositionErrorV1, RuntimeError, ScheduledDriverBindingV1,
@@ -208,18 +209,52 @@ fn an_invalid_output_discards_the_pass_and_only_marks_that_plugin() {
     }
 }
 
-/// R7-F4: a valid guest output the host cannot commit is authoritative.
+/// An unknown guest digest is refused at admission, not by the adapter: it
+/// is the host's typed, deterministic result and marks no Plugin (D22-A).
 #[test]
-fn a_draft_with_dependency_digests_is_unsupported_schema_and_authoritative() {
-    // `check_failure` asserts the whole pass is discarded: no Event, no state,
-    // no quarantine, and the receipt disposition is `Discarded`.
-    let unsupported = Error::UnsupportedSchema;
-    let raised = check_failure(&failure(b"deps:community.beta", unsupported, None));
-    let PassFailureV1::Host(host) = classify_pass_failure(&raised) else {
-        std::panic::resume_unwind(Box::new("the pass raised no host error"))
-    };
-    assert_eq!(host, unsupported);
-    assert_eq!(host.class(), HostFailureClassV1::Authoritative);
+fn an_unknown_dependency_digest_is_not_admitted_and_marks_no_plugin() {
+    let mut world = new_world();
+    let alpha = world.add("alpha", "community.alpha", b"draft:community.alpha", PROMPT);
+    let beta = world.add("beta", "community.beta", b"deps:community.beta", PROMPT);
+    let raised = err(world.pass());
+    assert!(matches!(
+        raised,
+        RuntimeError::DependencyDeclaration(FactualDependencyErrorV1::UnresolvedInput)
+    ));
+    assert_eq!(
+        classify_pass_failure(&raised),
+        PassFailureV1::Host(NOT_ADMITTED)
+    );
+    // The whole pass is discarded: no Event, no state, no quarantine.
+    assert!(world.events().is_empty());
+    for handle in [&alpha, &beta] {
+        assert_eq!(handle.committed_state(), initial());
+        assert_eq!(handle.last_failure(), None);
+        assert_eq!(handle.availability(), PluginAvailabilityV1::Available);
+    }
+}
+
+/// A Driver may declare `MAX_STEP_INPUTS_PER_DRIVER_V1` step inputs; one more
+/// consumed dependency is refused.
+#[test]
+fn too_many_consumed_dependencies_are_out_of_bounds_and_mark_no_plugin() {
+    let mut world = new_world();
+    let beta = world.add("beta", "community.beta", b"consumed:community.beta", PROMPT);
+    let raised = err(world.pass());
+    assert!(matches!(
+        raised,
+        RuntimeError::DependencyDeclaration(FactualDependencyErrorV1::Record(
+            CounterfactualDependencyErrorV1::FieldOutOfBounds
+        ))
+    ));
+    assert_eq!(
+        classify_pass_failure(&raised),
+        PassFailureV1::Host(NOT_ADMITTED)
+    );
+    assert!(world.events().is_empty());
+    assert_eq!(beta.committed_state(), initial());
+    assert_eq!(beta.last_failure(), None);
+    assert_eq!(beta.availability(), PluginAvailabilityV1::Available);
 }
 
 #[test]
