@@ -10,6 +10,7 @@
 //! activation decisions.
 
 mod build;
+mod in_memory;
 #[cfg(target_os = "linux")]
 mod local;
 mod oci;
@@ -62,6 +63,7 @@ fn parse_jcs_object(bytes: &[u8]) -> Result<serde_json::Value, ReleaseSourceErro
 }
 
 pub use build::{build_oci_closure_v1, ReleaseClosureInputV1};
+pub use in_memory::{InMemoryReleaseEntryV1, InMemoryReleaseErrorV1, InMemoryReleaseSourceV1};
 #[cfg(target_os = "linux")]
 pub use local::PublishOutcomeV1;
 #[cfg(target_os = "linux")]

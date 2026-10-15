@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use pos_conformance::PluginTrustPolicyAnchorV1;
 use pos_core::event::{CanonicalBytes, EventDraft, Kind};
 use pos_core::ids::{EntityId, TimelineId};
-use pos_core::trusted_clock::TrustedWallSourceV1;
+use pos_core::trusted_clock::PluginTrustWallSourceV1;
 use pos_crypto::plugin_execution::PluginExecutionProjectionV1;
 use pos_crypto::plugin_manifest::PluginManifestErrorV1;
 use pos_crypto::plugin_trust::VerifiedPluginTrustEvidenceV1;
@@ -25,6 +25,11 @@ use pos_plugin_release::{
 use pos_store::plugin_trust_registry::{ActivationEventInputV1, PluginTrustPolicyRegistryV1};
 use thiserror::Error;
 
+use super::error::CommunityPluginHostErrorV1;
+use super::gate::{
+    host_error_for_registry_v1, host_error_for_release_signature_v1,
+    host_error_for_release_source_v1, host_error_for_trust_authorization_v1,
+};
 use super::{cbor, PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1};
 
 #[cfg(test)]
@@ -98,7 +103,7 @@ pub fn install_community_release_v1(
     source: &impl ReleaseSourceV1,
     address: &BundleAddressV1,
     registry: &mut impl PluginTrustPolicyRegistryV1,
-    wall: &mut impl TrustedWallSourceV1,
+    wall: &mut impl PluginTrustWallSourceV1,
     request: &CommunityInstallRequestV1<'_>,
 ) -> Result<InstalledPluginReleaseV1, CommunityInstallErrorV1> {
     let bundle = source
@@ -124,6 +129,40 @@ pub fn install_community_release_v1(
         },
     )
     .map_err(CommunityInstallErrorV1::Install)
+}
+
+/// The host error of a failed community release install (ADR-061 revision 8 decision 5).
+///
+/// The mapping is total and composes the four existing ones: the source rows of the gate, the
+/// release signature rows, the trust authorization rows (the installer's own
+/// `authorize_release`, with the registry's wrapped trust errors) and the registry rows. A PMF1
+/// that failed to decode or bind is `InvalidManifest`. The `Source` and `Manifest` variants of
+/// the wrapped installer error cannot occur through [`install_community_release_v1()`], but are
+/// mapped like their outer twins.
+#[must_use]
+pub const fn host_error_for_install_v1(
+    error: CommunityInstallErrorV1,
+) -> CommunityPluginHostErrorV1 {
+    match error {
+        CommunityInstallErrorV1::Source(inner) => host_error_for_release_source_v1(inner),
+        CommunityInstallErrorV1::Manifest(_) => CommunityPluginHostErrorV1::InvalidManifest,
+        CommunityInstallErrorV1::Install(inner) => host_error_for_installer_v1(&inner),
+    }
+}
+
+/// The host error of a refusal of the signed installer.
+const fn host_error_for_installer_v1(
+    error: &PluginReleaseInstallErrorV1,
+) -> CommunityPluginHostErrorV1 {
+    match *error {
+        PluginReleaseInstallErrorV1::Source(inner) => host_error_for_release_source_v1(inner),
+        PluginReleaseInstallErrorV1::Manifest(_) => CommunityPluginHostErrorV1::InvalidManifest,
+        PluginReleaseInstallErrorV1::Authorization(inner) => {
+            host_error_for_trust_authorization_v1(inner)
+        }
+        PluginReleaseInstallErrorV1::Signature(inner) => host_error_for_release_signature_v1(inner),
+        PluginReleaseInstallErrorV1::Registry(inner) => host_error_for_registry_v1(inner),
+    }
 }
 
 /// The activation Event draft of one release on `target`.
