@@ -1055,9 +1055,9 @@ fn local_key_agrees(
 ) -> PublicationResultV1<bool> {
     registry.map_or(Ok(true), |registry| {
         registry_key_record_with_context(registry, record.identity(), context).and_then(|local| {
-            local
-                .as_ref()
-                .map_or(Ok(true), |local| local_key_record_agrees(record, local, context))
+            local.as_ref().map_or(Ok(true), |local| {
+                local_key_record_agrees(record, local, context)
+            })
         })
     })
 }
@@ -1111,11 +1111,13 @@ fn retained_record_matches_material(
     if record.private_material_digest == Some(operation.private_material_digest) {
         return Ok(true);
     }
-    registry_tombstone_with_context(registry, operation.signing_identity, context).map(|tombstone| {
-        tombstone.is_some_and(|tombstone| {
-            tombstone.destroyed_material_digest == operation.private_material_digest
-        })
-    })
+    registry_tombstone_with_context(registry, operation.signing_identity, context).map(
+        |tombstone| {
+            tombstone.is_some_and(|tombstone| {
+                tombstone.destroyed_material_digest == operation.private_material_digest
+            })
+        },
+    )
 }
 
 #[cfg(test)]
