@@ -171,8 +171,90 @@ fn authority_bytes(
         + 2 * 32)
 }
 
-#[test]
-fn imported_sqlite_rw_replay_keeps_one_exact_budget_through_final_validation() -> Fallible<()> {
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SqliteReplayAccess {
+    ReadWrite,
+    ReadOnly,
+    HeldMemory,
+}
+
+fn sqlite_replay_case(
+    access: SqliteReplayAccess,
+    world: &World,
+    built: &Built,
+    admission: &ImportedForkAttributionAdmissionV1,
+    limits: ForkReplayReadLimitsV1,
+    succeeds: bool,
+) -> Fallible<()> {
+    let directory = (access != SqliteReplayAccess::HeldMemory)
+        .then(tempfile::tempdir)
+        .transpose()?;
+    let path = match &directory {
+        Some(directory) => directory
+            .path()
+            .join("imported-budget.sqlite")
+            .to_str()
+            .ok_or("UTF-8 path")?
+            .to_owned(),
+        None => format!(
+            "file:pigloros-561-cumulative-{}?mode=memory&cache=shared",
+            pos_core::TimelineId::new(),
+        ),
+    };
+    // Keep the named database alive across setup-store drop and host recovery.
+    // This gate-unbound connection issues no command or transaction while the
+    // recovered host owns the protected interval.
+    let keeper = if access == SqliteReplayAccess::HeldMemory {
+        Some(SqliteStore::open(&path)?)
+    } else {
+        None
+    };
+    let mut store = SqliteStore::open(&path)?;
+    world.seed_destination(&mut store)?;
+    pin_policy(&mut store, &built.policy)?;
+    assert_eq!(
+        &store.import_verified(&request_for(world, built))?.admission,
+        admission
+    );
+    let child = world.child_at(0)?.id;
+    let committed = store.read_committed(child, 4)?;
+    let requirement = ForkReplayRequirementV1::new(
+        child,
+        Seq::from_u64(4),
+        committed.record_id,
+        committed.authority_origin_digest,
+    )?;
+    drop(store);
+    let verifier = Arc::new(ImportedVerifier {
+        child,
+        parent: world.root,
+        requirement,
+        secondary: None,
+        fault: Fault::None,
+        fault_target: None,
+        limits_override: Some(limits),
+        admissions: AtomicUsize::new(0),
+    });
+    let composition =
+        ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier.clone());
+    let recovery = ErasureRecoveryLimitsV1::compiled_maximum();
+    let host = if access == SqliteReplayAccess::ReadOnly {
+        // The populated schema and empty erasure inventory support direct RO
+        // recovery. No preceding writable Runtime host is needed.
+        ErasureExecutionHostV1::open_read_only_with_authority(&path, &composition, recovery)?
+    } else {
+        ErasureExecutionHostV1::open_with_authority(
+            StoreConfig::Sqlite { path },
+            &composition,
+            recovery,
+        )?
+    };
+    exercise(host, world, &verifier, None, succeeds)?;
+    drop(keeper);
+    Ok(())
+}
+
+fn sqlite_replay_budget_cases(access: SqliteReplayAccess) -> Fallible<()> {
     let world = World::new(Shape::EmptyUnclassified, false)?;
     assert_eq!(world.children.len(), 1);
     let built = world.build(&Spec::default())?;
@@ -195,49 +277,30 @@ fn imported_sqlite_rw_replay_keeps_one_exact_budget_through_final_validation() -
         (bytes, rows - 1, visits, false),
         (bytes, rows, visits - 1, false),
     ] {
-        let directory = tempfile::tempdir()?;
-        let path = directory.path().join("imported-budget.sqlite");
-        let path = path.to_str().ok_or("UTF-8 path")?;
-        let mut store = SqliteStore::open(path)?;
-        world.seed_destination(&mut store)?;
-        pin_policy(&mut store, &built.policy)?;
-        assert_eq!(
-            store
-                .import_verified(&request_for(&world, &built))?
-                .admission,
-            admission
-        );
-        let child = world.child_at(0)?.id;
-        let committed = store.read_committed(child, 4)?;
-        let requirement = ForkReplayRequirementV1::new(
-            child,
-            Seq::from_u64(4),
-            committed.record_id,
-            committed.authority_origin_digest,
+        sqlite_replay_case(
+            access,
+            &world,
+            &built,
+            &admission,
+            ForkReplayReadLimitsV1::new(8, visits, rows, bytes, 30_000_000)?,
+            succeeds,
         )?;
-        drop(store);
-        let verifier = Arc::new(ImportedVerifier {
-            child,
-            parent: world.root,
-            requirement,
-            secondary: None,
-            fault: Fault::None,
-            fault_target: None,
-            limits_override: Some(ForkReplayReadLimitsV1::new(
-                8, visits, rows, bytes, 30_000_000,
-            )?),
-            admissions: AtomicUsize::new(0),
-        });
-        let composition =
-            ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier.clone());
-        let host = ErasureExecutionHostV1::open_with_authority(
-            StoreConfig::Sqlite {
-                path: path.to_owned(),
-            },
-            &composition,
-            ErasureRecoveryLimitsV1::compiled_maximum(),
-        )?;
-        exercise(host, &world, &verifier, None, succeeds)?;
     }
     Ok(())
+}
+
+#[test]
+fn imported_sqlite_rw_replay_keeps_one_exact_budget_through_final_validation() -> Fallible<()> {
+    sqlite_replay_budget_cases(SqliteReplayAccess::ReadWrite)
+}
+
+#[test]
+fn imported_sqlite_ro_replay_keeps_one_exact_budget_through_final_validation() -> Fallible<()> {
+    sqlite_replay_budget_cases(SqliteReplayAccess::ReadOnly)
+}
+
+#[test]
+fn imported_sqlite_held_memory_replay_keeps_one_exact_budget_through_final_validation(
+) -> Fallible<()> {
+    sqlite_replay_budget_cases(SqliteReplayAccess::HeldMemory)
 }
