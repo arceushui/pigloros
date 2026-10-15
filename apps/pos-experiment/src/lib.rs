@@ -352,6 +352,13 @@ pub struct ExperimentConfig {
 /// Result of a completed experiment run.
 pub struct RunResult {
     pub timeline_id: pos_core::ids::TimelineId,
+    /// Session tick boundaries this run completed.
+    ///
+    /// A presentation-only counter of the session's own loop: it is not the
+    /// factual Tick of ADR-064 Revision 3. A factual Tick is recorded only by
+    /// an admitted nonempty pass, so the two counts need not agree. Nothing
+    /// derives a dependency coordinate, a Fork cut, or a counterfactual plan
+    /// Tick from this counter.
     pub ticks: u64,
     pub total_events: u64,
     timeline_head: u64,
@@ -629,6 +636,8 @@ pub struct ExperimentSession {
     recovery_store_config: Option<StoreConfig>,
     fork_registry_factory: Option<ForkRegistryFactory>,
     timeline: Timeline,
+    /// Presentation-only count of completed tick boundaries; never a factual
+    /// Tick (see [`RunResult::ticks`]).
     ticks: u64,
     total_events: u64,
     complete: bool,

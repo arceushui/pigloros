@@ -37,8 +37,18 @@ pos-plugin-synthetic-obs = { path = "../../plugins/observations/synthetic" }
 rusqlite = { workspace = true }
 tempfile = "3"
 
+# Linux-only: the `pos-time::counterfactual` module exists only on Linux. The
+# end-to-end test is cfg-gated the same way, so other targets never see the
+# dependency.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+pos-time = { path = "../../crates/pos-time" }
+
 [[test]]
 name = "agent_provider_replay"
+required-features = ["test-support"]
+
+[[test]]
+name = "factual_counterfactual_end_to_end"
 required-features = ["test-support"]
 
 [[test]]
