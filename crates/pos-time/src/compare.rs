@@ -210,8 +210,7 @@ fn prepare_comparison<'t>(
 ) -> Result<PreparedComparisonV1<'t>, CoreError> {
     let [a, b] = request.timelines;
     let [closure_a, closure_b] = request.closures;
-    let requested_a = comparison_use(sender, a, &request.consumer_ids[0])?;
-    let requested_b = comparison_use(sender, b, &request.consumer_ids[1])?;
+    let [requested_a, requested_b] = comparison_uses(sender, request)?;
     let requested_uses = [&requested_a, &requested_b];
     let verified = require_comparison_artifacts(sender, request.closures, requested_uses)?;
     if verified[0].fork_read_limits() != verified[1].fork_read_limits() {
@@ -224,27 +223,15 @@ fn prepare_comparison<'t>(
         &mut clock,
     )
     .map_err(|_| CoreError::ArtifactUnavailable)?;
-    let evidence_a = sender
-        .validate_world_replay_forks(&verified[0], &mut budget)
-        .map_err(crate::host_error_to_core)?;
-    let evidence_b = sender
-        .validate_world_replay_forks(&verified[1], &mut budget)
-        .map_err(crate::host_error_to_core)?;
-    let events_a = crate::read_complete_world_replay(
+    let evidence = validate_comparison_forks(sender, &verified, &mut budget)?;
+    let [events_a, events_b] = read_comparison_histories(
         sender,
-        &requested_a,
-        verified[0].read_bounds(),
+        requested_uses,
+        [verified[0].read_bounds(), verified[1].read_bounds()],
         &mut budget,
+        revoked,
+        request.fork_seq,
     )?;
-    revoked[0] = Some(RevokedSubjectsV1::from_verified_events(&events_a));
-    let events_b = crate::read_complete_world_replay(
-        sender,
-        &requested_b,
-        verified[1].read_bounds(),
-        &mut budget,
-    )?;
-    revoked[1] = Some(RevokedSubjectsV1::from_verified_events(&events_b));
-    require_shared_fork(request.fork_seq, &events_a, &events_b)?;
     let [fold_a, fold_b] = request.folds;
     let staged_a = crate::fold_staged(
         fold_a,
@@ -258,20 +245,15 @@ fn prepare_comparison<'t>(
         events_b,
         crate::verified_source(b, closure_b),
     )?;
-    let final_verified = require_comparison_artifacts(sender, request.closures, requested_uses)?;
-    if final_verified != verified {
-        return Err(CoreError::ArtifactUnavailable);
-    }
-    let final_a = sender
-        .validate_world_replay_forks(&final_verified[0], &mut budget)
-        .map_err(crate::host_error_to_core)?;
-    let final_b = sender
-        .validate_world_replay_forks(&final_verified[1], &mut budget)
-        .map_err(crate::host_error_to_core)?;
-    if final_a != evidence_a || final_b != evidence_b {
-        return Err(CoreError::ArtifactUnavailable);
-    }
-    crate::handoff_reserve(guard)?;
+    revalidate_comparison(
+        sender,
+        request.closures,
+        requested_uses,
+        &verified,
+        &evidence,
+        &mut budget,
+    )
+    .and_then(|()| crate::handoff_reserve(guard))?;
     // The diff is computed from the staged maps before the install pair is
     // prepared. They are identical to the installed maps, because the
     // install is an exact swap of these maps (ADR-113 clarification ticket
@@ -283,6 +265,67 @@ fn prepare_comparison<'t>(
     ProjectionRegistry::prepare_install_pair(registry_a, staged_a, registry_b, staged_b)
         .map(|prepared| (prepared, diverged_entities))
         .map_err(crate::unavailable)
+}
+
+/// Bind both observed uses in A-then-B order before verifying either artifact.
+fn comparison_uses(
+    sender: &mut ErasureReadSenderV1<'_>,
+    request: &CompareRequestV1<'_>,
+) -> Result<[WorldReplayUseV1; 2], CoreError> {
+    comparison_use(sender, request.timelines[0], &request.consumer_ids[0]).and_then(|a| {
+        comparison_use(sender, request.timelines[1], &request.consumer_ids[1]).map(|b| [a, b])
+    })
+}
+
+/// Both initial and final native proofs consume one shared ledger, A then B.
+fn validate_comparison_forks(
+    sender: &mut ErasureReadSenderV1<'_>,
+    verified: &[pos_runtime::VerifiedWorldReplayV1; 2],
+    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
+) -> Result<[Vec<pos_store::ForkReplayAuthorityEvidenceV1>; 2], CoreError> {
+    let a = sender
+        .validate_world_replay_forks(&verified[0], budget)
+        .map_err(crate::host_error_to_core)?;
+    sender
+        .validate_world_replay_forks(&verified[1], budget)
+        .map(|b| [a, b])
+        .map_err(crate::host_error_to_core)
+}
+
+/// Preserve each arm's revocation marker even if reading the later arm fails.
+fn read_comparison_histories(
+    sender: &mut ErasureReadSenderV1<'_>,
+    requested_uses: [&WorldReplayUseV1; 2],
+    bounds: [pos_core::EventReadBounds; 2],
+    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
+    revoked: &mut [Option<RevokedSubjectsV1>; 2],
+    fork_seq: Seq,
+) -> Result<[Vec<Event>; 2], CoreError> {
+    let a = crate::read_complete_world_replay(sender, requested_uses[0], bounds[0], budget)?;
+    revoked[0] = Some(RevokedSubjectsV1::from_verified_events(&a));
+    let b = crate::read_complete_world_replay(sender, requested_uses[1], bounds[1], budget)?;
+    revoked[1] = Some(RevokedSubjectsV1::from_verified_events(&b));
+    require_shared_fork(fork_seq, &a, &b).map(|()| [a, b])
+}
+
+/// Recheck both complete authorizations and native proofs before pair handoff.
+fn revalidate_comparison(
+    sender: &mut ErasureReadSenderV1<'_>,
+    closures: [&WorldReplayClosureV1; 2],
+    requested_uses: [&WorldReplayUseV1; 2],
+    verified: &[pos_runtime::VerifiedWorldReplayV1; 2],
+    evidence: &[Vec<pos_store::ForkReplayAuthorityEvidenceV1>; 2],
+    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
+) -> Result<(), CoreError> {
+    let final_verified = require_comparison_artifacts(sender, closures, requested_uses)?;
+    if final_verified != *verified {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+    let [a, b] = validate_comparison_forks(sender, &final_verified, budget)?;
+    if a != evidence[0] || b != evidence[1] {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+    Ok(())
 }
 
 fn require_comparison_artifacts(
