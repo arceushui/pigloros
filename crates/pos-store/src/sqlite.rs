@@ -9576,6 +9576,109 @@ fn rollback_stale_protected_effect_interval(conn: &Connection) -> ErasureErrorV1
     }
 }
 
+/// The reservation and optional reader snapshot used by one protected interval.
+/// Cleanup is explicit: dropping this borrowed selection never executes SQL.
+struct ProtectedIntervalConnectionsV1<'a> {
+    interval: &'a Connection,
+    reader: Option<&'a Connection>,
+}
+
+impl<'a> ProtectedIntervalConnectionsV1<'a> {
+    fn new(store: &'a SqliteStore) -> Self {
+        Self {
+            interval: store
+                .writer_reservation_connection
+                .as_ref()
+                .unwrap_or(&store.conn),
+            reader: store.writer_reservation_connection.as_ref().map(|_| &store.conn),
+        }
+    }
+
+    fn begin_reader_snapshot(&self) -> Result<(), ErasureErrorV1> {
+        if let Some(reader) = self.reader {
+            // Never reuse a snapshot that predates the writer reservation.
+            if !reader.is_autocommit() || reader.execute_batch("BEGIN DEFERRED").is_err() {
+                drop(self.interval.execute_batch("ROLLBACK"));
+                return Err(ErasureErrorV1::ReceiptCommitFailed);
+            }
+        }
+        Ok(())
+    }
+
+    fn observed_data_version(&self) -> Result<i64, ErasureErrorV1> {
+        sqlite_data_version(self.reader.unwrap_or(self.interval)).map_err(|_| {
+            self.rollback_reader();
+            drop(self.interval.execute_batch("ROLLBACK"));
+            ErasureErrorV1::ReceiptCommitFailed
+        })
+    }
+
+    fn rollback_reader(&self) {
+        if let Some(reader) = self.reader {
+            drop(reader.execute_batch("ROLLBACK"));
+        }
+    }
+
+    fn reject_stale(&self) -> ErasureErrorV1 {
+        self.rollback_reader();
+        rollback_stale_protected_effect_interval(self.interval)
+    }
+
+    fn finish_reader_snapshot(&self) -> Result<(), ErasureErrorV1> {
+        self.reader.map_or(Ok(()), |reader| {
+            reader.execute_batch("ROLLBACK").map_err(|_| {
+                drop(self.interval.execute_batch("ROLLBACK"));
+                ErasureErrorV1::ReceiptCommitFailed
+            })
+        })
+    }
+
+    /// Consume the selected owned interval, settling the reader before its writer.
+    fn finish(
+        self,
+        disposition: ErasureProtectedEffectDispositionV1,
+    ) -> Result<(), ErasureErrorV1> {
+        self.finish_reader_snapshot().and_then(|()| {
+            let statement = match disposition {
+                ErasureProtectedEffectDispositionV1::Commit => "COMMIT",
+                ErasureProtectedEffectDispositionV1::Rollback => "ROLLBACK",
+            };
+            self.interval.execute_batch(statement).map_err(|_| {
+                drop(self.interval.execute_batch("ROLLBACK"));
+                ErasureErrorV1::ReceiptCommitFailed
+            })
+        })
+    }
+}
+
+impl SqliteStore {
+    /// Refuse stale inventory only after the held interval's data-version read.
+    fn require_current_protected_inventory(
+        &self,
+        observed: i64,
+        connections: &ProtectedIntervalConnectionsV1<'_>,
+    ) -> Result<(), ErasureErrorV1> {
+        if self.erasure_gate_bound && observed != self.erasure_inventory_data_version {
+            return Err(connections.reject_stale());
+        }
+        if self.erasure_gate_bound {
+            let Some(gate) = self.erasure_gate.as_deref() else {
+                return Err(connections.reject_stale());
+            };
+            if crate::validate_bound_erasure_inventory_generation(
+                self.erasure_gate_bound,
+                gate,
+                self.erasure_inventory_generation,
+            )
+            .is_err()
+            {
+                return Err(connections.reject_stale());
+            }
+        }
+        Ok(())
+    }
+}
+
 impl ErasureInventoryPersistencePortV1 for SqliteStore {
     fn complete_erasure_inventory_snapshot(
         &mut self,
@@ -9601,62 +9704,17 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
     ) -> Result<ErasureProtectedEffectIntervalV1, ErasureErrorV1> {
         // A new interval starts after the previous transaction settled.
         self.settle_counterfactual_doubt();
-        let interval_connection = self
-            .writer_reservation_connection
-            .as_ref()
-            .unwrap_or(&self.conn);
-        if !interval_connection.is_autocommit() {
+        let connections = ProtectedIntervalConnectionsV1::new(self);
+        if !connections.interval.is_autocommit() {
             return Ok(ErasureProtectedEffectIntervalV1::Unowned);
         }
-        interval_connection
+        connections
+            .interval
             .execute_batch(begin_immediate_sql())
             .map_err(|_| ErasureErrorV1::ReceiptCommitFailed)?;
-        if self.writer_reservation_connection.is_some() {
-            // Never reuse a snapshot that predates the writer reservation.
-            if !self.conn.is_autocommit() || self.conn.execute_batch("BEGIN DEFERRED").is_err() {
-                drop(interval_connection.execute_batch("ROLLBACK"));
-                return Err(ErasureErrorV1::ReceiptCommitFailed);
-            }
-        }
-        let Ok(observed) = sqlite_data_version(&self.conn) else {
-            if self.writer_reservation_connection.is_some() {
-                drop(self.conn.execute_batch("ROLLBACK"));
-            }
-            drop(interval_connection.execute_batch("ROLLBACK"));
-            return Err(ErasureErrorV1::ReceiptCommitFailed);
-        };
-        if self.erasure_gate_bound && observed != self.erasure_inventory_data_version {
-            if self.writer_reservation_connection.is_some() {
-                drop(self.conn.execute_batch("ROLLBACK"));
-            }
-            return Err(rollback_stale_protected_effect_interval(
-                interval_connection,
-            ));
-        }
-        if self.erasure_gate_bound {
-            let Some(gate) = self.erasure_gate.as_deref() else {
-                if self.writer_reservation_connection.is_some() {
-                    drop(self.conn.execute_batch("ROLLBACK"));
-                }
-                return Err(rollback_stale_protected_effect_interval(
-                    interval_connection,
-                ));
-            };
-            if crate::validate_bound_erasure_inventory_generation(
-                self.erasure_gate_bound,
-                gate,
-                self.erasure_inventory_generation,
-            )
-            .is_err()
-            {
-                if self.writer_reservation_connection.is_some() {
-                    drop(self.conn.execute_batch("ROLLBACK"));
-                }
-                return Err(rollback_stale_protected_effect_interval(
-                    interval_connection,
-                ));
-            }
-        }
+        connections.begin_reader_snapshot()?;
+        let observed = connections.observed_data_version()?;
+        self.require_current_protected_inventory(observed, &connections)?;
         Ok(ErasureProtectedEffectIntervalV1::Owned)
     }
 
@@ -9668,24 +9726,7 @@ impl ErasureInventoryPersistencePortV1 for SqliteStore {
         if interval == ErasureProtectedEffectIntervalV1::Unowned {
             return Ok(());
         }
-        let interval_connection = self
-            .writer_reservation_connection
-            .as_ref()
-            .unwrap_or(&self.conn);
-        if self.writer_reservation_connection.is_some()
-            && self.conn.execute_batch("ROLLBACK").is_err()
-        {
-            drop(interval_connection.execute_batch("ROLLBACK"));
-            return Err(ErasureErrorV1::ReceiptCommitFailed);
-        }
-        let statement = match disposition {
-            ErasureProtectedEffectDispositionV1::Commit => "COMMIT",
-            ErasureProtectedEffectDispositionV1::Rollback => "ROLLBACK",
-        };
-        interval_connection.execute_batch(statement).map_err(|_| {
-            drop(interval_connection.execute_batch("ROLLBACK"));
-            ErasureErrorV1::ReceiptCommitFailed
-        })
+        ProtectedIntervalConnectionsV1::new(self).finish(disposition)
     }
 }
 
