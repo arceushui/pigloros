@@ -626,7 +626,7 @@ fn run_hidden_common_root_cases(
 
 fn late_common_root_sqlite(
     path: &str,
-    read_only: bool,
+    also_run_read_only: bool,
     world: &World,
     verifier: &NestedVerifier,
     composition: &ErasureCoordinatorCompositionV1,
@@ -643,7 +643,7 @@ fn late_common_root_sqlite(
         ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
     run_hidden_common_root_cases(host, world, verifier)?;
-    if read_only {
+    if also_run_read_only {
         let host = ErasureExecutionHostV1::open_read_only_with_authority(
             path,
             composition,
