@@ -3,6 +3,8 @@
 //! The outer fence may inspect ordinary ancestry metadata. Depth assertions
 //! concern the bounded native validation walk, not all reads by that fence.
 
+mod repeat;
+
 use super::fixture::{pin_policy, Fallible, Shape, Spec, World};
 use pos_core::{
     store::{EventStore, SeqRange},
@@ -73,9 +75,9 @@ impl WorldReplayVerifierV1 for ImportedRuntimeVerifier {
 
 fn imported_host(
     world: &World,
-    ledger_depth: usize,
+    limits: ForkReplayReadLimitsV1,
     arm_depth: usize,
-) -> Fallible<(ErasureExecutionHostV1, ForkReplayReadLimitsV1)> {
+) -> Fallible<ErasureExecutionHostV1> {
     assert_eq!(world.children.len(), 2);
     let mut store = MemoryStore::new();
     world.seed_destination(&mut store)?;
@@ -113,7 +115,6 @@ fn imported_host(
         .map(|required| WorldReplayForkSourceV1::new(required.child_timeline_id(), Some(*required)))
         .collect::<Result<Vec<_>, _>>()?;
     sources.push(WorldReplayForkSourceV1::new(world.root, None)?);
-    let limits = ForkReplayReadLimitsV1::new(ledger_depth, 1_024, 65_536, 1_048_576, 1_000_000)?;
     let verifier = Arc::new(ImportedRuntimeVerifier {
         leaf,
         sources,
@@ -123,14 +124,13 @@ fn imported_host(
     });
     let composition =
         ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier);
-    Ok((
+    Ok(
         ErasureExecutionHostV1::recover_memory_fixture_with_authority(
             store,
             &composition,
             ErasureRecoveryLimitsV1::compiled_maximum(),
         )?,
-        limits,
-    ))
+    )
 }
 
 #[test]
@@ -141,7 +141,9 @@ fn imported_memory_runtime_checks_effective_depth_before_deep_ancestor() -> Fall
     let leaf = world.child_at(1)?.id;
     assert_eq!(world.source.read(world.root, SeqRange::all())?.len(), 4);
     for (ledger_depth, arm_depth, succeeds) in [(2, 2, true), (2, 1, false), (1, 2, false)] {
-        let (mut host, limits) = imported_host(&world, ledger_depth, arm_depth)?;
+        let limits =
+            ForkReplayReadLimitsV1::new(ledger_depth, 1_024, 65_536, 1_048_576, 1_000_000)?;
+        let mut host = imported_host(&world, limits, arm_depth)?;
         let generation = Hash::from_bytes(host.containment_gate().inventory_generation()?.digest());
         let closure = WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
             leaf, generation,
