@@ -6,8 +6,8 @@ use super::{
     commit_counting_signer, create_lifecycle, publication_fixture, PublicationTestStoreV1,
 };
 use crate::{
-    memory::MemoryStore, ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1,
-    ForkReplayReadLimitsV1, ForkReplayRequirementV1,
+    memory::MemoryStore, ForkReplayAuthorityReadErrorV1, ForkReplayAuthorityReadPortV1,
+    ForkReplayReadBudgetV1, ForkReplayReadLimitsV1, ForkReplayRequirementV1,
 };
 use pos_core::{
     trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1},
@@ -15,6 +15,52 @@ use pos_core::{
     ErasureProtectedEffectIntervalV1, Hash, Seq,
 };
 use std::{error::Error, time::Duration};
+
+fn local_original_epoch_refusals<S: ForkReplayAuthorityReadPortV1>(
+    store: &S,
+    requirement: &ForkReplayRequirementV1,
+    expected_operation: &[u8],
+    limits: ForkReplayReadLimitsV1,
+) -> Result<(), Box<dyn Error>> {
+    for final_offset in [Duration::ZERO, Duration::from_secs(2)] {
+        let mut completed = false;
+        let mut refused = false;
+        for prefix in 2..2048 {
+            // A bad sample is followed by in-budget ticks. Native error
+            // translation must not erase the original ledger's refusal.
+            let mut probe_clock = ScriptedGuardMonotonicSourceV1::new(
+                std::iter::repeat_n(Duration::from_millis(1), prefix)
+                    .chain([final_offset, Duration::from_millis(1)]),
+            );
+            let probe_start = probe_clock.mark();
+            let mut probe_budget =
+                ForkReplayReadBudgetV1::new(limits, probe_start, &mut probe_clock)?;
+            match store.validate_fork_replay_authority(requirement, &mut probe_budget) {
+                Ok(evidence) => {
+                    assert_eq!(evidence.requirement(), *requirement);
+                    assert_eq!(evidence.operation_bytes(), expected_operation);
+                    completed = true;
+                    break;
+                }
+                Err(error) => {
+                    assert_eq!(
+                        error,
+                        ForkReplayAuthorityReadErrorV1::BoundsExceeded,
+                        "prefix={prefix}, terminal offset={final_offset:?}",
+                    );
+                    assert!(probe_budget.check_time().is_err());
+                    refused = true;
+                }
+            }
+        }
+        assert!(
+            refused,
+            "the Local reader must observe the bad clock sample"
+        );
+        assert!(completed, "the Local reader must reach its known positive");
+    }
+    Ok(())
+}
 
 fn local_publication_evidence<S>(
     store: &mut S,
@@ -59,6 +105,7 @@ where
         remaining = budget.remaining_native_bytes();
         assert_eq!(budget.check_time(), Ok(()));
     }
+    local_original_epoch_refusals(store, &requirement, &expected_bytes, limits)?;
     store.finish_protected_effect_interval(
         interval,
         ErasureProtectedEffectDispositionV1::Rollback,
