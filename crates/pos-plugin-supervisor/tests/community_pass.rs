@@ -234,7 +234,8 @@ fn an_unknown_dependency_digest_is_not_admitted_and_marks_no_plugin() {
     }
 }
 
-/// A Driver may declare 255 step inputs; 256 consumed dependencies are refused.
+/// A Driver may declare `MAX_STEP_INPUTS_PER_DRIVER_V1` step inputs; one more
+/// consumed dependency is refused.
 #[test]
 fn too_many_consumed_dependencies_are_out_of_bounds_and_mark_no_plugin() {
     let mut world = new_world();

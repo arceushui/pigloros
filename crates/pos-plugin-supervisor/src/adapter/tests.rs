@@ -132,6 +132,13 @@ fn offer(driver: &CommunityDriverV1, handle: &CommunityPluginHandleV1) {
     let () = ok(handle.offer_authorization(authorization));
 }
 
+/// The `NodeDigest` inputs a guest digest list declares.
+fn node_inputs<const N: usize>(digests: [[u8; 32]; N]) -> [DirectInputRefV1; N] {
+    digests.map(|digest| DirectInputRefV1::NodeDigest {
+        digest: Hash::from_bytes(digest),
+    })
+}
+
 #[test]
 fn a_draft_maps_to_an_event_draft_or_is_rejected() {
     let mapped = ok(map_draft(&EventDraftV1 {
@@ -157,9 +164,7 @@ fn a_drafts_dependency_digests_map_to_its_node_digest_inputs() {
         ..draft("community.event", b"p")
     };
     let mapped = ok(map_draft(&with_dependencies));
-    let inputs = [[1; 32], [2; 32]].map(|digest| DirectInputRefV1::NodeDigest {
-        digest: Hash::from_bytes(digest),
-    });
+    let inputs = node_inputs([[1; 32], [2; 32]]);
     assert_eq!(mapped.direct_inputs, inputs);
 }
 
@@ -171,9 +176,7 @@ fn consumed_dependencies_map_to_step_inputs_and_annotations_stay_dropped() {
     }]);
     consumed.consumed_dependencies = vec![[3; 32], [4; 32]];
     let step = ok(mapped_output(&consumed, 100));
-    let step_inputs = [[3; 32], [4; 32]].map(|digest| DirectInputRefV1::NodeDigest {
-        digest: Hash::from_bytes(digest),
-    });
+    let step_inputs = node_inputs([[3; 32], [4; 32]]);
     assert_eq!(step.step_inputs(), step_inputs);
     assert_eq!(step.outputs.len(), 1);
     let draft_input = DirectInputRefV1::NodeDigest {

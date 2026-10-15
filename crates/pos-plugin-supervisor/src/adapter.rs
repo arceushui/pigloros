@@ -380,12 +380,11 @@ impl CommunityDriverV1 {
     /// Map every draft, then hold the next state until commit.
     fn stage(&mut self, output: &PluginOutputV1) -> Result<StepOutput, Error> {
         let event_bytes = self.negotiated.limits().values().event_bytes;
-        mapped_output(output, event_bytes).map(|step| {
+        mapped_output(output, event_bytes).inspect(|_| {
             self.staged = Some(CommunityStateV1 {
                 schema: output.next_state_schema,
                 bytes: output.next_state_bytes.clone(),
             });
-            step
         })
     }
 
