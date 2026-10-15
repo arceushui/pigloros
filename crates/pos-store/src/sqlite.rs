@@ -1728,18 +1728,10 @@ impl SqliteStore {
                 context,
             );
         }
-        context
-            .check()
-            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
+        // Only ordinary contexts reach this path; they have no budget or clock.
         let prefix = read_origin_prefix(&self.conn, child_timeline_id)
             .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
-        context
-            .check()
-            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
         let rows = sqlite_fork_suffix_rows(&self.conn, child_timeline_id)?;
-        context
-            .check()
-            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
         // The immutable authority graph is validated once; its error is
         // surfaced only when the child actually has classified Events.
         let graph = sqlite_validated_graph(
@@ -1751,9 +1743,6 @@ impl SqliteStore {
         );
         let mut result = Vec::new();
         for row in rows {
-            context
-                .check()
-                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
             let (event_id, logical_seq, operation) = sqlite_decode_fork_suffix_row(prefix, row)
                 .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)?;
             let graph = graph.as_ref().map_err(|error| *error)?;
@@ -1776,14 +1765,8 @@ impl SqliteStore {
                 context,
             )?;
             result.push((origin, intervention, operation));
-            context
-                .check()
-                .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)?;
         }
-        context
-            .check()
-            .map(|()| result)
-            .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
+        Ok(result)
     }
 
     fn persist_fork_classifier_registration(
