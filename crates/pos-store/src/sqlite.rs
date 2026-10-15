@@ -14863,6 +14863,8 @@ use pos_core::geo_cell_admission::{
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    mod protected_interval_cleanup;
+
     use super::*;
     use crate::ErasureRejoinPersistencePortV1;
     use pos_core::{
