@@ -1796,12 +1796,8 @@ fn composite_over_an_empty_prefix_is_an_invalid_graph<B: Backend>() -> TestResul
         Err(AdmissionError::DependencyGraphInvalid)
     );
     // An unknown parent Timeline is never an empty prefix.
-    let mut unknown = PrefixSeededFrontierSourceV1::new(
-        Shared::new(B::open()?),
-        Vec::new(),
-        Vec::new(),
-        BOUNDS,
-    );
+    let mut unknown =
+        PrefixSeededFrontierSourceV1::new(Shared::new(B::open()?), Vec::new(), Vec::new(), BOUNDS);
     assert_eq!(
         derivation!(&mut unknown, &plan),
         Err(AdmissionError::Store(StoreError::ForkNotFound))
