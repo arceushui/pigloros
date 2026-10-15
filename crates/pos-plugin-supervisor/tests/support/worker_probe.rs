@@ -111,7 +111,8 @@ fn serve(request: &WorkerRequestV1) -> ExitCode {
 /// payload and `next` as the next state. `chain` carries the prior state as
 /// its payload and the prior state plus `+` as the next state, so the state
 /// the host feeds back is visible in the committed Event. `deps` adds a
-/// dependency digest, which no `EventDraft` field can carry.
+/// dependency digest that names no recorded node, and `consumed` consumes 256
+/// distinct dependencies, one more than a Driver may declare.
 fn serve_draft(request: &WorkerRequestV1) -> Option<ExitCode> {
     let mut parts = request.component.splitn(2, |byte| *byte == b':');
     let mode = parts.next()?;
@@ -129,7 +130,19 @@ fn serve_draft(request: &WorkerRequestV1) -> Option<ExitCode> {
         ),
         b"chain" => (prior.clone(), Vec::new(), [prior.as_slice(), b"+"].concat()),
         b"deps" => (b"p".to_vec(), vec![[1; 32]], b"next".to_vec()),
+        b"consumed" => (b"p".to_vec(), Vec::new(), b"next".to_vec()),
         _ => return None,
+    };
+    let consumed_dependencies = if mode == b"consumed" {
+        (0_u16..256)
+            .map(|index| {
+                let mut digest = [0; 32];
+                digest[..2].copy_from_slice(&index.to_be_bytes());
+                digest
+            })
+            .collect()
+    } else {
+        Vec::new()
     };
     let mut output = PluginOutputV1 {
         invocation_id: invocation.invocation_id,
@@ -143,7 +156,7 @@ fn serve_draft(request: &WorkerRequestV1) -> Option<ExitCode> {
         next_state_schema: [1; 32],
         next_state_bytes: state,
         trace_annotations: Vec::new(),
-        consumed_dependencies: Vec::new(),
+        consumed_dependencies,
         output_digest: [0; 32],
     };
     output.output_digest = plugin_output_digest_v1(&output);

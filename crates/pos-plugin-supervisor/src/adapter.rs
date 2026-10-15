@@ -24,9 +24,11 @@
 //!   [`Driver::commit_step()`] only after the whole batch commits. An abort
 //!   discards it, and a store outcome that is unknown keeps it staged for
 //!   `recover_scheduled_pass`.
-//! - A draft that declares `dependency_digests` is `UnsupportedSchema`: no
-//!   `EventDraft` field can commit them, so the adapter refuses them rather
-//!   than dropping them silently.
+//! - A draft's `dependency_digests` become `NodeDigest` inputs declared for
+//!   that draft, and the output's `consumed_dependencies` become step-level
+//!   `NodeDigest` inputs. The registry resolves them at admission; a digest
+//!   that names nothing fails there as `UnresolvedInput`, and a count above
+//!   the cap as `FieldOutOfBounds`.
 //! - Trace annotations are validated by the engine and the supervisor and
 //!   then dropped; only their count survives, in the receipt.
 //!
@@ -81,7 +83,7 @@ use pos_runtime::{
     StepOutput,
 };
 
-use self::output::mapped_drafts;
+use self::output::mapped_output;
 use self::state::Shared;
 pub use self::state::{
     CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1, ReceiptDispositionV1,
@@ -378,12 +380,12 @@ impl CommunityDriverV1 {
     /// Map every draft, then hold the next state until commit.
     fn stage(&mut self, output: &PluginOutputV1) -> Result<StepOutput, Error> {
         let event_bytes = self.negotiated.limits().values().event_bytes;
-        mapped_drafts(output, event_bytes).map(|drafts| {
+        mapped_output(output, event_bytes).map(|step| {
             self.staged = Some(CommunityStateV1 {
                 schema: output.next_state_schema,
                 bytes: output.next_state_bytes.clone(),
             });
-            StepOutput::new(drafts)
+            step
         })
     }
 
