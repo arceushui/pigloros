@@ -136,9 +136,7 @@ impl MemoryStore {
                 context
                     .suffix_row()
                     .map_err(|_| AuthorityError::CorruptAuthority)
-                    .and_then(|()| {
-                        self.imported_attribution_for_child(child_timeline_id, context)
-                    })
+                    .and_then(|()| self.imported_attribution_for_child(child_timeline_id, context))
                     .and_then(|row| {
                         context
                             .imported_admission(&row.stored.admission_bytes)
@@ -298,8 +296,8 @@ impl MemoryStore {
         validator: AuthorityValidatorV1,
         context: &mut NativeReadContextV1<'_, '_>,
     ) -> Result<Option<(ForkPublicationOperationV1, ValidatedOriginV1)>, PublicationError> {
-        context.check().and_then(|()| {
-            match self.fork_publication_operations.get(&operation_id) {
+        context.check().and_then(
+            |()| match self.fork_publication_operations.get(&operation_id) {
                 Some(operation) => context
                     .suffix_row()
                     .and_then(|()| {
@@ -308,11 +306,9 @@ impl MemoryStore {
                     .and_then(|()| charge_origin_copy(ValidatedOriginV1::Local, context))
                     .map(|()| (operation.clone(), ValidatedOriginV1::Local))
                     .and_then(|row| context.check().map(|()| Some(row))),
-                None => {
-                    self.imported_publication_operation_row(operation_id, validator, context)
-                }
-            }
-        })
+                None => self.imported_publication_operation_row(operation_id, validator, context),
+            },
+        )
     }
 
     /// Read an imported projection only after the local-priority lookup failed.
@@ -370,7 +366,9 @@ impl MemoryStore {
                     .zip(
                         self.imported_fork_attributions
                             .get(&import.import_operation_id)
-                            .filter(|row| row.stored.envelope_digest == import.full_envelope_digest),
+                            .filter(|row| {
+                                row.stored.envelope_digest == import.full_envelope_digest
+                            }),
                     )
                     .ok_or(PublicationSourceErrorV1::Invalid)
             })
