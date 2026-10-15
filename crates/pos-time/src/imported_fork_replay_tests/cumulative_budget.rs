@@ -4,6 +4,8 @@
 //! Expected units come from public fixture fields and byte encoders, never a
 //! measured ledger or the production canonical-length/debit helpers.
 
+mod compare;
+
 use super::{
     fixture::{pin_policy, request_for, Built, Fallible, Shape, Spec, World},
     Fault, ImportedVerifier,
@@ -46,12 +48,13 @@ fn count() -> Box<dyn Reducer> {
     Box::new(Count)
 }
 
-/// One imported child, no classified own Events, and no local attribution key.
+/// One imported child arm, no classified own Events, and no local attribution key.
 /// The byte encoders are independent of the production length/debit methods.
 fn whole_memory_budget(
     world: &World,
     built: &Built,
     admission: &ImportedForkAttributionAdmissionV1,
+    child_index: usize,
     folded_events: usize,
 ) -> Fallible<(usize, usize, usize)> {
     let closure = ForkAttributionImportClosureV1::validate(&built.envelope)?;
@@ -66,11 +69,11 @@ fn whole_memory_budget(
     assert!(closure.append_operations().is_empty());
     assert!(signed.manifest().input().intervention_sequences.is_empty());
     assert!(built.envelope.unsigned().input().key_tombstone.is_none());
-    assert_eq!(world.children.len(), 1);
-    assert!(world
-        .source
-        .read_own(world.child_at(0)?.id, SeqRange::all())?
-        .is_empty());
+    let child = world.child_at(child_index)?;
+    assert_eq!(operation.projection().input().child_timeline_id, child.id);
+    assert_eq!(child.parent, world.root);
+    assert_eq!(child.parent_cut, 4);
+    assert!(world.source.read_own(child.id, SeqRange::all())?.is_empty());
     let root = world.source.read(world.root, SeqRange::all())?;
     assert_eq!(root.len(), 4);
     for event in &root {
@@ -112,7 +115,9 @@ fn whole_memory_budget(
     // eight borrowed root Event candidates, one internal parent ID and one
     // Runtime parent/cut continuation. No name/payload/type String is copied.
     let lineage_bytes = (49 + 16) + 16 + (25 + 16) + 4 * 8 + 24 + (25 + 16) + 4 * 8;
-    let authority_rows = 3 + 2 + 2 + 1 + 4;
+    // The admission selection examines every actually installed import row.
+    // Both callers import every child into an otherwise fresh destination.
+    let authority_rows = 3 + (1 + world.children.len()) + 2 + 1 + 4;
     let lineage_rows = 3 + 2 * 4;
     // Five chain-hash visits, one empty suffix lookup and three lineage visits.
     let phase_visits = 5 + 1 + 3;
@@ -194,10 +199,11 @@ fn exercise(
 
 fn memory_replay_budget_cases(cut: Option<Seq>) -> Fallible<()> {
     let world = World::new(Shape::EmptyUnclassified, false)?;
+    assert_eq!(world.children.len(), 1);
     let built = world.build(&Spec::default())?;
     let admission = ImportedForkAttributionAdmissionV1::from_envelope(&built.envelope, 1)?;
     let folded_events = usize::try_from(cut.unwrap_or(Seq::from_u64(4)).as_u64())?;
-    let (bytes, rows, visits) = whole_memory_budget(&world, &built, &admission, folded_events)?;
+    let (bytes, rows, visits) = whole_memory_budget(&world, &built, &admission, 0, folded_events)?;
     assert_eq!((rows, visits), (46, 18));
     for (bytes, rows, visits, succeeds) in [
         (bytes, rows, visits, true),
