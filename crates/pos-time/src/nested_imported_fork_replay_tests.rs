@@ -7,9 +7,15 @@
 use crate::imported_fork_replay_tests::fixture::{pin_policy, Fallible, Port, Shape, Spec, World};
 use crate::test_support::{with_release, ProtectedFixture};
 use pos_core::{
+    geo_admission::{
+        GeoLocationAdmissionFenceV1, GeoLocationAdmissionInputV1, GeoLocationAdmissionRequestV1,
+        GeoLocationAdmissionStore,
+    },
     store::{EventStore, SeqRange},
-    CoreError, ErasureGate, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    Event, EventReadBounds, Hash, Reducer, Seq, State, TimelineId, WorldReplayClosureV1,
+    CanonicalBytes, CoreError, EntityId, ErasureContainmentGateV1, ErasureGate,
+    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventReadBounds, Hash,
+    OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, Reducer, Seq, State, TimelineId,
+    WorldReplayClosureV1,
 };
 use pos_runtime::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
@@ -90,6 +96,7 @@ enum Fault {
     FinalSources,
     FinalProfile,
     ArmDepthShort,
+    HiddenCommonRoot,
 }
 
 impl Fault {
@@ -476,7 +483,11 @@ fn exercise(
         0
     };
     assert_eq!(FOLDED.load(Ordering::SeqCst), folds);
-    let phases = if succeeds || (supported_depth && scenario.fault.is_final()) {
+    let phases = if scenario.fault == Fault::HiddenCommonRoot {
+        // The public ancestry/privacy barrier runs before either verifier,
+        // staged fold or contextual native-lineage read.
+        0
+    } else if succeeds || (supported_depth && scenario.fault.is_final()) {
         2
     } else {
         1
@@ -547,6 +558,102 @@ fn run_cases(
     Ok(())
 }
 
+/// Admit a legal later root Event without changing any imported child.
+/// Every child still inherits only the root prefix through sequence four.
+fn hide_common_root<S>(store: &mut S, root: TimelineId) -> Fallible<()>
+where
+    S: EventStore + OwnTracksEnrollmentStore + GeoLocationAdmissionStore,
+{
+    assert_eq!(store.protected_logical_head(root)?, Seq::from_u64(4));
+    let entity = EntityId::new();
+    let consent = ([0x41; 32], 8, [0x42; 32]);
+    store.pair_owntracks_enrollment(OwnTracksEnrollmentRequestV1::new(
+        root,
+        entity,
+        GeoLocationAdmissionFenceV1::new(7, consent, (1, false, 9)),
+        [0x43; 32],
+    ))?;
+    let admitted = store.admit_geo_location(GeoLocationAdmissionRequestV1::from_input(
+        GeoLocationAdmissionInputV1::new(
+            root,
+            entity,
+            CanonicalBytes::from_static(b"late root geographic admission"),
+            7,
+            consent,
+            (1, false, 10),
+            ([0x44; 32], [0x45; 32]),
+        ),
+    ))?;
+    assert!(admitted.is_accepted());
+    assert_eq!(store.protected_logical_head(root)?, Seq::from_u64(5));
+    assert!(store.get_timeline(root)?.is_none());
+    Ok(())
+}
+
+fn run_hidden_common_root_cases(
+    mut host: ErasureExecutionHostV1,
+    world: &World,
+    verifier: &NestedVerifier,
+) -> Fallible<()> {
+    let fixture = ProtectedFixture::new("count", count);
+    let seed = world
+        .source
+        .read(world.root, SeqRange::all())?
+        .into_iter()
+        .next()
+        .ok_or("root seed")?;
+    for consumer in [
+        Consumer::Replay,
+        Consumer::ReplayAtInherited,
+        Consumer::ReplayAtOwn,
+        Consumer::Compare,
+    ] {
+        exercise(
+            &mut host,
+            world,
+            verifier,
+            &fixture,
+            &seed,
+            Scenario {
+                consumer,
+                fault: Fault::HiddenCommonRoot,
+                target: 0,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn late_common_root_sqlite(
+    path: &str,
+    read_only: bool,
+    world: &World,
+    verifier: &NestedVerifier,
+    composition: &ErasureCoordinatorCompositionV1,
+) -> Fallible<()> {
+    let mut store = SqliteStore::open(path)?;
+    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+    hide_common_root(&mut store, world.root)?;
+    drop(store);
+    let host = ErasureExecutionHostV1::open_with_authority(
+        StoreConfig::Sqlite {
+            path: path.to_owned(),
+        },
+        composition,
+        ErasureRecoveryLimitsV1::compiled_maximum(),
+    )?;
+    run_hidden_common_root_cases(host, world, verifier)?;
+    if read_only {
+        let host = ErasureExecutionHostV1::open_read_only_with_authority(
+            path,
+            composition,
+            ErasureRecoveryLimitsV1::compiled_maximum(),
+        )?;
+        run_hidden_common_root_cases(host, world, verifier)?;
+    }
+    Ok(())
+}
+
 #[test]
 fn imported_nested_and_max_depth_histories_keep_exact_cuts_and_atomic_public_consumers(
 ) -> Fallible<()> {
@@ -564,6 +671,17 @@ fn imported_nested_and_max_depth_histories_keep_exact_cuts_and_atomic_public_con
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
             run_cases(host, &world, &verifier)?;
+            if depth <= 8 {
+                let mut memory = MemoryStore::new();
+                assert_eq!(populate(&mut memory, &world, destroyed)?, required);
+                hide_common_root(&mut memory, world.root)?;
+                let host = ErasureExecutionHostV1::recover_memory_fixture_with_authority(
+                    memory,
+                    &composition,
+                    ErasureRecoveryLimitsV1::compiled_maximum(),
+                )?;
+                run_hidden_common_root_cases(host, &world, &verifier)?;
+            }
             // Existing URI support lets the normal host recover imported rows
             // in memory without adding a test-only public transfer seam. This
             // is named shared memory, not the private SqliteInMemory variant.
@@ -576,13 +694,16 @@ fn imported_nested_and_max_depth_histories_keep_exact_cuts_and_atomic_public_con
             assert_eq!(populate(&mut sqlite, &world, destroyed)?, required);
             drop(sqlite);
             let host = ErasureExecutionHostV1::open_with_authority(
-                StoreConfig::Sqlite { path: uri },
+                StoreConfig::Sqlite { path: uri.clone() },
                 &composition,
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
             // The gate-unbound keeper issues no command or transaction while
             // the host owns the recovered adapter and protected read interval.
             run_cases(host, &world, &verifier)?;
+            if depth <= 8 {
+                late_common_root_sqlite(&uri, false, &world, &verifier, &composition)?;
+            }
             drop(keeper);
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("nested-imported.sqlite");
@@ -604,6 +725,9 @@ fn imported_nested_and_max_depth_histories_keep_exact_cuts_and_atomic_public_con
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
             run_cases(host, &world, &verifier)?;
+            if depth <= 8 {
+                late_common_root_sqlite(path, true, &world, &verifier, &composition)?;
+            }
         }
     }
     Ok(())
