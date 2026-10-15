@@ -48,15 +48,14 @@ fn count() -> Box<dyn Reducer> {
     Box::new(Count)
 }
 
-/// One imported child arm, no classified own Events, and no local attribution key.
-/// The byte encoders are independent of the production length/debit methods.
-fn whole_memory_budget(
+/// Empty imported own segment, four root Events and no local attribution key.
+/// Public encoders and fixture ancestry, not production length/debit methods.
+pub(super) fn memory_authority_bytes(
     world: &World,
     built: &Built,
     admission: &ImportedForkAttributionAdmissionV1,
     child_index: usize,
-    folded_events: usize,
-) -> Fallible<(usize, usize, usize)> {
+) -> Fallible<usize> {
     let closure = ForkAttributionImportClosureV1::validate(&built.envelope)?;
     let signed = closure.signed_manifest();
     let operation = closure.publication_operation();
@@ -71,9 +70,13 @@ fn whole_memory_budget(
     assert!(built.envelope.unsigned().input().key_tombstone.is_none());
     let child = world.child_at(child_index)?;
     assert_eq!(operation.projection().input().child_timeline_id, child.id);
-    assert_eq!(child.parent, world.root);
     assert_eq!(child.parent_cut, 4);
     assert!(world.source.read_own(child.id, SeqRange::all())?.is_empty());
+    let ancestry = pos_core::fork_ancestry(&world.source, child.id)?;
+    let parent_links = ancestry
+        .iter()
+        .filter(|member| member.fork_point.is_some())
+        .count();
     let root = world.source.read(world.root, SeqRange::all())?;
     assert_eq!(root.len(), 4);
     for event in &root {
@@ -88,7 +91,7 @@ fn whole_memory_budget(
         + admission.to_canonical_cbor().len()
         + 3 * closure.fork_admission().to_canonical_cbor().len();
     // Binding twice; projection three times; two origin carriers; retained key;
-    // two segment IDs/history entries and one cut; four Event hash inputs;
+    // segment IDs/history entries and cuts; four Event hash inputs;
     // FSM1/FRM1 encodings and retained bytes; receipt; absent-key getter;
     // final imported FPO1 and three digest copies.
     let authority_bytes = 2 * binding
@@ -102,8 +105,8 @@ fn whole_memory_budget(
             .key_record
             .to_canonical_cbor()
             .len()
-        + 2 * (16 + 16)
-        + 8
+        + ancestry.len() * (16 + 16)
+        + parent_links * 8
         + 4 * (26 + 6)
         + 2 * signed.to_canonical_cbor().len()
         + 2 * signed.manifest_bytes().len()
@@ -111,6 +114,18 @@ fn whole_memory_budget(
         + (owner.as_str().len() + 1 + 8 + 1 + 32 + 1 + 32)
         + operation.to_canonical_cbor().len()
         + 3 * 32;
+    Ok(authority_bytes)
+}
+
+fn whole_memory_budget(
+    world: &World,
+    built: &Built,
+    admission: &ImportedForkAttributionAdmissionV1,
+    child_index: usize,
+    folded_events: usize,
+) -> Fallible<(usize, usize, usize)> {
+    assert_eq!(world.child_at(child_index)?.parent, world.root);
+    let authority_bytes = memory_authority_bytes(world, built, admission, child_index)?;
     // Runtime reads [child,root], then [root]: three native metadata carriers,
     // eight borrowed root Event candidates, one internal parent ID and one
     // Runtime parent/cut continuation. No name/payload/type String is copied.
