@@ -13,9 +13,10 @@ use std::sync::{
 
 use fixture::{pin_policy, request_for, Fallible, Port, Shape, Spec, World, PARENT_CUT};
 use pos_core::{
-    store::EventStore, CoreError, ErasureRecoveryLimitsV1, ErasureReferenceV1,
-    ErasureReplayClaimV1, Hash, KeyDestructionRequestV1, KeyRegistryStateV1, Reducer, Seq, State,
-    TimelineId, WorldReplayClosureV1,
+    store::{EventReadBounds, EventStore},
+    CoreError, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash,
+    KeyDestructionRequestV1, KeyRegistryStateV1, Reducer, Seq, State, TimelineId,
+    WorldReplayClosureV1,
 };
 use pos_runtime::{
     ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
@@ -103,6 +104,20 @@ impl WorldReplayVerifierV1 for ImportedVerifier {
         requested: &WorldReplayUseV1,
         generation: ErasureReferenceV1,
     ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
+        self.verify_with_max_events(closure, requested, generation, None)
+    }
+}
+
+impl ImportedVerifier {
+    /// Select a finite Event allowance before the test owner seals its result.
+    /// Normal fixtures keep their exact existing bounds and fault behavior.
+    fn verify_with_max_events(
+        &self,
+        closure: &WorldReplayClosureV1,
+        requested: &WorldReplayUseV1,
+        generation: ErasureReferenceV1,
+        max_events: Option<usize>,
+    ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
         let phase = self.admissions.fetch_add(1, Ordering::SeqCst);
         let child = requested.timeline_id();
         let fault = if self.fault_target.is_none_or(|target| target == child) {
@@ -156,18 +171,36 @@ impl WorldReplayVerifierV1 for ImportedVerifier {
         let limits = ForkReplayReadLimitsV1::new(8, nodes, rows, bytes, 30_000_000)
             .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)?;
         let limits = self.limits_override.unwrap_or(limits);
+        let verified = pos_runtime::world_replay::test_verified_world_replay(
+            closure,
+            requested,
+            generation,
+            ErasureReplayClaimV1::Exact,
+        );
+        let verified = if let Some(max_events) = max_events {
+            let bounds = verified.read_bounds();
+            pos_runtime::world_replay::test_verified_world_replay_with_fields_and_bounds(
+                closure.digest(),
+                closure.timeline_id(),
+                closure.source_head(),
+                requested.clone(),
+                generation,
+                ErasureReplayClaimV1::Exact,
+                EventReadBounds::new_with_total_bytes_and_elapsed(
+                    bounds.max_payload_bytes(),
+                    bounds.max_event_type_bytes(),
+                    bounds.max_fork_depth(),
+                    max_events,
+                    bounds.max_total_bytes(),
+                    bounds.max_elapsed_micros(),
+                ),
+            )
+        } else {
+            verified
+        };
         Ok(
             pos_runtime::world_replay::test_verified_world_replay_with_fork_attribution(
-                pos_runtime::world_replay::test_verified_world_replay(
-                    closure,
-                    requested,
-                    generation,
-                    ErasureReplayClaimV1::Exact,
-                ),
-                profile,
-                sources,
-                required,
-                limits,
+                verified, profile, sources, required, limits,
             ),
         )
     }
