@@ -1,4 +1,4 @@
-//! Independent complete SQLite Replay totals for the empty imported segment.
+//! Independent complete `SQLite` Replay totals for the empty imported segment.
 //!
 //! Neither a native cost helper nor a measured ledger supplies these units.
 
