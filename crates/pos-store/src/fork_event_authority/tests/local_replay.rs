@@ -17,6 +17,7 @@ use pos_core::{
 };
 use std::{error::Error, time::Duration};
 
+#[derive(Clone, Copy)]
 enum LocalHistory {
     Empty,
     Classified,
