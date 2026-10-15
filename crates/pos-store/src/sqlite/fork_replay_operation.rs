@@ -271,6 +271,60 @@ mod tests {
     }
 
     #[test]
+    fn initial_operation_binding_failure_preserves_the_protected_read_budget() -> Fallible<()> {
+        use rusqlite::{limits::Limit, ErrorCode};
+
+        for principal_lookup in [false, true] {
+            let (store, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
+            let bytes = if principal_lookup {
+                32
+            } else {
+                expected_bytes(&row)
+            };
+            let read = |context: &mut NativeReadContextV1<'_, '_>| {
+                if principal_lookup {
+                    principal_operation_id_with_context(&store.conn, row.result_digest, context)
+                        .map(|actual| assert_eq!(actual, row.operation_id))
+                } else {
+                    operation_with_context(&store.conn, row.kind, row.operation_id, context)
+                        .map(|actual| assert_eq!(actual, Some(row.clone())))
+                }
+            };
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 2, bytes, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let previous = store.conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, 31)?;
+            // An actual 32-byte parameter fails binding, before row stepping.
+            // This is a native fault fixture, not malformed admitted authority.
+            {
+                let mut statement = store.conn.prepare("SELECT ?1")?;
+                let error = statement
+                    .query(params![row.operation_id.as_bytes().as_slice()])
+                    .err();
+                assert_eq!(
+                    error.and_then(|error| error.sqlite_error_code()),
+                    Some(ErrorCode::TooBig)
+                );
+            }
+            assert_eq!(
+                read(&mut NativeReadContextV1::protected(&mut budget)),
+                Err(Error::StorageIndeterminate)
+            );
+            assert_eq!(budget.remaining_native_bytes(), bytes);
+            budget.check_time()?;
+
+            store.conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, previous)?;
+            // Reuse the exact ledger: the valid probe + fetch need both rows
+            // and every byte, proving that the binding fault debited neither.
+            read(&mut NativeReadContextV1::protected(&mut budget))?;
+            assert_eq!(budget.remaining_native_bytes(), 0);
+            budget.check_time()?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn operation_facts_charge_exact_hash_vectors_optional_child_and_rows() -> Fallible<()> {
         for kind in [
             ForkAdmissionOperationKindV1::Fork,
