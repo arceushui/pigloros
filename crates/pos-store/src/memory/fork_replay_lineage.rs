@@ -177,7 +177,7 @@ mod tests {
                     CanonicalBytes::from_static(b"second ordinary Event"),
                 )],
             )?);
-            assert!(read(&store, child)?.is_some());
+            assert!(read(&store, child)??.is_some());
             // Public append cannot create these impossible native orders.
             // Only the stored cursor is corrupted; the read still crosses
             // the public port with its real installed containment gate.
