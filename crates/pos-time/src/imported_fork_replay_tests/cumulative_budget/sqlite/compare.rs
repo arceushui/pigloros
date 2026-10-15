@@ -1,4 +1,4 @@
-//! Two imported SQLite arms share one exact ledger through four validations.
+//! Two imported `SQLite` arms share one exact ledger through four validations.
 
 use super::super::super::{
     fixture::{Built, Fallible, Shape, Spec, World},
