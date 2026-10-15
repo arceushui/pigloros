@@ -868,7 +868,7 @@ mod tests {
             }
             Declares::Prior => {
                 let ghost = ok(DependencyNodeCoordinateV1::try_new(
-                    1,
+                    0,
                     1,
                     "plugin:ghost".to_owned(),
                     0,
