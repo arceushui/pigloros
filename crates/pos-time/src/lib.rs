@@ -340,20 +340,7 @@ fn read_complete_world_replay(
         .logical_head(timeline)
         .map_err(host_error_to_core)?
         .as_u64();
-    if head != requested_use.source_logical_head().as_u64() {
-        return Err(CoreError::ArtifactUnavailable);
-    }
-    let first = range.from.as_u64().max(1);
-    let last = range.to.map_or(head, pos_core::Seq::as_u64);
-    if first > head.saturating_add(1) {
-        return Err(CoreError::ArtifactUnavailable);
-    }
-    let expected = if first > last { 0 } else { last - first + 1 };
-    // An unrepresentable count cannot fit a verifier's finite max_events.
-    let expected = usize::try_from(expected).unwrap_or(usize::MAX);
-    if expected > bounds.max_events() {
-        return Err(CoreError::ArtifactUnavailable);
-    }
+    let (first, expected) = checked_world_replay_range(requested_use, head, bounds)?;
 
     budget
         .check_time()
@@ -373,7 +360,44 @@ fn read_complete_world_replay(
     {
         return Err(CoreError::ArtifactUnavailable);
     }
-    for event in &events {
+    charge_replay_event_bytes(&events, budget).map(|()| events)
+}
+
+/// Reject a changed head or impossible range before bounded Event materialization.
+fn checked_world_replay_range(
+    requested_use: &pos_runtime::WorldReplayUseV1,
+    head: u64,
+    bounds: pos_core::EventReadBounds,
+) -> Result<(u64, usize), pos_core::CoreError> {
+    use pos_core::CoreError;
+
+    if head != requested_use.source_logical_head().as_u64() {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+    let range = requested_use.range();
+    let first = range.from.as_u64().max(1);
+    let last = range.to.map_or(head, pos_core::Seq::as_u64);
+    if first > head.saturating_add(1) {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+    let expected = if first > last { 0 } else { last - first + 1 };
+    // An unrepresentable count cannot fit a verifier's finite max_events.
+    let expected = usize::try_from(expected).unwrap_or(usize::MAX);
+    if expected > bounds.max_events() {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+
+    Ok((first, expected))
+}
+
+/// Charge owned payloads in order, then apply the original post-read time check.
+fn charge_replay_event_bytes(
+    events: &[pos_core::Event],
+    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
+) -> Result<(), pos_core::CoreError> {
+    use pos_core::CoreError;
+
+    for event in events {
         budget
             .charge_bytes(event.payload.as_slice().len())
             .map_err(|_| CoreError::ArtifactUnavailable)?;
@@ -383,8 +407,7 @@ fn read_complete_world_replay(
     }
     budget
         .check_time()
-        .map_err(|_| CoreError::ArtifactUnavailable)?;
-    Ok(events)
+        .map_err(|_| CoreError::ArtifactUnavailable)
 }
 
 #[cfg(test)]
