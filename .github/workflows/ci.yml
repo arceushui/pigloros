@@ -789,6 +789,20 @@ jobs:
           --exclude 'src/system_bus/tests.rs'
           --exclude 'src/e2e_determinism.rs'
           --exclude 'src/action_admission_tests.rs'
+          --exclude 'src/fork_event_authority/tests/local_replay.rs'
+          --exclude 'src/sqlite/tests/protected_interval_cleanup.rs'
+          --exclude 'src/imported_fork_replay_tests.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/compare.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/read_bounds.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/sqlite.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/sqlite/compare.rs'
+          --exclude 'src/imported_fork_replay_tests/runtime_budget.rs'
+          --exclude 'src/imported_fork_replay_tests/runtime_budget/deadline.rs'
+          --exclude 'src/imported_fork_replay_tests/runtime_budget/repeat.rs'
+          --exclude 'src/nested_imported_fork_replay_tests.rs'
+          --exclude 'src/nested_imported_fork_replay_tests/intermediate_privacy.rs'
+          --exclude 'src/ordinary_fork_lineage_tests.rs'
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
       - name: Analyze CRAP score changes
@@ -805,6 +819,20 @@ jobs:
           --exclude 'src/system_bus/tests.rs'
           --exclude 'src/e2e_determinism.rs'
           --exclude 'src/action_admission_tests.rs'
+          --exclude 'src/fork_event_authority/tests/local_replay.rs'
+          --exclude 'src/sqlite/tests/protected_interval_cleanup.rs'
+          --exclude 'src/imported_fork_replay_tests.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/compare.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/read_bounds.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/sqlite.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/sqlite/compare.rs'
+          --exclude 'src/imported_fork_replay_tests/runtime_budget.rs'
+          --exclude 'src/imported_fork_replay_tests/runtime_budget/deadline.rs'
+          --exclude 'src/imported_fork_replay_tests/runtime_budget/repeat.rs'
+          --exclude 'src/nested_imported_fork_replay_tests.rs'
+          --exclude 'src/nested_imported_fork_replay_tests/intermediate_privacy.rs'
+          --exclude 'src/ordinary_fork_lineage_tests.rs'
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
           --format json
