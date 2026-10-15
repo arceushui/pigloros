@@ -166,6 +166,37 @@ mod tests {
     }
 
     #[test]
+    fn zero_and_duplicate_native_event_cursors_refuse_the_visible_child() -> Fallible<()> {
+        for zero in [true, false] {
+            let (mut store, root, child) = fixture()?;
+            drop(store.append(
+                root,
+                &[EventDraft::new(
+                    EntityId::new(),
+                    Kind::new("ordinary"),
+                    CanonicalBytes::from_static(b"second ordinary Event"),
+                )],
+            )?);
+            assert!(read(&store, child)?.is_some());
+            // Public append cannot create these impossible native orders.
+            // Only the stored cursor is corrupted; the read still crosses
+            // the public port with its real installed containment gate.
+            let state = store.timelines.get_mut(&root).ok_or("root fixture")?;
+            assert_eq!(state.events.len(), 2);
+            for event in &mut state.events {
+                event.seq = if zero { Seq::ZERO } else { Seq::from_u64(1) };
+            }
+            assert_eq!(
+                read(&store, child)?,
+                Err(Error::Read(
+                    ForkReplayAuthorityReadErrorV1::CorruptAuthority
+                ))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn late_ancestor_markers_and_actual_event_types_are_both_hidden() -> Fallible<()> {
         for marker in [true, false] {
             for kind in ["geo.cell", "geo.location"] {
