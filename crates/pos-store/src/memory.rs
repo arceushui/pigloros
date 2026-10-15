@@ -6204,6 +6204,8 @@ impl MemoryStore {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    mod classifier_binding;
+
     use super::*;
     use crate::ErasureRejoinPersistencePortV1;
     use ciborium::value::Value;
