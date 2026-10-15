@@ -1,7 +1,7 @@
 //! Read-only protected intervals retain exact transaction ownership on refusal.
 
 use super::fixture_store;
-use crate::SqliteStore;
+use crate::sqlite::SqliteStore;
 use pos_core::{
     store::EventStore, ErasureContainmentGateV1, ErasureErrorV1, ErasureInventoryPersistencePortV1,
     ErasureProtectedEffectDispositionV1, ErasureProtectedEffectIntervalV1,
