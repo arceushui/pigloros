@@ -3,7 +3,8 @@
 //! This diagnostic control does not authorize a protected Replay release.
 
 use super::{
-    commit_counting_signer, create_lifecycle, publication_fixture, PublicationTestStoreV1,
+    append_intervention, assert_host_append, commit_counting_signer, create_lifecycle,
+    publication_fixture, PublicationTestStoreV1,
 };
 use crate::{
     memory::MemoryStore, ForkReplayAuthorityReadErrorV1, ForkReplayAuthorityReadPortV1,
@@ -15,6 +16,11 @@ use pos_core::{
     ErasureProtectedEffectIntervalV1, Hash, Seq,
 };
 use std::{error::Error, time::Duration};
+
+enum LocalHistory {
+    Empty,
+    Classified,
+}
 
 fn local_original_epoch_refusals<S: ForkReplayAuthorityReadPortV1>(
     store: &S,
@@ -65,22 +71,37 @@ fn local_original_epoch_refusals<S: ForkReplayAuthorityReadPortV1>(
 fn local_publication_evidence<S>(
     store: &mut S,
     expected_interval: ErasureProtectedEffectIntervalV1,
+    history: LocalHistory,
 ) -> Result<(), Box<dyn Error>>
 where
     S: PublicationTestStoreV1 + ForkReplayAuthorityReadPortV1 + ErasureInventoryPersistencePortV1,
 {
     let lifecycle = create_lifecycle(store)?;
-    let fixture = publication_fixture(store, &lifecycle, 122, 0)?;
+    let child = lifecycle.fork.child_id;
+    let head = match history {
+        LocalHistory::Empty => 0,
+        LocalHistory::Classified => {
+            let host = assert_host_append(store, &lifecycle)?;
+            assert_eq!(host.event.seq, Seq::from_u64(1));
+            append_intervention(store, &lifecycle)?;
+            let suffix = store.read_fork_event_suffix(child, 1)?;
+            assert_eq!(suffix.len(), 2);
+            assert!(suffix[0].1.is_none());
+            assert!(suffix[1].1.is_some());
+            2
+        }
+    };
+    let fixture = publication_fixture(store, &lifecycle, 122, head)?;
     let (receipt, signatures) = commit_counting_signer(store, &fixture, fixture.request.clone());
     assert_eq!(signatures, 1);
     let receipt = receipt?;
-    let child = lifecycle.fork.child_id;
-    let committed = store.read_committed(child, 0)?;
+    let committed = store.read_committed(child, head)?;
     assert_eq!(committed.receipt, receipt);
     assert_ne!(committed.record_id, Hash::zero());
     assert!(committed.authority_origin_digest.is_none());
     let expected_bytes = committed.operation.to_canonical_cbor();
-    let requirement = ForkReplayRequirementV1::new(child, Seq::ZERO, committed.record_id, None)?;
+    let requirement =
+        ForkReplayRequirementV1::new(child, Seq::from_u64(head), committed.record_id, None)?;
     let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, 8 * 1024 * 1024, 1_000_000)?;
     let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
     let started = clock.mark();
@@ -110,25 +131,33 @@ where
         interval,
         ErasureProtectedEffectDispositionV1::Rollback,
     )?;
-    assert_eq!(store.read_committed(child, 0)?, committed);
+    assert_eq!(store.read_committed(child, head)?, committed);
     Ok(())
 }
 
 #[test]
 fn local_memory_native_replay_evidence_matches_the_published_operation(
 ) -> Result<(), Box<dyn Error>> {
-    local_publication_evidence(
-        &mut MemoryStore::new(),
-        ErasureProtectedEffectIntervalV1::Unowned,
-    )
+    for history in [LocalHistory::Empty, LocalHistory::Classified] {
+        local_publication_evidence(
+            &mut MemoryStore::new(),
+            ErasureProtectedEffectIntervalV1::Unowned,
+            history,
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "sqlite")]
 #[test]
 fn local_sqlite_native_replay_evidence_matches_the_published_operation(
 ) -> Result<(), Box<dyn Error>> {
-    local_publication_evidence(
-        &mut crate::sqlite::SqliteStore::open_in_memory()?,
-        ErasureProtectedEffectIntervalV1::Owned,
-    )
+    for history in [LocalHistory::Empty, LocalHistory::Classified] {
+        local_publication_evidence(
+            &mut crate::sqlite::SqliteStore::open_in_memory()?,
+            ErasureProtectedEffectIntervalV1::Owned,
+            history,
+        )?;
+    }
+    Ok(())
 }
