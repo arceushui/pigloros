@@ -709,7 +709,8 @@ fn r8_s9_a_launching_family_without_a_worker_is_unavailable() -> TestResult {
     // that holds no program, which is equivalent (R8-A6): the launch fails and the member is
     // `WorkerCrashed`, so the case is `Unavailable`.
     let missing = std::env::temp_dir().join(format!("pigloros-no-worker-{}", std::process::id()));
-    let runner = SupervisorRunnerV1::with_program(missing).ok_or("the worker path must be absolute")?;
+    let runner =
+        SupervisorRunnerV1::with_program(missing).ok_or("the worker path must be absolute")?;
     for family in LAUNCHING_FAMILIES {
         let attempt = attempt_from_fixture_files(family, ExecutionMode::Local)?;
         let observation = observe_through(&runner, &attempt)?;
