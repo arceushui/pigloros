@@ -47,11 +47,8 @@ impl NativeReadContextV1<'_, '_> {
     }
 
     fn publication_owner(&mut self, bytes: &[u8]) -> Result<()> {
-        if self.budget.is_some() {
-            let owner = bounded_field(bytes, OWNER_FIELD, 3, OWNER_MAX_BYTES)?;
-            self.bytes(owner.len())?;
-        }
-        Ok(())
+        let owner = bounded_field(bytes, OWNER_FIELD, 3, OWNER_MAX_BYTES)?;
+        self.bytes(owner.len())
     }
 
     pub(crate) fn publication_operation(
@@ -253,6 +250,60 @@ mod tests {
             let mut trailing = bytes.clone();
             trailing.push(0);
             assert_parity(codec, &trailing)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn publication_size_caps_refuse_before_owned_decoder_buffers() -> Fallible<()> {
+        let committed = committed()?;
+        let imported = ImportedForkPublicationOperationV1::from_local(
+            committed.operation.clone(),
+            committed.authority_origin_digest.ok_or("no origin")?,
+        );
+        for (codec, valid, maximum) in [
+            (
+                Codec::Binding,
+                committed.binding.to_canonical_cbor(),
+                MAX_FORK_PUBLICATION_BINDING_BYTES_V1,
+            ),
+            (
+                Codec::Operation,
+                committed.operation.to_canonical_cbor(),
+                MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
+            ),
+            (
+                Codec::Operation,
+                imported.to_canonical_cbor(),
+                MAX_FORK_PUBLICATION_OPERATION_BYTES_V1,
+            ),
+            (
+                Codec::Artifact,
+                artifact(&committed)?.to_canonical_cbor(),
+                MAX_FORK_PUBLICATION_ARTIFACT_BYTES_V1,
+            ),
+        ] {
+            assert!(valid.len() <= maximum);
+            assert!(codec.native_accepts(&valid));
+            codec.decode(&valid, &mut NativeReadContextV1::ordinary())?;
+            // Raw corruption below typed construction, not admitted authority.
+            let mut oversized = valid.clone();
+            oversized.resize(maximum + 1, 0);
+            assert!(!codec.native_accepts(&oversized));
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let started = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 8 * 1024 * 1024, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, started, &mut clock)?;
+            assert_eq!(
+                codec.decode(&oversized, &mut NativeReadContextV1::protected(&mut budget)),
+                Err(Error::PublicationConflict)
+            );
+            assert_eq!(budget.remaining_native_bytes(), limits.max_native_bytes());
+            assert_eq!(budget.check_time(), Ok(()));
+            // Semantic wire rejection does not fabricate a debit or latch an
+            // exhausted budget; the valid decoder control uses that same ledger.
+            codec.decode(&valid, &mut NativeReadContextV1::protected(&mut budget))?;
+            assert!(budget.remaining_native_bytes() < limits.max_native_bytes());
         }
         Ok(())
     }

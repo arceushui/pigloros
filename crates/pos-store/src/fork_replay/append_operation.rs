@@ -69,6 +69,7 @@ mod tests {
         fae1_fixture::{Fallible, Shape, Spec, World},
         ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
     };
+    use ciborium::value::Value;
     use pos_core::{
         trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1},
         ForkAppendSourceIdentityV1, ForkAttributionImportClosureV1,
@@ -92,6 +93,86 @@ mod tests {
                     source,
                 } => adapter_identifier.len() + source.route().len(),
             }
+    }
+
+    fn assert_preallocation_refusal(bytes: &[u8], valid: &ForkAppendOperationV1) -> Fallible<()> {
+        assert!(ForkAppendOperationV1::from_canonical_cbor(bytes).is_err());
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let started = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 8 * 1024 * 1024, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, started, &mut clock)?;
+        assert_eq!(
+            NativeReadContextV1::protected(&mut budget).append_operation(bytes),
+            Err(Error::PublicationConflict)
+        );
+        assert_eq!(budget.remaining_native_bytes(), limits.max_native_bytes());
+        assert_eq!(budget.check_time(), Ok(()));
+        let control = NativeReadContextV1::protected(&mut budget)
+            .append_operation(&valid.to_canonical_cbor())?;
+        assert_eq!(&control, valid);
+        assert!(budget.remaining_native_bytes() < limits.max_native_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn fop_caps_and_malformed_source_carriers_refuse_before_owned_buffers() -> Fallible<()> {
+        // These raw decoder faults cannot be constructed as typed FOP1 records.
+        // They prove the native preallocation boundary, not an admitted import.
+        let cases = operations()?;
+        assert_eq!(cases.len(), 4);
+        for operation in &cases {
+            let mut oversized = operation.to_canonical_cbor();
+            oversized.resize(MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1 + 1, 0);
+            assert_preallocation_refusal(&oversized, operation)?;
+        }
+        let external = cases
+            .iter()
+            .find(|operation| {
+                matches!(
+                    &operation.input().source,
+                    ForkAppendSourceIdentityV1::ExternalInput { .. }
+                )
+            })
+            .ok_or("external operation")?;
+        let valid = external.to_canonical_cbor();
+        let decoded: Value = ciborium::de::from_reader(valid.as_slice())?;
+        let Value::Array(fields) = decoded else {
+            return Err("FOP1 array".into());
+        };
+        let Value::Array(source) = fields.get(7).ok_or("FOP1 source")? else {
+            return Err("FOP1 source array".into());
+        };
+        let encode_source = |source: Vec<Value>| -> Fallible<Vec<u8>> {
+            let mut fields = fields.clone();
+            fields[7] = Value::Array(source);
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&Value::Array(fields), &mut bytes)?;
+            Ok(bytes)
+        };
+        assert_eq!(encode_source(source.clone())?, valid);
+        for (field, text) in [
+            (1, String::new()),
+            (2, String::new()),
+            (1, "x".repeat(MAX_FORK_EVENT_REGISTRAR_BYTES_V1 + 1)),
+            (2, "x".repeat(MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1 + 1)),
+        ] {
+            let mut changed = source.clone();
+            changed[field] = Value::Text(text);
+            let bytes = encode_source(changed)?;
+            assert!(bytes.len() <= MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1);
+            assert_preallocation_refusal(&bytes, external)?;
+        }
+        let mut unknown_tag = source.clone();
+        unknown_tag[0] = Value::Integer(2.into());
+        for changed in [
+            vec![Value::Integer(0.into()), Value::Integer(0.into())],
+            unknown_tag,
+        ] {
+            let bytes = encode_source(changed)?;
+            assert!(bytes.len() <= MAX_FORK_EVENT_APPEND_OPERATION_BYTES_V1);
+            assert_preallocation_refusal(&bytes, external)?;
+        }
+        Ok(())
     }
 
     #[test]
