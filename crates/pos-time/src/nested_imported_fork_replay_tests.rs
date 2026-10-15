@@ -16,8 +16,8 @@ use pos_core::{
     },
     store::{EventStore, SeqRange},
     CanonicalBytes, CoreError, EntityId, ErasureContainmentGateV1, ErasureGate,
-    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventReadBounds, Hash,
-    OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, Reducer, Seq, State, TimelineId,
+    ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1, Event, EventReadBounds,
+    Hash, OwnTracksEnrollmentRequestV1, OwnTracksEnrollmentStore, Reducer, Seq, State, TimelineId,
     WorldReplayClosureV1,
 };
 use pos_runtime::{
