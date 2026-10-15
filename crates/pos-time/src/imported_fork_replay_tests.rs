@@ -4,6 +4,7 @@
 pub mod fixture;
 
 mod cumulative_budget;
+mod runtime_budget;
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
