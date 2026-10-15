@@ -76,13 +76,19 @@
 //!   state as it stands: a generation still being written validates as what
 //!   is recorded so far, usually `DependencyGraphInvalid` for a missing
 //!   Intervention node, and a digest derived from it must not be published.
-//! - **Empty graph.** The committed prefix has no write path yet (#554), so
-//!   a parent Timeline's prefix is empty in production, and a Fork whose
-//!   generation has no records has an empty graph, which the validator
-//!   rejects as `DependencyGraphInvalid` (`InterventionNodeMissing`). The
-//!   first generation of a Fork is therefore admitted from a host-built
-//!   graph; once its suffix is recorded, this source serves every later
-//!   admission of the Fork from the recorded generation.
+//! - **Empty graph.** A Fork whose generation has no records has an empty
+//!   Fork graph, and a parent Timeline whose prefix recorded nothing has an
+//!   empty prefix; an empty graph is rejected by the validator as
+//!   `DependencyGraphInvalid` (`InterventionNodeMissing`). The prefix now has
+//!   a write path, but the first generation of a Fork has no recorded
+//!   records before its admission, so it is admitted through the composite
+//!   [`PrefixSeededFrontierSourceV1`](super::prefix_seeded_source::PrefixSeededFrontierSourceV1),
+//!   which reads the recorded prefix through
+//!   the same port and takes the generation's provisional graph from the
+//!   host. Once its suffix is recorded, this source serves every later
+//!   admission of the Fork from the recorded generation, with the same
+//!   digest. Both sources share the prefix paging and conversion of this
+//!   module.
 //! - **Determinism.** The output is a pure function of the committed rows,
 //!   the plan, and the bounds; the page limit never changes it.
 
@@ -123,7 +129,7 @@ pub struct RecordedFrontierSourceV1<P> {
 
 /// Why the recorded graph could not be read: a port fault or a graph the
 /// validator rejects. Kept small so that every helper can return it.
-enum RecordedGraphFaultV1 {
+pub(super) enum RecordedGraphFaultV1 {
     Store(CounterfactualStoreErrorV1),
     Graph(DependencyGraphErrorV1),
 }
@@ -142,13 +148,13 @@ impl From<DependencyGraphErrorV1> for RecordedGraphFaultV1 {
 
 /// One scope to page, with the Tick after which the source stops reading it.
 #[derive(Clone, Copy)]
-struct ScopeReadV1 {
+pub(super) struct ScopeReadV1 {
     scope: DependencyReadScopeV1,
     through_tick: u64,
 }
 
 /// One recorded row kind the source pages, with its graph counterpart.
-trait RecordedRowV1: DependencyPagedRowV1 + Sized {
+pub(super) trait RecordedRowV1: DependencyPagedRowV1 + Sized {
     /// The graph element one row converts to.
     type Graph;
 
@@ -295,55 +301,83 @@ impl<P: CounterfactualDependencyReadPortV1> RecordedFrontierSourceV1<P> {
         &self,
         plan: &CounterfactualPlanV1,
     ) -> Result<ValidatedDependencyGraphV1, RecordedGraphFaultV1> {
-        // The clamp is observably redundant: bounds above a hard maximum make
-        // the validator answer `FieldOutOfBounds` whatever was read, and the
-        // read stops early only with the same `DependencyGraphInvalid`
-        // admission outcome. It only keeps the early stop within the hard
-        // maximum, which no test can exceed without millions of rows.
-        let max_nodes = self.bounds.max_nodes.min(MAX_DEPENDENCY_GRAPH_NODES_V1);
-        let max_edges = self.bounds.max_edges.min(MAX_DEPENDENCY_GRAPH_EDGES_V1);
+        let caps = row_caps(self.bounds);
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
         for read in scope_reads(plan, self.generation) {
-            self.collect::<DependencyNodeRecordV1>(read, max_nodes, &mut nodes)?;
-            self.collect::<DependencyEdgeRecordV1>(read, max_edges, &mut edges)?;
+            read_scope(
+                &self.port,
+                self.page_limit,
+                read,
+                caps,
+                &mut nodes,
+                &mut edges,
+            )?;
         }
         validate_dependency_graph_v1(plan, self.bounds, nodes, edges)
             .map_err(RecordedGraphFaultV1::Graph)
     }
+}
 
-    /// Page one row kind of one scope into `out`, converting every row as its
-    /// page arrives, until the last page, the first row past the scope's
-    /// Tick bound, or one row more than `max_rows`.
-    fn collect<R: RecordedRowV1>(
-        &self,
-        read: ScopeReadV1,
-        max_rows: usize,
-        out: &mut Vec<R::Graph>,
-    ) -> Result<(), RecordedGraphFaultV1> {
-        let mut after: Option<DependencyPageCursorV1> = None;
-        loop {
-            // The cursor came from the port, so one outside its own scope is
-            // corrupt stored state, not a caller fault.
-            let request =
-                DependencyPageRequestV1::try_new(read.scope, after.take(), self.page_limit)
-                    .or(Err(CounterfactualDependencyErrorV1::READ_BACK_FAULT))?;
-            let page = R::read(&self.port, &request)?;
-            let rows = page.items();
-            // `partition_point` relies on the port contract: nodes are ordered
-            // by their own Tick and edges by consumer Tick first, so the rows
-            // within the bound form a prefix of the page.
-            let within = rows.partition_point(|row| row.tick() <= read.through_tick);
-            if out.len() + within > max_rows {
-                return Err(DependencyGraphErrorV1::ResourceLimitExceeded.into());
-            }
-            for row in &rows[..within] {
-                out.push(row.convert()?);
-            }
-            match page.next() {
-                Some(cursor) if within == rows.len() => after = Some(cursor.clone()),
-                _ => return Ok(()),
-            }
+/// The most nodes and edges a reader holds under `bounds`.
+///
+/// The clamp is observably redundant: bounds above a hard maximum make the
+/// validator answer `FieldOutOfBounds` whatever was read, and the read stops
+/// early only with the same `DependencyGraphInvalid` admission outcome. It
+/// only keeps the early stop within the hard maximum, which no test can
+/// exceed without millions of rows.
+pub(super) fn row_caps(bounds: DependencyGraphBoundsV1) -> (usize, usize) {
+    (
+        bounds.max_nodes.min(MAX_DEPENDENCY_GRAPH_NODES_V1),
+        bounds.max_edges.min(MAX_DEPENDENCY_GRAPH_EDGES_V1),
+    )
+}
+
+/// Page the nodes then the edges of one scope into `nodes` and `edges`, each
+/// capped at its entry of `caps`.
+pub(super) fn read_scope<P: CounterfactualDependencyReadPortV1>(
+    port: &P,
+    page_limit: usize,
+    read: ScopeReadV1,
+    caps: (usize, usize),
+    nodes: &mut Vec<DependencyGraphNodeV1>,
+    edges: &mut Vec<InputDependencyV1>,
+) -> Result<(), RecordedGraphFaultV1> {
+    collect_rows::<P, DependencyNodeRecordV1>(port, page_limit, read, caps.0, nodes)?;
+    collect_rows::<P, DependencyEdgeRecordV1>(port, page_limit, read, caps.1, edges)
+}
+
+/// Page one row kind of one scope into `out`, converting every row as its
+/// page arrives, until the last page, the first row past the scope's Tick
+/// bound, or one row more than `max_rows`.
+fn collect_rows<P: CounterfactualDependencyReadPortV1, R: RecordedRowV1>(
+    port: &P,
+    page_limit: usize,
+    read: ScopeReadV1,
+    max_rows: usize,
+    out: &mut Vec<R::Graph>,
+) -> Result<(), RecordedGraphFaultV1> {
+    let mut after: Option<DependencyPageCursorV1> = None;
+    loop {
+        // The cursor came from the port, so one outside its own scope is
+        // corrupt stored state, not a caller fault.
+        let request = DependencyPageRequestV1::try_new(read.scope, after.take(), page_limit)
+            .or(Err(CounterfactualDependencyErrorV1::READ_BACK_FAULT))?;
+        let page = R::read(port, &request)?;
+        let rows = page.items();
+        // `partition_point` relies on the port contract: nodes are ordered
+        // by their own Tick and edges by consumer Tick first, so the rows
+        // within the bound form a prefix of the page.
+        let within = rows.partition_point(|row| row.tick() <= read.through_tick);
+        if out.len() + within > max_rows {
+            return Err(DependencyGraphErrorV1::ResourceLimitExceeded.into());
+        }
+        for row in &rows[..within] {
+            out.push(row.convert()?);
+        }
+        match page.next() {
+            Some(cursor) if within == rows.len() => after = Some(cursor.clone()),
+            _ => return Ok(()),
         }
     }
 }
@@ -358,31 +392,46 @@ impl<P: CounterfactualDependencyReadPortV1> CounterfactualFrontierSourceV1
         provenance_digest: [u8; 32],
     ) -> Result<CounterfactualFrontierDerivationV1, CounterfactualAdmissionErrorV1> {
         let graph = self.read_graph(plan).map_err(admission_error)?;
-        let frontier =
-            derive_recomputation_frontier_v1(plan, &graph, frontier_id, provenance_digest)
-                .or(Err(CounterfactualAdmissionErrorV1::DependencyGraphInvalid))?;
-        Ok(CounterfactualFrontierDerivationV1 {
+        derive_validated(plan, &graph, frontier_id, provenance_digest)
+            .ok_or(CounterfactualAdmissionErrorV1::DependencyGraphInvalid)
+    }
+}
+
+/// Derive the sealed frontier of a validated graph and report its provisional
+/// outputs; `None` is a derivation the validated graph cannot support.
+pub(super) fn derive_validated(
+    plan: &CounterfactualPlanV1,
+    graph: &ValidatedDependencyGraphV1,
+    frontier_id: [u8; 16],
+    provenance_digest: [u8; 32],
+) -> Option<CounterfactualFrontierDerivationV1> {
+    derive_recomputation_frontier_v1(plan, graph, frontier_id, provenance_digest)
+        .ok()
+        .map(|frontier| CounterfactualFrontierDerivationV1 {
             frontier,
-            provisional_outputs: provisional_outputs(&graph),
+            provisional_outputs: provisional_outputs(graph),
         })
+}
+
+/// The parent-prefix scope of the plan, which the adapter bounds at the cut.
+pub(super) const fn prefix_read(plan: &CounterfactualPlanV1) -> ScopeReadV1 {
+    ScopeReadV1 {
+        scope: DependencyReadScopeV1::ParentPrefix {
+            timeline: TimelineId::from_ulid(Ulid::from_bytes(plan.parent_timeline_id)),
+            through_tick: plan.parent_cut_tick,
+        },
+        through_tick: u64::MAX,
     }
 }
 
 /// The two scopes of the plan's graph, in stitching order: the parent prefix,
-/// which the adapter bounds at the cut, then the Fork generation, which the
-/// source bounds at the horizon.
+/// then the Fork generation, which the source bounds at the horizon.
 const fn scope_reads(
     plan: &CounterfactualPlanV1,
     generation: ForkGenerationV1,
 ) -> [ScopeReadV1; 2] {
     [
-        ScopeReadV1 {
-            scope: DependencyReadScopeV1::ParentPrefix {
-                timeline: TimelineId::from_ulid(Ulid::from_bytes(plan.parent_timeline_id)),
-                through_tick: plan.parent_cut_tick,
-            },
-            through_tick: u64::MAX,
-        },
+        prefix_read(plan),
         ScopeReadV1 {
             scope: DependencyReadScopeV1::ForkGeneration(generation),
             through_tick: plan.horizon_tick,
@@ -393,7 +442,7 @@ const fn scope_reads(
 /// Map a read fault to the coordinator's closed error: the validator's edge
 /// coordinates are kept, every other graph fault is `DependencyGraphInvalid`,
 /// and a port fault is `Store`.
-fn admission_error(fault: RecordedGraphFaultV1) -> CounterfactualAdmissionErrorV1 {
+pub(super) fn admission_error(fault: RecordedGraphFaultV1) -> CounterfactualAdmissionErrorV1 {
     match fault {
         RecordedGraphFaultV1::Store(error) => CounterfactualAdmissionErrorV1::Store(error),
         RecordedGraphFaultV1::Graph(DependencyGraphErrorV1::DependencyGraphIncomplete(
