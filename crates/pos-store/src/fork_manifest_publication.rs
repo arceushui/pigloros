@@ -734,7 +734,16 @@ fn verified_committed_manifest(
     trusted: &TrustedPublicationSourcesV1<'_>,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> PublicationResultV1<CommittedForkManifestV1> {
-    let outer_bytes = &rows.artifact.input().signed_manifest_bytes;
+    verify_committed_manifest_binding(rows, trusted, context)
+        .and_then(|record_id| materialize_committed_manifest(rows, record_id, context))
+}
+
+/// Bind the cached signed manifest to its selected graph and retained key.
+fn verify_committed_manifest_binding(
+    rows: &CommittedPublicationRowsV1<'_>,
+    trusted: &TrustedPublicationSourcesV1<'_>,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationResultV1<Hash> {
     // FPA1's immutable native owner has already strictly decoded and bound
     // these exact FSM1 bytes. Borrow its cached value; do not decode it again.
     let signed = rows.artifact.signed_manifest();
@@ -754,7 +763,18 @@ fn verified_committed_manifest(
         rows.operation.input().public_verification_key,
     );
     context.check()?;
-    verification.map_err(|_| ForkManifestPublicationErrorV1::PublicationConflict)?;
+    verification
+        .map(|()| record_id)
+        .map_err(|_| ForkManifestPublicationErrorV1::PublicationConflict)
+}
+
+/// Copy only the verified receipt and publication fields, after their charges.
+fn materialize_committed_manifest(
+    rows: &CommittedPublicationRowsV1<'_>,
+    record_id: Hash,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationResultV1<CommittedForkManifestV1> {
+    let outer_bytes = &rows.artifact.input().signed_manifest_bytes;
     // FPR1 is not encoded here: only these receipt fields are materialized.
     charge_logical_fields(
         context,
@@ -904,6 +924,25 @@ fn committed_graph_is_consistent(
     record_id: Hash,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> PublicationResultV1<bool> {
+    let consistent = committed_record_fields_agree(rows, trusted, signed, record_id);
+    context.check().and_then(|()| {
+        if consistent {
+            trusted
+                .key_evidence
+                .accepts(trusted.registry, rows.operation.input(), context)
+        } else {
+            Ok(false)
+        }
+    })
+}
+
+/// The pure cross-record batch precedes the context check and retained-key read.
+fn committed_record_fields_agree(
+    rows: &CommittedPublicationRowsV1<'_>,
+    trusted: &TrustedPublicationSourcesV1<'_>,
+    signed: &SignedForkReproManifestV1,
+    record_id: Hash,
+) -> bool {
     let binding = rows.binding.input();
     let operation = rows.operation.input();
     let artifact = rows.artifact.input();
@@ -913,7 +952,7 @@ fn committed_graph_is_consistent(
         rows.final_logical_head,
         trusted.final_chain_head_hash,
     );
-    let consistent = (
+    (
         binding.child_timeline_id,
         binding.final_logical_head,
         binding.operation_id,
@@ -940,14 +979,7 @@ fn committed_graph_is_consistent(
                 trusted.admission.fields(),
             )
             .is_ok()
-        && manifest.intervention_sequences == trusted.intervention_sequences;
-    context.check()?;
-    if !consistent {
-        return Ok(false);
-    }
-    trusted
-        .key_evidence
-        .accepts(trusted.registry, operation, context)
+        && manifest.intervention_sequences == trusted.intervention_sequences
 }
 
 /// Where a trusted read takes the retained `FPO1`/`FSM1` verification key
@@ -1021,13 +1053,21 @@ fn local_key_agrees(
     registry: Option<&KeyRegistryStateV1>,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> PublicationResultV1<bool> {
-    let Some(registry) = registry else {
-        return Ok(true);
-    };
-    let local = registry_key_record_with_context(registry, record.identity(), context)?;
-    let Some(local) = local else {
-        return Ok(true);
-    };
+    registry.map_or(Ok(true), |registry| {
+        registry_key_record_with_context(registry, record.identity(), context).and_then(|local| {
+            local
+                .as_ref()
+                .map_or(Ok(true), |local| local_key_record_agrees(record, local, context))
+        })
+    })
+}
+
+/// Compare a selected local record only after charging its imported projection.
+fn local_key_record_agrees(
+    record: &ImportedKeyRecordV1,
+    local: &KeyRecordV1,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationResultV1<bool> {
     // Only the converted IKR1 fields are copied; no IKR1 encoding is emitted.
     charge_identity_copy(local.identity, context)?;
     context.bytes(OPTION_TAG_COPY_BYTES)?;
@@ -1035,7 +1075,7 @@ fn local_key_agrees(
         context.bytes(HASH_COPY_BYTES)?;
     }
     context.bytes(PUBLIC_KEY_COPY_BYTES)?;
-    let agrees = ImportedKeyRecordV1::from_key_record(&local).is_ok_and(|local| local == *record);
+    let agrees = ImportedKeyRecordV1::from_key_record(local).is_ok_and(|local| local == *record);
     context.check().map(|()| agrees)
 }
 
@@ -1046,20 +1086,32 @@ fn retained_key_is_consistent(
     operation: &ForkPublicationOperationInputV1,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> PublicationResultV1<bool> {
-    let Some(registry) = registry else {
-        return Ok(false);
-    };
-    let identity = operation.signing_identity;
-    let record = registry_key_record_with_context(registry, identity, context)?;
-    let Some(record) = record
-        .filter(|record| record.public_verification_key == Some(operation.public_verification_key))
-    else {
-        return Ok(false);
-    };
+    registry.map_or(Ok(false), |registry| {
+        registry_key_record_with_context(registry, operation.signing_identity, context).and_then(
+            |record| {
+                record
+                    .filter(|record| {
+                        record.public_verification_key == Some(operation.public_verification_key)
+                    })
+                    .map_or(Ok(false), |record| {
+                        retained_record_matches_material(registry, &record, operation, context)
+                    })
+            },
+        )
+    })
+}
+
+/// Only a matching public key may resolve its live digest or retained tombstone.
+fn retained_record_matches_material(
+    registry: &KeyRegistryStateV1,
+    record: &KeyRecordV1,
+    operation: &ForkPublicationOperationInputV1,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> PublicationResultV1<bool> {
     if record.private_material_digest == Some(operation.private_material_digest) {
         return Ok(true);
     }
-    registry_tombstone_with_context(registry, identity, context).map(|tombstone| {
+    registry_tombstone_with_context(registry, operation.signing_identity, context).map(|tombstone| {
         tombstone.is_some_and(|tombstone| {
             tombstone.destroyed_material_digest == operation.private_material_digest
         })
