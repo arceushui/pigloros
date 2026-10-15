@@ -11,9 +11,10 @@
 //! `pos-plugin-supervisor`, which depends on this crate, so the caller builds Drivers and
 //! registers them in [`CommunityEvaluationWorldV1::plugins_mut()`].
 //!
-//! Two kinds of failure are kept apart (ADR-061 revision 8, which carries decision 3 over from revision 7; O-13). A refusal of the
-//! registry, the gate, the trust verification or the clock keeps the closed host error that
-//! its table row maps to (`TrustStateUnavailable` only where the table says so). A fault of the
+//! Two kinds of failure are kept apart (ADR-061 revision 8, which carries decision 3 over from
+//! revision 7; O-13). A refusal of the registry, the gate, the trust verification or the clock
+//! keeps the closed host error that its table row maps to (`TrustStateUnavailable` only where
+//! the table says so). A fault of the
 //! hosts themselves (a host that is not ready, a missing registry, an unavailable store or
 //! ledger, a failed observation) is not a trust verdict: it is the operational
 //! [`CommunityPluginHostErrorV1::WorkerCrashed`], which the adapter classifies as
