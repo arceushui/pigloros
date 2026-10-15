@@ -41,8 +41,10 @@ use super::{
     sqlite_schema_ddl, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore,
 };
 use crate::{
-    committed_pipeline_receipt, evaluate_pipeline_admission, install_or_reject,
-    recovered_pipeline_receipt, retained_pipeline_receipt, PipelinePersistedStateV1,
+    committed_pipeline_receipt, evaluate_pipeline_admission,
+    factual_tick_plan::{FactualInstallV1, PlannedTickV1},
+    install_or_reject, recovered_pipeline_receipt, retained_pipeline_receipt,
+    PipelinePersistedStateV1,
 };
 
 /// `SQLite` treats a negative `LIMIT` as having no upper bound.
@@ -166,6 +168,24 @@ struct RetainedPipelineReceiptV1 {
     first_local_seq: u64,
     event_count: usize,
     expires_at: WallTime,
+}
+
+/// Where an admitted batch lands in its Timeline.
+#[derive(Clone, Copy)]
+struct BatchPositionV1 {
+    /// The length of the Timeline's inherited prefix: the logical offset of
+    /// its own Events.
+    prefix: u64,
+    /// The Timeline's own head before the batch.
+    owned_head: u64,
+}
+
+impl BatchPositionV1 {
+    /// The logical `seq` the first Event of the batch takes.
+    const fn first_seq(self) -> Seq {
+        let logical_head = self.prefix.saturating_add(self.owned_head);
+        Seq::from_u64(logical_head.saturating_add(1))
+    }
 }
 
 /// Raw integer columns of one retained receipt row before range validation.
@@ -297,7 +317,8 @@ impl SqliteStore {
                     self.recover_pipeline_receipt(timeline, basis, prefix, &record)
                 }
                 Some(_) | None => {
-                    self.commit_pipeline_batch(timeline, basis, now, prefix, owned_head)
+                    let position = BatchPositionV1 { prefix, owned_head };
+                    self.commit_pipeline_batch(timeline, basis, now, position, &chain)
                 }
             })
         })
@@ -395,10 +416,10 @@ impl SqliteStore {
         timeline: TimelineId,
         basis: &PipelineAdmissionBasisV1,
         now: WallTime,
-        prefix: u64,
-        owned_head: u64,
+        position: BatchPositionV1,
+        chain: &[(TimelineId, Seq)],
     ) -> Result<PipelineOutcomeV1, CoreError> {
-        crate::checked_logical_head(prefix, owned_head)
+        crate::checked_logical_head(position.prefix, position.owned_head)
             .and_then(|logical_head| {
                 read_fence(&self.conn, timeline).map(|fence| (Seq::from_u64(logical_head), fence))
             })
@@ -412,19 +433,44 @@ impl SqliteStore {
                     read_authority_state(&self.conn).and_then(|state| state.resolve(grant))
                 });
                 install_or_reject(evaluated, |next_fence| {
-                    self.insert_pipeline_batch(timeline, basis, now, prefix, owned_head, next_fence)
+                    self.insert_pipeline_batch(timeline, basis, now, position, next_fence, chain)
                 })
             })
     }
 
+    /// Check the Tick declaration, then append the complete batch and record
+    /// every effect together. A refused declaration is the commit's outcome;
+    /// nothing is appended or recorded.
     fn insert_pipeline_batch(
         &self,
         timeline: TimelineId,
         basis: &PipelineAdmissionBasisV1,
         now: WallTime,
-        prefix: u64,
-        owned_head: u64,
+        position: BatchPositionV1,
         next_fence: &PipelineAdmissionFenceV1,
+        chain: &[(TimelineId, Seq)],
+    ) -> Result<PipelineOutcomeV1, CoreError> {
+        let grant = next_fence.authority_grant();
+        let first_seq = position.first_seq();
+        let planned = self.plan_factual_tick(timeline, basis, grant, first_seq, chain);
+        planned.and_then(|checked| match checked {
+            PlannedTickV1::Install(install) => {
+                self.append_planned_batch(timeline, basis, now, position, next_fence, &install)
+            }
+            PlannedTickV1::Refused(refusal) => Ok(refusal.outcome()),
+        })
+    }
+
+    /// Append the batch, then write the Tick's dependency rows, the next
+    /// fence and the receipt in the same transaction.
+    fn append_planned_batch(
+        &self,
+        timeline: TimelineId,
+        basis: &PipelineAdmissionBasisV1,
+        now: WallTime,
+        position: BatchPositionV1,
+        next_fence: &PipelineAdmissionFenceV1,
+        install: &FactualInstallV1,
     ) -> Result<PipelineOutcomeV1, CoreError> {
         let drafts = basis.batch().drafts();
         drafts
@@ -436,7 +482,7 @@ impl SqliteStore {
                     timeline,
                     draft.clone(),
                 )
-                .and_then(|event| Self::logical_event(prefix, event))
+                .and_then(|event| Self::logical_event(position.prefix, event))
             })
             .collect::<Result<Vec<_>, _>>()
             .and_then(|events| committed_pipeline_receipt(basis, timeline, &events))
@@ -444,13 +490,15 @@ impl SqliteStore {
                 checked_append_identity_expires_at(now).map(|expires_at| (receipt, expires_at))
             })
             .and_then(|(receipt, expires_at)| {
-                write_fence(&self.conn, timeline, next_fence)
+                let record = basis.dependencies().record();
+                self.install_planned_factual_tick(timeline, record, install)
+                    .and_then(|()| write_fence(&self.conn, timeline, next_fence))
                     .and_then(|()| {
                         write_receipt(
                             &self.conn,
                             basis,
                             timeline,
-                            owned_head.saturating_add(1),
+                            position.owned_head.saturating_add(1),
                             drafts.len(),
                             expires_at,
                         )
@@ -733,9 +781,313 @@ impl PipelineAdmissionPortV1 for SqliteStore {
 
 #[cfg(test)]
 mod tests {
-    use pos_core::PIPELINE_ADMISSION_FENCE_BYTES_V1;
+    use std::sync::Arc;
 
-    use super::FENCE_LENGTH_CONSTRAINT;
+    use pos_core::output_policy::OutputAuthorityV1;
+    use pos_core::{
+        assemble_factual_tick, AppendIdentity, CanonicalBytes, DependencyNodeCoordinateV1,
+        EntityId, ErasureContainmentGateV1, Event, EventDraft, EventStore, FactualDriverStepV1,
+        FactualHeadV1, FactualIngressEventV1, FactualInputV1, FactualOutputV1, FactualOwnerIdV1,
+        FactualPrefixReadPortV1, FactualPriorNodeV1, FactualScheduledTickV1, FactualTickContextV1,
+        FactualTickShapeV1, Kind, PipelineAdmissionBasisDraftV1, PipelineAttemptDraftV1,
+        PipelineAttemptV1, PipelineDraftBatchV1, PipelineEvidenceRefV1, PipelineIngressV1,
+        PipelineObservationAnchorV1, PipelinePreconditionV1, PipelineSecurityRevisionsDraftV1,
+        PipelineSecurityRevisionsV1, RecordedDependencyClassV1, RecordedSetCountsV1, SeqRange,
+        TentativePipelineResultV1, PIPELINE_ADMISSION_FENCE_BYTES_V1, PIPELINE_CONTRACT_VERSION_V1,
+    };
+    use ulid::Ulid;
+
+    use super::*;
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        result.unwrap_or_else(|error| {
+            std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
+        })
+    }
+
+    /// What the basis of a test declares besides its two Events.
+    #[derive(Clone, Copy)]
+    enum Declares {
+        /// A human action: one node per Event.
+        Plain,
+        /// A scheduled Tick that records the ingress node of the first Event.
+        Ingress,
+        /// A scheduled Tick whose Driver consumes a node no Tick recorded.
+        Prior,
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn scheduled_shape(
+        drafts: &[EventDraft],
+        ingress_events: Vec<FactualIngressEventV1>,
+        extra: Vec<FactualInputV1>,
+    ) -> FactualTickShapeV1 {
+        let outputs = drafts
+            .iter()
+            .map(|draft| FactualOutputV1 {
+                draft: draft.clone(),
+                authority: OutputAuthorityV1::Authoritative,
+                direct_inputs: Vec::new(),
+            })
+            .collect();
+        let step_inputs = ingress_events
+            .iter()
+            .map(|event| FactualInputV1::IngressEvent(event.seq))
+            .chain(extra)
+            .collect();
+        let driver = FactualDriverStepV1 {
+            owner: FactualOwnerIdV1::new("plugin:test".to_owned()),
+            policy_identity: Hash::from_bytes([8; 32]),
+            step_inputs,
+            outputs,
+        };
+        FactualTickShapeV1::Scheduled(FactualScheduledTickV1 {
+            snapshot_digest: Hash::from_bytes([2; 32]),
+            prefix_contents: Vec::new(),
+            history_contents: Vec::new(),
+            ingress_events,
+            drivers: vec![driver],
+        })
+    }
+
+    /// The shape a test declares over `drafts`, given the Events already
+    /// stored.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn shape_of(declares: Declares, drafts: &[EventDraft], stored: &[Event]) -> FactualTickShapeV1 {
+        match declares {
+            Declares::Plain => FactualTickShapeV1::Human(drafts.to_vec()),
+            Declares::Ingress => {
+                let event = &stored[0];
+                let ingress = FactualIngressEventV1 {
+                    seq: event.seq,
+                    event_type: event.event_type.as_str().to_owned(),
+                    payload_hash: event.payload_hash,
+                };
+                scheduled_shape(drafts, vec![ingress], Vec::new())
+            }
+            Declares::Prior => {
+                let ghost = ok(DependencyNodeCoordinateV1::try_new(
+                    0,
+                    1,
+                    "plugin:ghost".to_owned(),
+                    0,
+                    7,
+                    Hash::from_bytes([0xee; 32]),
+                ));
+                let class = RecordedDependencyClassV1::EndogenousRecomputed;
+                let prior = FactualInputV1::Prior(FactualPriorNodeV1::new(ghost, class));
+                scheduled_shape(drafts, Vec::new(), vec![prior])
+            }
+        }
+    }
+
+    /// The basis of a Tick 1 over two Events, observed through the stored
+    /// Events.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn basis(
+        timeline: TimelineId,
+        declares: Declares,
+        stored: &[Event],
+    ) -> PipelineAdmissionBasisV1 {
+        let observed = stored.last().map_or(Seq::ZERO, |event| event.seq);
+        let observation =
+            PipelineObservationAnchorV1::try_new(timeline, observed, Hash::from_bytes([2; 32]));
+        let ingress = match declares {
+            Declares::Plain => PipelineIngressV1::HumanProposedAction,
+            Declares::Ingress | Declares::Prior => PipelineIngressV1::ScheduledAiDriver,
+        };
+        let attempt = ok(PipelineAttemptV1::try_from_draft(PipelineAttemptDraftV1 {
+            contract_version: PIPELINE_CONTRACT_VERSION_V1,
+            attempt_id: Some(ok(PipelineAttemptIdV1::try_new([1; 16]))),
+            ingress: Some(ingress),
+            observation: Some(ok(observation)),
+            idempotency: Some(AppendIdentity::new(
+                AppendDedupKey::from_keyed_hash([3; 32]),
+                AppendDedupScope::from_keyed_hash([4; 32]),
+            )),
+        }));
+        let drafts: Vec<EventDraft> = (0..2_u8)
+            .map(|index| {
+                EventDraft::new(
+                    EntityId::from_ulid(Ulid::from(9_u128)),
+                    Kind::new("world.action"),
+                    CanonicalBytes::from_vec(vec![index]),
+                )
+            })
+            .collect();
+        let context = FactualTickContextV1 {
+            timeline_id: timeline,
+            tick: 1,
+            attempt_id: ok(PipelineAttemptIdV1::try_new([1; 16])),
+            evidence_digest: Hash::from_bytes([5; 32]),
+            authority_grant: Hash::from_bytes([7; 32]),
+        };
+        let shape = shape_of(declares, &drafts, stored);
+        let evidence = ok(PipelineEvidenceRefV1::try_new(Hash::from_bytes([5; 32])));
+        let tentative_result = match declares {
+            Declares::Plain => TentativePipelineResultV1::HumanDomainApproval(evidence),
+            Declares::Ingress | Declares::Prior => {
+                TentativePipelineResultV1::AiProviderValidation(evidence)
+            }
+        };
+        let revision = Hash::from_bytes([6; 32]);
+        ok(PipelineAdmissionBasisV1::try_from_draft(
+            PipelineAdmissionBasisDraftV1 {
+                contract_version: PIPELINE_CONTRACT_VERSION_V1,
+                attempt: Some(attempt),
+                tentative_result: Some(tentative_result),
+                precondition: Some(PipelinePreconditionV1::ExpectedLogicalHead(observed)),
+                security_revisions: Some(ok(PipelineSecurityRevisionsV1::try_from_draft(
+                    PipelineSecurityRevisionsDraftV1 {
+                        authority: revision,
+                        consent: revision,
+                        capability: revision,
+                        delegation: revision,
+                        policy: revision,
+                        execution_profile: revision,
+                        erasure: revision,
+                    },
+                ))),
+                batch: Some(ok(PipelineDraftBatchV1::try_new(drafts))),
+                dependencies: ok(assemble_factual_tick(&context, &shape)),
+            },
+        ))
+    }
+
+    /// The fence a commit of `basis` leaves behind, and the fence before it.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn fences(basis: &PipelineAdmissionBasisV1) -> [PipelineAdmissionFenceV1; 2] {
+        let fence = ok(PipelineAdmissionFenceV1::try_new(
+            Hash::from_bytes([7; 32]),
+            basis.security_revisions(),
+            None,
+            10,
+        ));
+        [fence, ok(fence.after_commit(2).ok_or("budget"))]
+    }
+
+    /// Commit the batch of `basis` inside one transaction, as the port does,
+    /// after `stored` Events.
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn commit_in_transaction(
+        store: &SqliteStore,
+        timeline: TimelineId,
+        basis: &PipelineAdmissionBasisV1,
+        stored: u64,
+    ) -> Result<PipelineOutcomeV1, CoreError> {
+        let position = BatchPositionV1 {
+            prefix: 0,
+            owned_head: stored,
+        };
+        let [_, next_fence] = fences(basis);
+        begin_immediate_scope(&store.conn).and_then(|scope| {
+            let result = SqliteStore::fork_chain_on(&store.conn, timeline).and_then(|chain| {
+                let now = WallTime::from_micros(1);
+                store.insert_pipeline_batch(timeline, basis, now, position, &next_fence, &chain)
+            });
+            finish_immediate_scope(&store.conn, scope, result)
+        })
+    }
+
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn open_with_gate(path: &str) -> SqliteStore {
+        let mut store = ok(SqliteStore::open(path));
+        ok(store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open())));
+        store
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn an_in_doubt_commit_records_nothing_and_the_retry_commits_after_reopen() {
+        let directory = ok(tempfile::tempdir());
+        let path = directory
+            .path()
+            .join("admission-in-doubt.db")
+            .to_string_lossy()
+            .into_owned();
+        let mut store = open_with_gate(&path);
+        let timeline = ok(store.create_timeline("admission-in-doubt")).id();
+        let basis = basis(timeline, Declares::Plain, &[]);
+        let [fence, _] = fences(&basis);
+        ok(store.set_pipeline_admission_fence(timeline, fence));
+
+        ok(store.conn.commit_hook(Some(|| true)));
+        let in_doubt = commit_in_transaction(&store, timeline, &basis, 0);
+        ok(store.conn.commit_hook::<fn() -> bool>(None));
+        assert!(in_doubt.is_err());
+        drop(store);
+
+        let reopened = open_with_gate(&path);
+        assert!(ok(reopened.read(timeline, SeqRange::all())).is_empty());
+        assert_eq!(ok(reopened.pipeline_admission_fence(timeline)), Some(fence));
+        let no_tick = FactualHeadV1 {
+            tick: 0,
+            last_seq: Seq::ZERO,
+        };
+        assert_eq!(ok(reopened.last_committed_factual_tick(timeline)), no_tick);
+        let no_rows = RecordedSetCountsV1 {
+            nodes: 0,
+            edges: 0,
+            inputs: 0,
+        };
+        assert_eq!(ok(reopened.factual_set_counts(timeline)), no_rows);
+
+        let retried = ok(commit_in_transaction(&reopened, timeline, &basis, 0));
+        let PipelineOutcomeV1::Committed(receipt) = retried else {
+            std::panic::resume_unwind(Box::new(format!("expected a commit, got {retried:?}")));
+        };
+        assert_eq!(receipt.committed_events().len(), 2);
+        let one_tick = FactualHeadV1 {
+            tick: 1,
+            last_seq: Seq::from_u64(2),
+        };
+        assert_eq!(ok(reopened.last_committed_factual_tick(timeline)), one_tick);
+    }
+
+    /// A failing read of the store while a Tick is planned is an error that
+    /// leaves nothing behind, whichever read fails.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_failing_planning_read_is_a_storage_error_that_commits_nothing() {
+        let cases = [
+            (Declares::Plain, "counterfactual_dependency_commit_ranges"),
+            (Declares::Plain, "counterfactual_dependency_nodes"),
+            (Declares::Plain, "counterfactual_dependency_records"),
+            (Declares::Ingress, "events"),
+            (Declares::Ingress, "counterfactual_dependency_event_nodes"),
+            (Declares::Prior, "counterfactual_dependency_event_nodes"),
+        ];
+        for (declares, table) in cases {
+            let mut store = open_with_gate(":memory:");
+            let timeline = ok(store.create_timeline("admission-read-fault")).id();
+            let seed = [EventDraft::new(
+                EntityId::from_ulid(Ulid::from(9_u128)),
+                Kind::new("world.action"),
+                CanonicalBytes::from_vec(vec![9]),
+            )];
+            ok(store.append(timeline, &seed));
+            let stored = ok(store.read(timeline, SeqRange::all()));
+            let basis = basis(timeline, declares, &stored);
+            ok(store
+                .conn
+                .execute_batch(&format!("PRAGMA foreign_keys = OFF; DROP TABLE {table};")));
+
+            let outcome = commit_in_transaction(&store, timeline, &basis, 1);
+
+            assert!(
+                matches!(outcome, Err(CoreError::Storage(_))),
+                "{table}: {outcome:?}"
+            );
+            assert!(store.conn.is_autocommit(), "{table}");
+            let receipts = store.conn.query_row(
+                "SELECT COUNT(*) FROM pipeline_admission_receipts",
+                [],
+                |row| row.get::<_, i64>(0),
+            );
+            assert_eq!(ok(receipts), 0, "{table}");
+        }
+    }
 
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]

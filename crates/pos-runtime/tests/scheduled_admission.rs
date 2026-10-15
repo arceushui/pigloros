@@ -4122,14 +4122,7 @@ fn one_more_declared_input_is_refused_at_a_saturated_backlog_on_both_adapters() 
 
 // ── Recorded rows through the registry (ADR-064 Revision 3, Redmine #604) ──
 //
-// `MemoryStore` records the Tick rows with the Events; `SqliteStore` records
-// none until its own slice, which adds itself to this list.
-
-/// The adapters that record factual Ticks.
-#[cfg_attr(coverage_nightly, coverage(off))]
-fn recording_stores() -> Vec<(&'static str, Box<dyn Harness>)> {
-    vec![("memory", Box::new(MemoryStore::new()))]
-}
+// Both adapters record the Tick rows with the Events.
 
 /// ADR-064 R3.4.4 and R3.7.4: the Events forwarded to a Driver that have no
 /// node get one ingress node each, recorded once with the Tick and bound to
@@ -4137,8 +4130,8 @@ fn recording_stores() -> Vec<(&'static str, Box<dyn Harness>)> {
 /// and no second node for the earlier Events.
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn forwarded_events_are_recorded_once_as_ingress_nodes_on_memory() {
-    for (name, mut store) in recording_stores() {
+fn forwarded_events_are_recorded_once_as_ingress_nodes_on_both_adapters() {
+    for (name, mut store) in stores() {
         let host = Host::prepare(store.as_mut(), 1_000);
         let log = Log::default();
         let mut registry = host.registry();
@@ -4185,8 +4178,8 @@ fn forwarded_events_are_recorded_once_as_ingress_nodes_on_memory() {
 /// by digest and the store resolves it without a second row.
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn a_restored_history_node_is_recorded_once_on_memory() {
-    for (name, mut store) in recording_stores() {
+fn a_restored_history_node_is_recorded_once_on_both_adapters() {
+    for (name, mut store) in stores() {
         let host = Host::prepare(store.as_mut(), 1_000);
         let log = Log::default();
         let (mut registry, plans) = restored_pair(&host, store.as_mut(), &log);
@@ -4255,14 +4248,16 @@ fn assert_real_refusal(
 /// that is not the next one (`InvalidDependencyDeclaration`) and edges that
 /// name another authority grant than the persisted fence's
 /// (`AdmissionConflict`). `DependencySetExhausted` needs a recorded set filled
-/// to its bound of a million nodes; the only seam that fills one,
-/// `fill_factual_set_for_test`, exists in the `pos-store` unit tests alone, so
-/// that outcome is covered there
-/// (`an_exhausted_dependency_set_refuses_both_ingresses_and_commits_nothing`).
+/// to its bound of a million nodes; no public seam fills one, so that outcome
+/// is covered in `pos-store` for each adapter
+/// (`an_exhausted_dependency_set_refuses_both_ingresses_and_commits_nothing`
+/// for `MemoryStore` and
+/// `sqlite_an_exhausted_dependency_set_refuses_both_ingresses_and_commits_nothing`
+/// for `SqliteStore`).
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn the_memory_stores_own_refusal_aborts_the_staged_drivers() {
-    for (name, mut store) in recording_stores() {
+fn the_stores_own_refusal_aborts_the_staged_drivers() {
+    for (name, mut store) in stores() {
         let host = Host::prepare(store.as_mut(), 1_000);
         let invalid = PipelineOutcomeV1::InvalidDependencyDeclaration;
         let late = Offer {
