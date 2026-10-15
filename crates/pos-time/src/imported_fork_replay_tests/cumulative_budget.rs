@@ -52,6 +52,7 @@ fn whole_memory_budget(
     world: &World,
     built: &Built,
     admission: &ImportedForkAttributionAdmissionV1,
+    folded_events: usize,
 ) -> Fallible<(usize, usize, usize)> {
     let closure = ForkAttributionImportClosureV1::validate(&built.envelope)?;
     let signed = closure.signed_manifest();
@@ -116,7 +117,7 @@ fn whole_memory_budget(
     // Five chain-hash visits, one empty suffix lookup and three lineage visits.
     let phase_visits = 5 + 1 + 3;
     Ok((
-        2 * (authority_bytes + lineage_bytes) + 4 * (6 + 16),
+        2 * (authority_bytes + lineage_bytes) + folded_events * (6 + 16),
         2 * (authority_rows + lineage_rows),
         2 * phase_visits,
     ))
@@ -126,6 +127,7 @@ fn exercise(
     mut host: ErasureExecutionHostV1,
     world: &World,
     verifier: &ImportedVerifier,
+    cut: Option<Seq>,
     succeeds: bool,
 ) -> Fallible<()> {
     let child = world.child_at(0)?.id;
@@ -150,15 +152,24 @@ fn exercise(
         Some(&serde_json::json!(2))
     );
     let mut reads = host.read_sender()?;
-    let result = with_release(|release| {
-        crate::replay(
+    let result = with_release(|release| match cut {
+        None => crate::replay(
             &mut reads,
             child,
             &mut registry,
             &closure,
             release,
             &fixture.fold(),
-        )
+        ),
+        Some(cut) => crate::replay_at(
+            &mut reads,
+            child,
+            cut,
+            &mut registry,
+            &closure,
+            release,
+            &fixture.fold(),
+        ),
     });
     // Final admission occurs only after the staged fold. Each independent
     // one-under limit fits phase one and refuses in the final validation.
@@ -166,7 +177,8 @@ fn exercise(
     if succeeds {
         result?;
         let after = registry.state_snapshot(child)?;
-        assert_eq!(after["count"].len(), 4);
+        let folded_events = usize::try_from(cut.unwrap_or(Seq::from_u64(4)).as_u64())?;
+        assert_eq!(after["count"].len(), folded_events);
         assert!(after["count"]
             .entries()
             .all(|(_, state)| state.get("n") == Some(&serde_json::json!(1))));
@@ -180,12 +192,12 @@ fn exercise(
     Ok(())
 }
 
-#[test]
-fn imported_memory_replay_keeps_one_exact_budget_through_final_validation() -> Fallible<()> {
+fn memory_replay_budget_cases(cut: Option<Seq>) -> Fallible<()> {
     let world = World::new(Shape::EmptyUnclassified, false)?;
     let built = world.build(&Spec::default())?;
     let admission = ImportedForkAttributionAdmissionV1::from_envelope(&built.envelope, 1)?;
-    let (bytes, rows, visits) = whole_memory_budget(&world, &built, &admission)?;
+    let folded_events = usize::try_from(cut.unwrap_or(Seq::from_u64(4)).as_u64())?;
+    let (bytes, rows, visits) = whole_memory_budget(&world, &built, &admission, folded_events)?;
     assert_eq!((rows, visits), (46, 18));
     for (bytes, rows, visits, succeeds) in [
         (bytes, rows, visits, true),
@@ -228,7 +240,22 @@ fn imported_memory_replay_keeps_one_exact_budget_through_final_validation() -> F
             &composition,
             ErasureRecoveryLimitsV1::compiled_maximum(),
         )?;
-        exercise(host, &world, &verifier, succeeds)?;
+        exercise(host, &world, &verifier, cut, succeeds)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn imported_memory_replay_keeps_one_exact_budget_through_final_validation() -> Fallible<()> {
+    memory_replay_budget_cases(None)
+}
+
+#[test]
+fn imported_memory_replay_at_keeps_full_authority_budget_at_both_cuts() -> Fallible<()> {
+    // The prefix folds two Events, but validates the entire four-Event signed
+    // publication in both phases. The publication-cut control folds all four.
+    for cut in [2, 4] {
+        memory_replay_budget_cases(Some(Seq::from_u64(cut)))?;
     }
     Ok(())
 }
