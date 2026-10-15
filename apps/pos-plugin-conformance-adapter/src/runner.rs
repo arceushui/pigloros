@@ -285,10 +285,13 @@ impl OpenWorld {
         &self,
         args: &PassArgsV1,
     ) -> Result<Vec<(CommunityMemberV1, CommunityPluginHandleV1)>, HostError> {
+        // The most recent bind of a Plugin wins, like `committed_state`; the Resolver rejects a
+        // second `bind` of one Plugin today, so this is the one bind.
         let pair = |member: &PassMemberV1, source: &InMemoryReleaseSourceV1| {
             let found = self
                 .bound
                 .iter()
+                .rev()
                 .find(|bound| bound.plugin_id == member.plugin_id);
             found.ok_or(WIRING).map(|bound| {
                 *lock(&bound.inputs) = PassInputsV1 {

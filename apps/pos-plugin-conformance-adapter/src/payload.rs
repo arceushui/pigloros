@@ -526,8 +526,9 @@ impl CaseV1 {
     ///
     /// # Errors
     /// Returns [`InvalidCaseV1`] for JSON that violates the grammar, a schema string other
-    /// than the pinned one, a `family` that differs from the attempt's, more than 64
-    /// sub-cases, or a `provider` header that is missing, unexpected or not the transition.
+    /// than the pinned one, a `family` that differs from the attempt's, no sub-cases, more than
+    /// 64 sub-cases, a repeated sub-case id, or a `provider` header that is missing, unexpected
+    /// or not the transition.
     pub fn parse(bytes: &[u8], family: FixtureFamily) -> Result<Self, InvalidCaseV1> {
         let parsed = serde_json::from_slice::<Self>(bytes).or(Err(InvalidCaseV1));
         parsed.and_then(|case| case.checked(family))
