@@ -7,13 +7,13 @@ use super::fixture::{pin_policy, Fallible, Shape, Spec, World};
 use pos_core::{
     store::{EventStore, SeqRange},
     trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1},
-    ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1,
-    EventReadBounds, Hash, Seq, TimelineId, WorldReplayClosureV1,
+    ErasureHostErrorV1, ErasureProtectedOperationV1, ErasureRecoveryLimitsV1, ErasureReferenceV1,
+    ErasureReplayClaimV1, EventReadBounds, Hash, Seq, TimelineId, WorldReplayClosureV1,
 };
 use pos_runtime::{
-    ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, ErasureHostErrorV1,
-    VerifiedWorldReplayV1, WorldReplayForkSourceV1, WorldReplayUseV1,
-    WorldReplayVerificationErrorV1, WorldReplayVerifierV1,
+    ErasureCoordinatorCompositionV1, ErasureExecutionHostV1, VerifiedWorldReplayV1,
+    WorldReplayForkSourceV1, WorldReplayUseV1, WorldReplayVerificationErrorV1,
+    WorldReplayVerifierV1,
 };
 use pos_store::{
     memory::MemoryStore, ForkAttributionAuthorityImportPortV1,
@@ -124,8 +124,8 @@ fn imported_host(
     let composition =
         ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier);
     Ok((
-        ErasureExecutionHostV1::recover_with_composition(
-            Box::new(store),
+        ErasureExecutionHostV1::recover_memory_fixture_with_authority(
+            store,
             &composition,
             ErasureRecoveryLimitsV1::compiled_maximum(),
         )?,
