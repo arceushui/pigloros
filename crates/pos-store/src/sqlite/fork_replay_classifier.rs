@@ -3,7 +3,7 @@
 use pos_core::{
     ForkClassifierRegistrationV1, ForkClassifierSourceV1, ForkClassifierTableV1, Hash, TimelineId,
 };
-use rusqlite::{Connection, ToSql};
+use rusqlite::{Connection, Row, ToSql};
 
 use crate::{fork_replay::NativeReadContextV1, ForkEventAuthorityErrorV1 as Error};
 
@@ -29,34 +29,76 @@ fn raw_classifier_blob(
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<Option<Vec<u8>>> {
     use Error::CorruptAuthority;
-    context.check().map_err(|_| CorruptAuthority)?;
-    let mut statement = conn.prepare(probe).map_err(|_| CorruptAuthority)?;
-    context.check().map_err(|_| CorruptAuthority)?;
-    let mut rows = statement.query(arguments).map_err(|_| CorruptAuthority)?;
-    context.row_available().map_err(|_| CorruptAuthority)?;
-    let Some(row) = rows.next().map_err(|_| CorruptAuthority)? else {
-        return context.check().map(|()| None).map_err(|_| CorruptAuthority);
-    };
-    context.suffix_row().map_err(|_| CorruptAuthority)?;
-    let blob: bool = row.get(0).map_err(|_| CorruptAuthority)?;
-    if !blob {
-        return Err(CorruptAuthority);
-    }
-    let length = row.get::<_, i64>(1).map_err(|_| CorruptAuthority)?;
-    let length = usize::try_from(length).map_err(|_| CorruptAuthority)?;
-    if length > maximum {
-        return Err(CorruptAuthority);
-    }
-    context.check().map_err(|_| CorruptAuthority)?;
-    context.suffix_row().map_err(|_| CorruptAuthority)?;
-    context.bytes(length).map_err(|_| CorruptAuthority)?;
-    let bytes = conn
-        .query_row(fetch, arguments, |row| row.get::<_, Vec<u8>>(0))
-        .map_err(|_| CorruptAuthority)?;
     context
         .check()
-        .map(|()| Some(bytes))
         .map_err(|_| CorruptAuthority)
+        .and_then(|()| conn.prepare(probe).map_err(|_| CorruptAuthority))
+        .and_then(|mut statement| {
+            context
+                .check()
+                .map_err(|_| CorruptAuthority)
+                .and_then(|()| statement.query(arguments).map_err(|_| CorruptAuthority))
+                .and_then(|mut rows| {
+                    context
+                        .row_available()
+                        .map_err(|_| CorruptAuthority)
+                        .and_then(|()| rows.next().map_err(|_| CorruptAuthority))
+                        .and_then(|row| match row {
+                            None => context.check().map(|()| None).map_err(|_| CorruptAuthority),
+                            Some(row) => context
+                                .suffix_row()
+                                .map_err(|_| CorruptAuthority)
+                                .and_then(|()| {
+                                    classifier_bytes_from_row(
+                                        conn, row, fetch, maximum, arguments, context,
+                                    )
+                                })
+                                .map(Some),
+                        })
+                })
+        })
+}
+
+/// Materialize only while the caller still holds the selected probe row.
+fn classifier_bytes_from_row(
+    conn: &Connection,
+    row: &Row<'_>,
+    fetch: &str,
+    maximum: usize,
+    arguments: &[&dyn ToSql],
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> Result<Vec<u8>> {
+    use Error::CorruptAuthority;
+    row.get::<_, bool>(0)
+        .map_err(|_| CorruptAuthority)
+        .and_then(|blob| {
+            if !blob {
+                return Err(CorruptAuthority);
+            }
+            row.get::<_, i64>(1)
+                .map_err(|_| CorruptAuthority)
+                .and_then(|length| usize::try_from(length).map_err(|_| CorruptAuthority))
+                .and_then(|length| {
+                    if length > maximum {
+                        return Err(CorruptAuthority);
+                    }
+                    context
+                        .check()
+                        .map_err(|_| CorruptAuthority)
+                        .and_then(|()| context.suffix_row().map_err(|_| CorruptAuthority))
+                        .and_then(|()| context.bytes(length).map_err(|_| CorruptAuthority))
+                        .and_then(|()| {
+                            conn.query_row(fetch, arguments, |row| row.get::<_, Vec<u8>>(0))
+                                .map_err(|_| CorruptAuthority)
+                        })
+                        .and_then(|bytes| {
+                            context
+                                .check()
+                                .map(|()| bytes)
+                                .map_err(|_| CorruptAuthority)
+                        })
+                })
+        })
 }
 
 pub(super) fn classifier_blob_with_context(
