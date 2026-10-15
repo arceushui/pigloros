@@ -667,6 +667,49 @@ fn replace_first(bytes: &[u8], needle: &[u8], replacement: &[u8]) -> Fallible<Ve
 
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn ignored_native_wire_scalars_and_invalid_chunks_keep_registry_decoder_parity() -> Fallible<()> {
+    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
+        .swap_remove(1)
+        .0;
+    let marker = Value::Text("raw-ignored-wire-value".to_owned());
+    let mut snapshot = value(&live)?;
+    fields(record(&mut snapshot)?)?.push((Value::Text("extra".to_owned()), marker.clone()));
+    let bytes = encoded(&snapshot)?;
+    let needle = encoded(&marker)?;
+    // Raw replacement is below the typed Value encoder: valid wider scalar
+    // encodings must remain accepted by the pinned ordinary native reader.
+    for scalar in [
+        vec![0x1a, 0x00, 0x01, 0x00, 0x00], // positive u32 65536
+        vec![0xfa, 0x47, 0xf1, 0x20, 0x00], // f32 123456
+        vec![0xfb, 0x40, 0x5e, 0xdc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcd], // f64 123.45
+    ] {
+        let changed = replace_first(&bytes, &needle, &scalar)?;
+        assert_eq!(parity(&changed)?, live);
+        let mut guard = Guard::new(224); // unchanged owner "a", live signing-key inventory
+        assert_eq!(
+            KeyRegistryStateV1::from_durable_cbor_with_read_guard(&changed, &mut guard)?,
+            live
+        );
+        assert_eq!(guard.remaining, 0); // ignored scalars allocate no carrier
+    }
+    let mut malformed_text = vec![0x79, 0x10, 0x01]; // text length4097
+    malformed_text.extend(std::iter::repeat_n(0x80, 4_097));
+    for malformed in [
+        vec![0xf0],     // unsupported simple value
+        vec![0xfc],     // invalid additional-information28
+        vec![0xff],     // break cannot be a definite-map value
+        malformed_text, // no UTF8 boundary exists in the first4096-byte chunk
+    ] {
+        assert_eq!(
+            parity(&replace_first(&bytes, &needle, &malformed)?),
+            Err(ReadError::InvalidSnapshot)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn pinned_tuple_and_unit_enum_stream_consumption_is_not_silently_tightened() -> Fallible<()> {
     let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
         .swap_remove(1)
