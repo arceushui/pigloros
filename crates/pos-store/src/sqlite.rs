@@ -9653,7 +9653,10 @@ impl<'a> ProtectedIntervalConnectionsV1<'a> {
                 .writer_reservation_connection
                 .as_ref()
                 .unwrap_or(&store.conn),
-            reader: store.writer_reservation_connection.as_ref().map(|_| &store.conn),
+            reader: store
+                .writer_reservation_connection
+                .as_ref()
+                .map(|_| &store.conn),
         }
     }
 
