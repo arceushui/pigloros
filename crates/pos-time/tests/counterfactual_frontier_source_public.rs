@@ -1,7 +1,9 @@
 //! Public-interface tests for the ADR-064 production frontier source over the
 //! recorded dependency graph: differential against the hand-built `Source`
 //! fixture through a scripted read port, and end to end through the
-//! coordinator against both `MemoryStore` and `SqliteStore`.
+//! coordinator against both `MemoryStore` and `SqliteStore`. The composite
+//! source over a seeded prefix and a host-built Fork graph is checked against
+//! the same hand-built `Source` and against the recorded source.
 #![cfg(target_os = "linux")]
 
 use std::cell::RefCell;
@@ -61,6 +63,7 @@ use pos_time::counterfactual::frontier::{
     dependency_graph_digest_v1, derive_recomputation_frontier_v1,
 };
 use pos_time::counterfactual::frontier_source::RecordedFrontierSourceV1;
+use pos_time::counterfactual::prefix_seeded_source::PrefixSeededFrontierSourceV1;
 use ulid::Ulid;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -1721,3 +1724,126 @@ fn derives_over_a_seeded_prefix_with_an_unbound_committed_root<B: Backend>() -> 
     Ok(())
 }
 both_backends!(derives_over_a_seeded_prefix_with_an_unbound_committed_root);
+
+/// A root Timeline with no recorded prefix over a fresh adapter.
+fn bare_root<B: Backend>() -> TestResult<B> {
+    let mut store = B::open()?;
+    store.create_timeline_with_meta(TimelineMeta {
+        id: root_id(),
+        ..TimelineMeta::root("factual")
+    })?;
+    Ok(store)
+}
+
+fn composite_matches_the_hand_built_source_for_every_page_size<B: Backend>() -> TestResult {
+    let plan = plan(|_| {})?;
+    let mut hand_built = graph_with(&plan, &[])?;
+    let expected = derivation!(&mut hand_built, &plan)?;
+    let expected_graph = hand_built.graph(&plan)?;
+    let mut store = bare_root::<B>()?;
+    store.seed_prefix(root_id(), &prefix_ticks(&hand_built)?)?;
+    let store = Shared::new(store);
+    let fork = fork_part(&hand_built);
+    for limit in [1, 2, 3, 7, MAX_DEPENDENCY_PAGE_ROWS_V1] {
+        let mut source = PrefixSeededFrontierSourceV1::new(
+            store.clone(),
+            fork.nodes.clone(),
+            fork.edges.clone(),
+            BOUNDS,
+        )
+        .with_page_limit(limit);
+        assert_eq!(source.page_limit(), limit);
+        assert_eq!(source.bounds(), BOUNDS);
+        assert_eq!(derivation!(&mut source, &plan)?, expected);
+        assert_eq!(source.recorded_graph(&plan)?, expected_graph);
+        assert_eq!(
+            source.recorded_graph_digest(&plan)?,
+            dependency_graph_digest_v1(&expected_graph)
+        );
+        assert_eq!(
+            source.recorded_graph_digest(&plan)?,
+            expected.frontier.dependency_graph_digest
+        );
+    }
+    let clamped = |limit| {
+        PrefixSeededFrontierSourceV1::new(FakePort::default(), Vec::new(), Vec::new(), BOUNDS)
+            .with_page_limit(limit)
+    };
+    assert_eq!(clamped(0).page_limit(), 1);
+    assert_eq!(
+        clamped(usize::MAX).page_limit(),
+        MAX_DEPENDENCY_PAGE_ROWS_V1
+    );
+    assert!(clamped(4).port().requests.borrow().is_empty());
+    Ok(())
+}
+both_backends!(composite_matches_the_hand_built_source_for_every_page_size);
+
+fn composite_over_an_empty_prefix_is_an_invalid_graph<B: Backend>() -> TestResult {
+    let plan = plan(|_| {})?;
+    let mut source = PrefixSeededFrontierSourceV1::new(
+        Shared::new(bare_root::<B>()?),
+        Vec::new(),
+        Vec::new(),
+        BOUNDS,
+    );
+    assert_eq!(
+        derivation!(&mut source, &plan),
+        Err(AdmissionError::DependencyGraphInvalid)
+    );
+    assert_eq!(
+        source.recorded_graph(&plan).map_err(|error| *error),
+        Err(AdmissionError::DependencyGraphInvalid)
+    );
+    // An unknown parent Timeline is never an empty prefix.
+    let mut unknown =
+        PrefixSeededFrontierSourceV1::new(Shared::new(B::open()?), Vec::new(), Vec::new(), BOUNDS);
+    assert_eq!(
+        derivation!(&mut unknown, &plan),
+        Err(AdmissionError::Store(StoreError::ForkNotFound))
+    );
+    Ok(())
+}
+both_backends!(composite_over_an_empty_prefix_is_an_invalid_graph);
+
+fn admits_the_first_generation_through_the_composite_source<B: Backend>() -> TestResult {
+    let mut store = Shared::new(B::open()?);
+    let Seeded {
+        host,
+        mut graph,
+        fork,
+        facts,
+    } = seed(&mut store)?;
+    let plan = &host.plan;
+    let expected = derivation!(&mut graph, plan)?;
+    let mut composite = PrefixSeededFrontierSourceV1::new(
+        store.clone(),
+        fork.nodes.clone(),
+        fork.edges.clone(),
+        BOUNDS,
+    );
+    // The composite derives the published digest and the hand-built derivation.
+    let digest = composite.recorded_graph_digest(plan)?;
+    assert_eq!(digest, *facts.dependency_graph_digest.as_bytes());
+    assert_eq!(derivation!(&mut composite, plan)?, expected);
+    // Generation 1 is admitted through the composite and recomputed.
+    let mut coordinator = CounterfactualCoordinatorV1::new(store.clone());
+    let request = admission_request(&host);
+    let mut stager = DeclaringStager::new(&fork)?;
+    let first =
+        coordinator.admit_with_dependencies(&request, &Authority, &mut composite, &mut stager)?;
+    assert_eq!(first.generation(), generation(1));
+    let run = coordinator
+        .recompute_suffix_with_dependencies(&suffix_request(plan, first), &mut stager)?;
+    assert_eq!(run.failure, None);
+    // Generation 2 is admitted through the recorded source with the same digest.
+    let mut complete = recorded(&store)?;
+    assert_eq!(complete.recorded_graph_digest(plan)?, digest);
+    let mut again = DeclaringStager::new(&fork)?;
+    let second =
+        coordinator.admit_with_dependencies(&request, &Authority, &mut complete, &mut again)?;
+    assert_eq!(second.generation(), generation(2));
+    assert_eq!(second.frontier_digest(), first.frontier_digest());
+    Ok(())
+}
+both_backends!(admits_the_first_generation_through_the_composite_source);
