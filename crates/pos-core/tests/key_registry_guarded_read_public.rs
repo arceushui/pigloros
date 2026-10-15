@@ -2,6 +2,9 @@
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+#[path = "key_registry_guarded_read_public/lifecycle_wire_fields.rs"]
+mod lifecycle_wire_fields;
+
 use ciborium::Value;
 use pos_core::{
     deletion_receipt, Hash, KeyDestructionRequestV1, KeyIdentityV1, KeyRegistrationV1,
