@@ -65,36 +65,13 @@ impl ForkAdmissionHostRecordV1 {
     pub fn from_canonical_cbor(
         bytes_in: &[u8],
     ) -> Result<Self, ForkAdmissionAuthorityCodecErrorV1> {
-        // Every accepted FAH1 needs all 109 bytes: the shortest array, text
-        // marker, version and three fixed-width byte strings. Copy that exact
-        // shape into stack fields, without a generic Value tree. Keep the
-        // historical decoder below for every other shape so malformed-input
-        // error precedence remains unchanged.
-        const PREFIX: [u8; 7] = [0x85, 0x64, b'F', b'A', b'H', b'1', 0x01];
-        const HASH_HEAD: [u8; 2] = [0x58, 0x20];
-        if bytes_in.len() == MAX_FORK_ADMISSION_HOST_RECORD_BYTES_V1
-            && bytes_in[..PREFIX.len()] == PREFIX
-            && [7, 41, 75]
-                .iter()
-                .all(|offset| bytes_in[*offset..*offset + HASH_HEAD.len()] == HASH_HEAD)
-        {
-            let mut store_id = [0; 32];
-            let mut host_verifying_key = [0; 32];
-            let mut authentication_policy_digest = [0; 32];
-            store_id.copy_from_slice(&bytes_in[9..41]);
-            host_verifying_key.copy_from_slice(&bytes_in[43..75]);
-            authentication_policy_digest.copy_from_slice(&bytes_in[77..109]);
-            return Self::new(
-                Hash::from_bytes(store_id),
-                PublicKey::from_bytes(host_verifying_key),
-                Hash::from_bytes(authentication_policy_digest),
-            );
-        }
-        let fields = decode(bytes_in, MAX_FORK_ADMISSION_HOST_RECORD_BYTES_V1, 5, "FAH1")?;
-        Ok(Self {
-            store_id: Hash::from_bytes(fixed_nonzero(&fields[2])?),
-            host_verifying_key: PublicKey::from_bytes(fixed_nonzero(&fields[3])?),
-            authentication_policy_digest: Hash::from_bytes(fixed_nonzero(&fields[4])?),
+        Self::from_exact_fixed_shape(bytes_in).unwrap_or_else(|| {
+            let fields = decode(bytes_in, MAX_FORK_ADMISSION_HOST_RECORD_BYTES_V1, 5, "FAH1")?;
+            Ok(Self {
+                store_id: Hash::from_bytes(fixed_nonzero(&fields[2])?),
+                host_verifying_key: PublicKey::from_bytes(fixed_nonzero(&fields[3])?),
+                authentication_policy_digest: Hash::from_bytes(fixed_nonzero(&fields[4])?),
+            })
         })
     }
 
@@ -142,6 +119,34 @@ impl ForkAdmissionHostRecordV1 {
             self.host_verifying_key.as_bytes(),
             self.authentication_policy_digest.as_bytes(),
         ])
+    }
+
+    /// Decode the exact 109-byte layout into stack fields, without a `Value` tree.
+    /// `None` selects the historical decoder for every other shape; an exact
+    /// shape's field error must remain `Some(Err)` and never select that fallback.
+    fn from_exact_fixed_shape(
+        bytes_in: &[u8],
+    ) -> Option<Result<Self, ForkAdmissionAuthorityCodecErrorV1>> {
+        const PREFIX: [u8; 7] = [0x85, 0x64, b'F', b'A', b'H', b'1', 0x01];
+        const HASH_HEAD: [u8; 2] = [0x58, 0x20];
+        (bytes_in.len() == MAX_FORK_ADMISSION_HOST_RECORD_BYTES_V1
+            && bytes_in[..PREFIX.len()] == PREFIX
+            && [7, 41, 75]
+                .iter()
+                .all(|offset| bytes_in[*offset..*offset + HASH_HEAD.len()] == HASH_HEAD))
+        .then(|| {
+            let mut store_id = [0; 32];
+            let mut host_verifying_key = [0; 32];
+            let mut authentication_policy_digest = [0; 32];
+            store_id.copy_from_slice(&bytes_in[9..41]);
+            host_verifying_key.copy_from_slice(&bytes_in[43..75]);
+            authentication_policy_digest.copy_from_slice(&bytes_in[77..109]);
+            Self::new(
+                Hash::from_bytes(store_id),
+                PublicKey::from_bytes(host_verifying_key),
+                Hash::from_bytes(authentication_policy_digest),
+            )
+        })
     }
 }
 
