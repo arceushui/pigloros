@@ -247,3 +247,61 @@ fn missing_targets_and_unheld_sqlite_reads_fail_at_their_actual_seams() -> TestR
     assert_eq!(budget.remaining_native_bytes(), 0);
     Ok(())
 }
+
+fn native_gate_denials<
+    S: EventStore + ForkReplayAuthorityReadPortV1 + ErasureInventoryPersistencePortV1,
+>(
+    new_store: impl Fn() -> Result<S, Box<dyn std::error::Error>>,
+    sqlite: bool,
+) -> TestResult {
+    for ancestor in [false, true] {
+        for frozen in [false, true] {
+            let mut store = new_store()?;
+            let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
+            store.bind_erasure_gate(Arc::clone(&gate))?;
+            let root = store.create_timeline("native gate root")?.id();
+            let child = store.fork(root, Seq::ZERO, "native gate child")?.id();
+            let denied = if ancestor { root } else { child };
+            let expected = if frozen {
+                gate.freeze_timeline_for_test(denied);
+                Error::AccessFrozen
+            } else {
+                gate.block_timeline(denied);
+                Error::ContainmentUnavailable
+            };
+            let interval = store.begin_protected_effect_interval()?;
+            let limits = ForkReplayReadLimitsV1::new(2, 8, 32, 1_024, 1_000_000)?;
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                store.read_fork_replay_lineage_node(child, 0, 2, &mut budget),
+                Err(expected)
+            );
+            // A denied target copies no native carrier. A denied ancestor
+            // follows one actual Fork carrier plus its internal parent ID:
+            // Memory metadata49 + visitedID16 + parentID16; SQLite also
+            // copies key26, rawID26 and rawParent26. Freshness rows are scratch.
+            let prefix = if ancestor {
+                49 + 16 + 16 + if sqlite { 3 * 26 } else { 0 }
+            } else {
+                0
+            };
+            assert_eq!(budget.remaining_native_bytes(), 1_024 - prefix);
+            // A native gate denial is not a failed ledger debit. Keep the
+            // closed error distinct from resource/time exhaustion.
+            budget.check_time()?;
+            store.finish_protected_effect_interval(
+                interval,
+                ErasureProtectedEffectDispositionV1::Rollback,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn real_native_gate_denials_keep_both_closed_mappings_on_both_adapters() -> TestResult {
+    native_gate_denials(|| Ok(MemoryStore::new()), false)?;
+    native_gate_denials(|| Ok(SqliteStore::open(":memory:")?), true)
+}
