@@ -465,6 +465,9 @@ mod tests {
         // independently of production probes or measured ledger usage.
         let mut registry_bytes = Vec::new();
         ciborium::into_writer(&world.registry, &mut registry_bytes)?;
+        // Independent fixed-fixture golden also used, without this writer or
+        // helper, by the public Time consumer's cumulative-budget oracle.
+        assert_eq!(registry_bytes.len(), 466);
         // World::new registers exactly one live integrity-signing key, with
         // both digests present, plus its active/high-water entries. Inventory
         // ADR-116's native fields independently; do not measure the ledger.
