@@ -10,7 +10,10 @@
 
 mod retained_key;
 
-use pos_core::{Hasher, ImportedForkClassifierGraphV1, TimelineId};
+use pos_core::{
+    Hasher, ImportedForkAdmissionRecordV1, ImportedForkAttributionAdmissionV1,
+    ImportedForkClassifierGraphV1, TimelineId,
+};
 use retained_key::retained_key_bytes_with_context;
 #[cfg(test)]
 use rusqlite::params;
@@ -51,13 +54,13 @@ pub(super) fn sqlite_validated_admission(
         .and_then(|admission| local_admission_result(&admission, context));
     context
         .check()
-        .map_err(|_| AuthorityError::CorruptAuthority)?;
-    match validator {
-        AuthorityValidatorV1::LocalOnly => local,
-        AuthorityValidatorV1::CodeTwoAware => {
-            local.or_else(|_| sqlite_imported_admission(conn, child_timeline_id, context))
-        }
-    }
+        .map_err(|_| AuthorityError::CorruptAuthority)
+        .and_then(|()| match validator {
+            AuthorityValidatorV1::LocalOnly => local,
+            AuthorityValidatorV1::CodeTwoAware => {
+                local.or_else(|_| sqlite_imported_admission(conn, child_timeline_id, context))
+            }
+        })
 }
 
 /// Read one child's classified authority graph under an explicit R6.9
@@ -77,13 +80,13 @@ pub(super) fn sqlite_validated_graph(
             });
     context
         .check()
-        .map_err(|_| AuthorityError::CorruptAuthority)?;
-    match validator {
-        AuthorityValidatorV1::LocalOnly => local,
-        AuthorityValidatorV1::CodeTwoAware => {
-            local.or_else(|_| sqlite_imported_graph(conn, child_timeline_id, context))
-        }
-    }
+        .map_err(|_| AuthorityError::CorruptAuthority)
+        .and_then(|()| match validator {
+            AuthorityValidatorV1::LocalOnly => local,
+            AuthorityValidatorV1::CodeTwoAware => {
+                local.or_else(|_| sqlite_imported_graph(conn, child_timeline_id, context))
+            }
+        })
 }
 
 fn local_admission_result(
@@ -113,37 +116,43 @@ pub(super) fn sqlite_retained_key_evidence(
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> PublicationSourceResultV1<RetainedKeyEvidenceV1> {
     use PublicationSourceErrorV1::Invalid;
-    context.check().map_err(|_| Invalid)?;
-    admission
-        .as_ref()
-        .ok()
-        .and_then(ValidatedAdmissionV1::import)
-        .map_or(Ok(RetainedKeyEvidenceV1::LiveRegistry), |import| {
-            let stored = retained_key_bytes_with_context(conn, import, context)?;
-            let record = context
-                .imported_key_record(&stored.record)
-                .map_err(|_| Invalid)?;
-            let tombstone = stored
-                .tombstone
-                .as_ref()
-                .map(|bytes| context.imported_key_tombstone(bytes))
-                .transpose()
-                .map_err(|_| Invalid)?;
-            context
-                .canonical(record.canonical_cbor_len())
-                .map_err(|_| Invalid)?;
-            if let Some(tombstone) = tombstone.as_ref() {
-                context
-                    .canonical(tombstone.canonical_cbor_len())
-                    .map_err(|_| Invalid)?;
-            }
-            let retained = RetainedKeyEvidenceV1::Imported(Box::new(RetainedImportedKeyV1 {
-                record,
-                tombstone,
-            }));
-            context.check().map_err(|_| Invalid)?;
-            Ok(retained)
-        })
+    context.check().map_err(|_| Invalid).and_then(|()| {
+        admission
+            .as_ref()
+            .ok()
+            .and_then(ValidatedAdmissionV1::import)
+            .map_or(Ok(RetainedKeyEvidenceV1::LiveRegistry), |import| {
+                retained_key_bytes_with_context(conn, import, context).and_then(|stored| {
+                    context
+                        .imported_key_record(&stored.record)
+                        .map_err(|_| Invalid)
+                        .and_then(|record| {
+                            stored
+                                .tombstone
+                                .as_ref()
+                                .map(|bytes| context.imported_key_tombstone(bytes))
+                                .transpose()
+                                .map_err(|_| Invalid)
+                                .and_then(|tombstone| {
+                                    context
+                                        .canonical(record.canonical_cbor_len())
+                                        .and_then(|()| {
+                                            tombstone.as_ref().map_or(Ok(()), |tombstone| {
+                                                context.canonical(tombstone.canonical_cbor_len())
+                                            })
+                                        })
+                                        .map(|()| {
+                                            RetainedKeyEvidenceV1::Imported(Box::new(
+                                                RetainedImportedKeyV1 { record, tombstone },
+                                            ))
+                                        })
+                                        .and_then(|retained| context.check().map(|()| retained))
+                                        .map_err(|_| Invalid)
+                                })
+                        })
+                })
+            })
+    })
 }
 
 /// R6.9 (b), `FAR1` admission: the code-2 `FAR1` of the child has its one
@@ -154,6 +163,45 @@ fn sqlite_imported_admission(
     child_timeline_id: TimelineId,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<ValidatedAdmissionV1, AuthorityError> {
+    use AuthorityError::CorruptAuthority;
+    read_imported_admission_pair(conn, child_timeline_id, context).and_then(|(admission, record)| {
+        context
+            .canonical(admission.canonical_cbor_len())
+            .map_err(|_| CorruptAuthority)
+            .and_then(|()| {
+                let matches = imported_admission_matches(&admission, &record, child_timeline_id);
+                context
+                    .check()
+                    .map_err(|_| CorruptAuthority)
+                    .and_then(|()| matches.then_some(()).ok_or(CorruptAuthority))
+            })
+            // Acceptance emits the FAR1 digest again and copies its fields.
+            .and_then(|()| {
+                context
+                    .canonical(admission.canonical_cbor_len())
+                    .map_err(|_| CorruptAuthority)
+            })
+            .and_then(|()| {
+                context
+                    .canonical(admission.canonical_cbor_len())
+                    .map_err(|_| CorruptAuthority)
+            })
+            .map(|()| ValidatedAdmissionV1::imported(&admission, &record))
+            .and_then(|accepted| {
+                context
+                    .check()
+                    .map(|()| accepted)
+                    .map_err(|_| CorruptAuthority)
+            })
+    })
+}
+
+/// Select and decode the code-2 FAR1 and its unique committed IFA1 in order.
+fn read_imported_admission_pair(
+    conn: &Connection,
+    child_timeline_id: TimelineId,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> Result<(ImportedForkAdmissionRecordV1, ImportedForkAttributionAdmissionV1), AuthorityError> {
     use AuthorityError::CorruptAuthority;
     context
         .bytes(ulid::ULID_LEN)
@@ -169,26 +217,7 @@ fn sqlite_imported_admission(
     let record = context
         .imported_admission(&bytes)
         .map_err(|_| CorruptAuthority)?;
-    context
-        .canonical(admission.canonical_cbor_len())
-        .map_err(|_| CorruptAuthority)?;
-    let matches = imported_admission_matches(&admission, &record, child_timeline_id);
-    context.check().map_err(|_| CorruptAuthority)?;
-    if !matches {
-        return Err(CorruptAuthority);
-    }
-    // The accepted result emits the FAR1 digest again and copies its fields.
-    context
-        .canonical(admission.canonical_cbor_len())
-        .map_err(|_| CorruptAuthority)?;
-    context
-        .canonical(admission.canonical_cbor_len())
-        .map_err(|_| CorruptAuthority)?;
-    let accepted = ValidatedAdmissionV1::imported(&admission, &record);
-    context
-        .check()
-        .map(|()| accepted)
-        .map_err(|_| CorruptAuthority)
+    Ok((admission, record))
 }
 
 /// R6.9 (b), `FCS1` resolution: the imported `FCS1` is looked up by `FCT1`
@@ -198,7 +227,41 @@ fn sqlite_imported_graph(
     child_timeline_id: TimelineId,
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<ValidatedGraphV1, AuthorityError> {
-    let admission = sqlite_imported_admission(conn, child_timeline_id, context)?;
+    sqlite_imported_admission(conn, child_timeline_id, context).and_then(|admission| {
+        read_imported_classifier_graph(conn, child_timeline_id, context).and_then(|graph| {
+            // Gate source/table digest buffers separately from selected copies.
+            context
+                .canonical(graph.source.canonical_cbor_len())
+                .map_err(|_| AuthorityError::CorruptAuthority)
+                .and_then(|()| {
+                    context
+                        .canonical(graph.table.canonical_cbor_len())
+                        .map_err(|_| AuthorityError::CorruptAuthority)
+                })
+                .and_then(|()| {
+                    let matches = imported_graph_matches(&graph, &admission);
+                    context
+                        .check()
+                        .map_err(|_| AuthorityError::CorruptAuthority)
+                        .and_then(|()| {
+                            matches
+                                .then_some(ValidatedGraphV1 {
+                                    admission,
+                                    table: graph.table,
+                                })
+                                .ok_or(AuthorityError::CorruptAuthority)
+                        })
+                })
+        })
+    })
+}
+
+/// Read the classifier triple with the existing selected-row lifetime owners.
+fn read_imported_classifier_graph(
+    conn: &Connection,
+    child_timeline_id: TimelineId,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> Result<ImportedForkClassifierGraphV1, AuthorityError> {
     context
         .check()
         .map_err(|_| AuthorityError::CorruptAuthority)?;
@@ -209,30 +272,11 @@ fn sqlite_imported_graph(
         ClassifierKeyV1::ImportedSource(table.input().source_configuration_revision_digest),
         context,
     )?;
-    let graph = ImportedForkClassifierGraphV1 {
+    Ok(ImportedForkClassifierGraphV1 {
         source,
         table,
         registration,
-    };
-    // Core owns the one bounded G1-G8 batch. Gate its source/table digest
-    // buffers independently; an invalid early equality can reject before
-    // either encoding, so these invalid-input gates are conservative.
-    context
-        .canonical(graph.source.canonical_cbor_len())
-        .map_err(|_| AuthorityError::CorruptAuthority)?;
-    context
-        .canonical(graph.table.canonical_cbor_len())
-        .map_err(|_| AuthorityError::CorruptAuthority)?;
-    let matches = imported_graph_matches(&graph, &admission);
-    context
-        .check()
-        .map_err(|_| AuthorityError::CorruptAuthority)?;
-    matches
-        .then_some(ValidatedGraphV1 {
-            admission,
-            table: graph.table,
-        })
-        .ok_or(AuthorityError::CorruptAuthority)
+    })
 }
 
 #[cfg(test)]
