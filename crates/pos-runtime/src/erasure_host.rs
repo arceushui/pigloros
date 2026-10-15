@@ -4922,6 +4922,110 @@ mod tests {
         );
     }
 
+    fn root_lineage_capability(
+        host: &ErasureExecutionHostV1,
+        root: TimelineId,
+        limits: pos_store::ForkReplayReadLimitsV1,
+    ) -> VerifiedWorldReplayV1 {
+        let generation = test_ok(host.gate.inventory_generation());
+        let closure = test_ok(
+            WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+                root,
+                Hash::from_bytes(generation.digest()),
+            ),
+        );
+        let verified = crate::world_replay::test_verified_world_replay(
+            &closure,
+            &replay_use(&closure),
+            generation,
+            pos_core::ErasureReplayClaimV1::Exact,
+        );
+        crate::world_replay::test_verified_world_replay_with_fork_attribution(
+            verified,
+            Some(Hash::from_bytes([0xda; 32])),
+            vec![test_ok(crate::WorldReplayForkSourceV1::new(root, None))],
+            Vec::new(),
+            limits,
+        )
+    }
+
+    #[test]
+    fn fork_lineage_native_errors_and_post_read_clock_refusals_keep_their_precedence() {
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use pos_store::{
+            ForkReplayAuthorityReadErrorV1 as ReadError,
+            ForkReplayLineageReadErrorV1 as LineageError, ForkReplayReadLimitsV1,
+        };
+        use std::{sync::atomic::Ordering, time::Duration};
+
+        let limits = test_ok(ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000));
+        for (native_error, native_mapping) in [
+            (
+                LineageError::Read(ReadError::Unavailable),
+                ErasureHostErrorV1::AdapterFailure,
+            ),
+            (
+                LineageError::Read(ReadError::CorruptAuthority),
+                ErasureHostErrorV1::AdapterFailure,
+            ),
+            (
+                LineageError::Read(ReadError::StorageUnavailable),
+                ErasureHostErrorV1::AdapterFailure,
+            ),
+            (LineageError::AccessFrozen, ErasureHostErrorV1::AccessFrozen),
+            (
+                LineageError::ContainmentUnavailable,
+                ErasureHostErrorV1::RecoveryUnavailable,
+            ),
+        ] {
+            for post_read_mark in [
+                Duration::from_millis(1),
+                Duration::from_secs(2),
+                Duration::ZERO,
+            ] {
+                // Only the native fault is injected. Recovery, topology,
+                // inventory binding and the held ancestry interval are real.
+                let store = fault_store(FaultModeV1::ForkReplayLineageError(native_error));
+                let calls = Arc::clone(&store.lineage_read_calls);
+                let mut host = test_ok(ErasureExecutionHostV1::recover_with_composition(
+                    Box::new(store),
+                    &ErasureCoordinatorCompositionV1::closed(),
+                    ErasureRecoveryLimitsV1::compiled_maximum(),
+                ));
+                let root = test_ok(test_ok(host.command_sender()).create_timeline("lineage")).id();
+                let capability = root_lineage_capability(&host, root, limits);
+                // g0, ledger creation, validation entry and source entry are
+                // all at 1ms; only the mandatory post-read sample changes.
+                // The following good mark proves refusal stays latched.
+                let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                    std::iter::repeat_n(Duration::from_millis(1), 4)
+                        .chain([post_read_mark, Duration::from_millis(1)]),
+                );
+                let start = clock.mark();
+                let mut budget = test_ok(ForkReplayReadBudgetV1::new(limits, start, &mut clock));
+                let mut reads = test_ok(host.read_sender());
+                let mut result = Ok(Vec::new());
+                test_ok(reads.with_protected_ancestry_fence(
+                    root,
+                    ErasureProtectedOperationV1::Read,
+                    &mut |sender| {
+                        result = sender.validate_world_replay_forks(&capability, &mut budget);
+                    },
+                ));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                let clock_valid = post_read_mark == Duration::from_millis(1);
+                let expected = if clock_valid {
+                    native_mapping
+                } else {
+                    ErasureHostErrorV1::AdapterFailure
+                };
+                assert_eq!(result.map(|_| ()), Err(expected));
+                assert_eq!(budget.remaining_native_bytes(), limits.max_native_bytes());
+                assert_eq!(budget.check_time().is_ok(), clock_valid);
+            }
+        }
+    }
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FaultModeV1 {
         BeginProtectedEffect,
@@ -4947,6 +5051,7 @@ mod tests {
         DeliveryIndeterminate,
         DeliveryJournalIndeterminate,
         DeliveryMisreportedOwner,
+        ForkReplayLineageError(pos_store::ForkReplayLineageReadErrorV1),
         Passthrough,
     }
 
@@ -4958,6 +5063,7 @@ mod tests {
         resolve_control: Arc<ResolveStateControlV1>,
         timeline_created_hook: Option<TimelineCreatedHookV1>,
         transition_lookup_calls: Arc<std::sync::atomic::AtomicUsize>,
+        lineage_read_calls: Arc<std::sync::atomic::AtomicUsize>,
         inventory_snapshot_calls: usize,
         fork_recovery_override: Option<ErasureForkRecoveryV1>,
     }
@@ -5761,6 +5867,11 @@ mod tests {
             Option<pos_store::ForkReplayLineageNodeV1>,
             pos_store::ForkReplayLineageReadErrorV1,
         > {
+            self.lineage_read_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let FaultModeV1::ForkReplayLineageError(error) = self.fault {
+                return Err(error);
+            }
             self.inner.read_fork_replay_lineage_node(
                 timeline_id,
                 depth,
@@ -7487,6 +7598,7 @@ mod tests {
                 resolve_control: Arc::clone(&resolve_control),
                 timeline_created_hook: None,
                 transition_lookup_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                lineage_read_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 inventory_snapshot_calls: 0,
                 fork_recovery_override: None,
             },
