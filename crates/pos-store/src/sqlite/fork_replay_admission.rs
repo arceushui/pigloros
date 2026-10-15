@@ -1,6 +1,6 @@
 //! Selected admission blobs, gated before their actual raw retrieval.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Row};
 
 use super::FORK_ADMISSION_FAR1_SQL;
 use crate::{fork_replay::NativeReadContextV1, ForkEventAuthorityErrorV1 as Error};
@@ -67,31 +67,69 @@ fn selected_admission_blob(
 ) -> std::result::Result<Option<Vec<u8>>, BlobErrorV1> {
     use BlobErrorV1::{Corrupt, Storage};
     let (probe, fetch, maximum) = kind.queries();
-    context.check().map_err(|_| Corrupt)?;
-    let mut statement = conn.prepare(probe).map_err(|_| Storage)?;
-    context.check().map_err(|_| Corrupt)?;
-    let mut rows = statement.query(params![child_key]).map_err(|_| Storage)?;
-    context.row_available().map_err(|_| Corrupt)?;
-    let Some(row) = rows.next().map_err(|_| Storage)? else {
-        return context.check().map(|()| None).map_err(|_| Corrupt);
-    };
-    context.suffix_row().map_err(|_| Corrupt)?;
-    let blob: bool = row.get(0).map_err(|_| Storage)?;
-    if !blob {
-        return Err(Storage);
-    }
-    let length = row.get::<_, i64>(1).map_err(|_| Storage)?;
-    let length = usize::try_from(length).map_err(|_| Corrupt)?;
-    if length > maximum {
-        return Err(Corrupt);
-    }
-    context.check().map_err(|_| Corrupt)?;
-    context.suffix_row().map_err(|_| Corrupt)?;
-    context.bytes(length).map_err(|_| Corrupt)?;
-    let bytes = conn
-        .query_row(fetch, params![child_key], |row| row.get::<_, Vec<u8>>(0))
-        .map_err(|_| Storage)?;
-    context.check().map(|()| Some(bytes)).map_err(|_| Corrupt)
+    context
+        .check()
+        .map_err(|_| Corrupt)
+        .and_then(|()| conn.prepare(probe).map_err(|_| Storage))
+        .and_then(|mut statement| {
+            context
+                .check()
+                .map_err(|_| Corrupt)
+                .and_then(|()| statement.query(params![child_key]).map_err(|_| Storage))
+                .and_then(|mut rows| {
+                    context
+                        .row_available()
+                        .map_err(|_| Corrupt)
+                        .and_then(|()| rows.next().map_err(|_| Storage))
+                        .and_then(|row| match row {
+                            None => context.check().map(|()| None).map_err(|_| Corrupt),
+                            Some(row) => context
+                                .suffix_row()
+                                .map_err(|_| Corrupt)
+                                .and_then(|()| {
+                                    admission_bytes_from_row(
+                                        conn, row, fetch, maximum, child_key, context,
+                                    )
+                                })
+                                .map(Some),
+                        })
+                })
+        })
+}
+
+/// The caller holds the probe statement and `Rows` through fetch and post-check.
+fn admission_bytes_from_row(
+    conn: &Connection,
+    row: &Row<'_>,
+    fetch: &str,
+    maximum: usize,
+    child_key: &str,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> std::result::Result<Vec<u8>, BlobErrorV1> {
+    use BlobErrorV1::{Corrupt, Storage};
+    row.get::<_, bool>(0).map_err(|_| Storage).and_then(|blob| {
+        if !blob {
+            return Err(Storage);
+        }
+        row.get::<_, i64>(1)
+            .map_err(|_| Storage)
+            .and_then(|length| usize::try_from(length).map_err(|_| Corrupt))
+            .and_then(|length| {
+                if length > maximum {
+                    return Err(Corrupt);
+                }
+                context
+                    .check()
+                    .map_err(|_| Corrupt)
+                    .and_then(|()| context.suffix_row().map_err(|_| Corrupt))
+                    .and_then(|()| context.bytes(length).map_err(|_| Corrupt))
+                    .and_then(|()| {
+                        conn.query_row(fetch, params![child_key], |row| row.get::<_, Vec<u8>>(0))
+                            .map_err(|_| Storage)
+                    })
+                    .and_then(|bytes| context.check().map(|()| bytes).map_err(|_| Corrupt))
+            })
+    })
 }
 
 /// Independent test oracle: byte encoders and logical field lengths only.

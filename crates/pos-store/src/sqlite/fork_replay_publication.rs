@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 
 use pos_core::{Hash, TimelineId};
-use rusqlite::{params, ToSql};
+use rusqlite::{params, Row, ToSql};
 
 use super::{
     sqlite_publication_head, SqliteStore, FORK_PUBLICATION_ARTIFACT_SQL,
@@ -54,34 +54,66 @@ impl SqliteStore {
         context: &mut NativeReadContextV1<'_, '_>,
     ) -> Result<Option<Vec<u8>>> {
         let (probe, fetch, maximum) = kind.queries();
-        context.check()?;
-        let mut statement = self.conn.prepare(probe).map_err(Error::from)?;
-        context.check()?;
-        let mut rows = statement.query(arguments).map_err(Error::from)?;
-        context.check()?;
-        context.row_available()?;
-        let Some(row) = rows.next().map_err(Error::from)? else {
-            return context.check().map(|()| None);
-        };
-        context.suffix_row()?;
-        let blob: bool = row.get(0).map_err(Error::from)?;
-        if !blob {
-            // Preserve the old Vec getter's storage-type failure, not validity.
-            return Err(Error::StorageIndeterminate);
-        }
-        let length = row.get::<_, i64>(1).map_err(Error::from)?;
-        let length = usize::try_from(length).map_err(|_| Error::StorageIndeterminate)?;
-        if length > maximum {
-            return Err(Error::PublicationConflict);
-        }
-        context.check()?;
-        context.suffix_row()?;
-        context.bytes(length)?;
-        let bytes = self
-            .conn
-            .query_row(fetch, arguments, |row| row.get::<_, Vec<u8>>(0))
-            .map_err(Error::from)?;
-        context.check().map(|()| Some(bytes))
+        context
+            .check()
+            .and_then(|()| self.conn.prepare(probe).map_err(Error::from))
+            .and_then(|mut statement| {
+                context
+                    .check()
+                    .and_then(|()| statement.query(arguments).map_err(Error::from))
+                    .and_then(|mut rows| {
+                        context
+                            .check()
+                            .and_then(|()| context.row_available())
+                            .and_then(|()| rows.next().map_err(Error::from))
+                            .and_then(|row| match row {
+                                None => context.check().map(|()| None),
+                                Some(row) => context
+                                    .suffix_row()
+                                    .and_then(|()| {
+                                        self.publication_bytes_from_row(
+                                            row, fetch, maximum, arguments, context,
+                                        )
+                                    })
+                                    .map(Some),
+                            })
+                    })
+            })
+    }
+
+    /// Keep the caller's probe statement and `Rows` live through raw retrieval.
+    fn publication_bytes_from_row(
+        &self,
+        row: &Row<'_>,
+        fetch: &str,
+        maximum: usize,
+        arguments: &[&dyn ToSql],
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<Vec<u8>> {
+        row.get::<_, bool>(0).map_err(Error::from).and_then(|blob| {
+            if !blob {
+                // Preserve the Vec getter's storage-type failure, not validity.
+                return Err(Error::StorageIndeterminate);
+            }
+            row.get::<_, i64>(1)
+                .map_err(Error::from)
+                .and_then(|length| usize::try_from(length).map_err(|_| Error::StorageIndeterminate))
+                .and_then(|length| {
+                    if length > maximum {
+                        return Err(Error::PublicationConflict);
+                    }
+                    context
+                        .check()
+                        .and_then(|()| context.suffix_row())
+                        .and_then(|()| context.bytes(length))
+                        .and_then(|()| {
+                            self.conn
+                                .query_row(fetch, arguments, |row| row.get::<_, Vec<u8>>(0))
+                                .map_err(Error::from)
+                        })
+                        .and_then(|bytes| context.check().map(|()| bytes))
+                })
+        })
     }
 
     fn publication_operation_with_context(
