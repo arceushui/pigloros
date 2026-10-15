@@ -164,36 +164,39 @@ fn sqlite_imported_admission(
     context: &mut NativeReadContextV1<'_, '_>,
 ) -> Result<ValidatedAdmissionV1, AuthorityError> {
     use AuthorityError::CorruptAuthority;
-    read_imported_admission_pair(conn, child_timeline_id, context).and_then(|(admission, record)| {
-        context
-            .canonical(admission.canonical_cbor_len())
-            .map_err(|_| CorruptAuthority)
-            .and_then(|()| {
-                let matches = imported_admission_matches(&admission, &record, child_timeline_id);
-                context
-                    .check()
-                    .map_err(|_| CorruptAuthority)
-                    .and_then(|()| matches.then_some(()).ok_or(CorruptAuthority))
-            })
-            // Acceptance emits the FAR1 digest again and copies its fields.
-            .and_then(|()| {
-                context
-                    .canonical(admission.canonical_cbor_len())
-                    .map_err(|_| CorruptAuthority)
-            })
-            .and_then(|()| {
-                context
-                    .canonical(admission.canonical_cbor_len())
-                    .map_err(|_| CorruptAuthority)
-            })
-            .map(|()| ValidatedAdmissionV1::imported(&admission, &record))
-            .and_then(|accepted| {
-                context
-                    .check()
-                    .map(|()| accepted)
-                    .map_err(|_| CorruptAuthority)
-            })
-    })
+    read_imported_admission_pair(conn, child_timeline_id, context).and_then(
+        |(admission, record)| {
+            context
+                .canonical(admission.canonical_cbor_len())
+                .map_err(|_| CorruptAuthority)
+                .and_then(|()| {
+                    let matches =
+                        imported_admission_matches(&admission, &record, child_timeline_id);
+                    context
+                        .check()
+                        .map_err(|_| CorruptAuthority)
+                        .and_then(|()| matches.then_some(()).ok_or(CorruptAuthority))
+                })
+                // Acceptance emits the FAR1 digest again and copies its fields.
+                .and_then(|()| {
+                    context
+                        .canonical(admission.canonical_cbor_len())
+                        .map_err(|_| CorruptAuthority)
+                })
+                .and_then(|()| {
+                    context
+                        .canonical(admission.canonical_cbor_len())
+                        .map_err(|_| CorruptAuthority)
+                })
+                .map(|()| ValidatedAdmissionV1::imported(&admission, &record))
+                .and_then(|accepted| {
+                    context
+                        .check()
+                        .map(|()| accepted)
+                        .map_err(|_| CorruptAuthority)
+                })
+        },
+    )
 }
 
 /// Select and decode the code-2 FAR1 and its unique committed IFA1 in order.
@@ -201,7 +204,13 @@ fn read_imported_admission_pair(
     conn: &Connection,
     child_timeline_id: TimelineId,
     context: &mut NativeReadContextV1<'_, '_>,
-) -> Result<(ImportedForkAdmissionRecordV1, ImportedForkAttributionAdmissionV1), AuthorityError> {
+) -> Result<
+    (
+        ImportedForkAdmissionRecordV1,
+        ImportedForkAttributionAdmissionV1,
+    ),
+    AuthorityError,
+> {
     use AuthorityError::CorruptAuthority;
     context
         .bytes(ulid::ULID_LEN)
