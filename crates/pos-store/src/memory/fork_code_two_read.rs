@@ -15,7 +15,7 @@ use pos_core::{
     ForkPublicationOperationV1, Hash, ImportedForkClassifierGraphV1, Seq, TimelineId,
 };
 
-use super::MemoryStore;
+use super::{fork_attribution_authority_import::ImportedAttributionV1, MemoryStore};
 use crate::{
     fork_event_authority::{
         imported_admission_matches, imported_graph_matches, AuthorityValidatorV1,
@@ -129,13 +129,69 @@ impl MemoryStore {
         child_timeline_id: TimelineId,
         context: &mut NativeReadContextV1<'_, '_>,
     ) -> Result<ValidatedAdmissionV1, AuthorityError> {
-        let admission = self
-            .imported_fork_admissions
+        self.imported_fork_admissions
             .get(&child_timeline_id)
-            .ok_or(AuthorityError::CorruptAuthority)?;
-        context
-            .suffix_row()
-            .map_err(|_| AuthorityError::CorruptAuthority)?;
+            .ok_or(AuthorityError::CorruptAuthority)
+            .and_then(|admission| {
+                context
+                    .suffix_row()
+                    .map_err(|_| AuthorityError::CorruptAuthority)
+                    .and_then(|()| {
+                        self.imported_attribution_for_child(child_timeline_id, context)
+                    })
+                    .and_then(|row| {
+                        context
+                            .imported_admission(&row.stored.admission_bytes)
+                            .map_err(|_| AuthorityError::CorruptAuthority)
+                    })
+                    .and_then(|record| {
+                        // The matcher computes one FAR1 digest before its post-check.
+                        context
+                            .canonical(admission.canonical_cbor_len())
+                            .map_err(|_| AuthorityError::CorruptAuthority)
+                            .and_then(|()| {
+                                let matches = imported_admission_matches(
+                                    admission,
+                                    &record,
+                                    child_timeline_id,
+                                );
+                                context
+                                    .check()
+                                    .map_err(|_| AuthorityError::CorruptAuthority)
+                                    .and_then(|()| {
+                                        matches
+                                            .then_some(())
+                                            .ok_or(AuthorityError::CorruptAuthority)
+                                    })
+                            })
+                            // Acceptance recomputes that digest and copies FAR1 fields.
+                            .and_then(|()| {
+                                context
+                                    .canonical(admission.canonical_cbor_len())
+                                    .map_err(|_| AuthorityError::CorruptAuthority)
+                            })
+                            .and_then(|()| {
+                                context
+                                    .canonical(admission.canonical_cbor_len())
+                                    .map_err(|_| AuthorityError::CorruptAuthority)
+                            })
+                            .map(|()| ValidatedAdmissionV1::imported(admission, &record))
+                            .and_then(|accepted| {
+                                context
+                                    .check()
+                                    .map(|()| accepted)
+                                    .map_err(|_| AuthorityError::CorruptAuthority)
+                            })
+                    })
+            })
+    }
+
+    /// Select the unique committed import for a child without copying its bytes.
+    fn imported_attribution_for_child(
+        &self,
+        child_timeline_id: TimelineId,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<&ImportedAttributionV1, AuthorityError> {
         let mut selected = None;
         for row in self.imported_fork_attributions.values() {
             context
@@ -151,33 +207,7 @@ impl MemoryStore {
                 .check()
                 .map_err(|_| AuthorityError::CorruptAuthority)?;
         }
-        let row = selected.ok_or(AuthorityError::CorruptAuthority)?;
-        let record = context
-            .imported_admission(&row.stored.admission_bytes)
-            .map_err(|_| AuthorityError::CorruptAuthority)?;
-        // The native matcher's bounded batch computes one FAR1 digest.
-        context
-            .canonical(admission.canonical_cbor_len())
-            .map_err(|_| AuthorityError::CorruptAuthority)?;
-        let matches = imported_admission_matches(admission, &record, child_timeline_id);
-        context
-            .check()
-            .map_err(|_| AuthorityError::CorruptAuthority)?;
-        if !matches {
-            return Err(AuthorityError::CorruptAuthority);
-        }
-        // The accepted result recomputes that digest and copies FAR1 fields.
-        context
-            .canonical(admission.canonical_cbor_len())
-            .map_err(|_| AuthorityError::CorruptAuthority)?;
-        context
-            .canonical(admission.canonical_cbor_len())
-            .map_err(|_| AuthorityError::CorruptAuthority)?;
-        let accepted = ValidatedAdmissionV1::imported(admission, &record);
-        context
-            .check()
-            .map_err(|_| AuthorityError::CorruptAuthority)?;
-        Ok(accepted)
+        selected.ok_or(AuthorityError::CorruptAuthority)
     }
 
     /// R6.9 (b), `FCS1` resolution: the imported `FCS1` is looked up by `FCT1`
@@ -187,7 +217,43 @@ impl MemoryStore {
         child_timeline_id: TimelineId,
         context: &mut NativeReadContextV1<'_, '_>,
     ) -> Result<ValidatedGraphV1, AuthorityError> {
-        let admission = self.imported_fork_admission(child_timeline_id, context)?;
+        self.imported_fork_admission(child_timeline_id, context)
+            .and_then(|admission| {
+                self.materialize_imported_classifier_graph(child_timeline_id, context)
+                    .and_then(|graph| {
+                        // Digest equality is separate from the three graph copies.
+                        context
+                            .canonical(graph.source.canonical_cbor_len())
+                            .map_err(|_| AuthorityError::CorruptAuthority)
+                            .and_then(|()| {
+                                context
+                                    .canonical(graph.table.canonical_cbor_len())
+                                    .map_err(|_| AuthorityError::CorruptAuthority)
+                            })
+                            .and_then(|()| {
+                                let matches = imported_graph_matches(&graph, &admission);
+                                context
+                                    .check()
+                                    .map_err(|_| AuthorityError::CorruptAuthority)
+                                    .and_then(|()| {
+                                        matches
+                                            .then_some(ValidatedGraphV1 {
+                                                admission,
+                                                table: graph.table,
+                                            })
+                                            .ok_or(AuthorityError::CorruptAuthority)
+                                    })
+                            })
+                    })
+            })
+    }
+
+    /// Materialize the selected classifier triple only after its copy charges.
+    fn materialize_imported_classifier_graph(
+        &self,
+        child_timeline_id: TimelineId,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<ImportedForkClassifierGraphV1, AuthorityError> {
         let table = self
             .fork_classifier_tables
             .get(&child_timeline_id)
@@ -219,25 +285,8 @@ impl MemoryStore {
         };
         context
             .check()
-            .map_err(|_| AuthorityError::CorruptAuthority)?;
-        // The existing, capped G1-G8 batch may encode FCS1 and FCT1 for
-        // digest equality. These are separate from the three graph copies.
-        context
-            .canonical(graph.source.canonical_cbor_len())
-            .map_err(|_| AuthorityError::CorruptAuthority)?;
-        context
-            .canonical(graph.table.canonical_cbor_len())
-            .map_err(|_| AuthorityError::CorruptAuthority)?;
-        let matches = imported_graph_matches(&graph, &admission);
-        context
-            .check()
-            .map_err(|_| AuthorityError::CorruptAuthority)?;
-        matches
-            .then_some(ValidatedGraphV1 {
-                admission,
-                table: graph.table,
-            })
-            .ok_or(AuthorityError::CorruptAuthority)
+            .map(|()| graph)
+            .map_err(|_| AuthorityError::CorruptAuthority)
     }
 
     /// The `FPO1` of one operation ID with its origin: a local row, or, for
@@ -249,14 +298,30 @@ impl MemoryStore {
         validator: AuthorityValidatorV1,
         context: &mut NativeReadContextV1<'_, '_>,
     ) -> Result<Option<(ForkPublicationOperationV1, ValidatedOriginV1)>, PublicationError> {
-        context.check()?;
-        if let Some(operation) = self.fork_publication_operations.get(&operation_id) {
-            context.suffix_row()?;
-            charge_publication_copy(operation, ValidatedOriginV1::Local, context)?;
-            charge_origin_copy(ValidatedOriginV1::Local, context)?;
-            let row = (operation.clone(), ValidatedOriginV1::Local);
-            return context.check().map(|()| Some(row));
-        }
+        context.check().and_then(|()| {
+            match self.fork_publication_operations.get(&operation_id) {
+                Some(operation) => context
+                    .suffix_row()
+                    .and_then(|()| {
+                        charge_publication_copy(operation, ValidatedOriginV1::Local, context)
+                    })
+                    .and_then(|()| charge_origin_copy(ValidatedOriginV1::Local, context))
+                    .map(|()| (operation.clone(), ValidatedOriginV1::Local))
+                    .and_then(|row| context.check().map(|()| Some(row))),
+                None => {
+                    self.imported_publication_operation_row(operation_id, validator, context)
+                }
+            }
+        })
+    }
+
+    /// Read an imported projection only after the local-priority lookup failed.
+    fn imported_publication_operation_row(
+        &self,
+        operation_id: Hash,
+        validator: AuthorityValidatorV1,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<Option<(ForkPublicationOperationV1, ValidatedOriginV1)>, PublicationError> {
         if validator == AuthorityValidatorV1::LocalOnly {
             return Ok(None);
         }
@@ -298,38 +363,36 @@ impl MemoryStore {
     ) -> PublicationSourceResultV1<RetainedKeyEvidenceV1> {
         context
             .check()
-            .map_err(|_| PublicationSourceErrorV1::Invalid)?;
-        let (evidence, _) = self
-            .imported_fork_key_evidence
-            .get(&import.import_operation_id)
-            .zip(
-                self.imported_fork_attributions
+            .map_err(|_| PublicationSourceErrorV1::Invalid)
+            .and_then(|()| {
+                self.imported_fork_key_evidence
                     .get(&import.import_operation_id)
-                    .filter(|row| row.stored.envelope_digest == import.full_envelope_digest),
-            )
-            .ok_or(PublicationSourceErrorV1::Invalid)?;
-        context
-            .suffix_row()
-            .map_err(|_| PublicationSourceErrorV1::Invalid)?;
-        context
-            .suffix_row()
-            .map_err(|_| PublicationSourceErrorV1::Invalid)?;
-        context
-            .canonical(evidence.record.canonical_cbor_len())
-            .map_err(|_| PublicationSourceErrorV1::Invalid)?;
-        if let Some(tombstone) = evidence.tombstone.as_ref() {
-            context
-                .canonical(tombstone.canonical_cbor_len())
-                .map_err(|_| PublicationSourceErrorV1::Invalid)?;
-        }
-        let retained = RetainedKeyEvidenceV1::Imported(Box::new(RetainedImportedKeyV1 {
-            record: evidence.record,
-            tombstone: evidence.tombstone,
-        }));
-        context
-            .check()
-            .map_err(|_| PublicationSourceErrorV1::Invalid)?;
-        Ok(retained)
+                    .zip(
+                        self.imported_fork_attributions
+                            .get(&import.import_operation_id)
+                            .filter(|row| row.stored.envelope_digest == import.full_envelope_digest),
+                    )
+                    .ok_or(PublicationSourceErrorV1::Invalid)
+            })
+            .and_then(|(evidence, _)| {
+                context
+                    .suffix_row()
+                    .and_then(|()| context.suffix_row())
+                    .and_then(|()| context.canonical(evidence.record.canonical_cbor_len()))
+                    .and_then(|()| {
+                        evidence.tombstone.as_ref().map_or(Ok(()), |tombstone| {
+                            context.canonical(tombstone.canonical_cbor_len())
+                        })
+                    })
+                    .map(|()| {
+                        RetainedKeyEvidenceV1::Imported(Box::new(RetainedImportedKeyV1 {
+                            record: evidence.record,
+                            tombstone: evidence.tombstone,
+                        }))
+                    })
+                    .and_then(|retained| context.check().map(|()| retained))
+                    .map_err(|_| PublicationSourceErrorV1::Invalid)
+            })
     }
 
     /// Read the classified suffix after `from_logical_seq` under an explicit
