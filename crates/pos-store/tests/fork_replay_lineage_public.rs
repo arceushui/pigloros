@@ -23,13 +23,13 @@ fn bind(store: &mut impl EventStore) -> TestResult {
 }
 
 /// The oracle comes from literal native fields, not a measured remaining ledger:
-/// root ID16 + option1 + local head8 + cycle insertion16; SQLite additionally
+/// root ID16 + option1 + local head8 + cycle insertion16; `SQLite` additionally
 /// copies key26 and raw ID26. A Fork adds parent16/cut8 to the native carrier,
-/// another raw parent26 in SQLite, and one internal continuation16.
+/// another raw parent26 in `SQLite`, and one internal continuation16.
 fn empty_chain<
     S: EventStore + ForkReplayAuthorityReadPortV1 + ErasureInventoryPersistencePortV1,
 >(
-    store: &mut S,
+    store: &S,
     root: TimelineId,
     child: TimelineId,
     sqlite: bool,
@@ -73,7 +73,7 @@ fn empty_chain<
                 assert_eq!(node.fork_point(), Some(&(root, Seq::ZERO)));
             }
             if succeeds {
-                drop(result?);
+                assert!(result?.is_some());
                 assert_eq!(budget.remaining_native_bytes(), bytes - exact_bytes);
                 budget.check_time()?;
             } else {
@@ -130,20 +130,20 @@ fn seed_empty(
 fn literal_empty_lineage_limits_repeat_on_memory_sqlite_and_readonly() -> TestResult {
     let mut memory = MemoryStore::new();
     let (root, child) = seed_empty(&mut memory)?;
-    empty_chain(&mut memory, root, child, false)?;
+    empty_chain(&memory, root, child, false)?;
     let mut in_memory = SqliteStore::open(":memory:")?;
     let (root, child) = seed_empty(&mut in_memory)?;
-    empty_chain(&mut in_memory, root, child, true)?;
+    empty_chain(&in_memory, root, child, true)?;
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("lineage.sqlite");
     let path = path.to_str().ok_or("utf-8 path")?;
     let mut writer = SqliteStore::open(path)?;
     let (root, child) = seed_empty(&mut writer)?;
-    empty_chain(&mut writer, root, child, true)?;
+    empty_chain(&writer, root, child, true)?;
     drop(writer);
     let mut readonly = SqliteStore::open_read_only(path)?;
     bind(&mut readonly)?;
-    empty_chain(&mut readonly, root, child, true)?;
+    empty_chain(&readonly, root, child, true)?;
     Ok(())
 }
 
