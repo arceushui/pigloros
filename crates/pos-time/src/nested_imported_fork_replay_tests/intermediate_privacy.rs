@@ -225,14 +225,7 @@ pub(super) fn run_cases() -> Fallible<()> {
                 TimelineId::new(),
             );
             let keeper = SqliteStore::open(&uri)?;
-            intermediate_privacy_sqlite(
-                &uri,
-                &world,
-                &verifier,
-                destroyed,
-                hidden_arm,
-                false,
-            )?;
+            intermediate_privacy_sqlite(&uri, &world, &verifier, destroyed, hidden_arm, false)?;
             drop(keeper);
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("intermediate-privacy.sqlite");
