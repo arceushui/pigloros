@@ -116,10 +116,12 @@
 //!   is a storage fault, and so is any read of a pre-schema read-only file,
 //!   which holds none of the tables, even a read with nothing to look up.
 //!   The set counts are the sums of the Timeline's own record rows.
-//! - **Seeding.** The insert function behind `seed_factual_prefix` records one
-//!   committed Tick: its record, nodes, and edges under the prefix key, its
-//!   commit range, and its Event bindings, in one transaction. It exists only
-//!   with `test-support` until the pipeline commit calls it.
+//! - **Install path.** One insert function records a committed Tick: its
+//!   record, nodes, and edges under the prefix key, its commit range, and its
+//!   Event bindings. The pipeline commit calls it inside its own transaction,
+//!   after it has checked the Tick declaration against the Timeline's prefix
+//!   and appended the Events; `seed_factual_prefix` (`test-support` only)
+//!   calls it, in one transaction, for seeded Ticks.
 //! - **Event binding digest key.** This is a decision beyond the ADR's list of
 //!   tables, keys, and guards: `counterfactual_dependency_event_nodes` has
 //!   `UNIQUE (timeline_id, artifact_digest)` and the `digest_not_replaced`
@@ -128,8 +130,8 @@
 //!   `bound_seqs`, which holds at most one `seq` per digest. One digest binds
 //!   at most one `seq` (R3.7.2(iv)). The adapters differ only at the seeding
 //!   seam: the in-memory seam overwrites a repeated digest silently, while this
-//!   one aborts the whole seeding call. Both are test seams; slice 9, which
-//!   writes the bindings from the pipeline commit, enforces the rule.
+//!   one aborts the whole seeding call. Both are test seams; the pipeline
+//!   commit refuses a repeated digest before it writes any binding.
 //! - **Commit range order.** The head and split reads assume that the commit
 //!   ranges of a Timeline are disjoint and ascend with their Ticks. The schema
 //!   guards the Tick order of the records but not the `seq` order of the
@@ -167,11 +169,6 @@
 //!   refuses a read-only open until one writable open adds the new tables;
 //!   that is acceptable under the no-migration, replacement-first rule.
 
-// TODO(slice 9): seven items are gated by `cfg(any(test, feature =
-// "test-support"))` — this import, `INSERT_RANGE_SQL`, `INSERT_BINDING_SQL`,
-// `insert_commit_range`, `insert_event_nodes`, `install_factual_tick`, and
-// `seed_factual_prefix`. They are the one install path of a committed prefix,
-// so slice 9 must un-gate all seven together when the pipeline commit calls it.
 #[cfg(any(test, feature = "test-support"))]
 use pos_core::counterfactual_store::test_fixtures::SeededFactualTickV1;
 use pos_core::factual_dependency::BoundFactualNodeV1;
@@ -181,10 +178,10 @@ use pos_core::{
     CounterfactualInvalidationCommandV1, CounterfactualInvalidationOutcomeV1,
     CounterfactualTickOutcomeV1, DependencyEdgeRecordV1, DependencyNodeCoordinateV1,
     DependencyNodeRecordV1, DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1,
-    DependencyPagedRowV1, DependencyReadScopeV1, ErasureProtectedOperationV1, FactualCutV1,
-    FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, Hash, PipelineDraftBatchV1,
-    RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, Seq,
-    TickDependencyRecordV1, TimelineId,
+    DependencyPagedRowV1, DependencyReadScopeV1, ErasureProtectedOperationV1, Event, FactualCutV1,
+    FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, Hash, PipelineAdmissionBasisV1,
+    PipelineDraftBatchV1, RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1,
+    Seq, SeqRange, TickDependencyRecordV1, TimelineId,
 };
 use rusqlite::{params, Connection, OptionalExtension, Params, Row};
 
@@ -192,6 +189,7 @@ use super::{
     counterfactual_schema_present, read_fork_state, settle, sql_integer, stored_hash, stored_u64,
     then_staged, CounterfactualSchemaObjectV1, Staged, StoreError,
 };
+use crate::factual_tick_plan::{plan_tick, FactualInstallV1, PlannedTickV1, TickPrefixV1};
 use crate::sqlite::{seq_as_i64, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore};
 use crate::COUNTERFACTUAL_SEAL;
 
@@ -1914,38 +1912,33 @@ impl FactualPrefixReadPortV1 for SqliteStore {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
 const INSERT_RANGE_SQL: &str = "INSERT INTO counterfactual_dependency_commit_ranges
      (timeline_id, tick, first_seq, last_seq) VALUES (?1, ?2, ?3, ?4)";
 
-#[cfg(any(test, feature = "test-support"))]
 const INSERT_BINDING_SQL: &str = "INSERT INTO counterfactual_dependency_event_nodes
      (timeline_id, seq, tick, artifact_digest) VALUES (?1, ?2, ?3, ?4)";
 
-/// Insert the commit range of a seeded Tick.
-#[cfg(any(test, feature = "test-support"))]
+/// Insert the commit range of a Tick.
 fn insert_commit_range(
     conn: &Connection,
     timeline: &str,
     tick: i64,
-    seeded: &SeededFactualTickV1,
+    range: (Seq, Seq),
 ) -> Result<(), CoreError> {
-    let first = seq_as_i64(seeded.first_seq);
-    let last = seq_as_i64(seeded.last_seq);
+    let first = seq_as_i64(range.0);
+    let last = seq_as_i64(range.1);
     conn.execute(INSERT_RANGE_SQL, params![timeline, tick, first, last])
         .map(|_| ())
         .map_err(SqliteStore::into_storage_error)
 }
 
-/// Insert the Event bindings of a seeded Tick.
-#[cfg(any(test, feature = "test-support"))]
+/// Insert the Event bindings of a Tick.
 fn insert_event_nodes(
     conn: &Connection,
     timeline: &str,
     tick: i64,
-    seeded: &SeededFactualTickV1,
+    bindings: &[(Seq, Hash)],
 ) -> Result<(), CoreError> {
-    let bindings = &seeded.event_nodes;
     conn.prepare_cached(INSERT_BINDING_SQL)
         .and_then(|mut statement| {
             bindings.iter().try_for_each(|(seq, digest)| {
@@ -1961,20 +1954,99 @@ fn insert_event_nodes(
 /// Install one committed Tick of the Timeline's prefix set: its record,
 /// nodes, and edges, its commit range, and its Event bindings.
 ///
-/// The one insert path of a committed prefix: the `test-support` seeding
-/// function calls it now, and the pipeline commit calls it once it records
-/// factual Ticks.
-#[cfg(any(test, feature = "test-support"))]
+/// The one insert path of a committed prefix: the pipeline commit calls it
+/// with the Events, and the `test-support` seeding function calls it for
+/// seeded Ticks.
 fn install_factual_tick(
     conn: &Connection,
     timeline: TimelineId,
-    seeded: &SeededFactualTickV1,
+    record: &TickDependencyRecordV1,
+    range: (Seq, Seq),
+    bindings: &[(Seq, Hash)],
 ) -> Result<(), CoreError> {
     let set = DependencySetV1::new(timeline, PREFIX_GENERATION);
-    let tick = sql_tick(seeded.record.tick());
-    insert_dependency_record(conn, &set, tick, &seeded.record)
-        .and_then(|()| insert_commit_range(conn, &set.timeline, tick, seeded))
-        .and_then(|()| insert_event_nodes(conn, &set.timeline, tick, seeded))
+    let tick = sql_tick(record.tick());
+    insert_dependency_record(conn, &set, tick, record)
+        .and_then(|()| insert_commit_range(conn, &set.timeline, tick, range))
+        .and_then(|()| insert_event_nodes(conn, &set.timeline, tick, bindings))
+}
+
+/// The Timeline's visible committed prefix, as the Tick checks read it inside
+/// the commit's transaction.
+struct SqlitePrefixV1<'a> {
+    conn: &'a Connection,
+    timeline: TimelineId,
+    /// The Timeline's ancestry, oldest first and its own set last.
+    path: Vec<SegmentV1>,
+}
+
+impl TickPrefixV1 for SqlitePrefixV1<'_> {
+    fn last_tick(&self) -> Result<u64, CoreError> {
+        last_head(self.conn, &self.path).map(|head| head.tick)
+    }
+
+    fn events_in(&self, range: SeqRange) -> Result<Vec<Event>, CoreError> {
+        SqliteStore::read_unchecked_on(self.conn, self.timeline, range)
+    }
+
+    fn any_bound(&self, seqs: &[Seq]) -> Result<bool, CoreError> {
+        event_nodes(self.conn, &self.path, seqs).map(|found| found.iter().any(Option::is_some))
+    }
+
+    fn records_any(&self, record: &TickDependencyRecordV1) -> Result<bool, CoreError> {
+        let set = DependencySetV1::new(self.timeline, PREFIX_GENERATION);
+        settle_factual(nodes_collide(self.conn, &set, record))
+    }
+
+    fn counts(&self) -> Result<RecordedSetCountsV1, CoreError> {
+        prefix_counts(self.conn, self.timeline)
+    }
+
+    fn sources_below(&self, digests: &[Hash], tick: u64) -> Result<bool, CoreError> {
+        digest_nodes(self.conn, &self.path, digests).map(|found| {
+            found.iter().all(|hit| {
+                hit.as_ref()
+                    .is_some_and(|(node, _)| node.coordinate().tick() < tick)
+            })
+        })
+    }
+}
+
+impl SqliteStore {
+    /// Check the factual Tick declaration of `basis` against the Timeline's
+    /// visible committed prefix (R3.7.2), before any Event is appended, and
+    /// prepare the rows the commit installs. `chain` is the Timeline's fork
+    /// chain the caller has read. It reads inside the caller's transaction and
+    /// writes nothing.
+    pub(in crate::sqlite) fn plan_factual_tick(
+        &self,
+        timeline: TimelineId,
+        basis: &PipelineAdmissionBasisV1,
+        grant: Hash,
+        first_seq: Seq,
+        chain: &[(TimelineId, Seq)],
+    ) -> Result<PlannedTickV1, CoreError> {
+        path_of(&self.conn, timeline, chain).and_then(|path| {
+            let prefix = SqlitePrefixV1 {
+                conn: &self.conn,
+                timeline,
+                path,
+            };
+            plan_tick(&prefix, timeline, basis, grant, first_seq)
+        })
+    }
+
+    /// Install a checked Tick: its rows, commit range and Event bindings, in
+    /// the caller's transaction.
+    pub(in crate::sqlite) fn install_planned_factual_tick(
+        &self,
+        timeline: TimelineId,
+        record: &TickDependencyRecordV1,
+        planned: &FactualInstallV1,
+    ) -> Result<(), CoreError> {
+        let range = (planned.first_seq, planned.last_seq);
+        install_factual_tick(&self.conn, timeline, record, range, &planned.event_nodes)
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2006,7 +2078,11 @@ impl SqliteStore {
                 .and_then(|tx| {
                     ticks
                         .iter()
-                        .try_for_each(|held| install_factual_tick(&tx, timeline, held))
+                        .try_for_each(|held| {
+                            let range = (held.first_seq, held.last_seq);
+                            let bindings = &held.event_nodes;
+                            install_factual_tick(&tx, timeline, &held.record, range, bindings)
+                        })
                         .and_then(|()| tx.commit().map_err(Self::into_storage_error))
                 })
         })

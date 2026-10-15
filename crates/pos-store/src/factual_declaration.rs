@@ -77,7 +77,7 @@ const fn is_scheduled(basis: &PipelineAdmissionBasisV1) -> bool {
 
 /// R3.7.2 (i): every edge carries the persisted fence's authority grant. An
 /// authorization that is no 32-byte digest carries no grant.
-pub(super) fn edges_carry_grant(basis: &PipelineAdmissionBasisV1, grant: Hash) -> bool {
+pub(crate) fn edges_carry_grant(basis: &PipelineAdmissionBasisV1, grant: Hash) -> bool {
     let edges = basis.dependencies().record().edges();
     edges
         .iter()
@@ -86,7 +86,7 @@ pub(super) fn edges_carry_grant(basis: &PipelineAdmissionBasisV1, grant: Hash) -
 
 /// R3.7.2 (ii), the part that needs no store: the record is a committed one
 /// at the asserted Tick.
-pub(super) fn declares_committed_tick(basis: &PipelineAdmissionBasisV1) -> bool {
+pub(crate) fn declares_committed_tick(basis: &PipelineAdmissionBasisV1) -> bool {
     let dependencies = basis.dependencies();
     let record = dependencies.record();
     record.origin() == RecordedNodeOriginV1::Committed && record.tick() == dependencies.tick()
@@ -98,7 +98,7 @@ pub(super) fn declares_committed_tick(basis: &PipelineAdmissionBasisV1) -> bool 
 ///
 /// Returns the `(seq, artifact digest)` Event binding of every draft, where
 /// `first_seq` is the logical `seq` of the first draft.
-pub(super) fn output_event_nodes(
+pub(crate) fn output_event_nodes(
     timeline: TimelineId,
     basis: &PipelineAdmissionBasisV1,
     first_seq: Seq,
@@ -135,7 +135,7 @@ pub(super) fn output_event_nodes(
 /// whose artifact digest is the one recomputed from the observation anchor's
 /// snapshot digest. A human record has none: every node of it is bound to a
 /// draft.
-pub(super) fn snapshot_matches(timeline: TimelineId, basis: &PipelineAdmissionBasisV1) -> bool {
+pub(crate) fn snapshot_matches(timeline: TimelineId, basis: &PipelineAdmissionBasisV1) -> bool {
     let snapshot_digest = basis.attempt().observation().snapshot_digest();
     let snapshots: Vec<&DependencyNodeCoordinateV1> = basis
         .dependencies()
@@ -162,7 +162,7 @@ pub(super) fn snapshot_matches(timeline: TimelineId, basis: &PipelineAdmissionBa
 /// a binding without an entry names no such Event.
 ///
 /// Returns the `(seq, artifact digest)` Event binding of every ingress node.
-pub(super) fn ingress_event_nodes(
+pub(crate) fn ingress_event_nodes(
     timeline: TimelineId,
     basis: &PipelineAdmissionBasisV1,
     payloads: &BTreeMap<u64, Hash>,
@@ -190,11 +190,11 @@ pub(super) fn ingress_event_nodes(
 }
 
 /// The nodes of a record by artifact digest.
-pub(super) type DigestIndex<'a> = BTreeMap<Hash, &'a DependencyNodeRecordV1>;
+pub(crate) type DigestIndex<'a> = BTreeMap<Hash, &'a DependencyNodeRecordV1>;
 
 /// Index the nodes of `record` by artifact digest, once for all the checks
 /// that resolve a digest to a node.
-pub(super) fn digest_index(record: &TickDependencyRecordV1) -> DigestIndex<'_> {
+pub(crate) fn digest_index(record: &TickDependencyRecordV1) -> DigestIndex<'_> {
     record
         .nodes()
         .iter()
@@ -211,7 +211,7 @@ pub(super) fn digest_index(record: &TickDependencyRecordV1) -> DigestIndex<'_> {
 /// nothing but its draft nodes. The store cannot check Driver-output classes,
 /// which need the output policy, nor the step-chain, carried-set, history or
 /// verified-prefix content, which need registry state.
-pub(super) fn shape_holds(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIndex<'_>) -> bool {
+pub(crate) fn shape_holds(basis: &PipelineAdmissionBasisV1, by_digest: &DigestIndex<'_>) -> bool {
     let nodes = basis.dependencies().record().nodes();
     (is_scheduled(basis) || nodes.len() == basis.batch().drafts().len())
         && nodes.iter().all(|node| node_shape_holds(node, by_digest))
