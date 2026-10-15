@@ -5,6 +5,7 @@
 //! measured ledger or the production canonical-length/debit helpers.
 
 mod compare;
+mod sqlite;
 
 use super::{
     fixture::{pin_policy, request_for, Built, Fallible, Shape, Spec, World},
