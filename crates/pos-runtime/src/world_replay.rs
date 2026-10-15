@@ -278,8 +278,7 @@ impl VerifiedWorldReplayV1 {
             && finite_usize(bounds.max_fork_depth())
             && finite_usize(bounds.max_events())
             && finite_usize(bounds.max_total_bytes())
-            && bounds.max_elapsed_micros() != 0
-            && bounds.max_elapsed_micros() != u64::MAX
+            && finite_u64(bounds.max_elapsed_micros())
             && self
                 .fork_source_profile
                 .is_some_and(|profile| profile != Hash::zero())
@@ -315,6 +314,10 @@ impl VerifiedWorldReplayV1 {
 
 const fn finite_usize(value: usize) -> bool {
     value != 0 && value != usize::MAX
+}
+
+const fn finite_u64(value: u64) -> bool {
+    value != 0 && value != u64::MAX
 }
 
 /// Construct a verified result for an explicitly enabled downstream seam
