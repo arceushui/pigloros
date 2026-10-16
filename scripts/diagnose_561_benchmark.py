@@ -13,8 +13,8 @@ import time
 
 
 REVISIONS = {
-    "baseline": "091f25b9747f06072be4c10fdad3d14652cbffe0",
-    "candidate": "124a44dc319fa86007887ecde6d14caba94f831d",
+    "baseline": "7c7bc93575e947171d340c9efd7b2a22fc9fed9c",
+    "candidate": "77d78af043af93a1b1a5ee97df8fcb54ab893b1e",
 }
 CASES = {
     "manifest-cas": (0, 32, 128, 512),
