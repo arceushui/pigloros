@@ -15,6 +15,8 @@ from diagnose_561_benchmark import command
 
 
 REVISION = "77d78af043af93a1b1a5ee97df8fcb54ab893b1e"
+CURVE_PACKAGE = "registry+https://github.com/rust-lang/crates.io-index#curve25519-dalek@5.0.0"
+CURVE_TARGETS = {("curve25519_dalek", ("lib",)), ("build-script-build", ("custom-build",))}
 ORDER = ["baseline", "candidate", "candidate", "baseline"]
 TESTS = [
     "imported_fork_replay_tests::"
@@ -50,25 +52,42 @@ def profile_multisets(messages, checkout):
 def validate_profile_multisets(baseline, candidate):
     if not baseline or baseline.keys() != candidate.keys():
         raise ValueError("compiler artifact inventories differ or are empty")
-    changed = 0
+    changed = set()
     for key, before in baseline.items():
         after = candidate[key]
         package, name, kinds, _ = json.loads(key)
         if len({json.dumps(profile, sort_keys=True) for profile in before}) != 1:
             raise ValueError("ambiguous baseline group has mixed or absent profiles")
         expected = before
-        if name == "curve25519_dalek" and kinds == ["lib"]:
-            if (len(before) != 1 or "curve25519-dalek" not in package
+        if package == CURVE_PACKAGE:
+            target = (name, tuple(kinds))
+            if (target not in CURVE_TARGETS or target in changed or len(before) != 1
                     or before[0]["opt_level"] != "0"
                     or not before[0]["debug_assertions"] or not before[0]["overflow_checks"]):
                 raise ValueError("unexpected curve build inventory/profile")
             expected = [dict(before[0], opt_level="3")]
-            changed += 1
+            changed.add(target)
         normalized = lambda entries: sorted(json.dumps(p, sort_keys=True) for p in entries)
         if normalized(after) != normalized(expected):
             raise ValueError("artifact multiplicity or profile changed unexpectedly")
-    if changed != 1:
-        raise ValueError("expected exactly one optimized curve library")
+    if changed != CURVE_TARGETS:
+        raise ValueError("expected the pinned curve library and build script")
+
+
+def curve_build_output(messages):
+    records = [item for item in messages if item.get("reason") == "build-script-executed"
+               and item.get("package_id") == CURVE_PACKAGE]
+    fields = {"reason", "package_id", "linked_libs", "linked_paths", "cfgs", "env", "out_dir"}
+    if len(records) != 1 or records[0].keys() != fields or not records[0]["out_dir"]:
+        raise ValueError("expected one complete curve build-script output")
+    # Cargo gives each build its own hashed output directory. The pinned build.rs
+    # emits cfgs, not generated files; retain every semantic output for comparison.
+    return {key: value for key, value in records[0].items() if key != "out_dir"}
+
+
+def validate_build_outputs(baseline, candidate):
+    if baseline != candidate:
+        raise ValueError("curve build-script semantic outputs changed")
 
 
 def profile_self_test():
@@ -76,7 +95,8 @@ def profile_self_test():
     # sha2 emissions. Opaque output names differ; identity/profile fields agree.
     registry = "registry+https://github.com/rust-lang/crates.io-index#"
     fixtures = [
-        (registry + "curve25519-dalek@4.1.3", "curve25519_dalek", [], "curve"),
+        (CURVE_PACKAGE, "curve25519_dalek", [], "curve"),
+        (CURVE_PACKAGE, "build-script-build", [], "curve-build"),
         (registry + "serde_json@1.0.151", "serde_json", ["default", "std"], "serde-one"),
         (registry + "serde_json@1.0.151", "serde_json", ["default", "std"], "serde-two"),
         (registry + "sha2@0.11.0", "sha2", ["alloc", "default", "oid"], "sha-one"),
@@ -85,28 +105,31 @@ def profile_self_test():
     ]
     messages = [
         {"reason": "compiler-artifact", "package_id": package,
-         "target": {"name": name, "kind": ["lib"]}, "features": features,
+         "target": {"name": name, "kind": ["custom-build" if name == "build-script-build" else "lib"]},
+         "features": features,
          "filenames": [f"/baseline/target/debug/deps/{output}.rlib"],
-         "profile": {"opt_level": "0", "debuginfo": 2, "debug_assertions": True,
+         "profile": {"opt_level": "0", "debuginfo": 0 if name == "build-script-build" else 2,
+                     "debug_assertions": True,
                      "overflow_checks": True, "test": name == "pos_time"}}
         for package, name, features, output in fixtures
     ]
     messages.append({"reason": "build-finished", "success": True})
     baseline = profile_multisets(messages, Path("/baseline"))
-    assert len(baseline) == 4 and sum(map(len, baseline.values())) == 6
+    assert len(baseline) == 5 and sum(map(len, baseline.values())) == 7
     candidate_messages = copy.deepcopy(messages)
     for item in candidate_messages:
         if item["reason"] != "compiler-artifact":
             continue
         item["package_id"] = item["package_id"].replace("/baseline", "/candidate")
         item["filenames"] = [p.replace("/baseline", "/candidate") for p in item["filenames"]]
-        if item["target"]["name"] == "curve25519_dalek":
+        if item["package_id"] == CURVE_PACKAGE:
             item["profile"]["opt_level"] = "3"
     candidate = profile_multisets(candidate_messages, Path("/candidate"))
     validate_profile_multisets(baseline, candidate)
     validate_profile_multisets(
         baseline, profile_multisets(reversed(candidate_messages), Path("/candidate")))
     curve = next(key for key in baseline if json.loads(key)[1] == "curve25519_dalek")
+    build = next(key for key in baseline if json.loads(key)[1] == "build-script-build")
     other = next(key for key in baseline if json.loads(key)[1] == "pos_time")
     duplicates = [key for key, value in baseline.items() if len(value) == 2]
     assert {json.loads(key)[1] for key in duplicates} == {"serde_json", "sha2"}
@@ -140,6 +163,7 @@ def profile_self_test():
     extra_base = copy.deepcopy(baseline)
     extra_base[curve].append(copy.deepcopy(extra_base[curve][0]))
     extra_candidate = copy.deepcopy(extra_base)
+    extra_candidate[build][0]["opt_level"] = "3"
     for profile in extra_candidate[curve]:
         profile["opt_level"] = "3"
     invalid.append((extra_base, extra_candidate))
@@ -149,11 +173,13 @@ def profile_self_test():
         bad_base[curve][0][field] = value
         bad_candidate = copy.deepcopy(bad_base)
         bad_candidate[curve][0]["opt_level"] = "3"
+        bad_candidate[build][0]["opt_level"] = "3"
         invalid.append((bad_base, bad_candidate))
     heterogeneous = copy.deepcopy(baseline)
     heterogeneous[duplicates[0]][0]["opt_level"] = "1"
     unchanged = copy.deepcopy(heterogeneous)
     unchanged[curve][0]["opt_level"] = "3"
+    unchanged[build][0]["opt_level"] = "3"
     invalid.append((heterogeneous, unchanged))
     exchanged = copy.deepcopy(unchanged)
     exchanged[duplicates[0]].reverse()
@@ -161,6 +187,23 @@ def profile_self_test():
     empty = copy.deepcopy(baseline)
     empty[duplicates[0]] = []
     invalid.append((empty, candidate))
+    invalid.append(({k: v for k, v in baseline.items() if k != build},
+                    {k: v for k, v in candidate.items() if k != build}))
+    for field, value in [("opt_level", "0"), ("debug_assertions", False),
+                         ("overflow_checks", False), ("debuginfo", 2)]:
+        bad = copy.deepcopy(candidate)
+        bad[build][0][field] = value
+        invalid.append((baseline, bad))
+    extra = copy.deepcopy(candidate)
+    extra[build].append(copy.deepcopy(extra[build][0]))
+    invalid.append((baseline, extra))
+    wrong_baseline, wrong_candidate = copy.deepcopy(baseline), copy.deepcopy(candidate)
+    for group in [wrong_baseline, wrong_candidate]:
+        for key in [curve, build]:
+            wrong_version = json.loads(key)
+            wrong_version[0] = CURVE_PACKAGE.replace("@5.0.0", "@4.1.3")
+            group[json.dumps(wrong_version)] = group.pop(key)
+    invalid.append((wrong_baseline, wrong_candidate))
     for before, after in invalid:
         try:
             validate_profile_multisets(before, after)
@@ -168,6 +211,34 @@ def profile_self_test():
             continue
         raise AssertionError("invalid build profile evidence accepted")
     return 2, len(invalid)
+
+
+def build_output_self_test():
+    before = {"reason": "build-script-executed", "package_id": CURVE_PACKAGE,
+              "linked_libs": [], "linked_paths": [], "env": [],
+              "cfgs": ['curve25519_dalek_bits="64"', 'curve25519_dalek_backend="simd"'],
+              "out_dir": "/baseline/target/debug/build/curve-old/out"}
+    after = dict(before, out_dir="/candidate/target/debug/build/curve-new/out")
+    baseline = curve_build_output([before])
+    validate_build_outputs(baseline, curve_build_output([after]))
+    for field in ["linked_libs", "linked_paths", "cfgs", "env"]:
+        changed = copy.deepcopy(after)
+        changed[field].append("unexpected")
+        try:
+            validate_build_outputs(baseline, curve_build_output([changed]))
+        except ValueError:
+            continue
+        raise AssertionError("changed build-script output accepted")
+    invalid = [[], [after, after], [dict(after, out_dir="")],
+               [{k: v for k, v in after.items() if k != "cfgs"}],
+               [dict(after, unexpected=True)], [dict(after, package_id="wrong-package")]]
+    for messages in invalid:
+        try:
+            curve_build_output(messages)
+        except ValueError:
+            continue
+        raise AssertionError("invalid build-script output accepted")
+    return 1, len(invalid) + 4
 
 
 def self_test():
@@ -185,8 +256,9 @@ def self_test():
             continue
         raise AssertionError("invalid test evidence accepted")
     positives, refusals = profile_self_test()
-    print(f"test/profile evidence: {positives + 1} positive controls and "
-          f"{refusals + len(invalid)} refusals passed")
+    build_positives, build_refusals = build_output_self_test()
+    print(f"test/profile evidence: {positives + build_positives + 1} positive controls and "
+          f"{refusals + build_refusals + len(invalid)} refusals passed")
 
 
 def run():
@@ -202,9 +274,10 @@ def run():
         "CARGO_BUILD_JOBS", "CARGO_INCREMENTAL", "RUSTFLAGS")}
     metadata.update(revision=REVISION, order=ORDER, tests=TESTS,
                     scope="pos-time lib all-features; not the workspace feature-unified binary",
+                    intervention="curve25519-dalek 5.0.0 package opt-level: library and build script",
                     rustc=command(["rustc", "--version", "--verbose"]),
                     cargo=command(["cargo", "--version", "--verbose"]), cpu=command(["lscpu"]))
-    binaries, build_profiles = {}, {}
+    binaries, build_profiles, build_outputs = {}, {}, {}
     for owner in ["baseline", "candidate"]:
         checkout = workspace / owner
         if (command(["git", "rev-parse", "HEAD"], cwd=checkout) != REVISION
@@ -225,6 +298,7 @@ def run():
             output.seek(0)
             messages = [json.loads(line) for line in output if line.strip()]
         build_profiles[owner] = profile_multisets(messages, checkout)
+        build_outputs[owner] = curve_build_output(messages)
         candidates = [item["executable"] for item in messages
                       if item.get("reason") == "compiler-artifact" and item.get("executable")
                       and item["target"]["name"] == "pos_time"
@@ -241,6 +315,8 @@ def run():
             raise RuntimeError("build modified source checkout")
         (artifacts / "environment.json").write_text(json.dumps(metadata, indent=2) + "\n")
     validate_profile_multisets(build_profiles["baseline"], build_profiles["candidate"])
+    validate_build_outputs(build_outputs["baseline"], build_outputs["candidate"])
+    (artifacts / "curve-build-outputs.json").write_text(json.dumps(build_outputs, indent=2) + "\n")
     (artifacts / "profiles.json").write_text(json.dumps(build_profiles, indent=2) + "\n")
     allowed = sorted(os.sched_getaffinity(0))
     selected = min(allowed)
