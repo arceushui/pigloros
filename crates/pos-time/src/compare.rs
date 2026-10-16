@@ -110,16 +110,17 @@ pub fn compare(
                         &request,
                         preparations,
                         budget,
-                        held.held().map_err(crate::core_error_to_host)?,
+                        held.held()
+                            .map_err(|error| crate::core_error_to_host(&error))?,
                         revoked,
                         registries,
                     )
-                    .map_err(crate::core_error_to_host)?;
+                    .map_err(|error| crate::core_error_to_host(&error))?;
                     Ok((held, staged))
                 },
                 |(held, (staged, diverged_entities)), verdict| {
                     held.handoff(&expiries, staged, verdict)
-                        .map_err(crate::core_error_to_host)?;
+                        .map_err(|error| crate::core_error_to_host(&error))?;
                     diff = Some(ForkDiff {
                         fork_seq,
                         diverged_entities,
