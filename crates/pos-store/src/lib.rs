@@ -49,6 +49,14 @@ extern crate self as pos_store;
 #[path = "../tests/support/fae1_fixture.rs"]
 pub mod fae1_fixture;
 
+// Test-only. The ADR-099 revision 12 classified counterfactual fixture serves
+// the public Memory and `SQLite` tests and the adapter unit tests; its items
+// are `pub` for the same reason as the `FAE1` fixture above.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "../tests/support/classified_fork_fixture.rs"]
+pub mod classified_fork_fixture;
+
 // Test-only. The shared Plugin trust registry fixtures under `tests/support` serve the public
 // vectors and the Memory adapter's fault-injection tests; the items are `pub` for the same
 // reason as the `FAE1` fixture above.
@@ -97,7 +105,9 @@ pub use fork_delivery_journal::{
     ForkDeliveryStateV1, ForkDeliveryTupleV1,
 };
 pub use fork_event_authority::{
-    ForkAppendSourcePermitV1, ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
+    ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1,
+    ClassifiedProvenanceErrorV1, ClassifiedTickAuthorityV1, ForkAppendSourcePermitV1,
+    ForkClassifiedAppendReceiptV1, ForkClassifierRegistrarPermitV1,
     ForkClassifierRegistrationReceiptV1, ForkEventAuthorityErrorV1, ForkEventPermitIssuerPortV1,
     ForkEventPermitIssuerV1, ForkEventProvenanceAuthorityPortV1,
 };

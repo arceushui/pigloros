@@ -98,13 +98,19 @@
 //!   the Fork, and share the fences above; the `dependency` child module
 //!   documents the layout, the committed prefix of a parent Timeline (kept
 //!   once per Timeline and purged with it), and the check order.
+//! - **Classified Forks.** An ADR-099 admitted Fork keeps the generic guard
+//!   above on the plain and recording methods; its counterfactual Ticks go
+//!   through the ADR-099 revision 12 classified commit and append, which reuse
+//!   the recording write path with a classified staging step and install each
+//!   Event's `EOR1` and `FOP1` with it. The `classified` child module documents
+//!   the check order.
 //! - **Errors.** A missing, deleted, non-Fork, unpublished, or protected
 //!   Timeline, and a Tick draft the generic append guard rejects, is
 //!   `ForkNotFound`; a staged head that did not advance is `CorruptState`;
 //!   every other backend failure, including a containment denial or an
 //!   admitted Fork, is `StorageFailure`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use pos_core::{
     clock::Seq,
@@ -115,13 +121,15 @@ use pos_core::{
     CounterfactualBasisV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
     CounterfactualGenerationRecordV1, CounterfactualInvalidationCommandV1,
     CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, CounterfactualStorePortV1,
-    CounterfactualTickOutcomeV1, ErasureProtectedOperationV1, ForkGenerationV1,
-    PipelineDraftBatchV1, StoredCounterfactualArtifactV1,
+    CounterfactualTickOutcomeV1, ErasureProtectedOperationV1, EventOriginRecordV1,
+    ForkAppendOperationV1, ForkClassifiedEventV1, ForkGenerationV1, PipelineDraftBatchV1,
+    StoredCounterfactualArtifactV1,
 };
 
 use super::{MemoryStore, TimelineState};
 use crate::{counterfactual_port_error, COUNTERFACTUAL_SEAL};
 
+mod classified;
 mod dependency;
 
 pub(super) use dependency::DependencyRowsV1;
@@ -244,11 +252,16 @@ impl CounterfactualForkStateV1 {
 
 /// One visible, published Fork's entries, looked up once so the recheck,
 /// staging, and install all use the same Timeline and counterfactual state.
+///
+/// The store's `FOP1` and `EOR1` maps are borrowed beside them, disjointly, so
+/// the install of a classified Tick adds its provenance with its Events.
 struct ForkEntriesV1<'s> {
     fork: TimelineId,
     timeline: &'s mut TimelineState,
     counterfactual: &'s mut CounterfactualForkStateV1,
     event_ids: &'s mut HashSet<EventId>,
+    fork_append_operations: &'s mut HashMap<Hash, ForkAppendOperationV1>,
+    fork_event_origins: &'s mut HashMap<EventId, EventOriginRecordV1>,
     hasher: &'s dyn Hasher,
 }
 
@@ -259,10 +272,10 @@ impl ForkEntriesV1<'_> {
             .basis(committed_logical_head(self.timeline))
     }
 
-    /// Stage one Tick under the generic append guard on a scratch copy of the
-    /// Fork head that holds none of its committed Events. Nothing is
-    /// installed, so a failure leaves no partial state.
-    fn stage_tick(
+    /// Stage one Tick's Events on a scratch copy of the Fork head that holds
+    /// none of its committed Events. Nothing is installed, so a failure
+    /// leaves no partial state. The caller has already run its append guard.
+    fn stage_events(
         &self,
         drafts: &PipelineDraftBatchV1,
     ) -> Result<StagedTickV1, CounterfactualStoreErrorV1> {
@@ -271,26 +284,59 @@ impl ForkEntriesV1<'_> {
             events: Vec::new(),
             chain_head: self.timeline.chain_head,
         };
-        crate::ensure_non_geographic_drafts(drafts.drafts(), self.fork)
-            .and_then(|()| {
-                drafts.drafts().iter().try_for_each(|draft| {
-                    MemoryStore::append_one_to_state(&mut timeline, draft, self.hasher).map(drop)
-                })
+        drafts
+            .drafts()
+            .iter()
+            .try_for_each(|draft| {
+                MemoryStore::append_one_to_state(&mut timeline, draft, self.hasher).map(drop)
             })
             .and_then(|()| staged_tick_head(&timeline))
-            .map(|head| StagedTickV1 { timeline, head })
+            .map(|head| StagedTickV1 {
+                timeline,
+                head,
+                provenance: Vec::new(),
+            })
             .map_err(|error| counterfactual_port_error(&error))
     }
 
-    /// Install a staged Tick's Events on the Fork Timeline. Infallible.
+    /// Install a staged Tick's Events on the Fork Timeline, and the `EOR1` and
+    /// `FOP1` of each Event of a classified Tick. Infallible.
     fn install_tick(&mut self, tick: StagedTickV1) {
-        let staged = tick.timeline;
+        let StagedTickV1 {
+            timeline: staged,
+            provenance,
+            ..
+        } = tick;
         self.event_ids
             .extend(staged.events.iter().map(|event| event.id));
         self.timeline.chain_head = staged.chain_head;
         self.timeline.timeline.head = staged.timeline.head;
         self.timeline.events.extend(staged.events);
+        self.install_provenance(provenance);
     }
+
+    /// Install the staged `EOR1`/`FOP1` rows of a classified Tick; a generic
+    /// Tick stages none.
+    fn install_provenance(&mut self, provenance: Vec<StagedProvenanceV1>) {
+        for row in provenance {
+            self.fork_event_origins.insert(row.event_id, row.origin);
+            let operation_id = row.operation.input().operation_id;
+            self.fork_append_operations
+                .insert(operation_id, row.operation);
+        }
+    }
+}
+
+/// Stage one Tick of a generic Fork: the generic append guard, then the
+/// Events on a scratch copy of the Fork head. The staging step of a generic
+/// Fork's invalidation and later Ticks.
+fn stage_tick(
+    entries: &ForkEntriesV1<'_>,
+    drafts: &PipelineDraftBatchV1,
+) -> Result<StagedTickV1, CounterfactualStoreErrorV1> {
+    crate::ensure_non_geographic_drafts(drafts.drafts(), entries.fork)
+        .map_err(|error| counterfactual_port_error(&error))
+        .and_then(|()| entries.stage_events(drafts))
 }
 
 /// One recomputation Tick staged on a scratch copy of the Fork head.
@@ -299,14 +345,46 @@ struct StagedTickV1 {
     timeline: TimelineState,
     /// Fork Logical Head after the Tick.
     head: Seq,
+    /// The `EOR1` and `FOP1` of each Event of a classified Tick, in Event
+    /// order; empty for a generic Fork.
+    provenance: Vec<StagedProvenanceV1>,
+}
+
+impl StagedTickV1 {
+    /// The staged Events in logical form: each Event ID, logical `Seq`, wall
+    /// time, and payload hash, which a classified Tick derives its provenance
+    /// from.
+    ///
+    /// The local `Seq` is lifted by the Fork-point prefix, as `logical_event`
+    /// does. Staging already checked that every lifted `Seq` fits, so the
+    /// saturating sum is exact.
+    fn logical_events(&self) -> impl Iterator<Item = ForkClassifiedEventV1> + '_ {
+        let prefix = logical_prefix(&self.timeline);
+        self.timeline
+            .events
+            .iter()
+            .map(move |event| ForkClassifiedEventV1 {
+                event_id: event.id,
+                logical_seq: prefix.saturating_add(event.seq.as_u64()),
+                wall_time: event.wall_time,
+                payload_hash: event.payload_hash,
+            })
+    }
+}
+
+/// The staged `EOR1` and `FOP1` of one classified Event.
+struct StagedProvenanceV1 {
+    event_id: EventId,
+    origin: EventOriginRecordV1,
+    operation: ForkAppendOperationV1,
 }
 
 /// Map a fenced effect's storage error onto the port and flatten its result.
-fn fenced_result<T>(
-    result: Result<Result<T, CounterfactualStoreErrorV1>, CoreError>,
-) -> Result<T, CounterfactualStoreErrorV1> {
+fn fenced_result<T, E: From<CounterfactualStoreErrorV1>>(
+    result: Result<Result<T, E>, CoreError>,
+) -> Result<T, E> {
     result
-        .map_err(|error| counterfactual_port_error(&error))
+        .map_err(|error| E::from(counterfactual_port_error(&error)))
         .and_then(std::convert::identity)
 }
 
@@ -388,6 +466,8 @@ impl MemoryStore {
             ref mut timelines,
             ref mut counterfactual_forks,
             ref mut event_ids,
+            ref mut fork_append_operations,
+            ref mut fork_event_origins,
             ref hasher,
             ..
         } = *self;
@@ -400,6 +480,8 @@ impl MemoryStore {
                 timeline,
                 counterfactual,
                 event_ids,
+                fork_append_operations,
+                fork_event_origins,
                 hasher,
             })
             .ok_or(CounterfactualStoreErrorV1::ForkNotFound)
@@ -414,12 +496,14 @@ impl MemoryStore {
             .map(|state| state.basis(committed_logical_head(self.state(fork))))
     }
 
-    /// Recheck the persisted basis, stage the first Tick, build the receipt,
-    /// and only then install the Tick and the generation.
-    fn commit_visible_counterfactual(
+    /// Recheck the persisted basis, stage the first Tick through the caller's
+    /// staging `step`, build the receipt, and only then install the Tick and
+    /// the generation.
+    fn commit_visible_counterfactual<E: From<CounterfactualStoreErrorV1>>(
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
-    ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1> {
+        step: impl Fn(&ForkEntriesV1<'_>, &PipelineDraftBatchV1) -> Result<StagedTickV1, E>,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, E> {
         let mut entries = self.fork_entries(command.fork())?;
         let persisted = entries.persisted_basis();
         if let Some(conflict) = command.expected_basis().first_conflict(&persisted) {
@@ -427,7 +511,7 @@ impl MemoryStore {
                 conflict,
             ));
         }
-        let tick = entries.stage_tick(command.first_tick_drafts())?;
+        let tick = step(&entries, command.first_tick_drafts())?;
         // The receipt is built before anything is installed, so even its
         // `CorruptState` rejection commits nothing.
         command
@@ -437,27 +521,30 @@ impl MemoryStore {
                 entries.counterfactual.advance(command, receipt.record());
                 CounterfactualInvalidationOutcomeV1::Committed(Box::new(receipt))
             })
+            .map_err(E::from)
     }
 
-    /// Recheck the persisted basis, stage one later Tick, build its outcome,
-    /// and only then install the Tick.
-    fn append_visible_counterfactual_tick(
+    /// Recheck the persisted basis, stage one later Tick through the caller's
+    /// staging `step`, build its outcome, and only then install the Tick.
+    fn append_visible_counterfactual_tick<E: From<CounterfactualStoreErrorV1>>(
         &mut self,
         fork: TimelineId,
         expected: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
-    ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
+        step: impl Fn(&ForkEntriesV1<'_>, &PipelineDraftBatchV1) -> Result<StagedTickV1, E>,
+    ) -> Result<CounterfactualTickOutcomeV1, E> {
         let mut entries = self.fork_entries(fork)?;
         let persisted = entries.persisted_basis();
         if let Some(conflict) = expected.first_conflict(&persisted) {
             return Ok(CounterfactualTickOutcomeV1::Stale(conflict));
         }
-        let tick = entries.stage_tick(drafts)?;
+        let tick = step(&entries, drafts)?;
         // The outcome is built before the Tick is installed, so even its
         // `CorruptState` rejection commits nothing.
         persisted
             .committed_tick(&COUNTERFACTUAL_SEAL, tick.head)
             .inspect(|_| entries.install_tick(tick))
+            .map_err(E::from)
     }
 }
 
@@ -493,7 +580,7 @@ impl CounterfactualStorePortV1 for MemoryStore {
         let write = self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
             store
                 .ensure_generic_fork_append_is_rejected(fork)
-                .map(|()| store.commit_visible_counterfactual(command))
+                .map(|()| store.commit_visible_counterfactual(command, stage_tick))
         });
         fenced_result(write)
     }
@@ -507,7 +594,9 @@ impl CounterfactualStorePortV1 for MemoryStore {
         let write = self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
             store
                 .ensure_generic_fork_append_is_rejected(fork)
-                .map(|()| store.append_visible_counterfactual_tick(fork, expected, drafts))
+                .map(|()| {
+                    store.append_visible_counterfactual_tick(fork, expected, drafts, stage_tick)
+                })
         });
         fenced_result(write)
     }

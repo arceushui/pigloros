@@ -49,11 +49,14 @@ use pos_runtime::counterfactual::coordinator::{
     CounterfactualFrontierSourceV1, CounterfactualFrozenArtifactsV1, CounterfactualHostPreflightV1,
     CounterfactualInterventionAuthorityV1, CounterfactualProvisionalOutputV1,
     CounterfactualStagedTickV1, CounterfactualTickFailureV1, CounterfactualTickInputsV1,
-    FrozenArtifactAvailabilityV1, InterventionDecisionV1,
+    FrozenArtifactAvailabilityV1, GenericForksOnlyV1, InterventionDecisionV1,
 };
 use pos_runtime::counterfactual::suffix::CounterfactualSuffixRequestV1;
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
+use pos_store::{
+    ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1, ClassifiedTickAuthorityV1,
+};
 use pos_time::counterfactual::dependency_graph::{
     validate_dependency_graph_v1, DependencyGraphBoundsV1 as Bounds, DependencyGraphErrorV1,
     DependencyGraphNodeOriginV1 as Origin, DependencyGraphNodeV1 as Node,
@@ -1215,6 +1218,32 @@ impl<B: CounterfactualDependencyRecordingPortV1> CounterfactualDependencyRecordi
     }
 }
 
+impl<B: ClassifiedCounterfactualStorePortV1> ClassifiedCounterfactualStorePortV1 for Shared<B> {
+    fn commit_classified_counterfactual_invalidation(
+        &mut self,
+        command: &CounterfactualInvalidationCommandV1,
+        record: &TickDependencyRecordV1,
+        authority: &ClassifiedTickAuthorityV1<'_>,
+        base: Hash,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, ClassifiedCounterfactualErrorV1> {
+        self.lock()
+            .commit_classified_counterfactual_invalidation(command, record, authority, base)
+    }
+
+    fn append_classified_counterfactual_tick(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        record: &TickDependencyRecordV1,
+        authority: &ClassifiedTickAuthorityV1<'_>,
+        base: Hash,
+    ) -> Result<CounterfactualTickOutcomeV1, ClassifiedCounterfactualErrorV1> {
+        self.lock()
+            .append_classified_counterfactual_tick(fork, expected, drafts, record, authority, base)
+    }
+}
+
 impl<B: CounterfactualDependencyReadPortV1> CounterfactualDependencyReadPortV1 for Shared<B> {
     fn read_dependency_nodes(
         &self,
@@ -1278,6 +1307,7 @@ trait Backend:
     EventStore
     + CounterfactualStorePortV1
     + CounterfactualDependencyRecordingPortV1
+    + ClassifiedCounterfactualStorePortV1
     + CounterfactualDependencyReadPortV1
     + FactualPrefixReadPortV1
     + Sized
@@ -1481,6 +1511,7 @@ const fn suffix_request(
     CounterfactualSuffixRequestV1 {
         plan,
         receipt,
+        fork_append_authority: CounterfactualForkAppendAuthorityV1::Generic,
         result_id: RESULT_ID,
         evaluator_identity_digest: EVALUATOR,
     }
@@ -1522,8 +1553,13 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
     let request = admission_request(&host);
     // Generation 1 is admitted from the hand-built graph and records it.
     let mut stager = DeclaringStager::new(&fork)?;
-    let first =
-        coordinator.admit_with_dependencies(&request, &Authority, &mut graph, &mut stager)?;
+    let first = coordinator.admit(
+        &request,
+        &Authority,
+        &mut graph,
+        &mut stager,
+        &mut GenericForksOnlyV1,
+    )?;
     assert_eq!(first.generation(), generation(1));
     // A generation still being written validates as what is recorded so far:
     // the second Intervention's record is not committed yet.
@@ -1532,8 +1568,11 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
         derivation!(&mut early, plan),
         Err(AdmissionError::DependencyGraphInvalid)
     );
-    let run = coordinator
-        .recompute_suffix_with_dependencies(&suffix_request(plan, first), &mut stager)?;
+    let run = coordinator.recompute_suffix(
+        &suffix_request(plan, first),
+        &mut stager,
+        &mut GenericForksOnlyV1,
+    )?;
     assert_eq!(run.failure, None);
     // The complete generation derives the published digest and the hand-built
     // derivation.
@@ -1546,12 +1585,20 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
     assert_eq!(derivation!(&mut complete, plan)?, expected);
     // Generation 2 is admitted from the recorded graph alone and recomputed.
     let mut again = DeclaringStager::new(&fork)?;
-    let second =
-        coordinator.admit_with_dependencies(&request, &Authority, &mut complete, &mut again)?;
+    let second = coordinator.admit(
+        &request,
+        &Authority,
+        &mut complete,
+        &mut again,
+        &mut GenericForksOnlyV1,
+    )?;
     assert_eq!(second.generation(), generation(2));
     assert_eq!(second.frontier_digest(), first.frontier_digest());
-    let run = coordinator
-        .recompute_suffix_with_dependencies(&suffix_request(plan, second), &mut again)?;
+    let run = coordinator.recompute_suffix(
+        &suffix_request(plan, second),
+        &mut again,
+        &mut GenericForksOnlyV1,
+    )?;
     assert_eq!(run.failure, None);
     let mut third = recorded(&store)?;
     assert_eq!(third.generation(), generation(2));
@@ -1830,18 +1877,31 @@ fn admits_the_first_generation_through_the_composite_source<B: Backend>() -> Tes
     let mut coordinator = CounterfactualCoordinatorV1::new(store.clone());
     let request = admission_request(&host);
     let mut stager = DeclaringStager::new(&fork)?;
-    let first =
-        coordinator.admit_with_dependencies(&request, &Authority, &mut composite, &mut stager)?;
+    let first = coordinator.admit(
+        &request,
+        &Authority,
+        &mut composite,
+        &mut stager,
+        &mut GenericForksOnlyV1,
+    )?;
     assert_eq!(first.generation(), generation(1));
-    let run = coordinator
-        .recompute_suffix_with_dependencies(&suffix_request(plan, first), &mut stager)?;
+    let run = coordinator.recompute_suffix(
+        &suffix_request(plan, first),
+        &mut stager,
+        &mut GenericForksOnlyV1,
+    )?;
     assert_eq!(run.failure, None);
     // Generation 2 is admitted through the recorded source with the same digest.
     let mut complete = recorded(&store)?;
     assert_eq!(complete.recorded_graph_digest(plan)?, digest);
     let mut again = DeclaringStager::new(&fork)?;
-    let second =
-        coordinator.admit_with_dependencies(&request, &Authority, &mut complete, &mut again)?;
+    let second = coordinator.admit(
+        &request,
+        &Authority,
+        &mut complete,
+        &mut again,
+        &mut GenericForksOnlyV1,
+    )?;
     assert_eq!(second.generation(), generation(2));
     assert_eq!(second.frontier_digest(), first.frontier_digest());
     Ok(())

@@ -1202,6 +1202,11 @@ pub enum CounterfactualInvalidationOutcomeV1 {
 ///   including the non-geographic/consent Event guard (`pos-store`'s
 ///   `ensure_non_geographic_drafts`), whose rejection is concealed as
 ///   `ForkNotFound`, and inside the Fork's erasure write fence.
+/// - Reject the invalidation commit and the Tick append, here and on the
+///   dependency-recording port, on a Fork admitted under ADR-099 (a
+///   classified Fork), at the shared generic-append guard. Its Ticks commit
+///   only through the classified counterfactual port of `pos-store` (ADR-099
+///   revision 12), which states its own adapter obligations.
 /// - Serve [`Self::current_fork_generation`],
 ///   [`Self::current_counterfactual_basis`],
 ///   [`Self::committed_generation_receipt`], and

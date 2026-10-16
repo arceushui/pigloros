@@ -9,8 +9,11 @@
 //!
 //! 1. the CFP1 [`CounterfactualPlanV1`] (bounds, Interventions, descriptors,
 //!    and plan digest);
-//! 2. the Fork append authority: an ADR-099 FAR1-admitted Fork is rejected
-//!    as [`CounterfactualAdmissionErrorV1::ClassifiedForkUnsupported`];
+//! 2. the host-declared Fork append authority, which selects how the commit
+//!    below is made: a Generic Fork through the recording port, an ADR-099
+//!    FAR1-admitted Fork through the classified counterfactual commit under
+//!    an authority the host's [`CounterfactualClassifiedSourceResolverV1`]
+//!    lends (see **ADR-099 classified Forks** below);
 //! 3. the authority and consent decision of every Intervention, in plan
 //!    order, through the host [`CounterfactualInterventionAuthorityV1`];
 //! 4. the EPF1 execution-profile and TPS1 trust-policy identities bound by
@@ -37,11 +40,17 @@
 //! 9. the frontier's dependency-graph digest against the persisted basis;
 //! 10. the `SIV1` invalidation built here, with its invalid-artifact index and
 //!     cache/checkpoint eviction set;
-//! 11. the first recomputation Tick, staged by the
-//!     [`CounterfactualTickStagerV1`] from staged inputs only.
+//! 11. the first recomputation Tick and its declared dependencies, staged by
+//!     the [`CounterfactualDeclaringTickStagerV1`] from staged inputs only,
+//!     the declaration validated as the Tick's [`TickDependencyRecordV1`]
+//!     (see **Dependency records** below).
 //!
 //! Only then does it make exactly one
-//! [`CounterfactualStorePortV1::commit_counterfactual_invalidation`] call.
+//! [`CounterfactualDependencyRecordingPortV1::commit_counterfactual_invalidation_with_dependencies`]
+//! call, or on a classified Fork one
+//! [`ClassifiedCounterfactualStorePortV1::commit_classified_counterfactual_invalidation`]
+//! call, which records the dependency record atomically with the Tick's
+//! Events.
 //! The store rechecks the Fork head, plan digest, dependency-graph digest,
 //! prior generation, and trust, revocation, and erasure epochs inside its
 //! transaction; a mismatch returns
@@ -50,16 +59,6 @@
 //! that one call. Success commits `RCF1`, `SIV1`, exactly one generation
 //! increment, the index, the eviction set, and the first recomputation Tick
 //! as one transaction, so readers never observe mixed generations.
-//!
-//! [`CounterfactualCoordinatorV1::admit_with_dependencies`] is the same
-//! admission with one more staged input: the
-//! [`CounterfactualDeclaringTickStagerV1`] returns the first Tick's drafts
-//! together with its declared dependency nodes and edges, the shared staging
-//! seam validates them as the Tick's [`TickDependencyRecordV1`] before any
-//! store call, and the one commit call is
-//! [`CounterfactualDependencyRecordingPortV1::commit_counterfactual_invalidation_with_dependencies`],
-//! which records them atomically with the Tick's Events. See **Dependency
-//! records** below.
 //!
 //! # Unknown commit outcome
 //!
@@ -133,13 +132,26 @@
 //!   Intervention, with that Intervention's INT1 digest, its effective Tick,
 //!   and its target schema, and every seed must be an affected node;
 //!   otherwise the frontier is `FrontierBindingMismatch`.
-//! - **ADR-099 classified Forks.** Both store adapters reserve every Event
-//!   append to a FAR1-admitted Fork for the classifier append authority and
-//!   would fail closed with `StorageFailure`. Classified provenance for the
-//!   first recomputation Tick's Events is not designed yet, so the
-//!   coordinator rejects such a Fork up front, before any store call. The
-//!   host declares the Fork's append authority in the request; the store
-//!   check stays as defense in depth. This is a deferred ADR-099 integration.
+//! - **ADR-099 classified Forks.** Both store adapters reserve every generic
+//!   Event append to a FAR1-admitted Fork for the classifier append
+//!   authority. ADR-099 revision 12 adds a host-internal counterfactual path:
+//!   on a Fork the host declares
+//!   [`CounterfactualForkAppendAuthorityV1::ClassifiedAdmission`], every
+//!   commit goes through [`ClassifiedCounterfactualStorePortV1`], which
+//!   writes each Event as a host-internal `(0,0)` classified Event with its
+//!   `EOR1` and `FOP1` in the same transaction. Right before that one store
+//!   call, after every check and the staging, the coordinator asks the
+//!   host's [`CounterfactualClassifiedSourceResolverV1`] for the
+//!   transaction's [`ClassifiedTickAuthorityV1`], so a resolver failure
+//!   ([`CounterfactualAdmissionErrorV1::ClassifiedProvenance`]) never
+//!   precedes an earlier error, and derives the operation base
+//!   `BLAKE3("pigloros/counterfactual-tick-operation/v1" || fork_id ||
+//!   u64be(generation) || u64be(tick) || plan_digest)` of the committed
+//!   generation and the record Tick. A Generic Fork never calls the
+//!   resolver, so a Generic-only host passes [`GenericForksOnlyV1`]. A wrong
+//!   declaration fails closed in the store: Generic on a classified Fork is
+//!   `Store(StorageFailure)`, and classified on a Generic Fork is
+//!   `ClassifiedProvenance(InvalidRequest)`.
 //! - **Parent Logical Head.** A Fork's parent cut is immutable once the Fork
 //!   exists, so the coordinator validates the CFP1 parent Timeline and cut
 //!   `Seq` against the Fork's recorded parent cut and reads the Fork's moving
@@ -149,15 +161,13 @@
 //!   `ParentCutNotFound`. The new generation is the prior generation plus
 //!   one; an exhausted generation wraps and is rejected by the `SIV1`
 //!   validation as `Invalidation(PriorGenerationMismatch)`.
-//! - **Recorded parent cut.** The recording path
-//!   ([`CounterfactualCoordinatorV1::admit_with_dependencies`] and
-//!   `recompute_suffix_with_dependencies`) also reads the parent's recorded
-//!   factual prefix right after the Fork check: the cut `Seq` must not fall
-//!   inside a recorded Tick, and the plan's `parent_cut_tick` must be the
-//!   highest recorded Tick that ends at or before it; otherwise the cut is
+//! - **Recorded parent cut.** Admission (and the suffix slice's
+//!   `recompute_suffix`) also reads the parent's recorded factual prefix
+//!   right after the Fork check: the cut `Seq` must not fall inside a
+//!   recorded Tick, and the plan's `parent_cut_tick` must be the highest
+//!   recorded Tick that ends at or before it; otherwise the cut is
 //!   `ParentCutNotFound` before any frontier derivation or staging, and a
-//!   failed read is `Store(StorageFailure)`. The plain path uses a host-built
-//!   graph and does not read the prefix.
+//!   failed read is `Store(StorageFailure)`.
 //! - **Epochs.** The trust epoch is the TPS1 epoch of the plan, after the
 //!   host TPS1 snapshot is proven to be the plan's. The revocation and erasure
 //!   epochs are the host's current epochs. All three, with the plan digest,
@@ -263,10 +273,8 @@
 //!   previous recorded Tick. The declaration is validated after the drafts
 //!   and before any store call, so a rejected declaration commits nothing.
 //!   Only the host-side declaration list is defined here: the
-//!   Driver/Plugin declaration API is a separate ticket, and the plain
-//!   [`CounterfactualTickStagerV1`] path stays for hosts without one. The
-//!   recording and plain paths are parallel methods sharing one body, so
-//!   neither existing signature changes.
+//!   Driver/Plugin declaration API is a separate ticket. Every Tick is
+//!   recorded: there is no unrecorded path.
 //!
 //! # Deferred
 //!
@@ -275,7 +283,7 @@
 //! - The production [`CounterfactualFrontierSourceV1`] (Redmine #536, #553).
 //! - The Driver/Plugin dependency declaration API behind
 //!   [`CounterfactualDeclaringTickStagerV1`].
-//! - Classified (ADR-099 FAR1-admitted) Fork admission (Redmine #537).
+//! - Classified Forks whose FAR1 was imported (Redmine #447).
 
 use std::collections::BTreeSet;
 
@@ -304,6 +312,10 @@ use pos_core::{
     RecordedNodeOriginV1, ReplayClaimEvaluationV1, Seq, SuffixInvalidationBytesV1,
     TickDependencyRecordV1, TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1,
 };
+use pos_store::{
+    ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1,
+    ClassifiedProvenanceErrorV1, ClassifiedTickAuthorityV1,
+};
 use ulid::Ulid;
 
 /// `SIV1` artifact class of every invalidated endogenous output.
@@ -322,10 +334,6 @@ pub enum CounterfactualAdmissionErrorV1 {
     /// The CFP1 plan is invalid.
     #[error("counterfactual plan is invalid")]
     Plan(#[source] CounterfactualPlanContractErrorV1),
-    /// The Fork is ADR-099 FAR1-admitted; classified first-Tick provenance is
-    /// a deferred integration.
-    #[error("counterfactual admission on a classified Fork is not supported")]
-    ClassifiedForkUnsupported,
     /// The Principal or capability of an Intervention is not authorized.
     #[error("counterfactual Intervention is not authorized")]
     UnauthorizedIntervention,
@@ -404,11 +412,29 @@ pub enum CounterfactualAdmissionErrorV1 {
     /// The counterfactual store rejected or failed the operation.
     #[error("counterfactual store operation failed")]
     Store(#[source] CounterfactualStoreErrorV1),
+    /// The host's resolver or the store rejected the ADR-099 provenance of a
+    /// classified commit; nothing was committed.
+    #[error("counterfactual classified provenance was rejected")]
+    ClassifiedProvenance(#[source] ClassifiedProvenanceErrorV1),
     /// The commit may or may not have landed and the recovery read failed.
     /// Re-read with [`CounterfactualCoordinatorV1::resolve_pending_commit`];
     /// do not retry the admission blindly.
     #[error("counterfactual commit outcome is unknown")]
     CommitOutcomeUnknown(CounterfactualPendingCommitV1),
+}
+
+/// One classified commit's outcome as an admission error: a storage error
+/// keeps its store mapping, and a provenance rejection is
+/// [`CounterfactualAdmissionErrorV1::ClassifiedProvenance`].
+impl From<ClassifiedCounterfactualErrorV1> for CounterfactualAdmissionErrorV1 {
+    fn from(error: ClassifiedCounterfactualErrorV1) -> Self {
+        match error {
+            ClassifiedCounterfactualErrorV1::Store(store) => Self::Store(store),
+            ClassifiedCounterfactualErrorV1::Provenance(provenance) => {
+                Self::ClassifiedProvenance(provenance)
+            }
+        }
+    }
 }
 
 /// The coordinate of an invalidation whose commit outcome is unknown.
@@ -425,9 +451,47 @@ pub struct CounterfactualPendingCommitV1 {
 pub enum CounterfactualForkAppendAuthorityV1 {
     /// An ordinary Fork whose Events are appended through the generic path.
     Generic,
-    /// An ADR-099 FAR1-admitted Fork whose appends are reserved for the
-    /// classifier append authority; admission is deferred and rejected.
+    /// An ADR-099 FAR1-admitted Fork: appends go through the classified
+    /// counterfactual commit with a resolver-supplied authority (ADR-099
+    /// revision 12).
     ClassifiedAdmission,
+}
+
+/// Host port that lends the classified append authority of one transaction.
+///
+/// The coordinator calls it once per classified commit, right before the
+/// store call, and drops the authority after that call. The store, not the
+/// borrow, decides at commit time whether the session and permit are live.
+pub trait CounterfactualClassifiedSourceResolverV1 {
+    /// Lend the live session and the one host-internal append permit for a
+    /// commit on `fork` in `generation`.
+    ///
+    /// # Errors
+    /// Returns `Unauthenticated` when no live session or permit is available
+    /// for the Fork, and `InvalidRequest` when the Fork is not one this
+    /// resolver serves.
+    fn authority_for(
+        &mut self,
+        fork: TimelineId,
+        generation: ForkGenerationV1,
+    ) -> Result<ClassifiedTickAuthorityV1<'_>, ClassifiedProvenanceErrorV1>;
+}
+
+/// The resolver of a host that serves Generic Forks only.
+///
+/// It holds no session: a Generic Fork never calls the resolver, and a
+/// classified commit through it is `Unauthenticated`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GenericForksOnlyV1;
+
+impl CounterfactualClassifiedSourceResolverV1 for GenericForksOnlyV1 {
+    fn authority_for(
+        &mut self,
+        _fork: TimelineId,
+        _generation: ForkGenerationV1,
+    ) -> Result<ClassifiedTickAuthorityV1<'_>, ClassifiedProvenanceErrorV1> {
+        Err(ClassifiedProvenanceErrorV1::Unauthenticated)
+    }
 }
 
 /// The host's authority and consent decision for one Intervention.
@@ -530,18 +594,6 @@ impl<'a> CounterfactualTickInputsV1<'a> {
     }
 }
 
-/// Driver/Plugin stage that produces one recomputation Tick's Event drafts.
-pub trait CounterfactualTickStagerV1 {
-    /// Stage the ordered Event drafts of one Tick from staged inputs only.
-    ///
-    /// # Errors
-    /// Returns [`CounterfactualTickFailureV1`] when the Tick cannot be staged.
-    fn stage_tick(
-        &mut self,
-        inputs: &CounterfactualTickInputsV1<'_>,
-    ) -> Result<Vec<EventDraft>, CounterfactualTickFailureV1>;
-}
-
 /// One recomputation Tick's Event drafts with its declared dependencies.
 ///
 /// The declaration is host-supplied and unvalidated as a record: the shared
@@ -562,11 +614,10 @@ pub struct CounterfactualStagedTickV1 {
 /// Driver/Plugin stage that produces one recomputation Tick's Event drafts
 /// together with its declared dependencies.
 ///
-/// It is the parallel of [`CounterfactualTickStagerV1`] for the recording
-/// path ([`CounterfactualCoordinatorV1::admit_with_dependencies`] and the
-/// suffix slice's `recompute_suffix_with_dependencies`), and it is the first
-/// producer of a Tick's declaration; a Driver/Plugin declaration API behind it
-/// is deferred.
+/// It stages every recomputation Tick of
+/// [`CounterfactualCoordinatorV1::admit`] and the suffix slice's
+/// `recompute_suffix`, and it is the first producer of a Tick's declaration;
+/// a Driver/Plugin declaration API behind it is deferred.
 pub trait CounterfactualDeclaringTickStagerV1 {
     /// Stage the ordered Event drafts and the declared dependencies of one
     /// Tick from staged inputs only.
@@ -652,6 +703,13 @@ pub struct CounterfactualAdmissionRequestV1<'a> {
 const STORAGE_FAILURE: CounterfactualAdmissionErrorV1 =
     CounterfactualAdmissionErrorV1::Store(CounterfactualStoreErrorV1::StorageFailure);
 
+/// A commit whose outcome the store cannot report.
+///
+/// It is the one match target the admission commit and the suffix's Tick
+/// append share for an unknown outcome.
+pub(super) const COMMIT_OUTCOME_UNKNOWN: ClassifiedCounterfactualErrorV1 =
+    ClassifiedCounterfactualErrorV1::Store(CounterfactualStoreErrorV1::OutcomeUnknown);
+
 /// The core `CounterfactualCoordinator` admission slice.
 ///
 /// It exclusively owns the store that holds the counterfactual port.
@@ -680,41 +738,15 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         &self.store
     }
 
-    /// Validate `request` and commit its invalidation and first recomputation
-    /// Tick as one store transaction.
-    ///
-    /// See the module documentation for the validation order and rules.
-    ///
-    /// # Errors
-    /// Returns the first closed safe error. Every error except
-    /// [`CounterfactualAdmissionErrorV1::CommitOutcomeUnknown`] commits
-    /// nothing; that one means the commit may have landed: re-read it with
-    /// [`Self::resolve_pending_commit`] and never retry blindly.
-    pub fn admit(
-        &mut self,
-        request: &CounterfactualAdmissionRequestV1<'_>,
-        authority: &impl CounterfactualInterventionAuthorityV1,
-        frontier_source: &mut impl CounterfactualFrontierSourceV1,
-        stager: &mut impl CounterfactualTickStagerV1,
-    ) -> Result<CounterfactualGenerationReceiptV1, CounterfactualAdmissionErrorV1> {
-        self.admit_through(
-            request,
-            authority,
-            frontier_source,
-            &mut PlainSeamV1(stager),
-        )
-    }
-
     /// Validate `request` and commit its invalidation, its first
     /// recomputation Tick, and that Tick's declared dependency record as one
     /// store transaction.
     ///
-    /// This is [`Self::admit`] with the staged declaration: see the module
-    /// documentation for the validation order and the **Dependency records**
-    /// rules the seam adds.
+    /// See the module documentation for the validation order and the
+    /// **Dependency records** rules.
     ///
     /// # Errors
-    /// Returns the first closed safe error, as [`Self::admit`] does, and
+    /// Returns the first closed safe error, including
     /// [`CounterfactualAdmissionErrorV1::DependencyDeclarationRejected`] for
     /// a declaration the seam rejects before any store call. The Fork's cut
     /// must not be mid-Tick and `plan.parent_cut_tick` must equal the cut
@@ -724,23 +756,53 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     /// `BindingMismatch` for a record it rejects is
     /// [`CounterfactualAdmissionErrorV1::Store`]. Every error except
     /// [`CounterfactualAdmissionErrorV1::CommitOutcomeUnknown`] commits
-    /// nothing, the record included.
-    pub fn admit_with_dependencies(
+    /// nothing, the record included; that one means the commit may have
+    /// landed: re-read it with [`Self::resolve_pending_commit`] and never
+    /// retry blindly. On a classified Fork, a `resolver` failure or a
+    /// provenance rejection by the store is
+    /// [`CounterfactualAdmissionErrorV1::ClassifiedProvenance`]; a Generic
+    /// Fork never calls `resolver`.
+    pub fn admit(
         &mut self,
         request: &CounterfactualAdmissionRequestV1<'_>,
         authority: &impl CounterfactualInterventionAuthorityV1,
         frontier_source: &mut impl CounterfactualFrontierSourceV1,
         stager: &mut impl CounterfactualDeclaringTickStagerV1,
+        resolver: &mut impl CounterfactualClassifiedSourceResolverV1,
     ) -> Result<CounterfactualGenerationReceiptV1, CounterfactualAdmissionErrorV1>
     where
-        S: CounterfactualDependencyRecordingPortV1 + FactualPrefixReadPortV1,
+        S: ClassifiedCounterfactualStorePortV1 + FactualPrefixReadPortV1,
     {
-        self.admit_through(
-            request,
-            authority,
-            frontier_source,
-            &mut RecordingSeamV1(stager),
-        )
+        self.admit_dispatch(request, authority, frontier_source, stager, resolver)
+    }
+
+    /// Select the seam the Fork's declared append authority commits through,
+    /// and run the one admission body with it.
+    fn admit_dispatch(
+        &mut self,
+        request: &CounterfactualAdmissionRequestV1<'_>,
+        authority: &impl CounterfactualInterventionAuthorityV1,
+        frontier_source: &mut impl CounterfactualFrontierSourceV1,
+        stager: &mut impl CounterfactualDeclaringTickStagerV1,
+        resolver: &mut impl CounterfactualClassifiedSourceResolverV1,
+    ) -> Result<CounterfactualGenerationReceiptV1, CounterfactualAdmissionErrorV1>
+    where
+        S: ClassifiedCounterfactualStorePortV1 + FactualPrefixReadPortV1,
+    {
+        match request.fork_append_authority {
+            CounterfactualForkAppendAuthorityV1::Generic => self.admit_through(
+                request,
+                authority,
+                frontier_source,
+                &mut RecordingSeamV1(stager),
+            ),
+            CounterfactualForkAppendAuthorityV1::ClassifiedAdmission => self.admit_through(
+                request,
+                authority,
+                frontier_source,
+                &mut ClassifiedSeamV1::new(stager, resolver, request.plan),
+            ),
+        }
     }
 
     /// The one admission body: validate `request`, stage the first Tick
@@ -755,10 +817,6 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         let plan = request.plan;
         plan.validate()
             .map_err(CounterfactualAdmissionErrorV1::Plan)?;
-        if request.fork_append_authority == CounterfactualForkAppendAuthorityV1::ClassifiedAdmission
-        {
-            return Err(CounterfactualAdmissionErrorV1::ClassifiedForkUnsupported);
-        }
         authorize(plan, authority)?;
         check_host_state(request)?;
         let basis = self.checked_basis::<M>(request)?;
@@ -802,7 +860,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
                 )
             })
             .map_err(CounterfactualAdmissionErrorV1::Store)?;
-        self.commit::<M>(&command, &record)
+        self.commit(&command, &record, seam)
     }
 
     /// Read the Fork's persisted basis (fork point matches the plan), then
@@ -850,19 +908,20 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
         record: &M::Record,
+        seam: &mut M,
     ) -> Result<CounterfactualGenerationReceiptV1, CounterfactualAdmissionErrorV1> {
-        match M::commit_invalidation(&mut self.store, command, record) {
+        match seam.commit_invalidation(&mut self.store, command, record) {
             Ok(CounterfactualInvalidationOutcomeV1::Committed(receipt)) => Ok(*receipt),
             Ok(CounterfactualInvalidationOutcomeV1::InvalidationConflict(conflict)) => Err(
                 CounterfactualAdmissionErrorV1::InvalidationConflict(conflict),
             ),
-            Err(CounterfactualStoreErrorV1::OutcomeUnknown) => {
+            Err(COMMIT_OUTCOME_UNKNOWN) => {
                 self.resolve_pending_commit(CounterfactualPendingCommitV1 {
                     generation: command.new_generation(),
                     invalidation_digest: command.invalidation().digest(),
                 })
             }
-            Err(error) => Err(CounterfactualAdmissionErrorV1::Store(error)),
+            Err(error) => Err(error.into()),
         }
     }
 }
@@ -1326,12 +1385,14 @@ fn digest_set(digests: impl Iterator<Item = [u8; 32]>) -> Vec<Hash> {
         .collect()
 }
 
-/// What one coordinator path stages per Tick and how it commits it: with or
-/// without the Tick's dependency record.
+/// How the coordinator stages each Tick and commits it with the Tick's
+/// dependency record.
 ///
 /// Both coordinator slices run one body per operation; a seam supplies only
-/// what the plain and the recording paths differ in, so the parallel public
-/// methods share every check and the same commit outcome mapping.
+/// the staging, the parent cut check, and the two commit calls, so every
+/// check and the commit outcome mapping are shared. [`RecordingSeamV1`]
+/// commits a Generic Fork through the recording port and [`ClassifiedSeamV1`]
+/// an ADR-099 classified Fork through the classified port.
 pub(crate) trait TickSeamV1<S> {
     /// What a staged Tick carries besides its drafts.
     type Record;
@@ -1355,66 +1416,25 @@ pub(crate) trait TickSeamV1<S> {
 
     /// Make the one invalidation commit call.
     fn commit_invalidation(
-        store: &mut S,
-        command: &CounterfactualInvalidationCommandV1,
-        record: &Self::Record,
-    ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1>;
-
-    /// Append one later Tick under `expected`.
-    fn append_tick(
-        store: &mut S,
-        fork: TimelineId,
-        expected: &CounterfactualBasisV1,
-        drafts: &PipelineDraftBatchV1,
-        record: &Self::Record,
-    ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1>;
-}
-
-/// The seam of the plain path: drafts only, through the storage port.
-pub(crate) struct PlainSeamV1<'a, T>(pub(crate) &'a mut T);
-
-impl<S: CounterfactualStorePortV1, T: CounterfactualTickStagerV1> TickSeamV1<S>
-    for PlainSeamV1<'_, T>
-{
-    type Record = ();
-
-    fn stage(
         &mut self,
-        plan: &CounterfactualPlanV1,
-        generation: ForkGenerationV1,
-        tick: u64,
-        _after_tick: u64,
-    ) -> Result<(PipelineDraftBatchV1, ()), CounterfactualAdmissionErrorV1> {
-        stage_tick(self.0, plan, generation, tick).map(|batch| (batch, ()))
-    }
-
-    fn check_parent_cut(
-        _store: &S,
-        _plan: &CounterfactualPlanV1,
-    ) -> Result<(), CounterfactualAdmissionErrorV1> {
-        Ok(())
-    }
-
-    fn commit_invalidation(
         store: &mut S,
         command: &CounterfactualInvalidationCommandV1,
-        (): &(),
-    ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1> {
-        store.commit_counterfactual_invalidation(command)
-    }
+        record: &Self::Record,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, ClassifiedCounterfactualErrorV1>;
 
+    /// Append one later Tick of `fork` in `generation` under `expected`.
     fn append_tick(
+        &mut self,
         store: &mut S,
         fork: TimelineId,
+        generation: ForkGenerationV1,
         expected: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
-        (): &(),
-    ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
-        store.append_counterfactual_tick(fork, expected, drafts)
-    }
+        record: &Self::Record,
+    ) -> Result<CounterfactualTickOutcomeV1, ClassifiedCounterfactualErrorV1>;
 }
 
-/// The seam of the recording path: drafts with the Tick's dependency record,
+/// The seam of a Generic Fork: drafts with the Tick's dependency record,
 /// through the recording port.
 pub(crate) struct RecordingSeamV1<'a, T>(pub(crate) &'a mut T);
 
@@ -1440,39 +1460,157 @@ where
         store: &S,
         plan: &CounterfactualPlanV1,
     ) -> Result<(), CounterfactualAdmissionErrorV1> {
-        let parent = Ulid::from_bytes(plan.parent_timeline_id);
-        let cut = store
-            .cut_tick_at(
-                TimelineId::from_ulid(parent),
-                Seq::from_u64(plan.parent_cut_seq),
-            )
-            .or(Err(STORAGE_FAILURE))?;
-        match cut {
-            FactualCutV1::Boundary { cut_tick } if cut_tick == plan.parent_cut_tick => Ok(()),
-            _ => Err(CounterfactualAdmissionErrorV1::ParentCutNotFound),
-        }
+        recorded_parent_cut(store, plan)
     }
 
     fn commit_invalidation(
+        &mut self,
         store: &mut S,
         command: &CounterfactualInvalidationCommandV1,
         record: &TickDependencyRecordV1,
-    ) -> Result<CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1> {
-        store.commit_counterfactual_invalidation_with_dependencies(command, record)
+    ) -> Result<CounterfactualInvalidationOutcomeV1, ClassifiedCounterfactualErrorV1> {
+        store
+            .commit_counterfactual_invalidation_with_dependencies(command, record)
+            .map_err(ClassifiedCounterfactualErrorV1::Store)
     }
 
     fn append_tick(
+        &mut self,
         store: &mut S,
         fork: TimelineId,
+        _generation: ForkGenerationV1,
         expected: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
         record: &TickDependencyRecordV1,
-    ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1> {
-        store.append_counterfactual_tick_with_dependencies(fork, expected, drafts, record)
+    ) -> Result<CounterfactualTickOutcomeV1, ClassifiedCounterfactualErrorV1> {
+        store
+            .append_counterfactual_tick_with_dependencies(fork, expected, drafts, record)
+            .map_err(ClassifiedCounterfactualErrorV1::Store)
     }
 }
 
-/// Stage one recomputation Tick from staged inputs only.
+/// The seam of an ADR-099 classified Fork: the recording seam's staging and
+/// parent cut check, with every commit made through the classified port under
+/// the authority `resolver` lends for that one call.
+pub(crate) struct ClassifiedSeamV1<'a, T, R> {
+    stager: &'a mut T,
+    resolver: &'a mut R,
+    plan_digest: Hash,
+}
+
+impl<'a, T, R> ClassifiedSeamV1<'a, T, R> {
+    /// The classified seam of `plan`, whose digest binds every operation base.
+    pub(crate) const fn new(
+        stager: &'a mut T,
+        resolver: &'a mut R,
+        plan: &CounterfactualPlanV1,
+    ) -> Self {
+        Self {
+            stager,
+            resolver,
+            plan_digest: Hash::from_bytes(plan.plan_digest),
+        }
+    }
+}
+
+impl<S, T, R> TickSeamV1<S> for ClassifiedSeamV1<'_, T, R>
+where
+    S: ClassifiedCounterfactualStorePortV1 + FactualPrefixReadPortV1,
+    T: CounterfactualDeclaringTickStagerV1,
+    R: CounterfactualClassifiedSourceResolverV1,
+{
+    type Record = TickDependencyRecordV1;
+
+    fn stage(
+        &mut self,
+        plan: &CounterfactualPlanV1,
+        generation: ForkGenerationV1,
+        tick: u64,
+        after_tick: u64,
+    ) -> Result<(PipelineDraftBatchV1, TickDependencyRecordV1), CounterfactualAdmissionErrorV1>
+    {
+        stage_declared_tick(self.stager, plan, generation, tick, after_tick)
+    }
+
+    fn check_parent_cut(
+        store: &S,
+        plan: &CounterfactualPlanV1,
+    ) -> Result<(), CounterfactualAdmissionErrorV1> {
+        recorded_parent_cut(store, plan)
+    }
+
+    fn commit_invalidation(
+        &mut self,
+        store: &mut S,
+        command: &CounterfactualInvalidationCommandV1,
+        record: &TickDependencyRecordV1,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, ClassifiedCounterfactualErrorV1> {
+        let generation = command.new_generation();
+        let base = operation_base(generation, record.tick(), self.plan_digest);
+        let lent = self
+            .resolver
+            .authority_for(generation.fork, generation)
+            .map_err(ClassifiedCounterfactualErrorV1::Provenance)?;
+        store.commit_classified_counterfactual_invalidation(command, record, &lent, base)
+    }
+
+    fn append_tick(
+        &mut self,
+        store: &mut S,
+        fork: TimelineId,
+        generation: ForkGenerationV1,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        record: &TickDependencyRecordV1,
+    ) -> Result<CounterfactualTickOutcomeV1, ClassifiedCounterfactualErrorV1> {
+        let base = operation_base(generation, record.tick(), self.plan_digest);
+        let lent = self
+            .resolver
+            .authority_for(fork, generation)
+            .map_err(ClassifiedCounterfactualErrorV1::Provenance)?;
+        store.append_classified_counterfactual_tick(fork, expected, drafts, record, &lent, base)
+    }
+}
+
+/// ADR-099 revision 12 domain of one classified counterfactual Tick's
+/// operation base.
+const OPERATION_BASE_DOMAIN: &[u8] = b"pigloros/counterfactual-tick-operation/v1";
+
+/// The operation base of the Tick `tick` committed in `generation` under the
+/// plan `plan_digest`: `BLAKE3(domain || fork_id || u64be(generation) ||
+/// u64be(tick) || plan_digest)`. The store derives every Event's operation ID
+/// from it, and `(fork, generation, tick)` never repeats.
+fn operation_base(generation: ForkGenerationV1, tick: u64, plan_digest: Hash) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(OPERATION_BASE_DOMAIN);
+    hasher.update(&generation.fork.inner().to_bytes());
+    hasher.update(&generation.generation.to_be_bytes());
+    hasher.update(&tick.to_be_bytes());
+    hasher.update(plan_digest.as_bytes());
+    Hash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// Require the parent's recorded factual prefix to end a Tick at the plan's
+/// cut `Seq`, and that Tick to be the plan's parent cut Tick.
+fn recorded_parent_cut<S: FactualPrefixReadPortV1>(
+    store: &S,
+    plan: &CounterfactualPlanV1,
+) -> Result<(), CounterfactualAdmissionErrorV1> {
+    let parent = Ulid::from_bytes(plan.parent_timeline_id);
+    let cut = store
+        .cut_tick_at(
+            TimelineId::from_ulid(parent),
+            Seq::from_u64(plan.parent_cut_seq),
+        )
+        .or(Err(STORAGE_FAILURE))?;
+    match cut {
+        FactualCutV1::Boundary { cut_tick } if cut_tick == plan.parent_cut_tick => Ok(()),
+        _ => Err(CounterfactualAdmissionErrorV1::ParentCutNotFound),
+    }
+}
+
+/// Stage one recomputation Tick with its declared dependencies from staged
+/// inputs only.
 ///
 /// This is the shared staging seam of every recomputation Tick, the first
 /// one and every later one alike: it bounds the drafts as one
@@ -1480,24 +1618,8 @@ where
 /// [`COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1`], and then rejects an Event
 /// type longer than [`MAX_FORK_EVENT_TYPE_BYTES_V1`] as
 /// `StagedTickRejected(FieldOutOfBounds)`, so every committed Tick stays
-/// readable under the suffix recovery read bounds.
-fn stage_tick(
-    stager: &mut impl CounterfactualTickStagerV1,
-    plan: &CounterfactualPlanV1,
-    generation: ForkGenerationV1,
-    tick: u64,
-) -> Result<PipelineDraftBatchV1, CounterfactualAdmissionErrorV1> {
-    stager
-        .stage_tick(&tick_inputs(plan, generation, tick))
-        .or(Err(CounterfactualAdmissionErrorV1::PluginFailure))
-        .and_then(bounded_batch)
-}
-
-/// Stage one recomputation Tick with its declared dependencies from staged
-/// inputs only.
-///
-/// The drafts pass exactly the checks of [`stage_tick`]; the declaration is
-/// then validated as the provisional [`TickDependencyRecordV1`] of `tick`
+/// readable under the suffix recovery read bounds. The declaration is then
+/// validated as the provisional [`TickDependencyRecordV1`] of `tick`
 /// whose every node lies strictly after `after_tick` (the parent cut for the
 /// first Tick, the last committed Tick for every later one), all before any
 /// store call.
@@ -1592,4 +1714,53 @@ fn bounded_batch(
 /// Whether `draft` uses the coordinator-reserved checkpoint Event type.
 fn is_reserved_draft(draft: &EventDraft) -> bool {
     draft.event_type.as_str() == COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    const PLAN: Hash = Hash::from_bytes([7; 32]);
+
+    fn at(fork: u128, generation: u64) -> ForkGenerationV1 {
+        ForkGenerationV1 {
+            fork: TimelineId::from_ulid(Ulid::from(fork)),
+            generation,
+        }
+    }
+
+    #[test]
+    fn the_operation_base_hashes_its_domain_and_fields_in_order() {
+        let generation = at(0x51, 3);
+        let fork = generation.fork.inner().to_bytes();
+        let generation_be = 3_u64.to_be_bytes();
+        let tick_be = 17_u64.to_be_bytes();
+        let parts: [&[u8]; 5] = [
+            b"pigloros/counterfactual-tick-operation/v1",
+            &fork,
+            &generation_be,
+            &tick_be,
+            PLAN.as_bytes(),
+        ];
+        let expected = Hash::from_bytes(*blake3::hash(&parts.concat()).as_bytes());
+        let base = operation_base(generation, 17, PLAN);
+        assert_eq!(base, expected, "the documented operation base");
+    }
+
+    #[test]
+    fn the_operation_base_binds_the_fork_generation_tick_and_plan() {
+        let base = operation_base(at(0x51, 3), 17, PLAN);
+        let others = [
+            operation_base(at(0x52, 3), 17, PLAN),
+            operation_base(at(0x51, 4), 17, PLAN),
+            operation_base(at(0x51, 3), 18, PLAN),
+            operation_base(at(0x51, 3), 17, Hash::from_bytes([8; 32])),
+            // The generation and the Tick have fixed positions.
+            operation_base(at(0x51, 17), 3, PLAN),
+        ];
+        for other in others {
+            assert_ne!(other, base, "every input binds the operation base");
+        }
+    }
 }
