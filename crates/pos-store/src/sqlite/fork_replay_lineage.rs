@@ -375,6 +375,33 @@ mod tests {
     }
 
     #[test]
+    fn unbound_lineage_is_refused_by_the_default_gate_before_metadata_reads() -> Fallible<()> {
+        let mut store = SqliteStore::open(":memory:")?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let limits = ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000)?;
+        let start = clock.mark();
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let interval = store.begin_fork_replay_read_interval(&mut budget)?;
+        assert_eq!(
+            store.read_fork_replay_lineage_node(TimelineId::new(), 0, 8, &mut budget),
+            Err(Error::ContainmentUnavailable)
+        );
+        assert_eq!(budget.remaining_native_bytes(), 16_384);
+        budget.check_time()?;
+        store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
+        assert!(store.conn.is_autocommit());
+        // The default closed gate, not poisoned connections or an expired
+        // ledger, prevented the read. Normal binding permits a real root.
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let root = store.create_timeline("bound lineage control")?.id();
+        assert!(read(&store, root, &mut clock)??.is_some());
+        Ok(())
+    }
+
+    #[test]
     fn malformed_native_metadata_and_event_rows_fail_through_the_public_port() -> Fallible<()> {
         for sql in [
             "UPDATE timelines SET parent_id=NULL WHERE parent_id IS NOT NULL",
