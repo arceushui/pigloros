@@ -194,6 +194,10 @@
 //!   dependency read methods of the ADR-064 record contract run through the
 //!   same transaction, in-doubt, fence, and read-scope helpers; the `dependency`
 //!   module documents their tables and decisions.
+//! - **Classified Forks.** The ADR-099 revision 12 classified commit and
+//!   append run the same recording write path with a live-session check, a
+//!   local-`FAR1` Fork resolution, and a host-internal classified Event step
+//!   injected; the `classified` module documents them.
 //! - **`SQLite`-only differences.** `SQLite` stores signed 64-bit integers:
 //!   a generation, epoch, or Tick above `i64::MAX` is `FieldOutOfBounds`
 //!   before any transaction, and a persisted value outside its range is
@@ -215,6 +219,7 @@ use super::{
 };
 use crate::{counterfactual_port_error, COUNTERFACTUAL_SEAL};
 
+mod classified;
 mod dependency;
 
 type StoreError = CounterfactualStoreErrorV1;
