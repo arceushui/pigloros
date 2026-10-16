@@ -33,8 +33,8 @@ use crate::first_party::{entity_of, register_native, register_twin, Native};
 use crate::harness::Capture;
 use crate::parity::{observe, record, same_authority, Observed, ENTITY, STORE, TWIN_TYPE};
 use crate::support::lane::{
-    gated_release, profile, publish, trust_material, Lane, Published, Spec, Swap, ALPHA, EVENT_TYPE,
-    WATCHDOG,
+    gated_release, profile, publish, trust_material, Lane, Published, Spec, Swap, ALPHA,
+    EVENT_TYPE, WATCHDOG,
 };
 use crate::support::subcase::WORKER;
 use crate::support::test_ok::TestOk;
@@ -288,7 +288,11 @@ fn native_claims_community_type(signed: &SignedWorld, entries: &[Published]) -> 
 /// Record what the refused claim and the following pass show under `path`.
 fn record_claim(capture: &mut Capture, path: &str, claim: &Claim) {
     capture.record(STORE, &format!("{path}.refusal"), &claim.refusal);
-    capture.record(STORE, &format!("{path}.registry-unchanged"), claim.unchanged);
+    capture.record(
+        STORE,
+        &format!("{path}.registry-unchanged"),
+        claim.unchanged,
+    );
     record(capture, path, &claim.observed);
 }
 
