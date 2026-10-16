@@ -275,6 +275,42 @@ mod tests {
     }
 
     #[test]
+    fn hidden_geographic_marker_is_charged_before_returning_absence() -> Fallible<()> {
+        let (mut store, root, _) = fixture()?;
+        store.geographic_timelines.insert(root);
+        // The selected root visits one metadata row and one retained marker.
+        // Its Event is never inspected after the marker hides the Timeline.
+        for rows in [2, 1, 3, 2] {
+            let limits = ForkReplayReadLimitsV1::new(8, 8, rows, 128, 1_000_000)?;
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let result = store.read_fork_replay_lineage_node(root, 0, 8, &mut budget);
+            // One remembered Timeline ID and one root metadata carrier.
+            assert_eq!(budget.remaining_native_bytes(), 128 - (16 + 25));
+            if rows == 1 {
+                let expected = Err(Error::Read(ForkReplayAuthorityReadErrorV1::BoundsExceeded));
+                assert_eq!(result, expected);
+                assert_eq!(
+                    store.read_fork_replay_lineage_node(root, 0, 8, &mut budget),
+                    expected
+                );
+                assert_eq!(budget.remaining_native_bytes(), 128 - (16 + 25));
+            } else {
+                assert_eq!(result, Ok(None));
+                budget.check_time()?;
+                // Exactly two real rows were consumed, not the hidden Event.
+                budget.charge_rows(rows - 2)?;
+            }
+            assert_eq!(
+                budget.charge_rows(1),
+                Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn absent_containment_cannot_be_reinterpreted_as_a_missing_timeline() -> Fallible<()> {
         let (mut store, root, _) = fixture()?;
         store.erasure_gate = None;
