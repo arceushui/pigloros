@@ -725,6 +725,23 @@ pub fn plugin_corpus(records: &[Vec<u8>]) -> TestResult<Corpus> {
     })
 }
 
+/// Build a signed `plugin-conformance` corpus whose bundle carries one CFB1 attack shape.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn plugin_corpus_with_bundle_mutation(
+    records: &[Vec<u8>],
+    mutation: BundleMutation,
+) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        claim_layer: 4,
+        subject_adapter: SubjectAdapterKind::PublicPluginProtocol,
+        plugin_records: Some(records),
+        bundle_mutation: Some(mutation),
+        ..CorpusOptions::default()
+    })
+}
+
 /// Build a signed mixed-oracle corpus with one current typed failure outcome.
 ///
 /// # Errors

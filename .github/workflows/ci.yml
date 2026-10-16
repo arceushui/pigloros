@@ -1221,7 +1221,7 @@ jobs:
         run: |
           python scripts/check_fixture_instant_confinement.py
           python scripts/test_check_fixture_instant_confinement.py
-      - name: Check the community Plugin supervisor handoff README
+      - name: Check the community Plugin handoff READMEs
         run: |
           python scripts/check_handoff_readme.py
           python scripts/test_check_handoff_readme.py

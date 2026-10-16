@@ -19,92 +19,22 @@
 
 pub mod support;
 
-use std::path::PathBuf;
-
-use pos_plugin_conformance_adapter::{run_with, SupervisorRunnerV1};
-use pos_plugin_supervisor::WorkerProgramV1;
-use pos_reference::adapter_transport::{read_observation, write_attempt};
-use pos_reference::evaluator::{CaseAttempt, SubjectObservation, SubjectResult};
+use pos_reference::evaluator::{SubjectObservation, SubjectResult};
 use pos_reference::evaluator_domain::{ExecutionMode, FixtureFamily};
-use pos_reference::profile::NamespacedFailure;
 use serde_json::Value;
-use support::attempts::{
-    attempt_from_fixture_files, family_budget, oracle_bytes, rewrite_subcases,
-};
+use support::attempts::{attempt_from_fixture_files, oracle_bytes};
+use support::subcase::{assert_within_budget, expecting, failure, observe_attempt, one_subcase};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-const WORKER: &str = env!("CARGO_BIN_EXE_pos-plugin-worker");
-
-/// The observation of `attempt` from the adapter library over the real worker.
-fn observe_attempt(attempt: &CaseAttempt) -> TestResult<SubjectObservation> {
-    let program = WorkerProgramV1::new(PathBuf::from(WORKER)).ok_or("an invalid worker path")?;
-    let runner = SupervisorRunnerV1::new(program);
-    let mut stream = Vec::new();
-    write_attempt(&mut stream, attempt)?;
-    let mut out = Vec::new();
-    run_with(&runner, stream.as_slice(), &mut out)?;
-    Ok(read_observation(out.as_slice(), 1_048_576)?)
-}
 
 /// The observation of `family` in `mode` from the adapter library over the real worker.
 fn observe(family: FixtureFamily, mode: ExecutionMode) -> TestResult<SubjectObservation> {
     observe_attempt(&attempt_from_fixture_files(family, mode)?)
 }
 
-/// The provider's typed failure with code `code_id`.
-fn failure(code_id: &str) -> SubjectResult {
-    SubjectResult::Failure(NamespacedFailure {
-        owner_id: "pigloros.fixture.plugin-conformance".to_owned(),
-        contract_version: "2.0.0".to_owned(),
-        code_id: code_id.to_owned(),
-    })
-}
-
-/// The measured usage of the observation stays within the budget the provider declares.
-fn assert_within_budget(family: FixtureFamily, observation: &SubjectObservation) -> TestResult {
-    let (budget, usage) = (family_budget(family)?, observation.usage);
-    assert!(
-        usage.memory_bytes <= budget.memory_bytes,
-        "{family:?} {usage:?}"
-    );
-    assert!(usage.cpu_fuel <= budget.cpu_fuel, "{family:?} {usage:?}");
-    assert!(
-        usage.host_calls <= budget.host_calls,
-        "{family:?} {usage:?}"
-    );
-    assert!(
-        usage.event_count <= budget.event_count,
-        "{family:?} {usage:?}"
-    );
-    assert!(
-        usage.output_bytes <= budget.output_bytes,
-        "{family:?} {usage:?}"
-    );
-    assert!(
-        usage.storage_bytes <= budget.storage_bytes,
-        "{family:?} {usage:?}"
-    );
-    assert!(
-        usage.execution_steps <= budget.execution_steps,
-        "{family:?} {usage:?}"
-    );
-    assert!(
-        usage.simulation_time_ns <= budget.simulation_time_ns,
-        "{family:?} {usage:?}"
-    );
-    Ok(())
-}
-
 /// The observation equals the oracle member byte for byte and stays within the budget.
 fn assert_output_is_the_oracle(family: FixtureFamily, mode: ExecutionMode) -> TestResult {
-    let observation = observe(family, mode)?;
-    assert_eq!(
-        observation.result,
-        SubjectResult::Output(oracle_bytes(family)?),
-        "{family:?} {mode:?}"
-    );
-    assert_within_budget(family, &observation)
+    support::subcase::assert_output_is_the_oracle(family, &observe(family, mode)?)
 }
 
 #[test]
@@ -206,27 +136,6 @@ fn link_failures() -> impl Iterator<Item = String> {
     (3..=12).map(|number| format!("den.{number:02}"))
 }
 
-/// The attempt of `family` with only the sub-case `id`, which `edit` may change.
-fn one_subcase(
-    family: FixtureFamily,
-    id: &str,
-    edit: impl Fn(&mut Value),
-) -> TestResult<CaseAttempt> {
-    let attempt = attempt_from_fixture_files(family, ExecutionMode::Local)?;
-    rewrite_subcases(attempt, |subcase| {
-        let keep = subcase["id"] == id;
-        if keep {
-            edit(subcase);
-        }
-        keep
-    })
-}
-
-/// The edit that sets the expected `error` of a sub-case.
-fn expecting(error: &'static str) -> impl Fn(&mut Value) {
-    move |subcase| subcase["expect"]["error"] = error.into()
-}
-
 /// The edit that leaves a sub-case as it is.
 const fn unchanged(_subcase: &mut Value) {}
 
@@ -239,18 +148,6 @@ fn subcase_ids(family: FixtureFamily) -> TestResult<Vec<String>> {
         .iter()
         .filter_map(|subcase| subcase["id"].as_str().map(str::to_owned))
         .collect())
-}
-
-/// A smoke test of the whole `denied` case on the real worker; the `r8_s2_*` tests of
-/// `conformance_adapter_public.rs` prove the family and control the expiry sub-cases.
-#[test]
-fn every_denied_sub_case_matches_on_the_real_worker() -> TestResult {
-    for mode in [ExecutionMode::Local, ExecutionMode::AirGapped] {
-        let observation = observe(FixtureFamily::Denied, mode)?;
-        assert_eq!(observation.result, failure("capability-denied"), "{mode:?}");
-        assert_within_budget(FixtureFamily::Denied, &observation)?;
-    }
-    Ok(())
 }
 
 #[test]
