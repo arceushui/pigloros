@@ -18,6 +18,8 @@ use std::{sync::Arc, time::Duration};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+mod refusals;
+
 fn bind(store: &mut impl EventStore) -> TestResult {
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     Ok(())
@@ -290,7 +292,7 @@ const EVENT_BOUNDS: EventReadBounds =
     EventReadBounds::new_with_total_bytes_and_elapsed(3, 1, 1, 2, 8, 1_000_000);
 
 /// Three-byte payloads and a one-byte kind make the independent ER oracle
-/// explicit: Memory8+P+T=12 per selected Event; SQLite26 per selected segment
+/// explicit: Memory `8+P+T=12` per selected Event; `SQLite` 26 per selected segment
 /// plus8+110+P+T=122 per Event. All visibility candidates still cost8 each.
 fn seed_read_history(
     store: &mut impl EventStore,
