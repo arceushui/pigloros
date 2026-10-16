@@ -88,7 +88,7 @@ fn replay_range(
         health,
     } = release;
     let started = guard.guard_started_at();
-    let mut guard = Some(crate::PendingReplayGuardV1::new(guard, health));
+    let guard = crate::PendingReplayGuardV1::new(guard, health);
     let mut revoked = None;
     let result = (|| {
         pos_runtime::require_staged_release().map_err(crate::unavailable)?;
@@ -116,7 +116,6 @@ fn replay_range(
             pos_store::ForkReplayReadBudgetV1::new(prepared.fork_read_limits(), started, clock)
                 .map_err(crate::unavailable)?;
         let target_registry = &mut *registry;
-        let guard_slot = &mut guard;
         let revoked = &mut revoked;
         let preparation = &prepared;
         sender
@@ -125,9 +124,7 @@ fn replay_range(
                 &mut budget,
                 move |sender, budget| {
                     let registry = target_registry;
-                    let held = guard_slot
-                        .take()
-                        .ok_or(pos_core::ErasureHostErrorV1::AdapterFailure)?;
+                    let held = guard;
                     let staged = prepare_replay(
                         sender,
                         request,
@@ -147,8 +144,6 @@ fn replay_range(
             )
             .map_err(crate::host_error_to_core)
     })();
-    // Untaken guards still belong to Time, including policy/setup failures.
-    drop(guard);
     crate::forget_on_failure(result, registry, revoked.as_ref())
 }
 
