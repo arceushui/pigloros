@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [base, deps-o1, deps-o2]
+        variant: [base, crypto-o3]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -29,8 +29,7 @@ jobs:
         run: |
           case "${{ matrix.variant }}" in
             base) : ;;
-            deps-o1) printf '\n[profile.dev.package."*"]\nopt-level = 1\n' >> Cargo.toml ;;
-            deps-o2) printf '\n[profile.dev.package."*"]\nopt-level = 2\n' >> Cargo.toml ;;
+            crypto-o3) printf '\n[profile.dev.package.curve25519-dalek]\nopt-level = 3\n[profile.dev.package.ed25519-dalek]\nopt-level = 3\n[profile.dev.package.sha2]\nopt-level = 3\n[profile.dev.package.blake3]\nopt-level = 3\n[profile.dev.package.p256]\nopt-level = 3\n' >> Cargo.toml ;;
           esac
           tail -4 Cargo.toml
       - name: build
@@ -51,6 +50,7 @@ jobs:
           name: durs-${{ matrix.variant }}
           path: /tmp/durs.txt
   profile:
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -87,7 +87,7 @@ jobs:
         include:
           - {variant: jobs2, jobs: "2", deps: ""}
           - {variant: jobs4, jobs: "4", deps: ""}
-          - {variant: jobs4-deps-o1, jobs: "4", deps: "1"}
+          - {variant: jobs4-crypto-o3, jobs: "4", deps: "crypto"}
     env:
       RUSTC_BOOTSTRAP: "1"
       CARGO_BUILD_JOBS: ${{ matrix.jobs }}
@@ -103,14 +103,15 @@ jobs:
           tool: cargo-llvm-cov,cargo-nextest@0.9.146
       - name: configure
         if: matrix.deps != ''
-        run: printf '\n[profile.dev.package."*"]\nopt-level = %s\n' "${{ matrix.deps }}" >> Cargo.toml
+        run: printf '\n[profile.dev.package.curve25519-dalek]\nopt-level = 3\n[profile.dev.package.ed25519-dalek]\nopt-level = 3\n[profile.dev.package.sha2]\nopt-level = 3\n[profile.dev.package.blake3]\nopt-level = 3\n[profile.dev.package.p256]\nopt-level = 3\n' >> Cargo.toml
       - name: memory sampler
         run: (while true; do free -m | awk '/Mem:/{print $3}' >> /tmp/mem.txt; sleep 5; done) &
       - name: coverage
         run: |
           start=$(date +%s)
           cargo llvm-cov nextest --workspace --all-features --locked --json --output-path /tmp/cov.json \
-            --user-config-file none --ignore-default-filter --run-ignored all --no-fail-fast 2>&1 | grep -E "Finished|Summary|error|FAIL" | head -20
+            --user-config-file none --ignore-default-filter --run-ignored all --no-fail-fast > /tmp/cov.log 2>&1 || true
+          grep -E "Finished|Summary|^error|  FAIL" /tmp/cov.log | head -20
           echo "TOTAL_SECONDS=$(( $(date +%s) - start ))"
           jq -r '.data[0].totals | "lines \(.lines.percent) regions \(.regions.percent)"' /tmp/cov.json
           echo "PEAK_USED_MB=$(sort -n /tmp/mem.txt | tail -1)"; free -m
