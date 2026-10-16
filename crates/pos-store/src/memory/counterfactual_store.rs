@@ -312,6 +312,12 @@ impl ForkEntriesV1<'_> {
         self.timeline.chain_head = staged.chain_head;
         self.timeline.timeline.head = staged.timeline.head;
         self.timeline.events.extend(staged.events);
+        self.install_provenance(provenance);
+    }
+
+    /// Install the staged `EOR1`/`FOP1` rows of a classified Tick; a generic
+    /// Tick stages none.
+    fn install_provenance(&mut self, provenance: Vec<StagedProvenanceV1>) {
         for row in provenance {
             self.fork_event_origins.insert(row.event_id, row.origin);
             let operation_id = row.operation.input().operation_id;
