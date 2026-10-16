@@ -278,7 +278,7 @@ mod tests {
         let observation = Arc::new(Mutex::new(InterStatementWrite::default()));
         let callback_observation = Arc::clone(&observation);
         reader.authorizer(Some(move |context: AuthContext<'_>| {
-            if let AuthAction::Select = context.action {
+            if context.action == AuthAction::Select {
                 let Ok(mut observation) = callback_observation.lock() else {
                     return Authorization::Deny;
                 };

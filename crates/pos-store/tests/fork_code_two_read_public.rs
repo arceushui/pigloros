@@ -403,27 +403,9 @@ fn retained_key_tampers() -> Fallible<Vec<Tamper>> {
     ])
 }
 
-/// The tampers of one committed mixed import.
-fn tampers(
-    admission: &ImportedForkAttributionAdmissionV1,
-    closure: &ForkAttributionImportClosureV1,
-) -> Fallible<Vec<Tamper>> {
-    let mut origin = admission.input().clone();
-    origin.authority_origin_digest = hash(0x99);
-    let mut fork_digest = admission.input().clone();
-    fork_digest.fork_admission_digest = hash(0x98);
-    let other_source = ForkClassifierSourceV1::new(ForkClassifierSourceInputV1 {
-        room_revision_descriptor_hash: hash(0x41),
-        registrar_identifier: "other-registrar".to_owned(),
-        routes: vec![],
-    })?;
-    let publication = closure.publication_operation();
-    let foreign = ImportedForkPublicationOperationV1::from_local(
-        publication.projection().clone(),
-        hash(0x99),
-    );
-    let mut tampers = retained_key_tampers()?;
-    let binding = *closure.publication_binding().input();
+/// Independently alter each receipt field in an otherwise canonical FPB1.
+fn publication_binding_tampers(binding: ForkPublicationBindingInputV1) -> Fallible<Vec<Tamper>> {
+    let mut tampers = Vec::new();
     for (name, input) in [
         (
             "FPB1 naming another operation",
@@ -461,6 +443,32 @@ fn tampers(
             Some(ForkPublicationBindingV1::new(input)?.to_canonical_cbor()),
         ));
     }
+    Ok(tampers)
+}
+
+/// The tampers of one committed mixed import.
+fn tampers(
+    admission: &ImportedForkAttributionAdmissionV1,
+    closure: &ForkAttributionImportClosureV1,
+) -> Fallible<Vec<Tamper>> {
+    let mut origin = admission.input().clone();
+    origin.authority_origin_digest = hash(0x99);
+    let mut fork_digest = admission.input().clone();
+    fork_digest.fork_admission_digest = hash(0x98);
+    let other_source = ForkClassifierSourceV1::new(ForkClassifierSourceInputV1 {
+        room_revision_descriptor_hash: hash(0x41),
+        registrar_identifier: "other-registrar".to_owned(),
+        routes: vec![],
+    })?;
+    let publication = closure.publication_operation();
+    let foreign = ImportedForkPublicationOperationV1::from_local(
+        publication.projection().clone(),
+        hash(0x99),
+    );
+    let mut tampers = retained_key_tampers()?;
+    tampers.extend(publication_binding_tampers(
+        *closure.publication_binding().input(),
+    )?);
     tampers.extend(vec![
         refused_by_both(
             "missing import admission",
