@@ -92,6 +92,8 @@ fn map_to_unit_error<T>(_: T) {}
 struct RootSelectorComposition {
     service: RootSelectorService<ProviderTransport>,
     updates: Mutex<()>,
+    /// Bound for one committed live update's provider control exchange.
+    live_update_timeout: Duration,
 }
 
 struct ReceivedInstallationUpdate {
@@ -667,6 +669,7 @@ impl RootSelectorComposition {
                             recovery_owner: ROOT_UID,
                         },
                         updates: Mutex::new(()),
+                        live_update_timeout: LIVE_UPDATE_TIMEOUT,
                     })
                 })
         })
@@ -719,7 +722,7 @@ impl RootSelectorComposition {
             .and_then(|closed| {
                 self.service
                     .transport
-                    .complete_committed_update(closed.committed, LIVE_UPDATE_TIMEOUT)
+                    .complete_committed_update(closed.committed, self.live_update_timeout)
                     .map(
                         |(successor, acknowledgement)| SynchronizedInstallationUpdate {
                             admission: closed.admission,
@@ -2657,7 +2660,11 @@ mod tests {
     const INSTALLATION_PARENT: &str = "/var/lib/pigloros";
     const RUNTIME_DIRECTORY: &str = "/run/pigloros";
     const SOCKET_MODE: u32 = 0o600;
-    const COMPOSITION_WATCHDOG_MS: u64 = 30_000;
+    const COMPOSITION_WATCHDOG_MS: u64 = INITIAL_IO_TIMEOUT.as_secs() * 1_000;
+    /// Test clients outwait the longest selector-side sequence (live update
+    /// then successor synchronization), so a selector error reply arrives
+    /// before the client's own read timeout fires.
+    const CLIENT_IO_TIMEOUT: Duration = INITIAL_IO_TIMEOUT.saturating_mul(3);
 
     fn test_recovery_directory() -> TestResult<Arc<File>> {
         let directory = tempfile::tempdir()?;
@@ -3352,13 +3359,13 @@ mod tests {
         let original_manifest = fs::read(manifest_path)?;
         let mut abandoned =
             UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        abandoned.set_read_timeout(Some(INITIAL_IO_TIMEOUT))?;
+        abandoned.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
         let abandoned_challenge = read_frame(&mut abandoned)?;
         drop(abandoned);
 
         let mut cross_connection =
             UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        cross_connection.set_read_timeout(Some(INITIAL_IO_TIMEOUT))?;
+        cross_connection.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
         let cross_challenge = read_frame(&mut cross_connection)?;
         assert_ne!(cross_challenge, abandoned_challenge);
         let cross_update = fixture.request_from_challenge(&abandoned_challenge, None)?;
@@ -3370,7 +3377,7 @@ mod tests {
 
         let mut extra_frame =
             UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        extra_frame.set_read_timeout(Some(INITIAL_IO_TIMEOUT))?;
+        extra_frame.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
         let extra_frame_challenge = read_frame(&mut extra_frame)?;
         let extra_frame_update = fixture.request_from_challenge(&extra_frame_challenge, None)?;
         write_frame(&mut extra_frame, &extra_frame_update)?;
@@ -3388,7 +3395,7 @@ mod tests {
     ) -> TestResult {
         let mut administrator =
             UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        administrator.set_read_timeout(Some(INITIAL_IO_TIMEOUT))?;
+        administrator.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
         let challenge = read_frame(&mut administrator)?;
         let siu1 = fixture.request_from_challenge(&challenge, None)?;
         write_frame(&mut administrator, &siu1)?;
@@ -3400,7 +3407,7 @@ mod tests {
         assert!(trailing.is_empty());
 
         let mut stale = UnixStream::connect(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
-        stale.set_read_timeout(Some(INITIAL_IO_TIMEOUT))?;
+        stale.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
         let successor_challenge = read_frame(&mut stale)?;
         assert_ne!(successor_challenge, challenge);
         write_frame(&mut stale, &siu1)?;
@@ -3512,9 +3519,6 @@ mod tests {
             "/run/pigloros/provider-control.sock",
             fs::Permissions::from_mode(SOCKET_MODE),
         )?;
-        let control_provider = std::thread::spawn(move || {
-            serve_control_response(&control_listener).map_err(|error| error.to_string())
-        });
         let execute_provider = std::thread::spawn(move || {
             serve_describe_response(
                 &execute_listener,
@@ -3535,7 +3539,8 @@ mod tests {
         });
         assert!(!Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(!Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
-        let runtime = RootSelectorRuntime::activate()?;
+        let mut runtime = RootSelectorRuntime::activate()?;
+        runtime.composition.live_update_timeout = INITIAL_IO_TIMEOUT;
         assert!(Path::new(crate::selector::SANDBOX_SELECTOR_SOCKET).exists());
         assert!(Path::new(crate::selector::installation::SANDBOX_ADMIN_SOCKET).exists());
         let runtime = std::thread::spawn(move || runtime.serve());
@@ -3548,14 +3553,16 @@ mod tests {
         assert_eq!(reply.observation.as_ref().err(), None);
         assert_current_identity_conflict(&request, resolved.attempt())?;
 
-        apply_update_and_reject_replay(&update_fixture)?;
+        // Only the live update connects to the control provider, so its accept
+        // clock starts here rather than at activation.
+        let control_provider = std::thread::spawn(move || {
+            serve_control_response(&control_listener).map_err(|error| error.to_string())
+        });
+        let updated = apply_update_and_reject_replay(&update_fixture);
+        let control = join_provider("control", control_provider);
+        let execute = join_provider("execute", execute_provider);
+        all_succeeded([updated, control, execute])?;
         assert_successor_rejects_stale_request(&request, resolved.attempt())?;
-        control_provider
-            .join()
-            .map_err(|_| "provider control thread panicked")??;
-        execute_provider
-            .join()
-            .map_err(|_| "provider execute thread panicked")??;
         fs::remove_file(crate::selector::installation::SANDBOX_ADMIN_SOCKET)?;
         assert!(runtime
             .join()
@@ -3569,7 +3576,7 @@ mod tests {
     /// Installs the fixed composition with sanitizer-proof provider headroom.
     ///
     /// The runtime bounds each provider round trip by the selected case watchdog.
-    /// Under ASan and a loaded CI runner the 1 s default corpus watchdog can
+    /// Under `ASan` and a loaded CI runner the 1 s default corpus watchdog can
     /// expire before the provider stub answers, so this fixture selects a case
     /// whose watchdog matches the selector's initial I/O bound. Every authority,
     /// commitment, and identity check still runs on the exact installed bytes.
@@ -3593,13 +3600,35 @@ mod tests {
         Ok((request, admitted, resolved))
     }
 
+    fn join_provider(
+        name: &str,
+        provider: std::thread::JoinHandle<Result<(), String>>,
+    ) -> TestResult {
+        provider
+            .join()
+            .map_err(|_| format!("provider {name} thread panicked"))?
+            .map_err(|error| format!("provider {name}: {error}").into())
+    }
+
+    /// Reports every failure, so an early update error is not hidden behind
+    /// the provider stub timeouts it causes.
+    fn all_succeeded(results: [TestResult; 3]) -> TestResult {
+        let errors: Vec<_> = results.into_iter().filter_map(Result::err).collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+            Err(messages.join("; ").into())
+        }
+    }
+
     fn evaluate_fixed_runtime_request(
         request: &crate::evaluator_protocol::EvaluationRequest,
         attempt: &crate::evaluator::CaseAttempt,
     ) -> TestResult<crate::selector_protocol::DecodedSelectorReply> {
         let encoded = encoded_request(request, attempt)?;
         let mut client = UnixStream::connect(crate::selector::SANDBOX_SELECTOR_SOCKET)?;
-        client.set_read_timeout(Some(INITIAL_IO_TIMEOUT))?;
+        client.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
         write_frame(&mut client, &encoded.control)?;
         client.write_all(&encoded.attempt_stream)?;
         client.shutdown(std::net::Shutdown::Write)?;
@@ -4209,6 +4238,7 @@ mod tests {
                 recovery_owner: owner,
             },
             updates: Mutex::new(()),
+            live_update_timeout: LIVE_UPDATE_TIMEOUT,
         });
         let administrator_fixture = ListenerTestDirectory::create()?;
         let administrator = OwnedAdministratorListener {
