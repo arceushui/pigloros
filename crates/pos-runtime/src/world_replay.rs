@@ -535,7 +535,7 @@ pub fn test_verified_world_replay(
 /// The caller supplies limits validated by [`ForkReplayReadLimitsV1::new`].
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
-pub fn test_verified_world_replay_with_fields(
+pub const fn test_verified_world_replay_with_fields(
     closure_digest: Hash,
     timeline_id: TimelineId,
     source_head: Hash,
@@ -555,12 +555,13 @@ pub fn test_verified_world_replay_with_fields(
     )
 }
 
-/// Construct a verifier result with explicit bindings and read bounds for
-/// downstream seam tests. The profile carries caller-validated Fork limits;
+/// Construct an explicitly bound verifier result for downstream seam tests.
+///
+/// The profile carries caller-validated Fork limits;
 /// Event bounds may remain deliberately invalid for rejection tests.
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
-pub fn test_verified_world_replay_with_fields_and_bounds(
+pub const fn test_verified_world_replay_with_fields_and_bounds(
     closure_digest: Hash,
     timeline_id: TimelineId,
     source_head: Hash,
