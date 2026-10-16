@@ -152,7 +152,7 @@ impl WorldReplayVerifierV1 for OrdinaryVerifier {
             requested.clone(),
             generation,
             ErasureReplayClaimV1::Exact,
-            bounds,
+            (bounds, classification.limits),
         );
         Ok(
             pos_runtime::world_replay::test_verified_world_replay_with_fork_attribution(
