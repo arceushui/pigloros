@@ -252,4 +252,59 @@ mod tests {
         assert_eq!(read(&store, root)?, Err(Error::ContainmentUnavailable));
         Ok(())
     }
+
+    fn complete_events(
+        store: &MemoryStore,
+        child: TimelineId,
+    ) -> Fallible<ReadResult<Vec<pos_core::Event>>> {
+        let limits = ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000)?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let bounds = pos_core::EventReadBounds::new_with_total_bytes_and_elapsed(
+            128, 128, 8, 4, 1_024, 1_000_000,
+        );
+        Ok(store.read_fork_replay_events(child, pos_core::SeqRange::all(), bounds, &mut budget))
+    }
+
+    #[test]
+    fn complete_event_reads_reject_corrupt_counts_origins_signatures_and_cuts() -> Fallible<()> {
+        for fault in 0..6 {
+            let (mut store, root, child) = fixture()?;
+            assert_eq!(complete_events(&store, child)??.len(), 1);
+            // Public writes cannot produce these states. Corrupt only the
+            // retained field, then exercise the complete public read port.
+            if fault == 5 {
+                store
+                    .timelines
+                    .get_mut(&child)
+                    .ok_or("child")?
+                    .timeline
+                    .meta
+                    .fork_point = Some((root, Seq::from_u64(2)));
+            } else {
+                let state = store.timelines.get_mut(&root).ok_or("root")?;
+                match fault {
+                    0 => state.timeline.head = Seq::from_u64(2),
+                    1 => state.events.clear(),
+                    2 => state.events[0].origin = None,
+                    3 => {
+                        state.events[0].origin = Some(pos_core::EventOriginV1 {
+                            origin_timeline_id: TimelineId::new(),
+                            origin_logical_seq: Seq::from_u64(1),
+                        })
+                    }
+                    _ => state.events[0].signature = Some(pos_core::Signature::from_bytes([0; 64])),
+                }
+            }
+            assert_eq!(
+                complete_events(&store, child)?,
+                Err(Error::Read(
+                    ForkReplayAuthorityReadErrorV1::CorruptAuthority
+                )),
+                "accepted corrupt native Event case {fault}",
+            );
+        }
+        Ok(())
+    }
 }
