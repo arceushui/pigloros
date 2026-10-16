@@ -10,13 +10,12 @@ use crate::ForkManifestPublicationErrorV1 as Error;
 
 const SOURCE_FIELD: u64 = 7;
 
-fn text_length(carrier: &mut AdmissionCarrierV1<'_>, maximum: usize) -> Option<usize> {
+fn text_length(carrier: &mut AdmissionCarrierV1<'_>, maximum: u64) -> Option<usize> {
     let (major, length) = carrier.head()?;
-    let length = usize::try_from(length).ok()?;
     if major != 3 || length == 0 || length > maximum {
         return None;
     }
-    carrier.take(length).map(<[u8]>::len)
+    carrier.take_encoded(length).map(<[u8]>::len)
 }
 
 fn source_lengths(bytes: &[u8]) -> Option<[usize; 2]> {
@@ -24,8 +23,8 @@ fn source_lengths(bytes: &[u8]) -> Option<[usize; 2]> {
     match (count, source.head()?) {
         (1, (0, 0)) => Some([0, 0]),
         (4, (0, 1)) => {
-            let adapter = text_length(&mut source, MAX_FORK_EVENT_REGISTRAR_BYTES_V1)?;
-            let route = text_length(&mut source, MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1)?;
+            let adapter = text_length(&mut source, MAX_FORK_EVENT_REGISTRAR_BYTES_V1 as u64)?;
+            let route = text_length(&mut source, MAX_FORK_EVENT_SOURCE_ROUTE_BYTES_V1 as u64)?;
             Some([adapter, route])
         }
         _ => None,
