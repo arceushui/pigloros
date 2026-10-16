@@ -175,7 +175,10 @@ grep -Fqx "Ubuntu LLVM version 18.1.3" <<<"${symbolizer_version}"
     },
     {
         "uses": "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16",
-        "with": {"shared-key": "asan-nightly-2026-07-01"},
+        "with": {
+            "shared-key": "asan-nightly-2026-07-01",
+            "save-if": "${{ github.ref == 'refs/heads/main' }}",
+        },
     },
 ]
 EXPECTED_NEGATIVE_CONTROL_STEP = {

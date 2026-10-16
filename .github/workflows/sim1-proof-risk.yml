@@ -36,6 +36,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install heap profiler
         run: |
           sudo apt-get update
