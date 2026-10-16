@@ -22,7 +22,8 @@ use fixture::{
 use pos_core::{
     store::{EventStore, SeqRange},
     ForkAppendSourceIdentityV1, ForkAttributionImportClosureV1, ForkClassifierSourceInputV1,
-    ForkClassifierSourceV1, ForkEventSourceDescriptorV1, ImportedForkAttributionAdmissionV1,
+    ForkClassifierSourceV1, ForkEventSourceDescriptorV1, ForkPublicationBindingInputV1,
+    ForkPublicationBindingV1, ForkPublicationReceiptV1, ImportedForkAttributionAdmissionV1,
     ImportedForkPublicationOperationV1, ImportedKeyRecordV1, PublicKey, Signature, TimelineId,
 };
 use pos_store::{
@@ -81,6 +82,10 @@ fn assert_reads_accept<S: Port>(
     assert_eq!(committed.authority_origin_digest, Some(origin));
     assert_eq!(committed.receipt.child_timeline_id, child);
     assert_eq!(committed.receipt.final_logical_head, head);
+    assert_eq!(
+        committed.receipt,
+        ForkPublicationReceiptV1::from_records(&committed.operation, &committed.binding)?
+    );
     assert_eq!(committed.operation.input().child_timeline_id, child);
     Ok(())
 }
@@ -344,8 +349,8 @@ const fn event_tamper(name: &'static str, sql: &'static str) -> Tamper {
     }
 }
 
-/// An edit of the stored retained key or its selection: only the publication
-/// read consults it (ADR-105 erratum E12), and it refuses it as a conflict.
+/// An edit of a publication-only row or its selection. The suffix read does
+/// not consult it; the publication read refuses it as a conflict.
 const fn publication_tamper(
     name: &'static str,
     sql: &'static str,
@@ -418,6 +423,44 @@ fn tampers(
         hash(0x99),
     );
     let mut tampers = retained_key_tampers()?;
+    let binding = *closure.publication_binding().input();
+    for (name, input) in [
+        (
+            "FPB1 naming another operation",
+            ForkPublicationBindingInputV1 {
+                operation_id: hash(0xa1),
+                ..binding
+            },
+        ),
+        (
+            "FPB1 naming another child",
+            ForkPublicationBindingInputV1 {
+                child_timeline_id: TimelineId::new(),
+                ..binding
+            },
+        ),
+        (
+            "FPB1 naming another head",
+            ForkPublicationBindingInputV1 {
+                final_logical_head: binding.final_logical_head + 1,
+                ..binding
+            },
+        ),
+        (
+            "FPB1 naming another signed manifest",
+            ForkPublicationBindingInputV1 {
+                signed_manifest_record_id: hash(0xa2),
+                ..binding
+            },
+        ),
+    ] {
+        assert_ne!(input, binding, "{name} must alter the selected binding");
+        tampers.push(publication_tamper(
+            name,
+            "UPDATE fork_publication_bindings SET fpb1_cbor = ?1",
+            Some(ForkPublicationBindingV1::new(input)?.to_canonical_cbor()),
+        ));
+    }
     tampers.extend(vec![
         refused_by_both(
             "missing import admission",
