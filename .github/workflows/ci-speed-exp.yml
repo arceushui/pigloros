@@ -1,0 +1,80 @@
+name: ci-speed-exp
+on:
+  push:
+    branches: [scratch/ci-speed-exp]
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: never
+  RUSTFLAGS: -D warnings
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [base, deps-o1, deps-o2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: configure variant
+        run: |
+          case "${{ matrix.variant }}" in
+            base) : ;;
+            deps-o1) printf '\n[profile.dev.package."*"]\nopt-level = 1\n' >> Cargo.toml ;;
+            deps-o2) printf '\n[profile.dev.package."*"]\nopt-level = 2\n' >> Cargo.toml ;;
+          esac
+          tail -4 Cargo.toml
+      - name: build
+        run: |
+          start=$(date +%s)
+          cargo nextest run --workspace --all-features --locked --no-run
+          echo "BUILD_SECONDS=$(( $(date +%s) - start ))"
+      - name: run
+        run: |
+          cargo nextest run --workspace --all-features --locked --user-config-file none \
+            --run-ignored all --no-fail-fast --status-level pass --final-status-level none 2>&1 | tee /tmp/run.log | grep -E "Summary|FAIL" || true
+          grep -E "^ +PASS \[" /tmp/run.log | sed -E 's/^ +PASS \[ *([0-9.]+)s\] \( *[0-9]+\/[0-9]+\) (.*)/\1 \2/' | sort -rn > /tmp/durs.txt
+          awk '{s+=$1} END {print "SUM_TEST_SECONDS", s}' /tmp/durs.txt
+          head -40 /tmp/durs.txt
+          echo "--- by binary"; awk '{a[$2]+=$1} END {for (k in a) print a[k], k}' /tmp/durs.txt | sort -rn | head -25
+      - uses: actions/upload-artifact@v4
+        with:
+          name: durs-${{ matrix.variant }}
+          path: /tmp/durs.txt
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - name: install perf
+        run: |
+          sudo apt-get update -q && sudo apt-get install -yq linux-tools-common linux-tools-$(uname -r) || sudo apt-get install -yq linux-tools-azure
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+      - name: build tests
+        run: cargo test --workspace --all-features --locked --no-run 2>&1 | tail -3
+      - name: profile slowest tests
+        run: |
+          prof() {
+            pkg=$1; tst=$2; name=$3
+            echo "=================== $pkg $tst $name"
+            perf record -F 499 -g -o /tmp/p.data -- cargo test -q --all-features --locked -p "$pkg" $tst -- --exact "$name" --include-ignored >/dev/null 2>&1 || true
+            perf report -i /tmp/p.data --no-children --sort comm,sym --percent-limit 0.7 --stdio 2>/dev/null | grep -vE '^$|^#' | grep -E '^ +[0-9]' | head -45
+            echo "--- by comm"; perf report -i /tmp/p.data --no-children --sort comm --stdio 2>/dev/null | grep -E '^ +[0-9]' | head -10
+          }
+          prof pos-conformance "--test bundle_contract_public" public_materializer_rejects_expected_staging_entry_mutations
+          prof pos-conformance "--test bundle_contract_public" independent_verifier_rejects_wrong_types_across_every_raw_profile_record
+          prof pos-plugin-worker "--test conformance_adapter_public" r8_s11_a_refused_or_failed_pass_leaves_events_and_state_unchanged
+          prof pos-crypto "--lib" plugin_trust::tests::every_truncation_and_selected_single_byte_tamper_fails_closed
+          prof pos-owner-bridge "--test protocol" oracle::ten_thousand_seeded_interleavings_hold_every_invariant
