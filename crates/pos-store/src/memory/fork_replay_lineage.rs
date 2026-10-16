@@ -138,6 +138,35 @@ mod tests {
 
     type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 
+    #[test]
+    fn fixture_gate_transfer_refuses_real_and_missing_gates() -> Fallible<()> {
+        for store in [
+            MemoryStore::new(),
+            MemoryStore::new().without_erasure_gate(),
+        ] {
+            assert!(matches!(
+                store.detach_fixture_gate_for_host(),
+                Err(pos_core::CoreError::ErasureContainmentUnavailable)
+            ));
+        }
+        let mut store = MemoryStore::new();
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let mut detached = store.detach_fixture_gate_for_host()?;
+        let timeline = detached.create_timeline("unbound fixture")?.id();
+        let draft = EventDraft::new(
+            EntityId::new(),
+            Kind::new("ordinary"),
+            CanonicalBytes::from_static(b"fixture"),
+        );
+        assert!(matches!(
+            detached.append(timeline, std::slice::from_ref(&draft)),
+            Err(pos_core::CoreError::ErasureContainmentUnavailable)
+        ));
+        detached.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        assert_eq!(detached.append(timeline, &[draft])?.len(), 1);
+        Ok(())
+    }
+
     fn fixture() -> Fallible<(MemoryStore, TimelineId, TimelineId)> {
         let mut store = MemoryStore::new();
         store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
@@ -292,7 +321,7 @@ mod tests {
                         state.events[0].origin = Some(pos_core::EventOriginV1 {
                             origin_timeline_id: TimelineId::new(),
                             origin_logical_seq: Seq::from_u64(1),
-                        })
+                        });
                     }
                     _ => state.events[0].signature = Some(pos_core::Signature::from_bytes([0; 64])),
                 }
