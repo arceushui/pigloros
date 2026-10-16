@@ -32,7 +32,7 @@ pub const STORE: &str = "memory";
 /// of 1, as ULID text. The twin emits for the same entity.
 pub const ENTITY: &str = "01040G2081040G2081040G2081";
 /// The Event type the first-party twin owns beside the community Plugin in a mixed registry.
-const TWIN_TYPE: &str = "parity.first-party";
+pub const TWIN_TYPE: &str = "parity.first-party";
 
 /// What one pass shows of its authority outcome, the owner's isolation class aside.
 #[derive(Debug, PartialEq, Eq)]

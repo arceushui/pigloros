@@ -31,7 +31,7 @@ use pos_runtime::{PluginCompositionErrorV1, PluginRegistry, RuntimeError};
 
 use crate::first_party::{entity_of, register_native, register_twin, Native};
 use crate::harness::Capture;
-use crate::parity::{observe, record, same_authority, Observed, ENTITY, STORE};
+use crate::parity::{observe, record, same_authority, Observed, ENTITY, STORE, TWIN_TYPE};
 use crate::support::lane::{
     gated_release, profile, publish, trust_material, Lane, Published, Spec, Swap, ALPHA, EVENT_TYPE,
     WATCHDOG,
@@ -49,7 +49,7 @@ const OWNER: Native = Native {
 /// A first-party Plugin that owns a type of its own and proposes the owner's.
 const PROPOSER: Native = Native {
     name: "first-party-proposer",
-    owned: "parity.first-party",
+    owned: TWIN_TYPE,
     emitted: EVENT_TYPE,
     role: "first-party-proposer",
 };
@@ -92,11 +92,18 @@ fn composition_refusal(error: &PluginCompositionErrorV1) -> String {
 }
 
 /// The refusal that failed the pass `result`, or `none`.
+///
+/// A failure the community Plugin host classifies as its own appends that host error, so a pinned
+/// refusal also proves the failure quarantined no Plugin.
 fn pass_refusal(result: &PassResultV1) -> String {
-    let PassResultV1::Failed { error, .. } = result else {
+    let PassResultV1::Failed { host, error } = result else {
         return "none".to_owned();
     };
-    refusal_of(error)
+    let refusal = refusal_of(error);
+    let Some(host) = host else {
+        return refusal;
+    };
+    format!("{refusal} host={host:?}")
 }
 
 /// The typed refusal of a registration `claim`, or `accepted`.
