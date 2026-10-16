@@ -4,6 +4,8 @@ use super::*;
 use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
 use std::{cell::Cell, time::Duration};
 
+mod lineage_budget;
+
 fn intent_for(requested: &WorldReplayUseV1) -> WorldReplayReadIntentV1 {
     test_ok(WorldReplayReadIntentV1::new(
         requested.timeline_id(),
