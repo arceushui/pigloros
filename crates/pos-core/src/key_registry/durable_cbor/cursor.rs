@@ -223,7 +223,10 @@ impl<'input> Cursor<'input> {
         if let Some(length) = length {
             chunks(self.take(length, context)?, text, context, visit)
         } else {
-            *nesting = nesting.checked_add(1).ok_or(Error::InvalidSnapshot)?;
+            // Each nested header consumes input; even a buffered header came
+            // from this same finite carrier. A byte slice is at most
+            // isize::MAX long, so its header count plus one fits in usize.
+            *nesting += 1;
             Ok(())
         }
     }
