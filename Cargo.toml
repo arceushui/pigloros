@@ -128,22 +128,27 @@ lto = true
 codegen-units = 1
 
 # Signature and digest verification dominates test CPU time: at opt-level 0
-# every curve25519-dalek SIMD intrinsic is a function call. Optimizing only
-# these dependencies made the workspace suite about 3x faster on CI with no
-# cold-build cost (#649). Workspace crates stay unoptimized for coverage and
-# debugging; the test profile inherits these overrides.
+# every curve25519-dalek SIMD intrinsic is an out-of-line call. Optimizing
+# only these dependencies cut workspace test time substantially for a small
+# cold-build cost (measurements in #649). Workspace crates stay unoptimized
+# for coverage and debugging; the test profile inherits these overrides.
+# Cargo only warns if a listed crate leaves the dependency graph.
+
+# Ed25519 signatures.
 [profile.dev.package.curve25519-dalek]
 opt-level = 3
 
 [profile.dev.package.ed25519-dalek]
 opt-level = 3
 
+# Digests.
 [profile.dev.package.sha2]
 opt-level = 3
 
 [profile.dev.package.blake3]
 opt-level = 3
 
+# P-256 (WebAuthn) and its arithmetic stack.
 [profile.dev.package.p256]
 opt-level = 3
 

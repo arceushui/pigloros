@@ -4,7 +4,8 @@
 #   fmt          — cargo fmt --check (rustfmt)
 #   rustdoc      — cargo doc with rustdoc warnings denied
 #   test         — cargo nextest --all-features + doctests (no ignored tests silently skip)
-#   clippy       — pedantic + -D warnings
+#   clippy       — pedantic + -D warnings; also the all-features, all-targets
+#                  type check
 #   coverage     — lines ≥99%, regions ≥99%
 #   cargo-crap   — no CRAP regressions; new functions score ≤30
 #   audit        — cargo-audit (CVE advisories)
@@ -234,8 +235,6 @@ jobs:
           --test plugin_trust_registry_memory_public
           --test plugin_trust_registry_memory_policy_public
           --test plugin_trust_registry_memory_evaluation_public --locked
-      # The all-features, all-targets type check is the clippy job's
-      # `cargo clippy --workspace --all-features --all-targets`.
       - name: Prove reference evaluator implementation independence
         run: bash scripts/check-reference-evaluator-independence.sh
       - name: Prove the conformance adapter dependency graph
