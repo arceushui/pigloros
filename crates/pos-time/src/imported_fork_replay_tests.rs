@@ -258,6 +258,24 @@ fn populate<S: Port>(
     )?)
 }
 
+/// Seed one immutable database image, before any host owns its authority.
+/// Only closed, fully checkpointed images may be copied into isolated cases.
+fn closed_sqlite_fixture(
+    world: &World,
+    built: &Built,
+) -> Fallible<(tempfile::TempDir, ForkReplayRequirementV1)> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("imported-replay.sqlite");
+    let mut sqlite = SqliteStore::open(path.to_str().ok_or("utf-8 path")?)?;
+    let requirement = populate(&mut sqlite, world, built)?;
+    drop(sqlite);
+    // SQLite's final connection close checkpoints and removes these sidecars.
+    // Fail rather than copy an image whose committed pages could remain in WAL.
+    assert!(!path.with_extension("sqlite-wal").try_exists()?);
+    assert!(!path.with_extension("sqlite-shm").try_exists()?);
+    Ok((directory, requirement))
+}
+
 fn run_on_host(
     mut host: ErasureExecutionHostV1,
     child: TimelineId,
@@ -319,6 +337,7 @@ fn run_on_host(
 
 #[test]
 fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters() -> Fallible<()> {
+    let mut cases = [0; 3];
     for shape in [
         Shape::Mixed,
         Shape::EmptyClassified,
@@ -333,6 +352,10 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 destroyed_key: true,
                 ..Spec::default()
             })?,
+        ];
+        let sqlite_images = [
+            closed_sqlite_fixture(&world, &built[0])?,
+            closed_sqlite_fixture(&world, &built[1])?,
         ];
         for (fault, cut, destroyed_key) in [
             Fault::None,
@@ -361,7 +384,8 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 .filter(move |destroyed| !*destroyed || fault == Fault::None)
                 .map(move |destroyed| (fault, cut, destroyed))
         }) {
-            let built = &built[usize::from(destroyed_key)];
+            let image_index = usize::from(destroyed_key);
+            let built = &built[image_index];
             let mut memory = MemoryStore::new();
             let requirement = populate(&mut memory, &world, built)?;
             let run = |host| {
@@ -393,11 +417,24 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
             run(host)?;
+            cases[0] += 1;
             let directory = tempfile::tempdir()?;
             let path = directory.path().join("imported-replay.sqlite");
+            let (image_directory, image_requirement) = &sqlite_images[image_index];
+            assert_eq!(*image_requirement, requirement);
+            let image = image_directory.path().join("imported-replay.sqlite");
+            // Each case still gets a distinct database, fresh host, gate,
+            // verifier/admission counter, registry and release authority.
+            assert_eq!(std::fs::copy(&image, &path)?, image.metadata()?.len());
             let path = path.to_str().ok_or("utf-8 path")?;
             let mut sqlite = SqliteStore::open(path)?;
-            assert_eq!(populate(&mut sqlite, &world, built)?, requirement);
+            let committed =
+                sqlite.read_committed(child, requirement.publication_logical_head().as_u64())?;
+            assert_eq!(committed.record_id, requirement.signed_manifest_record_id());
+            assert_eq!(
+                committed.authority_origin_digest,
+                requirement.authority_origin_digest()
+            );
             drop(sqlite);
             let composition =
                 ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier());
@@ -409,6 +446,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
             run(host)?;
+            cases[1] += 1;
             let composition =
                 ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier());
             let host = ErasureExecutionHostV1::open_read_only_with_authority(
@@ -417,8 +455,10 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 ErasureRecoveryLimitsV1::compiled_maximum(),
             )?;
             run(host)?;
+            cases[2] += 1;
         }
     }
+    assert_eq!(cases, [99; 3]);
     Ok(())
 }
 
