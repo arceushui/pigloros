@@ -174,8 +174,9 @@ fn observe(lane: &Lane, outcome: &CommunityPassOutcomeV1, steps: String) -> Obse
             profile: observation_profiles(registry),
         },
         owners: owner_types.collect(),
-        // A cross-check only: the pinned per-path timeline strings are the authoritative proof
-        // of the order, since `scheduled` is derived from the same owners as `emitted`.
+        // `scheduled` takes its order from the registry's host schedule and only its membership
+        // from `emitted`, so equality proves the Timeline follows the schedule; the pinned
+        // per-path timeline strings pin the same order.
         follows_schedule: owned.len() == events.len() && emitted == scheduled,
         committed: committed_count(&outcome.result),
         payloads: events.iter().map(payload).collect(),
@@ -287,6 +288,13 @@ fn sorted(observed: &Observed) -> Vec<String> {
     owners
 }
 
+/// The entities `observed` committed, sorted, so registration order cannot change them.
+fn sorted_entities(observed: &Observed) -> Vec<&str> {
+    let mut entities: Vec<&str> = observed.authority.entities.split(',').collect();
+    entities.sort_unstable();
+    entities
+}
+
 /// PCF-CPH-002: a mixed registry commits in host schedule order.
 ///
 /// In one registry holding both Drivers, the pass commits both Events in one batch, in host
@@ -307,8 +315,10 @@ fn mixed_registry() -> BoxResult<Capture> {
     record(&mut capture, "twin-first", &twin_first);
     record(&mut capture, "community-first", &community_first);
     // The order itself is proven by the pinned per-order timeline strings; this compares what
-    // was committed regardless of order: the (type, owner isolation) multiset and the count.
+    // was committed regardless of order: the (type, owner isolation) multiset, the entities and
+    // the count.
     let same = sorted(&twin_first) == sorted(&community_first)
+        && sorted_entities(&twin_first) == sorted_entities(&community_first)
         && twin_first.committed == community_first.committed;
     capture.record(STORE, "same-events-either-order", same);
     Ok(capture)
