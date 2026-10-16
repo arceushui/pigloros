@@ -58,6 +58,26 @@ pub struct Observed {
     payloads: Vec<Vec<u8>>,
 }
 
+impl Observed {
+    /// The name of the pass result.
+    #[must_use]
+    pub const fn result(&self) -> &'static str {
+        self.authority.result
+    }
+
+    /// The number of Events the commit receipt names.
+    #[must_use]
+    pub const fn committed(&self) -> usize {
+        self.committed
+    }
+
+    /// Whether the first registered Plugin is available after the pass.
+    #[must_use]
+    pub fn first_available(&self) -> bool {
+        self.authority.availability.split(',').next() == Some("Available")
+    }
+}
+
 const fn result_name(result: &PassResultV1) -> &'static str {
     match result {
         PassResultV1::Committed(Some(_)) => "Committed",
@@ -257,8 +277,10 @@ fn single_pass() -> BoxResult<Capture> {
 
 /// Which Driver a mixed registry registers first.
 #[derive(Clone, Copy)]
-enum Order {
+pub enum Order {
+    /// The first-party Driver, then the community Driver.
     TwinFirst,
+    /// The community Driver, then the first-party Driver.
     CommunityFirst,
 }
 

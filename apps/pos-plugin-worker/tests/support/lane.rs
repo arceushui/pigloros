@@ -5,13 +5,17 @@
 //! the release the gate accepted, and runs whole host passes through
 //! `CommunityPluginHostV1::run_pass` over the supervisor's pass world. The handoff vectors and
 //! the community pipeline conformance runners share it.
+//!
+//! Each member's context source is the pass harness's, steered by its lane: the lane can make
+//! the real guest trap and can renew every member's invocation identity.
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use pos_core::TimelineId;
 use pos_plugin_publisher::test_support::{
     encoding::{Material, TICK, UTC},
     release::Shape,
@@ -21,14 +25,16 @@ use pos_plugin_publisher::test_support::{
 use pos_plugin_supervisor::pass_harness::{GatedSpec, Source, World as PassWorld};
 use pos_plugin_supervisor::{
     CommunityMemberV1, CommunityPluginHandleV1, CommunityPluginSubjectOutcomeV1 as Outcome,
+    InvocationBindingV1, InvocationContextSourceV1, InvocationContextV1,
 };
 use pos_runtime::community_plugin_host::{
     gate_community_release_v1, pinned_runtime_v1, CommunityPassOutcomeV1, CommunityPassV1,
     CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1, CommunityPluginExpectationV1,
-    CommunityPluginHostV1, CommunityPluginModeV1, CommunityPluginTrustMaterialV1,
-    GatedCommunityReleaseV1, MemberPassV1, PassResultV1, PluginTrustMaterialSourceV1,
-    PluginTrustMaterialUnavailableV1,
+    CommunityPluginHostErrorV1, CommunityPluginHostV1, CommunityPluginModeV1,
+    CommunityPluginTrustMaterialV1, GatedCommunityReleaseV1, MemberPassV1, PassResultV1,
+    PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1,
 };
+use pos_runtime::ObservationView;
 
 use super::subcase::WORKER;
 
@@ -62,6 +68,8 @@ pub const WATCHDOG: Duration = Duration::from_mins(5);
 pub const MEMORY: u64 = 16 * 1_048_576;
 /// The one Event type both fixtures' `drive` export emits.
 pub const EVENT_TYPE: &str = "prototype.driven";
+/// The observation on which both fixtures execute `unreachable` instead of driving.
+pub const TRAP_OBSERVATION: &[u8] = b"trap";
 
 /// One member of a lane.
 ///
@@ -190,11 +198,40 @@ pub fn publish_shape(
     })
 }
 
+/// A member's context source: the pass harness's source, steered by the member's lane.
+///
+/// While `trap` is set, the observation is [`TRAP_OBSERVATION`], so the real guest traps in the
+/// worker. The last byte of the invocation ID is flipped by `generation`, so a lane can run a
+/// pass under new invocation identities.
+struct Steered {
+    source: Source,
+    trap: Arc<AtomicBool>,
+    generation: Arc<AtomicU8>,
+}
+
+impl InvocationContextSourceV1 for Steered {
+    fn context(
+        &mut self,
+        timeline: TimelineId,
+        observation: &ObservationView<'_>,
+        binding: InvocationBindingV1,
+    ) -> Result<InvocationContextV1, CommunityPluginHostErrorV1> {
+        let mut context = self.source.context(timeline, observation, binding)?;
+        if self.trap.load(Ordering::SeqCst) {
+            context.invocation.observation_bytes = TRAP_OBSERVATION.to_vec();
+        }
+        context.invocation.invocation_id[15] ^= self.generation.load(Ordering::SeqCst);
+        Ok(context)
+    }
+}
+
 /// What a lane's members are built from.
 struct Setup<'a> {
     signed: &'a SignedWorld,
     material: CommunityPluginTrustMaterialV1,
     refuse: Arc<AtomicBool>,
+    trap: Arc<AtomicBool>,
+    generation: Arc<AtomicU8>,
     profile: CommunityPluginExecutionProfileV1,
 }
 
@@ -245,7 +282,11 @@ fn add_part(
     number: u8,
 ) -> BoxResult<Part> {
     let swap = Swap::of(setup.material.clone());
-    let source = Box::new(Source::switched(number, Arc::clone(&setup.refuse)));
+    let source = Box::new(Steered {
+        source: Source::switched(number, Arc::clone(&setup.refuse)),
+        trap: Arc::clone(&setup.trap),
+        generation: Arc::clone(&setup.generation),
+    });
     let built = pass.add_gated(GatedSpec {
         name: entry.spec.plugin_id,
         event_type: entry.spec.event_type,
@@ -302,6 +343,10 @@ pub struct Lane {
     pub parts: Vec<Part>,
     /// Set to make every member's context source refuse.
     pub refuse: Arc<AtomicBool>,
+    /// Set to make every member's real guest trap.
+    pub trap: Arc<AtomicBool>,
+    /// Flips the last byte of every member's invocation ID; zero keeps the harness's IDs.
+    pub generation: Arc<AtomicU8>,
 }
 
 impl Lane {
@@ -324,10 +369,14 @@ impl Lane {
         mut pass: PassWorld,
     ) -> BoxResult<Self> {
         let refuse = Arc::new(AtomicBool::new(false));
+        let trap = Arc::new(AtomicBool::new(false));
+        let generation = Arc::new(AtomicU8::new(0));
         let setup = Setup {
             signed,
             material: trust_material(signed, &signed.material()?),
             refuse: Arc::clone(&refuse),
+            trap: Arc::clone(&trap),
+            generation: Arc::clone(&generation),
             profile: profile(mode),
         };
         let mut parts = Vec::new();
@@ -345,6 +394,8 @@ impl Lane {
             host: CommunityPluginHostV1::new(members),
             parts,
             refuse,
+            trap,
+            generation,
         })
     }
 

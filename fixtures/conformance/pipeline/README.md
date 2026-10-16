@@ -61,6 +61,23 @@ community proposal of a reserved host type would need a new guest Component;
 the `COMMUNITY-RESERVED-PROPOSAL` exclusion records it, and only the
 first-party refusal of that proposal is pinned.
 
+`PCF-CPH-005` to `PCF-CPH-009` (#633) cover failure containment and fail-closed
+composition. A Driver of either class that fails while it stages (a real guest
+trap on the worker, or a first-party Driver failure) discards the whole pass,
+the other class's staged output included; the sibling stays available, only
+the trapping community Plugin is quarantined (`Trapped`, recorded but not
+compared), and the next pass commits. A failed pass launches one worker for the
+failing step, a first-party Plugin with the same domain contract is never run
+in its place, a quarantined Plugin refuses the whole pass, and recovery is a new
+pass under new invocation identities. A missing, unavailable or invalid Plugin
+of either class gets the same typed refusal: `MissingImplementation`,
+`ImplementationUnavailable` before any Driver runs, and
+`IncompatibleImplementation(Isolation)` from exact resolution. Only the
+community path has a release, so a release that is not active is refused at the
+trust gate and one with a denied capability never becomes a Driver. An invalid
+community guest output needs a new guest Component; the `INVALID-GUEST-OUTPUT`
+exclusion records it.
+
 The community pass world runs on `MemoryStore` only, so every case names the
 `memory` store, and the `SQLITE-STORE` exclusion records that this profile
 proves no SQLite parity of the community path. The other exclusions name the
