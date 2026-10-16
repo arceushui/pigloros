@@ -371,7 +371,7 @@ fn require_shared_fork(
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-pub(crate) mod tests {
+pub mod tests {
     use crate::ReleaseHealthV1;
     use pos_core::store::EventReadBounds;
 
