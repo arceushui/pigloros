@@ -5310,6 +5310,7 @@ name = "pos-plugin-worker"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "pos-core",
  "pos-crypto",
  "pos-plugin-conformance-adapter",
  "pos-plugin-host",
@@ -5318,6 +5319,7 @@ dependencies = [
  "pos-reference",
  "pos-runtime",
  "serde_json",
+ "sha2 0.11.0",
 ]
 
 [[package]]
