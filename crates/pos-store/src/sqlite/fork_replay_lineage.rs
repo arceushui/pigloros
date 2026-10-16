@@ -375,6 +375,45 @@ mod tests {
     }
 
     #[test]
+    fn descending_nested_fork_cut_refuses_the_public_logical_head() -> Fallible<()> {
+        let (mut store, _, child) = fixture()?;
+        let nested = store.fork(child, Seq::from_u64(1), "nested lineage")?.id();
+        let limits = ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000)?;
+        // Both Forks initially inherit the root's one Event. A nested cut of
+        // zero contradicts the child's inherited prefix of one, even though
+        // each native metadata row remains individually well-formed.
+        for (cut, expected) in [
+            (1_i64, Ok(Seq::from_u64(1))),
+            (0, Err(Error::Read(ReadError::CorruptAuthority))),
+            (1, Ok(Seq::from_u64(1))),
+        ] {
+            assert_eq!(
+                store.conn.execute(
+                    "UPDATE timelines SET fork_seq=?1 WHERE id=?2",
+                    params![cut, nested.to_string()],
+                )?,
+                1
+            );
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let interval = store.begin_protected_effect_interval()?;
+            assert_eq!(
+                store.fork_replay_logical_head(nested, 8, &mut budget),
+                expected
+            );
+            // Corrupt stored coordinates are not a failed resource debit.
+            budget.check_time()?;
+            store.finish_protected_effect_interval(
+                interval,
+                ErasureProtectedEffectDispositionV1::Rollback,
+            )?;
+            assert!(store.conn.is_autocommit());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn native_lineage_decoder_binds_selected_identity_and_root_shape() -> Fallible<()> {
         let conn = rusqlite::Connection::open_in_memory()?;
         let target = TimelineId::new();
