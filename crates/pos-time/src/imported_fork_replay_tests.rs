@@ -427,7 +427,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
             // verifier/admission counter, registry and release authority.
             assert_eq!(std::fs::copy(&image, &path)?, image.metadata()?.len());
             let path = path.to_str().ok_or("utf-8 path")?;
-            let mut sqlite = SqliteStore::open(path)?;
+            let sqlite = SqliteStore::open(path)?;
             let committed =
                 sqlite.read_committed(child, requirement.publication_logical_head().as_u64())?;
             assert_eq!(committed.record_id, requirement.signed_manifest_record_id());
