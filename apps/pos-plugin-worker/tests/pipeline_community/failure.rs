@@ -296,7 +296,7 @@ fn no_fallback() -> BoxResult<Capture> {
     record_pass(&mut capture, "failed", &failed);
     record_pass(&mut capture, "quarantined", &quarantined);
     record(&mut capture, "recovered", &recovered.observed);
-    capture.record(STORE, "recovered.community-receipts", &mixed.receipts());
+    capture.record(STORE, "recovered.community-receipts", mixed.receipts());
     capture.record(STORE, "recovered.fresh-id-new-receipt", renewed);
     Ok(capture)
 }

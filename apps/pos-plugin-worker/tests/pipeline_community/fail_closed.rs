@@ -293,7 +293,7 @@ fn denied_release() -> BoxResult<(String, bool)> {
         source: Box::new(Source::numbered(1)),
         register: true,
     });
-    let refusal = built.err().map(HostError::name).unwrap_or("accepted");
+    let refusal = built.err().map_or("accepted", HostError::name);
     Ok((refusal.to_owned(), snapshot(&pass.registry) == before))
 }
 
