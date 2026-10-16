@@ -51,8 +51,8 @@ use pos_runtime::counterfactual::coordinator::{
     CounterfactualFrontierSourceV1, CounterfactualFrozenArtifactsV1, CounterfactualHostPreflightV1,
     CounterfactualInterventionAuthorityV1, CounterfactualPendingCommitV1,
     CounterfactualProvisionalOutputV1, CounterfactualStagedTickV1, CounterfactualTickFailureV1,
-    CounterfactualTickInputsV1, CounterfactualTickStagerV1, FrozenArtifactAvailabilityV1 as Avail,
-    InterventionDecisionV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1, ENDOGENOUS_ARTIFACT_CLASS_V1,
+    CounterfactualTickInputsV1, FrozenArtifactAvailabilityV1 as Avail, InterventionDecisionV1,
+    COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1, ENDOGENOUS_ARTIFACT_CLASS_V1,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
@@ -833,7 +833,8 @@ struct Seen {
     fixed_policy: Vec<FrozenArtifactDescriptorV1>,
 }
 
-/// Stages `drafts` Events of `event_type`, or fails.
+/// Stages `drafts` Events of `event_type`, or fails; [`DeclaringStager`]
+/// adds each Tick's declaration.
 struct Stager {
     drafts: Option<u8>,
     event_type: &'static str,
@@ -848,9 +849,8 @@ impl Stager {
             seen: Vec::new(),
         }
     }
-}
 
-impl CounterfactualTickStagerV1 for Stager {
+    /// Record the staged inputs and stage the Tick's drafts.
     fn stage_tick(
         &mut self,
         inputs: &CounterfactualTickInputsV1<'_>,
@@ -998,16 +998,6 @@ struct DeclaringStager {
     tamper: Option<(u64, DeclarationTamper)>,
 }
 
-impl DeclaringStager {
-    fn new(source: &Source, first: u64, inner: Stager) -> TestResult<Self> {
-        Ok(Self {
-            inner,
-            declarations: declarations(source, first)?,
-            tamper: None,
-        })
-    }
-}
-
 impl CounterfactualDeclaringTickStagerV1 for DeclaringStager {
     fn stage_tick_with_dependencies(
         &mut self,
@@ -1124,6 +1114,19 @@ struct Setup<B> {
     coordinator: CounterfactualCoordinatorV1<B>,
     source: Source,
     fixture: Fixture,
+    /// The [`declarations`] of `source` from [`FIRST_RECORD_TICK`].
+    declared: BTreeMap<u64, Declaration>,
+}
+
+impl<B> Setup<B> {
+    /// A stager that stages like `inner` and declares the base records.
+    fn declaring(&self, inner: Stager) -> DeclaringStager {
+        DeclaringStager {
+            inner,
+            declarations: self.declared.clone(),
+            tamper: None,
+        }
+    }
 }
 
 /// A committed factual Tick of one step node that owns `first..=last`.
@@ -1201,9 +1204,11 @@ fn setup_cut<B: Backend>(
     };
     (spec.facts)(&mut facts);
     store.publish_counterfactual_facts(fork, facts)?;
+    let declared = declarations(&source, FIRST_RECORD_TICK)?;
     Ok(Setup {
         coordinator: CounterfactualCoordinatorV1::new(store),
         source,
+        declared,
         fixture: Fixture {
             root,
             fork,
@@ -1240,16 +1245,17 @@ const fn request(fixture: &Fixture) -> CounterfactualAdmissionRequestV1<'_> {
     }
 }
 
-/// Admit the base request with a default authority and a two-draft stager.
-fn admit<B: Backend>(setup: &mut Setup<B>) -> (Admission, Stager) {
-    let mut stager = Stager::drafting(2);
+/// Admit the base request with a default authority and a two-draft stager
+/// that declares the base records; return what the stager saw.
+fn admit<B: RecordingBackend>(setup: &mut Setup<B>) -> (Admission, Stager) {
+    let mut stager = setup.declaring(Stager::drafting(2));
     let result = setup.coordinator.admit(
         &request(&setup.fixture),
         &Authority::default(),
         &mut setup.source,
         &mut stager,
     );
-    (result, stager)
+    (result, stager.inner)
 }
 
 /// The frontier the `pos-time` port derives for this fixture.
@@ -1421,7 +1427,7 @@ fn assert_generation_reads<B: Backend>(
     Ok(())
 }
 
-fn commits_one_generation_and_the_first_tick<B: Backend>() -> TestResult {
+fn commits_one_generation_and_the_first_tick<B: RecordingBackend>() -> TestResult {
     let mut setup = setup::<B>(&BASE)?;
     let frontier = expected_frontier(&setup)?;
     let fork = setup.fixture.fork;
@@ -1483,7 +1489,7 @@ fn commits_one_generation_and_the_first_tick<B: Backend>() -> TestResult {
 }
 both_backends!(commits_one_generation_and_the_first_tick);
 
-fn unknown_edge_fallback_recomputes_from_the_cut<B: Backend>() -> TestResult {
+fn unknown_edge_fallback_recomputes_from_the_cut<B: RecordingBackend>() -> TestResult {
     let mut setup = setup::<B>(&Spec {
         policy: UnknownEdgePolicyV1::FullSuffixFromCut,
         omitted: WEATHER_EDGE,
@@ -1524,7 +1530,7 @@ fn unknown_edge_fallback_recomputes_from_the_cut<B: Backend>() -> TestResult {
 }
 both_backends!(unknown_edge_fallback_recomputes_from_the_cut);
 
-fn superseding_plan_records_a_changed_intervention<B: Backend>() -> TestResult {
+fn superseding_plan_records_a_changed_intervention<B: RecordingBackend>() -> TestResult {
     let mut setup = setup::<B>(&Spec {
         plan: |plan| plan.previous_plan_digest = Some([0x99; 32]),
         ..BASE
@@ -1544,9 +1550,9 @@ fn superseding_plan_records_a_changed_intervention<B: Backend>() -> TestResult {
 }
 both_backends!(superseding_plan_records_a_changed_intervention);
 
-fn invalid_plan_and_classified_fork_are_rejected_first<B: Backend>() -> TestResult {
+fn invalid_plan_and_classified_fork_are_rejected_first<B: RecordingBackend>() -> TestResult {
     let mut setup = setup::<B>(&BASE)?;
-    let mut stager = Stager::drafting(2);
+    let mut stager = setup.declaring(Stager::drafting(2));
     let mut corrupt = setup.fixture.plan.clone();
     corrupt.plan_digest = [1; 32];
     let result = setup.coordinator.admit(
@@ -1561,14 +1567,14 @@ fn invalid_plan_and_classified_fork_are_rejected_first<B: Backend>() -> TestResu
     );
     assert_rejected(
         &setup,
-        &(result, stager),
+        &(result, stager.inner),
         &AdmissionError::Plan(CounterfactualPlanContractErrorV1::DigestMismatch),
         0,
     )?;
 
     // ADR-099 FAR1-admitted Forks are a deferred integration: rejected
     // before any authority, store, graph, or stager call.
-    let mut stager = Stager::drafting(2);
+    let mut stager = setup.declaring(Stager::drafting(2));
     let result = setup.coordinator.admit(
         &CounterfactualAdmissionRequestV1 {
             fork_append_authority: CounterfactualForkAppendAuthorityV1::ClassifiedAdmission,
@@ -1582,7 +1588,7 @@ fn invalid_plan_and_classified_fork_are_rejected_first<B: Backend>() -> TestResu
     );
     assert_rejected(
         &setup,
-        &(result, stager),
+        &(result, stager.inner),
         &AdmissionError::ClassifiedForkUnsupported,
         0,
     )?;
@@ -1591,7 +1597,7 @@ fn invalid_plan_and_classified_fork_are_rejected_first<B: Backend>() -> TestResu
 }
 both_backends!(invalid_plan_and_classified_fork_are_rejected_first);
 
-fn intervention_authority_denials_are_closed<B: Backend>() -> TestResult {
+fn intervention_authority_denials_are_closed<B: RecordingBackend>() -> TestResult {
     let cases = [
         (
             vec![(INTERVENTION_B_ID, InterventionDecisionV1::Unauthorized)],
@@ -1619,25 +1625,25 @@ fn intervention_authority_denials_are_closed<B: Backend>() -> TestResult {
     ];
     for (denials, expected) in cases {
         let mut setup = setup::<B>(&BASE)?;
-        let mut stager = Stager::drafting(2);
+        let mut stager = setup.declaring(Stager::drafting(2));
         let result = setup.coordinator.admit(
             &request(&setup.fixture),
             &Authority { denials },
             &mut setup.source,
             &mut stager,
         );
-        assert_rejected(&setup, &(result, stager), &expected, 0)?;
+        assert_rejected(&setup, &(result, stager.inner), &expected, 0)?;
         assert_eq!(setup.source.calls, 0);
     }
     Ok(())
 }
 both_backends!(intervention_authority_denials_are_closed);
 
-fn profile_and_trust_policy_must_be_the_plans<B: Backend>() -> TestResult {
+fn profile_and_trust_policy_must_be_the_plans<B: RecordingBackend>() -> TestResult {
     let mut setup = setup::<B>(&BASE)?;
     let mut profile = setup.fixture.profile.clone();
     profile.profile_digest = [9; 32];
-    let mut stager = Stager::drafting(2);
+    let mut stager = setup.declaring(Stager::drafting(2));
     let result = setup.coordinator.admit(
         &CounterfactualAdmissionRequestV1 {
             execution_profile: &profile,
@@ -1649,14 +1655,14 @@ fn profile_and_trust_policy_must_be_the_plans<B: Backend>() -> TestResult {
     );
     assert_rejected(
         &setup,
-        &(result, stager),
+        &(result, stager.inner),
         &AdmissionError::IncompatibleExecutionProfile,
         0,
     )?;
 
     let mut snapshot = setup.fixture.snapshot.clone();
     snapshot.epoch += 1;
-    let mut stager = Stager::drafting(2);
+    let mut stager = setup.declaring(Stager::drafting(2));
     let result = setup.coordinator.admit(
         &CounterfactualAdmissionRequestV1 {
             trust_policy: &snapshot,
@@ -1668,7 +1674,7 @@ fn profile_and_trust_policy_must_be_the_plans<B: Backend>() -> TestResult {
     );
     assert_rejected(
         &setup,
-        &(result, stager),
+        &(result, stager.inner),
         &AdmissionError::TrustPolicyMismatch,
         0,
     )?;
@@ -1677,10 +1683,10 @@ fn profile_and_trust_policy_must_be_the_plans<B: Backend>() -> TestResult {
 }
 both_backends!(profile_and_trust_policy_must_be_the_plans);
 
-fn fork_and_parent_cut_must_match<B: Backend>() -> TestResult {
+fn fork_and_parent_cut_must_match<B: RecordingBackend>() -> TestResult {
     // A Timeline that is not a published Fork.
     let mut root = setup::<B>(&BASE)?;
-    let mut stager = Stager::drafting(2);
+    let mut stager = root.declaring(Stager::drafting(2));
     let result = root.coordinator.admit(
         &CounterfactualAdmissionRequestV1 {
             fork: root.fixture.root,
@@ -1692,7 +1698,7 @@ fn fork_and_parent_cut_must_match<B: Backend>() -> TestResult {
     );
     assert_rejected(
         &root,
-        &(result, stager),
+        &(result, stager.inner),
         &AdmissionError::Store(CounterfactualStoreErrorV1::ForkNotFound),
         0,
     )?;
@@ -1711,7 +1717,7 @@ fn fork_and_parent_cut_must_match<B: Backend>() -> TestResult {
 }
 both_backends!(fork_and_parent_cut_must_match);
 
-fn incomplete_dependency_graph_is_rejected<B: Backend>() -> TestResult {
+fn incomplete_dependency_graph_is_rejected<B: RecordingBackend>() -> TestResult {
     let mut setup = setup::<B>(&Spec {
         omitted: WEATHER_EDGE,
         ..BASE
@@ -1725,7 +1731,7 @@ fn incomplete_dependency_graph_is_rejected<B: Backend>() -> TestResult {
 }
 both_backends!(incomplete_dependency_graph_is_rejected);
 
-fn derived_frontier_is_revalidated_and_bound<B: Backend>() -> TestResult {
+fn derived_frontier_is_revalidated_and_bound<B: RecordingBackend>() -> TestResult {
     let cases: [FrontierCase; 9] = [
         (
             |frontier| {
@@ -1837,7 +1843,7 @@ const SEED_TAMPERS: [Tamper; 5] = [
     },
 ];
 
-fn frontier_seeds_must_be_the_plans_interventions<B: Backend>() -> TestResult {
+fn frontier_seeds_must_be_the_plans_interventions<B: RecordingBackend>() -> TestResult {
     for tamper in SEED_TAMPERS {
         let mut setup = setup::<B>(&BASE)?;
         // The tampered record still passes the standalone RCF1 validation.
@@ -1858,7 +1864,7 @@ fn frontier_seeds_must_be_the_plans_interventions<B: Backend>() -> TestResult {
 }
 both_backends!(frontier_seeds_must_be_the_plans_interventions);
 
-fn derived_frontier_range_is_enforced<B: Backend>() -> TestResult {
+fn derived_frontier_range_is_enforced<B: RecordingBackend>() -> TestResult {
     let cases: [Tamper; 2] = [
         // An affected node before the global frontier.
         |frontier| {
@@ -1909,7 +1915,7 @@ fn derived_frontier_range_is_enforced<B: Backend>() -> TestResult {
 }
 both_backends!(derived_frontier_range_is_enforced);
 
-fn fallback_frontier_is_exactly_the_first_tick<B: Backend>() -> TestResult {
+fn fallback_frontier_is_exactly_the_first_tick<B: RecordingBackend>() -> TestResult {
     let cases: [Tamper; 2] = [
         // A later scheduler position of the first Tick.
         |frontier| {
@@ -1937,7 +1943,7 @@ fn fallback_frontier_is_exactly_the_first_tick<B: Backend>() -> TestResult {
 }
 both_backends!(fallback_frontier_is_exactly_the_first_tick);
 
-fn suffix_ending_on_the_frontier_tick_has_a_valid_range<B: Backend>() -> TestResult {
+fn suffix_ending_on_the_frontier_tick_has_a_valid_range<B: RecordingBackend>() -> TestResult {
     let mut setup = setup::<B>(&Spec {
         plan: |plan| {
             plan.horizon_tick = 11;
@@ -1978,7 +1984,7 @@ fn suffix_ending_on_the_frontier_tick_has_a_valid_range<B: Backend>() -> TestRes
 }
 both_backends!(suffix_ending_on_the_frontier_tick_has_a_valid_range);
 
-fn invalidation_contract_violations_are_rejected<B: Backend>() -> TestResult {
+fn invalidation_contract_violations_are_rejected<B: RecordingBackend>() -> TestResult {
     let mut setup = setup::<B>(&BASE)?;
     let unordered = [[0xc3; 32], [0xc1; 32]];
     let cases = [
@@ -1998,19 +2004,19 @@ fn invalidation_contract_violations_are_rejected<B: Backend>() -> TestResult {
         ),
     ];
     for (request, expected) in cases {
-        let mut stager = Stager::drafting(2);
+        let mut stager = setup.declaring(Stager::drafting(2));
         let result = setup.coordinator.admit(
             &request,
             &Authority::default(),
             &mut setup.source,
             &mut stager,
         );
-        assert_rejected(&setup, &(result, stager), &expected, 0)?;
+        assert_rejected(&setup, &(result, stager.inner), &expected, 0)?;
     }
 
     // The store port refuses to quarantine the transaction's own RCF1.
     let own = [expected_frontier(&setup)?.frontier_digest];
-    let mut stager = Stager::drafting(2);
+    let mut stager = setup.declaring(Stager::drafting(2));
     let result = setup.coordinator.admit(
         &CounterfactualAdmissionRequestV1 {
             invalid_checkpoint_digests: &own,
@@ -2022,14 +2028,14 @@ fn invalidation_contract_violations_are_rejected<B: Backend>() -> TestResult {
     );
     assert_rejected(
         &setup,
-        &(result, stager),
+        &(result, stager.inner),
         &AdmissionError::Store(CounterfactualStoreErrorV1::BindingMismatch),
         1,
     )
 }
 both_backends!(invalidation_contract_violations_are_rejected);
 
-fn failed_or_empty_staging_commits_nothing<B: Backend>() -> TestResult {
+fn failed_or_empty_staging_commits_nothing<B: RecordingBackend>() -> TestResult {
     let cases = [
         (
             Stager {
@@ -2052,27 +2058,29 @@ fn failed_or_empty_staging_commits_nothing<B: Backend>() -> TestResult {
             AdmissionError::ReservedEventType,
         ),
     ];
-    for (mut stager, expected) in cases {
+    for (inner, expected) in cases {
         let mut setup = setup::<B>(&BASE)?;
+        let mut stager = setup.declaring(inner);
         let result = setup.coordinator.admit(
             &request(&setup.fixture),
             &Authority::default(),
             &mut setup.source,
             &mut stager,
         );
-        assert_rejected(&setup, &(result, stager), &expected, 1)?;
+        assert_rejected(&setup, &(result, stager.inner), &expected, 1)?;
     }
     Ok(())
 }
 both_backends!(failed_or_empty_staging_commits_nothing);
 
-fn first_tick_event_type_is_bounded<B: Backend>() -> TestResult {
+fn first_tick_event_type_is_bounded<B: RecordingBackend>() -> TestResult {
     // The longest accepted type is admitted: generation 1 holds the Tick.
     let mut accepting = setup::<B>(&BASE)?;
-    let mut stager = Stager {
+    let longest = Stager {
         event_type: LONGEST_TYPE,
         ..Stager::drafting(1)
     };
+    let mut stager = accepting.declaring(longest);
     let result = accepting.coordinator.admit(
         &request(&accepting.fixture),
         &Authority::default(),
@@ -2093,10 +2101,11 @@ fn first_tick_event_type_is_bounded<B: Backend>() -> TestResult {
 
     // One byte more is rejected while staging and commits nothing.
     let mut rejecting = setup::<B>(&BASE)?;
-    let mut stager = Stager {
+    let long = Stager {
         event_type: LONG_TYPE,
         ..Stager::drafting(1)
     };
+    let mut stager = rejecting.declaring(long);
     let result = rejecting.coordinator.admit(
         &request(&rejecting.fixture),
         &Authority::default(),
@@ -2105,14 +2114,14 @@ fn first_tick_event_type_is_bounded<B: Backend>() -> TestResult {
     );
     assert_rejected(
         &rejecting,
-        &(result, stager),
+        &(result, stager.inner),
         &AdmissionError::StagedTickRejected(PipelineContractErrorV1::FieldOutOfBounds),
         1,
     )
 }
 both_backends!(first_tick_event_type_is_bounded);
 
-fn changed_persisted_facts_conflict_atomically<B: Backend>() -> TestResult {
+fn changed_persisted_facts_conflict_atomically<B: RecordingBackend>() -> TestResult {
     let cases: [FactsCase; 6] = [
         (
             |facts| facts.plan_digest = Hash::from_bytes([1; 32]),
@@ -2185,12 +2194,15 @@ fn store_outcomes_without_a_commit_map_to_closed_errors() -> TestResult {
         &outcome,
         &AdmissionError::InvalidationConflict(InvalidationConflictV1::LogicalHead),
         1,
-    )
+    )?;
+    assert_eq!(conflicting.coordinator.store().commands.len(), 1);
+    Ok(())
 }
 
 #[test]
 fn unknown_commit_outcomes_are_resolved_by_the_recovery_read() -> TestResult {
-    // The commit landed: its receipt is returned as if it had been reported.
+    // The commit landed with its record: its receipt is returned as if it
+    // had been reported, and the record is readable at the generation.
     let mut landed = setup::<Rigged<LANDED_UNKNOWN>>(&BASE)?;
     let fork = landed.fixture.fork;
     let receipt = admit(&mut landed).0?;
@@ -2206,9 +2218,13 @@ fn unknown_commit_outcomes_are_resolved_by_the_recovery_read() -> TestResult {
     );
     assert_eq!(store.current_fork_generation(fork)?, generation);
     assert_eq!(store.recovery_reads.get(), 1);
+    assert_eq!(
+        Some(recorded(store, generation)?),
+        landed.declared.get(&FIRST_RECORD_TICK).cloned()
+    );
 
-    // The commit was lost: nothing committed, so it is a storage failure
-    // after which the admission may be retried.
+    // The commit was lost: nothing committed, the record included, so it is
+    // a storage failure after which the admission may be retried.
     let mut lost = setup::<Rigged<LOST_UNKNOWN>>(&BASE)?;
     let outcome = admit(&mut lost);
     assert_rejected(
@@ -2217,7 +2233,13 @@ fn unknown_commit_outcomes_are_resolved_by_the_recovery_read() -> TestResult {
         &AdmissionError::Store(CounterfactualStoreErrorV1::StorageFailure),
         1,
     )?;
-    assert_eq!(lost.coordinator.store().recovery_reads.get(), 1);
+    let store = lost.coordinator.store();
+    assert_eq!(store.recovery_reads.get(), 1);
+    let empty = ForkGenerationV1 {
+        fork: lost.fixture.fork,
+        generation: 0,
+    };
+    assert_eq!(recorded(store, empty)?, (Vec::new(), Vec::new()));
 
     // Another invalidation committed the generation.
     let mut other = setup::<Rigged<OTHER_RECEIPT>>(&BASE)?;
@@ -2263,13 +2285,13 @@ fn failed_recovery_read_keeps_the_commit_outcome_unknown() -> TestResult {
 // Dependency records
 // ---------------------------------------------------------------------------
 
-/// Admit the base request through the recording path with `stager`.
+/// Admit the base request with `stager`.
 ///
 /// A macro, not a function: the admission error is too large to return from
 /// a helper (`result_large_err`).
 macro_rules! admit_recording {
     ($setup:ident, $stager:expr_2021) => {
-        $setup.coordinator.admit_with_dependencies(
+        $setup.coordinator.admit(
             &request(&$setup.fixture),
             &Authority::default(),
             &mut $setup.source,
@@ -2285,7 +2307,7 @@ const FIRST_RECORD_TICK: u64 = 11;
 fn first_tick_dependencies_are_recorded_with_the_commit<B: RecordingBackend>() -> TestResult {
     let mut setup = setup::<B>(&BASE)?;
     let fork = setup.fixture.fork;
-    let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
+    let mut stager = setup.declaring(Stager::drafting(2));
     let receipt = admit_recording!(setup, &mut stager)?;
     let generation = ForkGenerationV1 {
         fork,
@@ -2294,7 +2316,7 @@ fn first_tick_dependencies_are_recorded_with_the_commit<B: RecordingBackend>() -
     assert_eq!(receipt.generation(), generation);
     assert_eq!(receipt.first_tick(), FIRST_RECORD_TICK);
     assert_eq!(receipt.first_tick_head(), Seq::from_u64(CUT_SEQ + 2));
-    // The declaring stager saw exactly the staged inputs of the plain one.
+    // The stager saw the staged inputs of the first Tick.
     assert_eq!(stager.inner.seen.len(), 1);
     assert_eq!(stager.inner.seen[0].tick, FIRST_RECORD_TICK);
     assert_eq!(stager.inner.seen[0].generation, generation);
@@ -2318,13 +2340,13 @@ fn first_tick_dependencies_are_recorded_with_the_commit<B: RecordingBackend>() -
     assert_eq!(store.current_fork_generation(fork)?, generation);
     assert_eq!(store.logical_head(fork)?, Seq::from_u64(CUT_SEQ + 2));
 
-    // The plain path records nothing: the next generation starts empty and
-    // the recorded generation is no longer readable.
+    // The next generation records its own first Tick, and the recorded
+    // generation is no longer readable.
     let second = admit(&mut setup).0?;
     assert_eq!(second.generation().generation, 2);
     assert_eq!(
         recorded(setup.coordinator.store(), second.generation())?,
-        (Vec::new(), Vec::new())
+        declared
     );
     assert_eq!(
         setup
@@ -2433,8 +2455,7 @@ const DECLARATION_CASES: [DeclarationCase; 8] = [
 fn rejected_declarations_are_typed_and_commit_nothing<B: RecordingBackend>() -> TestResult {
     for (tamper, expected) in DECLARATION_CASES {
         let mut setup = setup::<B>(&BASE)?;
-        let mut stager =
-            DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
+        let mut stager = setup.declaring(Stager::drafting(2));
         stager.tamper = Some((FIRST_RECORD_TICK, tamper));
         let result = admit_recording!(setup, &mut stager);
         let outcome = (result, stager.inner);
@@ -2451,8 +2472,7 @@ fn rejected_declarations_are_typed_and_commit_nothing<B: RecordingBackend>() -> 
 
         // A retry with the declaration repaired admits the same plan from
         // the same staged inputs.
-        let mut retry =
-            DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
+        let mut retry = setup.declaring(Stager::drafting(2));
         let receipt = admit_recording!(setup, &mut retry)?;
         assert_eq!(retry.inner.seen, outcome.1.seen);
         let declared = retry.declarations.get(&FIRST_RECORD_TICK).cloned();
@@ -2467,7 +2487,7 @@ both_backends!(rejected_declarations_are_typed_and_commit_nothing);
 
 fn drafts_are_checked_before_the_declaration<B: RecordingBackend>() -> TestResult {
     let mut setup = setup::<B>(&BASE)?;
-    let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(0))?;
+    let mut stager = setup.declaring(Stager::drafting(0));
     stager.tamper = Some((FIRST_RECORD_TICK, root_at_the_cut));
     let result = admit_recording!(setup, &mut stager);
     assert_rejected(
@@ -2477,12 +2497,12 @@ fn drafts_are_checked_before_the_declaration<B: RecordingBackend>() -> TestResul
         1,
     )?;
 
-    // A stager that fails to stage is the plain failure.
+    // A stager that fails to stage is a `PluginFailure`.
     let failing = Stager {
         drafts: None,
         ..Stager::drafting(0)
     };
-    let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, failing)?;
+    let mut stager = setup.declaring(failing);
     let result = admit_recording!(setup, &mut stager);
     assert_rejected(
         &setup,
@@ -2552,22 +2572,15 @@ fn the_parent_cut_must_be_a_recorded_tick_boundary<B: RecordingBackend>() -> Tes
     prefixes.push(Vec::new());
     for prefix in prefixes {
         let mut setup = setup_seeded::<B>(&BASE, &prefix)?;
-        let mut stager =
-            DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
-        let result = admit_recording!(setup, &mut stager);
-        let outcome = (result, stager.inner);
+        let outcome = admit(&mut setup);
         assert_rejected(&setup, &outcome, &AdmissionError::ParentCutNotFound, 0)?;
         assert_eq!(setup.source.calls, 0);
-
-        // The plain path uses a host-built graph and is unchanged.
-        assert!(admit(&mut setup).0.is_ok());
     }
 
     // A cut after the last recorded Tick, in the unrecorded tail, is a
     // boundary of that Tick.
     let mut setup = setup_seeded::<B>(&BASE, &trailing_tail_prefix()?)?;
-    let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
-    let receipt = admit_recording!(setup, &mut stager)?;
+    let receipt = admit(&mut setup).0?;
     assert_eq!(receipt.generation().generation, 1);
     Ok(())
 }
@@ -2588,8 +2601,7 @@ fn dense_prefix() -> TestResult<Vec<SeededFactualTickV1>> {
 
 fn a_dense_recorded_prefix_is_accepted<B: RecordingBackend>() -> TestResult {
     let mut setup = setup_cut::<B>(&DENSE, &dense_prefix()?, DENSE_EVENTS)?;
-    let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
-    let receipt = admit_recording!(setup, &mut stager)?;
+    let receipt = admit(&mut setup).0?;
     assert_eq!(receipt.generation().generation, 1);
     Ok(())
 }
@@ -2598,74 +2610,14 @@ both_backends!(a_dense_recorded_prefix_is_accepted);
 #[test]
 fn a_failed_prefix_read_is_a_store_failure_before_staging() -> TestResult {
     let mut setup = setup::<Rigged<PREFIX_READ_FAILS>>(&BASE)?;
-    let mut stager = DeclaringStager::new(&setup.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
-    let result = admit_recording!(setup, &mut stager);
+    let outcome = admit(&mut setup);
     assert_rejected(
         &setup,
-        &(result, stager.inner),
+        &outcome,
         &AdmissionError::Store(CounterfactualStoreErrorV1::StorageFailure),
         0,
     )?;
     assert_eq!(setup.source.calls, 0);
-    Ok(())
-}
-
-#[test]
-fn recording_commit_outcomes_are_resolved_like_plain_ones() -> TestResult {
-    // The commit landed with its record: the receipt is returned as if it
-    // had been reported, and the record is readable at the generation.
-    let mut landed = setup::<Rigged<LANDED_UNKNOWN>>(&BASE)?;
-    let mut stager = DeclaringStager::new(&landed.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
-    let receipt = admit_recording!(landed, &mut stager)?;
-    let generation = receipt.generation();
-    assert_eq!(generation.generation, 1);
-    assert_eq!(landed.coordinator.store().recovery_reads.get(), 1);
-    assert_eq!(
-        Some(recorded(landed.coordinator.store(), generation)?),
-        stager.declarations.get(&FIRST_RECORD_TICK).cloned()
-    );
-
-    // The commit was lost: nothing committed, the record included, and the
-    // admission may be retried.
-    let mut lost = setup::<Rigged<LOST_UNKNOWN>>(&BASE)?;
-    let mut stager = DeclaringStager::new(&lost.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
-    let result = admit_recording!(lost, &mut stager);
-    assert_rejected(
-        &lost,
-        &(result, stager.inner),
-        &AdmissionError::Store(CounterfactualStoreErrorV1::StorageFailure),
-        1,
-    )?;
-    let empty = ForkGenerationV1 {
-        fork: lost.fixture.fork,
-        generation: 0,
-    };
-    assert_eq!(
-        recorded(lost.coordinator.store(), empty)?,
-        (Vec::new(), Vec::new())
-    );
-
-    // A rejected and a conflicting commit map as on the plain path.
-    let mut failing = setup::<Rigged<COMMIT_FAILS>>(&BASE)?;
-    let mut stager = DeclaringStager::new(&failing.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
-    let result = admit_recording!(failing, &mut stager);
-    assert_rejected(
-        &failing,
-        &(result, stager.inner),
-        &AdmissionError::Store(CounterfactualStoreErrorV1::StorageFailure),
-        1,
-    )?;
-    let mut conflicting = setup::<Rigged<COMMIT_CONFLICTS>>(&BASE)?;
-    let mut stager =
-        DeclaringStager::new(&conflicting.source, FIRST_RECORD_TICK, Stager::drafting(2))?;
-    let result = admit_recording!(conflicting, &mut stager);
-    assert_rejected(
-        &conflicting,
-        &(result, stager.inner),
-        &AdmissionError::InvalidationConflict(InvalidationConflictV1::LogicalHead),
-        1,
-    )?;
-    assert_eq!(conflicting.coordinator.store().commands.len(), 1);
     Ok(())
 }
 
@@ -2793,7 +2745,7 @@ const PREFLIGHT_CASES: [PreflightCase; 10] = [
     ),
 ];
 
-fn preflight_rejections_are_closed_and_touch_nothing<B: Backend>() -> TestResult {
+fn preflight_rejections_are_closed_and_touch_nothing<B: RecordingBackend>() -> TestResult {
     for (edit, overrides, expected) in PREFLIGHT_CASES {
         let mut setup = setup::<B>(&Spec { plan: edit, ..BASE })?;
         setup.fixture.artifacts.overrides = overrides;
@@ -2827,7 +2779,7 @@ fn preflight_rejections_make_no_store_call() -> TestResult {
     Ok(())
 }
 
-fn first_preflight_error_wins<B: Backend>() -> TestResult {
+fn first_preflight_error_wins<B: RecordingBackend>() -> TestResult {
     let structural = ErasureReplayClaimV1::StructuralOnly;
     let peels: [Peel; 5] = [
         Peel {
@@ -2879,7 +2831,7 @@ fn first_preflight_error_wins<B: Backend>() -> TestResult {
             replay_claim: &evaluated,
             ..request(&setup.fixture).preflight
         };
-        let mut stager = Stager::drafting(2);
+        let mut stager = setup.declaring(Stager::drafting(2));
         let result = setup.coordinator.admit(
             &CounterfactualAdmissionRequestV1 {
                 preflight,
@@ -2889,7 +2841,7 @@ fn first_preflight_error_wins<B: Backend>() -> TestResult {
             &mut setup.source,
             &mut stager,
         );
-        assert_rejected(&setup, &(result, stager), &peel.expected, 0)?;
+        assert_rejected(&setup, &(result, stager.inner), &peel.expected, 0)?;
         assert_eq!(setup.source.calls, 0);
     }
     // With every host fact matching the plan, the same plan is admitted.
@@ -2898,7 +2850,7 @@ fn first_preflight_error_wins<B: Backend>() -> TestResult {
 }
 both_backends!(first_preflight_error_wins);
 
-fn preflight_follows_the_profile_and_precedes_the_store_reads<B: Backend>() -> TestResult {
+fn preflight_follows_the_profile_and_precedes_the_store_reads<B: RecordingBackend>() -> TestResult {
     let mut setup = setup::<B>(&BASE)?;
     let mut profile = setup.fixture.profile.clone();
     profile.profile_digest = [9; 32];
@@ -2925,21 +2877,21 @@ fn preflight_follows_the_profile_and_precedes_the_store_reads<B: Backend>() -> T
         ),
     ];
     for (admission, expected) in cases {
-        let mut stager = Stager::drafting(2);
+        let mut stager = setup.declaring(Stager::drafting(2));
         let result = setup.coordinator.admit(
             &admission,
             &Authority::default(),
             &mut setup.source,
             &mut stager,
         );
-        assert_rejected(&setup, &(result, stager), &expected, 0)?;
+        assert_rejected(&setup, &(result, stager.inner), &expected, 0)?;
         assert_eq!(setup.source.calls, 0);
     }
     Ok(())
 }
 both_backends!(preflight_follows_the_profile_and_precedes_the_store_reads);
 
-fn replay_claim_must_not_be_stronger_than_the_hosts<B: Backend>() -> TestResult {
+fn replay_claim_must_not_be_stronger_than_the_hosts<B: RecordingBackend>() -> TestResult {
     for (plan_rank, spec) in CLAIM_SPECS.iter().enumerate() {
         for (host_rank, host) in HOST_CLAIMS.into_iter().enumerate() {
             let mut scenario = setup::<B>(spec)?;
