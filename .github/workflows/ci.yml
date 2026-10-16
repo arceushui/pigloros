@@ -205,9 +205,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # Same debuginfo level as coverage and ASan. Line tables keep panic
-      # locations and backtraces while cutting link time and the cached
-      # target size.
+      # Coverage and ASan already build tests with line tables. They keep
+      # panic locations and backtraces while cutting link time and the
+      # cached target size.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
