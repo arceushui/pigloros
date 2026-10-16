@@ -25,8 +25,8 @@ use pos_runtime::{
     WorldReplayVerifierV1,
 };
 use pos_store::{
-    memory::MemoryStore, sqlite::SqliteStore, ForkReplayReadLimitsV1, ForkReplayRequirementV1,
-    StoreConfig,
+    memory::MemoryStore, sqlite::SqliteStore, ForkManifestPublicationPortV1,
+    ForkReplayReadLimitsV1, ForkReplayRequirementV1, StoreConfig,
 };
 
 use crate::test_support::{with_release, ProtectedFixture};

@@ -579,7 +579,8 @@ fn missing_imported_fork_admission_refuses_both_reads_until_restored() -> Fallib
             1,
         );
     }
-    assert_reads_accept(&reopen(path)?, &world, Shape::Mixed, origin)
+    let store = reopen(path)?;
+    assert_reads_accept(&store, &world, Shape::Mixed, origin)
 }
 
 #[test]
