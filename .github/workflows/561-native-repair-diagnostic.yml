@@ -11,29 +11,41 @@ permissions:
 jobs:
   native-repair:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 65
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: never
       RUSTFLAGS: -D warnings
+      RUSTC_BOOTSTRAP: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
         with:
-          ref: 187bbf2564fd424236bf7a74c2c8d36ca4f97665
+          ref: 4ba0318f61fe9a8d61fd6669d909b4609ef7bbee
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        timeout-minutes: 5
         with:
           toolchain: 1.97.1
-          components: clippy
+          components: clippy, llvm-tools-preview
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        timeout-minutes: 4
+        with:
+          tool: cargo-llvm-cov@0.9.1
       - name: Record exact candidate identity
+        timeout-minutes: 1
         run: |
           set -euo pipefail
           mkdir -p artifacts
           git rev-parse HEAD | tee artifacts/source-sha.txt
-          test "$(git rev-parse HEAD)" = 187bbf2564fd424236bf7a74c2c8d36ca4f97665
+          test "$(git rev-parse HEAD)" = 4ba0318f61fe9a8d61fd6669d909b4609ef7bbee
           rustc -Vv | tee artifacts/rustc.txt
+          cargo llvm-cov --version | tee artifacts/llvm-cov-version.txt
+          id | tee artifacts/runner-identity.txt
+          test "$(id -u)" -ne 0
       - name: Exercise the real inter-statement SQLite writer
+        timeout-minutes: 8
         run: |
           set -euo pipefail
           cargo test -p pos-store --all-features --locked --lib \
@@ -42,6 +54,7 @@ jobs:
           grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' artifacts/native-race.log
           bash scripts/assert-no-ignored-in-test-summary.sh artifacts/native-race.log
       - name: Exercise the distinct principal-lookup inter-statement writer
+        timeout-minutes: 2
         run: |
           set -euo pipefail
           cargo test -p pos-store --all-features --locked --lib \
@@ -50,6 +63,7 @@ jobs:
           grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' artifacts/principal-race.log
           bash scripts/assert-no-ignored-in-test-summary.sh artifacts/principal-race.log
       - name: Exercise real principal column refusal and exact native debits
+        timeout-minutes: 2
         run: |
           set -euo pipefail
           cargo test -p pos-store --all-features --locked --lib \
@@ -57,7 +71,17 @@ jobs:
             -- --exact --include-ignored 2>&1 | tee artifacts/principal-column-refusal.log
           grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' artifacts/principal-column-refusal.log
           bash scripts/assert-no-ignored-in-test-summary.sh artifacts/principal-column-refusal.log
+      - name: Exercise real suffix length refusal and exact funded retry
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          cargo test -p pos-store --all-features --locked --lib \
+            sqlite::fork_replay_suffix::tests::native_event_id_redaction_refuses_suffix_length_before_materialization \
+            -- --exact --include-ignored 2>&1 | tee artifacts/suffix-length-refusal.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' artifacts/suffix-length-refusal.log
+          bash scripts/assert-no-ignored-in-test-summary.sh artifacts/suffix-length-refusal.log
       - name: Exercise all native interval-acquisition regressions
+        timeout-minutes: 2
         run: |
           set -euo pipefail
           cargo test -p pos-store --all-features --locked --lib \
@@ -66,6 +90,7 @@ jobs:
           grep -F 'test result: ok. 6 passed; 0 failed; 0 ignored;' artifacts/native-interval.log
           bash scripts/assert-no-ignored-in-test-summary.sh artifacts/native-interval.log
       - name: Exercise the repaired public receipt and chain-hash contracts
+        timeout-minutes: 3
         run: |
           set -euo pipefail
           cargo test -p pos-store --all-features --locked \
@@ -74,13 +99,51 @@ jobs:
           grep -F 'test result: ok. 2 passed; 0 failed; 0 ignored;' artifacts/public-contracts.log
           grep -F 'test result: ok. 9 passed; 0 failed; 0 ignored;' artifacts/public-contracts.log
           bash scripts/assert-no-ignored-in-test-summary.sh artifacts/public-contracts.log
-      - name: Check the affected crate with strict Clippy
+      - name: Measure Store library coverage and assert native refusal regions
+        timeout-minutes: 18
         run: |
           set -euo pipefail
-          cargo clippy -p pos-store --all-features --all-targets --locked \
+          timeout --signal=TERM --kill-after=30s 16m \
+            cargo llvm-cov -p pos-store --all-features --locked --lib \
+            --json --output-path artifacts/coverage.json \
+            -- --include-ignored 2>&1 | tee artifacts/coverage-test.log
+          grep -F 'test result: ok. 1107 passed; 0 failed; 0 ignored;' artifacts/coverage-test.log
+          bash scripts/assert-no-ignored-in-test-summary.sh artifacts/coverage-test.log
+          python3 - <<'PY' | tee artifacts/target-regions.json
+          import json
+          from pathlib import Path
+          expected = [
+              ("fork_replay.rs", 114, 51, ".ok_or(INTERVAL_STORAGE_ERROR)?;"),
+              ("fork_replay_operation.rs", 83, 65, "let row = row.ok_or(Error::CorruptAuthority)?;"),
+              ("fork_replay_operation.rs", 89, 66, ".map_err(|_| Error::StorageIndeterminate)?;"),
+              ("fork_replay_suffix.rs", 70, 81, "row.get(4).map_err(|_| CorruptAuthority)?;"),
+          ]
+          report = json.loads(Path("artifacts/coverage.json").read_text())
+          results = []
+          for name, line, column, source in expected:
+              path = "crates/pos-store/src/sqlite/" + name
+              assert Path(path).read_text().splitlines()[line - 1].strip() == source
+              files = [entry for data in report["data"] for entry in data["files"]
+                       if entry["filename"].endswith("/" + path)]
+              assert len(files) == 1, "missing or ambiguous Store coverage entry"
+              segments = [segment for segment in files[0]["segments"]
+                          if segment[0] == line and segment[1] == column
+                          and segment[3] and segment[4] and not segment[5]]
+              assert len(segments) == 1, "missing or ambiguous refusal segment"
+              results.append({"path": path, "source": source, "segment": segments[0]})
+          print(json.dumps(results))
+          assert all(item["segment"][2] > 0 for item in results), "native refusal region not executed"
+          PY
+      - name: Check the affected crate with strict Clippy
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 7m \
+            cargo clippy -p pos-store --all-features --all-targets --locked \
             -- -D warnings -W clippy::pedantic 2>&1 | tee artifacts/clippy.log
       - name: Preserve diagnostic evidence even on failure
         if: ${{ always() }}
+        timeout-minutes: 3
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: untrusted-561-native-repair-${{ github.run_id }}-${{ github.run_attempt }}
