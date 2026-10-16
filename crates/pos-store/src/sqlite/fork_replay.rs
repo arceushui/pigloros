@@ -87,6 +87,10 @@ impl ForkReplayAuthorityReadPortV1 for SqliteStore {
                         .interval
                         .execute_batch(super::begin_immediate_sql());
                     writer_owned = !connections.interval.is_autocommit();
+                    #[cfg(test)]
+                    if writer_owned {
+                        interval_tests::after_acquisition(interval_tests::Acquisition::Writer);
+                    }
                     begun.map_err(|_| INTERVAL_STORAGE_ERROR)
                 })?;
                 if let Some(reader) = connections.reader {
@@ -97,6 +101,8 @@ impl ForkReplayAuthorityReadPortV1 for SqliteStore {
                         let begun = reader.execute_batch("BEGIN DEFERRED");
                         if !reader.is_autocommit() {
                             reader_owned = Some(reader);
+                            #[cfg(test)]
+                            interval_tests::after_acquisition(interval_tests::Acquisition::Reader);
                         }
                         begun.map_err(|_| INTERVAL_STORAGE_ERROR)
                     })?;
