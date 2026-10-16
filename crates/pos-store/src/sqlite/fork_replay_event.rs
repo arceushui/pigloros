@@ -1030,6 +1030,65 @@ mod tests {
     }
 
     #[test]
+    fn raw_decoder_rejects_native_shape_drift_after_a_valid_probe() -> Fallible<()> {
+        let (conn, timeline) = raw_fixture()?;
+        let key = timeline.to_string();
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(4, 8, 64, 16_384, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let mut context = NativeReadContextV1::protected(&mut budget);
+        let lengths = {
+            let mut statement = conn.prepare(EXACT_EVENT)?;
+            let mut rows = statement.query(params![&key, 1])?;
+            EventRowLengthsV1::probe(rows.next()?.ok_or("missing probe row")?, &mut context)?
+                .ok_or("missing probed Event")?
+        };
+        let control = read_probed_event(&conn, &key, &lengths, timeline, 0, &mut context)?;
+        assert_eq!(control.event().seq, Seq::from_u64(1));
+        drop(control);
+
+        // A held production snapshot forbids this transition. Deliberately
+        // violate it outside an interval to exercise the raw decoder's second
+        // barrier, not the earlier public reader's type probe.
+        conn.execute_batch("UPDATE events SET wall_time = 1.5")?;
+        assert_eq!(
+            read_probed_event(&conn, &key, &lengths, timeline, 0, &mut context).err(),
+            Some(Error::CorruptAuthority)
+        );
+        {
+            let mut statement = conn.prepare(EVENT_FIELDS)?;
+            let mut rows = statement.query(params![&key, 1])?;
+            let row = rows.next()?.ok_or("missing raw Event")?;
+            // This getter can otherwise accept REAL: its refusal specifically
+            // witnesses the native storage-class check, not i64 conversion.
+            assert!(matches!(row.get_ref(5)?, ValueRef::Real(_)));
+            let mut reader = EventRowReaderV1::new(row, &mut context, Some(&lengths));
+            assert!(matches!(
+                reader.get::<f64>(5),
+                Err(CoreError::ArtifactUnavailable)
+            ));
+        }
+        {
+            // A malformed native projection must also preserve the closed
+            // error mapping; no fabricated Row or production hook is needed.
+            let mut statement = conn.prepare("SELECT 1")?;
+            let mut rows = statement.query([])?;
+            let row = rows.next()?.ok_or("missing short native row")?;
+            let mut reader = EventRowReaderV1::new(row, &mut context, Some(&lengths));
+            assert!(matches!(
+                reader.get::<f64>(5),
+                Err(CoreError::ArtifactUnavailable)
+            ));
+        }
+        conn.execute_batch("UPDATE events SET wall_time = 0")?;
+        let restored = read_probed_event(&conn, &key, &lengths, timeline, 0, &mut context)?;
+        assert_eq!(restored.event().seq, Seq::from_u64(1));
+        budget.check_time()?;
+        Ok(())
+    }
+
+    #[test]
     fn actual_probe_rejects_types_widths_and_oversized_fields_before_raw_getters() -> Fallible<()> {
         for (column, value) in [
             ("event_id", Value::Text("x".repeat(27))),
