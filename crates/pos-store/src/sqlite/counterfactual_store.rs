@@ -219,8 +219,9 @@ mod dependency;
 
 type StoreError = CounterfactualStoreErrorV1;
 
-/// A storage step whose inner result carries a closed port rejection.
-type Staged<T> = Result<Result<T, StoreError>, CoreError>;
+/// A storage step whose inner result carries a closed port rejection, by
+/// default the counterfactual port's own.
+type Staged<T, E = StoreError> = Result<Result<T, E>, CoreError>;
 
 /// Quarantine kind of an invalid-artifact index member.
 const INVALID_ARTIFACT_KIND: i64 = 0;
@@ -811,8 +812,8 @@ fn decode_generation_record(
     }
 }
 
-fn settle<T>(staged: Staged<T>) -> Result<T, StoreError> {
-    staged.unwrap_or_else(|error| Err(counterfactual_port_error(&error)))
+fn settle<T, E: From<StoreError>>(staged: Staged<T, E>) -> Result<T, E> {
+    staged.unwrap_or_else(|error| Err(counterfactual_port_error(&error).into()))
 }
 
 /// Statements that open, release, and abandon one port read: a deferred read
@@ -839,8 +840,16 @@ const READ_SAVEPOINT: ReadScopeSqlV1 = ReadScopeSqlV1 {
 };
 
 /// Run `next` only when the previous staged step accepted.
-fn then_staged<T, U>(staged: Staged<T>, next: impl FnOnce(T) -> Staged<U>) -> Staged<U> {
+fn then_staged<T, U, E>(
+    staged: Staged<T, E>,
+    next: impl FnOnce(T) -> Staged<U, E>,
+) -> Staged<U, E> {
     staged.and_then(|accepted| accepted.map_or_else(|rejected| Ok(Err(rejected)), next))
+}
+
+/// Lift a step rejected with the port's own error into a wider rejection.
+fn lift<T, E: From<StoreError>>(staged: Staged<T>) -> Staged<T, E> {
+    staged.map(|accepted| accepted.map_err(E::from))
 }
 
 fn read_fork_state(conn: &Connection, fork: TimelineId) -> Staged<ForkStateV1> {
@@ -1191,7 +1200,10 @@ impl SqliteStore {
     /// a storage error, so a rejection decided after a write (a staged head
     /// that did not advance) commits nothing either. If the rollback itself
     /// fails, the unknown outcome wins over the rejection.
-    fn in_counterfactual_scope<T>(&self, work: impl FnOnce(&Self) -> Staged<T>) -> Staged<T> {
+    fn in_counterfactual_scope<T, E>(
+        &self,
+        work: impl FnOnce(&Self) -> Staged<T, E>,
+    ) -> Staged<T, E> {
         let mut rejection = None;
         begin_immediate_scope(&self.conn)
             .and_then(|scope| {
@@ -1228,13 +1240,15 @@ impl SqliteStore {
     /// connection is still inside a transaction marks it in doubt until it is
     /// next seen in autocommit. One reported back in autocommit has nothing
     /// left open, so it is settled at once.
-    fn settle_write<T>(&self, staged: Staged<T>) -> Result<T, StoreError> {
-        let settled = settle(staged);
-        let unknown = matches!(settled, Err(StoreError::OutcomeUnknown));
+    fn settle_write<T, E: From<StoreError>>(&self, staged: Staged<T, E>) -> Result<T, E> {
+        // Inner rejections never carry `OutcomeUnknown`: only
+        // `counterfactual_port_error` maps `StorageOutcomeUnknown` onto it, so
+        // the in-doubt mark keys on the outer storage error.
+        let unknown = matches!(staged, Err(CoreError::StorageOutcomeUnknown(_)));
         self.counterfactual_write_in_doubt.set(
             (self.counterfactual_write_in_doubt.get() || unknown) && !self.conn.is_autocommit(),
         );
-        settled
+        settle(staged)
     }
 
     /// Run a multi-statement port read at one consistent read point: one
@@ -1306,12 +1320,13 @@ impl SqliteStore {
     }
 
     /// Append one recomputation Tick under the generic append guard and
-    /// return the Fork Logical Head after it.
+    /// return the Fork Logical Head after it: the Event-append step of a
+    /// generic Fork's invalidation and later Ticks.
     fn append_tick_in_transaction(
         &self,
         fork: TimelineId,
         drafts: &PipelineDraftBatchV1,
-    ) -> Result<Seq, CoreError> {
+    ) -> Staged<Seq> {
         crate::ensure_non_geographic_drafts(drafts.drafts(), fork)
             .and_then(|()| {
                 drafts.drafts().iter().try_for_each(|draft| {
@@ -1325,20 +1340,24 @@ impl SqliteStore {
                 })
             })
             .and_then(|()| Self::logical_head_unchecked_on(&self.conn, fork))
+            .map(Ok)
     }
 
-    /// Append the first Tick and build the receipt from its head, then record
-    /// the generation and quarantine.
-    fn write_counterfactual_generation(
+    /// Append the first Tick through the caller's Event-append `step` and
+    /// build the receipt from its head, then record the generation and
+    /// quarantine.
+    fn write_counterfactual_generation<E: From<StoreError>>(
         &self,
         command: &CounterfactualInvalidationCommandV1,
         generation: i64,
         first_tick: i64,
-    ) -> Staged<CounterfactualInvalidationOutcomeV1> {
+        step: impl Fn(&Self, TimelineId, &PipelineDraftBatchV1) -> Staged<Seq, E>,
+    ) -> Staged<CounterfactualInvalidationOutcomeV1, E> {
         let fork = command.fork();
-        let staged = self
-            .append_tick_in_transaction(fork, command.first_tick_drafts())
-            .map(|head| command.committed_receipt(&COUNTERFACTUAL_SEAL, head));
+        let appended = step(self, fork, command.first_tick_drafts());
+        let staged = then_staged(appended, |head| {
+            lift(Ok(command.committed_receipt(&COUNTERFACTUAL_SEAL, head)))
+        });
         then_staged(staged, |receipt| {
             insert_generation(
                 &self.conn,
@@ -1410,7 +1429,12 @@ impl CounterfactualStorePortV1 for SqliteStore {
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
     ) -> Result<CounterfactualInvalidationOutcomeV1, StoreError> {
-        self.commit_invalidation_recording(command, None)
+        self.commit_invalidation_recording(
+            command,
+            None,
+            Self::writable_counterfactual_basis,
+            Self::append_tick_in_transaction,
+        )
     }
 
     fn append_counterfactual_tick(
@@ -1419,7 +1443,14 @@ impl CounterfactualStorePortV1 for SqliteStore {
         expected: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
     ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
-        self.append_tick_recording(fork, expected, drafts, None)
+        self.append_tick_recording(
+            fork,
+            expected,
+            drafts,
+            None,
+            Self::writable_counterfactual_basis,
+            Self::append_tick_in_transaction,
+        )
     }
 
     fn current_fork_generation(&self, fork: TimelineId) -> Result<ForkGenerationV1, StoreError> {
@@ -1761,14 +1792,14 @@ mod tests {
         // A known failure leaves reads inside the transaction available.
         assert!(store.conn.execute_batch("BEGIN").is_ok());
         assert_eq!(
-            store.settle_write::<()>(Err(CoreError::Storage("known".to_owned()))),
+            store.settle_write::<(), StoreError>(Err(CoreError::Storage("known".to_owned()))),
             Err(StoreError::StorageFailure)
         );
         assert_eq!(store.current_fork_generation(fork), Ok(settled));
 
         // An unknown outcome refuses every read until the transaction settles.
         assert_eq!(
-            store.settle_write::<()>(Err(unknown())),
+            store.settle_write::<(), StoreError>(Err(unknown())),
             Err(StoreError::OutcomeUnknown)
         );
         assert_eq!(
@@ -1794,7 +1825,7 @@ mod tests {
         // marks it in doubt, so reads in a transaction the host opens by
         // other means than a protected-effect interval are answered.
         assert_eq!(
-            store.settle_write::<()>(Err(unknown())),
+            store.settle_write::<(), StoreError>(Err(unknown())),
             Err(StoreError::OutcomeUnknown)
         );
         assert!(!store.counterfactual_write_in_doubt.get());

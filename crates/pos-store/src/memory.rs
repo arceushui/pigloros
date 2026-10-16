@@ -70,9 +70,9 @@ use pos_core::{
     ForkAppendOperationV1, ForkAppendSourceIdentityV1, ForkAttributionOriginV1,
     ForkAuthorityOriginV1, ForkClassifiedEventV1, ForkClassifiedProvenanceV1,
     ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
-    ForkClassifierTableV1, ForkEventClassifierV1, ForkInterventionAdmissionV1,
-    ForkPublicationArtifactV1, ForkPublicationBindingV1, ForkPublicationOperationV1,
-    ForkPublicationReceiptV1, KeyIdentityV1, KeyRegistryErrorV1,
+    ForkClassifierTableV1, ForkEventAppendRequestV1, ForkEventClassifierV1,
+    ForkInterventionAdmissionV1, ForkPublicationArtifactV1, ForkPublicationBindingV1,
+    ForkPublicationOperationV1, ForkPublicationReceiptV1, KeyIdentityV1, KeyRegistryErrorV1,
     KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1, LocalCutOwnerCommitKindV1,
     LocalCutOwnerCommitV1, LocalCutOwnerErrorV1, LocalCutOwnerPersistencePortV1,
     LocalCutOwnerRequestV1, LocalCutOwnerStateV1, ManifestOwnerAdmissionCommitKindV1,
@@ -2236,6 +2236,74 @@ impl MemoryStore {
             })
     }
 
+    /// Insert one classified Event whose operation has no FOP1 entry yet.
+    ///
+    /// The fresh-only part of a classified append, mirroring `SQLite`: the
+    /// caller has built the FEQ1 request, validated the permit (yielding
+    /// `table`) and ruled out an existing operation, so this classifies the
+    /// source and installs the Event, its EOR1 and its FOP1 with no
+    /// idempotence branch.
+    fn insert_fresh_classified_append(
+        &mut self,
+        table: &ForkClassifierTableV1,
+        request: &ForkEventAppendRequestV1,
+        draft: &EventDraft,
+    ) -> Result<ForkClassifiedAppendReceiptV1, ForkEventAuthorityErrorV1> {
+        let classification = ForkEventClassifierV1::from_table(table)
+            .classify_identity(&request.source)
+            .map_err(|_| ForkEventAuthorityErrorV1::ClassifierRejected)?;
+        let hasher: &dyn Hasher = self.hasher.as_ref();
+        // Every fallible step precedes the first mutation, matching SQLite's
+        // all-or-nothing transaction.
+        let (event, provenance) = self
+            .timelines
+            .get_mut(&request.child_timeline_id)
+            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
+            .and_then(|state| {
+                let prefix = state
+                    .timeline
+                    .meta
+                    .fork_point
+                    .map_or(0, |(_, fork)| fork.as_u64());
+                Self::prepare_one_for_state(state, draft, hasher)
+                    .and_then(|(local_event, chain_head)| {
+                        Self::logical_event(prefix, local_event.clone())
+                            .map(|event| (local_event, chain_head, event))
+                    })
+                    .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
+                    .and_then(|(local_event, chain_head, event)| {
+                        ForkClassifiedProvenanceV1::derive(
+                            request,
+                            table,
+                            classification,
+                            ForkClassifiedEventV1 {
+                                event_id: event.id,
+                                logical_seq: event.seq.as_u64(),
+                                wall_time: event.wall_time,
+                                payload_hash: event.payload_hash,
+                            },
+                        )
+                        .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)
+                        .map(|provenance| {
+                            Self::commit_prepared_to_state(state, local_event, chain_head);
+                            (event, provenance)
+                        })
+                    })
+            })?;
+        self.event_ids.insert(event.id);
+        self.fork_event_origins.insert(event.id, provenance.origin);
+        if let Some(intervention) = provenance.intervention {
+            self.fork_intervention_admissions
+                .insert(event.id, intervention);
+        }
+        self.fork_append_operations
+            .insert(request.operation_id, provenance.operation.clone());
+        Ok(ForkClassifiedAppendReceiptV1 {
+            event,
+            operation: provenance.operation,
+        })
+    }
+
     fn validate_classified_permit(
         &self,
         permit: &ForkAppendSourcePermitV1,
@@ -2476,59 +2544,7 @@ impl ForkEventProvenanceAuthorityPortV1 for MemoryStore {
                 }
             });
         }
-        let classification = ForkEventClassifierV1::from_table(&table)
-            .classify_identity(source)
-            .map_err(|_| ForkEventAuthorityErrorV1::ClassifierRejected)?;
-        let hasher: &dyn Hasher = self.hasher.as_ref();
-        // Every fallible step precedes the first mutation, matching SQLite's
-        // all-or-nothing transaction.
-        let (event, provenance) = self
-            .timelines
-            .get_mut(&child_timeline_id)
-            .ok_or(ForkEventAuthorityErrorV1::CorruptAuthority)
-            .and_then(|state| {
-                let prefix = state
-                    .timeline
-                    .meta
-                    .fork_point
-                    .map_or(0, |(_, fork)| fork.as_u64());
-                Self::prepare_one_for_state(state, &draft, hasher)
-                    .and_then(|(local_event, chain_head)| {
-                        Self::logical_event(prefix, local_event.clone())
-                            .map(|event| (local_event, chain_head, event))
-                    })
-                    .map_err(|_| ForkEventAuthorityErrorV1::StorageIndeterminate)
-                    .and_then(|(local_event, chain_head, event)| {
-                        ForkClassifiedProvenanceV1::derive(
-                            &request,
-                            &table,
-                            classification,
-                            ForkClassifiedEventV1 {
-                                event_id: event.id,
-                                logical_seq: event.seq.as_u64(),
-                                wall_time: event.wall_time,
-                                payload_hash: event.payload_hash,
-                            },
-                        )
-                        .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)
-                        .map(|provenance| {
-                            Self::commit_prepared_to_state(state, local_event, chain_head);
-                            (event, provenance)
-                        })
-                    })
-            })?;
-        self.event_ids.insert(event.id);
-        self.fork_event_origins.insert(event.id, provenance.origin);
-        if let Some(intervention) = provenance.intervention {
-            self.fork_intervention_admissions
-                .insert(event.id, intervention);
-        }
-        self.fork_append_operations
-            .insert(operation_id, provenance.operation.clone());
-        Ok(ForkClassifiedAppendReceiptV1 {
-            event,
-            operation: provenance.operation,
-        })
+        self.insert_fresh_classified_append(&table, &request, &draft)
     }
 
     fn recover_classified_append(

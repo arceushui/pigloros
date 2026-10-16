@@ -92,7 +92,7 @@ use pos_core::{
     TickDependencyRecordV1, TimelineId,
 };
 
-use super::{fenced_result, CounterfactualForkStateV1};
+use super::{fenced_result, stage_tick, CounterfactualForkStateV1, ForkEntriesV1, StagedTickV1};
 use crate::factual_tick_plan::{plan_tick, FactualInstallV1, PlannedTickV1, TickPrefixV1};
 use crate::memory::MemoryStore;
 
@@ -535,13 +535,14 @@ fn revalidated<T: DependencyPagedRowV1 + Clone>(
 impl MemoryStore {
     /// Check the first record of an invalidation against its command, once the
     /// Fork resolves.
-    fn admit_first_record(
+    fn admit_first_record<E: From<StoreError>>(
         &self,
         command: &CounterfactualInvalidationCommandV1,
         record: &TickDependencyRecordV1,
-    ) -> Result<(), StoreError> {
+    ) -> Result<(), E> {
         let state = self.counterfactual_fork(command.fork());
-        state.and_then(|_| admit_first(command.first_tick(), record))
+        let admitted = state.and_then(|_| admit_first(command.first_tick(), record));
+        admitted.map_err(E::from)
     }
 
     /// Check a later record against the Fork's stored set, once the Fork
@@ -564,35 +565,38 @@ impl MemoryStore {
         forks.get_mut(&fork).into_iter().for_each(install);
     }
 
-    /// Admit the first record, commit the invalidation, and record the rows
-    /// under the new generation only if it committed.
-    fn commit_recorded(
+    /// Admit the first record, commit the invalidation with the caller's
+    /// staging `step`, and record the rows under the new generation only if it
+    /// committed.
+    fn commit_recorded<E: From<StoreError>>(
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
         record: &TickDependencyRecordV1,
-    ) -> Result<CounterfactualInvalidationOutcomeV1, StoreError> {
+        step: impl Fn(&ForkEntriesV1<'_>, &PipelineDraftBatchV1) -> Result<StagedTickV1, E>,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, E> {
         let admitted = self.admit_first_record(command, record);
-        let committed = admitted.and_then(|()| self.commit_visible_counterfactual(command));
+        let committed = admitted.and_then(|()| self.commit_visible_counterfactual(command, step));
         if let Ok(CounterfactualInvalidationOutcomeV1::Committed(_)) = &committed {
             self.install_dependencies(command.fork(), record);
         }
         committed
     }
 
-    /// Recheck the basis, admit the record, append the Tick, and record the
-    /// rows only after it installed.
-    fn append_recorded(
+    /// Recheck the basis, admit the record, append the Tick with the caller's
+    /// staging `step`, and record the rows only after it installed.
+    fn append_recorded<E: From<StoreError>>(
         &mut self,
         fork: TimelineId,
         expected: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
         record: &TickDependencyRecordV1,
-    ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
-        let basis = self.persisted_counterfactual_basis(fork);
+        step: impl Fn(&ForkEntriesV1<'_>, &PipelineDraftBatchV1) -> Result<StagedTickV1, E>,
+    ) -> Result<CounterfactualTickOutcomeV1, E> {
+        let basis = self.persisted_counterfactual_basis(fork).map_err(E::from);
         basis.and_then(|persisted| {
             let found = expected.first_conflict(&persisted);
             found.map_or_else(
-                || self.admit_and_append(fork, expected, drafts, record),
+                || self.admit_and_append(fork, expected, drafts, record, step),
                 |conflict| Ok(CounterfactualTickOutcomeV1::Stale(conflict)),
             )
         })
@@ -601,16 +605,17 @@ impl MemoryStore {
     /// Admit the record, append the Tick, and record the rows only after it
     /// installed. The caller just rechecked the basis, so `Stale` is
     /// unreachable here and any `Ok` append is the committed Tick.
-    fn admit_and_append(
+    fn admit_and_append<E: From<StoreError>>(
         &mut self,
         fork: TimelineId,
         expected: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
         record: &TickDependencyRecordV1,
-    ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
-        let admitted = self.admit_later_record(fork, record);
+        step: impl Fn(&ForkEntriesV1<'_>, &PipelineDraftBatchV1) -> Result<StagedTickV1, E>,
+    ) -> Result<CounterfactualTickOutcomeV1, E> {
+        let admitted = self.admit_later_record(fork, record).map_err(E::from);
         admitted.and_then(|()| {
-            let appended = self.append_visible_counterfactual_tick(fork, expected, drafts);
+            let appended = self.append_visible_counterfactual_tick(fork, expected, drafts, step);
             appended.inspect(|_| self.install_dependencies(fork, record))
         })
     }
@@ -728,7 +733,7 @@ impl CounterfactualDependencyRecordingPortV1 for MemoryStore {
         let write = self.with_erasure_fence(fork, APPEND, |store| {
             store
                 .ensure_generic_fork_append_is_rejected(fork)
-                .map(|()| store.commit_recorded(command, record))
+                .map(|()| store.commit_recorded(command, record, stage_tick))
         });
         fenced_result(write)
     }
@@ -743,7 +748,7 @@ impl CounterfactualDependencyRecordingPortV1 for MemoryStore {
         let write = self.with_erasure_fence(fork, APPEND, |store| {
             store
                 .ensure_generic_fork_append_is_rejected(fork)
-                .map(|()| store.append_recorded(fork, expected, drafts, record))
+                .map(|()| store.append_recorded(fork, expected, drafts, record, stage_tick))
         });
         fenced_result(write)
     }
