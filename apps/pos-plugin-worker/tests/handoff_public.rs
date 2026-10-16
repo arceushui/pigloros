@@ -15,7 +15,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use pos_plugin_host::pinned_runtime;
 use pos_plugin_publisher::test_support::{
     encoding::{Material, TICK, UTC},
     release::Shape,
@@ -29,12 +28,13 @@ use pos_plugin_supervisor::{
     ReceiptDispositionV1 as Disposition,
 };
 use pos_runtime::community_plugin_host::{
-    gate_community_release_v1, AtomicCommitFailureV1, CommunityPassOutcomeV1, CommunityPassV1,
-    CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1, CommunityPluginExpectationV1,
-    CommunityPluginHostErrorV1, CommunityPluginHostV1, CommunityPluginModeV1,
-    CommunityPluginTrustMaterialV1, ComponentTrapClassV1, GatedCommunityReleaseV1, MemberPassV1,
-    PassResultV1, PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1,
-    RevocationBasisV1 as Revoke, TrapReproductionV1, TrustDenialBasisV1 as Denial,
+    gate_community_release_v1, pinned_runtime_v1, AtomicCommitFailureV1, CommunityPassOutcomeV1,
+    CommunityPassV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
+    CommunityPluginExpectationV1, CommunityPluginHostErrorV1, CommunityPluginHostV1,
+    CommunityPluginModeV1, CommunityPluginTrustMaterialV1, ComponentTrapClassV1,
+    GatedCommunityReleaseV1, MemberPassV1, PassResultV1, PluginTrustMaterialSourceV1,
+    PluginTrustMaterialUnavailableV1, RevocationBasisV1 as Revoke, TrapReproductionV1,
+    TrustDenialBasisV1 as Denial,
 };
 
 type Error = CommunityPluginHostErrorV1;
@@ -153,11 +153,9 @@ fn trust_material(world: &SignedWorld, material: &Material) -> CommunityPluginTr
 }
 
 /// The host profile of `mode`: what the worker's own pinned runtime equals.
-fn profile(mode: Mode) -> BoxResult<CommunityPluginExecutionProfileV1> {
-    let runtime = pinned_runtime().map_err(|error| format!("{error:?}"))?;
+fn profile(mode: Mode) -> CommunityPluginExecutionProfileV1 {
     let ceilings = CommunityPluginCeilingsV1::V1;
-    let built = CommunityPluginExecutionProfileV1::new(mode, ceilings, Some(runtime));
-    Ok(built)
+    CommunityPluginExecutionProfileV1::new(mode, ceilings, Some(pinned_runtime_v1()))
 }
 
 /// A release published and installed in the signed world.
@@ -292,7 +290,7 @@ impl Lane {
             signed,
             material: trust_material(signed, &signed.material()?),
             refuse: Arc::clone(&refuse),
-            profile: profile(mode)?,
+            profile: profile(mode),
         };
         let mut pass = PassWorld::new(WORKER);
         let mut parts = Vec::new();

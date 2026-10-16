@@ -63,9 +63,10 @@ pub use negotiation::{
     COMMUNITY_PLUGIN_ABI_MAJOR_V1,
 };
 pub use profile::{
-    CeilingValuesV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
-    CommunityPluginModeV1, CommunityPluginProfileErrorV1, ExecutionLimitV1,
-    PinnedComponentRuntimeV1, PinnedEngineConfigV1, TrapOutcomeV1, TrapTableEntryV1,
+    pinned_runtime_v1, profile_digest_of, CeilingValuesV1, CommunityPluginCeilingsV1,
+    CommunityPluginExecutionProfileV1, CommunityPluginModeV1, CommunityPluginProfileErrorV1,
+    ExecutionLimitV1, PinnedComponentRuntimeV1, PinnedEngineConfigV1, TrapOutcomeV1,
+    TrapTableEntryV1,
 };
 #[cfg(target_os = "linux")]
 pub use trust_bytes::{

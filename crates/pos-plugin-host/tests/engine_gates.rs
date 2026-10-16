@@ -14,11 +14,10 @@ use common::{
 };
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
 use pos_plugin_host::{
-    pinned_runtime, ComponentHost, LoadError, LoadedComponent, PinnedExecutionV1,
-    RuntimeNotPinnedV1,
+    ComponentHost, LoadError, LoadedComponent, PinnedExecutionV1, RuntimeNotPinnedV1,
 };
 use pos_runtime::community_plugin_host::{
-    CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
+    pinned_runtime_v1, CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, ComponentTrapClassV1,
     PinnedComponentRuntimeV1, TrapReproductionV1, MAX_OBSERVATION_BYTES_V1,
 };
 
@@ -235,7 +234,7 @@ enum RuntimeChange {
 }
 
 fn runtime_with(change: &RuntimeChange) -> PinnedComponentRuntimeV1 {
-    let runtime = ok(pinned_runtime(), "pinned runtime");
+    let runtime = pinned_runtime_v1();
     let mut version = runtime.wasmtime_version().to_owned();
     let mut features = runtime.resolved_features().to_vec();
     let mut engine = runtime.engine();
