@@ -5426,6 +5426,7 @@ mod tests {
         ForkReplayLineageSubstitute,
         ForkReplayLineageMissing,
         ForkReplayHeadError(pos_store::ForkReplayLineageReadErrorV1),
+        ForkReplayOversizedHead,
         ForkReplayEventsError(pos_store::ForkReplayLineageReadErrorV1),
         ForkReplayEventCount,
         ForkReplayEventSequence,
@@ -6271,7 +6272,15 @@ mod tests {
             if let FaultModeV1::ForkReplayHeadError(error) = self.fault {
                 return Err(error);
             }
-            self.inner.fork_replay_logical_head(timeline, depth, budget)
+            self.inner
+                .fork_replay_logical_head(timeline, depth, budget)
+                .map(|head| {
+                    if self.fault == FaultModeV1::ForkReplayOversizedHead {
+                        Seq::from_u64(u64::from(u32::MAX) + 1)
+                    } else {
+                        head
+                    }
+                })
         }
 
         fn read_fork_replay_events(
@@ -6281,6 +6290,11 @@ mod tests {
             bounds: EventReadBounds,
             budget: &mut ForkReplayReadBudgetV1<'_>,
         ) -> Result<Vec<Event>, pos_store::ForkReplayLineageReadErrorV1> {
+            if self.fault == FaultModeV1::ForkReplayOversizedHead {
+                // A distinct refusal makes reaching materialization observable
+                // without allocating the adapter's claimed oversized history.
+                return Err(pos_store::ForkReplayLineageReadErrorV1::AccessFrozen);
+            }
             if let FaultModeV1::ForkReplayEventsError(error) = self.fault {
                 return Err(error);
             }

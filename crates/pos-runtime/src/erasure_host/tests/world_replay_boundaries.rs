@@ -439,6 +439,57 @@ fn native_head_and_event_errors_preserve_the_public_refusal_mapping() {
 }
 
 #[test]
+fn oversized_native_event_counts_refuse_before_materialization() {
+    let (mut host, closure) = replay_fault_host(FaultModeV1::ForkReplayOversizedHead);
+    let head = Seq::from_u64(u64::from(u32::MAX) + 1);
+    for (range, expected) in [
+        (SeqRange::all(), ErasureHostErrorV1::AdapterFailure),
+        (SeqRange::from_seq(head), ErasureHostErrorV1::AccessFrozen),
+    ] {
+        let requested = test_ok(WorldReplayUseV1::new(
+            closure.timeline_id(),
+            ErasureProtectedOperationV1::Read,
+            range,
+            head,
+            vec!["count".to_owned()],
+            Vec::new(),
+        ));
+        let generation = test_ok(host.gate.inventory_generation());
+        // Deliberately inconsistent adapter/verifier seam output, not a claim
+        // that this one-Event fixture contains billions of admitted Events.
+        let verified = crate::world_replay::test_verified_world_replay(
+            &closure,
+            &requested,
+            generation,
+            pos_core::ErasureReplayClaimV1::Exact,
+            test_ok(pos_store::ForkReplayReadLimitsV1::new(
+                8,
+                1_024,
+                262_144,
+                256 * 1024 * 1024,
+                30_000_000,
+            )),
+        );
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = test_ok(ForkReplayReadBudgetV1::new(
+            verified.fork_read_limits(),
+            start,
+            &mut clock,
+        ));
+        // The all-Event range cannot fit usize on 32-bit and exceeds the
+        // finite Event bound on 64-bit. A one-Event range at the same head
+        // reaches the adapter's distinct materialization refusal on both.
+        assert_eq!(
+            test_ok(host.read_sender()).read_world_replay_events(&verified, &mut budget),
+            Err(expected),
+        );
+        test_ok(budget.check_time());
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+}
+
+#[test]
 fn native_head_and_event_reads_latch_expiry_at_every_clock_boundary() {
     let (mut host, closure) = replay_fault_host(FaultModeV1::Passthrough);
     let requested = test_ok(WorldReplayUseV1::new(
