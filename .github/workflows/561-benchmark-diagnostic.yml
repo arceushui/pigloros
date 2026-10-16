@@ -11,8 +11,8 @@ permissions:
 jobs:
   compare:
     runs-on: ubuntu-24.04
-    # Two 15-minute builds plus eight 5-minute tests, with setup/upload reserve.
-    timeout-minutes: 80
+    # Two 12-minute builds plus eight 90-second measurements and setup reserve.
+    timeout-minutes: 45
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
@@ -25,26 +25,26 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 77d78af043af93a1b1a5ee97df8fcb54ab893b1e
+          ref: 7c7bc93575e947171d340c9efd7b2a22fc9fed9c
           path: baseline
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 77d78af043af93a1b1a5ee97df8fcb54ab893b1e
+          ref: 802a4af07d85fa58782599dc2a660f984d8fec5f
           path: candidate
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.97.1
       - name: Test diagnostic evidence validation
-        run: python3 harness/scripts/diagnose_561_test_profile.py --self-test
-      - name: Compare identical Replay tests with one dependency profile override
-        run: python3 harness/scripts/diagnose_561_test_profile.py
+        run: python3 harness/scripts/diagnose_561_benchmark.py --self-test
+      - name: Compare fixed baseline and current PR benchmark on one runner
+        run: python3 harness/scripts/diagnose_561_benchmark.py
       - name: Preserve untrusted diagnostic evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
-          name: untrusted-561-test-cost-${{ github.run_id }}-${{ github.run_attempt }}
+          name: untrusted-561-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 14
