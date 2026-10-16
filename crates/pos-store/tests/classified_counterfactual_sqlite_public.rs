@@ -202,7 +202,14 @@ impl World {
         let fork = self.fork;
         let expected = self.store.current_counterfactual_basis(fork)?;
         let lent = self.authority.lend(permit);
-        Ok(append_as(&mut self.store, &lent, fork, &expected, drafts, record))
+        Ok(append_as(
+            &mut self.store,
+            &lent,
+            fork,
+            &expected,
+            drafts,
+            record,
+        ))
     }
 
     fn append(

@@ -54,8 +54,9 @@ const DESCRIPTOR: Hash = Hash::from_bytes([8; 32]);
 /// The authentication adapter of the fixture Principal.
 const AUTHENTICATION_ADAPTER: &str = "classified-counterfactual.adapter";
 
-/// `SQLite` counts of every row kind a classified write on the Fork `?1`
-/// adds: own Events, `EOR1`, `FOP1`, generations, quarantine, artifacts,
+/// `SQLite` counts of every row kind a classified write on the Fork `?1` adds.
+///
+/// The kinds are own Events, `EOR1`, `FOP1`, generations, quarantine, artifacts,
 /// dependency records, nodes, and edges. `EOR1` rows carry no child column,
 /// so they are counted store-wide; `?1 = ?1` only keeps the one parameter
 /// every query binds.
@@ -128,7 +129,10 @@ fn evidence() -> Fallible<VerifiedAuthenticatedPrincipalEvidenceV1> {
         operation_nonce: [7; 32],
     };
     let signed = adapter_key()?.sign_authenticated_principal(record)?;
-    Ok(verify_authenticated_principal_evidence_v1(&policy()?, signed)?)
+    Ok(verify_authenticated_principal_evidence_v1(
+        &policy()?,
+        signed,
+    )?)
 }
 
 fn encode(value: &Value) -> Fallible<Vec<u8>> {
@@ -172,7 +176,10 @@ fn command<S: ForkAdmissionAuthorityBootstrapPortV1>(
 }
 
 fn route() -> Fallible<ForkEventSourceDescriptorV1> {
-    Ok(ForkEventSourceDescriptorV1::new("classified.route.v1", hash(0x45))?)
+    Ok(ForkEventSourceDescriptorV1::new(
+        "classified.route.v1",
+        hash(0x45),
+    )?)
 }
 
 /// The fixture classifier's one external route.
@@ -309,7 +316,13 @@ impl Authority {
         source: ForkAppendSourceIdentityV1,
     ) -> Fallible<ForkAppendSourcePermitV1> {
         let selected = classifier_source()?;
-        Ok(store.issue_append_source_permit(&self.issuer, &self.session, fork, &selected, source)?)
+        Ok(store.issue_append_source_permit(
+            &self.issuer,
+            &self.session,
+            fork,
+            &selected,
+            source,
+        )?)
     }
 
     /// Lend the live session and `permit` for one classified call.
@@ -383,7 +396,12 @@ fn record(
     origin: RecordedNodeOriginV1,
     nodes: Vec<DependencyNodeRecordV1>,
 ) -> Fallible<TickDependencyRecordV1> {
-    Ok(TickDependencyRecordV1::try_new(tick, origin, nodes, Vec::new())?)
+    Ok(TickDependencyRecordV1::try_new(
+        tick,
+        origin,
+        nodes,
+        Vec::new(),
+    )?)
 }
 
 /// One invalidation request; every field defaults to a fresh fixture Fork.

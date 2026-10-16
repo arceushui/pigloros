@@ -11,8 +11,8 @@ use std::sync::{Arc, Weak};
 use pos_core::{
     CounterfactualBasisV1, CounterfactualDependencyRecordingPortV1,
     CounterfactualInvalidationCommandV1, CounterfactualInvalidationOutcomeV1,
-    CounterfactualStoreErrorV1, CounterfactualTickOutcomeV1, Event, EventDraft, EventOriginRecordV1,
-    ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAppendOperationV1,
+    CounterfactualStoreErrorV1, CounterfactualTickOutcomeV1, Event, EventDraft,
+    EventOriginRecordV1, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAppendOperationV1,
     ForkAppendSourceIdentityV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
     ForkClassifierTableV1, ForkEventAppendRequestV1, ForkEventClassifierV1,
     ForkInterventionAdmissionV1, Hash, ImportedForkAdmissionRecordV1,
@@ -5044,9 +5044,8 @@ mod classified_counterfactual_tests {
         ] {
             assert_eq!(error.to_string(), text);
         }
-        let sources = [store, provenance].map(|error| {
-            std::error::Error::source(&error).map(ToString::to_string)
-        });
+        let sources = [store, provenance]
+            .map(|error| std::error::Error::source(&error).map(ToString::to_string));
         assert_eq!(
             sources,
             [
