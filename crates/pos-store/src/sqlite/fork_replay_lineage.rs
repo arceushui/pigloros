@@ -375,6 +375,85 @@ mod tests {
     }
 
     #[test]
+    fn native_lineage_decoder_binds_selected_identity_and_root_shape() -> Fallible<()> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        let target = TimelineId::new();
+        let other = TimelineId::new();
+        // Real SQL rows deliberately violate selection/classification promises.
+        // A coherent held snapshot cannot do this; these are independent
+        // decoder defenses, not a simulated concurrent public Store mutation.
+        for (selected, parent, cut, fork, expected, bytes) in [
+            (
+                target,
+                None,
+                None,
+                false,
+                Ok((ForkReplayLineageNodeV1::new(target, None), Seq::from_u64(1))),
+                51,
+            ),
+            (
+                target,
+                Some(other),
+                Some(1_i64),
+                true,
+                Ok((
+                    ForkReplayLineageNodeV1::new(target, Some((other, Seq::from_u64(1)))),
+                    Seq::from_u64(1),
+                )),
+                101,
+            ),
+            (
+                other,
+                None,
+                None,
+                false,
+                Err(Error::Read(ReadError::CorruptAuthority)),
+                26,
+            ),
+            (
+                target,
+                Some(other),
+                None,
+                false,
+                Err(Error::Read(ReadError::CorruptAuthority)),
+                26,
+            ),
+            (
+                target,
+                None,
+                Some(1),
+                false,
+                Err(Error::Read(ReadError::CorruptAuthority)),
+                26,
+            ),
+        ] {
+            let mut statement = conn.prepare("SELECT ?1, ?2, ?3, 1")?;
+            let mut rows = statement.query(params![
+                selected.to_string(),
+                parent.map(|id| id.to_string()),
+                cut,
+            ])?;
+            let row = rows.next()?.ok_or("missing native lineage row")?;
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let result = SqliteStore::lineage_fields(
+                row,
+                target,
+                fork,
+                &mut LineageReadContextV1::new(&mut budget, 8)?,
+            );
+            assert_eq!(result, expected);
+            // Decoding charges the actual ID Strings before the fixed native
+            // coordinate: root 26+25, Fork 26+26+49; faults stop after first ID.
+            assert_eq!(budget.remaining_native_bytes(), 16_384 - bytes);
+            budget.check_time()?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn unbound_lineage_is_refused_by_the_default_gate_before_metadata_reads() -> Fallible<()> {
         let mut store = SqliteStore::open(":memory:")?;
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);

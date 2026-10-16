@@ -371,7 +371,7 @@ fn require_shared_fork(
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
+pub(crate) mod tests {
     use crate::ReleaseHealthV1;
     use pos_core::store::EventReadBounds;
 
@@ -403,6 +403,94 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     };
+
+    /// Exercise only the saved-evidence barrier under a real owning interval.
+    /// The corrupted saved vector is an impossible internal state, not a
+    /// concurrent mutation of the protected native authority.
+    pub(crate) fn assert_saved_native_evidence_refused(
+        sender: &mut ErasureReadSenderV1<'_>,
+        requirements: [pos_store::ForkReplayRequirementV1; 2],
+        closures: [&WorldReplayClosureV1; 2],
+        changed_arm: usize,
+    ) -> Result<(), CoreError> {
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use pos_store::ForkReplayReadBudgetV1;
+
+        let timelines = requirements.map(pos_store::ForkReplayRequirementV1::child_timeline_id);
+        let prepared = prepare_comparison_reads(
+            sender,
+            timelines,
+            closures,
+            [vec!["count".to_owned()], vec!["count".to_owned()]],
+        )?;
+        let preparations = [&prepared[0], &prepared[1]];
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([std::time::Duration::ZERO]);
+        let started = clock.mark();
+        let mut budget =
+            ForkReplayReadBudgetV1::new(prepared[0].fork_read_limits(), started, &mut clock)
+                .map_err(crate::unavailable)?;
+        let mut completions = 0;
+        let mut reached_evidence_barrier = false;
+        let result = sender.with_world_replay_read_fence(
+            &preparations,
+            &mut budget,
+            |sender, budget| {
+                let result = (|| {
+                    let uses = comparison_uses(sender, preparations, budget)?;
+                    let requested = [&uses[0], &uses[1]];
+                    let verified = require_comparison_artifacts(
+                        sender,
+                        preparations,
+                        closures,
+                        requested,
+                        budget,
+                    )?;
+                    let mut evidence = validate_comparison_forks(sender, &verified, budget)?;
+                    for (arm, expected) in evidence.iter().zip(requirements) {
+                        assert_eq!(arm.len(), 1);
+                        assert_eq!(arm[0].requirement(), expected);
+                    }
+                    // Prove the unmodified saved evidence passes before faulting
+                    // either arm; all reads keep the original shared budget.
+                    revalidate_comparison(
+                        sender,
+                        preparations,
+                        closures,
+                        requested,
+                        &verified,
+                        &evidence,
+                        budget,
+                    )?;
+                    evidence[changed_arm].clear();
+                    let refused = revalidate_comparison(
+                        sender,
+                        preparations,
+                        closures,
+                        requested,
+                        &verified,
+                        &evidence,
+                        budget,
+                    );
+                    assert!(matches!(refused, Err(CoreError::ArtifactUnavailable)));
+                    budget.check_time().map_err(crate::unavailable)?;
+                    reached_evidence_barrier = true;
+                    refused
+                })();
+                result.map_err(|error| crate::core_error_to_host(&error))
+            },
+            |(), _verdict| {
+                completions += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(completions, 0);
+        assert!(reached_evidence_barrier);
+        assert!(matches!(
+            result.map_err(crate::host_error_to_core),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        Ok(())
+    }
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
