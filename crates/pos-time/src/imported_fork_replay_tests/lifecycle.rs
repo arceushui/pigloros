@@ -248,7 +248,6 @@ impl Invocation<'_> {
                             &self.record,
                             test_ok(self.writer.as_deref().ok_or("writer")),
                         );
-                        Ok(())
                     },
                 ));
                 test_ok(result.ok_or("public Time result"))
@@ -738,8 +737,9 @@ fn memory_public_consumers_keep_original_clock_and_unowned_cleanup_semantics() -
             if call == ConsumerCall::Compare {
                 gates.extend([timelines[1], world.root]);
             }
+            let transcript = test_ok(record.lock());
             assert_transcript(
-                &test_ok(record.lock()),
+                &transcript,
                 &gates,
                 boundary,
                 false,
