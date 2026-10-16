@@ -16,6 +16,8 @@ const OPERATION_PROBE_SQL: &str = "SELECT
     FROM fork_admission_operations WHERE kind = ?1 AND operation_id = ?2";
 const OPERATION_FETCH_SQL: &str = "SELECT evidence_digest, commitment, result_digest, child_id
     FROM fork_admission_operations WHERE kind = ?1 AND operation_id = ?2";
+const PRINCIPAL_PROBE_SQL: &str = "SELECT typeof(operation_id) = 'blob', length(operation_id)
+        FROM fork_admission_operations WHERE kind = 1 AND result_digest = ?1";
 const HASH_BYTES: u8 = 32;
 
 /// Keep the selected statement and cursor alive throughout `read`, including
@@ -53,8 +55,7 @@ pub(super) fn principal_operation_id_with_context(
 ) -> Result<Hash> {
     with_selected_row(
         conn,
-        "SELECT typeof(operation_id) = 'blob', length(operation_id)
-        FROM fork_admission_operations WHERE kind = 1 AND result_digest = ?1",
+        PRINCIPAL_PROBE_SQL,
         params![result_digest.as_bytes().as_slice()],
         context,
         |row, context| {
@@ -258,6 +259,117 @@ mod tests {
     fn expected_bytes(row: &ForkAdmissionOperationRowV1) -> usize {
         // Three actual hash Vecs plus the optional ULID UTF-8 String.
         32 * 3 + row.child_id.map_or(0, |child| child.to_string().len())
+    }
+
+    fn operation_root(conn: &Connection) -> rusqlite::Result<i64> {
+        conn.query_row(
+            "SELECT rootpage FROM sqlite_schema
+             WHERE type = 'table' AND name = 'fork_admission_operations'",
+            [],
+            |row| row.get(0),
+        )
+    }
+
+    fn replace_operation_root(conn: &Connection, root: i64) -> rusqlite::Result<usize> {
+        conn.execute_batch("PRAGMA writable_schema=ON")?;
+        let changed = conn.execute(
+            "UPDATE sqlite_schema SET rootpage = ?1
+             WHERE type = 'table' AND name = 'fork_admission_operations'",
+            [root],
+        );
+        // Reset disables writable_schema and reloads the native schema cache,
+        // including when the preceding catalog update reported an error.
+        let reset = conn.execute_batch("PRAGMA writable_schema=RESET");
+        changed.and_then(|count| reset.map(|()| count))
+    }
+
+    #[test]
+    fn corrupt_operation_btree_fails_at_step_without_spending_the_read_budget() -> Fallible<()> {
+        use rusqlite::{params_from_iter, types::Value, ErrorCode};
+
+        for principal_lookup in [false, true] {
+            let (store, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
+            let table_root = operation_root(&store.conn)?;
+            let index_root: i64 = store.conn.query_row(
+                "SELECT rootpage FROM sqlite_schema WHERE type = 'index'
+                 AND tbl_name = 'fork_admission_operations' AND rootpage > 0
+                 ORDER BY name LIMIT 1",
+                [],
+                |row| row.get(0),
+            )?;
+            assert!(table_root > 0 && index_root > 0);
+            assert_ne!(table_root, index_root);
+            let (sql, parameters, bytes) = if principal_lookup {
+                (
+                    PRINCIPAL_PROBE_SQL,
+                    vec![Value::Blob(row.result_digest.as_bytes().to_vec())],
+                    32,
+                )
+            } else {
+                (
+                    OPERATION_PROBE_SQL,
+                    vec![
+                        Value::Integer(i64::from(row.kind.wire())),
+                        Value::Blob(row.operation_id.as_bytes().to_vec()),
+                    ],
+                    expected_bytes(&row),
+                )
+            };
+            // Preserve each native phase as a separate Result: an earlier
+            // prepare/bind refusal cannot masquerade as the required step error.
+            let probe = || {
+                store.conn.prepare(sql).map(|mut statement| {
+                    statement
+                        .query(params_from_iter(parameters.iter()))
+                        .map(|mut rows| rows.next().map(|row| row.is_some()))
+                })
+            };
+            assert!(probe()???);
+            let read = |context: &mut NativeReadContextV1<'_, '_>| {
+                if principal_lookup {
+                    principal_operation_id_with_context(&store.conn, row.result_digest, context)
+                        .map(|actual| actual == row.operation_id)
+                } else {
+                    operation_with_context(&store.conn, row.kind, row.operation_id, context)
+                        .map(|actual| actual.as_ref() == Some(&row))
+                }
+            };
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 2, bytes, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            // Genuine native catalog corruption, not admitted authority or a
+            // fake query return: a rowid table points at its index's B-tree.
+            let changed = replace_operation_root(&store.conn, index_root)?;
+            let corrupt_root = operation_root(&store.conn);
+            let failed_probe = probe();
+            let failed_read = read(&mut NativeReadContextV1::protected(&mut budget));
+            let remaining = budget.remaining_native_bytes();
+            let healthy_clock = budget.check_time();
+            // All statements/cursors are gone. Restore before assertions or
+            // propagating captured errors; this database is test-owned memory.
+            let restored = replace_operation_root(&store.conn, table_root)?;
+            assert_eq!((changed, restored), (1, 1));
+            assert_eq!(corrupt_root?, index_root);
+            assert_eq!(operation_root(&store.conn)?, table_root);
+            assert_eq!(
+                failed_probe??
+                    .err()
+                    .and_then(|error| error.sqlite_error_code()),
+                Some(ErrorCode::DatabaseCorrupt)
+            );
+            assert_eq!(failed_read, Err(Error::StorageIndeterminate));
+            assert_eq!(remaining, bytes);
+            healthy_clock?;
+            assert!(probe()???);
+            // Both actual rows and every byte are still available on the same
+            // ledger. The restored read must consume exactly those two rows.
+            assert!(read(&mut NativeReadContextV1::protected(&mut budget))?);
+            assert_eq!(budget.remaining_native_bytes(), 0);
+            budget.check_time()?;
+            assert!(budget.charge_rows(1).is_err());
+        }
+        Ok(())
     }
 
     #[test]
