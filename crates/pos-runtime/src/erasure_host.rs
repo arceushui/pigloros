@@ -5404,6 +5404,11 @@ mod tests {
         DeliveryJournalIndeterminate,
         DeliveryMisreportedOwner,
         ForkReplayLineageError(pos_store::ForkReplayLineageReadErrorV1),
+        ForkReplayLineageCycle,
+        ForkReplayLineageSubstitute,
+        ForkReplayEventCount,
+        ForkReplayEventSequence,
+        BeginForkReplayPanic,
         Passthrough,
     }
 
@@ -6214,6 +6219,9 @@ mod tests {
             budget: &mut ForkReplayReadBudgetV1<'_>,
         ) -> Result<ErasureProtectedEffectIntervalV1, pos_store::ForkReplayLineageReadErrorV1>
         {
+            if self.fault == FaultModeV1::BeginForkReplayPanic {
+                std::panic::resume_unwind(Box::new("fork replay setup panic"));
+            }
             self.inner.begin_fork_replay_read_interval(budget)
         }
 
@@ -6235,6 +6243,16 @@ mod tests {
         ) -> Result<Vec<Event>, pos_store::ForkReplayLineageReadErrorV1> {
             self.inner
                 .read_fork_replay_events(timeline, range, bounds, budget)
+                .map(|mut events| {
+                    if self.fault == FaultModeV1::ForkReplayEventCount {
+                        events.clear();
+                    } else if self.fault == FaultModeV1::ForkReplayEventSequence {
+                        for event in &mut events {
+                            event.seq = Seq::ZERO;
+                        }
+                    }
+                    events
+                })
         }
 
         fn read_fork_replay_lineage_node(
@@ -6251,6 +6269,18 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let FaultModeV1::ForkReplayLineageError(error) = self.fault {
                 return Err(error);
+            }
+            if self.fault == FaultModeV1::ForkReplayLineageCycle {
+                return Ok(Some(pos_store::fork_replay::test_fork_replay_lineage_node(
+                    timeline_id,
+                    Some((timeline_id, Seq::ZERO)),
+                )));
+            }
+            if self.fault == FaultModeV1::ForkReplayLineageSubstitute {
+                return Ok(Some(pos_store::fork_replay::test_fork_replay_lineage_node(
+                    TimelineId::new(),
+                    None,
+                )));
             }
             self.inner.read_fork_replay_lineage_node(
                 timeline_id,

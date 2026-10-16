@@ -434,4 +434,52 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn oversized_raw_intervention_count_refuses_before_sequence_allocation() -> Fallible<()> {
+        use ciborium::value::Value;
+
+        fn replace(bytes: &[u8], index: usize, value: Value) -> Fallible<Vec<u8>> {
+            let Value::Array(mut fields) = ciborium::from_reader(bytes)? else {
+                return Err("expected native array".into());
+            };
+            *fields.get_mut(index).ok_or("missing native field")? = value;
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&Value::Array(fields), &mut bytes)?;
+            Ok(bytes)
+        }
+
+        let original = artifact(&committed()?)?;
+        let signed = original.signed_manifest();
+        let manifest = replace(
+            &signed.manifest_bytes(),
+            10,
+            Value::Array(vec![
+                Value::Integer(1.into());
+                MAX_FORK_MANIFEST_INTERVENTIONS_V1 + 1
+            ]),
+        )?;
+        let signed_bytes = replace(&signed.to_canonical_cbor(), 5, Value::Bytes(manifest))?;
+        let expected_debit = signed_bytes.len() + signed.identity().owner_id.as_str().len();
+        let bytes = replace(&original.to_canonical_cbor(), 4, Value::Bytes(signed_bytes))?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(1, 1, 1, 8 * 1024 * 1024, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        assert_eq!(
+            NativeReadContextV1::protected(&mut budget).publication_artifact(&bytes),
+            Err(Error::PublicationConflict)
+        );
+        assert_eq!(
+            budget.remaining_native_bytes(),
+            limits.max_native_bytes() - expected_debit
+        );
+        budget.check_time()?;
+        assert_eq!(
+            NativeReadContextV1::protected(&mut budget)
+                .publication_artifact(&original.to_canonical_cbor())?,
+            original
+        );
+        Ok(())
+    }
 }

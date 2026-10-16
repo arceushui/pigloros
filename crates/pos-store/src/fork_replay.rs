@@ -713,6 +713,18 @@ pub struct ForkReplayLineageNodeV1 {
     fork_point: Option<(TimelineId, Seq)>,
 }
 
+/// Construct a deliberately unvalidated node for downstream read-port fault tests.
+///
+/// This fixture carries no authority and is unavailable in the deployment graph.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub const fn test_fork_replay_lineage_node(
+    timeline_id: TimelineId,
+    fork_point: Option<(TimelineId, Seq)>,
+) -> ForkReplayLineageNodeV1 {
+    ForkReplayLineageNodeV1::new(timeline_id, fork_point)
+}
+
 impl ForkReplayLineageNodeV1 {
     pub(crate) const fn new(
         timeline_id: TimelineId,
