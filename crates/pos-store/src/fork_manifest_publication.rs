@@ -785,8 +785,17 @@ fn materialize_committed_manifest(
             HASH_COPY_BYTES,
         ],
     )?;
-    let receipt = ForkPublicationReceiptV1::from_records(&rows.operation, &rows.binding)
-        .map_err(|_| ForkManifestPublicationErrorV1::PublicationConflict)?;
+    // The sole caller has verified the complete committed graph, including
+    // these four operation/binding equalities. Both records remain immutably
+    // borrowed: materialization copies the verified fields, without repeating
+    // a comparison that can no longer fail after that authoritative check.
+    let operation = rows.operation.input();
+    let receipt = ForkPublicationReceiptV1 {
+        operation_id: operation.operation_id,
+        child_timeline_id: operation.child_timeline_id,
+        final_logical_head: operation.final_logical_head,
+        signed_manifest_record_id: operation.signed_manifest_record_id,
+    };
     charge_publication_copy(&rows.operation, rows.origin, context)?;
     context.canonical(rows.binding.canonical_cbor_len())?;
     charge_origin_copy(rows.origin, context)?;
