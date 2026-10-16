@@ -159,6 +159,53 @@ fn event_reads_reject_stale_capabilities_and_substituted_operation_budgets() {
 }
 
 #[test]
+fn prepared_admission_rechecks_original_deadline_after_verification() {
+    let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
+    let requested = replay_use(&closure);
+    let mut sender = test_ok(host.read_sender());
+    let prepared = test_ok(sender.prepare_world_replay_read(&closure, intent_for(&requested)));
+    let good_mark = Duration::from_millis(1);
+    let expired_mark = Duration::from_micros(prepared.fork_read_limits().max_elapsed_micros())
+        + good_mark
+        + Duration::from_micros(1);
+    for post_verifier_mark in [good_mark, expired_mark, Duration::ZERO] {
+        // g0, budget construction and preparation validation are healthy.
+        // The fourth sample is the post-verifier check: expiry or regression
+        // must override the otherwise valid capability and remain latched.
+        let mut clock = ScriptedGuardMonotonicSourceV1::new(
+            [good_mark; 3]
+                .into_iter()
+                .chain([post_verifier_mark, good_mark]),
+        );
+        let start = clock.mark();
+        let mut budget = test_ok(ForkReplayReadBudgetV1::new(
+            prepared.fork_read_limits(),
+            start,
+            &mut clock,
+        ));
+        let result = sender
+            .admit_prepared_world_replay(&prepared, &closure, &requested, &mut budget)
+            .map(|_| ());
+        let healthy = post_verifier_mark == good_mark;
+        assert_eq!(
+            result,
+            if healthy {
+                Ok(())
+            } else {
+                Err(ErasureHostErrorV1::AdapterFailure)
+            }
+        );
+        assert_eq!(budget.check_time().is_ok(), healthy);
+        assert_eq!(
+            budget.remaining_native_bytes(),
+            prepared.fork_read_limits().max_native_bytes()
+        );
+        assert_eq!(clock.samples_taken(), if healthy { 5 } else { 4 });
+    }
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+}
+
+#[test]
 fn ordinary_history_refuses_an_unclassified_fork_requirement() {
     let (mut host, closure) = replay_fault_host(FaultModeV1::Passthrough);
     let requested = replay_use(&closure);
@@ -469,6 +516,22 @@ fn admitted_timeline_with_missing_native_lineage_refuses_before_callbacks() {
             start,
             &mut clock,
         ));
+        let classified = root_lineage_capability(
+            sender.host,
+            closure.timeline_id(),
+            prepared.fork_read_limits(),
+        );
+        // Classification and owning-fence traversal have different contracts:
+        // a missing classified source is Conflict, whereas an unavailable
+        // fence member is AdapterFailure. Both use the same admitted root.
+        assert_eq!(
+            sender.validate_world_replay_forks(&classified, &mut budget),
+            if succeeds {
+                Ok(Vec::new())
+            } else {
+                Err(ErasureHostErrorV1::Conflict)
+            }
+        );
         let callbacks = Cell::new(0);
         let result = sender.with_world_replay_read_fence(
             &[&prepared],
