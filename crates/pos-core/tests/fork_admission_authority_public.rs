@@ -286,6 +286,63 @@ mod fixed_fah1_parity {
     }
 
     #[test]
+    fn fixed_fah1_public_decoder_rejects_compensated_nonfixed_shapes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for lengths in [[31, 33, 32], [32, 31, 33], [33, 32, 31]] {
+            let mut values = fields();
+            for (index, length) in lengths.into_iter().enumerate() {
+                values[index + 2] = Value::Bytes(vec![1; length]);
+            }
+            let bytes = encode(&Value::Array(values))?;
+            assert_eq!(bytes.len(), 109);
+            parity(&bytes);
+            assert_eq!(
+                ForkAdmissionHostRecordV1::from_canonical_cbor(&bytes),
+                Err(ForkAdmissionAuthorityCodecErrorV1::FieldOutOfBounds)
+            );
+        }
+
+        let mut values = fields();
+        values[2] = Value::Bytes(vec![1; 31]);
+        let short = encode(&Value::Array(values))?;
+        assert_eq!(short.len(), 108);
+        // Each nonpreferred header consumes the byte saved by the short field.
+        for (range, replacement) in [
+            (0..1, vec![0x98, 5]),
+            (1..2, vec![0x78, 4]),
+            (6..7, vec![0x18, 1]),
+            (7..9, vec![0x59, 0, 31]),
+        ] {
+            let mut bytes = short.clone();
+            bytes.splice(range, replacement);
+            assert_eq!(bytes.len(), 109);
+            parity(&bytes);
+            assert_eq!(
+                ForkAdmissionHostRecordV1::from_canonical_cbor(&bytes),
+                Err(ForkAdmissionAuthorityCodecErrorV1::FieldOutOfBounds)
+            );
+        }
+        let mut indefinite = short;
+        indefinite[0] = 0x9f;
+        indefinite.push(0xff);
+        assert_eq!(indefinite.len(), 109);
+        parity(&indefinite);
+
+        // A tagged outer value fails envelope decoding before field validation.
+        let mut values = fields();
+        values[2] = Value::Bytes(vec![1; 30]);
+        let mut tagged = vec![0xd8, 24];
+        tagged.extend(encode(&Value::Array(values))?);
+        assert_eq!(tagged.len(), 109);
+        parity(&tagged);
+        assert_eq!(
+            ForkAdmissionHostRecordV1::from_canonical_cbor(&tagged),
+            Err(ForkAdmissionAuthorityCodecErrorV1::InvalidEncoding)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn fixed_fah1_public_decoder_preserves_malformed_error_precedence(
     ) -> Result<(), Box<dyn std::error::Error>> {
         parity(&encode(&Value::Null)?);
