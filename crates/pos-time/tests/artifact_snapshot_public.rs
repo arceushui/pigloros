@@ -42,6 +42,27 @@ impl Reducer for CountReducer {
 struct ExactVerifier;
 
 impl WorldReplayVerifierV1 for ExactVerifier {
+    fn read_profile(
+        &self,
+        _closure: &WorldReplayClosureV1,
+        _intent: &pos_runtime::WorldReplayReadIntentV1,
+        _generation: ErasureReferenceV1,
+    ) -> Result<
+        (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+        WorldReplayVerificationErrorV1,
+    > {
+        pos_store::ForkReplayReadLimitsV1::new(8, 1_024, 262_144, 256 * 1024 * 1024, 30_000_000)
+            .map(|limits| {
+                (
+                    pos_core::EventReadBounds::new_with_total_bytes_and_elapsed(
+                        65_536, 128, 8, 65_536, 67_108_864, 30_000_000,
+                    ),
+                    limits,
+                )
+            })
+            .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)
+    }
+
     fn verify(
         &self,
         closure: &WorldReplayClosureV1,

@@ -42,6 +42,37 @@ struct EventBoundVerifier {
 }
 
 impl WorldReplayVerifierV1 for EventBoundVerifier {
+    fn read_profile(
+        &self,
+        closure: &WorldReplayClosureV1,
+        intent: &pos_runtime::WorldReplayReadIntentV1,
+        generation: ErasureReferenceV1,
+    ) -> Result<
+        (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+        WorldReplayVerificationErrorV1,
+    > {
+        self.owner
+            .read_profile(closure, intent, generation)
+            .map(|(bounds, limits)| {
+                let count = if self.limited == Some(intent.timeline_id()) {
+                    3
+                } else {
+                    bounds.max_events()
+                };
+                (
+                    pos_core::EventReadBounds::new_with_total_bytes_and_elapsed(
+                        bounds.max_payload_bytes(),
+                        bounds.max_event_type_bytes(),
+                        bounds.max_fork_depth(),
+                        count,
+                        bounds.max_total_bytes(),
+                        bounds.max_elapsed_micros(),
+                    ),
+                    limits,
+                )
+            })
+    }
+
     fn verify(
         &self,
         closure: &WorldReplayClosureV1,

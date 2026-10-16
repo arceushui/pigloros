@@ -6,12 +6,12 @@
 
 use pos_core::staged_install::PreparedInstallV1;
 use pos_core::store::SeqRange;
-use pos_core::trusted_clock::{ApplicableExpiriesV1, ReleaseGuardV1, StagedProtectedOutputV1};
+use pos_core::trusted_clock::{ReleaseGuardV1, StagedProtectedOutputV1};
 use pos_core::{CoreError, ErasureProtectedOperationV1, Seq, TimelineId, WorldReplayClosureV1};
 use pos_runtime::ErasureReadSenderV1;
 use pos_state::{ProjectionRegistry, RevokedSubjectsV1};
 
-use crate::{ProtectedFoldV1, ProtectedReleaseV1, ReleaseHealthV1};
+use crate::{ProtectedFoldV1, ProtectedReleaseV1};
 
 /// Replay **all** events on `timeline` and install the resulting State in
 /// `registry`.
@@ -82,77 +82,73 @@ fn replay_range(
     registry: &mut ProjectionRegistry,
     release: ProtectedReleaseV1<'_>,
 ) -> Result<(), CoreError> {
-    let consumer_ids = pos_runtime::require_staged_release()
-        .map_err(crate::unavailable)
-        .and_then(|()| crate::consumer_selection(registry))?;
     let ProtectedReleaseV1 {
         guard,
         expiries,
         health,
     } = release;
-    let mut guard = Some(guard);
+    let mut guard = Some(crate::PendingReplayGuardV1::new(guard, health));
     let mut revoked = None;
-    let mut outcome = Err(CoreError::ArtifactUnavailable);
-    let mut effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        if let Some(held) = guard.take() {
-            let target = ReplayTargetV1 {
-                registry: &mut *registry,
-                guard: held,
-                expiries: &expiries,
-                health,
-                revoked: &mut revoked,
-            };
-            outcome = replay_in_fence(sender, request, &consumer_ids, target);
-        }
-    };
-    let fenced = sender
-        .with_protected_ancestry_fence(
+    let result = (|| {
+        pos_runtime::require_staged_release().map_err(crate::unavailable)?;
+        let intent = pos_runtime::WorldReplayReadIntentV1::new(
             request.timeline,
             ErasureProtectedOperationV1::Read,
-            &mut effect,
+            request.range,
+            crate::consumer_selection(registry)?,
+            Vec::new(),
         )
-        .map_err(crate::host_error_to_core);
-    // P2 and teardown of a guard the effect never took, before the
-    // failure-path forget.
-    crate::teardown(guard, health);
-    crate::forget_on_failure(fenced.and(outcome), registry, revoked.as_ref())
-}
-
-/// The visible registry, the held guard and the failure-path record of one
-/// Replay inside its fence.
-struct ReplayTargetV1<'t, 'g> {
-    registry: &'t mut ProjectionRegistry,
-    guard: ReleaseGuardV1<'g>,
-    expiries: &'t ApplicableExpiriesV1,
-    health: &'t ReleaseHealthV1,
-    revoked: &'t mut Option<RevokedSubjectsV1>,
-}
-
-/// Stage one Replay inside its fence, then hand it over; on any failure
-/// before the handoff, run P2 and tear the guard down.
-fn replay_in_fence(
-    sender: &mut ErasureReadSenderV1<'_>,
-    request: &ReplayRequestV1<'_>,
-    consumer_ids: &[String],
-    target: ReplayTargetV1<'_, '_>,
-) -> Result<(), CoreError> {
-    let ReplayTargetV1 {
-        registry,
-        guard,
-        expiries,
-        health,
-        revoked,
-    } = target;
-    let prepared = match prepare_replay(sender, request, consumer_ids, &guard, revoked, registry) {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            crate::teardown(Some(guard), health);
-            return Err(error);
-        }
-    };
-    // ADR-112's overrun signal is recorded, and the displaced maps are
-    // dropped, after the handoff returns; a refused handoff runs P2.
-    crate::handoff_with_p2(guard, expiries, prepared, health)
+        .map_err(crate::unavailable)?;
+        let prepared = sender
+            .prepare_world_replay_read(request.closure, intent)
+            .map_err(crate::host_error_to_core)?;
+        let started = guard
+            .as_ref()
+            .ok_or(CoreError::ArtifactUnavailable)?
+            .held()?
+            .guard_started_at();
+        let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
+        let mut budget = pos_store::ForkReplayReadBudgetV1::new(
+            prepared.fork_read_limits(),
+            started,
+            &mut clock,
+        )
+        .map_err(crate::unavailable)?;
+        let target_registry = &mut *registry;
+        let guard_slot = &mut guard;
+        let revoked = &mut revoked;
+        let preparation = &prepared;
+        sender
+            .with_world_replay_read_fence(
+                &[&prepared],
+                &mut budget,
+                move |sender, budget| {
+                    let registry = target_registry;
+                    let held = guard_slot
+                        .take()
+                        .ok_or(pos_core::ErasureHostErrorV1::AdapterFailure)?;
+                    let staged = prepare_replay(
+                        sender,
+                        request,
+                        preparation,
+                        budget,
+                        held.held().map_err(crate::core_error_to_host)?,
+                        revoked,
+                        registry,
+                    )
+                    .map_err(crate::core_error_to_host)?;
+                    Ok((held, staged))
+                },
+                |(held, staged), verdict| {
+                    held.handoff(&expiries, staged, verdict)
+                        .map_err(crate::core_error_to_host)
+                },
+            )
+            .map_err(crate::host_error_to_core)
+    })();
+    // Untaken guards still belong to Time, including policy/setup failures.
+    drop(guard);
+    crate::forget_on_failure(result, registry, revoked.as_ref())
 }
 
 /// Verify, read, fold and re-verify one Replay inside its fence, check the
@@ -160,48 +156,42 @@ fn replay_in_fence(
 fn prepare_replay<'r>(
     sender: &mut ErasureReadSenderV1<'_>,
     request: &ReplayRequestV1<'_>,
-    consumer_ids: &[String],
+    prepared: &pos_runtime::PreparedWorldReplayReadV1,
+    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
     guard: &ReleaseGuardV1<'_>,
     revoked: &mut Option<RevokedSubjectsV1>,
     registry: &'r mut ProjectionRegistry,
 ) -> Result<StagedProtectedOutputV1<PreparedInstallV1<'r>>, CoreError> {
-    let (requested_use, verified) = crate::observed_world_replay_use(
-        sender,
-        request.timeline,
-        ErasureProtectedOperationV1::Read,
-        request.range,
-        consumer_ids,
-    )
-    .and_then(|requested_use| {
-        crate::require_world_replay(sender, request.closure, &requested_use)
+    let (requested_use, verified) = sender
+        .observe_world_replay_use(prepared, budget)
+        .map_err(crate::host_error_to_core)
+        .and_then(|requested_use| {
+            crate::require_prepared_world_replay(
+                sender,
+                prepared,
+                request.closure,
+                &requested_use,
+                budget,
+            )
             .map(|verified| (requested_use, verified))
-    })?;
-    let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
-    let mut budget = pos_store::ForkReplayReadBudgetV1::new(
-        verified.fork_read_limits(),
-        guard.guard_started_at(),
-        &mut clock,
-    )
-    .map_err(|_| CoreError::ArtifactUnavailable)?;
+        })?;
     let evidence = sender
-        .validate_world_replay_forks(&verified, &mut budget)
+        .validate_world_replay_forks(&verified, budget)
         .map_err(crate::host_error_to_core)?;
-    let events = crate::read_complete_world_replay(
-        sender,
-        &requested_use,
-        verified.read_bounds(),
-        &mut budget,
-    )?;
+    let events = sender
+        .read_world_replay_events(&verified, budget)
+        .map_err(crate::host_error_to_core)?;
     *revoked = Some(RevokedSubjectsV1::from_verified_events(&events));
     let source = crate::verified_source(request.timeline, request.closure);
     let staged = crate::fold_staged(request.fold, guard, events, source)?;
     revalidate_replay(
         sender,
+        prepared,
         request.closure,
         &requested_use,
         &verified,
         &evidence,
-        &mut budget,
+        budget,
     )
     .and_then(|()| crate::handoff_reserve(guard))?;
     registry.prepare_install(staged).map_err(crate::unavailable)
@@ -210,13 +200,15 @@ fn prepare_replay<'r>(
 /// Recheck the complete authorization and native proof on the original ledger.
 fn revalidate_replay(
     sender: &mut ErasureReadSenderV1<'_>,
+    prepared: &pos_runtime::PreparedWorldReplayReadV1,
     closure: &WorldReplayClosureV1,
     requested_use: &pos_runtime::WorldReplayUseV1,
     verified: &pos_runtime::VerifiedWorldReplayV1,
     evidence: &[pos_store::ForkReplayAuthorityEvidenceV1],
     budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
 ) -> Result<(), CoreError> {
-    let final_verified = crate::require_world_replay(sender, closure, requested_use)?;
+    let final_verified =
+        crate::require_prepared_world_replay(sender, prepared, closure, requested_use, budget)?;
     if final_verified != *verified {
         return Err(CoreError::ArtifactUnavailable);
     }
@@ -1188,6 +1180,18 @@ mod tests {
     }
 
     impl pos_runtime::WorldReplayVerifierV1 for RecordedHeadVerifier {
+        fn read_profile(
+            &self,
+            _closure: &pos_core::WorldReplayClosureV1,
+            _intent: &pos_runtime::WorldReplayReadIntentV1,
+            _generation: pos_core::ErasureReferenceV1,
+        ) -> Result<
+            (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+            pos_runtime::WorldReplayVerificationErrorV1,
+        > {
+            crate::test_support::ordinary_read_profile()
+        }
+
         fn verify(
             &self,
             closure: &pos_core::WorldReplayClosureV1,
@@ -1282,6 +1286,19 @@ mod tests {
     struct OneEventWorldReplayVerifier;
 
     impl pos_runtime::WorldReplayVerifierV1 for OneEventWorldReplayVerifier {
+        fn read_profile(
+            &self,
+            _closure: &pos_core::WorldReplayClosureV1,
+            _intent: &pos_runtime::WorldReplayReadIntentV1,
+            _generation: pos_core::ErasureReferenceV1,
+        ) -> Result<
+            (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+            pos_runtime::WorldReplayVerificationErrorV1,
+        > {
+            crate::test_support::ordinary_read_profile()
+                .map(|(_, limits)| (ONE_EVENT_READ_BOUNDS, limits))
+        }
+
         fn verify(
             &self,
             closure: &pos_core::WorldReplayClosureV1,
@@ -1304,6 +1321,18 @@ mod tests {
     }
 
     impl pos_runtime::WorldReplayVerifierV1 for ChangeBoundsOnSecondVerification {
+        fn read_profile(
+            &self,
+            _closure: &pos_core::WorldReplayClosureV1,
+            _intent: &pos_runtime::WorldReplayReadIntentV1,
+            _generation: pos_core::ErasureReferenceV1,
+        ) -> Result<
+            (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+            pos_runtime::WorldReplayVerificationErrorV1,
+        > {
+            crate::test_support::ordinary_read_profile()
+        }
+
         fn verify(
             &self,
             closure: &pos_core::WorldReplayClosureV1,

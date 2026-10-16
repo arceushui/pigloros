@@ -87,6 +87,33 @@ impl OrdinaryVerifier {
 }
 
 impl WorldReplayVerifierV1 for OrdinaryVerifier {
+    fn read_profile(
+        &self,
+        _closure: &WorldReplayClosureV1,
+        intent: &pos_runtime::WorldReplayReadIntentV1,
+        _generation: ErasureReferenceV1,
+    ) -> Result<(EventReadBounds, ForkReplayReadLimitsV1), WorldReplayVerificationErrorV1> {
+        let classification = self
+            .classification
+            .lock()
+            .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)?
+            .ok_or(WorldReplayVerificationErrorV1::EvidenceUnavailable)?;
+        if !classification.arms.contains(&intent.timeline_id()) {
+            return Err(WorldReplayVerificationErrorV1::EvidenceUnavailable);
+        }
+        Ok((
+            EventReadBounds::new_with_total_bytes_and_elapsed(
+                1_024,
+                128,
+                classification.arm_depth,
+                64,
+                1_024,
+                30_000_000,
+            ),
+            classification.limits,
+        ))
+    }
+
     fn verify(
         &self,
         closure: &WorldReplayClosureV1,

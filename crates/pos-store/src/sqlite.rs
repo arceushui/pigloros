@@ -160,6 +160,7 @@ mod fork_replay_operation;
 mod fork_replay_orphans;
 mod fork_replay_provenance;
 mod fork_replay_publication;
+mod fork_replay_read;
 mod fork_replay_registry;
 mod fork_replay_row;
 mod fork_replay_suffix;
@@ -14710,16 +14711,18 @@ fn require_event_security_columns(columns: &HashSet<String>) -> Result<(), CoreE
 
 fn decode_signature(
     bytes: Option<Vec<u8>>,
-    reader: &fork_replay_event::EventRowReaderV1<'_, '_, '_, '_>,
+    reader: &mut fork_replay_event::EventRowReaderV1<'_, '_, '_, '_>,
 ) -> Result<Option<pos_core::Signature>, CoreError> {
-    bytes
-        .map(|bytes| {
-            bytes
-                .try_into()
-                .map(pos_core::Signature::from_bytes)
-                .map_err(|_| reader.serialization("bad signature length"))
-        })
-        .transpose()
+    reader.step(|reader| {
+        bytes
+            .map(|bytes| {
+                bytes
+                    .try_into()
+                    .map(pos_core::Signature::from_bytes)
+                    .map_err(|_| reader.serialization("bad signature length"))
+            })
+            .transpose()
+    })
 }
 
 fn decode_event_security_context(
@@ -14738,10 +14741,12 @@ fn decode_event_security_context(
     let epoch: Option<i64> = reader.get(13)?;
     let origin_timeline_id: String = reader.get(14)?;
     let origin_logical_seq: i64 = reader.get(15)?;
-    let origin_logical_seq = u64::try_from(origin_logical_seq)
-        .ok()
-        .filter(|seq| *seq >= 1)
-        .ok_or_else(|| reader.serialization("invalid Event origin sequence"))?;
+    let origin_logical_seq = reader.step(|reader| {
+        u64::try_from(origin_logical_seq)
+            .ok()
+            .filter(|seq| *seq >= 1)
+            .ok_or_else(|| reader.serialization("invalid Event origin sequence"))
+    })?;
     Ok((
         decode_signature(signature_bytes, reader)?,
         decode_signature_identity(owner_id, role, epoch, reader)?,
@@ -14803,17 +14808,26 @@ fn decode_event_row_with_reader(
         correlation_id,
         schema_version,
     } = read_event_row_fields(reader)?;
-    if schema_version != i64::from(SchemaVersion::V1.as_u32()) {
-        return Err(reader.serialization("unsupported event schema version"));
-    }
+    reader.step(|reader| {
+        if schema_version == i64::from(SchemaVersion::V1.as_u32()) {
+            Ok(())
+        } else {
+            Err(reader.serialization("unsupported event schema version"))
+        }
+    })?;
     let ph_bytes: Vec<u8> = reader.get(9)?;
-    let ph_arr: [u8; 32] = ph_bytes
-        .try_into()
-        .map_err(|_| reader.serialization("bad hash"))?;
+    let ph_arr: [u8; 32] = reader.step(|reader| {
+        ph_bytes
+            .try_into()
+            .map_err(|_| reader.serialization("bad hash"))
+    })?;
     let (signature, signature_identity, origin) = decode_event_security_context(reader)?;
-    let seq = u64::try_from(seq).map_err(|_| reader.serialization("bad event sequence"))?;
-    let wall_time =
-        u64::try_from(wall_time).map_err(|_| reader.serialization("bad event wall time"))?;
+    let seq = reader.step(|reader| {
+        u64::try_from(seq).map_err(|_| reader.serialization("bad event sequence"))
+    })?;
+    let wall_time = reader.step(|reader| {
+        u64::try_from(wall_time).map_err(|_| reader.serialization("bad event wall time"))
+    })?;
     let id = EventId::from_ulid(reader.parse_ulid(&event_id)?);
     let entity = EntityId::from_ulid(reader.parse_ulid(&entity_id)?);
     let causation_id = causation_id
@@ -14843,11 +14857,13 @@ fn decode_event_row_with_reader(
         origin: Some(origin),
         payload_hash: pos_core::Hash::from_bytes(ph_arr),
     };
-    pos_core::store::validate_event_signature(&event).inspect_err(|_| {
-        let scrubbed =
-            pos_core::store::zeroize_event_plaintext_staging(std::slice::from_mut(&mut event));
-        debug_assert!(scrubbed);
-    })?;
+    reader
+        .step(|_| pos_core::store::validate_event_signature(&event))
+        .inspect_err(|_| {
+            let scrubbed =
+                pos_core::store::zeroize_event_plaintext_staging(std::slice::from_mut(&mut event));
+            debug_assert!(scrubbed);
+        })?;
     Ok(event)
 }
 
@@ -14855,21 +14871,24 @@ fn decode_signature_identity(
     owner_id: Option<String>,
     role: Option<i64>,
     epoch: Option<i64>,
-    reader: &fork_replay_event::EventRowReaderV1<'_, '_, '_, '_>,
+    reader: &mut fork_replay_event::EventRowReaderV1<'_, '_, '_, '_>,
 ) -> Result<Option<KeyIdentityV1>, CoreError> {
     match (owner_id, role, epoch) {
         (None, None, None) => Ok(None),
         (Some(owner_id), Some(role), Some(epoch)) => {
-            let owner_id = OwnerIdV1::new(owner_id)
-                .map_err(|_| reader.serialization("bad signature owner"))?;
-            Ok(Some(KeyIdentityV1::new(
-                owner_id,
+            let owner_id = reader.step(|reader| {
+                OwnerIdV1::new(owner_id).map_err(|_| reader.serialization("bad signature owner"))
+            })?;
+            let role = reader.step(|reader| {
                 KeyRoleV1::from_code(
                     u8::try_from(role).map_err(|_| reader.serialization("bad signature role"))?,
                 )
-                .map_err(|_| reader.serialization("bad signature role"))?,
-                u64::try_from(epoch).map_err(|_| reader.serialization("bad signature epoch"))?,
-            )))
+                .map_err(|_| reader.serialization("bad signature role"))
+            })?;
+            let epoch = reader.step(|reader| {
+                u64::try_from(epoch).map_err(|_| reader.serialization("bad signature epoch"))
+            })?;
+            Ok(Some(KeyIdentityV1::new(owner_id, role, epoch)))
         }
         _ => Err(reader.serialization("signature identity is incomplete")),
     }
