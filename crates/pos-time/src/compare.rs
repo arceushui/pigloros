@@ -552,6 +552,7 @@ pub mod tests {
                 requested_use,
                 inventory_generation,
                 pos_core::ErasureReplayClaimV1::Exact,
+                crate::test_support::ordinary_read_profile()?.1,
             ))
         }
     }
@@ -586,6 +587,7 @@ pub mod tests {
                     requested_use,
                     inventory_generation,
                     pos_core::ErasureReplayClaimV1::Exact,
+                    crate::test_support::ordinary_read_profile()?.1,
                 ))
             } else {
                 Err(pos_runtime::WorldReplayVerificationErrorV1::EvidenceUnavailable)
@@ -631,8 +633,11 @@ pub mod tests {
                     requested_use.clone(),
                     inventory_generation,
                     pos_core::ErasureReplayClaimV1::Exact,
-                    EventReadBounds::new_with_total_bytes_and_elapsed(
-                        65_536, 128, 8, max_events, 67_108_864, 30_000_000,
+                    (
+                        EventReadBounds::new_with_total_bytes_and_elapsed(
+                            65_536, 128, 8, max_events, 67_108_864, 30_000_000,
+                        ),
+                        crate::test_support::ordinary_read_profile()?.1,
                     ),
                 ),
             )
