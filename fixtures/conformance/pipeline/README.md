@@ -87,12 +87,12 @@ discards the whole pass, the other class's staged output included, commits no
 Event, leaves the sibling available, and the next pass within budget commits.
 A community release whose memory budget (one page) the real guest exceeds ends
 every launch `MemoryLimitExceeded` and is quarantined `ResourceExhausted`
-(recorded but not compared); the budget belongs to the release, so the Plugin
-is exhausted again after the host clears the quarantine, and the pass within
-budget runs, in a fresh lane, a Driver built from an in-budget successor release. A first-party
-Driver that stages more drafts than the registry's host Tick draft budget
-leaves fails the pass `ResourceExhausted` and quarantines nothing. The fuel,
-host-call and output limits of a community Driver are not exercised on the
+(recorded but not compared); the budget belongs to the release, so the Plugin is
+exhausted again after the host clears the quarantine, and the pass within budget
+runs, in a fresh lane, a Driver built from an in-budget successor release. A
+first-party Driver that stages more drafts than the registry's host Tick draft
+budget leaves fails the pass `ResourceExhausted` and quarantines nothing. The
+fuel, host-call and output limits of a community Driver are not exercised on the
 real worker; the `OTHER-RESOURCE-LIMITS` exclusion records them.
 
 The community pass world runs on `MemoryStore` only, so every case names the
