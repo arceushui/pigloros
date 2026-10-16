@@ -39,14 +39,14 @@ fn empty_reducer() -> Box<dyn Reducer> {
     Box::new(EmptyReducer)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Consumer {
     Replay,
     ReplayAt,
     Compare,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Edge {
     Exact,
     OneOver,
@@ -166,42 +166,37 @@ impl WorldReplayVerifierV1 for OrdinaryVerifier {
     }
 }
 
-/// Each phase inspects [leaf,parent,root], then [parent,root], then [root].
-/// Six actual native members and three internal parent continuations are
-/// therefore repeated per phase. Runtime separately copies two parent/cuts.
-/// These worked values use the accepted literal native fields, not a measured
-/// ledger or a production length/debit helper:
-/// Memory: 3*65 + 3*41 + 3*16 + 2*24 = 414;
-/// `SQLite`: 3*143 + 3*93 + 3*16 + 2*24 = 804.
-/// Compare revisits its one root Event three times per arm-phase. Memory
-/// adds three 8-byte sequence candidates/rows; `SQLite` adds those plus
-/// three actual 8-byte non-geographic type strings/E1 rows: 438/9 versus
-/// 852/30 bytes/rows per arm-phase. The two public Event reads each add
-/// zero payload bytes plus the 8-byte type, once per arm, not per phase.
+/// Independent ADR-118 totals for each arm's three-member ordinary lineage.
+/// Fence and validation each inspect [leaf,parent,root], [parent,root], [root].
+/// Memory validation: 3*65 + 3*41 + 3*16 + 2*24 = 414 bytes, six rows.
+/// `SQLite` validation: 3*143 + 3*93 + 3*16 + 2*24 = 804 bytes, 24 rows.
+/// The fence retains 3*16 IDs and 2*16 parents instead of 2*24 parent/cuts,
+/// adding 32 bytes. Each of TWO head reads walks the three members; Event
+/// materialization walks them again, independently of both head observations.
+/// Compare's one unsigned root Event adds one 8-byte candidate per root visit
+/// in Memory, or an additional 8-byte type/E1 row in `SQLite`. Its selected
+/// Event costs Memory 8+8 bytes/one row, `SQLite` 144+8 bytes/four rows.
+/// The owned `SQLite` interval adds one freshness row for the whole operation.
+/// No measured ledger or production debit/length helper supplies these totals.
 fn limits(
     consumer: Consumer,
     edge: Edge,
     sqlite: bool,
 ) -> Result<ForkReplayReadLimitsV1, Box<dyn std::error::Error>> {
-    let (arms, phase_bytes, phase_rows, event_bytes) = if matches!(consumer, Consumer::Compare) {
-        (
-            2,
-            if sqlite { 852 } else { 438 },
-            if sqlite { 30 } else { 9 },
-            16,
-        )
-    } else {
-        (
-            1,
-            if sqlite { 804 } else { 414 },
-            if sqlite { 24 } else { 6 },
-            0,
-        )
-    };
-    let phases = 2 * arms;
-    let bytes = phases * phase_bytes + event_bytes;
-    let rows = phases * phase_rows;
-    let visits = phases * 6;
+    let compare = matches!(consumer, Consumer::Compare);
+    let arms = if compare { 2 } else { 1 };
+    // Each pair is (bytes, rows), in operation-stage order.
+    let [(fence_bytes, fence_rows), (head_bytes, head_rows), (phase_bytes, phase_rows), (event_bytes, event_rows)] =
+        match (sqlite, compare) {
+            (false, false) => [(446, 6), (211, 3), (414, 6), (203, 3)],
+            (true, false) => [(836, 24), (419, 12), (804, 24), (411, 12)],
+            (false, true) => [(470, 9), (219, 4), (438, 9), (227, 5)],
+            (true, true) => [(884, 30), (435, 14), (852, 30), (579, 18)],
+        };
+    let bytes = arms * (fence_bytes + 2 * head_bytes + 2 * phase_bytes + event_bytes);
+    let rows =
+        usize::from(sqlite) + arms * (fence_rows + 2 * head_rows + 2 * phase_rows + event_rows);
+    let visits = arms * (6 + 2 * 3 + 2 * 6 + 3);
     let adjust = |value, short| {
         if edge == short {
             value - 1
@@ -240,6 +235,12 @@ fn seed(
         )?;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].seq, Seq::from_u64(1));
+        assert_eq!(events[0].payload.len(), 0);
+        assert_eq!(events[0].event_type.as_str(), "ordinary");
+        assert!(events[0].signature.is_none());
+        assert!(events[0].signature_identity.is_none());
+        assert!(events[0].causation_id.is_none());
+        assert!(events[0].correlation_id.is_none());
         Seq::from_u64(1)
     } else {
         Seq::ZERO
@@ -332,7 +333,7 @@ fn exercise(
     } else {
         1
     };
-    let phases = if edge == Edge::ArmDepthShort { 1 } else { 2 };
+    let phases = if edge == Edge::ArmDepthShort { 0 } else { 2 };
     assert_eq!(verifier.admissions.load(Ordering::SeqCst), arms * phases);
     Ok(())
 }
@@ -377,14 +378,17 @@ fn explicit_ordinary_lineage_is_bounded_across_both_phases_and_compare_arms() ->
                     limits: limits(consumer, edge, sqlite)?,
                     arm_depth: if edge == Edge::ArmDepthShort { 1 } else { 8 },
                 };
-                exercise(host, classification, &verifier, consumer, edge)?;
+                exercise(host, classification, &verifier, consumer, edge).map_err(|error| {
+                    format!("{consumer:?}/{edge:?}, sqlite={sqlite}, RW: {error}")
+                })?;
                 if file_backed {
                     let readonly = ErasureExecutionHostV1::open_read_only_with_authority(
                         path,
                         &composition,
                         ErasureRecoveryLimitsV1::compiled_maximum(),
                     )?;
-                    exercise(readonly, classification, &verifier, consumer, edge)?;
+                    exercise(readonly, classification, &verifier, consumer, edge)
+                        .map_err(|error| format!("{consumer:?}/{edge:?}, SQLite RO: {error}"))?;
                 }
             }
         }
