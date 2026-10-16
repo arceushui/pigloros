@@ -187,6 +187,11 @@ def assert_core_rust_cache_contract(workflow: dict) -> None:
 TEST_SHARDS_NEEDS = ["test-shard"]
 TEST_SHARDS_IF = "${{ !cancelled() && needs.test-shard.result == 'success' }}"
 TEST_SHARDS_CORE_CHECK = 'test "${TEST_SHARDS_RESULT}" = "${expected}"'
+TEST_SHARD_COUNT = 3
+
+
+def step_runs(job: dict) -> str:
+    return "\n".join(str(step.get("run", "")) for step in job.get("steps", []))
 
 
 def assert_test_shards_gate(workflow: dict) -> None:
@@ -199,6 +204,25 @@ def assert_test_shards_gate(workflow: dict) -> None:
         raise AssertionError("test-shards must wait for every test shard")
     if aggregate.get("if") != TEST_SHARDS_IF:
         raise AssertionError("test-shards must run only after every shard succeeded")
+    shard = jobs.get("test-shard", {})
+    strategy = shard.get("strategy", {})
+    expected = list(range(1, TEST_SHARD_COUNT + 1))
+    if strategy.get("matrix", {}).get("shard") != expected:
+        raise AssertionError(f"test-shard matrix must be shards {expected}")
+    if strategy.get("fail-fast") is not False:
+        raise AssertionError("test-shard must not cancel sibling shards on failure")
+    count = str(TEST_SHARD_COUNT)
+    shard_runs = step_runs(shard)
+    aggregate_runs = step_runs(aggregate)
+    for fragment, runs in (
+        (f'--partition "slice:${{SHARD}}/{count}"', shard_runs),
+        (f"nextest partition: slice:%s/{count}", shard_runs),
+        (f"for shard in {' '.join(map(str, expected))}; do", aggregate_runs),
+        (f"slice:${{shard}}/{count}", aggregate_runs),
+        (f"--partitioned={count}", aggregate_runs),
+    ):
+        if fragment not in runs:
+            raise AssertionError(f"shard count must agree everywhere: missing {fragment}")
     core = jobs["core-gate"]
     if "test-shards" not in core.get("needs", []):
         raise AssertionError("core-gate must wait for test-shards")
@@ -478,6 +502,19 @@ class CiWorkflowPolicyTests(unittest.TestCase):
                 needs=["test"]
             ),
             "must define the test-shards aggregate": lambda w: w["jobs"].pop("test-shards"),
+            "matrix must be shards": lambda w: w["jobs"]["test-shard"]["strategy"].update(
+                matrix={"shard": [1, 2]}
+            ),
+            "must not cancel sibling shards": lambda w: w["jobs"]["test-shard"][
+                "strategy"
+            ].update({"fail-fast": True}),
+            "shard count must agree everywhere": lambda w: w["jobs"]["test-shards"][
+                "steps"
+            ][-1].update(
+                run=w["jobs"]["test-shards"]["steps"][-1]["run"].replace(
+                    "--partitioned=3", "--partitioned=2"
+                )
+            ),
         }
         for message, mutate in mutations.items():
             with self.subTest(message=message):

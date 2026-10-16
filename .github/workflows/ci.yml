@@ -56,7 +56,7 @@ env:
 # ── Quality gates ────────────────────────────────────────────────────────────
 #
 # Fail fast in bounded stages. Pull-request diff and policy checks run before
-# any Cargo-heavy work. The four core gates then run together, followed by at
+# any Cargo-heavy work. The core gates then run together, followed by at
 # most eight standard jobs. Mutation and ASan are the final expensive stages.
 
 jobs:

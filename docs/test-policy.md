@@ -17,7 +17,7 @@ Shared reference for humans and agents.
 | Attrs / doctests | Trunk `rust-test-policy` | `coverage(off)` test-only; bans ` ```ignore ` |
 | Git hook | Versioned repository pre-commit runs Trunk `rust-test-policy`, then regenerates/stages `Cargo.lock` for manifest changes | Run once per clone: `git config core.hooksPath .githooks` |
 | Runtime | CI: `cargo nextest run --run-ignored all` in three `--partition slice:k/3` shards plus `cargo test --doc -- --include-ignored`; locally `cargo test -- --include-ignored` | Ignored tests still execute |
-| Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches libtest `test result:` and nextest `Summary` lines only (no log prose FP); fails on any ignored or skipped test or a missing summary; `--partitioned` proves the shards ran every test exactly once |
+| Summary check | `scripts/assert-no-ignored-in-test-summary.sh` | Matches libtest `test result:` and nextest `Summary` lines only (no log prose FP); outside `--partitioned=N` mode fails on any ignored or skipped test or a missing summary; `--partitioned=N` instead proves the N shards ran every test exactly once (partitioning itself causes skips) |
 | Coverage | `cargo llvm-cov nextest` with `--run-ignored all` + `covgate` | At least 99% lines + 99% regions for the whole workspace and new/changed Rust code |
 | Change risk | `cargo-crap` over the hosted LCOV report | Existing function scores must not regress; new functions must score at most 30 for Rust-affecting changes |
 | Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |

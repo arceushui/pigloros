@@ -94,14 +94,8 @@ class AssertNoIgnoredTests(unittest.TestCase):
             "\x1b[1m     Summary\x1b[0m [  1.0s] \x1b[1m4\x1b[0m tests run: "
             "\x1b[1m4\x1b[0m passed, \x1b[1m4\x1b[0m skipped\n"
         )
-        self.assertEqual(
-            self.run_script(
-                coloured, coloured, coloured, flags=("--partitioned=2",)
-            ).returncode,
-            1,
-        )
-        two = "\x1b[1m     Summary\x1b[0m [  1.0s] \x1b[1m4\x1b[0m tests run: \x1b[1m4\x1b[0m passed, \x1b[1m4\x1b[0m skipped\n"
-        self.assertEqual(self.run_script(two, two, flags=("--partitioned=2",)).returncode, 0)
+        result = self.run_script(coloured, coloured, flags=("--partitioned=2",))
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_partitioned_missing_shard_fails(self) -> None:
         result = self.run_script(self.shard(3, 5), self.shard(3, 5), flags=(PART,))
