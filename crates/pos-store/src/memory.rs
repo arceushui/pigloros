@@ -10232,6 +10232,10 @@ mod tests {
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn logical_sequence_integrity_failures_are_fail_closed() {
+        use crate::{ForkReplayReadBudgetV1, ForkReplayReadLimitsV1};
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+
         let mut store = new_store();
         let root = store.create_timeline("integrity-root").test_ok();
         let entity = EntityId::new();
@@ -10250,6 +10254,20 @@ mod tests {
         ));
 
         let child = store.fork(root.id(), Seq::from_u64(1), "child").test_ok();
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000).test_ok();
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock).test_ok();
+        assert_eq!(
+            store
+                .compute_chain_hash_with_context(
+                    child.id(),
+                    Seq::ZERO,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                )
+                .test_ok(),
+            store.hasher.genesis_hash()
+        );
         let missing_prefix = ForkChain {
             timelines: vec![root.id(), child.id()],
             fork_seqs: Vec::new(),
@@ -10285,6 +10303,17 @@ mod tests {
             store.logical_head(child.id()),
             Err(CoreError::Storage(_))
         ));
+        // Reuse the corrupt metadata to prove the protected hash accumulator
+        // refuses before hashing, independently of the ordinary head lookup.
+        assert!(matches!(
+            store.compute_chain_hash_with_context(
+                child.id(),
+                Seq::ZERO,
+                &mut NativeReadContextV1::protected(&mut budget),
+            ),
+            Err(CoreError::Storage(message)) if message == "logical Timeline head overflow"
+        ));
+        budget.check_time().test_ok();
     }
 
     #[test]

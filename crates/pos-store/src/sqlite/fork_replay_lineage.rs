@@ -382,11 +382,12 @@ mod tests {
         // Real SQL rows deliberately violate selection/classification promises.
         // A coherent held snapshot cannot do this; these are independent
         // decoder defenses, not a simulated concurrent public Store mutation.
-        for (selected, parent, cut, fork, expected, bytes) in [
+        for (selected, parent, cut, head, fork, expected, bytes) in [
             (
                 target,
                 None,
                 None,
+                1_i64,
                 false,
                 Ok((ForkReplayLineageNodeV1::new(target, None), Seq::from_u64(1))),
                 51,
@@ -395,6 +396,7 @@ mod tests {
                 target,
                 Some(other),
                 Some(1_i64),
+                1,
                 true,
                 Ok((
                     ForkReplayLineageNodeV1::new(target, Some((other, Seq::from_u64(1)))),
@@ -406,6 +408,7 @@ mod tests {
                 other,
                 None,
                 None,
+                1,
                 false,
                 Err(Error::Read(ReadError::CorruptAuthority)),
                 26,
@@ -414,6 +417,7 @@ mod tests {
                 target,
                 Some(other),
                 None,
+                1,
                 false,
                 Err(Error::Read(ReadError::CorruptAuthority)),
                 26,
@@ -422,16 +426,36 @@ mod tests {
                 target,
                 None,
                 Some(1),
+                1,
+                false,
+                Err(Error::Read(ReadError::CorruptAuthority)),
+                26,
+            ),
+            (
+                target,
+                Some(other),
+                Some(-1),
+                1,
+                true,
+                Err(Error::Read(ReadError::CorruptAuthority)),
+                52,
+            ),
+            (
+                target,
+                None,
+                None,
+                -1,
                 false,
                 Err(Error::Read(ReadError::CorruptAuthority)),
                 26,
             ),
         ] {
-            let mut statement = conn.prepare("SELECT ?1, ?2, ?3, 1")?;
+            let mut statement = conn.prepare("SELECT ?1, ?2, ?3, ?4")?;
             let mut rows = statement.query(params![
                 selected.to_string(),
                 parent.map(|id| id.to_string()),
                 cut,
+                head,
             ])?;
             let row = rows.next()?.ok_or("missing native lineage row")?;
             let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
@@ -446,7 +470,8 @@ mod tests {
             );
             assert_eq!(result, expected);
             // Decoding charges the actual ID Strings before the fixed native
-            // coordinate: root 26+25, Fork 26+26+49; faults stop after first ID.
+            // coordinate: root 26+25, Fork 26+26+49. The negative cut stops
+            // after both IDs (52); all other faults stop after the first (26).
             assert_eq!(budget.remaining_native_bytes(), 16_384 - bytes);
             budget.check_time()?;
         }
