@@ -31,7 +31,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: f1afff2be9bb74571ee29cbe7c881d1da36f344d
+          ref: 23431019fae98b7f59df0e0ac2ed15c6419c60c7
           path: candidate
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
