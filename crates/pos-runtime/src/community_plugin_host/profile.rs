@@ -462,7 +462,8 @@ impl CommunityPluginExecutionProfileV1 {
         self.ceilings
     }
 
-    /// The recorded pinned runtime identity, once a later slice records it.
+    /// The recorded pinned runtime identity: the worker and the conformance adapter record
+    /// `pinned_runtime_v1()`.
     #[must_use]
     pub const fn runtime(&self) -> Option<&PinnedComponentRuntimeV1> {
         self.runtime.as_ref()

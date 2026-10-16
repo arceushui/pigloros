@@ -26,12 +26,13 @@ the types are compiled everywhere in CI, so this checker is the control. It requ
 5. `local-admission-host` is enabled only by `apps/pos-experiment`, the adapter and a feature
    named `test-support` that forwards it.
 
-Rules 1, 3 and 4 are vacuous on the real tree until the adapter exists (S2, #615; the worker
-dev-dependency from S3b1, #617); the companion test script exercises them with synthetic
-manifests and sources. Whether the adapter may be named in `[workspace.dependencies]` is decided
-by S2 or S3b1; until then such an entry is rejected like any other dependent. Rule 5 accepts any
-feature named `test-support` that forwards `local-admission-host`, in any crate (the pinned
-behaviour of `pos-runtime`'s own `test-support`), and only that.
+Rules 1, 3 and 4 have real subjects on the repository: the adapter (S2, #615) and, for rule 4, the
+`[dev-dependencies]` entry of `apps/pos-plugin-worker` (since #617). The companion test script
+exercises all of them with synthetic manifests and sources. The adapter is not named in
+`[workspace.dependencies]` (S2 decided: path dependencies only), so such an entry is rejected like
+any other dependent. Rule 5 accepts any feature named `test-support` that forwards
+`local-admission-host`, in any crate (the pinned behaviour of `pos-runtime`'s own
+`test-support`), and only that.
 
 Stated limits: the check is textual. It does not look at build configuration outside manifests
 (workflows, Dockerfiles, `.cargo/config*`, shell scripts); the only release build selects the one
