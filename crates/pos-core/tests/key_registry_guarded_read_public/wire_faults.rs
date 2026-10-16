@@ -23,6 +23,48 @@ fn unique_start(bytes: &[u8], needle: &[u8]) -> Fallible<usize> {
 
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
+fn nested_string_segments_do_not_inherit_the_container_recursion_limit() -> Fallible<()> {
+    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
+        .swap_remove(1)
+        .0;
+    let bytes = encoded(&live)?;
+    let mut baseline = Guard::new(1_024);
+    assert_eq!(
+        KeyRegistryStateV1::from_durable_cbor_with_read_guard(&bytes, &mut baseline)?,
+        live
+    );
+    for (header, needle) in [
+        (0x7f, encoded(&"a")?),
+        (0x5f, encoded(&Value::Bytes(vec![0x52; 32]))?),
+    ] {
+        // Target the first owner when identities repeat, or the public key.
+        let start = bytes
+            .windows(needle.len())
+            .position(|part| part == needle)
+            .ok_or("native segment field missing")?;
+        let mut nested = vec![header; 257];
+        nested.extend_from_slice(&needle);
+        nested.extend(std::iter::repeat_n(0xff, 257));
+        let complete = replace_first(&bytes, &needle, &nested)?;
+        // Acceptance is required, not merely agreement between two refusals.
+        assert_eq!(parity(&complete)?, live);
+        let mut guard = Guard::new(1_024);
+        assert_eq!(
+            KeyRegistryStateV1::from_durable_cbor_with_read_guard(&complete, &mut guard)?,
+            live
+        );
+        assert_eq!(guard.remaining, baseline.remaining);
+        // End the entire carrier before the final break, so later registry
+        // fields cannot accidentally supply a missing segment terminator.
+        let mut truncated = bytes[..start].to_vec();
+        truncated.extend_from_slice(&nested[..nested.len() - 1]);
+        assert_eq!(parity(&truncated), Err(ReadError::InvalidSnapshot));
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn native_key_byte_arrays_keep_exact_work_and_reject_invalid_elements() -> Fallible<()> {
     let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
         .swap_remove(1)
