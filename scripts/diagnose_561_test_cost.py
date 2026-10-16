@@ -53,7 +53,7 @@ def instrument(source, filename, functions):
 
 def measurements(log):
     result = {}
-    for label, elapsed in re.findall(r"(?m)^\[561-cost\] (\S+) (\d+)$", log):
+    for label, elapsed in re.findall(r"(?m)\[561-cost\] (\S+) (\d+)$", log):
         entry = result.setdefault(label, {"calls": 0, "total_ns": 0, "max_ns": 0})
         entry["calls"] += 1
         entry["total_ns"] += int(elapsed)
@@ -74,7 +74,7 @@ def self_test():
         except ValueError:
             continue
         raise AssertionError("ambiguous source accepted")
-    assert measurements("[561-cost] fixture.rs::populate 10\n"
+    assert measurements("test fixture ... [561-cost] fixture.rs::populate 10\n"
                         "[561-cost] fixture.rs::populate 20\n") == {
         "fixture.rs::populate": {"calls": 2, "total_ns": 30, "max_ns": 20},
     }
