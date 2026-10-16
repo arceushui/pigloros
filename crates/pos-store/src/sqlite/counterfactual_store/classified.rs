@@ -19,7 +19,9 @@ use pos_core::{
 use rusqlite::{params, OptionalExtension};
 
 use super::{lift, then_staged, Staged};
-use crate::fork_event_authority::{derive_operation_ids, fork_append_request};
+use crate::fork_event_authority::{
+    derive_operation_ids, fork_append_request, without_wall_time_override,
+};
 use crate::sqlite::{sqlite_validate_classified_permit, SqliteStore, FORK_ADMISSION_FAR1_SQL};
 use crate::{
     ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1,
@@ -174,20 +176,6 @@ impl SqliteStore {
         then_staged(Ok(inserted), |()| {
             Self::logical_head_unchecked_on(&self.conn, child).map(Ok)
         })
-    }
-}
-
-/// A classified Event is stamped by the store clock, so no draft may carry a
-/// `WallTime` override.
-fn without_wall_time_override(drafts: &PipelineDraftBatchV1) -> Result<(), ClassifiedError> {
-    if drafts
-        .drafts()
-        .iter()
-        .any(|draft| draft.wall_time.is_some())
-    {
-        Err(INVALID_REQUEST)
-    } else {
-        Ok(())
     }
 }
 

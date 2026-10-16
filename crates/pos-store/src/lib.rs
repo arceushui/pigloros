@@ -50,8 +50,8 @@ extern crate self as pos_store;
 pub mod fae1_fixture;
 
 // Test-only. The ADR-099 revision 12 classified counterfactual fixture serves
-// the public `SQLite` tests and the adapter unit tests; its items are `pub` for
-// the same reason as the `FAE1` fixture above.
+// the public Memory and `SQLite` tests and the adapter unit tests; its items
+// are `pub` for the same reason as the `FAE1` fixture above.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[path = "../tests/support/classified_fork_fixture.rs"]

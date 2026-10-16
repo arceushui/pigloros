@@ -711,16 +711,12 @@ pub(crate) fn fork_append_request(
 }
 
 /// ADR-099 revision 12 domain of one classified counterfactual operation ID.
-// Ungated by slice 4 (Memory), which adds the Memory adapter's caller.
-#[cfg(feature = "sqlite")]
 const COUNTERFACTUAL_TICK_OPERATION_INDEX_DOMAIN: &[u8] =
     b"pigloros/counterfactual-tick-operation-index/v1";
 
 /// Derive the `FOP1` operation IDs of the first `count` drafts of one
 /// classified counterfactual batch: `BLAKE3(domain || operation_base ||
 /// u32be(i))` for draft `i`, so the store never needs the plan.
-// Ungated by slice 4 (Memory), which adds the Memory adapter's caller.
-#[cfg(feature = "sqlite")]
 pub(crate) fn derive_operation_ids(operation_base: Hash, count: usize) -> Vec<Hash> {
     (0_u32..)
         .take(count)
@@ -732,6 +728,24 @@ pub(crate) fn derive_operation_ids(operation_base: Hash, count: usize) -> Vec<Ha
             Hash::from_bytes(*hasher.finalize().as_bytes())
         })
         .collect()
+}
+
+/// A classified counterfactual Event is stamped by the store clock, so no
+/// draft of its batch may carry a `WallTime` override.
+pub(crate) fn without_wall_time_override(
+    drafts: &PipelineDraftBatchV1,
+) -> Result<(), ClassifiedCounterfactualErrorV1> {
+    if drafts
+        .drafts()
+        .iter()
+        .any(|draft| draft.wall_time.is_some())
+    {
+        Err(ClassifiedCounterfactualErrorV1::Provenance(
+            ClassifiedProvenanceErrorV1::InvalidRequest,
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 /// The two authority validators of ADR-105 r6 R6.9.
@@ -5055,7 +5069,6 @@ mod classified_counterfactual_tests {
         );
     }
 
-    #[cfg(feature = "sqlite")]
     fn hex(hash: Hash) -> String {
         const DIGITS: &[u8; 16] = b"0123456789abcdef";
         hash.as_bytes()
@@ -5069,7 +5082,6 @@ mod classified_counterfactual_tests {
             .collect()
     }
 
-    #[cfg(feature = "sqlite")]
     #[test]
     fn operation_ids_hash_the_domain_the_base_and_the_big_endian_index() {
         let base = Hash::from_bytes([0x42; 32]);
