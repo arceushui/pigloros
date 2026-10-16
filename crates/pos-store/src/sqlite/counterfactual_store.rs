@@ -1241,6 +1241,9 @@ impl SqliteStore {
     /// next seen in autocommit. One reported back in autocommit has nothing
     /// left open, so it is settled at once.
     fn settle_write<T, E: From<StoreError>>(&self, staged: Staged<T, E>) -> Result<T, E> {
+        // Inner rejections never carry `OutcomeUnknown`: only
+        // `counterfactual_port_error` maps `StorageOutcomeUnknown` onto it, so
+        // the in-doubt mark keys on the outer storage error.
         let unknown = matches!(staged, Err(CoreError::StorageOutcomeUnknown(_)));
         self.counterfactual_write_in_doubt.set(
             (self.counterfactual_write_in_doubt.get() || unknown) && !self.conn.is_autocommit(),
@@ -1343,7 +1346,7 @@ impl SqliteStore {
     /// Append the first Tick through the caller's Event-append `step` and
     /// build the receipt from its head, then record the generation and
     /// quarantine.
-    fn write_counterfactual_generation<E>(
+    fn write_counterfactual_generation<E: From<StoreError>>(
         &self,
         command: &CounterfactualInvalidationCommandV1,
         generation: i64,
@@ -1351,9 +1354,11 @@ impl SqliteStore {
         step: impl Fn(&Self, TimelineId, &PipelineDraftBatchV1) -> Staged<Seq, E>,
     ) -> Staged<CounterfactualInvalidationOutcomeV1, E> {
         let fork = command.fork();
-        let staged = step(self, fork, command.first_tick_drafts());
-        then_staged(staged, |head| {
-            let receipt = command.committed_receipt(&COUNTERFACTUAL_SEAL, head);
+        let appended = step(self, fork, command.first_tick_drafts());
+        let staged = then_staged(appended, |head| {
+            lift(Ok(command.committed_receipt(&COUNTERFACTUAL_SEAL, head)))
+        });
+        then_staged(staged, |receipt| {
             insert_generation(
                 &self.conn,
                 command,

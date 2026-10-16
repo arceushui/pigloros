@@ -186,8 +186,8 @@ use pos_core::{
 use rusqlite::{params, Connection, OptionalExtension, Params, Row};
 
 use super::{
-    counterfactual_schema_present, read_fork_state, settle, sql_integer, stored_hash, stored_u64,
-    lift, then_staged, CounterfactualSchemaObjectV1, Staged, StoreError,
+    counterfactual_schema_present, lift, read_fork_state, settle, sql_integer, stored_hash,
+    stored_u64, then_staged, CounterfactualSchemaObjectV1, Staged, StoreError,
 };
 use crate::factual_tick_plan::{plan_tick, FactualInstallV1, PlannedTickV1, TickPrefixV1};
 use crate::sqlite::{seq_as_i64, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore};
@@ -1183,7 +1183,7 @@ impl SqliteStore {
     /// because `TickDependencyRecordV1::try_new` already enforces the
     /// per-record node, edge, input, and byte caps, which are far below the
     /// set bounds, and the generation's set starts empty.
-    fn write_recorded_generation<E>(
+    fn write_recorded_generation<E: From<StoreError>>(
         &self,
         command: &CounterfactualInvalidationCommandV1,
         set: &DependencySetV1,
@@ -1216,8 +1216,10 @@ impl SqliteStore {
         let set = DependencySetV1::new(fork, sql_tick(persisted.generation));
         let admitted = lift(admit_later_record(&self.conn, &set, record));
         then_staged(admitted, |()| {
-            then_staged(step(self, fork, drafts), |head| {
-                let outcome = persisted.committed_tick(&COUNTERFACTUAL_SEAL, head);
+            let appended = then_staged(step(self, fork, drafts), |head| {
+                lift(Ok(persisted.committed_tick(&COUNTERFACTUAL_SEAL, head)))
+            });
+            then_staged(appended, |outcome| {
                 record
                     .map_or(Ok(()), |record| {
                         insert_dependency_record(&self.conn, &set, sql_tick(record.tick()), record)
@@ -1228,10 +1230,10 @@ impl SqliteStore {
     }
 
     /// The one write path of an invalidation, plain (`record` is `None`) or
-    /// recording. After the fence, the caller's `basis` read (the admitted-Fork
-    /// guard and the Fork lookup), a record is checked before the basis, so a
-    /// misplaced record wins over a stale basis. The first Tick's Events are
-    /// appended by the caller's `step`.
+    /// recording. After the fence and the caller's `basis` read (the
+    /// admitted-Fork guard and the Fork lookup), a record is checked before the
+    /// basis comparison, so a misplaced record wins over a stale basis. The
+    /// first Tick's Events are appended by the caller's `step`.
     pub(super) fn commit_invalidation_recording<E: From<StoreError>>(
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
