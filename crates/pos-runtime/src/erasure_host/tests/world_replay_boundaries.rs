@@ -43,12 +43,44 @@ fn preparations_reject_stale_generation_and_substituted_closure_or_use() {
     // constructor is Runtime-private and grants no authority to external code.
     let stale = test_ok(PreparedWorldReplayReadV1::new(
         &stale_closure,
-        intent,
+        intent.clone(),
         reference(1),
         Arc::clone(prepared.owner()),
         prepared.read_bounds(),
         prepared.fork_read_limits(),
     ));
+    let foreign = test_ok(PreparedWorldReplayReadV1::new(
+        &closure,
+        intent,
+        prepared.generation(),
+        Arc::new(WorldReplayVerifierModeV1::Exact),
+        prepared.read_bounds(),
+        prepared.fork_read_limits(),
+    ));
+    for (refused, expected) in [
+        (&stale, ErasureHostErrorV1::StaleGeneration),
+        (&foreign, ErasureHostErrorV1::Conflict),
+    ] {
+        let callbacks = Cell::new(0);
+        let before = budget.remaining_native_bytes();
+        assert_eq!(
+            sender.with_world_replay_read_fence(
+                &[&prepared, refused],
+                &mut budget,
+                |_, _| {
+                    callbacks.set(callbacks.get() + 1);
+                    Ok(())
+                },
+                |(), verdict| {
+                    callbacks.set(callbacks.get() + 1);
+                    verdict
+                },
+            ),
+            Err(expected)
+        );
+        assert_eq!(callbacks.get(), 0);
+        assert_eq!(budget.remaining_native_bytes(), before);
+    }
     assert_eq!(
         sender.observe_world_replay_use(&stale, &mut budget),
         Err(ErasureHostErrorV1::StaleGeneration),
@@ -81,6 +113,13 @@ fn event_reads_reject_stale_capabilities_and_substituted_operation_budgets() {
     let requested = replay_use(&closure);
     let mut sender = test_ok(host.read_sender());
     let verified = test_ok(sender.admit_world_replay(&closure, &requested));
+    let non_authoritative = crate::world_replay::test_verified_world_replay(
+        &closure,
+        &requested,
+        verified.inventory_generation(),
+        pos_core::ErasureReplayClaimV1::StructuralOnly,
+        verified.fork_read_limits(),
+    );
     let stale = crate::world_replay::test_verified_world_replay(
         &closure,
         &requested,
@@ -95,6 +134,13 @@ fn event_reads_reject_stale_capabilities_and_substituted_operation_budgets() {
         start,
         &mut clock,
     ));
+    assert_eq!(verified.require_authoritative_use(), Ok(()));
+    let before = budget.remaining_native_bytes();
+    assert_eq!(
+        sender.read_world_replay_events(&non_authoritative, &mut budget),
+        Err(ErasureHostErrorV1::AuthorizationDenied),
+    );
+    assert_eq!(budget.remaining_native_bytes(), before);
     assert_eq!(
         sender.read_world_replay_events(&stale, &mut budget),
         Err(ErasureHostErrorV1::StaleGeneration),
