@@ -5162,8 +5162,17 @@ impl MemoryStore {
             context
                 .node(0)
                 .map_err(|_| CoreError::ArtifactUnavailable)?;
-            let length = chain.segment_length(self, index, *timeline)?;
-            let end = length.min(at_seq.as_u64() - logical_offset);
+            // The first pass proved every boundary is ordered and within its
+            // native segment. Earlier iterations consumed complete segments;
+            // a partial segment ends the loop. Project the already-validated
+            // logical boundary onto this segment instead of validating again.
+            let logical_end = chain
+                .fork_seqs
+                .get(index)
+                .copied()
+                .unwrap_or(logical_head)
+                .as_u64();
+            let end = logical_end.min(at_seq.as_u64()) - logical_offset;
             let events = &self.state(*timeline).events;
             context
                 .check()
