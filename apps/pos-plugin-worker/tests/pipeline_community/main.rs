@@ -25,9 +25,9 @@ use harness::{
     load_manifest, require_version, run_suite, verify_pinned, Capture, Case, ConformanceError,
     Manifest, Runner, PROFILE_MAGIC, PROFILE_VERSION,
 };
-use parity::TestOk;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use support::test_ok::TestOk;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 

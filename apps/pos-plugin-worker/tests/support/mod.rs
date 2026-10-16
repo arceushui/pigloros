@@ -3,3 +3,4 @@
 pub mod attempts;
 pub mod lane;
 pub mod subcase;
+pub mod test_ok;

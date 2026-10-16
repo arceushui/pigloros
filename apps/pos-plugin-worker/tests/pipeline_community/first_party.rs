@@ -88,7 +88,7 @@ fn native_pin() -> BoxResult<PluginPinV1> {
     )?)
 }
 
-/// Register the twin on the pinned local path and return its Plugin ID and step counter.
+/// Register the twin on the pinned local path and return its step counter.
 ///
 /// The twin owns `event_type` and emits for `entity`. It is assigned the non-participant
 /// scheduled profile, as `register_community_driver` does for a community Driver.
@@ -99,7 +99,7 @@ pub fn register_twin(
     registry: &mut PluginRegistry,
     event_type: &'static str,
     entity: EntityId,
-) -> BoxResult<(PluginId, Arc<AtomicUsize>)> {
+) -> BoxResult<Arc<AtomicUsize>> {
     let plugin = TwinPlugin {
         id: PluginId::new(),
         event_type,
@@ -116,5 +116,5 @@ pub fn register_twin(
     registry.register_pinned_generated(&plugin, registration, None, Some(driver))?;
     let binding = (plugin.id, ScheduledDriverBindingV1::NonParticipant);
     registry.compose_scheduled_profiles(&[binding])?;
-    Ok((plugin.id, steps))
+    Ok(steps)
 }

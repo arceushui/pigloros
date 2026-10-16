@@ -9,7 +9,7 @@
 //! recorded and is expected to differ; payload bytes are compared only between the Local and
 //! Air-Gapped runs of the same community release.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
 
 use pos_core::{Event, ScheduledObservationProfileV1};
@@ -24,6 +24,7 @@ use crate::first_party::{entity_of, register_twin};
 use crate::harness::{Capture, PROFILE_KEY};
 use crate::support::lane::{publish, Lane, Published, ALPHA, EVENT_TYPE};
 use crate::support::subcase::WORKER;
+use crate::support::test_ok::TestOk;
 
 /// The only store of the community pass world.
 const STORE: &str = "memory";
@@ -32,23 +33,6 @@ const STORE: &str = "memory";
 const ENTITY: &str = "01040G2081040G2081040G2081";
 /// The Event type the first-party twin owns beside the community Plugin in a mixed registry.
 const TWIN_TYPE: &str = "parity.first-party";
-
-/// Unwrap a fixture step, failing the runner with the unexpected error.
-///
-/// `resume_unwind` is deliberate: the workspace denies `unwrap`, `expect` and `panic!`, and the
-/// suite harness catches the unwind and reports it as a `RunnerPanicked` failure of the case.
-pub trait TestOk<T> {
-    /// The value, or an unwind that names the error.
-    fn test_ok(self) -> T;
-}
-
-impl<T, E: std::fmt::Debug> TestOk<T> for Result<T, E> {
-    fn test_ok(self) -> T {
-        self.unwrap_or_else(|error| {
-            std::panic::resume_unwind(Box::new(format!("unexpected fixture error: {error:?}")))
-        })
-    }
-}
 
 /// What one pass shows of its authority outcome, the owner's isolation class aside.
 #[derive(Debug, PartialEq, Eq)]
@@ -69,6 +53,8 @@ struct Observed {
     owners: Vec<String>,
     /// Whether the Events follow the host schedule order of their owners.
     follows_schedule: bool,
+    /// The number of Events the commit receipt names.
+    committed: usize,
     payloads: Vec<Vec<u8>>,
 }
 
@@ -92,9 +78,18 @@ fn receipt_names(result: &PassResultV1, events: &[Event]) -> bool {
     named.eq(events.iter().map(|event| (event.id, event.seq)))
 }
 
-/// The owning Plugin's name and isolation class of every Event type. The composition and the
-/// ownership rows are both in registration order.
-fn owners(registry: &PluginRegistry) -> BTreeMap<String, (String, String)> {
+/// The number of Events the commit receipt of `result` names, zero without a receipt.
+fn committed_count(result: &PassResultV1) -> usize {
+    match result {
+        PassResultV1::Committed(Some(receipt)) => receipt.committed_events().len(),
+        _ => 0,
+    }
+}
+
+/// The owning Plugin's name and isolation class of every Event type.
+///
+/// The composition and the ownership rows are both in registration order.
+fn owners_by_type(registry: &PluginRegistry) -> BTreeMap<String, (String, String)> {
     let mut owners = BTreeMap::new();
     let rows = registry.plugin_ownership_rows();
     for (plugin, (types, _closure)) in registry.composition().plugins.into_iter().zip(rows) {
@@ -110,22 +105,22 @@ fn owners(registry: &PluginRegistry) -> BTreeMap<String, (String, String)> {
 }
 
 /// The availability of every registered Plugin, in registration order.
-fn availability(registry: &PluginRegistry) -> String {
+fn availability_row(registry: &PluginRegistry) -> String {
     let plugins = registry.composition().plugins;
-    let names: Vec<String> = plugins
+    let states: Vec<String> = plugins
         .iter()
         .map(|plugin| {
-            let availability = registry.availability(plugin.id);
-            availability.map_or_else(|| "None".to_owned(), |value| format!("{value:?}"))
+            let state = registry.availability(plugin.id);
+            state.map_or_else(|| "None".to_owned(), |value| format!("{value:?}"))
         })
         .collect();
-    names.join(",")
+    states.join(",")
 }
 
-/// The scheduled observation profile of every registered Driver, once each.
-fn profile(registry: &PluginRegistry) -> String {
+/// The scheduled observation profile of every registered Driver, once each, in name order.
+fn observation_profiles(registry: &PluginRegistry) -> String {
     let plugins = registry.composition().plugins;
-    let mut profiles: Vec<&str> = plugins
+    let profiles: BTreeSet<&str> = plugins
         .iter()
         .map(|plugin| {
             let binding = registry.scheduled_binding(plugin.id);
@@ -136,7 +131,7 @@ fn profile(registry: &PluginRegistry) -> String {
             }
         })
         .collect();
-    profiles.dedup();
+    let profiles: Vec<&str> = profiles.into_iter().collect();
     profiles.join(",")
 }
 
@@ -145,8 +140,8 @@ fn profile(registry: &PluginRegistry) -> String {
 fn observe(lane: &Lane, outcome: &CommunityPassOutcomeV1, steps: String) -> Observed {
     let registry = &lane.pass.registry;
     let events = lane.pass.events();
-    let owners = owners(registry);
-    let owner_of = |event: &Event| owners.get(event.event_type.as_str()).cloned();
+    let owner_by_type = owners_by_type(registry);
+    let owner_of = |event: &Event| owner_by_type.get(event.event_type.as_str()).cloned();
     let owned: Vec<(String, String)> = events.iter().filter_map(owner_of).collect();
     let schedule: Vec<String> = registry.plugin_names().map(str::to_owned).collect();
     let emitted: Vec<&String> = owned.iter().map(|(name, _)| name).collect();
@@ -175,11 +170,14 @@ fn observe(lane: &Lane, outcome: &CommunityPassOutcomeV1, steps: String) -> Obse
             entities: entities.join(","),
             receipt_names_events: receipt_names(&outcome.result, &events),
             steps,
-            availability: availability(registry),
-            profile: profile(registry),
+            availability: availability_row(registry),
+            profile: observation_profiles(registry),
         },
         owners: owner_types.collect(),
+        // A cross-check only: the pinned per-path timeline strings are the authoritative proof
+        // of the order, since `scheduled` is derived from the same owners as `emitted`.
         follows_schedule: owned.len() == events.len() && emitted == scheduled,
+        committed: committed_count(&outcome.result),
         payloads: events.iter().map(payload).collect(),
     }
 }
@@ -204,7 +202,7 @@ fn record(capture: &mut Capture, path: &str, observed: &Observed) {
 /// The Local pass of a lane over the first-party twin alone, owning the fixture's Event type.
 fn first_party_pass(signed: &SignedWorld) -> BoxResult<Observed> {
     let mut pass = PassWorld::new(WORKER);
-    let (_, steps) = register_twin(&mut pass.registry, EVENT_TYPE, entity_of(ENTITY)?)?;
+    let steps = register_twin(&mut pass.registry, EVENT_TYPE, entity_of(ENTITY)?)?;
     let mut lane = Lane::over(signed, &[], Mode::Local, pass)?;
     let outcome = lane.run(signed)?;
     let steps = steps.load(Ordering::SeqCst).to_string();
@@ -263,12 +261,12 @@ fn mixed_pass(signed: &SignedWorld, entries: &[Published], order: Order) -> BoxR
     let (mut lane, twin) = match order {
         Order::TwinFirst => {
             let mut pass = PassWorld::new(WORKER);
-            let (_, twin) = register_twin(&mut pass.registry, TWIN_TYPE, entity)?;
+            let twin = register_twin(&mut pass.registry, TWIN_TYPE, entity)?;
             (Lane::over(signed, entries, Mode::Local, pass)?, twin)
         }
         Order::CommunityFirst => {
             let mut lane = Lane::new(signed, entries, Mode::Local)?;
-            let (_, twin) = register_twin(&mut lane.pass.registry, TWIN_TYPE, entity)?;
+            let twin = register_twin(&mut lane.pass.registry, TWIN_TYPE, entity)?;
             (lane, twin)
         }
     };
@@ -308,8 +306,10 @@ fn mixed_registry() -> BoxResult<Capture> {
     let mut capture = Capture::default();
     record(&mut capture, "twin-first", &twin_first);
     record(&mut capture, "community-first", &community_first);
+    // The order itself is proven by the pinned per-order timeline strings; this compares what
+    // was committed regardless of order: the (type, owner isolation) multiset and the count.
     let same = sorted(&twin_first) == sorted(&community_first)
-        && twin_first.authority.entities == community_first.authority.entities;
+        && twin_first.committed == community_first.committed;
     capture.record(STORE, "same-events-either-order", same);
     Ok(capture)
 }
