@@ -1,5 +1,5 @@
 # Temporary #561 investigation branch only; never a gate or trusted baseline.
-name: 561-benchmark-diagnostic
+name: 561-test-cost-diagnostic
 
 on:
   push:
@@ -9,15 +9,14 @@ permissions:
   contents: read
 
 jobs:
-  compare:
+  profile-tests:
     runs-on: ubuntu-24.04
-    # Two 12-minute builds plus four 3-minute runs, with setup/upload reserve.
-    timeout-minutes: 45
+    # One 15-minute build, two bounded test runs, setup and evidence upload.
+    timeout-minutes: 35
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: -D warnings
-      PIGLOROS_BENCH_SAMPLES: "10"
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -26,26 +25,21 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 091f25b9747f06072be4c10fdad3d14652cbffe0
-          path: baseline
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: 0c05f32092401e06e0661bf7982304b9f8a0c282
+          ref: 1b24e5f272c2962ed8091687ac29426e2b862356
           path: candidate
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.97.1
-      - name: Test diagnostic sample validation
-        run: python3 harness/scripts/diagnose_561_benchmark.py --self-test
-      - name: Compare frozen unchanged binaries on one runner
-        run: python3 harness/scripts/diagnose_561_benchmark.py
+      - name: Test diagnostic instrumentation
+        run: python3 harness/scripts/diagnose_561_test_cost.py --self-test
+      - name: Measure fixture and consumer cost without changing assertions
+        run: python3 harness/scripts/diagnose_561_test_cost.py
       - name: Preserve untrusted diagnostic evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
-          name: untrusted-561-abba-${{ github.run_id }}-${{ github.run_attempt }}
+          name: untrusted-561-test-cost-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 14
