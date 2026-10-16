@@ -15,6 +15,10 @@ use pos_core::{
 };
 use pos_store::{ForkReplayReadLimitsV1, ForkReplayRequirementV1};
 
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_support;
+
 /// One source in an owner-verified complete Fork ancestry classification.
 /// This structural value cannot mint a protected-use capability.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -489,7 +493,7 @@ const fn finite_u64(value: u64) -> bool {
     value != 0 && value != u64::MAX
 }
 
-fn finite_read_bounds(bounds: EventReadBounds) -> bool {
+const fn finite_read_bounds(bounds: EventReadBounds) -> bool {
     finite_usize(bounds.max_payload_bytes())
         && finite_usize(bounds.max_event_type_bytes())
         && finite_usize(bounds.max_fork_depth())

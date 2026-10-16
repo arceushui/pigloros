@@ -74,7 +74,7 @@ Repository
 the report.
 
 The internal-test allowlist includes the `#[cfg(test)]` imported Fork Replay,
-cumulative-budget, native Local replay, and protected-interval cleanup
+cumulative-budget, public-consumer lifecycle, native Local replay, and protected-interval cleanup
 companions. Keep these fixtures in their private module trees; moving a private
 unit module beneath `tests/**` does not turn it into a Cargo integration target.
 Each companion has an exact literal path in both baseline and analysis commands,

@@ -108,12 +108,19 @@ fn replay_range(
             .held()?
             .guard_started_at();
         let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
-        let mut budget = pos_store::ForkReplayReadBudgetV1::new(
-            prepared.fork_read_limits(),
-            started,
-            &mut clock,
-        )
-        .map_err(crate::unavailable)?;
+        #[cfg(test)]
+        let mut scripted = crate::imported_fork_replay_tests::lifecycle::operation_clock();
+        #[cfg(test)]
+        let clock: &mut dyn pos_core::trusted_clock::GuardMonotonicSourceV1 =
+            match scripted.as_mut() {
+                Some(script) => script,
+                None => &mut clock,
+            };
+        #[cfg(not(test))]
+        let clock = &mut clock;
+        let mut budget =
+            pos_store::ForkReplayReadBudgetV1::new(prepared.fork_read_limits(), started, clock)
+                .map_err(crate::unavailable)?;
         let target_registry = &mut *registry;
         let guard_slot = &mut guard;
         let revoked = &mut revoked;

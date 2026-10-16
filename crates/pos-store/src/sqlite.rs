@@ -164,6 +164,9 @@ mod fork_replay_read;
 mod fork_replay_registry;
 mod fork_replay_row;
 mod fork_replay_suffix;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod interval_test_support;
 mod local_cut_owner;
 mod pipeline_admission;
 // The Plugin trust registry needs `pos-conformance`, which builds only on Linux, so non-Linux
