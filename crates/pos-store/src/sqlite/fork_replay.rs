@@ -15,6 +15,10 @@ type ReadResult<T> = Result<T, Error>;
 const INTERVAL_STORAGE_ERROR: crate::ForkReplayLineageReadErrorV1 =
     crate::ForkReplayLineageReadErrorV1::Read(Error::StorageUnavailable);
 
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod interval_tests;
+
 /// Roll back only resources acquired by this begin, reader before writer.
 /// Both attempts execute even if the first fails; no clock or semantic read
 /// can prevent inert cleanup after a latched budget refusal.
