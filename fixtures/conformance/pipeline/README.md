@@ -95,10 +95,25 @@ budget leaves fails the pass `ResourceExhausted` and quarantines nothing. The
 fuel, host-call and output limits of a community Driver are not exercised on the
 real worker; the `OTHER-RESOURCE-LIMITS` exclusion records them.
 
+`PCF-CPH-011` and `PCF-CPH-012` (#635) cover Replay and lost-acknowledgement
+recovery. A Replay registry over the same first-party and community Drivers
+folds the Events a live pass of both committed into the projection the live
+registry folds (a first-party observer's Reducer that records Timeline Order,
+Event type and payload size), refuses to step its Drivers (`ModeMismatch`),
+steps no first-party Driver and launches no worker; the Local and Air-Gapped
+passes commit the same Events, payload bytes included. A pass whose commit
+acknowledgement is lost is `InDoubt` with its batch on the Timeline, in a mixed
+lane and in a first-party-only lane alike: `recover_scheduled_pass` returns a
+receipt that names exactly that batch, commits nothing again, re-runs no
+first-party Driver, launches no worker, and finds nothing in doubt a second
+time. The community member's receipt stays staged until the recovery commits it
+and adopts its state (recorded, not compared).
+
 The community pass world runs on `MemoryStore` only, so every case names the
 `memory` store, and the `SQLITE-STORE` exclusion records that this profile
-proves no SQLite parity of the community path. The other exclusions name the
-#489 subtasks that add the remaining cases.
+proves no SQLite parity of the community path. The other exclusions name what
+the real guests and release fixtures cannot yet exercise, with the subtask that
+owns it.
 
 ## `v1/legacy-eval-history.json` (`PLH1`, version 1)
 

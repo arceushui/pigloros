@@ -8,6 +8,7 @@
     "#632",
     "#633",
     "#634",
+    "#635",
     "ADR-021",
     "ADR-061 r8"
   ],
@@ -26,11 +27,6 @@
       "id": "OTHER-RESOURCE-LIMITS",
       "reason": "PCF-CPH-010 exhausts a community release through its memory budget only; the signed-release test world fixes the fuel, host-call and output budgets of a release, and the real guests make one host call and emit one small Event, so the fuel, host-call and output limits of a community Driver on the real worker need a release shape with those budgets or a new guest Component",
       "owner": "#637"
-    },
-    {
-      "id": "REPLAY-AND-RECOVERY",
-      "reason": "Replay without worker launches and lost-acknowledgement recovery of community Events are not yet proven",
-      "owner": "#635"
     },
     {
       "id": "SQLITE-STORE",
@@ -528,6 +524,121 @@
         "first-party.community-receipts": "none/Discarded,none/Committed",
         "parity.whole-pass-discarded-either-class": "true",
         "parity.next-pass-within-budget-commits": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-011",
+      "title": "A Replay registry over a first-party Driver and a community Driver built for the real worker folds the Events a live pass of both committed into the projection the live registry folds, refuses to step its Drivers, steps no first-party Driver and launches no worker, and the Local and Air-Gapped passes commit and fold the same",
+      "sources": [
+        "#489",
+        "#635",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "local-live.result": "Committed",
+        "local-live.timeline": "1:parity.first-party,2:prototype.driven",
+        "local-live.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "local-live.receipt.names-events": "true",
+        "local-live.steps": "1,1",
+        "local-live.availability": "Available,Available",
+        "local-live.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "local-live.follows-host-schedule": "true",
+        "local.live-projection": "1:parity.first-party,2:prototype.driven",
+        "local.replay-projection": "1:parity.first-party,2:prototype.driven",
+        "local.replay-equals-live": "true",
+        "local.replay-step": "ModeMismatch(Live,Replay)",
+        "local.replay-steps": "0,0",
+        "local.live-steps-during-replay": "0,0",
+        "air-gapped-live.result": "Committed",
+        "air-gapped-live.timeline": "1:parity.first-party,2:prototype.driven",
+        "air-gapped-live.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "air-gapped-live.receipt.names-events": "true",
+        "air-gapped-live.steps": "1,1",
+        "air-gapped-live.availability": "Available,Available",
+        "air-gapped-live.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "air-gapped-live.follows-host-schedule": "true",
+        "air-gapped.live-projection": "1:parity.first-party,2:prototype.driven",
+        "air-gapped.replay-projection": "1:parity.first-party,2:prototype.driven",
+        "air-gapped.replay-equals-live": "true",
+        "air-gapped.replay-step": "ModeMismatch(Live,Replay)",
+        "air-gapped.replay-steps": "0,0",
+        "air-gapped.live-steps-during-replay": "0,0",
+        "parity.replay-equals-live-either-class": "true",
+        "parity.local-equals-air-gapped": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-012",
+      "title": "A pass of either isolation class whose commit acknowledgement is lost is in doubt with its batch committed, and recovery returns a receipt naming exactly that batch without committing again, re-running the first-party Driver or launching a worker, and only once",
+      "sources": [
+        "#489",
+        "#635",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "mixed-lost.result": "InDoubt",
+        "mixed-lost.timeline": "1:parity.first-party,2:prototype.driven",
+        "mixed-lost.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "mixed-lost.receipt.names-events": "false",
+        "mixed-lost.steps": "1,1",
+        "mixed-lost.availability": "Available,Available",
+        "mixed-lost.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "mixed-lost.follows-host-schedule": "true",
+        "mixed-lost.refusal": "none",
+        "mixed-recovered.result": "Committed",
+        "mixed-recovered.timeline": "1:parity.first-party,2:prototype.driven",
+        "mixed-recovered.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "mixed-recovered.receipt.names-events": "true",
+        "mixed-recovered.steps": "0,0",
+        "mixed-recovered.availability": "Available,Available",
+        "mixed-recovered.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "mixed-recovered.follows-host-schedule": "true",
+        "mixed-recovered.refusal": "none",
+        "mixed.timeline-unchanged-by-recovery": "true",
+        "mixed.recover-again": "NoScheduledAdmissionInDoubt",
+        "mixed-lost.community-receipts": "none/Staged",
+        "mixed-lost.community-state": "initial",
+        "mixed-recovered.community-receipts": "none/Committed",
+        "mixed-recovered.community-state": "adopted",
+        "first-party-lost.result": "InDoubt",
+        "first-party-lost.timeline": "1:prototype.driven",
+        "first-party-lost.entity": "01040G2081040G2081040G2081",
+        "first-party-lost.receipt.names-events": "false",
+        "first-party-lost.steps": "1",
+        "first-party-lost.availability": "Available",
+        "first-party-lost.owner": "prototype.driven=OperatorTrustedNative",
+        "first-party-lost.follows-host-schedule": "true",
+        "first-party-lost.refusal": "none",
+        "first-party-recovered.result": "Committed",
+        "first-party-recovered.timeline": "1:prototype.driven",
+        "first-party-recovered.entity": "01040G2081040G2081040G2081",
+        "first-party-recovered.receipt.names-events": "true",
+        "first-party-recovered.steps": "0",
+        "first-party-recovered.availability": "Available",
+        "first-party-recovered.owner": "prototype.driven=OperatorTrustedNative",
+        "first-party-recovered.follows-host-schedule": "true",
+        "first-party-recovered.refusal": "none",
+        "first-party.timeline-unchanged-by-recovery": "true",
+        "first-party.recover-again": "NoScheduledAdmissionInDoubt",
+        "parity.recovered-without-rerun-either-class": "true"
       }
     }
   ]

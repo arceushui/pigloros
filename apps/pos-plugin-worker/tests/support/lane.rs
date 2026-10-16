@@ -22,7 +22,7 @@ use pos_plugin_publisher::test_support::{
     world::{wall, World as SignedWorld},
     BoxResult, BundleAddressV1,
 };
-use pos_plugin_supervisor::pass_harness::{GatedSpec, Source, World as PassWorld};
+use pos_plugin_supervisor::pass_harness::{GatedSpec, LostPort, Source, World as PassWorld};
 use pos_plugin_supervisor::{
     CommunityMemberV1, CommunityPluginHandleV1, CommunityPluginSubjectOutcomeV1 as Outcome,
     InvocationBindingV1, InvocationContextSourceV1, InvocationContextV1,
@@ -443,6 +443,21 @@ impl Lane {
         let registry = &signed.registry;
         let host = &mut self.host;
         Ok(self.pass.run(host, registry, &mut clock, TICK)?)
+    }
+
+    /// As [`Self::run`], through an admission port that commits the batch and then loses the
+    /// commit acknowledgement, so the registry holds the pass in doubt.
+    ///
+    /// # Errors
+    /// Returns the error of the clock or of the pass world's observation.
+    pub fn run_lost(&mut self, signed: &SignedWorld) -> BoxResult<CommunityPassOutcomeV1> {
+        let mut clock = wall(UTC)?;
+        let prepared = self.pass.prepare()?;
+        let mut port = LostPort(&mut self.pass.store);
+        let request = prepared.request(TICK, &mut port);
+        let registry = &signed.registry;
+        let host = &mut self.host;
+        Ok(host.run_pass(&mut self.pass.registry, registry, &mut clock, request))
     }
 
     /// One pass at the world's Tick and second.
