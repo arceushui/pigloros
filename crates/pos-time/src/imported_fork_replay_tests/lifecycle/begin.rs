@@ -84,6 +84,7 @@ fn refused_begin(call: ConsumerCall, read_only: bool, denied: Connection) -> Fal
         assert!(!record.phases.contains(&Phase::Installed));
         assert!(!record.phases.contains(&Phase::Staged));
         assert!(record.phases.contains(&Phase::FailureP2));
+        drop(record);
     }
     // Check before dropping the failed host: cleanup, not connection teardown,
     // must release the successfully acquired writer when reader BEGIN fails.
@@ -94,6 +95,7 @@ fn refused_begin(call: ConsumerCall, read_only: bool, denied: Connection) -> Fal
     assert_eq!(writer.load_key_registry()?, Some(before_keys));
     writer.save_key_registry(&verifier.next)?;
     assert_eq!(writer.load_key_registry()?, Some(verifier.next.clone()));
+    drop(writer);
     Ok(())
 }
 
