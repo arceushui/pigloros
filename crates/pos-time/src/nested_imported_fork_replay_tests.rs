@@ -156,6 +156,40 @@ fn classify_fault(
 }
 
 impl WorldReplayVerifierV1 for NestedVerifier {
+    fn read_profile(
+        &self,
+        _closure: &WorldReplayClosureV1,
+        intent: &pos_runtime::WorldReplayReadIntentV1,
+        _generation: ErasureReferenceV1,
+    ) -> Result<(EventReadBounds, ForkReplayReadLimitsV1), WorldReplayVerificationErrorV1> {
+        let scenario = self
+            .scenario
+            .lock()
+            .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)?
+            .ok_or(WorldReplayVerificationErrorV1::EvidenceUnavailable)?;
+        let arm = self
+            .sources
+            .iter()
+            .position(|sources| {
+                sources
+                    .first()
+                    .is_some_and(|source| source.timeline_id() == intent.timeline_id())
+            })
+            .ok_or(WorldReplayVerificationErrorV1::EvidenceUnavailable)?;
+        let short = scenario.target == arm && scenario.fault == Fault::ArmDepthShort;
+        let bounds = EventReadBounds::new_with_total_bytes_and_elapsed(
+            1_024,
+            128,
+            if short { 1 } else { 8 },
+            64,
+            64 * 1_024,
+            30_000_000,
+        );
+        ForkReplayReadLimitsV1::new(8, 65_536, 1_048_576, 256 * 1_024 * 1_024, 30_000_000)
+            .map(|limits| (bounds, limits))
+            .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)
+    }
+
     fn verify(
         &self,
         closure: &WorldReplayClosureV1,

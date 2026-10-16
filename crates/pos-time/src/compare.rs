@@ -3,14 +3,14 @@
 
 use pos_core::staged_install::PreparedInstallPairV1;
 use pos_core::store::SeqRange;
-use pos_core::trusted_clock::{ApplicableExpiriesV1, ReleaseGuardV1, StagedProtectedOutputV1};
+use pos_core::trusted_clock::{ReleaseGuardV1, StagedProtectedOutputV1};
 use pos_core::{
     CoreError, EntityId, ErasureProtectedOperationV1, Event, Seq, TimelineId, WorldReplayClosureV1,
 };
 use pos_runtime::{ErasureReadSenderV1, WorldReplayUseV1};
 use pos_state::{ProjectionRegistry, RevokedSubjectsV1};
 
-use crate::{ProtectedFoldV1, ProtectedReleaseV1, ReleaseHealthV1};
+use crate::{ProtectedFoldV1, ProtectedReleaseV1};
 
 /// The State-only result of comparing two diverged timelines.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -55,61 +55,108 @@ pub fn compare(
     release: ProtectedReleaseV1<'_>,
     folds: [&ProtectedFoldV1<'_>; 2],
 ) -> Result<ForkDiff, CoreError> {
-    let [a, b] = timelines;
     let [registry_a, registry_b] = registries;
-    let consumer_ids = comparison_consumers(fork_seq, [&*registry_a, &*registry_b])?;
-    let request = CompareRequestV1 {
-        timelines,
-        fork_seq,
-        closures,
-        folds,
-        consumer_ids: &consumer_ids,
-    };
     let ProtectedReleaseV1 {
         guard,
         expiries,
         health,
     } = release;
-    let mut guard = Some(guard);
+    let mut guard = Some(crate::PendingReplayGuardV1::new(guard, health));
     let mut revoked: [Option<RevokedSubjectsV1>; 2] = [None, None];
-    let mut comparison_outcome = Err(CoreError::ArtifactUnavailable);
-    let mut second_timeline_fence_result = Err(CoreError::ArtifactUnavailable);
-    let mut first_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
-        let mut second_timeline_effect = |sender: &mut ErasureReadSenderV1<'_>| {
-            if let Some(held) = guard.take() {
-                let target = CompareTargetV1 {
-                    registries: [&mut *registry_a, &mut *registry_b],
-                    guard: held,
-                    expiries: &expiries,
-                    health,
-                    revoked: &mut revoked,
-                };
-                comparison_outcome = compare_in_fences(sender, &request, target);
-            }
+    let mut diff = None;
+    let result = (|| {
+        let consumers = comparison_consumers(fork_seq, [&*registry_a, &*registry_b])?;
+        let prepared = prepare_comparison_reads(sender, timelines, closures, consumers)?;
+        let request = CompareRequestV1 {
+            timelines,
+            fork_seq,
+            closures,
+            folds,
         };
-        second_timeline_fence_result = sender
-            .with_protected_ancestry_fence(
-                b,
-                ErasureProtectedOperationV1::Export,
-                &mut second_timeline_effect,
-            )
-            .map_err(crate::host_error_to_core);
-    };
-    let fenced = sender
-        .with_protected_ancestry_fence(
-            a,
-            ErasureProtectedOperationV1::Export,
-            &mut first_timeline_effect,
+        let started = guard
+            .as_ref()
+            .ok_or(CoreError::ArtifactUnavailable)?
+            .held()?
+            .guard_started_at();
+        let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
+        let mut budget = pos_store::ForkReplayReadBudgetV1::new(
+            prepared[0].fork_read_limits(),
+            started,
+            &mut clock,
         )
-        .map_err(crate::host_error_to_core)
-        .and(second_timeline_fence_result)
-        .and(comparison_outcome);
-    // P2 and teardown of a guard the effect never took, before the
-    // failure-path forget of each arm.
-    crate::teardown(guard, health);
+        .map_err(crate::unavailable)?;
+        let targets = [&mut *registry_a, &mut *registry_b];
+        let guard_slot = &mut guard;
+        let revoked = &mut revoked;
+        let preparations = [&prepared[0], &prepared[1]];
+        sender
+            .with_world_replay_read_fence(
+                &preparations,
+                &mut budget,
+                |sender, budget| {
+                    let registries = targets;
+                    let held = guard_slot
+                        .take()
+                        .ok_or(pos_core::ErasureHostErrorV1::AdapterFailure)?;
+                    let staged = prepare_comparison(
+                        sender,
+                        &request,
+                        preparations,
+                        budget,
+                        held.held().map_err(crate::core_error_to_host)?,
+                        revoked,
+                        registries,
+                    )
+                    .map_err(crate::core_error_to_host)?;
+                    Ok((held, staged))
+                },
+                |(held, (staged, diverged_entities)), verdict| {
+                    held.handoff(&expiries, staged, verdict)
+                        .map_err(crate::core_error_to_host)?;
+                    diff = Some(ForkDiff {
+                        fork_seq,
+                        diverged_entities,
+                    });
+                    Ok(())
+                },
+            )
+            .map_err(crate::host_error_to_core)?;
+        diff.ok_or(CoreError::ArtifactUnavailable)
+    })();
+    drop(guard);
     let [revoked_a, revoked_b] = revoked;
-    let fenced = crate::forget_on_failure(fenced, registry_a, revoked_a.as_ref());
-    crate::forget_on_failure(fenced, registry_b, revoked_b.as_ref())
+    let result = crate::forget_on_failure(result, registry_a, revoked_a.as_ref());
+    crate::forget_on_failure(result, registry_b, revoked_b.as_ref())
+}
+
+/// Select both immutable policies, including equal operation ceilings, before
+/// any native read or either arm's initial admission.
+fn prepare_comparison_reads(
+    sender: &mut ErasureReadSenderV1<'_>,
+    timelines: [TimelineId; 2],
+    closures: [&WorldReplayClosureV1; 2],
+    consumers: [Vec<String>; 2],
+) -> Result<[pos_runtime::PreparedWorldReplayReadV1; 2], CoreError> {
+    let [consumers_a, consumers_b] = consumers;
+    let mut prepare = |index, consumers| {
+        let intent = pos_runtime::WorldReplayReadIntentV1::new(
+            timelines[index],
+            ErasureProtectedOperationV1::Export,
+            SeqRange::all(),
+            consumers,
+            Vec::new(),
+        )
+        .map_err(crate::unavailable)?;
+        sender
+            .prepare_world_replay_read(closures[index], intent)
+            .map_err(crate::host_error_to_core)
+    };
+    let a = prepare(0, consumers_a)?;
+    let b = prepare(1, consumers_b)?;
+    if a.fork_read_limits() != b.fork_read_limits() {
+        return Err(CoreError::ArtifactUnavailable);
+    }
+    Ok([a, b])
 }
 
 /// Refuse a quarantined staged executor, then a Fork point with no
@@ -134,62 +181,6 @@ struct CompareRequestV1<'r> {
     fork_seq: Seq,
     closures: [&'r WorldReplayClosureV1; 2],
     folds: [&'r ProtectedFoldV1<'r>; 2],
-    consumer_ids: &'r [Vec<String>; 2],
-}
-
-/// Both visible registries, the held guard and each arm's failure-path record.
-struct CompareTargetV1<'t, 'g> {
-    registries: [&'t mut ProjectionRegistry; 2],
-    guard: ReleaseGuardV1<'g>,
-    expiries: &'t ApplicableExpiriesV1,
-    health: &'t ReleaseHealthV1,
-    revoked: &'t mut [Option<RevokedSubjectsV1>; 2],
-}
-
-/// Stage both arms inside their fences, then hand them over under one token
-/// and release the diverged entities; on any failure before the handoff,
-/// run P2 and tear the guard down.
-fn compare_in_fences(
-    sender: &mut ErasureReadSenderV1<'_>,
-    request: &CompareRequestV1<'_>,
-    target: CompareTargetV1<'_, '_>,
-) -> Result<ForkDiff, CoreError> {
-    let CompareTargetV1 {
-        registries,
-        guard,
-        expiries,
-        health,
-        revoked,
-    } = target;
-    let prepared = prepare_comparison(sender, request, &guard, revoked, registries);
-    keep_guard_or_teardown(guard, health, prepared).and_then(
-        |(guard, (prepared, diverged_entities))| {
-            // One token commits both arms. ADR-112's overrun signal is
-            // recorded and the displaced maps are dropped after the handoff
-            // returns, and only then is the diff released; a refused
-            // handoff runs P2.
-            crate::handoff_with_p2(guard, expiries, prepared, health).map(|()| ForkDiff {
-                fork_seq: request.fork_seq,
-                diverged_entities,
-            })
-        },
-    )
-}
-
-/// Keep the held guard for the handoff when both arms were prepared;
-/// otherwise run P2 and tear the guard down before reporting the failure.
-fn keep_guard_or_teardown<'g, T>(
-    guard: ReleaseGuardV1<'g>,
-    health: &ReleaseHealthV1,
-    prepared: Result<T, CoreError>,
-) -> Result<(ReleaseGuardV1<'g>, T), CoreError> {
-    match prepared {
-        Ok(prepared) => Ok((guard, prepared)),
-        Err(error) => {
-            crate::teardown(Some(guard), health);
-            Err(error)
-        }
-    }
 }
 
 /// Both arms' prepared install and their diverged entities.
@@ -204,34 +195,21 @@ type PreparedComparisonV1<'t> = (
 fn prepare_comparison<'t>(
     sender: &mut ErasureReadSenderV1<'_>,
     request: &CompareRequestV1<'_>,
+    prepared: [&pos_runtime::PreparedWorldReplayReadV1; 2],
+    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
     guard: &ReleaseGuardV1<'_>,
     revoked: &mut [Option<RevokedSubjectsV1>; 2],
     registries: [&'t mut ProjectionRegistry; 2],
 ) -> Result<PreparedComparisonV1<'t>, CoreError> {
     let [a, b] = request.timelines;
     let [closure_a, closure_b] = request.closures;
-    let [requested_a, requested_b] = comparison_uses(sender, request)?;
+    let [requested_a, requested_b] = comparison_uses(sender, prepared, budget)?;
     let requested_uses = [&requested_a, &requested_b];
-    let verified = require_comparison_artifacts(sender, request.closures, requested_uses)?;
-    if verified[0].fork_read_limits() != verified[1].fork_read_limits() {
-        return Err(CoreError::ArtifactUnavailable);
-    }
-    let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
-    let mut budget = pos_store::ForkReplayReadBudgetV1::new(
-        verified[0].fork_read_limits(),
-        guard.guard_started_at(),
-        &mut clock,
-    )
-    .map_err(|_| CoreError::ArtifactUnavailable)?;
-    let evidence = validate_comparison_forks(sender, &verified, &mut budget)?;
-    let [events_a, events_b] = read_comparison_histories(
-        sender,
-        requested_uses,
-        [verified[0].read_bounds(), verified[1].read_bounds()],
-        &mut budget,
-        revoked,
-        request.fork_seq,
-    )?;
+    let verified =
+        require_comparison_artifacts(sender, prepared, request.closures, requested_uses, budget)?;
+    let evidence = validate_comparison_forks(sender, &verified, budget)?;
+    let [events_a, events_b] =
+        read_comparison_histories(sender, &verified, budget, revoked, request.fork_seq)?;
     let [fold_a, fold_b] = request.folds;
     let staged_a = crate::fold_staged(
         fold_a,
@@ -247,11 +225,12 @@ fn prepare_comparison<'t>(
     )?;
     revalidate_comparison(
         sender,
+        prepared,
         request.closures,
         requested_uses,
         &verified,
         &evidence,
-        &mut budget,
+        budget,
     )
     .and_then(|()| crate::handoff_reserve(guard))?;
     // The diff is computed from the staged maps before the install pair is
@@ -270,11 +249,16 @@ fn prepare_comparison<'t>(
 /// Bind both observed uses in A-then-B order before verifying either artifact.
 fn comparison_uses(
     sender: &mut ErasureReadSenderV1<'_>,
-    request: &CompareRequestV1<'_>,
+    prepared: [&pos_runtime::PreparedWorldReplayReadV1; 2],
+    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
 ) -> Result<[WorldReplayUseV1; 2], CoreError> {
-    comparison_use(sender, request.timelines[0], &request.consumer_ids[0]).and_then(|a| {
-        comparison_use(sender, request.timelines[1], &request.consumer_ids[1]).map(|b| [a, b])
-    })
+    let a = sender
+        .observe_world_replay_use(prepared[0], budget)
+        .map_err(crate::host_error_to_core)?;
+    sender
+        .observe_world_replay_use(prepared[1], budget)
+        .map(|b| [a, b])
+        .map_err(crate::host_error_to_core)
 }
 
 /// Both initial and final native proofs consume one shared ledger, A then B.
@@ -295,15 +279,18 @@ fn validate_comparison_forks(
 /// Preserve each arm's revocation marker even if reading the later arm fails.
 fn read_comparison_histories(
     sender: &mut ErasureReadSenderV1<'_>,
-    requested_uses: [&WorldReplayUseV1; 2],
-    bounds: [pos_core::EventReadBounds; 2],
+    verified: &[pos_runtime::VerifiedWorldReplayV1; 2],
     budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
     revoked: &mut [Option<RevokedSubjectsV1>; 2],
     fork_seq: Seq,
 ) -> Result<[Vec<Event>; 2], CoreError> {
-    let a = crate::read_complete_world_replay(sender, requested_uses[0], bounds[0], budget)?;
+    let a = sender
+        .read_world_replay_events(&verified[0], budget)
+        .map_err(crate::host_error_to_core)?;
     revoked[0] = Some(RevokedSubjectsV1::from_verified_events(&a));
-    let b = crate::read_complete_world_replay(sender, requested_uses[1], bounds[1], budget)?;
+    let b = sender
+        .read_world_replay_events(&verified[1], budget)
+        .map_err(crate::host_error_to_core)?;
     revoked[1] = Some(RevokedSubjectsV1::from_verified_events(&b));
     require_shared_fork(fork_seq, &a, &b).map(|()| [a, b])
 }
@@ -311,13 +298,15 @@ fn read_comparison_histories(
 /// Recheck both complete authorizations and native proofs before pair handoff.
 fn revalidate_comparison(
     sender: &mut ErasureReadSenderV1<'_>,
+    prepared: [&pos_runtime::PreparedWorldReplayReadV1; 2],
     closures: [&WorldReplayClosureV1; 2],
     requested_uses: [&WorldReplayUseV1; 2],
     verified: &[pos_runtime::VerifiedWorldReplayV1; 2],
     evidence: &[Vec<pos_store::ForkReplayAuthorityEvidenceV1>; 2],
     budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
 ) -> Result<(), CoreError> {
-    let final_verified = require_comparison_artifacts(sender, closures, requested_uses)?;
+    let final_verified =
+        require_comparison_artifacts(sender, prepared, closures, requested_uses, budget)?;
     if final_verified != *verified {
         return Err(CoreError::ArtifactUnavailable);
     }
@@ -330,29 +319,24 @@ fn revalidate_comparison(
 
 fn require_comparison_artifacts(
     sender: &mut ErasureReadSenderV1<'_>,
+    prepared: [&pos_runtime::PreparedWorldReplayReadV1; 2],
     closures: [&WorldReplayClosureV1; 2],
     requested_uses: [&WorldReplayUseV1; 2],
+    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
 ) -> Result<[pos_runtime::VerifiedWorldReplayV1; 2], CoreError> {
     let [closure_a, closure_b] = closures;
     let [requested_a, requested_b] = requested_uses;
-    crate::require_world_replay(sender, closure_a, requested_a).and_then(|bounds_a| {
-        crate::require_world_replay(sender, closure_b, requested_b)
+    crate::require_prepared_world_replay(sender, prepared[0], closure_a, requested_a, budget)
+        .and_then(|bounds_a| {
+            crate::require_prepared_world_replay(
+                sender,
+                prepared[1],
+                closure_b,
+                requested_b,
+                budget,
+            )
             .map(|bounds_b| [bounds_a, bounds_b])
-    })
-}
-
-fn comparison_use(
-    sender: &mut ErasureReadSenderV1<'_>,
-    timeline: TimelineId,
-    consumer_ids: &[String],
-) -> Result<WorldReplayUseV1, CoreError> {
-    crate::observed_world_replay_use(
-        sender,
-        timeline,
-        ErasureProtectedOperationV1::Export,
-        SeqRange::all(),
-        consumer_ids,
-    )
+        })
 }
 
 /// Require both complete histories to share exactly the prefix through
@@ -380,6 +364,7 @@ fn require_shared_fork(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use crate::ReleaseHealthV1;
     use pos_core::store::EventReadBounds;
 
     trait TestValueExt<T> {
@@ -444,6 +429,18 @@ mod tests {
     }
 
     impl pos_runtime::WorldReplayVerifierV1 for RecordGenerationVerifier {
+        fn read_profile(
+            &self,
+            _closure: &pos_core::WorldReplayClosureV1,
+            _intent: &pos_runtime::WorldReplayReadIntentV1,
+            _generation: pos_core::ErasureReferenceV1,
+        ) -> Result<
+            (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+            pos_runtime::WorldReplayVerificationErrorV1,
+        > {
+            crate::test_support::ordinary_read_profile()
+        }
+
         fn verify(
             &self,
             closure: &pos_core::WorldReplayClosureV1,
@@ -469,6 +466,18 @@ mod tests {
     }
 
     impl pos_runtime::WorldReplayVerifierV1 for RejectThirdVerification {
+        fn read_profile(
+            &self,
+            _closure: &pos_core::WorldReplayClosureV1,
+            _intent: &pos_runtime::WorldReplayReadIntentV1,
+            _generation: pos_core::ErasureReferenceV1,
+        ) -> Result<
+            (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+            pos_runtime::WorldReplayVerificationErrorV1,
+        > {
+            crate::test_support::ordinary_read_profile()
+        }
+
         fn verify(
             &self,
             closure: &pos_core::WorldReplayClosureV1,
@@ -494,6 +503,18 @@ mod tests {
     }
 
     impl pos_runtime::WorldReplayVerifierV1 for ChangeBoundsOnThirdVerification {
+        fn read_profile(
+            &self,
+            _closure: &pos_core::WorldReplayClosureV1,
+            _intent: &pos_runtime::WorldReplayReadIntentV1,
+            _generation: pos_core::ErasureReferenceV1,
+        ) -> Result<
+            (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+            pos_runtime::WorldReplayVerificationErrorV1,
+        > {
+            crate::test_support::ordinary_read_profile()
+        }
+
         fn verify(
             &self,
             closure: &pos_core::WorldReplayClosureV1,

@@ -98,6 +98,34 @@ struct ImportedVerifier {
 }
 
 impl WorldReplayVerifierV1 for ImportedVerifier {
+    fn read_profile(
+        &self,
+        _closure: &WorldReplayClosureV1,
+        intent: &pos_runtime::WorldReplayReadIntentV1,
+        _generation: ErasureReferenceV1,
+    ) -> Result<(EventReadBounds, ForkReplayReadLimitsV1), WorldReplayVerificationErrorV1> {
+        let fault = if self
+            .fault_target
+            .is_none_or(|target| target == intent.timeline_id())
+        {
+            self.fault
+        } else {
+            Fault::None
+        };
+        let nodes = if fault == Fault::NodeLimit { 1 } else { 1_024 };
+        let rows = if fault == Fault::RowLimit { 1 } else { 65_536 };
+        let bytes = if fault == Fault::ByteLimit {
+            1
+        } else {
+            64 * 1024 * 1024
+                + usize::from(fault == Fault::UnequalLimits && intent.timeline_id() != self.child)
+        };
+        let (bounds, _) = crate::test_support::ordinary_read_profile()?;
+        ForkReplayReadLimitsV1::new(8, nodes, rows, bytes, 30_000_000)
+            .map(|limits| (bounds, self.limits_override.unwrap_or(limits)))
+            .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)
+    }
+
     fn verify(
         &self,
         closure: &WorldReplayClosureV1,
@@ -560,6 +588,15 @@ struct ReservationVerifier {
 }
 
 impl WorldReplayVerifierV1 for ReservationVerifier {
+    fn read_profile(
+        &self,
+        closure: &WorldReplayClosureV1,
+        intent: &pos_runtime::WorldReplayReadIntentV1,
+        generation: ErasureReferenceV1,
+    ) -> Result<(EventReadBounds, ForkReplayReadLimitsV1), WorldReplayVerificationErrorV1> {
+        self.inner.read_profile(closure, intent, generation)
+    }
+
     fn verify(
         &self,
         closure: &WorldReplayClosureV1,

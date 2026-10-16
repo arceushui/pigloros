@@ -3,7 +3,10 @@
 use pos_core::{
     CoreError, Event, ForkAdmissionErrorV1 as Error, ForkAppendOperationV1, Hash, Seq, TimelineId,
 };
-use rusqlite::{types::FromSql, Connection, Row, Rows, Statement};
+use rusqlite::{
+    types::{FromSql, ValueRef},
+    Connection, Row, Rows, Statement,
+};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
@@ -21,9 +24,14 @@ type Result<T> = std::result::Result<T, Error>;
 // (timeline_id, seq) primary key and a closed, non-nullable range predicate.
 macro_rules! event_probe_sql {
     ($range:literal) => {
+        event_probe_sql!($range,
+            "SELECT probe.* FROM (SELECT 1) AS boundary LEFT JOIN (",
+            ") AS probe ON 1 = 1")
+    };
+    ($range:literal, $prefix:literal, $suffix:literal) => {
         concat!(
-            "SELECT probe.* FROM (SELECT 1) AS boundary LEFT JOIN (
-             SELECT seq,
+            $prefix,
+            "SELECT seq,
                 typeof(seq) = 'integer' AND typeof(wall_time) = 'integer'
                 AND typeof(schema_version) = 'integer'
                 AND typeof(signature_role) IN ('null', 'integer')
@@ -41,7 +49,8 @@ macro_rules! event_probe_sql {
                 typeof(origin_timeline_id) = 'text', length(CAST(origin_timeline_id AS BLOB))
              FROM events WHERE timeline_id = ?1 AND ",
             $range,
-            " ORDER BY seq ASC LIMIT 1) AS probe ON 1 = 1"
+            " ORDER BY seq ASC LIMIT 1",
+            $suffix,
         )
     };
 }
@@ -51,6 +60,12 @@ const FIRST_CAPPED: &str = event_probe_sql!("seq >= 0 AND seq <= ?2");
 const AFTER_OPEN: &str = event_probe_sql!("seq > ?2");
 const AFTER_CAPPED: &str = event_probe_sql!("seq > ?2 AND seq <= ?3");
 pub(super) const EXACT_EVENT: &str = event_probe_sql!("seq = ?2");
+pub(super) const REPLAY_EVENTS_PROBE: &str = event_probe_sql!("seq >= ?2 AND seq <= ?3", "", "");
+pub(super) const EVENT_FIELDS: &str =
+    "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
+    causation_id, correlation_id, schema_version, payload_hash, signature,
+    signature_owner_id, signature_role, signature_epoch, origin_timeline_id, origin_logical_seq
+    FROM events WHERE timeline_id = ?1 AND seq = ?2";
 
 #[derive(Clone, Copy)]
 pub(super) struct EventCursorV1 {
@@ -162,21 +177,27 @@ const VARIABLE_FIELDS: [VariableFieldV1; 10] = [
 
 /// Fixed scalar metadata for the next actual row, not an Event representation.
 pub(super) struct EventRowLengthsV1 {
-    seq: i64,
-    columns: [usize; 16],
+    pub(super) seq: i64,
+    pub(super) columns: [usize; 16],
 }
 
 impl EventRowLengthsV1 {
-    fn probe(row: &Row<'_>) -> Result<Option<Self>> {
-        row.get::<_, Option<i64>>(0)
+    pub(super) fn probe(
+        row: &Row<'_>,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<Option<Self>> {
+        let mut reader = EventRowReaderV1::new(row, context, None);
+        reader
+            .get::<Option<i64>>(0)
             .map_err(|_| Error::StorageIndeterminate)
             .and_then(|seq| {
                 seq.map(|seq| {
-                    row.get::<_, bool>(1)
+                    reader
+                        .get::<bool>(1)
                         .map_err(|_| Error::StorageIndeterminate)
                         .and_then(|scalar_types| {
                             if !scalar_types {
-                                return Err(Error::StorageIndeterminate);
+                                return Err(Error::CorruptAuthority);
                             }
                             VARIABLE_FIELDS.iter().try_fold(
                                 Self {
@@ -184,7 +205,7 @@ impl EventRowLengthsV1 {
                                     columns: [0; 16],
                                 },
                                 |mut lengths, field| {
-                                    field.length(row).map(|length| {
+                                    field.length(&mut reader).map(|length| {
                                         lengths.columns[field.value_column] = length;
                                         lengths
                                     })
@@ -196,7 +217,7 @@ impl EventRowLengthsV1 {
             })
     }
 
-    fn total(&self) -> Option<usize> {
+    pub(super) fn total(&self) -> Option<usize> {
         self.columns
             .iter()
             .try_fold(0_usize, |sum, length| sum.checked_add(*length))
@@ -204,14 +225,16 @@ impl EventRowLengthsV1 {
 }
 
 impl VariableFieldV1 {
-    fn length(self, row: &Row<'_>) -> Result<usize> {
-        row.get::<_, bool>(self.type_column)
+    fn length(self, reader: &mut EventRowReaderV1<'_, '_, '_, '_>) -> Result<usize> {
+        reader
+            .get::<bool>(self.type_column)
             .map_err(|_| Error::StorageIndeterminate)
             .and_then(|valid_type| {
                 if !valid_type {
-                    return Err(Error::StorageIndeterminate);
+                    return Err(Error::CorruptAuthority);
                 }
-                row.get::<_, Option<i64>>(self.length_column)
+                reader
+                    .get::<Option<i64>>(self.length_column)
                     .map_err(|_| Error::StorageIndeterminate)
                     .and_then(|length| {
                         length.map_or(Ok(0), |length| {
@@ -263,10 +286,58 @@ impl<'read, 'statement, 'budget, 'clock> EventRowReaderV1<'read, 'statement, 'bu
             .map_err(|_| CoreError::ArtifactUnavailable)
             .and_then(|()| {
                 self.lengths.map_or(Ok(()), |lengths| {
-                    self.context
-                        .bytes(lengths.columns[column])
-                        .map_err(|_| CoreError::ArtifactUnavailable)
+                    let length = lengths.columns[column];
+                    self.step(|reader| {
+                        let value = reader
+                            .row
+                            .get_ref(column)
+                            .map_err(|error| reader.storage(&error))?;
+                        let valid = match value {
+                            ValueRef::Text(bytes) => {
+                                [1, 2, 3, 6, 7, 11, 14].contains(&column)
+                                    && (column == 3 || length != 0)
+                                    && bytes.len() == length
+                                    && std::str::from_utf8(bytes).is_ok()
+                            }
+                            ValueRef::Blob(bytes) => {
+                                [4, 9, 10].contains(&column)
+                                    && (column == 4 || length != 0)
+                                    && bytes.len() == length
+                            }
+                            ValueRef::Integer(_) => [0, 5, 8, 12, 13, 15].contains(&column),
+                            ValueRef::Null => {
+                                [6, 7, 10, 11, 12, 13].contains(&column) && length == 0
+                            }
+                            ValueRef::Real(_) => false,
+                        };
+                        if valid {
+                            Ok(())
+                        } else {
+                            Err(CoreError::ArtifactUnavailable)
+                        }
+                    })
+                    .and_then(|()| {
+                        self.context
+                            .bytes(length)
+                            .map_err(|_| CoreError::ArtifactUnavailable)
+                    })
                 })
+            })
+    }
+
+    pub(super) fn step<T>(
+        &mut self,
+        effect: impl FnOnce(&Self) -> std::result::Result<T, CoreError>,
+    ) -> std::result::Result<T, CoreError> {
+        self.context
+            .check()
+            .map_err(|_| CoreError::ArtifactUnavailable)
+            .and_then(|()| {
+                let result = effect(self);
+                self.context
+                    .check()
+                    .map_err(|_| CoreError::ArtifactUnavailable)
+                    .and(result)
             })
     }
 
@@ -286,45 +357,42 @@ impl<'read, 'statement, 'budget, 'clock> EventRowReaderV1<'read, 'statement, 'bu
         }
     }
 
-    pub(super) fn parse_ulid(&self, text: &str) -> std::result::Result<ulid::Ulid, CoreError> {
-        text.parse().map_err(|_| {
-            if self.context.is_protected() {
-                CoreError::ArtifactUnavailable
-            } else {
-                CoreError::Serialization(format!("invalid ULID: {text}"))
-            }
+    pub(super) fn parse_ulid(&mut self, text: &str) -> std::result::Result<ulid::Ulid, CoreError> {
+        self.step(|reader| {
+            text.parse().map_err(|_| {
+                if reader.context.is_protected() {
+                    CoreError::ArtifactUnavailable
+                } else {
+                    CoreError::Serialization(format!("invalid ULID: {text}"))
+                }
+            })
         })
     }
 
     pub(super) fn get<T: FromSql>(&mut self, column: usize) -> std::result::Result<T, CoreError> {
-        self.before(column)
-            .and_then(|()| self.row.get(column).map_err(|error| self.storage(&error)))
-            .and_then(|value| {
-                self.context
-                    .check()
-                    .map(|()| value)
-                    .map_err(|_| CoreError::ArtifactUnavailable)
+        self.before(column).and_then(|()| {
+            self.step(|reader| {
+                reader
+                    .row
+                    .get(column)
+                    .map_err(|error| reader.storage(&error))
             })
+        })
     }
 
     pub(super) fn plaintext<T: FromSql + Zeroize>(
         &mut self,
         column: usize,
     ) -> std::result::Result<Zeroizing<T>, CoreError> {
-        self.before(column)
-            .and_then(|()| {
-                self.row
+        self.before(column).and_then(|()| {
+            self.step(|reader| {
+                reader
+                    .row
                     .get(column)
                     .map(Zeroizing::new)
-                    .map_err(|error| self.storage(&error))
+                    .map_err(|error| reader.storage(&error))
             })
-            .and_then(|value| {
-                // Own the zeroizing guard before a post-fetch time check can fail.
-                self.context
-                    .check()
-                    .map(|()| value)
-                    .map_err(|_| CoreError::ArtifactUnavailable)
-            })
+        })
     }
 }
 
@@ -487,7 +555,7 @@ pub(super) fn classified_event_with_context(
                         conn,
                         SelectedRowV1::ClassifiedEventProbe(&key, local),
                         context,
-                        |row, _| EventRowLengthsV1::probe(row),
+                        EventRowLengthsV1::probe,
                     )
                     .and_then(|probe| probe.flatten().ok_or(Error::CorruptAuthority))
                     .and_then(|lengths| {
@@ -532,7 +600,7 @@ fn next_event(
         conn,
         SelectedRowV1::EventProbe(key, cursor),
         context,
-        |row, _| EventRowLengthsV1::probe(row),
+        EventRowLengthsV1::probe,
     )
     .and_then(|probe| probe.ok_or(Error::StorageIndeterminate))
     .and_then(|probe| {
