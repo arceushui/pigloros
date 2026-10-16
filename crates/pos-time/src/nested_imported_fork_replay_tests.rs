@@ -247,7 +247,7 @@ impl WorldReplayVerifierV1 for NestedVerifier {
             requested.clone(),
             generation,
             ErasureReplayClaimV1::Exact,
-            bounds,
+            (bounds, limits),
         );
         let profile = if fault == Fault::FinalProfile && final_phase {
             0xc9
