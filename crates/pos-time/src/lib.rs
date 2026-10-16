@@ -654,7 +654,16 @@ pub mod test_support {
         body: impl FnOnce(ProtectedReleaseV1<'_>) -> T,
     ) -> T {
         let mut port = TrustedClockFixtureV1::new();
-        let guard = guard_on(&mut port);
+        with_release_on(&mut port, health, body)
+    }
+
+    /// Keep the fixture authority observable across a public consumer call.
+    pub(crate) fn with_release_on<T>(
+        port: &mut TrustedClockFixtureV1,
+        health: &ReleaseHealthV1,
+        body: impl FnOnce(ProtectedReleaseV1<'_>) -> T,
+    ) -> T {
+        let guard = guard_on(port);
         let expiries = far_expiries(&guard);
         body(ProtectedReleaseV1 {
             guard,

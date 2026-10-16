@@ -644,7 +644,14 @@ fn refused_begin(call: ConsumerCall, read_only: bool, denied: Connection) -> Fal
         assert_eq!(record.native, expected);
         assert!(!record.phases.contains(&Phase::Installed));
         assert!(!record.phases.contains(&Phase::Staged));
-        assert!(record.phases.contains(&Phase::FailureP2));
+        assert_eq!(
+            record
+                .phases
+                .iter()
+                .filter(|phase| **phase == Phase::FailureP2)
+                .count(),
+            1
+        );
         drop(record);
     }
     // Check before dropping the failed host: cleanup, not connection teardown,
@@ -673,6 +680,215 @@ fn begin_refusal_poison_closes_all_consumers_and_releases_partial_acquisition() 
             (true, Connection::Reader),
         ] {
             refused_begin(call, read_only, denied)?;
+        }
+    }
+    Ok(())
+}
+
+fn never_prepared(
+    call: ConsumerCall,
+    selected_arm: usize,
+    read_only: bool,
+    unwind: bool,
+) -> Fallible<()> {
+    use crate::test_support::with_release_on;
+    use pos_core::trusted_clock_fixture::TrustedClockFixtureV1;
+
+    let fixture = ProtectedFixture::new("count", count);
+    let verifier = Arc::new(EarlyVerifier::default());
+    let composition =
+        ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier.clone());
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("never-prepared.sqlite");
+    let path = path.to_str().ok_or("fixture path")?;
+    let mut seed = ErasureExecutionHostV1::recover_sqlite_fixture_with_authority(
+        SqliteStore::open(path)?,
+        &composition,
+        ErasureRecoveryLimitsV1::compiled_maximum(),
+    )?;
+    let (timelines, event) = ordinary_pair(&mut seed)?;
+    drop(seed);
+    let store = if read_only {
+        SqliteStore::open_read_only(path)?
+    } else {
+        SqliteStore::open(path)?
+    };
+    let native = Arc::new(Mutex::new(Vec::new()));
+    let recorded_native = Arc::clone(&native);
+    store.observe_interval_transactions_for_test(Arc::new(move |connection, operation| {
+        test_ok(recorded_native.lock()).push((connection, operation));
+        true
+    }))?;
+    let mut host = ErasureExecutionHostV1::recover_sqlite_fixture_with_authority(
+        store,
+        &composition,
+        ErasureRecoveryLimitsV1::compiled_maximum(),
+    )?;
+    let closures = closures_for(&host, timelines);
+    let mut a = fixture.registry(host.containment_gate());
+    let mut b = fixture.registry(host.containment_gate());
+    a.apply_event(timelines[0], &event);
+    b.apply_event(timelines[1], &event);
+    let before = [a.retained_state_for_test(), b.retained_state_for_test()];
+    super::super::FOLDED_EVENTS.store(0, Ordering::SeqCst);
+    test_ok(native.lock()).clear();
+    let phases = Rc::new(RefCell::new(Vec::new()));
+    let recorded = Rc::clone(&phases);
+    let mut port = TrustedClockFixtureV1::new();
+    let observed_port = port.clone();
+    let health = crate::ReleaseHealthV1::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        with_release_on(&mut port, &health, |release| {
+            let clock = Arc::new(Mutex::new(ScriptedGuardMonotonicSourceV1::new([
+                Duration::ZERO,
+            ])));
+            let _restore = RestoreClock(CLOCK.with(|slot| slot.replace(Some(clock.clone()))));
+            let observer = Rc::new(move |phase| {
+                recorded.borrow_mut().push(phase);
+                if phase == Phase::FailureP2 {
+                    assert!(observed_port.writer_held());
+                }
+                if phase == Phase::GateEntered(timelines[selected_arm]) {
+                    if unwind {
+                        std::panic::resume_unwind(Box::new("never-prepared witness"));
+                    }
+                    test_ok(clock.lock()).push(Duration::from_secs(31));
+                }
+            });
+            let mut sender = test_ok(host.read_sender());
+            with_replay_observer(observer, || match call {
+                ConsumerCall::Replay => crate::replay(
+                    &mut sender,
+                    timelines[0],
+                    &mut a,
+                    &closures[0],
+                    release,
+                    &fixture.fold(),
+                ),
+                ConsumerCall::ReplayAt => crate::replay_at(
+                    &mut sender,
+                    timelines[0],
+                    Seq::from_u64(1),
+                    &mut a,
+                    &closures[0],
+                    release,
+                    &fixture.fold(),
+                ),
+                ConsumerCall::Compare => crate::compare(
+                    &mut sender,
+                    timelines,
+                    Seq::from_u64(1),
+                    [&mut a, &mut b],
+                    [&closures[0], &closures[1]],
+                    release,
+                    [&fixture.fold(), &fixture.fold()],
+                )
+                .map(|_| ()),
+            })
+        })
+    }));
+    if unwind {
+        let payload = result.err().ok_or("gate observer must unwind")?;
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"never-prepared witness")
+        );
+        assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+        assert!(host.read_sender().is_err());
+    } else {
+        assert_eq!(
+            test_ok(result).map_err(|error| error.to_string()),
+            Err(CoreError::ArtifactUnavailable.to_string()),
+        );
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+    assert_eq!(
+        [a.retained_state_for_test(), b.retained_state_for_test()],
+        before
+    );
+    assert_eq!(super::super::FOLDED_EVENTS.load(Ordering::SeqCst), 0);
+    assert!(test_ok(verifier.admissions.lock()).is_empty());
+    let phases = phases.borrow();
+    assert!(!phases.contains(&Phase::Staged));
+    assert!(!phases.contains(&Phase::BeforeComplete));
+    assert!(!phases.contains(&Phase::Installed));
+    assert_eq!(
+        phases
+            .iter()
+            .filter(|phase| **phase == Phase::FailureP2)
+            .count(),
+        1
+    );
+    let failure = phases
+        .iter()
+        .position(|phase| *phase == Phase::FailureP2)
+        .ok_or("P2")?;
+    let rollback = phases
+        .iter()
+        .position(|phase| *phase == Phase::BeforeRollback)
+        .ok_or("rollback")?;
+    assert!(failure < rollback);
+    assert_eq!(phases.last(), Some(&Phase::AfterRollback));
+    let entered: Vec<_> = phases
+        .iter()
+        .filter_map(|phase| match phase {
+            Phase::GateEntered(timeline) => Some(*timeline),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(entered.len(), if selected_arm == 0 { 1 } else { 3 });
+    assert_eq!(entered.last(), Some(&timelines[selected_arm]));
+    let leaving: Vec<_> = phases
+        .iter()
+        .filter_map(|phase| match phase {
+            Phase::GateLeaving(timeline) => Some(*timeline),
+            _ => None,
+        })
+        .collect();
+    // A panic in GateEntered precedes construction of that observation's
+    // drop marker; the already-entered ancestors still unwind in reverse.
+    let expected_leaving: Vec<_> = entered
+        .iter()
+        .rev()
+        .skip(usize::from(unwind))
+        .copied()
+        .collect();
+    assert_eq!(leaving, expected_leaving);
+    let expected_native = if read_only {
+        vec![
+            (Connection::Writer, TransactionOperation::Begin),
+            (Connection::Reader, TransactionOperation::Begin),
+            (Connection::Reader, TransactionOperation::Rollback),
+            (Connection::Writer, TransactionOperation::Rollback),
+        ]
+    } else {
+        vec![
+            (Connection::Writer, TransactionOperation::Begin),
+            (Connection::Writer, TransactionOperation::Rollback),
+        ]
+    };
+    assert_eq!(*test_ok(native.lock()), expected_native);
+    assert!(!port.writer_held());
+    with_release_on(&mut port, &health, drop);
+    assert!(!port.writer_held());
+    // Native cleanup must release the reservation before host destruction.
+    let mut writer = SqliteStore::open(path)?;
+    writer.create_timeline("after never-prepared cleanup")?;
+    Ok(())
+}
+
+#[test]
+fn uncalled_preparation_releases_its_guard_and_owned_interval() -> Fallible<()> {
+    for (call, arm) in [
+        (ConsumerCall::Replay, 0),
+        (ConsumerCall::ReplayAt, 0),
+        (ConsumerCall::Compare, 0),
+        (ConsumerCall::Compare, 1),
+    ] {
+        for read_only in [false, true] {
+            for unwind in [false, true] {
+                never_prepared(call, arm, read_only, unwind)?;
+            }
         }
     }
     Ok(())

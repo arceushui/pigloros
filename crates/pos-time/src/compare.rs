@@ -62,7 +62,7 @@ pub fn compare(
         health,
     } = release;
     let started = guard.guard_started_at();
-    let mut guard = Some(crate::PendingReplayGuardV1::new(guard, health));
+    let guard = crate::PendingReplayGuardV1::new(guard, health);
     let mut revoked: [Option<RevokedSubjectsV1>; 2] = [None, None];
     let mut diff = None;
     let result = (|| {
@@ -89,7 +89,6 @@ pub fn compare(
             pos_store::ForkReplayReadBudgetV1::new(prepared[0].fork_read_limits(), started, clock)
                 .map_err(crate::unavailable)?;
         let targets = [&mut *registry_a, &mut *registry_b];
-        let guard_slot = &mut guard;
         let revoked = &mut revoked;
         let preparations = [&prepared[0], &prepared[1]];
         sender
@@ -98,9 +97,7 @@ pub fn compare(
                 &mut budget,
                 |sender, budget| {
                     let registries = targets;
-                    let held = guard_slot
-                        .take()
-                        .ok_or(pos_core::ErasureHostErrorV1::AdapterFailure)?;
+                    let held = guard;
                     let staged = prepare_comparison(
                         sender,
                         &request,
@@ -126,7 +123,6 @@ pub fn compare(
             .map_err(crate::host_error_to_core)?;
         diff.ok_or(CoreError::ArtifactUnavailable)
     })();
-    drop(guard);
     let [revoked_a, revoked_b] = revoked;
     let result = crate::forget_on_failure(result, registry_a, revoked_a.as_ref());
     crate::forget_on_failure(result, registry_b, revoked_b.as_ref())
