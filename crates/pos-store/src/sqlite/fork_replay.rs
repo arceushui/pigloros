@@ -2,14 +2,165 @@
 
 use super::SqliteStore;
 use crate::{
-    fork_event_authority::AuthorityValidatorV1, fork_replay::NativeReadContextV1,
+    fork_event_authority::AuthorityValidatorV1,
+    fork_replay::{LineageReadContextV1, LineageReadResult, NativeReadContextV1},
     ForkReplayAuthorityEvidenceV1, ForkReplayAuthorityReadErrorV1 as Error,
     ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1, ForkReplayRequirementV1,
 };
+use pos_core::{ErasureProtectedEffectIntervalV1, TimelineId};
+
+use super::ProtectedIntervalConnectionsV1;
 
 type ReadResult<T> = Result<T, Error>;
+const INTERVAL_STORAGE_ERROR: crate::ForkReplayLineageReadErrorV1 =
+    crate::ForkReplayLineageReadErrorV1::Read(Error::StorageUnavailable);
+
+/// Roll back only resources acquired by this begin, reader before writer.
+/// Both attempts execute even if the first fails; no clock or semantic read
+/// can prevent inert cleanup after a latched budget refusal.
+fn rollback_started_interval(
+    connections: &ProtectedIntervalConnectionsV1<'_>,
+    reader_owned: Option<&rusqlite::Connection>,
+    writer_owned: bool,
+) -> LineageReadResult<()> {
+    let reader = reader_owned.map_or(Ok(()), |reader| {
+        reader
+            .execute_batch("ROLLBACK")
+            .map_err(|_| INTERVAL_STORAGE_ERROR)
+    });
+    let writer = if writer_owned {
+        connections
+            .interval
+            .execute_batch("ROLLBACK")
+            .map_err(|_| INTERVAL_STORAGE_ERROR)
+    } else {
+        Ok(())
+    };
+    reader.and(writer)
+}
+
+impl SqliteStore {
+    pub(super) fn require_fork_replay_interval(
+        &self,
+        context: &mut LineageReadContextV1<'_, '_>,
+    ) -> LineageReadResult<()> {
+        context.step(|_| {
+            if self.conn.is_autocommit()
+                || self
+                    .writer_reservation_connection
+                    .as_ref()
+                    .is_some_and(rusqlite::Connection::is_autocommit)
+            {
+                Err(INTERVAL_STORAGE_ERROR)
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
 
 impl ForkReplayAuthorityReadPortV1 for SqliteStore {
+    fn begin_fork_replay_read_interval(
+        &self,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> LineageReadResult<ErasureProtectedEffectIntervalV1> {
+        let cap = budget.limits().max_fork_depth_per_traversal();
+        let mut context = LineageReadContextV1::new(budget, cap)?;
+        context.step(|_| {
+            self.settle_counterfactual_doubt();
+            Ok(())
+        })?;
+        let connections = ProtectedIntervalConnectionsV1::new(self);
+        if !connections.interval.is_autocommit() {
+            return context.step(|_| Ok(ErasureProtectedEffectIntervalV1::Unowned));
+        }
+        let mut reader_owned = None;
+        let mut writer_owned = false;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            context.step(|context| {
+                context.step(|_| {
+                    let begun = connections
+                        .interval
+                        .execute_batch(super::begin_immediate_sql());
+                    writer_owned = !connections.interval.is_autocommit();
+                    begun.map_err(|_| INTERVAL_STORAGE_ERROR)
+                })?;
+                if let Some(reader) = connections.reader {
+                    context.step(|_| {
+                        if !reader.is_autocommit() {
+                            return Err(INTERVAL_STORAGE_ERROR);
+                        }
+                        let begun = reader.execute_batch("BEGIN DEFERRED");
+                        if !reader.is_autocommit() {
+                            reader_owned = Some(reader);
+                        }
+                        begun.map_err(|_| INTERVAL_STORAGE_ERROR)
+                    })?;
+                }
+                let observed = self
+                    .lineage_row("PRAGMA data_version", [], context, |row, context| {
+                        context.step(|_| row.get::<_, i64>(0).map_err(|_| INTERVAL_STORAGE_ERROR))
+                    })?
+                    .ok_or(INTERVAL_STORAGE_ERROR)?;
+                if self.erasure_gate_bound {
+                    let gate = self
+                        .erasure_gate
+                        .as_deref()
+                        .ok_or(crate::ForkReplayLineageReadErrorV1::ContainmentUnavailable)?;
+                    if observed != self.erasure_inventory_data_version {
+                        return Err(crate::ForkReplayLineageReadErrorV1::ContainmentUnavailable);
+                    }
+                    context.step(|_| {
+                        crate::validate_bound_erasure_inventory_generation(
+                            true,
+                            gate,
+                            self.erasure_inventory_generation,
+                        )
+                        .map_err(|_| crate::ForkReplayLineageReadErrorV1::ContainmentUnavailable)
+                    })?;
+                }
+                Ok(ErasureProtectedEffectIntervalV1::Owned)
+            })
+        }));
+        match result {
+            Ok(Ok(interval)) => Ok(interval),
+            Ok(Err(error)) => {
+                rollback_started_interval(&connections, reader_owned, writer_owned).and(Err(error))
+            }
+            Err(payload) => {
+                let _cleanup = rollback_started_interval(&connections, reader_owned, writer_owned);
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
+    fn fork_replay_logical_head(
+        &self,
+        timeline_id: TimelineId,
+        effective_max_fork_depth: usize,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> LineageReadResult<pos_core::Seq> {
+        let mut context = LineageReadContextV1::new(budget, effective_max_fork_depth)?;
+        self.require_fork_replay_interval(&mut context)?;
+        let history = crate::fork_replay::read_visible_history(
+            timeline_id,
+            &mut context,
+            |member, visited, context| self.read_lineage_member(member, visited, context),
+        )?;
+        let head = crate::fork_replay::history_head(&history, &mut context)?;
+        context.bytes(8).map(|()| pos_core::Seq::from_u64(head))
+    }
+
+    fn read_fork_replay_events(
+        &self,
+        timeline_id: TimelineId,
+        range: pos_core::SeqRange,
+        bounds: pos_core::EventReadBounds,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> LineageReadResult<Vec<pos_core::Event>> {
+        self.read_replay_events(timeline_id, range, bounds, budget)
+    }
+
     fn read_fork_replay_lineage_node(
         &self,
         timeline_id: pos_core::TimelineId,
@@ -20,16 +171,7 @@ impl ForkReplayAuthorityReadPortV1 for SqliteStore {
         let mut context =
             crate::fork_replay::LineageReadContextV1::new(budget, effective_max_fork_depth)?;
         context.step(|context| {
-            if self.conn.is_autocommit()
-                || self
-                    .writer_reservation_connection
-                    .as_ref()
-                    .is_some_and(rusqlite::Connection::is_autocommit)
-            {
-                return Err(crate::ForkReplayLineageReadErrorV1::Read(
-                    Error::StorageUnavailable,
-                ));
-            }
+            self.require_fork_replay_interval(context)?;
             crate::fork_replay::read_visible_lineage(
                 timeline_id,
                 depth,

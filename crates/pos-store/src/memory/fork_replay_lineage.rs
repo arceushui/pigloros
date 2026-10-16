@@ -15,7 +15,19 @@ impl MemoryStore {
         timeline: TimelineId,
         visited: &mut Vec<TimelineId>,
         context: &mut LineageReadContextV1<'_, '_>,
+        validate_events: bool,
     ) -> ReadResult<Option<(ForkReplayLineageNodeV1, Seq)>> {
+        self.with_replay_read_fence(timeline, context, |context| {
+            self.lineage_metadata_and_visibility(timeline, visited, context, validate_events)
+        })
+    }
+
+    pub(super) fn with_replay_read_fence<T>(
+        &self,
+        timeline: TimelineId,
+        context: &mut LineageReadContextV1<'_, '_>,
+        mut effect: impl FnMut(&mut LineageReadContextV1<'_, '_>) -> ReadResult<T>,
+    ) -> ReadResult<T> {
         context.step(|context| {
             let gate = context.step(|_| {
                 self.validated_erasure_gate()
@@ -23,7 +35,7 @@ impl MemoryStore {
             })?;
             let mut result = Err(Error::ContainmentUnavailable);
             let fenced = gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
-                result = self.lineage_metadata_and_visibility(timeline, visited, context);
+                result = effect(context);
             });
             context.check()?;
             context.step(|_| {
@@ -43,6 +55,7 @@ impl MemoryStore {
         timeline: TimelineId,
         visited: &mut Vec<TimelineId>,
         context: &mut LineageReadContextV1<'_, '_>,
+        validate_events: bool,
     ) -> ReadResult<Option<(ForkReplayLineageNodeV1, Seq)>> {
         context.step(|context| {
             remember_member(timeline, visited, context)?;
@@ -76,11 +89,13 @@ impl MemoryStore {
                 return Ok(None);
             }
             let mut cursor = Seq::ZERO;
-            for event in &state.events {
+            for (index, event) in state.events.iter().enumerate() {
                 context.check()?;
                 context.row()?;
                 context.step(|_| {
-                    if event.seq > cursor {
+                    if event.seq > cursor
+                        && (!validate_events || index != 0 || event.seq == Seq::from_u64(1))
+                    {
                         Ok(())
                     } else {
                         corrupt()
@@ -91,6 +106,16 @@ impl MemoryStore {
                 if context.step(|_| Ok(pos_core::is_geographic_event_type(&event.event_type)))? {
                     return Ok(None);
                 }
+            }
+            if validate_events {
+                context.step(|_| {
+                    let count = u64::try_from(state.events.len()).unwrap_or(u64::MAX);
+                    if state.timeline.head == cursor && cursor.as_u64() == count {
+                        Ok(())
+                    } else {
+                        corrupt()
+                    }
+                })?;
             }
             context.check().map(|()| Some(metadata))
         })

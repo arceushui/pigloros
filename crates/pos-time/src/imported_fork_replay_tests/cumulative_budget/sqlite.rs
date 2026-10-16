@@ -200,12 +200,21 @@ fn whole_sqlite_budget(
     let bytes = 2
         * (authority_bytes(fixture.world, fixture.built, fixture.admission, child_index)?
             + lineage_bytes)
-        + folded_events * 22;
+        // Owning fence: native child/root284 + root125, gate IDs32 and
+        // parent16. Two head calls each return an additional Seq8. Event
+        // H/M repeats284; the one selected root segment reuses one key26.
+        + (284 + 125 + 32 + 16) + 2 * (284 + 8) + 284 + 26
+        // Raw signed row208 = IDs52 + P6+T16 + hash32 + sig64 + owner12
+        // + origin26; ER also retains a cursor8 per selected Event.
+        + folded_events * (208 + 8);
     // Per validation: lineage 12 freshness/metadata + 8 Event rows; authority
     // publication6 + FAR/IFA6 + key2 + suffix11 + final chain14 + registry2
     // + absent local-key lookup1. Visits: lineage3 + suffix1 + chain2.
-    let rows = 2 * (12 + 8 + 6 + 6 + 2 + 11 + 14 + 2 + 1);
-    let visits = 2 * (3 + 1 + 2);
+    // Interval setup's actual PRAGMA row is added ONCE by the operation,
+    // not per arm: Compare adds two arm values then that one setup row.
+    let rows =
+        2 * (12 + 8 + 6 + 6 + 2 + 11 + 14 + 2 + 1) + 20 + 2 * 12 + 12 + 2 + 2 * folded_events;
+    let visits = 2 * (3 + 1 + 2) + 3 + 3 * 2;
     Ok((bytes, rows, visits))
 }
 
@@ -300,8 +309,9 @@ fn sqlite_replay_budget_cases(access: SqliteReplayAccess, cut: Option<Seq>) -> F
         built: &built,
         admission: &admission,
     };
-    let (bytes, rows, visits) = whole_sqlite_budget(&fixture, 0, folded_events)?;
-    assert_eq!((rows, visits), (124, 12));
+    let (bytes, arm_rows, visits) = whole_sqlite_budget(&fixture, 0, folded_events)?;
+    let rows = arm_rows + 1;
+    assert_eq!((rows, visits), (183 + 2 * folded_events, 21));
     for (bytes, rows, visits, succeeds) in [
         (bytes, rows, visits, true),
         (bytes + 1, rows, visits, true),
