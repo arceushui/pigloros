@@ -18,6 +18,7 @@ use std::{sync::Arc, time::Duration};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+#[path = "fork_replay_lineage_public/refusals.rs"]
 mod refusals;
 
 fn bind(store: &mut impl EventStore) -> TestResult {
