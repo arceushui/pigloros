@@ -76,7 +76,7 @@ pub fn compare(
         let started = guard
             .as_ref()
             .ok_or(CoreError::ArtifactUnavailable)?
-            .held()?
+            .held()
             .guard_started_at();
         let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
         #[cfg(test)]
@@ -110,8 +110,7 @@ pub fn compare(
                         &request,
                         preparations,
                         budget,
-                        held.held()
-                            .map_err(|error| crate::core_error_to_host(&error))?,
+                        held.held(),
                         revoked,
                         registries,
                     )
