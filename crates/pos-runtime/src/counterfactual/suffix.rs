@@ -30,7 +30,10 @@
 //!    after the last committed Tick; see the coordinator module's
 //!    **Dependency records** decision), and appends the Tick's Events
 //!    together with its checkpoint Event as one batch through
-//!    [`CounterfactualDependencyRecordingPortV1::append_counterfactual_tick_with_dependencies`],
+//!    [`pos_core::CounterfactualDependencyRecordingPortV1::append_counterfactual_tick_with_dependencies`],
+//!    or on a classified Fork through
+//!    [`ClassifiedCounterfactualStorePortV1::append_classified_counterfactual_tick`]
+//!    under the authority the host's resolver lends for that one append,
 //!    which records the dependency record atomically with the Tick's Events;
 //! 5. emits every checkpoint of the generation and one sealed `CFR1`.
 //!
@@ -65,15 +68,19 @@
 //! Calling again derives the committed suffix from the Event Store alone.
 //! A store that reports a committed head other than the Tick's checkpoint
 //! Event is [`CounterfactualSuffixErrorV1::CommittedHeadMismatch`], also
-//! without a `CFR1`. Those two errors may follow Ticks this call already
-//! committed, which stay committed and are recovered by the next call; every
-//! other [`CounterfactualSuffixErrorV1`] is detected before any Tick is
-//! staged and commits nothing.
+//! without a `CFR1`. On a classified Fork, a resolver failure or a provenance
+//! rejection by the store commits nothing of the Tick and is
+//! [`CounterfactualSuffixErrorV1::ClassifiedProvenance`], without a `CFR1`;
+//! calling again with a fresh session and resolver resumes the suffix. Those
+//! three errors may follow Ticks this call already committed, which stay
+//! committed and are recovered by the next call; every other
+//! [`CounterfactualSuffixErrorV1`] is detected before any Tick is staged and
+//! commits nothing.
 //!
 //! # ADR gap decisions
 //!
 //! - **Generation fence.** Every later Tick is appended with
-//!   [`CounterfactualDependencyRecordingPortV1::append_counterfactual_tick_with_dependencies`]
+//!   [`pos_core::CounterfactualDependencyRecordingPortV1::append_counterfactual_tick_with_dependencies`]
 //!   under
 //!   [`CounterfactualGenerationReceiptV1::tick_basis`] of the last committed
 //!   head. The store rechecks, inside the append, the generation, the Fork
@@ -209,17 +216,22 @@ use pos_conformance::counterfactual::result::{
 use pos_conformance::{ReplayClaimV1, SuffixInvalidationV1};
 use pos_core::{
     pipeline_draft_vector_digest_v1, CanonicalBytes, CoreError, CounterfactualBasisV1,
-    CounterfactualDependencyErrorV1, CounterfactualDependencyRecordingPortV1,
-    CounterfactualFactsV1, CounterfactualGenerationReceiptV1, CounterfactualStoreErrorV1,
-    CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId, Event, EventDraft,
-    EventReadBounds, EventStore, FactualPrefixReadPortV1, Hash, InvalidationConflictV1, Kind,
-    PipelineContractErrorV1, PipelineDraftBatchV1, Seq, SeqRange, TimelineId,
-    MAX_FORK_EVENT_TYPE_BYTES_V1, MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
+    CounterfactualDependencyErrorV1, CounterfactualFactsV1, CounterfactualGenerationReceiptV1,
+    CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1, EntityId,
+    Event, EventDraft, EventReadBounds, EventStore, FactualPrefixReadPortV1, Hash,
+    InvalidationConflictV1, Kind, PipelineContractErrorV1, PipelineDraftBatchV1, Seq, SeqRange,
+    TimelineId, MAX_FORK_EVENT_TYPE_BYTES_V1, MAX_PIPELINE_DRAFTS_PER_BATCH,
+    MAX_PIPELINE_DRAFT_BATCH_BYTES,
+};
+use pos_store::{
+    ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1,
+    ClassifiedProvenanceErrorV1,
 };
 
 use super::coordinator::{
-    CounterfactualAdmissionErrorV1, CounterfactualCoordinatorV1,
-    CounterfactualDeclaringTickStagerV1, RecordingSeamV1, TickSeamV1,
+    ClassifiedSeamV1, CounterfactualAdmissionErrorV1, CounterfactualClassifiedSourceResolverV1,
+    CounterfactualCoordinatorV1, CounterfactualDeclaringTickStagerV1,
+    CounterfactualForkAppendAuthorityV1, RecordingSeamV1, TickSeamV1, COMMIT_OUTCOME_UNKNOWN,
     COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
 };
 
@@ -296,9 +308,10 @@ impl CounterfactualSuffixFailureV1 {
 
 /// Closed safe errors of one suffix recomputation call.
 ///
-/// Every error except [`Self::TickOutcomeUnknown`] and
-/// [`Self::CommittedHeadMismatch`] is detected before any Tick is staged and
-/// commits nothing; those two may follow Ticks the call already committed.
+/// Every error except [`Self::TickOutcomeUnknown`],
+/// [`Self::CommittedHeadMismatch`], and [`Self::ClassifiedProvenance`] is
+/// detected before any Tick is staged and commits nothing; those three may
+/// follow Ticks the call already committed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CounterfactualSuffixErrorV1 {
     /// The CFP1 plan is invalid.
@@ -346,6 +359,11 @@ pub enum CounterfactualSuffixErrorV1 {
     /// checkpoint Event, violating the port contract. No `CFR1` is sealed.
     #[error("counterfactual store reported another committed head")]
     CommittedHeadMismatch,
+    /// The host's resolver or the store rejected the ADR-099 provenance of a
+    /// classified Tick append; that Tick committed nothing. No `CFR1` is
+    /// sealed; call `recompute_suffix` again with a fresh resolver.
+    #[error("counterfactual classified provenance was rejected")]
+    ClassifiedProvenance(#[source] ClassifiedProvenanceErrorV1),
 }
 
 /// One suffix recomputation request for a committed generation.
@@ -355,6 +373,8 @@ pub struct CounterfactualSuffixRequestV1<'a> {
     pub plan: &'a CounterfactualPlanV1,
     /// The receipt of the admitted generation and its first Tick.
     pub receipt: CounterfactualGenerationReceiptV1,
+    /// Host-declared append authority of the Fork, as on admission.
+    pub fork_append_authority: CounterfactualForkAppendAuthorityV1,
     /// `CFR1` result ID of this call.
     pub result_id: [u8; 16],
     /// `CFR1` evaluator identity digest.
@@ -487,10 +507,14 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     ///
     /// # Errors
     /// Returns the first closed safe error. Every error except
-    /// [`CounterfactualSuffixErrorV1::TickOutcomeUnknown`] and
-    /// [`CounterfactualSuffixErrorV1::CommittedHeadMismatch`] is detected
-    /// before any Tick is staged and commits nothing; after those two, call
-    /// again to recover what committed. A mid-Tick cut or a `parent_cut_tick`
+    /// [`CounterfactualSuffixErrorV1::TickOutcomeUnknown`],
+    /// [`CounterfactualSuffixErrorV1::CommittedHeadMismatch`], and
+    /// [`CounterfactualSuffixErrorV1::ClassifiedProvenance`] is detected
+    /// before any Tick is staged and commits nothing; after those three, call
+    /// again to recover what committed. On a classified Fork, a `resolver`
+    /// failure or a provenance rejection by the store is
+    /// [`CounterfactualSuffixErrorV1::ClassifiedProvenance`]; a Generic Fork
+    /// never calls `resolver`. A mid-Tick cut or a `parent_cut_tick`
     /// that is not the parent's recorded cut Tick is
     /// [`CounterfactualSuffixErrorV1::ParentCutNotFound`]. On an already
     /// complete generation, a persisted fact that differs from the
@@ -500,11 +524,34 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         &mut self,
         request: &CounterfactualSuffixRequestV1<'_>,
         stager: &mut impl CounterfactualDeclaringTickStagerV1,
+        resolver: &mut impl CounterfactualClassifiedSourceResolverV1,
     ) -> Result<CounterfactualSuffixRunV1, CounterfactualSuffixErrorV1>
     where
-        S: CounterfactualDependencyRecordingPortV1 + FactualPrefixReadPortV1,
+        S: ClassifiedCounterfactualStorePortV1 + FactualPrefixReadPortV1,
     {
-        self.recompute_suffix_through(request, &mut RecordingSeamV1(stager))
+        self.recompute_dispatch(request, stager, resolver)
+    }
+
+    /// Select the seam the Fork's declared append authority appends through,
+    /// and run the one suffix body with it.
+    fn recompute_dispatch(
+        &mut self,
+        request: &CounterfactualSuffixRequestV1<'_>,
+        stager: &mut impl CounterfactualDeclaringTickStagerV1,
+        resolver: &mut impl CounterfactualClassifiedSourceResolverV1,
+    ) -> Result<CounterfactualSuffixRunV1, CounterfactualSuffixErrorV1>
+    where
+        S: ClassifiedCounterfactualStorePortV1 + FactualPrefixReadPortV1,
+    {
+        match request.fork_append_authority {
+            CounterfactualForkAppendAuthorityV1::Generic => {
+                self.recompute_suffix_through(request, &mut RecordingSeamV1(stager))
+            }
+            CounterfactualForkAppendAuthorityV1::ClassifiedAdmission => {
+                let mut seam = ClassifiedSeamV1::new(stager, resolver, request.plan);
+                self.recompute_suffix_through(request, &mut seam)
+            }
+        }
     }
 
     /// The one suffix body: recover, then stage and append every remaining
@@ -743,9 +790,11 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     ///
     /// # Errors
     /// Returns `TickOutcomeUnknown` when the append's outcome is unknown and
-    /// the persisted basis does not prove it uncommitted, and
+    /// the persisted basis does not prove it uncommitted,
     /// `CommittedHeadMismatch` when the store reports a committed head other
-    /// than the checkpoint Event's `Seq`; neither advances the progress.
+    /// than the checkpoint Event's `Seq`, and `ClassifiedProvenance` when the
+    /// resolver or the store rejects a classified append's provenance; none
+    /// of them advances the progress.
     fn append_tick<M: TickSeamV1<S>>(
         &mut self,
         context: &SuffixContextV1<'_>,
@@ -769,7 +818,15 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         let expected = context.receipt.tick_basis(Seq::from_u64(progress.head));
         // The checkpoint Event is the batch's last Event.
         let checkpoint_seq = progress.head.saturating_add(batch.drafts().len() as u64);
-        match seam.append_tick(&mut self.store, context.fork(), &expected, &batch, record) {
+        let generation = context.receipt.generation();
+        match seam.append_tick(
+            &mut self.store,
+            context.fork(),
+            generation,
+            &expected,
+            &batch,
+            record,
+        ) {
             Ok(CounterfactualTickOutcomeV1::Committed { head })
                 if head.as_u64() == checkpoint_seq =>
             {
@@ -787,18 +844,22 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     }
 
     /// Map a failed append: an unknown outcome is resolved with
-    /// [`Self::unknown_tick_outcome`], any other error is a Tick that
-    /// committed nothing.
+    /// [`Self::unknown_tick_outcome`], a provenance rejection stops the call
+    /// without a `CFR1`, and any other error is a Tick that committed nothing.
     fn seam_failure(
         &self,
         fork: TimelineId,
         expected: &CounterfactualBasisV1,
-        error: CounterfactualStoreErrorV1,
+        error: ClassifiedCounterfactualErrorV1,
     ) -> TickStepV1 {
-        if error == CounterfactualStoreErrorV1::OutcomeUnknown {
-            self.unknown_tick_outcome(fork, expected)
-        } else {
-            Ok(Some(CounterfactualSuffixFailureV1::AtomicCommitFailed))
+        match error {
+            COMMIT_OUTCOME_UNKNOWN => self.unknown_tick_outcome(fork, expected),
+            ClassifiedCounterfactualErrorV1::Provenance(provenance) => Err(
+                CounterfactualSuffixErrorV1::ClassifiedProvenance(provenance),
+            ),
+            ClassifiedCounterfactualErrorV1::Store(_) => {
+                Ok(Some(CounterfactualSuffixFailureV1::AtomicCommitFailed))
+            }
         }
     }
 

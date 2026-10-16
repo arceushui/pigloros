@@ -57,7 +57,8 @@ use pos_runtime::counterfactual::coordinator::{
     CounterfactualFrontierDerivationV1, CounterfactualFrontierSourceV1,
     CounterfactualFrozenArtifactsV1, CounterfactualHostPreflightV1,
     CounterfactualInterventionAuthorityV1, CounterfactualStagedTickV1, CounterfactualTickFailureV1,
-    CounterfactualTickInputsV1, FrozenArtifactAvailabilityV1, InterventionDecisionV1,
+    CounterfactualTickInputsV1, FrozenArtifactAvailabilityV1, GenericForksOnlyV1,
+    InterventionDecisionV1,
 };
 use pos_runtime::counterfactual::suffix::CounterfactualSuffixRequestV1;
 use pos_runtime::{
@@ -66,6 +67,9 @@ use pos_runtime::{
 };
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
+use pos_store::{
+    ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1, ClassifiedTickAuthorityV1,
+};
 use pos_time::counterfactual::dependency_graph::{
     DependencyGraphBoundsV1 as Bounds, DependencyGraphNodeOriginV1 as Origin,
     DependencyGraphNodeV1 as Node, ValidatedDependencyGraphV1,
@@ -399,6 +403,32 @@ impl<B: CounterfactualDependencyRecordingPortV1> CounterfactualDependencyRecordi
     }
 }
 
+impl<B: ClassifiedCounterfactualStorePortV1> ClassifiedCounterfactualStorePortV1 for Shared<B> {
+    fn commit_classified_counterfactual_invalidation(
+        &mut self,
+        command: &CounterfactualInvalidationCommandV1,
+        record: &TickDependencyRecordV1,
+        authority: &ClassifiedTickAuthorityV1<'_>,
+        base: Hash,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, ClassifiedCounterfactualErrorV1> {
+        self.lock()
+            .commit_classified_counterfactual_invalidation(command, record, authority, base)
+    }
+
+    fn append_classified_counterfactual_tick(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        record: &TickDependencyRecordV1,
+        authority: &ClassifiedTickAuthorityV1<'_>,
+        base: Hash,
+    ) -> Result<CounterfactualTickOutcomeV1, ClassifiedCounterfactualErrorV1> {
+        self.lock()
+            .append_classified_counterfactual_tick(fork, expected, drafts, record, authority, base)
+    }
+}
+
 impl<B: CounterfactualDependencyReadPortV1> CounterfactualDependencyReadPortV1 for Shared<B> {
     fn read_dependency_nodes(
         &self,
@@ -463,6 +493,7 @@ trait Backend:
     ScheduledAdmissionStoreV1
     + CounterfactualStorePortV1
     + CounterfactualDependencyRecordingPortV1
+    + ClassifiedCounterfactualStorePortV1
     + CounterfactualDependencyReadPortV1
     + FactualPrefixReadPortV1
     + Sized
@@ -1164,6 +1195,7 @@ const fn suffix_request(
     CounterfactualSuffixRequestV1 {
         plan,
         receipt,
+        fork_append_authority: CounterfactualForkAppendAuthorityV1::Generic,
         result_id: RESULT_ID,
         evaluator_identity_digest: EVALUATOR,
     }
@@ -1404,19 +1436,39 @@ fn admit_generations<B: Backend>(
     let mut coordinator = CounterfactualCoordinatorV1::new(prepared.store.clone());
     let mut stager = prepared.stager()?;
     let mut composite = prepared.composite();
-    let first = coordinator.admit(&request, &Authority, &mut composite, &mut stager)?;
+    let first = coordinator.admit(
+        &request,
+        &Authority,
+        &mut composite,
+        &mut stager,
+        &mut GenericForksOnlyV1,
+    )?;
     assert_eq!(first.generation(), generation(fork, 1));
-    let run = coordinator.recompute_suffix(&suffix_request(plan, first), &mut stager)?;
+    let run = coordinator.recompute_suffix(
+        &suffix_request(plan, first),
+        &mut stager,
+        &mut GenericForksOnlyV1,
+    )?;
     assert_eq!(run.failure, None);
     let mut complete = prepared.recorded()?;
     assert_eq!(complete.generation(), generation(fork, 1));
     assert_eq!(complete.recorded_graph_digest(plan)?, digest);
     let derived = complete.derive_frontier(plan, FRONTIER_ID, PROVENANCE)?;
     assert_eq!(&derived, expected);
-    let second = coordinator.admit(&request, &Authority, &mut complete, &mut stager)?;
+    let second = coordinator.admit(
+        &request,
+        &Authority,
+        &mut complete,
+        &mut stager,
+        &mut GenericForksOnlyV1,
+    )?;
     assert_eq!(second.generation(), generation(fork, 2));
     assert_eq!(second.frontier_digest(), first.frontier_digest());
-    let run = coordinator.recompute_suffix(&suffix_request(plan, second), &mut stager)?;
+    let run = coordinator.recompute_suffix(
+        &suffix_request(plan, second),
+        &mut stager,
+        &mut GenericForksOnlyV1,
+    )?;
     assert_eq!(run.failure, None);
     let mut third = prepared.recorded()?;
     assert_eq!(third.generation(), generation(fork, 2));
