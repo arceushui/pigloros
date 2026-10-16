@@ -355,8 +355,8 @@ fn consumer_selection(
 
 /// Bind one protected use to the Timeline's currently observed logical head.
 ///
-/// The installed verifier must accept the closure only for this exact head,
-/// and [`read_complete_world_replay`] rejects any read that observes another.
+/// This ordinary-read fixture checks use construction only. Production Time
+/// observes and rechecks heads through Runtime's prepared contextual read path.
 #[cfg(test)]
 fn observed_world_replay_use(
     sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
@@ -379,99 +379,6 @@ fn observed_world_replay_use(
             )
             .map_err(|_| pos_core::CoreError::ArtifactUnavailable)
         })
-}
-
-/// Read the complete range of a verified use at its bound logical head.
-///
-/// The read fails closed unless the Timeline's logical head still equals the
-/// head bound into the verified use. An Event appended after the head was
-/// observed makes an open-ended read return more Events than expected, which
-/// is rejected by the exact count and sequence check after the read.
-#[cfg(test)]
-fn read_complete_world_replay(
-    sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
-    requested_use: &pos_runtime::WorldReplayUseV1,
-    bounds: pos_core::EventReadBounds,
-    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
-) -> Result<Vec<pos_core::Event>, pos_core::CoreError> {
-    use pos_core::CoreError;
-
-    let timeline = requested_use.timeline_id();
-    let range = requested_use.range();
-    let head = sender
-        .logical_head(timeline)
-        .map_err(host_error_to_core)?
-        .as_u64();
-    let (first, expected) = checked_world_replay_range(requested_use, head, bounds)?;
-
-    budget
-        .check_time()
-        .map_err(|_| CoreError::ArtifactUnavailable)?;
-    let bounds = bounds.with_max_total_bytes(
-        bounds
-            .max_total_bytes()
-            .min(budget.remaining_native_bytes()),
-    );
-    let events = sender
-        .read_bounded(timeline, range, bounds)
-        .map_err(host_error_to_core)?;
-    if events.len() != expected
-        || events.iter().enumerate().any(|(index, event)| {
-            event.seq.as_u64() != first + u64::try_from(index).unwrap_or(u64::MAX)
-        })
-    {
-        return Err(CoreError::ArtifactUnavailable);
-    }
-    charge_replay_event_bytes(&events, budget).map(|()| events)
-}
-
-/// Reject a changed head or impossible range before bounded Event materialization.
-#[cfg(test)]
-fn checked_world_replay_range(
-    requested_use: &pos_runtime::WorldReplayUseV1,
-    head: u64,
-    bounds: pos_core::EventReadBounds,
-) -> Result<(u64, usize), pos_core::CoreError> {
-    use pos_core::CoreError;
-
-    if head != requested_use.source_logical_head().as_u64() {
-        return Err(CoreError::ArtifactUnavailable);
-    }
-    let range = requested_use.range();
-    let first = range.from.as_u64().max(1);
-    let last = range.to.map_or(head, pos_core::Seq::as_u64);
-    if first > head.saturating_add(1) {
-        return Err(CoreError::ArtifactUnavailable);
-    }
-    let expected = if first > last { 0 } else { last - first + 1 };
-    // An unrepresentable count cannot fit a verifier's finite max_events.
-    let expected = usize::try_from(expected).unwrap_or(usize::MAX);
-    if expected > bounds.max_events() {
-        return Err(CoreError::ArtifactUnavailable);
-    }
-
-    Ok((first, expected))
-}
-
-/// Charge owned payloads in order, then apply the original post-read time check.
-#[cfg(test)]
-fn charge_replay_event_bytes(
-    events: &[pos_core::Event],
-    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
-) -> Result<(), pos_core::CoreError> {
-    use pos_core::CoreError;
-
-    for event in events {
-        budget
-            .charge_bytes(event.payload.as_slice().len())
-            .map_err(|_| CoreError::ArtifactUnavailable)?;
-        budget
-            .charge_bytes(event.event_type.as_str().len())
-            .map_err(|_| CoreError::ArtifactUnavailable)?;
-    }
-    budget
-        .check_time()
-        .map_err(|_| CoreError::ArtifactUnavailable)
 }
 
 #[cfg(test)]
@@ -913,32 +820,11 @@ mod tests {
     };
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
-        store::{EventReadBounds, SeqRange},
+        store::SeqRange,
         CoreError, EntityId, ErasureHostErrorV1, ErasureProtectedOperationV1, Seq, TimelineId,
     };
-    use pos_runtime::{WorldReplayUseV1, GUARD_RELEASE_LATE_SIGNAL};
+    use pos_runtime::GUARD_RELEASE_LATE_SIGNAL;
     use std::time::Duration;
-
-    fn read_complete_world_replay(
-        sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
-        requested_use: &WorldReplayUseV1,
-        bounds: EventReadBounds,
-    ) -> Result<Vec<pos_core::Event>, CoreError> {
-        use pos_core::trusted_clock::GuardMonotonicSourceV1;
-        let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
-        let started = clock.mark();
-        let limits = crate::test_support::test_ok(pos_store::ForkReplayReadLimitsV1::new(
-            8,
-            1_024,
-            262_144,
-            256 * 1024 * 1024,
-            30_000_000,
-        ));
-        let mut budget = crate::test_support::test_ok(pos_store::ForkReplayReadBudgetV1::new(
-            limits, started, &mut clock,
-        ));
-        super::read_complete_world_replay(sender, requested_use, bounds, &mut budget)
-    }
 
     /// A refused handoff whose P2 measurement lands past `g0 + 30 s` records
     /// the late signal; nothing is handed over and no overrun is recorded.
@@ -959,97 +845,6 @@ mod tests {
         assert!(matches!(refused, Err(CoreError::ArtifactUnavailable)));
         assert_eq!(health.overrun_signal(), None);
         assert_eq!(health.guard_release_late(), Some(GUARD_RELEASE_LATE_SIGNAL));
-    }
-
-    fn use_at(timeline: TimelineId, range: SeqRange, head: u64) -> WorldReplayUseV1 {
-        crate::test_support::test_ok(WorldReplayUseV1::new(
-            timeline,
-            ErasureProtectedOperationV1::Read,
-            range,
-            Seq::from_u64(head),
-            vec!["count".to_owned()],
-            Vec::new(),
-        ))
-    }
-
-    #[test]
-    fn complete_replay_rejects_moved_heads_and_insufficient_bounds() {
-        let mut host = crate::test_support::open_exact_host();
-        let timeline = {
-            let mut commands = crate::test_support::test_ok(host.command_sender());
-            let timeline = crate::test_support::test_ok(commands.create_timeline("bounded-replay"));
-            let draft = EventDraft::new(
-                EntityId::new(),
-                Kind::new("test.tick"),
-                CanonicalBytes::from_vec(Vec::new()),
-            );
-            crate::test_support::test_ok(commands.append(timeline.id(), &[draft.clone(), draft]));
-            timeline.id()
-        };
-        let mut sender = crate::test_support::test_ok(host.read_sender());
-        let sufficient = EventReadBounds::new(65_536, 128, 8, 2);
-        for stale_head in [1, 3] {
-            assert!(matches!(
-                read_complete_world_replay(
-                    &mut sender,
-                    &use_at(timeline, SeqRange::all(), stale_head),
-                    sufficient,
-                ),
-                Err(CoreError::ArtifactUnavailable)
-            ));
-        }
-        assert!(matches!(
-            read_complete_world_replay(
-                &mut sender,
-                &use_at(timeline, SeqRange::from_seq(Seq::from_u64(4)), 2),
-                sufficient,
-            ),
-            Err(CoreError::ArtifactUnavailable)
-        ));
-        assert!(matches!(
-            read_complete_world_replay(
-                &mut sender,
-                &use_at(timeline, SeqRange::all(), 2),
-                EventReadBounds::new(65_536, 128, 8, 1),
-            ),
-            Err(CoreError::ArtifactUnavailable)
-        ));
-        assert!(crate::test_support::test_ok(read_complete_world_replay(
-            &mut sender,
-            &use_at(timeline, SeqRange::from_seq(Seq::from_u64(3)), 2),
-            sufficient,
-        ))
-        .is_empty());
-        assert_eq!(
-            crate::test_support::test_ok(read_complete_world_replay(
-                &mut sender,
-                &use_at(timeline, SeqRange::bounded(Seq::ZERO, Seq::from_u64(1)), 2),
-                sufficient,
-            ))
-            .len(),
-            1
-        );
-        assert_eq!(
-            crate::test_support::test_ok(read_complete_world_replay(
-                &mut sender,
-                &use_at(timeline, SeqRange::all(), 2),
-                sufficient,
-            ))
-            .len(),
-            2
-        );
-        assert!(read_complete_world_replay(
-            &mut sender,
-            &use_at(TimelineId::new(), SeqRange::all(), 2),
-            sufficient,
-        )
-        .is_err());
-        assert!(read_complete_world_replay(
-            &mut sender,
-            &use_at(timeline, SeqRange::all(), 2),
-            EventReadBounds::new(65_536, 0, 8, 2),
-        )
-        .is_err());
     }
 
     #[test]
