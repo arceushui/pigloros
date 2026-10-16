@@ -374,16 +374,23 @@ fn read_fence_setup_panic_preserves_payload_and_poisons_before_callbacks() {
     let (mut host, closure) = replay_fault_host(FaultModeV1::BeginForkReplayPanic);
     let requested = replay_use(&closure);
     let callbacks = Cell::new(0);
+    let mut sender = test_ok(host.read_sender());
+    let prepared = test_ok(sender.prepare_world_replay_read(&closure, intent_for(&requested)));
+    let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+    let start = clock.mark();
+    let mut budget = test_ok(ForkReplayReadBudgetV1::new(
+        prepared.fork_read_limits(),
+        start,
+        &mut clock,
+    ));
+    let observed = test_ok(sender.observe_world_replay_use(&prepared, &mut budget));
+    let verified =
+        test_ok(sender.admit_prepared_world_replay(&prepared, &closure, &observed, &mut budget));
+    assert_eq!(
+        test_ok(sender.read_world_replay_events(&verified, &mut budget)).len(),
+        1,
+    );
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut sender = test_ok(host.read_sender());
-        let prepared = test_ok(sender.prepare_world_replay_read(&closure, intent_for(&requested)));
-        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
-        let start = clock.mark();
-        let mut budget = test_ok(ForkReplayReadBudgetV1::new(
-            prepared.fork_read_limits(),
-            start,
-            &mut clock,
-        ));
         sender.with_world_replay_read_fence(
             &[&prepared],
             &mut budget,
@@ -405,6 +412,36 @@ fn read_fence_setup_panic_preserves_payload_and_poisons_before_callbacks() {
         Some(&"fork replay setup panic")
     );
     assert_eq!(callbacks.get(), 0);
+    // The caller may catch the native unwind while retaining its old sender.
+    // Poisoning must revoke that sender too, even with a healthy clock/budget.
+    test_ok(budget.check_time());
+    let before = budget.remaining_native_bytes();
+    assert_eq!(
+        sender
+            .prepare_world_replay_read(&closure, intent_for(&requested))
+            .err(),
+        Some(ErasureHostErrorV1::RecoveryUnavailable),
+    );
+    assert_eq!(
+        sender.observe_world_replay_use(&prepared, &mut budget),
+        Err(ErasureHostErrorV1::RecoveryUnavailable),
+    );
+    assert_eq!(
+        sender
+            .admit_prepared_world_replay(&prepared, &closure, &observed, &mut budget)
+            .err(),
+        Some(ErasureHostErrorV1::RecoveryUnavailable),
+    );
+    assert_eq!(
+        sender.read_world_replay_events(&verified, &mut budget),
+        Err(ErasureHostErrorV1::RecoveryUnavailable),
+    );
+    assert_eq!(
+        sender.validate_world_replay_forks(&verified, &mut budget),
+        Err(ErasureHostErrorV1::RecoveryUnavailable),
+    );
+    assert_eq!(budget.remaining_native_bytes(), before);
+    test_ok(budget.check_time());
     assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
     assert!(host.read_sender().is_err());
 }
