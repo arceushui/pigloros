@@ -3,20 +3,30 @@
 # Accepts libtest (`cargo test`) and cargo-nextest logs. Every log must carry at
 # least one summary, so a run that never reached its summary fails closed.
 #
-# --partitioned takes the nextest logs of every `--partition` shard of one run.
+# --partitioned=N takes the nextest logs of all N `--partition` shards of one run.
 # Each shard skips the tests of the others, so instead of rejecting skips it
 # requires every shard to report the same total (run + skipped) and the shards'
-# run counts to add up to exactly that total.
-# Usage: assert-no-ignored-in-test-summary.sh [--partitioned] <test.log>...
+# run counts to add up to exactly that total. The option must come first.
+# Usage: assert-no-ignored-in-test-summary.sh [--partitioned=N] <test.log>...
 set -euo pipefail
 
+usage="usage: assert-no-ignored-in-test-summary.sh [--partitioned=N] <logfile>..."
 partitioned=false
-if [[ ${1:-} == --partitioned ]]; then
+if [[ ${1:-} == --partitioned=* ]]; then
   partitioned=true
+  shards="${1#--partitioned=}"
   shift
+  if ! [[ $shards =~ ^[1-9][0-9]*$ ]]; then
+    echo "$usage" >&2
+    exit 2
+  fi
+  if [[ $# -ne $shards ]]; then
+    echo "ERROR: expected $shards shard logs, got $#." >&2
+    exit 1
+  fi
 fi
 if [[ $# -eq 0 ]]; then
-  echo "usage: assert-no-ignored-in-test-summary.sh [--partitioned] <logfile>..." >&2
+  echo "$usage" >&2
   exit 2
 fi
 

@@ -219,11 +219,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.97.1
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
-        with:
-          tool: cargo-nextest@0.9.146
-          fallback: none
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: test
@@ -299,7 +294,7 @@ jobs:
 
   test-shards:
     name: test-shards
-    needs: [ci_change_scope, test-shard]
+    needs: [test-shard]
     if: ${{ !cancelled() && needs.test-shard.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -315,8 +310,7 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           logs=("${RUNNER_TEMP}"/shards/test-shard-log-*/nextest-shard.log)
-          test "${#logs[@]}" -eq 3
-          bash scripts/assert-no-ignored-in-test-summary.sh --partitioned "${logs[@]}"
+          bash scripts/assert-no-ignored-in-test-summary.sh --partitioned=3 "${logs[@]}"
 
   reference-evaluator-release:
     name: reference-evaluator-release

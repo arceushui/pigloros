@@ -18,6 +18,7 @@ NEXTEST_SKIPPED_COLOURED = (
     "\x1b[1m     Summary\x1b[0m [  12.3s] \x1b[1m45\x1b[0m tests run: "
     "\x1b[1m45\x1b[0m passed, \x1b[1m1\x1b[0m skipped\n"
 )
+PART = "--partitioned=3"
 PROSE_ONLY = "note: the word ignored; 2 ignored; appears in prose only\n"
 
 
@@ -83,7 +84,7 @@ class AssertNoIgnoredTests(unittest.TestCase):
 
     def test_partitioned_shards_covering_every_test_pass(self) -> None:
         result = self.run_script(
-            self.shard(3, 5), self.shard(3, 5), self.shard(2, 6), flags=("--partitioned",)
+            self.shard(3, 5), self.shard(3, 5), self.shard(2, 6), flags=(PART,)
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("all 8 tests exactly once", result.stdout)
@@ -94,23 +95,37 @@ class AssertNoIgnoredTests(unittest.TestCase):
             "\x1b[1m4\x1b[0m passed, \x1b[1m4\x1b[0m skipped\n"
         )
         self.assertEqual(
-            self.run_script(coloured, coloured, flags=("--partitioned",)).returncode, 0
+            self.run_script(
+                coloured, coloured, coloured, flags=("--partitioned=2",)
+            ).returncode,
+            1,
         )
+        two = "\x1b[1m     Summary\x1b[0m [  1.0s] \x1b[1m4\x1b[0m tests run: \x1b[1m4\x1b[0m passed, \x1b[1m4\x1b[0m skipped\n"
+        self.assertEqual(self.run_script(two, two, flags=("--partitioned=2",)).returncode, 0)
 
     def test_partitioned_missing_shard_fails(self) -> None:
-        result = self.run_script(self.shard(3, 5), self.shard(3, 5), flags=("--partitioned",))
+        result = self.run_script(self.shard(3, 5), self.shard(3, 5), flags=(PART,))
         self.assertEqual(result.returncode, 1)
-        self.assertIn("shards ran 6 tests; the run holds 8", result.stderr)
+        self.assertIn("expected 3 shard logs, got 2", result.stderr)
+
+    def test_partitioned_dropped_tests_fail(self) -> None:
+        result = self.run_script(
+            self.shard(3, 5), self.shard(3, 5), self.shard(1, 7), flags=(PART,)
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("shards ran 7 tests; the run holds 8", result.stderr)
 
     def test_partitioned_unrun_ignored_tests_fail(self) -> None:
         # Without --run-ignored all, ignored tests are skipped by every shard.
         result = self.run_script(
-            self.shard(3, 6), self.shard(3, 6), self.shard(2, 7), flags=("--partitioned",)
+            self.shard(3, 6), self.shard(3, 6), self.shard(2, 7), flags=(PART,)
         )
         self.assertEqual(result.returncode, 1)
 
     def test_partitioned_mismatched_totals_fail(self) -> None:
-        result = self.run_script(self.shard(4, 4), self.shard(4, 5), flags=("--partitioned",))
+        result = self.run_script(
+            self.shard(4, 4), self.shard(4, 5), self.shard(0, 8), flags=(PART,)
+        )
         self.assertEqual(result.returncode, 1)
         self.assertIn("differs from", result.stderr)
 
@@ -118,15 +133,31 @@ class AssertNoIgnoredTests(unittest.TestCase):
         for content in ("", LIBTEST_CLEAN, self.shard(4, 4) * 2):
             with self.subTest(content=content):
                 result = self.run_script(
-                    self.shard(4, 4), content, flags=("--partitioned",)
+                    self.shard(4, 4), content, self.shard(0, 8), flags=(PART,)
                 )
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("exactly one nextest summary", result.stderr)
 
-    def test_partitioned_unpartitioned_log_counts_as_whole_run(self) -> None:
-        self.assertEqual(
-            self.run_script(NEXTEST_CLEAN, flags=("--partitioned",)).returncode, 0
+    def test_partitioned_single_shard_run_counts_as_whole_run(self) -> None:
+        one = "     Summary [  1.0s] 1 test run: 1 passed\n"
+        self.assertEqual(self.run_script(one, flags=("--partitioned=1",)).returncode, 0)
+
+    def test_partitioned_unreadable_summary_fails(self) -> None:
+        result = self.run_script(
+            "     Summary [  1.0s] garbage\n",
+            self.shard(4, 4),
+            self.shard(4, 4),
+            flags=(PART,),
         )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unreadable nextest summary", result.stderr)
+
+    def test_partitioned_requires_a_positive_shard_count(self) -> None:
+        for flag in ("--partitioned=", "--partitioned=0", "--partitioned=x"):
+            with self.subTest(flag=flag):
+                self.assertEqual(
+                    self.run_script(self.shard(1, 0), flags=(flag,)).returncode, 2
+                )
 
 
 if __name__ == "__main__":

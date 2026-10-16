@@ -180,16 +180,19 @@ check.
 
 ### Stage 2: core quality gates
 
-After preflight, the four core jobs start together:
+After preflight, the core jobs start together:
 
 ```mermaid
 flowchart TD
     P["preflight-gate"] --> F["fmt"]
-    P --> T["full workspace test"]
+    P --> T["test: checks and doctests"]
+    P --> S["test-shard x3: nextest partitions"]
     P --> C["clippy"]
     P --> V["one coverage execution"]
+    S --> A["test-shards: every test ran once"]
     F --> G["core-gate"]
     T --> G
+    A --> G
     C --> G
     V --> G
 ```
