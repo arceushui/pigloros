@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 5fecde3f3db4be4f07bf901b740e472eaf0a70cf
+          ref: 187bbf2564fd424236bf7a74c2c8d36ca4f97665
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -31,7 +31,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           git rev-parse HEAD | tee artifacts/source-sha.txt
-          test "$(git rev-parse HEAD)" = 5fecde3f3db4be4f07bf901b740e472eaf0a70cf
+          test "$(git rev-parse HEAD)" = 187bbf2564fd424236bf7a74c2c8d36ca4f97665
           rustc -Vv | tee artifacts/rustc.txt
       - name: Exercise the real inter-statement SQLite writer
         run: |
@@ -49,6 +49,14 @@ jobs:
             -- --exact --include-ignored 2>&1 | tee artifacts/principal-race.log
           grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' artifacts/principal-race.log
           bash scripts/assert-no-ignored-in-test-summary.sh artifacts/principal-race.log
+      - name: Exercise real principal column refusal and exact native debits
+        run: |
+          set -euo pipefail
+          cargo test -p pos-store --all-features --locked --lib \
+            sqlite::fork_replay_operation::tests::principal_raw_column_refusal_preserves_native_errors_and_exact_debits \
+            -- --exact --include-ignored 2>&1 | tee artifacts/principal-column-refusal.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' artifacts/principal-column-refusal.log
+          bash scripts/assert-no-ignored-in-test-summary.sh artifacts/principal-column-refusal.log
       - name: Exercise all native interval-acquisition regressions
         run: |
           set -euo pipefail
