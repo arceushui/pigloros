@@ -130,6 +130,50 @@ fn public_authority_codecs_reject_each_invalid_field_and_cbor_shape(
 }
 
 #[test]
+fn public_challenge_decoders_reject_wrong_field_types_and_widths(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let initialize = ForkAdmissionInitializeChallengeV1::new(hash(1), hash(2), key(3), hash(4))?;
+    let open = ForkAdmissionOpenChallengeV1::new(hash(1), hash(2), hash(3))?;
+    let initialize_bytes = initialize.canonical_bytes();
+    let open_bytes = open.canonical_bytes();
+    assert_eq!(
+        ForkAdmissionInitializeChallengeV1::from_canonical_cbor(&initialize_bytes)?,
+        initialize
+    );
+    assert_eq!(
+        ForkAdmissionOpenChallengeV1::from_canonical_cbor(&open_bytes)?,
+        open
+    );
+
+    // Both replacements preserve valid CBOR and shorten the complete record,
+    // so envelope parsing and the byte ceiling cannot mask field validation.
+    // FAI1/FAO1 still use the shared field decoder after FAH1's fixed-shape path.
+    let mut short_bytes = vec![0x58, 31];
+    short_bytes.extend_from_slice(&[1; 31]);
+    for replacement in [vec![0xf6], short_bytes] {
+        for offset in [7, 41, 75, 109] {
+            let mut bytes = initialize_bytes.clone();
+            bytes.splice(offset..offset + 34, replacement.iter().copied());
+            assert_eq!(
+                ForkAdmissionInitializeChallengeV1::from_canonical_cbor(&bytes).err(),
+                Some(ForkAdmissionAuthorityCodecErrorV1::FieldOutOfBounds),
+                "FAI1 field at {offset}"
+            );
+        }
+        for offset in [7, 41, 75] {
+            let mut bytes = open_bytes.clone();
+            bytes.splice(offset..offset + 34, replacement.iter().copied());
+            assert_eq!(
+                ForkAdmissionOpenChallengeV1::from_canonical_cbor(&bytes).err(),
+                Some(ForkAdmissionAuthorityCodecErrorV1::FieldOutOfBounds),
+                "FAO1 field at {offset}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn public_authority_codecs_round_trip_valid_records() -> Result<(), Box<dyn std::error::Error>> {
     let host = ForkAdmissionHostRecordV1::new(hash(1), key(2), hash(3))?;
     let initialize = ForkAdmissionInitializeChallengeV1::new(hash(4), hash(5), key(6), hash(7))?;
