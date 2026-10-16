@@ -16,8 +16,9 @@ env:
 jobs:
   baseline:
     runs-on: ubuntu-latest
-    # The command stops earlier so its evidence can upload before job teardown.
-    timeout-minutes: 35
+    # Bounded setup (8m), harness (30m), and upload (3m) leave teardown reserve.
+    # This diagnostic outer bound does not extend the 28m test command.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -28,14 +29,17 @@ jobs:
             source: 27c1190fd9447abfcfcb95d306592a1da949210f
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
         with:
           ref: ${{ matrix.source }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        timeout-minutes: 5
         with:
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
       # Deliberately no build cache: both sides measure the cold configuration.
       - name: Record exact source, toolchain and runner
+        timeout-minutes: 1
         env:
           EXPECTED_SOURCE: ${{ matrix.source }}
         run: |
@@ -55,6 +59,7 @@ jobs:
             printf 'rustup_toolchain=%s test_debug=%s\n' "$RUSTUP_TOOLCHAIN" "$CARGO_PROFILE_TEST_DEBUG"
           } | tee artifacts/environment.txt
       - name: Run the complete unmutated nightly harness with a log-preserving deadline
+        timeout-minutes: 30
         run: |
           set -euo pipefail
           date --utc --iso-8601=seconds | tee artifacts/command-start.txt
@@ -88,6 +93,7 @@ jobs:
           fi
       - name: Preserve the phase log even on failure
         if: ${{ always() }}
+        timeout-minutes: 3
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: untrusted-561-mutation-baseline-${{ matrix.label }}-${{ github.run_id }}-${{ github.run_attempt }}
