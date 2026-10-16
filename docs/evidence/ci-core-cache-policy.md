@@ -13,8 +13,11 @@ follow the same rule. The repository cache budget is shared: on 2026-10-16
 per-PR writes held 10.7 GB against the 10 GB limit, so LRU eviction removed
 `main`'s `test` cache and every pull request compiled the workspace cold.
 `assert_pull_requests_never_write_caches` in the policy test keeps every
-`ci.yml` cache write on `main`. Only the PR-only mutation workflow still
-writes from pull requests, because it never runs on `main`.
+`ci.yml`, fuzz, ThreadSanitizer and benchmark cache write on `main`. Only the
+pull-request-only mutation and sim1 proof-risk workflows still write from pull
+requests, each under its own key, because neither runs on `main`. The
+`workflow_dispatch` deploy workflow writes its Docker cache from whichever ref
+an operator dispatches, normally `main`.
 
 This is the runtime mechanism, not a convention enforced by a wrapper. The
 pinned `Swatinem/rust-cache` action documents `save-if: false` as

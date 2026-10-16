@@ -20,7 +20,7 @@ for log in "$@"; do
     continue
   fi
   if grep -E '^test result:.*; [1-9][0-9]* ignored;' <<<"$plain"; then
-    echo "ERROR: $log: cargo test summary reports ignored tests (use --include-ignored or remove #[ignore])." >&2
+    echo "ERROR: $log: libtest (cargo test) summary reports ignored tests (use --include-ignored or remove #[ignore])." >&2
     status=1
   fi
   if grep -E '^ *Summary \[.*[^0-9][1-9][0-9]* skipped' <<<"$plain"; then

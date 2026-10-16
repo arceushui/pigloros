@@ -204,10 +204,10 @@ The core checks and their immediate cargo-crap consumer mean:
    test gate is workspace-wide; Cargo has no built-in changed-test selector.
 3. `clippy` runs all targets with warnings denied and the repository's
    pedantic policy.
-4. `coverage` performs one complete `cargo llvm-cov nextest` run. `covgate` checks
-   changed production Rust code first from that report, then the same report
-   is checked against the full workspace 99% line and 99% region floor. The
-   resulting LCOV is uploaded for the next gate.
+4. `coverage` performs one complete `cargo llvm-cov nextest` run. `covgate`
+   checks changed production Rust code first from that report, then the same
+   report is checked against the full workspace 99% line and 99% region
+   floor. The resulting LCOV is uploaded for the next gate.
 5. `cargo-crap` consumes that LCOV and a trusted baseline. Existing function
    scores may not regress, and new functions must score at most 30.
 

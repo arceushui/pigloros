@@ -20,6 +20,14 @@ WORKFLOW_PATHS = (
 )
 RUST_CACHE_ACTION = "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16"
 TRUSTED_MAIN_SAVE_IF = "${{ github.ref == 'refs/heads/main' }}"
+# Workflows that run on main (push or schedule) own main-written caches. The
+# pull-request-only mutation and sim1 proof-risk workflows keep PR-scoped keys.
+MAIN_WRITER_WORKFLOW_PATHS = (
+    CI_WORKFLOW_PATH,
+    ROOT / ".github" / "workflows" / "fuzz.yml",
+    ROOT / ".github" / "workflows" / "memory-store-benchmark.yml",
+    ROOT / ".github" / "workflows" / "thread-sanitizer.yml",
+)
 TRUSTED_MAIN_DOCKER_CACHE_TO = (
     "${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}"
 )
@@ -421,7 +429,9 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             assert_core_rust_cache_contract(mutated)
 
     def test_pull_requests_never_write_caches(self) -> None:
-        assert_pull_requests_never_write_caches(load_workflow(CI_WORKFLOW_PATH))
+        for workflow_path in MAIN_WRITER_WORKFLOW_PATHS:
+            with self.subTest(workflow=workflow_path.name):
+                assert_pull_requests_never_write_caches(load_workflow(workflow_path))
 
     def test_cache_write_contract_rejects_pull_request_rust_cache_write(self) -> None:
         mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))

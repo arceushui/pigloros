@@ -45,6 +45,7 @@ def main() -> None:
         "--run-ignored all --no-fail-fast",
         "cargo test --workspace --all-features --locked --doc -- --include-ignored",
         "cargo llvm-cov nextest --workspace --all-features --locked",
+        "--user-config-file none --ignore-default-filter",
         "name: cargo test with ASan",
         "uses: ./.github/workflows/mutation.yml",
     ):

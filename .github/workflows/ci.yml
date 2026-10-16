@@ -3,7 +3,7 @@
 # Gate policy (Redmine #100):
 #   fmt          — cargo fmt --check (rustfmt)
 #   rustdoc      — cargo doc with rustdoc warnings denied
-#   test         — cargo test --all-features (no ignored tests silently skip)
+#   test         — cargo nextest --all-features + doctests (no ignored tests silently skip)
 #   clippy       — pedantic + -D warnings
 #   coverage     — lines ≥99%, regions ≥99%
 #   cargo-crap   — no CRAP regressions; new functions score ≤30
@@ -19,7 +19,8 @@
 #     feature(coverage_attribute) for #[coverage(off)] on test helpers.
 #   coverage(off) is only permitted on #[test]/#[tokio::test]/#[cfg(test)] code
 #     (enforced by Trunk rust-test-policy).
-#   --include-ignored: ensures #[ignore] tests run in CI; none may silently skip.
+#   --run-ignored all / --include-ignored: ensures #[ignore] tests run in CI;
+#     none may silently skip.
 #
 # Pull requests that change only documentation or other non-Rust content run the
 # lightweight scope job plus Trunk/CodeQL policy workflows. Rust build, test,
@@ -241,17 +242,18 @@ jobs:
       # Cargo runs test executables one after another; nextest schedules the
       # tests of every executable across all runner cores. Doctests are not
       # supported by nextest, so libtest still runs them.
-      - name: cargo nextest (all features, no ignored skip)
+      - name: cargo nextest (all features, ignored included)
         run: |
           set -euo pipefail
           cargo nextest run --workspace --all-features --locked \
             --user-config-file none --ignore-default-filter \
             --run-ignored all --no-fail-fast 2>&1 | tee /tmp/cargo-nextest.log
-      - name: cargo test doctests (all features, no ignored skip)
+      - name: cargo test doctests (all features, ignored included)
         run: |
           set -euo pipefail
           cargo test --workspace --all-features --locked --doc -- --include-ignored 2>&1 | tee /tmp/cargo-doctest.log
-          bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-nextest.log /tmp/cargo-doctest.log
+      - name: Require no ignored or skipped test in either summary
+        run: bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-nextest.log /tmp/cargo-doctest.log
 
   reference-evaluator-release:
     name: reference-evaluator-release
@@ -568,6 +570,7 @@ jobs:
         run: >
           cargo llvm-cov nextest --workspace --all-features --locked
           --json --output-path "${{ runner.temp }}/coverage.json"
+          --user-config-file none --ignore-default-filter
           --run-ignored all --no-fail-fast
       - name: Enforce changed production Rust code coverage first
         run: >
@@ -1214,6 +1217,8 @@ jobs:
         run: bash scripts/test-check-pinned-dependencies.sh
       - name: Test CI workflow policy
         run: python scripts/test_ci_workflow_policy.py
+      - name: Test ignored-test summary checker
+        run: python scripts/test_assert_no_ignored_in_test_summary.py
       - name: Check ASan CI policy
         run: bash scripts/check-asan-ci-policy.sh
       - name: Test ASan CI policy checker
