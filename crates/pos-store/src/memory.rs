@@ -7711,6 +7711,41 @@ mod tests {
     }
 
     #[test]
+    fn local_admission_rejects_a_valid_result_under_the_wrong_operation_key(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::ForkEventPermitIssuerPortV1;
+
+        let mut fixture = classified_authority_fixture()?;
+        assert_eq!(
+            fixture
+                .store
+                .read_validated_local_fork_admission(fixture.child_timeline_id)?,
+            fixture.admission
+        );
+        let principal = fixture
+            .store
+            .fork_admission_operations
+            .values()
+            .find(|row| row.kind == ForkAdmissionOperationKindV1::PrincipalOwner)
+            .cloned()
+            .ok_or("principal operation")?;
+        fixture.store.fork_admission_operations.insert(
+            (
+                ForkAdmissionOperationKindV1::Fork,
+                fixture.admission.input().operation_id,
+            ),
+            principal,
+        );
+        assert_eq!(
+            fixture
+                .store
+                .read_validated_local_fork_admission(fixture.child_timeline_id),
+            Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn classified_suffix_rejects_missing_and_duplicate_operations(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (mut store, child_timeline_id, suffix_operation, _) = classified_suffix_store()?;
