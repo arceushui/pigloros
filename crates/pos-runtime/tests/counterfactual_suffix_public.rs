@@ -2,6 +2,9 @@
 //! the first atomic Tick, against both `MemoryStore` and `SqliteStore`.
 #![cfg(target_os = "linux")]
 
+#[path = "../../pos-store/tests/support/classified_fork_fixture.rs"]
+pub mod classified;
+
 use std::collections::BTreeMap;
 use std::error::Error as _;
 use std::sync::Arc;
@@ -40,21 +43,23 @@ use pos_core::{
     DependencyNodeRecordV1, DependencyPageRequestV1, DependencyPageV1, DependencyReadScopeV1,
     EntityId, ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1,
     ErasureReplayClaimV1, Event, EventDraft, EventReadBounds, EventStore, FactualCutV1,
-    FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, ForkGenerationV1, Hash,
-    InvalidationConflictV1, Kind, PipelineContractErrorV1, PipelineDraftBatchV1,
-    RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1, RegisteredArtifactV1,
-    ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, SeqRange, TickDependencyRecordV1,
-    Timeline, TimelineId, TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1, MAX_FORK_EVENT_TYPE_BYTES_V1,
-    MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
+    FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, ForkAppendSourceIdentityV1,
+    ForkGenerationV1, Hash, InvalidationConflictV1, Kind, PipelineContractErrorV1,
+    PipelineDraftBatchV1, RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1,
+    RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, SeqRange,
+    TickDependencyRecordV1, Timeline, TimelineId, TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1,
+    MAX_FORK_EVENT_TYPE_BYTES_V1, MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
 };
 use pos_runtime::counterfactual::coordinator::{
     CounterfactualAdmissionErrorV1 as AdmissionError, CounterfactualAdmissionRequestV1,
-    CounterfactualCoordinatorV1, CounterfactualDeclaringTickStagerV1,
-    CounterfactualForkAppendAuthorityV1, CounterfactualFrontierDerivationV1,
-    CounterfactualFrontierSourceV1, CounterfactualFrozenArtifactsV1, CounterfactualHostPreflightV1,
+    CounterfactualClassifiedSourceResolverV1, CounterfactualCoordinatorV1,
+    CounterfactualDeclaringTickStagerV1, CounterfactualForkAppendAuthorityV1,
+    CounterfactualFrontierDerivationV1, CounterfactualFrontierSourceV1,
+    CounterfactualFrozenArtifactsV1, CounterfactualHostPreflightV1,
     CounterfactualInterventionAuthorityV1, CounterfactualProvisionalOutputV1,
     CounterfactualStagedTickV1, CounterfactualTickFailureV1, CounterfactualTickInputsV1,
-    FrozenArtifactAvailabilityV1, InterventionDecisionV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
+    FrozenArtifactAvailabilityV1, GenericForksOnlyV1, InterventionDecisionV1,
+    COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
 };
 use pos_runtime::counterfactual::suffix::{
     CounterfactualSuffixErrorV1 as SuffixError, CounterfactualSuffixFailureV1 as Failure,
@@ -62,6 +67,11 @@ use pos_runtime::counterfactual::suffix::{
 };
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
+use pos_store::{
+    ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1,
+    ClassifiedProvenanceErrorV1, ClassifiedTickAuthorityV1, ForkAppendSourcePermitV1,
+    ForkEventProvenanceAuthorityPortV1,
+};
 use pos_time::counterfactual::dependency_graph::{
     validate_dependency_graph_v1, DependencyGraphBoundsV1, DependencyGraphNodeOriginV1 as Origin,
     DependencyGraphNodeV1 as Node,
@@ -215,6 +225,7 @@ trait Backend: EventStore + CounterfactualStorePortV1 + Sized {
 trait RecordingBackend:
     Backend
     + CounterfactualDependencyRecordingPortV1
+    + ClassifiedCounterfactualStorePortV1
     + CounterfactualDependencyReadPortV1
     + FactualPrefixReadPortV1
 {
@@ -223,13 +234,52 @@ trait RecordingBackend:
 impl<B> RecordingBackend for B where
     B: Backend
         + CounterfactualDependencyRecordingPortV1
+        + ClassifiedCounterfactualStorePortV1
         + CounterfactualDependencyReadPortV1
         + FactualPrefixReadPortV1
 {
 }
 
+/// A backend whose store, or whose wrapped store, admits classified Forks.
+trait ClassifiedBackend: RecordingBackend {
+    /// The store that holds the Fork admission authority.
+    type Host: classified::Host;
+
+    /// Borrow the store that holds the Fork admission authority.
+    fn host(&mut self) -> &mut Self::Host;
+
+    /// Borrow the store that holds the Fork admission authority for reads.
+    fn host_ref(&self) -> &Self::Host;
+}
+
+impl ClassifiedBackend for MemoryStore {
+    type Host = Self;
+
+    fn host(&mut self) -> &mut Self {
+        self
+    }
+
+    fn host_ref(&self) -> &Self {
+        self
+    }
+}
+
+impl ClassifiedBackend for SqliteStore {
+    type Host = Self;
+
+    fn host(&mut self) -> &mut Self {
+        self
+    }
+
+    fn host_ref(&self) -> &Self {
+        self
+    }
+}
+
 /// The outcome of one later Tick append.
 type TickResult = Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1>;
+/// The outcome of one later classified Tick append.
+type ClassifiedTickResult = Result<CounterfactualTickOutcomeV1, ClassifiedCounterfactualErrorV1>;
 
 fn open_gate() -> Arc<ErasureContainmentGateV1> {
     Arc::new(ErasureContainmentGateV1::new_test_open())
@@ -346,15 +396,16 @@ impl<B> Faulty<B> {
 impl<B: Backend> Faulty<B> {
     /// Run the interference configured for this, the next, later Tick
     /// append, then make the append `append` unless the interference
-    /// replaced it.
-    fn interfered_append(
+    /// replaced it; the generic and the classified append share it.
+    fn interfered_append<E: From<CounterfactualStoreErrorV1>>(
         &mut self,
         fork: TimelineId,
         expected: &CounterfactualBasisV1,
-        append: impl FnOnce(&mut B) -> TickResult,
-    ) -> TickResult {
+        append: impl FnOnce(&mut B) -> Result<CounterfactualTickOutcomeV1, E>,
+    ) -> Result<CounterfactualTickOutcomeV1, E> {
         self.appends += 1;
         let now = self.appends;
+        let unknown = CounterfactualStoreErrorV1::OutcomeUnknown;
         match self.interference {
             Interference::Republish(at, change) if at == now => {
                 let mut facts = self.inner.current_counterfactual_basis(fork)?.facts;
@@ -367,18 +418,18 @@ impl<B: Backend> Faulty<B> {
                     .or(Err(CounterfactualStoreErrorV1::StorageFailure))?;
             }
             Interference::LostUnknown(at) if at == now => {
-                return Err(CounterfactualStoreErrorV1::OutcomeUnknown);
+                return Err(unknown.into());
             }
             Interference::UnreadableUnknown(at) if at == now => {
                 self.in_doubt = true;
-                return Err(CounterfactualStoreErrorV1::OutcomeUnknown);
+                return Err(unknown.into());
             }
             Interference::LandedUnknown(at) if at == now => {
-                return append(&mut self.inner)
-                    .and(Err(CounterfactualStoreErrorV1::OutcomeUnknown));
+                return append(&mut self.inner).and(Err(unknown.into()));
             }
             Interference::MisreportedHead(at) if at == now => {
-                return append(&mut self.inner).and_then(|outcome| misreported(expected, outcome));
+                let outcome = append(&mut self.inner)?;
+                return misreported(expected, outcome).map_err(E::from);
             }
             _ => {}
         }
@@ -406,6 +457,52 @@ impl<B: RecordingBackend> CounterfactualDependencyRecordingPortV1 for Faulty<B> 
         self.interfered_append(fork, expected, |inner| {
             inner.append_counterfactual_tick_with_dependencies(fork, expected, drafts, record)
         })
+    }
+}
+
+impl<B: RecordingBackend> ClassifiedCounterfactualStorePortV1 for Faulty<B> {
+    fn commit_classified_counterfactual_invalidation(
+        &mut self,
+        command: &CounterfactualInvalidationCommandV1,
+        record: &TickDependencyRecordV1,
+        authority: &ClassifiedTickAuthorityV1<'_>,
+        base: Hash,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, ClassifiedCounterfactualErrorV1> {
+        self.inner
+            .commit_classified_counterfactual_invalidation(command, record, authority, base)
+    }
+
+    fn append_classified_counterfactual_tick(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        record: &TickDependencyRecordV1,
+        authority: &ClassifiedTickAuthorityV1<'_>,
+        base: Hash,
+    ) -> ClassifiedTickResult {
+        self.interfered_append(fork, expected, |inner| {
+            inner.append_classified_counterfactual_tick(
+                fork,
+                expected,
+                drafts,
+                record,
+                authority,
+                base,
+            )
+        })
+    }
+}
+
+impl<B: ClassifiedBackend> ClassifiedBackend for Faulty<B> {
+    type Host = B::Host;
+
+    fn host(&mut self) -> &mut B::Host {
+        self.inner.host()
+    }
+
+    fn host_ref(&self) -> &B::Host {
+        self.inner.host_ref()
     }
 }
 
@@ -644,6 +741,7 @@ const fn descriptor(schema_id: u32, seed: u8) -> FrozenArtifactDescriptorV1 {
 }
 
 fn plan(
+    parent: TimelineId,
     profile: &ExecutionProfileV1,
     snapshot: &TrustPolicySnapshotV1,
     edit: fn(&mut CounterfactualPlanV1),
@@ -652,7 +750,7 @@ fn plan(
         plan_id: [1; 16],
         room_id: ROOM_ID.to_owned(),
         room_digest: ROOM_DIGEST,
-        parent_timeline_id: root_id().inner().to_bytes(),
+        parent_timeline_id: parent.inner().to_bytes(),
         parent_cut_seq: CUT_SEQ,
         parent_cut_tick: PARENT_CUT_TICK,
         parent_cut_digest: [4; 32],
@@ -1303,12 +1401,23 @@ fn seed<B: Backend>(
         id: fork_id(),
         ..TimelineMeta::forked_from(root_id(), Seq::from_u64(cut_seq), "counterfactual")
     })?;
+    seed_fork(store, edit, root_id(), fork_id())
+}
+
+/// The plan of `fork`, cut from `root`, with its host records and graph, and
+/// the published facts of the plan.
+fn seed_fork<B: Backend>(
+    store: &mut B,
+    edit: fn(&mut CounterfactualPlanV1),
+    root: TimelineId,
+    fork: TimelineId,
+) -> TestResult<Seeded> {
     let profile = ExecutionProfileV1::from_canonical_cbor(&draft_execution_profile_bytes_v1(
         "deterministic-local-v1",
     )?)?;
     let snapshot =
         TrustPolicySnapshotV1::from_canonical_cbor(&draft_trust_policy_snapshot_bytes_v1()?)?;
-    let plan = plan(&profile, &snapshot, edit)?;
+    let plan = plan(root, &profile, &snapshot, edit)?;
     let claim = exact_evaluation()?;
     let source = Source::new(&plan)?;
     let facts = CounterfactualFactsV1 {
@@ -1318,7 +1427,7 @@ fn seed<B: Backend>(
         revocation_epoch: REVOCATION_EPOCH,
         erasure_epoch: ERASURE_EPOCH,
     };
-    store.publish_counterfactual_facts(fork_id(), facts)?;
+    store.publish_counterfactual_facts(fork, facts)?;
     Ok(Seeded {
         plan,
         profile,
@@ -1370,6 +1479,7 @@ fn setup_cut_in<B: RecordingBackend>(
         &Authority,
         &mut source,
         &mut stager,
+        &mut GenericForksOnlyV1,
     )?;
     Ok(Setup {
         coordinator,
@@ -1432,6 +1542,7 @@ const fn suffix_request(fixture: &Fixture) -> CounterfactualSuffixRequestV1<'_> 
     CounterfactualSuffixRequestV1 {
         plan: &fixture.plan,
         receipt: fixture.receipt,
+        fork_append_authority: CounterfactualForkAppendAuthorityV1::Generic,
         result_id: RESULT_ID,
         evaluator_identity_digest: EVALUATOR,
     }
@@ -1453,9 +1564,11 @@ fn run_recording<B: RecordingBackend>(
     setup: &mut Setup<B>,
     stager: &mut DeclaringStager,
 ) -> Suffix {
-    setup
-        .coordinator
-        .recompute_suffix(&suffix_request(&setup.fixture), stager)
+    setup.coordinator.recompute_suffix(
+        &suffix_request(&setup.fixture),
+        stager,
+        &mut GenericForksOnlyV1,
+    )
 }
 
 /// Run with a stager that must not be called and expect `error`.
@@ -2078,6 +2191,7 @@ fn stale_generation_and_foreign_plans_are_rejected<B: RecordingBackend>() -> Tes
         &Authority,
         source,
         &mut stager,
+        &mut GenericForksOnlyV1,
     )?;
     assert_rejected(
         &mut setup,
@@ -2103,7 +2217,9 @@ fn stale_generation_and_foreign_plans_are_rejected<B: RecordingBackend>() -> Tes
             plan: &plan,
             ..suffix_request(&setup.fixture)
         };
-        let result = setup.coordinator.recompute_suffix(&request, &mut stager);
+        let result = setup
+            .coordinator
+            .recompute_suffix(&request, &mut stager, &mut GenericForksOnlyV1);
         assert_eq!(result, Err(expected));
     }
     assert!(stager.inner.seen.is_empty());
@@ -2133,6 +2249,7 @@ fn another_generations_invalidation_is_rejected() -> TestResult {
         &Authority,
         source,
         &mut stager,
+        &mut GenericForksOnlyV1,
     )?;
     // The store serves generation 1's retained `SIV1` for generation 2's.
     let swapped = StoreFault::ArtifactSwapped(earlier.invalidation_digest());
@@ -2415,7 +2532,9 @@ fn zero_result_identities_are_rejected_before_staging() -> TestResult {
     let mut stager = DeclaringStager::new(&setup.source, Stager::default())?;
     for request in cases {
         assert_eq!(
-            setup.coordinator.recompute_suffix(&request, &mut stager),
+            setup
+                .coordinator
+                .recompute_suffix(&request, &mut stager, &mut GenericForksOnlyV1),
             Err(SuffixError::InvalidResultIdentity)
         );
     }
@@ -2893,6 +3012,456 @@ fn a_failed_prefix_read_is_a_store_failure_before_staging() -> TestResult {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Classified Forks
+// ---------------------------------------------------------------------------
+
+/// Lends a classified world's live session and one permit, records every
+/// call, and refuses its `refuse_from`th call and every later one.
+struct Lender<'a> {
+    authority: &'a classified::Authority,
+    permit: &'a ForkAppendSourcePermitV1,
+    calls: Vec<ForkGenerationV1>,
+    refuse_from: usize,
+}
+
+impl<'a> Lender<'a> {
+    /// A lender that never refuses.
+    const fn new(
+        authority: &'a classified::Authority,
+        permit: &'a ForkAppendSourcePermitV1,
+    ) -> Self {
+        Self::refusing_from(authority, permit, usize::MAX)
+    }
+
+    const fn refusing_from(
+        authority: &'a classified::Authority,
+        permit: &'a ForkAppendSourcePermitV1,
+        refuse_from: usize,
+    ) -> Self {
+        Self {
+            authority,
+            permit,
+            calls: Vec::new(),
+            refuse_from,
+        }
+    }
+}
+
+impl CounterfactualClassifiedSourceResolverV1 for Lender<'_> {
+    fn authority_for(
+        &mut self,
+        fork: TimelineId,
+        generation: ForkGenerationV1,
+    ) -> Result<ClassifiedTickAuthorityV1<'_>, ClassifiedProvenanceErrorV1> {
+        assert_eq!(generation.fork, fork, "the resolver serves the Fork");
+        self.calls.push(generation);
+        if self.calls.len() >= self.refuse_from {
+            Err(ClassifiedProvenanceErrorV1::Unauthenticated)
+        } else {
+            Ok(self.authority.lend(self.permit))
+        }
+    }
+}
+
+/// Refuses every call as `Unauthenticated`, and counts the calls.
+#[derive(Default)]
+struct Counting {
+    calls: usize,
+}
+
+impl CounterfactualClassifiedSourceResolverV1 for Counting {
+    fn authority_for(
+        &mut self,
+        _fork: TimelineId,
+        _generation: ForkGenerationV1,
+    ) -> Result<ClassifiedTickAuthorityV1<'_>, ClassifiedProvenanceErrorV1> {
+        self.calls += 1;
+        Err(ClassifiedProvenanceErrorV1::Unauthenticated)
+    }
+}
+
+/// An admitted generation 1 in a store with a live Fork admission authority.
+struct ClassifiedSetup<B> {
+    setup: Setup<B>,
+    authority: classified::Authority,
+    /// The host-internal permit of the store's classified Fork.
+    permit: ForkAppendSourcePermitV1,
+    /// A permit of the classified Fork's external route.
+    external: ForkAppendSourcePermitV1,
+    /// The Fork the generation was admitted on.
+    fork: TimelineId,
+}
+
+/// A store with a live Fork admission authority and one classified Fork,
+/// admitted at the cut of a parent whose recorded prefix ends Tick
+/// `PARENT_CUT_TICK` there, with generation 1 admitted on that Fork, declared
+/// `ClassifiedAdmission`; or, with `generic_fork`, on an ordinary Fork at the
+/// same cut, declared `Generic`.
+fn setup_classified<B: ClassifiedBackend>(generic_fork: bool) -> TestResult<ClassifiedSetup<B>> {
+    let mut store = B::open()?;
+    let mut authority = classified::Authority::open(store.host())?;
+    let classified_fork = authority.admit(store.host(), 0xb1)?;
+    let (root, cut) = store
+        .get_timeline(classified_fork)?
+        .and_then(|timeline| timeline.meta.fork_point)
+        .ok_or("an admitted Fork has a parent cut")?;
+    assert_eq!(cut, Seq::from_u64(CUT_SEQ), "cut where the plan cuts");
+    store.seed_prefix(root, &boundary_prefix()?)?;
+    let permit = authority.host_permit(store.host(), classified_fork)?;
+    let external = authority.external_permit(store.host(), classified_fork)?;
+    let (fork, declared) = if generic_fork {
+        let generic = store.fork(root, cut, "generic")?.id();
+        (generic, CounterfactualForkAppendAuthorityV1::Generic)
+    } else {
+        let admission = CounterfactualForkAppendAuthorityV1::ClassifiedAdmission;
+        (classified_fork, admission)
+    };
+    let Seeded {
+        plan,
+        profile,
+        snapshot,
+        claim,
+        facts,
+        mut source,
+    } = seed_fork(&mut store, |_| {}, root, fork)?;
+    let mut stager = DeclaringStager::new(&source, Stager::default())?;
+    let mut coordinator = CounterfactualCoordinatorV1::new(store);
+    let receipt = {
+        let mut lender = Lender::new(&authority, &permit);
+        let receipt = coordinator.admit(
+            &CounterfactualAdmissionRequestV1 {
+                fork,
+                fork_append_authority: declared,
+                ..admission_request(&plan, &profile, &snapshot, &claim)
+            },
+            &Authority,
+            &mut source,
+            &mut stager,
+            &mut lender,
+        )?;
+        let lends = usize::from(!generic_fork);
+        assert_eq!(lender.calls.len(), lends, "only classified commits lend");
+        receipt
+    };
+    let setup = Setup {
+        coordinator,
+        source,
+        fixture: Fixture {
+            plan,
+            profile,
+            snapshot,
+            claim,
+            facts,
+            receipt,
+        },
+        declared: stager.declarations,
+    };
+    Ok(ClassifiedSetup {
+        setup,
+        authority,
+        permit,
+        external,
+        fork,
+    })
+}
+
+/// Recompute the suffix declared `ClassifiedAdmission` with `stager`, each
+/// Tick declaring its base record, and `resolver`.
+fn run_classified<B: RecordingBackend>(
+    setup: &mut Setup<B>,
+    stager: &mut Stager,
+    resolver: &mut impl CounterfactualClassifiedSourceResolverV1,
+) -> Suffix {
+    let mut declaring = DeclaringStager {
+        inner: std::mem::take(stager),
+        declarations: setup.declared.clone(),
+        tamper: None,
+    };
+    let request = CounterfactualSuffixRequestV1 {
+        fork_append_authority: CounterfactualForkAppendAuthorityV1::ClassifiedAdmission,
+        ..suffix_request(&setup.fixture)
+    };
+    let result = setup
+        .coordinator
+        .recompute_suffix(&request, &mut declaring, resolver);
+    *stager = declaring.inner;
+    result
+}
+
+/// The Logical Head of the world's Fork.
+fn classified_head<B: Backend>(world: &ClassifiedSetup<B>) -> TestResult<u64> {
+    let store = world.setup.coordinator.store();
+    Ok(store.logical_head(world.fork)?.as_u64())
+}
+
+/// The documented `FOP1` operation IDs of the first `count` Events of the
+/// Tick `tick` committed in `generation` under `plan`.
+fn operation_ids(
+    generation: ForkGenerationV1,
+    tick: u64,
+    plan: &CounterfactualPlanV1,
+    count: u32,
+) -> Vec<Hash> {
+    let mut input = b"pigloros/counterfactual-tick-operation/v1".to_vec();
+    input.extend_from_slice(&generation.fork.inner().to_bytes());
+    input.extend_from_slice(&generation.generation.to_be_bytes());
+    input.extend_from_slice(&tick.to_be_bytes());
+    input.extend_from_slice(&plan.plan_digest);
+    let base = blake3::hash(&input);
+    (0..count)
+        .map(|index| {
+            let mut id = b"pigloros/counterfactual-tick-operation-index/v1".to_vec();
+            id.extend_from_slice(base.as_bytes());
+            id.extend_from_slice(&index.to_be_bytes());
+            Hash::from_bytes(*blake3::hash(&id).as_bytes())
+        })
+        .collect()
+}
+
+/// The operation IDs of every Event of the generation through `last`: two
+/// Events on the first Tick, two and the checkpoint Event on every later one.
+fn suffix_operation_ids(fixture: &Fixture, last: u64) -> Vec<Hash> {
+    let generation = fixture.receipt.generation();
+    (FRONTIER_TICK..=last)
+        .flat_map(|tick| {
+            let events = if tick == FRONTIER_TICK { 2 } else { 3 };
+            operation_ids(generation, tick, &fixture.plan, events)
+        })
+        .collect()
+}
+
+/// Assert the Fork's Events carry exactly host-internal `FOP1` rows under
+/// `expected` operation IDs, in Timeline Order.
+fn assert_classified_provenance(
+    store: &impl ForkEventProvenanceAuthorityPortV1,
+    fork: TimelineId,
+    expected: &[Hash],
+) -> TestResult {
+    let suffix = store.read_fork_event_suffix(fork, 0)?;
+    for (_, intervention, operation) in &suffix {
+        let source = &operation.input().source;
+        assert!(intervention.is_none(), "a host-internal Event has no FIA1");
+        assert!(
+            *source == ForkAppendSourceIdentityV1::HostInternal,
+            "every coordinator Event is host-internal"
+        );
+    }
+    let operations: Vec<Hash> = suffix
+        .iter()
+        .map(|(_, _, operation)| operation.input().operation_id)
+        .collect();
+    assert_eq!(operations, expected, "the derived operation IDs");
+    Ok(())
+}
+
+fn classified_suffix_commits_with_provenance<B: ClassifiedBackend>() -> TestResult {
+    let mut world = setup_classified::<B>(false)?;
+    let mut lender = Lender::new(&world.authority, &world.permit);
+    let mut stager = Stager::default();
+    let run = run_classified(&mut world.setup, &mut stager, &mut lender)?;
+    assert_eq!(run.failure, None);
+    let later: Vec<u64> = (FRONTIER_TICK + 1..=HORIZON_TICK).collect();
+    assert_eq!(stager.ticks(), later);
+    // One lend per appended Tick, under the admitted generation.
+    let generation = world.setup.fixture.receipt.generation();
+    assert_eq!(lender.calls, vec![generation; later.len()]);
+    let fixture = &world.setup.fixture;
+    assert_eq!(
+        decoded_checkpoints(&run)?,
+        expected_checkpoints(fixture, HORIZON_TICK)?
+    );
+    assert_eq!(classified_head(&world)?, committed_head(HORIZON_TICK));
+    // Every Event, each checkpoint Event included, carries its provenance.
+    let expected = suffix_operation_ids(fixture, HORIZON_TICK);
+    let store = world.setup.coordinator.store();
+    assert_classified_provenance(store.host_ref(), world.fork, &expected)
+}
+both_backends!(classified_suffix_commits_with_provenance);
+
+fn a_refused_lend_stops_the_suffix_without_a_result<B: ClassifiedBackend>() -> TestResult {
+    let mut world = setup_classified::<B>(false)?;
+    // The lend for Tick 13 is refused: Tick 12 stays committed, Tick 13
+    // commits nothing, and no `CFR1` is sealed.
+    let mut refusing = Lender::refusing_from(&world.authority, &world.permit, 2);
+    let mut stager = Stager::default();
+    assert_eq!(
+        run_classified(&mut world.setup, &mut stager, &mut refusing),
+        Err(SuffixError::ClassifiedProvenance(
+            ClassifiedProvenanceErrorV1::Unauthenticated
+        ))
+    );
+    assert_eq!(stager.ticks(), vec![12, 13]);
+    assert_eq!(classified_head(&world)?, committed_head(12));
+    // A second call with a fresh resolver recovers Tick 12 and resumes.
+    let mut fresh = Lender::new(&world.authority, &world.permit);
+    let mut stager = Stager::default();
+    let run = run_classified(&mut world.setup, &mut stager, &mut fresh)?;
+    assert_eq!(run.failure, None);
+    assert_eq!(stager.ticks(), (13..=HORIZON_TICK).collect::<Vec<_>>());
+    let fixture = &world.setup.fixture;
+    assert_eq!(
+        decoded_checkpoints(&run)?,
+        expected_checkpoints(fixture, HORIZON_TICK)?
+    );
+    let expected = suffix_operation_ids(fixture, HORIZON_TICK);
+    let store = world.setup.coordinator.store();
+    assert_classified_provenance(store.host_ref(), world.fork, &expected)
+}
+both_backends!(a_refused_lend_stops_the_suffix_without_a_result);
+
+fn a_non_internal_permit_is_an_invalid_request<B: ClassifiedBackend>() -> TestResult {
+    let mut world = setup_classified::<B>(false)?;
+    let invalid = ClassifiedProvenanceErrorV1::InvalidRequest;
+    let mut external = Lender::new(&world.authority, &world.external);
+    let mut stager = Stager::default();
+    assert_eq!(
+        run_classified(&mut world.setup, &mut stager, &mut external),
+        Err(SuffixError::ClassifiedProvenance(invalid))
+    );
+    assert_eq!(stager.ticks(), vec![FRONTIER_TICK + 1]);
+    assert_eq!(classified_head(&world)?, FIRST_TICK_HEAD);
+    // An admission under that permit commits nothing either.
+    let Setup {
+        coordinator,
+        source,
+        fixture,
+        ..
+    } = &mut world.setup;
+    let mut stager = DeclaringStager::new(source, Stager::default())?;
+    let admitted = coordinator.admit(
+        &CounterfactualAdmissionRequestV1 {
+            fork: world.fork,
+            fork_append_authority: CounterfactualForkAppendAuthorityV1::ClassifiedAdmission,
+            ..admission_request(
+                &fixture.plan,
+                &fixture.profile,
+                &fixture.snapshot,
+                &fixture.claim,
+            )
+        },
+        &Authority,
+        source,
+        &mut stager,
+        &mut external,
+    );
+    assert_eq!(
+        admitted.err(),
+        Some(AdmissionError::ClassifiedProvenance(invalid))
+    );
+    let generation = coordinator.store().current_fork_generation(world.fork)?;
+    assert_eq!(generation, fixture.receipt.generation());
+    assert_eq!(external.calls.len(), 2);
+    Ok(())
+}
+both_backends!(a_non_internal_permit_is_an_invalid_request);
+
+fn a_wrongly_declared_suffix_authority_fails_closed<B: ClassifiedBackend>() -> TestResult {
+    // Generic declared on a classified Fork: the store's reservation guard
+    // fails the Tick, which commits nothing.
+    let mut world = setup_classified::<B>(false)?;
+    let mut stager = Stager::default();
+    let failed = run(&mut world.setup, &mut stager)?;
+    assert_eq!(failed.failure, Some(Failure::AtomicCommitFailed));
+    assert_eq!(stager.ticks(), vec![FRONTIER_TICK + 1]);
+    assert_eq!(classified_head(&world)?, FIRST_TICK_HEAD);
+
+    // Classified declared on a Generic Fork, with a live session and permit.
+    let mut world = setup_classified::<B>(true)?;
+    let mut lender = Lender::new(&world.authority, &world.permit);
+    let mut stager = Stager::default();
+    assert_eq!(
+        run_classified(&mut world.setup, &mut stager, &mut lender),
+        Err(SuffixError::ClassifiedProvenance(
+            ClassifiedProvenanceErrorV1::InvalidRequest
+        ))
+    );
+    assert_eq!(lender.calls.len(), 1);
+    assert_eq!(classified_head(&world)?, FIRST_TICK_HEAD);
+    Ok(())
+}
+both_backends!(a_wrongly_declared_suffix_authority_fails_closed);
+
+fn generic_forks_never_ask_the_resolver<B: RecordingBackend>() -> TestResult {
+    // A bare store: no Fork admission session exists.
+    let mut setup = prepare::<B>()?;
+    let mut resolver = Counting::default();
+    let Setup {
+        coordinator,
+        source,
+        fixture,
+        ..
+    } = &mut setup;
+    let mut stager = DeclaringStager::new(source, Stager::default())?;
+    fixture.receipt = coordinator.admit(
+        &admission_request(
+            &fixture.plan,
+            &fixture.profile,
+            &fixture.snapshot,
+            &fixture.claim,
+        ),
+        &Authority,
+        source,
+        &mut stager,
+        &mut resolver,
+    )?;
+    let request = suffix_request(fixture);
+    let run = coordinator.recompute_suffix(&request, &mut stager, &mut resolver)?;
+    assert_eq!(run.failure, None);
+    assert_eq!(fixture.receipt.generation().generation, 2);
+    assert_eq!(resolver.calls, 0, "a Generic Fork never asks the resolver");
+    Ok(())
+}
+both_backends!(generic_forks_never_ask_the_resolver);
+
+fn unknown_classified_outcomes_resolve_from_the_basis<B: ClassifiedBackend>() -> TestResult {
+    // Tick 13 committed but reported an unknown outcome: no result is
+    // sealed, and the next call, with a fresh resolver, recovers it.
+    let ClassifiedSetup {
+        setup,
+        authority,
+        permit,
+        fork,
+        ..
+    } = setup_classified::<Faulty<B>>(false)?;
+    let mut setup = configure(setup, StoreFault::None, Interference::LandedUnknown(2))?;
+    let mut lender = Lender::new(&authority, &permit);
+    let mut stager = Stager::default();
+    assert_eq!(
+        run_classified(&mut setup, &mut stager, &mut lender),
+        Err(SuffixError::TickOutcomeUnknown)
+    );
+    assert_eq!(stager.ticks(), vec![12, 13]);
+    let store = setup.coordinator.store();
+    assert_eq!(store.logical_head(fork)?.as_u64(), committed_head(13));
+    let mut fresh = Lender::new(&authority, &permit);
+    let mut stager = Stager::default();
+    let run = run_classified(&mut setup, &mut stager, &mut fresh)?;
+    assert_eq!(run.failure, None);
+    assert_eq!(stager.ticks(), (14..=HORIZON_TICK).collect::<Vec<_>>());
+    let expected = suffix_operation_ids(&setup.fixture, HORIZON_TICK);
+    assert_classified_provenance(setup.coordinator.store().host_ref(), fork, &expected)?;
+
+    // Tick 13 did not commit and the basis proves it: a retryable failure.
+    let ClassifiedSetup {
+        setup,
+        authority,
+        permit,
+        fork,
+        ..
+    } = setup_classified::<Faulty<B>>(false)?;
+    let mut setup = configure(setup, StoreFault::None, Interference::LostUnknown(2))?;
+    let mut lender = Lender::new(&authority, &permit);
+    let failed = run_classified(&mut setup, &mut Stager::default(), &mut lender)?;
+    assert_eq!(failed.failure, Some(Failure::AtomicCommitFailed));
+    let store = setup.coordinator.store();
+    assert_eq!(store.logical_head(fork)?.as_u64(), committed_head(12));
+    let run = run_classified(&mut setup, &mut Stager::default(), &mut lender)?;
+    assert_eq!(run.failure, None);
+    Ok(())
+}
+both_backends!(unknown_classified_outcomes_resolve_from_the_basis);
+
 #[test]
 fn every_error_has_a_distinct_safe_message() {
     let errors = [
@@ -2907,12 +3476,13 @@ fn every_error_has_a_distinct_safe_message() {
         SuffixError::TickOutcomeUnknown,
         SuffixError::CommittedHeadMismatch,
         SuffixError::ParentCutNotFound,
+        SuffixError::ClassifiedProvenance(ClassifiedProvenanceErrorV1::InvalidRequest),
     ];
     let messages: std::collections::BTreeSet<String> =
         errors.iter().map(ToString::to_string).collect();
     assert_eq!(messages.len(), errors.len());
     assert!(messages.iter().all(|message| !message.is_empty()));
-    let with_source = [0, 6];
+    let with_source = [0, 6, 11];
     for (position, error) in errors.iter().enumerate() {
         assert_eq!(error.source().is_some(), with_source.contains(&position));
     }
