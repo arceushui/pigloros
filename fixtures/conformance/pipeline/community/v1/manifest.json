@@ -15,17 +15,17 @@
     {
       "id": "COMMUNITY-RESERVED-PROPOSAL",
       "reason": "The real community guests emit only prototype.driven, so a community Driver's proposal of a reserved host Event type needs a new guest Component; this profile proves only the first-party refusal of that proposal and the refused reserved-type claim of either isolation class",
-      "owner": "#636"
+      "owner": "#637"
     },
     {
       "id": "INVALID-GUEST-OUTPUT",
       "reason": "The real community guests always return well-formed output, so a community Driver's invalid guest output (InvalidGuestOutput) needs a new guest Component, and an ABI- or manifest-invalid release needs a malformed release fixture; this profile proves only the invalid pin, registration and denied-capability release refusals of either isolation class and, through PCF-CPH-003, the first-party invalid-draft refusals",
-      "owner": "#636"
+      "owner": "#637"
     },
     {
       "id": "OTHER-RESOURCE-LIMITS",
       "reason": "PCF-CPH-010 exhausts a community release through its memory budget only; the signed-release test world fixes the fuel, host-call and output budgets of a release, and the real guests make one host call and emit one small Event, so the fuel, host-call and output limits of a community Driver on the real worker need a release shape with those budgets or a new guest Component",
-      "owner": "#636"
+      "owner": "#637"
     },
     {
       "id": "REPLAY-AND-RECOVERY",
@@ -456,7 +456,7 @@
     },
     {
       "id": "PCF-CPH-010",
-      "title": "An over-budget Plugin of either isolation class, a community release whose memory budget the real guest exceeds on the worker or a first-party Driver that stages more drafts than the host Tick draft budget leaves, fails the whole scheduled pass with a typed refusal, discards the other class's staged output, quarantines only the exhausted community Plugin until an in-budget release replaces it, and the next pass within budget commits",
+      "title": "An over-budget Plugin of either isolation class, a community release whose memory budget the real guest exceeds on the worker or a first-party Driver that stages more drafts than the host Tick draft budget leaves, fails the whole scheduled pass with a typed refusal, discards the other class's staged output, quarantines only the exhausted community Plugin, whose release stays exhausted once the quarantine is cleared, and the next pass within budget commits, for the community path in a fresh lane over an in-budget successor release",
       "sources": [
         "#489",
         "#634",

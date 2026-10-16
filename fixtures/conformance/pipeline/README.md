@@ -89,7 +89,7 @@ A community release whose memory budget (one page) the real guest exceeds ends
 every launch `MemoryLimitExceeded` and is quarantined `ResourceExhausted`
 (recorded but not compared); the budget belongs to the release, so the Plugin
 is exhausted again after the host clears the quarantine, and the pass within
-budget runs a Driver built from an in-budget successor release. A first-party
+budget runs, in a fresh lane, a Driver built from an in-budget successor release. A first-party
 Driver that stages more drafts than the registry's host Tick draft budget
 leaves fails the pass `ResourceExhausted` and quarantines nothing. The fuel,
 host-call and output limits of a community Driver are not exercised on the

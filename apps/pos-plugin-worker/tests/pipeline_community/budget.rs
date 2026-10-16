@@ -116,8 +116,9 @@ fn commits_both(pass: &Pass) -> bool {
 /// sibling staged, and a first-party Driver that stages more drafts than the host Tick draft
 /// budget leaves, after the community sibling staged, each fail the pass with a typed refusal:
 /// nothing is committed, the sibling's staged output is discarded and the sibling stays
-/// available. Only the community Plugin is quarantined, and it stays exhausted until an
-/// in-budget release replaces it. The next pass within budget commits both Events.
+/// available. Only the community Plugin is quarantined, and its release stays exhausted once
+/// the quarantine is cleared. A fresh lane over an in-budget successor release, and the
+/// first-party lane within budget, each commit both Events in the next pass.
 #[must_use]
 pub fn over_budget_parity() -> Capture {
     over_budget().test_ok()
@@ -135,7 +136,11 @@ fn over_budget() -> BoxResult<Capture> {
     let first_party = first_party_over(&signed, entries)?;
     let mut capture = Capture::default();
     record_pass(&mut capture, "community-exhausted", &community.failed);
-    record_pass(&mut capture, "community-quarantined", &community.quarantined);
+    record_pass(
+        &mut capture,
+        "community-quarantined",
+        &community.quarantined,
+    );
     record_pass(&mut capture, "community-cleared", &community.again);
     capture.record(STORE, "community.community-receipts", &community.receipts);
     record(&mut capture, "community-successor", &successor.observed);
