@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: a1c038a2688ba051b3e00421492e7cb45b7b6f9c
+          ref: 172c588b6c1efbcc9fa587301b763e861c55a12e
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -31,7 +31,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           git rev-parse HEAD | tee artifacts/source-sha.txt
-          test "$(git rev-parse HEAD)" = a1c038a2688ba051b3e00421492e7cb45b7b6f9c
+          test "$(git rev-parse HEAD)" = 172c588b6c1efbcc9fa587301b763e861c55a12e
           rustc -Vv | tee artifacts/rustc.txt
       - name: Exercise the real inter-statement SQLite writer
         run: |
