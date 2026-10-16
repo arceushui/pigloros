@@ -127,6 +127,38 @@ tower = { version = "0.5", features = ["util"] }
 lto = true
 codegen-units = 1
 
+# Signature and digest verification dominates test CPU time: at opt-level 0
+# every curve25519-dalek SIMD intrinsic is a function call. Optimizing only
+# these dependencies made the workspace suite about 3x faster on CI with no
+# cold-build cost (#649). Workspace crates stay unoptimized for coverage and
+# debugging; the test profile inherits these overrides.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.blake3]
+opt-level = 3
+
+[profile.dev.package.p256]
+opt-level = 3
+
+[profile.dev.package.ecdsa]
+opt-level = 3
+
+[profile.dev.package.elliptic-curve]
+opt-level = 3
+
+[profile.dev.package.primeorder]
+opt-level = 3
+
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 warnings = { level = "deny", priority = -2 }

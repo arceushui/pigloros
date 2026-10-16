@@ -234,8 +234,8 @@ jobs:
           --test plugin_trust_registry_memory_public
           --test plugin_trust_registry_memory_policy_public
           --test plugin_trust_registry_memory_evaluation_public --locked
-      - name: cargo check (all features, all targets)
-        run: cargo check --workspace --all-targets --all-features --locked
+      # The all-features, all-targets type check is the clippy job's
+      # `cargo clippy --workspace --all-features --all-targets`.
       - name: Prove reference evaluator implementation independence
         run: bash scripts/check-reference-evaluator-independence.sh
       - name: Prove the conformance adapter dependency graph
@@ -529,9 +529,6 @@ jobs:
     timeout-minutes: 45
     env:
       RUSTC_BOOTSTRAP: "1"
-      # Keep instrumentation bounded on the hosted runner; local runs may use
-      # substantially more memory when compiling the Bevy workspace.
-      CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
