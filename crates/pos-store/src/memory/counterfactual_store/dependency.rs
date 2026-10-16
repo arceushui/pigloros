@@ -568,7 +568,7 @@ impl MemoryStore {
     /// Admit the first record, commit the invalidation with the caller's
     /// staging `step`, and record the rows under the new generation only if it
     /// committed.
-    fn commit_recorded<E: From<StoreError>>(
+    pub(super) fn commit_recorded<E: From<StoreError>>(
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
         record: &TickDependencyRecordV1,
@@ -584,7 +584,7 @@ impl MemoryStore {
 
     /// Recheck the basis, admit the record, append the Tick with the caller's
     /// staging `step`, and record the rows only after it installed.
-    fn append_recorded<E: From<StoreError>>(
+    pub(super) fn append_recorded<E: From<StoreError>>(
         &mut self,
         fork: TimelineId,
         expected: &CounterfactualBasisV1,
@@ -1011,17 +1011,23 @@ impl MemoryStore {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use pos_core::counterfactual_store::test_fixtures::{hash_field, text_field, uint};
     use pos_core::{
-        CounterfactualStorePortV1, DependencyNodeCoordinateV1, EventStore,
-        ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionOriginV1, OwnerIdV1,
-        RecordedDependencyClassV1, RecordedNodeOriginV1, Seq, MAX_RECORDED_DEPENDENCY_EDGES_V1,
-        MAX_RECORDED_DEPENDENCY_NODES_V1,
+        CounterfactualStorePortV1, DependencyNodeCoordinateV1, ErasureContainmentGateV1,
+        EventStore, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionOriginV1,
+        OwnerIdV1, RecordedDependencyClassV1, RecordedNodeOriginV1, Seq,
+        MAX_RECORDED_DEPENDENCY_EDGES_V1, MAX_RECORDED_DEPENDENCY_NODES_V1,
     };
 
     use super::super::tests::{command, draft, facts, inject, ok, published_store, snapshot};
     use super::super::InjectedFaultV1;
     use super::*;
+    use crate::classified_fork_fixture::{
+        hash as classified_hash, node_record, Authority, Fallible, Spec, FIRST_TICK,
+    };
+    use crate::{ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1};
 
     type NodeRow = DependencyNodeRecordV1;
     type EdgeRow = DependencyEdgeRecordV1;
@@ -1606,5 +1612,40 @@ mod tests {
         let root = parent_of(&store, fork);
         ok(store.seed_factual_prefix(root, &[seeded_tick("p", 40)]));
         ok(store.seed_factual_prefix(root, &[seeded_tick("q", 40)]));
+    }
+
+    /// The classified Tick append composes this module's record checks, so its
+    /// set capacity is checked against the stored counts, as `SQLite` checks
+    /// it against its stored record rows.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn a_classified_later_record_must_fit_the_stored_set_counts() -> Fallible<()> {
+        let mut store = MemoryStore::new();
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let authority = Authority::open(&mut store)?;
+        let fork = authority.admit(&mut store, 0xb1)?;
+        let permit = authority.host_permit(&store, fork)?;
+        let lent = authority.lend(&permit);
+        let command = Spec::new(fork).command()?;
+        let first = node_record(FIRST_TICK, "a", 1)?;
+        let base = classified_hash(0x61);
+        let committed =
+            store.commit_classified_counterfactual_invalidation(&command, &first, &lent, base)?;
+        assert!(
+            matches!(committed, CounterfactualInvalidationOutcomeV1::Committed(_)),
+            "the invalidation commits: {committed:?}"
+        );
+        // The set is full, so the next one-node record is over the bound.
+        dependency_set(&mut store, fork).counts.nodes = MAX_RECORDED_DEPENDENCY_NODES_V1;
+        let full = snapshot(&store, fork);
+        let basis = store.current_counterfactual_basis(fork)?;
+        let batch = PipelineDraftBatchV1::try_new(vec![draft(20)])?;
+        let tick = node_record(18, "b", 2)?;
+        let appended =
+            store.append_classified_counterfactual_tick(fork, &basis, &batch, &tick, &lent, base);
+        let over = ClassifiedCounterfactualErrorV1::Store(StoreError::FieldOutOfBounds);
+        assert_eq!(appended, Err(over), "the record crosses the node bound");
+        assert_eq!(snapshot(&store, fork), full, "nothing was installed");
+        Ok(())
     }
 }

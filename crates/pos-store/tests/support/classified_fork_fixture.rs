@@ -4,9 +4,9 @@
 //! permit issuer. [`Authority::admit`] creates a factual parent with two
 //! Events, admits a local ("classified") Fork at its head, registers the
 //! fixture classifier, and publishes the Fork's counterfactual facts. [`Spec`]
-//! builds the invalidation command of such a Fork. The public `SQLite` tests
-//! and the adapter unit tests include this one file; the items are public so
-//! that no test crate sees them as unused.
+//! builds the invalidation command of such a Fork. The public Memory and
+//! `SQLite` tests and the adapter unit tests include this one file; the items
+//! are public so that no test crate sees them as unused.
 
 use std::error::Error;
 
