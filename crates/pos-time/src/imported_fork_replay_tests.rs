@@ -495,6 +495,53 @@ fn compare_on_host(
 }
 
 #[test]
+fn compare_saved_native_evidence_mismatch_refuses_and_releases_both_arms() -> Fallible<()> {
+    let mut world = World::new(Shape::Mixed, false)?;
+    world.add_child(Shape::EmptyUnclassified)?;
+    let mut memory = MemoryStore::new();
+    let requirements = populate_pair(&mut memory, &world)?;
+    assert_ne!(requirements[0], requirements[1]);
+    let verifier = Arc::new(ImportedVerifier {
+        child: requirements[0].child_timeline_id(),
+        parent: world.root,
+        requirement: requirements[0],
+        secondary: Some((requirements[1].child_timeline_id(), requirements[1])),
+        fault: Fault::None,
+        fault_target: None,
+        limits_override: None,
+        admissions: AtomicUsize::new(0),
+    });
+    let composition =
+        ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier);
+    let mut host = ErasureExecutionHostV1::recover_memory_fixture_with_authority(
+        memory,
+        &composition,
+        ErasureRecoveryLimitsV1::compiled_maximum(),
+    )?;
+    let generation = Hash::from_bytes(host.containment_gate().inventory_generation()?.digest());
+    let closures = requirements
+        .map(|requirement| {
+            WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+                requirement.child_timeline_id(),
+                generation,
+            )
+        })
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    for changed_arm in [0, 1] {
+        crate::compare::tests::assert_saved_native_evidence_refused(
+            &mut host.read_sender()?,
+            requirements,
+            [&closures[0], &closures[1]],
+            changed_arm,
+        )?;
+        assert_eq!(host.status(), pos_runtime::ErasureHostStatusV1::Ready);
+    }
+    // The real public operation must still succeed after both rollback paths.
+    compare_on_host(host, requirements, Fault::None)
+}
+
+#[test]
 fn compare_checks_both_imported_arms_before_folding_and_after_both_folds() -> Fallible<()> {
     for (fault, fault_arm) in [
         Fault::None,
