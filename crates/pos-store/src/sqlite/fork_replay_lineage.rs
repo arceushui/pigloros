@@ -680,6 +680,61 @@ mod tests {
     }
 
     #[test]
+    fn original_epoch_covers_the_complete_geographic_visibility_scan() -> Fallible<()> {
+        let (store, root, _) = fixture()?;
+        // The ordinary eight-byte kind requires the same funded native String
+        // read and comparison as a geographic candidate, but must stay visible.
+        for regression in [false, true] {
+            let initial = if regression {
+                Duration::from_micros(1)
+            } else {
+                Duration::ZERO
+            };
+            let later = if regression {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(2)
+            };
+            let mut failures = 0;
+            let mut completed = false;
+            // Check each clock boundary through the first complete success;
+            // the ceiling prevents an accidental unbounded fixture loop.
+            for marks in 2..=512 {
+                let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                    std::iter::repeat_n(initial, marks).chain([later]),
+                );
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                let interval = store.begin_protected_effect_interval()?;
+                let result = store.read_fork_replay_lineage_node(root, 0, 8, &mut budget);
+                store.finish_protected_effect_interval(
+                    interval,
+                    ErasureProtectedEffectDispositionV1::Rollback,
+                )?;
+                assert!(store.conn.is_autocommit());
+                match result {
+                    Err(Error::Read(ReadError::BoundsExceeded)) => {
+                        failures += 1;
+                        assert_eq!(budget.check_time(), Err(ReadError::BoundsExceeded));
+                    }
+                    Ok(Some(node)) => {
+                        assert_eq!(node.timeline_id(), &root);
+                        completed = true;
+                        break;
+                    }
+                    result => {
+                        return Err(format!("unexpected visibility result: {result:?}").into())
+                    }
+                }
+            }
+            assert!(failures > 0);
+            assert!(completed);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn original_epoch_expiry_takes_precedence_over_native_storage_faults() -> Fallible<()> {
         let (store, _, child) = fixture()?;
         store.conn.execute_batch("DROP TABLE geographic_presence")?;
