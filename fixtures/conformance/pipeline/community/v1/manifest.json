@@ -31,7 +31,7 @@
     {
       "id": "SQLITE-STORE",
       "reason": "The community pass world runs on MemoryStore only, so this profile proves no SQLite parity of the community path",
-      "owner": "#489"
+      "owner": "#638"
     }
   ],
   "cases": [

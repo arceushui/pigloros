@@ -26,9 +26,10 @@ new version directory, not an edit; rollback selects an older directory.
 - `exclusions` names requirements this profile does not prove yet, with the
   owner of the missing implementation or contract.
 - Community Plugin-host parity is not a `PPC1` exclusion. The sibling profile
-  `PCH1` below proves it (#489, #636). The `COMMUNITY-PLUGIN-HOST` exclusion
-  was removed from `v1` in place: removing an exclusion changes no expected
-  result.
+  `PCH1` below proves it (#489, #636), and what it cannot prove yet (some
+  invalid-Plugin and resource-limit shapes, SQLite) is recorded as `PCH1`
+  exclusions. The `COMMUNITY-PLUGIN-HOST` exclusion was removed from `v1` in
+  place: removing an exclusion changes no expected result.
 
 The runner fails closed on an unknown magic, version or field, a mandatory
 case without a runner, a runner without a case, a missing or unexpected
@@ -118,9 +119,9 @@ compared).
 
 The community pass world runs on `MemoryStore` only, so every case names the
 `memory` store, and the `SQLITE-STORE` exclusion records that this profile
-proves no SQLite parity of the community path. The other exclusions name what
-the real guests and release fixtures cannot yet exercise, with the ticket that
-owns it (#637).
+proves no SQLite parity of the community path (owned by #638). The other
+exclusions name what the real guests and release fixtures cannot yet exercise
+(owned by #637).
 
 Every `PCH1` case (`PCF-CPH-001` to `PCF-CPH-012`) is mandatory and applicable
 and has exactly one runner, in manifest order; the runner asserts that none is
