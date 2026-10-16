@@ -383,6 +383,27 @@ impl PluginPinV1 {
     }
 }
 
+/// The pin of a community Plugin (ADR-061 revision 8 decision 2): kind `Plugin`, isolation
+/// `GovernedCommunity`, and the given configuration digest and role set.
+///
+/// The production twin of the supervisor's test pin: the conformance adapter registers a
+/// community Driver under it.
+///
+/// # Errors
+/// Returns the closed metadata error of [`PluginPinV1::try_new`] for a zero digest, an empty
+/// role set, an empty role or a duplicate role.
+pub fn community_pin_v1(
+    configuration_digest: Hash,
+    roles: Vec<String>,
+) -> Result<PluginPinV1, PluginCompositionErrorV1> {
+    PluginPinV1::try_new(
+        DomainImplementationKindV1::Plugin,
+        PluginIsolationV1::GovernedCommunity,
+        configuration_digest,
+        roles,
+    )
+}
+
 /// Host registration state for one exact implementation pin.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PluginRegistrationV1 {
@@ -604,3 +625,7 @@ pub struct PluginComposition {
     /// Effective schemas in lexical event-type order.
     pub schemas: Vec<RegisteredEventSchema>,
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;

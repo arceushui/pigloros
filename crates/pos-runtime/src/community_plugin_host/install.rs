@@ -102,7 +102,7 @@ const WRONG_ADDRESS: CommunityInstallErrorV1 =
 pub fn install_community_release_v1(
     source: &impl ReleaseSourceV1,
     address: &BundleAddressV1,
-    registry: &mut impl PluginTrustPolicyRegistryV1,
+    registry: &mut (impl PluginTrustPolicyRegistryV1 + ?Sized),
     wall: &mut impl PluginTrustWallSourceV1,
     request: &CommunityInstallRequestV1<'_>,
 ) -> Result<InstalledPluginReleaseV1, CommunityInstallErrorV1> {

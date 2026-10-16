@@ -24,6 +24,8 @@ mod negotiation;
 mod profile;
 #[cfg(target_os = "linux")]
 mod trust_bytes;
+#[cfg(all(target_os = "linux", feature = "local-admission-host"))]
+mod world;
 
 pub use contract::{
     plugin_output_digest_v1, ArtifactRefV1, EventDraftV1, FieldRefV1, GuestPluginErrorV1,
@@ -39,11 +41,12 @@ pub use error::{
 pub use failure::{classify_pass_failure, quarantine_for, PassFailureV1};
 #[cfg(target_os = "linux")]
 pub use gate::{
-    gate_community_release_v1, host_error_for_registry_v1, host_error_for_release_signature_v1,
-    host_error_for_release_source_v1, host_error_for_trust_authorization_v1,
-    host_error_for_trust_verification_v1, CommunityPassAuthorizationV1, CommunityPassV1,
-    CommunityPluginExpectationV1, CommunityPluginTrustMaterialV1, GatedCommunityReleaseV1,
-    PluginTrustMaterialSourceV1, PluginTrustMaterialUnavailableV1, ReleaseIdentityV1,
+    gate_community_release_v1, gate_for_driver, host_error_for_registry_v1,
+    host_error_for_release_signature_v1, host_error_for_release_source_v1,
+    host_error_for_trust_authorization_v1, host_error_for_trust_verification_v1,
+    CommunityPassAuthorizationV1, CommunityPassV1, CommunityPluginExpectationV1,
+    CommunityPluginTrustMaterialV1, GatedCommunityReleaseV1, PluginTrustMaterialSourceV1,
+    PluginTrustMaterialUnavailableV1, ReleaseIdentityV1,
 };
 #[cfg(target_os = "linux")]
 pub use host::{
@@ -72,3 +75,5 @@ pub use profile::{
 pub use trust_bytes::{
     CommunityTrustAnchorBytesV1, CommunityTrustBytesErrorV1, FixedTrustMaterialSourceV1,
 };
+#[cfg(all(target_os = "linux", feature = "local-admission-host"))]
+pub use world::CommunityEvaluationWorldV1;
