@@ -643,6 +643,9 @@ fn reservation_verifier(
     requirements: [ForkReplayRequirementV1; 2],
     call: ConsumerCall,
 ) -> Fallible<(Arc<ReservationVerifier>, KeyRegistryStateV1)> {
+    // The owner joins each probe before releasing its reservation, so waiting
+    // for that reservation cannot make progress. Still attempt the real write.
+    writer.use_nonblocking_writer_for_test()?;
     let before = writer.load_key_registry()?.ok_or("persisted registry")?;
     let identity = world.anchors.first().ok_or("timeline key")?.0;
     let material = before
