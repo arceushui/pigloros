@@ -15,7 +15,10 @@ per-PR writes held 10.7 GB against the 10 GB limit, so LRU eviction removed
 `assert_pull_requests_never_write_caches` in the policy test keeps every
 `ci.yml`, fuzz, ThreadSanitizer and benchmark cache write on `main`. Only the
 pull-request-only mutation and sim1 proof-risk workflows still write from pull
-requests, each under its own key, because neither runs on `main`. The
+requests, each under its own key, because neither runs on `main`. Each writes
+one entry per qualifying pull request: about 140 MB for mutation (Rust-relevant
+pull requests) and 220 MB for the path-filtered sim1 check (sizes measured
+2026-10-16). The
 `workflow_dispatch` deploy workflow writes its Docker cache from whichever ref
 an operator dispatches, normally `main`.
 

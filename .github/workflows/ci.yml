@@ -205,8 +205,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # Line tables keep panic locations and backtraces while cutting link
-      # time and the cached target size.
+      # Same debuginfo level as coverage and ASan. Line tables keep panic
+      # locations and backtraces while cutting link time and the cached
+      # target size.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
@@ -566,6 +567,8 @@ jobs:
       # production diff before spending time on the repository-wide floor.
       # nextest runs every test executable in parallel instead of one at a
       # time; each test process writes its own profile, merged by llvm-cov.
+      # The test job runs the same nextest flags and asserts that no test was
+      # ignored or skipped, so this run needs no separate summary check.
       - name: Generate coverage report for changed-code gate
         run: >
           cargo llvm-cov nextest --workspace --all-features --locked

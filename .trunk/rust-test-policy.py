@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Trunk custom linter: coverage(off) only on test code; no ```ignore doctest fences.
 
-`#[ignore]` is not banned here — CI runs `cargo test -- --include-ignored`, which
-still executes ignored tests. This linter covers attributes CI does not rewrite.
+`#[ignore]` is not banned here — CI runs `cargo nextest run --run-ignored all`
+(doctests: `cargo test --doc -- --include-ignored`), which still executes
+ignored tests. This linter covers attributes CI does not rewrite.
 
 Prints Trunk regex diagnostics:
   path:line:col: [error] message (code)

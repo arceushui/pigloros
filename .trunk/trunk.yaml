@@ -17,7 +17,7 @@ lint:
     - name: rustfmt
       run_timeout: 20m
     # Custom policy: coverage(off) test-only; no ```ignore doctest fences.
-    # #[ignore] is left to cargo test -- --include-ignored (CI still runs them).
+    # #[ignore] is left to nextest --run-ignored all (CI still runs them).
     - name: rust-test-policy
       files: [rust]
       commands:

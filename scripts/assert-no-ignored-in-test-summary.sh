@@ -13,7 +13,8 @@ fi
 status=0
 for log in "$@"; do
   # CI forces colour; strip SGR sequences so styled counts still match.
-  plain="$(sed 's/\x1b\[[0-9;]*m//g' "$log")"
+  # $'\033' keeps this portable to BSD sed, which lacks the \x escape.
+  plain="$(sed $'s/\033\\[[0-9;]*m//g' "$log")"
   if ! grep -Eq '^test result:|^ *Summary \[' <<<"$plain"; then
     echo "ERROR: $log has no libtest or nextest summary line." >&2
     status=1
