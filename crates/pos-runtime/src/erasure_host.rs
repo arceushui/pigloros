@@ -4938,12 +4938,21 @@ mod tests {
             requested_use: &WorldReplayUseV1,
             inventory_generation: ErasureReferenceV1,
         ) -> Result<VerifiedWorldReplayV1, WorldReplayVerificationErrorV1> {
+            let limits = pos_store::ForkReplayReadLimitsV1::new(
+                8,
+                1_024,
+                262_144,
+                256 * 1024 * 1024,
+                30_000_000,
+            )
+            .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)?;
             match self {
                 Self::Exact => Ok(crate::world_replay::test_verified_world_replay(
                     closure,
                     requested_use,
                     inventory_generation,
                     pos_core::ErasureReplayClaimV1::Exact,
+                    limits,
                 )),
                 Self::Reject(error) => Err(*error),
                 Self::WrongDigest => {
@@ -4954,6 +4963,7 @@ mod tests {
                         requested_use.clone(),
                         inventory_generation,
                         pos_core::ErasureReplayClaimV1::Exact,
+                        limits,
                     ))
                 }
                 Self::WrongTimeline => {
@@ -4964,6 +4974,7 @@ mod tests {
                         requested_use.clone(),
                         inventory_generation,
                         pos_core::ErasureReplayClaimV1::Exact,
+                        limits,
                     ))
                 }
                 Self::WrongSourceHead => {
@@ -4974,6 +4985,7 @@ mod tests {
                         requested_use.clone(),
                         inventory_generation,
                         pos_core::ErasureReplayClaimV1::Exact,
+                        limits,
                     ))
                 }
                 Self::WrongGeneration => {
@@ -4984,6 +4996,7 @@ mod tests {
                         requested_use.clone(),
                         reference(1),
                         pos_core::ErasureReplayClaimV1::Exact,
+                        limits,
                     ))
                 }
                 Self::WrongUse => {
@@ -5000,6 +5013,7 @@ mod tests {
                         &wrong_use,
                         inventory_generation,
                         pos_core::ErasureReplayClaimV1::Exact,
+                        limits,
                     ))
                 }
                 Self::UnboundedRead => Ok(
@@ -5010,7 +5024,10 @@ mod tests {
                         requested_use.clone(),
                         inventory_generation,
                         pos_core::ErasureReplayClaimV1::Exact,
-                        EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+                        (
+                            EventReadBounds::new(usize::MAX, usize::MAX, usize::MAX, usize::MAX),
+                            limits,
+                        ),
                     ),
                 ),
             }
@@ -5291,6 +5308,7 @@ mod tests {
             &replay_use(&closure),
             generation,
             pos_core::ErasureReplayClaimV1::Exact,
+            limits,
         );
         crate::world_replay::test_verified_world_replay_with_fork_attribution(
             verified,

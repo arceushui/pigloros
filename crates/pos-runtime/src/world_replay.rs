@@ -507,6 +507,7 @@ const fn finite_read_bounds(bounds: EventReadBounds) -> bool {
 ///
 /// This helper is unavailable from the normal dependency graph. Production
 /// code receives [`VerifiedWorldReplayV1`] only from an installed verifier.
+/// The caller supplies limits validated by [`ForkReplayReadLimitsV1::new`].
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn test_verified_world_replay(
@@ -514,6 +515,7 @@ pub fn test_verified_world_replay(
     requested_use: &WorldReplayUseV1,
     inventory_generation: ErasureReferenceV1,
     replay_claim: ErasureReplayClaimV1,
+    fork_read_limits: ForkReplayReadLimitsV1,
 ) -> VerifiedWorldReplayV1 {
     test_verified_world_replay_with_fields_and_bounds(
         closure.digest(),
@@ -522,7 +524,7 @@ pub fn test_verified_world_replay(
         requested_use.clone(),
         inventory_generation,
         replay_claim,
-        TEST_WORLD_REPLAY_READ_BOUNDS,
+        (TEST_WORLD_REPLAY_READ_BOUNDS, fork_read_limits),
     )
 }
 
@@ -530,6 +532,7 @@ pub fn test_verified_world_replay(
 ///
 /// The function is available only to the crate's tests or to a dependency
 /// that explicitly enables the `test-support` feature.
+/// The caller supplies limits validated by [`ForkReplayReadLimitsV1::new`].
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn test_verified_world_replay_with_fields(
@@ -539,6 +542,7 @@ pub fn test_verified_world_replay_with_fields(
     requested_use: WorldReplayUseV1,
     inventory_generation: ErasureReferenceV1,
     replay_claim: ErasureReplayClaimV1,
+    fork_read_limits: ForkReplayReadLimitsV1,
 ) -> VerifiedWorldReplayV1 {
     test_verified_world_replay_with_fields_and_bounds(
         closure_digest,
@@ -547,12 +551,13 @@ pub fn test_verified_world_replay_with_fields(
         requested_use,
         inventory_generation,
         replay_claim,
-        TEST_WORLD_REPLAY_READ_BOUNDS,
+        (TEST_WORLD_REPLAY_READ_BOUNDS, fork_read_limits),
     )
 }
 
 /// Construct a verifier result with explicit bindings and read bounds for
-/// downstream seam tests.
+/// downstream seam tests. The profile carries caller-validated Fork limits;
+/// Event bounds may remain deliberately invalid for rejection tests.
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn test_verified_world_replay_with_fields_and_bounds(
@@ -562,8 +567,9 @@ pub fn test_verified_world_replay_with_fields_and_bounds(
     requested_use: WorldReplayUseV1,
     inventory_generation: ErasureReferenceV1,
     replay_claim: ErasureReplayClaimV1,
-    read_bounds: EventReadBounds,
+    read_profile: (EventReadBounds, ForkReplayReadLimitsV1),
 ) -> VerifiedWorldReplayV1 {
+    let (read_bounds, fork_read_limits) = read_profile;
     VerifiedWorldReplayV1 {
         closure_digest,
         timeline_id,
@@ -576,14 +582,7 @@ pub fn test_verified_world_replay_with_fields_and_bounds(
         fork_source_profile: Some(Hash::from_bytes([0xf1; 32])),
         fork_sources: None,
         fork_requirements: Vec::new(),
-        fork_read_limits: ForkReplayReadLimitsV1::new(
-            8,
-            1_024,
-            262_144,
-            256 * 1024 * 1024,
-            30_000_000,
-        )
-        .unwrap_or_else(|error| std::panic::resume_unwind(Box::new(error))),
+        fork_read_limits,
     }
 }
 
@@ -762,6 +761,7 @@ mod tests {
     #[test]
     fn verified_result_exposes_bindings_and_requires_an_exact_claim() {
         let closure = WorldReplayClosureV1::test_fixture().test_ok();
+        let limits = ForkReplayReadLimitsV1::new(2, 7, 11, 4_096, 1_000).test_ok();
         let generation = ErasureReferenceV1::from_digest([63; 32]);
         let requested_use = WorldReplayUseV1::new(
             closure.timeline_id(),
@@ -778,6 +778,7 @@ mod tests {
             &requested_use,
             generation,
             ErasureReplayClaimV1::Exact,
+            limits,
         );
         assert_eq!(exact.closure_digest(), closure.digest());
         assert_eq!(exact.timeline_id(), closure.timeline_id());
@@ -785,6 +786,7 @@ mod tests {
         assert_eq!(exact.inventory_generation(), generation);
         assert_eq!(exact.requested_use(), &requested_use);
         assert_eq!(exact.read_bounds(), TEST_WORLD_REPLAY_READ_BOUNDS);
+        assert_eq!(exact.fork_read_limits(), limits);
         assert!(exact.has_finite_read_bounds());
         assert_eq!(exact.require_authoritative_use(), Ok(()));
 
@@ -793,7 +795,9 @@ mod tests {
             &requested_use,
             generation,
             ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+            limits,
         );
+        assert_eq!(redacted.fork_read_limits(), limits);
         assert_eq!(redacted.require_authoritative_use(), Ok(()));
 
         let structural = test_verified_world_replay_with_fields(
@@ -803,7 +807,9 @@ mod tests {
             requested_use,
             generation,
             ErasureReplayClaimV1::StructuralOnly,
+            limits,
         );
+        assert_eq!(structural.fork_read_limits(), limits);
         assert_eq!(
             structural.require_authoritative_use(),
             Err(WorldReplayVerificationErrorV1::ClaimUnavailable)
@@ -886,6 +892,7 @@ mod tests {
     #[test]
     fn optional_view_use_requires_exact_per_root_authorization() {
         let closure = WorldReplayClosureV1::test_fixture().test_ok();
+        let limits = ForkReplayReadLimitsV1::new(2, 7, 11, 4_096, 1_000).test_ok();
         let generation = ErasureReferenceV1::from_digest([63; 32]);
         let root = closure.consumer_set().optional_view_roots()[0];
         let request = WorldReplayUseV1::new(
@@ -899,8 +906,13 @@ mod tests {
         .test_ok();
         assert_eq!(request.requested_optional_view_roots(), &[root]);
         assert!(request.is_covered_by(&closure));
-        let unverified =
-            test_verified_world_replay(&closure, &request, generation, ErasureReplayClaimV1::Exact);
+        let unverified = test_verified_world_replay(
+            &closure,
+            &request,
+            generation,
+            ErasureReplayClaimV1::Exact,
+            limits,
+        );
         assert_eq!(
             unverified.require_authoritative_use(),
             Err(WorldReplayVerificationErrorV1::ClaimUnavailable)
@@ -911,6 +923,7 @@ mod tests {
                 &request,
                 generation,
                 ErasureReplayClaimV1::ExactAuthoritativeWithRedactedViews,
+                limits,
             ),
             vec![root],
         );
@@ -921,6 +934,7 @@ mod tests {
                 &request,
                 generation,
                 ErasureReplayClaimV1::StructuralOnly,
+                limits,
             ),
             vec![root],
         );

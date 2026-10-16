@@ -801,6 +801,7 @@ pub mod test_support {
                 requested_use,
                 inventory_generation,
                 ErasureReplayClaimV1::Exact,
+                ordinary_read_profile()?.1,
             ))
         }
     }

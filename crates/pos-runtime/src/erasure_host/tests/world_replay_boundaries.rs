@@ -86,6 +86,7 @@ fn event_reads_reject_stale_capabilities_and_substituted_operation_budgets() {
         &requested,
         reference(1),
         pos_core::ErasureReplayClaimV1::Exact,
+        verified.fork_read_limits(),
     );
     let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
     let start = clock.mark();
@@ -251,6 +252,13 @@ fn event_reads_reject_malformed_successful_batches_and_stale_heads() {
             &requested,
             generation,
             pos_core::ErasureReplayClaimV1::Exact,
+            test_ok(pos_store::ForkReplayReadLimitsV1::new(
+                8,
+                1_024,
+                262_144,
+                256 * 1024 * 1024,
+                30_000_000,
+            )),
         );
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
@@ -289,6 +297,13 @@ fn protected_event_reads_preserve_empty_and_past_head_range_boundaries() {
             &requested,
             generation,
             pos_core::ErasureReplayClaimV1::Exact,
+            test_ok(pos_store::ForkReplayReadLimitsV1::new(
+                8,
+                1_024,
+                262_144,
+                256 * 1024 * 1024,
+                30_000_000,
+            )),
         );
         let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
         let start = clock.mark();
@@ -412,6 +427,13 @@ fn faulty_lineage_refuses_classification_and_fence_before_preparation() {
             &requested,
             generation,
             pos_core::ErasureReplayClaimV1::Exact,
+            test_ok(pos_store::ForkReplayReadLimitsV1::new(
+                8,
+                1_024,
+                262_144,
+                256 * 1024 * 1024,
+                30_000_000,
+            )),
         );
         let limits = verified.fork_read_limits();
         let source = test_ok(crate::WorldReplayForkSourceV1::new(
