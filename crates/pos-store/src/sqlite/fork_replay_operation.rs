@@ -337,6 +337,7 @@ mod tests {
                 let mut observation = observation.lock().map_err(|_| "observer poisoned")?;
                 assert_eq!(observation.selects, 2);
                 assert_eq!(observation.outcome.take().ok_or("writer was not scheduled")??, 1);
+                drop(observation);
                 if held_snapshot {
                     assert_eq!(result?, Some(row.clone()));
                     store.conn.execute_batch("ROLLBACK")?;
