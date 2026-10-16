@@ -149,8 +149,10 @@ jobs:
             echo "Mutation shard watchdog timed out after 60 minutes."
             latest_log=""
             if [[ -d mutants.out ]]; then
+              # Consume the whole listing: head can SIGPIPE sort under pipefail,
+              # hiding both the latest log and the original timeout status.
               latest_log="$(find mutants.out -type f -name '*.log' -printf '%T@ %p\n' \
-                | sort -nr | head -n 1 | cut -d' ' -f2-)"
+                | sort -nr | sed -n '1p' | cut -d' ' -f2-)"
             fi
             if [[ -n "$latest_log" ]]; then
               echo "Most recent mutant log: $latest_log"
