@@ -201,6 +201,34 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --all-features --no-deps --locked
 
+  feature-matrix:
+    name: feature-matrix
+    needs: [ci_change_scope, preflight-gate]
+    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: feature-matrix
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo check (no default features)
+        run: cargo check --workspace --all-targets --no-default-features --locked
+      - name: Plugin trust registry Memory vectors (no default features)
+        run: >
+          cargo test -p pos-store --no-default-features
+          --test plugin_trust_registry_memory_public
+          --test plugin_trust_registry_memory_policy_public
+          --test plugin_trust_registry_memory_evaluation_public --locked
+      - name: cargo check (all features, all targets)
+        run: cargo check --workspace --all-targets --all-features --locked
+      - name: Prove reference evaluator implementation independence
+        run: bash scripts/check-reference-evaluator-independence.sh
+
   test:
     name: test
     needs: [ci_change_scope, preflight-gate]
@@ -224,16 +252,6 @@ jobs:
         with:
           shared-key: test
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: cargo check (no default features)
-        run: cargo check --workspace --all-targets --no-default-features --locked
-      - name: Plugin trust registry Memory vectors (no default features)
-        run: >
-          cargo test -p pos-store --no-default-features
-          --test plugin_trust_registry_memory_public
-          --test plugin_trust_registry_memory_policy_public
-          --test plugin_trust_registry_memory_evaluation_public --locked
-      - name: Prove reference evaluator implementation independence
-        run: bash scripts/check-reference-evaluator-independence.sh
       - name: Prove the conformance adapter dependency graph
         run: bash scripts/check-adapter-graph.sh
       # The workspace tests run in the test-shard matrix. Doctests are not
@@ -697,6 +715,7 @@ jobs:
       - ci_change_scope
       - preflight-gate
       - fmt
+      - feature-matrix
       - test
       - test-shards
       - clippy
@@ -704,12 +723,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require fmt, test, test shards, clippy, and coverage
+      - name: Require fmt, feature matrix, test, test shards, clippy, and coverage
         env:
           SCOPE_RESULT: ${{ needs.ci_change_scope.result }}
           RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
           PREFLIGHT_RESULT: ${{ needs.preflight-gate.result }}
           FMT_RESULT: ${{ needs.fmt.result }}
+          FEATURE_MATRIX_RESULT: ${{ needs.feature-matrix.result }}
           TEST_RESULT: ${{ needs.test.result }}
           TEST_SHARDS_RESULT: ${{ needs.test-shards.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
@@ -723,6 +743,7 @@ jobs:
             expected=skipped
           fi
           test "${FMT_RESULT}" = "${expected}"
+          test "${FEATURE_MATRIX_RESULT}" = "${expected}"
           test "${TEST_RESULT}" = "${expected}"
           test "${TEST_SHARDS_RESULT}" = "${expected}"
           test "${CLIPPY_RESULT}" = "${expected}"
