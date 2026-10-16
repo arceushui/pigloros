@@ -44,7 +44,9 @@ thread_local! {
     static CLOCK: RefCell<Option<Clock>> = const { RefCell::new(None) };
 }
 
-pub(crate) fn operation_clock() -> Option<Clock> {
+/// Returns the scripted clock installed for the current lifecycle test.
+#[must_use]
+pub fn operation_clock() -> Option<Clock> {
     CLOCK.with(|slot| slot.borrow().clone())
 }
 
@@ -564,6 +566,7 @@ fn sqlite_case(
     assert_eq!(writer.load_key_registry()?, Some(before_keys));
     writer.save_key_registry(&verifier.next)?;
     assert_eq!(writer.load_key_registry()?, Some(verifier.next.clone()));
+    drop(writer);
     Ok(())
 }
 
