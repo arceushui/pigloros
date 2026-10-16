@@ -184,6 +184,34 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
         self.assertNotEqual(verdict(False, "success", "success", "skipped"), 0)
         self.assertNotEqual(verdict(False, "success", "skipped", "failure"), 0)
 
+    def test_timeout_log_selector_preserves_the_timeout_status(self) -> None:
+        run = next(
+            step["run"] for step in self.workflow["jobs"]["mutation"]["steps"]
+            if step.get("name") == "Run mutants in changed lines"
+        )
+        self.assertEqual(run.count("| sort -nr | "), 1)
+        selector = "sort -nr | " + run.split("| sort -nr | ", 1)[1].split(')"', 1)[0]
+        # Exercise the real pipeline, not Cargo or filesystem fixture creation.
+        # Exceed pipe capacity so an early-closing consumer exposes SIGPIPE.
+        many = "".join(f"{index}.0 mutants.out/log/case {index}.log\n"
+                       for index in range(20_000))
+        for listing, expected in (
+            ("", ""),
+            ("1.0 mutants.out/log/only.log\n", "mutants.out/log/only.log"),
+            (many, "mutants.out/log/case 19999.log"),
+        ):
+            with self.subTest(entries=listing.count("\n")):
+                result = subprocess.run(
+                    ["bash", "-euo", "pipefail", "-c",
+                     'mutation_status=124\nlatest_log="$(' + selector + ')"\n'
+                     'printf "%s\\n" "$latest_log"\nexit "$mutation_status"'],
+                    input=listing, capture_output=True, text=True, check=False,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 124, result.stderr)
+                self.assertEqual(result.stdout, expected + "\n")
+                self.assertEqual(result.stderr, "")
+
 
 if __name__ == "__main__":
     unittest.main()
