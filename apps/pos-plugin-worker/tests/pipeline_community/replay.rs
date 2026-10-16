@@ -421,12 +421,14 @@ fn first_party_recovery(signed: &SignedWorld) -> BoxResult<Recovery> {
     let outcome = recover(&mut lane);
     let rerun = steps.load(Ordering::SeqCst) - stepped;
     let recovered = describe(&lane, &outcome, rerun.to_string());
+    let unchanged = events == lane.pass.events();
+    let again = recover_again(&mut lane);
     Ok(Recovery {
         lost,
         recovered,
-        unchanged: events == lane.pass.events(),
+        unchanged,
         reran: rerun != 0,
-        again: recover_again(&mut lane),
+        again,
     })
 }
 
