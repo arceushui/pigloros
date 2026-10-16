@@ -78,3 +78,39 @@ jobs:
           prof pos-plugin-worker "--test conformance_adapter_public" r8_s11_a_refused_or_failed_pass_leaves_events_and_state_unchanged
           prof pos-crypto "--lib" plugin_trust::tests::every_truncation_and_selected_single_byte_tamper_fails_closed
           prof pos-owner-bridge "--test protocol" oracle::ten_thousand_seeded_interleavings_hold_every_invariant
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {variant: jobs2, jobs: "2", deps: ""}
+          - {variant: jobs4, jobs: "4", deps: ""}
+          - {variant: jobs4-deps-o1, jobs: "4", deps: "1"}
+    env:
+      RUSTC_BOOTSTRAP: "1"
+      CARGO_BUILD_JOBS: ${{ matrix.jobs }}
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest@0.9.146
+      - name: configure
+        if: matrix.deps != ''
+        run: printf '\n[profile.dev.package."*"]\nopt-level = %s\n' "${{ matrix.deps }}" >> Cargo.toml
+      - name: memory sampler
+        run: (while true; do free -m | awk '/Mem:/{print $3}' >> /tmp/mem.txt; sleep 5; done) &
+      - name: coverage
+        run: |
+          start=$(date +%s)
+          cargo llvm-cov nextest --workspace --all-features --locked --json --output-path /tmp/cov.json \
+            --user-config-file none --ignore-default-filter --run-ignored all --no-fail-fast 2>&1 | grep -E "Finished|Summary|error|FAIL" | head -20
+          echo "TOTAL_SECONDS=$(( $(date +%s) - start ))"
+          jq -r '.data[0].totals | "lines \(.lines.percent) regions \(.regions.percent)"' /tmp/cov.json
+          echo "PEAK_USED_MB=$(sort -n /tmp/mem.txt | tail -1)"; free -m
