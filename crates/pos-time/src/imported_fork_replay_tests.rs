@@ -205,6 +205,7 @@ impl ImportedVerifier {
             requested,
             generation,
             ErasureReplayClaimV1::Exact,
+            limits,
         );
         let verified = if let Some(max_events) = max_events {
             let bounds = verified.read_bounds();
@@ -215,13 +216,16 @@ impl ImportedVerifier {
                 requested.clone(),
                 generation,
                 ErasureReplayClaimV1::Exact,
-                EventReadBounds::new_with_total_bytes_and_elapsed(
-                    bounds.max_payload_bytes(),
-                    bounds.max_event_type_bytes(),
-                    bounds.max_fork_depth(),
-                    max_events,
-                    bounds.max_total_bytes(),
-                    bounds.max_elapsed_micros(),
+                (
+                    EventReadBounds::new_with_total_bytes_and_elapsed(
+                        bounds.max_payload_bytes(),
+                        bounds.max_event_type_bytes(),
+                        bounds.max_fork_depth(),
+                        max_events,
+                        bounds.max_total_bytes(),
+                        bounds.max_elapsed_micros(),
+                    ),
+                    limits,
                 ),
             )
         } else {

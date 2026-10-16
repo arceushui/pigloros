@@ -145,6 +145,14 @@ impl WorldReplayVerifierV1 for CountingVerifier {
             requested_use,
             inventory_generation,
             ErasureReplayClaimV1::Exact,
+            pos_store::ForkReplayReadLimitsV1::new(
+                8,
+                1_024,
+                262_144,
+                256 * 1024 * 1024,
+                30_000_000,
+            )
+            .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)?,
         ))
     }
 }

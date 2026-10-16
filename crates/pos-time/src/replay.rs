@@ -1334,6 +1334,7 @@ mod tests {
                     requested_use,
                     inventory_generation,
                     pos_core::ErasureReplayClaimV1::Exact,
+                    crate::test_support::ordinary_read_profile()?.1,
                 ))
             } else {
                 Err(pos_runtime::WorldReplayVerificationErrorV1::EvidenceUnavailable)
@@ -1442,7 +1443,7 @@ mod tests {
                     requested_use.clone(),
                     inventory_generation,
                     pos_core::ErasureReplayClaimV1::Exact,
-                    self.0,
+                    (self.0, crate::test_support::ordinary_read_profile()?.1),
                 ),
             )
         }
@@ -1474,6 +1475,7 @@ mod tests {
                     requested_use,
                     inventory_generation,
                     pos_core::ErasureReplayClaimV1::Exact,
+                    crate::test_support::ordinary_read_profile()?.1,
                 ))
             } else {
                 Ok(
@@ -1484,7 +1486,10 @@ mod tests {
                         requested_use.clone(),
                         inventory_generation,
                         pos_core::ErasureReplayClaimV1::Exact,
-                        ONE_EVENT_READ_BOUNDS,
+                        (
+                            ONE_EVENT_READ_BOUNDS,
+                            crate::test_support::ordinary_read_profile()?.1,
+                        ),
                     ),
                 )
             }
