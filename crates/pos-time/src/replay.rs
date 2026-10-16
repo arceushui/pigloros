@@ -139,16 +139,17 @@ fn replay_range(
                         request,
                         preparation,
                         budget,
-                        held.held().map_err(crate::core_error_to_host)?,
+                        held.held()
+                            .map_err(|error| crate::core_error_to_host(&error))?,
                         revoked,
                         registry,
                     )
-                    .map_err(crate::core_error_to_host)?;
+                    .map_err(|error| crate::core_error_to_host(&error))?;
                     Ok((held, staged))
                 },
                 |(held, staged), verdict| {
                     held.handoff(&expiries, staged, verdict)
-                        .map_err(crate::core_error_to_host)
+                        .map_err(|error| crate::core_error_to_host(&error))
                 },
             )
             .map_err(crate::host_error_to_core)

@@ -1,4 +1,4 @@
-//! ADR-118 r4 witnesses through the public Time entrypoints and real SQLite.
+//! ADR-118 r4 witnesses through the public Time entrypoints and real `SQLite`.
 
 use super::fixture::{Fallible, Shape, World, PARENT_CUT};
 use super::{
@@ -151,7 +151,7 @@ fn probe_writer(record: &Mutex<Transcript>, verifier: &ReservationVerifier) {
     record.writer_escapes += usize::from(!denied);
 }
 
-fn deny_cleanup(record: &mut Transcript, connection: Connection, cleanup: Cleanup) -> bool {
+const fn deny_cleanup(record: &mut Transcript, connection: Connection, cleanup: Cleanup) -> bool {
     match connection {
         Connection::Reader if matches!(cleanup, Cleanup::Reader | Cleanup::Both) => {
             !std::mem::replace(&mut record.denied_reader, true)
