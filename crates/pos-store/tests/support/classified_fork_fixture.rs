@@ -54,6 +54,23 @@ const DESCRIPTOR: Hash = Hash::from_bytes([8; 32]);
 /// The authentication adapter of the fixture Principal.
 const AUTHENTICATION_ADAPTER: &str = "classified-counterfactual.adapter";
 
+/// `SQLite` counts of every row kind a classified write on the Fork `?1`
+/// adds: own Events, `EOR1`, `FOP1`, generations, quarantine, artifacts,
+/// dependency records, nodes, and edges. `EOR1` rows carry no child column,
+/// so they are counted store-wide; `?1 = ?1` only keeps the one parameter
+/// every query binds.
+pub const WRITTEN_ROWS_SQL: [&str; 9] = [
+    "SELECT count(*) FROM events WHERE timeline_id = ?1",
+    "SELECT count(*) FROM fork_event_origins WHERE ?1 = ?1",
+    "SELECT count(*) FROM fork_append_operations WHERE child_id = ?1",
+    "SELECT count(*) FROM counterfactual_generations WHERE fork_id = ?1",
+    "SELECT count(*) FROM counterfactual_quarantine WHERE fork_id = ?1",
+    "SELECT count(*) FROM counterfactual_artifacts WHERE fork_id = ?1",
+    "SELECT count(*) FROM counterfactual_dependency_records WHERE timeline_id = ?1",
+    "SELECT count(*) FROM counterfactual_dependency_nodes WHERE timeline_id = ?1",
+    "SELECT count(*) FROM counterfactual_dependency_edges WHERE timeline_id = ?1",
+];
+
 /// A digest of 32 copies of `value`.
 #[must_use]
 pub const fn hash(value: u8) -> Hash {

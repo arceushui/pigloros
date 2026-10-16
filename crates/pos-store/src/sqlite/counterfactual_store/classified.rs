@@ -127,23 +127,24 @@ impl SqliteStore {
             .map_err(ClassifiedError::from)
     }
 
-    /// Refuse the batch when any derived operation ID already has a `FOP1`.
+    /// Refuse the batch when any derived operation ID already has a `FOP1`,
+    /// stopping at the first such ID or read failure.
     ///
     /// The basis matched, so the generation or Tick is uncommitted and such a
     /// row is an orphan of host misuse or corruption.
     fn reject_orphan_operations(&self, operations: &[Hash]) -> Staged<(), ClassifiedError> {
         operations
             .iter()
-            .try_fold(false, |found, operation| {
-                self.conn
-                    .query_row(
-                        OPERATION_EXISTS_SQL,
-                        params![operation.as_bytes().as_slice()],
-                        |row| row.get::<_, bool>(0),
-                    )
-                    .map(|exists| found || exists)
+            .map(|operation| {
+                self.conn.query_row(
+                    OPERATION_EXISTS_SQL,
+                    params![operation.as_bytes().as_slice()],
+                    |row| row.get::<_, bool>(0),
+                )
             })
-            .map(|found| (!found).then_some(()).ok_or(CORRUPT_AUTHORITY))
+            .find(|exists| !matches!(exists, Ok(false)))
+            .transpose()
+            .map(|hit| hit.is_none().then_some(()).ok_or(CORRUPT_AUTHORITY))
             .map_err(Self::into_storage_error)
     }
 
@@ -179,7 +180,11 @@ impl SqliteStore {
 /// A classified Event is stamped by the store clock, so no draft may carry a
 /// `WallTime` override.
 fn without_wall_time_override(drafts: &PipelineDraftBatchV1) -> Result<(), ClassifiedError> {
-    if drafts.drafts().iter().any(|draft| draft.wall_time.is_some()) {
+    if drafts
+        .drafts()
+        .iter()
+        .any(|draft| draft.wall_time.is_some())
+    {
         Err(INVALID_REQUEST)
     } else {
         Ok(())
@@ -231,22 +236,35 @@ impl ClassifiedCounterfactualStorePortV1 for SqliteStore {
 mod tests {
     //! In-crate evidence for the authority reread that the public port cannot
     //! reach with a live session: a permit naming other durable authority,
-    //! and a corrupt authority graph. A forged permit and an in-connection
-    //! edit keep the session live, which a write by another connection would
-    //! end.
+    //! and a corrupt or mismatched authority graph. A forged permit and an
+    //! in-connection edit keep the session live, which a write by another
+    //! connection would end.
 
     use std::sync::Arc;
 
-    use pos_core::{ErasureContainmentGateV1, EventStore, RecordedNodeOriginV1, TimelineId};
+    use pos_core::{
+        ErasureContainmentGateV1, EventStore, ForkClassifierRegistrationInputV1,
+        ForkClassifierRegistrationV1, RecordedNodeOriginV1, TimelineId,
+    };
     use rusqlite::params;
 
     use super::{CORRUPT_AUTHORITY, UNAUTHENTICATED};
-    use crate::classified_fork_fixture::{empty_record, hash, Authority, Fallible, Spec};
+    use crate::classified_fork_fixture::{
+        empty_record, hash, Authority, Fallible, Spec, WRITTEN_ROWS_SQL,
+    };
     use crate::sqlite::SqliteStore;
     use crate::{
         ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1,
         ForkAppendSourcePermitV1,
     };
+
+    /// Raw edits of one authority row of the Fork `FORK` to the bytes `?1`.
+    const MALFORMED_ROWS: [&str; 4] = [
+        "UPDATE fork_admissions SET far1_cbor = ?1 WHERE child_id = 'FORK'",
+        "UPDATE fork_classifier_sources SET fcs1_cbor = ?1",
+        "UPDATE fork_classifier_tables SET fct1_cbor = ?1 WHERE child_id = 'FORK'",
+        "UPDATE fork_classifier_registrations SET fcr1_cbor = ?1 WHERE child_id = 'FORK'",
+    ];
 
     fn classified() -> Fallible<(SqliteStore, Authority, TimelineId)> {
         let mut store = SqliteStore::open_in_memory()?;
@@ -256,26 +274,62 @@ mod tests {
         Ok((store, authority, fork))
     }
 
-    /// The error of the default invalidation under `permit`, and the Fork's
-    /// own Events after it.
-    fn refused(
+    /// The error of the default invalidation under `permit`.
+    fn commit_error(
         store: &mut SqliteStore,
         authority: &Authority,
         permit: &ForkAppendSourcePermitV1,
         fork: TimelineId,
-    ) -> Fallible<(Option<ClassifiedCounterfactualErrorV1>, i64)> {
+    ) -> Fallible<Option<ClassifiedCounterfactualErrorV1>> {
         let command = Spec::new(fork).command()?;
         let record = empty_record(17, RecordedNodeOriginV1::Provisional)?;
         let lent = authority.lend(permit);
-        let error = store
-            .commit_classified_counterfactual_invalidation(&command, &record, &lent, hash(0x61))
-            .err();
-        let events = store.conn.query_row(
-            "SELECT count(*) FROM events WHERE timeline_id = ?1",
+        let base = hash(0x61);
+        let committed =
+            store.commit_classified_counterfactual_invalidation(&command, &record, &lent, base);
+        Ok(committed.err())
+    }
+
+    /// Every row kind a classified write on `fork` adds.
+    fn written(store: &SqliteStore, fork: TimelineId) -> Fallible<Vec<i64>> {
+        let fork_id = fork.to_string();
+        let mut counts = Vec::new();
+        for sql in WRITTEN_ROWS_SQL {
+            counts.push(store.conn.query_row(sql, [&fork_id], |row| row.get(0))?);
+        }
+        Ok(counts)
+    }
+
+    /// Edit one authority row of a fresh Fork to `bytes` after its permit was
+    /// issued, then expect the commit refused as corrupt with nothing written.
+    fn assert_corrupt_after(
+        sql: &str,
+        bytes: impl FnOnce(&SqliteStore, TimelineId) -> Fallible<Vec<u8>>,
+    ) -> Fallible<()> {
+        let (mut store, authority, fork) = classified()?;
+        let permit = authority.host_permit(&store, fork)?;
+        let edited = bytes(&store, fork)?;
+        let sql = sql.replace("FORK", &fork.to_string());
+        store.conn.execute(&sql, params![edited])?;
+        let error = commit_error(&mut store, &authority, &permit, fork)?;
+        assert_eq!(error, Some(CORRUPT_AUTHORITY), "{sql}");
+        assert_eq!(written(&store, fork)?, [0; 9], "{sql}");
+        Ok(())
+    }
+
+    /// The Fork's FCR1 re-encoded to name another FCT1 digest.
+    fn mismatched_registration(store: &SqliteStore, fork: TimelineId) -> Fallible<Vec<u8>> {
+        let stored: Vec<u8> = store.conn.query_row(
+            "SELECT fcr1_cbor FROM fork_classifier_registrations WHERE child_id = ?1",
             params![fork.to_string()],
             |row| row.get(0),
         )?;
-        Ok((error, events))
+        let stored = ForkClassifierRegistrationV1::from_canonical_cbor(&stored)?;
+        let registration = ForkClassifierRegistrationV1::new(ForkClassifierRegistrationInputV1 {
+            classifier_revision_digest: hash(0x77),
+            ..stored.input().clone()
+        })?;
+        Ok(registration.to_canonical_cbor())
     }
 
     #[test]
@@ -285,28 +339,25 @@ mod tests {
             registration_digest: hash(0x55),
             ..authority.host_permit(&store, fork)?
         };
-        let refusal = refused(&mut store, &authority, &permit, fork)?;
-        assert_eq!(refusal, (Some(UNAUTHENTICATED), 0));
+        let error = commit_error(&mut store, &authority, &permit, fork)?;
+        assert_eq!(error, Some(UNAUTHENTICATED));
+        assert_eq!(written(&store, fork)?, [0; 9]);
         Ok(())
     }
 
     #[test]
-    fn a_corrupt_authority_graph_is_corrupt_authority() -> Fallible<()> {
-        // A malformed FCR1, and a malformed FAR1, which passes the Fork
-        // resolution and is refused by the authority reread.
-        for (table, column) in [
-            ("fork_classifier_registrations", "fcr1_cbor"),
-            ("fork_admissions", "far1_cbor"),
-        ] {
-            let (mut store, authority, fork) = classified()?;
-            let permit = authority.host_permit(&store, fork)?;
-            store.conn.execute(
-                &format!("UPDATE {table} SET {column} = x'00' WHERE child_id = ?1"),
-                params![fork.to_string()],
-            )?;
-            let refusal = refused(&mut store, &authority, &permit, fork)?;
-            assert_eq!(refusal, (Some(CORRUPT_AUTHORITY), 0), "{table}");
+    fn a_malformed_authority_row_is_corrupt_authority() -> Fallible<()> {
+        // A malformed FAR1 passes the Fork resolution and is refused by the
+        // authority reread, like a malformed FCS1, FCT1, or FCR1.
+        for sql in MALFORMED_ROWS {
+            assert_corrupt_after(sql, |_, _| Ok(vec![0]))?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn a_registration_naming_another_classifier_is_corrupt_authority() -> Fallible<()> {
+        let sql = "UPDATE fork_classifier_registrations SET fcr1_cbor = ?1 WHERE child_id = 'FORK'";
+        assert_corrupt_after(sql, mismatched_registration)
     }
 }

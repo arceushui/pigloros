@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use classified::{
     batch, draft, empty_record, facts, hash, node_record, Authority, Fallible, Spec, FIRST_TICK,
-    PARENT_CUT, TICK_KIND,
+    PARENT_CUT, TICK_KIND, WRITTEN_ROWS_SQL,
 };
 use pos_core::{
     CanonicalBytes, CounterfactualAdapterSealV1, CounterfactualBasisV1,
@@ -65,20 +65,6 @@ const NOT_FOUND: Classified = Classified::Store(StoreError::ForkNotFound);
 /// Event types the draft guard conceals as an absent Fork.
 const GUARDED_KINDS: [&str; 3] = ["geo.location", "geo.cell", "consent.granted.v1"];
 
-/// Every row kind a classified write on one Fork adds: own Events, `EOR1`
-/// (store-wide), `FOP1`, generations, quarantine, artifacts, dependency
-/// records, nodes, and edges.
-const WRITTEN: [&str; 9] = [
-    "SELECT count(*) FROM events WHERE timeline_id = ?1",
-    "SELECT count(*) FROM fork_event_origins WHERE ?1 = ?1",
-    "SELECT count(*) FROM fork_append_operations WHERE child_id = ?1",
-    "SELECT count(*) FROM counterfactual_generations WHERE fork_id = ?1",
-    "SELECT count(*) FROM counterfactual_quarantine WHERE fork_id = ?1",
-    "SELECT count(*) FROM counterfactual_artifacts WHERE fork_id = ?1",
-    "SELECT count(*) FROM counterfactual_dependency_records WHERE timeline_id = ?1",
-    "SELECT count(*) FROM counterfactual_dependency_nodes WHERE timeline_id = ?1",
-    "SELECT count(*) FROM counterfactual_dependency_edges WHERE timeline_id = ?1",
-];
 /// The snapshot of a Fork no classified write touched.
 const NOTHING: [i64; 9] = [0; 9];
 /// The snapshot after the default invalidation: two Events with their
@@ -96,7 +82,7 @@ fn snapshot(path: &Path, fork: TimelineId) -> Fallible<Vec<i64>> {
     let connection = rusqlite::Connection::open(path)?;
     let fork_id = fork.to_string();
     let mut counts = Vec::new();
-    for sql in WRITTEN {
+    for sql in WRITTEN_ROWS_SQL {
         counts.push(connection.query_row(sql, [&fork_id], |row| row.get(0))?);
     }
     Ok(counts)
@@ -632,6 +618,10 @@ fn a_later_record_must_fit_the_stored_set_counts() -> Fallible<()> {
     Ok(())
 }
 
+/// Pins existing ADR-099 behaviour, not a counterfactual-path rule:
+/// `delete_timeline` keeps a classified Fork's FAR1, classifier, EOR1, and
+/// FOP1 rows, so a re-created Fork ID resumes at its generation floor but
+/// cannot append through either classified path.
 #[test]
 fn a_recreated_fork_resumes_at_its_floor_and_refuses_its_old_operations() -> Fallible<()> {
     let mut world = world()?;
@@ -644,8 +634,6 @@ fn a_recreated_fork_resumes_at_its_floor_and_refuses_its_old_operations() -> Fal
         .meta;
     world.store.delete_timeline(fork)?;
     world.store.create_timeline_with_meta(meta)?;
-    // The re-created Fork keeps its local FAR1 and classifier, and its facts
-    // are published at the generation floor its purge left.
     let published = world.store.publish_counterfactual_facts(fork, facts())?;
     assert_eq!(published.generation, 1);
     let before = world.snapshot()?;
@@ -654,12 +642,13 @@ fn a_recreated_fork_resumes_at_its_floor_and_refuses_its_old_operations() -> Fal
         ..Spec::new(fork)
     };
     let record = node_record(FIRST_TICK, "a", 1)?;
-    // The first generation's operation IDs outlive the purge, so a base that
-    // re-derives them is refused before any insert.
+    // Step 8, the orphan-operation guard: a base that re-derives the first
+    // generation's operation IDs finds their retained FOP1 rows.
     assert_eq!(world.commit(&next, &record)?, Err(CORRUPT_AUTHORITY));
-    // A fresh base derives fresh operation IDs, but the retained FOP1 rows
-    // still hold the re-created Fork's local Seqs, so the first insert is
-    // refused as a conflict and the whole commit rolls back.
+    // Step 9, the insert: a fresh base passes step 8, but the retained FOP1
+    // rows still hold the Fork's local Seqs, so `UNIQUE (child_id,
+    // local_seq)` refuses the first FOP1 as a conflict and the commit rolls
+    // back.
     let permit = world.host_permit()?;
     let lent = world.authority.lend(&permit);
     let fresh = commit_at(&mut world.store, &lent, &next, &record, hash(0x63))?;

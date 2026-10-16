@@ -596,7 +596,6 @@ pub trait ForkEventProvenanceAuthorityPortV1 {
 /// permit for one classified counterfactual commit or append. It is neither
 /// cloneable nor serializable, and holding it proves nothing: the store
 /// decides at commit time whether the session and the permit are live.
-#[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
 pub struct ClassifiedTickAuthorityV1<'a> {
     session: &'a ForkAdmissionAuthoritySessionV1,
     permit: &'a ForkAppendSourcePermitV1,
@@ -613,14 +612,14 @@ impl<'a> ClassifiedTickAuthorityV1<'a> {
     }
 
     /// The lent session.
-    #[cfg(feature = "sqlite")]
-    pub(crate) const fn session(&self) -> &'a ForkAdmissionAuthoritySessionV1 {
+    #[must_use]
+    pub const fn session(&self) -> &'a ForkAdmissionAuthoritySessionV1 {
         self.session
     }
 
     /// The lent permit.
-    #[cfg(feature = "sqlite")]
-    pub(crate) const fn permit(&self) -> &'a ForkAppendSourcePermitV1 {
+    #[must_use]
+    pub const fn permit(&self) -> &'a ForkAppendSourcePermitV1 {
         self.permit
     }
 }
@@ -712,6 +711,7 @@ pub(crate) fn fork_append_request(
 }
 
 /// ADR-099 revision 12 domain of one classified counterfactual operation ID.
+// Ungated by slice 4 (Memory), which adds the Memory adapter's caller.
 #[cfg(feature = "sqlite")]
 const COUNTERFACTUAL_TICK_OPERATION_INDEX_DOMAIN: &[u8] =
     b"pigloros/counterfactual-tick-operation-index/v1";
@@ -719,6 +719,7 @@ const COUNTERFACTUAL_TICK_OPERATION_INDEX_DOMAIN: &[u8] =
 /// Derive the `FOP1` operation IDs of the first `count` drafts of one
 /// classified counterfactual batch: `BLAKE3(domain || operation_base ||
 /// u32be(i))` for draft `i`, so the store never needs the plan.
+// Ungated by slice 4 (Memory), which adds the Memory adapter's caller.
 #[cfg(feature = "sqlite")]
 pub(crate) fn derive_operation_ids(operation_base: Hash, count: usize) -> Vec<Hash> {
     (0_u32..)
