@@ -607,6 +607,18 @@ pub fn test_verified_world_replay_with_fork_attribution(
     verified
 }
 
+/// Model an inconsistent owner result for Runtime's private boundary tests.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn test_with_unclassified_fork_requirement(
+    mut verified: VerifiedWorldReplayV1,
+    requirement: ForkReplayRequirementV1,
+) -> VerifiedWorldReplayV1 {
+    verified.fork_sources = None;
+    verified.fork_requirements = vec![requirement];
+    verified
+}
+
 /// Attach explicit per-view authorization to a downstream seam-test result.
 /// The actual owner must verify each root's current claim before minting this result.
 #[cfg(any(test, feature = "test-support"))]

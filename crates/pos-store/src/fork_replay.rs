@@ -901,7 +901,7 @@ pub(crate) fn complete_event_range(
     range: SeqRange,
     bounds: EventReadBounds,
     context: &mut LineageReadContextV1<'_, '_>,
-) -> LineageReadResult<(u64, u64, usize)> {
+) -> LineageReadResult<(u64, u64)> {
     context.step(|context| {
         let from = range.from.as_u64().max(1);
         let to = range.to.map_or(head, Seq::as_u64);
@@ -913,9 +913,7 @@ pub(crate) fn complete_event_range(
         let count = if from > to { 0 } else { to - (from - 1) };
         let maximum = u64::try_from(bounds.max_events()).unwrap_or(u64::MAX);
         context.require(count <= maximum)?;
-        // The checked usize ceiling above proves this conversion fits on
-        // narrower targets as well; no truncated successful count is possible.
-        Ok((from, to, usize::try_from(count).unwrap_or(usize::MAX)))
+        Ok((from, to))
     })
 }
 
