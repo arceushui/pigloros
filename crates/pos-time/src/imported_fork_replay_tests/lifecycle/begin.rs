@@ -685,22 +685,55 @@ fn begin_refusal_poison_closes_all_consumers_and_releases_partial_acquisition() 
     Ok(())
 }
 
-fn never_prepared(
+fn invoke_ordinary_consumer(
     call: ConsumerCall,
-    selected_arm: usize,
-    read_only: bool,
-    unwind: bool,
-) -> Fallible<()> {
-    use crate::test_support::with_release_on;
-    use pos_core::trusted_clock_fixture::TrustedClockFixtureV1;
+    sender: &mut ErasureReadSenderV1<'_>,
+    timelines: [TimelineId; 2],
+    registries: [&mut ProjectionRegistry; 2],
+    closures: &[WorldReplayClosureV1; 2],
+    release: crate::ProtectedReleaseV1<'_>,
+    fixture: &ProtectedFixture,
+) -> Result<(), CoreError> {
+    let [a, b] = registries;
+    match call {
+        ConsumerCall::Replay => crate::replay(
+            sender,
+            timelines[0],
+            a,
+            &closures[0],
+            release,
+            &fixture.fold(),
+        ),
+        ConsumerCall::ReplayAt => crate::replay_at(
+            sender,
+            timelines[0],
+            Seq::from_u64(1),
+            a,
+            &closures[0],
+            release,
+            &fixture.fold(),
+        ),
+        ConsumerCall::Compare => crate::compare(
+            sender,
+            timelines,
+            Seq::from_u64(1),
+            [a, b],
+            [&closures[0], &closures[1]],
+            release,
+            [&fixture.fold(), &fixture.fold()],
+        )
+        .map(|_| ()),
+    }
+}
 
-    let fixture = ProtectedFixture::new("count", count);
-    let verifier = Arc::new(EarlyVerifier::default());
+fn ordinary_sqlite_host(
+    path: &str,
+    read_only: bool,
+    verifier: &Arc<EarlyVerifier>,
+    native: Arc<Mutex<Transcript>>,
+) -> Fallible<(ErasureExecutionHostV1, [TimelineId; 2], Event)> {
     let composition =
         ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier.clone());
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join("never-prepared.sqlite");
-    let path = path.to_str().ok_or("fixture path")?;
     let mut seed = ErasureExecutionHostV1::recover_sqlite_fixture_with_authority(
         SqliteStore::open(path)?,
         &composition,
@@ -713,17 +746,35 @@ fn never_prepared(
     } else {
         SqliteStore::open(path)?
     };
-    let native = Arc::new(Mutex::new(Vec::new()));
-    let recorded_native = Arc::clone(&native);
     store.observe_interval_transactions_for_test(Arc::new(move |connection, operation| {
-        test_ok(recorded_native.lock()).push((connection, operation));
+        test_ok(native.lock()).native.push((connection, operation));
         true
     }))?;
-    let mut host = ErasureExecutionHostV1::recover_sqlite_fixture_with_authority(
+    let host = ErasureExecutionHostV1::recover_sqlite_fixture_with_authority(
         store,
         &composition,
         ErasureRecoveryLimitsV1::compiled_maximum(),
     )?;
+    Ok((host, timelines, event))
+}
+
+fn never_prepared(
+    call: ConsumerCall,
+    selected_arm: usize,
+    read_only: bool,
+    unwind: bool,
+) -> Fallible<()> {
+    use crate::test_support::with_release_on;
+    use pos_core::trusted_clock_fixture::TrustedClockFixtureV1;
+
+    let fixture = ProtectedFixture::new("count", count);
+    let verifier = Arc::new(EarlyVerifier::default());
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("never-prepared.sqlite");
+    let path = path.to_str().ok_or("fixture path")?;
+    let native = Arc::new(Mutex::new(Transcript::default()));
+    let (mut host, timelines, event) =
+        ordinary_sqlite_host(path, read_only, &verifier, Arc::clone(&native))?;
     let closures = closures_for(&host, timelines);
     let mut a = fixture.registry(host.containment_gate());
     let mut b = fixture.registry(host.containment_gate());
@@ -731,7 +782,7 @@ fn never_prepared(
     b.apply_event(timelines[1], &event);
     let before = [a.retained_state_for_test(), b.retained_state_for_test()];
     super::super::FOLDED_EVENTS.store(0, Ordering::SeqCst);
-    test_ok(native.lock()).clear();
+    test_ok(native.lock()).native.clear();
     let phases = Rc::new(RefCell::new(Vec::new()));
     let recorded = Rc::clone(&phases);
     let mut port = TrustedClockFixtureV1::new();
@@ -748,6 +799,9 @@ fn never_prepared(
                 if phase == Phase::FailureP2 {
                     assert!(observed_port.writer_held());
                 }
+                if phase == Phase::BeforeRollback {
+                    assert!(!observed_port.writer_held());
+                }
                 if phase == Phase::GateEntered(timelines[selected_arm]) {
                     if unwind {
                         std::panic::resume_unwind(Box::new("never-prepared witness"));
@@ -756,34 +810,16 @@ fn never_prepared(
                 }
             });
             let mut sender = test_ok(host.read_sender());
-            with_replay_observer(observer, || match call {
-                ConsumerCall::Replay => crate::replay(
-                    &mut sender,
-                    timelines[0],
-                    &mut a,
-                    &closures[0],
-                    release,
-                    &fixture.fold(),
-                ),
-                ConsumerCall::ReplayAt => crate::replay_at(
-                    &mut sender,
-                    timelines[0],
-                    Seq::from_u64(1),
-                    &mut a,
-                    &closures[0],
-                    release,
-                    &fixture.fold(),
-                ),
-                ConsumerCall::Compare => crate::compare(
+            with_replay_observer(observer, || {
+                invoke_ordinary_consumer(
+                    call,
                     &mut sender,
                     timelines,
-                    Seq::from_u64(1),
                     [&mut a, &mut b],
-                    [&closures[0], &closures[1]],
+                    &closures,
                     release,
-                    [&fixture.fold(), &fixture.fold()],
+                    &fixture,
                 )
-                .map(|_| ()),
             })
         })
     }));
@@ -808,7 +844,31 @@ fn never_prepared(
     );
     assert_eq!(super::super::FOLDED_EVENTS.load(Ordering::SeqCst), 0);
     assert!(test_ok(verifier.admissions.lock()).is_empty());
-    let phases = phases.borrow();
+    assert_uncalled_transcript(
+        &phases.borrow(),
+        &test_ok(native.lock()).native,
+        timelines,
+        selected_arm,
+        read_only,
+        unwind,
+    )?;
+    assert!(!port.writer_held());
+    with_release_on(&mut port, &health, |_| ());
+    assert!(!port.writer_held());
+    // Native cleanup must release the reservation before host destruction.
+    let mut writer = SqliteStore::open(path)?;
+    writer.create_timeline("after never-prepared cleanup")?;
+    Ok(())
+}
+
+fn assert_uncalled_transcript(
+    phases: &[Phase],
+    native: &[(Connection, TransactionOperation)],
+    timelines: [TimelineId; 2],
+    selected_arm: usize,
+    read_only: bool,
+    unwind: bool,
+) -> Fallible<()> {
     assert!(!phases.contains(&Phase::Staged));
     assert!(!phases.contains(&Phase::BeforeComplete));
     assert!(!phases.contains(&Phase::Installed));
@@ -867,13 +927,7 @@ fn never_prepared(
             (Connection::Writer, TransactionOperation::Rollback),
         ]
     };
-    assert_eq!(*test_ok(native.lock()), expected_native);
-    assert!(!port.writer_held());
-    with_release_on(&mut port, &health, drop);
-    assert!(!port.writer_held());
-    // Native cleanup must release the reservation before host destruction.
-    let mut writer = SqliteStore::open(path)?;
-    writer.create_timeline("after never-prepared cleanup")?;
+    assert_eq!(native, expected_native);
     Ok(())
 }
 
