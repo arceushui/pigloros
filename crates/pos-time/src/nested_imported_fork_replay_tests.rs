@@ -522,9 +522,13 @@ fn exercise(
         0
     };
     assert_eq!(FOLDED.load(Ordering::SeqCst), folds);
-    let phases = if scenario.fault == Fault::HiddenCommonRoot {
-        // The public ancestry/privacy barrier runs before either verifier,
-        // staged fold or contextual native-lineage read.
+    let phases = if !supported_depth
+        || matches!(
+            scenario.fault,
+            Fault::HiddenCommonRoot | Fault::ArmDepthShort
+        ) {
+        // The owning ancestry fence refuses privacy/depth failures before
+        // either verifier or staged fold, including a later Compare arm.
         0
     } else if succeeds || (supported_depth && scenario.fault.is_final()) {
         2
