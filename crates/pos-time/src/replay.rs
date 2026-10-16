@@ -1115,7 +1115,9 @@ mod tests {
     fn public_replay_enforces_verified_read_bounds() {
         let fixture = count_fixture();
         let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
-            .with_world_replay_verifier(Arc::new(OneEventWorldReplayVerifier));
+            .with_world_replay_verifier(Arc::new(FixedBoundsWorldReplayVerifier(
+                ONE_EVENT_READ_BOUNDS,
+            )));
         let mut host = pos_runtime::ErasureExecutionHostV1::open_with_authority(
             StoreConfig::Memory,
             &composition,
@@ -1179,6 +1181,120 @@ mod tests {
                 .test_ok(),
             None
         );
+    }
+
+    fn replay_field_bound_case(config: StoreConfig, read_only: bool, bounds: EventReadBounds) {
+        let fixture = count_fixture();
+        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
+            .with_world_replay_verifier(Arc::new(FixedBoundsWorldReplayVerifier(bounds)));
+        let mut host = ErasureExecutionHostV1::open_with_authority(
+            config.clone(),
+            &composition,
+            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+        )
+        .test_ok();
+        let entity = EntityId::new();
+        let timeline = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("field-bounds").test_ok().id();
+            // A canonical three-byte CBOR byte string: four payload bytes.
+            let event = EventDraft::new(
+                entity,
+                Kind::new("test.tick"),
+                CanonicalBytes::from_vec(vec![0x43, 1, 2, 3]),
+            );
+            commands.append(timeline, &[event]).test_ok();
+            timeline
+        };
+        if read_only {
+            let path = match config {
+                StoreConfig::Sqlite { path } => Some(path),
+                _ => None,
+            }
+            .test_ok();
+            drop(host);
+            host = ErasureExecutionHostV1::recover_sqlite_fixture_with_authority(
+                pos_store::sqlite::SqliteStore::open_read_only(&path).test_ok(),
+                &composition,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok();
+        }
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let mut registry = fixture.registry(host.containment_gate());
+        let before = registry.retained_state_for_test();
+        let result = replay_with(
+            &fixture,
+            &mut host.read_sender().test_ok(),
+            timeline,
+            &mut registry,
+            &closure,
+        );
+        if bounds.max_payload_bytes() == 4 && bounds.max_event_type_bytes() == 9 {
+            result.test_ok();
+            assert_eq!(count_for(&registry, timeline, &entity), 1);
+        } else {
+            assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
+            assert_eq!(registry.retained_state_for_test(), before);
+        }
+        assert_eq!(host.status(), pos_runtime::ErasureHostStatusV1::Ready);
+    }
+
+    #[test]
+    fn public_replay_enforces_exact_payload_and_kind_bounds_on_native_owners() {
+        for (payload, kind) in [(4, 9), (3, 9), (4, 8)] {
+            let bounds = EventReadBounds::new_with_total_bytes_and_elapsed(
+                payload, kind, 8, 1, 65_536, 30_000_000,
+            );
+            replay_field_bound_case(StoreConfig::Memory, false, bounds);
+            replay_field_bound_case(StoreConfig::SqliteInMemory, false, bounds);
+            for read_only in [false, true] {
+                let directory = tempfile::tempdir().test_ok();
+                let path = directory.path().join("field-bounds.sqlite");
+                replay_field_bound_case(
+                    StoreConfig::Sqlite {
+                        path: path.to_str().test_ok().to_owned(),
+                    },
+                    read_only,
+                    bounds,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn public_replay_refuses_a_missing_native_timeline_with_matching_authority() {
+        let fixture = count_fixture();
+        let mut host = crate::test_support::open_exact_host();
+        let entity = EntityId::new();
+        let timeline = {
+            let mut commands = host.command_sender().test_ok();
+            let timeline = commands.create_timeline("present-control").test_ok().id();
+            commands.append(timeline, &[draft(entity)]).test_ok();
+            timeline
+        };
+        let closure = crate::test_support::closure_for_host(&mut host, timeline);
+        let gate = host.containment_gate();
+        let missing = TimelineId::new();
+        let absent = WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+            missing,
+            pos_core::Hash::from_bytes(gate.inventory_generation().test_ok().digest()),
+        )
+        .test_ok();
+        let mut registry = fixture.registry(gate);
+        let mut reads = host.read_sender().test_ok();
+        replay_with(&fixture, &mut reads, timeline, &mut registry, &closure).test_ok();
+        assert_eq!(count_for(&registry, timeline, &entity), 1);
+        let before = registry.retained_state_for_test();
+        assert!(matches!(
+            replay_with(&fixture, &mut reads, missing, &mut registry, &absent),
+            Err(CoreError::ArtifactUnavailable)
+        ));
+        assert_eq!(registry.retained_state_for_test(), before);
+        replay_with(&fixture, &mut reads, timeline, &mut registry, &closure).test_ok();
+        assert_eq!(count_for(&registry, timeline, &entity), 1);
+        drop(reads);
+        assert_eq!(host.status(), pos_runtime::ErasureHostStatusV1::Ready);
     }
 
     /// Mirrors the installed-verifier contract: a closure's source head is
@@ -1291,9 +1407,9 @@ mod tests {
         calls: AtomicUsize,
     }
 
-    struct OneEventWorldReplayVerifier;
+    struct FixedBoundsWorldReplayVerifier(EventReadBounds);
 
-    impl pos_runtime::WorldReplayVerifierV1 for OneEventWorldReplayVerifier {
+    impl pos_runtime::WorldReplayVerifierV1 for FixedBoundsWorldReplayVerifier {
         fn read_profile(
             &self,
             _closure: &pos_core::WorldReplayClosureV1,
@@ -1303,8 +1419,7 @@ mod tests {
             (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
             pos_runtime::WorldReplayVerificationErrorV1,
         > {
-            crate::test_support::ordinary_read_profile()
-                .map(|(_, limits)| (ONE_EVENT_READ_BOUNDS, limits))
+            crate::test_support::ordinary_read_profile().map(|(_, limits)| (self.0, limits))
         }
 
         fn verify(
@@ -1322,7 +1437,7 @@ mod tests {
                     requested_use.clone(),
                     inventory_generation,
                     pos_core::ErasureReplayClaimV1::Exact,
-                    ONE_EVENT_READ_BOUNDS,
+                    self.0,
                 ),
             )
         }
