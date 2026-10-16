@@ -7,6 +7,15 @@ eligible run, but write them only from `main`:
 save-if: ${{ github.ref == 'refs/heads/main' }}
 ```
 
+Every other Rust cache in `ci.yml`, the Docker layer cache (`cache-to` is
+empty off `main`), and the fuzz, sim1, benchmark and ThreadSanitizer caches
+follow the same rule. The repository cache budget is shared: on 2026-10-16
+per-PR writes held 10.7 GB against the 10 GB limit, so LRU eviction removed
+`main`'s `test` cache and every pull request compiled the workspace cold.
+`assert_pull_requests_never_write_caches` in the policy test keeps every
+`ci.yml` cache write on `main`. Only the PR-only mutation workflow still
+writes from pull requests, because it never runs on `main`.
+
 This is the runtime mechanism, not a convention enforced by a wrapper. The
 pinned `Swatinem/rust-cache` action documents `save-if: false` as
 restore-only, and its save implementation writes only when the resolved input

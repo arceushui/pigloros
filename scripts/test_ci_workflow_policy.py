@@ -20,6 +20,9 @@ WORKFLOW_PATHS = (
 )
 RUST_CACHE_ACTION = "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16"
 TRUSTED_MAIN_SAVE_IF = "${{ github.ref == 'refs/heads/main' }}"
+TRUSTED_MAIN_DOCKER_CACHE_TO = (
+    "${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}"
+)
 CORE_CACHE_KEYS = {
     "test": "test",
     "clippy": "clippy",
@@ -170,6 +173,24 @@ def assert_core_rust_cache_contract(workflow: dict) -> None:
             raise AssertionError(f"{job_name} cache must use the trusted-main policy")
         if "if" in cache_step:
             raise AssertionError(f"{job_name} cache must remain reachable on pull requests")
+
+
+def assert_pull_requests_never_write_caches(workflow: dict) -> None:
+    """Keep every cache write on main so pull requests cannot evict main's caches.
+
+    The repository cache budget is shared; per-PR writes previously pushed it
+    past the limit and evicted the trusted main caches every PR restores.
+    """
+    for job_name, job in workflow["jobs"].items():
+        for step in job.get("steps", []):
+            uses = step.get("uses", "") if isinstance(step, dict) else ""
+            if uses.startswith("Swatinem/rust-cache@"):
+                if step.get("with", {}).get("save-if") != TRUSTED_MAIN_SAVE_IF:
+                    raise AssertionError(f"{job_name} Rust cache must save only from main")
+            if uses.startswith("docker/build-push-action@"):
+                cache_to = step.get("with", {}).get("cache-to")
+                if cache_to is not None and cache_to != TRUSTED_MAIN_DOCKER_CACHE_TO:
+                    raise AssertionError(f"{job_name} Docker cache must save only from main")
 
 
 def excluded(path: str, patterns: list[str]) -> bool:
@@ -398,6 +419,31 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         cache_step["if"] = "${{ github.event_name == 'push' }}"
         with self.assertRaisesRegex(AssertionError, "reachable on pull requests"):
             assert_core_rust_cache_contract(mutated)
+
+    def test_pull_requests_never_write_caches(self) -> None:
+        assert_pull_requests_never_write_caches(load_workflow(CI_WORKFLOW_PATH))
+
+    def test_cache_write_contract_rejects_pull_request_rust_cache_write(self) -> None:
+        mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+        cache_step = next(
+            step
+            for step in mutated["jobs"]["rustdoc"]["steps"]
+            if str(step.get("uses", "")).startswith("Swatinem/rust-cache@")
+        )
+        del cache_step["with"]["save-if"]
+        with self.assertRaisesRegex(AssertionError, "rustdoc Rust cache must save only from main"):
+            assert_pull_requests_never_write_caches(mutated)
+
+    def test_cache_write_contract_rejects_pull_request_docker_cache_write(self) -> None:
+        mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+        build_step = next(
+            step
+            for step in mutated["jobs"]["docker-build"]["steps"]
+            if str(step.get("uses", "")).startswith("docker/build-push-action@")
+        )
+        build_step["with"]["cache-to"] = "type=gha,mode=max"
+        with self.assertRaisesRegex(AssertionError, "docker-build Docker cache must save only from main"):
+            assert_pull_requests_never_write_caches(mutated)
 
     def test_conformance_materialization_honors_rust_scope(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)

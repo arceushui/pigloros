@@ -178,7 +178,7 @@ See **[docs/test-policy.md](docs/test-policy.md)** for the full policy.
 |---|---|---|
 | `coverage(off)` + doctest ` ```ignore ` | Trunk **`rust-test-policy`** | `coverage(off)` test-only; no rustdoc ignore fences |
 | Local git hook | Versioned `.githooks/pre-commit` + Trunk **`rust-test-policy`** | Blocks a commit if the staged Rust policy fails |
-| Runtime `#[ignore]` | `cargo test -- --include-ignored` + `scripts/assert-no-ignored-in-test-summary.sh` | Summary must report `0 ignored` |
+| Runtime `#[ignore]` | CI `cargo nextest run --run-ignored all` (local `cargo test -- --include-ignored`) + `scripts/assert-no-ignored-in-test-summary.sh` | Summary must report no ignored or skipped test |
 | Change risk | pinned **cargo-crap** + `scripts/check_cargo_crap_report.py` | Existing scores cannot regress; new functions must score ≤30 |
 | Dependencies | **cargo-deny** (`deny.toml`) | Crates / licenses / advisories / sources |
 
