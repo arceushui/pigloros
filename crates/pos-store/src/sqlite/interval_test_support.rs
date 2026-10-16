@@ -1,4 +1,4 @@
-//! Native SQLite transaction observation and refusal for nonproduction tests.
+//! Native `SQLite` transaction observation and refusal for nonproduction tests.
 
 use super::SqliteStore;
 use pos_core::CoreError;
@@ -17,11 +17,11 @@ pub enum IntervalConnectionV1 {
 }
 
 impl SqliteStore {
-    /// Observe native transaction statements; return false to make SQLite
+    /// Observe native transaction statements; return false to make `SQLite`
     /// itself refuse that statement. No connection or SQL interface escapes.
     ///
     /// # Errors
-    /// Returns an error if SQLite cannot install its native authorizer.
+    /// Returns an error if `SQLite` cannot install its native authorizer.
     pub fn observe_interval_transactions_for_test(
         &self,
         observer: Arc<dyn Fn(IntervalConnectionV1, TransactionOperation) -> bool + Send + Sync>,
@@ -50,7 +50,7 @@ impl SqliteStore {
     /// Make a competing test writer report an existing reservation immediately.
     ///
     /// # Errors
-    /// Returns an error if SQLite cannot configure the test connection.
+    /// Returns an error if `SQLite` cannot configure the test connection.
     pub fn use_nonblocking_writer_for_test(&self) -> Result<(), CoreError> {
         self.conn
             .busy_timeout(Duration::ZERO)
