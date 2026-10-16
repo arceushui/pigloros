@@ -76,10 +76,7 @@ impl SelectedRowV1<'_> {
             Self::SuffixProbe(_, None) => super::fork_replay_suffix::FIRST_SUFFIX,
             Self::SuffixProbe(_, Some(_)) => super::fork_replay_suffix::AFTER_SUFFIX,
             Self::SuffixFields(_, _) => super::fork_replay_suffix::SUFFIX_FIELDS,
-            Self::EventFields(_, _) => "SELECT seq, event_id, entity_id, event_type, payload, wall_time,
-                causation_id, correlation_id, schema_version, payload_hash, signature,
-                signature_owner_id, signature_role, signature_epoch, origin_timeline_id, origin_logical_seq
-                FROM events WHERE timeline_id = ?1 AND seq = ?2",
+            Self::EventFields(_, _) => super::fork_replay_event::EVENT_FIELDS,
         }
     }
 

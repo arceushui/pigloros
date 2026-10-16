@@ -65,7 +65,7 @@ fn text(
 impl SqliteStore {
     /// EOF checks the clock but charges no fictitious row. An actual row is
     /// debited before its first getter, even at zero remaining row capacity.
-    fn lineage_row<T>(
+    pub(super) fn lineage_row<T>(
         &self,
         sql: &str,
         params: impl Params,
@@ -123,6 +123,17 @@ impl SqliteStore {
         visited: &mut Vec<TimelineId>,
         context: &mut LineageReadContextV1<'_, '_>,
     ) -> ReadResult<Option<(ForkReplayLineageNodeV1, Seq)>> {
+        self.with_replay_read_fence(timeline, context, |context| {
+            self.lineage_metadata_and_visibility(timeline, visited, context)
+        })
+    }
+
+    pub(super) fn with_replay_read_fence<T>(
+        &self,
+        timeline: TimelineId,
+        context: &mut LineageReadContextV1<'_, '_>,
+        mut effect: impl FnMut(&mut LineageReadContextV1<'_, '_>) -> ReadResult<T>,
+    ) -> ReadResult<T> {
         context.step(|context| {
             let gate = self
                 .erasure_gate
@@ -131,7 +142,7 @@ impl SqliteStore {
             self.lineage_freshness(context)?;
             let mut result = Err(Error::ContainmentUnavailable);
             let fenced = gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
-                result = self.lineage_metadata_and_visibility(timeline, visited, context);
+                result = effect(context);
             });
             // A latched refusal stops semantic work. Otherwise completion F
             // still executes after a native None/error or a gate denial.

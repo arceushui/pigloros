@@ -23,6 +23,20 @@ use std::{sync::Arc, time::Duration};
 struct PairVerifier([ImportedRuntimeVerifier; 2]);
 
 impl WorldReplayVerifierV1 for PairVerifier {
+    fn read_profile(
+        &self,
+        closure: &WorldReplayClosureV1,
+        intent: &pos_runtime::WorldReplayReadIntentV1,
+        generation: ErasureReferenceV1,
+    ) -> Result<(pos_core::EventReadBounds, ForkReplayReadLimitsV1), WorldReplayVerificationErrorV1>
+    {
+        self.0
+            .iter()
+            .find(|arm| arm.leaf == intent.timeline_id())
+            .ok_or(WorldReplayVerificationErrorV1::RequestMismatch)?
+            .read_profile(closure, intent, generation)
+    }
+
     fn verify(
         &self,
         closure: &WorldReplayClosureV1,
