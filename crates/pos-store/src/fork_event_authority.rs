@@ -628,21 +628,50 @@ impl<'a> ClassifiedTickAuthorityV1<'a> {
 ///
 /// The classified analogues of the two recording write methods: each appends
 /// every draft as one host-internal `(0,0)` classified Event with exactly one
-/// `EOR1` and one `FOP1`, atomically with the generation or the later Tick and
-/// its dependency record, under the session and the one host-internal permit
-/// of a [`ClassifiedTickAuthorityV1`]. The `FOP1` operation ID of draft `i` is
+/// `EOR1` and one `FOP1` and no `FIA1`, atomically with the generation or the
+/// later Tick and its dependency record, under the session and the one
+/// host-internal permit of a [`ClassifiedTickAuthorityV1`]. The `FOP1`
+/// operation ID of draft `i` is
 /// `BLAKE3("pigloros/counterfactual-tick-operation-index/v1" ||
-/// operation_base || u32be(i))`. The checks run once per transaction, in this
-/// order: the erasure write fence, the live session, the Fork (a visible
-/// counterfactual Fork whose `FAR1` is local), the record and basis checks of
-/// the recording method, the draft guard, one authority reread, and the
-/// operation IDs. Generic Forks keep the recording methods, and each Fork kind
-/// has exactly one write path.
+/// operation_base || u32be(i))`. Generic Forks keep the recording methods,
+/// and each Fork kind has exactly one write path.
 ///
-/// Neither method is idempotent: replaying a committed call fails the basis
-/// recheck, and a prior `FOP1` under a derived operation ID is corrupt
-/// authority. A Fork whose `FAR1` was imported (origin code 2) is unsupported
-/// until #447.
+/// # Adapter obligations
+///
+/// - **Check order.** Run the checks once per transaction, in this order, and
+///   write nothing before the last one passes:
+///   1. adapter integer bounds of the generation and Ticks (`SQLite` only),
+///      before any fence;
+///   2. the Fork's erasure write fence, then the transaction scope, then the
+///      live session (`Unauthenticated`), before the Fork is resolved, so a
+///      caller without a live session learns nothing about the Fork;
+///   3. the Fork: a visible counterfactual Fork (`ForkNotFound`) whose `FAR1`
+///      is present and local; an unclassified or imported Fork is
+///      `InvalidRequest`;
+///   4. the record and basis checks of the recording method, in its order
+///      (record before basis for the invalidation, basis before record for a
+///      later Tick);
+///   5. the draft guard: the non-geographic guard, concealed as
+///      `ForkNotFound`, then no draft may carry a `WallTime` override;
+///   6. one authority reread: the permit names this Fork, is live, is scoped
+///      to the Fork's `FAR1`, `FCT1` and registrar, and is host-internal;
+///   7. the derived operation IDs, none of which may already name a `FOP1`;
+///   8. the Events with their `EOR1` and `FOP1`, then the generation or Tick
+///      rows and the dependency record.
+/// - **Atomicity.** Every rejection, including one at a draft after the
+///   first, leaves no Event, `EOR1`, `FOP1`, generation, quarantine, artifact
+///   or dependency row. Only an in-doubt transaction finish is
+///   `OutcomeUnknown`; its recovery is the recording method's (the committed
+///   receipt, or the persisted basis), since the provenance commits in the
+///   same transaction. An adapter without transactions runs every fallible
+///   step before its first mutation.
+/// - **Not idempotent.** Replaying a committed call fails the basis recheck,
+///   and a prior `FOP1` under a derived operation ID is corrupt authority.
+/// - **Unsupported Forks.** A Fork whose `FAR1` was imported (origin code 2)
+///   is unsupported until #447. Until Redmine #645 decides otherwise,
+///   deleting a classified Fork keeps its provenance rows, so a classified
+///   Fork re-created under the same Timeline ID cannot append (pre-existing
+///   ADR-099 behaviour).
 pub trait ClassifiedCounterfactualStorePortV1: CounterfactualDependencyRecordingPortV1 {
     /// Commit a classified Fork's invalidation and its first Tick with its
     /// dependency record.

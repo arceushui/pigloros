@@ -46,12 +46,16 @@ use pos_core::{
     EntityId, ErasureArtifactClassV1, ErasureContainmentGateV1, ErasureReferenceV1,
     ErasureReplayClaimV1, Event, EventDraft, EventReadBounds, EventStore, FactualCutV1,
     FactualHeadV1, FactualOwnerIdV1, FactualPrefixReadPortV1, ForkAppendSourceIdentityV1,
-    ForkGenerationV1, Hash, InvalidationConflictV1, Kind, PipelineContractErrorV1,
-    PipelineDraftBatchV1, RecordedDependencyClassV1, RecordedNodeOriginV1, RecordedSetCountsV1,
-    RegisteredArtifactV1, ReplayClaimEvaluationV1, ReplayClaimEvaluatorV1, Seq, SeqRange,
-    TickDependencyRecordV1, Timeline, TimelineId, TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1,
-    MAX_FORK_EVENT_TYPE_BYTES_V1, MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
+    ForkEventClassificationV1, ForkEventOriginKindV1, ForkGenerationV1, ForkReproManifestInputV1,
+    Hash, InvalidationConflictV1, KeyIdentityV1, KeyRegistrationV1, KeyRegistryStateV1, KeyRoleV1,
+    Kind, PipelineContractErrorV1, PipelineDraftBatchV1, RecordedDependencyClassV1,
+    RecordedNodeOriginV1, RecordedSetCountsV1, RegisteredArtifactV1, ReplayClaimEvaluationV1,
+    ReplayClaimEvaluatorV1, Seq, SeqRange, SignedForkReproManifestV1, TickDependencyRecordV1,
+    Timeline, TimelineId, TimelineMeta, MAX_DEPENDENCY_PAGE_ROWS_V1, MAX_FORK_EVENT_TYPE_BYTES_V1,
+    MAX_PIPELINE_DRAFTS_PER_BATCH, MAX_PIPELINE_DRAFT_BATCH_BYTES,
 };
+use pos_crypto::key_roles::{sign_for_registered_role, SigningKeyMaterial};
+use pos_crypto::signing::generate_keypair;
 use pos_runtime::counterfactual::coordinator::{
     CounterfactualAdmissionErrorV1 as AdmissionError, CounterfactualAdmissionRequestV1,
     CounterfactualClassifiedSourceResolverV1, CounterfactualCoordinatorV1,
@@ -72,7 +76,8 @@ use pos_store::sqlite::SqliteStore;
 use pos_store::{
     ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1,
     ClassifiedProvenanceErrorV1, ClassifiedTickAuthorityV1, ForkAppendSourcePermitV1,
-    ForkEventProvenanceAuthorityPortV1,
+    ForkEventProvenanceAuthorityPortV1, ForkManifestPublicationPortV1,
+    ForkManifestPublicationRequestV1,
 };
 use pos_time::counterfactual::dependency_graph::{
     validate_dependency_graph_v1, DependencyGraphBoundsV1, DependencyGraphNodeOriginV1 as Origin,
@@ -244,8 +249,9 @@ impl<B> RecordingBackend for B where
 
 /// A backend whose store, or whose wrapped store, admits classified Forks.
 trait ClassifiedBackend: RecordingBackend {
-    /// The store that holds the Fork admission authority.
-    type Host: classified::Host;
+    /// The store that holds the Fork admission authority and publishes the
+    /// Fork's manifest.
+    type Host: classified::Host + ForkManifestPublicationPortV1;
 
     /// Borrow the store that holds the Fork admission authority.
     fn host(&mut self) -> &mut Self::Host;
@@ -3459,6 +3465,205 @@ fn unknown_classified_outcomes_resolve_from_the_basis<B: ClassifiedBackend>() ->
     Ok(())
 }
 both_backends!(unknown_classified_outcomes_resolve_from_the_basis);
+
+// ---------------------------------------------------------------------------
+// ADR-099 revision 12 conformance: the suffix read and the manifest producer
+// ---------------------------------------------------------------------------
+
+/// The admitted creator of every classified fixture Fork: its `POC1` Owner.
+const CREATOR: &str = classified::OWNER;
+/// The operation ID of every fixture manifest publication.
+const PUBLICATION_OPERATION: [u8; 32] = [0x5c; 32];
+
+/// The creator's attribution-signing key and its registry snapshot.
+struct Creator {
+    identity: KeyIdentityV1,
+    material: SigningKeyMaterial,
+    registry: KeyRegistryStateV1,
+}
+
+impl Creator {
+    /// Register a fresh attribution-signing key of [`CREATOR`] in `store`.
+    fn register(store: &mut impl EventStore) -> TestResult<Self> {
+        let (private_key, _) = generate_keypair();
+        let material = SigningKeyMaterial::new(private_key);
+        let identity = KeyIdentityV1::new(CREATOR, KeyRoleV1::SubjectAttributionSigning, 1);
+        let mut registry = KeyRegistryStateV1::new();
+        registry.register_key(KeyRegistrationV1::new(
+            identity,
+            material.material_digest(),
+            Some(material.public_verification_key()),
+        ))?;
+        store.save_key_registry(&registry)?;
+        Ok(Self {
+            identity,
+            material,
+            registry,
+        })
+    }
+
+    /// The publication request of `fork` at `head`.
+    fn request(&self, fork: TimelineId, head: u64) -> ForkManifestPublicationRequestV1 {
+        ForkManifestPublicationRequestV1 {
+            operation_id: Hash::from_bytes(PUBLICATION_OPERATION),
+            child_timeline_id: fork,
+            expected_final_logical_head: head,
+            signing_identity: self.identity,
+            private_material_digest: self.material.material_digest(),
+            public_verification_key: self.material.public_verification_key(),
+            expected_registry: self.registry.clone(),
+        }
+    }
+
+    /// Publish the manifest of `fork` at `head` and read it back.
+    ///
+    /// The store's producer derives the manifest from the stored provenance;
+    /// the result is the manifest the trusted read accepts.
+    fn publish(
+        &self,
+        store: &mut impl ForkManifestPublicationPortV1,
+        fork: TimelineId,
+        head: u64,
+    ) -> TestResult<ForkReproManifestInputV1> {
+        let mut signing = self.registry.clone();
+        let request = self.request(fork, head);
+        let receipt = store.commit_authorized(request, |held, bytes| {
+            sign_for_registered_role(
+                &mut signing,
+                &self.material,
+                held.identity(),
+                &CanonicalBytes::from_vec(bytes.to_vec()),
+            )
+        })?;
+        let committed = store.read_committed(fork, head)?;
+        assert_eq!(
+            committed.receipt, receipt,
+            "the trusted read returns the issued receipt"
+        );
+        let signed = SignedForkReproManifestV1::from_canonical_cbor(&committed.outer_bytes)?;
+        Ok(signed.manifest().input().clone())
+    }
+}
+
+/// Assert the suffix read of `fork` through `head`.
+///
+/// Every Event after the cut reads back through `read_fork_event_suffix` as
+/// host-internal `(0,0)`, with one `EOR1` and one `FOP1` under its `expected`
+/// derived operation ID, and with no `FIA1`.
+fn assert_host_internal_suffix(
+    store: &(impl ForkEventProvenanceAuthorityPortV1 + EventStore),
+    fork: TimelineId,
+    head: u64,
+    expected: &[Hash],
+) -> TestResult {
+    assert_classified_provenance(store, fork, expected)?;
+    let internal = ForkEventClassificationV1::new(ForkEventOriginKindV1::HostInternal, false)?;
+    let suffix = store.read_fork_event_suffix(fork, 0)?;
+    for (origin, _, operation) in &suffix {
+        let (recorded, appended) = (origin.input(), operation.input());
+        assert_eq!(recorded.fork_timeline_id, fork, "the EOR1 names the Fork");
+        assert_eq!(
+            recorded.classification, internal,
+            "every EOR1 is host-internal (0,0)"
+        );
+        assert_eq!(
+            appended.logical_seq, recorded.logical_seq,
+            "the FOP1 and the EOR1 name one Seq"
+        );
+        assert_eq!(
+            appended.event_id, recorded.event_id,
+            "the FOP1 and the EOR1 name one Event"
+        );
+        assert_eq!(
+            appended.intervention_admission_digest, None,
+            "no FOP1 binds an FIA1"
+        );
+    }
+    let provenance: Vec<_> = suffix
+        .iter()
+        .map(|(origin, _, _)| (origin.input().logical_seq, origin.input().event_id))
+        .collect();
+    let stored: Vec<_> = store
+        .read(fork, SeqRange::from_seq(Seq::from_u64(CUT_SEQ + 1)))?
+        .iter()
+        .map(|event| (event.seq.as_u64(), event.id))
+        .collect();
+    let sequences: Vec<u64> = stored.iter().map(|(seq, _)| *seq).collect();
+    let committed: Vec<u64> = (CUT_SEQ + 1..=head).collect();
+    assert_eq!(
+        sequences, committed,
+        "the Fork stores every Event through its head"
+    );
+    assert_eq!(
+        provenance, stored,
+        "every stored Event has its EOR1 and FOP1, under its own id"
+    );
+    Ok(())
+}
+
+/// Assert the provenance of `fork` through the suffix read and the producer.
+///
+/// The manifest is published at the Fork's head through the store's producer
+/// and must list no Intervention.
+fn assert_conformance<H>(store: &mut H, fork: TimelineId, expected: &[Hash]) -> TestResult
+where
+    H: EventStore + ForkEventProvenanceAuthorityPortV1 + ForkManifestPublicationPortV1,
+{
+    let head = store.logical_head(fork)?.as_u64();
+    assert_eq!(head, committed_head(HORIZON_TICK), "the suffix completed");
+    assert_host_internal_suffix(store, fork, head, expected)?;
+    let creator = Creator::register(store)?;
+    let manifest = creator.publish(store, fork, head)?;
+    assert_eq!(manifest.fork_timeline_id, fork, "the manifest's Fork");
+    assert_eq!(manifest.parent_logical_head, CUT_SEQ, "the manifest's cut");
+    assert_eq!(
+        manifest.final_fork_logical_head, head,
+        "the manifest's final head"
+    );
+    assert!(
+        manifest.intervention_sequences.is_empty(),
+        "a host-internal suffix lists no Intervention"
+    );
+    Ok(())
+}
+
+fn classified_ticks_conform_to_the_suffix_read_and_manifest<B: ClassifiedBackend>() -> TestResult {
+    // One `admit` with a resolver, then every later Tick.
+    let mut world = setup_classified::<B>(false)?;
+    let mut lender = Lender::new(&world.authority, &world.permit);
+    let run = run_classified(&mut world.setup, &mut Stager::default(), &mut lender)?;
+    assert_eq!(run.failure, None, "the classified suffix completes");
+    let expected = suffix_operation_ids(&world.setup.fixture, HORIZON_TICK);
+    let mut store = world.setup.coordinator.into_store();
+    assert_conformance(store.host(), world.fork, &expected)
+}
+both_backends!(classified_ticks_conform_to_the_suffix_read_and_manifest);
+
+fn recovered_ticks_conform_to_the_suffix_read_and_manifest<B: ClassifiedBackend>() -> TestResult {
+    // Tick 13 commits but reports an unknown outcome; the next call, with a
+    // fresh resolver, recovers it from the basis and completes the suffix.
+    let ClassifiedSetup {
+        setup,
+        authority,
+        permit,
+        fork,
+        ..
+    } = setup_classified::<Faulty<B>>(false)?;
+    let mut setup = configure(setup, StoreFault::None, Interference::LandedUnknown(2))?;
+    let mut lender = Lender::new(&authority, &permit);
+    assert_eq!(
+        run_classified(&mut setup, &mut Stager::default(), &mut lender),
+        Err(SuffixError::TickOutcomeUnknown),
+        "the landed Tick reports an unknown outcome"
+    );
+    let mut fresh = Lender::new(&authority, &permit);
+    let run = run_classified(&mut setup, &mut Stager::default(), &mut fresh)?;
+    assert_eq!(run.failure, None, "the recovered suffix completes");
+    let expected = suffix_operation_ids(&setup.fixture, HORIZON_TICK);
+    let mut store = setup.coordinator.into_store();
+    assert_conformance(store.host(), fork, &expected)
+}
+both_backends!(recovered_ticks_conform_to_the_suffix_read_and_manifest);
 
 #[test]
 fn every_error_has_a_distinct_safe_message() {
