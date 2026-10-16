@@ -161,6 +161,58 @@ fn acquisition_unwind_releases_real_owned_transactions_before_resuming_the_paylo
 }
 
 #[test]
+fn competing_writer_refuses_acquisition_without_owning_any_transaction() -> TestResult {
+    for read_only in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("busy-replay-acquisition.sqlite");
+        let path = path.to_str().ok_or("UTF-8 path")?;
+        let mut store = SqliteStore::open(path)?;
+        if read_only {
+            drop(store);
+            store = SqliteStore::open_read_only(path)?;
+        }
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        // Force real SQLite contention to return immediately, not an injected
+        // Rust error or a timeout-dependent fixture.
+        store.conn.busy_timeout(Duration::ZERO)?;
+        if let Some(writer) = &store.writer_reservation_connection {
+            writer.busy_timeout(Duration::ZERO)?;
+        }
+        let competitor = rusqlite::Connection::open(path)?;
+        competitor.busy_timeout(Duration::ZERO)?;
+        competitor.execute_batch("BEGIN IMMEDIATE")?;
+        let limits = crate::ForkReplayReadLimitsV1::new(1, 1, 1, 1, 1_000_000)?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let refused = store.begin_fork_replay_read_interval(&mut budget);
+        let reader_released = store.conn.is_autocommit();
+        let writer_released = store
+            .writer_reservation_connection
+            .as_ref()
+            .is_none_or(rusqlite::Connection::is_autocommit);
+        let competitor_held = !competitor.is_autocommit();
+        competitor.execute_batch("ROLLBACK")?;
+        assert_eq!(refused, Err(INTERVAL_STORAGE_ERROR));
+        assert!(reader_released && writer_released && competitor_held);
+        assert_eq!(budget.remaining_native_bytes(), 1);
+        budget.check_time()?;
+
+        // The refusal spent no row: the same one-row ledger can now pay the
+        // mandatory data-version read and own a complete fresh interval.
+        let interval = store.begin_fork_replay_read_interval(&mut budget)?;
+        store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
+        assert_eq!(interval, ErasureProtectedEffectIntervalV1::Owned);
+        assert_released(&store)?;
+        budget.check_time()?;
+    }
+    Ok(())
+}
+
+#[test]
 fn acquisition_does_not_rollback_a_preexisting_reader_transaction() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("preexisting-reader.sqlite");
