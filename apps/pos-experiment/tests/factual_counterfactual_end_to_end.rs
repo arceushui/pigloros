@@ -8,7 +8,7 @@
 //! an earlier Tick Boundary, and the Fork is cut there. Generation 1 is
 //! admitted through the composite `PrefixSeededFrontierSourceV1`, whose
 //! provisional graph a test-only stager also declares Tick by Tick.
-//! `recompute_suffix_with_dependencies` records the rest of the suffix, and
+//! `recompute_suffix` records the rest of the suffix, and
 //! generation 2 is admitted through `RecordedFrontierSourceV1`, which must
 //! derive the same graph digest from the store alone. The frontier is derived
 //! by `pos-time`; this file builds no `OwnerFrontierV1`.
@@ -1404,23 +1404,19 @@ fn admit_generations<B: Backend>(
     let mut coordinator = CounterfactualCoordinatorV1::new(prepared.store.clone());
     let mut stager = prepared.stager()?;
     let mut composite = prepared.composite();
-    let first =
-        coordinator.admit_with_dependencies(&request, &Authority, &mut composite, &mut stager)?;
+    let first = coordinator.admit(&request, &Authority, &mut composite, &mut stager)?;
     assert_eq!(first.generation(), generation(fork, 1));
-    let run = coordinator
-        .recompute_suffix_with_dependencies(&suffix_request(plan, first), &mut stager)?;
+    let run = coordinator.recompute_suffix(&suffix_request(plan, first), &mut stager)?;
     assert_eq!(run.failure, None);
     let mut complete = prepared.recorded()?;
     assert_eq!(complete.generation(), generation(fork, 1));
     assert_eq!(complete.recorded_graph_digest(plan)?, digest);
     let derived = complete.derive_frontier(plan, FRONTIER_ID, PROVENANCE)?;
     assert_eq!(&derived, expected);
-    let second =
-        coordinator.admit_with_dependencies(&request, &Authority, &mut complete, &mut stager)?;
+    let second = coordinator.admit(&request, &Authority, &mut complete, &mut stager)?;
     assert_eq!(second.generation(), generation(fork, 2));
     assert_eq!(second.frontier_digest(), first.frontier_digest());
-    let run = coordinator
-        .recompute_suffix_with_dependencies(&suffix_request(plan, second), &mut stager)?;
+    let run = coordinator.recompute_suffix(&suffix_request(plan, second), &mut stager)?;
     assert_eq!(run.failure, None);
     let mut third = prepared.recorded()?;
     assert_eq!(third.generation(), generation(fork, 2));

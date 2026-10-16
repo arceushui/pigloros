@@ -1522,8 +1522,7 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
     let request = admission_request(&host);
     // Generation 1 is admitted from the hand-built graph and records it.
     let mut stager = DeclaringStager::new(&fork)?;
-    let first =
-        coordinator.admit_with_dependencies(&request, &Authority, &mut graph, &mut stager)?;
+    let first = coordinator.admit(&request, &Authority, &mut graph, &mut stager)?;
     assert_eq!(first.generation(), generation(1));
     // A generation still being written validates as what is recorded so far:
     // the second Intervention's record is not committed yet.
@@ -1532,8 +1531,7 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
         derivation!(&mut early, plan),
         Err(AdmissionError::DependencyGraphInvalid)
     );
-    let run = coordinator
-        .recompute_suffix_with_dependencies(&suffix_request(plan, first), &mut stager)?;
+    let run = coordinator.recompute_suffix(&suffix_request(plan, first), &mut stager)?;
     assert_eq!(run.failure, None);
     // The complete generation derives the published digest and the hand-built
     // derivation.
@@ -1546,12 +1544,10 @@ fn admits_the_next_generation_from_the_recorded_graph<B: Backend>() -> TestResul
     assert_eq!(derivation!(&mut complete, plan)?, expected);
     // Generation 2 is admitted from the recorded graph alone and recomputed.
     let mut again = DeclaringStager::new(&fork)?;
-    let second =
-        coordinator.admit_with_dependencies(&request, &Authority, &mut complete, &mut again)?;
+    let second = coordinator.admit(&request, &Authority, &mut complete, &mut again)?;
     assert_eq!(second.generation(), generation(2));
     assert_eq!(second.frontier_digest(), first.frontier_digest());
-    let run = coordinator
-        .recompute_suffix_with_dependencies(&suffix_request(plan, second), &mut again)?;
+    let run = coordinator.recompute_suffix(&suffix_request(plan, second), &mut again)?;
     assert_eq!(run.failure, None);
     let mut third = recorded(&store)?;
     assert_eq!(third.generation(), generation(2));
@@ -1830,18 +1826,15 @@ fn admits_the_first_generation_through_the_composite_source<B: Backend>() -> Tes
     let mut coordinator = CounterfactualCoordinatorV1::new(store.clone());
     let request = admission_request(&host);
     let mut stager = DeclaringStager::new(&fork)?;
-    let first =
-        coordinator.admit_with_dependencies(&request, &Authority, &mut composite, &mut stager)?;
+    let first = coordinator.admit(&request, &Authority, &mut composite, &mut stager)?;
     assert_eq!(first.generation(), generation(1));
-    let run = coordinator
-        .recompute_suffix_with_dependencies(&suffix_request(plan, first), &mut stager)?;
+    let run = coordinator.recompute_suffix(&suffix_request(plan, first), &mut stager)?;
     assert_eq!(run.failure, None);
     // Generation 2 is admitted through the recorded source with the same digest.
     let mut complete = recorded(&store)?;
     assert_eq!(complete.recorded_graph_digest(plan)?, digest);
     let mut again = DeclaringStager::new(&fork)?;
-    let second =
-        coordinator.admit_with_dependencies(&request, &Authority, &mut complete, &mut again)?;
+    let second = coordinator.admit(&request, &Authority, &mut complete, &mut again)?;
     assert_eq!(second.generation(), generation(2));
     assert_eq!(second.frontier_digest(), first.frontier_digest());
     Ok(())

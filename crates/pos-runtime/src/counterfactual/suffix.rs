@@ -22,28 +22,20 @@
 //! 3. recovers the committed suffix from the Event Store alone (see
 //!    **Recovery** below);
 //! 4. commits each remaining Tick through the horizon: it stages the Tick
-//!    through the same [`CounterfactualTickStagerV1`] seam and staged inputs
-//!    as the first Tick (the plan's exact frozen `ExogenousFrozen` and
-//!    `FixedPolicy` descriptors and the Interventions effective at that
-//!    Tick), and appends the Tick's Events together with its checkpoint Event
-//!    as one batch through
-//!    [`CounterfactualStorePortV1::append_counterfactual_tick`];
+//!    through the same [`CounterfactualDeclaringTickStagerV1`] seam and
+//!    staged inputs as the first Tick (the plan's exact frozen
+//!    `ExogenousFrozen` and `FixedPolicy` descriptors and the Interventions
+//!    effective at that Tick), validates its declaration as the Tick's
+//!    dependency record before any store call (every declared node strictly
+//!    after the last committed Tick; see the coordinator module's
+//!    **Dependency records** decision), and appends the Tick's Events
+//!    together with its checkpoint Event as one batch through
+//!    [`CounterfactualDependencyRecordingPortV1::append_counterfactual_tick_with_dependencies`],
+//!    which records the dependency record atomically with the Tick's Events;
 //! 5. emits every checkpoint of the generation and one sealed `CFR1`.
 //!
-//! [`CounterfactualCoordinatorV1::recompute_suffix_with_dependencies`] is
-//! the same call for a generation admitted with
-//! [`CounterfactualCoordinatorV1::admit_with_dependencies`]: each Tick is
-//! staged through the [`CounterfactualDeclaringTickStagerV1`] seam, its
-//! declaration is validated as the Tick's dependency record before any store
-//! call (every declared node strictly after the last committed Tick; see the
-//! coordinator module's **Dependency records** decision), and the Tick is
-//! appended through
-//! [`CounterfactualDependencyRecordingPortV1::append_counterfactual_tick_with_dependencies`],
-//! which records it atomically with the Tick's Events. Recovery, the
-//! checkpoint chain, and every artifact are those of the plain call: the
-//! record is not part of the chained state, so a generation recomputed with
-//! dependencies emits exactly the checkpoints and `CFR1` of one recomputed
-//! without. A rejected declaration is
+//! The dependency record is not part of the chained state: the checkpoints
+//! and `CFR1` depend only on the committed Events. A rejected declaration is
 //! [`CounterfactualSuffixFailureV1::DependencyDeclarationRejected`], a
 //! `PluginFailure` terminal code like every other staging rejection, and a
 //! retry re-stages the same Tick from the same inputs.
@@ -81,7 +73,8 @@
 //! # ADR gap decisions
 //!
 //! - **Generation fence.** Every later Tick is appended with
-//!   [`CounterfactualStorePortV1::append_counterfactual_tick`] under
+//!   [`CounterfactualDependencyRecordingPortV1::append_counterfactual_tick_with_dependencies`]
+//!   under
 //!   [`CounterfactualGenerationReceiptV1::tick_basis`] of the last committed
 //!   head. The store rechecks, inside the append, the generation, the Fork
 //!   head, and the published plan, dependency-graph, trust, revocation, and
@@ -169,12 +162,10 @@
 //!   forbids for an incomplete suffix, `Exact` and
 //!   `ExactAuthoritativeWithRedactedViews`, to `StructuralOnly`, the
 //!   strongest permitted claim; every other claim is kept unchanged.
-//! - **Recorded parent cut.** The recording path
-//!   ([`CounterfactualCoordinatorV1::recompute_suffix_with_dependencies`])
-//!   checks the parent cut after `committed_invalidation` and before any Tick
-//!   is staged: `cut_tick_at` at the plan's parent cut `Seq` must be a
-//!   `Boundary` at the plan's parent cut Tick, otherwise the error is
-//!   `ParentCutNotFound`. The plain path does not read the parent prefix.
+//! - **Recorded parent cut.** The call checks the parent cut after
+//!   `committed_invalidation` and before any Tick is staged: `cut_tick_at`
+//!   at the plan's parent cut `Seq` must be a `Boundary` at the plan's
+//!   parent cut Tick, otherwise the error is `ParentCutNotFound`.
 //! - **Terminal codes.** A stale Tick basis is `InvalidationConflict`; a
 //!   stager failure, an empty, malformed, or oversized staged batch, a
 //!   reserved Event type, and a rejected dependency declaration are
@@ -228,8 +219,8 @@ use pos_core::{
 
 use super::coordinator::{
     CounterfactualAdmissionErrorV1, CounterfactualCoordinatorV1,
-    CounterfactualDeclaringTickStagerV1, CounterfactualTickStagerV1, PlainSeamV1, RecordingSeamV1,
-    TickSeamV1, COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
+    CounterfactualDeclaringTickStagerV1, RecordingSeamV1, TickSeamV1,
+    COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1,
 };
 
 /// `RCP1` owner of the chained suffix state digest.
@@ -409,6 +400,11 @@ struct ProgressV1 {
 }
 
 impl ProgressV1 {
+    /// The Tick after the last committed one.
+    const fn next_tick(&self) -> u64 {
+        self.tick.saturating_add(1)
+    }
+
     /// Record one committed Tick ending at Fork `Seq` `head`.
     fn advance(&mut self, tick: u64, head: u64, checkpoint: CheckpointV1) {
         self.tick = tick;
@@ -482,41 +478,25 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     }
 
     /// Recover the committed suffix of `request`'s generation and commit every
-    /// remaining Tick through the plan horizon.
+    /// remaining Tick through the plan horizon, each with its declared
+    /// dependency record.
     ///
     /// See the module documentation for the recovery, commit, and artifact
-    /// rules. A failed Tick is reported in the returned run, not as an error.
+    /// rules. A failed Tick, a rejected declaration included, is reported in
+    /// the returned run, not as an error.
     ///
     /// # Errors
     /// Returns the first closed safe error. Every error except
     /// [`CounterfactualSuffixErrorV1::TickOutcomeUnknown`] and
     /// [`CounterfactualSuffixErrorV1::CommittedHeadMismatch`] is detected
     /// before any Tick is staged and commits nothing; after those two, call
-    /// again to recover what committed. On an already complete generation, a
-    /// persisted fact that differs from the generation's Tick basis is
+    /// again to recover what committed. A mid-Tick cut or a `parent_cut_tick`
+    /// that is not the parent's recorded cut Tick is
+    /// [`CounterfactualSuffixErrorV1::ParentCutNotFound`]. On an already
+    /// complete generation, a persisted fact that differs from the
+    /// generation's Tick basis is
     /// [`CounterfactualSuffixErrorV1::InvalidationConflict`].
     pub fn recompute_suffix(
-        &mut self,
-        request: &CounterfactualSuffixRequestV1<'_>,
-        stager: &mut impl CounterfactualTickStagerV1,
-    ) -> Result<CounterfactualSuffixRunV1, CounterfactualSuffixErrorV1> {
-        self.recompute_suffix_through(request, &mut PlainSeamV1(stager))
-    }
-
-    /// Recover the committed suffix of `request`'s generation and commit every
-    /// remaining Tick through the plan horizon, each with its declared
-    /// dependency record.
-    ///
-    /// This is [`Self::recompute_suffix`] with the staged declarations; see
-    /// the module documentation.
-    ///
-    /// # Errors
-    /// Those of [`Self::recompute_suffix`]: a rejected declaration is a Tick
-    /// failure reported in the returned run, not an error. A mid-Tick cut or
-    /// a `parent_cut_tick` that is not the parent's recorded cut Tick is
-    /// [`CounterfactualSuffixErrorV1::ParentCutNotFound`], before any Tick is
-    /// staged.
-    pub fn recompute_suffix_with_dependencies(
         &mut self,
         request: &CounterfactualSuffixRequestV1<'_>,
         stager: &mut impl CounterfactualDeclaringTickStagerV1,
@@ -648,7 +628,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             let count = page.len() as u64;
             for (seq, event) in (next..).zip(page) {
                 if event.event_type.as_str() == COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1 {
-                    let tick = progress.tick.saturating_add(1);
+                    let tick = progress.next_tick();
                     let drafts = tick_events.take();
                     let payload = event.payload.as_slice();
                     let checkpoint =
@@ -740,7 +720,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         progress: &mut ProgressV1,
         seam: &mut M,
     ) -> TickStepV1 {
-        let tick = progress.tick.saturating_add(1);
+        let tick = progress.next_tick();
         let generation = context.receipt.generation();
         let (batch, record) = match seam.stage(context.plan, generation, tick, progress.tick) {
             Ok(staged) => staged,
@@ -751,12 +731,13 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         let seq = progress.head.saturating_add(drafts.len() as u64);
         // Sealing a well-formed `RCP1` does not fail; an error flows out as is.
         next_checkpoint(context, progress.state, tick, &bodies, seq).and_then(|checkpoint| {
-            self.append_tick::<M>(context, progress, tick, drafts, checkpoint, &record)
+            self.append_tick(context, progress, drafts, checkpoint, &record, seam)
         })
     }
 
-    /// Append the staged `drafts` and the Tick's checkpoint Event as one
-    /// batch under the generation's Tick basis, with the seam's `record`.
+    /// Append the staged `drafts` and the Tick's checkpoint Event, of
+    /// [`ProgressV1::next_tick`], as one batch under the generation's Tick
+    /// basis, with the seam's `record`.
     ///
     /// Returns the failure of a Tick that committed nothing.
     ///
@@ -769,11 +750,12 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         &mut self,
         context: &SuffixContextV1<'_>,
         progress: &mut ProgressV1,
-        tick: u64,
         drafts: &[EventDraft],
         checkpoint: CheckpointV1,
         record: &M::Record,
+        seam: &mut M,
     ) -> TickStepV1 {
+        let tick = progress.next_tick();
         let mut tick_drafts = drafts.to_vec();
         tick_drafts.push(checkpoint_draft(context.fork(), &checkpoint.bytes));
         let batch = match PipelineDraftBatchV1::try_new(tick_drafts) {
@@ -787,7 +769,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         let expected = context.receipt.tick_basis(Seq::from_u64(progress.head));
         // The checkpoint Event is the batch's last Event.
         let checkpoint_seq = progress.head.saturating_add(batch.drafts().len() as u64);
-        match M::append_tick(&mut self.store, context.fork(), &expected, &batch, record) {
+        match seam.append_tick(&mut self.store, context.fork(), &expected, &batch, record) {
             Ok(CounterfactualTickOutcomeV1::Committed { head })
                 if head.as_u64() == checkpoint_seq =>
             {
@@ -800,10 +782,23 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             Ok(CounterfactualTickOutcomeV1::Stale(conflict)) => Ok(Some(
                 CounterfactualSuffixFailureV1::InvalidationConflict(conflict),
             )),
-            Err(CounterfactualStoreErrorV1::OutcomeUnknown) => {
-                self.unknown_tick_outcome(context.fork(), &expected)
-            }
-            Err(_) => Ok(Some(CounterfactualSuffixFailureV1::AtomicCommitFailed)),
+            Err(error) => self.seam_failure(context.fork(), &expected, error),
+        }
+    }
+
+    /// Map a failed append: an unknown outcome is resolved with
+    /// [`Self::unknown_tick_outcome`], any other error is a Tick that
+    /// committed nothing.
+    fn seam_failure(
+        &self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        error: CounterfactualStoreErrorV1,
+    ) -> TickStepV1 {
+        if error == CounterfactualStoreErrorV1::OutcomeUnknown {
+            self.unknown_tick_outcome(fork, expected)
+        } else {
+            Ok(Some(CounterfactualSuffixFailureV1::AtomicCommitFailed))
         }
     }
 
@@ -1084,7 +1079,7 @@ fn finish(
                 CounterfactualTerminalStateV1::Failed,
                 Some(CounterfactualTerminalErrorV1 {
                     code: failure.code(),
-                    tick: progress.tick.saturating_add(1),
+                    tick: progress.next_tick(),
                     scheduler_position: 0,
                     safe_digest: None,
                 }),
