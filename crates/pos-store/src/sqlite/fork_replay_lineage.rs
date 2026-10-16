@@ -404,6 +404,27 @@ mod tests {
     }
 
     #[test]
+    fn invalid_utf8_text_is_refused_before_native_string_materialization() -> Fallible<()> {
+        for sql in [
+            "UPDATE timelines SET parent_id=CAST(x'ff' || zeroblob(25) AS TEXT) WHERE parent_id IS NOT NULL",
+            "UPDATE events SET event_type=CAST(x'ff' || zeroblob(7) AS TEXT)",
+        ] {
+            let (store, _, child) = fixture()?;
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            assert!(read(&store, child, &mut clock)??.is_some());
+            // These retain the native TEXT type and exact byte width, so
+            // refusal must come from the UTF-8 check, not the shape probe.
+            store.conn.execute_batch(sql)?;
+            assert_eq!(
+                read(&store, child, &mut clock)?,
+                Err(Error::Read(ReadError::CorruptAuthority)),
+                "accepted invalid UTF-8: {sql}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn late_ancestor_presence_and_geographic_events_hide_the_entire_use() -> Fallible<()> {
         for presence in [true, false] {
             for kind in ["geo.cell", "geo.location"] {

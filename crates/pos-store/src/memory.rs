@@ -7598,6 +7598,42 @@ mod tests {
         Ok((store, child_timeline_id, suffix_operation, event))
     }
 
+    #[test]
+    fn classified_suffix_refuses_overflowing_retained_fork_cut(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut store, child, _, _) = classified_suffix_store()?;
+        let original = store.read_fork_event_suffix(child, 1)?;
+        assert_eq!(original.len(), 1);
+        let original_cut = store
+            .timelines
+            .get(&child)
+            .ok_or("child state")?
+            .timeline
+            .meta
+            .fork_point
+            .ok_or("child fork point")?;
+        store
+            .timelines
+            .get_mut(&child)
+            .ok_or("child state")?
+            .timeline
+            .meta
+            .fork_point = Some((original_cut.0, Seq::from_u64(u64::MAX)));
+        assert_eq!(
+            store.read_fork_event_suffix(child, 1),
+            Err(ForkEventAuthorityErrorV1::CorruptAuthority)
+        );
+        store
+            .timelines
+            .get_mut(&child)
+            .ok_or("child state")?
+            .timeline
+            .meta
+            .fork_point = Some(original_cut);
+        assert_eq!(store.read_fork_event_suffix(child, 1)?, original);
+        Ok(())
+    }
+
     /// Register the fixture creator's attribution key in the store and build
     /// the publication request for the child at `head`, with its signer.
     fn publication_setup(
