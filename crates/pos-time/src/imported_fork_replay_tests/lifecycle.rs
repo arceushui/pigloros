@@ -492,11 +492,16 @@ fn sqlite_case(
             .ok_or("fixture path")?
             .to_owned()
     };
-    let mut writer = SqliteStore::open(&path)?;
-    let requirements = populate_pair(&mut writer, &world)?;
+    let mut seed = SqliteStore::open(&path)?;
+    let requirements = populate_pair(&mut seed, &world)?;
     let timelines = requirements.map(ForkReplayRequirementV1::child_timeline_id);
-    let expected = expected_pair(&writer, timelines, call)?;
-    writer.use_nonblocking_writer_for_test()?;
+    let expected = expected_pair(&seed, timelines, call)?;
+    // The competitor is independent of the seed connection's bound inventory.
+    // An outer COMMIT advances other shared-cache connections' data_version,
+    // even without writes. Keep the named database alive while opening the
+    // same competitor used by every denial probe and final successful write.
+    let writer = SqliteStore::open(&path)?;
+    drop(seed);
     let (verifier, before_keys) = reservation_verifier(writer, &world, requirements, call)?;
     let store = if read_only {
         SqliteStore::open_read_only(&path)?
@@ -564,7 +569,9 @@ fn sqlite_case(
         .lock()
         .map_err(|_| "writer fixture poisoned")?;
     assert_eq!(writer.load_key_registry()?, Some(before_keys));
-    writer.save_key_registry(&verifier.next)?;
+    writer
+        .save_key_registry(&verifier.next)
+        .map_err(|error| format!("same competing writer after release: {error}"))?;
     assert_eq!(writer.load_key_registry()?, Some(verifier.next.clone()));
     drop(writer);
     Ok(())

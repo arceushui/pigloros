@@ -506,11 +506,12 @@ mod tests {
         }
     }
 
-    struct ChangeBoundsOnThirdVerification {
+    struct ChangeFinalBounds {
         calls: AtomicUsize,
+        unchanged_calls: usize,
     }
 
-    impl pos_runtime::WorldReplayVerifierV1 for ChangeBoundsOnThirdVerification {
+    impl pos_runtime::WorldReplayVerifierV1 for ChangeFinalBounds {
         fn read_profile(
             &self,
             _closure: &pos_core::WorldReplayClosureV1,
@@ -530,7 +531,7 @@ mod tests {
             inventory_generation: pos_core::ErasureReferenceV1,
         ) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_runtime::WorldReplayVerificationErrorV1>
         {
-            let max_events = if self.calls.fetch_add(1, Ordering::SeqCst) < 2 {
+            let max_events = if self.calls.fetch_add(1, Ordering::SeqCst) < self.unchanged_calls {
                 65_536
             } else {
                 65_535
@@ -983,40 +984,45 @@ mod tests {
 
     #[test]
     fn public_compare_rolls_back_when_final_read_bounds_change() {
-        let fixture = count_fixture();
-        let verifier = Arc::new(ChangeBoundsOnThirdVerification {
-            calls: AtomicUsize::new(0),
-        });
-        let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
-            .with_world_replay_verifier(verifier.clone());
-        let mut host = pos_runtime::ErasureExecutionHostV1::open_with_authority(
-            StoreConfig::Memory,
-            &composition,
-            pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
-        )
-        .test_ok();
-        let gate = host.containment_gate();
-        let entity = EntityId::new();
-        let (fork_a, fork_b, fork_seq) = forked(&mut host, &[entity], 1, [1, 1]);
-        let closure_a = crate::test_support::closure_for_host(&mut host, fork_a);
-        let closure_b = crate::test_support::closure_for_host(&mut host, fork_b);
-        let mut registry_a = fixture.registry(Arc::clone(&gate));
-        let mut registry_b = fixture.registry(gate);
-        let mut reads = host.read_sender().test_ok();
-        assert!(matches!(
-            compare_with(
-                &fixture,
-                &mut reads,
-                [fork_a, fork_b],
-                fork_seq,
-                [&mut registry_a, &mut registry_b],
-                [&closure_a, &closure_b],
-            ),
-            Err(CoreError::ArtifactUnavailable)
-        ));
-        assert_eq!(count_for(&registry_a, fork_a, entity), 0);
-        assert_eq!(count_for(&registry_b, fork_b, entity), 0);
-        assert_eq!(verifier.calls.load(Ordering::SeqCst), 4);
+        // Final A refuses before final B is called; a separate case keeps A
+        // valid and proves that final B also refuses without installing either.
+        for unchanged_calls in [2, 3] {
+            let fixture = count_fixture();
+            let verifier = Arc::new(ChangeFinalBounds {
+                calls: AtomicUsize::new(0),
+                unchanged_calls,
+            });
+            let composition = pos_runtime::ErasureCoordinatorCompositionV1::closed()
+                .with_world_replay_verifier(verifier.clone());
+            let mut host = pos_runtime::ErasureExecutionHostV1::open_with_authority(
+                StoreConfig::Memory,
+                &composition,
+                pos_core::ErasureRecoveryLimitsV1::compiled_maximum(),
+            )
+            .test_ok();
+            let gate = host.containment_gate();
+            let entity = EntityId::new();
+            let (fork_a, fork_b, fork_seq) = forked(&mut host, &[entity], 1, [1, 1]);
+            let closure_a = crate::test_support::closure_for_host(&mut host, fork_a);
+            let closure_b = crate::test_support::closure_for_host(&mut host, fork_b);
+            let mut registry_a = fixture.registry(Arc::clone(&gate));
+            let mut registry_b = fixture.registry(gate);
+            let mut reads = host.read_sender().test_ok();
+            assert!(matches!(
+                compare_with(
+                    &fixture,
+                    &mut reads,
+                    [fork_a, fork_b],
+                    fork_seq,
+                    [&mut registry_a, &mut registry_b],
+                    [&closure_a, &closure_b],
+                ),
+                Err(CoreError::ArtifactUnavailable)
+            ));
+            assert_eq!(count_for(&registry_a, fork_a, entity), 0);
+            assert_eq!(count_for(&registry_b, fork_b, entity), 0);
+            assert_eq!(verifier.calls.load(Ordering::SeqCst), unchanged_calls + 1);
+        }
     }
 
     #[test]
