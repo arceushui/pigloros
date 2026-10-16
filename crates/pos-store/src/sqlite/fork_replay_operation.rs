@@ -363,6 +363,72 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn principal_inter_statement_writes_refuse_without_changing_a_held_snapshot() -> Fallible<()> {
+        use rusqlite::hooks::{AuthContext, Authorization};
+
+        let (_, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
+        for (sql, expected) in [
+            ("DELETE FROM fork_admission_operations", Error::CorruptAuthority),
+            ("UPDATE fork_admission_operations SET operation_id = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'", Error::StorageIndeterminate),
+            ("UPDATE fork_admission_operations SET operation_id = zeroblob(31)", Error::CorruptAuthority),
+        ] {
+            for held_snapshot in [false, true] {
+                let directory = tempfile::tempdir()?;
+                let path = directory.path().join("principal-operation.sqlite");
+                let store = super::super::SqliteStore::open(
+                    path.to_str().ok_or("non-UTF-8 test path")?,
+                )?;
+                super::super::sqlite_insert_fork_admission_operation(&store.conn, &row)?;
+                assert_eq!(
+                    principal_operation_id_with_context(
+                        &store.conn,
+                        row.result_digest,
+                        &mut NativeReadContextV1::ordinary(),
+                    )?,
+                    row.operation_id,
+                );
+                let writer = Connection::open(&path)?;
+                writer.busy_timeout(Duration::ZERO)?;
+                // Only the short-hash case needs persisted-corruption injection.
+                // None of these altered facts is admitted principal authority.
+                writer.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+                if held_snapshot {
+                    store.conn.execute_batch("BEGIN DEFERRED")?;
+                }
+                let observation = write_before_second_select(&store.conn, writer, sql)?;
+                let result = principal_operation_id_with_context(
+                    &store.conn,
+                    row.result_digest,
+                    &mut NativeReadContextV1::ordinary(),
+                );
+                store.conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+                let mut observation = observation.lock().map_err(|_| "observer poisoned")?;
+                assert_eq!(observation.selects, 2);
+                assert_eq!(observation.outcome.take().ok_or("writer was not scheduled")??, 1);
+                drop(observation);
+                if held_snapshot {
+                    assert_eq!(result?, row.operation_id);
+                    store.conn.execute_batch("ROLLBACK")?;
+                } else {
+                    assert_eq!(result, Err(expected));
+                }
+                // Re-select by the unchanged result digest. A fresh snapshot
+                // must observe the committed deletion or invalid operation ID.
+                assert_eq!(
+                    principal_operation_id_with_context(
+                        &store.conn,
+                        row.result_digest,
+                        &mut NativeReadContextV1::ordinary(),
+                    ),
+                    Err(expected),
+                );
+                assert!(store.conn.is_autocommit());
+            }
+        }
+        Ok(())
+    }
+
     fn operation_root(conn: &Connection) -> rusqlite::Result<i64> {
         conn.query_row(
             "SELECT rootpage FROM sqlite_schema
