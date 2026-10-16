@@ -592,6 +592,7 @@ struct CorpusOptions<'a> {
     extra: Option<&'a [u8]>,
     release_mutation: Option<ReleaseMutation>,
     mixed_oracles: bool,
+    plugin_records: Option<&'a [Vec<u8>]>,
     failure_outcome: Option<u8>,
     failure_redaction_state: Option<u8>,
     profile_mutation: Option<ProfileMutation>,
@@ -609,6 +610,7 @@ impl Default for CorpusOptions<'_> {
             extra: None,
             release_mutation: None,
             mixed_oracles: false,
+            plugin_records: None,
             failure_outcome: None,
             failure_redaction_state: None,
             profile_mutation: None,
@@ -699,6 +701,26 @@ pub fn corpus_with_invalid_release_admission() -> TestResult<Corpus> {
 pub fn mixed_oracle_corpus() -> TestResult<Corpus> {
     corpus_for_options(CorpusOptions {
         mixed_oracles: true,
+        ..CorpusOptions::default()
+    })
+}
+
+/// Build a signed `plugin-conformance` corpus for the public Plugin protocol.
+///
+/// Families 1, 2, 3 and 5 carry the typed failure oracles `capability-denied`,
+/// `malformed-payload`, `resource-limit` and `incompatible-contract` owned by the
+/// fixture provider; the remaining families carry the supplied oracle member for
+/// their ordinal, one entry per family. The records at ordinals 1, 2, 3 and 5 are
+/// written as fixture members but no oracle references them, so their content is
+/// opaque and inert by design, as is the one-byte payload of every family.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn plugin_corpus(records: &[Vec<u8>]) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        claim_layer: 4,
+        subject_adapter: SubjectAdapterKind::PublicPluginProtocol,
+        plugin_records: Some(records),
         ..CorpusOptions::default()
     })
 }
@@ -810,6 +832,7 @@ fn corpus_for_options(options: CorpusOptions<'_>) -> TestResult<Corpus> {
         extra,
         release_mutation: _,
         mixed_oracles,
+        plugin_records: _,
         failure_outcome: _,
         failure_redaction_state: _,
         profile_mutation,
@@ -1500,7 +1523,8 @@ fn fixtures(
             let output_path = format!("fixtures/{case_id}.expected");
             members.insert(payload_path.clone(), (vec![u8::try_from(family)?], 0));
             members.insert(evidence_path.clone(), (b"draft".to_vec(), 17));
-            members.insert(output_path.clone(), (expected.to_vec(), 1));
+            let output = plugin_record(options.plugin_records, family)?.unwrap_or(expected);
+            members.insert(output_path.clone(), (output.to_vec(), 1));
             let provider = provider_key(1);
             let transition = if family == 5 {
                 array(vec![provider_key(2), provider.clone()])
@@ -1513,39 +1537,7 @@ fn fixtures(
                 Value::Null
             };
             let release_binding = if family == 5 {
-                let admission = release_admission(
-                    signing_key,
-                    &case_id,
-                    execution,
-                    trust,
-                    &provider_key(2),
-                    &provider_key(1),
-                    options.release_mutation,
-                )?;
-                let digest = hash(&admission);
-                if !matches!(
-                    options.release_mutation,
-                    Some(ReleaseMutation::MissingMember)
-                ) {
-                    members.insert(
-                        format!("authority/release-admissions/{case_id}.rad1"),
-                        (admission.clone(), 16),
-                    );
-                }
-                if matches!(options.release_mutation, Some(ReleaseMutation::ExtraMember)) {
-                    members.insert(
-                        "authority/release-admissions/extra.rad1".to_owned(),
-                        (admission, 16),
-                    );
-                }
-                if matches!(
-                    options.release_mutation,
-                    Some(ReleaseMutation::MissingBinding)
-                ) {
-                    Value::Null
-                } else {
-                    bytes(&digest)
-                }
+                release_binding(members, signing_key, &case_id, [execution, trust], options)?
             } else {
                 Value::Null
             };
@@ -1553,7 +1545,7 @@ fn fixtures(
                 members,
                 &evidence_path,
                 &output_path,
-                options.mixed_oracles,
+                oracle_mode(options),
                 options.failure_outcome,
                 family,
             )?;
@@ -1593,6 +1585,45 @@ fn fixtures(
         .collect()
 }
 
+fn release_binding(
+    members: &mut BTreeMap<String, (Vec<u8>, u8)>,
+    signing_key: &SigningKey,
+    case_id: &str,
+    [execution, trust]: [[u8; 32]; 2],
+    options: CorpusOptions<'_>,
+) -> TestResult<Value> {
+    let admission = release_admission(
+        signing_key,
+        case_id,
+        execution,
+        trust,
+        &provider_key(2),
+        &provider_key(1),
+        options.release_mutation,
+    )?;
+    let digest = hash(&admission);
+    if !matches!(
+        options.release_mutation,
+        Some(ReleaseMutation::MissingMember)
+    ) {
+        members.insert(
+            format!("authority/release-admissions/{case_id}.rad1"),
+            (admission.clone(), 16),
+        );
+    }
+    if matches!(options.release_mutation, Some(ReleaseMutation::ExtraMember)) {
+        members.insert(
+            "authority/release-admissions/extra.rad1".to_owned(),
+            (admission, 16),
+        );
+    }
+    let unbound = matches!(
+        options.release_mutation,
+        Some(ReleaseMutation::MissingBinding)
+    );
+    Ok(if unbound { Value::Null } else { bytes(&digest) })
+}
+
 fn failure_replay_claim(family: u64, state: Option<u8>) -> u8 {
     if family == 1 {
         state.unwrap_or(0)
@@ -1601,11 +1632,64 @@ fn failure_replay_claim(family: u64, state: Option<u8>) -> u8 {
     }
 }
 
+fn plugin_record(records: Option<&[Vec<u8>]>, family: u64) -> TestResult<Option<&[u8]>> {
+    let Some(records) = records else {
+        return Ok(None);
+    };
+    let record = records
+        .get(usize::try_from(family)?)
+        .ok_or_else(|| io::Error::other("plugin oracle record is missing"))?;
+    Ok(Some(record.as_slice()))
+}
+
+/// How `fixture_expectation` derives the oracle of each family.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FixtureOracleMode {
+    Default,
+    Mixed,
+    Plugin,
+}
+
+const fn oracle_mode(options: CorpusOptions<'_>) -> FixtureOracleMode {
+    if options.plugin_records.is_some() {
+        FixtureOracleMode::Plugin
+    } else if options.mixed_oracles {
+        FixtureOracleMode::Mixed
+    } else {
+        FixtureOracleMode::Default
+    }
+}
+
+const fn typed_failure_code(mode: FixtureOracleMode, family: u64) -> Option<&'static str> {
+    match (mode, family) {
+        (FixtureOracleMode::Plugin, 1) => Some("capability-denied"),
+        (FixtureOracleMode::Plugin, 2) => Some("malformed-payload"),
+        (FixtureOracleMode::Plugin, 3) => Some("resource-limit"),
+        (FixtureOracleMode::Plugin, 5) => Some("incompatible-contract"),
+        (FixtureOracleMode::Mixed, 1) => Some("denied"),
+        _ => None,
+    }
+}
+
+fn typed_failure_expectation(
+    code: &str,
+    failure_outcome: Option<u8>,
+    auxiliary: Value,
+) -> FixtureExpectation {
+    let failure = array(vec![text("test-provider"), text("1.0.0"), text(code)]);
+    FixtureExpectation {
+        auxiliary,
+        oracle: array(vec![uint(1), Value::Null, failure.clone(), Value::Null]),
+        expected_outcome: uint(u64::from(failure_outcome.unwrap_or(2))),
+        expected_error: failure,
+    }
+}
+
 fn fixture_expectation(
     members: &BTreeMap<String, (Vec<u8>, u8)>,
     evidence_path: &str,
     output_path: &str,
-    mixed_oracles: bool,
+    mode: FixtureOracleMode,
     failure_outcome: Option<u8>,
     family: u64,
 ) -> TestResult<FixtureExpectation> {
@@ -1615,19 +1699,12 @@ fn fixture_expectation(
             descriptor(members, output_path)?,
         ]))
     };
-    Ok(match (mixed_oracles, family) {
-        (true, 1) => FixtureExpectation {
-            auxiliary: output_and_evidence()?,
-            oracle: array(vec![
-                uint(1),
-                Value::Null,
-                array(vec![text("test-provider"), text("1.0.0"), text("denied")]),
-                Value::Null,
-            ]),
-            expected_outcome: uint(u64::from(failure_outcome.unwrap_or(2))),
-            expected_error: array(vec![text("test-provider"), text("1.0.0"), text("denied")]),
-        },
-        (true, 2) => FixtureExpectation {
+    if let Some(code) = typed_failure_code(mode, family) {
+        let auxiliary = output_and_evidence()?;
+        return Ok(typed_failure_expectation(code, failure_outcome, auxiliary));
+    }
+    Ok(match (mode, family) {
+        (FixtureOracleMode::Mixed, 2) => FixtureExpectation {
             auxiliary: output_and_evidence()?,
             oracle: array(vec![
                 uint(2),
