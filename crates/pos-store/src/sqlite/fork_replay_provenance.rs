@@ -40,6 +40,15 @@ impl ProvenanceRecordV1 {
     }
 }
 
+/// Decode the selected native value without exposing native error details.
+/// The earlier probe does not replace this fallible conversion boundary.
+fn decode_provenance_blob(
+    row: &rusqlite::Row<'_>,
+) -> std::result::Result<Vec<u8>, pos_core::ForkAdmissionErrorV1> {
+    row.get(0)
+        .map_err(|_| pos_core::ForkAdmissionErrorV1::StorageIndeterminate)
+}
+
 fn stored_record(
     conn: &Connection,
     event: EventId,
@@ -87,11 +96,7 @@ fn stored_record(
                                     conn,
                                     selection.blob,
                                     context,
-                                    |row, _| {
-                                        row.get::<_, Vec<u8>>(0).map_err(|_| {
-                                            pos_core::ForkAdmissionErrorV1::StorageIndeterminate
-                                        })
-                                    },
+                                    |row, _| decode_provenance_blob(row),
                                 )
                             })
                             .and_then(|bytes| {
@@ -186,6 +191,39 @@ mod tests {
         super::super::SqliteStore,
         ForkAttributionImportClosureV1,
     );
+
+    #[test]
+    fn selected_native_blob_decoder_preserves_bytes_and_closes_wrong_types() -> Fallible<()> {
+        let conn = Connection::open_in_memory()?;
+        let mut statement = conn.prepare("SELECT ?1")?;
+        // These are native decoder faults, not a claim that a coherent held
+        // snapshot changes storage class after the preceding successful probe.
+        for (value, expected) in [
+            (Value::Blob(vec![0, 1, 255]), Ok(vec![0, 1, 255])),
+            (
+                Value::Text("private native contents".to_owned()),
+                Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+            ),
+            (
+                Value::Integer(1),
+                Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+            ),
+            (
+                Value::Real(1.5),
+                Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+            ),
+            (
+                Value::Null,
+                Err(pos_core::ForkAdmissionErrorV1::StorageIndeterminate),
+            ),
+            (Value::Blob(Vec::new()), Ok(Vec::new())),
+        ] {
+            let mut rows = statement.query([value])?;
+            let row = rows.next()?.ok_or("missing selected native blob row")?;
+            assert_eq!(decode_provenance_blob(row), expected);
+        }
+        Ok(())
+    }
 
     fn fixture() -> Fallible<Fixture> {
         let directory = tempfile::tempdir()?;
