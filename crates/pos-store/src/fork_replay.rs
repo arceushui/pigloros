@@ -878,10 +878,6 @@ impl ReplayEventStagingV1 {
         &mut self.0[index]
     }
 
-    pub(crate) const fn len(&self) -> usize {
-        self.0.len()
-    }
-
     pub(crate) fn into_events(mut self) -> Vec<pos_core::Event> {
         std::mem::take(&mut self.0)
     }
