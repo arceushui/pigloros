@@ -5425,6 +5425,8 @@ mod tests {
         ForkReplayLineageCycle,
         ForkReplayLineageSubstitute,
         ForkReplayLineageMissing,
+        ForkReplayHeadError(pos_store::ForkReplayLineageReadErrorV1),
+        ForkReplayEventsError(pos_store::ForkReplayLineageReadErrorV1),
         ForkReplayEventCount,
         ForkReplayEventSequence,
         BeginForkReplayPanic,
@@ -6266,6 +6268,9 @@ mod tests {
             depth: usize,
             budget: &mut ForkReplayReadBudgetV1<'_>,
         ) -> Result<Seq, pos_store::ForkReplayLineageReadErrorV1> {
+            if let FaultModeV1::ForkReplayHeadError(error) = self.fault {
+                return Err(error);
+            }
             self.inner.fork_replay_logical_head(timeline, depth, budget)
         }
 
@@ -6276,6 +6281,9 @@ mod tests {
             bounds: EventReadBounds,
             budget: &mut ForkReplayReadBudgetV1<'_>,
         ) -> Result<Vec<Event>, pos_store::ForkReplayLineageReadErrorV1> {
+            if let FaultModeV1::ForkReplayEventsError(error) = self.fault {
+                return Err(error);
+            }
             self.inner
                 .read_fork_replay_events(timeline, range, bounds, budget)
                 .map(|mut events| {
