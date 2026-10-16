@@ -112,6 +112,39 @@ fn event_reads_reject_stale_capabilities_and_substituted_operation_budgets() {
 }
 
 #[test]
+fn ordinary_history_refuses_an_unclassified_fork_requirement() {
+    let (mut host, closure) = replay_fault_host(FaultModeV1::Passthrough);
+    let requested = replay_use(&closure);
+    let mut sender = test_ok(host.read_sender());
+    let ordinary = test_ok(sender.admit_world_replay(&closure, &requested));
+    let requirement = test_ok(pos_store::ForkReplayRequirementV1::new(
+        closure.timeline_id(),
+        requested.source_logical_head(),
+        Hash::from_bytes([0x91; 32]),
+        None,
+    ));
+    let inconsistent =
+        crate::world_replay::test_with_unclassified_fork_requirement(ordinary.clone(), requirement);
+    let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+    let start = clock.mark();
+    let mut budget = test_ok(ForkReplayReadBudgetV1::new(
+        ordinary.fork_read_limits(),
+        start,
+        &mut clock,
+    ));
+    assert!(test_ok(sender.validate_world_replay_forks(&ordinary, &mut budget)).is_empty());
+    let remaining_bytes = budget.remaining_native_bytes();
+    assert_eq!(
+        sender.validate_world_replay_forks(&inconsistent, &mut budget),
+        Err(ErasureHostErrorV1::Conflict)
+    );
+    assert_eq!(budget.remaining_native_bytes(), remaining_bytes);
+    test_ok(budget.check_time());
+    assert!(test_ok(sender.validate_world_replay_forks(&ordinary, &mut budget)).is_empty());
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+}
+
+#[test]
 fn read_fence_rejects_zero_or_three_arms_without_invoking_callbacks() {
     let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
     let requested = replay_use(&closure);
