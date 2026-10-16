@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 172c588b6c1efbcc9fa587301b763e861c55a12e
+          ref: 08dcfdca37cdb5e04cdd0acb08e6ed95fcc3eae3
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
@@ -31,7 +31,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           git rev-parse HEAD | tee artifacts/source-sha.txt
-          test "$(git rev-parse HEAD)" = 172c588b6c1efbcc9fa587301b763e861c55a12e
+          test "$(git rev-parse HEAD)" = 08dcfdca37cdb5e04cdd0acb08e6ed95fcc3eae3
           rustc -Vv | tee artifacts/rustc.txt
       - name: Exercise the real inter-statement SQLite writer
         run: |
@@ -41,6 +41,14 @@ jobs:
             -- --exact --include-ignored 2>&1 | tee artifacts/native-race.log
           grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' artifacts/native-race.log
           bash scripts/assert-no-ignored-in-test-summary.sh artifacts/native-race.log
+      - name: Exercise all native interval-acquisition regressions
+        run: |
+          set -euo pipefail
+          cargo test -p pos-store --all-features --locked --lib \
+            sqlite::fork_replay::interval_tests:: \
+            -- --include-ignored 2>&1 | tee artifacts/native-interval.log
+          grep -F 'test result: ok. 6 passed; 0 failed; 0 ignored;' artifacts/native-interval.log
+          bash scripts/assert-no-ignored-in-test-summary.sh artifacts/native-interval.log
       - name: Exercise the repaired public receipt and chain-hash contracts
         run: |
           set -euo pipefail
