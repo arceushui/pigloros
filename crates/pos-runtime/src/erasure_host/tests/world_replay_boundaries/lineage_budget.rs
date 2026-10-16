@@ -100,8 +100,9 @@ fn clock_for(good_marks: Option<usize>, bad_mark: Duration) -> ScriptedGuardMono
     let script = good_marks.map_or_else(
         || vec![GOOD_MARK],
         |marks| {
-            // g0 and ledger construction remain healthy. The good mark after
-            // the refusal proves that failure is latched, not transient.
+            // g0 and ledger construction remain healthy. After refusal the
+            // good mark stays queued: repeated refusals and unchanged sample
+            // counts prove the latched ledger never reads the clock again.
             std::iter::repeat_n(GOOD_MARK, marks + 2)
                 .chain([bad_mark, GOOD_MARK])
                 .collect()
