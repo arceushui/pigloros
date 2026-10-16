@@ -29,10 +29,25 @@ fn local_original_epoch_refusals<S: ForkReplayAuthorityReadPortV1>(
     expected_operation: &[u8],
     limits: ForkReplayReadLimitsV1,
 ) -> Result<(), Box<dyn Error>> {
+    // Count an independently successful control, not a guessed prefix ceiling.
+    // Resource limits and expected evidence remain independent of this count.
+    let mut control_clock = ScriptedGuardMonotonicSourceV1::new([Duration::from_millis(1)]);
+    let control_start = control_clock.mark();
+    {
+        let mut control_budget =
+            ForkReplayReadBudgetV1::new(limits, control_start, &mut control_clock)?;
+        let evidence = store
+            .validate_fork_replay_authority(requirement, &mut control_budget)
+            .map_err(|error| format!("Local positive read control failed: {error}"))?;
+        assert_eq!(evidence.requirement(), *requirement);
+        assert_eq!(evidence.operation_bytes(), expected_operation);
+    }
+    let samples = control_clock.samples_taken();
+    assert!(samples > 2);
     for final_offset in [Duration::ZERO, Duration::from_secs(2)] {
         let mut completed = false;
         let mut refused = false;
-        for prefix in 2..2048 {
+        for prefix in 2..=samples {
             // A bad sample is followed by in-budget ticks. Native error
             // translation must not erase the original ledger's refusal.
             let mut probe_clock = ScriptedGuardMonotonicSourceV1::new(
@@ -44,12 +59,17 @@ fn local_original_epoch_refusals<S: ForkReplayAuthorityReadPortV1>(
                 ForkReplayReadBudgetV1::new(limits, probe_start, &mut probe_clock)?;
             match store.validate_fork_replay_authority(requirement, &mut probe_budget) {
                 Ok(evidence) => {
+                    assert_eq!(prefix, samples, "every observed sample must be checked");
                     assert_eq!(evidence.requirement(), *requirement);
                     assert_eq!(evidence.operation_bytes(), expected_operation);
                     completed = true;
                     break;
                 }
                 Err(error) => {
+                    assert!(
+                        prefix < samples,
+                        "the control's complete prefix must succeed"
+                    );
                     assert_eq!(
                         error,
                         ForkReplayAuthorityReadErrorV1::BoundsExceeded,
