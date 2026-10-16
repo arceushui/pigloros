@@ -1293,7 +1293,6 @@ mod tests {
         assert_eq!(registry.retained_state_for_test(), before);
         replay_with(&fixture, &mut reads, timeline, &mut registry, &closure).test_ok();
         assert_eq!(count_for(&registry, timeline, &entity), 1);
-        drop(reads);
         assert_eq!(host.status(), pos_runtime::ErasureHostStatusV1::Ready);
     }
 
