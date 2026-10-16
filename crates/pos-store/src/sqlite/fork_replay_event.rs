@@ -1165,10 +1165,31 @@ mod tests {
     #[test]
     fn original_guard_epoch_is_checked_inside_getters_and_hash_batches() -> Fallible<()> {
         let (_directory, store, ids) = fixture()?;
+        let limits = ForkReplayReadLimitsV1::new(2, 3, 64, 16_384, 10)?;
+        let expected = store.compute_chain_hash_at(ids[2], Seq::from_u64(1))?;
+        let mut control_clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let control_start = control_clock.mark();
+        {
+            let mut control_budget =
+                ForkReplayReadBudgetV1::new(limits, control_start, &mut control_clock)?;
+            assert_eq!(
+                chain_hash_with_context(
+                    &store.conn,
+                    store.hasher.as_ref(),
+                    ids[2],
+                    Seq::from_u64(1),
+                    &mut NativeReadContextV1::protected(&mut control_budget),
+                )
+                .map_err(|error| format!("parent-hash positive control failed: {error}"))?,
+                expected,
+            );
+        }
+        let samples = control_clock.samples_taken();
+        assert!(samples > 2);
         for regression in [false, true] {
             let mut observed_failures = 0;
             let mut observed_successes = 0;
-            for boundary in 2..=512 {
+            for boundary in 2..=samples {
                 let initial = if regression {
                     Duration::from_micros(1)
                 } else {
@@ -1182,7 +1203,6 @@ mod tests {
                 let marks = std::iter::repeat_n(initial, boundary).chain(std::iter::once(later));
                 let mut clock = ScriptedGuardMonotonicSourceV1::new(marks);
                 let start = clock.mark();
-                let limits = ForkReplayReadLimitsV1::new(2, 3, 64, 16_384, 10)?;
                 let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
                 let result = chain_hash_with_context(
                     &store.conn,
@@ -1192,8 +1212,14 @@ mod tests {
                     &mut NativeReadContextV1::protected(&mut budget),
                 );
                 if result.is_ok() {
+                    assert_eq!(boundary, samples, "every observed sample must be checked");
+                    assert_eq!(result?, expected);
                     observed_successes += 1;
                 } else {
+                    assert!(
+                        boundary < samples,
+                        "the control's complete prefix must succeed"
+                    );
                     observed_failures += 1;
                     assert!(matches!(result, Err(CoreError::ArtifactUnavailable)));
                     assert!(budget.check_time().is_err());
