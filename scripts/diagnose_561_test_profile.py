@@ -34,7 +34,7 @@ def validate_result(output, test):
         raise ValueError("expected exactly one successful named test, no ignored tests")
 
 
-def profiles(messages, checkout):
+def profile_multisets(messages, checkout):
     result = {}
     for item in messages:
         if item.get("reason") != "compiler-artifact":
@@ -43,30 +43,131 @@ def profiles(messages, checkout):
         package = item["package_id"].replace(str(checkout), "<checkout>")
         key = json.dumps([package, target["name"], target["kind"],
                           sorted(item["features"])])
-        if key in result:
-            raise ValueError("duplicate compiler artifact identity")
-        result[key] = item["profile"]
+        result.setdefault(key, []).append(item["profile"])
     return result
 
 
-def validate_profiles(baseline, candidate):
+def validate_profile_multisets(baseline, candidate):
     if not baseline or baseline.keys() != candidate.keys():
         raise ValueError("compiler artifact inventories differ or are empty")
     changed = 0
     for key, before in baseline.items():
         after = candidate[key]
         package, name, kinds, _ = json.loads(key)
+        if len({json.dumps(profile, sort_keys=True) for profile in before}) != 1:
+            raise ValueError("ambiguous baseline group has mixed or absent profiles")
+        expected = before
         if name == "curve25519_dalek" and kinds == ["lib"]:
-            expected = dict(before, opt_level="3")
-            if ("curve25519-dalek" not in package or before["opt_level"] != "0"
-                    or not before["debug_assertions"] or not before["overflow_checks"]
-                    or after != expected):
-                raise ValueError("curve profile changed beyond optimization")
+            if (len(before) != 1 or "curve25519-dalek" not in package
+                    or before[0]["opt_level"] != "0"
+                    or not before[0]["debug_assertions"] or not before[0]["overflow_checks"]):
+                raise ValueError("unexpected curve build inventory/profile")
+            expected = [dict(before[0], opt_level="3")]
             changed += 1
-        elif before != after:
-            raise ValueError("unrelated compiler profile changed")
+        normalized = lambda entries: sorted(json.dumps(p, sort_keys=True) for p in entries)
+        if normalized(after) != normalized(expected):
+            raise ValueError("artifact multiplicity or profile changed unexpectedly")
     if changed != 1:
         raise ValueError("expected exactly one optimized curve library")
+
+
+def profile_self_test():
+    # Bounded parser fixture derived from the observed duplicate serde_json and
+    # sha2 emissions. Opaque output names differ; identity/profile fields agree.
+    registry = "registry+https://github.com/rust-lang/crates.io-index#"
+    fixtures = [
+        (registry + "curve25519-dalek@4.1.3", "curve25519_dalek", [], "curve"),
+        (registry + "serde_json@1.0.151", "serde_json", ["default", "std"], "serde-one"),
+        (registry + "serde_json@1.0.151", "serde_json", ["default", "std"], "serde-two"),
+        (registry + "sha2@0.11.0", "sha2", ["alloc", "default", "oid"], "sha-one"),
+        (registry + "sha2@0.11.0", "sha2", ["alloc", "default", "oid"], "sha-two"),
+        ("path+file:///baseline#pos-time@0.1.0", "pos_time", [], "workspace"),
+    ]
+    messages = [
+        {"reason": "compiler-artifact", "package_id": package,
+         "target": {"name": name, "kind": ["lib"]}, "features": features,
+         "filenames": [f"/baseline/target/debug/deps/{output}.rlib"],
+         "profile": {"opt_level": "0", "debuginfo": 2, "debug_assertions": True,
+                     "overflow_checks": True, "test": name == "pos_time"}}
+        for package, name, features, output in fixtures
+    ]
+    messages.append({"reason": "build-finished", "success": True})
+    baseline = profile_multisets(messages, Path("/baseline"))
+    assert len(baseline) == 4 and sum(map(len, baseline.values())) == 6
+    candidate_messages = copy.deepcopy(messages)
+    for item in candidate_messages:
+        if item["reason"] != "compiler-artifact":
+            continue
+        item["package_id"] = item["package_id"].replace("/baseline", "/candidate")
+        item["filenames"] = [p.replace("/baseline", "/candidate") for p in item["filenames"]]
+        if item["target"]["name"] == "curve25519_dalek":
+            item["profile"]["opt_level"] = "3"
+    candidate = profile_multisets(candidate_messages, Path("/candidate"))
+    validate_profile_multisets(baseline, candidate)
+    validate_profile_multisets(
+        baseline, profile_multisets(reversed(candidate_messages), Path("/candidate")))
+    curve = next(key for key in baseline if json.loads(key)[1] == "curve25519_dalek")
+    other = next(key for key in baseline if json.loads(key)[1] == "pos_time")
+    duplicates = [key for key, value in baseline.items() if len(value) == 2]
+    assert {json.loads(key)[1] for key in duplicates} == {"serde_json", "sha2"}
+    invalid = [(baseline, baseline), (baseline, {}),
+               (baseline, {key: value for key, value in candidate.items() if key != curve})]
+    for field in ["debug_assertions", "overflow_checks"]:
+        bad = copy.deepcopy(candidate)
+        bad[curve][0][field] = False
+        invalid.append((baseline, bad))
+    bad = copy.deepcopy(candidate)
+    bad[other][0]["opt_level"] = "3"
+    invalid.append((baseline, bad))
+    bad = copy.deepcopy(candidate)
+    changed_identity = json.loads(other)
+    changed_identity[3] = ["unexpected-feature"]
+    bad[json.dumps(changed_identity)] = bad.pop(other)
+    invalid.append((baseline, bad))
+    for key in duplicates:
+        missing = copy.deepcopy(candidate)
+        missing[key].pop()
+        invalid.append((baseline, missing))
+        extra = copy.deepcopy(candidate)
+        extra[key].append(copy.deepcopy(extra[key][0]))
+        invalid.append((baseline, extra))
+        altered = copy.deepcopy(candidate)
+        altered[key][0]["debug_assertions"] = False
+        invalid.append((baseline, altered))
+    extra = copy.deepcopy(candidate)
+    extra[curve].append(copy.deepcopy(extra[curve][0]))
+    invalid.append((baseline, extra))
+    extra_base = copy.deepcopy(baseline)
+    extra_base[curve].append(copy.deepcopy(extra_base[curve][0]))
+    extra_candidate = copy.deepcopy(extra_base)
+    for profile in extra_candidate[curve]:
+        profile["opt_level"] = "3"
+    invalid.append((extra_base, extra_candidate))
+    for field, value in [("opt_level", "1"), ("debug_assertions", False),
+                         ("overflow_checks", False)]:
+        bad_base = copy.deepcopy(baseline)
+        bad_base[curve][0][field] = value
+        bad_candidate = copy.deepcopy(bad_base)
+        bad_candidate[curve][0]["opt_level"] = "3"
+        invalid.append((bad_base, bad_candidate))
+    heterogeneous = copy.deepcopy(baseline)
+    heterogeneous[duplicates[0]][0]["opt_level"] = "1"
+    unchanged = copy.deepcopy(heterogeneous)
+    unchanged[curve][0]["opt_level"] = "3"
+    invalid.append((heterogeneous, unchanged))
+    exchanged = copy.deepcopy(unchanged)
+    exchanged[duplicates[0]].reverse()
+    invalid.append((heterogeneous, exchanged))
+    empty = copy.deepcopy(baseline)
+    empty[duplicates[0]] = []
+    invalid.append((empty, candidate))
+    for before, after in invalid:
+        try:
+            validate_profile_multisets(before, after)
+        except ValueError:
+            continue
+        raise AssertionError("invalid build profile evidence accepted")
+    return 2, len(invalid)
 
 
 def self_test():
@@ -83,28 +184,9 @@ def self_test():
         except ValueError:
             continue
         raise AssertionError("invalid test evidence accepted")
-    curve = json.dumps(["registry#curve25519-dalek@4.1.3", "curve25519_dalek", ["lib"], []])
-    other = json.dumps(["registry#other@1", "other", ["lib"], []])
-    baseline = {key: {"opt_level": "0", "debug_assertions": True,
-                      "overflow_checks": True} for key in [curve, other]}
-    candidate = copy.deepcopy(baseline)
-    candidate[curve]["opt_level"] = "3"
-    validate_profiles(baseline, candidate)
-    bad_profiles = [baseline, {}, {curve: candidate[curve]}]
-    for field, value in [("debug_assertions", False), ("overflow_checks", False)]:
-        bad = copy.deepcopy(candidate)
-        bad[curve][field] = value
-        bad_profiles.append(bad)
-    bad = copy.deepcopy(candidate)
-    bad[other]["opt_level"] = "3"
-    bad_profiles.append(bad)
-    for value in bad_profiles:
-        try:
-            validate_profiles(baseline, value)
-        except ValueError:
-            continue
-        raise AssertionError("invalid build profile evidence accepted")
-    print("test/profile evidence: two positive controls and 12 refusals passed")
+    positives, refusals = profile_self_test()
+    print(f"test/profile evidence: {positives + 1} positive controls and "
+          f"{refusals + len(invalid)} refusals passed")
 
 
 def run():
@@ -142,7 +224,7 @@ def run():
             build_seconds = time.monotonic() - started
             output.seek(0)
             messages = [json.loads(line) for line in output if line.strip()]
-        build_profiles[owner] = profiles(messages, checkout)
+        build_profiles[owner] = profile_multisets(messages, checkout)
         candidates = [item["executable"] for item in messages
                       if item.get("reason") == "compiler-artifact" and item.get("executable")
                       and item["target"]["name"] == "pos_time"
@@ -158,7 +240,7 @@ def run():
         if command(["git", "status", "--porcelain"], cwd=checkout):
             raise RuntimeError("build modified source checkout")
         (artifacts / "environment.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    validate_profiles(build_profiles["baseline"], build_profiles["candidate"])
+    validate_profile_multisets(build_profiles["baseline"], build_profiles["candidate"])
     (artifacts / "profiles.json").write_text(json.dumps(build_profiles, indent=2) + "\n")
     allowed = sorted(os.sched_getaffinity(0))
     selected = min(allowed)
