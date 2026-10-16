@@ -40,6 +40,8 @@ use std::{
 type Clock = Arc<Mutex<ScriptedGuardMonotonicSourceV1>>;
 type Snapshot = HashMap<String, StateRegistry>;
 
+mod begin;
+
 thread_local! {
     static CLOCK: RefCell<Option<Clock>> = const { RefCell::new(None) };
 }
