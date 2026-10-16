@@ -1279,7 +1279,7 @@ mod tests {
         // Matching closure metadata does not put an unknown Timeline into the
         // host's recovered inventory. Containment must refuse before reading it.
         assert_eq!(
-            gate.authorize(missing, ErasureProtectedOperationV1::Read),
+            gate.authorize(missing, pos_core::ErasureProtectedOperationV1::Read),
             Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
         );
         let absent = WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
