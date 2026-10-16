@@ -366,6 +366,49 @@ mod tests {
     }
 
     #[test]
+    fn imported_publication_fallback_funds_each_repeated_charge() -> Fallible<()> {
+        let committed = committed()?;
+        let operation = committed.operation;
+        let owner = operation.input().signing_identity.owner_id.as_str().len();
+        let mut bytes = operation.to_canonical_cbor();
+        assert_eq!(
+            ForkPublicationOperationV1::from_canonical_cbor(&bytes)?,
+            operation
+        );
+        assert_eq!(&bytes[2..6], b"FPO1");
+        // Keep the bounded owner and local-origin tail intact. Invalid magic
+        // makes the first decoder refuse and forces the code-2 E9 fallback.
+        bytes[2] = b'X';
+        assert!(ForkPublicationOperationV1::from_canonical_cbor(&bytes).is_err());
+        assert_eq!(
+            ImportedForkPublicationOperationV1::from_canonical_cbor(&bytes).err(),
+            Some(pos_core::ForkAttributionCodecErrorV1::InvalidEncoding)
+        );
+        let first_pass = owner + bytes.len();
+        let second_owner = first_pass + owner;
+        let total = first_pass * 2;
+        for (limit, charged, healthy) in [
+            (second_owner - 1, first_pass, false),
+            (second_owner, second_owner, false),
+            (total - 1, second_owner, false),
+            (total, total, true),
+        ] {
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 1, limit, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                NativeReadContextV1::protected(&mut budget)
+                    .publication_operation(&bytes, AuthorityValidatorV1::CodeTwoAware),
+                Err(Error::PublicationConflict)
+            );
+            assert_eq!(budget.remaining_native_bytes(), limit - charged);
+            assert_eq!(budget.check_time().is_ok(), healthy);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn local_only_decoder_never_promotes_imported_publication_origin() -> Fallible<()> {
         let committed = committed()?;
         let bytes = ImportedForkPublicationOperationV1::from_local(
