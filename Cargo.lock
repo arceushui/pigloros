@@ -5013,6 +5013,7 @@ dependencies = [
  "libc",
  "pos-core",
  "pos-crypto",
+ "pos-plugin-release",
  "pos-reference",
  "rustix 1.1.5",
  "serde",
@@ -5308,11 +5309,15 @@ dependencies = [
 name = "pos-plugin-worker"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "pos-crypto",
+ "pos-plugin-conformance-adapter",
  "pos-plugin-host",
  "pos-plugin-publisher",
  "pos-plugin-supervisor",
+ "pos-reference",
  "pos-runtime",
+ "serde_json",
 ]
 
 [[package]]

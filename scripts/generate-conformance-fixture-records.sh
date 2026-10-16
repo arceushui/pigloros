@@ -223,6 +223,27 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_p
         exit 1
       }
     fi
+    # An adapter may also render the auxiliary members the provider declares for the family
+    # (the Plugin composite). `plugin-signed-v1` must render every one of them; an adapter that
+    # renders none is left to the verifier to find the missing file.
+    while IFS= read -r auxiliary_path; do
+      generated_auxiliary="${generated_root}/${auxiliary_path}"
+      if [[ ! -f "${generated_auxiliary}" ]]; then
+        [[ "${adapter_id}" != "plugin-signed-v1" ]] || {
+          echo "adapter did not render the auxiliary member: ${auxiliary_path}" >&2
+          exit 1
+        }
+        continue
+      fi
+      if [[ "${mode}" == "--write" ]]; then
+        install -m 0644 -- "${generated_auxiliary}" "${fixture_root}/${auxiliary_path}"
+      else
+        cmp -- "${generated_auxiliary}" "${fixture_root}/${auxiliary_path}" || {
+          echo "auxiliary fixture member is not independently reproducible: ${auxiliary_path}" >&2
+          exit 1
+        }
+      fi
+    done < <(jq -r --arg family "${family}" '.auxiliary[$family][]?.path' "${provider_manifest}")
     generated_count=$((generated_count + 1))
     continue
   fi

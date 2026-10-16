@@ -35,3 +35,11 @@ directory cannot be determined.
 The adapter links no Wasmtime and none of `pos-plugin-host`, `pos-plugin-worker`,
 `pos-conformance`, `pos-store` or `pos-plugin-publisher` directly (`scripts/check-adapter-graph.sh`).
 `pos-plugin-publisher` with `test-support` is a dev-dependency used by the runner tests.
+
+## Fixtures
+
+The checked-in Plugin conformance fixtures (`fixtures/conformance`, layer `plugin-conformance`) are
+written by `scripts/generate_plugin_conformance_fixtures.py`, which also writes
+`src/schema_digests.rs` (the pinned digest of each family's schema member) and verifies it with
+`--check`. `tests/fixture_attempts_public.rs` builds the attempts from those files; the real worker
+runs them in `apps/pos-plugin-worker/tests/conformance_fixtures_public.rs`.

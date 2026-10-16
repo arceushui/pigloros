@@ -2665,6 +2665,57 @@ fn assert_complete_execution_mode_closure(archive: &[u8]) -> TestResult {
     Ok(())
 }
 
+/// R8-F4: the Plugin fixtures of one materialized archive carry at most three auxiliary
+/// descriptors and a well-formed composite, and `oracles` collects the oracle of each case so
+/// that the Local and Air-Gapped archives can be compared.
+fn collect_plugin_oracles(
+    archive: &[u8],
+    oracles: &mut std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> TestResult {
+    let bundle = ConformanceBundleV1::from_canonical_cbor(archive)?;
+    let profile_member = bundle
+        .members
+        .iter()
+        .find(|member| member.role == BundleMemberRoleV1::Profile)
+        .ok_or("materialized archive omits its CPF1 profile")?;
+    let profile = ConformanceProfileV1::from_canonical_cbor(&profile_member.bytes)?;
+    for fixture in profile
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.claim_layer == ClaimLayerV1::PluginConformance)
+    {
+        assert!(fixture.auxiliary.len() <= 3, "{}", fixture.case_id);
+        let path = fixture_input_member_path(
+            &fixture.case_id,
+            fixture.claim_layer,
+            &fixture.execution_profile_digest,
+            "plugin-world",
+        );
+        let composite = bundle
+            .members
+            .iter()
+            .find(|member| member.path == path)
+            .ok_or("the composite member is absent")?;
+        support::plugin_composite::pieces_of(&composite.bytes)?;
+        let oracle = match (
+            &fixture.strict_oracle.output,
+            &fixture.strict_oracle.failure,
+        ) {
+            (Some(output), _) => format!("{:?}", output.blake3_digest),
+            (None, Some(failure)) => format!(
+                "{}/{}/{}",
+                failure.owner_id, failure.contract_version, failure.code_id
+            ),
+            (None, None) => return Err("the fixture has no oracle".into()),
+        };
+        oracles
+            .entry(fixture.case_id.clone())
+            .or_default()
+            .insert(oracle);
+    }
+    Ok(())
+}
+
 #[test]
 fn current_signed_bundle_round_trips_through_typed_and_independent_verifiers() -> TestResult {
     for mode in [BundleModeV1::Local, BundleModeV1::AirGapped] {
@@ -2856,15 +2907,20 @@ fn public_materializer_and_verifier_binaries_round_trip_current_archives() -> Te
         verify_release_tree_independently(&mismatched_registry),
         Err(BundleContractErrorV1::ProfileInvalid)
     );
+    let mut plugin_oracles = std::collections::BTreeMap::new();
     for (archive_path, bytes) in archives.iter().zip(&archive_bytes) {
         verify_archive_independently(bytes)?;
         assert_complete_execution_mode_closure(bytes)?;
+        collect_plugin_oracles(bytes, &mut plugin_oracles)?;
         let filename = archive_path
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or("archive filename is not UTF-8")?;
         verify_archive_release_filename(bytes, filename)?;
     }
+    // The seven Plugin cases appear in the Local and Air-Gapped archives with identical oracles.
+    assert_eq!(plugin_oracles.len(), 7);
+    assert!(plugin_oracles.values().all(|oracle| oracle.len() == 1));
     let metadata_path = files
         .iter()
         .find(|path| {

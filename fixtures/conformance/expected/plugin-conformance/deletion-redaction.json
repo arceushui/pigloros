@@ -2,7 +2,7 @@
   "claim_layer": "plugin-conformance",
   "case_id": "plugin-conformance-deletion-redaction",
   "family": "deletion-redaction",
-  "input_blake3_digest": "8a72edfc30742f4265136a07a1f55481aa08dfef5ba88f57b0ae06c263d73845",
+  "input_blake3_digest": "041510f03ba1c6cf0ab6e7f8b9d652b7bafd7ece59743e40fec1d362033475d4",
   "status": "pending",
   "execution_result": null,
   "executed_at": null

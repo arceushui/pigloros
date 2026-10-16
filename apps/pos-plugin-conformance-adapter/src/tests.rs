@@ -9,7 +9,7 @@ use super::*;
 use crate::payload::family_text;
 use crate::test_support::{
     anchor_bytes, artifact, attempt, blake3_subcase, composite, composite_of, digest, hex_of,
-    matched, observation, payload, sorted, stream, FakeRunner, TestResult,
+    matched, observation, payload, schema_member, sorted, stream, FakeRunner, TestResult,
 };
 
 fn full(id: &str) -> SubCaseRecordV1 {
@@ -182,7 +182,7 @@ fn a_wrong_schema_string_or_schema_member_is_not_executed() -> TestResult {
         two_subcases(FixtureFamily::Positive),
         vec![composite],
     );
-    let denied = schema_digests::placeholder_schema(FixtureFamily::Denied);
+    let denied = schema_member(FixtureFamily::Denied);
     other_family.schema = artifact(denied.to_vec());
     let (result, _, _) = run_matching(&other_family)?;
     assert_eq!(result, Err(AdapterRunErrorV1::NotExecuted));
