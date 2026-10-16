@@ -497,6 +497,7 @@ pub struct ScriptedGuardMonotonicSourceV1 {
     origin: Instant,
     script: std::collections::VecDeque<Duration>,
     last: Duration,
+    samples_taken: usize,
 }
 
 #[cfg(feature = "test-support")]
@@ -508,12 +509,19 @@ impl ScriptedGuardMonotonicSourceV1 {
             origin: Instant::now(),
             script: offsets.into_iter().collect(),
             last: Duration::ZERO,
+            samples_taken: 0,
         }
     }
 
     /// Append one offset.
     pub fn push(&mut self, offset: Duration) {
         self.script.push_back(offset);
+    }
+
+    /// Saturating count of marks, including repeats after script exhaustion.
+    #[must_use]
+    pub const fn samples_taken(&self) -> usize {
+        self.samples_taken
     }
 }
 
@@ -523,6 +531,7 @@ impl sealed::Sealed for ScriptedGuardMonotonicSourceV1 {}
 #[cfg(feature = "test-support")]
 impl GuardMonotonicSourceV1 for ScriptedGuardMonotonicSourceV1 {
     fn mark(&mut self) -> MonotonicMarkV1 {
+        self.samples_taken = self.samples_taken.saturating_add(1);
         self.last = self.script.pop_front().unwrap_or(self.last);
         MonotonicMarkV1(self.origin.checked_add(self.last).unwrap_or(self.origin))
     }
