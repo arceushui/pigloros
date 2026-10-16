@@ -261,6 +261,107 @@ mod tests {
         32 * 3 + row.child_id.map_or(0, |child| child.to_string().len())
     }
 
+    #[derive(Default)]
+    struct InterStatementWrite {
+        selects: usize,
+        outcome: Option<rusqlite::Result<usize>>,
+    }
+
+    fn write_before_second_select(
+        reader: &Connection,
+        writer: Connection,
+        sql: &'static str,
+    ) -> rusqlite::Result<std::sync::Arc<std::sync::Mutex<InterStatementWrite>>> {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::{Arc, Mutex};
+
+        let observation = Arc::new(Mutex::new(InterStatementWrite::default()));
+        let callback_observation = Arc::clone(&observation);
+        reader.authorizer(Some(move |context: AuthContext<'_>| {
+            if let AuthAction::Select = context.action {
+                let Ok(mut observation) = callback_observation.lock() else {
+                    return Authorization::Deny;
+                };
+                observation.selects += 1;
+                if observation.selects == 2 {
+                    // The first statement is the completed size/type probe;
+                    // the second is the raw fetch. Commit through a different
+                    // native connection, not a fabricated Row/getter result.
+                    observation.outcome = Some(writer.execute(sql, []));
+                }
+            }
+            Authorization::Allow
+        }))?;
+        Ok(observation)
+    }
+
+    #[test]
+    fn inter_statement_writes_refuse_ordinary_reads_but_do_not_change_a_held_snapshot(
+    ) -> Fallible<()> {
+        use rusqlite::hooks::{AuthContext, Authorization};
+
+        let (_, row) = fixture(ForkAdmissionOperationKindV1::Fork)?;
+        for (sql, expected) in [
+            ("DELETE FROM fork_admission_operations", Error::CorruptAuthority),
+            ("UPDATE fork_admission_operations SET evidence_digest = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'", Error::StorageIndeterminate),
+            ("UPDATE fork_admission_operations SET commitment = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'", Error::StorageIndeterminate),
+            ("UPDATE fork_admission_operations SET result_digest = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'", Error::StorageIndeterminate),
+            ("UPDATE fork_admission_operations SET child_id = zeroblob(26)", Error::StorageIndeterminate),
+            ("UPDATE fork_admission_operations SET evidence_digest = zeroblob(31)", Error::CorruptAuthority),
+            ("UPDATE fork_admission_operations SET commitment = zeroblob(31)", Error::CorruptAuthority),
+            ("UPDATE fork_admission_operations SET result_digest = zeroblob(31)", Error::CorruptAuthority),
+        ] {
+            for held_snapshot in [false, true] {
+                let directory = tempfile::tempdir()?;
+                let path = directory.path().join("operation.sqlite");
+                let store = super::super::SqliteStore::open(
+                    path.to_str().ok_or("non-UTF-8 test path")?,
+                )?;
+                super::super::sqlite_insert_fork_admission_operation(&store.conn, &row)?;
+                let writer = Connection::open(&path)?;
+                writer.busy_timeout(Duration::ZERO)?;
+                // Deliberate persisted-corruption injection for width cases.
+                // This does not classify the altered facts as valid authority.
+                writer.execute_batch("PRAGMA ignore_check_constraints=ON")?;
+                if held_snapshot {
+                    store.conn.execute_batch("BEGIN DEFERRED")?;
+                }
+                let observation = write_before_second_select(&store.conn, writer, sql)?;
+                let result = operation_with_context(
+                    &store.conn,
+                    row.kind,
+                    row.operation_id,
+                    &mut NativeReadContextV1::ordinary(),
+                );
+                store.conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+                let mut observation = observation.lock().map_err(|_| "observer poisoned")?;
+                assert_eq!(observation.selects, 2);
+                assert_eq!(observation.outcome.take().ok_or("writer was not scheduled")??, 1);
+                if held_snapshot {
+                    assert_eq!(result?, Some(row.clone()));
+                    store.conn.execute_batch("ROLLBACK")?;
+                } else {
+                    assert_eq!(result, Err(expected));
+                }
+                // A new native read sees the committed change after rollback,
+                // proving the successful control was snapshot isolation, not
+                // a writer that failed or a mutation that had no effect.
+                let changed = operation_with_context(
+                    &store.conn,
+                    row.kind,
+                    row.operation_id,
+                    &mut NativeReadContextV1::ordinary(),
+                );
+                if sql.starts_with("DELETE") {
+                    assert_eq!(changed?, None);
+                } else {
+                    assert_eq!(changed, Err(expected));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn operation_root(conn: &Connection) -> rusqlite::Result<i64> {
         conn.query_row(
             "SELECT rootpage FROM sqlite_schema
