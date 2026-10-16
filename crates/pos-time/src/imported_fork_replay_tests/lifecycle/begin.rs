@@ -208,6 +208,38 @@ impl WorldReplayVerifierV1 for EarlyVerifier {
     }
 }
 
+fn assert_selection_outcome(
+    result: Result<(), CoreError>,
+    invalid: bool,
+    verifier: &EarlyVerifier,
+    timelines: &[TimelineId],
+    phases: &[Phase],
+) -> Fallible<()> {
+    if invalid {
+        assert_eq!(
+            result.map_err(|error| error.to_string()),
+            Err(CoreError::ArtifactUnavailable.to_string())
+        );
+        assert!(test_ok(verifier.profiles.lock()).is_empty());
+        assert!(test_ok(verifier.admissions.lock()).is_empty());
+        assert_eq!(phases, [Phase::FailureP2]);
+        assert_eq!(super::super::FOLDED_EVENTS.load(Ordering::SeqCst), 0);
+    } else {
+        result?;
+        assert_eq!(*test_ok(verifier.profiles.lock()), timelines);
+        assert_eq!(
+            test_ok(verifier.admissions.lock()).len(),
+            timelines.len() * 2
+        );
+        assert!(phases.contains(&Phase::Installed));
+        assert_eq!(
+            super::super::FOLDED_EVENTS.load(Ordering::SeqCst),
+            timelines.len()
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn every_public_consumer_validates_selections_before_requesting_any_profile() -> Fallible<()> {
     let fixture = ProtectedFixture::new("count", count);
@@ -291,22 +323,13 @@ fn every_public_consumer_validates_selections_before_requesting_any_profile() ->
                         .map(|diff| assert!(diff.diverged_entities.is_empty())),
                     })
                 });
-                if names.is_some() {
-                    assert_eq!(
-                        result.map_err(|error| error.to_string()),
-                        Err(CoreError::ArtifactUnavailable.to_string())
-                    );
-                    assert!(test_ok(verifier.profiles.lock()).is_empty());
-                    assert!(test_ok(verifier.admissions.lock()).is_empty());
-                    assert_eq!(*phases.borrow(), vec![Phase::FailureP2]);
-                    assert_eq!(super::super::FOLDED_EVENTS.load(Ordering::SeqCst), 0);
-                } else {
-                    result?;
-                    assert_eq!(*test_ok(verifier.profiles.lock()), timelines[..arms]);
-                    assert_eq!(test_ok(verifier.admissions.lock()).len(), arms * 2);
-                    assert!(phases.borrow().contains(&Phase::Installed));
-                    assert_eq!(super::super::FOLDED_EVENTS.load(Ordering::SeqCst), arms);
-                }
+                assert_selection_outcome(
+                    result,
+                    names.is_some(),
+                    &verifier,
+                    &timelines[..arms],
+                    phases.borrow().as_slice(),
+                )?;
                 assert_eq!(
                     registries
                         .each_ref()
