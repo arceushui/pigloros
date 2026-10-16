@@ -73,6 +73,11 @@ pub fn refusal_of(error: &RuntimeError) -> String {
         RuntimeError::Authority(authority) => format!("Authority({authority:?})"),
         RuntimeError::CommunityPlugin(host) => format!("CommunityPlugin({})", host.name()),
         RuntimeError::DriverPanicked { name } => format!("DriverPanicked({name})"),
+        RuntimeError::ResourceExhausted {
+            driver,
+            requested,
+            limit,
+        } => format!("ResourceExhausted({driver},{requested}>{limit})"),
         RuntimeError::ReservedHostDraft { event_type } => {
             format!("ReservedHostDraft({event_type})")
         }

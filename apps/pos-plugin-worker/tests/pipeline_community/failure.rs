@@ -47,8 +47,10 @@ pub struct Mixed {
     /// The first-party Driver's step counter.
     steps: Arc<AtomicUsize>,
     /// Set to make the first-party Driver fail; public so a case can fail it mid-lane, while the
-    /// other fields stay bookkeeping the lane owns.
+    /// private fields stay bookkeeping the lane owns.
     pub fail: Arc<AtomicBool>,
+    /// Set to make the first-party Driver stage two drafts instead of one.
+    pub burst: Arc<AtomicBool>,
     order: Order,
     /// The first-party steps and the community launches before the next pass.
     seen: (usize, usize),
@@ -93,6 +95,7 @@ impl Mixed {
             lane,
             steps: switched.steps,
             fail: switched.fail,
+            burst: switched.burst,
             order,
             seen: (0, 0),
         })
@@ -135,6 +138,13 @@ impl Mixed {
             })
             .collect();
         rows.join(",")
+    }
+
+    /// Bound the Event drafts one scheduled pass of the lane may stage to `drafts`, the host
+    /// Tick draft budget of the registry.
+    pub fn limit(&mut self, drafts: u64) {
+        let registry = std::mem::take(&mut self.lane.pass.registry);
+        self.lane.pass.registry = registry.with_resource_limit(drafts);
     }
 
     /// Clear the community member's quarantine, in the registry and in its handle.

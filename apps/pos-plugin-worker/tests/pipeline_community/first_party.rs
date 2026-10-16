@@ -10,7 +10,7 @@
 //!
 //! The authority cases (#632) register further first-party Plugins of the same shape, which may
 //! own one Event type and emit another. The failure cases (#633) switch a first-party Driver to
-//! fail while it stages.
+//! fail while it stages, and the over-budget case (#634) switches it to stage one more draft.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -85,12 +85,15 @@ impl Plugin for TwinPlugin {
     }
 }
 
-/// The twin's Driver: one draft per step, counting its steps, or a failure while `fail` is set.
+/// The twin's Driver: one draft per step, counting its steps.
+///
+/// It stages two drafts while `burst` is set, and fails while `fail` is set.
 pub struct TwinDriver {
     name: &'static str,
     draft: EventDraft,
     steps: Arc<AtomicUsize>,
     fail: Arc<AtomicBool>,
+    burst: Arc<AtomicBool>,
 }
 
 impl Driver for TwinDriver {
@@ -105,7 +108,8 @@ impl Driver for TwinDriver {
             // `DriverPanicked`. `resume_unwind` skips the panic hook; `panic!` is denied.
             std::panic::resume_unwind(Box::new("the first-party Driver failed"));
         }
-        Ok(StepOutput::new(vec![self.draft.clone()]))
+        let drafts = 1 + usize::from(self.burst.load(Ordering::SeqCst));
+        Ok(StepOutput::new(vec![self.draft.clone(); drafts]))
     }
 }
 
@@ -115,6 +119,8 @@ pub struct Switched {
     pub steps: Arc<AtomicUsize>,
     /// Set to make every later step of the Driver fail.
     pub fail: Arc<AtomicBool>,
+    /// Set to make every later step of the Driver stage two drafts instead of one.
+    pub burst: Arc<AtomicBool>,
 }
 
 /// The entity `text` names, parsed from its ULID text.
@@ -167,7 +173,7 @@ pub fn register_native(
     Ok(register_switched(registry, native, entity)?.steps)
 }
 
-/// As [`register_native`], returning the switch that makes the Driver fail as well.
+/// As [`register_native`], returning the switches that make the Driver fail or burst as well.
 ///
 /// # Errors
 /// Returns the registry's registration or profile-composition error.
@@ -180,14 +186,18 @@ pub fn register_switched(
         id: PluginId::new(),
         native,
     };
-    let steps = Arc::new(AtomicUsize::new(0));
-    let fail = Arc::new(AtomicBool::new(false));
+    let switched = Switched {
+        steps: Arc::new(AtomicUsize::new(0)),
+        fail: Arc::new(AtomicBool::new(false)),
+        burst: Arc::new(AtomicBool::new(false)),
+    };
     let payload = CanonicalBytes::from_static(PAYLOAD);
     let driver = TwinDriver {
         name: native.name,
         draft: EventDraft::new(entity, Kind::new(native.emitted), payload),
-        steps: Arc::clone(&steps),
-        fail: Arc::clone(&fail),
+        steps: Arc::clone(&switched.steps),
+        fail: Arc::clone(&switched.fail),
+        burst: Arc::clone(&switched.burst),
     };
     let available = PluginAvailabilityV1::Available;
     let registration = PluginRegistrationV1::new(native_pin(native.role)?, available);
@@ -195,5 +205,5 @@ pub fn register_switched(
     registry.register_pinned_generated(&plugin, registration, None, Some(driver))?;
     let binding = (plugin.id, ScheduledDriverBindingV1::NonParticipant);
     registry.compose_scheduled_profiles(&[binding])?;
-    Ok(Switched { steps, fail })
+    Ok(switched)
 }
