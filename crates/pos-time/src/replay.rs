@@ -87,26 +87,20 @@ fn replay_range(
         expiries,
         health,
     } = release;
+    let started = guard.guard_started_at();
     let mut guard = Some(crate::PendingReplayGuardV1::new(guard, health));
     let mut revoked = None;
     let result = (|| {
         pos_runtime::require_staged_release().map_err(crate::unavailable)?;
-        let intent = pos_runtime::WorldReplayReadIntentV1::new(
+        let intent = crate::read_intent(
             request.timeline,
             ErasureProtectedOperationV1::Read,
             request.range,
-            crate::consumer_selection(registry)?,
-            Vec::new(),
-        )
-        .map_err(crate::unavailable)?;
+            registry,
+        )?;
         let prepared = sender
             .prepare_world_replay_read(request.closure, intent)
             .map_err(crate::host_error_to_core)?;
-        let started = guard
-            .as_ref()
-            .ok_or(CoreError::ArtifactUnavailable)?
-            .held()
-            .guard_started_at();
         let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
         #[cfg(test)]
         let mut scripted = crate::imported_fork_replay_tests::lifecycle::operation_clock();
