@@ -227,40 +227,43 @@ fn handoff_with_p2_on<T: ProtectedHandoffTargetV1>(
     }
 }
 
-/// P2, then teardown: a guard that did not reach the handoff is rolled back
-/// and released, after recording the payload-free late signal when the
-/// teardown is predicted to end after `g0 + 30 s`. Teardown runs either way.
-/// A guard the handoff consumed has nothing left to tear down.
-fn teardown(guard: Option<ReleaseGuardV1<'_>>, health: &ReleaseHealthV1) {
-    if let Some(guard) = guard {
-        record_p2(
-            health,
-            &mut SystemGuardMonotonicSourceV1,
-            guard.guard_started_at(),
-        );
-        drop(guard);
-    }
-}
-
 /// Time retains failure-path P2 ownership even while a detached target is
 /// temporarily returned to Runtime, or Runtime unwinds before completion.
 struct PendingReplayGuardV1<'g> {
-    guard: Option<ReleaseGuardV1<'g>>,
+    // Fields drop in declaration order: failure P2 must precede the concrete
+    // guard's rollback/release. This owner deliberately has no custom Drop.
+    failure_p2: PendingReplayP2V1<'g>,
+    guard: ReleaseGuardV1<'g>,
+}
+
+struct PendingReplayP2V1<'g> {
     health: &'g ReleaseHealthV1,
+    started: MonotonicMarkV1,
+    armed: bool,
+}
+
+impl Drop for PendingReplayP2V1<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            record_p2(self.health, &mut SystemGuardMonotonicSourceV1, self.started);
+        }
+    }
 }
 
 impl<'g> PendingReplayGuardV1<'g> {
     const fn new(guard: ReleaseGuardV1<'g>, health: &'g ReleaseHealthV1) -> Self {
         Self {
-            guard: Some(guard),
-            health,
+            failure_p2: PendingReplayP2V1 {
+                health,
+                started: guard.guard_started_at(),
+                armed: true,
+            },
+            guard,
         }
     }
 
-    fn held(&self) -> Result<&ReleaseGuardV1<'g>, pos_core::CoreError> {
-        self.guard
-            .as_ref()
-            .ok_or(pos_core::CoreError::ArtifactUnavailable)
+    const fn held(&self) -> &ReleaseGuardV1<'g> {
+        &self.guard
     }
 
     fn handoff<T: ProtectedHandoffTargetV1>(
@@ -270,17 +273,10 @@ impl<'g> PendingReplayGuardV1<'g> {
         verdict: Result<(), pos_core::ErasureHostErrorV1>,
     ) -> Result<(), pos_core::CoreError> {
         verdict.map_err(host_error_to_core)?;
-        let guard = self
-            .guard
-            .take()
-            .ok_or(pos_core::CoreError::ArtifactUnavailable)?;
-        handoff_with_p2(guard, expiries, staged, self.health)
-    }
-}
-
-impl Drop for PendingReplayGuardV1<'_> {
-    fn drop(&mut self) {
-        teardown(self.guard.take(), self.health);
+        // The verdict leaves both owners intact on failure. After disarming,
+        // only infallible moves transfer P2 responsibility to the handoff.
+        self.failure_p2.armed = false;
+        handoff_with_p2(self.guard, expiries, staged, self.failure_p2.health)
     }
 }
 
@@ -702,6 +698,50 @@ pub mod test_support {
             &mut wait,
             &mut SystemGuardMonotonicSourceV1,
         ))
+    }
+
+    #[test]
+    fn pending_replay_failure_records_p2_before_releasing_guard() {
+        use pos_runtime::world_replay::test_support::{with_replay_observer, ReplayPhaseV1};
+        use std::{cell::Cell, panic::AssertUnwindSafe, rc::Rc};
+
+        for unwind in [false, true] {
+            let mut port = TrustedClockFixtureV1::new();
+            let observed_port = port.clone();
+            let signals = Rc::new(Cell::new(0));
+            let observed_signals = Rc::clone(&signals);
+            let observer = Rc::new(move |phase| {
+                assert_eq!(phase, ReplayPhaseV1::FailureP2);
+                assert!(observed_port.writer_held());
+                observed_signals.set(observed_signals.get() + 1);
+            });
+            let health = ReleaseHealthV1::new();
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                with_replay_observer(observer, || {
+                    let guard = guard_on(&mut port);
+                    let started = guard.guard_started_at();
+                    let pending = crate::PendingReplayGuardV1::new(guard, &health);
+                    assert_eq!(pending.held().guard_started_at(), started);
+                    if unwind {
+                        std::panic::resume_unwind(Box::new("pending Replay unwind"));
+                    }
+                    drop(pending);
+                });
+            }));
+            assert_eq!(result.is_err(), unwind);
+            if let Err(payload) = result {
+                assert_eq!(
+                    payload.downcast_ref::<&str>(),
+                    Some(&"pending Replay unwind")
+                );
+            }
+            assert_eq!(signals.get(), 1);
+            assert!(!port.writer_held());
+            // The concrete guard released the real authority, not only a flag
+            // in the pending owner. Another reservation can reacquire it.
+            drop(guard_on(&mut port));
+            assert!(!port.writer_held());
+        }
     }
 
     /// Expiries far in the future, checked under `guard`.
