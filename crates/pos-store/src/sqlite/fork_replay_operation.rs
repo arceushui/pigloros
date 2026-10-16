@@ -141,11 +141,10 @@ fn operation_lengths(
                 let length = row
                     .get::<_, i64>(8)
                     .map_err(|_| Error::StorageIndeterminate)?;
-                let length = usize::try_from(length).map_err(|_| Error::CorruptAuthority)?;
-                if length != ulid::ULID_LEN {
+                if usize::try_from(length).ok() != Some(ulid::ULID_LEN) {
                     return Err(Error::CorruptAuthority);
                 }
-                Some(length)
+                Some(ulid::ULID_LEN)
             };
             for column in [1, 3, 5] {
                 let length = row
