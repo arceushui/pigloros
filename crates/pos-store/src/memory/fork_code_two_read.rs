@@ -1623,9 +1623,21 @@ mod tests {
         Ok(())
     }
 
+    fn rewrite_append_operations(
+        state: &mut Imported,
+        edit: fn(&mut pos_core::ForkAppendOperationInputV1),
+    ) -> Fallible<()> {
+        for operation in state.store.fork_append_operations.values_mut() {
+            let mut input = operation.input().clone();
+            edit(&mut input);
+            *operation = pos_core::ForkAppendOperationV1::new(input)?;
+        }
+        Ok(())
+    }
+
     /// Every stored-state tamper that both reads must refuse.
     fn refused_tampers() -> Vec<(&'static str, Tamper)> {
-        let tampers: [(&'static str, Tamper); 14] = [
+        let tampers: [(&'static str, Tamper); 16] = [
             ("missing import admission", |state| {
                 state.store.imported_fork_attributions.clear();
                 Ok(())
@@ -1723,6 +1735,18 @@ mod tests {
                     })
                 },
             ),
+            ("FOP1 names another EOR1 digest", |state| {
+                rewrite_append_operations(state, |input| {
+                    input.event_origin_digest = hash(0x95);
+                })
+            }),
+            ("FOP1 names another FIA1 digest", |state| {
+                rewrite_append_operations(state, |input| {
+                    if input.intervention_admission_digest.is_some() {
+                        input.intervention_admission_digest = Some(hash(0x96));
+                    }
+                })
+            }),
         ];
         tampers.into()
     }
@@ -1737,7 +1761,7 @@ mod tests {
             assert_eq!(reads(&state), BOTH_REFUSED, "{name}");
             seen += 1;
         }
-        assert_eq!(seen, 14);
+        assert_eq!(seen, 16);
         Ok(())
     }
 
@@ -1769,6 +1793,53 @@ mod tests {
             reads(&state),
             (None, Some(PublicationError::PublicationConflict))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn protected_publication_refuses_missing_artifact_and_disagreeing_chain() -> Fallible<()> {
+        use crate::{
+            ForkReplayAuthorityReadErrorV1, ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1,
+            ForkReplayReadLimitsV1, ForkReplayRequirementV1,
+        };
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+
+        for missing_artifact in [true, false] {
+            let mut state = imported(Shape::EmptyUnclassified)?;
+            let committed = state.store.read_committed(state.child, state.head)?;
+            let requirement = ForkReplayRequirementV1::new(
+                state.child,
+                Seq::from_u64(state.head),
+                committed.record_id,
+                committed.authority_origin_digest,
+            )?;
+            if missing_artifact {
+                state.store.fork_publication_artifacts.clear();
+            } else {
+                let mut input = committed.operation.input().clone();
+                input.final_chain_head_hash = hash(0x97);
+                let operation = pos_core::ForkPublicationOperationV1::new(input)?;
+                state.store.imported_fork_publication_operations.insert(
+                    operation.input().operation_id,
+                    ImportedForkPublicationOperationV1::from_local(
+                        operation,
+                        committed.authority_origin_digest.ok_or("imported origin")?,
+                    ),
+                );
+            }
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, 8 * 1024 * 1024, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                state
+                    .store
+                    .validate_fork_replay_authority(&requirement, &mut budget),
+                Err(ForkReplayAuthorityReadErrorV1::CorruptAuthority)
+            );
+            budget.check_time()?;
+        }
         Ok(())
     }
 

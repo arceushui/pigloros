@@ -673,4 +673,79 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn protected_publication_rejects_independently_corrupted_operation_digests() -> Fallible<()> {
+        use crate::{
+            ForkManifestPublicationPortV1, ForkReplayAuthorityReadErrorV1,
+            ForkReplayAuthorityReadPortV1, ForkReplayRequirementV1,
+        };
+
+        let (_directory, store, world, built) = fixture(Shape::Mixed)?;
+        let child = world.child_at(0)?.id;
+        let head = crate::fae1_fixture::PARENT_CUT + Shape::Mixed.events();
+        let committed = store.read_committed(child, head)?;
+        let requirement = ForkReplayRequirementV1::new(
+            child,
+            pos_core::Seq::from_u64(head),
+            committed.record_id,
+            committed.authority_origin_digest,
+        )?;
+        let closure = ForkAttributionImportClosureV1::validate(&built.envelope)?;
+        let original = closure
+            .append_operations()
+            .iter()
+            .find(|operation| operation.input().intervention_admission_digest.is_some())
+            .ok_or("intervention operation")?;
+        let interval = store.begin_protected_effect_interval()?;
+        for fault in 0..4 {
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, 8 * 1024 * 1024, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                store
+                    .validate_fork_replay_authority(&requirement, &mut budget)?
+                    .requirement(),
+                requirement
+            );
+            store
+                .conn
+                .execute_batch("SAVEPOINT changed_operation_digest")?;
+            let mut input = original.input().clone();
+            let foreign = pos_core::Hash::from_bytes([0x96; 32]);
+            match fault {
+                0 => input.fork_admission_digest = foreign,
+                1 => input.classifier_revision_digest = foreign,
+                2 => input.event_origin_digest = foreign,
+                _ => input.intervention_admission_digest = Some(foreign),
+            }
+            let changed = ForkAppendOperationV1::new(input)?;
+            assert_eq!(
+                store.conn.execute(
+                    "UPDATE fork_append_operations SET fop1_cbor=?1 WHERE operation_id=?2",
+                    params![
+                        changed.to_canonical_cbor(),
+                        original.input().operation_id.as_bytes().as_slice(),
+                    ],
+                )?,
+                1
+            );
+            assert_eq!(
+                store.validate_fork_replay_authority(&requirement, &mut budget),
+                Err(ForkReplayAuthorityReadErrorV1::CorruptAuthority),
+                "accepted corrupted operation digest {fault}"
+            );
+            budget.check_time()?;
+            store.conn.execute_batch(
+                "ROLLBACK TO changed_operation_digest; RELEASE changed_operation_digest",
+            )?;
+        }
+        store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
+        assert_eq!(store.read_committed(child, head)?, committed);
+        Ok(())
+    }
 }
