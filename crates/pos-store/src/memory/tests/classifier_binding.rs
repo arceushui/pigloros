@@ -6,10 +6,70 @@
 use super::classified_suffix_store;
 use crate::{ForkEventAuthorityErrorV1, ForkEventProvenanceAuthorityPortV1};
 use pos_core::{
-    ForkClassifierRegistrationV1, ForkClassifierSourceV1, ForkClassifierTableV1,
-    ForkEventOriginKindV1, ForkEventSourceDescriptorV1, ForkExternalInputRouteV1, Hash,
+    ForkAppendOperationV1, ForkAppendSourceIdentityV1, ForkClassifierRegistrationV1,
+    ForkClassifierSourceV1, ForkClassifierTableV1, ForkEventClassifierV1, ForkEventOriginKindV1,
+    ForkEventProvenanceErrorV1, ForkEventSourceDescriptorV1, ForkExternalInputRouteV1, Hash,
 };
 use std::error::Error;
+
+#[test]
+fn classified_suffix_requires_the_bound_event_origin() -> Result<(), Box<dyn Error>> {
+    let (mut store, child, _, event) = classified_suffix_store()?;
+    let before = store.read_fork_event_suffix(child, 1)?;
+    assert_eq!(before.len(), 1);
+    // An absent origin is not an orphan row: the anchor scan has nothing to
+    // inspect, so the per-Event provenance lookup must independently refuse.
+    let origin = store
+        .fork_event_origins
+        .remove(&event.id)
+        .ok_or("missing fixture EOR1")?;
+    assert_eq!(
+        store.read_fork_event_suffix(child, 1),
+        Err(ForkEventAuthorityErrorV1::CorruptAuthority),
+    );
+    store.fork_event_origins.insert(event.id, origin);
+    assert_eq!(store.read_fork_event_suffix(child, 1)?, before);
+    Ok(())
+}
+
+#[test]
+fn classified_suffix_requires_the_operation_source_in_the_retained_table(
+) -> Result<(), Box<dyn Error>> {
+    let (mut store, child, operation, _) = classified_suffix_store()?;
+    let before = store.read_fork_event_suffix(child, 1)?;
+    assert_eq!(before.len(), 1);
+    let mut input = operation.input().clone();
+    input.source = ForkAppendSourceIdentityV1::ExternalInput {
+        adapter_identifier: "foreign-adapter".to_owned(),
+        source: ForkEventSourceDescriptorV1::new("foreign-route", Hash::from_bytes([0xe2; 32]))?,
+    };
+    let table = store
+        .fork_classifier_tables
+        .get(&child)
+        .ok_or("fixture FCT1")?;
+    assert_eq!(
+        ForkEventClassifierV1::from_table(table).classify_identity(&input.source),
+        Err(ForkEventProvenanceErrorV1::SourceRejected),
+    );
+    let altered = ForkAppendOperationV1::new(input)?;
+    assert_eq!(
+        store
+            .fork_append_operations
+            .insert(operation.input().operation_id, altered),
+        Some(operation.clone()),
+    );
+    // Keep every Event, graph digest, origin and operation key unchanged.
+    // Only membership of the retained source in the valid table is broken.
+    assert_eq!(
+        store.read_fork_event_suffix(child, 1),
+        Err(ForkEventAuthorityErrorV1::CorruptAuthority),
+    );
+    store
+        .fork_append_operations
+        .insert(operation.input().operation_id, operation);
+    assert_eq!(store.read_fork_event_suffix(child, 1)?, before);
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug)]
 enum BindingFault {
