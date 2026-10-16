@@ -209,6 +209,118 @@ impl WorldReplayVerifierV1 for EarlyVerifier {
 }
 
 #[test]
+fn every_public_consumer_validates_selections_before_requesting_any_profile() -> Fallible<()> {
+    let fixture = ProtectedFixture::new("count", count);
+    let verifier = Arc::new(EarlyVerifier::default());
+    let composition =
+        ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier.clone());
+    let mut host = ErasureExecutionHostV1::open_with_authority(
+        pos_store::StoreConfig::Memory,
+        &composition,
+        ErasureRecoveryLimitsV1::compiled_maximum(),
+    )?;
+    let (timelines, event) = ordinary_pair(&mut host)?;
+    let closures = timelines.map(|timeline| closure_for_host(&mut host, timeline));
+    let selections = [
+        Some(Vec::new()),
+        Some(vec![String::new()]),
+        Some(vec!["x".repeat(129)]),
+        Some((0..65).map(|index| format!("consumer-{index}")).collect()),
+        None,
+    ];
+    for call in [
+        ConsumerCall::Replay,
+        ConsumerCall::ReplayAt,
+        ConsumerCall::Compare,
+    ] {
+        let arms = if call == ConsumerCall::Compare { 2 } else { 1 };
+        for selected_arm in 0..arms {
+            for names in &selections {
+                test_ok(verifier.profiles.lock()).clear();
+                test_ok(verifier.admissions.lock()).clear();
+                let mut registries = [
+                    fixture.registry(host.containment_gate()),
+                    fixture.registry(host.containment_gate()),
+                ];
+                if let Some(names) = names {
+                    registries[selected_arm] = pos_state::ProjectionRegistry::new();
+                    for name in names {
+                        registries[selected_arm].register(name, count());
+                    }
+                }
+                for (registry, timeline) in registries.iter_mut().zip(timelines) {
+                    registry.apply_event(timeline, &event);
+                }
+                let before = registries
+                    .each_ref()
+                    .map(pos_state::ProjectionRegistry::retained_state_for_test);
+                super::super::FOLDED_EVENTS.store(0, Ordering::SeqCst);
+                let phases = Rc::new(RefCell::new(Vec::new()));
+                let recorded = Rc::clone(&phases);
+                let observer = Rc::new(move |phase| recorded.borrow_mut().push(phase));
+                let [a, b] = &mut registries;
+                let mut sender = host.read_sender()?;
+                let result = with_replay_observer(observer, || {
+                    crate::test_support::with_release(|release| match call {
+                        ConsumerCall::Replay => crate::replay(
+                            &mut sender,
+                            timelines[0],
+                            a,
+                            &closures[0],
+                            release,
+                            &fixture.fold(),
+                        ),
+                        ConsumerCall::ReplayAt => crate::replay_at(
+                            &mut sender,
+                            timelines[0],
+                            Seq::from_u64(1),
+                            a,
+                            &closures[0],
+                            release,
+                            &fixture.fold(),
+                        ),
+                        ConsumerCall::Compare => crate::compare(
+                            &mut sender,
+                            timelines,
+                            Seq::from_u64(1),
+                            [a, b],
+                            [&closures[0], &closures[1]],
+                            release,
+                            [&fixture.fold(), &fixture.fold()],
+                        )
+                        .map(|diff| assert!(diff.diverged_entities.is_empty())),
+                    })
+                });
+                if names.is_some() {
+                    assert_eq!(
+                        result.map_err(|error| error.to_string()),
+                        Err(CoreError::ArtifactUnavailable.to_string())
+                    );
+                    assert!(test_ok(verifier.profiles.lock()).is_empty());
+                    assert!(test_ok(verifier.admissions.lock()).is_empty());
+                    assert_eq!(*phases.borrow(), vec![Phase::FailureP2]);
+                    assert_eq!(super::super::FOLDED_EVENTS.load(Ordering::SeqCst), 0);
+                } else {
+                    result?;
+                    assert_eq!(*test_ok(verifier.profiles.lock()), timelines[..arms]);
+                    assert_eq!(test_ok(verifier.admissions.lock()).len(), arms * 2);
+                    assert!(phases.borrow().contains(&Phase::Installed));
+                    assert_eq!(super::super::FOLDED_EVENTS.load(Ordering::SeqCst), arms);
+                }
+                assert_eq!(
+                    registries
+                        .each_ref()
+                        .map(pos_state::ProjectionRegistry::retained_state_for_test),
+                    before
+                );
+                assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn compare_preparation_refuses_each_arm_before_native_fences() -> Fallible<()> {
     let fixture = ProtectedFixture::new("count", count);
     let verifier = Arc::new(EarlyVerifier::default());

@@ -61,23 +61,19 @@ pub fn compare(
         expiries,
         health,
     } = release;
+    let started = guard.guard_started_at();
     let mut guard = Some(crate::PendingReplayGuardV1::new(guard, health));
     let mut revoked: [Option<RevokedSubjectsV1>; 2] = [None, None];
     let mut diff = None;
     let result = (|| {
-        let consumers = comparison_consumers(fork_seq, [&*registry_a, &*registry_b])?;
-        let prepared = prepare_comparison_reads(sender, timelines, closures, consumers)?;
+        let intents = comparison_intents(timelines, fork_seq, [&*registry_a, &*registry_b])?;
+        let prepared = prepare_comparison_reads(sender, closures, intents)?;
         let request = CompareRequestV1 {
             timelines,
             fork_seq,
             closures,
             folds,
         };
-        let started = guard
-            .as_ref()
-            .ok_or(CoreError::ArtifactUnavailable)?
-            .held()
-            .guard_started_at();
         let mut clock = pos_core::trusted_clock::SystemGuardMonotonicSourceV1;
         #[cfg(test)]
         let mut scripted = crate::imported_fork_replay_tests::lifecycle::operation_clock();
@@ -140,26 +136,16 @@ pub fn compare(
 /// any native read or either arm's initial admission.
 fn prepare_comparison_reads(
     sender: &mut ErasureReadSenderV1<'_>,
-    timelines: [TimelineId; 2],
     closures: [&WorldReplayClosureV1; 2],
-    consumers: [Vec<String>; 2],
+    intents: [pos_runtime::WorldReplayReadIntentV1; 2],
 ) -> Result<[pos_runtime::PreparedWorldReplayReadV1; 2], CoreError> {
-    let [consumers_a, consumers_b] = consumers;
-    let mut prepare = |index, consumers| {
-        let intent = pos_runtime::WorldReplayReadIntentV1::new(
-            timelines[index],
-            ErasureProtectedOperationV1::Export,
-            SeqRange::all(),
-            consumers,
-            Vec::new(),
-        )
-        .map_err(crate::unavailable)?;
-        sender
-            .prepare_world_replay_read(closures[index], intent)
-            .map_err(crate::host_error_to_core)
-    };
-    let a = prepare(0, consumers_a)?;
-    let b = prepare(1, consumers_b)?;
+    let [intent_a, intent_b] = intents;
+    let a = sender
+        .prepare_world_replay_read(closures[0], intent_a)
+        .map_err(crate::host_error_to_core)?;
+    let b = sender
+        .prepare_world_replay_read(closures[1], intent_b)
+        .map_err(crate::host_error_to_core)?;
     if a.fork_read_limits() != b.fork_read_limits() {
         return Err(CoreError::ArtifactUnavailable);
     }
@@ -167,19 +153,27 @@ fn prepare_comparison_reads(
 }
 
 /// Refuse a quarantined staged executor, then a Fork point with no
-/// successor, then select each arm's consumers.
-fn comparison_consumers(
+/// successor, then validate both intents before either profile is selected.
+fn comparison_intents(
+    timelines: [TimelineId; 2],
     fork_seq: Seq,
     registries: [&ProjectionRegistry; 2],
-) -> Result<[Vec<String>; 2], CoreError> {
+) -> Result<[pos_runtime::WorldReplayReadIntentV1; 2], CoreError> {
     // The quarantine check comes first, as in Replay (ADR-113 §5).
     pos_runtime::require_staged_release().map_err(crate::unavailable)?;
     if fork_seq.as_u64() == u64::MAX {
         return Err(CoreError::ArtifactUnavailable);
     }
     let [registry_a, registry_b] = registries;
-    crate::consumer_selection(registry_a)
-        .and_then(|ids_a| crate::consumer_selection(registry_b).map(|ids_b| [ids_a, ids_b]))
+    let intent = |timeline, registry| {
+        crate::read_intent(
+            timeline,
+            ErasureProtectedOperationV1::Export,
+            SeqRange::all(),
+            registry,
+        )
+    };
+    intent(timelines[0], registry_a).and_then(|a| intent(timelines[1], registry_b).map(|b| [a, b]))
 }
 
 /// One protected Compare request.
