@@ -1,0 +1,65 @@
+# Temporary #561 branch-only diagnostic; not a required gate or trusted baseline.
+name: 561-native-repair-diagnostic
+
+on:
+  push:
+    branches: [redmine/561-native-repair-diagnostic]
+
+permissions:
+  contents: read
+
+jobs:
+  native-repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: never
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: a1c038a2688ba051b3e00421492e7cb45b7b6f9c
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+          components: clippy
+      - name: Record exact candidate identity
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          git rev-parse HEAD | tee artifacts/source-sha.txt
+          test "$(git rev-parse HEAD)" = a1c038a2688ba051b3e00421492e7cb45b7b6f9c
+          rustc -Vv | tee artifacts/rustc.txt
+      - name: Exercise the real inter-statement SQLite writer
+        run: |
+          set -euo pipefail
+          cargo test -p pos-store --all-features --locked --lib \
+            sqlite::fork_replay_operation::tests::inter_statement_writes_refuse_ordinary_reads_but_do_not_change_a_held_snapshot \
+            -- --exact --include-ignored 2>&1 | tee artifacts/native-race.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' artifacts/native-race.log
+          bash scripts/assert-no-ignored-in-test-summary.sh artifacts/native-race.log
+      - name: Exercise the repaired public receipt and chain-hash contracts
+        run: |
+          set -euo pipefail
+          cargo test -p pos-store --all-features --locked \
+            --test fork_chain_hash_public --test fork_code_two_read_public \
+            -- --include-ignored 2>&1 | tee artifacts/public-contracts.log
+          grep -F 'test result: ok. 2 passed; 0 failed; 0 ignored;' artifacts/public-contracts.log
+          grep -F 'test result: ok. 9 passed; 0 failed; 0 ignored;' artifacts/public-contracts.log
+          bash scripts/assert-no-ignored-in-test-summary.sh artifacts/public-contracts.log
+      - name: Check the affected crate with strict Clippy
+        run: |
+          set -euo pipefail
+          cargo clippy -p pos-store --all-features --all-targets --locked \
+            -- -D warnings -W clippy::pedantic 2>&1 | tee artifacts/clippy.log
+      - name: Preserve diagnostic evidence even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: untrusted-561-native-repair-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
