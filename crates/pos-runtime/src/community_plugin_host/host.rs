@@ -7,7 +7,7 @@
 //! never writes registry trust state; only [`CommunityPluginHostV1::refresh_policy()`] does.
 
 use pos_core::{
-    trusted_clock::TrustedWallSourceV1, Event, FactualAdmissionPortV1, PipelineCommitReceiptV1,
+    trusted_clock::PluginTrustWallSourceV1, Event, FactualAdmissionPortV1, PipelineCommitReceiptV1,
     PluginId, Seq, TimelineId, TimelineMeta,
 };
 use pos_crypto::plugin_trust::verify_plugin_trust_v1;
@@ -176,7 +176,7 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
         &mut self,
         registry: &mut PluginRegistry,
         trust: &impl PluginTrustPolicyRegistryV1,
-        wall: &mut impl TrustedWallSourceV1,
+        wall: &mut impl PluginTrustWallSourceV1,
         request: CommunityPassRequestV1<'_>,
     ) -> CommunityPassOutcomeV1 {
         let tick = request.tick;
@@ -211,7 +211,7 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
         &mut self,
         trust: &mut impl PluginTrustPolicyRegistryV1,
         material: &CommunityPluginTrustMaterialV1,
-        wall: &mut impl TrustedWallSourceV1,
+        wall: &mut impl PluginTrustWallSourceV1,
         tick: u64,
     ) -> Result<PolicyAdvanceOutcomeV1, PluginTrustPolicyRegistryErrorV1> {
         self.members.iter().for_each(M::close_pass);
