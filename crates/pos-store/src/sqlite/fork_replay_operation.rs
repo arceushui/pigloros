@@ -430,6 +430,130 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Default)]
+    struct PrincipalReadAuthorization {
+        selects: usize,
+        reads: Vec<(usize, String, bool)>,
+    }
+
+    fn ignore_principal_raw_column(
+        conn: &Connection,
+        column: &'static str,
+    ) -> rusqlite::Result<std::sync::Arc<std::sync::Mutex<PrincipalReadAuthorization>>> {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::{Arc, Mutex};
+
+        let observed = Arc::new(Mutex::new(PrincipalReadAuthorization::default()));
+        let callback_observed = Arc::clone(&observed);
+        conn.authorizer(Some(move |context: AuthContext<'_>| {
+            let Ok(mut observed) = callback_observed.lock() else {
+                return Authorization::Deny;
+            };
+            if context.action == AuthAction::Select {
+                observed.selects += 1;
+            }
+            if let AuthAction::Read {
+                table_name: "fork_admission_operations",
+                column_name,
+            } = context.action
+            {
+                let select = observed.selects;
+                let ignored = select == 2 && column_name == column;
+                observed
+                    .reads
+                    .push((select, column_name.to_owned(), ignored));
+                if ignored {
+                    return Authorization::Ignore;
+                }
+            }
+            Authorization::Allow
+        }))?;
+        Ok(observed)
+    }
+
+    #[test]
+    fn principal_raw_column_refusal_preserves_native_errors_and_exact_debits() -> Fallible<()> {
+        use rusqlite::hooks::{AuthContext, Authorization};
+
+        // Backend-private driver faults, not a production authorization mode:
+        // SQLITE_READ + IGNORE substitutes NULL at prepare time. The actual
+        // probe, raw query, schema and cursor lifetime remain unchanged.
+        for (column, expected, failed_rows, failed_bytes) in [
+            ("operation_id", Error::StorageIndeterminate, 2, 32),
+            ("result_digest", Error::CorruptAuthority, 1, 0),
+        ] {
+            for held_snapshot in [false, true] {
+                let (store, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(
+                    1,
+                    1,
+                    failed_rows + 2,
+                    failed_bytes + 32,
+                    1_000_000,
+                )?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                if held_snapshot {
+                    store.conn.execute_batch("BEGIN DEFERRED")?;
+                }
+                let observed = ignore_principal_raw_column(&store.conn, column)?;
+                let failed = principal_operation_id_with_context(
+                    &store.conn,
+                    row.result_digest,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
+                // Remove the native policy before propagating results or
+                // asserting; the healthy control uses the unchanged query.
+                store
+                    .conn
+                    .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+                let observed = observed
+                    .lock()
+                    .map_err(|_| "authorizer observer poisoned")?;
+                assert_eq!(observed.selects, 2);
+                let reads: Vec<_> = observed
+                    .reads
+                    .iter()
+                    .map(|(select, name, ignored)| (*select, name.as_str(), *ignored))
+                    .collect();
+                assert_eq!(
+                    reads,
+                    [
+                        (1, "operation_id", false),
+                        (1, "operation_id", false),
+                        (1, "kind", false),
+                        (1, "result_digest", false),
+                        (2, "operation_id", column == "operation_id"),
+                        (2, "kind", false),
+                        (2, "result_digest", column == "result_digest"),
+                    ],
+                );
+                drop(observed);
+                assert_eq!(failed, Err(expected));
+                assert_eq!(budget.remaining_native_bytes(), 32);
+                budget.check_time()?;
+                assert_eq!(
+                    principal_operation_id_with_context(
+                        &store.conn,
+                        row.result_digest,
+                        &mut NativeReadContextV1::protected(&mut budget),
+                    )?,
+                    row.operation_id,
+                );
+                assert_eq!(budget.remaining_native_bytes(), 0);
+                budget.check_time()?;
+                assert!(budget.charge_rows(1).is_err());
+                assert!(budget.check_time().is_err());
+                if held_snapshot {
+                    store.conn.execute_batch("ROLLBACK")?;
+                }
+                assert!(store.conn.is_autocommit());
+            }
+        }
+        Ok(())
+    }
+
     fn operation_root(conn: &Connection) -> rusqlite::Result<i64> {
         conn.query_row(
             "SELECT rootpage FROM sqlite_schema
