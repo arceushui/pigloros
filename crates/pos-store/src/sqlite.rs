@@ -14913,6 +14913,7 @@ use pos_core::geo_cell_admission::{
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    mod local_replay_corruption;
     mod protected_interval_cleanup;
 
     use super::*;
