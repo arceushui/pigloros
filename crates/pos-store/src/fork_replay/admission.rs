@@ -320,6 +320,39 @@ mod tests {
     }
 
     #[test]
+    fn imported_admission_fallback_charges_before_rejecting_local_origin() -> Fallible<()> {
+        let (local, _) = records()?;
+        let bytes = local.to_canonical_cbor();
+        let owner = local.input().creator.as_str().len();
+        let total = owner + bytes.len();
+        assert_eq!(ForkAdmissionRecordV1::from_canonical_cbor(&bytes)?, local);
+        assert_eq!(
+            ImportedForkAdmissionRecordV1::from_canonical_cbor(&bytes).err(),
+            Some(pos_core::ForkAttributionCodecErrorV1::FieldMismatch)
+        );
+        for (limit, charged, healthy) in [
+            (owner - 1, 0, false),
+            (owner, owner, false),
+            (total - 1, owner, false),
+            (total, total, true),
+        ] {
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 1, limit, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                NativeReadContextV1::protected(&mut budget).imported_admission_record(&bytes),
+                Err(Error::PublicationConflict)
+            );
+            // The same public refusal has two causes: a latched budget before
+            // Core runs, or native local-origin rejection after full funding.
+            assert_eq!(budget.remaining_native_bytes(), limit - charged);
+            assert_eq!(budget.check_time().is_ok(), healthy);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn admission_decoders_charge_owner_and_actual_projection_equality_buffers() -> Fallible<()> {
         let (local, imported) = records()?;
         let local_bytes = local.to_canonical_cbor();
