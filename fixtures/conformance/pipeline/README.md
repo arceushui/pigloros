@@ -99,15 +99,18 @@ real worker; the `OTHER-RESOURCE-LIMITS` exclusion records them.
 recovery. A Replay registry over the same first-party and community Drivers
 folds the Events a live pass of both committed into the projection the live
 registry folds (a first-party observer's Reducer that records Timeline Order,
-Event type and payload size), refuses to step its Drivers (`ModeMismatch`),
-steps no first-party Driver and launches no worker; the Local and Air-Gapped
-passes commit the same Events, payload bytes included. A pass whose commit
-acknowledgement is lost is `InDoubt` with its batch on the Timeline, in a mixed
-lane and in a first-party-only lane alike: `recover_scheduled_pass` returns a
-receipt that names exactly that batch, commits nothing again, re-runs no
-first-party Driver, launches no worker, and finds nothing in doubt a second
-time. The community member's receipt stays staged until the recovery commits it
-and adopts its state (recorded, not compared).
+Event type and payload size; the observer joins the live registry after its
+pass, so the two folds are equal by construction and the case proves that the
+Events of either class fold and no Plugin runs), refuses at the registry seam to
+step its Drivers (`ModeMismatch`), steps no first-party Driver and launches no
+worker; the Local and Air-Gapped passes commit the same Events, payload bytes
+included. A pass whose commit acknowledgement is lost is `InDoubt` with its
+batch on the Timeline, in a mixed lane and in a first-party-only lane alike:
+`recover_scheduled_pass` returns a receipt that names exactly that batch,
+commits nothing again, re-runs no first-party Driver, launches no worker, and
+finds nothing in doubt a second time. The community member's receipt stays
+staged until the recovery commits it and adopts its state (recorded, not
+compared).
 
 The community pass world runs on `MemoryStore` only, so every case names the
 `memory` store, and the `SQLITE-STORE` exclusion records that this profile

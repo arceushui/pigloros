@@ -6,7 +6,11 @@
 //! the first-party twin does not run and the community Driver launches no worker. The
 //! projection is a first-party observer's Reducer, which every registry folds alike; it records
 //! the Timeline Order and type of each Event of the fixtures' entity and the size of their
-//! payloads.
+//! payloads. The observer joins the live registry only after its pass is observed, so both
+//! registries run the same fold over the same committed Events and their projections are equal
+//! by construction; what the case proves is that the Events of either class fold and that no
+//! Plugin runs. The Replay refusal is proven at the registry seam that steps Drivers, not
+//! through a whole host pass.
 //!
 //! A pass whose commit acknowledgement is lost is in doubt: the store committed the batch, and
 //! the registry keeps the staged pass. Recovery resubmits the retained basis once and returns the

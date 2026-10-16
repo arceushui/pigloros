@@ -115,7 +115,8 @@ impl Mixed {
         })
     }
 
-    /// Run one pass and describe it, with the Driver steps of this pass in registration order.
+    /// Run one pass and describe it, with the Driver steps of this pass in registration order;
+    /// the community Driver's steps are its worker launches.
     ///
     /// # Errors
     /// Returns the error of the pass world's observation.
