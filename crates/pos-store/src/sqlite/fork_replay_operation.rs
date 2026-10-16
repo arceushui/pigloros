@@ -284,7 +284,7 @@ mod tests {
                 };
                 observation.selects += 1;
                 if observation.selects == 2 {
-                    // The first statement is the completed size/type probe;
+                    // The first statement has produced the size/type probe;
                     // the second is the raw fetch. Commit through a different
                     // native connection, not a fabricated Row/getter result.
                     observation.outcome = Some(writer.execute(sql, []));
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn principal_inter_statement_writes_refuse_without_changing_a_held_snapshot() -> Fallible<()> {
+    fn principal_probe_keeps_its_snapshot_until_the_raw_fetch_finishes() -> Fallible<()> {
         use rusqlite::hooks::{AuthContext, Authorization};
 
         let (_, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
@@ -407,11 +407,12 @@ mod tests {
                 assert_eq!(observation.selects, 2);
                 assert_eq!(observation.outcome.take().ok_or("writer was not scheduled")??, 1);
                 drop(observation);
+                // The nested raw fetch runs before the probe cursor drops.
+                // That live cursor preserves even the implicit read snapshot;
+                // an explicit BEGIN is not required for this native owner.
+                assert_eq!(result?, row.operation_id);
                 if held_snapshot {
-                    assert_eq!(result?, row.operation_id);
                     store.conn.execute_batch("ROLLBACK")?;
-                } else {
-                    assert_eq!(result, Err(expected));
                 }
                 // Re-select by the unchanged result digest. A fresh snapshot
                 // must observe the committed deletion or invalid operation ID.
