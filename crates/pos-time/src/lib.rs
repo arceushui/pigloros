@@ -334,19 +334,21 @@ const fn host_error_to_core(error: pos_core::ErasureHostErrorV1) -> pos_core::Co
     }
 }
 
-/// Return `registry`'s canonical consumer selection before any host read.
-fn consumer_selection(
+/// Validate the registry selection as part of the immutable read intent,
+/// before asking the host for policy or observing native history.
+fn read_intent(
+    timeline: pos_core::TimelineId,
+    operation: pos_core::ErasureProtectedOperationV1,
+    range: pos_core::SeqRange,
     registry: &pos_state::ProjectionRegistry,
-) -> Result<Vec<String>, pos_core::CoreError> {
-    let mut consumer_ids: Vec<String> = registry
+) -> Result<pos_runtime::WorldReplayReadIntentV1, pos_core::CoreError> {
+    let consumer_ids = registry
         .reducer_names()
         .into_iter()
         .map(str::to_owned)
         .collect();
-    consumer_ids.sort_unstable();
-    pos_core::world_consumer_set::validate_consumer_id_selection(&consumer_ids)
-        .map(|()| consumer_ids)
-        .map_err(|_| pos_core::CoreError::ArtifactUnavailable)
+    pos_runtime::WorldReplayReadIntentV1::new(timeline, operation, range, consumer_ids, Vec::new())
+        .map_err(unavailable)
 }
 
 /// Bind one protected use to the Timeline's currently observed logical head.
