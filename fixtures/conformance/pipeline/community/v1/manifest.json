@@ -5,14 +5,15 @@
   "sources": [
     "#489",
     "#631",
+    "#632",
     "ADR-021",
     "ADR-061 r8"
   ],
   "exclusions": [
     {
-      "id": "PROPOSAL-AND-OWNER-PARITY",
-      "reason": "Rejection of another Plugin's or a reserved Event type and single-lineage action-owner resolution are not yet proven across isolation classes",
-      "owner": "#632"
+      "id": "COMMUNITY-RESERVED-PROPOSAL",
+      "reason": "The real community guests emit only prototype.driven, so a community Driver's proposal of a reserved host Event type needs a new guest Component; this profile proves only the first-party refusal of that proposal and the refused reserved-type claim of either isolation class",
+      "owner": "#489"
     },
     {
       "id": "DISCARD-FALLBACK-AND-AVAILABILITY",
@@ -117,6 +118,98 @@
         "community-first.owner": "prototype.driven=GovernedCommunity,parity.first-party=OperatorTrustedNative",
         "community-first.follows-host-schedule": "true",
         "same-events-either-order": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-003",
+      "title": "A first-party Driver and a community Driver on the real worker that propose another Plugin's Event type are refused with the same typed authority error, commit nothing and quarantine no Plugin; a first-party proposal of a reserved host type is refused too",
+      "sources": [
+        "#489",
+        "#632",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "first-party.result": "Failed",
+        "first-party.timeline": "",
+        "first-party.entity": "",
+        "first-party.receipt.names-events": "false",
+        "first-party.steps": "1,1",
+        "first-party.availability": "Available,Available",
+        "first-party.owner": "",
+        "first-party.follows-host-schedule": "true",
+        "first-party.refusal": "Authority(UnauthorizedSource)",
+        "community.result": "Failed",
+        "community.timeline": "",
+        "community.entity": "",
+        "community.receipt.names-events": "false",
+        "community.steps": "1,1",
+        "community.availability": "Available,Available",
+        "community.owner": "",
+        "community.follows-host-schedule": "true",
+        "community.refusal": "Authority(UnauthorizedSource)",
+        "first-party-reserved.result": "Failed",
+        "first-party-reserved.timeline": "",
+        "first-party-reserved.entity": "",
+        "first-party-reserved.receipt.names-events": "false",
+        "first-party-reserved.steps": "1,1",
+        "first-party-reserved.availability": "Available,Available",
+        "first-party-reserved.owner": "",
+        "first-party-reserved.follows-host-schedule": "true",
+        "first-party-reserved.refusal": "ReservedHostDraft(pigloros.plugin.release-activated)",
+        "parity.first-party-equals-community": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-004",
+      "title": "An Event type has one owner whichever isolation class claims it first: a community claim on a first-party type, a first-party claim on a community type and either class's claim on a reserved consent type are refused alike before the registry changes",
+      "sources": [
+        "#489",
+        "#632",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "community-claim.refusal": "DuplicateEventTypeOwner(prototype.driven)",
+        "community-claim.registry-unchanged": "true",
+        "community-claim.result": "Committed",
+        "community-claim.timeline": "1:prototype.driven",
+        "community-claim.entity": "01040G2081040G2081040G2081",
+        "community-claim.receipt.names-events": "true",
+        "community-claim.steps": "1",
+        "community-claim.availability": "Available",
+        "community-claim.owner": "prototype.driven=OperatorTrustedNative",
+        "community-claim.follows-host-schedule": "true",
+        "first-party-claim.refusal": "DuplicateEventTypeOwner(prototype.driven)",
+        "first-party-claim.registry-unchanged": "true",
+        "first-party-claim.result": "Committed",
+        "first-party-claim.timeline": "1:prototype.driven",
+        "first-party-claim.entity": "01040G2081040G2081040G2081",
+        "first-party-claim.receipt.names-events": "true",
+        "first-party-claim.steps": "1",
+        "first-party-claim.availability": "Available",
+        "first-party-claim.owner": "prototype.driven=GovernedCommunity",
+        "first-party-claim.follows-host-schedule": "true",
+        "reserved-claim.first-party.refusal": "ReservedConsentEventType(consent.revoked.v1)",
+        "reserved-claim.community.refusal": "ReservedConsentEventType(consent.revoked.v1)",
+        "reserved-claim.registry-unchanged": "true",
+        "parity.same-refusal-either-class": "true"
       }
     }
   ]

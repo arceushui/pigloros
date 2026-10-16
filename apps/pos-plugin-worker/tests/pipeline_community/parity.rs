@@ -27,10 +27,10 @@ use crate::support::subcase::WORKER;
 use crate::support::test_ok::TestOk;
 
 /// The only store of the community pass world.
-const STORE: &str = "memory";
+pub const STORE: &str = "memory";
 /// The entity of the community fixture's Event: the first member's invocation ID, sixteen bytes
 /// of 1, as ULID text. The twin emits for the same entity.
-const ENTITY: &str = "01040G2081040G2081040G2081";
+pub const ENTITY: &str = "01040G2081040G2081040G2081";
 /// The Event type the first-party twin owns beside the community Plugin in a mixed registry.
 const TWIN_TYPE: &str = "parity.first-party";
 
@@ -47,7 +47,7 @@ struct Authority {
 }
 
 /// One observed pass.
-struct Observed {
+pub struct Observed {
     authority: Authority,
     /// `type=isolation` of every Event, in Timeline Order.
     owners: Vec<String>,
@@ -135,9 +135,16 @@ fn observation_profiles(registry: &PluginRegistry) -> String {
     profiles.join(",")
 }
 
+/// Whether two passes show the same authority outcome, the owner's isolation class aside.
+#[must_use]
+pub fn same_authority(left: &Observed, right: &Observed) -> bool {
+    left.authority == right.authority
+}
+
 /// Describe the pass `outcome` of `lane`, whose Drivers stepped `steps` times in registration
 /// order.
-fn observe(lane: &Lane, outcome: &CommunityPassOutcomeV1, steps: String) -> Observed {
+#[must_use]
+pub fn observe(lane: &Lane, outcome: &CommunityPassOutcomeV1, steps: String) -> Observed {
     let registry = &lane.pass.registry;
     let events = lane.pass.events();
     let owner_by_type = owners_by_type(registry);
@@ -184,7 +191,7 @@ fn observe(lane: &Lane, outcome: &CommunityPassOutcomeV1, steps: String) -> Obse
 }
 
 /// Record what `observed` shows under `path`.
-fn record(capture: &mut Capture, path: &str, observed: &Observed) {
+pub fn record(capture: &mut Capture, path: &str, observed: &Observed) {
     let authority = &observed.authority;
     let mut put = |key: &str, value: &dyn std::fmt::Display| {
         capture.record(STORE, &format!("{path}.{key}"), value);
