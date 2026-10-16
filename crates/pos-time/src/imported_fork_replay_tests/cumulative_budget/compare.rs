@@ -140,7 +140,7 @@ fn imported_memory_compare_shares_one_exact_budget_across_both_arms() -> Fallibl
     let left = whole_memory_budget(&world, &built[0], &admissions[0], 0, 4)?;
     let right = whole_memory_budget(&world, &built[1], &admissions[1], 1, 4)?;
     let (bytes, rows, visits) = (left.0 + right.0, left.1 + right.1, left.2 + right.2);
-    assert_eq!((rows, visits), (96, 36));
+    assert_eq!((rows, visits), (162, 54));
     for (bytes, rows, visits, succeeds) in [
         (bytes, rows, visits, true),
         (bytes + 1, rows, visits, true),

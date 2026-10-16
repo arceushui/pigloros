@@ -138,10 +138,20 @@ fn whole_memory_budget(
     let lineage_rows = 3 + 2 * 4;
     // Five chain-hash visits, one empty suffix lookup and three lineage visits.
     let phase_visits = 5 + 1 + 3;
+    // ADR-118 adds the actual owning fence (same two native walks, but
+    // retained gate IDs16+16 and parent continuation16 instead of cut24),
+    // two complete guarded heads and the Event reader's own full H/M walk.
+    let history_bytes = (49 + 16) + 16 + (25 + 16) + 4 * 8;
+    let fence_bytes = history_bytes + (25 + 16) + 4 * 8 + 2 * 16 + 16;
+    let head_bytes = history_bytes + 8;
     Ok((
-        2 * (authority_bytes + lineage_bytes) + folded_events * (6 + 16),
-        2 * (authority_rows + lineage_rows),
-        2 * phase_visits,
+        2 * (authority_bytes + lineage_bytes)
+            + fence_bytes
+            + 2 * head_bytes
+            + history_bytes
+            + folded_events * (8 + 6 + 16),
+        2 * (authority_rows + lineage_rows) + lineage_rows + 3 * (2 + 4) + folded_events,
+        2 * phase_visits + 3 + 3 * 2,
     ))
 }
 
@@ -221,7 +231,7 @@ fn memory_replay_budget_cases(cut: Option<Seq>) -> Fallible<()> {
     let admission = ImportedForkAttributionAdmissionV1::from_envelope(&built.envelope, 1)?;
     let folded_events = usize::try_from(cut.unwrap_or(Seq::from_u64(4)).as_u64())?;
     let (bytes, rows, visits) = whole_memory_budget(&world, &built, &admission, 0, folded_events)?;
-    assert_eq!((rows, visits), (46, 18));
+    assert_eq!((rows, visits), (75 + folded_events, 27));
     for (bytes, rows, visits, succeeds) in [
         (bytes, rows, visits, true),
         (bytes + 1, rows, visits, true),

@@ -34,6 +34,28 @@ struct ImportedRuntimeVerifier {
 }
 
 impl WorldReplayVerifierV1 for ImportedRuntimeVerifier {
+    fn read_profile(
+        &self,
+        _closure: &WorldReplayClosureV1,
+        intent: &pos_runtime::WorldReplayReadIntentV1,
+        _generation: ErasureReferenceV1,
+    ) -> Result<(EventReadBounds, ForkReplayReadLimitsV1), WorldReplayVerificationErrorV1> {
+        if intent.timeline_id() != self.leaf {
+            return Err(WorldReplayVerificationErrorV1::RequestMismatch);
+        }
+        Ok((
+            EventReadBounds::new_with_total_bytes_and_elapsed(
+                1_024,
+                128,
+                self.arm_depth,
+                64,
+                1_048_576,
+                1_000_000,
+            ),
+            self.limits,
+        ))
+    }
+
     fn verify(
         &self,
         closure: &WorldReplayClosureV1,

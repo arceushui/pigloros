@@ -238,6 +238,72 @@ fn teardown(guard: Option<ReleaseGuardV1<'_>>, health: &ReleaseHealthV1) {
     }
 }
 
+/// Time retains failure-path P2 ownership even while a detached target is
+/// temporarily returned to Runtime, or Runtime unwinds before completion.
+struct PendingReplayGuardV1<'g> {
+    guard: Option<ReleaseGuardV1<'g>>,
+    health: &'g ReleaseHealthV1,
+}
+
+impl<'g> PendingReplayGuardV1<'g> {
+    fn new(guard: ReleaseGuardV1<'g>, health: &'g ReleaseHealthV1) -> Self {
+        Self {
+            guard: Some(guard),
+            health,
+        }
+    }
+
+    fn held(&self) -> Result<&ReleaseGuardV1<'g>, pos_core::CoreError> {
+        self.guard
+            .as_ref()
+            .ok_or(pos_core::CoreError::ArtifactUnavailable)
+    }
+
+    fn handoff<T: ProtectedHandoffTargetV1>(
+        mut self,
+        expiries: &ApplicableExpiriesV1,
+        staged: StagedProtectedOutputV1<T>,
+        verdict: Result<(), pos_core::ErasureHostErrorV1>,
+    ) -> Result<(), pos_core::CoreError> {
+        verdict.map_err(host_error_to_core)?;
+        let guard = self
+            .guard
+            .take()
+            .ok_or(pos_core::CoreError::ArtifactUnavailable)?;
+        handoff_with_p2(guard, expiries, staged, self.health)
+    }
+}
+
+impl Drop for PendingReplayGuardV1<'_> {
+    fn drop(&mut self) {
+        teardown(self.guard.take(), self.health);
+    }
+}
+
+fn core_error_to_host(error: pos_core::CoreError) -> pos_core::ErasureHostErrorV1 {
+    match error {
+        pos_core::CoreError::ErasureAccessFrozen => pos_core::ErasureHostErrorV1::AccessFrozen,
+        pos_core::CoreError::ErasureContainmentUnavailable => {
+            pos_core::ErasureHostErrorV1::RecoveryUnavailable
+        }
+        _ => pos_core::ErasureHostErrorV1::AdapterFailure,
+    }
+}
+
+fn require_prepared_world_replay(
+    sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
+    prepared: &pos_runtime::PreparedWorldReplayReadV1,
+    closure: &pos_core::WorldReplayClosureV1,
+    requested: &pos_runtime::WorldReplayUseV1,
+    budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
+) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_core::CoreError> {
+    let verified = sender
+        .admit_prepared_world_replay(prepared, closure, requested, budget)
+        .map_err(host_error_to_core)?;
+    verified.require_authoritative_use().map_err(unavailable)?;
+    Ok(verified)
+}
+
 /// Apply the ADR-093 Revision 4 failure-path forget after release: only the
 /// revoked subjects of a range that was read and verified, and only on failure.
 fn forget_on_failure<T>(
@@ -264,6 +330,7 @@ const fn host_error_to_core(error: pos_core::ErasureHostErrorV1) -> pos_core::Co
     }
 }
 
+#[cfg(test)]
 fn require_world_replay(
     sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
     closure: &pos_core::WorldReplayClosureV1,
@@ -297,6 +364,7 @@ fn consumer_selection(
 ///
 /// The installed verifier must accept the closure only for this exact head,
 /// and [`read_complete_world_replay`] rejects any read that observes another.
+#[cfg(test)]
 fn observed_world_replay_use(
     sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
     timeline: pos_core::TimelineId,
@@ -326,6 +394,7 @@ fn observed_world_replay_use(
 /// head bound into the verified use. An Event appended after the head was
 /// observed makes an open-ended read return more Events than expected, which
 /// is rejected by the exact count and sequence check after the read.
+#[cfg(test)]
 fn read_complete_world_replay(
     sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
     requested_use: &pos_runtime::WorldReplayUseV1,
@@ -364,6 +433,7 @@ fn read_complete_world_replay(
 }
 
 /// Reject a changed head or impossible range before bounded Event materialization.
+#[cfg(test)]
 fn checked_world_replay_range(
     requested_use: &pos_runtime::WorldReplayUseV1,
     head: u64,
@@ -391,6 +461,7 @@ fn checked_world_replay_range(
 }
 
 /// Charge owned payloads in order, then apply the original post-read time check.
+#[cfg(test)]
 fn charge_replay_event_bytes(
     events: &[pos_core::Event],
     budget: &mut pos_store::ForkReplayReadBudgetV1<'_>,
@@ -749,7 +820,36 @@ pub mod test_support {
 
     struct ExactWorldReplayVerifier;
 
+    /// Immutable fixture policy: no verifier call, native lookup or phase change.
+    pub(crate) fn ordinary_read_profile() -> Result<
+        (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+        WorldReplayVerificationErrorV1,
+    > {
+        pos_store::ForkReplayReadLimitsV1::new(8, 1_024, 262_144, 256 * 1024 * 1024, 30_000_000)
+            .map(|limits| {
+                (
+                    pos_core::EventReadBounds::new_with_total_bytes_and_elapsed(
+                        65_536, 128, 8, 65_536, 67_108_864, 30_000_000,
+                    ),
+                    limits,
+                )
+            })
+            .map_err(|_| WorldReplayVerificationErrorV1::EvidenceUnavailable)
+    }
+
     impl WorldReplayVerifierV1 for ExactWorldReplayVerifier {
+        fn read_profile(
+            &self,
+            _closure: &WorldReplayClosureV1,
+            _intent: &pos_runtime::WorldReplayReadIntentV1,
+            _generation: ErasureReferenceV1,
+        ) -> Result<
+            (pos_core::EventReadBounds, pos_store::ForkReplayReadLimitsV1),
+            WorldReplayVerificationErrorV1,
+        > {
+            ordinary_read_profile()
+        }
+
         fn verify(
             &self,
             closure: &WorldReplayClosureV1,

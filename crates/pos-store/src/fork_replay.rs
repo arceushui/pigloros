@@ -6,9 +6,11 @@
 
 use crate::CommittedForkManifestV1;
 use pos_core::{
+    store::{EventReadBounds, SeqRange},
     trusted_clock::{GuardMonotonicSourceV1, MonotonicMarkV1},
     ErasureContainmentErrorV1, Hash, Seq, TimelineId,
 };
+use std::time::Instant;
 
 #[cfg(feature = "sqlite")]
 mod admission;
@@ -42,16 +44,32 @@ fn imported_projection_length(bytes: &[u8]) -> Option<usize> {
 /// validator translates it to its existing closed error vocabulary.
 pub(crate) struct NativeReadContextV1<'budget, 'clock> {
     budget: Option<&'budget mut ForkReplayReadBudgetV1<'clock>>,
+    read_deadline: Option<(Instant, u64)>,
 }
 
 impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
     pub(crate) const fn ordinary() -> Self {
-        Self { budget: None }
+        Self {
+            budget: None,
+            read_deadline: None,
+        }
     }
 
     pub(crate) const fn protected(budget: &'budget mut ForkReplayReadBudgetV1<'clock>) -> Self {
         Self {
             budget: Some(budget),
+            read_deadline: None,
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    const fn for_event_read(
+        budget: &'budget mut ForkReplayReadBudgetV1<'clock>,
+        read_deadline: Option<(Instant, u64)>,
+    ) -> Self {
+        Self {
+            budget: Some(budget),
+            read_deadline,
         }
     }
 
@@ -71,9 +89,14 @@ impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
     }
 
     pub(crate) fn check(&mut self) -> Result<(), crate::ForkManifestPublicationErrorV1> {
+        let deadline = self.read_deadline;
         self.budget
             .as_deref_mut()
-            .map_or(Ok(()), ForkReplayReadBudgetV1::check_time)
+            .map_or(Ok(()), |budget| {
+                budget
+                    .check_time()
+                    .and_then(|()| budget.accept(within_read_deadline(deadline)))
+            })
             .map_err(|_| crate::ForkManifestPublicationErrorV1::PublicationConflict)
     }
 
@@ -617,6 +640,44 @@ impl ForkReplayAuthorityEvidenceV1 {
 /// interval and the existing transaction-internal validator (b), never a new
 /// nested transaction, signer, permit or recovery decision.
 pub trait ForkReplayAuthorityReadPortV1 {
+    /// Establish the existing read interval on the caller's original ledger.
+    ///
+    /// # Errors
+    /// Refuses before unsupported native work. Any newly acquired interval
+    /// is settled even when a post-acquisition budget check fails.
+    fn begin_fork_replay_read_interval(
+        &self,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> Result<pos_core::ErasureProtectedEffectIntervalV1, ForkReplayLineageReadErrorV1>;
+
+    /// Obtain the logical head through guarded native metadata and visibility.
+    ///
+    /// # Errors
+    /// Fails closed on unavailable history, invalid native cuts, missing held
+    /// interval, or exhaustion of the shared operation ledger.
+    fn fork_replay_logical_head(
+        &self,
+        timeline_id: TimelineId,
+        effective_max_fork_depth: usize,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> Result<Seq, ForkReplayLineageReadErrorV1>;
+
+    /// Materialize one complete inclusive logical range through native owners.
+    ///
+    /// The operation ledger and each arm's existing Event envelope are both
+    /// enforced before allocation, without ordinary bounded-read fallback.
+    ///
+    /// # Errors
+    /// Returns closed visibility, native structure, interval or bounds errors;
+    /// a refused ledger wins and no partial successful history is returned.
+    fn read_fork_replay_events(
+        &self,
+        timeline_id: TimelineId,
+        range: SeqRange,
+        bounds: EventReadBounds,
+        budget: &mut ForkReplayReadBudgetV1<'_>,
+    ) -> Result<Vec<pos_core::Event>, ForkReplayLineageReadErrorV1>;
+
     /// Read one actual lineage coordinate with bounded full-ancestry visibility.
     ///
     /// Reuses the caller's held interval and original operation ledger. The
@@ -695,6 +756,7 @@ pub(crate) type LineageReadResult<T> = Result<T, ForkReplayLineageReadErrorV1>;
 pub(crate) struct LineageReadContextV1<'budget, 'clock> {
     budget: &'budget mut ForkReplayReadBudgetV1<'clock>,
     cap: usize,
+    read_deadline: Option<(Instant, u64)>,
 }
 
 impl<'budget, 'clock> LineageReadContextV1<'budget, 'clock> {
@@ -708,13 +770,44 @@ impl<'budget, 'clock> LineageReadContextV1<'budget, 'clock> {
         budget
             .accept(cap <= budget.limits().max_fork_depth_per_traversal())
             .map_err(ForkReplayLineageReadErrorV1::Read)?;
-        Ok(Self { budget, cap })
+        Ok(Self {
+            budget,
+            cap,
+            read_deadline: None,
+        })
+    }
+
+    pub(crate) fn for_events(
+        budget: &'budget mut ForkReplayReadBudgetV1<'clock>,
+        bounds: EventReadBounds,
+    ) -> LineageReadResult<Self> {
+        let started = Instant::now();
+        let cap = bounds
+            .max_fork_depth()
+            .min(budget.limits().max_fork_depth_per_traversal());
+        let mut context = Self::new(budget, cap)?;
+        context.read_deadline = Some((started, bounds.max_elapsed_micros()));
+        context.check().map(|()| context)
     }
 
     pub(crate) fn check(&mut self) -> LineageReadResult<()> {
         self.budget
             .check_time()
+            .and_then(|()| self.budget.accept(within_read_deadline(self.read_deadline)))
             .map_err(ForkReplayLineageReadErrorV1::Read)
+    }
+
+    pub(crate) fn require(&mut self, within: bool) -> LineageReadResult<()> {
+        self.check().and_then(|()| {
+            self.budget
+                .accept(within)
+                .map_err(ForkReplayLineageReadErrorV1::Read)
+        })
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn native(&mut self) -> NativeReadContextV1<'_, 'clock> {
+        NativeReadContextV1::for_event_read(&mut *self.budget, self.read_deadline)
     }
 
     /// Always post-check a completed batch, including failed native work.
@@ -753,6 +846,65 @@ impl<'budget, 'clock> LineageReadContextV1<'budget, 'clock> {
             }
         })
     }
+}
+
+fn within_read_deadline(deadline: Option<(Instant, u64)>) -> bool {
+    deadline.is_none_or(|(started, limit)| {
+        limit != 0 && started.elapsed().as_micros() <= u128::from(limit)
+    })
+}
+
+/// Purpose-specific, exclusively owned plaintext staging. Native owners fund
+/// each Event before pushing it; all failed/post-check/unwind exits scrub it.
+#[derive(Default)]
+pub(crate) struct ReplayEventStagingV1(Vec<pos_core::Event>);
+
+impl ReplayEventStagingV1 {
+    pub(crate) fn push(&mut self, event: pos_core::Event) -> &mut pos_core::Event {
+        self.0.push(event);
+        let index = self.0.len() - 1;
+        &mut self.0[index]
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub(crate) fn into_events(mut self) -> Vec<pos_core::Event> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl Drop for ReplayEventStagingV1 {
+    fn drop(&mut self) {
+        let scrubbed = pos_core::store::zeroize_event_plaintext_staging(&mut self.0);
+        debug_assert!(scrubbed);
+    }
+}
+
+/// Validate the complete Event count before allocating a result; Seq zero is
+/// a range boundary, never a committed Event coordinate.
+pub(crate) fn complete_event_range(
+    head: u64,
+    range: SeqRange,
+    bounds: EventReadBounds,
+    context: &mut LineageReadContextV1<'_, '_>,
+) -> LineageReadResult<(u64, u64, usize)> {
+    context.step(|context| {
+        let from = range.from.as_u64().max(1);
+        let to = range.to.map_or(head, Seq::as_u64);
+        if to > head {
+            return Err(ForkReplayLineageReadErrorV1::Read(
+                ForkReplayAuthorityReadErrorV1::Unavailable,
+            ));
+        }
+        let count = if from > to { 0 } else { to - (from - 1) };
+        let maximum = u64::try_from(bounds.max_events()).unwrap_or(u64::MAX);
+        context.require(count <= maximum)?;
+        // The checked usize ceiling above proves this conversion fits on
+        // narrower targets as well; no truncated successful count is possible.
+        Ok((from, to, usize::try_from(count).unwrap_or(usize::MAX)))
+    })
 }
 
 pub(crate) const fn corrupt<T>() -> LineageReadResult<T> {
@@ -825,6 +977,88 @@ pub(crate) fn remember_member(
     context.bytes(16)?;
     visited.push(timeline);
     context.check()
+}
+
+/// Move the charged native carriers into one root-first history. No ordinary
+/// metadata lookup or second native plan is constructed (ADR-118 H/M).
+pub(crate) fn read_visible_history(
+    target: TimelineId,
+    context: &mut LineageReadContextV1<'_, '_>,
+    mut member: impl FnMut(
+        TimelineId,
+        &mut Vec<TimelineId>,
+        &mut LineageReadContextV1<'_, '_>,
+    ) -> LineageReadResult<Option<(ForkReplayLineageNodeV1, Seq)>>,
+) -> LineageReadResult<Vec<(ForkReplayLineageNodeV1, Seq)>> {
+    context.step(|context| {
+        let mut visited = Vec::new();
+        let mut history = Vec::new();
+        let mut current = target;
+        loop {
+            context.node(Some(visited.len()))?;
+            let (node, head) = member(current, &mut visited, context)?.ok_or(
+                ForkReplayLineageReadErrorV1::Read(ForkReplayAuthorityReadErrorV1::Unavailable),
+            )?;
+            let parent = node
+                .fork_point()
+                .map(|(parent, _)| context.bytes(16).map(|()| *parent))
+                .transpose()?;
+            history.push((node, head));
+            if let Some(parent) = parent {
+                current = parent;
+            } else {
+                return context.step(|_| {
+                    history.reverse();
+                    Ok(history)
+                });
+            }
+        }
+    })
+}
+
+/// Existing stitched segment arithmetic over already charged native fields.
+pub(crate) fn history_segment(
+    history: &[(ForkReplayLineageNodeV1, Seq)],
+    index: usize,
+    context: &mut LineageReadContextV1<'_, '_>,
+) -> LineageReadResult<(u64, u64)> {
+    context.step(|_| {
+        let (node, head) = &history[index];
+        let prefix = node.fork_point().map_or(0, |(_, cut)| cut.as_u64());
+        let length = history
+            .get(index + 1)
+            .map_or(Ok(head.as_u64()), |(next, _)| {
+                next.fork_point()
+                    .and_then(|(_, cut)| cut.as_u64().checked_sub(prefix))
+                    .ok_or(ForkReplayLineageReadErrorV1::Read(
+                        ForkReplayAuthorityReadErrorV1::CorruptAuthority,
+                    ))
+            })?;
+        if length > head.as_u64() {
+            corrupt()
+        } else {
+            Ok((prefix, length))
+        }
+    })
+}
+
+pub(crate) fn history_head(
+    history: &[(ForkReplayLineageNodeV1, Seq)],
+    context: &mut LineageReadContextV1<'_, '_>,
+) -> LineageReadResult<u64> {
+    history
+        .iter()
+        .enumerate()
+        .try_fold(0_u64, |head, (index, _)| {
+            history_segment(history, index, context).and_then(|(_, length)| {
+                context.step(|_| {
+                    head.checked_add(length)
+                        .ok_or(ForkReplayLineageReadErrorV1::Read(
+                            ForkReplayAuthorityReadErrorV1::CorruptAuthority,
+                        ))
+                })
+            })
+        })
 }
 
 #[cfg(test)]
