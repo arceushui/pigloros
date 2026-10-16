@@ -12,7 +12,7 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use fixture::{pin_policy, request_for, Fallible, Port, Shape, Spec, World, PARENT_CUT};
+use fixture::{pin_policy, request_for, Built, Fallible, Port, Shape, Spec, World, PARENT_CUT};
 use pos_core::{
     store::{EventReadBounds, EventStore},
     CoreError, ErasureRecoveryLimitsV1, ErasureReferenceV1, ErasureReplayClaimV1, Hash,
@@ -238,21 +238,16 @@ impl ImportedVerifier {
 fn populate<S: Port>(
     store: &mut S,
     world: &World,
-    shape: Shape,
-    destroyed_key: bool,
+    built: &Built,
 ) -> Fallible<ForkReplayRequirementV1> {
-    let built = world.build(&Spec {
-        destroyed_key,
-        ..Spec::default()
-    })?;
     world.seed_destination(store)?;
     pin_policy(store, &built.policy)?;
-    store.import_verified(&request_for(world, &built))?;
-    let child = world.child_at(0)?.id;
-    let head = PARENT_CUT + shape.events();
-    let committed = store.read_committed(child, head)?;
+    store.import_verified(&request_for(world, built))?;
+    let child = world.child_at(0)?;
+    let head = PARENT_CUT + child.shape.events();
+    let committed = store.read_committed(child.id, head)?;
     Ok(ForkReplayRequirementV1::new(
-        child,
+        child.id,
         Seq::from_u64(head),
         committed.record_id,
         committed.authority_origin_digest,
@@ -325,6 +320,16 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
         Shape::EmptyClassified,
         Shape::EmptyUnclassified,
     ] {
+        // Share immutable signed input, never destination state or host authority.
+        let world = World::new(shape, false)?;
+        let child = world.child_at(0)?.id;
+        let built = [
+            world.build(&Spec::default())?,
+            world.build(&Spec {
+                destroyed_key: true,
+                ..Spec::default()
+            })?,
+        ];
         for (fault, cut, destroyed_key) in [
             Fault::None,
             Fault::Omitted,
@@ -352,10 +357,9 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
                 .filter(move |destroyed| !*destroyed || fault == Fault::None)
                 .map(move |destroyed| (fault, cut, destroyed))
         }) {
-            let world = World::new(shape, false)?;
-            let child = world.child_at(0)?.id;
+            let built = &built[usize::from(destroyed_key)];
             let mut memory = MemoryStore::new();
-            let requirement = populate(&mut memory, &world, shape, destroyed_key)?;
+            let requirement = populate(&mut memory, &world, built)?;
             let run = |host| {
                 run_on_host(
                     host,
@@ -389,10 +393,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
             let path = directory.path().join("imported-replay.sqlite");
             let path = path.to_str().ok_or("utf-8 path")?;
             let mut sqlite = SqliteStore::open(path)?;
-            assert_eq!(
-                populate(&mut sqlite, &world, shape, destroyed_key)?,
-                requirement
-            );
+            assert_eq!(populate(&mut sqlite, &world, built)?, requirement);
             drop(sqlite);
             let composition =
                 ErasureCoordinatorCompositionV1::closed().with_world_replay_verifier(verifier());
@@ -418,7 +419,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
 }
 
 fn populate_pair<S: Port>(store: &mut S, world: &World) -> Fallible<[ForkReplayRequirementV1; 2]> {
-    let first = populate(store, world, Shape::Mixed, false)?;
+    let first = populate(store, world, &world.build(&Spec::default())?)?;
     let built = world.build(&Spec::distinct(1))?;
     pin_policy(store, &built.policy)?;
     store.import_verified(&request_for(world, &built))?;
@@ -697,7 +698,7 @@ fn sqlite_protected_consumers_hold_writer_reservation_through_both_phases() -> F
             let requirements = if call == ConsumerCall::Compare {
                 populate_pair(&mut writer, &world)?
             } else {
-                let requirement = populate(&mut writer, &world, Shape::Mixed, false)?;
+                let requirement = populate(&mut writer, &world, &world.build(&Spec::default())?)?;
                 [requirement, requirement]
             };
             let (verifier, before) = reservation_verifier(writer, &world, requirements, call)?;
