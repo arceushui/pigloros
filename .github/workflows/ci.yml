@@ -225,6 +225,8 @@ jobs:
         run: cargo check --workspace --all-targets --all-features --locked
       - name: Prove reference evaluator implementation independence
         run: bash scripts/check-reference-evaluator-independence.sh
+      - name: Prove the conformance adapter dependency graph
+        run: bash scripts/check-adapter-graph.sh
       - name: cargo test (all features, no ignored skip)
         run: |
           set -euo pipefail
@@ -306,6 +308,12 @@ jobs:
         run: python3 scripts/test_materialize_systemd_scs1.py
       - name: Independently regenerate public fixture records
         run: bash scripts/generate-conformance-fixture-records.sh
+      - name: Check the Plugin conformance fixture generator and its outputs
+        run: python3 scripts/generate_plugin_conformance_fixtures.py --check
+      - name: Check the Plugin conformance evidence-status records stay pending
+        run: |
+          python3 scripts/check_plugin_conformance_expected.py
+          python3 scripts/test_check_plugin_conformance_expected.py
       - name: Verify public conformance fixtures
         run: bash scripts/verify-conformance-fixtures.sh
       - name: Exercise conformance fixture rejection boundaries
@@ -1209,7 +1217,11 @@ jobs:
         run: |
           python scripts/check_plugin_trust_registry_impls.py
           python scripts/test_check_plugin_trust_registry_impls.py
-      - name: Check the community Plugin supervisor handoff README
+      - name: Check fixture evaluation instant and admission host confinement policy
+        run: |
+          python scripts/check_fixture_instant_confinement.py
+          python scripts/test_check_fixture_instant_confinement.py
+      - name: Check the community Plugin handoff READMEs
         run: |
           python scripts/check_handoff_readme.py
           python scripts/test_check_handoff_readme.py

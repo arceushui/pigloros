@@ -9,16 +9,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use pos_crypto::plugin_execution::DeterministicBudgetV1;
-use pos_plugin_host::pinned_runtime;
 use pos_plugin_supervisor::test_support::{
     authorization_for, invocation_for, negotiated_under, ok,
 };
 use pos_plugin_supervisor::{CommunityPluginSupervisorV1, WorkerProgramV1};
 use pos_runtime::community_plugin_host::{
-    CeilingValuesV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
-    CommunityPluginHostErrorV1, CommunityPluginModeV1, ComponentTrapClassV1, HostInputs,
-    InvocationReportV1, NegotiatedCommunityPluginV1, PluginDescriptorV1, PluginInvocationV1,
-    PluginOutputV1, TrapReproductionV1,
+    pinned_runtime_v1, CeilingValuesV1, CommunityPluginCeilingsV1,
+    CommunityPluginExecutionProfileV1, CommunityPluginHostErrorV1, CommunityPluginModeV1,
+    ComponentTrapClassV1, HostInputs, InvocationReportV1, NegotiatedCommunityPluginV1,
+    PluginDescriptorV1, PluginInvocationV1, PluginOutputV1, TrapReproductionV1,
 };
 
 /// Bytes of one committed compatibility fixture.
@@ -51,7 +50,7 @@ fn profile(
     mode: CommunityPluginModeV1,
     ceilings: CommunityPluginCeilingsV1,
 ) -> CommunityPluginExecutionProfileV1 {
-    CommunityPluginExecutionProfileV1::new(mode, ceilings, Some(ok(pinned_runtime())))
+    CommunityPluginExecutionProfileV1::new(mode, ceilings, Some(pinned_runtime_v1()))
 }
 
 fn negotiated_in(

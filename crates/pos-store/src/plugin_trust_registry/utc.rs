@@ -1,16 +1,17 @@
 //! The trusted UTC second of one registry transaction.
 
-use pos_core::trusted_clock::TrustedWallSourceV1;
+use pos_core::trusted_clock::PluginTrustWallSourceV1;
 
 use super::error::PluginTrustPolicyRegistryErrorV1;
 
 const MICROS_PER_SECOND: u64 = 1_000_000;
 
-/// One signed UTC second sampled from the sealed ADR-112 trusted wall source.
+/// One signed UTC second sampled from the sealed `PluginTrustWallSourceV1` (ADR-061 revision 8).
 ///
 /// The only production constructor is [`Self::from_source`]. Because
-/// `TrustedWallSourceV1` is sealed, no caller, TPS1, PTR1, PRV1, or Plugin can
-/// supply another source.
+/// `PluginTrustWallSourceV1` is sealed, the source is either a trusted ADR-112 wall source or the
+/// feature-gated fixture instant, which only the Plugin-conformance adapter may enable. No
+/// caller, TPS1, PTR1, PRV1, or Plugin can supply another source.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct TrustedUtcSecondV1(i64);
 
@@ -23,10 +24,10 @@ impl TrustedUtcSecondV1 {
     /// # Errors
     /// Returns `TrustedTimeUnavailable` when the source fails.
     pub fn from_source(
-        source: &mut impl TrustedWallSourceV1,
+        source: &mut impl PluginTrustWallSourceV1,
     ) -> Result<Self, PluginTrustPolicyRegistryErrorV1> {
         source
-            .sample()
+            .sample_plugin_trust()
             .or(Err(
                 PluginTrustPolicyRegistryErrorV1::TrustedTimeUnavailable,
             ))

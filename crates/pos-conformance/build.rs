@@ -62,7 +62,6 @@ impl SourceSnapshots {
 struct FixturePaths {
     case_id: String,
     family_variant: String,
-    schema_path: String,
     contract: CatalogFixtureContract,
     strict_oracle: CatalogStrictOracle,
     failure_outcome: CatalogVerificationOutcome,
@@ -72,6 +71,7 @@ struct FixturePaths {
     input: FixtureAsset,
     evidence_status: FixtureAsset,
     oracle: FixtureAsset,
+    auxiliary: Vec<FixtureAuxiliary>,
 }
 
 struct FixtureAsset {
@@ -824,7 +824,7 @@ fn verify_source_inventory(
 ) -> Result<[u8; 32], io::Error> {
     let support = support_package_manifest(snapshots)?;
     validate_provider_support_roles(profiles, &support)?;
-    let expected_paths = expected_source_paths(profiles, &support);
+    let expected_paths = expected_paths_with_auxiliary(profiles, &support);
     let declared_paths = snapshots
         .sha256_entries
         .keys()
@@ -1161,7 +1161,6 @@ fn profile_fixtures(
             }
             let family_variant =
                 rust_enum_variant("FixtureFamilyV1", &family, "profile fixture family")?;
-            let schema_path = json_text(fixture, "schema")?;
             let schema = relative_asset(snapshots, fixture, "schema")?;
             let expected_schema = provider_schemas
                 .get(&family)
@@ -1176,7 +1175,8 @@ fn profile_fixtures(
             }
             let input = relative_asset(snapshots, fixture, "input")?;
             let evidence_status = relative_asset(snapshots, fixture, "expected")?;
-            let oracle = relative_asset(snapshots, fixture, "oracle")?;
+            let (oracle, auxiliary) =
+                oracle_and_auxiliary(snapshots, fixture, provider_value, &family)?;
             let family_declaration = family_contract
                 .declarations
                 .get(&family)
@@ -1186,7 +1186,6 @@ fn profile_fixtures(
             Ok(FixturePaths {
                 case_id,
                 family_variant,
-                schema_path,
                 contract,
                 strict_oracle,
                 failure_outcome: family_declaration.failure_outcome,
@@ -1196,6 +1195,7 @@ fn profile_fixtures(
                 input,
                 evidence_status,
                 oracle,
+                auxiliary,
             })
         })
         .collect()
@@ -1222,7 +1222,7 @@ fn profile_fixture_provider(
             manifest.relative
         ))
     })?;
-    validate_fixture_provider(
+    validate_provider_with_auxiliary(
         &provider_value,
         context.claim_layer,
         context.subject_adapter,
@@ -1664,10 +1664,48 @@ fn emit_strict_oracle(
     }
 }
 
+/// The path under `OUT_DIR` of an embedded byte source, named by its BLAKE3 digest.
+fn embedded_path(bytes: &[u8]) -> String {
+    format!("embedded/{}.bin", blake3::hash(bytes).to_hex())
+}
+
+/// The `include_bytes!` expression of a byte source that `write_embedded_files` writes: a large
+/// array literal would be a large stack array for clippy and slow to compile.
+fn include_expression(bytes: &[u8]) -> String {
+    format!(
+        "include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{}\"))",
+        embedded_path(bytes)
+    )
+}
+
+/// Every byte source of the catalog that is embedded with `include_bytes!`, except the
+/// auxiliary members (which have their own numbered files).
+fn embedded_sources(profiles: &[ProfilePaths]) -> Vec<&[u8]> {
+    let mut sources: Vec<&[u8]> = Vec::new();
+    for profile in profiles {
+        sources.push(&profile.normative_requirements.bytes);
+        sources.push(&profile.profile_record);
+        for fixture in profile
+            .fixture_providers
+            .iter()
+            .flat_map(|provider| &provider.fixtures)
+        {
+            sources.extend([
+                fixture.schema.bytes.as_slice(),
+                fixture.input.bytes.as_slice(),
+                fixture.evidence_status.bytes.as_slice(),
+                fixture.oracle.bytes.as_slice(),
+            ]);
+        }
+    }
+    sources
+}
+
 fn emit_fixture(
     generated: &mut String,
     fixture: &FixturePaths,
     fixture_index: usize,
+    first_auxiliary_index: usize,
 ) -> Result<(), std::fmt::Error> {
     writeln!(
         generated,
@@ -1687,30 +1725,30 @@ fn emit_fixture(
     writeln!(
         generated,
         "                        schema_path: {:?},",
-        fixture.schema_path
+        fixture.schema.relative
     )?;
     emit_fixture_contract(generated, fixture)?;
     writeln!(
         generated,
-        "                        schema: &{:?},",
-        fixture.schema.bytes
+        "                        schema: {},",
+        include_expression(&fixture.schema.bytes)
     )?;
     writeln!(
         generated,
-        "                        input: &{:?},",
-        fixture.input.bytes
+        "                        input: {},",
+        include_expression(&fixture.input.bytes)
     )?;
     writeln!(
         generated,
-        "                        evidence_status: &{:?},",
-        fixture.evidence_status.bytes
+        "                        evidence_status: {},",
+        include_expression(&fixture.evidence_status.bytes)
     )?;
     writeln!(
         generated,
-        "                        oracle: &{:?},",
-        fixture.oracle.bytes
+        "                        oracle: {},",
+        include_expression(&fixture.oracle.bytes)
     )?;
-    emit_strict_oracle(generated, &fixture.strict_oracle)?;
+    emit_oracle_members(generated, fixture, first_auxiliary_index)?;
     writeln!(
         generated,
         "                        failure_outcome: {},",
@@ -1757,8 +1795,8 @@ fn emit_profile(
     )?;
     writeln!(
         generated,
-        "                normative_requirements: &{:?},",
-        profile.normative_requirements.bytes
+        "                normative_requirements: {},",
+        include_expression(&profile.normative_requirements.bytes)
     )?;
     writeln!(
         generated,
@@ -1767,8 +1805,8 @@ fn emit_profile(
     )?;
     writeln!(
         generated,
-        "                profile_record: &{:?},",
-        profile.profile_record
+        "                profile_record: {},",
+        include_expression(&profile.profile_record)
     )?;
     writeln!(generated, "                fixture_providers: vec![")?;
     let mut fixture_index = first_fixture_index;
@@ -1844,11 +1882,13 @@ fn emit_fixture_provider(
 fn emit_catalog(profiles: &[ProfilePaths]) -> Result<String, std::fmt::Error> {
     let mut generated = String::new();
     let mut fixture_index = 0;
+    let mut auxiliary_index = 0;
     for profile in profiles {
         for provider in &profile.fixture_providers {
             for fixture in &provider.fixtures {
-                emit_fixture(&mut generated, fixture, fixture_index)?;
+                emit_fixture(&mut generated, fixture, fixture_index, auxiliary_index)?;
                 fixture_index += 1;
+                auxiliary_index += fixture.auxiliary.len();
             }
         }
     }
@@ -2363,7 +2403,7 @@ fn manifest_catalog_root() -> Result<CatalogRoot, Box<dyn Error>> {
 fn discover_build_data(root: &CatalogRoot) -> Result<DiscoveredBuildData, Box<dyn Error>> {
     let snapshots = source_snapshots(root)?;
     let profiles = discover_profiles(root, &snapshots)?;
-    let source_inventory_digest = verify_source_inventory(&snapshots, &profiles)?;
+    let source_inventory_digest = verify_inventory_and_auxiliary(&snapshots, &profiles)?;
     Ok((snapshots, profiles, source_inventory_digest))
 }
 
@@ -2390,6 +2430,20 @@ fn output_directory() -> Result<PathBuf, Box<dyn Error>> {
 fn write_catalog_file(out_dir: &Path, profiles: &[ProfilePaths]) -> Result<(), Box<dyn Error>> {
     let generated = emit_catalog(profiles)?;
     std::fs::write(out_dir.join("conformance_fixture_catalog.rs"), generated)?;
+    write_side_files(out_dir, profiles)
+}
+
+/// The embedded byte sources and the auxiliary members next to the generated catalog.
+fn write_side_files(out_dir: &Path, profiles: &[ProfilePaths]) -> Result<(), Box<dyn Error>> {
+    write_embedded_files(out_dir, profiles)?;
+    write_auxiliary_files(out_dir, profiles)
+}
+
+fn write_embedded_files(out_dir: &Path, profiles: &[ProfilePaths]) -> Result<(), Box<dyn Error>> {
+    reset_auxiliary_directory(&out_dir.join("embedded"))?;
+    for bytes in embedded_sources(profiles) {
+        std::fs::write(out_dir.join(embedded_path(bytes)), bytes)?;
+    }
     Ok(())
 }
 
@@ -2451,4 +2505,255 @@ fn build() -> Result<(), Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     build()
+}
+
+#[path = "src/catalog_auxiliary.rs"]
+pub mod catalog_auxiliary;
+use catalog_auxiliary::{
+    check_embedded_total, declaration_is_valid, validate_auxiliary_catalog, AuxiliaryEntry,
+    DEFAULT_AUXILIARY_CAP, MAX_EMBEDDED_AUXILIARY_BYTES,
+};
+
+struct FixtureAuxiliary {
+    asset: FixtureAsset,
+    media_type: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderAuxiliaryEntry {
+    path: String,
+    media_type: String,
+}
+
+fn auxiliary_source_paths(fixture: &FixturePaths) -> Vec<String> {
+    fixture
+        .auxiliary
+        .iter()
+        .map(|auxiliary| auxiliary.asset.relative.clone())
+        .collect()
+}
+
+fn auxiliary_entry_counts(provider: &Value) -> Option<BTreeMap<String, usize>> {
+    let declared = provider.get("auxiliary")?.as_object()?;
+    Some(
+        declared
+            .iter()
+            .map(|(family, entries)| {
+                (
+                    family.clone(),
+                    entries.as_array().map_or(usize::MAX, Vec::len),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn validate_provider_auxiliary(provider: &Value, claim_layer: &str) -> Result<(), io::Error> {
+    let families = provider
+        .get("schemas")
+        .and_then(Value::as_object)
+        .map(|schemas| schemas.keys().cloned().collect::<BTreeSet<_>>())
+        .unwrap_or_default();
+    let adapter = provider.pointer("/fixture_adapter/id");
+    let json_adapter = adapter.and_then(Value::as_str) == Some(JSON_FIXTURE_ADAPTER_ID);
+    let valid = auxiliary_entry_counts(provider)
+        .is_some_and(|counts| declaration_is_valid(&families, &counts, json_adapter));
+    if valid {
+        Ok(())
+    } else {
+        Err(invalid_data(format!(
+            "provider manifest does not match profile claim layer {claim_layer}"
+        )))
+    }
+}
+
+fn validate_provider_with_auxiliary(
+    provider: &Value,
+    claim_layer: &str,
+    subject_adapter: &str,
+) -> Result<(), io::Error> {
+    validate_fixture_provider(provider, claim_layer, subject_adapter)?;
+    validate_provider_auxiliary(provider, claim_layer)
+}
+
+fn auxiliary_declaration<'a>(provider: &'a Value, family: &str) -> Result<&'a Value, io::Error> {
+    json_field(json_field(provider, "auxiliary")?, family)
+}
+
+fn parse_auxiliary_entries(
+    declared: &Value,
+    family: &str,
+) -> Result<Vec<AuxiliaryEntry>, io::Error> {
+    let entries: Vec<ProviderAuxiliaryEntry> =
+        serde_json::from_value(declared.clone()).map_err(|error| {
+            invalid_data(format!(
+                "provider auxiliary for {family} is invalid: {error}"
+            ))
+        })?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| AuxiliaryEntry {
+            path: entry.path,
+            media_type: entry.media_type,
+        })
+        .collect())
+}
+
+fn check_auxiliary_entries(
+    snapshots: &SourceSnapshots,
+    entries: &[AuxiliaryEntry],
+) -> Result<(), io::Error> {
+    let sources = snapshots.sources.keys().cloned().collect::<BTreeSet<_>>();
+    validate_auxiliary_catalog(&sources, entries, DEFAULT_AUXILIARY_CAP)
+        .map_err(|error| invalid_data(error.to_string()))
+}
+
+fn load_auxiliary_member(
+    snapshots: &SourceSnapshots,
+    entry: AuxiliaryEntry,
+) -> Result<FixtureAuxiliary, io::Error> {
+    let bytes = snapshots
+        .bytes(&entry.path, "provider auxiliary source")?
+        .to_vec();
+    Ok(FixtureAuxiliary {
+        asset: FixtureAsset {
+            relative: entry.path,
+            bytes,
+        },
+        media_type: entry.media_type,
+    })
+}
+
+fn fixture_auxiliary(
+    snapshots: &SourceSnapshots,
+    provider: &Value,
+    family: &str,
+) -> Result<Vec<FixtureAuxiliary>, io::Error> {
+    let declared = auxiliary_declaration(provider, family)?;
+    let entries = parse_auxiliary_entries(declared, family)?;
+    check_auxiliary_entries(snapshots, &entries)?;
+    entries
+        .into_iter()
+        .map(|entry| load_auxiliary_member(snapshots, entry))
+        .collect()
+}
+
+fn oracle_and_auxiliary(
+    snapshots: &SourceSnapshots,
+    fixture: &Value,
+    provider: &Value,
+    family: &str,
+) -> Result<(FixtureAsset, Vec<FixtureAuxiliary>), io::Error> {
+    let oracle = relative_asset(snapshots, fixture, "oracle")?;
+    fixture_auxiliary(snapshots, provider, family).map(|auxiliary| (oracle, auxiliary))
+}
+
+fn auxiliary_in_catalog_order(
+    profiles: &[ProfilePaths],
+) -> impl Iterator<Item = &FixtureAuxiliary> {
+    profiles
+        .iter()
+        .flat_map(|profile| &profile.fixture_providers)
+        .flat_map(|provider| &provider.fixtures)
+        .flat_map(|fixture| &fixture.auxiliary)
+}
+
+fn check_auxiliary_total(profiles: &[ProfilePaths]) -> Result<(), io::Error> {
+    let sizes = auxiliary_in_catalog_order(profiles)
+        .map(|auxiliary| auxiliary.asset.bytes.len())
+        .collect::<Vec<_>>();
+    check_embedded_total(&sizes, MAX_EMBEDDED_AUXILIARY_BYTES)
+        .map_err(|error| invalid_data(error.to_string()))
+}
+
+fn verify_inventory_and_auxiliary(
+    snapshots: &SourceSnapshots,
+    profiles: &[ProfilePaths],
+) -> Result<[u8; 32], io::Error> {
+    let digest = verify_source_inventory(snapshots, profiles)?;
+    check_auxiliary_total(profiles)?;
+    Ok(digest)
+}
+
+fn emit_auxiliary_member(
+    generated: &mut String,
+    auxiliary: &FixtureAuxiliary,
+    index: usize,
+) -> Result<(), std::fmt::Error> {
+    writeln!(generated, "                            CatalogAuxiliary {{")?;
+    writeln!(
+        generated,
+        "                                media_type: {:?},",
+        auxiliary.media_type
+    )?;
+    writeln!(
+        generated,
+        "                                bytes: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/aux/{index}.bin\")),"
+    )?;
+    writeln!(generated, "                            }},")
+}
+
+fn emit_auxiliary(
+    generated: &mut String,
+    fixture: &FixturePaths,
+    first_auxiliary_index: usize,
+) -> Result<(), std::fmt::Error> {
+    writeln!(generated, "                        auxiliary: &[")?;
+    for (offset, auxiliary) in fixture.auxiliary.iter().enumerate() {
+        emit_auxiliary_member(generated, auxiliary, first_auxiliary_index + offset)?;
+    }
+    writeln!(generated, "                        ],")
+}
+
+fn emit_oracle_members(
+    generated: &mut String,
+    fixture: &FixturePaths,
+    first_auxiliary_index: usize,
+) -> Result<(), std::fmt::Error> {
+    emit_auxiliary(generated, fixture, first_auxiliary_index)?;
+    emit_strict_oracle(generated, &fixture.strict_oracle)
+}
+
+fn reset_auxiliary_directory(directory: &Path) -> Result<(), io::Error> {
+    if directory.exists() {
+        std::fs::remove_dir_all(directory)?;
+    }
+    std::fs::create_dir_all(directory)?;
+    Ok(())
+}
+
+fn write_auxiliary_member(
+    directory: &Path,
+    index: usize,
+    auxiliary: &FixtureAuxiliary,
+) -> Result<(), io::Error> {
+    std::fs::write(
+        directory.join(format!("{index}.bin")),
+        &auxiliary.asset.bytes,
+    )
+}
+
+fn write_auxiliary_files(out_dir: &Path, profiles: &[ProfilePaths]) -> Result<(), Box<dyn Error>> {
+    let directory = out_dir.join("aux");
+    reset_auxiliary_directory(&directory)?;
+    for (index, auxiliary) in auxiliary_in_catalog_order(profiles).enumerate() {
+        write_auxiliary_member(&directory, index, auxiliary)?;
+    }
+    Ok(())
+}
+
+fn expected_paths_with_auxiliary(
+    profiles: &[ProfilePaths],
+    support: &SupportPackageManifest,
+) -> BTreeSet<String> {
+    let mut paths = expected_source_paths(profiles, support);
+    for profile in profiles {
+        for provider in &profile.fixture_providers {
+            for fixture in &provider.fixtures {
+                paths.extend(auxiliary_source_paths(fixture));
+            }
+        }
+    }
+    paths
 }

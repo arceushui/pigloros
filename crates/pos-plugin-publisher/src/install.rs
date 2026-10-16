@@ -28,7 +28,7 @@
 //! [`ContentValidationV1::NotPerformed`].
 
 use pos_conformance::PluginTrustPolicyAnchorV1;
-use pos_core::trusted_clock::TrustedWallSourceV1;
+use pos_core::trusted_clock::PluginTrustWallSourceV1;
 use pos_crypto::plugin_execution::PluginExecutionProjectionV1;
 use pos_crypto::plugin_manifest::{
     verify_plugin_release_signature_v1, PluginManifestErrorV1, PluginReleaseSignatureErrorV1,
@@ -157,8 +157,8 @@ impl InstalledPluginReleaseV1 {
 pub fn install_plugin_release_v1(
     source: &impl ReleaseSourceV1,
     address: &BundleAddressV1,
-    registry: &mut impl PluginTrustPolicyRegistryV1,
-    wall: &mut impl TrustedWallSourceV1,
+    registry: &mut (impl PluginTrustPolicyRegistryV1 + ?Sized),
+    wall: &mut impl PluginTrustWallSourceV1,
     request: PluginInstallRequestV1<'_>,
 ) -> Result<InstalledPluginReleaseV1, PluginReleaseInstallErrorV1> {
     let bundle = source.read_verified(address)?;

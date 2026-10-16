@@ -21,5 +21,11 @@ The EAI1/EAO1 subject adapter binary is owned by #194.
 
 Results are Local-relaxation engineering evidence, not hosted conformance.
 
+The adapter is `apps/pos-plugin-conformance-adapter` (ADR-061 revision 8, #194): it reads one
+EAI1 attempt, runs the sub-cases of its payload through this crate's supervisor and the real
+`pos-plugin-worker`, and writes one EAO1 observation. Its README has the contract, and its
+acceptance tests are `apps/pos-plugin-worker/tests/conformance_adapter_public.rs`.
+
 `scripts/check_handoff_readme.py` checks the ownership sentence and the evidence sentence
-above on every CI run.
+above, and the same two sentences and the worker-location sentence of the adapter README, on
+every CI run.

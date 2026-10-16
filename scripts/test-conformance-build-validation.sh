@@ -9,6 +9,7 @@ backup_root="$(mktemp -d)"
 replacement="$(mktemp)"
 log="$(mktemp)"
 negative_target="$(mktemp -d)"
+auxiliary_source="fixtures/conformance/inputs/artifact-integrity/auxiliary-control.pcw2"
 
 restore_fixture() {
   cp -- "${backup_root}/profile.json" "${profile}"
@@ -16,7 +17,7 @@ restore_fixture() {
   cp -- "${backup_root}/BLAKE3SUMS" "${blake_inventory}"
   cp -- "${backup_root}/SHA256SUMS" "${sha_inventory}"
   rm -rf -- "${backup_root}" "${negative_target}"
-  rm -f -- "${replacement}" "${log}"
+  rm -f -- "${replacement}" "${log}" "${auxiliary_source}"
 }
 trap restore_fixture EXIT
 
@@ -97,4 +98,81 @@ grep -Fq "provider manifest does not match profile claim layer" "${log}" || {
   exit 1
 }
 
-echo "pos-conformance build rejected invalid claim, support-role, and downgrade-headroom inputs"
+cp -- "${backup_root}/provider.json" "${provider}"
+cp -- "${backup_root}/BLAKE3SUMS" "${blake_inventory}"
+cp -- "${backup_root}/SHA256SUMS" "${sha_inventory}"
+jq '.fixture_adapter.id = "opaque-provider-v1" |
+    .auxiliary.positive = [{
+      path: "inputs/artifact-integrity/missing-control.pcw2",
+      media_type: "application/octet-stream"
+    }]' "${provider}" >"${replacement}"
+mv -- "${replacement}" "${provider}"
+refresh_inventory_digest "${provider}" "providers/artifact-integrity/provider.json"
+if CARGO_TARGET_DIR="${negative_target}" cargo check -p pos-conformance --locked >"${log}" 2>&1; then
+  echo "pos-conformance build accepted an auxiliary path outside the source inventory" >&2
+  exit 1
+fi
+grep -Fq "auxiliary path is not an inventoried source" "${log}" || {
+  echo "pos-conformance build rejected the missing auxiliary source for the wrong reason" >&2
+  cat "${log}" >&2
+  exit 1
+}
+
+for auxiliary_edit in 'del(.auxiliary.positive)' '.auxiliary.unknown = []' \
+  '.auxiliary.positive = [{path: "inputs/artifact-integrity/json.pcw2", media_type: "application/octet-stream"}]'; do
+  cp -- "${backup_root}/provider.json" "${provider}"
+  cp -- "${backup_root}/BLAKE3SUMS" "${blake_inventory}"
+  cp -- "${backup_root}/SHA256SUMS" "${sha_inventory}"
+  jq "${auxiliary_edit}" "${provider}" >"${replacement}"
+  mv -- "${replacement}" "${provider}"
+  refresh_inventory_digest "${provider}" "providers/artifact-integrity/provider.json"
+  if CARGO_TARGET_DIR="${negative_target}" cargo check -p pos-conformance --locked >"${log}" 2>&1; then
+    echo "pos-conformance build accepted an invalid auxiliary declaration: ${auxiliary_edit}" >&2
+    exit 1
+  fi
+  grep -Fq "provider manifest does not match profile claim layer" "${log}" || {
+    echo "pos-conformance build rejected the auxiliary declaration for the wrong reason: ${auxiliary_edit}" >&2
+    cat "${log}" >&2
+    exit 1
+  }
+done
+
+add_inventory_entry() {
+  local source="$1"
+  local relative="$2"
+  printf '%s  %s\n' "$(b3sum "${source}" | awk '{print $1}')" "${relative}" >>"${blake_inventory}"
+  printf '%s  %s\n' "$(sha256sum "${source}" | awk '{print $1}')" "${relative}" >>"${sha_inventory}"
+  replace_inventory_digest "${sha_inventory}" \
+    "$(sha256sum "${blake_inventory}" | awk '{print $1}')" BLAKE3SUMS
+}
+
+cp -- "${backup_root}/provider.json" "${provider}"
+cp -- "${backup_root}/BLAKE3SUMS" "${blake_inventory}"
+cp -- "${backup_root}/SHA256SUMS" "${sha_inventory}"
+printf 'auxiliary control composite\n' >"${auxiliary_source}"
+jq '.fixture_adapter.id = "opaque-provider-v1" |
+    .auxiliary.positive = [{
+      path: "inputs/artifact-integrity/auxiliary-control.pcw2",
+      media_type: "application/octet-stream"
+    }]' "${provider}" >"${replacement}"
+mv -- "${replacement}" "${provider}"
+refresh_inventory_digest "${provider}" "providers/artifact-integrity/provider.json"
+add_inventory_entry "${auxiliary_source}" "inputs/artifact-integrity/auxiliary-control.pcw2"
+if ! CARGO_TARGET_DIR="${negative_target}" cargo check -p pos-conformance --locked >"${log}" 2>&1; then
+  echo "pos-conformance build rejected an inventoried auxiliary member" >&2
+  cat "${log}" >&2
+  exit 1
+fi
+embedded_catalog="$(
+  grep -Frl --include=conformance_fixture_catalog.rs -- 'aux/0.bin' "${negative_target}" | head -n 1
+)"
+[[ -n "${embedded_catalog}" ]] || {
+  echo "pos-conformance catalog does not embed the auxiliary member" >&2
+  exit 1
+}
+cmp -- "$(dirname "${embedded_catalog}")/aux/0.bin" "${auxiliary_source}" || {
+  echo "pos-conformance embedded auxiliary bytes differ from the verified source" >&2
+  exit 1
+}
+
+echo "pos-conformance build rejected invalid claim, support-role, downgrade-headroom, and auxiliary inputs"

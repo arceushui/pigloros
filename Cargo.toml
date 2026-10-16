@@ -30,6 +30,7 @@ members = [
   "apps/pos-cli",
   "apps/pos-sandboxd",
   "apps/pos-plugin-worker",
+  "apps/pos-plugin-conformance-adapter",
   "apps/piglor-gateway",
   "apps/piglor-ledger",
   "apps/piglor-world-client",

@@ -21,12 +21,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use pos_plugin_host::{pinned_runtime, ComponentHost, PinnedExecutionV1};
+use pos_plugin_host::{ComponentHost, PinnedExecutionV1};
 use pos_plugin_supervisor::{WorkerCallV1, WorkerOutcomeV1, WorkerRequestV1, WorkerReturnV1};
 use pos_runtime::community_plugin_host::{
-    CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1,
-    CommunityPluginHostErrorV1, CommunityPluginModeV1, InvocationOptionsV1,
-    NegotiatedCommunityPluginV1, NegotiatedTransportV1,
+    pinned_runtime_v1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
+    CommunityPluginHostAbiV1, CommunityPluginHostErrorV1, CommunityPluginModeV1,
+    InvocationOptionsV1, NegotiatedCommunityPluginV1, NegotiatedTransportV1,
 };
 
 /// Interval between two engine epoch increments.
@@ -87,7 +87,7 @@ fn pinned(
     let profile = CommunityPluginExecutionProfileV1::new(
         mode,
         CommunityPluginCeilingsV1::V1,
-        pinned_runtime().ok(),
+        Some(pinned_runtime_v1()),
     );
     NegotiatedCommunityPluginV1::from_transport(
         transport,

@@ -33,6 +33,11 @@ python3 "$ROOT/scripts/test_check_asan_ci_policy.py"
 echo "==> PMF1 golden vectors match their independent generator"
 python3 "$ROOT/scripts/generate_pmf1_golden_vectors.py" --check
 
+echo "==> Plugin conformance fixtures match their independent generator"
+python3 "$ROOT/scripts/generate_plugin_conformance_fixtures.py" --check
+python3 "$ROOT/scripts/check_plugin_conformance_expected.py"
+python3 "$ROOT/scripts/test_check_plugin_conformance_expected.py"
+
 echo "==> owner-bridge codec vectors match their independent generator"
 python3 "$ROOT/scripts/owner_bridge_vectors.py" --check
 
@@ -42,6 +47,14 @@ python3 "$ROOT/scripts/owner_bridge_webauthn_fixtures.py" --check
 echo "==> MemoryStore benchmark CI policy"
 python3 "$ROOT/scripts/check_memory_store_benchmark_ci_policy.py"
 python3 "$ROOT/scripts/test_check_memory_store_benchmark_ci_policy.py"
+
+echo "==> Plugin trust registry, fixture instant and handoff README policies"
+python3 "$ROOT/scripts/check_plugin_trust_registry_impls.py"
+python3 "$ROOT/scripts/test_check_plugin_trust_registry_impls.py"
+python3 "$ROOT/scripts/check_fixture_instant_confinement.py"
+python3 "$ROOT/scripts/test_check_fixture_instant_confinement.py"
+python3 "$ROOT/scripts/check_handoff_readme.py"
+python3 "$ROOT/scripts/test_check_handoff_readme.py"
 
 echo "==> cargo-crap CI policy"
 python3 "$ROOT/scripts/check_cargo_crap_ci_policy.py"

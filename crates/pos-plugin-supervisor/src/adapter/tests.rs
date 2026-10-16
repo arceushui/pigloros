@@ -534,6 +534,34 @@ fn registration_is_pinned_community_and_non_participant() {
     assert_eq!(registry.driver_count(), 1);
 }
 
+/// R8-W4: the production pin is accepted, and is the governed community pin.
+#[test]
+fn registration_accepts_the_production_community_pin() {
+    let (driver, handle, _) = fixture(None);
+    let plugin = plugin(handle.plugin_id(), true);
+    let mut registry = PluginRegistry::new();
+    let pin = ok(pos_runtime::community_pin_v1(
+        pos_core::Hash::from_bytes([1; 32]),
+        vec!["community".to_owned()],
+    ));
+    assert_eq!(
+        pin,
+        pin_of(
+            DomainImplementationKindV1::Plugin,
+            PluginIsolationV1::GovernedCommunity,
+            1,
+            "community",
+        )
+    );
+    let () = ok(register_community_driver(
+        &mut registry,
+        &plugin,
+        pin,
+        driver,
+    ));
+    assert_eq!(registry.driver_count(), 1);
+}
+
 #[test]
 fn registration_rejects_a_non_community_pin() {
     use DomainImplementationKindV1 as Impl;

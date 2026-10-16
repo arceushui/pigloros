@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Check the #194 handoff README of the community Plugin supervisor (ADR-061 revision 7, #585).
+"""Check the #194 handoff READMEs of the community Plugin host (ADR-061 revision 8, #620).
 
-`crates/pos-plugin-supervisor/README.md` must contain, verbatim and each in one piece, the two
-sentences that state the ownership of the EAI1/EAO1 subject adapter binary and the evidence
-level of the results. Line wraps and runs of whitespace between words are ignored; the file may
-contain other text.
+Two READMEs carry pinned sentences, each verbatim and in one piece:
+
+- `crates/pos-plugin-supervisor/README.md`: the ownership of the EAI1/EAO1 subject adapter
+  binary and the evidence level of the results (revision 7, #585);
+- `apps/pos-plugin-conformance-adapter/README.md`: the same two sentences and the worker
+  location sentence (revision 8 decision 14; the third sentence is owner decision O-17).
+
+Line wraps and runs of whitespace between words are ignored; a file may contain other text.
 """
 
 from __future__ import annotations
@@ -12,28 +16,44 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-README = "crates/pos-plugin-supervisor/README.md"
-SENTENCES = (
-    "The EAI1/EAO1 subject adapter binary is owned by #194.",
-    "Results are Local-relaxation engineering evidence, not hosted conformance.",
-)
+OWNER = "The EAI1/EAO1 subject adapter binary is owned by #194."
+EVIDENCE = "Results are Local-relaxation engineering evidence, not hosted conformance."
+WORKER = "The pos-plugin-worker binary must be built into the directory of this binary."
+
+SUPERVISOR_README = "crates/pos-plugin-supervisor/README.md"
+ADAPTER_README = "apps/pos-plugin-conformance-adapter/README.md"
+
+READMES = {
+    SUPERVISOR_README: (OWNER, EVIDENCE),
+    ADAPTER_README: (OWNER, EVIDENCE, WORKER),
+}
 
 
-def missing(text: str) -> list[str]:
+def missing(text: str, sentences: tuple[str, ...]) -> list[str]:
     flat = " ".join(text.split())
-    return [sentence for sentence in SENTENCES if sentence not in flat]
+    return [sentence for sentence in sentences if sentence not in flat]
+
+
+def problems(root: Path, readme: str, sentences: tuple[str, ...]) -> list[str]:
+    path = root / readme
+    if not path.is_file():
+        return [f"{readme} does not exist"]
+    absent = missing(path.read_text(encoding="utf-8"), sentences)
+    return [f"{readme} lacks: {sentence}" for sentence in absent]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
-    path = parser.parse_args().root.resolve() / README
-    if not path.is_file():
-        raise SystemExit(f"{README} does not exist")
-    absent = missing(path.read_text(encoding="utf-8"))
-    if absent:
-        raise SystemExit("\n".join(f"{README} lacks: {sentence}" for sentence in absent))
-    print("the handoff README states the #194 ownership and the evidence level")
+    root = parser.parse_args().root.resolve()
+    found = [
+        problem
+        for readme, sentences in READMES.items()
+        for problem in problems(root, readme, sentences)
+    ]
+    if found:
+        raise SystemExit("\n".join(found))
+    print("both handoff READMEs state the #194 ownership, evidence level and worker location")
 
 
 if __name__ == "__main__":

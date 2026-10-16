@@ -60,6 +60,5 @@ pub mod test_values;
 pub use engine::{ComponentHost, GuestExport, LoadedComponent, PinnedExecutionV1};
 pub use outcome::{LoadError, RuntimeNotPinnedV1};
 pub use runtime::{
-    pinned_runtime, MAX_WASM_STACK_BYTES, PINNED_ENGINE_CONFIG, RESOLVED_WASMTIME_FEATURES,
-    WASMTIME_VERSION,
+    MAX_WASM_STACK_BYTES, PINNED_ENGINE_CONFIG, RESOLVED_WASMTIME_FEATURES, WASMTIME_VERSION,
 };
