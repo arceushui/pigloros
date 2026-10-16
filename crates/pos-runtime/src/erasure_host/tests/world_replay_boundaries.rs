@@ -373,6 +373,139 @@ fn event_reads_reject_malformed_successful_batches_and_stale_heads() {
 }
 
 #[test]
+fn native_head_and_event_errors_preserve_the_public_refusal_mapping() {
+    use pos_store::{
+        ForkReplayAuthorityReadErrorV1 as ReadError, ForkReplayLineageReadErrorV1 as LineageError,
+    };
+
+    for (native, expected) in [
+        (
+            LineageError::Read(ReadError::CorruptAuthority),
+            ErasureHostErrorV1::AdapterFailure,
+        ),
+        (LineageError::AccessFrozen, ErasureHostErrorV1::AccessFrozen),
+        (
+            LineageError::ContainmentUnavailable,
+            ErasureHostErrorV1::RecoveryUnavailable,
+        ),
+    ] {
+        for fault in [
+            FaultModeV1::ForkReplayHeadError(native),
+            FaultModeV1::ForkReplayEventsError(native),
+        ] {
+            let (mut host, closure) = replay_fault_host(fault);
+            let requested = test_ok(WorldReplayUseV1::new(
+                closure.timeline_id(),
+                ErasureProtectedOperationV1::Read,
+                SeqRange::all(),
+                Seq::from_u64(1),
+                vec!["count".to_owned()],
+                Vec::new(),
+            ));
+            let mut reads = test_ok(host.read_sender());
+            let prepared =
+                test_ok(reads.prepare_world_replay_read(&closure, intent_for(&requested)));
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let mut budget = test_ok(ForkReplayReadBudgetV1::new(
+                prepared.fork_read_limits(),
+                start,
+                &mut clock,
+            ));
+            let verified = test_ok(reads.admit_prepared_world_replay(
+                &prepared,
+                &closure,
+                &requested,
+                &mut budget,
+            ));
+            let observed = reads.observe_world_replay_use(&prepared, &mut budget);
+            if fault == FaultModeV1::ForkReplayHeadError(native) {
+                assert_eq!(observed, Err(expected));
+            } else {
+                // The Event fault cannot bypass the successful native head
+                // read or the independently known one-Event range.
+                assert_eq!(test_ok(observed), requested);
+            }
+            assert_eq!(
+                reads.read_world_replay_events(&verified, &mut budget),
+                Err(expected)
+            );
+            test_ok(budget.check_time());
+            assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+        }
+    }
+}
+
+#[test]
+fn native_head_and_event_reads_latch_expiry_at_every_clock_boundary() {
+    let (mut host, closure) = replay_fault_host(FaultModeV1::Passthrough);
+    let requested = test_ok(WorldReplayUseV1::new(
+        closure.timeline_id(),
+        ErasureProtectedOperationV1::Read,
+        SeqRange::all(),
+        Seq::from_u64(1),
+        vec!["count".to_owned()],
+        Vec::new(),
+    ));
+    let mut reads = test_ok(host.read_sender());
+    let prepared = test_ok(reads.prepare_world_replay_read(&closure, intent_for(&requested)));
+    let verified = test_ok(reads.admit_world_replay(&closure, &requested));
+    let good_mark = Duration::from_millis(1);
+    let expired_mark = Duration::from_micros(prepared.fork_read_limits().max_elapsed_micros())
+        + good_mark
+        + Duration::from_micros(1);
+    for materialize in [false, true] {
+        let mut probe = |good_marks: Option<usize>| {
+            // A successful trace enumerates clock positions only. Independent
+            // head/Event assertions below define success; every expired prefix
+            // must refuse and stay latched, including Runtime post-read checks.
+            let script = good_marks.map_or_else(
+                || vec![good_mark],
+                |marks| {
+                    std::iter::repeat_n(good_mark, marks + 2)
+                        .chain([expired_mark, good_mark])
+                        .collect()
+                },
+            );
+            let mut clock = ScriptedGuardMonotonicSourceV1::new(script);
+            let start = clock.mark();
+            let mut budget = test_ok(ForkReplayReadBudgetV1::new(
+                prepared.fork_read_limits(),
+                start,
+                &mut clock,
+            ));
+            let result = if materialize {
+                reads
+                    .read_world_replay_events(&verified, &mut budget)
+                    .map(|events| {
+                        assert_eq!(events.len(), 1);
+                        assert_eq!(events[0].seq, Seq::from_u64(1));
+                    })
+            } else {
+                reads
+                    .observe_world_replay_use(&prepared, &mut budget)
+                    .map(|observed| assert_eq!(observed, requested))
+            };
+            assert_eq!(
+                result,
+                good_marks.map_or(Ok(()), |_| Err(ErasureHostErrorV1::AdapterFailure))
+            );
+            assert_eq!(budget.check_time().is_ok(), good_marks.is_none());
+            clock.samples_taken()
+        };
+        // Exclude g0, budget construction, and the healthy final assertion.
+        // Reuse immutable native history with a fresh ledger per position.
+        let checkpoints = probe(None) - 3;
+        assert!((2..1_024).contains(&checkpoints));
+        for good_marks in 0..checkpoints {
+            assert_eq!(probe(Some(good_marks)), good_marks + 3);
+        }
+        probe(None);
+    }
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+}
+
+#[test]
 fn protected_event_reads_preserve_empty_and_past_head_range_boundaries() {
     for (first, succeeds) in [(2, true), (3, false)] {
         let (mut host, closure) = replay_fault_host(FaultModeV1::Passthrough);
