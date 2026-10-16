@@ -278,7 +278,8 @@ enum StoreFault {
     ArtifactSwapped(Hash),
     /// Every factual prefix read fails.
     PrefixRead,
-    /// Every factual cut read answers this cut.
+    /// The factual cut read at the plan's parent cut answers this cut; a
+    /// read anywhere else fails.
     Cut(FactualCutV1),
     /// Every Event read from this `Seq` on fails.
     ReadFailsFrom(u64),
@@ -435,7 +436,10 @@ impl<B: RecordingBackend> FactualPrefixReadPortV1 for Faulty<B> {
     fn cut_tick_at(&self, timeline: TimelineId, seq: Seq) -> Result<FactualCutV1, CoreError> {
         match self.fault {
             StoreFault::PrefixRead => Err(CoreError::Storage("injected read failure".to_owned())),
-            StoreFault::Cut(cut) => Ok(cut),
+            StoreFault::Cut(cut) if (timeline, seq) == (root_id(), Seq::from_u64(CUT_SEQ)) => {
+                Ok(cut)
+            }
+            StoreFault::Cut(_) => Err(CoreError::Storage("unexpected cut read".to_owned())),
             _ => self.inner.cut_tick_at(timeline, seq),
         }
     }

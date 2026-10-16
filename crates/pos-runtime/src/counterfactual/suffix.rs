@@ -400,6 +400,11 @@ struct ProgressV1 {
 }
 
 impl ProgressV1 {
+    /// The Tick after the last committed one.
+    const fn next_tick(&self) -> u64 {
+        self.tick.saturating_add(1)
+    }
+
     /// Record one committed Tick ending at Fork `Seq` `head`.
     fn advance(&mut self, tick: u64, head: u64, checkpoint: CheckpointV1) {
         self.tick = tick;
@@ -623,7 +628,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
             let count = page.len() as u64;
             for (seq, event) in (next..).zip(page) {
                 if event.event_type.as_str() == COUNTERFACTUAL_CHECKPOINT_EVENT_TYPE_V1 {
-                    let tick = progress.tick.saturating_add(1);
+                    let tick = progress.next_tick();
                     let drafts = tick_events.take();
                     let payload = event.payload.as_slice();
                     let checkpoint =
@@ -715,7 +720,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         progress: &mut ProgressV1,
         seam: &mut M,
     ) -> TickStepV1 {
-        let tick = progress.tick.saturating_add(1);
+        let tick = progress.next_tick();
         let generation = context.receipt.generation();
         let (batch, record) = match seam.stage(context.plan, generation, tick, progress.tick) {
             Ok(staged) => staged,
@@ -730,8 +735,8 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         })
     }
 
-    /// Append the staged `drafts` and the Tick's checkpoint Event, of the
-    /// Tick after `progress.tick`, as one batch under the generation's Tick
+    /// Append the staged `drafts` and the Tick's checkpoint Event, of
+    /// [`ProgressV1::next_tick`], as one batch under the generation's Tick
     /// basis, with the seam's `record`.
     ///
     /// Returns the failure of a Tick that committed nothing.
@@ -750,7 +755,7 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         record: &M::Record,
         seam: &mut M,
     ) -> TickStepV1 {
-        let tick = progress.tick.saturating_add(1);
+        let tick = progress.next_tick();
         let mut tick_drafts = drafts.to_vec();
         tick_drafts.push(checkpoint_draft(context.fork(), &checkpoint.bytes));
         let batch = match PipelineDraftBatchV1::try_new(tick_drafts) {
@@ -790,9 +795,10 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
         expected: &CounterfactualBasisV1,
         error: CounterfactualStoreErrorV1,
     ) -> TickStepV1 {
-        match error {
-            CounterfactualStoreErrorV1::OutcomeUnknown => self.unknown_tick_outcome(fork, expected),
-            _ => Ok(Some(CounterfactualSuffixFailureV1::AtomicCommitFailed)),
+        if error == CounterfactualStoreErrorV1::OutcomeUnknown {
+            self.unknown_tick_outcome(fork, expected)
+        } else {
+            Ok(Some(CounterfactualSuffixFailureV1::AtomicCommitFailed))
         }
     }
 
@@ -1073,7 +1079,7 @@ fn finish(
                 CounterfactualTerminalStateV1::Failed,
                 Some(CounterfactualTerminalErrorV1 {
                     code: failure.code(),
-                    tick: progress.tick.saturating_add(1),
+                    tick: progress.next_tick(),
                     scheduler_position: 0,
                     safe_digest: None,
                 }),

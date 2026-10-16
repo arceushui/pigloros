@@ -1285,7 +1285,9 @@ fn digest_set(digests: impl Iterator<Item = [u8; 32]>) -> Vec<Hash> {
 ///
 /// Both coordinator slices run one body per operation; a seam supplies only
 /// the staging, the parent cut check, and the two commit calls, so every
-/// check and the commit outcome mapping are shared.
+/// check and the commit outcome mapping are shared. [`RecordingSeamV1`] is
+/// the seam of every admission and suffix call today; the classified seam
+/// (ADR-099 r12) is added later.
 pub(crate) trait TickSeamV1<S> {
     /// What a staged Tick carries besides its drafts.
     type Record;
@@ -1326,8 +1328,8 @@ pub(crate) trait TickSeamV1<S> {
     ) -> Result<CounterfactualTickOutcomeV1, CounterfactualStoreErrorV1>;
 }
 
-/// The seam of the recording path: drafts with the Tick's dependency record,
-/// through the recording port.
+/// The seam of every admission and suffix call today: drafts with the
+/// Tick's dependency record, through the recording port.
 pub(crate) struct RecordingSeamV1<'a, T>(pub(crate) &'a mut T);
 
 impl<S, T> TickSeamV1<S> for RecordingSeamV1<'_, T>
