@@ -31,6 +31,13 @@ adapter may use another representation without changing the CPF1 verifier. No sc
 carries an adapter allowlist, provider version literal, generic payload template, or
 second family catalog.
 
+Each provider manifest also carries an `auxiliary` object that maps every family to
+a list of `{ "path", "media_type" }` entries (a provider lists none unless its adapter renders
+auxiliary members). A path
+is a source file under `inputs/` that `SHA256SUMS` and `BLAKE3SUMS` cover; the build
+embeds the verified bytes, and the materializer derives each bundle member path with
+`fixture_input_member_path`. The `pigloros-json-v1` adapter accepts only empty lists.
+
 The immutable bundle boundary in `pos-conformance` accepts these bytes from a
 caller, recomputes each BLAKE3 content address, binds the CPF1 profile digest,
 and signs only the canonical manifest. Local and Air-Gapped manifests must be

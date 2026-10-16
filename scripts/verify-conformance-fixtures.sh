@@ -68,6 +68,7 @@ validate_json_fixture_adapter() {
       (keys - ["with_operation", "without_operation"] | length) == 0 and
       (.with_operation | type == "object") and
       ((has("without_operation") | not) or (.without_operation | type == "object"))) and
+    all(.auxiliary[]?; . == []) and
     .artifact_media_types == {
       schema: "application/schema+json",
       payload: "application/json",
@@ -77,6 +78,31 @@ validate_json_fixture_adapter() {
   ' "${provider_manifest}" >/dev/null || {
     echo "invalid pigloros-json-v1 fixture adapter declaration: ${provider_manifest#"${fixture_root}/"}" >&2
     return 1
+  }
+}
+
+# The 64-entry cap, the inputs/ prefix and the media-type pattern below are copies of
+# DEFAULT_AUXILIARY_CAP and the rules in crates/pos-conformance/src/catalog_auxiliary.rs;
+# build.rs, verify-conformance-fixtures.sh and generate-conformance-fixture-records.sh
+# must agree.
+validate_auxiliary_declaration() {
+  local provider_manifest="$1"
+  jq -e --argjson family_names "${family_names}" '
+    (.auxiliary | type == "object") and
+    ((.auxiliary | keys | sort) == ($family_names | sort)) and
+    all(.auxiliary[];
+      type == "array" and length <= 64 and
+      all(.[];
+        type == "object" and (keys | sort) == ["media_type", "path"] and
+        (.path | type == "string" and
+          test("^inputs/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$") and
+          (split("/") | all(. != "." and . != ".."))) and
+        (.media_type | type == "string" and length > 2 and length <= 127 and
+          test("^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$"))) and
+      ([.[].path] | unique | length) == length)
+  ' "${provider_manifest}" >/dev/null || {
+    echo "invalid provider auxiliary declaration: ${provider_manifest#"${fixture_root}/"}" >&2
+    exit 1
   }
 }
 
@@ -108,6 +134,8 @@ validate_fixture_adapter() {
 }
 
 declare -A non_json_provider_artifacts=()
+declare -A auxiliary_input_paths=()
+auxiliary_files=()
 mapfile -t provider_manifest_paths < <(
   jq -r '.fixture_providers[].manifest' "${profile_root}"/*/profile.json | sort -u
 )
@@ -120,7 +148,12 @@ for manifest_path in "${provider_manifest_paths[@]}"; do
   provider_manifests+=("${fixture_root}/${manifest_path}")
 done
 for provider_manifest in "${provider_manifests[@]}"; do
+  validate_auxiliary_declaration "${provider_manifest}"
   validate_fixture_adapter "${provider_manifest}" || exit 1
+  while IFS= read -r auxiliary_path; do
+    auxiliary_input_paths["${fixture_root}/${auxiliary_path}"]=1
+    auxiliary_files+=("${fixture_root}/${auxiliary_path}")
+  done < <(jq -r '.auxiliary[][].path' "${provider_manifest}")
   IFS=$'\t' read -r schema_media payload_media oracle_media evidence_media < <(
     jq -r '[.artifact_media_types.schema, .artifact_media_types.payload,
       .artifact_media_types.oracle, .artifact_media_types.evidence_status] | @tsv' "${provider_manifest}"
@@ -284,7 +317,14 @@ fi
 authority_inventory_sha256="$(sha256sum "${authority_path}" | awk '{print $1}')"
 matrix_blake3_digest="$(b3sum "${matrix_path}" | awk '{print $1}')"
 
-mapfile -t inputs < <(find "${fixture_root}/inputs" -type f -print | sort)
+exclude_auxiliary_inputs() {
+  local prefix="$1" path
+  while IFS= read -r path; do
+    [[ -n "${auxiliary_input_paths[${prefix}${path}]+declared}" ]] || printf '%s\n' "${path}"
+  done
+}
+
+mapfile -t inputs < <(find "${fixture_root}/inputs" -type f -print | sort | exclude_auxiliary_inputs "")
 mapfile -t expected < <(find "${fixture_root}/expected" -type f -print | sort)
 mapfile -t oracles < <(find "${fixture_root}/oracles" -type f -print | sort)
 
@@ -394,7 +434,8 @@ for layer in "${profile_layers[@]}"; do
     jq -e --arg layer "${layer}" --argjson family_names "${family_names}" --argjson family_count "${family_count}" \
     '(keys | sort) == ([
        "abi_major", "abi_minor", "artifact_media_types", "claim_layer", "contract_version", "fixture_contracts",
-       "fixture_adapter", "package_path", "package_support", "provider_id", "schemas", "subject_adapter"
+       "auxiliary", "fixture_adapter", "package_path", "package_support", "provider_id", "schemas",
+       "subject_adapter"
      ] | sort) and
      .claim_layer == $layer and
      (.provider_id | type == "string" and length > 0) and
@@ -419,6 +460,15 @@ for layer in "${profile_layers[@]}"; do
      (.fixture_adapter.id | type == "string" and length > 0 and length <= 64 and
        test("^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$")) and
      (.fixture_adapter.config | type == "object") and
+     (.auxiliary | type == "object") and
+     (if .claim_layer == "plugin-conformance" then
+        ([.fixture_contracts | to_entries[] | [.key, .value.watchdog_ms]] | sort) == [
+          ["deletion-redaction", 600000], ["denied", 3000000],
+          ["downgrade", 60000], ["independent-evaluation", 300000],
+          ["malformed", 60000], ["positive", 1200000],
+          ["resource-exhaustion", 1200000]
+        ]
+      else true end) and
      (.schemas | length == $family_count) and
      (.fixture_contracts | keys | sort) == ($family_names | sort) and
      all(.fixture_contracts[];
@@ -504,7 +554,10 @@ if (( ${#declared_inputs[@]} < 49 || ${#declared_inputs[@]} != ${#declared_expec
   exit 1
 fi
 
-mapfile -t actual_input_paths < <(find "${fixture_root}/inputs" -type f -printf 'inputs/%P\n' | sort)
+mapfile -t actual_input_paths < <(
+  find "${fixture_root}/inputs" -type f -printf 'inputs/%P\n' | sort |
+    exclude_auxiliary_inputs "${fixture_root}/"
+)
 mapfile -t actual_expected_paths < <(find "${fixture_root}/expected" -type f -printf 'expected/%P\n' | sort)
 mapfile -t actual_oracle_paths < <(find "${fixture_root}/oracles" -type f -printf 'oracles/%P\n' | sort)
 if ! diff -u \
@@ -765,7 +818,7 @@ jq -e '
   exit 1
 }
 
-for path in "${inputs[@]}" "${expected[@]}" "${oracles[@]}" "${profiles[@]}" "${provider_files[@]}" "${support[@]}"; do
+for path in "${inputs[@]}" "${expected[@]}" "${oracles[@]}" "${profiles[@]}" "${provider_files[@]}" "${support[@]}" ${auxiliary_files[@]+"${auxiliary_files[@]}"}; do
   [[ -s "${path}" ]] || {
     echo "empty conformance fixture: ${path}" >&2
     exit 1
