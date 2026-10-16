@@ -4081,7 +4081,7 @@ impl ErasureReadSenderV1<'_> {
     }
 
     fn require_prepared_world_replay(
-        &self,
+        &mut self,
         prepared: &PreparedWorldReplayReadV1,
         budget: &mut ForkReplayReadBudgetV1<'_>,
     ) -> Result<(), ErasureHostErrorV1> {
