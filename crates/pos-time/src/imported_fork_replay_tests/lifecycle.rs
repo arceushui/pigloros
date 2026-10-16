@@ -37,7 +37,7 @@ use std::{
     time::Duration,
 };
 
-type Clock = Rc<RefCell<ScriptedGuardMonotonicSourceV1>>;
+type Clock = Arc<Mutex<ScriptedGuardMonotonicSourceV1>>;
 type Snapshot = HashMap<String, StateRegistry>;
 
 thread_local! {
@@ -214,7 +214,7 @@ fn observe_phase(
             | (Boundary::PostMoveClock, Phase::Installed)
             | (Boundary::CleanupClock, Phase::BeforeRollback)
     ) {
-        clock.borrow_mut().push(Duration::from_secs(31));
+        test_ok(clock.lock()).push(Duration::from_secs(31));
     }
     if matches!(
         (boundary, phase),
@@ -270,11 +270,11 @@ impl Invocation<'_> {
         let health = crate::ReleaseHealthV1::new();
         with_release_health(&health, |release| {
             // Construct after g0 so the first scripted sample cannot regress.
-            let mut clock = Rc::new(RefCell::new(ScriptedGuardMonotonicSourceV1::new([
+            let mut clock = Arc::new(Mutex::new(ScriptedGuardMonotonicSourceV1::new([
                 Duration::ZERO,
             ])));
-            let _restore = RestoreClock(CLOCK.with(|slot| slot.replace(Some(Rc::clone(&clock)))));
-            let phase_clock = Rc::clone(&clock);
+            let _restore = RestoreClock(CLOCK.with(|slot| slot.replace(Some(Arc::clone(&clock)))));
+            let phase_clock = Arc::clone(&clock);
             let phase_record = Arc::clone(&self.record);
             let phase_writer = self.writer.clone();
             let observer = Rc::new(move |phase| {
