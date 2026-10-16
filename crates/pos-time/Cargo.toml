@@ -30,6 +30,7 @@ pos-core = { path = "../pos-core", features = ["test-support"] }
 pos-runtime = { path = "../pos-runtime", features = ["test-support"] }
 pos-plugin-world = { path = "../../plugins/world" }
 pos-store = { path = "../pos-store", features = ["sqlite", "test-support"] }
+pos-state = { path = "../pos-state", features = ["test-support"] }
 
 # The imported Fork Replay tests include pos-store's tests/support/fae1_fixture.rs
 # via #[path]. Its signing imports compile in this crate, but cargo-shear does
