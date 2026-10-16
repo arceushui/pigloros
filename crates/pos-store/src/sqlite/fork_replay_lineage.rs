@@ -487,4 +487,50 @@ mod tests {
         }
         Ok(())
     }
+
+    fn complete_events(
+        store: &SqliteStore,
+        timeline: TimelineId,
+    ) -> Fallible<ReadResult<Vec<pos_core::Event>>> {
+        let limits = ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000)?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let bounds = pos_core::EventReadBounds::new_with_total_bytes_and_elapsed(
+            128, 128, 8, 4, 1_024, 1_000_000,
+        );
+        let interval = store.begin_protected_effect_interval()?;
+        let result =
+            store.read_fork_replay_events(timeline, pos_core::SeqRange::all(), bounds, &mut budget);
+        store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
+        Ok(result)
+    }
+
+    #[test]
+    fn complete_event_reads_refuse_malformed_native_rows_without_partial_output() -> Fallible<()> {
+        for sql in [
+            "DELETE FROM events",
+            "UPDATE events SET seq=2; UPDATE timelines SET head_seq=3 WHERE parent_id IS NULL",
+            "UPDATE events SET wall_time=1.5",
+            "UPDATE events SET signature=x'00'",
+            "UPDATE events SET signature=zeroblob(64)",
+            "UPDATE events SET origin_logical_seq=2",
+            "UPDATE events SET payload=CAST(x'ff' AS TEXT)",
+        ] {
+            let (store, root, _) = fixture()?;
+            assert_eq!(complete_events(&store, root)??.len(), 1);
+            // Retained corruption is injected only in this native fixture;
+            // the port, budget, snapshot and real containment gate are unchanged.
+            store.conn.execute_batch(sql)?;
+            assert_eq!(
+                complete_events(&store, root)?,
+                Err(Error::Read(ReadError::CorruptAuthority)),
+                "accepted corrupt native Event: {sql}",
+            );
+        }
+        Ok(())
+    }
 }
