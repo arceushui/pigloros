@@ -5406,6 +5406,7 @@ mod tests {
         ForkReplayLineageError(pos_store::ForkReplayLineageReadErrorV1),
         ForkReplayLineageCycle,
         ForkReplayLineageSubstitute,
+        ForkReplayLineageMissing,
         ForkReplayEventCount,
         ForkReplayEventSequence,
         BeginForkReplayPanic,
@@ -6285,6 +6286,9 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let FaultModeV1::ForkReplayLineageError(error) = self.fault {
                 return Err(error);
+            }
+            if self.fault == FaultModeV1::ForkReplayLineageMissing {
+                return Ok(None);
             }
             if self.fault == FaultModeV1::ForkReplayLineageCycle {
                 return Ok(Some(pos_store::fork_replay::test_fork_replay_lineage_node(

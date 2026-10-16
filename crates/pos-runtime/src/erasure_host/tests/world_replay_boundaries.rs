@@ -349,6 +349,56 @@ fn read_fence_setup_panic_preserves_payload_and_poisons_before_callbacks() {
 }
 
 #[test]
+fn admitted_timeline_with_missing_native_lineage_refuses_before_callbacks() {
+    // Unlike an unknown Timeline, this identity is admitted by the real host
+    // gate. Only the adapter's lineage result is faulted after admission.
+    for (fault, succeeds) in [
+        (FaultModeV1::Passthrough, true),
+        (FaultModeV1::ForkReplayLineageMissing, false),
+    ] {
+        let (mut host, closure) = replay_fault_host(fault);
+        let requested = replay_use(&closure);
+        test_ok(
+            host.gate
+                .authorize(closure.timeline_id(), ErasureProtectedOperationV1::Read),
+        );
+        let mut sender = test_ok(host.read_sender());
+        let prepared = test_ok(sender.prepare_world_replay_read(&closure, intent_for(&requested)));
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = test_ok(ForkReplayReadBudgetV1::new(
+            prepared.fork_read_limits(),
+            start,
+            &mut clock,
+        ));
+        let callbacks = Cell::new(0);
+        let result = sender.with_world_replay_read_fence(
+            &[&prepared],
+            &mut budget,
+            |_, _| {
+                callbacks.set(callbacks.get() + 1);
+                Ok(())
+            },
+            |(), verdict| {
+                callbacks.set(callbacks.get() + 1);
+                verdict
+            },
+        );
+        assert_eq!(
+            result,
+            if succeeds {
+                Ok(())
+            } else {
+                Err(ErasureHostErrorV1::AdapterFailure)
+            }
+        );
+        assert_eq!(callbacks.get(), if succeeds { 2 } else { 0 });
+        test_ok(budget.check_time());
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+}
+
+#[test]
 fn faulty_lineage_refuses_classification_and_fence_before_preparation() {
     for fault in [
         FaultModeV1::ForkReplayLineageCycle,
