@@ -11,13 +11,13 @@ permissions:
 jobs:
   compare:
     runs-on: ubuntu-24.04
-    # Two 12-minute builds plus four 3-minute runs, with setup/upload reserve.
+    # Two 12-minute builds plus eight 90-second runs, with setup/upload reserve.
     timeout-minutes: 45
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: -D warnings
-      PIGLOROS_BENCH_SAMPLES: "10"
+      PIGLOROS_BENCH_SAMPLES: "100"
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -31,7 +31,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 23431019fae98b7f59df0e0ac2ed15c6419c60c7
+          ref: 124a44dc319fa86007887ecde6d14caba94f831d
           path: candidate
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
@@ -39,7 +39,7 @@ jobs:
           toolchain: 1.97.1
       - name: Test diagnostic sample validation
         run: python3 harness/scripts/diagnose_561_benchmark.py --self-test
-      - name: Compare frozen unchanged binaries on one runner
+      - name: Compare frozen binaries in two fixed ABBA blocks on one CPU
         run: python3 harness/scripts/diagnose_561_benchmark.py
       - name: Preserve untrusted diagnostic evidence
         if: ${{ always() }}

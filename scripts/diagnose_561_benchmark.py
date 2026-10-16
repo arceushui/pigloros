@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import resource
 import subprocess
 import sys
 import time
@@ -13,7 +14,7 @@ import time
 
 REVISIONS = {
     "baseline": "091f25b9747f06072be4c10fdad3d14652cbffe0",
-    "candidate": "23431019fae98b7f59df0e0ac2ed15c6419c60c7",
+    "candidate": "124a44dc319fa86007887ecde6d14caba94f831d",
 }
 CASES = {
     "manifest-cas": (0, 32, 128, 512),
@@ -22,15 +23,17 @@ CASES = {
     "recovery-error-read": (1, 9, 25),
 }
 FIELDS = ["scenario", "cardinality", "sample", "elapsed_nanos"]
+SAMPLE_COUNT = 100
+ORDER = ["baseline", "candidate", "candidate", "baseline"] * 2
 
 
 def measurements(source):
-    """Require exactly the unchanged fourteen cases and all ten raw samples."""
+    """Require all fourteen cases and every predeclared raw sample."""
     reader = csv.DictReader(io.StringIO(source))
     if reader.fieldnames != FIELDS:
         raise ValueError("unexpected CSV header")
     expected = {(name, size, sample) for name, sizes in CASES.items()
-                for size in sizes for sample in range(10)}
+                for size in sizes for sample in range(SAMPLE_COUNT)}
     values = {}
     for row in reader:
         if None in row or any(value is None for value in row.values()):
@@ -43,14 +46,15 @@ def measurements(source):
     if values.keys() != expected:
         raise ValueError("incomplete benchmark sample set")
     return {f"{name}/{size}": sorted(values[name, size, sample]
-            for sample in range(10))[5] for name, sizes in CASES.items() for size in sizes}
+            for sample in range(SAMPLE_COUNT))[SAMPLE_COUNT // 2]
+            for name, sizes in CASES.items() for size in sizes}
 
 
 def self_test():
     rows = [",".join(FIELDS)] + [f"{name},{size},{sample},{sample + 1}"
-            for name, sizes in CASES.items() for size in sizes for sample in range(10)]
+            for name, sizes in CASES.items() for size in sizes for sample in range(SAMPLE_COUNT)]
     assert len(measurements("\n".join(rows))) == 14
-    assert set(measurements("\n".join(rows)).values()) == {6}
+    assert set(measurements("\n".join(rows)).values()) == {51}
     for invalid in [rows[:-1], rows + [rows[1]], ["wrong"] + rows[1:],
                     rows[:1] + ["manifest-cas,0,0,0"] + rows[2:],
                     rows[:1] + ["manifest-cas,0,0,1,extra"] + rows[2:],
@@ -80,7 +84,7 @@ def run():
     metadata = {name: os.environ.get(name) for name in (
         "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA", "ImageOS", "ImageVersion",
         "CARGO_BUILD_JOBS", "CARGO_INCREMENTAL", "RUSTFLAGS", "PIGLOROS_BENCH_SAMPLES")}
-    metadata.update(revisions=REVISIONS, order=["baseline", "candidate", "candidate", "baseline"],
+    metadata.update(revisions=REVISIONS, order=ORDER, samples_per_case=SAMPLE_COUNT,
                     rustc=command(["rustc", "--version", "--verbose"]),
                     cargo=command(["cargo", "--version", "--verbose"]),
                     cpu=command(["lscpu"]), uname=command(["uname", "-a"]))
@@ -123,19 +127,34 @@ def run():
                            hashlib.sha256(binary.read_bytes()).hexdigest()}
         if command(["git", "status", "--porcelain"], cwd=checkout):
             raise RuntimeError("build changed tracked or untracked source")
+    # Pin measurements, not builds. Every child inherits this same CPU mask.
+    # Two fixed ABBA blocks expose within-binary drift; no sample/run is dropped
+    # and no observation controls whether another block is attempted.
+    allowed_cpus = sorted(os.sched_getaffinity(0))
+    selected_cpu = min(allowed_cpus)
+    os.sched_setaffinity(0, {selected_cpu})
+    metadata.update(allowed_cpus=allowed_cpus, measurement_cpu=selected_cpu)
     (artifacts / "environment.json").write_text(json.dumps(metadata, indent=2) + "\n")
     results = []
     for index, owner in enumerate(metadata["order"], 1):
         output_path = artifacts / f"{index}-{owner}.csv"
         environment = dict(os.environ, PIGLOROS_BENCH_OUTPUT=str(output_path),
-                           PIGLOROS_BENCH_SAMPLES="10")
+                           PIGLOROS_BENCH_SAMPLES=str(SAMPLE_COUNT))
+        if os.sched_getaffinity(0) != {selected_cpu}:
+            raise RuntimeError("measurement CPU affinity changed")
+        before = resource.getrusage(resource.RUSAGE_CHILDREN)
         started = time.monotonic()
         with (artifacts / f"{index}-{owner}.log").open("w") as log:
             subprocess.run([str(binaries[owner])], cwd=workspace / owner, env=environment,
-                           stdout=log, stderr=subprocess.STDOUT, check=True, timeout=180)
+                           stdout=log, stderr=subprocess.STDOUT, check=True, timeout=90)
+        after = resource.getrusage(resource.RUSAGE_CHILDREN)
         medians = measurements(output_path.read_text())
         result = {"order": index, "owner": owner, "revision": REVISIONS[owner],
                   "wall_seconds": time.monotonic() - started, "medians_ns": medians,
+                  "user_cpu_seconds": after.ru_utime - before.ru_utime,
+                  "system_cpu_seconds": after.ru_stime - before.ru_stime,
+                  "voluntary_context_switches": after.ru_nvcsw - before.ru_nvcsw,
+                  "involuntary_context_switches": after.ru_nivcsw - before.ru_nivcsw,
                   "csv_sha256": hashlib.sha256(output_path.read_bytes()).hexdigest()}
         results.append(result)
         print(json.dumps(result), flush=True)
