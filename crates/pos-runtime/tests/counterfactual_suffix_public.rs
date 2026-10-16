@@ -3471,7 +3471,7 @@ both_backends!(unknown_classified_outcomes_resolve_from_the_basis);
 // ---------------------------------------------------------------------------
 
 /// The admitted creator of every classified fixture Fork: its `POC1` Owner.
-const CREATOR: &str = "classified-owner";
+const CREATOR: &str = classified::OWNER;
 /// The operation ID of every fixture manifest publication.
 const PUBLICATION_OPERATION: [u8; 32] = [0x5c; 32];
 
@@ -3551,7 +3551,7 @@ impl Creator {
 /// host-internal `(0,0)`, with one `EOR1` and one `FOP1` under its `expected`
 /// derived operation ID, and with no `FIA1`.
 fn assert_host_internal_suffix(
-    store: &impl ForkEventProvenanceAuthorityPortV1,
+    store: &(impl ForkEventProvenanceAuthorityPortV1 + EventStore),
     fork: TimelineId,
     head: u64,
     expected: &[Hash],
@@ -3579,14 +3579,24 @@ fn assert_host_internal_suffix(
             "no FOP1 binds an FIA1"
         );
     }
-    let sequences: Vec<u64> = suffix
+    let provenance: Vec<_> = suffix
         .iter()
-        .map(|(origin, _, _)| origin.input().logical_seq)
+        .map(|(origin, _, _)| (origin.input().logical_seq, origin.input().event_id))
         .collect();
+    let stored: Vec<_> = store
+        .read(fork, SeqRange::from_seq(Seq::from_u64(CUT_SEQ + 1)))?
+        .iter()
+        .map(|event| (event.seq.as_u64(), event.id))
+        .collect();
+    let sequences: Vec<u64> = stored.iter().map(|(seq, _)| *seq).collect();
     let committed: Vec<u64> = (CUT_SEQ + 1..=head).collect();
     assert_eq!(
         sequences, committed,
-        "every Event after the cut has provenance"
+        "the Fork stores every Event through its head"
+    );
+    assert_eq!(
+        provenance, stored,
+        "every stored Event has its EOR1 and FOP1, under its own id"
     );
     Ok(())
 }

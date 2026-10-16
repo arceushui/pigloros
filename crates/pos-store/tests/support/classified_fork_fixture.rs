@@ -49,6 +49,8 @@ pub const FIRST_TICK: u64 = 17;
 pub const TICK_KIND: &str = "counterfactual.tick";
 /// The registrar of the fixture classifier.
 pub const REGISTRAR: &str = "classified-counterfactual.test";
+/// The Owner the fixture `POC1` binds, the creator of every fixture Fork.
+pub const OWNER: &str = "classified-owner";
 /// The room revision descriptor every fixture Fork is admitted under.
 const DESCRIPTOR: Hash = Hash::from_bytes([8; 32]);
 /// The authentication adapter of the fixture Principal.
@@ -224,7 +226,7 @@ impl Authority {
         let signature = host.sign_initialize(&initialize.to_canonical_cbor()?)?;
         store.finalize_fork_admission_initialize(&initialize, &signature)?;
         let authority = Self::reopen(store)?;
-        let owner = vec![Value::Text("classified-owner".to_owned())];
+        let owner = vec![Value::Text(OWNER.to_owned())];
         let poc1 = command(store, &authority.session, "POC1", 0xa1, owner)?;
         store.execute_fork_admission_command(&authority.session, &policy()?, &poc1)?;
         Ok(authority)

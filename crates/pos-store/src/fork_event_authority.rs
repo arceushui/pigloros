@@ -668,9 +668,10 @@ impl<'a> ClassifiedTickAuthorityV1<'a> {
 /// - **Not idempotent.** Replaying a committed call fails the basis recheck,
 ///   and a prior `FOP1` under a derived operation ID is corrupt authority.
 /// - **Unsupported Forks.** A Fork whose `FAR1` was imported (origin code 2)
-///   is unsupported until #447. Deleting a classified Fork keeps its
-///   provenance rows, so a classified Fork re-created under the same Timeline
-///   ID cannot append (pre-existing ADR-099 behaviour, Redmine #645).
+///   is unsupported until #447. Until Redmine #645 decides otherwise,
+///   deleting a classified Fork keeps its provenance rows, so a classified
+///   Fork re-created under the same Timeline ID cannot append (pre-existing
+///   ADR-099 behaviour).
 pub trait ClassifiedCounterfactualStorePortV1: CounterfactualDependencyRecordingPortV1 {
     /// Commit a classified Fork's invalidation and its first Tick with its
     /// dependency record.
