@@ -11,7 +11,8 @@ permissions:
 jobs:
   compare:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Two 12-minute builds plus four 3-minute runs, with setup/upload reserve.
+    timeout-minutes: 45
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
