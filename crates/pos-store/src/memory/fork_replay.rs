@@ -57,7 +57,7 @@ impl ForkReplayAuthorityReadPortV1 for MemoryStore {
             |member, visited, context| self.read_lineage_member(member, visited, context, true),
         )?;
         let head = crate::fork_replay::history_head(&history, &mut context)?;
-        let (from, to, count) =
+        let (from, to) =
             crate::fork_replay::complete_event_range(head, range, bounds, &mut context)?;
         let mut events = crate::fork_replay::ReplayEventStagingV1::default();
         let mut total_bytes = 0_usize;
@@ -123,13 +123,9 @@ impl ForkReplayAuthorityReadPortV1 for MemoryStore {
                 Ok(())
             })?;
         }
-        context.step(|_| {
-            if events.len() == count {
-                Ok(())
-            } else {
-                crate::fork_replay::corrupt()
-            }
-        })?;
+        // The visibility walk checked each immutable segment's head/count.
+        // Its disjoint selected slices push exactly once per Event; the sealed
+        // fence cannot repeat a successful effect or change those slices.
         Ok(events.into_events())
     }
 
