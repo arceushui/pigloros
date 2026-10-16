@@ -129,12 +129,12 @@ struct Proposal {
     refusal: String,
 }
 
-/// The Local pass of a registry holding [`OWNER`] and then the first-party `proposer`.
-fn first_party_proposal(signed: &SignedWorld, proposer: Native) -> BoxResult<Proposal> {
+/// The Local pass of a registry holding [`OWNER`] and then the first-party `native` proposer.
+fn first_party_proposal(signed: &SignedWorld, native: Native) -> BoxResult<Proposal> {
     let entity = entity_of(ENTITY)?;
     let mut pass = PassWorld::new(WORKER);
     let owner = register_native(&mut pass.registry, OWNER, entity)?;
-    let proposed = register_native(&mut pass.registry, proposer, entity)?;
+    let proposed = register_native(&mut pass.registry, native, entity)?;
     let mut lane = Lane::over(signed, &[], Mode::Local, pass)?;
     let outcome = lane.run(signed)?;
     let owner = owner.load(Ordering::SeqCst);
