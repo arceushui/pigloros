@@ -335,6 +335,36 @@ fn run_on_host(
     Ok(())
 }
 
+fn imported_replay_cases() -> impl Iterator<Item = (Fault, Option<Seq>, bool)> {
+    [
+        Fault::None,
+        Fault::Omitted,
+        Fault::Foreign,
+        Fault::FinalIdentity,
+        Fault::FinalRequirements,
+        Fault::FinalLimits,
+        Fault::NoProfile,
+        Fault::NodeLimit,
+        Fault::RowLimit,
+        Fault::ByteLimit,
+    ]
+    .into_iter()
+    .flat_map(|fault| {
+        [
+            None,
+            Some(Seq::from_u64(2)),
+            Some(Seq::from_u64(PARENT_CUT)),
+        ]
+        .map(|cut| (fault, cut))
+    })
+    .flat_map(|(fault, cut)| {
+        [false, true]
+            .into_iter()
+            .filter(move |destroyed| !*destroyed || fault == Fault::None)
+            .map(move |destroyed| (fault, cut, destroyed))
+    })
+}
+
 #[test]
 fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters() -> Fallible<()> {
     let mut cases = [0; 3];
@@ -357,33 +387,7 @@ fn imported_mixed_and_empty_sources_reach_replay_and_replay_at_on_both_adapters(
             closed_sqlite_fixture(&world, &built[0])?,
             closed_sqlite_fixture(&world, &built[1])?,
         ];
-        for (fault, cut, destroyed_key) in [
-            Fault::None,
-            Fault::Omitted,
-            Fault::Foreign,
-            Fault::FinalIdentity,
-            Fault::FinalRequirements,
-            Fault::FinalLimits,
-            Fault::NoProfile,
-            Fault::NodeLimit,
-            Fault::RowLimit,
-            Fault::ByteLimit,
-        ]
-        .into_iter()
-        .flat_map(|fault| {
-            [
-                None,
-                Some(Seq::from_u64(2)),
-                Some(Seq::from_u64(PARENT_CUT)),
-            ]
-            .map(|cut| (fault, cut))
-        })
-        .flat_map(|(fault, cut)| {
-            [false, true]
-                .into_iter()
-                .filter(move |destroyed| !*destroyed || fault == Fault::None)
-                .map(move |destroyed| (fault, cut, destroyed))
-        }) {
+        for (fault, cut, destroyed_key) in imported_replay_cases() {
             let image_index = usize::from(destroyed_key);
             let built = &built[image_index];
             let mut memory = MemoryStore::new();
