@@ -1098,6 +1098,22 @@ mod tests {
 
     #[test]
     fn host_errors_map_to_stable_public_time_errors() {
+        for (core, host) in [
+            (
+                CoreError::ErasureAccessFrozen,
+                ErasureHostErrorV1::AccessFrozen,
+            ),
+            (
+                CoreError::ErasureContainmentUnavailable,
+                ErasureHostErrorV1::RecoveryUnavailable,
+            ),
+            (
+                CoreError::ArtifactUnavailable,
+                ErasureHostErrorV1::AdapterFailure,
+            ),
+        ] {
+            assert_eq!(super::core_error_to_host(&core), host);
+        }
         assert!(matches!(
             host_error_to_core(ErasureHostErrorV1::AccessFrozen),
             CoreError::ErasureAccessFrozen

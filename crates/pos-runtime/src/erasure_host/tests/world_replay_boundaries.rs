@@ -163,3 +163,181 @@ fn fork_source_rejects_attribution_for_a_different_timeline() {
     assert_eq!(source.timeline_id(), timeline);
     assert_eq!(source.required_attribution(), Some(required));
 }
+
+fn replay_fault_host(fault: FaultModeV1) -> (ErasureExecutionHostV1, WorldReplayClosureV1) {
+    let composition = ErasureCoordinatorCompositionV1::closed()
+        .with_world_replay_verifier(Arc::new(WorldReplayVerifierModeV1::Exact));
+    let mut host = test_ok(ErasureExecutionHostV1::recover_with_composition(
+        Box::new(fault_store(fault)),
+        &composition,
+        ErasureRecoveryLimitsV1::compiled_maximum(),
+    ));
+    let root = {
+        let mut sender = test_ok(host.command_sender());
+        let root = test_ok(sender.create_timeline("replay boundary")).id();
+        test_ok(sender.append(
+            root,
+            &[EventDraft::new(
+                EntityId::new(),
+                Kind::new("host.fixture"),
+                CanonicalBytes::from_vec(Vec::new()),
+            )],
+        ));
+        root
+    };
+    let generation = test_ok(host.gate.inventory_generation());
+    let closure = test_ok(
+        WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+            root,
+            Hash::from_bytes(generation.digest()),
+        ),
+    );
+    (host, closure)
+}
+
+#[test]
+fn event_reads_reject_malformed_successful_batches_and_stale_heads() {
+    for (fault, head, succeeds) in [
+        (FaultModeV1::Passthrough, 1, true),
+        (FaultModeV1::ForkReplayEventCount, 1, false),
+        (FaultModeV1::ForkReplayEventSequence, 1, false),
+        (FaultModeV1::Passthrough, 0, false),
+    ] {
+        let (mut host, closure) = replay_fault_host(fault);
+        let requested = test_ok(WorldReplayUseV1::new(
+            closure.timeline_id(),
+            ErasureProtectedOperationV1::Read,
+            SeqRange::all(),
+            Seq::from_u64(head),
+            vec!["count".to_owned()],
+            Vec::new(),
+        ));
+        let generation = test_ok(host.gate.inventory_generation());
+        let verified = crate::world_replay::test_verified_world_replay(
+            &closure,
+            &requested,
+            generation,
+            pos_core::ErasureReplayClaimV1::Exact,
+        );
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = test_ok(ForkReplayReadBudgetV1::new(
+            verified.fork_read_limits(),
+            start,
+            &mut clock,
+        ));
+        let result = test_ok(host.read_sender()).read_world_replay_events(&verified, &mut budget);
+        if succeeds {
+            let events = test_ok(result);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].seq, Seq::from_u64(1));
+        } else {
+            assert_eq!(result, Err(ErasureHostErrorV1::AdapterFailure));
+        }
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+}
+
+#[test]
+fn read_fence_setup_panic_preserves_payload_and_poisons_before_callbacks() {
+    let (mut host, closure) = replay_fault_host(FaultModeV1::BeginForkReplayPanic);
+    let requested = replay_use(&closure);
+    let callbacks = Cell::new(0);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut sender = test_ok(host.read_sender());
+        let prepared = test_ok(sender.prepare_world_replay_read(&closure, intent_for(&requested)));
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = test_ok(ForkReplayReadBudgetV1::new(
+            prepared.fork_read_limits(),
+            start,
+            &mut clock,
+        ));
+        sender.with_world_replay_read_fence(
+            &[&prepared],
+            &mut budget,
+            |_, _| {
+                callbacks.set(callbacks.get() + 1);
+                Ok(())
+            },
+            |(), verdict| {
+                callbacks.set(callbacks.get() + 1);
+                verdict
+            },
+        )
+    }));
+    let payload = outcome
+        .err()
+        .unwrap_or_else(|| std::panic::resume_unwind(Box::new("native setup did not unwind")));
+    assert_eq!(
+        payload.downcast_ref::<&str>(),
+        Some(&"fork replay setup panic")
+    );
+    assert_eq!(callbacks.get(), 0);
+    assert_eq!(host.status(), ErasureHostStatusV1::Poisoned);
+    assert!(host.read_sender().is_err());
+}
+
+#[test]
+fn faulty_lineage_refuses_classification_and_fence_before_preparation() {
+    for fault in [
+        FaultModeV1::ForkReplayLineageCycle,
+        FaultModeV1::ForkReplayLineageSubstitute,
+    ] {
+        let (mut host, closure) = replay_fault_host(fault);
+        let requested = replay_use(&closure);
+        let generation = test_ok(host.gate.inventory_generation());
+        let verified = crate::world_replay::test_verified_world_replay(
+            &closure,
+            &requested,
+            generation,
+            pos_core::ErasureReplayClaimV1::Exact,
+        );
+        let limits = verified.fork_read_limits();
+        let source = test_ok(crate::WorldReplayForkSourceV1::new(
+            closure.timeline_id(),
+            None,
+        ));
+        // Repeated classification follows the faulty native self-parent, so
+        // Runtime must detect the cycle rather than an unrelated order mismatch.
+        let sources = if fault == FaultModeV1::ForkReplayLineageCycle {
+            vec![source.clone(), source]
+        } else {
+            vec![source]
+        };
+        let verified = crate::world_replay::test_verified_world_replay_with_fork_attribution(
+            verified,
+            Some(Hash::from_bytes([0xda; 32])),
+            sources,
+            Vec::new(),
+            limits,
+        );
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = test_ok(ForkReplayReadBudgetV1::new(limits, start, &mut clock));
+        let mut sender = test_ok(host.read_sender());
+        assert_eq!(
+            sender.validate_world_replay_forks(&verified, &mut budget),
+            Err(ErasureHostErrorV1::Conflict)
+        );
+        let prepared = test_ok(sender.prepare_world_replay_read(&closure, intent_for(&requested)));
+        let callbacks = Cell::new(0);
+        assert_eq!(
+            sender.with_world_replay_read_fence(
+                &[&prepared],
+                &mut budget,
+                |_, _| {
+                    callbacks.set(callbacks.get() + 1);
+                    Ok(())
+                },
+                |(), verdict| {
+                    callbacks.set(callbacks.get() + 1);
+                    verdict
+                },
+            ),
+            Err(ErasureHostErrorV1::AdapterFailure)
+        );
+        assert_eq!(callbacks.get(), 0);
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+}
