@@ -2,6 +2,8 @@
 //! first atomic Tick Boundary, against both `MemoryStore` and `SqliteStore`.
 #![cfg(target_os = "linux")]
 
+// Shared deliberately with pos-store so both crates exercise the same classified
+// Fork setup; it must move with that file.
 #[path = "../../pos-store/tests/support/classified_fork_fixture.rs"]
 pub mod classified;
 

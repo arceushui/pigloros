@@ -55,8 +55,7 @@ use pos_runtime::counterfactual::suffix::CounterfactualSuffixRequestV1;
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
 use pos_store::{
-    ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1,
-    ClassifiedTickAuthorityV1,
+    ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1, ClassifiedTickAuthorityV1,
 };
 use pos_time::counterfactual::dependency_graph::{
     validate_dependency_graph_v1, DependencyGraphBoundsV1 as Bounds, DependencyGraphErrorV1,

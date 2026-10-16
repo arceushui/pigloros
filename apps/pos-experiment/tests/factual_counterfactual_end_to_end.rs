@@ -68,8 +68,7 @@ use pos_runtime::{
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
 use pos_store::{
-    ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1,
-    ClassifiedTickAuthorityV1,
+    ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1, ClassifiedTickAuthorityV1,
 };
 use pos_time::counterfactual::dependency_graph::{
     DependencyGraphBoundsV1 as Bounds, DependencyGraphNodeOriginV1 as Origin,

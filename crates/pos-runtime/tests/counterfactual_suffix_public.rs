@@ -2,6 +2,8 @@
 //! the first atomic Tick, against both `MemoryStore` and `SqliteStore`.
 #![cfg(target_os = "linux")]
 
+// Shared deliberately with pos-store so both crates exercise the same classified
+// Fork setup; it must move with that file.
 #[path = "../../pos-store/tests/support/classified_fork_fixture.rs"]
 pub mod classified;
 
@@ -483,12 +485,7 @@ impl<B: RecordingBackend> ClassifiedCounterfactualStorePortV1 for Faulty<B> {
     ) -> ClassifiedTickResult {
         self.interfered_append(fork, expected, |inner| {
             inner.append_classified_counterfactual_tick(
-                fork,
-                expected,
-                drafts,
-                record,
-                authority,
-                base,
+                fork, expected, drafts, record, authority, base,
             )
         })
     }
@@ -2217,9 +2214,10 @@ fn stale_generation_and_foreign_plans_are_rejected<B: RecordingBackend>() -> Tes
             plan: &plan,
             ..suffix_request(&setup.fixture)
         };
-        let result = setup
-            .coordinator
-            .recompute_suffix(&request, &mut stager, &mut GenericForksOnlyV1);
+        let result =
+            setup
+                .coordinator
+                .recompute_suffix(&request, &mut stager, &mut GenericForksOnlyV1);
         assert_eq!(result, Err(expected));
     }
     assert!(stager.inner.seen.is_empty());

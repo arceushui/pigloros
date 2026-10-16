@@ -704,6 +704,9 @@ const STORAGE_FAILURE: CounterfactualAdmissionErrorV1 =
     CounterfactualAdmissionErrorV1::Store(CounterfactualStoreErrorV1::StorageFailure);
 
 /// A commit whose outcome the store cannot report.
+///
+/// It is the one match target the admission commit and the suffix's Tick
+/// append share for an unknown outcome.
 pub(super) const COMMIT_OUTCOME_UNKNOWN: ClassifiedCounterfactualErrorV1 =
     ClassifiedCounterfactualErrorV1::Store(CounterfactualStoreErrorV1::OutcomeUnknown);
 

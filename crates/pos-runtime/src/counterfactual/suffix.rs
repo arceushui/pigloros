@@ -790,9 +790,11 @@ impl<S: EventStore + CounterfactualStorePortV1> CounterfactualCoordinatorV1<S> {
     ///
     /// # Errors
     /// Returns `TickOutcomeUnknown` when the append's outcome is unknown and
-    /// the persisted basis does not prove it uncommitted, and
+    /// the persisted basis does not prove it uncommitted,
     /// `CommittedHeadMismatch` when the store reports a committed head other
-    /// than the checkpoint Event's `Seq`; neither advances the progress.
+    /// than the checkpoint Event's `Seq`, and `ClassifiedProvenance` when the
+    /// resolver or the store rejects a classified append's provenance; none
+    /// of them advances the progress.
     fn append_tick<M: TickSeamV1<S>>(
         &mut self,
         context: &SuffixContextV1<'_>,
