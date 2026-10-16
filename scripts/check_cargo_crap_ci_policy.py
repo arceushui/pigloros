@@ -36,6 +36,7 @@ TEST_ONLY_EXCLUSIONS = (
     "src/fork_event_authority/tests/local_replay.rs",
     "src/sqlite/tests/protected_interval_cleanup.rs",
     "src/imported_fork_replay_tests.rs",
+    "src/imported_fork_replay_tests/lifecycle.rs",
     "src/imported_fork_replay_tests/cumulative_budget.rs",
     "src/imported_fork_replay_tests/cumulative_budget/compare.rs",
     "src/imported_fork_replay_tests/cumulative_budget/read_bounds.rs",
