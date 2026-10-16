@@ -6,9 +6,43 @@ use pos_core::{
     ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
     ErasureProtectedEffectDispositionV1, EventStore,
 };
-use std::{sync::Arc, time::Duration};
+use std::{cell::Cell, sync::Arc, time::Duration};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Acquisition {
+    Writer,
+    Reader,
+}
+
+thread_local! {
+    static PANIC_AFTER_ACQUISITION: Cell<Option<Acquisition>> = const { Cell::new(None) };
+}
+
+// Private Rust unwind injection: SQLite contains panics from native callbacks,
+// while the production gate and clock interfaces deliberately remain sealed.
+pub(super) fn after_acquisition(stage: Acquisition) {
+    if PANIC_AFTER_ACQUISITION.get() == Some(stage) {
+        PANIC_AFTER_ACQUISITION.set(None);
+        std::panic::resume_unwind(Box::new(stage));
+    }
+}
+
+fn catch_acquisition_panic<T>(
+    stage: Acquisition,
+    effect: impl FnOnce() -> T,
+) -> std::thread::Result<T> {
+    struct Restore(Option<Acquisition>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // Restore only test-local injection state, never native resources.
+            PANIC_AFTER_ACQUISITION.set(self.0);
+        }
+    }
+    let _restore = Restore(PANIC_AFTER_ACQUISITION.replace(Some(stage)));
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(effect))
+}
 
 fn assert_released(store: &SqliteStore) -> TestResult {
     assert!(store.conn.is_autocommit());
@@ -74,6 +108,56 @@ fn acquisition_expiry_releases_only_owned_resources_on_both_sqlite_modes() -> Te
     let mut reader = SqliteStore::open_read_only(path)?;
     reader.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     expiry_at_each_acquisition_checkpoint(&reader)
+}
+
+#[test]
+fn acquisition_unwind_releases_real_owned_transactions_before_resuming_the_payload() -> TestResult {
+    for (read_only, stage) in [
+        (false, Acquisition::Writer),
+        (true, Acquisition::Writer),
+        (true, Acquisition::Reader),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("acquisition-unwind.sqlite");
+        let path = path.to_str().ok_or("UTF-8 path")?;
+        let mut store = SqliteStore::open(path)?;
+        if read_only {
+            drop(store);
+            store = SqliteStore::open_read_only(path)?;
+        }
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let limits = crate::ForkReplayReadLimitsV1::new(1, 8, 8, 64, 1_000_000)?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let control = store.begin_fork_replay_read_interval(&mut budget)?;
+        assert_eq!(control, ErasureProtectedEffectIntervalV1::Owned);
+        store.finish_protected_effect_interval(
+            control,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
+
+        let payload =
+            catch_acquisition_panic(stage, || store.begin_fork_replay_read_interval(&mut budget))
+                .err()
+                .ok_or("acquisition did not resume the injected panic")?;
+        assert_eq!(payload.downcast_ref::<Acquisition>(), Some(&stage));
+        assert_eq!(PANIC_AFTER_ACQUISITION.get(), None);
+        assert_released(&store)?;
+        let competitor = rusqlite::Connection::open(path)?;
+        competitor.busy_timeout(Duration::ZERO)?;
+        competitor.execute_batch("BEGIN IMMEDIATE; ROLLBACK")?;
+
+        let reacquired = store.begin_fork_replay_read_interval(&mut budget)?;
+        assert_eq!(reacquired, ErasureProtectedEffectIntervalV1::Owned);
+        store.finish_protected_effect_interval(
+            reacquired,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
+        assert_released(&store)?;
+        budget.check_time()?;
+    }
+    Ok(())
 }
 
 #[test]
