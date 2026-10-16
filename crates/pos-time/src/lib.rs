@@ -172,6 +172,10 @@ fn record_p2(
     clock: &mut dyn GuardMonotonicSourceV1,
     g0: MonotonicMarkV1,
 ) {
+    #[cfg(test)]
+    pos_runtime::world_replay::test_support::record_replay_phase(
+        pos_runtime::world_replay::test_support::ReplayPhaseV1::FailureP2,
+    );
     health.record_guard_release_late(pos_runtime::teardown_signal(clock, g0));
 }
 
@@ -312,6 +316,10 @@ fn forget_on_failure<T>(
     revoked: Option<&RevokedSubjectsV1>,
 ) -> Result<T, pos_core::CoreError> {
     if let (Err(_), Some(subjects)) = (&result, revoked) {
+        #[cfg(test)]
+        pos_runtime::world_replay::test_support::record_replay_phase(
+            pos_runtime::world_replay::test_support::ReplayPhaseV1::FailureForget,
+        );
         registry.forget_revoked_subjects(subjects);
     }
     result
@@ -328,21 +336,6 @@ const fn host_error_to_core(error: pos_core::ErasureHostErrorV1) -> pos_core::Co
         | pos_core::ErasureHostErrorV1::Conflict
         | pos_core::ErasureHostErrorV1::AdapterFailure => pos_core::CoreError::ArtifactUnavailable,
     }
-}
-
-#[cfg(test)]
-fn require_world_replay(
-    sender: &mut pos_runtime::ErasureReadSenderV1<'_>,
-    closure: &pos_core::WorldReplayClosureV1,
-    requested_use: &pos_runtime::WorldReplayUseV1,
-) -> Result<pos_runtime::VerifiedWorldReplayV1, pos_core::CoreError> {
-    let verified = sender
-        .admit_world_replay(closure, requested_use)
-        .map_err(host_error_to_core)?;
-    verified
-        .require_authoritative_use()
-        .map_err(|_| pos_core::CoreError::ArtifactUnavailable)?;
-    Ok(verified)
 }
 
 /// Return `registry`'s canonical consumer selection before any host read.
