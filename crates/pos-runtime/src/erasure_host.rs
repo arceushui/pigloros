@@ -1364,7 +1364,7 @@ impl ErasureExecutionHostV1 {
             .and_then(|store| Self::recover_with_composition(Box::new(store), composition, limits))
     }
 
-    /// Recover a nonproduction SQLite fixture with native fault observers.
+    /// Recover a nonproduction `SQLite` fixture with native fault observers.
     ///
     /// # Errors
     /// Retains the normal composition's complete inventory and gate checks.
