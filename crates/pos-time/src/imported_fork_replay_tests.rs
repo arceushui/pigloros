@@ -4,7 +4,7 @@
 pub mod fixture;
 
 mod cumulative_budget;
-pub(crate) mod lifecycle;
+pub mod lifecycle;
 mod runtime_budget;
 
 use std::sync::{
