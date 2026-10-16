@@ -725,6 +725,70 @@ mod tests {
     }
 
     #[test]
+    fn complete_event_cursor_reads_the_maximum_native_coordinate_and_stops() -> Fallible<()> {
+        let (store, root, _) = fixture()?;
+        let maximum = i64::MAX.unsigned_abs();
+        // A sparse native boundary fixture, not a claim to contain all earlier
+        // Events. The complete reader must validate exactly the requested range.
+        assert_eq!(
+            store.conn.execute(
+                "UPDATE events SET seq=?1, origin_logical_seq=?1 WHERE timeline_id=?2",
+                params![i64::MAX, root.to_string()],
+            )?,
+            1
+        );
+        assert_eq!(
+            store.conn.execute(
+                "UPDATE timelines SET head_seq=?1 WHERE id=?2",
+                params![i64::MAX, root.to_string()],
+            )?,
+            1
+        );
+        let limits = ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000)?;
+        let bounds = pos_core::EventReadBounds::new_with_total_bytes_and_elapsed(
+            128, 128, 8, 4, 1_024, 1_000_000,
+        );
+        for (from, to, error) in [
+            (maximum, maximum, None),
+            (maximum - 1, maximum, Some(ReadError::CorruptAuthority)),
+            (maximum, maximum + 1, Some(ReadError::Unavailable)),
+            (maximum, maximum, None),
+        ] {
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let interval = store.begin_protected_effect_interval()?;
+            let result = store.read_fork_replay_events(
+                root,
+                pos_core::SeqRange::bounded(Seq::from_u64(from), Seq::from_u64(to)),
+                bounds,
+                &mut budget,
+            );
+            store.finish_protected_effect_interval(
+                interval,
+                ErasureProtectedEffectDispositionV1::Rollback,
+            )?;
+            budget.check_time()?;
+            if let Some(error) = error {
+                assert_eq!(result, Err(Error::Read(error)));
+            } else {
+                let events = result?;
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].seq, Seq::from_u64(maximum));
+                assert_eq!(
+                    events[0].origin,
+                    Some(pos_core::EventOriginV1 {
+                        origin_timeline_id: root,
+                        origin_logical_seq: Seq::from_u64(maximum),
+                    })
+                );
+            }
+            assert!(store.conn.is_autocommit());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn complete_event_reads_refuse_malformed_native_rows_without_partial_output() -> Fallible<()> {
         for sql in [
             "DELETE FROM events",
