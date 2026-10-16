@@ -68,9 +68,9 @@ impl SqliteStore {
                         context,
                     )?;
                     total_bytes = next_total;
-                    next = next
-                        .checked_add(1)
-                        .ok_or(Error::Read(ReadError::CorruptAuthority))?;
+                    // end <= length <= the native nonnegative i64 head:
+                    // advancing once beyond that endpoint still fits in u64.
+                    next += 1;
                 }
                 Ok(())
             })?;
