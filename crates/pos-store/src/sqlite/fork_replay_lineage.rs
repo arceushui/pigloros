@@ -86,7 +86,11 @@ impl SqliteStore {
         })
     }
 
-    fn lineage_freshness(&self, context: &mut LineageReadContextV1<'_, '_>) -> ReadResult<()> {
+    fn lineage_freshness(
+        &self,
+        gate: &pos_core::ErasureContainmentGateV1,
+        context: &mut LineageReadContextV1<'_, '_>,
+    ) -> ReadResult<()> {
         context.step(|context| {
             if !self.erasure_gate_bound {
                 return Ok(());
@@ -102,10 +106,6 @@ impl SqliteStore {
             if observed != Some(self.erasure_inventory_data_version) {
                 return Err(Error::ContainmentUnavailable);
             }
-            let gate = self
-                .erasure_gate
-                .as_deref()
-                .ok_or(Error::ContainmentUnavailable)?;
             context.step(|_| {
                 crate::validate_bound_erasure_inventory_generation(
                     true,
@@ -139,7 +139,7 @@ impl SqliteStore {
                 .erasure_gate
                 .as_deref()
                 .ok_or(Error::ContainmentUnavailable)?;
-            self.lineage_freshness(context)?;
+            self.lineage_freshness(gate, context)?;
             let mut result = Err(Error::ContainmentUnavailable);
             let fenced = gate.with_fence(timeline, ErasureProtectedOperationV1::Read, &mut || {
                 result = effect(context);
@@ -147,7 +147,7 @@ impl SqliteStore {
             // A latched refusal stops semantic work. Otherwise completion F
             // still executes after a native None/error or a gate denial.
             context.check()?;
-            self.lineage_freshness(context)?;
+            self.lineage_freshness(gate, context)?;
             fenced.map_err(gate_error).and(result)
         })
     }
@@ -514,6 +514,45 @@ mod tests {
             assert_eq!(budget.remaining_native_bytes(), 16_384 - bytes);
             budget.check_time()?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn removing_a_bound_gate_refuses_held_reads_and_new_intervals() -> Fallible<()> {
+        let mut store = SqliteStore::open(":memory:")?;
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let root = store.create_timeline("removed lineage gate")?.id();
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let limits = ForkReplayReadLimitsV1::new(8, 128, 512, 16_384, 1_000_000)?;
+        let start = clock.mark();
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let interval = store.begin_fork_replay_read_interval(&mut budget)?;
+        let healthy = store.read_fork_replay_lineage_node(root, 0, 8, &mut budget);
+        let remaining = budget.remaining_native_bytes();
+
+        // The public consuming operation removes the gate without changing the
+        // held native transaction. No private-field fault injection is needed.
+        let store = store.without_erasure_gate();
+        let refused_read = store.read_fork_replay_lineage_node(root, 0, 8, &mut budget);
+        store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
+        assert!(healthy?.is_some());
+        assert_eq!(refused_read, Err(Error::ContainmentUnavailable));
+        assert_eq!(budget.remaining_native_bytes(), remaining);
+        budget.check_time()?;
+        assert!(store.conn.is_autocommit());
+
+        // A fresh begin reaches the bound-gate check after acquiring its native
+        // interval and must unwind that acquisition on the same healthy ledger.
+        assert_eq!(
+            store.begin_fork_replay_read_interval(&mut budget),
+            Err(Error::ContainmentUnavailable)
+        );
+        assert!(store.conn.is_autocommit());
+        assert_eq!(budget.remaining_native_bytes(), remaining);
+        budget.check_time()?;
         Ok(())
     }
 
