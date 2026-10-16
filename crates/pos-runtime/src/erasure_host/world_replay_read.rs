@@ -9,6 +9,9 @@ use pos_core::{
 use pos_store::ForkReplayReadBudgetV1;
 use std::sync::Arc;
 
+#[cfg(any(test, feature = "test-support"))]
+use crate::world_replay::test_support::{record_replay_phase, ObservedGateV1, ReplayPhaseV1};
+
 type Result<T> = std::result::Result<T, Error>;
 
 fn checkpoint(budget: &mut ForkReplayReadBudgetV1<'_>) -> Result<()> {
@@ -26,7 +29,7 @@ impl Drop for EventBatchV1 {
     }
 }
 
-impl<'host> ErasureReadSenderV1<'host> {
+impl ErasureReadSenderV1<'_> {
     /// Materialize an authoritative use through the same original ledger.
     ///
     /// Reobserves its actual head before allocation and checks complete count
@@ -149,7 +152,7 @@ impl<'host> ErasureReadSenderV1<'host> {
                 {
                     self.host.poison();
                 }
-                return post.and(Err(map_fork_replay_lineage_error(error)));
+                return post.and_then(|()| Err(map_fork_replay_lineage_error(error)));
             }
         };
         let mut fence = ReadFenceV1 {
@@ -214,8 +217,19 @@ struct ReadFenceV1<'prepared, 'budget, 'clock> {
 
 impl<'clock> ReadFenceV1<'_, '_, 'clock> {
     fn rollback(&mut self, sender: &mut ErasureReadSenderV1<'_>) -> Result<()> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self.interval == Some(Interval::Owned) {
+            record_replay_phase(ReplayPhaseV1::BeforeRollback);
+        }
         if self.interval.take() == Some(Interval::Owned) {
-            finish_protected_effect_interval(sender.host, Interval::Owned, Disposition::Rollback)
+            let result = finish_protected_effect_interval(
+                sender.host,
+                Interval::Owned,
+                Disposition::Rollback,
+            );
+            #[cfg(any(test, feature = "test-support"))]
+            record_replay_phase(ReplayPhaseV1::AfterRollback);
+            result
         } else {
             Ok(())
         }
@@ -244,16 +258,25 @@ impl<'clock> ReadFenceV1<'_, '_, 'clock> {
         } else {
             let (prepare, complete) = callbacks;
             let staged = prepare(sender, self.budget);
+            #[cfg(any(test, feature = "test-support"))]
+            if staged.is_ok() {
+                record_replay_phase(ReplayPhaseV1::Staged);
+            }
             let verdict = checkpoint(self.budget);
             match staged {
                 Err(error) => self.rollback(sender).and(verdict).and(Err(error)),
-                Ok(staged) => match verdict {
-                    Err(error) => {
+                Ok(staged) => {
+                    if let Err(error) = verdict {
                         let verdict = self.rollback(sender).and(Err(error));
                         complete(staged, verdict).and(verdict)
-                    }
-                    Ok(()) => {
+                    } else {
+                        #[cfg(any(test, feature = "test-support"))]
+                        record_replay_phase(ReplayPhaseV1::BeforeComplete);
                         let installed = complete(staged, Ok(()));
+                        #[cfg(any(test, feature = "test-support"))]
+                        if installed.is_ok() {
+                            record_replay_phase(ReplayPhaseV1::Installed);
+                        }
                         let cleanup = self.rollback(sender);
                         match installed {
                             Ok(()) => match cleanup {
@@ -264,7 +287,7 @@ impl<'clock> ReadFenceV1<'_, '_, 'clock> {
                             Err(error) => cleanup.and(Err(error)),
                         }
                     }
-                },
+                }
             }
         }
     }
@@ -287,6 +310,8 @@ impl<'clock> ReadFenceV1<'_, '_, 'clock> {
         let prepared = self.prepared[arm];
         let gate = Arc::clone(&sender.host.gate);
         gate.with_fence_value(timeline, prepared.intent().operation(), || {
+            #[cfg(any(test, feature = "test-support"))]
+            let _observed_gate = ObservedGateV1::enter(timeline);
             for previous in &self.visited[start..] {
                 checkpoint(self.budget)?;
                 let cycle = *previous == timeline;

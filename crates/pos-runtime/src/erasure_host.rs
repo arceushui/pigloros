@@ -1329,6 +1329,19 @@ impl ErasureExecutionHostV1 {
             .and_then(|store| Self::recover_with_composition(Box::new(store), composition, limits))
     }
 
+    /// Recover a nonproduction SQLite fixture with native fault observers.
+    ///
+    /// # Errors
+    /// Retains the normal composition's complete inventory and gate checks.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn recover_sqlite_fixture_with_authority(
+        store: pos_store::sqlite::SqliteStore,
+        composition: &ErasureCoordinatorCompositionV1,
+        limits: ErasureRecoveryLimitsV1,
+    ) -> Result<Self, ErasureHostErrorV1> {
+        Self::recover_with_composition(Box::new(store), composition, limits)
+    }
+
     /// Recover one store after installing its explicit authority composition.
     ///
     /// # Errors
@@ -4563,7 +4576,8 @@ fn verify_world_replay_with_owner(
     let capability = owner
         .verify(closure, requested_use, generation)
         .map_err(map_world_replay_verification_error)?;
-    if capability.closure_digest() != closure.digest()
+    let closure_digest = closure.digest();
+    if capability.closure_digest() != closure_digest
         || capability.timeline_id() != closure.timeline_id()
         || capability.source_head() != closure.source_head()
         || capability.inventory_generation() != generation
