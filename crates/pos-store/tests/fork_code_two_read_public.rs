@@ -534,6 +534,55 @@ fn every_tampered_imported_row_fails_both_sqlite_reads_closed() -> Fallible<()> 
 }
 
 #[test]
+fn missing_imported_fork_admission_refuses_both_reads_until_restored() -> Fallible<()> {
+    let world = World::new(Shape::Mixed, false)?;
+    let built = world.build(&Spec::default())?;
+    let child = world.child_at(0)?.id;
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("missing-far1.sqlite");
+    let path = path.to_str().ok_or("utf-8 path")?;
+    let receipt = imported(&mut SqliteStore::open(path)?, &world, &built)?;
+    let origin = receipt.admission.input().authority_origin_digest;
+    assert_reads_accept(&reopen(path)?, &world, Shape::Mixed, origin)?;
+    let key = child.to_string();
+    let bytes: Vec<u8> = {
+        let connection = rusqlite::Connection::open(path)?;
+        let bytes = connection.query_row(
+            "SELECT far1_cbor FROM fork_admissions WHERE child_id = ?1",
+            [&key],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            connection.execute("DELETE FROM fork_admissions WHERE child_id = ?1", [&key])?,
+            1,
+        );
+        bytes
+    };
+    {
+        let store = reopen(path)?;
+        assert_eq!(
+            store.read_fork_event_suffix(child, PARENT_CUT + 1).err(),
+            Some(ForkEventAuthorityErrorV1::CorruptAuthority),
+        );
+        assert_eq!(
+            store.read_committed(child, PARENT_CUT + 4).err(),
+            Some(ForkManifestPublicationErrorV1::PublicationConflict),
+        );
+    }
+    {
+        let connection = rusqlite::Connection::open(path)?;
+        assert_eq!(
+            connection.execute(
+                "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES (?1, ?2)",
+                rusqlite::params![key, bytes],
+            )?,
+            1,
+        );
+    }
+    assert_reads_accept(&reopen(path)?, &world, Shape::Mixed, origin)
+}
+
+#[test]
 fn an_empty_imported_child_still_needs_its_import_admission_to_publish() -> Fallible<()> {
     let world = World::new(Shape::EmptyUnclassified, false)?;
     let built = world.build(&Spec::default())?;
