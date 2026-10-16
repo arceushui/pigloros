@@ -1,0 +1,96 @@
+# Temporary cold-build diagnosis, not a required gate or trusted baseline.
+# Separate hosted runners are not a controlled production performance comparison.
+name: 561-mutation-baseline-diagnostic
+
+on:
+  push:
+    branches: [redmine/561-mutation-baseline-diagnostic]
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: nightly-2026-08-28
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    # The command stops earlier so its evidence can upload before job teardown.
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: main-7c
+            source: 7c7bc93575e947171d340c9efd7b2a22fc9fed9c
+          - label: pr802-merge
+            source: 27c1190fd9447abfcfcb95d306592a1da949210f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.source }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+      # Deliberately no build cache: both sides measure the cold configuration.
+      - name: Record exact source, toolchain and runner
+        env:
+          EXPECTED_SOURCE: ${{ matrix.source }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          git rev-parse HEAD | tee artifacts/source-sha.txt
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          test -z "$(git status --porcelain --untracked-files=no)"
+          {
+            rustc -Vv
+            cargo --version
+            uname -a
+            nproc
+            free -m
+            df -h .
+            printf 'image=%s version=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            printf 'rustup_toolchain=%s test_debug=%s\n' "$RUSTUP_TOOLCHAIN" "$CARGO_PROFILE_TEST_DEBUG"
+          } | tee artifacts/environment.txt
+      - name: Run the complete unmutated nightly harness with a log-preserving deadline
+        run: |
+          set -euo pipefail
+          date --utc --iso-8601=seconds | tee artifacts/command-start.txt
+          set +e
+          timeout --kill-after=30s 28m /usr/bin/time -v \
+            cargo test --workspace --all-features --locked -- \
+            -Zunstable-options --fail-fast --include-ignored --test-threads=2 \
+            2>&1 | tee artifacts/mutation-baseline.log
+          pipeline_status=("${PIPESTATUS[@]}")
+          command_status=${pipeline_status[0]}
+          log_status=${pipeline_status[1]}
+          set -e
+          printf '%s\n' "$command_status" | tee artifacts/command-status.txt
+          date --utc --iso-8601=seconds | tee artifacts/command-end.txt
+          # These observations are diagnostic only, never replacements for exit status.
+          {
+            grep -E 'Finished .*test.*profile|Running |Doc-tests|test result:' artifacts/mutation-baseline.log || true
+            tail -n 100 artifacts/mutation-baseline.log
+          } > artifacts/phase-frontier.txt
+          if [[ "$command_status" -ne 0 ]]; then
+            exit "$command_status"
+          fi
+          if [[ "$log_status" -ne 0 ]]; then
+            exit "$log_status"
+          fi
+          # main predates the repository checker; enforce the same ignored-test rule here.
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed;' artifacts/mutation-baseline.log
+          if grep -E 'test result:.*; [1-9][0-9]* ignored;' artifacts/mutation-baseline.log; then
+            echo 'ERROR: ignored tests reported.' >&2
+            exit 1
+          fi
+      - name: Preserve the phase log even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: untrusted-561-mutation-baseline-${{ matrix.label }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
