@@ -250,7 +250,7 @@ struct PendingReplayGuardV1<'g> {
 }
 
 impl<'g> PendingReplayGuardV1<'g> {
-    fn new(guard: ReleaseGuardV1<'g>, health: &'g ReleaseHealthV1) -> Self {
+    const fn new(guard: ReleaseGuardV1<'g>, health: &'g ReleaseHealthV1) -> Self {
         Self {
             guard: Some(guard),
             health,
@@ -284,7 +284,7 @@ impl Drop for PendingReplayGuardV1<'_> {
     }
 }
 
-fn core_error_to_host(error: pos_core::CoreError) -> pos_core::ErasureHostErrorV1 {
+const fn core_error_to_host(error: &pos_core::CoreError) -> pos_core::ErasureHostErrorV1 {
     match error {
         pos_core::CoreError::ErasureAccessFrozen => pos_core::ErasureHostErrorV1::AccessFrozen,
         pos_core::CoreError::ErasureContainmentUnavailable => {
