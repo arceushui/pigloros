@@ -218,7 +218,7 @@ impl<'bytes> AdmissionCarrierV1<'bytes> {
         if major != expected_major {
             return None;
         }
-        carrier.take(usize::try_from(length).ok()?)
+        carrier.take_encoded(length)
     }
 
     #[cfg(feature = "sqlite")]
@@ -240,7 +240,7 @@ impl<'bytes> AdmissionCarrierV1<'bytes> {
             match major {
                 0 | 1 => (),
                 2 | 3 => {
-                    carrier.take(usize::try_from(length).ok()?)?;
+                    carrier.take_encoded(length)?;
                 }
                 _ => return None,
             }
@@ -264,6 +264,14 @@ impl<'bytes> AdmissionCarrierV1<'bytes> {
             .iter()
             .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte));
         Some((first >> 5, value))
+    }
+
+    /// Select an encoded length only when it fits both the host and carrier.
+    /// Grammar, protocol maxima and allocation debits remain with the caller.
+    fn take_encoded(&mut self, length: u64) -> Option<&'bytes [u8]> {
+        usize::try_from(length)
+            .ok()
+            .and_then(|length| self.take(length))
     }
 
     fn take(&mut self, length: usize) -> Option<&'bytes [u8]> {
@@ -1255,6 +1263,9 @@ mod canonical_length_mapping_tests {
             vec![0x81, 0x5f],
             vec![0x81, 0x78],
             vec![0x81, 0x7b, 0xff],
+            vec![
+                0x82, 0x7b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x61, b'x',
+            ],
             vec![0x82, 0x81, 0, 0x61, b'x'],
         ] {
             assert_eq!(AdmissionCarrierV1::field(&bytes, 0, 3), None);
