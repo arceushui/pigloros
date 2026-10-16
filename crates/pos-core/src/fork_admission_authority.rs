@@ -66,12 +66,14 @@ impl ForkAdmissionHostRecordV1 {
         bytes_in: &[u8],
     ) -> Result<Self, ForkAdmissionAuthorityCodecErrorV1> {
         Self::from_exact_fixed_shape(bytes_in).unwrap_or_else(|| {
-            let fields = decode(bytes_in, MAX_FORK_ADMISSION_HOST_RECORD_BYTES_V1, 5, "FAH1")?;
-            Ok(Self {
-                store_id: Hash::from_bytes(fixed_nonzero(&fields[2])?),
-                host_verifying_key: PublicKey::from_bytes(fixed_nonzero(&fields[3])?),
-                authentication_policy_digest: Hash::from_bytes(fixed_nonzero(&fields[4])?),
-            })
+            // A valid envelope plus three 32-byte identities needs at least
+            // 1 + 5 + 1 + 3 * 34 = 109 bytes. At the ceiling, valid fields
+            // therefore require the exact layout already handled above.
+            // Preserve envelope/version errors first; any remaining shape
+            // necessarily has an invalid identity field.
+            // Revisit this proof if the format or its exact ceiling changes.
+            decode(bytes_in, MAX_FORK_ADMISSION_HOST_RECORD_BYTES_V1, 5, "FAH1")
+                .and(Err(ForkAdmissionAuthorityCodecErrorV1::FieldOutOfBounds))
         })
     }
 
