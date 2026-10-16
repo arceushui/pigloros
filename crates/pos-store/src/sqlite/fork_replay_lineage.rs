@@ -535,6 +535,30 @@ mod tests {
     }
 
     #[test]
+    fn invalid_parent_ulid_refuses_after_native_type_and_length_checks() -> Fallible<()> {
+        let invalid = "IIIIIIIIIIIIIIIIIIIIIIIIII";
+        assert_eq!(invalid.len(), ulid::ULID_LEN);
+        assert!(invalid.parse::<ulid::Ulid>().is_err());
+        let (store, _, child) = fixture()?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        assert!(read(&store, child, &mut clock)??.is_some());
+        // Valid TEXT width passes the shape query; only ULID decoding refuses.
+        // Keep the original all-Z missing-parent case: Z is valid base32 here.
+        assert_eq!(
+            store.conn.execute(
+                "UPDATE timelines SET parent_id=?1 WHERE id=?2",
+                params![invalid, child.to_string()],
+            )?,
+            1
+        );
+        assert_eq!(
+            read(&store, child, &mut clock)?,
+            Err(Error::Read(ReadError::CorruptAuthority))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn invalid_utf8_text_is_refused_before_native_string_materialization() -> Fallible<()> {
         for sql in [
             "UPDATE timelines SET parent_id=CAST(x'ff' || zeroblob(25) AS TEXT) WHERE parent_id IS NOT NULL",
