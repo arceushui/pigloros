@@ -27,6 +27,11 @@ sha2 = { workspace = true }
 pos-crypto = { path = "../pos-crypto", features = ["test-support"] }
 pos-reference = { path = "../pos-reference" }
 
+# The Plugin fixture trust test (R8-F2a) rebuilds the release closures of the generated composites.
+# This widens the ADR's dependency statement: no existing dependency builds a verified closure.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+pos-plugin-release = { path = "../pos-plugin-release" }
+
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 

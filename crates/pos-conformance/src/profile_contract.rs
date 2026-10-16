@@ -2615,3 +2615,14 @@ fn decode_redaction(value: &Value) -> Result<RedactionStateV1, ConformanceContra
         _ => Err(ConformanceContractError::InvalidEncoding),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MAX_AUXILIARY_ARTIFACTS;
+    use crate::catalog_auxiliary::DEFAULT_AUXILIARY_CAP;
+
+    #[test]
+    fn the_catalog_auxiliary_cap_matches_the_cpf1_maximum() {
+        assert_eq!(DEFAULT_AUXILIARY_CAP, MAX_AUXILIARY_ARTIFACTS);
+    }
+}

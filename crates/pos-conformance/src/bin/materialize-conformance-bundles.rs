@@ -3,7 +3,7 @@
 use ed25519_dalek::SigningKey;
 use pos_conformance::{
     draft_execution_profile_bytes_v1, draft_release_admission_bytes_v1,
-    draft_trust_policy_snapshot_bytes_v1, expected_result_member_path,
+    draft_trust_policy_snapshot_bytes_v1, expected_result_member_path, fixture_input_member_path,
     verify_archive_release_filename, verify_release_tree_independently, ArtifactDescriptorV1,
     BundleExpectedResultV1, BundleMemberRoleV1, BundleMemberV1, BundleModeV1, CapabilityPolicyV1,
     ClaimLayerV1, ConformanceBundlePairV1, ConformanceBundleV1, ConformanceProfileV1,
@@ -201,6 +201,11 @@ struct CatalogFixtureContract {
     minimum_capability_ids: &'static [&'static str],
 }
 
+struct CatalogAuxiliary {
+    media_type: &'static str,
+    bytes: &'static [u8],
+}
+
 struct CatalogFixture {
     case_id: &'static str,
     family: FixtureFamilyV1,
@@ -210,6 +215,7 @@ struct CatalogFixture {
     input: &'static [u8],
     evidence_status: &'static [u8],
     oracle: &'static [u8],
+    auxiliary: &'static [CatalogAuxiliary],
     strict_oracle: CatalogStrictOracle,
     failure_outcome: VerificationOutcomeV1,
     replay_claim: ReplayClaimV1,
@@ -981,11 +987,22 @@ fn fixture_descriptor_from_record(
         fixture.oracle,
     );
     let expectation = fixture_expectation(fixture, &oracle_output);
-    let auxiliary = if expectation.strict_oracle.output.is_some() {
+    let mut auxiliary = if expectation.strict_oracle.output.is_some() {
         vec![evidence]
     } else {
         vec![evidence, oracle_output]
     };
+    auxiliary.extend(
+        auxiliary_artifacts(
+            fixture.auxiliary,
+            fixture.case_id,
+            context.claim_layer,
+            &execution_profile_digest,
+        )
+        .iter()
+        .map(PublicArtifact::descriptor),
+    );
+    sort_auxiliary_by_path(&mut auxiliary);
     let downgrade = fixture.family == FixtureFamilyV1::Downgrade;
     let transition = fixture_downgrade_transition(fixture.family, provider_key);
     trust_policy_snapshot_digest().and_then(|trust_policy_snapshot_digest| {
@@ -1051,6 +1068,51 @@ fn fixture_descriptor_from_record(
             descriptor
         })
     })
+}
+
+/// Member name of the first auxiliary composite. ADR-061 revision 8, decision 7 names it
+/// `plugin-world`; the catalog is generic, so the name is only a path-derivation input.
+const AUXILIARY_INPUT_MEMBER: &str = "plugin-world";
+
+fn auxiliary_member_name(index: usize) -> String {
+    if index == 0 {
+        AUXILIARY_INPUT_MEMBER.to_owned()
+    } else {
+        format!("{AUXILIARY_INPUT_MEMBER}-{index}")
+    }
+}
+
+fn auxiliary_artifacts(
+    auxiliary: &[CatalogAuxiliary],
+    case_id: &str,
+    claim_layer: ClaimLayerV1,
+    execution_profile_digest: &[u8; 32],
+) -> Vec<PublicArtifact> {
+    auxiliary
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| PublicArtifact {
+            path: fixture_input_member_path(
+                case_id,
+                claim_layer,
+                execution_profile_digest,
+                &auxiliary_member_name(index),
+            ),
+            media_type: entry.media_type,
+            bytes: entry.bytes.to_vec(),
+        })
+        .collect()
+}
+
+fn auxiliary_members(artifacts: Vec<PublicArtifact>) -> Vec<BundleMemberV1> {
+    artifacts
+        .into_iter()
+        .map(|artifact| BundleMemberV1::fixture_input(artifact.path, artifact.bytes))
+        .collect()
+}
+
+fn sort_auxiliary_by_path(auxiliary: &mut [ArtifactDescriptorV1]) {
+    auxiliary.sort_by(|left, right| left.member_path.cmp(&right.member_path));
 }
 
 fn fixture_downgrade_transition(
@@ -1210,6 +1272,12 @@ fn bundle_inputs_from_profile(
                 fixture.payload.member_path.clone(),
                 source.input.to_vec(),
             ));
+            members.extend(auxiliary_members(auxiliary_artifacts(
+                source.auxiliary,
+                &fixture.case_id,
+                fixture.claim_layer,
+                &fixture.execution_profile_digest,
+            )));
             let path = expected_result_member_path(
                 &fixture.case_id,
                 fixture.claim_layer,
@@ -1372,4 +1440,137 @@ fn verify_public_archive(
         .and_then(|_| {
             verify_archive_release_filename(archive_bytes, release_filename).map_err(Into::into)
         })
+}
+
+#[cfg(test)]
+mod auxiliary_tests {
+    use super::{
+        artifact_descriptor, auxiliary_artifacts, auxiliary_member_name, auxiliary_members,
+        fixture_context, fixture_descriptor_from_record, layer_catalog, sort_auxiliary_by_path,
+        CatalogAuxiliary, CatalogFixture,
+    };
+    use pos_conformance::{
+        fixture_input_member_path, BundleMemberRoleV1, ClaimLayerV1, ExecutionModeV1,
+        FixtureProviderKeyV1,
+    };
+    use std::error::Error;
+
+    const CASE: &str = "plugin-conformance-positive";
+    const LAYER: ClaimLayerV1 = ClaimLayerV1::PluginConformance;
+    const CATALOG: [CatalogAuxiliary; 2] = [
+        CatalogAuxiliary {
+            media_type: "application/octet-stream",
+            bytes: b"first",
+        },
+        CatalogAuxiliary {
+            media_type: "application/cbor",
+            bytes: b"second",
+        },
+    ];
+
+    #[test]
+    fn member_names_are_indexed_after_the_first() {
+        assert_eq!(auxiliary_member_name(0), "plugin-world");
+        assert_eq!(auxiliary_member_name(2), "plugin-world-2");
+    }
+
+    #[test]
+    fn bundle_paths_reuse_the_input_path_function_per_execution() {
+        let local = auxiliary_artifacts(&CATALOG, CASE, LAYER, &[1; 32]);
+        let air_gapped = auxiliary_artifacts(&CATALOG, CASE, LAYER, &[2; 32]);
+        assert_eq!(
+            local[0].path,
+            fixture_input_member_path(CASE, LAYER, &[1; 32], "plugin-world")
+        );
+        assert_eq!(
+            local[1].path,
+            fixture_input_member_path(CASE, LAYER, &[1; 32], "plugin-world-1")
+        );
+        assert_ne!(local[0].path, air_gapped[0].path);
+        assert!(local[0].path.starts_with("inputs/"));
+        assert_eq!(local[1].media_type, "application/cbor");
+        assert_eq!(local[1].bytes, b"second");
+    }
+
+    #[test]
+    fn no_auxiliary_entries_produce_no_artifacts() {
+        assert!(auxiliary_artifacts(&[], CASE, LAYER, &[1; 32]).is_empty());
+    }
+
+    #[test]
+    fn auxiliary_members_carry_the_fixture_input_role() {
+        let members = auxiliary_members(auxiliary_artifacts(&CATALOG, CASE, LAYER, &[1; 32]));
+        assert_eq!(members.len(), 2);
+        assert!(members
+            .iter()
+            .all(|member| member.role == BundleMemberRoleV1::FixtureInput));
+        assert_eq!(members[0].bytes, b"first");
+    }
+
+    #[test]
+    fn auxiliary_descriptors_materialize_in_path_order() {
+        let mut descriptors = vec![
+            artifact_descriptor("inputs/zz.bin", "a/b", b"z"),
+            artifact_descriptor("expected/mm.bin", "a/b", b"m"),
+            artifact_descriptor("evidence/aa", "a/b", b"a"),
+        ];
+        sort_auxiliary_by_path(&mut descriptors);
+        let paths = descriptors
+            .iter()
+            .map(|descriptor| descriptor.member_path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, ["evidence/aa", "expected/mm.bin", "inputs/zz.bin"]);
+    }
+
+    #[test]
+    fn fixture_descriptors_sort_derived_auxiliary_paths() -> Result<(), Box<dyn Error>> {
+        let first = layer_catalog().entries.remove(0);
+        let layer = layer_catalog().entries.remove(0);
+        let source = first.fixture_providers.into_iter().next();
+        let fixture = source.and_then(|provider| provider.fixtures.into_iter().next());
+        let fixture = fixture.ok_or("the catalog has no fixture")?;
+        let fixture = CatalogFixture {
+            auxiliary: &CATALOG,
+            ..fixture
+        };
+        let context = fixture_context(&layer);
+        let provider = &layer.fixture_providers[0];
+        let key = FixtureProviderKeyV1 {
+            provider_id: provider.provider.provider_id.to_owned(),
+            contract_version: provider.provider.contract_version.to_owned(),
+            abi_major: provider.provider.abi_major,
+            abi_minor: provider.provider.abi_minor,
+        };
+        let paths = |execution: &[u8; 32]| {
+            auxiliary_artifacts(&CATALOG, fixture.case_id, layer.claim_layer, execution)
+                .into_iter()
+                .map(|artifact| artifact.path)
+                .collect::<Vec<_>>()
+        };
+        let execution = (1..=u8::MAX)
+            .map(|byte| [byte; 32])
+            .find(|execution| {
+                let derived = paths(execution);
+                derived[0] > derived[1]
+            })
+            .ok_or("no execution digest derives out-of-order paths")?;
+        let derived = paths(&execution);
+        let descriptor = fixture_descriptor_from_record(
+            &layer,
+            provider,
+            &fixture,
+            &context,
+            &key,
+            execution,
+            ExecutionModeV1::Local,
+        )?;
+        let listed = descriptor
+            .auxiliary
+            .iter()
+            .map(|artifact| artifact.member_path.clone())
+            .collect::<Vec<_>>();
+        assert!(listed.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(derived.iter().all(|path| listed.contains(path)));
+        Ok(())
+    }
 }

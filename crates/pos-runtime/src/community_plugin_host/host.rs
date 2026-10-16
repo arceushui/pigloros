@@ -7,7 +7,7 @@
 //! never writes registry trust state; only [`CommunityPluginHostV1::refresh_policy()`] does.
 
 use pos_core::{
-    trusted_clock::TrustedWallSourceV1, Event, FactualAdmissionPortV1, PipelineCommitReceiptV1,
+    trusted_clock::PluginTrustWallSourceV1, Event, FactualAdmissionPortV1, PipelineCommitReceiptV1,
     PluginId, Seq, TimelineId, TimelineMeta,
 };
 use pos_crypto::plugin_trust::verify_plugin_trust_v1;
@@ -175,8 +175,8 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
     pub fn run_pass(
         &mut self,
         registry: &mut PluginRegistry,
-        trust: &impl PluginTrustPolicyRegistryV1,
-        wall: &mut impl TrustedWallSourceV1,
+        trust: &(impl PluginTrustPolicyRegistryV1 + ?Sized),
+        wall: &mut impl PluginTrustWallSourceV1,
         request: CommunityPassRequestV1<'_>,
     ) -> CommunityPassOutcomeV1 {
         let tick = request.tick;
@@ -209,9 +209,9 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
     /// records do not verify, and otherwise the registry's own error.
     pub fn refresh_policy(
         &mut self,
-        trust: &mut impl PluginTrustPolicyRegistryV1,
+        trust: &mut (impl PluginTrustPolicyRegistryV1 + ?Sized),
         material: &CommunityPluginTrustMaterialV1,
-        wall: &mut impl TrustedWallSourceV1,
+        wall: &mut impl PluginTrustWallSourceV1,
         tick: u64,
     ) -> Result<PolicyAdvanceOutcomeV1, PluginTrustPolicyRegistryErrorV1> {
         self.members.iter().for_each(M::close_pass);
@@ -222,7 +222,7 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
     fn run_open(
         &self,
         registry: &mut PluginRegistry,
-        trust: &impl PluginTrustPolicyRegistryV1,
+        trust: &(impl PluginTrustPolicyRegistryV1 + ?Sized),
         pass: &CommunityPassV1,
         request: CommunityPassRequestV1<'_>,
     ) -> (Vec<MemberVerdict>, PassResultV1) {
@@ -243,7 +243,7 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
     /// refusal is recorded and the verdicts of all members are returned as the error.
     fn gate_all(
         &self,
-        trust: &impl PluginTrustPolicyRegistryV1,
+        trust: &(impl PluginTrustPolicyRegistryV1 + ?Sized),
         pass: &CommunityPassV1,
     ) -> Result<Vec<Cleared>, Vec<MemberVerdict>> {
         let roster = &self.members;
@@ -265,7 +265,7 @@ impl<M: CommunityPluginMemberV1> CommunityPluginHostV1<M> {
 
 /// Verify the PTR1 and PRV1 records of `material` at `utc` and `tick`, then record the policy.
 fn advance(
-    trust: &mut impl PluginTrustPolicyRegistryV1,
+    trust: &mut (impl PluginTrustPolicyRegistryV1 + ?Sized),
     material: &CommunityPluginTrustMaterialV1,
     utc: TrustedUtcSecondV1,
     tick: u64,
@@ -292,7 +292,7 @@ fn advance(
 
 /// Gate one member against the registry with its own source, address and material.
 fn gate_member<M: CommunityPluginMemberV1>(
-    trust: &impl PluginTrustPolicyRegistryV1,
+    trust: &(impl PluginTrustPolicyRegistryV1 + ?Sized),
     member: &M,
     pass: &CommunityPassV1,
 ) -> GateAttempt {

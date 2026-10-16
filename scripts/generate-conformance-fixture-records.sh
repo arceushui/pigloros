@@ -72,6 +72,7 @@ validate_json_fixture_adapter() {
       (keys - ["with_operation", "without_operation"] | length) == 0 and
       (.with_operation | type == "object") and
       ((has("without_operation") | not) or (.without_operation | type == "object"))) and
+    all(.auxiliary[]?; . == []) and
     (.fixture_contracts.positive | has("allowed_divergence") | not) and
     .artifact_media_types == {
       schema: "application/schema+json",
@@ -85,6 +86,31 @@ validate_json_fixture_adapter() {
   }
 }
 
+# The 64-entry cap, the inputs/ prefix and the media-type pattern below are copies of
+# DEFAULT_AUXILIARY_CAP and the rules in crates/pos-conformance/src/catalog_auxiliary.rs;
+# build.rs, verify-conformance-fixtures.sh and generate-conformance-fixture-records.sh
+# must agree.
+validate_auxiliary_declaration() {
+  local provider_manifest="$1"
+  jq -e --argjson family_names "${family_names}" '
+    (.auxiliary | type == "object") and
+    ((.auxiliary | keys | sort) == ($family_names | sort)) and
+    all(.auxiliary[];
+      type == "array" and length <= 64 and
+      all(.[];
+        type == "object" and (keys | sort) == ["media_type", "path"] and
+        (.path | type == "string" and
+          test("^inputs/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$") and
+          (split("/") | all(. != "." and . != ".."))) and
+        (.media_type | type == "string" and length > 2 and length <= 127 and
+          test("^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$"))) and
+      ([.[].path] | unique | length) == length)
+  ' "${provider_manifest}" >/dev/null || {
+    echo "invalid provider auxiliary declaration: ${provider_manifest#"${fixture_root}/"}" >&2
+    exit 1
+  }
+}
+
 mapfile -t provider_manifest_paths < <(
   jq -r '.fixture_providers[].manifest' "${profile_root}"/*/profile.json | sort -u
 )
@@ -94,6 +120,7 @@ for manifest_path in "${provider_manifest_paths[@]}"; do
     exit 1
   }
   provider_manifest="${fixture_root}/${manifest_path}"
+  validate_auxiliary_declaration "${provider_manifest}"
   adapter_id="$(jq -er '.fixture_adapter.id | select(type == "string" and length > 0)' "${provider_manifest}")" || {
     echo "provider fixture adapter declaration is missing or invalid: ${provider_manifest#"${fixture_root}/"}" >&2
     exit 1
@@ -196,6 +223,27 @@ while IFS=$'\t' read -r case_id claim_layer family schema_path declared_schema_p
         exit 1
       }
     fi
+    # An adapter may also render the auxiliary members the provider declares for the family
+    # (the Plugin composite). `plugin-signed-v1` must render every one of them; an adapter that
+    # renders none is left to the verifier to find the missing file.
+    while IFS= read -r auxiliary_path; do
+      generated_auxiliary="${generated_root}/${auxiliary_path}"
+      if [[ ! -f "${generated_auxiliary}" ]]; then
+        [[ "${adapter_id}" != "plugin-signed-v1" ]] || {
+          echo "adapter did not render the auxiliary member: ${auxiliary_path}" >&2
+          exit 1
+        }
+        continue
+      fi
+      if [[ "${mode}" == "--write" ]]; then
+        install -m 0644 -- "${generated_auxiliary}" "${fixture_root}/${auxiliary_path}"
+      else
+        cmp -- "${generated_auxiliary}" "${fixture_root}/${auxiliary_path}" || {
+          echo "auxiliary fixture member is not independently reproducible: ${auxiliary_path}" >&2
+          exit 1
+        }
+      fi
+    done < <(jq -r --arg family "${family}" '.auxiliary[$family][]?.path' "${provider_manifest}")
     generated_count=$((generated_count + 1))
     continue
   fi

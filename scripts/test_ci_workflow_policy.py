@@ -48,6 +48,10 @@ FEATURE_MATRIX_STEPS = (
         "name": "Prove reference evaluator implementation independence",
         "run": "bash scripts/check-reference-evaluator-independence.sh",
     },
+    {
+        "name": "Prove the conformance adapter dependency graph",
+        "run": "bash scripts/check-adapter-graph.sh",
+    },
 )
 WORKSPACE_TEST_STEP = {
     "name": "cargo test (all features, no ignored skip)",
