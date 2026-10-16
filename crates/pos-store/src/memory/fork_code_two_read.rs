@@ -1635,9 +1635,8 @@ mod tests {
         Ok(())
     }
 
-    /// Every stored-state tamper that both reads must refuse.
-    fn refused_tampers() -> Vec<(&'static str, Tamper)> {
-        let tampers: [(&'static str, Tamper); 16] = [
+    fn admission_tampers() -> [(&'static str, Tamper); 7] {
+        [
             ("missing import admission", |state| {
                 state.store.imported_fork_attributions.clear();
                 Ok(())
@@ -1684,6 +1683,11 @@ mod tests {
                 state.store.imported_fork_admissions.clear();
                 Ok(())
             }),
+        ]
+    }
+
+    fn classifier_and_event_tampers() -> [(&'static str, Tamper); 9] {
+        [
             ("missing FCT1", |state| {
                 state.store.fork_classifier_tables.clear();
                 Ok(())
@@ -1747,8 +1751,15 @@ mod tests {
                     }
                 })
             }),
-        ];
-        tampers.into()
+        ]
+    }
+
+    /// Every stored-state tamper that both reads must refuse.
+    fn refused_tampers() -> Vec<(&'static str, Tamper)> {
+        admission_tampers()
+            .into_iter()
+            .chain(classifier_and_event_tampers())
+            .collect()
     }
 
     #[test]

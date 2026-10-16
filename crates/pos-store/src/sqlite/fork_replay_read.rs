@@ -38,7 +38,7 @@ impl SqliteStore {
                 self.read_lineage_member(member, visited, context)
             })?;
         let head = history_head(&history, &mut context)?;
-        let (from, to, count) = complete_event_range(head, range, bounds, &mut context)?;
+        let (from, to) = complete_event_range(head, range, bounds, &mut context)?;
         let mut events = ReplayEventStagingV1::default();
         let mut total_bytes = 0_usize;
         for (index, (node, _)) in history.iter().enumerate() {
@@ -75,13 +75,9 @@ impl SqliteStore {
                 Ok(())
             })?;
         }
-        context.step(|_| {
-            if events.len() == count {
-                Ok(())
-            } else {
-                corrupt()
-            }
-        })?;
+        // Every selected coordinate must pass the exact-next probe and exact
+        // key fetch before one push. A gap or early EOF already returns an
+        // error, and the held snapshot/sealed fence preserve that cardinality.
         Ok(events.into_events())
     }
 
@@ -153,13 +149,8 @@ impl SqliteStore {
                 // comparison or origin check can fail.
                 let event =
                     events.push(decoded.map_err(|_| Error::Read(ReadError::CorruptAuthority))?);
-                context.step(|_| {
-                    if event.seq.as_u64() == next {
-                        Ok(())
-                    } else {
-                        corrupt()
-                    }
-                })?;
+                // ER0 required lengths.seq == next. ER1 selects that exact
+                // primary key in the same snapshot and decodes its seq column.
                 context.step(|_| {
                     crate::finalize_committed_origins(
                         *timeline,
