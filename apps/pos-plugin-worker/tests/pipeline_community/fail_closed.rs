@@ -31,8 +31,8 @@ use crate::first_party::{entity_of, native_pin, register_twin, NAME};
 use crate::harness::Capture;
 use crate::parity::{record, Order, ENTITY, STORE, TWIN_TYPE};
 use crate::support::lane::{
-    gated_release, profile, publish, publish_shape, trust_material, Published, Swap, ALPHA, ALPHA_C,
-    WATCHDOG,
+    gated_release, profile, publish, publish_shape, trust_material, Published, Swap, ALPHA,
+    ALPHA_C, WATCHDOG,
 };
 use crate::support::subcase::WORKER;
 use crate::support::test_ok::TestOk;
@@ -164,7 +164,11 @@ fn set_and_pass(
     id: PluginId,
     availability: PluginAvailabilityV1,
 ) -> BoxResult<Pass> {
-    mixed.lane.pass.registry.set_availability(id, availability)?;
+    mixed
+        .lane
+        .pass
+        .registry
+        .set_availability(id, availability)?;
     mixed.pass(signed)
 }
 
@@ -194,6 +198,9 @@ fn quarantine_and_pass(
 
 /// The community release, registered after the first-party sibling, quarantined by the host,
 /// then cleared.
+///
+/// The revocation is injected through the handle's refusal record, the path the host itself uses
+/// to quarantine; that a real revoked artifact yields that refusal is proven at the trust gate.
 fn community_unavailable(signed: &SignedWorld, entries: &[Published]) -> BoxResult<Refused> {
     let mut mixed = Mixed::new(signed, entries, SIBLING, Order::TwinFirst)?;
     let revoked = HostError::ArtifactRevoked {

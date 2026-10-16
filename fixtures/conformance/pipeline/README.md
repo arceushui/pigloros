@@ -69,14 +69,17 @@ the trapping community Plugin is quarantined (`Trapped`, recorded but not
 compared), and the next pass commits. A failed pass launches one worker for the
 failing step, a first-party Plugin with the same domain contract is never run
 in its place, a quarantined Plugin refuses the whole pass, and recovery is a new
-pass under new invocation identities. A missing, unavailable or invalid Plugin
-of either class gets the same typed refusal: `MissingImplementation`,
-`ImplementationUnavailable` before any Driver runs, and
+pass under new invocation identities (the context source issues them, so the
+case models them). A missing, unavailable or invalid Plugin of either class gets
+the same typed refusal: `MissingImplementation` from exact resolution,
+`ImplementationUnavailable` before any Driver runs (community unavailability is
+injected through the host's refusal record), and
 `IncompatibleImplementation(Isolation)` from exact resolution. Only the
 community path has a release, so a release that is not active is refused at the
 trust gate and one with a denied capability never becomes a Driver. An invalid
-community guest output needs a new guest Component; the `INVALID-GUEST-OUTPUT`
-exclusion records it.
+community guest output needs a new guest Component and an ABI- or
+manifest-invalid release needs a malformed release fixture; the
+`INVALID-GUEST-OUTPUT` exclusion records both.
 
 The community pass world runs on `MemoryStore` only, so every case names the
 `memory` store, and the `SQLITE-STORE` exclusion records that this profile

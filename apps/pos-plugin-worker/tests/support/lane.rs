@@ -69,6 +69,8 @@ pub const MEMORY: u64 = 16 * 1_048_576;
 /// The one Event type both fixtures' `drive` export emits.
 pub const EVENT_TYPE: &str = "prototype.driven";
 /// The observation on which both fixtures execute `unreachable` instead of driving.
+///
+/// It mirrors the guests' private trap observation, which a test cannot import.
 pub const TRAP_OBSERVATION: &[u8] = b"trap";
 
 /// One member of a lane.

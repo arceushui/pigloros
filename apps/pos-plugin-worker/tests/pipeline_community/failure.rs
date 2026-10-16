@@ -46,7 +46,8 @@ pub struct Mixed {
     pub lane: Lane,
     /// The first-party Driver's step counter.
     steps: Arc<AtomicUsize>,
-    /// Set to make the first-party Driver fail.
+    /// Set to make the first-party Driver fail; public so a case can fail it mid-lane, while the
+    /// other fields stay bookkeeping the lane owns.
     pub fail: Arc<AtomicBool>,
     order: Order,
     /// The first-party steps and the community launches before the next pass.
@@ -127,7 +128,9 @@ impl Mixed {
         let rows: Vec<String> = receipts
             .iter()
             .map(|receipt| {
-                let failure = receipt.failure.map_or("none", CommunityPluginHostErrorV1::name);
+                let failure = receipt
+                    .failure
+                    .map_or("none", CommunityPluginHostErrorV1::name);
                 format!("{failure}/{:?}", receipt.disposition)
             })
             .collect();
@@ -285,12 +288,15 @@ fn no_fallback() -> BoxResult<Capture> {
     mixed.clear()?;
     let recovered = mixed.pass(&signed)?;
     let receipts = mixed.lane.handle().receipts();
+    // The context source, not the host, issues invocation IDs; the lane generation models a
+    // recovery under a new identity. The check proves the recovery added one new receipt beside
+    // the discarded one, not that the host issues the ID.
     let renewed = receipts.len() == 2 && receipts[0].invocation_id != receipts[1].invocation_id;
     let mut capture = Capture::default();
     record_pass(&mut capture, "failed", &failed);
     record_pass(&mut capture, "quarantined", &quarantined);
     record(&mut capture, "recovered", &recovered.observed);
     capture.record(STORE, "recovered.community-receipts", &mixed.receipts());
-    capture.record(STORE, "recovered.new-invocation-identity", renewed);
+    capture.record(STORE, "recovered.fresh-id-new-receipt", renewed);
     Ok(capture)
 }
