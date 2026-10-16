@@ -643,6 +643,12 @@ fn missing_targets_and_unheld_sqlite_reads_fail_at_their_actual_seams() -> TestR
         Err(Error::Read(ReadError::StorageUnavailable))
     );
     assert_eq!(budget.remaining_native_bytes(), 42);
+    assert_eq!(
+        store.fork_replay_logical_head(missing, 0, &mut budget),
+        Err(Error::Read(ReadError::StorageUnavailable))
+    );
+    assert_eq!(budget.remaining_native_bytes(), 42);
+    budget.check_time()?;
     let interval = store.begin_protected_effect_interval()?;
     assert_eq!(
         store.read_fork_replay_lineage_node(missing, 0, 0, &mut budget)?,
