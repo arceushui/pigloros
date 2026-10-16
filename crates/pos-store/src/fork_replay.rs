@@ -806,7 +806,7 @@ impl<'budget, 'clock> LineageReadContextV1<'budget, 'clock> {
     }
 
     #[cfg(feature = "sqlite")]
-    pub(crate) fn native(&mut self) -> NativeReadContextV1<'_, 'clock> {
+    pub(crate) const fn native(&mut self) -> NativeReadContextV1<'_, 'clock> {
         NativeReadContextV1::for_event_read(&mut *self.budget, self.read_deadline)
     }
 
@@ -866,7 +866,7 @@ impl ReplayEventStagingV1 {
         &mut self.0[index]
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.0.len()
     }
 
