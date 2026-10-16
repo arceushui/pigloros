@@ -272,6 +272,43 @@ fn event_reads_reject_malformed_successful_batches_and_stale_heads() {
 }
 
 #[test]
+fn protected_event_reads_preserve_empty_and_past_head_range_boundaries() {
+    for (first, succeeds) in [(2, true), (3, false)] {
+        let (mut host, closure) = replay_fault_host(FaultModeV1::Passthrough);
+        let requested = test_ok(WorldReplayUseV1::new(
+            closure.timeline_id(),
+            ErasureProtectedOperationV1::Read,
+            SeqRange::from_seq(Seq::from_u64(first)),
+            Seq::from_u64(1),
+            vec!["count".to_owned()],
+            Vec::new(),
+        ));
+        let generation = test_ok(host.gate.inventory_generation());
+        let verified = crate::world_replay::test_verified_world_replay(
+            &closure,
+            &requested,
+            generation,
+            pos_core::ErasureReplayClaimV1::Exact,
+        );
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = test_ok(ForkReplayReadBudgetV1::new(
+            verified.fork_read_limits(),
+            start,
+            &mut clock,
+        ));
+        let result = test_ok(host.read_sender()).read_world_replay_events(&verified, &mut budget);
+        if succeeds {
+            assert!(test_ok(result).is_empty());
+        } else {
+            assert_eq!(result, Err(ErasureHostErrorV1::AdapterFailure));
+        }
+        test_ok(budget.check_time());
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+}
+
+#[test]
 fn read_fence_setup_panic_preserves_payload_and_poisons_before_callbacks() {
     let (mut host, closure) = replay_fault_host(FaultModeV1::BeginForkReplayPanic);
     let requested = replay_use(&closure);
