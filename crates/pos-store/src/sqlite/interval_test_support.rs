@@ -74,3 +74,28 @@ fn authorize(
 fn observer_error(_: rusqlite::Error) -> CoreError {
     CoreError::Storage("native test transaction observer unavailable".to_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::observer_error;
+    use pos_core::CoreError;
+
+    #[test]
+    fn observer_error_mapping_does_not_expose_native_diagnostics(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+        let native = conn
+            .execute_batch("SELECT private_observer_detail")
+            .err()
+            .ok_or("invalid native statement unexpectedly succeeded")?;
+        assert!(native.to_string().contains("private_observer_detail"));
+        // Exercise the diagnostic translation with a real SQLite error. This
+        // does not claim a healthy authorizer/busy-timeout installation fails.
+        assert!(matches!(
+            observer_error(native),
+            CoreError::Storage(message)
+                if message == "native test transaction observer unavailable"
+        ));
+        Ok(())
+    }
+}
