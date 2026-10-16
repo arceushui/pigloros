@@ -6,9 +6,11 @@
 //! For every family the attempt has at most three auxiliary members, the schema member has the
 //! digest the adapter pins, and the payload grammar and the composite pieces decode. With
 //! `/bin/false` as the worker program, every present sub-case that refuses before a worker
-//! launch (`denied`, `malformed` and `downgrade`) gives its closed error, so the case gives the
-//! failure of the family oracle. The positive and independent-evaluation attempts launch a
-//! worker and are decoded only; the real worker proves them in `pos-plugin-worker`.
+//! launch (`den.01`, `den.02`, `den.13` to `den.22`, every `mal.*` and every `dgr.*`) gives its
+//! closed error, so the case gives the failure of the family oracle. The positive and
+//! independent-evaluation attempts launch a worker and are decoded only, and so are the link
+//! failures `den.03` to `den.12`, which only a worker can give: with `/bin/false` they make the
+//! whole `denied` case `Unavailable`. The real worker proves them in `pos-plugin-worker`.
 
 use std::fs;
 use std::path::PathBuf;
@@ -119,6 +121,47 @@ fn attempt_from_fixture_files(
     })
 }
 
+/// Whether the sub-case `id` is a link failure that only a launched worker can give.
+fn launches_a_worker(id: &str) -> bool {
+    id.strip_prefix("den.")
+        .and_then(|number| number.parse::<u32>().ok())
+        .is_some_and(|number| (3..=12).contains(&number))
+}
+
+/// `attempt` with the sub-cases that launch a worker taken out of its payload.
+///
+/// The worker's `tests/support/attempts.rs` has the general form (`rewrite_subcases`); the two
+/// test crates cannot share a helper, so keep them in step.
+fn without_launches(mut attempt: CaseAttempt) -> TestResult<CaseAttempt> {
+    let mut payload: Value = serde_json::from_slice(&attempt.payload.bytes)?;
+    let subcases = payload["subcases"].as_array_mut().ok_or("no sub-cases")?;
+    subcases.retain(|subcase| !subcase["id"].as_str().is_some_and(launches_a_worker));
+    let mut bytes = serde_json::to_vec(&payload)?;
+    bytes.push(b'\n');
+    attempt.fixture_digest = *blake3::hash(&bytes).as_bytes();
+    attempt.payload = artifact(bytes);
+    Ok(attempt)
+}
+
+fn subcase_ids(attempt: &CaseAttempt) -> TestResult<Vec<String>> {
+    let payload: Value = serde_json::from_slice(&attempt.payload.bytes)?;
+    let subcases = payload["subcases"].as_array().ok_or("no sub-cases")?;
+    Ok(subcases
+        .iter()
+        .filter_map(|subcase| subcase["id"].as_str().map(str::to_owned))
+        .collect())
+}
+
+/// The observation of `attempt` with `/bin/false` as the worker program.
+fn observe_without_worker(attempt: &CaseAttempt) -> TestResult<SubjectResult> {
+    let runner = SupervisorRunnerV1::with_program("/bin/false").ok_or("a relative program")?;
+    let mut stream = Vec::new();
+    write_attempt(&mut stream, attempt)?;
+    let mut out = Vec::new();
+    run_with(&runner, stream.as_slice(), &mut out)?;
+    Ok(read_observation(out.as_slice(), 1_048_576)?.result)
+}
+
 #[test]
 fn every_attempt_names_the_pinned_schema_and_decodes() -> TestResult {
     for family in FixtureFamily::ALL.iter().copied() {
@@ -143,7 +186,6 @@ fn every_attempt_names_the_pinned_schema_and_decodes() -> TestResult {
 
 #[test]
 fn sub_cases_that_refuse_before_a_launch_give_the_family_failure_without_a_worker() -> TestResult {
-    let runner = SupervisorRunnerV1::with_program("/bin/false").ok_or("a relative program")?;
     for family in [
         FixtureFamily::Denied,
         FixtureFamily::Malformed,
@@ -157,13 +199,28 @@ fn sub_cases_that_refuse_before_a_launch_give_the_family_failure_without_a_worke
             code_id: text("code_id").ok_or("no code")?,
         });
         for mode in MODES {
-            let mut stream = Vec::new();
-            write_attempt(&mut stream, &attempt_from_fixture_files(family, mode)?)?;
-            let mut out = Vec::new();
-            run_with(&runner, stream.as_slice(), &mut out)?;
-            let observation = read_observation(out.as_slice(), 1_048_576)?;
-            assert_eq!(observation.result, expected, "{family:?} {mode:?}");
+            let attempt = without_launches(attempt_from_fixture_files(family, mode)?)?;
+            let result = observe_without_worker(&attempt)?;
+            assert_eq!(result, expected, "{family:?} {mode:?}");
         }
     }
+    Ok(())
+}
+
+#[test]
+fn the_denied_sub_cases_split_into_link_failures_and_refusals_before_a_launch() -> TestResult {
+    let attempt = attempt_from_fixture_files(FixtureFamily::Denied, ExecutionMode::Local)?;
+    let all = subcase_ids(&attempt)?;
+    let expected: Vec<String> = (1..=22).map(|number| format!("den.{number:02}")).collect();
+    assert_eq!(all, expected);
+    let remaining = subcase_ids(&without_launches(attempt.clone())?)?;
+    let mut refusals = vec!["den.01".to_owned(), "den.02".to_owned()];
+    refusals.extend((13..=22).map(|number| format!("den.{number}")));
+    assert_eq!(remaining, refusals);
+    // The link failures give no verdict without a worker: the case is Unavailable.
+    assert_eq!(
+        observe_without_worker(&attempt)?,
+        SubjectResult::Unavailable
+    );
     Ok(())
 }

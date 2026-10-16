@@ -8,6 +8,11 @@
 //! specification (`H1` of both guests, `H2` of the carried state, the release identities and
 //! the profile digest of `ind.*`, the `FuelExhausted` of `res.1`, the redaction of `del.1`)
 //! are the ones the host computes. No fixture type is named here.
+//!
+//! R8-F2c: the load-time link failures `den.03` to `den.12` of the `denied` family give
+//! `IncompatibleAbi` from the real worker. The `denied` case, which also holds the sub-cases
+//! that refuse before a launch, is the failure of its oracle only when every sub-case matched;
+//! each link failure is also run alone, with a control whose expectation is changed.
 
 pub mod support;
 
@@ -16,24 +21,40 @@ use std::path::PathBuf;
 use pos_plugin_conformance_adapter::{run_with, SupervisorRunnerV1};
 use pos_plugin_supervisor::WorkerProgramV1;
 use pos_reference::adapter_transport::{read_observation, write_attempt};
-use pos_reference::evaluator::{SubjectObservation, SubjectResult};
+use pos_reference::evaluator::{CaseAttempt, SubjectObservation, SubjectResult};
 use pos_reference::evaluator_domain::{ExecutionMode, FixtureFamily};
 use pos_reference::profile::NamespacedFailure;
-use support::attempts::{attempt_from_fixture_files, family_budget, oracle_bytes};
+use support::attempts::{
+    attempt_from_fixture_files, family_budget, oracle_bytes, rewrite_subcases,
+};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const WORKER: &str = env!("CARGO_BIN_EXE_pos-plugin-worker");
 
-/// The observation of `family` in `mode` from the adapter library over the real worker.
-fn observe(family: FixtureFamily, mode: ExecutionMode) -> TestResult<SubjectObservation> {
+/// The observation of `attempt` from the adapter library over the real worker.
+fn observe_attempt(attempt: &CaseAttempt) -> TestResult<SubjectObservation> {
     let program = WorkerProgramV1::new(PathBuf::from(WORKER)).ok_or("an invalid worker path")?;
     let runner = SupervisorRunnerV1::new(program);
     let mut stream = Vec::new();
-    write_attempt(&mut stream, &attempt_from_fixture_files(family, mode)?)?;
+    write_attempt(&mut stream, attempt)?;
     let mut out = Vec::new();
     run_with(&runner, stream.as_slice(), &mut out)?;
     Ok(read_observation(out.as_slice(), 1_048_576)?)
+}
+
+/// The observation of `family` in `mode` from the adapter library over the real worker.
+fn observe(family: FixtureFamily, mode: ExecutionMode) -> TestResult<SubjectObservation> {
+    observe_attempt(&attempt_from_fixture_files(family, mode)?)
+}
+
+/// The provider's typed failure with code `code_id`.
+fn failure(code_id: &str) -> SubjectResult {
+    SubjectResult::Failure(NamespacedFailure {
+        owner_id: "pigloros.fixture.plugin-conformance".to_owned(),
+        contract_version: "2.0.0".to_owned(),
+        code_id: code_id.to_owned(),
+    })
 }
 
 /// The measured usage of the observation stays within the budget the provider declares.
@@ -102,18 +123,57 @@ fn the_independent_evaluation_literals_are_the_hosts() -> TestResult {
 #[test]
 fn a_starved_fuel_budget_is_the_resource_limit_failure() -> TestResult {
     let observation = observe(FixtureFamily::ResourceExhaustion, ExecutionMode::Local)?;
-    assert_eq!(
-        observation.result,
-        SubjectResult::Failure(NamespacedFailure {
-            owner_id: "pigloros.fixture.plugin-conformance".to_owned(),
-            contract_version: "2.0.0".to_owned(),
-            code_id: "resource-limit".to_owned(),
-        })
-    );
+    assert_eq!(observation.result, failure("resource-limit"));
     assert_within_budget(FixtureFamily::ResourceExhaustion, &observation)
 }
 
 #[test]
 fn the_synthetic_marker_is_absent_from_every_committed_record() -> TestResult {
     assert_output_is_the_oracle(FixtureFamily::DeletionRedaction, ExecutionMode::Local)
+}
+
+/// The IDs of the sub-cases of `denied` that fail at load on the real worker.
+fn link_failures() -> impl Iterator<Item = String> {
+    (3..=12).map(|number| format!("den.{number:02}"))
+}
+
+/// The `denied` attempt with only the sub-case `id`, whose expected `error` is `error` when
+/// given.
+fn denied_alone(id: &str, error: Option<&str>) -> TestResult<CaseAttempt> {
+    let attempt = attempt_from_fixture_files(FixtureFamily::Denied, ExecutionMode::Local)?;
+    rewrite_subcases(attempt, |subcase| {
+        let keep = subcase["id"] == id;
+        if let (true, Some(error)) = (keep, error) {
+            subcase["expect"]["error"] = error.into();
+        }
+        keep
+    })
+}
+
+/// A smoke test of the whole `denied` case on the real worker; the `r8_s2_*` tests of
+/// `conformance_adapter_public.rs` prove the family and control the expiry sub-cases.
+#[test]
+fn every_denied_sub_case_matches_on_the_real_worker() -> TestResult {
+    for mode in [ExecutionMode::Local, ExecutionMode::AirGapped] {
+        let observation = observe(FixtureFamily::Denied, mode)?;
+        assert_eq!(observation.result, failure("capability-denied"), "{mode:?}");
+        assert_within_budget(FixtureFamily::Denied, &observation)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn each_load_time_link_failure_is_incompatible_abi_from_the_real_worker() -> TestResult {
+    for id in link_failures() {
+        let matched = observe_attempt(&denied_alone(&id, None)?)?;
+        assert_eq!(matched.result, failure("capability-denied"), "{id}");
+        // The case code `capability-denied` is the observable of `IncompatibleAbi`: the case is
+        // that failure only when every sub-case matched, and `den.03` to `den.12` expect that
+        // refusal. The control: the same sub-case expecting another well-formed refusal
+        // (`InvalidManifest` needs no `basis` and no `index`) reaches the matcher and does not
+        // match.
+        let other = observe_attempt(&denied_alone(&id, Some("InvalidManifest"))?)?;
+        assert_eq!(other.result, failure("subcase-mismatch"), "{id}");
+    }
+    Ok(())
 }
