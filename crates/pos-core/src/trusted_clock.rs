@@ -531,12 +531,14 @@ impl GuardMonotonicSourceV1 for ScriptedGuardMonotonicSourceV1 {
 // A test may advance its existing script at a lifecycle boundary while the
 // consumer owns the clock borrow. This implements no deployable time source.
 #[cfg(feature = "test-support")]
-impl sealed::Sealed for std::rc::Rc<std::cell::RefCell<ScriptedGuardMonotonicSourceV1>> {}
+impl sealed::Sealed for std::sync::Arc<std::sync::Mutex<ScriptedGuardMonotonicSourceV1>> {}
 
 #[cfg(feature = "test-support")]
-impl GuardMonotonicSourceV1 for std::rc::Rc<std::cell::RefCell<ScriptedGuardMonotonicSourceV1>> {
+impl GuardMonotonicSourceV1 for std::sync::Arc<std::sync::Mutex<ScriptedGuardMonotonicSourceV1>> {
     fn mark(&mut self) -> MonotonicMarkV1 {
-        self.borrow_mut().mark()
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mark()
     }
 }
 
