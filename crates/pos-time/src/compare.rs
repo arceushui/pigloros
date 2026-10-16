@@ -406,12 +406,17 @@ pub mod tests {
         use pos_store::ForkReplayReadBudgetV1;
 
         let timelines = requirements.map(pos_store::ForkReplayRequirementV1::child_timeline_id);
-        let prepared = prepare_comparison_reads(
-            sender,
-            timelines,
-            closures,
-            [vec!["count".to_owned()], vec!["count".to_owned()]],
-        )?;
+        let [intent_a, intent_b] = timelines.map(|timeline| {
+            pos_runtime::WorldReplayReadIntentV1::new(
+                timeline,
+                ErasureProtectedOperationV1::Export,
+                SeqRange::all(),
+                vec!["count".to_owned()],
+                Vec::new(),
+            )
+            .map_err(crate::unavailable)
+        });
+        let prepared = prepare_comparison_reads(sender, closures, [intent_a?, intent_b?])?;
         let preparations = [&prepared[0], &prepared[1]];
         let mut clock = ScriptedGuardMonotonicSourceV1::new([std::time::Duration::ZERO]);
         let started = clock.mark();
