@@ -213,6 +213,74 @@ fn competing_writer_refuses_acquisition_without_owning_any_transaction() -> Test
 }
 
 #[test]
+fn an_ignored_native_data_version_refuses_acquisition_without_spending_a_row() -> TestResult {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for read_only in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("ignored-data-version.sqlite");
+        let path = path.to_str().ok_or("UTF-8 path")?;
+        let mut store = SqliteStore::open(path)?;
+        if read_only {
+            drop(store);
+            store = SqliteStore::open_read_only(path)?;
+        }
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        assert_released(&store)?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        store
+            .conn
+            .authorizer(Some(move |context: AuthContext<'_>| {
+                match context.action {
+                    AuthAction::Pragma { pragma_name, .. }
+                        if pragma_name.eq_ignore_ascii_case("data_version") =>
+                    {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        // SQLite compiles an ignored PRAGMA without a result row;
+                        // no fabricated Row or Rust getter error is involved.
+                        Authorization::Ignore
+                    }
+                    _ => Authorization::Allow,
+                }
+            }))?;
+        let limits = crate::ForkReplayReadLimitsV1::new(1, 1, 1, 1, 1_000_000)?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        let refused = store.begin_fork_replay_read_interval(&mut budget);
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        assert_eq!(refused, Err(INTERVAL_STORAGE_ERROR));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(store.conn.is_autocommit());
+        assert!(store
+            .writer_reservation_connection
+            .as_ref()
+            .is_none_or(rusqlite::Connection::is_autocommit));
+        assert_eq!(budget.remaining_native_bytes(), 1);
+        budget.check_time()?;
+        let competitor = rusqlite::Connection::open(path)?;
+        competitor.busy_timeout(Duration::ZERO)?;
+        competitor.execute_batch("BEGIN IMMEDIATE; ROLLBACK")?;
+
+        // EOF spends no row. The same one-row ledger must still fund a real
+        // data-version row and acquire an interval after the hook is removed.
+        let interval = store.begin_fork_replay_read_interval(&mut budget)?;
+        assert_eq!(interval, ErasureProtectedEffectIntervalV1::Owned);
+        store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
+        assert_released(&store)?;
+        budget.check_time()?;
+    }
+    Ok(())
+}
+
+#[test]
 fn acquisition_does_not_rollback_a_preexisting_reader_transaction() -> TestResult {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("preexisting-reader.sqlite");
