@@ -117,10 +117,11 @@ fn sqlite_compare_budget_cases(access: SqliteReplayAccess) -> Fallible<()> {
         totals.1 += rows;
         totals.2 += visits;
     }
-    let (bytes, rows, visits) = totals;
+    let (bytes, arm_rows, visits) = totals;
+    let rows = arm_rows + 1;
     // SQLite admission lookups select only this child, unlike Memory's scan
     // over every import row. Both complete per-arm budgets are still charged.
-    assert_eq!((rows, visits), (248, 24));
+    assert_eq!((rows, visits), (381, 42));
     for (bytes, rows, visits, succeeds) in [
         (bytes, rows, visits, true),
         (bytes + 1, rows, visits, true),

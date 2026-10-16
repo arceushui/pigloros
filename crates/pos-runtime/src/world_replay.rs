@@ -5,6 +5,8 @@
 //! The runtime owns the installed verifier boundary and the opaque verified
 //! result used by protected Replay, Snapshot, and comparison operations.
 
+use std::sync::Arc;
+
 use pos_core::{
     store::{EventReadBounds, SeqRange},
     world_consumer_set::{validate_consumer_id_selection, validate_optional_view_selection},
@@ -77,6 +79,165 @@ pub enum WorldReplayVerificationErrorV1 {
     /// The verified evidence does not support authoritative use.
     #[error("World Replay evidence does not support authoritative use")]
     ClaimUnavailable,
+}
+
+/// Structural selection for preparing installed policy before any Store read.
+///
+/// Unlike a head-bound use, an intent contains no observed logical head and
+/// grants no claim or release authority (ADR-118).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorldReplayReadIntentV1 {
+    timeline_id: TimelineId,
+    operation: ErasureProtectedOperationV1,
+    range: SeqRange,
+    consumer_ids: Vec<String>,
+    requested_optional_view_roots: Vec<Hash>,
+}
+
+impl WorldReplayReadIntentV1 {
+    /// Canonicalize structural selections without reading an unobserved head.
+    ///
+    /// # Errors
+    /// Rejects inverted bounded ranges and invalid consumer or view selections.
+    pub fn new(
+        timeline_id: TimelineId,
+        operation: ErasureProtectedOperationV1,
+        range: SeqRange,
+        mut consumer_ids: Vec<String>,
+        mut requested_optional_view_roots: Vec<Hash>,
+    ) -> Result<Self, WorldReplayVerificationErrorV1> {
+        consumer_ids.sort_unstable();
+        requested_optional_view_roots.sort_unstable_by_key(|root| *root.as_bytes());
+        let valid_range = range.to.is_none_or(|to| range.from <= to);
+        if valid_range
+            && validate_consumer_id_selection(&consumer_ids).is_ok()
+            && validate_optional_view_selection(&requested_optional_view_roots).is_ok()
+        {
+            Ok(Self {
+                timeline_id,
+                operation,
+                range,
+                consumer_ids,
+                requested_optional_view_roots,
+            })
+        } else {
+            Err(WorldReplayVerificationErrorV1::RequestMismatch)
+        }
+    }
+
+    /// The selected Timeline, not an observed native coordinate.
+    #[must_use]
+    pub const fn timeline_id(&self) -> TimelineId {
+        self.timeline_id
+    }
+
+    /// The protected operation whose gates must remain held.
+    #[must_use]
+    pub const fn operation(&self) -> ErasureProtectedOperationV1 {
+        self.operation
+    }
+
+    /// The inclusive logical range to observe after preparation.
+    #[must_use]
+    pub const fn range(&self) -> SeqRange {
+        self.range
+    }
+
+    /// The canonical consumer selection.
+    #[must_use]
+    pub fn consumer_ids(&self) -> &[String] {
+        &self.consumer_ids
+    }
+
+    /// The canonical optional-view selection.
+    #[must_use]
+    pub fn requested_optional_view_roots(&self) -> &[Hash] {
+        &self.requested_optional_view_roots
+    }
+
+    pub(crate) fn is_covered_by(&self, closure: &WorldReplayClosureV1) -> bool {
+        selection_is_covered_by(
+            self.timeline_id,
+            &self.consumer_ids,
+            &self.requested_optional_view_roots,
+            closure,
+        )
+    }
+
+    pub(crate) fn matches_use(&self, requested: &WorldReplayUseV1) -> bool {
+        self.timeline_id == requested.timeline_id
+            && self.operation == requested.operation
+            && self.range == requested.range
+            && self.consumer_ids == requested.consumer_ids
+            && self.requested_optional_view_roots == requested.requested_optional_view_roots
+    }
+}
+
+/// Installed read policy bound to its exact verifier allocation and generation.
+///
+/// Only the host constructs this value. It is not a verified claim, cannot be
+/// cloned into a detached authority token, and performs no native cleanup on drop.
+pub struct PreparedWorldReplayReadV1 {
+    closure_digest: Hash,
+    intent: WorldReplayReadIntentV1,
+    generation: ErasureReferenceV1,
+    owner: Arc<dyn WorldReplayVerifierV1>,
+    read_bounds: EventReadBounds,
+    fork_read_limits: ForkReplayReadLimitsV1,
+}
+
+impl PreparedWorldReplayReadV1 {
+    pub(crate) fn new(
+        closure: &WorldReplayClosureV1,
+        intent: WorldReplayReadIntentV1,
+        generation: ErasureReferenceV1,
+        owner: Arc<dyn WorldReplayVerifierV1>,
+        read_bounds: EventReadBounds,
+        fork_read_limits: ForkReplayReadLimitsV1,
+    ) -> Result<Self, WorldReplayVerificationErrorV1> {
+        if finite_read_bounds(read_bounds) {
+            Ok(Self {
+                closure_digest: closure.digest(),
+                intent,
+                generation,
+                owner,
+                read_bounds,
+                fork_read_limits,
+            })
+        } else {
+            Err(WorldReplayVerificationErrorV1::RequestMismatch)
+        }
+    }
+
+    /// Borrow the exact structural selection prepared by the installed owner.
+    #[must_use]
+    pub const fn intent(&self) -> &WorldReplayReadIntentV1 {
+        &self.intent
+    }
+
+    /// The installed arm-specific Event envelope.
+    #[must_use]
+    pub const fn read_bounds(&self) -> EventReadBounds {
+        self.read_bounds
+    }
+
+    /// The installed operation-wide cumulative ceilings.
+    #[must_use]
+    pub const fn fork_read_limits(&self) -> ForkReplayReadLimitsV1 {
+        self.fork_read_limits
+    }
+
+    pub(crate) const fn closure_digest(&self) -> Hash {
+        self.closure_digest
+    }
+
+    pub(crate) const fn generation(&self) -> ErasureReferenceV1 {
+        self.generation
+    }
+
+    pub(crate) fn owner(&self) -> &Arc<dyn WorldReplayVerifierV1> {
+        &self.owner
+    }
 }
 
 /// Exact protected use presented to the installed World Replay verifier.
@@ -178,21 +339,35 @@ impl WorldReplayUseV1 {
     /// bound by the installed verifier, whose result must echo this exact use,
     /// and by protected reads, which require the logical head to be unchanged.
     pub(crate) fn is_covered_by(&self, closure: &WorldReplayClosureV1) -> bool {
-        self.timeline_id == closure.timeline_id()
-            && self.consumer_ids.iter().all(|requested| {
-                closure
-                    .consumer_set()
-                    .consumers()
-                    .iter()
-                    .any(|recorded| recorded.consumer_id() == requested)
-            })
-            && self.requested_optional_view_roots.iter().all(|requested| {
-                closure
-                    .consumer_set()
-                    .optional_view_roots()
-                    .contains(requested)
-            })
+        selection_is_covered_by(
+            self.timeline_id,
+            &self.consumer_ids,
+            &self.requested_optional_view_roots,
+            closure,
+        )
     }
+}
+
+fn selection_is_covered_by(
+    timeline: TimelineId,
+    consumers: &[String],
+    views: &[Hash],
+    closure: &WorldReplayClosureV1,
+) -> bool {
+    timeline == closure.timeline_id()
+        && consumers.iter().all(|requested| {
+            closure
+                .consumer_set()
+                .consumers()
+                .iter()
+                .any(|recorded| recorded.consumer_id() == requested)
+        })
+        && views.iter().all(|requested| {
+            closure
+                .consumer_set()
+                .optional_view_roots()
+                .contains(requested)
+        })
 }
 
 /// An opaque host-issued World Replay result.
@@ -272,13 +447,7 @@ impl VerifiedWorldReplayV1 {
     }
 
     pub(crate) fn has_finite_read_bounds(&self) -> bool {
-        let bounds = self.read_bounds;
-        finite_usize(bounds.max_payload_bytes())
-            && finite_usize(bounds.max_event_type_bytes())
-            && finite_usize(bounds.max_fork_depth())
-            && finite_usize(bounds.max_events())
-            && finite_usize(bounds.max_total_bytes())
-            && finite_u64(bounds.max_elapsed_micros())
+        finite_read_bounds(self.read_bounds)
             && self
                 .fork_source_profile
                 .is_some_and(|profile| profile != Hash::zero())
@@ -318,6 +487,15 @@ const fn finite_usize(value: usize) -> bool {
 
 const fn finite_u64(value: u64) -> bool {
     value != 0 && value != u64::MAX
+}
+
+fn finite_read_bounds(bounds: EventReadBounds) -> bool {
+    finite_usize(bounds.max_payload_bytes())
+        && finite_usize(bounds.max_event_type_bytes())
+        && finite_usize(bounds.max_fork_depth())
+        && finite_usize(bounds.max_events())
+        && finite_usize(bounds.max_total_bytes())
+        && finite_u64(bounds.max_elapsed_micros())
 }
 
 /// Construct a verified result for an explicitly enabled downstream seam
@@ -464,6 +642,20 @@ pub fn test_verified_world_replay_with_authorized_views(
 /// The concrete native verifier and its minting path are owned by Redmine
 /// #396 and #397.
 pub trait WorldReplayVerifierV1: Send + Sync {
+    /// Select immutable installed policy before any native Store access.
+    ///
+    /// This structural selection performs no native/artifact/network I/O,
+    /// signing, clock acquisition or materialization and grants no claim.
+    ///
+    /// # Errors
+    /// Rejects unsupported policy, structural selection or generation.
+    fn read_profile(
+        &self,
+        closure: &WorldReplayClosureV1,
+        intent: &WorldReplayReadIntentV1,
+        inventory_generation: ErasureReferenceV1,
+    ) -> Result<(EventReadBounds, ForkReplayReadLimitsV1), WorldReplayVerificationErrorV1>;
+
     /// Verify the complete native closure against the installed generation.
     ///
     /// # Errors
@@ -493,6 +685,61 @@ mod tests {
                     "unexpected World Replay fixture error: {error:?}"
                 )))
             })
+        }
+    }
+
+    #[test]
+    fn read_intent_canonicalizes_structural_selection_without_observing_a_head() {
+        let closure = WorldReplayClosureV1::test_fixture().test_ok();
+        let root = closure.consumer_set().optional_view_roots()[0];
+        let range = SeqRange::bounded(Seq::from_u64(2), Seq::from_u64(3));
+        let intent = WorldReplayReadIntentV1::new(
+            closure.timeline_id(),
+            ErasureProtectedOperationV1::Read,
+            range,
+            vec!["count".to_owned()],
+            vec![root],
+        )
+        .test_ok();
+        assert_eq!(intent.timeline_id(), closure.timeline_id());
+        assert_eq!(intent.operation(), ErasureProtectedOperationV1::Read);
+        assert_eq!(intent.range(), range);
+        assert_eq!(intent.consumer_ids(), &["count".to_owned()]);
+        assert_eq!(intent.requested_optional_view_roots(), &[root]);
+        assert_eq!(intent.clone(), intent);
+        let observed = WorldReplayUseV1::new(
+            intent.timeline_id(),
+            intent.operation(),
+            intent.range(),
+            Seq::from_u64(3),
+            intent.consumer_ids().to_vec(),
+            intent.requested_optional_view_roots().to_vec(),
+        )
+        .test_ok();
+        assert_eq!(observed.source_logical_head(), Seq::from_u64(3));
+        for (range, consumers, views) in [
+            (
+                SeqRange::bounded(Seq::from_u64(3), Seq::from_u64(2)),
+                vec!["count".to_owned()],
+                Vec::new(),
+            ),
+            (
+                SeqRange::all(),
+                vec!["count".to_owned(), "count".to_owned()],
+                Vec::new(),
+            ),
+            (SeqRange::all(), vec!["count".to_owned()], vec![root, root]),
+        ] {
+            assert_eq!(
+                WorldReplayReadIntentV1::new(
+                    closure.timeline_id(),
+                    ErasureProtectedOperationV1::Read,
+                    range,
+                    consumers,
+                    views,
+                ),
+                Err(WorldReplayVerificationErrorV1::RequestMismatch)
+            );
         }
     }
 
