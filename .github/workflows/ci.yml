@@ -1405,6 +1405,8 @@ jobs:
         run: python scripts/test_ci_workflow_policy.py
       - name: Test ignored-test summary checker
         run: python scripts/test_assert_no_ignored_in_test_summary.py
+      - name: Test mutation workflow policy
+        run: python scripts/test_mutation_workflow_policy.py
       - name: Check ASan CI policy
         run: bash scripts/check-asan-ci-policy.sh
       - name: Test ASan CI policy checker
