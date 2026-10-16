@@ -1263,7 +1263,7 @@ mod tests {
     }
 
     #[test]
-    fn public_replay_refuses_a_missing_native_timeline_with_matching_authority() {
+    fn public_replay_preserves_containment_refusal_for_an_unknown_timeline() {
         let fixture = count_fixture();
         let mut host = crate::test_support::open_exact_host();
         let entity = EntityId::new();
@@ -1276,6 +1276,12 @@ mod tests {
         let closure = crate::test_support::closure_for_host(&mut host, timeline);
         let gate = host.containment_gate();
         let missing = TimelineId::new();
+        // Matching closure metadata does not put an unknown Timeline into the
+        // host's recovered inventory. Containment must refuse before reading it.
+        assert_eq!(
+            gate.authorize(missing, ErasureProtectedOperationV1::Read),
+            Err(pos_core::ErasureContainmentErrorV1::RecoveryUnavailable)
+        );
         let absent = WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
             missing,
             pos_core::Hash::from_bytes(gate.inventory_generation().test_ok().digest()),
@@ -1286,10 +1292,11 @@ mod tests {
         replay_with(&fixture, &mut reads, timeline, &mut registry, &closure).test_ok();
         assert_eq!(count_for(&registry, timeline, &entity), 1);
         let before = registry.retained_state_for_test();
-        assert!(matches!(
-            replay_with(&fixture, &mut reads, missing, &mut registry, &absent),
-            Err(CoreError::ArtifactUnavailable)
-        ));
+        let refused = replay_with(&fixture, &mut reads, missing, &mut registry, &absent);
+        assert!(
+            matches!(refused, Err(CoreError::ErasureContainmentUnavailable)),
+            "unknown Timeline lost its containment refusal: {refused:?}"
+        );
         assert_eq!(registry.retained_state_for_test(), before);
         replay_with(&fixture, &mut reads, timeline, &mut registry, &closure).test_ok();
         assert_eq!(count_for(&registry, timeline, &entity), 1);
