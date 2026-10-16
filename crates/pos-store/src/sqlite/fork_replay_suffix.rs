@@ -611,6 +611,89 @@ mod tests {
     }
 
     #[test]
+    fn native_event_id_redaction_refuses_suffix_length_before_materialization() -> Fallible<()> {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        for held_snapshot in [false, true] {
+            let (_directory, store, world, _built) = fixture(Shape::Mixed)?;
+            let key = world.child_at(0)?.id.to_string();
+            let expected = next_row(
+                &store.conn,
+                &key,
+                None,
+                &mut NativeReadContextV1::ordinary(),
+            )?
+            .ok_or("fixture suffix row")?;
+            let (_, (_, _, fop)) = &expected;
+            let bytes = ulid::ULID_LEN + fop.as_ref().ok_or("fixture FOP1")?.len();
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            // The ignored Event ID prevents the FOP join from matching: one
+            // failed probe row, then four rows for the complete healthy retry.
+            let limits = ForkReplayReadLimitsV1::new(1, 1, 5, bytes, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            if held_snapshot {
+                store.conn.execute_batch("BEGIN DEFERRED")?;
+            }
+            let ignored_reads = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&ignored_reads);
+            // Backend-private driver contract, not a production authorizer:
+            // SQLite substitutes NULL in the unchanged indexed probe query.
+            store
+                .conn
+                .authorizer(Some(move |request: AuthContext<'_>| {
+                    if let AuthAction::Read {
+                        table_name: "events",
+                        column_name: "event_id",
+                    } = request.action
+                    {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        Authorization::Ignore
+                    } else {
+                        Authorization::Allow
+                    }
+                }))?;
+            let failed = next_row(
+                &store.conn,
+                &key,
+                None,
+                &mut NativeReadContextV1::protected(&mut budget),
+            );
+            store
+                .conn
+                .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+            // typeof, length(CAST(... AS BLOB)), and the FOP join each read
+            // this column. Remove the policy before assertions or retry SQL.
+            assert_eq!(ignored_reads.load(Ordering::SeqCst), 3);
+            assert_eq!(failed, Err(Error::CorruptAuthority));
+            assert_eq!(budget.remaining_native_bytes(), bytes);
+            budget.check_time()?;
+            assert_eq!(
+                next_row(
+                    &store.conn,
+                    &key,
+                    None,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                )?,
+                Some(expected),
+            );
+            assert_eq!(budget.remaining_native_bytes(), 0);
+            budget.check_time()?;
+            assert!(budget.charge_rows(1).is_err());
+            assert!(budget.check_time().is_err());
+            if held_snapshot {
+                store.conn.execute_batch("ROLLBACK")?;
+            }
+            assert!(store.conn.is_autocommit());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn complete_suffix_batches_keep_original_guard_expiry_and_regression() -> Fallible<()> {
         let (_directory, store, world, built) = fixture(Shape::Mixed)?;
         let child = world.child_at(0)?.id;
