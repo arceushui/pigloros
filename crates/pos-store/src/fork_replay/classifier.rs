@@ -69,7 +69,7 @@ impl NativeReadContextV1<'_, '_> {
                 return Err(Error::PublicationConflict);
             }
             let text = routes
-                .take(usize::try_from(length).map_err(|_| Error::PublicationConflict)?)
+                .take_encoded(length)
                 .ok_or(Error::PublicationConflict)?;
             self.bytes(text.len())?;
             if routes.head() != Some((2, 32)) {
