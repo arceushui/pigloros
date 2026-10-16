@@ -4862,6 +4862,8 @@ const fn is_non_poisoning_transition_error(error: ErasureErrorV1) -> bool {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    mod world_replay_boundaries;
+
     use pos_core::{
         geo_admission::GeoLocationAdmissionInputV1, AppendDedupKey, CanonicalBytes,
         ConsentAuthority, ConsentGrantedV1, ConsentRevokedV1, EntityId,
