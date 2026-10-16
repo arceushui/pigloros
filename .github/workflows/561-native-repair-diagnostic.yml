@@ -107,7 +107,8 @@ jobs:
             cargo llvm-cov -p pos-store --all-features --locked --lib \
             --json --output-path artifacts/coverage.json \
             -- --include-ignored 2>&1 | tee artifacts/coverage-test.log
-          grep -F 'test result: ok. 1107 passed; 0 failed; 0 ignored;' artifacts/coverage-test.log
+          # Exact standalone source inventory, not the PR synthetic merge tree.
+          grep -F 'test result: ok. 1097 passed; 0 failed; 0 ignored;' artifacts/coverage-test.log
           bash scripts/assert-no-ignored-in-test-summary.sh artifacts/coverage-test.log
           python3 - <<'PY' | tee artifacts/target-regions.json
           import json
