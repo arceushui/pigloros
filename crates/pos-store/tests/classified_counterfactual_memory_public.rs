@@ -25,8 +25,8 @@ use pos_core::{
     CounterfactualDependencyReadPortV1, CounterfactualInvalidationOutcomeV1,
     CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1,
     DependencyPageRequestV1, DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, EventDraft,
-    EventStore, Hash, InvalidationConflictV1, Kind, PipelineDraftBatchV1, RecordedNodeOriginV1, Seq,
-    SeqRange, TickDependencyRecordV1, TimelineId, WallTime, MAX_DEPENDENCY_PAGE_ROWS_V1,
+    EventStore, Hash, InvalidationConflictV1, Kind, PipelineDraftBatchV1, RecordedNodeOriginV1,
+    Seq, SeqRange, TickDependencyRecordV1, TimelineId, WallTime, MAX_DEPENDENCY_PAGE_ROWS_V1,
     MAX_PIPELINE_DRAFT_BATCH_BYTES,
 };
 use pos_store::memory::MemoryStore;
@@ -580,8 +580,8 @@ fn a_later_tick_checks_the_basis_before_the_record_rules() -> Fallible<()> {
 
 /// Pins existing ADR-099 behaviour, not a counterfactual-path rule:
 /// `delete_timeline` keeps a classified Fork's FAR1, classifier, EOR1, and
-/// FOP1 rows, so a re-created Fork ID resumes at its generation floor and a
-/// base that re-derives its old operation IDs is refused.
+/// FOP1 rows, so a re-created Fork ID resumes at its generation floor but
+/// cannot append through the classified path.
 #[test]
 fn a_recreated_fork_resumes_at_its_floor_and_refuses_its_old_operations() -> Fallible<()> {
     let mut world = world()?;
@@ -602,10 +602,21 @@ fn a_recreated_fork_resumes_at_its_floor_and_refuses_its_old_operations() -> Fal
         ..Spec::new(fork)
     };
     let record = node_record(FIRST_TICK, "a", 1)?;
-    // The orphan-operation guard: a base that re-derives the first
+    // Step 8, the orphan-operation guard: a base that re-derives the first
     // generation's operation IDs finds their retained FOP1 rows.
     let committed = world.commit(&next, &record)?;
     assert_eq!(committed, Err(CORRUPT_AUTHORITY), "old IDs retained");
+    // Step 9, the staging: a fresh base passes step 8, but the retained FOP1
+    // rows still hold the Fork's logical Seqs, so the staged Events are
+    // refused as `SQLite` refuses them through `UNIQUE (child_id, local_seq)`.
+    let permit = world.host_permit()?;
+    let lent = world.authority.lend(&permit);
+    let fresh = commit_at(&mut world.store, &lent, &next, &record, hash(0x63))?;
+    assert_eq!(fresh, Err(CORRUPT_AUTHORITY), "logical Seqs held");
+    // The validating suffix read refuses the retained rows, so the snapshot
+    // is the basis, the generation, and the own Events.
+    let generation = world.store.current_fork_generation(fork)?.generation;
+    assert_eq!(generation, 1, "no generation was written");
     let after = world.store.current_counterfactual_basis(fork)?;
     assert_eq!(after, before, "nothing was written");
     let own = world.store.read_own(fork, SeqRange::all())?;

@@ -17,13 +17,21 @@
 //! dependency rows only after every fallible step succeeded, so atomicity is
 //! structural: a rejection leaves no Event, provenance, generation, or
 //! dependency row.
+//!
+//! One error precedence differs from `SQLite`, which builds each draft's
+//! `FEQ1` and inserts its Event before the next draft: Memory stages every
+//! Event first and then derives the provenance. Only a batch whose draft `i`
+//! has an invalid request and whose later draft `j > i` fails Event staging
+//! reports differently (Memory reports the staging failure); no test pins it.
+
+use std::collections::HashSet;
 
 use pos_core::{
-    CounterfactualBasisV1, CounterfactualInvalidationCommandV1, CounterfactualInvalidationOutcomeV1,
-    CounterfactualTickOutcomeV1, ErasureProtectedOperationV1, ForkAppendSourceIdentityV1,
-    ForkClassifiedEventV1, ForkClassifiedProvenanceV1, ForkClassifierTableV1,
-    ForkEventAppendRequestV1, ForkEventClassifierV1, Hash, PipelineDraftBatchV1,
-    TickDependencyRecordV1, TimelineId,
+    CounterfactualBasisV1, CounterfactualInvalidationCommandV1,
+    CounterfactualInvalidationOutcomeV1, CounterfactualTickOutcomeV1, ErasureProtectedOperationV1,
+    EventOriginRecordV1, ForkAppendOperationV1, ForkAppendSourceIdentityV1, ForkClassifiedEventV1,
+    ForkClassifiedProvenanceV1, ForkClassifierTableV1, ForkEventAppendRequestV1,
+    ForkEventClassifierV1, Hash, PipelineDraftBatchV1, TickDependencyRecordV1, TimelineId,
 };
 
 use super::{fenced_result, ForkEntriesV1, StagedProvenanceV1, StagedTickV1};
@@ -33,9 +41,9 @@ use crate::fork_event_authority::{
 };
 use crate::memory::MemoryStore;
 use crate::{
-    counterfactual_port_error, ClassifiedCounterfactualErrorV1, ClassifiedCounterfactualStorePortV1,
-    ClassifiedProvenanceErrorV1, ClassifiedTickAuthorityV1, ForkAdmissionAuthoritySessionV1,
-    ForkAppendSourcePermitV1, ForkEventAuthorityErrorV1,
+    counterfactual_port_error, ClassifiedCounterfactualErrorV1,
+    ClassifiedCounterfactualStorePortV1, ClassifiedProvenanceErrorV1, ClassifiedTickAuthorityV1,
+    ForkAdmissionAuthoritySessionV1, ForkAppendSourcePermitV1, ForkEventAuthorityErrorV1,
 };
 
 type ClassifiedError = ClassifiedCounterfactualErrorV1;
@@ -135,7 +143,7 @@ impl MemoryStore {
     fn memory_reject_orphan_operations(&self, operations: &[Hash]) -> Result<(), ClassifiedError> {
         let orphan = operations
             .iter()
-            .any(|operation| self.fork_append_operations.contains_key(operation));
+            .any(|id| self.fork_append_operations.contains_key(id));
         if orphan {
             Err(CORRUPT_AUTHORITY)
         } else {
@@ -168,7 +176,8 @@ fn memory_stage_classified_batch(
     drafts: &PipelineDraftBatchV1,
 ) -> Staged {
     let staged = entries.stage_events(drafts).map_err(ClassifiedError::from);
-    staged.and_then(|tick| {
+    let free = staged.and_then(|tick| reject_occupied_seqs(entries, tick));
+    free.and_then(|tick| {
         let provenance: Result<Vec<_>, ForkEventAuthorityErrorV1> = tick
             .logical_events()
             .zip(checked.operations.iter().zip(drafts.drafts()))
@@ -186,6 +195,38 @@ fn memory_stage_classified_batch(
     })
 }
 
+/// Refuse the batch when a staged Event's logical `Seq` already holds a `FOP1`
+/// or `EOR1` of the Fork.
+///
+/// A deleted and re-created Fork keeps the provenance of its old Events, so
+/// its new Events can reach the same logical `Seq`; `SQLite` refuses them
+/// through `UNIQUE (child_id, local_seq)`, and so does this check, before
+/// anything is installed.
+fn reject_occupied_seqs(entries: &ForkEntriesV1<'_>, tick: StagedTickV1) -> Staged {
+    let fork = entries.fork;
+    let operations = entries
+        .fork_append_operations
+        .values()
+        .map(ForkAppendOperationV1::input)
+        .filter(|input| input.child_timeline_id == fork)
+        .map(|input| input.logical_seq);
+    let origins = entries
+        .fork_event_origins
+        .values()
+        .map(EventOriginRecordV1::input)
+        .filter(|input| input.fork_timeline_id == fork)
+        .map(|input| input.logical_seq);
+    let held: HashSet<u64> = operations.chain(origins).collect();
+    let occupied = tick
+        .logical_events()
+        .any(|event| held.contains(&event.logical_seq));
+    if occupied {
+        Err(CORRUPT_AUTHORITY)
+    } else {
+        Ok(tick)
+    }
+}
+
 /// Classify the request's source and derive the `EOR1` and `FOP1` of one
 /// staged Event.
 ///
@@ -198,6 +239,8 @@ fn staged_provenance(
     let classified = ForkEventClassifierV1::from_table(table)
         .classify_identity(&request.source)
         .or(Err(ForkEventAuthorityErrorV1::ClassifierRejected));
+    // A host-internal `(0,0)` source never yields an `FIA1`, so the derived
+    // intervention is always absent and none is staged.
     classified
         .and_then(|classification| {
             ForkClassifiedProvenanceV1::derive(request, table, classification, event)
@@ -271,7 +314,9 @@ mod tests {
     use super::super::tests::{inject, snapshot, ForkSnapshot};
     use super::super::InjectedFaultV1;
     use super::{ClassifiedError, CORRUPT_AUTHORITY, UNAUTHENTICATED};
-    use crate::classified_fork_fixture::{hash, node_record, Authority, Fallible, Spec, FIRST_TICK};
+    use crate::classified_fork_fixture::{
+        hash, node_record, Authority, Fallible, Spec, FIRST_TICK,
+    };
     use crate::memory::MemoryStore;
     use crate::{ClassifiedCounterfactualStorePortV1, ForkAppendSourcePermitV1};
 

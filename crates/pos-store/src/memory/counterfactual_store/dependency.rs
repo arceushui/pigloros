@@ -1015,10 +1015,10 @@ mod tests {
 
     use pos_core::counterfactual_store::test_fixtures::{hash_field, text_field, uint};
     use pos_core::{
-        CounterfactualStorePortV1, DependencyNodeCoordinateV1, ErasureContainmentGateV1, EventStore,
-        ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionOriginV1, OwnerIdV1,
-        RecordedDependencyClassV1, RecordedNodeOriginV1, Seq, MAX_RECORDED_DEPENDENCY_EDGES_V1,
-        MAX_RECORDED_DEPENDENCY_NODES_V1,
+        CounterfactualStorePortV1, DependencyNodeCoordinateV1, ErasureContainmentGateV1,
+        EventStore, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAttributionOriginV1,
+        OwnerIdV1, RecordedDependencyClassV1, RecordedNodeOriginV1, Seq,
+        MAX_RECORDED_DEPENDENCY_EDGES_V1, MAX_RECORDED_DEPENDENCY_NODES_V1,
     };
 
     use super::super::tests::{command, draft, facts, inject, ok, published_store, snapshot};
