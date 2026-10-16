@@ -200,7 +200,8 @@
 //! - **Purge.** Not an obligation of this contract yet. Deleting a Fork purges
 //!   its generation rows with the rest of its counterfactual state (#530), and
 //!   its reads then return `ForkNotFound`. A re-created Fork id starts with an
-//!   empty set.
+//!   empty set. A classified (ADR-099) Fork's provenance rows survive the
+//!   deletion, so a re-created classified Fork id cannot append (Redmine #645).
 //! - **Error mapping.** Map [`CounterfactualDependencyErrorV1`] to the storage
 //!   error with `CounterfactualStoreErrorV1::from`: `InvalidEncoding` for
 //!   encoding and unknown-enum faults, `FieldOutOfBounds` for bounds,
