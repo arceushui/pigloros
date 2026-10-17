@@ -1,0 +1,152 @@
+# Paired compiler-cost experiment, not a replacement mutation gate.
+name: 561-mutation-incremental-probe
+
+on:
+  push:
+    branches: [redmine/561-mutation-incremental-probe]
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: nightly-2026-07-01
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: "1"
+  CARGO_TERM_COLOR: never
+  RUSTFLAGS: -D warnings
+
+jobs:
+  warm-builds:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        incremental: ["0", "1"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          ref: bb69188dc7f152653bb64e64916e2e8ff9c5c73f
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        timeout-minutes: 5
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        timeout-minutes: 2
+        with:
+          shared-key: mutation
+          save-if: false
+      - name: Compare native Store rebuilds without reducing its tests
+        timeout-minutes: 25
+        env:
+          # Step scope overrides the cache action's unconditional export of 0.
+          CARGO_INCREMENTAL: ${{ matrix.incremental }}
+          EXPECTED_INCREMENTAL: ${{ matrix.incremental }}
+          PROBE_WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = bb69188dc7f152653bb64e64916e2e8ff9c5c73f
+          test -z "$(git status --porcelain --untracked-files=no)"
+          mkdir -p artifacts/incremental
+          {
+            rustc -Vv
+            cargo --version
+            uname -a
+            nproc
+            free -m
+            df -h .
+            printf 'image=%s version=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+          } > artifacts/incremental/environment.txt
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import time
+
+          artifact = Path("artifacts/incremental")
+          source = Path("crates/pos-store/src/fork_replay.rs")
+          original = source.read_bytes()
+          assert subprocess.check_output(["git", "hash-object", str(source)], text=True).strip() == "4cdc9e77e651e415c7426905e13af1077f8c26b6"
+          assert os.environ["CARGO_INCREMENTAL"] == os.environ["EXPECTED_INCREMENTAL"]
+          assert os.environ["CARGO_INCREMENTAL"] in ("0", "1")
+          needle = b".fold(0_u64, |value, byte| (value << 8) + u64::from(*byte));"
+          assert original.count(needle) == 1
+          # These disjoint-bit concatenations are mathematically equal for the
+          # existing 1/2/4/8-byte bound. They exercise distinct warm edits, not
+          # a reduced test inventory or a proposed product representation.
+          variants = [("addition", original)] + [
+              (name, original.replace(needle, needle.replace(b" + ", operator)))
+              for name, operator in (("or", b" | "), ("xor", b" ^ "))
+          ]
+          command = [
+              "cargo", "test", "--package", "pos-store", "--all-features", "--locked", "--",
+              "-Zunstable-options", "--fail-fast", "--include-ignored", "--test-threads=2",
+          ]
+
+          def inventory(text):
+              result = []
+              target = None
+              for line in text.splitlines():
+                  if re.match(r"\s*(Running |Doc-tests )", line):
+                      target = re.sub(r"-[0-9a-f]{16}(?=\))", "-HASH", line.strip())
+                  match = re.fullmatch(
+                      r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; "
+                      r"(\d+) measured; (\d+) filtered out; finished in ([0-9.]+)s", line,
+                  )
+                  if match:
+                      assert target is not None
+                      passed, failed, ignored, measured, filtered, _ = match.groups()
+                      assert [int(value) for value in (failed, ignored, measured, filtered)] == [0, 0, 0, 0]
+                      result.append([target, int(passed)])
+              assert result and sum(row[1] for row in result) > 0
+              return result
+
+          report = {
+              "feature_source": "bb69188dc7f152653bb64e64916e2e8ff9c5c73f",
+              "workflow_source": os.environ["PROBE_WORKFLOW_SHA"],
+              "incremental": os.environ["CARGO_INCREMENTAL"],
+              "command": command, "samples": [],
+          }
+          expected_inventory = None
+          try:
+              for name, contents in variants:
+                  source.write_bytes(contents)
+                  started = time.monotonic()
+                  with (artifact / f"{name}.log").open("wb") as log:
+                      completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=720)
+                  text = (artifact / f"{name}.log").read_text()
+                  sample = {
+                      "variant": name, "source_sha256": hashlib.sha256(contents).hexdigest(),
+                      "seconds": time.monotonic() - started, "exit_code": completed.returncode,
+                      "compile_summaries": [line for line in text.splitlines() if "Finished " in line and "target(s)" in line],
+                  }
+                  report["samples"].append(sample)
+                  (artifact / "report.json").write_text(json.dumps(report, sort_keys=True, indent=2))
+                  assert completed.returncode == 0, "native Store tests failed"
+                  observed = inventory(text)
+                  if expected_inventory is None:
+                      expected_inventory = observed
+                  assert observed == expected_inventory, "native target/test-count inventory changed"
+                  sample["inventory"] = observed
+                  (artifact / "report.json").write_text(json.dumps(report, sort_keys=True, indent=2))
+          finally:
+              source.write_bytes(original)
+          assert len(report["samples"]) == 3
+          subprocess.run(["git", "diff", "--exit-code", "HEAD"], check=True)
+          print(json.dumps(report, sort_keys=True))
+          PY
+      - name: Retain every untrusted timing and native-test log
+        if: ${{ always() }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: untrusted-561-incremental-${{ matrix.incremental }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/incremental/
+          if-no-files-found: error
+          retention-days: 14
