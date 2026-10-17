@@ -91,12 +91,16 @@ jobs:
           observer_pid=$!
           stop_observer() {
             local status=0
+            local stop_sent=false
             if kill -0 "$observer_pid" 2>/dev/null; then
-              kill "$observer_pid"
+              if kill "$observer_pid"; then
+                stop_sent=true
+              fi
             fi
             wait "$observer_pid" || status=$?
             # SIGTERM is our deliberate observer teardown, not a Cargo status.
-            if [[ "$status" -ne 143 ]]; then
+            # An observer that died before our teardown must never be accepted.
+            if [[ "$stop_sent" != true || "$status" -ne 143 ]]; then
               echo "ERROR: resource observer stopped unexpectedly: $status" >&2
               return 1
             fi
