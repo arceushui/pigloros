@@ -390,10 +390,10 @@ impl<S: FallbackStore> Scenario<S> {
             .get(ENTRY)
             .ok_or("no recorded entry")?;
         let digest = entry.effective_digest();
-        let named = members
+        let matched = members
             .iter()
             .find(|(_, member)| member.key().digest() == digest);
-        let name = named.map_or("unknown", |(name, _)| *name);
+        let name = matched.map_or("unknown", |(name, _)| *name);
         let (tenure, chain) = (entry.tenure_ordinal(), entry.chain_position());
         Ok(format!("{tenure}/{chain}/{name}"))
     }
@@ -411,6 +411,7 @@ fn refusal(error: &FallbackDeclareErrorV1) -> String {
             format!("InvalidFallbackPolicy({:?})", invalid.field)
         }
         FallbackDeclareErrorV1::FactsMismatch { .. } => "FactsMismatch".to_owned(),
+        FallbackDeclareErrorV1::PrimaryNotEffective { .. } => "PrimaryNotEffective".to_owned(),
         other => format!("{other:?}"),
     }
 }
@@ -463,7 +464,7 @@ fn extra_capability() -> PluginCapabilityDescriptorV1 {
 const RULES: [Variant; 13] = [
     Variant {
         key: "rule.identity",
-        edit: |facts| facts.execution.plugin_id = "acme.elsewhere".to_owned(),
+        edit: |facts| "acme.elsewhere".clone_into(&mut facts.execution.plugin_id),
         ..VALID
     },
     Variant {
@@ -755,7 +756,7 @@ fn rebase<S: FallbackStore>(capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let primary = member(PRIMARY, PluginId::new())?;
     let candidate = member(CANDIDATE, PluginId::new())?;
     let next = member(NEXT, PluginId::new())?;
-    let named = [
+    let roster = [
         ("primary", &primary),
         ("candidate", &candidate),
         ("next", &next),
@@ -765,24 +766,24 @@ fn rebase<S: FallbackStore>(capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     capture.record("first.outcome", outcome(&first));
     let activated = scenario.activate(0, &primary, &candidate)?;
     capture.record("activation.outcome", activation(activated));
-    capture.record("activation.entry", scenario.entry_state(&named)?);
+    capture.record("activation.entry", scenario.entry_state(&roster)?);
     let previous = Some(first.row().policy_digest());
     let promoted = Plan::single(EntryPlan::of(&candidate, &[&next]), previous)?;
     let rebased = scenario.declare(&scenario.declaration(&promoted)?)?;
     capture.record("rebase.outcome", outcome(&rebased));
-    capture.record("rebase.entry", scenario.entry_state(&named)?);
+    capture.record("rebase.entry", scenario.entry_state(&roster)?);
     let continued = scenario.activate(1, &candidate, &next)?;
     capture.record("rebase.next-activation.outcome", activation(continued));
     capture.record(
         "rebase.next-activation.entry",
-        scenario.entry_state(&named)?,
+        scenario.entry_state(&roster)?,
     );
     let rebased_digest = rebased.row().policy_digest();
     let composition = composition_of(&next)?;
     let withdrawal = Plan::withdrawal(rebased_digest, composition);
     let withdrawn = scenario.declare(&scenario.declaration(&withdrawal)?)?;
     capture.record("withdrawal.outcome", outcome(&withdrawn));
-    capture.record("withdrawal.entry", scenario.entry_state(&named)?);
+    capture.record("withdrawal.entry", scenario.entry_state(&roster)?);
     let after = scenario.activate(2, &next, &primary)?;
     capture.record("withdrawal.activation", activation(after));
     let stale = Plan::single(EntryPlan::of(&next, &[&primary]), Some(rebased_digest))?;
@@ -795,6 +796,6 @@ fn rebase<S: FallbackStore>(capture: &mut StoreCapture<'_>) -> BoxResult<()> {
         "successor.naming-the-withdrawal",
         scenario.outcome(&successor),
     );
-    capture.record("successor.entry", scenario.entry_state(&named)?);
+    capture.record("successor.entry", scenario.entry_state(&roster)?);
     Ok(())
 }

@@ -212,9 +212,53 @@ fn a_candidate_that_breaks_a_rule_is_refused_with_its_field() -> TestResult {
     Ok(())
 }
 
+/// A candidate whose owned type has another schema (rule 2).
+fn schema_changed(facts: &mut FallbackEntryFactsV1) {
+    facts.candidates[0].registry.schemas = vec![Some("{}".to_owned())];
+}
+
+/// A candidate without the primary's output declarations (rule 2).
+fn outputs_dropped(facts: &mut FallbackEntryFactsV1) {
+    facts.candidates[0].registry.outputs.clear();
+}
+
+/// A candidate without the non-participant profile (rule 5).
+fn profile_dropped(facts: &mut FallbackEntryFactsV1) {
+    facts.candidates[0].registry.binding = None;
+}
+
+/// A primary whose registered pin is not the IMK1 release digest.
+fn primary_unpinned(facts: &mut FallbackEntryFactsV1) {
+    facts.primary.registry.pin = None;
+}
+
+/// The section 4.1 rules PCH1 cannot break through the facts-only path with
+/// one Plugin type, driven here through the runtime `declare`.
+const REGISTRY_FACT_RULES: [(Field, fn(&mut FallbackEntryFactsV1)); 4] = [
+    (Field::Schemas, schema_changed),
+    (Field::OutputPolicy, outputs_dropped),
+    (Field::Profile, profile_dropped),
+    (Field::ConfigurationDigest, primary_unpinned),
+];
+
+#[test]
+fn registry_fact_rules_are_refused_through_declare() -> TestResult {
+    for (field, edit) in REGISTRY_FACT_RULES {
+        let refusal = refusal_after(|world| edit_facts(world, edit))?;
+        let invalid = DeclareError::InvalidPolicy(InvalidFallbackPolicyV1 {
+            entry_key: ENTRY.to_owned(),
+            field,
+        });
+        assert_eq!(refusal, Some(invalid));
+    }
+    Ok(())
+}
+
 #[test]
 fn a_tenure_zero_primary_that_is_not_the_base_implementation_is_refused() -> TestResult {
-    let not_effective = Some(DeclareError::Registry(RegistryError::PrimaryNotEffective));
+    let not_effective = Some(DeclareError::PrimaryNotEffective {
+        entry_key: ENTRY.to_owned(),
+    });
     let other = ImplementationKeyV1::new(
         "acme.other".to_owned(),
         "1.0.0".to_owned(),
@@ -253,15 +297,20 @@ fn declaration_values_are_comparable_and_printable() -> TestResult {
     let mismatch = DeclareError::FactsMismatch {
         entry_key: ENTRY.to_owned(),
     };
+    let stale = DeclareError::PrimaryNotEffective {
+        entry_key: ENTRY.to_owned(),
+    };
     let messages = [
         DeclareError::NotGranted.to_string(),
         DeclareError::TargetNotStepped.to_string(),
         DeclareError::Record(FallbackRecordErrorV1::TooLarge).to_string(),
         mismatch.to_string(),
         DeclareError::Registry(RegistryError::Conflict).to_string(),
+        stale.to_string(),
     ];
     assert!(messages.iter().all(|message| !message.is_empty()));
     assert!(messages[3].contains(ENTRY));
+    assert!(messages[5].contains(ENTRY));
     assert!(format!("{mismatch:?}").contains(ENTRY));
     Ok(())
 }

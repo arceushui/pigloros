@@ -116,13 +116,21 @@ pub enum FallbackDeclareErrorV1 {
     /// A candidate breaks one of the section 4.1 rules.
     #[error(transparent)]
     InvalidPolicy(InvalidFallbackPolicyV1),
-    /// The composition fallback registry refused, including
-    /// `PrimaryNotEffective` for an entry it has never recorded.
+    /// A declared primary is not the implementation the registry runs for
+    /// its entry: for an entry the registry has never recorded (tenure 0),
+    /// the composer's base implementation.
+    #[error("declared primary of fallback entry '{entry_key}' is not effective")]
+    PrimaryNotEffective {
+        /// The DFP1 entry key.
+        entry_key: String,
+    },
+    /// The composition fallback registry refused, including its own
+    /// `PrimaryNotEffective` for an entry it has recorded.
     #[error("composition fallback registry refused: {0}")]
     Registry(CompositionFallbackRegistryErrorV1),
 }
 
-type Outcome<T> = Result<T, FallbackDeclareErrorV1>;
+type DeclareResult<T> = Result<T, FallbackDeclareErrorV1>;
 
 /// Declare, re-base or withdraw a fallback policy (ADR-119 section 4.3).
 ///
@@ -133,13 +141,18 @@ type Outcome<T> = Result<T, FallbackDeclareErrorV1>;
 /// each primary's host-supplied conformance profiles as the entry's
 /// conformance set; the port runs its own checks in section 4.3 order.
 ///
+/// The runtime pre-checks run before the port. A retry whose host facts
+/// changed after its commit is therefore refused here before the port could
+/// replay it; recovery after an indeterminate commit uses the port's
+/// `lookup_declaration`.
+///
 /// # Errors
 /// Returns the first refusal, as a [`FallbackDeclareErrorV1`].
 pub fn declare_composition_fallback_v1(
     registry: &mut (impl CompositionFallbackRegistryV1 + ?Sized),
     grants: &FallbackHostGrantsV1,
     declaration: &FallbackDeclarationV1,
-) -> Outcome<FallbackCommitReceiptV1> {
+) -> DeclareResult<FallbackCommitReceiptV1> {
     authorize(grants, declaration)?;
     let policy = DomainFallbackPolicyV1::from_canonical_cbor(&declaration.policy_bytes)
         .map_err(FallbackDeclareErrorV1::Record)?;
@@ -152,15 +165,18 @@ pub fn declare_composition_fallback_v1(
 }
 
 /// `Ok` when `condition` holds, otherwise `error`.
-fn require(condition: bool, error: FallbackDeclareErrorV1) -> Outcome<()> {
+fn require(condition: bool, error: FallbackDeclareErrorV1) -> DeclareResult<()> {
     condition.then_some(()).ok_or(error)
 }
 
 /// The grant, then `TargetNotStepped`.
-fn authorize(grants: &FallbackHostGrantsV1, declaration: &FallbackDeclarationV1) -> Outcome<()> {
-    let granted = grants.holds(COMPOSITION_FALLBACK_DECLARE_GRANT_V1);
+fn authorize(
+    grants: &FallbackHostGrantsV1,
+    declaration: &FallbackDeclarationV1,
+) -> DeclareResult<()> {
+    let holds_grant = grants.holds(COMPOSITION_FALLBACK_DECLARE_GRANT_V1);
     let stepped = declaration.target.timeline == declaration.stepped_timeline;
-    require(granted, FallbackDeclareErrorV1::NotGranted)
+    require(holds_grant, FallbackDeclareErrorV1::NotGranted)
         .and_then(|()| require(stepped, FallbackDeclareErrorV1::TargetNotStepped))
 }
 
@@ -168,12 +184,12 @@ fn authorize(grants: &FallbackHostGrantsV1, declaration: &FallbackDeclarationV1)
 fn validate_entries(
     declaration: &FallbackDeclarationV1,
     policy: &DomainFallbackPolicyV1,
-) -> Outcome<FallbackConformanceSetsV1> {
+) -> DeclareResult<FallbackConformanceSetsV1> {
     let sets = policy
         .entries()
         .iter()
         .map(|entry| validate_entry(declaration, entry))
-        .collect::<Outcome<BTreeMap<_, _>>>()?;
+        .collect::<DeclareResult<BTreeMap<_, _>>>()?;
     Ok(FallbackConformanceSetsV1::new(sets))
 }
 
@@ -181,7 +197,7 @@ fn validate_entries(
 fn validate_entry(
     declaration: &FallbackDeclarationV1,
     entry: &FallbackEntryV1,
-) -> Outcome<(String, BTreeSet<Hash>)> {
+) -> DeclareResult<(String, BTreeSet<Hash>)> {
     let entry_key = entry.entry_key();
     let facts = entry_facts(declaration, entry)?;
     let composition = &declaration.composition;
@@ -200,7 +216,7 @@ fn validate_entry(
 fn entry_facts<'a>(
     declaration: &'a FallbackDeclarationV1,
     entry: &FallbackEntryV1,
-) -> Outcome<&'a FallbackEntryFactsV1> {
+) -> DeclareResult<&'a FallbackEntryFactsV1> {
     declaration
         .facts
         .get(entry.entry_key())
@@ -215,13 +231,16 @@ fn entry_facts<'a>(
 fn require_effective(
     declaration: &FallbackDeclarationV1,
     policy: &DomainFallbackPolicyV1,
-) -> Outcome<()> {
-    let effective = policy
+) -> DeclareResult<()> {
+    let stale = policy
         .entries()
         .iter()
-        .all(|entry| runs_primary(&declaration.effective, entry));
-    let refusal = CompositionFallbackRegistryErrorV1::PrimaryNotEffective;
-    require(effective, FallbackDeclareErrorV1::Registry(refusal))
+        .find(|entry| !runs_primary(&declaration.effective, entry));
+    stale.map_or(Ok(()), |entry| {
+        Err(FallbackDeclareErrorV1::PrimaryNotEffective {
+            entry_key: entry.entry_key().to_owned(),
+        })
+    })
 }
 
 /// Whether the registry runs `entry`'s declared primary.
@@ -229,10 +248,9 @@ fn runs_primary(
     effective: &BTreeMap<String, ImplementationKeyV1>,
     entry: &FallbackEntryV1,
 ) -> bool {
-    let primary = entry.primary().implementation().digest();
     effective
         .get(entry.entry_key())
-        .is_some_and(|running| running.digest() == primary)
+        .is_some_and(|running| running == entry.primary().implementation())
 }
 
 /// The port request of `declaration` with the frozen `conformance` sets.

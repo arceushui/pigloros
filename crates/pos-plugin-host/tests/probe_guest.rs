@@ -7,7 +7,7 @@
 //! reserved host types the same way (#665), and `bad-digest` returns a zeroed
 //! output digest. Any other observation behaves exactly like the Rust guest.
 //!
-//! These tests prove only the guest side of `reserved` and `bad-digest`: this
+//! These tests prove only the guest side of the selectors: this
 //! crate cannot reach the registry or the real worker, so the host's
 //! `ReservedHostDraft` refusal is proven by PCF-CPH-013 and, for the ADR-119
 //! types, by PCF-CPH-017 of PCH1 version 2, and the pass that `bad-digest`
