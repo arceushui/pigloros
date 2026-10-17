@@ -84,10 +84,8 @@ const PPN1_HEADER: [u8; 7] = [0x84, 0x44, b'P', b'P', b'N', b'1', 0x01];
 pub enum FallbackFieldV1 {
     /// The IMK1 `plugin_id_text`.
     PluginId,
-    /// The IMK1 `version_text`, or a registered version that differs from it.
+    /// The IMK1 `version_text`.
     Version,
-    /// A registered pin `configuration_digest` that differs from the release digest.
-    ConfigurationDigest,
     /// The PPN1 roles: count, length or uniqueness.
     Roles,
     /// An entry key.
@@ -499,8 +497,10 @@ impl<'a> Reader<'a> {
     }
 
     fn hash(&mut self) -> Outcome<Hash> {
-        self.fixed(&[0x58, 0x20])?;
-        self.cursor.take(32).map(hash_from_slice).map_err(encoding)
+        let bytes = self.blob(2)?;
+        <[u8; 32]>::try_from(bytes)
+            .map(Hash::from_bytes)
+            .or(Err(FallbackRecordErrorV1::InvalidEncoding))
     }
 
     fn optional_hash(&mut self) -> Outcome<Option<Hash>> {
@@ -603,10 +603,6 @@ fn write_optional_hash(out: &mut Vec<u8>, hash: Option<Hash>) {
         Some(hash) => encode_hash(out, hash),
         None => out.push(0xf6),
     }
-}
-
-fn hash_from_slice(slice: &[u8]) -> Hash {
-    Hash::from_bytes(<[u8; 32]>::try_from(slice).unwrap_or([0; 32]))
 }
 
 fn domain_digest(domain: &[u8], bytes: &[u8]) -> Hash {

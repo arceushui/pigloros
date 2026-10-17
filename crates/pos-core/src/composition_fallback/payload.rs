@@ -126,7 +126,7 @@ impl FallbackDeclaredPayloadV1 {
     /// Encode the unique preferred CBOR payload.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(256);
+        let mut out = Vec::with_capacity(PAYLOAD_MAX);
         out.push(0x84);
         write_text(&mut out, &self.scope);
         encode_hash(&mut out, self.policy_digest);
@@ -231,7 +231,7 @@ impl FallbackActivatedPayloadV1 {
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
         let input = &self.0;
-        let mut out = Vec::with_capacity(1_024);
+        let mut out = Vec::with_capacity(PAYLOAD_MAX);
         out.push(0x8a);
         write_text(&mut out, &input.scope);
         encode_hash(&mut out, input.policy_digest);
@@ -293,34 +293,45 @@ fn read_rebased(reader: &mut Reader<'_>) -> Outcome<FallbackRebasedEntryV1> {
     FallbackRebasedEntryV1::new(entry_key, implementation_digest)
 }
 
-type Transition = (ImplementationKeyV1, ImplementationKeyV1, Vec<FallbackSkippedCandidateV1>);
 type TriggerFields = (FallbackTriggerCodeV1, FallbackTriggerBasisV1, u64);
 
 fn read_activated(reader: &mut Reader<'_>) -> Outcome<FallbackActivatedPayloadV1> {
     let (scope, policy_digest) = read_head(reader, 0x8a)?;
     let entry_key = reader.text()?;
     let closing_tenure_ordinal = reader.unsigned()?;
-    read_activated_tail(reader).and_then(|((from, to, skipped), trigger)| {
-        FallbackActivatedPayloadV1::new(FallbackActivatedInputV1 {
-            scope,
-            policy_digest,
-            entry_key,
-            closing_tenure_ordinal,
-            from,
-            to,
-            skipped,
-            trigger_code: trigger.0,
-            trigger_basis: trigger.1,
-            activation_ordinal: trigger.2,
-        })
-    })
+    read_activated_rest(
+        reader,
+        scope,
+        policy_digest,
+        entry_key,
+        closing_tenure_ordinal,
+    )
 }
 
-fn read_activated_tail(reader: &mut Reader<'_>) -> Outcome<(Transition, TriggerFields)> {
+// Split from `read_activated` to keep each reader at four `?` (cyclomatic complexity 5).
+fn read_activated_rest(
+    reader: &mut Reader<'_>,
+    scope: String,
+    policy_digest: Hash,
+    entry_key: String,
+    closing_tenure_ordinal: u64,
+) -> Outcome<FallbackActivatedPayloadV1> {
     let from = read_implementation_bytes(reader)?;
     let to = read_implementation_bytes(reader)?;
     let skipped = reader.list(SKIPPED_MAX, Field::Skipped, read_skipped)?;
-    Ok(((from, to, skipped), read_trigger(reader)?))
+    let (trigger_code, trigger_basis, activation_ordinal) = read_trigger(reader)?;
+    FallbackActivatedPayloadV1::new(FallbackActivatedInputV1 {
+        scope,
+        policy_digest,
+        entry_key,
+        closing_tenure_ordinal,
+        from,
+        to,
+        skipped,
+        trigger_code,
+        trigger_basis,
+        activation_ordinal,
+    })
 }
 
 fn read_implementation_bytes(reader: &mut Reader<'_>) -> Outcome<ImplementationKeyV1> {

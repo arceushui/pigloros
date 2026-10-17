@@ -10,6 +10,8 @@ use super::{
 };
 use crate::{encode_hash, encode_head, Hash};
 
+/// Initial buffer size for a DFP1 encoding; it grows up to the policy bound.
+const POLICY_CAPACITY_HINT: usize = 256;
 const DFP1_HEADER: [u8; 7] = [0x86, 0x44, b'D', b'F', b'P', b'1', 0x01];
 const CANDIDATES_MAX: usize = MAX_FALLBACK_CANDIDATES_V1;
 const ENTRIES_MAX: usize = MAX_FALLBACK_ENTRIES_V1;
@@ -214,7 +216,7 @@ impl DomainFallbackPolicyV1 {
     }
 
     fn fields(&self, array_header: u8) -> Vec<u8> {
-        let mut out = Vec::with_capacity(256);
+        let mut out = Vec::with_capacity(POLICY_CAPACITY_HINT);
         out.push(array_header);
         out.extend_from_slice(&DFP1_HEADER[1..]);
         write_text(&mut out, &self.scope);
