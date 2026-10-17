@@ -646,10 +646,11 @@ mod tests {
             store
                 .conn
                 .authorizer(Some(move |request: AuthContext<'_>| {
-                    if let AuthAction::Read {
-                        table_name: "events",
-                        column_name: "event_id",
-                    } = request.action
+                    if request.action
+                        == (AuthAction::Read {
+                            table_name: "events",
+                            column_name: "event_id",
+                        })
                     {
                         observed.fetch_add(1, Ordering::SeqCst);
                         Authorization::Ignore
