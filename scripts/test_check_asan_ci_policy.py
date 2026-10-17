@@ -183,6 +183,15 @@ class AsanCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(override_linker)
 
+    def test_requires_runtime_proof_of_serial_linking(self) -> None:
+        def drop_lock_assertion(workflow: dict) -> None:
+            step = self.build_step(workflow)
+            step["run"] = step["run"].replace(
+                'test -f "${RUNNER_TEMP}/asan-link.lock"\n', ""
+            )
+
+        self.assert_rejected(drop_lock_assertion)
+
     def test_repository_serial_linker_passes(self) -> None:
         CHECKER.check_serial_linker(SERIAL_LINKER_PATH)
 
