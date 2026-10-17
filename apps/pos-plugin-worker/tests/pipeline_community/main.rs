@@ -15,6 +15,7 @@
 #![cfg(target_os = "linux")]
 
 pub mod authority;
+pub mod budget;
 pub mod fail_closed;
 pub mod failure;
 pub mod first_party;
@@ -42,10 +43,10 @@ const COMMUNITY_VERSION: u64 = 1;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/community/v1/manifest.json");
-const MANIFEST_SHA256: &str = "16e2d967fe002c14648c283f9ab972d50a972526e2e312fb79804f7a2498f7bf";
+const MANIFEST_SHA256: &str = "4be2f98d3b0ba94329cdcfaa151cf332d036eb90adb3a1b927a7c131e194d19a";
 
 /// Every runner of profile version 1, by case identifier.
-const RUNNERS: [(&str, Runner); 9] = [
+const RUNNERS: [(&str, Runner); 10] = [
     ("PCF-CPH-001", parity::single_pass_parity),
     ("PCF-CPH-002", parity::mixed_registry_order),
     ("PCF-CPH-003", authority::foreign_proposal_parity),
@@ -55,6 +56,7 @@ const RUNNERS: [(&str, Runner); 9] = [
     ("PCF-CPH-007", fail_closed::missing_implementation),
     ("PCF-CPH-008", fail_closed::unavailable_implementation),
     ("PCF-CPH-009", fail_closed::invalid_implementation),
+    ("PCF-CPH-010", budget::over_budget_parity),
 ];
 
 /// Parse a `PCH1` manifest under the harness rules of `PPC1`.

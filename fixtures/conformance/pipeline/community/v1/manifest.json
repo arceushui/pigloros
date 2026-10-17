@@ -7,6 +7,7 @@
     "#631",
     "#632",
     "#633",
+    "#634",
     "ADR-021",
     "ADR-061 r8"
   ],
@@ -14,17 +15,17 @@
     {
       "id": "COMMUNITY-RESERVED-PROPOSAL",
       "reason": "The real community guests emit only prototype.driven, so a community Driver's proposal of a reserved host Event type needs a new guest Component; this profile proves only the first-party refusal of that proposal and the refused reserved-type claim of either isolation class",
-      "owner": "#636"
+      "owner": "#637"
     },
     {
       "id": "INVALID-GUEST-OUTPUT",
       "reason": "The real community guests always return well-formed output, so a community Driver's invalid guest output (InvalidGuestOutput) needs a new guest Component, and an ABI- or manifest-invalid release needs a malformed release fixture; this profile proves only the invalid pin, registration and denied-capability release refusals of either isolation class and, through PCF-CPH-003, the first-party invalid-draft refusals",
-      "owner": "#636"
+      "owner": "#637"
     },
     {
-      "id": "OVER-BUDGET-PLUGIN",
-      "reason": "Over-budget fail-closed behavior is not yet proven across isolation classes",
-      "owner": "#634"
+      "id": "OTHER-RESOURCE-LIMITS",
+      "reason": "PCF-CPH-010 exhausts a community release through its memory budget only; the signed-release test world fixes the fuel, host-call and output budgets of a release, and the real guests make one host call and emit one small Event, so the fuel, host-call and output limits of a community Driver on the real worker need a release shape with those budgets or a new guest Component",
+      "owner": "#637"
     },
     {
       "id": "REPLAY-AND-RECOVERY",
@@ -451,6 +452,82 @@
         "denied-release.refusal": "CapabilityDenied",
         "denied-release.registry-unchanged": "true",
         "parity.same-refusal-either-class": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-010",
+      "title": "An over-budget Plugin of either isolation class, a community release whose memory budget the real guest exceeds on the worker or a first-party Driver that stages more drafts than the host Tick draft budget leaves, fails the whole scheduled pass with a typed refusal, discards the other class's staged output, quarantines only the exhausted community Plugin, whose release stays exhausted once the quarantine is cleared, and the next pass within budget commits, for the community path in a fresh lane over an in-budget successor release",
+      "sources": [
+        "#489",
+        "#634",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "community-exhausted.result": "Failed",
+        "community-exhausted.timeline": "",
+        "community-exhausted.entity": "",
+        "community-exhausted.receipt.names-events": "false",
+        "community-exhausted.steps": "1,1",
+        "community-exhausted.availability": "Available,ResourceExhausted",
+        "community-exhausted.owner": "",
+        "community-exhausted.follows-host-schedule": "true",
+        "community-exhausted.refusal": "CommunityPlugin(MemoryLimitExceeded) host=MemoryLimitExceeded",
+        "community-quarantined.result": "Failed",
+        "community-quarantined.timeline": "",
+        "community-quarantined.entity": "",
+        "community-quarantined.receipt.names-events": "false",
+        "community-quarantined.steps": "0,0",
+        "community-quarantined.availability": "Available,ResourceExhausted",
+        "community-quarantined.owner": "",
+        "community-quarantined.follows-host-schedule": "true",
+        "community-quarantined.refusal": "ImplementationUnavailable(ResourceExhausted)",
+        "community-cleared.result": "Failed",
+        "community-cleared.timeline": "",
+        "community-cleared.entity": "",
+        "community-cleared.receipt.names-events": "false",
+        "community-cleared.steps": "1,1",
+        "community-cleared.availability": "Available,ResourceExhausted",
+        "community-cleared.owner": "",
+        "community-cleared.follows-host-schedule": "true",
+        "community-cleared.refusal": "CommunityPlugin(MemoryLimitExceeded) host=MemoryLimitExceeded",
+        "community.community-receipts": "MemoryLimitExceeded/Discarded,MemoryLimitExceeded/Discarded",
+        "community-successor.result": "Committed",
+        "community-successor.timeline": "1:parity.first-party,2:prototype.driven",
+        "community-successor.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "community-successor.receipt.names-events": "true",
+        "community-successor.steps": "1,1",
+        "community-successor.availability": "Available,Available",
+        "community-successor.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "community-successor.follows-host-schedule": "true",
+        "first-party-exhausted.result": "Failed",
+        "first-party-exhausted.timeline": "",
+        "first-party-exhausted.entity": "",
+        "first-party-exhausted.receipt.names-events": "false",
+        "first-party-exhausted.steps": "1,1",
+        "first-party-exhausted.availability": "Available,Available",
+        "first-party-exhausted.owner": "",
+        "first-party-exhausted.follows-host-schedule": "true",
+        "first-party-exhausted.refusal": "ResourceExhausted(host-tick-budget,3>2)",
+        "first-party-recovered.result": "Committed",
+        "first-party-recovered.timeline": "1:prototype.driven,2:parity.first-party",
+        "first-party-recovered.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "first-party-recovered.receipt.names-events": "true",
+        "first-party-recovered.steps": "1,1",
+        "first-party-recovered.availability": "Available,Available",
+        "first-party-recovered.owner": "prototype.driven=GovernedCommunity,parity.first-party=OperatorTrustedNative",
+        "first-party-recovered.follows-host-schedule": "true",
+        "first-party.community-receipts": "none/Discarded,none/Committed",
+        "parity.whole-pass-discarded-either-class": "true",
+        "parity.next-pass-within-budget-commits": "true"
       }
     }
   ]
