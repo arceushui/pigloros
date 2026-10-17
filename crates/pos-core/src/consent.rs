@@ -407,9 +407,7 @@ impl ConsentGrantedV1 {
     }
 }
 
-// Grant fields decode in three groups, in array order. A single twelve-level
-// combinator chain made `cargo fmt --check` spend minutes on this file.
-
+// Grant fields decode in three groups, in array order.
 fn decode_grant_parties(
     items: &[Value],
 ) -> Result<(EntityId, EntityId, String), ConsentCodecError> {

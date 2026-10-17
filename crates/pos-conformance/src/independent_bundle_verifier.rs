@@ -518,7 +518,7 @@ fn raw_archive_profile(
                     raw_value_depth(&profile),
                 )
                 .and_then(|raw_profile| {
-                    raw_archive_profile_members(
+                    raw_archive_profile_checked(
                         manifest,
                         profile_fields,
                         &raw_profile,
@@ -531,7 +531,7 @@ fn raw_archive_profile(
     })
 }
 
-fn raw_archive_profile_members(
+fn raw_archive_profile_checked(
     manifest: &[Value],
     profile_fields: &[Value],
     raw_profile: &RawCpf1Summary,
