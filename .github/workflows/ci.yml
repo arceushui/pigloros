@@ -897,10 +897,11 @@ jobs:
 
 # ── Platform verification ────────────────────────────────────────────────────
 
-  # ASan compilation is serialized (CARGO_BUILD_JOBS=1) and took most of each
-  # ASan shard's time, so it runs once as a standard-stage job. The archive
-  # holds every workspace test binary; the shards below still run last and
-  # only execute tests from it.
+  # ASan compilation took most of each ASan shard's time, so it runs once as a
+  # standard-stage job. Crates compile in parallel while scripts/asan/
+  # serial-link.sh admits one link at a time. The archive holds every
+  # workspace test binary; the shards below still run last and only execute
+  # tests from it.
   asan-build:
     name: asan build (nextest archive)
     needs:
@@ -931,7 +932,8 @@ jobs:
       - name: cargo nextest archive with ASan
         env:
           RUSTC_BOOTSTRAP: "1"
-          CARGO_BUILD_JOBS: "1"
+          CARGO_BUILD_JOBS: "4"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: ${{ github.workspace }}/scripts/asan/serial-link.sh
           CARGO_INCREMENTAL: "0"
           CARGO_PROFILE_TEST_DEBUG: line-tables-only
         run: |
