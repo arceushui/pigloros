@@ -1,9 +1,9 @@
-# Fixed-order test-profile experiment; every failure remains a failure.
-name: 561-store-test-profile-control
+# Unmutated owning-package control, not a replacement or relaxed mutation gate.
+name: 561-store-individual-test-times
 
 on:
   push:
-    branches: [redmine/561-mutation-incremental-probe]
+    branches: [redmine/561-store-test-hotspots]
 
 permissions:
   contents: read
@@ -16,7 +16,7 @@ env:
 
 jobs:
   store-control:
-    name: full Store profile comparison with assertions and overflow checks
+    name: full Store tests with individual timing and unchanged validation
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -54,101 +54,50 @@ jobs:
             free -m
             df -h .
           } > artifacts/store-control/environment.txt
-      - name: Compare the full Store test profiles in fixed ABBA order
-        # The job remains bounded. Partial measurements are not acceptance.
-        timeout-minutes: 17
+      - name: Build all owning-package targets before timing tests
+        timeout-minutes: 11
         env:
+          # As in the full baseline, three build jobs shorten cold setup.
+          # This setup timing is not compared with single-job mutant builds.
+          CARGO_BUILD_JOBS: "3"
+          CARGO_INCREMENTAL: "1"
+        run: |
+          set -euo pipefail
+          timeout --kill-after=5s 600s cargo test --no-run --verbose \
+            --package=pos-store@0.1.0 --all-features --locked \
+            2>&1 | tee artifacts/store-control/build.log
+      - name: Report individual test durations under the unchanged Test-phase budget
+        timeout-minutes: 3
+        env:
+          # Override setup/cache exports at the actual native consumer.
           CARGO_INCREMENTAL: "1"
         run: |
           set -euo pipefail
           test -x /usr/bin/time
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          import subprocess
-          import sys
-          import time
-
-          artifact = Path("artifacts/store-control")
-          report = {
-              "source": "0c6d537d11b1bf43614dd980bb30f49e60a7912f",
-              "order": [0, 1, 1, 0],
-              "debug_assertions": True,
-              "overflow_checks": True,
-              "cases": [],
-          }
-          report_path = artifact / "profiles.json"
-          first_failure = 0
-          for index, opt in enumerate(report["order"]):
-              case = {"index": index, "opt_level": opt}
-              report["cases"].append(case)
-              config = [
-                  "--config", f"profile.test.package.pos-store.opt-level={opt}",
-                  "--config", "profile.test.package.pos-store.debug-assertions=true",
-                  "--config", "profile.test.package.pos-store.overflow-checks=true",
-              ]
-              base = [
-                  "cargo", "test", "--verbose", "--package=pos-store@0.1.0",
-                  "--all-features", "--locked", *config,
-              ]
-              for phase, command, deadline in (
-                  ("build", [*base, "--no-run"], 600),
-                  ("test", [*base, "--", "-Zunstable-options", "--fail-fast",
-                            "--include-ignored", "--test-threads=2"], 120),
-              ):
-                  environment = dict(os.environ)
-                  environment["CARGO_BUILD_JOBS"] = "3" if phase == "build" else "1"
-                  assert environment["CARGO_INCREMENTAL"] == "1"
-                  log_path = artifact / f"{index}-opt{opt}-{phase}.log"
-                  timed = ["timeout", "--kill-after=5s", f"{deadline}s",
-                           "/usr/bin/time", "-v", *command]
-                  case[phase] = {
-                      "command": timed,
-                      "compiler_jobs": environment["CARGO_BUILD_JOBS"],
-                      "start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                  }
-                  report_path.write_text(json.dumps(report, sort_keys=True, indent=2))
-                  started = time.monotonic()
-                  with log_path.open("wb") as log:
-                      status = subprocess.run(
-                          timed, env=environment, stdout=log,
-                          stderr=subprocess.STDOUT, check=False,
-                      ).returncode
-                  case[phase].update(
-                      exit_code=status, seconds=time.monotonic() - started,
-                      end_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                  )
-                  report_path.write_text(json.dumps(report, sort_keys=True, indent=2))
-                  if status != 0:
-                      if first_failure == 0:
-                          first_failure = status if status > 0 else 1
-                      if phase == "build":
-                          sys.exit(first_failure)
-                  elif phase == "test":
-                      with (artifact / f"{index}-summary-validation.log").open("wb") as log:
-                          summary_status = subprocess.run(
-                              ["bash", "scripts/assert-no-ignored-in-test-summary.sh",
-                               str(log_path)], stdout=log, stderr=subprocess.STDOUT,
-                              check=False,
-                          ).returncode
-                      case["summary_status"] = summary_status
-                      report_path.write_text(json.dumps(report, sort_keys=True, indent=2))
-                      if summary_status != 0 and first_failure == 0:
-                          first_failure = summary_status
-              subprocess.run(["git", "diff", "--exit-code", "HEAD"], check=True)
-          assert len(report["cases"]) == 4
-          report["overall_exit_code"] = first_failure
-          report_path.write_text(json.dumps(report, sort_keys=True, indent=2))
-          print(json.dumps(report, sort_keys=True))
-          sys.exit(first_failure)
-          PY
+          date --utc --iso-8601=seconds > artifacts/store-control/test-start.txt
+          set +e
+          timeout --kill-after=5s 120s /usr/bin/time -v \
+            cargo test --verbose --package=pos-store@0.1.0 --all-features --locked -- \
+            -Zunstable-options --fail-fast --include-ignored --test-threads=2 --report-time \
+            2>&1 | tee artifacts/store-control/test.log
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${pipeline_status[@]}" > artifacts/store-control/test-status.txt
+          date --utc --iso-8601=seconds > artifacts/store-control/test-end.txt
+          if [[ "${pipeline_status[0]}" -ne 0 ]]; then
+            exit "${pipeline_status[0]}"
+          fi
+          if [[ "${pipeline_status[1]}" -ne 0 ]]; then
+            exit "${pipeline_status[1]}"
+          fi
+          bash scripts/assert-no-ignored-in-test-summary.sh artifacts/store-control/test.log
+          git diff --exit-code HEAD
       - name: Preserve every control result, including failure
         if: ${{ always() }}
         timeout-minutes: 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: untrusted-561-store-profile-control-${{ github.run_id }}-${{ github.run_attempt }}
+          name: untrusted-561-store-test-times-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/store-control/
           if-no-files-found: error
           retention-days: 14
