@@ -16,7 +16,9 @@ concurrency:
 # Installing nightly alone does not override the repository's stable pin.
 # Baseline and mutant subprocesses must select the same libtest harness.
 env:
-  RUSTUP_TOOLCHAIN: nightly-2026-08-28
+  # Match ASan's nightly to avoid a reported Bevy solver memory regression.
+  # https://github.com/rust-lang/rust/issues/161748
+  RUSTUP_TOOLCHAIN: nightly-2026-07-01
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   # Bound compiler concurrency separately from the four mutation workers.
   CARGO_BUILD_JOBS: "1"

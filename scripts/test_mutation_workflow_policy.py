@@ -12,7 +12,7 @@ import yaml
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-NIGHTLY = "nightly-2026-08-28"
+NIGHTLY = "nightly-2026-07-01"
 BASELINE_RUN = """set -euo pipefail
 cargo test --workspace --all-features --locked -- \\
   -Zunstable-options --fail-fast --include-ignored --test-threads=2 \\
@@ -130,7 +130,11 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
         )
 
     def test_rejects_wrong_or_missing_toolchain(self) -> None:
-        for value in ({}, {"RUSTUP_TOOLCHAIN": "1.97.1"}):
+        for value in (
+            {},
+            {"RUSTUP_TOOLCHAIN": "1.97.1"},
+            dict(self.workflow["env"], RUSTUP_TOOLCHAIN="nightly-2026-08-28"),
+        ):
             with self.subTest(value=value):
                 changed = copy.deepcopy(self.workflow)
                 changed["env"] = value
