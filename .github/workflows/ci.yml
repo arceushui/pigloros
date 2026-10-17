@@ -200,6 +200,36 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --all-features --no-deps --locked
 
+  feature-matrix:
+    name: feature-matrix
+    needs: [ci_change_scope, preflight-gate]
+    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: feature-matrix
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo check (no default features)
+        run: cargo check --workspace --all-targets --no-default-features --locked
+      - name: Plugin trust registry Memory vectors (no default features)
+        run: >
+          cargo test -p pos-store --no-default-features
+          --test plugin_trust_registry_memory_public
+          --test plugin_trust_registry_memory_policy_public
+          --test plugin_trust_registry_memory_evaluation_public --locked
+      - name: cargo check (all features, all targets)
+        run: cargo check --workspace --all-targets --all-features --locked
+      - name: Prove reference evaluator implementation independence
+        run: bash scripts/check-reference-evaluator-independence.sh
+      - name: Prove the conformance adapter dependency graph
+        run: bash scripts/check-adapter-graph.sh
+
   test:
     name: test
     needs: [ci_change_scope, preflight-gate]
@@ -223,18 +253,6 @@ jobs:
         with:
           shared-key: test
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: cargo check (no default features)
-        run: cargo check --workspace --all-targets --no-default-features --locked
-      - name: Plugin trust registry Memory vectors (no default features)
-        run: >
-          cargo test -p pos-store --no-default-features
-          --test plugin_trust_registry_memory_public
-          --test plugin_trust_registry_memory_policy_public
-          --test plugin_trust_registry_memory_evaluation_public --locked
-      - name: Prove reference evaluator implementation independence
-        run: bash scripts/check-reference-evaluator-independence.sh
-      - name: Prove the conformance adapter dependency graph
-        run: bash scripts/check-adapter-graph.sh
       # The workspace tests run in the test-shard matrix. Doctests are not
       # supported by nextest, so libtest still runs them here.
       - name: cargo test doctests (all features, ignored included)
@@ -554,10 +572,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.97.1
+          targets: i686-pc-windows-msvc
       - name: Exercise the unsupported owned-key signing boundary
         run: cargo test -p piglor-ledger --all-features --test non_unix_store_owner --locked -- --include-ignored
       - name: Exercise the unsupported non-Linux EPF1 boundary
         run: cargo test -p pos-runtime --features test-support --test non_linux_profile --locked -- --include-ignored
+      - name: Check narrower-target Replay representation boundaries
+        run: cargo check -p pos-runtime --target i686-pc-windows-msvc --locked
+      - name: Exercise narrower-target registry cardinality refusals
+        run: cargo test -p pos-core --target i686-pc-windows-msvc --test key_registry_guarded_read_public --locked -- --include-ignored
+      - name: Exercise native-width canonical length arithmetic
+        run: cargo test -p pos-core --target i686-pc-windows-msvc --lib --locked canonical_length_tests -- --include-ignored
 
   clippy:
     name: clippy
@@ -684,6 +709,7 @@ jobs:
       - ci_change_scope
       - preflight-gate
       - fmt
+      - feature-matrix
       - test
       - test-shards
       - clippy
@@ -691,12 +717,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require fmt, test, test shards, clippy, and coverage
+      - name: Require fmt, feature matrix, doctests, test shards, clippy, and coverage
         env:
           SCOPE_RESULT: ${{ needs.ci_change_scope.result }}
           RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
           PREFLIGHT_RESULT: ${{ needs.preflight-gate.result }}
           FMT_RESULT: ${{ needs.fmt.result }}
+          FEATURE_MATRIX_RESULT: ${{ needs.feature-matrix.result }}
           TEST_RESULT: ${{ needs.test.result }}
           TEST_SHARDS_RESULT: ${{ needs.test-shards.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
@@ -710,6 +737,7 @@ jobs:
             expected=skipped
           fi
           test "${FMT_RESULT}" = "${expected}"
+          test "${FEATURE_MATRIX_RESULT}" = "${expected}"
           test "${TEST_RESULT}" = "${expected}"
           test "${TEST_SHARDS_RESULT}" = "${expected}"
           test "${CLIPPY_RESULT}" = "${expected}"
@@ -775,6 +803,23 @@ jobs:
           --exclude 'src/system_bus/tests.rs'
           --exclude 'src/e2e_determinism.rs'
           --exclude 'src/action_admission_tests.rs'
+          --exclude 'src/fork_event_authority/tests/local_replay.rs'
+          --exclude 'src/sqlite/tests/protected_interval_cleanup.rs'
+          --exclude 'src/sqlite/fork_replay/interval_tests.rs'
+          --exclude 'src/imported_fork_replay_tests.rs'
+          --exclude 'src/imported_fork_replay_tests/lifecycle.rs'
+          --exclude 'src/imported_fork_replay_tests/lifecycle/begin.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/compare.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/read_bounds.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/sqlite.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/sqlite/compare.rs'
+          --exclude 'src/imported_fork_replay_tests/runtime_budget.rs'
+          --exclude 'src/imported_fork_replay_tests/runtime_budget/deadline.rs'
+          --exclude 'src/imported_fork_replay_tests/runtime_budget/repeat.rs'
+          --exclude 'src/nested_imported_fork_replay_tests.rs'
+          --exclude 'src/nested_imported_fork_replay_tests/intermediate_privacy.rs'
+          --exclude 'src/ordinary_fork_lineage_tests.rs'
           --format json
           --output "${{ runner.temp }}/cargo-crap-baseline.json"
       - name: Analyze CRAP score changes
@@ -791,6 +836,23 @@ jobs:
           --exclude 'src/system_bus/tests.rs'
           --exclude 'src/e2e_determinism.rs'
           --exclude 'src/action_admission_tests.rs'
+          --exclude 'src/fork_event_authority/tests/local_replay.rs'
+          --exclude 'src/sqlite/tests/protected_interval_cleanup.rs'
+          --exclude 'src/sqlite/fork_replay/interval_tests.rs'
+          --exclude 'src/imported_fork_replay_tests.rs'
+          --exclude 'src/imported_fork_replay_tests/lifecycle.rs'
+          --exclude 'src/imported_fork_replay_tests/lifecycle/begin.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/compare.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/read_bounds.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/sqlite.rs'
+          --exclude 'src/imported_fork_replay_tests/cumulative_budget/sqlite/compare.rs'
+          --exclude 'src/imported_fork_replay_tests/runtime_budget.rs'
+          --exclude 'src/imported_fork_replay_tests/runtime_budget/deadline.rs'
+          --exclude 'src/imported_fork_replay_tests/runtime_budget/repeat.rs'
+          --exclude 'src/nested_imported_fork_replay_tests.rs'
+          --exclude 'src/nested_imported_fork_replay_tests/intermediate_privacy.rs'
+          --exclude 'src/ordinary_fork_lineage_tests.rs'
           --baseline "${{ runner.temp }}/cargo-crap-baseline.json"
           --epsilon 0
           --format json
@@ -1285,6 +1347,8 @@ jobs:
         run: bash scripts/test-check-pinned-dependencies.sh
       - name: Test CI workflow policy
         run: python scripts/test_ci_workflow_policy.py
+      - name: Test mutation workflow policy
+        run: python scripts/test_mutation_workflow_policy.py
       - name: Test ignored-test summary checker
         run: python scripts/test_assert_no_ignored_in_test_summary.py
       - name: Check ASan CI policy

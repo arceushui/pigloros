@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Read-only inspection of otherwise inaccessible State after test poisoning.
+# Never enable in deployable builds.
+test-support = []
+
 [dependencies]
 blake3 = { workspace = true }
 pos-core = { path = "../pos-core" }

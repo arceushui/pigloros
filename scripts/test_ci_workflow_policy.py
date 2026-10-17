@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import fnmatch
 import pathlib
+import subprocess
 import unittest
 
 import yaml
@@ -32,12 +33,45 @@ TRUSTED_MAIN_DOCKER_CACHE_TO = (
     "${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}"
 )
 CORE_CACHE_KEYS = {
+    "feature-matrix": "feature-matrix",
     "test": "test",
     "test-shard": "test-nextest",
     "clippy": "clippy",
     "coverage": "coverage",
 }
-CORE_JOB_NAMES = ("fmt", "test", "test-shard", "clippy", "coverage")
+CORE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shard", "clippy", "coverage")
+CORE_GATE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shards", "clippy", "coverage")
+FEATURE_MATRIX_STEPS = (
+    {
+        "name": "cargo check (no default features)",
+        "run": "cargo check --workspace --all-targets --no-default-features --locked",
+    },
+    {
+        "name": "Plugin trust registry Memory vectors (no default features)",
+        "run": "cargo test -p pos-store --no-default-features "
+        "--test plugin_trust_registry_memory_public "
+        "--test plugin_trust_registry_memory_policy_public "
+        "--test plugin_trust_registry_memory_evaluation_public --locked\n",
+    },
+    {
+        "name": "cargo check (all features, all targets)",
+        "run": "cargo check --workspace --all-targets --all-features --locked",
+    },
+    {
+        "name": "Prove reference evaluator implementation independence",
+        "run": "bash scripts/check-reference-evaluator-independence.sh",
+    },
+    {
+        "name": "Prove the conformance adapter dependency graph",
+        "run": "bash scripts/check-adapter-graph.sh",
+    },
+)
+WORKSPACE_DOCTEST_STEP = {
+    "name": "cargo test doctests (all features, ignored included)",
+    "run": "set -euo pipefail\n"
+    "cargo test --workspace --all-features --locked --doc -- --include-ignored "
+    "2>&1 | tee /tmp/cargo-doctest.log\n",
+}
 MAIN_PUSH_TRIGGER = {"branches": ["main"]}
 PREFLIGHT_GATE_IF = "${{ always() }}"
 REQUIRED_PREFLIGHT_NEEDS = ("ci_change_scope", "pinned-dependencies")
@@ -262,6 +296,43 @@ def excluded(path: str, patterns: list[str]) -> bool:
     )
 
 
+def assert_parallel_validation_contract(workflow: dict) -> None:
+    """Moving checks may change scheduling, never scope or failure semantics."""
+    assert_core_jobs_run_on_main_push(workflow)
+    jobs = workflow["jobs"]
+    for owner, required in (
+        ("feature-matrix", FEATURE_MATRIX_STEPS),
+        ("test", (WORKSPACE_DOCTEST_STEP,)),
+    ):
+        job = jobs[owner]
+        if job.get("timeout-minutes") != 30 or "continue-on-error" in job:
+            raise AssertionError(f"{owner} must keep its blocking 30-minute limit")
+        for expected in required:
+            occurrences = [
+                (name, step)
+                for name, candidate in jobs.items()
+                for step in candidate.get("steps", [])
+                if step.get("name") == expected["name"]
+                or step.get("run") == expected["run"]
+            ]
+            if occurrences != [(owner, expected)]:
+                raise AssertionError(f"{owner} must run the exact required step once")
+    gate = jobs["core-gate"]
+    if gate.get("needs") != ["ci_change_scope", "preflight-gate", *CORE_GATE_JOB_NAMES]:
+        raise AssertionError("core-gate must require every parallel core job")
+    if gate.get("if") != "${{ always() }}" or "continue-on-error" in gate:
+        raise AssertionError("core-gate must remain unconditional and blocking")
+    step = gate["steps"][0]
+    if "if" in step or "continue-on-error" in step:
+        raise AssertionError("core-gate result check must remain blocking")
+    for name in CORE_GATE_JOB_NAMES:
+        variable = name.upper().replace("-", "_") + "_RESULT"
+        if step["env"].get(variable) != "${{ needs." + name + ".result }}":
+            raise AssertionError("core-gate must read every actual job result")
+        if f'test "${{{variable}}}" = "${{expected}}"' not in step["run"]:
+            raise AssertionError("core-gate must enforce every actual job result")
+
+
 def rust_gate_required(paths: list[str], patterns: list[str]) -> bool:
     return any(not excluded(path, patterns) for path in paths)
 
@@ -350,6 +421,84 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def test_core_gates_run_after_successful_preflight_on_push(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
         assert_core_jobs_run_on_main_push(workflow)
+
+    def test_parallel_validation_preserves_every_required_command(self) -> None:
+        assert_parallel_validation_contract(load_workflow(CI_WORKFLOW_PATH))
+
+    def test_native_width_counter_runs_on_the_actual_narrower_target(self) -> None:
+        expected = {
+            "name": "Exercise native-width canonical length arithmetic",
+            "run": "cargo test -p pos-core --target i686-pc-windows-msvc --lib --locked "
+            "canonical_length_tests -- --include-ignored",
+        }
+        steps = load_workflow(CI_WORKFLOW_PATH)["jobs"]["ledger-windows"]["steps"]
+        self.assertEqual(
+            [step for step in steps if step.get("name") == expected["name"]],
+            [expected],
+        )
+
+    def test_parallel_validation_rejects_missing_or_weakened_commands(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        for owner, required in (
+            ("feature-matrix", FEATURE_MATRIX_STEPS),
+            ("test", (WORKSPACE_DOCTEST_STEP,)),
+        ):
+            for expected in required:
+                for change in ("remove", "if", "continue-on-error", "run"):
+                    with self.subTest(owner=owner, step=expected["name"], change=change):
+                        mutated = copy.deepcopy(workflow)
+                        steps = mutated["jobs"][owner]["steps"]
+                        step = next(s for s in steps if s.get("name") == expected["name"])
+                        if change == "remove":
+                            steps.remove(step)
+                        else:
+                            step[change] = True if change == "continue-on-error" else "false"
+                        with self.assertRaisesRegex(AssertionError, "exact required step"):
+                            assert_parallel_validation_contract(mutated)
+
+    def test_parallel_validation_rejects_an_omitted_feature_result(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        for change in ("needs", "env", "run"):
+            with self.subTest(change=change):
+                mutated = copy.deepcopy(workflow)
+                gate = mutated["jobs"]["core-gate"]
+                if change == "needs":
+                    gate["needs"].remove("feature-matrix")
+                elif change == "env":
+                    gate["steps"][0]["env"]["FEATURE_MATRIX_RESULT"] = "success"
+                else:
+                    gate["steps"][0]["run"] = gate["steps"][0]["run"].replace(
+                        'test "${FEATURE_MATRIX_RESULT}" = "${expected}"', "true"
+                    )
+                with self.assertRaisesRegex(AssertionError, "core-gate must"):
+                    assert_parallel_validation_contract(mutated)
+
+    def test_parallel_core_gate_executes_fail_closed_for_every_result(self) -> None:
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        assert_parallel_validation_contract(workflow)
+        # Execute only the inspected shell result checker, never Cargo commands.
+        run = workflow["jobs"]["core-gate"]["steps"][0]["run"]
+        results = {
+            name.upper().replace("-", "_") + "_RESULT": "success"
+            for name in CORE_GATE_JOB_NAMES
+        }
+        environment = dict(
+            results, SCOPE_RESULT="success", PREFLIGHT_RESULT="success", RUST_SCOPE="true"
+        )
+
+        def verdict(env: dict[str, str]) -> int:
+            return subprocess.run(
+                ["/bin/bash", "-c", run], env=env, capture_output=True, check=False
+            ).returncode
+
+        self.assertEqual(verdict(environment), 0)
+        for result in results:
+            for state in ("failure", "cancelled", "skipped", ""):
+                with self.subTest(result=result, state=state):
+                    self.assertNotEqual(verdict(dict(environment, **{result: state})), 0)
+        scoped = dict(environment, RUST_SCOPE="false")
+        scoped.update(dict.fromkeys(results, "skipped"))
+        self.assertEqual(verdict(scoped), 0)
 
     def test_core_rust_caches_restore_on_prs_and_save_only_from_main(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)

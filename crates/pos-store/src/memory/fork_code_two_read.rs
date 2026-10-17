@@ -8,42 +8,53 @@
 //! 6. A code-2 child never consults the local custody store, and a local child
 //! never consults the imported one.
 
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 use pos_core::{
-    Event, EventId, ForkClassifierRegistrationV1, ForkPublicationOperationV1, Hash,
-    ImportedForkAttributionAdmissionV1, ImportedForkClassifierGraphV1, Seq, TimelineId,
+    Event, EventId, ForkAdmissionRecordV1, ForkClassifierRegistrationV1,
+    ForkPublicationOperationV1, Hash, ImportedForkClassifierGraphV1, Seq, TimelineId,
 };
 
-use super::MemoryStore;
+use super::{fork_attribution_authority_import::ImportedAttributionV1, MemoryStore};
 use crate::{
     fork_event_authority::{
         imported_admission_matches, imported_graph_matches, AuthorityValidatorV1,
         ValidatedAdmissionV1, ValidatedGraphV1, ValidatedImportV1, ValidatedOriginV1,
     },
     fork_manifest_publication::{
-        publication_parent_head, trusted_committed_manifest, CommittedPublicationRowsV1,
+        charge_origin_copy, charge_publication_copy, publication_parent_head,
+        trusted_committed_manifest_with_context, CommittedPublicationRowsV1,
         CommittedPublicationSourcesV1, PublicationSourceErrorV1, PublicationSourceResultV1,
         PublicationSuffixV1, RetainedImportedKeyV1, RetainedKeyEvidenceV1,
     },
+    fork_replay::NativeReadContextV1,
     ForkEventAuthorityErrorV1 as AuthorityError,
     ForkManifestPublicationErrorV1 as PublicationError,
 };
 
 impl MemoryStore {
     /// The one `FCR1` of a child, or corrupt authority for none or several.
-    pub(super) fn child_registration(
+    pub(super) fn child_registration_with_context(
         &self,
         child_timeline_id: TimelineId,
+        context: &mut NativeReadContextV1<'_, '_>,
     ) -> Result<&ForkClassifierRegistrationV1, AuthorityError> {
-        let mut registrations = self
-            .fork_classifier_registrations
-            .values()
-            .filter(|registration| registration.input().child_timeline_id == child_timeline_id);
-        let (Some(registration), None) = (registrations.next(), registrations.next()) else {
-            return Err(AuthorityError::CorruptAuthority);
-        };
-        Ok(registration)
+        let mut selected = None;
+        for registration in self.fork_classifier_registrations.values() {
+            context
+                .suffix_row()
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
+            if registration.input().child_timeline_id == child_timeline_id {
+                if selected.is_some() {
+                    return Err(AuthorityError::CorruptAuthority);
+                }
+                selected = Some(registration);
+            }
+            context
+                .check()
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
+        }
+        selected.ok_or(AuthorityError::CorruptAuthority)
     }
 
     /// Read one child's `FAR1` under an explicit R6.9 validator.
@@ -52,34 +63,60 @@ impl MemoryStore {
         child_timeline_id: TimelineId,
         validator: AuthorityValidatorV1,
     ) -> Result<ValidatedAdmissionV1, AuthorityError> {
+        self.validated_admission_with_context(
+            child_timeline_id,
+            validator,
+            &mut NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn validated_admission_with_context(
+        &self,
+        child_timeline_id: TimelineId,
+        validator: AuthorityValidatorV1,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<ValidatedAdmissionV1, AuthorityError> {
+        context
+            .check()
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
         let local = self
-            .validated_local_fork_admission(child_timeline_id)
-            .map(|admission| ValidatedAdmissionV1::local(&admission));
+            .validated_local_fork_admission_with_context(child_timeline_id, context)
+            .and_then(|admission| local_admission_result(&admission, context));
+        context
+            .check()
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
         match validator {
             AuthorityValidatorV1::LocalOnly => local,
             AuthorityValidatorV1::CodeTwoAware => {
-                local.or_else(|_| self.imported_fork_admission(child_timeline_id))
+                local.or_else(|_| self.imported_fork_admission(child_timeline_id, context))
             }
         }
     }
 
     /// Read one child's classified authority graph under an explicit R6.9
     /// validator.
-    pub(super) fn validated_graph(
+    fn validated_graph_with_context(
         &self,
         child_timeline_id: TimelineId,
         validator: AuthorityValidatorV1,
+        context: &mut NativeReadContextV1<'_, '_>,
     ) -> Result<ValidatedGraphV1, AuthorityError> {
-        let local =
-            self.classified_authority_graph(child_timeline_id)
-                .map(|(admission, table, _)| ValidatedGraphV1 {
-                    admission: ValidatedAdmissionV1::local(&admission),
-                    table,
-                });
+        context
+            .check()
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
+        let local = self
+            .classified_authority_graph_with_context(child_timeline_id, context)
+            .and_then(|(admission, table, _)| {
+                local_admission_result(&admission, context)
+                    .map(|admission| ValidatedGraphV1 { admission, table })
+            });
+        context
+            .check()
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
         match validator {
             AuthorityValidatorV1::LocalOnly => local,
             AuthorityValidatorV1::CodeTwoAware => {
-                local.or_else(|_| self.imported_graph(child_timeline_id))
+                local.or_else(|_| self.imported_graph(child_timeline_id, context))
             }
         }
     }
@@ -90,23 +127,85 @@ impl MemoryStore {
     fn imported_fork_admission(
         &self,
         child_timeline_id: TimelineId,
+        context: &mut NativeReadContextV1<'_, '_>,
     ) -> Result<ValidatedAdmissionV1, AuthorityError> {
-        let admission = self
-            .imported_fork_admissions
+        self.imported_fork_admissions
             .get(&child_timeline_id)
-            .ok_or(AuthorityError::CorruptAuthority)?;
-        let mut rows = self
-            .imported_fork_attributions
-            .values()
-            .filter(|row| row.child == child_timeline_id);
-        let (Some(row), None) = (rows.next(), rows.next()) else {
-            return Err(AuthorityError::CorruptAuthority);
-        };
-        ImportedForkAttributionAdmissionV1::from_canonical_cbor(&row.stored.admission_bytes)
-            .ok()
-            .filter(|record| imported_admission_matches(admission, record, child_timeline_id))
-            .map(|record| ValidatedAdmissionV1::imported(admission, &record))
             .ok_or(AuthorityError::CorruptAuthority)
+            .and_then(|admission| {
+                context
+                    .suffix_row()
+                    .map_err(|_| AuthorityError::CorruptAuthority)
+                    .and_then(|()| self.imported_attribution_for_child(child_timeline_id, context))
+                    .and_then(|row| {
+                        context
+                            .imported_admission(&row.stored.admission_bytes)
+                            .map_err(|_| AuthorityError::CorruptAuthority)
+                    })
+                    .and_then(|record| {
+                        // The matcher computes one FAR1 digest before its post-check.
+                        context
+                            .canonical(admission.canonical_cbor_len())
+                            .map_err(|_| AuthorityError::CorruptAuthority)
+                            .and_then(|()| {
+                                let matches = imported_admission_matches(
+                                    admission,
+                                    &record,
+                                    child_timeline_id,
+                                );
+                                context
+                                    .check()
+                                    .map_err(|_| AuthorityError::CorruptAuthority)
+                                    .and_then(|()| {
+                                        matches
+                                            .then_some(())
+                                            .ok_or(AuthorityError::CorruptAuthority)
+                                    })
+                            })
+                            // Acceptance recomputes that digest and copies FAR1 fields.
+                            .and_then(|()| {
+                                context
+                                    .canonical(admission.canonical_cbor_len())
+                                    .map_err(|_| AuthorityError::CorruptAuthority)
+                            })
+                            .and_then(|()| {
+                                context
+                                    .canonical(admission.canonical_cbor_len())
+                                    .map_err(|_| AuthorityError::CorruptAuthority)
+                            })
+                            .map(|()| ValidatedAdmissionV1::imported(admission, &record))
+                            .and_then(|accepted| {
+                                context
+                                    .check()
+                                    .map(|()| accepted)
+                                    .map_err(|_| AuthorityError::CorruptAuthority)
+                            })
+                    })
+            })
+    }
+
+    /// Select the unique committed import for a child without copying its bytes.
+    fn imported_attribution_for_child(
+        &self,
+        child_timeline_id: TimelineId,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<&ImportedAttributionV1, AuthorityError> {
+        let mut selected = None;
+        for row in self.imported_fork_attributions.values() {
+            context
+                .suffix_row()
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
+            if row.child == child_timeline_id {
+                if selected.is_some() {
+                    return Err(AuthorityError::CorruptAuthority);
+                }
+                selected = Some(row);
+            }
+            context
+                .check()
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
+        }
+        selected.ok_or(AuthorityError::CorruptAuthority)
     }
 
     /// R6.9 (b), `FCS1` resolution: the imported `FCS1` is looked up by `FCT1`
@@ -114,28 +213,78 @@ impl MemoryStore {
     fn imported_graph(
         &self,
         child_timeline_id: TimelineId,
+        context: &mut NativeReadContextV1<'_, '_>,
     ) -> Result<ValidatedGraphV1, AuthorityError> {
-        let admission = self.imported_fork_admission(child_timeline_id)?;
+        self.imported_fork_admission(child_timeline_id, context)
+            .and_then(|admission| {
+                self.materialize_imported_classifier_graph(child_timeline_id, context)
+                    .and_then(|graph| {
+                        // Digest equality is separate from the three graph copies.
+                        context
+                            .canonical(graph.source.canonical_cbor_len())
+                            .map_err(|_| AuthorityError::CorruptAuthority)
+                            .and_then(|()| {
+                                context
+                                    .canonical(graph.table.canonical_cbor_len())
+                                    .map_err(|_| AuthorityError::CorruptAuthority)
+                            })
+                            .and_then(|()| {
+                                let matches = imported_graph_matches(&graph, &admission);
+                                context
+                                    .check()
+                                    .map_err(|_| AuthorityError::CorruptAuthority)
+                                    .and_then(|()| {
+                                        matches
+                                            .then_some(ValidatedGraphV1 {
+                                                admission,
+                                                table: graph.table,
+                                            })
+                                            .ok_or(AuthorityError::CorruptAuthority)
+                                    })
+                            })
+                    })
+            })
+    }
+
+    /// Materialize the selected classifier triple only after its copy charges.
+    fn materialize_imported_classifier_graph(
+        &self,
+        child_timeline_id: TimelineId,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<ImportedForkClassifierGraphV1, AuthorityError> {
         let table = self
             .fork_classifier_tables
             .get(&child_timeline_id)
             .ok_or(AuthorityError::CorruptAuthority)?;
-        let registration = self.child_registration(child_timeline_id)?;
+        context
+            .suffix_row()
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
+        let registration = self.child_registration_with_context(child_timeline_id, context)?;
         let source = self
             .imported_fork_classifier_sources
             .get(&table.input().source_configuration_revision_digest)
             .ok_or(AuthorityError::CorruptAuthority)?;
+        context
+            .suffix_row()
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
+        context
+            .canonical(source.canonical_cbor_len())
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
+        context
+            .canonical(table.canonical_cbor_len())
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
+        context
+            .canonical(registration.canonical_cbor_len())
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
         let graph = ImportedForkClassifierGraphV1 {
             source: source.clone(),
             table: table.clone(),
             registration: registration.clone(),
         };
-        imported_graph_matches(&graph, &admission)
-            .then_some(ValidatedGraphV1 {
-                admission,
-                table: graph.table,
-            })
-            .ok_or(AuthorityError::CorruptAuthority)
+        context
+            .check()
+            .map(|()| graph)
+            .map_err(|_| AuthorityError::CorruptAuthority)
     }
 
     /// The `FPO1` of one operation ID with its origin: a local row, or, for
@@ -145,24 +294,42 @@ impl MemoryStore {
         &self,
         operation_id: Hash,
         validator: AuthorityValidatorV1,
-    ) -> Option<(ForkPublicationOperationV1, ValidatedOriginV1)> {
-        let local = self
-            .fork_publication_operations
-            .get(&operation_id)
-            .map(|operation| (operation.clone(), ValidatedOriginV1::Local));
-        match validator {
-            AuthorityValidatorV1::LocalOnly => local,
-            AuthorityValidatorV1::CodeTwoAware => local.or_else(|| {
-                self.imported_fork_publication_operations
-                    .get(&operation_id)
-                    .map(|operation| {
-                        (
-                            operation.projection().clone(),
-                            ValidatedOriginV1::Imported(operation.authority_origin_digest()),
-                        )
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<Option<(ForkPublicationOperationV1, ValidatedOriginV1)>, PublicationError> {
+        context.check().and_then(
+            |()| match self.fork_publication_operations.get(&operation_id) {
+                Some(operation) => context
+                    .suffix_row()
+                    .and_then(|()| {
+                        charge_publication_copy(operation, ValidatedOriginV1::Local, context)
                     })
-            }),
+                    .and_then(|()| charge_origin_copy(ValidatedOriginV1::Local, context))
+                    .map(|()| (operation.clone(), ValidatedOriginV1::Local))
+                    .and_then(|row| context.check().map(|()| Some(row))),
+                None => self.imported_publication_operation_row(operation_id, validator, context),
+            },
+        )
+    }
+
+    /// Read an imported projection only after the local-priority lookup failed.
+    fn imported_publication_operation_row(
+        &self,
+        operation_id: Hash,
+        validator: AuthorityValidatorV1,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<Option<(ForkPublicationOperationV1, ValidatedOriginV1)>, PublicationError> {
+        if validator == AuthorityValidatorV1::LocalOnly {
+            return Ok(None);
         }
+        let Some(operation) = self.imported_fork_publication_operations.get(&operation_id) else {
+            return Ok(None);
+        };
+        context.suffix_row()?;
+        let origin = ValidatedOriginV1::Imported(operation.authority_origin_digest());
+        charge_publication_copy(operation.projection(), origin, context)?;
+        charge_origin_copy(origin, context)?;
+        let row = (operation.projection().clone(), origin);
+        context.check().map(|()| Some(row))
     }
 
     /// Where the trusted publication read takes the retained key from (ADR-105
@@ -172,13 +339,14 @@ impl MemoryStore {
     fn retained_key_evidence(
         &self,
         admission: &PublicationSourceResultV1<ValidatedAdmissionV1>,
+        context: &mut NativeReadContextV1<'_, '_>,
     ) -> PublicationSourceResultV1<RetainedKeyEvidenceV1> {
         admission
             .as_ref()
             .ok()
             .and_then(ValidatedAdmissionV1::import)
             .map_or(Ok(RetainedKeyEvidenceV1::LiveRegistry), |import| {
-                self.imported_key_evidence(import)
+                self.imported_key_evidence(import, context)
             })
     }
 
@@ -187,21 +355,42 @@ impl MemoryStore {
     fn imported_key_evidence(
         &self,
         import: ValidatedImportV1,
+        context: &mut NativeReadContextV1<'_, '_>,
     ) -> PublicationSourceResultV1<RetainedKeyEvidenceV1> {
-        self.imported_fork_key_evidence
-            .get(&import.import_operation_id)
-            .zip(
-                self.imported_fork_attributions
+        context
+            .check()
+            .map_err(|_| PublicationSourceErrorV1::Invalid)
+            .and_then(|()| {
+                self.imported_fork_key_evidence
                     .get(&import.import_operation_id)
-                    .filter(|row| row.stored.envelope_digest == import.full_envelope_digest),
-            )
-            .map(|(evidence, _)| {
-                RetainedKeyEvidenceV1::Imported(Box::new(RetainedImportedKeyV1 {
-                    record: evidence.record,
-                    tombstone: evidence.tombstone,
-                }))
+                    .zip(
+                        self.imported_fork_attributions
+                            .get(&import.import_operation_id)
+                            .filter(|row| {
+                                row.stored.envelope_digest == import.full_envelope_digest
+                            }),
+                    )
+                    .ok_or(PublicationSourceErrorV1::Invalid)
             })
-            .ok_or(PublicationSourceErrorV1::Invalid)
+            .and_then(|(evidence, _)| {
+                context
+                    .suffix_row()
+                    .and_then(|()| context.suffix_row())
+                    .and_then(|()| context.canonical(evidence.record.canonical_cbor_len()))
+                    .and_then(|()| {
+                        evidence.tombstone.as_ref().map_or(Ok(()), |tombstone| {
+                            context.canonical(tombstone.canonical_cbor_len())
+                        })
+                    })
+                    .map(|()| {
+                        RetainedKeyEvidenceV1::Imported(Box::new(RetainedImportedKeyV1 {
+                            record: evidence.record,
+                            tombstone: evidence.tombstone,
+                        }))
+                    })
+                    .and_then(|retained| context.check().map(|()| retained))
+                    .map_err(|_| PublicationSourceErrorV1::Invalid)
+            })
     }
 
     /// Read the classified suffix after `from_logical_seq` under an explicit
@@ -216,81 +405,165 @@ impl MemoryStore {
         from_logical_seq: u64,
         validator: AuthorityValidatorV1,
     ) -> Result<PublicationSuffixV1, AuthorityError> {
+        self.read_fork_event_suffix_with_context(
+            child_timeline_id,
+            from_logical_seq,
+            validator,
+            &mut NativeReadContextV1::ordinary(),
+        )
+    }
+
+    fn read_fork_event_suffix_with_context(
+        &self,
+        child_timeline_id: TimelineId,
+        from_logical_seq: u64,
+        validator: AuthorityValidatorV1,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<PublicationSuffixV1, AuthorityError> {
+        context
+            .node(0)
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
         let prefix = self
             .logical_prefix(child_timeline_id)
             .map_err(|_| AuthorityError::CorruptAuthority)?;
         let events = &self.state(child_timeline_id).events;
-        let logical_seqs = events
-            .iter()
-            .filter_map(|event| {
-                prefix
-                    .checked_add(event.seq.as_u64())
-                    .map(|logical_seq| (event.id, logical_seq))
-            })
-            .collect::<HashMap<_, _>>();
-        let anchored =
-            |event_id: EventId, logical_seq: u64| logical_seqs.get(&event_id) == Some(&logical_seq);
-        let orphaned_operation = self.fork_append_operations.values().any(|operation| {
-            operation.input().child_timeline_id == child_timeline_id
-                && !anchored(operation.input().event_id, operation.input().logical_seq)
-        });
-        let orphaned_origin = self.fork_event_origins.values().any(|origin| {
-            origin.input().fork_timeline_id == child_timeline_id
-                && !anchored(origin.input().event_id, origin.input().logical_seq)
-        });
-        let orphaned_intervention = self.fork_intervention_admissions.values().any(|record| {
-            record.input().fork_timeline_id == child_timeline_id
-                && !anchored(record.input().event_id, record.input().logical_seq)
-        });
-        if orphaned_operation || orphaned_origin || orphaned_intervention {
-            return Err(AuthorityError::CorruptAuthority);
-        }
+        let logical_seqs = suffix_logical_seqs(events, prefix, context)?;
+        self.check_suffix_anchors(child_timeline_id, &logical_seqs, context)?;
         if events.is_empty() {
             return Ok(Vec::new());
         }
-        let mut operations = HashMap::with_capacity(logical_seqs.len());
+        let mut operations = HashMap::new();
         for operation in self.fork_append_operations.values() {
-            if logical_seqs.contains_key(&operation.input().event_id)
-                && operations
+            context
+                .suffix_row()
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
+            if logical_seqs.contains_key(&operation.input().event_id) {
+                context
+                    .bytes(16)
+                    .map_err(|_| AuthorityError::CorruptAuthority)?;
+                if operations
                     .insert(operation.input().event_id, operation)
                     .is_some()
-            {
-                return Err(AuthorityError::CorruptAuthority);
+                {
+                    return Err(AuthorityError::CorruptAuthority);
+                }
             }
+            context
+                .check()
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
         }
-        let graph = self.validated_graph(child_timeline_id, validator)?;
-        events
-            .iter()
-            .filter_map(|event| {
-                prefix
-                    .checked_add(event.seq.as_u64())
-                    .filter(|logical_seq| *logical_seq >= from_logical_seq)
-                    .map(|logical_seq| (event, logical_seq))
-            })
-            .map(|(event, logical_seq)| {
+        context
+            .check()
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
+        let graph = self.validated_graph_with_context(child_timeline_id, validator, context)?;
+        context
+            .check()
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
+        let mut suffix = Vec::new();
+        for event in events {
+            context
+                .suffix_row()
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
+            if let Some(logical_seq) = prefix
+                .checked_add(event.seq.as_u64())
+                .filter(|logical_seq| *logical_seq >= from_logical_seq)
+            {
                 let operation = operations
                     .get(&event.id)
                     .copied()
                     .ok_or(AuthorityError::CorruptAuthority)?;
                 if operation.input().logical_seq != logical_seq
                     || operation.input().fork_admission_digest != graph.admission.digest()
-                    || operation.input().classifier_revision_digest != graph.table.digest()
                 {
                     return Err(AuthorityError::CorruptAuthority);
                 }
+                context
+                    .canonical(graph.table.canonical_cbor_len())
+                    .map_err(|_| AuthorityError::CorruptAuthority)?;
+                let classifier_digest = graph.table.digest();
+                context
+                    .check()
+                    .map_err(|_| AuthorityError::CorruptAuthority)?;
+                if operation.input().classifier_revision_digest != classifier_digest {
+                    return Err(AuthorityError::CorruptAuthority);
+                }
+                context
+                    .bytes(event.payload.len())
+                    .map_err(|_| AuthorityError::CorruptAuthority)?;
+                context
+                    .bytes(event.event_type.as_str().len())
+                    .map_err(|_| AuthorityError::CorruptAuthority)?;
                 let committed = Event {
                     seq: Seq::from_u64(logical_seq),
                     ..event.clone()
                 };
-                self.validate_classified_records(
+                let (origin, intervention) = self.validate_classified_records_with_context(
                     operation,
                     &committed,
                     &graph.table,
                     graph.admission.origin(),
-                )
-                .map(|(origin, intervention)| (origin, intervention, operation.clone()))
-            })
-            .collect()
+                    context,
+                )?;
+                context
+                    .canonical(operation.canonical_cbor_len())
+                    .map_err(|_| AuthorityError::CorruptAuthority)?;
+                suffix.push((origin, intervention, operation.clone()));
+            }
+            context
+                .check()
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
+        }
+        Ok(suffix)
+    }
+
+    fn check_suffix_anchors(
+        &self,
+        child_timeline_id: TimelineId,
+        logical_seqs: &HashMap<EventId, u64>,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<(), AuthorityError> {
+        let anchored =
+            |event_id: EventId, logical_seq: u64| logical_seqs.get(&event_id) == Some(&logical_seq);
+        for operation in self.fork_append_operations.values() {
+            context
+                .suffix_row()
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
+            if operation.input().child_timeline_id == child_timeline_id
+                && !anchored(operation.input().event_id, operation.input().logical_seq)
+            {
+                return Err(AuthorityError::CorruptAuthority);
+            }
+            context
+                .check()
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
+        }
+        for origin in self.fork_event_origins.values() {
+            context
+                .suffix_row()
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
+            if origin.input().fork_timeline_id == child_timeline_id
+                && !anchored(origin.input().event_id, origin.input().logical_seq)
+            {
+                return Err(AuthorityError::CorruptAuthority);
+            }
+            context
+                .check()
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
+        }
+        for record in self.fork_intervention_admissions.values() {
+            context
+                .suffix_row()
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
+            if record.input().fork_timeline_id == child_timeline_id
+                && !anchored(record.input().event_id, record.input().logical_seq)
+            {
+                return Err(AuthorityError::CorruptAuthority);
+            }
+            context
+                .check()
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
+        }
+        Ok(())
     }
 
     /// Read and trust one committed publication graph under an explicit R6.9
@@ -304,52 +577,139 @@ impl MemoryStore {
         final_logical_head: u64,
         validator: AuthorityValidatorV1,
     ) -> Result<crate::CommittedForkManifestV1, PublicationError> {
-        self.fork_publication_bindings
-            .get(&(child_timeline_id, final_logical_head))
-            .copied()
-            .ok_or(PublicationError::PublicationMissing)
-            .and_then(|binding| {
-                let input = binding.input();
-                let artifact = self
-                    .fork_publication_artifacts
-                    .get(&input.signed_manifest_record_id)
-                    .cloned();
-                self.publication_operation_row(input.operation_id, validator)
-                    .zip(artifact)
-                    .map(
-                        |((operation, origin), artifact)| CommittedPublicationRowsV1 {
-                            child_timeline_id,
-                            final_logical_head,
-                            binding,
-                            operation,
-                            origin,
-                            artifact,
-                        },
-                    )
-                    .ok_or(PublicationError::PublicationConflict)
-            })
-            .and_then(|rows| {
-                let admission = self.fork_publication_admission(child_timeline_id, validator);
-                let retained = self.retained_key_evidence(&admission);
-                let head = Seq::from_u64(final_logical_head);
-                let final_chain_head_hash = self
-                    .compute_chain_hash_at_unchecked(child_timeline_id, head)
-                    .map_err(PublicationSourceErrorV1::from);
-                let suffix = self.fork_publication_suffix(
-                    child_timeline_id,
-                    publication_parent_head(&admission),
-                    validator,
-                );
-                let sources = CommittedPublicationSourcesV1 {
-                    admission,
-                    retained,
-                    final_chain_head_hash,
-                    suffix,
-                    registry: Ok(self.key_registry.clone()),
-                };
-                trusted_committed_manifest(&rows, sources)
-            })
+        self.read_committed_with_context(
+            child_timeline_id,
+            final_logical_head,
+            validator,
+            &mut NativeReadContextV1::ordinary(),
+        )
     }
+
+    pub(super) fn read_committed_with_context(
+        &self,
+        child_timeline_id: TimelineId,
+        final_logical_head: u64,
+        validator: AuthorityValidatorV1,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<crate::CommittedForkManifestV1, PublicationError> {
+        context.check()?;
+        self.publication_rows_with_context(
+            child_timeline_id,
+            final_logical_head,
+            validator,
+            context,
+        )
+        .and_then(|rows| {
+            let admission = self
+                .validated_admission_with_context(child_timeline_id, validator, context)
+                .map_err(PublicationSourceErrorV1::from);
+            let retained = self.retained_key_evidence(&admission, context);
+            let head = Seq::from_u64(final_logical_head);
+            let final_chain_head_hash = self
+                .compute_chain_hash_with_context(child_timeline_id, head, context)
+                .map_err(PublicationSourceErrorV1::from);
+            let suffix = publication_parent_head(&admission).and_then(|parent| {
+                self.read_fork_event_suffix_with_context(
+                    child_timeline_id,
+                    parent.saturating_add(1),
+                    validator,
+                    context,
+                )
+                .map_err(PublicationSourceErrorV1::from)
+            });
+            let sources = CommittedPublicationSourcesV1 {
+                admission,
+                retained,
+                final_chain_head_hash,
+                suffix,
+                registry: Ok(self.key_registry.as_ref()),
+            };
+            trusted_committed_manifest_with_context(&rows, sources, context)
+        })
+    }
+
+    fn publication_rows_with_context(
+        &self,
+        child_timeline_id: TimelineId,
+        final_logical_head: u64,
+        validator: AuthorityValidatorV1,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<CommittedPublicationRowsV1<'_>, PublicationError> {
+        let binding = self
+            .fork_publication_bindings
+            .get(&(child_timeline_id, final_logical_head))
+            .ok_or(PublicationError::PublicationMissing)?;
+        context.suffix_row()?;
+        context.canonical(binding.canonical_cbor_len())?;
+        let binding = *binding;
+        context.check()?;
+        let input = binding.input();
+        let artifact = if let Some(artifact) = self
+            .fork_publication_artifacts
+            .get(&input.signed_manifest_record_id)
+        {
+            context.suffix_row()?;
+            context.check()?;
+            Some(Cow::Borrowed(artifact))
+        } else {
+            None
+        };
+        self.publication_operation_row(input.operation_id, validator, context)?
+            .zip(artifact)
+            .map(
+                |((operation, origin), artifact)| CommittedPublicationRowsV1 {
+                    child_timeline_id,
+                    final_logical_head,
+                    binding,
+                    operation,
+                    origin,
+                    artifact,
+                },
+            )
+            .ok_or(PublicationError::PublicationConflict)
+    }
+}
+
+fn local_admission_result(
+    record: &ForkAdmissionRecordV1,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> Result<ValidatedAdmissionV1, AuthorityError> {
+    // This bounded native constructor encodes one digest and copies fields.
+    context
+        .canonical(record.canonical_cbor_len())
+        .map_err(|_| AuthorityError::CorruptAuthority)?;
+    context
+        .canonical(record.canonical_cbor_len())
+        .map_err(|_| AuthorityError::CorruptAuthority)?;
+    let admitted = ValidatedAdmissionV1::local(record);
+    context
+        .check()
+        .map(|()| admitted)
+        .map_err(|_| AuthorityError::CorruptAuthority)
+}
+
+fn suffix_logical_seqs(
+    events: &[Event],
+    prefix: u64,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> Result<HashMap<EventId, u64>, AuthorityError> {
+    let mut logical_seqs = HashMap::new();
+    for event in events {
+        context
+            .suffix_row()
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
+        if let Some(logical_seq) = prefix.checked_add(event.seq.as_u64()) {
+            // Only Event ID and logical sequence are copied into this index.
+            context
+                .bytes(16 + 8)
+                .map_err(|_| AuthorityError::CorruptAuthority)?;
+            logical_seqs.insert(event.id, logical_seq);
+        }
+        context
+            .check()
+            .map_err(|_| AuthorityError::CorruptAuthority)?;
+    }
+    Ok(logical_seqs)
 }
 
 #[cfg(test)]
@@ -358,8 +718,8 @@ mod tests {
     use pos_core::{
         store::EventStore, ForkAppendSourceIdentityV1, ForkClassifierRegistrationInputV1,
         ForkClassifierSourceInputV1, ForkClassifierSourceV1, ForkEventSourceDescriptorV1,
-        ImportedForkAttributionAdmissionInputV1, ImportedForkPublicationOperationV1,
-        ImportedKeyRecordV1, PublicKey, Signature, WallTime,
+        ImportedForkAttributionAdmissionInputV1, ImportedForkAttributionAdmissionV1,
+        ImportedForkPublicationOperationV1, ImportedKeyRecordV1, PublicKey, Signature, WallTime,
     };
 
     use super::*;
@@ -403,6 +763,525 @@ mod tests {
         })
     }
 
+    fn imported_admission_cost(state: &Imported) -> Fallible<(usize, usize)> {
+        let row = state
+            .store
+            .imported_fork_attributions
+            .values()
+            .find(|row| row.child == state.child)
+            .ok_or("no IFA1")?;
+        let record =
+            ImportedForkAttributionAdmissionV1::from_canonical_cbor(&row.stored.admission_bytes)?;
+        let far = state
+            .store
+            .imported_fork_admissions
+            .get(&state.child)
+            .ok_or("no FAR1")?;
+        let issuer = &record.input().issuer;
+        // Native encoder outputs independently measure decoder buffers,
+        // two actual FAR1 digests, and the accepted result's FAR1 field copy.
+        let bytes = issuer.issuer_id().len()
+            + issuer.to_canonical_cbor().len() * 2
+            + row.stored.admission_bytes.len()
+            + far.to_canonical_cbor().len() * 3;
+        Ok((bytes, 1 + state.store.imported_fork_attributions.len()))
+    }
+
+    fn imported_graph_cost(state: &Imported) -> Fallible<(usize, usize)> {
+        let (bytes, rows) = imported_admission_cost(state)?;
+        let table = state
+            .store
+            .fork_classifier_tables
+            .get(&state.child)
+            .ok_or("no FCT1")?;
+        let source = state
+            .store
+            .imported_fork_classifier_sources
+            .get(&table.input().source_configuration_revision_digest)
+            .ok_or("no FCS1")?;
+        let registration = state
+            .store
+            .child_registration_with_context(state.child, &mut NativeReadContextV1::ordinary())?;
+        Ok((
+            bytes
+                + source.to_canonical_cbor().len() * 2
+                + table.to_canonical_cbor().len() * 2
+                + registration.to_canonical_cbor().len(),
+            rows + 2 + state.store.fork_classifier_registrations.len(),
+        ))
+    }
+
+    #[test]
+    fn publication_rows_gate_selected_native_or_projection_copies_before_materialization(
+    ) -> Fallible<()> {
+        use crate::{ForkReplayReadBudgetV1, ForkReplayReadLimitsV1};
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+
+        let mut state = imported(Shape::EmptyUnclassified)?;
+        let committed = state.store.read_committed(state.child, state.head)?;
+        let owner = committed
+            .operation
+            .input()
+            .signing_identity
+            .owner_id
+            .as_str()
+            .len();
+        let projection = 32 + 16 + 8 + 32 + 32 + owner + 1 + 8 + 32 + 32 + 32 + 1;
+        for local in [false, true] {
+            if local {
+                state.store.fork_publication_operations.insert(
+                    committed.operation.input().operation_id,
+                    committed.operation.clone(),
+                );
+            }
+            let bytes = committed.binding.to_canonical_cbor().len()
+                + if local {
+                    committed.operation.to_canonical_cbor().len() + 1
+                } else {
+                    projection + 1 + 32
+                };
+            for (byte_limit, row_limit, succeeds) in
+                [(bytes, 3, true), (bytes - 1, 3, false), (bytes, 2, false)]
+            {
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, row_limit, byte_limit, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                let rows = state.store.publication_rows_with_context(
+                    state.child,
+                    state.head,
+                    AuthorityValidatorV1::CodeTwoAware,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
+                if succeeds {
+                    let rows = rows?;
+                    assert_eq!(rows.operation, committed.operation);
+                    assert_eq!(
+                        rows.origin,
+                        if local {
+                            ValidatedOriginV1::Local
+                        } else {
+                            ValidatedOriginV1::Imported(
+                                committed.authority_origin_digest.ok_or("no origin")?,
+                            )
+                        }
+                    );
+                    assert_eq!(budget.remaining_native_bytes(), 0);
+                } else {
+                    assert!(rows.is_err());
+                    assert!(budget.check_time().is_err());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Independent native byte encoders plus logical copy fields; never the
+    /// production length/debit helpers or a ledger measurement as the oracle.
+    fn imported_read_cost(state: &Imported) -> Fallible<(usize, usize, usize)> {
+        let committed = state.store.read_committed(state.child, state.head)?;
+        let owner = committed
+            .operation
+            .input()
+            .signing_identity
+            .owner_id
+            .as_str()
+            .len();
+        let projection = 32 + 16 + 8 + 32 + 32 + owner + 1 + 8 + 32 + 32 + 32 + 1;
+        let signed =
+            pos_core::SignedForkReproManifestV1::from_canonical_cbor(&committed.outer_bytes)?;
+        let (admission_bytes, admission_rows) = imported_admission_cost(state)?;
+        let evidence = state
+            .store
+            .imported_fork_key_evidence
+            .values()
+            .next()
+            .ok_or("no IKR1")?;
+        let binding = committed.binding.to_canonical_cbor().len();
+        let origin = 1 + 32;
+        let receipt = 32 + 16 + 8 + 32;
+        let registry_getter = owner + 1 + 8 + 1 + 32 + 1 + 32;
+        let registry_conversion = state
+            .store
+            .key_registry
+            .as_ref()
+            .and_then(|registry| registry.key_record(committed.operation.input().signing_identity))
+            .map_or(0, |key| {
+                owner
+                    + 1
+                    + 8
+                    + 1
+                    + 32
+                    + if key.private_material_digest.is_some() {
+                        32
+                    } else {
+                        0
+                    }
+            });
+        let mut bytes = binding
+            + projection
+            + origin
+            + admission_bytes
+            + evidence.record.to_canonical_cbor().len()
+            + evidence
+                .tombstone
+                .as_ref()
+                .map_or(0, |key| key.to_canonical_cbor().len())
+            + 2 * (16 + 16)
+            + 8
+            + committed.outer_bytes.len() * 2
+            + signed.manifest_bytes().len() * 2
+            + signed.manifest().input().intervention_sequences.len() * 8
+            + receipt
+            + projection
+            + binding
+            + origin
+            + registry_getter
+            + registry_conversion;
+        let mut rows = 3 + admission_rows + 2 + 1;
+        let events = &state.store.state(state.child).events;
+        for (timeline, limit) in [
+            (state.world.root, PARENT_CUT),
+            (state.child, state.head - PARENT_CUT),
+        ] {
+            for event in &state.store.state(timeline).events {
+                if event.seq.as_u64() <= limit {
+                    bytes += event.payload.len() + event.id.to_string().len();
+                    rows += 1;
+                }
+            }
+        }
+        let (suffix_bytes, suffix_rows) = imported_suffix_selection_cost(state)?;
+        bytes += suffix_bytes;
+        rows += suffix_rows;
+        let imported = ImportedForkPublicationOperationV1::from_local(
+            committed.operation,
+            committed.authority_origin_digest.ok_or("no origin")?,
+        );
+        bytes += projection + 32 + imported.to_canonical_cbor().len() + 32 + 32;
+        Ok((bytes, rows, if events.is_empty() { 6 } else { 7 }))
+    }
+
+    /// Suffix indexing, native validation and the later shared sequence pass,
+    /// independently derived from stored records and their byte encoders.
+    fn imported_suffix_selection_cost(state: &Imported) -> Fallible<(usize, usize)> {
+        let events = &state.store.state(state.child).events;
+        let mut rows = events.len() * 2
+            + state.store.fork_append_operations.len()
+            + state.store.fork_event_origins.len()
+            + state.store.fork_intervention_admissions.len();
+        let mut bytes = events.len() * (16 + 8);
+        if !events.is_empty() {
+            let (graph_bytes, graph_rows) = imported_graph_cost(state)?;
+            bytes += graph_bytes;
+            rows += graph_rows + events.len() + state.store.fork_append_operations.len();
+            let table = state
+                .store
+                .fork_classifier_tables
+                .get(&state.child)
+                .ok_or("no FCT1")?;
+            let classifier_copy = table
+                .input()
+                .routes
+                .iter()
+                .map(|route| route.source().route().len() + 32 + 1)
+                .sum::<usize>();
+            for event in events {
+                let operation = state
+                    .store
+                    .fork_append_operations
+                    .values()
+                    .find(|operation| operation.input().event_id == event.id)
+                    .ok_or("no FOP1")?;
+                let origin = state
+                    .store
+                    .fork_event_origins
+                    .get(&event.id)
+                    .ok_or("no EOR1")?;
+                bytes += 16
+                    + event.payload.len()
+                    + event.event_type.as_str().len()
+                    + table.to_canonical_cbor().len() * 2
+                    + classifier_copy
+                    + origin.to_canonical_cbor().len() * 2
+                    + state
+                        .store
+                        .fork_intervention_admissions
+                        .get(&event.id)
+                        .map_or(0, |record| record.to_canonical_cbor().len() * 2)
+                    + operation.to_canonical_cbor().len();
+            }
+        }
+        Ok((bytes, rows))
+    }
+
+    #[test]
+    fn protected_memory_port_charges_repeated_imported_reads_with_independent_exact_limits(
+    ) -> Fallible<()> {
+        use crate::{
+            ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
+            ForkReplayRequirementV1,
+        };
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use pos_core::{deletion_receipt, KeyDestructionRequestV1};
+        use std::time::Duration;
+        for shape in [
+            Shape::Mixed,
+            Shape::EmptyClassified,
+            Shape::EmptyUnclassified,
+        ] {
+            for destroyed in [false, true] {
+                let mut state = imported_with(
+                    shape,
+                    &Spec {
+                        destroyed_key: destroyed,
+                        ..Spec::default()
+                    },
+                )?;
+                for local_key in [false, true] {
+                    if local_key {
+                        let mut registry = state
+                            .world
+                            .registry_with_attribution_key("creator-a", 0x71)?;
+                        if destroyed {
+                            let request = KeyDestructionRequestV1::new(
+                                attribution_identity("creator-a", 1),
+                                attribution_material().material_digest(),
+                                hash(0x75),
+                            );
+                            registry.begin_key_destruction(request)?;
+                            registry
+                                .complete_key_destruction(request, deletion_receipt(&request))?;
+                        }
+                        state.store.key_registry = Some(registry);
+                    }
+                    let committed = state.store.read_committed(state.child, state.head)?;
+                    let requirement = ForkReplayRequirementV1::new(
+                        state.child,
+                        Seq::from_u64(state.head),
+                        committed.record_id,
+                        committed.authority_origin_digest,
+                    )?;
+                    let (bytes, rows, visits) = imported_read_cost(&state)?;
+                    for (byte_limit, row_limit, visit_limit, succeeds) in [
+                        (bytes * 2, rows * 2, visits * 2, true),
+                        (bytes * 2 - 1, rows * 2, visits * 2, false),
+                        (bytes * 2, rows * 2 - 1, visits * 2, false),
+                        (bytes * 2, rows * 2, visits * 2 - 1, false),
+                    ] {
+                        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                        let start = clock.mark();
+                        let limits = ForkReplayReadLimitsV1::new(
+                            1,
+                            visit_limit,
+                            row_limit,
+                            byte_limit,
+                            1_000_000,
+                        )?;
+                        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                        let result = state
+                            .store
+                            .validate_fork_replay_authority(&requirement, &mut budget)
+                            .and_then(|first| {
+                                state
+                                    .store
+                                    .validate_fork_replay_authority(&requirement, &mut budget)
+                                    .map(|second| {
+                                        assert_eq!(first, second);
+                                        second
+                                    })
+                            });
+                        if succeeds {
+                            assert_eq!(result?.requirement(), requirement);
+                            assert_eq!(budget.remaining_native_bytes(), 0);
+                        } else {
+                            assert!(result.is_err());
+                            assert!(budget.check_time().is_err());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn protected_memory_port_latches_expiry_at_every_observable_native_boundary() -> Fallible<()> {
+        use crate::{
+            ForkReplayAuthorityReadErrorV1, ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1,
+            ForkReplayReadLimitsV1, ForkReplayRequirementV1,
+        };
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+
+        for shape in [
+            Shape::Mixed,
+            Shape::EmptyClassified,
+            Shape::EmptyUnclassified,
+        ] {
+            for destroyed in [false, true] {
+                let state = imported_with(
+                    shape,
+                    &Spec {
+                        destroyed_key: destroyed,
+                        ..Spec::default()
+                    },
+                )?;
+                let committed = state.store.read_committed(state.child, state.head)?;
+                let requirement = ForkReplayRequirementV1::new(
+                    state.child,
+                    Seq::from_u64(state.head),
+                    committed.record_id,
+                    committed.authority_origin_digest,
+                )?;
+                let (bytes, rows, visits) = imported_read_cost(&state)?;
+                let mut completed = false;
+                // Every possible original-clock checkpoint before two complete
+                // reads. Stop only when expiry is beyond the last checkpoint;
+                // the cap bounds the test, not the adapter's operation budget.
+                for marks in 2..2_048 {
+                    let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                        std::iter::repeat_n(Duration::ZERO, marks).chain([Duration::from_secs(2)]),
+                    );
+                    let start = clock.mark();
+                    let limits =
+                        ForkReplayReadLimitsV1::new(1, visits * 2, rows * 2, bytes * 2, 1_000_000)?;
+                    let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                    let result = state
+                        .store
+                        .validate_fork_replay_authority(&requirement, &mut budget)
+                        .and_then(|_| {
+                            state
+                                .store
+                                .validate_fork_replay_authority(&requirement, &mut budget)
+                        });
+                    match result {
+                        Ok(evidence) => {
+                            assert_eq!(evidence.requirement(), requirement);
+                            assert_eq!(budget.remaining_native_bytes(), 0);
+                            completed = true;
+                            break;
+                        }
+                        Err(error) => {
+                            assert_eq!(error, ForkReplayAuthorityReadErrorV1::BoundsExceeded);
+                            let remaining = budget.remaining_native_bytes();
+                            assert_eq!(
+                                state
+                                    .store
+                                    .validate_fork_replay_authority(&requirement, &mut budget),
+                                Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded)
+                            );
+                            assert_eq!(budget.remaining_native_bytes(), remaining);
+                        }
+                    }
+                }
+                assert!(completed, "no complete read within the test checkpoint cap");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn protected_memory_port_refuses_all_current_native_attribution_tampers() -> Fallible<()> {
+        use crate::{
+            ForkReplayAuthorityReadErrorV1, ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1,
+            ForkReplayReadLimitsV1, ForkReplayRequirementV1,
+        };
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+
+        for (label, tamper) in refused_tampers() {
+            let mut state = imported(Shape::Mixed)?;
+            let committed = state.store.read_committed(state.child, state.head)?;
+            let requirement = ForkReplayRequirementV1::new(
+                state.child,
+                Seq::from_u64(state.head),
+                committed.record_id,
+                committed.authority_origin_digest,
+            )?;
+            tamper(&mut state)?;
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, 8 * 1024 * 1024, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                state
+                    .store
+                    .validate_fork_replay_authority(&requirement, &mut budget),
+                Err(ForkReplayAuthorityReadErrorV1::CorruptAuthority),
+                "{label}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn imported_admission_and_graph_charge_actual_work_with_exact_limits() -> Fallible<()> {
+        use crate::{ForkReplayReadBudgetV1, ForkReplayReadLimitsV1};
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+        for shape in [
+            Shape::Mixed,
+            Shape::EmptyClassified,
+            Shape::EmptyUnclassified,
+        ] {
+            let state = imported(shape)?;
+            for graph in [false, true] {
+                if graph && shape == Shape::EmptyUnclassified {
+                    continue;
+                }
+                let (bytes, rows) = if graph {
+                    imported_graph_cost(&state)?
+                } else {
+                    imported_admission_cost(&state)?
+                };
+                for (byte_limit, row_limit, succeeds) in [
+                    (bytes, rows, true),
+                    (bytes - 1, rows, false),
+                    (bytes, rows - 1, false),
+                ] {
+                    let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                    let start = clock.mark();
+                    let limits =
+                        ForkReplayReadLimitsV1::new(1, 1, row_limit, byte_limit, 1_000_000)?;
+                    let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                    let mut context = NativeReadContextV1::protected(&mut budget);
+                    let result = if graph {
+                        state
+                            .store
+                            .validated_graph_with_context(
+                                state.child,
+                                AuthorityValidatorV1::CodeTwoAware,
+                                &mut context,
+                            )
+                            .map(|graph| graph.admission)
+                    } else {
+                        state.store.validated_admission_with_context(
+                            state.child,
+                            AuthorityValidatorV1::CodeTwoAware,
+                            &mut context,
+                        )
+                    };
+                    assert_eq!(result.is_ok(), succeeds);
+                    if succeeds {
+                        assert_eq!(
+                            result?,
+                            state.store.validated_admission(
+                                state.child,
+                                AuthorityValidatorV1::CodeTwoAware
+                            )?
+                        );
+                        assert_eq!(budget.remaining_native_bytes(), 0);
+                    } else {
+                        assert!(budget.check_time().is_err());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The suffix read and publication read of one imported child.
     fn reads(state: &Imported) -> (Option<AuthorityError>, Option<PublicationError>) {
         (
@@ -418,6 +1297,304 @@ mod tests {
         Some(AuthorityError::CorruptAuthority),
         Some(PublicationError::PublicationConflict),
     );
+
+    /// Isolate the shared tail from adapter accounting; gather ordinary native
+    /// sources before supplying this test's borrowed ledger to the tail owner.
+    fn shared_native_read(
+        state: &Imported,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<crate::CommittedForkManifestV1, PublicationError> {
+        let binding = *state
+            .store
+            .fork_publication_bindings
+            .get(&(state.child, state.head))
+            .ok_or(PublicationError::PublicationMissing)?;
+        let (operation, origin) = state
+            .store
+            .publication_operation_row(
+                binding.input().operation_id,
+                AuthorityValidatorV1::CodeTwoAware,
+                &mut NativeReadContextV1::ordinary(),
+            )?
+            .ok_or(PublicationError::PublicationConflict)?;
+        let artifact = state
+            .store
+            .fork_publication_artifacts
+            .get(&binding.input().signed_manifest_record_id)
+            .ok_or(PublicationError::PublicationConflict)?;
+        let rows = CommittedPublicationRowsV1 {
+            child_timeline_id: state.child,
+            final_logical_head: state.head,
+            binding,
+            operation,
+            origin,
+            artifact: Cow::Borrowed(artifact),
+        };
+        let admission = state
+            .store
+            .fork_publication_admission(state.child, AuthorityValidatorV1::CodeTwoAware);
+        let retained = state
+            .store
+            .retained_key_evidence(&admission, &mut NativeReadContextV1::ordinary());
+        let suffix = state.store.fork_publication_suffix(
+            state.child,
+            publication_parent_head(&admission),
+            AuthorityValidatorV1::CodeTwoAware,
+        );
+        let final_chain_head_hash = state
+            .store
+            .compute_chain_hash_at_unchecked(state.child, Seq::from_u64(state.head))
+            .map_err(PublicationSourceErrorV1::from);
+        trusted_committed_manifest_with_context(
+            &rows,
+            CommittedPublicationSourcesV1 {
+                admission,
+                retained,
+                suffix,
+                final_chain_head_hash,
+                registry: Ok(state.store.key_registry.as_ref()),
+            },
+            context,
+        )
+    }
+
+    #[test]
+    fn shared_native_batches_charge_exact_buffers_and_latch_inside_validation_expiry(
+    ) -> Fallible<()> {
+        use crate::{
+            ForkReplayAuthorityReadErrorV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
+        };
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+
+        for shape in [
+            Shape::Mixed,
+            Shape::EmptyClassified,
+            Shape::EmptyUnclassified,
+        ] {
+            let state = imported(shape)?;
+            let committed = state.store.read_committed(state.child, state.head)?;
+            let signed =
+                pos_core::SignedForkReproManifestV1::from_canonical_cbor(&committed.outer_bytes)?;
+            let owner_bytes = committed
+                .operation
+                .input()
+                .signing_identity
+                .owner_id
+                .as_str()
+                .len();
+            let receipt_copy = 32 + 16 + 8 + 32;
+            let projection_copy = 32 + 16 + 8 + 32 + 32 + owner_bytes + 1 + 8 + 32 + 32 + 32 + 1;
+            let origin_copy = 1 + 32;
+            let absent_key_copy = owner_bytes + 1 + 8 + 1 + 32 + 1 + 32;
+            // Independent byte-encoder oracle: actual shared validator buffers
+            // are one FSM1 hash encoding, its nested FRM1, one FRM1 signature
+            // payload, and one retained FSM1 clone. No role-message allocation.
+            let expected = committed.outer_bytes.len() * 2
+                + signed.manifest_bytes().len() * 2
+                + signed.manifest().input().intervention_sequences.len()
+                    * std::mem::size_of::<u64>()
+                + committed.binding.to_canonical_cbor().len()
+                + receipt_copy
+                + projection_copy
+                + origin_copy
+                + absent_key_copy;
+            for (bytes, succeeds) in [(expected, true), (expected - 1, false)] {
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, bytes, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                let result =
+                    shared_native_read(&state, &mut NativeReadContextV1::protected(&mut budget));
+                if succeeds {
+                    assert_eq!(result?, committed);
+                    assert_eq!(budget.remaining_native_bytes(), 0);
+                } else {
+                    assert_eq!(result, Err(PublicationError::PublicationConflict));
+                    assert_eq!(
+                        budget.check_time(),
+                        Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded)
+                    );
+                }
+            }
+            // Expiry occurs inside shared validation, not at budget creation.
+            let mut clock = ScriptedGuardMonotonicSourceV1::new(
+                std::iter::repeat_n(Duration::ZERO, 4).chain([Duration::from_secs(2)]),
+            );
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, expected, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                shared_native_read(&state, &mut NativeReadContextV1::protected(&mut budget),),
+                Err(PublicationError::PublicationConflict)
+            );
+            assert_eq!(
+                budget.check_time(),
+                Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_suffix_accounting_accepts_exact_rows_and_bytes_and_latches_one_under() -> Fallible<()>
+    {
+        use crate::{
+            ForkReplayAuthorityReadErrorV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
+        };
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+
+        let state = imported(Shape::Mixed)?;
+        let events = &state.store.state(state.child).events;
+        let table = state
+            .store
+            .fork_classifier_tables
+            .get(&state.child)
+            .ok_or("no FCT1")?;
+        let classifier_copy = table
+            .input()
+            .routes
+            .iter()
+            .map(|route| route.source().route().len() + 32 + 1)
+            .sum::<usize>();
+        // Existing native byte encoders are the oracle, not the length methods
+        // or the validator's debit functions. Index metadata is ID16 + seq8.
+        let (graph_bytes, graph_rows) = imported_graph_cost(&state)?;
+        let mut bytes = graph_bytes + events.len() * (16 + 8);
+        for event in events {
+            let operation = state
+                .store
+                .fork_append_operations
+                .values()
+                .find(|operation| operation.input().event_id == event.id)
+                .ok_or("no FOP1")?;
+            let origin = state
+                .store
+                .fork_event_origins
+                .get(&event.id)
+                .ok_or("no EOR1")?;
+            let intervention = state.store.fork_intervention_admissions.get(&event.id);
+            bytes += 16
+                + event.payload.len()
+                + event.event_type.as_str().len()
+                + table.to_canonical_cbor().len() * 2
+                + classifier_copy
+                + origin.to_canonical_cbor().len() * 2
+                + intervention.map_or(0, |record| record.to_canonical_cbor().len() * 2)
+                + operation.to_canonical_cbor().len();
+        }
+        let rows = graph_rows
+            + events.len() * 2
+            + state.store.fork_append_operations.len() * 2
+            + state.store.fork_event_origins.len()
+            + state.store.fork_intervention_admissions.len();
+        let expected = state
+            .store
+            .read_fork_event_suffix(state.child, PARENT_CUT + 1)?;
+        for (byte_limit, row_limit, succeeds) in [
+            (bytes, rows, true),
+            (bytes - 1, rows, false),
+            (bytes, rows - 1, false),
+        ] {
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(1, 1, row_limit, byte_limit, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let result = state.store.read_fork_event_suffix_with_context(
+                state.child,
+                PARENT_CUT + 1,
+                AuthorityValidatorV1::CodeTwoAware,
+                &mut NativeReadContextV1::protected(&mut budget),
+            );
+            if succeeds {
+                assert_eq!(result?, expected);
+                assert_eq!(budget.remaining_native_bytes(), 0);
+            } else {
+                assert_eq!(result, Err(AuthorityError::CorruptAuthority));
+                assert_eq!(
+                    budget.check_time(),
+                    Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_chain_budget_tracks_actual_cut_and_ignores_later_parent_payloads() -> Fallible<()> {
+        use crate::{
+            ForkReplayAuthorityReadErrorV1, ForkReplayReadBudgetV1, ForkReplayReadLimitsV1,
+        };
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use pos_core::{CanonicalBytes, EventDraft, Kind};
+        use std::time::Duration;
+
+        for shape in [
+            Shape::Mixed,
+            Shape::EmptyClassified,
+            Shape::EmptyUnclassified,
+        ] {
+            let mut state = imported(shape)?;
+            let committed = state.store.read_committed(state.child, state.head)?;
+            // This immutable signed endpoint comes from source publication,
+            // not from the contextual chain-hash implementation under test.
+            let expected_hash = committed.operation.input().final_chain_head_hash;
+            let mut bytes = 2 * (16 + 16) + 8;
+            let mut rows = 0;
+            for (timeline, limit) in [
+                (state.world.root, PARENT_CUT),
+                (state.child, shape.events()),
+            ] {
+                for event in &state.store.state(timeline).events {
+                    if event.seq.as_u64() <= limit {
+                        bytes += event.payload.len() + event.id.to_string().len();
+                        rows += 1;
+                    }
+                }
+            }
+            let draft = EventDraft::new(
+                pos_core::EntityId::new(),
+                Kind::new("later.parent"),
+                CanonicalBytes::from_vec(vec![0; 65_536]),
+            );
+            state.store.append(state.world.root, &[draft])?;
+            // One walk, one head-validation pass, one hashing pass: 2 nodes
+            // each, even when the imported child has no own Events.
+            let visits = if shape.events() == 0 { 5 } else { 6 };
+            for (byte_limit, row_limit, visit_limit, succeeds) in [
+                (bytes, rows, visits, true),
+                (bytes - 1, rows, visits, false),
+                (bytes, rows - 1, visits, false),
+                (bytes, rows, visits - 1, false),
+            ] {
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits =
+                    ForkReplayReadLimitsV1::new(1, visit_limit, row_limit, byte_limit, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                let result = state.store.compute_chain_hash_with_context(
+                    state.child,
+                    Seq::from_u64(state.head),
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
+                if succeeds {
+                    assert_eq!(result?, expected_hash);
+                    assert_eq!(budget.remaining_native_bytes(), 0);
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(pos_core::CoreError::ArtifactUnavailable)
+                    ));
+                    assert_eq!(
+                        budget.check_time(),
+                        Err(ForkReplayAuthorityReadErrorV1::BoundsExceeded)
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 
     type Tamper = fn(&mut Imported) -> Fallible<()>;
 
@@ -446,9 +1623,20 @@ mod tests {
         Ok(())
     }
 
-    /// Every stored-state tamper that both reads must refuse.
-    fn refused_tampers() -> Vec<(&'static str, Tamper)> {
-        let tampers: [(&'static str, Tamper); 14] = [
+    fn rewrite_append_operations(
+        state: &mut Imported,
+        edit: fn(&mut pos_core::ForkAppendOperationInputV1),
+    ) -> Fallible<()> {
+        for operation in state.store.fork_append_operations.values_mut() {
+            let mut input = operation.input().clone();
+            edit(&mut input);
+            *operation = pos_core::ForkAppendOperationV1::new(input)?;
+        }
+        Ok(())
+    }
+
+    fn admission_tampers() -> [(&'static str, Tamper); 7] {
+        [
             ("missing import admission", |state| {
                 state.store.imported_fork_attributions.clear();
                 Ok(())
@@ -495,6 +1683,11 @@ mod tests {
                 state.store.imported_fork_admissions.clear();
                 Ok(())
             }),
+        ]
+    }
+
+    fn classifier_and_event_tampers() -> [(&'static str, Tamper); 9] {
+        [
             ("missing FCT1", |state| {
                 state.store.fork_classifier_tables.clear();
                 Ok(())
@@ -546,8 +1739,27 @@ mod tests {
                     })
                 },
             ),
-        ];
-        tampers.into()
+            ("FOP1 names another EOR1 digest", |state| {
+                rewrite_append_operations(state, |input| {
+                    input.event_origin_digest = hash(0x95);
+                })
+            }),
+            ("FOP1 names another FIA1 digest", |state| {
+                rewrite_append_operations(state, |input| {
+                    if input.intervention_admission_digest.is_some() {
+                        input.intervention_admission_digest = Some(hash(0x96));
+                    }
+                })
+            }),
+        ]
+    }
+
+    /// Every stored-state tamper that both reads must refuse.
+    fn refused_tampers() -> Vec<(&'static str, Tamper)> {
+        admission_tampers()
+            .into_iter()
+            .chain(classifier_and_event_tampers())
+            .collect()
     }
 
     #[test]
@@ -560,7 +1772,7 @@ mod tests {
             assert_eq!(reads(&state), BOTH_REFUSED, "{name}");
             seen += 1;
         }
-        assert_eq!(seen, 14);
+        assert_eq!(seen, 16);
         Ok(())
     }
 
@@ -596,6 +1808,53 @@ mod tests {
     }
 
     #[test]
+    fn protected_publication_refuses_missing_artifact_and_disagreeing_chain() -> Fallible<()> {
+        use crate::{
+            ForkReplayAuthorityReadErrorV1, ForkReplayAuthorityReadPortV1, ForkReplayReadBudgetV1,
+            ForkReplayReadLimitsV1, ForkReplayRequirementV1,
+        };
+        use pos_core::trusted_clock::{GuardMonotonicSourceV1, ScriptedGuardMonotonicSourceV1};
+        use std::time::Duration;
+
+        for missing_artifact in [true, false] {
+            let mut state = imported(Shape::EmptyUnclassified)?;
+            let committed = state.store.read_committed(state.child, state.head)?;
+            let requirement = ForkReplayRequirementV1::new(
+                state.child,
+                Seq::from_u64(state.head),
+                committed.record_id,
+                committed.authority_origin_digest,
+            )?;
+            if missing_artifact {
+                state.store.fork_publication_artifacts.clear();
+            } else {
+                let mut input = committed.operation.input().clone();
+                input.final_chain_head_hash = hash(0x97);
+                let operation = pos_core::ForkPublicationOperationV1::new(input)?;
+                state.store.imported_fork_publication_operations.insert(
+                    operation.input().operation_id,
+                    ImportedForkPublicationOperationV1::from_local(
+                        operation,
+                        committed.authority_origin_digest.ok_or("imported origin")?,
+                    ),
+                );
+            }
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            let limits = ForkReplayReadLimitsV1::new(8, 128, 4_096, 8 * 1024 * 1024, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            assert_eq!(
+                state
+                    .store
+                    .validate_fork_replay_authority(&requirement, &mut budget),
+                Err(ForkReplayAuthorityReadErrorV1::CorruptAuthority)
+            );
+            budget.check_time()?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn validator_a_refuses_what_validator_b_accepts() -> Fallible<()> {
         let state = imported(Shape::Mixed)?;
         let store = &state.store;
@@ -609,12 +1868,20 @@ mod tests {
         );
         assert_eq!(
             store
-                .validated_graph(state.child, AuthorityValidatorV1::LocalOnly)
+                .validated_graph_with_context(
+                    state.child,
+                    AuthorityValidatorV1::LocalOnly,
+                    &mut NativeReadContextV1::ordinary(),
+                )
                 .err(),
             Some(AuthorityError::CorruptAuthority)
         );
         assert!(store
-            .validated_graph(state.child, AuthorityValidatorV1::CodeTwoAware)
+            .validated_graph_with_context(
+                state.child,
+                AuthorityValidatorV1::CodeTwoAware,
+                &mut NativeReadContextV1::ordinary(),
+            )
             .is_ok());
         assert_eq!(
             store
@@ -782,7 +2049,11 @@ mod tests {
         assert_eq!(
             state
                 .store
-                .validated_graph(state.child, AuthorityValidatorV1::LocalOnly)
+                .validated_graph_with_context(
+                    state.child,
+                    AuthorityValidatorV1::LocalOnly,
+                    &mut NativeReadContextV1::ordinary(),
+                )
                 .err(),
             Some(AuthorityError::CorruptAuthority)
         );
@@ -804,12 +2075,18 @@ mod tests {
             .ok_or("no imported FPO1")?;
         assert!(state
             .store
-            .publication_operation_row(operation, AuthorityValidatorV1::LocalOnly)
+            .publication_operation_row(
+                operation,
+                AuthorityValidatorV1::LocalOnly,
+                &mut NativeReadContextV1::ordinary(),
+            )?
             .is_none());
         assert!(matches!(
-            state
-                .store
-                .publication_operation_row(operation, AuthorityValidatorV1::CodeTwoAware),
+            state.store.publication_operation_row(
+                operation,
+                AuthorityValidatorV1::CodeTwoAware,
+                &mut NativeReadContextV1::ordinary(),
+            )?,
             Some((_, ValidatedOriginV1::Imported(_)))
         ));
         Ok(())
