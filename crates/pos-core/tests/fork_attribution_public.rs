@@ -133,6 +133,40 @@ fn local_fpo1_fpb1_fpa1_and_derived_fpr1_round_trip_at_public_seam(
 }
 
 #[test]
+fn attribution_lengths_equal_the_native_public_encodings() -> Result<(), Box<dyn std::error::Error>>
+{
+    let admission = admission()?;
+    let manifest = manifest(&admission)?;
+    let signed = SignedForkReproManifestV1::new_from_admission(
+        &admission,
+        1,
+        manifest.clone(),
+        pos_core::Signature::from_bytes([9; 64]),
+    )?;
+    let (operation, binding, artifact) = publication_records(&admission)?;
+    for (length, encoded) in [
+        (
+            admission.canonical_cbor_len(),
+            admission.to_canonical_cbor(),
+        ),
+        (manifest.canonical_cbor_len(), manifest.to_canonical_cbor()),
+        (signed.canonical_cbor_len(), signed.to_canonical_cbor()),
+        (
+            operation.canonical_cbor_len(),
+            operation.to_canonical_cbor(),
+        ),
+        (binding.canonical_cbor_len(), binding.to_canonical_cbor()),
+        (artifact.canonical_cbor_len(), artifact.to_canonical_cbor()),
+    ] {
+        // The separately exercised public codecs carry real, nonempty records;
+        // the allocation-free length contract must count every nested head.
+        assert!(encoded.len() > 1);
+        assert_eq!(length, Ok(encoded.len()));
+    }
+    Ok(())
+}
+
+#[test]
 fn publication_codecs_reject_import_origin_and_mismatched_artifact(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let admission = admission()?;
