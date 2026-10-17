@@ -86,6 +86,9 @@ fn hash_hex(value: u8) -> String {
     hex(hash(value).as_bytes())
 }
 
+/// A draft of the fixed entity 9, so its bytes are identical on every run.
+///
+/// Unlike the shared `typed_draft`, which mints a fresh entity per call.
 fn draft(value: u8, kind: &str) -> EventDraft {
     EventDraft::new(
         EntityId::from_ulid(Ulid::from(9_u128)),

@@ -370,7 +370,7 @@ pub fn edge_tail() -> Vec<u8> {
 
 /// Encode the `IDP1` edge from `consumer` to `source`.
 #[must_use]
-pub fn edge_bytes(
+fn edge_bytes(
     consumer: &DependencyNodeCoordinateV1,
     source: &DependencyNodeCoordinateV1,
 ) -> Vec<u8> {
@@ -383,7 +383,7 @@ pub fn edge_bytes(
     .concat()
 }
 
-/// The verified [`edge_bytes`] edge from `consumer` to `source`.
+/// The verified `IDP1` edge from `consumer` to `source`.
 #[must_use]
 pub fn edge_row(
     consumer: &DependencyNodeCoordinateV1,

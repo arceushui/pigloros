@@ -811,10 +811,12 @@ fn dependency_errors_map_to_the_nearest_store_error() {
     assert_eq!(DepError::READ_BACK_FAULT, StoreError::CorruptState);
 }
 
+/// The shared [`test_fixtures::fork_scope`] of this suite's fixed `fork()`.
 fn fork_scope(generation: u64) -> DependencyReadScopeV1 {
     test_fixtures::fork_scope(fork(), generation)
 }
 
+/// The shared [`test_fixtures::prefix_scope`] of this suite's fixed `parent()`.
 fn prefix_scope(through_tick: u64) -> DependencyReadScopeV1 {
     test_fixtures::prefix_scope(parent(), through_tick)
 }
