@@ -1,0 +1,138 @@
+name: fork-memory-comparison-diagnostic
+
+on:
+  push:
+    branches: [redmine/561-memory-comparison-diagnostic]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-memory-comparison-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  paired-benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -D warnings
+      PIGLOROS_BENCH_SAMPLES: "10"
+      EVIDENCE_DIR: ${{ runner.temp }}/561-memory-comparison
+    steps:
+      - name: Check out the immutable trusted main baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 7c7bc93575e947171d340c9efd7b2a22fc9fed9c
+          path: main-source
+          persist-credentials: false
+      - name: Check out the immutable PR source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: b65291d67d68bfbc17aa6f852f62a41d0aa0c703
+          path: pr-source
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+      - name: Bind the source, harness and shared runner identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          test "$(git -C main-source rev-parse HEAD)" = 7c7bc93575e947171d340c9efd7b2a22fc9fed9c
+          test "$(git -C pr-source rev-parse HEAD)" = b65291d67d68bfbc17aa6f852f62a41d0aa0c703
+          cmp main-source/crates/pos-store/benches/memory_erasure.rs pr-source/crates/pos-store/benches/memory_erasure.rs
+          cmp main-source/scripts/compare_memory_store_benchmarks.py pr-source/scripts/compare_memory_store_benchmarks.py
+          {
+            printf 'main=%s\npr=%s\norder=main-1,pr-1,pr-2,main-2\nsamples=10\n' \
+              7c7bc93575e947171d340c9efd7b2a22fc9fed9c b65291d67d68bfbc17aa6f852f62a41d0aa0c703
+            printf 'runner_image=%s-%s\n' "$ImageOS" "$ImageVersion"
+            uname -m
+            lscpu
+            rustc --version --verbose
+            cargo --version --verbose
+            sha256sum main-source/Cargo.lock pr-source/Cargo.lock \
+              main-source/crates/pos-store/benches/memory_erasure.rs \
+              pr-source/crates/pos-store/benches/memory_erasure.rs \
+              main-source/scripts/compare_memory_store_benchmarks.py \
+              pr-source/scripts/compare_memory_store_benchmarks.py
+          } | tee "$EVIDENCE_DIR/environment.txt"
+      - name: Build and warm both unmodified benchmark harnesses
+        shell: bash
+        run: |
+          set -euo pipefail
+          for source in main pr; do
+            (
+              cd "${source}-source"
+              export PIGLOROS_BENCH_OUTPUT="$EVIDENCE_DIR/${source}-warmup.csv"
+              cargo bench --locked -p pos-store --bench memory_erasure
+            ) 2>&1 | tee "$EVIDENCE_DIR/${source}-warmup.log"
+          done
+      - name: Measure the warmed harnesses in ABBA order on this runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          for measurement in main-1 pr-1 pr-2 main-2; do
+            source="${measurement%-*}"
+            (
+              cd "${source}-source"
+              export PIGLOROS_BENCH_OUTPUT="$EVIDENCE_DIR/${measurement}.csv"
+              cargo bench --locked -p pos-store --bench memory_erasure
+            ) 2>&1 | tee "$EVIDENCE_DIR/${measurement}.log"
+          done
+      - name: Evaluate every sample with the unchanged ten-percent signal
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import dataclasses
+          import json
+          import os
+          import pathlib
+          import sys
+
+          sys.path.insert(0, str(pathlib.Path("pr-source/scripts").resolve()))
+          import compare_memory_store_benchmarks as benchmark
+
+          root = pathlib.Path(os.environ["EVIDENCE_DIR"])
+          comparisons = {}
+          warning_sets = []
+          for pair in (1, 2):
+              baseline = benchmark.load_csv(root / f"main-{pair}.csv")
+              current = benchmark.load_csv(root / f"pr-{pair}.csv")
+              rows = benchmark.compare_datasets(baseline, current)
+              comparisons[str(pair)] = [dataclasses.asdict(row) for row in rows]
+              warning_sets.append({row.key for row in rows if row.warning})
+          any_warning = set.union(*warning_sets)
+          repeated = set.intersection(*warning_sets)
+          verdict = (
+              "signal-reproduced" if repeated else
+              "unstable-signal" if any_warning else "not-reproduced"
+          )
+          result = {
+              "main": "7c7bc93575e947171d340c9efd7b2a22fc9fed9c",
+              "pr": "b65291d67d68bfbc17aa6f852f62a41d0aa0c703",
+              "order": ["main-1", "pr-1", "pr-2", "main-2"],
+              "comparisons": comparisons,
+              "repeated_warnings": [dataclasses.asdict(key) for key in sorted(repeated)],
+              "verdict": verdict,
+              "scope": "diagnostic only; neither required CI nor broad performance acceptance",
+          }
+          text = json.dumps(result, indent=2, sort_keys=True)
+          (root / "comparison.json").write_text(text + "\n", encoding="utf-8")
+          print(text)
+          if any_warning:
+              raise SystemExit("Paired benchmark timing warnings remain unresolved")
+          PY
+      - name: Preserve all raw measurements and environment evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fork-memory-comparison-${{ github.sha }}
+          path: ${{ runner.temp }}/561-memory-comparison/
+          if-no-files-found: error
+          retention-days: 3
