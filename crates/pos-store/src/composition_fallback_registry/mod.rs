@@ -11,6 +11,7 @@
 //! it. The Memory adapter lives beside `MemoryStore` behind `&mut self`; the decisions in
 //! `logic` are adapter-independent.
 
+mod derived;
 mod error;
 #[doc(hidden)]
 pub mod logic;
@@ -19,6 +20,7 @@ mod port;
 // Clippy's `redundant_pub_crate`.
 pub mod types;
 
+pub use derived::derived_fallback_state_v1;
 pub use error::CompositionFallbackRegistryErrorV1;
 pub use port::CompositionFallbackRegistryV1;
 pub use types::{

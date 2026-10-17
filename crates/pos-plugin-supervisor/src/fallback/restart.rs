@@ -7,6 +7,7 @@ use pos_core::trusted_clock::PluginTrustWallSourceV1;
 use pos_core::{
     CompositionPinV1, FallbackActivationModeV1, FallbackActivationOriginV1,
     FallbackSkipReasonV1 as Skip, FallbackSkippedCandidateV1, FallbackTriggerCodeV1, PluginId, Seq,
+    SeqRange, TimelineId,
 };
 use pos_runtime::community_plugin_host::{
     CommunityPluginHostErrorV1 as HostError, CommunityPluginHostV1, TrustDenialBasisV1,
@@ -19,6 +20,7 @@ use pos_store::composition_fallback_registry::{
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
 
 use super::candidate::{build_in, skip_of, BuiltV1, RefusalV1};
+use super::closure::fallback_tenures_v1;
 use super::derive::{
     effective_composition_v1, read_prefix, FallbackEffectiveCompositionV1, FallbackEffectiveEntryV1,
 };
@@ -31,6 +33,9 @@ use crate::member::CommunityMemberV1;
 /// A step after a restart activation's commit, or the final restore, failed.
 const RESTART_FAILED: Error =
     Error::InvariantFault("a restart step after the activation commit failed");
+/// The Events that name each slot's tenures do not fold.
+const TENURES_UNRESOLVED: Error =
+    Error::InvariantFault("the tenures of the restart slots cannot be derived");
 
 /// One community slot of the composer's recipe, in recipe order.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,9 +68,11 @@ struct ComposedV1 {
 /// activation, code 1" and "Crash and restart").
 ///
 /// The effective composition is derived from the fold. Each slot's effective implementation
-/// (the base implementation of a slot no policy declares) is built and installed fresh: the
-/// trust gate and the implementation-key check run, the section 4.1 facts are not re-checked,
-/// and no swap seam is used. When a declared entry's effective implementation is refused:
+/// is built and installed fresh. A declared entry's comes from the registry; any other slot's
+/// is its latest tenure's ([`fallback_tenures_v1`]), which is the base implementation unless
+/// an activation opened a later tenure, as for an entry a withdrawal froze. The trust gate
+/// and the implementation-key check run, the section 4.1 facts are not re-checked, and no swap
+/// seam is used. When a declared entry's effective implementation is refused:
 ///
 /// - with no release source or no admitted release of its IMK1, that is trigger code 1;
 /// - with a revoked release, that is trigger code 4: a Driver can only be built from a release
@@ -83,10 +90,11 @@ struct ComposedV1 {
 /// reason when a slot cannot be composed, and nothing is committed for it: a slot no policy
 /// declares, a refusal with no restart trigger (an untrusted release, a member build or
 /// preparation failure), a manual entry or one that does not declare the trigger, and an
-/// exhausted chain. Returns [`Error::StoreUnavailable`] when the Logical Head cannot be read
-/// before a restart activation, [`Error::Registry`] when the port refuses the activation, and
-/// an invariant fault when the install after the commit or the final restore fails. A failed
-/// restart composes nothing usable and is retried from the fold.
+/// exhausted chain. Returns [`Error::StoreUnavailable`] when the Timeline's Events, or its
+/// Logical Head before a restart activation, cannot be read; [`Error::Registry`] when the
+/// port refuses the activation; and an invariant fault when the slots' tenures cannot be
+/// derived from the Events, or when the install after the commit or the final restore fails.
+/// A failed restart composes nothing usable and is retried from the fold.
 pub fn compose_restart_v1<S, T, W>(
     context: Context<'_, '_, S, T, W>,
     scope: String,
@@ -99,6 +107,7 @@ where
     W: PluginTrustWallSourceV1,
 {
     let composition = effective_composition_v1(&*context.store, &scope, target.timeline)?;
+    let slots = resolved_slots(&*context.store, &scope, target.timeline, slots)?;
     let composed = ComposedV1 {
         revision: composition.state_revision,
         bindings: BTreeMap::new(),
@@ -124,6 +133,26 @@ where
         boundary: CompositionBoundaryV1::new(scope, target, composed.bindings),
         host: CommunityPluginHostV1::new(composed.members),
         outcomes: composed.outcomes,
+    })
+}
+
+/// The recipe's `slots`, each on the implementation of its latest tenure in the Events of
+/// `timeline`; nothing is composed when those Events cannot be read.
+fn resolved_slots<S: FallbackBoundaryStoreV1 + ?Sized>(
+    store: &S,
+    scope: &str,
+    timeline: TimelineId,
+    slots: &[FallbackRestartSlotV1],
+) -> Result<Vec<FallbackRestartSlotV1>, Error> {
+    let events = store.read(timeline, SeqRange::all());
+    let events = events.or(Err(Error::StoreUnavailable));
+    let tenures = events.and_then(|events| {
+        let tenures = fallback_tenures_v1(scope, slots, &events);
+        tenures.or(Err(TENURES_UNRESOLVED))
+    });
+    tenures.map(|tenures| {
+        let resolved = slots.iter().map(|slot| tenures.restart_slot(slot));
+        resolved.collect()
     })
 }
 

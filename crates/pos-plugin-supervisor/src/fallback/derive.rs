@@ -6,7 +6,7 @@ use pos_core::{
     SeqRange, TimelineId, TimelineMeta,
 };
 use pos_runtime::TimelineHistorySegment;
-use pos_store::composition_fallback_registry::FallbackRegistryStateV1;
+use pos_store::composition_fallback_registry::{derived_fallback_state_v1, FallbackRegistryStateV1};
 
 use super::{FallbackBoundaryErrorV1 as Error, FallbackBoundaryStoreV1};
 
@@ -68,6 +68,11 @@ impl FallbackEffectiveCompositionV1 {
 /// current policy is read back by digest and every entry's recorded state must name one of the
 /// entry's listed implementations at its chain position.
 ///
+/// A Timeline with no row of its own derives its state from the fold of its Events, inherited
+/// ones included (ADR-119 section 4.3, "Fork rows"). On a Fork before its first operation that
+/// is the effective composition at the Fork cut; before the first declaration it is the
+/// composer's base composition, with no declared entry.
+///
 /// # Errors
 /// Returns [`FallbackBoundaryErrorV1::Registry`](Error::Registry) for a refused read, and an
 /// invariant fault when the retained policy or an entry's state diverges.
@@ -79,9 +84,22 @@ pub fn effective_composition_v1<S: FallbackBoundaryStoreV1 + ?Sized>(
     let row = store.registry_row(scope, timeline);
     row.map_err(Error::Registry).and_then(|row| {
         row.map_or_else(
-            || Ok(FallbackEffectiveCompositionV1::default()),
+            || inherited_composition(store, scope, timeline),
             |row| composition_of(store, row.state()),
         )
+    })
+}
+
+/// The effective composition of a Timeline with no row: the fold of its Events.
+fn inherited_composition<S: FallbackBoundaryStoreV1 + ?Sized>(
+    store: &S,
+    scope: &str,
+    timeline: TimelineId,
+) -> Result<FallbackEffectiveCompositionV1, Error> {
+    let state = derived_fallback_state_v1(store, scope, timeline).map_err(Error::Registry);
+    state.and_then(|state| match state.policy_digest() {
+        None => Ok(FallbackEffectiveCompositionV1::default()),
+        Some(_) => composition_of(store, &state),
     })
 }
 

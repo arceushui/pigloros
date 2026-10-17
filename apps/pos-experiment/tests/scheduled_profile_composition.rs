@@ -152,7 +152,7 @@ fn session_composes_its_drivers_and_rejects_a_participant_bound_fork_registry() 
             stop: StopCondition::MaxTicks(1),
             store_config,
         })
-        .with_fork_registry_factory(move || Ok(world_registry(plugin_id, true)));
+        .with_fork_registry_factory(move |_| Ok(world_registry(plugin_id, true)));
         experiment
             .register_generated(
                 &WorldPlugin { id: plugin_id },

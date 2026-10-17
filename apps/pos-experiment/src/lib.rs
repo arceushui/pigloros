@@ -631,7 +631,6 @@ pub struct Experiment {
 pub struct ExperimentSession {
     config: ExperimentConfig,
     registry: PluginRegistry,
-    parent_composition: pos_runtime::PluginComposition,
     store: SharedEventStore,
     recovery_store_config: Option<StoreConfig>,
     fork_registry_factory: Option<ForkRegistryFactory>,
@@ -739,8 +738,12 @@ struct CapturedRange {
     timeline: Timeline,
 }
 
+/// The ordinary-Fork registry factory. It receives the parent's effective composition at the
+/// Fork cut and must register exactly that composition (ADR-119 section 4.6).
 type ForkRegistryFactory =
-    Arc<dyn Fn() -> Result<PluginRegistry, pos_runtime::RuntimeError> + Send + Sync>;
+    Arc<dyn Fn(&pos_runtime::PluginComposition) -> ForkRegistryResult + Send + Sync>;
+/// What one call of the ordinary-Fork registry factory returns.
+type ForkRegistryResult = Result<PluginRegistry, pos_runtime::RuntimeError>;
 type SharedEventStore = Arc<Mutex<Box<dyn ScheduledAdmissionStoreV1>>>;
 
 // ---------------------------------------------------------------------------
@@ -1410,16 +1413,26 @@ impl Experiment {
 
     /// Configure how each runnable Fork receives fresh plugin runtime state.
     ///
-    /// The factory must register the same deterministic plugin composition as
-    /// the parent. Fork creation hydrates fresh projections from inherited
-    /// Timeline history and stages durable Driver state from host-filtered,
-    /// sequence-bounded recovery evidence before the child can step.
+    /// The factory receives the parent session's effective composition at the
+    /// Fork cut and must register exactly that composition, with the same
+    /// Plugin identities. Before any ADR-119 entry swap this is the composition
+    /// at start; after a swap it names the current tenure's implementation and
+    /// its run-local `PluginId` (ADR-119 section 4.6, the ADR-033 section 2 and
+    /// ADR-035 amendments). Fork creation hydrates fresh projections from
+    /// inherited Timeline history and stages durable Driver state from
+    /// host-filtered, sequence-bounded recovery evidence before the child can
+    /// step.
     #[must_use]
-    pub fn with_fork_registry_factory(
-        mut self,
-        factory: impl Fn() -> Result<PluginRegistry, pos_runtime::RuntimeError> + Send + Sync + 'static,
-    ) -> Self {
-        let composed = move || factory().and_then(compose_non_participant);
+    pub fn with_fork_registry_factory<F>(mut self, factory: F) -> Self
+    where
+        F: Fn(&pos_runtime::PluginComposition) -> Result<PluginRegistry, pos_runtime::RuntimeError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let composed = move |composition: &pos_runtime::PluginComposition| {
+            factory(composition).and_then(compose_non_participant)
+        };
         self.fork_registry_factory = Some(Arc::new(composed));
         self
     }
@@ -1628,12 +1641,10 @@ impl Experiment {
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
         let registry = self.registry;
-        let parent_composition = registry.composition();
         let timeline = store.create_timeline(&self.config.name)?;
         Ok(ExperimentSession {
             config: self.config,
             registry,
-            parent_composition,
             store: Arc::new(Mutex::new(store)),
             recovery_store_config,
             fork_registry_factory: self.fork_registry_factory,
@@ -1737,7 +1748,6 @@ impl Experiment {
         store: Box<dyn ScheduledAdmissionStoreV1>,
         recovery_store_config: Option<StoreConfig>,
     ) -> Result<ExperimentSession, ExperimentError> {
-        let parent_composition = self.registry.composition();
         let timeline = store.get_timeline(timeline_id).and_then(|timeline| {
             timeline.ok_or(pos_core::CoreError::TimelineNotFound(timeline_id))
         })?;
@@ -1792,7 +1802,6 @@ impl Experiment {
         Ok(ExperimentSession {
             config: self.config,
             registry: self.registry,
-            parent_composition,
             store: Arc::new(Mutex::new(store)),
             recovery_store_config,
             fork_registry_factory: self.fork_registry_factory,
@@ -2795,6 +2804,12 @@ impl ExperimentSession {
     /// Driver state from host-filtered bounded evidence, and can be stepped
     /// immediately without reopening persistence.
     ///
+    /// This is an ordinary Fork: its cut is the parent's head. The fresh
+    /// registry comes from the factory, which receives the session's effective
+    /// composition at the cut, the current tenure of every ADR-119 entry
+    /// included, and must register exactly that composition (ADR-119 section
+    /// 4.6).
+    ///
     /// A session bound with [`Self::with_protected_token`] must still hold a
     /// live token whose `fork_permitted` flag is set at this exact Timeline
     /// head. An explicitly public session has no consent capability to carry
@@ -2802,7 +2817,9 @@ impl ExperimentSession {
     ///
     /// # Errors
     /// Returns [`ExperimentError::Runtime`] if fresh runtime construction fails,
-    /// [`ExperimentError::Store`] if history hydration or forking fails, or
+    /// [`ExperimentError::Store`] if history hydration or forking fails,
+    /// [`ExperimentError::IncompatibleForkRegistry`] if the fresh registry does
+    /// not register the effective composition, or
     /// [`ExperimentError::SharedStoreLockPoisoned`] if the shared store is poisoned.
     pub fn fork(&mut self, name: &str) -> Result<Self, ExperimentError> {
         if self.health == SessionHealth::Faulted {
@@ -2834,7 +2851,10 @@ impl ExperimentSession {
             .fork_registry_factory
             .as_ref()
             .ok_or(ExperimentError::MissingForkRegistryFactory)?;
-        let mut registry = factory()
+        // The live registry runs the effective composition (ADR-119 section 4.7): it is the
+        // composition at start until an entry swap, and the current tenure's after one.
+        let composition = self.registry.composition();
+        let mut registry = factory(&composition)
             .map_err(ExperimentError::from)
             .and_then(|mut registry| {
                 bind_fork_registry_erasure_gate(&mut registry, &self.registry).map(|()| registry)
@@ -2842,7 +2862,7 @@ impl ExperimentSession {
         if let Some(gate) = self.registry.clone_consent_gate() {
             registry = registry.with_consent_gate(gate);
         }
-        if registry.composition() != self.parent_composition {
+        if registry.composition() != composition {
             return Err(ExperimentError::IncompatibleForkRegistry);
         }
         let (events, ancestry) = lock_store(&self.store).and_then(|store| {
@@ -2862,7 +2882,6 @@ impl ExperimentSession {
         Ok(Self {
             config,
             registry,
-            parent_composition: self.parent_composition.clone(),
             store: Arc::clone(&self.store),
             recovery_store_config: self.recovery_store_config.clone(),
             fork_registry_factory: Some(Arc::clone(factory)),
@@ -5072,7 +5091,7 @@ pub mod tests {
             stop: StopCondition::MaxTicks(10),
             store_config: StoreConfig::Sqlite { path: path.clone() },
         })
-        .with_fork_registry_factory(move || Ok(composition_registry(&[plugin])));
+        .with_fork_registry_factory(move |_| Ok(composition_registry(&[plugin])));
         experiment
             .register_generated(&CompositionPlugin(plugin), None, None)
             .test_ok();
@@ -6157,7 +6176,7 @@ pub mod tests {
             stop: StopCondition::MaxTicks(2),
             store_config: StoreConfig::Memory,
         };
-        let mut experiment = Experiment::new(config).with_fork_registry_factory(move || {
+        let mut experiment = Experiment::new(config).with_fork_registry_factory(move |_| {
             let plugin = TestPlugin {
                 id: plugin_id,
                 name: "session-ticker",
@@ -6240,7 +6259,7 @@ pub mod tests {
         })
         .with_fork_registry_factory({
             let make_driver = make_driver.clone();
-            move || {
+            move |_: &pos_runtime::PluginComposition| {
                 let plugin = TestPlugin {
                     id: plugin_id,
                     name: "refresh",
@@ -6413,6 +6432,101 @@ pub mod tests {
         );
     }
 
+    /// What one call of a test Fork registry factory returns.
+    type ForkResult = Result<PluginRegistry, RuntimeError>;
+
+    /// The registration every forecast implementation shares: one pin and one role.
+    fn forecast_registration() -> pos_runtime::PluginRegistrationV1 {
+        let digest = pos_core::Hash::from_bytes([7; 32]);
+        let roles = vec!["forecaster".to_owned()];
+        let pin = pos_runtime::community_pin_v1(digest, roles).test_ok();
+        pos_runtime::PluginRegistrationV1::new(pin, pos_runtime::PluginAvailabilityV1::Available)
+    }
+
+    /// Register `spec` in `registry` as a pinned forecast implementation.
+    fn register_forecast(
+        registry: &mut PluginRegistry,
+        spec: CompositionPluginSpec,
+    ) -> Result<(), RuntimeError> {
+        let (plugin, registration) = (CompositionPlugin(spec), forecast_registration());
+        PluginRegistry::register_pinned_generated(registry, &plugin, registration, None, None)
+    }
+
+    /// A registry of `specs`, each a pinned forecast implementation.
+    fn pinned_registry(specs: &[CompositionPluginSpec]) -> ForkResult {
+        let mut registry = PluginRegistry::new();
+        for spec in specs {
+            register_forecast(&mut registry, *spec)?;
+        }
+        Ok(registry)
+    }
+
+    /// The Plugin IDs of `composition`, in registration order.
+    fn plugin_ids(composition: &pos_runtime::PluginComposition) -> Vec<PluginId> {
+        let plugins = composition.plugins.iter();
+        plugins.map(|plugin| plugin.id).collect()
+    }
+
+    /// A started session of `primary` that forks with `factory`, whose entry was then swapped
+    /// to `candidate` through the ADR-119 registry seams.
+    fn swapped_session<F>(
+        primary: CompositionPluginSpec,
+        candidate: CompositionPluginSpec,
+        factory: F,
+    ) -> ExperimentSession
+    where
+        F: Fn(&pos_runtime::PluginComposition) -> ForkResult + Send + Sync + 'static,
+    {
+        let mut experiment = Experiment::new(ExperimentConfig {
+            name: "entry-swap".to_owned(),
+            stop: StopCondition::MaxTicks(1),
+            store_config: StoreConfig::Memory,
+        })
+        .with_fork_registry_factory(factory);
+        let registered = register_forecast(&mut experiment.registry, primary);
+        registered.test_ok();
+        let mut session = experiment.start().test_ok();
+        let (plugin, registration) = (CompositionPlugin(candidate), forecast_registration());
+        let prepare = PluginRegistry::prepare_pinned_generated_v1;
+        let registry = &mut session.registry;
+        let prepared = prepare(registry, &plugin, registration, None, Some(primary.id));
+        let prepared = prepared.test_ok();
+        registry.swap_entry_v1(prepared).test_ok();
+        session
+    }
+
+    /// ADR-119 case 10 for an ordinary Fork: after an entry swap the factory receives the
+    /// session's effective composition, so the child composes the candidate under its
+    /// run-local `PluginId`; a factory that rebuilds the composition at start is refused.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn ordinary_fork_after_an_entry_swap_reuses_the_candidate_identity() {
+        let primary = CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "forecast-primary",
+            version: "1.0.0",
+            event_type: "forecast.event",
+        };
+        let candidate = CompositionPluginSpec {
+            id: PluginId::new(),
+            name: "forecast-candidate",
+            ..primary
+        };
+        let specs = [primary, candidate];
+        let effective = move |composition: &pos_runtime::PluginComposition| {
+            let ids = plugin_ids(composition);
+            let wanted = specs.into_iter().filter(|spec| ids.contains(&spec.id));
+            pinned_registry(&wanted.collect::<Vec<_>>())
+        };
+        let mut session = swapped_session(primary, candidate, effective);
+        let parent = session.registry.composition();
+        assert_eq!(plugin_ids(&parent), [candidate.id]);
+        let child = session.fork("swapped-child").test_ok();
+        assert_eq!(child.registry.composition(), parent);
+        let at_start = move |_: &pos_runtime::PluginComposition| pinned_registry(&[primary]);
+        assert_incompatible_fork(swapped_session(primary, candidate, at_start));
+    }
+
     #[test]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn live_session_fork_rejects_plugin_identity_mismatch_before_store_work() {
@@ -6431,7 +6545,7 @@ pub mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         })
-        .with_fork_registry_factory(move || Ok(composition_registry(&[child])));
+        .with_fork_registry_factory(move |_| Ok(composition_registry(&[child])));
         experiment
             .register_generated(&CompositionPlugin(parent), None, None)
             .test_ok();
@@ -6456,7 +6570,7 @@ pub mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         })
-        .with_fork_registry_factory(move || Ok(composition_registry(&[child])));
+        .with_fork_registry_factory(move |_| Ok(composition_registry(&[child])));
         experiment
             .register_generated(&CompositionPlugin(parent), None, None)
             .test_ok();
@@ -6483,7 +6597,7 @@ pub mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         })
-        .with_fork_registry_factory(move || Ok(composition_registry(&[second, first])));
+        .with_fork_registry_factory(move |_| Ok(composition_registry(&[second, first])));
         experiment
             .register_generated(&CompositionPlugin(first), None, None)
             .test_ok();
@@ -6511,7 +6625,7 @@ pub mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         })
-        .with_fork_registry_factory(move || Ok(composition_registry(&[child])));
+        .with_fork_registry_factory(move |_| Ok(composition_registry(&[child])));
         experiment
             .register_generated(&CompositionPlugin(parent), None, None)
             .test_ok();
@@ -6536,7 +6650,7 @@ pub mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         })
-        .with_fork_registry_factory(move || {
+        .with_fork_registry_factory(move |_| {
             let store = factory_store.lock().test_ok().clone();
             let is_unlocked = store.is_some_and(|store| store.try_lock().is_ok());
             factory_saw_unlocked_store.store(is_unlocked, std::sync::atomic::Ordering::SeqCst);
@@ -6617,7 +6731,7 @@ pub mod tests {
             store_config: StoreConfig::Memory,
         })
         .with_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))
-        .with_fork_registry_factory(move || {
+        .with_fork_registry_factory(move |_| {
             let mut registry = PluginRegistry::new().with_erasure_gate(foreign_gate.clone());
             registry.register_generated(&CompositionPlugin(plugin), None, None)?;
             Ok(registry)
@@ -6675,7 +6789,7 @@ pub mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         })
-        .with_fork_registry_factory(|| {
+        .with_fork_registry_factory(|_| {
             Err(RuntimeError::NoDriver {
                 name: "unavailable".to_owned(),
             })
@@ -6697,7 +6811,7 @@ pub mod tests {
             stop: StopCondition::MaxTicks(1),
             store_config: StoreConfig::Memory,
         })
-        .with_fork_registry_factory(|| Ok(PluginRegistry::new()))
+        .with_fork_registry_factory(|_| Ok(PluginRegistry::new()))
         .start()
         .test_ok();
         let store = Arc::clone(&session.store);
@@ -7546,7 +7660,7 @@ pub mod tests {
             store_config: StoreConfig::Memory,
         })
         .with_consent_authority(authority.clone())
-        .with_fork_registry_factory(|| Ok(PluginRegistry::new()));
+        .with_fork_registry_factory(|_| Ok(PluginRegistry::new()));
         let session = experiment.start().test_ok();
         let token = authority.record_grant_on_timeline(
             session.timeline().id(),
@@ -8501,7 +8615,7 @@ mod coverage_entrypoints {
     fn public_session_fork_hydrates_at_the_completed_boundary() {
         let experiment =
             Experiment::new(config("coverage-session-fork", StopCondition::MaxTicks(1)))
-                .with_fork_registry_factory(|| Ok(PluginRegistry::new()));
+                .with_fork_registry_factory(|_| Ok(PluginRegistry::new()));
         let mut session = ok(experiment.start());
         let child = ok(session.fork("coverage-session-child"));
         assert_eq!(
@@ -8516,7 +8630,7 @@ mod coverage_entrypoints {
             "coverage-session-protected",
             StopCondition::MaxTicks(1),
         ))
-        .with_fork_registry_factory(|| Ok(PluginRegistry::new()));
+        .with_fork_registry_factory(|_| Ok(PluginRegistry::new()));
         let mut session = ok(experiment.start());
         let timeline_id = session.timeline().id();
         let mut store = ok(lock_store(&session.store));
@@ -8544,7 +8658,7 @@ mod coverage_entrypoints {
         let mut experiment =
             Experiment::new(config("coverage-restore-fork", StopCondition::MaxTicks(1)))
                 .with_consent_authority(authority.clone())
-                .with_fork_registry_factory(move || {
+                .with_fork_registry_factory(move |_| {
                     let mut registry = PluginRegistry::new();
                     registry.register_generated(
                         &CoveragePlugin { id: factory_id },
@@ -8906,7 +9020,7 @@ mod coverage_entrypoints {
             StopCondition::MaxTicks(1),
         ))
         .with_consent_authority(authority.clone())
-        .with_fork_registry_factory(|| Ok(PluginRegistry::new()));
+        .with_fork_registry_factory(|_| Ok(PluginRegistry::new()));
         let session = ok(experiment.start());
         let token = authority.record_grant_on_timeline(
             session.timeline().id(),
@@ -8939,7 +9053,7 @@ mod coverage_entrypoints {
             StopCondition::MaxTicks(1),
         ))
         .with_consent_authority(authority.clone())
-        .with_fork_registry_factory(|| Ok(PluginRegistry::new()));
+        .with_fork_registry_factory(|_| Ok(PluginRegistry::new()));
         let session = ok(experiment.start());
         let token = authority.record_grant_on_timeline(
             session.timeline().id(),
@@ -10236,7 +10350,7 @@ mod fault_injection_tests {
     fn protected_fork_error_boundaries_reject_missing_and_expired_authority() {
         let authority = ConsentAuthority::new();
         let session = Experiment::new(config("fork-no-gate", StopCondition::MaxTicks(1)))
-            .with_fork_registry_factory(|| Ok(PluginRegistry::new()))
+            .with_fork_registry_factory(|_| Ok(PluginRegistry::new()))
             .start()
             .test_ok();
         let token =
@@ -10247,7 +10361,7 @@ mod fault_injection_tests {
         let authority = ConsentAuthority::new();
         let session = Experiment::new(config("fork-expired", StopCondition::MaxTicks(1)))
             .with_consent_authority(authority.clone())
-            .with_fork_registry_factory(|| Ok(PluginRegistry::new()))
+            .with_fork_registry_factory(|_| Ok(PluginRegistry::new()))
             .start()
             .test_ok();
         let token =
@@ -10280,7 +10394,7 @@ mod fault_injection_tests {
                 "fork-initial-head-error",
                 StopCondition::MaxTicks(1),
             ))
-            .with_fork_registry_factory(|| Ok(PluginRegistry::new())),
+            .with_fork_registry_factory(|_| Ok(PluginRegistry::new())),
             Box::new(failing_store),
         )
         .test_ok();
@@ -10864,7 +10978,7 @@ mod fault_injection_tests {
                 path: path.to_str().test_ok().to_owned(),
             },
         })
-        .with_fork_registry_factory(|| Ok(PluginRegistry::new()))
+        .with_fork_registry_factory(|_| Ok(PluginRegistry::new()))
         .start()
         .test_ok();
         drop_table(path.to_str().test_ok(), "events");

@@ -6,6 +6,7 @@ use pos_core::{
     CompositionPinV1, Event, FallbackActivatedPayloadV1, FallbackActivationModeV1,
     FallbackActivationOriginV1 as Origin, FallbackSkipReasonV1 as Skip, FallbackSkippedCandidateV1,
     FallbackTriggerBasisV1, FallbackTriggerCodeV1, ImplementationKeyV1, Seq, SeqRange, TimelineId,
+    COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
 };
 use pos_runtime::community_plugin_host::{CommunityPassOutcomeV1, PassResultV1};
 use pos_runtime::composition_fallback::{classify_fallback_trigger_v1, enforce_required_plugin_v1};
@@ -469,20 +470,20 @@ impl CompositionBoundaryV1 {
 
     /// The owner's return trigger: the code and cause of the activation that opened the
     /// closing tenure, with `origin=owner`.
+    ///
+    /// The activation is found among the Timeline's Events, inherited ones included, not in
+    /// its ledger: on a Fork the tenure may have been opened by the parent before the cut
+    /// (ADR-119 section 4.6).
     fn returning<S: FallbackBoundaryStoreV1 + ?Sized>(
         &self,
         store: &S,
         effective: &FallbackEffectiveEntryV1,
     ) -> Result<TriggerV1, Error> {
-        let timeline = self.target.timeline;
         let closing = effective.tenure_ordinal.saturating_sub(1);
         let key = effective.entry.entry_key();
-        let opened = store.lookup_activation(&self.scope, timeline, key, closing);
-        let event = opened
-            .ok()
-            .flatten()
-            .and_then(|row| read_event(store, timeline, &row));
-        let payload = event.and_then(|event| decoded_activation(&event));
+        let events = store.read(self.target.timeline, SeqRange::all());
+        let events = events.unwrap_or_default();
+        let payload = opening_activation(&events, &self.scope, key, closing);
         let trigger = payload.map(|payload| {
             let input = payload.as_input();
             TriggerV1 {
@@ -641,6 +642,26 @@ fn read_event<S: FallbackBoundaryStoreV1 + ?Sized>(
 /// The decoded activation payload of `event`.
 fn decoded_activation(event: &Event) -> Option<FallbackActivatedPayloadV1> {
     FallbackActivatedPayloadV1::from_canonical_cbor(event.payload.as_slice()).ok()
+}
+
+/// The activation of `scope` among `events` that closed tenure `closing` of `entry_key`, and
+/// so opened the entry's next tenure.
+fn opening_activation(
+    events: &[Event],
+    scope: &str,
+    entry_key: &str,
+    closing: u64,
+) -> Option<FallbackActivatedPayloadV1> {
+    let activated = COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1;
+    let activations = events
+        .iter()
+        .filter(|event| event.event_type.as_str() == activated);
+    let mut payloads = activations.filter_map(decoded_activation);
+    payloads.find(|payload| {
+        let input = payload.as_input();
+        let opened = input.entry_key == entry_key && input.closing_tenure_ordinal == closing;
+        input.scope == scope && opened
+    })
 }
 
 /// The activation Event the commit returned, which must activate the request's target.

@@ -397,6 +397,19 @@ impl CompositionPinV1 {
         &self.roles
     }
 
+    /// Return this pin with `implementation` in place of its own, and the same roles.
+    ///
+    /// An ADR-119 entry frozen by a withdrawal runs an implementation its policy no longer
+    /// lists. Its roles equal the slot's base pin's (section 4.1 rule 1), so its pin is the
+    /// base pin with the frozen implementation key.
+    #[must_use]
+    pub fn with_implementation(&self, implementation: ImplementationKeyV1) -> Self {
+        Self {
+            implementation,
+            roles: self.roles.clone(),
+        }
+    }
+
     /// Encode the unique preferred PPN1 CBOR record.
     #[must_use]
     pub fn to_canonical_cbor(&self) -> Vec<u8> {
