@@ -1,5 +1,5 @@
-# Paired compiler-cost experiment, not a replacement mutation gate.
-name: 561-mutation-incremental-probe
+# Unmutated owning-package control, not a replacement or relaxed mutation gate.
+name: 561-store-test-timeout-control
 
 on:
   push:
@@ -13,22 +13,17 @@ env:
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   CARGO_BUILD_JOBS: "1"
   CARGO_TERM_COLOR: never
-  RUSTFLAGS: -D warnings
 
 jobs:
-  warm-builds:
+  store-control:
+    name: full Store tests within the unchanged 120s budget
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        incremental: ["0", "1"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
-          ref: bb69188dc7f152653bb64e64916e2e8ff9c5c73f
+          ref: 0c6d537d11b1bf43614dd980bb30f49e60a7912f
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         timeout-minutes: 5
@@ -39,114 +34,70 @@ jobs:
         with:
           shared-key: mutation
           save-if: false
-      - name: Compare native Store rebuilds without reducing its tests
-        timeout-minutes: 25
+      - name: Record frozen source and actual runner
+        timeout-minutes: 1
         env:
-          # Step scope overrides the cache action's unconditional export of 0.
-          CARGO_INCREMENTAL: ${{ matrix.incremental }}
-          EXPECTED_INCREMENTAL: ${{ matrix.incremental }}
           PROBE_WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = bb69188dc7f152653bb64e64916e2e8ff9c5c73f
+          test "$(git rev-parse HEAD)" = 0c6d537d11b1bf43614dd980bb30f49e60a7912f
           test -z "$(git status --porcelain --untracked-files=no)"
-          mkdir -p artifacts/incremental
+          mkdir -p artifacts/store-control
           {
+            printf 'workflow=%s\n' "$PROBE_WORKFLOW_SHA"
+            git rev-parse HEAD
+            sha256sum Cargo.lock crates/pos-store/src/fork_replay.rs
             rustc -Vv
             cargo --version
             uname -a
             nproc
             free -m
             df -h .
-            printf 'image=%s version=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
-          } > artifacts/incremental/environment.txt
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-          import re
-          import subprocess
-          import time
-
-          artifact = Path("artifacts/incremental")
-          source = Path("crates/pos-store/src/fork_replay.rs")
-          original = source.read_bytes()
-          assert subprocess.check_output(["git", "hash-object", str(source)], text=True).strip() == "4cdc9e77e651e415c7426905e13af1077f8c26b6"
-          assert os.environ["CARGO_INCREMENTAL"] == os.environ["EXPECTED_INCREMENTAL"]
-          assert os.environ["CARGO_INCREMENTAL"] in ("0", "1")
-          needle = b".fold(0_u64, |value, byte| (value << 8) + u64::from(*byte));"
-          assert original.count(needle) == 1
-          # These disjoint-bit concatenations are mathematically equal for the
-          # existing 1/2/4/8-byte bound. They exercise distinct warm edits, not
-          # a reduced test inventory or a proposed product representation.
-          variants = [("addition", original)] + [
-              (name, original.replace(needle, needle.replace(b" + ", operator)))
-              for name, operator in (("or", b" | "), ("xor", b" ^ "))
-          ]
-          command = [
-              "cargo", "test", "--package", "pos-store", "--all-features", "--locked", "--",
-              "-Zunstable-options", "--fail-fast", "--include-ignored", "--test-threads=2",
-          ]
-
-          def inventory(text):
-              result = []
-              target = None
-              for line in text.splitlines():
-                  if re.match(r"\s*(Running |Doc-tests )", line):
-                      target = re.sub(r"-[0-9a-f]{16}(?=\))", "-HASH", line.strip())
-                  match = re.fullmatch(
-                      r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; "
-                      r"(\d+) measured; (\d+) filtered out; finished in ([0-9.]+)s", line,
-                  )
-                  if match:
-                      assert target is not None
-                      passed, failed, ignored, measured, filtered, _ = match.groups()
-                      assert [int(value) for value in (failed, ignored, measured, filtered)] == [0, 0, 0, 0]
-                      result.append([target, int(passed)])
-              assert result and sum(row[1] for row in result) > 0
-              return result
-
-          report = {
-              "feature_source": "bb69188dc7f152653bb64e64916e2e8ff9c5c73f",
-              "workflow_source": os.environ["PROBE_WORKFLOW_SHA"],
-              "incremental": os.environ["CARGO_INCREMENTAL"],
-              "command": command, "samples": [],
-          }
-          expected_inventory = None
-          try:
-              for name, contents in variants:
-                  source.write_bytes(contents)
-                  started = time.monotonic()
-                  with (artifact / f"{name}.log").open("wb") as log:
-                      completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=720)
-                  text = (artifact / f"{name}.log").read_text()
-                  sample = {
-                      "variant": name, "source_sha256": hashlib.sha256(contents).hexdigest(),
-                      "seconds": time.monotonic() - started, "exit_code": completed.returncode,
-                      "compile_summaries": [line for line in text.splitlines() if "Finished " in line and "target(s)" in line],
-                  }
-                  report["samples"].append(sample)
-                  (artifact / "report.json").write_text(json.dumps(report, sort_keys=True, indent=2))
-                  assert completed.returncode == 0, "native Store tests failed"
-                  observed = inventory(text)
-                  if expected_inventory is None:
-                      expected_inventory = observed
-                  assert observed == expected_inventory, "native target/test-count inventory changed"
-                  sample["inventory"] = observed
-                  (artifact / "report.json").write_text(json.dumps(report, sort_keys=True, indent=2))
-          finally:
-              source.write_bytes(original)
-          assert len(report["samples"]) == 3
-          subprocess.run(["git", "diff", "--exit-code", "HEAD"], check=True)
-          print(json.dumps(report, sort_keys=True))
-          PY
-      - name: Retain every untrusted timing and native-test log
+          } > artifacts/store-control/environment.txt
+      - name: Build all owning-package targets before timing tests
+        timeout-minutes: 11
+        env:
+          # As in the full baseline, three build jobs shorten cold setup.
+          # This setup timing is not compared with single-job mutant builds.
+          CARGO_BUILD_JOBS: "3"
+          CARGO_INCREMENTAL: "1"
+        run: |
+          set -euo pipefail
+          timeout --kill-after=5s 600s cargo test --no-run --verbose \
+            --package=pos-store@0.1.0 --all-features --locked \
+            2>&1 | tee artifacts/store-control/build.log
+      - name: Measure healthy full Store tests under the exact Test-phase budget
+        timeout-minutes: 3
+        env:
+          # Override setup/cache exports at the actual native consumer.
+          CARGO_INCREMENTAL: "1"
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/time
+          date --utc --iso-8601=seconds > artifacts/store-control/test-start.txt
+          set +e
+          timeout --kill-after=5s 120s /usr/bin/time -v \
+            cargo test --verbose --package=pos-store@0.1.0 --all-features --locked -- \
+            -Zunstable-options --fail-fast --include-ignored --test-threads=2 \
+            2>&1 | tee artifacts/store-control/test.log
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${pipeline_status[@]}" > artifacts/store-control/test-status.txt
+          date --utc --iso-8601=seconds > artifacts/store-control/test-end.txt
+          if [[ "${pipeline_status[0]}" -ne 0 ]]; then
+            exit "${pipeline_status[0]}"
+          fi
+          if [[ "${pipeline_status[1]}" -ne 0 ]]; then
+            exit "${pipeline_status[1]}"
+          fi
+          bash scripts/assert-no-ignored-in-test-summary.sh artifacts/store-control/test.log
+          git diff --exit-code HEAD
+      - name: Preserve every control result, including failure
         if: ${{ always() }}
         timeout-minutes: 2
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: untrusted-561-incremental-${{ matrix.incremental }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/incremental/
+          name: untrusted-561-store-test-control-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/store-control/
           if-no-files-found: error
           retention-days: 14
