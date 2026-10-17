@@ -67,6 +67,7 @@ impl ErasureReadSenderV1<'_> {
         let head = head.map_err(map_fork_replay_lineage_error)?.as_u64();
         let (first, count) = checked_range(verified, head)?;
         let mut staging = Vec::new();
+        let carrier = &mut staging;
         let result = self
             .host
             .store
@@ -77,9 +78,9 @@ impl ErasureReadSenderV1<'_> {
                 verified.read_bounds(),
                 budget,
             )
-            .map(|events| {
-                staging = events;
-                EventBatchV1(&mut staging)
+            .map(move |events| {
+                *carrier = events;
+                EventBatchV1(carrier)
             });
         checkpoint(budget)?;
         let events = result.map_err(map_fork_replay_lineage_error)?;
