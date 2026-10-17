@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use pos_core::{
     CanonicalBytes, CoreError, CorrelationId, CounterfactualDependencyErrorV1, EntityId, Event,
-    EventDraft, EventId, EventStore, FactualDependencyErrorV1, Hash, Kind, PipelineAttemptIdV1,
+    EventDraft, EventId, FactualDependencyErrorV1, Hash, Kind, PipelineAttemptIdV1,
     PipelineOutcomeV1, SchemaVersion,
 };
 use pos_plugin_supervisor::pass_harness::{initial, LostPort, StoreKind, World};
