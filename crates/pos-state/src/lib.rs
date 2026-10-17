@@ -823,6 +823,14 @@ impl ProjectionRegistry {
             })
     }
 
+    /// Whether an installed reducer slot is keyed by `plugin_id`.
+    #[must_use]
+    pub fn has_installed_reducer(&self, plugin_id: PluginId) -> bool {
+        self.slots
+            .iter()
+            .any(|(_, slot)| slot.plugin_id == Some(plugin_id))
+    }
+
     /// Return the names of all registered reducers in insertion order.
     #[must_use]
     pub fn reducer_names(&self) -> Vec<&str> {

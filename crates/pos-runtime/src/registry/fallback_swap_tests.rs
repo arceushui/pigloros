@@ -27,6 +27,7 @@ struct SwapPlugin {
     name: &'static str,
     owned: &'static [&'static str],
     has_driver: bool,
+    has_reducer: bool,
 }
 
 impl SwapPlugin {
@@ -36,6 +37,7 @@ impl SwapPlugin {
             name,
             owned,
             has_driver: true,
+            has_reducer: false,
         }
     }
 }
@@ -53,6 +55,7 @@ impl Plugin for SwapPlugin {
         Capability {
             owned_event_types: self.owned.iter().copied().map(Kind::new).collect(),
             has_driver: self.has_driver,
+            has_reducer: self.has_reducer,
             ..Capability::default()
         }
     }
@@ -119,6 +122,17 @@ impl Driver for SwapDriver {
     fn abort_restore_from_history(&mut self) {
         self.note("abort");
     }
+}
+
+/// A reducer that keeps nothing.
+struct NullReducer;
+
+impl Reducer for NullReducer {
+    fn initial(&self) -> pos_core::State {
+        pos_core::State::new()
+    }
+
+    fn apply(&self, _state: &mut pos_core::State, _event: &Event) {}
 }
 
 fn registration(role: &str) -> Result<PluginRegistrationV1, PluginCompositionErrorV1> {
@@ -445,6 +459,55 @@ fn validate_swap_refuses_every_failed_check_and_changes_nothing() {
     assert!(rig.registry.contains(&rig.primary));
 }
 
+/// A rig whose primary has an action approver (`approver`) or a reducer.
+fn rig_with_callbacks(approver: bool) -> Rig {
+    let mut primary = SwapPlugin::new("primary", WEATHER);
+    primary.has_reducer = !approver;
+    let mut rig = Rig {
+        registry: PluginRegistry::new(),
+        head: PluginId::new(),
+        primary: primary.id,
+        tail: PluginId::new(),
+        log: Log::default(),
+    };
+    let driver = Some(SwapDriver::boxed(primary.name, &rig.log));
+    let pin = registration("role.weather").test_ok();
+    let registered = if approver {
+        let route = [Kind::new(WEATHER[0])];
+        let approver: Option<Box<dyn ActionApprover>> = Some(Box::new(NoActionApproverV1));
+        let registry = &mut rig.registry;
+        registry.register_pinned_generated_with_approver(
+            &primary,
+            pin,
+            None,
+            driver,
+            approver,
+            route,
+        )
+    } else {
+        let reducer: Box<dyn Reducer> = Box::new(NullReducer);
+        rig.registry
+            .register_pinned_generated(&primary, pin, Some(reducer), driver)
+    };
+    registered.test_ok();
+    rig
+}
+
+#[test]
+fn validate_swap_refuses_a_primary_with_an_approver_or_a_reducer() {
+    for approver in [true, false] {
+        let mut rig = rig_with_callbacks(approver);
+        let (_, prepared) = rig.candidate();
+        let refused = rig.registry.validate_swap_v1(&prepared);
+        assert_eq!(refusal_of(&refused), Some(Refusal::PrimaryHasCallbacks));
+        let revision = rig.registry.registration_revision;
+        let refused = rig.registry.swap_entry_v1(prepared);
+        assert_eq!(refusal_of(&refused), Some(Refusal::PrimaryHasCallbacks));
+        assert!(rig.registry.contains(&rig.primary));
+        assert_eq!(rig.registry.registration_revision, revision);
+    }
+}
+
 #[test]
 fn restore_entry_restores_only_the_named_entry() {
     let mut rig = Rig::new(true);
@@ -581,10 +644,6 @@ fn the_prefix_check_is_the_restore_check() {
     ));
 }
 
-fn copied<T: Clone>(value: &T) -> T {
-    value.clone()
-}
-
 #[test]
 fn every_refusal_renders_distinctly_and_converts_transparently() {
     let refusals = [
@@ -595,7 +654,7 @@ fn every_refusal_renders_distinctly_and_converts_transparently() {
         Refusal::UnknownPrimary,
         Refusal::OwnedTypesDiffer,
         Refusal::CapacityUnavailable,
-        Refusal::CandidateRegistered,
+        Refusal::PrimaryHasCallbacks,
     ];
     let mut rendered: Vec<String> = Vec::new();
     for refusal in refusals {
@@ -603,7 +662,8 @@ fn every_refusal_renders_distinctly_and_converts_transparently() {
         assert!(!message.is_empty());
         assert!(!rendered.contains(&message), "{message}");
         assert_eq!(RuntimeError::from(refusal).to_string(), message);
-        assert_eq!(copied(&refusal), refusal);
+        let copy = refusal;
+        assert_eq!(copy, refusal);
         assert!(!format!("{refusal:?}").is_empty());
         rendered.push(message);
     }

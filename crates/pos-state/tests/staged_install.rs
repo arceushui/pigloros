@@ -380,3 +380,14 @@ fn compare_arms_commit_together_or_not_at_all() {
     assert_eq!(count_of(&arm_a, timeline_a, &entity), Some(2));
     assert_eq!(count_of(&arm_b, timeline_b, &entity), Some(3));
 }
+
+#[test]
+fn an_installed_slot_is_found_by_its_plugin_id() {
+    let mut registry = ProjectionRegistry::new();
+    let plugin = PluginId::new();
+    registry.register(NAME, Box::new(CountingReducer));
+    assert!(!registry.has_installed_reducer(plugin));
+    test_ok(registry.register_installed_reducer(plugin, NAME, Box::new(CountingReducer)));
+    assert!(registry.has_installed_reducer(plugin));
+    assert!(!registry.has_installed_reducer(PluginId::new()));
+}
