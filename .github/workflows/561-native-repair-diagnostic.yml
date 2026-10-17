@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
-          ref: f4a73f9638f5e27e94c8bd649d1c9caf80b4b399
+          ref: 10131069668b28b3ad2ff0fa4c78b0c8a9c3ddb0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         timeout-minutes: 5
@@ -39,7 +39,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           git rev-parse HEAD | tee artifacts/source-sha.txt
-          test "$(git rev-parse HEAD)" = f4a73f9638f5e27e94c8bd649d1c9caf80b4b399
+          test "$(git rev-parse HEAD)" = 10131069668b28b3ad2ff0fa4c78b0c8a9c3ddb0
           rustc -Vv | tee artifacts/rustc.txt
           cargo llvm-cov --version | tee artifacts/llvm-cov-version.txt
           id | tee artifacts/runner-identity.txt
@@ -91,6 +91,9 @@ jobs:
             sqlite::fork_replay_lineage::tests::metadata_where_redaction_refuses_only_the_raw_fetch_and_preserves_debits
             sqlite::fork_replay_lineage::tests::geographic_where_redaction_refuses_only_the_raw_kind_and_preserves_debits
             sqlite::fork_replay_lineage::tests::native_lineage_decoder_refuses_short_projections_without_refunding_work
+            sqlite::fork_replay_suffix::tests::native_suffix_decoder_refuses_a_noninteger_optional_length
+            sqlite::fork_replay_operation::tests::native_principal_decoder_rejects_a_width_mismatch_without_refunding_work
+            sqlite::fork_replay_operation::tests::native_operation_probe_decoder_rejects_a_nonboolean_null_marker
             sqlite::fork_replay_read::tests::projected_sequence_redaction_preserves_the_real_row_and_funded_event_retry
           )
           for test_name in "${tests[@]}"; do
@@ -128,7 +131,7 @@ jobs:
             --json --output-path artifacts/coverage.json \
             -- --include-ignored 2>&1 | tee artifacts/coverage-test.log
           # Exact standalone source inventory, not the PR synthetic merge tree.
-          grep -F 'test result: ok. 1104 passed; 0 failed; 0 ignored;' artifacts/coverage-test.log
+          grep -F 'test result: ok. 1107 passed; 0 failed; 0 ignored;' artifacts/coverage-test.log
           bash scripts/assert-no-ignored-in-test-summary.sh artifacts/coverage-test.log
           python3 - <<'PY' | tee artifacts/target-regions.json
           import json
@@ -143,16 +146,19 @@ jobs:
               ("fork_replay_read.rs", 104, 69, ".ok_or(Error::Read(ReadError::CorruptAuthority))?;"),
               ("fork_replay_operation.rs", 65, 58, ".map_err(|_| Error::StorageIndeterminate)?"),
               ("fork_replay_operation.rs", 71, 58, ".map_err(|_| Error::StorageIndeterminate)?"),
-              ("fork_replay_operation.rs", 83, 65, "let row = row.ok_or(Error::CorruptAuthority)?;"),
-              ("fork_replay_operation.rs", 89, 66, ".map_err(|_| Error::StorageIndeterminate)?;"),
-              ("fork_replay_operation.rs", 129, 62, ".map_err(|_| Error::StorageIndeterminate)?"),
-              ("fork_replay_operation.rs", 135, 81, "let text: bool = row.get(7).map_err(|_| Error::StorageIndeterminate)?;"),
-              ("fork_replay_operation.rs", 144, 62, ".map_err(|_| Error::StorageIndeterminate)?;"),
-              ("fork_replay_operation.rs", 153, 62, ".map_err(|_| Error::StorageIndeterminate)?;"),
+              ("fork_replay_operation.rs", 92, 49, "let row = row.ok_or(Error::CorruptAuthority)?;"),
+              ("fork_replay_operation.rs", 98, 50, ".map_err(|_| Error::StorageIndeterminate)?;"),
+              ("fork_replay_operation.rs", 100, 39, "let operation = sqlite_hash(bytes)?;"),
+              ("fork_replay_operation.rs", 127, 58, ".map_err(|_| Error::StorageIndeterminate)?"),
+              ("fork_replay_operation.rs", 132, 77, "let null: bool = row.get(6).map_err(|_| Error::StorageIndeterminate)?;"),
+              ("fork_replay_operation.rs", 133, 77, "let text: bool = row.get(7).map_err(|_| Error::StorageIndeterminate)?;"),
+              ("fork_replay_operation.rs", 142, 58, ".map_err(|_| Error::StorageIndeterminate)?;"),
+              ("fork_replay_operation.rs", 151, 58, ".map_err(|_| Error::StorageIndeterminate)?;"),
               ("fork_replay_suffix.rs", 67, 97, "let integer: bool = row.get(1).map_err(|_| CorruptAuthority)?;"),
               ("fork_replay_suffix.rs", 68, 94, "let text: bool = row.get(3).map_err(|_| CorruptAuthority)?;"),
               ("fork_replay_suffix.rs", 70, 81, "row.get(4).map_err(|_| CorruptAuthority)?;"),
               ("fork_replay_suffix.rs", 72, 81, "row.get(6).map_err(|_| CorruptAuthority)?;"),
+              ("fork_replay_suffix.rs", 82, 81, "row.get(7).map_err(|_| CorruptAuthority)?;"),
           ]
           report = json.loads(Path("artifacts/coverage.json").read_text())
           results = []
@@ -167,6 +173,17 @@ jobs:
                           and segment[3] and segment[4] and not segment[5]]
               assert len(segments) == 1, "missing or ambiguous refusal segment"
               results.append({"path": path, "source": source, "segment": segments[0]})
+          interval_path = "crates/pos-store/src/sqlite/interval_test_support.rs"
+          interval_files = [entry for data in report["data"] for entry in data["files"]
+                            if entry["filename"].endswith("/" + interval_path)]
+          assert len(interval_files) == 1, "missing or ambiguous interval-support coverage"
+          interval_segments = [segment for segment in interval_files[0]["segments"]
+                               if segment[3] and segment[4] and not segment[5]]
+          assert interval_segments, "missing mapped interval-support regions"
+          Path("artifacts/interval-support-regions.json").write_text(
+              json.dumps({"path": interval_path, "segments": interval_segments})
+          )
+          assert all(segment[2] > 0 for segment in interval_segments), "uncovered interval-support region"
           print(json.dumps(results))
           assert all(item["segment"][2] > 0 for item in results), "native refusal region not executed"
           PY
