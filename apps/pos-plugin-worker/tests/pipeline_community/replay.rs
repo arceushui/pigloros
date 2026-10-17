@@ -26,7 +26,7 @@ use pos_core::{
     State, TimelineId,
 };
 use pos_plugin_publisher::test_support::{encoding::TICK, world::World as SignedWorld, BoxResult};
-use pos_plugin_supervisor::pass_harness::{initial, World as PassWorld};
+use pos_plugin_supervisor::pass_harness::{initial, StoreKind, World as PassWorld};
 use pos_runtime::community_plugin_host::{
     CommunityPassOutcomeV1, CommunityPluginModeV1 as Mode, PassResultV1,
 };
@@ -37,10 +37,9 @@ use crate::authority::refusal_of;
 use crate::failure::{describe, record_pass, Mixed, Pass, SIBLING};
 use crate::first_party::{entity_of, native_pin, register_switched, register_twin, Switched};
 use crate::harness::Capture;
-use crate::parity::{record, Order, ENTITY, STORE, TWIN_TYPE};
+use crate::parity::{on_every_store, record, Order, StoreCapture, ENTITY, TWIN_TYPE};
 use crate::support::lane::{publish, Lane, Published, ALPHA, EVENT_TYPE};
 use crate::support::subcase::WORKER;
-use crate::support::test_ok::TestOk;
 
 /// The Plugin name, Reducer name and pin role of the projection observer.
 const OBSERVER: &str = "parity-projection";
@@ -152,7 +151,8 @@ fn read_both(
     })
 }
 
-/// A Replay registry over the twin, the community Driver and the observer, in that order.
+/// A Replay registry over the twin, the community Driver and the observer, in that order, in a
+/// pass world on a `kind` store.
 ///
 /// The community Driver is built from `entries` in `mode`; the twin's switches are returned with
 /// the lane.
@@ -163,8 +163,9 @@ fn replay_lane(
     signed: &SignedWorld,
     entries: &[Published],
     mode: Mode,
+    kind: StoreKind,
 ) -> BoxResult<(Lane, Switched)> {
-    let mut pass = PassWorld::new(WORKER);
+    let mut pass = PassWorld::on(kind, WORKER);
     let gate = pass.gate.clone();
     pass.registry = PluginRegistry::new_replay().with_erasure_gate(gate);
     let twin = register_switched(&mut pass.registry, SIBLING, entity_of(ENTITY)?)?;
@@ -226,19 +227,25 @@ impl Replayed {
     }
 }
 
-/// Commit both Events through a live mixed lane in `mode`, then replay them.
+/// Commit both Events through a live mixed lane on a `kind` store in `mode`, then replay them.
 ///
 /// The live registry and a Replay registry over the same Plugins fold the committed Events, and
-/// the Replay registry is asked to step its Drivers once.
-fn replayed(signed: &SignedWorld, entries: &[Published], mode: Mode) -> BoxResult<Replayed> {
-    let mut mixed = Mixed::in_mode(signed, entries, SIBLING, Order::TwinFirst, mode)?;
+/// the Replay registry is asked to step its Drivers once. The Replay registry's own pass world
+/// is on a store of the same kind, though the Replay reads only the Events handed to it.
+fn replayed(
+    signed: &SignedWorld,
+    entries: &[Published],
+    mode: Mode,
+    kind: StoreKind,
+) -> BoxResult<Replayed> {
+    let mut mixed = Mixed::in_mode(kind, signed, entries, SIBLING, Order::TwinFirst, mode)?;
     let live = mixed.pass(signed)?;
     let timeline = mixed.lane.pass.timeline;
     let committed = mixed.lane.pass.events();
     let ancestry = pos_core::fork_ancestry(&*mixed.lane.pass.store, timeline)?;
     add_observer(&mut mixed.lane.pass.registry)?;
     mixed.lane.pass.registry.fold_events(timeline, &committed);
-    let (mut replay, twin) = replay_lane(signed, entries, mode)?;
+    let (mut replay, twin) = replay_lane(signed, entries, mode, kind)?;
     let registry = &mut replay.pass.registry;
     registry.fold_events(timeline, &committed);
     let head = committed.last().map_or(Seq::ZERO, |event| event.seq);
@@ -259,11 +266,11 @@ fn replayed(signed: &SignedWorld, entries: &[Published], mode: Mode) -> BoxResul
 }
 
 /// Record one live pass and its Replay under `path`.
-fn record_replayed(capture: &mut Capture, path: &str, replayed: &Replayed) {
+fn record_replayed(capture: &mut StoreCapture<'_>, path: &str, replayed: &Replayed) {
     let live = format!("{path}-live");
     record(capture, &live, &replayed.live.observed);
     let mut put = |key: &str, value: &dyn std::fmt::Display| {
-        capture.record(STORE, &format!("{path}.{key}"), value);
+        capture.record(&format!("{path}.{key}"), value);
     };
     put("live-projection", &replayed.folded.live);
     put("replay-projection", &replayed.folded.replay);
@@ -282,24 +289,23 @@ fn record_replayed(capture: &mut Capture, path: &str, replayed: &Replayed) {
 /// the same Events, payload bytes included, and fold the same projection.
 #[must_use]
 pub fn replay_parity() -> Capture {
-    replay().test_ok()
+    on_every_store(replay)
 }
 
-fn replay() -> BoxResult<Capture> {
+fn replay(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let alpha = publish(&mut signed, ALPHA, 1)?;
     let entries = std::slice::from_ref(&alpha);
-    let local = replayed(&signed, entries, Mode::Local)?;
-    let air_gapped = replayed(&signed, entries, Mode::AirGapped)?;
-    let mut capture = Capture::default();
-    record_replayed(&mut capture, "local", &local);
-    record_replayed(&mut capture, "air-gapped", &air_gapped);
+    let local = replayed(&signed, entries, Mode::Local, kind)?;
+    let air_gapped = replayed(&signed, entries, Mode::AirGapped, kind)?;
+    record_replayed(capture, "local", &local);
+    record_replayed(capture, "air-gapped", &air_gapped);
     let either = local.holds() && air_gapped.holds();
     let key = "parity.replay-equals-live-either-class";
-    capture.record(STORE, key, either);
+    capture.record(key, either);
     let same = local.content == air_gapped.content && local.folded.live == air_gapped.folded.live;
-    capture.record(STORE, "parity.local-equals-air-gapped", same);
-    Ok(capture)
+    capture.record("parity.local-equals-air-gapped", same);
+    Ok(())
 }
 
 /// Recover the pass `lane`'s registry holds in doubt, described as the pass result it settles.
@@ -382,15 +388,16 @@ fn trace(mixed: &Mixed) -> Trace {
     }
 }
 
-/// A mixed lane whose pass loses its commit acknowledgement, then recovers it.
+/// A mixed lane on a `kind` store whose pass loses its commit acknowledgement, then recovers it.
 ///
 /// Both Drivers stage before the commit; the community member is returned as it was before and
 /// after the recovery.
 fn mixed_recovery(
     signed: &SignedWorld,
     entries: &[Published],
+    kind: StoreKind,
 ) -> BoxResult<(Recovery, Trace, Trace)> {
-    let mut mixed = Mixed::new(signed, entries, SIBLING, Order::TwinFirst)?;
+    let mut mixed = Mixed::new(kind, signed, entries, SIBLING, Order::TwinFirst)?;
     let lost = mixed.lost_pass(signed)?;
     let before = trace(&mixed);
     let events = mixed.lane.pass.events();
@@ -409,9 +416,10 @@ fn mixed_recovery(
     Ok((recovery, before, after))
 }
 
-/// A first-party-only lane whose pass loses its commit acknowledgement, then recovers it.
-fn first_party_recovery(signed: &SignedWorld) -> BoxResult<Recovery> {
-    let mut pass = PassWorld::new(WORKER);
+/// A first-party-only lane on a `kind` store whose pass loses its commit acknowledgement, then
+/// recovers it.
+fn first_party_recovery(signed: &SignedWorld, kind: StoreKind) -> BoxResult<Recovery> {
+    let mut pass = PassWorld::on(kind, WORKER);
     let steps = register_twin(&mut pass.registry, EVENT_TYPE, entity_of(ENTITY)?)?;
     let mut lane = Lane::over(signed, &[], Mode::Local, pass)?;
     let outcome = lane.run_lost(signed)?;
@@ -433,22 +441,22 @@ fn first_party_recovery(signed: &SignedWorld) -> BoxResult<Recovery> {
 }
 
 /// Record a recovery under `path`.
-fn record_recovery(capture: &mut Capture, path: &str, recovery: &Recovery) {
+fn record_recovery(capture: &mut StoreCapture<'_>, path: &str, recovery: &Recovery) {
     record_pass(capture, &format!("{path}-lost"), &recovery.lost);
     let recovered = format!("{path}-recovered");
     record_pass(capture, &recovered, &recovery.recovered);
     let unchanged = format!("{path}.timeline-unchanged-by-recovery");
-    capture.record(STORE, &unchanged, recovery.unchanged);
+    capture.record(&unchanged, recovery.unchanged);
     let again = format!("{path}.recover-again");
-    capture.record(STORE, &again, &recovery.again);
+    capture.record(&again, &recovery.again);
 }
 
 /// Record what the community member shows under `path`.
-fn record_trace(capture: &mut Capture, path: &str, trace: &Trace) {
+fn record_trace(capture: &mut StoreCapture<'_>, path: &str, trace: &Trace) {
     let receipts = format!("{path}.community-receipts");
-    capture.record(STORE, &receipts, &trace.receipts);
+    capture.record(&receipts, &trace.receipts);
     let state = format!("{path}.community-state");
-    capture.record(STORE, &state, trace.state);
+    capture.record(&state, trace.state);
 }
 
 /// PCF-CPH-012: lost-acknowledgement recovery without running a Plugin again.
@@ -461,22 +469,21 @@ fn record_trace(capture: &mut Capture, path: &str, trace: &Trace) {
 /// until the recovery commits it and adopts its state.
 #[must_use]
 pub fn lost_acknowledgement_recovery() -> Capture {
-    lost_acknowledgement().test_ok()
+    on_every_store(lost_acknowledgement)
 }
 
-fn lost_acknowledgement() -> BoxResult<Capture> {
+fn lost_acknowledgement(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let alpha = publish(&mut signed, ALPHA, 1)?;
     let entries = std::slice::from_ref(&alpha);
-    let (mixed, before, after) = mixed_recovery(&signed, entries)?;
-    let first_party = first_party_recovery(&signed)?;
-    let mut capture = Capture::default();
-    record_recovery(&mut capture, "mixed", &mixed);
-    record_trace(&mut capture, "mixed-lost", &before);
-    record_trace(&mut capture, "mixed-recovered", &after);
-    record_recovery(&mut capture, "first-party", &first_party);
+    let (mixed, before, after) = mixed_recovery(&signed, entries, kind)?;
+    let first_party = first_party_recovery(&signed, kind)?;
+    record_recovery(capture, "mixed", &mixed);
+    record_trace(capture, "mixed-lost", &before);
+    record_trace(capture, "mixed-recovered", &after);
+    record_recovery(capture, "first-party", &first_party);
     let either = mixed.holds() && first_party.holds();
     let key = "parity.recovered-without-rerun-either-class";
-    capture.record(STORE, key, either);
-    Ok(capture)
+    capture.record(key, either);
+    Ok(())
 }

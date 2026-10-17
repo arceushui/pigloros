@@ -21,12 +21,12 @@
 use std::sync::atomic::Ordering;
 
 use pos_plugin_publisher::test_support::{release::Shape, world::World as SignedWorld, BoxResult};
+use pos_plugin_supervisor::pass_harness::StoreKind;
 
 use crate::failure::{record_pass, Mixed, Pass, SIBLING};
 use crate::harness::Capture;
-use crate::parity::{record, Order, STORE};
+use crate::parity::{on_every_store, record, Order, StoreCapture};
 use crate::support::lane::{publish_shape, Published, ALPHA};
-use crate::support::test_ok::TestOk;
 
 /// The memory budget of the over-budget release: one page.
 ///
@@ -56,10 +56,14 @@ struct Exhausted {
 
 /// A community Driver that exceeds its release's memory budget on the real worker after the
 /// first-party sibling staged; the pass while it is quarantined; and the pass after the host
-/// cleared that quarantine.
-fn community_exhausted(signed: &SignedWorld, first: &Published) -> BoxResult<Exhausted> {
+/// cleared that quarantine; all on a `kind` store.
+fn community_exhausted(
+    signed: &SignedWorld,
+    first: &Published,
+    kind: StoreKind,
+) -> BoxResult<Exhausted> {
     let entries = std::slice::from_ref(first);
-    let mut mixed = Mixed::new(signed, entries, SIBLING, Order::TwinFirst)?;
+    let mut mixed = Mixed::new(kind, signed, entries, SIBLING, Order::TwinFirst)?;
     let failed = mixed.pass(signed)?;
     let quarantined = mixed.pass(signed)?;
     mixed.clear()?;
@@ -80,9 +84,13 @@ struct OverBudget {
 }
 
 /// A first-party Driver that stages more drafts than the pass budget leaves after the community
-/// sibling staged, then the next pass, within budget.
-fn first_party_over(signed: &SignedWorld, entries: &[Published]) -> BoxResult<OverBudget> {
-    let mut mixed = Mixed::new(signed, entries, SIBLING, Order::CommunityFirst)?;
+/// sibling staged, then the next pass, within budget, on a `kind` store.
+fn first_party_over(
+    signed: &SignedWorld,
+    entries: &[Published],
+    kind: StoreKind,
+) -> BoxResult<OverBudget> {
+    let mut mixed = Mixed::new(kind, signed, entries, SIBLING, Order::CommunityFirst)?;
     mixed.limit(PASS_DRAFTS);
     mixed.burst.store(true, Ordering::SeqCst);
     let failed = mixed.pass(signed)?;
@@ -121,37 +129,32 @@ fn commits_both(pass: &Pass) -> bool {
 /// first-party lane within budget, each commit both Events in the next pass.
 #[must_use]
 pub fn over_budget_parity() -> Capture {
-    over_budget().test_ok()
+    on_every_store(over_budget)
 }
 
-fn over_budget() -> BoxResult<Capture> {
+fn over_budget(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let shape = ALPHA.shape().with_memory_bytes(ONE_PAGE);
     let first = publish_shape(&mut signed, ALPHA, shape, 1)?;
-    let community = community_exhausted(&signed, &first)?;
+    let community = community_exhausted(&signed, &first, kind)?;
     let second = in_budget(&mut signed, &first)?;
     let entries = std::slice::from_ref(&second);
-    let mut renewed = Mixed::new(&signed, entries, SIBLING, Order::TwinFirst)?;
+    let mut renewed = Mixed::new(kind, &signed, entries, SIBLING, Order::TwinFirst)?;
     let successor = renewed.pass(&signed)?;
-    let first_party = first_party_over(&signed, entries)?;
-    let mut capture = Capture::default();
-    record_pass(&mut capture, "community-exhausted", &community.failed);
-    record_pass(
-        &mut capture,
-        "community-quarantined",
-        &community.quarantined,
-    );
-    record_pass(&mut capture, "community-cleared", &community.again);
-    capture.record(STORE, "community.community-receipts", &community.receipts);
-    record(&mut capture, "community-successor", &successor.observed);
-    record_pass(&mut capture, "first-party-exhausted", &first_party.failed);
+    let first_party = first_party_over(&signed, entries, kind)?;
+    record_pass(capture, "community-exhausted", &community.failed);
+    record_pass(capture, "community-quarantined", &community.quarantined);
+    record_pass(capture, "community-cleared", &community.again);
+    capture.record("community.community-receipts", &community.receipts);
+    record(capture, "community-successor", &successor.observed);
+    record_pass(capture, "first-party-exhausted", &first_party.failed);
     let recovered = &first_party.recovered.observed;
-    record(&mut capture, "first-party-recovered", recovered);
+    record(capture, "first-party-recovered", recovered);
     let receipts = &first_party.receipts;
-    capture.record(STORE, "first-party.community-receipts", receipts);
+    capture.record("first-party.community-receipts", receipts);
     let failed = discarded(&community.failed) && discarded(&first_party.failed);
-    capture.record(STORE, "parity.whole-pass-discarded-either-class", failed);
+    capture.record("parity.whole-pass-discarded-either-class", failed);
     let within = commits_both(&successor) && commits_both(&first_party.recovered);
-    capture.record(STORE, "parity.next-pass-within-budget-commits", within);
-    Ok(capture)
+    capture.record("parity.next-pass-within-budget-commits", within);
+    Ok(())
 }

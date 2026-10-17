@@ -22,7 +22,9 @@ use pos_plugin_publisher::test_support::{
     world::{wall, World as SignedWorld},
     BoxResult, BundleAddressV1,
 };
-use pos_plugin_supervisor::pass_harness::{GatedSpec, LostPort, Source, World as PassWorld};
+use pos_plugin_supervisor::pass_harness::{
+    GatedSpec, LostPort, Source, StoreKind, World as PassWorld,
+};
 use pos_plugin_supervisor::{
     CommunityMemberV1, CommunityPluginHandleV1, CommunityPluginSubjectOutcomeV1 as Outcome,
     InvocationBindingV1, InvocationContextSourceV1, InvocationContextV1,
@@ -352,12 +354,25 @@ pub struct Lane {
 }
 
 impl Lane {
-    /// A lane over a fresh pass world on the real worker, with one member per entry.
+    /// A lane over a fresh `MemoryStore` pass world on the real worker, with one member per entry.
     ///
     /// # Errors
     /// Returns the error of gating, building or registering a member.
     pub fn new(signed: &SignedWorld, entries: &[Published], mode: Mode) -> BoxResult<Self> {
-        Self::over(signed, entries, mode, PassWorld::new(WORKER))
+        Self::on(StoreKind::Memory, signed, entries, mode)
+    }
+
+    /// As [`Self::new`], over a fresh pass world on a store of `kind`.
+    ///
+    /// # Errors
+    /// Returns the error of gating, building or registering a member.
+    pub fn on(
+        kind: StoreKind,
+        signed: &SignedWorld,
+        entries: &[Published],
+        mode: Mode,
+    ) -> BoxResult<Self> {
+        Self::over(signed, entries, mode, PassWorld::on(kind, WORKER))
     }
 
     /// As [`Self::new`], over `pass`, which may already hold other Drivers.

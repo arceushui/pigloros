@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use pos_core::{PluginId, EVENT_TYPE_CONSENT_REVOKED_V1};
 use pos_plugin_publisher::test_support::{world::World as SignedWorld, BoxResult};
-use pos_plugin_supervisor::pass_harness::{initial, Source, World as PassWorld};
+use pos_plugin_supervisor::pass_harness::{initial, Source, StoreKind, World as PassWorld};
 use pos_plugin_supervisor::test_support::{community_pin, DriverPlugin};
 use pos_plugin_supervisor::{
     register_community_driver, CommunityDriverConfigV1, CommunityDriverSettingsV1,
@@ -31,13 +31,14 @@ use pos_runtime::{PluginCompositionErrorV1, PluginRegistry, RuntimeError};
 
 use crate::first_party::{entity_of, register_native, register_twin, Native};
 use crate::harness::Capture;
-use crate::parity::{observe, record, same_authority, Observed, ENTITY, STORE, TWIN_TYPE};
+use crate::parity::{
+    observe, on_every_store, record, same_authority, Observed, StoreCapture, ENTITY, TWIN_TYPE,
+};
 use crate::support::lane::{
     gated_release, profile, publish, trust_material, Lane, Published, Spec, Swap, ALPHA,
     EVENT_TYPE, WATCHDOG,
 };
 use crate::support::subcase::WORKER;
-use crate::support::test_ok::TestOk;
 
 /// The first-party Plugin that owns the fixture's Event type in the proposal cases.
 const OWNER: Native = Native {
@@ -149,10 +150,15 @@ struct Proposal {
     refusal: String,
 }
 
-/// The Local pass of a registry holding [`OWNER`] and then the first-party `native` proposer.
-fn first_party_proposal(signed: &SignedWorld, native: Native) -> BoxResult<Proposal> {
+/// The Local pass of a registry on a `kind` store holding [`OWNER`] and then the first-party
+/// `native` proposer.
+fn first_party_proposal(
+    signed: &SignedWorld,
+    native: Native,
+    kind: StoreKind,
+) -> BoxResult<Proposal> {
     let entity = entity_of(ENTITY)?;
-    let mut pass = PassWorld::new(WORKER);
+    let mut pass = PassWorld::on(kind, WORKER);
     let owner = register_native(&mut pass.registry, OWNER, entity)?;
     let proposed = register_native(&mut pass.registry, native, entity)?;
     let mut lane = Lane::over(signed, &[], Mode::Local, pass)?;
@@ -165,9 +171,14 @@ fn first_party_proposal(signed: &SignedWorld, native: Native) -> BoxResult<Propo
     })
 }
 
-/// The Local pass of a registry holding [`OWNER`] and then the community member of `entries`.
-fn community_proposal(signed: &SignedWorld, entries: &[Published]) -> BoxResult<Proposal> {
-    let mut pass = PassWorld::new(WORKER);
+/// The Local pass of a registry on a `kind` store holding [`OWNER`] and then the community
+/// member of `entries`.
+fn community_proposal(
+    signed: &SignedWorld,
+    entries: &[Published],
+    kind: StoreKind,
+) -> BoxResult<Proposal> {
+    let mut pass = PassWorld::on(kind, WORKER);
     let owner = register_native(&mut pass.registry, OWNER, entity_of(ENTITY)?)?;
     let mut lane = Lane::over(signed, entries, Mode::Local, pass)?;
     let outcome = lane.run(signed)?;
@@ -180,9 +191,9 @@ fn community_proposal(signed: &SignedWorld, entries: &[Published]) -> BoxResult<
 }
 
 /// Record what the refused proposal shows under `path`.
-fn record_proposal(capture: &mut Capture, path: &str, proposal: &Proposal) {
+fn record_proposal(capture: &mut StoreCapture<'_>, path: &str, proposal: &Proposal) {
     record(capture, path, &proposal.observed);
-    capture.record(STORE, &format!("{path}.refusal"), &proposal.refusal);
+    capture.record(&format!("{path}.refusal"), &proposal.refusal);
 }
 
 /// PCF-CPH-003: a proposal of another Plugin's Event type is refused identically.
@@ -193,23 +204,22 @@ fn record_proposal(capture: &mut Capture, path: &str, proposal: &Proposal) {
 /// release-activation type is refused with the reserved-draft refusal.
 #[must_use]
 pub fn foreign_proposal_parity() -> Capture {
-    foreign_proposal().test_ok()
+    on_every_store(foreign_proposal)
 }
 
-fn foreign_proposal() -> BoxResult<Capture> {
+fn foreign_proposal(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let member = publish(&mut signed, COMMUNITY_PROPOSER, 1)?;
-    let first_party = first_party_proposal(&signed, PROPOSER)?;
-    let community = community_proposal(&signed, std::slice::from_ref(&member))?;
-    let reserved = first_party_proposal(&signed, RESERVED)?;
-    let mut capture = Capture::default();
-    record_proposal(&mut capture, "first-party", &first_party);
-    record_proposal(&mut capture, "community", &community);
-    record_proposal(&mut capture, "first-party-reserved", &reserved);
+    let first_party = first_party_proposal(&signed, PROPOSER, kind)?;
+    let community = community_proposal(&signed, std::slice::from_ref(&member), kind)?;
+    let reserved = first_party_proposal(&signed, RESERVED, kind)?;
+    record_proposal(capture, "first-party", &first_party);
+    record_proposal(capture, "community", &community);
+    record_proposal(capture, "first-party-reserved", &reserved);
     let parity = same_authority(&first_party.observed, &community.observed)
         && first_party.refusal == community.refusal;
-    capture.record(STORE, "parity.first-party-equals-community", parity);
-    Ok(capture)
+    capture.record("parity.first-party-equals-community", parity);
+    Ok(())
 }
 
 /// A community Driver built from the gated release of `entry` for `plugin_id`.
@@ -273,9 +283,14 @@ struct Claim {
     observed: Observed,
 }
 
-/// A community claim on the fixture's type, which the first-party twin owns, then a pass.
-fn community_claims_native_type(signed: &SignedWorld, entry: &Published) -> BoxResult<Claim> {
-    let mut pass = PassWorld::new(WORKER);
+/// A community claim on the fixture's type, which the first-party twin owns, then a pass on a
+/// `kind` store.
+fn community_claims_native_type(
+    signed: &SignedWorld,
+    entry: &Published,
+    kind: StoreKind,
+) -> BoxResult<Claim> {
+    let mut pass = PassWorld::on(kind, WORKER);
     let steps = register_twin(&mut pass.registry, EVENT_TYPE, entity_of(ENTITY)?)?;
     let before = snapshot(&pass.registry);
     let claim = community_claim(signed, entry, &mut pass.registry, EVENT_TYPE);
@@ -292,9 +307,13 @@ fn community_claims_native_type(signed: &SignedWorld, entry: &Published) -> BoxR
 }
 
 /// A first-party claim on the fixture's type, which the community member of `entries` owns,
-/// then a pass.
-fn native_claims_community_type(signed: &SignedWorld, entries: &[Published]) -> BoxResult<Claim> {
-    let mut lane = Lane::new(signed, entries, Mode::Local)?;
+/// then a pass on a `kind` store.
+fn native_claims_community_type(
+    signed: &SignedWorld,
+    entries: &[Published],
+    kind: StoreKind,
+) -> BoxResult<Claim> {
+    let mut lane = Lane::on(kind, signed, entries, Mode::Local)?;
     let before = snapshot(&lane.pass.registry);
     let claim = register_twin(&mut lane.pass.registry, EVENT_TYPE, entity_of(ENTITY)?);
     let refusal = claim_refusal(claim);
@@ -309,20 +328,22 @@ fn native_claims_community_type(signed: &SignedWorld, entries: &[Published]) -> 
 }
 
 /// Record what the refused claim and the following pass show under `path`.
-fn record_claim(capture: &mut Capture, path: &str, claim: &Claim) {
-    capture.record(STORE, &format!("{path}.refusal"), &claim.refusal);
-    capture.record(
-        STORE,
-        &format!("{path}.registry-unchanged"),
-        claim.unchanged,
-    );
+fn record_claim(capture: &mut StoreCapture<'_>, path: &str, claim: &Claim) {
+    capture.record(&format!("{path}.refusal"), &claim.refusal);
+    capture.record(&format!("{path}.registry-unchanged"), claim.unchanged);
     record(capture, path, &claim.observed);
 }
 
 /// The refusals of a first-party and a community claim on the reserved consent type, in one
 /// empty registry, and whether that registry is unchanged.
-fn reserved_claims(signed: &SignedWorld, entry: &Published) -> BoxResult<(String, String, bool)> {
-    let mut pass = PassWorld::new(WORKER);
+///
+/// No pass runs, so the store of kind `kind` holds no Event and does not affect the refusals.
+fn reserved_claims(
+    signed: &SignedWorld,
+    entry: &Published,
+    kind: StoreKind,
+) -> BoxResult<(String, String, bool)> {
+    let mut pass = PassWorld::on(kind, WORKER);
     let before = snapshot(&pass.registry);
     let native = register_twin(&mut pass.registry, RESERVED_CLAIM, entity_of(ENTITY)?);
     let native = claim_refusal(native);
@@ -339,22 +360,22 @@ fn reserved_claims(signed: &SignedWorld, entry: &Published) -> BoxResult<(String
 /// Gateway's reserved consent type is refused the same way for either class.
 #[must_use]
 pub fn single_lineage_owner() -> Capture {
-    single_lineage().test_ok()
+    on_every_store(single_lineage)
 }
 
-fn single_lineage() -> BoxResult<Capture> {
+fn single_lineage(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let alpha = publish(&mut signed, ALPHA, 1)?;
-    let by_community = community_claims_native_type(&signed, &alpha)?;
-    let by_first_party = native_claims_community_type(&signed, std::slice::from_ref(&alpha))?;
-    let (native, community, unchanged) = reserved_claims(&signed, &alpha)?;
-    let mut capture = Capture::default();
-    record_claim(&mut capture, "community-claim", &by_community);
-    record_claim(&mut capture, "first-party-claim", &by_first_party);
-    capture.record(STORE, "reserved-claim.first-party.refusal", &native);
-    capture.record(STORE, "reserved-claim.community.refusal", &community);
-    capture.record(STORE, "reserved-claim.registry-unchanged", unchanged);
+    let by_community = community_claims_native_type(&signed, &alpha, kind)?;
+    let entries = std::slice::from_ref(&alpha);
+    let by_first_party = native_claims_community_type(&signed, entries, kind)?;
+    let (native, community, unchanged) = reserved_claims(&signed, &alpha, kind)?;
+    record_claim(capture, "community-claim", &by_community);
+    record_claim(capture, "first-party-claim", &by_first_party);
+    capture.record("reserved-claim.first-party.refusal", &native);
+    capture.record("reserved-claim.community.refusal", &community);
+    capture.record("reserved-claim.registry-unchanged", unchanged);
     let same = by_community.refusal == by_first_party.refusal && native == community;
-    capture.record(STORE, "parity.same-refusal-either-class", same);
-    Ok(capture)
+    capture.record("parity.same-refusal-either-class", same);
+    Ok(())
 }
