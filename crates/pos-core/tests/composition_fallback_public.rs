@@ -154,13 +154,11 @@ fn decode_policy(bytes: &[u8]) -> Result<(), FallbackRecordErrorV1> {
 }
 
 fn decode_declared(bytes: &[u8]) -> Result<(), FallbackRecordErrorV1> {
-    FallbackDeclaredPayloadV1::from_canonical_cbor(bytes)
-        .map(drop)
+    FallbackDeclaredPayloadV1::from_canonical_cbor(bytes).map(drop)
 }
 
 fn decode_activated(bytes: &[u8]) -> Result<(), FallbackRecordErrorV1> {
-    FallbackActivatedPayloadV1::from_canonical_cbor(bytes)
-        .map(drop)
+    FallbackActivatedPayloadV1::from_canonical_cbor(bytes).map(drop)
 }
 
 fn goldens() -> TestResult<Vec<(Decode, Vec<u8>)>> {
