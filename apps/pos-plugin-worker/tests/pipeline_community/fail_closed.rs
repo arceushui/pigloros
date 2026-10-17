@@ -127,7 +127,7 @@ fn missing(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let first = publish(&mut signed, ALPHA, 1)?;
     let entries = std::slice::from_ref(&first);
-    let mut mixed = Mixed::new(&signed, entries, SIBLING, Order::TwinFirst, kind)?;
+    let mut mixed = Mixed::new(kind, &signed, entries, SIBLING, Order::TwinFirst)?;
     let registry = &mixed.lane.pass.registry;
     let present = resolve(registry, registered(registry, None)?)?;
     let first_party = resolve_with_missing(registry, native_pin("missing-first-party")?)?;
@@ -179,7 +179,7 @@ fn first_party_unavailable(
     entries: &[Published],
     kind: StoreKind,
 ) -> BoxResult<Refused> {
-    let mut mixed = Mixed::new(signed, entries, SIBLING, Order::CommunityFirst, kind)?;
+    let mut mixed = Mixed::new(kind, signed, entries, SIBLING, Order::CommunityFirst)?;
     let id = plugin_id(&mixed.lane.pass.registry, NAME)?;
     Ok(Refused {
         revoked: set_and_pass(signed, &mut mixed, id, PluginAvailabilityV1::Revoked)?,
@@ -210,7 +210,7 @@ fn community_unavailable(
     entries: &[Published],
     kind: StoreKind,
 ) -> BoxResult<Refused> {
-    let mut mixed = Mixed::new(signed, entries, SIBLING, Order::TwinFirst, kind)?;
+    let mut mixed = Mixed::new(kind, signed, entries, SIBLING, Order::TwinFirst)?;
     let revoked = HostError::ArtifactRevoked {
         basis: Revoke::Artifact,
     };
@@ -333,7 +333,7 @@ fn invalid(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let alpha = publish(&mut signed, ALPHA, 1)?;
     let entries = std::slice::from_ref(&alpha);
-    let mixed = Mixed::new(&signed, entries, SIBLING, Order::TwinFirst, kind)?;
+    let mixed = Mixed::new(kind, &signed, entries, SIBLING, Order::TwinFirst)?;
     let registry = &mixed.lane.pass.registry;
     let first_party = resolve(registry, registered(registry, Some(NAME))?)?;
     let community = resolve(registry, registered(registry, Some(ALPHA.plugin_id))?)?;

@@ -63,7 +63,7 @@ fn community_exhausted(
     kind: StoreKind,
 ) -> BoxResult<Exhausted> {
     let entries = std::slice::from_ref(first);
-    let mut mixed = Mixed::new(signed, entries, SIBLING, Order::TwinFirst, kind)?;
+    let mut mixed = Mixed::new(kind, signed, entries, SIBLING, Order::TwinFirst)?;
     let failed = mixed.pass(signed)?;
     let quarantined = mixed.pass(signed)?;
     mixed.clear()?;
@@ -90,7 +90,7 @@ fn first_party_over(
     entries: &[Published],
     kind: StoreKind,
 ) -> BoxResult<OverBudget> {
-    let mut mixed = Mixed::new(signed, entries, SIBLING, Order::CommunityFirst, kind)?;
+    let mut mixed = Mixed::new(kind, signed, entries, SIBLING, Order::CommunityFirst)?;
     mixed.limit(PASS_DRAFTS);
     mixed.burst.store(true, Ordering::SeqCst);
     let failed = mixed.pass(signed)?;
@@ -139,7 +139,7 @@ fn over_budget(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()>
     let community = community_exhausted(&signed, &first, kind)?;
     let second = in_budget(&mut signed, &first)?;
     let entries = std::slice::from_ref(&second);
-    let mut renewed = Mixed::new(&signed, entries, SIBLING, Order::TwinFirst, kind)?;
+    let mut renewed = Mixed::new(kind, &signed, entries, SIBLING, Order::TwinFirst)?;
     let successor = renewed.pass(&signed)?;
     let first_party = first_party_over(&signed, entries, kind)?;
     record_pass(capture, "community-exhausted", &community.failed);

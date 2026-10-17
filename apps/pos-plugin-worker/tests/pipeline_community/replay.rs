@@ -238,7 +238,7 @@ fn replayed(
     mode: Mode,
     kind: StoreKind,
 ) -> BoxResult<Replayed> {
-    let mut mixed = Mixed::in_mode(signed, entries, SIBLING, Order::TwinFirst, mode, kind)?;
+    let mut mixed = Mixed::in_mode(kind, signed, entries, SIBLING, Order::TwinFirst, mode)?;
     let live = mixed.pass(signed)?;
     let timeline = mixed.lane.pass.timeline;
     let committed = mixed.lane.pass.events();
@@ -397,7 +397,7 @@ fn mixed_recovery(
     entries: &[Published],
     kind: StoreKind,
 ) -> BoxResult<(Recovery, Trace, Trace)> {
-    let mut mixed = Mixed::new(signed, entries, SIBLING, Order::TwinFirst, kind)?;
+    let mut mixed = Mixed::new(kind, signed, entries, SIBLING, Order::TwinFirst)?;
     let lost = mixed.lost_pass(signed)?;
     let before = trace(&mixed);
     let events = mixed.lane.pass.events();

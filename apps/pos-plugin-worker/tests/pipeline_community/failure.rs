@@ -74,13 +74,13 @@ impl Mixed {
     /// # Errors
     /// Returns the error of registering either Plugin or of building the lane.
     pub fn new(
+        kind: StoreKind,
         signed: &SignedWorld,
         entries: &[Published],
         native: Native,
         order: Order,
-        kind: StoreKind,
     ) -> BoxResult<Self> {
-        Self::in_mode(signed, entries, native, order, Mode::Local, kind)
+        Self::in_mode(kind, signed, entries, native, order, Mode::Local)
     }
 
     /// As [`Self::new`], with the community member in Execution Mode `mode`.
@@ -88,12 +88,12 @@ impl Mixed {
     /// # Errors
     /// Returns the error of registering either Plugin or of building the lane.
     pub fn in_mode(
+        kind: StoreKind,
         signed: &SignedWorld,
         entries: &[Published],
         native: Native,
         order: Order,
         mode: Mode,
-        kind: StoreKind,
     ) -> BoxResult<Self> {
         let entity = entity_of(ENTITY)?;
         let (lane, switched) = match order {
@@ -251,7 +251,7 @@ fn community_fails(
     entries: &[Published],
     kind: StoreKind,
 ) -> BoxResult<Contained> {
-    let mut mixed = Mixed::new(signed, entries, SIBLING, Order::TwinFirst, kind)?;
+    let mut mixed = Mixed::new(kind, signed, entries, SIBLING, Order::TwinFirst)?;
     mixed.lane.trap.store(true, Ordering::SeqCst);
     let failed = mixed.pass(signed)?;
     mixed.lane.trap.store(false, Ordering::SeqCst);
@@ -275,7 +275,7 @@ fn first_party_fails(
         name: "first-party-failing",
         ..SIBLING
     };
-    let mut mixed = Mixed::new(signed, entries, failing, Order::CommunityFirst, kind)?;
+    let mut mixed = Mixed::new(kind, signed, entries, failing, Order::CommunityFirst)?;
     mixed.fail.store(true, Ordering::SeqCst);
     let failed = mixed.pass(signed)?;
     mixed.fail.store(false, Ordering::SeqCst);
@@ -338,7 +338,7 @@ fn no_fallback(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()>
     let mut signed = SignedWorld::new()?;
     let alpha = publish(&mut signed, ALPHA, 1)?;
     let entries = std::slice::from_ref(&alpha);
-    let mut mixed = Mixed::new(&signed, entries, SIBLING, Order::CommunityFirst, kind)?;
+    let mut mixed = Mixed::new(kind, &signed, entries, SIBLING, Order::CommunityFirst)?;
     mixed.lane.trap.store(true, Ordering::SeqCst);
     let failed = mixed.pass(&signed)?;
     mixed.lane.trap.store(false, Ordering::SeqCst);
