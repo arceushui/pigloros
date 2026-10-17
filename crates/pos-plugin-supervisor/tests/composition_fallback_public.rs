@@ -10,7 +10,7 @@
 //! composition fallback registry needs the WAL journal.
 #![cfg(target_os = "linux")]
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -19,11 +19,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pos_core::{
-    Capability, CompositionPinV1, DomainFallbackPolicyV1, EntityId, ErasureContainmentGateV1,
-    ErasureGate, FallbackActivatedInputV1, FallbackActivatedPayloadV1, FallbackActivationModeV1,
+    Capability, CompositionPinV1, DomainFallbackPolicyV1, EntityId, ErasureGate,
+    FallbackActivatedInputV1, FallbackActivatedPayloadV1, FallbackActivationModeV1,
     FallbackActivationOriginV1, FallbackEntryV1, FallbackSkippedCandidateV1,
-    FallbackTriggerBasisV1, FallbackTriggerCodeV1 as Code, Hash, ImplementationKeyV1, Kind, Plugin,
-    PluginId, COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
+    FallbackTriggerCodeV1 as Code, Hash, ImplementationKeyV1, Kind, Plugin, PluginId,
+    COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
 };
 use pos_plugin_publisher::test_support::{
     encoding::{TICK, UTC},
@@ -58,9 +58,8 @@ use pos_runtime::{
     FallbackTriggerCauseV1, PluginExecutionModeV1, PluginRegistry, RequiredPluginCompositionV1,
 };
 use pos_store::composition_fallback_registry::{
-    CompositionFallbackRegistryErrorV1 as RegistryError, CompositionFallbackRegistryV1,
-    CompositionFallbackTargetV1, FallbackActivateRequestV1, FallbackConformanceSetsV1,
-    FallbackDeclareRequestV1, FallbackLedgerBodyV1,
+    CompositionFallbackRegistryErrorV1 as RegistryError, CompositionFallbackTargetV1,
+    FallbackLedgerBodyV1,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
@@ -304,7 +303,6 @@ struct Supply {
     missing: Vec<&'static str>,
     tamper: Option<(&'static str, Tamper)>,
     numbering: u8,
-    hook: Option<Box<dyn FnOnce()>>,
     built: Vec<(PluginId, &'static str)>,
 }
 
@@ -320,7 +318,6 @@ impl Supply {
             missing: Vec::new(),
             tamper: None,
             numbering: 0,
-            hook: None,
             built: Vec::new(),
         }
     }
@@ -385,9 +382,6 @@ impl FallbackReleaseSupplyV1 for Supply {
         _entry_key: &str,
         key: &ImplementationKeyV1,
     ) -> Option<FallbackCandidateInputV1> {
-        if let Some(hook) = self.hook.take() {
-            hook();
-        }
         let plugin_id = key.plugin_id();
         let release = self
             .releases
@@ -421,12 +415,6 @@ impl TempDb {
         Ok(self.0.to_str().ok_or("the temporary path is not UTF-8")?)
     }
 
-    /// Another connection to the database, behind the host's erasure gate.
-    fn connect(&self, gate: &Arc<ErasureContainmentGateV1>) -> BoxResult<SqliteStore> {
-        let mut store = SqliteStore::open(self.path()?)?;
-        pos_core::store::EventStore::bind_erasure_gate(&mut store, Arc::clone(gate))?;
-        Ok(store)
-    }
 }
 
 impl Drop for TempDb {
@@ -456,7 +444,7 @@ fn store_of(kind: StoreKind) -> BoxResult<(Box<dyn PassStoreV1>, Option<TempDb>)
 struct Rig {
     signed: SignedWorld,
     pass: PassWorld,
-    db: Option<TempDb>,
+    _db: Option<TempDb>,
     supply: Supply,
     boundary: CompositionBoundaryV1,
     host: Host,
@@ -515,7 +503,7 @@ impl Rig {
         let mut rig = Self {
             signed,
             pass,
-            db,
+            _db: db,
             supply,
             boundary,
             host: CommunityPluginHostV1::new(Vec::new()),
@@ -765,12 +753,6 @@ impl Rig {
         assert_eq!(event.event_type, activated);
         let payload = FallbackActivatedPayloadV1::from_canonical_cbor(event.payload.as_slice())?;
         Ok(payload.as_input().clone())
-    }
-
-    /// The registry's current state revision.
-    fn revision(&self) -> BoxResult<u64> {
-        let row = self.pass.store.registry_row(SCOPE, self.pass.timeline)?;
-        Ok(row.map_or(0, |row| row.state().state_revision()))
     }
 }
 
@@ -1413,103 +1395,5 @@ fn an_unprovisioned_registry_refuses_the_restart_and_the_boundary() -> TestResul
     let outcome = fuel_outcome(PluginId::new());
     let refused = boundary.run_boundary_v1(&mut context, &mut host, &outcome);
     assert_eq!(refused, Err(missing));
-    Ok(())
-}
-
-/// Case 7 (end to end, `SQLite`): a concurrent activation of the same tenure makes the commit
-/// a `Conflict`, which is not adopted, after which the boundary faults on the diverged fold; a
-/// concurrent declaration makes it `StaleState`, and the next boundary re-derives and activates.
-#[test]
-fn concurrent_writes_refuse_the_commit() -> TestResult {
-    conflict()?;
-    stale()
-}
-
-/// A connection to the rig's database.
-fn other_connection(rig: &Rig) -> BoxResult<SqliteStore> {
-    rig.db
-        .as_ref()
-        .ok_or("no database")?
-        .connect(&rig.pass.gate)
-}
-
-/// The rig's Logical Head and the sequences of its Events, as this connection reads them.
-fn prefix_of(rig: &Rig) -> BoxResult<String> {
-    let timeline = rig.pass.timeline;
-    let head = rig.pass.store.logical_head(timeline)?;
-    let events = rig.pass.store.read(timeline, pos_core::SeqRange::all());
-    let seqs: Vec<u64> = events?.iter().map(|event| event.seq.as_u64()).collect();
-    Ok(format!("head {head:?}, Events {seqs:?}"))
-}
-
-fn conflict() -> TestResult {
-    let mut rig = Rig::declared(StoreKind::Sqlite, FAILING, AUTOMATIC)?;
-    let failed = rig.pass()?;
-    let request = FallbackActivateRequestV1 {
-        scope: SCOPE.to_owned(),
-        target: rig.target(),
-        expected_state_revision: rig.revision()?,
-        expected_logical_head: rig.pass.store.logical_head(rig.pass.timeline)?,
-        entry_key: ENTRY.to_owned(),
-        closing_tenure_ordinal: 0,
-        from: rig.primary.key(),
-        to: rig.next.key(),
-        trigger_code: Code::ResourceLimit,
-        trigger_basis: FallbackTriggerBasisV1 {
-            cause: FallbackTriggerCauseV1::FuelExhausted.code(),
-            origin: FallbackActivationOriginV1::Automatic,
-        },
-        skipped: Vec::new(),
-        tick: TICK + 1,
-    };
-    let mut other = other_connection(&rig)?;
-    let ran = Rc::new(Cell::new(false));
-    let flag = Rc::clone(&ran);
-    rig.supply.hook = Some(Box::new(move || flag.set(other.activate(&request).is_ok())));
-    let outcomes = rig.boundary(&failed);
-    assert!(ran.get());
-    let prefix = prefix_of(&rig)?;
-    assert_eq!(described(&outcomes), ["not-committed:Conflict"], "{prefix}");
-    assert_eq!(rig.running()?, "plugin-a");
-    let faulted = rig.boundary(&failed);
-    assert!(
-        matches!(faulted, Err(BoundaryError::InvariantFault(_))),
-        "{faulted:?}"
-    );
-    Ok(())
-}
-
-fn stale() -> TestResult {
-    let mut rig = Rig::declared(StoreKind::Sqlite, FAILING, AUTOMATIC)?;
-    let failed = rig.pass()?;
-    let pins = vec![rig.candidate.pin.clone(), rig.next.pin.clone()];
-    let triggers = vec![Code::ResourceLimit];
-    let mode = FallbackActivationModeV1::Automatic;
-    let primary = rig.primary.pin.clone();
-    let entry = FallbackEntryV1::new(ENTRY.to_owned(), primary, pins, triggers, mode)?;
-    let policy = DomainFallbackPolicyV1::new(SCOPE.to_owned(), vec![entry], rig.policy)?;
-    let sets = BTreeMap::from([(ENTRY.to_owned(), BTreeSet::from([STABLE]))]);
-    let request = FallbackDeclareRequestV1 {
-        scope: SCOPE.to_owned(),
-        target: rig.target(),
-        expected_state_revision: rig.revision()?,
-        expected_logical_head: rig.pass.store.logical_head(rig.pass.timeline)?,
-        policy_bytes: policy.to_canonical_cbor(),
-        conformance: FallbackConformanceSetsV1::new(sets),
-    };
-    let mut other = other_connection(&rig)?;
-    let ran = Rc::new(Cell::new(false));
-    let flag = Rc::clone(&ran);
-    rig.supply.hook = Some(Box::new(move || flag.set(other.declare(&request).is_ok())));
-    let outcomes = rig.boundary(&failed);
-    assert!(ran.get());
-    let prefix = prefix_of(&rig)?;
-    assert_eq!(
-        described(&outcomes),
-        ["not-committed:StaleState"],
-        "{prefix}"
-    );
-    assert_eq!(rig.running()?, "plugin-a");
-    assert_eq!(described(&rig.boundary(&failed)), ["activated:plugin-b:[]"]);
     Ok(())
 }

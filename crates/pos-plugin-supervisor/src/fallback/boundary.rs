@@ -402,13 +402,8 @@ impl CompositionBoundaryV1 {
         T: ?Sized,
     {
         let request = commit.request(self, swap.prefix.head, context.tick);
-        match commit_activation(&mut *context.store, &request) {
-            Err(error) => Ok(Outcome::NotCommitted {
-                entry_key: request.entry_key,
-                error,
-            }),
-            Ok(row) => self.activated(context, host, swap, request, row),
-        }
+        let committed = commit_activation(&mut *context.store, &request);
+        committed.map_or_else(Ok, |row| self.activated(context, host, swap, request, row))
     }
 
     /// Steps 5-6 after a commit: the fault latches unless both succeed.
@@ -586,15 +581,19 @@ pub(super) fn checked_prefix(
 
 /// Commit the activation (step 4). After a refusal, a committed activation of the same tenure
 /// is adopted only when the commit outcome was unknown (`StorageIndeterminate`); otherwise the
-/// refusal stands and nothing changed.
-fn commit_activation<S: FallbackBoundaryStoreV1 + ?Sized>(
+/// refusal stands, nothing changed, and the entry's outcome is `NotCommitted`.
+pub(super) fn commit_activation<S: FallbackBoundaryStoreV1 + ?Sized>(
     store: &mut S,
     request: &FallbackActivateRequestV1,
-) -> Result<FallbackLedgerRowV1, CompositionFallbackRegistryErrorV1> {
+) -> Result<FallbackLedgerRowV1, Outcome> {
     let committed = store.activate(request);
-    committed
+    let committed = committed
         .map(|receipt| receipt.row().clone())
-        .or_else(|error| adopt(&*store, request, error))
+        .or_else(|error| adopt(&*store, request, error));
+    committed.map_err(|error| Outcome::NotCommitted {
+        entry_key: request.entry_key.clone(),
+        error,
+    })
 }
 
 /// The activation the port recorded for the request's tenure, adopted after an unknown commit
