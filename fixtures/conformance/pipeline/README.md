@@ -184,7 +184,7 @@ skipped.
 
 Version 2 of the community Plugin-host profile (ADR-119 section 6, #665). It
 holds every version 1 case unchanged and in order, so `PCF-CPH-006` stays the
-"no declaration, no fallback" case, and adds three ADR-119 cases. Version 1 is
+"no declaration, no fallback" case, and adds four ADR-119 cases. Version 1 is
 not edited: the same runner runs both directories, each with its own pin and
 runner table, and the version 2 table extends the version 1 table.
 
@@ -233,6 +233,21 @@ WAL journal, which an in-memory database cannot use. By ADR-119 clarification
 run no pass, so ADR-119 section 6's "Local results equal to Air-Gapped" clause
 applies only to the pass-running cases, of which `PCF-CPH-017` is run like
 `PCF-CPH-013`.
+
+`PCF-CPH-019` (cases 1, 2, 3 and 13, #667) runs the composition boundary
+transaction of `pos-plugin-supervisor` on the real worker. The entry's primary
+and its candidate are signed releases of the Rust guest, composed through the
+restart composer and declared through the runtime `declare` with the trap and
+revocation codes. A trap the host reports `Unverified` activates nothing until
+FU-7. A revoked primary refuses the pass at its gate (code 4); the boundary
+commits one activation and one ledger row, swaps the registry entry and the
+host member, and the next pass commits the candidate's Event. An owner return
+to the revoked primary is refused at the trust gate (`ReleaseNotCurrent`). The
+case runs in Local and Air-Gapped mode on both stores and records whether the
+Air-Gapped observations equal the Local ones. The remaining case-1 to case-15
+behaviour of slice 6 (codes 1 and 3, the chain, owner actions, manual mode,
+port refusals and pre-commit refusals) runs on the probe worker in
+`crates/pos-plugin-supervisor/tests/composition_fallback_public.rs`.
 
 ## `v1/legacy-eval-history.json` (`PLH1`, version 1)
 

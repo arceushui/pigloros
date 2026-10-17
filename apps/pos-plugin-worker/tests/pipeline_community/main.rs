@@ -6,7 +6,8 @@
 //! operator-trusted native Driver and a governed community Driver that runs a real Component in
 //! the real `pos-plugin-worker`. Version 2 (`community/v2`) holds every version 1 case
 //! unchanged plus the ADR-119 declaration and reserved-type cases (ADR-119 section 6 cases 4, 5
-//! and the declaration part of 14). Both version directories run. The cases run here because
+//! and the declaration part of 14, #665) and the composition boundary transaction on the real
+//! worker (cases 1, 2, 3 and 13, #667). Both version directories run. The cases run here because
 //! only this package's tests can launch the worker binary. Every case runs and records its
 //! captures on both stores of the community pass world, `MemoryStore` and in-memory `SQLite`
 //! (#638); the trust registry stays on `MemoryStore`. The ADR-119 declaration cases open a
@@ -20,6 +21,7 @@
 //! version are checked here first, then the harness parses the document under its own rules.
 #![cfg(target_os = "linux")]
 
+pub mod activation;
 pub mod authority;
 pub mod budget;
 pub mod fail_closed;
@@ -58,7 +60,7 @@ const MANIFEST_SHA256: &str = "b907f1b9134d141697095581a50f7be3d0cc1ddb0782adc7d
 /// The immutable version 2 profile manifest and its pinned SHA-256.
 const MANIFEST_V2: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/community/v2/manifest.json");
-const MANIFEST_V2_SHA256: &str = "fefec3f1eed16e31b61e497aafaf1e8d6a18af3ca5e5e93d8e5550f5cb92b88f";
+const MANIFEST_V2_SHA256: &str = "728e4cca3fa909bdd0f8472e218a8ff1bf2ee966059dd0bc38e58928737f61c8";
 
 /// Every runner of profile version 1, by case identifier.
 const RUNNERS: [(&str, Runner); 15] = [
@@ -81,7 +83,7 @@ const RUNNERS: [(&str, Runner); 15] = [
 
 /// Every runner of profile version 2, by case identifier: the version 1 runners, in order,
 /// then the ADR-119 cases.
-const RUNNERS_V2: [(&str, Runner); 18] = [
+const RUNNERS_V2: [(&str, Runner); 19] = [
     ("PCF-CPH-001", parity::single_pass_parity),
     ("PCF-CPH-002", parity::mixed_registry_order),
     ("PCF-CPH-003", authority::foreign_proposal_parity),
@@ -100,6 +102,7 @@ const RUNNERS_V2: [(&str, Runner); 18] = [
     ("PCF-CPH-016", fallback::declaration_refusals),
     ("PCF-CPH-017", fallback::reserved_fallback_types),
     ("PCF-CPH-018", fallback::withdrawal_and_rebase),
+    ("PCF-CPH-019", activation::boundary_activation),
 ];
 
 /// Parse a `PCH1` version 1 manifest under the harness rules of `PPC1`.
