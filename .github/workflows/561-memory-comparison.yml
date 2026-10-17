@@ -21,8 +21,12 @@ jobs:
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: -D warnings
       PIGLOROS_BENCH_SAMPLES: "10"
-      EVIDENCE_DIR: ${{ runner.temp }}/561-memory-comparison
     steps:
+      - name: Initialize the evidence path on the runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'EVIDENCE_DIR=%s/561-memory-comparison\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Check out the immutable trusted main baseline
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
