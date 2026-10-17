@@ -13,8 +13,63 @@ use pos_core::{
     KeyRegistryReadErrorV1 as ReadError, KeyRegistryReadGuardV1, KeyRegistryReadRefusedV1,
     KeyRegistryReadWorkV1 as Work, KeyRegistryStateV1, KeyRoleV1, OwnerIdV1, PublicKey,
 };
+use std::{sync::mpsc, thread, time::Duration};
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+
+fn within_deadline(
+    deadline: Duration,
+    body: impl FnOnce() -> Fallible<()> + Send + 'static,
+) -> Fallible<()> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let worker = thread::spawn(move || sender.send(body().map_err(|error| error.to_string())));
+    // A non-progressing decoder must fail its real test before the package's
+    // mutation deadline. On a deadline error the worker is detached, not joined: it owns
+    // only test-local data, and exits with this failing test executable.
+    let result = receiver.recv_timeout(deadline)?;
+    worker
+        .join()
+        .map_err(|_| "registry decoder worker panicked")??;
+    result.map_err(Into::into)
+}
+
+#[test]
+fn decoder_deadline_preserves_success_errors_panics_and_stalled_work() -> Fallible<()> {
+    let deadline = Duration::from_secs(10);
+    within_deadline(deadline, || Ok(()))?;
+    let error = within_deadline(deadline, || Err("decoder validation failed".into()))
+        .err()
+        .ok_or("decoder error was accepted")?;
+    assert_eq!(error.to_string(), "decoder validation failed");
+    let error = within_deadline(deadline, || {
+        std::panic::resume_unwind(Box::new("decoder panic control"))
+    })
+    .err()
+    .ok_or("decoder panic was accepted")?;
+    assert!(matches!(
+        error.downcast_ref::<mpsc::RecvTimeoutError>(),
+        Some(mpsc::RecvTimeoutError::Disconnected)
+    ));
+
+    // Keep the worker blocked until AFTER the zero deadline has refused it.
+    // Release this negative control afterwards; no stalled control is leaked.
+    let (release, resume) = mpsc::sync_channel(1);
+    let (finished, completion) = mpsc::sync_channel(1);
+    let error = within_deadline(Duration::ZERO, move || {
+        resume.recv()?;
+        finished.send(())?;
+        Ok(())
+    })
+    .err()
+    .ok_or("stalled decoder was accepted")?;
+    assert!(matches!(
+        error.downcast_ref::<mpsc::RecvTimeoutError>(),
+        Some(mpsc::RecvTimeoutError::Timeout)
+    ));
+    release.send(())?;
+    completion.recv_timeout(deadline)?;
+    Ok(())
+}
 
 struct Guard {
     remaining: usize,
@@ -548,6 +603,10 @@ fn truncation_bit_faults_missing_fields_and_trailing_input_keep_closed_native_pa
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn nested_unknown_values_missing_options_and_recursion_keep_derived_serde_behavior() -> Fallible<()>
 {
+    within_deadline(Duration::from_secs(10), nested_unknown_values_cases)
+}
+
+fn nested_unknown_values_cases() -> Fallible<()> {
     let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
         .swap_remove(1)
         .0;
@@ -673,6 +732,10 @@ fn replace_first(bytes: &[u8], needle: &[u8], replacement: &[u8]) -> Fallible<Ve
 #[test]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn ignored_native_wire_scalars_and_invalid_chunks_keep_registry_decoder_parity() -> Fallible<()> {
+    within_deadline(Duration::from_secs(10), ignored_native_wire_cases)
+}
+
+fn ignored_native_wire_cases() -> Fallible<()> {
     let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
         .swap_remove(1)
         .0;
