@@ -14,10 +14,7 @@ import yaml
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FILTER_PATH = ROOT / ".github" / "rust-scope.yml"
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
-WORKFLOW_PATHS = (
-    CI_WORKFLOW_PATH,
-    ROOT / ".github" / "workflows" / "codeql.yml",
-)
+CODEQL_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "codeql.yml"
 RUST_CACHE_ACTION = "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16"
 TRUSTED_MAIN_SAVE_IF = "${{ github.ref == 'refs/heads/main' }}"
 # Workflows that run on main (push or schedule) own main-written caches. The
@@ -276,32 +273,46 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(set(self.patterns[1:]), EXPECTED_EXCLUDES)
 
     def test_scope_jobs_use_trusted_base_and_fail_closed(self) -> None:
-        for workflow_path in WORKFLOW_PATHS:
-            with self.subTest(workflow=workflow_path.name):
-                workflow = load_workflow(workflow_path)
-                scope_name = (
-                    "ci_change_scope" if workflow_path.name == "ci.yml" else "codeql_change_scope"
-                )
-                scope = workflow["jobs"][scope_name]
-                steps = scope["steps"]
-                self.assertEqual(
-                    steps[0]["with"]["ref"],
-                    "${{ github.event.pull_request.base.sha }}",
-                )
-                filter_step = next(step for step in steps if step.get("id") == "scope")
-                self.assertEqual(filter_step["with"]["filters"], ".github/rust-scope.yml")
-                self.assertIn("hashFiles('.github/rust-scope.yml') != ''", filter_step["if"])
-                self.assertIs(filter_step["continue-on-error"], True)
-                fallback_step = next(step for step in steps if step.get("id") == "fallback")
-                self.assertEqual(fallback_step["if"], "steps.scope.outcome == 'failure'")
-                self.assertIn("printf 'rust=true\\n' >> \"$GITHUB_OUTPUT\"", fallback_step["run"])
-                full_step = next(step for step in steps if step.get("id") == "full")
-                self.assertIn("hashFiles('.github/rust-scope.yml') == ''", full_step["if"])
-                self.assertEqual(
-                    scope["outputs"]["rust"],
-                    "${{ steps.fallback.outputs.rust || steps.scope.outputs.rust || "
-                    "steps.full.outputs.rust }}",
-                )
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        scope = workflow["jobs"]["ci_change_scope"]
+        steps = scope["steps"]
+        self.assertEqual(
+            steps[0]["with"]["ref"],
+            "${{ github.event.pull_request.base.sha }}",
+        )
+        filter_step = next(step for step in steps if step.get("id") == "scope")
+        self.assertEqual(filter_step["with"]["filters"], ".github/rust-scope.yml")
+        self.assertIn("hashFiles('.github/rust-scope.yml') != ''", filter_step["if"])
+        self.assertIs(filter_step["continue-on-error"], True)
+        fallback_step = next(step for step in steps if step.get("id") == "fallback")
+        self.assertEqual(fallback_step["if"], "steps.scope.outcome == 'failure'")
+        self.assertIn("printf 'rust=true\\n' >> \"$GITHUB_OUTPUT\"", fallback_step["run"])
+        full_step = next(step for step in steps if step.get("id") == "full")
+        self.assertIn("hashFiles('.github/rust-scope.yml') == ''", full_step["if"])
+        self.assertEqual(
+            scope["outputs"]["rust"],
+            "${{ steps.fallback.outputs.rust || steps.scope.outputs.rust || "
+            "steps.full.outputs.rust }}",
+        )
+
+    def test_codeql_runs_for_documentation_only_pull_requests(self) -> None:
+        # The main ruleset's code_scanning rule needs an uploaded analysis for
+        # every PR head, so a Rust-scope skip would leave docs-only PRs unmergeable.
+        workflow = load_workflow(CI_WORKFLOW_PATH)
+        jobs = workflow["jobs"]
+        condition = " ".join(jobs["codeql"]["if"].split())
+        self.assertIn("needs.cargo-crap.result == 'skipped'", condition)
+        self.assertNotIn("outputs.rust == 'true'", condition)
+        required = jobs["codeql-required"]
+        self.assertEqual(required["name"], "CodeQL (Rust)")
+        self.assertEqual(required["needs"], ["codeql"])
+        self.assertIn('test "${CODEQL_RESULT}" = success', required["steps"][0]["run"])
+        standard = jobs["standard-gate"]["steps"][0]["run"]
+        self.assertIn('test "${CODEQL_RESULT}" = success', standard)
+        self.assertNotIn('"${CODEQL_RESULT}"', standard.split("for result in")[1])
+        codeql = load_workflow(CODEQL_WORKFLOW_PATH)
+        self.assertEqual(list(codeql["jobs"]), ["analyze"])
+        self.assertNotIn("if", codeql["jobs"]["analyze"])
 
     def test_documentation_only_paths_skip_rust_gate(self) -> None:
         paths = [

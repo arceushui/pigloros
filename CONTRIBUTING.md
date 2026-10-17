@@ -237,6 +237,9 @@ flowchart LR
 normal checks. Audit, deny, and shear share one runner; browser parity replaces
 the completed WASM packaging job rather than adding another concurrent runner.
 CodeQL is called from this stage instead of starting independently on every PR.
+Documentation-only pull requests have no `cargo-crap` run, so CodeQL starts
+right after the scope job there; it is never skipped, because the `main`
+ruleset's code-scanning rule needs an analysis for every PR head.
 
 ```mermaid
 flowchart TD
@@ -247,7 +250,7 @@ flowchart TD
     CR --> U["cargo-geiger"]
     CR --> X["Docker"]
     CR --> W["WASM package"]
-    CR --> Q["CodeQL"]
+    CR --> Q["CodeQL (docs-only PRs start it after the scope job)"]
     W --> BP["browser parity"]
     D --> G["standard-gate"]
     E --> G

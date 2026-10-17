@@ -25,7 +25,8 @@
 #     none may silently skip.
 #
 # Pull requests that change only documentation or other non-Rust content run the
-# lightweight scope job plus Trunk/CodeQL policy workflows. Rust build, test,
+# lightweight scope job plus Trunk policy workflows and CodeQL (the
+# code_scanning ruleset needs an analysis for every head commit). Rust build, test,
 # coverage, cargo-crap, security, platform, and report jobs are skipped
 # successfully. Any Rust, manifest, dependency, script, workflow, or
 # build-policy change keeps the complete gate set.
@@ -887,6 +888,10 @@ jobs:
       - name: cargo geiger (assert no unsafe in own crates)
         run: bash scripts/check-geiger.sh
 
+  # Always runs, including for documentation-only pull requests: the main
+  # ruleset's code_scanning rule needs an uploaded analysis for the head commit,
+  # and a skipped job uploads none, which leaves the PR unmergeable. Rust PRs
+  # still wait for cargo-crap; documentation-only PRs (cargo-crap skipped) do not.
   codeql:
     name: CodeQL (Rust)
     needs:
@@ -894,8 +899,9 @@ jobs:
       - cargo-crap
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
-      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+      (needs.cargo-crap.result == 'success' ||
+      (needs.ci_change_scope.outputs.rust == 'false' &&
+      needs.cargo-crap.result == 'skipped')) }}
     permissions:
       actions: read
       contents: read
@@ -909,21 +915,14 @@ jobs:
     name: CodeQL (Rust)
     if: ${{ always() }}
     needs:
-      - ci_change_scope
       - codeql
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Report the required CodeQL status
         env:
-          RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
           CODEQL_RESULT: ${{ needs.codeql.result }}
-        run: |
-          expected=success
-          if [[ "${RUST_SCOPE}" = false ]]; then
-            expected=skipped
-          fi
-          test "${CODEQL_RESULT}" = "${expected}"
+        run: test "${CODEQL_RESULT}" = success
 
 # ── Platform verification ────────────────────────────────────────────────────
 
@@ -1229,6 +1228,7 @@ jobs:
         run: |
           set -euo pipefail
           test "${CORE_RESULT}" = success
+          test "${CODEQL_RESULT}" = success
           expected=success
           if [[ "${RUST_SCOPE}" = false ]]; then
             expected=skipped
@@ -1236,7 +1236,7 @@ jobs:
           for result in \
             "${CARGO_CRAP_RESULT}" "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" \
             "${MATERIALIZE_RESULT}" "${DEPENDENCY_RESULT}" "${GEIGER_RESULT}" \
-            "${CODEQL_RESULT}" "${LEDGER_WINDOWS_RESULT}" "${DOCKER_RESULT}" \
+            "${LEDGER_WINDOWS_RESULT}" "${DOCKER_RESULT}" \
             "${WASM_RESULT}" "${BROWSER_RESULT}"; do
             test "${result}" = "${expected}"
           done

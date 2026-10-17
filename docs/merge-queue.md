@@ -113,7 +113,10 @@ these.
     `diff mutation testing`, `Trunk Code Quality` and `CodeQL (Rust)`;
     "require branches to be up to date" stays **off**.
   - `main` — pull request required (0 approvals), resolved conversations,
-    linear history, CodeQL alerts block.
+    linear history, CodeQL alerts block (code scanning rule). That rule needs
+    an uploaded CodeQL analysis for every pull-request head, so the `codeql`
+    job runs even for documentation-only pull requests; skipping it leaves the
+    PR "Not mergeable" and it never enters the queue.
 - Trunk must not bypass the two mergeability rulesets: they decide when a pull
   request may enter the queue.
 - Keep Trunk's merge method compatible with linear history (squash or rebase).
