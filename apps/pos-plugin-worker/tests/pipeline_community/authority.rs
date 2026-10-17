@@ -96,6 +96,9 @@ pub fn refusal_of(error: &RuntimeError) -> String {
         RuntimeError::ReservedConsentEventType { event_type, .. } => {
             format!("ReservedConsentEventType({event_type})")
         }
+        RuntimeError::ReservedHostEventType { event_type, .. } => {
+            format!("ReservedHostEventType({event_type})")
+        }
         RuntimeError::Composition(composition) => composition_refusal(composition),
         other => format!("Unexpected({other})"),
     }
@@ -387,11 +390,27 @@ fn reserved_claims(
     entry: &Published,
     kind: StoreKind,
 ) -> BoxResult<(String, String, bool)> {
+    reserved_claims_of(signed, entry, kind, RESERVED_CLAIM)
+}
+
+/// The refusals of a first-party and a community claim on the reserved `event_type`, in one
+/// empty registry, and whether that registry is unchanged.
+///
+/// No pass runs, so the store of kind `kind` holds no Event and does not affect the refusals.
+///
+/// # Errors
+/// Returns the error of building the first-party entity or the community Driver.
+pub fn reserved_claims_of(
+    signed: &SignedWorld,
+    entry: &Published,
+    kind: StoreKind,
+    event_type: &'static str,
+) -> BoxResult<(String, String, bool)> {
     let mut pass = PassWorld::on(kind, WORKER);
     let before = snapshot(&pass.registry);
-    let native = register_twin(&mut pass.registry, RESERVED_CLAIM, entity_of(ENTITY)?);
+    let native = register_twin(&mut pass.registry, event_type, entity_of(ENTITY)?);
     let native = claim_refusal(native);
-    let community = community_claim(signed, entry, &mut pass.registry, RESERVED_CLAIM);
+    let community = community_claim(signed, entry, &mut pass.registry, event_type);
     let community = claim_refusal(community);
     Ok((native, community, snapshot(&pass.registry) == before))
 }
@@ -478,26 +497,60 @@ pub fn reserved_proposal_parity() -> Capture {
 }
 
 fn reserved_proposal(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
+    let reserved = ReservedProposal {
+        prefix: "",
+        emitted: PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1,
+        selector: RESERVED_SELECTOR,
+    };
+    reserved_proposal_of(kind, capture, &reserved)
+}
+
+/// One reserved host Event type a Driver of either class proposes.
+pub struct ReservedProposal {
+    /// The prefix of every capture key; empty for PCF-CPH-013.
+    pub prefix: &'static str,
+    /// The reserved host Event type the first-party Driver drafts.
+    pub emitted: &'static str,
+    /// The probe guest selector under which the community Driver drafts it.
+    pub selector: &'static [u8],
+}
+
+/// Record the PCF-CPH-013 proposal pair of `reserved` on a `kind` store: a first-party and a
+/// community proposal of the type are refused alike, and the next unsteered pass commits.
+///
+/// # Errors
+/// Returns the error of publishing the probe guest, of building either lane or of a pass.
+pub fn reserved_proposal_of(
+    kind: StoreKind,
+    capture: &mut StoreCapture<'_>,
+    reserved: &ReservedProposal,
+) -> BoxResult<()> {
+    let key = |name: &str| format!("{}{name}", reserved.prefix);
     let mut signed = SignedWorld::new()?;
     let probe = publish(&mut signed, PROBE, 1)?;
-    let first_party = first_party_proposal(&signed, RESERVED, kind)?;
+    let native = Native {
+        emitted: reserved.emitted,
+        ..PROPOSER
+    };
+    let first_party = first_party_proposal(&signed, native, kind)?;
     let entries = std::slice::from_ref(&probe);
     let mut mixed = Mixed::new(kind, &signed, entries, SIBLING, Order::TwinFirst)?;
-    mixed.lane.selector.set(Some(RESERVED_SELECTOR.to_vec()));
+    mixed.lane.selector.set(Some(reserved.selector.to_vec()));
     let community = classified(&mut mixed, &signed)?;
     mixed.lane.selector.set(None);
     let next = mixed.pass(&signed)?;
-    record_proposal(capture, "first-party-reserved", &first_party);
-    capture.record("first-party-reserved.pass-failure", &first_party.class);
-    record_pass(capture, "community-reserved", &community.pass);
-    capture.record("community-reserved.pass-failure", &community.class);
-    capture.record("community-reserved.gate", &community.pass.gate);
-    capture.record("community-reserved.member", &community.member);
-    record(capture, "community-next", &next.observed);
-    capture.record("community.community-receipts", mixed.receipts());
+    record_proposal(capture, &key("first-party-reserved"), &first_party);
+    let class = &first_party.class;
+    capture.record(&key("first-party-reserved.pass-failure"), class);
+    record_pass(capture, &key("community-reserved"), &community.pass);
+    capture.record(&key("community-reserved.pass-failure"), &community.class);
+    capture.record(&key("community-reserved.gate"), &community.pass.gate);
+    capture.record(&key("community-reserved.member"), &community.member);
+    record(capture, &key("community-next"), &next.observed);
+    capture.record(&key("community.community-receipts"), mixed.receipts());
     let parity = same_authority(&first_party.observed, &community.pass.observed)
         && first_party.refusal == community.pass.refusal
         && first_party.class == community.class;
-    capture.record("parity.first-party-equals-community", parity);
+    capture.record(&key("parity.first-party-equals-community"), parity);
     Ok(())
 }

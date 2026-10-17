@@ -10,6 +10,10 @@
 //!   `ReservedHostDraft`.
 //! - `bad-digest` (the 10 ASCII bytes): the output digest is 32 zero bytes, so
 //!   the host refuses the output as `InvalidGuestOutput`.
+//! - `fallback-declared` and `fallback-activated` (#665): like `reserved`, but
+//!   the draft has the ADR-119 reserved host Event type
+//!   `pigloros.composition.fallback-declared` or
+//!   `pigloros.composition.fallback-activated`.
 //! - Anything else: the Rust guest's behaviour, including its `trap`
 //!   observation.
 //!
@@ -38,6 +42,20 @@ const RESERVED_SELECTOR: &[u8] = b"reserved";
 const BAD_DIGEST_SELECTOR: &[u8] = b"bad-digest";
 /// The host-owned Event type that no Plugin may draft.
 const RESERVED_EVENT_TYPE: &str = "pigloros.plugin.release-activated";
+/// Selects the ADR-119 fallback declaration type for the output's draft.
+const FALLBACK_DECLARED_SELECTOR: &[u8] = b"fallback-declared";
+/// Selects the ADR-119 fallback activation type for the output's draft.
+const FALLBACK_ACTIVATED_SELECTOR: &[u8] = b"fallback-activated";
+/// The ADR-119 host-owned fallback declaration Event type.
+const FALLBACK_DECLARED_EVENT_TYPE: &str = "pigloros.composition.fallback-declared";
+/// The ADR-119 host-owned fallback activation Event type.
+const FALLBACK_ACTIVATED_EVENT_TYPE: &str = "pigloros.composition.fallback-activated";
+/// Each type selector and the host-owned Event type its draft carries.
+const TYPE_SELECTORS: [(&[u8], &str); 3] = [
+    (RESERVED_SELECTOR, RESERVED_EVENT_TYPE),
+    (FALLBACK_DECLARED_SELECTOR, FALLBACK_DECLARED_EVENT_TYPE),
+    (FALLBACK_ACTIVATED_SELECTOR, FALLBACK_ACTIVATED_EVENT_TYPE),
+];
 /// The host's V1 `output-digest` domain, including its NUL.
 const OUTPUT_DIGEST_DOMAIN: &[u8] = b"PiglorOS.Plugin.Output.v1\0";
 
@@ -127,11 +145,10 @@ fn invoke(
     hash = fnv1a(hash, &now.to_le_bytes());
     hash = fnv1a(hash, &random);
     let state = hash.to_le_bytes().to_vec();
-    let event_type = if input.observation_bytes == RESERVED_SELECTOR {
-        RESERVED_EVENT_TYPE
-    } else {
-        event_type
-    };
+    let event_type = TYPE_SELECTORS
+        .iter()
+        .find(|(selector, _)| input.observation_bytes == *selector)
+        .map_or(event_type, |(_, selected)| *selected);
     let bad_digest = input.observation_bytes == BAD_DIGEST_SELECTOR;
     let mut output = PluginOutput {
         invocation_id: input.invocation_id.clone(),

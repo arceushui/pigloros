@@ -5834,8 +5834,10 @@ dependencies = [
  "pos-plugin-supervisor",
  "pos-reference",
  "pos-runtime",
+ "pos-store",
  "serde_json",
  "sha2 0.11.1",
+ "tempfile",
 ]
 
 [[package]]

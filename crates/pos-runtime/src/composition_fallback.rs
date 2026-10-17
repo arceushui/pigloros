@@ -8,9 +8,10 @@
 //!   (section 4.1, "Validation input");
 //! - the derivation and enforcement of [`RequiredPluginV1`] from IMK1;
 //! - the scratch validation of a candidate against the primary, rules 1-7;
-//! - the trigger-eligibility classifier of section 4.2.
+//! - the trigger-eligibility classifier of section 4.2;
+//! - the runtime `declare` of section 4.3 (slice 4).
 //!
-//! It declares, activates and swaps nothing: those are later slices.
+//! It activates and swaps nothing: those are later slices.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -30,9 +31,14 @@ use crate::{
     RuntimeError, ScheduledDriverBindingV1,
 };
 
+mod declaration;
 mod trigger;
 mod validation;
 
+pub use declaration::{
+    declare_composition_fallback_v1, FallbackDeclarationV1, FallbackDeclareErrorV1,
+    FallbackEntryFactsV1, FallbackHostGrantsV1, COMPOSITION_FALLBACK_DECLARE_GRANT_V1,
+};
 pub use trigger::{
     classify_fallback_trigger_v1, declared_fallback_trigger_v1, FallbackTriggerCauseV1,
 };
