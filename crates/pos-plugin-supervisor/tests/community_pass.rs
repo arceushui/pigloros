@@ -10,8 +10,9 @@
 use std::time::Duration;
 
 use pos_core::{
-    CanonicalBytes, CoreError, CounterfactualDependencyErrorV1, EntityId, Event, EventDraft,
-    EventStore, FactualDependencyErrorV1, Hash, Kind, PipelineAttemptIdV1, PipelineOutcomeV1,
+    CanonicalBytes, CoreError, CorrelationId, CounterfactualDependencyErrorV1, EntityId, Event,
+    EventDraft, EventId, EventStore, FactualDependencyErrorV1, Hash, Kind, PipelineAttemptIdV1,
+    PipelineOutcomeV1, SchemaVersion,
 };
 use pos_plugin_supervisor::pass_harness::{initial, LostPort, StoreKind, World};
 use pos_plugin_supervisor::test_support::{self, err, ok};
@@ -100,14 +101,28 @@ fn a_pass_commits_every_draft_atomically_and_only_then_the_state() {
     assert_eq!(alpha.committed_state().bytes, b"initial++");
 }
 
+/// The store-independent fields of one committed Event.
+///
+/// The Event ID and wall time are left out: every store mints its own.
+#[derive(Debug, PartialEq, Eq)]
+struct CommittedEvent {
+    seq: u64,
+    event_type: String,
+    entity: EntityId,
+    payload: Vec<u8>,
+    schema_version: SchemaVersion,
+    causation_id: Option<EventId>,
+    correlation_id: Option<CorrelationId>,
+}
+
 /// The store-independent part of one committed pass.
 ///
-/// It holds each Event's position, type, entity and payload, each member's committed state, and
-/// the receipt's attempt, draft batch digest and Event positions. Event IDs, wall times and the
-/// Timeline ID are left out: every store mints its own.
+/// It holds the store-independent fields of each Event, each member's committed state, and the
+/// receipt's attempt, draft batch digest and Event positions. The Timeline ID is left out: every
+/// store mints its own.
 #[derive(Debug, PartialEq, Eq)]
 struct Committed {
-    events: Vec<(u64, String, EntityId, Vec<u8>)>,
+    events: Vec<CommittedEvent>,
     states: Vec<Vec<u8>>,
     attempt: PipelineAttemptIdV1,
     digest: Hash,
@@ -117,16 +132,21 @@ struct Committed {
 /// Run one two-member pass on a fresh world over `kind`, and keep what it committed.
 fn commit_one_pass(kind: StoreKind) -> Committed {
     let mut world = World::on(kind, PROBE);
+    assert_eq!(world.kind(), kind);
     let alpha = world.add("alpha", "community.alpha", b"chain:community.alpha", PROMPT);
     let beta = world.add("beta", "community.beta", b"draft:community.beta", PROMPT);
     let receipt = ok(ok(world.pass()).ok_or("the pass committed nothing"));
     let events = world
         .events()
         .iter()
-        .map(|event| {
-            let event_type = event.event_type.as_str().to_owned();
-            let payload = event.payload.as_slice().to_vec();
-            (event.seq.as_u64(), event_type, event.entity, payload)
+        .map(|event| CommittedEvent {
+            seq: event.seq.as_u64(),
+            event_type: event.event_type.as_str().to_owned(),
+            entity: event.entity,
+            payload: event.payload.as_slice().to_vec(),
+            schema_version: event.schema_version,
+            causation_id: event.causation_id,
+            correlation_id: event.correlation_id,
         })
         .collect();
     let receipt_seqs = receipt
@@ -134,6 +154,8 @@ fn commit_one_pass(kind: StoreKind) -> Committed {
         .iter()
         .map(|event| event.seq().as_u64())
         .collect();
+    // Both are store-independent: the attempt ID is the host's `[attempt_count; 16]`, and the
+    // draft batch digest covers only the draft fields, no Timeline, Event or store data.
     Committed {
         events,
         states: vec![alpha.committed_state().bytes, beta.committed_state().bytes],
@@ -148,7 +170,8 @@ fn a_pass_on_sqlite_commits_the_same_events_and_receipt_as_on_memory() {
     let [memory, sqlite] = StoreKind::ALL.map(commit_one_pass);
     assert_eq!(memory.events.len(), 2);
     assert_eq!(memory.states, [b"initial+".to_vec(), b"next".to_vec()]);
-    assert_eq!(sqlite, memory);
+    let (memory_tag, sqlite_tag) = (StoreKind::Memory.tag(), StoreKind::Sqlite.tag());
+    assert_eq!(sqlite, memory, "{sqlite_tag} differs from {memory_tag}");
 }
 
 /// One failing member in a pass beside one that succeeds.
@@ -416,9 +439,10 @@ fn a_typed_non_commit_and_a_store_error_discard_the_pass_and_classify() {
     }
 }
 
-#[test]
-fn a_lost_commit_outcome_keeps_the_staged_state_for_recovery() {
-    let mut world = new_world();
+/// Lose the commit acknowledgement of one pass on a fresh world over `kind`, then recover it.
+fn lose_and_recover(kind: StoreKind) {
+    let mut world = World::on(kind, PROBE);
+    let tag = world.kind().tag();
     let alpha = world.add("alpha", "community.alpha", b"chain:community.alpha", PROMPT);
     let beta = world.add("beta", "community.beta", b"draft:community.beta", PROMPT);
     let staged = ok(world.stage());
@@ -442,12 +466,34 @@ fn a_lost_commit_outcome_keeps_the_staged_state_for_recovery() {
     // Recovery resubmits the retained basis: the state commits, no Driver
     // runs again.
     let recovered = ok(world.registry.recover_scheduled_pass(world.store.as_mut()));
-    assert_eq!(recovered.map(|r| r.committed_events().len()), Some(2));
-    assert_eq!(world.events().len(), 2);
+    let receipt = ok(recovered.ok_or("the recovery committed nothing"));
+    assert_eq!(receipt.attempt_id(), admission.attempt_id, "{tag}");
+
+    // The receipt names exactly the Events on the Timeline: the lost commit and its recovery
+    // committed the batch once, and nothing is left in doubt.
+    let events = world.events();
+    let committed: Vec<EventId> = receipt
+        .committed_events()
+        .iter()
+        .map(|event| event.event_id())
+        .collect();
+    let stored: Vec<EventId> = events.iter().map(|event| event.id).collect();
+    assert_eq!(stored.len(), 2, "{tag}");
+    assert_eq!(committed, stored, "{tag}");
+    let again = err(world.registry.recover_scheduled_pass(world.store.as_mut()));
+    assert!(matches!(again, RuntimeError::NoScheduledAdmissionInDoubt), "{tag}");
+    assert_eq!(world.events().len(), 2, "{tag}");
     assert_eq!(alpha.committed_state().bytes, b"initial+");
     assert_eq!(beta.committed_state().bytes, b"next");
     assert_eq!(dispositions(&alpha), [ReceiptDispositionV1::Committed]);
     assert_eq!(alpha.receipts().len(), 1);
+}
+
+#[test]
+fn a_lost_commit_outcome_keeps_the_staged_state_for_recovery() {
+    for kind in StoreKind::ALL {
+        lose_and_recover(kind);
+    }
 }
 
 #[test]

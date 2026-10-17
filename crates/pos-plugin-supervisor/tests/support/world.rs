@@ -257,6 +257,7 @@ pub struct GatedMember {
 pub struct World {
     program: PathBuf,
     fixture_members: Vec<Member>,
+    kind: StoreKind,
     /// The store the passes commit to; borrow it as a port with `store.as_mut()`.
     pub store: Box<dyn ScheduledAdmissionStoreV1>,
     /// The registry the Drivers are registered in.
@@ -289,6 +290,7 @@ impl World {
         Self {
             program: program.into(),
             fixture_members: Vec::new(),
+            kind,
             store,
             registry: PluginRegistry::new().with_erasure_gate(shared),
             gate,
@@ -296,6 +298,12 @@ impl World {
             member_count: 0,
             attempt_count: 0,
         }
+    }
+
+    /// The kind of store this world commits to.
+    #[must_use]
+    pub const fn kind(&self) -> StoreKind {
+        self.kind
     }
 
     fn supervisor(&self, watchdog: Duration) -> CommunityPluginSupervisorV1 {
