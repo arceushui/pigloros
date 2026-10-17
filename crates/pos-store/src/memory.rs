@@ -16067,38 +16067,130 @@ mod local_cut_owner_coverage {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod admitted_fork_deletion {
-    //! ADR-099 revision 13 in-crate evidence: an orphan `FAR1` of a missing
-    //! Timeline is not found through the generic delete and through the direct
-    //! visible delete that skips the visibility check, the direct delete still
-    //! refuses an existing admitted Fork, and a geographic admitted Fork stays
+    //! ADR-099 revision 13 in-crate evidence: a refused delete of a ticked
+    //! classified Fork changes no map, an orphan `FAR1` of a missing Timeline
+    //! is not found through the generic delete and through the direct visible
+    //! delete that skips the visibility check, the direct delete still refuses
+    //! an existing admitted Fork, and a geographic admitted Fork stays
     //! concealed.
 
     use std::sync::Arc;
 
-    use pos_core::{CoreError, ErasureContainmentGateV1, EventStore, TimelineId};
+    use pos_core::{
+        CoreError, CounterfactualDependencyReadPortV1, CounterfactualInvalidationOutcomeV1,
+        CounterfactualStorePortV1, CounterfactualTickOutcomeV1, DependencyPageRequestV1,
+        DependencyReadScopeV1, ErasureContainmentGateV1, EventStore, TimelineId,
+        MAX_DEPENDENCY_PAGE_ROWS_V1,
+    };
 
     use super::{delete_visible_timeline, MemoryStore};
-    use crate::classified_fork_fixture::{Authority, Fallible};
+    use crate::classified_fork_fixture::{
+        batch, draft, hash, node_record, Authority, Fallible, Spec, FIRST_TICK, TICK_KIND,
+    };
+    use crate::ClassifiedCounterfactualStorePortV1;
 
-    /// The sizes of the Timeline, Event, authority, and counterfactual maps.
-    fn sizes(store: &MemoryStore) -> [usize; 9] {
+    /// The sizes of every Timeline, Event, pipeline, counterfactual,
+    /// dependency, Fork authority, publication, and import map.
+    fn sizes(store: &MemoryStore) -> [usize; 26] {
         [
             store.timelines.len(),
             store.event_ids.len(),
-            store.fork_admissions.len(),
-            store.imported_fork_admissions.len(),
-            store.fork_classifier_tables.len(),
-            store.fork_append_operations.len(),
-            store.fork_event_origins.len(),
+            store.append_identities.len(),
+            store.geographic_timelines.len(),
+            store.pipeline_admission_fences.len(),
+            store.pipeline_admission_receipts.len(),
             store.counterfactual_forks.len(),
             store.counterfactual_generation_floors.len(),
+            store.dependency_prefixes.len(),
+            store.fork_admissions.len(),
+            store.fork_admission_operations.len(),
+            store.fork_classifier_sources.len(),
+            store.fork_classifier_tables.len(),
+            store.fork_classifier_registrations.len(),
+            store.fork_append_operations.len(),
+            store.fork_event_origins.len(),
+            store.fork_intervention_admissions.len(),
+            store.fork_publication_operations.len(),
+            store.fork_publication_bindings.len(),
+            store.fork_publication_artifacts.len(),
+            store.imported_fork_admissions.len(),
+            store.imported_fork_principal_owner_bindings.len(),
+            store.imported_fork_classifier_sources.len(),
+            store.imported_fork_publication_operations.len(),
+            store.imported_fork_key_evidence.len(),
+            store.imported_fork_attributions.len(),
         ]
+    }
+
+    /// A Memory store with an open erasure gate.
+    fn open() -> Fallible<MemoryStore> {
+        let mut store = MemoryStore::new();
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        Ok(store)
+    }
+
+    /// The dependency nodes of the Fork's current generation.
+    fn nodes(store: &MemoryStore, fork: TimelineId) -> Fallible<usize> {
+        let at = store.current_fork_generation(fork)?;
+        let scope = DependencyReadScopeV1::ForkGeneration(at);
+        let request = DependencyPageRequestV1::try_new(scope, None, MAX_DEPENDENCY_PAGE_ROWS_V1)?;
+        Ok(store.read_dependency_nodes(&request)?.items().len())
+    }
+
+    /// A classified Fork with a committed invalidation and one later Tick,
+    /// each with its Events, provenance, and dependency record.
+    fn ticked() -> Fallible<(MemoryStore, TimelineId)> {
+        let mut store = open()?;
+        let authority = Authority::open(&mut store)?;
+        let fork = authority.admit(&mut store, 0xb1)?;
+        let permit = authority.host_permit(&store, fork)?;
+        let lent = authority.lend(&permit);
+        let command = Spec::new(fork).command()?;
+        let first = node_record(FIRST_TICK, "a", 1)?;
+        let base = hash(0x61);
+        let committed =
+            store.commit_classified_counterfactual_invalidation(&command, &first, &lent, base)?;
+        assert!(
+            matches!(committed, CounterfactualInvalidationOutcomeV1::Committed(_)),
+            "{committed:?}"
+        );
+        let basis = store.current_counterfactual_basis(fork)?;
+        let pair = batch(vec![draft(20, TICK_KIND), draft(21, TICK_KIND)])?;
+        let later = node_record(18, "b", 2)?;
+        let base = hash(0x62);
+        let ticked =
+            store.append_classified_counterfactual_tick(fork, &basis, &pair, &later, &lent, base)?;
+        assert!(
+            matches!(ticked, CounterfactualTickOutcomeV1::Committed { .. }),
+            "{ticked:?}"
+        );
+        Ok((store, fork))
+    }
+
+    #[test]
+    fn a_refused_delete_of_a_ticked_fork_changes_no_map() -> Fallible<()> {
+        let (mut store, fork) = ticked()?;
+        let events = store.state(fork).events.clone();
+        let state = store.counterfactual_forks.get(&fork).cloned();
+        let recorded = nodes(&store, fork)?;
+        assert_eq!(events.len(), 4, "two Ticks of two Events");
+        assert!(recorded > 0, "the Ticks recorded dependency nodes");
+        let before = sizes(&store);
+        let refused = store.delete_timeline(fork);
+        assert!(
+            matches!(refused, Err(CoreError::AdmittedForkNotDeletable(id)) if id == fork),
+            "{refused:?}"
+        );
+        assert_eq!(sizes(&store), before);
+        assert_eq!(store.state(fork).events, events);
+        assert_eq!(store.counterfactual_forks.get(&fork).cloned(), state);
+        assert_eq!(nodes(&store, fork)?, recorded);
+        Ok(())
     }
 
     #[test]
     fn an_orphan_admission_of_a_missing_timeline_is_not_found() -> Fallible<()> {
-        let mut store = MemoryStore::new();
-        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let mut store = open()?;
         let authority = Authority::open(&mut store)?;
         let fork = authority.admit(&mut store, 0xb1)?;
         let admission = store.fork_admissions.get(&fork).ok_or("no FAR1")?.clone();
@@ -16128,8 +16220,7 @@ mod admitted_fork_deletion {
     /// Geographic concealment still precedes the admission check.
     #[test]
     fn a_geographic_admitted_fork_stays_concealed() -> Fallible<()> {
-        let mut store = MemoryStore::new();
-        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let mut store = open()?;
         let authority = Authority::open(&mut store)?;
         let fork = authority.admit(&mut store, 0xb1)?;
         store.geographic_timelines.insert(fork);

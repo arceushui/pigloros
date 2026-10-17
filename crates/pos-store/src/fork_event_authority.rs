@@ -2258,10 +2258,14 @@ mod tests {
         recreated: MaskedErrorV1,
         /// The committed sidecar's final logical head, read after both.
         head: u64,
+        /// The Seq of a fresh host-internal classified append after both.
+        appended: u64,
+        /// The validated suffix length from logical Seq 1 after the append.
+        suffix: usize,
     }
 
     /// Publish an empty admitted Fork, refuse its delete and its re-creation,
-    /// and read its sidecar back unchanged.
+    /// read its sidecar back unchanged, and append to it once more.
     #[cfg(feature = "sqlite")]
     fn refused_published_deletion<S: PublicationTestStoreV1>(
         store: &mut S,
@@ -2277,6 +2281,18 @@ mod tests {
         let recreated = recreated.ok_or("the re-creation must fail")?;
         let committed = store.read_committed(child, 0)?;
         assert_eq!(committed.receipt, receipt);
+        let permit = store.issue_append_source_permit(
+            &lifecycle.issuer,
+            &lifecycle.session,
+            child,
+            &lifecycle.source,
+            ForkAppendSourceIdentityV1::HostInternal,
+        )?;
+        let operation = Hash::from_bytes([97; 32]);
+        let event = draft(b"after-refusal");
+        let appended = store.append_classified(&lifecycle.session, &permit, operation, event)?;
+        assert_eq!(appended.operation.input().child_timeline_id, child);
+        let suffix = store.read_fork_event_suffix(child, 1)?.len();
         let id = child.to_string();
         let masked = |error: &pos_core::CoreError| {
             let text = error.to_string().replace(&id, "<fork>");
@@ -2286,11 +2302,13 @@ mod tests {
             deleted: masked(&deleted),
             recreated: masked(&recreated),
             head: committed.receipt.final_logical_head,
+            appended: appended.event.seq.as_u64(),
+            suffix,
         })
     }
 
     /// ADR-099 revision 13, test 2 publication case on both adapters: the
-    /// same refusal, re-creation failure, and readable sidecar.
+    /// same refusal, re-creation failure, readable sidecar, and later append.
     #[cfg(feature = "sqlite")]
     #[test]
     fn adapters_refuse_a_published_fork_delete_alike() -> Result<(), Box<dyn Error>> {
@@ -2298,7 +2316,9 @@ mod tests {
         let sqlite = refused_published_deletion(&mut SqliteStore::open_in_memory()?)?;
         assert_eq!(memory, sqlite);
         assert_eq!(memory.deleted.1, "admitted Fork cannot be deleted: <fork>");
-        assert_eq!(memory.head, 0);
+        let duplicate = "storage error: timeline already exists: <fork>";
+        assert_eq!(memory.recreated.1, duplicate);
+        assert_eq!((memory.head, memory.appended, memory.suffix), (0, 1, 1));
         Ok(())
     }
 

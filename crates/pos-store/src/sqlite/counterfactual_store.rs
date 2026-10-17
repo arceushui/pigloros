@@ -170,23 +170,22 @@
 //!   only because `recursive_triggers` is off, so the replaced row fires no
 //!   delete guard. No port read touches the tombstone, so every read of a
 //!   deleted Fork stays `ForkNotFound`, matching the `MemoryStore` adapter.
-//!   A generic Fork's Timeline later created with the same ID (an
+//!   A Timeline later created with the ID of a deleted generic Fork (an
 //!   identity-preserving import) is seeded at the floor when its facts are
-//!   published, so its generation never decreases. An admitted (ADR-099)
-//!   Fork is never deleted (ADR-099 revision 13): the delete refuses it before
+//!   published, so its generation never decreases. An admitted (ADR-099) Fork
+//!   is never deleted (ADR-099 revision 13): the delete refuses it before
 //!   this purge runs, so it never gets a tombstone and its ID is never
-//!   re-created. A marker only exists inside the purge
-//!   transaction, so a rollback or crash leaves none, and an open that finds
-//!   one fails closed. Files created by an earlier build
-//!   before this schema version must be recreated: their old delete guards
-//!   fail the exact validation. **ADR-060 clarification:** the
-//!   counterfactual rows are derived state of the Fork Timeline, not erasure
-//!   evidence, so purging them in the generic `delete_timeline` is
-//!   derived-state cleanup. It clears no erasure evidence, fence, or
-//!   inventory, and the purge touches none of them. The tombstone stores
-//!   only the Fork id and a generation number; if ADR-060 or ADR-064 ever
-//!   treat Fork ids as erasable, the tombstone table needs its own erasure
-//!   path.
+//!   re-created. A marker only exists inside the purge transaction, so a
+//!   rollback or crash leaves none, and an open that finds one fails closed.
+//!   Files created by an earlier build before this schema version must be
+//!   recreated: their old delete guards fail the exact validation. **ADR-060
+//!   clarification:** the counterfactual rows are derived state of the Fork
+//!   Timeline, not erasure evidence, so purging them in the generic
+//!   `delete_timeline` is derived-state cleanup. It clears no erasure
+//!   evidence, fence, or inventory, and the purge touches none of them. The
+//!   tombstone stores only the Fork id and a generation number; if ADR-060 or
+//!   ADR-064 ever treat Fork ids as erasable, the tombstone table needs its
+//!   own erasure path.
 //! - **Errors.** A missing, deleted, non-Fork, unpublished, or protected
 //!   Timeline, and a Tick draft the generic append guard rejects, is
 //!   `ForkNotFound`; a staged head that did not advance is `CorruptState`;

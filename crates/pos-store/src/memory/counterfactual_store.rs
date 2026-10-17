@@ -70,10 +70,10 @@
 //!   (ADR-099 revision 13): the delete refuses it before this purge runs, so
 //!   it never gets a floor and its id is never re-created. Publication,
 //!   reads, Tick appends, and commits on a deleted Fork still report
-//!   `ForkNotFound`. Purge atomicity is structural
-//!   here: the purge runs in infallible code right after the Timeline is
-//!   removed, and the injected delete failure fires before any mutation, so
-//!   no failure can leave a half-purged Fork.
+//!   `ForkNotFound`. Purge atomicity is structural here: the purge runs in
+//!   infallible code right after the Timeline is removed, and the injected
+//!   delete failure fires before any mutation, so no failure can leave a
+//!   half-purged Fork.
 //! - **ADR-060 clarification.** The purge is derived-state cleanup: the
 //!   counterfactual rows are derived from the Fork Timeline, not erasure
 //!   evidence. The generic `delete_timeline` still clears no erasure

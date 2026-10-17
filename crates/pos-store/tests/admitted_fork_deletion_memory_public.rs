@@ -51,10 +51,12 @@ fn open() -> Fallible<MemoryStore> {
 
 /// What the public ports read of every Timeline, in a stable order: the
 /// Timeline, its own Events, its validated provenance suffix, and its
-/// counterfactual basis and generation, each as its result.
-fn observed(store: &MemoryStore) -> Fallible<Vec<String>> {
-    let mut lines = Vec::new();
-    for timeline in store.list_timelines()? {
+/// counterfactual basis and generation, each as its result. A listing that
+/// fails, as on a fail-closed gated store, is recorded as its error.
+fn observed(store: &MemoryStore) -> Vec<String> {
+    let listed = store.list_timelines();
+    let mut lines = vec![format!("{:?}", listed.as_ref().map(Vec::len))];
+    for timeline in listed.unwrap_or_default() {
         let id = timeline.id();
         lines.push(format!(
             "{timeline:?} {:?} {:?} {:?} {:?}",
@@ -65,7 +67,7 @@ fn observed(store: &MemoryStore) -> Fallible<Vec<String>> {
         ));
     }
     lines.sort();
-    Ok(lines)
+    lines
 }
 
 /// Delete `id`, which must fail with exactly `expected`, and change nothing.
@@ -74,12 +76,12 @@ fn assert_delete_fails(
     id: TimelineId,
     expected: &CoreError,
 ) -> Fallible<()> {
-    let before = observed(store)?;
+    let before = observed(store);
     let deleted = store.delete_timeline(id);
     let error = deleted.err().ok_or("the delete must fail")?;
     assert_eq!(discriminant(&error), discriminant(expected));
     assert_eq!(error.to_string(), expected.to_string());
-    assert_eq!(observed(store)?, before);
+    assert_eq!(observed(store), before);
     Ok(())
 }
 
@@ -92,7 +94,7 @@ fn assert_refused(store: &mut MemoryStore, fork: TimelineId) -> Fallible<()> {
 /// Re-creating `fork` from its own metadata fails as a duplicate id and
 /// changes nothing.
 fn assert_not_recreatable(store: &mut MemoryStore, fork: TimelineId) -> Fallible<()> {
-    let before = observed(store)?;
+    let before = observed(store);
     let meta = store.get_timeline(fork)?.ok_or("the Fork exists")?.meta;
     let recreated = store.create_timeline_with_meta(meta).err();
     let error = recreated.ok_or("re-creating an admitted Fork must fail")?;
@@ -101,7 +103,7 @@ fn assert_not_recreatable(store: &mut MemoryStore, fork: TimelineId) -> Fallible
         matches!(&error, CoreError::Storage(message) if *message == duplicate),
         "{error:?}"
     );
-    assert_eq!(observed(store)?, before);
+    assert_eq!(observed(store), before);
     Ok(())
 }
 
@@ -131,7 +133,7 @@ fn world() -> Fallible<World> {
 }
 
 /// Issue a host-internal append permit for the world's Fork.
-fn permit(world: &World) -> Fallible<ForkAppendSourcePermitV1> {
+fn host_permit(world: &World) -> Fallible<ForkAppendSourcePermitV1> {
     world.authority.host_permit(&world.store, world.fork)
 }
 
@@ -144,9 +146,10 @@ fn append_classified(
     value: u8,
 ) -> Result<Seq, AuthorityError> {
     let session = &world.authority.session;
-    let appended = world
-        .store
-        .append_classified(session, permit, operation, draft(value, TICK_KIND));
+    let appended =
+        world
+            .store
+            .append_classified(session, permit, operation, draft(value, TICK_KIND));
     appended.map(|receipt| receipt.event.seq)
 }
 
@@ -173,7 +176,7 @@ fn tick(
 ) -> Fallible<Result<TickOutcome, Classified>> {
     let fork = world.fork;
     let expected = world.store.current_counterfactual_basis(fork)?;
-    let permit = permit(world)?;
+    let permit = host_permit(world)?;
     let lent = world.authority.lend(&permit);
     let store = &mut world.store;
     Ok(store.append_classified_counterfactual_tick(fork, &expected, drafts, record, &lent, base))
@@ -198,7 +201,7 @@ fn a_registered_fork_is_refused_around_public_appends_and_stays_usable() -> Fall
     let fork = world.fork;
     assert_refused(&mut world.store, fork)?;
     assert_not_recreatable(&mut world.store, fork)?;
-    let permit = permit(&world)?;
+    let permit = host_permit(&world)?;
     let first = append_classified(&mut world, &permit, hash(0x71), 30);
     assert_eq!(first, Ok(Seq::from_u64(PARENT_CUT + 1)));
     assert_refused(&mut world.store, fork)?;
@@ -216,7 +219,7 @@ fn a_registered_fork_is_refused_around_public_appends_and_stays_usable() -> Fall
 fn a_fork_with_counterfactual_ticks_is_refused_and_keeps_ticking() -> Fallible<()> {
     let mut world = world()?;
     let fork = world.fork;
-    let permit = permit(&world)?;
+    let permit = host_permit(&world)?;
     let record = node_record(FIRST_TICK, "a", 1)?;
     let outcome = commit(&mut world, &permit, &Spec::new(fork), &record, hash(0x61))??;
     assert!(matches!(outcome, Outcome::Committed(_)), "{outcome:?}");
@@ -268,11 +271,7 @@ fn a_gated_store_refuses_before_the_admission_check() -> Fallible<()> {
     let fork = authority.admit_unregistered(&mut store, 0xb1)?;
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()))?;
     let unavailable = CoreError::ErasureContainmentUnavailable;
-    let deleted = store.delete_timeline(fork).err();
-    let error = deleted.ok_or("the gated delete must fail")?;
-    assert_eq!(discriminant(&error), discriminant(&unavailable));
-    assert_eq!(error.to_string(), unavailable.to_string());
-    Ok(())
+    assert_delete_fails(&mut store, fork, &unavailable)
 }
 
 /// Tests 5 and 6: the child-Fork check precedes the admission check, and the

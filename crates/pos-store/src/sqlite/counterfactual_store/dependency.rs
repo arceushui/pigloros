@@ -83,10 +83,10 @@
 //!   capacity check: a record is bounded far below the set bounds.
 //! - **Record Tick.** It must be above the highest Tick recorded in the set,
 //!   or, while the set has no record, not below the first Tick persisted in
-//!   the generation's receipt row. A generation with no receipt row (a generic
-//!   Fork id re-created after a purge resumes at its floor without an
-//!   invalidation)
-//!   has no first Tick, so a later Tick with a record is `BindingMismatch`.
+//!   the generation's receipt row. A generation with no receipt row (a
+//!   generic Fork id re-created after a purge resumes at its floor without an
+//!   invalidation) has no first Tick, so a later Tick with a record is
+//!   `BindingMismatch`.
 //! - **Capacity.** The check sums the stored counts of the set's record rows
 //!   and trusts them; it does not recount the node and edge rows. That is the
 //!   accepted trust boundary: this adapter alone writes the counts, in the
