@@ -490,10 +490,17 @@ impl Rig {
         ];
         let mut releases = Vec::new();
         for (tag, (plugin_id, event_type, component)) in (1..).zip(specs) {
+            // Roles are exclusive across registered Plugins: the sibling holds its own.
+            let role = if plugin_id == "plugin-d" {
+                SIBLING_ROLE
+            } else {
+                ROLE
+            };
             let spec = Spec {
                 plugin_id,
                 event_type,
                 component,
+                role,
             };
             releases.push(publish(&mut signed, spec, tag, &swap)?);
         }
