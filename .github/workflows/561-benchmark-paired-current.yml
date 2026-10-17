@@ -1,0 +1,51 @@
+# Isolated measurement only: not a PR gate or trusted-baseline publisher.
+name: 561-benchmark-paired-current
+
+on:
+  push:
+    branches: [redmine/561-benchmark-paired-current]
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -D warnings
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: d5894cb0c27274a7c97a69fb879204f4bc196c21
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 0c6d537d11b1bf43614dd980bb30f49e60a7912f
+          path: candidate
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+      - name: Test complete diagnostic sample validation
+        run: python3 harness/scripts/diagnose_561_benchmark.py --self-test
+      - name: Compare frozen main and tested merge on one CPU
+        run: python3 harness/scripts/diagnose_561_benchmark.py
+      - name: Preserve every untrusted sample and build log
+        if: ${{ always() }}
+        timeout-minutes: 3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: untrusted-561-benchmark-paired-current-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
