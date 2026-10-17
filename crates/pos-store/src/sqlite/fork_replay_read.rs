@@ -254,6 +254,7 @@ mod tests {
             .map(|(index, column)| ("events", column, index == 0))
             .collect();
         assert_eq!(actual, expected);
+        drop(reads);
         Ok(())
     }
 
