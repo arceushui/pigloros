@@ -46,10 +46,10 @@ const COMMUNITY_VERSION: u64 = 1;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/community/v1/manifest.json");
-const MANIFEST_SHA256: &str = "38840656ec03db62d23004cc9ff59d4d97cabec03c8d12933e9d6636ac346fa1";
+const MANIFEST_SHA256: &str = "25596e4da68ee5874106beac8125c16a74ec53bfa99d272f0b35a4301e711531";
 
 /// Every runner of profile version 1, by case identifier.
-const RUNNERS: [(&str, Runner); 14] = [
+const RUNNERS: [(&str, Runner); 15] = [
     ("PCF-CPH-001", parity::single_pass_parity),
     ("PCF-CPH-002", parity::mixed_registry_order),
     ("PCF-CPH-003", authority::foreign_proposal_parity),
@@ -64,6 +64,7 @@ const RUNNERS: [(&str, Runner); 14] = [
     ("PCF-CPH-012", replay::lost_acknowledgement_recovery),
     ("PCF-CPH-013", authority::reserved_proposal_parity),
     ("PCF-CPH-014", fail_closed::invalid_output_and_releases),
+    ("PCF-CPH-015", budget::other_limits_parity),
 ];
 
 /// Parse a `PCH1` manifest under the harness rules of `PPC1`.
@@ -90,8 +91,8 @@ fn mandatory_on_both_stores(case: &Case) -> bool {
     case.mandatory && case.stores == ["memory", "sqlite"]
 }
 
-/// Every mandatory case of `PCH1` version 1 passes on the real worker. The exclusions record
-/// what the profile does not prove yet, with the subtask that owns it.
+/// Every mandatory case of `PCH1` version 1 passes on the real worker. The profile records no
+/// exclusion: nothing it names is left unproven.
 #[test]
 fn pch1_every_mandatory_case_passes_on_the_real_worker() {
     verify_pinned(MANIFEST, MANIFEST_SHA256).test_ok();
@@ -105,7 +106,7 @@ fn pch1_every_mandatory_case_passes_on_the_real_worker() {
     assert_eq!(report.passed.len(), RUNNERS.len());
     assert_eq!(manifest.cases.len(), RUNNERS.len());
     assert!(manifest.cases.iter().all(mandatory_on_both_stores));
-    assert_eq!(manifest.exclusions.len(), 1);
+    assert!(manifest.exclusions.is_empty());
 }
 
 // ── Fail-closed harness behaviour ───────────────────────────────────────────
