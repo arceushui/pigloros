@@ -1578,7 +1578,16 @@ pub mod tests {
     pub(crate) fn materialize_root_selector_state(
         root: &Path,
     ) -> TestResult<AdmittedSelectorProvider> {
-        let corpus = crate::selector_test_support::air_gapped_corpus()?;
+        materialize_root_selector_state_from(
+            root,
+            &crate::selector_test_support::air_gapped_corpus()?,
+        )
+    }
+
+    pub(crate) fn materialize_root_selector_state_from(
+        root: &Path,
+        corpus: &crate::selector_test_support::Corpus,
+    ) -> TestResult<AdmittedSelectorProvider> {
         let request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
         let mut state = admitted_state()?;
         retain_case_artifact(
@@ -2472,13 +2481,26 @@ pub mod tests {
     }
 
     pub(crate) fn root_selector_fixture_from_state(
-        mut state: InstalledSelectorState,
+        state: InstalledSelectorState,
     ) -> TestResult<(
         EvaluationRequest,
         AdmittedSelectorProvider,
         ResolvedInstalledCase,
     )> {
-        let corpus = crate::selector_test_support::air_gapped_corpus()?;
+        root_selector_fixture_from_corpus(
+            state,
+            &crate::selector_test_support::air_gapped_corpus()?,
+        )
+    }
+
+    pub(crate) fn root_selector_fixture_from_corpus(
+        mut state: InstalledSelectorState,
+        corpus: &crate::selector_test_support::Corpus,
+    ) -> TestResult<(
+        EvaluationRequest,
+        AdmittedSelectorProvider,
+        ResolvedInstalledCase,
+    )> {
         let mut request = EvaluationRequest::from_canonical_cbor(&corpus.request)?;
         let object_identity = |kind| {
             state

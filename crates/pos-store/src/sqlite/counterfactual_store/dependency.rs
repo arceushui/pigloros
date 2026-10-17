@@ -186,8 +186,8 @@ use pos_core::{
 use rusqlite::{params, Connection, OptionalExtension, Params, Row};
 
 use super::{
-    counterfactual_schema_present, read_fork_state, settle, sql_integer, stored_hash, stored_u64,
-    then_staged, CounterfactualSchemaObjectV1, Staged, StoreError,
+    counterfactual_schema_present, lift, read_fork_state, settle, sql_integer, stored_hash,
+    stored_u64, then_staged, CounterfactualSchemaObjectV1, Staged, StoreError,
 };
 use crate::factual_tick_plan::{plan_tick, FactualInstallV1, PlannedTickV1, TickPrefixV1};
 use crate::sqlite::{seq_as_i64, SqliteSchemaColumn, SqliteSchemaTable, SqliteStore};
@@ -1183,14 +1183,16 @@ impl SqliteStore {
     /// because `TickDependencyRecordV1::try_new` already enforces the
     /// per-record node, edge, input, and byte caps, which are far below the
     /// set bounds, and the generation's set starts empty.
-    fn write_recorded_generation(
+    fn write_recorded_generation<E: From<StoreError>>(
         &self,
         command: &CounterfactualInvalidationCommandV1,
         set: &DependencySetV1,
         first_tick: i64,
         record: Option<&TickDependencyRecordV1>,
-    ) -> Staged<CounterfactualInvalidationOutcomeV1> {
-        let written = self.write_counterfactual_generation(command, set.generation, first_tick);
+        step: impl Fn(&Self, TimelineId, &PipelineDraftBatchV1) -> Staged<Seq, E>,
+    ) -> Staged<CounterfactualInvalidationOutcomeV1, E> {
+        let written =
+            self.write_counterfactual_generation(command, set.generation, first_tick, step);
         then_staged(written, |outcome| {
             record
                 .map_or(Ok(()), |record| {
@@ -1200,21 +1202,23 @@ impl SqliteStore {
         })
     }
 
-    /// Append one later Tick and insert its record, if any, in the open
-    /// transaction. The outcome is built from the staged head; a head that did
-    /// not advance rolls back.
-    fn append_recorded_tick(
+    /// Append one later Tick through the caller's Event-append `step` and
+    /// insert its record, if any, in the open transaction. The outcome is
+    /// built from the staged head; a head that did not advance rolls back.
+    fn append_recorded_tick<E: From<StoreError>>(
         &self,
         fork: TimelineId,
         persisted: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
         record: Option<&TickDependencyRecordV1>,
-    ) -> Staged<CounterfactualTickOutcomeV1> {
+        step: impl Fn(&Self, TimelineId, &PipelineDraftBatchV1) -> Staged<Seq, E>,
+    ) -> Staged<CounterfactualTickOutcomeV1, E> {
         let set = DependencySetV1::new(fork, sql_tick(persisted.generation));
-        then_staged(admit_later_record(&self.conn, &set, record), |()| {
-            let appended = self
-                .append_tick_in_transaction(fork, drafts)
-                .map(|head| persisted.committed_tick(&COUNTERFACTUAL_SEAL, head));
+        let admitted = lift(admit_later_record(&self.conn, &set, record));
+        then_staged(admitted, |()| {
+            let appended = then_staged(step(self, fork, drafts), |head| {
+                lift(Ok(persisted.committed_tick(&COUNTERFACTUAL_SEAL, head)))
+            });
             then_staged(appended, |outcome| {
                 record
                     .map_or(Ok(()), |record| {
@@ -1226,30 +1230,33 @@ impl SqliteStore {
     }
 
     /// The one write path of an invalidation, plain (`record` is `None`) or
-    /// recording. After the fence, the admitted-Fork guard, and the Fork
-    /// lookup, a record is checked before the basis, so a misplaced record
-    /// wins over a stale basis.
-    pub(super) fn commit_invalidation_recording(
+    /// recording. After the fence and the caller's `basis` read (the
+    /// admitted-Fork guard and the Fork lookup), a record is checked before the
+    /// basis comparison, so a misplaced record wins over a stale basis. The
+    /// first Tick's Events are appended by the caller's `step`.
+    pub(super) fn commit_invalidation_recording<E: From<StoreError>>(
         &mut self,
         command: &CounterfactualInvalidationCommandV1,
         record: Option<&TickDependencyRecordV1>,
-    ) -> Result<CounterfactualInvalidationOutcomeV1, StoreError> {
+        basis: impl Fn(&Self, TimelineId) -> Staged<CounterfactualBasisV1, E>,
+        step: impl Fn(&Self, TimelineId, &PipelineDraftBatchV1) -> Staged<Seq, E>,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, E> {
         let fork = command.fork();
         let generation = sql_integer(command.new_generation().generation)?;
         let first_tick = sql_integer(command.first_tick())?;
         let set = DependencySetV1::new(fork, generation);
         let staged = self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
             store.in_counterfactual_scope(|store| {
-                then_staged(store.writable_counterfactual_basis(fork), |persisted| {
-                    let admitted = admit_first_record(record, command.first_tick());
-                    then_staged(Ok(admitted), |()| {
+                then_staged(basis(store, fork), |persisted| {
+                    let admitted = lift(Ok(admit_first_record(record, command.first_tick())));
+                    then_staged(admitted, |()| {
                         command
                             .expected_basis()
                             .first_conflict(&persisted)
                             .map_or_else(
                                 || {
                                     store.write_recorded_generation(
-                                        command, &set, first_tick, record,
+                                        command, &set, first_tick, record, &step,
                                     )
                                 },
                                 |conflict| {
@@ -1268,23 +1275,32 @@ impl SqliteStore {
     }
 
     /// The one write path of a later Tick, plain (`record` is `None`) or
-    /// recording. A record's Tick must fit `SQLite` before any fence.
-    pub(super) fn append_tick_recording(
+    /// recording. A record's Tick must fit `SQLite` before any fence; the
+    /// basis is read by the caller's `basis` and the Events are appended by
+    /// its `step`.
+    pub(super) fn append_tick_recording<E: From<StoreError>>(
         &mut self,
         fork: TimelineId,
         expected: &CounterfactualBasisV1,
         drafts: &PipelineDraftBatchV1,
         record: Option<&TickDependencyRecordV1>,
-    ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
+        basis: impl Fn(&Self, TimelineId) -> Staged<CounterfactualBasisV1, E>,
+        step: impl Fn(&Self, TimelineId, &PipelineDraftBatchV1) -> Staged<Seq, E>,
+    ) -> Result<CounterfactualTickOutcomeV1, E> {
         record
             .map_or(Ok(()), |record| sql_integer(record.tick()).map(|_| ()))
+            .map_err(E::from)
             .and_then(|()| {
                 let staged =
                     self.with_erasure_fence(fork, ErasureProtectedOperationV1::Append, |store| {
                         store.in_counterfactual_scope(|store| {
-                            then_staged(store.writable_counterfactual_basis(fork), |persisted| {
+                            then_staged(basis(store, fork), |persisted| {
                                 expected.first_conflict(&persisted).map_or_else(
-                                    || store.append_recorded_tick(fork, &persisted, drafts, record),
+                                    || {
+                                        store.append_recorded_tick(
+                                            fork, &persisted, drafts, record, &step,
+                                        )
+                                    },
                                     |conflict| Ok(Ok(CounterfactualTickOutcomeV1::Stale(conflict))),
                                 )
                             })
@@ -1317,7 +1333,12 @@ impl CounterfactualDependencyRecordingPortV1 for SqliteStore {
         command: &CounterfactualInvalidationCommandV1,
         record: &TickDependencyRecordV1,
     ) -> Result<CounterfactualInvalidationOutcomeV1, StoreError> {
-        self.commit_invalidation_recording(command, Some(record))
+        self.commit_invalidation_recording(
+            command,
+            Some(record),
+            Self::writable_counterfactual_basis,
+            Self::append_tick_in_transaction,
+        )
     }
 
     fn append_counterfactual_tick_with_dependencies(
@@ -1327,7 +1348,14 @@ impl CounterfactualDependencyRecordingPortV1 for SqliteStore {
         drafts: &PipelineDraftBatchV1,
         record: &TickDependencyRecordV1,
     ) -> Result<CounterfactualTickOutcomeV1, StoreError> {
-        self.append_tick_recording(fork, expected, drafts, Some(record))
+        self.append_tick_recording(
+            fork,
+            expected,
+            drafts,
+            Some(record),
+            Self::writable_counterfactual_basis,
+            Self::append_tick_in_transaction,
+        )
     }
 }
 

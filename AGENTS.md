@@ -50,6 +50,11 @@ RUSTC_BOOTSTRAP=1 cargo llvm-cov --workspace --locked --summary-only \
   --fail-under-lines 99 --fail-under-regions 99 -- --include-ignored
 ```
 
+CI runs the same tests through cargo-nextest (`cargo nextest run --workspace
+--all-features --locked --run-ignored all`, doctests via `cargo test --doc --
+--include-ignored`, coverage via `cargo llvm-cov nextest`). The libtest commands
+above run the same tests locally without installing nextest.
+
 ### Merging
 
 Merge only through the Trunk merge queue, which enqueues pull requests labelled `ready-to-merge`. Add that label only when the maintainer explicitly asks; `/trunk merge` comments are disabled. Never press Merge or call the GitHub merge API, and never rebase or update a branch only because `main` moved — only to resolve conflicts. See [`docs/merge-queue.md`](docs/merge-queue.md).

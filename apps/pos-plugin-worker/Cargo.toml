@@ -36,12 +36,18 @@ pos-runtime = { path = "../../crates/pos-runtime", features = ["test-support"] }
 # `blake3` (the EAI1 artifact digests) and `serde_json` (the provider manifest) widen the ADR's
 # dependency statement for this slice: `pos-reference` and `pos-crypto` offer no plain hasher.
 blake3 = { workspace = true }
+# The community pipeline conformance runner (`PCH1`, #489) registers a first-party native twin
+# Driver (`pos-core` Plugin types) and includes the first-party profile's fail-closed harness
+# from `apps/piglor-gateway/tests/pipeline_conformance/harness.rs` by `#[path]`, which pins
+# fixture bytes with `sha2`.
+pos-core = { path = "../../crates/pos-core" }
 pos-plugin-conformance-adapter = { path = "../pos-plugin-conformance-adapter" }
 pos-plugin-publisher = { path = "../../crates/pos-plugin-publisher", features = [
   "test-support",
 ] }
 pos-reference = { path = "../../crates/pos-reference" }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 
 [lints]
 workspace = true

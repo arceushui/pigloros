@@ -91,7 +91,7 @@ use pos_core::{
     ForkAdmissionRecoveryProofV1, ForkAppendOperationV1, ForkAppendSourceIdentityV1,
     ForkAttributionOriginV1, ForkAuthorityOriginV1, ForkClassifiedEventV1,
     ForkClassifiedProvenanceV1, ForkClassifierRegistrationInputV1, ForkClassifierRegistrationV1,
-    ForkClassifierSourceV1, ForkClassifierTableV1, ForkEventClassifierV1,
+    ForkClassifierSourceV1, ForkClassifierTableV1, ForkEventAppendRequestV1, ForkEventClassifierV1,
     ForkInterventionAdmissionV1, Hash, KeyDestructionOutcomeV1, KeyDestructionRequestV1,
     KeyIdentityV1, KeyRegistryErrorV1, KeyRegistryHistoricalDecryptionPortV1, KeyRegistryStateV1,
     KeyRoleV1, ManifestAdmissionCatalogV1, ManifestOwnerAdmissionCommitKindV1,
@@ -1612,8 +1612,24 @@ impl SqliteStore {
         if let Some(receipt) = self.existing_classified_append(operation_id, request.digest())? {
             return Ok(receipt);
         }
-        let classification = ForkEventClassifierV1::from_table(&table)
-            .classify_identity(source)
+        self.insert_fresh_classified_append(&table, &request, draft)
+    }
+
+    /// Insert one classified Event whose operation has no FOP1 row yet.
+    ///
+    /// The fresh-only part of a classified append: the caller has already
+    /// validated the permit (yielding `table`) and ruled out an existing
+    /// operation, so this classifies the source and inserts the Event, its
+    /// EOR1 and its FOP1 with no idempotence branch.
+    fn insert_fresh_classified_append(
+        &self,
+        table: &ForkClassifierTableV1,
+        request: &ForkEventAppendRequestV1,
+        draft: EventDraft,
+    ) -> Result<ForkClassifiedAppendReceiptV1, ForkEventAuthorityErrorV1> {
+        let child_timeline_id = request.child_timeline_id;
+        let classification = ForkEventClassifierV1::from_table(table)
+            .classify_identity(&request.source)
             .map_err(|_| ForkEventAuthorityErrorV1::ClassifierRejected)?;
         read_origin_prefix(&self.conn, child_timeline_id)
             .map_err(|_| ForkEventAuthorityErrorV1::CorruptAuthority)
@@ -1632,8 +1648,8 @@ impl SqliteStore {
             })
             .and_then(|(local_seq, event)| {
                 ForkClassifiedProvenanceV1::derive(
-                    &request,
-                    &table,
+                    request,
+                    table,
                     classification,
                     ForkClassifiedEventV1 {
                         event_id: event.id,

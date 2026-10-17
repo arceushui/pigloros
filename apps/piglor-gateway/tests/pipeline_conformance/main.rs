@@ -17,7 +17,9 @@
 //! The suite fails closed: an unknown manifest version or field, a changed
 //! fixture byte, a skipped mandatory case, a missing or unexpected capture,
 //! a diverging value, or evidence whose observation profile differs from the
-//! declared tag is a failure. Community Plugin-host cases are #489.
+//! declared tag is a failure. Community Plugin-host parity (#489) is the
+//! sibling profile `PCH1`, which runs in the `pos-plugin-worker` tests
+//! because only that package can launch the real worker.
 
 pub mod composition;
 pub mod consent_subscriptions;
@@ -44,7 +46,7 @@ use support::TestOk;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/v1/manifest.json");
-const MANIFEST_SHA256: &str = "2c51b6ec1e371d2269e39499b4a7aade344767d7e87af908ae4764fc7fe68409";
+const MANIFEST_SHA256: &str = "fdf209b34c456f02676322ead5bef94dd9d3938814826775621c4b446bc88862";
 
 /// Every runner of profile version 1, by case identifier.
 const RUNNERS: [(&str, Runner); 58] = [
@@ -197,7 +199,7 @@ fn every_mandatory_case_of_profile_v1_passes_through_public_seams() {
         .cases
         .iter()
         .all(|case| case.mandatory && !case.id.is_empty()));
-    assert_eq!(manifest.exclusions.len(), 2);
+    assert_eq!(manifest.exclusions.len(), 1);
 }
 
 // ── Fail-closed harness behaviour ───────────────────────────────────────────

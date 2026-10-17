@@ -9,12 +9,15 @@
 use std::sync::{Arc, Weak};
 
 use pos_core::{
-    Event, EventDraft, EventOriginRecordV1, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1,
-    ForkAppendOperationV1, ForkAppendSourceIdentityV1, ForkClassifierRegistrationV1,
-    ForkClassifierSourceV1, ForkClassifierTableV1, ForkEventAppendRequestV1, ForkEventClassifierV1,
+    CounterfactualBasisV1, CounterfactualDependencyRecordingPortV1,
+    CounterfactualInvalidationCommandV1, CounterfactualInvalidationOutcomeV1,
+    CounterfactualStoreErrorV1, CounterfactualTickOutcomeV1, Event, EventDraft,
+    EventOriginRecordV1, ForkAdmissionRecordInputV1, ForkAdmissionRecordV1, ForkAppendOperationV1,
+    ForkAppendSourceIdentityV1, ForkClassifierRegistrationV1, ForkClassifierSourceV1,
+    ForkClassifierTableV1, ForkEventAppendRequestV1, ForkEventClassifierV1,
     ForkInterventionAdmissionV1, Hash, ImportedForkAdmissionRecordV1,
-    ImportedForkAttributionAdmissionV1, ImportedForkClassifierGraphV1, TimelineId,
-    MAX_FORK_EVENT_REGISTRAR_BYTES_V1,
+    ImportedForkAttributionAdmissionV1, ImportedForkClassifierGraphV1, PipelineDraftBatchV1,
+    TickDependencyRecordV1, TimelineId, MAX_FORK_EVENT_REGISTRAR_BYTES_V1,
 };
 
 use crate::ForkAdmissionAuthoritySessionV1;
@@ -40,6 +43,70 @@ pub enum ForkEventAuthorityErrorV1 {
     /// The adapter cannot determine whether its transaction committed.
     #[error("Fork Event authority storage outcome is indeterminate")]
     StorageIndeterminate,
+}
+
+/// Closed ADR-099 revision 12 provenance rejections of a classified
+/// counterfactual commit or append.
+///
+/// `InvalidRequest` is deliberately overloaded: an imported Fork, a classified
+/// call on an unclassified Fork, a permit for a source that is not
+/// host-internal, and a draft carrying a `WallTime` override are all host
+/// programming errors with one remedy, so they share one code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ClassifiedProvenanceErrorV1 {
+    /// The host request cannot be served by the classified counterfactual path.
+    #[error("invalid classified counterfactual request")]
+    InvalidRequest,
+    /// The live session or the host-internal permit is unavailable.
+    #[error("classified counterfactual authority is unauthenticated")]
+    Unauthenticated,
+    /// The immutable FAR1/classifier/provenance graph is incomplete or unequal.
+    #[error("classified counterfactual authority is corrupt")]
+    CorruptAuthority,
+}
+
+/// Closed outcomes of a classified counterfactual commit or append.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ClassifiedCounterfactualErrorV1 {
+    /// A storage, record, or fence error of the counterfactual write path.
+    /// `OutcomeUnknown` leaves the commit in doubt.
+    #[error("classified counterfactual storage failed")]
+    Store(#[source] CounterfactualStoreErrorV1),
+    /// The ADR-099 provenance of the classified Events was rejected.
+    #[error("classified counterfactual provenance was rejected")]
+    Provenance(#[source] ClassifiedProvenanceErrorV1),
+}
+
+impl From<CounterfactualStoreErrorV1> for ClassifiedCounterfactualErrorV1 {
+    fn from(error: CounterfactualStoreErrorV1) -> Self {
+        Self::Store(error)
+    }
+}
+
+/// The total ADR-099 revision 12 mapping of a classified-append authority
+/// error. `ClassifierRejected` and `Conflict` cannot follow a host-internal
+/// source and a fresh operation, so they can only mean corrupt authority; an
+/// indeterminate step inside the counterfactual transaction is a known
+/// rollback.
+impl From<ForkEventAuthorityErrorV1> for ClassifiedCounterfactualErrorV1 {
+    fn from(error: ForkEventAuthorityErrorV1) -> Self {
+        match error {
+            ForkEventAuthorityErrorV1::InvalidRequest => {
+                Self::Provenance(ClassifiedProvenanceErrorV1::InvalidRequest)
+            }
+            ForkEventAuthorityErrorV1::Unauthenticated => {
+                Self::Provenance(ClassifiedProvenanceErrorV1::Unauthenticated)
+            }
+            ForkEventAuthorityErrorV1::ClassifierRejected
+            | ForkEventAuthorityErrorV1::Conflict
+            | ForkEventAuthorityErrorV1::CorruptAuthority => {
+                Self::Provenance(ClassifiedProvenanceErrorV1::CorruptAuthority)
+            }
+            ForkEventAuthorityErrorV1::StorageIndeterminate => {
+                Self::Store(CounterfactualStoreErrorV1::StorageFailure)
+            }
+        }
+    }
 }
 
 /// Committed classifier-registration receipt.
@@ -523,6 +590,130 @@ pub trait ForkEventProvenanceAuthorityPortV1 {
     >;
 }
 
+/// One transaction's classified append authority, lent by the host.
+///
+/// It borrows the live ADR-106 session and exactly one host-internal append
+/// permit for one classified counterfactual commit or append. It is neither
+/// cloneable nor serializable, and holding it proves nothing: the store
+/// decides at commit time whether the session and the permit are live.
+pub struct ClassifiedTickAuthorityV1<'a> {
+    session: &'a ForkAdmissionAuthoritySessionV1,
+    permit: &'a ForkAppendSourcePermitV1,
+}
+
+impl<'a> ClassifiedTickAuthorityV1<'a> {
+    /// Lend `session` and `permit` for one classified counterfactual call.
+    #[must_use]
+    pub const fn new(
+        session: &'a ForkAdmissionAuthoritySessionV1,
+        permit: &'a ForkAppendSourcePermitV1,
+    ) -> Self {
+        Self { session, permit }
+    }
+
+    /// The lent session.
+    #[must_use]
+    pub const fn session(&self) -> &'a ForkAdmissionAuthoritySessionV1 {
+        self.session
+    }
+
+    /// The lent permit.
+    #[must_use]
+    pub const fn permit(&self) -> &'a ForkAppendSourcePermitV1 {
+        self.permit
+    }
+}
+
+/// ADR-099 revision 12 counterfactual commit and append on classified Forks.
+///
+/// The classified analogues of the two recording write methods: each appends
+/// every draft as one host-internal `(0,0)` classified Event with exactly one
+/// `EOR1` and one `FOP1` and no `FIA1`, atomically with the generation or the
+/// later Tick and its dependency record, under the session and the one
+/// host-internal permit of a [`ClassifiedTickAuthorityV1`]. The `FOP1`
+/// operation ID of draft `i` is
+/// `BLAKE3("pigloros/counterfactual-tick-operation-index/v1" ||
+/// operation_base || u32be(i))`. Generic Forks keep the recording methods,
+/// and each Fork kind has exactly one write path.
+///
+/// # Adapter obligations
+///
+/// - **Check order.** Run the checks once per transaction, in this order, and
+///   write nothing before the last one passes:
+///   1. adapter integer bounds of the generation and Ticks (`SQLite` only),
+///      before any fence;
+///   2. the Fork's erasure write fence, then the transaction scope, then the
+///      live session (`Unauthenticated`), before the Fork is resolved, so a
+///      caller without a live session learns nothing about the Fork;
+///   3. the Fork: a visible counterfactual Fork (`ForkNotFound`) whose `FAR1`
+///      is present and local; an unclassified or imported Fork is
+///      `InvalidRequest`;
+///   4. the record and basis checks of the recording method, in its order
+///      (record before basis for the invalidation, basis before record for a
+///      later Tick);
+///   5. the draft guard: the non-geographic guard, concealed as
+///      `ForkNotFound`, then no draft may carry a `WallTime` override;
+///   6. one authority reread: the permit names this Fork, is live, is scoped
+///      to the Fork's `FAR1`, `FCT1` and registrar, and is host-internal;
+///   7. the derived operation IDs, none of which may already name a `FOP1`;
+///   8. the Events with their `EOR1` and `FOP1`, then the generation or Tick
+///      rows and the dependency record.
+/// - **Atomicity.** Every rejection, including one at a draft after the
+///   first, leaves no Event, `EOR1`, `FOP1`, generation, quarantine, artifact
+///   or dependency row. Only an in-doubt transaction finish is
+///   `OutcomeUnknown`; its recovery is the recording method's (the committed
+///   receipt, or the persisted basis), since the provenance commits in the
+///   same transaction. An adapter without transactions runs every fallible
+///   step before its first mutation.
+/// - **Not idempotent.** Replaying a committed call fails the basis recheck,
+///   and a prior `FOP1` under a derived operation ID is corrupt authority.
+/// - **Unsupported Forks.** A Fork whose `FAR1` was imported (origin code 2)
+///   is unsupported until #447. Until Redmine #645 decides otherwise,
+///   deleting a classified Fork keeps its provenance rows, so a classified
+///   Fork re-created under the same Timeline ID cannot append (pre-existing
+///   ADR-099 behaviour).
+pub trait ClassifiedCounterfactualStorePortV1: CounterfactualDependencyRecordingPortV1 {
+    /// Commit a classified Fork's invalidation and its first Tick with its
+    /// dependency record.
+    ///
+    /// # Errors
+    ///
+    /// `Store(e)` carries every error of the recording invalidation commit;
+    /// `OutcomeUnknown` leaves the commit in doubt, to be resolved through the
+    /// committed receipt. `Provenance(Unauthenticated)` is a session or permit
+    /// that is not live, a permit for another Fork, or one that does not name
+    /// the Fork's durable authority. `Provenance(InvalidRequest)` is an
+    /// unclassified or imported Fork, a permit whose source is not
+    /// host-internal, or a draft carrying a `WallTime` override.
+    /// `Provenance(CorruptAuthority)` is a corrupt authority graph or an
+    /// existing `FOP1` under a derived operation ID.
+    fn commit_classified_counterfactual_invalidation(
+        &mut self,
+        command: &CounterfactualInvalidationCommandV1,
+        record: &TickDependencyRecordV1,
+        authority: &ClassifiedTickAuthorityV1<'_>,
+        operation_base: Hash,
+    ) -> Result<CounterfactualInvalidationOutcomeV1, ClassifiedCounterfactualErrorV1>;
+
+    /// Append one later Tick of a classified Fork with its dependency record.
+    ///
+    /// # Errors
+    ///
+    /// `Store(e)` carries every error of the recording Tick append;
+    /// `OutcomeUnknown` leaves the Tick in doubt, to be resolved through the
+    /// persisted basis. The `Provenance` errors are those of
+    /// [`Self::commit_classified_counterfactual_invalidation`].
+    fn append_classified_counterfactual_tick(
+        &mut self,
+        fork: TimelineId,
+        expected: &CounterfactualBasisV1,
+        drafts: &PipelineDraftBatchV1,
+        record: &TickDependencyRecordV1,
+        authority: &ClassifiedTickAuthorityV1<'_>,
+        operation_base: Hash,
+    ) -> Result<CounterfactualTickOutcomeV1, ClassifiedCounterfactualErrorV1>;
+}
+
 /// Build the canonical request digest input for a classified append.
 ///
 /// # Errors
@@ -546,6 +737,44 @@ pub(crate) fn fork_append_request(
         wall_time_override: draft.wall_time,
     })
     .map_err(|_| ForkEventAuthorityErrorV1::InvalidRequest)
+}
+
+/// ADR-099 revision 12 domain of one classified counterfactual operation ID.
+const COUNTERFACTUAL_TICK_OPERATION_INDEX_DOMAIN: &[u8] =
+    b"pigloros/counterfactual-tick-operation-index/v1";
+
+/// Derive the `FOP1` operation IDs of the first `count` drafts of one
+/// classified counterfactual batch: `BLAKE3(domain || operation_base ||
+/// u32be(i))` for draft `i`, so the store never needs the plan.
+pub(crate) fn derive_operation_ids(operation_base: Hash, count: usize) -> Vec<Hash> {
+    (0_u32..)
+        .take(count)
+        .map(|index| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(COUNTERFACTUAL_TICK_OPERATION_INDEX_DOMAIN);
+            hasher.update(operation_base.as_bytes());
+            hasher.update(&index.to_be_bytes());
+            Hash::from_bytes(*hasher.finalize().as_bytes())
+        })
+        .collect()
+}
+
+/// A classified counterfactual Event is stamped by the store clock, so no
+/// draft of its batch may carry a `WallTime` override.
+pub(crate) fn without_wall_time_override(
+    drafts: &PipelineDraftBatchV1,
+) -> Result<(), ClassifiedCounterfactualErrorV1> {
+    if drafts
+        .drafts()
+        .iter()
+        .any(|draft| draft.wall_time.is_some())
+    {
+        Err(ClassifiedCounterfactualErrorV1::Provenance(
+            ClassifiedProvenanceErrorV1::InvalidRequest,
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 /// The two authority validators of ADR-105 r6 R6.9.
@@ -4775,5 +5004,133 @@ mod code_two_barrier_tests {
             forged_barrier(&mut SqliteStore::open_in_memory()?, shape)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod classified_counterfactual_tests {
+    //! Unit vectors for the ADR-099 revision 12 classified counterfactual
+    //! error mapping and operation IDs.
+
+    use pos_core::CounterfactualStoreErrorV1;
+    #[cfg(feature = "sqlite")]
+    use pos_core::Hash;
+
+    use super::{
+        ClassifiedCounterfactualErrorV1 as Classified, ClassifiedProvenanceErrorV1 as Provenance,
+        ForkEventAuthorityErrorV1 as Authority,
+    };
+
+    #[test]
+    fn every_authority_error_maps_onto_one_closed_classified_error() {
+        let cases = [
+            (
+                Authority::InvalidRequest,
+                Classified::Provenance(Provenance::InvalidRequest),
+            ),
+            (
+                Authority::Unauthenticated,
+                Classified::Provenance(Provenance::Unauthenticated),
+            ),
+            (
+                Authority::ClassifierRejected,
+                Classified::Provenance(Provenance::CorruptAuthority),
+            ),
+            (
+                Authority::Conflict,
+                Classified::Provenance(Provenance::CorruptAuthority),
+            ),
+            (
+                Authority::CorruptAuthority,
+                Classified::Provenance(Provenance::CorruptAuthority),
+            ),
+            (
+                Authority::StorageIndeterminate,
+                Classified::Store(CounterfactualStoreErrorV1::StorageFailure),
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(Classified::from(error), expected, "{error:?}");
+        }
+        for error in [
+            CounterfactualStoreErrorV1::OutcomeUnknown,
+            CounterfactualStoreErrorV1::ForkNotFound,
+        ] {
+            assert_eq!(Classified::from(error), Classified::Store(error));
+        }
+    }
+
+    #[test]
+    fn classified_errors_name_their_kind_and_keep_their_source() {
+        let store = Classified::Store(CounterfactualStoreErrorV1::StorageFailure);
+        assert_eq!(
+            store.to_string(),
+            "classified counterfactual storage failed"
+        );
+        let provenance = Classified::Provenance(Provenance::Unauthenticated);
+        assert_eq!(
+            provenance.to_string(),
+            "classified counterfactual provenance was rejected"
+        );
+        for (error, text) in [
+            (
+                Provenance::InvalidRequest,
+                "invalid classified counterfactual request",
+            ),
+            (
+                Provenance::Unauthenticated,
+                "classified counterfactual authority is unauthenticated",
+            ),
+            (
+                Provenance::CorruptAuthority,
+                "classified counterfactual authority is corrupt",
+            ),
+        ] {
+            assert_eq!(error.to_string(), text);
+        }
+        let sources = [store, provenance]
+            .map(|error| std::error::Error::source(&error).map(ToString::to_string));
+        assert_eq!(
+            sources,
+            [
+                Some(CounterfactualStoreErrorV1::StorageFailure.to_string()),
+                Some(Provenance::Unauthenticated.to_string()),
+            ]
+        );
+    }
+
+    fn hex(hash: Hash) -> String {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        hash.as_bytes()
+            .iter()
+            .flat_map(|byte| {
+                [
+                    char::from(DIGITS[usize::from(byte >> 4)]),
+                    char::from(DIGITS[usize::from(byte & 15)]),
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn operation_ids_hash_the_domain_the_base_and_the_big_endian_index() {
+        let base = Hash::from_bytes([0x42; 32]);
+        let derived = super::derive_operation_ids(base, 2);
+        // BLAKE3("pigloros/counterfactual-tick-operation-index/v1" || base ||
+        // u32be(i)), computed independently with `b3sum`.
+        let expected = [
+            "9a6b126ea7ded0da216bfca981e35a61827315591a0b0fae4b0b103c69249442",
+            "408e2f29760049c4086978ba27ea561773101f89ceeb5e6004c2bac61b85c618",
+        ];
+        assert_eq!(derived.into_iter().map(hex).collect::<Vec<_>>(), expected);
+        // A prefix of a longer batch is the shorter batch, and another base
+        // derives other IDs.
+        let longer = super::derive_operation_ids(base, 3);
+        let shorter = super::derive_operation_ids(base, 2);
+        assert_eq!(longer.get(..2), Some(shorter.as_slice()));
+        let other = super::derive_operation_ids(Hash::from_bytes([0x43; 32]), 1);
+        assert_ne!(other.first(), longer.first());
+        assert!(super::derive_operation_ids(base, 0).is_empty());
     }
 }

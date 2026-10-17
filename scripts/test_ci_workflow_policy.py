@@ -21,13 +21,26 @@ WORKFLOW_PATHS = (
 )
 RUST_CACHE_ACTION = "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16"
 TRUSTED_MAIN_SAVE_IF = "${{ github.ref == 'refs/heads/main' }}"
+# Workflows that run on main (push or schedule) own main-written caches. The
+# pull-request-only mutation and sim1 proof-risk workflows keep PR-scoped keys.
+MAIN_WRITER_WORKFLOW_PATHS = (
+    CI_WORKFLOW_PATH,
+    ROOT / ".github" / "workflows" / "fuzz.yml",
+    ROOT / ".github" / "workflows" / "memory-store-benchmark.yml",
+    ROOT / ".github" / "workflows" / "thread-sanitizer.yml",
+)
+TRUSTED_MAIN_DOCKER_CACHE_TO = (
+    "${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}"
+)
 CORE_CACHE_KEYS = {
     "feature-matrix": "feature-matrix",
     "test": "test",
+    "test-shard": "test-nextest",
     "clippy": "clippy",
     "coverage": "coverage",
 }
-CORE_JOB_NAMES = ("fmt", "feature-matrix", "test", "clippy", "coverage")
+CORE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shard", "clippy", "coverage")
+CORE_GATE_JOB_NAMES = ("fmt", "feature-matrix", "test", "test-shards", "clippy", "coverage")
 FEATURE_MATRIX_STEPS = (
     {
         "name": "cargo check (no default features)",
@@ -53,12 +66,11 @@ FEATURE_MATRIX_STEPS = (
         "run": "bash scripts/check-adapter-graph.sh",
     },
 )
-WORKSPACE_TEST_STEP = {
-    "name": "cargo test (all features, no ignored skip)",
+WORKSPACE_DOCTEST_STEP = {
+    "name": "cargo test doctests (all features, ignored included)",
     "run": "set -euo pipefail\n"
-    "cargo test --workspace --all-features --locked -- --include-ignored "
-    "2>&1 | tee /tmp/cargo-test.log\n"
-    "bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-test.log\n",
+    "cargo test --workspace --all-features --locked --doc -- --include-ignored "
+    "2>&1 | tee /tmp/cargo-doctest.log\n",
 }
 MAIN_PUSH_TRIGGER = {"branches": ["main"]}
 PREFLIGHT_GATE_IF = "${{ always() }}"
@@ -206,6 +218,75 @@ def assert_core_rust_cache_contract(workflow: dict) -> None:
             raise AssertionError(f"{job_name} cache must remain reachable on pull requests")
 
 
+TEST_SHARDS_NEEDS = ["test-shard"]
+TEST_SHARDS_IF = "${{ !cancelled() && needs.test-shard.result == 'success' }}"
+TEST_SHARDS_CORE_CHECK = 'test "${TEST_SHARDS_RESULT}" = "${expected}"'
+TEST_SHARD_COUNT = 3
+
+
+def step_runs(job: dict) -> str:
+    return "\n".join(str(step.get("run", "")) for step in job.get("steps", []))
+
+
+def assert_test_shards_gate(workflow: dict) -> None:
+    """Require the shard aggregate to run only on all-shard success and block core-gate."""
+    jobs = workflow["jobs"]
+    aggregate = jobs.get("test-shards")
+    if not isinstance(aggregate, dict):
+        raise AssertionError("ci.yml must define the test-shards aggregate")
+    if aggregate.get("needs") != TEST_SHARDS_NEEDS:
+        raise AssertionError("test-shards must wait for every test shard")
+    if aggregate.get("if") != TEST_SHARDS_IF:
+        raise AssertionError("test-shards must run only after every shard succeeded")
+    shard = jobs.get("test-shard", {})
+    strategy = shard.get("strategy", {})
+    expected = list(range(1, TEST_SHARD_COUNT + 1))
+    if strategy.get("matrix", {}).get("shard") != expected:
+        raise AssertionError(f"test-shard matrix must be shards {expected}")
+    if strategy.get("fail-fast") is not False:
+        raise AssertionError("test-shard must not cancel sibling shards on failure")
+    count = str(TEST_SHARD_COUNT)
+    shard_runs = step_runs(shard)
+    aggregate_runs = step_runs(aggregate)
+    for fragment, runs in (
+        (f'--partition "slice:${{SHARD}}/{count}"', shard_runs),
+        (f"nextest partition: slice:%s/{count}", shard_runs),
+        (f"for shard in {' '.join(map(str, expected))}; do", aggregate_runs),
+        (f"slice:${{shard}}/{count}", aggregate_runs),
+        (f"--partitioned={count}", aggregate_runs),
+    ):
+        if fragment not in runs:
+            raise AssertionError(f"shard count must agree everywhere: missing {fragment}")
+    core = jobs["core-gate"]
+    if "test-shards" not in core.get("needs", []):
+        raise AssertionError("core-gate must wait for test-shards")
+    steps = core.get("steps", [])
+    if not any(
+        step.get("env", {}).get("TEST_SHARDS_RESULT") == "${{ needs.test-shards.result }}"
+        and TEST_SHARDS_CORE_CHECK in step.get("run", "")
+        for step in steps
+    ):
+        raise AssertionError("core-gate must require the test-shards result")
+
+
+def assert_pull_requests_never_write_caches(workflow: dict) -> None:
+    """Keep every cache write on main so pull requests cannot evict main's caches.
+
+    The repository cache budget is shared; per-PR writes previously pushed it
+    past the limit and evicted the trusted main caches every PR restores.
+    """
+    for job_name, job in workflow["jobs"].items():
+        for step in job.get("steps", []):
+            uses = step.get("uses", "") if isinstance(step, dict) else ""
+            if uses.startswith("Swatinem/rust-cache@"):
+                if step.get("with", {}).get("save-if") != TRUSTED_MAIN_SAVE_IF:
+                    raise AssertionError(f"{job_name} Rust cache must save only from main")
+            if uses.startswith("docker/build-push-action@"):
+                cache_to = step.get("with", {}).get("cache-to")
+                if cache_to is not None and cache_to != TRUSTED_MAIN_DOCKER_CACHE_TO:
+                    raise AssertionError(f"{job_name} Docker cache must save only from main")
+
+
 def excluded(path: str, patterns: list[str]) -> bool:
     return any(
         fnmatch.fnmatchcase(path, pattern[1:])
@@ -221,7 +302,7 @@ def assert_parallel_validation_contract(workflow: dict) -> None:
     jobs = workflow["jobs"]
     for owner, required in (
         ("feature-matrix", FEATURE_MATRIX_STEPS),
-        ("test", (WORKSPACE_TEST_STEP,)),
+        ("test", (WORKSPACE_DOCTEST_STEP,)),
     ):
         job = jobs[owner]
         if job.get("timeout-minutes") != 30 or "continue-on-error" in job:
@@ -237,14 +318,14 @@ def assert_parallel_validation_contract(workflow: dict) -> None:
             if occurrences != [(owner, expected)]:
                 raise AssertionError(f"{owner} must run the exact required step once")
     gate = jobs["core-gate"]
-    if gate.get("needs") != ["ci_change_scope", "preflight-gate", *CORE_JOB_NAMES]:
+    if gate.get("needs") != ["ci_change_scope", "preflight-gate", *CORE_GATE_JOB_NAMES]:
         raise AssertionError("core-gate must require every parallel core job")
     if gate.get("if") != "${{ always() }}" or "continue-on-error" in gate:
         raise AssertionError("core-gate must remain unconditional and blocking")
     step = gate["steps"][0]
     if "if" in step or "continue-on-error" in step:
         raise AssertionError("core-gate result check must remain blocking")
-    for name in CORE_JOB_NAMES:
+    for name in CORE_GATE_JOB_NAMES:
         variable = name.upper().replace("-", "_") + "_RESULT"
         if step["env"].get(variable) != "${{ needs." + name + ".result }}":
             raise AssertionError("core-gate must read every actual job result")
@@ -348,7 +429,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         workflow = load_workflow(CI_WORKFLOW_PATH)
         for owner, required in (
             ("feature-matrix", FEATURE_MATRIX_STEPS),
-            ("test", (WORKSPACE_TEST_STEP,)),
+            ("test", (WORKSPACE_DOCTEST_STEP,)),
         ):
             for expected in required:
                 for change in ("remove", "if", "continue-on-error", "run"):
@@ -387,7 +468,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         run = workflow["jobs"]["core-gate"]["steps"][0]["run"]
         results = {
             name.upper().replace("-", "_") + "_RESULT": "success"
-            for name in CORE_JOB_NAMES
+            for name in CORE_GATE_JOB_NAMES
         }
         environment = dict(
             results, SCOPE_RESULT="success", PREFLIGHT_RESULT="success", RUST_SCOPE="true"
@@ -535,6 +616,76 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         cache_step["if"] = "${{ github.event_name == 'push' }}"
         with self.assertRaisesRegex(AssertionError, "reachable on pull requests"):
             assert_core_rust_cache_contract(mutated)
+
+    def test_test_shards_gate_blocks_core_gate(self) -> None:
+        assert_test_shards_gate(load_workflow(CI_WORKFLOW_PATH))
+
+    def test_test_shards_gate_rejects_mutations(self) -> None:
+        mutations = {
+            "core-gate must wait for test-shards": lambda w: w["jobs"]["core-gate"][
+                "needs"
+            ].remove("test-shards"),
+            "core-gate must require the test-shards result": lambda w: w["jobs"][
+                "core-gate"
+            ]["steps"][0].update(
+                run=w["jobs"]["core-gate"]["steps"][0]["run"].replace(
+                    TEST_SHARDS_CORE_CHECK, ""
+                )
+            ),
+            "only after every shard succeeded": lambda w: w["jobs"]["test-shards"].update(
+                {"if": "${{ always() }}"}
+            ),
+            "wait for every test shard": lambda w: w["jobs"]["test-shards"].update(
+                needs=["test"]
+            ),
+            "must define the test-shards aggregate": lambda w: w["jobs"].pop("test-shards"),
+            "matrix must be shards": lambda w: w["jobs"]["test-shard"]["strategy"].update(
+                matrix={"shard": [1, 2]}
+            ),
+            "must not cancel sibling shards": lambda w: w["jobs"]["test-shard"][
+                "strategy"
+            ].update({"fail-fast": True}),
+            "shard count must agree everywhere": lambda w: w["jobs"]["test-shards"][
+                "steps"
+            ][-1].update(
+                run=w["jobs"]["test-shards"]["steps"][-1]["run"].replace(
+                    "--partitioned=3", "--partitioned=2"
+                )
+            ),
+        }
+        for message, mutate in mutations.items():
+            with self.subTest(message=message):
+                mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+                mutate(mutated)
+                with self.assertRaisesRegex(AssertionError, message):
+                    assert_test_shards_gate(mutated)
+
+    def test_pull_requests_never_write_caches(self) -> None:
+        for workflow_path in MAIN_WRITER_WORKFLOW_PATHS:
+            with self.subTest(workflow=workflow_path.name):
+                assert_pull_requests_never_write_caches(load_workflow(workflow_path))
+
+    def test_cache_write_contract_rejects_pull_request_rust_cache_write(self) -> None:
+        mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+        cache_step = next(
+            step
+            for step in mutated["jobs"]["rustdoc"]["steps"]
+            if str(step.get("uses", "")).startswith("Swatinem/rust-cache@")
+        )
+        del cache_step["with"]["save-if"]
+        with self.assertRaisesRegex(AssertionError, "rustdoc Rust cache must save only from main"):
+            assert_pull_requests_never_write_caches(mutated)
+
+    def test_cache_write_contract_rejects_pull_request_docker_cache_write(self) -> None:
+        mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+        build_step = next(
+            step
+            for step in mutated["jobs"]["docker-build"]["steps"]
+            if str(step.get("uses", "")).startswith("docker/build-push-action@")
+        )
+        build_step["with"]["cache-to"] = "type=gha,mode=max"
+        with self.assertRaisesRegex(AssertionError, "docker-build Docker cache must save only from main"):
+            assert_pull_requests_never_write_caches(mutated)
 
     def test_conformance_materialization_honors_rust_scope(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
