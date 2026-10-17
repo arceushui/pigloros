@@ -218,6 +218,69 @@ class AsanCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(remove_test_threads)
 
+    def test_archive_build_rejects_changed_job_metadata(self) -> None:
+        changes = {
+            "needs": ["ci_change_scope"],
+            "if": "${{ always() }}",
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": 120,
+        }
+        for key, value in changes.items():
+            with self.subTest(key=key):
+                self.assert_rejected(
+                    lambda workflow, key=key, value=value: workflow["jobs"][
+                        "asan-build"
+                    ].update({key: value})
+                )
+
+    def test_archive_build_rejects_changed_setup(self) -> None:
+        def cache_step(workflow: dict) -> dict:
+            return next(
+                step
+                for step in workflow["jobs"]["asan-build"]["steps"]
+                if "rust-cache" in step.get("uses", "")
+            )
+
+        def nextest_step(workflow: dict) -> dict:
+            return next(
+                step
+                for step in workflow["jobs"]["asan-build"]["steps"]
+                if "install-action" in step.get("uses", "")
+            )
+
+        mutations = {
+            "cache key": lambda w: cache_step(w)["with"].update({"shared-key": "other"}),
+            "cache saved on pull requests": lambda w: cache_step(w)["with"].update(
+                {"save-if": True}
+            ),
+            "floating nextest": lambda w: nextest_step(w)["with"].update(
+                {"tool": "cargo-nextest"}
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                self.assert_rejected(mutate)
+
+    def test_shards_reject_compilation_setup(self) -> None:
+        def add_rust_cache(workflow: dict) -> None:
+            workflow["jobs"]["asan"]["steps"].insert(
+                3,
+                {
+                    "uses": "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16",
+                    "with": {"shared-key": "asan-nightly-2026-07-01"},
+                },
+            )
+
+        def add_rust_src(workflow: dict) -> None:
+            workflow["jobs"]["asan"]["steps"][2]["with"]["components"] = "rust-src"
+
+        def move_download(workflow: dict) -> None:
+            workflow["jobs"]["asan"]["steps"][5]["with"]["path"] = "asan-archive"
+
+        for mutate in (add_rust_cache, add_rust_src, move_download):
+            with self.subTest(mutation=mutate.__name__):
+                self.assert_rejected(mutate)
+
     def test_requires_archive_build_job(self) -> None:
         self.assert_rejected(lambda workflow: workflow["jobs"].pop("asan-build"))
 
