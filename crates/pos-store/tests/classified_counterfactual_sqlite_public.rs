@@ -163,7 +163,6 @@ impl World {
         snapshot(&self.path, self.fork)
     }
 
-
     fn host_permit(&self) -> Fallible<ForkAppendSourcePermitV1> {
         self.authority.host_permit(&self.store, self.fork)
     }

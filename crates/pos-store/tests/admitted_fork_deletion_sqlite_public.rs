@@ -170,9 +170,10 @@ fn append_classified(
     value: u8,
 ) -> Result<Seq, AuthorityError> {
     let session = &world.authority.session;
-    let appended = world
-        .store
-        .append_classified(session, permit, operation, draft(value, TICK_KIND));
+    let appended =
+        world
+            .store
+            .append_classified(session, permit, operation, draft(value, TICK_KIND));
     appended.map(|receipt| receipt.event.seq)
 }
 
@@ -362,9 +363,10 @@ fn a_tampered_next_operation_is_refused_on_both_classified_paths() -> Fallible<(
     let fork = world.fork;
     let permit = host_permit(&world)?;
     let session = &world.authority.session;
-    let first = world
-        .store
-        .append_classified(session, &permit, hash(0x71), draft(30, TICK_KIND))?;
+    let first =
+        world
+            .store
+            .append_classified(session, &permit, hash(0x71), draft(30, TICK_KIND))?;
     // A fresh operation and Event ID re-encode new FOP1 bytes that agree
     // with their columns, so only `UNIQUE (child_id, local_seq)` can refuse.
     let mut input = first.operation.input().clone();

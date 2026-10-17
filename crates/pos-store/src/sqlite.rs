@@ -22394,23 +22394,23 @@ mod tests {
         let mut store = new_store();
         let timeline = store.create_timeline("admitted-lookup-failure")?.id();
         let before = database_rows(&store.conn)?;
-        store.conn.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
-            if matches!(
-                context.action,
-                rusqlite::hooks::AuthAction::Read { table_name, .. }
-                    if table_name == "fork_admissions"
-            ) {
-                rusqlite::hooks::Authorization::Deny
-            } else {
-                rusqlite::hooks::Authorization::Allow
-            }
-        }))?;
-        let refused = store.delete_timeline(timeline);
         store
             .conn
-            .authorizer(
-                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
-            )?;
+            .authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Read { table_name, .. }
+                        if table_name == "fork_admissions"
+                ) {
+                    rusqlite::hooks::Authorization::Deny
+                } else {
+                    rusqlite::hooks::Authorization::Allow
+                }
+            }))?;
+        let refused = store.delete_timeline(timeline);
+        store.conn.authorizer(
+            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+        )?;
         assert!(matches!(refused, Err(CoreError::Storage(_))), "{refused:?}");
         assert!(store.conn.is_autocommit());
         assert_eq!(database_rows(&store.conn)?, before);
