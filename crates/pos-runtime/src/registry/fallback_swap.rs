@@ -225,7 +225,9 @@ impl PluginRegistry {
         &self,
         prepared: &PreparedRegistrationV1,
     ) -> Result<usize, FallbackSwapRefusalV1> {
-        let primary = prepared.replacing.ok_or(FallbackSwapRefusalV1::NotReplacing)?;
+        let primary = prepared
+            .replacing
+            .ok_or(FallbackSwapRefusalV1::NotReplacing)?;
         self.ensure_fresh(prepared)?;
         let (index, _, entry) = self
             .plugins
@@ -293,13 +295,8 @@ impl PluginRegistry {
         };
         let entry = self.plugins.get_mut(&plugin_id).ok_or_else(unknown)?;
         let poisoned = &mut self.poisoned_driver;
-        let restored = restore_entry_state(
-            entry,
-            poisoned,
-            timeline_segments,
-            &visible,
-            restored_head,
-        );
+        let restored =
+            restore_entry_state(entry, poisoned, timeline_segments, &visible, restored_head);
         self.restored_binding = None;
         restored
     }

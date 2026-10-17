@@ -311,7 +311,11 @@ fn check_output_declarations(
     owned_event_types: &[Kind],
 ) -> Result<(), RuntimeError> {
     let declarations = &output_policy.fields().output_declarations;
-    let owns = |event_type: &str| owned_event_types.iter().any(|kind| kind.as_str() == event_type);
+    let owns = |event_type: &str| {
+        owned_event_types
+            .iter()
+            .any(|kind| kind.as_str() == event_type)
+    };
     if let Some(declaration) = declarations
         .iter()
         .find(|declaration| !owns(declaration.event_type()))
