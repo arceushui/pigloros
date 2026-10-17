@@ -668,10 +668,12 @@ impl<'a> ClassifiedTickAuthorityV1<'a> {
 /// - **Not idempotent.** Replaying a committed call fails the basis recheck,
 ///   and a prior `FOP1` under a derived operation ID is corrupt authority.
 /// - **Unsupported Forks.** A Fork whose `FAR1` was imported (origin code 2)
-///   is unsupported until #447. Until Redmine #645 decides otherwise,
-///   deleting a classified Fork keeps its provenance rows, so a classified
-///   Fork re-created under the same Timeline ID cannot append (pre-existing
-///   ADR-099 behaviour).
+///   is unsupported until #447.
+/// - **No deletion.** An admitted Fork is never deleted (ADR-099 revision
+///   13): the generic `delete_timeline` refuses it with
+///   `AdmittedForkNotDeletable` before any mutation. Its `FOP1` rows therefore
+///   never outlive it and its Timeline ID is never re-created, so a Seq or
+///   operation ID collision on this path is corrupt state.
 pub trait ClassifiedCounterfactualStorePortV1: CounterfactualDependencyRecordingPortV1 {
     /// Commit a classified Fork's invalidation and its first Tick with its
     /// dependency record.
@@ -1030,12 +1032,16 @@ mod tests {
 
     use super::*;
     #[cfg(feature = "sqlite")]
+    use crate::classified_fork_fixture::database_rows_at;
+    #[cfg(feature = "sqlite")]
     use crate::sqlite::SqliteStore;
     use crate::{
         memory::MemoryStore, ForkAdmissionAuthorityBootstrapPortV1, ForkAdmissionAuthorityPortV1,
         ForkManifestPublicationErrorV1, ForkManifestPublicationPortV1,
         ForkManifestPublicationRequestV1,
     };
+    #[cfg(feature = "sqlite")]
+    use pos_core::CoreError;
 
     fn encode(value: &Value) -> Result<Vec<u8>, Box<dyn Error>> {
         let mut bytes = Vec::new();
@@ -2196,6 +2202,123 @@ mod tests {
                 false
             )
         );
+        Ok(())
+    }
+
+    /// ADR-099 revision 13: the generic delete refuses a published admitted
+    /// Fork, changes no row, and leaves its sidecar readable and the Fork
+    /// appendable.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_published_admitted_fork_is_not_deletable() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("publication-delete.sqlite");
+        let mut store = sqlite_store_at(&path)?;
+        let lifecycle = create_lifecycle(&mut store)?;
+        let fixture = publication_fixture(&mut store, &lifecycle, 91, 0)?;
+        commit_fork_publication(&mut store, &fixture, fixture.request.clone())?;
+        let child = lifecycle.fork.child_id;
+        let before = database_rows_at(&path)?;
+        let refused = store.delete_timeline(child);
+        assert!(
+            matches!(refused, Err(CoreError::AdmittedForkNotDeletable(id)) if id == child),
+            "{refused:?}"
+        );
+        assert_eq!(database_rows_at(&path)?, before);
+        let committed = store.read_committed(child, 0)?;
+        assert_eq!(committed.receipt.final_logical_head, 0);
+        let permit = store.issue_append_source_permit(
+            &lifecycle.issuer,
+            &lifecycle.session,
+            child,
+            &lifecycle.source,
+            ForkAppendSourceIdentityV1::HostInternal,
+        )?;
+        let operation = Hash::from_bytes([97; 32]);
+        let event = draft(b"after-refusal");
+        let appended = store.append_classified(&lifecycle.session, &permit, operation, event)?;
+        assert_eq!(appended.operation.input().child_timeline_id, child);
+        assert_eq!(appended.event.seq.as_u64(), 1);
+        assert_eq!(store.read_fork_event_suffix(child, 1)?.len(), 1);
+        Ok(())
+    }
+
+    /// One refused generic call, with the admitted Fork's id masked.
+    #[cfg(feature = "sqlite")]
+    type MaskedErrorV1 = (std::mem::Discriminant<pos_core::CoreError>, String);
+
+    /// What both adapters must agree on after refusing to delete a published
+    /// admitted Fork (ADR-099 revision 13).
+    #[cfg(feature = "sqlite")]
+    #[derive(Debug, PartialEq, Eq)]
+    struct RefusedDeletionV1 {
+        /// The refused delete.
+        deleted: MaskedErrorV1,
+        /// The refused re-creation of the Fork's id from its own metadata.
+        recreated: MaskedErrorV1,
+        /// The committed sidecar's final logical head, read after both.
+        head: u64,
+        /// The Seq of a fresh host-internal classified append after both.
+        appended: u64,
+        /// The validated suffix length from logical Seq 1 after the append.
+        suffix: usize,
+    }
+
+    /// Publish an empty admitted Fork, refuse its delete and its re-creation,
+    /// read its sidecar back unchanged, and append to it once more.
+    #[cfg(feature = "sqlite")]
+    fn refused_published_deletion<S: PublicationTestStoreV1>(
+        store: &mut S,
+    ) -> Result<RefusedDeletionV1, Box<dyn Error>> {
+        let lifecycle = create_lifecycle(store)?;
+        let fixture = publication_fixture(store, &lifecycle, 91, 0)?;
+        let receipt = commit_fork_publication(store, &fixture, fixture.request.clone())?;
+        let child = lifecycle.fork.child_id;
+        let meta = store.get_timeline(child)?.ok_or("the Fork exists")?.meta;
+        let deleted = store.delete_timeline(child).err();
+        let deleted = deleted.ok_or("the delete must fail")?;
+        let recreated = store.create_timeline_with_meta(meta).err();
+        let recreated = recreated.ok_or("the re-creation must fail")?;
+        let committed = store.read_committed(child, 0)?;
+        assert_eq!(committed.receipt, receipt);
+        let permit = store.issue_append_source_permit(
+            &lifecycle.issuer,
+            &lifecycle.session,
+            child,
+            &lifecycle.source,
+            ForkAppendSourceIdentityV1::HostInternal,
+        )?;
+        let operation = Hash::from_bytes([97; 32]);
+        let event = draft(b"after-refusal");
+        let appended = store.append_classified(&lifecycle.session, &permit, operation, event)?;
+        assert_eq!(appended.operation.input().child_timeline_id, child);
+        let suffix = store.read_fork_event_suffix(child, 1)?.len();
+        let id = child.to_string();
+        let masked = |error: &pos_core::CoreError| {
+            let text = error.to_string().replace(&id, "<fork>");
+            (std::mem::discriminant(error), text)
+        };
+        Ok(RefusedDeletionV1 {
+            deleted: masked(&deleted),
+            recreated: masked(&recreated),
+            head: committed.receipt.final_logical_head,
+            appended: appended.event.seq.as_u64(),
+            suffix,
+        })
+    }
+
+    /// ADR-099 revision 13, test 2 publication case on both adapters: the
+    /// same refusal, re-creation failure, readable sidecar, and later append.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn adapters_refuse_a_published_fork_delete_alike() -> Result<(), Box<dyn Error>> {
+        let memory = refused_published_deletion(&mut MemoryStore::new())?;
+        let sqlite = refused_published_deletion(&mut SqliteStore::open_in_memory()?)?;
+        assert_eq!(memory, sqlite);
+        assert_eq!(memory.deleted.1, "admitted Fork cannot be deleted: <fork>");
+        let duplicate = "storage error: timeline already exists: <fork>";
+        assert_eq!(memory.recreated.1, duplicate);
+        assert_eq!((memory.head, memory.appended, memory.suffix), (0, 1, 1));
         Ok(())
     }
 
