@@ -6583,28 +6583,27 @@ impl EventStore for SqliteStore {
         })
     }
 
+    /// Deletes a Timeline that has no child Fork and is not an admitted Fork.
+    ///
+    /// # Errors
+    ///
+    /// The `SQLite` adapter checks, in order: the direct-topology guard
+    /// (`ErasureContainmentUnavailable`), geographic concealment, child Forks
+    /// (`Storage`), and ADR-099 revision 13 admission. An admitted Fork, meaning a
+    /// Timeline with a `fork_admissions` row of any origin, is refused with
+    /// `AdmittedForkNotDeletable` inside the `BEGIN IMMEDIATE` transaction before
+    /// any mutation, and no counterfactual purge runs. A missing Timeline returns
+    /// `TimelineNotFound`, even when an orphan admission row names its id. Any
+    /// `SQLite` failure, including a failed admission lookup, returns `Storage`.
     fn delete_timeline(&mut self, id: TimelineId) -> Result<(), CoreError> {
         self.with_direct_topology_mutation(|store| {
             store.ensure_admin_visibility(id).and_then(|()| {
                 let id_str = id.to_string();
-                // Refuse delete while child forks still reference this timeline.
-                let child_count_query = store.conn.query_row(
-                    "SELECT COUNT(*) FROM timelines WHERE parent_id = ?1",
-                    params![id_str],
-                    |row| row.get(0),
-                );
-                let child_count: i64 =
-                    child_count_query.map_err(|error| Self::storage_error(&error))?;
-                if child_count > 0 {
-                    return Err(CoreError::Storage(
-                        "cannot delete timeline that still has forks".to_owned(),
-                    ));
-                }
-
                 let tx = store
                     .conn
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|e| CoreError::Storage(e.to_string()))?;
+                Self::ensure_timeline_deletable(&tx, id)?;
                 tx.execute(
                     "DELETE FROM append_identities
              WHERE event_id IN (SELECT event_id FROM events WHERE timeline_id = ?1)",
@@ -6748,6 +6747,47 @@ impl EventStore for SqliteStore {
 }
 
 impl SqliteStore {
+    /// Refuses deleting a Timeline that still has child Forks or is an admitted Fork.
+    ///
+    /// Both checks run inside the delete's `BEGIN IMMEDIATE` transaction, before
+    /// its first `DELETE`, so a refusal mutates nothing and the dropped transaction
+    /// rolls back. ADR-099 revision 13 keeps an admitted Fork (a Timeline with a
+    /// `fork_admissions` row of any origin) for the store's lifetime. The admitted
+    /// check tests row existence, not decodability, and joins `timelines`, so an
+    /// orphan admission row of a missing Timeline falls through to the caller's
+    /// `TimelineNotFound`. A failed lookup is a storage error, never "not admitted".
+    fn ensure_timeline_deletable(
+        tx: &rusqlite::Transaction<'_>,
+        id: TimelineId,
+    ) -> Result<(), CoreError> {
+        let id_str = id.to_string();
+        let child_count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM timelines WHERE parent_id = ?1",
+                params![id_str],
+                |row| row.get(0),
+            )
+            .map_err(Self::into_storage_error)?;
+        if child_count > 0 {
+            return Err(CoreError::Storage(
+                "cannot delete timeline that still has forks".to_owned(),
+            ));
+        }
+        let admitted: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM fork_admissions \
+                 JOIN timelines ON timelines.id = fork_admissions.child_id \
+                 WHERE fork_admissions.child_id = ?1)",
+                params![id_str],
+                |row| row.get(0),
+            )
+            .map_err(Self::into_storage_error)?;
+        if admitted {
+            return Err(CoreError::AdmittedForkNotDeletable(id));
+        }
+        Ok(())
+    }
+
     /// ADR-099 reserves every admitted Fork's append boundary for its
     /// classifier authority.  Generic callers never obtain a bypass.
     fn ensure_generic_fork_append_is_rejected(
@@ -14550,6 +14590,7 @@ use pos_core::geo_cell_admission::{
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::classified_fork_fixture::database_rows;
     use crate::ErasureRejoinPersistencePortV1;
     use pos_core::{
         event::{CanonicalBytes, EventDraft, Kind},
@@ -22321,6 +22362,59 @@ mod tests {
         let err = store.delete_timeline(tl.id()).test_err();
         drop(store.conn.execute_batch("ROLLBACK"));
         assert!(matches!(err, CoreError::Storage(_)));
+    }
+
+    /// ADR-099 revision 13: an undecodable `FAR1` row still makes its Timeline
+    /// an admitted Fork, and the refusal rolls its transaction back.
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn admitted_refusal_leaves_no_open_transaction() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = new_store();
+        let fork = store.create_timeline("admitted-delete-refusal")?.id();
+        store.conn.execute(
+            "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES (?1, X'00')",
+            params![fork.to_string()],
+        )?;
+        let before = database_rows(&store.conn)?;
+        let refused = store.delete_timeline(fork);
+        assert!(
+            matches!(refused, Err(CoreError::AdmittedForkNotDeletable(id)) if id == fork),
+            "{refused:?}"
+        );
+        assert!(store.conn.is_autocommit());
+        assert_eq!(database_rows(&store.conn)?, before);
+        store.create_timeline("after-admitted-delete-refusal")?;
+        Ok(())
+    }
+
+    /// A failed admission lookup is a storage error, never "not admitted".
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn admitted_lookup_failure_is_a_storage_error() -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = new_store();
+        let timeline = store.create_timeline("admitted-lookup-failure")?.id();
+        let before = database_rows(&store.conn)?;
+        store
+            .conn
+            .authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Read { table_name, .. }
+                        if table_name == "fork_admissions"
+                ) {
+                    rusqlite::hooks::Authorization::Deny
+                } else {
+                    rusqlite::hooks::Authorization::Allow
+                }
+            }))?;
+        let refused = store.delete_timeline(timeline);
+        store.conn.authorizer(
+            None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+        )?;
+        assert!(matches!(refused, Err(CoreError::Storage(_))), "{refused:?}");
+        assert!(store.conn.is_autocommit());
+        assert_eq!(database_rows(&store.conn)?, before);
+        Ok(())
     }
 
     #[test]
