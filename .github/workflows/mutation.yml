@@ -20,7 +20,7 @@ env:
   # https://github.com/rust-lang/rust/issues/161748
   RUSTUP_TOOLCHAIN: nightly-2026-07-01
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
-  # Bound compiler concurrency separately from the four mutation workers.
+  # Each of the four mutation workers owns one compiler job.
   CARGO_BUILD_JOBS: "1"
 
 jobs:
@@ -61,6 +61,10 @@ jobs:
     needs: mutation-changes
     if: needs.mutation-changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
+    # The baseline builds one workspace with three compiler jobs;
+    # mutant workers retain the single-job workflow default above.
+    env:
+      CARGO_BUILD_JOBS: "3"
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
