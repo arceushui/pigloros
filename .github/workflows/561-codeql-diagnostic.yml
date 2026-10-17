@@ -1,0 +1,124 @@
+# Temporary #561 extraction diagnostic, not a required gate or published scan.
+name: 561-codeql-diagnostic
+
+on:
+  push:
+    branches: [redmine/561-codeql-diagnostic]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  generated-bindings:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          ref: f958d197e22e0d48ab05d1cc36159b554a83bfce
+          persist-credentials: false
+      - name: Record exact source and generate the existing guest bindings
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          git rev-parse HEAD | tee artifacts/source-sha.txt
+          test "$(git rev-parse HEAD)" = f958d197e22e0d48ab05d1cc36159b554a83bfce
+          test -z "$(git status --porcelain --untracked-files=no)"
+          # Reuse the canonical install-tools.sh pin, verified before downloading.
+          installer=plugins/community/examples/compatibility-prototype/install-tools.sh
+          url=https://github.com/bytecodealliance/wit-bindgen/releases/download/v0.61.1/wit-bindgen-0.61.1-x86_64-linux.tar.gz
+          digest=1aea51f8379e36e76081c08fcc5faada928c03a6d0965a55132d72c8d966463c
+          grep -F -- "$url" "$installer"
+          grep -F -- "$digest" "$installer"
+          tools_dir="$(mktemp -d "${RUNNER_TEMP}/561-codeql-tools.XXXXXX")"
+          archive="${tools_dir}/wit-bindgen.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            --retry 3 --max-time 120 --output "$archive" "$url"
+          printf '%s  %s\n' "$digest" "$archive" | sha256sum --check --strict -
+          tar --list --gzip --file "$archive" > artifacts/wit-archive-members.txt
+          if grep -E '^/|(^|/)\.\.(/|$)' artifacts/wit-archive-members.txt; then
+            echo 'ERROR: unsafe generator archive path' >&2
+            exit 1
+          fi
+          tar --extract --gzip --file "$archive" --strip-components 1 \
+            --no-same-owner --no-same-permissions --directory "$tools_dir"
+          "$tools_dir/wit-bindgen" --version | tee artifacts/wit-version.txt
+          generated=plugins/community/examples/compatibility-prototype/rust-guest/generated
+          test ! -e "$generated"
+          mkdir -p "$generated"
+          "$tools_dir/wit-bindgen" rust --world community-plugin \
+            --out-dir "$generated" plugins/community/wit
+          test -s "$generated/community_plugin.rs"
+          sha256sum "$generated/community_plugin.rs" | tee artifacts/generated-sha256.txt
+          test -z "$(git diff --name-only HEAD)"
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        id: codeql
+        timeout-minutes: 5
+        with:
+          languages: rust
+          build-mode: none
+          tools: https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.2/codeql-bundle-linux64.tar.zst
+          db-location: ${{ runner.temp }}/561-codeql-databases
+      - name: Assert the diagnostic extractor version
+        timeout-minutes: 1
+        env:
+          CODEQL_VERSION: ${{ steps.codeql.outputs.codeql-version }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$CODEQL_VERSION" | tee artifacts/codeql-version.txt
+          test "$CODEQL_VERSION" = 2.27.2
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        timeout-minutes: 25
+        with:
+          output: artifacts/sarif
+          upload: never
+          upload-database: false
+          category: /diagnostic/561/generated-bindings
+      - name: Preserve and require clean extraction diagnostics
+        timeout-minutes: 3
+        env:
+          CODEQL: ${{ steps.codeql.outputs.codeql-path }}
+        run: |
+          set -euo pipefail
+          results="${RUNNER_TEMP}/561-codeql-databases/rust/results"
+          for query in ExtractionErrors ExtractionWarnings; do
+            mapfile -t reports < <(find "$results" -type f -name "$query.bqrs")
+            test "${#reports[@]}" -eq 1
+            "$CODEQL" bqrs decode --format=csv "${reports[0]}" \
+              --output "artifacts/$query.csv"
+          done
+          python3 - <<'PY'
+          import csv
+          import json
+          from pathlib import Path
+
+          reports = {}
+          for name in ("ExtractionErrors", "ExtractionWarnings"):
+              with Path("artifacts", name + ".csv").open(newline="") as stream:
+                  rows = list(csv.reader(stream))
+              assert rows, "missing diagnostic CSV header"
+              reports[name] = rows[1:]
+          sarif_files = list(Path("artifacts/sarif").glob("*.sarif"))
+          assert sarif_files, "missing SARIF output"
+          alerts = []
+          for path in sarif_files:
+              sarif = json.loads(path.read_text())
+              assert sarif.get("runs"), "empty SARIF run inventory"
+              for run in sarif["runs"]:
+                  alerts.extend(run.get("results", []))
+          print(json.dumps({"diagnostics": reports, "alert_count": len(alerts)}))
+          assert all(not rows for rows in reports.values()), "extraction diagnostics remain"
+          assert not alerts, "security alerts require investigation"
+          PY
+      - name: Preserve evidence even when extraction refuses closure
+        if: ${{ always() }}
+        timeout-minutes: 3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: untrusted-561-codeql-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
