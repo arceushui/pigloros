@@ -357,6 +357,173 @@ mod tests {
         Ok((store, root, child))
     }
 
+    type ReadTranscript = Arc<std::sync::Mutex<Vec<(String, String, bool)>>>;
+
+    fn redact_read(conn: &rusqlite::Connection, ordinal: usize) -> Fallible<ReadTranscript> {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        let transcript = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = Arc::clone(&transcript);
+        conn.authorizer(Some(move |request: AuthContext<'_>| {
+            if let AuthAction::Read {
+                table_name,
+                column_name,
+            } = request.action
+            {
+                let Ok(mut reads) = observed.lock() else {
+                    return Authorization::Deny;
+                };
+                let ignored = reads.len() == ordinal;
+                reads.push((table_name.to_owned(), column_name.to_owned(), ignored));
+                if ignored {
+                    return Authorization::Ignore;
+                }
+            }
+            Authorization::Allow
+        }))?;
+        Ok(transcript)
+    }
+
+    fn assert_reads(
+        transcript: &ReadTranscript,
+        table: &str,
+        columns: &[&str],
+        ignored: usize,
+    ) -> Fallible<()> {
+        let reads = transcript.lock().map_err(|_| "read observer poisoned")?;
+        let actual: Vec<_> = reads
+            .iter()
+            .map(|(table, column, ignored)| (table.as_str(), column.as_str(), *ignored))
+            .collect();
+        let expected: Vec<_> = columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| (table, *column, index == ignored))
+            .collect();
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_where_redaction_refuses_only_the_raw_fetch_and_preserves_debits() -> Fallible<()> {
+        use rusqlite::hooks::{AuthContext, Authorization};
+
+        let (store, root, _) = fixture()?;
+        let interval = store.begin_protected_effect_interval()?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        // Failure: visited ID16 + key26, one shape row. Healthy root:
+        // 42 + metadata51 + candidate8 + ordinary-kind8, four real rows.
+        let limits = ForkReplayReadLimitsV1::new(8, 2, 5, 151, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        // Eleven shape reads, then four projected metadata fields and WHERE id.
+        let observed = redact_read(&store.conn, 15)?;
+        let failed = store.lineage_metadata_and_visibility(
+            root,
+            &mut Vec::new(),
+            &mut LineageReadContextV1::new(&mut budget, 8)?,
+        );
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        assert_reads(
+            &observed,
+            "timelines",
+            &[
+                "id",
+                "id",
+                "parent_id",
+                "fork_seq",
+                "parent_id",
+                "parent_id",
+                "fork_seq",
+                "fork_seq",
+                "head_seq",
+                "head_seq",
+                "id",
+                "id",
+                "parent_id",
+                "fork_seq",
+                "head_seq",
+                "id",
+            ],
+            15,
+        )?;
+        assert_eq!(failed, Err(Error::Read(ReadError::CorruptAuthority)));
+        assert_eq!(budget.remaining_native_bytes(), 109);
+        budget.check_time()?;
+        assert_eq!(
+            store.lineage_metadata_and_visibility(
+                root,
+                &mut Vec::new(),
+                &mut LineageReadContextV1::new(&mut budget, 8)?,
+            )?,
+            Some((ForkReplayLineageNodeV1::new(root, None), Seq::from_u64(1)))
+        );
+        assert_eq!(budget.remaining_native_bytes(), 0);
+        budget.check_time()?;
+        assert!(budget.charge_rows(1).is_err());
+        assert!(budget.check_time().is_err());
+        store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
+        assert!(store.conn.is_autocommit());
+        Ok(())
+    }
+
+    #[test]
+    fn geographic_where_redaction_refuses_only_the_raw_kind_and_preserves_debits() -> Fallible<()> {
+        use rusqlite::hooks::{AuthContext, Authorization};
+
+        let (store, root, _) = fixture()?;
+        let key = root.to_string();
+        let interval = store.begin_protected_effect_interval()?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        // Failure: one candidate row/8 bytes. Healthy: candidate + raw row,
+        // 8 descriptor + 8 ordinary-kind bytes; final EOF charges no row.
+        let limits = ForkReplayReadLimitsV1::new(8, 1, 3, 24, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        // Five candidate reads, raw event_type, then the raw WHERE timeline key.
+        let observed = redact_read(&store.conn, 6)?;
+        let failed =
+            store.lineage_geographic_events(&key, &mut LineageReadContextV1::new(&mut budget, 8)?);
+        store
+            .conn
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+        assert_reads(
+            &observed,
+            "events",
+            &[
+                "seq",
+                "event_type",
+                "event_type",
+                "timeline_id",
+                "seq",
+                "event_type",
+                "timeline_id",
+                "seq",
+            ],
+            6,
+        )?;
+        assert_eq!(failed, Err(Error::Read(ReadError::CorruptAuthority)));
+        assert_eq!(budget.remaining_native_bytes(), 16);
+        budget.check_time()?;
+        assert!(!store
+            .lineage_geographic_events(&key, &mut LineageReadContextV1::new(&mut budget, 8)?,)?);
+        assert_eq!(budget.remaining_native_bytes(), 0);
+        budget.check_time()?;
+        assert!(budget.charge_rows(1).is_err());
+        assert!(budget.check_time().is_err());
+        store.finish_protected_effect_interval(
+            interval,
+            ErasureProtectedEffectDispositionV1::Rollback,
+        )?;
+        assert!(store.conn.is_autocommit());
+        Ok(())
+    }
+
     fn read(
         store: &SqliteStore,
         timeline: TimelineId,
