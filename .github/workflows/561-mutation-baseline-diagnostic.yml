@@ -1,5 +1,5 @@
 # Temporary cold-build resource diagnosis, not a required gate or trusted baseline.
-# The failed PR merge source and full test command stay fixed.
+# Both variants retain the failed PR merge source and full test command.
 name: 561-mutation-baseline-diagnostic
 
 on:
@@ -11,13 +11,20 @@ permissions:
 
 env:
   RUSTUP_TOOLCHAIN: nightly-2026-08-28
-  # Compare with 1633: keep debug metadata fixed and bound compiler concurrency.
-  CARGO_PROFILE_TEST_DEBUG: "0"
+  # Bound compiler concurrency identically in the paired variants.
   CARGO_BUILD_JOBS: "1"
 
 jobs:
   baseline:
+    name: baseline (debug=${{ matrix.profile }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        profile: [line-tables-only, "0"]
+    env:
+      CARGO_PROFILE_TEST_DEBUG: ${{ matrix.profile }}
     # Bounded setup (9m), harness (30m), and upload (3m) leave teardown reserve.
     # This diagnostic outer bound does not extend the 28m test command.
     timeout-minutes: 45
@@ -25,7 +32,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
-          ref: f5df2a4890d1f778aff7ff27fa4ba7c2378f5bde
+          ref: 371ba6f573d7bcb88cf11821e8ebc9c206d8f361
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         timeout-minutes: 5
@@ -35,7 +42,7 @@ jobs:
       - name: Record exact source, toolchain and runner
         timeout-minutes: 1
         env:
-          EXPECTED_SOURCE: f5df2a4890d1f778aff7ff27fa4ba7c2378f5bde
+          EXPECTED_SOURCE: 371ba6f573d7bcb88cf11821e8ebc9c206d8f361
         run: |
           set -euo pipefail
           mkdir -p artifacts
@@ -152,7 +159,7 @@ jobs:
               done
               printf 'MEMORY_PRESSURE\n'
               cat /proc/pressure/memory
-              ps -eo pid,ppid,rss,comm --sort=-rss | sed -n '1,9p'
+              ps -eo pid,ppid,rss,pcpu,comm --sort=-rss | sed -n '1,9p'
               sleep 20
             done
           ) &
@@ -210,7 +217,7 @@ jobs:
         timeout-minutes: 3
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
-          name: untrusted-561-mutation-resources-${{ github.run_id }}-${{ github.run_attempt }}
+          name: untrusted-561-mutation-resources-${{ matrix.profile }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 14
