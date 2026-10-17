@@ -263,17 +263,6 @@ fn an_imported_fork_is_refused_and_keeps_its_child_id() -> Fallible<()> {
     assert_not_recreatable(&mut store, child)
 }
 
-/// Test 5: on a gated store the direct-topology guard refuses first.
-#[test]
-fn a_gated_store_refuses_before_the_admission_check() -> Fallible<()> {
-    let mut store = MemoryStore::new();
-    let authority = Authority::open(&mut store)?;
-    let fork = authority.admit_unregistered(&mut store, 0xb1)?;
-    store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_fail_closed()))?;
-    let unavailable = CoreError::ErasureContainmentUnavailable;
-    assert_delete_fails(&mut store, fork, &unavailable)
-}
-
 /// Tests 5 and 6: the child-Fork check precedes the admission check, and the
 /// generic child itself is still deleted.
 #[test]

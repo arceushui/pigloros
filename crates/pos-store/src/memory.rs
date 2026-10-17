@@ -16071,8 +16071,8 @@ mod admitted_fork_deletion {
     //! classified Fork changes no map, an orphan `FAR1` of a missing Timeline
     //! is not found through the generic delete and through the direct visible
     //! delete that skips the visibility check, the direct delete still refuses
-    //! an existing admitted Fork, and a geographic admitted Fork stays
-    //! concealed.
+    //! an existing admitted Fork, a permit-requiring store refuses before the
+    //! admission check, and a geographic admitted Fork stays concealed.
 
     use std::sync::Arc;
 
@@ -16211,6 +16211,25 @@ mod admitted_fork_deletion {
         let refused = delete_visible_timeline(&mut store, fork);
         assert!(
             matches!(refused, Err(CoreError::AdmittedForkNotDeletable(id)) if id == fork),
+            "{refused:?}"
+        );
+        assert_eq!(sizes(&store), before);
+        Ok(())
+    }
+
+    /// The direct-topology guard of a permit-requiring store refuses first.
+    #[test]
+    fn a_permit_requiring_store_refuses_before_the_admission_check() -> Fallible<()> {
+        let mut store = open()?;
+        let authority = Authority::open(&mut store)?;
+        let fork = authority.admit(&mut store, 0xb1)?;
+        // Binding a fail-closed gate sets this flag, but a bound store cannot
+        // be rebound and an unbound one cannot admit a Fork.
+        store.erasure_topology_requires_permit = true;
+        let before = sizes(&store);
+        let refused = store.delete_timeline(fork);
+        assert!(
+            matches!(refused, Err(CoreError::ErasureContainmentUnavailable)),
             "{refused:?}"
         );
         assert_eq!(sizes(&store), before);
