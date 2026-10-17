@@ -2236,6 +2236,8 @@ mod tests {
         let event = draft(b"after-refusal");
         let appended = store.append_classified(&lifecycle.session, &permit, operation, event)?;
         assert_eq!(appended.operation.input().child_timeline_id, child);
+        assert_eq!(appended.event.seq.as_u64(), 1);
+        assert_eq!(store.read_fork_event_suffix(child, 1)?.len(), 1);
         Ok(())
     }
 
