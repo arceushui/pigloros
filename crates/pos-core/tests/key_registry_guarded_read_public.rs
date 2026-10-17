@@ -22,15 +22,12 @@ fn within_deadline(
     body: impl FnOnce() -> Fallible<()> + Send + 'static,
 ) -> Fallible<()> {
     let (sender, receiver) = mpsc::sync_channel(1);
-    let worker = thread::spawn(move || sender.send(body().map_err(|error| error.to_string())));
+    let _worker = thread::spawn(move || sender.send(body().map_err(|error| error.to_string())));
     // A non-progressing decoder must fail its real test before the package's
     // mutation deadline. On a deadline error the worker is detached, not joined: it owns
     // only test-local data, and exits with this failing test executable.
-    let result = receiver.recv_timeout(deadline)?;
-    worker
-        .join()
-        .map_err(|_| "registry decoder worker panicked")??;
-    result.map_err(Into::into)
+    // A late send can fail only after the receiver has already failed closed.
+    receiver.recv_timeout(deadline)?.map_err(Into::into)
 }
 
 #[test]
