@@ -20,11 +20,11 @@ fn checkpoint(budget: &mut ForkReplayReadBudgetV1<'_>) -> Result<()> {
 
 /// The native adapters return exclusively owned, already-funded plaintext.
 /// A failed Runtime post-check or unwind must scrub that plaintext too.
-struct EventBatchV1(Vec<Event>);
+struct EventBatchV1<'batch>(&'batch mut Vec<Event>);
 
-impl Drop for EventBatchV1 {
+impl Drop for EventBatchV1<'_> {
     fn drop(&mut self) {
-        let scrubbed = pos_core::store::zeroize_event_plaintext_staging(&mut self.0);
+        let scrubbed = pos_core::store::zeroize_event_plaintext_staging(self.0);
         debug_assert!(scrubbed);
     }
 }
@@ -66,6 +66,7 @@ impl ErasureReadSenderV1<'_> {
         checkpoint(budget)?;
         let head = head.map_err(map_fork_replay_lineage_error)?.as_u64();
         let (first, count) = checked_range(verified, head)?;
+        let mut staging = Vec::new();
         let result = self
             .host
             .store
@@ -76,9 +77,12 @@ impl ErasureReadSenderV1<'_> {
                 verified.read_bounds(),
                 budget,
             )
-            .map(EventBatchV1);
+            .map(|events| {
+                staging = events;
+                EventBatchV1(&mut staging)
+            });
         checkpoint(budget)?;
-        let mut events = result.map_err(map_fork_replay_lineage_error)?;
+        let events = result.map_err(map_fork_replay_lineage_error)?;
         let complete = (|| {
             if events.0.len() != count {
                 return Err(Error::AdapterFailure);
@@ -95,7 +99,7 @@ impl ErasureReadSenderV1<'_> {
             Ok(())
         })();
         checkpoint(budget).and(complete)?;
-        Ok(std::mem::take(&mut events.0))
+        Ok(std::mem::take(events.0))
     }
 
     /// Own one operation's native interval and every arm/ancestor gate.
@@ -185,6 +189,45 @@ impl ErasureReadSenderV1<'_> {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+    use pos_core::{CanonicalBytes, EntityId, EventId, Hash, Kind, SchemaVersion, Seq, WallTime};
+
+    #[test]
+    fn the_native_plaintext_guard_scrubs_its_carrier_on_return_and_unwind() {
+        for unwind in [false, true] {
+            let mut staging = vec![Event {
+                id: EventId::new(),
+                entity: EntityId::new(),
+                event_type: Kind::new("private.kind"),
+                payload: CanonicalBytes::from_vec(b"private payload".to_vec()),
+                wall_time: WallTime::from_micros(1),
+                seq: Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                origin: None,
+                payload_hash: Hash::zero(),
+            }];
+            // Borrowing the exclusively owned native carrier makes the actual
+            // Drop effect inspectable without retaining shared plaintext or
+            // examining freed memory. No test-only production callback is used.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = EventBatchV1(&mut staging);
+                if unwind {
+                    std::panic::resume_unwind(Box::new("native staging unwind control"));
+                }
+            }));
+            assert_eq!(result.is_err(), unwind);
+            assert_eq!(staging[0].event_type.as_str(), "");
+            assert!(staging[0].payload.is_empty());
         }
     }
 }
