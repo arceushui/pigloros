@@ -55,7 +55,8 @@ use pos_runtime::composition_fallback::{
 use pos_runtime::{
     FallbackCandidateFactsV1, FallbackDeclarationV1, FallbackDriverSettingsV1,
     FallbackEntryFactsV1, FallbackExecutionFactsV1, FallbackHostFactsV1, FallbackHostGrantsV1,
-    FallbackTriggerCauseV1, PluginExecutionModeV1, PluginRegistry, RequiredPluginCompositionV1,
+    FallbackTriggerCauseV1, PluginAvailabilityV1, PluginExecutionModeV1, PluginRegistry,
+    RequiredPluginCompositionV1,
 };
 use pos_store::composition_fallback_registry::{
     CompositionFallbackRegistryErrorV1 as RegistryError, CompositionFallbackTargetV1,
@@ -86,6 +87,8 @@ const SIBLING_SLOT: &str = "sibling";
 const ROLE: &str = "forecaster";
 /// The role of the undeclared sibling.
 const SIBLING_ROLE: &str = "sibling";
+/// The registry's mirror of an available Plugin.
+const AVAILABLE: Option<PluginAvailabilityV1> = Some(PluginAvailabilityV1::Available);
 /// The version label of every implementation, which the probe Plugins report.
 const VERSION: &str = "0.1.0";
 /// The Stable passing-profile digest every release holds (rule 7).
@@ -304,6 +307,8 @@ struct Supply {
     tamper: Option<(&'static str, Tamper)>,
     numbering: u8,
     built: Vec<(PluginId, &'static str)>,
+    /// Closure addresses that replace a release's own, by Plugin ID text.
+    addresses: Vec<(&'static str, BundleAddressV1)>,
 }
 
 impl Supply {
@@ -319,6 +324,7 @@ impl Supply {
             tamper: None,
             numbering: 0,
             built: Vec::new(),
+            addresses: Vec::new(),
         }
     }
 
@@ -390,7 +396,14 @@ impl FallbackReleaseSupplyV1 for Supply {
             .filter(|release| !self.missing.contains(&release.spec.plugin_id))?
             .clone();
         let tamper = self.tamper.filter(|(target, _)| *target == plugin_id);
-        self.input(&release, tamper.map(|(_, tamper)| tamper)).ok()
+        let mut input = self
+            .input(&release, tamper.map(|(_, tamper)| tamper))
+            .ok()?;
+        let moved = self.addresses.iter().find(|(text, _)| *text == plugin_id);
+        if let Some((_, address)) = moved {
+            input.address = address.clone();
+        }
+        Some(input)
     }
 
     fn reference(&self, _entry_key: &str) -> Option<FallbackReferenceV1> {
@@ -717,6 +730,16 @@ impl Rig {
         Ok(())
     }
 
+    /// Publish and install a newer release of the primary's Plugin ID, so the declared
+    /// primary release is no longer the admitted one.
+    fn supersede_primary(&mut self) -> BoxResult<Release> {
+        let spec = Spec {
+            component: b"draft:community.alpha.next",
+            ..self.primary.spec
+        };
+        publish(&mut self.signed, spec, 20, &self.supply.material)
+    }
+
     /// Revoke `release` and follow the new material.
     fn revoke(&mut self, release: &Release) -> TestResult {
         self.signed
@@ -883,8 +906,11 @@ fn a_resource_limit_activates_the_candidate_at_the_tick_boundary() -> TestResult
 
 fn resource_limit(kind: StoreKind) -> TestResult {
     let mut rig = Rig::declared(kind, FAILING, AUTOMATIC)?;
+    let sibling = rig.boundary.binding(SIBLING_SLOT).ok_or("no sibling")?;
+    let sibling_index = rig.host.member_index(sibling);
     let failed = rig.pass()?;
     assert_eq!(result_of(&failed), "failed");
+    assert_eq!(rig.pass.registry.availability(sibling), AVAILABLE);
     let (before, primary) = (rig.event_count(), bound(&rig)?);
     let outcomes = rig.boundary(&failed);
     assert_eq!(described(&outcomes), ["activated:plugin-b:[]"]);
@@ -912,8 +938,17 @@ fn resource_limit(kind: StoreKind) -> TestResult {
     assert_eq!(rig.running()?, "plugin-b");
     assert!(!rig.pass.registry.contains(&primary));
     assert_eq!(rig.host.member_index(primary), None);
+    // The sibling keeps its registration, its host member and its availability.
+    assert_eq!(rig.boundary.binding(SIBLING_SLOT), Some(sibling));
+    assert_eq!(rig.host.member_index(sibling), sibling_index);
+    assert_eq!(rig.pass.registry.availability(sibling), AVAILABLE);
     let next = rig.pass()?;
     assert_eq!(result_of(&next), "committed:2");
+    let sibling_gate = next.gates[1]
+        .gate
+        .as_ref()
+        .map(|summary| summary.plugin_id.as_str());
+    assert_eq!(sibling_gate, Ok("plugin-d"));
     let gated = next.gates[0]
         .gate
         .as_ref()
@@ -1007,7 +1042,8 @@ fn restart_refusals(kind: StoreKind) -> TestResult {
     let mut manual = Rig::declared(kind, HEALTHY, MANUAL)?;
     manual.supply.missing = vec!["plugin-a"];
     let refused = manual.restart();
-    assert_eq!(described(&refused), ["error:Registry(ManualEntry)"]);
+    let manual_refused = ["error:SlotUnavailable(SourceUnavailable)"];
+    assert_eq!(described(&refused), manual_refused);
     Ok(())
 }
 
@@ -1214,6 +1250,9 @@ fn erasure(kind: StoreKind) -> TestResult {
     let primary = bound(&rig)?;
     rig.pass.gate.block_timeline(rig.pass.timeline);
     let outcomes = described(&rig.boundary(&failed));
+    // The erasure gate refuses reads and appends alike, so the blocked Timeline is refused at
+    // the pre-commit prefix read or at the guarded append. The commit-path refusal itself is
+    // covered at store level (slice 2) and by the commit-step unit tests of `src/fallback`.
     let refused = outcomes.len() == 1
         && (outcomes[0].starts_with("not-committed:")
             || outcomes[0] == "exhausted:[SwapRefused,SwapRefused]");
@@ -1394,5 +1433,115 @@ fn an_unprovisioned_registry_refuses_the_restart_and_the_boundary() -> TestResul
     let outcome = fuel_outcome(PluginId::new());
     let refused = boundary.run_boundary_v1(&mut context, &mut host, &outcome);
     assert_eq!(refused, Err(missing));
+    Ok(())
+}
+
+/// Case 2 at restart (ADR-119 section 4.4, "Crash and restart"): a revoked effective release
+/// is not a missing implementation. The restart takes the gate's `ArtifactRevoked` as the
+/// first gate's observation and activates the next candidate with code 4 when the entry
+/// declares it, and fails closed when it does not; nothing is activated with code 1.
+#[test]
+fn a_revoked_effective_release_is_code_four_at_restart() -> TestResult {
+    on_every_store(revoked_at_restart)
+}
+
+fn revoked_at_restart(kind: StoreKind) -> TestResult {
+    let mut rig = Rig::declared(kind, HEALTHY, AUTOMATIC)?;
+    let primary = rig.primary.clone();
+    rig.revoke(&primary)?;
+    let before = rig.event_count();
+    assert_eq!(described(&rig.restart()), ["activated:plugin-b:[]"]);
+    assert_eq!(rig.event_count(), before + 1);
+    let activation = rig.last_activation()?;
+    assert_eq!(activation.trigger_code, Code::ArtifactRevoked);
+    let revoked = FallbackTriggerCauseV1::ArtifactRevoked.code();
+    assert_eq!(activation.trigger_basis.cause, revoked);
+    assert_eq!(rig.running()?, "plugin-b");
+    assert_eq!(result_of(&rig.pass()?), "committed:2");
+    let plan = Plan {
+        triggers: &[Code::MissingImplementation, Code::ResourceLimit],
+        ..AUTOMATIC
+    };
+    let mut undeclared = Rig::declared(kind, HEALTHY, plan)?;
+    let primary = undeclared.primary.clone();
+    undeclared.revoke(&primary)?;
+    let before = undeclared.event_count();
+    let refused = described(&undeclared.restart());
+    assert_eq!(refused, ["error:SlotUnavailable(ReleaseNotCurrent)"]);
+    assert_eq!(undeclared.event_count(), before);
+    Ok(())
+}
+
+/// Case 2 (code 1) at restart: a declared primary whose release is no longer the admitted one
+/// is missing, whether its old address is refused as not active or its address now holds the
+/// newer admitted release.
+#[test]
+fn a_superseded_primary_release_is_missing_at_restart() -> TestResult {
+    on_every_store(superseded_at_restart)
+}
+
+fn superseded_at_restart(kind: StoreKind) -> TestResult {
+    let mut rig = Rig::declared(kind, HEALTHY, AUTOMATIC)?;
+    rig.supersede_primary()?;
+    assert_eq!(described(&rig.restart()), ["activated:plugin-b:[]"]);
+    let missing = FallbackTriggerCauseV1::MissingImplementation.code();
+    assert_eq!(rig.last_activation()?.trigger_basis.cause, missing);
+    let mut moved = Rig::declared(kind, HEALTHY, AUTOMATIC)?;
+    let newer = moved.supersede_primary()?;
+    moved.supply.addresses = vec![("plugin-a", newer.address)];
+    assert_eq!(described(&moved.restart()), ["activated:plugin-b:[]"]);
+    assert_eq!(
+        moved.last_activation()?.trigger_code,
+        Code::MissingImplementation
+    );
+    Ok(())
+}
+
+/// A restart activation whose Logical Head cannot be read commits nothing.
+#[test]
+fn an_unreadable_head_refuses_the_restart_activation() -> TestResult {
+    on_every_store(unreadable_head)
+}
+
+fn unreadable_head(kind: StoreKind) -> TestResult {
+    let mut rig = Rig::declared(kind, HEALTHY, AUTOMATIC)?;
+    rig.supply.missing = vec!["plugin-a"];
+    rig.pass.gate.block_timeline(rig.pass.timeline);
+    assert_eq!(described(&rig.restart()), ["error:StoreUnavailable"]);
+    let row = rig.pass.store.registry_row(SCOPE, rig.pass.timeline)?;
+    let revision = row.map(|row| row.state().state_revision());
+    assert_eq!(revision, Some(1));
+    Ok(())
+}
+
+/// Section 4.2: a later committed pass drops a held observation, and so does an abandoned
+/// basis, so an owner activation of a candidate is then refused.
+#[test]
+fn a_committed_pass_or_an_abandoned_basis_drops_the_observation() -> TestResult {
+    on_every_store(dropped_observation)
+}
+
+fn dropped_observation(kind: StoreKind) -> TestResult {
+    let mut rig = Rig::declared(kind, HEALTHY, MANUAL)?;
+    let refusal = fuel_outcome(bound(&rig)?);
+    assert_eq!(
+        described(&rig.boundary(&refusal)),
+        ["awaiting:ResourceLimit"]
+    );
+    let committed = rig.pass()?;
+    assert_eq!(result_of(&committed), "committed:2");
+    assert_eq!(described(&rig.boundary(&committed)), Vec::<String>::new());
+    assert_eq!(rig.boundary.observation(ENTRY), None);
+    let candidate = rig.candidate.key();
+    let refused = rig.owner(&candidate, true);
+    assert_eq!(refused, Err(BoundaryError::NoObservation));
+    assert_eq!(
+        described(&rig.boundary(&refusal)),
+        ["awaiting:ResourceLimit"]
+    );
+    rig.boundary.forget_observations_v1();
+    assert_eq!(rig.boundary.observation(ENTRY), None);
+    let refused = rig.owner(&candidate, true);
+    assert_eq!(refused, Err(BoundaryError::NoObservation));
     Ok(())
 }

@@ -7,7 +7,7 @@ use pos_core::{
     FallbackActivationOriginV1 as Origin, FallbackSkipReasonV1 as Skip, FallbackSkippedCandidateV1,
     FallbackTriggerBasisV1, FallbackTriggerCodeV1, ImplementationKeyV1, Seq, SeqRange, TimelineId,
 };
-use pos_runtime::community_plugin_host::{CommunityPassOutcomeV1, CommunityPluginHostV1};
+use pos_runtime::community_plugin_host::{CommunityPassOutcomeV1, PassResultV1};
 use pos_runtime::composition_fallback::{classify_fallback_trigger_v1, enforce_required_plugin_v1};
 use pos_runtime::{FallbackHostGrantsV1, PluginRegistry, RegisteredPlugin};
 use pos_store::composition_fallback_registry::{
@@ -15,21 +15,17 @@ use pos_store::composition_fallback_registry::{
 };
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
 
-use super::candidate::{build_candidate, BuildV1, BuiltV1};
+use super::candidate::{build_in, skip_of, BuiltV1};
 use super::derive::{
     effective_composition_v1, read_prefix, FallbackEffectiveCompositionV1,
     FallbackEffectiveEntryV1, PrefixV1,
 };
 use super::trigger::fallback_trigger_cause_v1;
 use super::{
-    CompositionBoundaryV1, FallbackBoundaryContextV1, FallbackBoundaryErrorV1 as Error,
-    FallbackBoundaryStoreV1, FallbackEntryOutcomeV1 as Outcome, ObservationV1,
-    COMPOSITION_FALLBACK_ACTIVATE_GRANT_V1,
+    CompositionBoundaryV1, Context, FallbackBoundaryErrorV1 as Error, FallbackBoundaryStoreV1,
+    FallbackEntryOutcomeV1 as Outcome, Host, ObservationV1, COMPOSITION_FALLBACK_ACTIVATE_GRANT_V1,
 };
-use crate::member::CommunityMemberV1;
 
-type Host = CommunityPluginHostV1<CommunityMemberV1>;
-type Context<'c, 'a, S, T, W> = &'c mut FallbackBoundaryContextV1<'a, S, T, W>;
 /// A validated target and its pin, or the reason it is skipped and its pin.
 type AttemptV1<'p> = Result<(SwapV1, &'p CompositionPinV1), (Skip, &'p CompositionPinV1)>;
 
@@ -85,12 +81,18 @@ impl CompositionBoundaryV1 {
     /// the code: a manual entry waits for its owner, and an automatic entry walks forward
     /// along its chain, skipping each candidate that fails steps 2-3, and commits and swaps
     /// the first that passes. Entries are handled in policy order, each at the state revision
-    /// the previous one left.
+    /// the previous one left. A `Committed` pass first drops every held observation: the
+    /// observed implementations have since run successfully.
     ///
     /// # Errors
     /// Returns [`Error::Faulted`] after an earlier invariant fault, the registry's refusal of
     /// the derivation, and an invariant fault, which latches, when the live registry differs
-    /// from the effective composition or a step after a commit failed.
+    /// from the effective composition or a step after a commit failed. On an error no
+    /// outcome is returned: activations that an earlier entry of the same transaction
+    /// committed stay committed in the store and their ledger rows, and since the boundary
+    /// has faulted, the host recomposes from the fold at restart ([`compose_restart_v1`]).
+    ///
+    /// [`compose_restart_v1`]: super::compose_restart_v1
     pub fn run_boundary_v1<S, T, W>(
         &mut self,
         context: Context<'_, '_, S, T, W>,
@@ -102,6 +104,9 @@ impl CompositionBoundaryV1 {
         T: PluginTrustPolicyRegistryV1 + ?Sized,
         W: PluginTrustWallSourceV1,
     {
+        if matches!(outcome.result, PassResultV1::Committed(_)) {
+            self.observations.clear();
+        }
         let composition = self.checked(&*context.store, context.registry)?;
         let folded = FoldedV1 {
             revision: composition.state_revision,
@@ -120,9 +125,12 @@ impl CompositionBoundaryV1 {
     /// A candidate, adjacent or not, needs a current eligible observation of the effective
     /// implementation whose code the entry declares; the activation records that code with
     /// `origin=owner`. The entry's declared primary is the bounded return: it is allowed only
-    /// from a candidate tenure, needs no observation, re-runs the trust gate, and records the
-    /// closing tenure's code with `origin=owner`. A target that fails steps 2-3 is reported as
-    /// [`Outcome::Exhausted`] and nothing is committed.
+    /// from a candidate tenure and needs no observation. It re-runs the trust gate (with
+    /// `evaluate_current_release`) and the implementation-key check, skips the section 4.1
+    /// facts re-check (the declared primary is the reference itself), still runs the
+    /// host-level `validate_swap`, and records the code and cause of the activation that
+    /// opened the closing tenure with `origin=owner`. A target that fails steps 2-3 is
+    /// reported as [`Outcome::Exhausted`] and nothing is committed.
     ///
     /// # Errors
     /// Returns [`Error::NotGranted`] without the `composition.fallback.activate` grant, the
@@ -147,24 +155,29 @@ impl CompositionBoundaryV1 {
         }
         let composition = self.checked(&*context.store, context.registry)?;
         let effective = composition.entry(entry_key).ok_or(Error::UnknownEntry)?;
-        let current = usize::from(effective.chain_position);
-        let chain = effective.chain();
-        let position = chain
-            .iter()
-            .position(|pin| pin.implementation() == target)
-            .filter(|position| *position != current)
-            .ok_or(Error::InvalidTarget)?;
-        let trigger = if position == 0 {
-            self.returning(&*context.store, effective)
-        } else {
-            self.observed(effective)
-        };
+        let position = target_position(effective, target)?;
+        let trigger = self.owner_trigger(&*context.store, effective, position);
         let revision = composition.state_revision;
         trigger.and_then(|trigger| {
-            let pin = chain[position];
+            let pin = effective.chain()[position];
             let attempt = self.attempt(context, host, effective, pin, position > 0);
             self.settle(context, host, effective, attempt, trigger, revision)
         })
+    }
+
+    /// The trigger an owner activation of chain position `position` records: the closing
+    /// tenure's for the return to the primary, the held observation's for a candidate.
+    fn owner_trigger<S: FallbackBoundaryStoreV1 + ?Sized>(
+        &self,
+        store: &S,
+        effective: &FallbackEffectiveEntryV1,
+        position: usize,
+    ) -> Result<TriggerV1, Error> {
+        if position == 0 {
+            self.returning(store, effective)
+        } else {
+            self.observed(effective)
+        }
     }
 
     /// Derive the effective composition and require the live registry to run it.
@@ -359,21 +372,9 @@ impl CompositionBoundaryV1 {
         W: PluginTrustWallSourceV1,
     {
         let entry_key = effective.entry.entry_key();
-        let wanted = BuildV1 {
-            entry_key,
-            pin,
-            replacing: self.binding(entry_key),
-            verify_facts,
-            tick: context.tick,
-        };
-        let registry = &*context.registry;
-        let built = build_candidate(
-            registry,
-            context.trust,
-            context.wall,
-            context.supply,
-            &wanted,
-        );
+        let replacing = self.binding(entry_key);
+        let built = build_in(context, entry_key, pin, replacing, verify_facts);
+        let built = built.map_err(|refusal| refusal.reason);
         let timeline = self.target.timeline;
         let swap = built.and_then(|built| {
             validate_swap(
@@ -407,6 +408,11 @@ impl CompositionBoundaryV1 {
     }
 
     /// Steps 5-6 after a commit: the fault latches unless both succeed.
+    ///
+    /// The port's receipt names the activation Event only by its identity, so the boundary
+    /// reads that one Event back by its sequence (the only store read after the commit) to
+    /// extend the prefix, and requires it to activate the requested target. A failed read,
+    /// swap, member replacement or restore latches the section 4.7 invariant fault.
     fn activated<S, T, W>(
         &mut self,
         context: Context<'_, '_, S, T, W>,
@@ -525,12 +531,20 @@ impl CommitV1<'_> {
     }
 }
 
-/// The skipped record of `pin`.
-fn skip_of(pin: &CompositionPinV1, reason: Skip) -> FallbackSkippedCandidateV1 {
-    FallbackSkippedCandidateV1 {
-        implementation_digest: pin.implementation().digest(),
-        reason,
-    }
+/// The chain position of `target` in `effective`'s entry, which must be another listed
+/// implementation than the effective one.
+fn target_position(
+    effective: &FallbackEffectiveEntryV1,
+    target: &ImplementationKeyV1,
+) -> Result<usize, Error> {
+    let current = usize::from(effective.chain_position);
+    let position = effective
+        .chain()
+        .iter()
+        .position(|pin| pin.implementation() == target);
+    position
+        .filter(|position| *position != current)
+        .ok_or(Error::InvalidTarget)
 }
 
 /// The host-level `validate_swap(entry_key, prepared, k, prefix)` (ADR-119 section 4.4 step 3).

@@ -25,7 +25,7 @@ use super::{
 use crate::test_support::ok;
 
 /// Every boundary error, one per variant.
-const ERRORS: [Error; 9] = [
+const ERRORS: [Error; 10] = [
     Error::Faulted,
     Error::InvariantFault("diverged"),
     Error::Registry(CompositionFallbackRegistryErrorV1::Conflict),
@@ -35,6 +35,7 @@ const ERRORS: [Error; 9] = [
     Error::NoObservation,
     Error::TriggerNotDeclared,
     Error::SlotUnavailable(FallbackSkipReasonV1::SourceUnavailable),
+    Error::StoreUnavailable,
 ];
 
 /// A Fork of `parent` at `at`.

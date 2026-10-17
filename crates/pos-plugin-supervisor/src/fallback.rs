@@ -41,7 +41,8 @@ use pos_core::{
 };
 use pos_plugin_release::{BundleAddressV1, ReleaseSourceV1};
 use pos_runtime::community_plugin_host::{
-    CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, PluginTrustMaterialSourceV1,
+    CommunityPluginExecutionProfileV1, CommunityPluginHostAbiV1, CommunityPluginHostV1,
+    PluginTrustMaterialSourceV1,
 };
 use pos_runtime::{
     FallbackCandidateFactsV1, FallbackHostFactsV1, FallbackTriggerCauseV1, PluginRegistry,
@@ -53,6 +54,7 @@ use pos_store::composition_fallback_registry::{
 };
 
 use crate::adapter::CommunityDriverSettingsV1;
+use crate::member::CommunityMemberV1;
 
 mod boundary;
 mod candidate;
@@ -65,6 +67,11 @@ pub use derive::{
 };
 pub use restart::{compose_restart_v1, FallbackRestartSlotV1, FallbackRestartV1};
 pub use trigger::fallback_trigger_cause_v1;
+
+/// The community host whose members the boundary swaps.
+type Host = CommunityPluginHostV1<CommunityMemberV1>;
+/// What one boundary transaction borrows, as its steps take it.
+type Context<'c, 'a, S, T, W> = &'c mut FallbackBoundaryContextV1<'a, S, T, W>;
 
 /// The host-native grant that authorizes an owner activation (ADR-119 section 4.3).
 pub const COMPOSITION_FALLBACK_ACTIVATE_GRANT_V1: &str = "composition.fallback.activate";
@@ -175,6 +182,9 @@ pub enum FallbackBoundaryErrorV1 {
     /// reason and no candidate replaces it.
     #[error("a restart slot cannot be composed: {0:?}")]
     SlotUnavailable(FallbackSkipReasonV1),
+    /// The Event store could not be read before a restart activation's commit.
+    #[error("the Event store could not be read")]
+    StoreUnavailable,
 }
 
 /// What one boundary transaction did for one entry.
@@ -277,6 +287,15 @@ impl CompositionBoundaryV1 {
     #[must_use]
     pub const fn is_faulted(&self) -> bool {
         self.faulted
+    }
+
+    /// Drop every held observation (ADR-119 section 4.2, "In doubt").
+    ///
+    /// The host calls it when the basis of the observed failures is abandoned: after
+    /// `abort_step`, or when `recover_scheduled_pass` abandons an in-doubt pass. A committed
+    /// pass drops them in [`Self::run_boundary_v1`].
+    pub fn forget_observations_v1(&mut self) {
+        self.observations.clear();
     }
 }
 
