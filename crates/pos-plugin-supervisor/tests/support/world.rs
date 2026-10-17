@@ -9,7 +9,7 @@ use std::time::Duration;
 use pos_core::trusted_clock::PluginTrustWallSourceV1;
 use pos_core::{
     AppendDedupKey, AppendDedupScope, AppendIdentity, ErasureContainmentGateV1, ErasureGate, Event,
-    EventStore, FactualAdmissionPortV1, Hash, PipelineAttemptIdV1, PipelineCommitReceiptV1,
+    FactualAdmissionPortV1, Hash, PipelineAttemptIdV1, PipelineCommitReceiptV1,
     PipelineEvidenceRefV1, PipelineSecurityRevisionsV1, PluginId, Seq, SeqRange, TimelineId,
     TimelineMeta,
 };
