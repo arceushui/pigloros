@@ -65,6 +65,7 @@ STAGED_MAIN_JOBS = {
     "docker-build": ["ci_change_scope", "cargo-crap"],
     "world-client-wasm": ["ci_change_scope", "cargo-crap"],
     "world-client-browser-parity": ["ci_change_scope", "world-client-wasm"],
+    "asan-build": ["ci_change_scope", "cargo-crap"],
 }
 
 

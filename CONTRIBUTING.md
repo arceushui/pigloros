@@ -139,8 +139,7 @@ stateDiagram-v2
 
 CI is deliberately staged. A broken pull request receives useful feedback
 before it can occupy the expensive runners, and the main staged workflow uses
-no more than eight heavy runners at once, plus the single ASan archive build
-that runs beside the core and normal stages.
+no more than eight heavy runners at once.
 
 ```mermaid
 flowchart TD
@@ -150,8 +149,6 @@ flowchart TD
     R --> N["Normal checks: at most eight runners"]
     N --> M["Mutation: at most eight shards"]
     M --> A["ASan: six shards"]
-    P --> AB["ASan archive build"]
-    AB --> A
     A --> G["ci-gate"]
     P -. "failure" .-> X["Stop downstream work"]
     C -. "failure" .-> X
@@ -253,6 +250,7 @@ flowchart TD
     CR --> X["Docker"]
     CR --> W["WASM package"]
     CR --> Q["CodeQL (docs-only PRs start it after the scope job)"]
+    CR --> AB["ASan archive build"]
     W --> BP["browser parity"]
     D --> G["standard-gate"]
     E --> G
@@ -261,6 +259,7 @@ flowchart TD
     X --> G
     Q --> G
     BP --> G
+    AB --> G
 ```
 
 `modules-structure` and `depgraph` are reporting-only jobs. They run after a
@@ -283,19 +282,24 @@ flowchart TD
     MG --> A
 ```
 
-ASan tests remain final. Their serialized instrumented build does not: one
-`asan-build` job starts after preflight, compiles every workspace test target
-once with `cargo nextest archive`, and uploads the archive. Each shard downloads
-it and runs its tests without compiling. The archive is extracted into the
-workspace, so `target/` sits at the path compiled into `CARGO_BIN_EXE_*`.
+ASan tests remain final. Their serialized instrumented build is one of the
+eight normal-stage jobs: `asan-build` compiles every workspace test target once
+with `cargo nextest archive` and uploads the archive, and `standard-gate` and
+`asan-gate` both require it. Each shard downloads the archive and runs its
+tests without compiling. The archive is extracted into the workspace, so
+`target/` sits at the path compiled into `CARGO_BIN_EXE_*`.
 
 The previously dominant `bundle_contract_public` target is split through
 nextest's native `slice:1/2` partitioning. The non-conformance workspace
 remainder uses the same disjoint slices, while `remainder-1` retains the
 conformance library, binaries, and profile/provider targets. Shards select
-their tests with nextest filtersets, and every shard runs each test in its own
-process. The selected packages, features, test targets, and sanitizer scope
-remain unchanged.
+their tests with nextest filtersets. The selected packages, features, test
+targets, ignored-test handling, and sanitizer scope are unchanged.
+
+Execution isolation is stricter. `bundle-coverage`, `moat-proof`, and the
+conformance library, binary, profile, and provider tests previously ran under
+libtest, many tests per process. They now run one process per test under
+nextest, so LeakSanitizer checks each test on its own exit.
 
 ```mermaid
 flowchart LR

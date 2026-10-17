@@ -23,6 +23,7 @@ nextest_args=(
   --archive-file "${RUNNER_TEMP}/asan-archive/asan-tests.tar.zst"
   --extract-to "${GITHUB_WORKSPACE}"
   --extract-overwrite
+  --workspace-remap "${GITHUB_WORKSPACE}"
   --user-config-file none
   --ignore-default-filter
   --success-output final
@@ -84,9 +85,10 @@ EXPECTED_BUILD_ENV = {
 }
 EXPECTED_BUILD_JOB = {
     "name": "asan build (nextest archive)",
-    "needs": ["ci_change_scope", "preflight-gate"],
+    "needs": ["ci_change_scope", "cargo-crap"],
     "if": (
-        "${{ !cancelled() && needs.preflight-gate.result == 'success' && "
+        "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
+        "needs.cargo-crap.result == 'success' && "
         "(needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}"
     ),
     "runs-on": "ubuntu-24.04",
@@ -121,7 +123,7 @@ EXPECTED_BUILD_JOB = {
             "with": {
                 "name": ARCHIVE_ARTIFACT,
                 "path": "${{ runner.temp }}/asan-tests.tar.zst",
-                "retention-days": 1,
+                "retention-days": 3,
                 "if-no-files-found": "error",
                 "overwrite": True,
                 "compression-level": 0,
@@ -179,7 +181,7 @@ EXPECTED_STRATEGY = {
 EXPECTED_GATE_JOB = {
     "name": "asan (address sanitizer)",
     "if": "${{ always() }}",
-    "needs": ["ci_change_scope", "asan"],
+    "needs": ["ci_change_scope", "asan-build", "asan"],
     "runs-on": "ubuntu-24.04",
     "timeout-minutes": 5,
     "steps": [
@@ -188,15 +190,18 @@ EXPECTED_GATE_JOB = {
             "env": {
                 "SCOPE_JOB_RESULT": "${{ needs.ci_change_scope.result }}",
                 "RUST_SCOPE_RESULT": "${{ needs.ci_change_scope.outputs.rust }}",
+                "ASAN_BUILD_RESULT": "${{ needs.asan-build.result }}",
                 "ASAN_SHARDS_RESULT": "${{ needs.asan.result }}",
             },
             "run": (
                 "set -euo pipefail\n"
                 'if [[ "${SCOPE_JOB_RESULT}" == "success" \\\n'
                 '  && "${RUST_SCOPE_RESULT}" == "false" \\\n'
+                '  && "${ASAN_BUILD_RESULT}" == "skipped" \\\n'
                 '  && "${ASAN_SHARDS_RESULT}" == "skipped" ]]; then\n'
                 "  exit 0\n"
                 "fi\n"
+                'test "${ASAN_BUILD_RESULT}" = success\n'
                 'test "${ASAN_SHARDS_RESULT}" = success\n'
             ),
         }

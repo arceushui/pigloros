@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 
@@ -188,12 +190,21 @@ class AsanCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(drop_build_condition)
 
-    def test_archive_build_must_wait_for_preflight(self) -> None:
+    def test_archive_build_must_run_in_the_standard_stage(self) -> None:
         self.assert_rejected(
             lambda workflow: workflow["jobs"]["asan-build"].update(
-                {"needs": ["ci_change_scope"]}
+                {"needs": ["ci_change_scope", "preflight-gate"]}
             )
         )
+
+    def test_archive_build_must_require_cargo_crap_success(self) -> None:
+        def drop_cargo_crap_condition(workflow: dict) -> None:
+            job = workflow["jobs"]["asan-build"]
+            job["if"] = job["if"].replace(
+                "needs.cargo-crap.result == 'success' && ", ""
+            )
+
+        self.assert_rejected(drop_cargo_crap_condition)
 
     def test_archive_build_requires_instrumented_complete_scope(self) -> None:
         for fragment in (
@@ -247,17 +258,32 @@ class AsanCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(rename_download)
 
-    def test_rejects_unretained_archive_upload(self) -> None:
+    def test_rejects_ignored_missing_archive_upload(self) -> None:
         def ignore_missing_archive(workflow: dict) -> None:
             upload = workflow["jobs"]["asan-build"]["steps"][-1]
             upload["with"]["if-no-files-found"] = "ignore"
 
         self.assert_rejected(ignore_missing_archive)
 
+    def test_requires_exact_archive_retention(self) -> None:
+        def shorten_retention(workflow: dict) -> None:
+            upload = workflow["jobs"]["asan-build"]["steps"][-1]
+            upload["with"]["retention-days"] = 1
+
+        self.assert_rejected(shorten_retention)
+
+    def test_requires_archive_overwrite_on_rerun(self) -> None:
+        def keep_stale_archive(workflow: dict) -> None:
+            upload = workflow["jobs"]["asan-build"]["steps"][-1]
+            upload["with"]["overwrite"] = False
+
+        self.assert_rejected(keep_stale_archive)
+
     def test_requires_extraction_into_workspace(self) -> None:
         for fragment in (
             '  --extract-to "${GITHUB_WORKSPACE}"\n',
             "  --extract-overwrite\n",
+            '  --workspace-remap "${GITHUB_WORKSPACE}"\n',
         ):
             with self.subTest(fragment=fragment):
                 def move_extraction(workflow: dict, removed: str = fragment) -> None:
@@ -284,6 +310,12 @@ class AsanCiPolicyTests(unittest.TestCase):
                 "binary_id(pos-conformance::moat_proof_public) & test(=none)",
             ),
             ("--partition slice:1/2 --run-ignored all", "--partition slice:1/2"),
+            (" | kind(bin)", ""),
+            (" | binary_id(pos-conformance::provider_contract_public)", ""),
+            (
+                "binary_id(pos-conformance::bundle_contract_coverage_public)",
+                "binary_id(pos-conformance::bundle_contract_public)",
+            ),
         ):
             with self.subTest(old=old):
                 def change_filter(
@@ -308,6 +340,53 @@ class AsanCiPolicyTests(unittest.TestCase):
         self.assert_rejected(
             lambda workflow: workflow["jobs"]["asan-gate"].pop("if")
         )
+
+    def test_aggregate_gate_must_need_archive_build(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan-gate"]["needs"].remove(
+                "asan-build"
+            )
+        )
+
+    def test_aggregate_gate_must_check_archive_build(self) -> None:
+        def remove_build_check(workflow: dict) -> None:
+            step = workflow["jobs"]["asan-gate"]["steps"][0]
+            step["run"] = step["run"].replace(
+                'test "${ASAN_BUILD_RESULT}" = success\n', ""
+            )
+
+        self.assert_rejected(remove_build_check)
+
+    def test_aggregate_gate_verdicts(self) -> None:
+        script = self.workflow["jobs"]["asan-gate"]["steps"][0]["run"]
+        cases = (
+            (("success", "true", "success", "success"), True),
+            (("success", "false", "skipped", "skipped"), True),
+            (("success", "true", "failure", "skipped"), False),
+            (("success", "true", "skipped", "skipped"), False),
+            (("success", "true", "cancelled", "skipped"), False),
+            (("success", "true", "success", "failure"), False),
+            (("success", "true", "success", "skipped"), False),
+            (("success", "false", "success", "skipped"), False),
+            (("success", "false", "skipped", "success"), False),
+            (("failure", "false", "skipped", "skipped"), False),
+        )
+        for (scope, rust, build, shards), passes in cases:
+            with self.subTest(scope=scope, rust=rust, build=build, shards=shards):
+                env = {
+                    **os.environ,
+                    "SCOPE_JOB_RESULT": scope,
+                    "RUST_SCOPE_RESULT": rust,
+                    "ASAN_BUILD_RESULT": build,
+                    "ASAN_SHARDS_RESULT": shards,
+                }
+                result = subprocess.run(
+                    ["bash", "-c", script],
+                    env=env,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode == 0, passes)
 
     def test_aggregate_gate_must_require_shard_success(self) -> None:
         self.assert_rejected(
