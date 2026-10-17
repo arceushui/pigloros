@@ -236,7 +236,8 @@ impl Shape {
     /// This shape declaring the ABI minors `lowest` to `highest`, both included.
     ///
     /// It sets both bounds, so it and [`Self::with_worker_abi`] each override the highest minor
-    /// the other set: the later call wins.
+    /// the other set: the later call wins. [`Self::with_worker_abi`] also clears the clock
+    /// feature, which this setter leaves alone.
     #[must_use]
     pub const fn with_abi_minors(self, lowest: u16, highest: u16) -> Self {
         Self {
