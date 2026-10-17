@@ -14,7 +14,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -401,12 +401,16 @@ impl FallbackReleaseSupplyV1 for Supply {
     }
 }
 
+/// The number of temporary databases this process opened.
+static DATABASES: AtomicU64 = AtomicU64::new(0);
+
 /// A temporary `SQLite` database file, removed with its journals on drop.
 struct TempDb(PathBuf);
 
 impl TempDb {
     fn new() -> Self {
-        let name = format!("pigloros-cbt-{}.db", ulid::Ulid::new());
+        let number = DATABASES.fetch_add(1, Ordering::SeqCst);
+        let name = format!("pigloros-cbt-{}-{number}.db", std::process::id());
         Self(std::env::temp_dir().join(name))
     }
 
@@ -1250,15 +1254,15 @@ fn reference_missing(rig: &mut Rig) {
     rig.supply.reference = None;
 }
 
-fn version_label(rig: &mut Rig) {
+const fn version_label(rig: &mut Rig) {
     rig.supply.tamper = Some(("plugin-b", Tamper::Version));
 }
 
-fn foreign_settings(rig: &mut Rig) {
+const fn foreign_settings(rig: &mut Rig) {
     rig.supply.tamper = Some(("plugin-b", Tamper::ForeignSettings));
 }
 
-fn incompatible_abi(rig: &mut Rig) {
+const fn incompatible_abi(rig: &mut Rig) {
     rig.supply.tamper = Some(("plugin-b", Tamper::IncompatibleAbi));
 }
 
