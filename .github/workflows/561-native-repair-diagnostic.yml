@@ -122,16 +122,19 @@ jobs:
           grep -F 'test result: ok. 2 passed; 0 failed; 0 ignored;' artifacts/public-contracts.log
           grep -F 'test result: ok. 9 passed; 0 failed; 0 ignored;' artifacts/public-contracts.log
           bash scripts/assert-no-ignored-in-test-summary.sh artifacts/public-contracts.log
-      - name: Measure Store library coverage and assert native refusal regions
+      - name: Measure Store and owning Time tests and assert native refusal regions
         timeout-minutes: 18
         run: |
           set -euo pipefail
           timeout --signal=TERM --kill-after=30s 16m \
-            cargo llvm-cov -p pos-store --all-features --locked --lib \
+            cargo llvm-cov -p pos-store -p pos-time --all-features --locked --lib \
             --json --output-path artifacts/coverage.json \
             -- --include-ignored 2>&1 | tee artifacts/coverage-test.log
-          # Exact standalone source inventory, not the PR synthetic merge tree.
+          # Store's standalone inventory plus the Time library that owns the
+          # native interval-observer schedules; do not infer their execution
+          # from an uninstrumented focused run or omit the zero-count regions.
           grep -F 'test result: ok. 1107 passed; 0 failed; 0 ignored;' artifacts/coverage-test.log
+          test "$(grep -Ec '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' artifacts/coverage-test.log)" -eq 2
           bash scripts/assert-no-ignored-in-test-summary.sh artifacts/coverage-test.log
           python3 - <<'PY' | tee artifacts/target-regions.json
           import json
