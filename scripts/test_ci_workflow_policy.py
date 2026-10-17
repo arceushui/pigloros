@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import fnmatch
 import pathlib
 import subprocess
+import tomllib
 import unittest
 
 import yaml
@@ -330,6 +332,50 @@ def rust_gate_required(paths: list[str], patterns: list[str]) -> bool:
     return any(not excluded(path, patterns) for path in paths)
 
 
+def assert_codeql_preparation_contract(workflow: dict) -> None:
+    """Prepare real missing inputs without narrowing the native analysis."""
+    job = workflow["jobs"]["analyze"]
+    steps = job["steps"]
+    if job["timeout-minutes"] != 30 or len(steps) != 5:
+        raise AssertionError("retain the analysis deadline and complete step inventory")
+    if steps[3:] != [
+        {"uses": "github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2",
+         "with": {"languages": "rust", "build-mode": "none"}},
+        {"uses": "github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2",
+         "with": {"category": "/language:rust"}},
+    ]:
+        raise AssertionError("retain the unchanged full CodeQL initialization and analysis")
+    required = (
+        (5, (
+            'grep -F -- "$url" "$installer"',
+            'grep -F -- "$digest" "$installer"',
+            "sha256sum --check --strict -",
+            "--proto '=https' --tlsv1.2 --fail",
+            "tar --list --gzip",
+            "grep -E '^/|(^|/)\\.\\.(/|$)'",
+            "--no-same-owner --no-same-permissions",
+            'test ! -e "$generated"',
+            '"$tools_dir/wit-bindgen" rust --world community-plugin',
+            '--out-dir "$generated" plugins/community/wit',
+            'test -s "$generated/community_plugin.rs"',
+        )),
+        (1, (
+            "test ! -e scripts/asan/Cargo.toml",
+            "python3 - <<'PY'",
+            "sha256sum scripts/asan/intentional-leak.rs scripts/asan/Cargo.toml",
+        )),
+    )
+    for step, (deadline, fragments) in zip(steps[1:3], required):
+        if set(step) != {"name", "run", "timeout-minutes"} or step["timeout-minutes"] != deadline:
+            raise AssertionError("source preparation must remain bounded, unconditional and blocking")
+        run = step["run"]
+        if (not run.startswith("set -euo pipefail\n")
+                or not run.endswith('test -z "$(git diff --name-only HEAD)"\n')
+                or any(fragment not in run for fragment in fragments)
+                or any(bypass in run for bypass in ("||", "exit 0", "set +"))):
+            raise AssertionError("source preparation must retain its real inputs and refusal checks")
+
+
 class CiWorkflowPolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -338,6 +384,58 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def test_filter_has_conservative_positive_default(self) -> None:
         self.assertEqual(self.patterns[0], "**")
         self.assertEqual(set(self.patterns[1:]), EXPECTED_EXCLUDES)
+
+    def test_codeql_prepares_inputs_before_unchanged_analysis(self) -> None:
+        workflow = load_workflow(WORKFLOW_PATHS[1])
+        assert_codeql_preparation_contract(workflow)
+        steps = workflow["jobs"]["analyze"]["steps"]
+        installer = (ROOT / "plugins/community/examples/compatibility-prototype/install-tools.sh").read_text()
+        for prefix in ("url=", "digest="):
+            value = next(line[len(prefix):] for line in steps[1]["run"].splitlines()
+                         if line.startswith(prefix))
+            self.assertIn(value, installer)
+        for step in steps[1:3]:
+            subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True)
+        source = steps[2]["run"].split("python3 - <<'PY'\n")[1].split("\nPY\n")[0]
+        tree = ast.parse(source)
+        self.assertEqual(len(tree.body), 2)
+        call = tree.body[1].value
+        self.assertEqual(call.func.attr, "write_text")
+        self.assertEqual(ast.literal_eval(call.func.value.args[0]), "scripts/asan/Cargo.toml")
+        self.assertEqual(tomllib.loads(ast.literal_eval(call.args[0])), {
+            "package": {"name": "pigloros-asan-extraction-canary", "version": "0.0.0", "edition": "2021"},
+            "bin": [{"name": "intentional-leak", "path": "intentional-leak.rs"}],
+            "workspace": {},
+        })
+
+    def test_codeql_preparation_refuses_missing_or_weakened_inputs(self) -> None:
+        workflow = load_workflow(WORKFLOW_PATHS[1])
+        for index in (1, 2):
+            for key, value in (("if", "false"), ("continue-on-error", True), ("env", {})):
+                changed = copy.deepcopy(workflow)
+                changed["jobs"]["analyze"]["steps"][index][key] = value
+                with self.assertRaises(AssertionError):
+                    assert_codeql_preparation_contract(changed)
+            changed = copy.deepcopy(workflow)
+            del changed["jobs"]["analyze"]["steps"][index]
+            with self.assertRaises(AssertionError):
+                assert_codeql_preparation_contract(changed)
+        for original, replacement in (("sha256sum --check --strict -", "true"),
+                                      ("test ! -e scripts/asan/Cargo.toml", "true"),
+                                      ("test -s", "test -e")):
+            changed = copy.deepcopy(workflow)
+            for step in changed["jobs"]["analyze"]["steps"][1:3]:
+                step["run"] = step["run"].replace(original, replacement)
+            with self.assertRaises(AssertionError):
+                assert_codeql_preparation_contract(changed)
+        changed = copy.deepcopy(workflow)
+        changed["jobs"]["analyze"]["steps"][3]["with"]["config"] = "paths-ignore: [scripts]"
+        with self.assertRaises(AssertionError):
+            assert_codeql_preparation_contract(changed)
+        changed = copy.deepcopy(workflow)
+        changed["jobs"]["analyze"]["steps"][1]["run"] += "true || true\n"
+        with self.assertRaises(AssertionError):
+            assert_codeql_preparation_contract(changed)
 
     def test_scope_jobs_use_trusted_base_and_fail_closed(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
