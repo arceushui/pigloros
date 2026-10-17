@@ -64,10 +64,18 @@ leaves every Plugin available. An Event type has one owner, whichever class
 claims it first: a later claim of either class, or a claim of the Gateway's
 reserved consent type, is refused before the registry changes. The real
 guests emit only `prototype.driven`, so the community Driver proposes a
-foreign type by owning another type than the one its guest emits. A
-community proposal of a reserved host type would need a new guest Component;
-the `COMMUNITY-RESERVED-PROPOSAL` exclusion records it, and only the
-first-party refusal of that proposal is pinned.
+foreign type by owning another type than the one its guest emits.
+
+`PCF-CPH-013` (#654) covers a community proposal of a reserved host Event
+type. The lane steers the probe guest with the `reserved` selector, so the
+community Driver drafts the host's `pigloros.plugin.release-activated` type
+after the first-party sibling staged. The registry refuses the draft before
+ownership with `ReservedHostDraft`, the same refusal as the first-party
+proposal of that type, and `classify_pass_failure` classifies both as
+`Unrelated`, so the community host does not take the refusal as its own: the
+whole pass commits nothing, no Plugin is quarantined, the community receipt is
+discarded, and the next pass with the guest unsteered commits both Events. The
+`COMMUNITY-RESERVED-PROPOSAL` exclusion was removed in place.
 
 `PCF-CPH-005` to `PCF-CPH-009` (#633) cover failure containment and fail-closed
 composition. A Driver of either class that fails while it stages (a real guest
@@ -136,7 +144,12 @@ release fixtures cannot yet exercise (owned by #637).
 exclusion was removed, and #638 and #651 joined the sources. No expected value
 changed; only the store set grew, so the manifest's pinned SHA-256 changed.
 
-Every `PCH1` case (`PCF-CPH-001` to `PCF-CPH-012`) is mandatory and applicable
+`PCH1` version 1 was re-pinned in place again for #637, by user decision
+(2026-10-17): #654 appended `PCF-CPH-013` and removed the
+`COMMUNITY-RESERVED-PROPOSAL` exclusion, and #637 and #654 joined the sources.
+No expected value of an earlier case changed.
+
+Every `PCH1` case (`PCF-CPH-001` to `PCF-CPH-013`) is mandatory and applicable
 and has exactly one runner, in manifest order; the runner asserts that none is
 skipped.
 
