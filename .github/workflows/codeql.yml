@@ -29,6 +29,75 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Generate the existing Rust guest bindings for extraction
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          # Reuse the canonical generator pin, not a Cargo build or source filter.
+          installer=plugins/community/examples/compatibility-prototype/install-tools.sh
+          url=https://github.com/bytecodealliance/wit-bindgen/releases/download/v0.61.1/wit-bindgen-0.61.1-x86_64-linux.tar.gz
+          digest=1aea51f8379e36e76081c08fcc5faada928c03a6d0965a55132d72c8d966463c
+          grep -F -- "$url" "$installer"
+          grep -F -- "$digest" "$installer"
+          tools_dir="$(mktemp -d "${RUNNER_TEMP}/codeql-wit.XXXXXX")"
+          archive="${tools_dir}/wit-bindgen.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            --retry 3 --max-time 120 --output "$archive" "$url"
+          printf '%s  %s\n' "$digest" "$archive" | sha256sum --check --strict -
+          members="${tools_dir}/members.txt"
+          tar --list --gzip --file "$archive" > "$members"
+          if grep -E '^/|(^|/)\.\.(/|$)' "$members"; then
+            echo 'ERROR: unsafe generator archive path' >&2
+            exit 1
+          fi
+          tar --extract --gzip --file "$archive" --strip-components 1 \
+            --no-same-owner --no-same-permissions --directory "$tools_dir"
+          "$tools_dir/wit-bindgen" --version
+          prototype=plugins/community/examples/compatibility-prototype
+          guests=(rust-guest)
+          # Older feature heads have no probe package; any present owner must
+          # have complete inputs and receive its own canonical bindings.
+          if [[ -e "$prototype/probe-guest" || -L "$prototype/probe-guest" ]]; then
+            guests+=(probe-guest)
+          fi
+          for guest in "${guests[@]}"; do
+            guest_dir="$prototype/$guest"
+            test -d "$guest_dir"
+            test ! -L "$guest_dir"
+            test -s "$guest_dir/Cargo.toml"
+            test -s "$guest_dir/src/lib.rs"
+            generated="$guest_dir/generated"
+            test ! -e "$generated"
+            mkdir -p "$generated"
+            "$tools_dir/wit-bindgen" rust --world community-plugin \
+              --out-dir "$generated" plugins/community/wit
+            test -s "$generated/community_plugin.rs"
+            sha256sum "$generated/community_plugin.rs"
+          done
+          test -z "$(git diff --name-only HEAD)"
+      - name: Describe the unchanged standalone sanitizer fixture to extraction
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          test ! -e scripts/asan/Cargo.toml
+          # Analysis-only ownership; the real rustc/ASan invocation is unchanged.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          Path("scripts/asan/Cargo.toml").write_text('''[package]
+          name = "pigloros-asan-extraction-canary"
+          version = "0.0.0"
+          edition = "2021"
+
+          [[bin]]
+          name = "intentional-leak"
+          path = "intentional-leak.rs"
+
+          [workspace]
+          ''')
+          PY
+          sha256sum scripts/asan/intentional-leak.rs scripts/asan/Cargo.toml
+          test -z "$(git diff --name-only HEAD)"
       - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           languages: rust

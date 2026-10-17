@@ -20,6 +20,25 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHECKER_PATH = ROOT / "scripts" / "check_cargo_crap_ci_policy.py"
 RESOLVER_PATH = ROOT / "scripts" / "resolve_cargo_crap_baseline.sh"
 EXAMPLE_BASE_SHA = "a" * 40
+EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS = (
+    "src/fork_event_authority/tests/local_replay.rs",
+    "src/sqlite/tests/protected_interval_cleanup.rs",
+    "src/sqlite/fork_replay/interval_tests.rs",
+    "src/imported_fork_replay_tests.rs",
+    "src/imported_fork_replay_tests/lifecycle.rs",
+    "src/imported_fork_replay_tests/lifecycle/begin.rs",
+    "src/imported_fork_replay_tests/cumulative_budget.rs",
+    "src/imported_fork_replay_tests/cumulative_budget/compare.rs",
+    "src/imported_fork_replay_tests/cumulative_budget/read_bounds.rs",
+    "src/imported_fork_replay_tests/cumulative_budget/sqlite.rs",
+    "src/imported_fork_replay_tests/cumulative_budget/sqlite/compare.rs",
+    "src/imported_fork_replay_tests/runtime_budget.rs",
+    "src/imported_fork_replay_tests/runtime_budget/deadline.rs",
+    "src/imported_fork_replay_tests/runtime_budget/repeat.rs",
+    "src/nested_imported_fork_replay_tests.rs",
+    "src/nested_imported_fork_replay_tests/intermediate_privacy.rs",
+    "src/ordinary_fork_lineage_tests.rs",
+)
 EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "tests/**",
     "benches/**",
@@ -29,6 +48,7 @@ EXPECTED_TEST_ONLY_EXCLUSIONS = (
     "src/system_bus/tests.rs",
     "src/e2e_determinism.rs",
     "src/action_admission_tests.rs",
+    *EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS,
 )
 SPEC = importlib.util.spec_from_file_location("check_cargo_crap_ci_policy", CHECKER_PATH)
 if SPEC is None or SPEC.loader is None:
@@ -175,6 +195,15 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
             "src/protocol_tests.rs",
             "src/examples/production.rs",
             "src/system_bus/transport.rs",
+            "src/fork_event_authority/tests/production.rs",
+            "src/sqlite/tests/production.rs",
+            "src/sqlite/fork_replay/production.rs",
+            "src/imported_fork_replay_tests/production.rs",
+            "src/imported_fork_replay_tests/lifecycle/production.rs",
+            "src/imported_fork_replay_tests/cumulative_budget/production.rs",
+            "src/imported_fork_replay_tests/runtime_budget/production.rs",
+            "src/nested_imported_fork_replay_tests/production.rs",
+            "src/ordinary_fork_lineage_tests/production.rs",
         )
         for path in production_paths:
             with self.subTest(path=path):
@@ -184,6 +213,51 @@ class CargoCrapCiPolicyTests(unittest.TestCase):
                         for pattern in EXPECTED_TEST_ONLY_EXCLUSIONS
                     )
                 )
+
+    def test_internal_fork_replay_allowlist_paths_are_exact(self) -> None:
+        for path in EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS:
+            with self.subTest(path=path):
+                self.assertTrue(
+                    any(
+                        fnmatch.fnmatchcase(path, pattern)
+                        for pattern in self.cargo_crap_exclusions(
+                            "Analyze CRAP score changes"
+                        )
+                    )
+                )
+                production_neighbor = path.removesuffix(".rs") + "_production.rs"
+                self.assertFalse(
+                    any(
+                        fnmatch.fnmatchcase(production_neighbor, pattern)
+                        for pattern in EXPECTED_TEST_ONLY_EXCLUSIONS
+                    )
+                )
+
+    def test_rejects_internal_fork_replay_allowlist_scope_changes(self) -> None:
+        for step_name in (
+            "Generate trusted current baseline",
+            "Analyze CRAP score changes",
+        ):
+            for path in EXPECTED_FORK_REPLAY_TEST_EXCLUSIONS:
+                parent = str(pathlib.PurePosixPath(path).parent)
+                neighbor = path.removesuffix(".rs") + "_production.rs"
+                scope_changes = {
+                    "broadened": f"--exclude '{parent}/**'",
+                    "missing": "",
+                    "extra-production": f"--exclude '{path}' --exclude '{neighbor}'",
+                }
+                for change, replacement in scope_changes.items():
+                    with self.subTest(step=step_name, path=path, change=change):
+                        def change_scope(
+                            workflow, *, step_name=step_name, path=path,
+                            replacement=replacement,
+                        ):
+                            step = self.cargo_crap_step(workflow, step_name)
+                            step["run"] = step["run"].replace(
+                                f"--exclude '{path}'", replacement
+                            )
+
+                        self.assert_rejected(change_scope)
 
     def test_rejects_excluding_production_source(self) -> None:
         def exclude_production(workflow: dict) -> None:

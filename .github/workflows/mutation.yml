@@ -13,6 +13,16 @@ concurrency:
   group: mutation-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Installing nightly alone does not override the repository's stable pin.
+# Baseline and mutant subprocesses must select the same libtest harness.
+env:
+  # Match ASan's nightly to avoid a reported Bevy solver memory regression.
+  # https://github.com/rust-lang/rust/issues/161748
+  RUSTUP_TOOLCHAIN: nightly-2026-07-01
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # Each of the two mutation workers owns one compiler job.
+  CARGO_BUILD_JOBS: "1"
+
 jobs:
   mutation-changes:
     name: detect mutation-relevant changes
@@ -37,7 +47,7 @@ jobs:
           else
             while IFS= read -r path; do
               case "$path" in
-                *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|fixtures/conformance/*|.github/workflows/mutation.yml)
+                *.rs|Cargo.toml|*/Cargo.toml|Cargo.lock|rust-toolchain.toml|fixtures/conformance/*|.github/workflows/mutation.yml|scripts/test_mutation_workflow_policy.py)
                   relevant=true
                   break
                   ;;
@@ -46,35 +56,69 @@ jobs:
           fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
 
-  mutation:
-    name: diff mutation testing (shard ${{ matrix.shard }})
+  mutation-baseline:
+    name: mutation test baseline
     needs: mutation-changes
     if: needs.mutation-changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
+    # The baseline builds one workspace with three compiler jobs;
+    # mutant workers retain the single-job workflow default above.
     env:
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_BUILD_JOBS: "3"
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: mutation
+      # The stable core suite does not prove nightly-only libtest arguments.
+      # Prove them once on the full unmutated workspace before any shard starts.
+      - name: Prove the mutation test harness
+        # rust-cache exports 0; step scope keeps baseline and mutant builds aligned.
+        env:
+          CARGO_INCREMENTAL: "1"
+        run: |
+          set -euo pipefail
+          cargo test --workspace --all-features --locked -- \
+            -Zunstable-options --fail-fast --include-ignored --test-threads=4 \
+            2>&1 | tee "${RUNNER_TEMP}/mutation-baseline.log"
+          bash scripts/assert-no-ignored-in-test-summary.sh "${RUNNER_TEMP}/mutation-baseline.log"
+      - name: Upload mutation baseline log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-baseline
+          path: ${{ runner.temp }}/mutation-baseline.log
+          if-no-files-found: error
+
+  mutation:
+    name: diff mutation testing (shard ${{ matrix.shard }})
+    needs: [mutation-changes, mutation-baseline]
+    if: needs.mutation-changes.outputs.relevant == 'true' && needs.mutation-baseline.result == 'success'
+    runs-on: ubuntu-latest
     # The shell watchdog below exits with diagnostics before this outer limit.
     timeout-minutes: 70
     strategy:
       fail-fast: false
       max-parallel: 8
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
-          # A pinned nightly enables libtest's per-test fail-fast mode. The
-          # caller's core stage has already proved the stable workspace suite.
-          toolchain: nightly-2026-08-28
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: mutation
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
-          tool: cargo-mutants
+          tool: cargo-mutants@27.1.0
       - name: Capture pull-request diff
         run: |
           set -euo pipefail
@@ -82,10 +126,15 @@ jobs:
           git diff --relative --unified=0 \
             "origin/${base_ref}...HEAD" \
             > "${RUNNER_TEMP}/changes.diff"
-      # The caller's core test gate proves the whole workspace first. Each
-      # mutant retains the owning-package test selection used on main, while
-      # two harness threads limit four workers from multiplying concurrency.
+      # The blocking baseline above proves this exact nightly harness first.
+      # Each mutant retains the owning-package test selection used on main;
+      # Two workers with four harness threads retain eight configured slots
+      # per runner. Sixteen smaller shards split the same full selection across
+      # unchanged watchdogs; at most eight runners execute concurrently.
       - name: Run mutants in changed lines
+        # Reuse each worker's compiler state instead of rebuilding every edit.
+        env:
+          CARGO_INCREMENTAL: "1"
         run: |
           set -euo pipefail
           set +e
@@ -97,9 +146,9 @@ jobs:
             --all-features \
             --in-diff "${{ runner.temp }}/changes.diff" \
             --no-shuffle \
-            --shard "${{ matrix.shard }}/8" \
+            --shard "${{ matrix.shard }}/16" \
             --baseline skip \
-            --jobs 4 \
+            --jobs 2 \
             --timeout 120 \
             --build-timeout 600 \
             --cap-lints true \
@@ -109,15 +158,17 @@ jobs:
             -Zunstable-options \
             --fail-fast \
             --include-ignored \
-            --test-threads=2
+            --test-threads=4
           mutation_status=$?
           set -e
           if [[ "$mutation_status" -eq 124 ]]; then
             echo "Mutation shard watchdog timed out after 60 minutes."
             latest_log=""
             if [[ -d mutants.out ]]; then
+              # Consume the whole listing: head can SIGPIPE sort under pipefail,
+              # hiding both the latest log and the original timeout status.
               latest_log="$(find mutants.out -type f -name '*.log' -printf '%T@ %p\n' \
-                | sort -nr | head -n 1 | cut -d' ' -f2-)"
+                | sort -nr | sed -n '1p' | cut -d' ' -f2-)"
             fi
             if [[ -n "$latest_log" ]]; then
               echo "Most recent mutant log: $latest_log"
@@ -138,14 +189,16 @@ jobs:
     # must never be configured as independent merge approvals.
     name: diff mutation testing
     if: always()
-    needs: [mutation-changes, mutation]
+    needs: [mutation-changes, mutation-baseline, mutation]
     runs-on: ubuntu-latest
     steps:
       - name: Require every relevant mutation shard to pass
         run: |
           test "${{ needs.mutation-changes.result }}" = success
           if [[ "${{ needs.mutation-changes.outputs.relevant }}" = true ]]; then
+            test "${{ needs.mutation-baseline.result }}" = success
             test "${{ needs.mutation.result }}" = success
           else
+            test "${{ needs.mutation-baseline.result }}" = skipped
             test "${{ needs.mutation.result }}" = skipped
           fi

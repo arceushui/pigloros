@@ -22,6 +22,24 @@ Shared reference for humans and agents.
 | Change risk | `cargo-crap` over the hosted LCOV report | Existing function scores must not regress; new functions must score at most 30 for Rust-affecting changes |
 | Dependencies | **cargo-deny** | Crates/licenses/advisories/sources only |
 
+## Mutation baseline policy
+
+Before any diff-mutation shard starts, `mutation-baseline` must pass the full
+unmutated workspace with all features, the locked dependency graph, and the
+same pinned nightly and libtest arguments as the shards. The workflow sets
+`RUSTUP_TOOLCHAIN` explicitly: installing nightly alone does not override
+`rust-toolchain.toml`. A successful stable core test run cannot prove that
+nightly-only harness arguments work.
+
+Shards may use `--baseline skip` only behind that successful same-run baseline;
+the aggregate gate requires both it and every shard. This also applies to
+manual workflow dispatch. The separate baseline has the normal test job's
+30-minute limit; mutant limits remain 120 seconds for tests, 600 seconds for
+builds, and a 60-minute shard watchdog. `scripts/test_mutation_workflow_policy.py`
+locks this dependency and exercises failed, cancelled, missing and skipped
+results against the actual fan-in shell. Harness startup failures are not
+evidence that a mutation was caught.
+
 ## Coverage attribution policy
 
 The 99% line / 99% region floor allows for LLVM coverage regions that cannot be
@@ -72,6 +90,16 @@ allowed, so production Rust remains in scope regardless of module placement.
 Repository
 `.cargo-crap.toml` files are prohibited so a change cannot suppress or truncate
 the report.
+
+The internal-test allowlist includes the `#[cfg(test)]` imported Fork Replay,
+cumulative-budget, public-consumer lifecycle (including native begin refusal),
+native Local replay, and protected-interval acquisition/cleanup companions.
+Keep these fixtures in their private module trees; moving a private
+unit module beneath `tests/**` does not turn it into a Cargo integration target.
+Each companion has an exact literal path in both baseline and analysis commands,
+mirrored by `scripts/check_cargo_crap_ci_policy.py` and its independent adversarial
+tests. Family wildcards, production neighbours, and score-tolerance changes
+remain rejected; all fixture cases still execute in the workspace test run.
 
 Each successful `main` workflow publishes a 90-day baseline artifact named for
 its exact commit. A pull request downloads the artifact for its base SHA, so

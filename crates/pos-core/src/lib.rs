@@ -17,6 +17,7 @@ pub mod authority;
 #[cfg(test)]
 extern crate self as pos_core;
 
+pub(crate) mod canonical_length;
 pub mod clock;
 pub mod consent;
 pub mod counterfactual_dependency;
@@ -28,6 +29,8 @@ pub mod error;
 pub mod event;
 pub mod executable_budget;
 pub mod factual_dependency;
+pub use canonical_length::CanonicalLengthErrorV1;
+
 pub mod fork_admission;
 pub mod fork_admission_authority;
 pub mod fork_admission_command;
@@ -585,8 +588,9 @@ pub use key_registry::{
     deletion_receipt, KeyDestructionBeginOutcomeV1, KeyDestructionOutcomeV1, KeyDestructionPortV1,
     KeyDestructionRequestV1, KeyIdentityV1, KeyRecordV1, KeyRegistrationOutcomeV1,
     KeyRegistrationV1, KeyRegistryEncryptionPortV1, KeyRegistryErrorV1,
-    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryPortV1, KeyRegistrySigningPortV1,
-    KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, OwnerIdV1,
+    KeyRegistryHistoricalDecryptionPortV1, KeyRegistryPortV1, KeyRegistryReadErrorV1,
+    KeyRegistryReadGuardV1, KeyRegistryReadRefusedV1, KeyRegistryReadWorkV1,
+    KeyRegistrySigningPortV1, KeyRegistryStateV1, KeyRoleV1, KeyTombstoneV1, OwnerIdV1,
 };
 pub use manifest::{
     checked_repro_manifest_input_len, AdapterRecord, ReproManifest, ReproManifestError,

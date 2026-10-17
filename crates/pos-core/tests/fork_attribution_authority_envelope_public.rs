@@ -861,6 +861,7 @@ fn import_admission_record_derives_from_the_exact_envelope() -> TestResult {
     assert_eq!(value.final_logical_head, 4);
     assert_eq!(value.closure_root, envelope.unsigned().closure_root());
     let bytes = admission.to_canonical_cbor();
+    assert_eq!(admission.canonical_cbor_len(), Ok(bytes.len()));
     assert_eq!(&bytes[..6], &[0x8c, 0x64, b'I', b'F', b'A', b'1']);
     assert_eq!(
         ImportedForkAttributionAdmissionV1::from_canonical_cbor(&bytes)?,
@@ -903,6 +904,7 @@ fn import_admission_record_enforces_bounds_and_canonical_bytes() -> TestResult {
     let widest = ImportedForkAttributionAdmissionV1::new(admission_input()?)?;
     let bytes = widest.to_canonical_cbor();
     assert_eq!(bytes.len(), 428);
+    assert_eq!(widest.canonical_cbor_len(), Ok(bytes.len()));
     assert!(bytes.len() <= MAX_IMPORTED_FORK_ATTRIBUTION_ADMISSION_BYTES_V1);
     let decode_admission = ImportedForkAttributionAdmissionV1::from_canonical_cbor;
     assert_eq!(decode_admission(&bytes)?, widest);

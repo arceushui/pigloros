@@ -144,10 +144,10 @@ no more than eight heavy runners at once.
 ```mermaid
 flowchart TD
     S["ci_change_scope"] --> P["Fast preflight"]
-    P --> C["Core: four parallel jobs"]
+    P --> C["Core: at most eight runners"]
     C --> R["cargo-crap"]
     R --> N["Normal checks: at most eight runners"]
-    N --> M["Mutation: at most eight shards"]
+    N --> M["Mutation: sixteen shards, at most eight runners"]
     M --> A["ASan: six shards"]
     A --> G["ci-gate"]
     P -. "failure" .-> X["Stop downstream work"]
@@ -185,13 +185,15 @@ After preflight, the core jobs start together:
 ```mermaid
 flowchart TD
     P["preflight-gate"] --> F["fmt"]
-    P --> T["test: checks and doctests"]
+    P --> T["test: doctests"]
+    P --> M["feature-matrix"]
     P --> S["test-shard x3: nextest partitions"]
     P --> C["clippy"]
     P --> V["one coverage execution"]
     S --> A["test-shards: every test ran once"]
     F --> G["core-gate"]
     T --> G
+    M --> G
     A --> G
     C --> G
     V --> G
@@ -200,28 +202,32 @@ flowchart TD
 The core checks and their immediate cargo-crap consumer mean:
 
 1. `fmt` runs `cargo fmt --all -- --check`.
-2. `test` checks the workspace with default features disabled and runs the
-   doctests with `cargo test --doc -- --include-ignored`. The `test-shard`
-   matrix runs every other test with cargo-nextest `--run-ignored all`, split
+2. `test` runs workspace doctests with all features, the locked dependency graph,
+   and `--include-ignored`. The `test-shard` matrix runs every other test with
+   cargo-nextest `--run-ignored all`, split
    across three runners by `--partition slice:k/3`. `test-shards` then proves
    from the shard summaries that every test ran exactly once and none was
    skipped. The test gate is workspace-wide; Cargo has no built-in
    changed-test selector. The crypto dependencies that dominate test CPU time
    build at `opt-level = 3` in the dev and test profiles (see `Cargo.toml`);
    workspace crates stay unoptimized.
-3. `clippy` runs all targets with all features and warnings denied and the
+3. `feature-matrix` checks all workspace targets both without default features
+   and with all features, runs the no-default-feature Plugin trust registry
+   Memory vectors, and proves reference evaluator independence and the
+   conformance adapter dependency graph.
+4. `clippy` runs all targets with all features and warnings denied and the
    repository's pedantic policy. It is the all-features type check.
-4. `coverage` performs one complete `cargo llvm-cov nextest` run. `covgate`
+5. `coverage` performs one complete `cargo llvm-cov nextest` run. `covgate`
    checks changed production Rust code first from that report, then the same
    report is checked against the full workspace 99% line and 99% region
    floor. The resulting LCOV is uploaded for the next gate.
-5. `cargo-crap` consumes that LCOV and a trusted baseline. Existing function
+6. `cargo-crap` consumes that LCOV and a trusted baseline. Existing function
    scores may not regress, and new functions must score at most 30.
 
 There is no custom changed-test mapper. Cargo and nextest do not provide a
-reliable affected-test mapping for this workspace, so the complete test suite
-runs once. Coverage still checks changed production code first without a
-second instrumented execution:
+reliable affected-test mapping for this workspace, so the core nextest shards
+partition the complete suite. Coverage still checks changed production code
+first without a second instrumented execution:
 
 ```mermaid
 flowchart LR
@@ -268,15 +274,25 @@ successful normal stage on `main`, not on pull requests.
 ### Stages 4 and 5: mutation, then ASan
 
 Mutation and ASan cannot begin until every cheaper blocking gate passes.
-Mutation is changed-line scoped and uses at most eight shards. It skips its own
-workspace baseline because the identical stable full-workspace test command has
-already passed in the core stage.
+Mutation is changed-line scoped and uses sixteen shards on at most eight
+concurrent runners. Each runner uses two mutation workers with one compiler job
+each and four libtest harness threads per worker. These eight configured harness
+slots are not a hard CPU or process limit. The smaller shards retain the full
+selection and the existing 60-minute watchdog, 120-second Test limit and
+600-second Build limit; they do not omit slow tests or extend their deadlines.
+A separate `mutation-baseline` first runs the full unmutated workspace with all features,
+the locked dependency graph, and the same pinned nightly and libtest arguments
+as the shards. Stable core tests cannot prove the nightly-only harness. Only
+after that same-run baseline succeeds may shards use `--baseline skip`; the
+aggregate requires both the baseline and every shard.
 
 ```mermaid
 flowchart TD
     G["standard-gate"] --> R{"Mutation-relevant PR?"}
     R -->|"no"| S["Successful skip"]
-    R -->|"yes"| M["Eight changed-line shards"]
+    R -->|"yes"| B["Full same-nightly mutation baseline"]
+    B --> M["Sixteen changed-line shards, at most eight runners"]
+    B --> MG["diff mutation testing"]
     M --> MG["diff mutation testing"]
     S --> A["ASan"]
     MG --> A
