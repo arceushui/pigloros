@@ -1,0 +1,645 @@
+{
+  "magic": "PCH1",
+  "version": 1,
+  "suite": "pigloros.pipeline-community-host",
+  "sources": [
+    "#489",
+    "#631",
+    "#632",
+    "#633",
+    "#634",
+    "#635",
+    "ADR-021",
+    "ADR-061 r8"
+  ],
+  "exclusions": [
+    {
+      "id": "COMMUNITY-RESERVED-PROPOSAL",
+      "reason": "The real community guests emit only prototype.driven, so a community Driver's proposal of a reserved host Event type needs a new guest Component; this profile proves only the first-party refusal of that proposal and the refused reserved-type claim of either isolation class",
+      "owner": "#637"
+    },
+    {
+      "id": "INVALID-GUEST-OUTPUT",
+      "reason": "The real community guests always return well-formed output, so a community Driver's invalid guest output (InvalidGuestOutput) needs a new guest Component, and an ABI- or manifest-invalid release needs a malformed release fixture; this profile proves only the invalid pin, registration and denied-capability release refusals of either isolation class and, through PCF-CPH-003, the first-party invalid-draft refusals",
+      "owner": "#637"
+    },
+    {
+      "id": "OTHER-RESOURCE-LIMITS",
+      "reason": "PCF-CPH-010 exhausts a community release through its memory budget only; the signed-release test world fixes the fuel, host-call and output budgets of a release, and the real guests make one host call and emit one small Event, so the fuel, host-call and output limits of a community Driver on the real worker need a release shape with those budgets or a new guest Component",
+      "owner": "#637"
+    },
+    {
+      "id": "SQLITE-STORE",
+      "reason": "The community pass world runs on MemoryStore only, so this profile proves no SQLite parity of the community path",
+      "owner": "#638"
+    }
+  ],
+  "cases": [
+    {
+      "id": "PCF-CPH-001",
+      "title": "A first-party native Driver and a community Driver on the real worker commit their Event through the same pass with the same authority outcome, and Local equals Air-Gapped",
+      "sources": [
+        "#489",
+        "#631",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "first-party.result": "Committed",
+        "first-party.timeline": "1:prototype.driven",
+        "first-party.entity": "01040G2081040G2081040G2081",
+        "first-party.receipt.names-events": "true",
+        "first-party.steps": "1",
+        "first-party.availability": "Available",
+        "first-party.owner": "prototype.driven=OperatorTrustedNative",
+        "first-party.follows-host-schedule": "true",
+        "community-local.result": "Committed",
+        "community-local.timeline": "1:prototype.driven",
+        "community-local.entity": "01040G2081040G2081040G2081",
+        "community-local.receipt.names-events": "true",
+        "community-local.steps": "1",
+        "community-local.availability": "Available",
+        "community-local.owner": "prototype.driven=GovernedCommunity",
+        "community-local.follows-host-schedule": "true",
+        "community-air-gapped.result": "Committed",
+        "community-air-gapped.timeline": "1:prototype.driven",
+        "community-air-gapped.entity": "01040G2081040G2081040G2081",
+        "community-air-gapped.receipt.names-events": "true",
+        "community-air-gapped.steps": "1",
+        "community-air-gapped.availability": "Available",
+        "community-air-gapped.owner": "prototype.driven=GovernedCommunity",
+        "community-air-gapped.follows-host-schedule": "true",
+        "parity.first-party-equals-community": "true",
+        "parity.local-equals-air-gapped": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-002",
+      "title": "In one registry both Drivers commit in one batch in host schedule order, whichever isolation class is registered first",
+      "sources": [
+        "#489",
+        "#631",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "twin-first.result": "Committed",
+        "twin-first.timeline": "1:parity.first-party,2:prototype.driven",
+        "twin-first.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "twin-first.receipt.names-events": "true",
+        "twin-first.steps": "1,1",
+        "twin-first.availability": "Available,Available",
+        "twin-first.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "twin-first.follows-host-schedule": "true",
+        "community-first.result": "Committed",
+        "community-first.timeline": "1:prototype.driven,2:parity.first-party",
+        "community-first.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "community-first.receipt.names-events": "true",
+        "community-first.steps": "1,1",
+        "community-first.availability": "Available,Available",
+        "community-first.owner": "prototype.driven=GovernedCommunity,parity.first-party=OperatorTrustedNative",
+        "community-first.follows-host-schedule": "true",
+        "same-events-either-order": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-003",
+      "title": "A first-party Driver and a community Driver on the real worker that propose another Plugin's Event type are refused with the same typed authority error, commit nothing and quarantine no Plugin; a first-party proposal of a reserved host type is refused too",
+      "sources": [
+        "#489",
+        "#632",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "first-party.result": "Failed",
+        "first-party.timeline": "",
+        "first-party.entity": "",
+        "first-party.receipt.names-events": "false",
+        "first-party.steps": "1,1",
+        "first-party.availability": "Available,Available",
+        "first-party.owner": "",
+        "first-party.follows-host-schedule": "true",
+        "first-party.refusal": "Authority(UnauthorizedSource)",
+        "community.result": "Failed",
+        "community.timeline": "",
+        "community.entity": "",
+        "community.receipt.names-events": "false",
+        "community.steps": "1,1",
+        "community.availability": "Available,Available",
+        "community.owner": "",
+        "community.follows-host-schedule": "true",
+        "community.refusal": "Authority(UnauthorizedSource)",
+        "first-party-reserved.result": "Failed",
+        "first-party-reserved.timeline": "",
+        "first-party-reserved.entity": "",
+        "first-party-reserved.receipt.names-events": "false",
+        "first-party-reserved.steps": "1,1",
+        "first-party-reserved.availability": "Available,Available",
+        "first-party-reserved.owner": "",
+        "first-party-reserved.follows-host-schedule": "true",
+        "first-party-reserved.refusal": "ReservedHostDraft(pigloros.plugin.release-activated)",
+        "parity.first-party-equals-community": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-004",
+      "title": "An Event type has one owner whichever isolation class claims it first: a community claim on a first-party type, a first-party claim on a community type and either class's claim on a reserved consent type are refused alike before the registry changes",
+      "sources": [
+        "#489",
+        "#632",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "community-claim.refusal": "DuplicateEventTypeOwner(prototype.driven)",
+        "community-claim.registry-unchanged": "true",
+        "community-claim.result": "Committed",
+        "community-claim.timeline": "1:prototype.driven",
+        "community-claim.entity": "01040G2081040G2081040G2081",
+        "community-claim.receipt.names-events": "true",
+        "community-claim.steps": "1",
+        "community-claim.availability": "Available",
+        "community-claim.owner": "prototype.driven=OperatorTrustedNative",
+        "community-claim.follows-host-schedule": "true",
+        "first-party-claim.refusal": "DuplicateEventTypeOwner(prototype.driven)",
+        "first-party-claim.registry-unchanged": "true",
+        "first-party-claim.result": "Committed",
+        "first-party-claim.timeline": "1:prototype.driven",
+        "first-party-claim.entity": "01040G2081040G2081040G2081",
+        "first-party-claim.receipt.names-events": "true",
+        "first-party-claim.steps": "1",
+        "first-party-claim.availability": "Available",
+        "first-party-claim.owner": "prototype.driven=GovernedCommunity",
+        "first-party-claim.follows-host-schedule": "true",
+        "reserved-claim.first-party.refusal": "ReservedConsentEventType(consent.revoked.v1)",
+        "reserved-claim.community.refusal": "ReservedConsentEventType(consent.revoked.v1)",
+        "reserved-claim.registry-unchanged": "true",
+        "parity.same-refusal-either-class": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-005",
+      "title": "A Driver of either isolation class that fails while it stages, a community guest trap on the real worker or a first-party Driver failure, discards the whole scheduled pass including the other class's staged output, leaves the sibling available, quarantines only the trapping community Plugin, and the next pass commits",
+      "sources": [
+        "#489",
+        "#633",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "community-fails.result": "Failed",
+        "community-fails.timeline": "",
+        "community-fails.entity": "",
+        "community-fails.receipt.names-events": "false",
+        "community-fails.steps": "1,1",
+        "community-fails.availability": "Available,Trapped",
+        "community-fails.owner": "",
+        "community-fails.follows-host-schedule": "true",
+        "community-fails.refusal": "CommunityPlugin(ComponentTrap) host=ComponentTrap { class: Unreachable, reproduction: Unverified }",
+        "community-recovered.result": "Committed",
+        "community-recovered.timeline": "1:parity.first-party,2:prototype.driven",
+        "community-recovered.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "community-recovered.receipt.names-events": "true",
+        "community-recovered.steps": "1,1",
+        "community-recovered.availability": "Available,Available",
+        "community-recovered.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "community-recovered.follows-host-schedule": "true",
+        "community.community-receipts": "ComponentTrap/Discarded,none/Committed",
+        "first-party-fails.result": "Failed",
+        "first-party-fails.timeline": "",
+        "first-party-fails.entity": "",
+        "first-party-fails.receipt.names-events": "false",
+        "first-party-fails.steps": "1,1",
+        "first-party-fails.availability": "Available,Available",
+        "first-party-fails.owner": "",
+        "first-party-fails.follows-host-schedule": "true",
+        "first-party-fails.refusal": "DriverPanicked(first-party-failing)",
+        "first-party-recovered.result": "Committed",
+        "first-party-recovered.timeline": "1:prototype.driven,2:parity.first-party",
+        "first-party-recovered.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "first-party-recovered.receipt.names-events": "true",
+        "first-party-recovered.steps": "1,1",
+        "first-party-recovered.availability": "Available,Available",
+        "first-party-recovered.owner": "prototype.driven=GovernedCommunity,parity.first-party=OperatorTrustedNative",
+        "first-party-recovered.follows-host-schedule": "true",
+        "first-party.community-receipts": "none/Discarded,none/Committed",
+        "parity.whole-pass-discarded-either-class": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-006",
+      "title": "A failing community Driver launches exactly one worker and is never replaced by a registered first-party Plugin with the same domain contract; a quarantined Plugin refuses the whole pass, and recovery is a new pass under new invocation identities, which the context source issues and this case models, that never reuses the failed output",
+      "sources": [
+        "#489",
+        "#633",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "failed.result": "Failed",
+        "failed.timeline": "",
+        "failed.entity": "",
+        "failed.receipt.names-events": "false",
+        "failed.steps": "1,0",
+        "failed.availability": "Trapped,Available",
+        "failed.owner": "",
+        "failed.follows-host-schedule": "true",
+        "failed.refusal": "CommunityPlugin(ComponentTrap) host=ComponentTrap { class: Unreachable, reproduction: Unverified }",
+        "quarantined.result": "Failed",
+        "quarantined.timeline": "",
+        "quarantined.entity": "",
+        "quarantined.receipt.names-events": "false",
+        "quarantined.steps": "0,0",
+        "quarantined.availability": "Trapped,Available",
+        "quarantined.owner": "",
+        "quarantined.follows-host-schedule": "true",
+        "quarantined.refusal": "ImplementationUnavailable(Trapped)",
+        "recovered.result": "Committed",
+        "recovered.timeline": "1:prototype.driven,2:parity.first-party",
+        "recovered.entity": "01040G2081040G2081040G2080,01040G2081040G2081040G2081",
+        "recovered.receipt.names-events": "true",
+        "recovered.steps": "1,1",
+        "recovered.availability": "Available,Available",
+        "recovered.owner": "prototype.driven=GovernedCommunity,parity.first-party=OperatorTrustedNative",
+        "recovered.follows-host-schedule": "true",
+        "recovered.community-receipts": "ComponentTrap/Discarded,none/Committed",
+        "recovered.fresh-id-new-receipt": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-007",
+      "title": "A required but unregistered Plugin of either isolation class fails exact resolution with the same MissingImplementation (a resolver-level parity), and a community member without an active release is refused at the trust gate before any Driver runs",
+      "sources": [
+        "#489",
+        "#633",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "registered.resolve": "Resolved",
+        "first-party-missing.resolve": "MissingImplementation",
+        "community-missing.resolve": "MissingImplementation",
+        "community-not-active.result": "Refused",
+        "community-not-active.timeline": "",
+        "community-not-active.entity": "",
+        "community-not-active.receipt.names-events": "false",
+        "community-not-active.steps": "0,0",
+        "community-not-active.availability": "Available,Available",
+        "community-not-active.owner": "",
+        "community-not-active.follows-host-schedule": "true",
+        "community-not-active.gate": "ArtifactTrustDenied(NotActive)",
+        "parity.same-missing-either-class": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-008",
+      "title": "An unavailable Plugin of either isolation class, marked by the host or quarantined through an injected host refusal, refuses the whole pass with the same ImplementationUnavailable before any Driver runs, and the pass resumes once the Plugin is available again",
+      "sources": [
+        "#489",
+        "#633",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "first-party-revoked.result": "Failed",
+        "first-party-revoked.timeline": "",
+        "first-party-revoked.entity": "",
+        "first-party-revoked.receipt.names-events": "false",
+        "first-party-revoked.steps": "0,0",
+        "first-party-revoked.availability": "Available,Revoked",
+        "first-party-revoked.owner": "",
+        "first-party-revoked.follows-host-schedule": "true",
+        "first-party-revoked.refusal": "ImplementationUnavailable(Revoked)",
+        "first-party-unavailable.result": "Failed",
+        "first-party-unavailable.timeline": "",
+        "first-party-unavailable.entity": "",
+        "first-party-unavailable.receipt.names-events": "false",
+        "first-party-unavailable.steps": "0,0",
+        "first-party-unavailable.availability": "Available,Unavailable",
+        "first-party-unavailable.owner": "",
+        "first-party-unavailable.follows-host-schedule": "true",
+        "first-party-unavailable.refusal": "ImplementationUnavailable(Unavailable)",
+        "first-party-resumed.result": "Committed",
+        "first-party-resumed.timeline": "1:prototype.driven,2:parity.first-party",
+        "first-party-resumed.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "first-party-resumed.receipt.names-events": "true",
+        "first-party-resumed.steps": "1,1",
+        "first-party-resumed.availability": "Available,Available",
+        "first-party-resumed.owner": "prototype.driven=GovernedCommunity,parity.first-party=OperatorTrustedNative",
+        "first-party-resumed.follows-host-schedule": "true",
+        "first-party-resumed.refusal": "none",
+        "community-revoked.result": "Failed",
+        "community-revoked.timeline": "",
+        "community-revoked.entity": "",
+        "community-revoked.receipt.names-events": "false",
+        "community-revoked.steps": "0,0",
+        "community-revoked.availability": "Available,Revoked",
+        "community-revoked.owner": "",
+        "community-revoked.follows-host-schedule": "true",
+        "community-revoked.refusal": "ImplementationUnavailable(Revoked)",
+        "community-unavailable.result": "Failed",
+        "community-unavailable.timeline": "",
+        "community-unavailable.entity": "",
+        "community-unavailable.receipt.names-events": "false",
+        "community-unavailable.steps": "0,0",
+        "community-unavailable.availability": "Available,Unavailable",
+        "community-unavailable.owner": "",
+        "community-unavailable.follows-host-schedule": "true",
+        "community-unavailable.refusal": "ImplementationUnavailable(Unavailable)",
+        "community-resumed.result": "Committed",
+        "community-resumed.timeline": "1:parity.first-party,2:prototype.driven",
+        "community-resumed.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "community-resumed.receipt.names-events": "true",
+        "community-resumed.steps": "1,1",
+        "community-resumed.availability": "Available,Available",
+        "community-resumed.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "community-resumed.follows-host-schedule": "true",
+        "community-resumed.refusal": "none",
+        "parity.same-refusal-either-class": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-009",
+      "title": "An invalid implementation fails closed: a pin of the other isolation class fails exact resolution with the same IncompatibleImplementation for either class, and a community Driver under a native pin or a release with a denied capability is refused without changing the registry",
+      "sources": [
+        "#489",
+        "#633",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "first-party-pin.resolve": "IncompatibleImplementation(Isolation)",
+        "community-pin.resolve": "IncompatibleImplementation(Isolation)",
+        "native-pin.refusal": "IncompatibleImplementation(Isolation)",
+        "native-pin.registry-unchanged": "true",
+        "denied-release.refusal": "CapabilityDenied",
+        "denied-release.registry-unchanged": "true",
+        "parity.same-refusal-either-class": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-010",
+      "title": "An over-budget Plugin of either isolation class (a community release over its memory budget on the real worker, or a first-party Driver over the host Tick draft budget) fails the whole pass with a typed refusal and discards the other class's staged output. Only the exhausted community Plugin is quarantined, and its release stays exhausted once cleared. The next pass within budget commits (for the community path, in a fresh lane over an in-budget successor release)",
+      "sources": [
+        "#489",
+        "#634",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "community-exhausted.result": "Failed",
+        "community-exhausted.timeline": "",
+        "community-exhausted.entity": "",
+        "community-exhausted.receipt.names-events": "false",
+        "community-exhausted.steps": "1,1",
+        "community-exhausted.availability": "Available,ResourceExhausted",
+        "community-exhausted.owner": "",
+        "community-exhausted.follows-host-schedule": "true",
+        "community-exhausted.refusal": "CommunityPlugin(MemoryLimitExceeded) host=MemoryLimitExceeded",
+        "community-quarantined.result": "Failed",
+        "community-quarantined.timeline": "",
+        "community-quarantined.entity": "",
+        "community-quarantined.receipt.names-events": "false",
+        "community-quarantined.steps": "0,0",
+        "community-quarantined.availability": "Available,ResourceExhausted",
+        "community-quarantined.owner": "",
+        "community-quarantined.follows-host-schedule": "true",
+        "community-quarantined.refusal": "ImplementationUnavailable(ResourceExhausted)",
+        "community-cleared.result": "Failed",
+        "community-cleared.timeline": "",
+        "community-cleared.entity": "",
+        "community-cleared.receipt.names-events": "false",
+        "community-cleared.steps": "1,1",
+        "community-cleared.availability": "Available,ResourceExhausted",
+        "community-cleared.owner": "",
+        "community-cleared.follows-host-schedule": "true",
+        "community-cleared.refusal": "CommunityPlugin(MemoryLimitExceeded) host=MemoryLimitExceeded",
+        "community.community-receipts": "MemoryLimitExceeded/Discarded,MemoryLimitExceeded/Discarded",
+        "community-successor.result": "Committed",
+        "community-successor.timeline": "1:parity.first-party,2:prototype.driven",
+        "community-successor.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "community-successor.receipt.names-events": "true",
+        "community-successor.steps": "1,1",
+        "community-successor.availability": "Available,Available",
+        "community-successor.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "community-successor.follows-host-schedule": "true",
+        "first-party-exhausted.result": "Failed",
+        "first-party-exhausted.timeline": "",
+        "first-party-exhausted.entity": "",
+        "first-party-exhausted.receipt.names-events": "false",
+        "first-party-exhausted.steps": "1,1",
+        "first-party-exhausted.availability": "Available,Available",
+        "first-party-exhausted.owner": "",
+        "first-party-exhausted.follows-host-schedule": "true",
+        "first-party-exhausted.refusal": "ResourceExhausted(host-tick-budget,3>2)",
+        "first-party-recovered.result": "Committed",
+        "first-party-recovered.timeline": "1:prototype.driven,2:parity.first-party",
+        "first-party-recovered.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "first-party-recovered.receipt.names-events": "true",
+        "first-party-recovered.steps": "1,1",
+        "first-party-recovered.availability": "Available,Available",
+        "first-party-recovered.owner": "prototype.driven=GovernedCommunity,parity.first-party=OperatorTrustedNative",
+        "first-party-recovered.follows-host-schedule": "true",
+        "first-party.community-receipts": "none/Discarded,none/Committed",
+        "parity.whole-pass-discarded-either-class": "true",
+        "parity.next-pass-within-budget-commits": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-011",
+      "title": "A Replay registry over a first-party Driver and a community Driver built for the real worker folds the Events a live pass of both committed into the projection the live registry folds (equal by construction: both run the same fold over the same Events), refuses to step its Drivers, steps no first-party Driver and launches no worker, and the Local and Air-Gapped passes commit and fold the same",
+      "sources": [
+        "#489",
+        "#635",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "local-live.result": "Committed",
+        "local-live.timeline": "1:parity.first-party,2:prototype.driven",
+        "local-live.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "local-live.receipt.names-events": "true",
+        "local-live.steps": "1,1",
+        "local-live.availability": "Available,Available",
+        "local-live.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "local-live.follows-host-schedule": "true",
+        "local.live-projection": "1:parity.first-party,2:prototype.driven",
+        "local.replay-projection": "1:parity.first-party,2:prototype.driven",
+        "local.replay-equals-live": "true",
+        "local.replay-step": "ModeMismatch(Live,Replay)",
+        "local.replay-steps": "0,0",
+        "local.live-steps-during-replay": "0,0",
+        "air-gapped-live.result": "Committed",
+        "air-gapped-live.timeline": "1:parity.first-party,2:prototype.driven",
+        "air-gapped-live.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "air-gapped-live.receipt.names-events": "true",
+        "air-gapped-live.steps": "1,1",
+        "air-gapped-live.availability": "Available,Available",
+        "air-gapped-live.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "air-gapped-live.follows-host-schedule": "true",
+        "air-gapped.live-projection": "1:parity.first-party,2:prototype.driven",
+        "air-gapped.replay-projection": "1:parity.first-party,2:prototype.driven",
+        "air-gapped.replay-equals-live": "true",
+        "air-gapped.replay-step": "ModeMismatch(Live,Replay)",
+        "air-gapped.replay-steps": "0,0",
+        "air-gapped.live-steps-during-replay": "0,0",
+        "parity.replay-equals-live-either-class": "true",
+        "parity.local-equals-air-gapped": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-012",
+      "title": "A pass of either isolation class whose commit acknowledgement is lost is in doubt with its batch committed, and recovery returns a receipt naming exactly that batch without committing again, re-running the first-party Driver or launching a worker, and only once",
+      "sources": [
+        "#489",
+        "#635",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "mixed-lost.result": "InDoubt",
+        "mixed-lost.timeline": "1:parity.first-party,2:prototype.driven",
+        "mixed-lost.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "mixed-lost.receipt.names-events": "false",
+        "mixed-lost.steps": "1,1",
+        "mixed-lost.availability": "Available,Available",
+        "mixed-lost.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "mixed-lost.follows-host-schedule": "true",
+        "mixed-lost.refusal": "none",
+        "mixed-recovered.result": "Committed",
+        "mixed-recovered.timeline": "1:parity.first-party,2:prototype.driven",
+        "mixed-recovered.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "mixed-recovered.receipt.names-events": "true",
+        "mixed-recovered.steps": "0,0",
+        "mixed-recovered.availability": "Available,Available",
+        "mixed-recovered.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "mixed-recovered.follows-host-schedule": "true",
+        "mixed-recovered.refusal": "none",
+        "mixed.timeline-unchanged-by-recovery": "true",
+        "mixed.recover-again": "NoScheduledAdmissionInDoubt",
+        "mixed-lost.community-receipts": "none/Staged",
+        "mixed-lost.community-state": "initial",
+        "mixed-recovered.community-receipts": "none/Committed",
+        "mixed-recovered.community-state": "adopted",
+        "first-party-lost.result": "InDoubt",
+        "first-party-lost.timeline": "1:prototype.driven",
+        "first-party-lost.entity": "01040G2081040G2081040G2081",
+        "first-party-lost.receipt.names-events": "false",
+        "first-party-lost.steps": "1",
+        "first-party-lost.availability": "Available",
+        "first-party-lost.owner": "prototype.driven=OperatorTrustedNative",
+        "first-party-lost.follows-host-schedule": "true",
+        "first-party-lost.refusal": "none",
+        "first-party-recovered.result": "Committed",
+        "first-party-recovered.timeline": "1:prototype.driven",
+        "first-party-recovered.entity": "01040G2081040G2081040G2081",
+        "first-party-recovered.receipt.names-events": "true",
+        "first-party-recovered.steps": "0",
+        "first-party-recovered.availability": "Available",
+        "first-party-recovered.owner": "prototype.driven=OperatorTrustedNative",
+        "first-party-recovered.follows-host-schedule": "true",
+        "first-party-recovered.refusal": "none",
+        "first-party.timeline-unchanged-by-recovery": "true",
+        "first-party.recover-again": "NoScheduledAdmissionInDoubt",
+        "parity.recovered-without-rerun-either-class": "true"
+      }
+    }
+  ]
+}

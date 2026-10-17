@@ -18,11 +18,6 @@
       "id": "GATEWAY-HUMAN-SUCCESS-PATH",
       "reason": "Wave 8 has no installed Gateway action EPF1, so the authorized Gateway composition fails closed and its human success path is not publicly composable",
       "owner": "#461"
-    },
-    {
-      "id": "COMMUNITY-PLUGIN-HOST",
-      "reason": "Missing, invalid or over-budget governed Plugins and first-party versus community-replaceable parity need the ADR-061 community host",
-      "owner": "#489"
     }
   ],
   "cases": [

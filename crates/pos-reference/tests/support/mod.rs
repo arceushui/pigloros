@@ -672,6 +672,18 @@ pub fn air_gapped_corpus() -> TestResult<Corpus> {
     })
 }
 
+/// Build a complete Air-Gapped corpus with one selected operational watchdog.
+///
+/// # Errors
+/// Returns an error if canonical encoding or fixture construction fails.
+pub fn air_gapped_corpus_with_watchdog_ms(watchdog_ms: u64) -> TestResult<Corpus> {
+    corpus_for_options(CorpusOptions {
+        mode: 1,
+        watchdog_ms,
+        ..CorpusOptions::default()
+    })
+}
+
 /// Build a complete corpus with one selected operational watchdog.
 ///
 /// # Errors
