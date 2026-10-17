@@ -412,7 +412,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(set(self.patterns[1:]), EXPECTED_EXCLUDES)
 
     def test_codeql_prepares_inputs_before_unchanged_analysis(self) -> None:
-        workflow = load_workflow(WORKFLOW_PATHS[1])
+        workflow = load_workflow(CI_WORKFLOW_PATH.with_name("codeql.yml"))
         assert_codeql_preparation_contract(workflow)
         steps = workflow["jobs"]["analyze"]["steps"]
         installer = (ROOT / "plugins/community/examples/compatibility-prototype/install-tools.sh").read_text()
@@ -435,7 +435,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         })
 
     def test_codeql_preparation_refuses_missing_or_weakened_inputs(self) -> None:
-        workflow = load_workflow(WORKFLOW_PATHS[1])
+        workflow = load_workflow(CI_WORKFLOW_PATH.with_name("codeql.yml"))
         for index in (1, 2):
             for key, value in (("if", "false"), ("continue-on-error", True), ("env", {})):
                 changed = copy.deepcopy(workflow)
@@ -464,7 +464,7 @@ class CiWorkflowPolicyTests(unittest.TestCase):
             assert_codeql_preparation_contract(changed)
 
     def test_codeql_preparation_refuses_non_executing_checksum_text(self) -> None:
-        workflow = load_workflow(WORKFLOW_PATHS[1])
+        workflow = load_workflow(CI_WORKFLOW_PATH.with_name("codeql.yml"))
         run = workflow["jobs"]["analyze"]["steps"][1]["run"]
         checksum = next(line for line in run.splitlines()
                         if line.startswith("printf ") and "sha256sum --check" in line)
