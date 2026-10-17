@@ -145,7 +145,6 @@ fn effective_entry(
 
 /// The durable prefix of the stepped Timeline, read before the commit (ADR-119 section 4.4
 /// step 3).
-#[derive(Clone, Debug)]
 pub(super) struct PrefixV1 {
     /// The Timeline's Logical Head, the `expected_logical_head` of the commit.
     pub(super) head: Seq,

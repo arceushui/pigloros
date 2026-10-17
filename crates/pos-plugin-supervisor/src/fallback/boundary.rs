@@ -43,7 +43,7 @@ const TENURE_UNRESOLVED: Error =
     Error::InvariantFault("the activation that opened the tenure is not readable");
 
 /// The trigger an activation records: the code and its `trigger_basis`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 struct TriggerV1 {
     code: FallbackTriggerCodeV1,
     basis: FallbackTriggerBasisV1,

@@ -85,6 +85,8 @@ const ENTRY: &str = "forecast";
 /// The undeclared sibling slot.
 const SIBLING_SLOT: &str = "sibling";
 const ROLE: &str = "forecaster";
+/// The role of the undeclared sibling.
+const SIBLING_ROLE: &str = "sibling";
 /// The version label of every implementation, which the probe Plugins report.
 const VERSION: &str = "0.1.0";
 /// The Stable passing-profile digest every release holds (rule 7).
@@ -101,6 +103,7 @@ struct Spec {
     plugin_id: &'static str,
     event_type: &'static str,
     component: &'static [u8],
+    role: &'static str,
 }
 
 impl Spec {
@@ -202,7 +205,7 @@ impl Plugin for Versioned {
 #[derive(Clone)]
 struct Release {
     spec: Spec,
-    release: [u8; 32],
+    digest: [u8; 32],
     address: BundleAddressV1,
     pin: CompositionPinV1,
     execution: FallbackExecutionFactsV1,
@@ -234,7 +237,7 @@ fn publish(signed: &mut SignedWorld, spec: Spec, tag: u8, swap: &Swap) -> BoxRes
     installed.map_err(|error| format!("install failed: {error}"))?;
     let digest = Hash::from_bytes(published.release_digest());
     let key = ImplementationKeyV1::new(spec.plugin_id.to_owned(), VERSION.to_owned(), digest)?;
-    let pin = CompositionPinV1::new(key, vec![ROLE.to_owned()])?;
+    let pin = CompositionPinV1::new(key, vec![spec.role.to_owned()])?;
     let expected = CommunityPluginExpectationV1 {
         plugin_id: spec.plugin_id.to_owned(),
         release: None,
@@ -246,7 +249,7 @@ fn publish(signed: &mut SignedWorld, spec: Spec, tag: u8, swap: &Swap) -> BoxRes
     let (gated, _authorization) = gate?;
     Ok(Release {
         spec,
-        release: published.release_digest(),
+        digest: published.release_digest(),
         address: address.clone(),
         pin,
         execution: FallbackExecutionFactsV1::from_projection(gated.execution()),
@@ -724,7 +727,7 @@ impl Rig {
     /// Revoke `release` and follow the new material.
     fn revoke(&mut self, release: &Release) -> TestResult {
         self.signed
-            .advance_revoking_artifacts(&[release.release])??;
+            .advance_revoking_artifacts(&[release.digest])??;
         self.follow()
     }
 
@@ -1100,7 +1103,7 @@ fn chain(kind: StoreKind) -> TestResult {
     };
     assert_eq!(rig.last_activation()?.skipped, [skipped]);
     let mut exhausted = Rig::declared(kind, FAILING, AUTOMATIC)?;
-    let digests = [exhausted.candidate.release, exhausted.next.release];
+    let digests = [exhausted.candidate.digest, exhausted.next.digest];
     exhausted.signed.advance_revoking_artifacts(&digests)??;
     exhausted.follow()?;
     let failed = exhausted.pass()?;
@@ -1234,7 +1237,7 @@ fn erasure(kind: StoreKind) -> TestResult {
 }
 
 /// The outcome of the boundary after a failed pass when the rig is changed by `change`.
-fn refused_with(kind: StoreKind, change: fn(&mut Rig)) -> BoxResult<String> {
+fn refused_with(kind: StoreKind, change: Change) -> BoxResult<String> {
     let mut rig = Rig::declared(kind, FAILING, AUTOMATIC)?;
     let failed = rig.pass()?;
     change(&mut rig);
@@ -1267,7 +1270,7 @@ const fn incompatible_abi(rig: &mut Rig) {
 }
 
 fn primary_id(rig: &mut Rig) {
-    let live = rig.boundary.binding(ENTRY).unwrap_or_else(PluginId::new);
+    let live = rig.boundary.binding(ENTRY).unwrap_or_default();
     rig.supply.tamper = Some(("plugin-b", Tamper::SameId(live)));
 }
 
@@ -1275,8 +1278,11 @@ fn no_host_member(rig: &mut Rig) {
     rig.host = CommunityPluginHostV1::new(Vec::new());
 }
 
+/// One change to a rig before its boundary transaction.
+type Change = fn(&mut Rig);
+
 /// Every case-15 change and the outcome it leads to.
-const PRE_COMMIT: [(fn(&mut Rig), &str); 7] = [
+const PRE_COMMIT: [(Change, &str); 7] = [
     (source_missing, "activated:plugin-c:[SourceUnavailable]"),
     (reference_missing, "exhausted:[FactsMismatch,FactsMismatch]"),
     (version_label, "activated:plugin-c:[FactsMismatch]"),
