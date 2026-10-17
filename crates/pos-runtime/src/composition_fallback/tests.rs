@@ -706,3 +706,6 @@ fn host_cause_names_are_distinct() {
     let names: BTreeSet<&str> = trigger::HOST_CAUSES.iter().map(|(name, _)| *name).collect();
     assert_eq!(names.len(), trigger::HOST_CAUSES.len());
 }
+
+#[path = "declaration_tests.rs"]
+mod declaration_tests;
