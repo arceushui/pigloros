@@ -266,7 +266,7 @@ pub struct MemoryStore {
     pipeline_admission_fences: HashMap<TimelineId, pos_core::PipelineAdmissionFenceV1>,
     /// ADR-064 per-Fork counterfactual facts, generation, and artifacts.
     counterfactual_forks: HashMap<TimelineId, counterfactual_store::CounterfactualForkStateV1>,
-    /// Last generation of each deleted Fork, so a re-created id never resumes lower.
+    /// Last generation of each deleted generic Fork, so a re-created id never resumes lower.
     counterfactual_generation_floors: HashMap<TimelineId, u64>,
     /// ADR-064 committed dependency prefix of each parent Timeline.
     dependency_prefixes: HashMap<TimelineId, counterfactual_store::DependencyRowsV1>,
@@ -528,6 +528,26 @@ fn delete_visible_timeline(store: &mut MemoryStore, id: TimelineId) -> Result<()
     delete_visible_timeline_impl(store, id)
 }
 
+/// Refuses deleting a Timeline that still has child Forks or is an admitted Fork.
+///
+/// Both checks run before `delete_visible_timeline_impl` removes anything, so a
+/// refusal mutates nothing and the counterfactual purge does not run. ADR-099
+/// revision 13 keeps an admitted Fork (a Timeline with a local or an imported
+/// `FAR1`) for the store's lifetime. The existence term makes an orphan `FAR1`
+/// of a missing Timeline fall through to the caller's `TimelineNotFound`, also
+/// for callers that skip the visibility check.
+fn ensure_timeline_deletable(store: &MemoryStore, id: TimelineId) -> Result<(), CoreError> {
+    if has_child_timeline(&store.timelines, id) {
+        return Err(CoreError::Storage(
+            "cannot delete timeline that still has forks".to_owned(),
+        ));
+    }
+    if store.timelines.contains_key(&id) && store.fork_is_admitted(id) {
+        return Err(CoreError::AdmittedForkNotDeletable(id));
+    }
+    Ok(())
+}
+
 fn delete_visible_timeline_impl(store: &mut MemoryStore, id: TimelineId) -> Result<(), CoreError> {
     #[cfg(test)]
     if FAIL_NEXT_VISIBLE_DELETE.with(|fail| fail.replace(false)) {
@@ -535,11 +555,7 @@ fn delete_visible_timeline_impl(store: &mut MemoryStore, id: TimelineId) -> Resu
             "injected visible Timeline deletion failure".to_owned(),
         ));
     }
-    if has_child_timeline(&store.timelines, id) {
-        return Err(CoreError::Storage(
-            "cannot delete timeline that still has forks".to_owned(),
-        ));
-    }
+    ensure_timeline_deletable(store, id)?;
     store
         .timelines
         .remove(&id)
@@ -16044,6 +16060,87 @@ mod local_cut_owner_coverage {
             link_read(&store, link_identity(&second)?),
             Err(LocalCutOwnerErrorV1::CorruptState)
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod admitted_fork_deletion {
+    //! ADR-099 revision 13 in-crate evidence: an orphan `FAR1` of a missing
+    //! Timeline is not found through the generic delete and through the direct
+    //! visible delete that skips the visibility check, the direct delete still
+    //! refuses an existing admitted Fork, and a geographic admitted Fork stays
+    //! concealed.
+
+    use std::sync::Arc;
+
+    use pos_core::{CoreError, ErasureContainmentGateV1, EventStore, TimelineId};
+
+    use super::{delete_visible_timeline, MemoryStore};
+    use crate::classified_fork_fixture::{Authority, Fallible};
+
+    /// The sizes of the Timeline, Event, authority, and counterfactual maps.
+    fn sizes(store: &MemoryStore) -> [usize; 9] {
+        [
+            store.timelines.len(),
+            store.event_ids.len(),
+            store.fork_admissions.len(),
+            store.imported_fork_admissions.len(),
+            store.fork_classifier_tables.len(),
+            store.fork_append_operations.len(),
+            store.fork_event_origins.len(),
+            store.counterfactual_forks.len(),
+            store.counterfactual_generation_floors.len(),
+        ]
+    }
+
+    #[test]
+    fn an_orphan_admission_of_a_missing_timeline_is_not_found() -> Fallible<()> {
+        let mut store = MemoryStore::new();
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let authority = Authority::open(&mut store)?;
+        let fork = authority.admit(&mut store, 0xb1)?;
+        let admission = store.fork_admissions.get(&fork).ok_or("no FAR1")?.clone();
+        let orphan = TimelineId::new();
+        store.fork_admissions.insert(orphan, admission);
+        let before = sizes(&store);
+        let generic = store.delete_timeline(orphan);
+        assert!(
+            matches!(generic, Err(CoreError::TimelineNotFound(id)) if id == orphan),
+            "{generic:?}"
+        );
+        let direct = delete_visible_timeline(&mut store, orphan);
+        assert!(
+            matches!(direct, Err(CoreError::TimelineNotFound(id)) if id == orphan),
+            "{direct:?}"
+        );
+        assert_eq!(sizes(&store), before);
+        let refused = delete_visible_timeline(&mut store, fork);
+        assert!(
+            matches!(refused, Err(CoreError::AdmittedForkNotDeletable(id)) if id == fork),
+            "{refused:?}"
+        );
+        assert_eq!(sizes(&store), before);
+        Ok(())
+    }
+
+    /// Geographic concealment still precedes the admission check.
+    #[test]
+    fn a_geographic_admitted_fork_stays_concealed() -> Fallible<()> {
+        let mut store = MemoryStore::new();
+        store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
+        let authority = Authority::open(&mut store)?;
+        let fork = authority.admit(&mut store, 0xb1)?;
+        store.geographic_timelines.insert(fork);
+        let before = sizes(&store);
+        let concealed = store.delete_timeline(fork);
+        assert!(
+            matches!(concealed, Err(CoreError::TimelineNotFound(id)) if id == fork),
+            "{concealed:?}"
+        );
+        assert_eq!(sizes(&store), before);
+        assert!(store.geographic_timelines.contains(&fork));
         Ok(())
     }
 }

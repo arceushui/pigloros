@@ -198,10 +198,10 @@ fn memory_stage_classified_batch(
 /// Refuse the batch when a staged Event's logical `Seq` already holds a `FOP1`
 /// or `EOR1` of the Fork.
 ///
-/// A deleted and re-created Fork keeps the provenance of its old Events, so
-/// its new Events can reach the same logical `Seq`; `SQLite` refuses them
-/// through `UNIQUE (child_id, local_seq)`, and so does this check, before
-/// anything is installed.
+/// An admitted Fork is never deleted (ADR-099 revision 13), so only corrupt
+/// state can hold a `FOP1` or `EOR1` at a logical `Seq` the batch stages;
+/// `SQLite` refuses such Events through `UNIQUE (child_id, local_seq)`, and so
+/// does this check, before anything is installed.
 fn reject_occupied_seqs(entries: &ForkEntriesV1<'_>, tick: StagedTickV1) -> Staged {
     let fork = entries.fork;
     let operations = entries
@@ -301,24 +301,28 @@ impl ClassifiedCounterfactualStorePortV1 for MemoryStore {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     //! In-crate evidence the public port cannot reach with a live session: an
-    //! injected staging failure, a permit naming other durable authority, and
-    //! a corrupt authority graph.
+    //! injected staging failure, a permit naming other durable authority, a
+    //! corrupt authority graph, and a `FOP1` injected at an occupied `Seq`.
 
     use std::sync::Arc;
 
     use pos_core::{
         CounterfactualInvalidationOutcomeV1, CounterfactualStoreErrorV1, ErasureContainmentGateV1,
-        EventStore, TimelineId,
+        EventId, EventStore, ForkAppendOperationV1, RecordedNodeOriginV1, TimelineId,
     };
 
     use super::super::tests::{inject, snapshot, ForkSnapshot};
     use super::super::InjectedFaultV1;
     use super::{ClassifiedError, CORRUPT_AUTHORITY, UNAUTHENTICATED};
     use crate::classified_fork_fixture::{
-        hash, node_record, Authority, Fallible, Spec, FIRST_TICK,
+        draft, empty_record, hash, node_record, Authority, Fallible, Spec, FIRST_TICK, PARENT_CUT,
+        TICK_KIND,
     };
     use crate::memory::MemoryStore;
-    use crate::{ClassifiedCounterfactualStorePortV1, ForkAppendSourcePermitV1};
+    use crate::{
+        ClassifiedCounterfactualStorePortV1, ForkAppendSourcePermitV1,
+        ForkEventProvenanceAuthorityPortV1,
+    };
 
     type Outcome = CounterfactualInvalidationOutcomeV1;
 
@@ -407,6 +411,38 @@ mod tests {
             assert_eq!(refused, Err(CORRUPT_AUTHORITY), "corruption {index}");
             assert_eq!(written(&store, fork), before, "corruption {index}");
         }
+        Ok(())
+    }
+
+    /// ADR-099 revision 13: an admitted Fork is never deleted, so a `FOP1`
+    /// at the logical `Seq` a batch stages is corrupt state, injected here.
+    /// `reject_occupied_seqs` refuses it, and nothing is installed.
+    #[test]
+    fn an_operation_injected_at_an_occupied_seq_is_corrupt_authority() -> Fallible<()> {
+        let (mut store, authority, fork) = classified()?;
+        let permit = authority.host_permit(&store, fork)?;
+        let session = &authority.session;
+        let first = store.append_classified(session, &permit, hash(0x71), draft(30, TICK_KIND))?;
+        // A fresh operation and Event ID, so only the logical Seq collides.
+        let mut input = first.operation.input().clone();
+        input.operation_id = hash(0x7a);
+        input.event_id = EventId::new();
+        input.logical_seq = PARENT_CUT + 2;
+        let injected = ForkAppendOperationV1::new(input)?;
+        store.fork_append_operations.insert(hash(0x7a), injected);
+        let before = written(&store, fork);
+        let spec = Spec {
+            head: PARENT_CUT + 1,
+            ..Spec::new(fork)
+        };
+        let command = spec.command()?;
+        let record = empty_record(FIRST_TICK, RecordedNodeOriginV1::Provisional)?;
+        let lent = authority.lend(&permit);
+        let base = hash(0x63);
+        let refused =
+            store.commit_classified_counterfactual_invalidation(&command, &record, &lent, base);
+        assert_eq!(refused, Err(CORRUPT_AUTHORITY), "the staged Seq is held");
+        assert_eq!(written(&store, fork), before, "nothing was installed");
         Ok(())
     }
 }

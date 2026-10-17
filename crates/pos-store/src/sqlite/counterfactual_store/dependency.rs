@@ -83,8 +83,9 @@
 //!   capacity check: a record is bounded far below the set bounds.
 //! - **Record Tick.** It must be above the highest Tick recorded in the set,
 //!   or, while the set has no record, not below the first Tick persisted in
-//!   the generation's receipt row. A generation with no receipt row (a Fork id
-//!   re-created after a purge resumes at its floor without an invalidation)
+//!   the generation's receipt row. A generation with no receipt row (a generic
+//!   Fork id re-created after a purge resumes at its floor without an
+//!   invalidation)
 //!   has no first Tick, so a later Tick with a record is `BindingMismatch`.
 //! - **Capacity.** The check sums the stored counts of the set's record rows
 //!   and trusts them; it does not recount the node and edge rows. That is the
@@ -160,7 +161,9 @@
 //! - **Deletion.** The marked purge of a deleted Timeline also deletes its
 //!   edges, nodes, records, commit ranges, and Event bindings, whether they
 //!   are its Fork generations' or its own committed prefix. A re-created
-//!   Timeline ID starts with empty sets.
+//!   generic Fork's Timeline ID starts with empty sets. An admitted (ADR-099)
+//!   Fork is never deleted (ADR-099 revision 13), so its sets are never
+//!   purged.
 //! - **Existing files.** The tables are additive and created with
 //!   `IF NOT EXISTS`; a writable open of a file with the storage tables but
 //!   without these creates them empty, and a read-only open of such a file

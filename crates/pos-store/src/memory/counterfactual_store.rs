@@ -64,10 +64,13 @@
 //!   state inside the generic `delete_timeline`, exactly like the `SQLite`
 //!   adapter: the facts, artifacts, quarantine marks, and receipts go, and
 //!   only the Fork's last generation stays as a floor that no port read can
-//!   reach. A Fork re-created under the same id (identity-preserving import)
-//!   is seeded at that floor when its facts are published, so the generation
-//!   never decreases. Publication, reads, Tick appends, and commits on a
-//!   deleted Fork still report `ForkNotFound`. Purge atomicity is structural
+//!   reach. A generic Fork re-created under the same id (identity-preserving
+//!   import) is seeded at that floor when its facts are published, so the
+//!   generation never decreases. An admitted (ADR-099) Fork is never deleted
+//!   (ADR-099 revision 13): the delete refuses it before this purge runs, so
+//!   it never gets a floor and its id is never re-created. Publication,
+//!   reads, Tick appends, and commits on a deleted Fork still report
+//!   `ForkNotFound`. Purge atomicity is structural
 //!   here: the purge runs in infallible code right after the Timeline is
 //!   removed, and the injected delete failure fires before any mutation, so
 //!   no failure can leave a half-purged Fork.

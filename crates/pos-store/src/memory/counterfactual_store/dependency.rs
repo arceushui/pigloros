@@ -36,8 +36,8 @@
 //!   capacity check of the first record cannot fail and is not made. Later
 //!   records check capacity against the stored counts.
 //! - **A generation without a persisted first Tick takes no record.** A Fork
-//!   that was published but never invalidated (generation 0), or that was
-//!   re-created at its generation floor, has no receipt and so no first Tick
+//!   that was published but never invalidated (generation 0), or a generic
+//!   Fork re-created at its generation floor, has no receipt and so no first Tick
 //!   to bound its first record. A later Tick with a record there is a
 //!   `BindingMismatch`, and the dependency set of a generation starts at an
 //!   invalidation. This is stricter than the contract's reference model,
@@ -68,8 +68,9 @@
 //!   closed without a bound erasure gate; writes run under the write fence
 //!   and the admitted-Fork guard of the Tick append they compose.
 //! - **Purge.** Deleting a Fork drops its dependency sets with the rest of its
-//!   counterfactual state (the generation floor stays), so a re-created Fork
-//!   starts with no rows.
+//!   counterfactual state (the generation floor stays), so a re-created
+//!   generic Fork starts with no rows. An admitted (ADR-099) Fork is never
+//!   deleted (ADR-099 revision 13), so its sets are never purged.
 //! - **Corrupt rows.** A stored row that fails page re-validation reads back
 //!   as `CorruptState`; a request cursor of the other row kind is the
 //!   caller's `BindingMismatch`.

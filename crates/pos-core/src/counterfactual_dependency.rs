@@ -199,10 +199,10 @@
 //!   Timeline purges its prefix rows.
 //! - **Purge.** Not an obligation of this contract yet. Deleting a Fork purges
 //!   its generation rows with the rest of its counterfactual state (#530), and
-//!   its reads then return `ForkNotFound`. A re-created Fork id starts with an
-//!   empty set. Until Redmine #645 decides otherwise, a classified (ADR-099)
-//!   Fork's provenance rows survive the deletion, so a re-created classified
-//!   Fork id cannot append.
+//!   its reads then return `ForkNotFound`. A re-created generic Fork id starts
+//!   with an empty set. An admitted (ADR-099) Fork is never deleted (ADR-099
+//!   revision 13): the generic delete refuses it before any mutation, so its
+//!   rows are never purged and its id is never re-created.
 //! - **Error mapping.** Map [`CounterfactualDependencyErrorV1`] to the storage
 //!   error with `CounterfactualStoreErrorV1::from`: `InvalidEncoding` for
 //!   encoding and unknown-enum faults, `FieldOutOfBounds` for bounds,
@@ -1488,8 +1488,8 @@ pub trait CounterfactualDependencyRecordingPortV1: CounterfactualStorePortV1 {
     /// greater than the maximum record Tick already persisted in that
     /// generation (gaps are allowed), or, while the generation has no
     /// records, not below the generation's first Tick. A generation with no
-    /// persisted first Tick (generation 0, a Fork never invalidated, a Fork
-    /// re-created at its generation floor until its next invalidation) takes
+    /// persisted first Tick (generation 0, a Fork never invalidated, a generic
+    /// Fork re-created at its generation floor until its next invalidation) takes
     /// no record: its set is started by
     /// [`Self::commit_counterfactual_invalidation_with_dependencies`]. The Tick
     /// is stager-asserted: the store cannot check it against the drafts.

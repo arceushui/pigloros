@@ -170,9 +170,12 @@
 //!   only because `recursive_triggers` is off, so the replaced row fires no
 //!   delete guard. No port read touches the tombstone, so every read of a
 //!   deleted Fork stays `ForkNotFound`, matching the `MemoryStore` adapter.
-//!   A Timeline later created with the same ID (an identity-preserving
-//!   import) is seeded at the floor when its facts are published, so its
-//!   generation never decreases. A marker only exists inside the purge
+//!   A generic Fork's Timeline later created with the same ID (an
+//!   identity-preserving import) is seeded at the floor when its facts are
+//!   published, so its generation never decreases. An admitted (ADR-099)
+//!   Fork is never deleted (ADR-099 revision 13): the delete refuses it before
+//!   this purge runs, so it never gets a tombstone and its ID is never
+//!   re-created. A marker only exists inside the purge
 //!   transaction, so a rollback or crash leaves none, and an open that finds
 //!   one fails closed. Files created by an earlier build
 //!   before this schema version must be recreated: their old delete guards
