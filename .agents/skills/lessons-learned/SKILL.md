@@ -264,7 +264,7 @@ This is an internal PiglorOS skill and the canonical source of durable project l
 
 - **Extend the nearest contract test for small workflow invariants.** Add a direct assertion to the existing test that owns the workflow; reserve a new checker for independently reusable or complex contracts.
 
-- **Do not invent publication gates from supplemental diagnostics.** For each hold, cite the exact owner and normative condition, and separate source correctness, publication authority, diagnostic risk, and final-delivery requirements. When publication is authorized and every blocking check is preserved, run primary draft CI in parallel with supplemental experiments, adjudicate prior review advice explicitly, and never call unfinished validation successful.
+- **Do not invent publication gates from supplemental diagnostics.** For each hold, cite the exact owner and normative condition, and separate source correctness, publication authority, diagnostic risk, and final-delivery requirements. When publication is authorized, predecessor required runs are terminal, and every blocking check is preserved, run primary draft CI in parallel with supplemental experiments, adjudicate prior review advice explicitly, and never call unfinished validation successful.
 
 - **A mutation result needs a working unmutated baseline.** Inspect scenario logs to separate compile, harness-startup, test, and assertion failures; require a passing unmutated run with the same toolchain, features, and arguments, make fan-in depend on it, and check baseline timeout semantics in the pinned tool source.
 
