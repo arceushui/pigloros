@@ -4,8 +4,7 @@
 use std::collections::BTreeMap;
 
 use pos_core::{
-    CoreError, EntityId, FallbackSkipReasonV1, FallbackTriggerCodeV1, Seq, TimelineId,
-    TimelineMeta,
+    CoreError, EntityId, FallbackSkipReasonV1, FallbackTriggerCodeV1, Seq, TimelineId, TimelineMeta,
 };
 use pos_runtime::TimelineHistorySegment;
 use pos_store::composition_fallback_registry::{
