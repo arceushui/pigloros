@@ -1074,7 +1074,8 @@ fn is_reserved_host_draft_type(kind: &str) -> bool {
 
 /// Whether `kind` is an ADR-119 fallback type, which no Plugin may own.
 fn is_composition_fallback_kind(kind: &Kind) -> bool {
-    COMPOSITION_FALLBACK_EVENT_TYPES_V1.contains(&kind.as_str())
+    let kind = kind.as_str();
+    COMPOSITION_FALLBACK_EVENT_TYPES_V1.contains(&kind)
 }
 
 /// One reserved-ownership rule: which types are reserved, and the closed
@@ -7680,7 +7681,8 @@ mod tests {
                 "{error:?}"
             );
         }
-        assert!(host_owned_draft_error(&draft("plugin.allowed.v1")).is_none());
+        let allowed = host_owned_draft_error(&draft("plugin.allowed.v1"));
+        assert!(allowed.is_none());
     }
 
     #[test]

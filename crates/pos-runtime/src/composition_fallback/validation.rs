@@ -108,7 +108,8 @@ fn check_composition(
 }
 
 fn required(facts: &Facts) -> Option<RequiredPluginV1> {
-    required_plugin_v1(facts.registry.plugin_id, &facts.pin).ok()
+    let required = required_plugin_v1(facts.registry.plugin_id, &facts.pin);
+    required.ok()
 }
 
 fn replaced(
@@ -176,16 +177,23 @@ fn fidelity_equal(primary: &OutputDeclarationV1, candidate: &OutputDeclarationV1
         && primary.aggregate_min_group() == candidate.aggregate_min_group()
 }
 
-/// Every owned type under a namespace granted to the primary's publisher is
-/// also under a namespace granted to the candidate's. Same-publisher grants
-/// are equal, so the rule binds only a cross-publisher candidate.
+/// Rule 2 namespaces: a candidate from the primary's publisher passes; any
+/// other candidate must hold a namespace grant covering every owned type.
+///
+/// It fails closed. A publisher is the same only when the host names it for
+/// both releases, and no store records which types are publisher-prefixed, so
+/// V1 treats every type of a cross-publisher candidate as prefixed. Empty
+/// grants therefore refuse every cross-publisher or unattributed candidate.
 fn namespaces_allow(primary: &Facts, candidate: &Facts) -> bool {
-    let (left, right) = (&primary.host.namespace_grants, &candidate.host.namespace_grants);
-    candidate
-        .registry
-        .owned_event_types
-        .iter()
-        .all(|event_type| !granted(left, event_type) || granted(right, event_type))
+    let grants = &candidate.host.namespace_grants;
+    let owned = &candidate.registry.owned_event_types;
+    same_publisher(primary, candidate) || owned.iter().all(|kind| granted(grants, kind))
+}
+
+/// Whether the host names one publisher for both releases.
+fn same_publisher(primary: &Facts, candidate: &Facts) -> bool {
+    let publisher = &primary.host.publisher;
+    publisher.is_some() && *publisher == candidate.host.publisher
 }
 
 /// Whether `event_type` is `<namespace>.<rest>` for a granted namespace.
@@ -198,7 +206,10 @@ fn granted(grants: &[String], event_type: &str) -> bool {
 }
 
 fn capabilities_within(primary: &Facts, candidate: &Facts) -> bool {
-    subset(&candidate.execution.capabilities, &primary.execution.capabilities)
+    subset(
+        &candidate.execution.capabilities,
+        &primary.execution.capabilities,
+    )
 }
 
 fn subscriptions_within(primary: &Facts, candidate: &Facts) -> bool {
@@ -207,7 +218,13 @@ fn subscriptions_within(primary: &Facts, candidate: &Facts) -> bool {
         && subset(&right.event_subscriptions, &left.event_subscriptions)
 }
 
-/// Every PMF1 limit and every CPU reservation is at most the primary's.
+/// Rule 4: every PMF1 limit and every CPU reservation is at most the
+/// primary's.
+///
+/// The PMF1 limits are all eight `DeterministicBudgetV1` members, so "output"
+/// covers every output-side limit: Event count and bytes, state bytes, and log
+/// calls and bytes. A CPU reservation missing on either side refuses: the rule
+/// fails closed.
 fn budgets_within(primary: &Facts, candidate: &Facts) -> bool {
     let limits = budget_values(primary.execution.budget);
     let candidate_limits = budget_values(candidate.execution.budget);
@@ -233,7 +250,10 @@ const fn budget_values(budget: DeterministicBudgetV1) -> [u64; 8] {
 
 /// Whether each value is at most the bound at its position.
 fn all_within<T: PartialOrd>(values: &[T], bounds: &[T]) -> bool {
-    values.iter().zip(bounds).all(|(value, bound)| value <= bound)
+    values
+        .iter()
+        .zip(bounds)
+        .all(|(value, bound)| value <= bound)
 }
 
 /// Both are non-participant: the binding of a community entry.

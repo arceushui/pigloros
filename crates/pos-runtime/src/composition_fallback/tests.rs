@@ -21,7 +21,7 @@ struct FactsPlugin {
     id: PluginId,
     name: &'static str,
     version: &'static str,
-    owned: &'static str,
+    owned: &'static [&'static str],
     has_driver: bool,
 }
 
@@ -36,7 +36,7 @@ impl Plugin for FactsPlugin {
 
     fn capability(&self) -> Capability {
         Capability {
-            owned_event_types: vec![Kind::new(self.owned)],
+            owned_event_types: self.owned.iter().copied().map(Kind::new).collect(),
             owned_entity_kinds: Vec::new(),
             has_driver: self.has_driver,
             has_reducer: false,
@@ -53,7 +53,7 @@ fn plugin(name: &'static str, version: &'static str) -> FactsPlugin {
         id: PluginId::new(),
         name,
         version,
-        owned: OWNED,
+        owned: &[OWNED],
         has_driver: true,
     }
 }
@@ -94,6 +94,7 @@ fn execution(pin: &CompositionPinV1) -> FallbackExecutionFactsV1 {
 fn host(pin: &CompositionPinV1) -> FallbackHostFactsV1 {
     FallbackHostFactsV1 {
         active_release_digest: Some(pin.implementation().release_digest()),
+        publisher: Some("acme-publisher".to_owned()),
         namespace_grants: vec!["acme".to_owned()],
         conformance_profiles: BTreeSet::from([Hash::from_bytes([9; 32])]),
     }
@@ -459,21 +460,45 @@ fn rule_two_output_fidelity_metadata() -> TestResult {
 }
 
 #[test]
-fn rule_two_namespaces() -> TestResult {
+fn rule_two_same_publisher_needs_no_grant() -> TestResult {
+    let accepted = fixture()?.refusal_after(|candidate| {
+        candidate.host.namespace_grants.clear();
+    });
+    assert_eq!(accepted, None);
+    Ok(())
+}
+
+#[test]
+fn rule_two_cross_publisher_needs_a_grant_for_every_type() -> TestResult {
+    let granted = fixture()?.refusal_after(|candidate| {
+        candidate.host.publisher = Some("other-publisher".to_owned());
+    });
+    assert_eq!(granted, None);
     let ungranted = fixture()?.refusal_after(|candidate| {
+        candidate.host.publisher = Some("other-publisher".to_owned());
         candidate.host.namespace_grants.clear();
     });
     assert_eq!(ungranted, Some(Field::Namespace));
     let unprefixed = fixture()?.refusal_after(|candidate| {
+        candidate.host.publisher = Some("other-publisher".to_owned());
         candidate.host.namespace_grants = vec!["acm".to_owned(), "other".to_owned()];
     });
     assert_eq!(unprefixed, Some(Field::Namespace));
-    let mut open = fixture()?;
-    open.primary.host.namespace_grants = vec!["acm".to_owned()];
-    let accepted = open.refusal_after(|candidate| {
+    Ok(())
+}
+
+#[test]
+fn rule_two_an_unattributed_publisher_is_cross_publisher() -> TestResult {
+    let mut unattributed = fixture()?;
+    unattributed.primary.host.publisher = None;
+    let refused = unattributed.refusal_after(|candidate| {
+        candidate.host.publisher = None;
         candidate.host.namespace_grants.clear();
     });
-    assert_eq!(accepted, None);
+    assert_eq!(refused, Some(Field::Namespace));
+    let mut granted = fixture()?;
+    granted.primary.host.publisher = None;
+    assert_eq!(granted.refusal(), None);
     Ok(())
 }
 
@@ -490,7 +515,10 @@ fn rule_three_capabilities_and_subscriptions() -> TestResult {
     });
     assert_eq!(projection, Some(Field::Subscriptions));
     let event = fixture()?.refusal_after(|candidate| {
-        candidate.registry.event_subscriptions.push(Kind::new(OWNED));
+        candidate
+            .registry
+            .event_subscriptions
+            .push(Kind::new(OWNED));
     });
     assert_eq!(event, Some(Field::Subscriptions));
     let fewer = fixture()?.refusal_after(|candidate| {
@@ -514,6 +542,10 @@ fn rule_four_budgets() -> TestResult {
         candidate.registry.cpu_reservations_us = None;
     });
     assert_eq!(missing, Some(Field::Budgets));
+    let unreserved = fixture()?.primary_refusal_after(|primary| {
+        primary.registry.cpu_reservations_us = None;
+    });
+    assert_eq!(unreserved, Some(Field::Budgets));
     Ok(())
 }
 
@@ -578,5 +610,64 @@ fn a_refusal_names_the_entry() -> TestResult {
         field: Field::Admission,
     };
     assert_eq!(error, Err(expected));
+    Ok(())
+}
+
+#[test]
+fn a_driverless_unpinned_entry_has_no_driver_facts() -> TestResult {
+    let plugin = FactsPlugin {
+        owned: &["acme.zeta.v1", "acme.alpha.v1"],
+        has_driver: false,
+        ..plugin("driverless", "1.0.0")
+    };
+    let mut registry = PluginRegistry::new();
+    registry.register_generated(&plugin, None, None)?;
+    let facts = registry.fallback_registry_facts_v1(plugin.id)?;
+    assert_eq!(facts.owned_event_types, ["acme.alpha.v1", "acme.zeta.v1"]);
+    assert_eq!(facts.schemas, vec![None::<String>, None]);
+    assert_eq!(facts.outputs.len(), 2);
+    assert_eq!(facts.cpu_reservations_us, Some([10; 3]));
+    assert_eq!(facts.pin, None);
+    assert!(facts.subscriptions.is_empty());
+    assert_eq!(facts.driver_interval, None);
+    assert_eq!(facts.binding, None);
+    Ok(())
+}
+
+#[test]
+fn an_entry_without_an_output_admission_has_no_reservation() -> TestResult {
+    let mut registry = PluginRegistry::new();
+    let key = ProjectionKey::new(EntityId::new());
+    let shell = FallbackDriverShellV1::new("undeclared", settings(&key));
+    registry.register_driver(Box::new(shell))?;
+    let composition = registry.composition();
+    let id = composition.plugins[0].id;
+    let facts = registry.fallback_registry_facts_v1(id)?;
+    assert_eq!(facts.cpu_reservations_us, None);
+    assert!(facts.outputs.is_empty());
+    assert_eq!(facts.driver_interval, Some(Duration::from_millis(100)));
+    assert_eq!(facts.subscriptions, vec![key]);
+    Ok(())
+}
+
+#[test]
+fn an_unregistered_plugin_has_no_facts() {
+    let registry = PluginRegistry::new();
+    let facts = registry.fallback_registry_facts_v1(PluginId::new());
+    let refused = matches!(facts, Err(RuntimeError::NoDriver { .. }));
+    assert!(refused, "{facts:?}");
+}
+
+#[test]
+fn a_reserved_type_is_refused_on_the_facts_only_path() -> TestResult {
+    let reserved = FactsPlugin {
+        owned: &[pos_core::COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1],
+        ..plugin("reserved", "1.0.0")
+    };
+    let key = ProjectionKey::new(EntityId::new());
+    let pin = pin("acme.reserved", "1.0.0", 1)?;
+    let facts = PluginRegistry::fallback_scratch_facts_v1(&reserved, &pin, settings(&key));
+    let refused = matches!(facts, Err(RuntimeError::ReservedHostEventType { .. }));
+    assert!(refused, "{facts:?}");
     Ok(())
 }

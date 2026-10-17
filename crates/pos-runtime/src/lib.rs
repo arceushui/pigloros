@@ -56,11 +56,9 @@ pub use composition::{
     ResolvedPluginV1, MAX_MANIFEST_SLOT_BYTES_V1, MAX_REQUIRED_PLUGINS_V1,
 };
 pub use composition_fallback::{
-    classify_fallback_trigger_v1, declared_fallback_trigger_v1, enforce_required_plugin_v1,
-    required_plugin_v1, validate_fallback_candidate_v1, FallbackCandidateFactsV1,
-    FallbackDriverSettingsV1, FallbackDriverShellV1, FallbackExecutionFactsV1, FallbackHostFactsV1,
-    FallbackRegistryFactsV1, FallbackTriggerCauseV1, FallbackValidationFieldV1,
-    InvalidFallbackPolicyV1,
+    FallbackCandidateFactsV1, FallbackDriverSettingsV1, FallbackDriverShellV1,
+    FallbackExecutionFactsV1, FallbackHostFactsV1, FallbackRegistryFactsV1, FallbackTriggerCauseV1,
+    FallbackValidationFieldV1, InvalidFallbackPolicyV1,
 };
 pub use driver::{
     CommittedForkHandoff, DeclaredOutputV1, DirectInputRefV1, Driver, DriverRecoveryEvidence,
