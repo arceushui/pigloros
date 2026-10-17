@@ -401,6 +401,7 @@ mod tests {
             .map(|(index, column)| (table, *column, index == ignored))
             .collect();
         assert_eq!(actual, expected);
+        drop(reads);
         Ok(())
     }
 
