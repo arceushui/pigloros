@@ -45,6 +45,10 @@ def check_contract(workflow: dict) -> None:
             "baseline and mutants must share the pinned nightly and serial compiler jobs"
         )
     jobs = workflow["jobs"]
+    harness_steps = {
+        "mutation-baseline": "Prove the mutation test harness",
+        "mutation": "Run mutants in changed lines",
+    }
     for name in ("mutation-baseline", "mutation"):
         job = jobs[name]
         expected_env = {"CARGO_BUILD_JOBS": "3"} if name == "mutation-baseline" else None
@@ -61,8 +65,15 @@ def check_contract(workflow: dict) -> None:
         }:
             raise AssertionError("install the selected nightly in both jobs")
         for step in job["steps"]:
-            if "continue-on-error" in step or "env" in step:
-                raise AssertionError("steps must not override or suppress failures")
+            expected_step_env = (
+                {"CARGO_INCREMENTAL": "1"}
+                if step.get("name") == harness_steps[name] else None
+            )
+            if "continue-on-error" in step or step.get("env") != expected_step_env:
+                raise AssertionError(
+                    "only harness steps must override incremental compilation; "
+                    "all failures stay blocking"
+                )
     baseline = jobs["mutation-baseline"]
     if (
         baseline.get("needs") != "mutation-changes"
@@ -71,7 +82,11 @@ def check_contract(workflow: dict) -> None:
     ):
         raise AssertionError("baseline must run for every relevant change")
     runs = [step for step in baseline["steps"] if "run" in step]
-    if runs != [{"name": "Prove the mutation test harness", "run": BASELINE_RUN}]:
+    if runs != [{
+        "name": "Prove the mutation test harness",
+        "env": {"CARGO_INCREMENTAL": "1"},
+        "run": BASELINE_RUN,
+    }]:
         raise AssertionError("baseline must execute the complete mutation harness")
     mutation = jobs["mutation"]
     if (
@@ -193,6 +208,31 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
                     changed["jobs"]["mutation-baseline"]["env"] = value
                 with self.assertRaisesRegex(AssertionError, "only the baseline"):
                     check_contract(changed)
+
+    def test_rejects_missing_or_wrong_harness_incremental_mode(self) -> None:
+        for name in ("mutation-baseline", "mutation"):
+            for value in (None, {}, {"CARGO_INCREMENTAL": "0"},
+                          {"CARGO_INCREMENTAL": 1},
+                          {"CARGO_INCREMENTAL": "1", "RUSTUP_TOOLCHAIN": "stable"}):
+                with self.subTest(job=name, value=value):
+                    changed = copy.deepcopy(self.workflow)
+                    step = next(step for step in changed["jobs"][name]["steps"]
+                                if "--include-ignored" in step.get("run", ""))
+                    if value is None:
+                        step.pop("env", None)
+                    else:
+                        step["env"] = value
+                    with self.assertRaisesRegex(AssertionError, "incremental compilation"):
+                        check_contract(changed)
+
+    def test_rejects_incremental_override_outside_harness_steps(self) -> None:
+        for name in ("mutation-baseline", "mutation"):
+            changed = copy.deepcopy(self.workflow)
+            changed["jobs"][name]["steps"][0]["env"] = {"CARGO_INCREMENTAL": "1"}
+            with self.subTest(job=name), self.assertRaisesRegex(
+                AssertionError, "incremental compilation",
+            ):
+                check_contract(changed)
 
     def test_real_fan_in_rejects_unsuccessful_baseline_and_shards(self) -> None:
         run = self.workflow["jobs"]["mutation-gate"]["steps"][0]["run"]
