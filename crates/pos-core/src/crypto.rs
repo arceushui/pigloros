@@ -170,18 +170,20 @@ pub(crate) fn measure(value: &impl CanonicalEmit) -> Result<usize, CanonicalLeng
 
 pub(crate) fn head(out: &mut impl CanonicalSink, major: u8, value: u64) {
     let tag = major << 5;
+    // The major tag and additional-information field occupy disjoint bits.
+    // Their sum is the CBOR prefix and cannot overflow a byte (224 + 31).
     if value < 24 {
-        out.push(tag | value.to_be_bytes()[7]);
+        out.push(tag + value.to_be_bytes()[7]);
     } else if let Ok(value) = u8::try_from(value) {
-        out.extend_from_slice(&[tag | 0x18, value]);
+        out.extend_from_slice(&[tag + 0x18, value]);
     } else if let Ok(value) = u16::try_from(value) {
-        out.push(tag | 0x19);
+        out.push(tag + 0x19);
         out.extend_from_slice(&value.to_be_bytes());
     } else if let Ok(value) = u32::try_from(value) {
-        out.push(tag | 0x1a);
+        out.push(tag + 0x1a);
         out.extend_from_slice(&value.to_be_bytes());
     } else {
-        out.push(tag | 0x1b);
+        out.push(tag + 0x1b);
         out.extend_from_slice(&value.to_be_bytes());
     }
 }
