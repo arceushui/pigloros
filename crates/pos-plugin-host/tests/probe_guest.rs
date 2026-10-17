@@ -6,9 +6,11 @@
 //! returns a zeroed output digest. Any other observation behaves exactly like
 //! the Rust guest.
 //!
-//! These tests prove only the guest side of `reserved`: this crate cannot reach
-//! the registry, so the host's `ReservedHostDraft` refusal is proven by
-//! PCF-CPH-013 in the PCH1 runner.
+//! These tests prove only the guest side of `reserved` and `bad-digest`: this
+//! crate cannot reach the registry or the real worker, so the host's
+//! `ReservedHostDraft` refusal is proven by PCF-CPH-013, and the pass that
+//! `bad-digest` fails with `InvalidGuestOutput` by PCF-CPH-014, in the PCH1
+//! runner.
 
 pub mod common;
 

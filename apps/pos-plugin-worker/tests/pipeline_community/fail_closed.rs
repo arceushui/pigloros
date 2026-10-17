@@ -286,6 +286,58 @@ fn native_pinned(
     Ok((refusal, snapshot(&pass.registry) == before))
 }
 
+/// A pass world on a `kind` store that holds the first-party twin alone.
+fn twin_world(kind: StoreKind) -> BoxResult<PassWorld> {
+    let mut pass = PassWorld::on(kind, WORKER);
+    register_twin(&mut pass.registry, TWIN_TYPE, entity_of(ENTITY)?)?;
+    Ok(pass)
+}
+
+/// The refusal of gating `entry`, or of building and registering a Driver from it in `pass`.
+///
+/// This is the one gated-and-register path of the fail-closed releases. A release it refuses
+/// never reaches the registry, so a caller's registry-unchanged check fails only if the refusal
+/// regresses to `accepted`.
+fn gated_refusal(
+    signed: &SignedWorld,
+    entry: &Published,
+    pass: &mut PassWorld,
+) -> BoxResult<String> {
+    let swap = Swap::of(trust_material(signed, &signed.material()?));
+    let gated = match gated_release(signed, entry, &swap) {
+        Ok(gated) => gated,
+        Err(error) => {
+            let host = error.downcast_ref::<HostError>().copied();
+            let name = host.map(HostError::name);
+            let refusal = name.map_or_else(|| format!("Unexpected({error})"), str::to_owned);
+            return Ok(refusal);
+        }
+    };
+    let built = pass.add_gated(GatedSpec {
+        name: entry.spec.plugin_id,
+        event_type: entry.spec.event_type,
+        gated,
+        profile: profile(Mode::Local),
+        watchdog: WATCHDOG,
+        source: Box::new(Source::numbered(1)),
+        register: true,
+    });
+    Ok(built.err().map_or("accepted", HostError::name).to_owned())
+}
+
+/// The refusal of `entry` through [`gated_refusal`] beside the first-party twin, in a pass world
+/// on a `kind` store, and whether the registry is unchanged.
+fn twin_refusal(
+    signed: &SignedWorld,
+    entry: &Published,
+    kind: StoreKind,
+) -> BoxResult<(String, bool)> {
+    let mut pass = twin_world(kind)?;
+    let before = snapshot(&pass.registry);
+    let refusal = gated_refusal(signed, entry, &mut pass)?;
+    Ok((refusal, snapshot(&pass.registry) == before))
+}
+
 /// A release of `plugin-a` that requires a capability, in its own signed world, built into a
 /// Driver beside the first-party twin in a pass world on a `kind` store: the refusal, and
 /// whether the registry is unchanged.
@@ -298,21 +350,7 @@ fn denied_release(kind: StoreKind) -> BoxResult<(String, bool)> {
         ..ALPHA.shape()
     };
     let entry = publish_shape(&mut signed, ALPHA, shape, 1)?;
-    let mut pass = PassWorld::on(kind, WORKER);
-    register_twin(&mut pass.registry, TWIN_TYPE, entity_of(ENTITY)?)?;
-    let before = snapshot(&pass.registry);
-    let swap = Swap::of(trust_material(&signed, &signed.material()?));
-    let built = pass.add_gated(GatedSpec {
-        name: entry.spec.plugin_id,
-        event_type: entry.spec.event_type,
-        gated: gated_release(&signed, &entry, &swap)?,
-        profile: profile(Mode::Local),
-        watchdog: WATCHDOG,
-        source: Box::new(Source::numbered(1)),
-        register: true,
-    });
-    let refusal = built.err().map_or("accepted", HostError::name);
-    Ok((refusal.to_owned(), snapshot(&pass.registry) == before))
+    twin_refusal(&signed, &entry, kind)
 }
 
 /// Record a refusal and whether it left the registry unchanged under `path`.
@@ -386,15 +424,13 @@ fn community_invalid_output(
     })
 }
 
-/// A pass world on a `kind` store that holds the first-party twin alone.
-fn twin_world(kind: StoreKind) -> BoxResult<PassWorld> {
-    let mut pass = PassWorld::on(kind, WORKER);
-    register_twin(&mut pass.registry, TWIN_TYPE, entity_of(ENTITY)?)?;
-    Ok(pass)
-}
-
 /// The refusal of a Driver built from `entry` against the real worker's V1 host ABI, ABI 0.0
 /// alone, which is registered in `registry` if it is built.
+///
+/// Negotiation refuses before registration, so the caller's registry-unchanged check fails only
+/// if the refusal regresses to `accepted`. This is a registration-time refusal only: the pass
+/// harness negotiates under ABI 0.0 to 0.1, which accepts the release, and the real worker then
+/// rejects the transported record, which the supervisor reports as `WorkerCrashed`.
 fn worker_abi_refusal(
     signed: &SignedWorld,
     entry: &Published,
@@ -422,6 +458,7 @@ fn worker_abi_refusal(
 /// whether the registry is unchanged.
 ///
 /// The real worker supports ABI 0.0 alone, so negotiation finds no common minor.
+/// This is a registration-time refusal: the registry-unchanged check guards the accept path.
 fn abi_invalid_release(kind: StoreKind) -> BoxResult<(String, bool)> {
     let mut signed = SignedWorld::new()?;
     let shape = ALPHA.shape().with_abi_minors(1, 1);
@@ -432,39 +469,13 @@ fn abi_invalid_release(kind: StoreKind) -> BoxResult<(String, bool)> {
     Ok((refusal, snapshot(&pass.registry) == before))
 }
 
-/// The refusal of gating `entry`, or of building and registering a Driver from it in `pass`.
-fn gated_refusal(
-    signed: &SignedWorld,
-    entry: &Published,
-    pass: &mut PassWorld,
-) -> BoxResult<String> {
-    let swap = Swap::of(trust_material(signed, &signed.material()?));
-    let gated = match gated_release(signed, entry, &swap) {
-        Ok(gated) => gated,
-        Err(error) => {
-            let host = error.downcast_ref::<HostError>().copied();
-            let name = host.map(HostError::name);
-            let refusal = name.map_or_else(|| format!("Unexpected({error})"), str::to_owned);
-            return Ok(refusal);
-        }
-    };
-    let built = pass.add_gated(GatedSpec {
-        name: entry.spec.plugin_id,
-        event_type: entry.spec.event_type,
-        gated,
-        profile: profile(Mode::Local),
-        watchdog: WATCHDOG,
-        source: Box::new(Source::numbered(1)),
-        register: true,
-    });
-    Ok(built.err().map_or("accepted", HostError::name).to_owned())
-}
-
 /// A closure of `plugin-a` whose manifest bytes are not PMF1, in its own signed world, gated
 /// and built into a Driver beside the first-party twin in a pass world on a `kind` store: the
 /// refusal, and whether the registry is unchanged.
 ///
 /// The closure is published but never installed, and it has no release digest.
+/// The trust gate refuses it before registration, so the registry-unchanged check guards the
+/// accept path.
 fn manifest_invalid_release(kind: StoreKind) -> BoxResult<(String, bool)> {
     let signed = SignedWorld::new()?;
     let component = Shape::first().component;
@@ -474,10 +485,7 @@ fn manifest_invalid_release(kind: StoreKind) -> BoxResult<(String, bool)> {
         address,
         release: [0; 32],
     };
-    let mut pass = twin_world(kind)?;
-    let before = snapshot(&pass.registry);
-    let refusal = gated_refusal(&signed, &entry, &mut pass)?;
-    Ok((refusal, snapshot(&pass.registry) == before))
+    twin_refusal(&signed, &entry, kind)
 }
 
 /// Whether a failed pass discarded the whole pass: it failed with a typed refusal, committed
@@ -511,15 +519,14 @@ fn invalid_output(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<
     let community = community_invalid_output(&signed, entries, kind)?;
     let first_party = first_party_proposal(&signed, PROPOSER, kind)?;
     let (abi, abi_unchanged) = abi_invalid_release(kind)?;
-    let (manifest, manifest_unchanged) = manifest_invalid_release(kind)?;
+    let (raw, raw_unchanged) = manifest_invalid_release(kind)?;
     record_pass(capture, "community-invalid-output", &community.failed);
     record(capture, "community-next", &community.next.observed);
     capture.record("community.community-receipts", &community.receipts);
     record(capture, "first-party-invalid-draft", &first_party.observed);
     capture.record("first-party-invalid-draft.refusal", &first_party.refusal);
     record_refusal(capture, "abi-invalid-release", &abi, abi_unchanged);
-    let path = "manifest-invalid-release";
-    record_refusal(capture, path, &manifest, manifest_unchanged);
+    record_refusal(capture, "manifest-invalid-release", &raw, raw_unchanged);
     let failed = &community.failed;
     let discarded = discarded_whole(&failed.observed, &failed.refusal)
         && discarded_whole(&first_party.observed, &first_party.refusal);

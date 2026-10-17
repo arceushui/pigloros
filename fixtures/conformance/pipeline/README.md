@@ -104,8 +104,12 @@ invalid-draft refusal of `PCF-CPH-003`, `Authority(UnauthorizedSource)`, which
 also discards the whole pass and quarantines nothing. A release that declares
 ABI minor 1 alone is refused `IncompatibleAbi` by negotiation against the real
 worker's V1 host ABI (0.0 alone), and a closure whose manifest bytes are not
-PMF1 is refused `InvalidManifest` at the trust gate; neither changes the
-registry.
+PMF1 is refused `InvalidManifest` at the trust gate. Both are registration-time
+refusals, before any Driver is registered, so their registry-unchanged check
+guards the accept path. The pass path would not meet the ABI 0.1-only release as
+`IncompatibleAbi`: the pass harness negotiates under ABI 0.0 to 0.1, and the
+real worker then rejects the transported record, which the supervisor reports
+as `WorkerCrashed`.
 
 `PCF-CPH-010` (#634) covers over-budget parity. The two classes are bound by
 different budgets, so the equivalence is semantic: a typed non-commit that
