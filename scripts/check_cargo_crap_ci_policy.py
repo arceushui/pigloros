@@ -62,7 +62,6 @@ STAGED_MAIN_JOBS = {
         "cargo-crap",
     ],
     "audit": ["ci_change_scope", "cargo-crap"],
-    "geiger": ["ci_change_scope", "cargo-crap"],
     "codeql": ["ci_change_scope", "cargo-crap"],
     "docker-build": ["ci_change_scope", "cargo-crap"],
     "world-client-wasm": ["ci_change_scope", "cargo-crap"],
