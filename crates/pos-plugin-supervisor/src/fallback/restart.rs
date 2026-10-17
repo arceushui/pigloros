@@ -267,7 +267,7 @@ where
     T: PluginTrustPolicyRegistryV1 + ?Sized,
     W: PluginTrustWallSourceV1,
 {
-    let build = BuildV1 {
+    let wanted = BuildV1 {
         entry_key,
         pin,
         replacing: None,
@@ -280,7 +280,7 @@ where
         context.trust,
         context.wall,
         context.supply,
-        &build,
+        &wanted,
     );
     built.and_then(|built| {
         let prepared = &built.prepared;

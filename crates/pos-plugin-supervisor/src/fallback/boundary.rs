@@ -107,7 +107,7 @@ impl CompositionBoundaryV1 {
             revision: composition.state_revision,
             outcomes: Vec::new(),
         };
-        let entries = composition.entries.iter();
+        let mut entries = composition.entries.iter();
         let folded = entries.try_fold(folded, |folded, effective| {
             self.step(context, host, outcome, effective, folded)
         });
@@ -292,7 +292,7 @@ impl CompositionBoundaryV1 {
         let mut skipped = Vec::new();
         for pin in effective.chain().into_iter().skip(start) {
             match self.attempt(context, host, effective, pin, true) {
-                Ok(swap) => {
+                Ok((swap, _)) => {
                     let commit = CommitV1 {
                         effective,
                         pin,
@@ -302,7 +302,7 @@ impl CompositionBoundaryV1 {
                     };
                     return self.commit_and_swap(context, host, swap, commit);
                 }
-                Err(reason) => skipped.push(skip_of(pin, reason)),
+                Err((reason, _)) => skipped.push(skip_of(pin, reason)),
             }
         }
         Ok(Outcome::Exhausted {
@@ -359,7 +359,7 @@ impl CompositionBoundaryV1 {
         W: PluginTrustWallSourceV1,
     {
         let entry_key = effective.entry.entry_key();
-        let build = BuildV1 {
+        let wanted = BuildV1 {
             entry_key,
             pin,
             replacing: self.binding(entry_key),
@@ -372,7 +372,7 @@ impl CompositionBoundaryV1 {
             context.trust,
             context.wall,
             context.supply,
-            &build,
+            &wanted,
         );
         let timeline = self.target.timeline;
         let swap = built.and_then(|built| {
