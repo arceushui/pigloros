@@ -1,6 +1,6 @@
 # Temporary cold-build resource diagnosis, not a required gate or trusted baseline.
 # Retain the failed PR merge source, full test command and line-table profile.
-# Compare with run 38997541437; only the compiler toolchain changes.
+# Compare with run 39000109266; only baseline compiler concurrency changes.
 name: 561-mutation-baseline-diagnostic
 
 on:
@@ -14,8 +14,9 @@ env:
   # Existing ASan nightly predates the reported Bevy solver memory regression:
   # https://github.com/rust-lang/rust/issues/161748
   RUSTUP_TOOLCHAIN: nightly-2026-07-01
-  # Preserve the failed control's single compiler job.
-  CARGO_BUILD_JOBS: "1"
+  # The single-job control compiled with a sampled peak of 2.54 GiB.
+  # Measure three compiler jobs against the same 16 GiB runner allocation.
+  CARGO_BUILD_JOBS: "3"
 
 jobs:
   baseline:
