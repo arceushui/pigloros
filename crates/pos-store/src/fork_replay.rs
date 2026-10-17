@@ -262,7 +262,9 @@ impl<'bytes> AdmissionCarrierV1<'bytes> {
         let value = self
             .take(width)?
             .iter()
-            .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte));
+            // The header selects at most eight bytes. Each byte is added to
+            // the zero low byte of the shifted prefix, without overflow.
+            .fold(0_u64, |value, byte| (value << 8) + u64::from(*byte));
         Some((first >> 5, value))
     }
 
