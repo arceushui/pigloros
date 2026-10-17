@@ -70,7 +70,7 @@ fn selected_admission_blob(
     context
         .check()
         .map_err(|_| Corrupt)
-        .and_then(|()| conn.prepare(probe).map_err(|_| Storage))
+        .and_then(|()| conn.prepare_cached(probe).map_err(|_| Storage))
         .and_then(|mut statement| {
             context
                 .check()
@@ -124,7 +124,11 @@ fn admission_bytes_from_row(
                     .and_then(|()| context.suffix_row().map_err(|_| Corrupt))
                     .and_then(|()| context.bytes(length).map_err(|_| Corrupt))
                     .and_then(|()| {
-                        conn.query_row(fetch, params![child_key], |row| row.get::<_, Vec<u8>>(0))
+                        conn.prepare_cached(fetch)
+                            .and_then(|mut statement| {
+                                statement
+                                    .query_row(params![child_key], |row| row.get::<_, Vec<u8>>(0))
+                            })
                             .map_err(|_| Storage)
                     })
                     .and_then(|bytes| context.check().map(|()| bytes).map_err(|_| Corrupt))
