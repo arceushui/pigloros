@@ -197,13 +197,15 @@ flowchart TD
 The core checks and their immediate cargo-crap consumer mean:
 
 1. `fmt` runs `cargo fmt --all -- --check`.
-2. `test` checks the workspace with default features disabled and all
-   features enabled, then runs all tests with cargo-nextest
-   `--run-ignored all` (doctests with `cargo test --doc -- --include-ignored`).
-   Nextest runs test executables in parallel rather than one at a time. The
-   test gate is workspace-wide; Cargo has no built-in changed-test selector.
-3. `clippy` runs all targets with warnings denied and the repository's
-   pedantic policy.
+2. `test` checks the workspace with default features disabled, then runs all
+   tests with cargo-nextest `--run-ignored all` (doctests with
+   `cargo test --doc -- --include-ignored`). Nextest runs test executables in
+   parallel rather than one at a time. The test gate is workspace-wide; Cargo
+   has no built-in changed-test selector. The crypto dependencies that
+   dominate test CPU time build at `opt-level = 3` in the dev and test
+   profiles (see `Cargo.toml`); workspace crates stay unoptimized.
+3. `clippy` runs all targets with all features and warnings denied and the
+   repository's pedantic policy. It is the all-features type check.
 4. `coverage` performs one complete `cargo llvm-cov nextest` run. `covgate`
    checks changed production Rust code first from that report, then the same
    report is checked against the full workspace 99% line and 99% region
