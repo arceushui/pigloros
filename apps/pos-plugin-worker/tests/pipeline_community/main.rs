@@ -22,6 +22,7 @@ pub mod first_party;
 #[path = "../../../piglor-gateway/tests/pipeline_conformance/harness.rs"]
 pub mod harness;
 pub mod parity;
+pub mod replay;
 #[path = "../support/mod.rs"]
 pub mod support;
 
@@ -43,10 +44,10 @@ const COMMUNITY_VERSION: u64 = 1;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/community/v1/manifest.json");
-const MANIFEST_SHA256: &str = "4be2f98d3b0ba94329cdcfaa151cf332d036eb90adb3a1b927a7c131e194d19a";
+const MANIFEST_SHA256: &str = "984fa74b153bc786a45c9fc30359372b379a208eb22e4e053eee6c4c7a2b2473";
 
 /// Every runner of profile version 1, by case identifier.
-const RUNNERS: [(&str, Runner); 10] = [
+const RUNNERS: [(&str, Runner); 12] = [
     ("PCF-CPH-001", parity::single_pass_parity),
     ("PCF-CPH-002", parity::mixed_registry_order),
     ("PCF-CPH-003", authority::foreign_proposal_parity),
@@ -57,6 +58,8 @@ const RUNNERS: [(&str, Runner); 10] = [
     ("PCF-CPH-008", fail_closed::unavailable_implementation),
     ("PCF-CPH-009", fail_closed::invalid_implementation),
     ("PCF-CPH-010", budget::over_budget_parity),
+    ("PCF-CPH-011", replay::replay_parity),
+    ("PCF-CPH-012", replay::lost_acknowledgement_recovery),
 ];
 
 /// Parse a `PCH1` manifest under the harness rules of `PPC1`.
@@ -98,7 +101,7 @@ fn pch1_every_mandatory_case_passes_on_the_real_worker() {
     assert_eq!(report.passed.len(), RUNNERS.len());
     assert_eq!(manifest.cases.len(), RUNNERS.len());
     assert!(manifest.cases.iter().all(mandatory_on_memory));
-    assert_eq!(manifest.exclusions.len(), 5);
+    assert_eq!(manifest.exclusions.len(), 4);
 }
 
 // ── Fail-closed harness behaviour ───────────────────────────────────────────

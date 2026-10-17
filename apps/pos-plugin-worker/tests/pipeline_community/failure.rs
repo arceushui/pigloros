@@ -67,7 +67,7 @@ pub struct Pass {
 }
 
 impl Mixed {
-    /// A lane over the community release `entries` and the first-party Plugin `native`,
+    /// A Local lane over the community release `entries` and the first-party Plugin `native`,
     /// registered in `order`.
     ///
     /// # Errors
@@ -78,15 +78,29 @@ impl Mixed {
         native: Native,
         order: Order,
     ) -> BoxResult<Self> {
+        Self::in_mode(signed, entries, native, order, Mode::Local)
+    }
+
+    /// As [`Self::new`], with the community member in Execution Mode `mode`.
+    ///
+    /// # Errors
+    /// Returns the error of registering either Plugin or of building the lane.
+    pub fn in_mode(
+        signed: &SignedWorld,
+        entries: &[Published],
+        native: Native,
+        order: Order,
+        mode: Mode,
+    ) -> BoxResult<Self> {
         let entity = entity_of(ENTITY)?;
         let (lane, switched) = match order {
             Order::TwinFirst => {
                 let mut pass = PassWorld::new(WORKER);
                 let switched = register_switched(&mut pass.registry, native, entity)?;
-                (Lane::over(signed, entries, Mode::Local, pass)?, switched)
+                (Lane::over(signed, entries, mode, pass)?, switched)
             }
             Order::CommunityFirst => {
-                let mut lane = Lane::new(signed, entries, Mode::Local)?;
+                let mut lane = Lane::new(signed, entries, mode)?;
                 let switched = register_switched(&mut lane.pass.registry, native, entity)?;
                 (lane, switched)
             }
@@ -101,27 +115,40 @@ impl Mixed {
         })
     }
 
-    /// Run one pass and describe it, with the Driver steps of this pass in registration order.
-    ///
-    /// The community Driver's steps are its worker launches: every launch leaves one receipt.
+    /// Run one pass and describe it, with the Driver steps of this pass in registration order;
+    /// the community Driver's steps are its worker launches.
     ///
     /// # Errors
     /// Returns the error of the pass world's observation.
     pub fn pass(&mut self, signed: &SignedWorld) -> BoxResult<Pass> {
         let outcome = self.lane.run(signed)?;
+        let steps = self.steps_since();
+        Ok(describe(&self.lane, &outcome, steps))
+    }
+
+    /// As [`Self::pass`], through an admission port that commits the batch and then loses the
+    /// commit acknowledgement, so the pass is in doubt.
+    ///
+    /// # Errors
+    /// Returns the error of the pass world's observation.
+    pub fn lost_pass(&mut self, signed: &SignedWorld) -> BoxResult<Pass> {
+        let outcome = self.lane.run_lost(signed)?;
+        let steps = self.steps_since();
+        Ok(describe(&self.lane, &outcome, steps))
+    }
+
+    /// The Driver steps since the last call, in registration order.
+    ///
+    /// The community Driver's steps are its worker launches: every launch leaves one receipt.
+    pub fn steps_since(&mut self) -> String {
         let native = self.steps.load(Ordering::SeqCst);
         let launches = self.lane.handle().receipts().len();
         let (native_steps, community) = (native - self.seen.0, launches - self.seen.1);
         self.seen = (native, launches);
-        let steps = match self.order {
+        match self.order {
             Order::TwinFirst => format!("{native_steps},{community}"),
             Order::CommunityFirst => format!("{community},{native_steps}"),
-        };
-        Ok(Pass {
-            observed: observe(&self.lane, &outcome, steps),
-            refusal: pass_refusal(&outcome.result),
-            gate: gate_refusals(&outcome),
-        })
+        }
     }
 
     /// The failure and disposition of every receipt of the community member, oldest first.
@@ -173,6 +200,17 @@ fn gate_refusals(outcome: &CommunityPassOutcomeV1) -> String {
         "none".to_owned()
     } else {
         refused.join(",")
+    }
+}
+
+/// Describe the pass `outcome` of `lane`, whose Drivers stepped `steps` times in registration
+/// order.
+#[must_use]
+pub fn describe(lane: &Lane, outcome: &CommunityPassOutcomeV1, steps: String) -> Pass {
+    Pass {
+        observed: observe(lane, outcome, steps),
+        refusal: pass_refusal(&outcome.result),
+        gate: gate_refusals(outcome),
     }
 }
 
