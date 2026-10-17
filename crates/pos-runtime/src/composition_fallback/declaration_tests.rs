@@ -107,7 +107,7 @@ fn refusal_after(edit: impl FnOnce(&mut World)) -> Refusal {
 }
 
 /// Apply `edit` to the facts of every declared entry.
-fn edit_facts(world: &mut World, edit: fn(&mut FallbackEntryFactsV1)) {
+fn edit_facts(world: &mut World, edit: FactsEdit) {
     for facts in world.declaration.facts.values_mut() {
         edit(facts);
     }
@@ -232,9 +232,12 @@ fn primary_unpinned(facts: &mut FallbackEntryFactsV1) {
     facts.primary.registry.pin = None;
 }
 
+/// An in-place edit of one entry's facts.
+type FactsEdit = fn(&mut FallbackEntryFactsV1);
+
 /// The section 4.1 rules PCH1 cannot break through the facts-only path with
 /// one Plugin type, driven here through the runtime `declare`.
-const REGISTRY_FACT_RULES: [(Field, fn(&mut FallbackEntryFactsV1)); 4] = [
+const REGISTRY_FACT_RULES: [(Field, FactsEdit); 4] = [
     (Field::Schemas, schema_changed),
     (Field::OutputPolicy, outputs_dropped),
     (Field::Profile, profile_dropped),
