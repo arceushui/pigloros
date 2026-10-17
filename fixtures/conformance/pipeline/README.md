@@ -12,7 +12,10 @@ job executes.
 
 Each version directory is immutable. The runner pins the SHA-256 of every file
 it reads, so a changed byte fails the suite. A changed expected result needs a
-new version directory, not an edit; rollback selects an older directory.
+new version directory, not an edit; rollback selects an older directory. An
+edit that changes no expected value, such as removing an exclusion or running
+a case on one more store, has been made in place with a new pin, each time by
+user decision (see `PCH1` below).
 
 ## `v1/manifest.json` (`PPC1`, version 1)
 
@@ -27,7 +30,7 @@ new version directory, not an edit; rollback selects an older directory.
   owner of the missing implementation or contract.
 - Community Plugin-host parity is not a `PPC1` exclusion. The sibling profile
   `PCH1` below proves it (#489, #636), and what it cannot prove yet (some
-  invalid-Plugin and resource-limit shapes, SQLite) is recorded as `PCH1`
+  invalid-Plugin and resource-limit shapes) is recorded as `PCH1`
   exclusions. The `COMMUNITY-PLUGIN-HOST` exclusion was removed from `v1` in
   place: removing an exclusion changes no expected result.
 
@@ -117,11 +120,21 @@ finds nothing in doubt a second time. The community member's receipt stays
 staged until the recovery commits it and adopts its state (recorded, not
 compared).
 
-The community pass world runs on `MemoryStore` only, so every case names the
-`memory` store, and the `SQLITE-STORE` exclusion records that this profile
-proves no SQLite parity of the community path (owned by #638). The other
-exclusions name what the real guests and release fixtures cannot yet exercise
-(owned by #637).
+Every case runs on both stores of the community pass world, `memory`
+(`MemoryStore`) and `sqlite` (`SqliteStore` on an in-memory database), and
+records the same expected values on each (#638, #651). SQLite parity is proven
+for the pass store, the store every pass admits to, reads Events from and
+recovers from; the trust registry of the signed-release test world stays on
+`MemoryStore`. A case that runs no pass, or none that commits (parts of
+`PCF-CPH-004`, `PCF-CPH-007` and `PCF-CPH-009`), still runs on both stores and
+records the same values on each. The exclusions name what the real guests and
+release fixtures cannot yet exercise (owned by #637).
+
+`PCH1` version 1 was re-pinned in place to add SQLite, by user decision
+(2026-10-17), following the in-place re-pins of #632 to #636: every case's
+`stores` grew from `memory` to `memory` and `sqlite`, the `SQLITE-STORE`
+exclusion was removed, and #638 and #651 joined the sources. No expected value
+changed; only the store set grew, so the manifest's pinned SHA-256 changed.
 
 Every `PCH1` case (`PCF-CPH-001` to `PCF-CPH-012`) is mandatory and applicable
 and has exactly one runner, in manifest order; the runner asserts that none is

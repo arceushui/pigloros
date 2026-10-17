@@ -4,8 +4,9 @@
 //! that proves ADR-021 decision 7 across the two accepted isolation classes: an
 //! operator-trusted native Driver and a governed community Driver that runs a real Component in
 //! the real `pos-plugin-worker`. The cases run here because only this package's tests can launch
-//! the worker binary. They run on `MemoryStore`; the community pass world can also run on
-//! in-memory `SQLite`, which this profile does not use yet (#638).
+//! the worker binary. Every case runs and records its captures on both stores of the community
+//! pass world, `MemoryStore` and in-memory `SQLite` (#638); the trust registry stays on
+//! `MemoryStore`.
 //!
 //! The runner reuses the fail-closed harness of the first-party profile `PPC1`
 //! (`apps/piglor-gateway/tests/pipeline_conformance/harness.rs`) unchanged: an unknown magic,
@@ -45,7 +46,7 @@ const COMMUNITY_VERSION: u64 = 1;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/community/v1/manifest.json");
-const MANIFEST_SHA256: &str = "7c7cdef61b19e9a90ef71565cb83ab02fbe77a10b803391b3cbbf51841a134d8";
+const MANIFEST_SHA256: &str = "981ec4fe8fe0c0a45888eee5856236e26f122cad16ff446c0cd717a10bba3f18";
 
 /// Every runner of profile version 1, by case identifier.
 const RUNNERS: [(&str, Runner); 12] = [
@@ -82,9 +83,9 @@ fn load_community_manifest(bytes: &[u8]) -> Result<Manifest, ConformanceError> {
     load_manifest(&shared)
 }
 
-/// Whether `case` is mandatory and runs on the community pass world's store.
-fn mandatory_on_memory(case: &Case) -> bool {
-    case.mandatory && case.stores == ["memory"]
+/// Whether `case` is mandatory and runs on both stores of the community pass world.
+fn mandatory_on_both_stores(case: &Case) -> bool {
+    case.mandatory && case.stores == ["memory", "sqlite"]
 }
 
 /// Every mandatory case of `PCH1` version 1 passes on the real worker. The exclusions record
@@ -101,8 +102,8 @@ fn pch1_every_mandatory_case_passes_on_the_real_worker() {
     assert_eq!(manifest.suite, "pigloros.pipeline-community-host");
     assert_eq!(report.passed.len(), RUNNERS.len());
     assert_eq!(manifest.cases.len(), RUNNERS.len());
-    assert!(manifest.cases.iter().all(mandatory_on_memory));
-    assert_eq!(manifest.exclusions.len(), 4);
+    assert!(manifest.cases.iter().all(mandatory_on_both_stores));
+    assert_eq!(manifest.exclusions.len(), 3);
 }
 
 // ── Fail-closed harness behaviour ───────────────────────────────────────────

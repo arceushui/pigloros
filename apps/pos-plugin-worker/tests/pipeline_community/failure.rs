@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use pos_plugin_publisher::test_support::{world::World as SignedWorld, BoxResult};
-use pos_plugin_supervisor::pass_harness::World as PassWorld;
+use pos_plugin_supervisor::pass_harness::{StoreKind, World as PassWorld};
 use pos_runtime::community_plugin_host::{
     CommunityPassOutcomeV1, CommunityPluginHostErrorV1, CommunityPluginModeV1 as Mode,
 };
@@ -29,10 +29,11 @@ use pos_runtime::community_plugin_host::{
 use crate::authority::pass_refusal;
 use crate::first_party::{entity_of, register_switched, Native};
 use crate::harness::Capture;
-use crate::parity::{observe, record, Observed, Order, ENTITY, STORE, TWIN_TYPE};
+use crate::parity::{
+    observe, on_every_store, record, Observed, Order, StoreCapture, ENTITY, TWIN_TYPE,
+};
 use crate::support::lane::{publish, Lane, Published, ALPHA};
 use crate::support::subcase::WORKER;
-use crate::support::test_ok::TestOk;
 
 /// The first-party Plugin beside the community release.
 ///
@@ -67,8 +68,8 @@ pub struct Pass {
 }
 
 impl Mixed {
-    /// A Local lane over the community release `entries` and the first-party Plugin `native`,
-    /// registered in `order`.
+    /// A Local lane on a `kind` store over the community release `entries` and the first-party
+    /// Plugin `native`, registered in `order`.
     ///
     /// # Errors
     /// Returns the error of registering either Plugin or of building the lane.
@@ -77,8 +78,9 @@ impl Mixed {
         entries: &[Published],
         native: Native,
         order: Order,
+        kind: StoreKind,
     ) -> BoxResult<Self> {
-        Self::in_mode(signed, entries, native, order, Mode::Local)
+        Self::in_mode(signed, entries, native, order, Mode::Local, kind)
     }
 
     /// As [`Self::new`], with the community member in Execution Mode `mode`.
@@ -91,16 +93,17 @@ impl Mixed {
         native: Native,
         order: Order,
         mode: Mode,
+        kind: StoreKind,
     ) -> BoxResult<Self> {
         let entity = entity_of(ENTITY)?;
         let (lane, switched) = match order {
             Order::TwinFirst => {
-                let mut pass = PassWorld::new(WORKER);
+                let mut pass = PassWorld::on(kind, WORKER);
                 let switched = register_switched(&mut pass.registry, native, entity)?;
                 (Lane::over(signed, entries, mode, pass)?, switched)
             }
             Order::CommunityFirst => {
-                let mut lane = Lane::new(signed, entries, mode)?;
+                let mut lane = Lane::on(kind, signed, entries, mode)?;
                 let switched = register_switched(&mut lane.pass.registry, native, entity)?;
                 (lane, switched)
             }
@@ -215,9 +218,9 @@ pub fn describe(lane: &Lane, outcome: &CommunityPassOutcomeV1, steps: String) ->
 }
 
 /// Record what one pass shows under `path`, with its typed refusal.
-pub fn record_pass(capture: &mut Capture, path: &str, pass: &Pass) {
+pub fn record_pass(capture: &mut StoreCapture<'_>, path: &str, pass: &Pass) {
     record(capture, path, &pass.observed);
-    capture.record(STORE, &format!("{path}.refusal"), &pass.refusal);
+    capture.record(&format!("{path}.refusal"), &pass.refusal);
 }
 
 /// A failed pass of a mixed lane and the pass that follows the recovery.
@@ -242,9 +245,13 @@ impl Contained {
 }
 
 /// A community Driver that traps on the real worker after the first-party sibling staged, then
-/// the pass after the host cleared its quarantine.
-fn community_fails(signed: &SignedWorld, entries: &[Published]) -> BoxResult<Contained> {
-    let mut mixed = Mixed::new(signed, entries, SIBLING, Order::TwinFirst)?;
+/// the pass after the host cleared its quarantine, on a `kind` store.
+fn community_fails(
+    signed: &SignedWorld,
+    entries: &[Published],
+    kind: StoreKind,
+) -> BoxResult<Contained> {
+    let mut mixed = Mixed::new(signed, entries, SIBLING, Order::TwinFirst, kind)?;
     mixed.lane.trap.store(true, Ordering::SeqCst);
     let failed = mixed.pass(signed)?;
     mixed.lane.trap.store(false, Ordering::SeqCst);
@@ -257,13 +264,18 @@ fn community_fails(signed: &SignedWorld, entries: &[Published]) -> BoxResult<Con
     })
 }
 
-/// A first-party Driver that fails after the community sibling staged, then the next pass.
-fn first_party_fails(signed: &SignedWorld, entries: &[Published]) -> BoxResult<Contained> {
+/// A first-party Driver that fails after the community sibling staged, then the next pass, on a
+/// `kind` store.
+fn first_party_fails(
+    signed: &SignedWorld,
+    entries: &[Published],
+    kind: StoreKind,
+) -> BoxResult<Contained> {
     let failing = Native {
         name: "first-party-failing",
         ..SIBLING
     };
-    let mut mixed = Mixed::new(signed, entries, failing, Order::CommunityFirst)?;
+    let mut mixed = Mixed::new(signed, entries, failing, Order::CommunityFirst, kind)?;
     mixed.fail.store(true, Ordering::SeqCst);
     let failed = mixed.pass(signed)?;
     mixed.fail.store(false, Ordering::SeqCst);
@@ -276,12 +288,12 @@ fn first_party_fails(signed: &SignedWorld, entries: &[Published]) -> BoxResult<C
 }
 
 /// Record the failed and the recovered pass under `path`.
-fn record_contained(capture: &mut Capture, path: &str, contained: &Contained) {
+fn record_contained(capture: &mut StoreCapture<'_>, path: &str, contained: &Contained) {
     record_pass(capture, &format!("{path}-fails"), &contained.failed);
     let recovered = format!("{path}-recovered");
     record(capture, &recovered, &contained.recovered.observed);
     let key = format!("{path}.community-receipts");
-    capture.record(STORE, &key, &contained.receipts);
+    capture.record(&key, &contained.receipts);
 }
 
 /// PCF-CPH-005: a failing Driver of either class discards the whole scheduled pass.
@@ -293,21 +305,20 @@ fn record_contained(capture: &mut Capture, path: &str, contained: &Contained) {
 /// quarantine, commits both Events.
 #[must_use]
 pub fn failure_containment() -> Capture {
-    containment().test_ok()
+    on_every_store(containment)
 }
 
-fn containment() -> BoxResult<Capture> {
+fn containment(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let alpha = publish(&mut signed, ALPHA, 1)?;
     let entries = std::slice::from_ref(&alpha);
-    let community = community_fails(&signed, entries)?;
-    let first_party = first_party_fails(&signed, entries)?;
-    let mut capture = Capture::default();
-    record_contained(&mut capture, "community", &community);
-    record_contained(&mut capture, "first-party", &first_party);
+    let community = community_fails(&signed, entries, kind)?;
+    let first_party = first_party_fails(&signed, entries, kind)?;
+    record_contained(capture, "community", &community);
+    record_contained(capture, "first-party", &first_party);
     let same = community.holds() && first_party.holds();
-    capture.record(STORE, "parity.whole-pass-discarded-either-class", same);
-    Ok(capture)
+    capture.record("parity.whole-pass-discarded-either-class", same);
+    Ok(())
 }
 
 /// PCF-CPH-006: no host domain fallback and no implicit retry.
@@ -320,14 +331,14 @@ fn containment() -> BoxResult<Capture> {
 /// the failed invocation's receipt stays discarded.
 #[must_use]
 pub fn no_fallback_or_retry() -> Capture {
-    no_fallback().test_ok()
+    on_every_store(no_fallback)
 }
 
-fn no_fallback() -> BoxResult<Capture> {
+fn no_fallback(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let alpha = publish(&mut signed, ALPHA, 1)?;
     let entries = std::slice::from_ref(&alpha);
-    let mut mixed = Mixed::new(&signed, entries, SIBLING, Order::CommunityFirst)?;
+    let mut mixed = Mixed::new(&signed, entries, SIBLING, Order::CommunityFirst, kind)?;
     mixed.lane.trap.store(true, Ordering::SeqCst);
     let failed = mixed.pass(&signed)?;
     mixed.lane.trap.store(false, Ordering::SeqCst);
@@ -340,11 +351,10 @@ fn no_fallback() -> BoxResult<Capture> {
     // recovery under a new identity. The check proves the recovery added one new receipt beside
     // the discarded one, not that the host issues the ID.
     let renewed = receipts.len() == 2 && receipts[0].invocation_id != receipts[1].invocation_id;
-    let mut capture = Capture::default();
-    record_pass(&mut capture, "failed", &failed);
-    record_pass(&mut capture, "quarantined", &quarantined);
-    record(&mut capture, "recovered", &recovered.observed);
-    capture.record(STORE, "recovered.community-receipts", mixed.receipts());
-    capture.record(STORE, "recovered.fresh-id-new-receipt", renewed);
-    Ok(capture)
+    record_pass(capture, "failed", &failed);
+    record_pass(capture, "quarantined", &quarantined);
+    record(capture, "recovered", &recovered.observed);
+    capture.record("recovered.community-receipts", mixed.receipts());
+    capture.record("recovered.fresh-id-new-receipt", renewed);
+    Ok(())
 }

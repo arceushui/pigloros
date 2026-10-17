@@ -9,6 +9,8 @@
     "#633",
     "#634",
     "#635",
+    "#638",
+    "#651",
     "ADR-021",
     "ADR-061 r8"
   ],
@@ -27,11 +29,6 @@
       "id": "OTHER-RESOURCE-LIMITS",
       "reason": "PCF-CPH-010 exhausts a community release through its memory budget only; the signed-release test world fixes the fuel, host-call and output budgets of a release, and the real guests make one host call and emit one small Event, so the fuel, host-call and output limits of a community Driver on the real worker need a release shape with those budgets or a new guest Component",
       "owner": "#637"
-    },
-    {
-      "id": "SQLITE-STORE",
-      "reason": "The community pass world runs on MemoryStore only, so this profile proves no SQLite parity of the community path",
-      "owner": "#638"
     }
   ],
   "cases": [
@@ -49,7 +46,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -95,7 +93,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -132,7 +131,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -180,7 +180,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -224,7 +225,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -281,7 +283,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -329,7 +332,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -362,7 +366,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -437,7 +442,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": null,
       "expected": {
@@ -464,7 +470,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -540,7 +547,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -590,7 +598,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
