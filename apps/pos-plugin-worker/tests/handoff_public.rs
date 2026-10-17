@@ -512,6 +512,8 @@ fn a_failing_context_after_a_committed_pass_is_not_committed() -> TestResult {
 
 /// The lane's selector bytes reach the real guest as its observation: the trap observation fed
 /// as selector bytes, with the trap switch off, fails the pass exactly as the switch does.
+///
+/// The probe guest's `reserved` and `bad-digest` selectors are covered by PCF-CPH-013 and 014.
 #[test]
 fn selector_bytes_reach_the_real_guest_as_its_observation() -> TestResult {
     let mut signed = SignedWorld::new()?;
@@ -522,8 +524,6 @@ fn selector_bytes_reach_the_real_guest_as_its_observation() -> TestResult {
     let by_switch = switched.run(&signed)?;
     let mut selected = Lane::new(&signed, entries, LOCAL)?;
     selected.selector.set(Some(TRAP_OBSERVATION.to_vec()));
-    let fed = selected.selector.bytes();
-    assert_eq!(fed.as_deref(), Some(TRAP_OBSERVATION));
     let by_selector = selected.run(&signed)?;
     assert!(!is_committed(&by_switch), "{by_switch:?}");
     assert!(!is_committed(&by_selector), "{by_selector:?}");

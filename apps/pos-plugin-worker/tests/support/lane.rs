@@ -206,7 +206,7 @@ pub fn publish_shape(
 /// Selector bytes that replace every member's observation while set; a clone shares them.
 ///
 /// A guest that reads a selector from its observation, such as `reserved` or `bad-digest`, is
-/// steered by them.
+/// steered by them. Those selectors are first fed by PCF-CPH-013 and PCF-CPH-014.
 #[derive(Clone, Default)]
 pub struct Selector(Arc<Mutex<Option<Vec<u8>>>>);
 
@@ -248,10 +248,9 @@ impl InvocationContextSourceV1 for Steered {
         binding: InvocationBindingV1,
     ) -> Result<InvocationContextV1, CommunityPluginHostErrorV1> {
         let mut context = self.source.context(timeline, observation, binding)?;
-        let selected = self.selector.bytes();
         if self.trap.load(Ordering::SeqCst) {
             context.invocation.observation_bytes = TRAP_OBSERVATION.to_vec();
-        } else if let Some(bytes) = selected {
+        } else if let Some(bytes) = self.selector.bytes() {
             context.invocation.observation_bytes = bytes;
         }
         context.invocation.invocation_id[15] ^= self.generation.load(Ordering::SeqCst);

@@ -218,13 +218,10 @@ impl Shape {
         Self { fuel, ..self }
     }
 
-    /// This shape with a deterministic budget of `calls` host calls.
+    /// This shape with a deterministic host-call budget of `host_calls`.
     #[must_use]
-    pub const fn with_host_calls(self, calls: u64) -> Self {
-        Self {
-            host_calls: calls,
-            ..self
-        }
+    pub const fn with_host_calls(self, host_calls: u64) -> Self {
+        Self { host_calls, ..self }
     }
 
     /// This shape with a deterministic output budget of `event_bytes` total `EventDraft` bytes.
@@ -237,6 +234,9 @@ impl Shape {
     }
 
     /// This shape declaring the ABI minors `lowest` to `highest`, both included.
+    ///
+    /// It sets both bounds, so it and [`Self::with_worker_abi`] each override the highest minor
+    /// the other set: the later call wins.
     #[must_use]
     pub const fn with_abi_minors(self, lowest: u16, highest: u16) -> Self {
         Self {
