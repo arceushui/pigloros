@@ -17,8 +17,8 @@ use pos_core::{ErasureProtectedOperationV1, Event, EventDraft, Hash, Seq, Timeli
 
 use super::MemoryStore;
 use crate::composition_fallback_registry::logic::{
-    plan_activate, plan_declare, require, FallbackCommitV1, FallbackPlanV1, FallbackReadsV1,
-    FallbackResult,
+    event_identity, payload_digest, plan_activate, plan_declare, require, FallbackCommitV1,
+    FallbackPlanV1, FallbackReadsV1, FallbackResult,
 };
 use crate::composition_fallback_registry::{
     CompositionFallbackRegistryErrorV1 as Error, CompositionFallbackRegistryV1,
@@ -115,18 +115,9 @@ impl MemoryStore {
         timeline: TimelineId,
         draft: &EventDraft,
     ) -> FallbackResult<FallbackEventIdentityV1> {
-        let digest = Hash::from_bytes(*blake3::hash(draft.payload.as_slice()).as_bytes());
-        let hashed = self.hasher.hash_payload(&draft.payload) == digest;
-        require(hashed, Error::EventRejected)?;
-        self.guarded_generic_append(timeline, std::slice::from_ref(draft))
-            .ok()
-            .and_then(|events| events.into_iter().next())
-            .map(|event| FallbackEventIdentityV1 {
-                event_id: event.id,
-                seq: event.seq,
-                payload_digest: digest,
-            })
-            .ok_or(Error::EventRejected)
+        let digest = payload_digest(self.hasher.as_ref(), draft)?;
+        let appended = self.guarded_generic_append(timeline, std::slice::from_ref(draft));
+        event_identity(appended, digest)
     }
 
     /// Write the plan: return a replay, or append the Event and then commit the rows.

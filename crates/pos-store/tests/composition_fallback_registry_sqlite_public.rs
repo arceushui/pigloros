@@ -29,7 +29,9 @@ fn a_reopened_store_retains_the_row_the_policy_and_the_ledger() -> TestResult {
     let directory = h.guard.directory.as_ref().ok_or("no directory")?;
     let path = directory.path().join("composition-fallback.db");
     let path = path.to_str().ok_or("non-UTF-8 path")?.to_owned();
-    let Harness { store, timeline, .. } = h;
+    let Harness {
+        store, timeline, ..
+    } = h;
     drop(store);
     let mut reopened = SqliteStore::open(&path)?;
     reopened.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;

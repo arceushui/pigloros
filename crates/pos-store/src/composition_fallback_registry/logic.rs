@@ -14,16 +14,16 @@
 use std::iter;
 
 use pos_core::{
-    CanonicalBytes, DomainFallbackPolicyV1, EntityId, Event, EventDraft, FallbackActivatedInputV1,
-    FallbackActivatedPayloadV1, FallbackActivationModeV1, FallbackActivationOriginV1,
-    FallbackDeclaredPayloadV1, FallbackEntryV1, FallbackRebasedEntryV1, Hash, Kind, Seq,
-    TimelineId, COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
+    CanonicalBytes, CoreError, DomainFallbackPolicyV1, EntityId, Event, EventDraft,
+    FallbackActivatedInputV1, FallbackActivatedPayloadV1, FallbackActivationModeV1,
+    FallbackActivationOriginV1, FallbackDeclaredPayloadV1, FallbackEntryV1, FallbackRebasedEntryV1,
+    Hash, Hasher, Kind, Seq, TimelineId, COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
     COMPOSITION_FALLBACK_DECLARED_EVENT_TYPE_V1,
 };
 
 use super::error::CompositionFallbackRegistryErrorV1 as Error;
 use super::types::{
-    update_text, CompositionFallbackTargetV1, FallbackActivateRequestV1,
+    update_len, update_text, CompositionFallbackTargetV1, FallbackActivateRequestV1,
     FallbackConformanceSetsV1, FallbackDeclareRequestV1, FallbackEntryStateV1,
     FallbackEventIdentityV1, FallbackLedgerBodyV1, FallbackLedgerRowV1, FallbackRegistryRowV1,
     FallbackRegistryStateV1,
@@ -138,8 +138,7 @@ impl FallbackRegistryStateV1 {
             .iter()
             .filter(|(_, entry)| entry.chain_position > 0)
             .filter_map(|(key, entry)| {
-                FallbackRebasedEntryV1::new(key.clone(), entry.effective_digest)
-                    .ok()
+                FallbackRebasedEntryV1::new(key.clone(), entry.effective_digest).ok()
             })
             .collect()
     }
@@ -230,6 +229,12 @@ struct TransitionV1<'a> {
     next: FallbackEntryStateV1,
 }
 
+/// Whether `input` closes the entry's current tenure on its effective implementation.
+fn closes_tenure(current: &FallbackEntryStateV1, input: &FallbackActivatedInputV1) -> bool {
+    let from = input.from.digest();
+    current.tenure_ordinal == input.closing_tenure_ordinal && current.effective_digest == from
+}
+
 fn transition<'a>(
     policy: &'a DomainFallbackPolicyV1,
     state: &FallbackRegistryStateV1,
@@ -244,10 +249,7 @@ fn transition<'a>(
         .iter()
         .find(|entry| entry.entry_key() == input.entry_key)
         .ok_or(Error::UnknownEntry)?;
-    let from = input.from.digest();
-    let closes = current.tenure_ordinal == input.closing_tenure_ordinal
-        && current.effective_digest == from;
-    require(closes, Error::StaleActivation)?;
+    require(closes_tenure(&current, input), Error::StaleActivation)?;
     let to = input.to.digest();
     let chain_position = chain_index(entry, to).ok_or(Error::InvalidTarget)?;
     let next = FallbackEntryStateV1 {
@@ -281,6 +283,9 @@ fn check_origin(
 }
 
 /// The trigger, origin, and skipped-candidate rules of one activation.
+///
+/// `skipped` may name only candidates of the entry (never its primary), and never `to`: a
+/// skipped implementation is one the boundary tried and did not activate.
 fn check_rules(
     transition: &TransitionV1<'_>,
     input: &FallbackActivatedInputV1,
@@ -405,19 +410,52 @@ fn current(
         .map(|()| CurrentV1 { fold, ledger })
 }
 
-/// `StaleState`, then `StaleHead`.
-fn check_fresh(
-    reads: &dyn FallbackReadsV1,
-    timeline: TimelineId,
-    state_revision: u64,
+/// The arguments every write shares, and its request digest.
+struct WriteV1<'a> {
+    scope: &'a str,
+    target: CompositionFallbackTargetV1,
     expected_state_revision: u64,
     expected_logical_head: Seq,
-) -> FallbackResult<()> {
-    require(expected_state_revision == state_revision, Error::StaleState).and_then(|()| {
+    request_digest: Hash,
+}
+
+impl WriteV1<'_> {
+    /// `StaleState`, then `StaleHead`.
+    fn check_fresh(&self, reads: &dyn FallbackReadsV1, state_revision: u64) -> FallbackResult<()> {
+        let fresh = self.expected_state_revision == state_revision;
+        require(fresh, Error::StaleState)?;
         reads
-            .timeline_head(timeline)
-            .and_then(|head| require(head == expected_logical_head, Error::StaleHead))
-    })
+            .timeline_head(self.target.timeline)
+            .and_then(|head| require(head == self.expected_logical_head, Error::StaleHead))
+    }
+
+    /// The ADR-119 clarification 7 prelude: the fold invariant and `EntityMismatch`, then the
+    /// byte-identical replay of the row `occupies` finds (or `Conflict`), then staleness; only
+    /// then `fresh` runs the operation's own checks.
+    fn plan(
+        &self,
+        reads: &dyn FallbackReadsV1,
+        occupies: impl Fn(&FallbackLedgerRowV1) -> bool,
+        fresh: impl FnOnce(CurrentV1) -> FallbackResult<FallbackPlanV1>,
+    ) -> FallbackResult<FallbackPlanV1> {
+        let found = current(reads, self.scope, self.target)?;
+        if let Some(row) = found.ledger.iter().find(|row| occupies(row)) {
+            return replay(row, self.request_digest);
+        }
+        let revision = found.fold.state.state_revision;
+        self.check_fresh(reads, revision)?;
+        fresh(found)
+    }
+
+    /// The commit parts of this write against `found`.
+    fn parts(&self, found: &CurrentV1, policy_digest: Hash) -> CommitPartsV1 {
+        CommitPartsV1 {
+            entity: self.target.entity,
+            row_seq: next_row_seq(&found.ledger),
+            policy_digest,
+            request_digest: self.request_digest,
+        }
+    }
 }
 
 /// The original ledger row of a byte-identical repeat, or `Conflict`.
@@ -471,7 +509,7 @@ fn activate_request_digest(request: &FallbackActivateRequestV1) -> Hash {
     let origin = request.trigger_basis.origin.code();
     hasher.update(&[trigger, origin]);
     hasher.update(&request.trigger_basis.cause.to_le_bytes());
-    hasher.update(&(request.skipped.len() as u64).to_le_bytes());
+    update_len(&mut hasher, request.skipped.len());
     for skipped in &request.skipped {
         hasher.update(skipped.implementation_digest.as_bytes());
         hasher.update(&[skipped.reason.code()]);
@@ -527,6 +565,36 @@ const fn next_row_seq(ledger: &[FallbackLedgerRowV1]) -> u64 {
     (ledger.len() as u64).saturating_add(1)
 }
 
+/// BLAKE3-256 of the draft payload, which the store's own payload hash must equal: a store
+/// with another hasher never commits.
+///
+/// # Errors
+/// `EventRejected` when `hasher` hashes the payload differently.
+pub fn payload_digest(hasher: &dyn Hasher, draft: &EventDraft) -> FallbackResult<Hash> {
+    let digest = Hash::from_bytes(*blake3::hash(draft.payload.as_slice()).as_bytes());
+    let hashed = hasher.hash_payload(&draft.payload) == digest;
+    require(hashed, Error::EventRejected).map(|()| digest)
+}
+
+/// The identity of the one Event a guarded append of one draft returned.
+///
+/// # Errors
+/// `EventRejected` when the append refused or returned no Event.
+pub fn event_identity(
+    appended: Result<Vec<Event>, CoreError>,
+    payload_digest: Hash,
+) -> FallbackResult<FallbackEventIdentityV1> {
+    appended
+        .ok()
+        .and_then(|events| events.into_iter().next())
+        .map(|event| FallbackEventIdentityV1 {
+            event_id: event.id,
+            seq: event.seq,
+            payload_digest,
+        })
+        .ok_or(Error::EventRejected)
+}
+
 /// The parts of one commit that every operation fills the same way.
 struct CommitPartsV1 {
     entity: EntityId,
@@ -569,39 +637,43 @@ pub fn plan_declare(
     let policy = DomainFallbackPolicyV1::from_canonical_cbor(&request.policy_bytes)?;
     require(policy.scope() == request.scope, Error::ScopeMismatch)?;
     let target = request.target;
-    let found = current(reads, &request.scope, target)?;
-    let request_digest = declare_request_digest(target.entity, &request.conformance);
-    let policy_digest = policy.policy_digest();
-    if let Some(row) = found.ledger.iter().find(|row| row.declares(policy_digest)) {
-        return replay(row, request_digest);
-    }
-    let state = &found.fold.state;
-    let revision = state.state_revision;
-    let head = request.expected_logical_head;
-    check_fresh(
-        reads,
-        target.timeline,
-        revision,
-        request.expected_state_revision,
-        head,
-    )?;
-    check_declaration(state, &policy)?;
-    let parts = CommitPartsV1 {
-        entity: target.entity,
-        row_seq: next_row_seq(&found.ledger),
-        policy_digest,
-        request_digest,
+    let write = WriteV1 {
+        scope: &request.scope,
+        target,
+        expected_state_revision: request.expected_state_revision,
+        expected_logical_head: request.expected_logical_head,
+        request_digest: declare_request_digest(target.entity, &request.conformance),
     };
+    let digest = policy.policy_digest();
+    write.plan(
+        reads,
+        |row| row.declares(digest),
+        |found| declare_fresh(&write, found, policy, request),
+    )
+}
+
+/// The declaration checks and commit of a write that is neither a replay nor stale.
+fn declare_fresh(
+    write: &WriteV1<'_>,
+    found: CurrentV1,
+    policy: DomainFallbackPolicyV1,
+    request: &FallbackDeclareRequestV1,
+) -> FallbackResult<FallbackPlanV1> {
+    let state = &found.fold.state;
+    check_declaration(state, &policy)?;
+    let policy_digest = policy.policy_digest();
+    let parts = write.parts(&found, policy_digest);
     let body = FallbackLedgerBodyV1::Declaration {
         conformance_digest: request.conformance.digest(),
     };
     let retained = Some((policy_digest, request.policy_bytes.clone()));
     let rebased = state.rebased_entries();
+    let entity = write.target.entity;
     FallbackDeclaredPayloadV1::for_policy(&policy, rebased)
         .map_err(Error::from)
         .and_then(|payload| {
             let event_type = COMPOSITION_FALLBACK_DECLARED_EVENT_TYPE_V1;
-            let event = draft(target.entity, event_type, payload.to_canonical_cbor());
+            let event = draft(entity, event_type, payload.to_canonical_cbor());
             let fold = found.fold.apply_declared(&payload, policy);
             fold.map(|fold| parts.commit(fold, event, body, retained))
         })
@@ -634,34 +706,34 @@ pub fn plan_activate(
     reads: &dyn FallbackReadsV1,
     request: &FallbackActivateRequestV1,
 ) -> FallbackResult<FallbackPlanV1> {
-    let target = request.target;
-    let found = current(reads, &request.scope, target)?;
-    let request_digest = activate_request_digest(request);
+    let write = WriteV1 {
+        scope: &request.scope,
+        target: request.target,
+        expected_state_revision: request.expected_state_revision,
+        expected_logical_head: request.expected_logical_head,
+        request_digest: activate_request_digest(request),
+    };
     let (key, closing) = (&request.entry_key, request.closing_tenure_ordinal);
-    if let Some(row) = found.ledger.iter().find(|row| row.closes(key, closing)) {
-        return replay(row, request_digest);
-    }
-    let state = &found.fold.state;
-    let revision = state.state_revision;
-    let head = request.expected_logical_head;
-    check_fresh(
+    write.plan(
         reads,
-        target.timeline,
-        revision,
-        request.expected_state_revision,
-        head,
-    )?;
+        |row| row.closes(key, closing),
+        |found| activate_fresh(&write, found, request),
+    )
+}
+
+/// The activation checks and commit of a write that is neither a replay nor stale.
+fn activate_fresh(
+    write: &WriteV1<'_>,
+    found: CurrentV1,
+    request: &FallbackActivateRequestV1,
+) -> FallbackResult<FallbackPlanV1> {
+    let state = &found.fold.state;
     let policy = found.fold.policy.as_ref().ok_or(Error::UnknownEntry)?;
     let input = activation_input(request, policy.policy_digest(), state.activation_ordinal);
     let payload = FallbackActivatedPayloadV1::new(input)?;
     let input = payload.as_input();
     check_rules(&transition(policy, state, input)?, input)?;
-    let parts = CommitPartsV1 {
-        entity: target.entity,
-        row_seq: next_row_seq(&found.ledger),
-        policy_digest: input.policy_digest,
-        request_digest,
-    };
+    let parts = write.parts(&found, input.policy_digest);
     let body = FallbackLedgerBodyV1::Activation {
         entry_key: input.entry_key.clone(),
         closing_tenure_ordinal: input.closing_tenure_ordinal,
@@ -669,7 +741,7 @@ pub fn plan_activate(
         tick: request.tick,
     };
     let event_type = COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1;
-    let event = draft(target.entity, event_type, payload.to_canonical_cbor());
+    let event = draft(write.target.entity, event_type, payload.to_canonical_cbor());
     let fold = found.fold.apply_activated(&payload);
     fold.map(|fold| parts.commit(fold, event, body, None))
 }

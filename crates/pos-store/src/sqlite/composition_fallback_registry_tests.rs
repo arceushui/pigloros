@@ -8,10 +8,12 @@
 #![cfg(any(test, feature = "test-support"))]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use pos_core::{store::EventStore, DomainFallbackPolicyV1, ErasureContainmentGateV1};
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::limits::Limit;
+use rusqlite::Connection;
 
 use super::seam::{Step, FAULT};
 use crate::composition_fallback_fixtures::{
@@ -179,6 +181,23 @@ fn a_failed_begin_restores_the_level_and_changes_nothing() -> TestResult {
     crate::sqlite::FAIL_BEGIN_IMMEDIATE.with(|fail| fail.set(false));
     assert_eq!(refused.err(), Some(Error::StorageFailed));
     assert_eq!(level(&h.store)?, entry);
+    assert_eq!(snapshot(&h)?, before);
+    Ok(())
+}
+
+#[test]
+fn a_database_locked_by_another_writer_is_busy_and_writes_nothing() -> TestResult {
+    let (mut h, first) = declared()?;
+    let before = snapshot(&h)?;
+    let request = successor_request(&h, &first)?;
+    let holder = Connection::open(path_of(&h)?)?;
+    holder.execute_batch("BEGIN IMMEDIATE")?;
+    h.store.conn.busy_timeout(Duration::ZERO)?;
+    let refused = h.store.declare(&request);
+    let provision = h.store.provision_fallback_registry();
+    holder.execute_batch("ROLLBACK")?;
+    assert_eq!(refused.err(), Some(Error::StorageBusy));
+    assert_eq!(provision.err(), Some(Error::StorageBusy));
     assert_eq!(snapshot(&h)?, before);
     Ok(())
 }
