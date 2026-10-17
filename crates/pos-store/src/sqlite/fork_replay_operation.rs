@@ -554,6 +554,179 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Default)]
+    struct ProbeFunctionAuthorization {
+        selects: usize,
+        functions: Vec<(String, bool)>,
+    }
+
+    fn ignore_probe_function(
+        conn: &Connection,
+        ignored_index: usize,
+    ) -> rusqlite::Result<std::sync::Arc<std::sync::Mutex<ProbeFunctionAuthorization>>> {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::{Arc, Mutex};
+
+        let observed = Arc::new(Mutex::new(ProbeFunctionAuthorization::default()));
+        let callback_observed = Arc::clone(&observed);
+        conn.authorizer(Some(move |request: AuthContext<'_>| {
+            let Ok(mut observed) = callback_observed.lock() else {
+                return Authorization::Deny;
+            };
+            if request.action == AuthAction::Select {
+                observed.selects += 1;
+            }
+            if let AuthAction::Function { function_name } = request.action {
+                let ignored = observed.functions.len() == ignored_index;
+                observed.functions.push((function_name.to_owned(), ignored));
+                if ignored {
+                    return Authorization::Ignore;
+                }
+            }
+            Authorization::Allow
+        }))?;
+        Ok(observed)
+    }
+
+    #[test]
+    fn native_principal_function_refusals_preserve_probe_accounting() -> Fallible<()> {
+        use rusqlite::hooks::{AuthContext, Authorization};
+
+        // Native SQLITE_FUNCTION + IGNORE replaces the selected expression
+        // with NULL. No builtin, production query, schema or getter is replaced.
+        for (label, ignored_index) in [("operation_type", 0), ("operation_length", 1)] {
+            for held_snapshot in [false, true] {
+                let (store, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                // One failed probe followed by the unchanged two-row/32-byte read.
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 3, 32, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                if held_snapshot {
+                    store.conn.execute_batch("BEGIN DEFERRED")?;
+                }
+                let observed = ignore_probe_function(&store.conn, ignored_index)?;
+                let failed = principal_operation_id_with_context(
+                    &store.conn,
+                    row.result_digest,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
+                store
+                    .conn
+                    .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+                let observed = observed.lock().map_err(|_| "function observer poisoned")?;
+                assert_eq!(observed.selects, 1, "{label}");
+                let actual: Vec<_> = observed
+                    .functions
+                    .iter()
+                    .map(|(name, ignored)| (name.as_str(), *ignored))
+                    .collect();
+                let expected: Vec<_> = ["typeof", "length"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, name)| (name, index == ignored_index))
+                    .collect();
+                assert_eq!(actual, expected, "{label}");
+                drop(observed);
+                assert_eq!(failed, Err(Error::StorageIndeterminate), "{label}");
+                assert_eq!(budget.remaining_native_bytes(), 32, "{label}");
+                budget.check_time()?;
+                assert_eq!(
+                    principal_operation_id_with_context(
+                        &store.conn,
+                        row.result_digest,
+                        &mut NativeReadContextV1::protected(&mut budget),
+                    )?,
+                    row.operation_id,
+                    "{label}"
+                );
+                assert_eq!(budget.remaining_native_bytes(), 0, "{label}");
+                budget.check_time()?;
+                assert!(budget.charge_rows(1).is_err(), "{label}");
+                assert!(budget.check_time().is_err(), "{label}");
+                if held_snapshot {
+                    store.conn.execute_batch("ROLLBACK")?;
+                }
+                assert!(store.conn.is_autocommit(), "{label}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_operation_function_refusals_preserve_probe_accounting() -> Fallible<()> {
+        use rusqlite::hooks::{AuthContext, Authorization};
+
+        // One representative per distinct getter: the three hash columns
+        // share their type/length loops; the non-null child has separate getters.
+        for (label, ignored_index) in [
+            ("evidence_type", 0),
+            ("evidence_length", 1),
+            ("child_type", 6),
+            ("child_length", 7),
+        ] {
+            for held_snapshot in [false, true] {
+                let (store, row) = fixture(ForkAdmissionOperationKindV1::Fork)?;
+                let bytes = expected_bytes(&row);
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 3, bytes, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                if held_snapshot {
+                    store.conn.execute_batch("BEGIN DEFERRED")?;
+                }
+                let observed = ignore_probe_function(&store.conn, ignored_index)?;
+                let failed = operation_with_context(
+                    &store.conn,
+                    row.kind,
+                    row.operation_id,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
+                store
+                    .conn
+                    .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+                let observed = observed.lock().map_err(|_| "function observer poisoned")?;
+                assert_eq!(observed.selects, 1, "{label}");
+                let actual: Vec<_> = observed
+                    .functions
+                    .iter()
+                    .map(|(name, ignored)| (name.as_str(), *ignored))
+                    .collect();
+                let expected: Vec<_> = [
+                    "typeof", "length", "typeof", "length", "typeof", "length", "typeof", "length",
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| (name, index == ignored_index))
+                .collect();
+                assert_eq!(actual, expected, "{label}");
+                drop(observed);
+                assert_eq!(failed, Err(Error::StorageIndeterminate), "{label}");
+                assert_eq!(budget.remaining_native_bytes(), bytes, "{label}");
+                budget.check_time()?;
+                assert_eq!(
+                    operation_with_context(
+                        &store.conn,
+                        row.kind,
+                        row.operation_id,
+                        &mut NativeReadContextV1::protected(&mut budget),
+                    )?,
+                    Some(row),
+                    "{label}"
+                );
+                assert_eq!(budget.remaining_native_bytes(), 0, "{label}");
+                budget.check_time()?;
+                assert!(budget.charge_rows(1).is_err(), "{label}");
+                assert!(budget.check_time().is_err(), "{label}");
+                if held_snapshot {
+                    store.conn.execute_batch("ROLLBACK")?;
+                }
+                assert!(store.conn.is_autocommit(), "{label}");
+            }
+        }
+        Ok(())
+    }
+
     fn operation_root(conn: &Connection) -> rusqlite::Result<i64> {
         conn.query_row(
             "SELECT rootpage FROM sqlite_schema
