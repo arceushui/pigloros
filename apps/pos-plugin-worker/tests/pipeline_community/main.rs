@@ -46,10 +46,10 @@ const COMMUNITY_VERSION: u64 = 1;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/community/v1/manifest.json");
-const MANIFEST_SHA256: &str = "8a896d0c44d2d772222b88db8067e85fe8001b2576296b976c8443559905c7b6";
+const MANIFEST_SHA256: &str = "38840656ec03db62d23004cc9ff59d4d97cabec03c8d12933e9d6636ac346fa1";
 
 /// Every runner of profile version 1, by case identifier.
-const RUNNERS: [(&str, Runner); 13] = [
+const RUNNERS: [(&str, Runner); 14] = [
     ("PCF-CPH-001", parity::single_pass_parity),
     ("PCF-CPH-002", parity::mixed_registry_order),
     ("PCF-CPH-003", authority::foreign_proposal_parity),
@@ -63,6 +63,7 @@ const RUNNERS: [(&str, Runner); 13] = [
     ("PCF-CPH-011", replay::replay_parity),
     ("PCF-CPH-012", replay::lost_acknowledgement_recovery),
     ("PCF-CPH-013", authority::reserved_proposal_parity),
+    ("PCF-CPH-014", fail_closed::invalid_output_and_releases),
 ];
 
 /// Parse a `PCH1` manifest under the harness rules of `PPC1`.
@@ -104,7 +105,7 @@ fn pch1_every_mandatory_case_passes_on_the_real_worker() {
     assert_eq!(report.passed.len(), RUNNERS.len());
     assert_eq!(manifest.cases.len(), RUNNERS.len());
     assert!(manifest.cases.iter().all(mandatory_on_both_stores));
-    assert_eq!(manifest.exclusions.len(), 2);
+    assert_eq!(manifest.exclusions.len(), 1);
 }
 
 // ── Fail-closed harness behaviour ───────────────────────────────────────────

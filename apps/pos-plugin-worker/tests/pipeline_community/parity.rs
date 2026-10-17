@@ -108,6 +108,13 @@ impl Observed {
     pub fn first_available(&self) -> bool {
         self.authority.availability.split(',').next() == Some("Available")
     }
+
+    /// Whether every registered Plugin is available after the pass: none is quarantined.
+    #[must_use]
+    pub fn all_available(&self) -> bool {
+        let mut states = self.authority.availability.split(',');
+        states.all(|state| state == "Available")
+    }
 }
 
 const fn result_name(result: &PassResultV1) -> &'static str {

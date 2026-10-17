@@ -13,15 +13,11 @@
     "#638",
     "#651",
     "#654",
+    "#655",
     "ADR-021",
     "ADR-061 r8"
   ],
   "exclusions": [
-    {
-      "id": "INVALID-GUEST-OUTPUT",
-      "reason": "The real community guests always return well-formed output, so a community Driver's invalid guest output (InvalidGuestOutput) needs a new guest Component, and an ABI- or manifest-invalid release needs a malformed release fixture; this profile proves only the invalid pin, registration and denied-capability release refusals of either isolation class and, through PCF-CPH-003, the first-party invalid-draft refusals",
-      "owner": "#637"
-    },
     {
       "id": "OTHER-RESOURCE-LIMITS",
       "reason": "PCF-CPH-010 exhausts a community release through its memory budget only; the signed-release test world fixes the fuel, host-call and output budgets of a release, and the real guests make one host call and emit one small Event, so the fuel, host-call and output limits of a community Driver on the real worker need a release shape with those budgets or a new guest Component",
@@ -699,6 +695,60 @@
         "community-next.follows-host-schedule": "true",
         "community.community-receipts": "none/Discarded,none/Committed",
         "parity.first-party-equals-community": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-014",
+      "title": "Invalid guest output and invalid releases fail closed: a community Driver whose guest output fails validation on the real worker fails the whole pass with InvalidGuestOutput, discards the first-party sibling's staged output and quarantines nothing, as a first-party Driver's invalid draft discards its whole pass under an authority refusal; a release whose ABI the real worker does not support and a closure whose manifest is not PMF1 are refused without changing the registry",
+      "sources": [
+        "#489",
+        "#637",
+        "#655",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "community-invalid-output.result": "Failed",
+        "community-invalid-output.timeline": "",
+        "community-invalid-output.entity": "",
+        "community-invalid-output.receipt.names-events": "false",
+        "community-invalid-output.steps": "1,1",
+        "community-invalid-output.availability": "Available,Available",
+        "community-invalid-output.owner": "",
+        "community-invalid-output.follows-host-schedule": "true",
+        "community-invalid-output.refusal": "CommunityPlugin(InvalidGuestOutput) host=InvalidGuestOutput",
+        "community-next.result": "Committed",
+        "community-next.timeline": "1:parity.first-party,2:prototype.driven",
+        "community-next.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "community-next.receipt.names-events": "true",
+        "community-next.steps": "1,1",
+        "community-next.availability": "Available,Available",
+        "community-next.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "community-next.follows-host-schedule": "true",
+        "community.community-receipts": "InvalidGuestOutput/Discarded,none/Committed",
+        "first-party-invalid-draft.result": "Failed",
+        "first-party-invalid-draft.timeline": "",
+        "first-party-invalid-draft.entity": "",
+        "first-party-invalid-draft.receipt.names-events": "false",
+        "first-party-invalid-draft.steps": "1,1",
+        "first-party-invalid-draft.availability": "Available,Available",
+        "first-party-invalid-draft.owner": "",
+        "first-party-invalid-draft.follows-host-schedule": "true",
+        "first-party-invalid-draft.refusal": "Authority(UnauthorizedSource)",
+        "abi-invalid-release.refusal": "IncompatibleAbi",
+        "abi-invalid-release.registry-unchanged": "true",
+        "manifest-invalid-release.refusal": "InvalidManifest",
+        "manifest-invalid-release.registry-unchanged": "true",
+        "parity.whole-pass-discarded-either-class": "true"
       }
     }
   ]

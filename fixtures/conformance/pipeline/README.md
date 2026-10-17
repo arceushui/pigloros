@@ -92,10 +92,20 @@ the same typed refusal: `MissingImplementation` from exact resolution,
 injected through the host's refusal record), and
 `IncompatibleImplementation(Isolation)` from exact resolution. Only the
 community path has a release, so a release that is not active is refused at the
-trust gate and one with a denied capability never becomes a Driver. An invalid
-community guest output needs a new guest Component and an ABI- or
-manifest-invalid release needs a malformed release fixture; the
-`INVALID-GUEST-OUTPUT` exclusion records both.
+trust gate and one with a denied capability never becomes a Driver.
+
+`PCF-CPH-014` (#655) covers invalid guest output and invalid releases. The
+probe guest (`fixtures/probe-guest.wasm`, #652), steered by its `bad-digest`
+observation, returns an output whose digest does not match on the real worker:
+the pass fails `InvalidGuestOutput`, the first-party sibling's staged output is
+discarded, nothing is quarantined, and the next pass commits both Events
+without the host clearing anything. Its first-party counterpart is the
+invalid-draft refusal of `PCF-CPH-003`, `Authority(UnauthorizedSource)`, which
+also discards the whole pass and quarantines nothing. A release that declares
+ABI minor 1 alone is refused `IncompatibleAbi` by negotiation against the real
+worker's V1 host ABI (0.0 alone), and a closure whose manifest bytes are not
+PMF1 is refused `InvalidManifest` at the trust gate; neither changes the
+registry.
 
 `PCF-CPH-010` (#634) covers over-budget parity. The two classes are bound by
 different budgets, so the equivalence is semantic: a typed non-commit that
@@ -135,8 +145,9 @@ for the pass store, the store every pass admits to, reads Events from and
 recovers from; the trust registry of the signed-release test world stays on
 `MemoryStore`. A case that runs no pass, or none that commits (parts of
 `PCF-CPH-004`, `PCF-CPH-007` and `PCF-CPH-009`), still runs on both stores and
-records the same values on each. The exclusions name what the real guests and
-release fixtures cannot yet exercise (owned by #637).
+records the same values on each. The one remaining exclusion,
+`OTHER-RESOURCE-LIMITS`, names what the real worker does not exercise yet
+(owned by #637).
 
 `PCH1` version 1 was re-pinned in place to add SQLite, by user decision
 (2026-10-17), following the in-place re-pins of #632 to #636: every case's
@@ -146,10 +157,11 @@ changed; only the store set grew, so the manifest's pinned SHA-256 changed.
 
 `PCH1` version 1 was re-pinned in place again for #637, by user decision
 (2026-10-17): #654 appended `PCF-CPH-013` and removed the
-`COMMUNITY-RESERVED-PROPOSAL` exclusion, and #637 and #654 joined the sources.
-No expected value of an earlier case changed.
+`COMMUNITY-RESERVED-PROPOSAL` exclusion, #655 appended `PCF-CPH-014` and
+removed the `INVALID-GUEST-OUTPUT` exclusion, and #637, #654 and #655 joined
+the sources. No expected value of an earlier case changed.
 
-Every `PCH1` case (`PCF-CPH-001` to `PCF-CPH-013`) is mandatory and applicable
+Every `PCH1` case (`PCF-CPH-001` to `PCF-CPH-014`) is mandatory and applicable
 and has exactly one runner, in manifest order; the runner asserts that none is
 skipped.
 
