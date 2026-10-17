@@ -897,14 +897,19 @@ jobs:
 
 # ── Platform verification ────────────────────────────────────────────────────
 
-  # ASan compilation is serialized (CARGO_BUILD_JOBS=1) and takes most of an
-  # ASan shard's time, so it runs once, alongside the core and standard
-  # stages. The archive holds every workspace test binary; the shards below
-  # still run last and only execute tests from it.
+  # ASan compilation is serialized (CARGO_BUILD_JOBS=1) and took most of each
+  # ASan shard's time, so it runs once as a standard-stage job. The archive
+  # holds every workspace test binary; the shards below still run last and
+  # only execute tests from it.
   asan-build:
     name: asan build (nextest archive)
-    needs: [ci_change_scope, preflight-gate]
-    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    needs:
+      - ci_change_scope
+      - cargo-crap
+    if: >-
+      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
+      needs.cargo-crap.result == 'success' &&
+      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -940,11 +945,13 @@ jobs:
         with:
           name: asan-nextest-archive
           path: ${{ runner.temp }}/asan-tests.tar.zst
-          retention-days: 1
+          retention-days: 3
           if-no-files-found: error
           overwrite: true
           compression-level: 0
 
+  # Shards do not compile: they run tests from the asan-build archive, so
+  # rust-src and rust-cache are intentionally absent.
   asan:
     name: asan shard (${{ matrix.shard }})
     needs:
@@ -1024,6 +1031,7 @@ jobs:
             --archive-file "${RUNNER_TEMP}/asan-archive/asan-tests.tar.zst"
             --extract-to "${GITHUB_WORKSPACE}"
             --extract-overwrite
+            --workspace-remap "${GITHUB_WORKSPACE}"
             --user-config-file none
             --ignore-default-filter
             --success-output final
@@ -1075,6 +1083,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - ci_change_scope
+      - asan-build
       - asan
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -1083,14 +1092,17 @@ jobs:
         env:
           SCOPE_JOB_RESULT: ${{ needs.ci_change_scope.result }}
           RUST_SCOPE_RESULT: ${{ needs.ci_change_scope.outputs.rust }}
+          ASAN_BUILD_RESULT: ${{ needs.asan-build.result }}
           ASAN_SHARDS_RESULT: ${{ needs.asan.result }}
         run: |
           set -euo pipefail
           if [[ "${SCOPE_JOB_RESULT}" == "success" \
             && "${RUST_SCOPE_RESULT}" == "false" \
+            && "${ASAN_BUILD_RESULT}" == "skipped" \
             && "${ASAN_SHARDS_RESULT}" == "skipped" ]]; then
             exit 0
           fi
+          test "${ASAN_BUILD_RESULT}" = success
           test "${ASAN_SHARDS_RESULT}" = success
 
   docker-build:
@@ -1214,6 +1226,7 @@ jobs:
       - docker-build
       - world-client-wasm
       - world-client-browser-parity
+      - asan-build
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1231,6 +1244,7 @@ jobs:
           DOCKER_RESULT: ${{ needs.docker-build.result }}
           WASM_RESULT: ${{ needs.world-client-wasm.result }}
           BROWSER_RESULT: ${{ needs.world-client-browser-parity.result }}
+          ASAN_BUILD_RESULT: ${{ needs.asan-build.result }}
         run: |
           set -euo pipefail
           test "${CORE_RESULT}" = success
@@ -1242,7 +1256,7 @@ jobs:
             "${CARGO_CRAP_RESULT}" "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" \
             "${MATERIALIZE_RESULT}" "${DEPENDENCY_RESULT}" \
             "${CODEQL_RESULT}" "${LEDGER_WINDOWS_RESULT}" "${DOCKER_RESULT}" \
-            "${WASM_RESULT}" "${BROWSER_RESULT}"; do
+            "${WASM_RESULT}" "${BROWSER_RESULT}" "${ASAN_BUILD_RESULT}"; do
             test "${result}" = "${expected}"
           done
 
