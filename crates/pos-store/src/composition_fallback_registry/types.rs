@@ -59,9 +59,9 @@ impl FallbackConformanceSetsV1 {
         for (entry_key, digests) in &self.sets {
             update_text(&mut hasher, entry_key);
             update_len(&mut hasher, digests.len());
-            digests.iter().for_each(|digest| {
+            for digest in digests {
                 hasher.update(digest.as_bytes());
-            });
+            }
         }
         Hash::from_bytes(*hasher.finalize().as_bytes())
     }
