@@ -22,6 +22,7 @@ const SCOPE: &str = "scope";
 type DeclareError = FallbackDeclareErrorV1;
 type Declared = Result<FallbackCommitReceiptV1, DeclareError>;
 type Refusal = Result<Option<DeclareError>, Box<dyn Error>>;
+type Provisioned = (MemoryStore, TimelineId, pos_core::Seq);
 
 /// A provisioned store with one Timeline, a declaration of the fixture's
 /// one-entry policy on it, and the declare grant.
@@ -59,12 +60,19 @@ fn policy(
     Ok(DomainFallbackPolicyV1::new(scope, entries, previous)?)
 }
 
-fn world() -> Result<World, Box<dyn Error>> {
-    let fixture = fixture()?;
+/// A provisioned store with one Timeline and that Timeline's logical head.
+fn provisioned() -> Result<Provisioned, Box<dyn Error>> {
     let mut store = MemoryStore::new();
     store.bind_erasure_gate(Arc::new(ErasureContainmentGateV1::new_test_open()))?;
     store.provision_fallback_registry()?;
     let timeline = store.create_timeline("composition")?.id();
+    let head = store.logical_head(timeline)?;
+    Ok((store, timeline, head))
+}
+
+fn world() -> Result<World, Box<dyn Error>> {
+    let fixture = fixture()?;
+    let (store, timeline, head) = provisioned()?;
     let first = policy(vec![entry(&fixture)?], None)?;
     let primary = fixture.primary.pin.implementation().clone();
     let facts = FallbackEntryFactsV1 {
@@ -79,7 +87,7 @@ fn world() -> Result<World, Box<dyn Error>> {
         },
         stepped_timeline: timeline,
         expected_state_revision: 0,
-        expected_logical_head: store.logical_head(timeline)?,
+        expected_logical_head: head,
         policy_bytes: first.to_canonical_cbor(),
         composition: fixture.composition,
         effective: BTreeMap::from([(ENTRY.to_owned(), primary)]),
