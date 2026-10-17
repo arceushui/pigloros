@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
-          ref: 371ba6f573d7bcb88cf11821e8ebc9c206d8f361
+          ref: 53fdf96deede1def2c6dd0e6183b21ea2eca9a68
           persist-credentials: false
       - name: Record exact source and generate the existing guest bindings
         timeout-minutes: 5
@@ -25,7 +25,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           git rev-parse HEAD | tee artifacts/source-sha.txt
-          test "$(git rev-parse HEAD)" = 371ba6f573d7bcb88cf11821e8ebc9c206d8f361
+          test "$(git rev-parse HEAD)" = 53fdf96deede1def2c6dd0e6183b21ea2eca9a68
           test -z "$(git status --porcelain --untracked-files=no)"
           # Reuse the canonical install-tools.sh pin, verified before downloading.
           installer=plugins/community/examples/compatibility-prototype/install-tools.sh
