@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 
@@ -15,6 +17,7 @@ import yaml
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHECKER_PATH = ROOT / "scripts" / "check_asan_ci_policy.py"
 SUPPRESSION_PATH = ROOT / "scripts" / "asan" / "bevy-reflect.lsan"
+SERIAL_LINKER_PATH = ROOT / "scripts" / "asan" / "serial-link.sh"
 NEGATIVE_CONTROL_PATH = ROOT / "scripts" / "asan" / "intentional-leak.rs"
 EXPECTED_SUPPRESSION = (
     "leak:^<bevy_reflect::utility::GenericTypeCell<"
@@ -159,15 +162,277 @@ class AsanCiPolicyTests(unittest.TestCase):
 
         self.assert_rejected(remove_match_assertion)
 
-    def test_rejects_missing_serialization(self) -> None:
+    def test_rejects_unbounded_build_concurrency(self) -> None:
         self.assert_rejected(
-            lambda workflow: self.asan_step(workflow)["env"].pop("CARGO_BUILD_JOBS")
+            lambda workflow: self.build_step(workflow)["env"].pop("CARGO_BUILD_JOBS")
         )
 
-    def test_requires_bounded_test_concurrency(self) -> None:
+    def test_rejects_missing_serial_linker(self) -> None:
         self.assert_rejected(
-            lambda workflow: self.asan_step(workflow)["env"].pop("RUST_TEST_THREADS")
+            lambda workflow: self.build_step(workflow)["env"].pop(
+                "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"
+            )
         )
+
+    def test_rejects_rustflags_linker_override(self) -> None:
+        def override_linker(workflow: dict) -> None:
+            step = self.build_step(workflow)
+            step["run"] = step["run"].replace(
+                '-Z sanitizer=address"', '-Z sanitizer=address -C linker=cc"'
+            )
+
+        self.assert_rejected(override_linker)
+
+    def test_requires_runtime_proof_of_serial_linking(self) -> None:
+        def drop_lock_assertion(workflow: dict) -> None:
+            step = self.build_step(workflow)
+            step["run"] = step["run"].replace(
+                'test -f "${RUNNER_TEMP}/asan-link.lock"\n', ""
+            )
+
+        self.assert_rejected(drop_lock_assertion)
+
+    def test_repository_serial_linker_passes(self) -> None:
+        CHECKER.check_serial_linker(SERIAL_LINKER_PATH)
+
+    def test_rejects_unserialized_linker_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            linker = pathlib.Path(directory) / "serial-link.sh"
+            linker.write_text('#!/bin/sh\nexec cc "$@"\n', encoding="utf-8")
+            linker.chmod(0o755)
+            with self.assertRaises(CHECKER.PolicyError):
+                CHECKER.check_serial_linker(linker)
+
+    def test_rejects_non_executable_linker_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            linker = pathlib.Path(directory) / "serial-link.sh"
+            linker.write_bytes(SERIAL_LINKER_PATH.read_bytes())
+            linker.chmod(0o644)
+            with self.assertRaises(CHECKER.PolicyError):
+                CHECKER.check_serial_linker(linker)
+
+    def test_requires_bounded_test_concurrency(self) -> None:
+        def remove_test_threads(workflow: dict) -> None:
+            step = self.asan_step(workflow)
+            step["run"] = step["run"].replace("  --test-threads 2\n", "")
+
+        self.assert_rejected(remove_test_threads)
+
+    def test_archive_build_rejects_changed_job_metadata(self) -> None:
+        changes = {
+            "needs": ["ci_change_scope"],
+            "if": "${{ always() }}",
+            "runs-on": "ubuntu-latest",
+            "timeout-minutes": 120,
+        }
+        for key, value in changes.items():
+            with self.subTest(key=key):
+                self.assert_rejected(
+                    lambda workflow, key=key, value=value: workflow["jobs"][
+                        "asan-build"
+                    ].update({key: value})
+                )
+
+    def test_archive_build_rejects_changed_setup(self) -> None:
+        def cache_step(workflow: dict) -> dict:
+            return next(
+                step
+                for step in workflow["jobs"]["asan-build"]["steps"]
+                if "rust-cache" in step.get("uses", "")
+            )
+
+        def nextest_step(workflow: dict) -> dict:
+            return next(
+                step
+                for step in workflow["jobs"]["asan-build"]["steps"]
+                if "install-action" in step.get("uses", "")
+            )
+
+        mutations = {
+            "cache key": lambda w: cache_step(w)["with"].update({"shared-key": "other"}),
+            "cache saved on pull requests": lambda w: cache_step(w)["with"].update(
+                {"save-if": True}
+            ),
+            "floating nextest": lambda w: nextest_step(w)["with"].update(
+                {"tool": "cargo-nextest"}
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                self.assert_rejected(mutate)
+
+    def test_shards_reject_compilation_setup(self) -> None:
+        def add_rust_cache(workflow: dict) -> None:
+            workflow["jobs"]["asan"]["steps"].insert(
+                3,
+                {
+                    "uses": "Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16",
+                    "with": {"shared-key": "asan-nightly-2026-07-01"},
+                },
+            )
+
+        def add_rust_src(workflow: dict) -> None:
+            workflow["jobs"]["asan"]["steps"][2]["with"]["components"] = "rust-src"
+
+        def move_download(workflow: dict) -> None:
+            workflow["jobs"]["asan"]["steps"][5]["with"]["path"] = "asan-archive"
+
+        for mutate in (add_rust_cache, add_rust_src, move_download):
+            with self.subTest(mutation=mutate.__name__):
+                self.assert_rejected(mutate)
+
+    def test_requires_archive_build_job(self) -> None:
+        self.assert_rejected(lambda workflow: workflow["jobs"].pop("asan-build"))
+
+    def test_shards_require_archive_build_dependency(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan"]["needs"].remove("asan-build")
+        )
+
+    def test_shards_require_archive_build_success(self) -> None:
+        def drop_build_condition(workflow: dict) -> None:
+            job = workflow["jobs"]["asan"]
+            job["if"] = job["if"].replace(
+                "needs.asan-build.result == 'success' && ", ""
+            )
+
+        self.assert_rejected(drop_build_condition)
+
+    def test_archive_build_must_run_in_the_standard_stage(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan-build"].update(
+                {"needs": ["ci_change_scope", "preflight-gate"]}
+            )
+        )
+
+    def test_archive_build_must_require_cargo_crap_success(self) -> None:
+        def drop_cargo_crap_condition(workflow: dict) -> None:
+            job = workflow["jobs"]["asan-build"]
+            job["if"] = job["if"].replace(
+                "needs.cargo-crap.result == 'success' && ", ""
+            )
+
+        self.assert_rejected(drop_cargo_crap_condition)
+
+    def test_archive_build_requires_instrumented_complete_scope(self) -> None:
+        for fragment in (
+            'RUSTFLAGS="-Z sanitizer=address" \\\n  ',
+            " -Z build-std",
+            " --all-features",
+            " --tests",
+            " --workspace",
+        ):
+            with self.subTest(fragment=fragment):
+                def weaken_build(workflow: dict, removed: str = fragment) -> None:
+                    step = self.build_step(workflow)
+                    step["run"] = step["run"].replace(removed, "", 1)
+
+                self.assert_rejected(weaken_build)
+
+    def test_archive_build_rejects_extra_environment(self) -> None:
+        self.assert_rejected(
+            lambda workflow: self.build_step(workflow)["env"].update(
+                {"RUSTFLAGS": "-C opt-level=0"}
+            )
+        )
+
+    def test_archive_build_rejects_continue_on_error(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan-build"].update(
+                {"continue-on-error": True}
+            )
+        )
+
+    def test_archive_build_rejects_github_env_injection(self) -> None:
+        def inject_step(workflow: dict) -> None:
+            workflow["jobs"]["asan-build"]["steps"].insert(
+                -2,
+                {
+                    "name": "drop instrumentation",
+                    "run": "echo 'RUSTFLAGS=' >> \"$GITHUB_ENV\"",
+                },
+            )
+
+        self.assert_rejected(inject_step)
+
+    def test_rejects_archive_artifact_name_mismatch(self) -> None:
+        def rename_download(workflow: dict) -> None:
+            download = next(
+                step
+                for step in workflow["jobs"]["asan"]["steps"]
+                if step.get("name") == "Download ASan test archive"
+            )
+            download["with"]["name"] = "asan-nextest-archive-other"
+
+        self.assert_rejected(rename_download)
+
+    def test_rejects_ignored_missing_archive_upload(self) -> None:
+        def ignore_missing_archive(workflow: dict) -> None:
+            upload = workflow["jobs"]["asan-build"]["steps"][-1]
+            upload["with"]["if-no-files-found"] = "ignore"
+
+        self.assert_rejected(ignore_missing_archive)
+
+    def test_requires_exact_archive_retention(self) -> None:
+        def shorten_retention(workflow: dict) -> None:
+            upload = workflow["jobs"]["asan-build"]["steps"][-1]
+            upload["with"]["retention-days"] = 1
+
+        self.assert_rejected(shorten_retention)
+
+    def test_requires_archive_overwrite_on_rerun(self) -> None:
+        def keep_stale_archive(workflow: dict) -> None:
+            upload = workflow["jobs"]["asan-build"]["steps"][-1]
+            upload["with"]["overwrite"] = False
+
+        self.assert_rejected(keep_stale_archive)
+
+    def test_requires_extraction_into_workspace(self) -> None:
+        for fragment in (
+            '  --extract-to "${GITHUB_WORKSPACE}"\n',
+            "  --extract-overwrite\n",
+            '  --workspace-remap "${GITHUB_WORKSPACE}"\n',
+        ):
+            with self.subTest(fragment=fragment):
+                def move_extraction(workflow: dict, removed: str = fragment) -> None:
+                    step = self.asan_step(workflow)
+                    step["run"] = step["run"].replace(removed, "")
+
+                self.assert_rejected(move_extraction)
+
+    def test_requires_archive_reuse_in_shards(self) -> None:
+        def rebuild_in_shard(workflow: dict) -> None:
+            step = self.asan_step(workflow)
+            step["run"] = step["run"].replace(
+                '  --archive-file "${RUNNER_TEMP}/asan-archive/asan-tests.tar.zst"\n',
+                "  --workspace --all-features --locked\n",
+            )
+
+        self.assert_rejected(rebuild_in_shard)
+
+    def test_requires_exact_shard_filtersets(self) -> None:
+        for old, new in (
+            ("not package(pos-conformance)", "all()"),
+            (
+                "binary_id(pos-conformance::moat_proof_public)",
+                "binary_id(pos-conformance::moat_proof_public) & test(=none)",
+            ),
+            ("--partition slice:1/2 --run-ignored all", "--partition slice:1/2"),
+            (" | kind(bin)", ""),
+            (" | binary_id(pos-conformance::provider_contract_public)", ""),
+            (
+                "binary_id(pos-conformance::bundle_contract_coverage_public)",
+                "binary_id(pos-conformance::bundle_contract_public)",
+            ),
+        ):
+            with self.subTest(old=old):
+                def change_filter(
+                    workflow: dict, before: str = old, after: str = new
+                ) -> None:
+                    step = self.asan_step(workflow)
+                    step["run"] = step["run"].replace(before, after, 1)
+
+                self.assert_rejected(change_filter)
 
     def test_requires_all_asan_shards(self) -> None:
         self.assert_rejected(
@@ -184,6 +449,53 @@ class AsanCiPolicyTests(unittest.TestCase):
             lambda workflow: workflow["jobs"]["asan-gate"].pop("if")
         )
 
+    def test_aggregate_gate_must_need_archive_build(self) -> None:
+        self.assert_rejected(
+            lambda workflow: workflow["jobs"]["asan-gate"]["needs"].remove(
+                "asan-build"
+            )
+        )
+
+    def test_aggregate_gate_must_check_archive_build(self) -> None:
+        def remove_build_check(workflow: dict) -> None:
+            step = workflow["jobs"]["asan-gate"]["steps"][0]
+            step["run"] = step["run"].replace(
+                'test "${ASAN_BUILD_RESULT}" = success\n', ""
+            )
+
+        self.assert_rejected(remove_build_check)
+
+    def test_aggregate_gate_verdicts(self) -> None:
+        script = self.workflow["jobs"]["asan-gate"]["steps"][0]["run"]
+        cases = (
+            (("success", "true", "success", "success"), True),
+            (("success", "false", "skipped", "skipped"), True),
+            (("success", "true", "failure", "skipped"), False),
+            (("success", "true", "skipped", "skipped"), False),
+            (("success", "true", "cancelled", "skipped"), False),
+            (("success", "true", "success", "failure"), False),
+            (("success", "true", "success", "skipped"), False),
+            (("success", "false", "success", "skipped"), False),
+            (("success", "false", "skipped", "success"), False),
+            (("failure", "false", "skipped", "skipped"), False),
+        )
+        for (scope, rust, build, shards), passes in cases:
+            with self.subTest(scope=scope, rust=rust, build=build, shards=shards):
+                env = {
+                    **os.environ,
+                    "SCOPE_JOB_RESULT": scope,
+                    "RUST_SCOPE_RESULT": rust,
+                    "ASAN_BUILD_RESULT": build,
+                    "ASAN_SHARDS_RESULT": shards,
+                }
+                result = subprocess.run(
+                    ["bash", "-c", script],
+                    env=env,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode == 0, passes)
+
     def test_aggregate_gate_must_require_shard_success(self) -> None:
         self.assert_rejected(
             lambda workflow: workflow["jobs"]["asan-gate"]["steps"][0].update(
@@ -194,8 +506,8 @@ class AsanCiPolicyTests(unittest.TestCase):
     def test_rejects_commented_serialization(self) -> None:
         source = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         source = source.replace(
-            '          CARGO_BUILD_JOBS: "1"',
-            '          # CARGO_BUILD_JOBS: "1"',
+            "          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:",
+            "          # CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER:",
         )
         with tempfile.TemporaryDirectory() as directory:
             fixture = pathlib.Path(directory) / "ci.yml"
@@ -237,10 +549,10 @@ class AsanCiPolicyTests(unittest.TestCase):
 
     def test_rejects_newline_between_rustflags_and_cargo(self) -> None:
         def insert_newline(workflow: dict) -> None:
-            step = self.asan_step(workflow)
+            step = self.build_step(workflow)
             step["run"] = step["run"].replace(
-                'RUSTFLAGS="-Z sanitizer=address" \\\n    cargo "${cargo_args[@]}"',
-                'RUSTFLAGS="-Z sanitizer=address"\n    cargo "${cargo_args[@]}"',
+                'RUSTFLAGS="-Z sanitizer=address" \\\n  cargo',
+                'RUSTFLAGS="-Z sanitizer=address"\n  cargo',
             )
 
         self.assert_rejected(insert_newline)
@@ -426,7 +738,7 @@ class AsanCiPolicyTests(unittest.TestCase):
         def remove_cache_date(workflow: dict) -> None:
             cache_step = next(
                 step
-                for step in workflow["jobs"]["asan"]["steps"]
+                for step in workflow["jobs"]["asan-build"]["steps"]
                 if str(step.get("uses", "")).startswith("Swatinem/rust-cache@")
             )
             cache_step["with"]["shared-key"] = "asan"
@@ -435,14 +747,14 @@ class AsanCiPolicyTests(unittest.TestCase):
 
     def test_requires_incremental_artifacts_disabled(self) -> None:
         self.assert_rejected(
-            lambda workflow: self.asan_step(workflow)["env"].pop(
+            lambda workflow: self.build_step(workflow)["env"].pop(
                 "CARGO_INCREMENTAL", None
             )
         )
 
     def test_requires_line_table_debuginfo(self) -> None:
         self.assert_rejected(
-            lambda workflow: self.asan_step(workflow)["env"].pop(
+            lambda workflow: self.build_step(workflow)["env"].pop(
                 "CARGO_PROFILE_TEST_DEBUG", None
             )
         )
@@ -468,6 +780,14 @@ class AsanCiPolicyTests(unittest.TestCase):
             step
             for step in workflow["jobs"]["asan"]["steps"]
             if step.get("name") == "cargo test with ASan"
+        )
+
+    @staticmethod
+    def build_step(workflow: dict) -> dict:
+        return next(
+            step
+            for step in workflow["jobs"]["asan-build"]["steps"]
+            if step.get("name") == "cargo nextest archive with ASan"
         )
 
     @staticmethod
