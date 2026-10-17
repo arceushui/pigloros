@@ -3,7 +3,8 @@
 # Gate policy (Redmine #100):
 #   fmt          — cargo fmt --check (rustfmt)
 #   rustdoc      — cargo doc with rustdoc warnings denied
-#   test         — cargo nextest --all-features + doctests (no ignored tests silently skip)
+#   test         — cargo nextest --all-features in 3 shards + doctests (no ignored
+#                  or unrun test)
 #   clippy       — pedantic + -D warnings; also the all-features, all-targets
 #                  type check
 #   coverage     — lines ≥99%, regions ≥99%
@@ -55,7 +56,7 @@ env:
 # ── Quality gates ────────────────────────────────────────────────────────────
 #
 # Fail fast in bounded stages. Pull-request diff and policy checks run before
-# any Cargo-heavy work. The four core gates then run together, followed by at
+# any Cargo-heavy work. The core gates then run together, followed by at
 # most eight standard jobs. Mutation and ASan are the final expensive stages.
 
 jobs:
@@ -218,11 +219,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.97.1
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
-        with:
-          tool: cargo-nextest@0.9.146
-          fallback: none
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: test
@@ -239,21 +235,91 @@ jobs:
         run: bash scripts/check-reference-evaluator-independence.sh
       - name: Prove the conformance adapter dependency graph
         run: bash scripts/check-adapter-graph.sh
-      # Cargo runs test executables one after another; nextest schedules the
-      # tests of every executable across all runner cores. Doctests are not
-      # supported by nextest, so libtest still runs them.
-      - name: cargo nextest (all features, ignored included)
-        run: |
-          set -euo pipefail
-          cargo nextest run --workspace --all-features --locked \
-            --user-config-file none --ignore-default-filter \
-            --run-ignored all --no-fail-fast 2>&1 | tee /tmp/cargo-nextest.log
+      # The workspace tests run in the test-shard matrix. Doctests are not
+      # supported by nextest, so libtest still runs them here.
       - name: cargo test doctests (all features, ignored included)
         run: |
           set -euo pipefail
           cargo test --workspace --all-features --locked --doc -- --include-ignored 2>&1 | tee /tmp/cargo-doctest.log
-      - name: Require no ignored or skipped test in either summary
-        run: bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-nextest.log /tmp/cargo-doctest.log
+      - name: Require no ignored test in the doctest summary
+        run: bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-doctest.log
+
+  # The nextest suite is CPU-bound (~860 test-seconds on a 4-vCPU runner after
+  # the crypto dependency opt-level change), so it is split across runners.
+  # slice:k/N deals tests round-robin, spreading the long pos-conformance
+  # bundle tests over every shard.
+  test-shard:
+    name: test shard (${{ matrix.shard }}/3)
+    needs: [ci_change_scope, preflight-gate]
+    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-nextest@0.9.146
+          fallback: none
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: test-nextest
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo nextest partition (all features, ignored included)
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP}/nextest-shard.log"
+          printf 'nextest partition: slice:%s/3\n' "${SHARD}" >"${log}"
+          cargo nextest run --workspace --all-features --locked \
+            --user-config-file none --ignore-default-filter \
+            --run-ignored all --no-fail-fast \
+            --partition "slice:${SHARD}/3" 2>&1 | tee -a "${log}"
+      - name: Upload shard summary log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-shard-log-${{ matrix.shard }}
+          path: ${{ runner.temp }}/nextest-shard.log
+          retention-days: 1
+          if-no-files-found: error
+          # A re-run of one shard replaces its earlier attempt's log.
+          overwrite: true
+
+  test-shards:
+    name: test-shards
+    needs: [test-shard]
+    if: ${{ !cancelled() && needs.test-shard.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download every shard summary log
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: test-shard-log-*
+          path: ${{ runner.temp }}/shards
+      - name: Prove the shards ran every test exactly once
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          logs=("${RUNNER_TEMP}"/shards/test-shard-log-*/nextest-shard.log)
+          for shard in 1 2 3; do
+            matches="$(grep -lFx "nextest partition: slice:${shard}/3" "${logs[@]}" | wc -l)"
+            test "${matches}" -eq 1
+          done
+          bash scripts/assert-no-ignored-in-test-summary.sh --partitioned=3 "${logs[@]}"
 
   reference-evaluator-release:
     name: reference-evaluator-release
@@ -563,8 +629,8 @@ jobs:
       # production diff before spending time on the repository-wide floor.
       # nextest runs every test executable in parallel instead of one at a
       # time; each test process writes its own profile, merged by llvm-cov.
-      # The test job runs the same nextest flags and asserts that no test was
-      # ignored or skipped, so this run needs no separate summary check.
+      # The test-shard jobs run the same nextest flags and test-shards proves
+      # every test ran with none skipped, so this run needs no summary check.
       - name: Generate coverage report for changed-code gate
         run: >
           cargo llvm-cov nextest --workspace --all-features --locked
@@ -619,18 +685,20 @@ jobs:
       - preflight-gate
       - fmt
       - test
+      - test-shards
       - clippy
       - coverage
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require fmt, test, clippy, and coverage
+      - name: Require fmt, test, test shards, clippy, and coverage
         env:
           SCOPE_RESULT: ${{ needs.ci_change_scope.result }}
           RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
           PREFLIGHT_RESULT: ${{ needs.preflight-gate.result }}
           FMT_RESULT: ${{ needs.fmt.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          TEST_SHARDS_RESULT: ${{ needs.test-shards.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           COVERAGE_RESULT: ${{ needs.coverage.result }}
         run: |
@@ -643,6 +711,7 @@ jobs:
           fi
           test "${FMT_RESULT}" = "${expected}"
           test "${TEST_RESULT}" = "${expected}"
+          test "${TEST_SHARDS_RESULT}" = "${expected}"
           test "${CLIPPY_RESULT}" = "${expected}"
           test "${COVERAGE_RESULT}" = "${expected}"
 

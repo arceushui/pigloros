@@ -33,10 +33,11 @@ TRUSTED_MAIN_DOCKER_CACHE_TO = (
 )
 CORE_CACHE_KEYS = {
     "test": "test",
+    "test-shard": "test-nextest",
     "clippy": "clippy",
     "coverage": "coverage",
 }
-CORE_JOB_NAMES = ("fmt", "test", "clippy", "coverage")
+CORE_JOB_NAMES = ("fmt", "test", "test-shard", "clippy", "coverage")
 MAIN_PUSH_TRIGGER = {"branches": ["main"]}
 PREFLIGHT_GATE_IF = "${{ always() }}"
 REQUIRED_PREFLIGHT_NEEDS = ("ci_change_scope", "pinned-dependencies")
@@ -181,6 +182,57 @@ def assert_core_rust_cache_contract(workflow: dict) -> None:
             raise AssertionError(f"{job_name} cache must use the trusted-main policy")
         if "if" in cache_step:
             raise AssertionError(f"{job_name} cache must remain reachable on pull requests")
+
+
+TEST_SHARDS_NEEDS = ["test-shard"]
+TEST_SHARDS_IF = "${{ !cancelled() && needs.test-shard.result == 'success' }}"
+TEST_SHARDS_CORE_CHECK = 'test "${TEST_SHARDS_RESULT}" = "${expected}"'
+TEST_SHARD_COUNT = 3
+
+
+def step_runs(job: dict) -> str:
+    return "\n".join(str(step.get("run", "")) for step in job.get("steps", []))
+
+
+def assert_test_shards_gate(workflow: dict) -> None:
+    """Require the shard aggregate to run only on all-shard success and block core-gate."""
+    jobs = workflow["jobs"]
+    aggregate = jobs.get("test-shards")
+    if not isinstance(aggregate, dict):
+        raise AssertionError("ci.yml must define the test-shards aggregate")
+    if aggregate.get("needs") != TEST_SHARDS_NEEDS:
+        raise AssertionError("test-shards must wait for every test shard")
+    if aggregate.get("if") != TEST_SHARDS_IF:
+        raise AssertionError("test-shards must run only after every shard succeeded")
+    shard = jobs.get("test-shard", {})
+    strategy = shard.get("strategy", {})
+    expected = list(range(1, TEST_SHARD_COUNT + 1))
+    if strategy.get("matrix", {}).get("shard") != expected:
+        raise AssertionError(f"test-shard matrix must be shards {expected}")
+    if strategy.get("fail-fast") is not False:
+        raise AssertionError("test-shard must not cancel sibling shards on failure")
+    count = str(TEST_SHARD_COUNT)
+    shard_runs = step_runs(shard)
+    aggregate_runs = step_runs(aggregate)
+    for fragment, runs in (
+        (f'--partition "slice:${{SHARD}}/{count}"', shard_runs),
+        (f"nextest partition: slice:%s/{count}", shard_runs),
+        (f"for shard in {' '.join(map(str, expected))}; do", aggregate_runs),
+        (f"slice:${{shard}}/{count}", aggregate_runs),
+        (f"--partitioned={count}", aggregate_runs),
+    ):
+        if fragment not in runs:
+            raise AssertionError(f"shard count must agree everywhere: missing {fragment}")
+    core = jobs["core-gate"]
+    if "test-shards" not in core.get("needs", []):
+        raise AssertionError("core-gate must wait for test-shards")
+    steps = core.get("steps", [])
+    if not any(
+        step.get("env", {}).get("TEST_SHARDS_RESULT") == "${{ needs.test-shards.result }}"
+        and TEST_SHARDS_CORE_CHECK in step.get("run", "")
+        for step in steps
+    ):
+        raise AssertionError("core-gate must require the test-shards result")
 
 
 def assert_pull_requests_never_write_caches(workflow: dict) -> None:
@@ -427,6 +479,49 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         cache_step["if"] = "${{ github.event_name == 'push' }}"
         with self.assertRaisesRegex(AssertionError, "reachable on pull requests"):
             assert_core_rust_cache_contract(mutated)
+
+    def test_test_shards_gate_blocks_core_gate(self) -> None:
+        assert_test_shards_gate(load_workflow(CI_WORKFLOW_PATH))
+
+    def test_test_shards_gate_rejects_mutations(self) -> None:
+        mutations = {
+            "core-gate must wait for test-shards": lambda w: w["jobs"]["core-gate"][
+                "needs"
+            ].remove("test-shards"),
+            "core-gate must require the test-shards result": lambda w: w["jobs"][
+                "core-gate"
+            ]["steps"][0].update(
+                run=w["jobs"]["core-gate"]["steps"][0]["run"].replace(
+                    TEST_SHARDS_CORE_CHECK, ""
+                )
+            ),
+            "only after every shard succeeded": lambda w: w["jobs"]["test-shards"].update(
+                {"if": "${{ always() }}"}
+            ),
+            "wait for every test shard": lambda w: w["jobs"]["test-shards"].update(
+                needs=["test"]
+            ),
+            "must define the test-shards aggregate": lambda w: w["jobs"].pop("test-shards"),
+            "matrix must be shards": lambda w: w["jobs"]["test-shard"]["strategy"].update(
+                matrix={"shard": [1, 2]}
+            ),
+            "must not cancel sibling shards": lambda w: w["jobs"]["test-shard"][
+                "strategy"
+            ].update({"fail-fast": True}),
+            "shard count must agree everywhere": lambda w: w["jobs"]["test-shards"][
+                "steps"
+            ][-1].update(
+                run=w["jobs"]["test-shards"]["steps"][-1]["run"].replace(
+                    "--partitioned=3", "--partitioned=2"
+                )
+            ),
+        }
+        for message, mutate in mutations.items():
+            with self.subTest(message=message):
+                mutated = copy.deepcopy(load_workflow(CI_WORKFLOW_PATH))
+                mutate(mutated)
+                with self.assertRaisesRegex(AssertionError, message):
+                    assert_test_shards_gate(mutated)
 
     def test_pull_requests_never_write_caches(self) -> None:
         for workflow_path in MAIN_WRITER_WORKFLOW_PATHS:
