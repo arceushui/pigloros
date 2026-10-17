@@ -46,8 +46,9 @@ type ImportError = ForkAttributionAuthorityImportErrorV1;
 
 const CORRUPT_AUTHORITY: Classified =
     Classified::Provenance(ClassifiedProvenanceErrorV1::CorruptAuthority);
-/// An undecodable `FAR1` row for the Timeline `?1`.
-const FAR1_SQL: &str = "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES (?1, X'00')";
+/// An undecodable `FAR1` row for the Timeline `?1`, unique per Timeline.
+const FAR1_SQL: &str =
+    "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES (?1, CAST(X'00' || ?1 AS BLOB))";
 /// Protected geographic evidence for the Timeline `?1`.
 const PRESENCE_SQL: &str =
     "INSERT INTO geographic_presence (timeline_id, has_evidence) VALUES (?1, 1)";
