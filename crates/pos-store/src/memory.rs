@@ -119,6 +119,7 @@ use crate::{
     ForkManifestPublicationPortV1, ForkManifestPublicationRequestV1, HeldRegistryAuthorizationV1,
 };
 
+mod composition_fallback_registry;
 mod counterfactual_store;
 mod fork_attribution_authority_import;
 mod fork_attribution_issuer_policy;
@@ -211,6 +212,8 @@ fn fail_next_visible_delete_for_test() {
 
 /// In-memory event store. Thread-unsafe — intended for single-threaded tests and benchmarks.
 pub struct MemoryStore {
+    /// ADR-119 composition fallback registry state, keyed by `(scope, timeline)`.
+    composition_fallback: composition_fallback_registry::MemoryCompositionFallbackStateV1,
     /// ADR-103 Plugin trust policy registry state, one record set per policy scope.
     #[cfg(target_os = "linux")]
     plugin_trust: plugin_trust_registry::MemoryPluginTrustStateV1,
@@ -719,6 +722,8 @@ impl MemoryStore {
         let erasure_gate_bound = false;
 
         Self {
+            composition_fallback:
+                composition_fallback_registry::MemoryCompositionFallbackStateV1::default(),
             #[cfg(target_os = "linux")]
             plugin_trust: plugin_trust_registry::MemoryPluginTrustStateV1::default(),
             timelines: HashMap::new(),
