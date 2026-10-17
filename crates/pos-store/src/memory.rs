@@ -16089,8 +16089,8 @@ mod admitted_fork_deletion {
     };
     use crate::ClassifiedCounterfactualStorePortV1;
 
-    /// The sizes of every Timeline, Event, pipeline, counterfactual,
-    /// dependency, Fork authority, publication, and import map.
+    /// The sizes of the main Timeline, Event, pipeline, counterfactual,
+    /// dependency, Fork authority, publication, and import maps.
     fn sizes(store: &MemoryStore) -> [usize; 26] {
         [
             store.timelines.len(),
@@ -16158,8 +16158,8 @@ mod admitted_fork_deletion {
         let pair = batch(vec![draft(20, TICK_KIND), draft(21, TICK_KIND)])?;
         let later = node_record(18, "b", 2)?;
         let base = hash(0x62);
-        let ticked =
-            store.append_classified_counterfactual_tick(fork, &basis, &pair, &later, &lent, base)?;
+        let ticked = store
+            .append_classified_counterfactual_tick(fork, &basis, &pair, &later, &lent, base)?;
         assert!(
             matches!(ticked, CounterfactualTickOutcomeV1::Committed { .. }),
             "{ticked:?}"

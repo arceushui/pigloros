@@ -26,8 +26,8 @@ use pos_core::{
     CounterfactualDependencyReadPortV1, CounterfactualInvalidationOutcomeV1,
     CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1,
     DependencyPageRequestV1, DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, EventDraft,
-    EventStore, Hash, InvalidationConflictV1, Kind, PipelineDraftBatchV1, RecordedNodeOriginV1, Seq,
-    SeqRange, TickDependencyRecordV1, TimelineId, WallTime, MAX_DEPENDENCY_PAGE_ROWS_V1,
+    EventStore, Hash, InvalidationConflictV1, Kind, PipelineDraftBatchV1, RecordedNodeOriginV1,
+    Seq, SeqRange, TickDependencyRecordV1, TimelineId, WallTime, MAX_DEPENDENCY_PAGE_ROWS_V1,
     MAX_PIPELINE_DRAFT_BATCH_BYTES,
 };
 use pos_store::memory::MemoryStore;
