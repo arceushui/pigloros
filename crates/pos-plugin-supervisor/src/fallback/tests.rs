@@ -188,7 +188,7 @@ fn declared(target: CompositionFallbackTargetV1, store: &mut MemoryStore) {
 fn store() -> (MemoryStore, CompositionFallbackTargetV1) {
     let mut store = MemoryStore::new();
     let gate = Arc::new(pos_core::ErasureContainmentGateV1::new_test_open());
-    ok(pos_core::store::EventStore::bind_erasure_gate(
+    let () = ok(pos_core::store::EventStore::bind_erasure_gate(
         &mut store, gate,
     ));
     let timeline = ok(pos_core::store::EventStore::create_timeline(
@@ -230,10 +230,10 @@ fn activation(
 
 /// The refusal a commit reported, by its registry error.
 fn refusal(
-    committed: Result<FallbackLedgerRowV1, Outcome>,
+    committed: &Result<FallbackLedgerRowV1, Outcome>,
 ) -> Option<CompositionFallbackRegistryErrorV1> {
     match committed {
-        Err(Outcome::NotCommitted { error, .. }) => Some(error),
+        Err(Outcome::NotCommitted { error, .. }) => Some(*error),
         _ => None,
     }
 }
@@ -248,14 +248,14 @@ fn a_refused_commit_is_not_adopted() {
     assert_eq!(committed.map(|row| row.state_revision()), Ok(2));
     let conflict = commit_activation(&mut store, &activation(target, 1, 6));
     assert_eq!(
-        refusal(conflict),
+        refusal(&conflict),
         Some(CompositionFallbackRegistryErrorV1::Conflict)
     );
     let mut stale = activation(target, 1, 5);
     stale.closing_tenure_ordinal = 1;
     stale.from = key("acme.candidate", 2);
     stale.to = key("acme.primary", 1);
-    let refused = refusal(commit_activation(&mut store, &stale));
+    let refused = refusal(&commit_activation(&mut store, &stale));
     assert_eq!(
         refused,
         Some(CompositionFallbackRegistryErrorV1::StaleState)
