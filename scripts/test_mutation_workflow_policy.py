@@ -16,7 +16,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 NIGHTLY = "nightly-2026-07-01"
 BASELINE_RUN = """set -euo pipefail
 cargo test --workspace --all-features --locked -- \\
-  -Zunstable-options --fail-fast --include-ignored --test-threads=2 \\
+  -Zunstable-options --fail-fast --include-ignored --test-threads=4 \\
   2>&1 | tee "${RUNNER_TEMP}/mutation-baseline.log"
 bash scripts/assert-no-ignored-in-test-summary.sh "${RUNNER_TEMP}/mutation-baseline.log"
 """
@@ -36,7 +36,7 @@ fi
 # Pin the complete reviewed parsed program, including comments and heredoc data.
 # This policy snapshot is not a shell-semantics oracle; digest changes need review.
 MUTATION_RUN_SHA256 = (
-    "d6cd098db5944465576b8168bab897e7fb8b97f744e43eb5cde66d14e9ee2ca7"
+    "25ebc30ac7f2ce5fc4e858ee3d5e0f907373a6fa7e25b800105a9be5694da79e"
 )
 
 
@@ -103,9 +103,17 @@ def check_contract(workflow: dict) -> None:
     if mutation["strategy"] != {
         "fail-fast": False,
         "max-parallel": 8,
-        "matrix": {"shard": list(range(8))},
+        "matrix": {"shard": list(range(16))},
     }:
-        raise AssertionError("retain all eight blocking shards")
+        raise AssertionError("retain all sixteen blocking shards on at most eight runners")
+    installers = [
+        step for step in mutation["steps"]
+        if step.get("uses", "").startswith("taiki-e/install-action@")
+    ]
+    if len(installers) != 1 or installers[0].get("with") != {
+        "tool": "cargo-mutants@27.1.0"
+    }:
+        raise AssertionError("retain the validated cargo-mutants version")
     mutation_step = next(
         step for step in mutation["steps"]
         if step.get("name") == "Run mutants in changed lines"
@@ -116,9 +124,9 @@ def check_contract(workflow: dict) -> None:
     required = (
         "timeout --foreground 60m cargo mutants --workspace --all-features "
         '--in-diff "${{ runner.temp }}/changes.diff" --no-shuffle '
-        '--shard "${{ matrix.shard }}/8" --baseline skip --jobs 4 '
+        '--shard "${{ matrix.shard }}/16" --baseline skip --jobs 2 '
         "--timeout 120 --build-timeout 600 --cap-lints true --cargo-arg=--locked "
-        "-- -- -Zunstable-options --fail-fast --include-ignored --test-threads=2 "
+        "-- -- -Zunstable-options --fail-fast --include-ignored --test-threads=4 "
         "mutation_status=$? set -e"
     )
     if required not in command or not command.endswith('exit "$mutation_status"'):
@@ -216,6 +224,69 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
                 step["run"] = inert
                 with self.assertRaisesRegex(AssertionError, "reviewed mutation program"):
                     check_contract(changed)
+
+    def test_rejects_incomplete_or_overcommitted_shards(self) -> None:
+        for strategy in (
+            {"fail-fast": False, "max-parallel": 8,
+             "matrix": {"shard": list(range(15))}},
+            {"fail-fast": False, "max-parallel": 8,
+             "matrix": {"shard": list(range(15)) + [0]}},
+            {"fail-fast": False, "max-parallel": 8,
+             "matrix": {"shard": list(range(15)) + [16]}},
+            {"fail-fast": False, "max-parallel": 16,
+             "matrix": {"shard": list(range(16))}},
+            {"fail-fast": True, "max-parallel": 8,
+             "matrix": {"shard": list(range(16))}},
+        ):
+            with self.subTest(strategy=strategy):
+                changed = copy.deepcopy(self.workflow)
+                changed["jobs"]["mutation"]["strategy"] = strategy
+                with self.assertRaisesRegex(AssertionError, "sixteen blocking shards"):
+                    check_contract(changed)
+
+    def test_rejects_missing_or_wrong_mutator_version(self) -> None:
+        for value in (None, {}, {"tool": "cargo-mutants"},
+                      {"tool": "cargo-mutants@27.0.0"}):
+            with self.subTest(value=value):
+                changed = copy.deepcopy(self.workflow)
+                step = next(
+                    step for step in changed["jobs"]["mutation"]["steps"]
+                    if step.get("uses", "").startswith("taiki-e/install-action@")
+                )
+                if value is None:
+                    step.pop("with")
+                else:
+                    step["with"] = value
+                with self.assertRaisesRegex(AssertionError, "validated cargo-mutants"):
+                    check_contract(changed)
+
+    def test_rejects_worker_harness_and_deadline_drift(self) -> None:
+        for before, after in (
+            ('--shard "${{ matrix.shard }}/16"', '--shard "${{ matrix.shard }}/8"'),
+            ("--jobs 2", "--jobs 4"),
+            ("--test-threads=4", "--test-threads=2"),
+            ("--timeout 120", "--timeout 121"),
+            ("--build-timeout 600", "--build-timeout 601"),
+            ("--foreground 60m", "--foreground 61m"),
+        ):
+            with self.subTest(before=before, after=after):
+                changed = copy.deepcopy(self.workflow)
+                step = next(
+                    step for step in changed["jobs"]["mutation"]["steps"]
+                    if step.get("name") == "Run mutants in changed lines"
+                )
+                self.assertEqual(step["run"].count(before), 1)
+                step["run"] = step["run"].replace(before, after)
+                with self.assertRaisesRegex(AssertionError, "scope, limits, harness"):
+                    check_contract(changed)
+        changed = copy.deepcopy(self.workflow)
+        step = next(
+            step for step in changed["jobs"]["mutation-baseline"]["steps"]
+            if step.get("name") == "Prove the mutation test harness"
+        )
+        step["run"] = step["run"].replace("--test-threads=4", "--test-threads=2")
+        with self.assertRaisesRegex(AssertionError, "complete mutation harness"):
+            check_contract(changed)
 
     def test_rejects_missing_or_nonserial_compiler_jobs(self) -> None:
         for value in (None, "", "auto", "2", "4", 1):

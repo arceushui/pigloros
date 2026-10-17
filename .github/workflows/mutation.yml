@@ -20,7 +20,7 @@ env:
   # https://github.com/rust-lang/rust/issues/161748
   RUSTUP_TOOLCHAIN: nightly-2026-07-01
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
-  # Each of the four mutation workers owns one compiler job.
+  # Each of the two mutation workers owns one compiler job.
   CARGO_BUILD_JOBS: "1"
 
 jobs:
@@ -83,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --workspace --all-features --locked -- \
-            -Zunstable-options --fail-fast --include-ignored --test-threads=2 \
+            -Zunstable-options --fail-fast --include-ignored --test-threads=4 \
             2>&1 | tee "${RUNNER_TEMP}/mutation-baseline.log"
           bash scripts/assert-no-ignored-in-test-summary.sh "${RUNNER_TEMP}/mutation-baseline.log"
       - name: Upload mutation baseline log
@@ -105,7 +105,7 @@ jobs:
       fail-fast: false
       max-parallel: 8
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -118,7 +118,7 @@ jobs:
           shared-key: mutation
       - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
-          tool: cargo-mutants
+          tool: cargo-mutants@27.1.0
       - name: Capture pull-request diff
         run: |
           set -euo pipefail
@@ -128,7 +128,9 @@ jobs:
             > "${RUNNER_TEMP}/changes.diff"
       # The blocking baseline above proves this exact nightly harness first.
       # Each mutant retains the owning-package test selection used on main;
-      # two harness threads limit four workers from multiplying concurrency.
+      # Two workers with four harness threads retain eight configured slots
+      # per runner. Sixteen smaller shards split the same full selection across
+      # unchanged watchdogs; at most eight runners execute concurrently.
       - name: Run mutants in changed lines
         # Reuse each worker's compiler state instead of rebuilding every edit.
         env:
@@ -144,9 +146,9 @@ jobs:
             --all-features \
             --in-diff "${{ runner.temp }}/changes.diff" \
             --no-shuffle \
-            --shard "${{ matrix.shard }}/8" \
+            --shard "${{ matrix.shard }}/16" \
             --baseline skip \
-            --jobs 4 \
+            --jobs 2 \
             --timeout 120 \
             --build-timeout 600 \
             --cap-lints true \
@@ -156,7 +158,7 @@ jobs:
             -Zunstable-options \
             --fail-fast \
             --include-ignored \
-            --test-threads=2
+            --test-threads=4
           mutation_status=$?
           set -e
           if [[ "$mutation_status" -eq 124 ]]; then
