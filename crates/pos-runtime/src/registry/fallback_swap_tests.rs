@@ -476,14 +476,8 @@ fn rig_with_callbacks(approver: bool) -> Rig {
         let route = [Kind::new(WEATHER[0])];
         let approver: Option<Box<dyn ActionApprover>> = Some(Box::new(NoActionApproverV1));
         let registry = &mut rig.registry;
-        registry.register_pinned_generated_with_approver(
-            &primary,
-            pin,
-            None,
-            driver,
-            approver,
-            route,
-        )
+        registry
+            .register_pinned_generated_with_approver(&primary, pin, None, driver, approver, route)
     } else {
         let reducer: Box<dyn Reducer> = Box::new(NullReducer);
         rig.registry

@@ -241,8 +241,7 @@ impl PluginRegistry {
             .plugins
             .get_full(&primary)
             .ok_or(FallbackSwapRefusalV1::UnknownPrimary)?;
-        self.check_primary(primary, entry, prepared)
-            .map(|()| index)
+        self.check_primary(primary, entry, prepared).map(|()| index)
     }
 
     /// The primary has no approver and no reducer, and the candidate owns

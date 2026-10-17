@@ -251,9 +251,10 @@ fn stage_driver_restore(
     timeline_segments: &[TimelineHistorySegment],
     visible_events: &[Event],
 ) -> Result<(), RuntimeError> {
-    let evidence = DriverRecoveryEvidence::from_events(timeline_segments, visible_events, |header| {
-        driver.needs_recovery_payload(header)
-    });
+    let evidence =
+        DriverRecoveryEvidence::from_events(timeline_segments, visible_events, |header| {
+            driver.needs_recovery_payload(header)
+        });
     driver
         .stage_restore_from_history(&evidence)
         .inspect_err(|_| driver.abort_restore_from_history())
