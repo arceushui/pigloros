@@ -253,6 +253,60 @@ fn prepared_admission_rechecks_original_deadline_after_verification() {
 }
 
 #[test]
+fn prepared_admission_requires_each_original_policy_dimension() {
+    let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
+    let requested = replay_use(&closure);
+    let mut sender = test_ok(host.read_sender());
+    let original = test_ok(sender.prepare_world_replay_read(&closure, intent_for(&requested)));
+    for (different_bounds, different_limits) in [(false, false), (true, false), (false, true)] {
+        let bounds = if different_bounds {
+            EventReadBounds::new_with_total_bytes_and_elapsed(
+                65_535, 128, 8, 65_536, 67_108_864, 30_000_000,
+            )
+        } else {
+            original.read_bounds()
+        };
+        let limits = if different_limits {
+            test_ok(pos_store::ForkReplayReadLimitsV1::new(
+                8,
+                1_023,
+                262_144,
+                256 * 1024 * 1024,
+                30_000_000,
+            ))
+        } else {
+            original.fork_read_limits()
+        };
+        // Model a retained preparation whose owner later returns one changed
+        // policy dimension. Its identity, use and original ledger still agree.
+        let prepared = test_ok(PreparedWorldReplayReadV1::new(
+            &closure,
+            intent_for(&requested),
+            original.generation(),
+            Arc::clone(original.owner()),
+            bounds,
+            limits,
+        ));
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = test_ok(ForkReplayReadBudgetV1::new(limits, start, &mut clock));
+        assert_eq!(
+            sender
+                .admit_prepared_world_replay(&prepared, &closure, &requested, &mut budget)
+                .map(|_| ()),
+            if different_bounds || different_limits {
+                Err(ErasureHostErrorV1::Conflict)
+            } else {
+                Ok(())
+            }
+        );
+        assert_eq!(budget.remaining_native_bytes(), limits.max_native_bytes());
+        test_ok(budget.check_time());
+    }
+    assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+}
+
+#[test]
 fn ordinary_history_refuses_an_unclassified_fork_requirement() {
     let (mut host, closure) = replay_fault_host(FaultModeV1::Passthrough);
     let requested = replay_use(&closure);
