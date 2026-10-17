@@ -200,7 +200,10 @@ impl EntryPlan {
     }
 
     fn entry(&self) -> BoxResult<FallbackEntryV1> {
-        let pins = self.candidates.iter().map(|member| member.facts.pin.clone());
+        let pins = self
+            .candidates
+            .iter()
+            .map(|member| member.facts.pin.clone());
         let pins = pins.collect();
         let triggers = vec![FallbackTriggerCodeV1::ResourceLimit];
         let mode = FallbackActivationModeV1::Automatic;
@@ -381,9 +384,15 @@ impl<S: FallbackStore> Scenario<S> {
     fn entry_state(&self, members: &[(&str, &Member)]) -> BoxResult<String> {
         let row = self.store.registry_row(SCOPE, self.timeline)?;
         let row = row.ok_or("no registry row")?;
-        let entry = row.state().entries().get(ENTRY).ok_or("no recorded entry")?;
+        let entry = row
+            .state()
+            .entries()
+            .get(ENTRY)
+            .ok_or("no recorded entry")?;
         let digest = entry.effective_digest();
-        let named = members.iter().find(|(_, member)| member.key().digest() == digest);
+        let named = members
+            .iter()
+            .find(|(_, member)| member.key().digest() == digest);
         let name = named.map_or("unknown", |(name, _)| *name);
         let (tenure, chain) = (entry.tenure_ordinal(), entry.chain_position());
         Ok(format!("{tenure}/{chain}/{name}"))
@@ -596,7 +605,11 @@ fn repeated_plugin_id_bytes(primary: &Member, candidate: &Member) -> BoxResult<V
     let second = FallbackEntryV1::new(key, twin.facts.pin, pins, triggers, mode)?;
     let scope = SCOPE.to_owned();
     let policy = DomainFallbackPolicyV1::new(scope, vec![first, second], None)?;
-    Ok(renamed(policy.to_canonical_cbor(), TWIN_TEXT, PRIMARY.plugin_id))
+    Ok(renamed(
+        policy.to_canonical_cbor(),
+        TWIN_TEXT,
+        PRIMARY.plugin_id,
+    ))
 }
 
 /// PCF-CPH-016: every declaration refusal of ADR-119 section 6 case 4.
@@ -669,7 +682,9 @@ fn record_refusals<S: FallbackStore>(
     declaration.stepped_timeline = TimelineId::new();
     capture.record("target-not-stepped", scenario.outcome(&declaration));
     let mut declaration = valid.clone();
-    declaration.effective.insert(ENTRY.to_owned(), candidate.key());
+    declaration
+        .effective
+        .insert(ENTRY.to_owned(), candidate.key());
     let tenure_zero = scenario.outcome(&declaration);
     capture.record("primary-not-effective.tenure-zero", tenure_zero);
     let empty = DomainFallbackPolicyV1::new(SCOPE.to_owned(), Vec::new(), None)?;
@@ -758,7 +773,10 @@ fn rebase<S: FallbackStore>(capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     capture.record("rebase.entry", scenario.entry_state(&named)?);
     let continued = scenario.activate(1, &candidate, &next)?;
     capture.record("rebase.next-activation.outcome", activation(continued));
-    capture.record("rebase.next-activation.entry", scenario.entry_state(&named)?);
+    capture.record(
+        "rebase.next-activation.entry",
+        scenario.entry_state(&named)?,
+    );
     let rebased_digest = rebased.row().policy_digest();
     let composition = composition_of(&next)?;
     let withdrawal = Plan::withdrawal(rebased_digest, composition);
@@ -773,7 +791,10 @@ fn rebase<S: FallbackStore>(capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let withdrawn_digest = Some(withdrawn.row().policy_digest());
     let successor = Plan::single(EntryPlan::of(&next, &[&primary]), withdrawn_digest)?;
     let successor = scenario.declaration(&successor)?;
-    capture.record("successor.naming-the-withdrawal", scenario.outcome(&successor));
+    capture.record(
+        "successor.naming-the-withdrawal",
+        scenario.outcome(&successor),
+    );
     capture.record("successor.entry", scenario.entry_state(&named)?);
     Ok(())
 }
