@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use pos_core::{
     CanonicalBytes, CoreError, CounterfactualDependencyErrorV1, EntityId, Event, EventDraft,
-    EventStore, FactualDependencyErrorV1, Kind, PipelineOutcomeV1,
+    EventStore, FactualDependencyErrorV1, Hash, Kind, PipelineAttemptIdV1, PipelineOutcomeV1,
 };
-use pos_plugin_supervisor::pass_harness::{initial, LostPort, World};
+use pos_plugin_supervisor::pass_harness::{initial, LostPort, StoreKind, World};
 use pos_plugin_supervisor::test_support::{self, err, ok};
 use pos_plugin_supervisor::{CommunityPluginHandleV1, ReceiptDispositionV1};
 use pos_runtime::community_plugin_host::{
@@ -98,6 +98,57 @@ fn a_pass_commits_every_draft_atomically_and_only_then_the_state() {
     let _receipt = ok(world.pass());
     assert_eq!(payloads(&world.events())[2], b"initial+");
     assert_eq!(alpha.committed_state().bytes, b"initial++");
+}
+
+/// The store-independent part of one committed pass.
+///
+/// It holds each Event's position, type, entity and payload, each member's committed state, and
+/// the receipt's attempt, draft batch digest and Event positions. Event IDs, wall times and the
+/// Timeline ID are left out: every store mints its own.
+#[derive(Debug, PartialEq, Eq)]
+struct Committed {
+    events: Vec<(u64, String, EntityId, Vec<u8>)>,
+    states: Vec<Vec<u8>>,
+    attempt: PipelineAttemptIdV1,
+    digest: Hash,
+    receipt_seqs: Vec<u64>,
+}
+
+/// Run one two-member pass on a fresh world over `kind`, and keep what it committed.
+fn commit_one_pass(kind: StoreKind) -> Committed {
+    let mut world = World::on(kind, PROBE);
+    let alpha = world.add("alpha", "community.alpha", b"chain:community.alpha", PROMPT);
+    let beta = world.add("beta", "community.beta", b"draft:community.beta", PROMPT);
+    let receipt = ok(ok(world.pass()).ok_or("the pass committed nothing"));
+    let events = world
+        .events()
+        .iter()
+        .map(|event| {
+            let event_type = event.event_type.as_str().to_owned();
+            let payload = event.payload.as_slice().to_vec();
+            (event.seq.as_u64(), event_type, event.entity, payload)
+        })
+        .collect();
+    let receipt_seqs = receipt
+        .committed_events()
+        .iter()
+        .map(|event| event.seq().as_u64())
+        .collect();
+    Committed {
+        events,
+        states: vec![alpha.committed_state().bytes, beta.committed_state().bytes],
+        attempt: receipt.attempt_id(),
+        digest: receipt.draft_batch_digest(),
+        receipt_seqs,
+    }
+}
+
+#[test]
+fn a_pass_on_sqlite_commits_the_same_events_and_receipt_as_on_memory() {
+    let [memory, sqlite] = StoreKind::ALL.map(commit_one_pass);
+    assert_eq!(memory.events.len(), 2);
+    assert_eq!(memory.states, [b"initial+".to_vec(), b"next".to_vec()]);
+    assert_eq!(sqlite, memory);
 }
 
 /// One failing member in a pass beside one that succeeds.
@@ -374,7 +425,7 @@ fn a_lost_commit_outcome_keeps_the_staged_state_for_recovery() {
     let admission = world.admission(&staged);
     let lost = err(world
         .registry
-        .admit_scheduled_pass(&mut LostPort(&mut world.store), &admission));
+        .admit_scheduled_pass(&mut LostPort(world.store.as_mut()), &admission));
     assert_eq!(classify_pass_failure(&lost), PassFailureV1::InDoubt);
 
     // Nothing was discarded and nothing adopted: the exact basis is retained.
@@ -390,7 +441,7 @@ fn a_lost_commit_outcome_keeps_the_staged_state_for_recovery() {
 
     // Recovery resubmits the retained basis: the state commits, no Driver
     // runs again.
-    let recovered = ok(world.registry.recover_scheduled_pass(&mut world.store));
+    let recovered = ok(world.registry.recover_scheduled_pass(world.store.as_mut()));
     assert_eq!(recovered.map(|r| r.committed_events().len()), Some(2));
     assert_eq!(world.events().len(), 2);
     assert_eq!(alpha.committed_state().bytes, b"initial+");
@@ -407,7 +458,7 @@ fn abandoning_an_in_doubt_pass_discards_the_staged_state() {
     let admission = world.admission(&staged);
     let lost = err(world
         .registry
-        .admit_scheduled_pass(&mut LostPort(&mut world.store), &admission));
+        .admit_scheduled_pass(&mut LostPort(world.store.as_mut()), &admission));
     assert_eq!(classify_pass_failure(&lost), PassFailureV1::InDoubt);
     world.registry.abort_step();
     assert_eq!(alpha.committed_state(), initial());

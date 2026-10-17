@@ -356,7 +356,7 @@ impl Rig {
         wall: &mut ScriptedTrustedWallSourceV1,
     ) -> BoxResult<(CommunityPassOutcomeV1, Vec<u64>)> {
         let prepared = self.pass.prepare()?;
-        let mut port = StampedPort::new(&mut self.pass.store, Arc::clone(clock));
+        let mut port = StampedPort::new(self.pass.store.as_mut(), Arc::clone(clock));
         let request = prepared.request(TICK, &mut port);
         let registry = &self.signed.registry;
         let host = &mut self.host;
@@ -511,7 +511,7 @@ fn the_plain_anchored_stage_call_commits_the_pass() -> TestResult {
     let mut rig = Rig::new(&[ALPHA, BETA])?;
     let mut clock = wall(UTC)?;
     let prepared = rig.pass.prepare()?;
-    let request = prepared.anchored_request(TICK, &mut rig.pass.store);
+    let request = prepared.anchored_request(TICK, rig.pass.store.as_mut());
     let registry = &rig.signed.registry;
     let host = &mut rig.host;
     let outcome = host.run_pass(&mut rig.pass.registry, registry, &mut clock, request);
@@ -772,7 +772,7 @@ impl Rig {
         let mut clock = wall(UTC)?;
         let prepared = self.pass.prepare()?;
         let caught = catch_unwind(AssertUnwindSafe(|| {
-            let request = prepared.request(TICK, &mut self.pass.store);
+            let request = prepared.request(TICK, self.pass.store.as_mut());
             let registry = &self.signed.registry;
             host.run_pass(&mut self.pass.registry, registry, &mut clock, request)
         }));
@@ -835,7 +835,7 @@ fn a_panic_in_an_offer_leaves_no_slot_occupied() -> TestResult {
 fn lost_commit(rig: &mut Rig) -> BoxResult<CommunityPassOutcomeV1> {
     let mut clock = wall(UTC)?;
     let prepared = rig.pass.prepare()?;
-    let mut port = LostPort(&mut rig.pass.store);
+    let mut port = LostPort(rig.pass.store.as_mut());
     let request = prepared.request(TICK, &mut port);
     let registry = &rig.signed.registry;
     let host = &mut rig.host;
@@ -855,7 +855,7 @@ fn a_lost_commit_is_in_doubt_and_keeps_the_staged_state() -> TestResult {
     }
     assert!(rig.all_slots_empty());
 
-    let store = &mut rig.pass.store;
+    let store = &mut *rig.pass.store;
     let recovered = rig.pass.registry.recover_scheduled_pass(store)?;
     assert_eq!(recovered.map(|r| r.committed_events().len()), Some(2));
     assert_eq!(rig.handle(0).committed_state().bytes, b"initial+");
@@ -869,7 +869,7 @@ fn a_failed_admission_discards_the_pass_and_empties_every_slot() -> TestResult {
     let mut rig = Rig::new(&[CHAIN_ALPHA, BETA])?;
     let mut clock = wall(UTC)?;
     let prepared = rig.pass.prepare()?;
-    let mut port = FailingPort(&mut rig.pass.store);
+    let mut port = FailingPort(rig.pass.store.as_mut());
     let request = prepared.request(TICK, &mut port);
     let registry = &rig.signed.registry;
     let host = &mut rig.host;

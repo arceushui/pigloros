@@ -9,10 +9,10 @@ use pos_core::{
     PipelineAdmissionPortV1, PipelineAttemptIdV1, PipelineOutcomeV1, PipelineReceiptLookupV1,
     PurgeOutcome, TimelineId,
 };
-use pos_store::memory::MemoryStore;
+use pos_runtime::ScheduledAdmissionStoreV1;
 
 /// A port that commits through the real store and then loses the outcome.
-pub struct LostPort<'a>(pub &'a mut MemoryStore);
+pub struct LostPort<'a>(pub &'a mut dyn ScheduledAdmissionStoreV1);
 
 impl PipelineAdmissionPortV1 for LostPort<'_> {
     fn admit_pipeline_batch(
@@ -93,7 +93,7 @@ impl FactualPrefixReadPortV1 for LostPort<'_> {
 }
 
 /// A port whose admission fails with a deterministic store error, not an unknown outcome.
-pub struct FailingPort<'a>(pub &'a mut MemoryStore);
+pub struct FailingPort<'a>(pub &'a mut dyn ScheduledAdmissionStoreV1);
 
 impl PipelineAdmissionPortV1 for FailingPort<'_> {
     fn admit_pipeline_batch(
@@ -176,7 +176,7 @@ impl FactualPrefixReadPortV1 for FailingPort<'_> {
 /// same way). It is a wrapper of an admission port, an implementation of a different trait than
 /// the Plugin trust policy registry, and calls no registry.
 pub struct StampedPort<'a> {
-    db: &'a mut MemoryStore,
+    db: &'a mut dyn ScheduledAdmissionStoreV1,
     clock: Arc<AtomicU64>,
     stamps: Vec<u64>,
 }
@@ -184,7 +184,7 @@ pub struct StampedPort<'a> {
 impl<'a> StampedPort<'a> {
     /// A port over `db` that stamps from `clock`.
     #[must_use]
-    pub const fn new(db: &'a mut MemoryStore, clock: Arc<AtomicU64>) -> Self {
+    pub const fn new(db: &'a mut dyn ScheduledAdmissionStoreV1, clock: Arc<AtomicU64>) -> Self {
         Self {
             db,
             clock,

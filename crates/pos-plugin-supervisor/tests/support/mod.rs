@@ -11,12 +11,14 @@
 //!
 //! [`world::World`] registers Drivers built from the `test-support` fixtures (`add`) or from a
 //! gated release (`add_gated`), stages and admits passes by hand, and prepares the inputs of
-//! `CommunityPluginHostV1::run_pass`. [`ports`] holds the admission-port wrappers.
+//! `CommunityPluginHostV1::run_pass`. It commits to `MemoryStore` by default, or to the store
+//! that a [`world::StoreKind`] names through [`world::World::on`]. [`ports`] holds the
+//! admission-port wrappers, which wrap any scheduled-admission store.
 
 pub mod ports;
 pub mod world;
 
 pub use ports::{FailingPort, LostPort, StampedPort};
 pub use world::{
-    initial, GatedMember, GatedSpec, PanickingSource, Prepared, Source, Staged, World,
+    initial, GatedMember, GatedSpec, PanickingSource, Prepared, Source, Staged, StoreKind, World,
 };

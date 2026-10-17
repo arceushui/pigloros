@@ -1,5 +1,5 @@
-//! The pass world: a registry over an in-memory store, with community Drivers on the probe or
-//! the real worker.
+//! The pass world: a registry over an in-memory store (`MemoryStore` or `SQLite`), with community
+//! Drivers on the probe or the real worker.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,10 +21,11 @@ use pos_runtime::community_plugin_host::{
 };
 use pos_runtime::{
     LocalScheduledAdmissionHostV1, ObservationView, PluginRegistry, RuntimeError,
-    ScheduledPassAdmissionV1,
+    ScheduledAdmissionStoreV1, ScheduledPassAdmissionV1,
 };
 use pos_store::memory::MemoryStore;
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
+use pos_store::sqlite::SqliteStore;
 
 use crate::test_support::{self, community_pin, negotiated_with, ok, DriverPlugin, SMALL_BUDGET};
 use crate::{
@@ -127,6 +128,37 @@ impl InvocationContextSourceV1 for PanickingSource {
     }
 }
 
+/// The Event store a pass world commits to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoreKind {
+    /// `MemoryStore`.
+    Memory,
+    /// `SqliteStore` on an in-memory database.
+    Sqlite,
+}
+
+impl StoreKind {
+    /// Every store kind, `MemoryStore` first.
+    pub const ALL: [Self; 2] = [Self::Memory, Self::Sqlite];
+
+    /// The store's tag: `memory` or `sqlite`.
+    #[must_use]
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Sqlite => "sqlite",
+        }
+    }
+
+    /// A fresh, empty store of this kind.
+    fn open(self) -> Box<dyn ScheduledAdmissionStoreV1> {
+        match self {
+            Self::Memory => Box::new(MemoryStore::new()),
+            Self::Sqlite => Box::new(ok(SqliteStore::open(":memory:"))),
+        }
+    }
+}
+
 /// One staged scheduled pass and the host inputs of its commit.
 #[derive(Debug)]
 pub struct Staged {
@@ -225,8 +257,8 @@ pub struct GatedMember {
 pub struct World {
     program: PathBuf,
     fixture_members: Vec<Member>,
-    /// The store the passes commit to.
-    pub store: MemoryStore,
+    /// The store the passes commit to; borrow it as a port with `store.as_mut()`.
+    pub store: Box<dyn ScheduledAdmissionStoreV1>,
     /// The registry the Drivers are registered in.
     pub registry: PluginRegistry,
     /// The open erasure gate.
@@ -238,14 +270,20 @@ pub struct World {
 }
 
 impl World {
-    /// A world whose Drivers launch the worker at `program`.
+    /// A world on `MemoryStore` whose Drivers launch the worker at `program`.
     #[must_use]
     pub fn new(program: impl Into<PathBuf>) -> Self {
+        Self::on(StoreKind::Memory, program)
+    }
+
+    /// A world on a fresh store of `kind` whose Drivers launch the worker at `program`.
+    #[must_use]
+    pub fn on(kind: StoreKind, program: impl Into<PathBuf>) -> Self {
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
         // The registry takes the trait object, so this clone must unsize: `Arc::clone(&gate)`
         // would infer the trait object as the clone's type and fail to type-check.
         let shared: Arc<dyn ErasureGate> = gate.clone();
-        let mut store = MemoryStore::new();
+        let mut store = kind.open();
         let () = ok(store.bind_erasure_gate(Arc::clone(&gate)));
         let timeline = ok(store.create_timeline("community-pass")).id();
         Self {
@@ -383,12 +421,12 @@ impl World {
     fn observe(&mut self) -> Result<Observed, RuntimeError> {
         let revisions = LocalScheduledAdmissionHostV1::shared()?.observe(
             &self.registry,
-            &mut self.store,
+            self.store.as_mut(),
             self.timeline,
         )?;
         let head = self.store.logical_head(self.timeline)?;
         let prefix = self.store.read(self.timeline, SeqRange::all())?;
-        let chain = pos_core::fork_ancestry(&self.store, self.timeline)?;
+        let chain = pos_core::fork_ancestry(&*self.store, self.timeline)?;
         Ok(Observed {
             revisions,
             head,
@@ -462,7 +500,7 @@ impl World {
     ) -> Result<Option<PipelineCommitReceiptV1>, RuntimeError> {
         let admission = self.admission(staged);
         self.registry
-            .admit_scheduled_pass(&mut self.store, &admission)
+            .admit_scheduled_pass(self.store.as_mut(), &admission)
     }
 
     /// Stage and atomically admit one whole pass.
@@ -503,7 +541,7 @@ impl World {
         tick: u64,
     ) -> Result<CommunityPassOutcomeV1, RuntimeError> {
         let prepared = self.prepare()?;
-        let request = prepared.request(tick, &mut self.store);
+        let request = prepared.request(tick, self.store.as_mut());
         Ok(host.run_pass(&mut self.registry, trust, wall, request))
     }
 
