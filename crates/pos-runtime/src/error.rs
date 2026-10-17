@@ -210,6 +210,10 @@ pub enum RuntimeError {
     #[error(transparent)]
     CommunityPlugin(#[from] crate::community_plugin_host::CommunityPluginHostErrorV1),
 
+    /// A refusal of the ADR-119 registry swap seams.
+    #[error(transparent)]
+    FallbackSwap(#[from] crate::FallbackSwapRefusalV1),
+
     #[error("store error: {0}")]
     Store(#[from] pos_core::CoreError),
 

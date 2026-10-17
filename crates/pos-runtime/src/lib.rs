@@ -89,14 +89,14 @@ pub use registry::is_reviewed_staged_factory;
 pub use registry::{
     fold_detached_candidate_v1, recover_local_cut_owner_retry_v1,
     recover_manifest_owner_admission_retry_v1, AuthorizedDriverViewV1, AuthorizedViewAuthorityV1,
-    ClosedAdapterTranscriptV1, HostCatalogueEntryV1, HostProjectionProviderV1,
-    HumanActionAdmissionErrorV1, HumanActionAdmissionV1, HumanActionReceiptV1,
-    InstalledPluginFactoryV1, InstalledPluginProductV1, LocalAdapterErrorV1,
+    ClosedAdapterTranscriptV1, FallbackSwapRefusalV1, HostCatalogueEntryV1,
+    HostProjectionProviderV1, HumanActionAdmissionErrorV1, HumanActionAdmissionV1,
+    HumanActionReceiptV1, InstalledPluginFactoryV1, InstalledPluginProductV1, LocalAdapterErrorV1,
     LocalAdapterIdempotencyKeyV1, LocalAdapterProviderResponseV1, LocalAdapterProviderV1,
     LocalAdapterSessionV1, ManifestRosterBuildErrorV1, NoActionApproverV1, OperationContext,
-    PluginRegistry, ScheduledDriverBindingV1, ScheduledPassAdmissionV1, ScheduledProfileErrorV1,
-    StagedGrowthBoundV1, StagedReducerAdmissionErrorV1, StagedReducerAdmissionV1,
-    EMPTY_CONFIGURATION_DETAILS_V1, MAX_STAGED_CALLBACK_BOUND_V1,
+    PluginRegistry, PreparedRegistrationV1, ScheduledDriverBindingV1, ScheduledPassAdmissionV1,
+    ScheduledProfileErrorV1, StagedGrowthBoundV1, StagedReducerAdmissionErrorV1,
+    StagedReducerAdmissionV1, EMPTY_CONFIGURATION_DETAILS_V1, MAX_STAGED_CALLBACK_BOUND_V1,
 };
 pub use reviewed_policy::{
     canonical_plugin_configuration_v1, execution_profile_artifact_hash_v1, host_artifact_hash_v1,

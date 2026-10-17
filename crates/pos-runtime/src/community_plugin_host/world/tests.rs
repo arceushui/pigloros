@@ -457,3 +457,29 @@ fn a_host_fault_is_operational_never_a_trust_verdict() -> TestResult {
     assert_eq!(refreshed, Err(OPERATIONAL));
     Ok(())
 }
+
+#[test]
+fn replace_member_swaps_one_schedule_slot_and_keeps_the_others() -> TestResult {
+    let rig = Rig::new()?;
+    let (head, primary, candidate) = (rig.member()?, rig.member()?, rig.member()?);
+    let ids = [head.plugin, primary.plugin, candidate.plugin];
+    let mut host = CommunityPluginHostV1::new(vec![head, primary]);
+    assert_eq!(host.member_index(ids[1]), Some(1));
+    assert_eq!(host.member_index(ids[2]), None);
+
+    let replaced = host.replace_member(1, candidate);
+    let replaced = replaced.map_err(|_| "index 1 is a member index")?;
+    assert_eq!(replaced.plugin, ids[1]);
+    assert_eq!(host.member_index(ids[0]), Some(0));
+    assert_eq!(host.member_index(ids[2]), Some(1));
+    assert_eq!(host.member_index(ids[1]), None);
+
+    // An index past the members hands the member back and changes nothing.
+    let spare = rig.member()?;
+    let spare_id = spare.plugin;
+    let refused = host.replace_member(2, spare);
+    assert!(matches!(refused, Err(member) if member.plugin == spare_id));
+    assert_eq!(host.member_index(ids[2]), Some(1));
+    assert_eq!(host.member_index(spare_id), None);
+    Ok(())
+}
