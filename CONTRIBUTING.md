@@ -247,7 +247,6 @@ flowchart TD
     CR --> E["reference evaluator"]
     CR --> B["conformance bundles"]
     CR --> P["audit → deny → shear"]
-    CR --> U["cargo-geiger"]
     CR --> X["Docker"]
     CR --> W["WASM package"]
     CR --> Q["CodeQL (docs-only PRs start it after the scope job)"]
@@ -256,7 +255,6 @@ flowchart TD
     E --> G
     B --> G
     P --> G
-    U --> G
     X --> G
     Q --> G
     BP --> G
