@@ -170,8 +170,7 @@ fn a_pass_on_sqlite_commits_the_same_events_and_receipt_as_on_memory() {
     let [memory, sqlite] = StoreKind::ALL.map(commit_one_pass);
     assert_eq!(memory.events.len(), 2);
     assert_eq!(memory.states, [b"initial+".to_vec(), b"next".to_vec()]);
-    let (memory_tag, sqlite_tag) = (StoreKind::Memory.tag(), StoreKind::Sqlite.tag());
-    assert_eq!(sqlite, memory, "{sqlite_tag} differs from {memory_tag}");
+    assert_eq!(sqlite, memory, "sqlite differs from memory");
 }
 
 /// One failing member in a pass beside one that succeeds.
@@ -451,6 +450,8 @@ fn lose_and_recover(kind: StoreKind) {
         .registry
         .admit_scheduled_pass(&mut LostPort(world.store.as_mut()), &admission));
     assert_eq!(classify_pass_failure(&lost), PassFailureV1::InDoubt);
+    // The lost commit landed, so recovery must find it rather than commit the batch afresh.
+    assert_eq!(world.events().len(), 2, "{tag}");
 
     // Nothing was discarded and nothing adopted: the exact basis is retained.
     for handle in [&alpha, &beta] {
@@ -480,6 +481,7 @@ fn lose_and_recover(kind: StoreKind) {
     let stored: Vec<EventId> = events.iter().map(|event| event.id).collect();
     assert_eq!(stored.len(), 2, "{tag}");
     assert_eq!(committed, stored, "{tag}");
+    // A second recovery finds nothing in doubt and commits nothing more.
     let again = err(world.registry.recover_scheduled_pass(world.store.as_mut()));
     assert!(matches!(again, RuntimeError::NoScheduledAdmissionInDoubt), "{tag}");
     assert_eq!(world.events().len(), 2, "{tag}");
