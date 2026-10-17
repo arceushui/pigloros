@@ -18,6 +18,7 @@ pub mod authority;
 extern crate self as pos_core;
 
 pub mod clock;
+pub mod composition_fallback;
 pub mod consent;
 pub mod counterfactual_dependency;
 pub mod counterfactual_store;
@@ -355,6 +356,21 @@ pub use authority::{
 };
 pub use clock::{
     AdmissionClock, FixedAdmissionClock, Seq, SimDuration, SimTime, SystemAdmissionClock, WallTime,
+};
+pub use composition_fallback::{
+    CompositionPinV1, DomainFallbackPolicyV1, FallbackActivatedInputV1, FallbackActivatedPayloadV1,
+    FallbackActivationModeV1, FallbackActivationOriginV1, FallbackDeclaredPayloadV1,
+    FallbackEntryV1, FallbackFieldV1, FallbackRebasedEntryV1, FallbackRecordErrorV1,
+    FallbackSkipReasonV1, FallbackSkippedCandidateV1, FallbackTriggerBasisV1, FallbackTriggerCodeV1,
+    ImplementationKeyV1, COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
+    COMPOSITION_FALLBACK_DECLARED_EVENT_TYPE_V1, COMPOSITION_PIN_DIGEST_DOMAIN_V1,
+    FALLBACK_POLICY_DIGEST_DOMAIN_V1, IMPLEMENTATION_KEY_DIGEST_DOMAIN_V1,
+    MAX_COMPOSITION_PIN_BYTES_V1, MAX_FALLBACK_CANDIDATES_V1, MAX_FALLBACK_ENTRIES_V1,
+    MAX_FALLBACK_ENTRY_BYTES_V1, MAX_FALLBACK_ENTRY_KEY_BYTES_V1,
+    MAX_FALLBACK_EVENT_PAYLOAD_BYTES_V1, MAX_FALLBACK_PLUGIN_ID_BYTES_V1,
+    MAX_FALLBACK_POLICY_BYTES_V1, MAX_FALLBACK_ROLES_V1, MAX_FALLBACK_ROLE_BYTES_V1,
+    MAX_FALLBACK_SCOPE_BYTES_V1, MAX_FALLBACK_SKIPPED_V1, MAX_FALLBACK_VERSION_BYTES_V1,
+    MAX_IMPLEMENTATION_KEY_BYTES_V1,
 };
 pub use consent::{
     is_consent_event_type, is_consent_sensitive_event_type, is_subject_controlled_event_type,

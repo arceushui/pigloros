@@ -22,6 +22,7 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 | **EventStore** | `pos-store` | The `EventStore` trait abstraction over storage backends (SQLite WAL or in-memory). |
 | **Projection** | `pos-state` | A fold over a Timeline's events that produces current state. Managed by `ProjectionRegistry`. |
 | **Fork** | `pos-time` | A Copy-on-Write branch of a Timeline used to simulate a hypothetical future without mutating the original. |
+| **Fork Cut** | `pos-time`, `apps/pos-experiment` | For an ordinary Fork (ADR-041 §3, ADR-033 §2), the parent's Logical Head at the post-fold Tick Boundary where the Fork is admitted. An ADR-064 counterfactual Fork may cut earlier (CFP1 parent cut); its effective composition is derived at that earlier position (ADR-119). |
 | **Merge** | `pos-time` | Rejoining a forked Timeline back into the main branch after comparison. |
 | **Replay** | `pos-time` | Re-running events from a Timeline from a given sequence number to rebuild state. |
 | **Snapshot** | `pos-time` | A point-in-time capture of projected state, used to accelerate Replay. |
@@ -92,6 +93,11 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 | **Protected Projection Provider** | `pos-state` | The host-installed source of Detached Projection Candidates, selected from the installed host composition and never from a caller. |
 | **Host Projection Provider** | `pos-runtime` | The runtime Protected Projection Provider: it holds the reviewed staged Reducer admissions and builds every candidate's reducers fresh from their catalogue factories. |
 | **Hasher** | `pos-core` | Trait decoupling BLAKE3 from store adapters (`genesis_hash`, `hash_payload`, `hash_event`). Default: `Blake3Hasher`. |
+| **Tenure** | `pos-core` | A maximal Timeline Order range in which one implementation is effective for one required entry. Tenure 0 is the composer's base implementation; each ADR-119 activation starts a new tenure. |
+| **Effective Composition** | `pos-core`, `pos-runtime` | The composer's base composition at a Timeline position, folded with the ADR-119 declaration and activation Events at or before that position. |
+| **Composition Boundary Transaction** (CBT) | `pos-runtime`, `pos-plugin-supervisor` | The host-only transaction that commits an ADR-119 activation and swaps one community entry at a Tick Boundary. It is not a pass and not a tick. |
+| **IMK1** | `pos-core` | The ADR-119 implementation key: the cross-run identity of one community implementation (PMF1 Plugin ID, host-supplied version label, admitted release digest). It is never a run-local `PluginId`. |
+| **DFP1** | `pos-core` | `DomainFallbackPolicyV1`, the owner-declared ADR-119 fallback policy: per required entry, a primary pin, one or two candidate pins, triggers and an activation mode. Zero entries is a withdrawal. |
 
 ---
 
