@@ -35,7 +35,10 @@ use crate::authority::{
 use crate::failure::{record_pass, Mixed, Pass, SIBLING};
 use crate::first_party::{entity_of, native_pin, register_twin, NAME};
 use crate::harness::Capture;
-use crate::parity::{on_every_store, record, Observed, Order, StoreCapture, ENTITY, TWIN_TYPE};
+use crate::parity::{
+    discarded_whole, on_every_store, publish_successor, record, Observed, Order, StoreCapture,
+    ENTITY, TWIN_TYPE,
+};
 use crate::support::lane::{
     gated_release, profile, publish, publish_shape, trust_material, Published, Swap, ALPHA,
     ALPHA_C, WATCHDOG,
@@ -92,22 +95,12 @@ fn resolve_with_missing(registry: &PluginRegistry, pin: PluginPinV1) -> BoxResul
     resolve(registry, required)
 }
 
-/// The successor of `first` on the C fixture, installed as the active release.
-fn successor(signed: &mut SignedWorld, first: &Published) -> BoxResult<Published> {
-    let shape = Shape {
-        version: "2.0.0",
-        previous: Some(first.release),
-        ..ALPHA_C.shape()
-    };
-    publish_shape(signed, ALPHA_C, shape, 2)
-}
-
 /// The pass of `mixed` once its community member names a release that is not the active one.
 ///
-/// The member's successor is installed and rolled back, and the member is supplied from the
-/// successor's closure: the Plugin has no active release there.
+/// The member's successor, on the C fixture, is installed and rolled back, and the member is
+/// supplied from the successor's closure: the Plugin has no active release there.
 fn not_active(signed: &mut SignedWorld, first: &Published, mixed: &mut Mixed) -> BoxResult<Pass> {
-    let second = successor(signed, first)?;
+    let second = publish_successor(signed, first, ALPHA_C)?;
     signed.rollback_to(&first.address, 3)??;
     let expected = mixed.lane.parts[0].expected.clone();
     mixed.lane.rehost(signed, &second.address, &expected)?;
@@ -488,15 +481,6 @@ fn manifest_invalid_release(kind: StoreKind) -> BoxResult<(String, bool)> {
     twin_refusal(&signed, &entry, kind)
 }
 
-/// Whether a failed pass discarded the whole pass: it failed with a typed refusal, committed
-/// nothing, and quarantined no Plugin.
-fn discarded_whole(observed: &Observed, refusal: &str) -> bool {
-    observed.result() == "Failed"
-        && observed.committed() == 0
-        && observed.all_available()
-        && refusal != "none"
-}
-
 /// PCF-CPH-014: invalid guest output and invalid releases fail closed.
 ///
 /// A community Driver on the probe guest whose output digest does not match on the real worker,
@@ -527,9 +511,11 @@ fn invalid_output(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<
     capture.record("first-party-invalid-draft.refusal", &first_party.refusal);
     record_refusal(capture, "abi-invalid-release", &abi, abi_unchanged);
     record_refusal(capture, "manifest-invalid-release", &pmf, pmf_unchanged);
+    // Invalid output quarantines nothing, so every Plugin stays available.
+    let available = Observed::all_available;
     let failed = &community.failed;
-    let discarded = discarded_whole(&failed.observed, &failed.refusal)
-        && discarded_whole(&first_party.observed, &first_party.refusal);
+    let discarded = discarded_whole(&failed.observed, &failed.refusal, available)
+        && discarded_whole(&first_party.observed, &first_party.refusal, available);
     capture.record("parity.whole-pass-discarded-either-class", discarded);
     Ok(())
 }

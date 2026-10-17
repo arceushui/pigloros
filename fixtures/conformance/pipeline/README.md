@@ -29,10 +29,9 @@ user decision (see `PCH1` below).
 - `exclusions` names requirements this profile does not prove yet, with the
   owner of the missing implementation or contract.
 - Community Plugin-host parity is not a `PPC1` exclusion. The sibling profile
-  `PCH1` below proves it (#489, #636), and what it cannot prove yet (some
-  invalid-Plugin and resource-limit shapes) is recorded as `PCH1`
-  exclusions. The `COMMUNITY-PLUGIN-HOST` exclusion was removed from `v1` in
-  place: removing an exclusion changes no expected result.
+  `PCH1` below proves it (#489, #636) and records no exclusion of its own.
+  The `COMMUNITY-PLUGIN-HOST` exclusion was removed from `v1` in place:
+  removing an exclusion changes no expected result.
 
 The runner fails closed on an unknown magic, version or field, a mandatory
 case without a runner, a runner without a case, a missing or unexpected
@@ -121,9 +120,19 @@ every launch `MemoryLimitExceeded` and is quarantined `ResourceExhausted`
 exhausted again after the host clears the quarantine, and the pass within budget
 runs, in a fresh lane, a Driver built from an in-budget successor release. A
 first-party Driver that stages more drafts than the registry's host Tick draft
-budget leaves fails the pass `ResourceExhausted` and quarantines nothing. The
-fuel, host-call and output limits of a community Driver are not exercised on the
-real worker; the `OTHER-RESOURCE-LIMITS` exclusion records them.
+budget leaves fails the pass `ResourceExhausted` and quarantines nothing.
+
+`PCF-CPH-015` (#656) covers the other budgets of a community release on the
+real worker, with the existing guests and starved release budgets, as the
+`PCF1` sub-cases `res.1`, `res.3` and `res.4` do: one unit of fuel ends the C
+guest `FuelExhausted`, two host calls end the Rust guest (which makes three:
+time, random and log) `HostCallLimitExceeded`, and one Event byte ends it (its
+one Event has an 8-byte payload) `OutputLimitExceeded`. Each budget is below
+the host ceiling, so `min(release, ceiling)` keeps it. Each limit fails the
+whole pass, discards the first-party sibling's staged output, leaves the
+sibling available and quarantines the Plugin `ResourceExhausted`; a fresh lane
+over an in-budget successor release commits both Events. The first-party
+counterpart is the host Tick draft budget refusal of `PCF-CPH-010`, run again.
 
 `PCF-CPH-011` and `PCF-CPH-012` (#635) cover Replay and lost-acknowledgement
 recovery. A Replay registry over the same first-party and community Drivers
@@ -149,23 +158,25 @@ for the pass store, the store every pass admits to, reads Events from and
 recovers from; the trust registry of the signed-release test world stays on
 `MemoryStore`. A case that runs no pass, or none that commits (parts of
 `PCF-CPH-004`, `PCF-CPH-007` and `PCF-CPH-009`), still runs on both stores and
-records the same values on each. The one remaining exclusion,
-`OTHER-RESOURCE-LIMITS`, names what the real worker does not exercise yet
-(owned by #637).
+records the same values on each.
 
 `PCH1` version 1 was re-pinned in place to add SQLite, by user decision
 (2026-10-17), following the in-place re-pins of #632 to #636: every case's
 `stores` grew from `memory` to `memory` and `sqlite`, the `SQLITE-STORE`
-exclusion was removed, and #638 and #651 joined the sources. No expected value
-changed; only the store set grew, so the manifest's pinned SHA-256 changed.
+exclusion was removed, and #638 and #651 joined the sources of the manifest
+and, with the #637 re-pin below, of each of `PCF-CPH-001` to `PCF-CPH-012`. No
+expected value changed; only the store set and the sources grew, so the
+manifest's pinned SHA-256 changed.
 
 `PCH1` version 1 was re-pinned in place again for #637, by user decision
 (2026-10-17): #654 appended `PCF-CPH-013` and removed the
 `COMMUNITY-RESERVED-PROPOSAL` exclusion, #655 appended `PCF-CPH-014` and
-removed the `INVALID-GUEST-OUTPUT` exclusion, and #637, #654 and #655 joined
-the sources. No expected value of an earlier case changed.
+removed the `INVALID-GUEST-OUTPUT` exclusion, #656 appended `PCF-CPH-015` and
+removed the `OTHER-RESOURCE-LIMITS` exclusion, and #637, #654, #655 and #656
+joined the sources. No expected value of an earlier case changed. `PCH1`
+version 1 now has no exclusions.
 
-Every `PCH1` case (`PCF-CPH-001` to `PCF-CPH-014`) is mandatory and applicable
+Every `PCH1` case (`PCF-CPH-001` to `PCF-CPH-015`) is mandatory and applicable
 and has exactly one runner, in manifest order; the runner asserts that none is
 skipped.
 
