@@ -17,8 +17,9 @@ yanked = "deny"
 # a fixed ruzstd (Redmine #629). Remove (here and in .cargo/audit.toml) once
 # Cargo.lock resolves ruzstd >= 0.9.1.
 # RUSTSEC-2026-0370 (zvariant), RUSTSEC-2026-0371 (zbus_names) and
-# RUSTSEC-2026-0372 (zvariant_derive) are informational "unmaintained"
-# advisories (no vulnerability): zvariant moved into zbus 6 as `zbus::wire`.
+# RUSTSEC-2026-0372 (zvariant_derive), dated 2026-10-16, are informational
+# "unmaintained" advisories (no vulnerability): zvariant moved into zbus 6 as
+# `zbus::wire`.
 # Reached only through apps/pos-sandboxd (zbus 5.19, zbus_systemd 0.26200,
 # which still requires zbus ^5.3). Remove (here and in .cargo/audit.toml) once
 # pos-sandboxd is on zbus 6 (Redmine #686).
