@@ -201,7 +201,7 @@ pub const PROVENANCE_DIGEST: Hash = Hash::from_bytes([99; 32]);
 /// The unwind carries `unexpected test error: {error:?}` and does not run the
 /// panic hook. Tests call it as a statement to assert that a write succeeded,
 /// so it is not `#[must_use]`.
-#[allow(clippy::must_use_candidate)]
+#[allow(clippy::must_use_candidate, reason = "called as a statement to assert success")]
 pub fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
         std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
@@ -454,7 +454,12 @@ pub fn collect_rows<T: DependencyPagedRowV1 + Clone>(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{err, ok};
+    use super::{
+        collect_rows, err, ok, prefix_scope, CounterfactualStoreErrorV1, DependencyNodeRecordV1,
+        DependencyPageRequestV1, DependencyPageV1, StoreResult, TimelineId,
+    };
+
+    type NodeRow = DependencyNodeRecordV1;
 
     fn unwound_message<T>(outcome: std::thread::Result<T>) -> Option<String> {
         let payload = outcome.err()?;
@@ -474,6 +479,19 @@ mod tests {
         assert_eq!(
             unwound_message(succeeded).as_deref(),
             Some("unexpected success: 1")
+        );
+    }
+
+    const fn refuse(_: &DependencyPageRequestV1) -> StoreResult<DependencyPageV1<NodeRow>> {
+        Err(CounterfactualStoreErrorV1::CorruptState)
+    }
+
+    #[test]
+    fn collect_rows_returns_the_first_read_error() {
+        let scope = prefix_scope(TimelineId::new(), 1);
+        assert_eq!(
+            collect_rows(scope, 1, refuse).err(),
+            Some(CounterfactualStoreErrorV1::CorruptState)
         );
     }
 }

@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 
+use pos_core::counterfactual_store::test_fixtures;
 use pos_core::counterfactual_store::test_fixtures::{
     class_row, collect_rows, coord, coord_at, edge_row, edge_tail, edge_tail_with_rule, err, facts,
     frontier_frame, hash, hash_field, id_field, indexed_hash, invalidation_frame,
@@ -811,17 +812,11 @@ fn dependency_errors_map_to_the_nearest_store_error() {
 }
 
 fn fork_scope(generation: u64) -> DependencyReadScopeV1 {
-    DependencyReadScopeV1::ForkGeneration(ForkGenerationV1 {
-        fork: fork(),
-        generation,
-    })
+    test_fixtures::fork_scope(fork(), generation)
 }
 
 fn prefix_scope(through_tick: u64) -> DependencyReadScopeV1 {
-    DependencyReadScopeV1::ParentPrefix {
-        timeline: parent(),
-        through_tick,
-    }
+    test_fixtures::prefix_scope(parent(), through_tick)
 }
 
 fn numbered_rows(count: u32) -> Vec<NodeRow> {

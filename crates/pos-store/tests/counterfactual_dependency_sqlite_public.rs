@@ -54,6 +54,7 @@ const SEAL: CounterfactualAdapterSealV1 = CounterfactualAdapterSealV1::for_adapt
 const SQL_MAX: u64 = 9_223_372_036_854_775_807;
 const PROVISIONAL: RecordedNodeOriginV1 = RecordedNodeOriginV1::Provisional;
 const COMMITTED: RecordedNodeOriginV1 = RecordedNodeOriginV1::Committed;
+const ENDOGENOUS: RecordedDependencyClassV1 = RecordedDependencyClassV1::EndogenousRecomputed;
 const ROOT: RecordedDependencyClassV1 = RecordedDependencyClassV1::InterventionAssigned;
 /// The Tick of the invalidation every fixture commits.
 const FIRST_TICK: u64 = 17;
