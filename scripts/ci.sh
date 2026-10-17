@@ -85,7 +85,8 @@ echo "==> rustdoc (warnings denied)"
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
 
 echo "==> test (--include-ignored)"
-# Run ignored tests too so #[ignore] cannot silently skip a path.
+# Run ignored tests too so #[ignore] cannot silently skip a path. Hosted CI runs
+# the same tests through cargo-nextest; libtest keeps this script nextest-free.
 test_log="$(mktemp)"
 coverage_json=""
 cleanup() {

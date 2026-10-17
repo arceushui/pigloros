@@ -41,8 +41,13 @@ def main() -> None:
     for fragment in (
         "python scripts/check_isolated_test_runner_policy.py",
         "python scripts/test_check_isolated_test_runner_policy.py",
-        "cargo test --workspace --all-features --locked -- --include-ignored",
-        "cargo llvm-cov --workspace --all-features --locked",
+        "cargo nextest run --workspace --all-features --locked",
+        "--run-ignored all --no-fail-fast",
+        '--partition "slice:${SHARD}/3"',
+        "assert-no-ignored-in-test-summary.sh --partitioned=3",
+        "cargo test --workspace --all-features --locked --doc -- --include-ignored",
+        "cargo llvm-cov nextest --workspace --all-features --locked",
+        "--user-config-file none --ignore-default-filter",
         "name: cargo test with ASan",
         "uses: ./.github/workflows/mutation.yml",
     ):

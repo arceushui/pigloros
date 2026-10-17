@@ -1,6 +1,6 @@
 # Trunk Code Quality — complements .github/workflows/ci.yml (fmt/test/clippy/coverage).
 # Includes rust-test-policy (coverage(off) test-only; no ```ignore doctest fences).
-# #[ignore] is enforced at runtime via cargo test -- --include-ignored (see ci.yml).
+# #[ignore] is enforced at runtime via nextest --run-ignored all (see ci.yml).
 # Dependency and security gates run in `ci.yml`. Local: `trunk check` / scripts/ci.sh.
 
 name: trunk-check

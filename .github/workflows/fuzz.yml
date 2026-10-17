@@ -46,6 +46,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: fuzz-validation-nightly-2026-07-01
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: fuzz
       - name: Validate isolated fuzz workspace
         working-directory: fuzz
@@ -82,6 +83,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: fuzz-nightly-2026-07-01-${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: fuzz
       - name: Run ${{ matrix.target }}
         working-directory: fuzz

@@ -127,6 +127,43 @@ tower = { version = "0.5", features = ["util"] }
 lto = true
 codegen-units = 1
 
+# Signature and digest verification dominates test CPU time: at opt-level 0
+# every curve25519-dalek SIMD intrinsic is an out-of-line call. Optimizing
+# only these dependencies cut workspace test time substantially for a small
+# cold-build cost (measurements in #649). Workspace crates stay unoptimized
+# for coverage and debugging; the test profile inherits these overrides.
+# Cargo only warns if a listed crate leaves the dependency graph.
+
+# Ed25519 signatures.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+# Digests. A name-only spec covers both locked sha2 versions (0.10 and 0.11).
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.blake3]
+opt-level = 3
+
+# P-256 (WebAuthn) and its arithmetic stack.
+[profile.dev.package.p256]
+opt-level = 3
+
+[profile.dev.package.ecdsa]
+opt-level = 3
+
+[profile.dev.package.elliptic-curve]
+opt-level = 3
+
+[profile.dev.package.primeorder]
+opt-level = 3
+
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 warnings = { level = "deny", priority = -2 }
