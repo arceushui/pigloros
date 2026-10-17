@@ -1427,7 +1427,10 @@ fn concurrent_writes_refuse_the_commit() -> TestResult {
 
 /// A connection to the rig's database.
 fn other_connection(rig: &Rig) -> BoxResult<SqliteStore> {
-    rig.db.as_ref().ok_or("no database")?.connect(&rig.pass.gate)
+    rig.db
+        .as_ref()
+        .ok_or("no database")?
+        .connect(&rig.pass.gate)
 }
 
 /// The rig's Logical Head and the sequences of its Events, as this connection reads them.
@@ -1501,7 +1504,11 @@ fn stale() -> TestResult {
     let outcomes = rig.boundary(&failed);
     assert!(ran.get());
     let prefix = prefix_of(&rig)?;
-    assert_eq!(described(&outcomes), ["not-committed:StaleState"], "{prefix}");
+    assert_eq!(
+        described(&outcomes),
+        ["not-committed:StaleState"],
+        "{prefix}"
+    );
     assert_eq!(rig.running()?, "plugin-a");
     assert_eq!(described(&rig.boundary(&failed)), ["activated:plugin-b:[]"]);
     Ok(())
