@@ -483,7 +483,10 @@ fn lose_and_recover(kind: StoreKind) {
     assert_eq!(committed, stored, "{tag}");
     // A second recovery finds nothing in doubt and commits nothing more.
     let again = err(world.registry.recover_scheduled_pass(world.store.as_mut()));
-    assert!(matches!(again, RuntimeError::NoScheduledAdmissionInDoubt), "{tag}");
+    assert!(
+        matches!(again, RuntimeError::NoScheduledAdmissionInDoubt),
+        "{tag}"
+    );
     assert_eq!(world.events().len(), 2, "{tag}");
     assert_eq!(alpha.committed_state().bytes, b"initial+");
     assert_eq!(beta.committed_state().bytes, b"next");
