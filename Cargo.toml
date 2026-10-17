@@ -198,6 +198,16 @@ opt-level = 3
 [profile.dev.package.regalloc2]
 opt-level = 3
 
+[profile.dev.package.cranelift-bitset]
+opt-level = 3
+
+[profile.dev.package.cranelift-control]
+opt-level = 3
+
+# ELF emission for each compiled guest.
+[profile.dev.package.object]
+opt-level = 3
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 warnings = { level = "deny", priority = -2 }
