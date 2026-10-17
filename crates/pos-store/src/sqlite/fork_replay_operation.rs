@@ -31,9 +31,7 @@ fn with_selected_row<'budget, 'clock, T>(
     read: impl FnOnce(Option<&Row<'_>>, &mut NativeReadContextV1<'budget, 'clock>) -> Result<T>,
 ) -> Result<T> {
     context.check().map_err(|_| Error::CorruptAuthority)?;
-    let mut statement = conn
-        .prepare_cached(sql)
-        .map_err(|_| Error::StorageIndeterminate)?;
+    let mut statement = conn.prepare(sql).map_err(|_| Error::StorageIndeterminate)?;
     context.check().map_err(|_| Error::CorruptAuthority)?;
     let mut rows = statement
         .query(parameters)
