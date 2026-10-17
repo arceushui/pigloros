@@ -180,6 +180,45 @@ Every `PCH1` case (`PCF-CPH-001` to `PCF-CPH-015`) is mandatory and applicable
 and has exactly one runner, in manifest order; the runner asserts that none is
 skipped.
 
+## `community/v2/manifest.json` (`PCH1`, version 2)
+
+Version 2 of the community Plugin-host profile (ADR-119 section 6, #665). It
+holds every version 1 case unchanged and in order, so `PCF-CPH-006` stays the
+"no declaration, no fallback" case, and adds three ADR-119 cases. Version 1 is
+not edited: the same runner runs both directories, each with its own pin and
+runner table, and the version 2 table extends the version 1 table.
+
+`PCF-CPH-016` (case 4) covers the declaration refusals of the runtime
+`declare`. Before the composition fallback registry port is called, it refuses
+a principal without the host-native `composition.fallback.declare` grant, a
+target Timeline that is not the Timeline the community passes step
+(`TargetNotStepped`), DFP1 bytes that break a record rule (an oversized pin or
+policy, a Plugin ID text repeated across entries), a candidate that breaks a
+section 4.1 rule (rule 7 over the case's Stable passing-profile digest sets,
+exact digest match) and a primary that is not the implementation the registry
+runs, which for a tenure-0 entry is the composer's base implementation
+(`PrimaryNotEffective`). The port then refuses an empty first policy,
+`StalePolicy`, `EntityMismatch` and a primary that is not an entry's effective
+candidate. A byte-identical declaration retried after its commit is replayed
+before `StalePolicy` is checked. The schema, output-policy, profile and
+configuration-digest rules cannot be broken through the facts-only path with
+one Plugin type; the `pos-runtime` unit tests cover them.
+
+`PCF-CPH-017` (case 5) covers the two ADR-119 reserved types. The probe guest
+drafts `pigloros.composition.fallback-declared` under the `fallback-declared`
+selector and `pigloros.composition.fallback-activated` under
+`fallback-activated`, and each draft is refused as `PCF-CPH-013` refuses the
+release-activation type. A claim of either type by either class is refused with
+`ReservedHostEventType` before the registry changes.
+
+`PCF-CPH-018` (the declaration part of case 14) covers a re-base and a
+withdrawal declared in a candidate tenure. Entries are recorded as
+`tenure/chain-position/effective implementation`.
+
+The declaration cases record no observation profile: they run no pass. Their
+`sqlite` runs use a file-backed `SqliteStore`, because the registry requires the
+WAL journal, which an in-memory database cannot use.
+
 ## `v1/legacy-eval-history.json` (`PLH1`, version 1)
 
 Legacy `eval.prediction` and `eval.outcome` Events in the form the

@@ -46,8 +46,14 @@ pos-plugin-publisher = { path = "../../crates/pos-plugin-publisher", features = 
   "test-support",
 ] }
 pos-reference = { path = "../../crates/pos-reference" }
+# The ADR-119 declaration cases of `PCH1` version 2 (#665) run the runtime `declare` over the
+# composition fallback registry of `MemoryStore` and of a file-backed `SqliteStore`: the registry
+# requires WAL, which an in-memory database cannot use, so the file lives in a `tempfile`
+# directory.
+pos-store = { path = "../../crates/pos-store" }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
