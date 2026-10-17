@@ -100,7 +100,9 @@ impl<'input> Cursor<'input> {
         self.take(length, context).map(|bytes| {
             bytes
                 .iter()
-                .fold(0, |value, byte| (value << 8) | u64::from(*byte))
+                // Appending one byte adds its low eight bits to the shifted
+                // prefix. The header selects at most eight bytes in total.
+                .fold(0, |value, byte| (value << 8) + u64::from(*byte))
         })
     }
 
