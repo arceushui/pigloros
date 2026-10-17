@@ -122,7 +122,10 @@ pub(super) fn selected_field_with_context<'budget, 'clock, T>(
         .check()
         .map_err(|_| Error::CorruptAuthority)
         .and_then(|()| {
-            conn.prepare(query.sql())
+            // Reuse only the compiled SQL, never rows or validated evidence.
+            // Every execution still binds its key and crosses the same native
+            // cursor, field, accounting and original-clock checkpoints below.
+            conn.prepare_cached(query.sql())
                 .map_err(|_| Error::StorageIndeterminate)
         })
         .and_then(|mut statement| {
