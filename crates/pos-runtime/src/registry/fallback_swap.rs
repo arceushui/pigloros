@@ -153,7 +153,7 @@ impl PluginRegistry {
     /// cleared. The schemas, projections, approver routes and every other
     /// entry are untouched, and the primary's entry and Driver are dropped.
     /// The schema descriptions therefore keep the primary's
-    /// "owned by plugin '<name>'" text.
+    /// `owned by plugin '<name>'` text.
     ///
     /// It re-runs [`Self::validate_swap_v1`] first, so after a successful dry
     /// run with no registry change in between it cannot fail; an error there
