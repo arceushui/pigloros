@@ -31,14 +31,15 @@ impl SqliteStore {
         } else {
             IntervalConnectionV1::Writer
         };
-        std::iter::once((&self.conn, reader_kind))
-            .chain(
-                self.writer_reservation_connection
-                    .as_ref()
-                    .map(|writer| (writer, IntervalConnectionV1::Writer)),
-            )
-            .try_for_each(|(connection, kind)| {
-                let observer = Arc::clone(&observer);
+        let writer = self
+            .writer_reservation_connection
+            .as_ref()
+            .map(|writer| (writer, IntervalConnectionV1::Writer, Arc::clone(&observer)));
+        // The primary callback takes the caller's Arc; only a second
+        // connection needs a separately owned observer clone.
+        std::iter::once((&self.conn, reader_kind, observer))
+            .chain(writer)
+            .try_for_each(|(connection, kind, observer)| {
                 connection.authorizer(Some(move |context: AuthContext<'_>| {
                     authorize(context, kind, observer.as_ref())
                 }))
