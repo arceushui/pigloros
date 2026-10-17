@@ -200,9 +200,20 @@ runs, which for a tenure-0 entry is the composer's base implementation
 (`PrimaryNotEffective`). The port then refuses an empty first policy,
 `StalePolicy`, `EntityMismatch` and a primary that is not an entry's effective
 candidate. A byte-identical declaration retried after its commit is replayed
-before `StalePolicy` is checked. The schema, output-policy, profile and
-configuration-digest rules cannot be broken through the facts-only path with
-one Plugin type; the `pos-runtime` unit tests cover them.
+before `StalePolicy` is checked. The runtime `PrimaryNotEffective` names the
+entry; the port's `Registry(PrimaryNotEffective)` covers recorded entries.
+
+The schema, output-policy, profile and configuration-digest rules cannot be
+broken through the facts-only path with one Plugin type. The `pos-runtime` unit
+tests cover them: `registry_fact_rules_are_refused_through_declare`
+(`composition_fallback/declaration_tests.rs`) drives all four through the
+runtime `declare`, and the validator tests in `composition_fallback/tests.rs`
+cover each refusal and its accepted bounds:
+`rule_two_event_types_and_schemas` (schemas), `rule_two_output_policy` and
+`rule_two_output_fidelity_metadata` (output policy),
+`rule_five_profile_and_interval` (profile), and
+`required_plugin_enforcement_binds_version_and_digest` and
+`required_plugin_binding_is_enforced_for_both` (configuration digest).
 
 `PCF-CPH-017` (case 5) covers the two ADR-119 reserved types. The probe guest
 drafts `pigloros.composition.fallback-declared` under the `fallback-declared`
@@ -217,7 +228,11 @@ withdrawal declared in a candidate tenure. Entries are recorded as
 
 The declaration cases record no observation profile: they run no pass. Their
 `sqlite` runs use a file-backed `SqliteStore`, because the registry requires the
-WAL journal, which an in-memory database cannot use.
+WAL journal, which an in-memory database cannot use. By ADR-119 clarification
+8, the declaration cases (`PCF-CPH-016` and `PCF-CPH-018`) are host-side and
+run no pass, so ADR-119 section 6's "Local results equal to Air-Gapped" clause
+applies only to the pass-running cases, of which `PCF-CPH-017` is run like
+`PCF-CPH-013`.
 
 ## `v1/legacy-eval-history.json` (`PLH1`, version 1)
 

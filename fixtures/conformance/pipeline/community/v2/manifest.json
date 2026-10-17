@@ -899,7 +899,7 @@
     },
     {
       "id": "PCF-CPH-016",
-      "title": "The ADR-119 runtime declaration refuses, before the port changes anything, a principal without the composition.fallback.declare grant, a target that is not the stepped Timeline (TargetNotStepped), DFP1 bytes that break a record rule (an oversized pin or policy, a repeated Plugin ID text), a candidate that breaks a section 4.1 rule (rule 7 over host-supplied Stable passing-profile digest sets, exact digest match) and a tenure-0 primary that is not the composer's base implementation (PrimaryNotEffective); the port refuses an empty first policy, StalePolicy, EntityMismatch and a primary that is not an entry's effective candidate. A byte-identical declaration retried after its commit is replayed before StalePolicy is checked",
+      "title": "The ADR-119 runtime declaration refuses, before the port changes anything, a principal without the composition.fallback.declare grant, a target that is not the stepped Timeline (TargetNotStepped), DFP1 bytes that break a record rule (an oversized pin or policy, a repeated Plugin ID text), a candidate that breaks a section 4.1 rule (rule 7 over host-supplied Stable passing-profile digest sets, exact digest match) and a tenure-0 primary that is not the composer's base implementation (the runtime PrimaryNotEffective, which names the entry); the port refuses an empty first policy, StalePolicy, EntityMismatch and a primary that is not an entry's effective candidate. A byte-identical declaration retried after its commit is replayed before StalePolicy is checked",
       "sources": [
         "#661",
         "#665",
@@ -933,7 +933,7 @@
         "record.repeated-plugin-id": "Record(InvalidField(Distinctness))",
         "not-granted": "NotGranted",
         "target-not-stepped": "TargetNotStepped",
-        "primary-not-effective.tenure-zero": "Registry(PrimaryNotEffective)",
+        "primary-not-effective.tenure-zero": "PrimaryNotEffective",
         "empty-first-policy": "Registry(EmptyFirstPolicy)",
         "refusals.registry-unchanged": "true",
         "first.outcome": "Committed",
@@ -941,7 +941,7 @@
         "stale-policy": "Registry(StalePolicy)",
         "entity-mismatch": "Registry(EntityMismatch)",
         "activation.outcome": "Committed",
-        "primary-not-effective.candidate-tenure.runtime": "Registry(PrimaryNotEffective)",
+        "primary-not-effective.candidate-tenure.runtime": "PrimaryNotEffective",
         "primary-not-effective.candidate-tenure.port": "Registry(PrimaryNotEffective)"
       }
     },

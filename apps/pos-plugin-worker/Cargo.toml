@@ -39,8 +39,9 @@ blake3 = { workspace = true }
 # The community pipeline conformance runner (`PCH1`, #489) registers a first-party native twin
 # Driver (`pos-core` Plugin types) and includes the first-party profile's fail-closed harness
 # from `apps/piglor-gateway/tests/pipeline_conformance/harness.rs` by `#[path]`, which pins
-# fixture bytes with `sha2`.
-pos-core = { path = "../../crates/pos-core" }
+# fixture bytes with `sha2`. The ADR-119 declaration cases (#665) open their stores behind the
+# test erasure gate `ErasureContainmentGateV1::new_test_open`, which needs `test-support`.
+pos-core = { path = "../../crates/pos-core", features = ["test-support"] }
 pos-plugin-conformance-adapter = { path = "../pos-plugin-conformance-adapter" }
 pos-plugin-publisher = { path = "../../crates/pos-plugin-publisher", features = [
   "test-support",

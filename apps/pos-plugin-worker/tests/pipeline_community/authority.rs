@@ -59,10 +59,15 @@ pub const PROPOSER: Native = Native {
     role: "first-party-proposer",
 };
 /// A first-party Plugin that proposes the host's reserved release-activation type.
-const RESERVED: Native = Native {
-    emitted: PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1,
-    ..PROPOSER
-};
+const RESERVED: Native = native_of(PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1);
+
+/// A first-party Plugin that owns a type of its own and proposes `emitted`.
+const fn native_of(emitted: &'static str) -> Native {
+    Native {
+        emitted,
+        ..PROPOSER
+    }
+}
 /// The community member that owns a type of its own while its guest proposes the owner's.
 const COMMUNITY_PROPOSER: Spec = Spec {
     event_type: "parity.community",
@@ -499,7 +504,7 @@ pub fn reserved_proposal_parity() -> Capture {
 fn reserved_proposal(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let reserved = ReservedProposal {
         prefix: "",
-        emitted: PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1,
+        emitted: RESERVED.emitted,
         selector: RESERVED_SELECTOR,
     };
     reserved_proposal_of(kind, capture, &reserved)
@@ -528,11 +533,7 @@ pub fn reserved_proposal_of(
     let key = |name: &str| format!("{}{name}", reserved.prefix);
     let mut signed = SignedWorld::new()?;
     let probe = publish(&mut signed, PROBE, 1)?;
-    let native = Native {
-        emitted: reserved.emitted,
-        ..PROPOSER
-    };
-    let first_party = first_party_proposal(&signed, native, kind)?;
+    let first_party = first_party_proposal(&signed, native_of(reserved.emitted), kind)?;
     let entries = std::slice::from_ref(&probe);
     let mut mixed = Mixed::new(kind, &signed, entries, SIBLING, Order::TwinFirst)?;
     mixed.lane.selector.set(Some(reserved.selector.to_vec()));
