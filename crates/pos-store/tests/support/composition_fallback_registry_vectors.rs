@@ -228,7 +228,7 @@ fn declaration_refusals_write_nothing() -> TestResult {
     assert_refused(&h, &before, refused, RegistryError::StalePolicy)?;
 
     let mut scoped = h.declaration(&second)?;
-    scoped.scope = "other".to_owned();
+    "other".clone_into(&mut scoped.scope);
     let refused = h.store.declare(&scoped);
     assert_refused(&h, &before, refused, RegistryError::ScopeMismatch)?;
     let mut garbled = h.declaration(&second)?;
@@ -354,7 +354,7 @@ fn refusals() -> [Refusal; 12] {
         ),
         (
             "unknown entry",
-            |r, _| r.entry_key = "gamma".to_owned(),
+            |r, _| "gamma".clone_into(&mut r.entry_key),
             RegistryError::UnknownEntry,
         ),
         (
@@ -407,13 +407,13 @@ const fn invalid_implementation() -> RegistryError {
     ))
 }
 
-fn undeclared_trigger(request: &mut FallbackActivateRequestV1, _: &H) {
+const fn undeclared_trigger(request: &mut FallbackActivateRequestV1, _: &H) {
     request.trigger_code = FallbackTriggerCodeV1::WorkerCrashed;
     request.trigger_basis.origin = FallbackActivationOriginV1::Owner;
 }
 
 fn manual_entry(request: &mut FallbackActivateRequestV1, h: &H) {
-    request.entry_key = BETA.to_owned();
+    BETA.clone_into(&mut request.entry_key);
     request.from = h.world.d.clone();
     request.to = h.world.e.clone();
 }
@@ -467,26 +467,29 @@ fn an_activation_without_a_policy_names_no_entry() -> TestResult {
 #[test]
 fn the_chain_moves_forward_and_an_owner_returns_to_the_primary() -> TestResult {
     let (mut h, _) = declared()?;
-    let (a, b, c) = (h.world.a.clone(), h.world.b.clone(), h.world.c.clone());
-    h.activate(&h.activation(ALPHA, 0, &a, &b)?)?;
-    h.activate(&h.activation(ALPHA, 1, &b, &c)?)?;
+    let primary = h.world.a.clone();
+    let second = h.world.b.clone();
+    let third = h.world.c.clone();
+    h.activate(&h.activation(ALPHA, 0, &primary, &second)?)?;
+    h.activate(&h.activation(ALPHA, 1, &second, &third)?)?;
     // An owner return names the primary with any code and restarts the chain.
-    let mut back = h.activation(ALPHA, 2, &c, &a)?;
+    let mut back = h.activation(ALPHA, 2, &third, &primary)?;
     back.trigger_basis.origin = FallbackActivationOriginV1::Owner;
     back.trigger_code = FallbackTriggerCodeV1::WorkerCrashed;
     assert_eq!(h.activate(&back)?.row().state_revision(), 4);
     let stored = h.store.registry_row(SCOPE, h.timeline)?.ok_or("no row")?;
     let alpha = alpha_state(&stored)?;
     assert_eq!((alpha.tenure_ordinal(), alpha.chain_position()), (3, 0));
-    assert_eq!(alpha.effective_digest(), a.digest());
+    assert_eq!(alpha.effective_digest(), primary.digest());
     assert_eq!(stored.state().activation_ordinal(), 3);
     // An owner activates a manual entry; an automatic step may skip a candidate it records.
-    let (d, e) = (h.world.d.clone(), h.world.e.clone());
-    let mut manual = h.activation(BETA, 0, &d, &e)?;
+    let manual_primary = h.world.d.clone();
+    let manual_candidate = h.world.e.clone();
+    let mut manual = h.activation(BETA, 0, &manual_primary, &manual_candidate)?;
     manual.trigger_basis.origin = FallbackActivationOriginV1::Owner;
     h.activate(&manual)?;
-    let mut skipping = h.activation(ALPHA, 3, &a, &c)?;
-    skip(&mut skipping, b.digest());
+    let mut skipping = h.activation(ALPHA, 3, &primary, &third)?;
+    skip(&mut skipping, second.digest());
     assert_eq!(h.activate(&skipping)?.row().state_revision(), 6);
     Ok(())
 }
@@ -623,12 +626,12 @@ fn another_scope_on_the_same_timeline_is_not_folded() -> TestResult {
     let (mut h, first) = declared()?;
     let other = DomainFallbackPolicyV1::new("other".to_owned(), vec![h.world.alpha()?], None)?;
     let mut request = h.declaration(&other)?;
-    request.scope = "other".to_owned();
+    "other".clone_into(&mut request.scope);
     request.expected_state_revision = 0;
     h.store.declare(&request)?;
     let (a, b) = (h.world.a.clone(), h.world.b.clone());
     let mut elsewhere = h.activation(ALPHA, 0, &a, &b)?;
-    elsewhere.scope = "other".to_owned();
+    "other".clone_into(&mut elsewhere.scope);
     elsewhere.expected_state_revision = 1;
     h.store.activate(&elsewhere)?;
     assert_eq!(h.store.fallback_ledger("other", h.timeline)?.len(), 2);
