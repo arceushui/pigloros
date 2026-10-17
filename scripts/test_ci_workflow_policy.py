@@ -425,6 +425,18 @@ class CiWorkflowPolicyTests(unittest.TestCase):
     def test_parallel_validation_preserves_every_required_command(self) -> None:
         assert_parallel_validation_contract(load_workflow(CI_WORKFLOW_PATH))
 
+    def test_native_width_counter_runs_on_the_actual_narrower_target(self) -> None:
+        expected = {
+            "name": "Exercise native-width canonical length arithmetic",
+            "run": "cargo test -p pos-core --target i686-pc-windows-msvc --lib --locked "
+            "canonical_length_tests -- --include-ignored",
+        }
+        steps = load_workflow(CI_WORKFLOW_PATH)["jobs"]["ledger-windows"]["steps"]
+        self.assertEqual(
+            [step for step in steps if step.get("name") == expected["name"]],
+            [expected],
+        )
+
     def test_parallel_validation_rejects_missing_or_weakened_commands(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
         for owner, required in (

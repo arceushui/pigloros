@@ -581,6 +581,8 @@ jobs:
         run: cargo check -p pos-runtime --target i686-pc-windows-msvc --locked
       - name: Exercise narrower-target registry cardinality refusals
         run: cargo test -p pos-core --target i686-pc-windows-msvc --test key_registry_guarded_read_public --locked -- --include-ignored
+      - name: Exercise native-width canonical length arithmetic
+        run: cargo test -p pos-core --target i686-pc-windows-msvc --lib --locked canonical_length_tests -- --include-ignored
 
   clippy:
     name: clippy
