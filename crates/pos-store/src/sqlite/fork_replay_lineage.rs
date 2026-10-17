@@ -591,7 +591,7 @@ mod tests {
             ("SELECT id,NULL FROM timelines WHERE id=?1", false),
             ("SELECT id,NULL,NULL FROM timelines WHERE id=?1", false),
         ] {
-            let (mut store, root, _) = fixture()?;
+            let (store, root, _) = fixture()?;
             let interval = store.begin_protected_effect_interval()?;
             let key = root.to_string();
             let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
