@@ -31,6 +31,29 @@ case without a runner, a runner without a case, a missing or unexpected
 capture, a diverging value, and evidence whose observation profile differs
 from the declared one.
 
+## `community/v1/manifest.json` (`PCH1`, version 1)
+
+The sibling profile of the community Plugin host (Redmine #489, the second
+half of #321). It proves ADR-021 decision 7 across the two accepted isolation
+classes: a first-party operator-trusted native Driver and a governed community
+Driver that runs a real Component in the real `pos-plugin-worker`. Parity is
+semantic: pass result, Timeline Order and Event types, Event entity, commit
+receipt, Driver steps, Plugin availability and scheduled observation profile.
+The owner's isolation class is recorded and differs; payload bytes are compared
+only between the Local and Air-Gapped runs of one community release.
+
+Its runner is `apps/pos-plugin-worker/tests/pipeline_community/main.rs`,
+because only that package's tests can launch the worker binary. It includes
+the `PPC1` harness (`apps/piglor-gateway/tests/pipeline_conformance/harness.rs`)
+unchanged, checks the `PCH1` magic and version first, and then applies every
+`PPC1` rule above: closed fields, stores, applicability, observation-profile
+tags, pinned bytes, skipped mandatory cases and runners without a case.
+
+The community pass world runs on `MemoryStore` only, so every case names the
+`memory` store, and the `SQLITE-STORE` exclusion records that this profile
+proves no SQLite parity of the community path. The other exclusions name the
+#489 subtasks that add the remaining cases.
+
 ## `v1/legacy-eval-history.json` (`PLH1`, version 1)
 
 Legacy `eval.prediction` and `eval.outcome` Events in the form the

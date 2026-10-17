@@ -9,62 +9,36 @@
 //! the end-to-end vectors live here.
 #![cfg(target_os = "linux")]
 
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+pub mod support;
+
+use std::sync::atomic::Ordering;
 
 use pos_plugin_publisher::test_support::{
-    encoding::{Material, TICK, UTC},
+    encoding::{TICK, UTC},
     release::Shape,
-    world::{wall, Config, World as SignedWorld},
-    BoxResult, BundleAddressV1,
+    world::{Config, World as SignedWorld},
+    BoxResult,
 };
-use pos_plugin_supervisor::pass_harness::{GatedSpec, Source, World as PassWorld};
 use pos_plugin_supervisor::{
-    CommunityMemberV1, CommunityPluginHandleV1, CommunityPluginSubjectOutcomeV1 as Outcome,
-    CommunityPluginSubjectResultV1 as Verdict, ContentValidationV1,
-    ReceiptDispositionV1 as Disposition,
+    CommunityPluginSubjectOutcomeV1 as Outcome, CommunityPluginSubjectResultV1 as Verdict,
+    ContentValidationV1, ReceiptDispositionV1 as Disposition,
 };
 use pos_runtime::community_plugin_host::{
-    gate_community_release_v1, pinned_runtime_v1, AtomicCommitFailureV1, CommunityPassOutcomeV1,
-    CommunityPassV1, CommunityPluginCeilingsV1, CommunityPluginExecutionProfileV1,
-    CommunityPluginExpectationV1, CommunityPluginHostErrorV1, CommunityPluginHostV1,
-    CommunityPluginModeV1, CommunityPluginTrustMaterialV1, ComponentTrapClassV1,
-    GatedCommunityReleaseV1, MemberPassV1, PassResultV1, PluginTrustMaterialSourceV1,
-    PluginTrustMaterialUnavailableV1, RevocationBasisV1 as Revoke, TrapReproductionV1,
-    TrustDenialBasisV1 as Denial,
+    AtomicCommitFailureV1, CommunityPassOutcomeV1, CommunityPluginExpectationV1,
+    CommunityPluginHostErrorV1, CommunityPluginModeV1, ComponentTrapClassV1, MemberPassV1,
+    PassResultV1, RevocationBasisV1 as Revoke, TrapReproductionV1, TrustDenialBasisV1 as Denial,
+};
+use support::lane::{
+    assert_committed, committed, publish, publish_shape, trust_material, Lane, Published, Spec,
+    ALPHA, ALPHA_C,
 };
 
 type Error = CommunityPluginHostErrorV1;
 type TestResult = BoxResult<()>;
 type Mode = CommunityPluginModeV1;
-type Host = CommunityPluginHostV1<CommunityMemberV1>;
 
-/// Bytes of one committed compatibility fixture.
-macro_rules! fixture {
-    ($name:literal) => {
-        include_bytes!(concat!(
-            "../../../plugins/community/examples/compatibility-prototype/fixtures/",
-            $name
-        ))
-    };
-}
-
-const RUST_GUEST: &[u8] = fixture!("rust-guest.wasm");
-const C_GUEST: &[u8] = fixture!("c-guest.wasm");
-const WORKER: &str = env!("CARGO_BIN_EXE_pos-plugin-worker");
-/// Generous for compiling a fixture in an unoptimized, instrumented worker.
-/// A ceiling only: a healthy invocation finishes far sooner.
-const WATCHDOG: Duration = Duration::from_mins(5);
-/// The memory budget of the fixtures' releases: 256 pages (16 MiB), because the Rust guest
-/// reserves 17 pages (1.1 MiB) at start and the world's default budget is one page.
-const MEMORY: u64 = 16 * 1_048_576;
 /// The Plugin IDs the world's PTR1 grants besides the default `plugin-a`.
 const GRANTED: &[&str] = &["plugin-b"];
-/// The one Event type both fixtures' `drive` export emits.
-const EVENT_TYPE: &str = "prototype.driven";
 /// A release digest that no fixture release has.
 const UNRELATED: [u8; 32] = [0x77; 32];
 /// The invocation ID of the first member of a lane.
@@ -81,296 +55,12 @@ const NOT_ACTIVE: Error = Error::ArtifactTrustDenied {
 const AUTH: &str = "Authoritative";
 const OP: &str = "Operational";
 
-/// One member of a lane: the Plugin ID, the Component it publishes, and whether its Driver is
-/// registered in the pass world.
-#[derive(Clone, Copy)]
-struct Spec {
-    plugin_id: &'static str,
-    guest: &'static [u8],
-    registered: bool,
-}
-
-impl Spec {
-    /// The release shape that publishes this member.
-    const fn shape(&self) -> Shape {
-        Shape {
-            plugin_id: self.plugin_id,
-            component: self.guest,
-            ..Shape::first()
-        }
-        .with_optional_capability()
-        .with_worker_abi()
-        .with_memory_bytes(MEMORY)
-    }
-}
-
-const ALPHA: Spec = Spec {
-    plugin_id: "plugin-a",
-    guest: RUST_GUEST,
-    registered: true,
-};
-/// The first member, on the C fixture.
-const ALPHA_C: Spec = Spec {
-    guest: C_GUEST,
-    ..ALPHA
-};
 /// A second member whose Driver is built but never registered, so that it never runs.
 const BETA: Spec = Spec {
     plugin_id: "plugin-b",
     registered: false,
     ..ALPHA
 };
-
-/// A material source the test swaps between passes; a clone shares the material.
-#[derive(Clone)]
-struct Swap(Rc<RefCell<Option<CommunityPluginTrustMaterialV1>>>);
-
-impl Swap {
-    fn of(material: CommunityPluginTrustMaterialV1) -> Self {
-        Self(Rc::new(RefCell::new(Some(material))))
-    }
-
-    fn set(&self, material: Option<CommunityPluginTrustMaterialV1>) {
-        *self.0.borrow_mut() = material;
-    }
-}
-
-impl PluginTrustMaterialSourceV1 for Swap {
-    fn material(&self) -> Result<CommunityPluginTrustMaterialV1, PluginTrustMaterialUnavailableV1> {
-        let current = self.0.borrow().clone();
-        current.ok_or(PluginTrustMaterialUnavailableV1)
-    }
-}
-
-fn trust_material(world: &SignedWorld, material: &Material) -> CommunityPluginTrustMaterialV1 {
-    CommunityPluginTrustMaterialV1::new(
-        world.anchor.clone(),
-        material.root_anchor().clone(),
-        material.tps1.clone(),
-        vec![material.ptr1().to_vec()],
-        material.prv1_records().to_vec(),
-    )
-}
-
-/// The host profile of `mode`: what the worker's own pinned runtime equals.
-fn profile(mode: Mode) -> CommunityPluginExecutionProfileV1 {
-    let ceilings = CommunityPluginCeilingsV1::V1;
-    CommunityPluginExecutionProfileV1::new(mode, ceilings, Some(pinned_runtime_v1()))
-}
-
-/// A release published and installed in the signed world.
-#[derive(Clone)]
-struct Published {
-    spec: Spec,
-    address: BundleAddressV1,
-    release: [u8; 32],
-}
-
-/// Publish the release of `spec` and install it as the active release, with activation `tag`.
-fn publish(signed: &mut SignedWorld, spec: Spec, tag: u8) -> BoxResult<Published> {
-    publish_shape(signed, spec, spec.shape(), tag)
-}
-
-/// As [`publish`], for an explicit `shape` of `spec`.
-fn publish_shape(
-    signed: &mut SignedWorld,
-    spec: Spec,
-    shape: Shape,
-    tag: u8,
-) -> BoxResult<Published> {
-    let published = signed.publish(shape)?;
-    let installed = signed.install(published.address(), tag)?;
-    installed.map_err(|error| format!("install failed: {error}"))?;
-    Ok(Published {
-        spec,
-        address: published.address().clone(),
-        release: published.release_digest(),
-    })
-}
-
-/// What a lane's members are built from.
-struct Setup<'a> {
-    signed: &'a SignedWorld,
-    material: CommunityPluginTrustMaterialV1,
-    refuse: Arc<AtomicBool>,
-    profile: CommunityPluginExecutionProfileV1,
-}
-
-/// What the lane keeps of one member.
-struct Part {
-    handle: CommunityPluginHandleV1,
-    address: BundleAddressV1,
-    swap: Swap,
-    expected: CommunityPluginExpectationV1,
-}
-
-/// Gate the release of `entry` once, to build its Driver from. The gate here only supplies the
-/// Driver's release, so its call is not a pass's.
-fn gated_release(
-    signed: &SignedWorld,
-    entry: &Published,
-    swap: &Swap,
-) -> BoxResult<GatedCommunityReleaseV1> {
-    let expected = CommunityPluginExpectationV1 {
-        plugin_id: entry.spec.plugin_id.to_owned(),
-        release: None,
-    };
-    let open = CommunityPassV1::open_at_for_test(u32::try_from(UTC)?, TICK)?;
-    let (gated, _authorization) = gate_community_release_v1(
-        &signed.registry,
-        &expected,
-        &signed.store,
-        &entry.address,
-        swap,
-        &open,
-    )?;
-    Ok(gated)
-}
-
-/// Register the Driver of `entry` in `pass` and keep what the lane needs of it.
-fn add_part(
-    setup: &Setup<'_>,
-    pass: &mut PassWorld,
-    entry: &Published,
-    number: u8,
-) -> BoxResult<Part> {
-    let swap = Swap::of(setup.material.clone());
-    let source = Box::new(Source::switched(number, Arc::clone(&setup.refuse)));
-    let built = pass.add_gated(GatedSpec {
-        name: entry.spec.plugin_id,
-        event_type: EVENT_TYPE,
-        gated: gated_release(setup.signed, entry, &swap)?,
-        profile: setup.profile.clone(),
-        watchdog: WATCHDOG,
-        source,
-        register: entry.spec.registered,
-    })?;
-    Ok(Part {
-        handle: built.handle,
-        address: entry.address.clone(),
-        swap,
-        expected: built.expected,
-    })
-}
-
-/// The member of `part` over the closure at `address`, expecting `expected`.
-fn member_of(
-    signed: &SignedWorld,
-    part: &Part,
-    address: &BundleAddressV1,
-    expected: &CommunityPluginExpectationV1,
-) -> BoxResult<CommunityMemberV1> {
-    Ok(CommunityMemberV1::new(
-        part.handle.clone(),
-        Box::new(signed.root.store()?),
-        address.clone(),
-        Box::new(part.swap.clone()),
-        expected.clone(),
-    ))
-}
-
-/// The member of `part` over its own closure and expectation.
-fn member_for(signed: &SignedWorld, part: &Part) -> BoxResult<CommunityMemberV1> {
-    member_of(signed, part, &part.address, &part.expected)
-}
-
-/// One host over one pass world, in one Execution Mode.
-struct Lane {
-    mode: Mode,
-    pass: PassWorld,
-    host: Host,
-    parts: Vec<Part>,
-    refuse: Arc<AtomicBool>,
-}
-
-impl Lane {
-    fn new(signed: &SignedWorld, entries: &[Published], mode: Mode) -> BoxResult<Self> {
-        let refuse = Arc::new(AtomicBool::new(false));
-        let setup = Setup {
-            signed,
-            material: trust_material(signed, &signed.material()?),
-            refuse: Arc::clone(&refuse),
-            profile: profile(mode),
-        };
-        let mut pass = PassWorld::new(WORKER);
-        let mut parts = Vec::new();
-        for (index, entry) in entries.iter().enumerate() {
-            let number = u8::try_from(index)? + 1;
-            parts.push(add_part(&setup, &mut pass, entry, number)?);
-        }
-        let members = parts
-            .iter()
-            .map(|part| member_for(signed, part))
-            .collect::<BoxResult<Vec<_>>>()?;
-        Ok(Self {
-            mode,
-            pass,
-            host: CommunityPluginHostV1::new(members),
-            parts,
-            refuse,
-        })
-    }
-
-    /// Replace the host by one over the first member alone, supplied from `address` and
-    /// expecting `expected`.
-    fn rehost(
-        &mut self,
-        signed: &SignedWorld,
-        address: &BundleAddressV1,
-        expected: &CommunityPluginExpectationV1,
-    ) -> TestResult {
-        let member = member_of(signed, &self.parts[0], address, expected)?;
-        self.host = CommunityPluginHostV1::new(vec![member]);
-        Ok(())
-    }
-
-    /// Supply every member `material`.
-    fn feed(&self, material: &CommunityPluginTrustMaterialV1) {
-        for part in &self.parts {
-            part.swap.set(Some(material.clone()));
-        }
-    }
-
-    /// Supply every member the signed world's current evidence.
-    fn follow(&self, signed: &SignedWorld) -> TestResult {
-        self.feed(&trust_material(signed, &signed.material()?));
-        Ok(())
-    }
-
-    /// One pass at the world's Tick whose trusted clock reads `utc`.
-    fn run_at(&mut self, signed: &SignedWorld, utc: i64) -> BoxResult<CommunityPassOutcomeV1> {
-        let mut clock = wall(utc)?;
-        let registry = &signed.registry;
-        let host = &mut self.host;
-        Ok(self.pass.run(host, registry, &mut clock, TICK)?)
-    }
-
-    fn run(&mut self, signed: &SignedWorld) -> BoxResult<CommunityPassOutcomeV1> {
-        self.run_at(signed, UTC)
-    }
-
-    /// The subject outcome of every member of `pass`, in host order, as #194 assembles it: the
-    /// receipt is the newest one of the entry's invocation ID.
-    fn outcomes(&self, pass: &CommunityPassOutcomeV1) -> Vec<Outcome> {
-        let assemble = |(entry, part): (&MemberPassV1, &Part)| {
-            let handle = &part.handle;
-            let receipt = entry.invocation_id.and_then(|id| handle.receipt_for(id));
-            Outcome::assemble(entry, pass.tick, self.mode, receipt.as_ref())
-        };
-        pass.gates.iter().zip(&self.parts).map(assemble).collect()
-    }
-
-    /// The subject outcome of the first member of `pass`.
-    fn first(&self, pass: &CommunityPassOutcomeV1) -> BoxResult<Outcome> {
-        let assembled = self.outcomes(pass).into_iter().next();
-        Ok(assembled.ok_or("the pass has no entry")?)
-    }
-
-    /// The handle of the first member.
-    fn handle(&self) -> &CommunityPluginHandleV1 {
-        &self.parts[0].handle
-    }
-}
 
 /// A signed world with `plugin-a` published and installed, and a Local lane over it.
 fn single() -> BoxResult<(SignedWorld, Published, Lane)> {
@@ -401,10 +91,6 @@ const fn committed_digest(outcome: &Outcome) -> Option<[u8; 32]> {
     }
 }
 
-const fn is_committed(pass: &CommunityPassOutcomeV1) -> bool {
-    matches!(pass.result, PassResultV1::Committed(Some(_)))
-}
-
 /// A refusal of the class `PreExecutionRejection`.
 const fn refused(error: &'static str, basis: Option<&'static str>) -> Verdict {
     Verdict::Refused {
@@ -416,19 +102,6 @@ const fn refused(error: &'static str, basis: Option<&'static str>) -> Verdict {
 
 const fn failed(error: &'static str, class: &'static str) -> Verdict {
     Verdict::Failed { error, class }
-}
-
-/// Assert that `pass` committed, printing the lane's first receipts when it did not.
-fn assert_committed(lane: &Lane, pass: &CommunityPassOutcomeV1) {
-    let receipts = lane.handle().receipts();
-    assert!(is_committed(pass), "{pass:?} {receipts:?}");
-}
-
-/// Run one pass of the lane and assemble its first outcome, which must be committed.
-fn committed(lane: &mut Lane, signed: &SignedWorld) -> BoxResult<Outcome> {
-    let pass = lane.run(signed)?;
-    assert_committed(lane, &pass);
-    lane.first(&pass)
 }
 
 /// The outcomes of the same release in `guest`'s Local and Air-Gapped lanes over one signed
