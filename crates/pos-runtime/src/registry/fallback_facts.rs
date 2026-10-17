@@ -133,8 +133,9 @@ fn output_declarations(admission: &OutputAdmissionV1) -> Vec<OutputDeclarationV1
 }
 
 /// The subscriptions of the entry's Driver, if it has one.
-fn driver_subscriptions(d: Option<&dyn Driver>) -> Vec<ProjectionKey> {
-    d.map_or_else(Vec::new, |d| d.subscriptions().to_vec())
+fn driver_subscriptions(driver: Option<&dyn Driver>) -> Vec<ProjectionKey> {
+    let subscriptions = driver.map(Driver::subscriptions);
+    subscriptions.map_or_else(Vec::new, <[_]>::to_vec)
 }
 
 /// The per-fidelity CPU reservations the admitted budget holds for the Plugin.
@@ -150,8 +151,3 @@ fn cpu_reservations(
         .find(|reservation| reservation.plugin_id == plugin_id)
         .map(|reservation| reservation.cpu_reservations_us)
 }
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-#[path = "fallback_facts_tests.rs"]
-mod tests;

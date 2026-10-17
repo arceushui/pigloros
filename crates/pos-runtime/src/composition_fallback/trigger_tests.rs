@@ -70,6 +70,41 @@ fn host_table() -> Vec<(Error, Cause)> {
     table
 }
 
+/// The cause of `error` as an exhaustive `match` with no wildcard arm: a new
+/// host error variant does not compile until it is classified here, and the
+/// tests then require `HOST_CAUSES` to agree.
+const fn expected_cause(error: Error) -> Cause {
+    match error {
+        Error::InvalidManifest => Cause::InvalidManifest,
+        Error::ArtifactTrustDenied { .. } => Cause::ArtifactTrustDenied,
+        Error::ArtifactRevoked { .. } => Cause::ArtifactRevoked,
+        Error::IncompatibleAbi => Cause::IncompatibleAbi,
+        Error::MissingFeature { .. } => Cause::MissingFeature,
+        Error::CapabilityDenied { .. } => Cause::CapabilityDenied,
+        Error::InvalidInvocation => Cause::InvalidInvocation,
+        Error::InvalidGuestOutput => Cause::InvalidGuestOutput,
+        Error::UnsupportedSchema => Cause::UnsupportedSchema,
+        Error::StateMigrationFailed => Cause::StateMigrationFailed,
+        Error::GuestDeclaredFailure => Cause::GuestDeclaredFailure,
+        Error::ComponentTrap {
+            reproduction: TrapReproductionV1::Unverified,
+            ..
+        } => Cause::ComponentTrapUnverified,
+        Error::ComponentTrap {
+            reproduction: TrapReproductionV1::ReproducedByConformance,
+            ..
+        } => Cause::ComponentTrapReproduced,
+        Error::WorkerCrashed => Cause::WorkerCrashed,
+        Error::FuelExhausted => Cause::FuelExhausted,
+        Error::MemoryLimitExceeded => Cause::MemoryLimitExceeded,
+        Error::HostCallLimitExceeded => Cause::HostCallLimitExceeded,
+        Error::OutputLimitExceeded => Cause::OutputLimitExceeded,
+        Error::DeterministicDeadlineExceeded => Cause::DeterministicDeadlineExceeded,
+        Error::OperationalWatchdogStop => Cause::OperationalWatchdogStop,
+        Error::AtomicCommitFailed { .. } => Cause::AtomicCommitFailed,
+    }
+}
+
 /// The eligible code of every cause; every cause not listed is never eligible.
 const EXPECTED: [(Cause, Code); 8] = [
     (Cause::MissingImplementation, Code::MissingImplementation),
@@ -91,10 +126,16 @@ fn expected(cause: Cause) -> Option<Code> {
 
 #[test]
 fn every_host_error_maps_to_its_cause() {
-    for (error, cause) in host_table() {
+    let table = host_table();
+    for &(error, cause) in &table {
+        assert_eq!(expected_cause(error), cause, "{error:?}");
         assert_eq!(Cause::from_host_error(error), cause, "{error:?}");
         let failure = PassFailureV1::Host(error);
         assert_eq!(Cause::from_pass_failure(failure), cause, "{error:?}");
+    }
+    for (name, _) in HOST_CAUSES {
+        let sampled = table.iter().any(|(error, _)| error.name() == name);
+        assert!(sampled, "{name}");
     }
 }
 

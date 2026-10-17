@@ -158,8 +158,13 @@ pub struct FallbackHostFactsV1 {
     /// The release digest of the trust registry's active pointer for the
     /// release's Plugin ID, if one is active (rule 6).
     pub active_release_digest: Option<Hash>,
+    /// The release's publisher identity, as the trusted host attributes it
+    /// from the signed release (rule 2). `None` when the host cannot
+    /// attribute it: such a candidate is treated as cross-publisher.
+    pub publisher: Option<String>,
     /// The Event-type namespaces granted to the release's publisher at
-    /// install (rule 2). Each grant covers the types `<namespace>.<rest>`.
+    /// install (rule 2). Each grant covers the types `<namespace>.<rest>`;
+    /// a cross-publisher candidate needs a grant for every owned type.
     pub namespace_grants: Vec<String>,
     /// The `ConformanceProfile` digests (CNR1 field 4) of passing reports on
     /// Stable-lifecycle profiles whose subject is the release (rule 7).
@@ -223,7 +228,7 @@ pub enum FallbackValidationFieldV1 {
     Schemas,
     /// Rule 2: an EOP1 authority or fidelity differs, or `max_bytes` exceeds the primary's.
     OutputPolicy,
-    /// Rule 2: a publisher-prefixed type is outside the candidate's namespace grants.
+    /// Rule 2: a cross-publisher candidate lacks a namespace grant for an owned type.
     Namespace,
     /// Rule 3: a capability descriptor is not the primary's.
     Capabilities,

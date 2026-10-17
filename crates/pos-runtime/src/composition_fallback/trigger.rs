@@ -84,6 +84,11 @@ pub enum FallbackTriggerCauseV1 {
 ///
 /// `ComponentTrap` is listed with its `Unverified` cause; a reproduced trap is
 /// recognized before this table is read.
+///
+/// A table keeps the lookup within the complexity bound: twenty distinct
+/// causes would need twenty match arms. The unit tests classify every variant
+/// through an exhaustive `match` with no wildcard arm and compare it with this
+/// table, so a new variant does not compile and a renamed one fails the tests.
 const HOST_CAUSES: [(&str, Cause); 20] = [
     ("InvalidManifest", Cause::InvalidManifest),
     ("ArtifactTrustDenied", Cause::ArtifactTrustDenied),
@@ -237,7 +242,8 @@ pub fn declared_fallback_trigger_v1(
     cause: FallbackTriggerCauseV1,
     triggers: &[Code],
 ) -> Option<Code> {
-    classify_fallback_trigger_v1(cause).filter(|code| triggers.contains(code))
+    classify_fallback_trigger_v1(cause)
+        .filter(|code| triggers.contains(code))
 }
 
 #[cfg(test)]
