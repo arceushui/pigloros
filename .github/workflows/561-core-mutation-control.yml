@@ -127,7 +127,16 @@ jobs:
           pattern = "^(?:" + "|".join(
               "".join("\\" + c if c in special else c for c in name) for name in expected
           ) + ")$"
-          mutants = ["cargo", "mutants", "--package=pos-core", "--all-features", "--re", pattern]
+          # v27.1 can collect unrelated struct-field mutants without applying --re.
+          # Bound discovery to the four expected source files; keep the exact
+          # eleven-name and full-outcome checks below unchanged and fail closed.
+          file_args = [
+              arg for path in sorted({name.split(":", 1)[0] for name in expected})
+              for arg in ("--file", path)
+          ]
+          assert len(file_args) == 8
+          mutants = ["cargo", "mutants", "--package=pos-core", "--all-features",
+                     *file_args, "--re", pattern]
           # Keep JSON stdout separate from time/tool diagnostics so it remains parseable.
           with (artifact / "selected.json").open("wb") as output, (artifact / "selection.log").open("wb") as errors:
               subprocess.run(
