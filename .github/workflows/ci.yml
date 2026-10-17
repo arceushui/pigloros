@@ -899,7 +899,8 @@ jobs:
 
   # ASan compilation took most of each ASan shard's time, so it runs once as a
   # standard-stage job. Crates compile in parallel while scripts/asan/
-  # serial-link.sh admits one link at a time. The archive holds every
+  # serial-link.sh admits one link at a time; the build fails unless the
+  # wrapper's lock file exists afterwards. The archive holds every
   # workspace test binary; the shards below still run last and only execute
   # tests from it.
   asan-build:
@@ -942,6 +943,7 @@ jobs:
             cargo +nightly-2026-07-01 nextest archive --workspace --all-features \
             --locked -Z build-std --target x86_64-unknown-linux-gnu --tests \
             --archive-file "${RUNNER_TEMP}/asan-tests.tar.zst"
+          test -f "${RUNNER_TEMP}/asan-link.lock"
       - name: Upload ASan test archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

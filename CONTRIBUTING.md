@@ -280,10 +280,10 @@ flowchart TD
 ```
 
 ASan tests remain final. Their instrumented build is one of the eight
-normal-stage jobs. It compiles crates four at a time while
-`scripts/asan/serial-link.sh` admits one link at a time: `asan-build` compiles every workspace test target once
-with `cargo nextest archive` and uploads the archive, and `standard-gate` and
-`asan-gate` both require it. Each shard downloads the archive and runs its
+normal-stage jobs: `asan-build` compiles every workspace test target once with
+`cargo nextest archive` and uploads the archive, and `standard-gate` and
+`asan-gate` both require it. It compiles crates four at a time while
+`scripts/asan/serial-link.sh` admits one link at a time. Each shard downloads the archive and runs its
 tests without compiling. The archive is extracted into the workspace, so
 `target/` sits at the path compiled into `CARGO_BIN_EXE_*`.
 

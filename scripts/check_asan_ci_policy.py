@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import os
 import pathlib
+import stat
 import sys
 
 import yaml
@@ -82,6 +82,7 @@ RUSTFLAGS="-Z sanitizer=address" \\
   cargo +nightly-2026-07-01 nextest archive --workspace --all-features \\
   --locked -Z build-std --target x86_64-unknown-linux-gnu --tests \\
   --archive-file "${RUNNER_TEMP}/asan-tests.tar.zst"
+test -f "${RUNNER_TEMP}/asan-link.lock"
 """
 EXPECTED_BUILD_ENV = {
     "RUSTC_BOOTSTRAP": "1",
@@ -293,7 +294,7 @@ def check_serial_linker(linker_path: pathlib.Path) -> None:
         "ASan linker wrapper must serialize every link through one lock",
     )
     require(
-        os.access(linker_path, os.X_OK),
+        stat.S_IMODE(linker_path.stat().st_mode) & 0o111 == 0o111,
         "ASan linker wrapper must be executable",
     )
 
