@@ -151,12 +151,19 @@ fn implementation(
 fn composition_with(primary: &Facts) -> Result<RequiredPluginCompositionV1, Box<dyn Error>> {
     let other = other_required()?;
     let primary_required = required_plugin_v1(primary.registry.plugin_id, &primary.pin)?;
-    Ok(RequiredPluginCompositionV1::try_new(LOCAL, vec![primary_required, other])?)
+    Ok(RequiredPluginCompositionV1::try_new(
+        LOCAL,
+        vec![primary_required, other],
+    )?)
 }
 
 fn other_required() -> Result<RequiredPluginV1, Box<dyn Error>> {
     let other_pin = community_pin_v1(Hash::from_bytes([3; 32]), vec!["other".to_owned()])?;
-    Ok(RequiredPluginV1::try_new(PluginId::new(), "1.0.0", other_pin)?)
+    Ok(RequiredPluginV1::try_new(
+        PluginId::new(),
+        "1.0.0",
+        other_pin,
+    )?)
 }
 
 impl Fixture {
