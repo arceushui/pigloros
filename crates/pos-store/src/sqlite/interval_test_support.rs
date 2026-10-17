@@ -31,20 +31,19 @@ impl SqliteStore {
         } else {
             IntervalConnectionV1::Writer
         };
-        let reader_observer = Arc::clone(&observer);
-        self.conn
-            .authorizer(Some(move |context: AuthContext<'_>| {
-                authorize(context, reader_kind, reader_observer.as_ref())
-            }))
-            .map_err(observer_error)?;
-        if let Some(writer) = &self.writer_reservation_connection {
-            writer
-                .authorizer(Some(move |context: AuthContext<'_>| {
-                    authorize(context, IntervalConnectionV1::Writer, observer.as_ref())
+        std::iter::once((&self.conn, reader_kind))
+            .chain(
+                self.writer_reservation_connection
+                    .as_ref()
+                    .map(|writer| (writer, IntervalConnectionV1::Writer)),
+            )
+            .try_for_each(|(connection, kind)| {
+                let observer = Arc::clone(&observer);
+                connection.authorizer(Some(move |context: AuthContext<'_>| {
+                    authorize(context, kind, observer.as_ref())
                 }))
-                .map_err(observer_error)?;
-        }
-        Ok(())
+            })
+            .map_err(observer_error)
     }
 
     /// Make a competing test writer report an existing reservation immediately.
