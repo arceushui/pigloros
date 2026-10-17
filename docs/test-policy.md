@@ -163,13 +163,12 @@ targets, and execution scope remain.
 `scripts/check_asan_ci_policy.py` enforces the exact archive-build job and
 serial linker wrapper, shard matrix and filtersets, test-thread cap,
 fail-closed aggregate, and complete ASan scope by parsing the workflow's
-executable YAML semantics. Adversarial
-fixtures prove that disabled/non-failing steps, environment-based test runners,
-detached sanitizer flags, `--no-run`, shell success overrides, skipped
-prerequisites, injected setup steps, and test-skip arguments are rejected. The
-ASan job graph and pinned setup-step sequence must match exactly, and each test
-step may contain only `name`, `env`, and `run` so it cannot select a nested
-Cargo configuration.
+executable YAML semantics. Adversarial fixtures prove that disabled/non-failing
+steps, environment-based test runners, detached sanitizer flags, `--no-run`,
+shell success overrides, skipped prerequisites, injected setup steps, and
+test-skip arguments are rejected. The ASan job graph and pinned setup-step
+sequence must match exactly, and each test step may contain only `name`, `env`,
+and `run` so it cannot select a nested Cargo configuration.
 
 ### Controlled Bevy reflection metadata roots
 
