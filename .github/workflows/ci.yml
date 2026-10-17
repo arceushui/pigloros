@@ -1335,6 +1335,10 @@ jobs:
         run: |
           python scripts/check_plugin_trust_registry_impls.py
           python scripts/test_check_plugin_trust_registry_impls.py
+      - name: Check composition fallback registry confinement policy
+        run: |
+          python scripts/check_composition_fallback_registry_impls.py
+          python scripts/test_check_composition_fallback_registry_impls.py
       - name: Check fixture evaluation instant and admission host confinement policy
         run: |
           python scripts/check_fixture_instant_confinement.py
