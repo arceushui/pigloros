@@ -1,9 +1,9 @@
-# Unmutated owning-package control, not a replacement or relaxed mutation gate.
-name: 561-store-individual-test-times
+# One-axis SQL-program reuse experiment; every failure remains a failure.
+name: 561-store-sql-cache-control
 
 on:
   push:
-    branches: [redmine/561-store-test-hotspots]
+    branches: [redmine/561-store-sql-cache-control]
 
 permissions:
   contents: read
@@ -16,14 +16,15 @@ env:
 
 jobs:
   store-control:
-    name: full Store tests with individual timing and unchanged validation
+    name: full Store SQL-program reuse comparison with unchanged validation
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
-          ref: 0c6d537d11b1bf43614dd980bb30f49e60a7912f
+          ref: 43918b95c34b67b88466d1b1caeaef9baf96c355
+          fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         timeout-minutes: 5
@@ -40,7 +41,7 @@ jobs:
           PROBE_WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 0c6d537d11b1bf43614dd980bb30f49e60a7912f
+          test "$(git rev-parse HEAD)" = 43918b95c34b67b88466d1b1caeaef9baf96c355
           test -z "$(git status --porcelain --untracked-files=no)"
           mkdir -p artifacts/store-control
           {
@@ -54,50 +55,106 @@ jobs:
             free -m
             df -h .
           } > artifacts/store-control/environment.txt
-      - name: Build all owning-package targets before timing tests
-        timeout-minutes: 11
+      - name: Compare the full Store source snapshots in fixed ABBA order
+        # The job remains bounded. Partial measurements are not acceptance.
+        timeout-minutes: 17
         env:
-          # As in the full baseline, three build jobs shorten cold setup.
-          # This setup timing is not compared with single-job mutant builds.
-          CARGO_BUILD_JOBS: "3"
-          CARGO_INCREMENTAL: "1"
-        run: |
-          set -euo pipefail
-          timeout --kill-after=5s 600s cargo test --no-run --verbose \
-            --package=pos-store@0.1.0 --all-features --locked \
-            2>&1 | tee artifacts/store-control/build.log
-      - name: Report individual test durations under the unchanged Test-phase budget
-        timeout-minutes: 3
-        env:
-          # Override setup/cache exports at the actual native consumer.
           CARGO_INCREMENTAL: "1"
         run: |
           set -euo pipefail
           test -x /usr/bin/time
-          date --utc --iso-8601=seconds > artifacts/store-control/test-start.txt
-          set +e
-          timeout --kill-after=5s 120s /usr/bin/time -v \
-            cargo test --verbose --package=pos-store@0.1.0 --all-features --locked -- \
-            -Zunstable-options --fail-fast --include-ignored --test-threads=2 --report-time \
-            2>&1 | tee artifacts/store-control/test.log
-          pipeline_status=("${PIPESTATUS[@]}")
-          set -e
-          printf '%s\n' "${pipeline_status[@]}" > artifacts/store-control/test-status.txt
-          date --utc --iso-8601=seconds > artifacts/store-control/test-end.txt
-          if [[ "${pipeline_status[0]}" -ne 0 ]]; then
-            exit "${pipeline_status[0]}"
-          fi
-          if [[ "${pipeline_status[1]}" -ne 0 ]]; then
-            exit "${pipeline_status[1]}"
-          fi
-          bash scripts/assert-no-ignored-in-test-summary.sh artifacts/store-control/test.log
-          git diff --exit-code HEAD
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import time
+
+          artifact = Path("artifacts/store-control")
+          report = {
+              "baseline": "43918b95c34b67b88466d1b1caeaef9baf96c355",
+              "candidate": "6ce1e2a50668639392e7d6a874da5239c787f893",
+              "order": ["baseline", "candidate", "candidate", "baseline"],
+              "cases": [],
+          }
+          report_path = artifact / "sql-program-reuse.json"
+          changed = subprocess.check_output(
+              ["git", "diff", "--name-only", report["baseline"], report["candidate"]],
+              text=True,
+          ).splitlines()
+          assert changed == ["crates/pos-store/src/sqlite/fork_replay_row.rs"]
+          first_failure = 0
+          for index, label in enumerate(report["order"]):
+              source = report[label]
+              subprocess.run(["git", "switch", "--detach", source], check=True)
+              assert subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() == source
+              assert subprocess.check_output(
+                  ["git", "status", "--porcelain", "--untracked-files=no"],
+              ) == b""
+              case = {"index": index, "label": label, "source": source}
+              report["cases"].append(case)
+              base = [
+                  "cargo", "test", "--verbose", "--package=pos-store@0.1.0",
+                  "--all-features", "--locked",
+              ]
+              for phase, command, deadline in (
+                  ("build", [*base, "--no-run"], 600),
+                  ("test", [*base, "--", "-Zunstable-options", "--fail-fast",
+                            "--include-ignored", "--test-threads=2", "--report-time"], 120),
+              ):
+                  environment = dict(os.environ)
+                  environment["CARGO_BUILD_JOBS"] = "3" if phase == "build" else "1"
+                  assert environment["CARGO_INCREMENTAL"] == "1"
+                  log_path = artifact / f"{index}-{label}-{phase}.log"
+                  timed = ["timeout", "--kill-after=5s", f"{deadline}s",
+                           "/usr/bin/time", "-v", *command]
+                  case[phase] = {
+                      "command": timed,
+                      "compiler_jobs": environment["CARGO_BUILD_JOBS"],
+                      "start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                  }
+                  report_path.write_text(json.dumps(report, sort_keys=True, indent=2))
+                  started = time.monotonic()
+                  with log_path.open("wb") as log:
+                      status = subprocess.run(
+                          timed, env=environment, stdout=log,
+                          stderr=subprocess.STDOUT, check=False,
+                      ).returncode
+                  case[phase].update(
+                      exit_code=status, seconds=time.monotonic() - started,
+                      end_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                  )
+                  report_path.write_text(json.dumps(report, sort_keys=True, indent=2))
+                  if status != 0:
+                      if first_failure == 0:
+                          first_failure = status if status > 0 else 1
+                      if phase == "build":
+                          sys.exit(first_failure)
+                  elif phase == "test":
+                      with (artifact / f"{index}-summary-validation.log").open("wb") as log:
+                          summary_status = subprocess.run(
+                              ["bash", "scripts/assert-no-ignored-in-test-summary.sh",
+                               str(log_path)], stdout=log, stderr=subprocess.STDOUT,
+                              check=False,
+                          ).returncode
+                      case["summary_status"] = summary_status
+                      report_path.write_text(json.dumps(report, sort_keys=True, indent=2))
+                      if summary_status != 0 and first_failure == 0:
+                          first_failure = summary_status
+              subprocess.run(["git", "diff", "--exit-code", "HEAD"], check=True)
+          assert len(report["cases"]) == 4
+          report["overall_exit_code"] = first_failure
+          report_path.write_text(json.dumps(report, sort_keys=True, indent=2))
+          print(json.dumps(report, sort_keys=True))
+          sys.exit(first_failure)
+          PY
       - name: Preserve every control result, including failure
         if: ${{ always() }}
         timeout-minutes: 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: untrusted-561-store-test-times-${{ github.run_id }}-${{ github.run_attempt }}
+          name: untrusted-561-store-sql-cache-control-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/store-control/
           if-no-files-found: error
           retention-days: 14
