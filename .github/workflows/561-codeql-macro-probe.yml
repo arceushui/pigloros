@@ -195,12 +195,18 @@ jobs:
           bodies = rows("bodies.csv")
           names = {row[0] for row in bodies}
           candidate = {"forwarded_lexical_value", "forwarded_module_value"}
-          reproduced = []
+          expected_warnings = {}
           for case, macro in (("export", "crate::forward_export"), ("include", "forward_include")):
-              if f"forwarded_{case}_value" not in names and any(
-                  row[0] == f"macro expansion failed for '{macro}'"
-                  and f"/{case}/src/lib.rs" in row[1] for row in warnings
-              ):
+              message = f"macro expansion failed for '{macro}'"
+              source = (Path(".561-codeql-macro-probe") / case / "src/lib.rs").resolve()
+              expected_warnings[(message, f"Extraction warning in {source} with message {message}")] = case
+          reproduced = []
+          unexpected_warnings = []
+          for row in warnings:
+              case = expected_warnings.get(tuple(row[:2])) if len(row) == 3 else None
+              if case is None or f"forwarded_{case}_value" in names:
+                  unexpected_warnings.append(row)
+              else:
                   reproduced.append(case)
           sarif_files = list((root / "sarif").glob("*.sarif"))
           assert sarif_files, "missing probe SARIF"
@@ -212,13 +218,14 @@ jobs:
                   alerts.extend(run.get("results", []))
           print(json.dumps({
               "errors": errors, "warnings": warnings, "bodies": bodies,
-              "reproduced_families": reproduced, "alerts": alerts,
+              "reproduced_families": reproduced, "unexpected_warnings": unexpected_warnings,
+              "alerts": alerts,
           }))
           assert not errors, "probe extraction errors remain"
           assert not alerts, "unexpected probe security alerts"
           assert candidate <= names, "candidate method bodies were not extracted"
           assert reproduced, "minimal probe did not reproduce the original gap"
-          assert all("/lexical/" not in row[1] and "/module/" not in row[1] for row in warnings)
+          assert not unexpected_warnings, "warnings outside reproduced original controls remain"
           # This is causal evidence only. The full strict diagnostic stays failed;
           # neither its assertions nor the feature branch are modified here.
           PY
