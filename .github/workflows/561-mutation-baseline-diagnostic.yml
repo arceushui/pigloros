@@ -11,8 +11,9 @@ permissions:
 
 env:
   RUSTUP_TOOLCHAIN: nightly-2026-08-28
-  # Compare compiler memory with c927: debug metadata is the only build change.
+  # Compare with 1633: keep debug metadata fixed and bound compiler concurrency.
   CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_BUILD_JOBS: "1"
 
 jobs:
   baseline:
@@ -30,7 +31,7 @@ jobs:
         timeout-minutes: 5
         with:
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
-      # Deliberately cold, as in c927; retain its job count and test selection.
+      # Deliberately cold; retain the frozen source and complete test selection.
       - name: Record exact source, toolchain and runner
         timeout-minutes: 1
         env:
@@ -41,6 +42,47 @@ jobs:
           git rev-parse HEAD | tee artifacts/source-sha.txt
           test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
           test -z "$(git status --porcelain --untracked-files=no)"
+          observer_tools="$(mktemp -d "${RUNNER_TEMP}/561-rustc-observer.XXXXXX")"
+          compiler_wrapper="${observer_tools}/rustc-observer"
+          # Bind sampled rustc PIDs to crate names without logging other
+          # arguments or environment values. exec preserves the compiler PID.
+          cat > "$compiler_wrapper" <<'WRAPPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ "$#" -eq 0 ]]; then
+            echo 'ERROR: missing compiler executable' >&2
+            exit 2
+          fi
+          compiler_program="$1"
+          shift
+          compiler_arguments=("$@")
+          compiler_crate=probe
+          compiler_test=false
+          for ((compiler_index=0; compiler_index<${#compiler_arguments[@]}; compiler_index++)); do
+            case "${compiler_arguments[compiler_index]}" in
+              --crate-name)
+                compiler_index=$((compiler_index + 1))
+                if [[ "$compiler_index" -ge "${#compiler_arguments[@]}" ]]; then
+                  echo 'ERROR: missing compiler crate name' >&2
+                  exit 2
+                fi
+                compiler_crate="${compiler_arguments[compiler_index]}"
+                ;;
+              --crate-name=*) compiler_crate="${compiler_arguments[compiler_index]#--crate-name=}" ;;
+              --test) compiler_test=true ;;
+            esac
+          done
+          if [[ ! "$compiler_crate" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo 'ERROR: invalid compiler crate identity' >&2
+            exit 2
+          fi
+          printf 'COMPILER_START pid=%s crate=%s test=%s\n' \
+            "$$" "$compiler_crate" "$compiler_test" >&2
+          exec "$compiler_program" "${compiler_arguments[@]}"
+          WRAPPER
+          chmod 700 "$compiler_wrapper"
+          printf 'RUSTC_WRAPPER=%s\n' "$compiler_wrapper" >> "$GITHUB_ENV"
+          sha256sum "$compiler_wrapper" | tee artifacts/rustc-observer-sha256.txt
           {
             rustc -Vv
             cargo --version
@@ -49,7 +91,8 @@ jobs:
             free -m
             df -h .
             printf 'image=%s version=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
-            printf 'rustup_toolchain=%s test_debug=%s\n' "$RUSTUP_TOOLCHAIN" "$CARGO_PROFILE_TEST_DEBUG"
+            printf 'rustup_toolchain=%s test_debug=%s build_jobs=%s\n' \
+              "$RUSTUP_TOOLCHAIN" "$CARGO_PROFILE_TEST_DEBUG" "$CARGO_BUILD_JOBS"
           } | tee artifacts/environment.txt
       - name: Validate resource-observer availability
         timeout-minutes: 1
@@ -84,6 +127,8 @@ jobs:
           command -v df
           command -v timeout
           test -x /usr/bin/time
+          test -x "$RUSTC_WRAPPER"
+          sha256sum --check --strict artifacts/rustc-observer-sha256.txt
       - name: Run the complete unmutated nightly harness with a log-preserving deadline
         timeout-minutes: 30
         run: |
@@ -93,7 +138,8 @@ jobs:
           current_cgroup="$(awk -F: '$1 == "0" && $2 == "" { print $3 }' /proc/self/cgroup)"
           test "$observer_cgroup" = "/sys/fs/cgroup${current_cgroup%/}"
           # Emit directly into the job log: runner death can skip artifact upload.
-          # Only process names, not arguments or environment values, are sampled.
+          # Only process names are sampled. The wrapper above separately emits
+          # whitelisted crate identities, never other arguments or environments.
           (
             while true; do
               printf '\nRESOURCE_SAMPLE '
