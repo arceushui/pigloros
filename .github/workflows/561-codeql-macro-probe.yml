@@ -41,8 +41,14 @@ jobs:
           artifact = Path("artifacts/macro-probe")
           cases = ("export", "lexical", "include", "module")
           sources = {
-              "Cargo.toml": '[workspace]\nresolver = "2"\nmembers = '
+              # Match the real shared helper's owning package, not a virtual
+              # workspace in which neither definition is a source module.
+              "Cargo.toml": '[package]\nname = "probe-definition-owner"\n'
+              'version = "0.0.0"\nedition = "2021"\n\n'
+              '[workspace]\nresolver = "2"\nmembers = '
               + json.dumps(list(cases)) + "\n",
+              "src/lib.rs": '#[path = "../shared/export.rs"]\npub mod exported;\n'
+              '#[path = "../shared/lexical.rs"]\npub mod lexical;\n',
           }
           for case in cases:
               sources[f"{case}/Cargo.toml"] = (
@@ -126,6 +132,24 @@ jobs:
           source-root: .561-codeql-macro-probe
           tools: https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.2/codeql-bundle-linux64.tar.zst
           db-location: ${{ runner.temp }}/561-macro-probe-databases
+      - name: Extract and finalize from the actual fixture working directory
+        timeout-minutes: 5
+        working-directory: .561-codeql-macro-probe
+        env:
+          CODEQL: ${{ steps.codeql.outputs.codeql-path }}
+          CODEQL_VERSION: ${{ steps.codeql.outputs.codeql-version }}
+        run: |
+          set -euo pipefail
+          test "$CODEQL_VERSION" = 2.27.2
+          test "$PWD" = "${GITHUB_WORKSPACE}/.561-codeql-macro-probe"
+          database="${RUNNER_TEMP}/561-macro-probe-databases/rust"
+          # The pinned Rust autobuilder indexes '.', independently of source-root.
+          # A finalized database prevents the action from extracting again at
+          # repository root; the unchanged action still runs every default query.
+          {
+            "$CODEQL" database trace-command --use-build-mode --working-dir "$PWD" "$database"
+            "$CODEQL" database finalize --finalize-dataset --threads=2 "$database"
+          } 2>&1 | tee ../artifacts/macro-probe/extraction.log
       - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         timeout-minutes: 10
         with:
@@ -173,12 +197,20 @@ jobs:
           '''
           (root / "bodies.ql").write_text(query)
           Path("artifacts/macro-probe/bodies.ql").write_text(query)
+          inventory_query = '''import rust
+          from ExtractedFile file
+          select file.getAbsolutePath()
+          '''
+          (root / "files.ql").write_text(inventory_query)
+          Path("artifacts/macro-probe/files.ql").write_text(inventory_query)
           PY
-          "$CODEQL" query run --database "$database" --warnings=error \
-            --additional-packs "$(dirname "${rust_packs[0]}")" \
-            --output artifacts/macro-probe/bodies.bqrs "$query_root/bodies.ql"
-          "$CODEQL" bqrs decode --format=csv artifacts/macro-probe/bodies.bqrs \
-            --output artifacts/macro-probe/bodies.csv
+          for query in bodies files; do
+            "$CODEQL" query run --database "$database" --warnings=error \
+              --additional-packs "$(dirname "${rust_packs[0]}")" \
+              --output "artifacts/macro-probe/$query.bqrs" "$query_root/$query.ql"
+            "$CODEQL" bqrs decode --format=csv "artifacts/macro-probe/$query.bqrs" \
+              --output "artifacts/macro-probe/$query.csv"
+          done
           python3 - <<'PY'
           import csv
           import json
@@ -193,6 +225,14 @@ jobs:
           errors = rows("ExtractionErrors.csv")
           warnings = rows("ExtractionWarnings.csv")
           bodies = rows("bodies.csv")
+          files = rows("files.csv")
+          manifest = json.loads((root / "input-manifest.json").read_text())
+          fixture_root = Path(".561-codeql-macro-probe").resolve()
+          expected_files = {
+              str(fixture_root / entry["path"])
+              for entry in manifest["fixtures"] if entry["path"].endswith(".rs")
+          }
+          actual_files = {row[0] for row in files if len(row) == 1}
           names = {row[0] for row in bodies}
           candidate = {"forwarded_lexical_value", "forwarded_module_value"}
           expected_warnings = {}
@@ -218,11 +258,13 @@ jobs:
                   alerts.extend(run.get("results", []))
           print(json.dumps({
               "errors": errors, "warnings": warnings, "bodies": bodies,
+              "extracted_files": files, "expected_files": sorted(expected_files),
               "reproduced_families": reproduced, "unexpected_warnings": unexpected_warnings,
               "alerts": alerts,
           }))
           assert not errors, "probe extraction errors remain"
           assert not alerts, "unexpected probe security alerts"
+          assert len(expected_files) == 9 and actual_files == expected_files and len(files) == len(expected_files), "fixture source boundary mismatch"
           assert candidate <= names, "candidate method bodies were not extracted"
           assert reproduced, "minimal probe did not reproduce the original gap"
           assert not unexpected_warnings, "warnings outside reproduced original controls remain"
