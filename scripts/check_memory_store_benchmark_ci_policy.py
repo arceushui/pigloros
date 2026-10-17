@@ -125,7 +125,10 @@ TOOLCHAIN_STEP = {
 }
 RUST_CACHE_STEP = {
     "uses": RUST_CACHE_ACTION,
-    "with": {"shared-key": "memory-store-benchmark"},
+    "with": {
+        "shared-key": "memory-store-benchmark",
+        "save-if": "${{ github.ref == 'refs/heads/main' }}",
+    },
 }
 METADATA_STEP = {"name": METADATA_STEP_NAME, "run": METADATA_COMMAND}
 MEASUREMENT_STEP = {"name": MEASUREMENT_STEP_NAME, "run": MEASUREMENT_COMMAND}

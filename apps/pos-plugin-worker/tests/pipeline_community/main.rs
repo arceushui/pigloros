@@ -4,7 +4,9 @@
 //! that proves ADR-021 decision 7 across the two accepted isolation classes: an
 //! operator-trusted native Driver and a governed community Driver that runs a real Component in
 //! the real `pos-plugin-worker`. The cases run here because only this package's tests can launch
-//! the worker binary. They run on `MemoryStore`, the only store of the community pass world.
+//! the worker binary. Every case runs and records its captures on both stores of the community
+//! pass world, `MemoryStore` and in-memory `SQLite` (#638); the trust registry stays on
+//! `MemoryStore`.
 //!
 //! The runner reuses the fail-closed harness of the first-party profile `PPC1`
 //! (`apps/piglor-gateway/tests/pipeline_conformance/harness.rs`) unchanged: an unknown magic,
@@ -44,10 +46,10 @@ const COMMUNITY_VERSION: u64 = 1;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/community/v1/manifest.json");
-const MANIFEST_SHA256: &str = "7c7cdef61b19e9a90ef71565cb83ab02fbe77a10b803391b3cbbf51841a134d8";
+const MANIFEST_SHA256: &str = "b907f1b9134d141697095581a50f7be3d0cc1ddb0782adc7dd3f492aa6c6f2a1";
 
 /// Every runner of profile version 1, by case identifier.
-const RUNNERS: [(&str, Runner); 12] = [
+const RUNNERS: [(&str, Runner); 15] = [
     ("PCF-CPH-001", parity::single_pass_parity),
     ("PCF-CPH-002", parity::mixed_registry_order),
     ("PCF-CPH-003", authority::foreign_proposal_parity),
@@ -60,6 +62,9 @@ const RUNNERS: [(&str, Runner); 12] = [
     ("PCF-CPH-010", budget::over_budget_parity),
     ("PCF-CPH-011", replay::replay_parity),
     ("PCF-CPH-012", replay::lost_acknowledgement_recovery),
+    ("PCF-CPH-013", authority::reserved_proposal_parity),
+    ("PCF-CPH-014", fail_closed::invalid_output_and_releases),
+    ("PCF-CPH-015", budget::other_limits_parity),
 ];
 
 /// Parse a `PCH1` manifest under the harness rules of `PPC1`.
@@ -81,13 +86,13 @@ fn load_community_manifest(bytes: &[u8]) -> Result<Manifest, ConformanceError> {
     load_manifest(&shared)
 }
 
-/// Whether `case` is mandatory and runs on the community pass world's store.
-fn mandatory_on_memory(case: &Case) -> bool {
-    case.mandatory && case.stores == ["memory"]
+/// Whether `case` is mandatory and runs on both stores of the community pass world.
+fn mandatory_on_both_stores(case: &Case) -> bool {
+    case.mandatory && case.stores == ["memory", "sqlite"]
 }
 
-/// Every mandatory case of `PCH1` version 1 passes on the real worker. The exclusions record
-/// what the profile does not prove yet, with the subtask that owns it.
+/// Every mandatory case of `PCH1` version 1 passes on the real worker. The profile records no
+/// exclusion: nothing it names is left unproven.
 #[test]
 fn pch1_every_mandatory_case_passes_on_the_real_worker() {
     verify_pinned(MANIFEST, MANIFEST_SHA256).test_ok();
@@ -100,8 +105,8 @@ fn pch1_every_mandatory_case_passes_on_the_real_worker() {
     assert_eq!(manifest.suite, "pigloros.pipeline-community-host");
     assert_eq!(report.passed.len(), RUNNERS.len());
     assert_eq!(manifest.cases.len(), RUNNERS.len());
-    assert!(manifest.cases.iter().all(mandatory_on_memory));
-    assert_eq!(manifest.exclusions.len(), 4);
+    assert!(manifest.cases.iter().all(mandatory_on_both_stores));
+    assert!(manifest.exclusions.is_empty());
 }
 
 // ── Fail-closed harness behaviour ───────────────────────────────────────────

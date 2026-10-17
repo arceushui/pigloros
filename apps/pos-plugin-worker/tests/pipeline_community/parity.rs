@@ -13,8 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
 
 use pos_core::{Event, ScheduledObservationProfileV1};
-use pos_plugin_publisher::test_support::{world::World as SignedWorld, BoxResult};
-use pos_plugin_supervisor::pass_harness::World as PassWorld;
+use pos_plugin_publisher::test_support::{release::Shape, world::World as SignedWorld, BoxResult};
+use pos_plugin_supervisor::pass_harness::{StoreKind, World as PassWorld};
 use pos_runtime::community_plugin_host::{
     CommunityPassOutcomeV1, CommunityPluginModeV1 as Mode, PassResultV1,
 };
@@ -22,17 +22,49 @@ use pos_runtime::{PluginRegistry, ScheduledDriverBindingV1};
 
 use crate::first_party::{entity_of, register_twin};
 use crate::harness::{Capture, PROFILE_KEY};
-use crate::support::lane::{publish, Lane, Published, ALPHA, EVENT_TYPE};
+use crate::support::lane::{publish, publish_shape, Lane, Published, Spec, ALPHA, EVENT_TYPE};
 use crate::support::subcase::WORKER;
 use crate::support::test_ok::TestOk;
 
-/// The only store of the community pass world.
-pub const STORE: &str = "memory";
 /// The entity of the community fixture's Event: the first member's invocation ID, sixteen bytes
 /// of 1, as ULID text. The twin emits for the same entity.
 pub const ENTITY: &str = "01040G2081040G2081040G2081";
 /// The Event type the first-party twin owns beside the community Plugin in a mixed registry.
 pub const TWIN_TYPE: &str = "parity.first-party";
+
+/// The captures of one case on one store of the community pass world.
+pub struct StoreCapture<'a> {
+    capture: &'a mut Capture,
+    store: &'static str,
+}
+
+impl StoreCapture<'_> {
+    /// Record one observation of the case under this store.
+    pub fn record(&mut self, key: &str, value: impl std::fmt::Display) {
+        self.capture.record(self.store, key, value);
+    }
+}
+
+/// One case body on the community pass world's store of the given kind.
+pub type CaseOn = fn(StoreKind, &mut StoreCapture<'_>) -> BoxResult<()>;
+
+/// Run `case` once on each store kind and record its captures under that store's tag.
+///
+/// Every case of the profile lists both stores, and each run builds its own signed and pass
+/// worlds. The trust registry stays on `MemoryStore`. A case whose values no store affects
+/// records the same values for each store kind.
+#[must_use]
+pub fn on_every_store(case: CaseOn) -> Capture {
+    let mut capture = Capture::default();
+    for kind in StoreKind::ALL {
+        let mut scoped = StoreCapture {
+            capture: &mut capture,
+            store: kind.tag(),
+        };
+        case(kind, &mut scoped).test_ok();
+    }
+    capture
+}
 
 /// What one pass shows of its authority outcome, the owner's isolation class aside.
 #[derive(Debug, PartialEq, Eq)]
@@ -76,6 +108,49 @@ impl Observed {
     pub fn first_available(&self) -> bool {
         self.authority.availability.split(',').next() == Some("Available")
     }
+
+    /// Whether every registered Plugin is available after the pass: none is quarantined.
+    #[must_use]
+    pub fn all_available(&self) -> bool {
+        let mut states = self.authority.availability.split(',');
+        states.all(|state| state == "Available")
+    }
+}
+
+/// Whether a failed pass discarded the whole pass: it failed with the typed `refusal`, committed
+/// nothing, and its Plugins' availability satisfies `available`.
+///
+/// A case that quarantines the failing Plugin checks that the sibling stays available, with
+/// [`Observed::first_available`]; a case that quarantines nothing checks every Plugin, with
+/// [`Observed::all_available`].
+#[must_use]
+pub fn discarded_whole(
+    observed: &Observed,
+    refusal: &str,
+    available: fn(&Observed) -> bool,
+) -> bool {
+    observed.result() == "Failed"
+        && observed.committed() == 0
+        && available(observed)
+        && refusal != "none"
+}
+
+/// Publish the 2.0.0 successor of `first` as a release of `spec` and install it as the active
+/// release.
+///
+/// # Errors
+/// Returns the signed world's publication or installation error.
+pub fn publish_successor(
+    signed: &mut SignedWorld,
+    first: &Published,
+    spec: Spec,
+) -> BoxResult<Published> {
+    let shape = Shape {
+        version: "2.0.0",
+        previous: Some(first.release),
+        ..spec.shape()
+    };
+    publish_shape(signed, spec, shape, 2)
 }
 
 const fn result_name(result: &PassResultV1) -> &'static str {
@@ -211,10 +286,10 @@ pub fn observe(lane: &Lane, outcome: &CommunityPassOutcomeV1, steps: String) -> 
 }
 
 /// Record what `observed` shows under `path`.
-pub fn record(capture: &mut Capture, path: &str, observed: &Observed) {
+pub fn record(capture: &mut StoreCapture<'_>, path: &str, observed: &Observed) {
     let authority = &observed.authority;
     let mut put = |key: &str, value: &dyn std::fmt::Display| {
-        capture.record(STORE, &format!("{path}.{key}"), value);
+        capture.record(&format!("{path}.{key}"), value);
     };
     put("result", &authority.result);
     put("timeline", &authority.timeline);
@@ -224,12 +299,13 @@ pub fn record(capture: &mut Capture, path: &str, observed: &Observed) {
     put("availability", &authority.availability);
     put("owner", &observed.owners.join(","));
     put("follows-host-schedule", &observed.follows_schedule);
-    capture.record(STORE, PROFILE_KEY, &authority.profile);
+    capture.record(PROFILE_KEY, &authority.profile);
 }
 
-/// The Local pass of a lane over the first-party twin alone, owning the fixture's Event type.
-fn first_party_pass(signed: &SignedWorld) -> BoxResult<Observed> {
-    let mut pass = PassWorld::new(WORKER);
+/// The Local pass of a lane on a `kind` store over the first-party twin alone, owning the
+/// fixture's Event type.
+fn first_party_pass(signed: &SignedWorld, kind: StoreKind) -> BoxResult<Observed> {
+    let mut pass = PassWorld::on(kind, WORKER);
     let steps = register_twin(&mut pass.registry, EVENT_TYPE, entity_of(ENTITY)?)?;
     let mut lane = Lane::over(signed, &[], Mode::Local, pass)?;
     let outcome = lane.run(signed)?;
@@ -237,9 +313,14 @@ fn first_party_pass(signed: &SignedWorld) -> BoxResult<Observed> {
     Ok(observe(&lane, &outcome, steps))
 }
 
-/// The pass of a lane in `mode` over the community release `entries` alone.
-fn community_pass(signed: &SignedWorld, entries: &[Published], mode: Mode) -> BoxResult<Observed> {
-    let mut lane = Lane::new(signed, entries, mode)?;
+/// The pass of a lane on a `kind` store in `mode` over the community release `entries` alone.
+fn community_pass(
+    signed: &SignedWorld,
+    entries: &[Published],
+    mode: Mode,
+    kind: StoreKind,
+) -> BoxResult<Observed> {
+    let mut lane = Lane::on(kind, signed, entries, mode)?;
     let outcome = lane.run(signed)?;
     let steps = lane.handle().receipts().len().to_string();
     Ok(observe(&lane, &outcome, steps))
@@ -252,27 +333,26 @@ fn community_pass(signed: &SignedWorld, entries: &[Published], mode: Mode) -> Bo
 /// Local and Air-Gapped passes are identical, payload bytes included.
 #[must_use]
 pub fn single_pass_parity() -> Capture {
-    single_pass().test_ok()
+    on_every_store(single_pass)
 }
 
-fn single_pass() -> BoxResult<Capture> {
+fn single_pass(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let alpha = publish(&mut signed, ALPHA, 1)?;
     let entries = std::slice::from_ref(&alpha);
-    let first_party = first_party_pass(&signed)?;
-    let local = community_pass(&signed, entries, Mode::Local)?;
-    let air_gapped = community_pass(&signed, entries, Mode::AirGapped)?;
-    let mut capture = Capture::default();
-    record(&mut capture, "first-party", &first_party);
-    record(&mut capture, "community-local", &local);
-    record(&mut capture, "community-air-gapped", &air_gapped);
+    let first_party = first_party_pass(&signed, kind)?;
+    let local = community_pass(&signed, entries, Mode::Local, kind)?;
+    let air_gapped = community_pass(&signed, entries, Mode::AirGapped, kind)?;
+    record(capture, "first-party", &first_party);
+    record(capture, "community-local", &local);
+    record(capture, "community-air-gapped", &air_gapped);
     let parity = first_party.authority == local.authority;
-    capture.record(STORE, "parity.first-party-equals-community", parity);
+    capture.record("parity.first-party-equals-community", parity);
     let same = local.authority == air_gapped.authority
         && local.owners == air_gapped.owners
         && local.payloads == air_gapped.payloads;
-    capture.record(STORE, "parity.local-equals-air-gapped", same);
-    Ok(capture)
+    capture.record("parity.local-equals-air-gapped", same);
+    Ok(())
 }
 
 /// Which Driver a mixed registry registers first.
@@ -284,18 +364,23 @@ pub enum Order {
     CommunityFirst,
 }
 
-/// The Local pass of one registry holding both the twin and the community release, registered
-/// in `order`.
-fn mixed_pass(signed: &SignedWorld, entries: &[Published], order: Order) -> BoxResult<Observed> {
+/// The Local pass of one registry on a `kind` store holding both the twin and the community
+/// release, registered in `order`.
+fn mixed_pass(
+    signed: &SignedWorld,
+    entries: &[Published],
+    order: Order,
+    kind: StoreKind,
+) -> BoxResult<Observed> {
     let entity = entity_of(ENTITY)?;
     let (mut lane, twin) = match order {
         Order::TwinFirst => {
-            let mut pass = PassWorld::new(WORKER);
+            let mut pass = PassWorld::on(kind, WORKER);
             let twin = register_twin(&mut pass.registry, TWIN_TYPE, entity)?;
             (Lane::over(signed, entries, Mode::Local, pass)?, twin)
         }
         Order::CommunityFirst => {
-            let mut lane = Lane::new(signed, entries, Mode::Local)?;
+            let mut lane = Lane::on(kind, signed, entries, Mode::Local)?;
             let twin = register_twin(&mut lane.pass.registry, TWIN_TYPE, entity)?;
             (lane, twin)
         }
@@ -331,24 +416,23 @@ fn sorted_entities(observed: &Observed) -> Vec<&str> {
 /// and entities are the same in either registration order.
 #[must_use]
 pub fn mixed_registry_order() -> Capture {
-    mixed_registry().test_ok()
+    on_every_store(mixed_registry)
 }
 
-fn mixed_registry() -> BoxResult<Capture> {
+fn mixed_registry(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let alpha = publish(&mut signed, ALPHA, 1)?;
     let entries = std::slice::from_ref(&alpha);
-    let twin_first = mixed_pass(&signed, entries, Order::TwinFirst)?;
-    let community_first = mixed_pass(&signed, entries, Order::CommunityFirst)?;
-    let mut capture = Capture::default();
-    record(&mut capture, "twin-first", &twin_first);
-    record(&mut capture, "community-first", &community_first);
+    let twin_first = mixed_pass(&signed, entries, Order::TwinFirst, kind)?;
+    let community_first = mixed_pass(&signed, entries, Order::CommunityFirst, kind)?;
+    record(capture, "twin-first", &twin_first);
+    record(capture, "community-first", &community_first);
     // The order itself is proven by the pinned per-order timeline strings; this compares what
     // was committed regardless of order: the (type, owner isolation) multiset, the entities and
     // the count.
     let same = sorted(&twin_first) == sorted(&community_first)
         && sorted_entities(&twin_first) == sorted_entities(&community_first)
         && twin_first.committed == community_first.committed;
-    capture.record(STORE, "same-events-either-order", same);
-    Ok(capture)
+    capture.record("same-events-either-order", same);
+    Ok(())
 }

@@ -1,4 +1,5 @@
-//! PCF-CPH-003 and PCF-CPH-004: proposal rejection and single-lineage owner parity (#632).
+//! PCF-CPH-003, PCF-CPH-004 and PCF-CPH-013: proposal rejection and single-lineage owner parity
+//! (#632, #654).
 //!
 //! A Driver that proposes an Event type its own Plugin does not own is refused with the same
 //! typed authority error whether it is an operator-trusted native Driver or a community Driver on
@@ -6,10 +7,10 @@
 //! owning Plugin whichever isolation class claims it first, and a later claim of either class is
 //! refused before the registry changes (ADR-021 decision 7).
 //!
-//! The real community guests emit only `prototype.driven`, so the community Driver proposes a
-//! foreign type by owning another type than the one its guest emits. A community proposal of a
-//! reserved host type would need a new guest Component: the profile records it as an exclusion,
-//! and only the first-party refusal of that proposal is pinned here.
+//! The Rust guest emits only `prototype.driven`, so the community Driver of PCF-CPH-003 proposes
+//! a foreign type by owning another type than the one its guest emits. The community Driver of
+//! PCF-CPH-013 runs the probe guest, which the lane steers with the `reserved` selector to
+//! propose the host's reserved release-activation type itself.
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -17,27 +18,31 @@ use std::time::Duration;
 
 use pos_core::{PluginId, EVENT_TYPE_CONSENT_REVOKED_V1};
 use pos_plugin_publisher::test_support::{world::World as SignedWorld, BoxResult};
-use pos_plugin_supervisor::pass_harness::{initial, Source, World as PassWorld};
+use pos_plugin_supervisor::pass_harness::{initial, Source, StoreKind, World as PassWorld};
 use pos_plugin_supervisor::test_support::{community_pin, DriverPlugin};
 use pos_plugin_supervisor::{
     register_community_driver, CommunityDriverConfigV1, CommunityDriverSettingsV1,
     CommunityDriverV1, CommunityPluginSupervisorV1, WorkerProgramV1,
 };
 use pos_runtime::community_plugin_host::{
-    CommunityPluginHostAbiV1, CommunityPluginModeV1 as Mode, PassResultV1,
+    classify_pass_failure, CommunityPassOutcomeV1, CommunityPluginHostAbiV1,
+    CommunityPluginHostErrorV1, CommunityPluginModeV1 as Mode, PassResultV1,
     PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1,
 };
 use pos_runtime::{PluginCompositionErrorV1, PluginRegistry, RuntimeError};
 
+use crate::failure::{describe, record_pass, Mixed, Pass, SIBLING};
 use crate::first_party::{entity_of, register_native, register_twin, Native};
 use crate::harness::Capture;
-use crate::parity::{observe, record, same_authority, Observed, ENTITY, STORE, TWIN_TYPE};
+use crate::parity::{
+    observe, on_every_store, record, same_authority, Observed, Order, StoreCapture, ENTITY,
+    TWIN_TYPE,
+};
 use crate::support::lane::{
     gated_release, profile, publish, trust_material, Lane, Published, Spec, Swap, ALPHA,
-    EVENT_TYPE, WATCHDOG,
+    EVENT_TYPE, PROBE_GUEST, WATCHDOG,
 };
 use crate::support::subcase::WORKER;
-use crate::support::test_ok::TestOk;
 
 /// The first-party Plugin that owns the fixture's Event type in the proposal cases.
 const OWNER: Native = Native {
@@ -47,7 +52,7 @@ const OWNER: Native = Native {
     role: "first-party-owner",
 };
 /// A first-party Plugin that owns a type of its own and proposes the owner's.
-const PROPOSER: Native = Native {
+pub const PROPOSER: Native = Native {
     name: "first-party-proposer",
     owned: TWIN_TYPE,
     emitted: EVENT_TYPE,
@@ -65,6 +70,13 @@ const COMMUNITY_PROPOSER: Spec = Spec {
 };
 /// The consent Event type reserved to the Gateway consent host, which no Plugin may claim.
 const RESERVED_CLAIM: &str = EVENT_TYPE_CONSENT_REVOKED_V1;
+/// The community member on the probe guest, which owns the fixture's Event type.
+pub const PROBE: Spec = Spec {
+    guest: PROBE_GUEST,
+    ..ALPHA
+};
+/// The selector on which the probe guest drafts the host's reserved release-activation type.
+const RESERVED_SELECTOR: &[u8] = b"reserved";
 
 /// The typed refusal `error` names, without the ID of the refused Plugin.
 #[must_use]
@@ -109,6 +121,14 @@ pub fn composition_refusal(error: &PluginCompositionErrorV1) -> String {
     }
 }
 
+/// How `classify_pass_failure` classifies the error that failed the pass `result`, or `none`.
+fn failure_class(result: &PassResultV1) -> String {
+    let PassResultV1::Failed { error, .. } = result else {
+        return "none".to_owned();
+    };
+    format!("{:?}", classify_pass_failure(error))
+}
+
 /// The refusal that failed the pass `result`, or `none`.
 ///
 /// A failure the community Plugin host classifies as its own appends that host error, so a pinned
@@ -144,15 +164,27 @@ pub fn snapshot(registry: &PluginRegistry) -> String {
 }
 
 /// One refused proposal pass.
-struct Proposal {
-    observed: Observed,
-    refusal: String,
+pub struct Proposal {
+    /// The authority outcome of the pass.
+    pub observed: Observed,
+    /// The typed refusal that failed the pass.
+    pub refusal: String,
+    /// How the host classifies the error that failed the pass.
+    pub class: String,
 }
 
-/// The Local pass of a registry holding [`OWNER`] and then the first-party `native` proposer.
-fn first_party_proposal(signed: &SignedWorld, native: Native) -> BoxResult<Proposal> {
+/// The Local pass of a registry on a `kind` store holding [`OWNER`] and then the first-party
+/// `native` proposer.
+///
+/// # Errors
+/// Returns the error of registering either Plugin, of building the lane or of its pass.
+pub fn first_party_proposal(
+    signed: &SignedWorld,
+    native: Native,
+    kind: StoreKind,
+) -> BoxResult<Proposal> {
     let entity = entity_of(ENTITY)?;
-    let mut pass = PassWorld::new(WORKER);
+    let mut pass = PassWorld::on(kind, WORKER);
     let owner = register_native(&mut pass.registry, OWNER, entity)?;
     let proposed = register_native(&mut pass.registry, native, entity)?;
     let mut lane = Lane::over(signed, &[], Mode::Local, pass)?;
@@ -162,12 +194,18 @@ fn first_party_proposal(signed: &SignedWorld, native: Native) -> BoxResult<Propo
     Ok(Proposal {
         observed: observe(&lane, &outcome, format!("{owner},{proposed}")),
         refusal: pass_refusal(&outcome.result),
+        class: failure_class(&outcome.result),
     })
 }
 
-/// The Local pass of a registry holding [`OWNER`] and then the community member of `entries`.
-fn community_proposal(signed: &SignedWorld, entries: &[Published]) -> BoxResult<Proposal> {
-    let mut pass = PassWorld::new(WORKER);
+/// The Local pass of a registry on a `kind` store holding [`OWNER`] and then the community
+/// member of `entries`.
+fn community_proposal(
+    signed: &SignedWorld,
+    entries: &[Published],
+    kind: StoreKind,
+) -> BoxResult<Proposal> {
+    let mut pass = PassWorld::on(kind, WORKER);
     let owner = register_native(&mut pass.registry, OWNER, entity_of(ENTITY)?)?;
     let mut lane = Lane::over(signed, entries, Mode::Local, pass)?;
     let outcome = lane.run(signed)?;
@@ -176,13 +214,14 @@ fn community_proposal(signed: &SignedWorld, entries: &[Published]) -> BoxResult<
     Ok(Proposal {
         observed: observe(&lane, &outcome, format!("{owner},{community}")),
         refusal: pass_refusal(&outcome.result),
+        class: failure_class(&outcome.result),
     })
 }
 
 /// Record what the refused proposal shows under `path`.
-fn record_proposal(capture: &mut Capture, path: &str, proposal: &Proposal) {
+fn record_proposal(capture: &mut StoreCapture<'_>, path: &str, proposal: &Proposal) {
     record(capture, path, &proposal.observed);
-    capture.record(STORE, &format!("{path}.refusal"), &proposal.refusal);
+    capture.record(&format!("{path}.refusal"), &proposal.refusal);
 }
 
 /// PCF-CPH-003: a proposal of another Plugin's Event type is refused identically.
@@ -193,23 +232,22 @@ fn record_proposal(capture: &mut Capture, path: &str, proposal: &Proposal) {
 /// release-activation type is refused with the reserved-draft refusal.
 #[must_use]
 pub fn foreign_proposal_parity() -> Capture {
-    foreign_proposal().test_ok()
+    on_every_store(foreign_proposal)
 }
 
-fn foreign_proposal() -> BoxResult<Capture> {
+fn foreign_proposal(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let member = publish(&mut signed, COMMUNITY_PROPOSER, 1)?;
-    let first_party = first_party_proposal(&signed, PROPOSER)?;
-    let community = community_proposal(&signed, std::slice::from_ref(&member))?;
-    let reserved = first_party_proposal(&signed, RESERVED)?;
-    let mut capture = Capture::default();
-    record_proposal(&mut capture, "first-party", &first_party);
-    record_proposal(&mut capture, "community", &community);
-    record_proposal(&mut capture, "first-party-reserved", &reserved);
+    let first_party = first_party_proposal(&signed, PROPOSER, kind)?;
+    let community = community_proposal(&signed, std::slice::from_ref(&member), kind)?;
+    let reserved = first_party_proposal(&signed, RESERVED, kind)?;
+    record_proposal(capture, "first-party", &first_party);
+    record_proposal(capture, "community", &community);
+    record_proposal(capture, "first-party-reserved", &reserved);
     let parity = same_authority(&first_party.observed, &community.observed)
         && first_party.refusal == community.refusal;
-    capture.record(STORE, "parity.first-party-equals-community", parity);
-    Ok(capture)
+    capture.record("parity.first-party-equals-community", parity);
+    Ok(())
 }
 
 /// A community Driver built from the gated release of `entry` for `plugin_id`.
@@ -223,6 +261,25 @@ pub fn community_driver(
     entry: &Published,
     plugin_id: PluginId,
 ) -> BoxResult<CommunityDriverV1> {
+    let abi = CommunityPluginHostAbiV1::new(0, 1, vec!["clock".to_owned()]);
+    let abi = abi.map_err(|error| format!("{error:?}"))?;
+    let config = driver_config(signed, entry, plugin_id, &abi)?;
+    let config = config.map_err(|error| format!("{error:?}"))?;
+    Ok(CommunityDriverV1::new(config).0)
+}
+
+/// The configuration of a community Driver from the gated release of `entry`, or its refusal.
+///
+/// The Driver is for `plugin_id` and negotiates the release against the host ABI `abi`.
+///
+/// # Errors
+/// Returns the error of gating the release or of building the Driver's supervisor.
+pub fn driver_config(
+    signed: &SignedWorld,
+    entry: &Published,
+    plugin_id: PluginId,
+    abi: &CommunityPluginHostAbiV1,
+) -> BoxResult<Result<CommunityDriverConfigV1, CommunityPluginHostErrorV1>> {
     let swap = Swap::of(trust_material(signed, &signed.material()?));
     let gated = gated_release(signed, entry, &swap)?;
     let program = WorkerProgramV1::new(PathBuf::from(WORKER)).ok_or("an invalid worker path")?;
@@ -236,13 +293,10 @@ pub fn community_driver(
         source: Box::new(Source::numbered(1)),
         initial_state: initial(),
     };
-    let abi = CommunityPluginHostAbiV1::new(0, 1, vec!["clock".to_owned()]);
-    let abi = abi.map_err(|error| format!("{error:?}"))?;
     let hosted = profile(Mode::Local);
     let id = entry.spec.plugin_id;
-    let config = CommunityDriverConfigV1::from_gated(gated, &abi, &hosted, id, settings);
-    let config = config.map_err(|error| format!("{error:?}"))?;
-    Ok(CommunityDriverV1::new(config).0)
+    let config = CommunityDriverConfigV1::from_gated(gated, abi, &hosted, id, settings);
+    Ok(config)
 }
 
 /// Claim `event_type` for a community Plugin built from `entry`, on the community path.
@@ -273,9 +327,14 @@ struct Claim {
     observed: Observed,
 }
 
-/// A community claim on the fixture's type, which the first-party twin owns, then a pass.
-fn community_claims_native_type(signed: &SignedWorld, entry: &Published) -> BoxResult<Claim> {
-    let mut pass = PassWorld::new(WORKER);
+/// A community claim on the fixture's type, which the first-party twin owns, then a pass on a
+/// `kind` store.
+fn community_claims_native_type(
+    signed: &SignedWorld,
+    entry: &Published,
+    kind: StoreKind,
+) -> BoxResult<Claim> {
+    let mut pass = PassWorld::on(kind, WORKER);
     let steps = register_twin(&mut pass.registry, EVENT_TYPE, entity_of(ENTITY)?)?;
     let before = snapshot(&pass.registry);
     let claim = community_claim(signed, entry, &mut pass.registry, EVENT_TYPE);
@@ -292,9 +351,13 @@ fn community_claims_native_type(signed: &SignedWorld, entry: &Published) -> BoxR
 }
 
 /// A first-party claim on the fixture's type, which the community member of `entries` owns,
-/// then a pass.
-fn native_claims_community_type(signed: &SignedWorld, entries: &[Published]) -> BoxResult<Claim> {
-    let mut lane = Lane::new(signed, entries, Mode::Local)?;
+/// then a pass on a `kind` store.
+fn native_claims_community_type(
+    signed: &SignedWorld,
+    entries: &[Published],
+    kind: StoreKind,
+) -> BoxResult<Claim> {
+    let mut lane = Lane::on(kind, signed, entries, Mode::Local)?;
     let before = snapshot(&lane.pass.registry);
     let claim = register_twin(&mut lane.pass.registry, EVENT_TYPE, entity_of(ENTITY)?);
     let refusal = claim_refusal(claim);
@@ -309,20 +372,22 @@ fn native_claims_community_type(signed: &SignedWorld, entries: &[Published]) -> 
 }
 
 /// Record what the refused claim and the following pass show under `path`.
-fn record_claim(capture: &mut Capture, path: &str, claim: &Claim) {
-    capture.record(STORE, &format!("{path}.refusal"), &claim.refusal);
-    capture.record(
-        STORE,
-        &format!("{path}.registry-unchanged"),
-        claim.unchanged,
-    );
+fn record_claim(capture: &mut StoreCapture<'_>, path: &str, claim: &Claim) {
+    capture.record(&format!("{path}.refusal"), &claim.refusal);
+    capture.record(&format!("{path}.registry-unchanged"), claim.unchanged);
     record(capture, path, &claim.observed);
 }
 
 /// The refusals of a first-party and a community claim on the reserved consent type, in one
 /// empty registry, and whether that registry is unchanged.
-fn reserved_claims(signed: &SignedWorld, entry: &Published) -> BoxResult<(String, String, bool)> {
-    let mut pass = PassWorld::new(WORKER);
+///
+/// No pass runs, so the store of kind `kind` holds no Event and does not affect the refusals.
+fn reserved_claims(
+    signed: &SignedWorld,
+    entry: &Published,
+    kind: StoreKind,
+) -> BoxResult<(String, String, bool)> {
+    let mut pass = PassWorld::on(kind, WORKER);
     let before = snapshot(&pass.registry);
     let native = register_twin(&mut pass.registry, RESERVED_CLAIM, entity_of(ENTITY)?);
     let native = claim_refusal(native);
@@ -339,22 +404,100 @@ fn reserved_claims(signed: &SignedWorld, entry: &Published) -> BoxResult<(String
 /// Gateway's reserved consent type is refused the same way for either class.
 #[must_use]
 pub fn single_lineage_owner() -> Capture {
-    single_lineage().test_ok()
+    on_every_store(single_lineage)
 }
 
-fn single_lineage() -> BoxResult<Capture> {
+fn single_lineage(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let alpha = publish(&mut signed, ALPHA, 1)?;
-    let by_community = community_claims_native_type(&signed, &alpha)?;
-    let by_first_party = native_claims_community_type(&signed, std::slice::from_ref(&alpha))?;
-    let (native, community, unchanged) = reserved_claims(&signed, &alpha)?;
-    let mut capture = Capture::default();
-    record_claim(&mut capture, "community-claim", &by_community);
-    record_claim(&mut capture, "first-party-claim", &by_first_party);
-    capture.record(STORE, "reserved-claim.first-party.refusal", &native);
-    capture.record(STORE, "reserved-claim.community.refusal", &community);
-    capture.record(STORE, "reserved-claim.registry-unchanged", unchanged);
+    let by_community = community_claims_native_type(&signed, &alpha, kind)?;
+    let entries = std::slice::from_ref(&alpha);
+    let by_first_party = native_claims_community_type(&signed, entries, kind)?;
+    let (native, community, unchanged) = reserved_claims(&signed, &alpha, kind)?;
+    record_claim(capture, "community-claim", &by_community);
+    record_claim(capture, "first-party-claim", &by_first_party);
+    capture.record("reserved-claim.first-party.refusal", &native);
+    capture.record("reserved-claim.community.refusal", &community);
+    capture.record("reserved-claim.registry-unchanged", unchanged);
     let same = by_community.refusal == by_first_party.refusal && native == community;
-    capture.record(STORE, "parity.same-refusal-either-class", same);
-    Ok(capture)
+    capture.record("parity.same-refusal-either-class", same);
+    Ok(())
+}
+
+/// The name of a community host error, or `none`.
+fn error_name(error: Option<CommunityPluginHostErrorV1>) -> &'static str {
+    error.map_or("none", CommunityPluginHostErrorV1::name)
+}
+
+/// What the host made of the first member of `lane` in the pass `outcome`, as
+/// `launch-failure/availability/last-failure`.
+///
+/// The launch failure is the host's entry for the member; the availability and the last failure
+/// are its handle's, which the host mirrors into the registry.
+fn member_state(lane: &Lane, outcome: &CommunityPassOutcomeV1) -> String {
+    let entry = outcome.gates.first();
+    let launch = entry.and_then(|gate| gate.launch_failure);
+    let handle = lane.handle();
+    let availability = handle.availability();
+    let last = error_name(handle.last_failure());
+    format!("{}/{availability:?}/{last}", error_name(launch))
+}
+
+/// One pass of a mixed lane and how the host classified it.
+struct Classified {
+    pass: Pass,
+    class: String,
+    member: String,
+}
+
+/// Run one pass of `mixed` and classify it.
+fn classified(mixed: &mut Mixed, signed: &SignedWorld) -> BoxResult<Classified> {
+    let outcome = mixed.lane.run(signed)?;
+    let steps = mixed.steps_since();
+    let class = failure_class(&outcome.result);
+    let member = member_state(&mixed.lane, &outcome);
+    let pass = describe(&mixed.lane, &outcome, steps);
+    Ok(Classified {
+        pass,
+        class,
+        member,
+    })
+}
+
+/// PCF-CPH-013: a community proposal of a reserved host type is refused as a first-party one.
+///
+/// A community Driver on the real worker whose probe guest drafts the host's reserved
+/// release-activation type, after the first-party sibling staged, fails the pass with the same
+/// reserved-draft refusal, of the same failure class, as the first-party proposal of that type:
+/// the registry refuses the draft before ownership, the community host does not classify the
+/// refusal as its own, the whole pass commits nothing, and no Plugin is quarantined. The next
+/// pass, with the guest unsteered, commits both Events without clearing anything.
+#[must_use]
+pub fn reserved_proposal_parity() -> Capture {
+    on_every_store(reserved_proposal)
+}
+
+fn reserved_proposal(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
+    let mut signed = SignedWorld::new()?;
+    let probe = publish(&mut signed, PROBE, 1)?;
+    let first_party = first_party_proposal(&signed, RESERVED, kind)?;
+    let entries = std::slice::from_ref(&probe);
+    let mut mixed = Mixed::new(kind, &signed, entries, SIBLING, Order::TwinFirst)?;
+    mixed.lane.selector.set(Some(RESERVED_SELECTOR.to_vec()));
+    let community = classified(&mut mixed, &signed)?;
+    mixed.lane.selector.set(None);
+    let next = mixed.pass(&signed)?;
+    record_proposal(capture, "first-party-reserved", &first_party);
+    capture.record("first-party-reserved.pass-failure", &first_party.class);
+    record_pass(capture, "community-reserved", &community.pass);
+    capture.record("community-reserved.pass-failure", &community.class);
+    capture.record("community-reserved.gate", &community.pass.gate);
+    capture.record("community-reserved.member", &community.member);
+    record(capture, "community-next", &next.observed);
+    capture.record("community.community-receipts", mixed.receipts());
+    let parity = same_authority(&first_party.observed, &community.pass.observed)
+        && first_party.refusal == community.pass.refusal
+        && first_party.class == community.class;
+    capture.record("parity.first-party-equals-community", parity);
+    Ok(())
 }

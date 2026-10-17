@@ -138,6 +138,14 @@ pub struct Shape {
     pub abi_max_minor: u16,
     /// Whether the release requires the `clock` host feature.
     pub clock: bool,
+    /// The deterministic fuel budget of the release.
+    pub fuel: u64,
+    /// The deterministic host-call budget of the release.
+    pub host_calls: u64,
+    /// The deterministic output budget of the release: the total `EventDraft` bytes.
+    pub event_bytes: u64,
+    /// The lowest ABI minor the release declares.
+    pub abi_min_minor: u16,
 }
 
 impl Shape {
@@ -158,6 +166,10 @@ impl Shape {
             memory_bytes: 65_536,
             abi_max_minor: 1,
             clock: true,
+            fuel: 1 << 40,
+            host_calls: 256,
+            event_bytes: 4_096,
+            abi_min_minor: 0,
         }
     }
 
@@ -199,6 +211,41 @@ impl Shape {
             ..self
         }
     }
+
+    /// This shape with a deterministic fuel budget of `fuel`.
+    #[must_use]
+    pub const fn with_fuel(self, fuel: u64) -> Self {
+        Self { fuel, ..self }
+    }
+
+    /// This shape with a deterministic host-call budget of `host_calls`.
+    #[must_use]
+    pub const fn with_host_calls(self, host_calls: u64) -> Self {
+        Self { host_calls, ..self }
+    }
+
+    /// This shape with a deterministic output budget of `event_bytes` total `EventDraft` bytes.
+    #[must_use]
+    pub const fn with_event_bytes(self, event_bytes: u64) -> Self {
+        Self {
+            event_bytes,
+            ..self
+        }
+    }
+
+    /// This shape declaring the ABI minors `lowest` to `highest`, both included.
+    ///
+    /// It sets both bounds, so it and [`Self::with_worker_abi`] each override the highest minor
+    /// the other set: the later call wins. [`Self::with_worker_abi`] also clears the clock
+    /// feature, which this setter leaves alone.
+    #[must_use]
+    pub const fn with_abi_minors(self, lowest: u16, highest: u16) -> Self {
+        Self {
+            abi_min_minor: lowest,
+            abi_max_minor: highest,
+            ..self
+        }
+    }
 }
 
 /// A valid draft for `shape`.
@@ -211,7 +258,7 @@ pub fn make_draft<'a>(shape: Shape) -> BoxResult<PluginReleaseDraftV1<'a>> {
         release_version: shape.version.to_owned(),
         abi: PluginAbiRequirementV1 {
             major: 0,
-            min_minor: 0,
+            min_minor: shape.abi_min_minor,
             max_minor: shape.abi_max_minor,
             required_features: if shape.clock {
                 vec!["clock".to_owned()]
@@ -237,10 +284,10 @@ pub fn make_draft<'a>(shape: Shape) -> BoxResult<PluginReleaseDraftV1<'a>> {
         }],
         budget: DeterministicBudgetV1 {
             memory_bytes: shape.memory_bytes,
-            fuel: 1 << 40,
-            host_calls: 256,
+            fuel: shape.fuel,
+            host_calls: shape.host_calls,
             event_count: 24,
-            event_bytes: 4_096,
+            event_bytes: shape.event_bytes,
             state_bytes: 4_096,
             log_calls: 24,
             log_bytes: 256,

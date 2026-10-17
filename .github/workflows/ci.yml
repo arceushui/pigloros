@@ -3,8 +3,10 @@
 # Gate policy (Redmine #100):
 #   fmt          — cargo fmt --check (rustfmt)
 #   rustdoc      — cargo doc with rustdoc warnings denied
-#   test         — cargo test --all-features (no ignored tests silently skip)
-#   clippy       — pedantic + -D warnings
+#   test         — cargo nextest --all-features in 3 shards + doctests (no ignored
+#                  or unrun test)
+#   clippy       — pedantic + -D warnings; also the all-features, all-targets
+#                  type check
 #   coverage     — lines ≥99%, regions ≥99%
 #   cargo-crap   — no CRAP regressions; new functions score ≤30
 #   audit        — cargo-audit (CVE advisories)
@@ -19,10 +21,12 @@
 #     feature(coverage_attribute) for #[coverage(off)] on test helpers.
 #   coverage(off) is only permitted on #[test]/#[tokio::test]/#[cfg(test)] code
 #     (enforced by Trunk rust-test-policy).
-#   --include-ignored: ensures #[ignore] tests run in CI; none may silently skip.
+#   --run-ignored all / --include-ignored: ensures #[ignore] tests run in CI;
+#     none may silently skip.
 #
 # Pull requests that change only documentation or other non-Rust content run the
-# lightweight scope job plus Trunk/CodeQL policy workflows. Rust build, test,
+# lightweight scope job plus Trunk policy workflows and CodeQL (the
+# code_scanning ruleset needs an analysis for every head commit). Rust build, test,
 # coverage, cargo-crap, security, platform, and report jobs are skipped
 # successfully. Any Rust, manifest, dependency, script, workflow, or
 # build-policy change keeps the complete gate set.
@@ -53,7 +57,7 @@ env:
 # ── Quality gates ────────────────────────────────────────────────────────────
 #
 # Fail fast in bounded stages. Pull-request diff and policy checks run before
-# any Cargo-heavy work. The four core gates then run together, followed by at
+# any Cargo-heavy work. The core gates then run together, followed by at
 # most eight standard jobs. Mutation and ASan are the final expensive stages.
 
 jobs:
@@ -191,6 +195,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: rustdoc
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo doc (warnings denied)
         env:
           RUSTDOCFLAGS: -D warnings
@@ -202,6 +207,12 @@ jobs:
     if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Coverage and ASan already build tests with line tables. They keep
+      # panic locations and backtraces while cutting link time and the
+      # cached target size.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Test advisory benchmark comparator
@@ -221,17 +232,95 @@ jobs:
           --test plugin_trust_registry_memory_public
           --test plugin_trust_registry_memory_policy_public
           --test plugin_trust_registry_memory_evaluation_public --locked
-      - name: cargo check (all features, all targets)
-        run: cargo check --workspace --all-targets --all-features --locked
       - name: Prove reference evaluator implementation independence
         run: bash scripts/check-reference-evaluator-independence.sh
       - name: Prove the conformance adapter dependency graph
         run: bash scripts/check-adapter-graph.sh
-      - name: cargo test (all features, no ignored skip)
+      # The workspace tests run in the test-shard matrix. Doctests are not
+      # supported by nextest, so libtest still runs them here.
+      - name: cargo test doctests (all features, ignored included)
         run: |
           set -euo pipefail
-          cargo test --workspace --all-features --locked -- --include-ignored 2>&1 | tee /tmp/cargo-test.log
-          bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-test.log
+          cargo test --workspace --all-features --locked --doc -- --include-ignored 2>&1 | tee /tmp/cargo-doctest.log
+      - name: Require no ignored test in the doctest summary
+        run: bash scripts/assert-no-ignored-in-test-summary.sh /tmp/cargo-doctest.log
+
+  # The nextest suite is CPU-bound (~860 test-seconds on a 4-vCPU runner after
+  # the crypto dependency opt-level change), so it is split across runners.
+  # slice:k/N deals tests round-robin, spreading the long pos-conformance
+  # bundle tests over every shard.
+  test-shard:
+    name: test shard (${{ matrix.shard }}/3)
+    needs: [ci_change_scope, preflight-gate]
+    if: ${{ !cancelled() && needs.preflight-gate.result == 'success' && (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-nextest@0.9.146
+          fallback: none
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: test-nextest
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo nextest partition (all features, ignored included)
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP}/nextest-shard.log"
+          printf 'nextest partition: slice:%s/3\n' "${SHARD}" >"${log}"
+          cargo nextest run --workspace --all-features --locked \
+            --user-config-file none --ignore-default-filter \
+            --run-ignored all --no-fail-fast \
+            --partition "slice:${SHARD}/3" 2>&1 | tee -a "${log}"
+      - name: Upload shard summary log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-shard-log-${{ matrix.shard }}
+          path: ${{ runner.temp }}/nextest-shard.log
+          retention-days: 1
+          if-no-files-found: error
+          # A re-run of one shard replaces its earlier attempt's log.
+          overwrite: true
+
+  test-shards:
+    name: test-shards
+    needs: [test-shard]
+    if: ${{ !cancelled() && needs.test-shard.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download every shard summary log
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: test-shard-log-*
+          path: ${{ runner.temp }}/shards
+      - name: Prove the shards ran every test exactly once
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          logs=("${RUNNER_TEMP}"/shards/test-shard-log-*/nextest-shard.log)
+          for shard in 1 2 3; do
+            matches="$(grep -lFx "nextest partition: slice:${shard}/3" "${logs[@]}" | wc -l)"
+            test "${matches}" -eq 1
+          done
+          bash scripts/assert-no-ignored-in-test-summary.sh --partitioned=3 "${logs[@]}"
 
   reference-evaluator-release:
     name: reference-evaluator-release
@@ -254,6 +343,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: reference-evaluator-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install evaluator packaging tools
         run: sudo apt-get update && sudo apt-get install --yes b3sum jq
       - name: Build and verify standalone evaluator release evidence
@@ -340,6 +430,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: conformance-materialization
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install fixture verification tools
         run: sudo apt-get update && sudo apt-get install --yes b3sum jq
       - name: Reject non-main manual artifact publication
@@ -410,6 +501,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: conformance-non-linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Enforce the Linux-only secure fixture-generation boundary
         run: |
           set +e
@@ -428,9 +520,9 @@ jobs:
       - name: Exercise unsupported recipient export decryption boundary
         run: cargo test -p pos-store --test recipient_export_decryption_unsupported_public --locked -- --include-ignored
 
-  # ADR-061 revision 4 compatibility prototype (#539): rebuild the Rust and C
-  # guest Components from source with pinned toolchains and require the
-  # committed fixtures byte for byte.
+  # ADR-061 revision 4 compatibility prototype (#539): rebuild the
+  # compatibility Components from source with pinned toolchains and require
+  # the committed fixtures byte for byte.
   plugin-component-fixtures:
     name: plugin-component-fixtures
     needs: ci_change_scope
@@ -450,7 +542,19 @@ jobs:
       - name: Rebuild the compatibility Components and compare their bytes
         env:
           PROTOTYPE_TOOLS: ${{ runner.temp }}/component-tools
+          REBUILT_DIR: ${{ runner.temp }}/rebuilt-plugin-fixtures
         run: bash plugins/community/examples/compatibility-prototype/verify-fixtures.sh
+      # On a mismatch, publish the rebuilt Components and SHA256SUMS: download
+      # them with `gh run download -n rebuilt-plugin-fixtures` and commit them
+      # to the prototype's fixtures directory.
+      - name: Upload the rebuilt compatibility Components
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rebuilt-plugin-fixtures
+          path: ${{ runner.temp }}/rebuilt-plugin-fixtures
+          retention-days: 3
+          if-no-files-found: warn
 
   ledger-windows:
     name: ledger-windows
@@ -503,9 +607,6 @@ jobs:
     timeout-minutes: 45
     env:
       RUSTC_BOOTSTRAP: "1"
-      # Keep instrumentation bounded on the hosted runner; local runs may use
-      # substantially more memory when compiling the Bevy workspace.
-      CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
@@ -524,6 +625,11 @@ jobs:
         uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
           tool: cargo-llvm-cov
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-nextest@0.9.146
+          fallback: none
       - name: Install covgate
         uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
@@ -534,11 +640,16 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Generate one complete report, then let covgate check the changed
       # production diff before spending time on the repository-wide floor.
+      # nextest runs every test executable in parallel instead of one at a
+      # time; each test process writes its own profile, merged by llvm-cov.
+      # The test-shard jobs run the same nextest flags and test-shards proves
+      # every test ran with none skipped, so this run needs no summary check.
       - name: Generate coverage report for changed-code gate
         run: >
-          cargo llvm-cov --workspace --all-features --locked
+          cargo llvm-cov nextest --workspace --all-features --locked
           --json --output-path "${{ runner.temp }}/coverage.json"
-          -- --include-ignored
+          --user-config-file none --ignore-default-filter
+          --run-ignored all --no-fail-fast
       - name: Enforce changed production Rust code coverage first
         run: >
           covgate check "${{ runner.temp }}/coverage.json"
@@ -587,18 +698,20 @@ jobs:
       - preflight-gate
       - fmt
       - test
+      - test-shards
       - clippy
       - coverage
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require fmt, test, clippy, and coverage
+      - name: Require fmt, test, test shards, clippy, and coverage
         env:
           SCOPE_RESULT: ${{ needs.ci_change_scope.result }}
           RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
           PREFLIGHT_RESULT: ${{ needs.preflight-gate.result }}
           FMT_RESULT: ${{ needs.fmt.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          TEST_SHARDS_RESULT: ${{ needs.test-shards.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           COVERAGE_RESULT: ${{ needs.coverage.result }}
         run: |
@@ -611,6 +724,7 @@ jobs:
           fi
           test "${FMT_RESULT}" = "${expected}"
           test "${TEST_RESULT}" = "${expected}"
+          test "${TEST_SHARDS_RESULT}" = "${expected}"
           test "${CLIPPY_RESULT}" = "${expected}"
           test "${COVERAGE_RESULT}" = "${expected}"
 
@@ -774,6 +888,10 @@ jobs:
       - name: cargo geiger (assert no unsafe in own crates)
         run: bash scripts/check-geiger.sh
 
+  # Always runs, including for documentation-only pull requests: the main
+  # ruleset's code_scanning rule needs an uploaded analysis for the head commit,
+  # and a skipped job uploads none, which leaves the PR unmergeable. Rust PRs
+  # still wait for cargo-crap; documentation-only PRs (cargo-crap skipped) do not.
   codeql:
     name: CodeQL (Rust)
     needs:
@@ -781,8 +899,9 @@ jobs:
       - cargo-crap
     if: >-
       ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
-      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
+      (needs.cargo-crap.result == 'success' ||
+      (needs.ci_change_scope.outputs.rust == 'false' &&
+      needs.cargo-crap.result == 'skipped')) }}
     permissions:
       actions: read
       contents: read
@@ -796,21 +915,14 @@ jobs:
     name: CodeQL (Rust)
     if: ${{ always() }}
     needs:
-      - ci_change_scope
       - codeql
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Report the required CodeQL status
         env:
-          RUST_SCOPE: ${{ needs.ci_change_scope.outputs.rust }}
           CODEQL_RESULT: ${{ needs.codeql.result }}
-        run: |
-          expected=success
-          if [[ "${RUST_SCOPE}" = false ]]; then
-            expected=skipped
-          fi
-          test "${CODEQL_RESULT}" = "${expected}"
+        run: test "${CODEQL_RESULT}" = success
 
 # ── Platform verification ────────────────────────────────────────────────────
 
@@ -856,6 +968,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: asan-nightly-2026-07-01
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Prove unrelated leaks still fail LSan
         env:
           ASAN_OPTIONS: detect_leaks=1:detect_odr_violation=0
@@ -997,7 +1110,9 @@ jobs:
           load: true
           tags: pigloros-gateway:ci
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # PR runs restore only; main writes the shared layer cache so pull
+          # requests cannot evict it from the repository cache budget.
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}
       - name: Smoke test container
         run: |
           docker run --rm -d -p 8080:8080 --name pigloros-smoke pigloros-gateway:ci
@@ -1113,6 +1228,7 @@ jobs:
         run: |
           set -euo pipefail
           test "${CORE_RESULT}" = success
+          test "${CODEQL_RESULT}" = success
           expected=success
           if [[ "${RUST_SCOPE}" = false ]]; then
             expected=skipped
@@ -1120,7 +1236,7 @@ jobs:
           for result in \
             "${CARGO_CRAP_RESULT}" "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" \
             "${MATERIALIZE_RESULT}" "${DEPENDENCY_RESULT}" "${GEIGER_RESULT}" \
-            "${CODEQL_RESULT}" "${LEDGER_WINDOWS_RESULT}" "${DOCKER_RESULT}" \
+            "${LEDGER_WINDOWS_RESULT}" "${DOCKER_RESULT}" \
             "${WASM_RESULT}" "${BROWSER_RESULT}"; do
             test "${result}" = "${expected}"
           done
@@ -1181,6 +1297,8 @@ jobs:
         run: bash scripts/test-check-pinned-dependencies.sh
       - name: Test CI workflow policy
         run: python scripts/test_ci_workflow_policy.py
+      - name: Test ignored-test summary checker
+        run: python scripts/test_assert_no_ignored_in_test_summary.py
       - name: Check ASan CI policy
         run: bash scripts/check-asan-ci-policy.sh
       - name: Test ASan CI policy checker
@@ -1259,6 +1377,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: modules
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Module structure reports
         if: ${{ !cancelled() }}
         run: |

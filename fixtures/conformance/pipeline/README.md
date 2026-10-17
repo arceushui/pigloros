@@ -12,7 +12,10 @@ job executes.
 
 Each version directory is immutable. The runner pins the SHA-256 of every file
 it reads, so a changed byte fails the suite. A changed expected result needs a
-new version directory, not an edit; rollback selects an older directory.
+new version directory, not an edit; rollback selects an older directory. An
+edit that changes no expected value, such as removing an exclusion or running
+a case on one more store, has been made in place with a new pin, each time by
+user decision (see `PCH1` below).
 
 ## `v1/manifest.json` (`PPC1`, version 1)
 
@@ -26,10 +29,9 @@ new version directory, not an edit; rollback selects an older directory.
 - `exclusions` names requirements this profile does not prove yet, with the
   owner of the missing implementation or contract.
 - Community Plugin-host parity is not a `PPC1` exclusion. The sibling profile
-  `PCH1` below proves it (#489, #636), and what it cannot prove yet (some
-  invalid-Plugin and resource-limit shapes, SQLite) is recorded as `PCH1`
-  exclusions. The `COMMUNITY-PLUGIN-HOST` exclusion was removed from `v1` in
-  place: removing an exclusion changes no expected result.
+  `PCH1` below proves it (#489, #636) and records no exclusion of its own.
+  The `COMMUNITY-PLUGIN-HOST` exclusion was removed from `v1` in place:
+  removing an exclusion changes no expected result.
 
 The runner fails closed on an unknown magic, version or field, a mandatory
 case without a runner, a runner without a case, a missing or unexpected
@@ -61,10 +63,18 @@ leaves every Plugin available. An Event type has one owner, whichever class
 claims it first: a later claim of either class, or a claim of the Gateway's
 reserved consent type, is refused before the registry changes. The real
 guests emit only `prototype.driven`, so the community Driver proposes a
-foreign type by owning another type than the one its guest emits. A
-community proposal of a reserved host type would need a new guest Component;
-the `COMMUNITY-RESERVED-PROPOSAL` exclusion records it, and only the
-first-party refusal of that proposal is pinned.
+foreign type by owning another type than the one its guest emits.
+
+`PCF-CPH-013` (#654) covers a community proposal of a reserved host Event
+type. The lane steers the probe guest with the `reserved` selector, so the
+community Driver drafts the host's `pigloros.plugin.release-activated` type
+after the first-party sibling staged. The registry refuses the draft before
+ownership with `ReservedHostDraft`, the same refusal as the first-party
+proposal of that type, and `classify_pass_failure` classifies both as
+`Unrelated`, so the community host does not take the refusal as its own: the
+whole pass commits nothing, no Plugin is quarantined, the community receipt is
+discarded, and the next pass with the guest unsteered commits both Events. The
+`COMMUNITY-RESERVED-PROPOSAL` exclusion was removed in place.
 
 `PCF-CPH-005` to `PCF-CPH-009` (#633) cover failure containment and fail-closed
 composition. A Driver of either class that fails while it stages (a real guest
@@ -81,10 +91,24 @@ the same typed refusal: `MissingImplementation` from exact resolution,
 injected through the host's refusal record), and
 `IncompatibleImplementation(Isolation)` from exact resolution. Only the
 community path has a release, so a release that is not active is refused at the
-trust gate and one with a denied capability never becomes a Driver. An invalid
-community guest output needs a new guest Component and an ABI- or
-manifest-invalid release needs a malformed release fixture; the
-`INVALID-GUEST-OUTPUT` exclusion records both.
+trust gate and one with a denied capability never becomes a Driver.
+
+`PCF-CPH-014` (#655) covers invalid guest output and invalid releases. The
+probe guest (`fixtures/probe-guest.wasm`, #652), steered by its `bad-digest`
+observation, returns an output whose digest does not match on the real worker:
+the pass fails `InvalidGuestOutput`, the first-party sibling's staged output is
+discarded, nothing is quarantined, and the next pass commits both Events
+without the host clearing anything. Its first-party counterpart is the
+invalid-draft refusal of `PCF-CPH-003`, `Authority(UnauthorizedSource)`, which
+also discards the whole pass and quarantines nothing. A release that declares
+ABI minor 1 alone is refused `IncompatibleAbi` by negotiation against the real
+worker's V1 host ABI (0.0 alone), and a closure whose manifest bytes are not
+PMF1 is refused `InvalidManifest` at the trust gate. Both are registration-time
+refusals, before any Driver is registered, so their registry-unchanged check
+guards the accept path. The pass path would not meet the ABI 0.1-only release as
+`IncompatibleAbi`: the pass harness negotiates under ABI 0.0 to 0.1, and the
+real worker then rejects the transported record, which the supervisor reports
+as `WorkerCrashed`.
 
 `PCF-CPH-010` (#634) covers over-budget parity. The two classes are bound by
 different budgets, so the equivalence is semantic: a typed non-commit that
@@ -96,9 +120,19 @@ every launch `MemoryLimitExceeded` and is quarantined `ResourceExhausted`
 exhausted again after the host clears the quarantine, and the pass within budget
 runs, in a fresh lane, a Driver built from an in-budget successor release. A
 first-party Driver that stages more drafts than the registry's host Tick draft
-budget leaves fails the pass `ResourceExhausted` and quarantines nothing. The
-fuel, host-call and output limits of a community Driver are not exercised on the
-real worker; the `OTHER-RESOURCE-LIMITS` exclusion records them.
+budget leaves fails the pass `ResourceExhausted` and quarantines nothing.
+
+`PCF-CPH-015` (#656) covers the other budgets of a community release on the
+real worker, with the existing guests and starved release budgets, as the
+`PCF1` sub-cases `res.1`, `res.3` and `res.4` do: one unit of fuel ends the C
+guest `FuelExhausted`, two host calls end the Rust guest (which makes three:
+time, random and log) `HostCallLimitExceeded`, and one Event byte ends it (its
+one Event has an 8-byte payload) `OutputLimitExceeded`. Each budget is below
+the host ceiling, so `min(release, ceiling)` keeps it. Each limit fails the
+whole pass, discards the first-party sibling's staged output, leaves the
+sibling available and quarantines the Plugin `ResourceExhausted`; a fresh lane
+over an in-budget successor release commits both Events. The first-party
+counterpart is the host Tick draft budget refusal of `PCF-CPH-010`, run again.
 
 `PCF-CPH-011` and `PCF-CPH-012` (#635) cover Replay and lost-acknowledgement
 recovery. A Replay registry over the same first-party and community Drivers
@@ -117,13 +151,32 @@ finds nothing in doubt a second time. The community member's receipt stays
 staged until the recovery commits it and adopts its state (recorded, not
 compared).
 
-The community pass world runs on `MemoryStore` only, so every case names the
-`memory` store, and the `SQLITE-STORE` exclusion records that this profile
-proves no SQLite parity of the community path (owned by #638). The other
-exclusions name what the real guests and release fixtures cannot yet exercise
-(owned by #637).
+Every case runs on both stores of the community pass world, `memory`
+(`MemoryStore`) and `sqlite` (`SqliteStore` on an in-memory database), and
+records the same expected values on each (#638, #651). SQLite parity is proven
+for the pass store, the store every pass admits to, reads Events from and
+recovers from; the trust registry of the signed-release test world stays on
+`MemoryStore`. A case that runs no pass, or none that commits (parts of
+`PCF-CPH-004`, `PCF-CPH-007` and `PCF-CPH-009`), still runs on both stores and
+records the same values on each.
 
-Every `PCH1` case (`PCF-CPH-001` to `PCF-CPH-012`) is mandatory and applicable
+`PCH1` version 1 was re-pinned in place to add SQLite, by user decision
+(2026-10-17), following the in-place re-pins of #632 to #636: every case's
+`stores` grew from `memory` to `memory` and `sqlite`, the `SQLITE-STORE`
+exclusion was removed, and #638 and #651 joined the sources of the manifest
+and, with the #637 re-pin below, of each of `PCF-CPH-001` to `PCF-CPH-012`. No
+expected value changed; only the store set and the sources grew, so the
+manifest's pinned SHA-256 changed.
+
+`PCH1` version 1 was re-pinned in place again for #637, by user decision
+(2026-10-17): #654 appended `PCF-CPH-013` and removed the
+`COMMUNITY-RESERVED-PROPOSAL` exclusion, #655 appended `PCF-CPH-014` and
+removed the `INVALID-GUEST-OUTPUT` exclusion, #656 appended `PCF-CPH-015` and
+removed the `OTHER-RESOURCE-LIMITS` exclusion, and #637, #654, #655 and #656
+joined the sources. No expected value of an earlier case changed. `PCH1`
+version 1 now has no exclusions.
+
+Every `PCH1` case (`PCF-CPH-001` to `PCF-CPH-015`) is mandatory and applicable
 and has exactly one runner, in manifest order; the runner asserts that none is
 skipped.
 

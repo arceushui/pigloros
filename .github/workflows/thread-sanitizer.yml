@@ -38,6 +38,7 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: tsan-nightly-2026-07-01
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run concurrency tests under ThreadSanitizer
         run: |
           set -euo pipefail

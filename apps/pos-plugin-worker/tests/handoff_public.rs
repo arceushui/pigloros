@@ -29,8 +29,8 @@ use pos_runtime::community_plugin_host::{
     PassResultV1, RevocationBasisV1 as Revoke, TrapReproductionV1, TrustDenialBasisV1 as Denial,
 };
 use support::lane::{
-    assert_committed, committed, publish, publish_shape, trust_material, Lane, Published, Spec,
-    ALPHA, ALPHA_C,
+    assert_committed, committed, is_committed, publish, publish_shape, trust_material, Lane,
+    Published, Spec, ALPHA, ALPHA_C, TRAP_OBSERVATION,
 };
 
 type Error = CommunityPluginHostErrorV1;
@@ -507,6 +507,27 @@ fn a_failing_context_after_a_committed_pass_is_not_committed() -> TestResult {
     assert!(lane.handle().receipt_for(FIRST_ID).is_some());
     let outcomes = lane.outcomes(&second);
     assert_eq!(outcomes[0].result, refused("InvalidInvocation", None));
+    Ok(())
+}
+
+/// The lane's selector bytes reach the real guest as its observation: the trap observation fed
+/// as selector bytes, with the trap switch off, fails the pass exactly as the switch does.
+///
+/// The probe guest's `reserved` and `bad-digest` selectors are covered by PCF-CPH-013 and 014.
+#[test]
+fn selector_bytes_reach_the_real_guest_as_its_observation() -> TestResult {
+    let mut signed = SignedWorld::new()?;
+    let alpha = publish(&mut signed, ALPHA, 1)?;
+    let entries = std::slice::from_ref(&alpha);
+    let mut switched = Lane::new(&signed, entries, LOCAL)?;
+    switched.trap.store(true, Ordering::SeqCst);
+    let by_switch = switched.run(&signed)?;
+    let mut selected = Lane::new(&signed, entries, LOCAL)?;
+    selected.selector.set(Some(TRAP_OBSERVATION.to_vec()));
+    let by_selector = selected.run(&signed)?;
+    assert!(!is_committed(&by_switch), "{by_switch:?}");
+    assert!(!is_committed(&by_selector), "{by_selector:?}");
+    assert_eq!(selected.first(&by_selector)?, switched.first(&by_switch)?);
     Ok(())
 }
 

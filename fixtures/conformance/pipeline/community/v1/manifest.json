@@ -9,31 +9,16 @@
     "#633",
     "#634",
     "#635",
+    "#637",
+    "#638",
+    "#651",
+    "#654",
+    "#655",
+    "#656",
     "ADR-021",
     "ADR-061 r8"
   ],
-  "exclusions": [
-    {
-      "id": "COMMUNITY-RESERVED-PROPOSAL",
-      "reason": "The real community guests emit only prototype.driven, so a community Driver's proposal of a reserved host Event type needs a new guest Component; this profile proves only the first-party refusal of that proposal and the refused reserved-type claim of either isolation class",
-      "owner": "#637"
-    },
-    {
-      "id": "INVALID-GUEST-OUTPUT",
-      "reason": "The real community guests always return well-formed output, so a community Driver's invalid guest output (InvalidGuestOutput) needs a new guest Component, and an ABI- or manifest-invalid release needs a malformed release fixture; this profile proves only the invalid pin, registration and denied-capability release refusals of either isolation class and, through PCF-CPH-003, the first-party invalid-draft refusals",
-      "owner": "#637"
-    },
-    {
-      "id": "OTHER-RESOURCE-LIMITS",
-      "reason": "PCF-CPH-010 exhausts a community release through its memory budget only; the signed-release test world fixes the fuel, host-call and output budgets of a release, and the real guests make one host call and emit one small Event, so the fuel, host-call and output limits of a community Driver on the real worker need a release shape with those budgets or a new guest Component",
-      "owner": "#637"
-    },
-    {
-      "id": "SQLITE-STORE",
-      "reason": "The community pass world runs on MemoryStore only, so this profile proves no SQLite parity of the community path",
-      "owner": "#638"
-    }
-  ],
+  "exclusions": [],
   "cases": [
     {
       "id": "PCF-CPH-001",
@@ -41,6 +26,8 @@
       "sources": [
         "#489",
         "#631",
+        "#638",
+        "#651",
         "ADR-021 decision 7",
         "ADR-061 r8"
       ],
@@ -49,7 +36,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -87,6 +75,8 @@
       "sources": [
         "#489",
         "#631",
+        "#638",
+        "#651",
         "ADR-021 decision 7",
         "ADR-061 r8"
       ],
@@ -95,7 +85,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -124,6 +115,8 @@
       "sources": [
         "#489",
         "#632",
+        "#638",
+        "#651",
         "ADR-021 decision 7",
         "ADR-061 r8"
       ],
@@ -132,7 +125,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -172,6 +166,8 @@
       "sources": [
         "#489",
         "#632",
+        "#638",
+        "#651",
         "ADR-021 decision 7",
         "ADR-061 r8"
       ],
@@ -180,7 +176,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -216,6 +213,8 @@
       "sources": [
         "#489",
         "#633",
+        "#638",
+        "#651",
         "ADR-021 decision 7",
         "ADR-061 r8"
       ],
@@ -224,7 +223,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -273,6 +273,8 @@
       "sources": [
         "#489",
         "#633",
+        "#638",
+        "#651",
         "ADR-021 decision 7",
         "ADR-061 r8"
       ],
@@ -281,7 +283,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -321,6 +324,8 @@
       "sources": [
         "#489",
         "#633",
+        "#638",
+        "#651",
         "ADR-021 decision 7",
         "ADR-061 r8"
       ],
@@ -329,7 +334,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -354,6 +360,8 @@
       "sources": [
         "#489",
         "#633",
+        "#638",
+        "#651",
         "ADR-021 decision 7",
         "ADR-061 r8"
       ],
@@ -362,7 +370,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -429,6 +438,8 @@
       "sources": [
         "#489",
         "#633",
+        "#638",
+        "#651",
         "ADR-021 decision 7",
         "ADR-061 r8"
       ],
@@ -437,7 +448,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": null,
       "expected": {
@@ -456,6 +468,8 @@
       "sources": [
         "#489",
         "#634",
+        "#638",
+        "#651",
         "ADR-021 decision 7",
         "ADR-061 r8"
       ],
@@ -464,7 +478,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -532,6 +547,8 @@
       "sources": [
         "#489",
         "#635",
+        "#638",
+        "#651",
         "ADR-021 decision 7",
         "ADR-061 r8"
       ],
@@ -540,7 +557,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -582,6 +600,8 @@
       "sources": [
         "#489",
         "#635",
+        "#638",
+        "#651",
         "ADR-021 decision 7",
         "ADR-061 r8"
       ],
@@ -590,7 +610,8 @@
         "status": "applicable"
       },
       "stores": [
-        "memory"
+        "memory",
+        "sqlite"
       ],
       "observation_profile": "non-participant",
       "expected": {
@@ -639,6 +660,238 @@
         "first-party.timeline-unchanged-by-recovery": "true",
         "first-party.recover-again": "NoScheduledAdmissionInDoubt",
         "parity.recovered-without-rerun-either-class": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-013",
+      "title": "A community Driver on the real worker whose probe guest proposes the host's reserved release-activation type is refused with the same ReservedHostDraft refusal and failure class as the first-party proposal of that type: the whole pass commits nothing, the first-party sibling's staged output included, no Plugin is quarantined, and the next pass commits",
+      "sources": [
+        "#489",
+        "#637",
+        "#654",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "first-party-reserved.result": "Failed",
+        "first-party-reserved.timeline": "",
+        "first-party-reserved.entity": "",
+        "first-party-reserved.receipt.names-events": "false",
+        "first-party-reserved.steps": "1,1",
+        "first-party-reserved.availability": "Available,Available",
+        "first-party-reserved.owner": "",
+        "first-party-reserved.follows-host-schedule": "true",
+        "first-party-reserved.refusal": "ReservedHostDraft(pigloros.plugin.release-activated)",
+        "first-party-reserved.pass-failure": "Unrelated",
+        "community-reserved.result": "Failed",
+        "community-reserved.timeline": "",
+        "community-reserved.entity": "",
+        "community-reserved.receipt.names-events": "false",
+        "community-reserved.steps": "1,1",
+        "community-reserved.availability": "Available,Available",
+        "community-reserved.owner": "",
+        "community-reserved.follows-host-schedule": "true",
+        "community-reserved.refusal": "ReservedHostDraft(pigloros.plugin.release-activated)",
+        "community-reserved.pass-failure": "Unrelated",
+        "community-reserved.gate": "none",
+        "community-reserved.member": "none/Available/none",
+        "community-next.result": "Committed",
+        "community-next.timeline": "1:parity.first-party,2:prototype.driven",
+        "community-next.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "community-next.receipt.names-events": "true",
+        "community-next.steps": "1,1",
+        "community-next.availability": "Available,Available",
+        "community-next.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "community-next.follows-host-schedule": "true",
+        "community.community-receipts": "none/Discarded,none/Committed",
+        "parity.first-party-equals-community": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-014",
+      "title": "Invalid guest output and invalid releases fail closed: a community Driver whose guest output fails validation on the real worker fails the whole pass with InvalidGuestOutput, discards the first-party sibling's staged output and quarantines nothing, as a first-party Driver's invalid draft discards its whole pass under an authority refusal; a release whose ABI the real worker does not support and a closure whose manifest is not PMF1 are refused without changing the registry",
+      "sources": [
+        "#489",
+        "#637",
+        "#655",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "community-invalid-output.result": "Failed",
+        "community-invalid-output.timeline": "",
+        "community-invalid-output.entity": "",
+        "community-invalid-output.receipt.names-events": "false",
+        "community-invalid-output.steps": "1,1",
+        "community-invalid-output.availability": "Available,Available",
+        "community-invalid-output.owner": "",
+        "community-invalid-output.follows-host-schedule": "true",
+        "community-invalid-output.refusal": "CommunityPlugin(InvalidGuestOutput) host=InvalidGuestOutput",
+        "community-next.result": "Committed",
+        "community-next.timeline": "1:parity.first-party,2:prototype.driven",
+        "community-next.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "community-next.receipt.names-events": "true",
+        "community-next.steps": "1,1",
+        "community-next.availability": "Available,Available",
+        "community-next.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "community-next.follows-host-schedule": "true",
+        "community.community-receipts": "InvalidGuestOutput/Discarded,none/Committed",
+        "first-party-invalid-draft.result": "Failed",
+        "first-party-invalid-draft.timeline": "",
+        "first-party-invalid-draft.entity": "",
+        "first-party-invalid-draft.receipt.names-events": "false",
+        "first-party-invalid-draft.steps": "1,1",
+        "first-party-invalid-draft.availability": "Available,Available",
+        "first-party-invalid-draft.owner": "",
+        "first-party-invalid-draft.follows-host-schedule": "true",
+        "first-party-invalid-draft.refusal": "Authority(UnauthorizedSource)",
+        "abi-invalid-release.refusal": "IncompatibleAbi",
+        "abi-invalid-release.registry-unchanged": "true",
+        "manifest-invalid-release.refusal": "InvalidManifest",
+        "manifest-invalid-release.registry-unchanged": "true",
+        "parity.whole-pass-discarded-either-class": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-015",
+      "title": "A community release over its fuel, host-call or output budget on the real worker (one unit of fuel for the C guest; two host calls or one Event byte for the Rust guest) fails the whole pass with that typed limit and discards the first-party sibling's staged output, as a first-party Driver over the host Tick draft budget does. Only the exhausted community Plugin is quarantined (ResourceExhausted). The next pass within budget commits (for the community path, in a fresh lane over an in-budget successor release)",
+      "sources": [
+        "#489",
+        "#634",
+        "#637",
+        "#656",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "fuel.exhausted.result": "Failed",
+        "fuel.exhausted.timeline": "",
+        "fuel.exhausted.entity": "",
+        "fuel.exhausted.receipt.names-events": "false",
+        "fuel.exhausted.steps": "1,1",
+        "fuel.exhausted.availability": "Available,ResourceExhausted",
+        "fuel.exhausted.owner": "",
+        "fuel.exhausted.follows-host-schedule": "true",
+        "fuel.exhausted.refusal": "CommunityPlugin(FuelExhausted) host=FuelExhausted",
+        "fuel.quarantined.result": "Failed",
+        "fuel.quarantined.timeline": "",
+        "fuel.quarantined.entity": "",
+        "fuel.quarantined.receipt.names-events": "false",
+        "fuel.quarantined.steps": "0,0",
+        "fuel.quarantined.availability": "Available,ResourceExhausted",
+        "fuel.quarantined.owner": "",
+        "fuel.quarantined.follows-host-schedule": "true",
+        "fuel.quarantined.refusal": "ImplementationUnavailable(ResourceExhausted)",
+        "fuel.community-receipts": "FuelExhausted/Discarded",
+        "fuel.successor.result": "Committed",
+        "fuel.successor.timeline": "1:parity.first-party,2:prototype.driven",
+        "fuel.successor.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "fuel.successor.receipt.names-events": "true",
+        "fuel.successor.steps": "1,1",
+        "fuel.successor.availability": "Available,Available",
+        "fuel.successor.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "fuel.successor.follows-host-schedule": "true",
+        "host-calls.exhausted.result": "Failed",
+        "host-calls.exhausted.timeline": "",
+        "host-calls.exhausted.entity": "",
+        "host-calls.exhausted.receipt.names-events": "false",
+        "host-calls.exhausted.steps": "1,1",
+        "host-calls.exhausted.availability": "Available,ResourceExhausted",
+        "host-calls.exhausted.owner": "",
+        "host-calls.exhausted.follows-host-schedule": "true",
+        "host-calls.exhausted.refusal": "CommunityPlugin(HostCallLimitExceeded) host=HostCallLimitExceeded",
+        "host-calls.quarantined.result": "Failed",
+        "host-calls.quarantined.timeline": "",
+        "host-calls.quarantined.entity": "",
+        "host-calls.quarantined.receipt.names-events": "false",
+        "host-calls.quarantined.steps": "0,0",
+        "host-calls.quarantined.availability": "Available,ResourceExhausted",
+        "host-calls.quarantined.owner": "",
+        "host-calls.quarantined.follows-host-schedule": "true",
+        "host-calls.quarantined.refusal": "ImplementationUnavailable(ResourceExhausted)",
+        "host-calls.community-receipts": "HostCallLimitExceeded/Discarded",
+        "host-calls.successor.result": "Committed",
+        "host-calls.successor.timeline": "1:parity.first-party,2:prototype.driven",
+        "host-calls.successor.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "host-calls.successor.receipt.names-events": "true",
+        "host-calls.successor.steps": "1,1",
+        "host-calls.successor.availability": "Available,Available",
+        "host-calls.successor.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "host-calls.successor.follows-host-schedule": "true",
+        "output.exhausted.result": "Failed",
+        "output.exhausted.timeline": "",
+        "output.exhausted.entity": "",
+        "output.exhausted.receipt.names-events": "false",
+        "output.exhausted.steps": "1,1",
+        "output.exhausted.availability": "Available,ResourceExhausted",
+        "output.exhausted.owner": "",
+        "output.exhausted.follows-host-schedule": "true",
+        "output.exhausted.refusal": "CommunityPlugin(OutputLimitExceeded) host=OutputLimitExceeded",
+        "output.quarantined.result": "Failed",
+        "output.quarantined.timeline": "",
+        "output.quarantined.entity": "",
+        "output.quarantined.receipt.names-events": "false",
+        "output.quarantined.steps": "0,0",
+        "output.quarantined.availability": "Available,ResourceExhausted",
+        "output.quarantined.owner": "",
+        "output.quarantined.follows-host-schedule": "true",
+        "output.quarantined.refusal": "ImplementationUnavailable(ResourceExhausted)",
+        "output.community-receipts": "OutputLimitExceeded/Discarded",
+        "output.successor.result": "Committed",
+        "output.successor.timeline": "1:parity.first-party,2:prototype.driven",
+        "output.successor.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "output.successor.receipt.names-events": "true",
+        "output.successor.steps": "1,1",
+        "output.successor.availability": "Available,Available",
+        "output.successor.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "output.successor.follows-host-schedule": "true",
+        "first-party-exhausted.result": "Failed",
+        "first-party-exhausted.timeline": "",
+        "first-party-exhausted.entity": "",
+        "first-party-exhausted.receipt.names-events": "false",
+        "first-party-exhausted.steps": "1,1",
+        "first-party-exhausted.availability": "Available,Available",
+        "first-party-exhausted.owner": "",
+        "first-party-exhausted.follows-host-schedule": "true",
+        "first-party-exhausted.refusal": "ResourceExhausted(host-tick-budget,3>2)",
+        "first-party-recovered.result": "Committed",
+        "first-party-recovered.timeline": "1:prototype.driven,2:parity.first-party",
+        "first-party-recovered.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "first-party-recovered.receipt.names-events": "true",
+        "first-party-recovered.steps": "1,1",
+        "first-party-recovered.availability": "Available,Available",
+        "first-party-recovered.owner": "prototype.driven=GovernedCommunity,parity.first-party=OperatorTrustedNative",
+        "first-party-recovered.follows-host-schedule": "true",
+        "first-party.community-receipts": "none/Discarded,none/Committed",
+        "parity.whole-pass-discarded-either-class": "true",
+        "parity.next-pass-within-budget-commits": "true"
       }
     }
   ]

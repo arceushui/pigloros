@@ -19,7 +19,7 @@ use pos_runtime::community_plugin_host::{
 pub const RUST_GUEST: &[u8] = include_bytes!(
     "../../../../plugins/community/examples/compatibility-prototype/fixtures/rust-guest.wasm"
 );
-/// The Plugin ID both compatibility guests describe.
+/// The Plugin ID every compatibility guest describes.
 pub const PLUGIN_ID: &str = "pigloros.compatibility-prototype";
 /// The release's declared budget; the V1 profile clamps memory and fuel.
 pub const BUDGET: DeterministicBudgetV1 = DeterministicBudgetV1::MAXIMA;

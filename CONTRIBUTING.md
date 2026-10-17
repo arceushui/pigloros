@@ -180,16 +180,19 @@ check.
 
 ### Stage 2: core quality gates
 
-After preflight, the four core jobs start together:
+After preflight, the core jobs start together:
 
 ```mermaid
 flowchart TD
     P["preflight-gate"] --> F["fmt"]
-    P --> T["full workspace test"]
+    P --> T["test: checks and doctests"]
+    P --> S["test-shard x3: nextest partitions"]
     P --> C["clippy"]
     P --> V["one coverage execution"]
+    S --> A["test-shards: every test ran once"]
     F --> G["core-gate"]
     T --> G
+    A --> G
     C --> G
     V --> G
 ```
@@ -197,15 +200,21 @@ flowchart TD
 The core checks and their immediate cargo-crap consumer mean:
 
 1. `fmt` runs `cargo fmt --all -- --check`.
-2. `test` checks the workspace with default features disabled and all
-   features enabled, then runs all tests with `--include-ignored`. The test
-   gate is workspace-wide; Cargo has no built-in changed-test selector.
-3. `clippy` runs all targets with warnings denied and the repository's
-   pedantic policy.
-4. `coverage` performs one complete `cargo llvm-cov` run. `covgate` checks
-   changed production Rust code first from that report, then the same report
-   is checked against the full workspace 99% line and 99% region floor. The
-   resulting LCOV is uploaded for the next gate.
+2. `test` checks the workspace with default features disabled and runs the
+   doctests with `cargo test --doc -- --include-ignored`. The `test-shard`
+   matrix runs every other test with cargo-nextest `--run-ignored all`, split
+   across three runners by `--partition slice:k/3`. `test-shards` then proves
+   from the shard summaries that every test ran exactly once and none was
+   skipped. The test gate is workspace-wide; Cargo has no built-in
+   changed-test selector. The crypto dependencies that dominate test CPU time
+   build at `opt-level = 3` in the dev and test profiles (see `Cargo.toml`);
+   workspace crates stay unoptimized.
+3. `clippy` runs all targets with all features and warnings denied and the
+   repository's pedantic policy. It is the all-features type check.
+4. `coverage` performs one complete `cargo llvm-cov nextest` run. `covgate`
+   checks changed production Rust code first from that report, then the same
+   report is checked against the full workspace 99% line and 99% region
+   floor. The resulting LCOV is uploaded for the next gate.
 5. `cargo-crap` consumes that LCOV and a trusted baseline. Existing function
    scores may not regress, and new functions must score at most 30.
 
@@ -228,6 +237,9 @@ flowchart LR
 normal checks. Audit, deny, and shear share one runner; browser parity replaces
 the completed WASM packaging job rather than adding another concurrent runner.
 CodeQL is called from this stage instead of starting independently on every PR.
+Documentation-only pull requests have no `cargo-crap` run, so CodeQL starts
+right after the scope job there; it is never skipped, because the `main`
+ruleset's code-scanning rule needs an analysis for every PR head.
 
 ```mermaid
 flowchart TD
@@ -238,7 +250,7 @@ flowchart TD
     CR --> U["cargo-geiger"]
     CR --> X["Docker"]
     CR --> W["WASM package"]
-    CR --> Q["CodeQL"]
+    CR --> Q["CodeQL (docs-only PRs start it after the scope job)"]
     W --> BP["browser parity"]
     D --> G["standard-gate"]
     E --> G
