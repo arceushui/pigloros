@@ -70,6 +70,37 @@ fn host_table() -> Vec<(Error, Cause)> {
     table
 }
 
+/// The number of `CommunityPluginHostErrorV1` variants.
+const VARIANTS: usize = 20;
+
+/// A distinct index in `0..VARIANTS` for every variant, as an exhaustive
+/// `match` with no wildcard arm: a new variant does not compile until it gets
+/// an index, and the tests then fail until `host_table` samples it.
+const fn variant_index(error: Error) -> usize {
+    match error {
+        Error::InvalidManifest => 0,
+        Error::ArtifactTrustDenied { .. } => 1,
+        Error::ArtifactRevoked { .. } => 2,
+        Error::IncompatibleAbi => 3,
+        Error::MissingFeature { .. } => 4,
+        Error::CapabilityDenied { .. } => 5,
+        Error::InvalidInvocation => 6,
+        Error::InvalidGuestOutput => 7,
+        Error::UnsupportedSchema => 8,
+        Error::StateMigrationFailed => 9,
+        Error::GuestDeclaredFailure => 10,
+        Error::ComponentTrap { .. } => 11,
+        Error::WorkerCrashed => 12,
+        Error::FuelExhausted => 13,
+        Error::MemoryLimitExceeded => 14,
+        Error::HostCallLimitExceeded => 15,
+        Error::OutputLimitExceeded => 16,
+        Error::DeterministicDeadlineExceeded => 17,
+        Error::OperationalWatchdogStop => 18,
+        Error::AtomicCommitFailed { .. } => 19,
+    }
+}
+
 /// The cause of `error` as an exhaustive `match` with no wildcard arm: a new
 /// host error variant does not compile until it is classified here, and the
 /// tests then require `HOST_CAUSES` to agree.
@@ -133,6 +164,12 @@ fn every_host_error_maps_to_its_cause() {
         let failure = PassFailureV1::Host(error);
         assert_eq!(Cause::from_pass_failure(failure), cause, "{error:?}");
     }
+    let mut sampled = [false; VARIANTS];
+    for (error, _) in &table {
+        sampled[variant_index(*error)] = true;
+    }
+    assert_eq!(sampled, [true; VARIANTS]);
+    assert_eq!(HOST_CAUSES.len(), VARIANTS);
     for (name, _) in HOST_CAUSES {
         let sampled = table.iter().any(|(error, _)| error.name() == name);
         assert!(sampled, "{name}");
