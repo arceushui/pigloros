@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import pathlib
 import subprocess
 import unittest
@@ -32,6 +33,11 @@ else
   test "${{ needs.mutation.result }}" = skipped
 fi
 """
+# Pin the complete reviewed parsed program, including comments and heredoc data.
+# This policy snapshot is not a shell-semantics oracle; digest changes need review.
+MUTATION_RUN_SHA256 = (
+    "d6cd098db5944465576b8168bab897e7fb8b97f744e43eb5cde66d14e9ee2ca7"
+)
 
 
 def check_contract(workflow: dict) -> None:
@@ -117,6 +123,11 @@ def check_contract(workflow: dict) -> None:
     )
     if required not in command or not command.endswith('exit "$mutation_status"'):
         raise AssertionError("preserve mutation scope, limits, harness and exit status")
+    if (
+        hashlib.sha256(mutation_step["run"].encode("utf-8")).hexdigest()
+        != MUTATION_RUN_SHA256
+    ):
+        raise AssertionError("preserve the reviewed mutation program, not inert command text")
     gate = jobs["mutation-gate"]
     if (
         gate.get("needs") != ["mutation-changes", "mutation-baseline", "mutation"]
@@ -181,6 +192,30 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
             run["run"] = run["run"].replace("--include-ignored", "")
             with self.subTest(job=name), self.assertRaises(AssertionError):
                 check_contract(changed)
+
+    def test_rejects_inert_mutant_programs(self) -> None:
+        run = next(
+            step["run"] for step in self.workflow["jobs"]["mutation"]["steps"]
+            if step.get("name") == "Run mutants in changed lines"
+        )
+        for name, inert in (
+            ("early success", "exit 0\n" + run),
+            ("false branch", "mutation_status=0\nif false; then\n" + run
+             + 'fi\nexit "$mutation_status"\n'),
+            ("unused function", "never_run_mutants() {\n" + run
+             + '}\nmutation_status=0\nexit "$mutation_status"\n'),
+            ("inert heredoc", ": <<'DISABLED_MUTATION'\n" + run
+             + 'DISABLED_MUTATION\nmutation_status=0\nexit "$mutation_status"\n'),
+        ):
+            with self.subTest(program=name):
+                changed = copy.deepcopy(self.workflow)
+                step = next(
+                    step for step in changed["jobs"]["mutation"]["steps"]
+                    if step.get("name") == "Run mutants in changed lines"
+                )
+                step["run"] = inert
+                with self.assertRaisesRegex(AssertionError, "reviewed mutation program"):
+                    check_contract(changed)
 
     def test_rejects_missing_or_nonserial_compiler_jobs(self) -> None:
         for value in (None, "", "auto", "2", "4", 1):
