@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 
 use pos_core::counterfactual_store::test_fixtures;
 use pos_core::counterfactual_store::test_fixtures::{
-    class_row, collect_rows, coord, coord_at, edge_row, edge_tail, edge_tail_with_rule, err, facts,
-    frontier_frame, hash, hash_field, id_field, indexed_hash, invalidation_frame,
+    assert_ok, class_row, collect_rows, coord, coord_at, edge_row, edge_tail, edge_tail_with_rule,
+    err, facts, frontier_frame, hash, hash_field, id_field, indexed_hash, invalidation_frame,
     invalidation_middle, node_bytes, node_row, ok, request, text_field, uint, EDGE_HEAD,
 };
 use pos_core::{
@@ -1439,9 +1439,9 @@ fn tick_18_record() -> TickRecord {
 
 fn committed_store() -> FakeStore {
     let mut store = FakeStore::new();
-    let outcome =
-        ok(store
-            .commit_counterfactual_invalidation_with_dependencies(&command(), &sample_record()));
+    let outcome = assert_ok(
+        store.commit_counterfactual_invalidation_with_dependencies(&command(), &sample_record()),
+    );
     assert!(matches!(
         outcome,
         CounterfactualInvalidationOutcomeV1::Committed(_)
@@ -1474,9 +1474,9 @@ fn invalidation_records_its_dependencies_under_the_new_generation() {
 fn conflicting_or_misplaced_invalidations_record_nothing() {
     let mut store = FakeStore::new();
     store.facts.trust_epoch = 99;
-    let outcome =
-        ok(store
-            .commit_counterfactual_invalidation_with_dependencies(&command(), &sample_record()));
+    let outcome = assert_ok(
+        store.commit_counterfactual_invalidation_with_dependencies(&command(), &sample_record()),
+    );
     assert_eq!(
         outcome,
         CounterfactualInvalidationOutcomeV1::InvalidationConflict(

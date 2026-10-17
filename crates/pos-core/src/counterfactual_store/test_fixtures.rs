@@ -199,13 +199,17 @@ pub const PROVENANCE_DIGEST: Hash = Hash::from_bytes([99; 32]);
 /// Unwrap `result`, unwinding with its error when it failed.
 ///
 /// The unwind carries `unexpected test error: {error:?}` and does not run the
-/// panic hook. Tests call it as a statement to assert that a write succeeded,
-/// so it is not `#[must_use]`.
-#[allow(clippy::must_use_candidate)]
+/// panic hook. Use [`assert_ok`] to discard the value.
+#[must_use]
 pub fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     result.unwrap_or_else(|error| {
         std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
     })
+}
+
+/// Assert that `result` succeeded and discard its value, as [`ok`] does.
+pub fn assert_ok<T, E: std::fmt::Debug>(result: Result<T, E>) {
+    let _ = ok(result);
 }
 
 /// Unwrap the error of `result`, unwinding with its value when it succeeded.

@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 
 use pos_core::counterfactual_store::test_fixtures::{
-    err, hash, hash_field, indexed_hash, node_bytes, ok, text_field, uint,
+    assert_ok, err, hash, hash_field, indexed_hash, node_bytes, ok, text_field, uint,
 };
 use pos_core::output_policy::OutputAuthorityV1;
 use pos_core::{
@@ -322,7 +322,7 @@ fn the_rule_registry_lists_seven_rules_with_one_class_each() {
 fn bytes_hex(bytes: &[u8]) -> String {
     let mut text = String::new();
     for byte in bytes {
-        ok(write!(text, "{byte:02x}"));
+        assert_ok(write!(text, "{byte:02x}"));
     }
     text
 }

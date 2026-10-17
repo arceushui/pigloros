@@ -9,7 +9,8 @@
 use std::sync::Arc;
 
 use pos_core::counterfactual_store::test_fixtures::{
-    class_row, collect_rows, draft, err, hash, ok, prefix_scope, request, SeededFactualTickV1,
+    assert_ok, class_row, collect_rows, draft, err, hash, ok, prefix_scope, request,
+    SeededFactualTickV1,
 };
 use pos_core::{
     CoreError, CounterfactualDependencyReadPortV1, CounterfactualStoreErrorV1,
@@ -123,15 +124,15 @@ struct Lineage {
 fn lineage() -> Lineage {
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
     let mut store = MemoryStore::new();
-    ok(store.bind_erasure_gate(Arc::clone(&gate)));
+    assert_ok(store.bind_erasure_gate(Arc::clone(&gate)));
     let root = ok(store.create_timeline("factual-root")).id();
     let events: Vec<EventDraft> = (0..14).map(draft).collect();
-    ok(store.append(root, &events));
-    ok(store.seed_factual_prefix(root, &root_ticks()));
+    assert_ok(store.append(root, &events));
+    assert_ok(store.seed_factual_prefix(root, &root_ticks()));
     let mid = fork_at(&mut store, root, 6);
     let own: Vec<EventDraft> = (0..3).map(draft).collect();
-    ok(store.append(mid, &own));
-    ok(store.seed_factual_prefix(mid, &[fork_tick()]));
+    assert_ok(store.append(mid, &own));
+    assert_ok(store.seed_factual_prefix(mid, &[fork_tick()]));
     let deep = fork_at(&mut store, mid, 7);
     Lineage {
         store,
@@ -290,11 +291,11 @@ fn f4_event_nodes_resolve_through_ancestry_and_stop_at_each_cut() {
 fn f4_a_binding_to_an_unrecorded_node_resolves_to_nothing() {
     let mut store = MemoryStore::new();
     let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-    ok(store.bind_erasure_gate(gate));
+    assert_ok(store.bind_erasure_gate(gate));
     let root = ok(store.create_timeline("factual-dangling")).id();
     let mut tick = seeded_tick(ROOT_LANE, 1, OWNER_A, 1, 1);
     tick.event_nodes = vec![(Seq::from_u64(1), hash(250))];
-    ok(store.seed_factual_prefix(root, &[tick]));
+    assert_ok(store.seed_factual_prefix(root, &[tick]));
 
     let resolved = ok(store.nodes_for_committed_events(root, &seq_list(&[1])));
 
@@ -428,14 +429,14 @@ fn f9_missing_and_deleted_timelines_are_not_found() {
     );
 
     // Deleting a Timeline purges its set; the others stay readable.
-    ok(store.delete_timeline(deep));
-    ok(store.delete_timeline(mid));
+    assert_ok(store.delete_timeline(deep));
+    assert_ok(store.delete_timeline(mid));
     assert!(matches!(
         err(store.factual_set_counts(mid)),
         CoreError::TimelineNotFound(_)
     ));
     assert_eq!(head_of(store, root), head(3, 8));
-    ok(store.delete_timeline(root));
+    assert_ok(store.delete_timeline(root));
     assert!(matches!(
         err(store.last_committed_factual_tick(root)),
         CoreError::TimelineNotFound(_)
@@ -480,7 +481,7 @@ fn f2_cut_tick_at_is_a_boundary_on_a_timeline_without_ticks_and_at_seq_zero() {
     let mut lineage = lineage();
     let bare = ok(lineage.store.create_timeline("factual-bare-cut")).id();
     let events: Vec<EventDraft> = (0..3).map(draft).collect();
-    ok(lineage.store.append(bare, &events));
+    assert_ok(lineage.store.append(bare, &events));
     let store = &lineage.store;
 
     // No Tick is recorded, so every `seq`, beyond the head too, is a boundary.
