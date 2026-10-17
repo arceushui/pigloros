@@ -1652,7 +1652,7 @@ fn c10_a_page_is_capped_and_keyset_paging_is_stable_across_reopen() {
     let scope = prefix_scope(root, u64::MAX);
     let store = open(&fixture.path);
     let first: NodePage =
-        assert_ok(store.read_dependency_nodes(&request(scope, None, MAX_DEPENDENCY_PAGE_ROWS_V1)));
+        ok(store.read_dependency_nodes(&request(scope, None, MAX_DEPENDENCY_PAGE_ROWS_V1)));
     assert_eq!(first.items().len(), MAX_DEPENDENCY_PAGE_ROWS_V1);
     assert_eq!(first.items()[0].coordinate().tick(), 1);
     let last = first.items()[MAX_DEPENDENCY_PAGE_ROWS_V1 - 1]
@@ -1674,11 +1674,8 @@ fn c10_a_page_is_capped_and_keyset_paging_is_stable_across_reopen() {
 
     // The same cursor continues identically after a reopen.
     let reopened = open(&fixture.path);
-    let again = assert_ok(reopened.read_dependency_nodes(&request(
-        scope,
-        cursor,
-        MAX_DEPENDENCY_PAGE_ROWS_V1,
-    )));
+    let again =
+        ok(reopened.read_dependency_nodes(&request(scope, cursor, MAX_DEPENDENCY_PAGE_ROWS_V1)));
     assert_eq!(again, second);
     let all = ok(nodes(&reopened, scope, 100));
     assert_eq!(all.len(), MAX_DEPENDENCY_PAGE_ROWS_V1 + 1);

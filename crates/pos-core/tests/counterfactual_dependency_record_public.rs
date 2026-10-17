@@ -1439,9 +1439,9 @@ fn tick_18_record() -> TickRecord {
 
 fn committed_store() -> FakeStore {
     let mut store = FakeStore::new();
-    let outcome = assert_ok(
-        store.commit_counterfactual_invalidation_with_dependencies(&command(), &sample_record()),
-    );
+    let outcome =
+        ok(store
+            .commit_counterfactual_invalidation_with_dependencies(&command(), &sample_record()));
     assert!(matches!(
         outcome,
         CounterfactualInvalidationOutcomeV1::Committed(_)
@@ -1474,9 +1474,9 @@ fn invalidation_records_its_dependencies_under_the_new_generation() {
 fn conflicting_or_misplaced_invalidations_record_nothing() {
     let mut store = FakeStore::new();
     store.facts.trust_epoch = 99;
-    let outcome = assert_ok(
-        store.commit_counterfactual_invalidation_with_dependencies(&command(), &sample_record()),
-    );
+    let outcome =
+        ok(store
+            .commit_counterfactual_invalidation_with_dependencies(&command(), &sample_record()));
     assert_eq!(
         outcome,
         CounterfactualInvalidationOutcomeV1::InvalidationConflict(
