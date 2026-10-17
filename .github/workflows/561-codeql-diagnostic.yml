@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
-          ref: f958d197e22e0d48ab05d1cc36159b554a83bfce
+          ref: 371ba6f573d7bcb88cf11821e8ebc9c206d8f361
           persist-credentials: false
       - name: Record exact source and generate the existing guest bindings
         timeout-minutes: 5
@@ -25,7 +25,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           git rev-parse HEAD | tee artifacts/source-sha.txt
-          test "$(git rev-parse HEAD)" = f958d197e22e0d48ab05d1cc36159b554a83bfce
+          test "$(git rev-parse HEAD)" = 371ba6f573d7bcb88cf11821e8ebc9c206d8f361
           test -z "$(git status --porcelain --untracked-files=no)"
           # Reuse the canonical install-tools.sh pin, verified before downloading.
           installer=plugins/community/examples/compatibility-prototype/install-tools.sh
@@ -84,7 +84,8 @@ jobs:
         run: |
           set -euo pipefail
           results="${RUNNER_TEMP}/561-codeql-databases/rust/results"
-          for query in ExtractionErrors ExtractionWarnings; do
+          for query in ExtractionErrors ExtractionWarnings \
+            NumberOfSuccessfullyExtractedFiles NumberOfFilesExtractedWithErrors; do
             mapfile -t reports < <(find "$results" -type f -name "$query.bqrs")
             test "${#reports[@]}" -eq 1
             "$CODEQL" bqrs decode --format=csv "${reports[0]}" \
