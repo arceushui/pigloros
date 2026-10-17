@@ -44,7 +44,7 @@ const COMMUNITY_VERSION: u64 = 1;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/community/v1/manifest.json");
-const MANIFEST_SHA256: &str = "984fa74b153bc786a45c9fc30359372b379a208eb22e4e053eee6c4c7a2b2473";
+const MANIFEST_SHA256: &str = "7c7cdef61b19e9a90ef71565cb83ab02fbe77a10b803391b3cbbf51841a134d8";
 
 /// Every runner of profile version 1, by case identifier.
 const RUNNERS: [(&str, Runner); 12] = [
