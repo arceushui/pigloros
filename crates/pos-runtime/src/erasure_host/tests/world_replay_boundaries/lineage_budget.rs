@@ -372,9 +372,9 @@ fn classified_requirements_bind_exact_head_order_count_and_complete_ancestry() {
             vec![wrong_record],
             Err(ErasureHostErrorV1::Conflict),
         ),
-        // Structurally consistent imported authority on this ordinary native
-        // lineage must reach, and be refused by, the real authority validator.
-        // It is a denial control, never fabricated successful import evidence.
+        // A structurally consistent local publication requirement on this
+        // ordinary lineage must reach, and fail, the real authority validator.
+        // It is a denial control, never fabricated successful authority evidence.
         (
             classified_sources(required),
             vec![required],
