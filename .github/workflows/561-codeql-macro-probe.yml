@@ -1,0 +1,233 @@
+# Temporary causal probe, not a replacement for the failed full strict scan.
+name: 561-codeql-macro-probe
+
+on:
+  push:
+    branches: [redmine/561-codeql-macro-probe]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  macro-ownership:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          ref: bb69188dc7f152653bb64e64916e2e8ff9c5c73f
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.97.1
+      - name: Generate bounded no-dependency syntax controls
+        timeout-minutes: 1
+        env:
+          PROBE_WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = bb69188dc7f152653bb64e64916e2e8ff9c5c73f
+          test -z "$(git status --porcelain --untracked-files=no)"
+          test ! -e .561-codeql-macro-probe
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(".561-codeql-macro-probe")
+          artifact = Path("artifacts/macro-probe")
+          cases = ("export", "lexical", "include", "module")
+          sources = {
+              "Cargo.toml": '[workspace]\nresolver = "2"\nmembers = '
+              + json.dumps(list(cases)) + "\n",
+          }
+          for case in cases:
+              sources[f"{case}/Cargo.toml"] = (
+                  f'[package]\nname = "probe-{case}"\nversion = "0.0.0"\n'
+                  'edition = "2021"\n'
+              )
+              method = f"forwarded_{case}_value"
+              macro = f"forward_{case}"
+              types = (
+                  f"pub trait ReadPort {{ fn {method}(&self) -> u64; }}\n"
+                  "pub struct Backing { pub value: u64 }\n"
+                  "impl Backing { pub fn read_value(&self) -> u64 { self.value } }\n"
+                  "pub struct Host { pub inner: Backing }\n"
+              )
+              body = f"fn {method}(&self) -> u64 {{ self.inner.read_value() }}"
+              if case in ("export", "lexical"):
+                  declaration = '#[path = "../../shared/' + case + '.rs"]\npub mod support;\n'
+                  if case == "lexical":
+                      declaration = "#[macro_use]\n" + declaration
+                  call = f"crate::{macro}!()" if case == "export" else f"{macro}!()"
+                  implementation = f"impl ReadPort for Host {{ {call}; }}\n"
+                  sources[f"shared/{case}.rs"] = (
+                      f"#[macro_export]\nmacro_rules! {macro} {{ () => {{ {body} }}; }}\n"
+                  )
+              else:
+                  declaration = (
+                      'include!("forwarding.rs");\n' if case == "include"
+                      else "#[cfg(test)]\n#[macro_use]\nmod forwarding;\n"
+                  )
+                  implementation = f"#[cfg(test)]\n{macro}!(Host);\n"
+                  sources[f"{case}/src/forwarding.rs"] = (
+                      f"#[cfg(test)]\nmacro_rules! {macro} {{ ($host:ty) => {{ "
+                      f"impl crate::ReadPort for $host {{ {body} }} }}; }}\n"
+                  )
+              test = (
+                  "#[cfg(test)]\nmod tests { use super::*;\n"
+                  "#[test] fn native_forwarding_contract() {\n"
+                  "let host = Host { inner: Backing { value: 41 } };\n"
+                  f"assert_eq!(host.{method}(), 41);\n}}\n}}\n"
+              )
+              sources[f"{case}/src/lib.rs"] = declaration + types + implementation + test
+          artifact.mkdir(parents=True)
+          inventory = []
+          for relative, text in sorted(sources.items()):
+              for destination in (root / relative, artifact / "fixture-source" / relative):
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  destination.write_text(text)
+              inventory.append({"path": relative, "sha256": hashlib.sha256(text.encode()).hexdigest()})
+          (artifact / "input-manifest.json").write_text(json.dumps({
+              "feature_source": "bb69188dc7f152653bb64e64916e2e8ff9c5c73f",
+              "workflow_source": os.environ["PROBE_WORKFLOW_SHA"],
+              "fixtures": inventory,
+          }, sort_keys=True, indent=2))
+          PY
+      - name: Execute every native fixture control
+        timeout-minutes: 3
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path .561-codeql-macro-probe/Cargo.toml \
+            --workspace -- --include-ignored 2>&1 | tee artifacts/macro-probe/native-tests.log
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          text = Path("artifacts/macro-probe/native-tests.log").read_text()
+          rows = re.findall(
+              r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; "
+              r"\d+ measured; (\d+) filtered out", text,
+          )
+          assert len(rows) >= 4 and sum(int(row[0]) for row in rows) == 4
+          assert all(all(int(value) == 0 for value in row[1:]) for row in rows)
+          PY
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        id: codeql
+        timeout-minutes: 5
+        with:
+          languages: rust
+          build-mode: none
+          source-root: .561-codeql-macro-probe
+          tools: https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.2/codeql-bundle-linux64.tar.zst
+          db-location: ${{ runner.temp }}/561-macro-probe-databases
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        timeout-minutes: 10
+        with:
+          output: artifacts/macro-probe/sarif
+          upload: never
+          upload-database: false
+          category: /diagnostic/561/macro-ownership
+      - name: Inspect actual expanded method bodies without changing the full scan
+        timeout-minutes: 3
+        env:
+          CODEQL: ${{ steps.codeql.outputs.codeql-path }}
+          CODEQL_VERSION: ${{ steps.codeql.outputs.codeql-version }}
+        run: |
+          set -euo pipefail
+          test "$CODEQL_VERSION" = 2.27.2
+          test -z "$(git diff --name-only HEAD)"
+          database="${RUNNER_TEMP}/561-macro-probe-databases/rust"
+          for query in ExtractionErrors ExtractionWarnings; do
+            mapfile -t reports < <(find "$database/results" -type f -name "$query.bqrs")
+            test "${#reports[@]}" -eq 1
+            "$CODEQL" bqrs decode --format=csv "${reports[0]}" \
+              --output "artifacts/macro-probe/$query.csv"
+          done
+          mapfile -t rust_packs < <(find "$(dirname "$CODEQL")/qlpacks" \
+            -type f -path '*/codeql/rust-all/0.2.23/qlpack.yml')
+          test "${#rust_packs[@]}" -eq 1
+          query_root="${RUNNER_TEMP}/561-macro-probe-queries"
+          mkdir -p "$query_root"
+          export PROBE_QUERY_ROOT="$query_root"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["PROBE_QUERY_ROOT"])
+          (root / "qlpack.yml").write_text(
+              "name: pigloros/temporary-macro-probe\nversion: 0.0.0\n"
+              "dependencies:\n  codeql/rust-all: 0.2.23\n"
+          )
+          query = '''import rust
+          from Function function
+          where exists(function.getBody()) and
+            function.getName().getText().matches("forwarded_%_value")
+          select function.getName().getText(),
+            function.getLocation().getFile().getRelativePath()
+          '''
+          (root / "bodies.ql").write_text(query)
+          Path("artifacts/macro-probe/bodies.ql").write_text(query)
+          PY
+          "$CODEQL" query run --database "$database" --warnings=error \
+            --additional-packs "$(dirname "${rust_packs[0]}")" \
+            --output artifacts/macro-probe/bodies.bqrs "$query_root/bodies.ql"
+          "$CODEQL" bqrs decode --format=csv artifacts/macro-probe/bodies.bqrs \
+            --output artifacts/macro-probe/bodies.csv
+          python3 - <<'PY'
+          import csv
+          import json
+          from pathlib import Path
+
+          root = Path("artifacts/macro-probe")
+          def rows(name):
+              with (root / name).open(newline="") as stream:
+                  values = list(csv.reader(stream))
+              assert values, "missing report header"
+              return values[1:]
+          errors = rows("ExtractionErrors.csv")
+          warnings = rows("ExtractionWarnings.csv")
+          bodies = rows("bodies.csv")
+          names = {row[0] for row in bodies}
+          candidate = {"forwarded_lexical_value", "forwarded_module_value"}
+          reproduced = []
+          for case, macro in (("export", "crate::forward_export"), ("include", "forward_include")):
+              if f"forwarded_{case}_value" not in names and any(
+                  row[0] == f"macro expansion failed for '{macro}'"
+                  and f"/{case}/src/lib.rs" in row[1] for row in warnings
+              ):
+                  reproduced.append(case)
+          sarif_files = list((root / "sarif").glob("*.sarif"))
+          assert sarif_files, "missing probe SARIF"
+          alerts = []
+          for path in sarif_files:
+              sarif = json.loads(path.read_text())
+              assert sarif.get("runs"), "missing SARIF run inventory"
+              for run in sarif["runs"]:
+                  alerts.extend(run.get("results", []))
+          print(json.dumps({
+              "errors": errors, "warnings": warnings, "bodies": bodies,
+              "reproduced_families": reproduced, "alerts": alerts,
+          }))
+          assert not errors, "probe extraction errors remain"
+          assert not alerts, "unexpected probe security alerts"
+          assert candidate <= names, "candidate method bodies were not extracted"
+          assert reproduced, "minimal probe did not reproduce the original gap"
+          assert all("/lexical/" not in row[1] and "/module/" not in row[1] for row in warnings)
+          # This is causal evidence only. The full strict diagnostic stays failed;
+          # neither its assertions nor the feature branch are modified here.
+          PY
+      - name: Retain all untrusted probe evidence on success or failure
+        if: ${{ always() }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: untrusted-561-macro-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/macro-probe/
+          if-no-files-found: error
+          retention-days: 14
