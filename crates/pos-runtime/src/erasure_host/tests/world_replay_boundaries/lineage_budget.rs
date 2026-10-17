@@ -253,3 +253,145 @@ fn owning_fence_funds_visited_and_parent_copies_before_callbacks() {
         assert_eq!(fixture.host.status(), ErasureHostStatusV1::Ready);
     }
 }
+
+#[test]
+fn classified_lineage_requires_each_identity_and_budget_binding_before_native_reads() {
+    let mut fixture = LineageFixture::new();
+    let original = fixture.classified.clone();
+    let limits = original.fork_read_limits();
+    let sources = test_ok(original.fork_sources().ok_or(ErasureHostErrorV1::Conflict)).to_vec();
+    let stale = crate::world_replay::test_verified_world_replay_with_fields_and_bounds(
+        original.closure_digest(),
+        original.timeline_id(),
+        original.source_head(),
+        original.requested_use().clone(),
+        reference(1),
+        pos_core::ErasureReplayClaimV1::Exact,
+        (original.read_bounds(), limits),
+    );
+    let other_limits = test_ok(pos_store::ForkReplayReadLimitsV1::new(
+        8,
+        1_023,
+        262_144,
+        256 * 1024 * 1024,
+        30_000_000,
+    ));
+    for (base, profile, capability_limits, succeeds) in [
+        (
+            original.clone(),
+            original.fork_source_profile(),
+            limits,
+            true,
+        ),
+        (stale, original.fork_source_profile(), limits, false),
+        (original.clone(), None, limits, false),
+        (
+            original.clone(),
+            original.fork_source_profile(),
+            other_limits,
+            false,
+        ),
+    ] {
+        fixture.classified = crate::world_replay::test_verified_world_replay_with_fork_attribution(
+            base,
+            profile,
+            sources.clone(),
+            Vec::new(),
+            capability_limits,
+        );
+        let mut clock = clock_for(None, Duration::ZERO);
+        let start = clock.mark();
+        let mut budget = test_ok(ForkReplayReadBudgetV1::new(limits, start, &mut clock));
+        assert_eq!(
+            fixture.validate(&mut budget),
+            if succeeds {
+                Ok(())
+            } else {
+                Err(ErasureHostErrorV1::Conflict)
+            }
+        );
+        assert_eq!(
+            limits.max_native_bytes() - budget.remaining_native_bytes(),
+            if succeeds { VALIDATION_BYTES } else { 0 }
+        );
+        test_ok(budget.check_time());
+        assert_eq!(fixture.host.status(), ErasureHostStatusV1::Ready);
+    }
+}
+
+#[test]
+fn classified_requirements_bind_exact_head_order_count_and_complete_ancestry() {
+    let mut fixture = LineageFixture::new();
+    let original = fixture.classified.clone();
+    let limits = original.fork_read_limits();
+    let sources = test_ok(original.fork_sources().ok_or(ErasureHostErrorV1::Conflict)).to_vec();
+    let child = original.timeline_id();
+    let required = test_ok(pos_store::ForkReplayRequirementV1::new(
+        child,
+        Seq::ZERO,
+        Hash::from_bytes([0x91; 32]),
+        None,
+    ));
+    let wrong_head = test_ok(pos_store::ForkReplayRequirementV1::new(
+        child,
+        Seq::from_u64(1),
+        required.signed_manifest_record_id(),
+        None,
+    ));
+    let wrong_record = test_ok(pos_store::ForkReplayRequirementV1::new(
+        child,
+        Seq::ZERO,
+        Hash::from_bytes([0x92; 32]),
+        None,
+    ));
+    let root_source = sources[1].clone();
+    let classified_sources = |requirement| {
+        vec![
+            test_ok(crate::WorldReplayForkSourceV1::new(
+                child,
+                Some(requirement),
+            )),
+            root_source.clone(),
+        ]
+    };
+    for (classified, requirements, expected) in [
+        (sources.clone(), Vec::new(), Ok(())),
+        (
+            vec![sources[0].clone()],
+            Vec::new(),
+            Err(ErasureHostErrorV1::Conflict),
+        ),
+        (sources, vec![required], Err(ErasureHostErrorV1::Conflict)),
+        (
+            classified_sources(wrong_head),
+            vec![wrong_head],
+            Err(ErasureHostErrorV1::Conflict),
+        ),
+        (
+            classified_sources(required),
+            vec![wrong_record],
+            Err(ErasureHostErrorV1::Conflict),
+        ),
+        // Structurally consistent imported authority on this ordinary native
+        // lineage must reach, and be refused by, the real authority validator.
+        // It is a denial control, never fabricated successful import evidence.
+        (
+            classified_sources(required),
+            vec![required],
+            Err(ErasureHostErrorV1::AdapterFailure),
+        ),
+    ] {
+        fixture.classified = crate::world_replay::test_verified_world_replay_with_fork_attribution(
+            original.clone(),
+            original.fork_source_profile(),
+            classified,
+            requirements,
+            limits,
+        );
+        let mut clock = clock_for(None, Duration::ZERO);
+        let start = clock.mark();
+        let mut budget = test_ok(ForkReplayReadBudgetV1::new(limits, start, &mut clock));
+        assert_eq!(fixture.validate(&mut budget), expected);
+        assert_eq!(fixture.host.status(), ErasureHostStatusV1::Ready);
+    }
+}
