@@ -65,14 +65,17 @@ pub const EVENT_TYPE: &str = "prototype.driven";
 
 /// One member of a lane.
 ///
-/// It names the Plugin ID, the Component it publishes, and whether its Driver is registered in
-/// the pass world.
+/// It names the Plugin ID, the Component it publishes, the Event type it owns, and whether its
+/// Driver is registered in the pass world.
 #[derive(Clone, Copy)]
 pub struct Spec {
     /// The Plugin ID of the release.
     pub plugin_id: &'static str,
     /// The Component the release publishes.
     pub guest: &'static [u8],
+    /// The one Event type the Plugin owns; the fixtures' guests emit [`EVENT_TYPE`] whatever it
+    /// owns.
+    pub event_type: &'static str,
     /// Whether the Driver is registered in the pass world.
     pub registered: bool,
 }
@@ -96,6 +99,7 @@ impl Spec {
 pub const ALPHA: Spec = Spec {
     plugin_id: "plugin-a",
     guest: RUST_GUEST,
+    event_type: EVENT_TYPE,
     registered: true,
 };
 /// The first member, on the C fixture.
@@ -206,9 +210,13 @@ pub struct Part {
     pub expected: CommunityPluginExpectationV1,
 }
 
-/// Gate the release of `entry` once, to build its Driver from. The gate here only supplies the
-/// Driver's release, so its call is not a pass's.
-fn gated_release(
+/// Gate the release of `entry` once, to build its Driver from.
+///
+/// The gate here only supplies the Driver's release, so its call is not a pass's.
+///
+/// # Errors
+/// Returns the clock's or the trust gate's refusal.
+pub fn gated_release(
     signed: &SignedWorld,
     entry: &Published,
     swap: &Swap,
@@ -240,7 +248,7 @@ fn add_part(
     let source = Box::new(Source::switched(number, Arc::clone(&setup.refuse)));
     let built = pass.add_gated(GatedSpec {
         name: entry.spec.plugin_id,
-        event_type: EVENT_TYPE,
+        event_type: entry.spec.event_type,
         gated: gated_release(setup.signed, entry, &swap)?,
         profile: setup.profile.clone(),
         watchdog: WATCHDOG,

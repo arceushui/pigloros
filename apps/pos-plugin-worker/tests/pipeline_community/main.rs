@@ -14,6 +14,7 @@
 //! version are checked here first, then the harness parses the document under its own rules.
 #![cfg(target_os = "linux")]
 
+pub mod authority;
 pub mod first_party;
 #[path = "../../../piglor-gateway/tests/pipeline_conformance/harness.rs"]
 pub mod harness;
@@ -39,12 +40,14 @@ const COMMUNITY_VERSION: u64 = 1;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/community/v1/manifest.json");
-const MANIFEST_SHA256: &str = "c4768334e8824b3b1491791b07ca14e501ea8af67cdc2c7507be9a81ec75cdf9";
+const MANIFEST_SHA256: &str = "3d1639085ae7e6e86cb4d66a66b2601bcaf6a476d3df5b4fd2e0667567ace354";
 
 /// Every runner of profile version 1, by case identifier.
-const RUNNERS: [(&str, Runner); 2] = [
+const RUNNERS: [(&str, Runner); 4] = [
     ("PCF-CPH-001", parity::single_pass_parity),
     ("PCF-CPH-002", parity::mixed_registry_order),
+    ("PCF-CPH-003", authority::foreign_proposal_parity),
+    ("PCF-CPH-004", authority::single_lineage_owner),
 ];
 
 /// Parse a `PCH1` manifest under the harness rules of `PPC1`.

@@ -49,6 +49,18 @@ unchanged, checks the `PCH1` magic and version first, and then applies every
 `PPC1` rule above: closed fields, stores, applicability, observation-profile
 tags, pinned bytes, skipped mandatory cases and runners without a case.
 
+`PCF-CPH-003` and `PCF-CPH-004` (#632) cover authority parity. A Driver of
+either class that proposes another Plugin's Event type fails the pass with
+the same typed refusal, `Authority(UnauthorizedSource)`, commits nothing and
+leaves every Plugin available. An Event type has one owner, whichever class
+claims it first: a later claim of either class, or a claim of the Gateway's
+reserved consent type, is refused before the registry changes. The real
+guests emit only `prototype.driven`, so the community Driver proposes a
+foreign type by owning another type than the one its guest emits. A
+community proposal of a reserved host type would need a new guest Component;
+the `COMMUNITY-RESERVED-PROPOSAL` exclusion records it, and only the
+first-party refusal of that proposal is pinned.
+
 The community pass world runs on `MemoryStore` only, so every case names the
 `memory` store, and the `SQLITE-STORE` exclusion records that this profile
 proves no SQLite parity of the community path. The other exclusions name the
