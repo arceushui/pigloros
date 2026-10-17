@@ -4,7 +4,8 @@ use pos_core::{
         AuthenticatedPrincipalEvidenceV1, MAX_AUTHENTICATED_PRINCIPAL_EVIDENCE_BYTES_V1,
     },
     ForkAdmissionCommandCodecErrorV1, ForkAdmissionHostCommandV1, ForkAdmissionRecoveryCommandV1,
-    ForkAdmissionRecoveryProofV1, ForkCreateCommandV1, PrincipalOwnerCommandV1,
+    ForkAdmissionRecoveryProofV1, ForkCreateCommandV1, ForkCreateCommitmentInputV1, Hash,
+    OwnerIdV1, PrincipalOwnerCommandV1, PrincipalOwnerCommitmentInputV1, TimelineId,
     MAX_FORK_ADMISSION_HOST_COMMAND_BYTES_V1, MAX_FORK_ADMISSION_RECOVERY_COMMAND_BYTES_V1,
     MAX_FORK_ADMISSION_RECOVERY_PROOF_BYTES_V1, MAX_FORK_CREATE_COMMAND_BYTES_V1,
     MAX_PRINCIPAL_OWNER_COMMAND_BYTES_V1,
@@ -51,6 +52,73 @@ fn maximum_fcc1() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         Value::Integer(1.into()),
         Value::Text("c".repeat(128)),
     ]))
+}
+
+#[test]
+fn commitment_preimage_lengths_match_independent_cbor_arrays(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let principal_owner = PrincipalOwnerCommitmentInputV1 {
+        store_id: Hash::from_bytes([1; 32]),
+        operation_id: Hash::from_bytes([2; 32]),
+        evidence_digest: Hash::from_bytes([3; 32]),
+        principal_digest: Hash::from_bytes([4; 32]),
+        owner: OwnerIdV1::new("o".repeat(128))?,
+    };
+    let principal_owner_bytes = encode(&Value::Array(vec![
+        bytes(1, 32),
+        bytes(2, 32),
+        bytes(3, 32),
+        bytes(4, 32),
+        Value::Text("o".repeat(128)),
+    ]))?;
+    assert_eq!(
+        principal_owner.canonical_preimage_len(),
+        Ok(principal_owner_bytes.len())
+    );
+    let child_name = "c".repeat(128);
+    for cut in [
+        0,
+        23,
+        24,
+        255,
+        256,
+        65_535,
+        65_536,
+        u64::from(u32::MAX),
+        u64::MAX,
+    ] {
+        let fork = ForkCreateCommitmentInputV1 {
+            store_id: principal_owner.store_id,
+            operation_id: principal_owner.operation_id,
+            evidence_digest: principal_owner.evidence_digest,
+            principal_digest: principal_owner.principal_digest,
+            parent_id: TimelineId::from_ulid(ulid::Ulid::from_bytes([5; 16])),
+            cut,
+            descriptor_hash: Hash::from_bytes([6; 32]),
+            composition_hash: Hash::from_bytes([7; 32]),
+            attribution_required: true,
+            child_name: &child_name,
+        };
+        let fork_bytes = encode(&Value::Array(vec![
+            bytes(1, 32),
+            bytes(2, 32),
+            bytes(3, 32),
+            bytes(4, 32),
+            bytes(5, 16),
+            Value::Integer(cut.into()),
+            Value::Integer(cut.into()),
+            bytes(6, 32),
+            bytes(7, 32),
+            Value::Integer(1.into()),
+            Value::Text(child_name.clone()),
+        ]))?;
+        assert_eq!(
+            fork.canonical_preimage_len(),
+            Ok(fork_bytes.len()),
+            "cut {cut}"
+        );
+    }
+    Ok(())
 }
 
 fn maximum_fae1() -> Result<Vec<u8>, Box<dyn std::error::Error>> {

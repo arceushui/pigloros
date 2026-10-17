@@ -443,6 +443,7 @@ fn public_pob1_codec_is_canonical_bounded_and_closed() -> Result<(), Box<dyn std
     })?;
     let canonical = binding.to_canonical_cbor();
     assert_eq!(canonical.len(), MAX_PRINCIPAL_OWNER_BINDING_BYTES_V1);
+    assert_eq!(binding.canonical_cbor_len(), Ok(canonical.len()));
     assert_eq!(
         PrincipalOwnerBindingV1::from_canonical_cbor(&canonical)?,
         binding
