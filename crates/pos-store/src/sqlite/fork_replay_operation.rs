@@ -79,28 +79,85 @@ pub(super) fn principal_operation_id_with_context(
         WHERE kind = 1 AND result_digest = ?1",
                 params![result_digest.as_bytes().as_slice()],
                 context,
-                |row, context| {
-                    let row = row.ok_or(Error::CorruptAuthority)?;
-                    context
-                        .bytes(usize::from(HASH_BYTES))
-                        .map_err(|_| Error::CorruptAuthority)?;
-                    let bytes = row
-                        .get::<_, Vec<u8>>(0)
-                        .map_err(|_| Error::StorageIndeterminate)?;
-                    context.check().map_err(|_| Error::CorruptAuthority)?;
-                    let operation = sqlite_hash(bytes)?;
-                    context
-                        .check()
-                        .map(|()| operation)
-                        .map_err(|_| Error::CorruptAuthority)
-                },
+                principal_operation_fields,
             )
         },
     )
 }
 
+fn principal_operation_fields(
+    row: Option<&Row<'_>>,
+    context: &mut NativeReadContextV1<'_, '_>,
+) -> Result<Hash> {
+    let row = row.ok_or(Error::CorruptAuthority)?;
+    context
+        .bytes(usize::from(HASH_BYTES))
+        .map_err(|_| Error::CorruptAuthority)?;
+    let bytes = row
+        .get::<_, Vec<u8>>(0)
+        .map_err(|_| Error::StorageIndeterminate)?;
+    context.check().map_err(|_| Error::CorruptAuthority)?;
+    let operation = sqlite_hash(bytes)?;
+    context
+        .check()
+        .map(|()| operation)
+        .map_err(|_| Error::CorruptAuthority)
+}
+
 struct OperationLengthsV1 {
     child: Option<usize>,
+}
+
+impl OperationLengthsV1 {
+    fn read(
+        row: Option<&Row<'_>>,
+        context: &mut NativeReadContextV1<'_, '_>,
+    ) -> Result<Option<Self>> {
+        let Some(row) = row else {
+            return context
+                .check()
+                .map(|()| None)
+                .map_err(|_| Error::CorruptAuthority);
+        };
+        // Preserve the ordinary getter's StorageIndeterminate classification
+        // for wrong types, before native widths/ULID parse bounds.
+        for column in [0, 2, 4] {
+            if !row
+                .get::<_, bool>(column)
+                .map_err(|_| Error::StorageIndeterminate)?
+            {
+                return Err(Error::StorageIndeterminate);
+            }
+        }
+        let null: bool = row.get(6).map_err(|_| Error::StorageIndeterminate)?;
+        let text: bool = row.get(7).map_err(|_| Error::StorageIndeterminate)?;
+        if !null && !text {
+            return Err(Error::StorageIndeterminate);
+        }
+        let child = if null {
+            None
+        } else {
+            let length = row
+                .get::<_, i64>(8)
+                .map_err(|_| Error::StorageIndeterminate)?;
+            if usize::try_from(length).ok() != Some(ulid::ULID_LEN) {
+                return Err(Error::CorruptAuthority);
+            }
+            Some(ulid::ULID_LEN)
+        };
+        for column in [1, 3, 5] {
+            let length = row
+                .get::<_, i64>(column)
+                .map_err(|_| Error::StorageIndeterminate)?;
+            if length != i64::from(HASH_BYTES) {
+                return Err(Error::CorruptAuthority);
+            }
+        }
+        context
+            .check()
+            .map(|()| Some(Self { child }))
+            .map_err(|_| Error::CorruptAuthority)
+    }
 }
 
 fn operation_lengths(
@@ -114,52 +171,7 @@ fn operation_lengths(
         OPERATION_PROBE_SQL,
         params![i64::from(kind.wire()), operation.as_bytes().as_slice()],
         context,
-        |row, context| {
-            let Some(row) = row else {
-                return context
-                    .check()
-                    .map(|()| None)
-                    .map_err(|_| Error::CorruptAuthority);
-            };
-            // Preserve the ordinary getter's StorageIndeterminate classification
-            // for wrong types, before native widths/ULID parse bounds.
-            for column in [0, 2, 4] {
-                if !row
-                    .get::<_, bool>(column)
-                    .map_err(|_| Error::StorageIndeterminate)?
-                {
-                    return Err(Error::StorageIndeterminate);
-                }
-            }
-            let null: bool = row.get(6).map_err(|_| Error::StorageIndeterminate)?;
-            let text: bool = row.get(7).map_err(|_| Error::StorageIndeterminate)?;
-            if !null && !text {
-                return Err(Error::StorageIndeterminate);
-            }
-            let child = if null {
-                None
-            } else {
-                let length = row
-                    .get::<_, i64>(8)
-                    .map_err(|_| Error::StorageIndeterminate)?;
-                if usize::try_from(length).ok() != Some(ulid::ULID_LEN) {
-                    return Err(Error::CorruptAuthority);
-                }
-                Some(ulid::ULID_LEN)
-            };
-            for column in [1, 3, 5] {
-                let length = row
-                    .get::<_, i64>(column)
-                    .map_err(|_| Error::StorageIndeterminate)?;
-                if length != i64::from(HASH_BYTES) {
-                    return Err(Error::CorruptAuthority);
-                }
-            }
-            context
-                .check()
-                .map(|()| Some(OperationLengthsV1 { child }))
-                .map_err(|_| Error::CorruptAuthority)
-        },
+        OperationLengthsV1::read,
     )
 }
 
@@ -259,6 +271,78 @@ mod tests {
     fn expected_bytes(row: &ForkAdmissionOperationRowV1) -> usize {
         // Three actual hash Vecs plus the optional ULID UTF-8 String.
         32 * 3 + row.child_id.map_or(0, |child| child.to_string().len())
+    }
+
+    #[test]
+    fn native_principal_decoder_rejects_a_width_mismatch_without_refunding_work() -> Fallible<()> {
+        let (store, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(8, 1, 3, 64, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        // The production probe promises 32 bytes. This actual 31-byte SQL
+        // value tests the independent raw decoder defense against a bad shape.
+        assert_eq!(
+            with_selected_row(
+                &store.conn,
+                "SELECT zeroblob(31)",
+                [],
+                &mut NativeReadContextV1::protected(&mut budget),
+                principal_operation_fields,
+            ),
+            Err(Error::CorruptAuthority)
+        );
+        assert_eq!(budget.remaining_native_bytes(), 32);
+        budget.check_time()?;
+        assert_eq!(
+            principal_operation_id_with_context(
+                &store.conn,
+                row.result_digest,
+                &mut NativeReadContextV1::protected(&mut budget),
+            )?,
+            row.operation_id
+        );
+        assert_eq!(budget.remaining_native_bytes(), 0);
+        budget.check_time()?;
+        assert!(budget.charge_rows(1).is_err());
+        assert!(budget.check_time().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn native_operation_probe_decoder_rejects_a_nonboolean_null_marker() -> Fallible<()> {
+        let (store, row) = fixture(ForkAdmissionOperationKindV1::PrincipalOwner)?;
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let limits = ForkReplayReadLimitsV1::new(8, 1, 3, 96, 1_000_000)?;
+        let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+        // IS NULL is always boolean in production SQL. The real text value
+        // here tests the native probe decoder's independent type contract.
+        let failed = with_selected_row(
+            &store.conn,
+            "SELECT 1,32,1,32,1,32,'not a boolean',0,NULL",
+            [],
+            &mut NativeReadContextV1::protected(&mut budget),
+            OperationLengthsV1::read,
+        )
+        .map(|lengths| lengths.map(|lengths| lengths.child));
+        assert_eq!(failed, Err(Error::StorageIndeterminate));
+        assert_eq!(budget.remaining_native_bytes(), 96);
+        budget.check_time()?;
+        assert_eq!(
+            operation_with_context(
+                &store.conn,
+                row.kind,
+                row.operation_id,
+                &mut NativeReadContextV1::protected(&mut budget),
+            )?,
+            Some(row)
+        );
+        assert_eq!(budget.remaining_native_bytes(), 0);
+        budget.check_time()?;
+        assert!(budget.charge_rows(1).is_err());
+        assert!(budget.check_time().is_err());
+        Ok(())
     }
 
     #[derive(Default)]
