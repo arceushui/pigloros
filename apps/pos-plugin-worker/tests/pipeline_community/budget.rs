@@ -31,7 +31,9 @@ use pos_plugin_supervisor::pass_harness::StoreKind;
 
 use crate::failure::{record_pass, Mixed, Pass, SIBLING};
 use crate::harness::Capture;
-use crate::parity::{on_every_store, record, Order, StoreCapture};
+use crate::parity::{
+    discarded_whole, on_every_store, publish_successor, record, Observed, Order, StoreCapture,
+};
 use crate::support::lane::{publish, publish_shape, Published, Spec, ALPHA, ALPHA_C};
 
 /// The memory budget of the over-budget release: one page.
@@ -40,17 +42,6 @@ use crate::support::lane::{publish, publish_shape, Published, Spec, ALPHA, ALPHA
 const ONE_PAGE: u64 = 65_536;
 /// The host Tick draft budget of the first-party lane: one draft for each of its two Drivers.
 const PASS_DRAFTS: u64 = 2;
-
-/// Publish the successor of `first`, on the same member within the fixtures' budgets, and
-/// install it as the active release.
-fn in_budget(signed: &mut SignedWorld, first: &Published) -> BoxResult<Published> {
-    let shape = Shape {
-        version: "2.0.0",
-        previous: Some(first.release),
-        ..first.spec.shape()
-    };
-    publish_shape(signed, first.spec, shape, 2)
-}
 
 /// The passes of a lane whose community release is over its memory budget.
 struct Exhausted {
@@ -112,11 +103,8 @@ fn first_party_over(
 /// Whether `failed` is a typed non-commit that discarded the whole pass: it failed with a typed
 /// refusal, committed nothing, and the first registered Plugin, the sibling, stays available.
 fn discarded(failed: &Pass) -> bool {
-    let observed = &failed.observed;
-    observed.result() == "Failed"
-        && observed.committed() == 0
-        && observed.first_available()
-        && failed.refusal != "none"
+    let available = Observed::first_available;
+    discarded_whole(&failed.observed, &failed.refusal, available)
 }
 
 /// Whether `pass` committed the Events of both Drivers.
@@ -165,7 +153,7 @@ fn over_budget(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()>
     let shape = ALPHA.shape().with_memory_bytes(ONE_PAGE);
     let first = publish_shape(&mut signed, ALPHA, shape, 1)?;
     let community = community_exhausted(&signed, &first, kind)?;
-    let second = in_budget(&mut signed, &first)?;
+    let second = publish_successor(&mut signed, &first, first.spec)?;
     let entries = std::slice::from_ref(&second);
     let mut renewed = Mixed::new(kind, &signed, entries, SIBLING, Order::TwinFirst)?;
     let successor = renewed.pass(&signed)?;
@@ -238,7 +226,7 @@ fn starve(starved: &Starved, kind: StoreKind) -> BoxResult<Starvation> {
     let exhausted = mixed.pass(&signed)?;
     let quarantined = mixed.pass(&signed)?;
     let receipts = mixed.receipts();
-    let second = in_budget(&mut signed, &first)?;
+    let second = publish_successor(&mut signed, &first, first.spec)?;
     let entries = std::slice::from_ref(&second);
     let mut renewed = Mixed::new(kind, &signed, entries, SIBLING, Order::TwinFirst)?;
     let successor = renewed.pass(&signed)?;

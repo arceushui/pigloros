@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering;
 
 use pos_core::{Event, ScheduledObservationProfileV1};
-use pos_plugin_publisher::test_support::{world::World as SignedWorld, BoxResult};
+use pos_plugin_publisher::test_support::{release::Shape, world::World as SignedWorld, BoxResult};
 use pos_plugin_supervisor::pass_harness::{StoreKind, World as PassWorld};
 use pos_runtime::community_plugin_host::{
     CommunityPassOutcomeV1, CommunityPluginModeV1 as Mode, PassResultV1,
@@ -22,7 +22,7 @@ use pos_runtime::{PluginRegistry, ScheduledDriverBindingV1};
 
 use crate::first_party::{entity_of, register_twin};
 use crate::harness::{Capture, PROFILE_KEY};
-use crate::support::lane::{publish, Lane, Published, ALPHA, EVENT_TYPE};
+use crate::support::lane::{publish, publish_shape, Lane, Published, Spec, ALPHA, EVENT_TYPE};
 use crate::support::subcase::WORKER;
 use crate::support::test_ok::TestOk;
 
@@ -115,6 +115,42 @@ impl Observed {
         let mut states = self.authority.availability.split(',');
         states.all(|state| state == "Available")
     }
+}
+
+/// Whether a failed pass discarded the whole pass: it failed with the typed `refusal`, committed
+/// nothing, and its Plugins' availability satisfies `available`.
+///
+/// A case that quarantines the failing Plugin checks that the sibling stays available, with
+/// [`Observed::first_available`]; a case that quarantines nothing checks every Plugin, with
+/// [`Observed::all_available`].
+#[must_use]
+pub fn discarded_whole(
+    observed: &Observed,
+    refusal: &str,
+    available: fn(&Observed) -> bool,
+) -> bool {
+    observed.result() == "Failed"
+        && observed.committed() == 0
+        && available(observed)
+        && refusal != "none"
+}
+
+/// Publish the 2.0.0 successor of `first` as a release of `spec` and install it as the active
+/// release.
+///
+/// # Errors
+/// Returns the signed world's publication or installation error.
+pub fn publish_successor(
+    signed: &mut SignedWorld,
+    first: &Published,
+    spec: Spec,
+) -> BoxResult<Published> {
+    let shape = Shape {
+        version: "2.0.0",
+        previous: Some(first.release),
+        ..spec.shape()
+    };
+    publish_shape(signed, spec, shape, 2)
 }
 
 const fn result_name(result: &PassResultV1) -> &'static str {

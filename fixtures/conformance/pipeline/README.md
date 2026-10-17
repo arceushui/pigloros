@@ -163,8 +163,10 @@ records the same values on each.
 `PCH1` version 1 was re-pinned in place to add SQLite, by user decision
 (2026-10-17), following the in-place re-pins of #632 to #636: every case's
 `stores` grew from `memory` to `memory` and `sqlite`, the `SQLITE-STORE`
-exclusion was removed, and #638 and #651 joined the sources. No expected value
-changed; only the store set grew, so the manifest's pinned SHA-256 changed.
+exclusion was removed, and #638 and #651 joined the sources of the manifest
+and, with the #637 re-pin below, of each of `PCF-CPH-001` to `PCF-CPH-012`. No
+expected value changed; only the store set and the sources grew, so the
+manifest's pinned SHA-256 changed.
 
 `PCH1` version 1 was re-pinned in place again for #637, by user decision
 (2026-10-17): #654 appended `PCF-CPH-013` and removed the
