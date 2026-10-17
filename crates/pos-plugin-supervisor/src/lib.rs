@@ -41,6 +41,9 @@
 //! The [`CommunityMemberV1`] wraps a Driver's handle for pos-runtime's `CommunityPluginHostV1`,
 //! which sequences each host pass (#584).
 //!
+//! The [`fallback`] module is the ADR-119 composition boundary transaction: the host-level
+//! orchestration that activates an owner-declared fallback at a Tick Boundary (#667).
+//!
 //! [`CommunityPluginSubjectOutcomeV1`] is the stable per-Plugin outcome record of a host pass
 //! for the #194 subject adapter, which owns the EAI1/EAO1 wire code (#585). See the README.
 //!
@@ -53,6 +56,7 @@
 // Public modules keep crate-only items compatible with both `unreachable_pub`
 // and Clippy's `redundant_pub_crate`.
 pub mod adapter;
+pub mod fallback;
 pub mod frame;
 pub mod ipc;
 pub mod launch;
@@ -79,6 +83,14 @@ pub use adapter::{
     CommunityDriverV1, CommunityInvocationReceiptV1, CommunityPluginHandleV1, CommunityStateV1,
     InvocationBindingV1, InvocationContextSourceV1, InvocationContextV1, ReceiptDispositionV1,
     MAX_RETAINED_RECEIPTS_V1,
+};
+pub use fallback::{
+    compose_restart_v1, effective_composition_v1, fallback_trigger_cause_v1,
+    CompositionBoundaryV1, FallbackBoundaryContextV1, FallbackBoundaryErrorV1,
+    FallbackBoundaryStoreV1, FallbackCandidateInputV1, FallbackEffectiveCompositionV1,
+    FallbackEffectiveEntryV1, FallbackEntryOutcomeV1, FallbackReferenceV1,
+    FallbackReleaseSupplyV1, FallbackRestartSlotV1, FallbackRestartV1,
+    COMPOSITION_FALLBACK_ACTIVATE_GRANT_V1,
 };
 pub use frame::{FrameFaultV1, WorkerFrameLimitsV1};
 pub use ipc::{
