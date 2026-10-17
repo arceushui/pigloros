@@ -284,7 +284,7 @@ fn declaration_payload_golden_vector() -> TestResult<()> {
     assert_eq!(payload.scope(), "session.alpha");
     assert_eq!(payload.policy_digest(), policy.policy_digest());
     assert_eq!(payload.previous_policy_digest(), None);
-    assert_eq!(payload.rebased(), [rebased.clone()]);
+    assert_eq!(payload.rebased(), std::slice::from_ref(&rebased));
     assert_eq!(rebased.entry_key(), "geo");
     let lite_digest = hash_hex(LITE_IMK1_DIGEST_HEX)?;
     assert_eq!(rebased.implementation_digest(), lite_digest);
