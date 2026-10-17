@@ -108,6 +108,8 @@ def check_staged_main_job(jobs: dict, name: str, needs: list[str]) -> None:
     )
 
 
+# Deliberate tripwire: this mirrors the `codeql` job `if` in ci.yml, so an
+# edit to that condition must be made in both places.
 CODEQL_CONDITION = (
     "${{ !cancelled() && needs.ci_change_scope.result == 'success' && "
     "(needs.cargo-crap.result == 'success' || "

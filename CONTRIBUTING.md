@@ -250,7 +250,7 @@ flowchart TD
     CR --> U["cargo-geiger"]
     CR --> X["Docker"]
     CR --> W["WASM package"]
-    CR --> Q["CodeQL"]
+    CR --> Q["CodeQL (docs-only PRs start it after the scope job)"]
     W --> BP["browser parity"]
     D --> G["standard-gate"]
     E --> G
