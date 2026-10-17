@@ -19,13 +19,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pos_core::{
-    DomainFallbackPolicyV1, FallbackEntryV1, FallbackRecordErrorV1, Hash, ImplementationKeyV1,
-    Seq, TimelineId,
+    DomainFallbackPolicyV1, FallbackEntryV1, FallbackRecordErrorV1, Hash, ImplementationKeyV1, Seq,
+    TimelineId,
 };
 use pos_store::composition_fallback_registry::{
-    CompositionFallbackRegistryErrorV1, CompositionFallbackRegistryV1,
-    CompositionFallbackTargetV1, FallbackCommitReceiptV1, FallbackConformanceSetsV1,
-    FallbackDeclareRequestV1,
+    CompositionFallbackRegistryErrorV1, CompositionFallbackRegistryV1, CompositionFallbackTargetV1,
+    FallbackCommitReceiptV1, FallbackConformanceSetsV1, FallbackDeclareRequestV1,
 };
 
 use super::{validate_fallback_candidate_v1, FallbackCandidateFactsV1, InvalidFallbackPolicyV1};
