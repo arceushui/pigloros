@@ -207,8 +207,9 @@ impl<'budget, 'clock> NativeReadContextV1<'budget, 'clock> {
     }
 }
 
-/// Borrowed prefix reader for just IFA1 field 5 and FAI1 field 2. It never
-/// constructs a record, follows an input-sized collection, or copies a carrier.
+/// Borrowed prefix selector for native record decoding allocation gates.
+/// Callers select fixed prefixes; native owners retain validity and debit
+/// decisions. This reader never constructs a record or copies a carrier.
 struct AdmissionCarrierV1<'bytes>(&'bytes [u8]);
 
 impl<'bytes> AdmissionCarrierV1<'bytes> {
