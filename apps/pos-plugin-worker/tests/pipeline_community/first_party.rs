@@ -9,9 +9,10 @@
 //! contracts, not identical runtime trust.
 //!
 //! The authority cases (#632) register further first-party Plugins of the same shape, which may
-//! own one Event type and emit another.
+//! own one Event type and emit another. The failure cases (#633) switch a first-party Driver to
+//! fail while it stages.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use pos_core::{
@@ -84,11 +85,12 @@ impl Plugin for TwinPlugin {
     }
 }
 
-/// The twin's Driver: one draft per step, counting its steps.
+/// The twin's Driver: one draft per step, counting its steps, or a failure while `fail` is set.
 pub struct TwinDriver {
     name: &'static str,
     draft: EventDraft,
     steps: Arc<AtomicUsize>,
+    fail: Arc<AtomicBool>,
 }
 
 impl Driver for TwinDriver {
@@ -98,8 +100,21 @@ impl Driver for TwinDriver {
 
     fn step(&mut self, _: TimelineId, _: ObservationView<'_>) -> Result<StepOutput, RuntimeError> {
         self.steps.fetch_add(1, Ordering::SeqCst);
+        if self.fail.load(Ordering::SeqCst) {
+            // The native counterpart of a guest trap: the registry turns the unwind into
+            // `DriverPanicked`. `resume_unwind` skips the panic hook; `panic!` is denied.
+            std::panic::resume_unwind(Box::new("the first-party Driver failed"));
+        }
         Ok(StepOutput::new(vec![self.draft.clone()]))
     }
+}
+
+/// What the test keeps of a registered first-party Driver.
+pub struct Switched {
+    /// The Driver's step counter.
+    pub steps: Arc<AtomicUsize>,
+    /// Set to make every later step of the Driver fail.
+    pub fail: Arc<AtomicBool>,
 }
 
 /// The entity `text` names, parsed from its ULID text.
@@ -111,7 +126,10 @@ pub fn entity_of(text: &str) -> BoxResult<EntityId> {
 }
 
 /// The operator-trusted native pin of a first-party Plugin in `role`.
-fn native_pin(role: &str) -> BoxResult<PluginPinV1> {
+///
+/// # Errors
+/// Returns the pin's metadata error for an empty role.
+pub fn native_pin(role: &str) -> BoxResult<PluginPinV1> {
     Ok(PluginPinV1::try_new(
         DomainImplementationKindV1::Plugin,
         PluginIsolationV1::OperatorTrustedNative,
@@ -146,16 +164,30 @@ pub fn register_native(
     native: Native,
     entity: EntityId,
 ) -> BoxResult<Arc<AtomicUsize>> {
+    Ok(register_switched(registry, native, entity)?.steps)
+}
+
+/// As [`register_native`], returning the switch that makes the Driver fail as well.
+///
+/// # Errors
+/// Returns the registry's registration or profile-composition error.
+pub fn register_switched(
+    registry: &mut PluginRegistry,
+    native: Native,
+    entity: EntityId,
+) -> BoxResult<Switched> {
     let plugin = TwinPlugin {
         id: PluginId::new(),
         native,
     };
     let steps = Arc::new(AtomicUsize::new(0));
+    let fail = Arc::new(AtomicBool::new(false));
     let payload = CanonicalBytes::from_static(PAYLOAD);
     let driver = TwinDriver {
         name: native.name,
         draft: EventDraft::new(entity, Kind::new(native.emitted), payload),
         steps: Arc::clone(&steps),
+        fail: Arc::clone(&fail),
     };
     let available = PluginAvailabilityV1::Available;
     let registration = PluginRegistrationV1::new(native_pin(native.role)?, available);
@@ -163,5 +195,5 @@ pub fn register_native(
     registry.register_pinned_generated(&plugin, registration, None, Some(driver))?;
     let binding = (plugin.id, ScheduledDriverBindingV1::NonParticipant);
     registry.compose_scheduled_profiles(&[binding])?;
-    Ok(steps)
+    Ok(Switched { steps, fail })
 }

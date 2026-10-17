@@ -6,6 +6,7 @@
     "#489",
     "#631",
     "#632",
+    "#633",
     "ADR-021",
     "ADR-061 r8"
   ],
@@ -16,9 +17,9 @@
       "owner": "#636"
     },
     {
-      "id": "DISCARD-FALLBACK-AND-AVAILABILITY",
-      "reason": "Scheduled-pass discard without unrelated quarantine, no host domain fallback or retry, and missing, unavailable or invalid Plugins are not yet proven across isolation classes",
-      "owner": "#633"
+      "id": "INVALID-GUEST-OUTPUT",
+      "reason": "The real community guests always return well-formed output, so a community Driver's invalid guest output (InvalidGuestOutput) needs a new guest Component, and an ABI- or manifest-invalid release needs a malformed release fixture; this profile proves only the invalid pin, registration and denied-capability release refusals of either isolation class and, through PCF-CPH-003, the first-party invalid-draft refusals",
+      "owner": "#636"
     },
     {
       "id": "OVER-BUDGET-PLUGIN",
@@ -209,6 +210,246 @@
         "reserved-claim.first-party.refusal": "ReservedConsentEventType(consent.revoked.v1)",
         "reserved-claim.community.refusal": "ReservedConsentEventType(consent.revoked.v1)",
         "reserved-claim.registry-unchanged": "true",
+        "parity.same-refusal-either-class": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-005",
+      "title": "A Driver of either isolation class that fails while it stages, a community guest trap on the real worker or a first-party Driver failure, discards the whole scheduled pass including the other class's staged output, leaves the sibling available, quarantines only the trapping community Plugin, and the next pass commits",
+      "sources": [
+        "#489",
+        "#633",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "community-fails.result": "Failed",
+        "community-fails.timeline": "",
+        "community-fails.entity": "",
+        "community-fails.receipt.names-events": "false",
+        "community-fails.steps": "1,1",
+        "community-fails.availability": "Available,Trapped",
+        "community-fails.owner": "",
+        "community-fails.follows-host-schedule": "true",
+        "community-fails.refusal": "CommunityPlugin(ComponentTrap) host=ComponentTrap { class: Unreachable, reproduction: Unverified }",
+        "community-recovered.result": "Committed",
+        "community-recovered.timeline": "1:parity.first-party,2:prototype.driven",
+        "community-recovered.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "community-recovered.receipt.names-events": "true",
+        "community-recovered.steps": "1,1",
+        "community-recovered.availability": "Available,Available",
+        "community-recovered.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "community-recovered.follows-host-schedule": "true",
+        "community.community-receipts": "ComponentTrap/Discarded,none/Committed",
+        "first-party-fails.result": "Failed",
+        "first-party-fails.timeline": "",
+        "first-party-fails.entity": "",
+        "first-party-fails.receipt.names-events": "false",
+        "first-party-fails.steps": "1,1",
+        "first-party-fails.availability": "Available,Available",
+        "first-party-fails.owner": "",
+        "first-party-fails.follows-host-schedule": "true",
+        "first-party-fails.refusal": "DriverPanicked(first-party-failing)",
+        "first-party-recovered.result": "Committed",
+        "first-party-recovered.timeline": "1:prototype.driven,2:parity.first-party",
+        "first-party-recovered.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "first-party-recovered.receipt.names-events": "true",
+        "first-party-recovered.steps": "1,1",
+        "first-party-recovered.availability": "Available,Available",
+        "first-party-recovered.owner": "prototype.driven=GovernedCommunity,parity.first-party=OperatorTrustedNative",
+        "first-party-recovered.follows-host-schedule": "true",
+        "first-party.community-receipts": "none/Discarded,none/Committed",
+        "parity.whole-pass-discarded-either-class": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-006",
+      "title": "A failing community Driver launches exactly one worker and is never replaced by a registered first-party Plugin with the same domain contract; a quarantined Plugin refuses the whole pass, and recovery is a new pass under new invocation identities, which the context source issues and this case models, that never reuses the failed output",
+      "sources": [
+        "#489",
+        "#633",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "failed.result": "Failed",
+        "failed.timeline": "",
+        "failed.entity": "",
+        "failed.receipt.names-events": "false",
+        "failed.steps": "1,0",
+        "failed.availability": "Trapped,Available",
+        "failed.owner": "",
+        "failed.follows-host-schedule": "true",
+        "failed.refusal": "CommunityPlugin(ComponentTrap) host=ComponentTrap { class: Unreachable, reproduction: Unverified }",
+        "quarantined.result": "Failed",
+        "quarantined.timeline": "",
+        "quarantined.entity": "",
+        "quarantined.receipt.names-events": "false",
+        "quarantined.steps": "0,0",
+        "quarantined.availability": "Trapped,Available",
+        "quarantined.owner": "",
+        "quarantined.follows-host-schedule": "true",
+        "quarantined.refusal": "ImplementationUnavailable(Trapped)",
+        "recovered.result": "Committed",
+        "recovered.timeline": "1:prototype.driven,2:parity.first-party",
+        "recovered.entity": "01040G2081040G2081040G2080,01040G2081040G2081040G2081",
+        "recovered.receipt.names-events": "true",
+        "recovered.steps": "1,1",
+        "recovered.availability": "Available,Available",
+        "recovered.owner": "prototype.driven=GovernedCommunity,parity.first-party=OperatorTrustedNative",
+        "recovered.follows-host-schedule": "true",
+        "recovered.community-receipts": "ComponentTrap/Discarded,none/Committed",
+        "recovered.fresh-id-new-receipt": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-007",
+      "title": "A required but unregistered Plugin of either isolation class fails exact resolution with the same MissingImplementation (a resolver-level parity), and a community member without an active release is refused at the trust gate before any Driver runs",
+      "sources": [
+        "#489",
+        "#633",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "registered.resolve": "Resolved",
+        "first-party-missing.resolve": "MissingImplementation",
+        "community-missing.resolve": "MissingImplementation",
+        "community-not-active.result": "Refused",
+        "community-not-active.timeline": "",
+        "community-not-active.entity": "",
+        "community-not-active.receipt.names-events": "false",
+        "community-not-active.steps": "0,0",
+        "community-not-active.availability": "Available,Available",
+        "community-not-active.owner": "",
+        "community-not-active.follows-host-schedule": "true",
+        "community-not-active.gate": "ArtifactTrustDenied(NotActive)",
+        "parity.same-missing-either-class": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-008",
+      "title": "An unavailable Plugin of either isolation class, marked by the host or quarantined through an injected host refusal, refuses the whole pass with the same ImplementationUnavailable before any Driver runs, and the pass resumes once the Plugin is available again",
+      "sources": [
+        "#489",
+        "#633",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "first-party-revoked.result": "Failed",
+        "first-party-revoked.timeline": "",
+        "first-party-revoked.entity": "",
+        "first-party-revoked.receipt.names-events": "false",
+        "first-party-revoked.steps": "0,0",
+        "first-party-revoked.availability": "Available,Revoked",
+        "first-party-revoked.owner": "",
+        "first-party-revoked.follows-host-schedule": "true",
+        "first-party-revoked.refusal": "ImplementationUnavailable(Revoked)",
+        "first-party-unavailable.result": "Failed",
+        "first-party-unavailable.timeline": "",
+        "first-party-unavailable.entity": "",
+        "first-party-unavailable.receipt.names-events": "false",
+        "first-party-unavailable.steps": "0,0",
+        "first-party-unavailable.availability": "Available,Unavailable",
+        "first-party-unavailable.owner": "",
+        "first-party-unavailable.follows-host-schedule": "true",
+        "first-party-unavailable.refusal": "ImplementationUnavailable(Unavailable)",
+        "first-party-resumed.result": "Committed",
+        "first-party-resumed.timeline": "1:prototype.driven,2:parity.first-party",
+        "first-party-resumed.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "first-party-resumed.receipt.names-events": "true",
+        "first-party-resumed.steps": "1,1",
+        "first-party-resumed.availability": "Available,Available",
+        "first-party-resumed.owner": "prototype.driven=GovernedCommunity,parity.first-party=OperatorTrustedNative",
+        "first-party-resumed.follows-host-schedule": "true",
+        "first-party-resumed.refusal": "none",
+        "community-revoked.result": "Failed",
+        "community-revoked.timeline": "",
+        "community-revoked.entity": "",
+        "community-revoked.receipt.names-events": "false",
+        "community-revoked.steps": "0,0",
+        "community-revoked.availability": "Available,Revoked",
+        "community-revoked.owner": "",
+        "community-revoked.follows-host-schedule": "true",
+        "community-revoked.refusal": "ImplementationUnavailable(Revoked)",
+        "community-unavailable.result": "Failed",
+        "community-unavailable.timeline": "",
+        "community-unavailable.entity": "",
+        "community-unavailable.receipt.names-events": "false",
+        "community-unavailable.steps": "0,0",
+        "community-unavailable.availability": "Available,Unavailable",
+        "community-unavailable.owner": "",
+        "community-unavailable.follows-host-schedule": "true",
+        "community-unavailable.refusal": "ImplementationUnavailable(Unavailable)",
+        "community-resumed.result": "Committed",
+        "community-resumed.timeline": "1:parity.first-party,2:prototype.driven",
+        "community-resumed.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "community-resumed.receipt.names-events": "true",
+        "community-resumed.steps": "1,1",
+        "community-resumed.availability": "Available,Available",
+        "community-resumed.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "community-resumed.follows-host-schedule": "true",
+        "community-resumed.refusal": "none",
+        "parity.same-refusal-either-class": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-009",
+      "title": "An invalid implementation fails closed: a pin of the other isolation class fails exact resolution with the same IncompatibleImplementation for either class, and a community Driver under a native pin or a release with a denied capability is refused without changing the registry",
+      "sources": [
+        "#489",
+        "#633",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory"
+      ],
+      "observation_profile": null,
+      "expected": {
+        "first-party-pin.resolve": "IncompatibleImplementation(Isolation)",
+        "community-pin.resolve": "IncompatibleImplementation(Isolation)",
+        "native-pin.refusal": "IncompatibleImplementation(Isolation)",
+        "native-pin.registry-unchanged": "true",
+        "denied-release.refusal": "CapabilityDenied",
+        "denied-release.registry-unchanged": "true",
         "parity.same-refusal-either-class": "true"
       }
     }

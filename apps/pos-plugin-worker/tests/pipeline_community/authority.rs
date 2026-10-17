@@ -66,10 +66,13 @@ const COMMUNITY_PROPOSER: Spec = Spec {
 /// The consent Event type reserved to the Gateway consent host, which no Plugin may claim.
 const RESERVED_CLAIM: &str = EVENT_TYPE_CONSENT_REVOKED_V1;
 
-/// The typed refusal `error` names, without the name of the refused Plugin.
-fn refusal_of(error: &RuntimeError) -> String {
+/// The typed refusal `error` names, without the ID of the refused Plugin.
+#[must_use]
+pub fn refusal_of(error: &RuntimeError) -> String {
     match error {
         RuntimeError::Authority(authority) => format!("Authority({authority:?})"),
+        RuntimeError::CommunityPlugin(host) => format!("CommunityPlugin({})", host.name()),
+        RuntimeError::DriverPanicked { name } => format!("DriverPanicked({name})"),
         RuntimeError::ReservedHostDraft { event_type } => {
             format!("ReservedHostDraft({event_type})")
         }
@@ -81,11 +84,21 @@ fn refusal_of(error: &RuntimeError) -> String {
     }
 }
 
-/// The typed refusal a composition `error` names.
-fn composition_refusal(error: &PluginCompositionErrorV1) -> String {
+/// The typed refusal a composition `error` names, without the ID of the refused Plugin.
+#[must_use]
+pub fn composition_refusal(error: &PluginCompositionErrorV1) -> String {
     match error {
         PluginCompositionErrorV1::DuplicateEventTypeOwner { event_type } => {
             format!("DuplicateEventTypeOwner({event_type})")
+        }
+        PluginCompositionErrorV1::MissingImplementation { .. } => {
+            "MissingImplementation".to_owned()
+        }
+        PluginCompositionErrorV1::IncompatibleImplementation { field, .. } => {
+            format!("IncompatibleImplementation({field:?})")
+        }
+        PluginCompositionErrorV1::ImplementationUnavailable { availability, .. } => {
+            format!("ImplementationUnavailable({availability:?})")
         }
         other => format!("Composition({other:?})"),
     }
@@ -94,8 +107,9 @@ fn composition_refusal(error: &PluginCompositionErrorV1) -> String {
 /// The refusal that failed the pass `result`, or `none`.
 ///
 /// A failure the community Plugin host classifies as its own appends that host error, so a pinned
-/// refusal also proves the failure quarantined no Plugin.
-fn pass_refusal(result: &PassResultV1) -> String {
+/// refusal also pins whether the host classified the failure as its own.
+#[must_use]
+pub fn pass_refusal(result: &PassResultV1) -> String {
     let PassResultV1::Failed { host, error } = result else {
         return "none".to_owned();
     };
@@ -116,7 +130,8 @@ fn claim_refusal<T>(claim: BoxResult<T>) -> String {
 }
 
 /// Everything a refused registration must leave unchanged.
-fn snapshot(registry: &PluginRegistry) -> String {
+#[must_use]
+pub fn snapshot(registry: &PluginRegistry) -> String {
     let composition = registry.composition();
     let ownership = registry.plugin_ownership_rows();
     let (plugins, drivers) = (registry.len(), registry.driver_count());
@@ -195,7 +210,10 @@ fn foreign_proposal() -> BoxResult<Capture> {
 /// A community Driver built from the gated release of `entry` for `plugin_id`.
 ///
 /// Its registration is refused, so it never launches the worker.
-fn community_driver(
+///
+/// # Errors
+/// Returns the error of gating the release or of building the Driver's configuration.
+pub fn community_driver(
     signed: &SignedWorld,
     entry: &Published,
     plugin_id: PluginId,

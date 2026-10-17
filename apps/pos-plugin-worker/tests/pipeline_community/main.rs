@@ -15,6 +15,8 @@
 #![cfg(target_os = "linux")]
 
 pub mod authority;
+pub mod fail_closed;
+pub mod failure;
 pub mod first_party;
 #[path = "../../../piglor-gateway/tests/pipeline_conformance/harness.rs"]
 pub mod harness;
@@ -40,14 +42,19 @@ const COMMUNITY_VERSION: u64 = 1;
 /// The immutable profile manifest and its pinned SHA-256.
 const MANIFEST: &[u8] =
     include_bytes!("../../../../fixtures/conformance/pipeline/community/v1/manifest.json");
-const MANIFEST_SHA256: &str = "3d1639085ae7e6e86cb4d66a66b2601bcaf6a476d3df5b4fd2e0667567ace354";
+const MANIFEST_SHA256: &str = "16e2d967fe002c14648c283f9ab972d50a972526e2e312fb79804f7a2498f7bf";
 
 /// Every runner of profile version 1, by case identifier.
-const RUNNERS: [(&str, Runner); 4] = [
+const RUNNERS: [(&str, Runner); 9] = [
     ("PCF-CPH-001", parity::single_pass_parity),
     ("PCF-CPH-002", parity::mixed_registry_order),
     ("PCF-CPH-003", authority::foreign_proposal_parity),
     ("PCF-CPH-004", authority::single_lineage_owner),
+    ("PCF-CPH-005", failure::failure_containment),
+    ("PCF-CPH-006", failure::no_fallback_or_retry),
+    ("PCF-CPH-007", fail_closed::missing_implementation),
+    ("PCF-CPH-008", fail_closed::unavailable_implementation),
+    ("PCF-CPH-009", fail_closed::invalid_implementation),
 ];
 
 /// Parse a `PCH1` manifest under the harness rules of `PPC1`.
