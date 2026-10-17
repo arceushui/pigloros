@@ -421,11 +421,10 @@ impl TempDb {
         Ok(self.0.to_str().ok_or("the temporary path is not UTF-8")?)
     }
 
-    /// Another connection to the database, with an open erasure gate.
-    fn connect(&self) -> BoxResult<SqliteStore> {
+    /// Another connection to the database, behind the host's erasure gate.
+    fn connect(&self, gate: &Arc<ErasureContainmentGateV1>) -> BoxResult<SqliteStore> {
         let mut store = SqliteStore::open(self.path()?)?;
-        let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-        pos_core::store::EventStore::bind_erasure_gate(&mut store, gate)?;
+        pos_core::store::EventStore::bind_erasure_gate(&mut store, Arc::clone(gate))?;
         Ok(store)
     }
 }
@@ -1428,7 +1427,16 @@ fn concurrent_writes_refuse_the_commit() -> TestResult {
 
 /// A connection to the rig's database.
 fn other_connection(rig: &Rig) -> BoxResult<SqliteStore> {
-    rig.db.as_ref().ok_or("no database")?.connect()
+    rig.db.as_ref().ok_or("no database")?.connect(&rig.pass.gate)
+}
+
+/// The rig's Logical Head and the sequences of its Events, as this connection reads them.
+fn prefix_of(rig: &Rig) -> BoxResult<String> {
+    let timeline = rig.pass.timeline;
+    let head = rig.pass.store.logical_head(timeline)?;
+    let events = rig.pass.store.read(timeline, pos_core::SeqRange::all());
+    let seqs: Vec<u64> = events?.iter().map(|event| event.seq.as_u64()).collect();
+    Ok(format!("head {head:?}, Events {seqs:?}"))
 }
 
 fn conflict() -> TestResult {
@@ -1457,7 +1465,8 @@ fn conflict() -> TestResult {
     rig.supply.hook = Some(Box::new(move || flag.set(other.activate(&request).is_ok())));
     let outcomes = rig.boundary(&failed);
     assert!(ran.get());
-    assert_eq!(described(&outcomes), ["not-committed:Conflict"]);
+    let prefix = prefix_of(&rig)?;
+    assert_eq!(described(&outcomes), ["not-committed:Conflict"], "{prefix}");
     assert_eq!(rig.running()?, "plugin-a");
     let faulted = rig.boundary(&failed);
     assert!(
@@ -1491,7 +1500,8 @@ fn stale() -> TestResult {
     rig.supply.hook = Some(Box::new(move || flag.set(other.declare(&request).is_ok())));
     let outcomes = rig.boundary(&failed);
     assert!(ran.get());
-    assert_eq!(described(&outcomes), ["not-committed:StaleState"]);
+    let prefix = prefix_of(&rig)?;
+    assert_eq!(described(&outcomes), ["not-committed:StaleState"], "{prefix}");
     assert_eq!(rig.running()?, "plugin-a");
     assert_eq!(described(&rig.boundary(&failed)), ["activated:plugin-b:[]"]);
     Ok(())
