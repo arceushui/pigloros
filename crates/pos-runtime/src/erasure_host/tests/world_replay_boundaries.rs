@@ -17,6 +17,51 @@ fn intent_for(requested: &WorldReplayUseV1) -> WorldReplayReadIntentV1 {
 }
 
 #[test]
+fn every_prepared_event_bound_must_be_independently_finite() {
+    let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
+    let requested = replay_use(&closure);
+    let intent = intent_for(&requested);
+    let prepared =
+        test_ok(test_ok(host.read_sender()).prepare_world_replay_read(&closure, intent.clone()));
+    for dimension in 0..6 {
+        for unbounded in [false, true] {
+            let mut sizes = [1; 5];
+            let mut elapsed = 1;
+            if dimension < sizes.len() {
+                sizes[dimension] = if unbounded { usize::MAX } else { 0 };
+            } else {
+                elapsed = if unbounded { u64::MAX } else { 0 };
+            }
+            let bounds = EventReadBounds::new_with_total_bytes_and_elapsed(
+                sizes[0], sizes[1], sizes[2], sizes[3], sizes[4], elapsed,
+            );
+            assert_eq!(
+                PreparedWorldReplayReadV1::new(
+                    &closure,
+                    intent.clone(),
+                    prepared.generation(),
+                    Arc::clone(prepared.owner()),
+                    bounds,
+                    prepared.fork_read_limits(),
+                )
+                .err(),
+                Some(WorldReplayVerificationErrorV1::RequestMismatch),
+                "dimension {dimension}, unbounded {unbounded}"
+            );
+        }
+    }
+    assert!(PreparedWorldReplayReadV1::new(
+        &closure,
+        intent,
+        prepared.generation(),
+        Arc::clone(prepared.owner()),
+        EventReadBounds::new_with_total_bytes_and_elapsed(1, 1, 1, 1, 1, 1),
+        prepared.fork_read_limits(),
+    )
+    .is_ok());
+}
+
+#[test]
 fn preparations_reject_stale_generation_and_substituted_closure_or_use() {
     let (mut host, closure) = world_replay_host(WorldReplayVerifierModeV1::Exact);
     let requested = replay_use(&closure);
@@ -370,6 +415,146 @@ fn event_reads_reject_malformed_successful_batches_and_stale_heads() {
         } else {
             assert_eq!(result, Err(ErasureHostErrorV1::AdapterFailure));
         }
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+}
+
+#[test]
+fn bounded_reads_keep_partial_ranges_and_accept_the_exact_event_ceiling() {
+    let (mut host, closure) = replay_fault_host(FaultModeV1::Passthrough);
+    test_ok(test_ok(host.command_sender()).append(
+        closure.timeline_id(),
+        &[EventDraft::new(
+            EntityId::new(),
+            Kind::new("host.fixture"),
+            CanonicalBytes::from_vec(Vec::new()),
+        )],
+    ));
+    let generation = test_ok(host.gate.inventory_generation());
+    let limits = test_ok(pos_store::ForkReplayReadLimitsV1::new(
+        8,
+        1_024,
+        262_144,
+        256 * 1024 * 1024,
+        30_000_000,
+    ));
+    for (last, maximum, expected_count) in [(1, 1, Some(1)), (2, 2, Some(2)), (2, 1, None)] {
+        let requested = test_ok(WorldReplayUseV1::new(
+            closure.timeline_id(),
+            ErasureProtectedOperationV1::Read,
+            SeqRange::bounded(Seq::from_u64(1), Seq::from_u64(last)),
+            Seq::from_u64(2),
+            vec!["count".to_owned()],
+            Vec::new(),
+        ));
+        let verified = crate::world_replay::test_verified_world_replay_with_fields_and_bounds(
+            closure.digest(),
+            closure.timeline_id(),
+            closure.source_head(),
+            requested,
+            generation,
+            pos_core::ErasureReplayClaimV1::Exact,
+            (
+                EventReadBounds::new_with_total_bytes_and_elapsed(
+                    65_536, 128, 8, maximum, 67_108_864, 30_000_000,
+                ),
+                limits,
+            ),
+        );
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = test_ok(ForkReplayReadBudgetV1::new(limits, start, &mut clock));
+        let result = test_ok(host.read_sender()).read_world_replay_events(&verified, &mut budget);
+        if let Some(count) = expected_count {
+            let events = test_ok(result);
+            assert_eq!(events.len(), count);
+            assert_eq!(events[0].seq, Seq::from_u64(1));
+            assert_eq!(events[count - 1].seq, Seq::from_u64(last));
+        } else {
+            assert_eq!(result, Err(ErasureHostErrorV1::AdapterFailure));
+        }
+        assert_eq!(host.status(), ErasureHostStatusV1::Ready);
+    }
+}
+
+#[test]
+fn two_sqlite_read_arms_keep_independent_depths_and_settle_the_owned_interval() {
+    use crate::world_replay::test_support::{with_replay_observer, ReplayPhaseV1};
+    use std::{cell::RefCell, rc::Rc};
+    let composition = ErasureCoordinatorCompositionV1::closed()
+        .with_world_replay_verifier(Arc::new(WorldReplayVerifierModeV1::Exact));
+    let mut host = test_ok(ErasureExecutionHostV1::open_with_authority(
+        StoreConfig::SqliteInMemory,
+        &composition,
+        ErasureRecoveryLimitsV1::compiled_maximum(),
+    ));
+    let mut leaves = Vec::new();
+    for _ in 0..2 {
+        let mut sender = test_ok(host.command_sender());
+        let mut leaf = test_ok(sender.create_timeline("read arm root")).id();
+        for _ in 0..4 {
+            leaf = test_ok(sender.fork_timeline(leaf, Seq::ZERO, "read arm child")).id();
+        }
+        leaves.push(leaf);
+    }
+    let generation = test_ok(host.gate.inventory_generation());
+    let preparations: Vec<_> = leaves
+        .into_iter()
+        .map(|timeline| {
+            let closure = test_ok(
+                WorldReplayClosureV1::test_fixture_for_timeline_with_inventory_generation(
+                    timeline,
+                    Hash::from_bytes(generation.digest()),
+                ),
+            );
+            let requested = replay_use(&closure);
+            test_ok(
+                test_ok(host.read_sender())
+                    .prepare_world_replay_read(&closure, intent_for(&requested)),
+            )
+        })
+        .collect();
+    // Run twice: leaking the first owned SQLite transaction would make the
+    // second acquisition borrowed and would omit its required settlement.
+    for _ in 0..2 {
+        let phases = Rc::new(RefCell::new(Vec::new()));
+        let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+        let start = clock.mark();
+        let mut budget = test_ok(ForkReplayReadBudgetV1::new(
+            preparations[0].fork_read_limits(),
+            start,
+            &mut clock,
+        ));
+        let result = with_replay_observer(
+            Rc::new({
+                let phases = Rc::clone(&phases);
+                move |phase| phases.borrow_mut().push(phase)
+            }),
+            || {
+                test_ok(host.read_sender()).with_world_replay_read_fence(
+                    &[&preparations[0], &preparations[1]],
+                    &mut budget,
+                    |_, _| Ok(()),
+                    |(), verdict| verdict,
+                )
+            },
+        );
+        assert_eq!(result, Ok(()));
+        let phases = phases.borrow();
+        assert_eq!(
+            phases
+                .iter()
+                .filter(|phase| **phase == ReplayPhaseV1::BeforeRollback)
+                .count(),
+            1
+        );
+        assert_eq!(
+            phases
+                .iter()
+                .filter(|phase| **phase == ReplayPhaseV1::AfterRollback)
+                .count(),
+            1
+        );
         assert_eq!(host.status(), ErasureHostStatusV1::Ready);
     }
 }
