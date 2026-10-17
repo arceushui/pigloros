@@ -32,7 +32,7 @@ pub trait CompositionFallbackRegistryV1 {
 
     /// Declare, re-base, or withdraw the policy of `(scope, timeline)`.
     ///
-    /// The identity of a repeat is the entity, the DFP1 bytes, and the conformance sets; the
+    /// The identity of a repeat is the entity, the policy digest, and the conformance sets; the
     /// expected revision and head are not part of it, so a retry after an indeterminate commit
     /// replays even though it names the old revision.
     ///
