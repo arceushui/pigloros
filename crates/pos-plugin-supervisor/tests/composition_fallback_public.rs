@@ -414,7 +414,6 @@ impl TempDb {
     fn path(&self) -> BoxResult<&str> {
         Ok(self.0.to_str().ok_or("the temporary path is not UTF-8")?)
     }
-
 }
 
 impl Drop for TempDb {

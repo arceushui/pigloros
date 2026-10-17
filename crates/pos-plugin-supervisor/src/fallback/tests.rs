@@ -143,13 +143,20 @@ fn a_fresh_boundary_holds_its_bindings() {
 /// The implementation key of `plugin_id` on the release `byte`.
 fn key(plugin_id: &str, byte: u8) -> ImplementationKeyV1 {
     let digest = Hash::from_bytes([byte; 32]);
-    ok(ImplementationKeyV1::new(plugin_id.to_owned(), "0.1.0".to_owned(), digest))
+    ok(ImplementationKeyV1::new(
+        plugin_id.to_owned(),
+        "0.1.0".to_owned(),
+        digest,
+    ))
 }
 
 /// Declare, on `target` of `store`, one entry whose primary has one candidate.
 fn declared(target: CompositionFallbackTargetV1, store: &mut MemoryStore) {
     let pin = |plugin_id, byte| {
-        ok(pos_core::CompositionPinV1::new(key(plugin_id, byte), vec!["role".to_owned()]))
+        ok(pos_core::CompositionPinV1::new(
+            key(plugin_id, byte),
+            vec!["role".to_owned()],
+        ))
     };
     let triggers = vec![FallbackTriggerCodeV1::ResourceLimit];
     let automatic = pos_core::FallbackActivationModeV1::Automatic;
@@ -161,7 +168,11 @@ fn declared(target: CompositionFallbackTargetV1, store: &mut MemoryStore) {
         automatic,
     );
     let entries = vec![ok(entry)];
-    let policy = ok(pos_core::DomainFallbackPolicyV1::new("scope".to_owned(), entries, None));
+    let policy = ok(pos_core::DomainFallbackPolicyV1::new(
+        "scope".to_owned(),
+        entries,
+        None,
+    ));
     let request = FallbackDeclareRequestV1 {
         scope: "scope".to_owned(),
         target,
@@ -177,8 +188,13 @@ fn declared(target: CompositionFallbackTargetV1, store: &mut MemoryStore) {
 fn store() -> (MemoryStore, CompositionFallbackTargetV1) {
     let mut store = MemoryStore::new();
     let gate = Arc::new(pos_core::ErasureContainmentGateV1::new_test_open());
-    ok(pos_core::store::EventStore::bind_erasure_gate(&mut store, gate));
-    let timeline = ok(pos_core::store::EventStore::create_timeline(&mut store, "cbt")).id();
+    ok(pos_core::store::EventStore::bind_erasure_gate(
+        &mut store, gate,
+    ));
+    let timeline = ok(pos_core::store::EventStore::create_timeline(
+        &mut store, "cbt",
+    ))
+    .id();
     let _provisioned = ok(store.provision_fallback_registry());
     let target = CompositionFallbackTargetV1 {
         timeline,
@@ -231,11 +247,17 @@ fn a_refused_commit_is_not_adopted() {
     let committed = commit_activation(&mut store, &activation(target, 1, 5));
     assert_eq!(committed.map(|row| row.state_revision()), Ok(2));
     let conflict = commit_activation(&mut store, &activation(target, 1, 6));
-    assert_eq!(refusal(conflict), Some(CompositionFallbackRegistryErrorV1::Conflict));
+    assert_eq!(
+        refusal(conflict),
+        Some(CompositionFallbackRegistryErrorV1::Conflict)
+    );
     let mut stale = activation(target, 1, 5);
     stale.closing_tenure_ordinal = 1;
     stale.from = key("acme.candidate", 2);
     stale.to = key("acme.primary", 1);
     let refused = refusal(commit_activation(&mut store, &stale));
-    assert_eq!(refused, Some(CompositionFallbackRegistryErrorV1::StaleState));
+    assert_eq!(
+        refused,
+        Some(CompositionFallbackRegistryErrorV1::StaleState)
+    );
 }
