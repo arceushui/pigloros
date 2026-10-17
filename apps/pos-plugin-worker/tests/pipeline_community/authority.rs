@@ -52,7 +52,7 @@ const OWNER: Native = Native {
     role: "first-party-owner",
 };
 /// A first-party Plugin that owns a type of its own and proposes the owner's.
-const PROPOSER: Native = Native {
+pub const PROPOSER: Native = Native {
     name: "first-party-proposer",
     owned: TWIN_TYPE,
     emitted: EVENT_TYPE,
@@ -71,7 +71,7 @@ const COMMUNITY_PROPOSER: Spec = Spec {
 /// The consent Event type reserved to the Gateway consent host, which no Plugin may claim.
 const RESERVED_CLAIM: &str = EVENT_TYPE_CONSENT_REVOKED_V1;
 /// The community member on the probe guest, which owns the fixture's Event type.
-const PROBE: Spec = Spec {
+pub const PROBE: Spec = Spec {
     guest: PROBE_GUEST,
     ..ALPHA
 };
@@ -164,15 +164,21 @@ pub fn snapshot(registry: &PluginRegistry) -> String {
 }
 
 /// One refused proposal pass.
-struct Proposal {
-    observed: Observed,
-    refusal: String,
-    class: String,
+pub struct Proposal {
+    /// The authority outcome of the pass.
+    pub observed: Observed,
+    /// The typed refusal that failed the pass.
+    pub refusal: String,
+    /// How the host classifies the error that failed the pass.
+    pub class: String,
 }
 
 /// The Local pass of a registry on a `kind` store holding [`OWNER`] and then the first-party
 /// `native` proposer.
-fn first_party_proposal(
+///
+/// # Errors
+/// Returns the error of registering either Plugin, of building the lane or of its pass.
+pub fn first_party_proposal(
     signed: &SignedWorld,
     native: Native,
     kind: StoreKind,
@@ -255,6 +261,25 @@ pub fn community_driver(
     entry: &Published,
     plugin_id: PluginId,
 ) -> BoxResult<CommunityDriverV1> {
+    let abi = CommunityPluginHostAbiV1::new(0, 1, vec!["clock".to_owned()]);
+    let abi = abi.map_err(|error| format!("{error:?}"))?;
+    let config = driver_config(signed, entry, plugin_id, &abi)?;
+    let config = config.map_err(|error| format!("{error:?}"))?;
+    Ok(CommunityDriverV1::new(config).0)
+}
+
+/// The configuration of a community Driver from the gated release of `entry`, or its refusal.
+///
+/// The Driver is for `plugin_id` and negotiates the release against the host ABI `abi`.
+///
+/// # Errors
+/// Returns the error of gating the release or of building the Driver's supervisor.
+pub fn driver_config(
+    signed: &SignedWorld,
+    entry: &Published,
+    plugin_id: PluginId,
+    abi: &CommunityPluginHostAbiV1,
+) -> BoxResult<Result<CommunityDriverConfigV1, CommunityPluginHostErrorV1>> {
     let swap = Swap::of(trust_material(signed, &signed.material()?));
     let gated = gated_release(signed, entry, &swap)?;
     let program = WorkerProgramV1::new(PathBuf::from(WORKER)).ok_or("an invalid worker path")?;
@@ -268,13 +293,10 @@ pub fn community_driver(
         source: Box::new(Source::numbered(1)),
         initial_state: initial(),
     };
-    let abi = CommunityPluginHostAbiV1::new(0, 1, vec!["clock".to_owned()]);
-    let abi = abi.map_err(|error| format!("{error:?}"))?;
     let hosted = profile(Mode::Local);
     let id = entry.spec.plugin_id;
-    let config = CommunityDriverConfigV1::from_gated(gated, &abi, &hosted, id, settings);
-    let config = config.map_err(|error| format!("{error:?}"))?;
-    Ok(CommunityDriverV1::new(config).0)
+    let config = CommunityDriverConfigV1::from_gated(gated, abi, &hosted, id, settings);
+    Ok(config)
 }
 
 /// Claim `event_type` for a community Plugin built from `entry`, on the community path.
