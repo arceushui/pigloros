@@ -164,6 +164,40 @@ opt-level = 3
 [profile.dev.package.crypto-bigint]
 opt-level = 3
 
+# Community Plugin guests. Every real-worker launch validates the guest and
+# compiles it with Cranelift at OptLevel::Speed (pos-plugin-host engine.rs),
+# so the real-worker tests run an opt-level 0 compiler on every launch.
+# A name-only spec covers both locked wasmparser versions (0.258 and 0.261).
+[profile.dev.package.wasmtime]
+opt-level = 3
+
+[profile.dev.package.wasmtime-environ]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 3
+
+[profile.dev.package.wasmparser]
+opt-level = 3
+
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+
+[profile.dev.package.cranelift-frontend]
+opt-level = 3
+
+[profile.dev.package.cranelift-assembler-x64]
+opt-level = 3
+
+[profile.dev.package.cranelift-bforest]
+opt-level = 3
+
+[profile.dev.package.cranelift-entity]
+opt-level = 3
+
+[profile.dev.package.regalloc2]
+opt-level = 3
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 warnings = { level = "deny", priority = -2 }
