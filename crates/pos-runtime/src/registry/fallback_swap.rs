@@ -23,12 +23,12 @@ use pos_core::{clock::Seq, event::Event, Kind, Plugin, PluginId};
 use thiserror::Error;
 
 use super::{
-    driver_visible_event, pass_state, validate_recovery_evidence, PendingRegistrationCallbacksV1,
-    PluginEntry, PluginRegistry, PreparedRegistrationV1, ReducerSlotV1, RegistrationOptions,
-    StepChainV1,
+    commit_driver_restore, pass_state, reset_restored_entry, stage_driver_restore,
+    validate_recovery_evidence, visible_and_head, PendingRegistrationCallbacksV1, PluginEntry,
+    PluginRegistry, PreparedRegistrationV1, ReducerSlotV1, RegistrationOptions,
 };
 use crate::composition::PluginRegistrationV1;
-use crate::driver::{Driver, DriverRecoveryEvidence, TimelineHistorySegment};
+use crate::driver::{Driver, TimelineHistorySegment};
 use crate::error::RuntimeError;
 
 /// Closed refusals of the ADR-119 registry swap seams (section 4.4).
@@ -56,9 +56,11 @@ pub enum FallbackSwapRefusalV1 {
     /// The registry could not reserve the capacity the swap needs.
     #[error("the registry could not reserve capacity for the swap")]
     CapacityUnavailable,
-    /// The candidate's `PluginId` is already registered.
-    #[error("the fallback candidate is already registered")]
-    CandidateRegistered,
+    /// The primary has an action approver or a projection reducer. Fallback
+    /// primaries are approver-free and reducer-free, because the candidate
+    /// takes over neither.
+    #[error("the replaced primary has an action approver or a projection reducer")]
+    PrimaryHasCallbacks,
 }
 
 impl PluginRegistry {
@@ -123,7 +125,9 @@ impl PluginRegistry {
     /// primary at the current registry revision; and owned Event types equal
     /// to the primary's. It then reserves one slot in the entry map and in the
     /// scheduled bindings, so the swap cannot fail on allocation. It changes
-    /// no entry.
+    /// no entry. The primary must have no action approver and no projection
+    /// reducer: fallback primaries are approver-free and reducer-free, and a
+    /// prepared candidate carries neither.
     ///
     /// The Implementation key (IMK1) checks, the host member lookup and the
     /// prefix read belong to the host-level `validate_swap`.
@@ -136,7 +140,7 @@ impl PluginRegistry {
         &mut self,
         prepared: &PreparedRegistrationV1,
     ) -> Result<(), RuntimeError> {
-        self.swap_index(prepared).and(Ok(()))
+        self.swap_index(prepared).map(drop)
     }
 
     /// Move `prepared` into the registry index of its primary (section 4.4
@@ -148,9 +152,12 @@ impl PluginRegistry {
     /// Tick is kept. The revision advances and the restored Fork binding is
     /// cleared. The schemas, projections, approver routes and every other
     /// entry are untouched, and the primary's entry and Driver are dropped.
+    /// The schema descriptions therefore keep the primary's
+    /// "owned by plugin '<name>'" text.
     ///
     /// It re-runs [`Self::validate_swap_v1`] first, so after a successful dry
-    /// run with no registry change in between it cannot fail.
+    /// run with no registry change in between it cannot fail; an error there
+    /// is the section 4.7 invariant fault (ADR-119 clarification 9).
     ///
     /// # Errors
     /// Returns the errors of [`Self::validate_swap_v1`], with nothing changed.
@@ -214,6 +221,7 @@ impl PluginRegistry {
     /// Every dry-run check, then the reservation; the primary's index.
     fn swap_index(&mut self, prepared: &PreparedRegistrationV1) -> Result<usize, RuntimeError> {
         self.ensure_live_execution()?;
+        // This also refuses an in-doubt admission and a poisoned Driver.
         self.ensure_no_pending_step()?;
         let index = self.replaced_index(prepared)?;
         self.reserve_swap_capacity()
@@ -233,9 +241,26 @@ impl PluginRegistry {
             .plugins
             .get_full(&primary)
             .ok_or(FallbackSwapRefusalV1::UnknownPrimary)?;
-        same_owned_types(&entry.owned_event_types, &prepared.owned_event_types)
-            .then_some(index)
-            .ok_or(FallbackSwapRefusalV1::OwnedTypesDiffer)
+        self.check_primary(primary, entry, prepared)
+            .map(|()| index)
+    }
+
+    /// The primary has no approver and no reducer, and the candidate owns
+    /// exactly its Event types.
+    fn check_primary(
+        &self,
+        primary: PluginId,
+        entry: &PluginEntry,
+        prepared: &PreparedRegistrationV1,
+    ) -> Result<(), FallbackSwapRefusalV1> {
+        if entry.approver.is_some() || self.projections.has_installed_reducer(primary) {
+            return Err(FallbackSwapRefusalV1::PrimaryHasCallbacks);
+        }
+        if same_owned_types(&entry.owned_event_types, &prepared.owned_event_types) {
+            Ok(())
+        } else {
+            Err(FallbackSwapRefusalV1::OwnedTypesDiffer)
+        }
     }
 
     /// A successful `try_reserve(1)` leaves room for the one insert a swap
@@ -252,12 +277,13 @@ impl PluginRegistry {
         prepared: PreparedRegistrationV1,
     ) -> Result<(), RuntimeError> {
         let replaced = self.plugins.replace_index(index, prepared.id);
-        let registered = Err(RuntimeError::FallbackSwap(
-            FallbackSwapRefusalV1::CandidateRegistered,
+        // The dry run pins the revision, so the candidate key is unique here.
+        let stale = Err(RuntimeError::FallbackSwap(
+            FallbackSwapRefusalV1::StalePreparation,
         ));
         replaced
             .map(|primary| self.move_entry(index, primary, prepared))
-            .or(registered)
+            .or(stale)
     }
 
     fn move_entry(&mut self, index: usize, primary: PluginId, prepared: PreparedRegistrationV1) {
@@ -284,12 +310,7 @@ impl PluginRegistry {
         events: &[Event],
     ) -> Result<(), RuntimeError> {
         // Consent is host control-plane history: the Driver never sees it.
-        let visible: Vec<Event> = events
-            .iter()
-            .filter(|event| driver_visible_event(event))
-            .cloned()
-            .collect();
-        let restored_head = events.last().map_or(Seq::ZERO, |event| event.seq);
+        let (visible, restored_head) = visible_and_head(events);
         let unknown = || RuntimeError::NoDriver {
             name: plugin_id.to_string(),
         };
@@ -312,37 +333,12 @@ fn restore_entry_state(
     restored_head: Seq,
 ) -> Result<(), RuntimeError> {
     entry.driver.as_deref_mut().map_or(Ok(()), |driver| {
-        restore_one_driver(driver, poisoned, timeline_segments, visible)
+        stage_driver_restore(driver, timeline_segments, visible)
+            .and_then(|()| commit_driver_restore(driver, poisoned))
     })?;
-    entry.event_cursor = restored_head;
-    entry.pass_state.carried.clear();
-    entry.pass_state.history = pass_state::restored_history(visible, restored_head);
-    entry.chain = StepChainV1::Lookup;
+    let history = pass_state::restored_history(visible, restored_head);
+    reset_restored_entry(entry, restored_head, history);
     Ok(())
-}
-
-/// Stage, then commit, one Driver's restore. A staging error aborts the
-/// stage; a commit panic poisons the registry.
-fn restore_one_driver(
-    driver: &mut dyn Driver,
-    poisoned: &mut Option<String>,
-    timeline_segments: &[TimelineHistorySegment],
-    visible: &[Event],
-) -> Result<(), RuntimeError> {
-    let evidence = DriverRecoveryEvidence::from_events(timeline_segments, visible, |header| {
-        driver.needs_recovery_payload(header)
-    });
-    driver
-        .stage_restore_from_history(&evidence)
-        .inspect_err(|_| driver.abort_restore_from_history())?;
-    let name = driver.name().to_owned();
-    let committed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        driver.commit_restore_from_history();
-    }));
-    committed.map_err(|_| {
-        *poisoned = Some(name.clone());
-        RuntimeError::DriverRestorePanicked { name }
-    })
 }
 
 /// Whether two declarations own the same Event types. The ownership check

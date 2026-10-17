@@ -234,6 +234,54 @@ fn driver_visible_event(event: &Event) -> bool {
         && event.event_type.as_str() != pos_core::HOST_CONSENT_CLOSED_EVENT_TYPE
 }
 
+/// The Driver-visible Events of a validated prefix, and its restored head.
+fn visible_and_head(events: &[Event]) -> (Vec<Event>, Seq) {
+    let visible = events
+        .iter()
+        .filter(|event| driver_visible_event(event))
+        .cloned()
+        .collect();
+    let restored_head = events.last().map_or(Seq::ZERO, |event| event.seq);
+    (visible, restored_head)
+}
+
+/// Stage one Driver's restore, aborting the stage when the Driver refuses it.
+fn stage_driver_restore(
+    driver: &mut dyn Driver,
+    timeline_segments: &[TimelineHistorySegment],
+    visible_events: &[Event],
+) -> Result<(), RuntimeError> {
+    let evidence = DriverRecoveryEvidence::from_events(timeline_segments, visible_events, |header| {
+        driver.needs_recovery_payload(header)
+    });
+    driver
+        .stage_restore_from_history(&evidence)
+        .inspect_err(|_| driver.abort_restore_from_history())
+}
+
+/// Commit one Driver's staged restore; a panic poisons the registry.
+fn commit_driver_restore(
+    driver: &mut dyn Driver,
+    poisoned: &mut Option<String>,
+) -> Result<(), RuntimeError> {
+    let name = driver.name().to_owned();
+    let committed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        driver.commit_restore_from_history();
+    }));
+    committed.map_err(|_| {
+        *poisoned = Some(name.clone());
+        RuntimeError::DriverRestorePanicked { name }
+    })
+}
+
+/// Reset a restored entry's pass state to the restored head.
+fn reset_restored_entry(entry: &mut PluginEntry, restored_head: Seq, history: HistoryInputV1) {
+    entry.event_cursor = restored_head;
+    entry.pass_state.carried.clear();
+    entry.pass_state.history = history;
+    entry.chain = StepChainV1::Lookup;
+}
+
 /// Whether this pass's consent shows a subscribed committed Event.
 ///
 /// A subject-controlled Event (ADR-021 Revision 4 Decision 2) is shown only
@@ -3203,12 +3251,7 @@ impl PluginRegistry {
         // Consent is host control-plane history. Validate the full durable
         // prefix above, then ensure Drivers never receive grant/revocation
         // headers or payloads during recovery.
-        let visible_events: Vec<Event> = events
-            .iter()
-            .filter(|event| driver_visible_event(event))
-            .cloned()
-            .collect();
-        let restored_head = events.last().map_or(Seq::ZERO, |event| event.seq);
+        let (visible_events, restored_head) = visible_and_head(events);
         let history = pass_state::restored_history(&visible_events, restored_head);
         let mut staged_driver_count = 0;
         let mut failure = None;
@@ -3216,12 +3259,8 @@ impl PluginRegistry {
             let Some(driver) = entry.driver.as_mut() else {
                 continue;
             };
-            let evidence =
-                DriverRecoveryEvidence::from_events(timeline_segments, &visible_events, |header| {
-                    driver.needs_recovery_payload(header)
-                });
-            if let Err(error) = driver.stage_restore_from_history(&evidence) {
-                driver.abort_restore_from_history();
+            let staged = stage_driver_restore(driver.as_mut(), timeline_segments, &visible_events);
+            if let Err(error) = staged {
                 failure = Some(error);
                 break;
             }
@@ -3244,19 +3283,8 @@ impl PluginRegistry {
             let Some(driver) = entry.driver.as_mut() else {
                 continue;
             };
-            let name = driver.name().to_owned();
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                driver.commit_restore_from_history();
-            }))
-            .is_err()
-            {
-                self.poisoned_driver = Some(name.clone());
-                return Err(RuntimeError::DriverRestorePanicked { name });
-            }
-            entry.event_cursor = restored_head;
-            entry.pass_state.carried.clear();
-            entry.pass_state.history = history.clone();
-            entry.chain = StepChainV1::Lookup;
+            commit_driver_restore(driver.as_mut(), &mut self.poisoned_driver)?;
+            reset_restored_entry(entry, restored_head, history.clone());
         }
         self.restored_binding = timeline_segments
             .last()
