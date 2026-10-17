@@ -189,7 +189,7 @@ pub enum FallbackEntryOutcomeV1 {
         /// The candidates skipped before `to`.
         skipped: Vec<FallbackSkippedCandidateV1>,
         /// The ledger row of the activation.
-        row: FallbackLedgerRowV1,
+        row: Box<FallbackLedgerRowV1>,
     },
     /// A manual entry recorded the observation and waits for its owner.
     AwaitingOwner {

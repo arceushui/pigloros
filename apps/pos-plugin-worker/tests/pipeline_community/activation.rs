@@ -46,9 +46,7 @@ use pos_runtime::{
     FallbackEntryFactsV1, FallbackExecutionFactsV1, FallbackHostFactsV1, FallbackHostGrantsV1,
     FallbackTriggerCauseV1, ObservationView, PluginExecutionModeV1, RequiredPluginCompositionV1,
 };
-use pos_store::composition_fallback_registry::{
-    CompositionFallbackRegistryV1, CompositionFallbackTargetV1,
-};
+use pos_store::composition_fallback_registry::CompositionFallbackTargetV1;
 use pos_store::memory::MemoryStore;
 use pos_store::sqlite::SqliteStore;
 use tempfile::TempDir;

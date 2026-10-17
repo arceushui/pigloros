@@ -443,7 +443,7 @@ impl CompositionBoundaryV1 {
                 entry_key,
                 to,
                 skipped,
-                row,
+                row: Box::new(row),
             }
         });
         activated.ok_or(SWAP_FAILED)

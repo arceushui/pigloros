@@ -190,7 +190,7 @@ impl RestartV1<'_> {
                         skipped,
                     };
                     let request = self.request(effective, pin, commit);
-                    return self.activate(context, composed, request, built);
+                    return Self::activate(context, composed, request, built);
                 }
                 Err(reason) => skipped.push(FallbackSkippedCandidateV1 {
                     implementation_digest: pin.implementation().digest(),
@@ -227,7 +227,6 @@ impl RestartV1<'_> {
 
     /// Commit the restart activation, then install the candidate fresh in the slot's place.
     fn activate<S, T, W>(
-        &self,
         context: Context<'_, '_, S, T, W>,
         composed: ComposedV1,
         request: FallbackActivateRequestV1,
@@ -248,7 +247,7 @@ impl RestartV1<'_> {
                 entry_key: request.entry_key,
                 to: request.to,
                 skipped: request.skipped,
-                row,
+                row: Box::new(row),
             });
             composed
         })
