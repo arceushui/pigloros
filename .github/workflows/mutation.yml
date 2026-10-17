@@ -18,6 +18,8 @@ concurrency:
 env:
   RUSTUP_TOOLCHAIN: nightly-2026-08-28
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # Bound compiler concurrency separately from the four mutation workers.
+  CARGO_BUILD_JOBS: "1"
 
 jobs:
   mutation-changes:

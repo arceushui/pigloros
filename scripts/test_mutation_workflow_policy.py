@@ -39,8 +39,11 @@ def check_contract(workflow: dict) -> None:
     if workflow.get("env") != {
         "RUSTUP_TOOLCHAIN": NIGHTLY,
         "CARGO_PROFILE_TEST_DEBUG": "line-tables-only",
+        "CARGO_BUILD_JOBS": "1",
     }:
-        raise AssertionError("baseline and mutants must share the pinned nightly")
+        raise AssertionError(
+            "baseline and mutants must share the pinned nightly and serial compiler jobs"
+        )
     jobs = workflow["jobs"]
     for name in ("mutation-baseline", "mutation"):
         job = jobs[name]
@@ -156,6 +159,17 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
             run["run"] = run["run"].replace("--include-ignored", "")
             with self.subTest(job=name), self.assertRaises(AssertionError):
                 check_contract(changed)
+
+    def test_rejects_missing_or_nonserial_compiler_jobs(self) -> None:
+        for value in (None, "", "auto", "2", "4", 1):
+            with self.subTest(value=value):
+                changed = copy.deepcopy(self.workflow)
+                if value is None:
+                    changed["env"].pop("CARGO_BUILD_JOBS")
+                else:
+                    changed["env"]["CARGO_BUILD_JOBS"] = value
+                with self.assertRaisesRegex(AssertionError, "serial compiler jobs"):
+                    check_contract(changed)
 
     def test_real_fan_in_rejects_unsuccessful_baseline_and_shards(self) -> None:
         run = self.workflow["jobs"]["mutation-gate"]["steps"][0]["run"]
