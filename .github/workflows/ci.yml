@@ -11,7 +11,8 @@
 #   cargo-crap   — no CRAP regressions; new functions score ≤30
 #   audit        — cargo-audit (CVE advisories)
 #   deny         — cargo-deny (licenses, bans, sources)
-#   geiger       — no unsafe in own crates
+#   unsafe       — workspace unsafe_code = "forbid" plus the source-based
+#                  owner-bridge unsafe policy (pinned-dependencies job)
 #   asan         — address sanitizer on nightly
 #   docker       — image builds and smoke-tests
 #   wasm         — world-client WASM contract + browser parity
@@ -856,25 +857,6 @@ jobs:
       - name: cargo shear (strict)
         run: cargo shear --deny-warnings
 
-  geiger:
-    name: cargo-geiger (unsafe code audit)
-    needs:
-      - ci_change_scope
-      - cargo-crap
-    if: >-
-      ${{ !cancelled() && needs.ci_change_scope.result == 'success' &&
-      needs.cargo-crap.result == 'success' &&
-      (needs.ci_change_scope.outputs.rust == 'true' || github.event_name != 'pull_request') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
-        with:
-          tool: cargo-geiger
-      - name: cargo geiger (assert no unsafe in own crates)
-        run: bash scripts/check-geiger.sh
-
   codeql:
     name: CodeQL (Rust)
     needs:
@@ -1190,7 +1172,6 @@ jobs:
       - reference-evaluator-release
       - materialize-conformance-bundles
       - audit
-      - geiger
       - codeql
       - ledger-windows
       - docker-build
@@ -1208,7 +1189,6 @@ jobs:
           REFERENCE_RESULT: ${{ needs.reference-evaluator-release.result }}
           MATERIALIZE_RESULT: ${{ needs.materialize-conformance-bundles.result }}
           DEPENDENCY_RESULT: ${{ needs.audit.result }}
-          GEIGER_RESULT: ${{ needs.geiger.result }}
           CODEQL_RESULT: ${{ needs.codeql.result }}
           LEDGER_WINDOWS_RESULT: ${{ needs.ledger-windows.result }}
           DOCKER_RESULT: ${{ needs.docker-build.result }}
@@ -1223,7 +1203,7 @@ jobs:
           fi
           for result in \
             "${CARGO_CRAP_RESULT}" "${RUSTDOC_RESULT}" "${REFERENCE_RESULT}" \
-            "${MATERIALIZE_RESULT}" "${DEPENDENCY_RESULT}" "${GEIGER_RESULT}" \
+            "${MATERIALIZE_RESULT}" "${DEPENDENCY_RESULT}" \
             "${CODEQL_RESULT}" "${LEDGER_WINDOWS_RESULT}" "${DOCKER_RESULT}" \
             "${WASM_RESULT}" "${BROWSER_RESULT}"; do
             test "${result}" = "${expected}"

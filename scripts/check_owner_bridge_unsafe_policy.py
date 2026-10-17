@@ -4,7 +4,7 @@
 The Windows shim ``crates/pos-owner-bridge-windows`` is the only crate allowed
 to opt out of the workspace ``unsafe_code = "forbid"`` lint. The checker is
 source-based and target-independent: the shim compiles to nothing on Linux, so
-a Linux compiler or geiger run cannot audit its FFI boundary.
+a Linux compiler run cannot audit its FFI boundary.
 
 Policy, enforced over every ``.rs`` file under every workspace member (except
 ``<member>/target``):
