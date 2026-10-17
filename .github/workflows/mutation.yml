@@ -77,6 +77,9 @@ jobs:
       # The stable core suite does not prove nightly-only libtest arguments.
       # Prove them once on the full unmutated workspace before any shard starts.
       - name: Prove the mutation test harness
+        # rust-cache exports 0; step scope keeps baseline and mutant builds aligned.
+        env:
+          CARGO_INCREMENTAL: "1"
         run: |
           set -euo pipefail
           cargo test --workspace --all-features --locked -- \
@@ -127,6 +130,9 @@ jobs:
       # Each mutant retains the owning-package test selection used on main;
       # two harness threads limit four workers from multiplying concurrency.
       - name: Run mutants in changed lines
+        # Reuse each worker's compiler state instead of rebuilding every edit.
+        env:
+          CARGO_INCREMENTAL: "1"
         run: |
           set -euo pipefail
           set +e
