@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import copy
 import fnmatch
+import hashlib
 import pathlib
 import subprocess
 import tomllib
@@ -388,34 +389,16 @@ def assert_codeql_preparation_contract(workflow: dict) -> None:
          "with": {"category": "/language:rust"}},
     ]:
         raise AssertionError("retain the unchanged full CodeQL initialization and analysis")
+    # Exact reviewed-program snapshots, not a shell semantics oracle. Preserve
+    # every byte, including heredoc data; update only with reviewed setup changes.
     required = (
-        (5, (
-            'grep -F -- "$url" "$installer"',
-            'grep -F -- "$digest" "$installer"',
-            "sha256sum --check --strict -",
-            "--proto '=https' --tlsv1.2 --fail",
-            "tar --list --gzip",
-            "grep -E '^/|(^|/)\\.\\.(/|$)'",
-            "--no-same-owner --no-same-permissions",
-            'test ! -e "$generated"',
-            '"$tools_dir/wit-bindgen" rust --world community-plugin',
-            '--out-dir "$generated" plugins/community/wit',
-            'test -s "$generated/community_plugin.rs"',
-        )),
-        (1, (
-            "test ! -e scripts/asan/Cargo.toml",
-            "python3 - <<'PY'",
-            "sha256sum scripts/asan/intentional-leak.rs scripts/asan/Cargo.toml",
-        )),
+        (5, "943d3ffdab3272b7663ad6b8cea3eec11799ef54e3b56b5b46b15521114560d0"),
+        (1, "8ff9e3fadf283e88daefd380c1de1bdcf915e9ee321bcc8dd9b850c9e6382978"),
     )
-    for step, (deadline, fragments) in zip(steps[1:3], required):
+    for step, (deadline, digest) in zip(steps[1:3], required):
         if set(step) != {"name", "run", "timeout-minutes"} or step["timeout-minutes"] != deadline:
             raise AssertionError("source preparation must remain bounded, unconditional and blocking")
-        run = step["run"]
-        if (not run.startswith("set -euo pipefail\n")
-                or not run.endswith('test -z "$(git diff --name-only HEAD)"\n')
-                or any(fragment not in run for fragment in fragments)
-                or any(bypass in run for bypass in ("||", "exit 0", "set +"))):
+        if hashlib.sha256(step["run"].encode()).hexdigest() != digest:
             raise AssertionError("source preparation must retain its real inputs and refusal checks")
 
 
@@ -479,6 +462,20 @@ class CiWorkflowPolicyTests(unittest.TestCase):
         changed["jobs"]["analyze"]["steps"][1]["run"] += "true || true\n"
         with self.assertRaises(AssertionError):
             assert_codeql_preparation_contract(changed)
+
+    def test_codeql_preparation_refuses_non_executing_checksum_text(self) -> None:
+        workflow = load_workflow(WORKFLOW_PATHS[1])
+        run = workflow["jobs"]["analyze"]["steps"][1]["run"]
+        checksum = next(line for line in run.splitlines()
+                        if line.startswith("printf ") and "sha256sum --check" in line)
+        quoted = "'" + checksum.replace("'", "'\\''") + "'"
+        for replacement in ("# " + checksum, ": " + quoted, "echo " + quoted,
+                            "if false; then\n" + checksum + "\nfi",
+                            "unused_checksum() {\n" + checksum + "\n}"):
+            changed = copy.deepcopy(workflow)
+            changed["jobs"]["analyze"]["steps"][1]["run"] = run.replace(checksum, replacement)
+            with self.assertRaises(AssertionError):
+                assert_codeql_preparation_contract(changed)
 
     def test_scope_jobs_use_trusted_base_and_fail_closed(self) -> None:
         workflow = load_workflow(CI_WORKFLOW_PATH)
