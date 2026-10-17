@@ -117,23 +117,15 @@ impl CanonicalSink for Vec<u8> {
 
 struct LengthSink {
     length: Option<usize>,
-    maximum: usize,
 }
 
 impl LengthSink {
     const fn new() -> Self {
-        Self {
-            length: Some(0),
-            maximum: usize::MAX,
-        }
+        Self { length: Some(0) }
     }
 
     fn add(&mut self, amount: usize) {
-        self.length = self.length.and_then(|length| {
-            length
-                .checked_add(amount)
-                .filter(|next| *next <= self.maximum)
-        });
+        self.length = self.length.and_then(|length| length.checked_add(amount));
     }
 
     const fn finish(self) -> Result<usize, CanonicalLengthErrorV1> {
@@ -231,19 +223,6 @@ mod canonical_length_tests {
         count.nested_byte_string(&OneByte);
         assert_eq!(bytes, [0x41, 1]);
         assert_eq!(count.finish(), Ok(bytes.len()));
-    }
-
-    #[test]
-    fn the_actual_counting_primitive_enforces_a_32_bit_target_ceiling() {
-        let maximum = u32::MAX as usize;
-        let mut count = LengthSink {
-            length: Some(maximum - 1),
-            maximum,
-        };
-        count.push(1);
-        assert_eq!(count.length, Some(maximum));
-        count.push(1);
-        assert_eq!(count.finish(), Err(CanonicalLengthErrorV1::LengthOverflow));
     }
 }
 
