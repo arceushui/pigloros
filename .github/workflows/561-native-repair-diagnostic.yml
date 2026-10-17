@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
-          ref: 10131069668b28b3ad2ff0fa4c78b0c8a9c3ddb0
+          ref: 20cd689cdef7ebe25fe55fc80c3910be9a7c64ad
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         timeout-minutes: 5
@@ -39,7 +39,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           git rev-parse HEAD | tee artifacts/source-sha.txt
-          test "$(git rev-parse HEAD)" = 10131069668b28b3ad2ff0fa4c78b0c8a9c3ddb0
+          test "$(git rev-parse HEAD)" = 20cd689cdef7ebe25fe55fc80c3910be9a7c64ad
           rustc -Vv | tee artifacts/rustc.txt
           cargo llvm-cov --version | tee artifacts/llvm-cov-version.txt
           id | tee artifacts/runner-identity.txt
