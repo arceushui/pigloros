@@ -519,14 +519,14 @@ fn invalid_output(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<
     let community = community_invalid_output(&signed, entries, kind)?;
     let first_party = first_party_proposal(&signed, PROPOSER, kind)?;
     let (abi, abi_unchanged) = abi_invalid_release(kind)?;
-    let (raw, raw_unchanged) = manifest_invalid_release(kind)?;
+    let (pmf, pmf_unchanged) = manifest_invalid_release(kind)?;
     record_pass(capture, "community-invalid-output", &community.failed);
     record(capture, "community-next", &community.next.observed);
     capture.record("community.community-receipts", &community.receipts);
     record(capture, "first-party-invalid-draft", &first_party.observed);
     capture.record("first-party-invalid-draft.refusal", &first_party.refusal);
     record_refusal(capture, "abi-invalid-release", &abi, abi_unchanged);
-    record_refusal(capture, "manifest-invalid-release", &raw, raw_unchanged);
+    record_refusal(capture, "manifest-invalid-release", &pmf, pmf_unchanged);
     let failed = &community.failed;
     let discarded = discarded_whole(&failed.observed, &failed.refusal)
         && discarded_whole(&first_party.observed, &first_party.refusal);
