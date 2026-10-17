@@ -47,8 +47,11 @@ def check_contract(workflow: dict) -> None:
     jobs = workflow["jobs"]
     for name in ("mutation-baseline", "mutation"):
         job = jobs[name]
-        if "env" in job or "continue-on-error" in job:
-            raise AssertionError("mutation jobs must not override or suppress failures")
+        expected_env = {"CARGO_BUILD_JOBS": "3"} if name == "mutation-baseline" else None
+        if job.get("env") != expected_env or "continue-on-error" in job:
+            raise AssertionError(
+                "only the baseline may select three compiler jobs; failures stay blocking"
+            )
         toolchains = [
             step for step in job["steps"]
             if step.get("uses", "").startswith("dtolnay/rust-toolchain@")
@@ -173,6 +176,22 @@ class MutationWorkflowPolicyTests(unittest.TestCase):
                 else:
                     changed["env"]["CARGO_BUILD_JOBS"] = value
                 with self.assertRaisesRegex(AssertionError, "serial compiler jobs"):
+                    check_contract(changed)
+
+    def test_rejects_incorrect_baseline_compiler_budget(self) -> None:
+        for value in (
+            None, {},
+            {"CARGO_BUILD_JOBS": "1"}, {"CARGO_BUILD_JOBS": "2"},
+            {"CARGO_BUILD_JOBS": "4"}, {"CARGO_BUILD_JOBS": 3},
+            {"CARGO_BUILD_JOBS": "3", "RUSTUP_TOOLCHAIN": "stable"},
+        ):
+            with self.subTest(value=value):
+                changed = copy.deepcopy(self.workflow)
+                if value is None:
+                    changed["jobs"]["mutation-baseline"].pop("env")
+                else:
+                    changed["jobs"]["mutation-baseline"]["env"] = value
+                with self.assertRaisesRegex(AssertionError, "only the baseline"):
                     check_contract(changed)
 
     def test_real_fan_in_rejects_unsuccessful_baseline_and_shards(self) -> None:
