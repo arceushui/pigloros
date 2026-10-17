@@ -572,8 +572,8 @@ const fn next_row_seq(ledger: &[FallbackLedgerRowV1]) -> u64 {
 /// `EventRejected` when `hasher` hashes the payload differently.
 pub fn payload_digest(hasher: &dyn Hasher, draft: &EventDraft) -> FallbackResult<Hash> {
     let digest = Hash::from_bytes(*blake3::hash(draft.payload.as_slice()).as_bytes());
-    let hashed = hasher.hash_payload(&draft.payload) == digest;
-    require(hashed, Error::EventRejected).map(|()| digest)
+    let matches = hasher.hash_payload(&draft.payload) == digest;
+    require(matches, Error::EventRejected).map(|()| digest)
 }
 
 /// The identity of the one Event a guarded append of one draft returned.
