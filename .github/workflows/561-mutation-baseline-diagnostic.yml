@@ -1,5 +1,5 @@
 # Temporary cold-build resource diagnosis, not a required gate or trusted baseline.
-# The failed PR merge source and full test command stay fixed; telemetry adds no waiver.
+# The failed PR merge source and full test command stay fixed.
 name: 561-mutation-baseline-diagnostic
 
 on:
@@ -11,7 +11,8 @@ permissions:
 
 env:
   RUSTUP_TOOLCHAIN: nightly-2026-08-28
-  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # Compare compiler memory with c927: debug metadata is the only build change.
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   baseline:
@@ -29,7 +30,7 @@ jobs:
         timeout-minutes: 5
         with:
           toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
-      # Deliberately cold, as in the predecessor diagnostic; no profile/job tuning.
+      # Deliberately cold, as in c927; retain its job count and test selection.
       - name: Record exact source, toolchain and runner
         timeout-minutes: 1
         env:
