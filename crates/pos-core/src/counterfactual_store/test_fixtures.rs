@@ -207,9 +207,11 @@ pub fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     })
 }
 
-/// Assert that `result` succeeded and discard its value, as [`ok`] does.
+/// Assert that `result` succeeded and discard its value.
+///
+/// A failure unwinds with the same message as [`ok`].
 pub fn assert_ok<T, E: std::fmt::Debug>(result: Result<T, E>) {
-    let _ = ok(result);
+    let () = ok(result.map(drop));
 }
 
 /// Unwrap the error of `result`, unwinding with its value when it succeeded.
@@ -280,8 +282,8 @@ pub fn coord_at(tick: u64, owner: &str, ordinal: u32, digest: Hash) -> Dependenc
     ))
 }
 
-/// The [`coord_at`] coordinate of `owner`'s output 0, with digest
-/// [`hash`]`(digest)`.
+/// The [`coord_at`] coordinate of `owner`'s output 0, with the [`hash`] of
+/// `digest`.
 #[must_use]
 pub fn coord(tick: u64, owner: &str, digest: u8) -> DependencyNodeCoordinateV1 {
     coord_at(tick, owner, 0, hash(digest))
@@ -459,8 +461,8 @@ pub fn collect_rows<T: DependencyPagedRowV1 + Clone>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{
-        collect_rows, err, ok, prefix_scope, CounterfactualStoreErrorV1, DependencyNodeRecordV1,
-        DependencyPageRequestV1, DependencyPageV1, StoreResult, TimelineId,
+        assert_ok, collect_rows, err, ok, prefix_scope, CounterfactualStoreErrorV1,
+        DependencyNodeRecordV1, DependencyPageRequestV1, DependencyPageV1, StoreResult, TimelineId,
     };
 
     type NodeRow = DependencyNodeRecordV1;
@@ -488,6 +490,16 @@ mod tests {
 
     const fn refuse(_: &DependencyPageRequestV1) -> StoreResult<DependencyPageV1<NodeRow>> {
         Err(CounterfactualStoreErrorV1::CorruptState)
+    }
+
+    #[test]
+    fn assert_ok_unwinds_with_the_error() {
+        assert_ok::<u8, &str>(Ok(1));
+        let failed = std::panic::catch_unwind(|| assert_ok::<u8, _>(Err("refused")));
+        assert_eq!(
+            unwound_message(failed).as_deref(),
+            Some("unexpected test error: \"refused\"")
+        );
     }
 
     #[test]
