@@ -582,6 +582,56 @@ mod tests {
     }
 
     #[test]
+    fn native_lineage_decoder_refuses_short_projections_without_refunding_work() -> Fallible<()> {
+        // Production statements supply all four columns. Like the independent
+        // identity/root-shape defenses below, these real SQL projections test
+        // the existing decoder's second barrier, not public query reachability.
+        for (sql, fork) in [
+            ("SELECT id FROM timelines WHERE id=?1", true),
+            ("SELECT id,NULL FROM timelines WHERE id=?1", false),
+            ("SELECT id,NULL,NULL FROM timelines WHERE id=?1", false),
+        ] {
+            let (mut store, root, _) = fixture()?;
+            let interval = store.begin_protected_effect_interval()?;
+            let key = root.to_string();
+            let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+            let start = clock.mark();
+            // Both reads debit a real row. Failure has already materialized
+            // the 26-byte ID; the healthy root then charges 26+25 bytes.
+            let limits = ForkReplayReadLimitsV1::new(8, 1, 2, 77, 1_000_000)?;
+            let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+            let failed = store.lineage_row(
+                sql,
+                [&key],
+                &mut LineageReadContextV1::new(&mut budget, 8)?,
+                |row, context| SqliteStore::lineage_fields(row, root, fork, context),
+            );
+            assert_eq!(failed, Err(STORAGE_ERROR));
+            assert_eq!(budget.remaining_native_bytes(), 51);
+            budget.check_time()?;
+            assert_eq!(
+                store.lineage_row(
+                    "SELECT id,parent_id,fork_seq,head_seq FROM timelines WHERE id=?1",
+                    [&key],
+                    &mut LineageReadContextV1::new(&mut budget, 8)?,
+                    |row, context| SqliteStore::lineage_fields(row, root, false, context),
+                )?,
+                Some((ForkReplayLineageNodeV1::new(root, None), Seq::from_u64(1)))
+            );
+            assert_eq!(budget.remaining_native_bytes(), 0);
+            budget.check_time()?;
+            assert!(budget.charge_rows(1).is_err());
+            assert!(budget.check_time().is_err());
+            store.finish_protected_effect_interval(
+                interval,
+                ErasureProtectedEffectDispositionV1::Rollback,
+            )?;
+            assert!(store.conn.is_autocommit());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn native_lineage_decoder_binds_selected_identity_and_root_shape() -> Fallible<()> {
         let conn = rusqlite::Connection::open_in_memory()?;
         let target = TimelineId::new();
