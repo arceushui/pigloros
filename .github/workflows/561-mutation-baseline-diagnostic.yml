@@ -1,17 +1,20 @@
 # Temporary cold-build resource diagnosis, not a required gate or trusted baseline.
-# Both variants retain the failed PR merge source and full test command.
+# Retain the failed PR merge source, full test command and line-table profile.
+# Compare with run 38997541437; only the compiler toolchain changes.
 name: 561-mutation-baseline-diagnostic
 
 on:
   push:
-    branches: [redmine/561-mutation-baseline-diagnostic]
+    branches: [redmine/561-mutation-compiler-canary]
 
 permissions:
   contents: read
 
 env:
-  RUSTUP_TOOLCHAIN: nightly-2026-08-28
-  # Bound compiler concurrency identically in the paired variants.
+  # Existing ASan nightly predates the reported Bevy solver memory regression:
+  # https://github.com/rust-lang/rust/issues/161748
+  RUSTUP_TOOLCHAIN: nightly-2026-07-01
+  # Preserve the failed control's single compiler job.
   CARGO_BUILD_JOBS: "1"
 
 jobs:
@@ -22,7 +25,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        profile: [line-tables-only, "0"]
+        profile: [line-tables-only]
     env:
       CARGO_PROFILE_TEST_DEBUG: ${{ matrix.profile }}
     # Bounded setup (9m), harness (30m), and upload (3m) leave teardown reserve.
