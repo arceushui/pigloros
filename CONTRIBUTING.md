@@ -147,7 +147,7 @@ flowchart TD
     P --> C["Core: at most eight runners"]
     C --> R["cargo-crap"]
     R --> N["Normal checks: at most eight runners"]
-    N --> M["Mutation: at most eight shards"]
+    N --> M["Mutation: sixteen shards, at most eight runners"]
     M --> A["ASan: six shards"]
     A --> G["ci-gate"]
     P -. "failure" .-> X["Stop downstream work"]
@@ -271,8 +271,13 @@ successful normal stage on `main`, not on pull requests.
 ### Stages 4 and 5: mutation, then ASan
 
 Mutation and ASan cannot begin until every cheaper blocking gate passes.
-Mutation is changed-line scoped and uses at most eight shards. A separate
-`mutation-baseline` first runs the full unmutated workspace with all features,
+Mutation is changed-line scoped and uses sixteen shards on at most eight
+concurrent runners. Each runner uses two mutation workers with one compiler job
+each and four libtest harness threads per worker. These eight configured harness
+slots are not a hard CPU or process limit. The smaller shards retain the full
+selection and the existing 60-minute watchdog, 120-second Test limit and
+600-second Build limit; they do not omit slow tests or extend their deadlines.
+A separate `mutation-baseline` first runs the full unmutated workspace with all features,
 the locked dependency graph, and the same pinned nightly and libtest arguments
 as the shards. Stable core tests cannot prove the nightly-only harness. Only
 after that same-run baseline succeeds may shards use `--baseline skip`; the
@@ -283,7 +288,7 @@ flowchart TD
     G["standard-gate"] --> R{"Mutation-relevant PR?"}
     R -->|"no"| S["Successful skip"]
     R -->|"yes"| B["Full same-nightly mutation baseline"]
-    B --> M["Eight changed-line shards"]
+    B --> M["Sixteen changed-line shards, at most eight runners"]
     B --> MG["diff mutation testing"]
     M --> MG["diff mutation testing"]
     S --> A["ASan"]
