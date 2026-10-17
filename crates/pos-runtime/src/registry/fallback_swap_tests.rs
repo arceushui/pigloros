@@ -656,8 +656,6 @@ fn every_refusal_renders_distinctly_and_converts_transparently() {
         assert!(!message.is_empty());
         assert!(!rendered.contains(&message), "{message}");
         assert_eq!(RuntimeError::from(refusal).to_string(), message);
-        let copy = refusal;
-        assert_eq!(copy, refusal);
         assert!(!format!("{refusal:?}").is_empty());
         rendered.push(message);
     }

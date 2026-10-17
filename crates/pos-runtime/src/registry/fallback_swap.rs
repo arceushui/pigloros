@@ -276,7 +276,8 @@ impl PluginRegistry {
         prepared: PreparedRegistrationV1,
     ) -> Result<(), RuntimeError> {
         let replaced = self.plugins.replace_index(index, prepared.id);
-        // The dry run pins the revision, so the candidate key is unique here.
+        // The dry run pins the revision, so the candidate key is unique here and
+        // this refusal is unreachable: an Err is the section 4.7 invariant fault.
         let stale = Err(RuntimeError::FallbackSwap(
             FallbackSwapRefusalV1::StalePreparation,
         ));

@@ -824,6 +824,8 @@ impl ProjectionRegistry {
     }
 
     /// Whether an installed reducer slot is keyed by `plugin_id`.
+    ///
+    /// Name-keyed slots, which only test support installs, are not covered.
     #[must_use]
     pub fn has_installed_reducer(&self, plugin_id: PluginId) -> bool {
         self.slots
