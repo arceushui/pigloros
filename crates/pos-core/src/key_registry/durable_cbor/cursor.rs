@@ -76,6 +76,10 @@ impl<'input> Cursor<'input> {
                     .map(|_| Header::Negative)
                     .ok_or(Error::InvalidSnapshot),
                 2..=5 => {
+                    // Equal native widths make every u64 length representable.
+                    #[cfg(target_pointer_width = "64")]
+                    let length = number.map(|value| usize::from_ne_bytes(value.to_ne_bytes()));
+                    #[cfg(not(target_pointer_width = "64"))]
                     let length = number
                         .map(usize::try_from)
                         .transpose()

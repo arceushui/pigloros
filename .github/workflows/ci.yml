@@ -600,10 +600,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: 1.97.1
+          targets: i686-pc-windows-msvc
       - name: Exercise the unsupported owned-key signing boundary
         run: cargo test -p piglor-ledger --all-features --test non_unix_store_owner --locked -- --include-ignored
       - name: Exercise the unsupported non-Linux EPF1 boundary
         run: cargo test -p pos-runtime --features test-support --test non_linux_profile --locked -- --include-ignored
+      - name: Check narrower-target Replay representation boundaries
+        run: cargo check -p pos-runtime --target i686-pc-windows-msvc --locked
+      - name: Exercise narrower-target registry cardinality refusals
+        run: cargo test -p pos-core --target i686-pc-windows-msvc --test key_registry_guarded_read_public --locked -- --include-ignored
 
   clippy:
     name: clippy

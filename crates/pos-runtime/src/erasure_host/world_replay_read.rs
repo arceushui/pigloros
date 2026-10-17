@@ -201,6 +201,10 @@ fn checked_range(verified: &VerifiedWorldReplayV1, head: u64) -> Result<(u64, us
         return Err(Error::AdapterFailure);
     }
     let count = if first > last { 0 } else { last - (first - 1) };
+    // Retain the fallible representation boundary only on narrower targets.
+    #[cfg(target_pointer_width = "64")]
+    let count = usize::from_ne_bytes(count.to_ne_bytes());
+    #[cfg(not(target_pointer_width = "64"))]
     let count = usize::try_from(count).map_err(|_| Error::AdapterFailure)?;
     if count > verified.read_bounds().max_events() {
         return Err(Error::AdapterFailure);
