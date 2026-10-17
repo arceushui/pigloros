@@ -55,11 +55,29 @@ jobs:
         run: |
           set -euo pipefail
           # Fail before the expensive harness if the observer cannot operate.
-          test -r /proc/meminfo
-          test -r /proc/pressure/memory
-          test -r /sys/fs/cgroup/memory.events
-          test -r /sys/fs/cgroup/memory.current
-          test -r /sys/fs/cgroup/memory.max
+          # Kernel memory-controller files belong to non-root cgroups, not
+          # the hierarchy root. Resolve this runner's actual v2 membership.
+          cat /proc/self/cgroup
+          cgroup_path="$(awk -F: '$1 == "0" && $2 == "" { print $3 }' /proc/self/cgroup)"
+          case "$cgroup_path" in
+            /*) ;;
+            *) echo 'ERROR: no absolute cgroup-v2 membership' >&2; exit 1 ;;
+          esac
+          if [[ "$cgroup_path" == *$'\n'* || "$cgroup_path" == */../* || "$cgroup_path" == */.. ]]; then
+            echo 'ERROR: ambiguous or out-of-namespace cgroup membership' >&2
+            exit 1
+          fi
+          observer_cgroup="/sys/fs/cgroup${cgroup_path%/}"
+          for resource in /proc/meminfo /proc/pressure/memory \
+            "$observer_cgroup/memory.events" "$observer_cgroup/memory.current" \
+            "$observer_cgroup/memory.max"; do
+            printf 'REQUIRED_RESOURCE %s\n' "$resource"
+            if [[ ! -r "$resource" ]]; then
+              printf 'ERROR: unreadable resource %s\n' "$resource" >&2
+              exit 1
+            fi
+          done
+          printf '%s\n' "$observer_cgroup" > artifacts/observer-cgroup.txt
           command -v ps
           command -v free
           command -v df
@@ -70,6 +88,9 @@ jobs:
         run: |
           set -euo pipefail
           date --utc --iso-8601=seconds | tee artifacts/command-start.txt
+          IFS= read -r observer_cgroup < artifacts/observer-cgroup.txt
+          current_cgroup="$(awk -F: '$1 == "0" && $2 == "" { print $3 }' /proc/self/cgroup)"
+          test "$observer_cgroup" = "/sys/fs/cgroup${current_cgroup%/}"
           # Emit directly into the job log: runner death can skip artifact upload.
           # Only process names, not arguments or environment values, are sampled.
           (
@@ -80,7 +101,7 @@ jobs:
               df -Pm .
               for metric in memory.current memory.max memory.events; do
                 printf 'CGROUP %s\n' "$metric"
-                cat "/sys/fs/cgroup/$metric"
+                cat "$observer_cgroup/$metric"
               done
               printf 'MEMORY_PRESSURE\n'
               cat /proc/pressure/memory
