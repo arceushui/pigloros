@@ -196,6 +196,14 @@ fn reserved_event_types_and_digest_domains_are_fixed() {
         FALLBACK_POLICY_DIGEST_DOMAIN_V1,
         b"PiglorOS.Composition.FallbackPolicy.v1\0"
     );
+    for domain in [
+        IMPLEMENTATION_KEY_DIGEST_DOMAIN_V1,
+        COMPOSITION_PIN_DIGEST_DOMAIN_V1,
+        FALLBACK_POLICY_DIGEST_DOMAIN_V1,
+    ] {
+        assert!(domain.starts_with(b"PiglorOS.Composition."));
+        assert_eq!(domain.last(), Some(&0));
+    }
 }
 
 #[test]
@@ -252,6 +260,18 @@ fn dfp1_golden_vectors_and_withdrawal() -> TestResult<()> {
     assert_eq!(withdrawal.previous_policy_digest(), previous);
     let decoded = DomainFallbackPolicyV1::from_canonical_cbor(&from_hex(WITHDRAWAL_HEX)?)?;
     assert_eq!(decoded, withdrawal);
+    Ok(())
+}
+
+#[test]
+fn first_withdrawal_round_trips_at_the_codec() -> TestResult<()> {
+    let first = DomainFallbackPolicyV1::new("session.alpha".into(), Vec::new(), None)?;
+    assert!(first.is_withdrawal());
+    assert_eq!(first.previous_policy_digest(), None);
+    let bytes = first.to_canonical_cbor();
+    let decoded = DomainFallbackPolicyV1::from_canonical_cbor(&bytes)?;
+    assert_eq!(decoded, first);
+    assert_eq!(decoded.policy_digest(), first.policy_digest());
     Ok(())
 }
 
@@ -359,10 +379,11 @@ fn check_all(decode: Decode, bytes: &[u8], cases: &[Case<'_>]) -> TestResult<()>
 
 #[test]
 fn mutated_records_fail_closed() -> TestResult<()> {
-    let key_cases: [Case<'_>; 3] = [
+    let key_cases: [Case<'_>; 4] = [
         (b"IMK1", b"IMK2", ENCODING),
         (b"org.", BAD_UTF8, ENCODING),
         (NARROW_TEXT, WIDE_TEXT, NONCANONICAL),
+        (&[0x58, 0x20], &[0x58, 0x1f], ENCODING),
     ];
     check_all(decode_key, &from_hex(IMK1_HEX)?, &key_cases)?;
     let pin_cases: [Case<'_>; 2] = [
@@ -662,7 +683,6 @@ fn errors_and_records_render() -> TestResult<()> {
     let fields = [
         F::PluginId,
         F::Version,
-        F::ConfigurationDigest,
         F::Roles,
         F::EntryKey,
         F::Candidates,

@@ -93,10 +93,11 @@ A shared language for humans and agents working on PiglorOS. Use these terms exa
 | **Protected Projection Provider** | `pos-state` | The host-installed source of Detached Projection Candidates, selected from the installed host composition and never from a caller. |
 | **Host Projection Provider** | `pos-runtime` | The runtime Protected Projection Provider: it holds the reviewed staged Reducer admissions and builds every candidate's reducers fresh from their catalogue factories. |
 | **Hasher** | `pos-core` | Trait decoupling BLAKE3 from store adapters (`genesis_hash`, `hash_payload`, `hash_event`). Default: `Blake3Hasher`. |
-| **Tenure** | `pos-core` | A maximal Timeline Order range in which one implementation is effective for one required entry. Tenure 0 is the composer's base implementation; each ADR-119 activation starts a new tenure. |
-| **Effective Composition** | `pos-core`, `pos-runtime` | The composer's base composition at a Timeline position, folded with the ADR-119 declaration and activation Events at or before that position. |
-| **Composition Boundary Transaction** (CBT) | `pos-runtime`, `pos-plugin-supervisor` | The host-only transaction that commits an ADR-119 activation and swaps one community entry at a Tick Boundary. It is not a pass and not a tick. |
+| **Tenure** | ADR-119, later slices | A maximal Timeline Order range in which one implementation is effective for one required entry. Tenure 0 is the composer's base implementation; each ADR-119 activation starts a new tenure. |
+| **Effective Composition** | ADR-119, later slices | The composer's base composition at a Timeline position, folded with the ADR-119 declaration and activation Events at or before that position. |
+| **Composition Boundary Transaction** (CBT) | ADR-119, later slices | The host-only transaction that commits an ADR-119 activation and swaps one community entry at a Tick Boundary. It is not a pass and not a tick. |
 | **IMK1** | `pos-core` | The ADR-119 implementation key: the cross-run identity of one community implementation (PMF1 Plugin ID, host-supplied version label, admitted release digest). It is never a run-local `PluginId`. |
+| **PPN1** | `pos-core` | `CompositionPinV1`, the ADR-119 pin of one community implementation: an IMK1 plus 1 to 16 unique roles. A pin whose roles exceed these bounds has no PPN1. |
 | **DFP1** | `pos-core` | `DomainFallbackPolicyV1`, the owner-declared ADR-119 fallback policy: per required entry, a primary pin, one or two candidate pins, triggers and an activation mode. Zero entries is a withdrawal. |
 
 ---
