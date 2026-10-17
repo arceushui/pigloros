@@ -1,9 +1,9 @@
 # Focused diagnostic only; the full required mutation gate is unchanged.
-name: 561-core-repair-control
+name: 561-store-repair-control
 
 on:
   push:
-    branches: [redmine/561-core-mutation-check]
+    branches: [redmine/561-store-mutation-check]
 
 permissions:
   contents: read
@@ -15,15 +15,15 @@ env:
   CARGO_TERM_COLOR: never
 
 jobs:
-  core-control:
-    name: full Core baseline and eleven exact regression mutants
+  store-control:
+    name: full Store baseline and four exact regression mutants
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
-          ref: 43918b95c34b67b88466d1b1caeaef9baf96c355
+          ref: a0939c2efa69c6fef7ad9335c80f7f33fe3826f9
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         timeout-minutes: 5
@@ -44,21 +44,21 @@ jobs:
           PROBE_WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 43918b95c34b67b88466d1b1caeaef9baf96c355
+          test "$(git rev-parse HEAD)" = a0939c2efa69c6fef7ad9335c80f7f33fe3826f9
           test -z "$(git status --porcelain --untracked-files=no)"
-          mkdir -p artifacts/core-control
+          mkdir -p artifacts/store-control
           {
             printf 'workflow=%s\n' "$PROBE_WORKFLOW_SHA"
             git rev-parse HEAD
-            sha256sum Cargo.lock crates/pos-core/tests/key_registry_guarded_read_public.rs
+            sha256sum Cargo.lock crates/pos-store/src/sqlite/fork_replay_row.rs
             rustc -Vv
             cargo --version
             cargo mutants --version
             uname -a
             nproc
             free -m
-          } > artifacts/core-control/environment.txt
-      - name: Prove full Core baseline before eleven exact native mutants
+          } > artifacts/store-control/environment.txt
+      - name: Prove full Store baseline before four exact native mutants
         timeout-minutes: 32
         env:
           CARGO_INCREMENTAL: "1"
@@ -74,22 +74,15 @@ jobs:
           import sys
           import time
 
-          source = "43918b95c34b67b88466d1b1caeaef9baf96c355"
-          artifact = Path("artifacts/core-control")
+          source = "a0939c2efa69c6fef7ad9335c80f7f33fe3826f9"
+          artifact = Path("artifacts/store-control")
           expected = [
-              "crates/pos-core/src/fork_attribution/authority_evidence.rs:143:9: replace ImportedKeyRecordV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(0)",
-              "crates/pos-core/src/fork_attribution/authority_evidence.rs:143:9: replace ImportedKeyRecordV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(1)",
-              "crates/pos-core/src/fork_attribution/authority_evidence.rs:254:9: replace ImportedKeyTombstoneV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(0)",
-              "crates/pos-core/src/fork_attribution/authority_evidence.rs:254:9: replace ImportedKeyTombstoneV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(1)",
-              "crates/pos-core/src/fork_attribution/authority_import.rs:210:9: replace ImportedForkAdmissionRecordV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(0)",
-              "crates/pos-core/src/fork_attribution/authority_import.rs:210:9: replace ImportedForkAdmissionRecordV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(1)",
-              "crates/pos-core/src/fork_attribution/authority_import.rs:289:9: replace ImportedForkPublicationOperationV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(0)",
-              "crates/pos-core/src/fork_attribution/authority_import.rs:289:9: replace ImportedForkPublicationOperationV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(1)",
-              "crates/pos-core/src/fork_attribution/authority_issuer.rs:94:9: replace ForkAttributionIssuerV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(0)",
-              "crates/pos-core/src/fork_attribution/authority_issuer.rs:94:9: replace ForkAttributionIssuerV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(1)",
-              "crates/pos-core/src/key_registry/durable_cbor/cursor.rs:345:28: replace -= with /= in chunks"
+              "crates/pos-store/src/fork_replay.rs:358:9: replace ForkReplayRequirementV1::authority_origin_digest -> Option<Hash> with None",
+              "crates/pos-store/src/fork_replay.rs:412:9: replace ForkReplayReadLimitsV1::max_ancestry_node_visits -> usize with 0",
+              "crates/pos-store/src/fork_replay.rs:418:9: replace ForkReplayReadLimitsV1::max_suffix_rows -> usize with 0",
+              "crates/pos-store/src/fork_replay.rs:430:9: replace ForkReplayReadLimitsV1::max_elapsed_micros -> u64 with 0",
           ]
-          assert len(expected) == len(set(expected)) == 11
+          assert len(expected) == len(set(expected)) == 4
           report = {"source": source, "expected_mutants": expected, "phases": []}
           report_path = artifact / "phases.json"
 
@@ -116,26 +109,39 @@ jobs:
               if status != 0:
                   sys.exit(status if status > 0 else 1)
 
-          base = ["cargo", "test", "--package=pos-core@0.1.0", "--all-features", "--locked"]
-          harness = ["-Zunstable-options", "--fail-fast", "--include-ignored", "--test-threads=2"]
+          base = ["cargo", "test", "--package=pos-store@0.1.0", "--all-features", "--locked"]
+          harness = ["-Zunstable-options", "--fail-fast", "--include-ignored", "--test-threads=2", "--report-time"]
           run("build", [*base, "--no-run"], 600, 3)
           run("baseline", [*base, "--", *harness], 120, 1)
           subprocess.run(["bash", "scripts/assert-no-ignored-in-test-summary.sh",
                           str(artifact / "baseline.log")], check=True)
-          # Match the actual producer's ELEVEN full mutant names, not a broad method filter.
+          summaries = [
+              re.fullmatch(
+                  r"test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in [0-9.]+s",
+                  row,
+              )
+              for row in (artifact / "baseline.log").read_text().splitlines()
+              if row.startswith("test result:")
+          ]
+          assert len(summaries) == 55 and all(summaries)
+          assert sum(int(summary[1]) for summary in summaries) == 2087
+          report["baseline_summaries"] = 55
+          report["baseline_passed"] = 2087
+          save()
+          # Match the actual producer's FOUR full mutant names, not a broad method filter.
           special = set(r"\.^$|?*+()[]{}")
           pattern = "^(?:" + "|".join(
               "".join("\\" + c if c in special else c for c in name) for name in expected
           ) + ")$"
           # v27.1 can collect unrelated struct-field mutants without applying --re.
-          # Bound discovery to the four expected source files; keep the exact
-          # eleven-name and full-outcome checks below unchanged and fail closed.
+          # Bound discovery to the single expected source file; keep the exact
+          # four-name and full-outcome checks below unchanged and fail closed.
           file_args = [
               arg for path in sorted({name.split(":", 1)[0] for name in expected})
               for arg in ("--file", path)
           ]
-          assert len(file_args) == 8
-          mutants = ["cargo", "mutants", "--package=pos-core", "--all-features",
+          assert len(file_args) == 2
+          mutants = ["cargo", "mutants", "--package=pos-store", "--all-features",
                      *file_args, "--re", pattern]
           # Keep JSON stdout separate from time/tool diagnostics so it remains parseable.
           with (artifact / "selected.json").open("wb") as output, (artifact / "selection.log").open("wb") as errors:
@@ -144,8 +150,8 @@ jobs:
                   stdout=output, stderr=errors, check=True,
               )
           selected = json.loads((artifact / "selected.json").read_text())
-          assert len(selected) == 11
-          assert len({m["name"] for m in selected}) == 11
+          assert len(selected) == 4
+          assert len({m["name"] for m in selected}) == 4
           assert {m["name"] for m in selected} == set(expected)
           run("mutants", [*mutants, "--no-shuffle", "--baseline", "skip", "--jobs", "4",
                           "--timeout", "120", "--build-timeout", "600", "--cap-lints", "true",
@@ -153,16 +159,16 @@ jobs:
           actual_selected = json.loads(Path("mutants.out/mutants.json").read_text())
           outcomes = json.loads(Path("mutants.out/outcomes.json").read_text())
           assert outcomes["cargo_mutants_version"] == "27.1.0"
-          assert len(actual_selected) == len(outcomes["outcomes"]) == 11
+          assert len(actual_selected) == len(outcomes["outcomes"]) == 4
           def identity(mutant):
               return json.dumps({k: v for k, v in mutant.items() if k != "diff"},
                                 sort_keys=True, separators=(",", ":"))
-          assert len({identity(m) for m in selected}) == 11
+          assert len({identity(m) for m in selected}) == 4
           assert {identity(m) for m in selected} == {identity(m) for m in actual_selected}
           completed = [o["scenario"]["Mutant"] for o in outcomes["outcomes"]]
-          assert len({identity(m) for m in completed}) == 11
+          assert len({identity(m) for m in completed}) == 4
           assert {identity(m) for m in completed} == {identity(m) for m in selected}
-          assert outcomes["caught"] == outcomes["total_mutants"] == 11
+          assert outcomes["caught"] == outcomes["total_mutants"] == 4
           assert all(outcomes[k] == 0 for k in ("missed", "timeout", "unviable", "success"))
           for outcome in outcomes["outcomes"]:
               assert outcome["summary"] == "CaughtMutant"
@@ -173,9 +179,10 @@ jobs:
               log = Path("mutants.out") / outcome["log_path"]
               # Report paths are relative to mutants.out (fail if producer schema differs).
               rows = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log.read_text()).splitlines()
-              assert any(row.startswith("test ") and row.endswith(" ... FAILED") for row in rows)
+              failure = re.compile(r"^test .+ \.\.\. FAILED(?: <[0-9]+\.[0-9]+s>)?$")
+              assert any(failure.fullmatch(row) for row in rows)
           subprocess.run(["git", "diff", "--exit-code", "HEAD"], check=True)
-          report["caught"] = 11
+          report["caught"] = 4
           report["overall_exit_code"] = 0
           save()
           print(json.dumps(report, sort_keys=True))
@@ -185,9 +192,9 @@ jobs:
         timeout-minutes: 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: untrusted-561-core-repair-control-${{ github.run_id }}-${{ github.run_attempt }}
+          name: untrusted-561-store-repair-control-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            artifacts/core-control/
+            artifacts/store-control/
             mutants.out/
           if-no-files-found: error
           retention-days: 14
