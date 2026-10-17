@@ -459,6 +459,11 @@ fn rule_two_output_fidelity_metadata() -> TestResult {
     Ok(())
 }
 
+/// Attribute `candidate` to a publisher other than the primary's.
+fn cross_publisher(candidate: &mut Facts) {
+    candidate.host.publisher = Some("other-publisher".to_owned());
+}
+
 #[test]
 fn rule_two_same_publisher_needs_no_grant() -> TestResult {
     let accepted = fixture()?.refusal_after(|candidate| {
@@ -470,17 +475,15 @@ fn rule_two_same_publisher_needs_no_grant() -> TestResult {
 
 #[test]
 fn rule_two_cross_publisher_needs_a_grant_for_every_type() -> TestResult {
-    let granted = fixture()?.refusal_after(|candidate| {
-        candidate.host.publisher = Some("other-publisher".to_owned());
-    });
+    let granted = fixture()?.refusal_after(cross_publisher);
     assert_eq!(granted, None);
     let ungranted = fixture()?.refusal_after(|candidate| {
-        candidate.host.publisher = Some("other-publisher".to_owned());
+        cross_publisher(candidate);
         candidate.host.namespace_grants.clear();
     });
     assert_eq!(ungranted, Some(Field::Namespace));
     let unprefixed = fixture()?.refusal_after(|candidate| {
-        candidate.host.publisher = Some("other-publisher".to_owned());
+        cross_publisher(candidate);
         candidate.host.namespace_grants = vec!["acm".to_owned(), "other".to_owned()];
     });
     assert_eq!(unprefixed, Some(Field::Namespace));

@@ -181,9 +181,12 @@ fn fidelity_equal(primary: &OutputDeclarationV1, candidate: &OutputDeclarationV1
 /// other candidate must hold a namespace grant covering every owned type.
 ///
 /// It fails closed. A publisher is the same only when the host names it for
-/// both releases, and no store records which types are publisher-prefixed, so
-/// V1 treats every type of a cross-publisher candidate as prefixed. Empty
-/// grants therefore refuse every cross-publisher or unattributed candidate.
+/// both releases. ADR-119 section 4.1 rule 2 lets a cross-publisher candidate
+/// own a type that is not publisher-prefixed, but no store records which
+/// types are prefixed, so V1 narrows the rule: every owned type of a
+/// cross-publisher candidate is treated as publisher-prefixed and needs a
+/// grant. Empty grants therefore refuse every cross-publisher or unattributed
+/// candidate.
 fn namespaces_allow(primary: &Facts, candidate: &Facts) -> bool {
     let grants = &candidate.host.namespace_grants;
     let owned = &candidate.registry.owned_event_types;
