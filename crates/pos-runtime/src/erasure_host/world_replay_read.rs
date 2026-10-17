@@ -194,45 +194,6 @@ impl ErasureReadSenderV1<'_> {
     }
 }
 
-#[cfg(test)]
-mod staging_tests {
-    use super::*;
-    use pos_core::{CanonicalBytes, EntityId, EventId, Hash, Kind, SchemaVersion, Seq, WallTime};
-
-    #[test]
-    fn the_native_plaintext_guard_scrubs_its_carrier_on_return_and_unwind() {
-        for unwind in [false, true] {
-            let mut staging = vec![Event {
-                id: EventId::new(),
-                entity: EntityId::new(),
-                event_type: Kind::new("private.kind"),
-                payload: CanonicalBytes::from_vec(b"private payload".to_vec()),
-                wall_time: WallTime::from_micros(1),
-                seq: Seq::from_u64(1),
-                causation_id: None,
-                correlation_id: None,
-                schema_version: SchemaVersion::V1,
-                signature: None,
-                signature_identity: None,
-                origin: None,
-                payload_hash: Hash::zero(),
-            }];
-            // Borrowing the exclusively owned native carrier makes the actual
-            // Drop effect inspectable without retaining shared plaintext or
-            // examining freed memory. No test-only production callback is used.
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _guard = EventBatchV1(&mut staging);
-                if unwind {
-                    std::panic::resume_unwind(Box::new("native staging unwind control"));
-                }
-            }));
-            assert_eq!(result.is_err(), unwind);
-            assert_eq!(staging[0].event_type.as_str(), "");
-            assert!(staging[0].payload.is_empty());
-        }
-    }
-}
-
 fn checked_range(verified: &VerifiedWorldReplayV1, head: u64) -> Result<(u64, usize)> {
     let requested = verified.requested_use();
     let range = requested.range();
@@ -399,5 +360,44 @@ impl<'clock> ReadFenceV1<'_, '_, 'clock> {
             }
         })
         .map_err(Error::from)?
+    }
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+    use pos_core::{CanonicalBytes, EntityId, EventId, Hash, Kind, SchemaVersion, Seq, WallTime};
+
+    #[test]
+    fn the_native_plaintext_guard_scrubs_its_carrier_on_return_and_unwind() {
+        for unwind in [false, true] {
+            let mut staging = vec![Event {
+                id: EventId::new(),
+                entity: EntityId::new(),
+                event_type: Kind::new("private.kind"),
+                payload: CanonicalBytes::from_vec(b"private payload".to_vec()),
+                wall_time: WallTime::from_micros(1),
+                seq: Seq::from_u64(1),
+                causation_id: None,
+                correlation_id: None,
+                schema_version: SchemaVersion::V1,
+                signature: None,
+                signature_identity: None,
+                origin: None,
+                payload_hash: Hash::zero(),
+            }];
+            // Borrowing the exclusively owned native carrier makes the actual
+            // Drop effect inspectable without retaining shared plaintext or
+            // examining freed memory. No test-only production callback is used.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = EventBatchV1(&mut staging);
+                if unwind {
+                    std::panic::resume_unwind(Box::new("native staging unwind control"));
+                }
+            }));
+            assert_eq!(result.is_err(), unwind);
+            assert_eq!(staging[0].event_type.as_str(), "");
+            assert!(staging[0].payload.is_empty());
+        }
     }
 }
