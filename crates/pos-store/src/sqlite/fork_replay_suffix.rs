@@ -693,6 +693,112 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Default)]
+    struct SuffixFunctionAuthorization {
+        functions: Vec<(String, bool)>,
+    }
+
+    fn ignore_suffix_probe_function(
+        conn: &Connection,
+        ignored_index: usize,
+    ) -> rusqlite::Result<std::sync::Arc<std::sync::Mutex<SuffixFunctionAuthorization>>> {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::{Arc, Mutex};
+
+        let observed = Arc::new(Mutex::new(SuffixFunctionAuthorization::default()));
+        let callback_observed = Arc::clone(&observed);
+        conn.authorizer(Some(move |request: AuthContext<'_>| {
+            if let AuthAction::Function { function_name } = request.action {
+                let Ok(mut observed) = callback_observed.lock() else {
+                    return Authorization::Deny;
+                };
+                let ignored = observed.functions.len() == ignored_index;
+                observed.functions.push((function_name.to_owned(), ignored));
+                if ignored {
+                    return Authorization::Ignore;
+                }
+            }
+            Authorization::Allow
+        }))?;
+        Ok(observed)
+    }
+
+    #[test]
+    fn native_suffix_function_refusals_preserve_joined_probe_accounting() -> Fallible<()> {
+        use rusqlite::hooks::{AuthContext, Authorization};
+
+        for (label, ignored_index) in [("sequence_type", 0), ("event_id_type", 1), ("fop_type", 3)]
+        {
+            for held_snapshot in [false, true] {
+                let (_directory, store, world, _built) = fixture(Shape::Mixed)?;
+                let key = world.child_at(0)?.id.to_string();
+                let expected = next_row(
+                    &store.conn,
+                    &key,
+                    None,
+                    &mut NativeReadContextV1::ordinary(),
+                )?
+                .ok_or("fixture suffix row")?;
+                let (_, (_, _, fop)) = &expected;
+                let bytes = ulid::ULID_LEN + fop.as_ref().ok_or("fixture FOP1")?.len();
+                let mut clock = ScriptedGuardMonotonicSourceV1::new([Duration::ZERO]);
+                let start = clock.mark();
+                // Function redaction preserves the FOP join: two failed probe
+                // rows, then four rows and all bytes for the healthy retry.
+                let limits = ForkReplayReadLimitsV1::new(1, 1, 6, bytes, 1_000_000)?;
+                let mut budget = ForkReplayReadBudgetV1::new(limits, start, &mut clock)?;
+                if held_snapshot {
+                    store.conn.execute_batch("BEGIN DEFERRED")?;
+                }
+                let observed = ignore_suffix_probe_function(&store.conn, ignored_index)?;
+                let failed = next_row(
+                    &store.conn,
+                    &key,
+                    None,
+                    &mut NativeReadContextV1::protected(&mut budget),
+                );
+                store
+                    .conn
+                    .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)?;
+                let observed = observed.lock().map_err(|_| "function observer poisoned")?;
+                let actual: Vec<_> = observed
+                    .functions
+                    .iter()
+                    .map(|(name, ignored)| (name.as_str(), *ignored))
+                    .collect();
+                let expected_functions: Vec<_> = ["typeof", "typeof", "length", "typeof", "length"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, name)| (name, index == ignored_index))
+                    .collect();
+                assert_eq!(actual, expected_functions, "{label}");
+                drop(observed);
+                assert_eq!(failed, Err(Error::CorruptAuthority), "{label}");
+                assert_eq!(budget.remaining_native_bytes(), bytes, "{label}");
+                budget.check_time()?;
+                assert_eq!(
+                    next_row(
+                        &store.conn,
+                        &key,
+                        None,
+                        &mut NativeReadContextV1::protected(&mut budget)
+                    )?,
+                    Some(expected),
+                    "{label}"
+                );
+                assert_eq!(budget.remaining_native_bytes(), 0, "{label}");
+                budget.check_time()?;
+                assert!(budget.charge_rows(1).is_err(), "{label}");
+                assert!(budget.check_time().is_err(), "{label}");
+                if held_snapshot {
+                    store.conn.execute_batch("ROLLBACK")?;
+                }
+                assert!(store.conn.is_autocommit(), "{label}");
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn complete_suffix_batches_keep_original_guard_expiry_and_regression() -> Fallible<()> {
         let (_directory, store, world, built) = fixture(Shape::Mixed)?;
