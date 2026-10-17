@@ -234,7 +234,18 @@ impl Release {
 
 /// Publish and install `spec` as the active release, and gate it once for its PMF1 facts.
 fn publish(signed: &mut SignedWorld, spec: Spec, tag: u8, swap: &Swap) -> BoxResult<Release> {
-    let published = signed.publish(spec.shape())?;
+    publish_shape(signed, spec, spec.shape(), tag, swap)
+}
+
+/// As [`publish`], for an explicit release `shape` of `spec`.
+fn publish_shape(
+    signed: &mut SignedWorld,
+    spec: Spec,
+    shape: Shape,
+    tag: u8,
+    swap: &Swap,
+) -> BoxResult<Release> {
+    let published = signed.publish(shape)?;
     let installed = signed.install(published.address(), tag)?;
     installed.map_err(|error| format!("install failed: {error}"))?;
     let digest = Hash::from_bytes(published.release_digest());
@@ -737,7 +748,12 @@ impl Rig {
             component: b"draft:community.alpha.next",
             ..self.primary.spec
         };
-        publish(&mut self.signed, spec, 20, &self.supply.material)
+        let shape = Shape {
+            version: "2.0.0",
+            previous: Some(self.primary.digest),
+            ..spec.shape()
+        };
+        publish_shape(&mut self.signed, spec, shape, 20, &self.supply.material)
     }
 
     /// Revoke `release` and follow the new material.
