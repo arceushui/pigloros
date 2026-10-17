@@ -1,3 +1,5 @@
+#![cfg(feature = "test-support")]
+
 //! Public-interface contract tests for the ADR-064 Revision 3 factual Tick
 //! dependency contract.
 
@@ -5,6 +7,9 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 
+use pos_core::counterfactual_store::test_fixtures::{
+    err, hash, hash_field, indexed_hash, node_bytes, ok, text_field, uint,
+};
 use pos_core::output_policy::OutputAuthorityV1;
 use pos_core::{
     assemble_factual_tick, ensure_factual_set_headroom, factual_artifact_digest,
@@ -45,30 +50,6 @@ const HUMAN: PipelineIngressV1 = PipelineIngressV1::HumanProposedAction;
 const ENDOGENOUS: RecordedDependencyClassV1 = RecordedDependencyClassV1::EndogenousRecomputed;
 const PRESENTATION: RecordedDependencyClassV1 = RecordedDependencyClassV1::PresentationOnly;
 const EXOGENOUS: RecordedDependencyClassV1 = RecordedDependencyClassV1::ExogenousFrozen;
-
-fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|error| {
-        std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
-    })
-}
-
-fn unexpected_success<T: std::fmt::Debug, E>(value: &T) -> E {
-    std::panic::resume_unwind(Box::new(format!("unexpected success: {value:?}")))
-}
-
-fn err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
-    result.map_or_else(|error| error, |value| unexpected_success(&value))
-}
-
-const fn hash(value: u8) -> Hash {
-    Hash::from_bytes([value; 32])
-}
-
-fn indexed_hash(index: usize) -> Hash {
-    let mut bytes = [0_u8; 32];
-    bytes[24..].copy_from_slice(&ok(u64::try_from(index)).to_be_bytes());
-    Hash::from_bytes(bytes)
-}
 
 fn hex(value: Hash) -> String {
     blake3::Hash::from_bytes(*value.as_bytes())
@@ -789,39 +770,6 @@ fn a_scheduled_tick_declares_every_required_and_resolved_input_once() {
     assert_eq!(record.uncovered_input_count(), 0);
 }
 
-fn cbor_head(major: u8, value: u64) -> Vec<u8> {
-    let bytes = value.to_be_bytes();
-    let prefix = major << 5;
-    match value {
-        0..=23 => vec![prefix | bytes[7]],
-        24..=0xff => vec![prefix | 0x18, bytes[7]],
-        0x100..=0xffff => [&[prefix | 0x19][..], &bytes[6..]].concat(),
-        _ => [&[prefix | 0x1a][..], &bytes[4..]].concat(),
-    }
-}
-
-fn cbor_text(text: &str) -> Vec<u8> {
-    [cbor_head(3, text.len() as u64), text.as_bytes().to_vec()].concat()
-}
-
-fn cbor_digest(value: Hash) -> Vec<u8> {
-    [vec![0x58, 0x20], value.as_bytes().to_vec()].concat()
-}
-
-/// The six-field node array, written independently of the contract.
-fn node_bytes(node: &DependencyNodeCoordinateV1) -> Vec<u8> {
-    [
-        vec![0x86],
-        cbor_head(0, node.tick()),
-        cbor_head(0, u64::from(node.scheduler_position())),
-        cbor_text(node.owner_id()),
-        cbor_head(0, u64::from(node.output_ordinal())),
-        cbor_head(0, u64::from(node.schema_id())),
-        cbor_digest(node.artifact_digest()),
-    ]
-    .concat()
-}
-
 /// The exact `IDP1` array of one edge, written independently of the contract.
 fn expected_edge(
     consumer: &DependencyNodeRecordV1,
@@ -831,19 +779,19 @@ fn expected_edge(
 ) -> Vec<u8> {
     [
         vec![0x89],
-        cbor_text("IDP1"),
-        cbor_head(0, 1),
+        text_field("IDP1"),
+        uint(1),
         node_bytes(consumer.coordinate()),
         node_bytes(source),
-        cbor_head(0, u64::from(source_class.code())),
+        uint(u64::from(source_class.code())),
         vec![0x82],
-        cbor_head(0, source.tick()),
-        cbor_head(0, consumer.coordinate().tick()),
-        cbor_digest(hash(0x0f)),
+        uint(source.tick()),
+        uint(consumer.coordinate().tick()),
+        hash_field(hash(0x0f)),
         vec![0x82],
-        cbor_text(rule.rule_id()),
-        cbor_head(0, 1),
-        cbor_digest(consumer.provenance_digest()),
+        text_field(rule.rule_id()),
+        uint(1),
+        hash_field(consumer.provenance_digest()),
     ]
     .concat()
 }

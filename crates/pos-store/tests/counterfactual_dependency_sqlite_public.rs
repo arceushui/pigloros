@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pos_core::counterfactual_store::test_fixtures::{
-    frontier_frame, hash_field, id_field, invalidation_frame, invalidation_middle, text_field,
-    uint, SeededFactualTickV1,
+    class_row as row, collect_rows, coord, coord_at, edge_row as edge, err, facts, fork_scope,
+    frontier_frame, hash, hash_field, id_field, invalidation_frame, invalidation_middle, ok,
+    prefix_scope, provisional_row as provisional, record_of, request, uint, SeededFactualTickV1,
 };
 use pos_core::{
     CanonicalBytes, CoreError, CounterfactualAdapterSealV1, CounterfactualDependencyErrorV1,
@@ -21,8 +22,8 @@ use pos_core::{
     CounterfactualInvalidationInputV1, CounterfactualInvalidationOutcomeV1,
     CounterfactualStoreErrorV1, CounterfactualStorePortV1, CounterfactualTickOutcomeV1,
     DependencyEdgeRecordV1, DependencyNodeCoordinateV1, DependencyNodeRecordV1,
-    DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1, DependencyPagedRowV1,
-    DependencyReadScopeV1, EntityId, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
+    DependencyPageCursorV1, DependencyPageRequestV1, DependencyPageV1, DependencyReadScopeV1,
+    EntityId, ErasureContainmentGateV1, ErasureInventoryPersistencePortV1,
     ErasureProtectedEffectDispositionV1, EventDraft, EventStore, FactualCutV1, FactualHeadV1,
     FactualOwnerIdV1, FactualPrefixReadPortV1, ForkGenerationV1, Hash, InvalidationConflictV1,
     Kind, PipelineDraftBatchV1, RecomputationFrontierBytesV1, RecordedDependencyClassV1,
@@ -53,9 +54,7 @@ const SEAL: CounterfactualAdapterSealV1 = CounterfactualAdapterSealV1::for_adapt
 const SQL_MAX: u64 = 9_223_372_036_854_775_807;
 const PROVISIONAL: RecordedNodeOriginV1 = RecordedNodeOriginV1::Provisional;
 const COMMITTED: RecordedNodeOriginV1 = RecordedNodeOriginV1::Committed;
-const ENDOGENOUS: RecordedDependencyClassV1 = RecordedDependencyClassV1::EndogenousRecomputed;
 const ROOT: RecordedDependencyClassV1 = RecordedDependencyClassV1::InterventionAssigned;
-const EDGE_HEAD: [u8; 7] = [0x89, 0x64, b'I', b'D', b'P', b'1', 0x01];
 /// The Tick of the invalidation every fixture commits.
 const FIRST_TICK: u64 = 17;
 /// Every column of a node row, in table order.
@@ -67,24 +66,6 @@ const RECORD_FAULTS: [&str; 3] = [
     "BEFORE INSERT ON counterfactual_dependency_nodes",
     "BEFORE INSERT ON counterfactual_dependency_edges",
 ];
-
-fn ok<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
-    result.unwrap_or_else(|error| {
-        std::panic::resume_unwind(Box::new(format!("unexpected test error: {error:?}")))
-    })
-}
-
-fn unexpected_success<T: std::fmt::Debug, E>(value: &T) -> E {
-    std::panic::resume_unwind(Box::new(format!("unexpected success: {value:?}")))
-}
-
-fn err<T: std::fmt::Debug, E>(result: Result<T, E>) -> E {
-    result.map_or_else(|error| error, |value| unexpected_success(&value))
-}
-
-const fn hash(value: u8) -> Hash {
-    Hash::from_bytes([value; 32])
-}
 
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -101,16 +82,6 @@ fn hex(bytes: &[u8]) -> String {
 
 fn hash_hex(value: u8) -> String {
     hex(hash(value).as_bytes())
-}
-
-const fn facts() -> CounterfactualFactsV1 {
-    CounterfactualFactsV1 {
-        plan_digest: hash(5),
-        dependency_graph_digest: hash(3),
-        trust_epoch: 6,
-        revocation_epoch: 7,
-        erasure_epoch: 8,
-    }
 }
 
 fn draft(value: u8, kind: &str) -> EventDraft {
@@ -324,86 +295,9 @@ fn open_error(result: Result<SqliteStore, pos_core::CoreError>) -> String {
         .map_or_else(String::new, |error| format!("{error}"))
 }
 
-// Coordinates, nodes, edges, and records. Node `a` has digest 1 and `b` has
-// digest 2; the digest byte of the other nodes is named at each use.
-
-fn coord_at(tick: u64, owner: &str, ordinal: u32, digest: Hash) -> Coordinate {
-    ok(Coordinate::try_new(
-        tick,
-        0,
-        owner.to_owned(),
-        ordinal,
-        7,
-        digest,
-    ))
-}
-
-fn coord(tick: u64, owner: &str, digest: u8) -> Coordinate {
-    coord_at(tick, owner, 0, hash(digest))
-}
-
-fn row(
-    coordinate: Coordinate,
-    class: RecordedDependencyClassV1,
-    origin: RecordedNodeOriginV1,
-    inputs: Vec<Hash>,
-) -> NodeRow {
-    ok(NodeRow::try_new(
-        coordinate,
-        class,
-        origin,
-        inputs,
-        hash(99),
-    ))
-}
-
-fn provisional(coordinate: Coordinate, inputs: Vec<Hash>) -> NodeRow {
-    row(coordinate, ENDOGENOUS, PROVISIONAL, inputs)
-}
-
-/// The encoded six-field node array, written independently of the contract.
-fn node_bytes(node: &Coordinate) -> Vec<u8> {
-    [
-        vec![0x86],
-        uint(node.tick()),
-        uint(u64::from(node.scheduler_position())),
-        text_field(node.owner_id()),
-        uint(u64::from(node.output_ordinal())),
-        uint(u64::from(node.schema_id())),
-        hash_field(node.artifact_digest()),
-    ]
-    .concat()
-}
-
-fn edge_bytes(consumer: &Coordinate, source: &Coordinate) -> Vec<u8> {
-    [
-        EDGE_HEAD.to_vec(),
-        node_bytes(consumer),
-        node_bytes(source),
-        uint(2),
-        vec![0x82],
-        uint(3),
-        uint(5),
-        hash_field(hash(0x33)),
-        vec![0x82],
-        text_field("adr064.classification"),
-        uint(1),
-        hash_field(hash(0x44)),
-    ]
-    .concat()
-}
-
-fn edge(consumer: &Coordinate, source: &Coordinate) -> EdgeRow {
-    ok(EdgeRow::try_from_canonical(
-        edge_bytes(consumer, source),
-        consumer.clone(),
-        source.artifact_digest(),
-    ))
-}
-
-fn record_of(tick: u64, nodes: Vec<NodeRow>, edges: Vec<EdgeRow>) -> TickRecord {
-    ok(TickRecord::try_new(tick, PROVISIONAL, nodes, edges))
-}
+// Records, built from the shared `test_fixtures` coordinates, nodes, and edges.
+// Node `a` has digest 1 and `b` has digest 2; the digest byte of the other
+// nodes is named at each use.
 
 /// An empty provisional record at `tick`.
 fn empty_record(tick: u64) -> TickRecord {
@@ -438,43 +332,6 @@ fn tick_19_record() -> TickRecord {
 }
 
 // Scopes, requests, and paged reads.
-
-const fn fork_scope(fork: TimelineId, generation: u64) -> DependencyReadScopeV1 {
-    DependencyReadScopeV1::ForkGeneration(at(fork, generation))
-}
-
-const fn prefix_scope(timeline: TimelineId, through_tick: u64) -> DependencyReadScopeV1 {
-    DependencyReadScopeV1::ParentPrefix {
-        timeline,
-        through_tick,
-    }
-}
-
-fn request(
-    scope: DependencyReadScopeV1,
-    after: Option<DependencyPageCursorV1>,
-    limit: usize,
-) -> DependencyPageRequestV1 {
-    ok(DependencyPageRequestV1::try_new(scope, after, limit))
-}
-
-/// Read every page of `scope` through `read`.
-fn collect_rows<T: DependencyPagedRowV1 + Clone>(
-    scope: DependencyReadScopeV1,
-    limit: usize,
-    read: impl Fn(&DependencyPageRequestV1) -> Result<DependencyPageV1<T>, StoreError>,
-) -> Result<Vec<T>, StoreError> {
-    let mut collected = Vec::new();
-    let mut after = None;
-    loop {
-        let page = read(&request(scope, after, limit))?;
-        collected.extend_from_slice(page.items());
-        after = page.next().cloned();
-        if after.is_none() {
-            return Ok(collected);
-        }
-    }
-}
 
 fn nodes(
     store: &SqliteStore,
