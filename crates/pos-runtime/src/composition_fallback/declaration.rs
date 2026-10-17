@@ -244,6 +244,9 @@ fn require_effective(
 }
 
 /// Whether the registry runs `entry`'s declared primary.
+///
+/// Key equality is equivalent to the port's IMK1-digest comparison: the digest is taken over
+/// the key's canonical encoding, so equal digests mean equal keys.
 fn runs_primary(
     effective: &BTreeMap<String, ImplementationKeyV1>,
     entry: &FallbackEntryV1,
