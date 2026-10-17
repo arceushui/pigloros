@@ -5279,7 +5279,10 @@ mod tests {
             approver_event_types: Vec::new(),
         };
         let options = RegistrationOptions {
-            registration: Some(PluginRegistrationV1::new(pin, PluginAvailabilityV1::Available)),
+            registration: Some(PluginRegistrationV1::new(
+                pin,
+                PluginAvailabilityV1::Available,
+            )),
             output_admission: None,
             reducer_slot: ReducerSlotV1::ByPluginId,
             manifest_slot: None,

@@ -150,7 +150,11 @@ impl Rig {
             log: Log::default(),
         };
         rig.register(&head, "role.head", SwapDriver::boxed(head.name, &rig.log))?;
-        rig.register(&primary, "role.weather", SwapDriver::boxed(primary.name, &rig.log))?;
+        rig.register(
+            &primary,
+            "role.weather",
+            SwapDriver::boxed(primary.name, &rig.log),
+        )?;
         rig.register(&tail, "role.tail", SwapDriver::boxed(tail.name, &rig.log))?;
         if compose {
             rig.registry.compose_non_participant_drivers()?;
@@ -201,7 +205,10 @@ impl Rig {
     }
 
     fn cursor(&self, plugin: PluginId) -> Option<Seq> {
-        self.registry.plugins.get(&plugin).map(|entry| entry.event_cursor)
+        self.registry
+            .plugins
+            .get(&plugin)
+            .map(|entry| entry.event_cursor)
     }
 }
 
@@ -224,7 +231,10 @@ fn event(seq: u64) -> Event {
 }
 
 fn history(timeline: TimelineId, through: u64) -> (Vec<TimelineHistorySegment>, Vec<Event>) {
-    let segments = vec![TimelineHistorySegment::new(timeline, Seq::from_u64(through))];
+    let segments = vec![TimelineHistorySegment::new(
+        timeline,
+        Seq::from_u64(through),
+    )];
     (segments, (1..=through).map(event).collect())
 }
 
@@ -307,7 +317,10 @@ fn prepare_keeps_the_plugin_id_check_and_refuses_the_primary_itself() -> TestRes
     let mut twin = SwapPlugin::new("candidate", WEATHER);
     twin.id = rig.tail;
     let duplicate = rig.prepare(&twin, "role.weather", Some(rig.primary));
-    assert!(matches!(duplicate, Err(RuntimeError::DuplicatePlugin { .. })));
+    assert!(matches!(
+        duplicate,
+        Err(RuntimeError::DuplicatePlugin { .. })
+    ));
     Ok(())
 }
 
@@ -418,7 +431,11 @@ fn validate_swap_refuses_every_failed_check_and_changes_nothing() -> TestResult 
 
     // Any registration after the preparation makes it stale.
     let spare = SwapPlugin::new("spare", SPARE);
-    rig.register(&spare, "role.spare", SwapDriver::boxed(spare.name, &rig.log))?;
+    rig.register(
+        &spare,
+        "role.spare",
+        SwapDriver::boxed(spare.name, &rig.log),
+    )?;
     let stale = rig.registry.swap_entry_v1(prepared);
     assert_eq!(refusal_of(&stale), Some(Refusal::StalePreparation));
     assert!(rig.registry.contains(&rig.primary));
@@ -435,7 +452,10 @@ fn restore_entry_restores_only_the_named_entry() -> TestResult {
     let (segments, events) = history(TimelineId::new(), 3);
     rig.registry
         .restore_entry_from_history_v1(candidate.id, &segments, &events)?;
-    assert_eq!(rig.calls(), [("candidate", "stage"), ("candidate", "commit")]);
+    assert_eq!(
+        rig.calls(),
+        [("candidate", "stage"), ("candidate", "commit")]
+    );
     let entry = &rig.registry.plugins[&candidate.id];
     assert_eq!(entry.event_cursor, Seq::from_u64(3));
     assert!(entry.pass_state.carried.is_empty());
@@ -527,7 +547,11 @@ fn restore_entry_of_a_driverless_entry_resets_its_pass_state() -> TestResult {
     let mut rig = Rig::new(true)?;
     let mut quiet = SwapPlugin::new("quiet", OTHER);
     quiet.has_driver = false;
-    rig.register(&quiet, "role.quiet", SwapDriver::boxed(quiet.name, &rig.log))?;
+    rig.register(
+        &quiet,
+        "role.quiet",
+        SwapDriver::boxed(quiet.name, &rig.log),
+    )?;
     let (segments, events) = history(TimelineId::new(), 2);
     rig.registry
         .restore_entry_from_history_v1(quiet.id, &segments, &events)?;
