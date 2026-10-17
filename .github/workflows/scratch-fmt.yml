@@ -1,0 +1,24 @@
+name: scratch-fmt
+on:
+  push:
+    branches: ["scratch/fmt-**"]
+permissions:
+  contents: read
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: rustfmt diff per branch
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt
+          for b in $(cat .github/scratch-branches); do
+            git fetch -q origin "$b"
+            git checkout -q "origin/$b"
+            files=$(git diff --name-only origin/main...HEAD -- '*.rs')
+            echo "=== FMT DIFF BEGIN $b"
+            for f in $files; do [ -f "$f" ] && rustfmt +1.97.1 --check --config-path rustfmt.toml "$f" || true; done
+            echo "=== FMT DIFF END $b"
+          done
