@@ -95,7 +95,9 @@ mod tests {
     fn provisioned() -> Result<(MemoryStore, TimelineId), Error> {
         let mut store = MemoryStore::new();
         let gate = Arc::new(ErasureContainmentGateV1::new_test_open());
-        store.bind_erasure_gate(gate).or(Err(Error::StorageFailed))?;
+        store
+            .bind_erasure_gate(gate)
+            .or(Err(Error::StorageFailed))?;
         let timeline = store.create_timeline("derived");
         let timeline = timeline.or(Err(Error::StorageFailed))?.id();
         store.provision_fallback_registry()?;

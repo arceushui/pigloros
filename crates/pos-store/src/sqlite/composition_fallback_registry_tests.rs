@@ -543,3 +543,29 @@ fn a_stored_row_that_differs_from_its_fold_is_corrupt_state() -> TestResult {
     assert_eq!(refused.err(), Some(Error::CorruptState));
     Ok(())
 }
+
+/// ADR-119 section 4.6 on `SQLite`, the counterfactual-suffix constraint: the generic guarded
+/// append refuses an ADR-099-admitted Fork, so neither an activation nor a declaration commits
+/// in its suffix and the Fork gets no row or ledger row.
+#[test]
+fn an_admitted_fork_refuses_declarations_and_activations() -> TestResult {
+    let (mut h, first) = declared()?;
+    let cut = h.head()?;
+    let fork = h.store.fork(h.timeline, cut, "counterfactual")?.id();
+    h.timeline = fork;
+    let (a, b) = (h.world.a.clone(), h.world.b.clone());
+    let mut activation = h.activation(ALPHA, 0, &a, &b)?;
+    activation.expected_state_revision = 1;
+    let next = policy(vec![h.world.alpha()?], Some(first.policy_digest()))?;
+    let mut declaration = h.declaration(&next)?;
+    declaration.expected_state_revision = 1;
+    h.store.conn.execute(
+        "INSERT INTO fork_admissions (child_id, far1_cbor) VALUES (?1, x'00')",
+        [fork.to_string()],
+    )?;
+    assert!(h.activate(&activation).is_err());
+    assert!(h.store.declare(&declaration).is_err());
+    assert_eq!(h.store.registry_row(SCOPE, fork)?, None);
+    assert!(h.store.fallback_ledger(SCOPE, fork)?.is_empty());
+    Ok(())
+}

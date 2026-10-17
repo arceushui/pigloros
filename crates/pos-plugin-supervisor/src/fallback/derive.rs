@@ -6,7 +6,9 @@ use pos_core::{
     SeqRange, TimelineId, TimelineMeta,
 };
 use pos_runtime::TimelineHistorySegment;
-use pos_store::composition_fallback_registry::{derived_fallback_state_v1, FallbackRegistryStateV1};
+use pos_store::composition_fallback_registry::{
+    derived_fallback_state_v1, FallbackRegistryStateV1,
+};
 
 use super::{FallbackBoundaryErrorV1 as Error, FallbackBoundaryStoreV1};
 

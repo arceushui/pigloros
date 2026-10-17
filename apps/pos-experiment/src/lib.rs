@@ -1425,10 +1425,7 @@ impl Experiment {
     #[must_use]
     pub fn with_fork_registry_factory<F>(mut self, factory: F) -> Self
     where
-        F: Fn(&pos_runtime::PluginComposition) -> Result<PluginRegistry, pos_runtime::RuntimeError>
-            + Send
-            + Sync
-            + 'static,
+        F: Fn(&pos_runtime::PluginComposition) -> ForkRegistryResult + Send + Sync + 'static,
     {
         let composed = move |composition: &pos_runtime::PluginComposition| {
             factory(composition).and_then(compose_non_participant)
@@ -2809,6 +2806,12 @@ impl ExperimentSession {
     /// composition at the cut, the current tenure of every ADR-119 entry
     /// included, and must register exactly that composition (ADR-119 section
     /// 4.6).
+    ///
+    /// The live registry's composition is the session's effective composition
+    /// and its sole source of truth: no copy is kept, and every entry swap
+    /// changes it in place. A live registry that diverges from the effective
+    /// composition derived from the Events is the ADR-119 section 4.7 host
+    /// fault, raised by the composition boundary, not here.
     ///
     /// A session bound with [`Self::with_protected_token`] must still hold a
     /// live token whose `fork_permitted` flag is set at this exact Timeline

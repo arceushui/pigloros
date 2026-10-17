@@ -278,12 +278,19 @@ mod tests {
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+    // These helpers deliberately mirror the supervisor's `src/fallback/tests.rs` helpers: the
+    // two crates cannot share test code, and `pos-store` cannot depend on the supervisor.
+
     const SCOPE: &str = "counterfactual";
 
     fn key(plugin_id: &str, byte: u8) -> TestResult<ImplementationKeyV1> {
         let digest = Hash::from_bytes([byte; 32]);
         let version = "1.0.0".to_owned();
-        Ok(ImplementationKeyV1::new(plugin_id.to_owned(), version, digest)?)
+        Ok(ImplementationKeyV1::new(
+            plugin_id.to_owned(),
+            version,
+            digest,
+        )?)
     }
 
     fn pin(plugin_id: &str, byte: u8) -> TestResult<CompositionPinV1> {

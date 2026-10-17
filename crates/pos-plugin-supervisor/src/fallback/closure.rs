@@ -64,6 +64,9 @@ pub enum FallbackClosureErrorV1 {
     /// implementation.
     #[error("an activation does not close its entry's current tenure")]
     Discontinuous,
+    /// An activation of the scope names an entry key that no slot of the recipe names.
+    #[error("an activation names an entry key outside the recipe")]
+    UnknownEntry,
 }
 
 /// The tenures of every slot of a composition, in order.
@@ -96,9 +99,10 @@ impl FallbackTenuresV1 {
         latest.map(|tenure| &tenure.implementation)
     }
 
-    /// The composer's admitted-release evidence of `entry_key`'s tenure 0: the first
-    /// `release-activated` Event of `admissions` whose payload names the tenure-0 Plugin ID
-    /// and release digest in `trust_scope` (ADR-119 section 4.6, the tenure-0 rule).
+    /// The composer's admitted-release evidence of `entry_key`'s tenure 0 (the tenure-0 rule).
+    ///
+    /// It is the first `release-activated` Event of `admissions` whose payload names the
+    /// tenure-0 Plugin ID and release digest in `trust_scope` (ADR-119 section 4.6).
     ///
     /// That Event shows admission, not execution. It sits on the installer-supplied Timeline,
     /// which need not be the activation target, and it carries no version text: the tenure-0
@@ -120,9 +124,11 @@ impl FallbackTenuresV1 {
         })
     }
 
-    /// `slot` with its base pin running its latest tenure's implementation, so that a restart
-    /// composes an entry frozen by a withdrawal (ADR-119 section 4.3) on the implementation it
-    /// froze. The roles are the base pin's, which every candidate shares (section 4.1 rule 1).
+    /// `slot` with its base pin running its latest tenure's implementation.
+    ///
+    /// A restart therefore composes an entry frozen by a withdrawal (ADR-119 section 4.3) on
+    /// the implementation it froze. The roles are the base pin's, which every candidate shares
+    /// (section 4.1 rule 1).
     #[must_use]
     pub(super) fn restart_slot(&self, slot: &FallbackRestartSlotV1) -> FallbackRestartSlotV1 {
         let base = slot.base.implementation();
@@ -139,10 +145,12 @@ impl FallbackTenuresV1 {
         let undecodable = Err(FallbackClosureErrorV1::UndecodableActivation);
         let payload = payload.or(undecodable)?;
         let input = payload.as_input();
-        let tenures = self.entries.get_mut(&input.entry_key);
-        let tenures = tenures.filter(|_| input.scope == scope);
-        let open = |tenures| open_tenure(tenures, input, event);
-        let opened = tenures.map_or(Ok(()), open);
+        if input.scope != scope {
+            return Ok(self);
+        }
+        let unknown = FallbackClosureErrorV1::UnknownEntry;
+        let tenures = self.entries.get_mut(&input.entry_key).ok_or(unknown)?;
+        let opened = open_tenure(tenures, input, event);
         opened.map(|()| self)
     }
 }
@@ -156,12 +164,15 @@ impl FallbackTenuresV1 {
 /// the same tenures. A declaration changes no tenure: a re-base continues it.
 ///
 /// Pass the Events at or before a position to close the composition at that position; a
-/// Fork's Events include its inherited prefix. Activations of another scope, or of a key no
-/// slot names, are not folded.
+/// Fork's Events include its inherited prefix. Activations of another scope are not folded.
+/// An activation of `scope` for a key no slot names fails closed: every declared entry key is
+/// a slot of the composer's recipe (ADR-119 section 1), so such an Event means the recipe and
+/// the Timeline disagree.
 ///
 /// # Errors
 /// [`FallbackClosureErrorV1::UndecodableActivation`] for an activation Event that does not
-/// decode, and [`FallbackClosureErrorV1::Discontinuous`] for one that does not close its
+/// decode, [`FallbackClosureErrorV1::UnknownEntry`] for one of `scope` whose entry key no slot
+/// names, and [`FallbackClosureErrorV1::Discontinuous`] for one that does not close its
 /// entry's current tenure on its effective implementation.
 pub fn fallback_tenures_v1(
     scope: &str,
@@ -170,11 +181,16 @@ pub fn fallback_tenures_v1(
 ) -> Result<FallbackTenuresV1, FallbackClosureErrorV1> {
     let entries = slots.iter().map(base_entry).collect();
     let tenures = FallbackTenuresV1 { entries };
+    let fold = |tenures: FallbackTenuresV1, event| tenures.folded(scope, event);
+    activation_events(events).try_fold(tenures, fold)
+}
+
+/// The activation Events among `events`, in order, whatever their scope.
+pub(super) fn activation_events(events: &[Event]) -> impl Iterator<Item = &Event> {
     let activated = COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1;
     events
         .iter()
-        .filter(|event| event.event_type.as_str() == activated)
-        .try_fold(tenures, |tenures, event| tenures.folded(scope, event))
+        .filter(move |event| event.event_type.as_str() == activated)
 }
 
 /// The entry of `slot` with tenure 0 alone.

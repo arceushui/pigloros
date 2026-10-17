@@ -6,7 +6,6 @@ use pos_core::{
     CompositionPinV1, Event, FallbackActivatedPayloadV1, FallbackActivationModeV1,
     FallbackActivationOriginV1 as Origin, FallbackSkipReasonV1 as Skip, FallbackSkippedCandidateV1,
     FallbackTriggerBasisV1, FallbackTriggerCodeV1, ImplementationKeyV1, Seq, SeqRange, TimelineId,
-    COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
 };
 use pos_runtime::community_plugin_host::{CommunityPassOutcomeV1, PassResultV1};
 use pos_runtime::composition_fallback::{classify_fallback_trigger_v1, enforce_required_plugin_v1};
@@ -17,6 +16,7 @@ use pos_store::composition_fallback_registry::{
 use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
 
 use super::candidate::{build_in, skip_of, BuiltV1};
+use super::closure::activation_events;
 use super::derive::{
     effective_composition_v1, read_prefix, FallbackEffectiveCompositionV1,
     FallbackEffectiveEntryV1, PrefixV1,
@@ -137,7 +137,8 @@ impl CompositionBoundaryV1 {
     /// Returns [`Error::NotGranted`] without the `composition.fallback.activate` grant, the
     /// derivation's errors, [`Error::UnknownEntry`], [`Error::InvalidTarget`] for a target that
     /// is not another listed implementation, [`Error::NoObservation`] or
-    /// [`Error::TriggerNotDeclared`] for a candidate, and the invariant faults of the commit.
+    /// [`Error::TriggerNotDeclared`] for a candidate, [`Error::StoreUnavailable`] when a
+    /// return cannot read the Timeline's Events, and the invariant faults of the commit.
     pub fn owner_activate_v1<S, T, W>(
         &mut self,
         context: Context<'_, '_, S, T, W>,
@@ -473,7 +474,8 @@ impl CompositionBoundaryV1 {
     ///
     /// The activation is found among the Timeline's Events, inherited ones included, not in
     /// its ledger: on a Fork the tenure may have been opened by the parent before the cut
-    /// (ADR-119 section 4.6).
+    /// (ADR-119 section 4.6). Like the pre-commit prefix read, this is O(history) (section
+    /// 5); a Timeline that cannot be read refuses the return with nothing built.
     fn returning<S: FallbackBoundaryStoreV1 + ?Sized>(
         &self,
         store: &S,
@@ -482,9 +484,12 @@ impl CompositionBoundaryV1 {
         let closing = effective.tenure_ordinal.saturating_sub(1);
         let key = effective.entry.entry_key();
         let events = store.read(self.target.timeline, SeqRange::all());
-        let events = events.unwrap_or_default();
-        let payload = opening_activation(&events, &self.scope, key, closing);
-        let trigger = payload.map(|payload| {
+        let events = events.or(Err(Error::StoreUnavailable));
+        let payload = events.and_then(|events| {
+            let opening = opening_activation(&events, &self.scope, key, closing);
+            opening.ok_or(TENURE_UNRESOLVED)
+        });
+        payload.map(|payload| {
             let input = payload.as_input();
             TriggerV1 {
                 code: input.trigger_code,
@@ -493,8 +498,7 @@ impl CompositionBoundaryV1 {
                     origin: Origin::Owner,
                 },
             }
-        });
-        trigger.ok_or(TENURE_UNRESOLVED)
+        })
     }
 }
 
@@ -652,10 +656,7 @@ fn opening_activation(
     entry_key: &str,
     closing: u64,
 ) -> Option<FallbackActivatedPayloadV1> {
-    let activated = COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1;
-    let activations = events
-        .iter()
-        .filter(|event| event.event_type.as_str() == activated);
+    let activations = activation_events(events);
     let mut payloads = activations.filter_map(decoded_activation);
     payloads.find(|payload| {
         let input = payload.as_input();

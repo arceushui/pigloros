@@ -192,7 +192,8 @@ pub enum FallbackBoundaryErrorV1 {
     /// reason and no candidate replaces it.
     #[error("a restart slot cannot be composed: {0:?}")]
     SlotUnavailable(FallbackSkipReasonV1),
-    /// The Event store could not be read during a restart composition, before any commit.
+    /// The Event store could not be read during a restart composition or an owner return,
+    /// before any commit.
     #[error("the Event store could not be read")]
     StoreUnavailable,
 }

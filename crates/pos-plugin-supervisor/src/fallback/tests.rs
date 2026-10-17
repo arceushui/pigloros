@@ -410,6 +410,14 @@ fn tenures_close_from_the_events_alone() {
     assert_eq!(unknown, None);
     let few = &admissions[..3];
     assert_eq!(tenures.admitted_release_v1("entry", "trust", few), None);
+    // Another release digest of the same Plugin ID in the trust scope is not tenure 0's.
+    let wrong_digest = &admissions[1..2];
+    let found = tenures.admitted_release_v1("entry", "trust", wrong_digest);
+    assert_eq!(found, None);
+    // The tenure-0 release admitted in another trust scope is not the composer's evidence.
+    let wrong_scope = &admissions[2..3];
+    let found = tenures.admitted_release_v1("entry", "trust", wrong_scope);
+    assert_eq!(found, None);
 }
 
 /// One activation payload of `scope` for `entry_key` that closes tenure `closing` on `from`.
@@ -451,18 +459,18 @@ fn closed_over(payloads: Vec<Vec<u8>>) -> Result<usize, FallbackClosureErrorV1> 
     tenures.map(|tenures| tenures.tenures("entry").len())
 }
 
-/// Another scope's activation and an unknown key's are not folded; an activation that does not
-/// close the entry's current tenure on its implementation, or does not decode, refuses the
-/// closure.
+/// Another scope's activation is not folded. An activation of the scope for a key outside the
+/// recipe, one that does not close the entry's current tenure on its implementation, or one
+/// that does not decode refuses the closure.
 #[test]
 fn a_discontinuous_or_undecodable_activation_refuses_the_closure() {
     let primary = key("acme.primary", 1);
     let candidate = key("acme.candidate", 2);
-    let unrelated = vec![
-        activation_payload("other", "entry", 0, &primary),
-        activation_payload("scope", "elsewhere", 0, &primary),
-    ];
-    assert_eq!(closed_over(unrelated), Ok(1));
+    let other_scope = vec![activation_payload("other", "elsewhere", 0, &primary)];
+    assert_eq!(closed_over(other_scope), Ok(1));
+    let outside = vec![activation_payload("scope", "elsewhere", 0, &primary)];
+    let unknown = Err(FallbackClosureErrorV1::UnknownEntry);
+    assert_eq!(closed_over(outside), unknown);
     let discontinuous = Err(FallbackClosureErrorV1::Discontinuous);
     let skipping = activation_payload("scope", "entry", 1, &primary);
     assert_eq!(closed_over(vec![skipping]), discontinuous);
@@ -473,6 +481,7 @@ fn a_discontinuous_or_undecodable_activation_refuses_the_closure() {
     let errors = [
         FallbackClosureErrorV1::Discontinuous,
         FallbackClosureErrorV1::UndecodableActivation,
+        FallbackClosureErrorV1::UnknownEntry,
     ];
     let messages: std::collections::BTreeSet<String> =
         errors.iter().map(ToString::to_string).collect();
@@ -482,6 +491,7 @@ fn a_discontinuous_or_undecodable_activation_refuses_the_closure() {
 
 /// Case 6: Replay never runs a boundary step; the entry restore of step 6 is refused with
 /// `ModeMismatch` before it reads anything.
+// The ADR-119 section 6 case 6 conformance anchor of slice 7 (#668).
 #[test]
 fn replay_refuses_the_boundary_restore() {
     let mut replay = PluginRegistry::new_replay();

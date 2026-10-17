@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pos_core::{
-    Capability, CompositionPinV1, DomainFallbackPolicyV1, EntityId, ErasureGate,
-    FallbackActivatedInputV1, FallbackActivatedPayloadV1, FallbackActivationModeV1,
+    CanonicalBytes, Capability, CompositionPinV1, DomainFallbackPolicyV1, EntityId, ErasureGate,
+    EventDraft, FallbackActivatedInputV1, FallbackActivatedPayloadV1, FallbackActivationModeV1,
     FallbackActivationOriginV1, FallbackEntryV1, FallbackSkippedCandidateV1,
     FallbackTriggerCodeV1 as Code, Hash, ImplementationKeyV1, Kind, Plugin, PluginId,
     COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
@@ -1611,5 +1611,58 @@ fn dropped_observation(kind: StoreKind) -> TestResult {
     assert_eq!(rig.boundary.observation(ENTRY), None);
     let refused = rig.owner(&candidate, true);
     assert_eq!(refused, Err(BoundaryError::NoObservation));
+    Ok(())
+}
+
+/// An owner return whose Timeline Events cannot be read is refused with `StoreUnavailable`
+/// before anything is built, and nothing is committed.
+#[test]
+fn an_unreadable_timeline_refuses_the_owner_return() -> TestResult {
+    on_every_store(unreadable_return)
+}
+
+fn unreadable_return(kind: StoreKind) -> TestResult {
+    let mut rig = Rig::declared(kind, FAILING, AUTOMATIC)?;
+    let failed = rig.pass()?;
+    assert_eq!(described(&rig.boundary(&failed)), ["activated:plugin-b:[]"]);
+    rig.pass.gate.block_timeline(rig.pass.timeline);
+    let primary = rig.primary.key();
+    let refused = rig.owner(&primary, true);
+    assert_eq!(refused, Err(BoundaryError::StoreUnavailable));
+    let row = rig.pass.store.registry_row(SCOPE, rig.pass.timeline)?;
+    let revision = row.map(|row| row.state().state_revision());
+    assert_eq!(revision, Some(2));
+    Ok(())
+}
+
+/// A restart faults when a declared entry's registry state and its Events disagree: an
+/// activation Event the port never folded names a later tenure than the registry's row.
+#[test]
+fn a_registry_that_disagrees_with_its_events_faults_the_restart() -> TestResult {
+    on_every_store(disagreeing)
+}
+
+fn disagreeing(kind: StoreKind) -> TestResult {
+    let mut rig = Rig::declared(kind, HEALTHY, AUTOMATIC)?;
+    let automatic = FallbackActivationOriginV1::Automatic;
+    let input = FallbackActivatedInputV1 {
+        scope: SCOPE.to_owned(),
+        policy_digest: rig.policy.ok_or("nothing declared")?,
+        entry_key: ENTRY.to_owned(),
+        closing_tenure_ordinal: 0,
+        from: rig.primary.key(),
+        to: rig.candidate.key(),
+        skipped: Vec::new(),
+        trigger_code: Code::ResourceLimit,
+        trigger_basis: FallbackTriggerCauseV1::FuelExhausted.basis(automatic),
+        activation_ordinal: 1,
+    };
+    let payload = FallbackActivatedPayloadV1::new(input)?.to_canonical_cbor();
+    let activated = Kind::new(COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1);
+    let draft = EventDraft::new(rig.entity, activated, CanonicalBytes::from_vec(payload));
+    let _forged = rig.pass.store.append(rig.pass.timeline, &[draft])?;
+    let faulted = rig.restart();
+    let diverged = matches!(faulted, Err(BoundaryError::InvariantFault(_)));
+    assert!(diverged, "{faulted:?}");
     Ok(())
 }
