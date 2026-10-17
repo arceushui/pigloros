@@ -14,13 +14,14 @@ use std::sync::{
 };
 
 use pos_conformance::{PluginFloorErrorV1, PluginFloorKindV1, PluginTrustBridgeErrorV1};
+use pos_crypto::plugin_execution::{DeterministicBudgetV1, PluginExecutionProjectionV1};
 use pos_crypto::plugin_trust::{
     verify_plugin_trust_v1, PluginTrustErrorV1, ValidatedPluginManifestProjectionV1,
 };
 use pos_plugin_publisher::{
     test_support::{
         encoding::{Material, Revocations, Spec, OWNER, SCOPE, TICK, UTC},
-        release::{pmf1_digest, Shape, REAL_COMPONENT_BYTES},
+        release::{make_draft, pmf1_digest, Shape, REAL_COMPONENT_BYTES},
         spy_registry::Call,
         world::{key_bytes, register, wall, Config, World},
         BoxResult,
@@ -311,6 +312,73 @@ fn a_release_carrying_the_real_component_installs_with_its_digests() -> TestResu
     let projection = ValidatedPluginManifestProjectionV1::from_verified_bundle(&bundle)?;
     assert!(installed.execution().is_bound_to(&projection));
     assert_eq!(installed.execution().pmf1_digest(), pmf1_digest(&bundle));
+    Ok(())
+}
+
+/// The deterministic budget of the default shape, which the digests of other vectors depend on.
+const DEFAULT_BUDGET: DeterministicBudgetV1 = DeterministicBudgetV1 {
+    memory_bytes: 65_536,
+    fuel: 1 << 40,
+    host_calls: 256,
+    event_count: 24,
+    event_bytes: 4_096,
+    state_bytes: 4_096,
+    log_calls: 24,
+    log_bytes: 256,
+};
+
+/// The execution projection of `shape`, published into a fresh world.
+fn projected(shape: Shape) -> BoxResult<PluginExecutionProjectionV1> {
+    let mut world = World::new()?;
+    let published = world.publish(shape)?;
+    let bundle = world.store.read_verified(published.address())?;
+    Ok(PluginExecutionProjectionV1::from_verified_bundle(&bundle)?)
+}
+
+/// With no setter called, the shape's draft keeps the budget and ABI minors it always had, and
+/// the setters called with those same values give the identical draft.
+#[test]
+fn the_default_shape_keeps_its_budget_and_abi_minors() -> TestResult {
+    let draft = make_draft(Shape::first())?;
+    assert_eq!(draft.budget, DEFAULT_BUDGET);
+    let abi = &draft.abi;
+    assert_eq!((abi.major, abi.min_minor, abi.max_minor), (0, 0, 1));
+    let restated = Shape::first()
+        .with_fuel(1 << 40)
+        .with_host_calls(256)
+        .with_event_bytes(4_096)
+        .with_abi_minors(0, 1);
+    assert_eq!(make_draft(restated)?, draft);
+    assert_eq!(projected(Shape::first())?.budget(), DEFAULT_BUDGET);
+    Ok(())
+}
+
+/// Each budget and ABI setter reaches the published PMF1: the release's execution projection
+/// decodes the value it set, and every other budget member keeps its default.
+#[test]
+fn each_budget_and_abi_setter_decodes_from_the_published_release() -> TestResult {
+    let fuel = projected(Shape::first().with_fuel(1))?.budget();
+    let expected = DeterministicBudgetV1 {
+        fuel: 1,
+        ..DEFAULT_BUDGET
+    };
+    assert_eq!(fuel, expected);
+    let host_calls = projected(Shape::first().with_host_calls(2))?.budget();
+    let expected = DeterministicBudgetV1 {
+        host_calls: 2,
+        ..DEFAULT_BUDGET
+    };
+    assert_eq!(host_calls, expected);
+    let event_bytes = projected(Shape::first().with_event_bytes(1))?.budget();
+    let expected = DeterministicBudgetV1 {
+        event_bytes: 1,
+        ..DEFAULT_BUDGET
+    };
+    assert_eq!(event_bytes, expected);
+    let minors = projected(Shape::first().with_abi_minors(1, 1))?;
+    let abi = minors.abi();
+    assert_eq!((abi.major, abi.min_minor, abi.max_minor), (0, 1, 1));
+    assert_eq!(minors.budget(), DEFAULT_BUDGET);
     Ok(())
 }
 

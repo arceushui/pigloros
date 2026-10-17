@@ -14,6 +14,13 @@ The evidence is executable:
   the negative variants and the committed Component fixtures.
 - The `plugin-component-fixtures` CI job rebuilds every fixture from source
   with the pinned toolchains and requires identical bytes.
+- A third guest fixture,
+  `plugins/community/examples/compatibility-prototype/fixtures/probe-guest.wasm`
+  (#652), came after this evidence. It mirrors the Rust guest, except on the
+  exact observations `reserved` and `bad-digest`, which the `PCH1` cases
+  `PCF-CPH-013` and `PCF-CPH-014` use. The same fixture job builds and verifies
+  it. "The Rust and C guests" and "both guests" below mean the two languages
+  of this evidence, not the probe guest.
 
 ## Runtime pin
 

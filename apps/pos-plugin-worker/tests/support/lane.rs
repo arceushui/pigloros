@@ -7,12 +7,13 @@
 //! the community pipeline conformance runners share it.
 //!
 //! Each member's context source is the pass harness's, steered by its lane: the lane can make
-//! the real guest trap and can renew every member's invocation identity.
+//! the real guest trap, can feed every member's guest arbitrary selector bytes as its
+//! observation, and can renew every member's invocation identity.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use pos_core::TimelineId;
@@ -22,7 +23,9 @@ use pos_plugin_publisher::test_support::{
     world::{wall, World as SignedWorld},
     BoxResult, BundleAddressV1,
 };
-use pos_plugin_supervisor::pass_harness::{GatedSpec, LostPort, Source, World as PassWorld};
+use pos_plugin_supervisor::pass_harness::{
+    GatedSpec, LostPort, Source, StoreKind, World as PassWorld,
+};
 use pos_plugin_supervisor::{
     CommunityMemberV1, CommunityPluginHandleV1, CommunityPluginSubjectOutcomeV1 as Outcome,
     InvocationBindingV1, InvocationContextSourceV1, InvocationContextV1,
@@ -56,6 +59,9 @@ macro_rules! fixture {
 pub const RUST_GUEST: &[u8] = fixture!("rust-guest.wasm");
 /// The committed C guest.
 pub const C_GUEST: &[u8] = fixture!("c-guest.wasm");
+/// The committed probe guest, which behaves as the Rust guest unless its observation is a
+/// selector such as `reserved` or `bad-digest`.
+pub const PROBE_GUEST: &[u8] = fixture!("probe-guest.wasm");
 /// The worker watchdog of every member.
 ///
 /// Generous for compiling a fixture in an unoptimized, instrumented worker.
@@ -200,14 +206,40 @@ pub fn publish_shape(
     })
 }
 
+/// Selector bytes that replace every member's observation while set; a clone shares them.
+///
+/// A guest that reads a selector from its observation, such as `reserved` or `bad-digest`, is
+/// steered by them. Those selectors are first fed by PCF-CPH-013 and PCF-CPH-014.
+#[derive(Clone, Default)]
+pub struct Selector(Arc<Mutex<Option<Vec<u8>>>>);
+
+impl Selector {
+    /// Replace every member's observation with `bytes` from now on, or with `None` stop
+    /// replacing it.
+    pub fn set(&self, bytes: Option<Vec<u8>>) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = bytes;
+    }
+
+    /// The bytes that replace every member's observation, if any.
+    #[must_use]
+    pub fn bytes(&self) -> Option<Vec<u8>> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
 /// A member's context source: the pass harness's source, steered by the member's lane.
 ///
 /// While `trap` is set, the observation is [`TRAP_OBSERVATION`], so the real guest traps in the
-/// worker. The last byte of the invocation ID is flipped by `generation`, so a lane can run a
-/// pass under new invocation identities.
+/// worker. Otherwise, while `selector` holds bytes, the observation is those bytes. The last
+/// byte of the invocation ID is flipped by `generation`, so a lane can run a pass under new
+/// invocation identities.
 struct Steered {
     source: Source,
     trap: Arc<AtomicBool>,
+    selector: Selector,
     generation: Arc<AtomicU8>,
 }
 
@@ -221,6 +253,8 @@ impl InvocationContextSourceV1 for Steered {
         let mut context = self.source.context(timeline, observation, binding)?;
         if self.trap.load(Ordering::SeqCst) {
             context.invocation.observation_bytes = TRAP_OBSERVATION.to_vec();
+        } else if let Some(bytes) = self.selector.bytes() {
+            context.invocation.observation_bytes = bytes;
         }
         context.invocation.invocation_id[15] ^= self.generation.load(Ordering::SeqCst);
         Ok(context)
@@ -233,6 +267,7 @@ struct Setup<'a> {
     material: CommunityPluginTrustMaterialV1,
     refuse: Arc<AtomicBool>,
     trap: Arc<AtomicBool>,
+    selector: Selector,
     generation: Arc<AtomicU8>,
     profile: CommunityPluginExecutionProfileV1,
 }
@@ -287,6 +322,7 @@ fn add_part(
     let source = Box::new(Steered {
         source: Source::switched(number, Arc::clone(&setup.refuse)),
         trap: Arc::clone(&setup.trap),
+        selector: setup.selector.clone(),
         generation: Arc::clone(&setup.generation),
     });
     let built = pass.add_gated(GatedSpec {
@@ -347,17 +383,32 @@ pub struct Lane {
     pub refuse: Arc<AtomicBool>,
     /// Set to make every member's real guest trap.
     pub trap: Arc<AtomicBool>,
+    /// Selector bytes every member's guest reads as its observation while `trap` is not set.
+    pub selector: Selector,
     /// Flips the last byte of every member's invocation ID; zero keeps the harness's IDs.
     pub generation: Arc<AtomicU8>,
 }
 
 impl Lane {
-    /// A lane over a fresh pass world on the real worker, with one member per entry.
+    /// A lane over a fresh `MemoryStore` pass world on the real worker, with one member per entry.
     ///
     /// # Errors
     /// Returns the error of gating, building or registering a member.
     pub fn new(signed: &SignedWorld, entries: &[Published], mode: Mode) -> BoxResult<Self> {
-        Self::over(signed, entries, mode, PassWorld::new(WORKER))
+        Self::on(StoreKind::Memory, signed, entries, mode)
+    }
+
+    /// As [`Self::new`], over a fresh pass world on a store of `kind`.
+    ///
+    /// # Errors
+    /// Returns the error of gating, building or registering a member.
+    pub fn on(
+        kind: StoreKind,
+        signed: &SignedWorld,
+        entries: &[Published],
+        mode: Mode,
+    ) -> BoxResult<Self> {
+        Self::over(signed, entries, mode, PassWorld::on(kind, WORKER))
     }
 
     /// As [`Self::new`], over `pass`, which may already hold other Drivers.
@@ -372,12 +423,14 @@ impl Lane {
     ) -> BoxResult<Self> {
         let refuse = Arc::new(AtomicBool::new(false));
         let trap = Arc::new(AtomicBool::new(false));
+        let selector = Selector::default();
         let generation = Arc::new(AtomicU8::new(0));
         let setup = Setup {
             signed,
             material: trust_material(signed, &signed.material()?),
             refuse: Arc::clone(&refuse),
             trap: Arc::clone(&trap),
+            selector: selector.clone(),
             generation: Arc::clone(&generation),
             profile: profile(mode),
         };
@@ -397,6 +450,7 @@ impl Lane {
             parts,
             refuse,
             trap,
+            selector,
             generation,
         })
     }
@@ -453,7 +507,7 @@ impl Lane {
     pub fn run_lost(&mut self, signed: &SignedWorld) -> BoxResult<CommunityPassOutcomeV1> {
         let mut clock = wall(UTC)?;
         let prepared = self.pass.prepare()?;
-        let mut port = LostPort(&mut self.pass.store);
+        let mut port = LostPort(self.pass.store.as_mut());
         let request = prepared.request(TICK, &mut port);
         let registry = &signed.registry;
         let host = &mut self.host;

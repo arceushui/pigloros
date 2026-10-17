@@ -1,4 +1,5 @@
-//! PCF-CPH-007 to PCF-CPH-009: missing, unavailable and invalid Plugins fail closed (#633).
+//! PCF-CPH-007 to PCF-CPH-009 and PCF-CPH-014: missing, unavailable and invalid Plugins fail
+//! closed (#633, #655).
 //!
 //! A missing, unavailable or invalid required Plugin fails closed with a typed outcome, and the
 //! host has no runtime default (ADR-021 decision 7). Exact composition resolution gives the same
@@ -7,35 +8,42 @@
 //! the host makes the Plugin available again.
 //!
 //! Only the community path has a release: a release that is not the active one is refused at
-//! the trust gate, and a release whose capability the host denies never becomes a Driver. The
-//! first-party counterparts of an invalid draft are the authority refusals of PCF-CPH-003; an
-//! invalid community guest output needs a new guest Component and is recorded as an exclusion.
+//! the trust gate, and a release whose capability the host denies, whose ABI the real worker
+//! does not support or whose manifest is not PMF1 never becomes a Driver. A community guest
+//! output that fails validation discards the whole pass and quarantines nothing; its
+//! first-party counterpart is the invalid-draft authority refusal of PCF-CPH-003. The probe
+//! guest returns that invalid output on the real worker when its observation selects it.
 
 use pos_core::PluginId;
 use pos_plugin_publisher::test_support::{release::Shape, world::World as SignedWorld, BoxResult};
-use pos_plugin_supervisor::pass_harness::{GatedSpec, Source, World as PassWorld};
-use pos_plugin_supervisor::register_community_driver;
+use pos_plugin_supervisor::pass_harness::{GatedSpec, Source, StoreKind, World as PassWorld};
 use pos_plugin_supervisor::test_support::{community_pin, DriverPlugin};
+use pos_plugin_supervisor::{register_community_driver, CommunityDriverV1};
 use pos_runtime::community_plugin_host::{
-    CommunityPluginHostErrorV1 as HostError, CommunityPluginModeV1 as Mode,
-    RevocationBasisV1 as Revoke,
+    CommunityPluginHostAbiV1 as HostAbi, CommunityPluginHostErrorV1 as HostError,
+    CommunityPluginModeV1 as Mode, RevocationBasisV1 as Revoke,
 };
 use pos_runtime::{
     PluginAvailabilityV1, PluginExecutionModeV1, PluginIsolationV1, PluginPinV1, PluginRegistry,
     RequiredPluginCompositionV1, RequiredPluginV1,
 };
 
-use crate::authority::{community_driver, composition_refusal, refusal_of, snapshot};
+use crate::authority::{
+    community_driver, composition_refusal, driver_config, first_party_proposal, refusal_of,
+    snapshot, PROBE, PROPOSER,
+};
 use crate::failure::{record_pass, Mixed, Pass, SIBLING};
 use crate::first_party::{entity_of, native_pin, register_twin, NAME};
 use crate::harness::Capture;
-use crate::parity::{record, Order, ENTITY, STORE, TWIN_TYPE};
+use crate::parity::{
+    discarded_whole, on_every_store, publish_successor, record, Observed, Order, StoreCapture,
+    ENTITY, TWIN_TYPE,
+};
 use crate::support::lane::{
     gated_release, profile, publish, publish_shape, trust_material, Published, Swap, ALPHA,
     ALPHA_C, WATCHDOG,
 };
 use crate::support::subcase::WORKER;
-use crate::support::test_ok::TestOk;
 
 /// The version every test Plugin reports.
 const VERSION: &str = "0.1.0";
@@ -87,22 +95,12 @@ fn resolve_with_missing(registry: &PluginRegistry, pin: PluginPinV1) -> BoxResul
     resolve(registry, required)
 }
 
-/// The successor of `first` on the C fixture, installed as the active release.
-fn successor(signed: &mut SignedWorld, first: &Published) -> BoxResult<Published> {
-    let shape = Shape {
-        version: "2.0.0",
-        previous: Some(first.release),
-        ..ALPHA_C.shape()
-    };
-    publish_shape(signed, ALPHA_C, shape, 2)
-}
-
 /// The pass of `mixed` once its community member names a release that is not the active one.
 ///
-/// The member's successor is installed and rolled back, and the member is supplied from the
-/// successor's closure: the Plugin has no active release there.
+/// The member's successor, on the C fixture, is installed and rolled back, and the member is
+/// supplied from the successor's closure: the Plugin has no active release there.
 fn not_active(signed: &mut SignedWorld, first: &Published, mixed: &mut Mixed) -> BoxResult<Pass> {
-    let second = successor(signed, first)?;
+    let second = publish_successor(signed, first, ALPHA_C)?;
     signed.rollback_to(&first.address, 3)??;
     let expected = mixed.lane.parts[0].expected.clone();
     mixed.lane.rehost(signed, &second.address, &expected)?;
@@ -119,28 +117,29 @@ fn not_active(signed: &mut SignedWorld, first: &Published, mixed: &mut Mixed) ->
 /// in its place, and nothing is committed.
 #[must_use]
 pub fn missing_implementation() -> Capture {
-    missing().test_ok()
+    on_every_store(missing)
 }
 
-fn missing() -> BoxResult<Capture> {
+/// The resolutions read the registry alone and the refused pass commits nothing, so the store
+/// of kind `kind` holds no Event and the values are the same on every store.
+fn missing(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let first = publish(&mut signed, ALPHA, 1)?;
     let entries = std::slice::from_ref(&first);
-    let mut mixed = Mixed::new(&signed, entries, SIBLING, Order::TwinFirst)?;
+    let mut mixed = Mixed::new(kind, &signed, entries, SIBLING, Order::TwinFirst)?;
     let registry = &mixed.lane.pass.registry;
     let present = resolve(registry, registered(registry, None)?)?;
     let first_party = resolve_with_missing(registry, native_pin("missing-first-party")?)?;
     let community = resolve_with_missing(registry, community_pin(0x4d, "missing-community"))?;
     let pass = not_active(&mut signed, &first, &mut mixed)?;
-    let mut capture = Capture::default();
-    capture.record(STORE, "registered.resolve", &present);
-    capture.record(STORE, "first-party-missing.resolve", &first_party);
-    capture.record(STORE, "community-missing.resolve", &community);
-    record(&mut capture, "community-not-active", &pass.observed);
-    capture.record(STORE, "community-not-active.gate", &pass.gate);
+    capture.record("registered.resolve", &present);
+    capture.record("first-party-missing.resolve", &first_party);
+    capture.record("community-missing.resolve", &community);
+    record(capture, "community-not-active", &pass.observed);
+    capture.record("community-not-active.gate", &pass.gate);
     let same = first_party == community;
-    capture.record(STORE, "parity.same-missing-either-class", same);
-    Ok(capture)
+    capture.record("parity.same-missing-either-class", same);
+    Ok(())
 }
 
 /// Two passes refused for an unavailable Plugin and the pass after it is available again.
@@ -173,9 +172,13 @@ fn set_and_pass(
 }
 
 /// The first-party sibling, registered after the community release, made unavailable by the
-/// host, then available again.
-fn first_party_unavailable(signed: &SignedWorld, entries: &[Published]) -> BoxResult<Refused> {
-    let mut mixed = Mixed::new(signed, entries, SIBLING, Order::CommunityFirst)?;
+/// host, then available again, on a `kind` store.
+fn first_party_unavailable(
+    signed: &SignedWorld,
+    entries: &[Published],
+    kind: StoreKind,
+) -> BoxResult<Refused> {
+    let mut mixed = Mixed::new(kind, signed, entries, SIBLING, Order::CommunityFirst)?;
     let id = plugin_id(&mixed.lane.pass.registry, NAME)?;
     Ok(Refused {
         revoked: set_and_pass(signed, &mut mixed, id, PluginAvailabilityV1::Revoked)?,
@@ -197,12 +200,16 @@ fn quarantine_and_pass(
 }
 
 /// The community release, registered after the first-party sibling, quarantined by the host,
-/// then cleared.
+/// then cleared, on a `kind` store.
 ///
 /// The revocation is injected through the handle's refusal record, the path the host itself uses
 /// to quarantine; that a real revoked artifact yields that refusal is proven at the trust gate.
-fn community_unavailable(signed: &SignedWorld, entries: &[Published]) -> BoxResult<Refused> {
-    let mut mixed = Mixed::new(signed, entries, SIBLING, Order::TwinFirst)?;
+fn community_unavailable(
+    signed: &SignedWorld,
+    entries: &[Published],
+    kind: StoreKind,
+) -> BoxResult<Refused> {
+    let mut mixed = Mixed::new(kind, signed, entries, SIBLING, Order::TwinFirst)?;
     let revoked = HostError::ArtifactRevoked {
         basis: Revoke::Artifact,
     };
@@ -217,7 +224,7 @@ fn community_unavailable(signed: &SignedWorld, entries: &[Published]) -> BoxResu
 }
 
 /// Record the refused and the resumed passes under `path`.
-fn record_refused(capture: &mut Capture, path: &str, refused: &Refused) {
+fn record_refused(capture: &mut StoreCapture<'_>, path: &str, refused: &Refused) {
     record_pass(capture, &format!("{path}-revoked"), &refused.revoked);
     let unavailable = format!("{path}-unavailable");
     record_pass(capture, &unavailable, &refused.unavailable);
@@ -233,28 +240,31 @@ fn record_refused(capture: &mut Capture, path: &str, refused: &Refused) {
 /// pass commits both Events.
 #[must_use]
 pub fn unavailable_implementation() -> Capture {
-    unavailable().test_ok()
+    on_every_store(unavailable)
 }
 
-fn unavailable() -> BoxResult<Capture> {
+fn unavailable(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let alpha = publish(&mut signed, ALPHA, 1)?;
     let entries = std::slice::from_ref(&alpha);
-    let first_party = first_party_unavailable(&signed, entries)?;
-    let community = community_unavailable(&signed, entries)?;
-    let mut capture = Capture::default();
-    record_refused(&mut capture, "first-party", &first_party);
-    record_refused(&mut capture, "community", &community);
+    let first_party = first_party_unavailable(&signed, entries, kind)?;
+    let community = community_unavailable(&signed, entries, kind)?;
+    record_refused(capture, "first-party", &first_party);
+    record_refused(capture, "community", &community);
     let same = first_party.revoked.refusal == community.revoked.refusal
         && first_party.unavailable.refusal == community.unavailable.refusal;
-    capture.record(STORE, "parity.same-refusal-either-class", same);
-    Ok(capture)
+    capture.record("parity.same-refusal-either-class", same);
+    Ok(())
 }
 
-/// A community Driver of `entry` registered under an operator-trusted native pin: the refusal,
-/// and whether the registry is unchanged.
-fn native_pinned(signed: &SignedWorld, entry: &Published) -> BoxResult<(String, bool)> {
-    let mut pass = PassWorld::new(WORKER);
+/// A community Driver of `entry` registered under an operator-trusted native pin in a pass world
+/// on a `kind` store: the refusal, and whether the registry is unchanged.
+fn native_pinned(
+    signed: &SignedWorld,
+    entry: &Published,
+    kind: StoreKind,
+) -> BoxResult<(String, bool)> {
+    let mut pass = PassWorld::on(kind, WORKER);
     let before = snapshot(&pass.registry);
     let plugin = DriverPlugin {
         id: PluginId::new(),
@@ -269,38 +279,77 @@ fn native_pinned(signed: &SignedWorld, entry: &Published) -> BoxResult<(String, 
     Ok((refusal, snapshot(&pass.registry) == before))
 }
 
+/// A pass world on a `kind` store that holds the first-party twin alone.
+fn twin_world(kind: StoreKind) -> BoxResult<PassWorld> {
+    let mut pass = PassWorld::on(kind, WORKER);
+    register_twin(&mut pass.registry, TWIN_TYPE, entity_of(ENTITY)?)?;
+    Ok(pass)
+}
+
+/// The refusal of gating `entry`, or of building and registering a Driver from it in `pass`.
+///
+/// This is the one gated-and-register path of the fail-closed releases. A release it refuses
+/// never reaches the registry, so a caller's registry-unchanged check fails only if the refusal
+/// regresses to `accepted`.
+fn gated_refusal(
+    signed: &SignedWorld,
+    entry: &Published,
+    pass: &mut PassWorld,
+) -> BoxResult<String> {
+    let swap = Swap::of(trust_material(signed, &signed.material()?));
+    let gated = match gated_release(signed, entry, &swap) {
+        Ok(gated) => gated,
+        Err(error) => {
+            let host = error.downcast_ref::<HostError>().copied();
+            let name = host.map(HostError::name);
+            let refusal = name.map_or_else(|| format!("Unexpected({error})"), str::to_owned);
+            return Ok(refusal);
+        }
+    };
+    let built = pass.add_gated(GatedSpec {
+        name: entry.spec.plugin_id,
+        event_type: entry.spec.event_type,
+        gated,
+        profile: profile(Mode::Local),
+        watchdog: WATCHDOG,
+        source: Box::new(Source::numbered(1)),
+        register: true,
+    });
+    Ok(built.err().map_or("accepted", HostError::name).to_owned())
+}
+
+/// The refusal of `entry` through [`gated_refusal`] beside the first-party twin, in a pass world
+/// on a `kind` store, and whether the registry is unchanged.
+fn twin_refusal(
+    signed: &SignedWorld,
+    entry: &Published,
+    kind: StoreKind,
+) -> BoxResult<(String, bool)> {
+    let mut pass = twin_world(kind)?;
+    let before = snapshot(&pass.registry);
+    let refusal = gated_refusal(signed, entry, &mut pass)?;
+    Ok((refusal, snapshot(&pass.registry) == before))
+}
+
 /// A release of `plugin-a` that requires a capability, in its own signed world, built into a
-/// Driver beside the first-party twin: the refusal, and whether the registry is unchanged.
+/// Driver beside the first-party twin in a pass world on a `kind` store: the refusal, and
+/// whether the registry is unchanged.
 ///
 /// The host denies every required capability, so the release never becomes a Driver.
-fn denied_release() -> BoxResult<(String, bool)> {
+fn denied_release(kind: StoreKind) -> BoxResult<(String, bool)> {
     let mut signed = SignedWorld::new()?;
     let shape = Shape {
         required_capability: true,
         ..ALPHA.shape()
     };
     let entry = publish_shape(&mut signed, ALPHA, shape, 1)?;
-    let mut pass = PassWorld::new(WORKER);
-    register_twin(&mut pass.registry, TWIN_TYPE, entity_of(ENTITY)?)?;
-    let before = snapshot(&pass.registry);
-    let swap = Swap::of(trust_material(&signed, &signed.material()?));
-    let built = pass.add_gated(GatedSpec {
-        name: entry.spec.plugin_id,
-        event_type: entry.spec.event_type,
-        gated: gated_release(&signed, &entry, &swap)?,
-        profile: profile(Mode::Local),
-        watchdog: WATCHDOG,
-        source: Box::new(Source::numbered(1)),
-        register: true,
-    });
-    let refusal = built.err().map_or("accepted", HostError::name);
-    Ok((refusal.to_owned(), snapshot(&pass.registry) == before))
+    twin_refusal(&signed, &entry, kind)
 }
 
 /// Record a refusal and whether it left the registry unchanged under `path`.
-fn record_refusal(capture: &mut Capture, path: &str, refusal: &str, unchanged: bool) {
-    capture.record(STORE, &format!("{path}.refusal"), refusal);
-    capture.record(STORE, &format!("{path}.registry-unchanged"), unchanged);
+fn record_refusal(capture: &mut StoreCapture<'_>, path: &str, refusal: &str, unchanged: bool) {
+    capture.record(&format!("{path}.refusal"), refusal);
+    capture.record(&format!("{path}.registry-unchanged"), unchanged);
 }
 
 /// PCF-CPH-009: an invalid implementation fails closed.
@@ -312,25 +361,161 @@ fn record_refusal(capture: &mut Capture, path: &str, refusal: &str, unchanged: b
 /// denies never becomes a Driver; neither changes the registry or launches a worker.
 #[must_use]
 pub fn invalid_implementation() -> Capture {
-    invalid().test_ok()
+    on_every_store(invalid)
 }
 
-fn invalid() -> BoxResult<Capture> {
+/// No pass runs: the resolutions and refusals read the registry alone, so the store of kind
+/// `kind` holds no Event and the values are the same on every store.
+fn invalid(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
     let mut signed = SignedWorld::new()?;
     let alpha = publish(&mut signed, ALPHA, 1)?;
     let entries = std::slice::from_ref(&alpha);
-    let mixed = Mixed::new(&signed, entries, SIBLING, Order::TwinFirst)?;
+    let mixed = Mixed::new(kind, &signed, entries, SIBLING, Order::TwinFirst)?;
     let registry = &mixed.lane.pass.registry;
     let first_party = resolve(registry, registered(registry, Some(NAME))?)?;
     let community = resolve(registry, registered(registry, Some(ALPHA.plugin_id))?)?;
-    let (pinned, pinned_unchanged) = native_pinned(&signed, &alpha)?;
-    let (denied, denied_unchanged) = denied_release()?;
-    let mut capture = Capture::default();
-    capture.record(STORE, "first-party-pin.resolve", &first_party);
-    capture.record(STORE, "community-pin.resolve", &community);
-    record_refusal(&mut capture, "native-pin", &pinned, pinned_unchanged);
-    record_refusal(&mut capture, "denied-release", &denied, denied_unchanged);
+    let (pinned, pinned_unchanged) = native_pinned(&signed, &alpha, kind)?;
+    let (denied, denied_unchanged) = denied_release(kind)?;
+    capture.record("first-party-pin.resolve", &first_party);
+    capture.record("community-pin.resolve", &community);
+    record_refusal(capture, "native-pin", &pinned, pinned_unchanged);
+    record_refusal(capture, "denied-release", &denied, denied_unchanged);
     let same = first_party == community;
-    capture.record(STORE, "parity.same-refusal-either-class", same);
-    Ok(capture)
+    capture.record("parity.same-refusal-either-class", same);
+    Ok(())
+}
+
+/// The observation on which the probe guest returns an output whose digest does not match.
+const BAD_DIGEST: &[u8] = b"bad-digest";
+
+/// A pass whose community guest output is invalid, the next pass, and the member's receipts.
+struct InvalidOutput {
+    failed: Pass,
+    next: Pass,
+    receipts: String,
+}
+
+/// A community Driver on the probe guest whose output digest does not match on the real worker,
+/// after the first-party sibling staged, then the next pass on the unsteered observation, on a
+/// `kind` store.
+///
+/// Nothing is quarantined, so the host clears nothing before the next pass.
+fn community_invalid_output(
+    signed: &SignedWorld,
+    entries: &[Published],
+    kind: StoreKind,
+) -> BoxResult<InvalidOutput> {
+    let mut mixed = Mixed::new(kind, signed, entries, SIBLING, Order::TwinFirst)?;
+    mixed.lane.selector.set(Some(BAD_DIGEST.to_vec()));
+    let failed = mixed.pass(signed)?;
+    mixed.lane.selector.set(None);
+    let next = mixed.pass(signed)?;
+    Ok(InvalidOutput {
+        failed,
+        next,
+        receipts: mixed.receipts(),
+    })
+}
+
+/// The refusal of a Driver built from `entry` against the real worker's V1 host ABI, ABI 0.0
+/// alone, which is registered in `registry` if it is built.
+///
+/// Negotiation refuses before registration, so the caller's registry-unchanged check fails only
+/// if the refusal regresses to `accepted`. This is a registration-time refusal only: the pass
+/// harness negotiates under ABI 0.0 to 0.1, which accepts the release, and the real worker then
+/// rejects the transported record, which the supervisor reports as `WorkerCrashed`.
+fn worker_abi_refusal(
+    signed: &SignedWorld,
+    entry: &Published,
+    registry: &mut PluginRegistry,
+) -> BoxResult<String> {
+    let plugin = DriverPlugin {
+        id: PluginId::new(),
+        name: entry.spec.plugin_id,
+        event_type: entry.spec.event_type,
+        has_driver: true,
+    };
+    let config = match driver_config(signed, entry, plugin.id, &HostAbi::v1())? {
+        Ok(config) => config,
+        Err(error) => return Ok(error.name().to_owned()),
+    };
+    let driver = CommunityDriverV1::new(config).0;
+    let pin = community_pin(0x41, "abi-invalid-release");
+    let registered = register_community_driver(registry, &plugin, pin, driver);
+    let refusal = registered.map_or_else(|error| refusal_of(&error), |()| "accepted".to_owned());
+    Ok(refusal)
+}
+
+/// A release of `plugin-a` that declares ABI minor 1 alone, in its own signed world, built into
+/// a Driver beside the first-party twin in a pass world on a `kind` store: the refusal, and
+/// whether the registry is unchanged.
+///
+/// The real worker supports ABI 0.0 alone, so negotiation finds no common minor.
+/// This is a registration-time refusal: the registry-unchanged check guards the accept path.
+fn abi_invalid_release(kind: StoreKind) -> BoxResult<(String, bool)> {
+    let mut signed = SignedWorld::new()?;
+    let shape = ALPHA.shape().with_abi_minors(1, 1);
+    let entry = publish_shape(&mut signed, ALPHA, shape, 1)?;
+    let mut pass = twin_world(kind)?;
+    let before = snapshot(&pass.registry);
+    let refusal = worker_abi_refusal(&signed, &entry, &mut pass.registry)?;
+    Ok((refusal, snapshot(&pass.registry) == before))
+}
+
+/// A closure of `plugin-a` whose manifest bytes are not PMF1, in its own signed world, gated
+/// and built into a Driver beside the first-party twin in a pass world on a `kind` store: the
+/// refusal, and whether the registry is unchanged.
+///
+/// The closure is published but never installed, and it has no release digest.
+/// The trust gate refuses it before registration, so the registry-unchanged check guards the
+/// accept path.
+fn manifest_invalid_release(kind: StoreKind) -> BoxResult<(String, bool)> {
+    let signed = SignedWorld::new()?;
+    let component = Shape::first().component;
+    let address = signed.publish_raw(b"not a PMF1", component)?;
+    let entry = Published {
+        spec: ALPHA,
+        address,
+        release: [0; 32],
+    };
+    twin_refusal(&signed, &entry, kind)
+}
+
+/// PCF-CPH-014: invalid guest output and invalid releases fail closed.
+///
+/// A community Driver on the probe guest whose output digest does not match on the real worker,
+/// after the first-party sibling staged, fails the pass with `InvalidGuestOutput`: nothing is
+/// committed, the sibling's staged output is discarded and no Plugin is quarantined, so the next
+/// pass commits both Events without the host clearing anything. The first-party counterpart, a
+/// Driver's invalid draft of another Plugin's Event type, discards its whole pass the same way
+/// under the authority refusal of PCF-CPH-003. A release whose ABI the real worker does not
+/// support, and a closure whose manifest is not PMF1, never become a Driver and leave the
+/// registry unchanged.
+#[must_use]
+pub fn invalid_output_and_releases() -> Capture {
+    on_every_store(invalid_output)
+}
+
+fn invalid_output(kind: StoreKind, capture: &mut StoreCapture<'_>) -> BoxResult<()> {
+    let mut signed = SignedWorld::new()?;
+    let probe = publish(&mut signed, PROBE, 1)?;
+    let entries = std::slice::from_ref(&probe);
+    let community = community_invalid_output(&signed, entries, kind)?;
+    let first_party = first_party_proposal(&signed, PROPOSER, kind)?;
+    let (abi, abi_unchanged) = abi_invalid_release(kind)?;
+    let (pmf, pmf_unchanged) = manifest_invalid_release(kind)?;
+    record_pass(capture, "community-invalid-output", &community.failed);
+    record(capture, "community-next", &community.next.observed);
+    capture.record("community.community-receipts", &community.receipts);
+    record(capture, "first-party-invalid-draft", &first_party.observed);
+    capture.record("first-party-invalid-draft.refusal", &first_party.refusal);
+    record_refusal(capture, "abi-invalid-release", &abi, abi_unchanged);
+    record_refusal(capture, "manifest-invalid-release", &pmf, pmf_unchanged);
+    // Invalid output quarantines nothing, so every Plugin stays available.
+    let available = Observed::all_available;
+    let failed = &community.failed;
+    let discarded = discarded_whole(&failed.observed, &failed.refusal, available)
+        && discarded_whole(&first_party.observed, &first_party.refusal, available);
+    capture.record("parity.whole-pass-discarded-either-class", discarded);
+    Ok(())
 }

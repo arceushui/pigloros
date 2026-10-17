@@ -12,12 +12,14 @@ publish.workspace = true
 # recorder, for tests only. Never enable in deployable builds;
 # the probe is not a Component worker. Enforced by
 # scripts/check_test_support_features.py in CI. It also compiles the pass harness
-# (`tests/support`), which commits to the optional in-memory store dependency.
+# (`tests/support`), which commits to the optional store dependency: `MemoryStore`, or the
+# in-memory SQLite store through `pos-store/sqlite`.
 test-support = [
   "pos-crypto/test-support",
   "pos-core/test-support",
   "pos-runtime/test-support",
   "dep:pos-store",
+  "pos-store/sqlite",
 ]
 
 [dependencies]
@@ -32,9 +34,10 @@ pos-crypto = { path = "../pos-crypto" }
 # `ContentValidationV1` appears in the invocation receipt.
 pos-plugin-release = { path = "../pos-plugin-release" }
 pos-runtime = { path = "../pos-runtime" }
-# The pass harness (feature `test-support`) commits to the in-memory store. The default features
-# stay off to keep this declaration minimal; `pos-runtime` already depends on `pos-store` with
-# them, so the resolved graph is unchanged.
+# The pass harness (feature `test-support`) commits to `MemoryStore` or in-memory SQLite. The
+# default features stay off to keep this declaration minimal, and `test-support` enables
+# `pos-store/sqlite` explicitly; `pos-runtime` already depends on `pos-store` with its defaults
+# (SQLite included), so the resolved graph is unchanged.
 pos-store = { path = "../pos-store", default-features = false, optional = true }
 # `process` provides prlimit, PR_SET_PDEATHSIG and getppid as safe calls. The
 # worker lists its open descriptors through `/proc/self/fd` with the `fs`
