@@ -1,9 +1,10 @@
 # Focused diagnostic only; the full required mutation gate is unchanged.
-name: 561-store-repair-control
+# Two workers x four harness threads preserve eight configured harness slots.
+name: 561-store-balanced-control
 
 on:
   push:
-    branches: [redmine/561-store-mutation-check]
+    branches: [redmine/561-store-balanced-workers]
 
 permissions:
   contents: read
@@ -16,14 +17,14 @@ env:
 
 jobs:
   store-control:
-    name: full Store baseline and four exact regression mutants
+    name: full Store baseline and four exact mutants with two workers and four threads
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 2
         with:
-          ref: a0939c2efa69c6fef7ad9335c80f7f33fe3826f9
+          ref: f8088235e9c7299a9c5edac927ffbcb510bfd0fa
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         timeout-minutes: 5
@@ -44,7 +45,7 @@ jobs:
           PROBE_WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = a0939c2efa69c6fef7ad9335c80f7f33fe3826f9
+          test "$(git rev-parse HEAD)" = f8088235e9c7299a9c5edac927ffbcb510bfd0fa
           test -z "$(git status --porcelain --untracked-files=no)"
           mkdir -p artifacts/store-control
           {
@@ -74,7 +75,7 @@ jobs:
           import sys
           import time
 
-          source = "a0939c2efa69c6fef7ad9335c80f7f33fe3826f9"
+          source = "f8088235e9c7299a9c5edac927ffbcb510bfd0fa"
           artifact = Path("artifacts/store-control")
           expected = [
               "crates/pos-store/src/fork_replay.rs:358:9: replace ForkReplayRequirementV1::authority_origin_digest -> Option<Hash> with None",
@@ -110,7 +111,7 @@ jobs:
                   sys.exit(status if status > 0 else 1)
 
           base = ["cargo", "test", "--package=pos-store@0.1.0", "--all-features", "--locked"]
-          harness = ["-Zunstable-options", "--fail-fast", "--include-ignored", "--test-threads=2", "--report-time"]
+          harness = ["-Zunstable-options", "--fail-fast", "--include-ignored", "--test-threads=4", "--report-time"]
           run("build", [*base, "--no-run"], 600, 3)
           run("baseline", [*base, "--", *harness], 120, 1)
           subprocess.run(["bash", "scripts/assert-no-ignored-in-test-summary.sh",
@@ -153,7 +154,7 @@ jobs:
           assert len(selected) == 4
           assert len({m["name"] for m in selected}) == 4
           assert {m["name"] for m in selected} == set(expected)
-          run("mutants", [*mutants, "--no-shuffle", "--baseline", "skip", "--jobs", "4",
+          run("mutants", [*mutants, "--no-shuffle", "--baseline", "skip", "--jobs", "2",
                           "--timeout", "120", "--build-timeout", "600", "--cap-lints", "true",
                           "--cargo-arg=--locked", "--", "--", *harness], 1020, 1)
           actual_selected = json.loads(Path("mutants.out/mutants.json").read_text())
@@ -192,7 +193,7 @@ jobs:
         timeout-minutes: 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: untrusted-561-store-repair-control-${{ github.run_id }}-${{ github.run_attempt }}
+          name: untrusted-561-store-balanced-control-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/store-control/
             mutants.out/
