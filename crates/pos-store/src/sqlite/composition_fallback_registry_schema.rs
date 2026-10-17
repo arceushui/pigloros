@@ -115,33 +115,53 @@ struct ReviewedObject {
     sql: &'static str,
 }
 
-const fn table(name: &'static str, sql: &'static str) -> ReviewedObject {
-    ReviewedObject {
-        object_type: "table",
-        name,
-        sql,
-    }
-}
-
-const fn trigger(name: &'static str, sql: &'static str) -> ReviewedObject {
-    ReviewedObject {
-        object_type: "trigger",
-        name,
-        sql,
-    }
-}
-
 /// The reviewed set, tables before the triggers that guard them.
 static REVIEWED: [ReviewedObject; 9] = [
-    table("composition_fallback_policies", POLICIES_TABLE),
-    table("composition_fallback_rows", ROWS_TABLE),
-    table("composition_fallback_entries", ENTRIES_TABLE),
-    table("composition_fallback_ledger", LEDGER_TABLE),
-    trigger("composition_fallback_ledger_no_update", LEDGER_NO_UPDATE),
-    trigger("composition_fallback_ledger_no_delete", LEDGER_NO_DELETE),
-    trigger("composition_fallback_ledger_no_replace", LEDGER_NO_REPLACE),
-    trigger("composition_fallback_policies_no_update", POLICY_NO_UPDATE),
-    trigger("composition_fallback_policies_no_delete", POLICY_NO_DELETE),
+    ReviewedObject {
+        object_type: "table",
+        name: "composition_fallback_policies",
+        sql: POLICIES_TABLE,
+    },
+    ReviewedObject {
+        object_type: "table",
+        name: "composition_fallback_rows",
+        sql: ROWS_TABLE,
+    },
+    ReviewedObject {
+        object_type: "table",
+        name: "composition_fallback_entries",
+        sql: ENTRIES_TABLE,
+    },
+    ReviewedObject {
+        object_type: "table",
+        name: "composition_fallback_ledger",
+        sql: LEDGER_TABLE,
+    },
+    ReviewedObject {
+        object_type: "trigger",
+        name: "composition_fallback_ledger_no_update",
+        sql: LEDGER_NO_UPDATE,
+    },
+    ReviewedObject {
+        object_type: "trigger",
+        name: "composition_fallback_ledger_no_delete",
+        sql: LEDGER_NO_DELETE,
+    },
+    ReviewedObject {
+        object_type: "trigger",
+        name: "composition_fallback_ledger_no_replace",
+        sql: LEDGER_NO_REPLACE,
+    },
+    ReviewedObject {
+        object_type: "trigger",
+        name: "composition_fallback_policies_no_update",
+        sql: POLICY_NO_UPDATE,
+    },
+    ReviewedObject {
+        object_type: "trigger",
+        name: "composition_fallback_policies_no_delete",
+        sql: POLICY_NO_DELETE,
+    },
 ];
 
 /// One stored schema object found by name.
