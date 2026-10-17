@@ -4,9 +4,8 @@
 use pos_core::trusted_clock::PluginTrustWallSourceV1;
 use pos_core::{
     CompositionPinV1, Event, FallbackActivatedPayloadV1, FallbackActivationModeV1,
-    FallbackActivationOriginV1 as Origin, FallbackSkipReasonV1 as Skip,
-    FallbackSkippedCandidateV1, FallbackTriggerBasisV1, FallbackTriggerCodeV1, ImplementationKeyV1,
-    Seq, SeqRange, TimelineId,
+    FallbackActivationOriginV1 as Origin, FallbackSkipReasonV1 as Skip, FallbackSkippedCandidateV1,
+    FallbackTriggerBasisV1, FallbackTriggerCodeV1, ImplementationKeyV1, Seq, SeqRange, TimelineId,
 };
 use pos_runtime::community_plugin_host::{CommunityPassOutcomeV1, CommunityPluginHostV1};
 use pos_runtime::composition_fallback::{classify_fallback_trigger_v1, enforce_required_plugin_v1};
@@ -368,10 +367,23 @@ impl CompositionBoundaryV1 {
             tick: context.tick,
         };
         let registry = &*context.registry;
-        let built = build_candidate(registry, context.trust, context.wall, context.supply, &build);
+        let built = build_candidate(
+            registry,
+            context.trust,
+            context.wall,
+            context.supply,
+            &build,
+        );
         let timeline = self.target.timeline;
         let swap = built.and_then(|built| {
-            validate_swap(context.registry, host, &*context.store, timeline, pin, built)
+            validate_swap(
+                context.registry,
+                host,
+                &*context.store,
+                timeline,
+                pin,
+                built,
+            )
         });
         swap.map(|swap| (swap, pin)).map_err(|reason| (reason, pin))
     }
@@ -606,7 +618,9 @@ fn read_event<S: FallbackBoundaryStoreV1 + ?Sized>(
     row: &FallbackLedgerRowV1,
 ) -> Option<Event> {
     let identity = row.event();
-    let events = store.read(timeline, SeqRange::from_seq(identity.seq())).ok();
+    let events = store
+        .read(timeline, SeqRange::from_seq(identity.seq()))
+        .ok();
     let mut events = events.into_iter().flatten();
     events.find(|event| event.id == identity.event_id())
 }

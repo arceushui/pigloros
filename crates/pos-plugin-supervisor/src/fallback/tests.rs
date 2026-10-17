@@ -53,7 +53,10 @@ fn a_root_timeline_is_one_segment() {
 fn an_unreadable_or_invalid_prefix_refuses_the_swap() {
     let refused = Err(FallbackSkipReasonV1::SwapRefused);
     let unreadable = Err(CoreError::Storage("injected".to_owned()));
-    assert_eq!(checked_prefix(unreadable).map(|prefix| prefix.head), refused);
+    assert_eq!(
+        checked_prefix(unreadable).map(|prefix| prefix.head),
+        refused
+    );
     let short = checked_prefix(Ok(empty_prefix(2)));
     assert_eq!(short.map(|prefix| prefix.head), refused);
     let empty = checked_prefix(Ok(empty_prefix(0)));

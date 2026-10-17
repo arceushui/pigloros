@@ -85,12 +85,11 @@ pub use adapter::{
     MAX_RETAINED_RECEIPTS_V1,
 };
 pub use fallback::{
-    compose_restart_v1, effective_composition_v1, fallback_trigger_cause_v1,
-    CompositionBoundaryV1, FallbackBoundaryContextV1, FallbackBoundaryErrorV1,
-    FallbackBoundaryStoreV1, FallbackCandidateInputV1, FallbackEffectiveCompositionV1,
-    FallbackEffectiveEntryV1, FallbackEntryOutcomeV1, FallbackReferenceV1,
-    FallbackReleaseSupplyV1, FallbackRestartSlotV1, FallbackRestartV1,
-    COMPOSITION_FALLBACK_ACTIVATE_GRANT_V1,
+    compose_restart_v1, effective_composition_v1, fallback_trigger_cause_v1, CompositionBoundaryV1,
+    FallbackBoundaryContextV1, FallbackBoundaryErrorV1, FallbackBoundaryStoreV1,
+    FallbackCandidateInputV1, FallbackEffectiveCompositionV1, FallbackEffectiveEntryV1,
+    FallbackEntryOutcomeV1, FallbackReferenceV1, FallbackReleaseSupplyV1, FallbackRestartSlotV1,
+    FallbackRestartV1, COMPOSITION_FALLBACK_ACTIVATE_GRANT_V1,
 };
 pub use frame::{FrameFaultV1, WorkerFrameLimitsV1};
 pub use ipc::{

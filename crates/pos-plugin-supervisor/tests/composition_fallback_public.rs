@@ -22,8 +22,8 @@ use pos_core::{
     Capability, CompositionPinV1, DomainFallbackPolicyV1, EntityId, ErasureContainmentGateV1,
     ErasureGate, FallbackActivatedInputV1, FallbackActivatedPayloadV1, FallbackActivationModeV1,
     FallbackActivationOriginV1, FallbackEntryV1, FallbackSkippedCandidateV1,
-    FallbackTriggerBasisV1, FallbackTriggerCodeV1 as Code, Hash, ImplementationKeyV1, Kind,
-    Plugin, PluginId, COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
+    FallbackTriggerBasisV1, FallbackTriggerCodeV1 as Code, Hash, ImplementationKeyV1, Kind, Plugin,
+    PluginId, COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
 };
 use pos_plugin_publisher::test_support::{
     encoding::{TICK, UTC},
@@ -37,12 +37,11 @@ use pos_plugin_supervisor::pass_harness::{
 };
 use pos_plugin_supervisor::test_support;
 use pos_plugin_supervisor::{
-    compose_restart_v1, fallback_trigger_cause_v1,
-    CommunityDriverSettingsV1, CommunityMemberV1, CommunityPluginSupervisorV1,
-    CompositionBoundaryV1, FallbackBoundaryContextV1, FallbackBoundaryErrorV1 as BoundaryError,
-    FallbackCandidateInputV1, FallbackEntryOutcomeV1 as Outcome, FallbackReferenceV1,
-    FallbackReleaseSupplyV1, FallbackRestartSlotV1, WorkerProgramV1,
-    COMPOSITION_FALLBACK_ACTIVATE_GRANT_V1,
+    compose_restart_v1, fallback_trigger_cause_v1, CommunityDriverSettingsV1, CommunityMemberV1,
+    CommunityPluginSupervisorV1, CompositionBoundaryV1, FallbackBoundaryContextV1,
+    FallbackBoundaryErrorV1 as BoundaryError, FallbackCandidateInputV1,
+    FallbackEntryOutcomeV1 as Outcome, FallbackReferenceV1, FallbackReleaseSupplyV1,
+    FallbackRestartSlotV1, WorkerProgramV1, COMPOSITION_FALLBACK_ACTIVATE_GRANT_V1,
 };
 use pos_runtime::community_plugin_host::{
     gate_community_release_v1, CommunityPassOutcomeV1, CommunityPassV1,
@@ -351,7 +350,8 @@ impl Supply {
             0
         };
         let program = WorkerProgramV1::new(PathBuf::from(PROBE)).ok_or("invalid probe path")?;
-        let supervisor = CommunityPluginSupervisorV1::new(program, PROMPT).ok_or("no supervisor")?;
+        let supervisor =
+            CommunityPluginSupervisorV1::new(program, PROMPT).ok_or("no supervisor")?;
         let source = Source::switched(self.numbering, Arc::clone(&self.refuse));
         let settings = CommunityDriverSettingsV1 {
             plugin_id: settings_id,
@@ -475,7 +475,11 @@ impl Rig {
             ("plugin-a", "community.alpha", behaviour.primary),
             ("plugin-b", "community.alpha", behaviour.candidate),
             ("plugin-c", "community.alpha", behaviour.next),
-            ("plugin-d", "community.sibling", b"draft:community.sibling".as_slice()),
+            (
+                "plugin-d",
+                "community.sibling",
+                b"draft:community.sibling".as_slice(),
+            ),
         ];
         let mut releases = Vec::new();
         for (tag, (plugin_id, event_type, component)) in (1..).zip(specs) {
@@ -566,10 +570,19 @@ impl Rig {
         let required = required_plugin_v1(primary_facts.registry.plugin_id(), &primary_facts.pin)?;
         let mode = PluginExecutionModeV1::Local;
         let composition = RequiredPluginCompositionV1::try_new(mode, vec![required])?;
-        let facts = candidates.iter().map(|release| facts_of(release, PluginId::new()));
+        let facts = candidates
+            .iter()
+            .map(|release| facts_of(release, PluginId::new()));
         let facts = facts.collect::<BoxResult<Vec<_>>>()?;
-        let pins = candidates.iter().map(|release| release.pin.clone()).collect();
-        let (key, pin, triggers) = (ENTRY.to_owned(), primary.pin.clone(), plan.triggers.to_vec());
+        let pins = candidates
+            .iter()
+            .map(|release| release.pin.clone())
+            .collect();
+        let (key, pin, triggers) = (
+            ENTRY.to_owned(),
+            primary.pin.clone(),
+            plan.triggers.to_vec(),
+        );
         let entry = FallbackEntryV1::new(key, pin, pins, triggers, plan.mode)?;
         let policy = DomainFallbackPolicyV1::new(SCOPE.to_owned(), vec![entry], self.policy)?;
         let entry_facts = FallbackEntryFactsV1 {
@@ -592,7 +605,8 @@ impl Rig {
     fn withdraw(&mut self) -> TestResult {
         let reference = self.supply.reference.clone().ok_or("nothing declared")?;
         let policy = DomainFallbackPolicyV1::new(SCOPE.to_owned(), Vec::new(), self.policy)?;
-        let mut declaration = self.declaration(&policy, reference.composition, self.primary.key())?;
+        let mut declaration =
+            self.declaration(&policy, reference.composition, self.primary.key())?;
         declaration.effective.clear();
         self.commit_declaration(&declaration)
     }
@@ -641,7 +655,9 @@ impl Rig {
         let mut port = LostPort(self.pass.store.as_mut());
         let request = prepared.request(TICK, &mut port);
         let trust = &self.signed.registry;
-        Ok(self.host.run_pass(&mut self.pass.registry, trust, &mut wall, request))
+        Ok(self
+            .host
+            .run_pass(&mut self.pass.registry, trust, &mut wall, request))
     }
 
     /// The composition boundary transaction after `outcome`.
@@ -655,7 +671,8 @@ impl Rig {
             supply: &mut self.supply,
             tick: TICK,
         };
-        self.boundary.run_boundary_v1(&mut context, &mut self.host, outcome)
+        self.boundary
+            .run_boundary_v1(&mut context, &mut self.host, outcome)
     }
 
     /// An owner activation of `target` for the declared entry, with the activate grant when
@@ -690,7 +707,8 @@ impl Rig {
             tick: TICK,
         };
         let host = &mut self.host;
-        self.boundary.owner_activate_v1(&mut context, host, &held, entry_key, target)
+        self.boundary
+            .owner_activate_v1(&mut context, host, &held, entry_key, target)
     }
 
     /// Make every member and candidate follow the signed world's current material.
@@ -701,14 +719,18 @@ impl Rig {
 
     /// Revoke `release` and follow the new material.
     fn revoke(&mut self, release: &Release) -> TestResult {
-        self.signed.advance_revoking_artifacts(&[release.release])??;
+        self.signed
+            .advance_revoking_artifacts(&[release.release])??;
         self.follow()
     }
 
     /// The Plugin ID text of the entry's live implementation: the Plugin the boundary binds,
     /// which must be registered and have a host member.
     fn running(&self) -> BoxResult<&'static str> {
-        let bound = self.boundary.binding(ENTRY).ok_or("the entry is not bound")?;
+        let bound = self
+            .boundary
+            .binding(ENTRY)
+            .ok_or("the entry is not bound")?;
         self.host.member_index(bound).ok_or("no host member")?;
         let composition = self.pass.registry.composition();
         let registered = composition.plugins.iter().any(|plugin| plugin.id == bound);
@@ -850,7 +872,10 @@ fn described_one(outcome: &Result<Outcome, BoundaryError>) -> String {
 
 /// The run-local Plugin the declared entry runs.
 fn bound(rig: &Rig) -> BoxResult<PluginId> {
-    Ok(rig.boundary.binding(ENTRY).ok_or("the entry is not bound")?)
+    Ok(rig
+        .boundary
+        .binding(ENTRY)
+        .ok_or("the entry is not bound")?)
 }
 
 /// Case 1 and case 2 (code 3, `Failed`): the failed pass is discarded; the boundary appends
@@ -872,7 +897,10 @@ fn resource_limit(kind: StoreKind) -> TestResult {
     assert_eq!(rig.event_count(), before + 1);
     let activation = rig.last_activation()?;
     assert_eq!(activation.closing_tenure_ordinal, 0);
-    assert_eq!((activation.from, activation.to), (rig.primary.key(), rig.candidate.key()));
+    assert_eq!(
+        (activation.from, activation.to),
+        (rig.primary.key(), rig.candidate.key())
+    );
     assert_eq!(activation.trigger_code, Code::ResourceLimit);
     let automatic = FallbackActivationOriginV1::Automatic;
     let basis = FallbackTriggerCauseV1::FuelExhausted.basis(automatic);
@@ -892,7 +920,10 @@ fn resource_limit(kind: StoreKind) -> TestResult {
     assert_eq!(rig.host.member_index(primary), None);
     let next = rig.pass()?;
     assert_eq!(result_of(&next), "committed:2");
-    let gated = next.gates[0].gate.as_ref().map(|summary| summary.plugin_id.as_str());
+    let gated = next.gates[0]
+        .gate
+        .as_ref()
+        .map(|summary| summary.plugin_id.as_str());
     assert_eq!(gated, Ok("plugin-b"));
     assert!(next.gates.iter().all(|entry| entry.sync.is_ok()));
     assert_eq!(next.tick, TICK);
@@ -915,7 +946,10 @@ fn revoked_primary(kind: StoreKind) -> TestResult {
     rig.revoke(&primary)?;
     let refused = rig.pass()?;
     assert_eq!(result_of(&refused), "refused");
-    assert_eq!(described(&rig.boundary(&refused)), ["activated:plugin-b:[]"]);
+    assert_eq!(
+        described(&rig.boundary(&refused)),
+        ["activated:plugin-b:[]"]
+    );
     assert_eq!(rig.last_activation()?.trigger_code, Code::ArtifactRevoked);
     assert_eq!(result_of(&rig.pass()?), "committed:2");
     let before = rig.event_count();
@@ -939,7 +973,10 @@ fn restart_activation(kind: StoreKind) -> TestResult {
     rig.supply.missing = vec!["plugin-a", "plugin-b"];
     let before = rig.event_count();
     let outcomes = rig.restart();
-    assert_eq!(described(&outcomes), ["activated:plugin-c:[SourceUnavailable]"]);
+    assert_eq!(
+        described(&outcomes),
+        ["activated:plugin-c:[SourceUnavailable]"]
+    );
     assert_eq!(rig.event_count(), before + 1);
     let activation = rig.last_activation()?;
     assert_eq!(activation.trigger_code, Code::MissingImplementation);
@@ -1011,7 +1048,10 @@ fn ineligible_and_in_doubt_passes_activate_nothing() -> TestResult {
 fn ineligible(kind: StoreKind) -> TestResult {
     let mut undeclared = Rig::composed(kind, FAILING)?;
     let failed = undeclared.pass()?;
-    assert_eq!(described(&undeclared.boundary(&failed)), Vec::<String>::new());
+    assert_eq!(
+        described(&undeclared.boundary(&failed)),
+        Vec::<String>::new()
+    );
     let mut rig = Rig::declared(kind, HEALTHY, AUTOMATIC)?;
     let committed = rig.pass()?;
     assert_eq!(described(&rig.boundary(&committed)), Vec::<String>::new());
@@ -1046,7 +1086,10 @@ fn chain(kind: StoreKind) -> TestResult {
     rig.revoke(&candidate)?;
     let failed = rig.pass()?;
     let outcomes = rig.boundary(&failed);
-    assert_eq!(described(&outcomes), ["activated:plugin-c:[ReleaseNotCurrent]"]);
+    assert_eq!(
+        described(&outcomes),
+        ["activated:plugin-c:[ReleaseNotCurrent]"]
+    );
     let skipped = FallbackSkippedCandidateV1 {
         implementation_digest: candidate.pin.implementation().digest(),
         reason: pos_core::FallbackSkipReasonV1::ReleaseNotCurrent,
@@ -1059,7 +1102,10 @@ fn chain(kind: StoreKind) -> TestResult {
     let failed = exhausted.pass()?;
     let before = exhausted.event_count();
     let outcomes = described(&exhausted.boundary(&failed));
-    assert_eq!(outcomes, ["exhausted:[ReleaseNotCurrent,ReleaseNotCurrent]"]);
+    assert_eq!(
+        outcomes,
+        ["exhausted:[ReleaseNotCurrent,ReleaseNotCurrent]"]
+    );
     assert_eq!(exhausted.event_count(), before);
     assert_eq!(exhausted.running()?, "plugin-a");
     let both_fail = Behaviour {
@@ -1068,7 +1114,10 @@ fn chain(kind: StoreKind) -> TestResult {
     };
     let mut forward = Rig::declared(kind, both_fail, ONE_CANDIDATE)?;
     let failed = forward.pass()?;
-    assert_eq!(described(&forward.boundary(&failed)), ["activated:plugin-b:[]"]);
+    assert_eq!(
+        described(&forward.boundary(&failed)),
+        ["activated:plugin-b:[]"]
+    );
     let failed = forward.pass()?;
     assert_eq!(described(&forward.boundary(&failed)), ["exhausted:[]"]);
     assert_eq!(forward.running()?, "plugin-b");
@@ -1088,7 +1137,10 @@ fn manual(kind: StoreKind) -> TestResult {
     let mut rig = Rig::declared(kind, FAILING, MANUAL)?;
     let failed = rig.pass()?;
     let before = rig.event_count();
-    assert_eq!(described(&rig.boundary(&failed)), ["awaiting:ResourceLimit"]);
+    assert_eq!(
+        described(&rig.boundary(&failed)),
+        ["awaiting:ResourceLimit"]
+    );
     assert_eq!(rig.event_count(), before);
     assert_eq!(rig.boundary.observation(ENTRY), Some(Code::ResourceLimit));
     let unavailable = rig.pass()?;
@@ -1099,22 +1151,37 @@ fn manual(kind: StoreKind) -> TestResult {
     assert_eq!(rig.owner(&next, false), Err(BoundaryError::NotGranted));
     let unknown = rig.owner_at("elsewhere", &next, true);
     assert_eq!(unknown, Err(BoundaryError::UnknownEntry));
-    assert_eq!(described_one(&rig.owner(&next, true)), "activated:plugin-c:[]");
+    assert_eq!(
+        described_one(&rig.owner(&next, true)),
+        "activated:plugin-c:[]"
+    );
     let activation = rig.last_activation()?;
-    assert_eq!(activation.trigger_basis.origin, FallbackActivationOriginV1::Owner);
+    assert_eq!(
+        activation.trigger_basis.origin,
+        FallbackActivationOriginV1::Owner
+    );
     assert_eq!(activation.trigger_code, Code::ResourceLimit);
     assert_eq!(rig.boundary.observation(ENTRY), None);
     assert_eq!(rig.running()?, "plugin-c");
     assert_eq!(rig.owner(&next, true), Err(BoundaryError::InvalidTarget));
     let sibling = rig.sibling.key();
     assert_eq!(rig.owner(&sibling, true), Err(BoundaryError::InvalidTarget));
-    assert_eq!(rig.owner(&candidate, true), Err(BoundaryError::NoObservation));
+    assert_eq!(
+        rig.owner(&candidate, true),
+        Err(BoundaryError::NoObservation)
+    );
     let primary = rig.primary.key();
-    assert_eq!(described_one(&rig.owner(&primary, true)), "activated:plugin-a:[]");
+    assert_eq!(
+        described_one(&rig.owner(&primary, true)),
+        "activated:plugin-a:[]"
+    );
     let returned = rig.last_activation()?;
     assert_eq!(returned.closing_tenure_ordinal, 1);
     assert_eq!(returned.trigger_code, Code::ResourceLimit);
-    assert_eq!(returned.trigger_basis.origin, FallbackActivationOriginV1::Owner);
+    assert_eq!(
+        returned.trigger_basis.origin,
+        FallbackActivationOriginV1::Owner
+    );
     assert_eq!(rig.running()?, "plugin-a");
     Ok(())
 }
@@ -1263,10 +1330,16 @@ fn rebase_and_withdrawal(kind: StoreKind) -> TestResult {
     assert_eq!(result_of(&rig.pass()?), "committed:2");
     let mut withdrawn = Rig::declared(kind, both_fail, ONE_CANDIDATE)?;
     let failed = withdrawn.pass()?;
-    assert_eq!(described(&withdrawn.boundary(&failed)), ["activated:plugin-b:[]"]);
+    assert_eq!(
+        described(&withdrawn.boundary(&failed)),
+        ["activated:plugin-b:[]"]
+    );
     withdrawn.withdraw()?;
     let failed = withdrawn.pass()?;
-    assert_eq!(described(&withdrawn.boundary(&failed)), Vec::<String>::new());
+    assert_eq!(
+        described(&withdrawn.boundary(&failed)),
+        Vec::<String>::new()
+    );
     assert_eq!(withdrawn.running()?, "plugin-b");
     Ok(())
 }
@@ -1285,7 +1358,10 @@ fn diverged(kind: StoreKind) -> TestResult {
     let bindings = BTreeMap::from([(ENTRY.to_owned(), sibling)]);
     rig.boundary = CompositionBoundaryV1::new(SCOPE.to_owned(), rig.target(), bindings);
     let faulted = rig.boundary(&failed);
-    assert!(matches!(faulted, Err(BoundaryError::InvariantFault(_))), "{faulted:?}");
+    assert!(
+        matches!(faulted, Err(BoundaryError::InvariantFault(_))),
+        "{faulted:?}"
+    );
     assert!(rig.boundary.is_faulted());
     assert_eq!(rig.boundary(&failed), Err(BoundaryError::Faulted));
     let candidate = rig.candidate.key();
@@ -1367,7 +1443,10 @@ fn conflict() -> TestResult {
     assert_eq!(described(&outcomes), ["not-committed:Conflict"]);
     assert_eq!(rig.running()?, "plugin-a");
     let faulted = rig.boundary(&failed);
-    assert!(matches!(faulted, Err(BoundaryError::InvariantFault(_))), "{faulted:?}");
+    assert!(
+        matches!(faulted, Err(BoundaryError::InvariantFault(_))),
+        "{faulted:?}"
+    );
     Ok(())
 }
 

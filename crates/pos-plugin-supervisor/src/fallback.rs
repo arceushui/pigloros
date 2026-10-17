@@ -268,7 +268,9 @@ impl CompositionBoundaryV1 {
     /// The trigger code of the observation held for `entry_key`, if any.
     #[must_use]
     pub fn observation(&self, entry_key: &str) -> Option<FallbackTriggerCodeV1> {
-        self.observations.get(entry_key).map(|observed| observed.code)
+        self.observations
+            .get(entry_key)
+            .map(|observed| observed.code)
     }
 
     /// Whether an invariant fault latched.

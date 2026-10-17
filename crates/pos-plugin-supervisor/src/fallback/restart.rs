@@ -18,8 +18,7 @@ use pos_store::plugin_trust_registry::PluginTrustPolicyRegistryV1;
 
 use super::candidate::{build_candidate, BuildV1, BuiltV1};
 use super::derive::{
-    effective_composition_v1, read_prefix, FallbackEffectiveCompositionV1,
-    FallbackEffectiveEntryV1,
+    effective_composition_v1, read_prefix, FallbackEffectiveCompositionV1, FallbackEffectiveEntryV1,
 };
 use super::{
     CompositionBoundaryV1, FallbackBoundaryContextV1, FallbackBoundaryErrorV1 as Error,
@@ -181,7 +180,9 @@ impl RestartV1<'_> {
             match build_fresh(context, key, pin, true) {
                 Ok(built) => {
                     let store = &*context.store;
-                    let head = store.logical_head(self.target.timeline).unwrap_or(Seq::ZERO);
+                    let head = store
+                        .logical_head(self.target.timeline)
+                        .unwrap_or(Seq::ZERO);
                     let commit = RestartCommitV1 {
                         revision: composed.revision,
                         head,
@@ -274,7 +275,13 @@ where
         tick: context.tick,
     };
     let registry = &*context.registry;
-    let built = build_candidate(registry, context.trust, context.wall, context.supply, &build);
+    let built = build_candidate(
+        registry,
+        context.trust,
+        context.wall,
+        context.supply,
+        &build,
+    );
     built.and_then(|built| {
         let prepared = &built.prepared;
         let bound = enforce_required_plugin_v1(prepared.version(), prepared.pin(), pin);
