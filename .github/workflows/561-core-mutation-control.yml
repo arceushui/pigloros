@@ -1,0 +1,184 @@
+# Focused diagnostic only; the full required mutation gate is unchanged.
+name: 561-core-repair-control
+
+on:
+  push:
+    branches: [redmine/561-core-mutation-check]
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: nightly-2026-07-01
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  CARGO_BUILD_JOBS: "1"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  core-control:
+    name: full Core baseline and eleven exact regression mutants
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          ref: 43918b95c34b67b88466d1b1caeaef9baf96c355
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        timeout-minutes: 5
+        with:
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        timeout-minutes: 2
+        with:
+          shared-key: mutation
+          save-if: false
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        timeout-minutes: 3
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Record exact candidate and native environment
+        timeout-minutes: 1
+        env:
+          PROBE_WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 43918b95c34b67b88466d1b1caeaef9baf96c355
+          test -z "$(git status --porcelain --untracked-files=no)"
+          mkdir -p artifacts/core-control
+          {
+            printf 'workflow=%s\n' "$PROBE_WORKFLOW_SHA"
+            git rev-parse HEAD
+            sha256sum Cargo.lock crates/pos-core/tests/key_registry_guarded_read_public.rs
+            rustc -Vv
+            cargo --version
+            cargo mutants --version
+            uname -a
+            nproc
+            free -m
+          } > artifacts/core-control/environment.txt
+      - name: Prove full Core baseline before eleven exact native mutants
+        timeout-minutes: 32
+        env:
+          CARGO_INCREMENTAL: "1"
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/time
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+          import subprocess
+          import sys
+          import time
+
+          source = "43918b95c34b67b88466d1b1caeaef9baf96c355"
+          artifact = Path("artifacts/core-control")
+          expected = [
+              "crates/pos-core/src/fork_attribution/authority_evidence.rs:143:9: replace ImportedKeyRecordV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(0)",
+              "crates/pos-core/src/fork_attribution/authority_evidence.rs:143:9: replace ImportedKeyRecordV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(1)",
+              "crates/pos-core/src/fork_attribution/authority_evidence.rs:254:9: replace ImportedKeyTombstoneV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(0)",
+              "crates/pos-core/src/fork_attribution/authority_evidence.rs:254:9: replace ImportedKeyTombstoneV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(1)",
+              "crates/pos-core/src/fork_attribution/authority_import.rs:210:9: replace ImportedForkAdmissionRecordV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(0)",
+              "crates/pos-core/src/fork_attribution/authority_import.rs:210:9: replace ImportedForkAdmissionRecordV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(1)",
+              "crates/pos-core/src/fork_attribution/authority_import.rs:289:9: replace ImportedForkPublicationOperationV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(0)",
+              "crates/pos-core/src/fork_attribution/authority_import.rs:289:9: replace ImportedForkPublicationOperationV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(1)",
+              "crates/pos-core/src/fork_attribution/authority_issuer.rs:94:9: replace ForkAttributionIssuerV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(0)",
+              "crates/pos-core/src/fork_attribution/authority_issuer.rs:94:9: replace ForkAttributionIssuerV1::canonical_cbor_len -> Result<usize, crate::CanonicalLengthErrorV1> with Ok(1)",
+              "crates/pos-core/src/key_registry/durable_cbor/cursor.rs:345:28: replace -= with /= in chunks"
+          ]
+          assert len(expected) == len(set(expected)) == 11
+          report = {"source": source, "expected_mutants": expected, "phases": []}
+          report_path = artifact / "phases.json"
+
+          def save():
+              report_path.write_text(json.dumps(report, sort_keys=True, indent=2))
+
+          def run(name, command, seconds, jobs):
+              environment = dict(os.environ)
+              environment["CARGO_BUILD_JOBS"] = str(jobs)
+              assert environment["CARGO_INCREMENTAL"] == "1"
+              timed = ["timeout", "--kill-after=5s", f"{seconds}s", "/usr/bin/time", "-v", *command]
+              phase = {"name": name, "command": timed, "compiler_jobs": jobs,
+                       "start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+              report["phases"].append(phase)
+              save()
+              started = time.monotonic()
+              with (artifact / f"{name}.log").open("wb") as log:
+                  status = subprocess.run(
+                      timed, env=environment, stdout=log, stderr=subprocess.STDOUT, check=False,
+                  ).returncode
+              phase.update(exit_code=status, seconds=time.monotonic() - started,
+                           end_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+              save()
+              if status != 0:
+                  sys.exit(status if status > 0 else 1)
+
+          base = ["cargo", "test", "--package=pos-core@0.1.0", "--all-features", "--locked"]
+          harness = ["-Zunstable-options", "--fail-fast", "--include-ignored", "--test-threads=2"]
+          run("build", [*base, "--no-run"], 600, 3)
+          run("baseline", [*base, "--", *harness], 120, 1)
+          subprocess.run(["bash", "scripts/assert-no-ignored-in-test-summary.sh",
+                          str(artifact / "baseline.log")], check=True)
+          # Match the actual producer's ELEVEN full mutant names, not a broad method filter.
+          special = set(r"\.^$|?*+()[]{}")
+          pattern = "^(?:" + "|".join(
+              "".join("\\" + c if c in special else c for c in name) for name in expected
+          ) + ")$"
+          mutants = ["cargo", "mutants", "--package=pos-core", "--all-features", "--re", pattern]
+          # Keep JSON stdout separate from time/tool diagnostics so it remains parseable.
+          with (artifact / "selected.json").open("wb") as output, (artifact / "selection.log").open("wb") as errors:
+              subprocess.run(
+                  ["timeout", "--kill-after=5s", "60s", *mutants, "--list", "--json"],
+                  stdout=output, stderr=errors, check=True,
+              )
+          selected = json.loads((artifact / "selected.json").read_text())
+          assert len(selected) == 11
+          assert len({m["name"] for m in selected}) == 11
+          assert {m["name"] for m in selected} == set(expected)
+          run("mutants", [*mutants, "--no-shuffle", "--baseline", "skip", "--jobs", "4",
+                          "--timeout", "120", "--build-timeout", "600", "--cap-lints", "true",
+                          "--cargo-arg=--locked", "--", "--", *harness], 1020, 1)
+          actual_selected = json.loads(Path("mutants.out/mutants.json").read_text())
+          outcomes = json.loads(Path("mutants.out/outcomes.json").read_text())
+          assert outcomes["cargo_mutants_version"] == "27.1.0"
+          assert len(actual_selected) == len(outcomes["outcomes"]) == 11
+          def identity(mutant):
+              return json.dumps({k: v for k, v in mutant.items() if k != "diff"},
+                                sort_keys=True, separators=(",", ":"))
+          assert len({identity(m) for m in selected}) == 11
+          assert {identity(m) for m in selected} == {identity(m) for m in actual_selected}
+          completed = [o["scenario"]["Mutant"] for o in outcomes["outcomes"]]
+          assert len({identity(m) for m in completed}) == 11
+          assert {identity(m) for m in completed} == {identity(m) for m in selected}
+          assert outcomes["caught"] == outcomes["total_mutants"] == 11
+          assert all(outcomes[k] == 0 for k in ("missed", "timeout", "unviable", "success"))
+          for outcome in outcomes["outcomes"]:
+              assert outcome["summary"] == "CaughtMutant"
+              phases = outcome["phase_results"]
+              assert [(p["phase"], p["process_status"]) for p in phases] == [
+                  ("Build", "Success"), ("Test", {"Failure": 101}),
+              ]
+              log = Path("mutants.out") / outcome["log_path"]
+              # Report paths are relative to mutants.out (fail if producer schema differs).
+              rows = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log.read_text()).splitlines()
+              assert any(row.startswith("test ") and row.endswith(" ... FAILED") for row in rows)
+          subprocess.run(["git", "diff", "--exit-code", "HEAD"], check=True)
+          report["caught"] = 11
+          report["overall_exit_code"] = 0
+          save()
+          print(json.dumps(report, sort_keys=True))
+          PY
+      - name: Preserve complete diagnostics on success or failure
+        if: ${{ always() }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: untrusted-561-core-repair-control-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/core-control/
+            mutants.out/
+          if-no-files-found: error
+          retention-days: 14
