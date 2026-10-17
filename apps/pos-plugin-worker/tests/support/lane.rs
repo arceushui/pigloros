@@ -59,6 +59,9 @@ macro_rules! fixture {
 pub const RUST_GUEST: &[u8] = fixture!("rust-guest.wasm");
 /// The committed C guest.
 pub const C_GUEST: &[u8] = fixture!("c-guest.wasm");
+/// The committed probe guest, which behaves as the Rust guest unless its observation is a
+/// selector such as `reserved` or `bad-digest`.
+pub const PROBE_GUEST: &[u8] = fixture!("probe-guest.wasm");
 /// The worker watchdog of every member.
 ///
 /// Generous for compiling a fixture in an unoptimized, instrumented worker.

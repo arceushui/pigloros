@@ -9,17 +9,14 @@
     "#633",
     "#634",
     "#635",
+    "#637",
     "#638",
     "#651",
+    "#654",
     "ADR-021",
     "ADR-061 r8"
   ],
   "exclusions": [
-    {
-      "id": "COMMUNITY-RESERVED-PROPOSAL",
-      "reason": "The real community guests emit only prototype.driven, so a community Driver's proposal of a reserved host Event type needs a new guest Component; this profile proves only the first-party refusal of that proposal and the refused reserved-type claim of either isolation class",
-      "owner": "#637"
-    },
     {
       "id": "INVALID-GUEST-OUTPUT",
       "reason": "The real community guests always return well-formed output, so a community Driver's invalid guest output (InvalidGuestOutput) needs a new guest Component, and an ABI- or manifest-invalid release needs a malformed release fixture; this profile proves only the invalid pin, registration and denied-capability release refusals of either isolation class and, through PCF-CPH-003, the first-party invalid-draft refusals",
@@ -648,6 +645,60 @@
         "first-party.timeline-unchanged-by-recovery": "true",
         "first-party.recover-again": "NoScheduledAdmissionInDoubt",
         "parity.recovered-without-rerun-either-class": "true"
+      }
+    },
+    {
+      "id": "PCF-CPH-013",
+      "title": "A community Driver on the real worker whose probe guest proposes the host's reserved release-activation type is refused with the same ReservedHostDraft refusal and failure class as the first-party proposal of that type: the whole pass commits nothing, the first-party sibling's staged output included, no Plugin is quarantined, and the next pass commits",
+      "sources": [
+        "#489",
+        "#637",
+        "#654",
+        "ADR-021 decision 7",
+        "ADR-061 r8"
+      ],
+      "mandatory": true,
+      "applicability": {
+        "status": "applicable"
+      },
+      "stores": [
+        "memory",
+        "sqlite"
+      ],
+      "observation_profile": "non-participant",
+      "expected": {
+        "first-party-reserved.result": "Failed",
+        "first-party-reserved.timeline": "",
+        "first-party-reserved.entity": "",
+        "first-party-reserved.receipt.names-events": "false",
+        "first-party-reserved.steps": "1,1",
+        "first-party-reserved.availability": "Available,Available",
+        "first-party-reserved.owner": "",
+        "first-party-reserved.follows-host-schedule": "true",
+        "first-party-reserved.refusal": "ReservedHostDraft(pigloros.plugin.release-activated)",
+        "first-party-reserved.pass-failure": "Unrelated",
+        "community-reserved.result": "Failed",
+        "community-reserved.timeline": "",
+        "community-reserved.entity": "",
+        "community-reserved.receipt.names-events": "false",
+        "community-reserved.steps": "1,1",
+        "community-reserved.availability": "Available,Available",
+        "community-reserved.owner": "",
+        "community-reserved.follows-host-schedule": "true",
+        "community-reserved.refusal": "ReservedHostDraft(pigloros.plugin.release-activated)",
+        "community-reserved.pass-failure": "Unrelated",
+        "community-reserved.gate": "none",
+        "community-reserved.member": "none/Available/none",
+        "community-next.result": "Committed",
+        "community-next.timeline": "1:parity.first-party,2:prototype.driven",
+        "community-next.entity": "01040G2081040G2081040G2081,01040G2081040G2081040G2081",
+        "community-next.receipt.names-events": "true",
+        "community-next.steps": "1,1",
+        "community-next.availability": "Available,Available",
+        "community-next.owner": "parity.first-party=OperatorTrustedNative,prototype.driven=GovernedCommunity",
+        "community-next.follows-host-schedule": "true",
+        "community.community-receipts": "none/Discarded,none/Committed",
+        "parity.first-party-equals-community": "true"
       }
     }
   ]
