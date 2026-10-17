@@ -86,12 +86,13 @@ pub enum FallbackTriggerCauseV1 {
 /// recognized before this table is read.
 ///
 /// A table keeps the lookup within the complexity bound: twenty distinct
-/// causes would need twenty match arms. The unit tests guard it with two
+/// causes would need twenty match arms. The integration test
+/// `tests/composition_fallback_trigger_public.rs` guards it with two
 /// exhaustive `match`es with no wildcard arm: one gives every variant a
 /// distinct index and one its expected cause. A new variant therefore fails
-/// to compile until both are extended, the tests then fail until a sample of
-/// it is classified through this table to its expected cause, and a renamed
-/// variant fails the same comparison.
+/// to compile until both are extended, and the test then fails until a sample
+/// of it classifies through this table to its expected cause; no expected
+/// cause is `Unrelated`, so a variant missing here or renamed fails.
 const HOST_CAUSES: [(&str, Cause); 20] = [
     ("InvalidManifest", Cause::InvalidManifest),
     ("ArtifactTrustDenied", Cause::ArtifactTrustDenied),
@@ -247,8 +248,3 @@ pub fn declared_fallback_trigger_v1(
 ) -> Option<Code> {
     classify_fallback_trigger_v1(cause).filter(|code| triggers.contains(code))
 }
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-#[path = "trigger_tests.rs"]
-mod tests;
