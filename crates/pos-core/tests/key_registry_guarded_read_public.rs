@@ -684,6 +684,8 @@ fn ignored_native_wire_scalars_and_invalid_chunks_keep_registry_decoder_parity()
     // Raw replacement is below the typed Value encoder: valid wider scalar
     // encodings must remain accepted by the pinned ordinary native reader.
     for scalar in [
+        vec![0xf8, 0x14], // non-shortest simple false, accepted by native CBOR
+        vec![0xf8, 0x16], // non-shortest simple null
         vec![0x1a, 0x00, 0x01, 0x00, 0x00], // positive u32 65536
         vec![0xfa, 0x47, 0xf1, 0x20, 0x00], // f32 123456
         vec![0xfb, 0x40, 0x5e, 0xdc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcd], // f64 123.45
@@ -710,6 +712,60 @@ fn ignored_native_wire_scalars_and_invalid_chunks_keep_registry_decoder_parity()
             Err(ReadError::InvalidSnapshot)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn native_identifiers_keep_the_fixed_buffer_ceiling_for_text_and_bytes() -> Fallible<()> {
+    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
+        .swap_remove(1)
+        .0;
+    for length in [4_096, 4_097] {
+        for identifier in [
+            Value::Text("x".repeat(length)),
+            Value::Bytes(vec![b'x'; length]),
+        ] {
+            let mut snapshot = value(&live)?;
+            fields(record(&mut snapshot)?)?.push((identifier, Value::Null));
+            let result = parity(&encoded(&snapshot)?);
+            if length == 4_096 {
+                assert_eq!(result?, live);
+            } else {
+                assert_eq!(result, Err(ReadError::InvalidSnapshot));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn native_strings_reject_cross_kind_segments_and_negative_tags_cannot_hide_positive_epochs(
+) -> Fallible<()> {
+    let live = lifecycle("a", KeyRoleV1::TimelineIntegritySigning)?
+        .swap_remove(1)
+        .0;
+    let bytes = encoded(&live)?;
+    let owner = encoded(&"a")?;
+    assert_eq!(
+        parity(&replace_first(&bytes, &owner, &[0x7f, 0x41, b'a', 0xff])?),
+        Err(ReadError::InvalidSnapshot)
+    );
+    let key = encoded(&Value::Bytes(vec![0x52; 32]))?;
+    let mut wrong_key_chunks = vec![0x5f, 0x78, 0x20];
+    wrong_key_chunks.extend_from_slice(&[0x52; 32]);
+    wrong_key_chunks.push(0xff);
+    assert_eq!(
+        parity(&replace_first(&bytes, &key, &wrong_key_chunks)?),
+        Err(ReadError::InvalidSnapshot)
+    );
+    let mut epoch = encoded(&"epoch")?;
+    epoch.push(1);
+    let mut negative_epoch = encoded(&"epoch")?;
+    negative_epoch.extend_from_slice(&[0xc3, 1]);
+    assert_eq!(
+        parity(&replace_first(&bytes, &epoch, &negative_epoch)?),
+        Err(ReadError::InvalidSnapshot)
+    );
     Ok(())
 }
 
