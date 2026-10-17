@@ -72,3 +72,63 @@ impl Drop for ObservedGateV1 {
         record_replay_phase(ReplayPhaseV1::GateLeaving(self.0));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_observers_restore_on_return_and_unwind_and_gates_leave_on_unwind() {
+        let outer = Rc::new(RefCell::new(Vec::new()));
+        let inner = Rc::new(RefCell::new(Vec::new()));
+        let timeline = TimelineId::new();
+        with_replay_observer(
+            Rc::new({
+                let outer = Rc::clone(&outer);
+                move |phase| outer.borrow_mut().push(phase)
+            }),
+            || {
+                record_replay_phase(ReplayPhaseV1::Staged);
+                with_replay_observer(
+                    Rc::new({
+                        let inner = Rc::clone(&inner);
+                        move |phase| inner.borrow_mut().push(phase)
+                    }),
+                    || record_replay_phase(ReplayPhaseV1::BeforeComplete),
+                );
+                record_replay_phase(ReplayPhaseV1::Installed);
+                let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    with_replay_observer(
+                        Rc::new({
+                            let inner = Rc::clone(&inner);
+                            move |phase| inner.borrow_mut().push(phase)
+                        }),
+                        || {
+                            let _gate = ObservedGateV1::enter(timeline);
+                            std::panic::resume_unwind(Box::new("observer unwind control"));
+                        },
+                    );
+                }));
+                assert!(unwind.is_err());
+                record_replay_phase(ReplayPhaseV1::AfterRollback);
+            },
+        );
+        record_replay_phase(ReplayPhaseV1::FailureP2);
+        assert_eq!(
+            *outer.borrow(),
+            [
+                ReplayPhaseV1::Staged,
+                ReplayPhaseV1::Installed,
+                ReplayPhaseV1::AfterRollback
+            ]
+        );
+        assert_eq!(
+            *inner.borrow(),
+            [
+                ReplayPhaseV1::BeforeComplete,
+                ReplayPhaseV1::GateEntered(timeline),
+                ReplayPhaseV1::GateLeaving(timeline)
+            ]
+        );
+    }
+}
