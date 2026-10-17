@@ -109,7 +109,7 @@ impl<'a, 'row> Columns<'a, 'row> {
 
     pub(super) fn get<T: FromSql + Default>(&self, name: &str) -> T {
         self.row.get(name).unwrap_or_else(|error| {
-            let failure = self.failure.get().or(Some(storage_error(&error)));
+            let failure = self.failure.get().or_else(|| Some(storage_error(&error)));
             self.failure.set(failure);
             T::default()
         })
@@ -211,8 +211,7 @@ pub(super) fn load_row(
 ) -> FallbackResult<Option<FallbackRegistryRowV1>> {
     let timeline = timeline.to_string();
     let params = params![scope, timeline];
-    query_many(connection, SELECT_ROW, params, decode_joined)
-        .map(|records| assemble(&records))
+    query_many(connection, SELECT_ROW, params, decode_joined).map(|records| assemble(&records))
 }
 
 /// The retained DFP1 bytes of `policy_digest`.

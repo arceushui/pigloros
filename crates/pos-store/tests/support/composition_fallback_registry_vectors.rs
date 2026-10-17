@@ -10,8 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::fixtures::{
-    policy, Backend, Harness, OffsetHasher, Registry, RegistryError, TestResult, ALPHA, BETA,
-    SCOPE,
+    policy, Backend, Harness, OffsetHasher, Registry, RegistryError, TestResult, ALPHA, BETA, SCOPE,
 };
 use pos_core::{
     store::{EventStore, SeqRange},
@@ -171,7 +170,9 @@ fn a_first_declaration_commits_the_row_the_event_and_the_ledger_row() -> TestRes
     let digest = first.policy_digest();
     let found = h.store.lookup_declaration(SCOPE, h.timeline, digest)?;
     assert_eq!(found.as_ref(), Some(row));
-    let absent = h.store.lookup_declaration(SCOPE, h.timeline, Hash::zero())?;
+    let absent = h
+        .store
+        .lookup_declaration(SCOPE, h.timeline, Hash::zero())?;
     assert_eq!(absent, None);
     let ledger = h.store.fallback_ledger(SCOPE, h.timeline)?;
     assert_eq!(ledger, vec![row.clone()]);

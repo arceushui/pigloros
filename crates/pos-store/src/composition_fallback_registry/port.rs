@@ -15,9 +15,10 @@ use super::types::{
 /// the target Timeline, and one ledger row, or nothing. The row must equal the fold of its
 /// Timeline's declaration and activation Events; any divergence is `CorruptState`.
 ///
-/// A write checks, in order: the fold invariant; `EntityMismatch`; idempotency (a byte-identical
-/// repeat returns the original ledger row, any other request for the occupied key is a
-/// `Conflict`); staleness (`StaleState`, then `StaleHead`); then the operation's own checks.
+/// A write checks, in the order of ADR-119 clarification 7: record decode (`InvalidRecord`,
+/// `ScopeMismatch`); the fold invariant (`CorruptState`); `EntityMismatch`; idempotency (a
+/// byte-identical repeat returns the original ledger row, any other request for the occupied key
+/// is a `Conflict`); staleness (`StaleState`, then `StaleHead`); then the operation's own checks.
 /// `scripts/check_composition_fallback_registry_impls.py` restricts implementations and call
 /// sites to the trusted host.
 pub trait CompositionFallbackRegistryV1 {
@@ -31,6 +32,15 @@ pub trait CompositionFallbackRegistryV1 {
 
     /// Declare, re-base, or withdraw the policy of `(scope, timeline)`.
     ///
+    /// The identity of a repeat is the entity, the DFP1 bytes, and the conformance sets; the
+    /// expected revision and head are not part of it, so a retry after an indeterminate commit
+    /// replays even though it names the old revision.
+    ///
+    /// `PrimaryNotEffective` is checked only for entries the registry has recorded. An entry it
+    /// has never recorded is in tenure 0 on the composer's base implementation, which the port
+    /// cannot see: the runtime `declare` (slice 4) must pre-check every such entry's primary
+    /// against the composer's base composition before it calls the port.
+    ///
     /// # Errors
     /// The closed registry error of the first failing check.
     fn declare(
@@ -39,6 +49,10 @@ pub trait CompositionFallbackRegistryV1 {
     ) -> Result<FallbackCommitReceiptV1, CompositionFallbackRegistryErrorV1>;
 
     /// Close one entry's tenure and open the next on another declared implementation.
+    ///
+    /// Idempotency compares every argument, the expected revision, the expected head, and the
+    /// Tick included. A retry with re-read expected values is therefore a `Conflict`, not a
+    /// replay; recovery after an indeterminate commit goes through `lookup_activation`.
     ///
     /// # Errors
     /// The closed registry error of the first failing check.

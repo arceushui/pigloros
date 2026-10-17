@@ -11,9 +11,8 @@ use std::{error::Error, sync::Arc};
 use pos_core::{
     store::{EventStore, SeqRange},
     CanonicalBytes, CompositionPinV1, DomainFallbackPolicyV1, EntityId, ErasureContainmentGateV1,
-    FallbackActivationModeV1, FallbackActivationOriginV1, FallbackEntryV1,
-    FallbackTriggerBasisV1, FallbackTriggerCodeV1, Hash, Hasher, ImplementationKeyV1, Seq,
-    TimelineId,
+    FallbackActivationModeV1, FallbackActivationOriginV1, FallbackEntryV1, FallbackTriggerBasisV1,
+    FallbackTriggerCodeV1, Hash, Hasher, ImplementationKeyV1, Seq, TimelineId,
 };
 #[cfg(feature = "sqlite")]
 use pos_store::sqlite::SqliteStore;

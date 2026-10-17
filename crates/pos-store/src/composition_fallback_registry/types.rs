@@ -55,10 +55,10 @@ impl FallbackConformanceSetsV1 {
     pub fn digest(&self) -> Hash {
         let mut hasher = blake3::Hasher::new();
         hasher.update(CONFORMANCE_DIGEST_DOMAIN_V1);
-        hasher.update(&(self.sets.len() as u64).to_le_bytes());
+        update_len(&mut hasher, self.sets.len());
         for (entry_key, digests) in &self.sets {
             update_text(&mut hasher, entry_key);
-            hasher.update(&(digests.len() as u64).to_le_bytes());
+            update_len(&mut hasher, digests.len());
             digests.iter().for_each(|digest| {
                 hasher.update(digest.as_bytes());
             });
@@ -67,9 +67,14 @@ impl FallbackConformanceSetsV1 {
     }
 }
 
+/// Feed one length, as eight little-endian bytes, into `hasher`.
+pub(crate) fn update_len(hasher: &mut blake3::Hasher, length: usize) {
+    hasher.update(&(length as u64).to_le_bytes());
+}
+
 /// Feed one length-prefixed text into `hasher`.
 pub(crate) fn update_text(hasher: &mut blake3::Hasher, text: &str) {
-    hasher.update(&(text.len() as u64).to_le_bytes());
+    update_len(hasher, text.len());
     hasher.update(text.as_bytes());
 }
 
