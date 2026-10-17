@@ -27,6 +27,7 @@
 pub mod authorization_cache;
 pub mod community_plugin_host;
 pub mod composition;
+pub mod composition_fallback;
 #[cfg(target_os = "linux")]
 pub mod counterfactual;
 pub mod driver;
@@ -53,6 +54,11 @@ pub use composition::{
     PluginIsolationV1, PluginPinFieldV1, PluginPinV1, PluginRegistrationV1, RegisteredEventSchema,
     RegisteredPlugin, RequiredPluginCompositionV1, RequiredPluginV1, ResolvedPluginCompositionV1,
     ResolvedPluginV1, MAX_MANIFEST_SLOT_BYTES_V1, MAX_REQUIRED_PLUGINS_V1,
+};
+pub use composition_fallback::{
+    FallbackCandidateFactsV1, FallbackDriverSettingsV1, FallbackDriverShellV1,
+    FallbackExecutionFactsV1, FallbackHostFactsV1, FallbackRegistryFactsV1, FallbackTriggerCauseV1,
+    FallbackValidationFieldV1, InvalidFallbackPolicyV1,
 };
 pub use driver::{
     CommittedForkHandoff, DeclaredOutputV1, DirectInputRefV1, Driver, DriverRecoveryEvidence,

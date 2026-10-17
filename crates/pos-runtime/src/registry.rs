@@ -71,6 +71,7 @@ mod factual_dependencies;
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod factual_dependencies_tests;
+mod fallback_facts;
 mod human_admission;
 mod local_seal;
 mod manifest_roster;
@@ -1048,13 +1049,68 @@ fn host_owned_draft_error(draft: &EventDraft) -> Option<RuntimeError> {
         Some(RuntimeError::GeographicDraft {
             event_type: owned(),
         })
-    } else if kind == crate::community_plugin_host::PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1 {
+    } else if is_reserved_host_draft_type(kind) {
         Some(RuntimeError::ReservedHostDraft {
             event_type: owned(),
         })
     } else {
         None
     }
+}
+
+/// The host-owned Event types of ADR-119 (section 4.7): no Plugin may draft
+/// or own them.
+const COMPOSITION_FALLBACK_EVENT_TYPES_V1: [&str; 2] = [
+    pos_core::COMPOSITION_FALLBACK_DECLARED_EVENT_TYPE_V1,
+    pos_core::COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
+];
+
+/// Whether no Plugin may draft `kind`: the ADR-061 release activation type
+/// and the ADR-119 fallback types.
+fn is_reserved_host_draft_type(kind: &str) -> bool {
+    kind == crate::community_plugin_host::PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1
+        || COMPOSITION_FALLBACK_EVENT_TYPES_V1.contains(&kind)
+}
+
+/// Whether `kind` is an ADR-119 fallback type, which no Plugin may own.
+fn is_composition_fallback_kind(kind: &Kind) -> bool {
+    let kind = kind.as_str();
+    COMPOSITION_FALLBACK_EVENT_TYPES_V1.contains(&kind)
+}
+
+/// One reserved-ownership rule: which types are reserved, and the closed
+/// error for a Plugin that claims one, from its name and the type.
+type ReservedOwnershipV1 = (fn(&Kind) -> bool, fn(String, String) -> RuntimeError);
+
+/// The reserved-ownership rules, checked in order over every owned type.
+const RESERVED_OWNERSHIP_V1: [ReservedOwnershipV1; 3] = [
+    (pos_core::is_geographic_event_type, reserved_geographic),
+    (pos_core::is_consent_event_type, reserved_consent),
+    (is_composition_fallback_kind, reserved_host),
+];
+
+const fn reserved_geographic(name: String, event_type: String) -> RuntimeError {
+    RuntimeError::ReservedGeographicEventType { name, event_type }
+}
+
+const fn reserved_consent(name: String, event_type: String) -> RuntimeError {
+    RuntimeError::ReservedConsentEventType { name, event_type }
+}
+
+const fn reserved_host(name: String, event_type: String) -> RuntimeError {
+    RuntimeError::ReservedHostEventType { name, event_type }
+}
+
+/// The error of the first owned type `rule` reserves, if any.
+fn reserved_ownership_error(
+    name: &str,
+    owned: &[Kind],
+    &(reserved, error): &ReservedOwnershipV1,
+) -> Option<RuntimeError> {
+    owned
+        .iter()
+        .find(|kind| reserved(kind))
+        .map(|kind| error(name.to_owned(), kind.as_str().to_owned()))
 }
 
 fn reject_unowned_plugin_drafts(
@@ -3911,27 +3967,10 @@ impl PluginRegistry {
         name: &str,
         cap: &Capability,
     ) -> Result<(), RuntimeError> {
-        if let Some(kind) = cap
-            .owned_event_types
+        RESERVED_OWNERSHIP_V1
             .iter()
-            .find(|kind| pos_core::is_geographic_event_type(kind))
-        {
-            return Err(RuntimeError::ReservedGeographicEventType {
-                name: name.to_owned(),
-                event_type: kind.as_str().to_owned(),
-            });
-        }
-        if let Some(kind) = cap
-            .owned_event_types
-            .iter()
-            .find(|kind| pos_core::is_consent_event_type(kind))
-        {
-            return Err(RuntimeError::ReservedConsentEventType {
-                name: name.to_owned(),
-                event_type: kind.as_str().to_owned(),
-            });
-        }
-        Ok(())
+            .find_map(|rule| reserved_ownership_error(name, &cap.owned_event_types, rule))
+            .map_or(Ok(()), Err)
     }
 
     fn install_reducer(
@@ -7599,6 +7638,51 @@ mod tests {
                 Err(RuntimeError::ReservedConsentEventType { .. })
             ));
         }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn plugins_cannot_claim_composition_fallback_event_types() {
+        for reserved in [
+            pos_core::COMPOSITION_FALLBACK_DECLARED_EVENT_TYPE_V1,
+            pos_core::COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
+        ] {
+            let plugin = simple_plugin("malicious-fallback", &["plugin.allowed.v1", reserved]);
+            let mut registry = PluginRegistry::new();
+            let result = registry.register_generated(&plugin, None, None);
+            let refused = matches!(&result, Err(RuntimeError::ReservedHostEventType { .. }));
+            assert!(
+                refused && format!("{result:?}").contains(reserved),
+                "{result:?}"
+            );
+            assert!(registry.is_empty());
+        }
+    }
+
+    #[test]
+    #[cfg_attr(coverage_nightly, coverage(off))]
+    fn drafts_of_every_reserved_host_type_are_refused() {
+        fn draft(event_type: &str) -> EventDraft {
+            EventDraft::new(
+                EntityId::new(),
+                Kind::new(event_type),
+                CanonicalBytes::from_vec(Vec::new()),
+            )
+        }
+        for reserved in [
+            crate::community_plugin_host::PLUGIN_RELEASE_ACTIVATED_EVENT_TYPE_V1,
+            pos_core::COMPOSITION_FALLBACK_DECLARED_EVENT_TYPE_V1,
+            pos_core::COMPOSITION_FALLBACK_ACTIVATED_EVENT_TYPE_V1,
+        ] {
+            let error = host_owned_draft_error(&draft(reserved));
+            let refused = matches!(&error, Some(RuntimeError::ReservedHostDraft { .. }));
+            assert!(
+                refused && format!("{error:?}").contains(reserved),
+                "{error:?}"
+            );
+        }
+        let allowed = host_owned_draft_error(&draft("plugin.allowed.v1"));
+        assert!(allowed.is_none());
     }
 
     #[test]
