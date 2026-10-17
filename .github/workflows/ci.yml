@@ -175,6 +175,7 @@ jobs:
           components: rustfmt
       # The explicit toolchain bypasses rust-toolchain.toml, so rustup does not
       # download the clippy and llvm-tools components that formatting never uses.
+      # Bump both 1.97.1 values in this job together with rust-toolchain.toml.
       - name: cargo fmt --check (full repository)
         run: cargo +1.97.1 fmt --all -- --check
 
